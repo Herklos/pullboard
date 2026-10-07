@@ -348,9 +348,12 @@ function sayBrief(io, brief) {
  */
 function context(io) {
   const info = repoInfo(io.cwd);
+  const allowSchemaUpgrade = io.codeIsMain ?? (process.env.PULLBOARD_CODE_IS_MAIN === undefined
+    ? info.isMain
+    : process.env.PULLBOARD_CODE_IS_MAIN === '1');
   const config = configHere(info);
   const file = join(info.commonDir, 'pullboard', 'board.sqlite');
-  return { info, config, file, doctrine: loadDoctrine(info.root, config), io, clock: io.clock ?? store.systemClock };
+  return { info, config, file, allowSchemaUpgrade, doctrine: loadDoctrine(info.root, config), io, clock: io.clock ?? store.systemClock };
 }
 
 /**
@@ -387,7 +390,7 @@ function configHere(info) {
  * @returns {T}
  */
 function withBoard(ctx, work) {
-  const board = store.openBoard(ctx.file, ctx.clock);
+  const board = store.openBoard(ctx.file, ctx.clock, { isMain: ctx.allowSchemaUpgrade });
   const firstEvent = board.emittedEvents?.length ?? 0;
   try {
     const result = work(board);
@@ -695,15 +698,17 @@ async function viewHere(io, values) {
     io.say(`wrote snapshot ${exported.path}`);
     return 0;
   }
+  let isMain = false;
   try {
     const info = repoInfo(io.cwd);
+    isMain = info.isMain;
     if (info.isMain && existsSync(join(info.root, CONFIG_FILE))) registerProject(info.root, new Date(), loadConfig(info.root));
   } catch (error) {
     if (!(error instanceof Refused)) throw error;
   }
   const port = values.port === undefined ? 0 : Number(values.port);
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Refused('USAGE', '--port is a number from 0 to 65535; 0 picks a free one');
-  const view = await serveView({ port });
+  const view = await serveView({ port, isMain });
   io.result?.({ url: view.url, port: view.port });
   io.say(`Pullboard view: ${view.url}`);
   io.say('Only this machine can reach it, and only with that link. Ctrl-C stops it.');
@@ -727,7 +732,7 @@ async function serveHere(io, values) {
   registerProject(mainRoot, new Date(), loadConfig(mainRoot));
   const port = values.port === undefined ? 0 : Number(values.port);
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Refused('USAGE', '--port is a number from 0 to 65535; use 0 to choose a free one');
-  const api = await serveApi({ port, runCommand: main });
+  const api = await serveApi({ port, runCommand: main, isMain: ctx.info.isMain });
   io.result?.({ url: api.url, port: api.port });
   io.say(`Pullboard API v1: ${api.url}`);
   io.say('Only this machine can reach it, with its session secret. Ctrl-C stops it.');
@@ -754,7 +759,7 @@ function setupCommands(io, { first, values }) {
       const info = repoInfo(io.cwd);
       const notes = initRepo({
         info,
-        openBoardHere: () => store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), io.clock),
+        openBoardHere: () => store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), io.clock, { isMain: info.isMain }),
         register: store.register,
         closeBoard: store.closeBoard,
       });
@@ -1522,28 +1527,16 @@ function settingsCommand(io, { first, second, rest }) {
 }
 
 /**
- * Every spec id something cites (S8): commit headers since the spec's first commit, and every item
- * on the board, open or closed. Each must still be in the spec. The board is shared by every
- * checkout, so at an older commit an item may cite a row a later commit added: that id is not lost
- * here, only not written yet, and it counts once any ref has committed it (S10).
+ * Every spec id committed in a header since the spec's first commit (S8). Spec checking stays
+ * independent of the shared board, so an unmerged worktree can lint its spec without opening or
+ * migrating board data owned by the main checkout.
  *
  * @param {any} ctx
- * @param {{ ids: Map<string, string>, since: string | null }} history - this checkout's.
- * @returns {Map<string, string>} Each id, with who cites it.
+ * @param {{ since: string | null }} history - this checkout's spec history.
+ * @returns {Map<string, string>} Each id cited by a commit header.
  */
-function citations(ctx, { ids, since }) {
-  const cited = since ? commitCitations(ctx.info.root, since) : new Map();
-  if (!existsSync(ctx.file)) return cited;
-  const byItems = new Map();
-  for (const item of withBoard(ctx, (board) => store.listItems(board, { all: true }))) {
-    for (const id of item.item_spec_ids ? item.item_spec_ids.split(',') : []) {
-      if (!cited.has(id) && !byItems.has(id)) byItems.set(id, `item #${item.item_id}`);
-    }
-  }
-  const unseen = [...byItems.keys()].some((id) => !ids.has(id));
-  const elsewhere = unseen ? committedIds(ctx.info.root, ctx.config.spec, ['--all']).ids : new Map();
-  for (const [id, where] of byItems) if (ids.has(id) || !elsewhere.has(id)) cited.set(id, where);
-  return cited;
+function citations(ctx, { since }) {
+  return since ? commitCitations(ctx.info.root, since) : new Map();
 }
 
 /** Current board evidence, with each item's accepting receipts included once. */
@@ -1856,6 +1849,8 @@ export async function main(argv, streams) {
     }
   };
   if (sync) await retry();
+  if (streams?.codeIsMain !== undefined) io.codeIsMain = streams.codeIsMain;
+  else if (process.env.PULLBOARD_CODE_IS_MAIN !== undefined) io.codeIsMain = process.env.PULLBOARD_CODE_IS_MAIN === '1';
   const code = await runCommand(argv, io);
   if (sync && code === 0) await retry();
   io.flush(code);

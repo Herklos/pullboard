@@ -902,7 +902,7 @@ test('next --verify can reserve a named submitted review and default to the lowe
   assert.match(lowest.out, new RegExp(`next to verify: #${first} First review, built by web-1`));
 });
 
-test('a deleted spec row is refused at commit; spec check finds any id gone from history or cited [S8, S9]', () => {
+test('spec check reads committed history only; claim guards live item citations [S8, S9]', () => {
   const box = project();
   const spec = join(box.repo, 'SPEC.md');
   writeFileSync(spec, SPEC.replace(/- G2 .*\n/, ''));
@@ -919,7 +919,10 @@ test('a deleted spec row is refused at commit; spec check finds any id gone from
   assert.equal(check.code, 1);
   assert.match(check.out, /SPEC.md: G2 error: was committed in [0-9a-f]{12} and is gone/);
   assert.match(check.out, /SPEC.md: G7 error: commit [0-9a-f]{7,} cites it, but it was never committed/);
-  assert.match(check.out, /SPEC.md: G3 error: item #1 cites it, but it was never committed/);
+  assert.doesNotMatch(check.out, /G3 error: item #1 cites it/, 'spec check reads committed history without opening the shared board');
+  const liveItem = box.run(box.web, 'claim', '1');
+  assert.equal(liveItem.code, 1);
+  assert.match(liveItem.err, /UNKNOWN_SPEC.*G3/ , 'a board operation still refuses to freeze an item whose cited row is gone');
   writeFileSync(spec, `${SPEC.replace('- G2 [approved, must]', '- G2 [wont, must]')}- G3 [retired] Planned before the spec settled.\n- G7 [retired] Cited by mistake.\n`);
   const fixed = box.run(box.repo, 'spec', 'check');
   assert.equal(fixed.code, 0, fixed.out);
@@ -1336,7 +1339,7 @@ test('submit refuses a bar that moved since the claim, before any verifier runs;
   assert.match(box.run(box.web, 'submit', '1').out, /submitted #1/);
 });
 
-test('spec check at an older commit skips ids that items cite from a later commit; a never-committed id still fails [S10]', () => {
+test('spec check stays source-only at an older commit; claim still validates a later item citation [S10]', () => {
   const box = project();
   writeFileSync(join(box.repo, 'SPEC.md'), `${SPEC}- G3 [draft, must] The page has a footer.\n`);
   box.git(box.repo, 'commit', '-qam', 'docs(spec): a footer row');
@@ -1346,9 +1349,12 @@ test('spec check at an older commit skips ids that items cite from a later commi
   writeFileSync(join(box.repo, 'SPEC.md'), `${SPEC}- G3 [draft, must] The page has a footer.\n- G4 [draft, must] Not committed.\n`);
   box.run(box.repo, 'add', 'web', 'Ghost', '--specs', 'G4');
   const ghost = box.run(box.web, 'spec', 'check');
-  assert.equal(ghost.code, 1);
-  assert.match(ghost.out, /SPEC.md: G4 error: item #2 cites it, but it was never committed/);
+  assert.equal(ghost.code, 0, ghost.out);
+  assert.doesNotMatch(ghost.out, /G4 error: item #2 cites it/);
   assert.doesNotMatch(ghost.out, /G3 error/);
+  const claim = box.run(box.web, 'claim', '2');
+  assert.equal(claim.code, 1);
+  assert.match(claim.err, /UNKNOWN_SPEC.*G4/);
 });
 
 test('check runs the item\'s own check command, yours by default, and prints a digest [N23]', () => {
