@@ -21,9 +21,11 @@ const CODE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
  */
 export function gitChildEnv(root) {
   const env = { ...process.env };
+  const discoveryEnv = { ...env };
+  for (const name of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR']) delete discoveryEnv[name];
   const result = spawnSync('git', ['rev-parse', '--local-env-vars'], {
     cwd: root,
-    env: { PATH: process.env.PATH },
+    env: discoveryEnv,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'ignore'],
   });
