@@ -2,10 +2,9 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import * as store from './board.js';
 import { COORDINATOR, loadConfig } from './config.js';
-import { repoInfo, tryGit } from './git.js';
+import { codeIsFromMain, repoInfo } from './git.js';
 import { refusalDocument } from './json.js';
 import { laneNames } from './lanes.js';
 import { listApiProjects } from './projects.js';
@@ -15,12 +14,6 @@ import { createApiHandler } from './api-http.js';
 
 const ADDRESS = '127.0.0.1';
 const VERSION = 1;
-const CODE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-
-/** Whether this API module came from a Git main checkout, rather than a linked worktree. */
-function codeIsFromMain() {
-  return tryGit(CODE_ROOT, ['rev-parse', '--show-toplevel']).status !== 0 || repoInfo(CODE_ROOT).isMain;
-}
 
 /** Read a registered board and release its SQLite connection on every path.
  *

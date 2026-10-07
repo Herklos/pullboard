@@ -5,13 +5,13 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import * as store from './board.js';
 import { CONFIG_FILE, COORDINATOR, loadConfig } from './config.js';
 import { loadDoctrine } from './doctrine.js';
 import { digestOf, gateReport, runGate, runShell } from './gate.js';
-import { bareWorktreeFinding, contains, differFromHead, git, headCommit, headTree, isClean, repoInfo, resolveCommit, tryGit, untracked } from './git.js';
+import { bareWorktreeFinding, codeIsFromMain, contains, differFromHead, git, headCommit, headTree, isClean, repoInfo, resolveCommit, tryGit, untracked } from './git.js';
 import {
   FIX_NOTE,
   applyFixers,
@@ -57,12 +57,6 @@ import { relayOff, relayOn, relayStatus, syncRelay } from './relay.js';
 
 const PACKAGE = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 export const VERSION = PACKAGE.version;
-const CODE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-
-/** Published installs lack Git metadata; source checkouts may upgrade only from their main tree. */
-function codeIsFromMain() {
-  return tryGit(CODE_ROOT, ['rev-parse', '--show-toplevel']).status !== 0 || repoInfo(CODE_ROOT).isMain;
-}
 
 export const HELP = `pullboard ${VERSION}: the local-first work board for teams of coding agents.
 Nothing ships until a second agent verifies it.

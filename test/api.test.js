@@ -243,7 +243,34 @@ test('[A5, A6] a future-schema worktree cannot migrate the shared board; main ca
   box.git(linked, 'add', 'src/board.js');
   box.git(linked, 'commit', '-q', '-m', 'feat: simulate an unmerged schema bump');
 
-  const before = readFileSync(dbFile);
+  let before = readFileSync(dbFile);
+  const mainGitDir = box.git(repo, 'rev-parse', '--path-format=absolute', '--git-dir');
+  const linkedGitDir = box.git(linked, 'rev-parse', '--path-format=absolute', '--git-dir');
+  const commonGitDir = box.git(linked, 'rev-parse', '--path-format=absolute', '--git-common-dir');
+  const inheritedMain = {
+    ...box.env, GIT_DIR: mainGitDir, GIT_WORK_TREE: repo, GIT_COMMON_DIR: mainGitDir,
+  };
+  const inheritedLinked = {
+    ...box.env, GIT_DIR: linkedGitDir, GIT_WORK_TREE: linked, GIT_COMMON_DIR: commonGitDir,
+  };
+  const spoofedWorktree = spawnSync(process.execPath, [join(linked, 'bin/pullboard.js'), 'status', '--json'], {
+    cwd: repo, env: inheritedMain, encoding: 'utf8',
+  });
+  assert.equal(spoofedWorktree.status, 1, spoofedWorktree.stderr + spoofedWorktree.stdout);
+  assert.equal(JSON.parse(spoofedWorktree.stdout).error.code, 'UNMERGED_SCHEMA',
+    'GIT_DIR pointing at main cannot make unmerged worktree source appear merged');
+  assert.deepEqual(readFileSync(dbFile), before, 'inherited main Git variables cannot migrate from worktree source');
+
+  const mainFromHook = spawnSync(process.execPath, [join(repo, 'bin/pullboard.js'), 'status', '--json'], {
+    cwd: linked, env: inheritedLinked, encoding: 'utf8',
+  });
+  assert.equal(mainFromHook.status, 0, mainFromHook.stderr + mainFromHook.stdout);
+  const upgradedFromHook = new DatabaseSync(dbFile, { readOnly: true });
+  assert.equal(upgradedFromHook.prepare('PRAGMA user_version').get().user_version, 2,
+    'main source upgrades even when a linked-worktree hook exports its Git directory');
+  upgradedFromHook.close();
+  before = readFileSync(dbFile);
+
   const worktreeCodeFromMain = spawnSync(process.execPath, [join(linked, 'bin/pullboard.js'), 'status', '--json'], {
     cwd: repo, env: box.env, encoding: 'utf8',
   });

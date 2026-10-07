@@ -5,9 +5,11 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Refused } from './refused.js';
 
 const GIT_FLAGS = ['-c', 'core.quotepath=false'];
+const CODE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 /**
  * The environment for a gate or fixer: keep the user's settings, but remove Git's repository-local
@@ -19,7 +21,14 @@ const GIT_FLAGS = ['-c', 'core.quotepath=false'];
  */
 export function gitChildEnv(root) {
   const env = { ...process.env };
-  for (const name of git(root, ['rev-parse', '--local-env-vars']).split('\n')) delete env[name];
+  const result = spawnSync('git', ['rev-parse', '--local-env-vars'], {
+    cwd: root,
+    env: { PATH: process.env.PATH },
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  if (result.status === 0) for (const name of result.stdout.split('\n')) delete env[name];
+  else for (const name of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_PREFIX']) delete env[name];
   return env;
 }
 
@@ -28,11 +37,13 @@ export function gitChildEnv(root) {
  *
  * @param {string} cwd
  * @param {string[]} args
+ * @param {{env?: NodeJS.ProcessEnv}} [options]
  * @returns {string}
  */
-export function git(cwd, args) {
+export function git(cwd, args, { env = process.env } = {}) {
   return execFileSync('git', [...GIT_FLAGS, ...args], {
     cwd,
+    env,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
   }).trim();
@@ -43,10 +54,11 @@ export function git(cwd, args) {
  *
  * @param {string} cwd
  * @param {string[]} args
+ * @param {{env?: NodeJS.ProcessEnv}} [options]
  * @returns {{ status: number, stdout: string }}
  */
-export function tryGit(cwd, args) {
-  const result = spawnSync('git', [...GIT_FLAGS, ...args], { cwd, encoding: 'utf8' });
+export function tryGit(cwd, args, { env = process.env } = {}) {
+  const result = spawnSync('git', [...GIT_FLAGS, ...args], { cwd, env, encoding: 'utf8' });
   return { status: result.status ?? 1, stdout: (result.stdout ?? '').trim() };
 }
 
@@ -94,19 +106,31 @@ export function bareWorktreeFinding(cwd) {
  * The main checkout's git dir is the common dir; a linked worktree has its own under it.
  *
  * @param {string} cwd
+ * @param {{env?: NodeJS.ProcessEnv}} [options]
  * @returns {{ root: string, commonDir: string, gitDir: string, isMain: boolean }}
  */
-export function repoInfo(cwd) {
-  const top = tryGit(cwd, ['rev-parse', '--show-toplevel']);
+export function repoInfo(cwd, { env = process.env } = {}) {
+  const top = tryGit(cwd, ['rev-parse', '--show-toplevel'], { env });
   if (top.status !== 0) {
     const bare = bareWorktreeFinding(cwd);
     if (bare) throw new Refused(bare.code, `${bare.message}; run ${bare.next}`);
     throw new Refused('NOT_A_REPO', 'not inside a git work tree; run git init, or cd into a repo');
   }
   const root = top.stdout;
-  const commonDir = git(root, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
-  const gitDir = git(root, ['rev-parse', '--path-format=absolute', '--git-dir']);
+  const commonDir = git(root, ['rev-parse', '--path-format=absolute', '--git-common-dir'], { env });
+  const gitDir = git(root, ['rev-parse', '--path-format=absolute', '--git-dir'], { env });
   return { root, commonDir, gitDir, isMain: commonDir === gitDir };
+}
+
+/** Determine code provenance without letting a caller's active hook redirect Git's repository.
+ *
+ * @param {string} [root]
+ * @returns {boolean}
+ */
+export function codeIsFromMain(root = CODE_ROOT) {
+  const env = gitChildEnv(root);
+  const top = tryGit(root, ['rev-parse', '--show-toplevel'], { env });
+  return top.status !== 0 || repoInfo(root, { env }).isMain;
 }
 
 /**
