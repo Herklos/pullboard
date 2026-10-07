@@ -162,7 +162,7 @@ test('[A5, A6] a future-schema worktree cannot migrate the shared board; main ca
   const repo = join(box.dir, 'repo');
   const sourceRoot = resolve(import.meta.dirname, '..');
   mkdirSync(repo);
-  for (const name of ['bin', 'src']) cpSync(join(sourceRoot, name), join(repo, name), { recursive: true });
+  for (const name of ['bin', 'src', 'skills']) cpSync(join(sourceRoot, name), join(repo, name), { recursive: true });
   cpSync(join(sourceRoot, 'package.json'), join(repo, 'package.json'));
   writeFileSync(join(repo, 'pullboard.json'), `${JSON.stringify({
     gate: 'true', spec: 'SPEC.md', practice: 'PRACTICE.md',
@@ -252,6 +252,14 @@ test('[A5, A6] a future-schema worktree cannot migrate the shared board; main ca
     'a future-schema worktree refuses migration even when invoked from the main checkout directory');
   assert.deepEqual(readFileSync(dbFile), before, 'cwd cannot make worktree code migrate the shared board');
 
+  const initFromMain = spawnSync(process.execPath, [join(linked, 'bin/pullboard.js'), 'init', '--json'], {
+    cwd: repo, env: box.env, encoding: 'utf8',
+  });
+  assert.equal(initFromMain.status, 1, initFromMain.stderr + initFromMain.stdout);
+  assert.equal(JSON.parse(initFromMain.stdout).error.code, 'UNMERGED_SCHEMA',
+    'the setup command uses the running source identity when it opens the board');
+  assert.deepEqual(readFileSync(dbFile), before, 'setup cannot migrate the shared board from unmerged code');
+
   const envBypass = spawnSync(process.execPath, [join(linked, 'bin/pullboard.js'), 'status', '--json'], {
     cwd: repo, env: { ...box.env, PULLBOARD_CODE_IS_MAIN: '1' }, encoding: 'utf8',
   });
@@ -259,6 +267,25 @@ test('[A5, A6] a future-schema worktree cannot migrate the shared board; main ca
   assert.equal(JSON.parse(envBypass.stdout).error.code, 'UNMERGED_SCHEMA',
     'PULLBOARD_CODE_IS_MAIN cannot impersonate main-checkout source provenance');
   assert.deepEqual(readFileSync(dbFile), before, 'the removed environment override cannot migrate the shared board');
+
+  const relayProbe = join(linked, '.schema-relay-probe.mjs');
+  writeFileSync(relayProbe, `
+    import { localRecords } from './src/relay.js';
+    try {
+      localRecords(process.env.PULLBOARD_FIXTURE_REPO, (board) => board.db.prepare('PRAGMA user_version').get());
+      console.log(JSON.stringify({ code: 'UNEXPECTED_OPEN' }));
+    } catch (error) {
+      console.log(JSON.stringify({ code: error.code, message: error.message }));
+    }
+  `);
+  const relayRecords = spawnSync(process.execPath, [relayProbe], {
+    cwd: repo, env: { ...box.env, PULLBOARD_FIXTURE_REPO: repo }, encoding: 'utf8',
+  });
+  assert.equal(relayRecords.status, 0, relayRecords.stderr + relayRecords.stdout);
+  const relayRefusal = JSON.parse(relayRecords.stdout);
+  assert.equal(relayRefusal.code, 'UNMERGED_SCHEMA', 'relay localRecords uses its source worktree identity even from main cwd');
+  assert.match(relayRefusal.message, /worktree expects board schema 3, newer than the shared board's version 2/);
+  assert.deepEqual(readFileSync(dbFile), before, 'relay localRecords refuses before it can migrate the shared board');
 
   const specCheck = runFixture(linked, 'spec', 'check', '--json');
   assert.equal(specCheck.status, 0, specCheck.stderr + specCheck.stdout);

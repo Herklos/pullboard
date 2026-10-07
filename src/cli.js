@@ -59,6 +59,11 @@ const PACKAGE = JSON.parse(readFileSync(new URL('../package.json', import.meta.u
 export const VERSION = PACKAGE.version;
 const CODE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
+/** Published installs lack Git metadata; source checkouts may upgrade only from their main tree. */
+function codeIsFromMain() {
+  return tryGit(CODE_ROOT, ['rev-parse', '--show-toplevel']).status !== 0 || repoInfo(CODE_ROOT).isMain;
+}
+
 export const HELP = `pullboard ${VERSION}: the local-first work board for teams of coding agents.
 Nothing ships until a second agent verifies it.
 
@@ -349,8 +354,7 @@ function sayBrief(io, brief) {
  */
 function context(io) {
   const info = repoInfo(io.cwd);
-  const codeIsInGit = tryGit(CODE_ROOT, ['rev-parse', '--show-toplevel']).status === 0;
-  const allowSchemaUpgrade = !codeIsInGit || repoInfo(CODE_ROOT).isMain;
+  const allowSchemaUpgrade = codeIsFromMain();
   const config = configHere(info);
   const file = join(info.commonDir, 'pullboard', 'board.sqlite');
   return { info, config, file, allowSchemaUpgrade, doctrine: loadDoctrine(info.root, config), io, clock: io.clock ?? store.systemClock };
@@ -759,7 +763,7 @@ function setupCommands(io, { first, values }) {
       const info = repoInfo(io.cwd);
       const notes = initRepo({
         info,
-        openBoardHere: () => store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), io.clock, { isMain: info.isMain }),
+        openBoardHere: () => store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), io.clock, { isMain: codeIsFromMain() }),
         register: store.register,
         closeBoard: store.closeBoard,
       });

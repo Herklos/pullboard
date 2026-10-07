@@ -2,6 +2,7 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import * as store from './board.js';
 import { exportBoard } from './exchange.js';
 import { repoInfo, tryGit } from './git.js';
@@ -12,6 +13,12 @@ import { Refused } from './refused.js';
 
 export const DEFAULT_RELAY = 'https://app.pullboard.dev';
 const LINK_FILES = new WeakMap();
+const CODE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+
+/** A linked source worktree is unmerged; a published install has no Git metadata. */
+function codeIsFromMain() {
+  return tryGit(CODE_ROOT, ['rev-parse', '--show-toplevel']).status !== 0 || repoInfo(CODE_ROOT).isMain;
+}
 
 /** Require a trusted origin; HTTP exists only for loopback development and test relays. */
 function relayOrigin(address) {
@@ -125,9 +132,9 @@ async function request(state, path, { method = 'GET', body } = {}, io) {
 }
 
 /** Read durable local event rows; their ids are the crash-safe outbox after the saved cursor. */
-function localRecords(root, work) {
+export function localRecords(root, work) {
   const info = repoInfo(root);
-  const board = store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'));
+  const board = store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), undefined, { isMain: codeIsFromMain() });
   try { return work(board); } finally { store.closeBoard(board); }
 }
 
