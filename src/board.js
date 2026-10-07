@@ -152,12 +152,12 @@ export function openBoard(file, clock = systemClock, { isMain } = {}) {
       } finally {
         current.close();
       }
-    }
-    if (SCHEMA_VERSION > boardVersion) {
-      throw new Refused(
-        'UNMERGED_SCHEMA',
-        `this worktree expects board schema ${SCHEMA_VERSION}, newer than the shared board's version ${boardVersion}; merge this code into the main checkout first, or test it against a throwaway board`,
-      );
+      if (SCHEMA_VERSION > boardVersion) {
+        throw new Refused(
+          'UNMERGED_SCHEMA',
+          `this worktree expects board schema ${SCHEMA_VERSION}, newer than the shared board's version ${boardVersion}; merge this code into the main checkout first, or test it against a throwaway board`,
+        );
+      }
     }
   }
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
