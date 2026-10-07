@@ -1,7 +1,8 @@
 /** The local API v1: the CLI's moves, persistent board identities and live events (A2). */
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import * as store from './board.js';
 import { COORDINATOR, loadConfig } from './config.js';
 import { repoInfo } from './git.js';
@@ -14,6 +15,7 @@ import { createApiHandler } from './api-http.js';
 
 const ADDRESS = '127.0.0.1';
 const VERSION = 1;
+const CODE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 /** Read a registered board and release its SQLite connection on every path.
  *
@@ -24,7 +26,7 @@ const VERSION = 1;
 function withBoard(root, read, isMain) {
   const info = repoInfo(root);
   loadConfig(info.root);
-  const board = store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), undefined, { isMain: isMain ?? info.isMain });
+  const board = store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), undefined, { isMain: repoInfo(CODE_ROOT).isMain && isMain !== false });
   try { return read(board, info); } finally { store.closeBoard(board); }
 }
 
@@ -146,7 +148,6 @@ async function executeMove(root, body, runCommand, isMain) {
   const events = [];
   const status = await runCommand(argv, {
     cwd,
-    codeIsMain: isMain,
     stdout: { isTTY: false, write: (text) => { output += text; } },
     stderr: { write: (text) => { diagnostics += text; } },
     onEvent: (row) => { events.push(row); },
@@ -174,6 +175,7 @@ function createRequest(root, body, isMain) {
 export function createLocalApiHandler({ secret, getPort, runCommand, projects = listApiProjects, isMain } = {}) {
   if (typeof getPort !== 'function') throw new TypeError('createLocalApiHandler needs a bound-port getter');
   if (typeof runCommand !== 'function') throw new TypeError('createLocalApiHandler needs the actual CLI entry point as runCommand');
+  const codeIsMain = repoInfo(CODE_ROOT).isMain && isMain !== false;
   const key = Buffer.from(secret);
   return createApiHandler({
     authenticate: (req) => {
@@ -186,18 +188,18 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
       if (req.headers.origin && req.headers.origin !== 'http://' + req.headers.host) throw new Refused('API_ORIGIN', 'use the API from its own origin');
       return { local: true };
     },
-    boards: () => apiBoardListing(projects, isMain),
-    board: (id) => findBoard(id, projects, isMain),
+    boards: () => apiBoardListing(projects, codeIsMain),
+    board: (id) => findBoard(id, projects, codeIsMain),
     state: (board, who, seen) => {
-      const state = projectState(board.root, { seen, isMain });
+      const state = projectState(board.root, { seen, isMain: codeIsMain });
       state.board = board.id;
-      state.requests = withBoard(board.root, (db) => store.openRequests(db), isMain);
+      state.requests = withBoard(board.root, (db) => store.openRequests(db), codeIsMain);
       return state;
     },
     code: (board, ref) => codeAt(board.root, ref),
-    events: (board, after) => afterEvents(board.root, after, isMain),
-    move: (board, body) => executeMove(board.root, body, runCommand, isMain),
-    request: (board, body) => createRequest(board.root, body, isMain),
+    events: (board, after) => afterEvents(board.root, after, codeIsMain),
+    move: (board, body) => executeMove(board.root, body, runCommand, codeIsMain),
+    request: (board, body) => createRequest(board.root, body, codeIsMain),
   });
 }
 

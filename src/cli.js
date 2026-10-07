@@ -5,7 +5,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import * as store from './board.js';
 import { CONFIG_FILE, COORDINATOR, loadConfig } from './config.js';
@@ -57,6 +57,7 @@ import { relayOff, relayOn, relayStatus, syncRelay } from './relay.js';
 
 const PACKAGE = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 export const VERSION = PACKAGE.version;
+const CODE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 export const HELP = `pullboard ${VERSION}: the local-first work board for teams of coding agents.
 Nothing ships until a second agent verifies it.
@@ -348,9 +349,8 @@ function sayBrief(io, brief) {
  */
 function context(io) {
   const info = repoInfo(io.cwd);
-  const allowSchemaUpgrade = io.codeIsMain ?? (process.env.PULLBOARD_CODE_IS_MAIN === undefined
-    ? info.isMain
-    : process.env.PULLBOARD_CODE_IS_MAIN === '1');
+  const code = repoInfo(CODE_ROOT);
+  const allowSchemaUpgrade = code.isMain;
   const config = configHere(info);
   const file = join(info.commonDir, 'pullboard', 'board.sqlite');
   return { info, config, file, allowSchemaUpgrade, doctrine: loadDoctrine(info.root, config), io, clock: io.clock ?? store.systemClock };
@@ -732,7 +732,7 @@ async function serveHere(io, values) {
   registerProject(mainRoot, new Date(), loadConfig(mainRoot));
   const port = values.port === undefined ? 0 : Number(values.port);
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Refused('USAGE', '--port is a number from 0 to 65535; use 0 to choose a free one');
-  const api = await serveApi({ port, runCommand: main, isMain: ctx.info.isMain });
+  const api = await serveApi({ port, runCommand: main, isMain: ctx.allowSchemaUpgrade });
   io.result?.({ url: api.url, port: api.port });
   io.say(`Pullboard API v1: ${api.url}`);
   io.say('Only this machine can reach it, with its session secret. Ctrl-C stops it.');
@@ -1849,8 +1849,6 @@ export async function main(argv, streams) {
     }
   };
   if (sync) await retry();
-  if (streams?.codeIsMain !== undefined) io.codeIsMain = streams.codeIsMain;
-  else if (process.env.PULLBOARD_CODE_IS_MAIN !== undefined) io.codeIsMain = process.env.PULLBOARD_CODE_IS_MAIN === '1';
   const code = await runCommand(argv, io);
   if (sync && code === 0) await retry();
   io.flush(code);

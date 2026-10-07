@@ -200,6 +200,19 @@ test('[A5, A6] a future-schema worktree cannot migrate the shared board; main ca
   assert.equal(box.git(repo, 'rev-parse', '--path-format=absolute', '--git-common-dir'), box.git(linked, 'rev-parse', '--path-format=absolute', '--git-common-dir'));
   assert.notEqual(box.git(repo, 'rev-parse', '--path-format=absolute', '--git-dir'), box.git(linked, 'rev-parse', '--path-format=absolute', '--git-dir'));
 
+  const olderAgain = new DatabaseSync(dbFile);
+  olderAgain.exec('ALTER TABLE item DROP COLUMN item_files; PRAGMA user_version = 1');
+  olderAgain.close();
+  const mainCodeFromWorktree = spawnSync(process.execPath, [join(repo, 'bin/pullboard.js'), 'join', 'app', '--family', 'codex', '--json'], {
+    cwd: linked, env: box.env, encoding: 'utf8',
+  });
+  assert.equal(mainCodeFromWorktree.status, 0, mainCodeFromWorktree.stderr + mainCodeFromWorktree.stdout);
+  const migratedFromWorktree = new DatabaseSync(dbFile, { readOnly: true });
+  assert.equal(migratedFromWorktree.prepare('PRAGMA user_version').get().user_version, 2,
+    'the main checkout code may upgrade its shared board even when cwd is a linked worktree');
+  assert.ok(migratedFromWorktree.prepare('PRAGMA table_info(item)').all().some((column) => column.name === 'item_files'));
+  migratedFromWorktree.close();
+
   const boardSource = join(linked, 'src/board.js');
   const oldSource = readFileSync(boardSource, 'utf8');
   const migration = "    ['shout', 'shout_request_outcome', \"TEXT NOT NULL DEFAULT ''\"],\n  ];";
@@ -214,6 +227,22 @@ test('[A5, A6] a future-schema worktree cannot migrate the shared board; main ca
   box.git(linked, 'commit', '-q', '-m', 'feat: simulate an unmerged schema bump');
 
   const before = readFileSync(dbFile);
+  const worktreeCodeFromMain = spawnSync(process.execPath, [join(linked, 'bin/pullboard.js'), 'status', '--json'], {
+    cwd: repo, env: box.env, encoding: 'utf8',
+  });
+  assert.equal(worktreeCodeFromMain.status, 1, worktreeCodeFromMain.stderr + worktreeCodeFromMain.stdout);
+  assert.equal(JSON.parse(worktreeCodeFromMain.stdout).error.code, 'UNMERGED_SCHEMA',
+    'a future-schema worktree refuses migration even when invoked from the main checkout directory');
+  assert.deepEqual(readFileSync(dbFile), before, 'cwd cannot make worktree code migrate the shared board');
+
+  const envBypass = spawnSync(process.execPath, [join(linked, 'bin/pullboard.js'), 'status', '--json'], {
+    cwd: repo, env: { ...box.env, PULLBOARD_CODE_IS_MAIN: '1' }, encoding: 'utf8',
+  });
+  assert.equal(envBypass.status, 1, envBypass.stderr + envBypass.stdout);
+  assert.equal(JSON.parse(envBypass.stdout).error.code, 'UNMERGED_SCHEMA',
+    'PULLBOARD_CODE_IS_MAIN cannot impersonate main-checkout source provenance');
+  assert.deepEqual(readFileSync(dbFile), before, 'the removed environment override cannot migrate the shared board');
+
   const specCheck = runFixture(linked, 'spec', 'check', '--json');
   assert.equal(specCheck.status, 0, specCheck.stderr + specCheck.stdout);
   assert.deepEqual(readFileSync(dbFile), before, 'spec check reads the spec without opening the shared board');
@@ -223,7 +252,7 @@ test('[A5, A6] a future-schema worktree cannot migrate the shared board; main ca
     import { serveApi } from './src/api.js';
     const root = process.env.PULLBOARD_FIXTURE_REPO;
     const project = { root, name: 'schema fixture', project: '', added: '2026-01-01T00:00:00.000Z' };
-    const api = await serveApi({ secret: 'api-probe', runCommand: async () => 0, projects: () => [project], isMain: false });
+    const api = await serveApi({ secret: 'api-probe', runCommand: async () => 0, projects: () => [project], isMain: true });
     try {
       const listing = await fetch(api.url).then((response) => response.json());
       console.log(JSON.stringify({
