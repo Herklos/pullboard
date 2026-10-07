@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as store from './board.js';
 import { COORDINATOR, loadConfig } from './config.js';
-import { repoInfo } from './git.js';
+import { repoInfo, tryGit } from './git.js';
 import { refusalDocument } from './json.js';
 import { laneNames } from './lanes.js';
 import { listApiProjects } from './projects.js';
@@ -17,6 +17,11 @@ const ADDRESS = '127.0.0.1';
 const VERSION = 1;
 const CODE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
+/** Whether this API module came from a Git main checkout, rather than a linked worktree. */
+function codeIsFromMain() {
+  return tryGit(CODE_ROOT, ['rev-parse', '--show-toplevel']).status === 0 && repoInfo(CODE_ROOT).isMain;
+}
+
 /** Read a registered board and release its SQLite connection on every path.
  *
  * @param {string} root
@@ -26,7 +31,7 @@ const CODE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 function withBoard(root, read, isMain) {
   const info = repoInfo(root);
   loadConfig(info.root);
-  const board = store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), undefined, { isMain: repoInfo(CODE_ROOT).isMain && isMain !== false });
+  const board = store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), undefined, { isMain: codeIsFromMain() && isMain !== false });
   try { return read(board, info); } finally { store.closeBoard(board); }
 }
 
@@ -175,7 +180,7 @@ function createRequest(root, body, isMain) {
 export function createLocalApiHandler({ secret, getPort, runCommand, projects = listApiProjects, isMain } = {}) {
   if (typeof getPort !== 'function') throw new TypeError('createLocalApiHandler needs a bound-port getter');
   if (typeof runCommand !== 'function') throw new TypeError('createLocalApiHandler needs the actual CLI entry point as runCommand');
-  const codeIsMain = repoInfo(CODE_ROOT).isMain && isMain !== false;
+  const codeIsMain = codeIsFromMain() && isMain !== false;
   const key = Buffer.from(secret);
   return createApiHandler({
     authenticate: (req) => {
