@@ -350,7 +350,7 @@ function sayBrief(io, brief) {
 function context(io) {
   const info = repoInfo(io.cwd);
   const codeIsInGit = tryGit(CODE_ROOT, ['rev-parse', '--show-toplevel']).status === 0;
-  const allowSchemaUpgrade = codeIsInGit && repoInfo(CODE_ROOT).isMain;
+  const allowSchemaUpgrade = !codeIsInGit || repoInfo(CODE_ROOT).isMain;
   const config = configHere(info);
   const file = join(info.commonDir, 'pullboard', 'board.sqlite');
   return { info, config, file, allowSchemaUpgrade, doctrine: loadDoctrine(info.root, config), io, clock: io.clock ?? store.systemClock };

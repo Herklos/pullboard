@@ -185,6 +185,23 @@ test('[A5, A6] a future-schema worktree cannot migrate the shared board; main ca
   assert.equal(prior.prepare('PRAGMA user_version').get().user_version, 2);
   prior.close();
 
+  const installed = join(box.dir, 'installed-pullboard');
+  mkdirSync(installed);
+  for (const name of ['bin', 'src']) cpSync(join(sourceRoot, name), join(installed, name), { recursive: true });
+  cpSync(join(sourceRoot, 'package.json'), join(installed, 'package.json'));
+  const olderInstalled = new DatabaseSync(dbFile);
+  olderInstalled.exec('ALTER TABLE item DROP COLUMN item_files; PRAGMA user_version = 1');
+  olderInstalled.close();
+  const installedRun = spawnSync(process.execPath, [join(installed, 'bin/pullboard.js'), 'status', '--json'], {
+    cwd: repo, env: box.env, encoding: 'utf8',
+  });
+  assert.equal(installedRun.status, 0, installedRun.stderr + installedRun.stdout);
+  const migratedInstalled = new DatabaseSync(dbFile, { readOnly: true });
+  assert.equal(migratedInstalled.prepare('PRAGMA user_version').get().user_version, 2,
+    'a copied installed release without Git metadata can upgrade an older board');
+  assert.ok(migratedInstalled.prepare('PRAGMA table_info(item)').all().some((column) => column.name === 'item_files'));
+  migratedInstalled.close();
+
   const older = new DatabaseSync(dbFile);
   older.exec('ALTER TABLE item DROP COLUMN item_files; PRAGMA user_version = 1');
   older.close();

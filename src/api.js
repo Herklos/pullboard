@@ -19,7 +19,7 @@ const CODE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 /** Whether this API module came from a Git main checkout, rather than a linked worktree. */
 function codeIsFromMain() {
-  return tryGit(CODE_ROOT, ['rev-parse', '--show-toplevel']).status === 0 && repoInfo(CODE_ROOT).isMain;
+  return tryGit(CODE_ROOT, ['rev-parse', '--show-toplevel']).status !== 0 || repoInfo(CODE_ROOT).isMain;
 }
 
 /** Read a registered board and release its SQLite connection on every path.
