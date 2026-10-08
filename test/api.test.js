@@ -925,7 +925,7 @@ async function startApi(t, box) {
 /** Send one bounded HTTP request to the fixture API, authenticating by header unless overridden. */
 function apiFetch(api, path, options = {}) {
   const { noSecret = false, ...requestOptions } = options;
-  const headers = { ...(noSecret ? {} : { 'x-pullboard-key': api.secret }), ...requestOptions.headers };
+  const headers = { connection: 'close', ...(noSecret ? {} : { 'x-pullboard-key': api.secret }), ...requestOptions.headers };
   return fetch(new URL(path, api.origin), { ...requestOptions, headers, signal: requestOptions.signal ?? AbortSignal.timeout(10_000) });
 }
 
