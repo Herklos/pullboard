@@ -2901,6 +2901,11 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
   const demo = project(box, 'phone-demo');
   const other = project(box, 'other-demo');
   box.run(demo.repo, 'add', 'web', 'Starter item', '--specs', 'G1', '--criterion', 'visible in the detail pane');
+  box.run(other.repo, 'add', 'web', 'Other starter item', '--specs', 'G1', '--criterion', 'visible after a project switch');
+  for (let n = 1; n <= 10; n += 1) {
+    box.run(demo.repo, 'add', 'web', `Switch race filler ${n}`, '--specs', 'G1', '--criterion', 'keeps the narrow list below the viewport');
+    box.run(other.repo, 'add', 'web', `Other switch race filler ${n}`, '--specs', 'G1', '--criterion', 'keeps the narrow list below the viewport');
+  }
   const wrapTitle = 'word boundary test ' + 'abcdef0123456789'.repeat(12);
   box.run(demo.repo, 'add', 'web', wrapTitle, '--specs', 'G1', '--criterion', 'the activity title wraps without splitting words');
   box.run(demo.repo, 'shout', 'person', 'Should the phone demo ship?', '--decision');
@@ -3120,6 +3125,71 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
       await click('#lanes [data-release="web"]');
       await chrome.waitFor("!document.querySelector('#lanes [data-release=web]')");
     }
+
+    await setViewport(375);
+    await click('[data-tab="items"]');
+    await chrome.waitFor("!!document.querySelector('#chain .row') && !document.body.classList.contains('switching')");
+    await chrome.evaluate('window.scrollTo(0, 0)');
+    await waitForStableBoxes(chrome, ['[data-pane="items"] aside.detail', '#new-item']);
+    const detailTop = Number(await chrome.evaluate("document.querySelector('[data-pane=items] aside.detail').getBoundingClientRect().top"));
+    assert.ok(detailTop > 900, `the real mobile detail starts below the viewport before selecting a row (${detailTop}px)`);
+    const otherId = await boardId(view, other.repo);
+    await chrome.evaluate(`(() => {
+      const plain = fetch;
+      let release;
+      const hold = new Promise((resolve) => { release = resolve; });
+      window.__releaseOtherState = release;
+      window.__otherStateStarted = false;
+      window.__otherStateFinished = false;
+      window.__detailRevealCalls = [];
+      const scrollIntoView = HTMLElement.prototype.scrollIntoView;
+      /** Record actual detail reveals so the delayed-switch seam proves the callback occurred. */
+      HTMLElement.prototype.scrollIntoView = function(...args) {
+        const tracked = this.id === 'detail';
+        const entry = tracked ? { at: performance.now(), root: view.root === ${JSON.stringify(other.repo)}, tab: view.tab, item: view.item, adding: view.adding, narrow: matchMedia('(max-width: 900px)').matches, before: { scrollY, rect: (() => { const r=this.getBoundingClientRect(); return {x:r.x,y:r.y,bottom:r.bottom}; })() }, args } : null;
+        const result = scrollIntoView.apply(this, args);
+        if (tracked) { entry.after = { scrollY, rect: (() => { const r=this.getBoundingClientRect(); return {x:r.x,y:r.y,bottom:r.bottom}; })() }; window.__detailRevealCalls.push(entry); }
+        return result;
+      };
+      globalThis.fetch = (path, init) => {
+        if (String(path).includes(${JSON.stringify('/api/v1/boards/' + otherId + '/state')})) {
+          window.__otherStateStarted = true;
+          return hold.then(() => plain(path, init)).then((response) => {
+            window.__otherStateFinished = true;
+            return response;
+          });
+        }
+        return plain(path, init);
+      };
+    })()`);
+    await chrome.evaluate(`switchTo(${JSON.stringify(other.repo)}, null)`);
+    await chrome.waitFor(`window.__otherStateStarted && view.root === ${JSON.stringify(other.repo)}`);
+    await click('#chain .row');
+    await chrome.waitFor('view.item !== null');
+    const send = chrome.send;
+    let releaseOnMouseMove = true;
+    const switchPointer = {};
+    /** Release the delayed response after the helper samples the target but before its pointer move. */
+    chrome.send = async (method, params) => {
+      if (releaseOnMouseMove && method === 'Input.dispatchMouseEvent' && params.type === 'mouseMoved') {
+        releaseOnMouseMove = false;
+        switchPointer.before = JSON.parse(await chrome.evaluate(`JSON.stringify({root:view.root === ${JSON.stringify(other.repo)},tab:view.tab,scrollY,detailRevealCount:window.__detailRevealCalls.length,rect:(()=>{const r=document.querySelector('#new-item').getBoundingClientRect();return{x:r.x,y:r.y,bottom:r.bottom}})()})`));
+        await chrome.evaluate('window.__releaseOtherState()');
+        await chrome.waitFor('window.__otherStateFinished && !document.body.classList.contains("switching")');
+        switchPointer.after = JSON.parse(await chrome.evaluate(`JSON.stringify({root:view.root === ${JSON.stringify(other.repo)},tab:view.tab,scrollY,detailRevealCount:window.__detailRevealCalls.length,rect:(()=>{const r=document.querySelector('#new-item').getBoundingClientRect();return{x:r.x,y:r.y,bottom:r.bottom}})()})`));
+      }
+      return send(method, params);
+    };
+    try {
+      await click('#new-item');
+    } finally {
+      chrome.send = send;
+    }
+    await chrome.waitFor("document.querySelector('#proj-name').textContent === 'other-demo' && !document.body.classList.contains('switching')");
+    assert.deepEqual(switchPointer.after, switchPointer.before,
+      'completing a null-target switch after pointer targeting cannot scroll the New item button');
+    assert.equal(await chrome.evaluate("document.querySelector('#add-form').hidden"), false,
+      'a null-target project switch cannot scroll away a later New item click when its delayed response arrives');
 
     await chrome.evaluate(`(() => {
       const probe = document.createElement('div');

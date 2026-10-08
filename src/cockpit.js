@@ -165,6 +165,7 @@ function homeTab() {
   return kept && kept !== 'roadmap' ? kept : 'items';
 }
 const view = { root: keep('pb.project'), tab: addressTab() || homeTab(), seen: {}, code: {}, item: null, adding: false, state: 'active', rows: { spec: 'decide', doctrine: 'all' }, row: { spec: null, doctrine: null } };
+let switchGeneration = 0;
 if (snapshot) view.state = 'all';
 let data = null;
 let seen = '';
@@ -1258,10 +1259,12 @@ function fold(open) {
 
 /** Show another project and its item; history restores keep the tab their entry named. */
 function switchTo(root, target = null, record = true) {
+  const generation = ++switchGeneration;
   answer(null);
   view.root = root;
   const item = typeof target === 'number' ? target : /^item:(\\d+)$/.exec(target || '');
-  view.item = typeof item === 'number' ? item : item ? Number(item[1]) : null;
+  const requestedItem = typeof item === 'number' ? item : item ? Number(item[1]) : null;
+  view.item = requestedItem;
   view.adding = false;
   if (record && view.item !== null) { view.tab = 'items'; keep('pb.tab', view.tab); }
   keep('pb.project', root);
@@ -1272,8 +1275,8 @@ function switchTo(root, target = null, record = true) {
   if (data) renderSide();
   document.body.classList.add('switching');
   refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }).finally(() => {
-    document.body.classList.remove('switching');
-    if (view.item !== null && view.root === root && view.tab === 'items') reveal();
+    if (generation === switchGeneration) document.body.classList.remove('switching');
+    if (generation === switchGeneration && requestedItem !== null && view.item === requestedItem && view.root === root && view.tab === 'items') reveal();
   });
 }
 
