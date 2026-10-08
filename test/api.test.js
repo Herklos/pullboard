@@ -389,6 +389,7 @@ test('[A5, A6] a future-schema worktree cannot migrate the shared board; main ca
       const listing = await fetch(api.url).then((response) => response.json());
       console.log(JSON.stringify({
         apiWarnings: listing.warnings?.map((warning) => warning.error.error.code) ?? [],
+        apiNext: listing.warnings?.map((warning) => warning.error.error.next) ?? [],
       }));
     } finally {
       await api.close();
@@ -401,7 +402,8 @@ test('[A5, A6] a future-schema worktree cannot migrate the shared board; main ca
   });
   assert.equal(surfaces.status, 0, surfaces.stderr + surfaces.stdout);
   const surfaceResult = JSON.parse(surfaces.stdout);
-  assert.deepEqual(surfaceResult.apiWarnings, ['BOARD_UNAVAILABLE'], 'API reads must report a future-schema board as unavailable');
+  assert.deepEqual(surfaceResult.apiWarnings, ['UNMERGED_SCHEMA'], 'API warnings retain the actionable source-version refusal');
+  assert.match(surfaceResult.apiNext[0], /merge this code into the main checkout first/);
   assert.deepEqual(readFileSync(dbFile), before, 'API reads from the linked worktree must not migrate the shared board');
 
   const refused = runFixture(linked, 'status', '--json');

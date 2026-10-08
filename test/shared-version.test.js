@@ -1,7 +1,7 @@
 /** Unmerged source protects both shared formats, including indirect openers and real hooks [A5,A6]. */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -12,9 +12,12 @@ function fixture(t) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-shared-version-')));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const root = join(dir, 'repo'); const lane = join(dir, 'lane');
+  const executables = join(dir, 'executables'); mkdirSync(executables);
+  writeFileSync(join(executables, 'pullboard'), `#!/bin/sh\nexec "${process.execPath}" "$(git rev-parse --show-toplevel)/bin/pullboard.js" "$@"\n`);
+  chmodSync(join(executables, 'pullboard'), 0o755);
   mkdirSync(root);
   for (const name of ['bin', 'src', 'skills', 'package.json']) cpSync(resolve(import.meta.dirname, '..', name), join(root, name), { recursive: true });
-  const env = { ...process.env, HOME: join(dir, 'home'), PULLBOARD_HOME: join(dir, 'board-home'), PULLBOARD_MACHINE_HOME: join(dir, 'machine-home') };
+  const env = { ...process.env, HOME: join(dir, 'home'), PULLBOARD_HOME: join(dir, 'board-home'), PULLBOARD_MACHINE_HOME: join(dir, 'machine-home'), PATH: executables + ':' + process.env.PATH };
   for (const name of Object.keys(env)) if (name.startsWith('GIT_')) delete env[name];
   delete env.PULLBOARD_RELAY_TOKEN;
   Object.assign(env, { GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'Version Fixture', GIT_AUTHOR_EMAIL: 'version@example.test', GIT_COMMITTER_NAME: 'Version Fixture', GIT_COMMITTER_EMAIL: 'version@example.test' });

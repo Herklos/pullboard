@@ -1,7 +1,7 @@
 /** Integrity checks use throwaway git repositories and real board databases (A6). */
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
@@ -27,6 +27,8 @@ function boardBox({ initialize = true, repoName = 'repo' } = {}) {
   for (const name of Object.keys(env)) if (name.startsWith('GIT_')) delete env[name];
   Object.assign(env, {
     PULLBOARD_HOME: join(dir, 'home'),
+    HOME: join(dir, 'private-home'),
+    PULLBOARD_MACHINE_HOME: join(dir, 'machine-home'),
     GIT_CONFIG_GLOBAL: '/dev/null',
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_AUTHOR_NAME: 'Doctor Test',
@@ -34,6 +36,7 @@ function boardBox({ initialize = true, repoName = 'repo' } = {}) {
     GIT_COMMITTER_NAME: 'Doctor Test',
     GIT_COMMITTER_EMAIL: 'doctor@example.com',
   });
+  delete env.PULLBOARD_RELAY_TOKEN;
   const git = (...args) => execFileSync('git', args, { cwd: root, env, encoding: 'utf8' }).trim();
   const run = (...args) => spawnSync(process.execPath, [BIN, ...args], { cwd: root, env, encoding: 'utf8' });
   git('init', '-q', '-b', 'main');
@@ -44,6 +47,14 @@ function boardBox({ initialize = true, repoName = 'repo' } = {}) {
   if (initialize) assert.equal(run('status').status, 0);
   else mkdirSync(join(root, '.git', 'pullboard'), { recursive: true });
   return { dir, root, env, git, run, dbFile };
+}
+
+/** Exercise installed-release repair advice independently of the checkout running this test. */
+function runRelease(box, ...args) {
+  const release = join(box.dir, 'installed-release');
+  mkdirSync(release, { recursive: true });
+  for (const name of ['bin', 'src', 'package.json']) cpSync(resolve(import.meta.dirname, '..', name), join(release, name), { recursive: true });
+  return spawnSync(process.execPath, [join(release, 'bin/pullboard.js'), ...args], { cwd: box.root, env: box.env, encoding: 'utf8' });
 }
 
 /**
@@ -189,7 +200,7 @@ test('doctor reports verdicts whose commit object is gone [A6]', () => {
 test('doctor reports older and newer schema versions without migrating either [A6]', () => {
   const box = boardBox();
   mutate(box, (db) => db.exec('PRAGMA user_version = 0'));
-  const older = box.run('doctor');
+  const older = runRelease(box, 'doctor');
   assert.equal(older.status, 1);
   assert.match(older.stdout, new RegExp(`schema version is 0; this pullboard expects ${SCHEMA_VERSION}; repair: run pullboard status to upgrade this board`));
   mutate(box, (db) => db.exec(`PRAGMA user_version = ${SCHEMA_VERSION + 1}`));
@@ -210,7 +221,7 @@ test('doctor reports an older empty SQLite layout without querying current table
   db.exec('PRAGMA user_version = 0');
   db.close();
   const before = readFileSync(box.dbFile);
-  const result = box.run('doctor');
+  const result = runRelease(box, 'doctor');
   assert.equal(result.status, 1);
   assert.match(result.stdout, new RegExp(`schema version is 0; this pullboard expects ${SCHEMA_VERSION}; repair: run pullboard status to upgrade this board`));
   assert.doesNotMatch(result.stderr, /no such table|SQLITE_ERROR|Error:/);

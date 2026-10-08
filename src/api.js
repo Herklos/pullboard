@@ -52,7 +52,7 @@ function apiBoardListing(projects = listApiProjects, isMain) {
     try {
       boards.push(withBoard(project.root, (board) => ({ ...project, id: store.boardId(board) }), isMain));
     } catch (cause) {
-      const error = cause.code === 'EVENT_LOG_VERSION' ? cause : new Refused('BOARD_UNAVAILABLE', `registered project ${project.root} cannot be read; restore the repo or run pullboard forget ${project.root}`);
+      const error = ['EVENT_LOG_VERSION', 'UNMERGED_SCHEMA'].includes(cause.code) ? cause : new Refused('BOARD_UNAVAILABLE', `registered project ${project.root} cannot be read; restore the repo or run pullboard forget ${project.root}`);
       warnings.push({ ...project, error: refusalDocument(error) });
     }
   }

@@ -26,12 +26,13 @@ export function doctorProblems(file, root, tryGit, config, { isMain = true } = {
   try {
     const schemaProblems = versionProblems(db, isMain);
     if (schemaProblems.length) return schemaProblems;
+    const eventProblems = [];
     try {
       const version = readEventLogVersion(db);
       if (version < EVENT_LOG_VERSION) {
         const next = isMain ? 'run pullboard status to upgrade this event log'
           : 'merge this code into the main checkout first, then run pullboard status there; or test it against a throwaway board';
-        return [finding('EVENT_LOG_VERSION', `event log version is ${version}; this pullboard expects ${EVENT_LOG_VERSION}`, next)];
+        eventProblems.push(finding('EVENT_LOG_VERSION', `event log version is ${version}; this pullboard expects ${EVENT_LOG_VERSION}`, next));
       }
     }
     catch (error) {
@@ -40,6 +41,7 @@ export function doctorProblems(file, root, tryGit, config, { isMain = true } = {
     }
     const layout = layoutProblems(db);
     return [
+      ...eventProblems,
       ...triggerProblems(db),
       ...layout.problems,
       ...(layout.itemFields ? itemProblems(db) : []),
