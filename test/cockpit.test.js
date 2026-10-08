@@ -3024,17 +3024,25 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
         await click(`[data-tab="${tab}"]`);
         await checkLayout(width, `${tab} tab`);
         if (tab === 'spec') {
-          await chrome.evaluate(`(() => [...document.querySelectorAll('#spec-chips button')].forEach((button,index) => {
-            const clone=button.cloneNode(true); clone.style.cssText += ';position:fixed;visibility:hidden;width:max-content;flex:none'; button.parentElement.append(clone);
-            clone.dataset.naturalWidthProbe=String(index); clone.style.visibility='visible'; clone.style.opacity='0'; clone.style.pointerEvents='none';
-          }))()`);
-          await waitForStableBoxes(chrome, ['#spec-chips button', '#spec-chips [data-natural-width-probe]']);
+          await chrome.evaluate(`(() => {
+            const tray=document.createElement('div'); tray.id='spec-natural-width-probes'; tray.className='chips';
+            tray.style.cssText='position:fixed;left:-10000px;top:0;visibility:hidden;pointer-events:none';
+            document.querySelector('[data-pane="spec"]').append(tray);
+            [...document.querySelectorAll('#spec-chips button')].forEach((button,index) => {
+              const clone=button.cloneNode(true); clone.style.cssText += ';visibility:visible;width:max-content;flex:none;opacity:0;pointer-events:none'; tray.append(clone);
+              clone.dataset.naturalWidthProbe=String(index); clone.style.visibility='visible'; clone.style.opacity='0'; clone.style.pointerEvents='none';
+            });
+          })()`);
+          const selectedFilter = await chrome.evaluate("document.querySelector('#spec-chips button.on')?.dataset.rows || ''");
+          assert.ok(selectedFilter, `${width}: one spec filter is selected before measuring chip widths`);
+          await click(`[data-rows="${selectedFilter}"]`);
+          await waitForStableBoxes(chrome, ['#spec-chips button', '#spec-natural-width-probes [data-natural-width-probe]']);
           const chips = JSON.parse(await chrome.evaluate(`JSON.stringify([...document.querySelectorAll('#spec-chips button:not([data-natural-width-probe])')].map((button,index) => {
-            const clone=button.parentElement.querySelector('[data-natural-width-probe="'+index+'"]');
+            const clone=document.querySelector('#spec-natural-width-probes [data-natural-width-probe="'+index+'"]');
             const naturalWidth=clone.getBoundingClientRect().width, actualWidth=button.getBoundingClientRect().width;
             return {text:button.textContent.trim(),actualWidth,naturalWidth};
           }))`));
-          await chrome.evaluate(`document.querySelectorAll('#spec-chips [data-natural-width-probe]').forEach(probe=>probe.remove())`);
+          await chrome.evaluate(`document.querySelector('#spec-natural-width-probes').remove()`);
           assert.ok(chips.length >= 2, `${width}: spec filters render as chips`);
           for (const chip of chips) assert.ok(Math.abs(chip.actualWidth - chip.naturalWidth) < 2, `${width}: ${chip.text} keeps its natural width: ${JSON.stringify(chip)}`);
         }
