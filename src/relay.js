@@ -7,7 +7,7 @@ import { exportBoard, restoreRelaySnapshot } from './exchange.js';
 import { appliedSequence, applyEngineMove, checkpointSequence, engineReceipt, prepareEngineMove, startRelayEpoch } from './engine.js';
 import { ENGINE_VERSION } from './machine.js';
 import { presentationDigest, relayPresentation, relaySnapshot } from './relay-presentation.js';
-import { repoInfo, tryGit } from './git.js';
+import { codeIsFromMain, repoInfo, tryGit } from './git.js';
 import { forgetBoardKey, readBoardKey, storeBoardKey } from './relay-key.js';
 import { encodeBoardKey, generateBoardKey, seal, unseal } from './seal.js';
 import { terminalQr } from './qr.js';
@@ -132,9 +132,9 @@ async function request(state, path, { method = 'GET', body, allowMissing = false
 }
 
 /** Read durable local event rows; their ids are the crash-safe outbox after the saved cursor. */
-function localRecords(root, work) {
+export function localRecords(root, work) {
   const info = repoInfo(root);
-  const board = store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'));
+  const board = store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), undefined, { isMain: codeIsFromMain() });
   try { return work(board); } finally { store.closeBoard(board); }
 }
 

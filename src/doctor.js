@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { checkAtCommit, submissionPaths, dependencySnapshots } from './trusted-policy.js';
 import { BLANKS, STATES, storeTriggers } from './machine.js';
 
-import { readEventLogVersion, SCHEMA_VERSION } from './board.js';
+import { EVENT_LOG_VERSION, readEventLogVersion, SCHEMA_VERSION } from './board.js';
 import { staleFrozenItems, staleItemFinding } from './approved-rows.js';
 import { loadSpec } from './spec.js';
 const blankCharacters = new Set(BLANKS.map((point) => String.fromCodePoint(point)));
@@ -17,15 +17,23 @@ const blankCharacters = new Set(BLANKS.map((point) => String.fromCodePoint(point
  * @param {string} root
  * @param {(root: string, args: string[]) => { status: number, stdout: string }} tryGit
  * @param {any} [config] - Compare frozen rows with this checkout's current source when supplied.
+ * @param {{ isMain?: boolean }} [options] - Give older-board repair steps for the running source.
  * @returns {{ code: string, message: string, next: string }[]}
  */
-export function doctorProblems(file, root, tryGit, config) {
+export function doctorProblems(file, root, tryGit, config, { isMain = true } = {}) {
   if (!existsSync(file)) return [finding('BOARD_MISSING', 'board file is missing', 'run pullboard status to create a new board')];
   const db = new DatabaseSync(file, { readOnly: true });
   try {
-    const schemaProblems = versionProblems(db);
+    const schemaProblems = versionProblems(db, isMain);
     if (schemaProblems.length) return schemaProblems;
-    try { readEventLogVersion(db); }
+    try {
+      const version = readEventLogVersion(db);
+      if (version < EVENT_LOG_VERSION) {
+        const next = isMain ? 'run pullboard status to upgrade this event log'
+          : 'merge this code into the main checkout first, then run pullboard status there; or test it against a throwaway board';
+        return [finding('EVENT_LOG_VERSION', `event log version is ${version}; this pullboard expects ${EVENT_LOG_VERSION}`, next)];
+      }
+    }
     catch (error) {
       if (error.code !== 'EVENT_LOG_VERSION') throw error;
       return [finding(error.code, error.message, 'upgrade pullboard to read this event log, or restore a compatible board')];
@@ -91,11 +99,11 @@ function layoutProblems(db) {
  * @param {DatabaseSync} db
  * @returns {{ code: string, message: string, next: string }[]}
  */
-function versionProblems(db) {
+function versionProblems(db, isMain) {
   const version = db.prepare('PRAGMA user_version').get().user_version;
   if (version === SCHEMA_VERSION) return [];
   const repair = version < SCHEMA_VERSION
-    ? 'run pullboard status to upgrade this board'
+    ? (isMain ? 'run pullboard status to upgrade this board' : 'merge this code into the main checkout first, then run pullboard status there; or test it against a throwaway board')
     : 'use a pullboard version that supports this board schema';
   return [finding('SCHEMA_VERSION', `schema version is ${version}; this pullboard expects ${SCHEMA_VERSION}`, repair)];
 }

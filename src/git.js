@@ -3,8 +3,9 @@
  * and whether the tree is clean. Every call is a plain `git` child process.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Refused } from './refused.js';
 
 const GIT_FLAGS = ['--no-replace-objects', '-c', 'core.quotepath=false'];
@@ -43,6 +44,7 @@ export function mainCheckout(root) {
   if (resolved.status !== 0 && resolved.status !== 1) throw new Refused('NO_POLICY', 'the primary checkout commit cannot be read; restore its Git objects and ask the coordinator to retry');
   return { branch, commit: resolved.status === 0 ? resolved.stdout.trim() : null };
 }
+const CODE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 /**
  * The environment for a gate or fixer: keep the user's settings, but remove Git's repository-local
@@ -54,8 +56,17 @@ export function mainCheckout(root) {
  */
 export function gitChildEnv(root) {
   const env = { ...process.env };
-  for (const name of git(root, ['rev-parse', '--local-env-vars']).split('\n')) delete env[name];
-  env.GIT_NO_REPLACE_OBJECTS = '1'; // Exact-tree receipts must never resolve replacement refs.
+  const discoveryEnv = { ...env };
+  for (const name of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR']) delete discoveryEnv[name];
+  const result = spawnSync('git', ['rev-parse', '--local-env-vars'], {
+    cwd: root,
+    env: discoveryEnv,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  if (result.status === 0) for (const name of result.stdout.split('\n')) delete env[name];
+  else for (const name of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_PREFIX']) delete env[name];
+  env.GIT_NO_REPLACE_OBJECTS = '1'; // Exact-tree receipts never resolve replacement refs.
   return env;
 }
 
@@ -64,12 +75,13 @@ export function gitChildEnv(root) {
  *
  * @param {string} cwd
  * @param {string[]} args
- * @param {{ maxBuffer?: number }} [options] - Bound output captures for callers parsing larger diffs.
+ * @param {{ maxBuffer?: number, env?: NodeJS.ProcessEnv }} [options] - Bound output captures for callers parsing larger diffs.
  * @returns {string}
  */
-export function git(cwd, args, { maxBuffer } = {}) {
+export function git(cwd, args, { maxBuffer, env = process.env } = {}) {
   return execFileSync('git', [...GIT_FLAGS, ...args], {
     cwd,
+    env,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
     ...(maxBuffer === undefined ? {} : { maxBuffer }),
@@ -81,10 +93,11 @@ export function git(cwd, args, { maxBuffer } = {}) {
  *
  * @param {string} cwd
  * @param {string[]} args
+ * @param {{env?: NodeJS.ProcessEnv}} [options]
  * @returns {{ status: number, stdout: string }}
  */
-export function tryGit(cwd, args) {
-  const result = spawnSync('git', [...GIT_FLAGS, ...args], { cwd, encoding: 'utf8' });
+export function tryGit(cwd, args, { env = process.env } = {}) {
+  const result = spawnSync('git', [...GIT_FLAGS, ...args], { cwd, env, encoding: 'utf8' });
   return { status: result.status ?? 1, stdout: (result.stdout ?? '').trim() };
 }
 
@@ -132,19 +145,43 @@ export function bareWorktreeFinding(cwd) {
  * The main checkout's git dir is the common dir; a linked worktree has its own under it.
  *
  * @param {string} cwd
+ * @param {{env?: NodeJS.ProcessEnv}} [options]
  * @returns {{ root: string, commonDir: string, gitDir: string, isMain: boolean }}
  */
-export function repoInfo(cwd) {
-  const top = tryGit(cwd, ['rev-parse', '--show-toplevel']);
+export function repoInfo(cwd, { env = process.env } = {}) {
+  const top = tryGit(cwd, ['rev-parse', '--show-toplevel'], { env });
   if (top.status !== 0) {
     const bare = bareWorktreeFinding(cwd);
     if (bare) throw new Refused(bare.code, `${bare.message}; run ${bare.next}`);
     throw new Refused('NOT_A_REPO', 'not inside a git work tree; run git init, or cd into a repo');
   }
   const root = top.stdout;
-  const commonDir = git(root, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
-  const gitDir = git(root, ['rev-parse', '--path-format=absolute', '--git-dir']);
+  const commonDir = git(root, ['rev-parse', '--path-format=absolute', '--git-common-dir'], { env });
+  const gitDir = git(root, ['rev-parse', '--path-format=absolute', '--git-dir'], { env });
   return { root, commonDir, gitDir, isMain: commonDir === gitDir };
+}
+
+/** Determine code provenance without letting a caller's active hook redirect Git's repository.
+ *
+ * @param {string} [root]
+ * @returns {boolean}
+ */
+export function codeIsFromMain(root = CODE_ROOT) {
+  const env = gitChildEnv(root);
+  const top = tryGit(root, ['rev-parse', '--show-toplevel'], { env });
+  if (top.status === 0) return repoInfo(root, { env }).isMain;
+  let folder = resolve(root);
+  while (true) {
+    try {
+      lstatSync(join(folder, '.git'));
+      throw new Refused('UNMERGED_SCHEMA', 'the running code has Git metadata that cannot be read; restore its Git link before retrying, or install a released pullboard outside this checkout');
+    } catch (error) {
+      if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error;
+    }
+    const parent = dirname(folder);
+    if (parent === folder) return true;
+    folder = parent;
+  }
 }
 
 /**
