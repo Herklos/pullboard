@@ -900,7 +900,9 @@ test('an open decision counts in the sidebar and the tab title [B21, B26, N26]',
     box.run(beta.repo, 'answer', '3', 'after', '--as', 'person');
     await page.run('refresh()');
     assert.deepEqual(rows(), [['alpha', '', 'nothing open'], ['beta', '', 'nothing open']], 'answered, they need no one');
-    assert.match(box.run(beta.web, 'inbox'), /person -> web-1: answers \\?#1: Person answered \\?#2: yes/, "the person's answer reaches the agent that asked");
+    const replies = JSON.parse(box.run(beta.web, 'inbox', '--json')).shouts.filter((shout) => shout.shout_answers === 1);
+    assert.deepEqual(replies.map((shout) => [shout.shout_from, shout.shout_to, shout.shout_answers, shout.shout_text]),
+      [['person', 'web-1', 1, 'Person answered #2: yes']], "the person's answer reaches the agent that asked");
     assert.equal(page.run('document.title'), 'alpha · Pullboard');
     assert.equal(page.element('proj-elsewhere').hidden, true);
   } finally {
@@ -1485,7 +1487,9 @@ test('a decision waits in needs-you until the view answers it [B21, B26, N27]', 
     await page.fire('shout-form', 'submit');
     assert.equal(page.element('console').textContent.split('\n')[0], '$ pullboard answer 42 French, then English --as person', 'the view answers as the person');
     assert.equal(page.element('console').className, 'console ok');
-    assert.match(box.run(alpha.web, 'inbox'), /person -> web-1: answers \\?#1: Person answered \\?#42: French, then English/, 'the answer reaches the agent that asked');
+    const replies = JSON.parse(box.run(alpha.web, 'inbox', '--json')).shouts.filter((shout) => shout.shout_answers === 1);
+    assert.deepEqual(replies.map((shout) => [shout.shout_from, shout.shout_to, shout.shout_answers, shout.shout_text]),
+      [['person', 'web-1', 1, 'Person answered #42: French, then English']], 'the answer reaches the agent that asked');
     assert.deepEqual(form(), { answering: false, who: '', question: '', to: 'web', locked: false, button: 'Shout' }, 'the form is a plain shout again');
     assert.equal(page.element('shout-text').value, '');
     assert.doesNotMatch(page.show('needs'), /decide:/, 'an answered decision leaves Needs-you');
@@ -1520,8 +1524,11 @@ test('a decision waits in needs-you until the view answers it [B21, B26, N27]', 
     await page.fire('shout-form', 'submit');
     assert.deepEqual(form(), plain, 'an answer is never sent to another project');
     assert.equal(page.element('console').textContent.split('\n')[0], '$ pullboard answer 42 French, then English --as person', 'nothing ran');
-    assert.match(box.run(beta.repo, 'decisions', '--as', 'person'), /^#2 {2}coordinator -> person, [^:]+: Passed up from web-1: Beta asks too\?/m, "beta's ask still waits");
-    assert.match(box.run(alpha.repo, 'decisions', '--as', 'person'), /^#46 {2}coordinator -> person, [^:]+: Passed up from web-1: Ship today\?/m, "and so does alpha's");
+    /** Read the still-open decision by stable identity, independently of display-name formatting. */
+    const waiting = (repo, id) => JSON.parse(box.run(repo, 'decisions', '--as', 'person', '--json')).decisions
+      .filter((shout) => shout.shout_id === id).map((shout) => [shout.shout_from, shout.shout_to, shout.shout_text]);
+    assert.deepEqual(waiting(beta.repo, 2), [['coordinator', 'person', 'Passed up from web-1: Beta asks too?\nCoordinator note: yours too']], "beta's ask still waits");
+    assert.deepEqual(waiting(alpha.repo, 46), [['coordinator', 'person', 'Passed up from web-1: Ship today?\nCoordinator note: yours']], "and so does alpha's");
   } finally {
     await view.stop();
   }
@@ -2890,6 +2897,109 @@ test('read-only pages use a local browser transport and refresh on its updates [
     }
     await live.stop();
     await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('a configured transport never falls back while loading or after import failure [N26,N27]', { timeout: 90_000 }, async (t) => {
+  const executable = chromeExecutable();
+  if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME for the transport startup proof.');
+
+  const box = machine();
+  const demo = project(box, 'transport-startup');
+  box.run(demo.repo, 'add', 'web', 'Transport startup item', '--specs', 'G1', '--criterion', 'loads through the configured transport');
+  const live = await startView(box);
+  const slowPage = cockpitPage('', { transportModule: '/slow-transport.js' });
+  const failedPage = cockpitPage('', { transportModule: '/failed-transport.js' });
+  const localRequests = [];
+  const relayRequests = [];
+  let slowModuleRequested;
+  const requested = new Promise((resolve) => { slowModuleRequested = resolve; });
+  let releaseSlowModule;
+  const slowModuleBarrier = new Promise((resolve) => { releaseSlowModule = resolve; });
+  const transportSource = `export async function createTransport() {
+    window.__transportReady = true;
+    window.__transportCalls = [];
+    return { async request(path, body) {
+      window.__transportCalls.push(path);
+      const response = await fetch('/relay' + path, { method: body ? 'POST' : 'GET', body: body ? JSON.stringify(body) : undefined });
+      return response.json();
+    } };
+  }`;
+  const server = createServer(async (request, response) => {
+    const url = new URL(request.url, 'http://127.0.0.1');
+    if (url.pathname === '/slow' || url.pathname === '/failed') {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(url.pathname === '/slow' ? slowPage : failedPage);
+      return;
+    }
+    if (url.pathname === '/slow-transport.js') {
+      slowModuleRequested();
+      await slowModuleBarrier;
+      response.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' });
+      response.end(transportSource);
+      return;
+    }
+    if (url.pathname === '/failed-transport.js') {
+      response.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' });
+      response.end("throw new Error('fixture transport import failed');");
+      return;
+    }
+    if (url.pathname === '/view.css') {
+      response.writeHead(200, { 'content-type': 'text/css; charset=utf-8' });
+      response.end(readFileSync(new URL('../src/view.css', import.meta.url), 'utf8'));
+      return;
+    }
+    if (url.pathname.startsWith('/relay/')) {
+      const path = url.pathname.slice('/relay'.length) + url.search;
+      relayRequests.push(path);
+      try {
+        const reply = await fetch(live.base + path, { headers: { 'x-pullboard-key': live.key } });
+        response.writeHead(reply.status, { 'content-type': 'application/json' });
+        response.end(await reply.text());
+      } catch (error) {
+        response.writeHead(502, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ error: String(error.message || error) }));
+      }
+      return;
+    }
+    if (url.pathname.startsWith('/api/v1/')) {
+      localRequests.push(url.pathname);
+      response.writeHead(503, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ error: { code: 'LOCAL_FALLBACK', message: 'the page-local API must not be used' } }));
+      return;
+    }
+    response.writeHead(404).end();
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-transport-startup-chrome-'));
+  let chrome;
+  try {
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    chrome = await openSnapshotChrome(executable, `${origin}/slow`, profile);
+    await requested;
+    const loadingCall = await chrome.evaluate("api('/api/v1/boards').then(() => 'unexpected success', error => error.message)");
+    assert.match(loadingCall, /transport.*loading/i, 'direct API calls refuse while the configured module is loading');
+    await browserPause(3200);
+    assert.equal(await chrome.evaluate('window.__transportReady === true'), false, 'the delayed module is still loading during the proof');
+    assert.deepEqual(localRequests, [], 'neither direct reads nor the poll fall back while loading');
+
+    releaseSlowModule();
+    await chrome.waitFor('window.__transportReady === true && !!data?.project');
+    assert.ok(relayRequests.includes('/api/v1/boards'), 'the initial board read uses the configured transport');
+    assert.deepEqual(localRequests, [], 'loading the configured module never touched the page-local API');
+
+    await chrome.send('Page.navigate', { url: `${origin}/failed` });
+    await chrome.waitFor("document.querySelector('#live').textContent.includes('fixture transport import failed')");
+    await browserPause(3200);
+    assert.match(await chrome.evaluate("document.querySelector('#live').textContent"), /cannot reach the view: fixture transport import failed/,
+      'the original module error remains visible after later poll intervals');
+    assert.deepEqual(localRequests, [], 'a failed import also disables page-local polling');
+  } finally {
+    releaseSlowModule();
+    if (chrome) await closeSnapshotChrome(chrome);
+    await live.stop();
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(profile, { recursive: true, force: true });
   }
 });
 
