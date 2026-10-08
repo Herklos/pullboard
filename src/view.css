@@ -79,6 +79,10 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .live { margin-left: auto; align-self: center; font-size: 12px; color: var(--ink-faint); white-space: nowrap; }
 .switching main, .switching .products { opacity: .45; transition: opacity .12s; }
 
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
+}
+
 main { padding: 16px 18px 28px; }
 .first { display: none; max-width: 520px; margin: 10vh auto 0; padding: 22px 24px; }
 .first h2 { margin: 0 0 6px; font-size: 18px; }

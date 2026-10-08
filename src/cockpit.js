@@ -1128,7 +1128,7 @@ function pick(id, root = view.root) {
 
 /** Where the list and the detail stack (under 900px), bring the detail into view. */
 function reveal() {
-  if (matchMedia('(max-width: 900px)').matches) $('detail').scrollIntoView({ block: 'start', behavior: 'smooth' });
+  if (matchMedia('(max-width: 900px)').matches) $('detail').scrollIntoView({ block: 'start' });
 }
 
 /**

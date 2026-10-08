@@ -5,6 +5,7 @@
  * it, and the script's requests go to that view. Nothing is stood in for but the browser.
  */
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, request } from 'node:http';
@@ -2269,7 +2270,7 @@ async function openSnapshotChrome(executable, url, profile) {
     /** Evaluate an expression in the page and return its by-value result. */
     const evaluate = async (expression) => {
       const result = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
-      if (result.exceptionDetails) throw new Error(result.exceptionDetails.text);
+      if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description ?? result.exceptionDetails.text);
       return result.result.value;
     };
     /** Poll a page expression with a fixed deadline, without leaving a live interval behind. */
@@ -2284,7 +2285,28 @@ async function openSnapshotChrome(executable, url, profile) {
     await send('Page.enable');
     await send('Runtime.enable');
     await send('Network.enable');
+    await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+    const firstStateDelayMs = Number(process.env.PULLBOARD_CHROME_FIRST_STATE_DELAY_MS ?? 0);
+    if (Number.isSafeInteger(firstStateDelayMs) && firstStateDelayMs > 0 && firstStateDelayMs <= 30_000) {
+      await send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+        const nativeFetch = window.fetch.bind(window); let delayed = false;
+        window.fetch = (input, init) => {
+          const url = typeof input === 'string' ? input : input.url;
+          const path = new URL(url, location.href).pathname;
+          if (!delayed && /^\\/api\\/v1\\/boards\\/[^/]+\\/state$/.test(path)) {
+            delayed = true;
+            const state = window.__pullboardFirstStateDelay = { started: performance.now(), ended: null };
+            return new Promise((resolve, reject) => setTimeout(() => {
+              state.ended = performance.now();
+              nativeFetch(input, init).then(resolve, reject);
+            }, ${firstStateDelayMs}));
+          }
+          return nativeFetch(input, init);
+        };
+      })()` });
+    }
     await send('Page.navigate', { url });
+    await waitFor("matchMedia('(prefers-reduced-motion: reduce)').matches");
     return { child, stopped, socket, send, evaluate, waitFor, requests, exceptions };
   } catch (error) {
     socket?.close();
@@ -2292,6 +2314,104 @@ async function openSnapshotChrome(executable, url, profile) {
     const chromeStderr = launched.stderr().trim();
     throw new Error(chromeStderr ? `${error.message}; Chrome stderr: ${chromeStderr}` : error.message, { cause: error });
   }
+}
+
+/** Wait until each requested rendered element has a visible, unchanged box across two frames [N26]. */
+async function waitForStableBoxes(chrome, selectors, timeoutMs = 10_000) {
+  const result = JSON.parse(await chrome.evaluate(`(async () => {
+    const selectors = ${JSON.stringify(selectors)};
+    const sample = () => {
+      const groups = selectors.map((requested) => {
+        const optional = requested.startsWith('?'), selector = optional ? requested.slice(1) : requested;
+        const elements = [...document.querySelectorAll(selector)].filter((element) => {
+          const style = getComputedStyle(element), rect = element.getBoundingClientRect();
+          return !element.closest('[hidden]') && style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        });
+        return { optional, elements };
+      });
+      if (groups.some(({ optional, elements }) => !optional && !elements.length)) return null;
+      const boxes = [[scrollX, scrollY]];
+      for (const { elements } of groups) for (const element of elements) {
+        const rect = element.getBoundingClientRect();
+        boxes.push([rect.x, rect.y, rect.width, rect.height]);
+      }
+      return boxes;
+    };
+    return JSON.stringify(await new Promise((resolve, reject) => {
+      let previous = null, frameId = 0, finished = false;
+      const timeout = setTimeout(() => {
+        finished = true;
+        cancelAnimationFrame(frameId);
+        reject(Error('rendered boxes did not become stable for ' + selectors.join(', ')));
+      }, ${timeoutMs});
+      const frame = () => {
+        if (finished) return;
+        const current = sample();
+        if (current && previous && JSON.stringify(current) === JSON.stringify(previous)) {
+          finished = true;
+          clearTimeout(timeout);
+          resolve(current);
+          return;
+        }
+        previous = current;
+        frameId = requestAnimationFrame(frame);
+      };
+      frameId = requestAnimationFrame(frame);
+    }));
+  })()`));
+  assert.ok(Array.isArray(result) && result.length > 0, `stable rendered boxes exist for ${selectors.join(', ')}`);
+  return result;
+}
+
+/** Click one visible target only after its box is stable, then verify Chrome hit-tests that target. */
+async function clickStableChrome(chrome, selector) {
+  await chrome.evaluate(`(() => {
+    const element = document.querySelector(${JSON.stringify(selector)});
+    if (!element) throw Error('missing ' + ${JSON.stringify(selector)});
+    element.scrollIntoView({ block: 'center', behavior: 'instant' });
+  })()`);
+  await waitForStableBoxes(chrome, [selector]);
+  const point = JSON.parse(await chrome.evaluate(`(() => {
+    const element = document.querySelector(${JSON.stringify(selector)}), rect = element.getBoundingClientRect();
+    const x = rect.x + rect.width / 2, y = rect.y + rect.height / 2, hit = document.elementFromPoint(x, y);
+    return JSON.stringify({ x, y, scrollX, scrollY, rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, hit: hit === element || element.contains(hit) });
+  })()`));
+  assert.equal(point.hit, true, `${selector} is still the visible pointer target after waiting`);
+  await chrome.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y });
+  await waitForStableBoxes(chrome, [selector]);
+  const underPointer = JSON.parse(await chrome.evaluate(`(() => {
+    const element = document.querySelector(${JSON.stringify(selector)}), rect = element.getBoundingClientRect(), x = ${point.x}, y = ${point.y}, hit = document.elementFromPoint(x, y);
+    return JSON.stringify({ x, y, scrollX, scrollY, rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, hit: hit === element || element.contains(hit) });
+  })()`));
+  assert.deepEqual(underPointer, point, `${selector}: scroll and target geometry remain unchanged under the pointer before press`);
+  await chrome.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 });
+  await chrome.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 });
+}
+
+/** Wait for the visible page, its controls, and conditional panels before layout measurements. */
+async function waitForStablePageLayout(chrome) {
+  return waitForStableBoxes(chrome, [
+    '[data-pane]:not([hidden])',
+    '[data-pane]:not([hidden]) *',
+    'button,a[href],input:not([type=hidden]),select,textarea,[role=button],[data-root],[data-tab],[data-go],[data-item],[data-state],[data-rows],[data-row],[data-release],[data-shout],[data-new],[data-code]',
+    '?#proj-list', '?#needs', '?#detail', '?#console', '?[data-scrollbar-proof]',
+  ]);
+}
+
+/** Measure a page expression only after its rendered targets have stable, non-zero boxes. */
+async function measureStableChrome(chrome, selectors, expression) {
+  await waitForStableBoxes(chrome, selectors);
+  return chrome.evaluate(expression);
+}
+
+/** Assert and diagnose an opt-in first-board-state delay used by bounded CPU-contention runs. */
+async function assertFirstStateDelay(chrome, t) {
+  const expected = Number(process.env.PULLBOARD_CHROME_FIRST_STATE_DELAY_MS ?? 0);
+  if (!Number.isSafeInteger(expected) || expected <= 0 || expected > 30_000) return;
+  await chrome.waitFor('window.__pullboardFirstStateDelay?.ended !== null && !!window.__pullboardFirstStateDelay');
+  const elapsed = await chrome.evaluate('window.__pullboardFirstStateDelay.ended - window.__pullboardFirstStateDelay.started');
+  t.diagnostic(`first board-state request delayed ${Math.round(elapsed)}ms (requested ${expected}ms)`);
+  assert.ok(elapsed >= expected, `first board-state request waits at least ${expected}ms: ${elapsed}`);
 }
 
 /** Stop only an owned Chrome process group, with bounded TERM and KILL waits. */
@@ -2474,7 +2594,7 @@ test('static export stays in its prefix and replays read-only in Chrome [A10,A3]
     assert.ok(shout.html.includes('&lt;script&gt;'), 'the snapshot escapes HTML in shout text');
     assert.equal(shout.scripts, 0, 'shout text never becomes an executable script element');
 
-    const firstPosition = JSON.parse(await evaluate(`(() => {
+    await evaluate(`(() => {
       window.__snapshotRealAdvance = advanceReplay;
       window.__snapshotFirstPosition = null;
       window.advanceReplay = () => {
@@ -2482,9 +2602,9 @@ test('static export stays in its prefix and replays read-only in Chrome [A10,A3]
         snapshotReplay.playing = false;
         replayControls();
       };
-      document.querySelector('#replay-play').click();
-      return JSON.stringify(window.__snapshotFirstPosition);
-    })()`));
+    })()`);
+    await clickStableChrome(chrome, '#replay-play');
+    const firstPosition = JSON.parse(await evaluate('JSON.stringify(window.__snapshotFirstPosition)'));
     assert.deepEqual(firstPosition, { index: 0, items: [] }, 'play starts from an empty board before its first event');
     await evaluate('window.advanceReplay = window.__snapshotRealAdvance');
 
@@ -2519,10 +2639,10 @@ test('static export stays in its prefix and replays read-only in Chrome [A10,A3]
         if (status) window.__replayObserved.push({ index, status });
       }).observe(progress, { childList: true, characterData: true, subtree: true });
     })()`);
-    await evaluate("document.querySelector('#replay-play').click()");
+    await clickStableChrome(chrome, '#replay-play');
     await chrome.waitFor('snapshotReplay.playing && snapshotReplay.index > 0 && snapshotReplay.index < snapshotReplay.events.length');
     const beforePause = await evaluate('snapshotReplay.index');
-    await evaluate("document.querySelector('#replay-pause').click()");
+    await clickStableChrome(chrome, '#replay-pause');
     await chrome.waitFor('!snapshotReplay.playing');
     const pausedIndex = await evaluate('snapshotReplay.index');
     assert.equal(pausedIndex, beforePause, 'pause keeps the current replay event');
@@ -2534,7 +2654,7 @@ test('static export stays in its prefix and replays read-only in Chrome [A10,A3]
     const speedStart = await evaluate('snapshotReplay.index');
     assert.ok(speedStart + 4 < initial.total, 'at least four events remain to measure 16x playback');
     const speedStartedAt = Date.now();
-    await evaluate("document.querySelector('#replay-play').click()");
+    await clickStableChrome(chrome, '#replay-play');
     await chrome.waitFor(`snapshotReplay.index >= ${speedStart + 4}`, 2_000);
     assert.ok(Date.now() - speedStartedAt < 2_000, '16x advances four replay events within two seconds');
     await chrome.waitFor('!snapshotReplay.playing', 20_000);
@@ -2552,6 +2672,7 @@ test('static export stays in its prefix and replays read-only in Chrome [A10,A3]
     for (const [width, theme] of [[1280, 'light'], [375, 'dark']]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 1000, deviceScaleFactor: 1, mobile: false });
       await evaluate(`document.documentElement.dataset.theme = '${theme}'`);
+      await waitForStablePageLayout(chrome);
       assert.ok(await evaluate('document.documentElement.scrollWidth <= document.documentElement.clientWidth'),
         'snapshot controls fit the viewport content area');
       if (process.env.PULLBOARD_SNAPSHOT_PROOF) {
@@ -2624,10 +2745,13 @@ test('served connection reaches an authenticated API on another origin and path 
     await chrome.send('Emulation.setDeviceMetricsOverride', { width: 375, height: 900, deviceScaleFactor: 1, mobile: false });
     await chrome.waitFor('typeof data === "object" && !!data?.project');
     assert.equal(await chrome.evaluate('data.project.items[0].title'), 'Remote original');
-    await chrome.evaluate(`document.querySelector('#new-item').click(); document.querySelector('#add-title').value = 'Remote added'; document.querySelector('#add-form').requestSubmit()`);
+    await clickStableChrome(chrome, '#new-item');
+    await chrome.evaluate("document.querySelector('#add-title').value = 'Remote added'; document.querySelector('#add-title').dispatchEvent(new Event('input',{bubbles:true}))");
+    await clickStableChrome(chrome, '#add-form button[type="submit"]');
     await chrome.waitFor('data.project.items.some(item => item.title === "Remote added")');
     assert.ok(seen.some((entry) => entry.method === 'POST' && entry.path.endsWith('/moves')), 'a real browser action reaches the configured API');
     assert.ok(seen.every((entry) => entry.authorization === `Bearer ${credential}` && entry.localKey === undefined && entry.path.startsWith('/mirror/api/v1/')), 'only the supplied credential and API base reach the stand-in');
+    await waitForStablePageLayout(chrome);
     assert.ok(await chrome.evaluate('document.documentElement.scrollWidth <= document.documentElement.clientWidth'),
       'the remote phone page fits the viewport content area');
     assert.deepEqual(chrome.exceptions, []);
@@ -2777,26 +2901,22 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
     });
     await chrome.send('Log.enable');
 
-    /** Wait for every matching element to render before using its geometry [N26]. */
-    const waitRendered = (selectors) => chrome.waitFor(`(() => {
-      const groups = ${JSON.stringify(selectors)}.map(selector => [...document.querySelectorAll(selector)]);
-      return groups.every(elements => elements.length > 0 && elements.every(element => {
-        const style = getComputedStyle(element), rect = element.getBoundingClientRect();
-        return !element.closest('[hidden]') && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-      }));
-    })()`);
-    /** Click the actual control through Chrome input coordinates. */
+    const motion = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+      document.documentElement.classList.add('switching');
+      const main = document.querySelector('main'), result = {
+        reduced: matchMedia('(prefers-reduced-motion: reduce)').matches,
+        scroll: getComputedStyle(document.documentElement).scrollBehavior,
+        transition: getComputedStyle(main).transitionProperty,
+        animation: getComputedStyle(main).animationName,
+      };
+      document.documentElement.classList.remove('switching');
+      return result;
+    })())`));
+    assert.deepEqual(motion, { reduced: true, scroll: 'auto', transition: 'none', animation: 'none' },
+      'real Chrome pages honor reduced motion with no smooth scrolling, transition or animation');
+
     const click = async (selector) => {
-      await waitRendered([selector]);
-      const point = JSON.parse(await chrome.evaluate(`(() => {
-        const e=document.querySelector(${JSON.stringify(selector)});
-        if(!e) throw Error('missing '+${JSON.stringify(selector)});
-        e.scrollIntoView({block:'center'});
-        const r=e.getBoundingClientRect(); return JSON.stringify({x:r.x+r.width/2,y:r.y+r.height/2});
-      })()`));
-      await chrome.send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point });
-      await chrome.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 });
-      await chrome.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount: 1 });
+      await clickStableChrome(chrome, selector);
     };
     /** Fill a form field and deliver its input and change events. */
     const fill = (selector, value) => chrome.evaluate(`(() => {
@@ -2809,11 +2929,11 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
     const setViewport = async (width) => {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
       await chrome.waitFor(`innerWidth === ${width} && document.readyState === 'complete'`);
-      await waitRendered(['[data-pane]:not([hidden])']);
+      await waitForStableBoxes(chrome, ['[data-pane]:not([hidden])']);
     };
     /** Read actual visible target sizes and document geometry. */
     const snapshot = async () => {
-      await waitRendered(['[data-pane]:not([hidden])']);
+      await waitForStablePageLayout(chrome);
       return JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
       const visible=e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return !e.disabled&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)!==0&&r.width>0&&r.height>0&&!e.closest('[hidden]')};
       const selector='button,a[href],input:not([type=hidden]),select,textarea,[role=button],[data-root],[data-tab],[data-go],[data-item],[data-state],[data-rows],[data-row],[data-release],[data-shout],[data-new],[data-code]';
@@ -2842,6 +2962,18 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
 
     await chrome.send('Emulation.setDeviceMetricsOverride', { width: 375, height: 900, deviceScaleFactor: 1, mobile: false });
     await chrome.waitFor("document.readyState === 'complete' && !!document.querySelector('#chain .row')");
+    await assertFirstStateDelay(chrome, t);
+    const movingProbe = `box-${randomUUID()}`;
+    await chrome.evaluate(`(() => {
+      const probe=document.createElement('div'); probe.dataset.frameProbe=${JSON.stringify(movingProbe)};
+      probe.style.cssText='position:fixed;left:0;top:0;width:1px;height:8px;background:transparent'; document.body.append(probe);
+      let frame=0; const advance=()=>{ frame++; probe.dataset.frames=String(frame); probe.style.width=(frame+1)+'px'; if(frame<40)requestAnimationFrame(advance); };
+      requestAnimationFrame(advance);
+    })()`);
+    await waitForStableBoxes(chrome, [`[data-frame-probe="${movingProbe}"]`]);
+    const sampledFrames = Number(await chrome.evaluate(`document.querySelector('[data-frame-probe="${movingProbe}"]').dataset.frames`));
+    assert.equal(sampledFrames, 40, 'the shared real-Chrome wait does not measure a moving target before its box stops changing');
+    await chrome.evaluate(`document.querySelector('[data-frame-probe="${movingProbe}"]').remove()`);
     for (const width of [375, 1280]) {
       if (width === 1280) {
         box.run(demo.repo, 'shout', 'person', 'Should the desktop demo ship?', '--decision');
@@ -2868,21 +3000,26 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
         await click(`[data-tab="${tab}"]`);
         await checkLayout(width, `${tab} tab`);
         if (tab === 'spec') {
-          await waitRendered(['#spec-chips button']);
-          const chips = JSON.parse(await chrome.evaluate(`JSON.stringify([...document.querySelectorAll('#spec-chips button')].map(button => {
+          await chrome.evaluate(`(() => [...document.querySelectorAll('#spec-chips button')].forEach((button,index) => {
             const clone=button.cloneNode(true); clone.style.cssText += ';position:fixed;visibility:hidden;width:max-content;flex:none'; button.parentElement.append(clone);
-            const naturalWidth=clone.getBoundingClientRect().width, actualWidth=button.getBoundingClientRect().width; clone.remove();
+            clone.dataset.naturalWidthProbe=String(index); clone.style.visibility='visible'; clone.style.opacity='0'; clone.style.pointerEvents='none';
+          }))()`);
+          await waitForStableBoxes(chrome, ['#spec-chips button', '#spec-chips [data-natural-width-probe]']);
+          const chips = JSON.parse(await chrome.evaluate(`JSON.stringify([...document.querySelectorAll('#spec-chips button:not([data-natural-width-probe])')].map((button,index) => {
+            const clone=button.parentElement.querySelector('[data-natural-width-probe="'+index+'"]');
+            const naturalWidth=clone.getBoundingClientRect().width, actualWidth=button.getBoundingClientRect().width;
             return {text:button.textContent.trim(),actualWidth,naturalWidth};
           }))`));
+          await chrome.evaluate(`document.querySelectorAll('#spec-chips [data-natural-width-probe]').forEach(probe=>probe.remove())`);
           assert.ok(chips.length >= 2, `${width}: spec filters render as chips`);
           for (const chip of chips) assert.ok(Math.abs(chip.actualWidth - chip.naturalWidth) < 2, `${width}: ${chip.text} keeps its natural width: ${JSON.stringify(chip)}`);
         }
         if (tab === 'activity') {
           await chrome.waitFor(`(() => {
             const element = [...document.querySelectorAll('#activity .what')].find(node => node.textContent === ${JSON.stringify(wrapTitle)});
-            return element?.getBoundingClientRect().width > 0 && element.firstChild?.nodeType === Node.TEXT_NODE;
+            return !!element && element.firstChild?.nodeType === Node.TEXT_NODE;
           })()`);
-          const wrap = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+          const wrap = JSON.parse(await measureStableChrome(chrome, ['#activity .what'], `JSON.stringify((() => {
             const element=[...document.querySelectorAll('#activity .what')].find(node=>node.textContent===${JSON.stringify(wrapTitle)});
             if(!element) return null;
             const text=element.firstChild, ranges=(word)=>{const start=text.textContent.indexOf(word),range=document.createRange();range.setStart(text,start);range.setEnd(text,start+word.length);return [...range.getClientRects()].map(rect=>({x:rect.x,y:rect.y,width:rect.width}));};
@@ -2894,11 +3031,14 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
           assert.ok(wrap.tokenLines > 1, `${width}: only the overflowing unbroken token splits: ${JSON.stringify(wrap)}`);
         }
         if (tab === 'shouts') {
-          await waitRendered([
+          await waitForStableBoxes(chrome, [
             '#decisions .ask.other', '#decisions .ask.other p:first-child', '#decisions .ask.other p:nth-child(2)',
             '#decisions .ask:not(.other) p:first-child', '#decisions .ask:not(.other) button',
           ]);
-          const asks = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+          const asks = JSON.parse(await measureStableChrome(chrome, [
+            '#decisions .ask.other', '#decisions .ask.other p:first-child', '#decisions .ask.other p:nth-child(2)',
+            '#decisions .ask:not(.other)', '#decisions .ask:not(.other) p:first-child', '#decisions .ask:not(.other) button',
+          ], `JSON.stringify((() => {
             const waiting = document.querySelector('#decisions .ask.other');
             const waitingMeta = waiting?.querySelector('p:first-child');
             const waitingText = waiting?.querySelector('p:nth-child(2)');
@@ -2943,9 +3083,11 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
       await submit('#shout-form');
       await chrome.waitFor(`document.querySelector('#feed').innerText.includes('Phone shout ${width}')`);
 
-      await chrome.waitFor("!!document.querySelector('#decisions [data-go]')");
-      const decision = await chrome.evaluate("document.querySelector('#decisions [data-go]')?.getAttribute('data-go')");
-      assert.ok(decision, `${width}: a decision is offered for answer`);
+      const answerAsk = JSON.parse(box.run(demo.repo, 'shout', 'person', `Answer this phone demo question ${width}?`, '--decision', '--json')).id;
+      const decision = `decide:${answerAsk}`;
+      await chrome.waitFor(`!!document.querySelector('#decisions [data-go=${JSON.stringify(decision)}]')`);
+      assert.ok(await chrome.evaluate(`!!document.querySelector('#decisions [data-go=${JSON.stringify(decision)}]')`),
+        `${width}: the exact synthetic person question is available to answer`);
       await click(`#decisions [data-go="${decision}"]`);
       await checkLayout(width, 'answer form');
       await fill('#shout-text', `Phone answer ${width}`);
@@ -3097,7 +3239,9 @@ test('real Chrome styles shout code and item text without growing linked lines [
     });
     await chrome.send('Log.enable');
     await chrome.waitFor('typeof data !== "undefined" && data?.project?.shouts?.length >= 4 && document.querySelectorAll("#feed > div:not(.day)").length >= 4');
-    await chrome.evaluate(`document.querySelector('[data-tab="shouts"]').click()`);
+    await assertFirstStateDelay(chrome, t);
+    await clickStableChrome(chrome, '[data-tab="shouts"]');
+    await waitForStableBoxes(chrome, ['#feed > div:not(.day)', '#feed > div:not(.day) > :nth-child(2)']);
 
     const rendered = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
       const shout = [...document.querySelectorAll('#feed > div:not(.day)')].find((row) => row.textContent.includes('Inline'));
@@ -3142,7 +3286,7 @@ test('real Chrome styles shout code and item text without growing linked lines [
     assert.match(rendered.outsideHtml, /&lt;script&gt;alert\(2\)&lt;\/script&gt; outside code/, 'script text outside code is escaped too');
     assert.equal(rendered.previewLinks, 1, 'only a path:lines@SHA reference with the original whole-word boundaries becomes an actionable preview');
     assert.match(rendered.shoutHtml, /Invalid prefix:<code class="inline">SPEC\.md:1-2@/, 'a path:lines@SHA suffix after a colon stays plain inline code');
-    await chrome.evaluate(`document.querySelector('#feed button[data-code^="SPEC.md:1-2@"]').click()`);
+    await clickStableChrome(chrome, '#feed button[data-code^="SPEC.md:1-2@"]');
     await chrome.waitFor(`document.querySelector('#feed button[data-code^="SPEC.md:1-2@"]').getAttribute('aria-expanded') === 'true'`);
     await chrome.waitFor(`document.querySelector('#feed button[data-code^="SPEC.md:1-2@"] + .code')?.textContent.includes('Demo spec')`);
     assert.match(await chrome.evaluate(`document.querySelector('#feed button[data-code^="SPEC.md:1-2@"] + .code')?.textContent || ''`), /Demo spec/, 'the original code preview still opens its referenced lines');
@@ -3160,8 +3304,9 @@ test('real Chrome styles shout code and item text without growing linked lines [
     assert.ok(Math.abs(rendered.linkedMetrics.height - rendered.plainMetrics.height) < 1, 'the complete one-line desktop boxes match within 1px');
     assert.ok(Math.abs(rendered.linkedMetrics.height - rendered.linkedMetrics.lineHeight) < 1, 'the linked desktop box equals one computed line-height');
     await chrome.send('Emulation.setDeviceMetricsOverride', { width: 375, height: 900, deviceScaleFactor: 1, mobile: false });
-    await chrome.waitFor('innerWidth === 375 && document.querySelector("#feed > div:not(.day)")?.getBoundingClientRect().width > 0');
-    const phoneMetrics = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+    await chrome.waitFor('innerWidth === 375');
+    await waitForStableBoxes(chrome, ['#feed > div:not(.day)', '#feed > div:not(.day) > :nth-child(2)']);
+    const phoneMetrics = JSON.parse(await measureStableChrome(chrome, ['#feed > div:not(.day)', '#feed > div:not(.day) > :nth-child(2)'], `JSON.stringify((() => {
       /** Measure the complete rendered content line box, including its item link. */
       const lineMetrics = (message) => {
         const row = [...document.querySelectorAll('#feed > div:not(.day)')].find((entry) => {
@@ -3206,76 +3351,18 @@ test('wait references stay on one line and link to every prerequisite at phone a
   let chrome;
   try {
     chrome = await openSnapshotChrome(executable, view.link.href, join(box.dir, 'waits-chrome'));
-    /** Pick a visible click target only after scrolling and its hit-test position have settled. */
-    const click = async (selector) => {
-      const point = JSON.parse(await chrome.evaluate(`(async () => {
-        const element=document.querySelector(${JSON.stringify(selector)});
-        if (!element) throw Error('missing '+${JSON.stringify(selector)});
-        const visible=()=>{const style=getComputedStyle(element),rect=element.getBoundingClientRect();return style.display!=='none'&&style.visibility!=='hidden'&&rect.width>0&&rect.height>0&&!element.closest('[hidden]');};
-        if(!visible())throw Error('target is not visible: '+${JSON.stringify(selector)});
-        element.scrollIntoView({block:'center'});
-        const point=()=>{const currentElement=document.querySelector(${JSON.stringify(selector)});if(!currentElement)return null;const style=getComputedStyle(currentElement),rect=currentElement.getBoundingClientRect();if(style.display==='none'||style.visibility==='hidden'||rect.width<=0||rect.height<=0||currentElement.closest('[hidden]'))return null;const x=rect.x+rect.width/2,y=rect.y+rect.height/2,hit=document.elementFromPoint(x,y);return {x,y,scrollX,scrollY,rect:{x:rect.x,y:rect.y,width:rect.width,height:rect.height},hit:!!hit&&(hit===currentElement||currentElement.contains(hit))};};
-        const targets=[window,document,...(()=>{const nodes=[];for(let node=element.parentElement;node;node=node.parentElement)if(node.scrollHeight>node.clientHeight||node.scrollWidth>node.clientWidth)nodes.push(node);return nodes;})()];
-        let scrolled=false,scrollEnded=false;
-        const onScroll=()=>{scrolled=true;};
-        const onScrollEnd=()=>{scrollEnded=true;};
-        targets.forEach(target=>{target.addEventListener('scroll',onScroll,{passive:true});target.addEventListener('scrollend',onScrollEnd);});
-        try {
-          return JSON.stringify(await new Promise((resolve,reject)=>{
-            let previous=null,stable=0,frameId=0,finished=false;
-            const timeout=setTimeout(()=>{finished=true;cancelAnimationFrame(frameId);reject(Error('scroll did not settle for '+${JSON.stringify(selector)}+': '+JSON.stringify(previous)));},5000);
-            const frame=()=>{
-              if(finished)return;
-              const current=point();
-              if(!current){previous=null;stable=0;frameId=requestAnimationFrame(frame);return;}
-              const same=previous&&Math.abs(current.scrollX-previous.scrollX)<=.1&&Math.abs(current.scrollY-previous.scrollY)<=.1&&Math.abs(current.rect.x-previous.rect.x)<=.1&&Math.abs(current.rect.y-previous.rect.y)<=.1&&Math.abs(current.rect.width-previous.rect.width)<=.1&&Math.abs(current.rect.height-previous.rect.height)<=.1;
-              stable=same?stable+1:0;previous=current;
-              if(stable>=3&&current.hit&&(!scrolled||scrollEnded||stable>=12)){finished=true;clearTimeout(timeout);resolve(current);return;}
-              frameId=requestAnimationFrame(frame);
-            };
-            frameId=requestAnimationFrame(frame);
-          }));
-        } finally { targets.forEach(target=>{target.removeEventListener('scroll',onScroll);target.removeEventListener('scrollend',onScrollEnd);}); }
-      })()`));
-      const deadline = Date.now() + 5000;
-      let ready;
-      let settled = false;
-      while (Date.now() < deadline) {
-        ready = JSON.parse(await chrome.evaluate(`(async()=>{
-          const sample=()=>{const element=document.querySelector(${JSON.stringify(selector)});if(!element)return null;const style=getComputedStyle(element),rect=element.getBoundingClientRect();if(style.display==='none'||style.visibility==='hidden'||rect.width<=0||rect.height<=0||element.closest('[hidden]'))return null;const x=rect.x+rect.width/2,y=rect.y+rect.height/2,hit=document.elementFromPoint(x,y);return {x,y,scrollX,scrollY,rect:{x:rect.x,y:rect.y,width:rect.width,height:rect.height},hit:!!hit&&(hit===element||element.contains(hit))};};
-          let previous=null,stable=0,current=null,frameId=0,finished=false;
-          await new Promise((resolve,reject)=>{const timeout=setTimeout(()=>{finished=true;cancelAnimationFrame(frameId);reject(Error('pointer target did not stabilize for '+${JSON.stringify(selector)}));},1500);const frame=()=>{if(finished)return;current=sample();const same=current&&previous&&Math.abs(current.scrollX-previous.scrollX)<=.1&&Math.abs(current.scrollY-previous.scrollY)<=.1&&Math.abs(current.rect.x-previous.rect.x)<=.1&&Math.abs(current.rect.y-previous.rect.y)<=.1&&Math.abs(current.rect.width-previous.rect.width)<=.1&&Math.abs(current.rect.height-previous.rect.height)<=.1;stable=same?stable+1:0;previous=current;if(stable>=2&&current.hit){finished=true;clearTimeout(timeout);resolve();}else frameId=requestAnimationFrame(frame);};frameId=requestAnimationFrame(frame);});
-          return JSON.stringify(current);
-        })()`));
-        await chrome.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: ready.x, y: ready.y });
-        const underPointer = JSON.parse(await chrome.evaluate(`(async()=>{
-          const sample=()=>{const element=document.querySelector(${JSON.stringify(selector)});if(!element)return null;const rect=element.getBoundingClientRect(),hit=document.elementFromPoint(${ready.x},${ready.y});return {scrollX,scrollY,rect:{x:rect.x,y:rect.y,width:rect.width,height:rect.height},hit:!!hit&&(hit===element||element.contains(hit))};};
-          let previous=null,stable=0,current=null,frameId=0,finished=false;
-          await new Promise((resolve,reject)=>{const timeout=setTimeout(()=>{finished=true;cancelAnimationFrame(frameId);reject(Error('pointer target did not stabilize for '+${JSON.stringify(selector)}));},1000);const frame=()=>{if(finished)return;current=sample();const same=current&&previous&&Math.abs(current.scrollX-previous.scrollX)<=.1&&Math.abs(current.scrollY-previous.scrollY)<=.1&&Math.abs(current.rect.x-previous.rect.x)<=.1&&Math.abs(current.rect.y-previous.rect.y)<=.1&&Math.abs(current.rect.width-previous.rect.width)<=.1&&Math.abs(current.rect.height-previous.rect.height)<=.1;stable=same?stable+1:0;previous=current;if(stable>=2&&current.hit){finished=true;clearTimeout(timeout);resolve();}else frameId=requestAnimationFrame(frame);};frameId=requestAnimationFrame(frame);});return JSON.stringify({current,stable});
-        })()`));
-        if (underPointer?.current?.hit && underPointer.stable >= 2 && Math.abs(underPointer.current.scrollX-ready.scrollX)<=.1 && Math.abs(underPointer.current.scrollY-ready.scrollY)<=.1 && Math.abs(underPointer.current.rect.x-ready.rect.x)<=.1 && Math.abs(underPointer.current.rect.y-ready.rect.y)<=.1 && Math.abs(underPointer.current.rect.width-ready.rect.width)<=.1 && Math.abs(underPointer.current.rect.height-ready.rect.height)<=.1) {
-          point.x = ready.x;
-          point.y = ready.y;
-          point.scrollX = ready.scrollX;
-          point.scrollY = ready.scrollY;
-          point.rect = ready.rect;
-          settled = true;
-          break;
-        }
-      }
-      assert.ok(settled && ready && point.x === ready.x && point.y === ready.y,
-        `${selector}: scroll and target geometry settle under the pointer before press: ${JSON.stringify({ point, ready })}`);
-      await chrome.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 });
-      await chrome.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 });
-    };
+    /** Use the shared stable-box wait before every Chrome click [N26]. */
+    const click = (selector) => clickStableChrome(chrome, selector);
     for (const width of [375, 1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
-      await chrome.waitFor(`innerWidth === ${width} && document.querySelector('#chain [data-item="3"] .meta .gate')?.getBoundingClientRect().width > 0`);
+      await chrome.waitFor(`innerWidth === ${width}`);
+      await waitForStableBoxes(chrome, ['#chain [data-item="3"] .meta .gate']);
+      if (width === 375) await assertFirstStateDelay(chrome, t);
       await click('#chain [data-item="1"] .t');
       await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('Prerequisite one')");
       const itemIds = await chrome.evaluate('data.project.items.map(item => item.id + ":" + item.title + ":" + item.blockedBy.join(","))');
       assert.ok(await chrome.evaluate('!!document.querySelector(\'#chain [data-item="3"]\')'), `${width}: blocked item appears among ${itemIds.join('; ')}`);
-      const list = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+      const list = JSON.parse(await measureStableChrome(chrome, ['#chain [data-item="3"] .meta > *', '#chain [data-item="3"] .meta .wait-unit', '#chain [data-item="3"] .meta .wait-unit button.ref'], `JSON.stringify((() => {
         const gate=document.querySelector('#chain [data-item="3"] .meta .gate');
         const lineHeight=e=>parseFloat(getComputedStyle(e).lineHeight);
         const neighbors=[...gate.parentElement.children].filter(e=>e!==gate).map(lineHeight).filter(Number.isFinite);
@@ -3290,7 +3377,7 @@ test('wait references stay on one line and link to every prerequisite at phone a
 
       await click('#chain [data-item="3"] .t');
       await chrome.waitFor("!!document.querySelector('#detail .kv dd.waits-on')");
-      const detail = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+      const detail = JSON.parse(await measureStableChrome(chrome, ['#detail .kv > dd', '#detail .kv dd.waits-on .wait-unit', '#detail .kv dd.waits-on button.ref'], `JSON.stringify((() => {
         const waits=document.querySelector('#detail .kv dd.waits-on');
         const units=[...waits.querySelectorAll('.wait-unit')];
         return {height:waits.getBoundingClientRect().height,lineHeight:parseFloat(getComputedStyle(waits).lineHeight),unitWhiteSpaces:units.map(unit=>getComputedStyle(unit).whiteSpace),unitY:units.map(unit=>unit.getBoundingClientRect().y),
@@ -3318,16 +3405,19 @@ test('wait references stay on one line and link to every prerequisite at phone a
 
 /** Click what a page expression finds, through Chrome's own mouse input, as a person would. */
 async function press(chrome, find) {
-  const point = JSON.parse(await chrome.evaluate(`(() => {
+  const id = randomUUID();
+  const selector = `[data-stability-target="${id}"]`;
+  await chrome.evaluate(`(() => {
     const element = ${find};
     if (!element) throw new Error(${JSON.stringify(`nothing to press: ${find}`)});
-    element.scrollIntoView({ block: 'center' });
-    const rect = element.getBoundingClientRect();
-    return JSON.stringify({ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 });
-  })()`));
-  await chrome.send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point });
-  await chrome.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 });
-  await chrome.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount: 1 });
+    element.dataset.stabilityTarget = ${JSON.stringify(id)};
+    element.scrollIntoView({ block: 'center', behavior: 'instant' });
+  })()`);
+  try {
+    await clickStableChrome(chrome, selector);
+  } finally {
+    await chrome.evaluate(`document.querySelector(${JSON.stringify(selector)})?.removeAttribute('data-stability-target')`);
+  }
 }
 
 /** Go back (-1) or forward (1) one entry in the tab's history, as the browser's own buttons do. */
@@ -3363,6 +3453,12 @@ function showing(pane, address) {
  * and how many lines the title takes and whether it is cut with an ellipsis.
  */
 async function readRoadmap(chrome) {
+  await waitForStableBoxes(chrome, [
+    '#roadmap .milestone', '#roadmap .milestone-count', '#roadmap .milestone-progress',
+    '#roadmap .milestone h2', '#roadmap .milestone-empty', '#roadmap .milestone-note',
+    '#roadmap .milestone-progress rect', '#roadmap .milestone-item', '#roadmap .milestone-item .chip',
+    '#roadmap .milestone-item .dot', '#roadmap .milestone-item .t',
+  ]);
   return JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
     const paint = (element) => getComputedStyle(element).color + ' on ' + getComputedStyle(element).backgroundColor;
     return {
@@ -3401,20 +3497,34 @@ async function readRoadmap(chrome) {
  * and the bar's edges. The tab picked now is picked again afterwards.
  */
 async function tabBar(chrome) {
-  return JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
-    const bar = document.querySelector('#tabs'), tabs = [...bar.querySelectorAll('.tab')], picked = tabs.find((tab) => tab.classList.contains('on'));
-    const layouts = tabs.map((on) => {
-      tabs.forEach((tab) => tab.classList.toggle('on', tab === on));
-      return { on: on.dataset.tab, bar: [bar.getBoundingClientRect().left, bar.getBoundingClientRect().right], tabs: tabs.map((tab) => {
-        const range = document.createRange();
-        range.selectNodeContents(tab.firstChild);
-        const box = tab.getBoundingClientRect(), label = range.getBoundingClientRect();
-        return { tab: tab.dataset.tab, left: box.left, right: box.right, labelLeft: label.left, labelRight: label.right };
-      }) };
-    });
-    tabs.forEach((tab) => tab.classList.toggle('on', tab === picked));
-    return { client: document.documentElement.clientWidth, layouts };
-  })())`));
+  const tabs = JSON.parse(await chrome.evaluate(`JSON.stringify({
+    picked: document.querySelector('#tabs .tab.on')?.dataset.tab,
+    names: [...document.querySelectorAll('#tabs .tab')].map((tab) => tab.dataset.tab),
+  })`));
+  const layouts = [];
+  await waitForStableBoxes(chrome, ['#tabs', '#tabs .tab', '#tabs .tab > *']);
+  const client = await chrome.evaluate('document.documentElement.clientWidth');
+  try {
+    for (const name of tabs.names) {
+      await chrome.evaluate(`(() => document.querySelectorAll('#tabs .tab').forEach(tab => tab.classList.toggle('on',tab.dataset.tab===${JSON.stringify(name)})))()`);
+      await waitForStableBoxes(chrome, ['#tabs', '#tabs .tab', '#tabs .tab > *']);
+      layouts.push(JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+        const bar = document.querySelector('#tabs'), tabs = [...bar.querySelectorAll('.tab')];
+        return { on: tabs.find((tab) => tab.classList.contains('on')).dataset.tab,
+          bar: [bar.getBoundingClientRect().left, bar.getBoundingClientRect().right],
+          tabs: tabs.map((tab) => {
+            const range = document.createRange();
+            range.selectNodeContents(tab.firstChild);
+            const box = tab.getBoundingClientRect(), label = range.getBoundingClientRect();
+            return { tab: tab.dataset.tab, left: box.left, right: box.right, labelLeft: label.left, labelRight: label.right };
+          }) };
+      })())`)));
+    }
+  } finally {
+    await chrome.evaluate(`(() => document.querySelectorAll('#tabs .tab').forEach(tab => tab.classList.toggle('on',tab.dataset.tab===${JSON.stringify(tabs.picked)})))()`);
+    await waitForStableBoxes(chrome, ['#tabs', '#tabs .tab', '#tabs .tab > *']);
+  }
+  return { client, layouts };
 }
 
 /** Serve a folder under a path prefix, as a static host does, recording each request and its status. */
@@ -3441,9 +3551,10 @@ async function proofShot(chrome, name, width) {
   mkdirSync(process.env.PULLBOARD_ROADMAP_PROOF, { recursive: true });
   for (const theme of ['light', 'dark']) {
     await chrome.evaluate(`document.documentElement.dataset.theme = '${theme}'`);
+    await waitForStablePageLayout(chrome);
     const height = await chrome.evaluate('Math.ceil(document.documentElement.scrollHeight)');
     await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: Math.max(900, height), deviceScaleFactor: 2, mobile: false });
-    await browserPause(150);
+    await waitForStablePageLayout(chrome);
     const shot = await chrome.send('Page.captureScreenshot', { format: 'png' });
     writeFileSync(join(process.env.PULLBOARD_ROADMAP_PROOF, `${name}-${width}-${theme}.png`), Buffer.from(shot.data, 'base64'));
   }
@@ -3511,6 +3622,20 @@ test('the roadmap reads every item as the Items tab does, opens each one, anothe
     for (const width of [375, 1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
       await chrome.waitFor(`innerWidth === ${width} && ${showing('roadmap', '/roadmap')}`);
+      if (width === 375) {
+        await chrome.evaluate(`(() => {
+          const rect=document.querySelector('#roadmap .milestone-progress rect');
+          if(!rect) throw Error('missing roadmap progress rect');
+          rect.dataset.roadmapWaitProbe='0'; rect.setAttribute('width','0');
+          let frame=0;
+          const advance=()=>{ frame++; rect.dataset.roadmapWaitProbe=String(frame); rect.setAttribute('width',String(frame)); if(frame<40)requestAnimationFrame(advance); };
+          requestAnimationFrame(advance);
+        })()`);
+        const probed=await readRoadmap(chrome);
+        const frames=Number(await chrome.evaluate("document.querySelector('#roadmap .milestone-progress rect')?.dataset.roadmapWaitProbe"));
+        assert.equal(frames,40,'readRoadmap waits for the actual SVG progress rectangle to stop changing');
+        assert.equal(probed.cards[0].filled,0.4,'readRoadmap measures the final rendered SVG width after the moving target settles');
+      }
       seen = await readRoadmap(chrome);
       assert.deepEqual([seen.address, seen.shown, seen.tab], [roadmap, ['roadmap'], 'roadmap'], `${width}: the direct address shows the Roadmap tab, and only it`);
       assert.ok(seen.document <= seen.client && seen.body <= seen.client, `${width}: no sideways scroll: ${JSON.stringify(seen)}`);
