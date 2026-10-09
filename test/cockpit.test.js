@@ -2399,15 +2399,19 @@ async function clickStableChrome(chrome, selector) {
   await waitForStableBoxes(chrome, [selector]);
   const point = JSON.parse(await chrome.evaluate(`(() => {
     const element = document.querySelector(${JSON.stringify(selector)}), rect = element.getBoundingClientRect();
-    const x = rect.x + rect.width / 2, y = rect.y + rect.height / 2, hit = document.elementFromPoint(x, y);
-    return JSON.stringify({ x, y, scrollX, scrollY, rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, hit: hit === element || element.contains(hit) });
+    const candidates = [[.5,.5],[.1,.5],[.9,.5],[.5,.1],[.5,.9],[.1,.1],[.9,.1],[.1,.9],[.9,.9]].map(([dx,dy]) => ({ x: rect.x + rect.width * dx, y: rect.y + rect.height * dy }));
+    const hitAt = ({x,y}) => { const hit = document.elementFromPoint(x,y); return hit === element || element.contains(hit); };
+    const selected = candidates.find(hitAt) ?? candidates[0], hit = document.elementFromPoint(selected.x, selected.y);
+    return JSON.stringify({ x:selected.x, y:selected.y, scrollX, scrollY, rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, hit: hitAt(selected), hitNode: hit && { tag: hit.tagName, id: hit.id, className: String(hit.className ?? '') }, hitPoints:candidates.map(point => ({...point, hit:hitAt(point)})) });
   })()`));
-  assert.equal(point.hit, true, `${selector} is still the visible pointer target after waiting`);
+  assert.equal(point.hit, true, `${selector} is still the visible pointer target after waiting: ${JSON.stringify(point)}`);
   await chrome.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y });
   await waitForStableBoxes(chrome, [selector]);
   const underPointer = JSON.parse(await chrome.evaluate(`(() => {
     const element = document.querySelector(${JSON.stringify(selector)}), rect = element.getBoundingClientRect(), x = ${point.x}, y = ${point.y}, hit = document.elementFromPoint(x, y);
-    return JSON.stringify({ x, y, scrollX, scrollY, rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, hit: hit === element || element.contains(hit) });
+    const candidates = [[.5,.5],[.1,.5],[.9,.5],[.5,.1],[.5,.9],[.1,.1],[.9,.1],[.1,.9],[.9,.9]].map(([dx,dy]) => ({x:rect.x + rect.width * dx,y:rect.y + rect.height * dy}));
+    const hitAt = point => { const candidate = document.elementFromPoint(point.x, point.y); return candidate === element || element.contains(candidate); };
+    return JSON.stringify({ x, y, scrollX, scrollY, rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, hit: hitAt({x,y}), hitNode: hit && { tag: hit.tagName, id: hit.id, className: String(hit.className ?? '') }, hitPoints:candidates.map(point => ({...point,hit:hitAt(point)})) });
   })()`));
   assert.deepEqual(underPointer, point, `${selector}: scroll and target geometry remain unchanged under the pointer before press`);
   await chrome.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 });
@@ -3565,12 +3569,13 @@ test('in-text item references stay inline and open their target at phone and des
   try {
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
     await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+    const click = (selector) => clickStableChrome(chrome, selector);
     await chrome.waitFor('document.querySelectorAll("#chain .row").length >= 2 && document.querySelector("#needs .ny")');
 
     for (const width of [375, 1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
       // The row inlineReference stays on its title line beside the text.
-      const rendered = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+      const rendered = JSON.parse(await measureStableChrome(chrome, ['?#feed > div:not(.day)', '?#feed > div:not(.day) > :nth-child(2)', '#chain .row .t', '?#detail'], `JSON.stringify((() => {
         const row = document.querySelector('#chain .row[data-item="2"]');
         const plain = document.querySelector('#chain .row[data-item="1"]');
         const titleRef = row?.querySelector('.t button.ref');
@@ -3603,11 +3608,11 @@ test('in-text item references stay inline and open their target at phone and des
 
       for (const section of ['agents', 'spec', 'doctrine']) {
         if (section === 'agents') {
-          await chrome.evaluate(`document.querySelector('[data-tab="shouts"]').click()`);
+          await click('[data-tab="shouts"]');
           await chrome.waitFor('document.querySelector("#agents [data-item=\\"2\\"]")');
         } else {
-          await chrome.evaluate(`document.querySelector('[data-tab="${section}"]').click()`);
-          await chrome.evaluate(`document.querySelector('[data-rows="${section}:all"]').click()`);
+          await click(`[data-tab="${section}"]`);
+          await click(`[data-rows="${section}:all"]`);
           const citedRow = section === 'doctrine' ? 'R1' : 'G1';
           if (section === 'doctrine') {
             // Item citations normally point to SPEC ids; add the distinct practice id to the
@@ -3615,11 +3620,11 @@ test('in-text item references stay inline and open their target at phone and des
             await chrome.evaluate("data.project.items.find(item => item.id === 2).specs.push('R1'); render();");
           }
           await chrome.waitFor(`document.querySelector('#${section}-list [data-row="${section}:${citedRow}"]')`);
-          await chrome.evaluate(`document.querySelector('#${section}-list [data-row="${section}:${citedRow}"]').click()`);
+          await click(`#${section}-list [data-row="${section}:${citedRow}"]`);
           await chrome.waitFor(`document.querySelector('#${section}-detail [data-item="2"]')`);
         }
         const selector = section === 'agents' ? '#agents [data-item="2"] .ref' : `#${section}-detail .links [data-item="2"] .ref`;
-        const metrics = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+        const metrics = JSON.parse(await measureStableChrome(chrome, [selector, `${section === 'agents' ? '#agents' : `#${section}-detail`} [data-item="2"]`], `JSON.stringify((() => {
           const ref = document.querySelector(${JSON.stringify(selector)});
           const container = ref?.closest('[data-item="2"]');
           const r = ref?.getBoundingClientRect();
@@ -3633,29 +3638,46 @@ test('in-text item references stay inline and open their target at phone and des
         assert.ok(Math.abs(metrics.refHeight - metrics.lineHeight) < 1, `${width}: ${section} reference keeps the text line height: ${JSON.stringify(metrics)}`);
         assert.ok(metrics.containerHeight >= 44, `${width}: ${section} containing item keeps a 44px target`);
         assert.equal(metrics.nestedButtons, 0, `${width}: ${section} title has no nested controls`);
-        await chrome.evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
+        await click(selector);
         await chrome.waitFor("document.querySelector('[data-tab=items].on') && document.querySelector('#detail h2')?.textContent.includes('Target item')");
-        await chrome.evaluate(`document.querySelector(${JSON.stringify(selector)}).closest('[data-item="2"]').click()`);
+        await click('#chain .row[data-item="2"]');
         await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('Title links to #1')");
       }
 
-      await chrome.evaluate(`document.querySelector('#chain .row[data-item="2"] .t button.ref').click()`);
+      const movingRef = '#chain .row[data-item="2"] .t button.ref';
+      await chrome.evaluate(`(() => {
+        window.__referenceMoveProbe = { frame: 0, pressedAt: null };
+        document.addEventListener('click', event => {
+          if (event.target.closest(${JSON.stringify(movingRef)})) window.__referenceMoveProbe.pressedAt = window.__referenceMoveProbe.frame;
+        }, { once: true, capture: true });
+        const advance = () => {
+          const probe = window.__referenceMoveProbe;
+          probe.frame += 1;
+          const target = document.querySelector(${JSON.stringify(movingRef)});
+          if (target) target.style.transform = probe.frame < 120 ? 'translateX(' + probe.frame + 'px)' : '';
+          if (probe.frame < 120) requestAnimationFrame(advance);
+        };
+        requestAnimationFrame(advance);
+      })()`);
+      await click(movingRef);
+      const referenceProbe = JSON.parse(await chrome.evaluate('JSON.stringify(window.__referenceMoveProbe)'));
+      assert.deepEqual(referenceProbe, { frame: 120, pressedAt: 120 }, 'the reference finishes moving before the shared helper dispatches its real click');
       await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('Target item')");
-      await chrome.evaluate(`document.querySelector('#needs .ny button.ref').click()`);
+      await click('#needs .ny button.ref');
       await chrome.waitFor("document.querySelector('[data-tab=items].on') && document.querySelector('#detail h2')?.textContent.includes('Target item')");
 
-      await chrome.evaluate(`document.querySelector('[data-tab="activity"]').click()`);
+      await click('[data-tab="activity"]');
       await chrome.waitFor("document.querySelector('#activity .what button.ref')");
-      await chrome.evaluate(`document.querySelector('#activity .what button.ref').click()`);
+      await click('#activity .what button.ref');
       await chrome.waitFor("document.querySelector('[data-tab=items].on') && document.querySelector('#detail h2')?.textContent.includes('Target item')");
 
-      await chrome.evaluate(`document.querySelector('#chain .row[data-item="2"]').click()`);
+      await click('#chain .row[data-item="2"]');
       await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('Title links to #1') && document.querySelector('#detail .text button.ref') && document.querySelector('#detail .text.muted button.ref')");
-      await chrome.evaluate(`document.querySelector('#detail .text button.ref').click()`);
+      await click('#detail .text button.ref');
       await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('Target item')");
-      await chrome.evaluate(`document.querySelector('#chain .row[data-item="2"]').click()`);
+      await click('#chain .row[data-item="2"]');
       await chrome.waitFor("document.querySelector('#detail .text.muted button.ref')");
-      await chrome.evaluate(`document.querySelector('#detail .text.muted button.ref').click()`);
+      await click('#detail .text.muted button.ref');
       await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('Target item')");
     }
   } finally {
@@ -3686,6 +3708,7 @@ test('Roadmap and rule prose references stay inline and open the item on their o
   try {
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
     await chrome.waitFor("document.querySelector('#chain .row[data-item=\"2\"]')");
+    const click = (selector) => clickStableChrome(chrome, selector);
     for (const width of [375, 1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
       const contexts = [
@@ -3697,11 +3720,13 @@ test('Roadmap and rule prose references stay inline and open the item on their o
         ['doctrine', '#doctrine-list [data-row="doctrine:R1"] .ref', 'Local target'],
       ];
       for (const [tab, selector, target] of contexts) {
-        await chrome.evaluate(`document.querySelector('[data-root=${JSON.stringify(demo.repo)}]').click();`);
+        const projectSelector = `#proj-list button.proj.repo[data-root=${JSON.stringify(demo.repo)}]`;
+        if (await chrome.evaluate("matchMedia('(max-width: 900px)').matches && !document.querySelector('#side')?.classList.contains('open')")) await click('#proj-switch');
+        await click(projectSelector);
         await chrome.waitFor("data?.project?.root === view.root && !document.body.classList.contains('switching') && document.querySelector('#proj-name').textContent === 'a-inline-prose'");
-        await chrome.evaluate(`document.querySelector('[data-tab="${tab}"]').click()`);
-        if (tab !== 'roadmap') await chrome.evaluate(`document.querySelector('[data-rows="${tab}:all"]').click()`);
-        const metrics = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+        await click(`[data-tab="${tab}"]`);
+        if (tab !== 'roadmap') await click(`[data-rows="${tab}:all"]`);
+        const metrics = JSON.parse(await measureStableChrome(chrome, [selector], `JSON.stringify((() => {
           const ref = document.querySelector(${JSON.stringify(selector)});
           const row = ref?.closest('.milestone-item');
           const style = ref && getComputedStyle(ref);
@@ -3715,21 +3740,25 @@ test('Roadmap and rule prose references stay inline and open the item on their o
         assert.ok(Math.abs(metrics.height - metrics.line) < 1, `${width}: ${selector} keeps the text line height`);
         assert.equal(metrics.nested, false, `${width}: ${selector} never nests buttons`);
         if (metrics.rowHeight !== undefined) assert.ok(metrics.rowHeight >= 44, `${width}: the containing Roadmap control keeps its touch target`);
-        await chrome.evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
+        await click(selector);
         await chrome.waitFor("!document.body.classList.contains('switching') && document.querySelector('[data-tab=items].on') && document.querySelector('#detail h2 > span')?.textContent === '#1'");
         assert.ok((await chrome.evaluate("document.querySelector('#detail h2').textContent")).includes(target), 'the reference opens its target title');
         assert.equal(await chrome.evaluate('view.root'), target === 'Remote target' ? other.repo : demo.repo, 'duplicate item numbers stay bound to their own board');
       }
-      await chrome.evaluate(`document.querySelector('[data-tab="items"]').click(); document.querySelector('#chain .row[data-item="2"]').click()`);
+      await click('[data-tab="items"]');
+      await click('#chain .row[data-item="2"]');
       await chrome.waitFor("document.querySelector('#detail .verdict .note')");
       assert.equal(await chrome.evaluate("document.querySelectorAll('#detail .verdict .note .ref').length"), 1, 'verdict prose keeps its item reference');
-      await chrome.evaluate("document.querySelector('#detail .verdict .note .ref').click()");
+      await click('#detail .verdict .note .ref');
       await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('Local target')");
-      await chrome.evaluate("document.querySelector('#needs .ny-open[data-go^=\"decide:\"]').click()");
+      await click('#needs .ny-open[data-go^="decide:"]');
       assert.equal(await chrome.evaluate("document.querySelectorAll('#answering-q .ref').length"), 1, 'the answering question keeps its inline item reference');
-      await chrome.evaluate("document.querySelector('#answering-q .ref').click()");
+      await click('#answering-q .ref');
       await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('Local target') && document.querySelector('[data-tab=items].on')");
-      await chrome.evaluate("document.querySelector('[data-tab=roadmap]').click(); document.querySelector('#roadmap .milestone-item[role=button]:not([data-board])').dispatchEvent(new KeyboardEvent('keydown', {key:'Enter',bubbles:true}))");
+      await click('[data-tab=roadmap]');
+      const keyboardTarget = '#roadmap .milestone-item[role=button]:not([data-board])';
+      await waitForStableBoxes(chrome, [keyboardTarget]);
+      await chrome.evaluate(`document.querySelector(${JSON.stringify(keyboardTarget)}).dispatchEvent(new KeyboardEvent('keydown', {key:'Enter',bubbles:true}))`);
       await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('Local title links to #1') && document.querySelector('[data-tab=items].on')");
     }
   } finally {
