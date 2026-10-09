@@ -3454,7 +3454,9 @@ test('real Chrome styles shout code and item text without growing linked lines [
     await clickStableChrome(chrome, '[data-tab="shouts"]');
     await waitForStableBoxes(chrome, ['#feed > div:not(.day)', '#feed > div:not(.day) > :nth-child(2)']);
 
-    const rendered = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+    const rendered = JSON.parse(await measureStableChrome(chrome, [
+      '#feed > div:not(.day)', '#feed > div:not(.day) > :nth-child(2)', '#agents .agent [data-item="1"]',
+    ], `JSON.stringify((() => {
       const shout = [...document.querySelectorAll('#feed > div:not(.day)')].find((row) => row.textContent.includes('Inline'));
       const ask = [...document.querySelectorAll('#decisions .ask')].find((row) => row.textContent.includes('Inline'));
       const titleNode = document.querySelector('#chain .row .t');
@@ -3574,8 +3576,25 @@ test('in-text item references stay inline and open their target at phone and des
 
     for (const width of [375, 1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
+      const measuringRef = '#chain .row[data-item="2"] .t button.ref';
+      await chrome.evaluate(`(() => {
+        window.__referenceMeasureProbe = { frame: 0 };
+        /** Move the live reference for 120 frames so sampling its parent cannot satisfy the probe. */
+        const advance = () => {
+          const probe = window.__referenceMeasureProbe;
+          probe.frame += 1;
+          const target = document.querySelector(${JSON.stringify(measuringRef)});
+          if (target) target.style.transform = probe.frame < 120 ? 'translateX(' + probe.frame + 'px)' : '';
+          if (probe.frame < 120) requestAnimationFrame(advance);
+        };
+        requestAnimationFrame(advance);
+      })()`);
       // The row inlineReference stays on its title line beside the text.
-      const rendered = JSON.parse(await measureStableChrome(chrome, ['?#feed > div:not(.day)', '?#feed > div:not(.day) > :nth-child(2)', '#chain .row .t', '?#detail'], `JSON.stringify((() => {
+      const rendered = JSON.parse(await measureStableChrome(chrome, [
+        '?#feed > div:not(.day)', '?#feed > div:not(.day) > :nth-child(2)', measuringRef,
+        '#chain .row[data-item="2"] .t', '#chain .row[data-item="1"] .t', '#needs .ny button.ref',
+        '#needs .ny .ny-text', '#needs .ny .ny-open', '#new-item',
+      ], `JSON.stringify((() => {
         const row = document.querySelector('#chain .row[data-item="2"]');
         const plain = document.querySelector('#chain .row[data-item="1"]');
         const titleRef = row?.querySelector('.t button.ref');
@@ -3594,6 +3613,8 @@ test('in-text item references stay inline and open their target at phone and des
           needAction: needAction && rect(needAction), realButton: realButton && rect(realButton),
         };
       })())`));
+      const measuredReferenceProbe = JSON.parse(await chrome.evaluate('JSON.stringify(window.__referenceMeasureProbe)'));
+      assert.equal(measuredReferenceProbe.frame, 120, `${width}: measurement waits for the reference itself to stop moving`);
       assert.ok(rendered.titleRef && rendered.needRef, `${width}: list and Needs-you references are links: ${JSON.stringify(rendered)}`);
       assert.equal(rendered.titleRef.border, '0px', `${width}: the title reference has no button border`);
       assert.equal(rendered.needRef.border, '0px', `${width}: the Needs-you reference has no button border`);
@@ -3726,7 +3747,8 @@ test('Roadmap and rule prose references stay inline and open the item on their o
         await chrome.waitFor("data?.project?.root === view.root && !document.body.classList.contains('switching') && document.querySelector('#proj-name').textContent === 'a-inline-prose'");
         await click(`[data-tab="${tab}"]`);
         if (tab !== 'roadmap') await click(`[data-rows="${tab}:all"]`);
-        const metrics = JSON.parse(await measureStableChrome(chrome, [selector], `JSON.stringify((() => {
+        const rowTarget = selector.includes('.milestone-item') ? selector.slice(0, selector.indexOf(' .t')) : null;
+        const metrics = JSON.parse(await measureStableChrome(chrome, [selector, ...(rowTarget ? [rowTarget] : [])], `JSON.stringify((() => {
           const ref = document.querySelector(${JSON.stringify(selector)});
           const row = ref?.closest('.milestone-item');
           const style = ref && getComputedStyle(ref);
