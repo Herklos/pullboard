@@ -210,3 +210,27 @@ test('the shared wait survives a redrawn element [N26,C7]', { timeout: 120_000 }
     await view.stop();
   }
 });
+
+test('a timeout always reports the last sample [N26,C7]', { timeout: 90_000 }, async () => {
+  const executable = chromeExecutable();
+  assert.ok(executable, 'Chrome is required for the throttled timeout diagnostic');
+  const box = machine();
+  project(box, 'timeout-last-sample');
+  const view = await startView(box);
+  let chrome;
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, join(box.dir, 'timeout-last-sample-chrome'));
+    await chrome.waitFor('!!data?.project');
+    await chrome.send('Emulation.setCPUThrottlingRate', { rate: 6 });
+    const missing = "document.querySelector('#never-sampled-proof').closest('button')";
+    await assert.rejects(() => waitForStableBoxes(chrome, missing, 1), error => {
+      assert.match(error.message, /never-sampled-proof/, 'the timeout names the missing target');
+      assert.match(error.message, /last saw.*TypeError/i, 'the 1 ms timeout includes the first sampled failure');
+      return true;
+    });
+    assert.deepEqual(chrome.exceptions, [], 'the missing target is reported without an uncaught page exception');
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    await view.stop();
+  }
+});
