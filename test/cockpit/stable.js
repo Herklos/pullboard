@@ -47,6 +47,8 @@ export async function waitForStableBoxes(chrome, find = 'document.documentElemen
         if (unchanged >= 2) { clearTimeout(timer); resolve(current.targets); return; }
         frameId = requestAnimationFrame(frame);
       };
+      // Sample synchronously before yielding so even an expired short timer has a real diagnostic.
+      try { sample(); } catch (error) { lastSeen = error.name + ': ' + error.message; }
       frameId = requestAnimationFrame(frame);
     });
   })()`);
