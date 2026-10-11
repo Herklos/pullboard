@@ -25,6 +25,7 @@ Pullboard View opens on your work. The Items tab leads with your list, with the 
 - The Roadmap leads with the next release and keeps every upcoming release open. Shipped releases fold away.
 - Doctrine and Spec rows read like Items rows: two lines, with the full rule a click away.
 - The README's board shots show the stats line, and its "What's next" lists only work that isn't built yet.
+- The shipped skills teach every command in `pullboard help`, and a test keeps a new command from shipping untaught.
 
 ### Fixed
 

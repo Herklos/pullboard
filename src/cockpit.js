@@ -1468,6 +1468,9 @@ function render() {
   // and the panel back to its top under a person mid-scroll, so both keep where they were.
   const chipsAt = $('roadmap-releases')?.scrollLeft ?? 0, panelAt = $('roadmap-panel')?.scrollTop ?? 0;
   $('roadmap').innerHTML = roadmapCards(p, titles);
+  // The mark sets its chip in bold, which widens it, and the fresh row has no mark yet. Restored first, the scroll
+  // would clamp to a row narrower by that bold and leave the chips short of where they were (#452).
+  updateRoadmapPanel();
   if ($('roadmap-releases')) $('roadmap-releases').scrollLeft = chipsAt;
   if ($('roadmap-panel')) $('roadmap-panel').scrollTop = panelAt;
 
