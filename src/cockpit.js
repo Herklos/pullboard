@@ -2356,7 +2356,8 @@ document.addEventListener('click', (event) => {
   else if (t.dataset.shout) { answer(null); addressTo(t.dataset.shout); $('shout-text').value = '#' + t.dataset.about + ': '; openTab('shouts'); showTab(); $('shout-text').focus(); }
   else if (t.dataset.new !== undefined) { view.adding = true; render(); $('add-title').focus(); }
 });
-window.addEventListener('scroll', updateRoadmapPanel, { passive: true });
+// The viewport's scroll is fired at the document; the tests' stand-in document has no window.
+document.addEventListener('scroll', updateRoadmapPanel, { passive: true });
 /** Close the expanded stats card and return focus to the list's summary control on Escape. */
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape' || !view.statsOpen || view.tab !== 'items' || document.querySelector('[data-pane="items"]')?.hidden) return;
