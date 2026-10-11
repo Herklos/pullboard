@@ -112,3 +112,17 @@ test('a roadmap external-board open refuses unmerged event-log source [A5,A6]', 
   `);
   assert.equal(result[0].items[0].status, 'unavailable'); assert.deepEqual(box.versions(), before);
 });
+
+
+test('a held item remains readable by newer-source read-only spec citations [A5,A6,S8,S10]', t => {
+  const box = fixture(t);
+  const added = box.cli(box.root, box.root, 'add', 'core', 'Preserve held citations', '--specs', 'G1');
+  assert.equal(added.status, 0, added.stderr + added.stdout);
+  const claimed = box.cli(box.root, box.lane, 'claim', '1');
+  assert.equal(claimed.status, 0, claimed.stderr + claimed.stdout);
+  const before = readFileSync(box.file);
+  box.bump('SCHEMA_VERSION', 2, 3);
+  const checked = box.cli(box.lane, box.lane, 'spec', 'check', '--json');
+  assert.equal(checked.status, 0, checked.stderr + checked.stdout);
+  assert.deepEqual(readFileSync(box.file), before, 'spec citations read a live claim without migrating or writing its board');
+});

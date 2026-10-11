@@ -2743,7 +2743,7 @@ async function readStdin(stdin) {
 function hookRead(ctx, read) {
   if (!existsSync(ctx.file)) return null;
   const db = new DatabaseSync(ctx.file, { readOnly: true });
-  try { return read({ db }); }
+  try { return read({ db, clock: ctx.clock }); }
   finally { db.close(); }
 }
 
