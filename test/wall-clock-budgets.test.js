@@ -37,6 +37,29 @@ test('the clock-margin guard follows a fixed wait result into a later assertion 
   }
 });
 
+test('the clock-margin guard follows waited results through boolean assertions [C7]', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pullboard-wait-boolean-'));
+  try {
+    const file = join(root, 'wait-boolean.test.js');
+    const prefix = '/** Return false when the child-close deadline wins. */\nfunction childClosesWithin(child, timeoutMs) { return new Promise(resolve => { child.once("close", () => resolve(true)); setTimeout(() => resolve(false), timeoutMs); }); }\nconst closed = await childClosesWithin(child, 1500);\n';
+    for (const judgment of ['assert.ok(closed === true)', 'assert.ok(closed !== false)', 'assert(closed && true)',
+      'assert.ok(Boolean(closed))', 'assert.strictEqual(true, closed)', 'assert.deepEqual({closed}, {closed: true})']) {
+      writeFileSync(file, prefix + judgment + ';\n');
+      assert.match(wallClockViolations(root).join('\n'), /wait-boolean\.test\.js:4: literal wait result judged by an assertion/u, judgment);
+      writeFileSync(file, prefix + judgment + '; // budget: hang ceiling for the child-close handshake.\n');
+      assert.deepEqual(wallClockViolations(root), [], 'the boolean judgment accepts its same-line reason');
+    }
+    for (const judgment of ['assert.ok(response.closed === true)', 'assert.equal(true, true, closed)',
+      'assert.ok(true, closed === false)', 'assert.deepEqual({closed: true}, {closed: true})',
+      'assert.ok("closed === true")', 'console.log(closed)']) {
+      writeFileSync(file, prefix + judgment + ';\n');
+      assert.deepEqual(wallClockViolations(root), [], judgment + ' does not judge the waited result');
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('no test judges work by a fixed wall-clock margin [C7]', () => {
   assert.deepEqual(wallClockViolations(fileURLToPath(new URL('..', import.meta.url))), []);
 });

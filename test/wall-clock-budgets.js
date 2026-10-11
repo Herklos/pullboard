@@ -94,6 +94,12 @@ function literalWait(expression, literals) {
   return false;
 }
 
+/** Recognize tracked wait-result references while excluding property names and object keys. */
+function judgesWaitResult(expression, waitResults) {
+  const values = expression.replace(/\.\s*\w+|\b\w+\s*:/gu, ' ');
+  return [...values.matchAll(/\b\w+\b/gu)].some(match => waitResults.has(match[0]));
+}
+
 /** Find every literal timing judgment and return its original file, line and source text. */
 export function fixedWallMargins(source, file) {
   const { code, comments } = codeOnly(source);
@@ -127,7 +133,9 @@ export function fixedWallMargins(source, file) {
     if ((observesTime(expression, aliases) || clockDifference(expression, clocks)) && (margin.test(expression) || fixedAlias || /^(equal|strictEqual)$/u.test(match[1] ?? '') && new RegExp(`^\\s*${literal}\\s*$`, 'u').test(args[1] ?? ''))) {
       record(match.index, 'literal elapsed-time margin');
     }
-    if (waitResults.has(expression.trim().replace(/^[(!\s]+|[)\s]+$/gu, ''))) record(match.index, 'literal wait result judged by an assertion');
+    const judged = /^(?:equal|notEqual|strictEqual|notStrictEqual|deepEqual|notDeepEqual|deepStrictEqual|notDeepStrictEqual|partialDeepStrictEqual)$/u.test(match[1] ?? '')
+      ? args.slice(0, 2) : args.slice(0, 1);
+    if (judged.some(argument => judgesWaitResult(argument, waitResults))) record(match.index, 'literal wait result judged by an assertion');
     if ((['rejects', 'doesNotReject'].includes(match[1]) || /\bawait\s+/u.test(expression)) && literalWait(expression, literals)) record(match.index, 'literal wait judged by an assertion');
   }
   for (const match of code.matchAll(/\bawait\s+(?:\w+\s*\.\s*)*\w*waitFor\w*\s*\(/giu)) {
