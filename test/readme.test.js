@@ -160,8 +160,40 @@ test('the lifecycle figure is drawn from the declaration, and refuses a state or
   }
   const parked = { ...MACHINE, states: [...MACHINE.states, { id: 'parked', means: 'set aside', requires: [] }] };
   assert.throws(() => drawLifecycle(parked), /no place for state parked/);
-  const reopen = { ...MACHINE, moves: [...MACHINE.moves, { verb: 'reopen', from: ['verified'], to: 'open', by: ['coordinator'], guards: [] }] };
-  assert.throws(() => drawLifecycle(reopen), /no route for verified > open/);
+  const unsupported = { ...MACHINE, moves: [...MACHINE.moves, { verb: 'restore', from: ['withdrawn'], to: 'open', by: ['coordinator'], guards: [] }] };
+  assert.throws(() => drawLifecycle(unsupported), /no route for withdrawn > open/);
+  const reopen = { ...MACHINE,
+    states: MACHINE.states.map((state) => state.id === 'verified' ? { ...state, final: false } : state),
+    moves: [...MACHINE.moves, { verb: 'reopen', from: ['verified'], to: 'open', by: ['coordinator'], guards: [] }],
+  };
+  let reopenedSvg;
+  assert.doesNotThrow(() => { reopenedSvg = drawLifecycle(reopen); }, 'the synthetic verified reopen has a declared drawing route');
+  assert.ok(texts(reopenedSvg).some((text) => text.words === 'reopen'), 'the synthetic verified reopen is named');
+  assert.ok(reopenedSvg.includes('class="edge back" d="M 815 179 L 830 179 L 830 8 L 15 8 L 15 179 L 25 179" marker-end="url(#tip-back)"'),
+    'verified-to-open uses the dashed return route');
+  const reopenTexts = texts(reopenedSvg);
+  const reopenLabel = reopenTexts.find((text) => text.words === 'reopen');
+  assert.ok(reopenLabel, 'the synthetic reopen label has a measurable text box');
+  for (const other of reopenTexts.filter((text) => text !== reopenLabel)) {
+    const separated = reopenLabel.right <= other.left || other.right <= reopenLabel.left || reopenLabel.bottom <= other.top || other.bottom <= reopenLabel.top;
+    assert.ok(separated, `the reopen label does not overlap “${other.words}”`);
+  }
+  const drawing = reopenedSvg.slice(reopenedSvg.indexOf('</defs>') + '</defs>'.length);
+  for (const [, x, y, width, height] of drawing.matchAll(/<rect(?! class="card")\b[^>]*\bx="([\d.]+)"\s+y="([\d.]+)"\s+width="([\d.]+)"\s+height="([\d.]+)"/gu)) {
+    const box = { left: Number(x), right: Number(x) + Number(width), top: Number(y), bottom: Number(y) + Number(height) };
+    const separated = reopenLabel.right <= box.left || box.right <= reopenLabel.left || reopenLabel.bottom <= box.top || box.bottom <= reopenLabel.top;
+    assert.ok(separated, `the reopen label does not overlap the box at ${x},${y}`);
+  }
+  for (const [, path] of drawing.matchAll(/<path\b[^>]*\bd="([^"]+)"/gu)) {
+    const points = [...path.matchAll(/[ML]\s*([\d.]+)\s+([\d.]+)/gu)].map(([, x, y]) => ({ x: Number(x), y: Number(y) }));
+    for (let index = 1; index < points.length; index++) {
+      const first = points[index - 1];
+      const second = points[index];
+      const segment = { left: Math.min(first.x, second.x), right: Math.max(first.x, second.x), top: Math.min(first.y, second.y), bottom: Math.max(first.y, second.y) };
+      const separated = reopenLabel.right <= segment.left || segment.right <= reopenLabel.left || reopenLabel.bottom <= segment.top || segment.bottom <= reopenLabel.top;
+      assert.ok(separated, `the reopen label does not overlap path segment ${index}: ${path}`);
+    }
+  }
   const bench = { ...MACHINE, moves: [...MACHINE.moves, { verb: 'bench', from: ['claimed'], to: 'open', by: ['coordinator'], guards: [] }] };
   assert.match(texts(drawLifecycle(bench)).map((text) => text.words).join(' '), /\bbench\b/, 'a new move between drawn states is named without touching draw.mjs');
 });
