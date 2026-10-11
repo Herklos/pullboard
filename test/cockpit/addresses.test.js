@@ -185,6 +185,7 @@ test('the snapshot keeps its addresses under a sub-path [N38,A10]', { timeout: 9
     await settled(chrome, "document.body.classList.contains('snapshot') && !!data?.project");
     await settled(chrome, 'snapshotReplay.index === snapshotReplay.events.length');
     await press(chrome, `document.querySelector('#chain [data-item="2"]')`);
+    assert.equal(await chrome.stable('location.pathname + location.hash'), '/demo/#items/2', 'a plain snapshot selection records its own address before any reload');
     const reference = `document.querySelector('#detail a.ref[data-go="item:1"]')`;
     await chrome.waitFor(`!!${reference}`);
     const href = await chrome.stable(`${reference}.href`);
