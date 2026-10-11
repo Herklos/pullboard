@@ -170,8 +170,10 @@ async function bisect(state, items, failures, label = 'split') {
     if (!store.itemThread(state.board, item.id).some((entry) => entry.type === 'fact' && entry.text === text)) {
       await state.write('appendFact', [item.id, { agentId: 'coordinator', kind: 'measurement', text }]);
     }
-    if (!state.culprits.some((entry) => entry.id === item.id)) state.culprits.push({ id: item.id, commit: item.commit, tests: failures });
+    const mergeCommit = state.batch.tip;
+    if (!state.culprits.some((entry) => entry.id === item.id)) state.culprits.push({ id: item.id, commit: item.commit, mergeCommit, tests: failures });
     await save(state, { culprits: state.culprits });
+    await returnCulprits(state);
     state.say(`culprit #${item.id}: ${failures.map((failure) => failure.name).join(', ')}`);
     return [];
   }
@@ -193,6 +195,17 @@ async function bisect(state, items, failures, label = 'split') {
     }
   }
   return green;
+}
+
+/** Return recorded red candidates once, including a saved failure interrupted before its move. */
+async function returnCulprits(state) {
+  for (const culprit of state.culprits) {
+    const item = store.getItem(state.board, culprit.id);
+    if (item.item_status !== 'verified' || item.item_merged_commit || item.item_commit !== culprit.commit
+      || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(culprit.mergeCommit ?? '')) continue;
+    const note = `Landing batch ${state.batch.id} failed ${culprit.tests.map((failure) => `${failure.file}: ${failure.name}`).join('; ')}; merge commit ${culprit.mergeCommit}`;
+    await state.write('reopen', [culprit.id, { agentId: 'coordinator', note }]);
+  }
 }
 
 /** File a flake once against its named test and leave the batch stopped. */
@@ -293,9 +306,11 @@ export async function land({ root, board, config, write, say, owner, maximum = I
   }
   const state = { root, board, config, write, say, onWait, batch, culprits: batch.culprits ?? [], flaky: false, gates: new Map((batch.gateResults ?? []).map((result) => [result.tree, result])), diagnosed: new Map((batch.diagnostics ?? []).map((result) => [result.test, result.isGreen])) };
   await save(state, { owner });
+  await returnCulprits(state);
   if (state.batch.state === 'pushed' || state.batch.state === 'ready') await publish(state);
   else {
-    const initialItems = state.batch.candidates ?? state.batch.items;
+    const initialItems = (state.batch.candidates ?? state.batch.items)
+      .filter((entry) => !state.culprits.some((culprit) => culprit.id === entry.id && culprit.commit === entry.commit));
     if (!existsSync(state.batch.root)) throw new Refused('LAND_WORKTREE', `the recorded landing worktree is missing at ${state.batch.root}; restore it before adopting`);
     const build = await mergeGroup(state, initialItems);
     await save(state, { ...build, conflicts: [...state.batch.conflicts, ...build.conflicts] });

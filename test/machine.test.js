@@ -289,15 +289,15 @@ const BROKEN = [
   },
   {
     property: 'nothing leaves a final state',
-    breaks: (machine) => machine.moves.push({ verb: 'reopen', from: ['verified'], to: 'open', by: ['agent', 'coordinator'], refuse: 'NOT_VERIFIED', guards: ['joined', 'itemExists', IN_STATE] }),
-    says: /final state verified has a move out/,
+    breaks: (machine) => machine.moves.push({ verb: 'restore', from: ['withdrawn'], to: 'open', by: ['agent', 'coordinator'], refuse: 'CLOSED', guards: ['joined', 'coordinatorOnly', 'itemExists', IN_STATE] }),
+    says: /final state withdrawn has a move out/,
   },
   {
     property: 'every final state has exit guards',
     breaks: (machine) => {
-      machine.exitGuards.verified = [];
+      machine.exitGuards.withdrawn = [];
     },
-    says: /final state verified has no exit guards/,
+    says: /final state withdrawn has no exit guards/,
   },
   {
     property: 'accept names every exit guard of verified',
@@ -372,7 +372,7 @@ const BROKEN = [
 test('the declared lifecycle is sound: reachable, no traps, no second door, every refusal with a next step [M1, M2, M4]', () => {
   assert.deepEqual(machineProblems(), []);
   assert.deepEqual(MACHINE.states.map((state) => state.id), ['open', 'claimed', 'submitted', 'verified', 'withdrawn']);
-  assert.deepEqual(MACHINE.states.filter((state) => state.final).map((state) => state.id), ['verified', 'withdrawn']);
+  assert.deepEqual(MACHINE.states.filter((state) => state.final).map((state) => state.id), ['withdrawn']);
   assert.deepEqual(MACHINE.moves.map((move) => move.verb), ['claim', 'release', 'lapse', 'submit', 'reserve', 'accept', 'reject', 'reopen', 'escalate', 'refreeze', 'refreeze', 'withdraw']);
 });
 
