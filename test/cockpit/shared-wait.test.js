@@ -200,7 +200,7 @@ test('the shared wait survives a redrawn element [N26,C7]', { timeout: 120_000 }
     assert.deepEqual(await chrome.stable(`[window.__redrawGap, document.querySelector('#redrawn-proof').dataset.replaced, window.__redrawSamples >= 4]`), [true, 'yes', true]);
     const missing = `document.querySelector('#never-redrawn-proof').closest('button')`;
     // budget: this deliberately missing target's short deadline bounds the diagnostic control.
-    await assert.rejects(() => waitForStableBoxes(chrome, missing, 100), error => {
+    await assert.rejects(() => waitForStableBoxes(chrome, missing, 100), error => { // budget: declared 100 ms negative diagnostic deadline for this deliberately absent selector.
       assert.match(error.message, /never-redrawn-proof/, 'the timeout names the selector');
       assert.match(error.message, /last saw.*(?:TypeError|closest|null)/i, 'the timeout retains the last failed sample');
       return true;
@@ -223,7 +223,7 @@ test('a timeout always reports the last sample [N26,C7]', { timeout: 90_000 }, a
     await chrome.waitFor('!!data?.project');
     await chrome.send('Emulation.setCPUThrottlingRate', { rate: 6 });
     const missing = "document.querySelector('#never-sampled-proof').closest('button')";
-    await assert.rejects(() => waitForStableBoxes(chrome, missing, 1), error => {
+    await assert.rejects(() => waitForStableBoxes(chrome, missing, 1), error => { // budget: declared 1 ms first-sample negative diagnostic deadline for this absent selector.
       assert.match(error.message, /never-sampled-proof/, 'the timeout names the missing target');
       assert.match(error.message, /last saw.*TypeError/i, 'the 1 ms timeout includes the first sampled failure');
       return true;

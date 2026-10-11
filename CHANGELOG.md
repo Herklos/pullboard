@@ -4,6 +4,34 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.8.7] - 2026-10-11
+
+### What you see first
+
+Pullboard View opens on your work. The Items tab leads with your list, with the board's stats in one line above it. The Roadmap leads with the next release, keeps every upcoming one open, and has a panel for moving between them. Every tab, item, row and shout now has an address you can share, reload and come back to.
+
+### Added
+
+- Every tab, item, Spec row, Doctrine row and shout in Pullboard View has its own address. Open it directly, go back and forward, or reload and stay where you were.
+- The Roadmap has a panel on the right that jumps to each release and shows how much of the next one is open, building, in review and done.
+- `pullboard resume` says what is new since the checkout last ran, once for each release, and `resume --json` carries the same notes as `whatsNew`.
+- The coordinator and every agent on the demo board declare their model.
+
+### Changed
+
+- The Items tab opens on the work. The stats take one line above the list, and that line opens and folds the full card. Times read like "3 h 34 min", and the card no longer lists every agent.
+- `pullboard stats`, its JSON and the coordinator's resume give times in hours and minutes, and name at most three items before "+N more".
+- The Items toolbar is one row: List or Pipeline, a Filter menu for what to show and which lane, and New item.
+- The Roadmap leads with the next release and keeps every upcoming release open. Shipped releases fold away.
+- Doctrine and Spec rows read like Items rows: two lines, with the full rule a click away.
+- The README's board shots show the stats line, and its "What's next" lists only work that isn't built yet.
+- The shipped skills teach every command in `pullboard help`, and a test keeps a new command from shipping untaught.
+
+### Fixed
+
+- Rows added in the same second list newest first, even when a commit lands while the view is reading.
+- A late transport call is no longer counted as a refused write.
+
 ## [0.8.6] - 2026-10-11
 
 ### See the flow
@@ -215,7 +243,8 @@ Pullboard View got a full design pass, so the board is cleaner and easier on the
 - A local, spec-backed work board gives each item a frozen criterion, a separate worktree lane, a gated submission, and an independent review receipt.
 - The timed tour demonstrates a change being rejected, corrected, and accepted with proof.
 
-[Unreleased]: https://github.com/pullboard-dev/pullboard/compare/v0.8.6...HEAD
+[Unreleased]: https://github.com/pullboard-dev/pullboard/compare/v0.8.7...HEAD
+[0.8.7]: https://github.com/pullboard-dev/pullboard/compare/v0.8.6...v0.8.7
 [0.8.6]: https://github.com/pullboard-dev/pullboard/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/pullboard-dev/pullboard/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/pullboard-dev/pullboard/compare/v0.8.3...v0.8.4

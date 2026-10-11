@@ -78,7 +78,7 @@ test('the demo board declares every agent\'s model [I11,I13]', () => {
     const root = join(fixture, 'repo');
     mkdirSync(root);
     for (const directory of ['src', 'bin', 'docs/shots', 'skills']) cpSync(join(source, directory), join(root, directory), { recursive: true });
-    for (const file of ['test/chrome-fixture.js', 'test/fixture-child.js', 'package.json']) cpSync(join(source, file), join(root, file));
+    for (const file of ['test/chrome-fixture.js', 'test/fixture-child.js', 'package.json', 'CHANGELOG.md']) cpSync(join(source, file), join(root, file));
     const shims = join(fixture, 'bin');
     mkdirSync(shims);
     const pullboard = join(shims, 'pullboard');

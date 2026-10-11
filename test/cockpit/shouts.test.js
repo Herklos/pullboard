@@ -557,7 +557,7 @@ test('shouts read as cards [N26]', { timeout: 120_000 }, async (t) => {
     await chrome.click(`document.querySelector('#feed #shout-${ids[long]} .more')`);
     assert.deepEqual(await foldOf(), ['less', 12], 'more shows every line');
     box.run(alpha.web, 'shout', 'all', 'A later shout.');
-    await chrome.waitFor(`data.project.shouts.some((s) => s.shout_text === 'A later shout.') && document.querySelector('#feed .shout .text')?.textContent === 'A later shout.'`, 15_000);
+    await chrome.waitFor(`data.project.shouts.some((s) => s.shout_text === 'A later shout.') && document.querySelector('#feed .shout .text')?.textContent === 'A later shout.'`, 15_000); // budget: hang ceiling for the new shout to replace the feed card; no throughput claim.
     assert.deepEqual(await foldOf(), ['less', 12], 'an open shout stays open across a refresh');
     await chrome.click(`document.querySelector('#feed #shout-${ids[long]} .more')`);
     assert.deepEqual(await foldOf(), ['more', 6], 'less folds it again');
@@ -565,12 +565,12 @@ test('shouts read as cards [N26]', { timeout: 120_000 }, async (t) => {
     // The block opens on its header to the lines it names, in its own frame.
     const blockRef = `document.querySelector('#feed #shout-${ids[blockShout]} .code-ref > button.ref.block')`;
     await chrome.click(`${blockRef}`);
-    await chrome.waitFor(`${blockRef}.parentElement.classList.contains('open') && ${blockRef}.getAttribute('aria-expanded') === 'true' && ${blockRef}.parentElement.querySelector('.code-wrap .code')?.textContent.includes('Demo spec')`, 15_000);
+    await chrome.waitFor(`${blockRef}.parentElement.classList.contains('open') && ${blockRef}.getAttribute('aria-expanded') === 'true' && ${blockRef}.parentElement.querySelector('.code-wrap .code')?.textContent.includes('Demo spec')`, 15_000); // budget: hang ceiling for the referenced block to open; no throughput claim.
 
     // The short label still opens the code it names, at that commit.
     const deepRef = `[...document.querySelectorAll('#feed #shout-${ids[refsShout]} button[data-code]')][1]`;
     await chrome.click(`${deepRef}`);
-    await chrome.waitFor(`${deepRef}.getAttribute('aria-expanded') === 'true' && ${deepRef}.nextElementSibling?.textContent.includes('Deep line one')`, 15_000);
+    await chrome.waitFor(`${deepRef}.getAttribute('aria-expanded') === 'true' && ${deepRef}.nextElementSibling?.textContent.includes('Deep line one')`, 15_000); // budget: hang ceiling for the deep code reference to open; no throughput claim.
     // An inline reference keeps its label in the sentence and opens the same block a reference on its own line is.
     const opened = JSON.parse(await chrome.stable(`JSON.stringify((() => {
       const inline = ${deepRef}, block = inline.nextElementSibling, header = block?.querySelector(':scope > button.ref.block');
@@ -687,7 +687,7 @@ test('the shout composer, agent filter and agents panel [N26]', { timeout: 120_0
     assert.ok(await height() > one + 20, 'the message grows as it is typed');
     assert.equal(await chrome.stable('data.project.shouts.length'), total, 'and sends nothing');
     await key(0);
-    await chrome.waitFor("data.project.shouts.some((s) => s.shout_text === 'First line\\nsecond line\\nthird line' && s.shout_to === 'coordinator')", 15_000);
+    await chrome.waitFor("data.project.shouts.some((s) => s.shout_text === 'First line\\nsecond line\\nthird line' && s.shout_to === 'coordinator')", 15_000); // budget: hang ceiling for the submitted multiline shout to be recorded; no throughput claim.
     await chrome.waitFor("document.querySelector('#shout-text').value === ''");
     assert.ok(Math.abs(await height() - one) < 1, 'Enter sends, and the bar shrinks back to one line');
     assert.ok(await chrome.stable("!document.querySelector('#console').hidden && !document.querySelector('.composer #console') && document.querySelector('#console').getBoundingClientRect().bottom <= document.querySelector('.composer').getBoundingClientRect().top"),
@@ -782,17 +782,17 @@ test('the composer goes to the coordinator and says who heard [N26]', { timeout:
     await chrome.stable("document.querySelector('#shout-text').focus()");
     await chrome.send('Input.insertText', { text: 'Ship the greeting?' });
     await key();
-    await chrome.waitFor("data.project.shouts.some((s) => s.shout_from === 'person' && s.shout_to === 'coordinator' && s.shout_text === 'Ship the greeting?')", 15_000);
-    await chrome.waitFor(`${heardOf('Ship the greeting?')} === 'Not heard yet'`, 15_000);
+    await chrome.waitFor("data.project.shouts.some((s) => s.shout_from === 'person' && s.shout_to === 'coordinator' && s.shout_text === 'Ship the greeting?')", 15_000); // budget: hang ceiling for the person shout to be recorded; no throughput claim.
+    await chrome.waitFor(`${heardOf('Ship the greeting?')} === 'Not heard yet'`, 15_000); // budget: hang ceiling for the initial unread state to appear; no throughput claim.
     box.run(alpha.repo, 'inbox');
-    await chrome.waitFor(`${heardOf('Ship the greeting?')} === 'Heard by coordinator (unknown)'`, 15_000);
+    await chrome.waitFor(`${heardOf('Ship the greeting?')} === 'Heard by coordinator (unknown)'`, 15_000); // budget: hang ceiling for coordinator inbox to mark the shout heard; no throughput claim.
     // A shout that reaches everyone says who of them has read it: the coordinator first, then how many agents.
     // (The person reaches every agent through the relay's requests; here the board records one directly.)
     earlier(alpha.repo, Date.now(), (board) => shoutOnBoard(board, { from: 'person', to: 'all', text: 'Hold the merge, please.', lanes: ['web'] }));
-    await chrome.waitFor("data.project.shouts.some((s) => s.shout_from === 'person' && s.shout_to === 'all')", 15_000);
+    await chrome.waitFor("data.project.shouts.some((s) => s.shout_from === 'person' && s.shout_to === 'all')", 15_000); // budget: hang ceiling for the addressed-to-all shout to be recorded; no throughput claim.
     box.run(alpha.repo, 'inbox');
     box.run(alpha.web, 'inbox');
-    await chrome.waitFor(`${heardOf('Hold the merge, please.')} === 'Heard by coordinator (unknown) and 1 agent'`, 15_000);
+    await chrome.waitFor(`${heardOf('Hold the merge, please.')} === 'Heard by coordinator (unknown) and 1 agent'`, 15_000); // budget: hang ceiling for both inbox reads to appear; no throughput claim.
     const all = (await read()).heard.find(([text]) => text === 'Hold the merge, please.');
     assert.deepEqual(all.slice(2), [2, 'Heard by coordinator (unknown), web-1 (Test Model)'], 'with their avatars, and every name on hover');
 

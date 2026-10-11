@@ -52,3 +52,10 @@ To change a brief or a route later: `pullboard edit <id> --brief "..."` or `--ro
 ## Done
 
 Every approved must-row is cited by an item, or named in your report with the reason it needs none. `pullboard list` shows the order through `after`.
+
+## Pullboard commands for this job
+
+- When you begin planning, run `pullboard prompt plan` for the role-specific checklist and `pullboard doctor` to find board-integrity problems.
+- When you need to preserve release order, run `pullboard roadmap` before changing milestones.
+- When you need to create a milestone, run `pullboard milestone add`; append or remove its item references with `pullboard milestone items`.
+- When you need to change an existing milestone's order or label, run `pullboard milestone move` or `pullboard milestone edit`; when retiring an empty milestone, run `pullboard milestone remove`.

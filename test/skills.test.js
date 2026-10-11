@@ -52,14 +52,14 @@ function project() {
   return { dir, root, env, git, run };
 }
 
-/** Return the exact legacy file bytes for the four skills changed in 0.8.1. */
-function legacySkill(role) {
+/** Return the earlier skill bytes derived from an immutable 0.8.1 fixture. */
+function legacySkill(role, testRoot = import.meta.dirname) {
   const name = ROLES[role];
-  const file = resolve(import.meta.dirname, `../skills/${name}/SKILL.md`);
-  const current = readFileSync(file, 'utf8');
+  const file = resolve(testRoot, `fixtures/skills-0.8.1/${name}/SKILL.md`);
+  const release = readFileSync(file, 'utf8');
   const [currentSnippet, oldSnippet] = LEGACY_SNIPPETS[role];
-  assert.ok(current.includes(currentSnippet), `${role} ships the doctrine migration phrase`);
-  return current.replace(currentSnippet, oldSnippet);
+  assert.ok(release.includes(currentSnippet), `${role} 0.8.1 fixture contains the doctrine migration phrase`);
+  return release.replace(currentSnippet, oldSnippet);
 }
 
 /** Hash the file bytes using the release catalog's SHA-256 contract. */
@@ -83,6 +83,42 @@ function json(box, ...args) {
   assert.equal(result.stderr, '');
   return JSON.parse(result.stdout);
 }
+
+test('legacy skill fixtures match the 0.8.1 release [C7,I11]', () => {
+  for (const role of ['decompose', 'plan', 'review', 'verify']) {
+    const releaseDigests = Object.entries(SHIPPED_SKILL_DIGESTS[role])
+      .filter(([, versions]) => versions.includes('0.8.1'))
+      .map(([shippedDigest]) => shippedDigest);
+    assert.equal(releaseDigests.length, 1, `${role} has one catalog digest for 0.8.1`);
+    const name = ROLES[role];
+    const fixture = readFileSync(resolve(import.meta.dirname, `fixtures/skills-0.8.1/${name}/SKILL.md`));
+    assert.equal(digest(fixture), releaseDigests[0], `${role} fixture matches its 0.8.1 release digest`);
+  }
+});
+
+test('a current skill change leaves the legacy fixtures alone [C7,I11]', () => {
+  const box = project();
+  const testRoot = join(box.dir, 'test');
+  const currentRoot = join(box.dir, 'skills');
+  const roles = ['decompose', 'plan', 'review', 'verify'];
+  const before = {};
+  for (const role of roles) {
+    const name = ROLES[role];
+    const fixture = resolve(import.meta.dirname, `fixtures/skills-0.8.1/${name}/SKILL.md`);
+    const scratchFixture = join(testRoot, 'fixtures', 'skills-0.8.1', name, 'SKILL.md');
+    const scratchCurrent = join(currentRoot, name, 'SKILL.md');
+    mkdirSync(join(testRoot, 'fixtures', 'skills-0.8.1', name), { recursive: true });
+    mkdirSync(join(currentRoot, name), { recursive: true });
+    writeFileSync(scratchFixture, readFileSync(fixture));
+    const current = readFileSync(resolve(import.meta.dirname, `../skills/${name}/SKILL.md`));
+    writeFileSync(scratchCurrent, current);
+    before[role] = digest(legacySkill(role, testRoot));
+    writeFileSync(scratchCurrent, Buffer.concat([current, Buffer.from('\nLocal scratch-only skill note.\n')]));
+    assert.notEqual(digest(readFileSync(scratchCurrent)), digest(current), `${role} current skill changed in the scratch copy`);
+  }
+  const after = Object.fromEntries(roles.map((role) => [role, digest(legacySkill(role, testRoot))]));
+  assert.deepEqual(after, before, 'legacy test inputs still come from the immutable release fixtures');
+});
 
 test('doctor names a skill older than this Pullboard [I2]', () => {
   const box = project();
