@@ -1,0 +1,148 @@
+/** Find unexplained wall-clock judgments in test source, without executing it [C7]. */
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, relative } from 'node:path';
+
+/** Mask comments and quoted fixture text while retaining exact offsets and comment lines. */
+function codeOnly(source) {
+  const comments = new Map();
+  let code = '', line = 1;
+  for (let i = 0; i < source.length;) {
+    const start = i, firstLine = line;
+    const quote = source[i];
+    if (quote === '"' || quote === "'" || quote === '`') {
+      i++;
+      while (i < source.length) {
+        if (source[i] === '\\') { i += 2; continue; }
+        if (source[i++] === quote) break;
+      }
+    } else if (source.startsWith('//', i)) {
+      i = source.indexOf('\n', i);
+      if (i < 0) i = source.length;
+      comments.set(firstLine, source.slice(start, i));
+    } else if (source.startsWith('/*', i)) {
+      const end = source.indexOf('*/', i + 2);
+      i = end < 0 ? source.length : end + 2;
+      source.slice(start, i).split('\n').forEach((part, offset) => comments.set(firstLine + offset, part));
+    } else if (quote === '/' && (/[=(:,!&|?;{}\[]\s*$/u.test(code) || /\breturn\s*$/u.test(code))) {
+      let characterClass = false;
+      i++;
+      while (i < source.length) {
+        if (source[i] === '\\') { i += 2; continue; }
+        if (source[i] === '[') characterClass = true;
+        if (source[i] === ']') characterClass = false;
+        if (source[i++] === '/' && !characterClass) break;
+      }
+      while (/[a-z]/iu.test(source[i] ?? '') && i < source.length) i++;
+      const skipped = source.slice(start, i);
+      const masked = skipped.replace(/[^\n]/gu, ' ');
+      code += /\belapsed\b/iu.test(skipped) ? masked.replace(/ {7}/u, 'elapsed') : masked;
+      line += skipped.split('\n').length - 1;
+      continue;
+    } else {
+      code += source[i++];
+      if (quote === '\n') line++;
+      continue;
+    }
+    const skipped = source.slice(start, i);
+    code += skipped.replace(/[^\n]/gu, ' ');
+    line += skipped.split('\n').length - 1;
+  }
+  return { code, comments };
+}
+
+/** Read a balanced call or condition, including nested callbacks, from masked source. */
+function parenthesized(code, opening) {
+  let depth = 0;
+  for (let end = opening; end < code.length; end++) {
+    if (code[end] === '(') depth++;
+    if (code[end] === ')' && --depth === 0) return code.slice(opening, end + 1);
+  }
+  return code.slice(opening);
+}
+
+/** Recognize a direct clock observation or an elapsed-time variable/property. */
+function observesTime(expression, aliases) {
+  return /\b(?:Date|performance)\s*\.\s*now\s*\(|\bhrtime\s*\(|\b\w*(?:elapsed|duration|wallMs|waitMs|delay)\w*\b(?!\s*\()/iu.test(expression)
+    || [...aliases].some(name => new RegExp(`\\b${name}\\b`, 'u').test(expression));
+}
+
+/** Split a call at its own commas, never at a nested assertion, callback or argument. */
+function argumentsOf(call) {
+  const args = [];
+  let depth = 0, start = 1;
+  for (let i = 1; i < call.length - 1; i++) {
+    if ('([{'.includes(call[i])) depth++;
+    if (')]}'.includes(call[i])) depth--;
+    if (call[i] === ',' && depth === 0) { args.push(call.slice(start, i)); start = i + 1; }
+  }
+  args.push(call.slice(start, -1));
+  return args;
+}
+
+/** Recognize literal arguments of wait helpers without crossing their closing parenthesis. */
+function literalWait(expression, literals) {
+  for (const match of expression.matchAll(/\b(?:\w*wait\w*|event|\w*ClosesWithin|\w*Healthy|\w*Ready)\s*\(/giu)) {
+    const call = parenthesized(expression, match.index + match[0].lastIndexOf('('));
+    if (argumentsOf(call).some(arg => /^\s*[1-9][0-9_]*\s*$/u.test(arg) || literals.has(arg.trim()))) return true;
+  }
+  return false;
+}
+
+/** Find every literal timing judgment and return its original file, line and source text. */
+export function fixedWallMargins(source, file) {
+  const { code, comments } = codeOnly(source);
+  const lines = source.split('\n');
+  const aliases = new Set(), literals = new Set();
+  for (const match of code.matchAll(/\b(?:const|let|var)\s+(\w+)\s*=\s*([^;\n]+)/gu)) {
+    if (observesTime(match[2], aliases) && /\b(?:Date|performance)\s*\.\s*now\s*\([^)]*\)\s*-/u.test(match[2])) aliases.add(match[1]);
+    if (/^\s*[1-9][0-9_]*\s*$/u.test(match[2])) literals.add(match[1]);
+  }
+  const found = new Map();
+  /** Require a same-line reason, including an explicit approved-spec promise that cannot be relaxed. */
+  function record(offset, reason) {
+    const line = code.slice(0, offset).split('\n').length;
+    if (/\bbudget:\s*[^\n]*(?:measur|baseline|deriv|declared|hang|ceiling|approved row [A-Z]\d)[^\n]*\S/iu.test(comments.get(line) ?? '')) return;
+    found.set(line, `${file}:${line}: ${reason}: ${lines[line - 1].trim()}`);
+  }
+  const literal = '(?:[1-9][0-9_]*(?:\\.[0-9_]+)?)';
+  const margin = new RegExp(`(?:[<>]=?\\s*${literal}\\b|\\b${literal}\\s*[<>]=?)`, 'u');
+  for (const match of code.matchAll(/\bassert(?:\s*\.\s*(\w+))?\s*\(/gu)) {
+    const call = parenthesized(code, match.index + match[0].lastIndexOf('('));
+    const args = argumentsOf(call), expression = args[0];
+    const fixedAlias = [...literals].some(name => new RegExp(`[<>]=?\\s*${name}\\s*$|^\\s*${name}\\s*[<>]=?`, 'u').test(expression));
+    if (observesTime(expression, aliases) && (margin.test(expression) || fixedAlias || /^(equal|strictEqual)$/u.test(match[1] ?? '') && new RegExp(`^\\s*${literal}\\s*$`, 'u').test(args[1] ?? ''))) {
+      record(match.index, 'literal elapsed-time margin');
+    }
+    if ((match[1] === 'rejects' || /\bawait\s+/u.test(expression)) && literalWait(expression, literals)) record(match.index, 'literal wait judged by an assertion');
+  }
+  for (const match of code.matchAll(/\bsetTimeout\s*\(/gu)) {
+    const call = parenthesized(code, match.index + match[0].lastIndexOf('('));
+    if (/\b(?:reject|throw|fail\w*)\b/iu.test(call) && /,\s*[1-9][0-9_]*\s*\)$/u.test(call)) record(match.index, 'literal timeout reports failure');
+  }
+  for (const match of code.matchAll(/\bif\s*\(/gu)) {
+    const opening = match.index + match[0].lastIndexOf('(');
+    const call = parenthesized(code, opening);
+    const following = code.slice(opening + call.length, opening + call.length + 100);
+    if (/\bawait\s+/u.test(call) && literalWait(call, literals)
+      && /\b(?:throw|return\s+(?:false|null))\b/u.test(following)) record(match.index, 'literal wait reports failure');
+  }
+  return [...found.values()];
+}
+
+/** Scan every test file under a checkout, including nested tests and documentation tests. */
+export function wallClockViolations(root) {
+  const found = [];
+  /** Walk source directories without visiting generated artifacts, dependencies or preserved work. */
+  function visit(directory) {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (!['.git', 'node_modules', 'work'].includes(entry.name)) visit(path);
+      } else if (entry.isFile() && /(?:^test[-_.].+|.+[-_.]test)\.[cm]?js$/u.test(entry.name)) {
+        found.push(...fixedWallMargins(readFileSync(path, 'utf8'), relative(root, path).replaceAll('\\', '/')));
+      }
+    }
+  }
+  visit(root);
+  return found.sort();
+}

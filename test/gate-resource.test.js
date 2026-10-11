@@ -296,7 +296,7 @@ test('[Q4] SIGKILL during a gate releases its machine slot for the next process'
   assert.equal((await dead.closed).signal, 'SIGKILL');
   const result = await Promise.race([
     next.closed,
-    new Promise((_, reject) => setTimeout(() => reject(new Error('successor did not acquire the freed slot')), 5_000)),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('successor did not acquire the freed slot')), 5_000)), // budget: hang ceiling for a freed slot acquisition; no throughput claim.
   ]);
   assert.equal(result.code, 0, next.stderrText);
   assert.ok(events(box).includes('next start'));

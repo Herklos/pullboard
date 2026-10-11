@@ -77,7 +77,7 @@ test('removes the profile only after every Chrome process exits [C7]', async (t)
   await waitForFile(scripts.helperReady);
   const closedAt = Date.now();
   await chrome.close();
-  assert.ok(Date.now() - closedAt >= 1_300, 'close waited while the helper kept writing after the leader exited');
+  assert.ok(Date.now() - closedAt >= 1_300, 'close waited while the helper kept writing after the leader exited'); // budget: declared delayed helper write (1.5 seconds); close must wait for it.
   assert.equal(readFileSync(scripts.lateWrite, 'utf8'), 'finished', 'the helper finished its delayed profile write');
   assert.doesNotThrow(() => rmSync(profile, { recursive: true }), 'one profile removal succeeds after the group is empty');
   removed = true;
@@ -105,7 +105,7 @@ test('a missing DevTools port fails once with stderr and elapsed launch time [C7
   }), (error) => {
     assert.match(error.message, /did not publish its DevTools port/u);
     assert.match(error.message, /elapsed \d+ms; 30000ms DevTools budget/u);
-    assert.ok(Number(/elapsed (\d+)ms/u.exec(error.message)[1]) >= 30_000, 'the stand-in exercised the actual default startup budget');
+    assert.ok(Number(/elapsed (\d+)ms/u.exec(error.message)[1]) >= 30_000, 'the stand-in exercised the actual default startup budget'); // budget: declared production DevTools startup deadline is 30000ms.
     assert.match(error.message, /NO_PORT_STAND_IN_STDERR/u);
     return true;
   });
@@ -141,7 +141,7 @@ test("a DevTools port timeout names Chrome's state [C7]", async (t) => {
     assert.match(error.message, /elapsed \d+ms; 2000ms DevTools budget/u);
     assert.match(error.message, /load average \[/u);
     const elapsed = Number(/Chrome startup state:.*elapsed (\d+)ms/u.exec(error.message)?.[1]);
-    assert.ok(elapsed >= startupTimeoutMs, `the live stand-in reached the startup budget: ${error.message}`);
+    assert.ok(elapsed >= startupTimeoutMs, `the live stand-in reached the startup budget: ${error.message}`); // budget: declared 2000ms startup deadline must actually expire.
     return true;
   });
   assert.equal(readFileSync(liveMarker, 'utf8'), 'start\n', 'the live stand-in launched only once');
@@ -282,12 +282,12 @@ test('a DevTools timer that fires early still times out at its budget [C7]', asy
   const pending = new Map();
   const send = createSender(socket, pending, () => 1, 250, { max: 0 }, new Set(), timers);
   const result = send('Runtime.evaluate', {}, 'early timer').catch(error => error);
-  assert.equal(scheduled[0].delay, 250, 'the first timer receives the full command budget');
+  assert.equal(scheduled[0].delay, 250, 'the first timer receives the full command budget'); // budget: declared 250ms command allowance on a simulated clock, not machine speed.
 
   now += 249;
   scheduled.shift().callback();
   assert.equal(scheduled.length, 1, 'a timer firing 1ms early is re-armed');
-  assert.equal(scheduled[0].delay, 1, 'the re-armed timer uses only the remaining budget');
+  assert.equal(scheduled[0].delay, 1, 'the re-armed timer uses only the remaining budget'); // budget: declared simulated clock advanced 249ms of its 250ms allowance.
 
   now += 1;
   scheduled.shift().callback();
@@ -347,11 +347,11 @@ test('a wait that throws while the page changes keeps waiting [C7]', async (t) =
 
     const alwaysThrows = '(() => { throw new Error("persistent evaluation failure"); })()';
     const startedAt = Date.now();
-    await assert.rejects(chrome.waitFor(alwaysThrows, 350, 'always-throwing expression'), (error) => {
+    await assert.rejects(chrome.waitFor(alwaysThrows, 350, 'always-throwing expression'), (error) => { // budget: declared 350ms operation deadline for an always-throwing condition.
       assert.match(error.message, /did not arrive within 350ms/u);
       assert.match(error.message, /persistent evaluation failure/u);
       assert.ok(error.message.includes(alwaysThrows), 'deadline diagnostic names the expression');
-      assert.ok(Date.now() - startedAt >= 350, 'the wait polls through its requested deadline');
+      assert.ok(Date.now() - startedAt >= 350, 'the wait polls through its requested deadline'); // budget: declared 350ms operation deadline must actually expire.
       return true;
     });
 

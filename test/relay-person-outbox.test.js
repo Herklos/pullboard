@@ -126,7 +126,7 @@ test('real Chrome keeps an interrupted person request sealed and retries it once
   assert.equal(status.result.snapshotUploads, trace.length);
   assert.equal(status.result.snapshotDeadlineMs, cliChildDeadlineMs(trace.length), 'the child deadline follows this run’s observed upload count');
   assertSnapshotCheckpoints(trace, 3);
-  assert.ok(delays.every(delay => delay >= 7900), 'the relay delayed every native snapshot by 8 seconds');
+  assert.ok(delays.every(delay => delay >= 7900), 'the relay delayed every native snapshot by 8 seconds'); // budget: declared eight-second native snapshot delay (7900ms lower bound).
   const completed = await waitForRequest(chrome, link.board, requestId, 'done');
   const exported = (await box.cli('export')).document;
   const shouts = exported.tables.shout.filter(row => row.shout_from === 'person' && row.shout_text === text);

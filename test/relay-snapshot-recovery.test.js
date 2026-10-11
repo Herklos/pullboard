@@ -77,7 +77,7 @@ test('a delayed native checkpoint recovers the real page after its visible timeo
   const timeoutText = 'The relay snapshot has not caught up to this move. Retry this board.';
   await chrome.waitFor('document.querySelector("#relay-notice")?.textContent.includes(' + JSON.stringify(timeoutText) + ')',
     45_000, 'actual fifteen-second native checkpoint timeout');
-  assert.ok(Date.now() - started >= 14_000, 'the production wait elapsed; no clock or fetch was replaced');
+  assert.ok(Date.now() - started >= 14_000, 'the production wait elapsed; no clock or fetch was replaced'); // budget: declared fifteen-second native checkpoint wait (14000ms lower bound).
   assert.equal(await chrome.evaluate('document.querySelector("#chain").textContent.includes(' + JSON.stringify(recovered) + ')'), false);
 
   const native = openBoard(join(box.root, '.git', 'pullboard', 'board.sqlite'));

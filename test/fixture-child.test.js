@@ -38,7 +38,7 @@ test('a fixture child killed or failed names its command, signal and stderr [C7]
   assert.match(killed.failure, /command: .*setInterval/u);
   assert.match(killed.failure, /signal: SIGTERM/u);
   const elapsed = /elapsed: (\d+)ms/u.exec(killed.failure);
-  assert.ok(Number(elapsed?.[1]) - (readyAt - startedAt) >= 80, killed.failure);
+  assert.ok(Number(elapsed?.[1]) - (readyAt - startedAt) >= 80, killed.failure); // budget: declared 80ms termination timer starts after the child readiness handshake.
   assert.match(killed.failure, /stderr: sleeping child/u);
 
   assert.throws(() => runFixtureExecFile(process.execPath, ['-e', "console.error('exec stderr'); process.exit(6)"], { encoding: 'utf8' }),
