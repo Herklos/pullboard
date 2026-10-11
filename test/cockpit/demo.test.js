@@ -5,7 +5,7 @@ import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { tapTarget, machine, project, startView, boardOf, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, press } from './fixture.js';
+import { tapTarget, SPEC, machine, project, startView, boardOf, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, press } from './fixture.js';
 import { assertFirstStateDelay } from './stable.js';
 
 /** Stage real chip clones and retain their node identities to diagnose a redraw between browser evaluations. */
@@ -369,5 +369,60 @@ test('the spec chip measurement survives a redraw [N26,C7]', {
     if (chrome) await closeSnapshotChrome(chrome);
     await view.stop();
     rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+test('the lanes panel fits its card at every width [N26]', {
+  timeout: 120_000, // budget: hang ceiling for real Chrome startup and eight viewport and scheme layouts of one side card.
+}, async () => {
+  const executable = chromeExecutable();
+  assert.ok(executable, 'Chrome is installed or PULLBOARD_CHROME points to it');
+  const box = machine();
+  const demo = project(box, 'lanes-panel-fit', SPEC, { lanes: { web: { owns: ['web/'], specs: ['G'] }, review: { owns: ['review/'], specs: [] } } });
+  // A holder whose name is longer than the README demo's "coordinator (Demo coordinator)", which already overflowed.
+  const model = 'Demo coordinator with a long model name';
+  box.run(demo.repo, 'join', 'coordinator', '--model', model);
+  box.run(demo.repo, 'hold', 'review', '--reason', 'Waiting for the next demo item.');
+  const held = `held by coordinator (${model})`;
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-lanes-panel-'));
+  let chrome;
+  /** The card's content box, its sideways scroll and the page's, the holder chip, and every lane and form box that leaves the content box. */
+  const measure = async () => JSON.parse(await chrome.stable(`JSON.stringify((() => {
+    const card = document.querySelector('#shouts-pane aside[aria-label="Agents and lanes"]'), s = getComputedStyle(card), r = card.getBoundingClientRect();
+    const left = r.left + card.clientLeft + parseFloat(s.paddingLeft), right = r.left + card.clientLeft + card.clientWidth - parseFloat(s.paddingRight);
+    const name = (e) => e.id ? '#' + e.id : (e.className && typeof e.className === 'string' ? '.' + e.className.split(' ').join('.') : e.tagName.toLowerCase()) + (e.textContent.trim() ? ' "' + e.textContent.trim().slice(0, 24) + '"' : '');
+    const boxes = [...card.querySelectorAll('#lanes .lane, #lanes .lane *, #hold-form, #hold-form *')].filter((e) => e.getClientRects().length).map((e) => [name(e), e.getBoundingClientRect()]);
+    const past = boxes.filter(([, b]) => b.left < left - 0.5 || b.right > right + 0.5).map(([n, b]) => [n, Math.round(b.left), Math.round(b.right)]);
+    const chip = card.querySelector('#lanes [data-release="review"]')?.closest('.lane')?.querySelector('.chip'), cs = chip && getComputedStyle(chip);
+    const form = card.querySelector('#hold-form'), widths = ['#hold-form', '#hold-lane', '#hold-reason', '#hold-form button[type=submit]'].map((q) => Math.round(card.querySelector(q).getBoundingClientRect().width * 10) / 10);
+    return { content: [Math.round(left), Math.round(right)], column: s.gridTemplateColumns, card: [card.scrollWidth, card.clientWidth], page: [Math.max(document.documentElement.scrollWidth, document.body.scrollWidth), document.documentElement.clientWidth],
+      chip: chip && { text: chip.textContent.trim(), title: chip.title, wraps: cs.whiteSpace === 'normal', ellipsis: cs.textOverflow === 'ellipsis' && cs.overflow === 'hidden', clipped: chip.scrollWidth > chip.clientWidth },
+      widths, past };
+  })())`));
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await chrome.waitFor('innerWidth === 1440');
+    await press(chrome, "document.querySelector('[data-tab=shouts]')");
+    await chrome.waitFor("!!document.querySelector('#shouts-pane:not([hidden]) #lanes [data-release=review]')");
+    for (const scheme of ['light', 'dark']) {
+      await chrome.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: scheme }] });
+      await chrome.waitFor(`document.documentElement.dataset.scheme === '${scheme}'`);
+      for (const width of [375, 900, 1280, 1440]) {
+        await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
+        await chrome.waitFor(`innerWidth === ${width}`);
+        const at = `${width}/${scheme}`, m = await measure();
+        assert.deepEqual(m.past, [], `${at}: every lane and form control stays inside the card's content box ${m.content}: ${JSON.stringify(m)}`);
+        assert.ok(m.card[0] <= m.card[1] && m.page[0] <= m.page[1], `${at}: neither the card nor the page scrolls sideways: ${JSON.stringify(m)}`);
+        assert.equal(m.chip.text, held, `${at}: the chip names the whole holder`);
+        assert.ok(m.chip.wraps || (m.chip.ellipsis && m.chip.title === held), `${at}: a long holder wraps, or ends in an ellipsis with the full name on hover: ${JSON.stringify(m.chip)}`);
+        assert.ok(m.widths.every((w) => Math.abs(w - (m.content[1] - m.content[0])) <= 1), `${at}: the hold form, its lane, its reason and its button take the card's width ${m.content[1] - m.content[0]}: ${m.widths}`);
+      }
+    }
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    rmSync(profile, { recursive: true, force: true });
+    await view.stop();
   }
 });
