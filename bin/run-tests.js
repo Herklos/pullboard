@@ -13,6 +13,7 @@ import { AGENT_SHELL_MARKERS, SSH_SHELL_MARKERS } from '../src/person.js';
 
 const runner = fileURLToPath(import.meta.url);
 export const DEFAULT_TEST_TIMEOUT_MS = 660_000;
+export const DEFAULT_TEST_FILE_TIMEOUT_MS = 30_000;
 
 const watchdogSource = `
 const { parentPort } = require('node:worker_threads');
@@ -21,8 +22,38 @@ const timers = new Map();
 parentPort.on('message', (message) => {
   if (message.type === 'stop') {
     const active = timers.get(message.id);
-    if (active) clearTimeout(active.timer);
+    if (active) {
+      clearTimeout(active.timer);
+      if (active.probe) clearTimeout(active.probe);
+    }
     timers.delete(message.id);
+    return;
+  }
+  if (message.type === 'file-diagnostic-update') {
+    const active = timers.get(message.id);
+    if (active) {
+      active.handles = message.handles;
+      active.observedAt = message.observedAt;
+      active.updated = true;
+    }
+    return;
+  }
+  if (message.type === 'start-file') {
+    const active = { handles: message.handles, observedAt: Date.now(), updated: false, timer: null, probe: null };
+    active.probe = setTimeout(() => {
+      parentPort.postMessage({ type: 'file-diagnostic-request', id: message.id });
+    }, Math.max(0, message.timeoutMs - 50));
+    active.timer = setTimeout(() => {
+      const ports = active.handles.ports.length ? active.handles.ports.join(', ') : 'none';
+      const handles = active.handles.types.length ? active.handles.types.join(', ') : 'none';
+      const ageMs = Date.now() - active.observedAt;
+      const freshness = active.updated ? 'latest responsive snapshot' : 'fallback; main thread did not answer';
+      writeSync(2, 'run-tests: test file "' + message.file + '" failed: its process did not exit within ' +
+        message.timeoutMs + 'ms file-exit timeout; listening ports: ' + ports + '; live handles: ' + handles +
+        '; live-handle snapshot age: ' + ageMs + 'ms (' + freshness + ')\\n');
+      try { process.kill(message.pid, 'SIGKILL'); } catch { /* The timed-out test-file process already exited. */ }
+    }, message.timeoutMs);
+    timers.set(message.id, active);
     return;
   }
   if (message.type !== 'start') return;
@@ -52,6 +83,34 @@ function testTimeoutMs(value = process.env.PULLBOARD_TEST_TIMEOUT_MS) {
   return Number(value);
 }
 
+/** Read the per-file exit ceiling so a completed file cannot keep the gate open. */
+function testFileTimeoutMs(value = process.env.PULLBOARD_TEST_FILE_TIMEOUT_MS) {
+  if (value === undefined) return DEFAULT_TEST_FILE_TIMEOUT_MS;
+  if (!/^[1-9][0-9]*$/u.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) > 2_147_483_647) {
+    throw new Error('PULLBOARD_TEST_FILE_TIMEOUT_MS must be a positive integer no greater than 2147483647 milliseconds');
+  }
+  return Number(value);
+}
+
+/** Describe listening ports and live handle types when the test-file exit ceiling expires. */
+function activeHandleSummary() {
+  const handles = process._getActiveHandles();
+  const ports = [];
+  const types = [];
+  for (const handle of handles) {
+    const type = handle?.constructor?.name ?? 'Unknown';
+    types.push(type);
+    if (typeof handle?.address !== 'function' || !handle.listening) continue;
+    try {
+      const address = handle.address();
+      if (address && typeof address === 'object' && typeof address.port === 'number') {
+        ports.push(`${address.address}:${address.port}`);
+      }
+    } catch { /* A handle may close while its diagnostic is collected. */ }
+  }
+  return { ports: [...new Set(ports)].slice(0, 20), types: [...new Set(types)].slice(0, 20) };
+}
+
 /**
  * Keep an independent watchdog for every active test in this test-file process.
  *
@@ -59,8 +118,17 @@ function testTimeoutMs(value = process.env.PULLBOARD_TEST_TIMEOUT_MS) {
  */
 function installTestWatchdog() {
   const timeoutMs = testTimeoutMs();
+  const fileTimeoutMs = testFileTimeoutMs();
   const file = process.env.PULLBOARD_TEST_FILE ?? process.argv[1] ?? '<unknown test file>';
   const watchdog = new Worker(watchdogSource, { eval: true });
+  watchdog.on('message', (message) => {
+    if (message.type !== 'file-diagnostic-request') return;
+    watchdog.postMessage({
+      type: 'file-diagnostic-update', id: message.id,
+      handles: activeHandleSummary(), observedAt: Date.now(),
+    });
+  });
+  // Message listeners ref the worker port; unref only after installing the diagnostic listener.
   watchdog.unref();
   const activeTests = new WeakMap();
   let nextTestId = 0;
@@ -77,9 +145,15 @@ function installTestWatchdog() {
     if (id !== undefined) watchdog.postMessage({ type: 'stop', id });
   });
 
-  after(async () => {
-    await watchdog.terminate();
-  });
+  /** Arm at the first root cleanup hook so a stuck cleanup remains inside the file ceiling. */
+  function armFileExitWatchdog() {
+    watchdog.postMessage({
+      type: 'start-file', id: `${process.pid}:file`, file,
+      timeoutMs: fileTimeoutMs, pid: process.pid, handles: activeHandleSummary(),
+    });
+  }
+
+  after(armFileExitWatchdog);
 }
 
 /** Quote a path for the private Git shim without interpreting shell metacharacters. */

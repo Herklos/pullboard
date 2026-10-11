@@ -9,6 +9,8 @@ import { runFixtureChild } from './fixture-child.js';
 
 const runner = fileURLToPath(new URL('../bin/run-tests.js', import.meta.url));
 const shardFileCount = 9;
+const fixtureExitCeilingMs = '500';
+const fixtureCleanupMs = '100';
 
 /** Build a private runner checkout whose tests record the files Node actually selects. */
 function makeShardFixture(t) {
@@ -88,3 +90,96 @@ function badShardTest() {
 }
 
 test('a bad shard is refused by name [C7]', badShardTest);
+
+/** Build an isolated production-runner fixture with the source imports it needs. */
+function makeFileExitFixture(t, source) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-test-file-exit-')));
+  const bin = join(root, 'bin');
+  const tests = join(root, 'test');
+  mkdirSync(bin);
+  mkdirSync(tests);
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ type: 'module' }));
+  copyFileSync(runner, join(bin, 'run-tests.js'));
+  cpSync(fileURLToPath(new URL('../src', import.meta.url)), join(root, 'src'), { recursive: true });
+  const testFile = join(tests, 'file-exit.test.js');
+  writeFileSync(testFile, source);
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  return {
+    root, runner: join(bin, 'run-tests.js'), testFile,
+    cleanupFile: join(root, 'cleanup.txt'), portFile: join(root, 'port.txt'),
+  };
+}
+
+/** Run one fixture file with a bounded ceiling and clean up its process group if it hangs. */
+function runFileExitFixture(fixture) {
+  const result = runFixtureChild(process.execPath, [fixture.runner, fixture.testFile], {
+    cwd: fixture.root,
+    detached: true,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PULLBOARD_TEST_FILE_TIMEOUT_MS: fixtureExitCeilingMs,
+      PULLBOARD_FILE_EXIT_CLEANUP: fixture.cleanupFile,
+      PULLBOARD_FILE_EXIT_PORT: fixture.portFile,
+    },
+    timeout: 6_000,
+  });
+  if (result.error?.code === 'ETIMEDOUT' && result.pid) {
+    try { process.kill(-result.pid, 'SIGKILL'); } catch { /* The owned fixture process group already exited. */ }
+  }
+  return result;
+}
+
+/** Combine native test output and the production runner's file-exit diagnostic. */
+function outputOf(result) {
+  return `${result.stdout ?? ''}${result.stderr ?? ''}`;
+}
+
+test('a test file that won\'t exit fails by name [C7]', (t) => {
+  const fixture = makeFileExitFixture(t, `import { createServer } from 'node:http';
+import { writeFileSync } from 'node:fs';
+import { after, test } from 'node:test';
+const server = createServer((_request, response) => response.end('ok'));
+test('leave cleanup active [C7]', () => {});
+/** Open the listener only after watchdog arming, then leave the root cleanup hook stuck. */
+after(async () => {
+  await new Promise((ready) => server.listen(0, '127.0.0.1', ready));
+  writeFileSync(process.env.PULLBOARD_FILE_EXIT_PORT, String(server.address().port));
+  await new Promise(() => {});
+});
+`);
+  const result = runFileExitFixture(fixture);
+  const output = outputOf(result);
+  const port = readFileSync(fixture.portFile, 'utf8').trim();
+  assert.equal(result.status, 1, result.context);
+  assert.ok(result.elapsedMs >= Number(fixtureExitCeilingMs), `the process remains through its ${fixtureExitCeilingMs}ms file ceiling: ${result.elapsedMs}ms`);
+  assert.ok(result.elapsedMs < 5_000, `the runner terminates the stuck cleanup within the 5-second bound: ${result.elapsedMs}ms`); // budget: 500ms file ceiling plus Node startup and CI scheduling allowance.
+  assert.match(output, /test file ".*file-exit\.test\.js" failed: its process did not exit within 500ms file-exit timeout/u);
+  assert.match(output, /live-handle snapshot age: [0-9]+ms \((?:latest responsive snapshot|fallback; main thread did not answer)\)/u);
+  assert.ok(output.includes(`127.0.0.1:${port}`), `the diagnostic names its listening port ${port}: ${output}`);
+  assert.match(output, /live handles:.*Server/u);
+  assert.match(output, /leave cleanup active \[C7\]/u);
+});
+
+test('a file that exits cleanly is not touched [C7]', (t) => {
+  const fixture = makeFileExitFixture(t, `import { createServer } from 'node:http';
+import { writeFileSync } from 'node:fs';
+import { after, test } from 'node:test';
+const server = createServer((_request, response) => response.end('ok'));
+test('clean test file exits [C7]', () => {});
+after(async () => {
+  await new Promise((ready) => server.listen(0, '127.0.0.1', ready));
+  writeFileSync(process.env.PULLBOARD_FILE_EXIT_PORT, String(server.address().port));
+  await new Promise((ready, reject) => server.close((error) => error ? reject(error) : ready()));
+  await new Promise((ready) => setTimeout(ready, ${fixtureCleanupMs}));
+  writeFileSync(process.env.PULLBOARD_FILE_EXIT_CLEANUP, 'done');
+});
+`);
+  const result = runFileExitFixture(fixture);
+  const output = outputOf(result);
+  assert.equal(result.status, 0, result.context);
+  assert.equal(result.signal, null, 'a clean test file is never killed by the watchdog');
+  assert.equal(readFileSync(fixture.cleanupFile, 'utf8'), 'done', 'asynchronous cleanup within the ceiling completes normally');
+  assert.ok(readFileSync(fixture.portFile, 'utf8').trim(), 'the cleanup listener was opened after watchdog arming');
+  assert.doesNotMatch(output, /file-exit timeout/u);
+});
