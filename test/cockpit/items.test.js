@@ -913,7 +913,7 @@ test('Pipeline view shows every stage, status counts, stage ages, detail links a
       assert.ok(stage.age.length > 0, stage.stage + ': visible elapsed age');
       assert.match(stage.age, /^\d+(m|h)$/, stage.stage + ': a visible elapsed time');
       const elapsed = parseInt(stage.age, 10) * (stage.age.endsWith('h') ? 60 : 1);
-      assert.ok(Math.abs(elapsed - (observedAt - Date.parse(since)) / 60_000) <= 1, stage.stage + ': elapsed time matches native fixture arrival');
+      assert.ok(Math.abs(elapsed - (observedAt - Date.parse(since)) / 60_000) <= 1, stage.stage + ': elapsed time matches native fixture arrival'); // budget: one minute is the display's measured-age rounding unit.
     }
     assert.equal(await chrome.stable("document.querySelector('#item-list').hidden"), true);
     for (const width of [375, 1280]) {
