@@ -52,7 +52,7 @@ test("a shout's code reference opens that code as it was at that commit [B23]", 
     const button = (ref, open, before = '', block = false) => `<button class="ref${block ? ' block' : ''}" data-code="${ref}"${before ? ` data-before="${before}"` : ''} title="${ref}" aria-label="Open code reference ${ref}" type="button" aria-expanded="${open}">${label(ref)}</button>`;
     const prior = (text, ref) => text.slice(0, text.indexOf(ref));
     const [b1, b2, b3] = [was, now, long].map((ref) => prior(first_, ref));
-    assert.ok(page.show('feed').includes(`#1</a> was ${button(was, false, b1)}, is ${button(now, false, b2)}; see ${button(long, false, b3)}.`), 'each reference is a button in the text');
+    assert.ok(page.show('feed').includes(`#1</a> was ${button(was, false, b1)}, is ${button(now, false, b2)}; see ${button(long, false, b3)}.`), 'code references stay buttons beside the item link');
 
     await page.click({ code: was, before: b1 });
     await page.click({ code: now, before: b2 });
