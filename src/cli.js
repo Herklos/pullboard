@@ -1711,7 +1711,7 @@ async function submitHere(ctx, id) {
   if (!gate.isGreen) {
     const message = `the submission proof is red at ${commit.slice(0, 12)}; fix it, commit, submit again. ${submitGateReport(gate)}`;
     let comparison = { main: null, files: [], unavailable: 'main comparison could not be completed' };
-    try { comparison = await compareMainFailures(root, gate.profile, gateWaitReporter(ctx.io)); } catch { /* Keep the original gate refusal if main evidence is unavailable. */ }
+    try { comparison = await compareMainFailures(root, gate.profile, gateWaitReporter(ctx.io), gate.output); } catch { /* Keep the original gate refusal if main evidence is unavailable. */ }
     const mainNote = withBoard(ctx, board => mainRedMessage(root, board, gate.profile, comparison));
     throw new Refused('GATE_RED', `${message}${mainNote ? `\n${mainNote}` : ''}`);
   }
