@@ -581,6 +581,7 @@ code.inline.long { white-space: break-spaces; overflow-wrap: anywhere; }
 .snapshot #new-item, .snapshot form, .snapshot [data-new], .snapshot [data-release], .snapshot [data-shout], .snapshot [data-go^="decide:"] { display: none !important; }
 .read-only:not(.requests) #new-item, .read-only:not(.requests) form, .read-only:not(.requests) [data-new], .read-only:not(.requests) [data-release], .read-only:not(.requests) [data-shout], .read-only:not(.requests) [data-go^="decide:"] { display: none !important; }
 .person-requests { margin-bottom: 12px; padding: 12px; min-width: 0; }
+html:has(body.read-only.requests:not(.snapshot)) { overflow-anchor: none; }
 .person-requests h2 { margin: 0 0 8px; font-size: 14px; }
 .request-list { list-style: none; margin: 0; padding: 0; max-height: 240px; overflow-y: auto; }
 .request-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; padding: 8px 0; border-top: 1px solid var(--line); }
