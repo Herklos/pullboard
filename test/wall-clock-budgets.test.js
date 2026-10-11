@@ -7,6 +7,36 @@ import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { wallClockViolations } from './wall-clock-budgets.js';
 
+test('the clock-margin guard follows separately captured clock readings [C7]', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pullboard-clock-readings-'));
+  try {
+    const file = join(root, 'readings.test.js');
+    const source = 'const startedAt = Date.now();\nconst finishedAt = Date.now();\nassert.ok(finishedAt - startedAt < 30_000);\n';
+    writeFileSync(file, source);
+    assert.match(wallClockViolations(root).join('\n'), /readings\.test\.js:3: literal elapsed-time margin/u);
+    writeFileSync(file, source.replace('< 30_000);', '< 30_000); // budget: declared observation window is 30000ms.'));
+    assert.deepEqual(wallClockViolations(root), [], 'the asserted margin accepts its same-line reason');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the clock-margin guard follows a fixed wait result into a later assertion [C7]', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pullboard-wait-result-'));
+  try {
+    const file = join(root, 'wait-result.test.js');
+    const source = '/** Return false when the child-close deadline wins. */\nfunction childClosesWithin(child, timeoutMs) { return new Promise(resolve => { child.once("close", () => resolve(true)); setTimeout(() => resolve(false), timeoutMs); }); }\nconst closed = await childClosesWithin(child, 1500);\nassert.equal(closed, true);\n';
+    writeFileSync(file, source);
+    assert.match(wallClockViolations(root).join('\n'), /wait-result\.test\.js:4: literal wait result judged by an assertion/u);
+    writeFileSync(file, source.replace('assert.equal(closed, true);', 'assert.equal(closed, true); // budget: hang ceiling for the child-close handshake.'));
+    assert.deepEqual(wallClockViolations(root), [], 'the later judgment accepts its same-line reason');
+    writeFileSync(file, source.replace('assert.equal(closed, true);', ''));
+    assert.deepEqual(wallClockViolations(root), [], 'an unasserted cleanup result is not a timing judgment');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('no test judges work by a fixed wall-clock margin [C7]', () => {
   assert.deepEqual(wallClockViolations(fileURLToPath(new URL('..', import.meta.url))), []);
 });

@@ -66,6 +66,12 @@ function observesTime(expression, aliases) {
     || [...aliases].some(name => new RegExp(`\\b${name}\\b`, 'u').test(expression));
 }
 
+/** Recognize elapsed arithmetic using a separately captured clock observation. */
+function clockDifference(expression, clocks) {
+  return expression.includes('-')
+    && [...clocks].some(name => new RegExp(`\\b${name}\\b`, 'u').test(expression));
+}
+
 /** Split a call at its own commas, never at a nested assertion, callback or argument. */
 function argumentsOf(call) {
   const args = [];
@@ -92,10 +98,18 @@ function literalWait(expression, literals) {
 export function fixedWallMargins(source, file) {
   const { code, comments } = codeOnly(source);
   const lines = source.split('\n');
-  const aliases = new Set(), literals = new Set();
-  for (const match of code.matchAll(/\b(?:const|let|var)\s+(\w+)\s*=\s*([^;\n]+)/gu)) {
-    if (observesTime(match[2], aliases) && /\b(?:Date|performance)\s*\.\s*now\s*\([^)]*\)\s*-/u.test(match[2])) aliases.add(match[1]);
+  const aliases = new Set(), literals = new Set(), clocks = new Set(), waitResults = new Set();
+  const declarations = [...code.matchAll(/\b(?:const|let|var)\s+(\w+)\s*=\s*([^;\n]+)/gu)];
+  for (const match of declarations) {
     if (/^\s*[1-9][0-9_]*\s*$/u.test(match[2])) literals.add(match[1]);
+    if (/^\s*(?:Date|performance)\s*\.\s*now\s*\(/u.test(match[2])) clocks.add(match[1]);
+  }
+  for (const match of declarations) {
+    if (observesTime(match[2], aliases) && /\b(?:Date|performance)\s*\.\s*now\s*\([^)]*\)\s*-/u.test(match[2])
+      || clockDifference(match[2], clocks)) aliases.add(match[1]);
+    const waited = /^\s*await\s+(?:\w+\s*\.\s*)*(\w+)\s*\(/u.exec(match[2])?.[1];
+    if (waited && /^(?:\w*wait\w*|event|\w*ClosesWithin|\w*Healthy|\w*Ready)$/iu.test(waited)
+      && literalWait(match[2], literals)) waitResults.add(match[1]);
   }
   const found = new Map();
   /** Require a same-line reason, including an explicit approved-spec promise that cannot be relaxed. */
@@ -110,9 +124,10 @@ export function fixedWallMargins(source, file) {
     const call = parenthesized(code, match.index + match[0].lastIndexOf('('));
     const args = argumentsOf(call), expression = args[0];
     const fixedAlias = [...literals].some(name => new RegExp(`[<>]=?\\s*${name}\\s*$|^\\s*${name}\\s*[<>]=?`, 'u').test(expression));
-    if (observesTime(expression, aliases) && (margin.test(expression) || fixedAlias || /^(equal|strictEqual)$/u.test(match[1] ?? '') && new RegExp(`^\\s*${literal}\\s*$`, 'u').test(args[1] ?? ''))) {
+    if ((observesTime(expression, aliases) || clockDifference(expression, clocks)) && (margin.test(expression) || fixedAlias || /^(equal|strictEqual)$/u.test(match[1] ?? '') && new RegExp(`^\\s*${literal}\\s*$`, 'u').test(args[1] ?? ''))) {
       record(match.index, 'literal elapsed-time margin');
     }
+    if (waitResults.has(expression.trim().replace(/^[(!\s]+|[)\s]+$/gu, ''))) record(match.index, 'literal wait result judged by an assertion');
     if ((['rejects', 'doesNotReject'].includes(match[1]) || /\bawait\s+/u.test(expression)) && literalWait(expression, literals)) record(match.index, 'literal wait judged by an assertion');
   }
   for (const match of code.matchAll(/\bawait\s+(?:\w+\s*\.\s*)*\w*waitFor\w*\s*\(/giu)) {
