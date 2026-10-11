@@ -12,6 +12,7 @@
         "bin/",
         "test/",
         "package.json",
+        ".github/workflows/gate.yml",
         "relay/",
         "docs/api.md",
         "docs/api.test.js",
