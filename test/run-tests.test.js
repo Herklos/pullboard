@@ -183,3 +183,63 @@ after(async () => {
   assert.ok(readFileSync(fixture.portFile, 'utf8').trim(), 'the cleanup listener was opened after watchdog arming');
   assert.doesNotMatch(output, /file-exit timeout/u);
 });
+
+test('a nested suite cleanup cannot hold a completed file open [C7]', (t) => {
+  const fixture = makeFileExitFixture(t, `import { createServer } from 'node:http';
+import { writeFileSync } from 'node:fs';
+import { after, describe, test } from 'node:test';
+describe('outer suite [C7]', () => {
+  describe('inner suite [C7]', () => {
+    test('last nested leaf finished [C7]', () => {
+      writeFileSync(process.env.PULLBOARD_FILE_EXIT_CLEANUP, 'leaf finished');
+    });
+    after(async () => {
+      const server = createServer((_request, response) => response.end('ok'));
+      await new Promise((ready) => server.listen(0, '127.0.0.1', ready));
+      writeFileSync(process.env.PULLBOARD_FILE_EXIT_PORT, String(server.address().port));
+      await new Promise(() => {});
+    });
+  });
+});
+`);
+  const result = runFileExitFixture(fixture);
+  const output = outputOf(result);
+  const port = readFileSync(fixture.portFile, 'utf8').trim();
+  assert.equal(readFileSync(fixture.cleanupFile, 'utf8'), 'leaf finished');
+  assert.equal(result.status, 1, result.context);
+  assert.ok(result.elapsedMs >= Number(fixtureExitCeilingMs), `nested cleanup reaches the ${fixtureExitCeilingMs}ms ceiling: ${result.elapsedMs}ms`);
+  assert.ok(result.elapsedMs < 5_000, `nested cleanup is terminated before the independent fixture bound: ${result.elapsedMs}ms`); // budget: 500ms ceiling plus Node startup and CI scheduling allowance.
+  assert.match(output, /test file ".*file-exit\.test\.js" failed: its process did not exit within 500ms file-exit timeout/u);
+  assert.ok(output.includes(`127.0.0.1:${port}`), `nested cleanup diagnostic names the actual listening port ${port}: ${output}`);
+  assert.match(output, /live handles:.*Server/u);
+  assert.match(output, /ok [0-9]+ - last nested leaf finished \[C7\]/u);
+});
+
+test('clean nested cleanup and a later active test keep their own time [C7]', (t) => {
+  const fixture = makeFileExitFixture(t, `import { createServer } from 'node:http';
+import { writeFileSync } from 'node:fs';
+import { after, describe, test } from 'node:test';
+describe('clean suite [C7]', () => {
+  test('first nested leaf finished [C7]', () => {});
+  after(async () => {
+    const server = createServer((_request, response) => response.end('ok'));
+    await new Promise((ready) => server.listen(0, '127.0.0.1', ready));
+    writeFileSync(process.env.PULLBOARD_FILE_EXIT_PORT, String(server.address().port));
+    await new Promise((ready, reject) => server.close((error) => error ? reject(error) : ready()));
+    await new Promise((ready) => setTimeout(ready, ${fixtureCleanupMs}));
+    writeFileSync(process.env.PULLBOARD_FILE_EXIT_CLEANUP, 'done');
+  });
+});
+test('later active body uses its per-test ceiling [C7]', async () => {
+  await new Promise((ready) => setTimeout(ready, 650)); // budget: exceed the 500ms file-exit ceiling while a real test body is active.
+});
+`);
+  const result = runFileExitFixture(fixture);
+  const output = outputOf(result);
+  assert.equal(result.status, 0, result.context);
+  assert.equal(result.signal, null, 'normal nested cleanup and the next body are never killed');
+  assert.equal(readFileSync(fixture.cleanupFile, 'utf8'), 'done', 'nested cleanup completes normally within its ceiling');
+  assert.ok(readFileSync(fixture.portFile, 'utf8').trim(), 'the nested cleanup opens a real listener');
+  assert.match(output, /ok [0-9]+ - later active body uses its per-test ceiling \[C7\]/u);
+  assert.doesNotMatch(output, /file-exit timeout/u);
+});

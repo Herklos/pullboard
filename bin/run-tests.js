@@ -131,24 +131,39 @@ function installTestWatchdog() {
   // Message listeners ref the worker port; unref only after installing the diagnostic listener.
   watchdog.unref();
   const activeTests = new WeakMap();
+  const runningTests = new Set();
+  const fileId = `${process.pid}:file`;
+  let fileWatchdogArmed = false;
   let nextTestId = 0;
 
   beforeEach((context) => {
+    if (fileWatchdogArmed) {
+      watchdog.postMessage({ type: 'stop', id: fileId });
+      fileWatchdogArmed = false;
+    }
     const id = `${process.pid}:${++nextTestId}`;
     const name = String(context.name).replace(/[\r\n\t\u0000-\u001f]/gu, ' ').slice(0, 200);
     activeTests.set(context, id);
+    runningTests.add(id);
     watchdog.postMessage({ type: 'start', id, name, file, timeoutMs, pid: process.pid });
   });
 
   afterEach((context) => {
     const id = activeTests.get(context);
-    if (id !== undefined) watchdog.postMessage({ type: 'stop', id });
+    if (id !== undefined) {
+      watchdog.postMessage({ type: 'stop', id });
+      runningTests.delete(id);
+    }
+    // A suite's after hooks run before root after; start the idle ceiling here.
+    if (runningTests.size === 0) armFileExitWatchdog();
   });
 
-  /** Arm at the first root cleanup hook so a stuck cleanup remains inside the file ceiling. */
+  /** Bound cleanup between completed tests, cancelling the ceiling when another test starts. */
   function armFileExitWatchdog() {
+    if (fileWatchdogArmed) return;
+    fileWatchdogArmed = true;
     watchdog.postMessage({
-      type: 'start-file', id: `${process.pid}:file`, file,
+      type: 'start-file', id: fileId, file,
       timeoutMs: fileTimeoutMs, pid: process.pid, handles: activeHandleSummary(),
     });
   }
