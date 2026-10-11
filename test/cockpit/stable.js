@@ -23,20 +23,24 @@ export async function waitForStableBoxes(chrome, find = 'document.documentElemen
     const visible = element => { const style = getComputedStyle(element), box = element.getBoundingClientRect(); return !element.closest('[hidden]') && style.display !== 'none' && style.visibility !== 'hidden' && box.width > 0 && box.height > 0; };
     /** Compare exact layout geometry without tolerances that hide movement. */
     const box = element => { const rect = element.getBoundingClientRect(); return [rect.x, rect.y, rect.width, rect.height]; };
+    let lastSeen = 'no frame sampled';
     /** Capture required targets, descendants and page extents in one layout sample. */
     const sample = () => {
       const required = targets();
-      if (!required.length || !required.every(element => element.isConnected && visible(element))) return null;
+      lastSeen = required.length ? JSON.stringify(required.map(element => element instanceof Element
+        ? { tag: element.tagName, id: element.id, connected: element.isConnected, hidden: !!element.closest('[hidden]'), box: box(element) }
+        : { target: String(element) })) : 'no matching target';
+      if (!required.length || !required.every(element => element instanceof Element && element.isConnected && visible(element))) return null;
       const elements = [...document.querySelectorAll('body, body *')].filter(visible);
       return { targets: required.map(box), page: [scrollX, scrollY, document.documentElement.clientWidth, document.documentElement.scrollWidth, document.documentElement.scrollHeight, ...elements.map(box)] };
     };
     return await new Promise((resolve, reject) => {
       let previous = '', unchanged = 0, frameId = 0;
-      const timer = setTimeout(() => { cancelAnimationFrame(frameId); reject(Error('shared wait: target missing, zero-sized or moving: ' + ${JSON.stringify(find)})); }, ${timeoutMs});
+      const timer = setTimeout(() => { cancelAnimationFrame(frameId); reject(Error('shared wait: target missing, zero-sized or moving: ' + ${JSON.stringify(find)} + '; last saw ' + lastSeen)); }, ${timeoutMs});
       /** Resolve only after two complete frame intervals have unchanged nonzero geometry. */
       const frame = () => {
         let current;
-        try { current = sample(); } catch (error) { clearTimeout(timer); reject(error); return; }
+        try { current = sample(); } catch (error) { current = null; lastSeen = error.name + ': ' + error.message; }
         const signature = current ? JSON.stringify(current) : '';
         unchanged = signature && signature === previous ? unchanged + 1 : 0;
         previous = signature;

@@ -163,3 +163,47 @@ test('real Chrome retains reduced motion and jumps both detail panes without ani
     await view.stop();
   }
 });
+
+
+test('the shared wait survives a redrawn element [N26,C7]', { timeout: 120_000 }, async (t) => {
+  const executable = chromeExecutable();
+  if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME for redraw checks.');
+  const box = machine();
+  project(box, 'redrawn-target');
+  const view = await startView(box);
+  let chrome;
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, join(box.dir, 'redrawn-chrome'));
+    await chrome.waitFor('!!data?.project');
+    await chrome.stable(`(() => {
+      const button = document.createElement('button'); button.id = 'redrawn-proof'; button.textContent = 'Redrawn target';
+      button.style.cssText = 'position:fixed;top:180px;left:20px;width:160px;height:44px'; document.body.append(button);
+      window.__redrawSamples = 0; window.__redrawGap = false;
+    })()`);
+    // Resolve the real target each frame. The first sample detaches it; the second sees the same
+    // null.closest gap as macOS CI, before the replacement is inserted on the following frame.
+    const find = `(() => {
+      const node = document.querySelector('#redrawn-proof'); window.__redrawSamples++;
+      if (window.__redrawSamples === 1) {
+        node.remove();
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const replacement = node.cloneNode(true); replacement.dataset.replaced = 'yes'; document.body.append(replacement);
+        }));
+      }
+      if (!node) window.__redrawGap = true;
+      return node.closest('button');
+    })()`;
+    await assert.doesNotReject(() => waitForStableBoxes(chrome, find), 'a disappearing selector is sampled again until its replacement settles');
+    assert.deepEqual(await chrome.stable(`[window.__redrawGap, document.querySelector('#redrawn-proof').dataset.replaced, window.__redrawSamples >= 4]`), [true, 'yes', true]);
+    const missing = `document.querySelector('#never-redrawn-proof').closest('button')`;
+    // budget: this deliberately missing target's short deadline bounds the diagnostic control.
+    await assert.rejects(() => waitForStableBoxes(chrome, missing, 100), error => {
+      assert.match(error.message, /never-redrawn-proof/, 'the timeout names the selector');
+      assert.match(error.message, /last saw.*(?:TypeError|closest|null)/i, 'the timeout retains the last failed sample');
+      return true;
+    });
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    await view.stop();
+  }
+});
