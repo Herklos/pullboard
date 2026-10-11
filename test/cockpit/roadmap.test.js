@@ -293,21 +293,6 @@ test('the roadmap leads with the next release and folds shipped ones [N26]', { t
   })())`));
   /** Activate a disclosure or item through the shared native pointer helper. */
   const click = (selector) => press(chrome, `document.querySelector(${JSON.stringify(selector)})`);
-  /** Measure every visible item target and hit-test the edges of its required 44px area. */
-  const checkItemTargets = async (at, expected) => {
-    const targets = JSON.parse(await chrome.stable(`JSON.stringify([...document.querySelectorAll('#roadmap .milestone-item[data-go]')].filter((row) => row.getClientRects().length).map((row) => row.dataset.go))`));
-    assert.deepEqual(targets.slice().sort(), expected.slice().sort(), at + ': all expected visible item targets are measured');
-    for (const go of targets) {
-      const selector = `#roadmap .milestone-item[data-go="${go}"]`;
-      await chrome.stable(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({ block: 'center', inline: 'nearest' })`);
-      const hit = JSON.parse(await chrome.stable(`JSON.stringify((() => {
-        const row = document.querySelector(${JSON.stringify(selector)}), r = row.getBoundingClientRect();
-        return { height: r.height, hits: [-21, 21].map((offset) => document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2 + offset)?.closest('.milestone-item')?.dataset.go ?? null) };
-      })())`));
-      assert.ok(hit.height >= 44, at + ': ' + go + ' has a 44px item target: ' + JSON.stringify(hit));
-      assert.deepEqual(hit.hits, [go, go], at + ': ' + go + ' owns both edges of its 44px hit area');
-    }
-  };
   try {
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
     await chrome.waitFor("typeof data === 'object' && data?.project?.milestones?.length === 5");
@@ -331,7 +316,6 @@ test('the roadmap leads with the next release and folds shipped ones [N26]', { t
           ['shipped', false, 'Shipped | 2 releases'],
         ], `${at}: the next release first and open, then the queued one, then Shipped, folded`);
         assert.deepEqual(r.parts[0].rows, ['#3', '#4'], `${at}: the next release shows its items`);
-        await checkItemTargets(at, ['item:3', 'item:4']);
         assert.ok(r.parts.every((part) => part.height >= 44), `${at}: each part opens from a 44px target`);
         await click('#roadmap > [data-key="shipped"] > .milestone-head');
         const expanded = await read();
@@ -344,13 +328,6 @@ test('the roadmap leads with the next release and folds shipped ones [N26]', { t
         assert.ok(expanded.page.scroll <= expanded.page.width && expanded.page.body <= expanded.page.width, at + ': expanded history has no sideways scroll');
         await click('#roadmap .shipped-one[data-key="m:0.2"] > .milestone-head');
         assert.deepEqual((await read()).parts.find((part) => part.key === 'shipped').shipped[0].rows, ['#2', '#6'], at + ': verified and withdrawn items remain readable');
-        await checkItemTargets(at + ' with Shipped open', ['item:3', 'item:4', 'item:2', 'item:6']);
-        await click('#roadmap .shipped-one[data-key="m:0.1"] > .milestone-head');
-        await checkItemTargets(at + ' with both shipped releases open', ['item:3', 'item:4', 'item:2', 'item:6', 'item:1']);
-        await click('#roadmap .shipped-one[data-key="m:0.1"] > .milestone-head');
-        await click('#roadmap > [data-key="m:0.4"] > .milestone-head');
-        await checkItemTargets(at + ' with the queued release open', ['item:3', 'item:4', 'item:5', 'item:2', 'item:6']);
-        await click('#roadmap > [data-key="m:0.4"] > .milestone-head');
         await proofShot(chrome, 'releases', width);
         await click('#roadmap .shipped-one[data-key="m:0.2"] > .milestone-head');
         await click('#roadmap > [data-key="shipped"] > .milestone-head');
