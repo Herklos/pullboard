@@ -106,7 +106,7 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
   <section data-pane="items" class="two">
     <div class="primary">
       <section class="card-panel proof-stats" id="proof-stats" aria-label="Board proof stats" hidden></section>
-      <div class="card-panel toolbar">
+      <div class="card-panel toolbar" id="items-toolbar">
         <div class="items-view-switch seg" id="items-view-switch" role="group" aria-label="Items view"></div>
         <div class="filter-control"><button class="filter-toggle" id="filter-toggle" data-filter-toggle type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="filter-menu"><span class="filter-label" id="filter-label">Filter</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg></button><div class="filter-menu" id="filter-menu" role="menu" aria-label="Filter" hidden></div></div>
         <button class="go" id="new-item" type="button" aria-label="New item"><span class="new-item-wide">New item</span><span class="new-item-narrow" aria-hidden="true">New</span></button>
@@ -1491,7 +1491,16 @@ function render() {
     + '<section class="filter-group" role="group" aria-label="Lane"><h3>Lane</h3>' + laneOptions.join('') + '</section>';
   menu.hidden = !view.filterOpen;
   menu.style.left = '0px';
-  if (view.filterOpen) menu.style.left = Math.min(0, innerWidth - 16 - menu.getBoundingClientRect().right) + 'px';
+  menu.style.maxWidth = '';
+  if (view.filterOpen) {
+    // The open menu stays inside the toolbar, no wider than it and shifted left as far as it needs. The window's
+    // width is no measure of that room: it counts a classic scrollbar, so on CI's runners a menu kept inside the
+    // window still reached 10px past the toolbar (#442).
+    const bar = $('items-toolbar'), box = bar.getBoundingClientRect(), left = box.left + bar.clientLeft, right = left + bar.clientWidth;
+    menu.style.maxWidth = Math.min(320, bar.clientWidth) + 'px';
+    const at = menu.getBoundingClientRect();
+    menu.style.left = Math.max(left - at.left, Math.min(0, right - at.right)) + 'px';
+  }
   $('filter-toggle').setAttribute('aria-expanded', String(view.filterOpen));
   const stateLabel = pipeline || view.state === 'active' ? '' : names[view.state] || '';
   const laneLabel = view.lane || '';

@@ -324,7 +324,7 @@ test('the list shows active, verified or all [N26]', async () => {
     assert.deepEqual(rows(), [1]);
     await page.click({ state: 'all' });
     assert.deepEqual(rows(), [1, 2]);
-    assert.match(page.html, /<div class="card-panel toolbar">\s*<div class="items-view-switch seg" id="items-view-switch" role="group" aria-label="Items view"><\/div>\s*<div class="filter-control"><button class="filter-toggle" id="filter-toggle"/, 'the view toggle and filter are together in the toolbar');
+    assert.match(page.html, /<div class="card-panel toolbar" id="items-toolbar">\s*<div class="items-view-switch seg" id="items-view-switch" role="group" aria-label="Items view"><\/div>\s*<div class="filter-control"><button class="filter-toggle" id="filter-toggle"/, 'the view toggle and filter are together in the toolbar');
     assert.doesNotMatch(page.html, /id="lane-pick"|id="state-chips"/, 'the old second-row controls are gone');
     assert.match(page.html, /<header class="top">[^]*<div class="top-find"><input id="q" type="search"[^]*<\/header>/, 'and the search is in the top bar');
     assert.doesNotMatch(page.html, /id="lane-filter"|class="chips" id="state-chips"/, 'no lane menu and no row of chips');
@@ -394,6 +394,70 @@ test('the items toolbar is one row: view, filter and new [N26]', async () => {
     await chrome.waitFor("!document.querySelector('#add-form').hidden");
     await press(chrome, "document.querySelector('#add-cancel')");
     await chrome.waitFor("document.querySelector('#add-form').hidden");
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    rmSync(profile, { recursive: true, force: true });
+    await view.stop();
+  }
+});
+
+test('the items toolbar fits at 375 with wide fonts [N26]', async () => {
+  const executable = chromeExecutable();
+  assert.ok(executable, 'the wide-font toolbar check needs Chrome');
+  const box = machine();
+  const longLane = 'apilonglanenameforclipping';
+  const lanes = { web: { owns: ['web/'], specs: ['G'] }, [longLane]: { owns: ['api/'], specs: ['G'] } };
+  const alpha = project(box, 'wide-fonts', SPEC, { lanes });
+  box.run(alpha.repo, 'add', 'web', 'Active item', '--specs', 'G1');
+  box.run(alpha.repo, 'add', longLane, 'Another item', '--specs', 'G1');
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-items-wide-fonts-chrome-'));
+  let chrome;
+  /** The toolbar's visible labels by their text's own width, measured from the glyphs, not the boxes. */
+  const labels = async () => JSON.parse(await chrome.stable(`JSON.stringify([...document.querySelectorAll('.items-view-switch button, #filter-label, #new-item span')]
+    .filter((e) => e.getClientRects().length).map((e) => { const r = document.createRange(); r.selectNodeContents(e); return [e.id || e.textContent.trim(), r.getBoundingClientRect().width]; }))`));
+  /** Sideways scroll of the toolbar and the page, and every box in the toolbar or its menu that reaches past the toolbar's inside edge. */
+  const fit = async () => JSON.parse(await chrome.stable(`JSON.stringify((() => {
+    const bar = document.querySelector('.toolbar'), s = getComputedStyle(bar), r = bar.getBoundingClientRect();
+    const left = r.left + parseFloat(s.borderLeftWidth), right = r.right - parseFloat(s.borderRightWidth);
+    const name = (e) => e.id ? '#' + e.id : e.className ? '.' + String(e.className).split(' ')[0] : e.tagName.toLowerCase();
+    const past = [...bar.querySelectorAll('*')].filter((e) => e.getClientRects().length).map((e) => [name(e), e.getBoundingClientRect()])
+      .filter(([, b]) => b.left < left - 0.5 || b.right > right + 0.5).map(([n, b]) => [n, Math.round(b.left), Math.round(b.right)]);
+    return { toolbar: [bar.scrollWidth, bar.clientWidth], page: [Math.max(document.documentElement.scrollWidth, document.body.scrollWidth), innerWidth], inside: [Math.round(left), Math.round(right)], past };
+  })())`));
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.waitFor("document.querySelectorAll('#chain .row').length === 2");
+    await chrome.send('Emulation.setDeviceMetricsOverride', { width: 375, height: 900, deviceScaleFactor: 1, mobile: false });
+    await chrome.waitFor('innerWidth === 375');
+    // CI's runners draw a classic 15px scrollbar, which the window's width counts and the page cannot use: that is
+    // what put the open menu past the toolbar on every job (#442). Draw one here too.
+    await chrome.stable("(() => { const sheet = document.styleSheets[0]; sheet.insertRule('html { overflow-y: scroll; }', 0); sheet.insertRule('::-webkit-scrollbar { width: 15px; }', 0); return true; })()");
+    await chrome.waitFor('document.documentElement.clientWidth === 360');
+    const before = await labels();
+    // A wider face and letter-spacing on the toolbar and its menu, as a runner with wider fonts draws them.
+    await chrome.stable("(() => { const sheet = document.styleSheets[0]; sheet.insertRule('.toolbar, .toolbar *, .filter-menu, .filter-menu * { font-family: Verdana, \"DejaVu Sans\", \"Bitstream Vera Sans\", sans-serif !important; letter-spacing: .05em !important; }', sheet.cssRules.length); return true; })()");
+    const after = await labels();
+    assert.deepEqual(after.map(([name]) => name), before.map(([name]) => name), 'the same labels, widened');
+    assert.ok(after.every(([, width], i) => width >= before[i][1] * 1.1), `every label is at least 10% wider: ${JSON.stringify([before, after])}`);
+    for (const scheme of ['light', 'dark']) {
+      await chrome.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: scheme }] });
+      await chrome.waitFor(`document.documentElement.dataset.scheme === '${scheme}'`);
+      for (const open of [false, true]) {
+        if (open) {
+          await press(chrome, "document.querySelector('#filter-toggle')");
+          await chrome.waitFor("!document.querySelector('#filter-menu').hidden");
+        }
+        const at = `375/${scheme}/menu ${open ? 'open' : 'closed'}`;
+        const measured = await fit();
+        assert.ok(measured.toolbar[0] <= measured.toolbar[1] && measured.page[0] <= measured.page[1], `${at}: neither the toolbar nor the page scrolls sideways: ${JSON.stringify(measured)}`);
+        assert.deepEqual(measured.past, [], `${at}: nothing reaches past the toolbar's edges (${measured.inside}): ${JSON.stringify(measured.past)}`);
+        if (open) {
+          await press(chrome, "document.querySelector('#detail')");
+          await chrome.waitFor("document.querySelector('#filter-menu').hidden");
+        }
+      }
+    }
   } finally {
     if (chrome) await closeSnapshotChrome(chrome);
     rmSync(profile, { recursive: true, force: true });
