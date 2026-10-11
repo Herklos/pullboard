@@ -490,7 +490,7 @@ test('relay person requests stay explicit, read-only and visible [H12,H5]', { ti
   }
 });
 
-test('person request growth does not shift the reading position at sixfold CPU [N26]', { timeout: 120_000 }, async t => {
+test('a person request never moves the reading position under a 6× CPU throttle [N26]', { timeout: 120_000 }, async t => { // budget: hang-only ceiling for real Chrome startup, private board setup and the sixfold request journey.
   const executable = chromeExecutable();
   assert.ok(executable, 'Chrome is required for the native sixfold person-request regression');
 
