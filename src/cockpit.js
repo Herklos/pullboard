@@ -150,7 +150,7 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
     <button class="ghost flow-show" id="flow-show" type="button" hidden>Show the lifecycle</button>
     <div class="card-panel feed" id="activity"></div>
   </section>
-  <section data-pane="roadmap" class="roadmap" id="roadmap" aria-label="Roadmap"></section>
+  <section data-pane="roadmap" class="roadmap-layout" id="roadmap" aria-label="Roadmap"></section>
 </main>
 </div>
 </div>
@@ -776,7 +776,7 @@ function boardSummary(board, state) {
     decisions: state.decisions.length,
     // What each item's state reads from, so another repo's roadmap can show it as this board's
     // Items tab does, sent back included, and open it here.
-    items: state.items.map((item) => ({ id: item.id, title: item.title, status: item.status, verdict: item.verdict && { decision: item.verdict.decision } })),
+    items: state.items.map((item) => ({ id: item.id, title: item.title, status: item.status, merged: Boolean(item.merged), verdict: item.verdict && { decision: item.verdict.decision } })),
   };
 }
 
@@ -1264,12 +1264,49 @@ function milestoneItem(entry, p) {
     root,
     titles: new Map((root === view.root ? p.items : root ? named[0].items : []).map((i) => [String(i.id), i.title])),
     state: read ? stateOf(read) : null,
+    stage: item ? pipelineStage(item) : entry.status,
     word: entry.status,
     open: item ? { root, id } : null,
     // Why an item does not open, short enough to read beside its id on a phone.
     why: item ? '' : local ? 'not on this board' : root ? 'not on that board' : snapshot ? 'not in this snapshot'
       : named.length > 1 ? 'board name not unique' : named.length ? 'board unreadable' : 'no such board',
   };
+}
+
+/** Mark the release nearest the top of the Roadmap in its companion panel. */
+function updateRoadmapPanel() {
+  const panel = $('roadmap-panel');
+  if (!panel || view.tab !== 'roadmap') return;
+  const entries = [...panel.querySelectorAll('[data-roadmap-jump]')].map((button) => ({
+    key: button.dataset.roadmapJump,
+    target: $('roadmap-list').querySelector('[data-key="' + CSS.escape(button.dataset.roadmapJump) + '"]'),
+  })).filter((entry) => entry.target);
+  if (!entries.length) return;
+  const threshold = (document.querySelector('.top')?.getBoundingClientRect().bottom ?? 0) + 8;
+  const active = entries.find((entry) => entry.target.getBoundingClientRect().bottom > threshold)?.key || entries.at(-1).key;
+  for (const entry of entries) {
+    const button = panel.querySelector('[data-roadmap-jump="' + CSS.escape(entry.key) + '"]');
+    if (button) {
+      if (entry.key === active) button.setAttribute('aria-current', 'location');
+      else button.removeAttribute('aria-current');
+    }
+  }
+}
+
+/** Open a selected release in the list and briefly mark it after the jump. */
+function jumpToRoadmap(key) {
+  if (key === 'shipped') {
+    view.roadmapOpen.set(JSON.stringify([view.root, 'shipped']), true);
+    render();
+  }
+  const target = $('roadmap-list')?.querySelector('[data-key="' + CSS.escape(key) + '"]');
+  if (!target) return;
+  target.scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
+  target.classList.remove('roadmap-arrival');
+  void target.offsetWidth;
+  target.classList.add('roadmap-arrival');
+  setTimeout(() => target.classList.remove('roadmap-arrival'), 1300);
+  updateRoadmapPanel();
 }
 
 /**
@@ -1316,12 +1353,18 @@ function roadmapCards(p, titles) {
   const only = view.roadmapOnly && (p.milestones || []).some((m) => m.name === view.roadmapOnly) ? view.roadmapOnly : null;
   const milestones = (p.milestones || []).filter((m) => !only || m.name === only);
   const lead = only ? '<div class="roadmap-only"><span>' + esc(only) + '</span><button class="link" data-roadmap-all type="button">show all</button></div>' : '';
-  if (!milestones.length) return '<div class="card-panel empty">No milestones yet. The coordinator adds one with <code class="inline">pullboard milestone add</code>.</div>';
   const read = milestones.map((milestone) => readMilestone(milestone, p));
   const coming = read.filter((m) => !m.shipped && m.rows.length).concat(read.filter((m) => !m.rows.length)), shipped = read.filter((m) => m.shipped).reverse();
   /** Preserve each board's disclosure choices independently. */
   const isOpen = (key, first) => view.roadmapOpen.has(JSON.stringify([view.root, key])) ? view.roadmapOpen.get(JSON.stringify([view.root, key])) : first;
   const caret = '<span class="caret" aria-hidden="true"></span>';
+  const next = coming.find((m) => m.rows.length) || null;
+  const stages = [['open', 'Open'], ['claimed', 'Building'], ['submitted', 'In review'], ['accepted', 'Accepted'], ['merged', 'Verified']];
+  const counts = Object.fromEntries(stages.map(([stage]) => [stage, next ? next.rows.filter((row) => row.stage === stage).length : 0]));
+  const shippingCounts = '<dl class="roadmap-stage-counts">' + stages.map(([stage, label]) => '<div data-shipping-stage="' + stage + '"><dt>' + label + '</dt><dd>' + counts[stage] + '</dd></div>').join('') + '</dl>';
+  const lastShipped = '<p class="roadmap-last-shipped"><span>Last shipped</span><b>' + esc(shipped[0]?.milestone.name || 'None yet') + '</b>'
+    + (shipped[0]?.milestone.note ? '<small>' + esc(firstLine(shipped[0].milestone.note)) + '</small>' : '') + '</p>';
+  const mobileShipping = '<section class="roadmap-shipping roadmap-mobile-shipping" aria-label="Shipping counts">' + shippingCounts + lastShipped + '</section>';
   /** Keep the existing verified-item count beside an upcoming release. */
   const count = (m) => m.rows.length ? '<span class="milestone-count">' + m.done + '/' + m.rows.length + ' done</span>' : '';
   /** Render the existing milestone items, progress and complete note when opened. */
@@ -1330,16 +1373,28 @@ function roadmapCards(p, titles) {
     : '<p class="milestone-empty">No items yet.</p>')
     + (milestone.note ? '<p class="milestone-note">' + rich(milestone.note, titles) + '</p>' : '');
   /** Keep folding consistent with the View's other keyboard-accessible disclosure controls. */
-  const wrap = (tag, classes, key, first, heading, contents) => {
+  const wrap = (tag, classes, key, first, heading, contents, afterHead = '') => {
     const open = isOpen(key, first);
-    return '<' + tag + ' class="' + classes + '" data-key="' + esc(key) + '"><div class="milestone-head" data-roadmap-key="' + esc(key) + '" role="button" tabindex="0" aria-expanded="' + open + '">' + caret + heading + '</div><div class="milestone-body"' + (open ? '' : ' hidden') + '>' + contents + '</div></' + tag + '>';
+    return '<' + tag + ' class="' + classes + '" data-key="' + esc(key) + '"><div class="milestone-head" data-roadmap-key="' + esc(key) + '" role="button" tabindex="0" aria-expanded="' + open + '">' + caret + heading + '</div>' + afterHead + '<div class="milestone-body"' + (open ? '' : ' hidden') + '>' + contents + '</div></' + tag + '>';
   };
   /** Open every upcoming milestone by default; the person's current-page fold remains in the view map. */
-  const card = (m) => wrap('section', 'card-panel milestone', 'm:' + m.milestone.name, true, '<h2>' + linked(m.milestone.name, titles) + '</h2>' + count(m), body(m));
+  const card = (m) => wrap('section', 'card-panel milestone', 'm:' + m.milestone.name, true, '<h2>' + linked(m.milestone.name, titles) + '</h2>' + count(m), body(m), m === next ? mobileShipping : '');
   /** Summarize one shipped milestone with its first note line and total count. */
   const line = (m) => wrap('div', 'milestone shipped-one', 'm:' + m.milestone.name, false, '<h2>' + esc(m.milestone.name) + '</h2><small>' + esc(firstLine(m.milestone.note)) + '</small><span class="milestone-count">' + m.rows.length + (m.rows.length === 1 ? ' item' : ' items') + '</span>', body(m));
-  return lead + coming.map(card).join('')
-    + (shipped.length ? wrap('section', 'card-panel shipped', 'shipped', false, '<h2>Shipped</h2><span class="milestone-count">' + shipped.length + (shipped.length === 1 ? ' release' : ' releases') + '</span>', shipped.map(line).join('')) : '');
+  const releaseButtons = coming.map((m) => {
+    const key = 'm:' + m.milestone.name;
+    return '<button class="roadmap-release" data-roadmap-jump="' + esc(key) + '" type="button"><span>' + esc(m.milestone.name) + '</span><b>' + m.done + '/' + m.rows.length + '</b></button>';
+  }).join('');
+  const shippedButton = shipped.length
+    ? '<button class="roadmap-release" data-roadmap-jump="shipped" type="button"><span>Shipped</span><b>' + shipped.length + '</b></button>' : '';
+  const releasePanel = '<aside class="card-panel roadmap-panel" id="roadmap-panel" aria-label="Roadmap releases and shipping">'
+    + '<section class="roadmap-release-index"><h2>Releases</h2><nav class="roadmap-releases" id="roadmap-releases" aria-label="Roadmap releases">' + releaseButtons + shippedButton + '</nav></section>'
+    + '<section class="roadmap-shipping roadmap-desktop-shipping" aria-label="Shipping counts"><h2>Shipping</h2><h3 class="roadmap-next-release">' + esc(next?.milestone.name || 'No upcoming release') + '</h3>'
+    + shippingCounts + lastShipped + '</section></aside>';
+  const roadmapList = '<div class="roadmap-list" id="roadmap-list">' + lead + (milestones.length ? coming.map(card).join('') : '<div class="card-panel empty">No milestones yet. The coordinator adds one with <code class="inline">pullboard milestone add</code>.</div>')
+    + (shipped.length ? wrap('section', 'card-panel shipped', 'shipped', false, '<h2>Shipped</h2><span class="milestone-count">' + shipped.length + (shipped.length === 1 ? ' release' : ' releases') + '</span>', shipped.map(line).join('')) : '') + '</div>';
+  // With no releases there is nothing to jump to, so the Roadmap is its list alone, as before the panel.
+  return (milestones.length ? releasePanel : '') + roadmapList;
 }
 
 /** Tags that flow inside a line of text, so a reference's line belongs to the nearest block around it. */
@@ -1409,7 +1464,12 @@ function render() {
   const items = p.items.filter((i) => i.status !== 'withdrawn');
   const active = items.filter((i) => stateOf(i) !== 'verified');
   const titles = new Map(p.items.map((i) => [String(i.id), i.title]));
+  // Every refresh redraws the Roadmap. Left alone, that would send the phone's release chips back to their start
+  // and the panel back to its top under a person mid-scroll, so both keep where they were.
+  const chipsAt = $('roadmap-releases')?.scrollLeft ?? 0, panelAt = $('roadmap-panel')?.scrollTop ?? 0;
   $('roadmap').innerHTML = roadmapCards(p, titles);
+  if ($('roadmap-releases')) $('roadmap-releases').scrollLeft = chipsAt;
+  if ($('roadmap-panel')) $('roadmap-panel').scrollTop = panelAt;
 
   // What needs the person, first, and only the person's calls (B26): the decisions passed up to them,
   // questions in the spec, held lanes, then draft rows. Work waiting for a verdict or sent back shows
@@ -1735,6 +1795,7 @@ function render() {
   $('activity').innerHTML = p.events.length ? byDay(p.events, (e) => e.event_at, (e) => '<div><time>' + clock(e.event_at) + '</time><div class="act">' + (e.event_kind === 'shout' || e.event_kind === 'answer' ? spoke(e) : '<b>' + esc(agentName(e.event_by)) + '</b> ' + esc(e.event_kind) + (e.item_id ? ' <button class="ref" data-go="item:' + e.item_id + '" type="button">#' + e.item_id + '</button>' + (titles.has(String(e.item_id)) ? ' <span class="what">' + rich(titles.get(String(e.item_id)), titles) + '</span>' : '') : '')) + '</div></div>') : '<div class="empty">No activity yet.</div>';
   showTab();
   revealPlace();
+  updateRoadmapPanel();
 }
 
 /**
@@ -2378,7 +2439,7 @@ $('shouts-pane').addEventListener('click', (event) => {
 $('shout-text').addEventListener('keydown', (event) => { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); $('shout-form').requestSubmit(); } });
 document.addEventListener('click', (event) => {
   if (view.filterOpen && !event.target.closest('.filter-control')) { view.filterOpen = false; render(); }
-  const t = event.target.closest('[data-filter-toggle],[data-filter-choice],[data-status],[data-shout-id],[data-roadmap-key],[data-roadmap-all],[data-root],[data-tab],[data-go],[data-item],[data-items-view],[data-state],[data-rows],[data-row],[data-row-decision],[data-section-approve],[data-release],[data-shout],[data-new],[data-code],[data-code-all],[data-code-less],[data-stats-toggle],#proj-switch,#console');
+  const t = event.target.closest('[data-filter-toggle],[data-filter-choice],[data-status],[data-roadmap-jump],[data-shout-id],[data-roadmap-key],[data-roadmap-all],[data-root],[data-tab],[data-go],[data-item],[data-items-view],[data-state],[data-rows],[data-row],[data-row-decision],[data-section-approve],[data-release],[data-shout],[data-new],[data-code],[data-code-all],[data-code-less],[data-stats-toggle],#proj-switch,#console');
   if (!event.target.closest('.side')) fold(false);
   if (!t) return;
   if (t.id === 'proj-switch') { fold(!$('side').classList.contains('open')); return; }
@@ -2390,6 +2451,7 @@ document.addEventListener('click', (event) => {
     return;
   }
   if (t.dataset.status) { statusGo(t.dataset.status); return; }
+  if (t.dataset.roadmapJump) { jumpToRoadmap(t.dataset.roadmapJump); return; }
   if (t.dataset.filterToggle !== undefined) { view.filterOpen = !view.filterOpen; render(); return; }
   if (t.dataset.filterChoice) {
     if (t.dataset.filterKind === 'state') view.state = t.dataset.filterValue;
@@ -2449,6 +2511,8 @@ document.addEventListener('click', (event) => {
   else if (t.dataset.shout) { answer(null); addressTo(t.dataset.shout); $('shout-text').value = '#' + t.dataset.about + ': '; openTab('shouts'); showTab(); $('shout-text').focus(); }
   else if (t.dataset.new !== undefined) { view.adding = true; render(); $('add-title').focus(); }
 });
+// The viewport's scroll is fired at the document; the tests' stand-in document has no window.
+document.addEventListener('scroll', updateRoadmapPanel, { passive: true });
 /** Close the expanded stats card and return focus to the list's summary control on Escape. */
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape' || !view.statsOpen || view.tab !== 'items' || document.querySelector('[data-pane="items"]')?.hidden) return;

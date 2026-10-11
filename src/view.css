@@ -136,12 +136,37 @@ main { padding: 16px 18px 56px; }
 .loading .top, .loading [data-pane], .boardless .top, .boardless [data-pane] { display: none; }
 .two { display: grid; grid-template-columns: minmax(0, 1fr) clamp(300px, 42%, 600px); gap: 16px; align-items: start; }
 .two.narrow { grid-template-columns: minmax(0, 1fr) var(--agents-w); }
-.roadmap { display: grid; gap: 12px; max-width: 900px; align-content: start; }
+.roadmap-layout { display: grid; grid-template-columns: minmax(0, 1fr) clamp(260px, 30%, 360px); gap: 16px; align-items: start; }
+.roadmap-layout:not(:has(.roadmap-panel)) { grid-template-columns: minmax(0, 1fr); }
+.roadmap-layout:not(:has(.roadmap-panel)) .roadmap-list { grid-row: 1; }
+.roadmap-list { grid-column: 1; grid-row: 1; display: grid; gap: 12px; max-width: 900px; min-width: 0; align-content: start; }
+.roadmap-panel { grid-column: 2; grid-row: 1; position: sticky; top: calc(var(--top) + 16px); max-height: calc(100vh - var(--top) - 32px); min-width: 0; overflow-y: auto; padding: 16px; display: grid; gap: 18px; align-content: start; }
+.roadmap-panel h2 { margin: 0 0 8px; font-size: 15px; }
+.roadmap-mobile-shipping { display: none; }
+.roadmap-release-index { min-width: 0; }
+.roadmap-releases { display: grid; gap: 4px; min-width: 0; }
+.roadmap-release { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; min-width: 0; min-height: var(--tap); padding: 5px 8px; border: 1px solid transparent; border-radius: 8px; background: none; color: var(--ink); text-align: left; cursor: pointer; }
+.roadmap-release:hover, .roadmap-release[aria-current="location"] { background: var(--surface-2); }
+.roadmap-release[aria-current="location"] { border-color: var(--line); font-weight: 600; }
+.roadmap-release > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.roadmap-release > b { flex: none; color: var(--ink-muted); font: 11px var(--mono); }
+.roadmap-next-release { margin: -2px 0 10px; font-size: 13px; overflow-wrap: anywhere; }
+.roadmap-stage-counts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin: 0; }
+.roadmap-stage-counts > div { display: flex; justify-content: space-between; gap: 6px; padding: 7px 8px; border-radius: 8px; background: var(--surface-2); }
+.roadmap-stage-counts dt { color: var(--ink-muted); font-size: 12px; }
+.roadmap-stage-counts dd { margin: 0; font: 12px var(--mono); }
+.roadmap-last-shipped { display: grid; gap: 3px; margin: 12px 0 0; font-size: 12px; }
+.roadmap-last-shipped > span { color: var(--ink-faint); }
+.roadmap-last-shipped > b { font-size: 13px; }
+.roadmap-last-shipped > small { color: var(--ink-muted); }
+.roadmap-list > [data-key] { scroll-margin-top: calc(var(--top) + 16px); }
+.roadmap-arrival { animation: roadmap-arrival 1.3s ease-out; }
+@keyframes roadmap-arrival { from { box-shadow: 0 0 0 2px var(--accent); } to { box-shadow: 0 0 0 0 transparent; } }
 .milestone { padding: 14px 16px 12px; }
 .milestone-head { display: flex; align-items: center; gap: 10px; min-height: 44px; cursor: pointer; border-radius: 8px; }
 .milestone-head .milestone-count { margin-left: auto; }
 /* A small triangle that turns down when its part is open. */
-.roadmap .caret { flex: none; width: 7px; height: 9px; background: var(--ink-faint); clip-path: polygon(0 0, 100% 50%, 0 100%); transition: transform .15s; }
+.roadmap-layout .caret { flex: none; width: 7px; height: 9px; background: var(--ink-faint); clip-path: polygon(0 0, 100% 50%, 0 100%); transition: transform .15s; }
 .milestone-head[aria-expanded="true"] > .caret { transform: rotate(90deg); }
 .shipped { padding: 4px 16px; }
 .shipped > .milestone-head h2 { margin: 0; font-size: 15px; color: var(--ink-muted); }
@@ -163,6 +188,18 @@ main { padding: 16px 18px 56px; }
 .milestone-item .id { margin-right: 6px; color: var(--ink-faint); font: 500 12px var(--mono); }
 .milestone-empty { margin: 8px 0 0; color: var(--ink-faint); }
 .milestone-note { margin: 10px 0 2px; padding: 8px 10px; border-radius: 8px; background: var(--accent-soft); color: var(--ink-muted); overflow-wrap: anywhere; }
+/* Below 900px, not at it: the Roadmap keeps its panel on the right at 900, as its criterion says, while the rest
+   of the page folds at 900 and narrower. */
+@media (width < 900px) {
+  .roadmap-layout { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .roadmap-panel { grid-column: 1; grid-row: 1; position: static; max-height: none; overflow: visible; padding: 12px; }
+  .roadmap-list { grid-column: 1; grid-row: 2; max-width: none; }
+  .roadmap-releases { display: flex; overflow-x: auto; overscroll-behavior-inline: contain; scrollbar-width: thin; gap: 5px; padding-bottom: 3px; }
+  .roadmap-release { flex: 0 0 auto; width: auto; max-width: 220px; border-color: var(--line); }
+  .roadmap-desktop-shipping { display: none; }
+  .roadmap-list .roadmap-mobile-shipping { display: grid; gap: 10px; padding: 0 14px 12px; }
+  .roadmap-stage-counts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
 @media (max-width: 900px) {
   .shell { display: block; }
   .side { position: static; height: auto; overflow: visible; padding: 8px 12px; border-right: 0; border-bottom: 1px solid var(--line); }
