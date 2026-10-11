@@ -63,3 +63,9 @@ The backlog grows when proof comes at the end. Treat a work item as done only wh
 - A hostile check knocked down three ✅s that passed their tests: a model-written line that went out unlabeled, a privacy limit that a derived ratio leaked around, and a spending cap that failed calls could reopen.
 - A row cited by 8 tests had never been built. The tests tested other rows.
 - Signers stop trusting tables that mix ready rows with questions. Keep them apart.
+
+## Pullboard commands for this work
+
+- When preparing a sign-off batch, run `pullboard prompt signoff` for the role-specific instructions.
+- When checking who may sign, run `pullboard spec signers`; when an authorized signer needs adding, use `pullboard spec signers add` with the exact verified principal.
+- When the person has recorded row decisions and the coordinator is ready to apply them, run `pullboard spec apply`.

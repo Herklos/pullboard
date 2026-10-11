@@ -27,3 +27,8 @@ Verification checks the work against the spec. This checks the spec, and what wa
 ## Report
 
 Rank the findings by what the client would notice first. For each: what it is, where it is (a file and line, or a screen), why it matters to the client, and the fix. Put decisions that belong to the person at the top. Write the report to a file the person can hand to the build's coordinator.
+
+## Pullboard commands for this review
+
+- When you start a spec review, run `pullboard prompt review` for its role-specific checklist.
+- When you need a compact table of rows, run `pullboard spec view`; inspect one row with `pullboard spec show <id>` and find rows still needing work with `pullboard spec unmet`.
