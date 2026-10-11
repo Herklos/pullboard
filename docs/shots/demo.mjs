@@ -56,7 +56,7 @@ async function buildBoard(base, env) {
   const repo = join(base, 'demo-board');
   await mkdir(repo, { recursive: true });
   command('git', ['init', '-q', '-b', 'main'], repo, env);
-  command(process.execPath, [BIN, 'init'], repo, env);
+  command(process.execPath, [BIN, 'init', '--model', 'Demo coordinator'], repo, env);
   await writeFile(join(repo, 'pullboard.json'), JSON.stringify({ name: 'Demo board', project: 'Demo project', gate: 'node --check src/demo.js', spec: 'SPEC.md', verify: { policy: 'any', family: 'require' }, lease: '2h', lanes: { app: { owns: ['src/'], specs: ['G'] }, review: { owns: [], specs: [] } }, shared: [] }, null, 2) + '\n');
   await writeFile(join(repo, 'SPEC.md'), '# Demo\n\n## G · Goals\n- G1 [approved, must] A demo item exists to show the board. | gate: none\n- G2 [approved, must] The verified item shows its review history. | gate: none\n');
   command('git', ['add', '-A'], repo, env);
