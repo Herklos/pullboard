@@ -33,6 +33,7 @@ function rawChromeBypasses(root = COCKPIT) {
     ['computed evaluate', new RegExp('\\[\\s*[\'"]' + 'evaluate' + '[\'"]\\s*\\]')],
     ['unwaited DOM click', new RegExp('\\.\\s*' + 'click' + '\\s*\\(\\s*\\)')],
     ['raw protocol', new RegExp('[\'"](?:Runtime\\.(?:evaluate|callFunctionOn)|DOM\\.(?:getBoxModel|getContentQuads)|Page\\.getLayoutMetrics|Input\\.dispatch(?:Mouse|Touch)Event)[\'"]')],
+    ['unwrapped Chrome client', new RegExp('\\bstart' + 'Chrome\\s*\\(')],
   ];
   const files = [];
   /** Include future nested Chrome test files in the boundary check. */
@@ -52,8 +53,9 @@ function rawChromeBypasses(root = COCKPIT) {
     }
     const lines = source.split('\n');
     for (let index = 0; index < lines.length; index += 1) {
+      const guardedLine = lines[index].replace(new RegExp('\\bstable' + 'Chrome\\s*\\(\\s*await\\s+start' + 'Chrome\\s*\\(', 'gu'), '(');
       for (const [kind, pattern] of patterns) {
-        if (pattern.test(lines[index])) violations.push({ file: relative(root, path), line: index + 1, kind });
+        if (pattern.test(guardedLine)) violations.push({ file: relative(root, path), line: index + 1, kind });
       }
     }
   }
@@ -107,8 +109,10 @@ test('the guard catches each low-level protocol bypass outside shared helpers [N
       ['Runtime', 'evaluate'], ['Runtime', 'callFunctionOn'], ['DOM', 'getBoxModel'],
       ['DOM', 'getContentQuads'], ['Page', 'getLayoutMetrics'], ['Input', 'dispatchMouseEvent'], ['Input', 'dispatchTouchEvent'],
     ].map(parts => `chrome.send(${JSON.stringify(parts.join('.'))}, {});`);
-    writeFileSync(join(root, 'protocol.test.js'), forbiddenCalls.join('\n') + '\n');
-    assert.deepEqual(rawChromeBypasses(root).map(({ file, line }) => [file, line]), forbiddenCalls.map((_, index) => ['protocol.test.js', index + 1]));
+    const constructor = ['start', 'Chrome', '()'].join('');
+    const wrapped = ['stable', 'Chrome', '(await ', constructor, ')'].join('');
+    writeFileSync(join(root, 'protocol.test.js'), forbiddenCalls.concat(`const raw = await ${constructor};`, `const safe = await ${wrapped};`).join('\n') + '\n');
+    assert.deepEqual(rawChromeBypasses(root), forbiddenCalls.map((_, index) => ({ file: 'protocol.test.js', line: index + 1, kind: 'raw protocol' })).concat({ file: 'protocol.test.js', line: forbiddenCalls.length + 1, kind: 'unwrapped Chrome client' }));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
