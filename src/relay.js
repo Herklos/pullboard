@@ -864,6 +864,9 @@ export async function relayOperation(root, operation, args, io, command, applyLo
   return locked(file, async () => {
     const state = loadLink(file);
     if (!state || state.unlinking) throw new Refused('RELAY_UNLINK_PENDING', 'finish unlinking this device with pullboard relay off before sending a move');
+    if (credentialActor({ operation, args, personRequest: io?.personRequest }) === 'person') {
+      throw new Refused('HUMAN_REQUIRED', 'send this person action from the paired phone');
+    }
     if (state.recovery) throw new Refused('RELAY_RECOVERY_PENDING', `finish the saved recovery for sequence ${state.recovery.skip} before sending a linked move`);
     let moves = CHECKPOINT_MOVES.get(io);
     if (!moves) { moves = new Set(); CHECKPOINT_MOVES.set(io, moves); }
