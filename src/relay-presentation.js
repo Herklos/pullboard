@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import * as store from './board.js';
 import { exportBoard } from './exchange.js';
-import { repoInfo } from './git.js';
+import { codeIsFromMain, repoInfo } from './git.js';
 import { Refused } from './refused.js';
 import { loadConfig } from './config.js';
 import { projectState } from './serve.js';
@@ -11,10 +11,11 @@ import { personRequestStatuses } from './relay-requests.js';
 
 /** Capture spec, doctrine, config and board presentation without sending plaintext to a relay. */
 export function relayPresentation(root, { board: providedBoard = null } = {}) {
-  const state = projectState(root, { board: providedBoard });
   const info = repoInfo(root);
-  const board = providedBoard ?? store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'));
-  try { return { version: 1, state: { ...store.projectItemThreads(board, state), personRequests: personRequestStatuses(board) }, config: loadConfig(root), shouts: store.allShouts(board) }; }
+  const board = providedBoard ?? store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), undefined, { isMain: codeIsFromMain() });
+  try {
+    const state = projectState(root, { board });
+    return { version: 1, state: { ...store.projectItemThreads(board, state), personRequests: personRequestStatuses(board) }, config: loadConfig(root), shouts: store.allShouts(board) }; }
   finally { if (!providedBoard) store.closeBoard(board); }
 }
 /** Resolve one shout from the complete history carried only inside the sealed presentation. */
@@ -41,7 +42,7 @@ export function relaySnapshot(root, { board: providedBoard = null } = {}) {
   const info = repoInfo(root);
   for (let attempt = 0; attempt < 3; attempt++) {
     const before = providedBoard ? null : relayPresentation(info.root);
-    const board = providedBoard ?? store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'));
+    const board = providedBoard ?? store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), undefined, { isMain: codeIsFromMain() });
     let native;
     try { native = exportBoard(board); } finally { if (!providedBoard) store.closeBoard(board); }
     const presentation = relayPresentation(info.root, { board: providedBoard });

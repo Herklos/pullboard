@@ -33,6 +33,7 @@ const NOT_MOVES = {
   EVENT_LOG_VERSION: 'the local board format is checked before opening it for an item move',
   NOT_YOUR_CHECKOUT: 'the caller owns the checkout session, checked before any item move',
   CHECKOUT_SESSION: 'the checkout-local session binding is readable before any item move',
+  UNMERGED_SCHEMA: 'shared-board schema compatibility checked before a command opens the database',
 };
 
 /**
@@ -1077,6 +1078,13 @@ test('next --verify reserves the review for the reviewLease and says until when;
     const commit = git(builder, 'rev-parse', 'HEAD');
     const submitted = run(builder, 'submit', '1');
     assert.equal(submitted.status, 0, submitted.stderr);
+    const commonDir = git(repo, 'rev-parse', '--path-format=absolute', '--git-common-dir');
+    assert.equal(git(holder, 'rev-parse', '--path-format=absolute', '--git-common-dir'), commonDir,
+      'the verifier worktree reads the builder repo common dir');
+    const sharedBoard = new DatabaseSync(join(commonDir, 'pullboard', 'board.sqlite'), { readOnly: true });
+    assert.equal(sharedBoard.prepare('PRAGMA user_version').get().user_version, 2,
+      'the main repo creates the shared board before the verifier opens it');
+    sharedBoard.close();
 
     const before = Date.now();
     const first = run(holder, 'next', '--verify');

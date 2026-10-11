@@ -4,7 +4,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, wri
 import { dirname, join } from 'node:path';
 import * as store from './board.js';
 import { exportBoard, importBoard } from './exchange.js';
-import { repoInfo } from './git.js';
+import { codeIsFromMain, repoInfo } from './git.js';
 import { forgetBoardKey, readBoardKey, storeBoardKey } from './relay-key.js';
 import { encodeBoardKey } from './seal.js';
 import { createPairingCode, openPairingBundle, parsePairingCode, sealPairingBundle } from './pairing.js';
@@ -99,7 +99,7 @@ async function signIn(url, io) {
 /** Return an exported local board with its persistent identity. */
 function localSnapshot(root) {
   const info = repoInfo(root);
-  const board = store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'));
+  const board = store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), undefined, { isMain: codeIsFromMain() });
   try { return { board: store.boardId(board), snapshot: exportBoard(board) }; }
   finally { store.closeBoard(board); }
 }
@@ -211,7 +211,7 @@ export async function relayJoin(root, code, address, io) {
   try {
     keyStorage = storeBoardKey(bundle.board, Buffer.from(bundle.key, 'base64url'));
     const info = repoInfo(root);
-    const board = store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'));
+    const board = store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), undefined, { isMain: codeIsFromMain() });
     try { importBoard(board, bundle.snapshot); }
     finally { store.closeBoard(board); }
     saveState(file, {
