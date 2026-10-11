@@ -112,7 +112,10 @@ test('[H12,H16] an expired native executor lease transfers once and the old devi
     PULLBOARD_MACHINE_HOME: join(secondHome, 'machine'),
   };
   runFixtureGit(['init', '-q', '-b', 'main'], { cwd: secondRoot, env: secondEnv });
-  const initialized = await cli(secondRoot, secondEnv, 'init');
+  // Preserve the source coordinator declaration when importing into this fresh replica.
+  const initEnv = { ...secondEnv };
+  delete initEnv.PULLBOARD_MODEL;
+  const initialized = await cli(secondRoot, initEnv, 'init');
   assert.equal(initialized.code, 0, initialized.failure ?? initialized.stderr);
   const snapshot = join(secondRoot, 'native-board.json');
   writeFileSync(snapshot, JSON.stringify(await privateExport(box.root, box.env)), { mode: 0o600 });

@@ -229,7 +229,10 @@ test('export and import CLI commands exchange a versioned document between real 
   };
   const cli = (cwd, ...args) => runFixtureChild(process.execPath, [BIN, ...args], { cwd, env, encoding: 'utf8' });
   try {
-    const initialized = cli(targetRoot, 'init');
+    // An import recipient starts without its own declared coordinator metadata.
+    const initEnv = { ...env };
+    delete initEnv.PULLBOARD_MODEL;
+    const initialized = runFixtureChild(process.execPath, [BIN, 'init'], { cwd: targetRoot, env: initEnv, encoding: 'utf8' });
     assert.equal(initialized.status, 0, initialized.stderr || initialized.stdout);
     assert.match(initialized.stdout, /coordinator/i);
 

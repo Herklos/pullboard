@@ -517,7 +517,9 @@ globalThis.fetch = function tracedFetch(input, init) {
     assert.equal(runFixtureChild('git', ['clone', bare, otherRoot], { cwd: scratch, env: otherEnv, encoding: 'utf8' }).status, 0, 'second device is a real clone');
     assert.equal(runFixtureChild('git', ['remote', 'set-url', 'origin', 'git@github.com:fixture/repository.git'], { cwd: otherRoot, env: otherEnv, encoding: 'utf8' }).status, 0, 'clone names the same authorized repository');
     const run = (...args) => childResult(otherRoot, otherEnv, [CLI, ...args, '--json']);
-    assert.equal((await run('init')).code, 0, 'the cloned project initializes its private local board');
+    const initEnv = { ...otherEnv };
+    delete initEnv.PULLBOARD_MODEL; // Pairing imports the source coordinator's declaration.
+    assert.equal((await childResult(otherRoot, initEnv, [CLI, 'init', '--json'])).code, 0, 'the cloned project initializes its private local board');
     const joined = await run('relay', 'join', code, '--url', origin);
     const document = joined.document;
     if (joined.code !== 0) throw new Error('real clone did not join the one-use pairing code');
