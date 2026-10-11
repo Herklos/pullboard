@@ -60,6 +60,29 @@ test('the clock-margin guard follows waited results through boolean assertions [
   }
 });
 
+test('the clock-margin guard checks both compared assertion arguments [C7]', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pullboard-compared-clock-'));
+  try {
+    const file = join(root, 'compared-clock.test.js');
+    const prefix = 'const startedAt = Date.now();\n';
+    for (const judgment of ['assert.strictEqual(true, Date.now() - startedAt < 10)',
+      'assert.equal(true, Date.now() - startedAt < 10)', 'assert.strictEqual(Date.now() - startedAt < 10, true)',
+      'assert.strictEqual(10, Date.now() - startedAt)', 'assert.equal(Date.now() - startedAt, 10)']) {
+      writeFileSync(file, prefix + judgment + ';\n');
+      assert.match(wallClockViolations(root).join('\n'), /compared-clock\.test\.js:2: literal elapsed-time margin/u, judgment);
+      writeFileSync(file, prefix + judgment + '; // budget: declared fixture delay is 10ms.\n');
+      assert.deepEqual(wallClockViolations(root), [], 'either compared argument accepts its same-line reason');
+    }
+    for (const judgment of ['assert.strictEqual(true, true, Date.now() - startedAt < 10)',
+      'assert.ok(true, Date.now() - startedAt < 10)', 'assert.strictEqual(true, "Date.now() - startedAt < 10")']) {
+      writeFileSync(file, prefix + judgment + ';\n');
+      assert.deepEqual(wallClockViolations(root), [], 'diagnostic arguments and quoted fixtures are excluded');
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('no test judges work by a fixed wall-clock margin [C7]', () => {
   assert.deepEqual(wallClockViolations(fileURLToPath(new URL('..', import.meta.url))), []);
 });

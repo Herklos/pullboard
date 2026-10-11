@@ -129,12 +129,17 @@ export function fixedWallMargins(source, file) {
   for (const match of code.matchAll(/\bassert(?:\s*\.\s*(\w+))?\s*\(/gu)) {
     const call = parenthesized(code, match.index + match[0].lastIndexOf('('));
     const args = argumentsOf(call), expression = args[0];
-    const fixedAlias = [...literals].some(name => new RegExp(`[<>]=?\\s*${name}\\s*$|^\\s*${name}\\s*[<>]=?`, 'u').test(expression));
-    if ((observesTime(expression, aliases) || clockDifference(expression, clocks)) && (margin.test(expression) || fixedAlias || /^(equal|strictEqual)$/u.test(match[1] ?? '') && new RegExp(`^\\s*${literal}\\s*$`, 'u').test(args[1] ?? ''))) {
-      record(match.index, 'literal elapsed-time margin');
-    }
     const judged = /^(?:equal|notEqual|strictEqual|notStrictEqual|deepEqual|notDeepEqual|deepStrictEqual|notDeepStrictEqual|partialDeepStrictEqual)$/u.test(match[1] ?? '')
       ? args.slice(0, 2) : args.slice(0, 1);
+    for (let index = 0; index < judged.length; index++) {
+      const argument = judged[index];
+      const fixedAlias = [...literals].some(name => new RegExp(`[<>]=?\\s*${name}\\s*$|^\\s*${name}\\s*[<>]=?`, 'u').test(argument));
+      const literalPeer = /^(equal|strictEqual)$/u.test(match[1] ?? '')
+        && new RegExp(`^\\s*${literal}\\s*$`, 'u').test(judged[1 - index] ?? '');
+      if ((observesTime(argument, aliases) || clockDifference(argument, clocks)) && (margin.test(argument) || fixedAlias || literalPeer)) {
+        record(match.index, 'literal elapsed-time margin');
+      }
+    }
     if (judged.some(argument => judgesWaitResult(argument, waitResults))) record(match.index, 'literal wait result judged by an assertion');
     if ((['rejects', 'doesNotReject'].includes(match[1]) || /\bawait\s+/u.test(expression)) && literalWait(expression, literals)) record(match.index, 'literal wait judged by an assertion');
   }
