@@ -2742,9 +2742,15 @@ async function readStdin(stdin) {
 /** Read hook identity and landing facts without migrating the shared board from newer source. */
 function hookRead(ctx, read) {
   if (!existsSync(ctx.file)) return null;
-  const db = new DatabaseSync(ctx.file, { readOnly: true });
-  try { return read({ db, clock: ctx.clock }); }
-  finally { db.close(); }
+  const startedAt = Date.now();
+  let db;
+  try {
+    db = new DatabaseSync(ctx.file, { readOnly: true });
+    db.exec(`PRAGMA busy_timeout = ${store.BOARD_BUSY_TIMEOUT_MS}`);
+    return read({ db, clock: ctx.clock });
+  } catch (error) {
+    throw store.boardBusyError(ctx.file, startedAt, error);
+  } finally { db?.close(); }
 }
 
 /**
