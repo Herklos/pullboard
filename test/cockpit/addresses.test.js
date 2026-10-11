@@ -202,7 +202,7 @@ test('a modified click opens a new tab [N38,N26]', { timeout: 90_000 }, async ()
       const beforeTargets = (await chrome.send('Target.getTargets')).targetInfos.filter(row => row.type === 'page').map(row => row.targetId).sort();
       await press(chrome, `document.querySelector('#detail .verdict .note code')`, input);
       const afterTargets = (await chrome.send('Target.getTargets')).targetInfos.filter(row => row.type === 'page').map(row => row.targetId).sort();
-      assert.deepEqual(afterTargets, beforeTargets, 'modified click on literal verdict code opens no tab');
+      assert.deepEqual(afterTargets.filter(id => !beforeTargets.includes(id)), [], 'modified click on literal verdict code opens no tab');
       assert.equal(await chrome.stable('location.pathname'), '/items/1', 'literal code leaves the original tab in place');
       await press(chrome, verdictSelector, input);
       const opened = await targetForHref(profile, verdictHref);
