@@ -959,10 +959,13 @@ async function refresh() {
     addressReady = true;
   }
   const text = JSON.stringify(next);
+  const changed = text !== seen;
   if (text !== seen) {
     seen = text;
     data = next;
     render();
+  }
+  if (changed) {
     address(false);
     void loadAddressedShout();
   }
