@@ -111,6 +111,7 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
         <div class="filter-control"><button class="filter-toggle" id="filter-toggle" data-filter-toggle type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="filter-menu"><span class="filter-label" id="filter-label">Filter</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg></button><div class="filter-menu" id="filter-menu" role="menu" aria-label="Filter" hidden></div></div>
         <button class="go" id="new-item" type="button" aria-label="New item"><span class="new-item-wide">New item</span><span class="new-item-narrow" aria-hidden="true">New</span></button>
       </div>
+      <section class="card-panel upgrade-note" id="upgrade-note" aria-label="What is new" hidden></section>
       <div class="card-panel list-card" id="item-list"><ol class="needs" id="needs" aria-label="What needs you" hidden></ol><ol class="chain" id="chain" aria-label="Items"></ol></div>
       <ol class="pipeline" id="pipeline" aria-label="Item pipeline" hidden></ol>
     </div>
@@ -1357,6 +1358,39 @@ if (typeof MutationObserver === 'function') new MutationObserver((changes) => {
   }
 }).observe(document.body, { childList: true, subtree: true });
 
+const releaseNotices = new Map();
+
+/** Compare already parsed release versions without treating 0.8.10 as older than 0.8.9. */
+function newerRelease(version, previous) {
+  if (!/^[0-9]+[.][0-9]+[.][0-9]+$/.test(previous)) return false;
+  const left = version.split('.').map(Number), right = previous.split('.').map(Number);
+  for (let index = 0; index < 3; index += 1) if (left[index] !== right[index]) return left[index] > right[index];
+  return false;
+}
+
+/** Remember one upgrade per board while retaining its card through this page's background refreshes. */
+function renderReleaseNotes(project) {
+  const region = $('upgrade-note');
+  region.hidden = true;
+  if (snapshot || !project?.releaseNotes) return;
+  const info = project.releaseNotes;
+  let notice = releaseNotices.get(project.root);
+  if (notice?.version !== info.version) {
+    const key = 'pb.release.' + project.root;
+    const previous = keep(key);
+    const releases = previous ? info.releases.filter((release) => newerRelease(release.version, previous)) : [];
+    notice = { version: info.version, releases, notes: info.notes };
+    releaseNotices.set(project.root, notice);
+    keep(key, info.version);
+  }
+  if (!notice.releases.length) return;
+  region.innerHTML = '<header><h2>New in ' + esc(notice.version) + '</h2><button class="ghost" type="button" data-upgrade-dismiss>Dismiss</button></header>'
+    + notice.releases.slice(0, 3).map((release) => '<article><h3>' + esc(release.version) + ' · ' + esc(release.headline) + '</h3><p>' + esc(release.paragraph) + '</p></article>').join('')
+    + '<footer>' + (notice.releases.length > 3 ? '<span>+' + (notice.releases.length - 3) + ' more</span> · ' : '')
+    + '<a href="' + esc(notice.notes) + '" target="_blank" rel="noopener noreferrer">Full release notes</a></footer>';
+  region.hidden = false;
+}
+
 /** Draw the board shown: the sidebar, then every tab's panes from the project's board. */
 function render() {
   const statsFocus = document.activeElement?.id === 'proof-stats-summary' ? document.activeElement.id : null;
@@ -1374,6 +1408,7 @@ function render() {
   $('tabs').hidden = Boolean(group);
   document.querySelectorAll('[data-pane]').forEach((pane) => { pane.hidden = Boolean(group) || pane.dataset.pane !== view.tab; });
   $('products').hidden = !p || !p.products.length;
+  renderReleaseNotes(group ? null : p);
   renderPersonRequests(p);
   renderCredentials();
   if (group) { renderGroup(group); return; }
@@ -2357,6 +2392,12 @@ for (const kind of ['spec', 'doctrine']) $(kind + '-list').addEventListener('key
 });
 // The form covers the picked item rather than dropping it, so Cancel brings it back.
 $('new-item').addEventListener('click', () => { view.adding = true; render(); $('add-title').focus(); });
+$('upgrade-note').addEventListener('click', (event) => {
+  if (!event.target.closest('[data-upgrade-dismiss]')) return;
+  const notice = releaseNotices.get(data.project?.root);
+  if (notice) notice.releases = [];
+  renderReleaseNotes(data.project);
+});
 $('add-cancel').addEventListener('click', () => { view.adding = false; render(); });
 $('spec-decline-cancel').addEventListener('click', () => { view.declining = null; $('spec-decline-dialog').hidden = true; if (view.declineFrom === 'list') $(view.declineKind + '-list').focus({ preventScroll: true }); });
 $('spec-decline-form').addEventListener('submit', (event) => {
