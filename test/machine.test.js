@@ -29,6 +29,7 @@ const NOT_MOVES = {
   BAD_MACHINE_SETTINGS: 'machine-wide settings checked before a command runs',
   BAD_GATE_SLOTS: 'machine-wide gate capacity checked before a command runs',
   NO_AGENT: 'a linked coordinator must already be registered before an item move',
+  REMOTE_COORDINATOR_MODEL: 'a linked replica cannot redeclare the coordinator model; use the coordinator checkout',
   EVENT_LOG_VERSION: 'the local board format is checked before opening it for an item move',
   NOT_YOUR_CHECKOUT: 'the caller owns the checkout session, checked before any item move',
   CHECKOUT_SESSION: 'the checkout-local session binding is readable before any item move',
@@ -49,6 +50,9 @@ const ENTRY_POINTS = [
   { verbs: ['refreeze'], at: ['board.js#refreeze'] },
   { verbs: ['reopen'], at: ['board.js#reopen'] },
 ];
+
+/** Setup refusals have no item move, but stay in the same reachability audit. */
+const NON_MOVE_ENTRY_POINTS = ['cli.js#refuseRemoteCoordinatorModel'];
 
 /** Board functions handed a function to call, and the one the CLI and the runner hand them. */
 const CALLBACKS = { 'board.js': { freeze: 'cli.js#freezer' } };
@@ -420,7 +424,9 @@ test('every refusal a move raises today is declared on that move, and every decl
     assert.ok(ENTRY_POINTS.some(({ at }) => at.some((entry) => walk.refusalsOf(entry).has(code))), `the walk finds ${code}`);
   }
   for (const code of Object.keys(NOT_MOVES)) {
-    assert.ok(ENTRY_POINTS.some(({ at }) => at.some((entry) => walk.refusalsOf(entry).has(code))), `${code} is listed as not a move because a move's code path raises it`);
+    const moveRaises = ENTRY_POINTS.some(({ at }) => at.some((entry) => walk.refusalsOf(entry).has(code)));
+    const setupRaises = NON_MOVE_ENTRY_POINTS.some((entry) => walk.refusalsOf(entry).has(code));
+    assert.ok(moveRaises || setupRaises, `${code} is listed as not a move because a move or setup code path raises it`);
   }
 });
 

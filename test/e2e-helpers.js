@@ -74,13 +74,17 @@ const SPEC = `# Demo spec
 
 /**
  * A repo set up with pullboard, two lanes and a spec, committed through its own hooks, plus a
- * worktree joined to the web lane.
+ * worktree joined to the web lane. The coordinator stays deliberately undeclared; later agents
+ * retain the runner's model, while initialization model coverage invokes init directly.
  */
 function project(gate = CONFIG.gate, box = sandbox()) {
   const repo = join(box.dir, 'repo');
   mkdirSync(repo);
   box.git(repo, 'init', '-q', '-b', 'main');
+  const inheritedModel = box.env.PULLBOARD_MODEL;
+  delete box.env.PULLBOARD_MODEL;
   assert.equal(box.run(repo, 'init').code, 0);
+  if (inheritedModel !== undefined) box.env.PULLBOARD_MODEL = inheritedModel;
   writeFileSync(join(repo, 'pullboard.json'), JSON.stringify({ ...CONFIG, gate }, null, 2));
   writeFileSync(join(repo, 'SPEC.md'), SPEC);
   box.git(repo, 'add', '-A');
