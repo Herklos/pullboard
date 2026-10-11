@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { portableSnapshot } from '../../src/serve.js';
-import { machine, project, build, sendBack, fetchLive, startView, accept, boardId, boardOf, assertObservationsEqual, chromeExecutable, browserPause, openSnapshotChrome, closeSnapshotChrome, press, travel, settled, roadmapRow, showing, readRoadmap, serveFolder, proofShot } from './fixture.js';
+import { machine, project, build, sendBack, fetchLive, startView, accept, boardId, boardOf, assertObservationsEqual, chromeExecutable, browserPause, openSnapshotChrome, closeSnapshotChrome, press, travel, settled, roadmapRow, showing, readRoadmap, openRoadmapParts, serveFolder, proofShot } from './fixture.js';
 
 
 test('static export stays in its prefix and replays read-only in Chrome [A10,A3]', { timeout: 90_000 }, async (t) => {
@@ -91,7 +91,7 @@ test('static export stays in its prefix and replays read-only in Chrome [A10,A3]
   let chrome;
   try {
     chrome = await openSnapshotChrome(executable, `${base}${prefix}`, profile);
-    const evaluate = chrome.evaluate;
+    const evaluate = chrome.stable;
     await chrome.waitFor("document.body?.classList.contains('snapshot') && typeof snapshotReplay === 'object' && !!data?.project && snapshotReplay.events.length > 0 && snapshotReplay.index === snapshotReplay.events.length");
     await chrome.waitFor("!!document.querySelector('#replay-play') && !!document.querySelector('#replay-pause') && !!document.querySelector('#replay-speed') && !!document.querySelector('#replay-progress')");
 
@@ -110,7 +110,7 @@ test('static export stays in its prefix and replays read-only in Chrome [A10,A3]
     assert.ok(shout.html.includes('&lt;script&gt;'), 'the snapshot escapes HTML in shout text');
     assert.equal(shout.scripts, 0, 'shout text never becomes an executable script element');
 
-    const firstPosition = JSON.parse(await evaluate(`(() => {
+    await evaluate(`(() => {
       window.__snapshotRealAdvance = advanceReplay;
       window.__snapshotFirstPosition = null;
       window.advanceReplay = () => {
@@ -118,9 +118,9 @@ test('static export stays in its prefix and replays read-only in Chrome [A10,A3]
         snapshotReplay.playing = false;
         replayControls();
       };
-      document.querySelector('#replay-play').click();
-      return JSON.stringify(window.__snapshotFirstPosition);
-    })()`));
+    })()`);
+    await chrome.click("document.querySelector('#replay-play')");
+    const firstPosition = JSON.parse(await evaluate('JSON.stringify(window.__snapshotFirstPosition)'));
     assert.deepEqual(firstPosition, { index: 0, items: [] }, 'play starts from an empty board before its first event');
     await evaluate('window.advanceReplay = window.__snapshotRealAdvance');
 
@@ -155,26 +155,69 @@ test('static export stays in its prefix and replays read-only in Chrome [A10,A3]
         if (status) window.__replayObserved.push({ index, status });
       }).observe(progress, { childList: true, characterData: true, subtree: true });
     })()`);
-    await evaluate("document.querySelector('#replay-play').click()");
+    await chrome.click("document.querySelector('#replay-play')");
     await chrome.waitFor('snapshotReplay.playing && snapshotReplay.index > 0 && snapshotReplay.index < snapshotReplay.events.length');
     const beforePause = await evaluate('snapshotReplay.index');
-    await evaluate("document.querySelector('#replay-pause').click()");
+    await chrome.click("document.querySelector('#replay-pause')");
     await chrome.waitFor('!snapshotReplay.playing');
     const pausedIndex = await evaluate('snapshotReplay.index');
     assert.equal(pausedIndex, beforePause, 'pause keeps the current replay event');
     await browserPause(180);
     assert.equal(await evaluate('snapshotReplay.index'), pausedIndex, 'a paused replay does not advance');
 
-    await evaluate("const speed = document.querySelector('#replay-speed'); speed.value = '16'; speed.dispatchEvent(new Event('change', { bubbles: true }))");
-    assert.equal(await evaluate("document.querySelector('#replay-speed').value"), '16');
-    const speedStart = await evaluate('snapshotReplay.index');
-    assert.ok(speedStart + 4 < initial.total, 'at least four events remain to measure 16x playback');
-    const speedStartedAt = Date.now();
-    await evaluate("document.querySelector('#replay-play').click()");
-    await chrome.waitFor(`snapshotReplay.index >= ${speedStart + 4}`, 2_000);
-    assert.ok(Date.now() - speedStartedAt < 2_000, '16x advances four replay events within two seconds');
-    await chrome.waitFor('!snapshotReplay.playing', 20_000);
-    assert.equal(await evaluate('snapshotReplay.playing'), false, 'the replay reaches its end');
+    await evaluate(`(() => {
+      window.__replayScheduledDelays = [];
+      const nativeSetTimeout = window.setTimeout.bind(window);
+      /** Observe replay pacing while preserving each native browser timeout unchanged. */
+      window.setTimeout = (callback, delay, ...args) => {
+        if (callback === window.advanceReplay) window.__replayScheduledDelays.push(delay);
+        return nativeSetTimeout(callback, delay, ...args);
+      };
+    })()`);
+    /** Replay the complete exported history and compare scheduled timer values, not elapsed time. */
+    const assertScheduledDelay = async (speed, delay) => {
+      await evaluate(`(() => {
+        window.__replayScheduledDelays.length = 0;
+        replayPosition(snapshotReplay.events.length);
+        const select = document.querySelector('#replay-speed');
+        select.value = '${speed}';
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+      })()`);
+      assert.equal(await evaluate("document.querySelector('#replay-speed').value"), speed);
+      await chrome.click("document.querySelector('#replay-play')");
+      await chrome.waitFor('!snapshotReplay.playing', 30_000); // budget: hang-only ceiling for one complete replay.
+      assert.equal(await evaluate('snapshotReplay.playing'), false, `${speed}× replay reaches its end`);
+      assert.equal(await evaluate('snapshotReplay.index'), initial.total, `${speed}× replay renders the final exported event`);
+      const scheduled = JSON.parse(await evaluate('JSON.stringify(window.__replayScheduledDelays)'));
+      assert.equal(scheduled.length, initial.total - 1, `${speed}× schedules one timeout between each exported event`);
+      assert.ok(scheduled.every((actual) => actual === delay), `${speed}× schedules ${delay} ms per step; got ${scheduled.join(', ')}`);
+    };
+    await assertScheduledDelay('1', 1000);
+    await assertScheduledDelay('4', 250);
+    await assertScheduledDelay('16', 62.5);
+    assert.equal(await evaluate('snapshotReplay.playing'), false, 'each measured replay reaches its end');
+
+    await evaluate(`(() => {
+      window.__replayScheduledDelays.length = 0;
+      replayPosition(snapshotReplay.events.length);
+      const select = document.querySelector('#replay-speed');
+      select.value = '4';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await press(chrome, "document.querySelector('#replay-play')");
+    const atFour = JSON.parse(await evaluate('JSON.stringify({ playing: snapshotReplay.playing, delay: window.__replayScheduledDelays.at(-1) })'));
+    const atSixteen = JSON.parse(await evaluate(`JSON.stringify((() => {
+      const select = document.querySelector('#replay-speed');
+      select.value = '16';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      return { playing: snapshotReplay.playing, delay: window.__replayScheduledDelays.at(-1) };
+    })())`));
+    await press(chrome, "document.querySelector('#replay-pause')");
+    const changedSpeed = { wasPlaying: atFour.playing, atFour: atFour.delay, remainsPlaying: atSixteen.playing,
+      atSixteen: atSixteen.delay, paused: !JSON.parse(await evaluate('JSON.stringify(snapshotReplay.playing)')) };
+    assert.deepEqual(changedSpeed, { wasPlaying: true, atFour: 250, remainsPlaying: true, atSixteen: 62.5, paused: true },
+      'changing speed while playing replaces the scheduled delay and leaves pause effective');
+    await assertScheduledDelay('16', 62.5);
     const renderedStates = JSON.parse(await evaluate('JSON.stringify(window.__replayObserved.map((entry) => entry.status))'));
     const distinctStates = renderedStates.filter((state, index) => index === 0 || state !== renderedStates[index - 1]);
     const firstClaim = distinctStates.indexOf('building');
@@ -216,6 +259,81 @@ test('static export stays in its prefix and replays read-only in Chrome [A10,A3]
     if (chrome) await closeSnapshotChrome(chrome);
     await new Promise((resolve) => server.close(resolve));
     rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+test('replay speed is judged by its scheduled delay [A10,C7]', { timeout: 90_000 }, async () => {
+  const executable = chromeExecutable();
+  assert.ok(executable, 'Chrome is required for the throttled replay timing proof');
+  const box = machine();
+  const alpha = project(box, 'throttled-snapshot');
+  for (let id = 1; id <= 6; id++) {
+    box.run(alpha.repo, 'add', 'web', `Throttled replay item ${id}`, '--specs', 'G1', '--criterion', 'replays');
+  }
+  const folder = join(box.dir, 'throttled-export');
+  box.run(alpha.repo, 'view', '--export', folder);
+  const host = await serveFolder(folder, '/demo/');
+  const profile = join(box.dir, 'throttled-chrome');
+  let chrome;
+  try {
+    chrome = await openSnapshotChrome(executable, `${host.base}/demo/`, profile);
+    await settled(chrome, "document.body.classList.contains('snapshot') && !!data?.project && snapshotReplay.index === snapshotReplay.events.length");
+    await chrome.send('Emulation.setCPUThrottlingRate', { rate: 6 });
+    const total = await chrome.stable('snapshotReplay.events.length');
+    assert.ok(total >= 6, 'the exported history contains at least six native item moves');
+    await chrome.stable(`(() => {
+      window.__replayScheduledDelays = [];
+      const nativeSetTimeout = window.setTimeout.bind(window);
+      /** Observe replay pacing while preserving each native browser timeout unchanged. */
+      window.setTimeout = (callback, delay, ...args) => {
+        if (callback === window.advanceReplay) window.__replayScheduledDelays.push(delay);
+        return nativeSetTimeout(callback, delay, ...args);
+      };
+    })()`);
+    /** Confirm the pacing value for every scheduled step in a complete CPU-throttled replay. */
+    const assertThrottledDelay = async (speed, delay) => {
+      await chrome.stable(`(() => {
+        window.__replayScheduledDelays.length = 0;
+        replayPosition(snapshotReplay.events.length);
+        const select = document.querySelector('#replay-speed');
+        select.value = '${speed}';
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+      })()`);
+      await press(chrome, "document.querySelector('#replay-play')");
+      await chrome.waitFor('!snapshotReplay.playing', 30_000); // budget: hang-only ceiling for one complete replay.
+      assert.equal(await chrome.stable('snapshotReplay.playing'), false, `${speed}× replay reaches its end`);
+      assert.equal(await chrome.stable('snapshotReplay.index'), total, `${speed}× replay renders the final exported event`);
+      const scheduled = await chrome.stable('window.__replayScheduledDelays');
+      assert.equal(scheduled.length, total - 1, `${speed}× schedules one delay between every replay step`);
+      assert.ok(scheduled.every((actual) => actual === delay), `${speed}× schedules ${delay} ms per step`);
+    };
+    await assertThrottledDelay('1', 1000);
+    await assertThrottledDelay('4', 250);
+    await assertThrottledDelay('16', 62.5);
+    await chrome.stable(`(() => {
+      window.__replayScheduledDelays.length = 0;
+      replayPosition(snapshotReplay.events.length);
+      const select = document.querySelector('#replay-speed');
+      select.value = '4';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await press(chrome, "document.querySelector('#replay-play')");
+    const atFour = await chrome.stable('({ playing: snapshotReplay.playing, delay: window.__replayScheduledDelays.at(-1) })');
+    const atSixteen = await chrome.stable(`(() => {
+      const select = document.querySelector('#replay-speed');
+      select.value = '16';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      return { playing: snapshotReplay.playing, delay: window.__replayScheduledDelays.at(-1) };
+    })()`);
+    await press(chrome, "document.querySelector('#replay-pause')");
+    const changedSpeed = { wasPlaying: atFour.playing, atFour: atFour.delay, remainsPlaying: atSixteen.playing,
+      atSixteen: atSixteen.delay, paused: !(await chrome.stable('snapshotReplay.playing')) };
+    assert.deepEqual(changedSpeed, { wasPlaying: true, atFour: 250, remainsPlaying: true, atSixteen: 62.5, paused: true },
+      'changing speed while playing replaces the scheduled delay under CPU throttle');
+    assert.deepEqual(chrome.exceptions, [], 'the throttled snapshot reports no uncaught browser errors');
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    await host.close();
   }
 });
 
@@ -312,6 +430,7 @@ test('an exported roadmap has its own address under a folder, and Back and Forwa
     await settled(chrome, `${ready} && ${showing('items', '/demo/')}`);
     await press(chrome, `document.querySelector('[data-tab="roadmap"]')`);
     await chrome.waitFor(showing('roadmap', '/demo/#roadmap'));
+    await openRoadmapParts(chrome);
     const seen = await readRoadmap(chrome);
     assert.deepEqual(seen.cards[0].rows.map(({ id, label, tone, button }) => ({ id, label, tone, button })), [
       { id: '#1', label: 'verified', tone: 'ok', button: true },
@@ -344,6 +463,7 @@ test('an exported roadmap has its own address under a folder, and Back and Forwa
     for (const width of [375, 1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
       await chrome.waitFor(`innerWidth === ${width}`);
+      await openRoadmapParts(chrome);
       const layout = await readRoadmap(chrome);
       assert.ok(layout.document <= layout.client && layout.body <= layout.client, `${width}: no sideways scroll in the snapshot: ${JSON.stringify(layout)}`);
       await proofShot(chrome, 'snapshot-roadmap', width);

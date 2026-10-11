@@ -1,13 +1,127 @@
 /** Coordinator flow alerts reuse the real Git/SQLite statistics and documented thresholds [N32,R1,R2]. */
 import assert from 'node:assert/strict';
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import * as store from '../src/board.js';
 import { main } from '../src/cli.js';
 import { proofStats } from '../src/stats.js';
-import { runFixtureGit } from './fixture-child.js';
+import { runFixtureChild, runFixtureGit } from './fixture-child.js';
+
+const PRIVATE_CHANGELOG = `# Changelog\n\n## [0.8.7] - 2026-10-12\n\n### A new session\n\nThe latest headline paragraph.\n\n### Added\n\n- The detailed release list is not part of the resume.\n\n## [0.8.6] - 2026-10-11\n\n### See the flow\n\nThe middle headline paragraph.\n\n### Fixed\n\n- A detailed fix.\n\n## [0.8.5] - 2026-10-10\n\n### A prettier board\n\nThe previous release.\n`;
+const LONG_CHANGELOG = `# Changelog\n\n## [0.8.9] - 2026-10-14\n\n### Nine\n\nNine paragraph.\n\n## [0.8.8] - 2026-10-13\n\n### Eight\n\nEight paragraph.\n\n## [0.8.7] - 2026-10-12\n\n### Seven\n\nSeven paragraph.\n\n## [0.8.6] - 2026-10-11\n\n### Six\n\nSix paragraph.\n\n## [0.8.5] - 2026-10-10\n\n### Five\n\nFive paragraph.\n\n## [0.8.4] - 2026-10-09\n\n### Added\n\nThis category heading is not a release headline.\n`;
+
+/** Build an isolated copy of the production CLI at a chosen release version. */
+function releaseFixture(t, { previous = null, version = '0.8.7', changelog = PRIVATE_CHANGELOG } = {}) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-resume-release-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const cli = join(root, 'cli');
+  const repo = join(root, 'repo');
+  mkdirSync(cli);
+  mkdirSync(repo);
+  writeFileSync(join(repo, 'SPEC.md'), '# Release fixture\n\n## N · Resume\n- N19 [approved, must] Resume announces released headlines once per checkout. | gate: review\n');
+  cpSync(join(import.meta.dirname, '../src'), join(cli, 'src'), { recursive: true });
+  cpSync(join(import.meta.dirname, '../bin'), join(cli, 'bin'), { recursive: true });
+  cpSync(join(import.meta.dirname, '../skills'), join(cli, 'skills'), { recursive: true });
+  symlinkSync(join(cli, 'bin/pullboard.js'), join(cli, 'bin/pullboard'));
+  const packageData = JSON.parse(readFileSync(join(import.meta.dirname, '../package.json'), 'utf8'));
+  writeFileSync(join(cli, 'package.json'), JSON.stringify({ ...packageData, version }));
+  writeFileSync(join(cli, 'CHANGELOG.md'), changelog);
+  const env = { ...process.env, PATH: `${join(cli, 'bin')}:${process.env.PATH}`, PULLBOARD_HOME: join(root, 'home'), PULLBOARD_MACHINE_HOME: join(root, 'machine-home'),
+    GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'Fixture',
+    GIT_AUTHOR_EMAIL: 'fixture@example.com', GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.com' };
+  delete env.PULLBOARD_RELAY_TOKEN;
+  runFixtureGit(['init', '-q', '-b', 'main'], { cwd: repo, env });
+  /** Run the copied production CLI in the selected real checkout. */
+  const run = (cwd, ...args) => runFixtureChild(process.execPath, [join(cli, 'bin/pullboard.js'), ...args], { cwd, env, encoding: 'utf8' });
+  /** Run Git with this fixture's private identity and configuration. */
+  const git = (cwd, ...args) => runFixtureGit(args, { cwd, env });
+  const initialized = run(repo, 'init');
+  assert.equal(initialized.status, 0, initialized.failure || initialized.stderr || initialized.stdout);
+  if (previous) {
+    const record = join(repo, '.git', 'pullboard-checkout', 'resume-version');
+    mkdirSync(join(repo, '.git', 'pullboard-checkout'), { recursive: true });
+    writeFileSync(record, `${previous}\n`);
+  }
+  return { root, repo, run, git, env };
+}
+
+test('resume says what is new once after an upgrade [N19]', t => {
+  const box = releaseFixture(t, { previous: '0.8.5' });
+  const otherCheckout = join(box.root, 'other-checkout');
+  box.git(box.repo, 'add', '-A');
+  box.git(box.repo, 'commit', '-q', '-m', 'chore: initialize resume release fixture [N19]');
+  box.git(box.repo, 'worktree', 'add', '-q', '-b', 'other', otherCheckout);
+  const lane = Object.keys(JSON.parse(readFileSync(join(box.repo, 'pullboard.json'), 'utf8')).lanes)[0];
+  const joined = box.run(otherCheckout, 'join', lane, '--model', 'Fixture');
+  assert.equal(joined.status, 0, joined.failure || joined.stderr || joined.stdout);
+  const firstCheckoutRun = box.run(otherCheckout, 'resume');
+  assert.equal(firstCheckoutRun.status, 0, firstCheckoutRun.failure || firstCheckoutRun.stderr || firstCheckoutRun.stdout);
+  assert.doesNotMatch(firstCheckoutRun.stdout, /new in 0\.8\.[67]|Full release notes/u);
+  const first = box.run(box.repo, 'resume');
+  assert.equal(first.status, 0, first.failure || first.stderr || first.stdout);
+  const text = first.stdout;
+  const latest = text.indexOf('new in 0.8.7 — A new session: The latest headline paragraph.');
+  const middle = text.indexOf('new in 0.8.6 — See the flow: The middle headline paragraph.');
+  assert.ok(latest >= 0 && middle > latest, text);
+  const fullNotes = text.indexOf('Full release notes: CHANGELOG.md');
+  assert.ok(fullNotes >= 0 && fullNotes < text.indexOf('resume:'), text);
+  assert.doesNotMatch(text, /detailed release list|A detailed fix|new in 0\.8\.5/u);
+  const second = box.run(box.repo, 'resume');
+  assert.equal(second.status, 0, second.failure || second.stderr || second.stdout);
+  assert.doesNotMatch(second.stdout, /new in 0\.8\.[67]/u);
+});
+
+test('resume --json carries what is new [N19]', t => {
+  const box = releaseFixture(t, { previous: '0.8.5' });
+  const first = box.run(box.repo, 'resume', '--json');
+  assert.equal(first.status, 0, first.failure || first.stderr || first.stdout);
+  assert.deepEqual(JSON.parse(first.stdout).whatsNew, {
+    releases: [
+      { version: '0.8.7', headline: 'A new session', paragraph: 'The latest headline paragraph.' },
+      { version: '0.8.6', headline: 'See the flow', paragraph: 'The middle headline paragraph.' },
+    ], omitted: 0, notes: 'CHANGELOG.md',
+  });
+  const second = box.run(box.repo, 'resume', '--json');
+  assert.equal(second.status, 0, second.failure || second.stderr || second.stdout);
+  assert.equal(JSON.parse(second.stdout).whatsNew, null, 'JSON notes are shown once');
+  const text = box.run(box.repo, 'resume');
+  assert.equal(text.status, 0, text.failure || text.stderr || text.stdout);
+  assert.doesNotMatch(text.stdout, /new in 0\.8\.[67]/u, 'JSON resume records the displayed notes');
+  const fresh = releaseFixture(t);
+  const quiet = fresh.run(fresh.repo, 'resume', '--json');
+  assert.equal(quiet.status, 0, quiet.failure || quiet.stderr || quiet.stdout);
+  assert.equal(JSON.parse(quiet.stdout).whatsNew, null, 'first-ever JSON resume stays quiet');
+  const long = releaseFixture(t, { previous: '0.8.3', version: '0.8.9', changelog: LONG_CHANGELOG });
+  const trimmed = long.run(long.repo, 'resume', '--json');
+  assert.equal(trimmed.status, 0, trimmed.failure || trimmed.stderr || trimmed.stdout);
+  const notes = JSON.parse(trimmed.stdout).whatsNew;
+  assert.deepEqual(notes.releases.map(release => release.version), ['0.8.9', '0.8.8', '0.8.7']);
+  assert.equal(notes.omitted, 2);
+  assert.equal(notes.notes, 'CHANGELOG.md');
+});
+
+test('a first run records the version quietly [N19]', t => {
+  const box = releaseFixture(t);
+  const result = box.run(box.repo, 'resume');
+  assert.equal(result.status, 0, result.failure || result.stderr || result.stdout);
+  assert.doesNotMatch(result.stdout, /new in 0\.8\.[67]|Full release notes/u);
+  assert.equal(readFileSync(join(box.repo, '.git', 'pullboard-checkout', 'resume-version'), 'utf8'), '0.8.7\n');
+});
+
+test('resume limits long upgrade notes and skips changelog categories as headlines [N19]', t => {
+  const box = releaseFixture(t, { previous: '0.8.3', version: '0.8.9', changelog: LONG_CHANGELOG });
+  const result = box.run(box.repo, 'resume');
+  assert.equal(result.status, 0, result.failure || result.stderr || result.stdout);
+  const text = result.stdout;
+  assert.match(text, /new in 0\.8\.9 — Nine: Nine paragraph\./u);
+  assert.match(text, /new in 0\.8\.8 — Eight: Eight paragraph\./u);
+  assert.match(text, /new in 0\.8\.7 — Seven: Seven paragraph\./u);
+  assert.doesNotMatch(text, /new in 0\.8\.6|new in 0\.8\.5|new in 0\.8\.4/u);
+  assert.match(text, /2 earlier releases omitted; see the full notes in CHANGELOG\.md/u);
+  assert.doesNotMatch(text, /new in 0\.8\.4 — Added/u);
+});
 
 const BASE = Date.parse('2026-10-10T00:00:00Z');
 const MINUTE = 60_000;
@@ -94,7 +208,7 @@ function alert(text, expected) {
 
 test('coordinator resume ends with the exact measured-average flow alert [N32,R1,R2]', async t => {
   const box = fixture(t, { wait: 61 });
-  alert(await box.run(['resume']), 'flow: review wait average 61 min (1 measured; > 60 min); bottleneck: build (66.67% of 300 measured cycle min); next: add a builder when open work is available');
+  alert(await box.run(['resume']), 'flow: review wait average 1 h 1 min (1 measured; > 1 h 0 min); bottleneck: build (66.67% of 5 h 0 min measured cycle time); next: add a builder when open work is available');
   const json = await box.run(['resume', '--json']);
   assert.deepEqual(json.flow, box.stats().flow, 'resume uses precisely the stats observation, stage and action');
   const stats = await box.run(['stats', '--json']);
@@ -104,13 +218,18 @@ test('coordinator resume ends with the exact measured-average flow alert [N32,R1
 
 test('coordinator resume alerts for the oldest unreviewed submission alone [N32,R1,R2]', async t => {
   const box = fixture(t, { wait: 10, age: 181 });
-  alert(await box.run(['resume']), 'flow: unreviewed #2 waiting 181 min (> 180 min); bottleneck: build (66.67% of 300 measured cycle min); next: add a builder when open work is available');
+  alert(await box.run(['resume']), 'flow: unreviewed #2 waiting 3 h 1 min (> 3 h 0 min); bottleneck: build (66.67% of 5 h 0 min measured cycle time); next: add a builder when open work is available');
   assert.deepEqual(box.stats().flow.unreviewed, { size: 1, oldest: { id: 2, since: '2026-10-10T05:19:00.000Z', ageMinutes: 181 } });
 });
 
 test('coordinator resume keeps both threshold trips in one final flow line [N32,R1,R2]', async t => {
   const box = fixture(t, { wait: 61, age: 181 });
-  alert(await box.run(['resume']), 'flow: review wait average 61 min (1 measured; > 60 min); unreviewed #2 waiting 181 min (> 180 min); bottleneck: build (66.67% of 300 measured cycle min); next: add a builder when open work is available');
+  const text = await box.run(['resume']);
+  alert(text, 'flow: review wait average 1 h 1 min (1 measured; > 1 h 0 min); unreviewed #2 waiting 3 h 1 min (> 3 h 0 min); bottleneck: build (66.67% of 5 h 0 min measured cycle time); next: add a builder when open work is available');
+  const flowLine = text.split('\n').find(line => line.startsWith('flow:'));
+  const minuteValues = [...flowLine.matchAll(/(\d+(?:\.\d+)?) min\b/gu)].map(match => Number(match[1]));
+  assert.ok(minuteValues.length > 0 && minuteValues.every(value => Number.isInteger(value) && value >= 0 && value < 60),
+    `every displayed minute unit is a rounded remainder below 60: ${flowLine}`);
 });
 
 test('coordinator resume adds no alert at exact healthy threshold boundaries [N32,R1,R2]', async t => {
@@ -128,13 +247,13 @@ test('coordinator resume adds no alert to an unmeasured healthy board [N32,R1,R2
 
 test('coordinator resume names an old waiting item without inventing a measured bottleneck [N32,R1,R2]', async t => {
   const box = fixture(t, { age: 181 });
-  alert(await box.run(['resume']), 'flow: unreviewed #1 waiting 181 min (> 180 min); bottleneck: not measured yet');
+  alert(await box.run(['resume']), 'flow: unreviewed #1 waiting 3 h 1 min (> 3 h 0 min); bottleneck: not measured yet');
 });
 
 for (const reservation of ['expired', 'released']) {
   test(`coordinator resume counts an ${reservation} review as unreserved from final submit [N32,R1,R2]`, async t => {
     const box = fixture(t, { age: 181, reservation });
-    alert(await box.run(['resume']), 'flow: unreviewed #1 waiting 181 min (> 180 min); bottleneck: not measured yet');
+    alert(await box.run(['resume']), 'flow: unreviewed #1 waiting 3 h 1 min (> 3 h 0 min); bottleneck: not measured yet');
   });
 }
 
@@ -156,6 +275,6 @@ test('agent resume keeps its next step without a coordinator flow alert [N32,R1,
 
 test('coordinator resume finds the oldest unreserved item behind an older live review [N32,R1,R2]', async t => {
   const box = fixture(t, { age: 190, otherAge: 181, reservation: 'live' });
-  alert(await box.run(['resume']), 'flow: unreviewed #2 waiting 181 min (> 180 min); bottleneck: not measured yet');
+  alert(await box.run(['resume']), 'flow: unreviewed #2 waiting 3 h 1 min (> 3 h 0 min); bottleneck: not measured yet');
   assert.deepEqual(box.stats().flow.unreviewed, { size: 1, oldest: { id: 2, since: '2026-10-10T05:19:00.000Z', ageMinutes: 181 } });
 });

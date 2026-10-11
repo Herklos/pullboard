@@ -12,7 +12,8 @@ import { relayClientFixture } from '../relay-client-fixture.js';
 import { AGENT_SHELL_MARKERS, SSH_SHELL_MARKERS } from '../../src/person.js';
 import { runFixtureChildAsync } from '../fixture-child.js';
 import { startChrome } from '../relay-browser-fixture.js';
-import { BIN, tapTarget, SPEC, machine, project, build, sendBack, startView, openPage, agentEntries, accept, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, earlier, shoutsAt, press, settled } from './fixture.js';
+import { stableChrome } from './stable.js';
+import { BIN, tapTarget, SPEC, machine, project, build, sendBack, startView, openPage, agentEntries, accept, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, earlier, shoutsAt, press, settled, chooseFilter } from './fixture.js';
 
 
 test('the agents panel says what each agent holds [N26]', async () => {
@@ -83,13 +84,13 @@ test('the agents panel is rows for work and pills for idle [N26]', { timeout: 12
   try {
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
     await chrome.waitFor('typeof data !== "undefined" && data?.project?.agents?.length >= 4 && data.project.shouts.length >= 2');
-    await chrome.evaluate("document.querySelector('[data-tab=shouts]').click()");
+    await chrome.click("document.querySelector('[data-tab=shouts]')");
     await chrome.waitFor('document.querySelector("[data-pane=shouts]:not([hidden]) #agents [data-agent]")');
-    assert.equal(await chrome.evaluate("document.querySelectorAll('#agents .agent-pill').length + ':' + document.querySelector('#agents .fold-line[data-fold=\"idle\"]').getAttribute('aria-expanded')"), '0:false', 'the idle agents start folded');
-    await chrome.evaluate("(() => { const fold = document.querySelector('.fold-line[data-fold=\"idle\"]'); if (fold && fold.getAttribute('aria-expanded') !== 'true') fold.click(); })()");
-    const agents = await chrome.evaluate('data.project.agents.length');
+    assert.equal(await chrome.stable("document.querySelectorAll('#agents .agent-pill').length + ':' + document.querySelector('#agents .fold-line[data-fold=\"idle\"]').getAttribute('aria-expanded')"), '0:false', 'the idle agents start folded');
+    await chrome.stable("(document.querySelector('.fold-line[data-fold=\"idle\"]'))?.getAttribute('aria-expanded') !== 'true' && !!(document.querySelector('.fold-line[data-fold=\"idle\"]'))").then(open => open ? chrome.click("document.querySelector('.fold-line[data-fold=\"idle\"]')") : undefined);
+    const agents = await chrome.stable('data.project.agents.length');
     /** The panel as it reads: each row and pill, measured where it stands. */
-    const panel = async () => JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+    const panel = async () => JSON.parse(await chrome.stable(`JSON.stringify((() => {
       const box = (e) => { const r = e.getBoundingClientRect(); return { height: r.height, width: r.width }; };
       const list = document.querySelector('#agents');
       return {
@@ -130,18 +131,18 @@ test('the agents panel is rows for work and pills for idle [N26]', { timeout: 12
 
     // A row filters the feed to that agent and addresses the composer to it, and opens to each thing it holds.
     await shoutsAt(chrome, 1280, 'light');
-    await chrome.evaluate(`document.querySelector('#agents .agent-row[data-agent="web-1"]').click()`);
+    await chrome.click(`document.querySelector('#agents .agent-row[data-agent="web-1"]')`);
     let p = await panel();
     assert.deepEqual([p.rows[0].on, p.rows[0].work.map(([id]) => id), p.chip, p.to, p.cards], [true, ['1', '2'], 'to web-1 (Test Model)×', 'web-1', [['web-1 (Test Model)', 'coordinator (unknown)']]],
       `the picked row opens to what it holds, the feed shows its shouts and the composer is addressed to it: ${JSON.stringify(p)}`);
     assert.ok(p.rows[0].work.every(([, height]) => height >= tapTarget(1280)), 'each thing it holds is a target');
     // A pill does the same.
-    await chrome.evaluate(`document.querySelector('#agents .agent-pill[data-agent="web-2"]').click()`);
+    await chrome.click(`document.querySelector('#agents .agent-pill[data-agent="web-2"]')`);
     p = await panel();
     assert.deepEqual([p.pills.find((pill) => pill.id === 'web-2').on, p.chip, p.cards], [true, 'to web-2 (Test Model)×', [['web-2 (Test Model)', 'coordinator (unknown)']]], 'a pill filters and addresses too');
     // And a thing an agent holds opens its item.
-    await chrome.evaluate(`document.querySelector('#agents .agent-row[data-agent="web-1"]').click()`);
-    await chrome.evaluate(`document.querySelector('#agents .agent-work[data-item="2"]').click()`);
+    await chrome.click(`document.querySelector('#agents .agent-row[data-agent="web-1"]')`);
+    await chrome.click(`document.querySelector('#agents .agent-work[data-item="2"]')`);
     await chrome.waitFor(`!document.querySelector('[data-pane=items]').hidden && document.querySelector('#detail h2')?.textContent.includes('Footer')`);
     assert.deepEqual(chrome.exceptions, [], 'the page raises no uncaught exception');
   } finally {
@@ -183,7 +184,7 @@ test('agent model display names follow the API on phone and desktop [O8,N26]', {
   const profile = mkdtempSync(join(tmpdir(), 'pullboard-model-names-chrome-'));
   let chrome;
   /** Read rendered text from the real browser without changing its API data. */
-  const text = (selector) => chrome.evaluate(`document.querySelector(${JSON.stringify(selector)})?.textContent || ''`);
+  const text = (selector) => chrome.stable(`document.querySelector(${JSON.stringify(selector)})?.textContent || ''`);
   /** Press a real control and wait until its requested pane is drawn. */
   const tab = async (name) => {
     await press(chrome, `document.querySelector('[data-tab="${name}"]')`);
@@ -200,19 +201,19 @@ test('agent model display names follow the API on phone and desktop [O8,N26]', {
         writeFileSync(configFile, JSON.stringify(config, null, 2));
         box.git(alpha.repo, 'add', 'pullboard.json');
         box.git(alpha.repo, 'commit', '-q', '-m', 'chore: use prefix names');
-        await chrome.evaluate('refresh()');
+        await chrome.stable('refresh()');
       }
       const expected = style === 'suffix'
         ? { builder: 'web-1 (' + model + ')', reviewer: 'coordinator (Claude)', unknown: 'web-2 (unknown)' }
         : { builder: 'gpt-6-with-a-very-long-model-declaration-for-readable-agent-names-web-1', reviewer: 'claude-coordinator', unknown: 'unknown-web-2' };
-      const apiNames = JSON.parse(await chrome.evaluate('JSON.stringify(Object.fromEntries(data.project.agents.map(a => [a.agent_id, a.displayName])))'));
+      const apiNames = JSON.parse(await chrome.stable('JSON.stringify(Object.fromEntries(data.project.agents.map(a => [a.agent_id, a.displayName])))'));
       assert.deepEqual(apiNames, { coordinator: expected.reviewer, 'web-1': expected.builder, 'web-2': expected.unknown }, `${style}: authoritative API names`);
       for (const width of [375, 1280]) {
         await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
         await settled(chrome, `innerWidth === ${width}`);
         const at = `${style} ${width}`;
         await tab('items');
-        await press(chrome, 'document.querySelector("[data-state=active]")');
+        await chooseFilter(chrome, 'state:active');
         await settled(chrome, '!!document.querySelector("#chain [data-item=\\"1\\"]")');
         assert.equal(await text('#chain [data-item="1"] .chip'), expected.builder, `${at}: item row holder`);
         assert.equal(await text('#chain [data-item="3"] .chip'), expected.unknown, `${at}: unknown model row`);
@@ -221,7 +222,7 @@ test('agent model display names follow the API on phone and desktop [O8,N26]', {
         assert.ok((await text('#detail')).includes(expected.builder), `${at}: held item detail`);
         assert.equal(await text('#needs .row[data-go^="decide:"] .meta'), 'NEEDS YOU a decision, asked by ' + expected.reviewer, `${at}: Needs-you decision author`);
         assert.ok((await text('#needs .row[data-go="tab:shouts"] .meta')).includes('lane held by ' + expected.reviewer), `${at}: Needs-you lane holder`);
-        await press(chrome, 'document.querySelector("[data-state=verified]")');
+        await chooseFilter(chrome, 'state:verified');
         await settled(chrome, '!!document.querySelector("#chain [data-item=\\"2\\"]")');
         await press(chrome, 'document.querySelector("#chain [data-item=\\"2\\"]")');
         await settled(chrome, 'view.item === 2');
@@ -232,12 +233,12 @@ test('agent model display names follow the API on phone and desktop [O8,N26]', {
         for (const [id, label] of [['web-1', expected.builder], ['web-2', expected.unknown]]) {
           assert.equal(await text(`#agents [data-agent="${id}"] .agent-who b`), label, `${at}: agent panel ${id}`);
         }
-        if (!await chrome.evaluate('Boolean(view.open.idle)')) await press(chrome, 'document.querySelector("[data-fold=idle]")');
+        if (!await chrome.stable('Boolean(view.open.idle)')) await press(chrome, 'document.querySelector("[data-fold=idle]")');
         assert.equal((await text('#agents [data-agent="coordinator"]')).trim(), expected.reviewer, `${at}: idle agent model`);
         const feed = await text('#feed');
         assert.ok(feed.includes(expected.builder) && feed.includes(expected.unknown) && feed.includes(expected.reviewer), `${at}: shout sender and recipient names`);
         assert.ok(feed.includes('→ all') && feed.includes('→ person'), `${at}: person and broadcast recipients keep their names`);
-        const headers = JSON.parse(await chrome.evaluate(`JSON.stringify([...document.querySelectorAll('#feed .shout header')].map(header => {
+        const headers = JSON.parse(await chrome.stable(`JSON.stringify([...document.querySelectorAll('#feed .shout header')].map(header => {
           const rect = header.getBoundingClientRect();
           return { height: rect.height, line: parseFloat(getComputedStyle(header.querySelector('.who')).lineHeight),
             labels: [...header.querySelectorAll('.agent-label')].map(label => {
@@ -265,7 +266,7 @@ test('agent model display names follow the API on phone and desktop [O8,N26]', {
 
         await press(chrome, 'document.querySelector("#agents [data-agent=\\"web-1\\"]")');
         await settled(chrome, 'view.agent === "web-1"');
-        assert.equal(await chrome.evaluate('view.agent'), 'web-1', `${at}: filtering retains the raw API id`);
+        assert.equal(await chrome.stable('view.agent'), 'web-1', `${at}: filtering retains the raw API id`);
         await press(chrome, 'document.querySelector("[data-agent=\\"\\"]")');
         await tab('activity');
         const activity = await text('#activity');
@@ -275,7 +276,7 @@ test('agent model display names follow the API on phone and desktop [O8,N26]', {
         await press(chrome, 'document.querySelector("#roadmap [data-go=\\"item:1\\"]")');
         await settled(chrome, 'view.tab === "items" && view.item === 1');
         assert.ok((await text('#detail')).includes(expected.builder), `${at}: roadmap item opens with the API identity`);
-        assert.ok(await chrome.evaluate('document.documentElement.scrollWidth <= innerWidth'), `${at}: no sideways overflow`);
+        assert.ok(await chrome.stable('document.documentElement.scrollWidth <= innerWidth'), `${at}: no sideways overflow`);
       }
     }
     assert.deepEqual(chrome.exceptions, [], 'all model-name views run without browser exceptions');
@@ -346,9 +347,9 @@ test('local agents panel inventories and phone-revokes a scoped credential [H2,H
   const pending = await waitFixture(() => existsSync(machineFile) && JSON.parse(readFileSync(machineFile, 'utf8')).pending,
     'foreground pairing publishes the one-use device enrollment');
   const phone = await box.phoneSession();
-  const phoneChrome = await startChrome();
+  const phoneChrome = await stableChrome(await startChrome());
   t.after(() => phoneChrome.close());
-  const localChrome = await startChrome();
+  const localChrome = await stableChrome(await startChrome());
   t.after(() => localChrome.close());
   assert.equal((await phoneChrome.send('Network.setCookie', {
     name: 'pb_session', value: phone.token, url: box.origin, httpOnly: true, sameSite: 'Lax',
@@ -379,31 +380,18 @@ test('local agents panel inventories and phone-revokes a scoped credential [H2,H
     await localChrome.waitFor("typeof data === 'object' && !!data?.project");
     /** Deliver actual mouse input only after layout settles and the target is uncovered. */
     const tap = async (selector) => {
-      await localChrome.waitFor(`Boolean(document.querySelector(${JSON.stringify(selector)})?.getBoundingClientRect().width)`);
-      const point = JSON.parse(await localChrome.evaluate(`(async () => {
-        const find=()=>document.querySelector(${JSON.stringify(selector)}); const e=find();
-        e.scrollIntoView({block:'center',inline:'nearest'});
-        const frame=()=>new Promise(done=>requestAnimationFrame(()=>done())); let previous='', stable=0;
-        for(let i=0;i<120&&stable<2;i++){await frame();const n=find(),r=n?.getBoundingClientRect(),v=r?[r.x,r.y,r.width,r.height,scrollX,scrollY].join():'';stable=v&&v===previous?stable+1:0;previous=v;}
-        const n=find(),r=n?.getBoundingClientRect(); if(!n||!r||r.width<=0||r.height<=0)throw Error('control is not laid out');
-        const x=r.x+r.width/2,y=r.y+r.height/2,hit=document.elementFromPoint(x,y);
-        if(hit!==n&&!n.contains(hit))throw Error('the real mouse point is covered by another control');
-        return JSON.stringify({x,y});
-      })()`));
-      for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) await localChrome.send('Input.dispatchMouseEvent', {
-        type, ...point, ...(type === 'mouseMoved' ? {} : { button: 'left', clickCount: 1 }),
-      });
+      await press(localChrome, `document.querySelector(${JSON.stringify(selector)})`);
     };
     await tap('[data-tab="shouts"]');
     for (const scheme of ['light', 'dark']) for (const width of [375, 1280]) {
       await localChrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
       await localChrome.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: scheme }] });
       await localChrome.waitFor(`innerWidth === ${width} && matchMedia('(prefers-color-scheme: ${scheme})').matches`);
-      if (!await localChrome.evaluate('Boolean(document.querySelector("[data-token-id]"))')) await tap('[data-credentials]');
+      if (!await localChrome.stable('Boolean(document.querySelector("[data-token-id]"))')) await tap('[data-credentials]');
       for (const metadata of listed.document.tokens) {
         const selector = `[data-token-id="${metadata.id}"]`;
         await localChrome.waitFor(`Boolean(document.querySelector(${JSON.stringify(selector)}))`);
-        const row = JSON.parse(await localChrome.evaluate(`JSON.stringify((() => {
+        const row = JSON.parse(await localChrome.stable(`JSON.stringify((() => {
           const e=document.querySelector(${JSON.stringify(selector)}),r=e.getBoundingClientRect();
           return {id:e.dataset.tokenId,text:e.innerText,overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth,
             rowOverflow:r.right>document.documentElement.clientWidth};
@@ -414,10 +402,10 @@ test('local agents panel inventories and phone-revokes a scoped credential [H2,H
         }
         assert.equal(row.text.includes(oldPA.token), false, 'the credential value never enters the DOM');
         for (const secret of [oldPA.token, otherPA.token, link.token, phone.token, readFileSync(box.keyFile, 'utf8').trim()]) {
-          assert.equal(await localChrome.evaluate(`document.documentElement.outerHTML.includes(${JSON.stringify(secret)}) || JSON.stringify(data).includes(${JSON.stringify(secret)}) || JSON.stringify([...credentials]).includes(${JSON.stringify(secret)})`), false,
+          assert.equal(await localChrome.stable(`document.documentElement.outerHTML.includes(${JSON.stringify(secret)}) || JSON.stringify(data).includes(${JSON.stringify(secret)}) || JSON.stringify([...credentials]).includes(${JSON.stringify(secret)})`), false,
             'the local page, projected board and inventory retain no credential value or board key');
         }
-        assert.equal(await localChrome.evaluate(`document.querySelector(${JSON.stringify(selector)}).querySelector('[data-revoke-token]').getBoundingClientRect().height >= 44`), true,
+        assert.equal(await localChrome.stable(`document.querySelector(${JSON.stringify(selector)}).querySelector('[data-revoke-token]').getBoundingClientRect().height >= 44`), true,
           `${width}/${scheme}: revocation has a full touch target`);
 
         assert.equal(row.overflow || row.rowOverflow, false, `${width}/${scheme}: the inventory stays within the viewport`);
@@ -436,18 +424,9 @@ test('local agents panel inventories and phone-revokes a scoped credential [H2,H
     await phoneChrome.navigate(`${box.origin}/#board=${board}&key=${encodedKey}`);
     await phoneChrome.waitFor("document.querySelector('#phone-approvals') !== null");
     await phoneChrome.waitFor(` [...document.querySelectorAll('.phone-approval')].some(node => node.textContent.includes(${JSON.stringify(expected.id)}))`);
-    const approvalPoint = JSON.parse(await phoneChrome.evaluate(`(() => {
-      const card=[...document.querySelectorAll('.phone-approval')].find(node=>node.textContent.includes(${JSON.stringify(expected.id)}));
-      const button=card?.querySelector('button'); button?.scrollIntoView({block:'center',behavior:'instant'});
-      const r=button?.getBoundingClientRect(); if(!r||r.width<=0||r.height<=0)throw Error('approval button is not visible');
-      const x=r.x+r.width/2,y=r.y+r.height/2,hit=document.elementFromPoint(x,y);
-      if(hit!==button&&!button.contains(hit))throw Error('approval mouse point is covered'); return JSON.stringify({x,y});
-    })()`));
-    for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) await phoneChrome.send('Input.dispatchMouseEvent', {
-      type, ...approvalPoint, ...(type === 'mouseMoved' ? {} : { button: 'left', clickCount: 1 }),
-    });
+    await press(phoneChrome, `[...document.querySelectorAll('.phone-approval')].find(node => node.textContent.includes(${JSON.stringify(expected.id)}))?.querySelector('button')`);
     await localChrome.waitFor("document.querySelector('#credentials [role=status]')?.textContent.includes('Credential revoked.')");
-    assert.equal(await localChrome.evaluate(`document.querySelector('[data-token-id="${expected.id}"]')?.textContent.includes('Revoked')`), true, 'the acknowledged credential row is marked revoked');
+    assert.equal(await localChrome.stable(`document.querySelector('[data-token-id="${expected.id}"]')?.textContent.includes('Revoked')`), true, 'the acknowledged credential row is marked revoked');
     assert.equal(box.calls.filter(call => call.path.endsWith('/authorize')).length, authorizationsBefore + 1,
       'one real phone tap authorizes exactly one revoke');
 

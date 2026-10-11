@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
 import { projectState } from '../src/serve.js';
 import { checkAtCommit } from '../src/trusted-policy.js';
+import { doctrineHistory } from '../src/doctrine.js';
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
 const DOCTRINE = 'DOCTRINE.md';
@@ -258,6 +259,36 @@ test('[D4,A5] canonical collisions stay errors without legacy rename history', f
   assert.equal(check.status, 1, check.stdout);
   assert.match(check.stdout, /SPEC\.md:4 G1 error: duplicate id; also appears at DOCTRINE\.md:4/u);
   assert.match(check.stdout, /DOCTRINE\.md:4 G1 error: duplicate id; also appears at SPEC\.md:4/u);
+});
+
+/** Keep both conventional doctrine paths readable at an older pinned revision. */
+test('doctrine history reads at a pinned revision [N26]', function doctrineHistoryAtPinnedRevision() {
+  const box = sandbox();
+  const root = join(box.dir, 'pinned-history');
+  mkdirSync(root);
+  box.git(root, 'init', '-q', '-b', 'main');
+  const first = '# Doctrine\n\n## L · Local\n- L1 [fact] First legacy rule.\n';
+  writeFileSync(join(root, PRACTICE), first);
+  box.git(root, 'add', PRACTICE);
+  box.git(root, 'commit', '-q', '-m', 'docs: add first legacy rule');
+  const pinned = box.git(root, 'rev-parse', 'HEAD');
+
+  writeFileSync(join(root, PRACTICE), `${first}- L2 [fact] Second legacy rule.\n`);
+  box.git(root, 'add', PRACTICE);
+  box.git(root, 'commit', '-q', '-m', 'docs: add second legacy rule');
+  const legacyPinned = doctrineHistory(root, PRACTICE, [pinned]);
+  assert.deepEqual([...legacyPinned.ids.keys()].sort(), ['L1'], 'the legacy filename honors the requested revision');
+  assert.deepEqual([...doctrineHistory(root, PRACTICE).ids.keys()].sort(), ['L1', 'L2'], 'the default still reads current HEAD');
+
+  box.git(root, 'mv', PRACTICE, DOCTRINE);
+  box.git(root, 'commit', '-q', '-m', 'docs: rename practice to doctrine');
+  writeFileSync(join(root, DOCTRINE), `${readFileSync(join(root, DOCTRINE), 'utf8')}- L3 [fact] Third doctrine rule.\n`);
+  box.git(root, 'add', DOCTRINE);
+  box.git(root, 'commit', '-q', '-m', 'docs: add third doctrine rule');
+
+  const currentPinned = doctrineHistory(root, DOCTRINE, [pinned]);
+  assert.deepEqual([...currentPinned.ids.keys()].sort(), ['L1'], 'the current filename recovers the pinned legacy history without later rows');
+  assert.deepEqual([...doctrineHistory(root, DOCTRINE).ids.keys()].sort(), ['L1', 'L2', 'L3'], 'the current filename default includes history through the rename');
 });
 
 

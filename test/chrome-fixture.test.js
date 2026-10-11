@@ -235,6 +235,53 @@ test('a failed browser evaluation names what the page threw [C7]', async () => {
   }
 });
 
+/** Prove real CDP failures retain their causes and whether a top-level page navigation occurred [C7]. */
+test('a failed DevTools command names its CDP error [C7]', {
+  skip: !findChromeExecutable() && 'Chrome is not installed',
+}, async () => {
+  let afterRequests = 0;
+  const server = createServer((request, response) => {
+    if (request.url === '/after') afterRequests += 1;
+    response.writeHead(200, { 'content-type': 'text/html' });
+    response.end(`<!doctype html><body>${request.url === '/after' ? 'after' : 'before'}</body>`);
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  let chrome;
+  try {
+    chrome = await startChrome({ url: `${origin}/before` });
+    await chrome.waitFor("location.pathname === '/before' && document.body.textContent === 'before'", 5_000, 'initial document ready'); // budget: bounds a missing local fixture document
+
+    const navigationUrl = `${origin}/after`;
+    const navigation = chrome.evaluate(`(() => {
+      setTimeout(() => location.assign(${JSON.stringify(navigationUrl)}), 0);
+      return new Promise(() => {});
+    })()`, 'evaluate during page navigation').then(() => null, (error) => error);
+    const navigationError = await navigation;
+    assert.ok(navigationError instanceof Error, 'the actual page navigation rejects the pending Runtime.evaluate');
+    assert.match(navigationError.message, /Runtime\.evaluate/u);
+    assert.match(navigationError.message, /evaluate during page navigation/u);
+    assert.match(navigationError.message, /CDP error -\d+: .+/u);
+    assert.match(navigationError.message, /Inspected target navigated or closed/u);
+    assert.match(navigationError.message, /page navigated since command was sent: yes \(Page\.(?:frameStartedNavigating|frameNavigated)\)/u);
+    await chrome.waitFor("location.pathname === '/after' && document.body.textContent === 'after'", 5_000, 'replacement document ready'); // budget: bounds a missing local fixture document
+    assert.equal(afterRequests, 1, 'the pending evaluation lost a race with one real HTTP navigation');
+
+    const rejected = await chrome.send('Runtime.noSuchCommand', {}, 'unsupported CDP method').then(() => null, (error) => error);
+    assert.ok(rejected instanceof Error, 'Chrome rejects the unsupported protocol method');
+    assert.match(rejected.message, /Runtime\.noSuchCommand/u);
+    assert.match(rejected.message, /unsupported CDP method/u);
+    assert.match(rejected.message, /CDP error -32601: .+/u);
+    assert.match(rejected.message, /wasn't found|not found/u);
+    assert.match(rejected.message, /page navigated since command was sent: no/u);
+  } finally {
+    if (chrome) await chrome.close();
+    server.closeAllConnections();
+    if (server.listening) await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 /** Prove a page condition cannot spend the much longer general command allowance. */
 test('a stalled condition uses its remaining operation budget [C7]', {
   skip: !findChromeExecutable() && 'Chrome is not installed',

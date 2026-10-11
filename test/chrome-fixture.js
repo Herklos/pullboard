@@ -300,11 +300,23 @@ export function createSender(socket, pending, nextId, timeoutMs, loopDelay, rela
   const now = timers.now ?? Date.now;
   const schedule = timers.setTimeout ?? setTimeout;
   const cancel = timers.clearTimeout ?? clearTimeout;
+  let mainFrameNavigation = 0;
+  let mainFrameId;
+  let mainFrameNavigationEvent = 'none';
   /** Resolve or reject the request matching one CDP response without logging its payload. */
   function onMessage(event) {
     let message;
     try { message = JSON.parse(String(event.data)); } catch { return; }
-    if (message.method === 'Page.frameNavigated' && !message.params?.frame?.parentId) relayRequests.clear();
+    if (message.method === 'Page.frameNavigated' && !message.params?.frame?.parentId) {
+      mainFrameId = message.params.frame.id;
+      mainFrameNavigation += 1;
+      mainFrameNavigationEvent = 'Page.frameNavigated';
+      relayRequests.clear();
+    }
+    if (message.method === 'Page.frameStartedNavigating' && message.params?.frameId === mainFrameId) {
+      mainFrameNavigation += 1;
+      mainFrameNavigationEvent = 'Page.frameStartedNavigating';
+    }
     if (message.method === 'Network.requestWillBeSent') {
       const request = message.params?.request;
       const url = request?.url ?? '';
@@ -319,8 +331,14 @@ export function createSender(socket, pending, nextId, timeoutMs, loopDelay, rela
     if (!waiter) return;
     pending.delete(message.id);
     cancel(waiter.timer);
-    if (message.error) waiter.reject(new Error(`DevTools command failed: ${waiter.method}.`));
-    else waiter.resolve(message.result);
+    if (message.error) {
+      const cdpError = message.error;
+      const navigated = mainFrameNavigation !== waiter.mainFrameNavigationAtSend;
+      const navigation = navigated ? `yes (${mainFrameNavigationEvent})` : 'no';
+      const error = new Error(`DevTools command failed: ${waiter.method} "${waiter.label}"; CDP error ${cdpError.code}: ${cdpError.message}; page navigated since command was sent: ${navigation}.`);
+      error.code = cdpError.code;
+      waiter.reject(error);
+    } else waiter.resolve(message.result);
   }
   socket.addEventListener('message', onMessage);
   return (method, params = {}, label = method, remainingMs = timeoutMs) => new Promise((resolveResult, rejectResult) => {
@@ -352,7 +370,7 @@ export function createSender(socket, pending, nextId, timeoutMs, loopDelay, rela
       rejectResult(error);
     };
     timer = schedule(expire, durationMs);
-    pending.set(requestId, { resolve: resolveResult, reject: rejectResult, timer, method, label });
+    pending.set(requestId, { resolve: resolveResult, reject: rejectResult, timer, method, label, mainFrameNavigationAtSend: mainFrameNavigation });
     try { socket.send(JSON.stringify({ id: requestId, method, params })); }
     catch {
       cancel(timer);

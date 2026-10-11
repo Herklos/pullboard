@@ -136,8 +136,10 @@ function recommendation(stage, { activeAgents, queues, openByLane, accepted, cou
     const lane = [...openByLane].sort(([a, first], [b, second]) => second - first || a.localeCompare(b))[0]?.[0];
     return lane ? `add a builder in ${lane}` : 'add a builder when open work is available';
   }
-  if (stage === 'review') return `reviews are slow (median ${stages.review.medianMinutes ?? 'unmeasured'} min): check how long the frozen checks take`;
-  return accepted.length ? `land the accepted items: ${accepted.map(id => `#${id}`).join(', ')}` : 'land the accepted items (none waiting)';
+  if (stage === 'review') return `reviews are slow (median ${duration(stages.review.medianMinutes)}): check how long the frozen checks take`;
+  const named = accepted.slice(0, 3).map(id => `#${id}`).join(', ');
+  const more = accepted.length > 3 ? ` +${accepted.length - 3} more` : '';
+  return accepted.length ? `land the accepted items: ${named}${more}` : 'land the accepted items (none waiting)';
 }
 
 /** Derive flow from the same immutable history used for counts, with an injectable observation time for fixtures. */
@@ -206,23 +208,33 @@ export function flowStats(history, boundary, now, counts) {
     submitsPerMerged: completedItems ? counts.submissions / completedItems : 0, activeAgents, bottleneck };
 }
 
-/** Format measured minutes for people while JSON retains the original numeric precision. */
-function minutes(value) { return value === null ? 'unmeasured' : String(Number(value.toFixed(2))); }
+/** Format elapsed minutes in rounded human units while JSON retains its original numeric precision. */
+function duration(value) {
+  if (value === null) return 'unmeasured';
+  const rounded = Math.round(value);
+  if (rounded < 60) return `${rounded} min`;
+  if (rounded < 24 * 60) return `${Math.floor(rounded / 60)} h ${rounded % 60} min`;
+  const hours = Math.floor(rounded / 60);
+  return `${Math.floor(hours / 24)} d ${hours % 24} h`;
+}
+
+/** Keep dimensionless counts and percentages compact without changing JSON values. */
+function number(value) { return value === null ? 'unmeasured' : String(Number(value.toFixed(2))); }
 
 /** Render all flow dimensions and the evidence behind the single recommended action. */
 export function flowLines(flow) {
   const lines = STAGES.map(stage => {
     const row = flow.stages[stage];
-    return `${LABELS[stage]}: average ${minutes(row.averageMinutes)} min · median ${minutes(row.medianMinutes)} min · ${row.count} measured; ${row.unmeasuredCompleted} of ${flow.bottleneck.completedItems} completed items unmeasured`;
+    return `${LABELS[stage]}: average ${duration(row.averageMinutes)} · median ${duration(row.medianMinutes)} · ${row.count} measured; ${row.unmeasuredCompleted} of ${flow.bottleneck.completedItems} completed items unmeasured`;
   });
   for (const [state, queue] of Object.entries(flow.queues)) {
-    lines.push(`${state} queue: ${queue.size} · oldest ${queue.oldest ? `#${queue.oldest.id} (${minutes(queue.oldest.ageMinutes)} min)` : 'none'}`);
+    lines.push(`${state} queue: ${queue.size} · oldest ${queue.oldest ? `#${queue.oldest.id} (${duration(queue.oldest.ageMinutes)})` : 'none'}`);
   }
   lines.push(`per day: ${flow.daily.map(row => `${row.date}: ${row.added} added, ${row.merged} merged`).join('; ') || 'none'}`);
-  lines.push(`${minutes(flow.submitsPerMerged)} submissions per merged item`);
+  lines.push(`${number(flow.submitsPerMerged)} submissions per merged item`);
   lines.push(`active in the last hour: ${flow.activeAgents.total} agents · roles ${Object.entries(flow.activeAgents.roles).map(([role, count]) => `${role} ${count}`).join(', ')} · lanes ${Object.entries(flow.activeAgents.lanes).map(([lane, count]) => `${lane} ${count}`).join(', ') || 'none'}`);
   const bottleneck = flow.bottleneck;
-  lines.push(`bottleneck: ${bottleneck.message}${bottleneck.share === null ? '' : ` (${minutes(bottleneck.share * 100)}%)`}${bottleneck.lowConfidence ? ' · low confidence' : ''}`);
+  lines.push(`bottleneck: ${bottleneck.message}${bottleneck.share === null ? '' : ` (${number(bottleneck.share * 100)}%)`}${bottleneck.lowConfidence ? ' · low confidence' : ''}`);
   if (bottleneck.recommendation) lines.push(`next: ${bottleneck.recommendation}`);
   return lines;
 }
@@ -232,11 +244,11 @@ export function flowAlertLine(flow) {
   const average = flow.stages.reviewWait.averageMinutes;
   const oldest = flow.unreviewed.oldest;
   const thresholds = [];
-  if (average > 60) thresholds.push(`review wait average ${minutes(average)} min (${flow.stages.reviewWait.count} measured; > 60 min)`);
-  if (oldest?.ageMinutes > 180) thresholds.push(`unreviewed #${oldest.id} waiting ${minutes(oldest.ageMinutes)} min (> 180 min)`);
+  if (average > 60) thresholds.push(`review wait average ${duration(average)} (${flow.stages.reviewWait.count} measured; > ${duration(60)})`);
+  if (oldest?.ageMinutes > 180) thresholds.push(`unreviewed #${oldest.id} waiting ${duration(oldest.ageMinutes)} (> ${duration(180)})`);
   if (!thresholds.length) return null;
   const bottleneck = flow.bottleneck;
   const measured = bottleneck.stage === null ? 'bottleneck: not measured yet' :
-    `bottleneck: ${LABELS[bottleneck.stage]} (${minutes(bottleneck.share * 100)}% of ${minutes(bottleneck.totalCycleMinutes)} measured cycle min); next: ${bottleneck.recommendation}`;
+    `bottleneck: ${LABELS[bottleneck.stage]} (${number(bottleneck.share * 100)}% of ${duration(bottleneck.totalCycleMinutes)} measured cycle time); next: ${bottleneck.recommendation}`;
   return `flow: ${thresholds.join('; ')}; ${measured}`;
 }

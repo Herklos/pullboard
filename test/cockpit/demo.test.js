@@ -5,7 +5,52 @@ import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { tapTarget, machine, project, startView, boardOf, chromeExecutable, openSnapshotChrome, closeSnapshotChrome } from './fixture.js';
+import { tapTarget, machine, project, startView, boardOf, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, press } from './fixture.js';
+import { assertFirstStateDelay } from './stable.js';
+
+/** Stage real chip clones and retain their node identities to diagnose a redraw between browser evaluations. */
+async function stageNaturalSpecChips(chrome) {
+  return JSON.parse(await chrome.stable(`JSON.stringify((() => {
+    const root = document.querySelector('#spec-chips');
+    if (!root) return { buttonCount: 0, cloneCount: 0 };
+    root.querySelectorAll('[data-natural-chip]').forEach(clone => clone.remove());
+    const buttons = [...root.querySelectorAll('button:not([data-natural-chip])')];
+    const clones = buttons.map(button => {
+      const clone = button.cloneNode(true);
+      clone.dataset.naturalChip = '';
+      clone.style.cssText += ';position:fixed;left:-10000px;opacity:0;width:max-content;flex:none';
+      button.parentElement.append(clone);
+      return clone;
+    });
+    window.__specChipStage = { buttons, clones };
+    return { buttonCount: buttons.length, cloneCount: clones.length };
+  })())`));
+}
+
+/** Clone, measure and remove natural-size chips in one page evaluation, so a render cannot split the sample. */
+async function measureNaturalSpecChips(chrome, beforeMeasure = null) {
+  if (beforeMeasure) await beforeMeasure();
+  return JSON.parse(await chrome.stable(`JSON.stringify((() => {
+    const root = document.querySelector('#spec-chips');
+    if (!root) return { buttonCount: 0, cloneCount: 0, chips: [] };
+    const buttons = [...root.querySelectorAll('button:not([data-natural-chip])')];
+    root.querySelectorAll('[data-natural-chip]').forEach(clone => clone.remove());
+    const clones = buttons.map(button => {
+      const clone = button.cloneNode(true);
+      clone.dataset.naturalChip = '';
+      clone.style.cssText += ';position:fixed;left:-10000px;opacity:0;width:max-content;flex:none';
+      button.parentElement.append(clone);
+      return clone;
+    });
+    const chips = buttons.map((button, index) => ({
+      text: button.textContent.trim(),
+      actualWidth: button.getBoundingClientRect().width,
+      naturalWidth: clones[index].getBoundingClientRect().width,
+    }));
+    clones.forEach(clone => clone.remove());
+    return { buttonCount: buttons.length, cloneCount: clones.length, chips };
+  })())`, "document.querySelectorAll('#spec-chips button:not([data-natural-chip])')"));
+}
 
 
 test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N26,N27]', { timeout: 120_000 }, async (t) => {
@@ -46,30 +91,15 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
     /** Click the actual control through Chrome input coordinates. */
     const click = async (selector) => {
       await waitRendered([selector]);
-      const point = JSON.parse(await chrome.evaluate(`(async () => {
-        const find=()=>document.querySelector(${JSON.stringify(selector)});
-        if(!find()) throw Error('missing '+${JSON.stringify(selector)});
-        find().scrollIntoView({block:'center'});
-        // Centering the sticky tab bar scrolls the page on for a few frames, so measure only once the
-        // target has held still for two frames; a point read mid-scroll lands on whatever slid under it.
-        // Find it afresh each frame: a refresh can redraw it, and a detached element measures as 0,0.
-        const frame=()=>new Promise((done)=>requestAnimationFrame(()=>done()));
-        let last='', still=0;
-        for (let n=0; n<120 && still<2; n++) { await frame(); const e=find(); const b=e?e.getBoundingClientRect():null, now=b?[b.x,b.y,b.width,b.height,scrollX,scrollY].join():''; still=now&&now===last?still+1:0; last=now; }
-        const e=find(); if(!e) throw Error('gone before the click: '+${JSON.stringify(selector)});
-        const r=e.getBoundingClientRect(); return JSON.stringify({x:r.x+r.width/2,y:r.y+r.height/2});
-      })()`));
-      await chrome.send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point });
-      await chrome.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 });
-      await chrome.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount: 1 });
+      await press(chrome, `document.querySelector(${JSON.stringify(selector)})`);
     };
     /** Fill a form field and deliver its input and change events. */
-    const fill = (selector, value) => chrome.evaluate(`(() => {
+    const fill = (selector, value) => chrome.stable(`(() => {
       const e=document.querySelector(${JSON.stringify(selector)}); if(!e) throw Error('missing '+${JSON.stringify(selector)});
       e.value=${JSON.stringify(value)}; e.dispatchEvent(new Event('input',{bubbles:true})); e.dispatchEvent(new Event('change',{bubbles:true}));
     })()`);
     /** Submit a rendered form through native validation. */
-    const submit = (selector) => chrome.evaluate(`document.querySelector(${JSON.stringify(selector)}).requestSubmit()`);
+    const submit = (selector) => chrome.stable(`document.querySelector(${JSON.stringify(selector)}).requestSubmit()`);
     /** Resize Chrome and wait for the board layout. */
     const setViewport = async (width) => {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
@@ -79,7 +109,7 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
     /** Read actual visible target sizes and document geometry. */
     const snapshot = async () => {
       await waitRendered(['[data-pane]:not([hidden])']);
-      return JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+      return JSON.parse(await chrome.stable(`JSON.stringify((() => {
       const visible=e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return !e.disabled&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)!==0&&r.width>0&&r.height>0&&!e.closest('[hidden]')};
       const selector='button,a[href],input:not([type=hidden]),select,textarea,[role=button],[data-root],[data-tab],[data-go],[data-item],[data-state],[data-rows],[data-row],[data-release],[data-shout],[data-new],[data-code]';
       const controls=[...new Set(document.querySelectorAll(selector))].filter(visible).map(e=>{const r=e.getBoundingClientRect();return {tag:e.tagName,id:e.id||'',text:(e.innerText||e.getAttribute('aria-label')||'').trim().slice(0,60),x:r.x,y:r.y,right:r.right,bottom:r.bottom,width:r.width,height:r.height,inlineReference:e.matches('.feed button.ref, .shout button.ref, .shout .band a, .detail button.ref')||!!e.closest('#chain .meta .gate, #detail .kv dd.waits-on'),statusBar:(!!e.closest('.status')||(!!e.closest('.composer')&&innerWidth>=900))&&!matchMedia('(pointer: coarse)').matches,oneLine:!e.closest('.status')||getComputedStyle(e).whiteSpace==='nowrap'}});
@@ -113,6 +143,16 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
 
     await chrome.send('Emulation.setDeviceMetricsOverride', { width: 375, height: 900, deviceScaleFactor: 1, mobile: false });
     await chrome.waitFor("document.readyState === 'complete' && !!document.querySelector('#chain .row')");
+    await assertFirstStateDelay(chrome, t);
+    await chrome.stable(`(() => {
+      const probe=document.createElement('div'); probe.dataset.frameProbe='shared-wait';
+      probe.style.cssText='position:fixed;left:0;top:0;width:1px;height:8px;background:transparent;pointer-events:none'; document.body.append(probe);
+      let frame=0; const advance=()=>{ frame++; probe.dataset.frames=String(frame); probe.style.width=(frame+1)+'px'; if(frame<40)requestAnimationFrame(advance); };
+      requestAnimationFrame(advance);
+    })()`);
+    const sampledFrames = Number(await chrome.stable("document.querySelector('[data-frame-probe]').dataset.frames", "document.querySelector('[data-frame-probe]')"));
+    assert.equal(sampledFrames, 40, 'the shared real-Chrome wait does not measure a moving target before its box stops changing');
+    await chrome.stable("document.querySelector('[data-frame-probe]').remove()");
     for (const width of [375, 1280]) {
       if (width === 1280) {
         box.run(demo.repo, 'shout', 'person', 'Should the desktop demo ship?', '--decision');
@@ -130,21 +170,19 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
         await click(`[data-root="${demo.repo}"]`);
         await chrome.waitFor("document.querySelector('#proj-name').textContent === 'phone-demo' && !!document.querySelector('#chain .row')");
       }
-      assert.ok(await chrome.evaluate("[...document.querySelectorAll('#proj-list .pname')].some(e=>e.textContent==='phone-demo')"), `${width}: demo appears in the project list`);
-      assert.ok(await chrome.evaluate("!!document.querySelector('#needs:not([hidden])')"), `${width}: Needs you is visible`);
+      assert.ok(await chrome.stable("[...document.querySelectorAll('#proj-list .pname')].some(e=>e.textContent==='phone-demo')"), `${width}: demo appears in the project list`);
+      assert.ok(await chrome.stable("!!document.querySelector('#needs:not([hidden])')"), `${width}: Needs you is visible`);
       await click('#chain .row');
-      assert.ok(await chrome.evaluate("!!document.querySelector('#detail h2')"), `${width}: selected item detail is visible`);
+      assert.ok(await chrome.stable("!!document.querySelector('#detail h2')"), `${width}: selected item detail is visible`);
       await checkLayout(width, 'items, Needs you and detail');
       for (const tab of ['shouts', 'spec', 'doctrine', 'activity']) {
         await click(`[data-tab="${tab}"]`);
         await checkLayout(width, `${tab} tab`);
         if (tab === 'spec') {
           await waitRendered(['#spec-chips button']);
-          const chips = JSON.parse(await chrome.evaluate(`JSON.stringify([...document.querySelectorAll('#spec-chips button')].map(button => {
-            const clone=button.cloneNode(true); clone.style.cssText += ';position:fixed;visibility:hidden;width:max-content;flex:none'; button.parentElement.append(clone);
-            const naturalWidth=clone.getBoundingClientRect().width, actualWidth=button.getBoundingClientRect().width; clone.remove();
-            return {text:button.textContent.trim(),actualWidth,naturalWidth};
-          }))`));
+          const { buttonCount, cloneCount, chips } = await measureNaturalSpecChips(chrome);
+          assert.ok(buttonCount > 0, `${width}: Spec chip measurement found ${buttonCount} buttons and ${cloneCount} clones`);
+          assert.equal(cloneCount, buttonCount, `${width}: spec chip measurements use one clone per current button`);
           assert.ok(chips.length >= 2, `${width}: spec filters render as chips`);
           for (const chip of chips) assert.ok(Math.abs(chip.actualWidth - chip.naturalWidth) < 2, `${width}: ${chip.text} keeps its natural width: ${JSON.stringify(chip)}`);
         }
@@ -153,7 +191,7 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
             const element = [...document.querySelectorAll('#activity .what')].find(node => node.textContent === ${JSON.stringify(wrapTitle)});
             return element?.getBoundingClientRect().width > 0 && element.firstChild?.nodeType === Node.TEXT_NODE;
           })()`);
-          const wrap = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+          const wrap = JSON.parse(await chrome.stable(`JSON.stringify((() => {
             const element=[...document.querySelectorAll('#activity .what')].find(node=>node.textContent===${JSON.stringify(wrapTitle)});
             if(!element) return null;
             const text=element.firstChild, ranges=(word)=>{const start=text.textContent.indexOf(word),range=document.createRange();range.setStart(text,start);range.setEnd(text,start+word.length);return [...range.getClientRects()].map(rect=>({x:rect.x,y:rect.y,width:rect.width}));};
@@ -165,9 +203,9 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
           assert.ok(wrap.tokenLines > 1, `${width}: only the overflowing unbroken token splits: ${JSON.stringify(wrap)}`);
         }
         if (tab === 'shouts') {
-          await chrome.evaluate("(() => { const fold = document.querySelector('.asks-toggle[data-fold=\"waiting\"]'); if (fold && fold.getAttribute('aria-expanded') !== 'true') fold.click(); })()");
+          await chrome.stable("(document.querySelector('.asks-toggle[data-fold=\"waiting\"]'))?.getAttribute('aria-expanded') !== 'true' && !!(document.querySelector('.asks-toggle[data-fold=\"waiting\"]'))").then(open => open ? chrome.click("document.querySelector('.asks-toggle[data-fold=\"waiting\"]')") : undefined);
           await waitRendered(['#decisions .shout:not(:has(.answer)) header', '#decisions .shout:not(:has(.answer)) .text', '#decisions .shout .answer']);
-          const asks = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+          const asks = JSON.parse(await chrome.stable(`JSON.stringify((() => {
             const waiting = document.querySelector('#decisions .shout:not(:has(.answer))');
             const waitingMeta = waiting?.querySelector('header');
             const waitingText = waiting?.querySelector('.text');
@@ -212,7 +250,7 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
       await chrome.waitFor(`document.querySelector('#feed').innerText.includes('Phone shout ${width}')`);
 
       await chrome.waitFor("!!document.querySelector('#decisions [data-go]')");
-      const decision = await chrome.evaluate("document.querySelector('#decisions [data-go]')?.getAttribute('data-go')");
+      const decision = await chrome.stable("document.querySelector('#decisions [data-go]')?.getAttribute('data-go')");
       assert.ok(decision, `${width}: a decision is offered for answer`);
       await click(`#decisions [data-go="${decision}"]`);
       await checkLayout(width, 'answer form');
@@ -228,7 +266,7 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
       await chrome.waitFor("!document.querySelector('#lanes [data-release=web]')");
     }
 
-    const originalPointer = JSON.parse(await chrome.evaluate(`JSON.stringify({ fine:matchMedia('(pointer: fine)').matches, coarse:matchMedia('(pointer: coarse)').matches, none:matchMedia('(pointer: none)').matches })`));
+    const originalPointer = JSON.parse(await chrome.stable(`JSON.stringify({ fine:matchMedia('(pointer: fine)').matches, coarse:matchMedia('(pointer: coarse)').matches, none:matchMedia('(pointer: none)').matches })`));
     await chrome.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 });
     await chrome.waitFor("matchMedia('(pointer: coarse)').matches");
     await setViewport(1280);
@@ -240,7 +278,7 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
     await chrome.send('Emulation.setTouchEmulationEnabled', { enabled: false });
     await chrome.waitFor(`matchMedia('(pointer: fine)').matches === ${originalPointer.fine} && matchMedia('(pointer: coarse)').matches === ${originalPointer.coarse} && matchMedia('(pointer: none)').matches === ${originalPointer.none}`);
 
-    await chrome.evaluate(`(() => {
+    await chrome.stable(`(() => {
       const probe = document.createElement('div');
       probe.dataset.scrollbarProof = '';
       probe.style.cssText = 'position:absolute;left:0;top:0;width:2000px;height:1px;';
@@ -251,7 +289,7 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
       'the deliberate probe extends past the content viewport');
     assert.equal(fitsViewport(overflowingLayout), false,
       'the no-horizontal-overflow predicate detects deliberate content overflow');
-    await chrome.evaluate("document.querySelector('[data-scrollbar-proof]').remove()");
+    await chrome.stable("document.querySelector('[data-scrollbar-proof]').remove()");
     await checkLayout(1280, 'after removing the deliberate overflow probe');
 
     const posts = chrome.requests.filter((request) => request.method === 'POST' && new URL(request.url).pathname.endsWith('/moves'));
@@ -268,6 +306,65 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
     assert.deepEqual(state.holds, [], 'both widths released the held lane');
     assert.deepEqual(chrome.exceptions, [], 'Chrome reports no uncaught exceptions');
     assert.deepEqual(consoleErrors, [], 'Chrome reports no console errors');
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    await view.stop();
+    rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+test('the spec chip measurement survives a redraw [N26,C7]', {
+  timeout: 30_000, // budget: stop a hung local Chrome flow; not a rendering-speed assertion.
+}, async () => {
+  const executable = chromeExecutable();
+  assert.ok(executable, 'Chrome is installed or PULLBOARD_CHROME points to it');
+
+  const box = machine();
+  const demo = project(box, 'spec-chip-redraw-demo');
+  box.run(demo.repo, 'add', 'web', 'Spec chip measurement item', '--specs', 'G1', '--criterion', 'visible in the Spec chip redraw test');
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-spec-chip-redraw-'));
+  let chrome;
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+    await chrome.waitFor("document.readyState === 'complete' && !!document.querySelector('#chain .row')");
+    await press(chrome, "document.querySelector('[data-tab=spec]')");
+    await chrome.waitFor("document.querySelectorAll('#spec-chips button:not([data-natural-chip])').length >= 2");
+
+    let redraw;
+    /** Reproduce the prior split-operation boundary with a real chip click and record why its samples differ. */
+    const forceRedrawAtMeasurementBoundary = async () => {
+      const staged = await stageNaturalSpecChips(chrome);
+      assert.ok(staged.buttonCount >= 2, `Spec filters render as chips: ${JSON.stringify(staged)}`);
+      assert.equal(staged.cloneCount, staged.buttonCount, `staging begins with matching buttons and clones: ${JSON.stringify(staged)}`);
+      await press(chrome, "document.querySelector('#spec-chips [data-rows=\"spec:all\"]')");
+      await chrome.waitFor("document.querySelectorAll('#spec-chips button:not([data-natural-chip])').length >= 2");
+      redraw = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+        const stage = window.__specChipStage;
+        const root = document.querySelector('#spec-chips');
+        return {
+          stagedButtonsConnected: stage.buttons.every(button => button.isConnected),
+          stagedClonesConnected: stage.clones.every(clone => clone.isConnected),
+          buttonCount: root.querySelectorAll('button:not([data-natural-chip])').length,
+          cloneCount: root.querySelectorAll('[data-natural-chip]').length,
+        };
+      })())`));
+      assert.equal(redraw.stagedButtonsConnected, false, `the actual filter click redrew the chip buttons: ${JSON.stringify(redraw)}`);
+      assert.equal(redraw.stagedClonesConnected, false, `that redraw dropped the staged clones: ${JSON.stringify(redraw)}`);
+      assert.equal(redraw.buttonCount, staged.buttonCount, `the current chip count stayed stable: ${JSON.stringify(redraw)}`);
+      assert.equal(redraw.cloneCount, 0, `the redraw removed the staged clones rather than changing the chip count: ${JSON.stringify(redraw)}`);
+    };
+
+    const measured = await measureNaturalSpecChips(chrome, forceRedrawAtMeasurementBoundary);
+    assert.ok(measured.buttonCount > 0, `Spec chip measurement found ${measured.buttonCount} buttons and ${measured.cloneCount} clones`);
+    assert.equal(measured.cloneCount, measured.buttonCount, `the current buttons are cloned and measured together: ${JSON.stringify(measured)}`);
+    assert.equal(measured.chips.length, measured.buttonCount, `every current Spec chip has a measurement: ${JSON.stringify(measured)}`);
+    for (const chip of measured.chips) assert.ok(Math.abs(chip.actualWidth - chip.naturalWidth) < 2,
+      `${chip.text} keeps its natural width after redraw: ${JSON.stringify(chip)}`);
+    assert.equal(await chrome.stable("document.querySelectorAll('#spec-chips [data-natural-chip]').length"), 0,
+      'natural-size clones are removed after measurement');
+    assert.deepEqual(chrome.exceptions, [], 'the browser reports no page exceptions');
   } finally {
     if (chrome) await closeSnapshotChrome(chrome);
     await view.stop();

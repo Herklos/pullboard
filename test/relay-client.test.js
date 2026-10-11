@@ -570,7 +570,9 @@ test('[H3,H16,V1,V17] three cloned linked replicas order competing claims and re
   await cli(clones[0], envs[0], 'status');
 
   const beforeInit = localEvents(replicaFiles[0]);
-  const initializedClone = await cli(clones[0], envs[0], 'init');
+  const modelFreeInitEnv = { ...envs[0] };
+  delete modelFreeInitEnv.PULLBOARD_MODEL;
+  const initializedClone = await cli(clones[0], modelFreeInitEnv, 'init');
   assert.equal(initializedClone.root, clones[0]);
   assert.deepEqual(localEvents(replicaFiles[0]), beforeInit, 'repeated init cannot bypass relay ordering to rewrite coordinator registration');
 

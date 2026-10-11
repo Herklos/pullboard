@@ -65,6 +65,32 @@ A bare id names a row in `SPEC.md`. A doctrine row is cited as `doctrine:<id>` i
 | `line` | 1-based source line. |
 <!-- parser-fields:end -->
 
+## Resume release notes
+
+<!-- resume-release-notes:start -->
+`pullboard resume --json` adds a `whatsNew` field to its version-1 envelope. `whatsNew` is `null` when nothing is new. After an upgrade it contains the released versions newer than this checkout last ran, newest first:
+
+```json
+{
+  "whatsNew": {
+    "releases": [
+      {
+        "version": "0.8.7",
+        "headline": "A new session",
+        "paragraph": "Release headline paragraph."
+      }
+    ],
+    "omitted": 0,
+    "notes": "CHANGELOG.md"
+  }
+}
+```
+
+Each `releases` entry has a version number, the release headline from its `###` heading in `CHANGELOG.md`, and that heading's paragraph. Added, Changed and Fixed lists are excluded. Only the newest three releases are included; `omitted` counts the earlier releases left out, and `notes` names the full release notes.
+
+Both text and JSON resumes record the displayed version once per checkout. Later resumes at the same version have no extra text and a null `whatsNew` field. A checkout's first run records its version quietly. The record is `pullboard-checkout/resume-version` in the checkout's Git directory, outside the shared board; linked worktrees keep separate records. JSON resume includes the notes in its response when recording that version, so a JSON call does not consume notes without exposing them.
+<!-- resume-release-notes:end -->
+
 ## SQLite board schema
 
 The board file is in the repository's Git common directory at `.git/pullboard/board.sqlite`. File-backed connections use WAL mode, so `board.sqlite-wal` and `board.sqlite-shm` can sit beside it while connections are open. SQLite `PRAGMA user_version` records the board schema version; it also marks whether trigger repairs are reported in the event log. Schema objects are created from `src/board.js` when a board opens.

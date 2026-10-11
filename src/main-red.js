@@ -4,6 +4,8 @@ import { randomUUID } from 'node:crypto';
 import { lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
+import { stripVTControlCharacters } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { runProfiledShell, withGateSlot } from './gate.js';
 import { cleanGitEnvironment, mainCheckout } from './git.js';
 import { mainPolicy, policyAt } from './trusted-policy.js';
@@ -22,14 +24,17 @@ function shellWord(value) {
 /** Resolve one test filename from runner output to a safe repository-relative path. */
 function testPath(root, value) {
   if (typeof value !== 'string' || !value) return null;
+  if (value.startsWith('file:')) {
+    try { value = fileURLToPath(value); } catch { return null; }
+  }
   const absolute = resolve(root, value);
   const path = relative(root, absolute);
   if (!path || path === '..' || path.startsWith(`..${sep}`) || path.startsWith(sep)) return null;
   return path.split(sep).join('/');
 }
 
-/** Unique failed test files actually named by the runner profile. */
-function failingFiles(root, profile) {
+/** Unique failed files named by TAP/JUnit metadata or Node's native spec failure footer. */
+function failingFiles(root, profile, output) {
   const files = new Set();
   for (const test of profile?.tests ?? []) if (test.passed === false) {
     const path = testPath(root, test.file);
@@ -42,6 +47,15 @@ function failingFiles(root, profile) {
       const path = testPath(root, file.path);
       if (path) files.add(path);
     }
+  }
+  let specFailures = false;
+  for (const raw of String(output ?? '').split(/\r?\n/u)) {
+    const line = stripVTControlCharacters(raw).trim();
+    if (line === '✖ failing tests:') specFailures = true;
+    if (!specFailures) continue;
+    const location = /^test at (.+):\d+:\d+$/u.exec(line);
+    const path = location && testPath(root, location[1]);
+    if (path) files.add(path);
   }
   return [...files].sort();
 }
@@ -126,17 +140,18 @@ function withMainCheckout(root, commit, run) {
  * @param {string} root
  * @param {object} profile
  * @param {(state:object)=>void} [onWait]
+ * @param {string} [output] - The failed phase's unchanged reporter output.
  * @returns {Promise<{ main: string|null, files: Array<{file:string,result:'red'|'green'}>, unavailable?: string }>}
  */
-export async function compareMainFailures(root, profile, onWait) {
+export async function compareMainFailures(root, profile, onWait, output = '') {
   const main = mainCheckout(root);
   if (!main?.commit) return { main: null, files: [], unavailable: 'the primary checkout has no committed main snapshot' };
   const policy = policyAt(root, main.commit);
   if (typeof policy.config.affectedTests !== 'string' || !policy.config.affectedTests.trim()) {
     return { main: main.commit, files: [], unavailable: 'no focused test runner configured' };
   }
-  const files = failingFiles(root, profile);
-  if (!files.length) return { main: main.commit, files: [], unavailable: 'the runner did not name failed test files' };
+  const files = failingFiles(root, profile, output);
+  if (!files.length) return { main: main.commit, files: [], unavailable: 'could not read which tests failed' };
   const file = cacheFile(root);
   const cacheLease = await takeResource({
     name: 'main-red-cache', capacity: 1, scope: 'repo', root,
@@ -185,6 +200,9 @@ export function mainRedAttribution(root, board, comparison) {
 export function mainRedMessage(root, board, profile, comparison) {
   if (comparison.unavailable === 'no focused test runner configured') {
     return 'main not checked: no focused test runner configured (affectedTests)';
+  }
+  if (comparison.unavailable === 'could not read which tests failed') {
+    return 'main not checked: could not read which tests failed';
   }
   if (!comparison.files.length) return '';
   const attribution = mainRedAttribution(root, board, comparison);

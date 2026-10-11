@@ -3,8 +3,10 @@
  * and fit the size budgets so they stay useful in the README and the site.
  */
 import assert from 'node:assert/strict';
-import { readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { delimiter, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { evaluationValue } from './devtools-evaluation.mjs';
@@ -32,6 +34,23 @@ test('the README links the desktop board and timed tour with descriptive alt tex
   linkedInSection('Installation', 'tour.svg', ['submitted', 'rejected', 'fixed', 'accepted']);
 });
 
+test('the README board shots show the stats line [I11,I13]', () => {
+  const { state } = JSON.parse(readFileSync(new URL('docs/demo/api/v1/boards/demo-board/state.json', ROOT), 'utf8'));
+  const stats = state.proofStats;
+  assert.equal(stats.merged, 1, 'the demo includes one merged item');
+  assert.equal(stats.rejectionShare, 1 / 3, 'one of three submissions was sent back');
+  assert.equal(stats.flow.stages.reviewWait.totalMinutes, 6, 'the final review wait is recorded as six minutes');
+  assert.equal(stats.flow.bottleneck.fullyMeasuredCycles, 1, 'the completed demo cycle has every stage measured');
+  assert.equal(stats.flow.bottleneck.stage, 'reviewWait', 'recorded event times name the longest completed-cycle stage');
+  assert.equal(stats.flow.bottleneck.recommendation, 'add a verifier');
+  const exported = readFileSync(new URL('docs/demo/index.html', ROOT), 'utf8');
+  assert.match(exported, /proof-stats-summary-text/, 'the exported demo renders a compact summary');
+  assert.match(exported, /stats\.merged \+ ' merged · ' \+ percentage \+ ' sent back'/, 'the summary is derived from exported stats');
+  assert.match(exported, /Bottleneck: ' \+ \(stage \|\| bottleneck\.message\)/, 'the summary includes the measured bottleneck');
+  linkedInSection('Pullboard View', 'desktop.png', ['stats line', 'merged work', 'sent-back share', 'bottleneck recommendation']);
+  linkedInSection('Pullboard View', 'phone.png', ['stats line', 'merged work', 'sent-back share', 'bottleneck recommendation']);
+});
+
 test('the demo board stages a Shouts conversation [I11,I13]', () => {
   const { state } = JSON.parse(readFileSync(new URL('docs/demo/api/v1/boards/demo-board/state.json', ROOT), 'utf8'));
   const agents = state.agents.filter((agent) => agent.agent_id !== 'person');
@@ -50,6 +69,37 @@ test('the demo board stages a Shouts conversation [I11,I13]', () => {
   assert.equal(receipt.shout_evidence_outcome, 'edge passes');
   assert.equal(receipt.shout_evidence_commit, state.items.find((item) => item.id === 1).commit);
   assert.ok(state.shouts.some((shout) => shout.shout_text.includes(`src/demo.js:1@${receipt.shout_evidence_commit}`)), 'the code reference points at the reviewed fix');
+});
+
+test('the demo board declares every agent\'s model [I11,I13]', () => {
+  const fixture = mkdtempSync(join(tmpdir(), 'pullboard-demo-model-'));
+  try {
+    const source = fileURLToPath(ROOT);
+    const root = join(fixture, 'repo');
+    mkdirSync(root);
+    for (const directory of ['src', 'bin', 'docs/shots', 'skills']) cpSync(join(source, directory), join(root, directory), { recursive: true });
+    for (const file of ['test/chrome-fixture.js', 'test/fixture-child.js', 'package.json']) cpSync(join(source, file), join(root, file));
+    const shims = join(fixture, 'bin');
+    mkdirSync(shims);
+    const pullboard = join(shims, 'pullboard');
+    writeFileSync(pullboard, `#!/bin/sh\nexec "${process.execPath}" "${join(root, 'bin/pullboard.js')}" "$@"\n`);
+    chmodSync(pullboard, 0o755);
+    const env = { ...process.env, PATH: [shims, process.env.PATH].filter(Boolean).join(delimiter) };
+    delete env.PULLBOARD_MODEL;
+    const result = spawnSync(process.execPath, [join(root, 'docs/shots/demo.mjs'), '--board-only'], { cwd: root, env, encoding: 'utf8' });
+    assert.equal(result.status, 0, `the isolated real demo board rebuild succeeds: ${result.stderr}\n${result.stdout}`);
+    const state = JSON.parse(readFileSync(join(root, 'docs/demo/api/v1/boards/demo-board/state.json'), 'utf8')).state;
+    const models = new Map(state.agents.map((agent) => [agent.agent_id, agent.agent_model]));
+    const events = JSON.parse(readFileSync(join(root, 'docs/demo/api/v1/boards/demo-board/events.json'), 'utf8')).events;
+    assert.ok(events.some((event) => event.event_kind === 'join' && event.event_by === 'coordinator'), 'the first coordinator registration is in the full event log');
+    for (const event of events.filter((move) => move.event_by !== 'person')) {
+      const detail = JSON.parse(event.event_detail);
+      assert.ok(typeof detail.model === 'string' && detail.model.trim() && detail.model !== 'unknown', `${event.event_by} ${event.event_kind} declares its model`);
+    }
+    assert.deepEqual([...models].sort(), [['app-1', 'Demo builder'], ['coordinator', 'Demo coordinator'], ['review-1', 'Demo reviewer']]);
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
 });
 
 test('the README shows the Shouts capture [I11,I13]', () => {
@@ -128,7 +178,7 @@ test('the demo rebuild script uses a temporary repo and isolated home [I11,I13]'
   const script = readFileSync(shots('demo.mjs'), 'utf8');
   assert.match(script, /mkdtemp\(join\(tmpdir\(\)/);
   assert.match(readFileSync(shots('demo-env.mjs'), 'utf8'), /, HOME: home, PULLBOARD_HOME: home/);
-  assert.match(script, /process\.execPath, \[BIN, 'init'\]/);
+  assert.match(script, /process\.execPath, \[BIN, 'init', '--model', 'Demo coordinator'\]/);
 });
 
 test('a Chrome evaluation exception fails the screenshot capture [I11,I13]', () => {

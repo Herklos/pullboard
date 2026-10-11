@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { SPEC, machine, project, build, sendBack, startView, styleOf, element, openPage, projectRows, agentEntries, needEntries, itemRow, shoutNameText, chromeExecutable, openSnapshotChrome, closeSnapshotChrome } from './fixture.js';
+import { SPEC, machine, project, build, sendBack, startView, styleOf, element, openPage, projectRows, agentEntries, needEntries, itemRow, shoutNameText, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, chooseFilter } from './fixture.js';
 
 
 test('a decision waits in needs-you until the view answers it [B21, B26, N27]', async () => {
@@ -182,7 +182,7 @@ test('needs you and the asks sit in their lists [N26]', { timeout: 180_000 }, as
   const profile = mkdtempSync(join(tmpdir(), 'pullboard-asks-chrome-'));
   let chrome;
   /** Items' head and Shouts' card as they read. */
-  const read = async () => JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+  const read = async () => JSON.parse(await chrome.stable(`JSON.stringify((() => {
     const box = (e) => { if (!e) return null; const r = e.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height }; };
     const shown = (e) => !!e && !e.closest('[hidden]') && e.getBoundingClientRect().height > 0;
     const probe = document.createElement('i'); probe.style.color = 'var(--warn)'; document.body.append(probe); const warn = getComputedStyle(probe).color; probe.remove();
@@ -203,7 +203,7 @@ test('needs you and the asks sit in their lists [N26]', { timeout: 180_000 }, as
       okNote: (() => { const c = document.querySelector('#console'); return !!c && !c.hidden && getComputedStyle(c).display !== 'none' && c.classList.contains('ok'); })(),
     };
   })())`));
-  const click = (selector) => chrome.evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
+  const click = (selector) => chrome.click(`document.querySelector(${JSON.stringify(selector)})`);
   try {
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
     await chrome.waitFor("typeof data === 'object' && data?.project?.decisions?.length === 1 && data.project.asked.length === 1 && data.project.holds.length === 1");
@@ -214,7 +214,8 @@ test('needs you and the asks sit in their lists [N26]', { timeout: 180_000 }, as
         await chrome.waitFor(`innerWidth === ${width} && matchMedia('(prefers-color-scheme: ${scheme})').matches`);
         const at = `${width}px ${scheme}`;
         await click('[data-tab=items]');
-        await click('[data-state=active]');
+        await click('[data-tab=items]');
+        await chooseFilter(chrome, 'state:active');
         let r = await read();
         assert.ok(r.page.scroll <= r.page.width && r.page.body <= r.page.width, `${at}: no sideways scroll on Items`);
         // Needs you heads the list: each call a row shaped like an item, NEEDS YOU and its kind (for a decision, who
@@ -260,7 +261,7 @@ test('needs you and the asks sit in their lists [N26]', { timeout: 180_000 }, as
     await click('.asks-slot [data-agents-toggle]');
     assert.ok((await read()).panelShown, 'and brings the panel back');
     // A sent shout shows as its card; no note pushes into the composer's line.
-    await chrome.evaluate("document.querySelector('#shout-text').focus()");
+    await chrome.stable("document.querySelector('#shout-text').focus()");
     await chrome.send('Input.insertText', { text: 'Footer after the greeting.' });
     await click('#shout-send');
     await chrome.waitFor("[...document.querySelectorAll('#feed .shout .text')].some((text) => text.textContent === 'Footer after the greeting.')", 15_000);
@@ -273,19 +274,21 @@ test('needs you and the asks sit in their lists [N26]', { timeout: 180_000 }, as
     r = await read();
     assert.deepEqual([r.needs.length, r.needs.filter((need) => /^Ship part [1-6] today\?$/.test(need.words)).length, r.needs.every((need) => need.label)], [10, 6, true],
       `ten calls, ten rows, each with its kind in the warning colour: ${JSON.stringify(r.needs)}`);
-    assert.equal(await chrome.evaluate("document.querySelector('#needs').textContent.includes('more need you')"), false, 'no call is folded into a count');
+    assert.equal(await chrome.stable("document.querySelector('#needs').textContent.includes('more need you')"), false, 'no call is folded into a count');
     // Narrowed to the unread shouts from the status bar, the feed carries its bar with show all; show all clears it.
     box.run(alpha.web, 'shout', 'coordinator', 'Greeting is half done.');
     await chrome.waitFor("!document.querySelector('#status-unread')?.hidden", 15_000);
     await click('#status-unread');
     await chrome.waitFor("view.tab === 'shouts' && !!document.querySelector('#feed .feed-bar')");
-    assert.match(await chrome.evaluate("document.querySelector('#feed .feed-bar').textContent"), /^\d+ unread\s*show all$/, 'narrowed to the unread shouts, the feed carries its bar with show all');
+    assert.match(await chrome.stable("document.querySelector('#feed .feed-bar').textContent"), /^\d+ unread\s*show all$/, 'narrowed to the unread shouts, the feed carries its bar with show all');
     await click('#feed [data-unread]');
     assert.equal((await read()).feedBar, false, 'show all brings back every shout and clears the bar');
     // Under Verified, or a lane, the list is narrowed and Needs you steps aside.
-    await click('[data-state=verified]');
+    await click('[data-tab=items]');
+    await chooseFilter(chrome, 'state:verified');
     assert.equal((await read()).needsShown, false, 'under Verified, Needs you steps aside');
-    await click('[data-state=active]');
+    await click('[data-tab=items]');
+    await chooseFilter(chrome, 'state:active');
     assert.deepEqual(chrome.exceptions, [], 'the page raises no uncaught exception');
   } finally {
     if (chrome) await closeSnapshotChrome(chrome);
