@@ -190,6 +190,34 @@ function hasTestFiles(args) {
   return false;
 }
 
+/** Translate the runner's shard option to Node's native test-shard option, refusing malformed ranges. */
+function shardArguments(args) {
+  const forwarded = [];
+  let shard;
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === '--') {
+      forwarded.push(...args.slice(index));
+      break;
+    }
+    if (argument === '--shard' || argument.startsWith('--shard=')) {
+      if (shard !== undefined) return { error: `duplicate --shard; expected one <i>/<n> value` };
+      shard = argument === '--shard' ? args[++index] : argument.slice('--shard='.length);
+      if (shard === undefined) return { error: '--shard requires a value; expected <i>/<n> with 1 <= i <= n' };
+      continue;
+    }
+    forwarded.push(argument);
+  }
+  if (shard === undefined) return { args: forwarded };
+  const match = shard.match(/^([1-9][0-9]*)\/([1-9][0-9]*)$/u);
+  const index = match ? Number(match[1]) : NaN;
+  const total = match ? Number(match[2]) : NaN;
+  if (!Number.isSafeInteger(index) || !Number.isSafeInteger(total) || index > total) {
+    return { error: `invalid --shard value "${shard}"; expected <i>/<n> with 1 <= i <= n` };
+  }
+  return { args: [`--test-shard=${shard}`, ...forwarded] };
+}
+
 /** Run tests in the disposable environment, preserving a marker only when a parent holds the slot. */
 function executeTests(args, sandbox, gateSlotHeld) {
   const env = testEnvironment(sandbox);
@@ -213,6 +241,13 @@ async function main(args) {
     process.exitCode = 1;
     return;
   }
+  const sharding = shardArguments(args);
+  if (sharding.error) {
+    process.stderr.write(`run-tests: ${sharding.error}\n`);
+    process.exitCode = 1;
+    return;
+  }
+  args = sharding.args;
   const fullSuite = !hasTestFiles(args);
   const inheritedSlot = process.env.PULLBOARD_GATE_SLOT_HELD === '1';
   let signal = null;
