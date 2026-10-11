@@ -126,8 +126,23 @@ const routed = false;
 /** The tab the address names: the Roadmap at its own address, or null at the board's. */
 function addressTab() {
   if (typeof location === 'undefined') return null;
+  if (snapshot) {
+    const tab = (location.hash || '').slice(1).split('/')[0] || '';
+    return ['items', 'shouts', 'spec', 'doctrine', 'activity', 'roadmap'].includes(tab) ? tab : null;
+  }
   if (location.hash === '#items/pipeline') return 'items';
+  if (/^#items\/\d+$/.test(location.hash)) return 'items';
   return (routed ? location.pathname === '/roadmap' : location.hash === '#roadmap') ? 'roadmap' : null;
+}
+/** Build an address for an item in the current app or an exported snapshot, preserving repo scope. */
+function itemAddress(id, root = view.root) {
+  if (snapshot) return location.pathname + location.search + '#items/' + encodeURIComponent(String(id));
+  const repo = data?.projects.find((entry) => entry.root === root);
+  const group = data?.groups.find((entry) => entry.key === root);
+  const name = repo?.name || group?.name;
+  const prefix = (data?.projects.filter((entry) => entry.ok).length || 0) > 1 && name ? '/' + encodeURIComponent(name) : '';
+  const path = prefix + '/items/' + encodeURIComponent(String(id));
+  return routed ? path + location.search : location.pathname + location.search + '#' + path.slice(1);
 }
 /** The tab the board's own address shows: the one last picked there, or Items. */
 function homeTab() {
@@ -140,8 +155,32 @@ if (snapshot) view.state = 'all';
 let data = null;
 let seen = '';
 let addressReady = false;
+let heldClickPointer = null;
+let deferredClickRender = false;
 const addressedShouts = new Map();
 const $ = (id) => document.getElementById(id);
+
+/** Mark primary pointer targets whose click would be lost if a refresh replaces them. */
+function holdClickPointer(event) {
+  if (!event.isPrimary || event.button !== 0 || !(event.target instanceof Element && event.target.closest('#pipeline .pipeline-item, #spec-detail [data-row-decision="decline"], #spec-decline-submit'))) return;
+  heldClickPointer = event.pointerId;
+}
+
+/** Flush a deferred refresh only after the browser has had the chance to dispatch the resulting click. */
+function releaseClickPointer(event) {
+  if (event.pointerId !== heldClickPointer) return;
+  heldClickPointer = null;
+  if (deferredClickRender) requestAnimationFrame(() => {
+    if (heldClickPointer === null && deferredClickRender) {
+      deferredClickRender = false;
+      render();
+    }
+  });
+}
+
+document.addEventListener('pointerdown', holdClickPointer, true);
+document.addEventListener('pointerup', releaseClickPointer, true);
+document.addEventListener('pointercancel', releaseClickPointer, true);
 /**
  * Draw the page in the theme the person picked, light or dark; with none picked it follows the system, live. The button
  * only ever offers the other of the two: it shows the scheme on screen, and a press picks the opposite. Following the
@@ -222,7 +261,7 @@ function shoutAgentName(id) {
   return '<span class="agent-label' + (prefix ? ' prefix' : '') + '" title="' + esc(name) + '" role="group" aria-label="' + esc(name) + '">' + (prefix ? label + address : address + label) + '</span>';
 }
 /** Render a review note with escaped text and references bound to the selected board. */
-const verdictHtml = (v, titles) => '<div class="verdict ' + (v.decision === 'ACCEPT' ? 'yes' : 'no') + '"><b>' + esc(v.decision) + ' ' + esc(v.reason) + '</b><span class="by">' + esc(agentName(v.by)) + ' · ' + when(v.at) + ' · at ' + esc(String(v.commit || '').slice(0, 12)) + '</span><div class="note">' + linked(visibleVerdictNote(v.reason, v.note), titles) + '</div></div>';
+const verdictHtml = (v, titles) => '<div class="verdict ' + (v.decision === 'ACCEPT' ? 'yes' : 'no') + '"><b>' + esc(v.decision) + ' ' + esc(v.reason) + '</b><span class="by">' + esc(agentName(v.by)) + ' · ' + when(v.at) + ' · at ' + esc(String(v.commit || '').slice(0, 12)) + '</span><div class="note">' + inline(visibleVerdictNote(v.reason, v.note), titles) + '</div></div>';
 const stateOf = (i) => i.status === 'claimed' ? 'building' : i.status === 'submitted' ? 'verify' : i.status === 'verified' ? 'verified' : i.status === 'withdrawn' ? 'withdrawn' : i.verdict && i.verdict.decision === 'REJECT' ? 'back' : 'open';
 const STATES = { building: ['building', 'busy'], verify: ['to verify', 'warn'], back: ['sent back', 'no'], verified: ['verified', 'ok'], open: ['unclaimed', 'free'], withdrawn: ['withdrawn', ''] };
 const chip = (s) => '<span class="chip ' + STATES[s][1] + '">' + STATES[s][0] + '</span>';
@@ -413,7 +452,7 @@ function pipelineCard(items) {
     const rows = items.filter((item) => pipelineStage(item) === stage).sort((a, b) => pipelineSince(a).localeCompare(pipelineSince(b)) || a.id - b.id);
     const oldest = rows[0];
     return '<li class="card-panel pipeline-stage" data-pipeline-stage="' + stage + '"><header><h2>' + label + '</h2><b data-stage-count="' + stage + '">' + rows.length + '</b></header>'
-      + (oldest ? '<p class="pipeline-oldest">Oldest <button class="ref" type="button" data-item="' + oldest.id + '">#' + oldest.id + '</button> · ' + age(pipelineSince(oldest)) + ' in this stage</p>' : '<p class="pipeline-oldest">No items</p>')
+      + (oldest ? '<p class="pipeline-oldest">Oldest <a class="ref" href="' + esc(itemAddress(oldest.id)) + '" data-go="item:' + oldest.id + '">#' + oldest.id + '</a> · ' + age(pipelineSince(oldest)) + ' in this stage</p>' : '<p class="pipeline-oldest">No items</p>')
       + '<ul>' + rows.map((item) => '<li><button class="pipeline-item' + (view.item === item.id ? ' on' : '') + '" type="button" data-item="' + item.id + '"><span>#' + item.id + '</span><span>' + esc(item.title) + '</span></button></li>').join('') + '</ul></li>';
   }).join('');
 }
@@ -896,7 +935,7 @@ async function refresh() {
   // Rebuild only when the board changed: a list rebuilt under the pointer can swallow a click.
   if (!addressReady) {
     data = next;
-    const place = snapshot ? null : placeAtAddress(next);
+    const place = placeAtAddress(next);
     if (place?.root && place.root !== view.root) {
       view.root = place.root;
       keep('pb.project', view.root);
@@ -1075,10 +1114,10 @@ function renderSide() {
    * @param {boolean} allowLinks
    * @returns {string}
    */
-  function linked(text, titles, allowLinks = true) { return String(text ?? '').split(/(#\d+|(?<![^\s([{"'`])[^\s:@()[\]{}"'`]+:\d+(?:-\d+)?@[0-9a-f]{7,40}(?![^\s)\]}"'`.,;:!?]))/).map((part, n, parts) => {
+  function linked(text, titles, allowLinks = true, root = view.root) { return String(text ?? '').split(/(#\d+|(?<![^\s([{"'`])[^\s:@()[\]{}"'`]+:\d+(?:-\d+)?@[0-9a-f]{7,40}(?![^\s)\]}"'`.,;:!?]))/).map((part, n, parts) => {
     if (n % 2 && part[0] !== '#') return allowLinks ? codeRef(part, parts.slice(0, n).join('').split('\n').pop().slice(-2000)) : codeChip(part);
     const id = /^#\d+$/.test(part) ? String(Number(part.slice(1))) : '';
-    return titles.has(id) && allowLinks ? '<button class="ref" data-go="item:' + id + '" title="' + esc(titles.get(id)) + '" type="button">' + esc(part) + '</button>' : esc(part);
+    return id && allowLinks ? '<a class="ref" href="' + esc(itemAddress(id, root)) + '" data-go="item:' + id + '"' + (root === view.root ? '' : ' data-board="' + esc(root) + '"') + (titles.has(id) ? ' title="' + esc(titles.get(id)) + '"' : '') + '>' + esc(part) + '</a>' : esc(part);
   }).join(''); }
   /** Format inline code and recognized command tokens without interpreting markup.
    * @param {string} text
@@ -1086,7 +1125,7 @@ function renderSide() {
    * @param {boolean} allowLinks
    * @returns {string}
    */
-  function inline(text, titles, allowLinks = true) { return String(text ?? '').split(/(`[^`]*`|(?:[^\s:@()[\]{}"'`]+)?:\d+(?:-\d+)?@[0-9a-f]{0,40}|pullboard (?:hook pre-merge-commit|join coordinator|milestone remove|prompt decompose|spec signers add|hook commit-msg|hook pre-commit|milestone items|milestone edit|milestone move|prompt signoff|hook pre-push|milestone add|prompt review|prompt verify|relay devices|relay recover|relay revoke|relay tokens|spec approve|spec decline|spec signers|spec signoff|prompt plan|view export|relay join|relay pair|spec apply|spec check|spec unmet|decisions|lifecycle|milestone|relay off|resources|spec show|spec view|escalate|refreeze|relay on|settings|takeover|withdraw|worktree|release|roadmap|version|answer|doctor|export|forget|import|ledger|merged|prompt|reopen|resume|skills|status|submit|verify|whoami|check|claim|hooks|inbox|lanes|relay|serve|shout|stats|sweep|done|edit|fact|gate|help|hold|hook|init|join|land|list|next|pass|show|spec|tour|view|add|log|run)(?![\w-])(?: (?:--?[\w-]+|\d+|#\d+|"[^"\n]*"|[A-Z][A-Z0-9_]*|[\w-]*[\/.:@][^\s"]*|[a-z]+-\d+)(?![\w-]))*|--[\w-]+|(?:\/|\.\.?\/|[\w.-]+\/)\w[\w./-]*\.[A-Za-z0-9]+|\b[0-9a-fA-F]{7,40}\b|#\d+)/g).map((part, n, parts) => {
+  function inline(text, titles, allowLinks = true, root = view.root) { return String(text ?? '').split(/(`[^`]*`|(?:[^\s:@()[\]{}"'`]+)?:\d+(?:-\d+)?@[0-9a-f]{0,40}|pullboard (?:hook pre-merge-commit|join coordinator|milestone remove|prompt decompose|spec signers add|hook commit-msg|hook pre-commit|milestone items|milestone edit|milestone move|prompt signoff|hook pre-push|milestone add|prompt review|prompt verify|relay devices|relay recover|relay revoke|relay tokens|spec approve|spec decline|spec signers|spec signoff|prompt plan|view export|relay join|relay pair|spec apply|spec check|spec unmet|decisions|lifecycle|milestone|relay off|resources|spec show|spec view|escalate|refreeze|relay on|settings|takeover|withdraw|worktree|release|roadmap|version|answer|doctor|export|forget|import|ledger|merged|prompt|reopen|resume|skills|status|submit|verify|whoami|check|claim|hooks|inbox|lanes|relay|serve|shout|stats|sweep|done|edit|fact|gate|help|hold|hook|init|join|land|list|next|pass|show|spec|tour|view|add|log|run)(?![\w-])(?: (?:--?[\w-]+|\d+|#\d+|"[^"\n]*"|[A-Z][A-Z0-9_]*|[\w-]*[\/.:@][^\s"]*|[a-z]+-\d+)(?![\w-]))*|--[\w-]+|(?:\/|\.\.?\/|[\w.-]+\/)\w[\w./-]*\.[A-Za-z0-9]+|\b[0-9a-fA-F]{7,40}\b|#\d+)/g).map((part, n, parts) => {
     if (part.startsWith('`') && part.endsWith('`')) return codeChip(part.slice(1, -1));
     if (part.includes('@') && part.includes(':')) {
       const textBefore = parts.slice(0, n).join('');
@@ -1106,7 +1145,7 @@ function renderSide() {
     if (/^(?:pullboard (?:hook pre-merge-commit|join coordinator|milestone remove|prompt decompose|spec signers add|hook commit-msg|hook pre-commit|milestone items|milestone edit|milestone move|prompt signoff|hook pre-push|milestone add|prompt review|prompt verify|relay devices|relay recover|relay revoke|relay tokens|spec approve|spec decline|spec signers|spec signoff|prompt plan|view export|relay join|relay pair|spec apply|spec check|spec unmet|decisions|lifecycle|milestone|relay off|resources|spec show|spec view|escalate|refreeze|relay on|settings|takeover|withdraw|worktree|release|roadmap|version|answer|doctor|export|forget|import|ledger|merged|prompt|reopen|resume|skills|status|submit|verify|whoami|check|claim|hooks|inbox|lanes|relay|serve|shout|stats|sweep|done|edit|fact|gate|help|hold|hook|init|join|land|list|next|pass|show|spec|tour|view|add|log|run)(?![\w-])(?: (?:--?[\w-]+|\d+|#\d+|"[^"\n]*"|[A-Z][A-Z0-9_]*|[\w-]*[\/.:@][^\s"]*|[a-z]+-\d+)(?![\w-]))*|--[\w-]+)$/.test(part)) return codeChip(part, 'cmd');
     if (/^(?:\/|\.\.?\/|[\w.-]+\/)\w[\w./-]*\.[A-Za-z0-9]+$/.test(part)) return codeChip(part, 'path');
     if (/^[0-9a-fA-F]{7,40}$/.test(part)) return codeChip(part, 'sha');
-    return linked(part, titles, allowLinks);
+    return linked(part, titles, allowLinks, root);
   }).join(''); }
   /** Render inline text and fenced or shell command blocks with escaped contents.
    * @param {string} text
@@ -1128,7 +1167,8 @@ function renderSide() {
     return !/[,;]\s/.test(bare) && bare.trim().split(/\s+/).slice(1).filter((word) => /^[A-Za-z]+$/.test(word)).length <= 2;
   }
 
-  function bullets(lines, titles, allowLinks) {
+  /** Preserve repo scope while linking references inside a prose list. */
+  function bullets(lines, titles, allowLinks, root = view.root) {
     const roots = [], open = [];
     for (const line of lines) {
       const [, indent, text] = /^(\s*)- (.*)$/.exec(line);
@@ -1138,14 +1178,14 @@ function renderSide() {
       open.push({ indent: indent.length, node });
     }
     const list = (nodes) => '<ul class="text-list">' + nodes.map((node) => '<li>'
-      + (wholeCommand(node.text) ? codeChip(node.text, 'cmd') : inline(node.text, titles, allowLinks))
+      + (wholeCommand(node.text) ? codeChip(node.text, 'cmd') : inline(node.text, titles, allowLinks, root))
       + (node.children.length ? list(node.children) : '') + '</li>').join('') + '</ul>';
     return list(roots);
   }
 
   // A line that is nothing but one path:lines@commit reference.
   const WHOLE_REF = /^\s*[^\s:@()[\]{}"'`]+:\d+(?:-\d+)?@[0-9a-f]{7,40}\s*$/;
-  function rich(text, titles, allowLinks = true) {
+  function rich(text, titles, allowLinks = true, root = view.root) {
     const lines = String(text ?? '').split('\n');
     const output = [];
     for (let i = 0; i < lines.length;) {
@@ -1164,10 +1204,10 @@ function renderSide() {
       } else if (/^\s*- /.test(lines[i])) {
         const run = [];
         while (i < lines.length && /^\s*- /.test(lines[i])) run.push(lines[i++]);
-        output.push({ list: bullets(run, titles, allowLinks) });
+        output.push({ list: bullets(run, titles, allowLinks, root) });
       } else {
         const block = [];
-        while (i < lines.length && !lines[i].startsWith('```') && !lines[i].startsWith('$ ') && !/^\s*- /.test(lines[i]) && !(allowLinks && WHOLE_REF.test(lines[i]))) block.push(inline(lines[i++], titles, allowLinks));
+        while (i < lines.length && !lines[i].startsWith('```') && !lines[i].startsWith('$ ') && !/^\s*- /.test(lines[i]) && !(allowLinks && WHOLE_REF.test(lines[i]))) block.push(inline(lines[i++], titles, allowLinks, root));
         output.push(block.join('<br>'));
       }
     }
@@ -1180,14 +1220,14 @@ function renderGroup(group) {
   const needs = group.repos.flatMap((repo) => projectNeeds(repo.board).map((row) => ({ ...row, repo })));
   $('group-needs').innerHTML = needs.length ? needs.map((row) => {
     const titles = new Map(row.repo.board.items.map((item) => [String(item.id), item.title]));
-    const text = rich(row.text, titles).replaceAll('<button class="ref" data-go=', '<button class="ref" data-root="' + esc(row.repo.root) + '" data-go=');
+    const text = rich(row.text, titles, true, row.repo.root);
     return '<div class="group-need"><b>' + esc(row.repo.name) + '</b><code>' + esc(row.ref) + '</code><span>' + text + '</span><button data-root="' + esc(row.repo.root) + '" type="button"><em>' + esc(row.what) + (row.at ? ', ' + age(row.at) : '') + ' →</em></button></div>';
   }).join('') : '<div class="empty">Nothing needs you across this project.</div>';
   const events = group.repos.flatMap((repo) => {
     const titles = new Map(repo.board.items.map((item) => [String(item.id), item.title]));
     return repo.board.events.map((event) => ({ ...event, repo, titles, title: event.item_id ? titles.get(String(event.item_id)) : null }));
   }).sort((a, b) => b.event_at.localeCompare(a.event_at)).slice(0, 80);
-  $('group-activity').innerHTML = events.length ? byDay(events, (event) => event.event_at, (event) => '<div><time>' + clock(event.event_at) + '</time><div class="act"><b class="repo-label">' + esc(event.repo.name) + '</b> <span>' + esc(agentName(event.event_by, event.repo.board)) + ' ' + esc(event.event_kind) + (event.item_id ? ' #' + event.item_id + (event.title ? ' ' + rich(event.title, event.titles).replaceAll('<button class="ref" data-go=', '<button class="ref" data-root="' + esc(event.repo.root) + '" data-go=') : '') : '') + '</span></div></div>') : '<div class="empty">No activity yet.</div>';
+  $('group-activity').innerHTML = events.length ? byDay(events, (event) => event.event_at, (event) => '<div><time>' + clock(event.event_at) + '</time><div class="act"><b class="repo-label">' + esc(event.repo.name) + '</b> <span>' + esc(agentName(event.event_by, event.repo.board)) + ' ' + esc(event.event_kind) + (event.item_id ? ' <a class="ref" href="' + esc(itemAddress(event.item_id, event.repo.root)) + '" data-go="item:' + event.item_id + '"' + (event.repo.root === view.root ? '' : ' data-board="' + esc(event.repo.root) + '"') + '>#' + event.item_id + '</a>' + (event.title ? ' ' + rich(event.title, event.titles, true, event.repo.root) : '') : '') + '</span></div></div>') : '<div class="empty">No activity yet.</div>';
 }
 
 /**
@@ -1262,7 +1302,7 @@ function jumpToRoadmap(key) {
  * title is the row's tooltip. An item that opens is a button; one that cannot says why instead.
  */
 function milestoneRow(row, titles) {
-  const title = row.title ? inline(String(row.title).replace(/\s+/g, ' '), row.titles || titles).replaceAll('<button class="ref" data-go=', '<button class="ref" data-board="' + esc(row.root) + '" data-go=') : '<span class="muted">' + esc(row.why) + '</span>';
+  const title = row.title ? inline(String(row.title).replace(/\s+/g, ' '), row.titles || titles, true, row.root) : '<span class="muted">' + esc(row.why) + '</span>';
   const inner = '<span class="dot' + (row.state ? ' ' + row.state : '') + '"></span><span class="t"><span class="id">' + esc(row.label) + '</span>' + title + '</span>' + (row.state ? chip(row.state) : '<span class="chip">' + esc(row.word) + '</span>');
   if (!row.open) return '<li><div class="milestone-item" title="' + esc(row.title ? row.title + ' (' + row.why + ')' : row.why) + '">' + inner + '</div></li>';
   const attributes = 'class="milestone-item" data-go="item:' + row.open.id + '"' + (row.open.root === view.root ? '' : ' data-board="' + esc(row.open.root) + '"') + ' title="' + esc(row.title) + '"';
@@ -1373,12 +1413,14 @@ function inText(ref) {
 // tests' stand-in document, which is not a browser, has no observer, and there nothing is marked.
 if (typeof MutationObserver === 'function') new MutationObserver((changes) => {
   for (const root of new Set(changes.map((change) => change.target))) {
-    if (root.nodeType === 1) for (const ref of root.querySelectorAll('button.ref')) ref.classList.toggle('alone', !inText(ref));
+    if (root.nodeType === 1) for (const ref of root.querySelectorAll('button.ref, a.ref[data-go]')) ref.classList.toggle('alone', !inText(ref));
   }
 }).observe(document.body, { childList: true, subtree: true });
 
 /** Draw the board shown: the sidebar, then every tab's panes from the project's board. */
 function render() {
+  if (heldClickPointer !== null) { deferredClickRender = true; return; }
+  deferredClickRender = false;
   const statsFocus = document.activeElement?.id === 'proof-stats-summary' ? document.activeElement.id : null;
   const p = data.project;
   const group = data.group;
@@ -1515,7 +1557,7 @@ function render() {
     const hold = s === 'open' ? heldLanes.get(i.lane) : null;
     const waits = s === 'open' && i.blockedBy.length ? i.blockedBy : [];
     const gated = gatedOf(i);
-    const pills = (waits.length ? '<span class="gate">' + waits.map((id, index) => '<span class="wait-unit">' + (index ? '' : 'waits on ') + '<button class="ref" data-go="item:' + id + '" type="button">#' + id + '</button></span>').join(', ') + '</span>' : '') + (hold ? '<span class="gate">lane held: ' + linked(hold.hold_reason, titles) + '</span>' : '');
+    const pills = (waits.length ? '<span class="gate">' + waits.map((id, index) => '<span class="wait-unit">' + (index ? '' : 'waits on ') + '<a class="ref" href="' + esc(itemAddress(id)) + '" data-go="item:' + id + '">#' + id + '</a></span>').join(', ') + '</span>' : '') + (hold ? '<span class="gate">lane held: ' + linked(hold.hold_reason, titles) + '</span>' : '');
     const tag = s === 'building' && i.owner ? '<span class="chip busy" title="building, held by ' + esc(agentName(i.owner)) + '">' + esc(agentName(i.owner)) + '</span>'
       : s === 'verify' && i.reviewer ? '<span class="chip warn" title="reviewing until ' + esc(when(i.reviewUntil)) + '">' + esc(agentName(i.reviewer)) + ' reviewing</span>'
       : s === 'open' ? openChip(i) : chip(s);
@@ -1566,7 +1608,7 @@ function render() {
       + referencedCode
       + (cited.length ? '<div><h3>Spec rows it serves</h3>' + cited.map((r) => '<div class="rowref"><code>' + esc(r.id) + '</code><div>' + linked(r.text, titles) + ' <span class="chip ' + tone(r.status) + '">' + esc(r.status) + '</span></div></div>').join('') + '</div>' : '')
       + (item.brief ? '<div><h3>Brief</h3><div class="text muted">' + rich(item.brief, titles) + '</div></div>' : '')
-      + '<div><h3>People and commits</h3><dl class="kv">' + (item.owner && s === 'building' ? '<dt>holding</dt><dd>' + esc(agentName(item.owner)) + '</dd>' : '') + (item.builtBy ? '<dt>built by</dt><dd>' + esc(agentName(item.builtBy)) + '</dd>' : '') + (item.verifiedBy ? '<dt>verified by</dt><dd>' + esc(agentName(item.verifiedBy)) + '</dd>' : '') + (item.commit ? '<dt>commit</dt><dd><code>' + esc(item.commit.slice(0, 12)) + '</code></dd>' : '') + (item.merged ? '<dt>merged</dt><dd><code>' + esc(item.merged.slice(0, 12)) + '</code></dd>' : '') + (item.blockedBy.length ? '<dt>waits on</dt><dd class="waits-on">' + item.blockedBy.map((id) => '<span class="wait-unit"><button class="ref" data-go="item:' + id + '" type="button">#' + id + '</button></span>').join(', ') + '</dd>' : '') + '</dl></div>'
+      + '<div><h3>People and commits</h3><dl class="kv">' + (item.owner && s === 'building' ? '<dt>holding</dt><dd>' + esc(agentName(item.owner)) + '</dd>' : '') + (item.builtBy ? '<dt>built by</dt><dd>' + esc(agentName(item.builtBy)) + '</dd>' : '') + (item.verifiedBy ? '<dt>verified by</dt><dd>' + esc(agentName(item.verifiedBy)) + '</dd>' : '') + (item.commit ? '<dt>commit</dt><dd><code>' + esc(item.commit.slice(0, 12)) + '</code></dd>' : '') + (item.merged ? '<dt>merged</dt><dd><code>' + esc(item.merged.slice(0, 12)) + '</code></dd>' : '') + (item.blockedBy.length ? '<dt>waits on</dt><dd class="waits-on">' + item.blockedBy.map((id) => '<span class="wait-unit"><a class="ref" href="' + esc(itemAddress(id)) + '" data-go="item:' + id + '">#' + id + '</a></span>').join(', ') + '</dd>' : '') + '</dl></div>'
       + (back && !earlier.length ? '' : '<div><h3>' + (back ? 'Earlier verdicts' : 'Verdicts') + '</h3>' + (earlier.length ? earlier.map((v) => verdictHtml(v, titles)).join('') : '<div class="muted">None yet.</div>') + '</div>')
       + '<div><h3>History</h3>' + timeline(item) + '</div>'
       + '<div class="links"><button data-shout="' + esc(item.lane) + '" data-about="' + item.id + '" type="button">Shout the ' + esc(item.lane) + ' lane about #' + item.id + '</button><button data-new type="button">New item</button></div></div>';
@@ -1682,7 +1724,7 @@ function render() {
     + (release ? '<button type="button" data-status="release" title="' + esc('Show this release on the Roadmap: ' + (release.note || release.name)) + '">' + esc(release.name) + ' <b>' + release.done + '/' + release.total + '</b></button>' : '')
     + (last ? '<button type="button" class="end" data-status="' + (last.item_id ? 'item:' + last.item_id : 'activity') + '" title="' + esc(last.event_at) + '">' + esc(agentName(last.event_by)) + ' ' + esc(last.event_kind) + (last.item_id ? ' #' + last.item_id : '') + ' · ' + age(last.event_at) + '</button>' : '');
   const held = new Map(p.holds.map((h) => [h.hold_lane, h]));
-  $('lanes').innerHTML = working.map((l) => '<div class="lane"><span><b>' + esc(l) + '</b> ' + (held.has(l) ? '<span class="chip no">held by ' + esc(agentName(held.get(l).hold_by)) + '</span> <span class="muted">' + linked(held.get(l).hold_reason, titles) + '</span>' : '<span class="chip ok">open</span>') + '</span>' + (held.has(l) ? '<button class="ghost" data-release="' + esc(l) + '" type="button">Release</button>' : '') + '</div>').join('');
+  $('lanes').innerHTML = working.map((l) => '<div class="lane"><span><b>' + esc(l) + '</b> ' + (held.has(l) ? '<span class="chip no" title="held by ' + esc(agentName(held.get(l).hold_by)) + '">held by ' + esc(agentName(held.get(l).hold_by)) + '</span> <span class="muted">' + linked(held.get(l).hold_reason, titles) + '</span>' : '<span class="chip ok">open</span>') + '</span>' + (held.has(l) ? '<button class="ghost" data-release="' + esc(l) + '" type="button">Release</button>' : '') + '</div>').join('');
 
   for (const kind of ['spec', 'doctrine']) {
     const rows = kind === 'spec' ? p.spec : p.practice;
@@ -1742,7 +1784,7 @@ function render() {
     const line = firstLine(x.shout_text);
     return '<b>' + esc(agentName(e.event_by)) + '</b> ' + verb + (x.shout_to ? ' <b>' + esc(agentName(x.shout_to)) + '</b>' : '') + (line ? '<span class="said" title="' + esc(line) + '">' + inline(line, titles) + '</span>' : '');
   };
-  $('activity').innerHTML = p.events.length ? byDay(p.events, (e) => e.event_at, (e) => '<div><time>' + clock(e.event_at) + '</time><div class="act">' + (e.event_kind === 'shout' || e.event_kind === 'answer' ? spoke(e) : '<b>' + esc(agentName(e.event_by)) + '</b> ' + esc(e.event_kind) + (e.item_id ? ' <button class="ref" data-go="item:' + e.item_id + '" type="button">#' + e.item_id + '</button>' + (titles.has(String(e.item_id)) ? ' <span class="what">' + rich(titles.get(String(e.item_id)), titles) + '</span>' : '') : '')) + '</div></div>') : '<div class="empty">No activity yet.</div>';
+  $('activity').innerHTML = p.events.length ? byDay(p.events, (e) => e.event_at, (e) => '<div><time>' + clock(e.event_at) + '</time><div class="act">' + (e.event_kind === 'shout' || e.event_kind === 'answer' ? spoke(e) : '<b>' + esc(agentName(e.event_by)) + '</b> ' + esc(e.event_kind) + (e.item_id ? ' <a class="ref" href="' + esc(itemAddress(e.item_id)) + '" data-go="item:' + e.item_id + '">#' + e.item_id + '</a>' + (titles.has(String(e.item_id)) ? ' <span class="what">' + rich(titles.get(String(e.item_id)), titles) + '</span>' : '') : '')) + '</div></div>') : '<div class="empty">No activity yet.</div>';
   showTab();
   revealPlace();
   updateRoadmapPanel();
@@ -1789,8 +1831,9 @@ function placeAtAddress(page = data) {
 /** Name each repo even beneath a group; one repo needs no prefix. */
 function tabHref(tab) {
   if (snapshot) {
-    if (tab === 'items' && view.itemsView === 'pipeline') return location.pathname + location.search + '#items/pipeline';
-    return location.pathname + location.search + (tab === 'roadmap' ? '#roadmap' : '');
+    const detail = tab === 'items' && view.itemsView === 'pipeline' ? 'pipeline' : view.addressDetail;
+    if (tab === 'items' && detail === null && !location.hash) return location.pathname + location.search;
+    return location.pathname + location.search + '#' + tab + (detail === null ? '' : '/' + encodeURIComponent(String(detail)));
   }
   const repo = data?.projects.find((entry) => entry.root === view.root);
   const group = data?.groups.find((entry) => entry.key === view.root);
@@ -1845,9 +1888,8 @@ function fromAddress(event) {
   }
   if (snapshot) {
     const kept = event?.state || {};
-    view.tab = addressTab() || kept.tab || homeTab();
-    view.itemsView = location.hash === '#items/pipeline' ? 'pipeline' : 'list';
-    if (typeof kept.item === 'number') view.item = kept.item;
+    const place = location.hash ? placeAtAddress() : { root: null, tab: kept.tab || homeTab(), detail: kept.detail ?? null };
+    applyPlace(place, kept);
     if (kept.root && kept.root !== view.root) return switchTo(kept.root, view.item, false);
   } else {
     const place = placeAtAddress();
@@ -1955,7 +1997,7 @@ function answer(id) {
   $('answering').hidden = !ask;
   $('answering-who').textContent = ask ? agentName(ask.shout_from) : '';
   const question = ask ? linked(ask.shout_text, new Map(data.project.items.map((i) => [String(i.id), i.title]))) : '';
-  if (question.includes('<button class="ref"')) $('answering-q').innerHTML = question;
+  if (question.includes('<a class="ref"')) $('answering-q').innerHTML = question;
   else $('answering-q').textContent = ask ? ask.shout_text : '';
   if (ask) addressTo(ask.shout_from);
   $('shout-to').disabled = Boolean(ask);
@@ -2394,6 +2436,10 @@ document.addEventListener('click', (event) => {
   if (!t) return;
   if (t.id === 'proj-switch') { fold(!$('side').classList.contains('open')); return; }
   if (t.id === 'console') { t.hidden = true; return; }
+  if (t.tagName === 'A' && t.dataset.go?.startsWith('item:')) {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+  }
   if (t.dataset.statsToggle !== undefined) {
     view.statsOpen = !view.statsOpen;
     render();
