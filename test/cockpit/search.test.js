@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { SPEC, machine, project, startView, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, searchFor } from './fixture.js';
+import { SPEC, machine, project, startView, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, searchFor, press } from './fixture.js';
 
 
 test('search in the top bar finds anything on the board [N26]', { timeout: 150_000 }, async (t) => {
@@ -23,7 +23,7 @@ test('search in the top bar finds anything on the board [N26]', { timeout: 150_0
   const profile = mkdtempSync(join(tmpdir(), 'pullboard-finder-chrome-'));
   let chrome;
   /** The top bar's search and its results as they read. */
-  const read = async () => JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+  const read = async () => JSON.parse(await chrome.stable(`JSON.stringify((() => {
     const box = (e) => { if (!e) return null; const r = e.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height }; };
     const results = document.querySelector('#find-results');
     return {
@@ -42,8 +42,7 @@ test('search in the top bar finds anything on the board [N26]', { timeout: 150_0
     for (const type of ['keyDown', 'keyUp']) await chrome.send('Input.dispatchKeyEvent', { type, key: name, code, windowsVirtualKeyCode: keyCode, ...(type === 'keyDown' && text ? { text, unmodifiedText: text } : {}) });
   };
   const tap = async (selector) => {
-    const point = JSON.parse(await chrome.evaluate(`(() => { const r = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return JSON.stringify({ x: r.x + r.width / 2, y: r.y + r.height / 2 }); })()`));
-    for (const type of ['mousePressed', 'mouseReleased']) await chrome.send('Input.dispatchMouseEvent', { type, ...point, button: 'left', clickCount: 1 });
+    await press(chrome, `document.querySelector(${JSON.stringify(selector)})`);
   };
   const search = (words) => searchFor(chrome, words);
   try {
@@ -54,7 +53,7 @@ test('search in the top bar finds anything on the board [N26]', { timeout: 150_0
         await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
         await chrome.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: scheme }] });
         await chrome.waitFor(`innerWidth === ${width} && matchMedia('(prefers-color-scheme: ${scheme})').matches`);
-        await chrome.evaluate("document.querySelector('[data-tab=items]').click()");
+        await chrome.click("document.querySelector('[data-tab=items]')");
         const at = `${width}px ${scheme}`;
         // The Items toolbar is one row: Active, Verified and All, the lane picker, New item at its end; on a phone Active
         // and Verified with New item, All and the lane picker dropped.
@@ -88,11 +87,11 @@ test('search in the top bar finds anything on the board [N26]', { timeout: 150_0
     await search('greeting');
     await key('Escape', 'Escape', 27);
     await search('greeting');
-    await chrome.evaluate('new Promise((done) => setTimeout(done, 250))');
-    const kept = JSON.parse(await chrome.evaluate("JSON.stringify([document.querySelector('#q').value, document.activeElement.id, document.querySelector('#find-results').hidden])"));
+    await chrome.stable('new Promise((done) => setTimeout(done, 250))');
+    const kept = JSON.parse(await chrome.stable("JSON.stringify([document.querySelector('#q').value, document.activeElement.id, document.querySelector('#find-results').hidden])"));
     assert.deepEqual(kept, ['greeting', 'q', false], `a search straight after Esc keeps its results (words, focus, results hidden): ${JSON.stringify(kept)}`);
     await key('Escape', 'Escape', 27);
-    assert.equal(await chrome.evaluate("document.querySelector('#find-results').dataset.why"), 'escape', 'Esc closes the results and says so');
+    assert.equal(await chrome.stable("document.querySelector('#find-results').dataset.why"), 'escape', 'Esc closes the results and says so');
 
     // The arrows move the highlight and Enter opens it: here the third item, the third newest.
     await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
@@ -121,7 +120,7 @@ test('search in the top bar finds anything on the board [N26]', { timeout: 150_0
       const opened = (await read()).bar;
       assert.deepEqual(opened.map((part) => [part.name, part.on]), [['active', false], ['verified', false], ['all', true], ['new-item', false]], `375px ${scheme}: a search that opens an item shows All, selected: ${JSON.stringify(opened)}`);
       assert.ok(opened.every((part) => Math.abs(part.middle - opened[0].middle) <= 2), `375px ${scheme}: still one row: ${JSON.stringify(opened)}`);
-      await chrome.evaluate("document.querySelector('[data-state=active]').click()");
+      await chrome.click("document.querySelector('[data-state=active]')");
       assert.deepEqual((await read()).bar.map((part) => part.name), ['active', 'verified', 'new-item'], `375px ${scheme}: back on Active, All drops again`);
     }
     await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
@@ -156,25 +155,25 @@ test('search in the top bar finds anything on the board [N26]', { timeout: 150_0
     await chrome.waitFor(`view.tab === 'shouts' && document.getElementById('shout-${shout.slice(6)}')?.classList.contains('found')`);
 
     // "/" goes to the search from the page, never from a field.
-    await chrome.evaluate("document.activeElement.blur(); document.body.focus()");
+    await chrome.stable("document.activeElement.blur(); document.body.focus()");
     await key('/', 'Slash', 191, '/');
     r = await read();
-    const selected = await chrome.evaluate("(() => { const q = document.querySelector('#q'); return q.selectionStart === 0 && q.selectionEnd === q.value.length; })()");
+    const selected = await chrome.stable("(() => { const q = document.querySelector('#q'); return q.selectionStart === 0 && q.selectionEnd === q.value.length; })()");
     assert.deepEqual([r.focused, selected], ['q', true], '"/" puts the cursor in the search, its last words selected to type over');
-    await chrome.evaluate("document.querySelector('#shout-text').focus()");
+    await chrome.stable("document.querySelector('#shout-text').focus()");
     await key('/', 'Slash', 191, '/');
-    assert.equal(await chrome.evaluate("document.querySelector('#shout-text').value"), '/', 'and in a field it is only a slash');
+    assert.equal(await chrome.stable("document.querySelector('#shout-text').value"), '/', 'and in a field it is only a slash');
 
     // On a phone the lane picker shows while a lane narrows the list, so the person sees where they are and can leave
     // it; with every lane shown it drops again. A coordinator item makes a second lane to pick between.
     box.run(alpha.repo, 'add', 'coordinator', 'Plan the greeting release', '--criterion', 'planned');
     await chrome.waitFor('data.project.items.length === 9', 15_000);
-    const lane = (name) => chrome.evaluate(`(() => { const pick = document.querySelector('#lane-pick'); pick.value = ${JSON.stringify(name)}; pick.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+    const lane = (name) => chrome.stable(`(() => { const pick = document.querySelector('#lane-pick'); pick.value = ${JSON.stringify(name)}; pick.dispatchEvent(new Event('change', { bubbles: true })); })()`);
     for (const scheme of ['light', 'dark']) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
       await chrome.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: scheme }] });
       await chrome.waitFor(`innerWidth === 1280 && matchMedia('(prefers-color-scheme: ${scheme})').matches`);
-      await chrome.evaluate("document.querySelector('[data-tab=items]').click(); document.querySelector('[data-state=active]').click()");
+      await chrome.click("document.querySelector('[data-tab=items]')"); await chrome.click("document.querySelector('[data-state=active]')");
       await lane('web');
       await chrome.waitFor("view.lane === 'web'");
       assert.ok((await read()).bar.some((part) => part.name === 'lane-pick'), `1280px ${scheme}: the lane picker is in the toolbar`);
@@ -191,18 +190,18 @@ test('search in the top bar finds anything on the board [N26]', { timeout: 150_0
       const both = await read();
       assert.deepEqual(both.bar.map((part) => [part.name, part.on]), [['active', false], ['verified', false], ['all', true], ['lane-pick', false], ['new-item', false]], `375px ${scheme}: All and the picked lane both show: ${JSON.stringify(both.bar)}`);
       assert.ok(both.bar.every((part) => Math.abs(part.middle - both.bar[0].middle) <= 2) && both.page.scroll <= both.page.width && both.page.body <= both.page.width, `375px ${scheme}: both filters on one row, no sideways scroll: ${JSON.stringify(both)}`);
-      assert.deepEqual(JSON.parse(await chrome.evaluate("JSON.stringify((() => { const go = document.querySelector('#new-item'); return [go.textContent, getComputedStyle(go, '::before').content, Math.round(go.getBoundingClientRect().width)]; })())")), ['New item', '"+"', 44], `375px ${scheme}: New item is a 44px + that keeps its name`);
+      assert.deepEqual(JSON.parse(await chrome.stable("JSON.stringify((() => { const go = document.querySelector('#new-item'); return [go.textContent, getComputedStyle(go, '::before').content, Math.round(go.getBoundingClientRect().width)]; })())")), ['New item', '"+"', 44], `375px ${scheme}: New item is a 44px + that keeps its name`);
       // A long lane name gives way rather than the row: with the coordinator lane picked, still one row.
       await lane('coordinator');
       await chrome.waitFor("view.lane === 'coordinator'");
       const long = await read();
       assert.deepEqual(long.bar.map((part) => part.name), ['active', 'verified', 'all', 'lane-pick', 'new-item'], `375px ${scheme}: a long lane keeps every control: ${JSON.stringify(long.bar)}`);
       assert.ok(long.bar.every((part) => Math.abs(part.middle - long.bar[0].middle) <= 2) && long.page.scroll <= long.page.width && long.page.body <= long.page.width, `375px ${scheme}: a long lane name gives way, not the row: ${JSON.stringify(long)}`);
-      await chrome.evaluate("document.querySelector('[data-state=active]').click()");
+      await chrome.click("document.querySelector('[data-state=active]')");
       await lane('');
       await chrome.waitFor('view.lane === null');
       assert.deepEqual((await read()).bar.map((part) => part.name), ['active', 'verified', 'new-item'], `375px ${scheme}: every lane shown, the picker drops again`);
-      assert.equal(await chrome.evaluate("getComputedStyle(document.querySelector('#new-item'), '::before').content"), 'none', `375px ${scheme}: with only Active and Verified, New item has its words`);
+      assert.equal(await chrome.stable("getComputedStyle(document.querySelector('#new-item'), '::before').content"), 'none', `375px ${scheme}: with only Active and Verified, New item has its words`);
     }
     await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
     await chrome.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }] });
@@ -230,18 +229,18 @@ test('the search step names its state on timeout [N26]', { timeout: 60_000 }, as
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
     await chrome.waitFor("typeof data === 'object' && data?.project?.items?.length === 1");
     // A field that takes no typing: the step times out, and its message says how far the search got.
-    await chrome.evaluate("document.querySelector('#q').disabled = true");
+    await chrome.stable("document.querySelector('#q').disabled = true");
     let stalled;
     await assert.rejects(searchFor(chrome, 'greeting', 1_500), (error) => { stalled = error; return true; });
     assert.match(stalled.message, /^the search for "greeting" did not show its results: \{/, 'the step says which search stalled');
     assert.deepEqual(Object.keys(record(stalled)), ['value', 'focused', 'windowFocus', 'resultsHidden', 'closedBy'], 'it records the value, the focus, the window focus, and the results with what closed them');
     assert.deepEqual([record(stalled).value, record(stalled).focused, typeof record(stalled).windowFocus, record(stalled).resultsHidden], ['', 'body', 'boolean', true], `no words reached the field, which never had focus: ${stalled.message}`);
     // Results that showed and were then closed say what closed them: here, leaving the field.
-    await chrome.evaluate("document.querySelector('#q').disabled = false");
+    await chrome.stable("document.querySelector('#q').disabled = false");
     await searchFor(chrome, 'greeting');
-    await chrome.evaluate("document.querySelector('#q').blur()");
+    await chrome.stable("document.querySelector('#q').blur()");
     await chrome.waitFor("document.querySelector('#find-results').hidden");
-    assert.equal(await chrome.evaluate("document.querySelector('#find-results').dataset.why"), 'left the field', 'leaving the field closes the results and says so');
+    assert.equal(await chrome.stable("document.querySelector('#find-results').dataset.why"), 'left the field', 'leaving the field closes the results and says so');
     assert.deepEqual(chrome.exceptions, [], 'the page raises no uncaught exception');
   } finally {
     if (chrome) await closeSnapshotChrome(chrome);

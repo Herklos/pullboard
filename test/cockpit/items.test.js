@@ -281,9 +281,9 @@ test('a sent-back reason reads once [N26]', { timeout: 90_000 }, async () => {
         ['1', 'Duplicate reason', 'BEHAVIOR_MISMATCH a78c361: selected-lane exception is unclear', 'a78c361: selected-lane exception is unclear'],
         ['2', 'Plain note', 'BEHAVIOR_MISMATCH BEHAVIOR_MISMATCHED is a separate code-like prefix: the issue remains', 'BEHAVIOR_MISMATCHED is a separate code-like prefix: the issue remains'],
       ]) {
-        await chrome.evaluate(`document.querySelector('#chain .row[data-item="${id}"]').click()`);
+        await chrome.click(`document.querySelector('#chain .row[data-item="${id}"]')`);
         await chrome.waitFor(`document.querySelector('#detail h2')?.textContent.includes('${title}')`);
-        const rendered = JSON.parse(await chrome.evaluate(`JSON.stringify({
+        const rendered = JSON.parse(await chrome.stable(`JSON.stringify({
           row: document.querySelector('#chain .row[data-item="${id}"] .why')?.textContent,
           card: document.querySelector('#detail .sentback .verdict .note')?.textContent,
           reason: document.querySelector('#detail .sentback .verdict b')?.textContent,
@@ -576,7 +576,7 @@ test("item detail merges API facts and moves in one responsive timeline [B33,B29
     for (const width of [375, 1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 1000, deviceScaleFactor: 1, mobile: false });
       await chrome.waitFor(`innerWidth === ${width} && document.querySelector('#detail .tl')?.getBoundingClientRect().width > 0`);
-      const rendered = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+      const rendered = JSON.parse(await chrome.stable(`JSON.stringify((() => {
         const timeline = document.querySelector('#detail .tl');
         const old = document.querySelector('#detail #fact-${oldNote.id}');
         const replacement = document.querySelector('#detail #fact-${replacement.id}');
@@ -622,10 +622,10 @@ test("item detail merges API facts and moves in one responsive timeline [B33,B29
       assert.equal(rendered.ref, `SPEC.md:1-2@${sourceHead}`, `${width}px: the committed code reference is actionable`);
       assert.equal(rendered.pageWidth, rendered.viewport, `${width}px: the timeline causes no sideways page scroll`);
     }
-    const scrollBefore = JSON.parse(await chrome.evaluate(`JSON.stringify({ page: document.documentElement.scrollTop, detail: document.querySelector('#detail').scrollTop })`));
-    await chrome.evaluate(`document.querySelector('#detail #fact-${oldNote.id} .thread-replacement').click()`);
+    const scrollBefore = JSON.parse(await chrome.stable(`JSON.stringify({ page: document.documentElement.scrollTop, detail: document.querySelector('#detail').scrollTop })`));
+    await chrome.click(`document.querySelector('#detail #fact-${oldNote.id} .thread-replacement')`);
     await chrome.waitFor(`location.hash === '#fact-${replacement.id}' && document.querySelector('#detail #fact-${replacement.id}')`);
-    const target = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+    const target = JSON.parse(await chrome.stable(`JSON.stringify((() => {
       const detail = document.querySelector('#detail'), fact = document.querySelector('#detail #fact-${replacement.id}');
       const box = fact.getBoundingClientRect(), panel = detail.getBoundingClientRect();
       return { item: view.item, id: fact.id, text: document.querySelector('#detail h2')?.textContent,
@@ -638,10 +638,10 @@ test("item detail merges API facts and moves in one responsive timeline [B33,B29
     assert.ok(target.page > scrollBefore.page || target.detail > scrollBefore.detail,
       'following the replacement anchor scrolls to its existing target');
     assert.equal(target.visible, true, 'the replacement is visible after following its link');
-    await chrome.evaluate(`document.querySelector('#detail .tl-fact button[data-code]').click()`);
+    await chrome.click(`document.querySelector('#detail .tl-fact button[data-code]')`);
     await chrome.waitFor(`document.querySelector('#detail .tl-fact button[data-code]')?.getAttribute('aria-expanded') === 'true'`);
     await chrome.waitFor(`document.querySelector('#detail .tl-fact .code')?.textContent.includes('Demo spec')`);
-    assert.match(await chrome.evaluate(`document.querySelector('#detail .tl-fact .code')?.textContent || ''`), /Demo spec/, 'the code reference opens the committed lines');
+    assert.match(await chrome.stable(`document.querySelector('#detail .tl-fact .code')?.textContent || ''`), /Demo spec/, 'the code reference opens the committed lines');
   } finally {
     if (chrome) await closeSnapshotChrome(chrome);
     await view.stop();
@@ -671,9 +671,9 @@ test('in-text item references stay inline and open their target at phone and des
     for (const width of [375, 1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
       // Needs you heads the Items list under Active; the steps below leave other tabs and filters open.
-      await chrome.evaluate("document.querySelector('[data-tab=items]').click(); document.querySelector('[data-state=active]').click()");
+      await chrome.click("document.querySelector('[data-tab=items]')"); await chrome.click("document.querySelector('[data-state=active]')");
       // The row inlineReference stays on its title line beside the text.
-      const rendered = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+      const rendered = JSON.parse(await chrome.stable(`JSON.stringify((() => {
         const row = document.querySelector('#chain .row[data-item="2"]');
         const plain = document.querySelector('#chain .row[data-item="1"]');
         const titleRef = row?.querySelector('.t button.ref');
@@ -706,24 +706,25 @@ test('in-text item references stay inline and open their target at phone and des
 
       for (const section of ['agents', 'spec', 'doctrine']) {
         if (section === 'agents') {
-          await chrome.evaluate(`document.querySelector('[data-tab="shouts"]').click()`);
-          await chrome.evaluate("(() => { const item = data.project.items.find((i) => i.id === 2); const who = item.owner || item.reviewer || item.builtBy; if (!document.querySelector('#agents .agent-card.on [data-agent=\"' + who + '\"]')) document.querySelector('#agents [data-agent=\"' + who + '\"]').click(); })()");
+          await chrome.click(`document.querySelector('[data-tab="shouts"]')`);
+          const agent = await chrome.stable("(() => { const item=data.project.items.find(i => i.id===2); return item.owner || item.reviewer || item.builtBy; })()");
+          if (!await chrome.stable(`!!document.querySelector('#agents .agent-card.on [data-agent="${agent}"]')`)) await chrome.click(`document.querySelector('#agents [data-agent="${agent}"]')`);
           await chrome.waitFor('document.querySelector("#agents [data-item=\\"2\\"]")');
         } else {
-          await chrome.evaluate(`document.querySelector('[data-tab="${section}"]').click()`);
-          await chrome.evaluate(`document.querySelector('[data-rows="${section}:all"]').click()`);
+          await chrome.click(`document.querySelector('[data-tab="${section}"]')`);
+          await chrome.click(`document.querySelector('[data-rows="${section}:all"]')`);
           const citedRow = section === 'doctrine' ? 'R1' : 'G1';
           if (section === 'doctrine') {
             // Item citations normally point to SPEC ids; add the distinct practice id to the
             // browser projection to exercise the shared doctrine citing-item renderer.
-            await chrome.evaluate("data.project.items.find(item => item.id === 2).specs.push('R1'); render();");
+            await chrome.stable("data.project.items.find(item => item.id === 2).specs.push('R1'); render();");
           }
           await chrome.waitFor(`document.querySelector('#${section}-list [data-row="${section}:${citedRow}"]')`);
-          await chrome.evaluate(`document.querySelector('#${section}-list [data-row="${section}:${citedRow}"]').click()`);
+          await chrome.click(`document.querySelector('#${section}-list [data-row="${section}:${citedRow}"]')`);
           await chrome.waitFor(`document.querySelector('#${section}-detail [data-item="2"]')`);
         }
         const selector = section === 'agents' ? '#agents [data-item="2"] .ref' : `#${section}-detail .links [data-item="2"] .ref`;
-        const metrics = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+        const metrics = JSON.parse(await chrome.stable(`JSON.stringify((() => {
           const ref = document.querySelector(${JSON.stringify(selector)});
           const container = ref?.closest('[data-item="2"]');
           const r = ref?.getBoundingClientRect();
@@ -737,29 +738,32 @@ test('in-text item references stay inline and open their target at phone and des
         assert.ok(Math.abs(metrics.refHeight - metrics.lineHeight) < 1, `${width}: ${section} reference keeps the text line height: ${JSON.stringify(metrics)}`);
         assert.ok(metrics.containerHeight >= tapTarget(width), `${width}: ${section} containing item keeps a target`);
         assert.equal(metrics.nestedButtons, 0, `${width}: ${section} title has no nested controls`);
-        await chrome.evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
+        await chrome.click(`document.querySelector(${JSON.stringify(selector)})`);
         await chrome.waitFor("document.querySelector('[data-tab=items].on') && document.querySelector('#detail h2')?.textContent.includes('Target item')");
-        await chrome.evaluate(`document.querySelector(${JSON.stringify(selector)}).closest('[data-item="2"]').click()`);
+        await chrome.click(`document.querySelector('[data-tab="${section === 'agents' ? 'shouts' : section}"]')`);
+        await chrome.click(`document.querySelector(${JSON.stringify(selector)}).closest('[data-item="2"]')`);
         await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('Title links to #1')");
       }
 
-      await chrome.evaluate(`document.querySelector('#chain .row[data-item="2"] .t button.ref').click()`);
+      await chrome.click(`document.querySelector('[data-tab="items"]')`);
+      await chrome.click(`document.querySelector('#chain .row[data-item="2"] .t button.ref')`);
       await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('Target item')");
-      await chrome.evaluate(`document.querySelector('#needs .row .t button.ref').click()`);
+      await chrome.click("document.querySelector('[data-state=active]')");
+      await chrome.click(`document.querySelector('#needs .row .t button.ref')`);
       await chrome.waitFor("document.querySelector('[data-tab=items].on') && document.querySelector('#detail h2')?.textContent.includes('Target item')");
 
-      await chrome.evaluate(`document.querySelector('[data-tab="activity"]').click()`);
+      await chrome.click(`document.querySelector('[data-tab="activity"]')`);
       await chrome.waitFor("document.querySelector('#activity .what button.ref')");
-      await chrome.evaluate(`document.querySelector('#activity .what button.ref').click()`);
+      await chrome.click(`document.querySelector('#activity .what button.ref')`);
       await chrome.waitFor("document.querySelector('[data-tab=items].on') && document.querySelector('#detail h2')?.textContent.includes('Target item')");
 
-      await chrome.evaluate(`document.querySelector('#chain .row[data-item="2"]').click()`);
+      await chrome.click(`document.querySelector('#chain .row[data-item="2"]')`);
       await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('Title links to #1') && document.querySelector('#detail .text button.ref') && document.querySelector('#detail .text.muted button.ref')");
-      await chrome.evaluate(`document.querySelector('#detail .text button.ref').click()`);
+      await chrome.click(`document.querySelector('#detail .text button.ref')`);
       await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('Target item')");
-      await chrome.evaluate(`document.querySelector('#chain .row[data-item="2"]').click()`);
+      await chrome.click(`document.querySelector('#chain .row[data-item="2"]')`);
       await chrome.waitFor("document.querySelector('#detail .text.muted button.ref')");
-      await chrome.evaluate(`document.querySelector('#detail .text.muted button.ref').click()`);
+      await chrome.click(`document.querySelector('#detail .text.muted button.ref')`);
       await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('Target item')");
     }
   } finally {
@@ -794,7 +798,7 @@ test('list rows hold their shape: one-line titles end in an ellipsis, every row 
     for (const width of [375, 1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
       await chrome.waitFor(`innerWidth === ${width}`);
-      const rows = JSON.parse(await chrome.evaluate(`JSON.stringify([...document.querySelectorAll('#chain .row')].map((row) => {
+      const rows = JSON.parse(await chrome.stable(`JSON.stringify([...document.querySelectorAll('#chain .row')].map((row) => {
         const box = (node) => node.getBoundingClientRect();
         const lines = (node) => Math.round(box(node).height / parseFloat(getComputedStyle(node).lineHeight));
         const apart = (a, b) => a.right <= b.left + 0.5 || b.right <= a.left + 0.5 || a.bottom <= b.top + 0.5 || b.bottom <= a.top + 0.5;
@@ -822,9 +826,9 @@ test('list rows hold their shape: one-line titles end in an ellipsis, every row 
       assert.match(chips[5], /^chip busy: web-\d+ \(Test Model\)$/, `${width}: a claimed item names who builds it, in the building colour`);
       // The same state wears the same chip in the item's detail as in its row.
       for (const row of rows) {
-        await chrome.evaluate(`document.querySelector('#chain .row[data-item="${row.id}"]').click()`);
+        await chrome.click(`document.querySelector('#chain .row[data-item="${row.id}"]')`);
         await chrome.waitFor(`document.querySelector('#detail h2')?.textContent.startsWith('#${row.id}')`);
-        const detail = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+        const detail = JSON.parse(await chrome.stable(`JSON.stringify((() => {
           const chip = document.querySelector('#detail .meta.spaced .chip'), listed = document.querySelector('#chain .row[data-item="${row.id}"] > .chip');
           const paint = (node) => [getComputedStyle(node).backgroundColor, getComputedStyle(node).color, getComputedStyle(node).outlineStyle];
           return { chip: chip.className + ': ' + chip.textContent, samePaint: JSON.stringify(paint(chip)) === JSON.stringify(paint(listed)) };
@@ -835,11 +839,11 @@ test('list rows hold their shape: one-line titles end in an ellipsis, every row 
       }
     }
     // A builder's name can be long; its chip stops at its cap and ends in an ellipsis, leaving the title its line.
-    await chrome.evaluate("data.project.items.find((item) => item.id === 5).owner = 'claude-opus-designer-on-the-studio-7'; render();");
+    await chrome.stable("data.project.items.find((item) => item.id === 5).owner = 'claude-opus-designer-on-the-studio-7'; render();");
     for (const width of [375, 1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
       await chrome.waitFor(`innerWidth === ${width} && document.querySelector('#chain .row[data-item="5"] > .chip')?.textContent.startsWith('claude-opus')`);
-      const named = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+      const named = JSON.parse(await chrome.stable(`JSON.stringify((() => {
         const row = document.querySelector('#chain .row[data-item="5"]'), chip = row.querySelector(':scope > .chip'), meta = row.querySelector('.meta');
         const a = chip.getBoundingClientRect(), b = meta.getBoundingClientRect();
         return { chipWidth: a.width, cap: 10 * parseFloat(getComputedStyle(document.documentElement).fontSize), cut: chip.scrollWidth > chip.clientWidth,
@@ -885,17 +889,17 @@ test('Pipeline view shows every stage, status counts, stage ages, detail links a
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
     await chrome.waitFor(`data?.project?.root === ${JSON.stringify(alpha.repo)} && document.querySelector('#chain [data-item="5"]')`);
     const listRead = "JSON.stringify([...document.querySelectorAll('#chain > li[data-item]')].map(row => ({id:Number(row.dataset.item),title:row.title,meta:row.querySelector('.meta').textContent,tag:row.lastElementChild.textContent})))";
-    const listBefore = await chrome.evaluate(listRead);
+    const listBefore = await chrome.stable(listRead);
     await press(chrome, "document.querySelector('[data-items-view=\"pipeline\"]')");
-    assert.equal(await chrome.evaluate('location.hash'), '#items/pipeline', 'Pipeline has its own shareable address');
+    assert.equal(await chrome.stable('location.hash'), '#items/pipeline', 'Pipeline has its own shareable address');
     await chrome.waitFor("location.hash === '#items/pipeline' && !document.querySelector('#pipeline').hidden");
     const expectedCounts = [status.open, status.claimed, status.submitted, 1, 1];
-    const read = JSON.parse(await chrome.evaluate(`JSON.stringify([...document.querySelectorAll('[data-pipeline-stage]')].map(stage => ({ stage:stage.dataset.pipelineStage, label:stage.querySelector('h2').textContent, count:Number(stage.querySelector('[data-stage-count]').textContent), oldest:Number(stage.querySelector('.pipeline-oldest [data-item]')?.dataset.item || 0), since:stage.querySelector('.pipeline-oldest time')?.dataset.ago || null, age:stage.querySelector('.pipeline-oldest time')?.textContent || '', ids:[...stage.querySelectorAll('.pipeline-item')].map(item => Number(item.dataset.item)) })))`));
+    const read = JSON.parse(await chrome.stable(`JSON.stringify([...document.querySelectorAll('[data-pipeline-stage]')].map(stage => ({ stage:stage.dataset.pipelineStage, label:stage.querySelector('h2').textContent, count:Number(stage.querySelector('[data-stage-count]').textContent), oldest:Number(stage.querySelector('.pipeline-oldest [data-item]')?.dataset.item || 0), since:stage.querySelector('.pipeline-oldest time')?.dataset.ago || null, age:stage.querySelector('.pipeline-oldest time')?.textContent || '', ids:[...stage.querySelectorAll('.pipeline-item')].map(item => Number(item.dataset.item)) })))`));
     assert.deepEqual(read.map(stage => stage.label), ['Not started', 'Building', 'Waiting for review', 'Accepted, waiting to merge', 'Merged']);
     assert.deepEqual(read.map(stage => stage.count), expectedCounts, 'open/claimed/submitted match status; accepted plus merged equals verified');
     assert.equal(read[3].count + read[4].count, status.verified);
     assert.deepEqual(read.map(stage => stage.ids), [[5, 6], [4], [3], [2], [1]], 'an accept without a merge remains waiting to merge');
-    const observedAt = await chrome.evaluate('Date.now()');
+    const observedAt = await chrome.stable('Date.now()');
     for (const stage of read) {
       const [id, minute] = arrivals[stage.stage], since = new Date(base + minute * 60_000).toISOString();
       assert.equal(stage.oldest, id, stage.stage + ': oldest item');
@@ -905,25 +909,26 @@ test('Pipeline view shows every stage, status counts, stage ages, detail links a
       const elapsed = parseInt(stage.age, 10) * (stage.age.endsWith('h') ? 60 : 1);
       assert.ok(Math.abs(elapsed - (observedAt - Date.parse(since)) / 60_000) <= 1, stage.stage + ': elapsed time matches native fixture arrival');
     }
-    assert.equal(await chrome.evaluate("document.querySelector('#item-list').hidden"), true);
+    assert.equal(await chrome.stable("document.querySelector('#item-list').hidden"), true);
     for (const width of [375, 1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
       await chrome.waitFor(`innerWidth === ${width}`);
       for (const scheme of ['light', 'dark']) {
       await chrome.send('Emulation.setEmulatedMedia', { features: [{name:'prefers-color-scheme',value:scheme}] });
-      await chrome.evaluate('(async()=>{await new Promise(requestAnimationFrame);await new Promise(requestAnimationFrame)})()');
-      assert.equal(await chrome.evaluate('document.documentElement.dataset.scheme'), scheme);
+      await chrome.stable('(async()=>{await new Promise(requestAnimationFrame);await new Promise(requestAnimationFrame)})()');
+      assert.equal(await chrome.stable('document.documentElement.dataset.scheme'), scheme);
       for (const id of [1, 2, 3, 4, 5, 6]) {
         await press(chrome, `document.querySelector('#pipeline .pipeline-item[data-item="${id}"]')`);
-        assert.equal(await chrome.evaluate('view.item'), id, `${width}: every item opens its detail`);
+        await chrome.waitFor(`view.item === ${id}`);
+        assert.equal(await chrome.stable('view.item'), id, `${width}: every item opens its detail`);
         await chrome.waitFor(`document.querySelector('#detail h2')?.textContent.includes('#${id}')`);
       }
-      const geometry = JSON.parse(await chrome.evaluate("JSON.stringify({ width:innerWidth, body:document.documentElement.scrollWidth, stages:[...document.querySelectorAll('.pipeline-stage')].map(node => ({left:node.getBoundingClientRect().left,right:node.getBoundingClientRect().right})) })"));
+      const geometry = JSON.parse(await chrome.stable("JSON.stringify({ width:innerWidth, body:document.documentElement.scrollWidth, stages:[...document.querySelectorAll('.pipeline-stage')].map(node => ({left:node.getBoundingClientRect().left,right:node.getBoundingClientRect().right})) })"));
       assert.ok(geometry.body <= width, `${width}: no sideways scroll: ${JSON.stringify(geometry)}`);
       assert.ok(geometry.stages.every(stage => stage.left >= 0 && stage.right <= width), `${width}: the flow fits the screen`);
       if (process.env.PULLBOARD_PIPELINE_SHOTS) {
         mkdirSync(process.env.PULLBOARD_PIPELINE_SHOTS, {recursive:true});
-        await chrome.evaluate('scrollTo(0,0)');
+        await chrome.stable('scrollTo(0,0)');
         const shot = await chrome.send('Page.captureScreenshot', {format:'png',captureBeyondViewport:true});
         writeFileSync(join(process.env.PULLBOARD_PIPELINE_SHOTS, `pipeline-${width}-${scheme}.png`), Buffer.from(shot.data,'base64'));
       }
@@ -931,16 +936,16 @@ test('Pipeline view shows every stage, status counts, stage ages, detail links a
     }
     box.run(alpha.repo, 'merged', '2', box.git(alpha.repo, 'rev-parse', 'HEAD'));
     await chrome.waitFor("document.querySelector('[data-stage-count=accepted]').textContent === '0' && document.querySelector('[data-stage-count=merged]').textContent === '2'");
-    assert.equal(await chrome.evaluate("document.querySelector('[data-pipeline-stage=accepted] .pipeline-oldest').textContent"), 'No items', 'a recorded merge advances only the accepted item and leaves an honest empty stage');
+    assert.equal(await chrome.stable("document.querySelector('[data-pipeline-stage=accepted] .pipeline-oldest').textContent"), 'No items', 'a recorded merge advances only the accepted item and leaves an honest empty stage');
     await press(chrome, "document.querySelector('[data-items-view=\"list\"]')");
     await chrome.waitFor("!location.hash && !document.querySelector('#item-list').hidden && document.querySelector('#pipeline').hidden");
-    assert.equal(await chrome.evaluate(listRead), listBefore, 'returning to List preserves its Active rows, metadata and ordering');
+    assert.equal(await chrome.stable(listRead), listBefore, 'returning to List preserves its Active rows, metadata and ordering');
     assert.deepEqual(JSON.parse(listBefore).map(row => row.id).sort((a,b)=>a-b), [3,4,5,6]);
     await travel(chrome, -1);
     await settled(chrome, "location.hash === '#items/pipeline' && !document.querySelector('#pipeline').hidden");
     await chrome.send('Page.reload', {});
     await settled(chrome, "location.hash === '#items/pipeline' && data?.project && !document.querySelector('#pipeline').hidden");
-    assert.equal(await chrome.evaluate("document.querySelector('.tab.on').dataset.tab"), 'items', 'the Pipeline address reloads within Items');
+    assert.equal(await chrome.stable("document.querySelector('.tab.on').dataset.tab"), 'items', 'the Pipeline address reloads within Items');
     await travel(chrome, 1);
     await settled(chrome, "!location.hash && !document.querySelector('#item-list').hidden");
     assert.deepEqual(chrome.exceptions, [], 'the pipeline has no uncaught page errors');

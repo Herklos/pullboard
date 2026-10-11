@@ -145,7 +145,7 @@ test('the project list collapses into the tab bar and stays collapsed [N26]', { 
   const profile = mkdtempSync(join(tmpdir(), 'pullboard-collapse-chrome-'));
   let chrome;
   /** Read the sidebar, the tab bar and the board's columns as the person sees them. */
-  const read = async () => JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+  const read = async () => JSON.parse(await chrome.stable(`JSON.stringify((() => {
     const box = (s) => { const e = document.querySelector(s); const r = e.getBoundingClientRect(); return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height, shown: getComputedStyle(e).display !== 'none' && r.width > 0 }; };
     const logo = document.querySelector('#side-toggle');
     return { width: document.documentElement.clientWidth, logo: box('#side-toggle'), side: box('.side'), top: box('.top'), main: box('main'), switcher: box('#proj-switch'), list: box('#side-body'), theme: box('#theme'), live: box('#live'),
@@ -157,13 +157,13 @@ test('the project list collapses into the tab bar and stays collapsed [N26]', { 
     await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
     await chrome.waitFor('innerWidth === 1280 && !!document.querySelector("#chain .row") && !!document.querySelector("#detail h2")');
     // A classic 15px scrollbar, as Linux draws one, so every edge is measured against the content width.
-    await chrome.evaluate("document.styleSheets[0].insertRule('html { overflow-y: scroll; }', 0); document.styleSheets[0].insertRule('::-webkit-scrollbar { width: 15px; }', 0)");
+    await chrome.stable("document.styleSheets[0].insertRule('html { overflow-y: scroll; }', 0); document.styleSheets[0].insertRule('::-webkit-scrollbar { width: 15px; }', 0)");
     await chrome.waitFor('document.documentElement.clientWidth === innerWidth - 15');
     const open = await read();
     assert.ok(open.side.width >= 200 && open.side.height >= 800 && !open.collapsed && open.pressed === 'false', `the sidebar starts open: ${JSON.stringify(open)}`);
     assert.ok(open.theme.right >= open.width - 16 && open.theme.top < open.top.bottom && open.live.right <= open.theme.left, `the light/dark button sits at the right end of the tab bar, clear of the live status: ${JSON.stringify(open)}`);
 
-    await chrome.evaluate('document.querySelector("#side-toggle").click()');
+    await chrome.click('document.querySelector("#side-toggle")');
     await chrome.waitFor('document.documentElement.dataset.side === "collapsed"');
     const collapsed = await read();
     assert.deepEqual([collapsed.pressed, collapsed.title], ['true', 'Show the project list'], 'the logo says it brings the list back');
@@ -175,13 +175,13 @@ test('the project list collapses into the tab bar and stays collapsed [N26]', { 
       `the board takes the whole width: the list and detail gain at least 200px: ${JSON.stringify({ open: open.columns, collapsed: collapsed.columns, main: collapsed.main })}`);
     assert.ok(collapsed.theme.right >= collapsed.width - 16 && collapsed.live.right <= collapsed.theme.left, 'the light/dark button stays at the right end');
 
-    await chrome.evaluate('document.querySelector("#proj-switch").click()');
+    await chrome.click('document.querySelector("#proj-switch")');
     const dropdown = await read();
     assert.ok(dropdown.list.shown && dropdown.listPosition === 'absolute' && dropdown.list.top >= dropdown.top.bottom - 0.5 && dropdown.list.right <= dropdown.width, `the switcher opens the project list as a dropdown: ${JSON.stringify(dropdown.list)}`);
-    await chrome.evaluate('document.querySelector("main").click()');
+    await chrome.click('document.querySelector("main")');
     assert.equal((await read()).list.shown, false, 'a click outside closes it');
-    await chrome.evaluate('document.querySelector("#proj-switch").click()');
-    await chrome.evaluate(`document.querySelector('#proj-list [data-root="${other.repo}"]').click()`);
+    await chrome.click('document.querySelector("#proj-switch")');
+    await chrome.click(`document.querySelector('#proj-list [data-root="${other.repo}"]')`);
     await chrome.waitFor(`document.querySelector('#proj-name').textContent === 'collapse-other'`);
     assert.equal((await read()).list.shown, false, 'a pick closes it and shows that project');
 
@@ -189,16 +189,16 @@ test('the project list collapses into the tab bar and stays collapsed [N26]', { 
     await chrome.waitFor('document.readyState === "complete" && !!document.querySelector("#proj-switch")');
     assert.equal((await read()).collapsed, 'collapsed', 'the choice is kept in this browser across a reload');
 
-    await chrome.evaluate('document.querySelector("#side-toggle").click()');
+    await chrome.click('document.querySelector("#side-toggle")');
     await chrome.waitFor('!document.documentElement.dataset.side');
     const back = await read();
     assert.ok(back.side.width >= 200 && back.list.shown && back.pressed === 'false' && back.title === 'Collapse the project list', `the logo brings the sidebar back as it was: ${JSON.stringify(back)}`);
 
-    await chrome.evaluate('document.querySelector("#side-toggle").click()');
+    await chrome.click('document.querySelector("#side-toggle")');
     await chrome.send('Emulation.setDeviceMetricsOverride', { width: 375, height: 900, deviceScaleFactor: 1, mobile: false });
     await chrome.waitFor('innerWidth === 375');
     const phone = await read();
-    await chrome.evaluate('document.querySelector("#side-toggle").click()');
+    await chrome.click('document.querySelector("#side-toggle")');
     const tapped = await read();
     assert.ok(phone.switcher.shown && !phone.list.shown && phone.theme.right >= phone.width - 16 && phone.theme.top < phone.side.bottom, `a phone keeps its switcher, the light/dark button at the right of its top row: ${JSON.stringify(phone)}`);
     assert.equal(tapped.collapsed, phone.collapsed, 'on a phone the logo is only the logo');
@@ -448,7 +448,7 @@ test('the project switcher\'s arrow turns with the list [N26]', { timeout: 120_0
   const profile = mkdtempSync(join(tmpdir(), 'pullboard-arrow-chrome-'));
   let chrome;
   /** The switcher's arrow as it reads: shown, its size, which way it points, and whether it animates. */
-  const read = async () => JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+  const read = async () => JSON.parse(await chrome.stable(`JSON.stringify((() => {
     const arrow = document.querySelector('#proj-switch small'), svg = arrow.querySelector('svg'), s = getComputedStyle(arrow), r = svg.getBoundingClientRect();
     return {
       page: { width: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth },
@@ -456,9 +456,9 @@ test('the project switcher\'s arrow turns with the list [N26]', { timeout: 120_0
       turn: s.transform, motion: [s.transitionDuration, s.animationName], open: document.querySelector('#proj-switch').getAttribute('aria-expanded'),
     };
   })())`));
-  const click = (selector) => chrome.evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
+  const click = (selector) => chrome.click(`document.querySelector(${JSON.stringify(selector)})`);
   /** One drawn frame after a click: an arrow that animated would still be part way round. */
-  const frame = () => chrome.evaluate('new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))');
+  const frame = () => chrome.stable('new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))');
   const DOWN = 'none', UP = 'matrix(-1, 0, 0, -1, 0, 0)';
   try {
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
@@ -471,7 +471,7 @@ test('the project switcher\'s arrow turns with the list [N26]', { timeout: 120_0
         const at = `${width}px ${scheme}`;
         if (width === 1280) {
           // Docked, the name opens no list, so there is no arrow; collapsed, the list drops from the name.
-          if (await chrome.evaluate("document.documentElement.dataset.side === 'collapsed'")) await click('#side-toggle');
+          if (await chrome.stable("document.documentElement.dataset.side === 'collapsed'")) await click('#side-toggle');
           await chrome.waitFor("document.documentElement.dataset.side !== 'collapsed'");
           assert.equal((await read()).shown, false, `${at}: docked, with no list to drop, there is no arrow`);
           await click('#side-toggle');

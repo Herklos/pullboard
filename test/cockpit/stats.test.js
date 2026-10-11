@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import * as store from '../../src/board.js';
-import { SPEC, machine, project, build, sendBack, startView, accept, boardOf, earlier, proofShot, chromeExecutable, openSnapshotChrome, closeSnapshotChrome } from './fixture.js';
+import { SPEC, machine, project, build, sendBack, startView, accept, boardOf, earlier, proofShot, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, pickProject } from './fixture.js';
 
 /** Add a real joined worktree to the shared test board.
  * @param {ReturnType<typeof machine>} box
@@ -48,14 +48,14 @@ test('[V2,N26] real Chrome shows matching proof stats at phone width and clears 
   try {
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
     await chrome.waitFor("!!data?.project?.proofStats && document.querySelector('#proof-stats [data-stat=\"submissions\"]')");
-    await chrome.evaluate(`document.querySelector('[data-root=${JSON.stringify(alpha.repo)}]').click()`);
+    await pickProject(chrome, `document.querySelector('[data-root=${JSON.stringify(alpha.repo)}]')`);
     await chrome.waitFor(`data?.project?.root === ${JSON.stringify(alpha.repo)} && !!document.querySelector('#proof-stats [data-stat="submissions"]')`);
     const keys = ['submissions', 'rejections', 'rejectionShare', 'merged', 'mergedWithoutAccept', 'agentCount', 'familyCount', 'firstEventAt', 'lastEventAt'];
     const expectedValues = Object.fromEntries(keys.map((key) => [key, key === 'rejectionShare' ? `${(expected[key] * 100).toFixed(1)}%` : String(expected[key] ?? '')]));
     for (const scheme of ['light', 'dark']) for (const width of [375, 1280]) {
       await chrome.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: scheme }] });
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
-      const actual = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+      const actual = JSON.parse(await chrome.stable(`JSON.stringify((() => {
         const card = document.querySelector('#proof-stats'), rect = card.getBoundingClientRect();
         const grid = getComputedStyle(card.querySelector('.proof-stats-grid'));
         return { hidden:card.hidden || !!card.closest('[hidden]'), display:getComputedStyle(card).display,
@@ -69,16 +69,16 @@ test('[V2,N26] real Chrome shows matching proof stats at phone width and clears 
       assert.ok(actual.width > 0 && actual.height > 0 && actual.right <= actual.viewport + 1, `${width}: card has visible bounds inside the viewport`);
       assert.equal(actual.columns, width < 480 ? 2 : 4, `${width}: compact stats grid adapts to the viewport`);
       assert.deepEqual(actual.values, expectedValues, `${width}: every visible value matches pullboard stats --json`);
-      const expectedText = JSON.parse(await chrome.evaluate(`JSON.stringify(Object.fromEntries(${JSON.stringify(keys)}.map(key => {
+      const expectedText = JSON.parse(await chrome.stable(`JSON.stringify(Object.fromEntries(${JSON.stringify(keys)}.map(key => {
         const value = ${JSON.stringify(expected)}[key];
         const date = key === 'firstEventAt' || key === 'lastEventAt';
         return [key, date ? (value ? new Date(value).toLocaleDateString([], { year:'numeric', month:'short', day:'numeric' }) : 'none') : ${JSON.stringify(expectedValues)}[key]];
       })))`));
       assert.deepEqual(actual.text, expectedText, `${width}: visible text also matches the stats response`);
     }
-    await chrome.evaluate(`document.querySelector('[data-root="group:Proof project"]').click()`);
+    await pickProject(chrome, `document.querySelector('[data-root="group:Proof project"]')`);
     await chrome.waitFor("data?.group?.name === 'Proof project' && document.querySelector('#group-view:not([hidden])') && document.querySelector('#proof-stats').hidden");
-    assert.equal(await chrome.evaluate("document.querySelector('#proof-stats').innerHTML"), '', 'a grouped view cannot retain a prior repo\'s stats');
+    assert.equal(await chrome.stable("document.querySelector('#proof-stats').innerHTML"), '', 'a grouped view cannot retain a prior repo\'s stats');
     const { flow: currentFlow, ...currentTotals } = (await boardOf(view, alpha.repo)).proofStats;
     const { flow: expectedFlow, ...expectedTotals } = expected;
     assert.deepEqual(currentTotals, expectedTotals, 'the comparison reads the same live API stats source; queue ages may advance');
@@ -120,9 +120,9 @@ test('[V2,N26] stats counts agree in number', { timeout: 90_000 }, async () => {
   try {
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
     await chrome.waitFor("!!data?.project?.proofStats && document.querySelector('#proof-stats .proof-stats-detail')");
-    await chrome.evaluate(`document.querySelector('[data-root=${JSON.stringify(alpha.repo)}]').click()`);
+    await pickProject(chrome, `document.querySelector('[data-root=${JSON.stringify(alpha.repo)}]')`);
     await chrome.waitFor(`data?.project?.root === ${JSON.stringify(alpha.repo)} && !!document.querySelector('#proof-stats .proof-stats-detail')`);
-    const detail = await chrome.evaluate("document.querySelector('#proof-stats .proof-stats-detail').textContent");
+    const detail = await chrome.stable("document.querySelector('#proof-stats .proof-stats-detail').textContent");
     assert.match(detail, /solo \(1 agent, 1 move\)/);
     assert.match(detail, /crew \(3 agents, 14 moves\)/);
     assert.match(detail, /web-5 \(unknown; 1 move\)/);
@@ -182,14 +182,14 @@ test('the stats card shows API flow and bottleneck at 375 and 1280 [N26]', { tim
     assert.equal(api.bottleneck.recommendation, 'review the oldest submission first (#4)');
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
     await chrome.waitFor('!!data?.project?.proofStats');
-    await chrome.evaluate('document.querySelector(' + JSON.stringify('[data-root="' + alpha.repo + '"]') + ').click()');
+    await pickProject(chrome, 'document.querySelector(' + JSON.stringify('[data-root="' + alpha.repo + '"]') + ')');
     await chrome.waitFor('data?.project?.root === ' + JSON.stringify(alpha.repo) + ' && !!document.querySelector("[data-stage=build]")');
     const backgrounds = {};
     for (const scheme of ['light', 'dark']) for (const width of [375, 1280]) {
       await chrome.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: scheme }] });
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
-      await chrome.evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))');
-      const actual = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+      await chrome.stable('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))');
+      const actual = JSON.parse(await chrome.stable(`JSON.stringify((() => {
         const card=document.querySelector('#proof-stats');
         const statement=card.querySelector('.proof-stats-bottleneck');
         const nodes=selector => [...card.querySelectorAll(selector)].map(node => ({ key:node.dataset.stage ?? node.dataset.queue ?? node.dataset.oldest, value:node.dataset.value, text:node.textContent }));
@@ -226,9 +226,9 @@ test('the stats card shows API flow and bottleneck at 375 and 1280 [N26]', { tim
       if (scheme === 'dark') await proofShot(chrome, 'stats-flow', width);
     }
     assert.notEqual(backgrounds.light, backgrounds.dark, 'both color themes were rendered');
-    await chrome.evaluate('document.querySelector(' + JSON.stringify('[data-root="' + empty.repo + '"]') + ').click()');
+    await pickProject(chrome, 'document.querySelector(' + JSON.stringify('[data-root="' + empty.repo + '"]') + ')');
     await chrome.waitFor('data?.project?.root === ' + JSON.stringify(empty.repo));
-    const blank = JSON.parse(await chrome.evaluate(`JSON.stringify({ stages:[...document.querySelectorAll('[data-stage]')].map(node => node.textContent), oldest:[...document.querySelectorAll('[data-oldest]')].map(node => node.textContent), action:document.querySelector('[data-flow=recommendation]')?.textContent ?? null, message:document.querySelector('[data-flow=bottleneck]')?.textContent, api:data.project.proofStats.flow })`));
+    const blank = JSON.parse(await chrome.stable(`JSON.stringify({ stages:[...document.querySelectorAll('[data-stage]')].map(node => node.textContent), oldest:[...document.querySelectorAll('[data-oldest]')].map(node => node.textContent), action:document.querySelector('[data-flow=recommendation]')?.textContent ?? null, message:document.querySelector('[data-flow=bottleneck]')?.textContent, api:data.project.proofStats.flow })`));
     assert.deepEqual(blank.stages, Array(4).fill('unmeasured'), 'missing measurements are not invented zeroes');
     assert.deepEqual(blank.oldest, Array(4).fill('Oldest: none'));
     assert.equal(blank.action, null, 'no action is invented without an API recommendation');

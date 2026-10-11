@@ -1892,7 +1892,7 @@ function pick(id, root = view.root) {
 
 /** Where the list and the detail stack (under 900px), bring the detail into view. */
 function reveal() {
-  if (matchMedia('(max-width: 900px)').matches) $('detail').scrollIntoView({ block: 'start' });
+  if (matchMedia('(max-width: 900px)').matches) $('detail').scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
 }
 
 /**
@@ -2066,6 +2066,14 @@ async function decideRow(kind, command, args, anchor) {
   if (root === view.root && view.specFeedback === feedback) {
     render();
     window.scrollTo({ top: scroll, behavior: 'instant' });
+    // A phone row click jumps to its detail. A later list-key decision returns the next pick to view,
+    // instead of restoring that detail's scroll position with the focused list still offscreen.
+    if (feedback.from === 'list' && feedback.tone === 'ok' && next && view.row[kind] === next) {
+      const picked = [...$(kind + '-list').querySelectorAll('[data-row]')].find((row) => row.dataset.row === prefix + next);
+      const rect = picked?.getBoundingClientRect();
+      // Center an offscreen pick: nearest can round a half-pixel edge just outside the viewport.
+      if (rect && (rect.top < 0 || rect.bottom > innerHeight)) picked.scrollIntoView({ block: 'center', behavior: 'instant' });
+    }
     if (!requests || feedback.status === 'done') setTimeout(() => { if (view.specFeedback === feedback) { view.specFeedback = null; render(); } }, 6000);
   }
   return requests ? Boolean(feedback.requestId) && feedback.status !== 'refused' : feedback.tone === 'ok';
@@ -2231,7 +2239,7 @@ document.addEventListener('click', (event) => {
     render();
     $(kind + '-list').focus({ preventScroll: true });
     // Where the list and the detail stack, the picked row's detail, with its buttons, comes into view.
-    if (matchMedia('(max-width: 900px)').matches) $(kind + '-detail').scrollIntoView({ block: 'start', behavior: 'smooth' });
+    if (matchMedia('(max-width: 900px)').matches) $(kind + '-detail').scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
   }
   else if (t.dataset.codeAll) showAllCode(t.dataset.codeAll, t.dataset.before || '');
   else if (t.dataset.codeLess) showLessCode(t.dataset.codeLess, t.dataset.before || '');
