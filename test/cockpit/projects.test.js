@@ -96,27 +96,27 @@ test('projects group repos with combined needs and activity, while ungrouped and
     assert.equal(page.element('tabs').hidden, true);
     assert.match(page.show('group-needs'), /Core API/);
     assert.match(page.show('group-needs'), /Web UI/);
-    assert.match(page.show('group-needs'), /<b>Core API<\/b><code>G3<\/code><span>Should <button class="ref" data-root="[^"]+" data-go="item:1" title="Core target #1" type="button">#1<\/button> greet in French\?<\/span><button data-root="[^"]+" type="button"><em>answer in SPEC\.md →<\/em><\/button>/, "a question in one repo's spec");
-    assert.match(page.show('group-needs'), /<b>Web UI<\/b><code>coordinator \(unknown\)<\/code><span>Ship <button class="ref" data-root="[^"]+" data-go="item:1" title="Target for #1" type="button">#1<\/button> today\?<\/span><button data-root="[^"]+" type="button"><em>decision, /, "and a decision in another's");
+    assert.match(page.show('group-needs'), /<b>Core API<\/b><code>G3<\/code><span>Should <a class="ref" href="\/Core%20API\/items\/1\?k=[^"]+" data-go="item:1" data-board="[^"]+" title="Core target #1">#1<\/a> greet in French\?<\/span><button data-root="[^"]+" type="button"><em>answer in SPEC\.md →<\/em><\/button>/, "a question in one repo's spec");
+    assert.match(page.show('group-needs'), /<b>Web UI<\/b><code>coordinator \(unknown\)<\/code><span>Ship <a class="ref" href="\/Web%20UI\/items\/1\?k=[^"]+" data-go="item:1" data-board="[^"]+" title="Target for #1">#1<\/a> today\?<\/span><button data-root="[^"]+" type="button"><em>decision, /, "and a decision in another's");
     assert.doesNotMatch(page.show('group-needs'), /sent back|to verify|Greeting|Header/, "work sent back or waiting for a verdict is the agents', not the person's");
     assert.match(page.show('group-activity'), /Core API/);
     assert.match(page.show('group-activity'), /Web UI/);
     assert.match(page.show('group-activity'), /Greeting|Target/);
-    const activityRefs = [...page.show('group-activity').matchAll(/<button class="ref" data-root="([^"]+)" data-go="item:1" title="([^"]+)"/g)].map((link) => [link[1], link[2]]);
+    const activityRefs = [...page.show('group-activity').matchAll(/<a class="ref" href="[^"]+" data-go="item:1" data-board="([^"]+)" title="([^"]+)"/g)].map((link) => [link[1], link[2]]);
     assert.ok(activityRefs.some(([root, title]) => root === core.repo && title === 'Core target #1'), 'activity links bind Core API #1 to its repo');
     assert.ok(activityRefs.some(([root, title]) => root === web.repo && title === 'Target for #1'), 'activity links bind Web UI #1 to its repo');
 
-    assert.deepEqual([...page.show('group-needs').matchAll(/<button class="ref" data-root="([^"]+)" data-go="item:1" title="([^"]+)"/g)].map((link) => [link[1], link[2]]), [
+    assert.deepEqual([...page.show('group-needs').matchAll(/<a class="ref" href="[^"]+" data-go="item:1" data-board="([^"]+)" title="([^"]+)"/g)].map((link) => [link[1], link[2]]), [
       [core.repo, 'Core target #1'], [web.repo, 'Target for #1'],
     ], 'each duplicate #1 keeps the repo where it was written');
     page.run("view.tab = 'activity'");
-    await page.click({ root: core.repo, go: 'item:1' });
+    await page.click({ board: core.repo, go: 'item:1' });
     assert.equal(page.run('view.root'), core.repo, 'the Core API link opens its own repo');
     assert.equal(page.run('view.item'), 1, 'the Core API link opens its #1');
     assert.equal(page.run('view.tab'), 'items', 'the Core API link opens its item detail');
     await page.click({ root: 'group:Atlas' });
     page.run("view.tab = 'activity'");
-    await page.click({ root: web.repo, go: 'item:1' });
+    await page.click({ board: web.repo, go: 'item:1' });
     assert.equal(page.run('view.root'), web.repo, 'the Web UI link opens its own repo');
     assert.equal(page.run('view.item'), 1, 'the Web UI link opens its #1');
     assert.equal(page.run('view.tab'), 'items', 'the Web UI link opens its item detail');
