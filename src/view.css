@@ -332,8 +332,8 @@ input:disabled { background: var(--surface-2); color: var(--ink-muted); }
 .chip.gate { background: none; color: var(--ink-muted); outline: 1px dashed var(--line-strong); outline-offset: -1px; }
 .meta .gate { color: var(--ink-muted); }
 .meta .gate .wait-unit, .kv dd.waits-on .wait-unit { white-space: nowrap; }
-.meta .gate button.ref { min-height: 0; }
-.meta button.ref { border: 0; background: none; padding: 0; font: inherit; color: var(--accent-strong); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+.meta .gate button.ref, .meta .gate a.ref { min-height: 0; }
+.meta button.ref, .meta a.ref { border: 0; background: none; padding: 0; font: inherit; color: var(--accent-strong); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
 .empty { color: var(--ink-faint); padding: 14px 10px; }
 
 .stack { display: grid; gap: 14px; }
@@ -351,8 +351,8 @@ input:disabled { background: var(--surface-2); color: var(--ink-muted); }
 .check-warning { margin: 6px 0 0; color: var(--warn); font-size: 13px; }
 .kv { display: grid; grid-template-columns: 6.5em minmax(0, 1fr); gap: 4px 10px; font-size: 13px; margin: 0; }
 .kv dt { color: var(--ink-faint); } .kv dd { margin: 0; overflow-wrap: anywhere; }
-.kv dd.waits-on button.ref { border: 0; background: none; padding: 0; font: inherit; color: var(--accent-strong); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
-.kv dd.waits-on button.ref { min-height: 0; }
+.kv dd.waits-on button.ref, .kv dd.waits-on a.ref { border: 0; background: none; padding: 0; font: inherit; color: var(--accent-strong); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+.kv dd.waits-on button.ref, .kv dd.waits-on a.ref { min-height: 0; }
 .kv code, .detail code { font: 12px var(--mono); }
 .verdict { display: grid; gap: 3px; margin-bottom: 10px; }
 .verdict.yes b { color: var(--accent-strong); } .verdict.no b { color: var(--reject); }
@@ -467,7 +467,7 @@ form.inline { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; paddin
 .shout .receipt .outcome { color: var(--ink-muted); }
 .shout .receipt-foot { color: var(--ink-faint); font-size: 12px; }
 /* In a shout, a chip says what it is: an item, a path, a commit, a command. */
-.shout button.ref[data-go] { padding: 0 5px; border-radius: 5px; background: var(--violet-soft); color: var(--violet); font-weight: 600; text-decoration: none; }
+.shout button.ref[data-go], .shout a.ref[data-go] { padding: 0 5px; border-radius: 5px; background: var(--violet-soft); color: var(--violet); font-weight: 600; text-decoration: none; }
 .shout code.inline.path { background: var(--blue-soft); color: var(--blue); }
 .shout code.inline.sha { background: var(--warn-soft); color: var(--warn); }
 .shout code.inline.cmd { background: var(--accent-soft); color: var(--accent-strong); }
@@ -476,7 +476,9 @@ form.inline { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; paddin
 .shout code.inline.long { display: inline-block; box-sizing: border-box; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; vertical-align: bottom; }
 .feed .day { margin: 0; padding: 12px 0 4px; font: 600 11px/1 var(--mono); letter-spacing: .07em; text-transform: uppercase; color: var(--ink-faint); }
 .feed .day:first-child { padding-top: 6px; }
-button.ref { width: auto; min-height: 0; border: 0; border-radius: 0; background: none; padding: 0; color: var(--accent-strong); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; display: inline; vertical-align: baseline; line-height: inherit; font: inherit; }
+button.ref, a.ref[data-go] { width: auto; min-height: 0; border: 0; border-radius: 0; background: none; padding: 0; color: var(--accent-strong); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; display: inline; vertical-align: baseline; line-height: inherit; font: inherit; }
+/* Item anchors use their inherited line box, rather than the shorter inline glyph box. */
+a.ref[data-go] { display: inline-block; }
 /* A code reference (path:lines@sha) is one long token: wider than its line, it breaks anywhere rather than push the page sideways. */
 button.ref[data-code] { display: inline-flex; max-width: 100%; vertical-align: bottom; white-space: nowrap; text-align: left; }
 button.ref[data-code] .ref-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
@@ -599,7 +601,7 @@ code.inline.long { white-space: break-spaces; overflow-wrap: anywhere; }
 @media (pointer: coarse), (width < 900px) {
   :root { --tap: 44px; }
   button, input, select, textarea, [data-item], [data-row] { min-height: 44px; }
-  button.ref.alone { display: inline-flex; align-items: center; min-height: 44px; vertical-align: middle; }
+  button.ref.alone, a.ref.alone { display: inline-flex; align-items: center; min-height: 44px; vertical-align: middle; }
   .theme-btn, .flow-hide { width: 44px; height: 44px; }
 }
 /* A clickable row is never shorter than the target. */

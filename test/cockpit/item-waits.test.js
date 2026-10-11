@@ -40,7 +40,7 @@ test('wait references stay on one line and link to every prerequisite at phone a
         const lineHeight=e=>parseFloat(getComputedStyle(e).lineHeight);
         const neighbors=[...gate.parentElement.children].filter(e=>e!==gate).map(lineHeight).filter(Number.isFinite);
         const units=[...gate.querySelectorAll('.wait-unit')];
-        return {height:gate.getBoundingClientRect().height,neighborHeight:Math.max(...neighbors),unitWhiteSpaces:units.map(unit=>getComputedStyle(unit).whiteSpace),unitY:units.map(unit=>unit.getBoundingClientRect().y),links:[...gate.querySelectorAll('button.ref')].map(link=>link.dataset.go)};
+        return {height:gate.getBoundingClientRect().height,neighborHeight:Math.max(...neighbors),unitWhiteSpaces:units.map(unit=>getComputedStyle(unit).whiteSpace),unitY:units.map(unit=>unit.getBoundingClientRect().y),links:[...gate.querySelectorAll('a.ref[data-go]')].map(link=>link.dataset.go)};
       })())`));
       t.diagnostic(`${width}px list wait marker: ${list.height}px tall, neighboring metadata line ${list.neighborHeight}px`);
       assert.ok(list.height <= list.neighborHeight + 1, `${width}: list reference matches neighboring metadata height: ${JSON.stringify(list)}`);
@@ -54,7 +54,7 @@ test('wait references stay on one line and link to every prerequisite at phone a
         const waits=document.querySelector('#detail .kv dd.waits-on');
         const units=[...waits.querySelectorAll('.wait-unit')];
         return {height:waits.getBoundingClientRect().height,lineHeight:parseFloat(getComputedStyle(waits).lineHeight),unitWhiteSpaces:units.map(unit=>getComputedStyle(unit).whiteSpace),unitY:units.map(unit=>unit.getBoundingClientRect().y),
-          links:[...waits.querySelectorAll('button.ref')].map(link=>link.dataset.go)};
+          links:[...waits.querySelectorAll('a.ref[data-go]')].map(link=>link.dataset.go)};
       })())`));
       t.diagnostic(`${width}px detail wait marker: ${detail.height}px tall, neighboring metadata line ${detail.lineHeight}px`);
       assert.ok(detail.height <= detail.lineHeight + 1, `${width}: detail prerequisite line matches its metadata: ${JSON.stringify(detail)}`);

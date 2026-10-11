@@ -522,7 +522,7 @@ test('an exported roadmap has its own address under a folder, and Back and Forwa
     await travel(chrome, 1);
     await settled(chrome, `${ready} && ${showing('roadmap', '/demo/#roadmap')} && !!${roadmapRow('#2')}`);
     await press(chrome, roadmapRow('#2'));
-    await chrome.waitFor(`${showing('items', '/demo/')} && document.querySelector('#detail h2')?.innerText.includes('Open page')`);
+    await chrome.waitFor(`${showing('items', '/demo/#items/2')} && document.querySelector('#detail h2')?.innerText.includes('Open page')`);
     await travel(chrome, -1);
     await settled(chrome, `${ready} && ${showing('roadmap', '/demo/#roadmap')}`);
 

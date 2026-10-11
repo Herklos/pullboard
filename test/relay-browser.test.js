@@ -1,5 +1,6 @@
 /** Real Chrome reads and follows device-sealed boards; the relay never receives its key [H5,H15,H18]. */
 import assert from 'node:assert/strict';
+import { AssertionError } from 'node:assert';
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -12,7 +13,7 @@ import { relaySnapshot } from '../src/relay-presentation.js';
 import { ENGINE_VERSION } from '../src/machine.js';
 import { addItem, answerDecision, closeBoard, openBoard, shout } from '../src/board.js';
 import { relayClientFixture } from './relay-client-fixture.js';
-import { findChromeExecutable, startChrome } from './relay-browser-fixture.js';
+import { findChromeExecutable, relayWorkBudgetMs, startChrome } from './relay-browser-fixture.js';
 
 /** Read native gzip snapshots while retaining checks against historical uncompressed records. */
 function snapshotDocument(plain) {
@@ -226,8 +227,45 @@ test('the relay reads an addressed shout [H5,N38]', {
   const unpaired = await chrome.evaluate(`api('/api/v1/boards/${link.board}/shouts/${shoutId}').then(() => 'unexpected', error => error.message)`);
   assert.match(unpaired, /Pair this browser to read that board/u);
 
-  await chrome.navigate(box.origin + '/#board=' + link.board + '&key=' + key);
-  await chrome.waitFor("document.querySelector('#chain')?.textContent.includes('private cleanup fixture item')");
+  const pairedBoardExpression = "document.querySelector('#chain')?.textContent.includes('private cleanup fixture item')";
+  const captureExpression = `(() => {
+    const board = ${JSON.stringify(link.board)};
+    const fragment = new URLSearchParams(location.hash.slice(1));
+    if (fragment.has('key')) fragment.set('key', '[MASKED]');
+    let deviceKeyForBoard = false;
+    try {
+      const keys = JSON.parse(localStorage.getItem('pullboard.relay.keys.v1') ?? '{}');
+      deviceKeyForBoard = typeof keys?.[board] === 'string' && keys[board].length > 0;
+    } catch { /* Report only whether a key exists, never the stored value. */ }
+    return {
+      relayNotice: document.querySelector('#relay-notice')?.textContent ?? null,
+      chainFirst200: (document.querySelector('#chain')?.textContent ?? '').slice(0, 200),
+      locationHashMasked: location.hash ? '#' + fragment.toString() : '',
+      deviceKeyForBoard,
+    };
+  })()`;
+  // Start observing before the hash-only navigation so a stalled pairing leaves its page state in the failure.
+  const pairedBoardWait = chrome.waitFor(pairedBoardExpression, relayWorkBudgetMs(), 'the addressed-shout board appears')
+    .catch(async error => {
+      const capture = {
+        relayNotice: null, chainFirst200: null, locationHashMasked: null, deviceKeyForBoard: null,
+      };
+      try { Object.assign(capture, await chrome.evaluate(captureExpression, 'capture addressed-shout page state', 5000)); }
+      catch (captureError) { capture.captureError = captureError.message; }
+      const captureText = JSON.stringify(capture);
+      const captureContainsPairingKey = captureText.includes(key);
+      const safeCapture = captureContainsPairingKey ? captureText.replaceAll(key, '[MASKED]') : captureText;
+      const failure = new AssertionError({
+        message: `${error.message}\nAddressed-shout page capture: ${safeCapture}\nPairing key present in capture: ${captureContainsPairingKey}`,
+        actual: false, expected: true, operator: 'waitFor',
+      });
+      failure.cause = error;
+      throw failure;
+    });
+  await Promise.all([
+    chrome.navigate(box.origin + '/#board=' + link.board + '&key=' + key),
+    pairedBoardWait,
+  ]);
   const recentState = await chrome.evaluate(`api('/api/v1/boards/${link.board}/state')`);
   assert.equal(recentState.state.shouts.length, 40);
   assert.equal(recentState.state.shouts.some(row => row.shout_id === shoutId), false,

@@ -95,7 +95,7 @@ test('each row says what it waits on [N26]', async () => {
     }]));
     assert.deepEqual(rows['1'], { chip: 'free: unclaimed', edge: false, waits: [] }, 'free to claim');
     assert.deepEqual(rows['2'], { chip: 'busy: web-1 (Test Model)', edge: false, waits: [] }, 'a claim names its holder');
-    assert.deepEqual(rows['3'], { chip: 'gate: gated', edge: true, waits: ['<span class="wait-unit">waits on <button class="ref" data-go="item:2" type="button">#2</button>'] }, 'gated on #2, which is still being built');
+    assert.deepEqual(rows['3'], { chip: 'gate: gated', edge: true, waits: [`<span class="wait-unit">waits on <a class="ref" href="/items/2?k=${view.key}" data-go="item:2">#2</a>`] }, 'gated on #2, which is still being built');
     assert.deepEqual(rows['4'], { chip: 'gate: lane held', edge: true, waits: ['lane held: API &lt;freeze&gt; until Friday'] });
     assert.deepEqual(rows['5'], { chip: 'warn: to verify', edge: false, waits: [] });
     assert.deepEqual(rows['6'], { chip: 'no: sent back', edge: false, waits: [] });
@@ -611,12 +611,12 @@ test('shout ids, search and narrow windows reach the item [N26]', async () => {
     await page.type('q', '');
 
     const feed = page.show('feed');
-    assert.ok(feed.includes('<button class="ref" data-go="item:1" title="Greeting" type="button">#1</button> is next;'), feed);
-    assert.ok(feed.includes('<button class="ref" data-go="item:2" title="Farewell banner" type="button">#2</button> shipped'));
-    assert.ok(feed.includes('(#99 is not an item) and it&#39;s done'), 'no link for a missing item, and the apostrophe stays intact');
-    const ref = (id, title) => `<button class="ref" data-go="item:${id}" title="${title}" type="button">#${id}</button>`;
+    assert.ok(feed.includes(`<a class="ref" href="/items/1?k=${view.key}" data-go="item:1" title="Greeting">#1</a> is next;`), feed);
+    assert.ok(feed.includes(`<a class="ref" href="/items/2?k=${view.key}" data-go="item:2" title="Farewell banner">#2</a> shipped`));
+    assert.ok(feed.includes(`(<a class="ref" href="/items/99?k=${view.key}" data-go="item:99">#99</a> is not an item) and it&#39;s done`), 'an unknown item still has its address, and the apostrophe stays intact');
+    const ref = (id, title) => `<a class="ref" href="/items/${id}?k=${view.key}" data-go="item:${id}" title="${title}">#${id}</a>`;
     assert.ok(feed.includes(`${ref(7, 'Filler 7')}, see${ref(7, 'Filler 7')} and ${ref(7, 'Filler 7')}${ref(8, 'Filler 8')}: it&#39;s 5 o&#39;clock`), 'every #id links, whatever stands next to it');
-    assert.equal(feed.match(/class="ref"/g).length, 6);
+    assert.equal(feed.match(/class="ref"/g).length, 7);
     await page.click({ go: 'item:2', classes: 'ref' });
     assert.equal(page.run('view.tab'), 'items', 'the link opens the Items tab');
     assert.match(page.show('detail'), /<h2><span>#2<\/span>Farewell banner<\/h2>/, 'on that item');
@@ -905,9 +905,9 @@ test('in-text item references stay inline and open their target at phone and des
       const rendered = JSON.parse(await chrome.stable(`JSON.stringify((() => {
         const row = document.querySelector('#chain .row[data-item="2"]');
         const plain = document.querySelector('#chain .row[data-item="1"]');
-        const titleRef = row?.querySelector('.t button.ref');
+        const titleRef = row?.querySelector('.t a.ref[data-go]');
         const need = [...document.querySelectorAll('#needs .row')].find((entry) => entry.textContent.includes('Please choose'));
-        const needRef = need?.querySelector('.t button.ref');
+        const needRef = need?.querySelector('.t a.ref[data-go]');
         const needAction = need;
         const realButton = document.querySelector('#new-item');
         /** Measure the element box independently of the inline-link assertion. */
@@ -973,24 +973,24 @@ test('in-text item references stay inline and open their target at phone and des
       }
 
       await chrome.click(`document.querySelector('[data-tab="items"]')`);
-      await chrome.click(`document.querySelector('#chain .row[data-item="2"] .t button.ref')`);
+      await chrome.click(`document.querySelector('#chain .row[data-item="2"] .t a.ref[data-go]')`);
       await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('Target item')");
       await chooseFilter(chrome, 'state:active');
-      await chrome.click(`document.querySelector('#needs .row .t button.ref')`);
+      await chrome.click(`document.querySelector('#needs .row .t a.ref[data-go]')`);
       await chrome.waitFor("document.querySelector('[data-tab=items].on') && document.querySelector('#detail h2')?.textContent.includes('Target item')");
 
       await chrome.click(`document.querySelector('[data-tab="activity"]')`);
-      await chrome.waitFor("document.querySelector('#activity .what button.ref')");
-      await chrome.click(`document.querySelector('#activity .what button.ref')`);
+      await chrome.waitFor("document.querySelector('#activity .what a.ref[data-go]')");
+      await chrome.click(`document.querySelector('#activity .what a.ref[data-go]')`);
       await chrome.waitFor("document.querySelector('[data-tab=items].on') && document.querySelector('#detail h2')?.textContent.includes('Target item')");
 
       await chrome.click(`document.querySelector('#chain .row[data-item="2"]')`);
-      await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('Title links to #1') && document.querySelector('#detail .text button.ref') && document.querySelector('#detail .text.muted button.ref')");
-      await chrome.click(`document.querySelector('#detail .text button.ref')`);
+      await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('Title links to #1') && document.querySelector('#detail .text a.ref[data-go]') && document.querySelector('#detail .text.muted a.ref[data-go]')");
+      await chrome.click(`document.querySelector('#detail .text a.ref[data-go]')`);
       await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('Target item')");
       await chrome.click(`document.querySelector('#chain .row[data-item="2"]')`);
-      await chrome.waitFor("document.querySelector('#detail .text.muted button.ref')");
-      await chrome.click(`document.querySelector('#detail .text.muted button.ref')`);
+      await chrome.waitFor("document.querySelector('#detail .text.muted a.ref[data-go]')");
+      await chrome.click(`document.querySelector('#detail .text.muted a.ref[data-go]')`);
       await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('Target item')");
     }
   } finally {
@@ -1178,7 +1178,7 @@ test('Pipeline view shows every stage, status counts, stage ages, detail links a
     assert.equal(await chrome.stable('location.pathname'), '/items/pipeline', 'Pipeline has its own shareable address');
     await chrome.waitFor("typeof data !== 'undefined' && location.pathname === '/items/pipeline' && !document.querySelector('#pipeline').hidden");
     const expectedCounts = [status.open, status.claimed, status.submitted, 1, 1];
-    const read = JSON.parse(await chrome.stable(`JSON.stringify([...document.querySelectorAll('[data-pipeline-stage]')].map(stage => ({ stage:stage.dataset.pipelineStage, label:stage.querySelector('h2').textContent, count:Number(stage.querySelector('[data-stage-count]').textContent), oldest:Number(stage.querySelector('.pipeline-oldest [data-item]')?.dataset.item || 0), since:stage.querySelector('.pipeline-oldest time')?.dataset.ago || null, age:stage.querySelector('.pipeline-oldest time')?.textContent || '', ids:[...stage.querySelectorAll('.pipeline-item')].map(item => Number(item.dataset.item)) })))`));
+    const read = JSON.parse(await chrome.stable(`JSON.stringify([...document.querySelectorAll('[data-pipeline-stage]')].map(stage => ({ stage:stage.dataset.pipelineStage, label:stage.querySelector('h2').textContent, count:Number(stage.querySelector('[data-stage-count]').textContent), oldest:Number(stage.querySelector('.pipeline-oldest a[data-go]')?.dataset.go.slice('item:'.length) || 0), since:stage.querySelector('.pipeline-oldest time')?.dataset.ago || null, age:stage.querySelector('.pipeline-oldest time')?.textContent || '', ids:[...stage.querySelectorAll('.pipeline-item')].map(item => Number(item.dataset.item)) })))`));
     assert.deepEqual(read.map(stage => stage.label), ['Not started', 'Building', 'Waiting for review', 'Accepted, waiting to merge', 'Merged']);
     assert.deepEqual(read.map(stage => stage.count), expectedCounts, 'open/claimed/submitted match status; accepted plus merged equals verified');
     assert.equal(read[3].count + read[4].count, status.verified);
@@ -1362,11 +1362,11 @@ test('Pipeline view dates an expired claim from its recorded deadline [N26,N38]'
     const page = await openPage(view);
     await page.click({itemsView:'pipeline'});
     const open = () => page.show('pipeline').split('data-pipeline-stage="open"')[1].split('</header>')[1].split('</p>')[0];
-    assert.match(open(), /data-item="2"/, 'an open item from minute35 is older than a claim that lapses at minute40');
+    assert.match(open(), /data-go="item:2"/, 'an open item from minute35 is older than a claim that lapses at minute40');
     assert.match(open(), new RegExp(new Date(base+35*60_000).toISOString()), 'the oldest open timestamp is the arrival');
     box.run(alpha.repo, 'withdraw', '2', 'Private fixture now isolates the lapse age');
     await page.run('refresh()');
-    assert.match(open(), /data-item="1"/);
+    assert.match(open(), /data-go="item:1"/);
     assert.match(open(), new RegExp(new Date(base+40*60_000).toISOString()), 'expired claim age starts at its native lease deadline');
   } finally { await view.stop(); }
 });
