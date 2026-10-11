@@ -8,6 +8,50 @@ import { test } from 'node:test';
 import { tapTarget, machine, project, startView, boardOf, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, press } from './fixture.js';
 import { assertFirstStateDelay } from './stable.js';
 
+/** Stage real chip clones and retain their node identities to diagnose a redraw between browser evaluations. */
+async function stageNaturalSpecChips(chrome) {
+  return JSON.parse(await chrome.stable(`JSON.stringify((() => {
+    const root = document.querySelector('#spec-chips');
+    if (!root) return { buttonCount: 0, cloneCount: 0 };
+    root.querySelectorAll('[data-natural-chip]').forEach(clone => clone.remove());
+    const buttons = [...root.querySelectorAll('button:not([data-natural-chip])')];
+    const clones = buttons.map(button => {
+      const clone = button.cloneNode(true);
+      clone.dataset.naturalChip = '';
+      clone.style.cssText += ';position:fixed;left:-10000px;opacity:0;width:max-content;flex:none';
+      button.parentElement.append(clone);
+      return clone;
+    });
+    window.__specChipStage = { buttons, clones };
+    return { buttonCount: buttons.length, cloneCount: clones.length };
+  })())`));
+}
+
+/** Clone, measure and remove natural-size chips in one page evaluation, so a render cannot split the sample. */
+async function measureNaturalSpecChips(chrome, beforeMeasure = null) {
+  if (beforeMeasure) await beforeMeasure();
+  return JSON.parse(await chrome.stable(`JSON.stringify((() => {
+    const root = document.querySelector('#spec-chips');
+    if (!root) return { buttonCount: 0, cloneCount: 0, chips: [] };
+    const buttons = [...root.querySelectorAll('button:not([data-natural-chip])')];
+    root.querySelectorAll('[data-natural-chip]').forEach(clone => clone.remove());
+    const clones = buttons.map(button => {
+      const clone = button.cloneNode(true);
+      clone.dataset.naturalChip = '';
+      clone.style.cssText += ';position:fixed;left:-10000px;opacity:0;width:max-content;flex:none';
+      button.parentElement.append(clone);
+      return clone;
+    });
+    const chips = buttons.map((button, index) => ({
+      text: button.textContent.trim(),
+      actualWidth: button.getBoundingClientRect().width,
+      naturalWidth: clones[index].getBoundingClientRect().width,
+    }));
+    clones.forEach(clone => clone.remove());
+    return { buttonCount: buttons.length, cloneCount: clones.length, chips };
+  })())`, "document.querySelectorAll('#spec-chips button:not([data-natural-chip])')"));
+}
+
 
 test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N26,N27]', { timeout: 120_000 }, async (t) => {
   const executable = chromeExecutable();
@@ -136,15 +180,9 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
         await checkLayout(width, `${tab} tab`);
         if (tab === 'spec') {
           await waitRendered(['#spec-chips button']);
-          await chrome.stable(`document.querySelectorAll('#spec-chips button').forEach(button => {
-            const clone=button.cloneNode(true); clone.dataset.naturalChip=''; clone.style.cssText += ';position:fixed;left:-10000px;opacity:0;width:max-content;flex:none'; button.parentElement.append(clone);
-          })`);
-          const chips = await chrome.stable(`(() => {
-            const buttons=[...document.querySelectorAll('#spec-chips button:not([data-natural-chip])')];
-            const clones=[...document.querySelectorAll('#spec-chips [data-natural-chip]')];
-            return buttons.map((button,index) => ({text:button.textContent.trim(),actualWidth:button.getBoundingClientRect().width,naturalWidth:clones[index].getBoundingClientRect().width}));
-          })()`, "document.querySelectorAll('#spec-chips button')");
-          await chrome.stable("document.querySelectorAll('[data-natural-chip]').forEach(clone => clone.remove())");
+          const { buttonCount, cloneCount, chips } = await measureNaturalSpecChips(chrome);
+          assert.ok(buttonCount > 0, `${width}: Spec chip measurement found ${buttonCount} buttons and ${cloneCount} clones`);
+          assert.equal(cloneCount, buttonCount, `${width}: spec chip measurements use one clone per current button`);
           assert.ok(chips.length >= 2, `${width}: spec filters render as chips`);
           for (const chip of chips) assert.ok(Math.abs(chip.actualWidth - chip.naturalWidth) < 2, `${width}: ${chip.text} keeps its natural width: ${JSON.stringify(chip)}`);
         }
@@ -268,6 +306,65 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
     assert.deepEqual(state.holds, [], 'both widths released the held lane');
     assert.deepEqual(chrome.exceptions, [], 'Chrome reports no uncaught exceptions');
     assert.deepEqual(consoleErrors, [], 'Chrome reports no console errors');
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    await view.stop();
+    rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+test('the spec chip measurement survives a redraw [N26,C7]', {
+  timeout: 30_000, // budget: stop a hung local Chrome flow; not a rendering-speed assertion.
+}, async () => {
+  const executable = chromeExecutable();
+  assert.ok(executable, 'Chrome is installed or PULLBOARD_CHROME points to it');
+
+  const box = machine();
+  const demo = project(box, 'spec-chip-redraw-demo');
+  box.run(demo.repo, 'add', 'web', 'Spec chip measurement item', '--specs', 'G1', '--criterion', 'visible in the Spec chip redraw test');
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-spec-chip-redraw-'));
+  let chrome;
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+    await chrome.waitFor("document.readyState === 'complete' && !!document.querySelector('#chain .row')");
+    await press(chrome, "document.querySelector('[data-tab=spec]')");
+    await chrome.waitFor("document.querySelectorAll('#spec-chips button:not([data-natural-chip])').length >= 2");
+
+    let redraw;
+    /** Reproduce the prior split-operation boundary with a real chip click and record why its samples differ. */
+    const forceRedrawAtMeasurementBoundary = async () => {
+      const staged = await stageNaturalSpecChips(chrome);
+      assert.ok(staged.buttonCount >= 2, `Spec filters render as chips: ${JSON.stringify(staged)}`);
+      assert.equal(staged.cloneCount, staged.buttonCount, `staging begins with matching buttons and clones: ${JSON.stringify(staged)}`);
+      await press(chrome, "document.querySelector('#spec-chips [data-rows=\"spec:all\"]')");
+      await chrome.waitFor("document.querySelectorAll('#spec-chips button:not([data-natural-chip])').length >= 2");
+      redraw = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+        const stage = window.__specChipStage;
+        const root = document.querySelector('#spec-chips');
+        return {
+          stagedButtonsConnected: stage.buttons.every(button => button.isConnected),
+          stagedClonesConnected: stage.clones.every(clone => clone.isConnected),
+          buttonCount: root.querySelectorAll('button:not([data-natural-chip])').length,
+          cloneCount: root.querySelectorAll('[data-natural-chip]').length,
+        };
+      })())`));
+      assert.equal(redraw.stagedButtonsConnected, false, `the actual filter click redrew the chip buttons: ${JSON.stringify(redraw)}`);
+      assert.equal(redraw.stagedClonesConnected, false, `that redraw dropped the staged clones: ${JSON.stringify(redraw)}`);
+      assert.equal(redraw.buttonCount, staged.buttonCount, `the current chip count stayed stable: ${JSON.stringify(redraw)}`);
+      assert.equal(redraw.cloneCount, 0, `the redraw removed the staged clones rather than changing the chip count: ${JSON.stringify(redraw)}`);
+    };
+
+    const measured = await measureNaturalSpecChips(chrome, forceRedrawAtMeasurementBoundary);
+    assert.ok(measured.buttonCount > 0, `Spec chip measurement found ${measured.buttonCount} buttons and ${measured.cloneCount} clones`);
+    assert.equal(measured.cloneCount, measured.buttonCount, `the current buttons are cloned and measured together: ${JSON.stringify(measured)}`);
+    assert.equal(measured.chips.length, measured.buttonCount, `every current Spec chip has a measurement: ${JSON.stringify(measured)}`);
+    for (const chip of measured.chips) assert.ok(Math.abs(chip.actualWidth - chip.naturalWidth) < 2,
+      `${chip.text} keeps its natural width after redraw: ${JSON.stringify(chip)}`);
+    assert.equal(await chrome.stable("document.querySelectorAll('#spec-chips [data-natural-chip]').length"), 0,
+      'natural-size clones are removed after measurement');
+    assert.deepEqual(chrome.exceptions, [], 'the browser reports no page exceptions');
   } finally {
     if (chrome) await closeSnapshotChrome(chrome);
     await view.stop();
