@@ -135,7 +135,7 @@ test("needs-you holds only the person's calls; the rest show on the board with w
     page.run("view.agent = 'web-1'; render();");
     assert.deepEqual(agentEntries(page.show('agents')).find((agent) => agent.id === 'web-1').holds, ['#2 Farewell: sent back', '#1 Greeting: to verify'], 'the agent that built them holds both');
     page.run('view.agent = null; render();');
-    assert.match(page.show('lanes'), /<b>web<\/b> <span class="chip no">held by coordinator \(unknown\)<\/span> <span class="muted">G3 is open<\/span>/, 'a held lane names who holds it');
+    assert.match(page.show('lanes'), /<b>web<\/b> <span class="chip no" title="held by coordinator \(unknown\)">held by coordinator \(unknown\)<\/span> <span class="muted">G3 is open<\/span>/, 'a held lane names who holds it');
 
     // The sidebar counts exactly the person's calls; its line still says what the agents are doing.
     assert.deepEqual(projectRows(page.show('proj-list')).map((row) => [row.needs, row.line]), [['4', '1 decision · 1 question · 1 draft row · 1 lane held · 1 sent back · 1 to verify']]);

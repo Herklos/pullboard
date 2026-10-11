@@ -33,7 +33,10 @@ test('CI runs the gate on every push and pull request, Node 22.13 and 24, on Lin
     assert.match(text, /\n {8}node: \['22\.13', '24'\]\n/, `${name} runs Node 22.13 and 24`);
     assert.match(text, /\n {10}node-version: \$\{\{ matrix\.node \}\}\n/, `${name} sets up the matrix's Node`);
     assert.match(text, /\n {10}fetch-depth: 0\n/, `${name} checks out full history, which spec check reads`);
-    assert.match(text, /\n {6}- run: npm run gate\n/, `${name} runs the gate`);
+    assert.equal([...text.matchAll(/\n {6}- run: node bin\/pullboard\.js spec check(?=\n)/gu)].length, 1,
+      `${name} checks the spec exactly once in every matrix job`);
+    assert.ok(text.includes('npm test -- --shard=${{ matrix.shard }}/${{ matrix.shards }}'),
+      `${name} forwards its native shard to the test runner`);
   }
   assert.match(job('macos'), /\n {4}if: \$\{\{ !github\.event\.repository\.private \}\}\n/, 'macOS runs once the repository is public');
   assert.doesNotMatch(job('linux'), /\n {4}if:/, 'Linux runs every time');
