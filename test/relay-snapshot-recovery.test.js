@@ -75,7 +75,7 @@ test('a delayed native checkpoint recovers the real page after its visible timeo
   const sent = await upload(box, { ...link, token: agent.token }, 'moves', 1, await encoded(key, move, link.board, 'move', 1));
   const started = Date.now();
   const timeoutText = 'The relay snapshot has not caught up to this move. Retry this board.';
-  await chrome.waitFor('document.querySelector("#relay-notice")?.textContent.includes(' + JSON.stringify(timeoutText) + ')',
+  await chrome.waitFor('document.querySelector("#relay-notice")?.textContent.includes(' + JSON.stringify(timeoutText) + ')', // budget: hang ceiling for observing the declared fifteen-second checkpoint timeout; no throughput claim.
     45_000, 'actual fifteen-second native checkpoint timeout');
   assert.ok(Date.now() - started >= 14_000, 'the production wait elapsed; no clock or fetch was replaced'); // budget: declared fifteen-second native checkpoint wait (14000ms lower bound).
   assert.equal(await chrome.evaluate('document.querySelector("#chain").textContent.includes(' + JSON.stringify(recovered) + ')'), false);

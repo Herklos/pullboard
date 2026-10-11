@@ -101,7 +101,7 @@ export function fixedWallMargins(source, file) {
   /** Require a same-line reason, including an explicit approved-spec promise that cannot be relaxed. */
   function record(offset, reason) {
     const line = code.slice(0, offset).split('\n').length;
-    if (/\bbudget:\s*[^\n]*(?:measur|baseline|deriv|declared|hang|ceiling|approved row [A-Z]\d)[^\n]*\S/iu.test(comments.get(line) ?? '')) return;
+    if (/\bbudget:\s*[^\n]*(?:measur|baseline|deriv|declared|hang|ceiling|approved row [A-Z]\d|after\s+[1-9][0-9,_]*\s*ms)[^\n]*\S/iu.test(comments.get(line) ?? '')) return;
     found.set(line, `${file}:${line}: ${reason}: ${lines[line - 1].trim()}`);
   }
   const literal = '(?:[1-9][0-9_]*(?:\\.[0-9_]+)?)';
@@ -113,7 +113,11 @@ export function fixedWallMargins(source, file) {
     if (observesTime(expression, aliases) && (margin.test(expression) || fixedAlias || /^(equal|strictEqual)$/u.test(match[1] ?? '') && new RegExp(`^\\s*${literal}\\s*$`, 'u').test(args[1] ?? ''))) {
       record(match.index, 'literal elapsed-time margin');
     }
-    if ((match[1] === 'rejects' || /\bawait\s+/u.test(expression)) && literalWait(expression, literals)) record(match.index, 'literal wait judged by an assertion');
+    if ((['rejects', 'doesNotReject'].includes(match[1]) || /\bawait\s+/u.test(expression)) && literalWait(expression, literals)) record(match.index, 'literal wait judged by an assertion');
+  }
+  for (const match of code.matchAll(/\bawait\s+(?:\w+\s*\.\s*)*\w*waitFor\w*\s*\(/giu)) {
+    const call = parenthesized(code, match.index + match[0].lastIndexOf('('));
+    if (literalWait(match[0] + call.slice(1), literals)) record(match.index, 'literal awaited wait can fail the test');
   }
   for (const match of code.matchAll(/\bsetTimeout\s*\(/gu)) {
     const call = parenthesized(code, match.index + match[0].lastIndexOf('('));
@@ -133,12 +137,13 @@ export function fixedWallMargins(source, file) {
 export function wallClockViolations(root) {
   const found = [];
   /** Walk source directories without visiting generated artifacts, dependencies or preserved work. */
-  function visit(directory) {
+  function visit(directory, underTestDirectory = false) {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const path = join(directory, entry.name);
       if (entry.isDirectory()) {
-        if (!['.git', 'node_modules', 'work'].includes(entry.name)) visit(path);
-      } else if (entry.isFile() && /(?:^test[-_.].+|.+[-_.]test)\.[cm]?js$/u.test(entry.name)) {
+        if (!['.git', 'node_modules', 'work'].includes(entry.name)) visit(path, underTestDirectory || entry.name === 'test');
+      } else if (entry.isFile() && /\.[cm]?js$/u.test(entry.name)
+        && (underTestDirectory || /^(?:test|test[-_.].+|.+[-_.]test)\.[cm]?js$/u.test(entry.name))) {
         found.push(...fixedWallMargins(readFileSync(path, 'utf8'), relative(root, path).replaceAll('\\', '/')));
       }
     }

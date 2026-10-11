@@ -173,7 +173,7 @@ test('[Q4,O5,O6] gate processes run one at a time in FIFO order when machine slo
   assert.equal(setting.status, 0, setting.stderr);
   assert.equal(JSON.parse(setting.stdout).settings.gateSlots, 1);
   const first = launch(box, roots[0]);
-  await waitFor(() => events(box).includes('first start') && !events(box).includes('first end'), 'first gate to remain active', 30_000);
+  await waitFor(() => events(box).includes('first start') && !events(box).includes('first end'), 'first gate to remain active', 30_000); // budget: hang ceiling for the private first-gate marker handshake; no throughput claim.
   const second = launch(box, roots[1]);
   await waitFor(() => second.stdoutText.includes('place 1'), 'second gate to enter the FIFO line');
   assert.match(second.stdoutText, /1 running/);
@@ -268,7 +268,7 @@ test('[Q4] an exact-tree cached gate starts while another machine gate holds the
   assert.equal(warm.status, 0, warm.stderr);
   const priorCount = events(box).filter((line) => line.startsWith('cached ')).length;
   const holder = launch(box, holderRoot);
-  await waitFor(() => events(box).includes('holder start') && !events(box).includes('holder end'), 'uncached holder gate to remain active', 30_000);
+  await waitFor(() => events(box).includes('holder start') && !events(box).includes('holder end'), 'uncached holder gate to remain active', 30_000); // budget: hang ceiling for the private holder-gate marker handshake; no throughput claim.
   const refusedChange = spawnSync(process.execPath, [BIN, 'settings', 'gateSlots', '2', '--json'], { cwd: cachedRoot, env: box.env, encoding: 'utf8' });
   assert.equal(refusedChange.status, 1);
   assert.equal(JSON.parse(refusedChange.stdout).error.code, 'RESOURCE_BUSY');
@@ -392,7 +392,7 @@ test('a raw full-suite run takes a machine gate slot [Q4]', async () => {
     try {
       await waitFor(() => events(box).includes('full-suite-holder start'), 'the fixture gate to hold its only machine slot');
       fullRun = launchTestRunner(box, suiteRoot, args, marker, releaseProbe);
-      const outcome = await waitFor(() => {
+      const outcome = await waitFor(() => { // budget: hang ceiling for the raw runner to announce its actual queue state; no throughput claim.
         if (fullRun.stderrText.includes('waiting for a gate slot:')) return 'waiting';
         if (existsSync(marker)) return 'ran';
         return false;
@@ -469,7 +469,7 @@ syncBuiltinESMExports();
   const runner = launchTestRunner(box, root, [], marker, null, env);
   let assertionError;
   try {
-    await waitFor(() => existsSync(ready), 'the probe write to pause after creating its destination', 30_000);
+    await waitFor(() => existsSync(ready), 'the probe write to pause after creating its destination', 30_000); // budget: hang ceiling for the private paused-write marker handshake; no throughput claim.
     if (existsSync(marker)) assert.equal(readFileSync(marker, 'utf8'), '1', 'a visible marker already has its complete slot value');
   } catch (error) {
     assertionError = error;
@@ -499,7 +499,7 @@ test('a focused run takes no slot [Q4]', async () => {
       '--disable-warning', 'ExperimentalWarning', '--title', 'focused-slot-probe',
       'test/probe.test.js',
     ], marker);
-    const outcome = await waitFor(() => {
+    const outcome = await waitFor(() => { // budget: hang ceiling for the focused runner to announce its actual start state; no throughput claim.
       if (existsSync(marker)) return 'ran';
       if (focusedRun.stderrText.includes('waiting for a gate slot:')) return 'waiting';
       return false;
@@ -529,7 +529,7 @@ test('a full run nested under a held gate does not take a second slot [Q4]', asy
   setOneGateSlot(box, gateRoot);
   const nestedGate = launch({ ...box, env: { ...box.env, [PROBE_PATH_ENV]: marker } }, gateRoot);
   try {
-    const outcome = await waitFor(() => {
+    const outcome = await waitFor(() => { // budget: hang ceiling for the nested runner marker handshake; no throughput claim.
       if (existsSync(marker)) return 'completed';
       if (existsSync(output) && readFileSync(output, 'utf8').includes('waiting for a gate slot:')) return 'queued';
       return false;

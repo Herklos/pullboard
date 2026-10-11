@@ -251,7 +251,7 @@ test('a failed DevTools command names its CDP error [C7]', {
   let chrome;
   try {
     chrome = await startChrome({ url: `${origin}/before` });
-    await chrome.waitFor("location.pathname === '/before' && document.body.textContent === 'before'", 5_000, 'initial document ready'); // budget: bounds a missing local fixture document
+    await chrome.waitFor("location.pathname === '/before' && document.body.textContent === 'before'", 5_000, 'initial document ready'); // budget: hang ceiling for the private initial document handshake; no throughput claim.
 
     const navigationUrl = `${origin}/after`;
     const navigation = chrome.evaluate(`(() => {
@@ -265,7 +265,7 @@ test('a failed DevTools command names its CDP error [C7]', {
     assert.match(navigationError.message, /CDP error -\d+: .+/u);
     assert.match(navigationError.message, /Inspected target navigated or closed/u);
     assert.match(navigationError.message, /page navigated since command was sent: yes \(Page\.(?:frameStartedNavigating|frameNavigated)\)/u);
-    await chrome.waitFor("location.pathname === '/after' && document.body.textContent === 'after'", 5_000, 'replacement document ready'); // budget: bounds a missing local fixture document
+    await chrome.waitFor("location.pathname === '/after' && document.body.textContent === 'after'", 5_000, 'replacement document ready'); // budget: hang ceiling for the private replacement document handshake; no throughput claim.
     assert.equal(afterRequests, 1, 'the pending evaluation lost a race with one real HTTP navigation');
 
     const rejected = await chrome.send('Runtime.noSuchCommand', {}, 'unsupported CDP method').then(() => null, (error) => error);
@@ -293,7 +293,7 @@ test('a stalled condition uses its remaining operation budget [C7]', {
   scheduler.enable();
   const startedAt = Date.now();
   let failure;
-  try { await chrome.waitFor('new Promise(() => {})', budgetMs, 'bounded condition'); }
+  try { await chrome.waitFor('new Promise(() => {})', budgetMs, 'bounded condition'); } // budget: declared 250ms operation deadline for a deliberately unresolved page condition.
   catch (error) { failure = error; }
   const elapsedMs = Date.now() - startedAt;
   scheduler.disable();
@@ -378,7 +378,7 @@ test('a wait that throws while the page changes keeps waiting [C7]', async (t) =
 
   const chrome = await startChrome({ url: `http://127.0.0.1:${server.address().port}/before` });
   try {
-    await chrome.waitFor("typeof window.goNext === 'function'", 5_000, 'initial document ready');
+    await chrome.waitFor("typeof window.goNext === 'function'", 5_000, 'initial document ready'); // budget: hang ceiling for the private navigation control handshake; no throughput claim.
     await chrome.evaluate('setTimeout(() => window.goNext(), 0); true');
     const expression = "location.pathname === '/next' && document.body === null ? (() => { if (!window.__gapNotified) { window.__gapNotified = true; fetch('/observed-null'); } return document.body.textContent.includes('ready'); })() : document.body?.textContent.includes('ready') === true";
     const waiting = chrome.waitFor(expression, 5_000, 'wait for the replacement document')

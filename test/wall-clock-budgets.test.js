@@ -23,8 +23,12 @@ test('the clock-margin guard catches planted source and names its file and line 
       error.code === 'ERR_ASSERTION' && /nested\/planted\.test\.mjs:2/u.test(error.message), 'a planted bare clock margin makes the real guard red');
     writeFileSync(file, bare.replace('< 30_000);', '< 30_000); // budget: hang ceiling only; no throughput claim.'));
     assert.deepEqual(wallClockViolations(root), []);
+    writeFileSync(file, 'assert.ok(Date.now() - start > 10_000); // budget: the stand-in publishes DevToolsActivePort after 10,100 ms.\n');
+    assert.deepEqual(wallClockViolations(root), [], 'a concrete fixture publication delay explains the budget without special vocabulary');
     writeFileSync(file, 'const spent = performance.now() - start;\nassert.ok(spent < 1500);\nawait assert.rejects(waitFor(child, 1500));\n');
     assert.deepEqual(wallClockViolations(root).map(line => Number(/:(\d+):/u.exec(line)[1])), [2, 3]);
+    writeFileSync(file, 'await assert.doesNotReject(waitFor(child, 1500));\nawait chrome.waitFor(ready, 1500);\n');
+    assert.deepEqual(wallClockViolations(root).map(line => Number(/:(\d+):/u.exec(line)[1])), [1, 2]);
     writeFileSync(file, 'const budgetMs = 1500;\nassert.ok(elapsed < budgetMs);\nawait assert.rejects(waitFor(child, budgetMs));\n');
     assert.deepEqual(wallClockViolations(root).map(line => Number(/:(\d+):/u.exec(line)[1])), [2, 3]);
     writeFileSync(file, 'const text = "assert.ok(Date.now() - start < 1)";\nassert.equal(response.status, 200);\nassert.ok(elapsed < measuredBaseline * 3);\n');
@@ -33,6 +37,12 @@ test('the clock-margin guard catches planted source and names its file and line 
     assert.deepEqual(wallClockViolations(root).map(line => Number(/:(\d+):/u.exec(line)[1])), [1, 2, 3]);
     writeFileSync(file, 'await assert.rejects(browser(), error => {\n  assert.ok(elapsed >= 30000); // budget: declared startup timeout.\n});\nassert.equal((await event(worker)).waiting, 1);\nassert.equal(durationMs("2h"), 7200000);\nconst matcher = /[\'"`]/u;\nassert.ok(Date.now() - start < 1500);\n');
     assert.deepEqual(wallClockViolations(root).map(line => Number(/:(\d+):/u.exec(line)[1])), [7]);
+    writeFileSync(file, '');
+    mkdirSync(join(root, 'test'));
+    writeFileSync(join(root, 'test', 'helper.js'), bare);
+    writeFileSync(join(root, 'test.js'), bare);
+    assert.deepEqual(wallClockViolations(root).map(line => line.split(':')[0]).sort(), ['test.js', 'test/helper.js'],
+      'plain test.js and every JavaScript file under test/ are part of native discovery');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
