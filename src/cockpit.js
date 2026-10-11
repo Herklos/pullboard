@@ -106,8 +106,11 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
   <section data-pane="items" class="two">
     <div class="primary">
       <section class="card-panel proof-stats" id="proof-stats" aria-label="Board proof stats" hidden></section>
-      <div class="items-view-switch seg" id="items-view-switch" role="group" aria-label="Items view"></div>
-      <div class="card-panel toolbar"><div class="seg" id="state-chips" role="group" aria-label="Show"></div><select class="lane-pick" id="lane-pick" aria-label="Lane"></select><button class="go" id="new-item" type="button">New item</button></div>
+      <div class="card-panel toolbar">
+        <div class="items-view-switch seg" id="items-view-switch" role="group" aria-label="Items view"></div>
+        <div class="filter-control"><button class="filter-toggle" id="filter-toggle" data-filter-toggle type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="filter-menu"><span class="filter-label" id="filter-label">Filter</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg></button><div class="filter-menu" id="filter-menu" role="menu" aria-label="Filter" hidden></div></div>
+        <button class="go" id="new-item" type="button" aria-label="New item"><span class="new-item-wide">New item</span><span class="new-item-narrow" aria-hidden="true">New</span></button>
+      </div>
       <div class="card-panel list-card" id="item-list"><ol class="needs" id="needs" aria-label="What needs you" hidden></ol><ol class="chain" id="chain" aria-label="Items"></ol></div>
       <ol class="pipeline" id="pipeline" aria-label="Item pipeline" hidden></ol>
     </div>
@@ -184,7 +187,7 @@ function homeTab() {
   const kept = keep('pb.tab');
   return kept && kept !== 'roadmap' ? kept : 'items';
 }
-const view = { roadmapOpen: new Map(), root: keep('pb.project'), tab: addressTab() || homeTab(), itemsView: typeof location !== 'undefined' && location.hash === '#items/pipeline' ? 'pipeline' : 'list', seen: {}, code: {}, item: null, adding: false, declining: null, state: 'active', rows: { spec: 'decide', doctrine: 'all' }, row: { spec: null, doctrine: null }, agent: null, allAgents: false, agentsHidden: keep('pb.agents') === 'hidden', statsOpen: false, open: {} };
+const view = { roadmapOpen: new Map(), root: keep('pb.project'), tab: addressTab() || homeTab(), itemsView: typeof location !== 'undefined' && location.hash === '#items/pipeline' ? 'pipeline' : 'list', filterOpen: false, seen: {}, code: {}, item: null, adding: false, declining: null, state: 'active', rows: { spec: 'decide', doctrine: 'all' }, row: { spec: null, doctrine: null }, agent: null, allAgents: false, agentsHidden: keep('pb.agents') === 'hidden', statsOpen: false, open: {} };
 let switchGeneration = 0;
 if (snapshot) view.state = 'all';
 let data = null;
@@ -1425,10 +1428,9 @@ function render() {
   const q = $('q').value.trim().toLowerCase();
   const pipeline = view.itemsView === 'pipeline';
   $('items-view-switch').innerHTML = ['list', 'pipeline'].map((mode) => '<button type="button" data-items-view="' + mode + '" aria-pressed="' + (view.itemsView === mode) + '" class="' + (view.itemsView === mode ? 'on' : '') + '">' + (mode === 'list' ? 'List' : 'Pipeline') + '</button>').join('');
-  $('state-chips').hidden = pipeline;
   $('item-list').hidden = pipeline;
   $('pipeline').hidden = !pipeline;
-  // Each chip counts what it would show under the lane and the search. A search looks through every
+  // Each Show choice counts what it would show under the lane and the search. A search looks through every
   // state, withdrawn items included; browsing leaves those out.
   const matching = (q ? p.items : items)
     .filter((i) => !q || ('#' + i.id + ' ' + i.title + ' ' + i.lane + ' ' + i.specs.join(' ') + ' ' + (i.criterion || '')).toLowerCase().includes(q));
@@ -1443,15 +1445,26 @@ function render() {
   // A lane narrows the list as a state does, and each counts within the other's choice.
   const inLane = (lane) => (i) => !lane || i.lane === lane;
   if (view.lane && !matching.some(inLane(view.lane))) view.lane = null;
-  $('state-chips').innerHTML = Object.keys(names).map((s) => '<button data-state="' + s + '" class="' + (view.state === s ? 'on' : '') + '" type="button">' + names[s] + '<b>' + matching.filter(inLane(view.lane)).filter(inState(s)).length + '</b></button>').join('');
+  const stateOptions = Object.keys(names).map((s) => '<button class="filter-option" role="menuitemradio" aria-checked="' + (view.state === s) + '" data-filter-choice="state:' + s + '" data-filter-kind="state" data-filter-value="' + s + '" data-state="' + s + '" type="button"><span class="filter-option-label">' + names[s] + '</span><b>' + matching.filter(inLane(view.lane)).filter(inState(s)).length + '</b></button>');
   const inView = pipeline ? matching.filter((item) => item.status !== 'withdrawn') : matching.filter(inState(view.state));
   const laneCounts = [...inView.reduce((m, i) => m.set(i.lane, (m.get(i.lane) || 0) + 1), new Map())].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   if (view.lane && !laneCounts.some(([lane]) => lane === view.lane)) laneCounts.push([view.lane, 0]);
-  const pick = $('lane-pick'), options = [['', 'All lanes'], ...laneCounts.map(([lane, n]) => [lane, lane + ' · ' + n])].map(([lane, label]) => '<option value="' + esc(lane) + '">' + esc(label) + '</option>').join('');
-  // Rewriting an open picker closes it, so it is rewritten only when the lanes or their counts change.
-  if (pick.dataset.options !== options) { pick.innerHTML = options; pick.dataset.options = options; }
-  pick.value = view.lane || '';
-  pick.hidden = laneCounts.length < 2 && !view.lane;
+  const laneOptions = [['', 'All lanes', null], ...laneCounts.map(([lane, n]) => [lane, lane, n])].map(([lane, label, count]) => '<button class="filter-option" role="menuitemradio" aria-checked="' + ((view.lane || '') === lane) + '" data-filter-choice="lane:' + esc(lane) + '" data-filter-kind="lane" data-filter-value="' + esc(lane) + '" aria-label="' + esc(label) + (count === null ? '' : ' · ' + count) + '" title="' + esc(label) + (count === null ? '' : ' · ' + count) + '" type="button"><span class="filter-option-label">' + esc(label) + '</span>' + (count === null ? '' : '<b>' + count + '</b>') + '</button>');
+  const activeChoice = document.activeElement?.dataset?.filterChoice;
+  const menu = $('filter-menu');
+  menu.innerHTML = (pipeline ? '' : '<section class="filter-group" role="group" aria-label="Show"><h3>Show</h3>' + stateOptions.join('') + '</section>')
+    + '<section class="filter-group" role="group" aria-label="Lane"><h3>Lane</h3>' + laneOptions.join('') + '</section>';
+  menu.hidden = !view.filterOpen;
+  menu.style.left = '0px';
+  if (view.filterOpen) menu.style.left = Math.min(0, innerWidth - 16 - menu.getBoundingClientRect().right) + 'px';
+  $('filter-toggle').setAttribute('aria-expanded', String(view.filterOpen));
+  const stateLabel = pipeline || view.state === 'active' ? '' : names[view.state] || '';
+  const laneLabel = view.lane || '';
+  const filterLabel = stateLabel || laneLabel ? 'Filter: ' + [stateLabel, laneLabel].filter(Boolean).join(' · ') : 'Filter';
+  $('filter-label').textContent = filterLabel;
+  $('filter-toggle').setAttribute('aria-label', filterLabel);
+  $('filter-toggle').title = filterLabel;
+  if (view.filterOpen && activeChoice) [...menu.querySelectorAll('[data-filter-choice]')].find((option) => option.dataset.filterChoice === activeChoice)?.focus({ preventScroll: true });
   const shown = inView.filter(inLane(view.lane)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   $('pipeline').innerHTML = pipeline ? pipelineCard(shown) : '';
   // With nothing picked, the detail shows the first row, and keeps it when a refresh reorders the list.
@@ -2242,7 +2255,8 @@ $('shouts-pane').addEventListener('click', (event) => {
 // Enter shouts; Shift+Enter starts a new line.
 $('shout-text').addEventListener('keydown', (event) => { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); $('shout-form').requestSubmit(); } });
 document.addEventListener('click', (event) => {
-  const t = event.target.closest('[data-status],[data-roadmap-key],[data-roadmap-all],[data-root],[data-tab],[data-go],[data-item],[data-items-view],[data-state],[data-rows],[data-row],[data-row-decision],[data-section-approve],[data-release],[data-shout],[data-new],[data-code],[data-code-all],[data-code-less],[data-stats-toggle],#proj-switch,#console');
+  if (view.filterOpen && !event.target.closest('.filter-control')) { view.filterOpen = false; render(); }
+  const t = event.target.closest('[data-filter-toggle],[data-filter-choice],[data-status],[data-roadmap-key],[data-roadmap-all],[data-root],[data-tab],[data-go],[data-item],[data-items-view],[data-state],[data-rows],[data-row],[data-row-decision],[data-section-approve],[data-release],[data-shout],[data-new],[data-code],[data-code-all],[data-code-less],[data-stats-toggle],#proj-switch,#console');
   if (!event.target.closest('.side')) fold(false);
   if (!t) return;
   if (t.id === 'proj-switch') { fold(!$('side').classList.contains('open')); return; }
@@ -2254,6 +2268,15 @@ document.addEventListener('click', (event) => {
     return;
   }
   if (t.dataset.status) { statusGo(t.dataset.status); return; }
+  if (t.dataset.filterToggle !== undefined) { view.filterOpen = !view.filterOpen; render(); return; }
+  if (t.dataset.filterChoice) {
+    if (t.dataset.filterKind === 'state') view.state = t.dataset.filterValue;
+    else view.lane = t.dataset.filterValue || null;
+    view.filterOpen = false;
+    render();
+    $('filter-toggle').focus({ preventScroll: true });
+    return;
+  }
   if (t.dataset.itemsView) { view.itemsView = t.dataset.itemsView; address(); render(); return; }
   if ('roadmapKey' in t.dataset) {
     const key = t.dataset.roadmapKey;
@@ -2387,12 +2410,30 @@ $('q').addEventListener('blur', () => {
 });
 // "/" goes to the search from anywhere but a field.
 document.addEventListener('keydown', (event) => {
+  if (!view.filterOpen) return;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    view.filterOpen = false;
+    render();
+    $('filter-toggle').focus({ preventScroll: true });
+    return;
+  }
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    const choices = [...$('filter-menu').querySelectorAll('[data-filter-choice]')];
+    const at = choices.indexOf(document.activeElement);
+    if (choices.length) {
+      event.preventDefault();
+      const next = at < 0 ? (event.key === 'ArrowDown' ? 0 : choices.length - 1) : (at + (event.key === 'ArrowDown' ? 1 : choices.length - 1)) % choices.length;
+      choices[next].focus({ preventScroll: true });
+    }
+  }
+});
+document.addEventListener('keydown', (event) => {
   if (event.key !== '/' || event.metaKey || event.ctrlKey || event.altKey || event.target.closest('input, textarea, select, [contenteditable]')) return;
   event.preventDefault();
   $('q').focus();
   $('q').select();
 });
-$('lane-pick').addEventListener('change', (event) => { view.lane = event.target.value || null; render(); });
 $('add-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   if (await act('add', { lane: $('add-lane').value, title: $('add-title').value, criterion: $('add-criterion').value, specs: $('add-specs').value, brief: $('add-brief').value }, event.currentTarget)) {

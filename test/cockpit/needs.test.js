@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { SPEC, machine, project, build, sendBack, startView, styleOf, element, openPage, projectRows, agentEntries, needEntries, itemRow, shoutNameText, chromeExecutable, openSnapshotChrome, closeSnapshotChrome } from './fixture.js';
+import { SPEC, machine, project, build, sendBack, startView, styleOf, element, openPage, projectRows, agentEntries, needEntries, itemRow, shoutNameText, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, chooseFilter } from './fixture.js';
 
 
 test('a decision waits in needs-you until the view answers it [B21, B26, N27]', async () => {
@@ -215,7 +215,7 @@ test('needs you and the asks sit in their lists [N26]', { timeout: 180_000 }, as
         const at = `${width}px ${scheme}`;
         await click('[data-tab=items]');
         await click('[data-tab=items]');
-        await click('[data-state=active]');
+        await chooseFilter(chrome, 'state:active');
         let r = await read();
         assert.ok(r.page.scroll <= r.page.width && r.page.body <= r.page.width, `${at}: no sideways scroll on Items`);
         // Needs you heads the list: each call a row shaped like an item, NEEDS YOU and its kind (for a decision, who
@@ -285,10 +285,10 @@ test('needs you and the asks sit in their lists [N26]', { timeout: 180_000 }, as
     assert.equal((await read()).feedBar, false, 'show all brings back every shout and clears the bar');
     // Under Verified, or a lane, the list is narrowed and Needs you steps aside.
     await click('[data-tab=items]');
-    await click('[data-state=verified]');
+    await chooseFilter(chrome, 'state:verified');
     assert.equal((await read()).needsShown, false, 'under Verified, Needs you steps aside');
     await click('[data-tab=items]');
-    await click('[data-state=active]');
+    await chooseFilter(chrome, 'state:active');
     assert.deepEqual(chrome.exceptions, [], 'the page raises no uncaught exception');
   } finally {
     if (chrome) await closeSnapshotChrome(chrome);
