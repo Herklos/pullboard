@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import { stableChrome } from './stable.js';
 import { relayClientFixture } from '../relay-client-fixture.js';
 import { startChrome, relayWorkBudgetMs } from '../relay-browser-fixture.js';
-import { SPEC, machine, project, startView, boardOf, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, press, travel, settled } from './fixture.js';
+import { SPEC, machine, project, build, startView, boardOf, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, press, travel, settled, serveFolder } from './fixture.js';
 
 const SCRIPT = "typeof view === 'object' && typeof data === 'object' && !!data?.project && data.root === view.root && !document.body.classList.contains('loading')";
 /** Read the actual rendered place without waiting for the expected answer. */
@@ -75,6 +75,174 @@ async function withBrowser(box, run) {
     rmSync(profile, { recursive: true, force: true });
   }
 }
+
+/** Create accepted and open items whose real prose, dependency and activity rows cite one another. */
+function linkedItems(box, name) {
+  const alpha = project(box, name, SPEC, { practice: 'DOCTRINE.md' });
+  writeFileSync(join(alpha.repo, 'DOCTRINE.md'), `# Local rules\n\n## Team\n- PB1 [approved, must] ${name} practice rule. | gate: review\n`);
+  box.run(alpha.repo, 'add', 'web', 'Address target', '--specs', 'G1', '--criterion', 'renders');
+  box.run(alpha.repo, 'add', 'web', 'Text points to #1', '--specs', 'G1', '--criterion', 'criterion cites #1', '--brief', 'brief cites #1 and #999');
+  box.run(alpha.repo, 'add', 'web', 'Waits on #2', '--specs', 'G1', '--criterion', 'waits', '--after', '2');
+  box.run(alpha.repo, 'shout', 'all', 'Activity cites #1 and waits on #2.');
+  build(box, alpha, 1, 'target.txt');
+  box.git(alpha.repo, 'switch', '-q', '--detach', alpha.itemBranches.get(`${alpha.baseBranch}:1`));
+  box.run(alpha.repo, 'verify', '1', 'accept', '--note', 'The notes cite #2.', '--as', 'coordinator');
+  box.git(alpha.repo, 'switch', '-q', 'main');
+  return alpha;
+}
+
+/** Poll Chrome's real target list until a modified anchor click opens its href in another tab. */
+async function targetForHref(profile, href) {
+  const port = readFileSync(join(profile, 'DevToolsActivePort'), 'utf8').split('\n')[0].trim();
+  const deadline = Date.now() + 10_000; // budget: hang-only wait for Chrome to publish the native new-tab target.
+  let targets = [];
+  while (Date.now() < deadline) {
+    targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+    const match = targets.find((target) => target.type === 'page' && target.url === href);
+    if (match) return match;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.fail(`Chrome did not open ${href}; page targets: ${JSON.stringify(targets.map(({ type, url }) => ({ type, url })))}`);
+}
+
+test('item text links every #N [N38,N26]', { timeout: 90_000 }, async () => { // budget: hang ceiling for the real API, Chrome navigation and linked prose checks.
+  const box = machine(), alpha = linkedItems(box, 'item-text-links');
+  await withBrowser(box, async (chrome, server) => {
+    await openAddress(chrome, server, '/items/2');
+    const refs = JSON.parse(await chrome.stable(`JSON.stringify({
+      criterion:[...([...document.querySelectorAll('#detail h3')].find(node=>node.textContent==='Criterion')?.parentElement.querySelectorAll('a.ref[data-go]')||[])].map(node=>[node.textContent,new URL(node.href).pathname]),
+      brief:[...([...document.querySelectorAll('#detail h3')].find(node=>node.textContent==='Brief')?.parentElement.querySelectorAll('a.ref[data-go]')||[])].map(node=>[node.textContent,new URL(node.href).pathname])
+    })`));
+    assert.deepEqual(refs.criterion, [['#1', '/items/1']], 'criterion references are real same-board addresses');
+    assert.deepEqual(refs.brief, [['#1', '/items/1'], ['#999', '/items/999']], 'known and unknown references are real same-board addresses');
+    await press(chrome, `document.querySelector('#detail a.ref[data-go="item:999"]')`);
+    await settled(chrome, "document.querySelector('#detail .empty')?.textContent.includes('No item #999 exists here.')");
+    assert.match(await chrome.stable("document.querySelector('#detail .empty')?.textContent"), /No item #999 exists here/,
+      'an unknown reference opens its address and shows the missing-item detail');
+    await openAddress(chrome, server, '/items/3');
+    const waits = JSON.parse(await chrome.stable(`JSON.stringify([...document.querySelectorAll('#detail .waits-on a.ref[data-go]')].map(node=>[node.textContent,new URL(node.href).pathname]))`));
+    assert.deepEqual(waits, [['#2', '/items/2']], 'waits-on references link to the waited item');
+    await press(chrome, `document.querySelector('[data-tab="activity"]')`);
+    const activity = JSON.parse(await chrome.stable(`JSON.stringify([...document.querySelectorAll('#activity a.ref[data-go]')].map(node=>[node.textContent,new URL(node.href).pathname]))`));
+    const activityCites = JSON.parse(await chrome.stable(`JSON.stringify([...document.querySelectorAll('#activity .act')]
+      .filter(node=>node.textContent.includes('Activity cites #1 and waits on #2'))
+      .flatMap(node=>[...node.querySelectorAll('a.ref[data-go]')].map(link=>[link.textContent,new URL(link.href).pathname])))`));
+    assert.deepEqual(activityCites, [['#1', '/items/1'], ['#2', '/items/2']], 'the Activity citation and wait prose link to their exact item targets');
+    assert.ok(activity.some(([text, href]) => text === '#1' && href === '/items/1'), 'Activity item events also link to their item addresses');
+    await openAddress(chrome, server, '/items/1');
+    const verdict = JSON.parse(await chrome.stable(`JSON.stringify([...document.querySelectorAll('#detail .verdict .note a.ref[data-go]')].map(node=>[node.textContent,new URL(node.href).pathname]))`));
+    assert.deepEqual(verdict, [['#2', '/items/2']], 'verdict notes link to their cited item');
+    await press(chrome, `document.querySelector('#detail .verdict .note a.ref[data-go]')`);
+    assert.equal(await chrome.stable('location.pathname'), '/items/2', 'plain click stays in the page and opens the linked place');
+    assert.equal(await chrome.stable("document.querySelector('#detail h2 > span')?.textContent"), '#2');
+    assert.deepEqual(chrome.exceptions, [], 'the real view raises no page errors');
+  });
+});
+
+test('a modified click opens a new tab [N38,N26]', { timeout: 90_000 }, async () => { // budget: hang ceiling for Chrome startup and native modified-click targets.
+  const box = machine(), alpha = linkedItems(box, 'modified-item-link');
+  const server = await startView(box);
+  const executable = chromeExecutable();
+  assert.ok(executable, 'real Chrome is required to prove native modified-click behavior');
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-modified-link-'));
+  let chrome;
+  try {
+    chrome = await openSnapshotChrome(executable, server.link.href, profile);
+    await settled(chrome, SCRIPT);
+    await openAddress(chrome, server, '/items/2');
+    const href = await chrome.stable(`document.querySelector('#detail a.ref[data-go="item:1"]')?.href`);
+    assert.equal(new URL(href).pathname, '/items/1', 'the anchor exposes the target before input');
+    await press(chrome, `document.querySelector('#detail a.ref[data-go="item:1"]')`, { button: 'middle' });
+    const target = await targetForHref(profile, href);
+    assert.equal(await chrome.stable('location.pathname'), '/items/2', 'the original tab remains at its current place');
+    assert.equal(target.url, href, 'Chrome opens the anchor destination in another page target');
+    await openAddress(chrome, server, '/items/3');
+    const modifierHref = await chrome.stable(`document.querySelector('#detail a.ref[data-go="item:2"]')?.href`);
+    const modifiers = process.platform === 'darwin' ? 4 : 2;
+    await press(chrome, `document.querySelector('#detail a.ref[data-go="item:2"]')`, { modifiers });
+    const modifierTarget = await targetForHref(profile, modifierHref);
+    assert.equal(await chrome.stable('location.pathname'), '/items/3', 'the platform modifier leaves the original tab at its current place');
+    assert.equal(modifierTarget.url, modifierHref, 'Chrome opens a platform-modified anchor in another page target');
+    assert.deepEqual(chrome.exceptions, []);
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    await server.stop();
+    rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+test('the snapshot keeps its addresses under a sub-path [N38,A10]', { timeout: 90_000 }, async () => { // budget: hang ceiling for export, replay, click and reload.
+  const executable = chromeExecutable();
+  assert.ok(executable, 'real Chrome is required to prove exported address reloads');
+  const box = machine(), alpha = linkedItems(box, 'snapshot-item-address');
+  const folder = join(box.dir, 'snapshot');
+  box.run(alpha.repo, 'view', '--export', folder);
+  const host = await serveFolder(folder, '/demo/');
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-snapshot-address-'));
+  let chrome;
+  try {
+    chrome = await openSnapshotChrome(executable, `${host.base}/demo/`, profile);
+    await settled(chrome, "document.body.classList.contains('snapshot') && !!data?.project");
+    await settled(chrome, 'snapshotReplay.index === snapshotReplay.events.length');
+    await press(chrome, `document.querySelector('#chain [data-item="2"]')`);
+    const reference = `document.querySelector('#detail a.ref[data-go="item:1"]')`;
+    await chrome.waitFor(`!!${reference}`);
+    const href = await chrome.stable(`${reference}.href`);
+    assert.equal(new URL(href).pathname, '/demo/', 'snapshot item links retain the export sub-path');
+    assert.equal(new URL(href).hash, '#items/1', 'snapshot item links address the item in the fragment');
+    const outsideInitialRefs = JSON.parse(await chrome.stable(`JSON.stringify([...document.querySelectorAll('#detail a.ref[data-go^="item:"]')]
+      .filter(link=>new URL(link.href).pathname !== '/demo/').map(link=>link.href))`));
+    assert.deepEqual(outsideInitialRefs, [], 'item detail references also remain under the exported sub-path');
+    await press(chrome, reference);
+    await settled(chrome, "location.pathname === '/demo/' && location.hash === '#items/1' && document.querySelector('#detail h2 > span')?.textContent === '#1'");
+    await chrome.send('Page.reload');
+    await settled(chrome, "location.pathname === '/demo/' && location.hash === '#items/1' && document.querySelector('#detail h2 > span')?.textContent === '#1'");
+
+    /** Reload an exported address and verify both its selected detail and its contained references. */
+    const checkPlace = async (hash, ready) => {
+      assert.equal(await chrome.stable('location.hash'), hash, 'the selected place is encoded in the snapshot address');
+      await chrome.send('Page.reload');
+      await settled(chrome, `location.pathname === '/demo/' && location.hash === ${JSON.stringify(hash)} && data?.project && snapshotReplay.final && snapshotReplay.index === snapshotReplay.events.length && (${ready})`);
+      assert.equal(await chrome.stable('location.pathname'), '/demo/', 'reload keeps the exported page path');
+      const outside = JSON.parse(await chrome.stable(`JSON.stringify([...document.querySelectorAll('a.ref[data-go^="item:"]')]
+        .filter(link=>new URL(link.href).pathname !== '/demo/').map(link=>link.href))`));
+      assert.deepEqual(outside, [], `${hash} keeps every item address under the exported sub-path`);
+    };
+    await press(chrome, `document.querySelector('[data-items-view="pipeline"]')`);
+    await checkPlace('#items/pipeline', "view.tab === 'items' && view.itemsView === 'pipeline' && !document.querySelector('[data-pane=items]').hidden");
+    const oldest = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+      const link = document.querySelector('#pipeline .pipeline-oldest a.ref[data-go]');
+      return { href: link?.href, id: Number(link?.textContent.slice(1)) };
+    })())`));
+    assert.ok(oldest.href && oldest.id > 0, 'the exported Pipeline shows its oldest-item address');
+    await press(chrome, `document.querySelector('#pipeline .pipeline-oldest a.ref[data-go]')`);
+    await checkPlace(new URL(oldest.href).hash, `view.tab === 'items' && view.item === ${oldest.id}`);
+    await press(chrome, `document.querySelector('[data-tab="shouts"]')`);
+    await checkPlace('#shouts', "view.tab === 'shouts' && !document.querySelector('[data-pane=shouts]').hidden");
+    const shoutId = await chrome.stable(`document.querySelector('#feed [data-shout-id]')?.dataset.shoutId`);
+    await press(chrome, `document.querySelector('#feed [data-shout-id]')`);
+    await checkPlace('#shouts/' + shoutId, `view.tab === 'shouts' && view.shout === Number(${JSON.stringify(shoutId)}) && document.querySelector('#feed article.found')?.dataset.shoutId === ${JSON.stringify(shoutId)}`);
+    await press(chrome, `document.querySelector('[data-tab="spec"]')`);
+    await press(chrome, `document.querySelector('[data-rows="spec:all"]')`);
+    const specId = await chrome.stable(`document.querySelector('#spec-list [data-row]')?.dataset.row.split(':')[1]`);
+    await press(chrome, `document.querySelector('#spec-list [data-row]')`);
+    await checkPlace('#spec/' + specId, `view.tab === 'spec' && view.row.spec === ${JSON.stringify(specId)} && document.querySelector('#spec-detail h2 > span')?.textContent === ${JSON.stringify(specId)}`);
+    await press(chrome, `document.querySelector('[data-tab="doctrine"]')`);
+    const doctrineId = await chrome.stable(`document.querySelector('#doctrine-list [data-row]')?.dataset.row.split(':')[1]`);
+    await press(chrome, `document.querySelector('#doctrine-list [data-row]')`);
+    await checkPlace('#doctrine/' + doctrineId, `view.tab === 'doctrine' && view.row.doctrine === ${JSON.stringify(doctrineId)} && document.querySelector('#doctrine-detail h2 > span')?.textContent === ${JSON.stringify(doctrineId)}`);
+    await press(chrome, `document.querySelector('[data-tab="activity"]')`);
+    await checkPlace('#activity', "view.tab === 'activity' && !document.querySelector('[data-pane=activity]').hidden");
+    await press(chrome, `document.querySelector('[data-tab="roadmap"]')`);
+    await checkPlace('#roadmap', "view.tab === 'roadmap' && !document.querySelector('[data-pane=roadmap]').hidden");
+    assert.ok(host.requests.length > 0 && host.requests.every((request) => request.path.startsWith('/demo/')), 'click and reload stay under the exported sub-path');
+    assert.deepEqual(chrome.exceptions, [], 'the exported page raises no page errors');
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    await host.close();
+    rmSync(profile, { recursive: true, force: true });
+  }
+});
 /** Wait only for the addressed lookup to finish, then inspect the real target and its viewport box. */
 async function assertShout(chrome, id, text) {
   await settled(chrome, `${SCRIPT} && !document.querySelector('#shout-address-status')?.textContent.startsWith('Loading')`);
