@@ -180,7 +180,10 @@ test('relay person requests stay explicit, read-only and visible [H12,H5]', { ti
     };
     window.__holdNextIntent = false;
     window.__releaseHeldIntent = null;
-    return { async request(path, body) {
+    window.__pendingEarlierTransportCalls = 0;
+    window.__lateEarlierTransportError = null;
+    window.__releaseEarlierTransportCall = null;
+    const transport = { async request(path, body) {
       window.__transportCalls.push({ path, body: body ?? null });
       if (body) {
         if (window.__holdNextIntent) {
@@ -198,6 +201,16 @@ test('relay person requests stay explicit, read-only and visible [H12,H5]', { ti
       if (new URL(path, location.origin).pathname.endsWith('/state')) document.state.personRequests = await (await fetch('/request-state')).json();
       return document;
     } };
+    /** Hold a genuine earlier read so the test can release it after taking a stale count. */
+    window.__queueEarlierTransportCall = (path) => {
+      window.__pendingEarlierTransportCalls += 1;
+      window.__releaseEarlierTransportCall = () => {
+        window.__releaseEarlierTransportCall = null;
+        void transport.request(path).catch(error => { window.__lateEarlierTransportError = error.message; })
+          .finally(() => { window.__pendingEarlierTransportCalls -= 1; });
+      };
+    };
+    return transport;
   }`;
   /** Serve controlled request receipts and proxy reads to the actual private Git/SQLite board. */
   async function fixtureRequest(request, response) {
@@ -302,13 +315,39 @@ test('relay person requests stay explicit, read-only and visible [H12,H5]', { ti
     assert.deepEqual(ids, ['request-1', 'request-2']);
     assert.ok(await chrome.stable("[...document.querySelectorAll('[data-person-request]')].length === 2 && [...document.querySelectorAll('[data-person-request]')].every(node => node.querySelector('.request-status').textContent === 'Waiting')"), 'waiting receipts render from API state');
 
-    // A generic write and an unknown action are refused before they reach the stand-in transport.
-    const beforeRefused = intents.length;
-    const beforeTransport = await chrome.stable('window.__transportCalls.length');
-    assert.match(await chrome.stable(`(async () => { try { await api(boardPath(view.root) + '/moves', { verb: 'shout', args: { to: 'coordinator', text: 'direct writes stay refused' } }); return 'unexpected'; } catch (error) { return error.message; } })()`), /read-only view/i);
-    assert.equal(await chrome.stable(`(async () => act('exec', { command: 'true' }))()`), false);
-    assert.equal(intents.length, beforeRefused, 'refused shapes never reach the request server');
-    assert.equal(await chrome.stable('window.__transportCalls.length'), beforeTransport, 'refused writes never reach the browser transport');
+    await t.test('a late earlier transport call is not counted as a refused write [H12]', { timeout: 30_000 }, async () => {
+      /** Keep only calls with a write shape; unrelated earlier reads must not enter this count. */
+      const writes = async () => JSON.parse(await chrome.stable(`JSON.stringify(window.__transportCalls.filter(call => call.body !== null || call.path.split('?')[0].endsWith('/moves')))`));
+      const earlierPath = await chrome.stable(`boardPath(view.root) + '/state?lateEarlier=406'`);
+      const beforeAllCalls = JSON.parse(await chrome.stable('JSON.stringify(window.__transportCalls)'));
+      const beforeWrites = await writes();
+      await chrome.stable(`window.__queueEarlierTransportCall(${JSON.stringify(earlierPath)})`);
+      assert.equal(await chrome.stable('window.__pendingEarlierTransportCalls'), 1, 'the earlier read is held before it reaches the transport');
+      assert.equal(await chrome.stable('window.__releaseEarlierTransportCall()'), undefined, 'the earlier read is released after the stale count');
+      await chrome.waitFor(`(async () => {
+        if (window.__pendingEarlierTransportCalls !== 0) return false;
+        const count = window.__transportCalls.length;
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        return window.__pendingEarlierTransportCalls === 0 && count === window.__transportCalls.length;
+      })()`);
+      assert.equal(await chrome.stable('window.__lateEarlierTransportError'), null, 'the earlier read completed successfully');
+      const afterEarlierCalls = JSON.parse(await chrome.stable('JSON.stringify(window.__transportCalls)'));
+      assert.equal(beforeAllCalls.some(call => call.path === earlierPath), false, 'the delayed call was not in the earlier snapshot');
+      assert.equal(afterEarlierCalls.filter(call => call.path === earlierPath && call.body === null).length, 1, 'the deliberately delayed earlier read reaches the transport once');
+      const afterEarlierWrites = await writes();
+      assert.deepEqual(afterEarlierWrites, beforeWrites, `the late read does not change the write-shaped transport calls: ${JSON.stringify(afterEarlierWrites)}`);
+
+      // A generic write and an unknown action are refused before they reach the stand-in transport.
+      const beforeRefused = intents.length;
+      const beforeTransport = beforeWrites.length;
+      const apiRefusal = await chrome.stable(`(async () => { try { await api(boardPath(view.root) + '/moves', { verb: 'shout', args: { to: 'coordinator', text: 'direct writes stay refused' } }); return 'unexpected'; } catch (error) { return error.message; } })()`);
+      const execRefusal = await chrome.stable(`(async () => act('exec', { command: 'true' }))()`);
+      const afterRefused = await writes();
+      assert.equal(afterRefused.length, beforeTransport, `refused writes never reach the browser transport; extra call shapes: ${JSON.stringify(afterRefused.slice(beforeTransport))}`);
+      assert.equal(intents.length, beforeRefused, 'refused shapes never reach the request server');
+      assert.match(apiRefusal, /read-only view/i);
+      assert.equal(execRefusal, false);
+    });
 
     const longTitle = 'Requested item ' + 'abcdefghij'.repeat(24);
     const otherActions = [
