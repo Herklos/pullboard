@@ -9,7 +9,7 @@ import { press, waitForStableBoxes } from './stable.js';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const COCKPIT = join(ROOT, 'test', 'cockpit');
-const EXEMPT_FUNCTIONS = new Set(['rawChromeEvaluation', 'waitForStableBoxes', 'press']);
+const EXEMPT_FUNCTIONS = new Set(['rawChromeEvaluation', 'waitForStableBoxes', 'press', 'tapTouch']);
 
 /** Find complete top-level exception bodies without exempting the rest of stable.js. */
 function maskSharedChromeFunctions(source) {
@@ -63,7 +63,7 @@ function rawChromeBypasses(root = COCKPIT) {
 }
 
 test('real Chrome tests measure and click only through the shared wait [N26,C7]', () => {
-  assert.deepEqual(rawChromeBypasses(), [], 'every cockpit test uses the stable API; raw CDP plumbing stays in the three named helpers');
+  assert.deepEqual(rawChromeBypasses(), [], 'every cockpit test uses the stable API; raw CDP plumbing stays in the four named helpers');
 });
 
 test('the shared-wait guard reports a synthetic direct Chrome evaluation by file and line [N26,C7]', () => {
@@ -92,11 +92,14 @@ test('raw protocol exceptions are limited to named stable helpers [N26,C7]', () 
       'export async function press(chrome) {',
       '  return chrome.send(' + JSON.stringify(['Input', 'dispatchMouseEvent'].join('.')) + ', {});',
       '}',
+      'export async function tapTouch(chrome) {',
+      '  return chrome.send(' + JSON.stringify(['Input', 'dispatchTouchEvent'].join('.')) + ', {});',
+      '}',
       'export async function accidentalBypass(chrome) {',
       `  return ${['chrome', '.', 'evaluate', '(', "'outside helper'", ')'].join('')};`,
       '}',
     ].join('\n') + '\n');
-    assert.deepEqual(rawChromeBypasses(root), [{ file: 'stable.js', line: 11, kind: 'direct evaluate' }]);
+    assert.deepEqual(rawChromeBypasses(root), [{ file: 'stable.js', line: 14, kind: 'direct evaluate' }]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
