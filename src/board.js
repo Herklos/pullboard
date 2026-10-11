@@ -1114,9 +1114,12 @@ export function submit(board, id, { agentId, commit, tree, files = [], policyCom
           return total ? new Refused('CHILDREN_OPEN', `item #${id} has ${total} unfinished child items`) : null;
         },
         headIsNew: (found) => {
-          const wasRejected = board.db.prepare("SELECT 1 FROM verdict WHERE item_id = ? AND verdict_decision = 'REJECT' AND verdict_commit = ?").get(id, commit);
+          const engineVersion = board.executionEngineVersion ?? ENGINE_VERSION;
+          const rejectedHead = board.db.prepare(
+            "SELECT 1 FROM verdict WHERE item_id = ? AND verdict_decision = 'REJECT' AND verdict_commit = ? AND (? < 9 OR verdict_digest = ?) LIMIT 1",
+          ).get(id, commit, engineVersion, found.item_frozen_digest);
           const sameReopenedHead = found.item_verdict === null && found.item_commit === commit;
-          return wasRejected || sameReopenedHead
+          return rejectedHead || sameReopenedHead
             ? new Refused('HEAD_NOT_NEW', `#${id} already has a submission at ${commit.slice(0, 12)}; commit the rework first`)
             : null;
         },
@@ -1132,7 +1135,14 @@ export function submit(board, id, { agentId, commit, tree, files = [], policyCom
         item_files: [...new Set([...(found.item_files ?? '').split('\n').filter(Boolean), ...files])].join('\n'),
       }),
     });
-    logEvent(board, agentId, 'submit', id, { commit, tree, ...(policyCommit ? { policyCommit } : {}) });
+    const engineVersion = board.executionEngineVersion ?? ENGINE_VERSION;
+    const criterionDigest = engineVersion >= 9 ? getItem(board, id).item_frozen_digest : null;
+    logEvent(board, agentId, 'submit', id, {
+      commit,
+      tree,
+      ...(policyCommit ? { policyCommit } : {}),
+      ...(criterionDigest ? { criterionDigest } : {}),
+    });
   });
 }
 

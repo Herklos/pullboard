@@ -16,6 +16,9 @@ import { exportBoard } from '../src/exchange.js';
 import { main } from '../src/cli.js';
 import { briefFiles } from '../src/brief.js';
 import { JSON_SHAPES } from '../src/json.js';
+import { ENGINE_VERSION } from '../src/machine.js';
+import { pathToFileURL } from 'node:url';
+import { unpackRelease } from './release-archive.js';
 
 const HOUR = 3_600_000;
 const SHA_A = 'a'.repeat(40);
@@ -385,6 +388,138 @@ test('REJECT reopens the item; resubmitting a rejected head is refused [V6]', ()
   store.submit(board, id, { agentId: 'web-1', commit: SHA_B, tree: 'tree-b' });
   verdict(id, { agentId: 'web-2', decision: 'ACCEPT' });
   assert.equal(store.getItem(board, id).item_status, 'verified');
+});
+
+test('a rejected commit resubmits after its bar was corrected [V4,B3]', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'pullboard-corrected-reject-'));
+  const repo = join(directory, 'repo');
+  mkdirSync(repo);
+  let durable;
+  t.after(() => {
+    if (durable) store.closeBoard(durable);
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo, stdio: 'pipe' });
+  execFileSync('git', ['config', 'user.name', 'Pullboard Test'], { cwd: repo, stdio: 'pipe' });
+  execFileSync('git', ['config', 'user.email', 'pullboard-test@example.com'], { cwd: repo, stdio: 'pipe' });
+  writeFileSync(join(repo, 'page.html'), '<h1>Page</h1>\n');
+  execFileSync('git', ['add', 'page.html'], { cwd: repo, stdio: 'pipe' });
+  execFileSync('git', ['commit', '-q', '-m', 'feat(web): render a page [G1]'], { cwd: repo, stdio: 'pipe' });
+  const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim();
+  const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repo, encoding: 'utf8' }).trim();
+
+  durable = store.openBoard(join(repo, '.git', 'pullboard', 'board.sqlite'), clock);
+  store.register(durable, { lane: 'coordinator', path: repo });
+  const builder = store.register(durable, { lane: 'web', path: join(directory, 'web-1') });
+  const reviewer = store.register(durable, { lane: 'web', path: join(directory, 'web-2') });
+  /** Freeze the current criterion deterministically for this real-board replay test. */
+  const criterionFreeze = (item) => ({ text: item.item_criterion, digest: `digest:${item.item_criterion}` });
+  assert.equal(ENGINE_VERSION, 9, 'corrected-bar resubmission is an engine-9 move rule');
+  const id = store.addItem(durable, {
+    by: 'coordinator', lane: 'web', title: 'Page', criterion: 'the page renders its heading',
+  });
+  const originalClaim = store.claim(durable, id, { agentId: builder, lane: 'web', leaseMs: HOUR, freeze: criterionFreeze });
+  store.submit(durable, id, { agentId: builder, commit, tree });
+  store.verify(durable, id, {
+    agentId: reviewer, decision: 'REJECT', reason: 'BEHAVIOR_MISMATCH',
+    note: 'the heading is missing', head: commit, digest: originalClaim.digest, policy: 'any',
+  });
+
+  store.claim(durable, id, { agentId: builder, lane: 'web', leaseMs: HOUR, freeze: criterionFreeze });
+  assert.throws(
+    () => store.submit(durable, id, { agentId: builder, commit, tree }),
+    (error) => error.code === 'HEAD_NOT_NEW',
+    'the same rejected head is still refused while its criterion is unchanged',
+  );
+  store.editItem(durable, id, { agentId: 'coordinator', criterion: 'the page renders an accessible heading' });
+  const correction = store.refreeze(durable, id, { agentId: 'coordinator', freeze: criterionFreeze });
+  assert.notEqual(correction.after, originalClaim.digest);
+  assert.equal(store.getItem(durable, id).item_owner, builder, 'refreeze keeps the builder claim for the corrected bar');
+
+  assert.doesNotThrow(
+    () => store.submit(durable, id, { agentId: builder, commit, tree }),
+    'the rejected commit is resubmitted unchanged after the coordinator corrects the criterion',
+  );
+  const item = store.getItem(durable, id);
+  assert.equal(item.item_status, 'submitted');
+  assert.equal(item.item_commit, commit);
+  assert.equal(item.item_frozen_digest, correction.after, 'the resubmission is recorded against the new criterion digest');
+  const rejects = store.verdictsFor(durable, id).filter((entry) => entry.verdict_decision === 'REJECT');
+  assert.equal(rejects.length, 1);
+  assert.equal(rejects[0].verdict_commit, commit);
+  assert.equal(rejects[0].verdict_digest, originalClaim.digest, 'the original rejection remains bound to its original bar');
+  assert.equal(store.events(durable, { itemId: id }).filter((event) => event.event_kind === 'reject').length, 1);
+  const resubmission = JSON.parse(store.events(durable, { itemId: id }).at(-1).event_detail);
+  assert.equal(resubmission.commit, commit);
+  assert.equal(resubmission.criterionDigest, correction.after, 'the engine-9 submit event names its corrected frozen digest');
+  store.verify(durable, id, {
+    agentId: reviewer, decision: 'REJECT', reason: 'BEHAVIOR_MISMATCH',
+    note: 'the corrected criterion still fails', head: commit, digest: correction.after, policy: 'any',
+  });
+  store.claim(durable, id, { agentId: builder, lane: 'web', leaseMs: HOUR, freeze: criterionFreeze });
+  assert.throws(
+    () => store.submit(durable, id, { agentId: builder, commit, tree }),
+    (error) => error.code === 'HEAD_NOT_NEW',
+    'engine 9 refuses the same commit after a rejection at the unchanged corrected digest',
+  );
+  const allRejects = store.verdictsFor(durable, id).filter((entry) => entry.verdict_decision === 'REJECT');
+  assert.equal(allRejects.length, 2);
+  assert.equal(allRejects[1].verdict_digest, correction.after);
+
+  const legacy = [
+    store.openBoard(join(directory, 'engine-8-source.sqlite'), clock),
+    store.openBoard(join(directory, 'engine-8-replica.sqlite'), clock),
+  ];
+  t.after(() => legacy.forEach((replica) => store.closeBoard(replica)));
+  const oldIds = legacy.map((replica) => {
+    store.register(replica, { lane: 'coordinator', path: '/legacy/repo' });
+    const oldBuilder = store.register(replica, { lane: 'web', path: '/legacy/web-1' });
+    store.register(replica, { lane: 'web', path: '/legacy/web-2' });
+    return { oldBuilder, oldItem: store.addItem(replica, {
+      by: 'coordinator', lane: 'web', title: 'Legacy page', criterion: 'the page renders its heading',
+    }) };
+  });
+  for (const replica of legacy) {
+    replica.db.prepare('UPDATE board_meta SET meta_value = ? WHERE meta_key = ?').run('8'.repeat(32), 'board_id');
+  }
+  const legacyClientDirectory = join(directory, 'engine-8-client');
+  mkdirSync(legacyClientDirectory);
+  unpackRelease('v0.8.6', legacyClientDirectory);
+  const legacyEngine = await import(pathToFileURL(join(legacyClientDirectory, 'src/engine.js')).href);
+  /** Freeze an engine-8 item with its captured verify policy, as released boards require. */
+  const legacyFreeze = (item) => ({
+    text: JSON.stringify({
+      criterion: item.item_criterion,
+      policy: { version: 1, commit: 'a'.repeat(40), verify: { policy: 'any', family: 'off' } },
+    }),
+    digest: `digest:${item.item_criterion}`,
+  });
+  const oldMoves = [
+    ['claim', (replica, ids) => [ids.oldItem, { agentId: ids.oldBuilder, lane: 'web', leaseMs: HOUR, freeze: legacyFreeze }]],
+    ['submit', (replica, ids) => [ids.oldItem, { agentId: ids.oldBuilder, commit, tree }]],
+    ['verify', (replica, ids) => [ids.oldItem, { agentId: 'web-2', decision: 'REJECT', reason: 'BEHAVIOR_MISMATCH', note: 'heading missing', head: commit, digest: 'digest:the page renders its heading', policy: 'any' }]],
+    ['claim', (replica, ids) => [ids.oldItem, { agentId: ids.oldBuilder, lane: 'web', leaseMs: HOUR, freeze: legacyFreeze }]],
+    ['editItem', (replica, ids) => [ids.oldItem, { agentId: 'coordinator', criterion: 'the page renders an accessible heading' }]],
+    ['refreeze', (replica, ids) => [ids.oldItem, { agentId: 'coordinator', freeze: legacyFreeze }]],
+    ['submit', (replica, ids) => [ids.oldItem, { agentId: ids.oldBuilder, commit, tree }]],
+  ];
+  let finalLegacyOutcome;
+  oldMoves.forEach(([operation, argsFor], index) => {
+    const args = argsFor(legacy[0], oldIds[0]);
+    const move = legacyEngine.prepareEngineMove(legacy[0], operation, args, { id: `engine-8-resubmit-${index}` });
+    assert.equal(move.engine, 8);
+    const receipt = { sequence: index + 1, at: `2026-10-11T16:00:0${index}.000Z` };
+    const sourceOutcome = legacyEngine.applyEngineMove(legacy[0], move, receipt);
+    const replicaOutcome = applyEngineMove(legacy[1], move, receipt);
+    assert.deepEqual(sourceOutcome, replicaOutcome, `engine-8 move ${operation} replays identically`);
+    if (index < oldMoves.length - 1) assert.equal(sourceOutcome.error, undefined, `released engine-8 ${operation} applies`);
+    if (index === oldMoves.length - 1) finalLegacyOutcome = sourceOutcome;
+  });
+  assert.equal(finalLegacyOutcome.error.code, 'HEAD_NOT_NEW', 'engine 8 still refuses a rejected commit after refreeze');
+  assert.deepEqual(store.events(legacy[0]), store.events(legacy[1]), 'engine-8 event details replay without engine-9 additions');
+  assert.ok(store.events(legacy[0]).filter((event) => event.event_kind === 'submit')
+    .every((event) => !Object.hasOwn(JSON.parse(event.event_detail), 'criterionDigest')));
 });
 
 test('every verdict binds the submitted commit and the frozen digest [V8]', () => {
