@@ -1802,6 +1802,11 @@ function applyPlace(place, kept = null) {
 /** Restore the address on Back and Forward, with a scoped refresh when the repo changes. */
 function fromAddress(event) {
   if (!data) return;
+  // The configured relay transport owns pairing fragments and removes their secrets itself.
+  if (transportModule) {
+    const pairing = new URLSearchParams((location.hash || '').slice(1));
+    if (['board', 'key', 'device'].some((name) => pairing.has(name))) return;
+  }
   if (snapshot) {
     const kept = event?.state || {};
     view.tab = addressTab() || kept.tab || homeTab();
