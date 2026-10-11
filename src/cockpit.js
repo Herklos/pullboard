@@ -184,7 +184,7 @@ function homeTab() {
   const kept = keep('pb.tab');
   return kept && kept !== 'roadmap' ? kept : 'items';
 }
-const view = { roadmapOpen: new Map(), root: keep('pb.project'), tab: addressTab() || homeTab(), itemsView: typeof location !== 'undefined' && location.hash === '#items/pipeline' ? 'pipeline' : 'list', seen: {}, code: {}, item: null, adding: false, declining: null, state: 'active', rows: { spec: 'decide', doctrine: 'all' }, row: { spec: null, doctrine: null }, agent: null, allAgents: false, agentsHidden: keep('pb.agents') === 'hidden', open: {} };
+const view = { roadmapOpen: new Map(), root: keep('pb.project'), tab: addressTab() || homeTab(), itemsView: typeof location !== 'undefined' && location.hash === '#items/pipeline' ? 'pipeline' : 'list', seen: {}, code: {}, item: null, adding: false, declining: null, state: 'active', rows: { spec: 'decide', doctrine: 'all' }, row: { spec: null, doctrine: null }, agent: null, allAgents: false, agentsHidden: keep('pb.agents') === 'hidden', statsOpen: false, open: {} };
 let switchGeneration = 0;
 if (snapshot) view.state = 'all';
 let data = null;
@@ -771,9 +771,14 @@ function boardSummary(board, state) {
   };
 }
 
-/** Format the API's measured minutes without deriving new times from events [N26]. */
+/** Format an API-measured duration in readable units without deriving times from events [N26]. */
 function flowMinutes(value) {
-  return value === null || value === undefined ? 'unmeasured' : Number(value.toFixed(2)) + ' min';
+  if (value === null || value === undefined) return 'unmeasured';
+  const minutes = Math.round(value);
+  if (minutes < 60) return minutes + ' min';
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return hours + ' h ' + minutes % 60 + ' min';
+  return Math.floor(hours / 24) + ' d ' + hours % 24 + ' h';
 }
 
 /** Render the four stages, live queues and single recommendation supplied by stats [N26]. */
@@ -797,24 +802,14 @@ function proofFlowCard(flow) {
     + (bottleneck.recommendation ? ' · <span data-flow="recommendation">' + esc(bottleneck.recommendation) + '</span>' : '') + '</p></div>';
 }
 
-/** Format a counted noun for the proof stats detail.
- * @param {number} count
- * @param {string} singular
- * @param {string} plural
- * @returns {string}
- */
-function counted(count, singular, plural) {
-  return count + ' ' + (count === 1 ? singular : plural);
-}
-
 /** Render the event-log totals already supplied by the shared stats API [V2,N26]. */
-function proofStatsCard(stats) {
+function proofStatsCard(stats, expanded = false) {
   if (!stats) return '<span class="muted">Stats unavailable</span>';
-  const families = stats.families || [];
-  const agents = stats.agents || [];
   const percentage = (Number(stats.rejectionShare) * 100).toFixed(1) + '%';
-  const familyDetail = families.map((family) => family.name + ' (' + counted(family.agents, 'agent', 'agents') + ', ' + counted(family.moves, 'move', 'moves') + ')').join(' · ') || 'none';
-  const agentDetail = agents.map((agent) => agent.id + ' (' + agent.families.join('/') + '; ' + counted(agent.moves, 'move', 'moves') + ')').join(' · ') || 'none';
+  const bottleneck = stats.flow?.bottleneck;
+  const stage = { build: 'Build', reviewWait: 'Review wait', review: 'Review', mergeWait: 'Merge wait' }[bottleneck?.stage];
+  const summary = stats.merged + ' merged · ' + percentage + ' sent back'
+    + (bottleneck ? ' · Bottleneck: ' + (stage || bottleneck.message) + (bottleneck.recommendation ? ', ' + bottleneck.recommendation : '') : '');
   /** Format an API timestamp for the card without recalculating event statistics.
    * @param {string|number|null} value
    * @returns {string}
@@ -822,7 +817,10 @@ function proofStatsCard(stats) {
   const dateText = (value) => value ? new Date(value).toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' }) : 'none';
   const firstAt = stats.firstEventAt ?? '';
   const lastAt = stats.lastEventAt ?? '';
-  return '<div class="proof-stats-head"><b>Proof stats</b><span>from recorded moves</span></div>'
+  return '<button class="proof-stats-summary" id="proof-stats-summary" data-stats-toggle type="button" aria-expanded="' + expanded + '" aria-controls="proof-stats-full">'
+    + '<span class="proof-stats-summary-text">' + esc(summary) + '</span><span class="proof-stats-caret" aria-hidden="true">' + (expanded ? '−' : '+') + '</span></button>'
+    + '<div class="proof-stats-full" id="proof-stats-full"' + (expanded ? '' : ' hidden') + '>'
+    + '<div class="proof-stats-head"><b>Proof stats</b><span>from recorded moves</span><button id="proof-stats-close" type="button" class="proof-stats-close" data-stats-close>Close</button></div>'
     + '<div class="proof-stats-grid">'
     + '<div><span>Submissions</span><b data-stat="submissions" data-value="' + esc(stats.submissions) + '">' + esc(stats.submissions) + '</b></div>'
     + '<div><span>Rejections</span><b data-stat="rejections" data-value="' + esc(stats.rejections) + '">' + esc(stats.rejections) + '</b></div>'
@@ -830,10 +828,8 @@ function proofStatsCard(stats) {
     + '<div><span>Merged</span><b data-stat="merged" data-value="' + esc(stats.merged) + '">' + esc(stats.merged) + '</b></div>'
     + '<div><span>Without accept</span><b data-stat="mergedWithoutAccept" data-value="' + esc(stats.mergedWithoutAccept) + '">' + esc(stats.mergedWithoutAccept) + '</b></div>'
     + '<div><span>Agents</span><b data-stat="agentCount" data-value="' + esc(stats.agentCount) + '">' + esc(stats.agentCount) + '</b></div>'
-    + '<div><span>Families</span><b data-stat="familyCount" data-value="' + esc(stats.familyCount) + '">' + esc(stats.familyCount) + '</b></div>'
     + '<div><span>First · latest</span><small><time data-stat="firstEventAt" data-value="' + esc(firstAt) + '" datetime="' + esc(firstAt) + '">' + esc(dateText(firstAt)) + '</time> · <time data-stat="lastEventAt" data-value="' + esc(lastAt) + '" datetime="' + esc(lastAt) + '">' + esc(dateText(lastAt)) + '</time></small></div>'
-    + '</div>' + proofFlowCard(stats.flow) + '<div class="proof-stats-detail">'
-    + '<p><b>Families:</b> ' + esc(familyDetail) + '</p><p><b>Agents:</b> ' + esc(agentDetail) + '</p></div>';
+    + '</div>' + proofFlowCard(stats.flow) + '</div>';
 }
 
 /** Resolve a displayed repo to the persistent board identity supplied by API v1. */
@@ -1356,6 +1352,7 @@ if (typeof MutationObserver === 'function') new MutationObserver((changes) => {
 
 /** Draw the board shown: the sidebar, then every tab's panes from the project's board. */
 function render() {
+  const statsFocus = ['proof-stats-summary', 'proof-stats-close'].includes(document.activeElement?.id) ? document.activeElement.id : null;
   const p = data.project;
   const group = data.group;
   renderSide();
@@ -1375,7 +1372,9 @@ function render() {
   if (group) { renderGroup(group); return; }
   if (!p) return;
   $('proof-stats').hidden = false;
-  $('proof-stats').innerHTML = proofStatsCard(p.proofStats);
+  $('proof-stats').innerHTML = proofStatsCard(p.proofStats, view.statsOpen);
+  // Polling replaces this card's controls; keep the person's keyboard position through that redraw.
+  if (statsFocus && view.tab === 'items') $(statsFocus)?.focus({ preventScroll: true });
   // Each product's progress (N28): the rows an accepted item cites, and its items by state.
   $('prod-list').innerHTML = p.products.map((x) => {
     const states = [['open', '', x.items.open], ['building', 'building', x.items.claimed], ['to verify', 'verify', x.items.submitted], ['verified', 'verified', x.items.verified]].filter(([, , n]) => n);
@@ -2240,11 +2239,23 @@ $('shouts-pane').addEventListener('click', (event) => {
 // Enter shouts; Shift+Enter starts a new line.
 $('shout-text').addEventListener('keydown', (event) => { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); $('shout-form').requestSubmit(); } });
 document.addEventListener('click', (event) => {
-  const t = event.target.closest('[data-status],[data-roadmap-key],[data-roadmap-all],[data-root],[data-tab],[data-go],[data-item],[data-items-view],[data-state],[data-rows],[data-row],[data-row-decision],[data-section-approve],[data-release],[data-shout],[data-new],[data-code],[data-code-all],[data-code-less],#proj-switch,#console');
+  const t = event.target.closest('[data-status],[data-roadmap-key],[data-roadmap-all],[data-root],[data-tab],[data-go],[data-item],[data-items-view],[data-state],[data-rows],[data-row],[data-row-decision],[data-section-approve],[data-release],[data-shout],[data-new],[data-code],[data-code-all],[data-code-less],[data-stats-toggle],[data-stats-close],#proj-switch,#console');
   if (!event.target.closest('.side')) fold(false);
   if (!t) return;
   if (t.id === 'proj-switch') { fold(!$('side').classList.contains('open')); return; }
   if (t.id === 'console') { t.hidden = true; return; }
+  if (t.dataset.statsToggle !== undefined) {
+    view.statsOpen = true;
+    render();
+    $('proof-stats-close').focus({ preventScroll: true });
+    return;
+  }
+  if (t.dataset.statsClose !== undefined) {
+    view.statsOpen = false;
+    render();
+    $('proof-stats-summary').focus({ preventScroll: true });
+    return;
+  }
   if (t.dataset.status) { statusGo(t.dataset.status); return; }
   if (t.dataset.itemsView) { view.itemsView = t.dataset.itemsView; address(); render(); return; }
   if ('roadmapKey' in t.dataset) {
@@ -2285,6 +2296,14 @@ document.addEventListener('click', (event) => {
   else if (t.dataset.release) act('release', { lane: t.dataset.release }, t);
   else if (t.dataset.shout) { answer(null); addressTo(t.dataset.shout); $('shout-text').value = '#' + t.dataset.about + ': '; openTab('shouts'); showTab(); $('shout-text').focus(); }
   else if (t.dataset.new !== undefined) { view.adding = true; render(); $('add-title').focus(); }
+});
+/** Close the expanded stats card and return focus to the list's summary control on Escape. */
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape' || !view.statsOpen || view.tab !== 'items' || document.querySelector('[data-pane="items"]')?.hidden) return;
+  event.preventDefault();
+  view.statsOpen = false;
+  render();
+  $('proof-stats-summary').focus({ preventScroll: true });
 });
 /** Let a Roadmap row with independent inline links keep its keyboard button behavior. */
 document.addEventListener('keydown', (event) => {
