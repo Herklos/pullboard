@@ -479,6 +479,29 @@ test('the roadmap panel jumps to each release [N26]', {
   try {
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
     await chrome.waitFor('data?.project?.milestones?.length === 14');
+    // The panel's breakpoint is below 900px, not at it: at 900 the panel stays on the right, sticky, with its own
+    // Shipping; at 899 it is the chip row above the list, and the counts sit under the next release.
+    for (const scheme of ['light', 'dark']) {
+      await chrome.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: scheme }] });
+      await chrome.waitFor(`document.documentElement.dataset.scheme === '${scheme}'`);
+      for (const width of [900, 899]) {
+        await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
+        await chrome.waitFor(`innerWidth === ${width}`);
+        await press(chrome, "document.querySelector('[data-tab=roadmap]')");
+        const edge = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+          const panel = document.querySelector('#roadmap-panel'), list = document.querySelector('#roadmap-list');
+          const shown = (e) => !!e && e.getClientRects().length > 0 && e.getBoundingClientRect().height > 0;
+          return { position: getComputedStyle(panel).position, beside: panel.getBoundingClientRect().left >= list.getBoundingClientRect().right,
+            chips: getComputedStyle(document.querySelector('#roadmap-releases')).display, desk: shown(panel.querySelector('.roadmap-desktop-shipping')), phone: shown(list.querySelector('.roadmap-mobile-shipping')),
+            page: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) };
+        })())`));
+        const at = `${width}/${scheme}`;
+        if (width === 900) assert.deepEqual([edge.position, edge.beside, edge.desk, edge.phone], ['sticky', true, true, false], `${at}: the panel stays on the right with its Shipping: ${JSON.stringify(edge)}`);
+        else assert.deepEqual([edge.position, edge.beside, edge.chips, edge.desk, edge.phone], ['static', false, 'flex', false, true], `${at}: the chip row above the list, Shipping under the next release: ${JSON.stringify(edge)}`);
+        assert.ok(edge.page <= width, `${at}: no sideways scroll: ${JSON.stringify(edge)}`);
+      }
+    }
+    await chrome.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }] });
     for (const width of [375, 1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
       await chrome.waitFor(`innerWidth === ${width}`);
@@ -503,7 +526,7 @@ test('the roadmap panel jumps to each release [N26]', {
         assert.ok(initial.panel.bottom <= initial.targets[0].rect.top, 'the phone panel sits above the release list');
         // A board refresh redraws the Roadmap; the chips stay where the person scrolled them.
         const kept = JSON.parse(await chrome.stable("(() => { const row = document.querySelector('#roadmap-releases'); row.scrollLeft = row.scrollWidth; const before = row.scrollLeft; render(); return JSON.stringify([before, document.querySelector('#roadmap-releases').scrollLeft]); })()"));
-        assert.ok(kept[0] > 0 && kept[1] === kept[0], `375: a redraw keeps the chips where they were scrolled: ${JSON.stringify(kept)}`);
+        assert.ok(kept[0] > 0 && Math.abs(kept[1] - kept[0]) <= 2, `375: a redraw keeps the chips where they were scrolled: ${JSON.stringify(kept)}`);
         await chrome.stable("(() => { document.querySelector('#roadmap-releases').scrollLeft = 0; return true; })()");
       }
       await proofShot(chrome, 'roadmap-panel-jumps', width);

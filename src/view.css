@@ -188,6 +188,18 @@ main { padding: 16px 18px 56px; }
 .milestone-item .id { margin-right: 6px; color: var(--ink-faint); font: 500 12px var(--mono); }
 .milestone-empty { margin: 8px 0 0; color: var(--ink-faint); }
 .milestone-note { margin: 10px 0 2px; padding: 8px 10px; border-radius: 8px; background: var(--accent-soft); color: var(--ink-muted); overflow-wrap: anywhere; }
+/* Below 900px, not at it: the Roadmap keeps its panel on the right at 900, as its criterion says, while the rest
+   of the page folds at 900 and narrower. */
+@media (width < 900px) {
+  .roadmap-layout { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .roadmap-panel { grid-column: 1; grid-row: 1; position: static; max-height: none; overflow: visible; padding: 12px; }
+  .roadmap-list { grid-column: 1; grid-row: 2; max-width: none; }
+  .roadmap-releases { display: flex; overflow-x: auto; overscroll-behavior-inline: contain; scrollbar-width: thin; gap: 5px; padding-bottom: 3px; }
+  .roadmap-release { flex: 0 0 auto; width: auto; max-width: 220px; border-color: var(--line); }
+  .roadmap-desktop-shipping { display: none; }
+  .roadmap-list .roadmap-mobile-shipping { display: grid; gap: 10px; padding: 0 14px 12px; }
+  .roadmap-stage-counts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
 @media (max-width: 900px) {
   .shell { display: block; }
   .side { position: static; height: auto; overflow: visible; padding: 8px 12px; border-right: 0; border-bottom: 1px solid var(--line); }
@@ -203,14 +215,6 @@ main { padding: 16px 18px 56px; }
   .live { display: none; }
   main { padding: 12px 10px 24px; }
   .two, .two.narrow { grid-template-columns: minmax(0, 1fr); }
-  .roadmap-layout { grid-template-columns: minmax(0, 1fr); gap: 12px; }
-  .roadmap-panel { grid-column: 1; grid-row: 1; position: static; max-height: none; overflow: visible; padding: 12px; }
-  .roadmap-list { grid-column: 1; grid-row: 2; max-width: none; }
-  .roadmap-releases { display: flex; overflow-x: auto; overscroll-behavior-inline: contain; scrollbar-width: thin; gap: 5px; padding-bottom: 3px; }
-  .roadmap-release { flex: 0 0 auto; width: auto; max-width: 220px; border-color: var(--line); }
-  .roadmap-desktop-shipping { display: none; }
-  .roadmap-list .roadmap-mobile-shipping { display: grid; gap: 10px; padding: 0 14px 12px; }
-  .roadmap-stage-counts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .group-need { grid-template-columns: minmax(80px, auto) auto minmax(0, 1fr); }
   .group-need > button { grid-column: 3; }
 }
