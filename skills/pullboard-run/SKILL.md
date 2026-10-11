@@ -38,3 +38,21 @@ Every approved row is cited by an item that is verified and merged, or the perso
 ## Report flow
 
 At the start of every coordinator cycle, check the flow from the `flow:` line in `pullboard resume`, or from `pullboard stats --json`. When it names a bottleneck, use `pullboard shout person "..."` to tell the person in one plain sentence what is slow, the reported numbers, and the action that would fix it. Use the reported values and recommendation; do not calculate new numbers. Ask for a decision only when the fix needs the person's choice or authorization, such as starting another agent. Otherwise report the action without a question.
+
+## Commands by coordination task
+
+- When registering the main checkout as coordinator, run `pullboard join coordinator --model <name>`; when joining a lane, run `pullboard join <lane> --model <name>`. After the same agent starts a new session, run `pullboard takeover`; confirm the active identity with `pullboard whoami`.
+- When you need current syntax, run `pullboard help` or `pullboard help <command>`; check the installed release with `pullboard version`. Use `pullboard tour` to walk a person through the scripted example in a throwaway repo.
+- When checking machine gate capacity, run `pullboard resources`; change the configured slot count with `pullboard settings` only when the team has agreed to that machine-wide setting.
+- When an item needs its frozen check, run `pullboard check <id>`; use `pullboard claim <id>` to take or renew a specific lease and `pullboard release <id>` when you cannot continue. `pullboard done <id>` is the submit alias.
+- When coordinating a pause or correction, use `pullboard hold` for a lane or item, `pullboard reopen` to return a submission for criterion correction, and `pullboard withdraw` only when nobody should build the item.
+- When answering a decision addressed to the coordinator, run `pullboard answer <id>`; when it belongs to the person, use `pullboard pass <id>` to forward it rather than answering for them.
+- When preparing a verified batch for the main line, use `pullboard sweep` to file one item per flagged file, `pullboard land` to gate and push the durable batch, and `pullboard merged <id> <commit>` to record where an accepted item landed.
+- When you need an append-only observation for an item, run `pullboard fact <id>`; use `pullboard ledger` for the board's event ledger and `pullboard log` for its readable activity timeline.
+- When inspecting the queue, use `pullboard status`, `pullboard list`, and `pullboard inbox`; use `pullboard show <id>` to read the frozen criterion and item history.
+- When validating a project before planning, run `pullboard doctor`; when a published Claude Code skill changed, run `pullboard skills --update` to refresh only unchanged installed copies.
+- When hooks are missing after a clone, run `pullboard hooks` to reinstall them; when diagnosing one hook directly, run `pullboard hook pre-commit`, `pullboard hook pre-merge-commit`, `pullboard hook commit-msg`, or `pullboard hook pre-push` for the hook in question.
+- When linking this board to the relay, run `pullboard relay on`; use `pullboard relay off` to unlink it, `pullboard relay pair` to print a one-use code, and `pullboard relay join <code>` in the clone that receives that code. Run `pullboard relay` to inspect link state.
+- When checking paired-device or agent-token metadata, run `pullboard relay devices` or `pullboard relay tokens`; use `pullboard relay revoke <id>` only when authorized to revoke that device or token. When a blocked relay position needs recovery, hand it to the person because recovery is reserved for their action.
+- When opening the local board in a browser, run `pullboard view`; use `pullboard view --export <dir>` for a static snapshot and `pullboard serve` when a local script needs the authenticated API.
+- When keeping a versioned board backup, run `pullboard export`; restore it only into an empty board with `pullboard import <file>`. When removing a repository from this machine's registered project list, run `pullboard forget <path>`.
