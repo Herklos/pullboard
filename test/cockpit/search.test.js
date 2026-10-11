@@ -174,10 +174,17 @@ process.stdout.write(result.stdout ?? ''); process.stderr.write(result.stderr ??
     assert.deepEqual(early.spec.filter(row => ['G4','G5'].includes(row.id)).map(row => row.added), [0, 0], diagnostic);
     assert.ok(early.doctrine.some(row => row.id === 'R2'), 'the former presence-only readiness condition is already satisfied');
     assert.deepEqual(early.order, ['G4', 'G5', 'G3', 'R2', 'R1'], diagnostic);
-    // A later real capture is the discriminator: distinct committed ages restore the intended order.
+    // Start the actual comparison while the stale capture is still visible. Presence-only readiness
+    // would resolve now and preserve that wrong order, even though a later refresh becomes correct.
+    const comparison = committedRows(chrome, observed).then(observe);
+    // Two ordered browser observations let the readiness check and any early comparison finish,
+    // without a wall-clock sleep or changing the real response. Both still see the held capture.
+    for (let checkpoint = 0; checkpoint < 2; checkpoint += 1) {
+      assert.deepEqual((await observe()).captured, early.captured, 'the real stale capture remains visible before the refresh');
+    }
+    // Only the committed-head barrier keeps the comparison pending until this real refresh.
     await chrome.stable('refresh()');
-    await committedRows(chrome, observed);
-    const latest = await observe();
+    const latest = await comparison;
     assert.deepEqual(latest.captured, { 'SPEC.md': observed, 'ways.md': observed }, JSON.stringify(latest));
     assert.deepEqual(latest.spec.map(row => [row.id,row.added]), [['G5',1],['G3',3],['G4',2]], JSON.stringify(latest));
     assert.deepEqual(latest.order, ['G5', 'G4', 'G3', 'R2', 'R1'], JSON.stringify(latest));
