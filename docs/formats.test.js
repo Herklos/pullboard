@@ -52,6 +52,24 @@ import { sha256, signRows } from '../src/signature.js';
 
 const guide = readFileSync(new URL('./formats.md', import.meta.url), 'utf8');
 
+test('formats guide documents resume release notes and checkout recording [N19]', () => {
+  const section = block('<!-- resume-release-notes:start -->', '<!-- resume-release-notes:end -->');
+  const example = /```json\n([\s\S]*?)\n```/u.exec(section);
+  assert.ok(example, 'the resume contract includes a JSON example');
+  assert.deepEqual(JSON.parse(example[1]), {
+    whatsNew: { releases: [{ version: '0.8.7', headline: 'A new session', paragraph: 'Release headline paragraph.' }], omitted: 0, notes: 'CHANGELOG.md' },
+  });
+  assert.match(section, /`whatsNew` is `null` when nothing is new/u);
+  assert.match(section, /newest first/u);
+  assert.match(section, /newest three/u);
+  assert.match(section, /`omitted` counts the earlier releases left out/u);
+  assert.match(section, /`notes` names the full release notes/u);
+  assert.match(section, /Both text and JSON resumes record the displayed version once per checkout/u);
+  assert.match(section, /A checkout's first run records its version quietly/u);
+  assert.ok(section.includes("`pullboard-checkout/resume-version` in the checkout's Git directory"));
+  assert.match(section, /outside the shared board/u);
+});
+
 test('formats guide documents collision grandfathering and doctrine citations [A5]', () => {
   assert.match(guide, /A bare id names a row in `SPEC\.md`/u);
   assert.match(guide, /`doctrine:<id>` in item spec ids and commit headers/u);
