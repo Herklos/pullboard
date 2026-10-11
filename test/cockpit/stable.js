@@ -85,6 +85,23 @@ export async function press(chrome, find, { native = true } = {}) {
   await raw.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 });
 }
 
+/** Tap a stable visible target with Chrome's real touch input path, so touch interactions are not simulated clicks. */
+export async function tapTouch(chrome, find) {
+  await waitForStableBoxes(chrome, find);
+  await rawChromeEvaluation(chrome, `(${find}).scrollIntoView({ block: 'center', behavior: 'instant' })`);
+  await waitForStableBoxes(chrome, find);
+  const point = await rawChromeEvaluation(chrome, `(() => {
+    const element = (${find}), rect = element.getBoundingClientRect(), x = rect.x + rect.width / 2, y = rect.y + rect.height / 2;
+    const hit = document.elementFromPoint(x, y);
+    if (!rect.width || !rect.height || !hit || (hit !== element && !element.contains(hit))) throw Error('shared touch: target is hidden or covered: ' + ${JSON.stringify(find)});
+    return { x, y };
+  })()`);
+  const raw = clients.get(chrome);
+  const touchPoint = { ...point, id: 1, radiusX: 1, radiusY: 1, force: 1 };
+  await raw.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [touchPoint] });
+  await raw.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+}
+
 /**
  * Expose only waited page expressions. Every media override retains reduced motion, including the external
  * relay browser's pages. Polling observes readiness; it never retries a click or reruns an assertion.
