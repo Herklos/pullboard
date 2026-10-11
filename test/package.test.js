@@ -220,6 +220,7 @@ test('the installable package includes the single inherited doctrine file [D1]',
   const files = JSON.parse(packed.stdout)[0].files.map(file => file.path);
   assert.equal(files.filter(file => file === 'src/standard-doctrine.md').length, 1);
   assert.ok(files.includes('src/doctrine.js'));
+  assert.ok(files.includes('CHANGELOG.md'), 'resume release headlines require the shipped changelog');
 });
 
 

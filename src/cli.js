@@ -70,6 +70,7 @@ import { staleFrozenItems, staleItemFinding } from './approved-rows.js';
 import { mainPolicy, policyAt, itemPolicy, submissionPaths, frozenCheck, checkAtCommit, dependencySnapshots, requireTrunkMerge, trunkRef } from './trusted-policy.js';
 import { proofStats } from './stats.js';
 import { flowLines, flowAlertLine } from './stats-flow.js';
+import { releaseHeadlinesBetween } from './changelog.js';
 import { exportBoard, importBoard } from './exchange.js';
 import { addSigner, assertRequiredSigners, defaultPrincipal, hasSignerFile } from './signature.js';
 import { loadMachineSettings, setGateSlots } from './settings.js';
@@ -1006,6 +1007,23 @@ function coordinatorDecisionSections(board, ctx) {
   return { openDecisions, recentAnswers, personQuestions, shouts };
 }
 
+/** Read and update this checkout's last-run version, returning only newly released headlines. */
+function resumeReleaseNotes(info) {
+  const record = join(info.gitDir, 'pullboard-checkout', 'resume-version');
+  let previous = '';
+  try { previous = readFileSync(record, 'utf8').trim(); } catch { /* First resume in this checkout. */ }
+  if (!/^\d+\.\d+\.\d+$/u.test(previous)) {
+    mkdirSync(dirname(record), { recursive: true });
+    writeFileSync(record, `${VERSION}\n`);
+    return null;
+  }
+  if (previous === VERSION) return null;
+  const releases = releaseHeadlinesBetween(previous, VERSION);
+  mkdirSync(dirname(record), { recursive: true });
+  writeFileSync(record, `${VERSION}\n`);
+  return releases.length ? { releases: releases.slice(0, 3), omitted: Math.max(0, releases.length - 3), notes: 'CHANGELOG.md' } : null;
+}
+
 /**
  * `pullboard resume` (N19): one short card that puts an agent back to work after a fresh start,
  * a restart or a compaction, from the board rather than from a summary.
@@ -1056,6 +1074,12 @@ function resumeHere(io) {
     card.reviewQueue = { items: card.toVerify, awaiting: card.awaiting };
   }
   const say = (line) => io.say(line);
+  const releaseNotes = card.whatsNew = resumeReleaseNotes(ctx.info);
+  for (const note of (releaseNotes?.releases ?? [])) {
+    say(`new in ${note.version} — ${note.headline}: ${note.paragraph}`);
+  }
+  if (releaseNotes?.omitted) say(`${releaseNotes.omitted} earlier release${releaseNotes.omitted === 1 ? '' : 's'} omitted; see the full notes in CHANGELOG.md`);
+  else if (releaseNotes?.releases.length) say('Full release notes: CHANGELOG.md');
   for (const problem of card.relayProblems) say(problem.message);
   for (const problem of card.hookProblems) say(`${problem.message}; ${problem.next}`);
   const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;

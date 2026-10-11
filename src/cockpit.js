@@ -826,7 +826,7 @@ function proofStatsCard(stats, expanded = false) {
   return '<button class="proof-stats-summary" id="proof-stats-summary" data-stats-toggle type="button" aria-expanded="' + expanded + '" aria-controls="proof-stats-full">'
     + '<span class="proof-stats-summary-text">' + esc(summary) + '</span><span class="proof-stats-caret" aria-hidden="true">' + (expanded ? '−' : '+') + '</span></button>'
     + '<div class="proof-stats-full" id="proof-stats-full"' + (expanded ? '' : ' hidden') + '>'
-    + '<div class="proof-stats-head"><b>Proof stats</b><span>from recorded moves</span><button id="proof-stats-close" type="button" class="proof-stats-close" data-stats-close>Close</button></div>'
+    + '<div class="proof-stats-head"><b>Proof stats</b><span>from recorded moves</span></div>'
     + '<div class="proof-stats-grid">'
     + '<div><span>Submissions</span><b data-stat="submissions" data-value="' + esc(stats.submissions) + '">' + esc(stats.submissions) + '</b></div>'
     + '<div><span>Rejections</span><b data-stat="rejections" data-value="' + esc(stats.rejections) + '">' + esc(stats.rejections) + '</b></div>'
@@ -1371,7 +1371,7 @@ if (typeof MutationObserver === 'function') new MutationObserver((changes) => {
 
 /** Draw the board shown: the sidebar, then every tab's panes from the project's board. */
 function render() {
-  const statsFocus = ['proof-stats-summary', 'proof-stats-close'].includes(document.activeElement?.id) ? document.activeElement.id : null;
+  const statsFocus = document.activeElement?.id === 'proof-stats-summary' ? document.activeElement.id : null;
   const p = data.project;
   const group = data.group;
   renderSide();
@@ -2347,19 +2347,13 @@ $('shouts-pane').addEventListener('click', (event) => {
 // Enter shouts; Shift+Enter starts a new line.
 $('shout-text').addEventListener('keydown', (event) => { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); $('shout-form').requestSubmit(); } });
 document.addEventListener('click', (event) => {
-  const t = event.target.closest('[data-status],[data-shout-id],[data-roadmap-key],[data-roadmap-all],[data-root],[data-tab],[data-go],[data-item],[data-items-view],[data-state],[data-rows],[data-row],[data-row-decision],[data-section-approve],[data-release],[data-shout],[data-new],[data-code],[data-code-all],[data-code-less],[data-stats-toggle],[data-stats-close],#proj-switch,#console');
+  const t = event.target.closest('[data-status],[data-shout-id],[data-roadmap-key],[data-roadmap-all],[data-root],[data-tab],[data-go],[data-item],[data-items-view],[data-state],[data-rows],[data-row],[data-row-decision],[data-section-approve],[data-release],[data-shout],[data-new],[data-code],[data-code-all],[data-code-less],[data-stats-toggle],#proj-switch,#console');
   if (!event.target.closest('.side')) fold(false);
   if (!t) return;
   if (t.id === 'proj-switch') { fold(!$('side').classList.contains('open')); return; }
   if (t.id === 'console') { t.hidden = true; return; }
   if (t.dataset.statsToggle !== undefined) {
-    view.statsOpen = true;
-    render();
-    $('proof-stats-close').focus({ preventScroll: true });
-    return;
-  }
-  if (t.dataset.statsClose !== undefined) {
-    view.statsOpen = false;
+    view.statsOpen = !view.statsOpen;
     render();
     $('proof-stats-summary').focus({ preventScroll: true });
     return;
