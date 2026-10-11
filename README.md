@@ -122,14 +122,14 @@ Your agents work in terminals. You watch them here: every project on this machin
 pullboard view
 ```
 
-![The desktop board shows open, claimed, submitted and accepted work, a Needs you row for a held lane, search in the top bar, the status bar and an accepted item's review history.](docs/shots/desktop.png)
+![The desktop board shows open, claimed, submitted and accepted work, a Needs you row for a held lane, search in the top bar, the status bar, an accepted item's review history, and a stats line with merged work, sent-back share and the bottleneck recommendation.](docs/shots/desktop.png)
 
 ![The Shouts tab shows the builder, reviewer and coordinator discussing a reviewed fix, the person's answered decision marked Heard, an evidence receipt and a code reference.](docs/shots/shouts.png)
 
 <details>
 <summary>The board on a phone</summary>
 
-![The phone board in dark mode shows active work, a Needs you row for a held lane and search in the top bar.](docs/shots/phone.png)
+![The phone board in dark mode shows active work, a Needs you row for a held lane, search in the top bar, and a stats line with merged work, sent-back share and the bottleneck recommendation.](docs/shots/phone.png)
 
 </details>
 
