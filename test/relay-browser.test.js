@@ -10,7 +10,7 @@ import { snapshotState, presentationState } from '../relay/browser-model.js';
 import { decodeBoardKey, seal, unseal } from '../src/seal.js';
 import { relaySnapshot } from '../src/relay-presentation.js';
 import { ENGINE_VERSION } from '../src/machine.js';
-import { addItem, closeBoard, openBoard } from '../src/board.js';
+import { addItem, answerDecision, closeBoard, openBoard, shout } from '../src/board.js';
 import { relayClientFixture } from './relay-client-fixture.js';
 import { findChromeExecutable, startChrome } from './relay-browser-fixture.js';
 
@@ -200,6 +200,66 @@ test('real Chrome pairs, retains its device key, declares its engine on every re
   assert.equal(box.keyInRequest(), false, 'the key was never in an HTTP URL or header');
   await box.revokeSession();
   await chrome.waitFor("document.body.textContent.includes('Sign in with GitHub') && !document.body.textContent.includes(" + JSON.stringify(liveTitle) + ')');
+});
+
+test('the relay reads an addressed shout [H5,N38]', {
+  skip: !findChromeExecutable() && 'Chrome is not installed',
+}, async t => {
+  const box = await relayClientFixture(t);
+  const board = openBoard(join(box.root, '.git', 'pullboard', 'board.sqlite'));
+  let shoutId;
+  try {
+    shoutId = shout(board, { from: 'coordinator', to: 'person', text: 'OLD_ADDRESSED_DECISION_434', lanes: [], decision: true });
+    answerDecision(board, shoutId, { agentId: 'coordinator', text: 'Answered on the device', lanes: [], asPerson: true, channel: 'view' });
+    for (let index = 0; index < 40; index += 1) {
+      shout(board, { from: 'coordinator', to: 'person', text: `RECENT_ADDRESSED_${index}_434`, lanes: [] });
+    }
+  } finally { closeBoard(board); }
+  await box.link();
+  const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));
+  const key = readFileSync(box.keyFile, 'utf8').trim();
+  const chrome = await startChrome();
+  t.after(() => chrome.close());
+  await signIn(chrome, box);
+  await chrome.navigate(box.origin);
+  await chrome.waitFor("document.querySelector('#relay-notice')?.textContent.includes('pair this browser')");
+  const unpaired = await chrome.evaluate(`api('/api/v1/boards/${link.board}/shouts/${shoutId}').then(() => 'unexpected', error => error.message)`);
+  assert.match(unpaired, /Pair this browser to read that board/u);
+
+  await chrome.navigate(box.origin + '/#board=' + link.board + '&key=' + key);
+  await chrome.waitFor("document.querySelector('#chain')?.textContent.includes('private cleanup fixture item')");
+  const recentState = await chrome.evaluate(`api('/api/v1/boards/${link.board}/state')`);
+  assert.equal(recentState.state.shouts.length, 40);
+  assert.equal(recentState.state.shouts.some(row => row.shout_id === shoutId), false,
+    'the old decision is outside the ordinary recent-40 state window');
+  const addressed = await chrome.evaluate(`api('/api/v1/boards/${link.board}/shouts/${shoutId}').then(value => ({ value, error: null }), error => ({ value: null, error: { code: error.code ?? null, message: error.message } }))`);
+  assert.equal(addressed.error, null, 'the paired browser resolves the old shout from its local sealed history');
+  assert.equal(addressed.value.version, 1);
+  assert.equal(addressed.value.shout.shout_id, shoutId);
+  assert.equal(addressed.value.shout.shout_text, 'OLD_ADDRESSED_DECISION_434');
+  assert.equal(addressed.value.shout.decision_state, 'answered');
+  assert.equal(addressed.value.shout.decision_answer.shout_text, 'Answered on the device');
+  const invalid = await chrome.evaluate(`api('/api/v1/boards/${link.board}/shouts/0').then(() => 'unexpected', error => error.code)`);
+  assert.equal(invalid, 'BAD_REQUEST', 'addressed reads accept only positive integer ids');
+  const missing = await chrome.evaluate(`api('/api/v1/boards/${link.board}/shouts/999999').then(() => 'unexpected', error => error.code)`);
+  assert.equal(missing, 'NO_SHOUT', 'an absent addressed id has the same named refusal as the local API');
+  const write = await chrome.evaluate(`transport.request('/api/v1/boards/${link.board}/shouts/${shoutId}', { text: 'must not leave the device' }).then(() => 'unexpected', error => error.code)`);
+  assert.equal(write, 'BAD_REQUEST', 'addressed shout routes remain read-only');
+  const unsupported = await chrome.evaluate(`api('/api/v1/boards/${link.board}/code').then(() => 'unexpected', error => error.message)`);
+  assert.match(unsupported, /Pair this browser to read that board/u, 'unrelated relay routes remain refused');
+  assert.equal(box.calls.some(call => call.path.includes('/shouts/')), false,
+    'the browser resolves the complete shout locally from its decrypted sealed presentation');
+  assert.equal(box.transit.some(entry => entry.request.includes(Buffer.from('OLD_ADDRESSED_DECISION_434'))), false,
+    'the shout text is absent from every request sent to the relay');
+  assert.equal(box.keyInRequest(), false, 'the device key and shout plaintext never leave the browser');
+
+  await chrome.navigate(box.origin + '/#shout-' + shoutId);
+  const card = `#shout-${shoutId}.found`;
+  await chrome.waitFor(`typeof api === 'function' && transport !== null && document.querySelector(${JSON.stringify(card + ' h2')})?.textContent.includes(${JSON.stringify('Shout #' + shoutId)})`);
+  assert.equal(await chrome.evaluate(`document.querySelector(${JSON.stringify(card + ' .text')})?.textContent`),
+    'OLD_ADDRESSED_DECISION_434', 'the addressed relay fallback opens the actual old shout card');
+  assert.equal(await chrome.evaluate("document.querySelector('#shout-address-status') === null"), true,
+    'the old-shout fallback does not leave an unavailable-history message');
 });
 
 test('a board without a snapshot waits without reloading the page [H5,H16]', {
