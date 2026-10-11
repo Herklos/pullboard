@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import * as store from './board.js';
 import { executeMove } from './api.js';
 import { loadConfig } from './config.js';
-import { git, repoInfo } from './git.js';
+import { codeIsFromMain, git, repoInfo } from './git.js';
 import { laneNames } from './lanes.js';
 import { refusalDocument } from './json.js';
 import { Refused } from './refused.js';
@@ -13,7 +13,7 @@ import { personRequestRecords, requestIntentDigest, requestStageText } from './r
 
 /** Read durable intake without retaining a SQLite connection while the CLI runs. */
 function requests(root) {
-  const board = store.openBoard(join(repoInfo(root).commonDir, 'pullboard', 'board.sqlite'));
+  const board = store.openBoard(join(repoInfo(root).commonDir, 'pullboard', 'board.sqlite'), undefined, { isMain: codeIsFromMain() });
   try { return personRequestRecords(board).filter(record => !record.duplicateOf); }
   finally { store.closeBoard(board); }
 }
