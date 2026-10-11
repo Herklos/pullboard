@@ -34,6 +34,23 @@ test('the README links the desktop board and timed tour with descriptive alt tex
   linkedInSection('Installation', 'tour.svg', ['submitted', 'rejected', 'fixed', 'accepted']);
 });
 
+test('the README board shots show the stats line [I11,I13]', () => {
+  const { state } = JSON.parse(readFileSync(new URL('docs/demo/api/v1/boards/demo-board/state.json', ROOT), 'utf8'));
+  const stats = state.proofStats;
+  assert.equal(stats.merged, 1, 'the demo includes one merged item');
+  assert.equal(stats.rejectionShare, 1 / 3, 'one of three submissions was sent back');
+  assert.equal(stats.flow.stages.reviewWait.totalMinutes, 6, 'the final review wait is recorded as six minutes');
+  assert.equal(stats.flow.bottleneck.fullyMeasuredCycles, 1, 'the completed demo cycle has every stage measured');
+  assert.equal(stats.flow.bottleneck.stage, 'reviewWait', 'recorded event times name the longest completed-cycle stage');
+  assert.equal(stats.flow.bottleneck.recommendation, 'add a verifier');
+  const exported = readFileSync(new URL('docs/demo/index.html', ROOT), 'utf8');
+  assert.match(exported, /proof-stats-summary-text/, 'the exported demo renders a compact summary');
+  assert.match(exported, /stats\.merged \+ ' merged · ' \+ percentage \+ ' sent back'/, 'the summary is derived from exported stats');
+  assert.match(exported, /Bottleneck: ' \+ \(stage \|\| bottleneck\.message\)/, 'the summary includes the measured bottleneck');
+  linkedInSection('Pullboard View', 'desktop.png', ['stats line', 'merged work', 'sent-back share', 'bottleneck recommendation']);
+  linkedInSection('Pullboard View', 'phone.png', ['stats line', 'merged work', 'sent-back share', 'bottleneck recommendation']);
+});
+
 test('the demo board stages a Shouts conversation [I11,I13]', () => {
   const { state } = JSON.parse(readFileSync(new URL('docs/demo/api/v1/boards/demo-board/state.json', ROOT), 'utf8'));
   const agents = state.agents.filter((agent) => agent.agent_id !== 'person');

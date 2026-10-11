@@ -19,6 +19,11 @@ const DEMO_OUTPUT = join(ROOT, 'docs', 'demo');
 const DEMO_BOARD_ID = 'demo-board';
 const CHROME = ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser'];
 
+/** Set the deterministic lifecycle clock used by the next isolated board command. */
+function setDemoMinutes(env, minutes) {
+  env.PULLBOARD_DEMO_NOW = new Date(Date.parse(FIXED_TIME) + minutes * 60_000).toISOString();
+}
+
 /** Run a pullboard or git command in the disposable demo environment. */
 function command(file, args, cwd, env) {
   const result = spawnSync(file, args, { cwd, env, encoding: 'utf8' });
@@ -76,23 +81,34 @@ async function buildBoard(base, env) {
   const review = pb(repo, 'worktree', 'review', '--model', 'Demo reviewer').match(/made (.+) on branch review\/1/)?.[1];
   if (!review) throw new Error('Could not create the demo reviewer worktree');
   pb(review, 'join', 'review', '--family', 'claude', '--model', 'Demo reviewer');
+  setDemoMinutes(env, 1);
   pb(app, 'next');
   await mkdir(join(app, 'src'), { recursive: true });
   await writeFile(join(app, 'src', 'demo.js'), 'export const reviewed = false;\n');
   command('git', ['add', '-A'], app, env);
   command('git', ['commit', '-q', '-m', 'feat(app): draft the demo change [G1]'], app, env);
+  setDemoMinutes(env, 2);
   pb(app, 'submit', '1');
   const first = command('git', ['rev-parse', 'HEAD'], app, env);
   command('git', ['switch', '-q', '--detach', first], review, env);
+  setDemoMinutes(env, 3);
+  pb(review, 'next', '--verify');
+  setDemoMinutes(env, 4);
   pb(review, 'verify', '1', 'reject', '--reason', 'BEHAVIOR_MISMATCH', '--note', 'The example skipped an edge; revise it before merging.');
+  setDemoMinutes(env, 5);
   pb(app, 'claim', '1');
   await writeFile(join(app, 'src', 'demo.js'), 'export const reviewed = true;\n');
   command('git', ['add', '-A'], app, env);
   command('git', ['commit', '-q', '-m', 'feat(app): revise the reviewed demo [G1]'], app, env);
+  setDemoMinutes(env, 6);
   pb(app, 'submit', '1');
   const second = command('git', ['rev-parse', 'HEAD'], app, env);
   command('git', ['switch', '-q', '--detach', second], review, env);
+  setDemoMinutes(env, 12);
+  pb(review, 'next', '--verify');
+  setDemoMinutes(env, 13);
   pb(review, 'verify', '1', 'accept', '--note', 'Tried the edge that failed before; the revised demo passes.');
+  setDemoMinutes(env, 14);
   command('git', ['merge', '-q', '--ff-only', 'app/1'], repo, env);
   pb(repo, 'merged', '1', second);
   command('git', ['switch', '-q', '-c', 'app/next-review', 'main'], app, env);
@@ -103,6 +119,7 @@ async function buildBoard(base, env) {
   pb(app, 'submit', '3');
   pb(app, 'claim', '4');
   pb(review, 'shout', 'coordinator', `#1 passes the edge that failed before. The fix is in src/demo.js:1@${second}.`, '--evidence', 'receipt', '--outcome', 'edge passes', '--item', '1', '--commit', second);
+  setDemoMinutes(env, 75);
   const decision = pb(app, 'shout', 'coordinator', 'The review is complete. May the verified change proceed?', '--decision').match(/as #(\d+)/)?.[1];
   if (!decision) throw new Error('The demo decision request was not recorded.');
   const passed = pb(repo, 'pass', decision, 'The review passed; ask the person before proceeding.').match(/as #(\d+)/)?.[1];
@@ -154,8 +171,8 @@ else {
   let server;
   try {
     const clockShim = join(base, 'fixed-clock.mjs');
-    await writeFile(clockShim, `const NativeDate = Date;\nconst fixed = NativeDate.parse(${JSON.stringify(FIXED_TIME)});\nclass FixedDate extends NativeDate { constructor(...args) { super(...(args.length ? args : [fixed])); } static now() { return fixed; } }\nglobalThis.Date = FixedDate;\n`);
-    const env = { ...isolatedEnv(join(base, '.pullboard-home'), clockShim), TMPDIR: base, TMP: base, TEMP: base };
+    await writeFile(clockShim, `const NativeDate = Date;\nconst fixed = NativeDate.parse(process.env.PULLBOARD_DEMO_NOW || ${JSON.stringify(FIXED_TIME)});\nclass FixedDate extends NativeDate { constructor(...args) { super(...(args.length ? args : [fixed])); } static now() { return fixed; } }\nglobalThis.Date = FixedDate;\n`);
+    const env = { ...isolatedEnv(join(base, '.pullboard-home'), clockShim), PULLBOARD_DEMO_NOW: FIXED_TIME, TMPDIR: base, TMP: base, TEMP: base };
     if (tourOnly) {
       await recordTour(env);
     } else {

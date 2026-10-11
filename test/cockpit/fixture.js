@@ -815,6 +815,17 @@ async function travel(chrome, step) {
   await chrome.send('Page.navigateToHistoryEntry', { entryId: entries[currentIndex + step].id });
 }
 
+/**
+ * Choose a Show or Lane option from the Items toolbar's Filter menu as a person does: open the menu, press the
+ * option, and wait for the menu to close (#429). A choice is "state:<state>" or "lane:<lane>".
+ */
+async function chooseFilter(chrome, choice) {
+  await press(chrome, "document.querySelector('#filter-toggle')");
+  await chrome.waitFor("!document.querySelector('#filter-menu').hidden");
+  await press(chrome, `document.querySelector('#filter-menu [data-filter-choice="${choice}"]')`);
+  await chrome.waitFor("document.querySelector('#filter-menu').hidden");
+}
+
 /** Wait for a condition after a press; if it never arrives, say what the page shows and where the press landed. */
 async function pressedInto(chrome, expression, timeoutMs = 10_000) {
   try {
@@ -974,4 +985,4 @@ async function searchFor(chrome, words, timeoutMs) {
   }
 }
 
-export { BIN, scratch, tapTarget, SPEC, machine, project, build, sendBack, fetchReason, fetchView, fetchLive, startView, styleOf, element, ageNodes, target, settle, storage, daysOn, openPage, projectRows, productEntries, timelineRows, agentEntries, drawing, textBoxes, meet, accept, needEntries, itemRow, boardId, boardOf, assertObservationAges, withoutObservationAges, assertObservationsEqual, shoutNameText, chromeExecutable, browserPause, startSnapshotChrome, openSnapshotChrome, stopOwnedChrome, closeSnapshotChrome, watchSpecDecisionWait, earlier, shoutsAt, press, tapTouch, pickProject, travel, pressedInto, settled, roadmapRow, showing, readRoadmap, openRoadmapParts, tabBar, serveFolder, proofShot, searchFor };
+export { BIN, scratch, chooseFilter, tapTarget, SPEC, machine, project, build, sendBack, fetchReason, fetchView, fetchLive, startView, styleOf, element, ageNodes, target, settle, storage, daysOn, openPage, projectRows, productEntries, timelineRows, agentEntries, drawing, textBoxes, meet, accept, needEntries, itemRow, boardId, boardOf, assertObservationAges, withoutObservationAges, assertObservationsEqual, shoutNameText, chromeExecutable, browserPause, startSnapshotChrome, openSnapshotChrome, stopOwnedChrome, closeSnapshotChrome, watchSpecDecisionWait, earlier, shoutsAt, press, tapTouch, pickProject, travel, pressedInto, settled, roadmapRow, showing, readRoadmap, openRoadmapParts, tabBar, serveFolder, proofShot, searchFor };

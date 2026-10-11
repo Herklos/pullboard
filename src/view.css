@@ -225,7 +225,7 @@ main { padding: 16px 18px 56px; }
   .tab { display: grid; justify-items: center; align-content: center; padding: 7px 2px; font-size: clamp(11px, 3.6vw, 13.5px); }
 }
 .primary { display: grid; gap: 12px; min-width: 0; }
-.items-view-switch { justify-self: start; }
+.items-view-switch { flex: none; flex-wrap: nowrap; max-width: none; }
 .pipeline { display: grid; gap: 24px; list-style: none; margin: 0; padding: 0; min-width: 0; }
 .pipeline-stage { position: relative; min-width: 0; padding: 14px; }
 .pipeline-stage + .pipeline-stage::before { content: '↓'; position: absolute; top: -25px; left: 22px; color: var(--ink-faint); }
@@ -239,11 +239,27 @@ main { padding: 16px 18px 56px; }
 .pipeline-item > span:first-child { color: var(--ink-faint); font-family: var(--mono); }
 .pipeline-item > span:last-child { overflow-wrap: anywhere; }
 .card-panel { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); min-width: 0; }
-/* The Items toolbar is one row: the states, the lane picker, and New item at its end. */
-.toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px; }
-.toolbar .lane-pick { flex: none; field-sizing: content; max-width: 11em; padding: 0 8px; color: var(--ink-muted); font-size: 13px; cursor: pointer; }
-.toolbar .lane-pick[hidden] { display: none; }
-.toolbar .go { margin-left: auto; }
+/* The Items toolbar keeps its view, filters, and creation action together on one line. */
+.toolbar { display: flex; flex-wrap: nowrap; gap: 6px; align-items: center; min-width: 0; padding: 10px; }
+.toolbar .go { flex: none; margin-left: auto; }
+.items-view-switch button { padding-inline: 5px; }
+/* Filter is a button sized to its words, beside List | Pipeline; a long choice gives way with an ellipsis, never the row.
+   Its arrow points the way the menu goes, as the project switcher's does, switching at once. */
+.filter-control { position: relative; flex: 0 1 auto; min-width: 0; }
+.filter-toggle { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-width: 0; min-height: var(--tap); padding: 0 10px 0 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); font-weight: 500; cursor: pointer; white-space: nowrap; }
+.filter-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.filter-toggle svg { flex: none; width: 16px; height: 16px; color: var(--ink-faint); }
+.filter-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+.filter-toggle:hover, .filter-toggle[aria-expanded="true"] { background: var(--surface-2); }
+.filter-menu { position: absolute; z-index: 20; top: calc(100% + 8px); left: 0; display: grid; gap: 10px; width: max-content; min-width: 220px; max-width: min(320px, calc(100vw - 32px)); padding: 10px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); }
+.filter-group { display: grid; gap: 2px; min-width: 0; }
+.filter-group h3 { margin: 0 6px 2px; color: var(--ink-faint); font-size: 11px; letter-spacing: .05em; text-transform: uppercase; }
+.filter-option { display: flex; justify-content: space-between; align-items: center; gap: 20px; width: 100%; min-height: var(--tap); padding: 5px 8px; border: 0; border-radius: 7px; background: none; color: var(--ink); text-align: left; white-space: nowrap; cursor: pointer; }
+.filter-option:hover, .filter-option:focus-visible { background: var(--surface-2); }
+.filter-option[aria-checked="true"] { background: var(--accent-soft); color: var(--accent-strong); font-weight: 600; }
+.filter-option-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.filter-option b { flex: none; color: var(--ink-faint); font: 600 11px var(--mono); }
+.new-item-narrow { display: none; }
 input, select, textarea { border: 1px solid var(--line-strong); background: var(--surface); border-radius: 8px; padding: 7px 9px; min-width: 0; }
 input:disabled { background: var(--surface-2); color: var(--ink-muted); }
 .go { border: 0; background: var(--ink); color: var(--surface); border-radius: 8px; padding: 8px 14px; cursor: pointer; font-weight: 600; white-space: nowrap; }
@@ -579,21 +595,15 @@ code.inline.long { white-space: break-spaces; overflow-wrap: anywhere; }
 /* A clickable row is never shorter than the target. */
 [data-item], [data-row] { min-height: var(--tap); }
 /* The Items toolbar's controls stand at the target, 32px under a mouse. */
-.seg button, .toolbar .go, .toolbar select, .toolbar input { min-height: var(--tap); }
-.toolbar .go, .toolbar select, .toolbar input { padding-block: 0; }
+.seg button, .toolbar .go, .toolbar input, .filter-toggle, .filter-option { min-height: var(--tap); }
+.toolbar .go, .toolbar input { padding-block: 0; }
 .seg { flex-wrap: wrap; max-width: 100%; }
 .inline > label { min-width: 0; }
-/* On a phone the Items toolbar is one row, Active and Verified with New item at its end, as the person chose; All and
- * the lane picker drop out unless one of them is what narrows the list now. While a filter beyond Active and Verified
- * shows, New item is a + (its name is still New item), so the row holds both filters; a long lane name gives way, the
- * picker shrinking to show what it can, rather than the row. */
+/* The label changes at 900px, while the control keeps its accessible name at every size. */
+@media (width < 900px) { .new-item-wide { display: none; } .new-item-narrow { display: inline; } }
 @media (width < 480px) {
-  .toolbar { flex-wrap: nowrap; }
-  .toolbar .seg, .toolbar .go { flex: none; }
-  .toolbar .lane-pick { flex: 0 1 auto; min-width: 4em; }
-  .toolbar .seg [data-state="all"]:not(.on), .toolbar .lane-pick:not(:has(option:checked:not([value=""]))) { display: none; }
-  .toolbar:has(.seg button.on:not([data-state="active"]):not([data-state="verified"]), .lane-pick option:checked:not([value=""])) .go { width: var(--tap); padding: 0; font-size: 0; }
-  .toolbar:has(.seg button.on:not([data-state="active"]):not([data-state="verified"]), .lane-pick option:checked:not([value=""])) .go::before { content: "+"; font-size: 22px; font-weight: 500; line-height: 1; }
+  .toolbar { gap: 6px; padding-inline: 8px; }
+  .toolbar .go { padding-inline: 12px; }
 }
 
 .spec-feedback { margin: 8px 0; padding: 8px; border: 1px solid var(--line-strong); border-radius: 8px; overflow-wrap: anywhere; font-size: 13px; }
