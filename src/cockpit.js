@@ -193,32 +193,32 @@ if (snapshot) view.state = 'all';
 let data = null;
 let seen = '';
 let addressReady = false;
-let heldPipelinePointer = null;
-let deferredPipelineRender = false;
+let heldClickPointer = null;
+let deferredClickRender = false;
 const addressedShouts = new Map();
 const $ = (id) => document.getElementById(id);
 
-/** Mark the primary pointer while it holds a Pipeline card so a refresh cannot replace its click target. */
-function holdPipelinePointer(event) {
-  if (!event.isPrimary || event.button !== 0 || !(event.target instanceof Element && event.target.closest('#pipeline .pipeline-item'))) return;
-  heldPipelinePointer = event.pointerId;
+/** Mark primary pointer targets whose click would be lost if a refresh replaces them. */
+function holdClickPointer(event) {
+  if (!event.isPrimary || event.button !== 0 || !(event.target instanceof Element && event.target.closest('#pipeline .pipeline-item, #spec-detail [data-row-decision="decline"], #spec-decline-submit'))) return;
+  heldClickPointer = event.pointerId;
 }
 
 /** Flush a deferred refresh only after the browser has had the chance to dispatch the resulting click. */
-function releasePipelinePointer(event) {
-  if (event.pointerId !== heldPipelinePointer) return;
-  heldPipelinePointer = null;
-  if (deferredPipelineRender) requestAnimationFrame(() => {
-    if (heldPipelinePointer === null && deferredPipelineRender) {
-      deferredPipelineRender = false;
+function releaseClickPointer(event) {
+  if (event.pointerId !== heldClickPointer) return;
+  heldClickPointer = null;
+  if (deferredClickRender) requestAnimationFrame(() => {
+    if (heldClickPointer === null && deferredClickRender) {
+      deferredClickRender = false;
       render();
     }
   });
 }
 
-document.addEventListener('pointerdown', holdPipelinePointer, true);
-document.addEventListener('pointerup', releasePipelinePointer, true);
-document.addEventListener('pointercancel', releasePipelinePointer, true);
+document.addEventListener('pointerdown', holdClickPointer, true);
+document.addEventListener('pointerup', releaseClickPointer, true);
+document.addEventListener('pointercancel', releaseClickPointer, true);
 /**
  * Draw the page in the theme the person picked, light or dark; with none picked it follows the system, live. The button
  * only ever offers the other of the two: it shows the scheme on screen, and a press picks the opposite. Following the
@@ -1456,8 +1456,8 @@ if (typeof MutationObserver === 'function') new MutationObserver((changes) => {
 
 /** Draw the board shown: the sidebar, then every tab's panes from the project's board. */
 function render() {
-  if (heldPipelinePointer !== null) { deferredPipelineRender = true; return; }
-  deferredPipelineRender = false;
+  if (heldClickPointer !== null) { deferredClickRender = true; return; }
+  deferredClickRender = false;
   const statsFocus = document.activeElement?.id === 'proof-stats-summary' ? document.activeElement.id : null;
   const p = data.project;
   const group = data.group;
