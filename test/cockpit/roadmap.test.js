@@ -260,7 +260,7 @@ test('the roadmap leads with the next release and folds shipped ones [N26]', { t
   box.run(alpha.repo, 'milestone', 'add', '0.2', '--note', 'Shipped on Tuesday.\nA second line the shipped row leaves out.', '--items', '2,6');
   box.run(alpha.repo, 'milestone', 'add', '0.3', '--note', 'Next out.', '--items', '3,4');
   box.run(alpha.repo, 'milestone', 'add', '0.4', '--note', 'Queued behind 0.3.', '--items', '5');
-  box.run(alpha.repo, 'milestone', 'add', 'Later');
+  box.run(alpha.repo, 'milestone', 'add', 'Later', '--note', 'Work not filed yet.');
   box.run(alpha.repo, 'milestone', 'move', 'Later', '--before', '0.1');
   const other = project(box, 'other-releases');
   box.run(other.repo, 'add', 'web', 'Other next page', '--specs', 'G1', '--criterion', 'renders');
@@ -286,7 +286,7 @@ test('the roadmap leads with the next release and folds shipped ones [N26]', { t
       statusRelease: document.querySelector('[data-status=release]')?.textContent.replace(/\\s+/g, ' ').trim() ?? null,
       page: { width: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth, body: document.body.scrollWidth },
       parts: [...document.querySelectorAll('#roadmap > [data-key]')].map((d) => ({ key: d.dataset.key, open: open(d), summary: words(head(d)), height: box(head(d)).height,
-        rows: rows(d),
+        rows: rows(d), empty: body(d).querySelector('.milestone-empty')?.textContent ?? null, note: body(d).querySelector('.milestone-note')?.textContent ?? null,
         shipped: [...body(d).querySelectorAll(':scope > .shipped-one[data-key]')].map((one) => ({ key: one.dataset.key, open: open(one), summary: words(head(one)), height: box(head(one)).height,
           rows: rows(one) })) })),
     };
@@ -308,14 +308,15 @@ test('the roadmap leads with the next release and folds shipped ones [N26]', { t
         const r = await read();
         assert.equal(r.statusRelease, '0.3 1/2', at + ': the status bar names the same next release');
         assert.ok(r.page.scroll <= r.page.width && r.page.body <= r.page.width, `${at}: no sideways scroll`);
-        // What ships next leads, open; the release after it waits closed; the shipped ones fold into one part at the end.
+        // Every release with work ahead stays open; the shipped ones fold into one part at the end.
         assert.deepEqual(r.parts.map((part) => [part.key, part.open, part.summary]), [
           ['m:0.3', true, '0.3 | 1/2 done'],
-          ['m:0.4', false, '0.4 | 0/1 done'],
-          ['m:Later', false, 'Later'],
+          ['m:0.4', true, '0.4 | 0/1 done'],
+          ['m:Later', true, 'Later'],
           ['shipped', false, 'Shipped | 2 releases'],
-        ], `${at}: the next release first and open, then the queued one, then Shipped, folded`);
+        ], `${at}: every upcoming milestone opens in order, with Shipped folded last`);
         assert.deepEqual(r.parts[0].rows, ['#3', '#4'], `${at}: the next release shows its items`);
+        assert.deepEqual([r.parts[2].empty, r.parts[2].note], ['No items yet.', 'Work not filed yet.'], `${at}: the open empty milestone shows its note and empty state`);
         assert.ok(r.parts.every((part) => part.height >= 44), `${at}: each part opens from a 44px target`);
         await click('#roadmap > [data-key="shipped"] > .milestone-head');
         const expanded = await read();
@@ -363,14 +364,77 @@ test('the roadmap leads with the next release and folds shipped ones [N26]', { t
     box.run(alpha.web, 'claim', '3');
     await chrome.waitFor("data.project.items.find((i) => i.id === 3)?.status === 'claimed'", 15_000);
     r = await read();
-    assert.deepEqual(r.parts.map((part) => [part.key, part.open]), [['m:0.3', false], ['m:0.4', false], ['m:Later', false], ['shipped', true]], 'a redraw keeps each part as it was left');
+    assert.deepEqual(r.parts.map((part) => [part.key, part.open]), [['m:0.3', false], ['m:0.4', true], ['m:Later', true], ['shipped', true]], 'a redraw keeps each part as it was left');
     await pickProject(chrome, `[...document.querySelectorAll('[data-root]')].find((e) => e.dataset.root === ${JSON.stringify(other.repo)})`);
     await press(chrome, "document.querySelector('[data-tab=roadmap]')");
     assert.deepEqual((await read()).parts.map((part) => [part.key, part.open]), [['m:0.3', true]], 'another board starts with its own next release open');
     await pickProject(chrome, `[...document.querySelectorAll('[data-root]')].find((e) => e.dataset.root === ${JSON.stringify(alpha.repo)})`);
     await press(chrome, "document.querySelector('[data-tab=roadmap]')");
-    assert.deepEqual((await read()).parts.map((part) => [part.key, part.open]), [['m:0.3', false], ['m:0.4', false], ['m:Later', false], ['shipped', true]], 'returning to the board preserves its disclosure choices');
+    assert.deepEqual((await read()).parts.map((part) => [part.key, part.open]), [['m:0.3', false], ['m:0.4', true], ['m:Later', true], ['shipped', true]], 'returning to the board preserves this visit\'s disclosure choices');
+    await chrome.send('Page.reload');
+    await settled(chrome, "typeof data === 'object' && data?.project?.milestones?.length === 5 && !document.querySelector('[data-pane=roadmap]').hidden");
+    assert.deepEqual((await read()).parts.map((part) => [part.key, part.open]), [['m:0.3', true], ['m:0.4', true], ['m:Later', true], ['shipped', false]], 'a new visit opens every upcoming milestone and folds Shipped again');
     assert.deepEqual(chrome.exceptions, [], 'the page raises no uncaught exception');
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    rmSync(profile, { recursive: true, force: true });
+    await view.stop();
+  }
+});
+
+test('the roadmap keeps every upcoming release open [N26]', {
+  timeout: 90_000, //budget: real Chrome startup, two viewport layouts, and reload; test assertions bound each state.
+}, async (t) => {
+  const executable = chromeExecutable();
+  assert.ok(executable, 'Chrome is required for roadmap disclosure checks.');
+  const box = machine();
+  const alpha = project(box, 'all-upcoming-open');
+  for (const title of ['Shipped one', 'Shipped two', 'Next release', 'Later release']) box.run(alpha.repo, 'add', 'web', title, '--specs', 'G1', '--criterion', 'renders');
+  for (const id of [1, 2]) { build(box, alpha, id, `page-${id}.html`); accept(box, alpha, id); }
+  box.run(alpha.repo, 'milestone', 'add', '0.1', '--items', '1');
+  box.run(alpha.repo, 'milestone', 'add', '0.2', '--items', '2');
+  box.run(alpha.repo, 'milestone', 'add', '0.3', '--note', 'Next out.', '--items', '3');
+  box.run(alpha.repo, 'milestone', 'add', '0.4', '--note', 'Queued next.', '--items', '4');
+  box.run(alpha.repo, 'milestone', 'add', 'Later', '--note', 'No work filed yet.');
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-all-upcoming-open-chrome-'));
+  let chrome;
+  /** Read default disclosures, their visible content, status label, and viewport overflow. */
+  const read = async () => JSON.parse(await chrome.stable(`JSON.stringify((() => {
+    const parts=[...document.querySelectorAll('#roadmap > [data-key]')];
+    const readPart=part=>{const head=part.querySelector(':scope > .milestone-head'),body=part.querySelector(':scope > .milestone-body');
+      const rows=[...body.querySelectorAll(':scope > ul .milestone-item')];
+      return {key:part.dataset.key,open:head.getAttribute('aria-expanded')==='true',rows:rows.map(row=>row.querySelector('.id').textContent),visibleRows:rows.filter(row=>row.getBoundingClientRect().height>0).length,
+        empty:body.querySelector('.milestone-empty')?.textContent??null,note:body.querySelector('.milestone-note')?.textContent??null,
+        shipped:[...body.querySelectorAll(':scope > .shipped-one')].map(readPart)};};
+    return {parts:parts.map(readPart),status:document.querySelector('[data-status=release]')?.textContent.replace(/\\s+/g,' ').trim()??null,
+      viewport:document.documentElement.clientWidth,scroll:document.documentElement.scrollWidth,body:document.body.scrollWidth};
+  })())`));
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.waitFor("data?.project?.milestones?.length === 5");
+    await press(chrome, "document.querySelector('[data-tab=roadmap]')");
+    for (const width of [375, 1280]) {
+      await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: width === 375 ? 812 : 800, deviceScaleFactor: 1, mobile: false });
+      await chrome.waitFor(`innerWidth === ${width}`);
+      const initial = await read();
+      assert.deepEqual(initial.parts.map(({ key, open }) => [key, open]), [['m:0.3', true], ['m:0.4', true], ['m:Later', true], ['shipped', false]], `${width}: every upcoming release opens while Shipped stays folded`);
+      assert.deepEqual(initial.parts.slice(0, 2).map((part) => [part.rows, part.visibleRows]), [[['#3'], 1], [['#4'], 1]], `${width}: both upcoming item lists are visible`);
+      assert.deepEqual([initial.parts[2].empty, initial.parts[2].note], ['No items yet.', 'No work filed yet.'], `${width}: the empty upcoming release shows its note`);
+      assert.equal(initial.parts[3].shipped.length, 2, `${width}: both shipped releases are present`);
+      assert.equal(initial.parts[3].shipped.every((part) => !part.open && part.visibleRows === 0), true, `${width}: both shipped releases remain folded`);
+      assert.equal(initial.status, '0.3 0/1', `${width}: the status bar still names the next release`);
+      assert.ok(initial.scroll <= initial.viewport && initial.body <= initial.viewport, `${width}: no sideways scrolling`);
+      await proofShot(chrome, 'roadmap-upcoming-open', width);
+      if (width === 375) {
+        await press(chrome, "document.querySelector('[data-roadmap-key=\"m:0.4\"]')");
+        await chrome.waitFor("document.querySelector('[data-roadmap-key=\"m:0.4\"]').getAttribute('aria-expanded') === 'false'");
+        assert.equal((await read()).parts[1].open, false, 'the person can fold an upcoming release for this visit');
+        await chrome.send('Page.reload');
+        await settled(chrome, "data?.project?.milestones?.length === 5 && !document.querySelector('[data-pane=roadmap]').hidden");
+        assert.deepEqual((await read()).parts.map(({ key, open }) => [key, open]), [['m:0.3', true], ['m:0.4', true], ['m:Later', true], ['shipped', false]], 'the next visit reopens upcoming releases and folds Shipped');
+      }
+    }
   } finally {
     if (chrome) await closeSnapshotChrome(chrome);
     rmSync(profile, { recursive: true, force: true });
