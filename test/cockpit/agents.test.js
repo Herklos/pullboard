@@ -13,7 +13,7 @@ import { AGENT_SHELL_MARKERS, SSH_SHELL_MARKERS } from '../../src/person.js';
 import { runFixtureChildAsync } from '../fixture-child.js';
 import { startChrome } from '../relay-browser-fixture.js';
 import { stableChrome } from './stable.js';
-import { BIN, tapTarget, SPEC, machine, project, build, sendBack, startView, openPage, agentEntries, accept, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, earlier, shoutsAt, press, settled } from './fixture.js';
+import { BIN, tapTarget, SPEC, machine, project, build, sendBack, startView, openPage, agentEntries, accept, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, earlier, shoutsAt, press, settled, chooseFilter } from './fixture.js';
 
 
 test('the agents panel says what each agent holds [N26]', async () => {
@@ -213,7 +213,7 @@ test('agent model display names follow the API on phone and desktop [O8,N26]', {
         await settled(chrome, `innerWidth === ${width}`);
         const at = `${style} ${width}`;
         await tab('items');
-        await press(chrome, 'document.querySelector("[data-state=active]")');
+        await chooseFilter(chrome, 'state:active');
         await settled(chrome, '!!document.querySelector("#chain [data-item=\\"1\\"]")');
         assert.equal(await text('#chain [data-item="1"] .chip'), expected.builder, `${at}: item row holder`);
         assert.equal(await text('#chain [data-item="3"] .chip'), expected.unknown, `${at}: unknown model row`);
@@ -222,7 +222,7 @@ test('agent model display names follow the API on phone and desktop [O8,N26]', {
         assert.ok((await text('#detail')).includes(expected.builder), `${at}: held item detail`);
         assert.equal(await text('#needs .row[data-go^="decide:"] .meta'), 'NEEDS YOU a decision, asked by ' + expected.reviewer, `${at}: Needs-you decision author`);
         assert.ok((await text('#needs .row[data-go="tab:shouts"] .meta')).includes('lane held by ' + expected.reviewer), `${at}: Needs-you lane holder`);
-        await press(chrome, 'document.querySelector("[data-state=verified]")');
+        await chooseFilter(chrome, 'state:verified');
         await settled(chrome, '!!document.querySelector("#chain [data-item=\\"2\\"]")');
         await press(chrome, 'document.querySelector("#chain [data-item=\\"2\\"]")');
         await settled(chrome, 'view.item === 2');
