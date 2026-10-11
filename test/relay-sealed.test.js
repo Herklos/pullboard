@@ -126,6 +126,13 @@ function replayClient(root, env, ...args) {
     });
 }
 
+/** Initialize an import recipient without declaring a second coordinator; later commands retain their model. */
+function initializeReplica(root, env) {
+  const initEnv = { ...env };
+  delete initEnv.PULLBOARD_MODEL;
+  return replayClient(root, initEnv, 'init');
+}
+
 /** Replay through the native CLI while acknowledging but suppressing checkpoint writes to the fixture relay. */
 function replayClientWithoutCheckpoint(root, env) {
   const cliURL = pathToFileURL(resolve(import.meta.dirname, '../src/cli.js')).href;
@@ -220,7 +227,7 @@ test('sealed agent shout cannot answer a person decision on either independent c
   const envs = homes.map(home => ({ ...box.env, HOME: home, PULLBOARD_HOME: home }));
   mkdirSync(roots[1]); mkdirSync(homes[1], { mode: 0o700 });
   assert.equal(spawnSync('git', ['init', '-q', '-b', 'main'], { cwd: roots[1], env: envs[1] }).status, 0);
-  await replayClient(roots[1], envs[1], 'init');
+  await initializeReplica(roots[1], envs[1]);
   const native = join(box.directory, 'native.json');
   writeFileSync(native, JSON.stringify(document), { mode: 0o600 });
   await replayClient(roots[1], envs[1], 'import', native);
@@ -318,7 +325,7 @@ test('two real clients stop before sender checks for newer operations and actor 
       const envs = homes.map(home => ({ ...box.env, HOME: home, PULLBOARD_HOME: home }));
       mkdirSync(roots[1]); mkdirSync(homes[1], { mode: 0o700 });
       assert.equal(spawnSync('git', ['init', '-q', '-b', 'main'], { cwd: roots[1], env: envs[1] }).status, 0);
-      await replayClient(roots[1], envs[1], 'init');
+      await initializeReplica(roots[1], envs[1]);
       const native = join(box.directory, 'native.json');
       writeFileSync(native, JSON.stringify(document), { mode: 0o600 });
       await replayClient(roots[1], envs[1], 'import', native);
@@ -422,7 +429,7 @@ test('two real clients refuse forged relay actors and person-only requests while
   const envs = homes.map(home => ({ ...box.env, HOME: home, PULLBOARD_HOME: home }));
   mkdirSync(roots[1]); mkdirSync(homes[1], { mode: 0o700 });
   assert.equal(spawnSync('git', ['init', '-q', '-b', 'main'], { cwd: roots[1], env: envs[1] }).status, 0);
-  await replayClient(roots[1], envs[1], 'init');
+  await initializeReplica(roots[1], envs[1]);
   const snapshotFile = join(box.directory, 'native.json');
   writeFileSync(snapshotFile, JSON.stringify(document), { mode: 0o600 });
   await replayClient(roots[1], envs[1], 'import', snapshotFile);
@@ -569,7 +576,7 @@ test('two real clients enforce the verify policy captured in the item freeze [H1
   const envs = homes.map(home => ({ ...box.env, HOME: home, PULLBOARD_HOME: home }));
   mkdirSync(roots[1]); mkdirSync(homes[1], { mode: 0o700 });
   assert.equal(spawnSync('git', ['init', '-q', '-b', 'main'], { cwd: roots[1], env: envs[1] }).status, 0);
-  await replayClient(roots[1], envs[1], 'init');
+  await initializeReplica(roots[1], envs[1]);
     const snapshotFile = join(box.directory, 'policy-snapshot.json');
   writeFileSync(snapshotFile, JSON.stringify(document), { mode: 0o600 });
   await replayClient(roots[1], envs[1], 'import', snapshotFile);
@@ -659,7 +666,7 @@ test('person recovery explicitly skips one future-engine blocker and publishes a
   const secondHome = join(box.directory, 'recovery-replica-home');
   mkdirSync(secondRoot); mkdirSync(secondHome, { mode: 0o700 });
   assert.equal(spawnSync('git', ['init', '-q', '-b', 'main'], { cwd: secondRoot, env: box.env }).status, 0);
-  await replayClient(secondRoot, { ...box.env, HOME: secondHome, PULLBOARD_HOME: secondHome }, 'init');
+  await initializeReplica(secondRoot, { ...box.env, HOME: secondHome, PULLBOARD_HOME: secondHome });
   const initialFile = join(box.directory, 'recovery-initial.json');
   writeFileSync(initialFile, JSON.stringify(box.document), { mode: 0o600 });
   await replayClient(secondRoot, { ...box.env, HOME: secondHome, PULLBOARD_HOME: secondHome }, 'import', initialFile);
@@ -917,7 +924,7 @@ test('two future-engine blockers recover one durable position at a time on two r
   finally { store.closeBoard(source); }
   mkdirSync(roots[1]); mkdirSync(homes[1], { mode: 0o700 });
   assert.equal(spawnSync('git', ['init', '-q', '-b', 'main'], { cwd: roots[1], env: envs[1] }).status, 0);
-  await replayClient(roots[1], envs[1], 'init');
+  await initializeReplica(roots[1], envs[1]);
   const initial = join(box.directory, 'two-blockers-native.json');
   writeFileSync(initial, JSON.stringify(document), { mode: 0o600 });
   await replayClient(roots[1], envs[1], 'import', initial);
@@ -975,7 +982,7 @@ test('recovery collision status preserves the retry while the winner catches an 
   mkdirSync(secondHome, { mode: 0o700 });
   const secondEnv = { ...box.env, HOME: secondHome, PULLBOARD_HOME: secondHome };
   assert.equal(spawnSync('git', ['init', '-q', '-b', 'main'], { cwd: secondRoot, env: secondEnv }).status, 0);
-  await replayClient(secondRoot, secondEnv, 'init');
+  await initializeReplica(secondRoot, secondEnv);
   const snapshotFile = join(box.directory, 'collision-initial.json');
   writeFileSync(snapshotFile, JSON.stringify(box.document), { mode: 0o600 });
   await replayClient(secondRoot, secondEnv, 'import', snapshotFile);

@@ -109,13 +109,16 @@ function sandbox() {
   return { dir, env, git, run };
 }
 
-/** Initialize a real pullboard repo, replace its fixture config, and commit setup files. */
+/** Initialize a real board with an undeclared legacy coordinator for the API protocol fixtures. */
 function project() {
   const box = sandbox();
   const repo = join(box.dir, 'repo');
   mkdirSync(repo);
   box.git(repo, 'init', '-q', '-b', 'main');
+  const inheritedModel = box.env.PULLBOARD_MODEL;
+  delete box.env.PULLBOARD_MODEL;
   const initialized = json(box, repo, 'init');
+  if (inheritedModel !== undefined) box.env.PULLBOARD_MODEL = inheritedModel;
   const configFile = join(repo, 'pullboard.json');
   const config = JSON.parse(readFileSync(configFile, 'utf8'));
   writeFileSync(configFile, `${JSON.stringify({

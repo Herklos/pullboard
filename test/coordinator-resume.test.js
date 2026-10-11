@@ -247,7 +247,7 @@ test("the coordinator's handoff brief orders current work and leaves agent resum
   assert.equal((resumed.out.match(/^open decision /gmu) ?? []).length, 3, 'text caps each section while JSON keeps all records');
   assert.doesNotMatch(resumed.out, /Old answer stays in history/u);
   assert.match(resumed.out, new RegExp(`open decision #${openId} from web-1 \\(Test Model\\) \\(2h\\): Need a decision`));
-  assert.match(resumed.out, /recent decision .*person answered coordinator \(unknown\) \(1h ago\): Yes, after the review\./u);
+  assert.match(resumed.out, /recent decision .*person answered coordinator \(Test Model\) \(1h ago\): Yes, after the review\./u);
   assert.match(resumed.out, new RegExp(`merges cleanly: #${cleanId} Clean item`));
   assert.match(resumed.out, new RegExp(`conflicts: #${conflictId} Conflict item \\(web/shared\\.txt\\)`));
   assert.match(resumed.out, new RegExp(`claimed for integration: #${activeId} by web-3 \\(Test Model\\) at .*\\(${descendant.slice(0, 12)}\\)`));
