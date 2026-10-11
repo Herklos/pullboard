@@ -260,7 +260,8 @@ export function projectState(root, { seen = null, board: providedBoard = null } 
       holds: store.laneHolds(board),
       spec: rows(config.spec),
       practice: doctrine.rows.map(({ id, status: state, tier, text, gate, serves, section, origin, version, reason }) => ({
-        id, status: state, tier, text, gate, serves, section, origin, version, reason, added: origin === 'standard' ? null : doctrineAges.get(id) ?? 0,
+        id, status: state, tier, text, gate, serves, section, origin, version, reason,
+        standardVersion: inherited.has(id) ? doctrine.version : null, overrides: origin === 'repo' && inherited.has(id), added: origin === 'standard' ? null : doctrineAges.get(id) ?? 0,
         ...(state === 'wont' && inherited.has(id) ? { standardText: inherited.get(id) } : {}),
       })),
       unseen: seen === null ? null : { since: seen, count: board.db.prepare('SELECT COUNT(*) AS n FROM shout WHERE shout_id > ?').get(seen).n },

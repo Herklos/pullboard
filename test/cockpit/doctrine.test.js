@@ -1,10 +1,11 @@
 /** Cockpit doctrine checks, using the shared real-board fixtures [N26]. */
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { loadDoctrine } from '../../src/doctrine.js';
-import { SPEC, machine, project, startView, styleOf, openPage } from './fixture.js';
+import { loadDoctrine, standardDoctrine } from '../../src/doctrine.js';
+import { tapTarget, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, press, SPEC, machine, project, startView, styleOf, openPage } from './fixture.js';
 
 
 test('the doctrine view carries and labels inherited, local, overridden and declined rules [D3,N26]', async () => {
@@ -25,27 +26,26 @@ test('the doctrine view carries and labels inherited, local, overridden and decl
     assert.equal(state.practice.find((row) => row.id === 'PB8').standardText, 'No secrets or sensitive info in the repo; test data is synthetic.');
     await page.click({ tab: 'doctrine' });
     const list = page.show('doctrine-list');
-    // A section says once where its rules come from; a row says so only where it differs from its section.
-    const sections = list.split('<div class="spec-section-head">').slice(1).map((chunk) => ({
-      source: /<small class="section-source" title="[^"]+">([^<]*)<\/small>/.exec(chunk)?.[1] ?? null,
-      rows: chunk.split('<div class="srow').slice(1).map((row) => [/data-row="doctrine:([^"]+)"/.exec(row)[1], /<small class="rule-source" title="[^"]+">([^<]*)<\/small>/.exec(row)?.[1] ?? null]),
-    }));
-    const where = (id) => { const section = sections.find((s) => s.rows.some(([row]) => row === id)); return [section?.source ?? null, section?.rows.find(([row]) => row === id)[1] ?? null]; };
-    assert.deepEqual(where('PB1'), ['From Pullboard', null], `a section of Pullboard's rules says so once, in its header: ${JSON.stringify(sections)}`);
-    assert.deepEqual(where('R1'), ['This repo', null], `a rule this repo wrote sits under a header that says so: ${JSON.stringify(sections)}`);
+    /** Read each rendered row's own source label rather than relying on section metadata. */
+    const where = (id) => {
+      const row = list.split('<div class="srow').slice(1).find((chunk) => chunk.includes('data-row="doctrine:' + id + '"'));
+      return /<span class="rule-source" title="[^"]+">([^<]*)<\/span>/.exec(row)?.[1] ?? null;
+    };
+    assert.equal(where('PB1'), 'Pullboard v' + merged.version, 'an inherited rule names its actual packaged version');
+    assert.equal(where('R1'), 'this repo', 'a local row names the repo');
     assert.match(list, /data-row="doctrine:R1"[^]*?Keep &lt;b&gt;local&lt;\/b&gt; evidence\./);
-    assert.ok(['This repo,', ',This repo'].includes(where('PB2').join()), `the rule this repo changed says This repo, by its section or by itself: ${JSON.stringify(where('PB2'))}`);
+    assert.equal(where('PB2'), 'Pullboard v' + merged.version + ', overridden here');
     assert.match(list, /data-row="doctrine:PB2"[^]*?Deletion needs &lt;i&gt;two&lt;\/i&gt; approvals\./);
     assert.doesNotMatch(list, /Destructive or irreversible actions wait/);
-    assert.match(list, /data-row="doctrine:PB8"[^]*?<s>No secrets or sensitive info in the repo; test data is synthetic\.<\/s><small class="rule-reason">Reason: No &lt;script&gt;persistent&lt;\/script&gt; data is stored\.<\/small>/);
+    assert.match(list, /data-row="doctrine:PB8"[^]*?<s>No secrets or sensitive info in the repo; test data is synthetic\.<\/s>[^]*?<span class="rule-reason"[^>]*>Reason: No &lt;script&gt;persistent&lt;\/script&gt; data is stored\.<\/span>/);
     assert.doesNotMatch(list, /<script>|<i>two<\/i>|<b>local<\/b>/, 'all repo text stays text');
     const style = await styleOf(view);
-    assert.match(style, /\.rule-source, \.rule-reason \{ display: block; color: var\(--ink-muted\);/, 'labels and reasons remain separate readable lines');
+    assert.match(style, /\.rule-source, \.rule-reason \{ color: var\(--ink-muted\); font: inherit;/, 'source and reason share the Items secondary-line type');
 
     await page.click({ row: 'doctrine:PB1' });
-    assert.match(page.show('doctrine-detail'), /<span class="chip" title="Pullboard standard rules, version \d+">From Pullboard<\/span>/);
+    assert.match(page.show('doctrine-detail'), /<span class="chip" title="Pullboard v\d+">Pullboard v\d+<\/span>/);
     await page.click({ row: 'doctrine:PB2' });
-    assert.match(page.show('doctrine-detail'), /<span class="chip" title="Written in this repo">This repo<\/span>/);
+    assert.match(page.show('doctrine-detail'), /<span class="chip" title="Pullboard v\d+, overridden here">Pullboard v\d+, overridden here<\/span>/);
     assert.match(page.show('doctrine-detail'), /Deletion needs &lt;i&gt;two&lt;\/i&gt; approvals\./);
     await page.click({ row: 'doctrine:PB8' });
     assert.match(page.show('doctrine-detail'), /<s>No secrets or sensitive info in the repo; test data is synthetic\.<\/s>/);
@@ -85,5 +85,121 @@ test('the doctrine pane names DOCTRINE.md and its rules doctrine [D1,N26]', asyn
     assert.doesNotMatch(localDetail, /PRACTICE\.md/);
   } finally {
     await view.stop();
+  }
+});
+
+// Hang ceiling: two real boards and six Chrome layouts, each using the shared two-frame stability wait.
+
+/** Check real source metadata and the two-line presentation, including a repo overriding every packaged id. */
+test('a doctrine row names its source under its id [N26]', { timeout: 300_000 }, async (t) => {
+  const executable = chromeExecutable();
+  if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME for Doctrine source-row checks.');
+
+  const standard = standardDoctrine();
+  assert.ok(standard.rows.length >= 3, 'the actual packaged doctrine supplies inherited and override rows');
+  const [inherited, overridden, declined] = standard.rows;
+  const box = machine();
+  const repo = project(box, 'doctrine-source', SPEC, { practice: 'DOCTRINE.md' });
+  const longText = 'This repo replaces the standard wording with a deliberately long sentence that must stay complete in the detail and end in an ellipsis in the compact row. '.repeat(4);
+  const reason = 'The team declined this inherited rule because the local workflow already covers it.';
+  writeFileSync(join(repo.repo, 'DOCTRINE.md'), `# Team doctrine\n\n## Local rules\n`
+    + `- ${overridden.id} [approved, must] ${longText} | gate: focused source test | serves: G1\n`
+    + `- ${declined.id} [wont] ${reason} | gate: focused source test | serves: G2\n`
+    + '- R1 [approved, must] A rule written only for this repository. | gate: local review | serves: G1\n');
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-doctrine-source-chrome-'));
+  let chrome;
+
+  /** Read only rendered geometry and labels after the shared two-frame stability wait. */
+  const readRow = async (id) => JSON.parse(await chrome.stable(`JSON.stringify((() => {
+    const row = document.querySelector('#doctrine-list [data-row="doctrine:${id}"]');
+    const box = element => { const r = element?.getBoundingClientRect(); return r && { left:r.left, right:r.right, top:r.top, bottom:r.bottom, height:r.height, width:r.width }; };
+    const title = row?.querySelector('.t'), meta = row?.querySelector('.meta');
+    const source = meta?.querySelector('.rule-source'), gate = meta?.querySelector('.gate');
+    const reason = row?.querySelector('.rule-reason'), idBox = row?.querySelector('.row-id');
+    return { text: title?.textContent ?? null, textBox: box(title), textStyle: title && { overflow:getComputedStyle(title).textOverflow, lines:Math.ceil(title.getBoundingClientRect().height / parseFloat(getComputedStyle(title).lineHeight)) },
+      source: source?.textContent ?? null, sourceBox:box(source), gate:gate?.textContent ?? null, gateBox:box(gate), reason:reason?.textContent ?? null, reasonBox:box(reason), idBox:box(idBox), rowBox:box(row),
+      overflow:document.documentElement.scrollWidth > document.documentElement.clientWidth };
+  })())`));
+
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.waitFor(`!!data?.project?.practice?.some(row => row.id === ${JSON.stringify(inherited.id)})`);
+    await press(chrome, "document.querySelector('[data-tab=doctrine]')");
+    await press(chrome, "document.querySelector('#doctrine-chips [data-rows=\"doctrine:all\"]')");
+    const expected = new Map([
+      [inherited.id, `Pullboard v${standard.version}`],
+      [overridden.id, `Pullboard v${standard.version}, overridden here`],
+      [declined.id, `Pullboard v${standard.version}, declined here`],
+      ['R1', 'this repo'],
+    ]);
+
+    for (const theme of ['light', 'dark']) {
+      for (const width of [375, 1280]) {
+        await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
+        await chrome.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: theme }] });
+        await chrome.waitFor(`innerWidth === ${width} && matchMedia('(prefers-color-scheme: ${theme})').matches`);
+        for (const [id, source] of expected) {
+          const row = await readRow(id);
+          assert.equal(row.source, source, `${width}px ${theme}: ${id} names its actual source under its id`);
+          assert.ok(row.rowBox.height >= tapTarget(width), `${width}px ${theme}: ${id} keeps the #371 target size: ${JSON.stringify(row.rowBox)}`);
+          assert.ok(row.sourceBox && row.idBox && row.textBox && row.sourceBox.top > row.textBox.top && Math.abs(row.sourceBox.left - row.idBox.left) < 1,
+            `${width}px ${theme}: ${id}'s source is visibly beneath the words in the id's content column: ${JSON.stringify(row)}`);
+          assert.ok(row.gate && row.gateBox && Math.abs(row.gateBox.top - row.sourceBox.top) < 2 && row.gateBox.left > row.sourceBox.right,
+            `${width}px ${theme}: ${id}'s gate follows its source: ${JSON.stringify(row)}`);
+          assert.ok(!row.overflow, `${width}px ${theme}: ${id} does not create sideways page scrolling`);
+        }
+        const override = await readRow(overridden.id);
+        assert.ok(override.text.includes('This repo replaces the standard wording'), `${width}px ${theme}: the title retains its words`);
+        assert.equal(override.textStyle.overflow, 'ellipsis', `${width}px ${theme}: the first-line title is ellipsized`);
+        assert.equal(override.textStyle.lines, 1, `${width}px ${theme}: the title stays on its first line`);
+        assert.ok(override.textBox.width > 0, `${width}px ${theme}: the title is rendered`);
+        const refused = await readRow(declined.id);
+        assert.ok(refused.reason?.includes(reason) && refused.reasonBox && Math.abs(refused.reasonBox.top - refused.sourceBox.top) < 2 && refused.reasonBox.left > refused.sourceBox.right,
+          `${width}px ${theme}: the declined rule's reason follows its source: ${JSON.stringify(refused)}`);
+
+        await press(chrome, `document.querySelector('#doctrine-list [data-row="doctrine:${inherited.id}"]')`);
+        await chrome.waitFor(`document.querySelector('#doctrine-detail h2 span')?.textContent === ${JSON.stringify(inherited.id)}`);
+        const detail = JSON.parse(await chrome.stable(`JSON.stringify(document.querySelector('#doctrine-detail').innerText)`));
+        assert.ok(detail.includes(inherited.text) && detail.includes(inherited.gate), `${width}px ${theme}: selecting the row opens its full rule and gate`);
+      }
+    }
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    rmSync(profile, { recursive: true, force: true });
+    await view.stop();
+  }
+
+  const allBox = machine();
+  const allRepo = project(allBox, 'doctrine-all-overridden', SPEC, { practice: 'DOCTRINE.md' });
+  const allStandard = standardDoctrine();
+  const rows = allStandard.rows.map((row) => {
+    const state = 'approved, must';
+    const fields = [row.gate && `gate: ${row.gate}`, row.serves?.length && `serves: ${row.serves.join(', ')}`].filter(Boolean);
+    return `- ${row.id} [${state}] Repository wording for ${row.id} is intentionally distinct. ${fields.length ? `| ${fields.join(' | ')}` : ''}`;
+  }).join('\n');
+  writeFileSync(join(allRepo.repo, 'DOCTRINE.md'), `# All standard rows overridden\n\n## Local rules\n${rows}\n`);
+  const allView = await startView(allBox);
+  const allProfile = mkdtempSync(join(tmpdir(), 'pullboard-doctrine-all-overridden-chrome-'));
+  let allChrome;
+  try {
+    allChrome = await openSnapshotChrome(executable, allView.link.href, allProfile);
+    await allChrome.waitFor(`data?.project?.practice?.length === ${allStandard.rows.length}`);
+    await press(allChrome, "document.querySelector('[data-tab=doctrine]')");
+    await press(allChrome, "document.querySelector('#doctrine-chips [data-rows=\"doctrine:all\"]')");
+    for (const [width, theme] of [[375, 'light'], [1280, 'dark']]) {
+      await allChrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
+      await allChrome.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: theme }] });
+      await allChrome.waitFor(`innerWidth === ${width} && matchMedia('(prefers-color-scheme: ${theme})').matches`);
+      const sources = await allChrome.stable(`JSON.stringify([...document.querySelectorAll('#doctrine-list .srow')].map(row => [row.dataset.row, row.querySelector('.meta .rule-source')?.textContent ?? null]))`);
+      assert.deepEqual(JSON.parse(sources), allStandard.rows.map((row) => [`doctrine:${row.id}`, `Pullboard v${allStandard.version}, overridden here`]),
+        `${width}px ${theme}: every actual standard rule is shown as overridden, not inferred from an id pattern`);
+      const overflow = await allChrome.stable('document.documentElement.scrollWidth > document.documentElement.clientWidth');
+      assert.equal(overflow, false, `${width}px ${theme}: the complete overridden doctrine fits without sideways scrolling`);
+    }
+  } finally {
+    if (allChrome) await closeSnapshotChrome(allChrome);
+    rmSync(allProfile, { recursive: true, force: true });
+    await allView.stop();
   }
 });
