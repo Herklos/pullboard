@@ -1,6 +1,6 @@
 /** Exercise native test-file sharding through the production test runner [C7]. */
 import assert from 'node:assert/strict';
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,13 +17,10 @@ function makeShardFixture(t) {
   const source = join(root, 'src');
   const tests = join(root, 'test');
   mkdirSync(bin);
-  mkdirSync(source);
   mkdirSync(tests);
   writeFileSync(join(root, 'package.json'), JSON.stringify({ type: 'module' }));
   copyFileSync(runner, join(bin, 'run-tests.js'));
-  for (const name of ['person.js', 'refused.js']) {
-    copyFileSync(fileURLToPath(new URL(`../src/${name}`, import.meta.url)), join(source, name));
-  }
+  cpSync(fileURLToPath(new URL('../src', import.meta.url)), source, { recursive: true });
   const capture = join(root, 'selected-files.txt');
   const expected = [];
   for (let number = 1; number <= shardFileCount; number += 1) {
@@ -50,6 +47,8 @@ function runShardFixture(fixture, shard) {
   const args = [fixture.runner, ...(shard ? ['--shard', shard] : [])];
   const env = { ...process.env, PULLBOARD_SHARD_CAPTURE: fixture.capture };
   delete env.NODE_TEST_CONTEXT;
+  delete env.PULLBOARD_GATE_SLOT_HELD;
+  assert.equal(env.PULLBOARD_GATE_SLOT_HELD, undefined, 'the private default-run probe does not inherit an outer gate lease');
   const result = runFixtureChild(process.execPath, args, {
     cwd: fixture.root,
     encoding: 'utf8',
