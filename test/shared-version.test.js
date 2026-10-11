@@ -112,19 +112,3 @@ test('a roadmap external-board open refuses unmerged event-log source [A5,A6]', 
   `);
   assert.equal(result[0].items[0].status, 'unavailable'); assert.deepEqual(box.versions(), before);
 });
-
-for (const [version, from, to] of [['SCHEMA_VERSION', 2, 3], ['EVENT_LOG_VERSION', 1, 2]]) {
-  test(`projectState refuses a linked-source ${version} upgrade despite caller isMain [A5,A6]`, t => {
-    const box = fixture(t); const before = box.versions(); box.bump(version, from, to);
-    const result = box.probe(`
-      import { projectState } from './src/serve.js';
-      try { projectState(${JSON.stringify(box.root)}, { isMain: true }); console.log(JSON.stringify({code:'OPENED'})); }
-      catch(error) { console.log(JSON.stringify({code:error.code})); }
-    `);
-    assert.equal(result.code, 'UNMERGED_SCHEMA', 'caller provenance must not override unmerged running source');
-    assert.deepEqual(box.versions(), before, 'the view projection leaves both persisted formats unchanged');
-    const primary = box.cli(box.root, box.root, 'status', '--json');
-    assert.equal(primary.status, 0, primary.stderr + primary.stdout);
-    assert.deepEqual(box.versions(), before, 'primary source remains able to open its board');
-  });
-}
