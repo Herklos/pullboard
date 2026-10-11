@@ -845,6 +845,16 @@ function showing(pane, address) {
   return `[...document.querySelectorAll('[data-pane]')].filter((each) => !each.hidden).map((each) => each.dataset.pane).join() === ${JSON.stringify(pane)} && location.pathname + location.hash === ${JSON.stringify(address)}`;
 }
 
+/** Open each folded Roadmap part once so stories that inspect all items read visible rows. */
+async function openRoadmapParts(chrome) {
+  const keys = JSON.parse(await chrome.stable("JSON.stringify([...document.querySelectorAll('#roadmap [data-key]')].filter(part => part.querySelector(':scope > .milestone-head').getAttribute('aria-expanded') !== 'true').map(part => part.dataset.key))"));
+  for (const key of keys) {
+    const part = `[...document.querySelectorAll('#roadmap [data-key]')].find(part => part.dataset.key === ${JSON.stringify(key)})`;
+    await press(chrome, `${part}.querySelector(':scope > .milestone-head')`);
+    await chrome.waitFor(`${part}.querySelector(':scope > .milestone-head').getAttribute('aria-expanded') === 'true'`);
+  }
+}
+
 /**
  * The Roadmap as Chrome draws it: the address and the pane shown, the page's width, and each card
  * with its count, the share of its bar that is filled, its note and its rows. A row has the id and
@@ -964,4 +974,4 @@ async function searchFor(chrome, words, timeoutMs) {
   }
 }
 
-export { BIN, scratch, tapTarget, SPEC, machine, project, build, sendBack, fetchReason, fetchView, fetchLive, startView, styleOf, element, ageNodes, target, settle, storage, daysOn, openPage, projectRows, productEntries, timelineRows, agentEntries, drawing, textBoxes, meet, accept, needEntries, itemRow, boardId, boardOf, assertObservationAges, withoutObservationAges, assertObservationsEqual, shoutNameText, chromeExecutable, browserPause, startSnapshotChrome, openSnapshotChrome, stopOwnedChrome, closeSnapshotChrome, watchSpecDecisionWait, earlier, shoutsAt, press, pickProject, travel, pressedInto, settled, roadmapRow, showing, readRoadmap, tabBar, serveFolder, proofShot, searchFor };
+export { BIN, scratch, tapTarget, SPEC, machine, project, build, sendBack, fetchReason, fetchView, fetchLive, startView, styleOf, element, ageNodes, target, settle, storage, daysOn, openPage, projectRows, productEntries, timelineRows, agentEntries, drawing, textBoxes, meet, accept, needEntries, itemRow, boardId, boardOf, assertObservationAges, withoutObservationAges, assertObservationsEqual, shoutNameText, chromeExecutable, browserPause, startSnapshotChrome, openSnapshotChrome, stopOwnedChrome, closeSnapshotChrome, watchSpecDecisionWait, earlier, shoutsAt, press, pickProject, travel, pressedInto, settled, roadmapRow, showing, readRoadmap, openRoadmapParts, tabBar, serveFolder, proofShot, searchFor };

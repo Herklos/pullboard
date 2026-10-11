@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { portableSnapshot } from '../../src/serve.js';
-import { machine, project, build, sendBack, fetchLive, startView, accept, boardId, boardOf, assertObservationsEqual, chromeExecutable, browserPause, openSnapshotChrome, closeSnapshotChrome, press, travel, settled, roadmapRow, showing, readRoadmap, serveFolder, proofShot } from './fixture.js';
+import { machine, project, build, sendBack, fetchLive, startView, accept, boardId, boardOf, assertObservationsEqual, chromeExecutable, browserPause, openSnapshotChrome, closeSnapshotChrome, press, travel, settled, roadmapRow, showing, readRoadmap, openRoadmapParts, serveFolder, proofShot } from './fixture.js';
 
 
 test('static export stays in its prefix and replays read-only in Chrome [A10,A3]', { timeout: 90_000 }, async (t) => {
@@ -312,6 +312,7 @@ test('an exported roadmap has its own address under a folder, and Back and Forwa
     await settled(chrome, `${ready} && ${showing('items', '/demo/')}`);
     await press(chrome, `document.querySelector('[data-tab="roadmap"]')`);
     await chrome.waitFor(showing('roadmap', '/demo/#roadmap'));
+    await openRoadmapParts(chrome);
     const seen = await readRoadmap(chrome);
     assert.deepEqual(seen.cards[0].rows.map(({ id, label, tone, button }) => ({ id, label, tone, button })), [
       { id: '#1', label: 'verified', tone: 'ok', button: true },
@@ -344,6 +345,7 @@ test('an exported roadmap has its own address under a folder, and Back and Forwa
     for (const width of [375, 1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
       await chrome.waitFor(`innerWidth === ${width}`);
+      await openRoadmapParts(chrome);
       const layout = await readRoadmap(chrome);
       assert.ok(layout.document <= layout.client && layout.body <= layout.client, `${width}: no sideways scroll in the snapshot: ${JSON.stringify(layout)}`);
       await proofShot(chrome, 'snapshot-roadmap', width);
