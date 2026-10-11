@@ -4,6 +4,29 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.8.6] - 2026-10-11
+
+### See the flow
+
+Pullboard now tells you where work is waiting. The stats card and the coordinator's resume name the bottleneck and what would fix it, and a Pipeline view shows every item's stage at a glance.
+
+### Added
+
+- Pullboard View shows a stats card: the numbers `pullboard stats` reports, each stage's average time, each queue's size and oldest item, and the bottleneck with its recommended action, all read from the board.
+- The Items tab has a Pipeline view: every item laid out by stage as one flow, with its own address.
+- The agents panel lists each agent's credential without ever showing it, and revokes one from your paired phone.
+- The pullboard-run skill has the coordinator tell you about a bottleneck in one sentence, asking for a decision only when the fix needs you.
+
+### Changed
+
+- When a submit's gate is red, it now says whether main shares the red. An inherited red names the spec row and the open item that owns it, and `pullboard next` offers that item first.
+- The README shows the current board, with a screenshot of the Shouts tab.
+
+### Fixed
+
+- A sent-back reason reads once on Items rows and verdict cards.
+- The stats card's counts agree in number ("1 agent", not "1 agents").
+
 ## [0.8.5] - 2026-10-10
 
 ### A prettier board
@@ -192,7 +215,8 @@ Pullboard View got a full design pass, so the board is cleaner and easier on the
 - A local, spec-backed work board gives each item a frozen criterion, a separate worktree lane, a gated submission, and an independent review receipt.
 - The timed tour demonstrates a change being rejected, corrected, and accepted with proof.
 
-[Unreleased]: https://github.com/pullboard-dev/pullboard/compare/v0.8.5...HEAD
+[Unreleased]: https://github.com/pullboard-dev/pullboard/compare/v0.8.6...HEAD
+[0.8.6]: https://github.com/pullboard-dev/pullboard/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/pullboard-dev/pullboard/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/pullboard-dev/pullboard/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/pullboard-dev/pullboard/compare/v0.8.2...v0.8.3
