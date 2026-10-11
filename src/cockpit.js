@@ -2362,6 +2362,8 @@ $('q').addEventListener('keydown', (event) => {
 $('find-results').addEventListener('mousedown', (event) => { const hit = event.target.closest('[data-find]'); if (hit) { event.preventDefault(); openFound(hit.dataset.find); } });
 $('q').addEventListener('blur', () => {
   clearTimeout(closingFound);
+  // Esc and opening a result already close explicitly; their blur must keep that reason.
+  if ($('find-results').hidden) return;
   closingFound = setTimeout(() => hideFound('left the field'), 120);
 });
 // "/" goes to the search from anywhere but a field.

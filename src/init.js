@@ -188,10 +188,10 @@ function writeSessionHook(root, onWrite) {
 /**
  * Set the repo up. Must run in the main checkout, which becomes the coordinator.
  *
- * @param {{ info: { root: string, isMain: boolean }, openBoardHere: () => any, register: Function, closeBoard: Function }} context
+ * @param {{ info: { root: string, isMain: boolean }, openBoardHere: () => any, register: Function, closeBoard: Function, model?: string }} context
  * @returns {string[]} What happened, one line each.
  */
-export function initRepo({ info, openBoardHere, register, closeBoard }) {
+export function initRepo({ info, openBoardHere, register, closeBoard, model }) {
   if (!info.isMain) {
     throw new Refused('NOT_MAIN', 'run init in the main checkout; worktrees join a lane instead');
   }
@@ -213,7 +213,7 @@ export function initRepo({ info, openBoardHere, register, closeBoard }) {
   ];
   const board = openBoardHere();
   try {
-    register(board, { lane: COORDINATOR, path: root });
+    register(board, { lane: COORDINATOR, path: root, model });
   } finally {
     closeBoard(board);
   }

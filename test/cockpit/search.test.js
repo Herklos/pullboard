@@ -248,3 +248,38 @@ test('the search step names its state on timeout [N26]', { timeout: 60_000 }, as
     await view.stop();
   }
 });
+
+
+test('search keeps focus through Esc [N26,C7]', { timeout: 120_000 }, async (t) => {
+  const executable = chromeExecutable();
+  if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME for search-focus checks.');
+  const box = machine(), demo = project(box, 'search-focus');
+  box.run(demo.repo, 'add', 'web', 'Greeting focus proof', '--specs', 'G1', '--criterion', 'visible');
+  const view = await startView(box);
+  let chrome;
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, join(box.dir, 'search-focus-chrome'));
+    await chrome.waitFor('data?.project?.items?.length === 1');
+    await chrome.stable(`(() => {
+      window.__searchFocus = [];
+      document.querySelector('#q').addEventListener('keydown', event => {
+        if (event.key === 'Escape') window.__searchFocus.push({ focused: document.activeElement.id, window: document.hasFocus(), key: event.key });
+      }, { capture: true });
+    })()`);
+    for (const width of [1280, 375]) {
+      await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
+      await searchFor(chrome, 'Greeting');
+      assert.equal(await chrome.stable('document.activeElement.id'), 'q', `${width}: typing and settling results retain the search field's focus`);
+      for (const type of ['keyDown', 'keyUp']) await chrome.send('Input.dispatchKeyEvent', { type, key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+      // budget: 120ms is the page's declared blur-close delay; observe after that callback can run.
+      await chrome.stable('new Promise(resolve => setTimeout(resolve, 120))');
+      const result = await chrome.stable(`({ focus: window.__searchFocus.at(-1), value: document.querySelector('#q').value, hidden: document.querySelector('#find-results').hidden, why: document.querySelector('#find-results').dataset.why })`);
+      assert.equal(result.focus?.focused, 'q', `${width}: Escape is actually delivered while the search field is focused`);
+      assert.equal(result.focus?.key, 'Escape');
+      assert.deepEqual([result.value, result.hidden, result.why], ['', true, 'escape'], `${width}: Escape's own blur does not replace its close reason`);
+    }
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    await view.stop();
+  }
+});
