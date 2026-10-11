@@ -96,7 +96,7 @@ function literalWait(expression, literals) {
 
 /** Recognize tracked wait-result references while excluding property names and object keys. */
 function judgesWaitResult(expression, waitResults) {
-  const values = expression.replace(/\.\s*\w+|\b\w+\s*:/gu, ' ');
+  const values = expression.replace(/\.\s*\w+/gu, ' ').replace(/([{,]\s*)\w+\s*:/gu, '$1 ');
   return [...values.matchAll(/\b\w+\b/gu)].some(match => waitResults.has(match[0]));
 }
 

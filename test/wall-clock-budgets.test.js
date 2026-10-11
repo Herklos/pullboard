@@ -43,7 +43,7 @@ test('the clock-margin guard follows waited results through boolean assertions [
     const file = join(root, 'wait-boolean.test.js');
     const prefix = '/** Return false when the child-close deadline wins. */\nfunction childClosesWithin(child, timeoutMs) { return new Promise(resolve => { child.once("close", () => resolve(true)); setTimeout(() => resolve(false), timeoutMs); }); }\nconst closed = await childClosesWithin(child, 1500);\n';
     for (const judgment of ['assert.ok(closed === true)', 'assert.ok(closed !== false)', 'assert(closed && true)',
-      'assert.ok(Boolean(closed))', 'assert.strictEqual(true, closed)', 'assert.deepEqual({closed}, {closed: true})']) {
+      'assert.ok(Boolean(closed))', 'assert.ok(true ? closed : false)', 'assert.strictEqual(true, closed)', 'assert.deepEqual({closed}, {closed: true})']) {
       writeFileSync(file, prefix + judgment + ';\n');
       assert.match(wallClockViolations(root).join('\n'), /wait-boolean\.test\.js:4: literal wait result judged by an assertion/u, judgment);
       writeFileSync(file, prefix + judgment + '; // budget: hang ceiling for the child-close handshake.\n');
