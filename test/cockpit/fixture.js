@@ -640,7 +640,7 @@ async function openSnapshotChrome(executable, url, profile) {
     const target = await (await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: 'PUT', signal: AbortSignal.timeout(10_000) })).json();
     socket = new WebSocket(target.webSocketDebuggerUrl);
     await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('DevTools socket did not open')), 10_000);
+      const timer = setTimeout(() => reject(new Error('DevTools socket did not open')), 10_000); // budget: hang ceiling for the local DevTools socket-open handshake; no throughput claim.
       socket.addEventListener('open', () => { clearTimeout(timer); resolve(); }, { once: true });
       socket.addEventListener('error', () => { clearTimeout(timer); reject(new Error('DevTools socket failed')); }, { once: true });
     });
@@ -661,7 +661,7 @@ async function openSnapshotChrome(executable, url, profile) {
     /** Send one CDP command and clear its timeout on either response or failure. */
     const send = (method, params = {}) => new Promise((resolve, reject) => {
       const key = ++id;
-      const timer = setTimeout(() => { pending.delete(key); reject(new Error(`DevTools timed out: ${method}`)); }, 45_000);
+      const timer = setTimeout(() => { pending.delete(key); reject(new Error(`DevTools timed out: ${method}`)); }, 45_000); // budget: hang ceiling for one unanswered DevTools command; no throughput claim.
       pending.set(key, { resolve, reject, timer });
       socket.send(JSON.stringify({ id: key, method, params }));
     });
@@ -713,7 +713,7 @@ async function stopOwnedChrome(child, stopped) {
   try { process.kill(-child.pid, 'SIGTERM'); } catch { /* The owned Chrome group already exited. */ }
   if (await waitBounded(5_000)) return;
   try { process.kill(-child.pid, 'SIGKILL'); } catch { /* The owned Chrome group already exited. */ }
-  assert.ok(await waitBounded(5_000), 'owned Chrome exits after SIGKILL within the bounded cleanup window');
+  assert.ok(await waitBounded(5_000), 'owned Chrome exits after SIGKILL within the bounded cleanup window'); // budget: hang ceiling for owned Chrome process-group cleanup; no throughput claim.
 }
 
 /** Close the CDP socket and stop only this test's isolated Chrome process group. */

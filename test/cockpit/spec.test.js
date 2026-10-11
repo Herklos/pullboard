@@ -197,7 +197,7 @@ test('spec rows read as a list, decided in the panel [N26]', { timeout: 300_000 
           await tap(`#${kind}-list [data-row="${kind}:${first}"]`);
           await chrome.waitFor(`view.row['${kind}'] === '${first}' && document.activeElement === document.querySelector('#${kind}-list')`);
           // At 375 the detail stacks under the list: tapping a row brings its decision into view.
-          if (width === 375) await chrome.waitFor(`(() => { const d = document.querySelector('#${kind}-detail [data-row-decision="approve"]')?.getBoundingClientRect(); return !!d && d.top >= 0 && d.bottom <= innerHeight; })()`, 10_000);
+          if (width === 375) await chrome.waitFor(`(() => { const d = document.querySelector('#${kind}-detail [data-row-decision="approve"]')?.getBoundingClientRect(); return !!d && d.top >= 0 && d.bottom <= innerHeight; })()`, 10_000); // budget: hang ceiling for the selected mobile decision to enter the viewport; no speed threshold.
           // The picked row's detail holds its decision once, a 44px target each.
           const held = await read(kind);
           assert.deepEqual(held.decide.map((b) => b.word), ['Approve', 'Decline'], `${tab}: the picked row's detail holds its decision`);
@@ -208,7 +208,7 @@ test('spec rows read as a list, decided in the panel [N26]', { timeout: 300_000 
           assert.equal(await chrome.stable(`view.row['${kind}']`), first, `${tab}: and up moves it back`);
           await pressKey('a', 'KeyA', 65);
           const after = undecidedNow[undecidedNow.findIndex(([id]) => id === first) + 1][0];
-          await chrome.waitFor(`!!document.querySelector('#${kind}-list .spec-feedback.ok') && view.row['${kind}'] === '${after}'`, 15_000);
+          await chrome.waitFor(`!!document.querySelector('#${kind}-list .spec-feedback.ok') && view.row['${kind}'] === '${after}'`, 15_000); // budget: hang ceiling for the saved decision and next row selection; no throughput claim.
           assert.deepEqual([await recorded(kind, first), await recorded(kind, second)], [{ stage: 'approved, pending apply', decided: 'approved' }, { stage: 'draft', decided: null }],
             `${tab}: A approved the picked ${first}, and only ${first}`);
           assert.equal(await chrome.stable(`document.activeElement === document.querySelector('#${kind}-list')`), true, `${tab}: the list keeps focus for the next key`);
@@ -222,14 +222,14 @@ test('spec rows read as a list, decided in the panel [N26]', { timeout: 300_000 
           assert.deepEqual(await recorded(kind, second), { stage: 'draft', decided: null }, `${tab}: and decides nothing`);
           await chrome.send('Input.insertText', { text: ' clearer outcome, please' });
           await chrome.click("document.querySelector('#spec-decline-submit')");
-          await chrome.waitFor(`document.querySelector('#spec-decline-dialog').hidden && !!document.querySelector('#${kind}-list .spec-feedback.ok')`, 15_000);
+          await chrome.waitFor(`document.querySelector('#spec-decline-dialog').hidden && !!document.querySelector('#${kind}-list .spec-feedback.ok')`, 15_000); // budget: hang ceiling for the saved decline and dialog close; no throughput claim.
           assert.deepEqual(await recorded(kind, second), { stage: 'declined, pending apply', decided: 'a clearer outcome, please' }, `${tab}: D declined ${second} with its reason`);
           // The last layout decides the last two drafts, so only the earlier ones have a row after them to stay untouched.
           if (third) assert.deepEqual(await recorded(kind, third), { stage: 'draft', decided: null }, `${tab}: and nothing else`);
           assert.equal(await chrome.stable(`document.activeElement === document.querySelector('#${kind}-list')`), true, `${tab}: the dialog returns to the list`);
           // The two decided rows leave Needs your decision.
           expected[kind].decide = undecidedNow.filter(([id]) => id !== first && id !== second);
-          await chrome.waitFor(`![...document.querySelectorAll('#${kind}-list .srow')].some((row) => ['${kind}:${first}', '${kind}:${second}'].includes(row.dataset.row))`, 15_000);
+          await chrome.waitFor(`![...document.querySelectorAll('#${kind}-list .srow')].some((row) => ['${kind}:${first}', '${kind}:${second}'].includes(row.dataset.row))`, 15_000); // budget: hang ceiling for decided rows to leave Needs; no throughput claim.
 
           // Under All rows, every row not approved says what it is.
           await filter(kind, 'all');
@@ -421,7 +421,7 @@ test('the spec decision wait names its state on timeout [N26]', { timeout: 60_00
     await chrome.waitFor("view.row.spec === 'G2'");
 
     let timeout;
-    try { await diagnostics.waitFor('false', 10); } catch (error) { timeout = error; }
+    try { await diagnostics.waitFor('false', 10); } catch (error) { timeout = error; } // budget: declared 10 ms negative timeout diagnostic deadline.
     assert.match(timeout?.message ?? '', /Browser condition did not arrive: false/, 'the test deliberately drives the real wait helper to timeout');
     assert.deepEqual(timeout.diagnostic.selectedRow, 'G2', 'the timeout record names the currently selected row');
     assert.equal(timeout.diagnostic.focusedElement.id, 'spec-list', 'the timeout record names the focused list');
