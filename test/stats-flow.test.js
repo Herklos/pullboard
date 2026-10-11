@@ -120,11 +120,11 @@ test('flow numbers match a hand computation through rework, released reviews and
   assert.equal(result.flow.bottleneck.recommendation, 'add a builder in core');
   assert.deepEqual(result.flow.bottleneck.completedItems, 2);
   assert.deepEqual(flowLines(result.flow), [
-    'build: average 33.75 min · median 25 min · 4 measured; 0 of 2 completed items unmeasured',
+    'build: average 34 min · median 25 min · 4 measured; 0 of 2 completed items unmeasured',
     'review wait: average 15 min · median 10 min · 3 measured; 0 of 2 completed items unmeasured',
     'review: average 15 min · median 10 min · 3 measured; 0 of 2 completed items unmeasured',
     'merge wait: average 40 min · median 40 min · 2 measured; 0 of 2 completed items unmeasured',
-    'open queue: 3 · oldest #3 (160 min)', 'claimed queue: 1 · oldest #6 (25 min)',
+    'open queue: 3 · oldest #3 (2 h 40 min)', 'claimed queue: 1 · oldest #6 (25 min)',
     'submitted queue: 1 · oldest #7 (10 min)', 'accepted queue: 1 · oldest #8 (5 min)',
     'per day: 2026-10-10: 8 added, 2 merged', '2.5 submissions per merged item',
     'active in the last hour: 6 agents · roles builder 4, verifier 1, coordinator 1, unknown 0 · lanes coordinator 1, core 4, review 1',
@@ -210,7 +210,7 @@ test('every bottleneck recommendation follows its documented rule and ties choos
       [180, 'coordinator', 'add', 6, { lane: 'core' }], [185, 'core-6', 'claim', 6, { leaseUntil: at(1000) }]], 'review the oldest submission first (#2)'],
     [[20, 1, 1, 1], [[185, 'review-1', 'reserve', 2, { until: at(1000) }], [190, 'review-1', 'reject', 2, { commit: '2'.repeat(40) }]], 'tighten criteria or briefs: 1 of 3 submissions were sent back'],
     [[20, 1, 1, 1], [], 'add a builder in core'],
-    [[1, 1, 20, 1], [], 'reviews are slow (median 12.5 min): check how long the frozen checks take'],
+    [[1, 1, 20, 1], [], 'reviews are slow (median 13 min): check how long the frozen checks take'],
     [[1, 1, 1, 20], [], 'land the accepted items: #3'],
     [[20, 20, 20, 20], [], 'add a builder in core'],
   ]) {
@@ -224,6 +224,39 @@ test('every bottleneck recommendation follows its documented rule and ties choos
     const result = fixture(t, entries).stats();
     assert.equal(result.flow.bottleneck.recommendation, expected, durations.join(','));
   }
+});
+
+test('stats sentences read times in human units [R1,R2]', t => {
+  for (const [review, expected] of [[42, '42 min'], [213.9, '3 h 34 min'], [5707.5, '3 d 23 h']]) {
+    const entries = cycle(1, [1, 1, review, 1]);
+    for (const entry of entries) {
+      if (entry[4]?.leaseUntil) entry[4].leaseUntil = at(10_000);
+      if (entry[4]?.until) entry[4].until = at(10_000);
+    }
+    const { stats } = fixture(t, entries, Math.ceil(review + 10));
+    const flow = stats().flow;
+    assert.equal(flow.stages.review.averageMinutes, review, 'JSON keeps measured numeric precision');
+    assert.equal(flow.bottleneck.recommendation, `reviews are slow (median ${expected}): check how long the frozen checks take`);
+    assert.ok(flowLines(flow).includes(`review: average ${expected} · median ${expected} · 1 measured; 0 of 1 completed items unmeasured`));
+    assert.ok(flowLines(flow).includes(`next: ${flow.bottleneck.recommendation}`), 'text output uses the same rounded recommendation');
+  }
+  const empty = fixture(t, []).stats().flow;
+  assert.ok(flowLines(empty).includes('build: average unmeasured · median unmeasured · 0 measured; 0 of 0 completed items unmeasured'));
+});
+
+test('a recommendation names at most three items [R1,R2]', t => {
+  const accepted = Array.from({ length: 5 }, (_, index) => {
+    const id = index + 1, start = index * 10, commit = String(id).repeat(40);
+    return [
+      [start, 'coordinator', 'add', id, { lane: 'core' }], [start + 1, `core-${id}`, 'claim', id, { leaseUntil: at(1000) }],
+      [start + 2, `core-${id}`, 'submit', id, { commit }], [start + 3, 'review-1', 'reserve', id, { until: at(1000) }],
+      [start + 4, 'review-1', 'accept', id, { commit }],
+    ];
+  }).flat();
+  const entries = [...accepted, ...cycle(6, [1, 1, 1, 20], 60)];
+  const flow = fixture(t, entries).stats().flow;
+  assert.equal(flow.queues.accepted.size, 5, 'the five named recommendation targets remain genuinely accepted');
+  assert.equal(flow.bottleneck.recommendation, 'land the accepted items: #1, #2, #3 +2 more');
 });
 
 test('flow reports no evidence instead of inventing a bottleneck or missing review time [R1,R2]', t => {
