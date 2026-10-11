@@ -1,6 +1,6 @@
 /** Cockpit items checks, using the shared real-board fixtures [N26]. */
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -839,7 +839,13 @@ test('list rows hold their shape: one-line titles end in an ellipsis, every row 
       }
     }
     // A builder's name can be long; its chip stops at its cap and ends in an ellipsis, leaving the title its line.
-    await chrome.stable("data.project.items.find((item) => item.id === 5).owner = 'claude-opus-designer-on-the-studio-7'; render();");
+    // Keep the long name in the real fixture so a live refresh cannot replace it between widths.
+    const configPath = join(demo.repo, 'pullboard.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf8'));
+    config.agents = { names: 'prefix' };
+    writeFileSync(configPath, JSON.stringify(config, null, 2));
+    box.run(demo.web, 'join', 'web', '--model', 'claude-opus-designer-on-the-studio');
+    await chrome.stable('refresh()');
     for (const width of [375, 1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
       await chrome.waitFor(`innerWidth === ${width} && document.querySelector('#chain .row[data-item="5"] > .chip')?.textContent.startsWith('claude-opus')`);
