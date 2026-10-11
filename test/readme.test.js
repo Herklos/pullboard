@@ -268,3 +268,27 @@ test('README is concise and skimmable without removing its instructions or figur
     assert.ok(cells.length > 0 && cells.every(Boolean), 'tables have no empty header cells');
   }
 });
+
+test("what's next lists only unbuilt work [I11]", () => {
+  const spec = readFileSync(join(ROOT, 'SPEC.md'), 'utf8');
+  const sectionStart = README.indexOf("### What's next\n");
+  assert.notEqual(sectionStart, -1, "the README replaces 'Planned features' with What's next");
+  const sectionEnd = README.indexOf('\n### Docs\n', sectionStart);
+  assert.notEqual(sectionEnd, -1, "What's next ends before the Docs section");
+  const section = README.slice(sectionStart, sectionEnd);
+  const lines = section.split(/\r?\n/u).slice(1).map((line) => line.trim()).filter(Boolean);
+  const bullets = lines.filter((line) => line.startsWith('- '));
+  assert.ok(bullets.length > 0, "What's next contains cited work");
+
+  const specRows = new Set([...spec.matchAll(/^- ([A-Za-z]+\d+(?:\.\d+)*) \[/gmu)].map(([, id]) => id));
+  for (const bullet of bullets) {
+    const citations = [...bullet.matchAll(/\[([^\]]+)\]/gu)];
+    assert.ok(citations.length > 0, `each bullet cites a SPEC row: ${bullet}`);
+    for (const [, group] of citations) {
+      for (const id of group.split(/,\s*/u)) assert.ok(specRows.has(id), `${bullet} cites existing row ${id}`);
+    }
+  }
+
+  assert.doesNotMatch(bullets.join('\n'), /\b(?:relay|roadmap)\b/iu, 'shipped relay and roadmap work do not remain in the upcoming bullets');
+  assert.equal(lines.at(-1), 'The full plan lives in the Roadmap tab in Pullboard View and `pullboard roadmap`.', 'the section ends by pointing to the full plan');
+});
