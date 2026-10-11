@@ -81,12 +81,12 @@ function linkedItems(box, name) {
   const alpha = project(box, name, SPEC, { practice: 'DOCTRINE.md' });
   writeFileSync(join(alpha.repo, 'DOCTRINE.md'), `# Local rules\n\n## Team\n- PB1 [approved, must] ${name} practice rule. | gate: review\n`);
   box.run(alpha.repo, 'add', 'web', 'Address target', '--specs', 'G1', '--criterion', 'renders');
-  box.run(alpha.repo, 'add', 'web', 'Text points to #1', '--specs', 'G1', '--criterion', 'criterion cites #1', '--brief', 'brief cites #1 and #999');
+  box.run(alpha.repo, 'add', 'web', 'Text points to #1', '--specs', 'G1', '--criterion', 'criterion cites #1 and `#1`', '--brief', 'brief cites #1 and #999, with literal `#1`');
   box.run(alpha.repo, 'add', 'web', 'Waits on #2', '--specs', 'G1', '--criterion', 'waits', '--after', '2');
   box.run(alpha.repo, 'shout', 'all', 'Activity cites #1 and waits on #2.');
   build(box, alpha, 1, 'target.txt');
   box.git(alpha.repo, 'switch', '-q', '--detach', alpha.itemBranches.get(`${alpha.baseBranch}:1`));
-  box.run(alpha.repo, 'verify', '1', 'accept', '--note', 'The notes cite #2.', '--as', 'coordinator');
+  box.run(alpha.repo, 'verify', '1', 'accept', '--note', 'The notes cite #2 and literal `#2`.', '--as', 'coordinator');
   box.git(alpha.repo, 'switch', '-q', 'main');
   return alpha;
 }
@@ -115,6 +115,16 @@ test('item text links every item reference [N38,N26]', { timeout: 90_000 }, asyn
     })`));
     assert.deepEqual(refs.criterion, [['#1', '/items/1']], 'criterion references are real same-board addresses');
     assert.deepEqual(refs.brief, [['#1', '/items/1'], ['#999', '/items/999']], 'known and unknown references are real same-board addresses');
+    for (const heading of ['Criterion', 'Brief']) {
+      const literal = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+        const section = [...document.querySelectorAll('#detail h3')].find(node => node.textContent === ${JSON.stringify(heading)}).parentElement;
+        return { code: [...section.querySelectorAll('code')].map(node => node.textContent), linkedCode: section.querySelectorAll('code a, a code').length };
+      })())`));
+      assert.deepEqual(literal, { code: ['#1'], linkedCode: 0 }, `${heading}: backticked references stay unlinked code`);
+      const before = await history(chrome);
+      await press(chrome, `[...document.querySelectorAll('#detail h3')].find(node => node.textContent === ${JSON.stringify(heading)}).parentElement.querySelector('code')`);
+      assert.deepEqual(await history(chrome), before, `${heading}: clicking code leaves the browser address unchanged`);
+    }
     await press(chrome, `document.querySelector('#detail a.ref[data-go="item:999"]')`);
     await settled(chrome, "document.querySelector('#detail .empty')?.textContent.includes('No item #999 exists here.')");
     assert.match(await chrome.stable("document.querySelector('#detail .empty')?.textContent"), /No item #999 exists here/,
@@ -131,7 +141,15 @@ test('item text links every item reference [N38,N26]', { timeout: 90_000 }, asyn
     assert.ok(activity.some(([text, href]) => text === '#1' && href === '/items/1'), 'Activity item events also link to their item addresses');
     await openAddress(chrome, server, '/items/1');
     const verdict = JSON.parse(await chrome.stable(`JSON.stringify([...document.querySelectorAll('#detail .verdict .note a.ref[data-go]')].map(node=>[node.textContent,new URL(node.href).pathname]))`));
-    assert.deepEqual(verdict, [['#2', '/items/2']], 'verdict notes link to their cited item');
+    assert.deepEqual(verdict, [['#2', '/items/2']], 'verdict notes link only their plain cited item');
+    const verdictCode = JSON.parse(await chrome.stable(`JSON.stringify({
+      code: [...document.querySelectorAll('#detail .verdict .note code')].map(node => node.textContent),
+      linkedCode: document.querySelectorAll('#detail .verdict .note code a, #detail .verdict .note a code').length
+    })`));
+    assert.deepEqual(verdictCode, { code: ['#2'], linkedCode: 0 }, 'actual recorded verdict notes keep backticked references literal');
+    const beforeCode = await history(chrome);
+    await press(chrome, `document.querySelector('#detail .verdict .note code')`);
+    assert.deepEqual(await history(chrome), beforeCode, 'plain click on verdict code does not navigate');
     await press(chrome, `document.querySelector('#detail .verdict .note a.ref[data-go]')`);
     assert.equal(await chrome.stable('location.pathname'), '/items/2', 'plain click stays in the page and opens the linked place');
     assert.equal(await chrome.stable("document.querySelector('#detail h2 > span')?.textContent"), '#2');
@@ -150,6 +168,16 @@ test('a modified click opens a new tab [N38,N26]', { timeout: 90_000 }, async ()
     chrome = await openSnapshotChrome(executable, server.link.href, profile);
     await settled(chrome, SCRIPT);
     await openAddress(chrome, server, '/items/2');
+    for (const heading of ['Criterion', 'Brief']) {
+      const selector = `[...document.querySelectorAll('#detail h3')].find(node => node.textContent === ${JSON.stringify(heading)}).parentElement.querySelector('code')`;
+      for (const input of [{ button: 'middle' }, { modifiers: process.platform === 'darwin' ? 4 : 2 }]) {
+        const beforeTargets = (await chrome.send('Target.getTargets')).targetInfos.filter(row => row.type === 'page').map(row => row.targetId).sort();
+        await press(chrome, selector, input);
+        const afterTargets = (await chrome.send('Target.getTargets')).targetInfos.filter(row => row.type === 'page').map(row => row.targetId).sort();
+        assert.deepEqual(afterTargets, beforeTargets, `${heading}: modified code clicks open no tab`);
+        assert.equal(await chrome.stable('location.pathname'), '/items/2', `${heading}: modified code clicks leave this tab in place`);
+      }
+    }
     const href = await chrome.stable(`document.querySelector('#detail a.ref[data-go="item:1"]')?.href`);
     assert.equal(new URL(href).pathname, '/items/1', 'the anchor exposes the target before input');
     await press(chrome, `document.querySelector('#detail a.ref[data-go="item:1"]')`, { button: 'middle' });
@@ -163,6 +191,25 @@ test('a modified click opens a new tab [N38,N26]', { timeout: 90_000 }, async ()
     const modifierTarget = await targetForHref(profile, modifierHref);
     assert.equal(await chrome.stable('location.pathname'), '/items/3', 'the platform modifier leaves the original tab at its current place');
     assert.equal(modifierTarget.url, modifierHref, 'Chrome opens a platform-modified anchor in another page target');
+    await chrome.send('Target.closeTarget', { targetId: target.id });
+    await chrome.send('Target.closeTarget', { targetId: modifierTarget.id });
+    await openAddress(chrome, server, '/items/1');
+    const verdictSelector = `document.querySelector('#detail .verdict .note a.ref[data-go="item:2"]')`;
+    assert.equal(await chrome.stable(`document.querySelector('#detail .verdict .note code')?.textContent ?? null`), '#2', 'modified-click control has a literal verdict code token');
+    const verdictHref = await chrome.stable(`${verdictSelector}?.href`);
+    assert.equal(new URL(verdictHref).pathname, '/items/2', 'recorded verdict prose exposes its real href');
+    for (const input of [{ button: 'middle' }, { modifiers }]) {
+      const beforeTargets = (await chrome.send('Target.getTargets')).targetInfos.filter(row => row.type === 'page').map(row => row.targetId).sort();
+      await press(chrome, `document.querySelector('#detail .verdict .note code')`, input);
+      const afterTargets = (await chrome.send('Target.getTargets')).targetInfos.filter(row => row.type === 'page').map(row => row.targetId).sort();
+      assert.deepEqual(afterTargets, beforeTargets, 'modified click on literal verdict code opens no tab');
+      assert.equal(await chrome.stable('location.pathname'), '/items/1', 'literal code leaves the original tab in place');
+      await press(chrome, verdictSelector, input);
+      const opened = await targetForHref(profile, verdictHref);
+      assert.equal(await chrome.stable('location.pathname'), '/items/1', 'modified verdict prose leaves the original tab in place');
+      assert.equal(opened.url, verdictHref, 'modified verdict prose opens the real item address');
+      await chrome.send('Target.closeTarget', { targetId: opened.id });
+    }
     assert.deepEqual(chrome.exceptions, []);
   } finally {
     if (chrome) await closeSnapshotChrome(chrome);
