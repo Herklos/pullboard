@@ -328,7 +328,7 @@ test('activity rows say what each shout and answer said [N26]', { timeout: 120_0
       const rows = JSON.parse(await chrome.stable(`JSON.stringify([...document.querySelectorAll('#activity .act')].map((row) => {
         const said = row.querySelector('.said');
         const lines = said ? Math.round(said.getBoundingClientRect().height / parseFloat(getComputedStyle(said).lineHeight)) : 0;
-        return { text: row.textContent, said: said?.textContent ?? null, tip: said?.title ?? null, lines, refs: said ? said.querySelectorAll('button.ref').length : 0,
+        return { text: row.textContent, said: said?.textContent ?? null, tip: said?.title ?? null, lines, refs: said ? said.querySelectorAll('a.ref[data-go]').length : 0,
           code: said ? [...said.querySelectorAll('code')].map((code) => code.textContent) : [], ellipsis: said ? getComputedStyle(said).textOverflow === 'ellipsis' : null,
           cut: said ? said.scrollWidth > said.clientWidth : null };
       }))`));

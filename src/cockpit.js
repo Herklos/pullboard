@@ -1885,6 +1885,7 @@ function placeAtAddress(page = data) {
 function tabHref(tab) {
   if (snapshot) {
     const detail = tab === 'items' && view.itemsView === 'pipeline' ? 'pipeline' : view.addressDetail;
+    if (tab === 'items' && detail === null && !location.hash) return location.pathname + location.search;
     return location.pathname + location.search + '#' + tab + (detail === null ? '' : '/' + encodeURIComponent(String(detail)));
   }
   const repo = data?.projects.find((entry) => entry.root === view.root);
@@ -2488,7 +2489,7 @@ document.addEventListener('click', (event) => {
   if (!t) return;
   if (t.id === 'proj-switch') { fold(!$('side').classList.contains('open')); return; }
   if (t.id === 'console') { t.hidden = true; return; }
-  if (t.matches('a[data-go^="item:"]')) {
+  if (t.tagName === 'A' && t.dataset.go?.startsWith('item:')) {
     if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault();
   }

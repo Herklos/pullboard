@@ -105,7 +105,7 @@ async function targetForHref(profile, href) {
   assert.fail(`Chrome did not open ${href}; page targets: ${JSON.stringify(targets.map(({ type, url }) => ({ type, url })))}`);
 }
 
-test('item text links every #N [N38,N26]', { timeout: 90_000 }, async () => { // budget: hang ceiling for the real API, Chrome navigation and linked prose checks.
+test('item text links every item reference [N38,N26]', { timeout: 90_000 }, async () => { // budget: hang ceiling for the real API, Chrome navigation and linked prose checks.
   const box = machine(), alpha = linkedItems(box, 'item-text-links');
   await withBrowser(box, async (chrome, server) => {
     await openAddress(chrome, server, '/items/2');
