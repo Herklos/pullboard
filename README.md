@@ -276,10 +276,13 @@ Pullboard exists to keep a team of agents coherent over a long build.
 - You can skip a hook with `--no-verify`. The pre-push gate and the verifier are the backstops.
 - CI runs on Linux and macOS. Windows isn't tested yet.
 
-### Planned features
+### What's next
 
-- **The relay.** Your boards, live on your phone and other machines. Sealed records, never code.
-- **A roadmap in Pullboard View.** Every milestone and what's left in it, at a glance.
+- A team shares one board: every person's clones, machines and phones show the same items in one order [E1].
+- Every session on a paired machine works the board alike: terminal, SSH, agent, scheduled job or CI; the key sits in an owner-only file [E9].
+- Each person may keep a private board per repo in ~/.pullboard; its items stay on that person's devices [E11].
+
+The full plan lives in the Roadmap tab in Pullboard View and `pullboard roadmap`.
 
 ### Docs
 
