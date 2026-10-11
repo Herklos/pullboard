@@ -12,6 +12,18 @@ import { projectState } from '../../src/serve.js';
 import { scratch, machine, project, build, fetchView, fetchLive, startView, styleOf, openPage, boardId, boardOf, assertObservationsEqual, chromeExecutable, startSnapshotChrome, openSnapshotChrome, stopOwnedChrome, closeSnapshotChrome } from './fixture.js';
 
 
+test('the cockpit fixture inits its board without a model [N26]', () => {
+  const box = machine();
+  project(box, 'model-free-coordinator');
+  const init = box.invocations.find((call) => call.args.length === 1 && call.args[0] === 'init');
+  const join = box.invocations.find((call) => call.args[0] === 'join' && call.args[1] === 'web');
+  assert.ok(init, 'the fixture ran init');
+  assert.equal(init.hasModel, false, 'init does not inherit the test runner model');
+  assert.ok(join, 'the fixture ran a later agent join');
+  assert.equal(join.hasModel, true, 'later agent joins retain the machine model');
+  assert.equal(join.model, 'Test Model');
+});
+
 test('borrowed board presentation keeps parity, shows staged rows, and leaves the caller connection open [N26,H16]', () => {
   const box = machine();
   const p = project(box, 'projector');

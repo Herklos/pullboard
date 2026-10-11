@@ -51,12 +51,17 @@ function machine() {
     PULLBOARD_MACHINE_HOME: join(dir, 'machine-home'),
   };
   const git = (cwd, ...args) => execFileSync('git', args, { cwd, env, encoding: 'utf8', stdio: 'pipe' }).trim();
-  const run = (cwd, ...args) => {
-    const result = spawnSync(process.execPath, [BIN, ...args], { cwd, env, encoding: 'utf8' });
+  const invocations = [];
+  /** Run the CLI with an explicit environment and retain facts used by fixture checks. */
+  const runWithEnv = (cwd, commandEnv, ...args) => {
+    invocations.push({ args, hasModel: Object.hasOwn(commandEnv, 'PULLBOARD_MODEL'), model: commandEnv.PULLBOARD_MODEL });
+    const result = spawnSync(process.execPath, [BIN, ...args], { cwd, env: commandEnv, encoding: 'utf8' });
     assert.equal(result.status, 0, `pullboard ${args.join(' ')}: ${result.stderr}`);
     return result.stdout;
   };
-  return { dir, env, git, run };
+  /** Run the CLI with the machine environment used by later agent commands. */
+  const run = (cwd, ...args) => runWithEnv(cwd, env, ...args);
+  return { dir, env, git, run, runWithEnv, invocations };
 }
 
 /**
@@ -67,7 +72,9 @@ function project(box, name, spec = SPEC, extra = {}) {
   const repo = join(box.dir, name);
   mkdirSync(repo);
   box.git(repo, 'init', '-q', '-b', 'main');
-  box.run(repo, 'init');
+  const initEnv = { ...box.env };
+  delete initEnv.PULLBOARD_MODEL;
+  box.runWithEnv(repo, initEnv, 'init');
   const config = { gate: 'true', spec: 'SPEC.md', verify: 'any', lease: '2h', lanes: { web: { owns: ['web/'], specs: ['G'] } }, shared: [], ...extra };
   writeFileSync(join(repo, 'pullboard.json'), JSON.stringify(config, null, 2));
   writeFileSync(join(repo, 'SPEC.md'), spec);
