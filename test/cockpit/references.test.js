@@ -200,32 +200,35 @@ test('committed shout and fact references stay local, expand safely at phone and
     for (const width of [375, 1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 1000, deviceScaleFactor: 1, mobile: false });
       await chrome.waitFor(`innerWidth === ${width}`);
-      await chrome.evaluate(`document.querySelector('[data-tab="shouts"]').click()`);
-      await chrome.evaluate(`document.querySelector('#feed button[data-code^="web/reference.js:1-100@"]').click()`);
+      await chrome.click(`document.querySelector('[data-tab="shouts"]')`);
+      await chrome.click(`document.querySelector('#feed button[data-code^="web/reference.js:1-100@"]')`);
       await chrome.waitFor(`document.querySelector('#feed .code-wrap pre.code .tok-keyword')?.textContent === 'const'`);
-      assert.equal(await chrome.evaluate(`document.querySelector('#feed pre.code').textContent.includes('localOnlyFixture = 42')`), true, 'the open local preview reads the exact committed text');
-      assert.equal(await chrome.evaluate(`document.querySelector('#feed pre.code .tok-number')?.textContent`), '42', 'source tokens receive syntax highlighting');
-      assert.equal(await chrome.evaluate(`document.querySelectorAll('#feed pre.code > span').length`), 60, 'the initial preview stays bounded');
-      await chrome.evaluate(`document.querySelector('#feed button[data-code-all]').click()`);
+      assert.equal(await chrome.stable(`document.querySelector('#feed pre.code').textContent.includes('localOnlyFixture = 42')`), true, 'the open local preview reads the exact committed text');
+      assert.equal(await chrome.stable(`document.querySelector('#feed pre.code .tok-number')?.textContent`), '42', 'source tokens receive syntax highlighting');
+      assert.equal(await chrome.stable(`document.querySelectorAll('#feed pre.code > span').length`), 60, 'the initial preview stays bounded');
+      await chrome.click(`document.querySelector('#feed button[data-code-all]')`);
       await chrome.waitFor(`document.querySelectorAll('#feed pre.code > span').length === 100`);
-      assert.equal(await chrome.evaluate(`document.querySelector('#feed pre.code > span:last-child').textContent.includes('row99 = 99')`), true, 'show all lines fetches the end of the cited range');
-      await chrome.evaluate(`document.querySelector('#feed button[data-code-less]').click()`);
+      assert.equal(await chrome.stable(`document.querySelector('#feed pre.code > span:last-child').textContent.includes('row99 = 99')`), true, 'show all lines fetches the end of the cited range');
+      await chrome.click(`document.querySelector('#feed button[data-code-less]')`);
       await chrome.waitFor(`document.querySelectorAll('#feed pre.code > span').length === 60`);
-      assert.equal(await chrome.evaluate('document.documentElement.scrollWidth <= document.documentElement.clientWidth'), true, `${width}px page has no sideways overflow`);
+      assert.equal(await chrome.stable('document.documentElement.scrollWidth <= document.documentElement.clientWidth'), true, `${width}px page has no sideways overflow`);
 
-      assert.equal(await chrome.evaluate(`!!document.querySelector('#detail .fact-code .code-ref:not(.open) > button.ref.block[aria-expanded="false"]')`), true, 'a fact\'s reference is a collapsed block too');
-      await chrome.evaluate(`document.querySelector('#detail .fact-code button[data-code]').click()`);
+      await chrome.click(`document.querySelector('[data-tab="items"]')`);
+      await chrome.click(`document.querySelector('#chain [data-item="1"]')`);
+      assert.equal(await chrome.stable(`!!document.querySelector('#detail .fact-code .code-ref:not(.open) > button.ref.block[aria-expanded="false"]')`), true, 'a fact\'s reference is a collapsed block too');
+      await chrome.click(`document.querySelector('#detail .fact-code button[data-code]')`);
       await chrome.waitFor(`document.querySelector('#detail .fact-code pre.code .tok-keyword')?.textContent === 'const'`);
-      assert.equal(await chrome.evaluate(`document.querySelector('#detail .fact-code pre.code').textContent.includes('localOnlyFixture = 42')`), true, 'typed fact refs use the same local renderer');
-      assert.equal(await chrome.evaluate('document.documentElement.scrollWidth <= document.documentElement.clientWidth'), true, `${width}px thread ref has no sideways overflow`);
-      await chrome.evaluate(`document.querySelector('#detail .fact-code button[data-code]').click()`);
-      await chrome.evaluate(`document.querySelector('#feed button[data-code^=\"web/reference.js:1-100@\"]').click()`);
+      assert.equal(await chrome.stable(`document.querySelector('#detail .fact-code pre.code').textContent.includes('localOnlyFixture = 42')`), true, 'typed fact refs use the same local renderer');
+      assert.equal(await chrome.stable('document.documentElement.scrollWidth <= document.documentElement.clientWidth'), true, `${width}px thread ref has no sideways overflow`);
+      await chrome.click(`document.querySelector('#detail .fact-code button[data-code]')`);
+      await chrome.click(`document.querySelector('[data-tab="shouts"]')`);
+      await chrome.click(`document.querySelector('#feed button[data-code^=\"web/reference.js:1-100@\"]')`);
       await chrome.waitFor(`document.querySelector('#feed button[data-code^=\"web/reference.js:1-100@\"]').getAttribute('aria-expanded') === 'false'`);
     }
-    await chrome.evaluate(`document.querySelector('#feed button[data-code^="web/reference.js:1@deadbee"]').click()`);
+    await chrome.click(`document.querySelector('#feed button[data-code^="web/reference.js:1@deadbee"]')`);
     await chrome.waitFor(`document.querySelector('#feed button[data-code^=\"web/reference.js:1@deadbee\"] + .code-ref .code, #feed button[data-code^=\"web/reference.js:1@deadbee\"] + .code')?.textContent.includes('[NO_COMMIT]')`);
-    assert.equal(await chrome.evaluate(`document.querySelector('#feed button[data-code^=\"web/reference.js:1@deadbee\"] + .code-ref .code, #feed button[data-code^=\"web/reference.js:1@deadbee\"] + .code').textContent.includes('deadbee')`), true, 'a missing commit produces its readable refusal');
-    assert.equal(await chrome.evaluate(`document.querySelector('#feed .ref-missing')?.textContent.includes('missing the repository path')`), true, 'a reference with no path gives a clear note');
+    assert.equal(await chrome.stable(`document.querySelector('#feed button[data-code^=\"web/reference.js:1@deadbee\"] + .code-ref .code, #feed button[data-code^=\"web/reference.js:1@deadbee\"] + .code').textContent.includes('deadbee')`), true, 'a missing commit produces its readable refusal');
+    assert.equal(await chrome.stable(`document.querySelector('#feed .ref-missing')?.textContent.includes('missing the repository path')`), true, 'a reference with no path gives a clear note');
   } finally {
     if (chrome) await closeSnapshotChrome(chrome);
     await view.stop();
@@ -258,10 +261,10 @@ test('committed shout and fact references stay local, expand safely at phone and
     const address = snapshotServer.address();
     snapshotChrome = await openSnapshotChrome(executable, `http://127.0.0.1:${address.port}/`, join(box.dir, 'relay-snapshot-chrome'));
     await snapshotChrome.waitFor(`document.querySelector('#feed button[data-code^=\"web/reference.js:1-100@\"]')`);
-    await snapshotChrome.evaluate(`document.querySelector('[data-tab="shouts"]').click()`);
-    await snapshotChrome.evaluate(`document.querySelector('#feed button[data-code^="web/reference.js:1-100@"]').click()`);
+    await snapshotChrome.click(`document.querySelector('[data-tab="shouts"]')`);
+    await snapshotChrome.click(`document.querySelector('#feed button[data-code^="web/reference.js:1-100@"]')`);
     await snapshotChrome.waitFor(`document.querySelector('#feed button[data-code^=\"web/reference.js:1-100@\"]')?.getAttribute('aria-expanded') === 'true'`);
-    assert.match(await snapshotChrome.evaluate(`document.querySelector('#feed button[data-code^=\"web/reference.js:1-100@\"] + .code-ref .code, #feed button[data-code^=\"web/reference.js:1-100@\"] + .code')?.textContent || ''`), /Source code is not included in this relay snapshot/);
+    assert.match(await snapshotChrome.stable(`document.querySelector('#feed button[data-code^=\"web/reference.js:1-100@\"] + .code-ref .code, #feed button[data-code^=\"web/reference.js:1-100@\"] + .code')?.textContent || ''`), /Source code is not included in this relay snapshot/);
     assert.ok(snapshotChrome.requests.every((request) => !request.url.includes('/code?')), 'relay snapshot serves only the reference and sends no code read');
   } finally {
     if (snapshotChrome) await closeSnapshotChrome(snapshotChrome);

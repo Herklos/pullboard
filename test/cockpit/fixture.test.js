@@ -230,7 +230,7 @@ setTimeout(() => {
   const started = Date.now();
   const chrome = await startSnapshotChrome(delayed, profile);
   try {
-    assert.ok(Date.now() - started > 10_000, 'the helper waits beyond its former ten-second limit');
+    assert.ok(Date.now() - started > 10_000, 'the helper waits beyond its former ten-second limit'); // budget: the stand-in publishes DevToolsActivePort after 10,100 ms.
     assert.equal(chrome.port, '9333');
     assert.equal(readFileSync(attempts, 'utf8'), '2', 'the failed first launch is retried exactly once');
   } finally {
@@ -286,7 +286,7 @@ test('a Chrome wait whose condition throws while the next document loads keeps p
     await chrome.waitFor("document.querySelector('#first')?.textContent === 'first page'");
     await chrome.send('Page.navigate', { url: `${origin}/late` });
     await chrome.waitFor("document.querySelector('#late').textContent.includes('the late body arrived')");
-    await assert.rejects(chrome.waitFor("document.querySelector('#never').textContent === 'never'", 1000),
+    await assert.rejects(chrome.waitFor("document.querySelector('#never').textContent === 'never'", 1000), // budget: 1,000 ms is only a ceiling for an impossible browser condition.
       /^Error: Browser condition did not arrive: .*#never.*; it last threw: TypeError: Cannot read properties of null/u);
     assert.deepEqual(chrome.exceptions, [], 'a condition that throws is not a page exception');
     await chrome.send('Page.navigate', { url: `${origin}/fault` });

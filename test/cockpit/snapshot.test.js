@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { portableSnapshot } from '../../src/serve.js';
-import { machine, project, build, sendBack, fetchLive, startView, accept, boardId, boardOf, assertObservationsEqual, chromeExecutable, browserPause, openSnapshotChrome, closeSnapshotChrome, press, travel, settled, roadmapRow, showing, readRoadmap, serveFolder, proofShot } from './fixture.js';
+import { machine, project, build, sendBack, fetchLive, startView, accept, boardId, boardOf, assertObservationsEqual, chromeExecutable, browserPause, openSnapshotChrome, closeSnapshotChrome, press, travel, settled, roadmapRow, showing, readRoadmap, openRoadmapParts, serveFolder, proofShot } from './fixture.js';
 
 
 test('static export stays in its prefix and replays read-only in Chrome [A10,A3]', { timeout: 90_000 }, async (t) => {
@@ -91,7 +91,7 @@ test('static export stays in its prefix and replays read-only in Chrome [A10,A3]
   let chrome;
   try {
     chrome = await openSnapshotChrome(executable, `${base}${prefix}`, profile);
-    const evaluate = chrome.evaluate;
+    const evaluate = chrome.stable;
     await chrome.waitFor("document.body?.classList.contains('snapshot') && typeof snapshotReplay === 'object' && !!data?.project && snapshotReplay.events.length > 0 && snapshotReplay.index === snapshotReplay.events.length");
     await chrome.waitFor("!!document.querySelector('#replay-play') && !!document.querySelector('#replay-pause') && !!document.querySelector('#replay-speed') && !!document.querySelector('#replay-progress')");
 
@@ -110,7 +110,7 @@ test('static export stays in its prefix and replays read-only in Chrome [A10,A3]
     assert.ok(shout.html.includes('&lt;script&gt;'), 'the snapshot escapes HTML in shout text');
     assert.equal(shout.scripts, 0, 'shout text never becomes an executable script element');
 
-    const firstPosition = JSON.parse(await evaluate(`(() => {
+    await evaluate(`(() => {
       window.__snapshotRealAdvance = advanceReplay;
       window.__snapshotFirstPosition = null;
       window.advanceReplay = () => {
@@ -118,9 +118,9 @@ test('static export stays in its prefix and replays read-only in Chrome [A10,A3]
         snapshotReplay.playing = false;
         replayControls();
       };
-      document.querySelector('#replay-play').click();
-      return JSON.stringify(window.__snapshotFirstPosition);
-    })()`));
+    })()`);
+    await chrome.click("document.querySelector('#replay-play')");
+    const firstPosition = JSON.parse(await evaluate('JSON.stringify(window.__snapshotFirstPosition)'));
     assert.deepEqual(firstPosition, { index: 0, items: [] }, 'play starts from an empty board before its first event');
     await evaluate('window.advanceReplay = window.__snapshotRealAdvance');
 
@@ -155,25 +155,42 @@ test('static export stays in its prefix and replays read-only in Chrome [A10,A3]
         if (status) window.__replayObserved.push({ index, status });
       }).observe(progress, { childList: true, characterData: true, subtree: true });
     })()`);
-    await evaluate("document.querySelector('#replay-play').click()");
+    await chrome.click("document.querySelector('#replay-play')");
     await chrome.waitFor('snapshotReplay.playing && snapshotReplay.index > 0 && snapshotReplay.index < snapshotReplay.events.length');
     const beforePause = await evaluate('snapshotReplay.index');
-    await evaluate("document.querySelector('#replay-pause').click()");
+    await chrome.click("document.querySelector('#replay-pause')");
     await chrome.waitFor('!snapshotReplay.playing');
     const pausedIndex = await evaluate('snapshotReplay.index');
     assert.equal(pausedIndex, beforePause, 'pause keeps the current replay event');
     await browserPause(180);
     assert.equal(await evaluate('snapshotReplay.index'), pausedIndex, 'a paused replay does not advance');
 
-    await evaluate("const speed = document.querySelector('#replay-speed'); speed.value = '16'; speed.dispatchEvent(new Event('change', { bubbles: true }))");
+    await evaluate("(() => { const speed = document.querySelector('#replay-speed'); speed.value = '1'; speed.dispatchEvent(new Event('change', { bubbles: true })); })()");
+    assert.equal(await evaluate("document.querySelector('#replay-speed').value"), '1');
+    await chrome.click("document.querySelector('#replay-play')");
+    await chrome.waitFor('!snapshotReplay.playing', 30_000); // budget: hang-only ceiling for the complete 1x replay.
+    assert.equal(await evaluate('snapshotReplay.playing'), false, 'the 1x replay reaches its end');
+    const normalStart = 0;
+    assert.ok(normalStart + 4 < initial.total, 'at least four events remain to measure 1x playback');
+    const normalStartedAt = Date.now();
+    await chrome.click("document.querySelector('#replay-play')");
+    await chrome.waitFor(`snapshotReplay.index >= ${normalStart + 4}`, 10_000); // budget: hang-only ceiling for the measured four-event sample.
+    const normalFourEventMs = Date.now() - normalStartedAt;
+    assert.ok(normalFourEventMs > 0, '1x playback advances four events in measurable time');
+    await chrome.waitFor('!snapshotReplay.playing', 30_000); // budget: hang-only ceiling for the complete 1x replay.
+    assert.equal(await evaluate('snapshotReplay.playing'), false, 'the 1x replay reaches its end');
+
+    await evaluate("(() => { const speed = document.querySelector('#replay-speed'); speed.value = '16'; speed.dispatchEvent(new Event('change', { bubbles: true })); })()");
     assert.equal(await evaluate("document.querySelector('#replay-speed').value"), '16');
-    const speedStart = await evaluate('snapshotReplay.index');
+    const speedStart = 0; // Play from the completed 1x run restarts at the first event.
     assert.ok(speedStart + 4 < initial.total, 'at least four events remain to measure 16x playback');
     const speedStartedAt = Date.now();
-    await evaluate("document.querySelector('#replay-play').click()");
-    await chrome.waitFor(`snapshotReplay.index >= ${speedStart + 4}`, 2_000);
-    assert.ok(Date.now() - speedStartedAt < 2_000, '16x advances four replay events within two seconds');
-    await chrome.waitFor('!snapshotReplay.playing', 20_000);
+    await chrome.click("document.querySelector('#replay-play')");
+    await chrome.waitFor(`snapshotReplay.index >= ${speedStart + 4}`, 10_000); // budget: hang-only ceiling for the measured four-event sample.
+    const speedFourEventMs = Date.now() - speedStartedAt;
+    assert.ok(speedFourEventMs * 4 < normalFourEventMs,
+      `16x advances four events at least four times faster than measured 1x (${speedFourEventMs}ms vs ${normalFourEventMs}ms)`);
+    await chrome.waitFor('!snapshotReplay.playing', 30_000); // budget: hang-only ceiling for the complete 16x replay.
     assert.equal(await evaluate('snapshotReplay.playing'), false, 'the replay reaches its end');
     const renderedStates = JSON.parse(await evaluate('JSON.stringify(window.__replayObserved.map((entry) => entry.status))'));
     const distinctStates = renderedStates.filter((state, index) => index === 0 || state !== renderedStates[index - 1]);
@@ -312,6 +329,7 @@ test('an exported roadmap has its own address under a folder, and Back and Forwa
     await settled(chrome, `${ready} && ${showing('items', '/demo/')}`);
     await press(chrome, `document.querySelector('[data-tab="roadmap"]')`);
     await chrome.waitFor(showing('roadmap', '/demo/#roadmap'));
+    await openRoadmapParts(chrome);
     const seen = await readRoadmap(chrome);
     assert.deepEqual(seen.cards[0].rows.map(({ id, label, tone, button }) => ({ id, label, tone, button })), [
       { id: '#1', label: 'verified', tone: 'ok', button: true },
@@ -344,6 +362,7 @@ test('an exported roadmap has its own address under a folder, and Back and Forwa
     for (const width of [375, 1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
       await chrome.waitFor(`innerWidth === ${width}`);
+      await openRoadmapParts(chrome);
       const layout = await readRoadmap(chrome);
       assert.ok(layout.document <= layout.client && layout.body <= layout.client, `${width}: no sideways scroll in the snapshot: ${JSON.stringify(layout)}`);
       await proofShot(chrome, 'snapshot-roadmap', width);

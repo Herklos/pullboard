@@ -151,7 +151,7 @@ test('real Chrome renders brief lists with inline paths [N26]', { timeout: 90_00
     for (const width of [375, 1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
       await chrome.waitFor(`innerWidth === ${width} && document.querySelector('#detail .text.muted ul') !== null`);
-      const seen = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+      const seen = JSON.parse(await chrome.stable(`JSON.stringify((() => {
         const text = document.querySelector('#detail .text.muted');
         const lists = [...text.querySelectorAll(':scope > ul.text-list')];
         const label = (list) => { let n = list.previousSibling; while (n && n.nodeType === 3 && !n.textContent.trim()) n = n.previousSibling; return n ? (n.nodeType === 3 ? n.textContent : n.textContent).trim().split('\\n').pop() : ''; };
@@ -180,7 +180,7 @@ test('real Chrome renders brief lists with inline paths [N26]', { timeout: 90_00
       assert.ok(seen.gap > 0.4 && seen.gap < 1.6, `${width}: one blank line between a list and the next label, as written: ${seen.gap.toFixed(2)} lines`);
       assert.ok(!seen.overflow, `${width}: nothing runs off the screen`);
     }
-    await chrome.evaluate("document.querySelector('[data-tab=\"shouts\"]').click()");
+    await chrome.click("document.querySelector('[data-tab=\"shouts\"]')");
     await chrome.waitFor("[...document.querySelectorAll('#feed code.block')].some((code) => code.textContent.includes('const greeting'))");
   } finally {
     if (chrome) await closeSnapshotChrome(chrome);

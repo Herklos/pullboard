@@ -542,6 +542,21 @@ function requiredModel(value, env = process.env) {
   return model;
 }
 
+/** Resolve an optional coordinator declaration while preserving the legacy unknown identity. */
+function optionalModel(value, env = process.env) {
+  if (value === undefined && !env.PULLBOARD_MODEL) return undefined;
+  return requiredModel(value, env);
+}
+
+/** Refuse to redeclare a coordinator whose linked board belongs to another checkout. */
+function refuseRemoteCoordinatorModel(ctx, command) {
+  const coordinator = withBoard(ctx, (board) => store.listAgents(board).find((agent) => agent.agent_id === COORDINATOR));
+  if (!coordinator) throw new Refused('NO_AGENT', 'the linked snapshot has no coordinator; restore a consistent relay snapshot before initializing');
+  if (ctx.info.isMain && coordinator.agent_path === ctx.info.root) return;
+  const name = displayAgentName(coordinator, ctx.config.agents.names);
+  throw new Refused('REMOTE_COORDINATOR_MODEL', `the coordinator's model is declared on the coordinator's own checkout (${name}); run pullboard ${command} there`);
+}
+
 /**
  * Who is asking: the coordinator in the main checkout, or the agent this worktree joined as.
  *
@@ -1189,12 +1204,17 @@ function setupCommands(io, { first, values }) {
   return {
     init: async () => {
       const info = repoInfo(io.cwd);
+      const model = optionalModel(values.model);
+      const linked = relayLinked(info.root);
+      const ctx = linked && model !== undefined ? context(io) : null;
+      if (model !== undefined && linked) refuseRemoteCoordinatorModel(ctx, 'init');
       const notes = initRepo({
         info,
+        model,
         openBoardHere: () => store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), io.clock),
         /** Keep a linked coordinator's canonical identity without writing a clone-local path. */
         register: (board, options) => {
-          if (!relayLinked(info.root)) return store.register(board, options);
+          if (!linked) return store.register(board, options);
           if (!board.db.prepare('SELECT 1 FROM agent WHERE agent_id=?').get(COORDINATOR)) {
             throw new Refused('NO_AGENT', 'the linked snapshot has no coordinator; restore a consistent relay snapshot before initializing');
           }
@@ -1202,6 +1222,9 @@ function setupCommands(io, { first, values }) {
         },
         closeBoard: store.closeBoard,
       });
+      if (linked && model !== undefined) await withBoard(ctx, (board) => ordered(ctx, board, 'register', [
+        { lane: COORDINATOR, path: info.root, model },
+      ]));
       io.result?.({ root: info.root, notes });
       const staging = notes.at(-1)?.startsWith('git add -f -- ') ? notes.at(-1) : null;
       (staging ? notes.slice(0, -1) : notes).forEach((note) => io.say(note));
@@ -1219,7 +1242,19 @@ function setupCommands(io, { first, values }) {
     },
     join: async () => {
       const ctx = context(io);
-      if (ctx.info.isMain) throw new Refused('MAIN_IS_COORDINATOR', 'the main checkout is the coordinator; join from a worktree: git worktree add ../<dir>');
+      if (ctx.info.isMain) {
+        if (first !== COORDINATOR) throw new Refused('MAIN_IS_COORDINATOR', 'the main checkout is the coordinator; join from a worktree: git worktree add ../<dir>');
+        const route = values.route ?? 'strong';
+        const model = requiredModel(values.model);
+        if (relayLinked(ctx.info.root)) refuseRemoteCoordinatorModel(ctx, 'join coordinator');
+        const id = await withBoard(ctx, async (board) => await ordered(ctx, board, 'register', [
+          { lane: COORDINATOR, path: ctx.info.root, route, family: values.family, model },
+        ]));
+        const displayName = displayAgentName({ agent_id: id, agent_model: model }, ctx.config.agents.names);
+        io.result?.({ agent: id, lane: COORDINATOR, route, path: ctx.info.root, model, displayName });
+        io.say(`declared ${displayName} in the coordinator lane`);
+        return 0;
+      }
       if (!first || first === COORDINATOR || !isLane(ctx.config, first)) {
         throw new Refused('NO_LANE', `no lane "${first ?? ''}"; lanes: ${laneNames(ctx.config).slice(1).join(', ') || 'none yet, declare them in pullboard.json'}`);
       }
@@ -1711,7 +1746,7 @@ async function submitHere(ctx, id) {
   if (!gate.isGreen) {
     const message = `the submission proof is red at ${commit.slice(0, 12)}; fix it, commit, submit again. ${submitGateReport(gate)}`;
     let comparison = { main: null, files: [], unavailable: 'main comparison could not be completed' };
-    try { comparison = await compareMainFailures(root, gate.profile, gateWaitReporter(ctx.io)); } catch { /* Keep the original gate refusal if main evidence is unavailable. */ }
+    try { comparison = await compareMainFailures(root, gate.profile, gateWaitReporter(ctx.io), gate.output); } catch { /* Keep the original gate refusal if main evidence is unavailable. */ }
     const mainNote = withBoard(ctx, board => mainRedMessage(root, board, gate.profile, comparison));
     throw new Refused('GATE_RED', `${message}${mainNote ? `\n${mainNote}` : ''}`);
   }
@@ -2912,7 +2947,10 @@ async function runMain(argv, streams) {
     io.relayCommand = { cliOperation: command === 'done' ? 'submit' : command, cwd: resolve(io.cwd),
       positionals: parsed.positionals.slice(1),
       values: Object.fromEntries(Object.keys(parsed.values).filter(key => key !== 'json').sort().map(key => [key, parsed.values[key]])) };
-    sync = Boolean(command) && !parsed.values.help && !parsed.values.version && !['help', 'version', 'hook', 'init', 'relay', 'tour'].includes(command);
+    sync = Boolean(command) && !parsed.values.help && !parsed.values.version
+      && !['help', 'version', 'hook', 'init', 'relay', 'tour'].includes(command)
+      // A coordinator declaration on a linked clone must refuse before auto-link or relay sync.
+      && !(command === 'join' && parsed.positionals[1] === COORDINATOR);
     needsRepo = !(parsed.values.help || parsed.values.version || command === 'help' || command === 'version');
   } catch { sync = false; needsRepo = false; }
   if (parsed) {

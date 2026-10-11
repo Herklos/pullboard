@@ -111,8 +111,8 @@ function childResult(root, env, argv, observedSnapshotUploads, initialSnapshotUp
   });
 }
 
-/** Start an isolated board with fallback-file keys and a real authorized loopback relay. */
-export async function relayClientFixture(t, { cliChildren } = {}) {
+/** Start an isolated board and authorized loopback relay; a null coordinatorModel keeps its initial identity unknown. */
+export async function relayClientFixture(t, { cliChildren, coordinatorModel } = {}) {
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-relay-cleanup-')));
   const root = join(scratch, 'repo');
   const home = join(scratch, 'home');
@@ -133,6 +133,8 @@ export async function relayClientFixture(t, { cliChildren } = {}) {
     GIT_AUTHOR_NAME: 'Relay Fixture', GIT_AUTHOR_EMAIL: 'relay-fixture@example.com',
     GIT_COMMITTER_NAME: 'Relay Fixture', GIT_COMMITTER_EMAIL: 'relay-fixture@example.com',
   };
+  if (coordinatorModel === null) delete env.PULLBOARD_MODEL;
+  else if (coordinatorModel !== undefined) env.PULLBOARD_MODEL = coordinatorModel;
   writeFileSync(tracePreload, `
 import { appendFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -517,7 +519,9 @@ globalThis.fetch = function tracedFetch(input, init) {
     assert.equal(runFixtureChild('git', ['clone', bare, otherRoot], { cwd: scratch, env: otherEnv, encoding: 'utf8' }).status, 0, 'second device is a real clone');
     assert.equal(runFixtureChild('git', ['remote', 'set-url', 'origin', 'git@github.com:fixture/repository.git'], { cwd: otherRoot, env: otherEnv, encoding: 'utf8' }).status, 0, 'clone names the same authorized repository');
     const run = (...args) => childResult(otherRoot, otherEnv, [CLI, ...args, '--json']);
-    assert.equal((await run('init')).code, 0, 'the cloned project initializes its private local board');
+    const initEnv = { ...otherEnv };
+    delete initEnv.PULLBOARD_MODEL; // Pairing imports the source coordinator's declaration.
+    assert.equal((await childResult(otherRoot, initEnv, [CLI, 'init', '--json'])).code, 0, 'the cloned project initializes its private local board');
     const joined = await run('relay', 'join', code, '--url', origin);
     const document = joined.document;
     if (joined.code !== 0) throw new Error('real clone did not join the one-use pairing code');

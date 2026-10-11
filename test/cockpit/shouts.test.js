@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { after, test } from 'node:test';
 import { register, shout as shoutOnBoard } from '../../src/board.js';
 import { tapTarget, SPEC, machine, project, build, startView, styleOf, element, storage, openPage, boardId, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, earlier, shoutsAt, press, pressedInto } from './fixture.js';
+import { assertFirstStateDelay, press as sharedPress } from './stable.js';
 
 
 test('the shouts tab counts shouts you have not seen [N26]', async () => {
@@ -127,12 +128,12 @@ test('a short code chip at a line end stays whole, and long code stays one chip 
   try {
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
     await chrome.waitFor('!!document.querySelector(\'[data-tab="shouts"]\')');
-    await chrome.evaluate('document.querySelector(\'[data-tab="shouts"]\').click()');
+    await chrome.click('document.querySelector(\'[data-tab="shouts"]\')');
     await chrome.waitFor(`[...document.querySelectorAll('#feed code.inline')].some((code) => code.textContent === ${JSON.stringify(wide)})`);
     for (const width of [320, 375, 1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
       await chrome.waitFor(`innerWidth === ${width}`);
-      const seen = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+      const seen = JSON.parse(await chrome.stable(`JSON.stringify((() => {
         const chips = [...document.querySelectorAll('#feed code.inline')];
         const flag = chips.find((code) => code.textContent === '--flag'), path = chips.find((code) => code.textContent === ${JSON.stringify(long)});
         const text = flag.parentElement.closest('div');
@@ -200,18 +201,19 @@ test('real Chrome styles shout code and item text without growing linked lines [
     });
     await chrome.send('Log.enable');
     await chrome.waitFor('typeof data !== "undefined" && data?.project?.shouts?.length >= 4 && document.querySelectorAll("#feed > .shout").length >= 4');
+    await assertFirstStateDelay(chrome, t);
     await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
     await chrome.waitFor('innerWidth === 1280 && document.querySelector("#detail .text.muted code.inline")?.getBoundingClientRect().width > 0');
-    const desktopBrief = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+    const desktopBrief = JSON.parse(await chrome.stable(`JSON.stringify((() => {
       const code=document.querySelector('#detail .text.muted code.inline'), line=code?.parentElement;
       const rect=code?.getBoundingClientRect(), lineRect=line?.getBoundingClientRect();
       return {display:code&&getComputedStyle(code).display,width:rect?.width,lineWidth:lineRect?.width};
     })())`));
     assert.equal(desktopBrief.display, 'inline', `1280px brief code computes inline: ${JSON.stringify(desktopBrief)}`);
     assert.ok(desktopBrief.width > 0 && desktopBrief.width < desktopBrief.lineWidth / 2, `1280px brief code is a compact chip: ${JSON.stringify(desktopBrief)}`);
-    await chrome.evaluate("document.querySelector('#new-item').click()");
+    await chrome.click("document.querySelector('#new-item')");
     await chrome.waitFor("!document.querySelector('#add-form').hidden && getComputedStyle(document.querySelector('#add-form')).display === 'grid'");
-    const desktopForm = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+    const desktopForm = JSON.parse(await chrome.stable(`JSON.stringify((() => {
       const form=document.querySelector('#add-form'), box=form.getBoundingClientRect();
       const fields=[...form.querySelectorAll('label')].map(field=>{const r=field.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height};});
       return {display:getComputedStyle(form).display,box:{left:box.left,right:box.right,top:box.top,bottom:box.bottom,width:box.width,height:box.height},fields,actions:getComputedStyle(form.querySelector('.actions')).display};
@@ -220,11 +222,11 @@ test('real Chrome styles shout code and item text without growing linked lines [
     assert.equal(desktopForm.actions, 'flex', `1280px add-item actions keep their row: ${JSON.stringify(desktopForm)}`);
     assert.equal(desktopForm.fields.length, 5, '1280px add-item form keeps all five fields');
     assert.ok(desktopForm.fields.every((field, index, fields) => field.width > 0 && field.left >= desktopForm.box.left && field.right <= desktopForm.box.right && field.top >= desktopForm.box.top && field.bottom <= desktopForm.box.bottom && (index === 0 || field.top >= fields[index - 1].bottom)), `1280px add-item fields remain a non-overlapping grid: ${JSON.stringify(desktopForm)}`);
-    await chrome.evaluate("document.querySelector('#add-cancel').click()");
+    await chrome.click("document.querySelector('#add-cancel')");
     await chrome.waitFor("document.querySelector('#add-form').hidden");
-    await chrome.evaluate(`document.querySelector('[data-tab="shouts"]').click()`);
+    await chrome.click(`document.querySelector('[data-tab="shouts"]')`);
 
-    const rendered = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+    const rendered = JSON.parse(await chrome.stable(`JSON.stringify((() => {
       const shout = [...document.querySelectorAll('#feed > .shout')].find((row) => row.textContent.includes('Inline'));
       const shoutCode=[...(shout?.querySelectorAll('code.inline')||[])].find(code=>code.textContent==='--flag'), shoutLine=shout?.querySelector('.text');
       const shoutRect=shoutCode?.getBoundingClientRect(), shoutLineRect=shoutLine?.getBoundingClientRect();
@@ -274,10 +276,10 @@ test('real Chrome styles shout code and item text without growing linked lines [
     assert.match(rendered.outsideHtml, /&lt;script&gt;alert\(2\)&lt;\/script&gt; outside code/, 'script text outside code is escaped too');
     assert.equal(rendered.previewLinks, 1, 'only a path:lines@SHA reference with the original whole-word boundaries becomes an actionable preview');
     assert.match(rendered.shoutHtml, /Invalid prefix:<code class="inline long" title="SPEC\.md:1-2@[0-9a-f]+">SPEC\.md:1-2@/, 'a path:lines@SHA suffix after a colon stays plain inline code');
-    await chrome.evaluate(`document.querySelector('#feed button[data-code^="SPEC.md:1-2@"]').click()`);
+    await chrome.click(`document.querySelector('#feed button[data-code^="SPEC.md:1-2@"]')`);
     await chrome.waitFor(`document.querySelector('#feed button[data-code^="SPEC.md:1-2@"]').getAttribute('aria-expanded') === 'true'`);
     await chrome.waitFor(`document.querySelector('#feed button[data-code^="SPEC.md:1-2@"] + .code-ref .code-wrap > .code')?.textContent.includes('Demo spec')`);
-    assert.match(await chrome.evaluate(`document.querySelector('#feed button[data-code^="SPEC.md:1-2@"] + .code-ref .code-wrap > .code')?.textContent || ''`), /Demo spec/, 'the original code preview still opens its referenced lines');
+    assert.match(await chrome.stable(`document.querySelector('#feed button[data-code^="SPEC.md:1-2@"] + .code-ref .code-wrap > .code')?.textContent || ''`), /Demo spec/, 'the original code preview still opens its referenced lines');
     assert.match(rendered.askHtml, /<code class="inline cmd(?: long" title="pullboard shout --decision)?">pullboard shout --decision<\/code>/, 'needs-you uses the same code renderer');
     assert.equal(rendered.askNestedButtons, 0, 'formatted text in an ask cannot nest interactive controls');
     assert.equal(rendered.needsNestedButtons, 0, 'needs-you keeps its button markup valid');
@@ -294,18 +296,18 @@ test('real Chrome styles shout code and item text without growing linked lines [
     assert.ok(Math.abs(rendered.linkedMetrics.height - rendered.linkedMetrics.lineHeight) < 1, 'the linked desktop box equals one computed line-height');
     await chrome.send('Emulation.setDeviceMetricsOverride', { width: 375, height: 900, deviceScaleFactor: 1, mobile: false });
     await chrome.waitFor('innerWidth === 375 && document.querySelector("#feed > .shout")?.getBoundingClientRect().width > 0');
-    await chrome.evaluate("document.querySelector('[data-tab=items]').click()");
+    await chrome.click("document.querySelector('[data-tab=items]')");
     await chrome.waitFor('document.querySelector("[data-pane=items]:not([hidden])") && document.querySelector("#detail .text.muted code.inline")?.getBoundingClientRect().width > 0');
-    const phoneBrief = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+    const phoneBrief = JSON.parse(await chrome.stable(`JSON.stringify((() => {
       const code=document.querySelector('#detail .text.muted code.inline'), line=code?.parentElement;
       const rect=code?.getBoundingClientRect(), lineRect=line?.getBoundingClientRect();
       return {display:code&&getComputedStyle(code).display,width:rect?.width,lineWidth:lineRect?.width};
     })())`));
     assert.equal(phoneBrief.display, 'inline', `375px brief code computes inline: ${JSON.stringify(phoneBrief)}`);
     assert.ok(phoneBrief.width > 0 && phoneBrief.width < phoneBrief.lineWidth / 2, `375px brief code is a compact chip: ${JSON.stringify(phoneBrief)}`);
-    await chrome.evaluate("document.querySelector('#new-item').click()");
+    await chrome.click("document.querySelector('#new-item')");
     await chrome.waitFor("!document.querySelector('#add-form').hidden && getComputedStyle(document.querySelector('#add-form')).display === 'grid'");
-    const phoneForm = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+    const phoneForm = JSON.parse(await chrome.stable(`JSON.stringify((() => {
       const form=document.querySelector('#add-form'), box=form.getBoundingClientRect();
       const fields=[...form.querySelectorAll('label')].map(field=>{const r=field.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height};});
       return {display:getComputedStyle(form).display,box:{left:box.left,right:box.right,top:box.top,bottom:box.bottom,width:box.width,height:box.height},fields,actions:getComputedStyle(form.querySelector('.actions')).display};
@@ -314,11 +316,11 @@ test('real Chrome styles shout code and item text without growing linked lines [
     assert.equal(phoneForm.actions, 'flex', `375px add-item actions keep their row: ${JSON.stringify(phoneForm)}`);
     assert.equal(phoneForm.fields.length, 5, '375px add-item form keeps all five fields');
     assert.ok(phoneForm.fields.every((field, index, fields) => field.width > 0 && field.left >= phoneForm.box.left && field.right <= phoneForm.box.right && field.top >= phoneForm.box.top && field.bottom <= phoneForm.box.bottom && (index === 0 || field.top >= fields[index - 1].bottom)), `375px add-item fields remain a non-overlapping grid: ${JSON.stringify(phoneForm)}`);
-    await chrome.evaluate("document.querySelector('#add-cancel').click()");
+    await chrome.click("document.querySelector('#add-cancel')");
     await chrome.waitFor("document.querySelector('#add-form').hidden");
-    await chrome.evaluate("document.querySelector('[data-tab=shouts]').click()");
+    await chrome.click("document.querySelector('[data-tab=shouts]')");
     await chrome.waitFor('document.querySelector("[data-pane=shouts]:not([hidden])") && document.querySelector("#feed code.inline")?.getBoundingClientRect().width > 0');
-    const phoneMetrics = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+    const phoneMetrics = JSON.parse(await chrome.stable(`JSON.stringify((() => {
       /** Measure the complete rendered content line box, including its item link. */
       const lineMetrics = (message) => {
         const row = [...document.querySelectorAll('#feed > .shout')].find((entry) => {
@@ -410,15 +412,15 @@ test('shouts read as cards [N26]', { timeout: 120_000 }, async (t) => {
   try {
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
     await chrome.waitFor('typeof data !== "undefined" && data?.project?.shouts?.length >= 12');
-    await chrome.evaluate("document.querySelector('[data-tab=shouts]').click()");
+    await chrome.click("document.querySelector('[data-tab=shouts]')");
     await chrome.waitFor('document.querySelector("[data-pane=shouts]:not([hidden]) #feed .shout")');
-    await chrome.evaluate("(() => { const fold = document.querySelector('.asks-toggle[data-fold=\"waiting\"]'); if (fold && fold.getAttribute('aria-expanded') !== 'true') fold.click(); })()");
-    const ids = JSON.parse(await chrome.evaluate('JSON.stringify(Object.fromEntries(data.project.shouts.map((s) => [s.shout_text, s.shout_id])))'));
-    const answerId = await chrome.evaluate(`data.project.shouts.find((s) => s.shout_answers === ${asked.shout_id}).shout_id`);
-    const stamps = JSON.parse(await chrome.evaluate('JSON.stringify(data.project.shouts.map((s) => [s.shout_id, s.shout_at]))'));
+    await chrome.stable("(document.querySelector('.asks-toggle[data-fold=\"waiting\"]'))?.getAttribute('aria-expanded') !== 'true' && !!(document.querySelector('.asks-toggle[data-fold=\"waiting\"]'))").then(open => open ? chrome.click("document.querySelector('.asks-toggle[data-fold=\"waiting\"]')") : undefined);
+    const ids = JSON.parse(await chrome.stable('JSON.stringify(Object.fromEntries(data.project.shouts.map((s) => [s.shout_text, s.shout_id])))'));
+    const answerId = await chrome.stable(`data.project.shouts.find((s) => s.shout_answers === ${asked.shout_id}).shout_id`);
+    const stamps = JSON.parse(await chrome.stable('JSON.stringify(data.project.shouts.map((s) => [s.shout_id, s.shout_at]))'));
 
     /** Everything a card shows, measured where it stands. */
-    const read = async () => JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+    const read = async () => JSON.parse(await chrome.stable(`JSON.stringify((() => {
       const box = (e) => { if (!e) return null; const r = e.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height }; };
       const style = (e) => getComputedStyle(e);
       const card = (place, id) => {
@@ -551,26 +553,26 @@ test('shouts read as cards [N26]', { timeout: 120_000 }, async (t) => {
 
     // Folding: more opens the whole shout, less closes it, and an open shout stays open across a refresh.
     await shoutsAt(chrome, 1280, 'light');
-    const foldOf = () => chrome.evaluate(`JSON.stringify((() => { const c = document.querySelector('#feed #shout-${ids[long]}'), t = c.querySelector('.text'); return [c.querySelector('.more').textContent, Math.round(t.clientHeight / parseFloat(getComputedStyle(t).lineHeight))]; })())`).then(JSON.parse);
-    await chrome.evaluate(`document.querySelector('#feed #shout-${ids[long]} .more').click()`);
+    const foldOf = () => chrome.stable(`JSON.stringify((() => { const c = document.querySelector('#feed #shout-${ids[long]}'), t = c.querySelector('.text'); return [c.querySelector('.more').textContent, Math.round(t.clientHeight / parseFloat(getComputedStyle(t).lineHeight))]; })())`).then(JSON.parse);
+    await chrome.click(`document.querySelector('#feed #shout-${ids[long]} .more')`);
     assert.deepEqual(await foldOf(), ['less', 12], 'more shows every line');
     box.run(alpha.web, 'shout', 'all', 'A later shout.');
     await chrome.waitFor(`data.project.shouts.some((s) => s.shout_text === 'A later shout.') && document.querySelector('#feed .shout .text')?.textContent === 'A later shout.'`, 15_000);
     assert.deepEqual(await foldOf(), ['less', 12], 'an open shout stays open across a refresh');
-    await chrome.evaluate(`document.querySelector('#feed #shout-${ids[long]} .more').click()`);
+    await chrome.click(`document.querySelector('#feed #shout-${ids[long]} .more')`);
     assert.deepEqual(await foldOf(), ['more', 6], 'less folds it again');
 
     // The block opens on its header to the lines it names, in its own frame.
     const blockRef = `document.querySelector('#feed #shout-${ids[blockShout]} .code-ref > button.ref.block')`;
-    await chrome.evaluate(`${blockRef}.click()`);
+    await chrome.click(`${blockRef}`);
     await chrome.waitFor(`${blockRef}.parentElement.classList.contains('open') && ${blockRef}.getAttribute('aria-expanded') === 'true' && ${blockRef}.parentElement.querySelector('.code-wrap .code')?.textContent.includes('Demo spec')`, 15_000);
 
     // The short label still opens the code it names, at that commit.
     const deepRef = `[...document.querySelectorAll('#feed #shout-${ids[refsShout]} button[data-code]')][1]`;
-    await chrome.evaluate(`${deepRef}.click()`);
+    await chrome.click(`${deepRef}`);
     await chrome.waitFor(`${deepRef}.getAttribute('aria-expanded') === 'true' && ${deepRef}.nextElementSibling?.textContent.includes('Deep line one')`, 15_000);
     // An inline reference keeps its label in the sentence and opens the same block a reference on its own line is.
-    const opened = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+    const opened = JSON.parse(await chrome.stable(`JSON.stringify((() => {
       const inline = ${deepRef}, block = inline.nextElementSibling, header = block?.querySelector(':scope > button.ref.block');
       const standalone = document.querySelector('#feed #shout-${ids[blockShout]} .code-ref.open');
       return { label: !inline.classList.contains('block') && inline.textContent, next: block?.className, header: header && [header.dataset.code, header.textContent, header.getAttribute('aria-expanded')],
@@ -615,13 +617,13 @@ test('the shout composer, agent filter and agents panel [N26]', { timeout: 120_0
   try {
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
     await chrome.waitFor('typeof data !== "undefined" && data?.project?.shouts?.length >= 4');
-    await chrome.evaluate("document.querySelector('[data-tab=shouts]').click()");
+    await chrome.click("document.querySelector('[data-tab=shouts]')");
     await chrome.waitFor('document.querySelector("[data-pane=shouts]:not([hidden]) #feed .shout")');
-    await chrome.evaluate("(() => { const fold = document.querySelector('.fold-line[data-fold=\"idle\"]'); if (fold && fold.getAttribute('aria-expanded') !== 'true') fold.click(); })()");
-    const agents = JSON.parse(await chrome.evaluate('JSON.stringify(data.project.agents.map((a) => [a.agent_id, a.agent_path]))'));
+    await chrome.stable("(document.querySelector('.fold-line[data-fold=\"idle\"]'))?.getAttribute('aria-expanded') !== 'true' && !!(document.querySelector('.fold-line[data-fold=\"idle\"]'))").then(open => open ? chrome.click("document.querySelector('.fold-line[data-fold=\"idle\"]')") : undefined);
+    const agents = JSON.parse(await chrome.stable('JSON.stringify(data.project.agents.map((a) => [a.agent_id, a.agent_path]))'));
     assert.deepEqual(agents.filter(([, path]) => [alpha.web, idle, fresh].includes(path)).map(([id]) => id).sort(), ['web-1', 'web-2', 'web-3'], 'three agents joined the web lane');
-    const total = await chrome.evaluate('data.project.shouts.length');
-    const state = async () => JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+    const total = await chrome.stable('data.project.shouts.length');
+    const state = async () => JSON.parse(await chrome.stable(`JSON.stringify((() => {
       const box = (e) => { if (!e) return null; const r = e.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height }; };
       const pane = document.querySelector('[data-pane=shouts]'), list = document.querySelector('#agents');
       return {
@@ -636,7 +638,7 @@ test('the shout composer, agent filter and agents panel [N26]', { timeout: 120_0
         kept: (() => { try { return localStorage.getItem('pb.agents'); } catch { return 'unreadable'; } })(),
       };
     })())`));
-    const click = (selector) => chrome.evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
+    const click = (selector) => chrome.click(`document.querySelector(${JSON.stringify(selector)})`);
     const key = async (modifiers) => {
       for (const type of ['keyDown', 'keyUp']) await chrome.send('Input.dispatchKeyEvent', { type, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, modifiers, ...(type === 'keyDown' ? { text: '\r', unmodifiedText: '\r' } : {}) });
     };
@@ -673,22 +675,22 @@ test('the shout composer, agent filter and agents panel [N26]', { timeout: 120_0
     await click('#agents .all-agents');
 
     // The message grows as it is typed; Shift+Enter starts a line, Enter sends.
-    await chrome.evaluate("document.querySelector('#shout-text').focus()");
-    const height = () => chrome.evaluate("document.querySelector('#shout-text').getBoundingClientRect().height");
+    await chrome.stable("document.querySelector('#shout-text').focus()");
+    const height = () => chrome.stable("document.querySelector('#shout-text').getBoundingClientRect().height");
     const one = await height();
     await chrome.send('Input.insertText', { text: 'First line' });
     await key(8);
     await chrome.send('Input.insertText', { text: 'second line' });
     await key(8);
     await chrome.send('Input.insertText', { text: 'third line' });
-    assert.equal(await chrome.evaluate("document.querySelector('#shout-text').value"), 'First line\nsecond line\nthird line', 'Shift+Enter starts a new line');
+    assert.equal(await chrome.stable("document.querySelector('#shout-text').value"), 'First line\nsecond line\nthird line', 'Shift+Enter starts a new line');
     assert.ok(await height() > one + 20, 'the message grows as it is typed');
-    assert.equal(await chrome.evaluate('data.project.shouts.length'), total, 'and sends nothing');
+    assert.equal(await chrome.stable('data.project.shouts.length'), total, 'and sends nothing');
     await key(0);
     await chrome.waitFor("data.project.shouts.some((s) => s.shout_text === 'First line\\nsecond line\\nthird line' && s.shout_to === 'coordinator')", 15_000);
     await chrome.waitFor("document.querySelector('#shout-text').value === ''");
     assert.ok(Math.abs(await height() - one) < 1, 'Enter sends, and the bar shrinks back to one line');
-    assert.ok(await chrome.evaluate("!document.querySelector('#console').hidden && !document.querySelector('.composer #console') && document.querySelector('#console').getBoundingClientRect().bottom <= document.querySelector('.composer').getBoundingClientRect().top"),
+    assert.ok(await chrome.stable("!document.querySelector('#console').hidden && !document.querySelector('.composer #console') && document.querySelector('#console').getBoundingClientRect().bottom <= document.querySelector('.composer').getBoundingClientRect().top"),
       'the result stands above the bar, never inside it');
 
     // The panel hides and shows, and the browser remembers.
@@ -698,7 +700,7 @@ test('the shout composer, agent filter and agents panel [N26]', { timeout: 120_0
     assert.deepEqual([s.bare, s.panel, s.toggle, s.kept], [true, false, 'Show agents', 'hidden'], 'Hide agents hides the panel and remembers it');
     await chrome.send('Page.reload');
     await chrome.waitFor('typeof data !== "undefined" && data?.project?.shouts?.length > 0 && !!document.querySelector("[data-tab=shouts]")');
-    await chrome.evaluate("document.querySelector('[data-tab=shouts]').click()");
+    await chrome.click("document.querySelector('[data-tab=shouts]')");
     await chrome.waitFor('document.querySelector("[data-pane=shouts]:not([hidden]) #feed .shout")');
     s = await state();
     assert.deepEqual([s.bare, s.panel, s.toggle], [true, false, 'Show agents'], 'still hidden after a reload');
@@ -735,11 +737,11 @@ test('the composer goes to the coordinator and says who heard [N26]', { timeout:
   try {
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
     await chrome.waitFor('typeof data !== "undefined" && data?.project?.shouts?.length >= 1');
-    await chrome.evaluate("document.querySelector('[data-tab=shouts]').click()");
+    await chrome.click("document.querySelector('[data-tab=shouts]')");
     await chrome.waitFor('document.querySelector("[data-pane=shouts]:not([hidden]) #feed .shout")');
-    await chrome.evaluate("document.querySelector('#agents .fold-line[data-fold=\"idle\"]').click()");
+    await chrome.click("document.querySelector('#agents .fold-line[data-fold=\"idle\"]')");
     /** The composer and every shout of the person's, with what its Heard line says. */
-    const read = async () => JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+    const read = async () => JSON.parse(await chrome.stable(`JSON.stringify((() => {
       const chip = document.querySelector('#shout-to-chip'), clear = chip.querySelector('[data-to-clear]');
       return {
         page: { width: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth, body: document.body.scrollWidth },
@@ -767,17 +769,17 @@ test('the composer goes to the coordinator and says who heard [N26]', { timeout:
         // A shout to a lane no agent has joined reached no one, so it has not been heard.
         assert.deepEqual(r.heard.find(([text]) => text === 'Docs, anyone?')?.slice(1), ['Not heard yet', 0, ''], `${at}: a shout that reached no agent says Not heard yet`);
         // A picked agent's chip has an x that is a 44px square target; picking the agent again puts it back.
-        await chrome.evaluate(`document.querySelector('#agents [data-agent="web-1"]').click()`);
+        await chrome.click(`document.querySelector('#agents [data-agent="web-1"]')`);
         const picked = await read();
         assert.ok(picked.chip === 'to web-1 (Test Model)×' && picked.clear[0] >= tapTarget(width) && picked.clear[1] >= tapTarget(width), `${at}: the chip's x is a square target: ${JSON.stringify(picked.clear)}`);
-        await chrome.evaluate(`document.querySelector('#agents [data-agent="web-1"]').click()`);
+        await chrome.click(`document.querySelector('#agents [data-agent="web-1"]')`);
         assert.equal((await read()).chip, null, `${at}: picking the agent again returns the composer to the coordinator`);
       }
     }
 
     // The person shouts with Enter: it goes to the coordinator, and says it is not heard until the coordinator reads it.
     await shoutsAt(chrome, 1280, 'light');
-    await chrome.evaluate("document.querySelector('#shout-text').focus()");
+    await chrome.stable("document.querySelector('#shout-text').focus()");
     await chrome.send('Input.insertText', { text: 'Ship the greeting?' });
     await key();
     await chrome.waitFor("data.project.shouts.some((s) => s.shout_from === 'person' && s.shout_to === 'coordinator' && s.shout_text === 'Ship the greeting?')", 15_000);
@@ -795,20 +797,20 @@ test('the composer goes to the coordinator and says who heard [N26]', { timeout:
     assert.deepEqual(all.slice(2), [2, 'Heard by coordinator (unknown), web-1 (Test Model)'], 'with their avatars, and every name on hover');
 
     // Picking an agent addresses the composer to it; the chip's x returns it to the coordinator.
-    await chrome.evaluate(`document.querySelector('#agents [data-agent="web-1"]').click()`);
+    await chrome.click(`document.querySelector('#agents [data-agent="web-1"]')`);
     let r = await read();
     assert.deepEqual([r.chip, r.to, r.placeholder], ['to web-1 (Test Model)×', 'web-1', 'Shout to web-1 (Test Model)'], 'a picked agent shows as a chip');
-    const clearAt = tapTarget(await chrome.evaluate('innerWidth'));
+    const clearAt = tapTarget(await chrome.stable('innerWidth'));
     assert.ok(r.clear[0] >= clearAt && r.clear[1] >= clearAt, 'whose x is a square target');
-    await chrome.evaluate(`document.querySelector('#shout-to-chip [data-to-clear]').click()`);
+    await chrome.click(`document.querySelector('#shout-to-chip [data-to-clear]')`);
     r = await read();
     assert.deepEqual([r.chip, r.to, r.placeholder], [null, 'coordinator', 'Shout to the coordinator'], 'the x returns it to the coordinator');
     // An item's Shout button addresses its lane the same way.
-    await chrome.evaluate("document.querySelector('[data-tab=items]').click()");
+    await chrome.click("document.querySelector('[data-tab=items]')");
     await chrome.waitFor('!!document.querySelector("#chain [data-item=\\"1\\"]")');
-    await chrome.evaluate(`document.querySelector('#chain [data-item="1"]').click()`);
+    await chrome.click(`document.querySelector('#chain [data-item="1"]')`);
     await chrome.waitFor('!!document.querySelector("#detail [data-shout]")');
-    await chrome.evaluate(`document.querySelector('#detail [data-shout]').click()`);
+    await chrome.click(`document.querySelector('#detail [data-shout]')`);
     await chrome.waitFor("!document.querySelector('[data-pane=shouts]').hidden");
     for (const width of [375, 1280]) {
       await shoutsAt(chrome, width, 'dark');
@@ -843,8 +845,8 @@ test("a waiting ask's who and when stay on one line with wide fonts [N26]", { ti
     await press(chrome, "document.querySelector('.asks-toggle')");
     await pressedInto(chrome, "!!document.querySelector('#decisions .shout:not(:has(.answer)) header')");
     // Change font metrics only: the production layout must fit the same real waiting ask.
-    await chrome.evaluate("(() => { const sheet = document.styleSheets[0]; sheet.insertRule('#decisions .shout header { font-family: monospace; letter-spacing: 1px; }', sheet.cssRules.length); })()");
-    const result = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+    await chrome.stable("(() => { const sheet = document.styleSheets[0]; sheet.insertRule('#decisions .shout header { font-family: monospace; letter-spacing: 1px; }', sheet.cssRules.length); })()");
+    const result = JSON.parse(await chrome.stable(`JSON.stringify((() => {
       const card = document.querySelector('#decisions .shout:not(:has(.answer))'), header = card.querySelector('header');
       const rect = (element) => { const r = element.getBoundingClientRect(); return { left:r.left, right:r.right, top:r.top, bottom:r.bottom, width:r.width, height:r.height }; };
       const who = header.querySelector('.who'), address = who.querySelector('.agent-id') || who, age = header.querySelector('time'), kind = header.querySelector('.mark');
@@ -936,28 +938,19 @@ test('shout cards fit beside a classic scrollbar [N26]', { timeout: 120_000 }, a
     await chrome.waitFor('typeof data !== "undefined" && data?.project?.shouts?.length >= 12');
     /** Press a real mouse at an uncovered control after layout settles. */
     const press = async (selector) => {
-      const point = await chrome.evaluate(`(async () => {
-        const e=document.querySelector(${JSON.stringify(selector)}); e.scrollIntoView({block:'center',behavior:'instant'});
-        await new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)));
-        const r=e.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2,hit=document.elementFromPoint(x,y);
-        if(!r.width||!r.height||(hit!==e&&!e.contains(hit)))throw Error('mouse target is hidden or covered');
-        return {x,y};
-      })()`);
-      for (const type of ['mouseMoved','mousePressed','mouseReleased']) await chrome.send('Input.dispatchMouseEvent', {
-        type,...point,...(type==='mouseMoved'?{}:{button:'left',clickCount:1}),
-      });
+      await sharedPress(chrome, `document.querySelector(${JSON.stringify(selector)})`);
     };
     await press('[data-tab="shouts"]');
     await chrome.waitFor('document.querySelector("[data-pane=shouts]:not([hidden]) #feed .shout")');
-    if (await chrome.evaluate(`document.querySelector('.asks-toggle[data-fold="waiting"]')?.getAttribute('aria-expanded') === 'false'`)) await press('.asks-toggle[data-fold="waiting"]');
+    if (await chrome.stable(`document.querySelector('.asks-toggle[data-fold="waiting"]')?.getAttribute('aria-expanded') === 'false'`)) await press('.asks-toggle[data-fold="waiting"]');
     for (const font of ['monospace', '']) for (const scheme of ['light','dark']) {
       // A portable fallback exercises the wider font metrics used by CI, alongside the native font.
-      await chrome.evaluate(`document.documentElement.style.setProperty('--sans', ${JSON.stringify(font)})`);
+      await chrome.stable(`document.documentElement.style.setProperty('--sans', ${JSON.stringify(font)})`);
       await shoutsAt(chrome,375,scheme);
-      const gutter=await chrome.evaluate('innerWidth-document.documentElement.clientWidth');
+      const gutter=await chrome.stable('innerWidth-document.documentElement.clientWidth');
       assert.ok(gutter>=0&&gutter<=30, 'the fixture measures the browser scrollbar before selecting the viewport');
       await shoutsAt(chrome,360+gutter,scheme);
-      const metrics=await chrome.evaluate(`(() => {
+      const metrics=await chrome.stable(`(() => {
         const width=document.documentElement.clientWidth;
         const edge=e=>{const r=e.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width};};
         const cards=[...document.querySelectorAll('#feed .shout,#decisions .shout')];

@@ -94,7 +94,7 @@ function alert(text, expected) {
 
 test('coordinator resume ends with the exact measured-average flow alert [N32,R1,R2]', async t => {
   const box = fixture(t, { wait: 61 });
-  alert(await box.run(['resume']), 'flow: review wait average 61 min (1 measured; > 60 min); bottleneck: build (66.67% of 300 measured cycle min); next: add a builder when open work is available');
+  alert(await box.run(['resume']), 'flow: review wait average 1 h 1 min (1 measured; > 1 h 0 min); bottleneck: build (66.67% of 5 h 0 min measured cycle time); next: add a builder when open work is available');
   const json = await box.run(['resume', '--json']);
   assert.deepEqual(json.flow, box.stats().flow, 'resume uses precisely the stats observation, stage and action');
   const stats = await box.run(['stats', '--json']);
@@ -104,13 +104,18 @@ test('coordinator resume ends with the exact measured-average flow alert [N32,R1
 
 test('coordinator resume alerts for the oldest unreviewed submission alone [N32,R1,R2]', async t => {
   const box = fixture(t, { wait: 10, age: 181 });
-  alert(await box.run(['resume']), 'flow: unreviewed #2 waiting 181 min (> 180 min); bottleneck: build (66.67% of 300 measured cycle min); next: add a builder when open work is available');
+  alert(await box.run(['resume']), 'flow: unreviewed #2 waiting 3 h 1 min (> 3 h 0 min); bottleneck: build (66.67% of 5 h 0 min measured cycle time); next: add a builder when open work is available');
   assert.deepEqual(box.stats().flow.unreviewed, { size: 1, oldest: { id: 2, since: '2026-10-10T05:19:00.000Z', ageMinutes: 181 } });
 });
 
 test('coordinator resume keeps both threshold trips in one final flow line [N32,R1,R2]', async t => {
   const box = fixture(t, { wait: 61, age: 181 });
-  alert(await box.run(['resume']), 'flow: review wait average 61 min (1 measured; > 60 min); unreviewed #2 waiting 181 min (> 180 min); bottleneck: build (66.67% of 300 measured cycle min); next: add a builder when open work is available');
+  const text = await box.run(['resume']);
+  alert(text, 'flow: review wait average 1 h 1 min (1 measured; > 1 h 0 min); unreviewed #2 waiting 3 h 1 min (> 3 h 0 min); bottleneck: build (66.67% of 5 h 0 min measured cycle time); next: add a builder when open work is available');
+  const flowLine = text.split('\n').find(line => line.startsWith('flow:'));
+  const minuteValues = [...flowLine.matchAll(/(\d+(?:\.\d+)?) min\b/gu)].map(match => Number(match[1]));
+  assert.ok(minuteValues.length > 0 && minuteValues.every(value => Number.isInteger(value) && value >= 0 && value < 60),
+    `every displayed minute unit is a rounded remainder below 60: ${flowLine}`);
 });
 
 test('coordinator resume adds no alert at exact healthy threshold boundaries [N32,R1,R2]', async t => {
@@ -128,13 +133,13 @@ test('coordinator resume adds no alert to an unmeasured healthy board [N32,R1,R2
 
 test('coordinator resume names an old waiting item without inventing a measured bottleneck [N32,R1,R2]', async t => {
   const box = fixture(t, { age: 181 });
-  alert(await box.run(['resume']), 'flow: unreviewed #1 waiting 181 min (> 180 min); bottleneck: not measured yet');
+  alert(await box.run(['resume']), 'flow: unreviewed #1 waiting 3 h 1 min (> 3 h 0 min); bottleneck: not measured yet');
 });
 
 for (const reservation of ['expired', 'released']) {
   test(`coordinator resume counts an ${reservation} review as unreserved from final submit [N32,R1,R2]`, async t => {
     const box = fixture(t, { age: 181, reservation });
-    alert(await box.run(['resume']), 'flow: unreviewed #1 waiting 181 min (> 180 min); bottleneck: not measured yet');
+    alert(await box.run(['resume']), 'flow: unreviewed #1 waiting 3 h 1 min (> 3 h 0 min); bottleneck: not measured yet');
   });
 }
 
@@ -156,6 +161,6 @@ test('agent resume keeps its next step without a coordinator flow alert [N32,R1,
 
 test('coordinator resume finds the oldest unreserved item behind an older live review [N32,R1,R2]', async t => {
   const box = fixture(t, { age: 190, otherAge: 181, reservation: 'live' });
-  alert(await box.run(['resume']), 'flow: unreviewed #2 waiting 181 min (> 180 min); bottleneck: not measured yet');
+  alert(await box.run(['resume']), 'flow: unreviewed #2 waiting 3 h 1 min (> 3 h 0 min); bottleneck: not measured yet');
   assert.deepEqual(box.stats().flow.unreviewed, { size: 1, oldest: { id: 2, since: '2026-10-10T05:19:00.000Z', ageMinutes: 181 } });
 });

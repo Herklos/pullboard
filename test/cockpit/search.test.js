@@ -1,10 +1,91 @@
 /** Cockpit search checks, using the shared real-board fixtures [N26]. */
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { SPEC, machine, project, startView, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, searchFor } from './fixture.js';
+import { SPEC, machine, project, startView, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, searchFor, press } from './fixture.js';
+
+/** Commit between actual Git reads, preserving each real command's output and exit status. */
+function interleavedAges(file, when) {
+  const box = machine();
+  const g3 = '- G3 [approved, must] The greeting names the visitor. | gate: web test\n';
+  const g4 = '- G4 [approved, must] The greeting waves back. | gate: web test\n';
+  const g5 = '- G5 [approved, must] The greeting fits a phone. | gate: web test\n';
+  const r1 = '# Local rules\n\n## Team\n- R1 [approved, must] Every greeting is read by a person. | gate: review\n';
+  const r2 = '- R2 [approved, must] A greeting never shouts. | gate: review\n';
+  const alpha = project(box, 'pinned-ages', SPEC + g3, { practice: 'ways.md' });
+  writeFileSync(join(alpha.repo, 'ways.md'), r1);
+  writeFileSync(join(alpha.repo, 'SPEC.md'), SPEC + g3 + g4);
+  box.git(alpha.repo, 'add', 'ways.md', 'SPEC.md');
+  box.git(alpha.repo, 'commit', '-q', '-m', 'docs(spec): add the second greeting [G1]');
+  const specTarget = file === 'SPEC.md';
+  writeFileSync(join(alpha.repo, specTarget ? 'ways.md' : 'SPEC.md'), specTarget ? r1 + r2 : SPEC + g5 + g3 + g4);
+  box.git(alpha.repo, 'commit', '-q', '-am', 'docs(spec): add the next greeting [G1]');
+  const captured = box.git(alpha.repo, 'rev-parse', 'HEAD');
+  const future = join(box.dir, 'next-row.txt'), receipt = join(box.dir, 'interleave.json');
+  writeFileSync(future, specTarget ? SPEC + g5 + g3 + g4 : r1 + r2);
+  const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
+  const wrapper = join(box.dir, 'bin', 'git');
+  writeFileSync(wrapper, `#!${process.execPath}
+import { spawnSync } from 'node:child_process';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+const args = process.argv.slice(2), file = ${JSON.stringify(file)}, receipt = ${JSON.stringify(receipt)};
+const realGit = ${JSON.stringify(realGit)};
+/** Run the real Git command with unchanged arguments and environment. */
+const run = (words) => spawnSync(realGit, words, { encoding: 'utf8', env: process.env });
+const interleave = args[0] === 'log' && args.includes('--format=%H') && args.at(-1) === file && !existsSync(receipt);
+let before, after, result;
+/** Add the prepared real row in a real commit, without changing any command response. */
+function advance() {
+  writeFileSync(file, readFileSync(${JSON.stringify(future)}));
+  for (const words of [['add', file], ['commit', '-q', '-m', 'docs(spec): interleave a greeting [G1]']]) {
+    const step = run(words);
+    if (step.status !== 0) throw new Error(step.stderr);
+  }
+  after = run(['rev-parse', 'HEAD']).stdout.trim();
+}
+if (interleave) {
+  before = run(['rev-parse', 'HEAD']).stdout.trim();
+  writeFileSync(receipt, '{}');
+  if (${JSON.stringify(when)} === 'before') advance();
+  result = run(args);
+  if (${JSON.stringify(when)} === 'after') advance();
+  writeFileSync(receipt, JSON.stringify({ args, before, after, status: result.status, stdout: result.stdout }));
+} else result = run(args);
+process.stdout.write(result.stdout ?? ''); process.stderr.write(result.stderr ?? ''); process.exitCode = result.status ?? 1;
+`);
+  chmodSync(wrapper, 0o755);
+  // Both tabs may read the on-disk row before its commit lands between their history reads.
+  writeFileSync(join(alpha.repo, file), readFileSync(future));
+  const worker = spawnSync(process.execPath, ['--input-type=module', '-e', `import { projectState } from ${JSON.stringify(new URL('../../src/serve.js', import.meta.url).href)}; console.log(JSON.stringify(projectState(${JSON.stringify(alpha.repo)})));`], { cwd: alpha.repo, env: box.env, encoding: 'utf8' });
+  assert.equal(worker.status, 0, `real projectState child: ${worker.stderr}`);
+  const state = JSON.parse(worker.stdout), observed = box.git(alpha.repo, 'rev-parse', 'HEAD');
+  const proof = JSON.parse(readFileSync(receipt, 'utf8'));
+  const ordinals = { spec: state.spec.map(({ id, added }) => ({ id, added })), doctrine: state.practice.map(({ id, added }) => ({ id, added })) };
+  return { state, captured, observed, proof, ordinals };
+}
+
+/** Pin every age read despite a real commit before or after either file's ordinal log. */
+test('row ages read from one captured commit [N26]', () => {
+  for (const file of ['SPEC.md', 'ways.md']) for (const when of ['after', 'before']) {
+    const { state, captured, observed, proof, ordinals } = interleavedAges(file, when);
+    const diagnostic = JSON.stringify({ file, when, ordinals, captured, observed, computedAt: state.rowAgesAt ?? null, proof });
+    assert.notEqual(observed, captured, diagnostic);
+    assert.equal(proof.before, captured, diagnostic);
+    assert.equal(proof.after, observed, diagnostic);
+    assert.equal(proof.status, 0, diagnostic);
+    /** Keep only the deliberate fixture rows, in the same age order as search results. */
+    const ordered = (rows, ids) => rows.filter((row) => ids.includes(row.id)).sort((a, b) => a.added - b.added).map(({ id, added }) => [id, added]);
+    const spec = ordered(state.spec, ['G3', 'G4', 'G5']), doctrine = ordered(state.practice, ['R1', 'R2']);
+    assert.deepEqual(spec.map(([id]) => id), ['G5', 'G4', 'G3'], diagnostic);
+    assert.deepEqual(doctrine.map(([id]) => id), ['R2', 'R1'], diagnostic);
+    assert.deepEqual(spec, file === 'SPEC.md' ? [['G5', 0], ['G4', 1], ['G3', 2]] : [['G5', 1], ['G4', 2], ['G3', 3]], diagnostic);
+    assert.deepEqual(doctrine, file === 'SPEC.md' ? [['R2', 1], ['R1', 2]] : [['R2', 0], ['R1', 1]], diagnostic);
+    assert.deepEqual(state.rowAgesAt, { 'SPEC.md': captured, 'ways.md': captured }, diagnostic);
+  }
+});
 
 
 test('search in the top bar finds anything on the board [N26]', { timeout: 150_000 }, async (t) => {
@@ -23,7 +104,7 @@ test('search in the top bar finds anything on the board [N26]', { timeout: 150_0
   const profile = mkdtempSync(join(tmpdir(), 'pullboard-finder-chrome-'));
   let chrome;
   /** The top bar's search and its results as they read. */
-  const read = async () => JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+  const read = async () => JSON.parse(await chrome.stable(`JSON.stringify((() => {
     const box = (e) => { if (!e) return null; const r = e.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height }; };
     const results = document.querySelector('#find-results');
     return {
@@ -42,8 +123,7 @@ test('search in the top bar finds anything on the board [N26]', { timeout: 150_0
     for (const type of ['keyDown', 'keyUp']) await chrome.send('Input.dispatchKeyEvent', { type, key: name, code, windowsVirtualKeyCode: keyCode, ...(type === 'keyDown' && text ? { text, unmodifiedText: text } : {}) });
   };
   const tap = async (selector) => {
-    const point = JSON.parse(await chrome.evaluate(`(() => { const r = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return JSON.stringify({ x: r.x + r.width / 2, y: r.y + r.height / 2 }); })()`));
-    for (const type of ['mousePressed', 'mouseReleased']) await chrome.send('Input.dispatchMouseEvent', { type, ...point, button: 'left', clickCount: 1 });
+    await press(chrome, `document.querySelector(${JSON.stringify(selector)})`);
   };
   const search = (words) => searchFor(chrome, words);
   try {
@@ -54,7 +134,7 @@ test('search in the top bar finds anything on the board [N26]', { timeout: 150_0
         await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
         await chrome.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: scheme }] });
         await chrome.waitFor(`innerWidth === ${width} && matchMedia('(prefers-color-scheme: ${scheme})').matches`);
-        await chrome.evaluate("document.querySelector('[data-tab=items]').click()");
+        await chrome.click("document.querySelector('[data-tab=items]')");
         const at = `${width}px ${scheme}`;
         // The Items toolbar is one row: Active, Verified and All, the lane picker, New item at its end; on a phone Active
         // and Verified with New item, All and the lane picker dropped.
@@ -88,11 +168,11 @@ test('search in the top bar finds anything on the board [N26]', { timeout: 150_0
     await search('greeting');
     await key('Escape', 'Escape', 27);
     await search('greeting');
-    await chrome.evaluate('new Promise((done) => setTimeout(done, 250))');
-    const kept = JSON.parse(await chrome.evaluate("JSON.stringify([document.querySelector('#q').value, document.activeElement.id, document.querySelector('#find-results').hidden])"));
+    await chrome.stable('new Promise((done) => setTimeout(done, 250))');
+    const kept = JSON.parse(await chrome.stable("JSON.stringify([document.querySelector('#q').value, document.activeElement.id, document.querySelector('#find-results').hidden])"));
     assert.deepEqual(kept, ['greeting', 'q', false], `a search straight after Esc keeps its results (words, focus, results hidden): ${JSON.stringify(kept)}`);
     await key('Escape', 'Escape', 27);
-    assert.equal(await chrome.evaluate("document.querySelector('#find-results').dataset.why"), 'escape', 'Esc closes the results and says so');
+    assert.equal(await chrome.stable("document.querySelector('#find-results').dataset.why"), 'escape', 'Esc closes the results and says so');
 
     // The arrows move the highlight and Enter opens it: here the third item, the third newest.
     await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
@@ -121,7 +201,7 @@ test('search in the top bar finds anything on the board [N26]', { timeout: 150_0
       const opened = (await read()).bar;
       assert.deepEqual(opened.map((part) => [part.name, part.on]), [['active', false], ['verified', false], ['all', true], ['new-item', false]], `375px ${scheme}: a search that opens an item shows All, selected: ${JSON.stringify(opened)}`);
       assert.ok(opened.every((part) => Math.abs(part.middle - opened[0].middle) <= 2), `375px ${scheme}: still one row: ${JSON.stringify(opened)}`);
-      await chrome.evaluate("document.querySelector('[data-state=active]').click()");
+      await chrome.click("document.querySelector('[data-state=active]')");
       assert.deepEqual((await read()).bar.map((part) => part.name), ['active', 'verified', 'new-item'], `375px ${scheme}: back on Active, All drops again`);
     }
     await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
@@ -140,7 +220,8 @@ test('search in the top bar finds anything on the board [N26]', { timeout: 150_0
     await chrome.waitFor("data.project.spec.some((row) => row.id === 'G5') && data.project.practice.some((row) => row.id === 'R2')", 15_000);
     await search('greeting');
     const added = (await read()).hits.filter((hit) => /^(spec|doctrine):/.test(hit.go)).map((hit) => hit.id);
-    assert.deepEqual(added, ['G5', 'G4', 'G3', 'R2', 'R1'], `Spec and Doctrine newest first by when each row was added: ${JSON.stringify(added)}`);
+    const ageProof = JSON.parse(await chrome.stable('JSON.stringify({ captured: data.project.rowAgesAt ?? null, spec: data.project.spec.map(({ id, added }) => ({ id, added })), doctrine: data.project.practice.map(({ id, added }) => ({ id, added })) })'));
+    assert.deepEqual(added, ['G5', 'G4', 'G3', 'R2', 'R1'], `Spec and Doctrine newest first by when each row was added: ${JSON.stringify({ added, ...ageProof, observed: box.git(alpha.repo, 'rev-parse', 'HEAD') })}`);
     await key('Escape', 'Escape', 27);
 
     // A click opens a Spec row, a Doctrine rule or a shout where it lives.
@@ -156,25 +237,25 @@ test('search in the top bar finds anything on the board [N26]', { timeout: 150_0
     await chrome.waitFor(`view.tab === 'shouts' && document.getElementById('shout-${shout.slice(6)}')?.classList.contains('found')`);
 
     // "/" goes to the search from the page, never from a field.
-    await chrome.evaluate("document.activeElement.blur(); document.body.focus()");
+    await chrome.stable("document.activeElement.blur(); document.body.focus()");
     await key('/', 'Slash', 191, '/');
     r = await read();
-    const selected = await chrome.evaluate("(() => { const q = document.querySelector('#q'); return q.selectionStart === 0 && q.selectionEnd === q.value.length; })()");
+    const selected = await chrome.stable("(() => { const q = document.querySelector('#q'); return q.selectionStart === 0 && q.selectionEnd === q.value.length; })()");
     assert.deepEqual([r.focused, selected], ['q', true], '"/" puts the cursor in the search, its last words selected to type over');
-    await chrome.evaluate("document.querySelector('#shout-text').focus()");
+    await chrome.stable("document.querySelector('#shout-text').focus()");
     await key('/', 'Slash', 191, '/');
-    assert.equal(await chrome.evaluate("document.querySelector('#shout-text').value"), '/', 'and in a field it is only a slash');
+    assert.equal(await chrome.stable("document.querySelector('#shout-text').value"), '/', 'and in a field it is only a slash');
 
     // On a phone the lane picker shows while a lane narrows the list, so the person sees where they are and can leave
     // it; with every lane shown it drops again. A coordinator item makes a second lane to pick between.
     box.run(alpha.repo, 'add', 'coordinator', 'Plan the greeting release', '--criterion', 'planned');
     await chrome.waitFor('data.project.items.length === 9', 15_000);
-    const lane = (name) => chrome.evaluate(`(() => { const pick = document.querySelector('#lane-pick'); pick.value = ${JSON.stringify(name)}; pick.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+    const lane = (name) => chrome.stable(`(() => { const pick = document.querySelector('#lane-pick'); pick.value = ${JSON.stringify(name)}; pick.dispatchEvent(new Event('change', { bubbles: true })); })()`);
     for (const scheme of ['light', 'dark']) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
       await chrome.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: scheme }] });
       await chrome.waitFor(`innerWidth === 1280 && matchMedia('(prefers-color-scheme: ${scheme})').matches`);
-      await chrome.evaluate("document.querySelector('[data-tab=items]').click(); document.querySelector('[data-state=active]').click()");
+      await chrome.click("document.querySelector('[data-tab=items]')"); await chrome.click("document.querySelector('[data-state=active]')");
       await lane('web');
       await chrome.waitFor("view.lane === 'web'");
       assert.ok((await read()).bar.some((part) => part.name === 'lane-pick'), `1280px ${scheme}: the lane picker is in the toolbar`);
@@ -191,18 +272,18 @@ test('search in the top bar finds anything on the board [N26]', { timeout: 150_0
       const both = await read();
       assert.deepEqual(both.bar.map((part) => [part.name, part.on]), [['active', false], ['verified', false], ['all', true], ['lane-pick', false], ['new-item', false]], `375px ${scheme}: All and the picked lane both show: ${JSON.stringify(both.bar)}`);
       assert.ok(both.bar.every((part) => Math.abs(part.middle - both.bar[0].middle) <= 2) && both.page.scroll <= both.page.width && both.page.body <= both.page.width, `375px ${scheme}: both filters on one row, no sideways scroll: ${JSON.stringify(both)}`);
-      assert.deepEqual(JSON.parse(await chrome.evaluate("JSON.stringify((() => { const go = document.querySelector('#new-item'); return [go.textContent, getComputedStyle(go, '::before').content, Math.round(go.getBoundingClientRect().width)]; })())")), ['New item', '"+"', 44], `375px ${scheme}: New item is a 44px + that keeps its name`);
+      assert.deepEqual(JSON.parse(await chrome.stable("JSON.stringify((() => { const go = document.querySelector('#new-item'); return [go.textContent, getComputedStyle(go, '::before').content, Math.round(go.getBoundingClientRect().width)]; })())")), ['New item', '"+"', 44], `375px ${scheme}: New item is a 44px + that keeps its name`);
       // A long lane name gives way rather than the row: with the coordinator lane picked, still one row.
       await lane('coordinator');
       await chrome.waitFor("view.lane === 'coordinator'");
       const long = await read();
       assert.deepEqual(long.bar.map((part) => part.name), ['active', 'verified', 'all', 'lane-pick', 'new-item'], `375px ${scheme}: a long lane keeps every control: ${JSON.stringify(long.bar)}`);
       assert.ok(long.bar.every((part) => Math.abs(part.middle - long.bar[0].middle) <= 2) && long.page.scroll <= long.page.width && long.page.body <= long.page.width, `375px ${scheme}: a long lane name gives way, not the row: ${JSON.stringify(long)}`);
-      await chrome.evaluate("document.querySelector('[data-state=active]').click()");
+      await chrome.click("document.querySelector('[data-state=active]')");
       await lane('');
       await chrome.waitFor('view.lane === null');
       assert.deepEqual((await read()).bar.map((part) => part.name), ['active', 'verified', 'new-item'], `375px ${scheme}: every lane shown, the picker drops again`);
-      assert.equal(await chrome.evaluate("getComputedStyle(document.querySelector('#new-item'), '::before').content"), 'none', `375px ${scheme}: with only Active and Verified, New item has its words`);
+      assert.equal(await chrome.stable("getComputedStyle(document.querySelector('#new-item'), '::before').content"), 'none', `375px ${scheme}: with only Active and Verified, New item has its words`);
     }
     await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
     await chrome.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }] });
@@ -230,22 +311,57 @@ test('the search step names its state on timeout [N26]', { timeout: 60_000 }, as
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
     await chrome.waitFor("typeof data === 'object' && data?.project?.items?.length === 1");
     // A field that takes no typing: the step times out, and its message says how far the search got.
-    await chrome.evaluate("document.querySelector('#q').disabled = true");
+    await chrome.stable("document.querySelector('#q').disabled = true");
     let stalled;
     await assert.rejects(searchFor(chrome, 'greeting', 1_500), (error) => { stalled = error; return true; });
     assert.match(stalled.message, /^the search for "greeting" did not show its results: \{/, 'the step says which search stalled');
     assert.deepEqual(Object.keys(record(stalled)), ['value', 'focused', 'windowFocus', 'resultsHidden', 'closedBy'], 'it records the value, the focus, the window focus, and the results with what closed them');
     assert.deepEqual([record(stalled).value, record(stalled).focused, typeof record(stalled).windowFocus, record(stalled).resultsHidden], ['', 'body', 'boolean', true], `no words reached the field, which never had focus: ${stalled.message}`);
     // Results that showed and were then closed say what closed them: here, leaving the field.
-    await chrome.evaluate("document.querySelector('#q').disabled = false");
+    await chrome.stable("document.querySelector('#q').disabled = false");
     await searchFor(chrome, 'greeting');
-    await chrome.evaluate("document.querySelector('#q').blur()");
+    await chrome.stable("document.querySelector('#q').blur()");
     await chrome.waitFor("document.querySelector('#find-results').hidden");
-    assert.equal(await chrome.evaluate("document.querySelector('#find-results').dataset.why"), 'left the field', 'leaving the field closes the results and says so');
+    assert.equal(await chrome.stable("document.querySelector('#find-results').dataset.why"), 'left the field', 'leaving the field closes the results and says so');
     assert.deepEqual(chrome.exceptions, [], 'the page raises no uncaught exception');
   } finally {
     if (chrome) await closeSnapshotChrome(chrome);
     rmSync(profile, { recursive: true, force: true });
+    await view.stop();
+  }
+});
+
+
+test('search keeps focus through Esc [N26,C7]', { timeout: 120_000 }, async (t) => {
+  const executable = chromeExecutable();
+  if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME for search-focus checks.');
+  const box = machine(), demo = project(box, 'search-focus');
+  box.run(demo.repo, 'add', 'web', 'Greeting focus proof', '--specs', 'G1', '--criterion', 'visible');
+  const view = await startView(box);
+  let chrome;
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, join(box.dir, 'search-focus-chrome'));
+    await chrome.waitFor('data?.project?.items?.length === 1');
+    await chrome.stable(`(() => {
+      window.__searchFocus = [];
+      document.querySelector('#q').addEventListener('keydown', event => {
+        if (event.key === 'Escape') window.__searchFocus.push({ focused: document.activeElement.id, window: document.hasFocus(), key: event.key });
+      }, { capture: true });
+    })()`);
+    for (const width of [1280, 375]) {
+      await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
+      await searchFor(chrome, 'Greeting');
+      assert.equal(await chrome.stable('document.activeElement.id'), 'q', `${width}: typing and settling results retain the search field's focus`);
+      for (const type of ['keyDown', 'keyUp']) await chrome.send('Input.dispatchKeyEvent', { type, key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+      // budget: 120ms is the page's declared blur-close delay; observe after that callback can run.
+      await chrome.stable('new Promise(resolve => setTimeout(resolve, 120))');
+      const result = await chrome.stable(`({ focus: window.__searchFocus.at(-1), value: document.querySelector('#q').value, hidden: document.querySelector('#find-results').hidden, why: document.querySelector('#find-results').dataset.why })`);
+      assert.equal(result.focus?.focused, 'q', `${width}: Escape is actually delivered while the search field is focused`);
+      assert.equal(result.focus?.key, 'Escape');
+      assert.deepEqual([result.value, result.hidden, result.why], ['', true, 'escape'], `${width}: Escape's own blur does not replace its close reason`);
+    }
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
     await view.stop();
   }
 });

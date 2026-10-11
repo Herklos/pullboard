@@ -1,11 +1,12 @@
 /** Cockpit spec checks, using the shared real-board fixtures [N26]. */
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
+import { standardDoctrine } from '../../src/doctrine.js';
 import { loadConfig } from '../../src/config.js';
-import { tapTarget, SPEC, machine, project, startView, styleOf, openPage, boardOf, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, watchSpecDecisionWait, press } from './fixture.js';
+import { tapTarget, SPEC, machine, project, build, startView, styleOf, openPage, boardOf, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, watchSpecDecisionWait, press } from './fixture.js';
 
 
 test('spec rows read across a phone [N26,D1]', async () => {
@@ -20,26 +21,24 @@ test('spec rows read across a phone [N26,D1]', async () => {
     assert.match(doctrineRows, /data-row="doctrine:W1"[^]*?Numbers over adjectives\./, 'W1 from the configured doctrine is shown');
     assert.match(doctrineRows, /data-row="doctrine:W2"[^]*?One record per decision\./, 'W2 from the configured doctrine is shown');
     const style = await styleOf(view);
-    assert.match(style, /\n\.srow \{ display: grid; grid-template-columns: 3\.4em minmax\(0, 1fr\);/, 'a row is its id in a slim gutter and its text at full width, with no decision in it');
-    const phone = /\n@media ([^{]+) \{ \.srow \{ grid-template-columns: 3em minmax\(0, 1fr\); gap: 8px; \} \}/.exec(style);
-    assert.ok(phone, 'on a phone the gutter narrows and the text keeps the rest');
-    assert.equal(phone[1], '(width < 480px)', 'under 480px only');
-
-    // The rule holds because every row is the id, then its words, a chip first only where its status is not the filter's.
+    assert.match(style, /\.row \{ grid-template-areas: "dot t age" "dot meta chip";/, 'all three lists use the Items two-line grid');
     await page.click({ rows: 'spec:all' });
     const rows = (html) => html.split('<div class="srow').slice(1);
-    const shape = /^[^>]*><code>[^<]+<\/code><span class="srow-text">(?:<span class="chip[^"]*">[^<]+<\/span>)?[^<]+<\/span><\/div>/;
     assert.deepEqual(rows(page.show('spec-list')).map((row) => /data-row="spec:([^"]+)"/.exec(row)[1]), ['G1', 'G2']);
-    for (const row of rows(page.show('spec-list'))) assert.match(row, shape);
-    const doctrineShape = /^[^>]*><code>[^<]+<\/code><span class="srow-text">(?:<span class="chip[^"]*">[^<]+<\/span>)?(?:<small class="rule-source" title="[^"]+">(?:From Pullboard|This repo)<\/small>)?[^<]+<\/span><\/div>/;
-    for (const row of rows(page.show('doctrine-list'))) assert.match(row, doctrineShape, "a rule is its id and its words, its source only where it differs from its section's, in the same two columns");
-    assert.ok(rows(page.show('doctrine-list')).length > 0, 'doctrine rows are drawn the same way');
+    for (const kind of ['spec', 'doctrine']) {
+      const drawn = rows(page.show(kind + '-list'));
+      assert.ok(drawn.length > 0, kind + ' has rows');
+      for (const row of drawn) {
+        assert.match(row, /^ row s-[^"]*"[^]*?<span class="dot [^"]+"><\/span><div><div class="t srow-text"><span class="row-id">[^<]+<\/span>/, kind + ' shares the dot and primary line');
+        assert.match(row, /<div class="meta"><span class="rule-source"/, kind + ' names its source on the secondary line');
+      }
+    }
   } finally {
     await view.stop();
   }
 });
 
-test('Spec and Doctrine line up, open on a row and decide with quiet controls [N26, B26]', { timeout: 120_000 }, async (t) => {
+test('Spec and Doctrine line up, open on a row and decide with filled and outlined controls [N26, B26]', { timeout: 120_000 }, async (t) => {
   const executable = chromeExecutable();
   if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME for Spec layout checks.');
 
@@ -50,7 +49,7 @@ test('Spec and Doctrine line up, open on a row and decide with quiet controls [N
   const profile = mkdtempSync(join(tmpdir(), 'pullboard-spec-layout-chrome-'));
   let chrome;
   /** Where the list and detail cards start, what is picked, and how a row's decision sits beside its text. */
-  const read = async (kind) => JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+  const read = async (kind) => JSON.parse(await chrome.stable(`JSON.stringify((() => {
     const pane = document.querySelector('[data-pane="${kind}"]');
     const box = (e) => { const r = e.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, left: r.left, right: r.right, height: r.height }; };
     const row = document.querySelector('#${kind}-list .srow[data-row="${kind}:G1"]');
@@ -60,9 +59,9 @@ test('Spec and Doctrine line up, open on a row and decide with quiet controls [N
     const line = text ? parseFloat(getComputedStyle(text).lineHeight) : 0;
     return { list: box(pane.querySelector('.rows-card')), detail: box(pane.querySelector('.detail')), picked: document.querySelector('#${kind}-list .srow.on')?.dataset.row ?? null,
       shown: document.querySelector('#${kind}-detail h2 span')?.textContent ?? null, first: document.querySelector('#${kind}-list .srow')?.dataset.row ?? null,
-      row: row && box(row), text: text && box(text), line, buttons: buttons.map((e) => ({ ...box(e), quiet: quiet(e), word: e.textContent })),
-      decide: [...document.querySelectorAll('#${kind}-detail [data-row-decision]')].map((e) => ({ ...box(e), quiet: quiet(e), word: e.textContent })),
-      section: [...document.querySelectorAll('#${kind}-list [data-section-approve], #${kind}-detail [data-row-decision]')].map((e) => quiet(e)),
+      row: row && box(row), text: text && box(text), line, buttons: buttons.map((e) => ({ ...box(e), quiet: quiet(e), word: e.childNodes[0].textContent.trim(), filled: getComputedStyle(e).backgroundColor !== 'rgba(0, 0, 0, 0)', border: getComputedStyle(e).borderTopWidth, key: e.querySelector('kbd')?.textContent })),
+      decide: [...document.querySelectorAll('#${kind}-detail [data-row-decision]')].map((e) => ({ ...box(e), quiet: quiet(e), word: e.childNodes[0].textContent.trim(), filled: getComputedStyle(e).backgroundColor !== 'rgba(0, 0, 0, 0)', border: getComputedStyle(e).borderTopWidth, key: e.querySelector('kbd')?.textContent })),
+      section: [...document.querySelectorAll('#${kind}-list [data-section-approve]')].map((e) => quiet(e)),
       overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth };
   })())`));
   try {
@@ -70,26 +69,26 @@ test('Spec and Doctrine line up, open on a row and decide with quiet controls [N
     await chrome.waitFor("typeof data === 'object' && !!data && !!data.project");
     for (const width of [1280, 375]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
-      await chrome.evaluate("document.querySelector('[data-tab=spec]').click(); document.querySelector('#spec-chips [data-rows=\"spec:decide\"]').click(); view.row.spec = null; render();");
+      await chrome.click("document.querySelector('[data-tab=spec]')"); await chrome.click("document.querySelector('#spec-chips [data-rows=\"spec:decide\"]')"); await chrome.stable("view.row.spec = null"); await chrome.stable("render()");
       await chrome.waitFor(`innerWidth === ${width} && !!document.querySelector('#spec-list [data-row="spec:G1"]')`);
       const spec = await read('spec');
       if (width === 1280) assert.ok(Math.abs(spec.list.top - spec.detail.top) < 0.5, `${width}: the list and the detail start on one line: ${JSON.stringify([spec.list, spec.detail])}`);
       assert.deepEqual([spec.picked, spec.shown], ['spec:G1', 'G1'], `${width}: with nothing picked, the detail opens on the first row shown`);
       assert.deepEqual([spec.buttons.length, spec.decide.map((b) => b.word)], [0, ['Approve', 'Decline']], `${width}: a row carries no decision; the picked row's detail holds it once`);
-      assert.ok(spec.decide.every((b) => b.quiet && b.height >= tapTarget(width)), `${width}: quiet words, no box or fill until hovered, each a target: ${JSON.stringify(spec.decide)}`);
-      assert.ok(spec.section.length >= 3 && spec.section.every(Boolean), `${width}: Approve all and the detail's decision are quiet too`);
+      assert.ok(spec.decide.every((b) => b.height >= tapTarget(width) && b.border === '1px') && spec.decide[0].filled && !spec.decide[1].filled && spec.decide.map((b) => b.key).join() === 'A,D', `${width}: filled Approve and outlined Decline show their keys and meet the target: ${JSON.stringify(spec.decide)}`);
+      assert.ok(spec.section.length >= 1 && spec.section.every(Boolean), `${width}: Approve all stays quiet on the section header`);
       if (width === 1280) {
-        assert.ok(spec.row.height <= 60 && Math.round(spec.text.height / spec.line) <= 2, `${width}: a one-sentence row takes one or two lines: ${JSON.stringify([spec.row, spec.text, spec.line])}`);
+        assert.ok(spec.row.height <= 2 * spec.line + 22 && Math.round(spec.text.height / spec.line) <= 2, `${width}: a one-sentence row takes one or two lines: ${JSON.stringify([spec.row, spec.text, spec.line])}`);
       }
       assert.ok(!spec.overflow, `${width}: nothing runs off the screen`);
       // A filter that hides the pick moves it to the new first row; one that keeps it keeps it.
-      await chrome.evaluate("document.querySelector('#spec-list [data-row=\"spec:G2\"]').click()");
-      await chrome.evaluate("document.querySelector('#spec-chips [data-rows=\"spec:all\"]').click()");
+      await chrome.click("document.querySelector('#spec-list [data-row=\"spec:G2\"]')");
+      await chrome.click("document.querySelector('#spec-chips [data-rows=\"spec:all\"]')");
       assert.equal((await read('spec')).picked, 'spec:G2', `${width}: a filter that still shows the pick keeps it`);
-      await chrome.evaluate("document.querySelector('#spec-chips [data-rows=\"spec:approved\"]').click()");
+      await chrome.click("document.querySelector('#spec-chips [data-rows=\"spec:approved\"]')");
       const moved = await read('spec');
       assert.deepEqual([moved.picked, moved.shown], ['spec:G3', 'G3'], `${width}: a filter that hides the pick moves it to the first row shown`);
-      await chrome.evaluate("document.querySelector('[data-tab=doctrine]').click(); view.row.doctrine = null; render();");
+      await chrome.click("document.querySelector('[data-tab=doctrine]')"); await chrome.stable("view.row.doctrine = null"); await chrome.stable("render()");
       const doctrine = await read('doctrine');
       if (width === 1280) assert.ok(Math.abs(doctrine.list.top - doctrine.detail.top) < 0.5, `${width}: Doctrine's cards start on one line too`);
       assert.ok(doctrine.picked && doctrine.picked === doctrine.first && doctrine.shown === doctrine.first.split(':')[1], `${width}: and Doctrine opens on its first row: ${JSON.stringify([doctrine.picked, doctrine.shown])}`);
@@ -122,11 +121,11 @@ test('spec rows read as a list, decided in the panel [N26]', { timeout: 300_000 
   const profile = mkdtempSync(join(tmpdir(), 'pullboard-spec-list-chrome-'));
   let chrome;
   /** One tab's rows and detail as they read: each row's chip, gutter, words and lines, and the detail's decision. */
-  const read = async (kind) => JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+  const read = async (kind) => JSON.parse(await chrome.stable(`JSON.stringify((() => {
     const box = (e) => { const r = e.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height }; };
     const rows = [...document.querySelectorAll('#${kind}-list .srow')].map((row) => {
       const s = getComputedStyle(row), text = row.querySelector('.srow-text');
-      return { id: row.dataset.row.slice(${kind.length + 1}), chip: row.querySelector('.chip')?.textContent ?? null, gutter: box(row.querySelector('code')), text: box(text), row: box(row),
+      return { id: row.dataset.row.slice(${kind.length + 1}), chip: row.querySelector('.chip')?.textContent ?? null, gutter: box(row.querySelector('.row-id')), text: box(text), row: box(row),
         lines: Math.round(text.getBoundingClientRect().height / parseFloat(getComputedStyle(text).lineHeight)), buttons: row.querySelectorAll('button').length,
         on: row.classList.contains('on'), tint: s.backgroundColor, edges: [s.borderLeftWidth, s.borderLeftColor].join() === [s.borderRightWidth, s.borderRightColor].join() };
     });
@@ -134,23 +133,22 @@ test('spec rows read as a list, decided in the panel [N26]', { timeout: 300_000 
     return {
       page: { width: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth, body: document.body.scrollWidth },
       rows, picked: view.row['${kind}'], shown: detail.querySelector('h2 span')?.textContent ?? null, viewport: innerHeight,
-      decide: [...detail.querySelectorAll('[data-row-decision]')].map((b) => ({ word: b.textContent, ...box(b) })),
-      section: [...document.querySelectorAll('#${kind}-list [data-section-approve]')].map((b) => ({ word: b.textContent, height: b.getBoundingClientRect().height, head: !!b.closest('.spec-section-head') })),
+      decide: [...detail.querySelectorAll('[data-row-decision]')].map((b) => ({ word: b.childNodes[0].textContent.trim(), ...box(b) })),
+      section: [...document.querySelectorAll('#${kind}-list [data-section-approve]')].map((b) => ({ word: b.childNodes[0].textContent.trim(), height: b.getBoundingClientRect().height, head: !!b.closest('.spec-section-head') })),
     };
   })())`));
   /** A tint is quiet when its colour channels sit close together: grey, not a hue. */
   const neutral = (css) => { const [r, g, b] = (css.match(/[\d.]+/g) || []).map(Number); return Math.max(r, g, b) - Math.min(r, g, b) <= 12; };
   /** Press a key the way a keyboard does, into whatever has focus. */
-  const press = async (key, code, keyCode) => {
+  const pressKey = async (key, code, keyCode) => {
     for (const type of ['keyDown', 'keyUp']) await chrome.send('Input.dispatchKeyEvent', { type, key, code, windowsVirtualKeyCode: keyCode, ...(type === 'keyDown' && key.length === 1 ? { text: key, unmodifiedText: key } : {}) });
   };
   /** Tap an element through Chrome's input path at its centre. */
   const tap = async (selector) => {
-    const point = JSON.parse(await chrome.evaluate(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); e.scrollIntoView({ block: 'center' }); const r = e.getBoundingClientRect(); return JSON.stringify({ x: r.x + r.width / 2, y: r.y + r.height / 2 }); })()`));
-    for (const type of ['mousePressed', 'mouseReleased']) await chrome.send('Input.dispatchMouseEvent', { type, ...point, button: 'left', clickCount: 1 });
+    await press(chrome, `document.querySelector(${JSON.stringify(selector)})`);
   };
   const filter = async (kind, name) => {
-    await chrome.evaluate(`document.querySelector('[data-tab=${kind}]').click(); document.querySelector('#${kind}-chips [data-rows="${kind}:${name}"]').click()`);
+    await chrome.click(`document.querySelector('[data-tab=${kind}]')`); await chrome.click(`document.querySelector('#${kind}-chips [data-rows="${kind}:${name}"]')`);
     await chrome.waitFor(`!document.querySelector('[data-pane=${kind}]').hidden && !!document.querySelector('#${kind}-list .srow')`);
   };
   /** A row as the board records it: Spec rows by id, Doctrine rules by id among the merged rules. */
@@ -166,7 +164,7 @@ test('spec rows read as a list, decided in the panel [N26]', { timeout: 300_000 
     await chrome.waitFor("typeof data === 'object' && !!data?.project?.spec?.length && data.project.practice.some((r) => r.id === 'D8')");
     // Pullboard's own rules can wait on the person too; they list under Needs your decision, in the board's order, but are
     // changed in DOCTRINE.md rather than decided here.
-    const order = JSON.parse(await chrome.evaluate("JSON.stringify(data.project.practice.map((r) => [r.id, r.origin, r.status, !!r.decision]))"));
+    const order = JSON.parse(await chrome.stable("JSON.stringify(data.project.practice.map((r) => [r.id, r.origin, r.status, !!r.decision]))"));
     const standardWaiting = order.filter(([, origin, status, decided]) => origin === 'standard' && ['pending', 'draft'].includes(status) && !decided).map(([id, , status]) => [id, status === 'draft' ? null : status]);
     expected.doctrine.decide = [...standardWaiting, ...expected.doctrine.decide].sort(([a], [b]) => order.findIndex(([id]) => id === a) - order.findIndex(([id]) => id === b));
     for (const scheme of ['light', 'dark']) {
@@ -182,10 +180,10 @@ test('spec rows read as a list, decided in the panel [N26]', { timeout: 300_000 
           assert.ok(r.page.scroll <= r.page.width && r.page.body <= r.page.width, `${tab}: no sideways scroll`);
           // Each row is its id in a slim gutter and its words at full width; a chip only where the status is not the filter's.
           const undecidedNow = expected[kind].decide;
-          assert.deepEqual(r.rows.map((row) => [row.id, row.chip, row.buttons]), undecidedNow.map(([id, chip]) => [id, chip, 0]),
-            `${tab}: drafts carry no chip under Needs your decision, an open question says pending, and no row carries a decision`);
+          assert.deepEqual(r.rows.map((row) => [row.id, row.chip, row.buttons]), undecidedNow.map(([id, chip]) => [id, chip || 'must', 0]),
+            `${tab}: drafts carry their tier under Needs your decision, an open question says pending, and no row carries a decision`);
           for (const row of r.rows) {
-            assert.ok(row.gutter.width <= 52 && row.text.left - row.gutter.right <= 14 && row.row.right - row.text.right <= 12, `${tab}: ${row.id} is a slim gutter and full-width words: ${JSON.stringify(row)}`);
+            assert.ok(row.gutter.width <= 52 && Math.abs(row.text.left - row.gutter.left) < 1 && row.text.right <= row.row.right, `${tab}: ${row.id} starts with its id on the same primary line: ${JSON.stringify(row)}`);
             if (width === 1280) assert.ok(row.lines <= 2, `${tab}: ${row.id}, one sentence, takes one or two lines: ${row.lines}`);
           }
           const picked = r.rows.find((row) => row.on);
@@ -204,31 +202,31 @@ test('spec rows read as a list, decided in the panel [N26]', { timeout: 300_000 
           const held = await read(kind);
           assert.deepEqual(held.decide.map((b) => b.word), ['Approve', 'Decline'], `${tab}: the picked row's detail holds its decision`);
           assert.ok(held.decide.every((b) => b.height >= tapTarget(width)), `${tab}: each a target, 44px where a finger taps`);
-          await press('ArrowDown', 'ArrowDown', 40);
-          assert.equal(await chrome.evaluate(`view.row['${kind}']`), undecidedNow[undecidedNow.findIndex(([id]) => id === first) + 1][0], `${tab}: down moves the pick`);
-          await press('ArrowUp', 'ArrowUp', 38);
-          assert.equal(await chrome.evaluate(`view.row['${kind}']`), first, `${tab}: and up moves it back`);
-          await press('a', 'KeyA', 65);
+          await pressKey('ArrowDown', 'ArrowDown', 40);
+          assert.equal(await chrome.stable(`view.row['${kind}']`), undecidedNow[undecidedNow.findIndex(([id]) => id === first) + 1][0], `${tab}: down moves the pick`);
+          await pressKey('ArrowUp', 'ArrowUp', 38);
+          assert.equal(await chrome.stable(`view.row['${kind}']`), first, `${tab}: and up moves it back`);
+          await pressKey('a', 'KeyA', 65);
           const after = undecidedNow[undecidedNow.findIndex(([id]) => id === first) + 1][0];
           await chrome.waitFor(`!!document.querySelector('#${kind}-list .spec-feedback.ok') && view.row['${kind}'] === '${after}'`, 15_000);
           assert.deepEqual([await recorded(kind, first), await recorded(kind, second)], [{ stage: 'approved, pending apply', decided: 'approved' }, { stage: 'draft', decided: null }],
             `${tab}: A approved the picked ${first}, and only ${first}`);
-          assert.equal(await chrome.evaluate(`document.activeElement === document.querySelector('#${kind}-list')`), true, `${tab}: the list keeps focus for the next key`);
+          assert.equal(await chrome.stable(`document.activeElement === document.querySelector('#${kind}-list')`), true, `${tab}: the list keeps focus for the next key`);
           // The pick moved on to the next row; when that is the open question, step past it to a draft.
-          if (after !== second) { await press('ArrowDown', 'ArrowDown', 40); await chrome.waitFor(`view.row['${kind}'] === '${second}'`); }
-          await press('d', 'KeyD', 68);
+          if (after !== second) { await pressKey('ArrowDown', 'ArrowDown', 40); await chrome.waitFor(`view.row['${kind}'] === '${second}'`); }
+          await pressKey('d', 'KeyD', 68);
           await chrome.waitFor(`!document.querySelector('#spec-decline-dialog').hidden && document.querySelector('#spec-decline-title').textContent === 'Decline ${second}'`);
           // Never while typing in a field: an a in the reason is a letter, not an approval.
-          await press('a', 'KeyA', 65);
-          assert.equal(await chrome.evaluate("document.querySelector('#spec-decline-reason').value"), 'a', `${tab}: the key types into the reason`);
+          await pressKey('a', 'KeyA', 65);
+          assert.equal(await chrome.stable("document.querySelector('#spec-decline-reason').value"), 'a', `${tab}: the key types into the reason`);
           assert.deepEqual(await recorded(kind, second), { stage: 'draft', decided: null }, `${tab}: and decides nothing`);
           await chrome.send('Input.insertText', { text: ' clearer outcome, please' });
-          await chrome.evaluate("document.querySelector('#spec-decline-submit').click()");
+          await chrome.click("document.querySelector('#spec-decline-submit')");
           await chrome.waitFor(`document.querySelector('#spec-decline-dialog').hidden && !!document.querySelector('#${kind}-list .spec-feedback.ok')`, 15_000);
           assert.deepEqual(await recorded(kind, second), { stage: 'declined, pending apply', decided: 'a clearer outcome, please' }, `${tab}: D declined ${second} with its reason`);
           // The last layout decides the last two drafts, so only the earlier ones have a row after them to stay untouched.
           if (third) assert.deepEqual(await recorded(kind, third), { stage: 'draft', decided: null }, `${tab}: and nothing else`);
-          assert.equal(await chrome.evaluate(`document.activeElement === document.querySelector('#${kind}-list')`), true, `${tab}: the dialog returns to the list`);
+          assert.equal(await chrome.stable(`document.activeElement === document.querySelector('#${kind}-list')`), true, `${tab}: the dialog returns to the list`);
           // The two decided rows leave Needs your decision.
           expected[kind].decide = undecidedNow.filter(([id]) => id !== first && id !== second);
           await chrome.waitFor(`![...document.querySelectorAll('#${kind}-list .srow')].some((row) => ['${kind}:${first}', '${kind}:${second}'].includes(row.dataset.row))`, 15_000);
@@ -238,8 +236,8 @@ test('spec rows read as a list, decided in the panel [N26]', { timeout: 300_000 
           r = await read(kind);
           const all = Object.fromEntries(r.rows.map((row) => [row.id, row.chip]));
           assert.deepEqual([all[first], all[second]], ['approved, pending apply', 'declined, pending apply'], `${tab}: under All rows the decided rows say so`);
-          if (kind === 'spec') assert.deepEqual([all.S2, all.S3], ['pending', null], `${tab}: the open question says pending; the approved row needs no chip`);
-          else assert.ok(r.rows.some((row) => row.id.startsWith('PB') && row.chip === null), `${tab}: Pullboard's own approved rules need no chip`);
+          if (kind === 'spec') assert.deepEqual([all.S2, all.S3], ['pending', 'approved'], `${tab}: the open question says pending; All rows shows the approved row’s status too`);
+          else assert.ok(r.rows.some((row) => row.id.startsWith('PB') && row.chip === 'approved'), `${tab}: All rows names the standard rules’ approved status`);
         }
       }
     }
@@ -248,11 +246,11 @@ test('spec rows read as a list, decided in the panel [N26]', { timeout: 300_000 
     await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
     await chrome.waitFor('innerWidth === 1280');
     await filter('doctrine', 'all');
-    const standard = await chrome.evaluate("[...document.querySelectorAll('#doctrine-list .srow')].map((row) => row.dataset.row.slice(9)).find((id) => id.startsWith('PB'))");
+    const standard = await chrome.stable("[...document.querySelectorAll('#doctrine-list .srow')].map((row) => row.dataset.row.slice(9)).find((id) => id.startsWith('PB'))");
     await tap(`#doctrine-list [data-row="doctrine:${standard}"]`);
     await chrome.waitFor(`view.row.doctrine === '${standard}' && document.activeElement === document.querySelector('#doctrine-list')`);
-    assert.equal(await chrome.evaluate("document.querySelectorAll('#doctrine-detail [data-row-decision]').length"), 0, `${standard}: a standard rule's detail offers no decision`);
-    await press('a', 'KeyA', 65);
+    assert.equal(await chrome.stable("document.querySelectorAll('#doctrine-detail [data-row-decision]').length"), 0, `${standard}: a standard rule's detail offers no decision`);
+    await pressKey('a', 'KeyA', 65);
     assert.equal((await recorded('doctrine', standard)).decided, null, `${standard}: A decides nothing on it`);
     assert.deepEqual(chrome.exceptions, [], 'the page raises no uncaught exception');
   } finally {
@@ -268,17 +266,7 @@ test('real Chrome records Spec row decisions from the row, detail and confirmed 
 
   /** Click a visible control through Chrome's input path without scrolling the result away. */
   const click = async (chrome, selector) => {
-    const point = JSON.parse(await chrome.evaluate(`(() => {
-      const e = document.querySelector(${JSON.stringify(selector)});
-      if (!e) throw Error('missing ' + ${JSON.stringify(selector)});
-      e.scrollIntoView({block:'center'});
-      const r = e.getBoundingClientRect();
-      if (r.width <= 0 || r.height <= 0 || r.top < 0 || r.bottom > innerHeight) throw Error('control is not visible: ' + ${JSON.stringify(selector)});
-      return JSON.stringify({x:r.x+r.width/2,y:r.y+r.height/2});
-    })()`));
-    await chrome.send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point });
-    await chrome.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 });
-    await chrome.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount: 1 });
+    await press(chrome, `document.querySelector(${JSON.stringify(selector)})`);
   };
 
   /** Run the full decision story in a fresh real board and browser at one viewport width. */
@@ -295,15 +283,15 @@ test('real Chrome records Spec row decisions from the row, detail and confirmed 
       chrome = await openSnapshotChrome(executable, view.link.href, profile);
       await chrome.waitFor("typeof data === 'object' && !!data && !!data.project");
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
-      await chrome.evaluate("document.querySelector('[data-tab=spec]').click()");
+      await chrome.click("document.querySelector('[data-tab=spec]')");
       await chrome.waitFor(`innerWidth === ${width} && !!document.querySelector('#spec-list [data-row="spec:G1"]')`);
-      await chrome.evaluate("document.querySelector('#spec-chips [data-rows=\"spec:all\"]').click()");
+      await chrome.click("document.querySelector('#spec-chips [data-rows=\"spec:all\"]')");
       await chrome.waitFor("document.querySelector('#spec-list [data-row=\"spec:G2\"]') && document.querySelector('#spec-chips [data-rows=\"spec:decide\"] b')?.textContent === '31'");
-      const geometry = JSON.parse(await chrome.evaluate(`JSON.stringify({
+      const geometry = JSON.parse(await chrome.stable(`JSON.stringify({
         overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
         controls: [...document.querySelectorAll('#spec-list button[data-row-decision],#spec-list button[data-section-approve]')].map(e=>({height:e.getBoundingClientRect().height})),
         rows: [...document.querySelectorAll('#spec-list .srow')].map(row=>{
-          const chip=row.querySelector('.srow-text .chip');
+          const chip=row.querySelector(':scope > .chip');
           const words=[...(row.querySelector('.srow-text')?.childNodes||[])].find(n=>n.nodeType===3&&n.textContent.trim());
           if (!chip || !words) return {id:row.dataset.row, missing:true};
           const range=document.createRange(); range.selectNodeContents(words);
@@ -316,9 +304,9 @@ test('real Chrome records Spec row decisions from the row, detail and confirmed 
       assert.deepEqual(geometry.rows.filter((row) => row.missing), [], `${width}: row status and text are present for every fixture row`);
       if (width === 1280) assert.deepEqual(geometry.rows.filter((row) => row.intersects), [], '1280: stage chips never cover row text');
 
-      await chrome.evaluate("document.querySelector('#spec-list [data-row=\"spec:G2\"]').click()");
+      await chrome.click("document.querySelector('#spec-list [data-row=\"spec:G2\"]')");
       await chrome.waitFor("document.querySelector('#spec-detail h2 span')?.textContent === 'G2'");
-      assert.ok(await chrome.evaluate("document.querySelector('#spec-detail [data-row-decision=approve]') && document.querySelector('#spec-detail [data-row-decision=decline]')"), `${width}: selected G2 has both detail decisions`);
+      assert.ok(await chrome.stable("document.querySelector('#spec-detail [data-row-decision=approve]') && document.querySelector('#spec-detail [data-row-decision=decline]')"), `${width}: selected G2 has both detail decisions`);
       diagnostics = await watchSpecDecisionWait(chrome);
       // Picked from the list, A approves G1, and the pick moves on to the next row.
       await click(chrome, '#spec-list [data-row="spec:G1"]');
@@ -330,47 +318,47 @@ test('real Chrome records Spec row decisions from the row, detail and confirmed 
       assert.equal(state.spec.find((row) => row.id === 'G1')?.stage, 'approved, pending apply', `${width}: A approves the picked G1`);
       assert.equal(state.spec.find((row) => row.id === 'G2')?.decision, undefined, `${width}: and nothing else`);
       await chrome.waitFor("view.row.spec === 'G2' && document.querySelector('#spec-detail h2 span')?.textContent === 'G2'");
-      assert.ok(await chrome.evaluate(`(() => { const e=document.querySelector('#spec-list [data-row="spec:G2"]'); const r=e.getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight; })()`), `${width}: next undecided G2 stays in the viewport after G1 approval`);
-      assert.equal(await chrome.evaluate("document.querySelector('#spec-chips [data-rows=\"spec:decide\"] b').textContent"), '30', `${width}: Needs your decision excludes the decided row`);
-      if (width === 1280) assert.ok(await chrome.evaluate(`(() => {
+      assert.ok(await chrome.stable(`(() => { const e=document.querySelector('#spec-list [data-row="spec:G2"]'); const r=e.getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight; })()`), `${width}: next undecided G2 stays in the viewport after G1 approval`);
+      assert.equal(await chrome.stable("document.querySelector('#spec-chips [data-rows=\"spec:decide\"] b').textContent"), '30', `${width}: Needs your decision excludes the decided row`);
+      if (width === 1280) assert.ok(await chrome.stable(`(() => {
         const row=document.querySelector('#spec-list [data-row="spec:G1"]');
-        const chip=row.querySelector('.srow-text .chip').getBoundingClientRect();
+        const chip=row.querySelector(':scope > .chip').getBoundingClientRect();
         const words=[...row.querySelector('.srow-text').childNodes].find(n=>n.nodeType===3&&n.textContent.trim());
         const range=document.createRange(); range.selectNodeContents(words); const text=range.getClientRects()[0];
         return chip.right <= text.left || chip.bottom <= text.top || chip.top >= text.bottom;
       })()`), '1280: the approved pending stage does not cover row text');
 
-      await chrome.evaluate("document.querySelector('#spec-chips [data-rows=\"spec:decide\"]').click()");
-      assert.equal(await chrome.evaluate("!!document.querySelector('#spec-list [data-row=\"spec:G1\"]')"), false, `${width}: approval immediately leaves Needs your decision`);
-      await chrome.evaluate("document.querySelector('#spec-chips [data-rows=\"spec:all\"]').click()");
+      await chrome.click("document.querySelector('#spec-chips [data-rows=\"spec:decide\"]')");
+      assert.equal(await chrome.stable("!!document.querySelector('#spec-list [data-row=\"spec:G1\"]')"), false, `${width}: approval immediately leaves Needs your decision`);
+      await chrome.click("document.querySelector('#spec-chips [data-rows=\"spec:all\"]')");
 
       await click(chrome, '#spec-detail [data-row-decision="decline"]');
-      assert.ok(await chrome.evaluate("!document.querySelector('#spec-decline-dialog').hidden && document.querySelector('#spec-decline-title').textContent === 'Decline G2'"), `${width}: G2 decline opens the reason form`);
-      assert.ok(await chrome.evaluate(`[...document.querySelectorAll('#spec-decline-dialog input,#spec-decline-dialog button')].every(e => e.getBoundingClientRect().height >= ${tapTarget(width)})`), `${width}: decline reason and controls meet the 44px target`);
+      assert.ok(await chrome.stable("!document.querySelector('#spec-decline-dialog').hidden && document.querySelector('#spec-decline-title').textContent === 'Decline G2'"), `${width}: G2 decline opens the reason form`);
+      assert.ok(await chrome.stable(`[...document.querySelectorAll('#spec-decline-dialog input,#spec-decline-dialog button')].every(e => e.getBoundingClientRect().height >= ${tapTarget(width)})`), `${width}: decline reason and controls meet the 44px target`);
       await click(chrome, '#spec-decline-cancel');
       state = await boardOf(view, demo.repo);
       assert.equal(state.events.filter((event) => event.event_kind === 'row_decision').length, 1, `${width}: cancelling decline records no event`);
       assert.equal(state.spec.find((row) => row.id === 'G2')?.decision, undefined, `${width}: cancelling leaves G2 undecided`);
 
       await click(chrome, '#spec-detail [data-row-decision="decline"]');
-      await chrome.evaluate("document.querySelector('#spec-decline-reason').value = 'Needs a clearer outcome'");
+      await chrome.stable("document.querySelector('#spec-decline-reason').value = 'Needs a clearer outcome'");
       box.run(demo.repo, 'shout', 'person', `refresh probe ${width}`);
       await chrome.waitFor(`data.project.shouts.some(shout => shout.shout_text === 'refresh probe ${width}')`);
-      assert.equal(await chrome.evaluate("document.querySelector('#spec-decline-reason').value"), 'Needs a clearer outcome', `${width}: typed reason survives a live refresh`);
+      assert.equal(await chrome.stable("document.querySelector('#spec-decline-reason').value"), 'Needs a clearer outcome', `${width}: typed reason survives a live refresh`);
       await click(chrome, '#spec-decline-submit');
       await chrome.waitFor("!!document.querySelector('#spec-detail .spec-feedback.ok,#spec-detail .spec-feedback.no')");
 
-      await chrome.evaluate("window.__sectionConfirm = null; window.confirm = message => { window.__sectionConfirm = message; return false; }");
+      await chrome.stable("window.__sectionConfirm = null; window.confirm = message => { window.__sectionConfirm = message; return false; }");
       const sectionSelector = `#spec-list [data-section-approve]`;
-      await chrome.evaluate(`(() => { const button=[...document.querySelectorAll(${JSON.stringify(sectionSelector)})].find(e=>e.parentElement.querySelector('h4')?.textContent.includes('Follow-up')); if(!button) throw Error('missing K section approval'); button.click(); })()`);
+      await chrome.click(`[...document.querySelectorAll(${JSON.stringify(sectionSelector)})].find(e=>e.parentElement.querySelector('h4')?.textContent.includes('Follow-up'))`);
       state = await boardOf(view, demo.repo);
-      assert.match(await chrome.evaluate('window.__sectionConfirm'), /Approve all 2 undecided rows in/, `${width}: section approval asks for confirmation`);
-      assert.equal(await chrome.evaluate("!!document.querySelector('#spec-list .spec-feedback')"), false, `${width}: dismissing the confirmation starts no move`);
+      assert.match(await chrome.stable('window.__sectionConfirm'), /Approve all 2 undecided rows in/, `${width}: section approval asks for confirmation`);
+      assert.equal(await chrome.stable("!!document.querySelector('#spec-list .spec-feedback')"), false, `${width}: dismissing the confirmation starts no move`);
       assert.equal(state.events.filter((event) => event.event_kind === 'row_decision').length, 2, `${width}: dismissing section confirmation records no events`);
       assert.equal(state.spec.find((row) => row.id === 'K1')?.decision, undefined, `${width}: dismissed section approval leaves K1 undecided`);
 
-      await chrome.evaluate("window.confirm = () => true");
-      await chrome.evaluate(`(() => { const button=[...document.querySelectorAll(${JSON.stringify(sectionSelector)})].find(e=>e.parentElement.querySelector('h4')?.textContent.includes('Follow-up')); if(!button) throw Error('missing K section approval'); button.click(); })()`);
+      await chrome.stable("window.confirm = () => true");
+      await chrome.click(`[...document.querySelectorAll(${JSON.stringify(sectionSelector)})].find(e=>e.parentElement.querySelector('h4')?.textContent.includes('Follow-up'))`);
       await chrome.waitFor("document.querySelector('#spec-list [data-row=\"spec:K1\"]').innerText.includes('approved, pending apply') && document.querySelector('#spec-list [data-row=\"spec:K2\"]').innerText.includes('approved, pending apply')");
       state = await boardOf(view, demo.repo);
       const decisions = state.events.filter((event) => event.event_kind === 'row_decision');
@@ -382,16 +370,16 @@ test('real Chrome records Spec row decisions from the row, detail and confirmed 
       assert.equal(state.spec.find((row) => row.id === 'K1')?.stage, 'approved, pending apply', `${width}: K1 was approved`);
       assert.equal(state.spec.find((row) => row.id === 'K2')?.stage, 'approved, pending apply', `${width}: K2 was approved`);
       assert.equal(state.spec.find((row) => row.id === 'G3')?.decision, undefined, `${width}: other section rows remain undecided`);
-      if (width === 1280) assert.ok(await chrome.evaluate(`['G1','G2','K1','K2'].every(id => {
+      if (width === 1280) assert.ok(await chrome.stable(`['G1','G2','K1','K2'].every(id => {
         const row=document.querySelector('#spec-list [data-row="spec:'+id+'"]');
-        const chip=row.querySelector('.srow-text .chip').getBoundingClientRect();
+        const chip=row.querySelector(':scope > .chip').getBoundingClientRect();
         const words=[...row.querySelector('.srow-text').childNodes].find(n=>n.nodeType===3&&n.textContent.trim());
         const range=document.createRange(); range.selectNodeContents(words); const text=range.getClientRects()[0];
         return chip.right <= text.left || chip.bottom <= text.top || chip.top >= text.bottom;
       })`), '1280: every pending decision stage has room beside its row text');
-      await chrome.evaluate("document.querySelector('#spec-chips [data-rows=\"spec:decide\"]').click()");
+      await chrome.click("document.querySelector('#spec-chips [data-rows=\"spec:decide\"]')");
       await chrome.waitFor("document.querySelector('#spec-list [data-row=\"spec:G3\"]') && !document.querySelector('#spec-list [data-row=\"spec:G1\"]') && !document.querySelector('#spec-list [data-row=\"spec:G2\"]') && !document.querySelector('#spec-list [data-row=\"spec:K1\"]') && !document.querySelector('#spec-list [data-row=\"spec:K2\"]')");
-      assert.ok(await chrome.evaluate("document.querySelector('#spec-chips [data-rows=\"spec:decide\"]').innerText.includes('27')"), `${width}: Needs your decision excludes all four decided rows`);
+      assert.ok(await chrome.stable("document.querySelector('#spec-chips [data-rows=\"spec:decide\"]').innerText.includes('27')"), `${width}: Needs your decision excludes all four decided rows`);
       assert.deepEqual(chrome.exceptions, [], `${width}: Chrome reports no uncaught exceptions`);
     } finally {
       try { await diagnostics?.dispose(); }
@@ -424,18 +412,10 @@ test('the spec decision wait names its state on timeout [N26]', { timeout: 60_00
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
     await chrome.waitFor("typeof data === 'object' && !!data?.project");
     await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
-    await chrome.evaluate("document.querySelector('[data-tab=spec]').click()");
+    await chrome.click("document.querySelector('[data-tab=spec]')");
     await chrome.waitFor("!!document.querySelector('#spec-list [data-row=\"spec:G1\"]') && !!document.querySelector('#spec-list [data-row=\"spec:G2\"]')");
     diagnostics = await watchSpecDecisionWait(chrome);
-    const point = JSON.parse(await chrome.evaluate(`(() => {
-      const row=document.querySelector('#spec-list [data-row="spec:G1"]');
-      row.scrollIntoView({block:'center'});
-      const r=row.getBoundingClientRect();
-      return JSON.stringify({x:r.x+r.width/2,y:r.y+r.height/2});
-    })()`));
-    await chrome.send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point });
-    await chrome.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 });
-    await chrome.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount: 1 });
+    await press(chrome, `document.querySelector('#spec-list [data-row="spec:G1"]')`);
     await chrome.waitFor("view.row.spec === 'G1' && document.activeElement === document.querySelector('#spec-list')");
     for (const type of ['keyDown', 'keyUp']) await chrome.send('Input.dispatchKeyEvent', { type, key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40 });
     await chrome.waitFor("view.row.spec === 'G2'");
@@ -458,5 +438,187 @@ test('the spec decision wait names its state on timeout [N26]', { timeout: 60_00
         finally { await view.stop(); }
       }
     }
+  }
+});
+
+// Hang ceiling: four three-tab layouts, native input and real Git/SQLite setup; two 120s journey budgets plus setup headroom.
+
+/** Compare real Items, Spec and Doctrine rendering and native selection across four viewport/theme layouts. */
+test('doctrine and spec rows share the items row [N26]', { timeout: 300_000 }, async (t) => {
+  const executable = chromeExecutable();
+  if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME for shared-row checks.');
+
+  const standard = standardDoctrine();
+  const [inherited, overridden, declined] = standard.rows;
+  const longGoal = 'A deliberately long requirement keeps all its words in the detail while the shared row cuts its title with an ellipsis. '.repeat(3);
+  const longOverride = 'This repository replaces the standard wording with a long rule that must ellipsize in the shared row while remaining complete in the detail. '.repeat(3);
+  const spec = '# Shared rows\n\n## G · Goals\n'
+    + `- G1 [draft, must] ${longGoal} | gate: browser check | serves: G3\n`
+    + '- G2 [pending, aim] A second undecided row keeps the section approval count honest. | gate: browser check\n'
+    + '- G3 [approved, must] Approved text remains available in its detail. | gate: browser check\n';
+  const box = machine();
+  const demo = project(box, 'shared-rows', spec, { practice: 'DOCTRINE.md' });
+  const reason = 'The local process already covers this inherited rule.';
+  writeFileSync(join(demo.repo, 'DOCTRINE.md'), `# Team doctrine\n\n## Rules\n`
+    + `- ${overridden.id} [draft, must] ${longOverride} | gate: doctrine check | serves: ${inherited.id}\n`
+    + `- ${declined.id} [wont] ${reason} | gate: doctrine check | serves: ${inherited.id}\n`
+    + '\n## Local\n- R1 [approved, must] The repository’s own rule stays in its source section. | gate: local check\n- G1 [approved, must] This doctrine rule shares the citing item. | gate: citation check\n');
+  box.run(demo.repo, 'add', 'web', 'A real item citing G1', '--specs', 'G1', '--criterion', 'The requirement is represented by a built item.');
+  build(box, demo, 1, 'shared-row.txt');
+
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-shared-rows-chrome-'));
+  let chrome;
+  /** Save a full-page proof of the actual rendered tab when a proof folder is requested. */
+  const shot = async (kind, width, theme) => {
+    if (!process.env.PULLBOARD_ROWS_PROOF) return;
+    mkdirSync(process.env.PULLBOARD_ROWS_PROOF, { recursive: true });
+    await chrome.stable('window.scrollTo(0, 0)');
+    const cssContentSize = JSON.parse(await chrome.stable('JSON.stringify({width:document.documentElement.scrollWidth,height:document.documentElement.scrollHeight})'));
+    const capture = await chrome.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true, clip: { x: 0, y: 0, width: cssContentSize.width, height: cssContentSize.height, scale: 1 } });
+    writeFileSync(join(process.env.PULLBOARD_ROWS_PROOF, kind + '-' + width + '-' + theme + '.png'), Buffer.from(capture.data, 'base64'));
+  };
+  /** Capture rendered row geometry and computed row/title type from the live DOM. */
+  const rowState = async (selector) => JSON.parse(await chrome.stable(`JSON.stringify((() => {
+    const row = document.querySelector(${JSON.stringify(selector)});
+    const box = e => { if (!e) return null; const r=e.getBoundingClientRect(); return {x:r.x,y:r.y,right:r.right,bottom:r.bottom,width:r.width,height:r.height}; };
+    const style = e => { if (!e) return null; const s=getComputedStyle(e); return {display:s.display,dotColumn:s.gridTemplateColumns.split(" ")[0],gridTemplateAreas:s.gridTemplateAreas,columnGap:s.columnGap,rowGap:s.rowGap,padding:s.padding,fontFamily:s.fontFamily,fontSize:s.fontSize,fontWeight:s.fontWeight,lineHeight:s.lineHeight}; };
+    const title = row?.querySelector('.t'), meta = row?.querySelector('.meta'), source = row?.querySelector('.rule-source'), reason = row?.querySelector('.rule-reason');
+    const age = row?.querySelector('.row-age');
+    return {tag:row?.tagName ?? null, className:row?.className ?? '', title:title?.textContent ?? '', titleFull:row?.getAttribute('title') ?? '', titleBox:box(title), titleStyle:title&&{overflow:getComputedStyle(title).textOverflow,whiteSpace:getComputedStyle(title).whiteSpace,lines:Math.ceil(title.getBoundingClientRect().height/parseFloat(getComputedStyle(title).lineHeight))},
+      rowBox:box(row), rowStyle:style(row), dot:!!row?.querySelector(':scope > .dot'), meta:meta?.textContent ?? '', metaBox:box(source), source:source?.textContent ?? null, sourceBox:box(source), reason:reason?.textContent ?? null, reasonBox:box(reason), gate:row?.querySelector('.meta .gate')?.textContent ?? null, gateBox:box(row?.querySelector('.meta .gate')),
+      count:age?.textContent.trim() ?? null, countBox:box(age), status:row?.querySelector(':scope > .chip')?.textContent.trim() ?? null, statusBox:box(row?.querySelector(':scope > .chip')),
+      overflow:document.documentElement.scrollWidth > document.documentElement.clientWidth, pageWidth:document.documentElement.clientWidth, pageScrollWidth:document.documentElement.scrollWidth};
+  })())`));
+
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.waitFor("data?.project?.spec?.some(row => row.id === 'G1') && data?.project?.practice?.some(row => row.id === 'R1')");
+    for (const theme of ['light', 'dark']) {
+      for (const width of [375, 1280]) {
+        await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
+        await chrome.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: theme }] });
+        await chrome.waitFor(`innerWidth === ${width} && matchMedia('(prefers-color-scheme: ${theme})').matches`);
+        await press(chrome, "document.querySelector('[data-tab=items]')");
+        const item = await rowState('#chain .row[data-item="1"]');
+        assert.ok(item?.dot, `${width}px ${theme}: the Items reference row has its status dot`);
+        assert.equal(item.overflow, false, `${width}px ${theme}: the Items row has no horizontal overflow`);
+
+        await press(chrome, "document.querySelector('[data-tab=spec]')");
+        await press(chrome, "document.querySelector('#spec-chips [data-rows=\"spec:all\"]')");
+        const g1 = await rowState('#spec-list [data-row="spec:G1"]');
+        const g2 = await rowState('#spec-list [data-row="spec:G2"]');
+        assert.match(g1.className, /(?:^|\s)srow(?:\s|$)/u);
+        assert.match(g1.className, /(?:^|\s)row(?:\s|$)/u, `${width}px ${theme}: Spec uses the shared Items row component`);
+        assert.equal(g1.dot, true);
+        assert.equal(g1.overflow, false, `${width}px ${theme}: Spec has no horizontal overflow`);
+        assert.match(g1.count, /^1(?:\s+items?)?$/u, `${width}px ${theme}: G1 shows one citing item at the right of line one`);
+        assert.ok(g1.countBox.y < g1.metaBox.y && g1.countBox.right >= g1.rowBox.right - 12, `${width}px ${theme}: the citation count is right-aligned on line one`);
+        assert.equal(g1.status, 'draft', `${width}px ${theme}: All rows shows an explicit non-implied status chip`);
+        assert.ok(g1.statusBox.y > g1.countBox.y, `${width}px ${theme}: the status chip is on line two`);
+        assert.equal(g2.count, null, `${width}px ${theme}: a row with no cited items shows no zero`);
+        const zeroCount = await chrome.stable(`document.querySelector('#spec-list').innerText.includes('0')`);
+        assert.equal(zeroCount, false, `${width}px ${theme}: Spec does not print a zero citation badge`);
+        assert.deepEqual(g1.rowStyle, item.rowStyle, `${width}px ${theme}: Spec and Items share grid, spacing and type`);
+        assert.equal(g1.titleStyle.overflow, 'ellipsis');
+        assert.equal(g1.titleStyle.whiteSpace, 'nowrap');
+        assert.equal(g1.titleStyle.lines, 1);
+        assert.ok(g1.titleFull.includes(longGoal.slice(0, 40)), `${width}px ${theme}: the full title remains available on the row`);
+
+        const header = JSON.parse(await chrome.stable(`JSON.stringify((() => { const e=document.querySelector('#spec-list .spec-section-head'); return {text:e?.innerText??'', count:e?.querySelector('.section-count')?.textContent.trim()??null, approve:e?.querySelector('[data-section-approve]')?.innerText??null, button:e?.querySelector('[data-section-approve]')?.getBoundingClientRect().height??0}; })())`));
+        assert.match(header.text, /Goals/u);
+        assert.equal(header.count, '3', `${width}px ${theme}: the section header shows its three rows`);
+        assert.match(header.approve ?? '', /Approve all 2/u, `${width}px ${theme}: Spec keeps its two-undecided-row Approve all action`);
+        assert.ok(header.button >= tapTarget(width), `${width}px ${theme}: Approve all meets the #371 target size`);
+
+        await press(chrome, "document.querySelector('#spec-chips [data-rows=\"spec:decide\"]')");
+        const draft = await rowState('#spec-list [data-row="spec:G1"]');
+        const pending = await rowState('#spec-list [data-row="spec:G2"]');
+        assert.equal(draft.status, 'must', `${width}px ${theme}: the filter-implied draft status gives way to its tier`);
+        assert.equal(pending.status, 'pending', `${width}px ${theme}: a non-implied pending status remains explicit`);
+        await press(chrome, "document.querySelector('#spec-chips [data-rows=\"spec:approved\"]')");
+        const approved = await rowState('#spec-list [data-row="spec:G3"]');
+        assert.equal(approved.status, 'must', `${width}px ${theme}: the approved filter-implied status gives way to its tier`);
+        await press(chrome, "document.querySelector('#spec-chips [data-rows=\"spec:all\"]')");
+        await press(chrome, "document.querySelector('#spec-list [data-row=\"spec:G1\"]')");
+        await chrome.waitFor("document.querySelector('#spec-detail h2 span')?.textContent === 'G1'");
+        let detail = await chrome.stable("document.querySelector('#spec-detail').innerText");
+        assert.ok(detail.includes(longGoal.trim()) && detail.includes('browser check') && detail.includes('G3') && detail.includes('#1 A real item citing G1'), `${width}px ${theme}: clicking Spec opens full text, gate, served area and citing item`);
+        let actions = JSON.parse(await chrome.stable(`JSON.stringify([...document.querySelectorAll('#spec-detail [data-row-decision]')].map(e=>({action:e.dataset.rowDecision,text:e.innerText,key:e.querySelector('kbd')?.innerText??null,height:e.getBoundingClientRect().height,background:getComputedStyle(e).backgroundColor,border:getComputedStyle(e).borderTopWidth})))`));
+        assert.deepEqual(actions.map(e=>e.action), ['approve','decline']);
+        assert.equal(actions[0].key, 'A'); assert.equal(actions[1].key, 'D');
+        assert.notEqual(actions[0].background, 'rgba(0, 0, 0, 0)', 'Approve is filled');
+        assert.equal(actions[1].background, 'rgba(0, 0, 0, 0)', 'Decline is outlined');
+        assert.ok(actions.every(e=>e.height >= tapTarget(width) && e.border === '1px'), `${width}px ${theme}: detail actions meet #371 targets`);
+
+        await shot('spec', width, theme);
+        await press(chrome, "document.querySelector('[data-tab=doctrine]')");
+        await press(chrome, "document.querySelector('#doctrine-chips [data-rows=\"doctrine:all\"]')");
+        const pb1 = await rowState(`#doctrine-list [data-row="doctrine:${inherited.id}"]`);
+        const pb2 = await rowState(`#doctrine-list [data-row="doctrine:${overridden.id}"]`);
+        const pb3 = await rowState(`#doctrine-list [data-row="doctrine:${declined.id}"]`);
+        const local = await rowState('#doctrine-list [data-row="doctrine:R1"]');
+        assert.equal(pb1.source, `Pullboard v${standard.version}`, `${width}px ${theme}: an inherited standard row names its version`);
+        assert.equal(pb2.source, `Pullboard v${standard.version}, overridden here`);
+        assert.equal(pb3.source, `Pullboard v${standard.version}, declined here`);
+        assert.equal(local.source, 'this repo');
+        for (const row of [pb1,pb2,pb3,local]) {
+          assert.match(row.className, /(?:^|\s)srow(?:\s|$)/u);
+          assert.match(row.className, /(?:^|\s)row(?:\s|$)/u);
+          assert.deepEqual(row.rowStyle, item.rowStyle, `${width}px ${theme}: every doctrine record shares Items geometry and type`);
+          assert.ok(row.dot && !row.count && !row.overflow, `${width}px ${theme}: uncited rules have a dot, no zero-count marker, and no horizontal overflow`);
+        }
+        assert.ok(pb2.sourceBox.y > pb2.titleBox.y && Math.abs(pb2.sourceBox.x - pb2.titleBox.x) < 1);
+        assert.ok(Math.abs(pb2.sourceBox.y - pb2.gateBox.y) < 2, `${width}px ${theme}: source and gate share the second line`);
+        assert.ok(pb3.reason && Math.abs(pb3.reasonBox.y - pb3.sourceBox.y) < 2 && pb3.reasonBox.x > pb3.sourceBox.x, `${width}px ${theme}: a declined reason follows its source on the metadata line`);
+        assert.equal(pb2.titleStyle.overflow, 'ellipsis');
+        assert.equal(pb2.titleStyle.lines, 1);
+        assert.ok(pb2.titleBox.width > 0, `${width}px ${theme}: the full-width detail rule still has a visible title line`);
+        const sectionCounts = JSON.parse(await chrome.stable(`JSON.stringify([...document.querySelectorAll('#doctrine-list .spec-section-head')].map(e=>({name:e.querySelector('h4')?.innerText??'', count:e.querySelector('.section-count')?.textContent.trim()??null})))`));
+        assert.ok(sectionCounts.some(e => e.count === String(standard.rows.length)), `${width}px ${theme}: the standard Rules header counts all merged standard ids`);
+        assert.ok(sectionCounts.some(e => e.count === '2'), `${width}px ${theme}: the repo-only section keeps its own row count`);
+        const citedRule = await rowState('#doctrine-list [data-row="doctrine:G1"]');
+        assert.equal(citedRule.count, '1 item', `${width}px ${theme}: Doctrine counts its actual citing item on line one`);
+        await press(chrome, "document.querySelector('#doctrine-list [data-row=\"doctrine:G1\"]')");
+        const citedDetail = await chrome.stable("document.querySelector('#doctrine-detail').innerText");
+        assert.ok(citedDetail.includes('This doctrine rule shares the citing item.') && citedDetail.includes('citation check') && citedDetail.includes('#1 A real item citing G1'), `${width}px ${theme}: Doctrine detail lists the actual item that cites it`);
+        const allText = await chrome.stable('document.body.innerText.toLowerCase()');
+        assert.equal(allText.includes('standard 1'), false, `${width}px ${theme}: the old label is absent`);
+
+        await press(chrome, `document.querySelector('#doctrine-list [data-row="doctrine:${overridden.id}"]')`);
+        await chrome.waitFor(`document.querySelector('#doctrine-detail h2 span')?.textContent === ${JSON.stringify(overridden.id)}`);
+        await chrome.stable('window.scrollTo(0, 0)');
+        await chrome.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter' });
+        await chrome.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter' });
+        const visibleDetail = JSON.parse(await chrome.stable("JSON.stringify((() => {const r=document.querySelector('#doctrine-detail h2').getBoundingClientRect(); return {top:r.top,bottom:r.bottom};})())"));
+        assert.ok(visibleDetail.top >= -1 && visibleDetail.top < 900, `${width}px ${theme}: native Enter opens the picked detail in the viewport: ${JSON.stringify(visibleDetail)}`);
+        detail = await chrome.stable("document.querySelector('#doctrine-detail').innerText");
+        assert.ok(detail.includes(longOverride.trim()) && detail.includes('doctrine check') && detail.includes(inherited.id) && detail.toLowerCase().includes('items that cite it') && detail.includes('None yet.'), `${width}px ${theme}: Enter on the picked rule opens full detail: ${detail}`);
+        assert.ok(!await chrome.stable('document.documentElement.scrollWidth > document.documentElement.clientWidth'), `${width}px ${theme}: no horizontal overflow`);
+        await shot('doctrine', width, theme);
+      }
+    }
+    // The same wide layout becomes touch-sized when its primary pointer is coarse.
+    await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+    await chrome.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+    await chrome.waitFor("matchMedia('(pointer: coarse)').matches");
+    for (const kind of ['spec', 'doctrine']) {
+      await press(chrome, `document.querySelector('[data-tab=${kind}]')`);
+      await press(chrome, `document.querySelector('#${kind}-chips [data-rows="${kind}:all"]')`);
+      const id = kind === 'spec' ? 'G1' : overridden.id;
+      await press(chrome, `document.querySelector('#${kind}-list [data-row="${kind}:${id}"]')`);
+      const targets = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+        const nodes = [...document.querySelectorAll('#${kind}-list [data-row], #${kind}-list [data-section-approve], #${kind}-detail [data-row-decision]')];
+        return {coarse:matchMedia('(pointer: coarse)').matches, tap:getComputedStyle(document.documentElement).getPropertyValue('--tap').trim(),
+          heights:nodes.map(node => ({name:node.dataset.row || node.textContent.trim(), height:node.getBoundingClientRect().height}))};
+      })())`));
+      assert.equal(targets.coarse, true, kind + ': the real wide Chrome viewport has a coarse primary pointer');
+      assert.equal(targets.tap, '44px', kind + ': touch uses the accepted 44px sizing token');
+      assert.ok(targets.heights.length > 2 && targets.heights.every(target => target.height >= 44), kind + ': rows and both detail decisions meet the touch target: ' + JSON.stringify(targets));
+    }
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    rmSync(profile, { recursive: true, force: true });
+    await view.stop();
   }
 });

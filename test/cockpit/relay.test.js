@@ -6,6 +6,7 @@ import { createServer, request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { delimiter, join, relative, resolve, sep } from 'node:path';
 import { after, test } from 'node:test';
+import { stableChrome } from './stable.js';
 import { cockpitPage } from '../../src/cockpit.js';
 import { relayClientFixture } from '../relay-client-fixture.js';
 import { findChromeExecutable, relayWorkBudgetMs, startChrome } from '../relay-browser-fixture.js';
@@ -64,7 +65,7 @@ test('a paired relay reference explains that committed source is available only 
 
   const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));
   const encoded = readFileSync(box.keyFile, 'utf8').trim();
-  const chrome = await startChrome();
+  const chrome = await stableChrome(await startChrome());
   t.after(() => chrome.close());
   // Since person power stays on the paired phone, the browser reads the board with the phone's session, not the link's.
   assert.equal((await chrome.send('Network.setCookie', {
@@ -72,24 +73,24 @@ test('a paired relay reference explains that committed source is available only 
   })).success, true, 'the private browser receives the paired phone’s authenticated session');
   await chrome.navigate(box.origin + '/#board=' + link.board + '&key=' + encoded);
   await chrome.waitFor(`document.querySelector('#chain')?.textContent.includes(${JSON.stringify(itemTitle)})`);
-  await chrome.evaluate(`document.querySelector('[data-tab="shouts"]').click()`);
+  await chrome.click(`document.querySelector('[data-tab="shouts"]')`);
   await chrome.waitFor(`document.querySelector('#feed button[data-code^="${sourceRef}:1@"]')`);
   const beforeOpen = box.calls.length;
   for (const width of [375, 1280]) {
     await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
     await chrome.waitFor(`innerWidth === ${width}`);
     const button = `document.querySelector('#feed button[data-code^="${sourceRef}:1@"]')`;
-    if (!await chrome.evaluate(`${button}.getAttribute('aria-expanded') === 'true'`)) await chrome.evaluate(`${button}.click()`);
+    if (!await chrome.stable(`${button}.getAttribute('aria-expanded') === 'true'`)) await chrome.click(`${button}`);
     await chrome.waitFor(`${button}.nextElementSibling?.querySelector('.code')?.textContent.includes('local project view')`);
-    assert.equal(await chrome.evaluate(`document.body.textContent.includes(${JSON.stringify(sentinel)})`), false,
+    assert.equal(await chrome.stable(`document.body.textContent.includes(${JSON.stringify(sentinel)})`), false,
       'the paired relay browser never receives committed source text');
-    assert.equal(await chrome.evaluate(`JSON.stringify(data).includes(${JSON.stringify(sentinel)})`), false,
+    assert.equal(await chrome.stable(`JSON.stringify(data).includes(${JSON.stringify(sentinel)})`), false,
       'the decoded relay presentation contains only the reference, not source bytes');
-    assert.equal(await chrome.evaluate(`${button}.nextElementSibling.querySelector('.code').textContent`),
+    assert.equal(await chrome.stable(`${button}.nextElementSibling.querySelector('.code').textContent`),
       'Source code is unavailable in a relay view; open this reference in the local project view.');
-    assert.equal(await chrome.evaluate(`document.querySelector('#feed button[data-code-all]') === null`), true,
+    assert.equal(await chrome.stable(`document.querySelector('#feed button[data-code-all]') === null`), true,
       'a relay reference exposes no control that could request more source');
-    assert.equal(await chrome.evaluate('document.documentElement.scrollWidth <= document.documentElement.clientWidth'), true,
+    assert.equal(await chrome.stable('document.documentElement.scrollWidth <= document.documentElement.clientWidth'), true,
       `${width}px relay reference stays within the viewport`);
   }
   assert.equal(box.calls.slice(beforeOpen).some(call => /\/code(?:\?|$)/.test(call.path)), false,
@@ -136,12 +137,12 @@ test('served connection reaches an authenticated API on another origin and path 
     chrome = await openSnapshotChrome(executable, `http://127.0.0.1:${pageServer.address().port}/phone/index.html`, join(box.dir, 'remote-phone-chrome'));
     await chrome.send('Emulation.setDeviceMetricsOverride', { width: 375, height: 900, deviceScaleFactor: 1, mobile: false });
     await chrome.waitFor('typeof data === "object" && !!data?.project');
-    assert.equal(await chrome.evaluate('data.project.items[0].title'), 'Remote original');
-    await chrome.evaluate(`document.querySelector('#new-item').click(); document.querySelector('#add-title').value = 'Remote added'; document.querySelector('#add-form').requestSubmit()`);
+    assert.equal(await chrome.stable('data.project.items[0].title'), 'Remote original');
+    await chrome.click(`document.querySelector('#new-item')`); await chrome.stable(`document.querySelector('#add-title').value = 'Remote added'`); await chrome.stable(`document.querySelector('#add-form').requestSubmit()`);
     await chrome.waitFor('data.project.items.some(item => item.title === "Remote added")');
     assert.ok(seen.some((entry) => entry.method === 'POST' && entry.path.endsWith('/moves')), 'a real browser action reaches the configured API');
     assert.ok(seen.every((entry) => entry.authorization === `Bearer ${credential}` && entry.localKey === undefined && entry.path.startsWith('/mirror/api/v1/')), 'only the supplied credential and API base reach the stand-in');
-    assert.ok(await chrome.evaluate('document.documentElement.scrollWidth <= document.documentElement.clientWidth'),
+    assert.ok(await chrome.stable('document.documentElement.scrollWidth <= document.documentElement.clientWidth'),
       'the remote phone page fits the viewport content area');
     assert.deepEqual(chrome.exceptions, []);
   } finally {
@@ -179,7 +180,10 @@ test('relay person requests stay explicit, read-only and visible [H12,H5]', { ti
     };
     window.__holdNextIntent = false;
     window.__releaseHeldIntent = null;
-    return { async request(path, body) {
+    window.__pendingEarlierTransportCalls = 0;
+    window.__lateEarlierTransportError = null;
+    window.__releaseEarlierTransportCall = null;
+    const transport = { async request(path, body) {
       window.__transportCalls.push({ path, body: body ?? null });
       if (body) {
         if (window.__holdNextIntent) {
@@ -197,6 +201,16 @@ test('relay person requests stay explicit, read-only and visible [H12,H5]', { ti
       if (new URL(path, location.origin).pathname.endsWith('/state')) document.state.personRequests = await (await fetch('/request-state')).json();
       return document;
     } };
+    /** Hold a genuine earlier read so the test can release it after taking a stale count. */
+    window.__queueEarlierTransportCall = (path) => {
+      window.__pendingEarlierTransportCalls += 1;
+      window.__releaseEarlierTransportCall = () => {
+        window.__releaseEarlierTransportCall = null;
+        void transport.request(path).catch(error => { window.__lateEarlierTransportError = error.message; })
+          .finally(() => { window.__pendingEarlierTransportCalls -= 1; });
+      };
+    };
+    return transport;
   }`;
   /** Serve controlled request receipts and proxy reads to the actual private Git/SQLite board. */
   async function fixtureRequest(request, response) {
@@ -259,55 +273,81 @@ test('relay person requests stay explicit, read-only and visible [H12,H5]', { ti
     chrome = await openSnapshotChrome(executable, `http://127.0.0.1:${pageServer.address().port}/`, profile);
     await chrome.waitFor("typeof data === 'object' && !!data?.project && typeof window.__setPersonRequest === 'function'");
     await chrome.send('Emulation.setDeviceMetricsOverride', { width: 375, height: 900, deviceScaleFactor: 1, mobile: false });
-    assert.equal(await chrome.evaluate('document.documentElement.scrollWidth <= document.documentElement.clientWidth'), true, 'the request view fits a phone viewport');
-    assert.equal(await chrome.evaluate("document.body.classList.contains('requests') && getComputedStyle(document.querySelector('#new-item')).display !== 'none' && document.querySelector('#new-item').getBoundingClientRect().height >= 44"), true, 'the explicit capability exposes usable person controls');
-    await chrome.evaluate("document.querySelector('[data-tab=\"shouts\"]').click(); document.querySelector('#shout-to').value = 'coordinator'; document.querySelector('#shout-text').value = 'Please review this item.'; document.querySelector('#shout-form').requestSubmit()");
+    assert.equal(await chrome.stable('document.documentElement.scrollWidth <= document.documentElement.clientWidth'), true, 'the request view fits a phone viewport');
+    assert.equal(await chrome.stable("document.body.classList.contains('requests') && getComputedStyle(document.querySelector('#new-item')).display !== 'none' && document.querySelector('#new-item').getBoundingClientRect().height >= 44"), true, 'the explicit capability exposes usable person controls');
+    await chrome.click("document.querySelector('[data-tab=\"shouts\"]')"); await chrome.stable("document.querySelector('#shout-to').value = 'coordinator'"); await chrome.stable("document.querySelector('#shout-text').value = 'Please review this item.'"); await chrome.stable("document.querySelector('#shout-form').requestSubmit()");
     await chrome.waitFor("data?.project?.personRequests?.length === 1");
     assert.deepEqual(intents.at(-1), { verb: 'shout', args: { to: 'coordinator', text: 'Please review this item.' } });
-    await chrome.evaluate("document.querySelector('[data-tab=\"spec\"]').click()");
+    await chrome.click("document.querySelector('[data-tab=\"spec\"]')");
     await chrome.waitFor("document.querySelector('#spec-list [data-row=\"spec:G2\"]')");
-    await chrome.evaluate("document.querySelector('#spec-list [data-row=\"spec:G2\"]').scrollIntoView({ block: 'center' })");
+    await chrome.stable("document.querySelector('#spec-list [data-row=\"spec:G2\"]').scrollIntoView({ block: 'center' })");
     await chrome.waitFor('window.scrollY > 0');
-    await chrome.evaluate("document.querySelector('#spec-list [data-row=\"spec:G2\"]').click()");
+    await chrome.click("document.querySelector('#spec-list [data-row=\"spec:G2\"]')");
     await chrome.waitFor("view.row.spec === 'G2'");
-    const reading = JSON.parse(await chrome.evaluate(`JSON.stringify({ root: view.root, boardRoot: data.project.root, row: view.row.spec, scroll: window.scrollY })`));
+    const reading = JSON.parse(await chrome.stable(`JSON.stringify({ root: view.root, boardRoot: data.project.root, row: view.row.spec, scroll: window.scrollY })`));
     assert.equal(reading.root, reading.boardRoot, 'the selected spec row belongs to the displayed board');
     assert.equal(reading.row, 'G2', 'G2 is the selected reading row before approval');
     await chrome.waitFor("document.querySelector('#spec-detail button[data-row-decision=\"approve\"]')");
-    assert.equal(await chrome.evaluate("document.querySelector('#spec-detail button[data-row-decision=\"approve\"]').getBoundingClientRect().height >= 44"), true, 'the real G2 approval control is usable at 375px');
-    await chrome.evaluate('window.__holdNextIntent = true');
-    await chrome.evaluate("document.querySelector('#spec-detail button[data-row-decision=\"approve\"]').click()");
+    assert.equal(await chrome.stable("document.querySelector('#spec-detail button[data-row-decision=\"approve\"]').getBoundingClientRect().height >= 44"), true, 'the real G2 approval control is usable at 375px');
+    await chrome.stable('window.__holdNextIntent = true');
+    await chrome.click("document.querySelector('#spec-detail button[data-row-decision=\"approve\"]')");
     await chrome.waitFor("typeof window.__releaseHeldIntent === 'function' || document.querySelector('#spec-detail .spec-feedback.no')");
-    assert.equal(await chrome.evaluate("typeof window.__releaseHeldIntent"), 'function', 'the row decision reaches the sealed request transport instead of the refused generic API');
+    assert.equal(await chrome.stable("typeof window.__releaseHeldIntent"), 'function', 'the row decision reaches the sealed request transport instead of the refused generic API');
     await chrome.waitFor("document.querySelector('#spec-detail .spec-feedback')?.textContent.trim() === 'Recording decision…'");
-    await chrome.evaluate('window.__releaseHeldIntent()');
+    await chrome.stable('window.__releaseHeldIntent()');
     await chrome.waitFor("document.querySelector('#spec-detail .spec-feedback') && document.querySelector('#spec-detail .spec-feedback').textContent.trim() !== 'Recording decision…'");
     assert.deepEqual(intents.at(-1), { verb: 'spec-approve', args: { ids: 'G2' } }, 'the detail click creates the exact second literal intent');
     await chrome.waitFor("data?.project?.personRequests?.length === 2 && document.querySelector('[data-person-request=\"request-2\"] .request-status')?.textContent === 'Waiting'");
-    assert.match(await chrome.evaluate("document.querySelector('#spec-detail .spec-feedback')?.textContent.trim() || ''"), /G2/);
-    const afterApproval = JSON.parse(await chrome.evaluate(`JSON.stringify({ root: view.root, row: view.row.spec, scroll: window.scrollY, selected: document.querySelector('#spec-list [data-row=\"spec:G2\"]')?.classList.contains('on'), visible: (() => { const row = document.querySelector('#spec-list [data-row=\"spec:G2\"]')?.getBoundingClientRect(); return !!row && row.top >= 0 && row.bottom <= innerHeight; })() })`));
+    assert.match(await chrome.stable("document.querySelector('#spec-detail .spec-feedback')?.textContent.trim() || ''"), /G2/);
+    const afterApproval = JSON.parse(await chrome.stable(`JSON.stringify({ root: view.root, row: view.row.spec, scroll: window.scrollY, selected: document.querySelector('#spec-list [data-row=\"spec:G2\"]')?.classList.contains('on'), visible: (() => { const row = document.querySelector('#spec-list [data-row=\"spec:G2\"]')?.getBoundingClientRect(); return !!row && row.top >= 0 && row.bottom <= innerHeight; })() })`));
     assert.deepEqual([afterApproval.root, afterApproval.row, afterApproval.selected], [reading.root, 'G2', true], 'the request keeps the selected board and G2 row');
     assert.ok(Math.abs(afterApproval.scroll - reading.scroll) <= 1, 'the request keeps the page at the same reading position');
     assert.equal(afterApproval.visible, true, 'G2 remains visible beside its inline feedback');
     assert.deepEqual(intents.at(-1), { verb: 'spec-approve', args: { ids: 'G2' } });
-    assert.equal(await chrome.evaluate("data.project.spec.find(row => row.id === 'G2').decision === undefined"), true, 'waiting for a request never approves the row optimistically');
-    await chrome.evaluate("window.__setPersonRequest('request-2', 'done')");
-    assert.match(await chrome.evaluate("document.querySelector('#spec-detail .spec-feedback')?.textContent || ''"), /^Done/, 'the same row feedback follows a matched done receipt');
-    await chrome.evaluate("window.__setPersonRequest('request-2', 'refused', { code: 'REQUEST_DECLINED', message: 'Keep the row draft.', next: 'Ask the coordinator for the next step.' })");
-    assert.match(await chrome.evaluate("document.querySelector('#spec-detail .spec-feedback.no')?.textContent || ''"), /Refused[\s\S]*REQUEST_DECLINED[\s\S]*Keep the row draft\.[\s\S]*Ask the coordinator/, 'the same row retains the original refusal and next step');
-    await chrome.evaluate("window.__setPersonRequest('request-2', 'waiting')");
+    assert.equal(await chrome.stable("data.project.spec.find(row => row.id === 'G2').decision === undefined"), true, 'waiting for a request never approves the row optimistically');
+    await chrome.stable("window.__setPersonRequest('request-2', 'done')");
+    assert.match(await chrome.stable("document.querySelector('#spec-detail .spec-feedback')?.textContent || ''"), /^Done/, 'the same row feedback follows a matched done receipt');
+    await chrome.stable("window.__setPersonRequest('request-2', 'refused', { code: 'REQUEST_DECLINED', message: 'Keep the row draft.', next: 'Ask the coordinator for the next step.' })");
+    assert.match(await chrome.stable("document.querySelector('#spec-detail .spec-feedback.no')?.textContent || ''"), /Refused[\s\S]*REQUEST_DECLINED[\s\S]*Keep the row draft\.[\s\S]*Ask the coordinator/, 'the same row retains the original refusal and next step');
+    await chrome.stable("window.__setPersonRequest('request-2', 'waiting')");
 
-    const ids = JSON.parse(await chrome.evaluate('JSON.stringify(data.project.personRequests.map(row => row.id))'));
+    const ids = JSON.parse(await chrome.stable('JSON.stringify(data.project.personRequests.map(row => row.id))'));
     assert.deepEqual(ids, ['request-1', 'request-2']);
-    assert.ok(await chrome.evaluate("[...document.querySelectorAll('[data-person-request]')].length === 2 && [...document.querySelectorAll('[data-person-request]')].every(node => node.querySelector('.request-status').textContent === 'Waiting')"), 'waiting receipts render from API state');
+    assert.ok(await chrome.stable("[...document.querySelectorAll('[data-person-request]')].length === 2 && [...document.querySelectorAll('[data-person-request]')].every(node => node.querySelector('.request-status').textContent === 'Waiting')"), 'waiting receipts render from API state');
 
-    // A generic write and an unknown action are refused before they reach the stand-in transport.
-    const beforeRefused = intents.length;
-    const beforeTransport = await chrome.evaluate('window.__transportCalls.length');
-    assert.match(await chrome.evaluate(`(async () => { try { await api(boardPath(view.root) + '/moves', { verb: 'shout', args: { to: 'coordinator', text: 'direct writes stay refused' } }); return 'unexpected'; } catch (error) { return error.message; } })()`), /read-only view/i);
-    assert.equal(await chrome.evaluate(`(async () => act('exec', { command: 'true' }))()`), false);
-    assert.equal(intents.length, beforeRefused, 'refused shapes never reach the request server');
-    assert.equal(await chrome.evaluate('window.__transportCalls.length'), beforeTransport, 'refused writes never reach the browser transport');
+    await t.test('a late earlier transport call is not counted as a refused write [H12]', { timeout: 30_000 }, async () => {
+      /** Keep only calls with a write shape; unrelated earlier reads must not enter this count. */
+      const writes = async () => JSON.parse(await chrome.stable(`JSON.stringify(window.__transportCalls.filter(call => call.body !== null || call.path.split('?')[0].endsWith('/moves')))`));
+      const earlierPath = await chrome.stable(`boardPath(view.root) + '/state?lateEarlier=406'`);
+      const beforeAllCalls = JSON.parse(await chrome.stable('JSON.stringify(window.__transportCalls)'));
+      const beforeWrites = await writes();
+      await chrome.stable(`window.__queueEarlierTransportCall(${JSON.stringify(earlierPath)})`);
+      assert.equal(await chrome.stable('window.__pendingEarlierTransportCalls'), 1, 'the earlier read is held before it reaches the transport');
+      assert.equal(await chrome.stable('window.__releaseEarlierTransportCall()'), undefined, 'the earlier read is released after the stale count');
+      await chrome.waitFor(`(async () => {
+        if (window.__pendingEarlierTransportCalls !== 0) return false;
+        const count = window.__transportCalls.length;
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        return window.__pendingEarlierTransportCalls === 0 && count === window.__transportCalls.length;
+      })()`);
+      assert.equal(await chrome.stable('window.__lateEarlierTransportError'), null, 'the earlier read completed successfully');
+      const afterEarlierCalls = JSON.parse(await chrome.stable('JSON.stringify(window.__transportCalls)'));
+      assert.equal(beforeAllCalls.some(call => call.path === earlierPath), false, 'the delayed call was not in the earlier snapshot');
+      assert.equal(afterEarlierCalls.filter(call => call.path === earlierPath && call.body === null).length, 1, 'the deliberately delayed earlier read reaches the transport once');
+      const afterEarlierWrites = await writes();
+      assert.deepEqual(afterEarlierWrites, beforeWrites, `the late read does not change the write-shaped transport calls: ${JSON.stringify(afterEarlierWrites)}`);
+
+      // A generic write and an unknown action are refused before they reach the stand-in transport.
+      const beforeRefused = intents.length;
+      const beforeTransport = beforeWrites.length;
+      const apiRefusal = await chrome.stable(`(async () => { try { await api(boardPath(view.root) + '/moves', { verb: 'shout', args: { to: 'coordinator', text: 'direct writes stay refused' } }); return 'unexpected'; } catch (error) { return error.message; } })()`);
+      const execRefusal = await chrome.stable(`(async () => act('exec', { command: 'true' }))()`);
+      const afterRefused = await writes();
+      assert.equal(afterRefused.length, beforeTransport, `refused writes never reach the browser transport; extra call shapes: ${JSON.stringify(afterRefused.slice(beforeTransport))}`);
+      assert.equal(intents.length, beforeRefused, 'refused shapes never reach the request server');
+      assert.match(apiRefusal, /read-only view/i);
+      assert.equal(execRefusal, false);
+    });
 
     const longTitle = 'Requested item ' + 'abcdefghij'.repeat(24);
     const otherActions = [
@@ -318,7 +358,7 @@ test('relay person requests stay explicit, read-only and visible [H12,H5]', { ti
       ['spec-decline', { ids: 'G2', reason: 'Keep the present behavior' }, { verb: 'spec-decline', args: { ids: 'G2', reason: 'Keep the present behavior' } }],
     ];
     for (const [action, args, expected] of otherActions) {
-      assert.equal(await chrome.evaluate(`act(${JSON.stringify(action)}, ${JSON.stringify(args)})`), true, `${action} is a permitted person request`);
+      assert.equal(await chrome.stable(`act(${JSON.stringify(action)}, ${JSON.stringify(args)})`), true, `${action} is a permitted person request`);
       assert.deepEqual(intents.at(-1), expected, `${action} retains literal public CLI intent`);
     }
     const allActions = [['shout', { to: 'coordinator', text: 'must not send' }], ['spec-approve', { ids: 'G2' }], ...otherActions.map(([action, args]) => [action, args])];
@@ -327,36 +367,36 @@ test('relay person requests stay explicit, read-only and visible [H12,H5]', { ti
     await chrome.send('Page.navigate', { url: `http://127.0.0.1:${pageServer.address().port}/without-capability` });
     await chrome.waitFor("typeof data === 'object' && !!data?.project && document.body?.classList.contains('read-only')");
     const beforeDisabled = intents.length;
-    await chrome.evaluate("document.querySelector('[data-tab=\"spec\"]').click(); document.querySelector('#spec-list [data-row=\"spec:G2\"]').click()");
+    await chrome.click("document.querySelector('[data-tab=\"spec\"]')"); await chrome.click("document.querySelector('#spec-list [data-row=\"spec:G2\"]')");
     await chrome.waitFor("view.row.spec === 'G2'");
-    assert.equal(await chrome.evaluate(`(async () => decideRow('spec', 'spec-approve', { ids: 'G2' }, document.querySelector('#spec-list [data-row=\"spec:G2\"]')))()`), false, 'the decision handler itself refuses without request capability');
-    assert.equal(await chrome.evaluate('!view.specFeedback'), true, 'a disabled decision refuses before creating decision feedback');
+    assert.equal(await chrome.stable(`(async () => decideRow('spec', 'spec-approve', { ids: 'G2' }, document.querySelector('#spec-list [data-row=\"spec:G2\"]')))()`), false, 'the decision handler itself refuses without request capability');
+    assert.equal(await chrome.stable('!view.specFeedback'), true, 'a disabled decision refuses before creating decision feedback');
     assert.equal(intents.length, beforeDisabled, 'a direct no-capability decision never reaches the request transport');
-    for (const [action, args] of allActions) assert.equal(await chrome.evaluate(`act(${JSON.stringify(action)}, ${JSON.stringify(args)})`), false, `${action} stays refused without the capability`);
+    for (const [action, args] of allActions) assert.equal(await chrome.stable(`act(${JSON.stringify(action)}, ${JSON.stringify(args)})`), false, `${action} stays refused without the capability`);
     assert.equal(intents.length, beforeDisabled, 'read-only without the explicit request capability refuses every action');
     await chrome.send('Page.navigate', { url: `http://127.0.0.1:${pageServer.address().port}/snapshot` });
     await chrome.waitFor("typeof data === 'object' && !!data?.project && document.body?.classList.contains('snapshot')");
-    assert.equal(await chrome.evaluate(`(async () => decideRow('spec', 'spec-approve', { ids: 'G2' }, null))()`), false, 'the decision handler itself refuses in a snapshot');
-    for (const [action, args] of allActions) assert.equal(await chrome.evaluate(`act(${JSON.stringify(action)}, ${JSON.stringify(args)})`), false, `${action} stays refused in a snapshot`);
-    assert.match(await chrome.evaluate(`(async () => { try { await api('/api/v1/boards/demo/moves', { verb: 'shout' }); return 'unexpected'; } catch (error) { return error.message; } })()`), /read-only snapshot/i);
+    assert.equal(await chrome.stable(`(async () => decideRow('spec', 'spec-approve', { ids: 'G2' }, null))()`), false, 'the decision handler itself refuses in a snapshot');
+    for (const [action, args] of allActions) assert.equal(await chrome.stable(`act(${JSON.stringify(action)}, ${JSON.stringify(args)})`), false, `${action} stays refused in a snapshot`);
+    assert.match(await chrome.stable(`(async () => { try { await api('/api/v1/boards/demo/moves', { verb: 'shout' }); return 'unexpected'; } catch (error) { return error.message; } })()`), /read-only snapshot/i);
     assert.equal(intents.length, beforeDisabled, 'snapshot mode cannot use the explicit request capability');
 
     // A later actual API read may update status; refusal text is safe text and preserves CLI guidance.
     await chrome.send('Page.navigate', { url: `http://127.0.0.1:${pageServer.address().port}/` });
     await chrome.waitFor("typeof window.__setPersonRequest === 'function' && !!data?.project");
-    await chrome.evaluate(`window.__setPersonRequest('request-1', 'done')`);
+    await chrome.stable(`window.__setPersonRequest('request-1', 'done')`);
     await chrome.waitFor("document.querySelector('[data-person-request=\"request-1\"]')?.querySelector('.request-status')?.textContent === 'Done'");
     const refusal = '<img src=x onerror=globalThis.requestInjection=true> UNKNOWN_SPEC; run pullboard spec check';
-    await chrome.evaluate(`window.__setPersonRequest('request-2', 'refused', { code: 'UNKNOWN_SPEC', message: ${JSON.stringify(refusal)}, next: 'run pullboard spec check' })`);
+    await chrome.stable(`window.__setPersonRequest('request-2', 'refused', { code: 'UNKNOWN_SPEC', message: ${JSON.stringify(refusal)}, next: 'run pullboard spec check' })`);
     await chrome.waitFor("document.querySelector('[data-person-request=\"request-2\"]')?.textContent.includes('UNKNOWN_SPEC')");
-    assert.equal(await chrome.evaluate("document.querySelector('[data-person-request=\"request-2\"] img') === null"), true, 'refusal guidance is escaped, not interpreted as markup');
-    assert.equal(await chrome.evaluate("document.querySelector('[data-person-request=\"request-2\"] .request-error')?.textContent"), 'UNKNOWN_SPEC ' + refusal, 'the original CLI refusal message stays intact');
-    assert.equal(await chrome.evaluate('globalThis.requestInjection === undefined'), true, 'refusal content cannot execute in the page');
-    assert.equal(await chrome.evaluate("document.querySelector('[data-person-request=\"request-2\"]')?.textContent.includes('run pullboard spec check')"), true);
+    assert.equal(await chrome.stable("document.querySelector('[data-person-request=\"request-2\"] img') === null"), true, 'refusal guidance is escaped, not interpreted as markup');
+    assert.equal(await chrome.stable("document.querySelector('[data-person-request=\"request-2\"] .request-error')?.textContent"), 'UNKNOWN_SPEC ' + refusal, 'the original CLI refusal message stays intact');
+    assert.equal(await chrome.stable('globalThis.requestInjection === undefined'), true, 'refusal content cannot execute in the page');
+    assert.equal(await chrome.stable("document.querySelector('[data-person-request=\"request-2\"]')?.textContent.includes('run pullboard spec check')"), true);
     for (const width of [375, 1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
-      assert.equal(await chrome.evaluate('document.documentElement.scrollWidth <= document.documentElement.clientWidth'), true, `${width}px refusal view has no horizontal overflow`);
-      const layout = JSON.parse(await chrome.evaluate(`JSON.stringify({
+      assert.equal(await chrome.stable('document.documentElement.scrollWidth <= document.documentElement.clientWidth'), true, `${width}px refusal view has no horizontal overflow`);
+      const layout = JSON.parse(await chrome.stable(`JSON.stringify({
         statuses: [...document.querySelectorAll('.request-status')].map(node => node.textContent),
         listFits: document.querySelector('.request-list').scrollWidth <= document.querySelector('.request-list').clientWidth,
         readable: [...document.querySelectorAll('.request-label, .request-status, .request-error, .request-next')].every(node => {
@@ -373,7 +413,7 @@ test('relay person requests stay explicit, read-only and visible [H12,H5]', { ti
       { verb: 'spec-approve', args: { ids: 'G2' } },
       ...otherActions.map(([, , expected]) => expected),
     ]);
-    const privatePath = await chrome.evaluate('boardPath(view.root)');
+    const privatePath = await chrome.stable('boardPath(view.root)');
     const privateState = await (await fetchLive(live.base + privatePath + '/state', { headers: { 'x-pullboard-key': live.key } })).json();
     assert.equal(privateState.state.items.length, 1, 'the stand-in request transport never executes an item move on the real board');
     assert.equal(privateState.state.holds.length, 0, 'the request transport never changes a real lane hold');
@@ -465,7 +505,7 @@ test('read-only Needs-you preserves each entry as text while its transport stays
     chrome = await openSnapshotChrome(executable, live.link.href, profile);
     await chrome.waitFor("typeof data === 'object' && !!data?.project && document.querySelector('#needs .row')?.textContent.includes('Should the read-only fixture ship?')");
     /** Read Needs-you labels with absolute API age timestamps so the comparison survives minute ticks. */
-    const readNeedEntries = () => chrome.evaluate(`JSON.stringify([...document.querySelectorAll('#needs .row')].map((row) => {
+    const readNeedEntries = () => chrome.stable(`JSON.stringify([...document.querySelectorAll('#needs .row')].map((row) => {
       const time = row.querySelector('.row-age time'), ref = row.querySelector('.t > span');
       return [ref?.textContent, row.querySelector('.t').textContent.slice((ref?.textContent ?? '').length),
         row.querySelector('.meta .why').textContent + (time ? ' @' + time.dataset.ago : '')];
@@ -479,28 +519,28 @@ test('read-only Needs-you preserves each entry as text while its transport stays
     await chrome.waitFor("document.querySelector('#needs .row')?.textContent.includes('Should the read-only fixture ship?')");
     const readOnlyEntries = JSON.parse(await readNeedEntries());
     assert.deepEqual(readOnlyEntries, normalEntries, 'read-only Needs-you preserves the normal entries and their API-provided asker and ages');
-    assert.equal(await chrome.evaluate("document.querySelectorAll('#needs button, #needs [data-go], #needs [data-new], #needs [data-shout], #needs [data-release]').length"), 0,
+    assert.equal(await chrome.stable("document.querySelectorAll('#needs button, #needs [data-go], #needs [data-new], #needs [data-shout], #needs [data-release]').length"), 0,
       'read-only Needs-you entries contain no answer, approve, navigation, or other action controls');
-    const calls = JSON.parse(await chrome.evaluate('JSON.stringify(window.__transportCalls)'));
+    const calls = JSON.parse(await chrome.stable('JSON.stringify(window.__transportCalls)'));
     assert.ok(calls.some((call) => call.path === '/api/v1/boards'));
     assert.ok(calls.some((call) => call.path.startsWith('/api/v1/boards/') && call.path.endsWith('/state')));
-    assert.equal(await chrome.evaluate("document.querySelector('#live').textContent"), '', 'read-only transport keeps the page live, which says nothing');
+    assert.equal(await chrome.stable("document.querySelector('#live').textContent"), '', 'read-only transport keeps the page live, which says nothing');
     const actionSelectors = ['#new-item', '#add-form', '#shout-form', '#hold-form', '[data-release]', '[data-shout]', '[data-new]', '[data-go^="decide:"]'];
-    const actionMatches = JSON.parse(await chrome.evaluate(`JSON.stringify(${JSON.stringify(actionSelectors)}.map((selector) => ({ selector, count: document.querySelectorAll(selector).length, visible: [...document.querySelectorAll(selector)].some((node) => !node.hidden && getComputedStyle(node).display !== 'none') })))`));
+    const actionMatches = JSON.parse(await chrome.stable(`JSON.stringify(${JSON.stringify(actionSelectors)}.map((selector) => ({ selector, count: document.querySelectorAll(selector).length, visible: [...document.querySelectorAll(selector)].some((node) => !node.hidden && getComputedStyle(node).display !== 'none') })))`));
     assert.ok(actionMatches.every((entry) => entry.count > 0), 'the seeded item, decision and hold exercise every action selector');
     assert.deepEqual(actionMatches.filter((entry) => entry.visible).map((entry) => entry.selector), [], 'read-only mode hides every match for every action control');
 
-    const refusedAction = JSON.parse(await chrome.evaluate(`(async () => JSON.stringify({ result: await act('shout', { to: 'all', text: 'blocked' }), message: document.querySelector('#console').textContent }))()`));
+    const refusedAction = JSON.parse(await chrome.stable(`(async () => JSON.stringify({ result: await act('shout', { to: 'all', text: 'blocked' }), message: document.querySelector('#console').textContent }))()`));
     assert.equal(refusedAction.result, false);
     assert.match(refusedAction.message, /read-only/i);
-    const refusedApi = await chrome.evaluate(`(async () => { try { await api('/api/v1/boards/demo/moves', { verb: 'shout' }); return 'unexpected success'; } catch (error) { return error.message; } })()`);
+    const refusedApi = await chrome.stable(`(async () => { try { await api('/api/v1/boards/demo/moves', { verb: 'shout' }); return 'unexpected success'; } catch (error) { return error.message; } })()`);
     assert.match(refusedApi, /read-only/i, 'direct API mutation calls are refused before transport');
     assert.ok(forwarded.every((method) => method === 'GET'), 'read-only action attempts send no write through the transport');
 
-    await chrome.evaluate(`window.__samePage = true; Object.defineProperty(document, 'hidden', { configurable: true, get: () => true })`);
+    await chrome.stable(`window.__samePage = true; Object.defineProperty(document, 'hidden', { configurable: true, get: () => true })`);
     box.run(app.repo, 'add', 'web', 'Transport refresh item', '--specs', 'G1', '--criterion', 'appears after a transport update');
-    await chrome.evaluate('window.__transportUpdate()');
-    assert.equal(await chrome.evaluate("data?.project?.items.some((item) => item.title === 'Transport refresh item') && window.__samePage === true"), true, 'onUpdate refreshes state in the same page without relying on the poll');
+    await chrome.stable('window.__transportUpdate()');
+    assert.equal(await chrome.stable("data?.project?.items.some((item) => item.title === 'Transport refresh item') && window.__samePage === true"), true, 'onUpdate refreshes state in the same page without relying on the poll');
     assert.ok(forwarded.every((method) => method === 'GET'), 'transport update refreshed through reads only');
 
   } finally {
@@ -590,10 +630,10 @@ test('a configured transport never falls back while loading or after import fail
     const origin = `http://127.0.0.1:${server.address().port}`;
     chrome = await openSnapshotChrome(executable, `${origin}/slow`, profile);
     await requested;
-    const loadingCall = await chrome.evaluate("api('/api/v1/boards').then(() => 'unexpected success', error => error.message)");
+    const loadingCall = await chrome.stable("api('/api/v1/boards').then(() => 'unexpected success', error => error.message)");
     assert.match(loadingCall, /transport.*loading/i, 'direct API calls refuse while the configured module is loading');
     await browserPause(3200);
-    assert.equal(await chrome.evaluate('window.__transportReady === true'), false, 'the delayed module is still loading during the proof');
+    assert.equal(await chrome.stable('window.__transportReady === true'), false, 'the delayed module is still loading during the proof');
     assert.deepEqual(localRequests, [], 'neither direct reads nor the poll fall back while loading');
 
     releaseSlowModule();
@@ -604,7 +644,7 @@ test('a configured transport never falls back while loading or after import fail
     await chrome.send('Page.navigate', { url: `${origin}/failed` });
     await chrome.waitFor("document.querySelector('#live').textContent.includes('fixture transport import failed')");
     await browserPause(3200);
-    assert.match(await chrome.evaluate("document.querySelector('#live').textContent"), /cannot reach the view: fixture transport import failed/,
+    assert.match(await chrome.stable("document.querySelector('#live').textContent"), /cannot reach the view: fixture transport import failed/,
       'the original module error remains visible after later poll intervals');
     assert.deepEqual(localRequests, [], 'a failed import also disables page-local polling');
   } finally {
