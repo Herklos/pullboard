@@ -10,9 +10,9 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-test('model declarations and event snapshots retain engines 1 through 7 semantics [O8,O3,H16]', (t) => {
-  assert.equal(ENGINE_VERSION, 8, 'model moves share the approved 0.8.5 engine');
-  for (const version of [1, 2, 3, 4, 5, 6, 7, 8]) {
+test('model declarations and event snapshots retain engines 1 through 9 semantics [O8,O3,H16]', (t) => {
+  assert.equal(ENGINE_VERSION, 9, 'model moves remain supported by the 0.8.10 engine');
+  for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9]) {
     const board = store.openBoard(':memory:');
     t.after(() => store.closeBoard(board));
     const registration = prepareEngineMove(board, 'register', [{ lane: 'web', path: '/web', model: 'First Model' }]);
@@ -29,7 +29,7 @@ test('model declarations and event snapshots retain engines 1 through 7 semantic
     assert.equal(changed.result, 'web-1');
     assert.equal(changed.events.length, version < 8 ? 0 : 1);
     assert.equal(store.agentAt(board, '/web').agent_model, version < 8 ? null : 'Second Model');
-    if (version === 8) {
+    if (version >= 8) {
       assert.equal(changed.events[0].event_kind, 'model');
       assert.deepEqual(JSON.parse(changed.events[0].event_detail), { model: 'Second Model' });
       assert.deepEqual(JSON.parse(store.events(board)[0].event_detail), { lane: 'web', model: 'First Model' },
