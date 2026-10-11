@@ -173,16 +173,16 @@ function withProject(root, read, providedBoard = null) {
  *
  * @param {string} root
  * @param {string} file
- * @param {(root: string, file: string) => { ids: Map<string, string> }} [history]
+ * @param {string | null} head The one commit captured for this project's state.
+ * @param {(root: string, file: string, revs: string[]) => { ids: Map<string, string> }} [history]
  * @returns {Map<string, number>}
  */
-function rowAges(root, file, history = committedIds) {
-  const head = resolveCommit(root, 'HEAD');
+function rowAges(root, file, head, history = committedIds) {
   const key = root + '\0' + file, kept = agesKept.get(key);
   if (kept && kept.head === head) return kept.ages;
-  const log = head ? spawnSync('git', ['log', '--follow', '--format=%H', 'HEAD', '--', file], { cwd: root, encoding: 'utf8' }) : null;
+  const log = head ? spawnSync('git', ['log', '--follow', '--format=%H', head, '--', file], { cwd: root, encoding: 'utf8' }) : null;
   const place = new Map((log?.status === 0 ? log.stdout : '').split('\n').filter(Boolean).map((commit, n) => [commit, n + 1]));
-  const ages = new Map([...history(root, file).ids].map(([id, commit]) => [id, place.get(commit) ?? place.size + 1]));
+  const ages = new Map([...(head ? history(root, file, [head]).ids : new Map())].map(([id, commit]) => [id, place.get(commit) ?? place.size + 1]));
   agesKept.set(key, { head, ages });
   return ages;
 }
@@ -201,13 +201,15 @@ export function projectState(root, { seen = null, board: providedBoard = null } 
   return withProject(root, (board, info, config) => {
     const all = store.listItems(board, { all: true });
     const status = new Map(all.map((item) => [item.item_id, item.item_status]));
+    // Both row lists and their cached ages name this commit even if HEAD moves between Git reads.
+    const head = resolveCommit(info.root, 'HEAD');
     const rows = (file) => {
-      const ages = rowAges(info.root, file);
+      const ages = rowAges(info.root, file, head);
       return loadSpec(info.root, { ...config, spec: file }).rows.map(({ id, status: state, tier, text, gate, serves, section }) => ({ id, status: state, tier, text, gate, serves, section, added: ages.get(id) ?? 0 }));
     };
     const doctrine = loadDoctrine(info.root, config);
     // A standard rule was never added to this repo, so it has no age here; the repo's own rows have.
-    const doctrineAges = rowAges(info.root, doctrine.name, doctrineHistory);
+    const doctrineAges = rowAges(info.root, doctrine.name, head, doctrineHistory);
     // A decline's text is its reason. Keep the inherited rule available so the page strikes the
     // rule itself, while showing the repo's reason beside it.
     const inherited = new Map(standardDoctrine().rows.map((row) => [row.id, row.text]));
@@ -217,6 +219,7 @@ export function projectState(root, { seen = null, board: providedBoard = null } 
     const lastMove = new Map(log.map((event) => [event.event_by, event.event_at]));
     return {
       root: info.root,
+      rowAgesAt: { [config.spec]: head, [doctrine.name]: head },
       lanes: [COORDINATOR, ...Object.keys(config.lanes)],
       // The lanes that own folders, where builders work; review lanes own none.
       owning: Object.keys(config.lanes).filter((lane) => (config.lanes[lane].owns ?? []).length > 0),
