@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { tapTarget, SPEC, machine, project, build, sendBack, fetchLive, startView, target, accept, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, press, travel, pressedInto, settled, roadmapRow, showing, readRoadmap, openRoadmapParts, tabBar, proofShot, pickProject } from './fixture.js';
+import { tapTarget, SPEC, machine, project, build, sendBack, fetchLive, startView, target, accept, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, press, travel, pressedInto, settled, roadmapRow, showing, readRoadmap, openRoadmapParts, tabBar, proofShot, pickProject, chooseFilter } from './fixture.js';
 
 
 test('Roadmap and rule prose references stay inline and open the item on their own board [N26,N38]', { timeout: 90_000 }, async (t) => {
@@ -67,7 +67,7 @@ test('Roadmap and rule prose references stay inline and open the item on their o
       assert.equal(await chrome.stable("document.querySelectorAll('#detail .verdict .note .ref').length"), 1, 'verdict prose keeps its item reference');
       await chrome.click("document.querySelector('#detail .verdict .note .ref')");
       await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('Local target')");
-      await chrome.click("document.querySelector('[data-state=active]')");
+      await chooseFilter(chrome, 'state:active');
       await chrome.click("document.querySelector('#needs .row[data-go^=\"decide:\"]')");
       assert.equal(await chrome.stable("document.querySelectorAll('#answering-q .ref').length"), 1, 'the answering question keeps its inline item reference');
       await chrome.click("document.querySelector('#answering-q .ref')");
