@@ -138,19 +138,18 @@ main { padding: 16px 18px 56px; }
 .two.narrow { grid-template-columns: minmax(0, 1fr) var(--agents-w); }
 .roadmap { display: grid; gap: 12px; max-width: 900px; align-content: start; }
 .milestone { padding: 14px 16px 12px; }
-.roadmap summary { display: flex; align-items: center; gap: 10px; min-height: 44px; list-style: none; cursor: pointer; }
-.roadmap summary::-webkit-details-marker { display: none; }
-.roadmap summary .milestone-count { margin-left: auto; }
+.milestone-head { display: flex; align-items: center; gap: 10px; min-height: 44px; cursor: pointer; border-radius: 8px; }
+.milestone-head .milestone-count { margin-left: auto; }
 /* A small triangle that turns down when its part is open. */
 .roadmap .caret { flex: none; width: 7px; height: 9px; background: var(--ink-faint); clip-path: polygon(0 0, 100% 50%, 0 100%); transition: transform .15s; }
-.roadmap details[open] > summary > .caret { transform: rotate(90deg); }
+.milestone-head[aria-expanded="true"] > .caret { transform: rotate(90deg); }
 .shipped { padding: 4px 16px; }
-.shipped > summary h2 { margin: 0; font-size: 15px; color: var(--ink-muted); }
+.shipped > .milestone-head h2 { margin: 0; font-size: 15px; color: var(--ink-muted); }
 .shipped-one { border-top: 1px solid var(--line); }
-.shipped-one > summary { min-height: 44px; }
-.shipped-one > summary h2 { flex: none; font-size: 14px; }
-.shipped-one > summary small { min-width: 0; overflow: hidden; color: var(--ink-faint); font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap; }
-.shipped-one[open] { padding-bottom: 10px; }
+.shipped-one > .milestone-head { min-height: 44px; }
+.shipped-one > .milestone-head h2 { flex: none; font-size: 14px; }
+.shipped-one > .milestone-head small { min-width: 0; overflow: hidden; color: var(--ink-faint); font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap; }
+.shipped-one:has(> .milestone-head[aria-expanded="true"]) { padding-bottom: 10px; }
 .milestone h2 { margin: 0; font-size: 17px; line-height: 1.3; overflow-wrap: anywhere; }
 .milestone-count { color: var(--ink-muted); font: 12px var(--mono); white-space: nowrap; }
 .milestone-progress { display: block; width: 100%; height: 7px; margin: 10px 0 6px; overflow: hidden; border-radius: 99px; background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line); }
@@ -720,3 +719,5 @@ code.inline.long { white-space: break-spaces; overflow-wrap: anywhere; }
 .proof-stats-detail p { margin: 5px 0 0; overflow-wrap: anywhere; }
 
 @media (width < 480px) { .proof-stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+.milestone-head:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

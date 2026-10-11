@@ -1267,6 +1267,22 @@ function milestoneRow(row, titles) {
     : '<li><button ' + attributes + ' type="button">' + inner + '</button></li>';
 }
 
+/** Read a release once using the same terminal-item rule in the Roadmap and status bar. */
+function readMilestone(milestone, p) {
+  const rows = milestone.items.map((entry) => milestoneItem(entry, p));
+  const done = rows.filter((row) => row.state === 'verified').length;
+  // A nonempty release has no work left when every item is verified or withdrawn.
+  return { milestone, rows, done, shipped: rows.length > 0 && rows.every((row) => row.state === 'verified' || row.state === 'withdrawn') };
+}
+
+/** Pick the first release with remaining work in roadmap order; empty plans wait behind it. */
+function nextMilestone(p) {
+  return (p.milestones || []).find((milestone) => {
+    const read = readMilestone(milestone, p);
+    return read.rows.length > 0 && !read.shipped;
+  });
+}
+
 /**
  * The Roadmap (N26, N38) leads with what ships next: the milestones with work still to verify, in the board's order,
  * the next one open; then one Shipped section, folded, holding nonempty milestones with only verified or withdrawn items, newest
@@ -1280,15 +1296,10 @@ function roadmapCards(p, titles) {
   const milestones = (p.milestones || []).filter((m) => !only || m.name === only);
   const lead = only ? '<div class="roadmap-only"><span>' + esc(only) + '</span><button class="link" data-roadmap-all type="button">show all</button></div>' : '';
   if (!milestones.length) return '<div class="card-panel empty">No milestones yet. The coordinator adds one with <code class="inline">pullboard milestone add</code>.</div>';
-  const read = milestones.map((milestone) => {
-    const rows = milestone.items.map((entry) => milestoneItem(entry, p));
-    const done = rows.filter((row) => row.state === 'verified').length;
-    // A nonempty release has no work left when every item is verified or withdrawn.
-    return { milestone, rows, done, shipped: rows.length > 0 && rows.every((row) => row.state === 'verified' || row.state === 'withdrawn') };
-  });
-  const coming = read.filter((m) => !m.shipped), shipped = read.filter((m) => m.shipped).reverse();
+  const read = milestones.map((milestone) => readMilestone(milestone, p));
+  const coming = read.filter((m) => !m.shipped && m.rows.length).concat(read.filter((m) => !m.rows.length)), shipped = read.filter((m) => m.shipped).reverse();
   /** Preserve each board's disclosure choices independently. */
-  const open = (key, first) => (view.roadmapOpen.has(JSON.stringify([view.root, key])) ? view.roadmapOpen.get(JSON.stringify([view.root, key])) : first) ? ' open' : '';
+  const isOpen = (key, first) => view.roadmapOpen.has(JSON.stringify([view.root, key])) ? view.roadmapOpen.get(JSON.stringify([view.root, key])) : first;
   const caret = '<span class="caret" aria-hidden="true"></span>';
   /** Keep the existing verified-item count beside an upcoming release. */
   const count = (m) => m.rows.length ? '<span class="milestone-count">' + m.done + '/' + m.rows.length + ' done</span>' : '';
@@ -1297,13 +1308,17 @@ function roadmapCards(p, titles) {
     ? '<svg class="milestone-progress" viewBox="0 0 100 1" preserveAspectRatio="none" role="progressbar" aria-label="' + esc(milestone.name) + ': ' + done + ' of ' + rows.length + ' done" aria-valuemin="0" aria-valuemax="' + rows.length + '" aria-valuenow="' + done + '"><rect width="' + Math.round((100 * done) / rows.length) + '" height="1"/></svg><ul>' + rows.map((row) => milestoneRow(row, titles)).join('') + '</ul>'
     : '<p class="milestone-empty">No items yet.</p>')
     + (milestone.note ? '<p class="milestone-note">' + rich(milestone.note, titles) + '</p>' : '');
+  /** Keep folding consistent with the View's other keyboard-accessible disclosure controls. */
+  const wrap = (tag, classes, key, first, heading, contents) => {
+    const open = isOpen(key, first);
+    return '<' + tag + ' class="' + classes + '" data-key="' + esc(key) + '"><div class="milestone-head" data-roadmap-key="' + esc(key) + '" role="button" tabindex="0" aria-expanded="' + open + '">' + caret + heading + '</div><div class="milestone-body"' + (open ? '' : ' hidden') + '>' + contents + '</div></' + tag + '>';
+  };
   /** Open only the next upcoming milestone by default. */
-  const card = (m, first) => '<details class="card-panel milestone" data-key="' + esc('m:' + m.milestone.name) + '"' + open('m:' + m.milestone.name, first) + '><summary>' + caret + '<h2>' + linked(m.milestone.name, titles) + '</h2>' + count(m) + '</summary>' + body(m) + '</details>';
+  const card = (m, first) => wrap('section', 'card-panel milestone', 'm:' + m.milestone.name, first, '<h2>' + linked(m.milestone.name, titles) + '</h2>' + count(m), body(m));
   /** Summarize one shipped milestone with its first note line and total count. */
-  const line = (m) => '<details class="milestone shipped-one" data-key="' + esc('m:' + m.milestone.name) + '"' + open('m:' + m.milestone.name, false) + '><summary>' + caret + '<h2>' + esc(m.milestone.name) + '</h2>'
-    + '<small>' + esc(firstLine(m.milestone.note)) + '</small><span class="milestone-count">' + m.rows.length + (m.rows.length === 1 ? ' item' : ' items') + '</span></summary>' + body(m) + '</details>';
+  const line = (m) => wrap('div', 'milestone shipped-one', 'm:' + m.milestone.name, false, '<h2>' + esc(m.milestone.name) + '</h2><small>' + esc(firstLine(m.milestone.note)) + '</small><span class="milestone-count">' + m.rows.length + (m.rows.length === 1 ? ' item' : ' items') + '</span>', body(m));
   return lead + coming.map((m, n) => card(m, n === 0)).join('')
-    + (shipped.length ? '<details class="card-panel shipped" data-key="shipped"' + open('shipped', false) + '><summary>' + caret + '<h2>Shipped</h2><span class="milestone-count">' + shipped.length + (shipped.length === 1 ? ' release' : ' releases') + '</span></summary>' + shipped.map(line).join('') + '</details>' : '');
+    + (shipped.length ? wrap('section', 'card-panel shipped', 'shipped', false, '<h2>Shipped</h2><span class="milestone-count">' + shipped.length + (shipped.length === 1 ? ' release' : ' releases') + '</span>', shipped.map(line).join('')) : '');
 }
 
 /** Tags that flow inside a line of text, so a reference's line belongs to the nearest block around it. */
@@ -1602,7 +1617,7 @@ function render() {
   // The status bar: what the board is doing, along the foot of the window. Each number is the length of the list its
   // click opens (the Active and To verify filters, the gated rows, the agents panel's rows), and a part with none hides.
   // countUnseen fills the unread shouts once the tab is drawn.
-  const release = (p.milestones || []).find((m) => m.done < m.total), last = p.events[0];
+  const release = nextMilestone(p), last = p.events[0];
   const part = (to, n, words, title) => n ? '<button type="button" data-status="' + to + '" title="' + esc(title) + '"><b>' + n + '</b> ' + words + '</button>' : '';
   $('status-board').innerHTML = part('items', active.length, 'items', 'Show the active items') + '<button type="button" id="status-unread" data-status="unread" title="Show the shouts you have not read" hidden></button>'
     + part('agents', busy.length, busy.length === 1 ? 'agent' : 'agents', 'Show the agents holding work: ' + busy.map((a) => agentName(a.agent_id)).join(', '))
@@ -1822,7 +1837,7 @@ function statusGo(to) {
   // The agents it counts are the panel's rows, so it opens the panel even where the person hid it.
   else if (to === 'agents') { view.agentsHidden = false; keep('pb.agents', 'shown'); view.agent = null; openTab('shouts'); }
   // The release it counts is one milestone, so the Roadmap opens on that one alone.
-  else if (to === 'release') { view.roadmapOnly = (data.project.milestones || []).find((m) => m.done < m.total)?.name ?? null; openTab('roadmap'); }
+  else if (to === 'release') { view.roadmapOnly = nextMilestone(data.project)?.name ?? null; openTab('roadmap'); }
   else openTab(to);
   showTab();
   render();
@@ -2225,13 +2240,20 @@ $('shouts-pane').addEventListener('click', (event) => {
 // Enter shouts; Shift+Enter starts a new line.
 $('shout-text').addEventListener('keydown', (event) => { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); $('shout-form').requestSubmit(); } });
 document.addEventListener('click', (event) => {
-  const t = event.target.closest('[data-status],[data-roadmap-all],[data-root],[data-tab],[data-go],[data-item],[data-items-view],[data-state],[data-rows],[data-row],[data-row-decision],[data-section-approve],[data-release],[data-shout],[data-new],[data-code],[data-code-all],[data-code-less],#proj-switch,#console');
+  const t = event.target.closest('[data-status],[data-roadmap-key],[data-roadmap-all],[data-root],[data-tab],[data-go],[data-item],[data-items-view],[data-state],[data-rows],[data-row],[data-row-decision],[data-section-approve],[data-release],[data-shout],[data-new],[data-code],[data-code-all],[data-code-less],#proj-switch,#console');
   if (!event.target.closest('.side')) fold(false);
   if (!t) return;
   if (t.id === 'proj-switch') { fold(!$('side').classList.contains('open')); return; }
   if (t.id === 'console') { t.hidden = true; return; }
   if (t.dataset.status) { statusGo(t.dataset.status); return; }
   if (t.dataset.itemsView) { view.itemsView = t.dataset.itemsView; address(); render(); return; }
+  if ('roadmapKey' in t.dataset) {
+    const key = t.dataset.roadmapKey;
+    view.roadmapOpen.set(JSON.stringify([view.root, key]), t.getAttribute('aria-expanded') !== 'true');
+    render();
+    [...$('roadmap').querySelectorAll('[data-roadmap-key]')].find((head) => head.dataset.roadmapKey === key)?.focus({ preventScroll: true });
+    return;
+  }
   if ('roadmapAll' in t.dataset) { view.roadmapOnly = null; render(); return; }
   if (t.dataset.root) switchTo(t.dataset.root, t.dataset.go || '');
   else if (t.dataset.tab) { view.unread = null; view.roadmapOnly = null; openTab(t.dataset.tab); showTab(); }
@@ -2267,6 +2289,8 @@ document.addEventListener('click', (event) => {
 /** Let a Roadmap row with independent inline links keep its keyboard button behavior. */
 document.addEventListener('keydown', (event) => {
   if (!['Enter', ' '].includes(event.key)) return;
+  const head = event.target.closest('.milestone-head');
+  if (head && event.target === head) { event.preventDefault(); head.click(); return; }
   const row = event.target.closest('.milestone-item[role="button"]');
   if (event.target !== row) return;
   event.preventDefault();
@@ -2324,10 +2348,6 @@ $('theme').addEventListener('click', () => {
   theme(next);
 });
 $('q').addEventListener('input', () => { search(); view.foundAt = 0; showFound(); });
-/** Remember disclosure choices independently for each board. */
-$('roadmap').addEventListener('toggle', (event) => {
-  if (event.target.isConnected && event.target.dataset?.key) view.roadmapOpen.set(JSON.stringify([view.root, event.target.dataset.key]), event.target.open);
-}, true);
 // Leaving the field closes the results a moment later, so a press on a result lands first; coming back to the field
 // before then keeps them, or a search begun straight after Esc would lose its new results to the old close.
 let closingFound = 0;
