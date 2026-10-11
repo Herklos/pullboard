@@ -138,7 +138,19 @@ main { padding: 16px 18px 56px; }
 .two.narrow { grid-template-columns: minmax(0, 1fr) var(--agents-w); }
 .roadmap { display: grid; gap: 12px; max-width: 900px; align-content: start; }
 .milestone { padding: 14px 16px 12px; }
-.milestone header { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.roadmap summary { display: flex; align-items: center; gap: 10px; min-height: 44px; list-style: none; cursor: pointer; }
+.roadmap summary::-webkit-details-marker { display: none; }
+.roadmap summary .milestone-count { margin-left: auto; }
+/* A small triangle that turns down when its part is open. */
+.roadmap .caret { flex: none; width: 7px; height: 9px; background: var(--ink-faint); clip-path: polygon(0 0, 100% 50%, 0 100%); transition: transform .15s; }
+.roadmap details[open] > summary > .caret { transform: rotate(90deg); }
+.shipped { padding: 4px 16px; }
+.shipped > summary h2 { margin: 0; font-size: 15px; color: var(--ink-muted); }
+.shipped-one { border-top: 1px solid var(--line); }
+.shipped-one > summary { min-height: 44px; }
+.shipped-one > summary h2 { flex: none; font-size: 14px; }
+.shipped-one > summary small { min-width: 0; overflow: hidden; color: var(--ink-faint); font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap; }
+.shipped-one[open] { padding-bottom: 10px; }
 .milestone h2 { margin: 0; font-size: 17px; line-height: 1.3; overflow-wrap: anywhere; }
 .milestone-count { color: var(--ink-muted); font: 12px var(--mono); white-space: nowrap; }
 .milestone-progress { display: block; width: 100%; height: 7px; margin: 10px 0 6px; overflow: hidden; border-radius: 99px; background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line); }

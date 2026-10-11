@@ -184,7 +184,7 @@ function homeTab() {
   const kept = keep('pb.tab');
   return kept && kept !== 'roadmap' ? kept : 'items';
 }
-const view = { root: keep('pb.project'), tab: addressTab() || homeTab(), itemsView: typeof location !== 'undefined' && location.hash === '#items/pipeline' ? 'pipeline' : 'list', seen: {}, code: {}, item: null, adding: false, declining: null, state: 'active', rows: { spec: 'decide', doctrine: 'all' }, row: { spec: null, doctrine: null }, agent: null, allAgents: false, agentsHidden: keep('pb.agents') === 'hidden', open: {} };
+const view = { roadmapOpen: new Map(), root: keep('pb.project'), tab: addressTab() || homeTab(), itemsView: typeof location !== 'undefined' && location.hash === '#items/pipeline' ? 'pipeline' : 'list', seen: {}, code: {}, item: null, adding: false, declining: null, state: 'active', rows: { spec: 'decide', doctrine: 'all' }, row: { spec: null, doctrine: null }, agent: null, allAgents: false, agentsHidden: keep('pb.agents') === 'hidden', open: {} };
 let switchGeneration = 0;
 if (snapshot) view.state = 'all';
 let data = null;
@@ -1268,9 +1268,11 @@ function milestoneRow(row, titles) {
 }
 
 /**
- * The Roadmap (N26, N38): a card for each milestone in the board's order, with how many of its
- * items are verified as a count and a bar, a row for each, and the note to the person in its own
- * highlighted line. A milestone with no items says so, rather than draw an empty bar.
+ * The Roadmap (N26, N38) leads with what ships next: the milestones with work still to verify, in the board's order,
+ * the next one open; then one Shipped section, folded, holding nonempty milestones with only verified or withdrawn items, newest
+ * first, each a line with its name, its item count and its note's first line. A milestone opens to a card as before:
+ * how many of its items are verified as a count and a bar, a row for each, and the note to the person in its own
+ * highlighted line; one with no items says so. Each part stays open or closed as the person left it.
  */
 function roadmapCards(p, titles) {
   // Opened from the status bar's release, the Roadmap is that release alone, with a way back to all of them.
@@ -1278,16 +1280,30 @@ function roadmapCards(p, titles) {
   const milestones = (p.milestones || []).filter((m) => !only || m.name === only);
   const lead = only ? '<div class="roadmap-only"><span>' + esc(only) + '</span><button class="link" data-roadmap-all type="button">show all</button></div>' : '';
   if (!milestones.length) return '<div class="card-panel empty">No milestones yet. The coordinator adds one with <code class="inline">pullboard milestone add</code>.</div>';
-  return lead + milestones.map((milestone) => {
+  const read = milestones.map((milestone) => {
     const rows = milestone.items.map((entry) => milestoneItem(entry, p));
     const done = rows.filter((row) => row.state === 'verified').length;
-    const name = esc(milestone.name);
-    return '<article class="card-panel milestone"><header><h2>' + linked(milestone.name, titles) + '</h2>' + (rows.length ? '<span class="milestone-count">' + done + '/' + rows.length + ' done</span>' : '') + '</header>'
-      + (rows.length
-        ? '<svg class="milestone-progress" viewBox="0 0 100 1" preserveAspectRatio="none" role="progressbar" aria-label="' + name + ': ' + done + ' of ' + rows.length + ' done" aria-valuemin="0" aria-valuemax="' + rows.length + '" aria-valuenow="' + done + '"><rect width="' + Math.round((100 * done) / rows.length) + '" height="1"/></svg><ul>' + rows.map((row) => milestoneRow(row, titles)).join('') + '</ul>'
-        : '<p class="milestone-empty">No items yet.</p>')
-      + (milestone.note ? '<p class="milestone-note">' + rich(milestone.note, titles) + '</p>' : '') + '</article>';
-  }).join('');
+    // A nonempty release has no work left when every item is verified or withdrawn.
+    return { milestone, rows, done, shipped: rows.length > 0 && rows.every((row) => row.state === 'verified' || row.state === 'withdrawn') };
+  });
+  const coming = read.filter((m) => !m.shipped), shipped = read.filter((m) => m.shipped).reverse();
+  /** Preserve each board's disclosure choices independently. */
+  const open = (key, first) => (view.roadmapOpen.has(JSON.stringify([view.root, key])) ? view.roadmapOpen.get(JSON.stringify([view.root, key])) : first) ? ' open' : '';
+  const caret = '<span class="caret" aria-hidden="true"></span>';
+  /** Keep the existing verified-item count beside an upcoming release. */
+  const count = (m) => m.rows.length ? '<span class="milestone-count">' + m.done + '/' + m.rows.length + ' done</span>' : '';
+  /** Render the existing milestone items, progress and complete note when opened. */
+  const body = ({ milestone, rows, done }) => (rows.length
+    ? '<svg class="milestone-progress" viewBox="0 0 100 1" preserveAspectRatio="none" role="progressbar" aria-label="' + esc(milestone.name) + ': ' + done + ' of ' + rows.length + ' done" aria-valuemin="0" aria-valuemax="' + rows.length + '" aria-valuenow="' + done + '"><rect width="' + Math.round((100 * done) / rows.length) + '" height="1"/></svg><ul>' + rows.map((row) => milestoneRow(row, titles)).join('') + '</ul>'
+    : '<p class="milestone-empty">No items yet.</p>')
+    + (milestone.note ? '<p class="milestone-note">' + rich(milestone.note, titles) + '</p>' : '');
+  /** Open only the next upcoming milestone by default. */
+  const card = (m, first) => '<details class="card-panel milestone" data-key="' + esc('m:' + m.milestone.name) + '"' + open('m:' + m.milestone.name, first) + '><summary>' + caret + '<h2>' + linked(m.milestone.name, titles) + '</h2>' + count(m) + '</summary>' + body(m) + '</details>';
+  /** Summarize one shipped milestone with its first note line and total count. */
+  const line = (m) => '<details class="milestone shipped-one" data-key="' + esc('m:' + m.milestone.name) + '"' + open('m:' + m.milestone.name, false) + '><summary>' + caret + '<h2>' + esc(m.milestone.name) + '</h2>'
+    + '<small>' + esc(firstLine(m.milestone.note)) + '</small><span class="milestone-count">' + m.rows.length + (m.rows.length === 1 ? ' item' : ' items') + '</span></summary>' + body(m) + '</details>';
+  return lead + coming.map((m, n) => card(m, n === 0)).join('')
+    + (shipped.length ? '<details class="card-panel shipped" data-key="shipped"' + open('shipped', false) + '><summary>' + caret + '<h2>Shipped</h2><span class="milestone-count">' + shipped.length + (shipped.length === 1 ? ' release' : ' releases') + '</span></summary>' + shipped.map(line).join('') + '</details>' : '');
 }
 
 /** Tags that flow inside a line of text, so a reference's line belongs to the nearest block around it. */
@@ -2308,6 +2324,10 @@ $('theme').addEventListener('click', () => {
   theme(next);
 });
 $('q').addEventListener('input', () => { search(); view.foundAt = 0; showFound(); });
+/** Remember disclosure choices independently for each board. */
+$('roadmap').addEventListener('toggle', (event) => {
+  if (event.target.isConnected && event.target.dataset?.key) view.roadmapOpen.set(JSON.stringify([view.root, event.target.dataset.key]), event.target.open);
+}, true);
 // Leaving the field closes the results a moment later, so a press on a result lands first; coming back to the field
 // before then keeps them, or a search begun straight after Esc would lose its new results to the old close.
 let closingFound = 0;
