@@ -390,7 +390,7 @@ test('REJECT reopens the item; resubmitting a rejected head is refused [V6]', ()
   assert.equal(store.getItem(board, id).item_status, 'verified');
 });
 
-test('a rejected commit resubmits after its bar was corrected [V4,B3]', async (t) => {
+test('a rejected commit resubmits after its bar is corrected [V4,B3]', async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'pullboard-corrected-reject-'));
   const repo = join(directory, 'repo');
   mkdirSync(repo);
