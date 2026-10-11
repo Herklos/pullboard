@@ -104,12 +104,36 @@ test('the coordinator declares its model [O8,O3]', async (t) => {
   assert.equal(JSON.parse(modelEvent.event_detail).model, 'Later Coordinator');
   assert.equal(JSON.parse(shoutEvent.event_detail).model, 'Later Coordinator');
 
+  const canonicalRelay = await relayClientFixture(t, { coordinatorModel: null });
+  assert.equal(coordinatorModel(canonicalRelay.root), null, 'the canonical coordinator begins unknown');
+  await canonicalRelay.link();
+  /** Count real sealed model moves, excluding checkpoint and token requests. */
+  const sealedMoves = () => canonicalRelay.calls.filter(call => call.method === 'POST' && /\/moves$/u.test(call.path)).length;
+  for (const [command, model] of [['join', 'Linked Join Coordinator'], ['init', 'Linked Init Coordinator']]) {
+    const movesBefore = sealedMoves();
+    const declared = command === 'join'
+      ? await canonicalRelay.cli('join', 'coordinator', '--model', model)
+      : await canonicalRelay.cli('init', '--model', model);
+    assert.equal(declared.code, 0, declared.failure);
+    assert.equal(sealedMoves(), movesBefore + 1, `${command}: canonical linked declaration is one sealed move`);
+    const registered = coordinatorEvents(canonicalRelay.root).filter(event => event.event_kind === 'model' && JSON.parse(event.event_detail).model === model);
+    assert.equal(registered.length, 1, `${command}: the linked declaration records one model event`);
+    assert.equal(coordinatorModel(canonicalRelay.root), model, `${command}: the model is persisted on the linked board`);
+    const acted = await canonicalRelay.cli('shout', 'all', `${model} acts`);
+    assert.equal(acted.code, 0, acted.failure);
+    const latestShout = coordinatorEvents(canonicalRelay.root).filter(event => event.event_kind === 'shout').at(-1);
+    assert.equal(JSON.parse(latestShout.event_detail).model, model, `${command}: later linked moves carry the declared model`);
+    const exported = await canonicalRelay.cli('export');
+    assert.equal(exported.code, 0, exported.failure);
+    const canonical = exported.document.tables.agent.find(agent => agent.agent_id === 'coordinator');
+    assert.equal(canonical.agent_path, canonicalRelay.root, `${command}: the canonical coordinator retains its own checkout`);
+  }
   const relay = await relayClientFixture(t);
   const remoteDeclaration = await relay.cli('join', 'coordinator', '--model', 'Remote Coordinator');
   assert.equal(remoteDeclaration.code, 0, remoteDeclaration.failure);
   await relay.link();
   const pairing = await relay.cli('relay', 'pair');
-  assert.equal(pairing.code, 0, pairing.failure);
+  assert.equal(pairing.code, 0, `${pairing.failure}; ${pairing.document.error?.code ?? ''}`);
   delete relay.env.PULLBOARD_MODEL;
   const paired = await relay.otherDeviceJoin(pairing.document.code);
   const before = await paired.cli('export');

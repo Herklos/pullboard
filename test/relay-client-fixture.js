@@ -111,8 +111,8 @@ function childResult(root, env, argv, observedSnapshotUploads, initialSnapshotUp
   });
 }
 
-/** Start an isolated board with fallback-file keys and a real authorized loopback relay. */
-export async function relayClientFixture(t, { cliChildren } = {}) {
+/** Start an isolated board and authorized loopback relay; a null coordinatorModel keeps its initial identity unknown. */
+export async function relayClientFixture(t, { cliChildren, coordinatorModel } = {}) {
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-relay-cleanup-')));
   const root = join(scratch, 'repo');
   const home = join(scratch, 'home');
@@ -133,6 +133,8 @@ export async function relayClientFixture(t, { cliChildren } = {}) {
     GIT_AUTHOR_NAME: 'Relay Fixture', GIT_AUTHOR_EMAIL: 'relay-fixture@example.com',
     GIT_COMMITTER_NAME: 'Relay Fixture', GIT_COMMITTER_EMAIL: 'relay-fixture@example.com',
   };
+  if (coordinatorModel === null) delete env.PULLBOARD_MODEL;
+  else if (coordinatorModel !== undefined) env.PULLBOARD_MODEL = coordinatorModel;
   writeFileSync(tracePreload, `
 import { appendFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';

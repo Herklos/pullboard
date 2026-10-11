@@ -552,6 +552,7 @@ function optionalModel(value, env = process.env) {
 function refuseRemoteCoordinatorModel(ctx, command) {
   const coordinator = withBoard(ctx, (board) => store.listAgents(board).find((agent) => agent.agent_id === COORDINATOR));
   if (!coordinator) throw new Refused('NO_AGENT', 'the linked snapshot has no coordinator; restore a consistent relay snapshot before initializing');
+  if (ctx.info.isMain && coordinator.agent_path === ctx.info.root) return;
   const name = displayAgentName(coordinator, ctx.config.agents.names);
   throw new Refused('REMOTE_COORDINATOR_MODEL', `the coordinator's model is declared on the coordinator's own checkout (${name}); run pullboard ${command} there`);
 }
@@ -1204,14 +1205,16 @@ function setupCommands(io, { first, values }) {
     init: async () => {
       const info = repoInfo(io.cwd);
       const model = optionalModel(values.model);
-      if (model !== undefined && relayLinked(info.root)) refuseRemoteCoordinatorModel(context(io), 'init');
+      const linked = relayLinked(info.root);
+      const ctx = linked && model !== undefined ? context(io) : null;
+      if (model !== undefined && linked) refuseRemoteCoordinatorModel(ctx, 'init');
       const notes = initRepo({
         info,
         model,
         openBoardHere: () => store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), io.clock),
         /** Keep a linked coordinator's canonical identity without writing a clone-local path. */
         register: (board, options) => {
-          if (!relayLinked(info.root)) return store.register(board, options);
+          if (!linked) return store.register(board, options);
           if (!board.db.prepare('SELECT 1 FROM agent WHERE agent_id=?').get(COORDINATOR)) {
             throw new Refused('NO_AGENT', 'the linked snapshot has no coordinator; restore a consistent relay snapshot before initializing');
           }
@@ -1219,6 +1222,9 @@ function setupCommands(io, { first, values }) {
         },
         closeBoard: store.closeBoard,
       });
+      if (linked && model !== undefined) await withBoard(ctx, (board) => ordered(ctx, board, 'register', [
+        { lane: COORDINATOR, path: info.root, model },
+      ]));
       io.result?.({ root: info.root, notes });
       const staging = notes.at(-1)?.startsWith('git add -f -- ') ? notes.at(-1) : null;
       (staging ? notes.slice(0, -1) : notes).forEach((note) => io.say(note));
