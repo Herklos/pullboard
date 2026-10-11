@@ -1,5 +1,5 @@
 /**
- * The board (B1–B7, V1–V8, R1, R2): items, claims, submissions, verdicts and shouts in one SQLite
+ * The board (B1–B7, V1–V8, R1–R3): items, claims, submissions, verdicts and shouts in one SQLite
  * file in the git common dir, so every worktree sees the same board and nothing is committed.
  *
  * Every move is one immediate transaction (B2), so two agents can never claim the same item, and
@@ -12,7 +12,7 @@ import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { briefFiles, briefSections } from './brief.js';
 import { COORDINATOR } from './config.js';
-import { GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, effectiveGuards, storeTriggers } from './machine.js';
+import { ENGINE_VERSION, GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, effectiveGuards, storeTriggers } from './machine.js';
 import { Refused } from './refused.js';
 import { parseSpec } from './spec.js';
 
@@ -30,6 +30,7 @@ export const EVENT_LOG_VERSION = 1;
  */
 export const ROUTES = ['light', 'mid', 'strong'];
 const BRIEF_LIMIT = 8000;
+const REVIEW_RELEASE_COOLDOWN_MS = 60 * 60 * 1000;
 
 /**
  * True when an agent on `agentRoute` may build or verify an item routed `itemRoute`.
@@ -90,6 +91,9 @@ const SCHEMA = `
     item_verified_by TEXT,
     item_merged_commit TEXT,
     item_withdrawn_reason TEXT,
+    item_hold_reason TEXT,
+    item_hold_by TEXT,
+    item_hold_at TEXT,
     item_created_by TEXT NOT NULL,
     item_created_at TEXT NOT NULL,
     item_updated_at TEXT NOT NULL
@@ -239,6 +243,9 @@ function migrate(db) {
     ['item', 'item_files', "TEXT NOT NULL DEFAULT ''"],
     ['item', 'item_review_by', 'TEXT'],
     ['item', 'item_review_until', 'TEXT'],
+    ['item', 'item_hold_reason', 'TEXT'],
+    ['item', 'item_hold_by', 'TEXT'],
+    ['item', 'item_hold_at', 'TEXT'],
     ['shout', 'shout_decision', 'INTEGER NOT NULL DEFAULT 0'],
     ['shout', 'shout_answers', 'INTEGER'],
     ['shout', 'shout_evidence_kind', 'TEXT'],
@@ -356,18 +363,22 @@ export function atomic(board, work) {
  * @param {object} [detail]
  */
 function logEvent(board, by, kind, itemId, detail = {}) {
+  const model = agentModel(board, by);
+  const isAgent = Boolean(board.db.prepare('SELECT 1 FROM agent WHERE agent_id = ?').get(by));
+  const recorded = (board.executionEngineVersion ?? ENGINE_VERSION) >= 8 && isAgent
+    ? { ...detail, model: model ?? 'unknown' } : detail;
   const inserted = board.db
     .prepare(
       'INSERT INTO event (event_at, event_by, event_kind, item_id, event_detail) VALUES (?, ?, ?, ?, ?)',
     )
-    .run(now(board), by, kind, itemId, JSON.stringify(detail));
+    .run(now(board), by, kind, itemId, JSON.stringify(recorded));
   board.lastEvent = board.db.prepare('SELECT * FROM event WHERE event_id = ?').get(inserted.lastInsertRowid);
   (board.emittedEvents ??= []).push(board.lastEvent);
 }
 
 /** Log an authenticated relay refusal without making an item, shout or verdict move [H2,H16]. */
-export function recordRelayRefusal(board, { by, sequence, kind, operation, actor, code }) {
-  logEvent(board, by, 'relay_refused', null, { sequence, kind, operation, actor, code });
+export function recordRelayRefusal(board, { by, sequence, kind, operation, actor, code, itemId = null }) {
+  logEvent(board, by, 'relay_refused', itemId, { sequence, kind, operation, actor, code });
 }
 
 /**
@@ -429,7 +440,28 @@ function current(board, item) {
  * @returns {any}
  */
 export function agentAt(board, path) {
-  return board.db.prepare('SELECT * FROM agent WHERE agent_path = ?').get(path);
+  const agent = board.db.prepare('SELECT * FROM agent WHERE agent_path = ?').get(path);
+  return withModel(board, agent);
+}
+
+/** Read the model label kept beside other board metadata, avoiding any board-schema migration. */
+function agentModel(board, id) {
+  return board.db.prepare('SELECT meta_value FROM board_meta WHERE meta_key = ?').get(`agent_model:${id}`)?.meta_value ?? null;
+}
+
+/** Attach an agent's model to a row from the legacy stable agent table. */
+function withModel(board, agent) {
+  return agent ? { ...agent, agent_model: agentModel(board, agent.agent_id) } : agent;
+}
+
+/** Save or clear a model label without changing the shared SQLite schema. */
+function saveAgentModel(board, id, model) {
+  if (model === null || model === undefined) {
+    board.db.prepare('DELETE FROM board_meta WHERE meta_key = ?').run(`agent_model:${id}`);
+    return;
+  }
+  board.db.prepare('INSERT INTO board_meta (meta_key, meta_value) VALUES (?, ?) ON CONFLICT(meta_key) DO UPDATE SET meta_value = excluded.meta_value')
+    .run(`agent_model:${id}`, model);
 }
 
 /**
@@ -437,13 +469,14 @@ export function agentAt(board, path) {
  * worktree as the next agent in its lane (`web-1`, `web-2`, ...), on a route: the tier of model
  * behind it, which decides the items it may take (B13). The optional family is free text supplied
  * by the agent; the board neither names nor infers it. Registering again preserves the agent id;
- * an explicitly supplied family updates the declaration, while omission preserves it.
+ * explicitly supplied family and model values update their declarations, while omission preserves them.
  *
  * @param {any} board
- * @param {{ lane: string, path: string, route?: string, family?: string | null }} who
+ * @param {{ lane: string, path: string, route?: string, family?: string | null, model?: string | null }} who
  * @returns {string} The agent's id.
  */
-export function register(board, { lane, path, route = 'strong', family }) {
+export function register(board, { lane, path, route = 'strong', family, model }) {
+  if ((board.executionEngineVersion ?? ENGINE_VERSION) < 8) model = undefined;
   checkRoute(route);
   if (lane === COORDINATOR && route !== 'strong') {
     throw new Refused('BAD_ROUTE', 'the coordinator plans, merges and verifies; it is always strong');
@@ -461,6 +494,10 @@ export function register(board, { lane, path, route = 'strong', family }) {
         board.db.prepare('UPDATE agent SET agent_family = ? WHERE agent_id = ?').run(family, existing.agent_id);
         logEvent(board, existing.agent_id, 'family', null, { family });
       }
+      if (model !== undefined && model !== existing.agent_model) {
+        saveAgentModel(board, existing.agent_id, model);
+        logEvent(board, existing.agent_id, 'model', null, { model: model ?? 'unknown' });
+      }
       return existing.agent_id;
     }
     const { total } = board.db
@@ -475,6 +512,7 @@ export function register(board, { lane, path, route = 'strong', family }) {
         'INSERT INTO agent (agent_id, agent_lane, agent_path, agent_route, agent_family, agent_created_at) VALUES (?, ?, ?, ?, ?, ?)',
       )
       .run(id, lane, path, route, family ?? null, now(board));
+    if ((board.executionEngineVersion ?? ENGINE_VERSION) >= 8) saveAgentModel(board, id, model);
     logEvent(board, id, 'join', null, route === 'strong' ? { lane } : { lane, route });
     return id;
   });
@@ -507,7 +545,7 @@ export function ensureCoordinator(board, path) {
  * @returns {any[]}
  */
 export function listAgents(board) {
-  return board.db.prepare('SELECT * FROM agent ORDER BY rowid').all();
+  return board.db.prepare('SELECT * FROM agent ORDER BY rowid').all().map((agent) => withModel(board, agent));
 }
 
 /**
@@ -609,11 +647,9 @@ export function validateItemAddition(board, { by, lane, title, criterion = '', p
 }
 
 /**
- * Change an item's brief, route, criterion or check (B10, B13, B14). The brief says how to build it
- * and may change until the item is verified or withdrawn. The route, the criterion and the check
- * change only while nobody holds the item; changing the criterion or the check drops the frozen
- * bar, so the next claim freezes the new one, in the log for anyone to see. The coordinator or the
- * agent that added the item may edit it.
+ * Change an item's brief, route, criterion or check (B10, B13, B14). The coordinator may make a
+ * claimed criterion/check correction at engine 8; the live holder must refreeze before renewal or
+ * submission, and keeps the claim while adopting the new frozen bar.
  *
  * @param {any} board
  * @param {number} id
@@ -621,9 +657,21 @@ export function validateItemAddition(board, { by, lane, title, criterion = '', p
  */
 export function editItem(board, id, { agentId, brief, route, criterion, check, checkBaseline }) {
   atomic(board, () => {
+    const stored = itemById(board, id);
+    const expiredHolder = stored.item_status === 'claimed' && !isHeld(board, stored) ? stored.item_owner : null;
     const { item, next, command, unfreeze } = validateItemEdit(board, id, { agentId, brief, route, criterion, check });
     const baseline = normalizeCheckBaseline(agentId, command, checkBaseline);
-    setItem(board, id, { ...next, ...(unfreeze ? { item_frozen: null, item_frozen_digest: null } : {}) });
+    const pendingFields = [
+      ...(next.item_criterion !== item.item_criterion ? ['criterion'] : []),
+      ...(command !== undefined && next.item_check !== item.item_check ? ['check'] : []),
+    ];
+    const pendingRefreeze = (board.executionEngineVersion ?? ENGINE_VERSION) >= 8
+      && item.item_status === 'claimed' && agentId === COORDINATOR && pendingFields.length > 0;
+    const clearFrozen = (unfreeze && !pendingRefreeze) || Boolean(expiredHolder);
+    if (expiredHolder) {
+      moveItem(board, id, 'lapse', { checks: {}, set: () => ({ item_owner: null, item_lease_until: null }) });
+    }
+    setItem(board, id, { ...next, ...(clearFrozen ? { item_frozen: null, item_frozen_digest: null } : {}) });
     if (baseline || next.item_check !== item.item_check) saveCheckBaseline(board, id, baseline);
     logEvent(board, agentId, 'edit', id, {
       ...(next.item_brief !== item.item_brief ? { brief: `${next.item_brief.length} characters` } : {}),
@@ -631,18 +679,32 @@ export function editItem(board, id, { agentId, brief, route, criterion, check, c
       ...(next.item_criterion !== item.item_criterion ? { criterion: next.item_criterion } : {}),
       ...(command !== undefined ? { check: next.item_check } : {}),
       ...(baseline ? { checkBaseline: baseline } : {}),
-      ...(unfreeze && item.item_frozen_digest ? { unfrozen: item.item_frozen_digest } : {}),
+      ...(pendingRefreeze ? { pendingRefreeze: pendingFields } : {}),
+      ...(clearFrozen && item.item_frozen_digest ? { unfrozen: item.item_frozen_digest } : {}),
+      ...(expiredHolder ? { expiredHolder } : {}),
     });
+    if (pendingRefreeze) {
+      insertShout(board, {
+        from: COORDINATOR,
+        to: item.item_owner,
+        text: `The coordinator has a pending ${pendingFields.join(' and ')} correction for #${id}; refreeze it before renewing or submitting.\nnext: pullboard refreeze ${id}`,
+        lanes: [],
+      });
+    }
   });
 }
 
 /** Validate an edit without side effects, so a refused change never starts a shell baseline. */
 export function validateItemEdit(board, id, { agentId, brief, route, criterion, check }) {
+  let item = (board.executionEngineVersion ?? ENGINE_VERSION) >= 8 ? current(board, itemById(board, id)) : null;
+  if (item?.item_status === 'claimed' && agentId !== COORDINATOR) {
+    throw new Refused('HELD', `item #${id} is claimed; only the coordinator may edit it while held; shout coordinator`);
+  }
   const command = coordinatorCheck(agentId, check);
   if ([brief, route, criterion, check].every((value) => value === undefined)) {
     throw new Refused('USAGE', 'say what changes: --brief "...", --brief-file <file>, --route light|mid|strong, --criterion "..." or --check "<command>"');
   }
-  const item = current(board, itemById(board, id));
+  item ??= current(board, itemById(board, id));
   if (agentId !== COORDINATOR && agentId !== item.item_created_by) {
     throw new Refused('NOT_YOURS', `only the coordinator or ${item.item_created_by}, who added #${id}, edits it; shout them instead`);
   }
@@ -657,7 +719,11 @@ export function validateItemEdit(board, id, { agentId, brief, route, criterion, 
   };
   checkRoute(next.item_route);
   const moved = ['item_route', 'item_criterion', 'item_check'].filter((key) => next[key] !== item[key]);
-  if (moved.length && item.item_status !== 'open') {
+  const routeChanged = next.item_route !== item.item_route;
+  const correctionWhileClaimed = (board.executionEngineVersion ?? ENGINE_VERSION) >= 8
+    && item.item_status === 'claimed' && agentId === COORDINATOR
+    && (next.item_criterion !== item.item_criterion || next.item_check !== item.item_check);
+  if (moved.length && item.item_status !== 'open' && (routeChanged || !correctionWhileClaimed)) {
     throw new Refused('HELD', `item #${id} is ${item.item_status}; change its route, criterion or check only while it is open`);
   }
   checkRouted({ brief: next.item_brief, route: next.item_route, criterion: next.item_criterion, check: next.item_check });
@@ -680,19 +746,40 @@ function normalizeCheckBaseline(agentId, command, baseline) {
   if (baseline === undefined) return undefined;
   coordinatorCheck(agentId, command ?? '');
   if (!command || !baseline || typeof baseline !== 'object' || Array.isArray(baseline)
-    || baseline.command !== command || !['green', 'red', 'unavailable'].includes(baseline.result)
+    || baseline.command !== command || !['green', 'red', 'unavailable', 'pending'].includes(baseline.result)
     || !(baseline.main === null || typeof baseline.main === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(baseline.main))
     || (baseline.result !== 'unavailable' && baseline.main === null)
+    || (baseline.result === 'pending' && !baseline.request)
+    || (baseline.request !== undefined && (typeof baseline.request !== 'string' || !/^[a-f0-9-]{36}$/.test(baseline.request)))
     || (baseline.reason !== undefined && typeof baseline.reason !== 'string')
     || (baseline.seconds !== undefined && (!Number.isSafeInteger(baseline.seconds) || baseline.seconds < 0))) {
     throw new Refused('BAD_CHECK_BASELINE', 'the check baseline must describe this command at a main commit; set --check again from the coordinator');
   }
   return {
     command, main: baseline.main, result: baseline.result,
+    ...(baseline.request === undefined ? {} : { request: baseline.request }),
     ...(baseline.reason === undefined ? {} : { reason: baseline.reason }),
     ...(baseline.seconds === undefined ? {} : { seconds: baseline.seconds }),
     ...(baseline.result === 'green' ? { warning: 'CRITERION_PROVES_NOTHING' } : {}),
   };
+}
+
+/** Record a captured result only for the still-current authorized background request [V2,H16]. */
+export function completeCheckBaseline(board, id, { agentId, expected, baseline }) {
+  return atomic(board, () => {
+    const result = normalizeCheckBaseline(agentId, baseline?.command, baseline);
+    if (!expected || !result || result.result === 'pending' || result.command !== expected.command || result.main !== expected.main
+      || typeof expected.request !== 'string' || !/^[a-f0-9-]{36}$/.test(expected.request)) {
+      throw new Refused('BAD_CHECK_BASELINE', 'a completed baseline must match its authorized request; set --check again from the coordinator');
+    }
+    const item = itemById(board, id);
+    const current = itemCheckBaseline(board, item);
+    if (current?.result !== 'pending' || current.request !== expected.request || current.command !== expected.command || current.main !== expected.main) return false;
+    const recorded = { ...result, request: expected.request };
+    saveCheckBaseline(board, id, recorded);
+    logEvent(board, agentId, 'check-baseline', id, { checkBaseline: recorded });
+    return true;
+  });
 }
 
 /** Store or clear an item's observation atomically with its check and immutable audit event. */
@@ -754,11 +841,11 @@ function declaredCodes(move, id) {
  * @param {any} board
  * @param {number} id
  * @param {string} verb
- * @param {{ checks: Record<string, ((item: any) => Refused | null) | null>, set?: (item: any) => object, before?: (item: any) => void }} how
+ * @param {{ checks: Record<string, ((item: any) => Refused | null) | null>, set?: (item: any) => object, before?: (item: any) => void, transition?: object }} how
  * @returns {any} The item as it was before the move.
  */
-function moveItem(board, id, verb, { checks, set = () => ({}), before = () => {} }) {
-  const move = MOVES.find((entry) => entry.verb === verb);
+function moveItem(board, id, verb, { checks, set = () => ({}), before = () => {}, transition = null }) {
+  const move = transition ?? MOVES.find((entry) => entry.verb === verb);
   if (!move) throw new Refused(UNKNOWN_MOVE.refuse, `${UNKNOWN_MOVE.rule}: ${UNKNOWN_MOVE.next}`);
   let item = null;
   for (const guard of effectiveGuards(move)) {
@@ -899,11 +986,18 @@ export function claim(board, id, { agentId, lane, leaseMs, freeze, head = null, 
           return null;
         },
         notHeldByAnother: (found) => (isHeld(board, found) && found.item_owner !== agentId ? new Refused('HELD', `item #${id} is held by ${found.item_owner} until ${found.item_lease_until}`) : null),
+        correctionRefrozen: () => pendingRefreezeProblem(board, id),
         laneOpen: (found) => {
           // Declared: not checked when the caller renews its own live claim.
           const paused = laneHold(board, found.item_lane);
           return paused && !isRenewal(found)
             ? new Refused('LANE_HELD', `${paused.hold_by} holds the ${found.item_lane} lane: ${paused.hold_reason}. Wait for it: pullboard next --wait 9 (minutes)`)
+            : null;
+        },
+        itemNotHeld: (found) => {
+          const held = itemHold(board, found.item_id);
+          return held && !isRenewal(found)
+            ? new Refused('ITEM_HELD', `item #${id} is held by coordinator: ${held.item_hold_reason}; wait for the coordinator to lift it with pullboard hold ${id} --off`)
             : null;
         },
         oneLiveClaim: (found) => {
@@ -949,17 +1043,23 @@ export function claim(board, id, { agentId, lane, leaseMs, freeze, head = null, 
  * @param {any} board
  * @param {number} id
  * @param {string} agentId
+ * @param {string} [note] One-line reason required when releasing a submitted review.
  * @returns {boolean} Whether a review reservation was released rather than a claim.
  */
-export function release(board, id, agentId) {
+export function release(board, id, agentId, note = '') {
   return atomic(board, () => {
     const item = itemById(board, id);
     if (item.item_status === 'submitted') {
       if (reviewHolder(board, item) !== agentId) {
         throw new Refused('NOT_YOURS', `item #${id} review is not reserved by you; ask its current reviewer to release it, or take a free review with pullboard next --verify`);
       }
+      const currentEngine = board.executionEngineVersion ?? ENGINE_VERSION;
+      const problem = currentEngine >= 5 ? reviewReleaseNoteProblem(board, id, agentId, note) : null;
+      if (problem) throw problem;
+      const reason = typeof note === 'string' ? note.trim() : '';
       setItem(board, id, { item_review_by: null, item_review_until: null });
-      logEvent(board, agentId, 'release', id);
+      if (currentEngine >= 5) logEvent(board, agentId, 'release', id, { review: true, reason });
+      else logEvent(board, agentId, 'release', id);
       return true;
     }
     moveItem(board, id, 'release', {
@@ -967,6 +1067,7 @@ export function release(board, id, agentId) {
         joined: null,
         [IN_STATE]: () => new Refused('NOT_YOURS', `item #${id} is not claimed by you`),
         isHolder: (found) => (found.item_owner === agentId ? null : new Refused('NOT_YOURS', `item #${id} is not claimed by you`)),
+        reviewReleaseExplained: null, // Claimed releases do not free a submitted review.
       },
       set: () => ({ item_owner: null, item_lease_until: null }),
     });
@@ -995,12 +1096,14 @@ export function submit(board, id, { agentId, commit, tree, files = [], policyCom
         joined: null,
         [IN_STATE]: notYours,
         isHolder: (found) => (found.item_owner === agentId ? null : notYours()),
+        correctionRefrozen: () => pendingRefreezeProblem(board, id),
         criterionUnchanged: null,
         treeClean: null,
         nothingUntracked: null,
         hasCommit: null,
         withinLane: null,
         trunkMergeClean: null,
+        noUnverifiedStack: null,
         gateConfigured: null,
         gateGreen: null,
         treeStillDuringGate: null,
@@ -1010,9 +1113,12 @@ export function submit(board, id, { agentId, commit, tree, files = [], policyCom
             .get(id);
           return total ? new Refused('CHILDREN_OPEN', `item #${id} has ${total} unfinished child items`) : null;
         },
-        headIsNew: () => {
+        headIsNew: (found) => {
           const wasRejected = board.db.prepare("SELECT 1 FROM verdict WHERE item_id = ? AND verdict_decision = 'REJECT' AND verdict_commit = ?").get(id, commit);
-          return wasRejected ? new Refused('HEAD_NOT_NEW', `#${id} was rejected at ${commit.slice(0, 12)}; commit the rework first`) : null;
+          const sameReopenedHead = found.item_verdict === null && found.item_commit === commit;
+          return wasRejected || sameReopenedHead
+            ? new Refused('HEAD_NOT_NEW', `#${id} already has a submission at ${commit.slice(0, 12)}; commit the rework first`)
+            : null;
         },
       },
       set: (found) => ({
@@ -1040,6 +1146,73 @@ export function submit(board, id, { agentId, commit, tree, files = [], policyCom
  */
 export function reviewHolder(board, item) {
   return item.item_status === 'submitted' && item.item_review_by && (item.item_review_until ?? '') > now(board) ? item.item_review_by : null;
+}
+
+/** Validate a newly constructed review release while keeping old sealed replay executable [V1,R1,H16].
+ * @param {any} board
+ * @param {number} itemId
+ * @param {string} agentId
+ * @param {unknown} note
+ * @returns {Refused | null}
+ */
+export function reviewReleaseNoteProblem(board, itemId, agentId, note) {
+  if ((board.executionEngineVersion ?? ENGINE_VERSION) < 5) return null;
+  let item;
+  try { item = getItem(board, itemId); }
+  catch (error) {
+    // Missing items keep their native, ordered refusal; this preflight only validates review notes.
+    if (error instanceof Refused && error.code === 'NO_ITEM') return null;
+    throw error;
+  }
+  if (item.item_status !== 'submitted' || reviewHolder(board, item) !== agentId) return null;
+  const reason = typeof note === 'string' ? note.trim() : '';
+  if (!reason || /[\r\n\u2028\u2029]/u.test(reason)) {
+    return new Refused('NOTE_REQUIRED', 'give the review release a one-line reason with --note "..."');
+  }
+  return null;
+}
+
+/** Find review releases after the current submission, optionally for one reviewer [V1,R1].
+ * Older releases are ignored because a new submission starts a fresh review.
+ */
+function reviewReleasesSinceSubmit(board, itemId, agentId = null) {
+  const events = board.db.prepare("SELECT event_id, event_at, event_by, event_kind, event_detail FROM event WHERE item_id=? AND event_kind IN ('submit','release') ORDER BY event_id DESC")
+    .all(itemId);
+  const releases = [];
+  for (const event of events) {
+    if (event.event_kind === 'submit') return releases;
+    if (event.event_by !== agentId && agentId !== null) continue;
+    try {
+      const detail = JSON.parse(event.event_detail);
+      if (detail.review === true || detail.review === undefined) releases.push({ ...event, legacy: detail.review === undefined,
+        reason: detail.reason ?? 'reason not recorded' });
+    } catch { /* Ignore malformed legacy details rather than treating them as review releases. */ }
+  }
+  return releases;
+}
+
+/** Return a reviewer's active one-hour cooldown, if a later submission has not reset it [V1,R1]. */
+function reviewReleaseCooldown(board, itemId, agentId) {
+  if ((board.executionEngineVersion ?? ENGINE_VERSION) < 5) return null;
+  const event = reviewReleasesSinceSubmit(board, itemId, agentId).find((release) => !release.legacy);
+  if (!event) return null;
+  const until = Date.parse(event.event_at) + REVIEW_RELEASE_COOLDOWN_MS;
+  return until > board.clock.now().getTime() ? new Date(until).toISOString() : null;
+}
+
+/** Count unreserved submissions by whether they are awaiting a first reviewer or were released [R1]. */
+export function reviewQueueBreakdown(board) {
+  let awaitingFirstReview = 0;
+  let releasedWithoutVerdict = 0;
+  const releasedItems = [];
+  for (const item of listItems(board).filter((entry) => entry.item_status === 'submitted' && !reviewHolder(board, entry))) {
+    const releases = reviewReleasesSinceSubmit(board, item.item_id);
+    if (releases.length) {
+      releasedWithoutVerdict += 1;
+      releasedItems.push({ item: item.item_id, releases: releases.length, reason: releases[0].reason });
+    } else awaitingFirstReview += 1;
+  }
+  return { awaitingFirstReview, releasedWithoutVerdict, releasedItems };
 }
 
 /** Summarize outstanding reviews using live leases and the latest submission's age [Q1,V15]. */
@@ -1135,7 +1308,13 @@ function reserveWithin(board, id, { agentId, leaseMs, policy, familyPolicy = 'of
     checks: {
       coordinatorSaysAs: null,
       joined: null,
+      roadmapReadable: null, // Selection reads it before this move; explicit ids need no roadmap.
       [IN_STATE]: (found) => new Refused('NOT_SUBMITTED', `item #${id} is ${current(board, found).item_status}, not submitted`),
+      /** Enforce the cooldown after state validation and before reviewer eligibility [V1]. */
+      reviewCooldownElapsed: () => {
+        const cooldown = reviewReleaseCooldown(board, id, agentId);
+        return cooldown ? new Refused('REVIEW_COOLDOWN', `you released the review of #${id}; try again after ${cooldown}, or let another reviewer take it`) : null;
+      },
       ...reviewerChecks(board, { agentId, policy, familyPolicy }),
     },
     set: () => ({ item_review_by: agentId, item_review_until: until }),
@@ -1179,6 +1358,7 @@ export function verify(board, id, { agentId, decision, reason, note = '', head, 
             : new Refused('CRITERIA_CHANGED', `the criterion for #${id} changed after it was claimed; the coordinator runs: pullboard refreeze ${id}`),
         reasonIsMet: () => (reason && reason !== ACCEPT_REASON ? new Refused('BAD_REASON', `accept means ${ACCEPT_REASON}; a failed criterion is a reject`) : null),
         trunkMergeClean: null,
+        noUnverifiedStack: null,
         itemCheckGreen: null,
         proofNoted: () =>
           note.trim()
@@ -1206,6 +1386,41 @@ export function verify(board, id, { agentId, decision, reason, note = '', head, 
   });
 }
 
+/** Return a submission for criterion correction without recording a verifier's judgment [V2,V6].
+ * The prior commit remains as the base the builder must change before resubmitting.
+ *
+ * @param {any} board
+ * @param {number} id
+ * @param {{ agentId: string, note: string }} request
+ * @returns {{ id: number, commit: string }}
+ */
+export function reopen(board, id, { agentId, note }) {
+  return atomic(board, () => {
+    let submittedCommit = null;
+    const item = moveItem(board, id, 'reopen', {
+      checks: {
+        joined: null,
+        [IN_STATE]: (found) => new Refused('NOT_SUBMITTED', `item #${id} is ${current(board, found).item_status}, not submitted`),
+        coordinatorOnly: () => onlyCoordinator(agentId, 'reopens submissions'),
+        noteGiven: () => (note.trim() ? null : new Refused('NOTE_REQUIRED', 'say why the criterion needs correction: --note "why"')),
+      },
+      set: (found) => {
+        submittedCommit = found.item_commit;
+        return {
+          item_verdict: null,
+          item_verified_by: null,
+          item_owner: null,
+          item_lease_until: null,
+          item_review_by: null,
+          item_review_until: null,
+        };
+      },
+    });
+    logEvent(board, agentId, 'reopen', id, { commit: submittedCommit, note: note.trim(), judgment: null });
+    return { id: item.item_id, commit: submittedCommit };
+  });
+}
+
 /**
  * Refuse unless the acting agent is the coordinator.
  *
@@ -1222,9 +1437,9 @@ function coordinatorOnly(agentId, what) {
  *
  * @param {any} board
  * @param {number} id
- * @param {{ agentId: string, commit: string }} merge
+ * @param {{ agentId: string, commit: string, note?: string }} merge
  */
-export function merged(board, id, { agentId, commit }) {
+export function merged(board, id, { agentId, commit, note = '' }) {
   coordinatorOnly(agentId, 'records merges');
   atomic(board, () => {
     const item = itemById(board, id);
@@ -1232,7 +1447,7 @@ export function merged(board, id, { agentId, commit }) {
       throw new Refused('NOT_VERIFIED', `item #${id} is ${item.item_status}; merge verified work only`);
     }
     setItem(board, id, { item_merged_commit: commit });
-    logEvent(board, agentId, 'merged', id, { commit });
+    logEvent(board, agentId, 'merged', id, { commit, ...(note.trim() ? { note: note.trim() } : {}) });
   });
 }
 
@@ -1259,22 +1474,33 @@ export function withdraw(board, id, { agentId, reason }) {
 }
 
 /**
- * Freeze an item's criterion again after its spec rows changed, and reopen it, so the next claim
- * builds against the text a verdict will check (V3). Explicit and logged: the bar moves only in
- * the open.
+ * Freeze the current criterion and rows again (V2,V3). A pending coordinator correction is
+ * adopted within its live claim, keeping the holder, lease and base; other refreezes reopen the
+ * item so its next claim builds against the bar a verdict will check.
  *
  * @param {any} board
  * @param {number} id
  * @param {{ agentId: string, freeze: (item: any) => { text: string, digest: string } }} who
- * @returns {{ before: string | null, after: string }}
+ * @returns {{ before: string | null, after: string, retainedClaim?: true }}
  */
 export function refreeze(board, id, { agentId, freeze }) {
   return atomic(board, () => {
     let frozen = null;
+    const currentItem = board.db.prepare('SELECT * FROM item WHERE item_id=?').get(id);
+    const pending = currentItem ? pendingRefreeze(board, id) : [];
+    const retainsClaim = (board.executionEngineVersion ?? ENGINE_VERSION) >= 8
+      && currentItem?.item_status === 'claimed' && isHeld(board, currentItem) && pending.length > 0;
+    const transition = MOVES.find((move) => move.verb === 'refreeze' && move.to === (retainsClaim ? 'claimed' : 'open'));
     const item = moveItem(board, id, 'refreeze', {
       checks: {
         joined: null,
         coordinatorOnly: () => onlyCoordinator(agentId, 'refreezes a criterion'),
+        holderOrCoordinator: (found) => {
+          const live = current(board, found);
+          return live.item_owner === agentId || agentId === COORDINATOR
+            ? null
+            : new Refused('NOT_YOURS', `item #${id} is not claimed by you; only its holder or the coordinator refreezes it`);
+        },
         [IN_STATE]: (found) => new Refused('CLOSED', `item #${id} is ${found.item_status}`),
         rowsInForce: (found) => {
           try {
@@ -1286,11 +1512,37 @@ export function refreeze(board, id, { agentId, freeze }) {
           }
         },
       },
-      set: () => ({ item_frozen: frozen.text, item_frozen_digest: frozen.digest, item_owner: null, item_lease_until: null }),
+      set: () => ({
+        item_frozen: frozen.text,
+        item_frozen_digest: frozen.digest,
+        ...(!retainsClaim ? { item_owner: null, item_lease_until: null } : {}),
+      }),
+      transition,
     });
-    logEvent(board, agentId, 'refreeze', id, { before: item.item_frozen_digest, after: frozen.digest });
-    return { before: item.item_frozen_digest, after: frozen.digest };
+    logEvent(board, agentId, 'refreeze', id, { before: item.item_frozen_digest, after: frozen.digest, ...(retainsClaim ? { retainedClaim: true } : {}) });
+    return { before: item.item_frozen_digest, after: frozen.digest, ...(retainsClaim ? { retainedClaim: true } : {}) };
   });
+}
+
+/** Return a pending coordinator correction until a later refreeze event adopts it [V2]. */
+export function pendingRefreeze(board, id) {
+  const lastRefreeze = board.db.prepare("SELECT COALESCE(MAX(event_id), 0) AS event_id FROM event WHERE item_id = ? AND event_kind = 'refreeze'").get(id).event_id;
+  const edits = board.db.prepare("SELECT event_detail FROM event WHERE item_id = ? AND event_kind = 'edit' AND event_id > ? ORDER BY event_id DESC").all(id, lastRefreeze);
+  const fields = new Set();
+  for (const edit of edits) {
+    const details = JSON.parse(edit.event_detail);
+    for (const field of details.pendingRefreeze ?? []) if (['criterion', 'check'].includes(field)) fields.add(field);
+  }
+  return [...fields].sort();
+}
+
+/** Refuse a stale claim action with the exact coordinator repair command [V2]. */
+export function pendingRefreezeProblem(board, id) {
+  if ((board.executionEngineVersion ?? ENGINE_VERSION) < 8) return null;
+  const fields = pendingRefreeze(board, id);
+  return fields.length
+    ? new Refused('PENDING_REFREEZE', `item #${id} has a pending ${fields.join(' and ')} correction; refreeze it before renewing or submitting.\nnext: pullboard refreeze ${id}`)
+    : null;
 }
 
 /**
@@ -1307,6 +1559,27 @@ export function listItems(board, { lane, all = false } = {}) {
     .all(lane ?? null, lane ?? null);
   const items = rows.map((item) => current(board, item));
   return all ? items : items.filter((item) => !['verified', 'withdrawn'].includes(item.item_status));
+}
+
+/** Return all recorded submitted heads of items still awaiting verification [V1,V17].
+ * Historical heads remain unreviewed after a rejection or resubmission; current pointers also
+ * cover legacy snapshots that retained the item but not its original submit event.
+ * @param {any} board
+ * @returns {{ item_id: number, item_title: string, item_commit: string }[]}
+ */
+export function unverifiedSubmissions(board) {
+  const submissions = new Map();
+  for (const item of listItems(board, { all: true })) {
+    if (item.item_status === 'verified') continue;
+    const commits = [item.item_commit, ...events(board, { itemId: item.item_id })
+      .filter(event => event.event_kind === 'submit')
+      .map(event => JSON.parse(event.event_detail).commit)];
+    for (const commit of commits) {
+      if (!/^[0-9a-f]{40,64}$/iu.test(commit ?? '')) continue;
+      submissions.set(`${item.item_id}:${commit}`, { item_id: item.item_id, item_title: item.item_title, item_commit: commit });
+    }
+  }
+  return [...submissions.values()];
 }
 
 /**
@@ -1348,6 +1621,7 @@ export function verdictsFor(board, id) {
  */
 function insertShout(board, { from, to, text, lanes, decision = false, answers = null, evidence = null, request = false, channel = 'terminal' }) {
   if (!text.trim()) throw new Refused('EMPTY_SHOUT', 'a shout needs text');
+  if (to === from) throw new Refused('SELF_SHOUT', `a shout cannot be addressed to its sender ${from}; name another agent, a lane or all`);
   if (request && (from !== 'person' || to !== COORDINATOR || decision || answers !== null)) {
     throw new Refused('BAD_REQUEST', 'a request goes from the person to the coordinator; use the board requests endpoint with its text');
   }
@@ -1655,6 +1929,26 @@ export function appendFact(board, id, { agentId, kind, text, ref = null, superse
 }
 
 /**
+ * Rank items by the first unfinished milestone that contains them, leaving unlisted work last.
+ * A finished milestone no longer holds back later releases.
+ *
+ * @param {any} board
+ * @returns {(entry: any) => number}
+ */
+function milestonePriorities(board) {
+  if ((board.executionEngineVersion ?? ENGINE_VERSION) < 8) return () => 0;
+  const ordered = milestones(board);
+  const items = new Map(listItems(board, { all: true }).map((entry) => [entry.item_id, entry]));
+  const priorities = new Map();
+  for (const [index, milestone] of ordered.entries()) {
+    const unfinished = milestone.items.some((id) => typeof id !== 'number' || items.get(id)?.item_status !== 'verified');
+    if (!unfinished) continue;
+    for (const id of milestone.items) if (!priorities.has(id)) priorities.set(id, index);
+  }
+  return (entry) => priorities.get(entry.item_id) ?? ordered.length;
+}
+
+/**
  * The next item an agent can take (N2): for a builder, the oldest open item in its lane whose
  * dependencies are verified; for a verifier, the oldest submitted item it did not build. An agent
  * sees items at its tier and below, its own tier first, so lighter work waits for lighter models
@@ -1667,14 +1961,14 @@ export function appendFact(board, id, { agentId, kind, text, ref = null, superse
  * and `shared` names them (N20). A held lane offers nothing new (N22).
  *
  * @param {any} board
- * @param {{ agentId: string, lane: string, verify?: boolean, policy?: string, familyPolicy?: string, runnable?: boolean, routes?: string[], warm?: string[] }} who
+ * @param {{ agentId: string, lane: string, verify?: boolean, policy?: string, familyPolicy?: string, runnable?: boolean, routes?: string[], warm?: string[], priority?: number[] }} who
  * @returns {{ item: any | null, reasons: string[], shared?: string[] }}
  */
-export function nextFor(board, { agentId, lane, verify = false, policy = 'any', familyPolicy = 'off', runnable = false, routes = ROUTES, warm = [] }) {
+export function nextFor(board, { agentId, lane, verify = false, policy = 'any', familyPolicy = 'off', runnable = false, routes = ROUTES, warm = [], priority = [] }) {
   const route = routeOf(board, agentId);
   const tier = (entry) => ROUTES.indexOf(entry.item_route);
-  const items = listItems(board)
-    .reverse()
+  const allItems = listItems(board).reverse();
+  const items = allItems
     .filter((entry) => canTake(route, entry.item_route) && routes.includes(entry.item_route) && (!runnable || entry.item_check))
     .sort((first, second) => tier(second) - tier(first));
   const tiers = route === 'strong' ? '' : `${ROUTES.slice(0, ROUTES.indexOf(route) + 1).reverse().join(' or ')} `;
@@ -1686,32 +1980,59 @@ export function nextFor(board, { agentId, lane, verify = false, policy = 'any', 
     if (policy === COORDINATOR && agentId !== COORDINATOR) reviewable = reviewable.filter((entry) => entry.item_lane === COORDINATOR);
     if (familyPolicy === 'require') reviewable = reviewable.filter(hasDifferentFamily);
     if (familyPolicy === 'prefer') reviewable.sort((first, second) => Number(hasDifferentFamily(second)) - Number(hasDifferentFamily(first)));
-    const holder = (entry) => reviewHolder(board, entry);
-    const item = reviewable.find((entry) => holder(entry) === agentId) ?? reviewable.find((entry) => !holder(entry));
+    const candidates = reviewable.map((entry) => ({
+      entry,
+      holder: reviewHolder(board, entry),
+      cooldown: reviewReleaseCooldown(board, entry.item_id, agentId),
+    }));
+    const heldByMe = candidates.find((candidate) => candidate.holder === agentId)?.entry;
+    if (heldByMe) return { item: heldByMe, reasons: [] };
+    const milestonePriority = milestonePriorities(board);
+    candidates.sort((first, second) => milestonePriority(first.entry) - milestonePriority(second.entry));
+    const item = candidates.find((candidate) => !candidate.holder && !candidate.cooldown)?.entry;
     if (item) return { item, reasons: [] };
-    const held = reviewable.map((entry) => `${holder(entry)} holds the review of #${entry.item_id} until ${entry.item_review_until}`);
-    return { item: null, reasons: [`nothing ${routed}submitted that you did not build${held.length ? ' and no other agent is reviewing' : ''}`, ...held] };
+    const held = candidates.filter((candidate) => candidate.holder && candidate.holder !== agentId)
+      .map(({ entry, holder: reviewer }) => `${reviewer} holds the review of #${entry.item_id} until ${entry.item_review_until}`);
+    const cooling = candidates.filter((candidate) => candidate.cooldown)
+      .map(({ entry, cooldown }) => `you released the review of #${entry.item_id}; try again after ${cooldown}, or let another reviewer take it`);
+    return { item: null, reasons: [`nothing ${routed}submitted that you did not build${held.length ? ' and no other agent is reviewing' : ''}`, ...held, ...cooling] };
   }
   const held = items.find((entry) => entry.item_status === 'claimed' && entry.item_owner === agentId && entry.item_parent_id === null);
   if (held) return { item: held, reasons: [] };
+  const reasons = allItems.filter((entry) => entry.item_status === 'open' && entry.item_lane === lane && entry.item_hold_reason)
+    .map((entry) => `#${entry.item_id} is held by coordinator: ${entry.item_hold_reason}`);
   const paused = laneHold(board, lane);
-  if (paused) return { item: null, reasons: [`${paused.hold_by} holds the ${lane} lane: ${paused.hold_reason}`] };
+  if (paused) return { item: null, reasons: [`${paused.hold_by} holds the ${lane} lane: ${paused.hold_reason}`, ...reasons] };
+  const milestonePriority = milestonePriorities(board);
   const recent = new Set(warm);
-  const mine = items
-    .filter((entry) => entry.item_status === 'open' && entry.item_lane === lane)
+  const mainRed = new Set(priority);
+  const laneItems = items.filter((entry) => entry.item_status === 'open' && entry.item_lane === lane);
+  const mine = laneItems
+    .filter((entry) => !itemHold(board, entry.item_id))
     .map((entry, order) => ({ entry, order, shared: itemFiles(entry).filter((path) => recent.has(path)) }))
-    .sort((first, second) => tier(second.entry) - tier(first.entry) || second.shared.length - first.shared.length || first.order - second.order);
-  const reasons = [];
+    .sort((first, second) => milestonePriority(first.entry) - milestonePriority(second.entry)
+      || tier(second.entry) - tier(first.entry)
+      || second.shared.length - first.shared.length || first.order - second.order);
+  // Move only evidenced reworks ahead of their own tier; with no evidence, normal order is exact.
+  for (const route of ROUTES) {
+    const routeTier = ROUTES.indexOf(route);
+    const selected = mine.findIndex(({ entry }) => tier(entry) === routeTier && mainRed.has(entry.item_id));
+    const firstTierItem = mine.findIndex(({ entry }) => tier(entry) === routeTier);
+    if (selected > firstTierItem && firstTierItem >= 0) {
+      const [rework] = mine.splice(selected, 1);
+      mine.splice(firstTierItem, 0, rework);
+    }
+  }
   for (const { entry, shared } of mine) {
     const waiting = (entry.item_after ? entry.item_after.split(',').map(Number) : [])
       .map((id) => current(board, itemById(board, id)))
       .filter((before) => before.item_status !== 'verified');
-    if (!waiting.length) return { item: entry, reasons: [], shared };
+    if (!waiting.length) return { item: entry, reasons, shared };
     reasons.push(`#${entry.item_id} waits on ${waiting.map(waitingOn).join(', ')}`);
   }
-  if (!mine.length) reasons.push(idleReason(items, lane, routed));
+  if (!mine.length && !reasons.length) reasons.push(idleReason(items, lane, routed));
   // Nothing to claim, yet work above the agent's tier is open: name it and the ways through (B16).
-  for (const entry of listItems(board).filter((open) => open.item_status === 'open' && open.item_lane === lane && !canTake(route, open.item_route))) {
+  for (const entry of listItems(board).filter((open) => open.item_status === 'open' && open.item_lane === lane && !open.item_hold_reason && !canTake(route, open.item_route))) {
     reasons.push(`#${entry.item_id} (${entry.item_route}) is open in the ${lane} lane, above your ${route} route: a ${entry.item_route} agent takes it, or, if ${route} can build it, the coordinator reroutes it: pullboard edit ${entry.item_id} --route ${route}`);
   }
   return { item: null, reasons };
@@ -1841,6 +2162,43 @@ export function laneHold(board, lane) {
  */
 export function laneHolds(board) {
   return board.db.prepare('SELECT * FROM hold ORDER BY hold_lane').all();
+}
+
+/** Read an item's coordinator hold, or null when it is available for claims. */
+export function itemHold(board, id) {
+  const item = getItem(board, id);
+  return item.item_hold_reason ? {
+    item_id: item.item_id, item_hold_reason: item.item_hold_reason,
+    item_hold_by: item.item_hold_by, item_hold_at: item.item_hold_at,
+  } : null;
+}
+
+/** Hold an open or already-claimed item without changing its current lifecycle state. */
+export function holdItem(board, id, { agentId, reason }) {
+  coordinatorOnly(agentId, 'holds an item');
+  const text = String(reason ?? '').trim();
+  if (!text) throw new Refused('USAGE', `a hold needs a reason: pullboard hold ${id} "why"`);
+  return atomic(board, () => {
+    const item = getItem(board, id);
+    if (!['open', 'claimed'].includes(item.item_status)) {
+      throw new Refused('ITEM_NOT_OPEN', `item #${id} is ${item.item_status}; only open or claimed items can be held`);
+    }
+    const at = now(board);
+    setItem(board, id, { item_hold_reason: text, item_hold_by: agentId, item_hold_at: at });
+    logEvent(board, agentId, 'hold_item', id, { reason: text });
+    return itemHold(board, id);
+  });
+}
+
+/** Lift an item's coordinator hold without changing any other item state. */
+export function releaseItemHold(board, id, { agentId }) {
+  coordinatorOnly(agentId, 'lifts an item hold');
+  return atomic(board, () => {
+    const held = itemHold(board, id);
+    if (!held) throw new Refused('NOT_HELD', `item #${id} is not held`);
+    setItem(board, id, { item_hold_reason: null, item_hold_by: null, item_hold_at: null });
+    logEvent(board, agentId, 'unhold_item', id, { reason: held.item_hold_reason });
+  });
 }
 
 /** Read named milestones from board metadata; older boards simply have none. */
@@ -2115,4 +2473,130 @@ export function stats(board) {
     .all();
   const count = (decision) => verdicts.find((row) => row.decision === decision)?.total ?? 0;
   return { items, accepted: count('ACCEPT'), rejected: count('REJECT') };
+}
+
+/** Read the latest append-only snapshot of each landing batch [B3,R3,R2]. */
+export function landingBatches(board) {
+  const batches = new Map();
+  for (const row of board.db.prepare("SELECT event_detail FROM event WHERE event_kind = 'landing_batch' ORDER BY event_id").all()) {
+    const { batch } = JSON.parse(row.event_detail);
+    batches.set(batch.id, batch);
+  }
+  return [...batches.values()];
+}
+
+/** Append one coordinator-owned batch revision without changing the board schema [B3,R3]. */
+export function recordLandingBatch(board, { agentId, batch, revision = 0 }) {
+  coordinatorOnly(agentId, 'records landing batches');
+  if (!batch || batch.version !== 1 || typeof batch.id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/u.test(batch.id)
+    || !['merging', 'gating', 'bisecting', 'flaky', 'blocked', 'ready', 'pushed', 'landed'].includes(batch.state)
+    || !/^[a-f0-9]{40,64}$/u.test(batch.base ?? '') || !/^[a-f0-9]{40,64}$/u.test(batch.tip ?? '')
+    || typeof batch.root !== 'string' || !batch.root || typeof batch.branch !== 'string' || !batch.branch.startsWith('refs/heads/')
+    || !Array.isArray(batch.items) || batch.items.some((entry) => !Number.isSafeInteger(entry?.id) || entry.id < 1 || !/^[a-f0-9]{40,64}$/u.test(entry.commit ?? ''))
+    || typeof batch.owner !== 'string' || !batch.owner || typeof batch.logPath !== 'string' || !batch.logPath
+    || !Number.isSafeInteger(revision) || revision < 0) {
+    throw new Refused('LAND_BATCH', 'a landing batch needs its exact base, tip, items, state, owner and log path; run pullboard land');
+  }
+  return atomic(board, () => {
+    const previous = landingBatches(board).find((entry) => entry.id === batch.id);
+    if ((previous?.revision ?? 0) !== revision || previous?.state === 'landed') {
+      throw new Refused('LAND_MOVED', 'the landing batch changed; read pullboard resume and adopt its current revision');
+    }
+    if (previous && (previous.base !== batch.base || previous.root !== batch.root || previous.branch !== batch.branch)) {
+      throw new Refused('LAND_BATCH', 'a batch keeps its original base and landing worktree; adopt it with pullboard land --adopt');
+    }
+    const recorded = { ...batch, revision: revision + 1, updatedAt: now(board) };
+    logEvent(board, agentId, 'landing_batch', null, { batch: recorded });
+    return recorded;
+  });
+}
+
+/** Record the person's expiring exception for one named failing test [B3,R3]. */
+export function recordLandingWaiver(board, { agentId, channel, id, test, until, reason }) {
+  if (agentId !== PERSON) throw new Refused('LAND_PERSON_ONLY', 'only the person waives a flaky test; use the person’s terminal or Pullboard View');
+  if (!['terminal', 'view'].includes(channel)) throw new Refused('B26_PERSON_CHANNEL', 'waivers use the person’s terminal or view; run pullboard view');
+  if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/u.test(id) || typeof test !== 'string' || !test.trim()
+    || test.startsWith('/') || test.includes('\\') || test.split('/').some((part) => !part || part === '..' || part === '.')
+    || !Number.isFinite(Date.parse(until)) || Date.parse(until) <= board.clock.now().getTime() || typeof reason !== 'string' || !reason.trim()) {
+    throw new Refused('LAND_WAIVER', 'name a test, a future --until date and a nonempty --reason; run pullboard land --waive <test> --until <date> --reason "why"');
+  }
+  return atomic(board, () => {
+    const waiver = { id, test, until: new Date(until).toISOString(), reason: reason.trim(), by: PERSON, channel };
+    logEvent(board, PERSON, 'landing_waiver', null, { waiver });
+    return waiver;
+  });
+}
+
+/** Read every person waiver, retaining expired entries as evidence [B3,R3]. */
+export function landingWaivers(board) {
+  return board.db.prepare("SELECT event_by,event_detail FROM event WHERE event_kind = 'landing_waiver' ORDER BY event_id").all()
+    .filter((row) => row.event_by === PERSON)
+    .map((row) => JSON.parse(row.event_detail).waiver);
+}
+
+/** Find a live person's waiver covering the exact failing file or test name [B3,R3]. */
+export function landingWaiverFor(board, failure) {
+  return landingWaivers(board).findLast((waiver) => Date.parse(waiver.until) > board.clock.now().getTime()
+    && (waiver.test === failure.file || waiver.test === failure.name)) ?? null;
+}
+
+/** File one durable defect per flaky test and retain its source digest [B3,R3]. */
+export function recordLandingFlake(board, { agentId, test, hash, names, lane, batchId }) {
+  coordinatorOnly(agentId, 'files landing flakes');
+  if (typeof test !== 'string' || !test || !/^[a-f0-9]{64}$/u.test(hash ?? '') || !Array.isArray(names) || !names.length || names.some((name) => typeof name !== 'string' || !name) || typeof batchId !== 'string') {
+    throw new Refused('LAND_FLAKE', 'a flake needs its named test, exact source digest and failing names; inspect the landing log');
+  }
+  return atomic(board, () => {
+    const existing = landingFlakes(board).find((entry) => entry.test === test);
+    if (existing?.hash === hash) return existing;
+    const item = existing?.item ?? addItem(board, { by: agentId, lane, title: `Flaky test: ${test}`,
+      criterion: `${test} passes in a full gate and alone without retries; failures: ${names.join(', ')}`, route: 'strong' });
+    const flake = { test, hash, names, item, batchId };
+    logEvent(board, agentId, 'landing_flake', item, { flake });
+    return flake;
+  });
+}
+
+/** Read the latest observation of each named flaky test [B3,R3]. */
+export function landingFlakes(board) {
+  const flakes = new Map();
+  for (const row of board.db.prepare("SELECT event_detail FROM event WHERE event_kind = 'landing_flake' ORDER BY event_id").all()) {
+    const { flake } = JSON.parse(row.event_detail);
+    flakes.set(flake.test, flake);
+  }
+  return [...flakes.values()];
+}
+
+/** Validate a distinct waived landing proof without creating an ordinary gate stamp [B3,R3]. */
+export function waivedLandingProof(board, tree) {
+  return landingBatches(board).findLast((batch) => ['ready', 'pushed', 'landed'].includes(batch.state)
+    && batch.proof?.tree === tree && Array.isArray(batch.proof.failures) && batch.proof.failures.length > 0
+    && batch.proof.failures.every((failure) => {
+      const waiver = landingWaivers(board).find((entry) => entry.id === failure.waiver);
+      return waiver && Date.parse(waiver.until) > board.clock.now().getTime()
+        && (waiver.test === failure.file || waiver.test === failure.name);
+    })) ?? null;
+}
+
+/** Atomically record a pushed batch's first-containing merges and one main-moved receipt [B3,R3]. */
+export function finishLandingBatch(board, { agentId, id, tip }) {
+  coordinatorOnly(agentId, 'finishes a landing');
+  return atomic(board, () => {
+    const batch = landingBatches(board).find((entry) => entry.id === id);
+    if (!batch || batch.tip !== tip) throw new Refused('LAND_BATCH', 'the pushed tip must match its recorded batch; run pullboard land --adopt');
+    if (batch.state === 'landed') return batch;
+    if (batch.state !== 'pushed') throw new Refused('LAND_NOT_PUSHED', 'record a successful push before landing receipts; run pullboard land --adopt');
+    for (const entry of batch.items) {
+      const item = itemById(board, entry.id);
+      if (item.item_commit !== entry.commit || item.item_status !== 'verified') {
+        throw new Refused('LAND_ITEM_MOVED', `item #${entry.id} changed after the batch was gated; rebuild its landing`);
+      }
+      if (item.item_merged_commit && item.item_merged_commit !== entry.merge) {
+        throw new Refused('LAND_ITEM_MOVED', `item #${entry.id} already has another landing receipt; read pullboard show ${entry.id}`);
+      }
+      if (!item.item_merged_commit) merged(board, entry.id, { agentId, commit: entry.merge });
+    }
+    logEvent(board, agentId, 'main-moved', null, { sha: tip, batch: id, items: batch.items.map((entry) => entry.id) });
+    return recordLandingBatch(board, { agentId, batch: { ...batch, state: 'landed' }, revision: batch.revision });
+  });
 }

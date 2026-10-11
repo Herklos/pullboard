@@ -2,13 +2,13 @@
  * The commit-message rules (C1, C2) and the pre-commit pattern checks on real staged changes.
  */
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { runFixtureExecFile as execFileSync, runFixtureGit } from './fixture-child.js';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { defaults } from '../src/config.js';
-import { addedLines, blockedPaths, commitMsgProblems, matchesPattern, preCommitProblems, secretsIn } from '../src/hooks.js';
+import { addedLines, blockedPaths, commitCitationWarnings, commitMsgProblems, hookScript, matchesPattern, preCommitProblems, secretsIn, unwiredHookProblems } from '../src/hooks.js';
 import { parseSpec } from '../src/spec.js';
 import { Refused } from '../src/refused.js';
 
@@ -21,7 +21,7 @@ function stagedRepo(t) {
   const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
   t.after(() => rmSync(root, { recursive: true, force: true }));
   /** Run Git only in this fixture, without the maintainer's identity or configuration. */
-  const git = (...args) => execFileSync('git', args, { cwd: root, env, encoding: 'utf8', stdio: 'pipe' }).trim();
+  const git = (...args) => runFixtureGit(args, { cwd: root, env, encoding: 'utf8', stdio: 'pipe' });
   git('init', '-q', '-b', 'main');
   return { root, git };
 }
@@ -36,6 +36,44 @@ function stagedProblems(root) {
  */
 const check = (message, rules = RULES) => commitMsgProblems(message, { rules, spec: SPEC });
 
+test('hook wiring checks the configured path and accepts pullboard delegation [L3]', (t) => {
+  const box = stagedRepo(t);
+  const hooks = join(box.root, '.husky');
+  mkdirSync(hooks);
+  box.git('config', 'core.hooksPath', '.husky');
+  writeFileSync(join(hooks, 'pre-commit'), '#!/bin/sh\nnpx lint-staged\n');
+  chmodSync(join(hooks, 'pre-commit'), 0o755);
+  assert.deepEqual(unwiredHookProblems(box.root), [{
+    code: 'HOOK_UNWIRED',
+    message: 'active Git hook .husky/pre-commit does not call pullboard hook pre-commit',
+    next: 'add this line: pullboard hook pre-commit "$@"',
+  }]);
+  writeFileSync(join(hooks, 'pre-commit'), '#!/bin/sh\n# pullboard hook pre-commit "$@"\nnot-pullboard hook pre-commit\n');
+  chmodSync(join(hooks, 'pre-commit'), 0o755);
+  assert.equal(unwiredHookProblems(box.root).length, 1);
+  writeFileSync(join(hooks, 'pre-commit'), '#!/bin/sh\npullboard hook pre-commit "$@"\n');
+  chmodSync(join(hooks, 'pre-commit'), 0o755);
+  assert.deepEqual(unwiredHookProblems(box.root), []);
+  for (const source of [
+    `#!/bin/sh\necho 'pullboard hook pre-commit'\n`,
+    `#!/bin/sh\necho 'example; pullboard hook pre-commit'\n`,
+    '#!/bin/sh\nbin=some-other-tool; "$bin" hook pre-commit\n',
+  ]) {
+    writeFileSync(join(hooks, 'pre-commit'), source);
+    assert.equal(unwiredHookProblems(box.root).length, 1, source);
+  }
+  for (const source of [
+    '#!/bin/sh\nexec "$root/node_modules/.bin/pullboard" hook pre-commit\n',
+    '#!/bin/sh\nnode "./bin/pullboard.js" hook pre-commit\n',
+  ]) {
+    writeFileSync(join(hooks, 'pre-commit'), source);
+    assert.deepEqual(unwiredHookProblems(box.root), [], source);
+  }
+  writeFileSync(join(hooks, 'pre-commit'), hookScript('pre-commit'));
+  chmodSync(join(hooks, 'pre-commit'), 0o755);
+  assert.deepEqual(unwiredHookProblems(box.root), []);
+});
+
 test('a clean header citing a live id passes [C1, C2]', () => {
   assert.deepEqual(check('feat(web): add the page [G1]'), []);
   assert.deepEqual(check('docs: explain lanes'), []);
@@ -46,6 +84,20 @@ test('feat and fix cite ids; cited ids exist and are not retired [C2]', () => {
   assert.match(check('feat(web): add the page')[0], /end the header with the spec rows this feat serves, like \[G1,G2\]/);
   assert.match(check('fix: patch [G9]')[0], /G9 is not in SPEC.md/);
   assert.match(check('fix: patch [G2]')[0], /G2 is retired/);
+});
+
+test('doctrine citations are namespaced; a colliding bare id warns that it resolves to SPEC.md [A5]', () => {
+  const doctrine = {
+    name: 'DOCTRINE.md',
+    repo: { rows: [{ id: 'G1', line: 4 }] },
+    rows: [{ id: 'G1', status: 'approved' }, { id: 'PB1', status: 'approved' }],
+  };
+  assert.deepEqual(commitMsgProblems('feat(web): add the rule [doctrine:PB1]', { rules: RULES, spec: SPEC, doctrine }), []);
+  assert.deepEqual(commitMsgProblems('feat(web): add the rule [doctrine:G1]', { rules: RULES, spec: SPEC, doctrine }), []);
+  assert.match(commitMsgProblems('fix(web): add the rule [doctrine:missing]', { rules: RULES, spec: SPEC, doctrine })[0], /doctrine:missing is not in doctrine/u);
+  assert.deepEqual(commitCitationWarnings('feat(web): patch the rule [G1]', { spec: SPEC, doctrine }), [
+    'G1 is a known collision at SPEC.md:2 and DOCTRINE.md:4; bare ids cite SPEC.md, use doctrine:G1 for a doctrine row',
+  ]);
 });
 
 test('header format, length, case and period [C1]', () => {

@@ -15,7 +15,7 @@ const README = readFileSync(join(ROOT, 'README.md'), 'utf8');
 const drawn = Object.keys(FIGURES).map((name) => `docs/img/${name}.svg`).sort();
 const SHOT_FIGURES = [
   { path: 'docs/shots/tour.svg', alt: 'The timed Pullboard tour shows a change submitted, rejected for a missed edge, fixed and accepted.' },
-  { path: 'docs/shots/desktop.png', alt: "The Pullboard board shows open, claimed, submitted and accepted work, with a pending decision and the accepted item's review history." },
+  { path: 'docs/shots/desktop.png', alt: "The desktop board shows open, claimed, submitted and accepted work, a Needs you row for a held lane, search in the top bar, the status bar and an accepted item's review history." },
 ];
 
 /** Average glyph width, in ems, generous enough for the widest system font each figure may get. */
@@ -66,7 +66,7 @@ test('current docs pages and shipped skills use DOCTRINE.md, reserving PRACTICE.
   const files = [...markdownFiles('docs'), ...markdownFiles('skills')].sort();
   assert.ok(files.includes('docs/rfcs/0001-standard-doctrine.md'));
   const specProof = readFileSync(join(ROOT, 'docs/proof/spec.md'), 'utf8');
-  assert.match(specProof, /This checkout still uses legacy `PRACTICE\.md`; new repos use `DOCTRINE\.md`, and `PRACTICE\.md` remains a compatibility fallback/u, 'the proof table is anchored by its explicit legacy-fallback introduction');
+  assert.match(specProof, /this repo's `DOCTRINE\.md`\. This audit's S6 proof row records the earlier root `PRACTICE\.md`; other repos that still have only `PRACTICE\.md` keep it as a compatibility fallback/u, 'the proof table labels the old filename as historical while preserving its fallback for other repos');
   for (const file of files) {
     const text = readFileSync(join(ROOT, file), 'utf8');
     for (const [index, line] of text.split('\n').entries()) {

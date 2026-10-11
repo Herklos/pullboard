@@ -1,20 +1,26 @@
 /** Versioned, deterministic replay through the CLI's existing board engine [H3,H16]. */
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import * as store from './board.js';
 import { refusalDocument } from './json.js';
 import { ENGINE_VERSION } from './machine.js';
 import { Refused } from './refused.js';
 import { requestMoveProblem, recordRequestMove } from './relay-requests.js';
-import { relayMoveActor, relaySenderProblem } from './relay-sender.js';
+import { relayMoveActor, relaySenderProblem, validRelaySender } from './relay-sender.js';
+
+const ITEM_ID_FIRST_ARGUMENT = new Set(['editItem', 'escalate', 'recordAttempt', 'claim', 'release', 'submit', 'reserveReview', 'verify', 'merged', 'withdraw', 'refreeze', 'reopen', 'appendFact']);
 
 /** Only these public board operations may be requested by an encrypted move. */
 export const ENGINE_OPERATIONS = Object.freeze([
-  'register', 'ensureCoordinator', 'addItem', 'editItem', 'escalate', 'recordAttempt',
+  'register', 'ensureCoordinator', 'addItem', 'editItem', 'completeCheckBaseline', 'escalate', 'recordAttempt',
   'claim', 'release', 'submit', 'reserveReview', 'reserveNextReview', 'verify', 'merged',
-  'withdraw', 'refreeze', 'shout', 'passDecision', 'answerDecision', 'holdLane', 'releaseLane',
+  'withdraw', 'refreeze', 'reopen', 'shout', 'passDecision', 'answerDecision', 'holdLane', 'releaseLane', 'holdItem', 'releaseItemHold',
   'addMilestone', 'editMilestoneItems', 'moveMilestone', 'editMilestone', 'removeMilestone',
   'recordRowDecisions', 'applyRowDecisions', 'appendFact',
+  'recordLandingBatch', 'recordLandingWaiver', 'recordLandingFlake', 'finishLandingBatch',
 ]);
+
+/** Engine version at which each ordered operation first has stable replay semantics. */
+const OPERATION_ENGINE = Object.freeze({ reopen: 8, recordLandingBatch: 8, recordLandingWaiver: 8, recordLandingFlake: 8, finishLandingBatch: 8 });
 
 /** Read a replica's committed prefix without trusting an independently saved transport cursor. */
 export function appliedSequence(board) {
@@ -50,9 +56,15 @@ export function startRelayEpoch(board) {
 }
 
 /** Turn caller-only callbacks into deterministic values before sealing an executable operation. */
-export function prepareEngineMove(board, operation, args, { id = randomUUID() } = {}) {
+export function prepareEngineMove(board, operation, args, { id = randomUUID(), actor } = {}) {
   if (!ENGINE_OPERATIONS.includes(operation) || !Array.isArray(args)) throw new Refused('RELAY_MOVE', 'use a supported board-engine operation with its argument array');
+  const minimumEngine = OPERATION_ENGINE[operation] ?? 1;
+  if (ENGINE_VERSION < minimumEngine) throw new Refused('ENGINE_VERSION', `${operation} requires engine version ${minimumEngine}; this pullboard uses engine ${ENGINE_VERSION}; upgrade before sending it`);
   const values = args.map((value) => value && typeof value === 'object' ? { ...value } : value);
+  if (operation === 'release') {
+    const problem = store.reviewReleaseNoteProblem(board, values[0], values[1], values[2]);
+    if (problem) throw problem;
+  }
   if (['claim', 'refreeze'].includes(operation)) {
     const options = values[1];
     const item = store.getItem(board, values[0]);
@@ -69,7 +81,7 @@ export function prepareEngineMove(board, operation, args, { id = randomUUID() } 
       options.freezeError = error ?? null;
     }
   }
-  const move = { version: 1, engine: ENGINE_VERSION, id, operation, args: values };
+  const move = { version: 1, engine: ENGINE_VERSION, id, operation, args: values, ...(actor === undefined ? {} : { actor }) };
   // JSON is the wire format: optional undefined fields become absent on every replica alike.
   return JSON.parse(JSON.stringify(move));
 }
@@ -84,6 +96,8 @@ function validateMove(move) {
   if (!move || move.version !== 1 || !Number.isSafeInteger(move.engine) || move.engine < 1) throw new Refused('RELAY_MOVE', 'this executable move format is invalid; upgrade pullboard or restore a consistent relay snapshot');
   requireSupportedEngine(move);
   if (typeof move.id !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(move.id) || !ENGINE_OPERATIONS.includes(move.operation) || !Array.isArray(move.args)) throw new Refused('RELAY_MOVE', 'this sealed operation is invalid; use a supported board-engine operation');
+  const minimumEngine = OPERATION_ENGINE[move.operation] ?? 1;
+  if (move.engine < minimumEngine) throw new Refused('RELAY_MOVE', `${move.operation} cannot be replayed from engine version ${move.engine}; it was introduced in engine ${minimumEngine}; restore a consistent relay prefix`);
 }
 
 /** Restore only the frozen criterion callback; no receiver runs another machine's Git or shell. */
@@ -126,38 +140,45 @@ export function engineReceipt(board, id) {
   return row ? JSON.parse(row.meta_value) : null;
 }
 
-/** Authorize each public relay position before replay, retaining refusals atomically with its cursor. */
-export function applyRelayMove(board, move, { sequence, at, sender, kind }) {
-  requireSupportedEngine(move);
-  const problem = relaySenderProblem(move, sender, kind);
-  if (!problem) return applyEngineMove(board, move, { sequence, at });
-  if (!Number.isSafeInteger(sequence) || sequence < 1 || !Number.isFinite(Date.parse(at))) throw new Refused('RELAY_MOVE', 'supply a valid relay sequence and receipt timestamp');
+/** Record one relay refusal and advance exactly one authenticated transport position atomically. */
+export function refuseRelayMove(board, move, { sequence, at, sender, kind, code, digest = null, refusal = null }) {
+  if (!Number.isSafeInteger(sequence) || sequence < 1 || !Number.isFinite(Date.parse(at))) throw new Refused('RELAY_ORDER', 'the refused relay position is invalid; fetch the ordered relay prefix');
+  const normalizedBy = validRelaySender(sender) && sender.kind === 'agent' ? sender.agent : 'relay';
+  const record = digest ?? createHash('sha256').update(JSON.stringify({ move, sender, kind })).digest('hex');
+  const key = 'relay_refusal_' + sequence;
   return store.atomic(board, () => {
     const cursor = appliedSequence(board);
-    const key = 'relay_refusal_' + sequence;
-    const encoded = JSON.stringify({ move, sender, kind });
     const saved = board.db.prepare('SELECT meta_value FROM board_meta WHERE meta_key=?').get(key);
     if (sequence <= cursor) {
-      const receipt = saved && JSON.parse(saved.meta_value);
-      if (!receipt || receipt.record !== encoded) throw new Refused('RELAY_CURSOR', 'this earlier refused position has no matching receipt; fetch a consistent relay snapshot');
-      return receipt.outcome;
+      const prior = saved && JSON.parse(saved.meta_value);
+      if (!prior || prior.record !== record) throw new Refused('RELAY_CURSOR', 'this refused relay position has no matching receipt; fetch a consistent snapshot');
+      return prior.outcome;
     }
-    if (sequence !== cursor + 1) throw new Refused('RELAY_ORDER', `relay sequence ${sequence} does not follow applied sequence ${cursor}; fetch and apply the missing prefix first`);
-    const outcome = { error: refusalDocument(problem).error };
+    if (sequence !== cursor + 1) throw new Refused('RELAY_ORDER', `relay sequence ${sequence} does not follow applied sequence ${cursor}; fetch the missing prefix first`);
+    const candidateItemId = ITEM_ID_FIRST_ARGUMENT.has(move?.operation) ? move?.args?.[0] : null;
+    const itemId = Number.isSafeInteger(candidateItemId) && candidateItemId > 0 && board.db.prepare('SELECT 1 FROM item WHERE item_id=?').get(candidateItemId) ? candidateItemId : null;
+    const reason = refusal ?? new Refused(code, 'this relay record was refused and logged; run pullboard relay to continue with the next ordered record');
+    const outcome = { error: refusalDocument(reason).error };
     const clock = board.clock;
     board.clock = { now: () => new Date(at) };
     try {
-      store.recordRelayRefusal(board, {
-        by: sender?.kind === 'agent' && typeof sender.agent === 'string' ? sender.agent : 'relay',
-        sequence, kind, operation: typeof move?.operation === 'string' ? move.operation : null,
-        actor: typeof relayMoveActor(move) === 'string' ? relayMoveActor(move) : null, code: problem.code,
-      });
+      store.recordRelayRefusal(board, { by: normalizedBy, sequence, kind, operation: typeof move?.operation === 'string' ? move.operation : null,
+        actor: typeof relayMoveActor(move) === 'string' ? relayMoveActor(move) : null, code, itemId });
     } finally { board.clock = clock; }
-    metadata(board, key, JSON.stringify({ record: encoded, outcome }));
+    metadata(board, key, JSON.stringify({ record, outcome }));
     metadata(board, 'relay_applied_sequence', String(sequence));
     metadata(board, 'relay_engine_version', String(ENGINE_VERSION));
     return outcome;
   });
+}
+
+/** Authorize each public relay position before replay, retaining refusals atomically with its cursor. */
+export function applyRelayMove(board, move, { sequence, at, sender, kind, digest = null }) {
+  requireSupportedEngine(move);
+  const phoneReceipt = sender?.kind === 'machine' && move?.engine >= 6 && Boolean(move.personRequest) && !requestMoveProblem(board, move, { checkExecutorLease: false });
+  const problem = relaySenderProblem(move, sender, kind, { phoneReceipt });
+  if (!problem) return applyEngineMove(board, move, { sequence, at });
+  return refuseRelayMove(board, move, { sequence, at, sender, kind, code: problem.code, digest, refusal: problem });
 }
 
 /**
@@ -180,7 +201,9 @@ export function applyEngineMove(board, move, { sequence, at }) {
     let outcome = previous?.outcome;
     if (!outcome) {
       const clock = board.clock;
+      const engineVersion = board.executionEngineVersion;
       board.clock = { now: () => new Date(at) };
+      board.executionEngineVersion = move.engine;
       const firstEvent = board.emittedEvents?.length ?? 0;
       try {
         const result = store.atomic(board, () => {
@@ -192,7 +215,11 @@ export function applyEngineMove(board, move, { sequence, at }) {
       } catch (error) {
         if (!(error instanceof Refused)) throw error;
         outcome = { error: refusalDocument(error).error };
-      } finally { board.clock = clock; }
+      } finally {
+        board.clock = clock;
+        if (engineVersion === undefined) delete board.executionEngineVersion;
+        else board.executionEngineVersion = engineVersion;
+      }
       recordRequestMove(board, move, outcome, sequence, at);
       metadata(board, 'relay_receipt_' + move.id, JSON.stringify({ sequence, move: encoded, outcome }));
     }

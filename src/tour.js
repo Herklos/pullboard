@@ -9,8 +9,9 @@ import { chmodSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from '
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { displayAgentName } from './agent-names.js';
 import { loadConfig } from './config.js';
-import { registerProject } from './projects.js';
+import { registerProjectAndLink } from './projects.js';
 
 const BIN = fileURLToPath(new URL('../bin/pullboard.js', import.meta.url));
 
@@ -79,9 +80,9 @@ function pause(ms) {
  * Run the tour. Pauses only when a person is watching a terminal.
  *
  * @param {{ say: (line: string) => void, stdout: any }} io
- * @returns {number}
+ * @returns {Promise<number>}
  */
-export function tour(io) {
+export async function tour(io) {
   const color = colorEnabled(io);
   const pace = io.stdout.isTTY ? 1 : 0;
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-tour-')));
@@ -103,7 +104,7 @@ export function tour(io) {
    */
   const run = (who, file, args, { label = `${file} ${typed(args)}`, show = /./, fails = false, tone } = {}) => {
     pause(400 * pace);
-    if (label) io.say(`   ${paint(who, PROMPT_COLOR[who], color)} $ ${label}`);
+    if (label) io.say(`   ${paint(displayAgentName({ agent_id: who, agent_model: who === 'coordinator' ? null : 'Scripted' }), PROMPT_COLOR[who], color)} $ ${label}`);
     const result = spawnSync(file, args, {
       cwd: where[who],
       encoding: 'utf8',
@@ -145,7 +146,7 @@ export function tour(io) {
     pb('coordinator', ['add', 'app', 'Greeting', '--specs', 'G1', '--criterion', 'greet() meets G1']);
 
     step(2, 'A builder agent gets its own worktree in the app lane and claims the next item. Its criterion freezes.');
-    pb('coordinator', ['worktree', 'app'], { show: /^made /, label: 'pullboard worktree app' });
+    pb('coordinator', ['worktree', 'app', '--model', 'Scripted'], { show: /^made /, label: 'pullboard worktree app --model Scripted' });
     pb('app-1', ['next'], { show: /^claimed|^criterion/ });
 
     step(3, 'It writes greet(), tests the happy path and submits. Its own gate is green.');
@@ -155,7 +156,7 @@ export function tour(io) {
     const first = pb('app-1', ['submit', '1'], { show: /^submitted/ }).match(/at ([0-9a-f]{12})/)[1];
 
     step(4, 'A second agent checks out exactly that commit and tries the edge the builder skipped.');
-    pb('coordinator', ['worktree', 'review'], { show: /^made /, label: 'pullboard worktree review' });
+    pb('coordinator', ['worktree', 'review', '--model', 'Scripted'], { show: /^made /, label: 'pullboard worktree review --model Scripted' });
     run('review-1', 'git', ['switch', '-q', '--detach', first]);
     const edge = run('review-1', process.execPath, TRY_EDGE, { label: "node -e \"greet('')\"" });
     pb('review-1', ['verify', '1', 'reject', '--reason', 'BEHAVIOR_MISMATCH', '--note', `greet('') returns "${edge}"; G1 says a blank name greets the world`], { tone: 'red' });
@@ -188,7 +189,7 @@ export function tour(io) {
     io.say(`The repo is at ${repo}`);
     return 1;
   }
-  registerProject(repo, new Date(), loadConfig(repo));
+  await registerProjectAndLink(repo, new Date(), loadConfig(repo), io);
   io.say('\nNothing shipped until a second agent verified it.');
   io.say(`Look around: cd ${repo} && pullboard log`);
   io.say('see it: pullboard view');

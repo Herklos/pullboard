@@ -3,12 +3,14 @@
  * R2). The git-facing rules (V3, V4, V7) run against real repos in e2e.test.js.
  */
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { runFixtureExecFile as execFileSync, runFixtureGit } from './fixture-child.js';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeEach, test } from 'node:test';
 import * as store from '../src/board.js';
+import { displayAgentName } from '../src/agent-names.js';
+import { projectState } from '../src/serve.js';
 import { applyEngineMove, prepareEngineMove } from '../src/engine.js';
 import { exportBoard } from '../src/exchange.js';
 import { main } from '../src/cli.js';
@@ -84,7 +86,7 @@ beforeEach(() => {
   store.register(board, { lane: 'api', path: '/repo-api-1' });
 });
 
-test('[B14] brief paths ignore sentence punctuation but still refuse a foreign path', async (t) => {
+test('[B14] notes in parentheses are not paths, and a foreign path still refuses', async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'pullboard-brief-files-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const repo = join(directory, 'repo');
@@ -101,6 +103,9 @@ test('[B14] brief paths ignore sentence punctuation but still refuse a foreign p
   }));
   const brief = 'Files:\n- src/x.js, README.md, docs/, make. folders). api/server.js.\nChange: add a page\nTest: check the page';
   assert.deepEqual(briefFiles(brief), ['src/x.js', 'README.md', 'docs/', 'api/server.js']);
+  const noted = 'Files:\n- src/a.js (only where a checked claim changed in 0.8.1 (see api/v1.js)) .8.1 1..2 0.8.1\n- src/b.js (main.moved and skills/ stay as they are)';
+  assert.deepEqual(briefFiles(noted), ['src/a.js', 'src/b.js']);
+  const unclosed = 'Files:\n- src/a.js (old note api/x.js';
 
   let stdout = '';
   let stderr = '';
@@ -114,6 +119,18 @@ test('[B14] brief paths ignore sentence punctuation but still refuse a foreign p
   assert.equal(code, 1, stdout);
   assert.match(stderr, /BRIEF_LANE.*api\/server\.js \(api's\)/);
   assert.doesNotMatch(stderr, /make\.|folders\)/);
+
+  let unclosedStderr = '';
+  const unclosedCode = await main([
+    'add', 'web', 'Page', '--route', 'light', '--criterion', 'the page renders', '--check', 'true', '--brief', `${unclosed}\nChange: update the page\nTest: check the page`,
+  ], {
+    cwd: repo,
+    stdout: { isTTY: false, write: () => {} },
+    stderr: { write: (text) => { unclosedStderr += text; } },
+  });
+  assert.equal(unclosedCode, 1);
+  assert.match(unclosedStderr, /BRIEF_LANE.*api\/x\.js/u);
+  assert.deepEqual(briefFiles(unclosed), ['src/a.js', 'api/x.js']);
 });
 
 test('agents are numbered per lane; one coordinator; a worktree joins once', () => {
@@ -121,6 +138,28 @@ test('agents are numbered per lane; one coordinator; a worktree joins once', () 
   assert.equal(store.register(board, { lane: 'web', path: '/repo-web-1' }), 'web-1');
   assert.throws(() => store.register(board, { lane: 'api', path: '/repo-web-1' }), /ALREADY_JOINED/);
   assert.throws(() => store.register(board, { lane: 'coordinator', path: '/elsewhere' }), /ONE_COORDINATOR/);
+});
+
+test('[O8] model labels follow stable agent ids into moves and configured display names', () => {
+  const id = store.register(board, { lane: 'api', path: '/repo-api-2', model: 'gpt-6-luna' });
+  assert.equal(id, 'api-2');
+  assert.equal(store.agentAt(board, '/repo-api-2').agent_model, 'gpt-6-luna');
+  assert.equal(displayAgentName(store.agentAt(board, '/repo-api-2')), 'api-2 (gpt-6-luna)');
+  assert.equal(displayAgentName(store.agentAt(board, '/repo-api-2'), 'prefix'), 'gpt-6-luna-api-2');
+  assert.equal(displayAgentName(store.agentAt(board, '/repo-web-1')), 'web-1 (unknown)');
+  assert.equal(displayAgentName(store.agentAt(board, '/repo-web-1'), 'prefix'), 'unknown-web-1');
+  const id2 = store.register(board, { lane: 'api', path: '/repo-api-2' });
+  assert.equal(id2, id, 'omitting model on a repeat registration preserves it and the stable id');
+  const joined = store.events(board).find((event) => event.event_kind === 'join' && event.event_by === id);
+  assert.equal(JSON.parse(joined.event_detail).model, 'gpt-6-luna');
+  store.addItem(board, { by: 'coordinator', lane: 'api', title: 'Model event' });
+  store.claim(board, 1, { agentId: id, lane: 'api', leaseMs: HOUR, freeze });
+  const claim = store.events(board, { itemId: 1 }).find((event) => event.event_kind === 'claim');
+  assert.equal(JSON.parse(claim.event_detail).model, 'gpt-6-luna', 'moves retain the declared model in their event receipt');
+  const legacyItem = store.addItem(board, { by: 'coordinator', lane: 'web', title: 'Legacy model' });
+  store.claim(board, legacyItem, { agentId: 'web-1', lane: 'web', leaseMs: HOUR, freeze });
+  const legacyClaim = store.events(board, { itemId: legacyItem }).find((event) => event.event_kind === 'claim');
+  assert.equal(JSON.parse(legacyClaim.event_detail).model, 'unknown', 'moves by older agents record their missing model explicitly');
 });
 
 test('the coordinator follows the main checkout when the repo moves', () => {
@@ -289,7 +328,7 @@ test('a verifier releases its reserved review; another verifier can take it, and
     store.submit(durable, id, { agentId: builder, commit: SHA_A, tree: 'tree-a' });
     store.reserveReview(durable, id, { agentId: reviewer, leaseMs: HOUR, policy: 'any' });
 
-    assert.equal(store.release(durable, id, reviewer), true);
+    assert.equal(store.release(durable, id, reviewer, 'wrong tree'), true);
     assert.deepEqual(
       [store.getItem(durable, id).item_review_by, store.getItem(durable, id).item_review_until],
       [null, null],
@@ -553,10 +592,10 @@ test('an item carries a brief; editing it changes how to build, never what [B10]
   store.editItem(board, id, { agentId: 'coordinator', brief: 'Copy how add prints; test it like add.' });
   assert.equal(store.getItem(board, id).item_brief, 'Copy how add prints; test it like add.');
   assert.equal(store.getItem(board, id).item_frozen_digest, digest);
-  assert.throws(() => store.editItem(board, id, { agentId: 'api-1', brief: 'mine now' }), /NOT_YOURS.*coordinator/);
+  assert.throws(() => store.editItem(board, id, { agentId: 'api-1', brief: 'mine now' }), /HELD.*coordinator/);
   assert.throws(() => store.editItem(board, id, { agentId: 'coordinator' }), /USAGE/);
   assert.throws(() => store.addItem(board, { by: 'coordinator', lane: 'web', title: 'Huge', brief: 'x'.repeat(8001) }), /BRIEF_TOO_LONG/);
-  assert.deepEqual(JSON.parse(store.events(board, { itemId: id }).find((event) => event.event_kind === 'edit').event_detail), { brief: '38 characters' });
+  assert.deepEqual(JSON.parse(store.events(board, { itemId: id }).find((event) => event.event_kind === 'edit').event_detail), { brief: '38 characters', model: 'unknown' });
   store.submit(board, id, { agentId: 'web-1', commit: SHA_A, tree: 't' });
   store.verify(board, id, { agentId: 'web-2', decision: 'ACCEPT', head: SHA_A, digest, policy: 'any', note: 'removed the help case; its test failed' });
   assert.throws(() => store.editItem(board, id, { agentId: 'coordinator', brief: 'late' }), /CLOSED/);
@@ -607,13 +646,52 @@ test('below strong, an item is buildable cold: files, a test, a criterion and a 
 test('changing a criterion or a check drops the frozen bar, in the open; the next claim freezes anew [B14]', () => {
   const id = store.addItem(board, { by: 'coordinator', lane: 'web', title: 'Page' });
   claimAs(id, 'web-1', 'web');
-  assert.throws(() => store.editItem(board, id, { agentId: 'coordinator', check: 'npm test' }), /HELD/);
   store.release(board, id, 'web-1');
   store.editItem(board, id, { agentId: 'coordinator', check: 'npm test', criterion: 'renders' });
   assert.equal(store.getItem(board, id).item_frozen_digest, null);
   const edit = store.events(board, { itemId: id }).find((event) => event.event_kind === 'edit');
-  assert.deepEqual(JSON.parse(edit.event_detail), { criterion: 'renders', check: 'npm test', unfrozen: 'digest:Page' });
+  assert.deepEqual(JSON.parse(edit.event_detail), { criterion: 'renders', check: 'npm test', unfrozen: 'digest:Page', model: 'unknown' });
   assert.equal(claimAs(id, 'web-1', 'web').digest, 'digest:Page');
+});
+
+test('edit after an expired claim reopens it and names its holder [B13]', () => {
+  const edits = [
+    { title: 'Criterion', change: { criterion: 'the new criterion' } },
+    { title: 'Check', change: { check: 'node --test' } },
+    { title: 'Route', change: { route: 'mid' } },
+  ];
+  for (const { title, change } of edits) {
+    const id = store.addItem(board, {
+      by: 'coordinator', lane: 'web', title, route: 'light', brief: BRIEF,
+      criterion: 'the old criterion', check: 'true',
+    });
+    claimAs(id, 'web-1', 'web');
+    clock.advance(2 * HOUR + 1);
+    assert.doesNotThrow(
+      () => store.editItem(board, id, { agentId: 'coordinator', ...change }),
+      `an expired ${title.toLowerCase()} edit must reopen the item before writing its fields`,
+    );
+    const stored = store.itemById(board, id);
+    assert.deepEqual([stored.item_status, stored.item_owner, stored.item_lease_until], ['open', null, null]);
+    assert.equal(stored.item_frozen_digest, null);
+    const event = store.events(board, { itemId: id }).findLast((entry) => entry.event_kind === 'edit');
+    assert.equal(event.event_by, 'coordinator');
+    assert.equal(JSON.parse(event.event_detail).expiredHolder, 'web-1');
+    assert.equal(JSON.parse(event.event_detail).unfrozen, `digest:${title}`);
+  }
+
+  const live = store.addItem(board, {
+    by: 'coordinator', lane: 'web', title: 'Live', route: 'light', brief: BRIEF,
+    criterion: 'the old criterion', check: 'true',
+  });
+  claimAs(live, 'web-1', 'web');
+  const digest = store.itemById(board, live).item_frozen_digest;
+  assert.throws(() => store.editItem(board, live, { agentId: 'coordinator', route: 'mid' }), /HELD/);
+  assert.deepEqual(
+    [store.itemById(board, live).item_status, store.itemById(board, live).item_owner, store.itemById(board, live).item_frozen_digest],
+    ['claimed', 'web-1', digest],
+  );
+  assert.equal(store.events(board, { itemId: live }).some((entry) => entry.event_kind === 'edit'), false);
 });
 
 test('escalate frees an item one tier up, with what was tried attached [B15]', () => {
@@ -632,7 +710,7 @@ test('escalate frees an item one tier up, with what was tried attached [B15]', (
   const moves = store.events(board, { itemId: id }).map((event) => event.event_kind).filter((kind) => ['attempt', 'escalate'].includes(kind));
   assert.deepEqual(moves, ['attempt', 'escalate', 'escalate', 'escalate']);
   const first = store.events(board, { itemId: id }).find((event) => event.event_kind === 'escalate');
-  assert.deepEqual(JSON.parse(first.event_detail), { from: 'light', to: 'mid', note: 'check failed twice', attempt: 'refs/pullboard/attempts/1/abc' }, 'the failure and the pinned attempt travel with it');
+  assert.deepEqual(JSON.parse(first.event_detail), { from: 'light', to: 'mid', note: 'check failed twice', attempt: 'refs/pullboard/attempts/1/abc', model: 'unknown' }, 'the failure and the pinned attempt travel with it');
 });
 
 test('a fresh claim records where the work started; submit records what it changed, reworks included [N21]', () => {
@@ -770,7 +848,7 @@ test('[O3] declared families travel from join through submit and verdict, and ab
     GIT_COMMITTER_EMAIL: 'agent@example.com',
   };
   /** Run Git with isolated identity and configuration in the fixture repository. */
-  const git = (cwd, ...args) => execFileSync('git', args, { cwd, env, encoding: 'utf8', stdio: 'pipe' }).trim();
+  const git = (cwd, ...args) => runFixtureGit(args, { cwd, env, encoding: 'utf8', stdio: 'pipe' });
   git(repo, 'init', '-q', '-b', 'main');
   writeFileSync(join(repo, 'pullboard.json'), JSON.stringify({
     gate: 'true',
@@ -783,10 +861,22 @@ test('[O3] declared families travel from join through submit and verdict, and ab
   git(repo, 'add', '-A');
   git(repo, 'commit', '-q', '-m', 'chore: initialize family test');
 
+  const savedWorktreeModel = process.env.PULLBOARD_MODEL;
+  delete process.env.PULLBOARD_MODEL;
+  let missingWorktreeModel;
+  try { missingWorktreeModel = await runMain(repo, ['worktree', 'web', '--json']); }
+  finally { if (savedWorktreeModel === undefined) delete process.env.PULLBOARD_MODEL; else process.env.PULLBOARD_MODEL = savedWorktreeModel; }
+  assert.equal(missingWorktreeModel.code, 1);
+  assert.equal(JSON.parse(missingWorktreeModel.stdout).error.code, 'MODEL_REQUIRED', 'worktree without a flag or model environment refuses');
   const made = await runMain(repo, ['worktree', 'web', '--family', 'Family Alpha', '--json']);
   assert.equal(made.code, 0, made.stderr || made.stdout);
   const worktree = JSON.parse(made.stdout);
   assertJsonShape(worktree, 'worktree');
+  assert.equal(worktree.agent, 'web-1', 'the model never changes the stable id');
+  assert.equal(worktree.model, 'Test Model');
+  assert.equal(worktree.displayName, 'web-1 (Test Model)');
+  assert.match(worktree.prompt, /Model: 'Test Model'\./);
+  assert.match(worktree.prompt, /pass --model 'Test Model' or set PULLBOARD_MODEL='Test Model'/);
   const builderPath = worktree.path;
   const reviewerPath = join(directory, 'reviewer');
   git(repo, 'worktree', 'add', '-q', '-b', 'review/one', reviewerPath, 'main');
@@ -795,9 +885,18 @@ test('[O3] declared families travel from join through submit and verdict, and ab
   assert.equal(joined.code, 0, joined.stderr || joined.stdout);
   const joinResult = JSON.parse(joined.stdout);
   assertJsonShape(joinResult, 'join');
+  assert.equal(joinResult.model, 'Test Model');
+  assert.equal(joinResult.displayName, 'review-1 (Test Model)');
   const noFamilyPath = join(directory, 'no-family');
   git(repo, 'worktree', 'add', '-q', '-b', 'web/two', noFamilyPath, 'main');
   const noFamilyRoot = git(noFamilyPath, 'rev-parse', '--show-toplevel');
+  const savedModel = process.env.PULLBOARD_MODEL;
+  delete process.env.PULLBOARD_MODEL;
+  let missingModel;
+  try { missingModel = await runMain(noFamilyRoot, ['join', 'web', '--json']); }
+  finally { if (savedModel === undefined) delete process.env.PULLBOARD_MODEL; else process.env.PULLBOARD_MODEL = savedModel; }
+  assert.equal(missingModel.code, 1);
+  assert.equal(JSON.parse(missingModel.stdout).error.code, 'MODEL_REQUIRED', 'join without a flag or model environment refuses');
   const joinedWithout = await runMain(noFamilyRoot, ['join', 'web']);
   assert.equal(joinedWithout.code, 0, joinedWithout.stderr || joinedWithout.stdout);
 
@@ -807,11 +906,16 @@ test('[O3] declared families travel from join through submit and verdict, and ab
   assert.equal(store.agentAt(persistent, builderPath).agent_family, 'Family Alpha');
   assert.equal(store.agentAt(persistent, reviewerRoot).agent_family, 'Family Beta');
   assert.equal(store.agentAt(persistent, noFamilyRoot).agent_family, null);
+  assert.equal(store.agentAt(persistent, noFamilyRoot).agent_model, 'Test Model');
+  const apiState = projectState(repo);
+  assert.equal(apiState.agents.find((agent) => agent.agent_id === 'web-1').agent_model, 'Test Model');
   store.register(persistent, { lane: 'coordinator', path: repo });
+  const stateWithCoordinator = projectState(repo);
+  assert.equal(stateWithCoordinator.agents.find((agent) => agent.agent_id === 'coordinator').agent_model, null);
   assert.equal(store.agentAt(persistent, repo).agent_family, null, 'the core supplies no family for itself');
   store.register(persistent, { lane: 'coordinator', path: repo, family: 'Family Coordinator' });
   const coordinatorResume = await runMain(repo, ['resume']);
-  assert.match(coordinatorResume.stdout, /resume: coordinator \(Family Coordinator\), coordinator lane/);
+  assert.match(coordinatorResume.stdout, /resume: coordinator \(unknown\) \[family Family Coordinator\], coordinator lane/);
   const coordinatorJson = await runMain(repo, ['resume', '--json']);
   assert.equal(JSON.parse(coordinatorJson.stdout).me.family, 'Family Coordinator');
 
@@ -833,8 +937,8 @@ test('[O3] declared families travel from join through submit and verdict, and ab
   assert.equal(shownJson.item_builder_family, 'Family Alpha');
   assert.equal(shownJson.verdicts[0].verdict_verifier_family, 'Family Beta');
   const shownText = await runMain(repo, ['show', String(id)]);
-  assert.match(shownText.stdout, /submitted by web-1 \(Family Alpha\)/);
-  assert.match(shownText.stdout, /ACCEPT CRITERION_MET by review-1 \(Family Beta\)/);
+  assert.match(shownText.stdout, /submitted by web-1 \(Test Model\) \[family Family Alpha\]/);
+  assert.match(shownText.stdout, /ACCEPT CRITERION_MET by review-1 \(Test Model\) \[family Family Beta\]/);
 
   const redeclared = await runMain(reviewerRoot, ['join', 'review', '--family', 'Family Gamma', '--json']);
   assert.equal(redeclared.code, 0, redeclared.stderr || redeclared.stdout);
@@ -845,10 +949,10 @@ test('[O3] declared families travel from join through submit and verdict, and ab
   assert.equal(rejoined.code, 0, rejoined.stderr || rejoined.stdout);
   assert.equal(store.agentAt(persistent, reviewerRoot).agent_family, 'Family Gamma', 'omitting --family preserves the declaration');
   const historicalShow = await runMain(repo, ['show', String(id)]);
-  assert.match(historicalShow.stdout, /ACCEPT CRITERION_MET by review-1 \(Family Beta\)/);
+  assert.match(historicalShow.stdout, /ACCEPT CRITERION_MET by review-1 \(Test Model\) \[family Family Beta\]/);
 
   const resumed = await runMain(builderPath, ['resume']);
-  assert.match(resumed.stdout, /resume: web-1 \(Family Alpha\), web lane/);
+  assert.match(resumed.stdout, /resume: web-1 \(Test Model\) \[family Family Alpha\], web lane/);
   const resumedJson = await runMain(builderPath, ['resume', '--json']);
   assert.equal(resumedJson.code, 0, resumedJson.stderr || resumedJson.stdout);
   const resumedShape = JSON.parse(resumedJson.stdout);
@@ -885,6 +989,22 @@ test('[O3] declared families travel from join through submit and verdict, and ab
   const cliReview = await runMain(reviewerRoot, ['next', '--verify', '--json']);
   assert.equal(cliReview.code, 0, cliReview.stderr || cliReview.stdout);
   assert.equal(JSON.parse(cliReview.stdout).item.item_id, differentFamily, 'CLI reads verify.family and reserves different-family work');
+
+  const prefixConfig = JSON.parse(policyConfig);
+  prefixConfig.agents = { names: 'prefix' };
+  writeFileSync(join(repo, 'pullboard.json'), JSON.stringify(prefixConfig, null, 2));
+  git(repo, 'add', 'pullboard.json');
+  git(repo, 'commit', '-q', '-m', 'docs: configure prefix agent names');
+  const prefixMade = await runMain(repo, ['worktree', 'web', '--model', 'Claude Sonnet', '--json']);
+  assert.equal(prefixMade.code, 0, prefixMade.stderr || prefixMade.stdout);
+  const prefixResult = JSON.parse(prefixMade.stdout);
+  assert.equal(prefixResult.agent, 'web-3');
+  assert.equal(prefixResult.model, 'Claude Sonnet');
+  assert.equal(prefixResult.displayName, 'claude-sonnet-web-3');
+  const quotedModel = await runMain(repo, ['worktree', 'web', '--model', 'Model " $x', '--json']);
+  assert.equal(quotedModel.code, 0, quotedModel.stderr || quotedModel.stdout);
+  assert.match(JSON.parse(quotedModel.stdout).prompt, /Model: 'Model " \$x'\./);
+  assert.match(JSON.parse(quotedModel.stdout).prompt, /pass --model 'Model " \$x'/);
 });
 
 test('[O2,O3] family policy controls review order and refuses unknown or matching families', () => {

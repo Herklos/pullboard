@@ -9,10 +9,11 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { evaluationValue } from './devtools-evaluation.mjs';
 import { renderTour } from './tour-renderer.mjs';
+import { narrationDurations, parseVtt } from './video.mjs';
 
 const ROOT = new URL('../../', import.meta.url);
 const README = readFileSync(new URL('README.md', ROOT), 'utf8');
-const files = ['desktop.png', 'phone.png', 'tour.svg'];
+const files = ['desktop.png', 'phone.png', 'shouts.png', 'tour.svg'];
 const shots = (name) => new URL(`docs/shots/${name}`, ROOT);
 
 /** Assert that an image is embedded in a named README section with useful alt text. */
@@ -31,10 +32,42 @@ test('the README links the desktop board and timed tour with descriptive alt tex
   linkedInSection('Installation', 'tour.svg', ['submitted', 'rejected', 'fixed', 'accepted']);
 });
 
+test('the demo board stages a Shouts conversation [I11,I13]', () => {
+  const { state } = JSON.parse(readFileSync(new URL('docs/demo/api/v1/boards/demo-board/state.json', ROOT), 'utf8'));
+  const agents = state.agents.filter((agent) => agent.agent_id !== 'person');
+  assert.equal(agents.length, 3, 'the demo has a coordinator, builder and reviewer');
+  const senders = new Set(state.shouts.map((shout) => shout.shout_from).filter((id) => id !== 'person'));
+  assert.deepEqual([...senders].sort(), ['app-1', 'coordinator', 'review-1']);
+  const decision = state.shouts.find((shout) => shout.shout_decision && shout.shout_to === 'person');
+  assert.ok(decision, 'the coordinator asks the person');
+  const answer = state.shouts.find((shout) => shout.shout_from === 'person' && shout.shout_answers === decision.shout_id);
+  assert.ok(answer, 'the person answers that decision');
+  assert.ok(agents.some((agent) => ['all', agent.agent_id, agent.agent_lane].includes(answer.shout_to)
+    && agent.agent_last_shout_id >= answer.shout_id), 'an addressed agent has Heard the person');
+  const receipt = state.shouts.find((shout) => shout.shout_evidence_kind === 'receipt');
+  assert.ok(receipt, 'the conversation includes an evidence receipt');
+  assert.equal(receipt.shout_evidence_item, 1);
+  assert.equal(receipt.shout_evidence_outcome, 'edge passes');
+  assert.equal(receipt.shout_evidence_commit, state.items.find((item) => item.id === 1).commit);
+  assert.ok(state.shouts.some((shout) => shout.shout_text.includes(`src/demo.js:1@${receipt.shout_evidence_commit}`)), 'the code reference points at the reviewed fix');
+});
+
+test('the README shows the Shouts capture [I11,I13]', () => {
+  linkedInSection('Pullboard View', 'shouts.png', ['shouts', 'answered', 'heard', 'receipt', 'code reference']);
+  linkedInSection('Pullboard View', 'desktop.png', ['needs you', 'search', 'status bar']);
+  linkedInSection('Pullboard View', 'phone.png', ['phone', 'dark', 'active work', 'needs you', 'search']);
+  const section = README.slice(README.indexOf('## Pullboard View'), README.indexOf('## Get started'));
+  assert.match(section, /desktop\.png\)[^]*shouts\.png\)/, 'desktop and Shouts captures are together');
+  const png = readFileSync(shots('shouts.png'));
+  assert.deepEqual([...png.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
+  assert.equal(png.readUInt32BE(16), 1440, 'the Shouts capture is desktop width');
+});
+
 test('the demo assets exist and stay within their size budgets [I11,I13]', () => {
   for (const name of files) assert.ok(statSync(shots(name)).size > 0, `${name} exists`);
   assert.ok(statSync(shots('desktop.png')).size < 300_000, 'desktop PNG is under 300 KB');
   assert.ok(statSync(shots('phone.png')).size < 300_000, 'phone PNG is under 300 KB');
+  assert.ok(statSync(shots('shouts.png')).size < 300_000, 'Shouts PNG is under 300 KB');
   assert.ok(statSync(shots('tour.svg')).size < 200_000, 'tour SVG is under 200 KB');
   const tour = readFileSync(shots('tour.svg'), 'utf8');
   assert.match(tour, /animation:light-step 16s linear infinite/, 'the SVG carries its own timed animation');
@@ -83,11 +116,12 @@ test('the exported demo is synthetic and contains no machine paths or unrelated 
   const state = JSON.parse(readFileSync(new URL('docs/demo/api/v1/boards/demo-board/state.json', ROOT), 'utf8')).state;
   assert.ok(state.agents.every((agent) => /^(coordinator|person|app-\d+|review-\d+)$/.test(agent.agent_id)), 'only generic demo roles appear as agents');
   assert.ok(state.shouts.every((shout) => [
+    '#4 can continue while #3 waits for review.',
     'The review is complete. May the verified change proceed?',
-    'Passed up from app-3: The review is complete. May the verified change proceed?\nCoordinator note: The review passed; ask the person before proceeding.',
+    'Passed up from app-1: The review is complete. May the verified change proceed?\nCoordinator note: The review passed; ask the person before proceeding.',
     'Proceed with the verified change.',
-    'Person answered #2: Proceed with the verified change.',
-  ].includes(shout.shout_text)), 'the board contains only the synthetic decision exchange');
+    'Person answered #3: Proceed with the verified change.',
+  ].includes(shout.shout_text) || /^#1 passes the edge that failed before\. The fix is in src\/demo\.js:1@[a-f0-9]{40}\.$/.test(shout.shout_text)), 'the board contains only the synthetic conversation');
 });
 
 test('the demo rebuild script uses a temporary repo and isolated home [I11,I13]', () => {
@@ -165,4 +199,62 @@ test('the card changes when the real tour facts change and escapes its captured 
   assert.throws(() => renderTour(captured.filter(({ text }) => !text.startsWith('8  '))), /eight numbered tour steps/);
   assert.throws(() => renderTour(captured.filter(({ text }) => !text.includes('# fail 1'))), /deliberately failing test/);
   assert.match(readFileSync(shots('demo.mjs'), 'utf8'), /NO_COLOR: '1'/);
+});
+
+
+const videoManifest = JSON.parse(readFileSync(shots('video.json'), 'utf8'));
+
+test('the product video follows its five-line story and keeps captions publishable [I14]', () => {
+  assert.deepEqual(videoManifest.scenes.map((scene) => scene.id), ['problem', 'constraints', 'holds', 'proof', 'tagline']);
+  assert.equal(videoManifest.scenes.reduce((sum, scene) => sum + scene.seconds, 0), 90);
+  for (const scene of videoManifest.scenes) {
+    assert.equal(scene.line, scene.caption, `${scene.id} burns in the narrated line`);
+    assert.ok(scene.caption.length <= 48, `${scene.id} caption fits one short line`);
+    assert.equal(scene.beats.length, 3, `${scene.id} contains three diagram stages`);
+  }
+  assert.deepEqual(videoManifest.scenes.find((scene) => scene.id === 'proof').stats, ['submissions', 'rejections', 'merged']);
+  const manifestText = readFileSync(shots('video.json'), 'utf8');
+  assert.doesNotMatch(manifestText, /(?:\/Users\/|\/private\/|file:\/\/|shout|coreyolson)/iu);
+  const renderer = readFileSync(shots('video.mjs'), 'utf8');
+  assert.match(renderer, /'stats', '--json'/u, 'the proof figures come from pullboard stats');
+  assert.match(renderer, /document\.stats/u, 'the renderer reads the CLI statistics document');
+  assert.match(renderer, /product-1920x1080\.mp4/u);
+  assert.match(renderer, /product-1080x1350\.mp4/u);
+  assert.match(renderer, /sizeLimitBytes/u, 'the script enforces the file-size budget');
+});
+
+test('narration VTT cues set scene timing and refuse drift or overlap [I14]', () => {
+  const vtt = `WEBVTT
+
+00:00:00.000 --> 00:00:14.000
+${videoManifest.scenes[0].line}
+
+00:00:14.000 --> 00:00:31.000
+${videoManifest.scenes[1].line}
+
+00:00:31.000 --> 00:00:58.000
+${videoManifest.scenes[2].line}
+
+00:00:58.000 --> 00:01:18.000
+${videoManifest.scenes[3].line}
+
+00:01:18.000 --> 00:01:30.000
+${videoManifest.scenes[4].line}
+`;
+  const cues = parseVtt(vtt, videoManifest.scenes);
+  assert.deepEqual(narrationDurations(videoManifest.scenes, cues, 90), [14, 17, 27, 20, 12]);
+  assert.deepEqual(narrationDurations(videoManifest.scenes, cues, 90.25), [14, 17, 27, 20, 12.25]);
+  assert.throws(() => parseVtt(vtt.replace('00:00:14.000 --> 00:00:31.000', '00:00:13.000 --> 00:00:31.000'), videoManifest.scenes), /never overlap/u);
+  assert.throws(() => parseVtt(vtt.replace(`${videoManifest.scenes[2].line}`, 'a different narration line'), videoManifest.scenes), /must match/u);
+  assert.throws(() => parseVtt(vtt.slice(0, vtt.indexOf('\n\n00:01:18.000')), videoManifest.scenes), /has 4 cues/u);
+  const second = `00:00:14.000 --> 00:00:31.000\n${videoManifest.scenes[1].line}`;
+  const third = `00:00:31.000 --> 00:00:58.000\n${videoManifest.scenes[2].line}`;
+  assert.throws(() => parseVtt(vtt.replace(`${second}\n\n${third}`, `${third}\n\n${second}`), videoManifest.scenes), /increase in time/u);
+  const gappedVtt = vtt.replace('00:00:00.000 --> 00:00:14.000', '00:00:00.000 --> 00:00:13.000')
+    .replace('00:00:14.000 --> 00:00:31.000', '00:00:14.000 --> 00:00:31.000')
+    .replace('00:00:31.000 --> 00:00:58.000', '00:00:33.000 --> 00:00:58.000')
+    .replace('00:00:58.000 --> 00:01:18.000', '00:00:59.000 --> 00:01:18.000')
+    .replace('00:01:18.000 --> 00:01:30.000', '00:01:20.000 --> 00:01:30.000');
+  assert.deepEqual(narrationDurations(videoManifest.scenes, parseVtt(gappedVtt, videoManifest.scenes), 90), [14, 19, 26, 21, 10]);
+  assert.throws(() => narrationDurations(videoManifest.scenes, cues, 91), /91\.000s.*90\.000s/u);
 });

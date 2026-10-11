@@ -23,7 +23,12 @@ import {
   escalate,
   events,
   holdLane,
+  holdItem,
   merged,
+  recordLandingBatch,
+  recordLandingWaiver,
+  recordLandingFlake,
+  finishLandingBatch,
   openBoard,
   passDecision,
   PERSON,
@@ -34,6 +39,7 @@ import {
   register,
   release,
   releaseLane,
+  releaseItemHold,
   reserveReview,
   SCHEMA_VERSION,
   submit,
@@ -45,6 +51,13 @@ import { ID_RE, readSignoffs, SPEC_GRAMMAR_VERSION, STATUSES, TIERS, lintSpec, p
 import { sha256, signRows } from '../src/signature.js';
 
 const guide = readFileSync(new URL('./formats.md', import.meta.url), 'utf8');
+
+test('formats guide documents collision grandfathering and doctrine citations [A5]', () => {
+  assert.match(guide, /A bare id names a row in `SPEC\.md`/u);
+  assert.match(guide, /`doctrine:<id>` in item spec ids and commit headers/u);
+  assert.match(guide, /Collisions already present in the primary checkout's attached branch are reported as known warnings/u);
+  assert.match(guide, /adding a colliding row is an error that names both file paths and line numbers/u);
+});
 
 /** Return the text inside a named marked documentation block. */
 function block(start, end) {
@@ -221,6 +234,7 @@ function recordEventContract() {
   const coordinator = ensureCoordinator(board, '/coordinator');
   const builder = register(board, { lane: 'docs', path: '/builder' });
   register(board, { lane: 'docs', path: '/builder', family: 'codex' });
+  register(board, { lane: 'docs', path: '/builder', model: 'Fixture Model' });
   const reviewer = register(board, { lane: 'tests', path: '/reviewer' });
   register(board, { lane: 'small', path: '/small', route: 'light' });
   ensureCoordinator(board, '/coordinator-moved');
@@ -243,6 +257,8 @@ function recordEventContract() {
   const fact = appendFact(board, first, { agentId: builder, kind: 'note', text: 'Captured evidence', ref: 'docs/formats.md:1-3@' + 'a'.repeat(40) });
   appendFact(board, first, { agentId: coordinator, kind: 'measurement', text: 'Corrected evidence', supersedes: fact.id });
   editItem(board, first, { agentId: coordinator, brief: 'Files: docs/formats.md\nTest: docs/formats.test.js', route: 'mid', criterion: 'Changed', check: 'node test' });
+  holdItem(board, first, { agentId: coordinator, reason: 'fixture item hold' });
+  releaseItemHold(board, first, { agentId: coordinator });
   recordAttempt(board, first, { agentId: builder, n: 1, seconds: 2, result: 'failed' });
   claim(board, first, { agentId: builder, lane: 'docs', leaseMs: 60_000, freeze: freeze('first') });
   claim(board, first, { agentId: builder, lane: 'docs', leaseMs: 60_000, freeze: freeze('unused') });
@@ -257,12 +273,23 @@ function recordEventContract() {
   reserveReview(board, first, { agentId: reviewer, leaseMs: 60_000, policy: 'agents' });
   verify(board, first, { agentId: reviewer, decision: 'ACCEPT', reason: ACCEPT_REASON, note: 'checked the example', head: acceptedCommit, digest: 'second', policy: 'agents' });
   merged(board, first, { agentId: coordinator, commit: 'c'.repeat(40) });
+  const batch = recordLandingBatch(board, { agentId: coordinator, batch: { version: 1, id: 'format-example', base: 'a'.repeat(40), tip: 'c'.repeat(40),
+    root: '/landing', branch: 'refs/heads/main', state: 'pushed', owner: 'format-example', logPath: '/landing.log', items: [{ id: first, commit: acceptedCommit, merge: 'c'.repeat(40) }] } });
+  recordLandingWaiver(board, { agentId: PERSON, channel: 'terminal', id: 'format-waiver', test: 'test/flaky.test.js', until: '2099-01-01', reason: 'format example' });
+  recordLandingFlake(board, { agentId: coordinator, test: 'test/flaky.test.js', hash: 'd'.repeat(64), names: ['flaky example'], lane: 'docs', batchId: batch.id });
+  finishLandingBatch(board, { agentId: coordinator, id: batch.id, tip: batch.tip });
 
   const rejected = addItem(board, { by: coordinator, lane: 'docs', title: 'Rejected example' });
   claim(board, rejected, { agentId: builder, lane: 'docs', leaseMs: 60_000, freeze: freeze('rejected') });
   const rejectedCommit = 'd'.repeat(40);
   submit(board, rejected, { agentId: builder, commit: rejectedCommit, tree: 'e'.repeat(40) });
   verify(board, rejected, { agentId: reviewer, decision: 'REJECT', reason: 'TEST_FAILURE', note: 'the fixture failed', head: rejectedCommit, digest: 'rejected', policy: 'agents' });
+
+  const corrected = addItem(board, { by: coordinator, lane: 'docs', title: 'Corrected live claim' });
+  claim(board, corrected, { agentId: builder, lane: 'docs', leaseMs: 60_000, freeze: freeze('before-correction') });
+  editItem(board, corrected, { agentId: coordinator, criterion: 'Corrected criterion' });
+  assert.deepEqual(JSON.parse(events(board).filter((row) => row.event_kind === 'edit').at(-1).event_detail).pendingRefreeze, ['criterion']);
+  refreeze(board, corrected, { agentId: builder, freeze: freeze('adopted-correction') });
 
   const withdrawn = addItem(board, { by: coordinator, lane: 'docs', title: 'Withdrawn example' });
   withdraw(board, withdrawn, { agentId: coordinator, reason: 'duplicate fixture' });
@@ -527,6 +554,7 @@ test('[A5] schema, versions, event kinds and event detail fields match live beha
   const actorByKind = {
     join: 'joining agent',
     family: 'agent',
+    model: 'agent',
     moved: 'coordinator',
     add: 'item creator',
     edit: 'editor',
@@ -540,16 +568,20 @@ test('[A5] schema, versions, event kinds and event detail fields match live beha
   for (const row of actualRows) {
     const kind = row.event_kind;
     const entry = actual[kind] ?? { actors: new Set(), fields: new Set() };
-    const actor = actorByKind[kind] ?? actors[row.event_by] ?? 'unknown';
+    const actor = kind === 'refreeze' && row.event_by !== COORDINATOR
+      ? 'live holder adopting a pending correction'
+      : actorByKind[kind] ?? actors[row.event_by] ?? 'unknown';
     entry.actors.add(actor);
-    for (const field of Object.keys(row.detail)) entry.fields.add(field);
+    for (const field of Object.keys(row.detail)) {
+      if (field !== 'model') entry.fields.add(field);
+    }
     actual[kind] = entry;
   }
   const documented = documentedEvents();
   assert.deepEqual(Object.keys(documented).sort(), Object.keys(actual).sort());
   assert.match(block('<!-- pass-rule:start -->', '<!-- pass-rule:end -->'), /passDecision` only for the coordinator/);
   for (const [kind, expected] of Object.entries(documented)) {
-    assert.deepEqual([...actual[kind].actors].sort(), [expected.actor]);
+    assert.deepEqual([...actual[kind].actors].sort(), expected.actor.split(', or ').sort());
     assert.deepEqual([...actual[kind].fields].sort(), expected.fields);
   }
 });

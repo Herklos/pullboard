@@ -4,6 +4,136 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.8.5] - 2026-10-10
+
+### A prettier board
+
+Pullboard View got a full design pass, so the board is cleaner and easier on the eyes. It's quicker to read at a glance, with what needs you up top and search in the top bar. It works in light or dark and feels right on a phone.
+
+### Added
+
+- `pullboard stats` measures the flow from the event log: build, review wait, review and merge wait times, each queue's size and oldest item, items added and merged per day, resubmits per merged item, and active agents by role and lane. It names the bottleneck and one recommended action.
+- The coordinator's `pullboard resume` ends with one line when review backs up (average wait over an hour, or a submission unreviewed for three hours), naming the bottleneck and what would fix it.
+- Every agent declares its model when it joins (`--model` or `PULLBOARD_MODEL`), and Pullboard View shows each agent with its model.
+- The coordinator can return a submission without a verdict to fix its criterion: `pullboard reopen <id> --note "why"`.
+- The coordinator can correct a claimed item's criterion or check without the holder releasing it; the holder adopts the correction with `pullboard refreeze <id>` and keeps its claim.
+- `pullboard land` merges verified items in verdict order, gates the batch once, bisects a red to its culprit, and lands nothing on a flake until the test is fixed or you waive it.
+
+### Changed
+
+- `pullboard next` offers work in roadmap order, the next release first.
+- `submit` refuses work stacked on an unverified item; `merged` refuses a commit that doesn't carry the item's work.
+- Gate slots are machine-wide even with a private Pullboard home, and every full test run takes one.
+- Every gate run records where its time went.
+- `doctor` and `resume` say when the repo's hooks aren't wired.
+- A repo's skills follow Pullboard upgrades and never replace ones you edited.
+- Boards use engine 8. Upgrade every linked device; a 0.8.4 device stops at the first new record and says to upgrade.
+
+### Fixed
+
+- An expired relay sign-in never blocks local work, and `relay off` stays off.
+- No single agent token can halt relay replay for good.
+- `refreeze` picks up a lane change made after the claim.
+- Claiming an item whose spec rows are on main but not yet in your worktree fast-forwards a clean worktree, or refuses with SPEC_BEHIND_MAIN naming the rows and the merge to run, instead of a confusing UNKNOWN_SPEC.
+- Help examples carry every flag their command requires.
+
+## [0.8.4] - 2026-10-10
+
+### Added
+
+- The coordinator can hold an item: `pullboard hold <id> "reason"` keeps it out of `next` and `claim` on every device until `pullboard hold <id> --off`.
+
+### Changed
+
+- Pullboard View: the Shouts tab's agents panel is compact. Each agent holding work is one row with its avatar, the age of its latest move and the first thing it holds; idle agents are small pills; lane and route show on hover. Pick an agent to filter the feed and address the composer to it.
+- Each of your shouts says who has heard it: "Heard by coordinator", "Heard by coordinator and N agents", or "Not heard yet".
+- The composer sends to the coordinator, with no recipient picker; a picked agent shows as a chip you can clear.
+- A code reference on its own line in a shout, and every one in an item's thread, opens as a block, collapsed until asked, with the exact lines from that commit highlighted; one inside a sentence stays a short label that opens the same block.
+- Boards use engine 7. Upgrade every linked device; a 0.8.3 device stops at the first new record and says to upgrade.
+
+### Fixed
+
+- A person-level relay action the relay refuses now fails at once, naming the refusal, its reason and the request id, instead of waiting for a phone card that never comes. A step that half succeeds (the local unlink done, the remote delete refused) exits nonzero and says which part failed.
+
+## [0.8.3] - 2026-10-10
+
+### Changed
+
+- Agents can never act as you on the relay. `relay on` gives each machine its own credential that only mints agent tokens for its linked boards, so agents keep working with no tap, and no file on the machine can act as you. A person-level action from the Mac asks for one tap on your paired phone; the grant is used once and never stored.
+- Boards use engine 6. Upgrade every linked device: once a machine on a board has its own credential, older clients on that board stop and say to upgrade.
+- Relay snapshots are compressed inside the seal, so a large board syncs.
+- Pullboard View: shouts read as cards, with an avatar, name and chips, and decisions and receipts set apart. You shout from a composer, and an agents panel shows who is holding what.
+
+### Fixed
+
+- A refused relay upload never blocks board moves: agents keep working, and each move prints one line saying why.
+- A board with no snapshot yet waits on the phone instead of reloading in a loop.
+- A recovered relay snapshot clears its stale timeout notice.
+
+## [0.8.2] - 2026-10-09
+
+### Added
+
+- `pullboard relay on --all` sets up the relay once: it links every board on the machine, links boards registered later on its own, and one phone pairing opens all of them.
+- Another machine joins a linked board by pairing.
+- Each agent has its own relay token.
+- From the relay page you can act on your board through sealed requests, and Pullboard View shows each one as waiting, done or refused.
+- An item's detail shows its check baseline and warns when the check proves nothing.
+
+### Changed
+
+- Commands ask git each question once, so they run about 4x faster.
+- Submit can run only the tests a change affects: set `affectedTests` in pullboard.json to the command that runs selected test files. Without it, submit runs your gate in full.
+- A piped gate fails when any stage fails, so a red test piped to `tail` can't read green.
+- `pullboard add` returns at once; a check's baseline runs in the background (`--wait` waits for it).
+- A review released without a verdict goes to another reviewer, and needs a one-line `--note`.
+- Boards use engine 5. Upgrade every linked device; an older client stops at the first new record and says to upgrade.
+- Item checks and verify runs wait for a machine gate slot, and a waiting gate goes first.
+- A checkout speaks for one agent session.
+- A red check at verify shows why it failed.
+- Duplicate ids across SPEC.md and DOCTRINE.md are refused; ones PRACTICE.md already had stay warnings after the rename.
+- Lane checks can't be bypassed by unstaged config, auto-merges or grafts.
+
+### Fixed
+
+- `pullboard relay on` works over SSH: relay keys live in an owner-only file, not the system keychain.
+- Without its board key, a device still reads its linked board locally.
+- A registered board behind an unreadable folder stays listed, with one warning.
+- `spec check` works in a detached checkout.
+- A shell reached over SSH is never treated as your terminal.
+- `pullboard edit` on an item whose claim expired reopens it instead of crashing.
+- `init` ignores agent worktrees under .claude, so they never block submit.
+- A note in a brief's Files entry no longer trips the lane check.
+- Pullboard View: only a command becomes a code chip and it stays inline, briefs show their lists as lists, the page never scrolls sideways on a phone, the project list folds into the tab bar on a laptop, and Activity says what each shout said.
+- The coordinator's resume is a full handoff brief.
+
+## [0.8.1] - 2026-10-09
+
+### Added
+
+- Your board on your phone: pullboard.dev shows Pullboard View to a signed-in person, and what you do there reaches your board as a request.
+- Approve or decline proposed spec rows from the Spec tab, one at a time or a whole section at once.
+- An item's detail shows its thread as one timeline.
+- `pullboard stats` prints the board's proof numbers.
+- The tour's demo board appears in Pullboard View.
+
+### Changed
+
+- The agents' house rules are DOCTRINE.md everywhere; a PRACTICE.md is still read under its old name.
+- Submit and accept refuse work that can't merge onto the trunk.
+- Accept installs the repo's dependencies before the frozen check, and every accept records whether a check ran.
+- Only `pullboard answer` closes a decision, over the relay too.
+- A replayed verify obeys the item's frozen policy.
+- Every relay client declares its engine, and the relay refuses clients too old to judge agent moves; upgrade every linked device to 0.8.1.
+- Offline, a linked board reads locally and refuses moves.
+
+### Fixed
+
+- Retrying a move after a lost reply never duplicates it.
+- Merging main into a lane branch commits cleanly; edits outside the lane are still refused.
+- Test runs keep a private machine home, so they no longer add projects to Pullboard View.
+- Chrome and port tests hold up on a busy machine.
+
 ## [0.8.0] - 2026-10-08
 
 ### Added
@@ -62,7 +192,12 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 - A local, spec-backed work board gives each item a frozen criterion, a separate worktree lane, a gated submission, and an independent review receipt.
 - The timed tour demonstrates a change being rejected, corrected, and accepted with proof.
 
-[Unreleased]: https://github.com/pullboard-dev/pullboard/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/pullboard-dev/pullboard/compare/v0.8.5...HEAD
+[0.8.5]: https://github.com/pullboard-dev/pullboard/compare/v0.8.4...v0.8.5
+[0.8.4]: https://github.com/pullboard-dev/pullboard/compare/v0.8.3...v0.8.4
+[0.8.3]: https://github.com/pullboard-dev/pullboard/compare/v0.8.2...v0.8.3
+[0.8.2]: https://github.com/pullboard-dev/pullboard/compare/v0.8.1...v0.8.2
+[0.8.1]: https://github.com/pullboard-dev/pullboard/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/pullboard-dev/pullboard/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/pullboard-dev/pullboard/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/pullboard-dev/pullboard/compare/v0.6.0...v0.6.1

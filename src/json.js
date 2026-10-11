@@ -13,14 +13,15 @@ export const JSON_SHAPES = {
     version: shape({ release: 'string' }),
     init: shape({ root: 'string', notes: 'array' }),
     hooks: shape({ notes: 'array' }),
-    join: shape({ agent: 'string', lane: 'string', route: 'string', path: 'string' }),
-    worktree: shape({ agent: 'string', lane: 'string', route: 'string', path: 'string', branch: 'string', prompt: 'string' }),
+    join: shape({ agent: 'string', lane: 'string', route: 'string', path: 'string', model: 'string', displayName: 'string' }),
+    takeover: shape({ agent: 'string', path: 'string' }),
+    worktree: shape({ agent: 'string', lane: 'string', route: 'string', path: 'string', branch: 'string', prompt: 'string', model: 'string', displayName: 'string' }),
     resume: shape({ me: 'object', all: 'array', requests: 'array', holding: 'array', sentBack: 'array', awaiting: 'array', toVerify: 'array', toMerge: 'array', open: 'array', stale: 'array', holds: 'array', unread: 'number', newest: 'array', root: 'string', dirty: 'number', next: 'string' }),
-    whoami: shape({ id: 'string', lane: 'string', path: 'string' }),
+    whoami: shape({ id: 'string', lane: 'string', path: 'string', model: 'string', displayName: 'string' }),
     lanes: shape({ lanes: 'object', shared: 'array', coordinator: 'string' }),
     resources: shape({ resources: 'array' }),
     settings: shape({ settings: 'object' }),
-    relay: shape({ linked: 'boolean', board: 'string', url: 'string', link: 'string', sequence: 'number', behind: 'number' }),
+    relay: shape({ linked: 'boolean', board: 'string', url: 'string', link: 'string', sequence: 'number', behind: 'number', recovery: 'object' }),
     list: shape({ items: 'array' }),
     roadmap: shape({ milestones: 'array' }),
     'milestone add': shape({ milestone: 'object' }),
@@ -30,8 +31,9 @@ export const JSON_SHAPES = {
     'milestone remove': shape({ milestone: 'object' }),
     show: shape({ item_id: 'number', item_title: 'string', item_lane: 'string', item_status: 'string', verdicts: 'array', thread: 'array' }),
     stats: shape({ stats: 'object' }),
-    status: shape({ me: 'object', mine: 'array', stats: 'object', reviewQueue: 'object', unread: 'number' }),
+    status: shape({ me: 'object', mine: 'array', stats: 'object', reviewQueue: 'object', unread: 'number', relay: 'object' }),
     doctor: shape({ problems: 'array' }),
+    skills: shape({ updated: 'array', current: 'array', customized: 'array' }),
     inbox: shape({ shouts: 'array' }),
     decisions: shape({ decisions: 'array' }),
     ledger: shape({ items: 'array', stats: 'object' }),
@@ -51,8 +53,10 @@ export const JSON_SHAPES = {
     done: shape({ id: 'number', commit: 'string', pin: 'string', gate: 'object' }),
     verify: shape({ id: 'number', decision: 'string', reason: 'string' }),
     merged: shape({ id: 'number', commit: 'string' }),
+    land: shape({ batch: 'object|null', landed: 'array', conflicts: 'array', blocked: 'array', culprits: 'array', flakes: 'array' }),
     withdraw: shape({ id: 'number', reason: 'string' }),
     refreeze: shape({ id: 'number', after: 'string' }),
+    reopen: shape({ id: 'number', commit: 'string' }),
     shout: shape({ id: 'number', decision: 'boolean' }),
     answer: shape({ id: 'number', answers: 'number' }),
     pass: shape({ id: 'number', answers: 'number' }),
@@ -77,6 +81,7 @@ export const JSON_SHAPES = {
     'spec decline': shape({ decisions: 'array' }),
     'spec apply': shape({ applied: 'array', files: 'array' }),
     'hook pre-commit': shape({ messages: 'array' }),
+    'hook pre-merge-commit': shape({ messages: 'array' }),
     'hook commit-msg': shape({ messages: 'array' }),
     'hook pre-push': shape({ messages: 'array' }),
   },
@@ -102,7 +107,7 @@ function nextStep(message) {
 /** A refusal shared by the CLI and API, retaining its rule and repair guidance (A1, A2). */
 export function refusalDocument(error) {
   const message = String(error.message).replace(/^\[[A-Z][A-Z0-9_]*\] /, '');
-  return { version: JSON_SHAPES.version, error: { code: error.code ?? 'INTERNAL', message, next: nextStep(message) } };
+  return { version: JSON_SHAPES.version, error: { code: error.code ?? 'INTERNAL', message, next: error.code === 'SPEC_BEHIND_MAIN' ? 'git merge main' : nextStep(message) } };
 }
 
 /**
@@ -113,6 +118,7 @@ export function commandOutput(argv, streams) {
   let enabled = argv.slice(0, argv.indexOf('--') < 0 ? argv.length : argv.indexOf('--')).includes('--json');
   let result;
   let refusal;
+  let remote;
   let written = false;
   const messages = [];
   const diagnostics = [];
@@ -140,6 +146,7 @@ export function commandOutput(argv, streams) {
       document = native && !Array.isArray(native) && typeof native.version === 'number'
         ? { ...native, ...(diagnostics.length ? { diagnostics } : {}) } : { version: JSON_SHAPES.version, messages, ...(diagnostics.length ? { diagnostics } : {}) };
     }
+    if (remote) document.remote = remote;
     streams.stdout.write(`${JSON.stringify(document, null, 2)}\n`);
   };
   return {
@@ -149,6 +156,8 @@ export function commandOutput(argv, streams) {
     err: (line) => emit(streams.stderr, diagnostics, line),
     result: (value) => { result = value; },
     refusal: (error) => { refusal = error; },
+    remote: (value) => { remote = value; },
+    exitCode: (code) => code || (remote ? 1 : 0),
     jsonMode: (value) => { enabled = Boolean(value); },
     flush,
   };

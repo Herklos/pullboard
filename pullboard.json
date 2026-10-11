@@ -1,5 +1,7 @@
 {
+  "name": "pullboard",
   "gate": "npm run gate",
+  "affectedTests": "node bin/run-tests.js",
   "spec": "SPEC.md",
   "verify": "any",
   "lease": "2h",
@@ -14,6 +16,7 @@
         "docs/api.md",
         "docs/api.test.js",
         "docs/lifecycle.md",
+        "docs/img/lifecycle.svg",
         "docs/formats.md",
         "docs/formats.test.js"
       ],
@@ -41,13 +44,15 @@
       "owns": [
         "docs/",
         "README.md",
-        "ROADMAP.md",
         "test/readme.test.js",
         "skills/",
+        "DOCTRINE.md",
+        "PRACTICE.md",
         "CODE_OF_CONDUCT.md",
         "CHANGELOG.md",
         ".github/ISSUE_TEMPLATE/",
-        ".github/pull_request_template.md"
+        ".github/pull_request_template.md",
+        "CONTRIBUTING.md"
       ],
       "specs": [
         "I"
@@ -59,7 +64,9 @@
         "src/cockpit.js",
         "src/serve.js",
         "src/view.css",
-        "test/cockpit.test.js"
+        "test/cockpit.test.js",
+        "test/cockpit/",
+        "test/journeys.test.js"
       ],
       "specs": [
         "N26",

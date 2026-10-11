@@ -44,6 +44,10 @@ After the requirement text, `gate:` names the check, `serves:` names comma-separ
 
 The row object returned by `parseSpec` has these fields:
 
+### ID namespaces and collisions
+
+A bare id names a row in `SPEC.md`. A doctrine row is cited as `doctrine:<id>` in item spec ids and commit headers, even when a row with the same bare id exists in `SPEC.md`. `spec check` compares the current rows in `SPEC.md` and `DOCTRINE.md` (or a legacy `PRACTICE.md`), and rows within either file. Collisions already present in the primary checkout's attached branch are reported as known warnings; adding a colliding row is an error that names both file paths and line numbers. A detached primary checkout cannot establish this baseline. A commit that cites a bare id shared with a doctrine row warns that the bare id resolves to `SPEC.md`; use the `doctrine:` prefix to cite the doctrine row.
+
 `parseSpec` also returns `grammarVersion`, equal to `SPEC_GRAMMAR_VERSION` after the file's marker has been checked.
 
 <!-- parser-fields:start -->
@@ -72,20 +76,20 @@ The board file is in the repository's Git common directory at `.git/pullboard/bo
 | `row grammar` | `1` | `SPEC_GRAMMAR_VERSION` in `src/spec.js`; optional `<!-- pullboard-grammar N -->` line in either file (absence means the current grammar) | Both files share the version. A declared version must match; an incompatible grammar change requires a coordinated version bump and compatible files. No automatic conversion occurs. |
 | `board schema` | `2` | `SCHEMA_VERSION` in `src/board.js`, persisted as `PRAGMA user_version` | Create missing tables and indexes, add missing columns in place with declared defaults, restore missing or changed triggers, and remove stale machine triggers without replacing rows. |
 | `event log` | `1` | `EVENT_LOG_VERSION` in `src/board.js`, persisted in `board_meta` as `event_log_version` | Older event-log versions upgrade in place; newer versions are refused with `EVENT_LOG_VERSION`. Preserve event rows when the board schema changes. |
-| `move engine` | `3` | `ENGINE_VERSION` in `src/machine.js`, carried as `engine` in every sealed executable move | Bump when a move's meaning changes, independently of the event log and sealed envelope. A newer engine is refused with `ENGINE_VERSION`, naming both versions and asking you to upgrade Pullboard. |
+| `move engine` | `8` | `ENGINE_VERSION` in `src/machine.js`, carried as `engine` in every sealed executable move | Bump when a move's meaning changes, independently of the event log and sealed envelope. A newer engine is refused with `ENGINE_VERSION`, naming both versions and asking you to upgrade Pullboard. |
 <!-- format-versions:end -->
 
-Pullboard 0.6.1 released engine 1. The first change to released move semantics raises the engine once for the next release; later changes developed before that release keep the same version. Engine 2 records a fresh explicit-build claim's skipped-review snapshot. Older clients refuse engine-2 moves before changing rows or replay cursors; engine 2 still accepts engine-1 moves.
+Pullboard 0.6.1 released engine 1. Engine 2 records a fresh explicit-build claim's skipped-review snapshot. Pullboard 0.8.1 released engine 3, including lane-sensitive graft refusals and authenticated relay senders. Engine 4 adds captured background-baseline completions through `completeCheckBaseline`; released engine-3 clients stop with `ENGINE_VERSION` before interpreting this new operation or advancing their replay cursor. Engine 5 requires a one-line reason when releasing a review and gives that reviewer a one-hour cooldown for the current submission. Each sealed move replays under its recorded engine version: engines 1 through 4 retain the original release event and review-reservation behavior. Engine 5 retains support for older moves, including engine-4 baseline completions. Pullboard 0.8.3 released engine 6, adding board-scoped machine credentials and permitting machine execution only for one exact, earlier authenticated phone request, including its payload digest. Engine 7 adds ordered item holds through `holdItem` and `releaseItemHold`; engine-6 clients stop with `ENGINE_VERSION` before interpreting either operation or advancing their replay cursor. Engine 8, shared by the 0.8.5 move changes, retains merged-item exception notes, selects the next review in roadmap order, and adds coordinator-only `reopen` for a submission returned without a verdict; engine-7 clients stop with `ENGINE_VERSION` before interpreting this new operation or advancing their replay cursor. Recorded engines 1 through 7 retain their original tier-first review selection. Engine 8 also adds durable refusal recovery for blocked relay positions; each explicit skip publishes the readable prefix even when another unsupported record follows. Engine 8 also permits coordinator criterion/check edits on a live claim as pending corrections; the holder cannot renew or submit until a refreeze adopts the correction while preserving the claim. Older request receipts retain their recorded engine semantics. Upgrade every linked device before using the new moves. Each release shares one engine bump across its changed moves. Engine 8 also retains declared model labels on registration and records each registered agent move's model snapshot; engines 1 through 7 retain their original registration and event details without these model fields.
 
 The CLI declares its engine in every relay request's `X-Pullboard-Engine` header.
 A linked board requires at least engine 3 after issuing any agent token, including
-revoked or expired tokens. The minimum survives reopening the auth database;
+revoked or expired tokens. Issuing any machine credential raises that board’s minimum to engine 6, including after revocation or expiry. The minimum survives reopening the auth database;
 unlink removes the board and ends its lifetime. A missing declaration is legacy
 engine 1. Board-content requests below their minimum, and malformed declarations,
 receive `ENGINE_VERSION` with upgrade guidance before records are returned or
 changed. The service checks again under its board lock and on live-stream polls.
 
-Engine 3 checks each move or request against the relay's authenticated sender before replay. An agent token acts only as its named agent and cannot act as the person. Refused attribution attempts advance the sequence with a `relay_refusal_<sequence>` receipt and a `relay_refused` event naming the sender, attempted actor and refusal code. They change no item, shout or verdict and do not reserve the forged operation id. Snapshot restoration requires a person sender. The event log remains version 1.
+Engine 3 checks each move or request against the relay's authenticated sender before replay. An agent token acts only as its named agent and cannot act as the person. Refused attribution attempts advance the sequence with a `relay_refusal_<sequence>` receipt and a `relay_refused` event naming the sender, attempted actor and refusal code. They change no item, shout or verdict and do not reserve the forged operation id. Snapshot restoration requires an authenticated person or board machine sender. A machine can register ordinary agents and ensure the coordinator; other person effects require an earlier authenticated phone intent with exact operation, arguments, target and digest. Every replica consumes its execution once, including row decisions waiting for repository application. Receipt shouts have fixed text; refusal details remain in the structured request result. The event log remains version 1.
 
 A board without `event_log_version` is a legacy version-0 event log. Opening an older board writes the current marker without replacing its events. Opening a newer event log refuses with `EVENT_LOG_VERSION`, naming the stored and supported versions and asking you to upgrade Pullboard. `doctor` reports that version conflict read-only.
 
@@ -94,6 +98,22 @@ A native board export includes the marker in its `board_meta` rows. Import refus
 Linked clients seal an executable operation and its deterministic inputs. The relay assigns its sequence and receipt timestamp without reading the operation. Each client runs the CLI's board engine at that timestamp. Successful results and engine refusals advance `board_meta.relay_applied_sequence` in the same transaction as the move's receipt, keyed by `relay_receipt_<operation-id>`; retries return the recorded outcome. An identical operation id and descriptor at a later relay position advances the prefix without another event and returns its first outcome. The same id with different contents is refused with `RELAY_MOVE`. `relay_engine_version` records the checkpoint's executable semantics. A future engine stops replay before either its rows or its cursor changes.
 
 A sealed checkpoint keeps the native export tables importable and may carry the local API presentation beside them. Its public sequence equals `relay_applied_sequence`, so clients can restore a compacted prefix and continue after it. The older local-first mirror drains only its already-durable outbox, then publishes a checkpoint covering the acknowledged prefix without executing those events again. A divergent old outbox is refused with the relay and local sequences; re-link from that machine or join by pairing.
+
+For ordered sealed relays, ordinary `pullboard relay` stops at an unsupported future move-engine or seal-envelope version. It leaves the blocked sequence and native board unchanged so an upgraded client can replay it. A person in the main checkout may explicitly run `pullboard relay recover --skip N` for the exact blocked next sequence. Recovery refuses a record this version can replay; it records a deterministic refusal for only the selected unsupported or malformed record, replays the readable tail up to the next unsupported record, then publishes an authenticated checkpoint. A later unsupported record cannot undo the selected refusal; it needs its own explicit recovery choice. It never automatically skips a future version. Agent shells cannot use this command.
+
+If another person device has already published a different checkpoint for the same pending recovery, a retry adopts it only when its authenticated sender, supported engine, board identity, covered sequence, and durable refusal receipt for the selected blocker all validate. A concurrent local write prevents adoption; the CLI preserves it and reports that the local export and remote checkpoint need person-led reconciliation. Exporting alone does not clear the saved recovery, and this prototype has no command to merge or discard that conflict.
+
+Recovery stages the replacement before publication and saves the exact sealed checkpoint candidate locally. A known publication failure leaves the native board untouched and keeps that candidate for retry; a lost acknowledgement retries the same ciphertext. Before restoring an acknowledged checkpoint, Pullboard compares semantic native state with the saved digest inside SQLite's write transaction. The local `agent_last_shout_id` inbox read cursor is metadata rather than a semantic write: the check ignores only that field, and recovery preserves the greater valid cursor for each agent present on both boards. Every other native row and field remains guarded; a concurrent semantic write is preserved and recovery refuses with `RELAY_LOCAL_CHANGED`. Ordinary relay sync also refuses while a recovery checkpoint is pending.
+
+Machine relay setup lives outside repositories in `$PULLBOARD_HOME/relay-machine/state.json` (default `~/.pullboard/relay-machine/state.json`), format `v: 2`. The directory is mode 700; state and the SQLite serialization lock are mode 600. State retains the auto-link setting, account and relay origin, stable machine id, excluded project roots, device roster, one pending ten-minute enrollment, pending remote revocations and non-person board-link proposals. Person sessions never persist on the Mac: old machine sessions, Git-directory sessions and retired per-board session files are scrubbed before use. Each linked board keeps a `pm_` credential bound to that board and machine; it can mint `pa_` agent credentials only for that board. `pa_` credentials cannot mint credentials. Explicit `relay on --all` always signs in afresh and preserves the paired phone key. Each roster entry contains `deviceId`, public P-256 JWK, SHA-256 fingerprint, label, creation timestamp, account and relay origin. No device private key is stored on the Mac. The phone retains its non-extractable ECDH P-256 private CryptoKey in IndexedDB database `pullboard-relay-device-v1`, store `keys`, key `device`.
+
+Enrollment HMAC-SHA256 uses an HKDF-SHA256 key derived from the QR-only 32-byte secret, locator-byte salt and UTF-8 JSON info `["pullboard-device-auth",1,account,locator]`. The authenticated enrollment is UTF-8 JSON `["pullboard-device-enroll",1,account,locator,deviceId,{kty,crv,x,y},label,createdAt]`. The Mac consumes its local secret atomically after checking the MAC; relay-supplied public keys are never used as wrapping recipients.
+
+Device wraps are `{v:1,board,device,engine,ephemeral,nonce,ciphertext}`. `ephemeral` is a fresh public P-256 JWK; `nonce` is 12 bytes and `ciphertext` is the 32-byte board key plus its 16-byte AES-GCM tag, both canonical base64url. ECDH yields HKDF-SHA256 input, the raw 65-byte ephemeral public point is salt, and UTF-8 JSON `["pullboard-wrap-v1",board,device]` is info. AES-256-GCM AAD is UTF-8 JSON `["pullboard-device-wrap",1,board,device,engine]`. The relay's private `devices.sqlite` stores only account/device identifiers, opaque wraps, expiring public enrollment transports and durable revocation tombstones. Unlink removes board grants; a device revocation atomically deletes all its grants and blocks stale uploads.
+
+Phone approval contexts contain exactly `id,account,publisher,board,device,action,target,machine,command,expires`. New-board link requests have one visible ten-minute proposal and may retain a private reply JWK because their reply grants only board-scoped machine power. Native revocation reply keys are non-extractable and RAM-only. One phone tap returns a `pg_` grant, limited to two minutes and bound to the entire immutable context; the relay retains only its hash and consumes it atomically before executing the exact action. Agent shells refuse native person actions before network access. `relay off` always removes the local link without a tap, including offline and in agent shells; the remote copy remains until a separate explicit phone deletion approval.
+
+Approval intents and replies use separate ECDH/HKDF-SHA256/AES-256-GCM domains. HKDF salt is UTF-8 JSON of the ephemeral public P-256 JWK; info is UTF-8 JSON `["pullboard-phone-approval-v1",direction,context]`. AES-GCM AAD is UTF-8 JSON `["pullboard-phone-approval",1,direction,context]`. The publishing board key authenticates the sealed intent with HMAC-SHA256 over UTF-8 JSON `["pullboard-phone-intent-v1",envelope]` before the phone displays an approval. Opaque encrypted replies never expose a native grant to durable storage. Journal format 3 permits machine sender attribution, upgrading format-2 CHECK constraints atomically while preserving history, snapshots and sequence heads.
 
 The in-place upgrade behavior is exercised by `exerciseUpgrade` in `docs/formats.test.js`:
 
@@ -158,6 +178,9 @@ The following live SQLite declarations include nullability, defaults, primary an
 | `item` | `item_verified_by` | `TEXT` | `nullable` |
 | `item` | `item_merged_commit` | `TEXT` | `nullable` |
 | `item` | `item_withdrawn_reason` | `TEXT` | `nullable` |
+| `item` | `item_hold_reason` | `TEXT` | `nullable` |
+| `item` | `item_hold_by` | `TEXT` | `nullable` |
+| `item` | `item_hold_at` | `TEXT` | `nullable` |
 | `item` | `item_created_by` | `TEXT` | `NOT NULL` |
 | `item` | `item_created_at` | `TEXT` | `NOT NULL` |
 | `item` | `item_updated_at` | `TEXT` | `NOT NULL` |
@@ -235,16 +258,17 @@ Each connection also has a temporary `moving(token INTEGER)` table and `status_t
 
 ## Event log
 
-The `event` table is a SQLite schema object governed by `SCHEMA_VERSION`; its append-only record format has the independent `EVENT_LOG_VERSION`. Each event has an increasing integer id, an ISO timestamp, the actor, the event kind, an optional item id, and a JSON object in `event_detail`. Board moves append their event inside the same immediate transaction as the move. Events are append-only; board triggers reject updates and deletes. The actor column is the acting agent id, except guard-repair events, which use `board`. The following rows name the emitted kinds and their established detail keys; CLI accept events additionally carry the frozen-check result described below:
+The `event` table is a SQLite schema object governed by `SCHEMA_VERSION`; its append-only record format has the independent `EVENT_LOG_VERSION`. Each event has an increasing integer id, an ISO timestamp, the actor, the event kind, an optional item id, and a JSON object in `event_detail`. Board moves append their event inside the same immediate transaction as the move. Events are append-only; board triggers reject updates and deletes. The actor column is the acting agent id, except guard-repair events, which use `board`. Under engine 8, each event by a registered agent also carries a `model` string snapshot in `event_detail`; legacy agents without a declaration use `unknown`. Declared models live under `agent_model:<agent id>` in `board_meta`, without changing the agent table or stable ids. Rejoining with another model appends a `model` event whose common snapshot holds the new declaration. This common snapshot is separate from the per-kind payload fields listed below. The following rows name the emitted kinds and the union of their operation-specific detail keys; CLI accept events additionally carry the frozen-check result described below:
 
 <!-- events:start -->
 | Kind | Actor | Detail fields |
 | --- | --- | --- |
 | `join` | joining agent | `lane`, `route` |
 | `family` | agent | `family` |
+| `model` | agent | — |
 | `moved` | coordinator | `path` |
 | `add` | item creator | `lane`, `specIds`, `after`, `route` |
-| `edit` | editor | `brief`, `route`, `criterion`, `check`, `unfrozen` |
+| `edit` | editor | `brief`, `route`, `criterion`, `check`, `unfrozen`, optional `pendingRefreeze` |
 | `escalate` | builder | `from`, `to`, `note`, `attempt` |
 | `attempt` | reporting agent | `n`, `seconds`, `result` |
 | `fact` | author | `id`, `kind`, `text`, `ref`, `supersedes` |
@@ -256,10 +280,16 @@ The `event` table is a SQLite schema object governed by `SCHEMA_VERSION`; its ap
 | `accept` | reviewer | `reason`, `commit` |
 | `reject` | reviewer | `reason`, `commit` |
 | `merged` | coordinator | `commit` |
+| `landing_batch` | coordinator | `batch` |
+| `landing_waiver` | person | `waiver` |
+| `landing_flake` | coordinator | `flake` |
+| `main-moved` | coordinator | `batch`, `items`, `sha` |
 | `withdraw` | coordinator | `reason` |
-| `refreeze` | coordinator | `before`, `after` |
+| `refreeze` | coordinator, or live holder adopting a pending correction | `before`, `after`, optional `retainedClaim` |
 | `hold` | coordinator | `lane`, `reason` |
 | `unhold` | coordinator | `lane` |
+| `hold_item` | coordinator | `reason` |
+| `unhold_item` | coordinator | `reason` |
 | `guards` | board | `missing`, `changed`, `stale` |
 | `shout` | sender | `shout`, `to`, `decision`, `request`, `answers` |
 | `pass` | coordinator | `shout`, `to`, `decision`, `request`, `answers` |
@@ -288,6 +318,10 @@ An approval of proposed new wording uses that same record: `source` is the exist
 
 Migration preserves event rows and adds only schema objects that are missing.
 
+## Submit test selection
+
+`pullboard.json` may set `affectedTests` to a command prefix that runs selected test files. When it is absent, `submit` runs the configured `gate` in full. When present and the import graph can safely select a subset, Pullboard appends the selected file paths to this prefix; an uncertain selection still runs the full gate. For example, this repository opts in with `"affectedTests": "node bin/run-tests.js"`. Projects using another test framework can leave the setting out and keep their configured gate, such as `npm test`.
+
 <!-- pass-rule:start -->
 The `pass` event is emitted by `passDecision` only for the coordinator; another agent receives `COORDINATOR_ONLY`. Its event actor is the coordinator. The person receives the passed decision, while the event table records who performed the pass.
 <!-- pass-rule:end -->
@@ -307,3 +341,9 @@ The `pass` event is emitted by `passDecision` only for the coordinator; another 
 <!-- snapshot-files:end -->
 
 The schema, trigger and parser tables are checked against live `openBoard(':memory:')` and `parseSpec` results. The static export is generated and its files, API v1 shapes and page readers are checked by `docs/formats.test.js`.
+
+### Landing records
+
+Engine 8 adds `recordLandingBatch`, `recordLandingWaiver`, `recordLandingFlake` and `finishLandingBatch`. Older engines stop before applying these operations. Their append-only events need no schema migration. A batch snapshot has version 1, identity, base and tip commits, trunk branch, landing worktree, items with their first-containing merge commits, state, owner, log path and revision. Additional owner-lease and environment fields can be added without changing version 1. A revision refuses stale updates. Successful push precedes the atomic merged receipts and single `main-moved` event.
+
+A person waiver records its identity, named test, expiry, reason and person channel. A distinct landing proof records the exact batch tree and each failing test with its covering waiver identity. Pre-push checks every waiver against the current time; this proof never writes an ordinary green-gate stamp. Flake records retain a test path, source digest, failing names and one defect item, so a repeated observation does not create another defect.

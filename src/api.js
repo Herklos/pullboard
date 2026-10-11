@@ -2,11 +2,12 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
+import { displayAgentName } from './agent-names.js';
 import * as store from './board.js';
 import { COORDINATOR, loadConfig } from './config.js';
 import { repoInfo } from './git.js';
 import { refusalDocument } from './json.js';
-import { relayLinked, relayOperation } from './relay.js';
+import { relayLinked, relayOperation, relayRevoke, relayTokens } from './relay.js';
 import { laneNames } from './lanes.js';
 import { listApiProjects } from './projects.js';
 import { milestoneRoadmap } from './roadmap.js';
@@ -151,12 +152,22 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
     board: (id) => findBoard(id, projects),
     state: (board, who, seen) => {
       let state = projectState(board.root, { seen });
+      const config = loadConfig(board.root);
+      state.agents = state.agents.map((agent) => ({
+        ...agent,
+        model: agent.agent_model ?? 'unknown',
+        displayName: displayAgentName(agent, config.agents.names),
+      }));
       state.board = board.id;
       const projectData = withBoard(board.root, (db) => ({
         requests: store.openRequests(db),
         personRequests: personRequestStatuses(db),
         milestones: milestoneRoadmap(board.root, db),
         rowDecisions: store.rowDecisions(db),
+        checks: new Map(store.listItems(db, { all: true }).map((item) => store.getItem(db, item.item_id)).map((item) => [item.item_id, {
+          check: item.item_check,
+          ...(item.item_check_baseline ? { checkBaseline: item.item_check_baseline } : {}),
+        }])),
         proofStats: proofStats(db),
         threads: new Map(store.listItems(db, { all: true }).map((item) => [item.item_id, store.itemThread(db, item.item_id)])),
       }));
@@ -164,6 +175,7 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
       state.requests = projectData.requests;
       state.personRequests = projectData.personRequests;
       state.milestones = projectData.milestones;
+      state.items = state.items.map((item) => ({ ...item, ...projectData.checks.get(item.id) }));
       state = projectRowDecisions(projectData.rowDecisions, state);
       state.items = state.items.map((item) => ({ ...item, thread: projectData.threads.get(item.id) ?? [] }));
       return state;
@@ -176,6 +188,8 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
     eventLogVersion: () => store.EVENT_LOG_VERSION,
     move: (board, body) => executeMove(board.root, body, runCommand),
     request: (board, body) => createRequest(board.root, body),
+    tokens: async (board) => (await relayTokens(board.root, { err() {} })).tokens,
+    revokeToken: (board, id) => relayRevoke(board.root, id, { personChannel: 'view', say() {}, err() {} }),
   });
 }
 

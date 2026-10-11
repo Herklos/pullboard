@@ -1,11 +1,11 @@
-/** Local machine and repository resource queues with SQLite-backed leases [Q1,Q2,Q3]. */
+/** Machine and repository queues persist leases; landings, gates, and item checks run by priority [Q1,Q2,Q3,V18]. */
 import { mkdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { repoInfo } from './git.js';
+import { machineHome } from './machine-home.js';
 import { Refused } from './refused.js';
 
 const LEASE_MS = 20_000;
@@ -14,10 +14,13 @@ const POLL_MS = 40;
 const PROCESS_IDENTITY_CACHE_MS = 3_000;
 const processIdentities = new Map();
 
+/** Mark child commands whose parent already owns a machine gate slot. */
+export const GATE_SLOT_HELD_ENV = 'PULLBOARD_GATE_SLOT_HELD';
+
 /** Resolve the local database for the requested scope. */
 function databaseFile(scope, root) {
   if (scope === 'board') throw new Refused('BOARD_SCOPE_UNAVAILABLE', 'board-scoped resources need the relay; run pullboard relay on');
-  if (scope === 'machine') return join(process.env.PULLBOARD_HOME || join(homedir(), '.pullboard'), 'resources.sqlite');
+  if (scope === 'machine') return join(machineHome(), 'resources.sqlite');
   if (scope === 'repo') return join(repoInfo(root).commonDir, 'pullboard', 'resources.sqlite');
   throw new Refused('BAD_RESOURCE_SCOPE', `unknown resource scope "${scope}"; use machine or repo`);
 }
@@ -32,13 +35,15 @@ function open(file) {
     db.exec('BEGIN IMMEDIATE');
     transaction = true;
     db.exec(`CREATE TABLE IF NOT EXISTS resource (name TEXT PRIMARY KEY, capacity INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS holder (token TEXT PRIMARY KEY, name TEXT NOT NULL, pid INTEGER NOT NULL, started TEXT NOT NULL DEFAULT '', agent TEXT NOT NULL, repo TEXT NOT NULL, since TEXT NOT NULL, heartbeat INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS holder (token TEXT PRIMARY KEY, name TEXT NOT NULL, pid INTEGER NOT NULL, started TEXT NOT NULL DEFAULT '', agent TEXT NOT NULL, repo TEXT NOT NULL, since TEXT NOT NULL, heartbeat INTEGER NOT NULL, landing INTEGER NOT NULL DEFAULT 0, item_check INTEGER NOT NULL DEFAULT 0);
       CREATE INDEX IF NOT EXISTS holder_name ON holder(name);
-      CREATE TABLE IF NOT EXISTS waiter (ticket INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT UNIQUE NOT NULL, name TEXT NOT NULL, pid INTEGER NOT NULL, started TEXT NOT NULL DEFAULT '', agent TEXT NOT NULL, repo TEXT NOT NULL, since TEXT NOT NULL, heartbeat INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS waiter (ticket INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT UNIQUE NOT NULL, name TEXT NOT NULL, pid INTEGER NOT NULL, started TEXT NOT NULL DEFAULT '', agent TEXT NOT NULL, repo TEXT NOT NULL, since TEXT NOT NULL, heartbeat INTEGER NOT NULL, landing INTEGER NOT NULL DEFAULT 0, item_check INTEGER NOT NULL DEFAULT 0);
       CREATE INDEX IF NOT EXISTS waiter_name_ticket ON waiter(name, ticket);`);
     for (const table of ['holder', 'waiter']) {
       const columns = db.prepare(`PRAGMA table_info(${table})`).all().map(({ name }) => name);
       if (!columns.includes('started')) db.exec(`ALTER TABLE ${table} ADD COLUMN started TEXT NOT NULL DEFAULT ''`);
+      if (!columns.includes('landing')) db.exec(`ALTER TABLE ${table} ADD COLUMN landing INTEGER NOT NULL DEFAULT 0`);
+      if (!columns.includes('item_check')) db.exec(`ALTER TABLE ${table} ADD COLUMN item_check INTEGER NOT NULL DEFAULT 0`);
     }
     db.exec('COMMIT');
     transaction = false;
@@ -124,29 +129,55 @@ function update(db, action) {
   }
 }
 
-/** Current holders and FIFO line for one resource. */
+/** Current holders and the landing-first line, then ordinary gates, then item checks. */
 function snapshot(db, name) {
-  const holders = db.prepare('SELECT agent, repo, since FROM holder WHERE name = ? ORDER BY since, token').all(name);
-  const line = db.prepare('SELECT agent, repo, since FROM waiter WHERE name = ? ORDER BY ticket').all(name);
+  const holders = db.prepare('SELECT agent, repo, since, landing, item_check AS itemCheck FROM holder WHERE name = ? ORDER BY since, token').all(name)
+    .map((holder) => ({ ...holder, landing: holder.landing === 1, itemCheck: holder.itemCheck === 1 }));
+  const line = db.prepare('SELECT agent, repo, since, landing, item_check AS itemCheck FROM waiter WHERE name = ? ORDER BY landing DESC, item_check, ticket').all(name)
+    .map((waiter) => ({ ...waiter, landing: waiter.landing === 1, itemCheck: waiter.itemCheck === 1 }));
   return { holders, line };
+}
+
+/** Count eligible waiters ahead of a ticket by priority and FIFO order; a holder cannot monopolize a landing. */
+function waiterPosition(db, name, ticket) {
+  const waiters = db.prepare('SELECT ticket, pid, agent, repo, landing, item_check AS itemCheck FROM waiter WHERE name = ? ORDER BY ticket').all(name);
+  const holders = db.prepare('SELECT pid, agent, repo FROM holder WHERE name = ?').all(name);
+  /** A live process owns its leases even if it changes descriptive agent or repository labels. */
+  const holdsSlot = (waiter) => holders.some((holder) => holder.pid === waiter.pid);
+  /** Leave a waiting independent landing a slot before a holder takes another lease. */
+  const blockedByLanding = (waiter) => holdsSlot(waiter)
+    && waiters.some((other) => other.landing === 1 && other.pid !== waiter.pid);
+  const eligible = waiters.filter((waiter) => !blockedByLanding(waiter));
+  const current = waiters.find((waiter) => waiter.ticket === ticket);
+  if (!current) return eligible.length + 1;
+  const currentIndex = eligible.findIndex((waiter) => waiter.ticket === ticket);
+  if (currentIndex < 0) return Math.max(2, eligible.length + 1);
+  /** Map queue entries to their declared precedence class. */
+  const rank = (waiter) => waiter.landing === 1 ? 0 : waiter.itemCheck === 1 ? 2 : 1;
+  const currentRank = rank(current);
+  return eligible.filter((waiter) => rank(waiter) < currentRank || (rank(waiter) === currentRank && waiter.ticket <= ticket)).length;
 }
 
 /** Pause briefly between durable queue checks. */
 function pause(ms) { return new Promise((resolvePromise) => setTimeout(resolvePromise, ms)); }
 
 /**
- * Join a resource's FIFO queue and resolve with a renewable lease when capacity is available.
+ * Join the queue, preserving FIFO within landing, ordinary-gate, and item-check classes.
  *
- * @param {{ name: string, capacity: number, capacityProvider?: () => number, scope?: 'machine'|'repo'|'board', root?: string, agent?: string, repo?: string, onWait?: (state: object) => void, allowIdleCapacityUpdate?: boolean }} options
- * @returns {Promise<{ name: string, scope: string, token: string, release: () => void, renew: () => void }>}
+ * @param {{ name: string, capacity: number, capacityProvider?: () => number, scope?: 'machine'|'repo'|'board', root?: string, agent?: string, repo?: string, landing?: boolean, itemCheck?: boolean, onWait?: (state: object) => void, allowIdleCapacityUpdate?: boolean }} options - Resource identity and queue class.
+ * @returns {Promise<{ name: string, scope: string, token: string, waitMs: number, release: () => void, renew: () => void }>}
  */
 export async function takeResource(options) {
   const { name, capacity, scope = 'machine', root = process.cwd(), allowIdleCapacityUpdate = false } = options;
   if (typeof name !== 'string' || !name.trim() || name.trim() !== name) throw new Refused('BAD_RESOURCE_NAME', 'resource name must be nonempty trimmed text');
   if (!Number.isSafeInteger(capacity) || capacity < 1) throw new Refused('BAD_RESOURCE_CAPACITY', 'resource capacity must be a positive integer');
+  const landing = options.landing === true;
+  const itemCheck = options.itemCheck === true;
+  if (landing && itemCheck) throw new Refused('BAD_RESOURCE_PRIORITY', 'a gate slot cannot be both a landing and an item check');
   const file = databaseFile(scope, root);
   const db = open(file);
   const token = randomUUID();
+  const requestedAt = Date.now();
   const pid = process.pid;
   const agent = options.agent ?? process.env.PULLBOARD_AGENT ?? `pid-${pid}`;
   const started = processStarted(pid);
@@ -165,24 +196,24 @@ export async function takeResource(options) {
         db.prepare('UPDATE resource SET capacity = ? WHERE name = ?').run(currentCapacity, name);
       }
       db.prepare('INSERT INTO resource(name, capacity) VALUES (?, ?) ON CONFLICT(name) DO NOTHING').run(name, currentCapacity);
-      db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, queuedAt, Date.now());
+      db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck));
     });
     while (true) {
       const acquired = update(db, () => {
-        const waiter = db.prepare('SELECT ticket FROM waiter WHERE token = ?').get(token);
+        const waiter = db.prepare('SELECT ticket, landing, item_check AS itemCheck FROM waiter WHERE token = ?').get(token);
         if (!waiter) {
           queuedAt = new Date().toISOString();
-          db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, queuedAt, Date.now());
-          return { acquired: false, state: { ...snapshot(db, name), position: db.prepare('SELECT count(*) AS count FROM waiter WHERE name = ?').get(name).count, rejoined: true } };
+          const rejoined = db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck));
+          return { acquired: false, state: { ...snapshot(db, name), position: waiterPosition(db, name, Number(rejoined.lastInsertRowid)), rejoined: true } };
         }
         db.prepare('UPDATE waiter SET heartbeat = ? WHERE token = ?').run(Date.now(), token);
         const spot = snapshot(db, name);
-        const position = db.prepare('SELECT count(*) AS count FROM waiter WHERE name = ? AND ticket <= ?').get(name, waiter.ticket).count;
+        const position = waiterPosition(db, name, waiter.ticket);
         const limit = db.prepare('SELECT capacity FROM resource WHERE name = ?').get(name).capacity;
         if (position === 1 && spot.holders.length < limit) {
           db.prepare('DELETE FROM waiter WHERE token = ?').run(token);
           const acquiredAt = new Date().toISOString();
-          db.prepare('INSERT INTO holder(token, name, pid, started, agent, repo, since, heartbeat) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, acquiredAt, Date.now());
+          db.prepare('INSERT INTO holder(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, acquiredAt, Date.now(), Number(landing), Number(itemCheck));
           return { acquired: true, state: { ...spot, position: 0 } };
         }
         return { acquired: false, state: { ...spot, position } };
@@ -216,7 +247,7 @@ export async function takeResource(options) {
             throw new Refused('RESOURCE_LEASE_LOST', `resource lease for "${name}" is no longer held`);
           }
         };
-        return { name, scope, token, release, renew };
+        return { name, scope, token, waitMs: Math.max(0, Date.now() - requestedAt), release, renew };
       }
       options.onWait?.(acquired.state);
       await pause(POLL_MS);

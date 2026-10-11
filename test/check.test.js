@@ -1,23 +1,45 @@
 /** Coordinator-owned check commands and explicit caller consent [V2,N23]. */
 import assert from 'node:assert/strict';
-import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { runFixtureExecFile as execFileSync, startFixtureChild as spawn, runFixtureChild as spawnSync, runFixtureChild, runFixtureGit } from './fixture-child.js';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { after, test } from 'node:test';
+import { addItem, closeBoard, openBoard } from '../src/board.js';
+import { prepareCheckBaseline } from '../src/check-baseline.js';
+import { removeFixtureDirectory } from './cleanup-diagnostics.js';
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
+const BASELINE_WORKER = resolve(import.meta.dirname, '../bin/check-baseline.js');
 const TEMP_DIRS = [];
+const BACKGROUND_WRITERS = [];
 const SPEC = `# Check ownership fixture
 
 ## G · Goals
 - G1 [approved, must] The fixture keeps its board. | gate: true
 `;
 
-after(() => {
-  for (const dir of TEMP_DIRS) rmSync(dir, { recursive: true, force: true });
-});
+/** Wait for every owned baseline worker before removing its fixture repository. */
+async function cleanupFixtures() {
+  const failures = [];
+  for (const writer of BACKGROUND_WRITERS) writeFileSync(writer.releaseFile, 'release');
+  for (const writer of BACKGROUND_WRITERS) {
+    try {
+      await writer.closed;
+      assert.notEqual(writer.child.exitCode, null, `background writer ${writer.name} did not exit before cleanup`);
+      assert.equal(writer.child.signalCode, null, `background writer ${writer.name} was signaled before cleanup`);
+      assert.equal(writer.child.exitCode, 0, `background writer ${writer.name} exited unsuccessfully before cleanup`);
+      assert.equal(readFileSync(writer.completedFile, 'utf8'), writer.completedValue,
+        `background writer ${writer.name} wrote its late marker before cleanup`);
+    } catch (error) { failures.push(error); }
+  }
+  for (const writer of BACKGROUND_WRITERS) if (writer.child.exitCode === null) await writer.closed;
+  for (const dir of TEMP_DIRS) removeFixtureDirectory(dir);
+  if (failures.length) throw failures[0];
+}
+
+after(cleanupFixtures);
 
 /** Quote a literal executable path for the fixture hook's POSIX shim. */
 function shellWord(value) {
@@ -42,12 +64,13 @@ function sandbox() {
     GIT_COMMITTER_NAME: 'Check owner test',
     GIT_COMMITTER_EMAIL: 'check-owner@example.invalid',
     PULLBOARD_HOME: join(dir, 'pullboard-home'),
+    PULLBOARD_MACHINE_HOME: join(dir, 'machine-home'),
   };
   /** Run Git with private fixture identity and config. */
-  const git = (cwd, ...args) => execFileSync('git', args, { cwd, env, encoding: 'utf8', stdio: 'pipe' }).trim();
+  const git = (cwd, ...args) => runFixtureGit(args, { cwd, env });
   /** Run the production CLI in a separate process, optionally with piped stdin. */
-  const run = (cwd, args, input) => spawnSync(process.execPath, [BIN, ...args], {
-    cwd, env, encoding: 'utf8', timeout: 10_000, ...(input === undefined ? {} : { input }),
+  const run = (cwd, args, input) => runFixtureChild(process.execPath, [BIN, ...args], {
+    cwd, env, encoding: 'utf8', ...(input === undefined ? {} : { input }),
   });
   return { dir, env, git, run };
 }
@@ -97,7 +120,7 @@ function markerCheck(filename) {
 
 /** Add a check-bearing item as the coordinator and return its persisted id. */
 function addCheckedItem(box, title, command) {
-  const result = box.run(box.repo, ['add', 'coordinator', title, '--check', command, '--json']);
+  const result = box.run(box.repo, ['add', 'coordinator', title, '--check', command, '--wait', '--json']);
   assert.equal(result.status, 0, result.stderr);
   return JSON.parse(result.stdout).item.item_id;
 }
@@ -133,13 +156,12 @@ async function confirmInteractively(box, itemId, command, markerFile, json = fal
   child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; answerPrompt(); });
   child.once('error', promptReject);
   const closed = new Promise((resolveClose, rejectClose) => {
-    child.once('close', (code, signal) => resolveClose({ code, signal }));
+    child.once('close', (code, signal) => {
+      if (!sent) promptReject(new Error(child.fixtureFailure ?? 'check exited before its prompt'));
+      resolveClose({ code, signal, failure: child.fixtureFailure });
+    });
     child.once('error', rejectClose);
   });
-  const timer = setTimeout(() => {
-    promptReject(new Error('timed out waiting for the coordinator check prompt'));
-    child.kill('SIGKILL');
-  }, 10_000);
   try {
     await prompt;
     const result = await closed;
@@ -149,8 +171,6 @@ async function confirmInteractively(box, itemId, command, markerFile, json = fal
     child.kill('SIGKILL');
     await Promise.race([closed, new Promise((resolveClose) => setTimeout(resolveClose, 1_000))]);
     throw error;
-  } finally {
-    clearTimeout(timer);
   }
 }
 
@@ -195,7 +215,7 @@ test('[V2,N23] only the coordinator sets checks and agents confirm them before e
 
   const interactiveCommand = markerCheck('check-ran-interactive.txt');
   const interactiveId = ordinaryId;
-  const authored = box.run(box.repo, ['edit', String(interactiveId), '--check', interactiveCommand, '--json']);
+  const authored = box.run(box.repo, ['edit', String(interactiveId), '--check', interactiveCommand, '--wait', '--json']);
   assert.equal(authored.status, 0, authored.stdout + authored.stderr);
   assert.equal(queryBoard(box, 'SELECT item_created_by FROM item WHERE item_id = ?', interactiveId).item_created_by, 'web-1',
     'the check setter is derived from the edit, independently of the item creator');
@@ -231,4 +251,55 @@ test('[V2,N23] only the coordinator sets checks and agents confirm them before e
   assert.equal(JSON.parse(yesResult.stdout).by, 'coordinator', 'JSON retains check attribution');
   assert.equal(JSON.parse(yesResult.stdout).check, yesCommand);
   assert.equal(readFileSync(join(box.web, 'check-ran-yes.txt'), 'utf8'), 'ran');
+});
+
+/** Wait for a real baseline worker to start its held check before the test body ends. */
+async function waitForFile(filename, child, description) {
+  const deadline = Date.now() + 10_000;
+  while (!existsSync(filename) && child.exitCode === null && child.signalCode === null && Date.now() < deadline) {
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 10));
+  }
+  assert.ok(existsSync(filename), `${description}${child.fixtureFailure ? `: ${child.fixtureFailure}` : ''}`);
+}
+
+test('check cleanup waits for every background writer [C7]', async () => {
+  const box = project();
+  const startedFile = join(box.dir, 'baseline-started');
+  const releaseFile = join(box.dir, 'baseline-release');
+  const completedFile = join(box.dir, 'baseline-completed');
+  const completedValue = 'late baseline write completed';
+  const source = [
+    `const fs = require('node:fs');`,
+    `fs.writeFileSync(${JSON.stringify(startedFile)}, 'started');`,
+    `while (!fs.existsSync(${JSON.stringify(releaseFile)})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);`,
+    `fs.writeFileSync(${JSON.stringify(completedFile)}, ${JSON.stringify(completedValue)});`,
+  ].join('');
+  const command = `${shellWord(process.execPath)} -e ${shellWord(source)}`;
+  const baseline = prepareCheckBaseline(box.repo, command);
+  assert.equal(baseline.result, 'pending', 'the real fixture check starts with an authorized pending baseline');
+  const board = openBoard(join(box.repo, '.git', 'pullboard', 'board.sqlite'));
+  let itemId;
+  try {
+    itemId = addItem(board, {
+      by: 'coordinator', lane: 'web', title: 'Held baseline writer',
+      criterion: 'cleanup waits until the baseline worker exits', check: command, checkBaseline: baseline,
+    });
+  } finally { closeBoard(board); }
+
+  const child = spawn(process.execPath, [BASELINE_WORKER, box.repo, String(itemId), baseline.request], {
+    cwd: box.repo, env: box.env, stdio: 'ignore',
+  });
+  const closed = new Promise(resolveClose => {
+    child.once('close', (code, signal) => resolveClose({ code, signal }));
+  });
+  BACKGROUND_WRITERS.push({
+    name: `baseline request ${baseline.request}`,
+    child,
+    releaseFile,
+    completedFile,
+    completedValue,
+    closed,
+  });
+  await waitForFile(startedFile, child, `background writer ${baseline.request} started its check`);
+  assert.equal(existsSync(completedFile), false, 'the baseline is still writing after the test body reaches cleanup');
 });

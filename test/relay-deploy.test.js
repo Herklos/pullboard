@@ -1,6 +1,7 @@
 /** Exercise the deploy smoke script against a private loopback relay [H5,H18]. */
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { startFixtureChild as spawn, reportFixtureChildFailure, safeFixtureDiagnostic } from './fixture-child.js';
+import { performance } from 'node:perf_hooks';
 import { createServer } from 'node:http';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, copyFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -15,6 +16,7 @@ const SERVER = resolve(import.meta.dirname, '../relay/server.mjs');
 const DOCKERFILE = resolve(import.meta.dirname, '../relay/Dockerfile');
 const README = resolve(import.meta.dirname, '../relay/README.md');
 const ROOT = resolve(import.meta.dirname, '..');
+const DAMAGED_SERVER_FAILURE_FLOOR_MS = 5000;
 
 /** Copy one declared Docker source to its Dockerfile destination, optionally omitting a runtime file. */
 function copyDockerSource(source, destinationPath, omitted) {
@@ -62,15 +64,25 @@ function copiedServer(t, image, port, provider) {
   };
   mkdirSync(env.HOME, { recursive: true, mode: 0o700 });
   t.after(() => rmSync(privateHome, { recursive: true, force: true }));
-  const child = spawn(process.execPath, [join(image, 'relay/server.mjs')], { cwd: image, env, stdio: ['ignore', 'ignore', 'ignore'] });
+  const command = process.execPath;
+  const args = [join(image, 'relay/server.mjs')];
+  const started = performance.now();
+  const child = spawn(command, args, { cwd: image, env, stdio: ['ignore', 'ignore', 'pipe'] });
+  let stderr = '';
+  child.stderr.setEncoding('utf8').on('data', part => { stderr += part; });
+  child.once('close', (status, signal) => {
+    if (child.fixtureExpectedStop || (status === 0 && !signal)) return;
+    child.fixtureFailure = reportFixtureChildFailure({ command, args, status, signal, elapsedMs: performance.now() - started, stderr, env });
+  });
   t.after(async () => {
     if (child.exitCode !== null || child.signalCode !== null) return;
+    child.fixtureExpectedStop = true;
     child.kill('SIGTERM');
     if (await childClosesWithin(child, 5000)) return;
     child.kill('SIGKILL');
     await childClosesWithin(child, 5000);
   });
-  return { child, privateHome };
+  return { child, privateHome, startedAt: started };
 }
 
 /** Fetch with the remaining portion of the copied server's shared readiness deadline. */
@@ -108,11 +120,39 @@ function childClosesWithin(child, milliseconds) {
   });
 }
 
-/** Require an omitted Docker source to produce a real nonzero process exit before readiness. */
-async function copiedServerFailureCode(child) {
-  if (child.exitCode !== null) return child.exitCode;
-  if (!await childClosesWithin(child, 1500)) return null;
-  return child.exitCode;
+/** Wait for an omitted Docker source and retain the observed exit or elapsed timeout. */
+async function copiedServerFailure(child, budgetMs) {
+  const started = performance.now();
+  if (child.exitCode === null && !await childClosesWithin(child, budgetMs)) {
+    return { code: null, description: `still running after ${Math.round(performance.now() - started)} ms (budget ${budgetMs} ms)` };
+  }
+  return { code: child.exitCode, description: `exited ${child.exitCode}` };
+}
+
+/** Require the Docker omission to fail before startup, naming the missing source and observed outcome. */
+async function requireCopiedServerFailure(child, budgetMs, omitted) {
+  const outcome = await copiedServerFailure(child, budgetMs);
+  assert.ok(Number.isInteger(outcome.code) && outcome.code > 0,
+    `omitting ${omitted} from the Dockerfile copy must cause a real nonzero startup exit; observed ${outcome.description}`);
+  return outcome.code;
+}
+
+/** Scale the damaged-copy wait to this test's healthy boot while retaining a useful minimum. */
+function damagedServerFailureBudget(healthyBootMs) {
+  return Math.max(DAMAGED_SERVER_FAILURE_FLOOR_MS, Math.ceil(healthyBootMs * 3));
+}
+
+/** Start an isolated child whose only behavior is determined by the supplied Node script. */
+function standInServer(t, script) {
+  const child = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'ignore', 'ignore'] });
+  t.after(async () => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    child.kill('SIGTERM');
+    if (await childClosesWithin(child, 1000)) return;
+    child.kill('SIGKILL');
+    await childClosesWithin(child, 1000);
+  });
+  return child;
 }
 
 /** Extract a documented setting so the checklist can be checked against executable config. */
@@ -125,22 +165,37 @@ function setting(text, pattern, description) {
 /** Run the checked-in smoke script in a private real repository without retaining its output. */
 function runSmoke(box, address) {
   return new Promise((resolveResult, reject) => {
-    const child = spawn(process.execPath, [SMOKE, address], { cwd: box.root, env: box.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const command = process.execPath;
+    const args = [SMOKE, address];
+    const started = performance.now();
+    const child = spawn(command, args, { cwd: box.root, env: box.env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
+    let stderr = '';
     let safeFailure = '';
-    const timer = setTimeout(() => child.kill('SIGKILL'), 90_000);
     child.stdout.setEncoding('utf8').on('data', (part) => { stdout += part; });
     child.stderr.setEncoding('utf8').on('data', (part) => {
+      stderr += part;
       const line = part.split('\n').find((entry) => entry.startsWith('relay smoke failed:'));
-      if (line) safeFailure = line;
+      if (line) safeFailure = safeFixtureDiagnostic(line, box.env);
     });
-    child.once('error', (error) => { clearTimeout(timer); reject(error); });
+    child.once('error', (error) => {
+      reportFixtureChildFailure({ command, args, status: null, signal: null, elapsedMs: performance.now() - started, stderr, env: box.env, detail: error.message });
+      reject(error);
+    });
     child.once('close', (code, signal) => {
-      clearTimeout(timer);
-      if (signal) return reject(new Error('private relay deployment smoke did not complete'));
-      if (code !== 0) return resolveResult({ code, failure: safeFailure });
+      if (signal) {
+        const failure = reportFixtureChildFailure({ command, args, status: code, signal, elapsedMs: performance.now() - started, stderr, env: box.env, detail: safeFailure || 'smoke process ended before producing a safe summary' });
+        return reject(new Error(failure));
+      }
+      if (code !== 0) {
+        const failure = reportFixtureChildFailure({ command, args, status: code, signal, elapsedMs: performance.now() - started, stderr, env: box.env, detail: safeFailure });
+        return resolveResult({ code, failure });
+      }
       try { resolveResult({ code, result: JSON.parse(stdout) }); }
-      catch { reject(new Error('private relay deployment smoke did not return its safe summary')); }
+      catch (error) {
+        const failure = reportFixtureChildFailure({ command, args, status: code, signal, elapsedMs: performance.now() - started, stderr, env: box.env, detail: `smoke produced invalid safe summary: ${error.message}` });
+        reject(new Error(failure));
+      }
     });
   });
 }
@@ -210,9 +265,19 @@ test('[H5,H18] the Railway checklist matches the container and relay runtime set
 test('[H5,H18] the Railway smoke links, reads one unsealed move and unlinks locally', async (t) => {
   const box = await relayClientFixture(t);
   await box.link();
-  assert.equal(await box.requireEngineThree(), ENGINE_VERSION, 'the real relay fixture now refuses legacy declarations for this board');
+  assert.equal(await box.requireEngineThree(), 6, 'a machine-linked board requires the machine-aware replay engine');
   const previous = JSON.parse(readFileSync(box.linkFile, 'utf8'));
+  const legacy = await fetch(`${previous.url}/api/v1/boards/${previous.board}/state`, {
+    headers: { authorization: `Bearer ${previous.token}`, 'x-pullboard-engine': '2' },
+  });
+  assert.equal(legacy.status, 400, 'the durable agent-token minimum refuses an engine-2 reader');
+  assert.equal((await legacy.json()).error.code, 'ENGINE_VERSION');
   assert.equal((await box.cli('relay', 'off')).code, 0);
+  const phone = await box.phoneSession();
+  const removed = await fetch(`${previous.url}/api/v1/boards/${previous.board}`, {
+    method: 'DELETE', headers: { authorization: `Bearer ${phone.token}`, 'x-pullboard-engine': String(ENGINE_VERSION) },
+  });
+  assert.equal(removed.status, 200, 'the signed-in phone explicitly deletes the earlier disposable board before relinking');
   const beforeSmoke = box.calls.length;
 
   const smoke = await runSmoke(box, previous.url);
@@ -223,8 +288,14 @@ test('[H5,H18] the Railway smoke links, reads one unsealed move and unlinks loca
   assert.equal(result.sequence, 1);
   assert.equal(existsSync(box.linkFile), false, 'relay off forgets the private link metadata');
   assert.equal(existsSync(box.keyFile), false, 'relay off forgets the device-only board key');
-  assert.ok(box.calls.slice(beforeSmoke).some((call) => call.method === 'DELETE' && call.path === `/api/v1/boards/${previous.board}`),
-    'the smoke sends relay off to the supplied local relay');
+  assert.equal(box.calls.slice(beforeSmoke).some(call => call.method === 'DELETE'), false,
+    'the smoke only unlinks locally and cannot delete the relay copy without phone approval');
+  assert.equal(result.remoteCopyRetained, true);
+  assert.match(result.notice, /relay copy stays until you approve deleting it on your phone/u);
+  const retained = await fetch(`${previous.url}/api/v1/boards/${previous.board}/state`, {
+    headers: { authorization: `Bearer ${phone.token}`, 'x-pullboard-engine': String(ENGINE_VERSION) },
+  });
+  assert.equal(retained.status, 200, 'local smoke cleanup retains the sealed relay copy for explicit phone deletion');
   const smokeReads = box.calls.slice(beforeSmoke).filter((call) => call.method === 'GET'
     && new RegExp(`^/api/v1/boards/${previous.board}/(?:events|state)(?:\\?|$)`, 'u').test(call.path));
   assert.ok(smokeReads.length >= 2, 'the smoke reads the mirrored event and its native checkpoint over the real HTTP API');
@@ -246,7 +317,7 @@ test('[H5,H18] a linked repository is refused before the smoke can unlink its bo
   assert.equal(existsSync(box.linkFile), true, 'the existing private link remains intact');
   assert.equal(existsSync(box.keyFile), true, 'the existing device key remains intact');
   const state = await fetch(`${previous.url}/api/v1/boards/${previous.board}/state`, {
-    headers: { authorization: `Bearer ${previous.token}` },
+    headers: { authorization: `Bearer ${previous.token}`, 'x-pullboard-engine': String(ENGINE_VERSION) },
   });
   assert.equal(state.status, 200, 'the linked remote board was not deleted');
 });
@@ -266,10 +337,18 @@ test('[H5,H18] the container entry point serves readiness and stays available', 
     GITHUB_APP_CLIENT_SECRET: provider.config.clientSecret,
     GITHUB_APP_PRIVATE_KEY: provider.config.privateKey,
   };
-  const child = spawn(process.execPath, [SERVER], { cwd: resolve(import.meta.dirname, '..'), env, stdio: ['ignore', 'ignore', 'pipe'] });
-  child.stderr.resume();
+  const command = process.execPath;
+  const args = [SERVER];
+  const started = performance.now();
+  const child = spawn(command, args, { cwd: resolve(import.meta.dirname, '..'), env, stdio: ['ignore', 'ignore', 'pipe'] });
+  let stderr = '';
+  child.stderr.setEncoding('utf8').on('data', part => { stderr += part; });
+  child.once('close', (status, signal) => {
+    if (child.fixtureExpectedStop || (status === 0 && !signal)) return;
+    child.fixtureFailure = reportFixtureChildFailure({ command, args, status, signal, elapsedMs: performance.now() - started, stderr, env });
+  });
   t.after(async () => {
-    if (child.exitCode === null) child.kill('SIGTERM');
+    if (child.exitCode === null) { child.fixtureExpectedStop = true; child.kill('SIGTERM'); }
     if (child.exitCode === null) await new Promise((ready) => {
       const timer = setTimeout(() => { child.kill('SIGKILL'); ready(); }, 5000);
       child.once('close', () => { clearTimeout(timer); ready(); });
@@ -287,6 +366,7 @@ test('[H5,H18] Docker COPY sources boot the relay and serve its browser page, wh
   const running = copiedServer(t, image, port, provider);
   const deadline = Date.now() + 5000;
   assert.equal(await copiedServerHealthy(running.child, origin, deadline), true, 'the Dockerfile-only copy starts the production entry point and reaches health');
+  const failureBudgetMs = damagedServerFailureBudget(performance.now() - running.startedAt);
   const page = await fetchBeforeDeadline(origin, deadline);
   assert.equal(page.status, 200);
   assert.match(await page.text(), /Sign in to see your linked boards/u, 'the copied image serves the browser page');
@@ -309,6 +389,33 @@ test('[H5,H18] Docker COPY sources boot the relay and serve its browser page, wh
     const damagedImage = copiedImage(t, [omitted]);
     const damagedPort = await unusedPort();
     const damaged = copiedServer(t, damagedImage, damagedPort, provider);
-    assert.ok((await copiedServerFailureCode(damaged.child)) > 0, `omitting ${omitted} from the Dockerfile copy causes a real nonzero startup exit`);
+    await requireCopiedServerFailure(damaged.child, failureBudgetMs, omitted);
   }
+});
+
+test('[H5,H18] a damaged relay copy is judged by its own boot time', { timeout: 30_000 }, async (t) => {
+  const budgetMs = DAMAGED_SERVER_FAILURE_FLOOR_MS;
+  assert.ok(damagedServerFailureBudget(budgetMs) > budgetMs, 'a slower healthy boot extends the damaged-copy budget above its stated floor');
+  const slowFailure = standInServer(t, 'setTimeout(() => process.exit(7), 1700)');
+  const slowCode = await requireCopiedServerFailure(slowFailure, budgetMs, 'src/relay/browser-model.js');
+  assert.equal(slowCode, 7, 'a real failure later than the old 1,500 ms cutoff is still observed');
+
+  const neverExits = standInServer(t, 'setInterval(() => {}, 1000)');
+  let neverMessage = '';
+  await assert.rejects(
+    requireCopiedServerFailure(neverExits, budgetMs, 'src/relay/browser-model.js'),
+    (error) => {
+      neverMessage = error.message;
+      return /omitting src\/relay\/browser-model\.js .*still running after (\d+) ms \(budget 5000 ms\)/u.test(error.message);
+    },
+    'a damaged copy that never exits names the omitted file and its observed timeout',
+  );
+  const elapsed = Number(/still running after (\d+) ms/u.exec(neverMessage)?.[1]);
+  assert.ok(elapsed >= budgetMs, `the reported elapsed wait ${elapsed} ms reached the ${budgetMs} ms budget`);
+  const exitsZero = standInServer(t, 'setImmediate(() => process.exit(0))');
+  await assert.rejects(
+    requireCopiedServerFailure(exitsZero, budgetMs, 'src/relay/browser-model.js'),
+    /omitting src\/relay\/browser-model\.js .*exited 0/u,
+    'a clean exit is identified as not being a startup failure',
+  );
 });

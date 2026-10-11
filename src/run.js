@@ -17,7 +17,7 @@ import { briefFiles } from './brief.js';
 import { CONFIG_FILE, COORDINATOR, loadConfig } from './config.js';
 import { doctrineText, loadDoctrine } from './doctrine.js';
 import { digestOf, runGate } from './gate.js';
-import { contains, git, headCommit, isClean, tryGit, untracked } from './git.js';
+import { contains, git, headCommit, invalidateGitFacts, isClean, tryGit, untracked } from './git.js';
 import { laneNames, outOfLane } from './lanes.js';
 import { Refused } from './refused.js';
 
@@ -85,6 +85,7 @@ function runCommand(command, { cwd, env = process.env, timeoutMs, log }) {
     }, timeoutMs);
     child.on('close', (status) => {
       clearTimeout(timer);
+      invalidateGitFacts();
       done({ status, output, timedOut, seconds: Math.round((Date.now() - started) / 1000) });
     });
   });
@@ -202,14 +203,21 @@ function commitHeader(item, rules, plain) {
  * @param {any} item
  * @param {any} config
  * @param {string[]} paths
- * @returns {{ ok: boolean, output: string }}
+ * @returns {{ ok: boolean, output: string, commit?: string }}
  */
-function commitWork(root, item, config, paths) {
+export function commitWork(root, item, config, paths) {
   git(root, ['add', '-A', '--', ...paths]);
+  const previousHead = headCommit(root);
   let output = '';
   for (const plain of [false, true]) {
     const result = spawnSync('git', ['commit', '-q', '-m', commitHeader(item, config.commits, plain)], { cwd: root, encoding: 'utf8' });
-    if (result.status === 0) return { ok: true, output: '' };
+    invalidateGitFacts();
+    if (result.status === 0) {
+      const commit = headCommit(root);
+      return commit === previousHead
+        ? { ok: false, output: 'git commit succeeded without advancing HEAD' }
+        : { ok: true, output: '', commit };
+    }
     output = `${result.stdout}${result.stderr}`;
   }
   return { ok: false, output };
@@ -260,9 +268,15 @@ async function mergeDependencies(ctx, item, deps) {
     .filter((before) => before.item_commit && !contains(root, before.item_commit, 'HEAD'));
   for (const before of needed) {
     const merged = spawnSync('git', ['merge', '--no-edit', '-q', before.item_commit], { cwd: root, encoding: 'utf8' });
-    if (merged.status === 0) continue;
+    invalidateGitFacts();
+    if (merged.status === 0) {
+      continue;
+    }
     spawnSync('git', ['merge', '--abort'], { cwd: root });
-    await deps.withBoard(ctx, async (board) => deps.ordered ? deps.ordered(ctx, board, 'release', [item.item_id, deps.whoAmI(ctx, board).id]) : store.release(board, item.item_id, deps.whoAmI(ctx, board).id));
+    invalidateGitFacts();
+    await deps.withBoard(ctx, async (board) => deps.ordered
+      ? deps.ordered(ctx, board, 'release', [item.item_id, deps.whoAmI(ctx, board).id, 'dependency merge conflict'])
+      : store.release(board, item.item_id, deps.whoAmI(ctx, board).id, 'dependency merge conflict'));
     throw new Refused('MERGE_CONFLICT', `#${item.item_id} waits on #${before.item_id}, whose commit ${before.item_commit.slice(0, 12)} conflicts with this worktree; the coordinator integrates it, then run again`);
   }
 }
@@ -382,7 +396,7 @@ async function buildItem(ctx, item, { agents, attempts, minutes, deps, me }) {
 export async function runItems(io, values, deps) {
   const ctx = deps.context(io);
   if (ctx.info.isMain) {
-    throw new Refused('MAIN_IS_COORDINATOR', 'the runner builds lane items, so it runs in a lane worktree: pullboard worktree <lane> --route light, then run it there');
+    throw new Refused('MAIN_IS_COORDINATOR', 'the runner builds lane items, so it runs in a lane worktree: pullboard worktree <lane> --model "<model name>" --route light, then run it there');
   }
   const agents = Object.fromEntries(
     store.ROUTES.map((route) => [route, String(values[`agent-${route}`] ?? values.agent ?? '').trim()]).filter(([, command]) => command),
@@ -401,7 +415,7 @@ export async function runItems(io, values, deps) {
   const me = deps.withBoard(ctx, (board) => deps.whoAmI(ctx, board));
   const above = Object.keys(agents).filter((route) => !store.canTake(me.route, route) && values[`agent-${route}`]);
   if (above.length) {
-    throw new Refused('ROUTE', `this worktree joined on the ${me.route} route, so it cannot take ${above.join(' or ')} items; make one that can: pullboard worktree ${me.lane} --route ${above.at(-1)}`);
+    throw new Refused('ROUTE', `this worktree joined on the ${me.route} route, so it cannot take ${above.join(' or ')} items; make one that can: pullboard worktree ${me.lane} --model "<model name>" --route ${above.at(-1)}`);
   }
   const routes = Object.keys(agents).filter((route) => store.canTake(me.route, route));
   const totals = { submitted: 0, escalated: 0 };

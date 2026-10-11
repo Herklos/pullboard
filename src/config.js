@@ -44,6 +44,7 @@ export function defaults() {
     lease: '2h',
     reviewLease: '30m',
     verify: { policy: 'any', family: 'off', reviewRatio: 3 },
+    agents: { names: 'suffix' },
     check: { install: '', timeout: '5m' },
     lanes: {},
     products: {},
@@ -95,6 +96,10 @@ function merge(base, raw) {
     verify: typeof raw.verify === 'string'
       ? { ...base.verify, policy: raw.verify }
       : { ...base.verify, ...(raw.verify ?? {}) },
+    agents: raw.agents === undefined ? base.agents
+      : raw.agents && typeof raw.agents === 'object' && !Array.isArray(raw.agents)
+        ? { ...base.agents, ...raw.agents }
+        : raw.agents,
     check: raw.check === undefined ? base.check
       : raw.check && typeof raw.check === 'object' && !Array.isArray(raw.check)
         ? { ...base.check, ...raw.check }
@@ -153,6 +158,9 @@ export function configProblems(config) {
   if (typeof config.spec !== 'string' || !config.spec) problems.push('"spec" names a file');
   if (typeof config.practice !== 'string' || !config.practice) problems.push('"practice" names the doctrine file');
   if (typeof config.gate !== 'string') problems.push('"gate" is a shell command, like "npm test"');
+  if (config.affectedTests !== undefined && (typeof config.affectedTests !== 'string' || !config.affectedTests.trim())) {
+    problems.push('"affectedTests" is a nonempty command prefix used to run selected test files');
+  }
   if (!['any', COORDINATOR].includes(config.verify?.policy)) {
     problems.push('"verify.policy" is "any" (any other agent) or "coordinator"');
   }
@@ -170,6 +178,11 @@ export function configProblems(config) {
   }
   if (!Number.isFinite(config.verify?.reviewRatio) || config.verify.reviewRatio <= 0) {
     problems.push('"verify.reviewRatio" is a positive number, such as 3');
+  }
+  if (typeof config.agents !== 'object' || config.agents === null || Array.isArray(config.agents)) {
+    problems.push('"agents" is an object with a names option');
+  } else if (!['suffix', 'prefix'].includes(config.agents.names)) {
+    problems.push('"agents.names" is "suffix" or "prefix"');
   }
   if (!isStringList(config.shared)) problems.push('"shared" is a list of path prefixes');
   const isFixer = (fixer) => typeof fixer?.run === 'string' && fixer.run.trim() && (fixer.files === undefined || isStringList(fixer.files));

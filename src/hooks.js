@@ -4,16 +4,16 @@
  * Each check returns its problems; an empty list lets git go on.
  */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { DOCTRINE_FILE, LEGACY_DOCTRINE_FILE } from './config.js';
-import { git, gitChildEnv, mainCheckout, tryGit } from './git.js';
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { join, relative, resolve } from 'node:path';
+import { git, gitChildEnv, gitPath, gitConfig, invalidateGitFacts, mainCheckout, refuseGrafts, tryGit } from './git.js';
+import { CONFIG_FILE, configFromSource, DOCTRINE_FILE, LEGACY_DOCTRINE_FILE } from './config.js';
 import { Refused } from './refused.js';
 import { outOfLane } from './lanes.js';
 import { citedIds, deletedIds, idProblems } from './spec.js';
 import { approvedRowProblems } from './approved-rows.js';
 
-export const HOOKS = ['pre-commit', 'commit-msg', 'pre-push'];
+export const HOOKS = ['pre-commit', 'pre-merge-commit', 'commit-msg', 'pre-push'];
 export const HOOKS_DIR = '.githooks';
 export const HOOK_MARK = 'Installed by pullboard';
 export const FIX_NOTE = 'Fix what each line names. Never work around a refusal with filler text.';
@@ -78,7 +78,7 @@ function headerProblems(header, rules) {
  * @param {{ rules: any, spec: any }} context
  * @returns {string[]}
  */
-export function commitMsgProblems(raw, { rules, spec }) {
+export function commitMsgProblems(raw, { rules, spec, doctrine = null }) {
   const lines = raw.split('\n').filter((line) => !line.startsWith('#'));
   while (lines.length && !lines.at(-1)?.trim()) lines.pop();
   const [header = '', second, ...body] = lines;
@@ -86,7 +86,7 @@ export function commitMsgProblems(raw, { rules, spec }) {
   const { problems, type } = headerProblems(header, rules);
   const ids = citedIds(header);
   problems.push(
-    ...idProblems(spec, ids).map(
+    ...idProblems(spec, ids, doctrine).map(
       (problem) => `cite only rows that exist and are live, separated by commas like [G1,G2] (${problem})`,
     ),
   );
@@ -104,6 +104,29 @@ export function commitMsgProblems(raw, { rules, spec }) {
   if (rules.noEmoji && EMOJI_RE.test(all)) problems.push('remove the emoji');
   if (rules.noCoAuthor && /^\s*co-authored-by\s*:/im.test(all)) problems.push('remove the Co-Authored-By trailer');
   return problems;
+}
+
+/**
+ * Colliding bare citations keep their SPEC.md meaning, but tell the author how to name doctrine.
+ *
+ * @param {string} raw
+ * @param {{ spec: any, doctrine: any }} context
+ * @returns {string[]}
+ */
+export function commitCitationWarnings(raw, { spec, doctrine }) {
+  const ids = citedIds(raw.split('\n')[0] ?? '').filter((id) => !id.startsWith('doctrine:'));
+  return ids.flatMap((id) => {
+    const specRows = spec.rows.filter((row) => row.id === id);
+    const doctrineRows = (doctrine?.repo?.rows ?? []).filter((row) => row.id === id);
+    if (!specRows.length || specRows.length + doctrineRows.length < 2) return [];
+    const specLocations = specRows.map((row) => `${spec.name ?? 'SPEC.md'}:${row.line}`);
+    const doctrineLocations = doctrineRows.map((row) => `${doctrine.name}:${row.line}`);
+    const locations = [...specLocations, ...doctrineLocations].slice(0, 2);
+    const resolution = doctrineRows.length
+      ? `bare ids cite SPEC.md, use doctrine:${id} for a doctrine row`
+      : 'bare ids resolve to SPEC.md, which contains duplicate rows';
+    return [`${id} is a known collision at ${locations.join(' and ')}; ${resolution}`];
+  });
 }
 
 /**
@@ -203,6 +226,7 @@ export function blockedPaths(paths, protect) {
  * @returns {string[]}
  */
 export function preCommitProblems({ root, isMain, config, agent, boardFile }) {
+  if (!isMain) refuseGrafts(root);
   const { touched, written } = stagedPaths(root);
   const problems = blockedPaths(written, config.protect).map(
     (path) => `${path} is a blocked file (env or secrets); keep it out of git`,
@@ -221,19 +245,159 @@ export function preCommitProblems({ root, isMain, config, agent, boardFile }) {
   problems.push(...approvedRowProblems(root, config, boardFile));
   if (isMain) return problems;
   if (!agent) {
-    problems.push('this worktree has not joined a lane: pullboard join <lane>');
+    problems.push('this worktree has not joined a lane: pullboard join <lane> --model "<model name>"');
     return problems;
   }
   const mergeBase = mainMergeBase(root);
+  const ownershipConfig = committedLaneConfig(root);
   const ownershipTouched = mergeBase
     ? [...new Set([...touched, ...stagedPaths(root, mergeBase).touched])]
-      .filter((path) => !outOfLane(config, agent.agent_lane, [path]).length || !unchangedMergePath(root, path, mergeBase))
+      .filter((path) => !outOfLane(ownershipConfig, agent.agent_lane, [path]).length || !unchangedMergePath(root, path, mergeBase))
     : touched;
-  const foreign = outOfLane(config, agent.agent_lane, ownershipTouched);
+  const foreign = outOfLane(ownershipConfig, agent.agent_lane, ownershipTouched);
   problems.push(
     ...foreign.map((path) => `outside the ${agent.agent_lane} lane: ${path}; shout its owner instead`),
   );
   return problems;
+}
+
+/** Read lane ownership from the committed checkout, so unstaged settings cannot grant new folders [L1,L3]. */
+function committedLaneConfig(root) {
+  const source = tryGit(root, ['show', 'HEAD:' + CONFIG_FILE]);
+  if (source.status !== 0) throw new Refused('NO_POLICY', 'lane checks need pullboard.json committed at HEAD; restore the committed policy or ask the coordinator to initialize it');
+  return configFromSource(source.stdout);
+}
+
+/** Report a missing merge check at Git's effective hook path without changing files [L3,A6]. */
+export function preMergeHookProblems(root) {
+  const file = gitPath(root, 'hooks/pre-merge-commit');
+  return existsSync(file) ? [] : [{ code: 'HOOK_MISSING', message: `merge hook ${file} is missing`, next: 'run pullboard hooks to install pre-merge-commit, then commit the hook files' }];
+}
+
+/** Resolve Git's effective hook directory, letting Git apply core.hooksPath itself.
+ *
+ * @param {string} root
+ * @returns {string}
+ */
+function activeHooksDir(root) {
+  return resolve(root, gitPath(root, 'hooks'));
+}
+
+/** Read a here-document delimiter without treating its quoted spelling as executable code. */
+function hookHeredoc(text, start) {
+  let end = start + 2;
+  const stripTabs = text[end] === '-';
+  if (stripTabs) end++;
+  while (text[end] === ' ' || text[end] === '\t') end++;
+  const wordStart = end;
+  let delimiter = '';
+  let quote = '';
+  while (end < text.length) {
+    const char = text[end];
+    if (!quote && /[\s;&|()<>]/u.test(char)) break;
+    if (char === '\\' && quote !== "'") {
+      if (end + 1 >= text.length || text[end + 1] === '\n') return null;
+      delimiter += text[++end]; end++; continue;
+    }
+    if (quote) {
+      if (char === quote) quote = '';
+      else delimiter += char;
+    } else if (char === "'" || char === '"') quote = char;
+    else delimiter += char;
+    end++;
+  }
+  return end > wordStart && !quote ? { end, delimiter, stripTabs } : null;
+}
+
+/** Skip here-document bodies in shell order; printed examples cannot establish hook wiring. */
+function skipHookHeredocs(text, start, documents) {
+  let cursor = start;
+  for (const { delimiter, stripTabs } of documents) {
+    while (cursor < text.length) {
+      const newline = text.indexOf('\n', cursor);
+      const line = text.slice(cursor, newline < 0 ? text.length : newline);
+      cursor = newline < 0 ? text.length : newline + 1;
+      if ((stripTabs ? line.replace(/^\t*/u, '') : line) === delimiter) break;
+    }
+  }
+  return cursor;
+}
+
+/** Split hook shell commands without treating quoted examples, comments or heredocs as invocations. */
+function hookCommands(source) {
+  const text = source.replace(/\\\r?\n/gu, '');
+  const commands = [];
+  const documents = [];
+  let command = '';
+  let quote = '';
+  let escaped = false;
+  let comment = false;
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index];
+    if (comment) {
+      if (char !== '\n') continue;
+      comment = false;
+    }
+    if (escaped) { command += char; escaped = false; continue; }
+    if (char === '\\' && quote !== "'") { command += char; escaped = true; continue; }
+    if (quote) { command += char; if (char === quote) quote = ''; continue; }
+    if (char === '"' || char === "'") { quote = char; command += char; continue; }
+    if (char === '#' && (!command || /\s$/u.test(command))) { comment = true; continue; }
+    if (char === '<' && text[index + 1] === '<' && text[index - 1] !== '<' && text[index + 2] !== '<') {
+      const here = hookHeredoc(text, index);
+      if (here) {
+        documents.push(here); command += text.slice(index, here.end); index = here.end - 1; continue;
+      }
+    }
+    if (/[\n;&|()]/u.test(char)) {
+      commands.push(command.trim()); command = '';
+      if (char === '\n' && documents.length) {
+        index = skipHookHeredocs(text, index + 1, documents) - 1;
+        documents.length = 0;
+      }
+      continue;
+    }
+    command += char;
+  }
+  commands.push(command.trim());
+  return commands.filter(Boolean);
+}
+
+/** Recognize direct, quoted-path and generated-variable calls without executing a hook. */
+function delegatesHook(source, hook) {
+  const commands = hookCommands(source);
+  const program = String.raw`(?:"(?:[^"]*/)?pullboard(?:\.js)?"|'(?:[^']*/)?pullboard(?:\.js)?'|(?:[^\s"';&|()]+/)?pullboard(?:\.js)?)`;
+  const binBinding = new RegExp(`^(?:bin=|for\\s+bin\\s+in\\s+)${program}(?=\\s|$)`);
+  const boundBin = commands.some(command => binBinding.test(command));
+  // env consumes NAME=value arguments before its executable, including quoted and empty values.
+  const assignment = String.raw`[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s"';&|()])*`;
+  const prefix = String.raw`(?:(?:then|do|else|exec|command|npx|node)\s+|env\s+(?:${assignment}\s+)*)*`;
+  const call = new RegExp(`^${prefix}(?:${program}${boundBin ? '|"?\\$bin"?' : ''})\\s+hook\\s+${hook}(?=\\s|$)`);
+  return commands.some(command => call.test(command));
+}
+
+/** Report active Git hooks that do not delegate to Pullboard, without changing hook files [L3].
+ *
+ * @param {string} root
+ * @returns {{ code: string, message: string, next: string }[]}
+ */
+export function unwiredHookProblems(root) {
+  const dir = activeHooksDir(root);
+  return HOOKS.flatMap((hook) => {
+    const file = join(dir, hook);
+    let source;
+    try {
+      if ((statSync(file).mode & 0o111) === 0) return [];
+      source = readFileSync(file, 'utf8');
+    } catch { return []; }
+    if (delegatesHook(source, hook)) return [];
+    const path = relative(root, file);
+    return [{
+      code: 'HOOK_UNWIRED',
+      message: `active Git hook ${path} does not call pullboard hook ${hook}`,
+      next: `add this line: pullboard hook ${hook} "$@"`,
+    }];
+  });
 }
 
 /**
@@ -320,6 +484,7 @@ export function applyFixers(root, fixers) {
       encoding: 'utf8',
       timeout: 120_000,
     });
+    invalidateGitFacts();
     if (result.status === 0) git(root, ['add', '--', ...files]);
     else notes.push(`fixer "${fixer.run}" failed (${result.status ?? 'timed out'}); staged nothing from it, so the gate will name what it could not fix`);
   }
@@ -375,6 +540,16 @@ export function prePushProblems(root, refsText) {
   return problems;
 }
 
+/** Whether Git's pre-push updates advance the configured trunk rather than another remote branch. */
+export function pushesTrunk(refsText, trunk) {
+  if (!trunk) return false;
+  const remoteTrunk = trunk.startsWith('refs/heads/') ? trunk : `refs/heads/${trunk}`;
+  return refsText.split('\n').some((line) => {
+    const [, localSha = '', remoteRef = ''] = line.trim().split(/\s+/u);
+    return remoteRef === remoteTrunk && !ZERO_SHA.test(localSha);
+  });
+}
+
 /**
  * The shell script for one hook: it runs pullboard from this checkout's install, else the main
  * checkout's, which a fresh agent worktree shares, else the PATH.
@@ -423,14 +598,25 @@ export function installHooks(root, onWrite = () => {}) {
       );
       continue;
     }
-    writeFileSync(file, hookScript(hook));
+    const script = hookScript(hook);
+    if (existing === script) {
+      if ((statSync(file).mode & 0o777) !== 0o755) {
+        chmodSync(file, 0o755);
+        onWrite(`${HOOKS_DIR}/${hook}`);
+        notes.push(`restored executable mode for ${HOOKS_DIR}/${hook}`);
+      } else notes.push(`kept ${HOOKS_DIR}/${hook}`);
+      continue;
+    }
+    writeFileSync(file, script);
     chmodSync(file, 0o755);
     onWrite(`${HOOKS_DIR}/${hook}`);
     notes.push(`wrote ${HOOKS_DIR}/${hook}`);
   }
-  const current = tryGit(root, ['config', '--get', 'core.hooksPath']).stdout;
+  const current = gitConfig(root, 'core.hooksPath').stdout;
   if (current && current !== HOOKS_DIR) {
     notes.push(`core.hooksPath is ${current}; left as is. Call pullboard hook <name> from those hooks`);
+  } else if (current === HOOKS_DIR) {
+    notes.push(`kept core.hooksPath at ${HOOKS_DIR}`);
   } else {
     git(root, ['config', 'core.hooksPath', HOOKS_DIR]);
     notes.push(`set core.hooksPath to ${HOOKS_DIR}`);
