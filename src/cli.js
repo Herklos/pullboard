@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
+import { DatabaseSync } from 'node:sqlite';
 import * as store from './board.js';
 import { CONFIG_FILE, COORDINATOR, DOCTRINE_FILE, LEGACY_DOCTRINE_FILE, loadConfig } from './config.js';
 import { displayAgentName } from './agent-names.js';
@@ -16,7 +17,7 @@ import { agentSessionDigest, requirePersonChannel } from './person.js';
 import { bindLocalSession } from './agent-session.js';
 import { decisionProjection, planRowApply, prepareRowDecisions, restoreRowApply, writeRowApply } from './row-decisions.js';
 import { digestOf, gateReport, runGate, runProfiledShell, runSubmitGate, submitGateReport, timingDigest, withGateSlot } from './gate.js';
-import { bareWorktreeFinding, contains, differFromHead, git, gitChildEnv, headCommit, headTree, invalidateGitFacts, isClean, mainCheckout, patchId, repoInfo, resolveCommit, tryGit, untracked, withGitFacts } from './git.js';
+import { bareWorktreeFinding, codeIsFromMain, contains, differFromHead, git, gitChildEnv, headCommit, headTree, invalidateGitFacts, isClean, mainCheckout, patchId, repoInfo, resolveCommit, tryGit, untracked, withGitFacts } from './git.js';
 import {
   FIX_NOTE,
   applyFixers,
@@ -420,9 +421,10 @@ function sayBrief(io, brief) {
  */
 function context(io) {
   const info = repoInfo(io.cwd);
+  const allowSchemaUpgrade = codeIsFromMain();
   const config = configHere(info);
   const file = join(info.commonDir, 'pullboard', 'board.sqlite');
-  return { info, config, file, doctrine: loadDoctrine(info.root, config), io, clock: io.clock ?? store.systemClock };
+  return { info, config, file, allowSchemaUpgrade, doctrine: loadDoctrine(info.root, config), io, clock: io.clock ?? store.systemClock };
 }
 
 /**
@@ -459,7 +461,7 @@ function configHere(info) {
  * @returns {T}
  */
 function withBoard(ctx, work) {
-  const board = store.openBoard(ctx.file, ctx.clock);
+  const board = store.openBoard(ctx.file, ctx.clock, { isMain: ctx.allowSchemaUpgrade });
   const firstEvent = board.emittedEvents?.length ?? 0;
   /** Forward committed events before releasing either synchronous or asynchronous work. */
   const finish = () => {
@@ -1179,7 +1181,7 @@ async function viewHere(io, values) {
   }
   const port = values.port === undefined ? 0 : Number(values.port);
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Refused('USAGE', '--port is a number from 0 to 65535; 0 picks a free one');
-  const view = await serveView({ port });
+  const view = await serveView({ port, isMain: codeIsFromMain() });
   io.result?.({ url: view.url, port: view.port });
   io.say(`Pullboard view: ${view.url}`);
   io.say('Only this machine can reach it, and only with that link. Ctrl-C stops it.');
@@ -1203,7 +1205,7 @@ async function serveHere(io, values) {
   await registerProjectAndLink(mainRoot, new Date(), loadConfig(mainRoot), io);
   const port = values.port === undefined ? 0 : Number(values.port);
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Refused('USAGE', '--port is a number from 0 to 65535; use 0 to choose a free one');
-  const api = await serveApi({ port, runCommand: main });
+  const api = await serveApi({ port, runCommand: main, isMain: ctx.allowSchemaUpgrade });
   io.result?.({ url: api.url, port: api.port });
   io.say(`Pullboard API v1: ${api.url}`);
   io.say('Only this machine can reach it, with its session secret. Ctrl-C stops it.');
@@ -1235,7 +1237,7 @@ function setupCommands(io, { first, values }) {
       const notes = initRepo({
         info,
         model,
-        openBoardHere: () => store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), io.clock),
+        openBoardHere: () => store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), io.clock, { isMain: codeIsFromMain() }),
         /** Keep a linked coordinator's canonical identity without writing a clone-local path. */
         register: (board, options) => {
           if (!linked) return store.register(board, options);
@@ -1600,7 +1602,7 @@ function readCommands(io, { first, second, rest, values }) {
         return 1;
       }
       const ctx = context(io);
-      const problems = [...doctorProblems(ctx.file, ctx.info.root, tryGit, ctx.config), ...skillProblems(ctx.info.root), ...doctrineProblems(ctx.info.root, ctx.config), ...unlinkedRelayProjects()];
+      const problems = [...doctorProblems(ctx.file, ctx.info.root, tryGit, ctx.config, { isMain: ctx.allowSchemaUpgrade }), ...skillProblems(ctx.info.root), ...doctrineProblems(ctx.info.root, ctx.config), ...unlinkedRelayProjects()];
       const checkpointProblem = pendingCheckpointProblem(ctx.info.root);
       if (checkpointProblem) problems.push(checkpointProblem);
       const oversizedSnapshot = checkpointProblem ? null : pendingSnapshotSize(ctx.info.root);
@@ -2464,7 +2466,7 @@ function settingsCommand(io, { first, second, rest }) {
 
 /**
  * Every spec id something cites (S8): commit headers since the spec's first commit, and every item
- * on the board, open or closed. Each must still be in the spec. The board is shared by every
+ * on the board, open or closed. The connection is read-only: spec lint never migrates a shared board. Each must still be in the spec. The board is shared by every
  * checkout, so at an older commit an item may cite a row a later commit added: that id is not lost
  * here, only not written yet, and it counts once any ref has committed it (S10).
  *
@@ -2476,7 +2478,7 @@ function citations(ctx, { ids, since }) {
   const cited = since ? commitCitations(ctx.info.root, since) : new Map();
   if (!existsSync(ctx.file)) return cited;
   const byItems = new Map();
-  for (const item of withBoard(ctx, (board) => store.listItems(board, { all: true }))) {
+  for (const item of hookRead(ctx, (board) => store.listItems(board, { all: true }))) {
     for (const id of item.item_spec_ids ? item.item_spec_ids.split(',') : []) {
       if (!cited.has(id) && !byItems.has(id)) byItems.set(id, `item #${item.item_id}`);
     }
@@ -2737,6 +2739,14 @@ async function readStdin(stdin) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
+/** Read hook identity and landing facts without migrating the shared board from newer source. */
+function hookRead(ctx, read) {
+  if (!existsSync(ctx.file)) return null;
+  const db = new DatabaseSync(ctx.file, { readOnly: true });
+  try { return read({ db, clock: ctx.clock }); }
+  finally { db.close(); }
+}
+
 /**
  * The hooks git runs. In a repo without pullboard.json they pass, so a stray hook never blocks.
  *
@@ -2756,8 +2766,8 @@ async function hookCommand(io, { first, second }) {
   let problems = [];
   if (first === 'pre-commit' || first === 'pre-merge-commit') {
     applyFixers(info.root, ctx.config.fix).forEach((note) => io.err(`pullboard pre-commit: ${note}`));
-    const agent = info.isMain ? null : withBoard(ctx, (board) => store.agentAt(board, info.root));
-    const landing = withBoard(ctx, (board) => store.landingBatches(board).some((batch) => batch.root === info.root && !['landed', 'blocked'].includes(batch.state)));
+    const agent = info.isMain ? null : hookRead(ctx, (board) => store.agentAt(board, info.root));
+    const landing = hookRead(ctx, (board) => store.landingBatches(board).some((batch) => batch.root === info.root && !['landed', 'blocked'].includes(batch.state)));
     problems = preCommitProblems({ root: info.root, isMain: info.isMain || landing, config: ctx.config, agent, boardFile: ctx.file });
   } else if (first === 'commit-msg') {
     const message = readFileSync(second ?? '', 'utf8');

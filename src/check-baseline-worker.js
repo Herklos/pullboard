@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, w
 import { join, resolve } from 'node:path';
 import * as store from './board.js';
 import { checkBaseline } from './check-baseline.js';
-import { gitChildEnv, repoInfo } from './git.js';
+import { codeIsFromMain, gitChildEnv, repoInfo } from './git.js';
 import { relayLinked, relayOperation } from './relay.js';
 import { Refused } from './refused.js';
 
@@ -18,7 +18,7 @@ function locations(root) {
 
 /** Close a real board around one short operation; measurements never hold a database connection. */
 function withBoard(root, work) {
-  const board = store.openBoard(locations(root).board);
+  const board = store.openBoard(locations(root).board, undefined, { isMain: codeIsFromMain() });
   try { return work(board); } finally { store.closeBoard(board); }
 }
 

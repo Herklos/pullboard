@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { displayAgentName } from './agent-names.js';
 import * as store from './board.js';
 import { COORDINATOR, loadConfig } from './config.js';
-import { repoInfo } from './git.js';
+import { codeIsFromMain, repoInfo } from './git.js';
 import { refusalDocument } from './json.js';
 import { relayLinked, relayOperation, relayRevoke, relayTokens } from './relay.js';
 import { laneNames } from './lanes.js';
@@ -24,18 +24,23 @@ export { moveArgs } from './api-moves.js';
 const ADDRESS = '127.0.0.1';
 const VERSION = 1;
 
-/** Read a registered board and release its SQLite connection on every path. */
-function withBoard(root, read) {
+/** Read a registered board and release its SQLite connection on every path.
+ *
+ * @param {string} root
+ * @param {(board: any, info: any) => any} read
+ * @param {boolean} [isMain] Whether the running CLI code comes from the main checkout.
+ */
+function withBoard(root, read, isMain) {
   const info = repoInfo(root);
   loadConfig(info.root);
-  const board = store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'));
+  const board = store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), undefined, { isMain: codeIsFromMain() && isMain !== false });
   try { return read(board, info); } finally { store.closeBoard(board); }
 }
 
 /** Registered boards carry one persistent identity across local and relay addresses. */
-export function apiBoards(projects = listApiProjects) {
+export function apiBoards(projects = listApiProjects, isMain) {
   return projects().flatMap((project) => {
-    try { return [withBoard(project.root, (board) => ({ ...project, id: store.boardId(board) }))]; }
+    try { return [withBoard(project.root, (board) => ({ ...project, id: store.boardId(board) }), isMain)]; }
     catch { return []; }
   });
 }
@@ -46,14 +51,14 @@ export function apiBoards(projects = listApiProjects) {
  * @param {() => { root: string, name: string, project: string, added: string }[]} projects
  * @returns {{ boards: object[], warnings: object[] }}
  */
-function apiBoardListing(projects = listApiProjects) {
+function apiBoardListing(projects = listApiProjects, isMain) {
   const boards = [];
   const warnings = [];
   for (const project of projects()) {
     try {
-      boards.push(withBoard(project.root, (board) => ({ ...project, id: store.boardId(board) })));
+      boards.push(withBoard(project.root, (board) => ({ ...project, id: store.boardId(board) }), isMain));
     } catch (cause) {
-      const error = cause.code === 'EVENT_LOG_VERSION' ? cause : new Refused('BOARD_UNAVAILABLE', `registered project ${project.root} cannot be read; restore the repo or run pullboard forget ${project.root}`);
+      const error = ['EVENT_LOG_VERSION', 'UNMERGED_SCHEMA'].includes(cause.code) ? cause : new Refused('BOARD_UNAVAILABLE', `registered project ${project.root} cannot be read; restore the repo or run pullboard forget ${project.root}`);
       warnings.push({ ...project, error: refusalDocument(error) });
     }
   }
@@ -61,19 +66,19 @@ function apiBoardListing(projects = listApiProjects) {
 }
 
 /** Resolve only registered boards, so a request cannot open an arbitrary path on the machine. */
-function findBoard(id, projects) {
-  const board = apiBoards(projects).find((entry) => entry.id === id);
+function findBoard(id, projects, isMain) {
+  const board = apiBoards(projects, isMain).find((entry) => entry.id === id);
   if (!board) throw new Refused('NO_BOARD', `no registered board ${id}; run pullboard serve in its repo and use GET /api/v1/boards`);
   return board;
 }
 
 /** Read events in sequence, including changes made by other processes on the same board. */
-function afterEvents(root, after) {
-  return withBoard(root, (board) => board.db.prepare('SELECT * FROM event WHERE event_id > ? ORDER BY event_id').all(after));
+function afterEvents(root, after, isMain) {
+  return withBoard(root, (board) => board.db.prepare('SELECT * FROM event WHERE event_id > ? ORDER BY event_id').all(after), isMain);
 }
 
 /** Resolve an authenticated local caller's agent to its own checkout, never another board. */
-function agentPath(root, name = COORDINATOR) {
+function agentPath(root, name = COORDINATOR, isMain) {
   if (typeof name !== 'string' || !name) throw new Refused('BAD_REQUEST', 'agent needs a registered name; omit it to act as the coordinator');
   return withBoard(root, (board, info) => {
     if (name === COORDINATOR && !relayLinked(root)) store.ensureCoordinator(board, root);
@@ -83,15 +88,15 @@ function agentPath(root, name = COORDINATOR) {
     if (name === COORDINATOR && relayLinked(root)) return root;
     if (repoInfo(agent.agent_path).commonDir !== info.commonDir) throw new Refused('WRONG_BOARD', `agent ${name}'s worktree belongs to another board; join the agent in this board's worktree`);
     return agent.agent_path;
-  });
+  }, isMain);
 }
 
 /** Execute one actual CLI command and retain its emitted event without a latest-row race. */
-export async function executeMove(root, body, runCommand) {
+export async function executeMove(root, body, runCommand, isMain) {
   if (Object.keys(body).some((key) => !['verb', 'item', 'args', 'agent'].includes(key))) throw new Refused('BAD_REQUEST', 'a move takes only verb, item, args and agent; remove the unknown fields');
   const argv = moveArgs(body);
   let cwd;
-  try { cwd = agentPath(root, body.agent); } catch (error) {
+  try { cwd = agentPath(root, body.agent, isMain); } catch (error) {
     if (!(error instanceof Refused) || error.code === 'BAD_REQUEST') throw error;
     return { status: error.code === 'WRONG_BOARD' ? 403 : 409, body: refusalDocument(error) };
   }
@@ -117,25 +122,26 @@ export async function executeMove(root, body, runCommand) {
 }
 
 /** Create a person's coordinator request through the same shout transaction as the CLI. */
-async function createRequest(root, body) {
+async function createRequest(root, body, isMain) {
   if (typeof body.text !== 'string' || !body.text.trim() || Object.keys(body).some((key) => key !== 'text')) throw new Refused('BAD_REQUEST', 'a request needs {text: "what the coordinator should do"}');
   const message = { from: 'person', to: COORDINATOR, text: body.text, request: true, lanes: laneNames(loadConfig(root)) };
   if (relayLinked(root)) {
     const id = await relayOperation(root, 'shout', [message], { err: () => {} });
     return withBoard(root, (board) => ({ version: VERSION,
       event: store.events(board).find((event) => JSON.parse(event.event_detail).shout === id),
-      result: { id, request: true } }));
+      result: { id, request: true } }), isMain);
   }
   return withBoard(root, (board) => {
     const id = store.shout(board, message);
     return { version: VERSION, event: board.lastEvent, result: { id, request: true } };
-  });
+  }, isMain);
 }
 
 /** Create the authenticated local adapter used by the HTTP server and other local transports. */
-export function createLocalApiHandler({ secret, getPort, runCommand, projects = listApiProjects } = {}) {
+export function createLocalApiHandler({ secret, getPort, runCommand, projects = listApiProjects, isMain } = {}) {
   if (typeof getPort !== 'function') throw new TypeError('createLocalApiHandler needs a bound-port getter');
   if (typeof runCommand !== 'function') throw new TypeError('createLocalApiHandler needs the actual CLI entry point as runCommand');
+  const codeIsMain = codeIsFromMain() && isMain !== false;
   const key = Buffer.from(secret);
   return createApiHandler({
     authenticate: (req) => {
@@ -148,10 +154,10 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
       if (req.headers.origin && req.headers.origin !== 'http://' + req.headers.host) throw new Refused('API_ORIGIN', 'use the API from its own origin');
       return { local: true };
     },
-    boards: () => apiBoardListing(projects),
-    board: (id) => findBoard(id, projects),
+    boards: () => apiBoardListing(projects, codeIsMain),
+    board: (id) => findBoard(id, projects, codeIsMain),
     state: (board, who, seen) => {
-      let state = projectState(board.root, { seen });
+      let state = projectState(board.root, { seen, isMain: codeIsMain });
       const config = loadConfig(board.root);
       state.agents = state.agents.map((agent) => ({
         ...agent,
@@ -170,7 +176,7 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
         }])),
         proofStats: proofStats(db),
         threads: new Map(store.listItems(db, { all: true }).map((item) => [item.item_id, store.itemThread(db, item.item_id)])),
-      }));
+      }), codeIsMain);
       state.proofStats = projectData.proofStats;
       state.requests = projectData.requests;
       state.personRequests = projectData.personRequests;
@@ -182,22 +188,22 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
     },
     shout: (board, id) => relayLinked(board.root)
       ? relayPresentationShout(board.root, id)
-      : withBoard(board.root, (db) => store.shoutDetails(db, id)),
+      : withBoard(board.root, (db) => store.shoutDetails(db, id), codeIsMain),
     code: (board, ref) => codeAt(board.root, ref),
-    events: (board, after) => afterEvents(board.root, after),
+    events: (board, after) => afterEvents(board.root, after, codeIsMain),
     eventLogVersion: () => store.EVENT_LOG_VERSION,
-    move: (board, body) => executeMove(board.root, body, runCommand),
-    request: (board, body) => createRequest(board.root, body),
+    move: (board, body) => executeMove(board.root, body, runCommand, codeIsMain),
+    request: (board, body) => createRequest(board.root, body, codeIsMain),
     tokens: async (board) => (await relayTokens(board.root, { err() {} })).tokens,
     revokeToken: (board, id) => relayRevoke(board.root, id, { personChannel: 'view', say() {}, err() {} }),
   });
 }
 
 /** Serve the RFC 0002 API only on loopback, behind the same session-secret boundary as the view. */
-export function serveApi({ port = 0, secret = randomBytes(18).toString('base64url'), runCommand, projects = listApiProjects } = {}) {
+export function serveApi({ port = 0, secret = randomBytes(18).toString('base64url'), runCommand, projects = listApiProjects, isMain } = {}) {
   if (typeof runCommand !== 'function') throw new TypeError('serveApi needs the actual CLI entry point as runCommand');
   let bound;
-  const handler = createLocalApiHandler({ secret, getPort: () => bound, runCommand, projects });
+  const handler = createLocalApiHandler({ secret, getPort: () => bound, runCommand, projects, isMain });
   const server = createServer(handler);
   server.requestTimeout = 15_000;
   return new Promise((ready, fail) => {

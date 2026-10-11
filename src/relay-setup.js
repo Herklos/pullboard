@@ -4,7 +4,7 @@ import * as store from './board.js';
 import { phoneProposal, publishPhoneApproval, warnPhoneApproval } from './relay-phone.js';
 import { openApproval, restoreLinkReply } from './relay-approval.js';
 import { requirePersonChannel } from './person.js';
-import { repoInfo } from './git.js';
+import { codeIsFromMain, repoInfo } from './git.js';
 import { listApiProjects } from './projects.js';
 import { acceptDeviceEnrollment, beginDeviceEnrollment, readRelayMachine, updateRelayMachine } from './relay-machine.js';
 import { deliverDeviceWraps, relayDeviceRequest, relayMachineSignIn, relayMachineContext, relayRevokeDevice, relayOn, relayStatus, originRepository } from './relay.js';
@@ -24,7 +24,7 @@ export function unlinkedRelayProjects() {
 
 /** Read the registered local board identity without executing any person action. */
 function projectBoard(root) {
-  const board = store.openBoard(join(repoInfo(root).commonDir, 'pullboard', 'board.sqlite'));
+  const board = store.openBoard(join(repoInfo(root).commonDir, 'pullboard', 'board.sqlite'), undefined, { isMain: codeIsFromMain() });
   try { return store.boardId(board); } finally { store.closeBoard(board); }
 }
 
