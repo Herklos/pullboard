@@ -197,20 +197,24 @@ test('static export stays in its prefix and replays read-only in Chrome [A10,A3]
     await assertScheduledDelay('16', 62.5);
     assert.equal(await evaluate('snapshotReplay.playing'), false, 'each measured replay reaches its end');
 
-    const changedSpeed = JSON.parse(await evaluate(`JSON.stringify((() => {
+    await evaluate(`(() => {
       window.__replayScheduledDelays.length = 0;
       replayPosition(snapshotReplay.events.length);
       const select = document.querySelector('#replay-speed');
       select.value = '4';
       select.dispatchEvent(new Event('change', { bubbles: true }));
-      document.querySelector('#replay-play').click();
-      const wasPlaying = snapshotReplay.playing, atFour = window.__replayScheduledDelays.at(-1);
+    })()`);
+    await press(chrome, "document.querySelector('#replay-play')");
+    const atFour = JSON.parse(await evaluate('JSON.stringify({ playing: snapshotReplay.playing, delay: window.__replayScheduledDelays.at(-1) })'));
+    const atSixteen = JSON.parse(await evaluate(`JSON.stringify((() => {
+      const select = document.querySelector('#replay-speed');
       select.value = '16';
       select.dispatchEvent(new Event('change', { bubbles: true }));
-      const remainsPlaying = snapshotReplay.playing, atSixteen = window.__replayScheduledDelays.at(-1);
-      document.querySelector('#replay-pause').click();
-      return { wasPlaying, atFour, remainsPlaying, atSixteen, paused: !snapshotReplay.playing };
+      return { playing: snapshotReplay.playing, delay: window.__replayScheduledDelays.at(-1) };
     })())`));
+    await press(chrome, "document.querySelector('#replay-pause')");
+    const changedSpeed = { wasPlaying: atFour.playing, atFour: atFour.delay, remainsPlaying: atSixteen.playing,
+      atSixteen: atSixteen.delay, paused: !JSON.parse(await evaluate('JSON.stringify(snapshotReplay.playing)')) };
     assert.deepEqual(changedSpeed, { wasPlaying: true, atFour: 250, remainsPlaying: true, atSixteen: 62.5, paused: true },
       'changing speed while playing replaces the scheduled delay and leaves pause effective');
     await assertScheduledDelay('16', 62.5);
@@ -306,20 +310,24 @@ test('replay speed is judged by its scheduled delay [A10,C7]', { timeout: 90_000
     await assertThrottledDelay('1', 1000);
     await assertThrottledDelay('4', 250);
     await assertThrottledDelay('16', 62.5);
-    const changedSpeed = await chrome.stable(`(() => {
+    await chrome.stable(`(() => {
       window.__replayScheduledDelays.length = 0;
       replayPosition(snapshotReplay.events.length);
       const select = document.querySelector('#replay-speed');
       select.value = '4';
       select.dispatchEvent(new Event('change', { bubbles: true }));
-      document.querySelector('#replay-play').click();
-      const wasPlaying = snapshotReplay.playing, atFour = window.__replayScheduledDelays.at(-1);
+    })()`);
+    await press(chrome, "document.querySelector('#replay-play')");
+    const atFour = await chrome.stable('({ playing: snapshotReplay.playing, delay: window.__replayScheduledDelays.at(-1) })');
+    const atSixteen = await chrome.stable(`(() => {
+      const select = document.querySelector('#replay-speed');
       select.value = '16';
       select.dispatchEvent(new Event('change', { bubbles: true }));
-      const remainsPlaying = snapshotReplay.playing, atSixteen = window.__replayScheduledDelays.at(-1);
-      document.querySelector('#replay-pause').click();
-      return { wasPlaying, atFour, remainsPlaying, atSixteen, paused: !snapshotReplay.playing };
+      return { playing: snapshotReplay.playing, delay: window.__replayScheduledDelays.at(-1) };
     })()`);
+    await press(chrome, "document.querySelector('#replay-pause')");
+    const changedSpeed = { wasPlaying: atFour.playing, atFour: atFour.delay, remainsPlaying: atSixteen.playing,
+      atSixteen: atSixteen.delay, paused: !(await chrome.stable('snapshotReplay.playing')) };
     assert.deepEqual(changedSpeed, { wasPlaying: true, atFour: 250, remainsPlaying: true, atSixteen: 62.5, paused: true },
       'changing speed while playing replaces the scheduled delay under CPU throttle');
     assert.deepEqual(chrome.exceptions, [], 'the throttled snapshot reports no uncaught browser errors');
