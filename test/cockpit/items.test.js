@@ -655,7 +655,7 @@ test('in-text item references stay inline and open their target at phone and des
 
   const box = machine();
   const demo = project(box, 'inline-references', SPEC, { practice: 'ways.md' });
-  writeFileSync(join(demo.repo, 'ways.md'), '# Local rules\n\n## Team\n- R1 [approved, must] Items carry the page behavior. | gate: review\n');
+  writeFileSync(join(demo.repo, 'ways.md'), '# Local rules\n\n## Team\n- G1 [approved, must] Items carry the page behavior. | gate: review\n');
   box.run(demo.repo, 'add', 'web', 'Target item', '--specs', 'G1', '--criterion', 'the linked target');
   box.run(demo.repo, 'add', 'web', 'Title links to #1', '--specs', 'G1', '--criterion', 'Criterion links to #1', '--brief', 'Brief links to #1');
   box.run(demo.web, 'claim', '2');
@@ -713,11 +713,9 @@ test('in-text item references stay inline and open their target at phone and des
         } else {
           await chrome.click(`document.querySelector('[data-tab="${section}"]')`);
           await chrome.click(`document.querySelector('[data-rows="${section}:all"]')`);
-          const citedRow = section === 'doctrine' ? 'R1' : 'G1';
+          const citedRow = 'G1';
           if (section === 'doctrine') {
-            // Item citations normally point to SPEC ids; add the distinct practice id to the
-            // browser projection to exercise the shared doctrine citing-item renderer.
-            await chrome.stable("data.project.items.find(item => item.id === 2).specs.push('R1'); render();");
+            await chrome.waitFor('data?.project?.practice?.some(row => row.id === "G1") && data?.project?.items?.some(item => item.id === 2 && item.specs.includes("G1"))');
           }
           await chrome.waitFor(`document.querySelector('#${section}-list [data-row="${section}:${citedRow}"]')`);
           await chrome.click(`document.querySelector('#${section}-list [data-row="${section}:${citedRow}"]')`);
