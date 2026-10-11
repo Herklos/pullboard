@@ -457,7 +457,7 @@ test('the board reads at a glance from the status bar [N26]', { timeout: 180_000
     const alreadyRead = await chrome.stable('data.project.shouts.length');
     assert.ok(alreadyRead >= 2, `shouts the person has already read: ${alreadyRead}`);
     box.run(alpha.web, 'shout', 'coordinator', 'web-1 is on it');
-    await chrome.waitFor("!document.querySelector('#status-unread')?.hidden && document.querySelector('#status-unread')?.textContent === '1 unread'", 15_000);
+    await chrome.waitFor("!document.querySelector('#status-unread')?.hidden && document.querySelector('#status-unread')?.textContent === '1 unread'", 15_000); // budget: hang ceiling for the unread bar after the native shout; no throughput claim.
     await click('#status-unread');
     await chrome.waitFor("view.tab === 'shouts' && document.querySelector('#status-unread')?.hidden === true");
     const feed = async () => JSON.parse(await chrome.stable("JSON.stringify([...document.querySelectorAll('#feed .shout .text')].map((text) => text.textContent))"));
@@ -468,7 +468,7 @@ test('the board reads at a glance from the status bar [N26]', { timeout: 180_000
 
     // Cut off from the board, the bar turns red and says why.
     await chrome.stable("globalThis.fetch = () => Promise.reject(new TypeError('Failed to fetch'))");
-    await chrome.waitFor("document.querySelector('#live').textContent.startsWith('offline')", 15_000);
+    await chrome.waitFor("document.querySelector('#live').textContent.startsWith('offline')", 15_000); // budget: hang ceiling for the offline state after fetch rejection; no rendering-speed claim.
     r = await read();
     const [red, green, blue] = r.barTint;
     assert.ok(red > green + 10 && red > blue + 10 && r.bar.length > 0, `the bar turns red and keeps its parts: ${JSON.stringify(r.barTint)}`);

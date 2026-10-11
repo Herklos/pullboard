@@ -90,7 +90,7 @@ test('row ages read from one captured commit [N26]', () => {
 
 /** Wait for committed row order, rather than rows that may already be visible as uncommitted edits. */
 async function committedRows(chrome, head) {
-  await chrome.waitFor(`data?.project?.rowAgesAt?.['SPEC.md'] === ${JSON.stringify(head)} && data.project.rowAgesAt['ways.md'] === ${JSON.stringify(head)}`, 15_000);
+  await chrome.waitFor(`data?.project?.rowAgesAt?.['SPEC.md'] === ${JSON.stringify(head)} && data.project.rowAgesAt['ways.md'] === ${JSON.stringify(head)}`, 15_000); // budget: hang ceiling for the committed row-age snapshot to arrive; no throughput claim.
 }
 
 /** Observe the old and refreshed captures around real commits without replacing any Git or HTTP response. */

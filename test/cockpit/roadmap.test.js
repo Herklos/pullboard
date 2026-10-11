@@ -218,9 +218,9 @@ test('the roadmap reads every item as the Items tab does, opens each one, anothe
 
     // It updates live as items move, here and on the other repo's board.
     accept(box, alpha, 4);
-    await chrome.waitFor(`${roadmapRow('#4')}?.querySelector('.chip').innerText === 'verified' && document.querySelector('#roadmap .milestone-count').innerText === '3/5 done'`, 15_000);
+    await chrome.waitFor(`${roadmapRow('#4')}?.querySelector('.chip').innerText === 'verified' && document.querySelector('#roadmap .milestone-count').innerText === '3/5 done'`, 15_000); // budget: hang ceiling for the verified item and milestone count to refresh; no throughput claim.
     box.run(beacon.web, 'claim', '1');
-    await chrome.waitFor(`${roadmapRow('beacon#1')}?.querySelector('.chip').innerText === 'building'`, 15_000);
+    await chrome.waitFor(`${roadmapRow('beacon#1')}?.querySelector('.chip').innerText === 'building'`, 15_000); // budget: hang ceiling for the claimed external item to refresh; no throughput claim.
 
     // A board with no milestones says how one starts; the address stays the Roadmap's.
     await press(chrome, `document.querySelector('[data-root=${JSON.stringify(beacon.repo)}]')`);
@@ -363,7 +363,7 @@ test('the roadmap leads with the next release and folds shipped ones [N26]', { t
     await chrome.waitFor("!document.querySelector('[data-pane=roadmap]').hidden");
     await click('#roadmap-list > [data-key="m:0.3"] > .milestone-head');
     box.run(alpha.web, 'claim', '3');
-    await chrome.waitFor("data.project.items.find((i) => i.id === 3)?.status === 'claimed'", 15_000);
+    await chrome.waitFor("data.project.items.find((i) => i.id === 3)?.status === 'claimed'", 15_000); // budget: hang ceiling for the native claim to reach the open roadmap; no throughput claim.
     r = await read();
     assert.deepEqual(r.parts.map((part) => [part.key, part.open]), [['m:0.3', false], ['m:0.4', true], ['m:Later', true], ['shipped', true]], 'a redraw keeps each part as it was left');
     await pickProject(chrome, `[...document.querySelectorAll('[data-root]')].find((e) => e.dataset.root === ${JSON.stringify(other.repo)})`);
