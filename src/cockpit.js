@@ -184,7 +184,7 @@ function homeTab() {
   const kept = keep('pb.tab');
   return kept && kept !== 'roadmap' ? kept : 'items';
 }
-const view = { roadmapOpen: new Map(), root: keep('pb.project'), tab: addressTab() || homeTab(), itemsView: typeof location !== 'undefined' && location.hash === '#items/pipeline' ? 'pipeline' : 'list', seen: {}, code: {}, item: null, adding: false, declining: null, state: 'active', rows: { spec: 'decide', doctrine: 'all' }, row: { spec: null, doctrine: null }, agent: null, allAgents: false, agentsHidden: keep('pb.agents') === 'hidden', open: {} };
+const view = { roadmapOpen: new Map(), root: keep('pb.project'), tab: addressTab() || homeTab(), itemsView: typeof location !== 'undefined' && location.hash === '#items/pipeline' ? 'pipeline' : 'list', seen: {}, code: {}, item: null, adding: false, declining: null, state: 'active', rows: { spec: 'decide', doctrine: 'all' }, row: { spec: null, doctrine: null }, agent: null, allAgents: false, agentsHidden: keep('pb.agents') === 'hidden', statsOpen: false, open: {} };
 let switchGeneration = 0;
 if (snapshot) view.state = 'all';
 let data = null;
@@ -381,10 +381,14 @@ function factCodeRef(ref) {
   return ref.path + ':' + lines + '@' + ref.commit;
 }
 const tone = (s) => s === 'approved' ? 'ok' : s === 'pending' ? 'no' : s === 'draft' ? 'warn' : '';
-/** A doctrine rule's source, with a version only when it comes from the shipped standard. */
-// Where a rule comes from, in words: Pullboard's standard rules, or this repo's own; the standard's version is on hover.
-const ruleSource = (row) => row.origin === 'standard' ? 'From Pullboard' : 'This repo';
-const ruleSourceTitle = (row) => row.origin === 'standard' ? 'Pullboard standard rules, version ' + row.version : 'Written in this repo';
+/** Name a rule's actual packaged version or its repository source, including explicit overrides. */
+const ruleSource = (row) => row.standardVersion != null ? 'Pullboard v' + row.standardVersion + (row.overrides ? row.status === 'wont' ? ', declined here' : ', overridden here' : '') : 'this repo';
+/** Keep the full source label available when a narrow row clips it. */
+const ruleSourceTitle = (row) => ruleSource(row);
+/** Render the two-line record shared by Items, Spec and Doctrine, with one grid and type hierarchy. */
+function recordRow({ tag = 'li', classes = '', attributes, title, state, primary, secondary, rightTop = '', rightBottom = '' }) {
+  return '<' + tag + ' class="' + (tag === 'div' ? 'srow ' : '') + 'row s-' + state + (classes ? ' ' + classes.trim() : '') + '" ' + attributes + ' title="' + esc(title) + '"><span class="dot ' + state + '"></span><div><div class="t srow-text">' + primary + '</div>' + (rightTop ? '<span class="row-age">' + rightTop + '</span>' : '') + '<div class="meta">' + secondary + '</div></div>' + rightBottom + '</' + tag + '>';
+}
 const count = (n, one, many = one) => n + ' ' + (n === 1 ? one : many);
 // What needs the person in a project, as its Needs-you list counts it: only the person's calls (B26),
 // the decisions passed up to them, spec rows waiting for them, and held lanes, which only the main
@@ -771,9 +775,14 @@ function boardSummary(board, state) {
   };
 }
 
-/** Format the API's measured minutes without deriving new times from events [N26]. */
+/** Format an API-measured duration in readable units without deriving times from events [N26]. */
 function flowMinutes(value) {
-  return value === null || value === undefined ? 'unmeasured' : Number(value.toFixed(2)) + ' min';
+  if (value === null || value === undefined) return 'unmeasured';
+  const minutes = Math.round(value);
+  if (minutes < 60) return minutes + ' min';
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return hours + ' h ' + minutes % 60 + ' min';
+  return Math.floor(hours / 24) + ' d ' + hours % 24 + ' h';
 }
 
 /** Render the four stages, live queues and single recommendation supplied by stats [N26]. */
@@ -797,24 +806,14 @@ function proofFlowCard(flow) {
     + (bottleneck.recommendation ? ' · <span data-flow="recommendation">' + esc(bottleneck.recommendation) + '</span>' : '') + '</p></div>';
 }
 
-/** Format a counted noun for the proof stats detail.
- * @param {number} count
- * @param {string} singular
- * @param {string} plural
- * @returns {string}
- */
-function counted(count, singular, plural) {
-  return count + ' ' + (count === 1 ? singular : plural);
-}
-
 /** Render the event-log totals already supplied by the shared stats API [V2,N26]. */
-function proofStatsCard(stats) {
+function proofStatsCard(stats, expanded = false) {
   if (!stats) return '<span class="muted">Stats unavailable</span>';
-  const families = stats.families || [];
-  const agents = stats.agents || [];
   const percentage = (Number(stats.rejectionShare) * 100).toFixed(1) + '%';
-  const familyDetail = families.map((family) => family.name + ' (' + counted(family.agents, 'agent', 'agents') + ', ' + counted(family.moves, 'move', 'moves') + ')').join(' · ') || 'none';
-  const agentDetail = agents.map((agent) => agent.id + ' (' + agent.families.join('/') + '; ' + counted(agent.moves, 'move', 'moves') + ')').join(' · ') || 'none';
+  const bottleneck = stats.flow?.bottleneck;
+  const stage = { build: 'Build', reviewWait: 'Review wait', review: 'Review', mergeWait: 'Merge wait' }[bottleneck?.stage];
+  const summary = stats.merged + ' merged · ' + percentage + ' sent back'
+    + (bottleneck ? ' · Bottleneck: ' + (stage || bottleneck.message) + (bottleneck.recommendation ? ', ' + bottleneck.recommendation : '') : '');
   /** Format an API timestamp for the card without recalculating event statistics.
    * @param {string|number|null} value
    * @returns {string}
@@ -822,7 +821,10 @@ function proofStatsCard(stats) {
   const dateText = (value) => value ? new Date(value).toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' }) : 'none';
   const firstAt = stats.firstEventAt ?? '';
   const lastAt = stats.lastEventAt ?? '';
-  return '<div class="proof-stats-head"><b>Proof stats</b><span>from recorded moves</span></div>'
+  return '<button class="proof-stats-summary" id="proof-stats-summary" data-stats-toggle type="button" aria-expanded="' + expanded + '" aria-controls="proof-stats-full">'
+    + '<span class="proof-stats-summary-text">' + esc(summary) + '</span><span class="proof-stats-caret" aria-hidden="true">' + (expanded ? '−' : '+') + '</span></button>'
+    + '<div class="proof-stats-full" id="proof-stats-full"' + (expanded ? '' : ' hidden') + '>'
+    + '<div class="proof-stats-head"><b>Proof stats</b><span>from recorded moves</span><button id="proof-stats-close" type="button" class="proof-stats-close" data-stats-close>Close</button></div>'
     + '<div class="proof-stats-grid">'
     + '<div><span>Submissions</span><b data-stat="submissions" data-value="' + esc(stats.submissions) + '">' + esc(stats.submissions) + '</b></div>'
     + '<div><span>Rejections</span><b data-stat="rejections" data-value="' + esc(stats.rejections) + '">' + esc(stats.rejections) + '</b></div>'
@@ -830,10 +832,8 @@ function proofStatsCard(stats) {
     + '<div><span>Merged</span><b data-stat="merged" data-value="' + esc(stats.merged) + '">' + esc(stats.merged) + '</b></div>'
     + '<div><span>Without accept</span><b data-stat="mergedWithoutAccept" data-value="' + esc(stats.mergedWithoutAccept) + '">' + esc(stats.mergedWithoutAccept) + '</b></div>'
     + '<div><span>Agents</span><b data-stat="agentCount" data-value="' + esc(stats.agentCount) + '">' + esc(stats.agentCount) + '</b></div>'
-    + '<div><span>Families</span><b data-stat="familyCount" data-value="' + esc(stats.familyCount) + '">' + esc(stats.familyCount) + '</b></div>'
     + '<div><span>First · latest</span><small><time data-stat="firstEventAt" data-value="' + esc(firstAt) + '" datetime="' + esc(firstAt) + '">' + esc(dateText(firstAt)) + '</time> · <time data-stat="lastEventAt" data-value="' + esc(lastAt) + '" datetime="' + esc(lastAt) + '">' + esc(dateText(lastAt)) + '</time></small></div>'
-    + '</div>' + proofFlowCard(stats.flow) + '<div class="proof-stats-detail">'
-    + '<p><b>Families:</b> ' + esc(familyDetail) + '</p><p><b>Agents:</b> ' + esc(agentDetail) + '</p></div>';
+    + '</div>' + proofFlowCard(stats.flow) + '</div>';
 }
 
 /** Resolve a displayed repo to the persistent board identity supplied by API v1. */
@@ -1356,6 +1356,7 @@ if (typeof MutationObserver === 'function') new MutationObserver((changes) => {
 
 /** Draw the board shown: the sidebar, then every tab's panes from the project's board. */
 function render() {
+  const statsFocus = ['proof-stats-summary', 'proof-stats-close'].includes(document.activeElement?.id) ? document.activeElement.id : null;
   const p = data.project;
   const group = data.group;
   renderSide();
@@ -1375,7 +1376,9 @@ function render() {
   if (group) { renderGroup(group); return; }
   if (!p) return;
   $('proof-stats').hidden = false;
-  $('proof-stats').innerHTML = proofStatsCard(p.proofStats);
+  $('proof-stats').innerHTML = proofStatsCard(p.proofStats, view.statsOpen);
+  // Polling replaces this card's controls; keep the person's keyboard position through that redraw.
+  if (statsFocus && view.tab === 'items') $(statsFocus)?.focus({ preventScroll: true });
   // Each product's progress (N28): the rows an accepted item cites, and its items by state.
   $('prod-list').innerHTML = p.products.map((x) => {
     const states = [['open', '', x.items.open], ['building', 'building', x.items.claimed], ['to verify', 'verify', x.items.submitted], ['verified', 'verified', x.items.verified]].filter(([, , n]) => n);
@@ -1466,11 +1469,11 @@ function render() {
     const tag = s === 'building' && i.owner ? '<span class="chip busy" title="building, held by ' + esc(agentName(i.owner)) + '">' + esc(agentName(i.owner)) + '</span>'
       : s === 'verify' && i.reviewer ? '<span class="chip warn" title="reviewing until ' + esc(when(i.reviewUntil)) + '">' + esc(agentName(i.reviewer)) + ' reviewing</span>'
       : s === 'open' ? openChip(i) : chip(s);
-    return '<li class="row s-' + s + (view.item === i.id ? ' on' : '') + (gated ? ' gated' : '') + '" data-item="' + i.id + '" title="' + esc(i.title) + '"><span class="dot ' + s + '"></span><div><div class="t"><span>#' + i.id + '</span>' + rich(i.title, titles) + '</div><span class="row-age">' + age(i.updatedAt) + '</span><div class="meta">'
+    return recordRow({ classes: (view.item === i.id ? 'on ' : '') + (gated ? 'gated ' : ''), attributes: 'data-item="' + i.id + '"', title: i.title, state: s,
+      primary: '<span>#' + i.id + '</span>' + rich(i.title, titles), rightTop: age(i.updatedAt), rightBottom: tag,
       // A rejected row's second line is its verdict; any other row's is its lane and the spec ids it serves.
-      + (rejected(i) ? '<span class="why"><b>' + esc(i.verdict.reason) + '</b> ' + linked(firstLine(visibleVerdictNote(i.verdict.reason, i.verdict.note)), titles) + '</span>'
-        : '<span>' + esc(i.lane) + '</span>' + (i.specs.length ? '<span class="specs" title="' + esc(i.specs.join(', ')) + '">' + esc(i.specs.slice(0, 3).join(', ') + (i.specs.length > 3 ? ' +' + (i.specs.length - 3) : '')) + '</span>' : ''))
-      + pills + '</div></div>' + tag + '</li>';
+      secondary: (rejected(i) ? '<span class="why"><b>' + esc(i.verdict.reason) + '</b> ' + linked(firstLine(visibleVerdictNote(i.verdict.reason, i.verdict.note)), titles) + '</span>'
+        : '<span>' + esc(i.lane) + '</span>' + (i.specs.length ? '<span class="specs" title="' + esc(i.specs.join(', ')) + '">' + esc(i.specs.slice(0, 3).join(', ') + (i.specs.length > 3 ? ' +' + (i.specs.length - 3) : '')) + '</span>' : '')) + pills });
   }).join('') : '<li class="empty">' + (items.length ? 'No items match.' : snapshot ? 'No items at this event.' : 'No items yet. Add the first one with New item.') + '</li>';
 
   const item = p.items.find((i) => i.id === view.item);
@@ -1642,23 +1645,22 @@ function render() {
     const feedback = view.specFeedback?.kind === kind && view.specFeedback.root === view.root && view.specFeedback.from === 'list' ? view.specFeedback : null;
     const feedbackId = feedback && (shownRows.some((r) => r.id === feedback.id) ? feedback.id : shownRows.some((r) => r.id === feedback.next) ? feedback.next : shownRows[0]?.id);
     let section = null;
-    const implied = filter === 'decide' ? 'draft' : 'approved';
-    // A Doctrine section is usually all Pullboard's rules or all this repo's, so its header says which; a row says so only
-    // where it differs from its section, such as a standard rule this repo changed.
-    const sectionSource = new Map();
-    if (kind === 'doctrine') for (const r of rows) { const was = sectionSource.get(r.section); sectionSource.set(r.section, was === undefined || was === ruleSource(r) ? ruleSource(r) : null); }
     $(kind + '-list').innerHTML = shownRows.length ? shownRows.map((r) => {
       const sectionRows = !snapshot && (!readOnly || requests) && kind === 'spec' && r.section !== section ? rows.filter((entry) => entry.section === r.section && undecided(entry)) : [];
-      const head = r.section !== section ? '<div class="spec-section-head"><h4>' + esc(r.section) + (sectionSource.get(r.section) ? ' <small class="section-source" title="' + esc(ruleSourceTitle(r)) + '">' + esc(sectionSource.get(r.section)) + '</small>' : '') + '</h4>' + (sectionRows.length ? '<button class="spec-section-approve" data-section-approve="' + esc(r.section) + '" type="button">Approve all ' + sectionRows.length + ' in this section</button>' : '') + '</div>' : '';
+      const sectionCount = shownRows.filter((entry) => entry.section === r.section).length;
+      const head = r.section !== section ? '<div class="spec-section-head"><h4>' + esc(r.section) + ' <span class="section-count">' + sectionCount + '</span></h4>' + (sectionRows.length ? '<button class="spec-section-approve" data-section-approve="' + esc(r.section) + '" type="button">Approve all ' + sectionRows.length + ' in this section</button>' : '') + '</div>' : '';
       section = r.section;
       const declined = kind === 'doctrine' && r.status === 'wont';
       const text = declined ? '<s>' + linked(r.standardText || r.text, titles) + '</s>' : linked(r.text, titles);
-      const reason = declined && r.reason ? '<small class="rule-reason">Reason: ' + linked(r.reason, titles) + '</small>' : '';
-      // Most rules are Pullboard's own; only the exception, a rule this repo wrote or changed, is marked in the list.
-      const source = kind === 'doctrine' && sectionSource.get(r.section) !== ruleSource(r) ? '<small class="rule-source" title="' + esc(ruleSourceTitle(r)) + '">' + esc(ruleSource(r)) + '</small>' : '';
-      // A row reads as its id and its words; a chip only where its status is not the one the filter already says.
-      const chip = r.status === implied ? '' : '<span class="chip ' + tone(r.status) + '">' + esc(r.stage || r.status) + '</span>';
-      return head + (feedback && feedbackId === r.id ? specFeedback(feedback) : '') + '<div class="srow' + (view.row[kind] === r.id ? ' on' : '') + '" data-row="' + kind + ':' + esc(r.id) + '"><code>' + esc(r.id) + '</code><span class="srow-text">' + chip + source + text + reason + '</span></div>';
+      const source = kind === 'doctrine' ? ruleSource(r) : 'this repo';
+      const reason = declined && r.reason ? '<span class="rule-reason" title="' + esc(r.reason) + '">Reason: ' + linked(r.reason, titles) + '</span>' : '';
+      const secondary = '<span class="rule-source" title="' + esc(source) + '">' + esc(source) + '</span>' + reason + (r.gate ? '<span class="gate" title="' + esc(r.gate) + '">' + esc(r.gate) + '</span>' : '');
+      const statusShown = filter === 'all' || (filter === 'decide' && r.status !== 'draft');
+      const badge = statusShown ? '<span class="chip ' + tone(r.status) + '">' + esc(r.stage || r.status) + '</span>' : r.tier ? '<span class="chip">' + esc(r.tier) + '</span>' : '';
+      const citations = p.items.filter((item) => item.specs.includes(r.id)).length;
+      return head + (feedback && feedbackId === r.id ? specFeedback(feedback) : '') + recordRow({ tag: 'div', classes: view.row[kind] === r.id ? 'on' : '', attributes: 'data-row="' + kind + ':' + esc(r.id) + '"', title: r.text,
+        state: r.status === 'approved' ? 'verified' : r.status === 'wont' ? 'back' : 'open', primary: '<span class="row-id">' + esc(r.id) + '</span>' + text,
+        secondary, rightTop: citations ? count(citations, 'item', 'items') : '', rightBottom: badge });
     }).join('') : '<div class="empty">' + (rows.length ? 'No rows match.' : kind === 'spec' ? 'No spec rows yet. Each requirement is one row in SPEC.md, such as G1 [draft, must] and a line; write them, or ask an agent to, and they show up here.' : 'No doctrine rows yet: they live in DOCTRINE.md.') + '</div>';
     if (feedback && !shownRows.length) $(kind + '-list').innerHTML += specFeedback(feedback);
     const row = rows.find((r) => r.id === view.row[kind]);
@@ -1670,7 +1672,7 @@ function render() {
     const home = kind === 'doctrine' && row && row.origin === 'standard' ? 'Standard rules come with Pullboard; override or decline one in DOCTRINE.md.' : 'Rows change in ' + (kind === 'spec' ? 'SPEC.md' : 'DOCTRINE.md') + ', and only you approve them.';
     const rowStatus = row?.stage || row?.status;
     const rowDecisionActions = !snapshot && (!readOnly || requests) && row && undecided(row) && (kind === 'spec' || row.origin !== 'standard')
-      ? '<div class="spec-decision-actions detail-decision-actions"><button class="approve-row" data-row-decision="approve" data-row-kind="' + kind + '" data-row-id="' + esc(row.id) + '" title="Approve (A, from the list)" type="button">Approve</button><button class="decline-row" data-row-decision="decline" data-row-kind="' + kind + '" data-row-id="' + esc(row.id) + '" title="Decline (D, from the list)" type="button">Decline</button></div>'
+      ? '<div class="spec-decision-actions detail-decision-actions"><button class="approve-row" data-row-decision="approve" data-row-kind="' + kind + '" data-row-id="' + esc(row.id) + '" title="Approve (A, from the list)" type="button">Approve <kbd>A</kbd></button><button class="decline-row" data-row-decision="decline" data-row-kind="' + kind + '" data-row-id="' + esc(row.id) + '" title="Decline (D, from the list)" type="button">Decline <kbd>D</kbd></button></div>'
       : '';
     $(kind + '-detail').innerHTML = row ? '<div class="stack tight"><h2><span>' + esc(row.id) + '</span>' + text + '</h2><div class="meta"><span class="chip ' + tone(row.status) + '">' + esc(rowStatus) + '</span>' + (row.tier ? '<span class="chip">' + esc(row.tier) + '</span>' : '') + source + '</div>' + rowDecisionActions + (kind === 'spec' && view.specFeedback?.kind === kind && view.specFeedback.root === view.root && view.specFeedback.from === 'detail' && view.specFeedback.id === row.id ? specFeedback(view.specFeedback) : '') + '<dl class="kv"><dt>section</dt><dd>' + esc(row.section) + '</dd>' + reason + (row.gate ? '<dt>gate</dt><dd>' + esc(row.gate) + '</dd>' : '') + (row.serves && row.serves.length ? '<dt>serves</dt><dd>' + esc(row.serves.join(', ')) + '</dd>' : '') + '</dl><div><h3>Items that cite it</h3>' + (citing.length ? '<div class="links">' + citing.map((i) => '<div class="links-item" data-item="' + i.id + '"><span>#' + i.id + ' ' + rich(i.title, titles) + '</span></div>').join('') + '</div>' : '<div class="muted">None yet.</div>') + '</div><div class="muted">' + home + '</div></div>' : '<div class="empty">Pick a row to see it, and the items that cite it.</div>';
   }
@@ -2240,11 +2242,23 @@ $('shouts-pane').addEventListener('click', (event) => {
 // Enter shouts; Shift+Enter starts a new line.
 $('shout-text').addEventListener('keydown', (event) => { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); $('shout-form').requestSubmit(); } });
 document.addEventListener('click', (event) => {
-  const t = event.target.closest('[data-status],[data-roadmap-key],[data-roadmap-all],[data-root],[data-tab],[data-go],[data-item],[data-items-view],[data-state],[data-rows],[data-row],[data-row-decision],[data-section-approve],[data-release],[data-shout],[data-new],[data-code],[data-code-all],[data-code-less],#proj-switch,#console');
+  const t = event.target.closest('[data-status],[data-roadmap-key],[data-roadmap-all],[data-root],[data-tab],[data-go],[data-item],[data-items-view],[data-state],[data-rows],[data-row],[data-row-decision],[data-section-approve],[data-release],[data-shout],[data-new],[data-code],[data-code-all],[data-code-less],[data-stats-toggle],[data-stats-close],#proj-switch,#console');
   if (!event.target.closest('.side')) fold(false);
   if (!t) return;
   if (t.id === 'proj-switch') { fold(!$('side').classList.contains('open')); return; }
   if (t.id === 'console') { t.hidden = true; return; }
+  if (t.dataset.statsToggle !== undefined) {
+    view.statsOpen = true;
+    render();
+    $('proof-stats-close').focus({ preventScroll: true });
+    return;
+  }
+  if (t.dataset.statsClose !== undefined) {
+    view.statsOpen = false;
+    render();
+    $('proof-stats-summary').focus({ preventScroll: true });
+    return;
+  }
   if (t.dataset.status) { statusGo(t.dataset.status); return; }
   if (t.dataset.itemsView) { view.itemsView = t.dataset.itemsView; address(); render(); return; }
   if ('roadmapKey' in t.dataset) {
@@ -2286,6 +2300,14 @@ document.addEventListener('click', (event) => {
   else if (t.dataset.shout) { answer(null); addressTo(t.dataset.shout); $('shout-text').value = '#' + t.dataset.about + ': '; openTab('shouts'); showTab(); $('shout-text').focus(); }
   else if (t.dataset.new !== undefined) { view.adding = true; render(); $('add-title').focus(); }
 });
+/** Close the expanded stats card and return focus to the list's summary control on Escape. */
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape' || !view.statsOpen || view.tab !== 'items' || document.querySelector('[data-pane="items"]')?.hidden) return;
+  event.preventDefault();
+  view.statsOpen = false;
+  render();
+  $('proof-stats-summary').focus({ preventScroll: true });
+});
 /** Let a Roadmap row with independent inline links keep its keyboard button behavior. */
 document.addEventListener('keydown', (event) => {
   if (!['Enter', ' '].includes(event.key)) return;
@@ -2306,6 +2328,9 @@ for (const kind of ['spec', 'doctrine']) $(kind + '-list').addEventListener('key
     event.preventDefault();
     const next = ids[Math.min(ids.length - 1, Math.max(0, at + (event.key === 'ArrowDown' ? 1 : -1)))];
     if (next && next !== view.row[kind]) { view.row[kind] = next; render(); event.currentTarget.querySelector('.srow.on')?.scrollIntoView({ block: 'nearest' }); }
+  } else if (event.key === 'Enter' && view.row[kind]) {
+    event.preventDefault();
+    $(kind + '-detail').scrollIntoView({ block: 'start', behavior: 'instant' });
   } else if ((event.key === 'a' || event.key === 'd') && view.row[kind] && $(kind + '-detail').querySelector('.approve-row')) {
     // Only a row still waiting on the person has a decision to make; the detail shows it.
     event.preventDefault();

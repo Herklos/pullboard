@@ -165,15 +165,32 @@ test('static export stays in its prefix and replays read-only in Chrome [A10,A3]
     await browserPause(180);
     assert.equal(await evaluate('snapshotReplay.index'), pausedIndex, 'a paused replay does not advance');
 
-    await evaluate("const speed = document.querySelector('#replay-speed'); speed.value = '16'; speed.dispatchEvent(new Event('change', { bubbles: true }))");
+    await evaluate("(() => { const speed = document.querySelector('#replay-speed'); speed.value = '1'; speed.dispatchEvent(new Event('change', { bubbles: true })); })()");
+    assert.equal(await evaluate("document.querySelector('#replay-speed').value"), '1');
+    await chrome.click("document.querySelector('#replay-play')");
+    await chrome.waitFor('!snapshotReplay.playing', 30_000); // budget: hang-only ceiling for the complete 1x replay.
+    assert.equal(await evaluate('snapshotReplay.playing'), false, 'the 1x replay reaches its end');
+    const normalStart = 0;
+    assert.ok(normalStart + 4 < initial.total, 'at least four events remain to measure 1x playback');
+    const normalStartedAt = Date.now();
+    await chrome.click("document.querySelector('#replay-play')");
+    await chrome.waitFor(`snapshotReplay.index >= ${normalStart + 4}`, 10_000); // budget: hang-only ceiling for the measured four-event sample.
+    const normalFourEventMs = Date.now() - normalStartedAt;
+    assert.ok(normalFourEventMs > 0, '1x playback advances four events in measurable time');
+    await chrome.waitFor('!snapshotReplay.playing', 30_000); // budget: hang-only ceiling for the complete 1x replay.
+    assert.equal(await evaluate('snapshotReplay.playing'), false, 'the 1x replay reaches its end');
+
+    await evaluate("(() => { const speed = document.querySelector('#replay-speed'); speed.value = '16'; speed.dispatchEvent(new Event('change', { bubbles: true })); })()");
     assert.equal(await evaluate("document.querySelector('#replay-speed').value"), '16');
-    const speedStart = await evaluate('snapshotReplay.index');
+    const speedStart = 0; // Play from the completed 1x run restarts at the first event.
     assert.ok(speedStart + 4 < initial.total, 'at least four events remain to measure 16x playback');
     const speedStartedAt = Date.now();
     await chrome.click("document.querySelector('#replay-play')");
-    await chrome.waitFor(`snapshotReplay.index >= ${speedStart + 4}`, 2_000);
-    assert.ok(Date.now() - speedStartedAt < 2_000, '16x advances four replay events within two seconds');
-    await chrome.waitFor('!snapshotReplay.playing', 20_000);
+    await chrome.waitFor(`snapshotReplay.index >= ${speedStart + 4}`, 10_000); // budget: hang-only ceiling for the measured four-event sample.
+    const speedFourEventMs = Date.now() - speedStartedAt;
+    assert.ok(speedFourEventMs * 4 < normalFourEventMs,
+      `16x advances four events at least four times faster than measured 1x (${speedFourEventMs}ms vs ${normalFourEventMs}ms)`);
+    await chrome.waitFor('!snapshotReplay.playing', 30_000); // budget: hang-only ceiling for the complete 16x replay.
     assert.equal(await evaluate('snapshotReplay.playing'), false, 'the replay reaches its end');
     const renderedStates = JSON.parse(await evaluate('JSON.stringify(window.__replayObserved.map((entry) => entry.status))'));
     const distinctStates = renderedStates.filter((state, index) => index === 0 || state !== renderedStates[index - 1]);
