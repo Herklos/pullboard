@@ -1178,7 +1178,7 @@ test('Pipeline view shows every stage, status counts, stage ages, detail links a
     assert.equal(await chrome.stable('location.pathname'), '/items/pipeline', 'Pipeline has its own shareable address');
     await chrome.waitFor("typeof data !== 'undefined' && location.pathname === '/items/pipeline' && !document.querySelector('#pipeline').hidden");
     const expectedCounts = [status.open, status.claimed, status.submitted, 1, 1];
-    const read = JSON.parse(await chrome.stable(`JSON.stringify([...document.querySelectorAll('[data-pipeline-stage]')].map(stage => ({ stage:stage.dataset.pipelineStage, label:stage.querySelector('h2').textContent, count:Number(stage.querySelector('[data-stage-count]').textContent), oldest:Number(stage.querySelector('.pipeline-oldest [data-item]')?.dataset.item || 0), since:stage.querySelector('.pipeline-oldest time')?.dataset.ago || null, age:stage.querySelector('.pipeline-oldest time')?.textContent || '', ids:[...stage.querySelectorAll('.pipeline-item')].map(item => Number(item.dataset.item)) })))`));
+    const read = JSON.parse(await chrome.stable(`JSON.stringify([...document.querySelectorAll('[data-pipeline-stage]')].map(stage => ({ stage:stage.dataset.pipelineStage, label:stage.querySelector('h2').textContent, count:Number(stage.querySelector('[data-stage-count]').textContent), oldest:Number(stage.querySelector('.pipeline-oldest a[data-go]')?.dataset.go.slice('item:'.length) || 0), since:stage.querySelector('.pipeline-oldest time')?.dataset.ago || null, age:stage.querySelector('.pipeline-oldest time')?.textContent || '', ids:[...stage.querySelectorAll('.pipeline-item')].map(item => Number(item.dataset.item)) })))`));
     assert.deepEqual(read.map(stage => stage.label), ['Not started', 'Building', 'Waiting for review', 'Accepted, waiting to merge', 'Merged']);
     assert.deepEqual(read.map(stage => stage.count), expectedCounts, 'open/claimed/submitted match status; accepted plus merged equals verified');
     assert.equal(read[3].count + read[4].count, status.verified);
@@ -1362,11 +1362,11 @@ test('Pipeline view dates an expired claim from its recorded deadline [N26,N38]'
     const page = await openPage(view);
     await page.click({itemsView:'pipeline'});
     const open = () => page.show('pipeline').split('data-pipeline-stage="open"')[1].split('</header>')[1].split('</p>')[0];
-    assert.match(open(), /data-item="2"/, 'an open item from minute35 is older than a claim that lapses at minute40');
+    assert.match(open(), /data-go="item:2"/, 'an open item from minute35 is older than a claim that lapses at minute40');
     assert.match(open(), new RegExp(new Date(base+35*60_000).toISOString()), 'the oldest open timestamp is the arrival');
     box.run(alpha.repo, 'withdraw', '2', 'Private fixture now isolates the lapse age');
     await page.run('refresh()');
-    assert.match(open(), /data-item="1"/);
+    assert.match(open(), /data-go="item:1"/);
     assert.match(open(), new RegExp(new Date(base+40*60_000).toISOString()), 'expired claim age starts at its native lease deadline');
   } finally { await view.stop(); }
 });
