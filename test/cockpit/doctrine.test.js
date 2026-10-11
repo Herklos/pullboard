@@ -88,6 +88,77 @@ test('the doctrine pane names DOCTRINE.md and its rules doctrine [D1,N26]', asyn
   }
 });
 
+/** Keep a doctrine row's real item citations when the person leaves and returns to the tab. */
+// Hang ceiling: two real Chrome viewport journeys; no speed assertion.
+test('the doctrine detail keeps its citing items after a tab round trip [N26,C7]', { timeout: 30_000 }, async (t) => {
+  const executable = chromeExecutable();
+  assert.ok(executable, 'Chrome is required for the Doctrine tab round-trip check.');
+
+  const box = machine();
+  const repo = project(box, 'doctrine-tab-round-trip', SPEC, { practice: 'DOCTRINE.md' });
+  writeFileSync(join(repo.repo, 'DOCTRINE.md'), '# Team rules\n\n## Team\n'
+    + '- R1 [approved, must] Keep local notes accurate. | gate: web test\n'
+    + '- G1 [approved, must] Keep the page useful. | gate: web test\n');
+  box.run(repo.repo, 'add', 'web', 'First citation', '--specs', 'G1', '--criterion', 'The first item cites G1.');
+  box.run(repo.repo, 'add', 'web', 'Second citation', '--specs', 'G1', '--criterion', 'The second item cites G1.');
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-doctrine-tab-round-trip-chrome-'));
+  let chrome;
+  /** Capture the returned pane, selected doctrine rule and actual citation rows for failure diagnosis. */
+  const readDetail = async () => JSON.parse(await chrome.stable(`JSON.stringify((() => {
+    const pane = document.querySelector('[data-pane="doctrine"]');
+    const detail = document.querySelector('#doctrine-detail');
+    const heading = detail?.querySelector('h2 span');
+    const links = detail?.querySelector('.links');
+    const target = links?.querySelector('[data-item="2"]');
+    const box = target?.getBoundingClientRect();
+    return { tab:document.querySelector('[data-tab="doctrine"]')?.classList.contains('on'), paneHidden:!!pane?.hidden,
+      detailOpen:!!heading,
+      heading:heading?.textContent ?? null, linksPresent:!!links,
+      itemIds:[...(links?.querySelectorAll('[data-item]') ?? [])].map(row => row.dataset.item),
+      targetPresent:!!target, targetVisible:!!box && box.width > 0 && box.height > 0 };
+  })())`));
+
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.waitFor('data?.project?.practice?.some(row => row.id === "G1") && data?.project?.items?.some(item => item.id === 2 && item.specs.includes("G1"))');
+    for (const width of [375, 1280]) {
+      await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
+      await chrome.waitFor(`innerWidth === ${width}`);
+      await press(chrome, "document.querySelector('[data-tab=doctrine]')");
+      await press(chrome, "document.querySelector('#doctrine-chips [data-rows=\"doctrine:all\"]')");
+      await press(chrome, "document.querySelector('#doctrine-list [data-row=\"doctrine:G1\"]')");
+      await chrome.waitFor("document.querySelector('#doctrine-detail .links [data-item=\"2\"]')");
+      const before = await readDetail();
+      assert.equal(before.heading, 'G1', `${width}px: the cited Doctrine rule is selected before leaving`);
+      assert.equal(before.targetPresent, true, `${width}px: the live Doctrine detail contains the second real citing item`);
+      assert.equal(before.targetVisible, true, `${width}px: the live Doctrine citation is rendered before leaving`);
+
+      await press(chrome, "document.querySelector('[data-tab=items]')");
+      await chrome.waitFor("document.querySelector('[data-tab=items].on') && !document.querySelector('[data-pane=items]').hidden");
+      const refreshMarkerTitle = `Refresh marker ${width}px`;
+      box.run(repo.repo, 'add', 'web', refreshMarkerTitle, '--specs', 'G1', '--criterion', 'The refresh marker is visible from a real board read.');
+      await chrome.waitFor(`data?.project?.items?.some(item => item.title === ${JSON.stringify(refreshMarkerTitle)})`);
+      await press(chrome, "document.querySelector('[data-tab=doctrine]')");
+      await chrome.waitFor("document.querySelector('[data-tab=doctrine].on') && !document.querySelector('[data-pane=doctrine]').hidden");
+      let waitError = null;
+      try {
+        await chrome.waitFor("!document.querySelector('[data-pane=doctrine]').hidden && document.querySelector('#doctrine-detail h2 span')?.textContent === 'G1' && document.querySelector('#doctrine-detail .links [data-item=\"2\"]')");
+      } catch (error) { waitError = error.message; }
+      const after = await readDetail();
+      assert.equal(after.tab, true, `${width}px: the Doctrine tab is active after returning: ${JSON.stringify(after)}`);
+      assert.equal(after.paneHidden, false, `${width}px: the Doctrine pane is visible after returning: ${JSON.stringify(after)}`);
+      assert.equal(waitError, null,
+        `${width}px: after the tab round trip the selected detail and its item #2 return before the wait expires; ${JSON.stringify({ waitError, after })}`);
+      assert.equal(after.targetVisible, true, `${width}px: the returned Doctrine citation is rendered: ${JSON.stringify(after)}`);
+    }
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    rmSync(profile, { recursive: true, force: true });
+    await view.stop();
+  }
+});
+
 // Hang ceiling: two real boards and six Chrome layouts, each using the shared two-frame stability wait.
 
 /** Check real source metadata and the two-line presentation, including a repo overriding every packaged id. */
