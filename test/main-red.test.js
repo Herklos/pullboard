@@ -37,7 +37,7 @@ function commit(root, env, subject = 'chore: fixture state') {
 function shellWord(value) { return "'" + String(value).replaceAll("'", "'\\''") + "'"; }
 
 /** Create a private real-Git board with a selected native Node test command. */
-function fixture(t, { spec, source, affectedTests = 'node test/runner.js' }) {
+function fixture(t, { spec, source, affectedTests = 'node test/runner.js', reporter }) {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-main-red-')));
   roots.push(directory);
   t.after(() => rmSync(directory, { recursive: true, force: true }));
@@ -73,7 +73,7 @@ function fixture(t, { spec, source, affectedTests = 'node test/runner.js' }) {
     "import { spawnSync } from 'node:child_process';",
     "if (process.env.MAIN_RED_RUNS) appendFileSync(process.env.MAIN_RED_RUNS, `${process.cwd()}\\n`);",
     "const files = process.argv.slice(2).length ? process.argv.slice(2) : ['test/inherited.test.js'];",
-    "const result = spawnSync(process.execPath, ['--test', ...files], { cwd: process.cwd(), env: process.env, encoding: 'utf8' });",
+    `const result = spawnSync(process.execPath, ['--test', ...${JSON.stringify(reporter ? [`--test-reporter=${reporter}`] : [])}, ...files], { cwd: process.cwd(), env: process.env, encoding: 'utf8' });`,
     "if (result.stdout) process.stdout.write(result.stdout);",
     "if (result.stderr) process.stderr.write(result.stderr);",
     'process.exitCode = result.status ?? 1;',
@@ -127,6 +127,51 @@ const FAILING_TEST = [
   "import { test } from 'node:test';",
   "test('the inherited behavior remains broken [V1]', () => assert.equal(1, 2));",
 ].join('\n') + '\n';
+
+test('an inherited red reads native spec reporter failure locations [V1]', t => {
+  const box = fixture(t, { spec: RED_SPEC, source: FAILING_TEST, reporter: 'spec' });
+  delete box.env.NO_COLOR;
+  box.env.FORCE_COLOR = '1';
+  const [rework, submitItem] = addItems(box, [
+    { title: 'Repair spec-reported failure', specId: 'G1' },
+    { title: 'Unrelated submit', specId: 'G2' },
+  ]);
+  const submitter = builder(box);
+  assert.equal(submitter.run('claim', String(submitItem)).code, 0);
+  put(submitter.root, 'test/inherited.test.js', `${FAILING_TEST}// candidate-only comment\n`);
+  commit(submitter.root, box.env, 'test(core): select spec-reported red [G2]');
+  const red = submitter.run('submit', String(submitItem));
+  inheritedMessage(red, { row: 'G1', item: rework });
+  assert.equal(readFileSync(box.env.MAIN_RED_RUNS, 'utf8').trim().split('\n').length, 2,
+    'the unchanged spec reporter command runs once on the candidate and once on exact main');
+});
+
+test('a red with unreadable failure files says why main was not checked [V1]', t => {
+  const box = fixture(t, { spec: RED_SPEC, source: FAILING_TEST });
+  put(box.root, 'test/runner.js', [
+    "import { appendFileSync } from 'node:fs';",
+    "appendFileSync(process.env.MAIN_RED_RUNS, `${process.cwd()}\\n`);",
+    "console.error('A runner failed without a failure-file report.');",
+    "console.error('test at test/inherited.test.js:3:1');",
+    'process.exitCode = 1;',
+  ].join('\n') + '\n');
+  commit(box.root, box.env);
+  const [, submitItem] = addItems(box, [
+    { title: 'Repair unknown runner failure', specId: 'G1' },
+    { title: 'Unrelated submit', specId: 'G2' },
+  ]);
+  const submitter = builder(box);
+  assert.equal(submitter.run('claim', String(submitItem)).code, 0);
+  put(submitter.root, 'test/inherited.test.js', `${FAILING_TEST}// candidate-only comment\n`);
+  commit(submitter.root, box.env, 'test(core): select unreadable runner red [G2]');
+  const red = submitter.run('submit', String(submitItem));
+  assert.equal(red.code, 1, red.out || red.err);
+  assert.match(red.err, /\[GATE_RED\]/u);
+  assert.match(red.err, /main not checked: could not read which tests failed/u);
+  assert.doesNotMatch(red.err, /also red on main|inherited main red/u);
+  assert.equal(readFileSync(box.env.MAIN_RED_RUNS, 'utf8').trim().split('\n').length, 1,
+    'a location outside the spec reporter failure footer is not guessed to be a failed file');
+});
 
 test('an inherited red names the rework that owns it [V1]', async (t) => {
   await t.test('a prioritized rework already first in its tier stays first [V1]', (sub) => {
