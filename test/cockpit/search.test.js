@@ -88,6 +88,109 @@ test('row ages read from one captured commit [N26]', () => {
 });
 
 
+/** Wait for committed row order, rather than rows that may already be visible as uncommitted edits. */
+async function committedRows(chrome, head) {
+  await chrome.waitFor(`data?.project?.rowAgesAt?.['SPEC.md'] === ${JSON.stringify(head)} && data.project.rowAgesAt['ways.md'] === ${JSON.stringify(head)}`, 15_000);
+}
+
+/** Observe the old and refreshed captures around real commits without replacing any Git or HTTP response. */
+test('spec rows keep newest-first order across a capture that moves [N26]', { timeout: 90_000 }, async (t) => {
+  const executable = chromeExecutable();
+  assert.ok(executable, 'Chrome is required for the moving-capture proof');
+  const box = machine();
+  const g3 = '- G3 [approved, must] The greeting names the visitor. | gate: web test\n';
+  const g4 = '- G4 [approved, must] The greeting waves back. | gate: web test\n';
+  const g5 = '- G5 [approved, must] The greeting fits a phone. | gate: web test\n';
+  const r1 = '# Local rules\n\n## Team\n- R1 [approved, must] Every greeting is read by a person. | gate: review\n';
+  const r2 = '- R2 [approved, must] A greeting never shouts. | gate: review\n';
+  const alpha = project(box, 'moving-capture', SPEC + g3, { practice: 'ways.md' });
+  writeFileSync(join(alpha.repo, 'ways.md'), r1);
+  box.git(alpha.repo, 'add', 'ways.md');
+  box.git(alpha.repo, 'commit', '-q', '-m', 'docs(rules): keep the local rules [G1]');
+  const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
+  const armed = join(box.dir, 'armed'), receipt = join(box.dir, 'moved.json');
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-moving-capture-'));
+  let chrome;
+  try {
+    chrome = await openSnapshotChrome(executable, 'about:blank', profile);
+    // Keep this controlled observation until an explicit real refresh; no API response is substituted.
+    await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: `
+      const nativeInterval = window.setInterval.bind(window);
+      /** Hold only the automatic board poll while the test observes one complete real response. */
+      window.setInterval = (callback, delay, ...args) => delay === 3000 ? 0 : nativeInterval(callback, delay, ...args);
+    ` });
+    await chrome.send('Page.navigate', { url: view.link.href });
+    await chrome.waitFor("data?.project?.spec.some(row => row.id === 'G3') && data.project.practice.some(row => row.id === 'R1')");
+    // A new HEAD invalidates the age cache; R2 is already a visible working edit, as in the CI shape.
+    writeFileSync(join(alpha.repo, 'ways.md'), r1 + r2);
+    writeFileSync(join(alpha.repo, 'capture.txt'), 'The next state captures this commit.\n');
+    box.git(alpha.repo, 'add', 'capture.txt');
+    box.git(alpha.repo, 'commit', '-q', '-m', 'test(view): advance the capture [G1]');
+    const captured = box.git(alpha.repo, 'rev-parse', 'HEAD');
+    const wrapper = join(box.dir, 'bin', 'git');
+    writeFileSync(wrapper, `#!${process.execPath}
+import { spawnSync } from 'node:child_process';
+import { existsSync, unlinkSync, writeFileSync } from 'node:fs';
+const args = process.argv.slice(2), realGit = ${JSON.stringify(realGit)};
+/** Run actual Git unchanged, including its original captured revision. */
+const run = words => spawnSync(realGit, words, { encoding: 'utf8', env: process.env });
+if (args[0] === 'log' && args.includes('--format=%H') && args.at(-1) === 'SPEC.md' && existsSync(${JSON.stringify(armed)})) {
+  unlinkSync(${JSON.stringify(armed)});
+  const before = run(['rev-parse', 'HEAD']).stdout.trim();
+  const steps = [];
+  for (const spec of [${JSON.stringify(SPEC + g3 + g4)}, ${JSON.stringify(SPEC + g5 + g3 + g4)}]) {
+    writeFileSync('SPEC.md', spec);
+    for (const words of [['add', 'SPEC.md', 'ways.md'], ['commit', '-q', '-m', 'docs(spec): add the next greeting [G1]']]) {
+      const step = run(words); if (step.status !== 0) throw new Error(step.stderr);
+    }
+    steps.push(run(['rev-parse', 'HEAD']).stdout.trim());
+  }
+  writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({ before, after: steps.at(-1), steps, args }));
+}
+const result = run(args);
+process.stdout.write(result.stdout ?? ''); process.stderr.write(result.stderr ?? ''); process.exitCode = result.status ?? 1;
+`);
+    chmodSync(wrapper, 0o755);
+    writeFileSync(armed, 'capture');
+    await chrome.stable('refresh()');
+    const proof = JSON.parse(readFileSync(receipt, 'utf8'));
+    const observed = box.git(alpha.repo, 'rev-parse', 'HEAD');
+    /** Read capture refs, exact ages and rendered search order together at one browser boundary. */
+    const observe = () => chrome.stable(`(() => {
+      showFound();
+      return { captured: data.project.rowAgesAt,
+        spec: data.project.spec.filter(row => ['G3','G4','G5'].includes(row.id)).map(({id,added}) => ({id,added})),
+        doctrine: data.project.practice.filter(row => ['R1','R2'].includes(row.id)).map(({id,added}) => ({id,added})),
+        order: [...document.querySelectorAll('#find-results [data-find]')].filter(hit => /^(spec|doctrine):/.test(hit.dataset.find)).map(hit => hit.querySelector('code').textContent) };
+    })()`);
+    await searchFor(chrome, 'greeting');
+    const early = await observe();
+    const diagnostic = JSON.stringify({ captured, observed, proof, early });
+    assert.equal(proof.before, captured, diagnostic);
+    assert.equal(proof.after, observed, diagnostic);
+    assert.notEqual(captured, observed, diagnostic);
+    assert.deepEqual(early.captured, { 'SPEC.md': captured, 'ways.md': captured }, diagnostic);
+    assert.deepEqual(early.spec.filter(row => ['G4','G5'].includes(row.id)).map(row => row.added), [0, 0], diagnostic);
+    assert.ok(early.doctrine.some(row => row.id === 'R2'), 'the former presence-only readiness condition is already satisfied');
+    assert.deepEqual(early.order, ['G4', 'G5', 'G3', 'R2', 'R1'], diagnostic);
+    // A later real capture is the discriminator: distinct committed ages restore the intended order.
+    await chrome.stable('refresh()');
+    await committedRows(chrome, observed);
+    const latest = await observe();
+    assert.deepEqual(latest.captured, { 'SPEC.md': observed, 'ways.md': observed }, JSON.stringify(latest));
+    assert.deepEqual(latest.spec.map(row => [row.id,row.added]), [['G5',1],['G3',3],['G4',2]], JSON.stringify(latest));
+    assert.deepEqual(latest.order, ['G5', 'G4', 'G3', 'R2', 'R1'], JSON.stringify(latest));
+    t.diagnostic(JSON.stringify({ captured, observed, proof, early, latest }));
+    assert.deepEqual(chrome.exceptions, []);
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    await view.stop();
+    rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+
 test('search in the top bar finds anything on the board [N26]', { timeout: 150_000 }, async (t) => {
   const executable = chromeExecutable();
   if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME for search checks.');
@@ -217,7 +320,8 @@ test('search in the top bar finds anything on the board [N26]', { timeout: 150_0
     box.git(alpha.repo, 'commit', '-q', '-am', 'docs(spec): the greeting waves back [G1]');
     writeFileSync(join(alpha.repo, 'SPEC.md'), spec.replace('- G3 ', '- G5 [approved, must] The greeting fits a phone. | gate: web test\n- G3 ') + '- G4 [approved, must] The greeting waves back. | gate: web test\n');
     box.git(alpha.repo, 'commit', '-q', '-am', 'docs(spec): the greeting fits a phone [G1]');
-    await chrome.waitFor("data.project.spec.some((row) => row.id === 'G5') && data.project.practice.some((row) => row.id === 'R2')", 15_000);
+    // The working file can expose G5 before its commit: compare only after the page captures the completed commit.
+    await committedRows(chrome, box.git(alpha.repo, 'rev-parse', 'HEAD'));
     await search('greeting');
     const added = (await read()).hits.filter((hit) => /^(spec|doctrine):/.test(hit.go)).map((hit) => hit.id);
     const ageProof = JSON.parse(await chrome.stable('JSON.stringify({ captured: data.project.rowAgesAt ?? null, spec: data.project.spec.map(({ id, added }) => ({ id, added })), doctrine: data.project.practice.map(({ id, added }) => ({ id, added })) })'));
