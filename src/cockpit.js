@@ -2304,7 +2304,8 @@ async function decideRow(kind, command, args, anchor) {
   const feedback = { kind, root, id: ids[0], next, from: anchor?.closest('#' + kind + '-detail') ? 'detail' : 'list', tone: '', text: 'Recording decision…' };
   view.specFeedback = feedback;
   render();
-  window.scrollTo({ top: scroll, behavior: 'instant' });
+  // A waiting request keeps its row; let browser anchoring follow growth above it.
+  if (!requests) window.scrollTo({ top: scroll, behavior: 'instant' });
   try {
     const move = pageMove(command, kind === 'doctrine' ? { ...args, ids: ids.map((id) => 'doctrine:' + id).join(' ') } : args);
     const result = requests ? await sendPersonRequest(root, move.body) : await api(boardPath(root) + '/moves', move.body);
@@ -2323,7 +2324,7 @@ async function decideRow(kind, command, args, anchor) {
   }
   if (root === view.root && view.specFeedback === feedback) {
     render();
-    window.scrollTo({ top: scroll, behavior: 'instant' });
+    if (!requests) window.scrollTo({ top: scroll, behavior: 'instant' });
     // A phone row click jumps to its detail. A later list-key decision returns the next pick to view,
     // instead of restoring that detail's scroll position with the focused list still offscreen.
     if (feedback.from === 'list' && feedback.tone === 'ok' && next && view.row[kind] === next) {

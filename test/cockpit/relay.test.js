@@ -350,11 +350,11 @@ test('relay person requests stay explicit, read-only and visible [H12,H5]', { ti
     assert.deepEqual(intents.at(-1), { verb: 'spec-approve', args: { ids: 'G2' } }, 'the detail click creates the exact second literal intent');
     await chrome.waitFor("data?.project?.personRequests?.length === 2 && document.querySelector('[data-person-request=\"request-2\"] .request-status')?.textContent === 'Waiting'");
     assert.match(await chrome.stable("document.querySelector('#spec-detail .spec-feedback')?.textContent.trim() || ''"), /G2/);
-    const afterApproval = JSON.parse(await chrome.stable(`JSON.stringify({ root: view.root, row: view.row.spec, scroll: window.scrollY, selected: document.querySelector('#spec-list [data-row=\"spec:G2\"]')?.classList.contains('on'), visible: (() => { const row = document.querySelector('#spec-list [data-row=\"spec:G2\"]')?.getBoundingClientRect(); return !!row && row.top >= 0 && row.bottom <= innerHeight; })(), browserTrace: window.__personRequestReadingTrace?.serialize() ?? null })`));
+    const afterApproval = JSON.parse(await chrome.stable(`JSON.stringify({ root: view.root, row: view.row.spec, scroll: window.scrollY, rowTop: document.querySelector('#spec-list [data-row=\"spec:G2\"]')?.getBoundingClientRect().top, selected: document.querySelector('#spec-list [data-row=\"spec:G2\"]')?.classList.contains('on'), visible: (() => { const row = document.querySelector('#spec-list [data-row=\"spec:G2\"]')?.getBoundingClientRect(); return !!row && row.top >= 0 && row.bottom <= innerHeight; })(), browserTrace: window.__personRequestReadingTrace?.serialize() ?? null })`));
     t.diagnostic(`person-request reading capture: ${JSON.stringify({ clocks: { browser: 'performance.now()', fixture: 'Date.now()' }, reading, afterApproval, requestTimeline })}`);
     diagnosticEmitted = true;
     assert.deepEqual([afterApproval.root, afterApproval.row, afterApproval.selected], [reading.root, 'G2', true], 'the request keeps the selected board and G2 row');
-    assert.ok(Math.abs(afterApproval.scroll - reading.scroll) <= 1, 'the request keeps the page at the same reading position');
+    assert.ok(Math.abs(afterApproval.rowTop - reading.rowBox.top) <= 1, 'the request keeps the row at the same viewport reading position');
     assert.equal(afterApproval.visible, true, 'G2 remains visible beside its inline feedback');
     assert.deepEqual(intents.at(-1), { verb: 'spec-approve', args: { ids: 'G2' } });
     assert.equal(await chrome.stable("data.project.spec.find(row => row.id === 'G2').decision === undefined"), true, 'waiting for a request never approves the row optimistically');
@@ -601,6 +601,7 @@ test('a person request never moves the reading position under a 6× CPU throttle
       };
       const nativeScrollTo=window.scrollTo;
       const trace=window.__personRequestGrowthTrace={ initial:box(), events:[], mutationBatches:0, growth:null, scrollToCalls:[], preRestore:null, disposed:false };
+      trace.snapshot=box;
       window.scrollTo=function(...args){
         const before=box();
         const growingPanel=before.requestCount===2 && before.panel.height>trace.initial.panel.height;
@@ -630,16 +631,16 @@ test('a person request never moves the reading position under a 6× CPU throttle
     traceArmed = true;
     await press(chrome, "document.querySelector('#spec-detail button[data-row-decision=\"approve\"]')");
     await chrome.waitFor("data?.project?.personRequests?.length === 2 && document.querySelector('[data-person-request=\"request-2\"] .request-status')?.textContent === 'Waiting'");
-    const capture = JSON.parse(await chrome.stable('JSON.stringify(window.__personRequestGrowthTrace ?? null)'));
+    const capture = JSON.parse(await chrome.stable('JSON.stringify({ ...window.__personRequestGrowthTrace, settled: window.__personRequestGrowthTrace.snapshot() })'));
     assert.ok(capture?.growth, 'the actual second-request DOM mutation captures the panel-growth instant');
     assert.equal(capture.growth.requestCount, 2, 'the captured mutation contains the real second request');
     assert.ok(capture.growth.panel.height > before.panel.height, 'the person panel grew before the browser movement assertion');
-    assert.ok(capture.preRestore, 'the actual product restoration call is measured after panel growth');
-    assert.equal(capture.preRestore.before.scrollY, before.scrollY,
-      'person-request panel growth does not move the reading position before product restoration');
-    assert.equal(capture.preRestore.after.scrollY, before.scrollY,
-      'the existing product restoration keeps the original page position');
-    assert.equal(capture.growth.pageOverflowAnchor, 'none', 'the live person-request page opts out of viewport anchoring');
+    const positions = [capture.initial, ...capture.events, ...capture.scrollToCalls.flatMap(call => [call.before, call.after]), capture.settled];
+    for (const position of positions) {
+      assert.ok(position.row?.connected, 'the reading row remains present through each redraw and restoration');
+      assert.ok(Math.abs(position.row.top - before.row.top) <= 1,
+        `the row stays at viewport top ${before.row.top} through request growth: ${JSON.stringify(position)}`);
+    }
     assert.equal(capture.growth.selected, 'G2', 'the selected reading row stays the same through panel growth');
     assert.deepEqual(intents[1], { verb: 'spec-approve', args: { ids: 'G2' } }, 'the measured action is the real G2 approval request');
     t.diagnostic(`sixfold person-request growth capture: ${JSON.stringify({ throttle, before, capture, intent:intents[1], timeline:requestTimeline,
