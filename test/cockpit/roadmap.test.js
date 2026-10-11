@@ -510,12 +510,15 @@ test('the roadmap panel jumps to each release [N26]', {
       const initial = await read();
       if (width >= 900) {
         assert.ok(initial.buttons.every((button) => button.height >= tapTarget(width)), 'wide fine-pointer release jumps meet the 32px target');
+        // Touch is turned off again below, and the wait is for the pointer the page started with, as demo.test.js
+        // does: a Chrome with no mouse, as on Linux CI, starts at none, not fine (#453).
+        const originalPointer = JSON.parse(await chrome.stable(`JSON.stringify({ fine:matchMedia('(pointer: fine)').matches, coarse:matchMedia('(pointer: coarse)').matches, none:matchMedia('(pointer: none)').matches })`));
         await chrome.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
         await chrome.waitFor("matchMedia('(pointer: coarse)').matches");
         const coarse = await read();
         assert.ok(coarse.buttons.every((button) => button.height >= 44), 'wide coarse-pointer release jumps meet the 44px target');
         await chrome.send('Emulation.setTouchEmulationEnabled', { enabled: false });
-        await chrome.waitFor("matchMedia('(pointer: fine)').matches");
+        await chrome.waitFor(`matchMedia('(pointer: fine)').matches === ${originalPointer.fine} && matchMedia('(pointer: coarse)').matches === ${originalPointer.coarse} && matchMedia('(pointer: none)').matches === ${originalPointer.none}`);
       }
       const keys = ['m:0.8.7', 'm:0.8.8', 'm:0.8.9', 'm:0.8.10', 'm:0.8.11', 'm:0.8.12', 'm:0.8.13', 'm:0.8.14', 'm:0.8.15', 'm:0.8.16', 'm:0.8.17', 'm:0.8.18', 'm:0.8.19', 'shipped'];
       assert.deepEqual(initial.buttons.map((button) => button.key), keys, `${width}: each upcoming release in order and one Shipped jump`);
