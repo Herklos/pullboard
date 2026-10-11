@@ -124,7 +124,7 @@ test('demo capture preserves one shared Chrome startup diagnostic [I13]', { time
   await assert.rejects(browser(wrapper, profile, 'about:blank'), (error) => {
     assert.match(error.message, /did not publish its DevTools port/u);
     assert.match(error.message, /elapsed \d+ms; 30000ms DevTools budget/u);
-    assert.ok(Number(/elapsed (\d+)ms/u.exec(error.message)[1]) >= 30_000, 'the capture uses the shared 30-second startup budget');
+    assert.ok(Number(/elapsed (\d+)ms/u.exec(error.message)[1]) >= 30_000, 'the capture uses the shared 30-second startup budget'); // budget: declared shared 30-second DevTools startup deadline
     assert.match(error.message, /DEMO_CAPTURE_NO_PORT_STDERR/u, 'the capture preserves Chrome stderr in its startup refusal');
     return true;
   });
@@ -177,7 +177,7 @@ test('demo capture waits for the intended HTTP document and populated board in C
     await populated;
     assert.equal(await view.evaluate("data.project.root === 'demo-board' && !!document.querySelector('#chain .row[data-item=\"1\"]')"), true);
     assert.equal(await view.evaluate("localStorage.setItem('capture-proof', 'ready'); localStorage.getItem('capture-proof')"), 'ready');
-    await assert.rejects(view.waitFor('false', 'impossible capture state', 150), /did not become ready: impossible capture state/);
+    await assert.rejects(view.waitFor('false', 'impossible capture state', 150), /did not become ready: impossible capture state/); // budget: hang-only ceiling on an impossible state
   } finally {
     document.release(); state.release(); stylesheet.release();
     if (!view) view = await opening.catch(() => null);
