@@ -1284,8 +1284,8 @@ function nextMilestone(p) {
 }
 
 /**
- * The Roadmap (N26, N38) leads with what ships next: the milestones with work still to verify, in the board's order,
- * the next one open; then one Shipped section, folded, holding nonempty milestones with only verified or withdrawn items, newest
+ * The Roadmap (N26, N38) leads with what ships next: every milestone with work still to verify, in the board's order,
+ * open by default; then one Shipped section, folded, holding nonempty milestones with only verified or withdrawn items, newest
  * first, each a line with its name, its item count and its note's first line. A milestone opens to a card as before:
  * how many of its items are verified as a count and a bar, a row for each, and the note to the person in its own
  * highlighted line; one with no items says so. Each part stays open or closed as the person left it.
@@ -1313,11 +1313,11 @@ function roadmapCards(p, titles) {
     const open = isOpen(key, first);
     return '<' + tag + ' class="' + classes + '" data-key="' + esc(key) + '"><div class="milestone-head" data-roadmap-key="' + esc(key) + '" role="button" tabindex="0" aria-expanded="' + open + '">' + caret + heading + '</div><div class="milestone-body"' + (open ? '' : ' hidden') + '>' + contents + '</div></' + tag + '>';
   };
-  /** Open only the next upcoming milestone by default. */
-  const card = (m, first) => wrap('section', 'card-panel milestone', 'm:' + m.milestone.name, first, '<h2>' + linked(m.milestone.name, titles) + '</h2>' + count(m), body(m));
+  /** Open every upcoming milestone by default; the person's current-page fold remains in the view map. */
+  const card = (m) => wrap('section', 'card-panel milestone', 'm:' + m.milestone.name, true, '<h2>' + linked(m.milestone.name, titles) + '</h2>' + count(m), body(m));
   /** Summarize one shipped milestone with its first note line and total count. */
   const line = (m) => wrap('div', 'milestone shipped-one', 'm:' + m.milestone.name, false, '<h2>' + esc(m.milestone.name) + '</h2><small>' + esc(firstLine(m.milestone.note)) + '</small><span class="milestone-count">' + m.rows.length + (m.rows.length === 1 ? ' item' : ' items') + '</span>', body(m));
-  return lead + coming.map((m, n) => card(m, n === 0)).join('')
+  return lead + coming.map(card).join('')
     + (shipped.length ? wrap('section', 'card-panel shipped', 'shipped', false, '<h2>Shipped</h2><span class="milestone-count">' + shipped.length + (shipped.length === 1 ? ' release' : ' releases') + '</span>', shipped.map(line).join('')) : '');
 }
 
