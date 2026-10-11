@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import * as store from '../../src/board.js';
 import { addItem, closeBoard, completeCheckBaseline, openBoard } from '../../src/board.js';
-import { tapTarget, SPEC, machine, project, build, sendBack, startView, element, target, openPage, agentEntries, accept, itemRow, boardOf, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, settled, earlier, press, travel } from './fixture.js';
+import { tapTarget, SPEC, machine, project, build, sendBack, startView, element, target, openPage, agentEntries, accept, itemRow, boardOf, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, settled, earlier, press, travel, chooseFilter } from './fixture.js';
 
 
 test('an added item confirmation names its returned id [A3,N27]', async () => {
@@ -316,7 +316,7 @@ test('the list shows active, verified or all [N26]', async () => {
   const view = await startView(box);
   try {
     const page = await openPage(view);
-    const control = () => [...page.show('state-chips').matchAll(/<button data-state="([a-z]+)" class="(on)?" type="button">([A-Za-z]+)<b>(\d+)<\/b><\/button>/g)].map((match) => `${match[3]} ${match[4]}${match[2] ? ' (shown)' : ''}`);
+    const control = () => [...page.show('filter-menu').matchAll(/<button class="filter-option" role="menuitemradio" aria-checked="(true|false)" data-filter-choice="state:([a-z]+)"[^>]*><span class="filter-option-label">([A-Za-z ]+)<\/span><b>(\d+)<\/b><\/button>/g)].map((match) => `${match[3]} ${match[4]}${match[1] === 'true' ? ' (shown)' : ''}`);
     const rows = () => [...page.show('chain').matchAll(/data-item="(\d+)"/g)].map((match) => Number(match[1])).sort();
     assert.deepEqual(control(), ['Active 1 (shown)', 'Verified 1', 'All 2'], 'three choices, each with its count');
     assert.deepEqual(rows(), [2]);
@@ -324,7 +324,8 @@ test('the list shows active, verified or all [N26]', async () => {
     assert.deepEqual(rows(), [1]);
     await page.click({ state: 'all' });
     assert.deepEqual(rows(), [1, 2]);
-    assert.match(page.html, /<div class="card-panel toolbar"><div class="seg" id="state-chips" role="group" aria-label="Show"><\/div><select class="lane-pick" id="lane-pick" aria-label="Lane"><\/select><button class="go" id="new-item"/, 'the control sits in the toolbar beside the lane picker and New item');
+    assert.match(page.html, /<div class="card-panel toolbar">\s*<div class="items-view-switch seg" id="items-view-switch" role="group" aria-label="Items view"><\/div>\s*<div class="filter-control"><button class="filter-toggle" id="filter-toggle"/, 'the view toggle and filter are together in the toolbar');
+    assert.doesNotMatch(page.html, /id="lane-pick"|id="state-chips"/, 'the old second-row controls are gone');
     assert.match(page.html, /<header class="top">[^]*<div class="top-find"><input id="q" type="search"[^]*<\/header>/, 'and the search is in the top bar');
     assert.doesNotMatch(page.html, /id="lane-filter"|class="chips" id="state-chips"/, 'no lane menu and no row of chips');
 
@@ -335,6 +336,156 @@ test('the list shows active, verified or all [N26]', async () => {
     await view.stop();
   }
 });
+
+test('the items toolbar is one row: view, filter and new [N26]', async () => {
+  const executable = chromeExecutable();
+  assert.ok(executable, 'the required real-Chrome toolbar check needs Chrome');
+  const box = machine();
+  const longLane = 'apilonglanenameforclipping';
+  const lanes = { web: { owns: ['web/'], specs: ['G'] }, [longLane]: { owns: ['api/'], specs: ['G'] } };
+  const alpha = project(box, 'toolbar', SPEC, { lanes });
+  box.run(alpha.repo, 'add', 'web', 'Active item', '--specs', 'G1');
+  box.run(alpha.repo, 'add', longLane, 'Another item', '--specs', 'G1');
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-items-toolbar-chrome-'));
+  let chrome;
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.waitFor("document.querySelectorAll('#chain .row').length === 2");
+    for (const width of [375, 1280]) {
+      await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
+      await chrome.waitFor(`innerWidth === ${width}`);
+      for (const scheme of ['light', 'dark']) {
+        await chrome.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: scheme }] });
+        await chrome.waitFor(`document.documentElement.dataset.scheme === '${scheme}'`);
+        await press(chrome, "document.querySelector('#filter-toggle')");
+        await chrome.waitFor("!document.querySelector('#filter-menu').hidden");
+        const layout = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+          const toolbar = document.querySelector('.toolbar'), nodes = [...toolbar.children];
+          const rect = node => { const r = node.getBoundingClientRect(); return { top:r.top, bottom:r.bottom, height:r.height, left:r.left, right:r.right }; };
+          const menu = rect(document.querySelector('#filter-menu'));
+          return { children:nodes.map(node => node.id || node.className), rows:nodes.map(rect), scroll:toolbar.scrollWidth,
+            client:toolbar.clientWidth, page:document.documentElement.scrollWidth, width:innerWidth,
+            menu,
+            buttons:[...toolbar.querySelectorAll('button')].map(node => ({ text:node.innerText, name:node.getAttribute('aria-label'), height:rect(node).height })),
+            groups:[...document.querySelectorAll('#filter-menu .filter-group')].map(group => group.getAttribute('aria-label')) };
+        })())`));
+        assert.deepEqual(layout.children, ['items-view-switch', 'filter-control', 'new-item'], `${width}/${scheme}: exactly the three toolbar controls appear in order`);
+        // One row: the controls share a centre line (List | Pipeline is a 48px group around 44px buttons, so tops differ).
+        const centres = layout.rows.map(row => (row.top + row.bottom) / 2);
+        assert.ok(Math.max(...centres) - Math.min(...centres) <= 2, `${width}/${scheme}: controls share one row: ${JSON.stringify(layout)}`);
+        assert.ok(layout.scroll <= layout.client && layout.page <= width, `${width}/${scheme}: no horizontal toolbar or page scroll: ${JSON.stringify(layout)}`);
+        assert.ok(layout.menu.left >= 0 && layout.menu.right <= width, `${width}/${scheme}: the long-lane menu stays within the viewport: ${JSON.stringify(layout.menu)}`);
+        assert.deepEqual(layout.groups, ['Show', 'Lane'], `${width}/${scheme}: the open filter has both groups`);
+        assert.deepEqual(layout.buttons.slice(0, 2).map(button => button.text), ['List', 'Pipeline'], `${width}/${scheme}: List and Pipeline lead the row`);
+        assert.ok(layout.buttons.every(button => button.height >= tapTarget(width)), `${width}/${scheme}: toolbar buttons meet the ${tapTarget(width)}px target: ${JSON.stringify(layout.buttons)}`);
+        assert.equal(layout.buttons.at(-1).name, 'New item', `${width}/${scheme}: the new action keeps its accessible name`);
+        assert.equal(layout.buttons.at(-1).text, width < 900 ? 'New' : 'New item', `${width}/${scheme}: the new action uses the right visible label`);
+        if (process.env.PULLBOARD_ITEMS_TOOLBAR_PROOF) {
+          mkdirSync(process.env.PULLBOARD_ITEMS_TOOLBAR_PROOF, { recursive: true });
+          const shot = await chrome.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
+          writeFileSync(join(process.env.PULLBOARD_ITEMS_TOOLBAR_PROOF, `toolbar-${width}-${scheme}.png`), Buffer.from(shot.data, 'base64'));
+        }
+        await press(chrome, "document.querySelector('#detail')");
+        await chrome.waitFor("document.querySelector('#filter-menu').hidden");
+      }
+    }
+    await press(chrome, "document.querySelector('#new-item')");
+    await chrome.waitFor("!document.querySelector('#add-form').hidden");
+    await press(chrome, "document.querySelector('#add-cancel')");
+    await chrome.waitFor("document.querySelector('#add-form').hidden");
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    rmSync(profile, { recursive: true, force: true });
+    await view.stop();
+  }
+});
+
+test('the filter menu sets show and lane [N26]', async () => {
+  const executable = chromeExecutable();
+  assert.ok(executable, 'the required real-Chrome filter check needs Chrome');
+  const box = machine();
+  const lanes = { web: { owns: ['web/'], specs: ['G'] }, api: { owns: ['api/'], specs: ['G'] } };
+  const alpha = project(box, 'filter', SPEC, { lanes });
+  box.run(alpha.repo, 'add', 'web', 'Active item', '--specs', 'G1');
+  box.run(alpha.repo, 'add', 'api', 'Verified item', '--specs', 'G1');
+  const api = join(box.dir, 'filter-api');
+  const apiBranch = 'api/filter';
+  box.git(alpha.repo, 'worktree', 'add', '-q', api, '-b', apiBranch);
+  box.run(api, 'join', 'api');
+  box.run(api, 'claim', '2');
+  mkdirSync(join(api, 'api'), { recursive: true });
+  writeFileSync(join(api, 'api', 'verified.html'), 'verified.html\n');
+  box.git(api, 'add', '-A');
+  box.git(api, 'commit', '-q', '-m', 'feat(api): verified [G1]');
+  box.run(api, 'submit', '2');
+  box.git(alpha.repo, 'switch', '-q', '--detach', apiBranch);
+  box.run(alpha.repo, 'verify', '2', 'accept', '--note', 'the page shows it', '--as', 'coordinator');
+  box.git(alpha.repo, 'switch', '-q', 'main');
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-items-filter-chrome-'));
+  let chrome;
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.waitFor("document.querySelectorAll('#chain .row').length === 1");
+    assert.equal(await chrome.stable("document.querySelector('#chain .row').dataset.item"), '1');
+    await press(chrome, "document.querySelector('#filter-toggle')");
+    await chrome.waitFor("!document.querySelector('#filter-menu').hidden");
+    assert.deepEqual(JSON.parse(await chrome.stable("JSON.stringify([...document.querySelectorAll('#filter-menu .filter-option[data-filter-kind=state]')].map(option => option.querySelector('.filter-option-label').textContent + ' ' + option.querySelector('b').textContent))")), ['Active 1', 'Verified 1', 'All 2'], 'Show choices name their counts');
+    await press(chrome, "document.querySelector('#filter-menu [data-state=verified]')");
+    await chrome.waitFor("view.state === 'verified' && document.querySelector('#filter-menu').hidden");
+    assert.equal(await chrome.stable("document.querySelector('#chain .row').dataset.item"), '2', 'choosing Verified updates the list at once');
+    assert.equal(await chrome.stable("document.querySelector('#filter-toggle').textContent"), 'Filter: Verified');
+    await press(chrome, "document.querySelector('#filter-toggle')");
+    assert.equal(await chrome.stable("document.querySelector('#filter-menu .filter-option[data-filter-kind=lane][data-filter-value=api]').getAttribute('aria-label')"), 'api · 1');
+    await press(chrome, "document.querySelector('#filter-menu .filter-option[data-filter-kind=lane][data-filter-value=api]')");
+    await chrome.waitFor("view.lane === 'api' && document.querySelector('#filter-menu').hidden");
+    assert.equal(await chrome.stable("document.querySelector('#filter-toggle').textContent"), 'Filter: Verified · api', 'mouse can choose a lane');
+    await press(chrome, "document.querySelector('#filter-toggle')");
+    for (const type of ['keyDown', 'keyUp']) await chrome.send('Input.dispatchKeyEvent', { type, key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40 });
+    for (let step = 0; step < 1; step += 1) {
+      for (const type of ['keyDown', 'keyUp']) await chrome.send('Input.dispatchKeyEvent', { type, key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40 });
+    }
+    await chrome.waitFor("document.activeElement.dataset.filterChoice === 'state:verified'");
+    for (const type of ['keyDown', 'keyUp']) await chrome.send('Input.dispatchKeyEvent', { type, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, ...(type === 'keyDown' ? { text: '\r' } : {}) });
+    await chrome.waitFor("view.state === 'verified' && document.querySelector('#filter-menu').hidden");
+    await press(chrome, "document.querySelector('#filter-toggle')");
+    for (let step = 0; step < 5; step += 1) {
+      for (const type of ['keyDown', 'keyUp']) await chrome.send('Input.dispatchKeyEvent', { type, key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40 });
+    }
+    await chrome.waitFor("document.activeElement.dataset.filterChoice === 'lane:api'");
+    for (const type of ['keyDown', 'keyUp']) await chrome.send('Input.dispatchKeyEvent', { type, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, ...(type === 'keyDown' ? { text: '\r' } : {}) });
+    await chrome.waitFor("view.lane === 'api' && document.querySelector('#filter-menu').hidden");
+    assert.equal(await chrome.stable("document.querySelector('#chain .row').dataset.item"), '2', 'choosing a lane from the keyboard applies it immediately');
+    assert.equal(await chrome.stable("document.querySelector('#filter-toggle').textContent"), 'Filter: Verified · api');
+    await press(chrome, "document.querySelector('#filter-toggle')");
+    assert.equal(await chrome.stable("document.querySelector('#filter-menu [data-filter-kind=state][data-filter-value=verified]').getAttribute('aria-checked')"), 'true', 'the selected Show option is marked');
+    assert.equal(await chrome.stable("document.querySelector('#filter-menu [data-filter-value=api]')?.getAttribute('aria-checked')"), 'true', 'the selected Lane option is marked');
+    for (const type of ['keyDown', 'keyUp']) await chrome.send('Input.dispatchKeyEvent', { type, key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+    await chrome.waitFor("document.querySelector('#filter-menu').hidden");
+    assert.equal(await chrome.stable("view.state + ':' + view.lane + ':' + document.querySelector('#filter-toggle').textContent"), 'verified:api:Filter: Verified · api', 'Escape closes without changing either choice');
+    await press(chrome, "document.querySelector('#filter-toggle')");
+    await press(chrome, "document.querySelector('[data-items-view=pipeline]')");
+    await chrome.waitFor("view.itemsView === 'pipeline'");
+    await press(chrome, "document.querySelector('#filter-toggle')");
+    assert.equal(await chrome.stable("document.querySelectorAll('#filter-menu .filter-group').length"), 1, 'Pipeline omits Show');
+    assert.equal(await chrome.stable("document.querySelector('#filter-menu .filter-group').getAttribute('aria-label')"), 'Lane');
+    await press(chrome, "document.querySelector('#filter-menu .filter-option[data-filter-kind=lane][data-filter-value=web]')");
+    await chrome.waitFor("view.lane === 'web' && document.querySelector('#filter-menu').hidden");
+    assert.deepEqual(JSON.parse(await chrome.stable("JSON.stringify([...document.querySelectorAll('#pipeline .pipeline-item')].map(item => item.dataset.item))")), ['1'], 'the Lane choice still filters Pipeline');
+    await press(chrome, "document.querySelector('[data-items-view=list]')");
+    await chrome.waitFor("view.itemsView === 'list'");
+    await press(chrome, "document.querySelector('#filter-toggle')");
+    await press(chrome, "document.querySelector('#detail')");
+    await chrome.waitFor("document.querySelector('#filter-menu').hidden");
+    assert.equal(await chrome.stable("view.state + ':' + view.lane"), 'verified:web', 'an outside click closes without changing either choice');
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    rmSync(profile, { recursive: true, force: true });
+    await view.stop();
+  }
+});
+
 test('shout ids, search and narrow windows reach the item [N26]', async () => {
   const box = machine();
   const p = project(box, 'desk');
@@ -355,9 +506,9 @@ test('shout ids, search and narrow windows reach the item [N26]', async () => {
     assert.doesNotMatch(page.show('chain'), /Farewell banner/, 'Active hides the verified item');
     await page.type('q', 'farewell');
     assert.match(page.show('chain'), /Farewell banner/, 'a search finds the verified item');
-    assert.match(page.show('state-chips'), /data-state="all" class="on"/, 'and says it looks in every state');
-    assert.match(page.show('state-chips'), /Verified<b>1<\/b>/);
-    assert.match(page.show('state-chips'), /Active<b>0<\/b>/, 'the chips count the matches');
+    assert.match(page.show('filter-menu'), /aria-checked="true" data-filter-choice="state:all"/, 'and marks the all-state choice');
+    assert.match(page.show('filter-menu'), /<span class="filter-option-label">Verified<\/span><b>1<\/b>/);
+    assert.match(page.show('filter-menu'), /<span class="filter-option-label">Active<\/span><b>0<\/b>/, 'the menu counts the matches');
     await page.type('q', '');
     assert.equal(page.run('view.state'), 'active', 'clearing the search brings the chip back');
     assert.doesNotMatch(page.show('chain'), /Farewell banner/);
@@ -377,8 +528,8 @@ test('shout ids, search and narrow windows reach the item [N26]', async () => {
     const found = itemRow(page.show('chain'), 40);
     assert.match(found, /Retired widget/, 'a search finds the withdrawn item too');
     assert.match(found, /<span class="chip ">withdrawn<\/span>/);
-    assert.match(page.show('state-chips'), /All<b>1<\/b>/);
-    assert.match(page.show('state-chips'), /Active<b>0<\/b>/, 'a withdrawn item is not active');
+    assert.match(page.show('filter-menu'), /<span class="filter-option-label">All<\/span><b>1<\/b>/);
+    assert.match(page.show('filter-menu'), /<span class="filter-option-label">Active<\/span><b>0<\/b>/, 'a withdrawn item is not active');
     await page.type('q', '');
 
     const feed = page.show('feed');
@@ -671,7 +822,7 @@ test('in-text item references stay inline and open their target at phone and des
     for (const width of [375, 1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
       // Needs you heads the Items list under Active; the steps below leave other tabs and filters open.
-      await chrome.click("document.querySelector('[data-tab=items]')"); await chrome.click("document.querySelector('[data-state=active]')");
+      await chrome.click("document.querySelector('[data-tab=items]')"); await chooseFilter(chrome, 'state:active');
       // The row inlineReference stays on its title line beside the text.
       const rendered = JSON.parse(await chrome.stable(`JSON.stringify((() => {
         const row = document.querySelector('#chain .row[data-item="2"]');
@@ -746,7 +897,7 @@ test('in-text item references stay inline and open their target at phone and des
       await chrome.click(`document.querySelector('[data-tab="items"]')`);
       await chrome.click(`document.querySelector('#chain .row[data-item="2"] .t button.ref')`);
       await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('Target item')");
-      await chrome.click("document.querySelector('[data-state=active]')");
+      await chooseFilter(chrome, 'state:active');
       await chrome.click(`document.querySelector('#needs .row .t button.ref')`);
       await chrome.waitFor("document.querySelector('[data-tab=items].on') && document.querySelector('#detail h2')?.textContent.includes('Target item')");
 
