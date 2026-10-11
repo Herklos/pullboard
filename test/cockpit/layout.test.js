@@ -30,12 +30,12 @@ test('the view never scrolls sideways at 320px [N26]', { timeout: 120_000 }, asy
     // the room a 320px screen leaves beside a classic 15px scrollbar: Linux CI measured 324px of tabs there.
     for (const [width, font] of [[320, ''], [320, 'Verdana, "DejaVu Sans", sans-serif'], [305, 'Verdana, "DejaVu Sans", sans-serif']]) {
     await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 800, deviceScaleFactor: 1, mobile: false });
-    await chrome.evaluate(`document.documentElement.style.setProperty('--sans', ${JSON.stringify(font || 'system-ui, sans-serif')})`);
+    await chrome.stable(`document.documentElement.style.setProperty('--sans', ${JSON.stringify(font || 'system-ui, sans-serif')})`);
     await chrome.waitFor(`innerWidth === ${width}`);
     for (const tab of ['items', 'shouts', 'spec', 'doctrine', 'activity', 'roadmap']) {
-      await chrome.evaluate(`document.querySelector('[data-tab="${tab}"]').click()`);
+      await chrome.click(`document.querySelector('[data-tab="${tab}"]')`);
       await chrome.waitFor(`!document.querySelector('[data-pane="${tab}"]').hidden`);
-      const seen = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+      const seen = JSON.parse(await chrome.stable(`JSON.stringify((() => {
         const edge = document.documentElement.clientWidth;
         // Name each element that runs past the edge with nothing above it to clip or scroll it.
         const clipped = (e) => { for (let p = e.parentElement; p && p !== document.body; p = p.parentElement) if (!['visible', ''].includes(getComputedStyle(p).overflowX)) return true; return false; };
@@ -193,7 +193,7 @@ test('the status bar holds one line under no pointer [N26]', { timeout: 120_000 
     chrome = await openSnapshotChrome(wrapper, view.link.href, profile);
     await chrome.waitFor("typeof data === 'object' && !!data && data.project?.items?.length === 3");
     await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
-    const layout = JSON.parse(await chrome.evaluate(`JSON.stringify({
+    const layout = JSON.parse(await chrome.stable(`JSON.stringify({
       pointer: { none: matchMedia('(pointer: none)').matches, fine: matchMedia('(pointer: fine)').matches, coarse: matchMedia('(pointer: coarse)').matches },
       parts: [...document.querySelectorAll('.status [data-status]')].filter((button) => !button.hidden && button.getBoundingClientRect().width > 0).map((button) => {
         const rects = [...button.childNodes].flatMap((node) => {
@@ -208,7 +208,7 @@ test('the status bar holds one line under no pointer [N26]', { timeout: 120_000 
     console.log('375 pointer none raw layout', JSON.stringify(layout));
     assert.deepEqual(layout.pointer, { none: true, fine: false, coarse: false }, `wrapper produces real pointer:none CSS state: ${JSON.stringify(layout.pointer)}`);
     assert.ok(layout.parts.some((part) => part.label === '3 items'), `the real board's Items status part is present: ${JSON.stringify(layout.parts)}`);
-    const audit = JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+    const audit = JSON.parse(await chrome.stable(`JSON.stringify((() => {
       const visible=e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return !e.disabled&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)!==0&&r.width>0&&r.height>0&&!e.closest('[hidden]')};
       const selector='button,a[href],input:not([type=hidden]),select,textarea,[role=button],[data-root],[data-tab],[data-go],[data-item],[data-state],[data-rows],[data-row],[data-release],[data-shout],[data-new],[data-code]';
       const controls=[...new Set(document.querySelectorAll(selector))].filter(visible).map(e=>{const r=e.getBoundingClientRect();return {text:(e.innerText||e.getAttribute('aria-label')||'').trim(),height:r.height,inlineReference:e.matches('.feed button.ref, .shout button.ref, .shout .band a, .detail button.ref')||!!e.closest('#chain .meta .gate, #detail .kv dd.waits-on'),statusBar:!!e.closest('.status')&&!matchMedia('(pointer: coarse)').matches,oneLine:!e.closest('.status')||getComputedStyle(e).whiteSpace==='nowrap'}});
@@ -260,7 +260,7 @@ test('the board reads at a glance from the status bar [N26]', { timeout: 180_000
   const profile = mkdtempSync(join(tmpdir(), 'pullboard-glance-chrome-'));
   let chrome;
   /** The page as it reads: the header, the bar's parts, the list's rows and the toolbar, measured where they stand. */
-  const read = async () => JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+  const read = async () => JSON.parse(await chrome.stable(`JSON.stringify((() => {
     const box = (e) => { if (!e) return null; const r = e.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height }; };
     const rgb = (css) => { const n = (css.match(/[\\d.]+/g) || []).map(Number); return css.startsWith('color(srgb') ? [n[0] * 255, n[1] * 255, n[2] * 255, n[3] ?? 1] : [n[0], n[1], n[2], n[3] ?? 1]; };
     const words = (e) => [...e.children].map((child) => child.textContent.replace(/\\s+/g, ' ').trim()).join(' ');
@@ -295,10 +295,10 @@ test('the board reads at a glance from the status bar [N26]', { timeout: 180_000
   })())`));
   const part = (r, to) => r.bar.find((p) => p.to === to);
   const number = (p) => Number(/^(\d+)/.exec(p?.text ?? '')?.[1] ?? NaN);
-  const click = async (selector) => chrome.evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
-  const settle = () => chrome.evaluate('new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))');
+  const click = async (selector) => chrome.click(`document.querySelector(${JSON.stringify(selector)})`);
+  const settle = () => chrome.stable('new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))');
   /** Pick a lane the way the picker does: its value, then its change event. */
-  const lane = async (name) => { await chrome.evaluate(`(() => { const pick = document.querySelector('#lane-pick'); pick.value = ${JSON.stringify(name)}; pick.dispatchEvent(new Event('change')); })()`); await settle(); };
+  const lane = async (name) => { await chrome.stable(`(() => { const pick = document.querySelector('#lane-pick'); pick.value = ${JSON.stringify(name)}; pick.dispatchEvent(new Event('change')); })()`); await settle(); };
   try {
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
     await chrome.waitFor("typeof data === 'object' && data?.project?.items?.length === 7 && !!document.querySelector('.status [data-status=\"items\"]')");
@@ -307,6 +307,7 @@ test('the board reads at a glance from the status bar [N26]', { timeout: 180_000
         await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
         await chrome.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: scheme }] });
         await chrome.waitFor(`innerWidth === ${width} && matchMedia('(prefers-color-scheme: ${scheme})').matches`);
+        await click('[data-tab=items]');
         await click('[data-tab=items]');
         await click('[data-state=active]');
         await settle();
@@ -362,6 +363,7 @@ test('the board reads at a glance from the status bar [N26]', { timeout: 180_000
     await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
     await chrome.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }] });
     await chrome.waitFor('innerWidth === 1280');
+    await click('[data-tab=items]');
     await click('[data-state=all]');
     let r = await read();
     for (const [to, state, label] of [['verify', 'verify', 'To verify'], ['gated', 'gated', 'Gated'], ['items', 'active', 'Active']]) {
@@ -374,6 +376,7 @@ test('the board reads at a glance from the status bar [N26]', { timeout: 180_000
       assert.deepEqual([on?.[0], Number(on?.[1]), r.rows.length], [label, n, n], `${to}: the bar's ${n} opens ${label}, which counts and lists the same ${n}: ${JSON.stringify(r.chips)}`);
       if (to === 'gated') assert.ok(r.rows.every((x) => x.gated), 'every row it opens is a gated row');
     }
+    await click('[data-tab=items]');
     await click('[data-state=active]');
     await click('.status [data-status="agents"]');
     await chrome.waitFor("view.tab === 'shouts' && !document.querySelector('[data-pane=shouts]').hidden");
@@ -390,8 +393,8 @@ test('the board reads at a glance from the status bar [N26]', { timeout: 180_000
     // The release part opens the Roadmap on that release alone: its rows are the ones it counts.
     await click('.status [data-status="release"]');
     await chrome.waitFor("view.tab === 'roadmap'");
-    const roadmapRows = () => chrome.evaluate("document.querySelectorAll('#roadmap .milestone-item').length");
-    assert.deepEqual([await chrome.evaluate("[...document.querySelectorAll('#roadmap .milestone h2')].map((h) => h.textContent).join()"), await roadmapRows()], ['1.0: first cut', 3],
+    const roadmapRows = () => chrome.stable("document.querySelectorAll('#roadmap .milestone-item').length");
+    assert.deepEqual([await chrome.stable("[...document.querySelectorAll('#roadmap .milestone h2')].map((h) => h.textContent).join()"), await roadmapRows()], ['1.0: first cut', 3],
       'the release the part counts, and only its three items');
     await click('#roadmap [data-roadmap-all]');
     assert.equal(await roadmapRows(), 6, 'show all brings back every release');
@@ -402,16 +405,19 @@ test('the board reads at a glance from the status bar [N26]', { timeout: 180_000
     }
 
     // Lanes narrow the list as states do, each counting within the other's choice.
+    await click('[data-tab=items]');
     await click('[data-state=active]');
     await lane('api');
     r = await read();
     assert.deepEqual([r.lane, r.rows.map((x) => x.id), r.chips.find(([name]) => name === 'Active')[1], r.chips.find(([name]) => name === 'Verified')[1]], ['api', ['4'], '1', '0'], 'api narrows the list and the state counts');
     await lane('');
+    await click('[data-tab=items]');
     await click('[data-state=verified]');
     await lane('web');
     r = await read();
     assert.deepEqual([r.lane, r.rows.map((x) => x.id), r.lanes], ['web', ['7'], ['All lanes', 'web · 1']], 'under Verified the lanes count what is verified');
     await lane('');
+    await click('[data-tab=items]');
     await click('[data-state=active]');
 
     // Shouts: asks waiting on others and idle agents each fold to one line, closed until opened.
@@ -436,20 +442,20 @@ test('the board reads at a glance from the status bar [N26]', { timeout: 180_000
     // A shout that lands while Items is open counts as unread in the bar. The part opens exactly that shout, not the ones
     // already read beside it, and opening it reads it; show all brings the rest back.
     await click('[data-tab=items]');
-    const alreadyRead = await chrome.evaluate('data.project.shouts.length');
+    const alreadyRead = await chrome.stable('data.project.shouts.length');
     assert.ok(alreadyRead >= 2, `shouts the person has already read: ${alreadyRead}`);
     box.run(alpha.web, 'shout', 'coordinator', 'web-1 is on it');
     await chrome.waitFor("!document.querySelector('#status-unread')?.hidden && document.querySelector('#status-unread')?.textContent === '1 unread'", 15_000);
     await click('#status-unread');
     await chrome.waitFor("view.tab === 'shouts' && document.querySelector('#status-unread')?.hidden === true");
-    const feed = async () => JSON.parse(await chrome.evaluate("JSON.stringify([...document.querySelectorAll('#feed .shout .text')].map((text) => text.textContent))"));
-    assert.deepEqual([await feed(), await chrome.evaluate("document.querySelector('#feed .feed-bar span').textContent")], [['web-1 is on it'], '1 unread show all'],
+    const feed = async () => JSON.parse(await chrome.stable("JSON.stringify([...document.querySelectorAll('#feed .shout .text')].map((text) => text.textContent))"));
+    assert.deepEqual([await feed(), await chrome.stable("document.querySelector('#feed .feed-bar span').textContent")], [['web-1 is on it'], '1 unread show all'],
       `1 unread opens that one shout, not the ${alreadyRead} already read`);
     await click('#feed [data-unread]');
     assert.equal((await feed()).length, alreadyRead + 1, 'show all brings back the shouts already read');
 
     // Cut off from the board, the bar turns red and says why.
-    await chrome.evaluate("globalThis.fetch = () => Promise.reject(new TypeError('Failed to fetch'))");
+    await chrome.stable("globalThis.fetch = () => Promise.reject(new TypeError('Failed to fetch'))");
     await chrome.waitFor("document.querySelector('#live').textContent.startsWith('offline')", 15_000);
     r = await read();
     const [red, green, blue] = r.barTint;
@@ -479,7 +485,7 @@ test('the project corner and the theme read the same everywhere [N26]', { timeou
   const profile = mkdtempSync(join(tmpdir(), 'pullboard-corner-chrome-'));
   let chrome;
   /** The corner, the project list and the theme button as they read. */
-  const read = async () => JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+  const read = async () => JSON.parse(await chrome.stable(`JSON.stringify((() => {
     const box = (e) => { if (!e) return null; const r = e.getBoundingClientRect(); return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height }; };
     const shown = (e) => !!e && getComputedStyle(e).display !== 'none' && e.getBoundingClientRect().width > 0;
     const rgb = (css) => (css.match(/[\\d.]+/g) || []).map(Number);
@@ -498,9 +504,9 @@ test('the project corner and the theme read the same everywhere [N26]', { timeou
       theme: { scheme: document.documentElement.dataset.scheme || null, title: theme.title, box: box(theme), bar: box(bar), picked: document.documentElement.dataset.theme || null, side: box(side) },
     };
   })())`));
-  const click = (selector) => chrome.evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
+  const click = (selector) => chrome.click(`document.querySelector(${JSON.stringify(selector)})`);
   /** A drawn frame: the page hears of a colour-scheme change at its next one. */
-  const frame = () => chrome.evaluate('new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))');
+  const frame = () => chrome.stable('new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))');
   const middle = (b) => b.top + b.height / 2;
   try {
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
@@ -562,7 +568,7 @@ test('the project corner and the theme read the same everywhere [N26]', { timeou
     await click('#theme');
     assert.deepEqual(Object.values((await read()).theme).slice(0, 2), ['dark', 'Dark theme: switch to light'], 'a press switches to dark');
     await click('#theme');
-    assert.deepEqual([...Object.values((await read()).theme).slice(0, 2), await chrome.evaluate("localStorage.getItem('pb.theme')")], ['light', 'Light theme: switch to dark', 'light'], 'the next press is light again, never back to following the system');
+    assert.deepEqual([...Object.values((await read()).theme).slice(0, 2), await chrome.stable("localStorage.getItem('pb.theme')")], ['light', 'Light theme: switch to dark', 'light'], 'the next press is light again, never back to following the system');
     await click('#theme');
     await chrome.send('Page.reload');
     await chrome.waitFor("document.readyState === 'complete' && !!document.querySelector('#theme')");
@@ -591,7 +597,7 @@ test('targets are 44px for touch and compact under a mouse [N26]', { timeout: 15
   const profile = mkdtempSync(join(tmpdir(), 'pullboard-targets-chrome-'));
   let chrome;
   /** Every visible enabled action with its height, which references sit in running text, and the named compact ones. */
-  const audit = async () => JSON.parse(await chrome.evaluate(`JSON.stringify((() => {
+  const audit = async () => JSON.parse(await chrome.stable(`JSON.stringify((() => {
     const visible = (e) => { const s = getComputedStyle(e), r = e.getBoundingClientRect(); return !e.disabled && s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0 && !e.closest('[hidden]'); };
     const height = (s) => { const e = document.querySelector(s); return e && visible(e) ? Math.round(e.getBoundingClientRect().height) : null; };
     const selector = 'button,a[href],input:not([type=hidden]),select,textarea,[role=button],[data-tab],[data-go],[data-item],[data-state],[data-row],[data-new]';
@@ -622,7 +628,7 @@ test('targets are 44px for touch and compact under a mouse [N26]', { timeout: 15
       composer: { text: height('#shout-text'), send: height('#shout-send') }, status: [...document.querySelectorAll('.status [data-status]')].filter(visible).map((b) => Math.round(b.getBoundingClientRect().height)),
     };
   })())`));
-  const tab = async (name) => { await chrome.evaluate(`document.querySelector('[data-tab=${name}]').click()`); await chrome.waitFor(`!document.querySelector('[data-pane=${name}]').hidden`); };
+  const tab = async (name) => { await chrome.click(`document.querySelector('[data-tab=${name}]')`); await chrome.waitFor(`!document.querySelector('[data-pane=${name}]').hidden`); };
   try {
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
     await chrome.waitFor("typeof data === 'object' && data?.project?.items?.length === 2 && data.project.shouts.length >= 2");

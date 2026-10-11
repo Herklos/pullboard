@@ -318,14 +318,14 @@ test('activity rows say what each shout and answer said [N26]', { timeout: 120_0
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
     await chrome.waitFor('!!document.querySelector(\'[data-tab="activity"]\')');
     await chrome.waitFor("typeof data === 'object' && !!data && !!data.project");
-    await chrome.evaluate('document.querySelector(\'[data-tab="activity"]\').click()');
+    await chrome.click('document.querySelector(\'[data-tab="activity"]\')');
     await chrome.waitFor(`[...document.querySelectorAll('#activity .act')].some((row) => row.textContent.startsWith('coordinator (unknown) answered'))`);
     for (const width of [375, 1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
       // Measure only laid-out previews: on Activity, at this width, each preview with a box of its own.
       const laidOut = `innerWidth === ${width} && !document.querySelector('[data-pane="activity"]').hidden && [...document.querySelectorAll('#activity .said')].every((said) => said.getBoundingClientRect().height > 0)`;
-      await chrome.waitFor(laidOut).catch(async (error) => { throw new Error(`${error.message}; showing ${await chrome.evaluate("[...document.querySelectorAll('[data-pane]')].filter((pane) => !pane.hidden).map((pane) => pane.dataset.pane).join()")}`); });
-      const rows = JSON.parse(await chrome.evaluate(`JSON.stringify([...document.querySelectorAll('#activity .act')].map((row) => {
+      await chrome.waitFor(laidOut).catch(async (error) => { throw new Error(`${error.message}; showing ${await chrome.stable("[...document.querySelectorAll('[data-pane]')].filter((pane) => !pane.hidden).map((pane) => pane.dataset.pane).join()")}`); });
+      const rows = JSON.parse(await chrome.stable(`JSON.stringify([...document.querySelectorAll('#activity .act')].map((row) => {
         const said = row.querySelector('.said');
         const lines = said ? Math.round(said.getBoundingClientRect().height / parseFloat(getComputedStyle(said).lineHeight)) : 0;
         return { text: row.textContent, said: said?.textContent ?? null, tip: said?.title ?? null, lines, refs: said ? said.querySelectorAll('button.ref').length : 0,

@@ -185,6 +185,7 @@ function homeTab() {
   return kept && kept !== 'roadmap' ? kept : 'items';
 }
 const view = { root: keep('pb.project'), tab: addressTab() || homeTab(), itemsView: typeof location !== 'undefined' && location.hash === '#items/pipeline' ? 'pipeline' : 'list', seen: {}, code: {}, item: null, adding: false, declining: null, state: 'active', rows: { spec: 'decide', doctrine: 'all' }, row: { spec: null, doctrine: null }, agent: null, allAgents: false, agentsHidden: keep('pb.agents') === 'hidden', open: {} };
+let switchGeneration = 0;
 if (snapshot) view.state = 'all';
 let data = null;
 let seen = '';
@@ -1891,7 +1892,7 @@ function pick(id, root = view.root) {
 
 /** Where the list and the detail stack (under 900px), bring the detail into view. */
 function reveal() {
-  if (matchMedia('(max-width: 900px)').matches) $('detail').scrollIntoView({ block: 'start', behavior: 'smooth' });
+  if (matchMedia('(max-width: 900px)').matches) $('detail').scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
 }
 
 /**
@@ -2065,6 +2066,14 @@ async function decideRow(kind, command, args, anchor) {
   if (root === view.root && view.specFeedback === feedback) {
     render();
     window.scrollTo({ top: scroll, behavior: 'instant' });
+    // A phone row click jumps to its detail. A later list-key decision returns the next pick to view,
+    // instead of restoring that detail's scroll position with the focused list still offscreen.
+    if (feedback.from === 'list' && feedback.tone === 'ok' && next && view.row[kind] === next) {
+      const picked = [...$(kind + '-list').querySelectorAll('[data-row]')].find((row) => row.dataset.row === prefix + next);
+      const rect = picked?.getBoundingClientRect();
+      // Center an offscreen pick: nearest can round a half-pixel edge just outside the viewport.
+      if (rect && (rect.top < 0 || rect.bottom > innerHeight)) picked.scrollIntoView({ block: 'center', behavior: 'instant' });
+    }
     if (!requests || feedback.status === 'done') setTimeout(() => { if (view.specFeedback === feedback) { view.specFeedback = null; render(); } }, 6000);
   }
   return requests ? Boolean(feedback.requestId) && feedback.status !== 'refused' : feedback.tone === 'ok';
@@ -2150,10 +2159,12 @@ function fold(open) {
 
 /** Show another project and its item; history restores keep the tab their entry named. */
 function switchTo(root, target = null, record = true) {
+  const generation = ++switchGeneration;
   answer(null);
   view.root = root;
   const item = typeof target === 'number' ? target : /^item:(\\d+)$/.exec(target || '');
-  view.item = typeof item === 'number' ? item : item ? Number(item[1]) : null;
+  const requestedItem = typeof item === 'number' ? item : item ? Number(item[1]) : null;
+  view.item = requestedItem;
   view.adding = false;
   if (record && view.item !== null) { view.tab = 'items'; keep('pb.tab', view.tab); }
   keep('pb.project', root);
@@ -2164,8 +2175,8 @@ function switchTo(root, target = null, record = true) {
   if (data) renderSide();
   document.body.classList.add('switching');
   refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }).finally(() => {
-    document.body.classList.remove('switching');
-    if (view.item !== null && view.root === root && view.tab === 'items') reveal();
+    if (generation === switchGeneration) document.body.classList.remove('switching');
+    if (generation === switchGeneration && requestedItem !== null && view.item === requestedItem && view.root === root && view.tab === 'items') reveal();
   });
 }
 
@@ -2228,7 +2239,7 @@ document.addEventListener('click', (event) => {
     render();
     $(kind + '-list').focus({ preventScroll: true });
     // Where the list and the detail stack, the picked row's detail, with its buttons, comes into view.
-    if (matchMedia('(max-width: 900px)').matches) $(kind + '-detail').scrollIntoView({ block: 'start', behavior: 'smooth' });
+    if (matchMedia('(max-width: 900px)').matches) $(kind + '-detail').scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
   }
   else if (t.dataset.codeAll) showAllCode(t.dataset.codeAll, t.dataset.before || '');
   else if (t.dataset.codeLess) showLessCode(t.dataset.codeLess, t.dataset.before || '');

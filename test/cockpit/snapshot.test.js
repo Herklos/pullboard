@@ -91,7 +91,7 @@ test('static export stays in its prefix and replays read-only in Chrome [A10,A3]
   let chrome;
   try {
     chrome = await openSnapshotChrome(executable, `${base}${prefix}`, profile);
-    const evaluate = chrome.evaluate;
+    const evaluate = chrome.stable;
     await chrome.waitFor("document.body?.classList.contains('snapshot') && typeof snapshotReplay === 'object' && !!data?.project && snapshotReplay.events.length > 0 && snapshotReplay.index === snapshotReplay.events.length");
     await chrome.waitFor("!!document.querySelector('#replay-play') && !!document.querySelector('#replay-pause') && !!document.querySelector('#replay-speed') && !!document.querySelector('#replay-progress')");
 
@@ -110,7 +110,7 @@ test('static export stays in its prefix and replays read-only in Chrome [A10,A3]
     assert.ok(shout.html.includes('&lt;script&gt;'), 'the snapshot escapes HTML in shout text');
     assert.equal(shout.scripts, 0, 'shout text never becomes an executable script element');
 
-    const firstPosition = JSON.parse(await evaluate(`(() => {
+    await evaluate(`(() => {
       window.__snapshotRealAdvance = advanceReplay;
       window.__snapshotFirstPosition = null;
       window.advanceReplay = () => {
@@ -118,9 +118,9 @@ test('static export stays in its prefix and replays read-only in Chrome [A10,A3]
         snapshotReplay.playing = false;
         replayControls();
       };
-      document.querySelector('#replay-play').click();
-      return JSON.stringify(window.__snapshotFirstPosition);
-    })()`));
+    })()`);
+    await chrome.click("document.querySelector('#replay-play')");
+    const firstPosition = JSON.parse(await evaluate('JSON.stringify(window.__snapshotFirstPosition)'));
     assert.deepEqual(firstPosition, { index: 0, items: [] }, 'play starts from an empty board before its first event');
     await evaluate('window.advanceReplay = window.__snapshotRealAdvance');
 
@@ -155,10 +155,10 @@ test('static export stays in its prefix and replays read-only in Chrome [A10,A3]
         if (status) window.__replayObserved.push({ index, status });
       }).observe(progress, { childList: true, characterData: true, subtree: true });
     })()`);
-    await evaluate("document.querySelector('#replay-play').click()");
+    await chrome.click("document.querySelector('#replay-play')");
     await chrome.waitFor('snapshotReplay.playing && snapshotReplay.index > 0 && snapshotReplay.index < snapshotReplay.events.length');
     const beforePause = await evaluate('snapshotReplay.index');
-    await evaluate("document.querySelector('#replay-pause').click()");
+    await chrome.click("document.querySelector('#replay-pause')");
     await chrome.waitFor('!snapshotReplay.playing');
     const pausedIndex = await evaluate('snapshotReplay.index');
     assert.equal(pausedIndex, beforePause, 'pause keeps the current replay event');
@@ -170,7 +170,7 @@ test('static export stays in its prefix and replays read-only in Chrome [A10,A3]
     const speedStart = await evaluate('snapshotReplay.index');
     assert.ok(speedStart + 4 < initial.total, 'at least four events remain to measure 16x playback');
     const speedStartedAt = Date.now();
-    await evaluate("document.querySelector('#replay-play').click()");
+    await chrome.click("document.querySelector('#replay-play')");
     await chrome.waitFor(`snapshotReplay.index >= ${speedStart + 4}`, 2_000);
     assert.ok(Date.now() - speedStartedAt < 2_000, '16x advances four replay events within two seconds');
     await chrome.waitFor('!snapshotReplay.playing', 20_000);
