@@ -165,33 +165,55 @@ test('static export stays in its prefix and replays read-only in Chrome [A10,A3]
     await browserPause(180);
     assert.equal(await evaluate('snapshotReplay.index'), pausedIndex, 'a paused replay does not advance');
 
-    await evaluate("(() => { const speed = document.querySelector('#replay-speed'); speed.value = '1'; speed.dispatchEvent(new Event('change', { bubbles: true })); })()");
-    assert.equal(await evaluate("document.querySelector('#replay-speed').value"), '1');
-    await chrome.click("document.querySelector('#replay-play')");
-    await chrome.waitFor('!snapshotReplay.playing', 30_000); // budget: hang-only ceiling for the complete 1x replay.
-    assert.equal(await evaluate('snapshotReplay.playing'), false, 'the 1x replay reaches its end');
-    const normalStart = 0;
-    assert.ok(normalStart + 4 < initial.total, 'at least four events remain to measure 1x playback');
-    const normalStartedAt = Date.now();
-    await chrome.click("document.querySelector('#replay-play')");
-    await chrome.waitFor(`snapshotReplay.index >= ${normalStart + 4}`, 10_000); // budget: hang-only ceiling for the measured four-event sample.
-    const normalFourEventMs = Date.now() - normalStartedAt;
-    assert.ok(normalFourEventMs > 0, '1x playback advances four events in measurable time');
-    await chrome.waitFor('!snapshotReplay.playing', 30_000); // budget: hang-only ceiling for the complete 1x replay.
-    assert.equal(await evaluate('snapshotReplay.playing'), false, 'the 1x replay reaches its end');
+    await evaluate(`(() => {
+      window.__replayScheduledDelays = [];
+      const nativeSetTimeout = window.setTimeout.bind(window);
+      /** Observe replay pacing while preserving each native browser timeout unchanged. */
+      window.setTimeout = (callback, delay, ...args) => {
+        if (callback === window.advanceReplay) window.__replayScheduledDelays.push(delay);
+        return nativeSetTimeout(callback, delay, ...args);
+      };
+    })()`);
+    /** Replay the complete exported history and compare scheduled timer values, not elapsed time. */
+    const assertScheduledDelay = async (speed, delay) => {
+      await evaluate(`(() => {
+        window.__replayScheduledDelays.length = 0;
+        replayPosition(snapshotReplay.events.length);
+        const select = document.querySelector('#replay-speed');
+        select.value = '${speed}';
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+      })()`);
+      assert.equal(await evaluate("document.querySelector('#replay-speed').value"), speed);
+      await chrome.click("document.querySelector('#replay-play')");
+      await chrome.waitFor('!snapshotReplay.playing', 30_000); // budget: hang-only ceiling for one complete replay.
+      assert.equal(await evaluate('snapshotReplay.playing'), false, `${speed}× replay reaches its end`);
+      assert.equal(await evaluate('snapshotReplay.index'), initial.total, `${speed}× replay renders the final exported event`);
+      const scheduled = JSON.parse(await evaluate('JSON.stringify(window.__replayScheduledDelays)'));
+      assert.equal(scheduled.length, initial.total - 1, `${speed}× schedules one timeout between each exported event`);
+      assert.ok(scheduled.every((actual) => actual === delay), `${speed}× schedules ${delay} ms per step; got ${scheduled.join(', ')}`);
+    };
+    await assertScheduledDelay('1', 1000);
+    await assertScheduledDelay('4', 250);
+    await assertScheduledDelay('16', 62.5);
+    assert.equal(await evaluate('snapshotReplay.playing'), false, 'each measured replay reaches its end');
 
-    await evaluate("(() => { const speed = document.querySelector('#replay-speed'); speed.value = '16'; speed.dispatchEvent(new Event('change', { bubbles: true })); })()");
-    assert.equal(await evaluate("document.querySelector('#replay-speed').value"), '16');
-    const speedStart = 0; // Play from the completed 1x run restarts at the first event.
-    assert.ok(speedStart + 4 < initial.total, 'at least four events remain to measure 16x playback');
-    const speedStartedAt = Date.now();
-    await chrome.click("document.querySelector('#replay-play')");
-    await chrome.waitFor(`snapshotReplay.index >= ${speedStart + 4}`, 10_000); // budget: hang-only ceiling for the measured four-event sample.
-    const speedFourEventMs = Date.now() - speedStartedAt;
-    assert.ok(speedFourEventMs * 4 < normalFourEventMs,
-      `16x advances four events at least four times faster than measured 1x (${speedFourEventMs}ms vs ${normalFourEventMs}ms)`);
-    await chrome.waitFor('!snapshotReplay.playing', 30_000); // budget: hang-only ceiling for the complete 16x replay.
-    assert.equal(await evaluate('snapshotReplay.playing'), false, 'the replay reaches its end');
+    const changedSpeed = JSON.parse(await evaluate(`JSON.stringify((() => {
+      window.__replayScheduledDelays.length = 0;
+      replayPosition(snapshotReplay.events.length);
+      const select = document.querySelector('#replay-speed');
+      select.value = '4';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelector('#replay-play').click();
+      const wasPlaying = snapshotReplay.playing, atFour = window.__replayScheduledDelays.at(-1);
+      select.value = '16';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      const remainsPlaying = snapshotReplay.playing, atSixteen = window.__replayScheduledDelays.at(-1);
+      document.querySelector('#replay-pause').click();
+      return { wasPlaying, atFour, remainsPlaying, atSixteen, paused: !snapshotReplay.playing };
+    })())`));
+    assert.deepEqual(changedSpeed, { wasPlaying: true, atFour: 250, remainsPlaying: true, atSixteen: 62.5, paused: true },
+      'changing speed while playing replaces the scheduled delay and leaves pause effective');
+    await assertScheduledDelay('16', 62.5);
     const renderedStates = JSON.parse(await evaluate('JSON.stringify(window.__replayObserved.map((entry) => entry.status))'));
     const distinctStates = renderedStates.filter((state, index) => index === 0 || state !== renderedStates[index - 1]);
     const firstClaim = distinctStates.indexOf('building');
@@ -233,6 +255,77 @@ test('static export stays in its prefix and replays read-only in Chrome [A10,A3]
     if (chrome) await closeSnapshotChrome(chrome);
     await new Promise((resolve) => server.close(resolve));
     rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+test('replay speed is judged by its scheduled delay [A10,C7]', { timeout: 90_000 }, async () => {
+  const executable = chromeExecutable();
+  assert.ok(executable, 'Chrome is required for the throttled replay timing proof');
+  const box = machine();
+  const alpha = project(box, 'throttled-snapshot');
+  for (let id = 1; id <= 6; id++) {
+    box.run(alpha.repo, 'add', 'web', `Throttled replay item ${id}`, '--specs', 'G1', '--criterion', 'replays');
+  }
+  const folder = join(box.dir, 'throttled-export');
+  box.run(alpha.repo, 'view', '--export', folder);
+  const host = await serveFolder(folder, '/demo/');
+  const profile = join(box.dir, 'throttled-chrome');
+  let chrome;
+  try {
+    chrome = await openSnapshotChrome(executable, `${host.base}/demo/`, profile);
+    await settled(chrome, "document.body.classList.contains('snapshot') && !!data?.project && snapshotReplay.index === snapshotReplay.events.length");
+    await chrome.send('Emulation.setCPUThrottlingRate', { rate: 6 });
+    const total = await chrome.stable('snapshotReplay.events.length');
+    assert.ok(total >= 6, 'the exported history contains at least six native item moves');
+    await chrome.stable(`(() => {
+      window.__replayScheduledDelays = [];
+      const nativeSetTimeout = window.setTimeout.bind(window);
+      /** Observe replay pacing while preserving each native browser timeout unchanged. */
+      window.setTimeout = (callback, delay, ...args) => {
+        if (callback === window.advanceReplay) window.__replayScheduledDelays.push(delay);
+        return nativeSetTimeout(callback, delay, ...args);
+      };
+    })()`);
+    /** Confirm the pacing value for every scheduled step in a complete CPU-throttled replay. */
+    const assertThrottledDelay = async (speed, delay) => {
+      await chrome.stable(`(() => {
+        window.__replayScheduledDelays.length = 0;
+        replayPosition(snapshotReplay.events.length);
+        const select = document.querySelector('#replay-speed');
+        select.value = '${speed}';
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+      })()`);
+      await press(chrome, "document.querySelector('#replay-play')");
+      await chrome.waitFor('!snapshotReplay.playing', 30_000); // budget: hang-only ceiling for one complete replay.
+      assert.equal(await chrome.stable('snapshotReplay.playing'), false, `${speed}× replay reaches its end`);
+      assert.equal(await chrome.stable('snapshotReplay.index'), total, `${speed}× replay renders the final exported event`);
+      const scheduled = await chrome.stable('window.__replayScheduledDelays');
+      assert.equal(scheduled.length, total - 1, `${speed}× schedules one delay between every replay step`);
+      assert.ok(scheduled.every((actual) => actual === delay), `${speed}× schedules ${delay} ms per step`);
+    };
+    await assertThrottledDelay('1', 1000);
+    await assertThrottledDelay('4', 250);
+    await assertThrottledDelay('16', 62.5);
+    const changedSpeed = await chrome.stable(`(() => {
+      window.__replayScheduledDelays.length = 0;
+      replayPosition(snapshotReplay.events.length);
+      const select = document.querySelector('#replay-speed');
+      select.value = '4';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelector('#replay-play').click();
+      const wasPlaying = snapshotReplay.playing, atFour = window.__replayScheduledDelays.at(-1);
+      select.value = '16';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      const remainsPlaying = snapshotReplay.playing, atSixteen = window.__replayScheduledDelays.at(-1);
+      document.querySelector('#replay-pause').click();
+      return { wasPlaying, atFour, remainsPlaying, atSixteen, paused: !snapshotReplay.playing };
+    })()`);
+    assert.deepEqual(changedSpeed, { wasPlaying: true, atFour: 250, remainsPlaying: true, atSixteen: 62.5, paused: true },
+      'changing speed while playing replaces the scheduled delay under CPU throttle');
+    assert.deepEqual(chrome.exceptions, [], 'the throttled snapshot reports no uncaught browser errors');
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    await host.close();
   }
 });
 
