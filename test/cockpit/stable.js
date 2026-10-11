@@ -59,8 +59,12 @@ export async function waitForStableBoxes(chrome, find = 'document.documentElemen
 /**
  * Press an uncovered, stable target through real Chrome input. A pointer move can change hover layout,
  * so wait again after it and refuse a changed point rather than retrying the action at another point.
+ * @param {object} chrome
+ * @param {string} find
+ * @param {{ native?: boolean, afterMouseDown?: () => Promise<void> }} [options] - Optionally run a bounded observation while the real pointer remains held.
+ * @returns {Promise<void>}
  */
-export async function press(chrome, find, { native = true } = {}) {
+export async function press(chrome, find, { native = true, afterMouseDown = null } = {}) {
   await waitForStableBoxes(chrome, find);
   if (!native) return rawChromeEvaluation(chrome, `(${find}).click()`);
   await rawChromeEvaluation(chrome, `(${find}).scrollIntoView({ block: 'center', behavior: 'instant' })`);
@@ -84,7 +88,11 @@ export async function press(chrome, find, { native = true } = {}) {
     document.addEventListener('mousedown', event => Object.assign(window.__pressed, { landed: name(event.target), landedAt: Math.round(event.clientY), scrolledTo: Math.round(scrollY) }), { capture: true, once: true });
   })()`);
   await raw.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 });
-  await raw.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 });
+  try {
+    if (afterMouseDown) await afterMouseDown();
+  } finally {
+    await raw.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 });
+  }
 }
 
 /** Tap a stable visible target with Chrome's real touch input path, so touch interactions are not simulated clicks. */
