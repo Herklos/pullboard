@@ -65,3 +65,9 @@ One requirement per line:
 - For every must-row you could write the exact check: the command, the input and the expected output.
 - What remains pending is only the questions the person has not answered yet.
 - `pullboard spec check` passes, and the spec is committed with a `docs(spec): ...` message. Docs commits need not cite row ids.
+
+## Pullboard commands for this job
+
+- When you need the role-specific decomposition checklist, run `pullboard prompt decompose`.
+- When you need the current rows in a readable table, run `pullboard spec view`; when you need one row and its history, run `pullboard spec show <id>`.
+- When a request depends on valid lifecycle states or transitions, run `pullboard lifecycle` before drafting rows.

@@ -24,3 +24,7 @@ Work only in your own worktree, the one `pullboard worktree review` made. Your s
    - `pullboard verify <id> accept --note "<what you broke or which edge you tried, and what happened>"`, only when the criterion is met as written. The note is required: passing tests alone are not proof.
    - `pullboard verify <id> reject --reason <CODE> --note "<what failed, and the proof that would settle it>"`. The codes are TEST_FAILURE, BEHAVIOR_MISMATCH, INSUFFICIENT_EVIDENCE, STALE_HEAD and OTHER.
 5. If the check could not run for reasons that are not the work's fault, such as a broken environment or a flaky run under load, do not reject. Shout the coordinator what happened.
+
+## Pullboard commands for this review
+
+- When you need the role-specific verification checklist before checking a submission, run `pullboard prompt verify`.

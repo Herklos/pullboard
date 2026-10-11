@@ -8,7 +8,9 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { FIGURES, drawLifecycle } from '../docs/img/draw.mjs';
+import { HELP, commandPhrases } from '../src/help.js';
 import { MACHINE } from '../src/machine.js';
+import { agentsBlock } from '../src/templates.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const README = readFileSync(join(ROOT, 'README.md'), 'utf8');
@@ -291,4 +293,33 @@ test("what's next lists only unbuilt work [I11]", () => {
 
   assert.doesNotMatch(bullets.join('\n'), /\b(?:relay|roadmap)\b/iu, 'shipped relay and roadmap work do not remain in the upcoming bullets');
   assert.equal(lines.at(-1), 'The full plan lives in the Roadmap tab in Pullboard View and `pullboard roadmap`.', 'the section ends by pointing to the full plan');
+});
+
+test('every command in help is taught to agents [I11]', () => {
+  const skillFiles = readdirSync(join(ROOT, 'skills'), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => join(ROOT, 'skills', entry.name, 'SKILL.md'));
+  const instructionLines = `${skillFiles.map((file) => readFileSync(file, 'utf8')).join('\n')}\n${agentsBlock()}`.split(/\r?\n/u);
+  const phrases = new Set(commandPhrases({ all: HELP.all, commands: {} }));
+  for (const declaration of Object.values(HELP.commands)) {
+    for (const usage of declaration.usages) {
+      for (const phrase of commandPhrases({ all: `  ${usage}`, commands: {} })) phrases.add(phrase);
+    }
+  }
+  const personOnly = new Map([
+    ['spec approve', 'Only the person approves a SPEC row.'],
+    ['spec decline', 'Only the person declines a SPEC row.'],
+    ['relay recover', 'The command is explicitly reserved for person-only recovery.'],
+  ]);
+  assert.ok(personOnly.size <= 4, 'the person-only exception list stays short');
+  for (const [phrase, reason] of personOnly) {
+    assert.ok(phrases.has(phrase), `${phrase} is still a command in help`);
+    assert.ok(reason.trim(), `${phrase} has a reason agents must not run it`);
+  }
+  const untaught = [...phrases].filter((phrase) => {
+    const command = phrase.split(' ').map((word) => word.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')).join('\\s+');
+    const taught = instructionLines.some((line) => new RegExp(`(?:^|[^A-Za-z0-9_-])pullboard\\s+${command}(?=$|[^A-Za-z0-9_-])`, 'u').test(line));
+    return !taught && !personOnly.has(phrase);
+  });
+  assert.deepEqual(untaught, [], `teach each command where agents need it, or explain a person-only exception:\n${untaught.join('\n')}`);
 });
