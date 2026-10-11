@@ -184,11 +184,13 @@ function homeTab() {
   const kept = keep('pb.tab');
   return kept && kept !== 'roadmap' ? kept : 'items';
 }
-const view = { roadmapOpen: new Map(), root: keep('pb.project'), tab: addressTab() || homeTab(), itemsView: typeof location !== 'undefined' && location.hash === '#items/pipeline' ? 'pipeline' : 'list', seen: {}, code: {}, item: null, adding: false, declining: null, state: 'active', rows: { spec: 'decide', doctrine: 'all' }, row: { spec: null, doctrine: null }, agent: null, allAgents: false, agentsHidden: keep('pb.agents') === 'hidden', statsOpen: false, open: {} };
+const view = { roadmapOpen: new Map(), root: keep('pb.project'), tab: addressTab() || homeTab(), itemsView: typeof location !== 'undefined' && location.hash === '#items/pipeline' ? 'pipeline' : 'list', seen: {}, code: {}, item: null, adding: false, declining: null, state: 'active', rows: { spec: 'decide', doctrine: 'all' }, row: { spec: null, doctrine: null }, agent: null, allAgents: false, agentsHidden: keep('pb.agents') === 'hidden', statsOpen: false, open: {}, addressDetail: null, shout: null, scrollPlace: false };
 let switchGeneration = 0;
 if (snapshot) view.state = 'all';
 let data = null;
 let seen = '';
+let addressReady = false;
+const addressedShouts = new Map();
 const $ = (id) => document.getElementById(id);
 /**
  * Draw the page in the theme the person picked, light or dark; with none picked it follows the system, live. The button
@@ -942,11 +944,24 @@ async function refresh() {
   // The project this board is, so a switch still loading never reads it as the next one's.
   next.root = root;
   // Rebuild only when the board changed: a list rebuilt under the pointer can swallow a click.
+  if (!addressReady) {
+    data = next;
+    const place = snapshot ? null : placeAtAddress(next);
+    if (place?.root && place.root !== view.root) {
+      view.root = place.root;
+      keep('pb.project', view.root);
+      return refresh();
+    }
+    if (place) applyPlace(place, globalThis.history?.state);
+    addressReady = true;
+  }
   const text = JSON.stringify(next);
   if (text !== seen) {
     seen = text;
     data = next;
     render();
+    address(false);
+    void loadAddressedShout();
   }
   if (snapshot && !snapshotReplay.final && data.project) {
     snapshotReplay.final = structuredClone(data.project);
@@ -1456,7 +1471,7 @@ function render() {
   $('pipeline').innerHTML = pipeline ? pipelineCard(shown) : '';
   // With nothing picked, the detail shows the first row, and keeps it when a refresh reorders the list.
   // While another project loads, the item picked there waits for its own board.
-  if (data.root === view.root && !view.adding && !p.items.some((i) => i.id === view.item)) view.item = shown.length ? shown[0].id : null;
+  if (data.root === view.root && !view.adding && !(view.tab === 'items' && view.addressDetail !== null && view.addressDetail !== 'pipeline') && !p.items.some((i) => i.id === view.item)) view.item = shown.length ? shown[0].id : null;
   // An open item's chip, the same in its row and its detail: gated, its lane held, or unclaimed.
   const openChip = (i) => i.blockedBy.length || heldLanes.has(i.lane) ? '<span class="chip gate">' + (i.blockedBy.length ? 'gated' : 'lane held') + '</span>' : chip('open');
   $('chain').innerHTML = shown.length ? shown.map((i) => {
@@ -1478,11 +1493,11 @@ function render() {
 
   const item = p.items.find((i) => i.id === view.item);
   // The form shows when asked for, or when the project has no item at all, withdrawn ones included.
-  const adding = view.adding || !p.items.length;
+  const adding = view.adding || (!p.items.length && !(view.tab === 'items' && view.addressDetail !== null && view.addressDetail !== 'pipeline'));
   $('add-form').hidden = !adding;
   $('add-cancel').hidden = !p.items.length;
   $('detail').hidden = adding;
-  if (!item) $('detail').innerHTML = '<div class="empty">Pick an item to see its criterion, verdicts and history.</div>';
+  if (!item) $('detail').innerHTML = '<div class="empty">' + (view.tab === 'items' && view.addressDetail !== null && view.addressDetail !== 'pipeline' ? 'No item #' + esc(view.addressDetail) + ' exists here.' : 'Pick an item to see its criterion, verdicts and history.') + '</div>';
   if (item && !view.adding) {
     const s = stateOf(item);
     const cited = item.specs.map((id) => p.spec.find((r) => r.id === id) || { id, status: 'missing', text: '(not in SPEC.md)' });
@@ -1547,7 +1562,10 @@ function render() {
   const lead = (from) => from === 'coordinator';
   // Opened from the status bar's unread, the feed is exactly those shouts, the ones after the mark the person had.
   const unread = view.unread?.root === view.root ? view.unread : null;
-  const heard = unread ? p.shouts.filter((x) => x.shout_id > unread.after) : view.agent ? p.shouts.filter((x) => x.shout_from === view.agent || x.shout_to === view.agent) : p.shouts;
+  const addressed = addressedShouts.get(JSON.stringify([view.root, view.shout]));
+  const feedShouts = addressed?.shout && !p.shouts.some((entry) => entry.shout_id === view.shout) ? [...p.shouts, addressed.shout] : p.shouts;
+  const heard = unread ? feedShouts.filter((x) => x.shout_id > unread.after) : view.agent ? feedShouts.filter((x) => x.shout_from === view.agent || x.shout_to === view.agent) : feedShouts;
+  if (view.tab === 'shouts' && view.shout !== null) openShouts.add(view.shout);
   const bar = !unread && !view.agent ? '' : '<div class="feed-bar">' + (unread ? '<span><b>' + heard.length + '</b> unread <button class="link" data-unread type="button">show all</button></span>'
     : '<span>Shouts with <b>' + esc(agentName(view.agent)) + '</b> <button class="link" data-agent="" type="button">show all</button></span>') + '</div>';
   $('shouts-pane').classList.toggle('bare', view.agentsHidden);
@@ -1565,11 +1583,11 @@ function render() {
   };
   // One card for a shout, in the feed and among the asks; tail adds what the place needs, such as Answer. Only the
   // feed's copy carries the band and the id an answer's link lands on, so an ask shown twice never repeats an id.
-  const card = (x, tail = '', inFeed = true) => '<article class="shout h' + hue(x.shout_from) + (lead(x.shout_from) ? ' lead' : '') + (openShouts.has(x.shout_id) ? ' open' : '') + '"' + (inFeed ? ' id="shout-' + x.shout_id + '"' : '') + ' data-shout-id="' + x.shout_id + '">'
-    + (lead(x.shout_from) ? '<span class="avatar">' + LEAD + '</span>' : '<span class="avatar' + (initials(x.shout_from).length > 3 ? ' wide' : '') + '" aria-hidden="true">' + esc(initials(x.shout_from)) + '</span>') + '<div class="shout-main"><header><b class="who">' + shoutAgentName(x.shout_from) + '</b><span class="to">→ ' + shoutAgentName(x.shout_to) + '</span>'
+  const card = (x, tail = '', inFeed = true) => '<article class="shout h' + hue(x.shout_from) + (lead(x.shout_from) ? ' lead' : '') + (openShouts.has(x.shout_id) ? ' open' : '') + (inFeed && x.shout_id === view.shout ? ' found' : '') + '"' + (inFeed ? ' id="shout-' + x.shout_id + '"' : '') + ' data-shout-id="' + x.shout_id + '">'
+    + (lead(x.shout_from) ? '<span class="avatar">' + LEAD + '</span>' : '<span class="avatar' + (initials(x.shout_from).length > 3 ? ' wide' : '') + '" aria-hidden="true">' + esc(initials(x.shout_from)) + '</span>') + '<div class="shout-main">' + (inFeed && x.shout_id === view.shout ? '<h2>Shout #' + x.shout_id + '</h2>' : '') + '<header><b class="who">' + shoutAgentName(x.shout_from) + '</b><span class="to">→ ' + shoutAgentName(x.shout_to) + '</span>'
     + (itemOf(x) ? '<span class="item">#' + esc(itemOf(x)) + '</span>' : '') + mark(x) + '<time class="long" data-ago="' + esc(x.shout_at) + '" title="' + esc(when(x.shout_at)) + '">' + agoLong(x.shout_at) + '</time></header>'
     + '<div class="text">' + rich(x.shout_text, titles) + '</div><button class="more" data-more type="button">' + (openShouts.has(x.shout_id) ? 'less' : 'more') + '</button>' + (inFeed ? band(x) + heardBy(x) : '') + evidence(x) + tail + '</div></article>';
-  $('feed').innerHTML = bar + (heard.length ? dayRules(heard, (x) => x.shout_at, card) : '<div class="empty">' + (unread ? 'No unread shouts.' : view.agent ? 'No shouts with ' + esc(agentName(view.agent)) + ' among the last forty.' : 'No shouts yet.') + '</div>');
+  $('feed').innerHTML = (view.shout !== null && !feedShouts.some((entry) => entry.shout_id === view.shout) ? '<p class="empty" id="shout-address-status" role="status">' + esc(addressed?.error || 'Loading shout #' + view.shout + '…') + '</p>' : '') + bar + (heard.length ? dayRules(heard, (x) => x.shout_at, card) : '<div class="empty">' + (unread ? 'No unread shouts.' : view.agent ? 'No shouts with ' + esc(agentName(view.agent)) + ' among the last forty.' : 'No shouts yet.') + '</div>');
   foldShouts();
   // Each ask waits here until it is answered (B21); the answer itself is typed in the form below. The
   // person answers the ones passed up to them; the rest wait on whoever holds them (B26).
@@ -1641,7 +1659,7 @@ function render() {
     $(kind + '-chips').innerHTML = Object.keys(labels).map((f) => '<button data-rows="' + kind + ':' + f + '" class="' + (filter === f ? 'on' : '') + '" type="button">' + labels[f] + '<b>' + n[f] + '</b></button>').join('');
     const shownRows = rows.filter((r) => filter === 'all' || (filter === 'decide' ? undecided(r) : r.status === 'approved'));
     // With no row picked, or the pick filtered out, the detail opens on the first row shown, as Items does.
-    if (!shownRows.some((r) => r.id === view.row[kind])) view.row[kind] = shownRows[0]?.id ?? null;
+    if (!(view.tab === kind && view.addressDetail !== null) && !shownRows.some((r) => r.id === view.row[kind])) view.row[kind] = shownRows[0]?.id ?? null;
     const feedback = view.specFeedback?.kind === kind && view.specFeedback.root === view.root && view.specFeedback.from === 'list' ? view.specFeedback : null;
     const feedbackId = feedback && (shownRows.some((r) => r.id === feedback.id) ? feedback.id : shownRows.some((r) => r.id === feedback.next) ? feedback.next : shownRows[0]?.id);
     let section = null;
@@ -1674,7 +1692,7 @@ function render() {
     const rowDecisionActions = !snapshot && (!readOnly || requests) && row && undecided(row) && (kind === 'spec' || row.origin !== 'standard')
       ? '<div class="spec-decision-actions detail-decision-actions"><button class="approve-row" data-row-decision="approve" data-row-kind="' + kind + '" data-row-id="' + esc(row.id) + '" title="Approve (A, from the list)" type="button">Approve <kbd>A</kbd></button><button class="decline-row" data-row-decision="decline" data-row-kind="' + kind + '" data-row-id="' + esc(row.id) + '" title="Decline (D, from the list)" type="button">Decline <kbd>D</kbd></button></div>'
       : '';
-    $(kind + '-detail').innerHTML = row ? '<div class="stack tight"><h2><span>' + esc(row.id) + '</span>' + text + '</h2><div class="meta"><span class="chip ' + tone(row.status) + '">' + esc(rowStatus) + '</span>' + (row.tier ? '<span class="chip">' + esc(row.tier) + '</span>' : '') + source + '</div>' + rowDecisionActions + (kind === 'spec' && view.specFeedback?.kind === kind && view.specFeedback.root === view.root && view.specFeedback.from === 'detail' && view.specFeedback.id === row.id ? specFeedback(view.specFeedback) : '') + '<dl class="kv"><dt>section</dt><dd>' + esc(row.section) + '</dd>' + reason + (row.gate ? '<dt>gate</dt><dd>' + esc(row.gate) + '</dd>' : '') + (row.serves && row.serves.length ? '<dt>serves</dt><dd>' + esc(row.serves.join(', ')) + '</dd>' : '') + '</dl><div><h3>Items that cite it</h3>' + (citing.length ? '<div class="links">' + citing.map((i) => '<div class="links-item" data-item="' + i.id + '"><span>#' + i.id + ' ' + rich(i.title, titles) + '</span></div>').join('') + '</div>' : '<div class="muted">None yet.</div>') + '</div><div class="muted">' + home + '</div></div>' : '<div class="empty">Pick a row to see it, and the items that cite it.</div>';
+    $(kind + '-detail').innerHTML = row ? '<div class="stack tight"><h2><span>' + esc(row.id) + '</span>' + text + '</h2><div class="meta"><span class="chip ' + tone(row.status) + '">' + esc(rowStatus) + '</span>' + (row.tier ? '<span class="chip">' + esc(row.tier) + '</span>' : '') + source + '</div>' + rowDecisionActions + (kind === 'spec' && view.specFeedback?.kind === kind && view.specFeedback.root === view.root && view.specFeedback.from === 'detail' && view.specFeedback.id === row.id ? specFeedback(view.specFeedback) : '') + '<dl class="kv"><dt>section</dt><dd>' + esc(row.section) + '</dd>' + reason + (row.gate ? '<dt>gate</dt><dd>' + esc(row.gate) + '</dd>' : '') + (row.serves && row.serves.length ? '<dt>serves</dt><dd>' + esc(row.serves.join(', ')) + '</dd>' : '') + '</dl><div><h3>Items that cite it</h3>' + (citing.length ? '<div class="links">' + citing.map((i) => '<div class="links-item" data-item="' + i.id + '"><span>#' + i.id + ' ' + rich(i.title, titles) + '</span></div>').join('') + '</div>' : '<div class="muted">None yet.</div>') + '</div><div class="muted">' + home + '</div></div>' : '<div class="empty">' + (view.tab === kind && view.addressDetail !== null ? 'No ' + (kind === 'spec' ? 'Spec' : 'Doctrine') + ' row ' + esc(view.addressDetail) + ' exists here.' : 'Pick a row to see it, and the items that cite it.') + '</div>';
   }
 
   if (keep('pb.flow') !== 'hidden') $('flow').innerHTML = flowSvg(p);
@@ -1691,6 +1709,7 @@ function render() {
   };
   $('activity').innerHTML = p.events.length ? byDay(p.events, (e) => e.event_at, (e) => '<div><time>' + clock(e.event_at) + '</time><div class="act">' + (e.event_kind === 'shout' || e.event_kind === 'answer' ? spoke(e) : '<b>' + esc(agentName(e.event_by)) + '</b> ' + esc(e.event_kind) + (e.item_id ? ' <button class="ref" data-go="item:' + e.item_id + '" type="button">#' + e.item_id + '</button>' + (titles.has(String(e.item_id)) ? ' <span class="what">' + rich(titles.get(String(e.item_id)), titles) + '</span>' : '') : '')) + '</div></div>') : '<div class="empty">No activity yet.</div>';
   showTab();
+  revealPlace();
 }
 
 /**
@@ -1712,51 +1731,135 @@ function showTab() {
   if (view.tab === 'shouts') foldShouts();
 }
 
-/** The address that names a tab: the Roadmap's own, or the board's, keeping the rest as it is. */
-function tabHref(tab) {
-  const own = tab === 'roadmap';
-  if (tab === 'items' && view.itemsView === 'pipeline') return (routed ? '/' : location.pathname) + location.search + '#items/pipeline';
-  return routed ? (own ? '/roadmap' : '/') + location.search : location.pathname + location.search + (own ? '#roadmap' : '');
+/** Read the selected repo, tab and detail from a path or the hosted page's fragment. */
+function placeAtAddress(page = data) {
+  const tabs = ['items', 'shouts', 'spec', 'doctrine', 'activity', 'roadmap'];
+  const hash = location.hash || '';
+  let path = routed ? location.pathname || '/' : hash.slice(1);
+  if (hash === '#items/pipeline' || hash === '#roadmap') path = hash.slice(1);
+  if (hash.startsWith('#shout-')) path = 'shouts/' + hash.slice(7);
+  let parts;
+  try { parts = path.split('/').filter(Boolean).map(decodeURIComponent); }
+  catch { parts = []; }
+  const repo = page?.projects.find((entry) => entry.ok && entry.name === parts[0]);
+  const group = page?.groups.find((entry) => entry.name === parts[0]);
+  const named = (repo || group) && tabs.includes(parts[1]);
+  const root = named ? repo?.root || group.key : null;
+  if (named) parts.shift();
+  const tab = tabs.includes(parts[0]) ? parts.shift() : (!path && transportModule && globalThis.history?.state?.tab) || homeTab();
+  return { root, tab, detail: parts[0] ?? null };
 }
 
-/**
- * Keep the address naming what the page shows (N38). Moving between the Roadmap and another tab
- * changes it and adds a history entry, so Back and Forward return there; anything else, or push
- * false, only updates the entry. Each entry carries its project and item too, so returning to one
- * shows that board as it was. A host that refuses the change still shows the tab.
- */
+/** Name each repo even beneath a group; one repo needs no prefix. */
+function tabHref(tab) {
+  if (snapshot) {
+    if (tab === 'items' && view.itemsView === 'pipeline') return location.pathname + location.search + '#items/pipeline';
+    return location.pathname + location.search + (tab === 'roadmap' ? '#roadmap' : '');
+  }
+  const repo = data?.projects.find((entry) => entry.root === view.root);
+  const group = data?.groups.find((entry) => entry.key === view.root);
+  const name = repo?.name || group?.name;
+  const prefix = (data?.projects.filter((entry) => entry.ok).length || 0) > 1 && name ? '/' + encodeURIComponent(name) : '';
+  const detail = tab === 'items' && view.itemsView === 'pipeline' && (view.addressDetail === null || view.addressDetail === 'pipeline') ? 'pipeline' : view.addressDetail;
+  const path = prefix + '/' + tab + (detail === null ? '' : '/' + encodeURIComponent(String(detail)));
+  return routed ? path + location.search : location.pathname + location.search + '#' + path.slice(1);
+}
+
+/** Push one entry per changed place, and retain native fact anchors when restoring an entry. */
 function address(push = true) {
-  if (typeof history === 'undefined' || typeof location === 'undefined') return;
-  const state = { tab: view.tab, root: view.root, item: view.item, itemsView: view.itemsView };
-  const href = tabHref(view.tab);
+  if (typeof history === 'undefined' || typeof location === 'undefined' || !addressReady) return;
+  const state = { tab: view.tab, root: view.root, item: view.item, itemsView: view.itemsView, detail: view.addressDetail };
+  let href = tabHref(view.tab);
+  if (!push && routed && location.hash && !['#roadmap', '#items/pipeline'].includes(location.hash)) href += location.hash;
   try {
     if (push && href !== location.pathname + location.search + (location.hash || '')) history.pushState(state, '', href);
-    else history.replaceState(state, '');
-  } catch { /* The tab shows all the same. */ }
+    else if (transportModule && !location.hash && view.tab === 'items' && view.addressDetail === null) history.replaceState(state, '');
+    else history.replaceState(state, '', href);
+  } catch { /* A host that refuses history changes still shows the selected place. */ }
 }
 
-/**
- * Show what a history entry names, on Back, Forward or an edited #roadmap: the tab its address
- * names, or at the board's address the tab the entry kept, and the project and item it kept.
- */
+/** Apply a parsed selection without recording another history entry. */
+function applyPlace(place, kept = null) {
+  if (place.root) view.root = place.root;
+  view.tab = place.tab;
+  view.addressDetail = place.detail;
+  view.item = place.tab === 'items' && place.detail !== null && place.detail !== 'pipeline' ? Number(place.detail) : null;
+  view.itemsView = place.tab === 'items' && place.detail === 'pipeline' ? 'pipeline' : 'list';
+  if (place.tab === 'items' && kept?.root === view.root && kept.tab === place.tab && kept.detail === place.detail && kept.itemsView === 'pipeline') view.itemsView = 'pipeline';
+  view.shout = place.tab === 'shouts' && place.detail !== null ? Number(place.detail) : null;
+  view.agent = null;
+  view.unread = null;
+  view.roadmapOnly = null;
+  if (place.tab === 'spec' || place.tab === 'doctrine') {
+    view.row[place.tab] = place.detail;
+    if (place.detail !== null) view.rows[place.tab] = 'all';
+  }
+  view.scrollPlace = place.detail !== null;
+  keep('pb.project', view.root);
+  if (place.tab !== 'roadmap') keep('pb.tab', place.tab);
+}
+
+/** Restore the address on Back and Forward, with a scoped refresh when the repo changes. */
 function fromAddress(event) {
-  const kept = (event && event.state) || {};
-  view.itemsView = location.hash === '#items/pipeline' ? 'pipeline' : kept.itemsView === 'pipeline' && kept.tab !== 'items' ? 'pipeline' : 'list';
-  view.tab = addressTab() || (kept.tab && kept.tab !== 'roadmap' ? kept.tab : homeTab());
-  if (view.tab !== 'roadmap') keep('pb.tab', view.tab);
-  const item = typeof kept.item === 'number' ? kept.item : null;
-  if (kept.root && kept.root !== view.root && data && data.projects.some((x) => x.ok && x.root === kept.root)) return switchTo(kept.root, item, false);
-  if (item !== null && view.tab === 'items') view.item = item;
+  if (!data) return;
+  if (snapshot) {
+    const kept = event?.state || {};
+    view.tab = addressTab() || kept.tab || homeTab();
+    view.itemsView = location.hash === '#items/pipeline' ? 'pipeline' : 'list';
+    if (typeof kept.item === 'number') view.item = kept.item;
+    if (kept.root && kept.root !== view.root) return switchTo(kept.root, view.item, false);
+  } else {
+    const place = placeAtAddress();
+    // A native timeline anchor keeps its existing DOM target and the browser's own scroll.
+    if ((location.hash || '').startsWith('#fact-') && place.tab === 'items' && (!place.root || place.root === view.root) && (place.detail === null || Number(place.detail) === view.item)) { address(false); return; }
+    const previous = view.root;
+    applyPlace(place, event?.state);
+    if (previous !== view.root) return switchTo(view.root, view.item, false);
+  }
   address(false);
-  if (data) render();
-  else showTab();
+  render();
+  void loadAddressedShout();
 }
 
-/** Pick a tab. The board's address keeps it for next time; the Roadmap has an address of its own. */
-function openTab(tab) {
+/** Pick a tab or an explicit detail and record the complete place once. */
+function openTab(tab, detail = null) {
   view.tab = tab;
+  view.addressDetail = detail;
+  view.shout = tab === 'shouts' && detail !== null ? Number(detail) : null;
+  view.scrollPlace = detail !== null;
   if (tab !== 'roadmap') keep('pb.tab', tab);
   address();
+}
+
+/** Fetch one old shout through the same public read API used by local and relay views. */
+async function loadAddressedShout() {
+  if (!data?.project || view.tab !== 'shouts' || view.shout === null || data.root !== view.root) return;
+  const root = view.root, id = view.shout, key = JSON.stringify([root, id]);
+  if (data.project.shouts.some((entry) => entry.shout_id === id) || addressedShouts.has(key)) return;
+  const entry = { shout: null, error: null };
+  addressedShouts.set(key, entry);
+  try {
+    const reply = await api(boardPath(root) + '/shouts/' + encodeURIComponent(String(id)));
+    entry.shout = reply.shout;
+  } catch (error) {
+    const message = String(error.message || error);
+    entry.error = transportModule && !message.includes('NO_SHOUT')
+      ? 'This shout is older than the relay holds. Open its address in the local project view.'
+      : 'No shout #' + id + ' exists here. ' + message;
+  }
+  if (view.root === root && view.shout === id && view.tab === 'shouts') render();
+}
+
+/** Scroll a newly addressed detail once, after its real content has arrived. */
+function revealPlace() {
+  if (!view.scrollPlace) return;
+  const fact = view.tab === 'items' && (location.hash || '').startsWith('#fact-') ? $(location.hash.slice(1)) : null;
+  const element = fact || (view.tab === 'shouts' ? $('shout-' + view.shout)
+    : view.tab === 'items' ? $('detail')
+      : ['spec', 'doctrine'].includes(view.tab) ? $(view.tab + '-detail') : null);
+  if (!element || (view.tab === 'shouts' && !element.querySelector('h2'))) return;
+  element.scrollIntoView({ block: 'center', behavior: 'instant' });
+  view.scrollPlace = false;
 }
 
 /**
@@ -1858,10 +1961,9 @@ function go(target, root = view.root) {
   else if (kind === 'shout') { tab = 'shouts'; view.agent = null; view.unread = null; }
   else if (kind === 'tab') tab = id;
   else if (kind === 'decide') { tab = 'shouts'; answer(Number(id)); }
-  openTab(tab);
-  if (kind === 'item') pick(Number(id), root);
-  else render();
-  if (kind === 'shout') { const card = document.getElementById('shout-' + id); card?.scrollIntoView({ block: 'center' }); card?.classList.add('found'); setTimeout(() => card?.classList.remove('found'), 1600); }
+  if (kind === 'item') { view.tab = 'items'; view.itemsView = 'list'; pick(Number(id), root); }
+  else { openTab(tab, ['spec', 'doctrine', 'shout'].includes(kind) ? id : null); render(); }
+  if (kind === 'shout') void loadAddressedShout();
 }
 
 /** An item's state as a word, for a search result. */
@@ -1917,8 +2019,11 @@ function openFound(target) {
 function pick(id, root = view.root) {
   view.adding = false;
   if (root !== view.root) return switchTo(root, id);
+  view.tab = 'items';
+  keep('pb.tab', view.tab);
   view.item = id;
-  address(false);
+  view.addressDetail = String(id);
+  address();
   render();
   reveal();
 }
@@ -2201,7 +2306,7 @@ function switchTo(root, target = null, record = true) {
   view.adding = false;
   if (record && view.item !== null) { view.tab = 'items'; keep('pb.tab', view.tab); }
   keep('pb.project', root);
-  if (record) address(false);
+  if (record) { view.addressDetail = requestedItem === null ? null : String(requestedItem); view.shout = null; address(); }
   fold(false);
   // The board that arrives is drawn even if it matches the last one seen, so the pick is made from it.
   seen = '';
@@ -2242,7 +2347,7 @@ $('shouts-pane').addEventListener('click', (event) => {
 // Enter shouts; Shift+Enter starts a new line.
 $('shout-text').addEventListener('keydown', (event) => { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); $('shout-form').requestSubmit(); } });
 document.addEventListener('click', (event) => {
-  const t = event.target.closest('[data-status],[data-roadmap-key],[data-roadmap-all],[data-root],[data-tab],[data-go],[data-item],[data-items-view],[data-state],[data-rows],[data-row],[data-row-decision],[data-section-approve],[data-release],[data-shout],[data-new],[data-code],[data-code-all],[data-code-less],[data-stats-toggle],[data-stats-close],#proj-switch,#console');
+  const t = event.target.closest('[data-status],[data-shout-id],[data-roadmap-key],[data-roadmap-all],[data-root],[data-tab],[data-go],[data-item],[data-items-view],[data-state],[data-rows],[data-row],[data-row-decision],[data-section-approve],[data-release],[data-shout],[data-new],[data-code],[data-code-all],[data-code-less],[data-stats-toggle],[data-stats-close],#proj-switch,#console');
   if (!event.target.closest('.side')) fold(false);
   if (!t) return;
   if (t.id === 'proj-switch') { fold(!$('side').classList.contains('open')); return; }
@@ -2260,7 +2365,7 @@ document.addEventListener('click', (event) => {
     return;
   }
   if (t.dataset.status) { statusGo(t.dataset.status); return; }
-  if (t.dataset.itemsView) { view.itemsView = t.dataset.itemsView; address(); render(); return; }
+  if (t.dataset.itemsView) { view.itemsView = t.dataset.itemsView; view.addressDetail = null; address(); render(); return; }
   if ('roadmapKey' in t.dataset) {
     const key = t.dataset.roadmapKey;
     view.roadmapOpen.set(JSON.stringify([view.root, key]), t.getAttribute('aria-expanded') !== 'true');
@@ -2270,11 +2375,18 @@ document.addEventListener('click', (event) => {
   }
   if ('roadmapAll' in t.dataset) { view.roadmapOnly = null; render(); return; }
   if (t.dataset.root) switchTo(t.dataset.root, t.dataset.go || '');
-  else if (t.dataset.tab) { view.unread = null; view.roadmapOnly = null; openTab(t.dataset.tab); showTab(); }
+  else if (t.dataset.tab) { view.unread = null; view.roadmapOnly = null; openTab(t.dataset.tab); render(); }
   else if (t.dataset.go) go(t.dataset.go, t.dataset.board);
   else if (t.dataset.item) pick(Number(t.dataset.item));
   else if (t.dataset.state) { view.state = t.dataset.state; render(); }
-  else if (t.dataset.rows) { const [kind, f] = t.dataset.rows.split(':'); view.rows[kind] = f; render(); }
+  else if (t.dataset.rows) {
+    const [kind, f] = t.dataset.rows.split(':');
+    const addressed = view.addressDetail !== null;
+    view.rows[kind] = f;
+    view.addressDetail = null;
+    render();
+    if (addressed) { view.addressDetail = view.row[kind]; address(); }
+  }
   else if (t.dataset.rowDecision) {
     const id = t.dataset.rowId, kind = t.dataset.rowKind;
     if (t.dataset.rowDecision === 'approve') decideRow(kind, 'spec-approve', { ids: id }, t);
@@ -2285,9 +2397,12 @@ document.addEventListener('click', (event) => {
     const ids = data.project.spec.filter((row) => row.section === section && ['pending', 'draft'].includes(row.status) && !row.decision).map((row) => row.id);
     if (ids.length && window.confirm('Approve all ' + ids.length + ' undecided rows in “' + section + '”?')) decideRow('spec', 'spec-approve', { ids: ids.join(' ') }, t);
   }
+  else if (t.dataset.shoutId && !event.target.closest('button,a,input,textarea,select')) { go('shout:' + t.dataset.shoutId); }
   else if (t.dataset.row) {
     const [kind, id] = t.dataset.row.split(':');
     view.row[kind] = id;
+    view.addressDetail = id;
+    address();
     render();
     $(kind + '-list').focus({ preventScroll: true });
     // Where the list and the detail stack, the picked row's detail, with its buttons, comes into view.
@@ -2327,7 +2442,7 @@ for (const kind of ['spec', 'doctrine']) $(kind + '-list').addEventListener('key
   if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
     event.preventDefault();
     const next = ids[Math.min(ids.length - 1, Math.max(0, at + (event.key === 'ArrowDown' ? 1 : -1)))];
-    if (next && next !== view.row[kind]) { view.row[kind] = next; render(); event.currentTarget.querySelector('.srow.on')?.scrollIntoView({ block: 'nearest' }); }
+    if (next && next !== view.row[kind]) { view.row[kind] = next; view.addressDetail = next; address(); render(); event.currentTarget.querySelector('.srow.on')?.scrollIntoView({ block: 'nearest' }); }
   } else if (event.key === 'Enter' && view.row[kind]) {
     event.preventDefault();
     $(kind + '-detail').scrollIntoView({ block: 'start', behavior: 'instant' });

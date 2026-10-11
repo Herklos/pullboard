@@ -125,7 +125,8 @@ test('the roadmap reads every item as the Items tab does, opens each one, anothe
     { id: '#7', label: 'withdrawn', tone: '' },
   ];
   const view = await startView(box);
-  const roadmap = `/roadmap${view.link.search}`;
+  const roadmapPath = '/roadmap-demo/roadmap';
+  const roadmap = `${roadmapPath}${view.link.search}`;
   const profile = mkdtempSync(join(tmpdir(), 'pullboard-roadmap-chrome-'));
   let chrome;
   try {
@@ -140,14 +141,14 @@ test('the roadmap reads every item as the Items tab does, opens each one, anothe
       if (message.method === 'Log.entryAdded' && message.params.entry.level === 'error') consoleErrors.push(message.params.entry.text);
     });
     await chrome.send('Log.enable');
-    await settled(chrome, `!!data?.project && ${showing('roadmap', '/roadmap')} && document.querySelectorAll('#roadmap .milestone').length === 3`);
+    await settled(chrome, `!!data?.project && ${showing('roadmap', roadmapPath)} && document.querySelectorAll('#roadmap .milestone').length === 3`);
     // This story reads every release; open the later cards through their actual controls.
     await openRoadmapParts(chrome);
 
     let seen;
     for (const width of [375, 1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
-      await chrome.waitFor(`innerWidth === ${width} && ${showing('roadmap', '/roadmap')}`);
+      await chrome.waitFor(`innerWidth === ${width} && ${showing('roadmap', roadmapPath)}`);
       seen = await readRoadmap(chrome);
       assert.deepEqual([seen.address, seen.shown, seen.tab], [roadmap, ['roadmap'], 'roadmap'], `${width}: the direct address shows the Roadmap tab, and only it`);
       assert.ok(seen.document <= seen.client && seen.body <= seen.client, `${width}: no sideways scroll: ${JSON.stringify(seen)}`);
@@ -176,43 +177,43 @@ test('the roadmap reads every item as the Items tab does, opens each one, anothe
 
       // An item opens on the Items tab; Back shows the Roadmap at its address again, Forward the item.
       await press(chrome, roadmapRow('#3'));
-      await pressedInto(chrome, `${showing('items', '/')} && document.querySelector('#detail h2')?.innerText.includes('Session timeout banner')`);
+      await pressedInto(chrome, `${showing('items', '/roadmap-demo/items/3')} && document.querySelector('#detail h2')?.innerText.includes('Session timeout banner')`);
       assert.equal(await chrome.stable('location.search'), view.link.search, `${width}: the address keeps the rest of itself`);
       await travel(chrome, -1);
-      await settled(chrome, `${showing('roadmap', '/roadmap')} && document.querySelector('.tab.on')?.dataset.tab === 'roadmap'`);
+      await settled(chrome, `${showing('roadmap', roadmapPath)} && document.querySelector('.tab.on')?.dataset.tab === 'roadmap'`);
       await travel(chrome, 1);
-      await settled(chrome, `${showing('items', '/')} && document.querySelector('.tab.on')?.dataset.tab === 'items' && document.querySelector('#detail h2')?.innerText.includes('Session timeout banner')`);
+      await settled(chrome, `${showing('items', '/roadmap-demo/items/3')} && document.querySelector('.tab.on')?.dataset.tab === 'items' && document.querySelector('#detail h2')?.innerText.includes('Session timeout banner')`);
       await press(chrome, `document.querySelector('[data-tab="roadmap"]')`);
-      await pressedInto(chrome, `${showing('roadmap', '/roadmap')} && location.search === ${JSON.stringify(view.link.search)}`);
+      await pressedInto(chrome, `${showing('roadmap', roadmapPath)} && location.search === ${JSON.stringify(view.link.search)}`);
     }
 
     // Another repo's item opens on its own board, and Back and Forward move between the two boards.
     await press(chrome, roadmapRow('beacon#1'));
-    await chrome.waitFor(`document.querySelector('#proj-name').textContent === 'beacon' && ${showing('items', '/')} && document.querySelector('#detail h2')?.innerText.includes('Billing webhook retries')`);
+    await chrome.waitFor(`document.querySelector('#proj-name').textContent === 'beacon' && ${showing('items', '/beacon/items/1')} && document.querySelector('#detail h2')?.innerText.includes('Billing webhook retries')`);
     const there = JSON.parse(await chrome.stable(`JSON.stringify((() => { const chip = document.querySelector('#detail .meta .chip'); return {
       id: document.querySelector('#detail h2 span').innerText, label: chip.innerText, chip: getComputedStyle(chip).color + ' on ' + getComputedStyle(chip).backgroundColor,
       dot: getComputedStyle(document.querySelector('#chain [data-item="1"] .dot')).backgroundColor }; })())`));
     const crossed = seen.cards[0].rows.find((row) => row.id === 'beacon#1');
     assert.deepEqual(there, { id: '#1', label: crossed.label, chip: crossed.chip, dot: crossed.dot }, "the other repo's Items tab shows that item with the Roadmap's word and colours");
     await travel(chrome, -1);
-    await settled(chrome, `document.querySelector('#proj-name').textContent === 'roadmap-demo' && ${showing('roadmap', '/roadmap')} && !!${roadmapRow('beacon#1')}`);
+    await settled(chrome, `document.querySelector('#proj-name').textContent === 'roadmap-demo' && ${showing('roadmap', roadmapPath)} && !!${roadmapRow('beacon#1')}`);
     await travel(chrome, 1);
-    await settled(chrome, `document.querySelector('#proj-name').textContent === 'beacon' && ${showing('items', '/')} && document.querySelector('#detail h2')?.innerText.includes('Billing webhook retries')`);
+    await settled(chrome, `document.querySelector('#proj-name').textContent === 'beacon' && ${showing('items', '/beacon/items/1')} && document.querySelector('#detail h2')?.innerText.includes('Billing webhook retries')`);
     await travel(chrome, -1);
-    await settled(chrome, `document.querySelector('#proj-name').textContent === 'roadmap-demo' && ${showing('roadmap', '/roadmap')} && !!${roadmapRow('#1')}`);
+    await settled(chrome, `document.querySelector('#proj-name').textContent === 'roadmap-demo' && ${showing('roadmap', roadmapPath)} && !!${roadmapRow('#1')}`);
 
     // Each of this board's rows opens its item on the Items tab, which gives it the same word and
     // colours, its list dot included; a withdrawn item is left out of the list while browsing.
     for (const row of seen.cards.flatMap((card) => card.rows).filter((each) => each.id.startsWith('#'))) {
       await press(chrome, roadmapRow(row.id));
-      await chrome.waitFor(`${showing('items', '/')} && document.querySelector('#detail h2 span')?.innerText === ${JSON.stringify(row.id)}`);
+      await chrome.waitFor(`${showing('items', '/roadmap-demo/items/' + row.id.slice(1))} && document.querySelector('#detail h2 span')?.innerText === ${JSON.stringify(row.id)}`);
       const here = JSON.parse(await chrome.stable(`JSON.stringify((() => {
         const chip = document.querySelector('#detail .meta .chip'), dot = document.querySelector('#chain [data-item="${row.id.slice(1)}"] .dot');
         return { label: chip.innerText, chip: getComputedStyle(chip).color + ' on ' + getComputedStyle(chip).backgroundColor, dot: dot ? getComputedStyle(dot).backgroundColor : 'not listed' };
       })())`));
       assert.deepEqual(here, { label: row.label, chip: row.chip, dot: row.label === 'withdrawn' ? 'not listed' : row.dot }, `${row.id}: the Items tab shows it with the Roadmap's word and colours`);
       await travel(chrome, -1);
-      await settled(chrome, `${showing('roadmap', '/roadmap')} && !!${roadmapRow(row.id)}`);
+      await settled(chrome, `${showing('roadmap', roadmapPath)} && !!${roadmapRow(row.id)}`);
     }
 
     // It updates live as items move, here and on the other repo's board.
@@ -223,20 +224,20 @@ test('the roadmap reads every item as the Items tab does, opens each one, anothe
 
     // A board with no milestones says how one starts; the address stays the Roadmap's.
     await press(chrome, `document.querySelector('[data-root=${JSON.stringify(beacon.repo)}]')`);
-    await chrome.waitFor(`document.querySelector('#proj-name').textContent === 'beacon' && ${showing('roadmap', '/roadmap')} && document.querySelector('#roadmap').innerText.startsWith('No milestones yet.')`);
+    await chrome.waitFor(`document.querySelector('#proj-name').textContent === 'beacon' && ${showing('roadmap', '/beacon/roadmap')} && document.querySelector('#roadmap').innerText.startsWith('No milestones yet.')`);
     await press(chrome, `document.querySelector('[data-root=${JSON.stringify(alpha.repo)}]')`);
     await chrome.waitFor(`document.querySelector('#proj-name').textContent === 'roadmap-demo' && !!${roadmapRow('#1')}`);
 
     // A reload keeps the Roadmap. The board's own address shows the tab last picked there, never the
     // Roadmap, even when the Roadmap was picked last.
     await chrome.send('Page.reload');
-    await settled(chrome, `!!data?.project && ${showing('roadmap', '/roadmap')} && !!${roadmapRow('#1')}`);
+    await settled(chrome, `!!data?.project && ${showing('roadmap', roadmapPath)} && !!${roadmapRow('#1')}`);
     await press(chrome, `document.querySelector('[data-tab="shouts"]')`);
-    await chrome.waitFor(showing('shouts', '/'));
+    await chrome.waitFor(showing('shouts', '/roadmap-demo/shouts'));
     await press(chrome, `document.querySelector('[data-tab="roadmap"]')`);
-    await chrome.waitFor(showing('roadmap', '/roadmap'));
+    await chrome.waitFor(showing('roadmap', roadmapPath));
     await chrome.send('Page.navigate', { url: view.link.href });
-    await settled(chrome, `!!data?.project && ${showing('shouts', '/')} && document.querySelector('.tab.on')?.dataset.tab === 'shouts'`);
+    await settled(chrome, `!!data?.project && ${showing('shouts', '/roadmap-demo/shouts')} && document.querySelector('.tab.on')?.dataset.tab === 'shouts'`);
     assert.deepEqual(chrome.exceptions, [], 'Chrome reports no uncaught page exceptions');
     assert.deepEqual(consoleErrors, [], 'Chrome reports no console errors');
   } finally {

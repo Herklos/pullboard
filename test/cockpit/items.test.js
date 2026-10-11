@@ -895,8 +895,8 @@ test('Pipeline view shows every stage, status counts, stage ages, detail links a
     const listRead = "JSON.stringify([...document.querySelectorAll('#chain > li[data-item]')].map(row => ({id:Number(row.dataset.item),title:row.title,meta:row.querySelector('.meta').textContent,tag:row.lastElementChild.textContent})))";
     const listBefore = await chrome.stable(listRead);
     await press(chrome, "document.querySelector('[data-items-view=\"pipeline\"]')");
-    assert.equal(await chrome.stable('location.hash'), '#items/pipeline', 'Pipeline has its own shareable address');
-    await chrome.waitFor("location.hash === '#items/pipeline' && !document.querySelector('#pipeline').hidden");
+    assert.equal(await chrome.stable('location.pathname'), '/items/pipeline', 'Pipeline has its own shareable address');
+    await chrome.waitFor("typeof data !== 'undefined' && location.pathname === '/items/pipeline' && !document.querySelector('#pipeline').hidden");
     const expectedCounts = [status.open, status.claimed, status.submitted, 1, 1];
     const read = JSON.parse(await chrome.stable(`JSON.stringify([...document.querySelectorAll('[data-pipeline-stage]')].map(stage => ({ stage:stage.dataset.pipelineStage, label:stage.querySelector('h2').textContent, count:Number(stage.querySelector('[data-stage-count]').textContent), oldest:Number(stage.querySelector('.pipeline-oldest [data-item]')?.dataset.item || 0), since:stage.querySelector('.pipeline-oldest time')?.dataset.ago || null, age:stage.querySelector('.pipeline-oldest time')?.textContent || '', ids:[...stage.querySelectorAll('.pipeline-item')].map(item => Number(item.dataset.item)) })))`));
     assert.deepEqual(read.map(stage => stage.label), ['Not started', 'Building', 'Waiting for review', 'Accepted, waiting to merge', 'Merged']);
@@ -946,9 +946,9 @@ test('Pipeline view shows every stage, status counts, stage ages, detail links a
     assert.equal(await chrome.stable(listRead), listBefore, 'returning to List preserves its Active rows, metadata and ordering');
     assert.deepEqual(JSON.parse(listBefore).map(row => row.id).sort((a,b)=>a-b), [3,4,5,6]);
     await travel(chrome, -1);
-    await settled(chrome, "location.hash === '#items/pipeline' && !document.querySelector('#pipeline').hidden");
+    await settled(chrome, "typeof data !== 'undefined' && location.pathname === '/items/6' && !document.querySelector('#pipeline').hidden");
     await chrome.send('Page.reload', {});
-    await settled(chrome, "location.hash === '#items/pipeline' && data?.project && !document.querySelector('#pipeline').hidden");
+    await settled(chrome, "typeof data !== 'undefined' && location.pathname === '/items/6' && data?.project && !document.querySelector('#pipeline').hidden");
     assert.equal(await chrome.stable("document.querySelector('.tab.on').dataset.tab"), 'items', 'the Pipeline address reloads within Items');
     await travel(chrome, 1);
     await settled(chrome, "!location.hash && !document.querySelector('#item-list').hidden");
