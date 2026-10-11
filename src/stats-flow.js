@@ -244,8 +244,8 @@ export function flowAlertLine(flow) {
   const average = flow.stages.reviewWait.averageMinutes;
   const oldest = flow.unreviewed.oldest;
   const thresholds = [];
-  if (average > 60) thresholds.push(`review wait average ${duration(average)} (${flow.stages.reviewWait.count} measured; > 60 min)`);
-  if (oldest?.ageMinutes > 180) thresholds.push(`unreviewed #${oldest.id} waiting ${duration(oldest.ageMinutes)} (> 180 min)`);
+  if (average > 60) thresholds.push(`review wait average ${duration(average)} (${flow.stages.reviewWait.count} measured; > ${duration(60)})`);
+  if (oldest?.ageMinutes > 180) thresholds.push(`unreviewed #${oldest.id} waiting ${duration(oldest.ageMinutes)} (> ${duration(180)})`);
   if (!thresholds.length) return null;
   const bottleneck = flow.bottleneck;
   const measured = bottleneck.stage === null ? 'bottleneck: not measured yet' :
