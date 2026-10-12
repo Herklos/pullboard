@@ -9,6 +9,101 @@ import { MACHINE } from '../../src/machine.js';
 import { machine, project, build, sendBack, fetchLive, startView, styleOf, element, storage, openPage, timelineRows, agentEntries, drawing, textBoxes, meet, accept, itemRow, chromeExecutable, openSnapshotChrome, closeSnapshotChrome } from './fixture.js';
 
 
+/** Verify a verified stay ends at its next state move, while a quiet merge remains untimed. */
+test('the timeline times a verified item that goes back to open [N26, M1]', async () => {
+  const box = machine();
+  project(box, 'alpha');
+  const view = await startView(box);
+  try {
+    const page = await openPage(view);
+    const history = [
+      ['add', '2026-10-12T12:00:00.000Z'],
+      ['claim', '2026-10-12T12:01:00.000Z'],
+      ['submit', '2026-10-12T12:02:00.000Z'],
+      ['accept', '2026-10-12T12:03:00.000Z'],
+      ['merged', '2026-10-12T12:03:30.000Z'],
+      ['reopen', '2026-10-12T12:05:00.000Z'],
+    ].map(([kind, at]) => ({ kind, by: 'coordinator', at }));
+    const rendered = JSON.parse(page.run(`(() => {
+      FLOW.moves.push({ verb: 'reopen', from: ['verified'], to: 'open', by: ['coordinator'], how: 'pullboard reopen <id>', checks: [] });
+      const item = ${JSON.stringify({ status: 'open', history })};
+      const finalVerified = timeline(item);
+      FLOW.states.find((state) => state.id === 'verified').final = false;
+      return JSON.stringify([finalVerified, timeline(item)]);
+    })()`));
+    const [finalRows, nonFinalRows] = rendered.map(timelineRows);
+    for (const rows of [finalRows, nonFinalRows]) {
+      assert.equal(rows.find((row) => row.event.startsWith('accept ')).stay, 'verified for 2m');
+      assert.equal(rows.find((row) => row.event.startsWith('merged ')).stay, '', 'a quiet event does not end the verified stay');
+      assert.equal(rows.find((row) => row.event.startsWith('reopen ')).dot, 'tl-open');
+    }
+  } finally {
+    await view.stop();
+  }
+});
+
+/** Verify a fixture lifecycle draws and labels an outgoing route from a below-row state. */
+test('the activity lifecycle draws a move out of a state below the row [N26, M1]', async () => {
+  const box = machine();
+  project(box, 'alpha');
+  const view = await startView(box);
+  try {
+    const page = await openPage(view);
+    const fixture = {
+      initial: 'open',
+      states: [
+        { id: 'open', means: 'waiting', final: false, entry: [] },
+        { id: 'claimed', means: 'building', final: false, entry: [] },
+        { id: 'submitted', means: 'waiting for review', final: false, entry: [] },
+        { id: 'verified', means: 'accepted', final: false, entry: [] },
+        { id: 'withdrawn', means: 'closed', final: true, entry: [] },
+        { id: 'deferred', means: 'waiting for another decision', final: false, entry: [] },
+      ],
+      moves: [
+        { verb: 'claim', from: ['open'], to: 'claimed', by: ['agent'], how: 'claim', checks: [] },
+        { verb: 'submit', from: ['claimed'], to: 'submitted', by: ['agent'], how: 'submit', checks: [] },
+        { verb: 'accept', from: ['submitted'], to: 'verified', by: ['coordinator'], how: 'accept', checks: [] },
+        { verb: 'withdraw', from: ['submitted'], to: 'withdrawn', by: ['coordinator'], how: 'withdraw', checks: [] },
+        { verb: 'reopen', from: ['verified'], to: 'open', by: ['coordinator'], how: 'reopen', checks: [] },
+        { verb: 'pause', from: ['open'], to: 'deferred', by: ['coordinator'], how: 'pause', checks: [] },
+        { verb: 'resume', from: ['deferred'], to: 'verified', by: ['coordinator'], how: 'resume', checks: [] },
+      ],
+    };
+    const svg = page.run(`(() => {
+      FLOW.initial = ${JSON.stringify(fixture.initial)};
+      FLOW.states.splice(0, FLOW.states.length, ...${JSON.stringify(fixture.states)});
+      FLOW.moves.splice(0, FLOW.moves.length, ...${JSON.stringify(fixture.moves)});
+      return flowSvg(data.project);
+    })()`);
+    const diagram = drawing(svg);
+    const route = diagram.routes.find((entry) => entry.pair === 'verified>open');
+    assert.ok(route, 'the fixture machine declares verified > open');
+    assert.equal(route.label, 'reopen (none yet)');
+    assert.ok(route.points.length >= 4, 'the outgoing route has a path from the below-row state to open');
+    const pairs = fixture.moves.flatMap((move) => move.from.map((from) => `${from}>${move.to}`));
+    assert.deepEqual(diagram.routes.map((entry) => entry.pair).sort(), pairs.sort(),
+      'each move pair is drawn once, including between two below-row states');
+    /** Read a fixture state's box top to verify the selected longest path stays above it. */
+    const stateY = (state) => Number(new RegExp(`<g class="s-${state}"><title>[\\s\\S]*?<rect class="box" x="[\\d.]+" y="([\\d.]+)"`).exec(svg)?.[1]);
+    assert.ok(stateY('verified') > stateY('open'), 'verified is below the longest path to a final state');
+    assert.equal(stateY('deferred'), stateY('verified'), 'the fixture also includes a move between below-row states');
+    const segments = diagram.routes.flatMap((entry) => entry.points.slice(1).map(([x, y], index) => ({
+      left: Math.min(x, entry.points[index][0]),
+      right: Math.max(x, entry.points[index][0]) + 0.01,
+      top: Math.min(y, entry.points[index][1]),
+      bottom: Math.max(y, entry.points[index][1]) + 0.01,
+    })));
+    for (const words of ['reopen', 'resume']) {
+      const label = textBoxes(svg).find((entry) => entry.words === words);
+      assert.ok(label, `${words}: the outgoing move is labelled`);
+      assert.ok(segments.every((segment) => !meet(label, segment, 2)), `${words}: its label clears every route`);
+    }
+  } finally {
+    await view.stop();
+  }
+});
+
+
 test("the history is a timeline of the item's states [N26]", async () => {
   const box = machine();
   const alpha = project(box, 'alpha');
