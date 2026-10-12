@@ -211,6 +211,7 @@ globalThis.fetch = function tracedFetch(input, init) {
   let rejectedStateReads = null;
   let beforeSnapshotWrite = null;
   let refuseRequestWrites = false;
+  let refuseNextAcceptedApprovalCompletionResponse = false;
   let signIn;
   let api;
   let phone;
@@ -225,6 +226,10 @@ globalThis.fetch = function tracedFetch(input, init) {
     if (snapshotWrite) snapshotWriteCount += 1;
     const requestChunks = [];
     const responseChunks = [];
+    const acceptedApprovalCompletionRefusal = refuseNextAcceptedApprovalCompletionResponse
+      && req.method === 'POST'
+      && /^\/api\/v1\/devices\/approvals\/[A-Za-z0-9_-]{1,80}\/complete$/u.test(req.url ?? '');
+    if (acceptedApprovalCompletionRefusal) refuseNextAcceptedApprovalCompletionResponse = false;
     const snapshotStartedAt = Date.now();
     const snapshotRecord = snapshotWrite ? { at: snapshotStartedAt, sequence: null, ciphertext: null, status: null, elapsedMs: null, responseClosedBeforeFinish: false } : null;
     if (snapshotRecord) snapshotWriteRecords.push(snapshotRecord);
@@ -258,8 +263,19 @@ globalThis.fetch = function tracedFetch(input, init) {
     }
     const write = res.write.bind(res);
     res.write = (chunk, ...args) => { captureResponse(chunk); return write(chunk, ...args); };
+    const writeHead = res.writeHead.bind(res);
+    let acceptedApprovalCompletionReturnedAsRefusal = false;
+    res.writeHead = (status, ...args) => {
+      acceptedApprovalCompletionReturnedAsRefusal = acceptedApprovalCompletionRefusal && status === 200;
+      return writeHead(acceptedApprovalCompletionReturnedAsRefusal ? 403 : status, ...args);
+    };
     const end = res.end.bind(res);
     res.end = (chunk, ...args) => {
+      if (acceptedApprovalCompletionReturnedAsRefusal) {
+        chunk = JSON.stringify({ version: 1, error: { code: 'REVIEWER_COMPLETE_REFUSED',
+          message: 'The completion response was refused after sealed delivery.',
+          next: 'The completion response was refused after sealed delivery.' } });
+      }
       captureResponse(chunk);
       if (req.method === 'POST' && /\/api\/v1\/boards\/[0-9a-f]{32}\/moves$/.test(req.url ?? '') && (typeof chunk === 'string' || Buffer.isBuffer(chunk))) {
         try {
@@ -610,6 +626,8 @@ globalThis.fetch = function tracedFetch(input, init) {
     /** Return how many state reads reached the private relay. */
     stateReadStarted() { return stateReadStarted; },
     refuseRequestWrites(value) { refuseRequestWrites = value; },
+    /** Return HTTP 403 only after the real relay has stored one sealed approval completion. */
+    refuseNextAcceptedApprovalCompletionResponse() { refuseNextAcceptedApprovalCompletionResponse = true; },
     mainURL: new URL('../src/cli.js', import.meta.url).href,
     keyInRequest() { return keyLeaked; },
     /** Revoke the actual synthetic person session, including its current live streams. */
