@@ -4,7 +4,7 @@
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { loadavg } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -1042,6 +1042,34 @@ function resumeReleaseNotes(info) {
   return releases.length ? { releases: releases.slice(0, 3), omitted: Math.max(0, releases.length - 3), notes: 'CHANGELOG.md' } : null;
 }
 
+/** Identify setup from this board's coordinator enrollment, independently of agent flags. */
+function setupIdentity(board) {
+  return { boardId: store.boardId(board),
+    setupStartedAt: store.listAgents(board).find(agent => agent.agent_id === COORDINATOR)?.agent_created_at };
+}
+
+/** Read only the view's typed successful-bind receipt for this board and setup. */
+function viewSetupComplete(ctx, board) {
+  let receipt;
+  try { receipt = JSON.parse(readFileSync(join(ctx.info.commonDir, 'pullboard', 'view-bind.json'), 'utf8')); }
+  catch (error) { if (error.code === 'ENOENT' || error instanceof SyntaxError) return false; throw error; }
+  const identity = setupIdentity(board);
+  return receipt?.type === 'pullboard.view.bound' && receipt.version === 1
+    && receipt.boardId === identity.boardId && receipt.setupStartedAt === identity.setupStartedAt
+    && Number.isFinite(Date.parse(receipt.boundAt))
+    && Date.parse(receipt.boundAt) >= Date.parse(identity.setupStartedAt);
+}
+
+/** Atomically record a successful real view bind, scoped to this board's current setup. */
+function recordViewBind(ctx, board) {
+  const file = join(ctx.info.commonDir, 'pullboard', 'view-bind.json');
+  const temporary = file + '.' + randomUUID() + '.tmp';
+  const receipt = { type: 'pullboard.view.bound', version: 1, ...setupIdentity(board), boundAt: new Date().toISOString() };
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(temporary, JSON.stringify(receipt) + '\n', { mode: 0o600 });
+  renameSync(temporary, file);
+}
+
 /** Derive the next setup question from the real requirements, config, items and view receipt. */
 function boardSetup(ctx, card) {
   const rows = loadSpec(ctx.info.root, ctx.config).rows;
@@ -1055,18 +1083,20 @@ function boardSetup(ctx, card) {
   const quote = value => "'" + String(value).replaceAll("'", "'\\''") + "'";
   /** Preserve all existing configuration when recording one setup answer. */
   const configure = patch => `node -e ${quote(`const fs=require('node:fs');const p='pullboard.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));${patch};fs.writeFileSync(p,JSON.stringify(c,null,2)+${JSON.stringify('\n')})`)}`;
+  const proposedIds = rows.length ? rows.map(row => row.id).join(',') : 'G1,G2';
   const steps = [
     { number: 1, done: approved.length > 0, question: 'Ask the person: what are we building, and who will use it? Draft a few requirements as pending, then ask the person to approve them.',
-      command: `node -e ${quote(`require('node:fs').appendFileSync(${JSON.stringify(ctx.config.spec)},${JSON.stringify('\n- G1 [pending, must] Describe the first thing the person wants. | gate: review\n')})`)}`,
-      afterAnswer: 'Replace the proposed text with the person’s answer; the person runs pullboard spec approve G1, then the agent runs pullboard spec apply.' },
+      command: rows.length ? `pullboard spec show ${quote(rows[0].id)}` : `node -e ${quote(`require('node:fs').appendFileSync(${JSON.stringify(ctx.config.spec)},${JSON.stringify('\n- G1 [pending, must] Describe the first thing the person wants. | gate: review\n- G2 [pending, must] Describe how the person will know it works. | gate: review\n')})`)}`,
+      afterAnswer: `Replace the proposed text with the person’s answer; the person approves ${proposedIds} in Pullboard View or runs pullboard spec approve ${proposedIds} in their own terminal; then the coordinator runs pullboard spec apply.` },
     { number: 2, done: lanes.length > 0, question: `Ask the person: how should we divide the work? Suggested folders: ${folders.join(', ') || 'app/ (create it for the app)'}.`,
       command: configure(`c.lanes[${JSON.stringify(lane)}]={owns:[${JSON.stringify(lane + '/')}]}`) },
     { number: 3, done: Boolean(ctx.config.gate?.trim()), question: `Ask the person: which command proves the build works? Suggested: ${detectGate(ctx.info.root) || 'choose the repo’s test command'}.`,
       command: configure(`c.gate=${JSON.stringify(detectGate(ctx.info.root) || '<test command>')}`) },
     { number: 4, done: card.all.length > 0, question: 'Ask the person: what is the first small piece we should build?',
       command: `pullboard add ${quote(lane)} 'First small piece' --specs ${quote(approved[0]?.id ?? 'G1')} --criterion 'Describe what the person will be able to do'` },
-    { number: 5, done: card.viewOpened || card.agents.some(agent => !['coordinator', 'review'].includes(agent.agent_lane)),
-      question: 'Ask the person: shall we open the board so you can follow the work?', command: 'pullboard view' },
+    { number: 5, done: card.viewOpened,
+      question: 'Ask the person: shall we open the board so you can follow the work?', command: 'pullboard view',
+      afterAnswer: 'Run this in the person’s own terminal, or start it in the background as the agent so setup can continue. The view records its successful bind for this board.' },
   ];
   const current = steps.find(step => !step.done);
   return current ? { step: current.number, total: 5, ...current, steps } : null;
@@ -1108,7 +1138,7 @@ function resumeHere(io) {
       unread: store.unreadCount(board, me.id),
       newest: store.peekShouts(board, me.id, 1),
       agents: store.listAgents(board),
-      viewOpened: store.allShouts(board).some(shout => shout.shout_text === 'Opened Pullboard view for this board.'),
+      viewOpened: viewSetupComplete(ctx, board),
     };
   });
   card.relayProblems = unlinkedRelayProjects();
@@ -1237,15 +1267,15 @@ async function viewHere(io, values) {
   const port = values.port === undefined ? 0 : Number(values.port);
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Refused('USAGE', '--port is a number from 0 to 65535; 0 picks a free one');
   const view = await serveView({ port, isMain: codeIsFromMain() });
-  // Record the actual successful server bind, rather than an agent-controlled setup flag.
+  // Only an actual bind writes this typed receipt; ordinary shouts cannot complete setup.
   try {
-    const ctx = existsSync(join(io.cwd, CONFIG_FILE)) ? context(io) : null;
-    if (ctx?.info.isMain) await withBoard(ctx, async board => {
-      if (!store.allShouts(board).some(shout => shout.shout_text === 'Opened Pullboard view for this board.')) {
-        await ordered(ctx, board, 'shout', [{ from: COORDINATOR, to: 'all',
-          text: 'Opened Pullboard view for this board.', lanes: laneNames(ctx.config) }]);
-      }
-    });
+    let info;
+    try { info = repoInfo(io.cwd); }
+    catch (error) { if (!(error instanceof Refused)) throw error; }
+    if (info && existsSync(join(info.root, CONFIG_FILE))) {
+      const ctx = context(io);
+      withBoard(ctx, board => recordViewBind(ctx, board));
+    }
   } catch (error) {
     await view.close();
     throw error;

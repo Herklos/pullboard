@@ -291,7 +291,7 @@ function recordSetupAnswer(box, command) {
 /** Open the real local view and wait for its ready line before stopping its owned child. */
 async function openSetupView(box) {
   const child = spawn(process.execPath, [join(box.root, 'cli/bin/pullboard.js'), 'view', '--no-open'],
-    { cwd: box.repo, env: box.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    { cwd: box.repo, env: { ...box.env, PULLBOARD_VIEW_FOREGROUND: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '', errors = '';
   const closed = new Promise(resolve => child.once('close', (code, signal) => resolve({ code, signal })));
   try {
@@ -306,6 +306,22 @@ async function openSetupView(box) {
     child.kill('SIGTERM');
     await closed;
   }
+}
+
+/** Reject stale or foreign receipt data while preserving the view's exact successful receipt. */
+function assertViewReceipt(box) {
+  const receiptPath = join(box.repo, '.git/pullboard/view-bind.json');
+  const receiptBytes = readFileSync(receiptPath);
+  const receipt = JSON.parse(receiptBytes);
+  assert.equal(receipt.type, 'pullboard.view.bound');
+  for (const invalid of [{ ...receipt, boardId: 'another-board' },
+    { ...receipt, setupStartedAt: '2000-01-01T00:00:00.000Z' },
+    { ...receipt, boundAt: '2000-01-01T00:00:00.000Z' }]) {
+    writeFileSync(receiptPath, JSON.stringify(invalid));
+    assert.equal(JSON.parse(box.run(box.repo, 'resume', '--json').stdout).setup?.step, 5,
+      'a receipt for another board or before this setup cannot complete it');
+  }
+  writeFileSync(receiptPath, receiptBytes);
 }
 
 /** Drive the same actual commands a newcomer receives, with a private fixture person approval. */
@@ -325,9 +341,12 @@ async function finishSetup(box, observe = () => {}) {
     observe(number, setup);
     return setup;
   }
-  recordSetupAnswer(box, step(1).command);
+  const requirements = step(1);
+  assert.match(requirements.afterAnswer, /person approves G1,G2 in Pullboard View or runs pullboard spec approve G1,G2 in their own terminal/u);
+  assert.match(requirements.afterAnswer, /coordinator runs pullboard spec apply/u);
+  recordSetupAnswer(box, requirements.command);
   // The person decision is recorded through the real CLI in a synthetic, private person environment.
-  for (const args of [['spec', 'approve', 'G1'], ['spec', 'apply']]) {
+  for (const args of [['spec', 'approve', 'G1,G2'], ['spec', 'apply']]) {
     const result = box.run(box.repo, ...args);
     assert.equal(result.status, 0, result.failure || result.stderr || result.stdout);
   }
@@ -337,8 +356,21 @@ async function finishSetup(box, observe = () => {}) {
   assert.match(gate.question, /Suggested: npm test/u);
   recordSetupAnswer(box, gate.command);
   recordSetupAnswer(box, step(4).command);
-  assert.equal(step(5).command, 'pullboard view');
+  const view = step(5);
+  assert.equal(view.command, 'pullboard view');
+  assert.match(view.afterAnswer, /person’s own terminal, or start it in the background as the agent/u);
+  box.git(box.repo, 'add', '-A');
+  box.git(box.repo, 'commit', '-q', '-m', 'chore: set up private fixture');
+  const builder = box.run(box.repo, 'worktree', 'app', '--model', 'Fixture');
+  assert.equal(builder.status, 0, builder.failure || builder.stderr);
+  const stillWaiting = JSON.parse(box.run(box.repo, 'resume', '--json').stdout);
+  assert.equal(stillWaiting.setup?.step, 5, 'registering a builder does not stand in for the view’s own bind receipt');
+  const shouted = box.run(box.repo, 'shout', 'all', 'Opened Pullboard view for this board.');
+  assert.equal(shouted.status, 0, shouted.failure || shouted.stderr);
+  assert.equal(JSON.parse(box.run(box.repo, 'resume', '--json').stdout).setup?.step, 5,
+    'an ordinary same-text shout cannot impersonate a successful view bind');
   await openSetupView(box);
+  assertViewReceipt(box);
 }
 
 test('resume walks a new board through setup one step at a time [N32,N19]', async t => {
