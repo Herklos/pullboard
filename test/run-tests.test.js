@@ -1,5 +1,6 @@
 /** Exercise native test-file sharding through the production test runner [C7]. */
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,6 +12,12 @@ const runner = fileURLToPath(new URL('../bin/run-tests.js', import.meta.url));
 const shardFileCount = 9;
 const fixtureExitCeilingMs = '500';
 const fixtureCleanupMs = '100';
+
+/** Initialize a private fixture repository and stage exactly its intended tests. */
+function stageFixtureTests(root, paths) {
+  execFileSync('git', ['init', '-q'], { cwd: root, stdio: 'ignore' });
+  execFileSync('git', ['add', '--', ...paths], { cwd: root, stdio: 'ignore' });
+}
 
 /** Build a private runner checkout whose tests record the files Node actually selects. */
 function makeShardFixture(t) {
@@ -35,6 +42,7 @@ function recordSelectedFile() { appendFileSync(process.env.PULLBOARD_SHARD_CAPTU
 test('record ${name} [C7]', recordSelectedFile);
 `);
   }
+  stageFixtureTests(root, expected.map(name => `test/${name}`));
   /** Remove the private runner tree after its child processes exit. */
   function cleanupFixture() {
     rmSync(root, { recursive: true, force: true });
@@ -42,6 +50,118 @@ test('record ${name} [C7]', recordSelectedFile);
   t.after(cleanupFixture);
   return { root, capture, expected, runner: join(bin, 'run-tests.js') };
 }
+
+/** Build a copied production runner with tracked, ignored, and untracked test files. */
+function makeTrackedSelectionFixture(t) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-tracked-tests-')));
+  const bin = join(root, 'bin');
+  const source = join(root, 'src');
+  const tests = join(root, 'test');
+  const scratch = join(root, 'scratch');
+  const expected = ['tracked', 'dot-suffix', 'dash-suffix', 'underscore-suffix', 'test-prefix', 'test-name'];
+  mkdirSync(bin);
+  mkdirSync(tests);
+  mkdirSync(scratch);
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ type: 'module' }));
+  writeFileSync(join(root, '.gitignore'), 'scratch/\n');
+  copyFileSync(runner, join(bin, 'run-tests.js'));
+  cpSync(fileURLToPath(new URL('../src', import.meta.url)), source, { recursive: true });
+  const capture = join(root, 'selected-files.txt');
+  const trackedSources = new Map([
+    ['test/tracked.test.js', trackedFixtureSource('tracked')],
+    ['prefix.test.js', trackedFixtureSource('dot-suffix')],
+    ['prefix-test.cjs', trackedFixtureSource('dash-suffix')],
+    ['prefix_test.mjs', trackedFixtureSource('underscore-suffix')],
+    ['test-launch.js', trackedFixtureSource('test-prefix')],
+    ['test.js', trackedFixtureSource('test-name')],
+  ]);
+  for (const [path, sourceText] of trackedSources) {
+    writeFileSync(join(root, path), sourceText);
+  }
+  writeFileSync(join(root, 'tracked.spec.js'), `import { appendFileSync } from 'node:fs';
+import { test } from 'node:test';
+/** Fail if a tracked but non-default filename is selected. */
+function failIfNonDefaultRuns() { appendFileSync(process.env.PULLBOARD_TRACKED_CAPTURE, 'non-default\\n'); throw new Error('non-default test was executed'); }
+test('tracked spec file must not run [C7]', failIfNonDefaultRuns);
+`);
+  writeFileSync(join(tests, 'untracked.test.js'), `import { appendFileSync } from 'node:fs';
+import { test } from 'node:test';
+/** Fail if the runner discovers an untracked test from the worktree. */
+function failIfUntrackedRuns() { appendFileSync(process.env.PULLBOARD_TRACKED_CAPTURE, 'untracked\\n'); throw new Error('untracked test was executed'); }
+test('untracked test must not run [C7]', failIfUntrackedRuns);
+`);
+  writeFileSync(join(scratch, 'ignored.test.js'), `import { appendFileSync } from 'node:fs';
+import { test } from 'node:test';
+/** Fail if the runner discovers an ignored test from scratch storage. */
+function failIfIgnoredRuns() { appendFileSync(process.env.PULLBOARD_TRACKED_CAPTURE, 'ignored\\n'); throw new Error('ignored test was executed'); }
+test('ignored test must not run [C7]', failIfIgnoredRuns);
+`);
+  stageFixtureTests(root, ['.gitignore', ...trackedSources.keys(), 'tracked.spec.js']);
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  return { root, runner: join(bin, 'run-tests.js'), capture, expected };
+}
+
+/** Create a small ESM or CommonJS test that records its discovery-pattern label. */
+function trackedFixtureSource(label) {
+  if (label === 'dash-suffix') {
+    return `const { appendFileSync } = require('node:fs');
+const { test } = require('node:test');
+/** Record one tracked default-pattern match. */
+function recordTrackedMatch() { appendFileSync(process.env.PULLBOARD_TRACKED_CAPTURE, '${label}\\n'); }
+test('tracked ${label} pattern ran [C7]', recordTrackedMatch);
+`;
+  }
+  return `import { appendFileSync } from 'node:fs';
+import { test } from 'node:test';
+/** Record one tracked default-pattern match. */
+function recordTrackedMatch() { appendFileSync(process.env.PULLBOARD_TRACKED_CAPTURE, '${label}\\n'); }
+test('tracked ${label} pattern ran [C7]', recordTrackedMatch);
+`;
+}
+
+/** Ensure default discovery runs tracked tests but never filesystem-only copies. */
+function trackedSelectionTest(t) {
+  const fixture = makeTrackedSelectionFixture(t);
+  assert.equal(execFileSync('git', ['check-ignore', '-q', 'scratch/ignored.test.js'], { cwd: fixture.root }).length, 0,
+    'the failing scratch test is actually ignored by Git');
+  const tracked = execFileSync('git', ['ls-files'], { cwd: fixture.root, encoding: 'utf8' }).trim().split(/\r?\n/u);
+  assert.ok(tracked.includes('.gitignore') && tracked.includes('tracked.spec.js'), 'the non-default and ignore control files are tracked');
+  assert.equal(tracked.length, fixture.expected.length + 2, 'all pattern cases and non-default controls are tracked');
+  const result = runFixtureChild(process.execPath, [fixture.runner], {
+    cwd: fixture.root,
+    encoding: 'utf8',
+    env: { ...process.env, PULLBOARD_TRACKED_CAPTURE: fixture.capture },
+  });
+  assert.equal(result.status, 0,
+    `${result.context}\nexecuted files: ${readFileSync(fixture.capture, 'utf8')}`);
+  for (const label of fixture.expected) assert.match(result.stdout, new RegExp(`ok [0-9]+ - tracked .*${label}.* pattern ran \\[C7\\]`, 'u'));
+  assert.doesNotMatch(`${result.stdout}\n${result.stderr ?? ''}`, /ignored test was executed|untracked test was executed|non-default test was executed/u);
+  assert.deepEqual(readFileSync(fixture.capture, 'utf8').trim().split(/\r?\n/u).sort(),
+    ['tracked', 'dot-suffix', 'dash-suffix', 'underscore-suffix', 'test-prefix', 'test-name'].sort(),
+    'every default filename pattern runs exactly once');
+
+  writeFileSync(fixture.capture, '');
+  const filtered = runFixtureChild(process.execPath, [fixture.runner, '--test-name-pattern', 'dot-suffix'], {
+    cwd: fixture.root,
+    encoding: 'utf8',
+    env: { ...process.env, PULLBOARD_TRACKED_CAPTURE: fixture.capture },
+  });
+  assert.equal(filtered.status, 0, filtered.context);
+  assert.match(filtered.stdout, /ok [0-9]+ - tracked dot-suffix pattern ran \[C7\]/u,
+    'name filters still apply to the tracked default list');
+  assert.equal(readFileSync(fixture.capture, 'utf8'), 'dot-suffix\n');
+
+  const explicit = runFixtureChild(process.execPath, [fixture.runner, 'test/untracked.test.js'], {
+    cwd: fixture.root,
+    encoding: 'utf8',
+    env: { ...process.env, PULLBOARD_TRACKED_CAPTURE: fixture.capture },
+  });
+  assert.equal(explicit.status, 1, explicit.context);
+  assert.match(explicit.stdout, /not ok [0-9]+ - untracked test must not run \[C7\]/u,
+    'an explicitly named fixture remains runnable even though it is untracked');
+}
+
+test('the runner skips test files git does not track [C7]', trackedSelectionTest);
 
 /** Run the copied production runner and return the test filenames it actually executed. */
 function runShardFixture(fixture, shard) {
@@ -77,6 +197,29 @@ function shardsSplitTest(t) {
 }
 
 test('shards split the test files with none twice and none missing [C7]', shardsSplitTest);
+
+/** Keep plain temporary projects runnable without requiring a Git index. */
+function outsideGitDiscoveryTest(t) {
+  const fixture = makeShardFixture(t);
+  rmSync(join(fixture.root, '.git'), { recursive: true, force: true });
+  const selected = runShardFixture(fixture, null);
+  assert.deepEqual([...selected].sort(), fixture.expected,
+    'without a Git work tree Node still discovers and executes every fixture test');
+
+  writeFileSync(fixture.capture, '');
+  writeFileSync(join(fixture.root, '.git'), 'gitdir: missing-git-directory\n');
+  const broken = runFixtureChild(process.execPath, [fixture.runner], {
+    cwd: fixture.root,
+    encoding: 'utf8',
+    env: { ...process.env, PULLBOARD_SHARD_CAPTURE: fixture.capture },
+  });
+  assert.equal(broken.status, 1, broken.context);
+  assert.match(broken.stderr, /could not list tracked test files/u,
+    'a damaged checkout is refused rather than mistaken for an ordinary non-Git folder');
+  assert.equal(readFileSync(fixture.capture, 'utf8'), '', 'no filesystem tests run after Git metadata fails');
+}
+
+test('the runner keeps native discovery outside a Git work tree [C7]', outsideGitDiscoveryTest);
 
 /** Assert the production runner names malformed shard ranges and their expected form. */
 function badShardTest() {

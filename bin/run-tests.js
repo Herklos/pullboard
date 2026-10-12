@@ -279,6 +279,55 @@ function hasTestFiles(args) {
   return false;
 }
 
+/** Match Node's default test-file patterns against a Git path for this runtime. */
+function isDefaultTestFile(path, includeTypeScript) {
+  const normalized = path.replaceAll('\\', '/');
+  const parts = normalized.split('/');
+  if (parts.some(part => part === 'node_modules' || part.startsWith('.'))) return false;
+  const basename = parts.at(-1);
+  const extension = includeTypeScript ? /\.(?:cjs|mjs|js|cts|mts|ts)$/u : /\.(?:cjs|mjs|js)$/u;
+  if (!extension.test(basename)) return false;
+  return parts.slice(0, -1).includes('test') ||
+    /^test(?:-|\.)/u.test(basename) ||
+    (includeTypeScript
+      ? /(?:\.test|-test|_test)\.(?:cjs|mjs|js|cts|mts|ts)$/u
+      : /(?:\.test|-test|_test)\.(?:cjs|mjs|js)$/u).test(basename);
+}
+
+/** Probe the effective TypeScript mode of the Node child that will execute tests. */
+function typeScriptTestDiscovery(args, env) {
+  const typeFlags = args.filter(argument => [
+    '--experimental-strip-types', '--strip-types', '--experimental-transform-types',
+    '--no-experimental-strip-types', '--no-strip-types',
+  ].includes(argument));
+  const result = spawnSync(process.execPath, [...typeFlags, '-p', 'String(process.features?.typescript ?? false)'], {
+    cwd: process.cwd(), encoding: 'utf8', env, timeout: 5_000,
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(`Node could not report TypeScript test discovery mode (status ${result.status}, signal ${result.signal ?? 'none'}): ${result.stderr.trim()}`);
+  }
+  return !['false', 'undefined', ''].includes(result.stdout.trim());
+}
+
+/** Preserve native discovery outside Git, but never hide a repository access failure. */
+function isGitWorkTree(cwd, env) {
+  const result = spawnSync('git', ['rev-parse', '--is-inside-work-tree'], {
+    cwd, env: { ...env, LC_ALL: 'C' }, encoding: 'utf8',
+  });
+  if (result.error) throw result.error;
+  if (result.status === 0) return result.stdout.trim() === 'true';
+  if (result.status === 128 && /^fatal: not a git repository \(or any /u.test(result.stderr)) return false;
+  throw new Error(result.stderr.trim() || `git rev-parse failed (status ${result.status})`);
+}
+
+/** List tracked files matching Node's runtime default patterns, excluding worktree copies. */
+function trackedDefaultTestFiles(cwd, includeTypeScript, env) {
+  const output = execFileSync('git', ['ls-files', '-z'], { cwd, env, encoding: 'utf8' });
+  return output.split('\0').filter(path => path && isDefaultTestFile(path, includeTypeScript)).sort()
+    .map(path => `./${path}`);
+}
+
 /** Translate the runner's shard option to Node's native test-shard option, refusing malformed ranges. */
 function shardArguments(args) {
   const forwarded = [];
@@ -308,10 +357,30 @@ function shardArguments(args) {
 }
 
 /** Run tests in the disposable environment, preserving a marker only when a parent holds the slot. */
-function executeTests(args, sandbox, gateSlotHeld) {
+function executeTests(args, sandbox, gateSlotHeld, fullSuite) {
   const env = testEnvironment(sandbox);
   if (gateSlotHeld) env.PULLBOARD_GATE_SLOT_HELD = '1';
-  const result = runTests(args, env);
+  let selectedArgs = args;
+  if (fullSuite) {
+    let files;
+    try {
+      files = isGitWorkTree(process.cwd(), env)
+        ? trackedDefaultTestFiles(process.cwd(), typeScriptTestDiscovery(args, env), env)
+        : null;
+    }
+    catch (error) {
+      process.stderr.write(`run-tests: could not list tracked test files: ${error.message}\n`);
+      process.exitCode = 1;
+      return { status: 1, signal: null };
+    }
+    if (files?.length === 0) {
+      process.stderr.write('run-tests: no tracked Node test files found; refusing filesystem discovery\n');
+      process.exitCode = 1;
+      return { status: 1, signal: null };
+    }
+    if (files) selectedArgs = [...args, ...files];
+  }
+  const result = runTests(selectedArgs, env);
   if (result.error) throw result.error;
   return result;
 }
@@ -344,7 +413,7 @@ async function main(args) {
   const run = (gateSlotHeld) => {
     const sandbox = mkdtempSync(join(tmpdir(), 'pullboard-test-run-'));
     try {
-      const result = executeTests(args, sandbox, gateSlotHeld);
+      const result = executeTests(args, sandbox, gateSlotHeld, fullSuite);
       signal = result.signal;
       process.exitCode = result.status ?? 1;
     } finally { rmSync(sandbox, { recursive: true, force: true }); }
