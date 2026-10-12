@@ -575,11 +575,21 @@ code.inline.long { white-space: break-spaces; overflow-wrap: anywhere; }
 .flow g:hover > .box, .flow g:hover > .edge { stroke-width: 2.2; }
 .console { position: static; width: min(560px, calc(100% - 32px)); margin: 8px auto; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 12px; box-shadow: var(--shadow); padding: 10px 12px; font: 12px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 38vh; overflow: auto; cursor: pointer; }
 .console.ok { border-color: var(--accent); } .console.no { border-color: var(--reject); }
-.snapshot-controls:not([hidden]) { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; padding: 12px 16px; }
-.snapshot-controls > span { font-weight: 600; }
-#replay-play { min-inline-size: 12em; }
-.snapshot-controls label { display: flex; align-items: center; gap: 6px; }
-.snapshot-controls output { color: var(--ink-muted); font: 12px/1.5 var(--mono); }
+/* Keep the replay viewport width fixed when its event list grows a classic scrollbar. */
+:root:has(body.snapshot) { overflow-y: scroll; }
+/* Changing Play and event labels occupy their own tracks, so they cannot rewrap a tap target. */
+.snapshot-controls:not([hidden]) { display: grid; grid-template-columns: minmax(0, 18rem) max-content max-content; align-items: center; gap: 10px; margin-bottom: 16px; padding: 12px 16px; }
+.snapshot-controls > span { grid-column: 1 / -1; font-weight: 600; }
+#replay-play { grid-column: 1; min-inline-size: 0; }
+#replay-pause { grid-column: 2; }
+.snapshot-controls label { grid-column: 3; display: flex; align-items: center; gap: 6px; }
+.snapshot-controls output { grid-column: 1 / -1; min-width: 0; overflow-wrap: anywhere; color: var(--ink-muted); font: 12px/1.5 var(--mono); }
+@media (width < 600px) {
+  .snapshot-controls:not([hidden]) { grid-template-columns: minmax(0, 1fr) max-content; }
+  #replay-play { grid-column: 1 / -1; }
+  #replay-pause { grid-column: 1; justify-self: start; }
+  .snapshot-controls label { grid-column: 2; }
+}
 .snapshot #new-item, .snapshot form, .snapshot [data-new], .snapshot [data-release], .snapshot [data-shout], .snapshot [data-go^="decide:"] { display: none !important; }
 .read-only:not(.requests) #new-item, .read-only:not(.requests) form, .read-only:not(.requests) [data-new], .read-only:not(.requests) [data-release], .read-only:not(.requests) [data-shout], .read-only:not(.requests) [data-go^="decide:"] { display: none !important; }
 .person-requests { margin-bottom: 12px; padding: 12px; min-width: 0; }
