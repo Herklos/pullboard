@@ -133,3 +133,102 @@ test('a delayed prior shout cannot clear a newer person answer [N26,H5,C7]', {
     t.diagnostic(JSON.stringify({ ...cleanup, cleanupComplete: Object.values(cleanup).every(Boolean) && cleanupErrors.length === 0, cleanupErrors }));
   }
 });
+
+/** The earlier response returns after selection but before answer text is entered. */
+test('a delayed prior shout cannot turn a newer answer into a plain shout [N26,H5,C7]', {
+  timeout: 120_000, // budget: hang-only ceiling for Chrome startup, board setup and the existing 10-second answer observation.
+}, async (t) => {
+  const executable = chromeExecutable();
+  assert.ok(executable, 'Chrome is required for this real-board regression');
+  const box = machine();
+  const demo = project(box, 'prior-shout-mode-order');
+  const answerText = 'Person answer after prior completion';
+  box.run(demo.repo, 'shout', 'person', QUESTION, '--decision');
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-prior-shout-mode-'));
+  let chrome, barrier, captureArmed = false, capture = null, barrierCleanup = null;
+  const cleanupErrors = [];
+  const cleanup = { barrierComplete: false, chromeClosed: false, viewStopped: false, profileRemoved: false };
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.send('Emulation.setDeviceMetricsOverride', { width: 375, height: 812, deviceScaleFactor: 1, mobile: false });
+    await chrome.waitFor("innerWidth===375&&document.querySelector('#proj-list .pname')?.textContent==='prior-shout-mode-order'");
+    await press(chrome, `document.querySelector(${JSON.stringify('[data-tab="shouts"]')})`);
+    const armed = await armWitness(chrome);
+    captureArmed = armed.armed === true;
+    assert.ok(captureArmed, 'the native shout composer observer arms');
+    barrier = await holdPriorShoutResponse(chrome, PRIOR);
+
+    const beginPrior = "(()=>{const to=document.querySelector('#shout-to'),field=document.querySelector('#shout-text');"
+      + "to.value='web';to.dispatchEvent(new Event('input',{bubbles:true}));to.dispatchEvent(new Event('change',{bubbles:true}));"
+      + "field.value=" + JSON.stringify(PRIOR) + ";field.dispatchEvent(new Event('input',{bubbles:true}));"
+      + "field.dispatchEvent(new Event('change',{bubbles:true}));document.querySelector('#shout-form').requestSubmit();})()";
+    await chrome.stable(beginPrior);
+    const held = await barrier.waitUntilHeld(10_000); // budget: the existing local browser-wait ceiling, not a speed target.
+    await chrome.waitFor("document.querySelector('#feed')?.innerText.includes(" + JSON.stringify(PRIOR) + ")");
+    const committed = await boardOf(view, demo.repo);
+    const committedPrior = committed.shouts.find((shout) => shout.shout_text === PRIOR);
+    assert.ok(committedPrior, 'the real server committed the prior shout before releasing its response');
+    const ask = committed.shouts.find((shout) => shout.shout_to === 'person' && shout.shout_text === QUESTION);
+    assert.ok(ask, 'the private fixture contains the expected real pending person question');
+    const selector = '#decisions [data-go="decide:' + ask.shout_id + '"]';
+    await chrome.waitFor('!!document.querySelector(' + JSON.stringify(selector) + ')');
+    await press(chrome, `document.querySelector(${JSON.stringify(selector)})`);
+    const selected = JSON.parse(await chrome.stable("JSON.stringify({answerId:typeof view==='object'?(view.answering?.id??null):null,text:document.querySelector('#shout-text').value,to:document.querySelector('#shout-to').value})"));
+    assert.equal(selected.answerId, ask.shout_id, 'the native journey selected the actual question before the prior response completes');
+
+    const releasedAt = Date.now();
+    const released = await barrier.release(10_000);
+    await chrome.waitFor("window.__priorShoutWitness?.events.some(event=>event.type==='prior-act-return')");
+    const after = JSON.parse(await chrome.stable("JSON.stringify({answerId:typeof view==='object'?(view.answering?.id??null):null,text:document.querySelector('#shout-text').value,to:document.querySelector('#shout-to').value})"));
+    barrierCleanup = await barrier.dispose();
+    cleanup.barrierComplete = barrierCleanup.complete === true;
+    barrier = null;
+    t.diagnostic('reset-mode-before-text ' + JSON.stringify({ rootCauseStatus: 'NOT PROVEN', order: 'real prior shout HTTP 200 and board commit; native question selection; prior response release and prior act return; only then answer text entry and native requestSubmit',
+      heldStatus: held.status, releasedStatus: released.status, releasedAt, selected, after, prior: { from: committedPrior.shout_from, to: committedPrior.shout_to }, barrierCleanup }));
+
+    const fillAnswer = "(()=>{const field=document.querySelector('#shout-text');field.value=" + JSON.stringify(answerText)
+      + ";field.dispatchEvent(new Event('input',{bubbles:true}));field.dispatchEvent(new Event('change',{bubbles:true}));})()";
+    await chrome.stable(fillAnswer);
+    const ready = JSON.parse(await chrome.stable("JSON.stringify({text:document.querySelector('#shout-text').value,to:document.querySelector('#shout-to').value})"));
+    await chrome.stable("document.querySelector('#shout-form').requestSubmit()");
+    let answerWaitError = null;
+    try { await chrome.waitFor("document.querySelector('#feed')?.innerText.includes(" + JSON.stringify(answerText) + ")"); }
+    catch (error) { answerWaitError = error.message; } // budget: preserves the existing 10-second answer observation.
+    const finalState = await boardOf(view, demo.repo);
+    capture = await finishWitness(chrome);
+    captureArmed = false;
+    const finalMatchingTextShouts = finalState.shouts.filter((shout) => shout.shout_text === answerText).map((shout) => ({
+      id: shout.shout_id, from: shout.shout_from, to: shout.shout_to, answers: shout.shout_answers, text: shout.shout_text,
+    }));
+    const personAnswer = finalMatchingTextShouts.find((shout) => shout.from === 'person' && shout.answers === ask.shout_id);
+    t.diagnostic('reset-mode-final-record ' + JSON.stringify({ answerWaitError, ask: { id: ask.shout_id, from: ask.shout_from, to: ask.shout_to }, ready,
+      finalMatchingTextShouts, personAnswer: personAnswer ?? null, afterBeforeText: after, capture }));
+    assert.equal(answerWaitError, null, 'the existing 10-second feed observation sees the submitted answer text');
+    assert.ok(personAnswer, 'the board records this as a person-linked answer');
+    assert.equal(ready.to, ask.shout_from, 'the real answer is addressed to the author of the selected question');
+    assert.equal(personAnswer.answers, ask.shout_id, 'the answer closes the selected question rather than becoming a plain shout');
+    assert.equal(after.answerId, ask.shout_id, 'the earlier shout completion must not reset the selected answer mode before text entry');
+    assert.equal(barrierCleanup.complete, true, 'the actual HTTP response barrier drained cleanly');
+    assert.equal(capture?.complete, true, 'the bounded lifecycle capture has no observer errors or drops');
+  } finally {
+    if (barrier) {
+      barrierCleanup = await barrier.dispose().catch((error) => ({ complete: false, trace: [], cleanupErrors: [`${error.name}: ${error.message}`] }));
+      cleanup.barrierComplete = barrierCleanup.complete === true;
+      cleanupErrors.push(...(barrierCleanup.cleanupErrors ?? []));
+    }
+    if (chrome && captureArmed) {
+      try { capture = await finishWitness(chrome); captureArmed = false; }
+      catch (error) { cleanupErrors.push('capture cleanup: ' + error.name + ': ' + error.message); }
+    }
+    if (chrome) {
+      try { await closeSnapshotChrome(chrome); cleanup.chromeClosed = true; }
+      catch (error) { cleanupErrors.push('Chrome close: ' + error.name + ': ' + error.message); }
+    }
+    try { await view.stop(); cleanup.viewStopped = true; }
+    catch (error) { cleanupErrors.push('view stop: ' + error.name + ': ' + error.message); }
+    try { rmSync(profile, { recursive: true, force: true }); cleanup.profileRemoved = true; }
+    catch (error) { cleanupErrors.push('profile removal: ' + error.name + ': ' + error.message); }
+    t.diagnostic('reset-mode-cleanup ' + JSON.stringify({ ...cleanup, cleanupComplete: Object.values(cleanup).every(Boolean) && cleanupErrors.length === 0, cleanupErrors }));
+  }
+});
