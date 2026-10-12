@@ -180,7 +180,7 @@ const ROUTES = {
   'submitted>withdrawn': { points: [[525, 208], [525, 280]] },
 };
 
-/** Where the guards every move into a final state passes are listed, by state id. */
+/** Where the guards every move into a guarded state passes are listed, by state id. */
 const GUARD_NOTES = {
   verified: { x: 640, y: 26, w: 176, leader: [[735, 122], [735, 146]] },
   withdrawn: { x: 640, y: 284, w: 176, leader: [[640, 313], [609, 313]] },
@@ -201,7 +201,7 @@ function wrapped(words, count) {
 /**
  * An item's life, drawn from the lifecycle declaration: every state, every move's verb between
  * each pair of states, the moves that keep a state, the final states, and the refusals every move
- * into a final state can raise.
+ * into a guarded state can raise.
  *
  * @param {any} [machine]
  * @returns {string}
@@ -223,6 +223,7 @@ export function drawLifecycle(machine = MACHINE) {
     }
   }
   const finals = machine.states.filter((state) => state.final).map((state) => state.id);
+  const guardedStates = machine.states.filter((state) => (machine.exitGuards[state.id] ?? []).length > 0).map((state) => state.id);
   const body = [text(24, 34, "An item's life", 'head'), text(140, 34, `starts ${machine.initial}; ends ${finals.join(' or ')}`, 'aside')];
   for (const state of machine.states) {
     const [x, y] = PLACES[state.id];
@@ -238,7 +239,7 @@ export function drawLifecycle(machine = MACHINE) {
     const [x, y, anchor] = route.label;
     wrapped(said, route.wrap ?? 1).forEach((line, i) => body.push(text(x, y + i * 15, line, `label${route.back ? ' back' : ''}`, anchor)));
   }
-  for (const id of finals) {
+  for (const id of guardedStates) {
     const note = GUARD_NOTES[id];
     if (!note) throw new Error(`no place for the guards into ${id}: add it to GUARD_NOTES in docs/img/draw.mjs`);
     const codes = machine.exitGuards[id].map((guard) => machine.guards.find((each) => each.id === guard).refuse);
