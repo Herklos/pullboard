@@ -338,6 +338,7 @@ function startExclusiveWriter(box, boardFile, name) {
   const child = startFixtureChild(process.execPath, ['-e', source, boardFile, ready, release, released], {
     cwd: box.repo, env: box.env, detached: true, stdio: ['ignore', 'ignore', 'pipe'],
   });
+  child.once('exit', (code, signal) => { child.writerExit = { observedAt: Date.now(), code, signal }; });
   const closed = lockChildOutcome(child);
   return { name, child, closed, ready, release, released };
 }
@@ -360,9 +361,14 @@ function lockChildOutcome(child) {
  */
 function launchHookProbe(box, probe, marker) {
   const env = { ...box.env, HOOK_READ_ATTEMPT: marker };
+  const hookTiming = { launchRequestedAt: Date.now(), marker };
   const child = startFixtureChild(process.execPath, ['--import', probe, BIN, 'hook', 'pre-commit'], {
     cwd: box.web, env, stdio: ['ignore', 'pipe', 'pipe'],
   });
+  child.hookTiming = hookTiming;
+  child.once('spawn', () => { hookTiming.spawnObservedAt = Date.now(); });
+  child.once('error', (error) => { hookTiming.spawnErrorObservedAt = Date.now(); hookTiming.spawnError = error.message; });
+  child.once('exit', (code, signal) => { hookTiming.exitObservedAt = Date.now(); hookTiming.code = code; hookTiming.signal = signal; });
   child.stdoutText = '';
   child.stderrText = '';
   child.stdout.setEncoding('utf8').on('data', (part) => { child.stdoutText += part; });
@@ -578,9 +584,12 @@ async (t) => {
     "import { appendFileSync, writeFileSync } from 'node:fs';",
     "import { DatabaseSync } from 'node:sqlite';",
     'const prepare = DatabaseSync.prototype.prepare;',
-    "const record = (row) => appendFileSync(process.env.HOOK_READ_ATTEMPT + '.trace', JSON.stringify({ at: Date.now(), pid: process.pid, ...row }) + '\\n');",
+    "/** Record native-process times without changing the hook result. */",
+    "const record = (row) => { try { appendFileSync(process.env.HOOK_READ_ATTEMPT + '.trace', JSON.stringify({ at: Date.now(), pid: process.pid, ...row }) + '\\n'); } catch {} };",
+    "record({ phase: 'hook-started', at: Math.round(performance.timeOrigin) });",
     "process.on('exit', () => record({ phase: 'hook-exit', code: process.exitCode ?? 0 }));",
     'const exec = DatabaseSync.prototype.exec;',
+    '/** Observe the connection timeout after the production statement executes. */',
     'DatabaseSync.prototype.exec = function (sql, ...args) {',
     '  const value = Reflect.apply(exec, this, [sql, ...args]);',
     "  if (/PRAGMA busy_timeout/u.test(String(sql))) record({ phase: 'busy-timeout', value: Reflect.apply(prepare, this, ['PRAGMA busy_timeout']).get() });",
@@ -588,6 +597,7 @@ async (t) => {
     '};',
     'DatabaseSync.prototype.prepare = function (sql, ...args) {',
     "  if (String(sql) !== 'SELECT * FROM agent WHERE agent_path = ?') return Reflect.apply(prepare, this, [sql, ...args]);",
+    "  record({ phase: 'busy-timeout-at-read', value: Reflect.apply(prepare, this, ['PRAGMA busy_timeout']).get() });",
     "  record({ phase: 'prepare-started' }); writeFileSync(process.env.HOOK_READ_ATTEMPT, JSON.stringify({ phase: 'prepare-started', at: Date.now() }));",
     '  try {',
     '    const statement = Reflect.apply(prepare, this, [sql, ...args]);',
@@ -603,7 +613,20 @@ async (t) => {
     '};',
   ].join('\n'));
   /** Emit actual cross-process lock/read times even when the original assertion refuses. */
-  const timing = (name, writer, marker) => t.diagnostic(JSON.stringify({ name, platform: process.platform, node: process.version, observedAt: Date.now(), locked: existsSync(writer.ready) ? JSON.parse(readFileSync(writer.ready, 'utf8')) : null, released: existsSync(writer.released) ? JSON.parse(readFileSync(writer.released, 'utf8')) : null, read: existsSync(marker + '.trace') ? readFileSync(marker + '.trace', 'utf8').trim().split('\n').map(JSON.parse) : [] }));
+  const timing = (name, writer, marker) => {
+    try {
+      t.diagnostic('hook read timings ' + JSON.stringify({
+        name, platform: process.platform, node: process.version, observedAt: Date.now(),
+        hook: hooks.find((hook) => hook.hookTiming?.marker === marker)?.hookTiming ?? null,
+        writerExit: writer.child.writerExit ?? null,
+        locked: existsSync(writer.ready) ? JSON.parse(readFileSync(writer.ready, 'utf8')) : null,
+        released: existsSync(writer.released) ? JSON.parse(readFileSync(writer.released, 'utf8')) : null,
+        read: existsSync(marker + '.trace') ? readFileSync(marker + '.trace', 'utf8').trim().split('\n').map(JSON.parse) : [],
+      }));
+    } catch (error) {
+      t.diagnostic('hook read timings ' + JSON.stringify({ name, captureError: error.message }));
+    }
+  };
   const writers = [];
   const hooks = [];
   t.after(async () => {
