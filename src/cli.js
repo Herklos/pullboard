@@ -2741,11 +2741,14 @@ async function readStdin(stdin) {
 /** Wait up to the board's shared busy timeout while reading hook facts, without migrating its schema. */
 function hookRead(ctx, read) {
   if (!existsSync(ctx.file)) return null;
-  const db = store.openBoardReadOnly(ctx.file);
+  const startedAt = Date.now();
+  let db;
   try {
+    db = store.openBoardReadOnly(ctx.file);
     return read({ db, clock: ctx.clock });
-  }
-  finally { db.close(); }
+  } catch (error) {
+    throw store.boardBusyError(ctx.file, startedAt, error);
+  } finally { db?.close(); }
 }
 
 /**

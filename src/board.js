@@ -22,6 +22,23 @@ export const PERSON = 'person';
 /** Version of the persisted append-only event record format; bump for incompatible format changes. */
 export const EVENT_LOG_VERSION = 1;
 
+/** Maximum time a board connection waits for another process to release SQLite's lock. */
+export const BOARD_BUSY_TIMEOUT_MS = 10_000;
+
+/**
+ * Replace SQLite's bare lock error with the board path and elapsed wait when the wait expires.
+ *
+ * @param {string} file
+ * @param {number} startedAt
+ * @param {Error & { errcode?: number }} error
+ * @returns {Error}
+ */
+export function boardBusyError(file, startedAt, error) {
+  const sqliteCode = Number.isInteger(error.errcode) ? error.errcode & 0xff : null;
+  if (sqliteCode !== 5 && error.code !== 'SQLITE_BUSY' && !/database is locked/iu.test(error.message ?? '')) return error;
+  return new Refused('BOARD_BUSY', `board file ${file} remained held by another process after ${Date.now() - startedAt}ms; wait for it to finish and retry`);
+}
+
 /**
  * Who can take an item (B13), as tiers in order of the model an item needs: `light` is work a small
  * or local model can build from its brief, `mid` needs a capable general model, and
@@ -137,13 +154,15 @@ const SCHEMA = `
 
 /** Open an existing board without migrations, waiting for the same locks as openBoard. */
 export function openBoardReadOnly(file) {
-  const db = new DatabaseSync(file, { readOnly: true });
+  const startedAt = Date.now();
+  let db;
   try {
-    db.exec('PRAGMA busy_timeout = 10000');
+    db = new DatabaseSync(file, { readOnly: true });
+    db.exec(`PRAGMA busy_timeout = ${BOARD_BUSY_TIMEOUT_MS}`);
     return db;
   } catch (error) {
-    db.close();
-    throw error;
+    try { db?.close(); } catch {}
+    throw boardBusyError(file, startedAt, error);
   }
 }
 
@@ -163,12 +182,16 @@ export function openBoard(file, clock = systemClock, { isMain } = {}) {
     let boardVersion = 0;
     let logVersion = 0;
     if (existsSync(file)) {
-      const current = openBoardReadOnly(file);
+      const startedAt = Date.now();
+      let current;
       try {
+        current = openBoardReadOnly(file);
         boardVersion = current.prepare('PRAGMA user_version').get().user_version;
         logVersion = readEventLogVersion(current);
+      } catch (error) {
+        throw boardBusyError(file, startedAt, error);
       } finally {
-        current.close();
+        current?.close();
       }
       if (SCHEMA_VERSION > boardVersion) {
         throw new Refused(
@@ -182,9 +205,11 @@ export function openBoard(file, clock = systemClock, { isMain } = {}) {
     }
   }
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
-  const db = new DatabaseSync(file);
+  const startedAt = Date.now();
+  let db;
   try {
-    db.exec('PRAGMA busy_timeout = 10000');
+    db = new DatabaseSync(file);
+    db.exec(`PRAGMA busy_timeout = ${BOARD_BUSY_TIMEOUT_MS}`);
     if (file !== ':memory:') db.exec('PRAGMA journal_mode = WAL');
     migrateEventLogVersion(db);
     migrate(db);
@@ -194,8 +219,8 @@ export function openBoard(file, clock = systemClock, { isMain } = {}) {
     guardMoves(board);
     return board;
   } catch (error) {
-    db.close();
-    throw error;
+    try { db?.close(); } catch {}
+    throw boardBusyError(file, startedAt, error);
   }
 }
 

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseSpec, SIGNOFFS_FILE } from './spec.js';
-import { openBoardReadOnly, rowDecisions } from './board.js';
+import { boardBusyError, openBoardReadOnly, rowDecisions } from './board.js';
 import { hasSignerFile, verifySignedRecords } from './signature.js';
 import { Refused } from './refused.js';
 import { CONFIG_FILE, configFromSource } from './config.js';
@@ -37,9 +37,11 @@ function rowSourceAt(root, revision, file, kind) {
 /** Read the shared decision index without opening the board's migrator or changing its evidence. */
 function boardApprovals(file) {
   if (!file || !existsSync(file)) return [];
-  const db = openBoardReadOnly(file);
-  try { return rowDecisions({ db }); }
-  finally { db.close(); }
+  const startedAt = Date.now();
+  let db;
+  try { db = openBoardReadOnly(file); return rowDecisions({ db }); }
+  catch (error) { throw boardBusyError(file, startedAt, error); }
+  finally { db?.close(); }
 }
 
 /** Verify staged receipts using staged trust files anchored to the already committed opt-in. */
