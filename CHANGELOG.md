@@ -4,6 +4,18 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.8.12] - 2026-10-12
+
+### Your answer always lands
+
+An answer you send in Pullboard View is recorded as your answer, even while your previous shout is still sending.
+
+### Fixed
+
+- Answering a question while your previous shout was still sending could drop your answer, or record it as a plain shout instead of your answer. The earlier send no longer clears what you wrote next.
+- The replay controls stay in place at phone width when a scrollbar appears at the end of a replay.
+- Tests that waited too long on a busy machine now say which step they were waiting on, and the hook-read lock test holds on macOS.
+
 ## [0.8.11] - 2026-10-12
 
 ### A proper first visit, safer releases
