@@ -7,7 +7,7 @@ import { loadavg, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { test } from 'node:test';
-import { createSender, findChromeExecutable, launchChromeProcess, startChrome } from './chrome-fixture.js';
+import { createEvaluator, createSender, createWaiter, findChromeExecutable, launchChromeProcess, startChrome } from './chrome-fixture.js';
 
 /** Pause between checks while waiting for a fixture helper's readiness marker. */
 function pause(ms) {
@@ -265,6 +265,7 @@ test('a failed DevTools command names its CDP error [C7]', {
     assert.match(navigationError.message, /CDP error -\d+: .+/u);
     assert.match(navigationError.message, /Inspected target navigated or closed/u);
     assert.match(navigationError.message, /page navigated since command was sent: yes \(Page\.(?:frameStartedNavigating|frameNavigated)\)/u);
+    assert.equal(navigationError.navigated, true, 'the sender attaches its observed main-frame navigation to the error');
     await chrome.waitFor("location.pathname === '/after' && document.body.textContent === 'after'", 5_000, 'replacement document ready'); // budget: hang ceiling for the private replacement document handshake; no throughput claim.
     assert.equal(afterRequests, 1, 'the pending evaluation lost a race with one real HTTP navigation');
 
@@ -275,6 +276,7 @@ test('a failed DevTools command names its CDP error [C7]', {
     assert.match(rejected.message, /CDP error -32601: .+/u);
     assert.match(rejected.message, /wasn't found|not found/u);
     assert.match(rejected.message, /page navigated since command was sent: no/u);
+    assert.equal(rejected.navigated, false, 'a protocol error without navigation remains distinguishable');
   } finally {
     if (chrome) await chrome.close();
     server.closeAllConnections();
@@ -456,6 +458,101 @@ test('a wait that throws while the page changes keeps waiting [C7]', async (t) =
     transition.waitError ??= { name: error.name, code: error.code ?? null, message: error.message };
     t.diagnostic(`transition capture before test failure: ${JSON.stringify(transition)}`);
     throw error;
+  } finally {
+    await chrome.close();
+  }
+});
+
+/** Prove waitFor retries a DevTools navigation error instead of abandoning its condition. */
+test('a wait keeps waiting through a DevTools error from a page navigation [C7]', async (t) => {
+  let afterRequests = 0;
+  const server = createServer((request, response) => {
+    if (request.url === '/before') {
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end('<!doctype html><body>before</body>');
+      return;
+    }
+    if (request.url === '/after') {
+      afterRequests += 1;
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end('<!doctype html><body>after</body>');
+      return;
+    }
+    response.writeHead(404);
+    response.end();
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  t.after(() => {
+    server.closeAllConnections();
+    if (server.listening) server.close();
+  });
+
+  const chrome = await startChrome({ url: `${origin}/before` });
+  try {
+    await chrome.waitFor("location.pathname === '/before' && document.body.textContent === 'before'", 5_000, 'initial document ready'); // budget: hang ceiling for the private initial document handshake; no throughput claim.
+    await chrome.send('Emulation.setCPUThrottlingRate', { rate: 6 });
+    const expression = `location.pathname === '/before' ? (() => {
+      if (!window.__navigationScheduled) {
+        window.__navigationScheduled = true;
+        setTimeout(() => location.assign('/after'), 0);
+      }
+      return new Promise(() => {});
+    })() : location.pathname === '/after' && document.body.textContent === 'after'`;
+    const waitResult = await chrome.waitFor(expression, 5_000, 'wait across document navigation')
+      .then(() => ({ resolved: true }), error => ({ resolved: false, error })); // budget: declared 5s ceiling for the local replacement-document handshake.
+    assert.equal(waitResult.resolved, true,
+      `the wait retries a DevTools failure from a main-frame navigation; failure=${waitResult.error?.message ?? 'none'}`);
+    assert.equal(await chrome.evaluate('document.body.textContent'), 'after', 'the wait resolves on the replacement document');
+    assert.equal(afterRequests, 1, 'the real navigation occurs once');
+
+    await chrome.send('Page.navigate', { url: `${origin}/before` }, 'return to the initial document');
+    await chrome.waitFor("location.pathname === '/before' && document.body.textContent === 'before'", 5_000, 'initial document ready again'); // budget: hang ceiling for the private reset handshake; no throughput claim.
+    const exhaustedExpression = `location.pathname === '/before' ? (() => {
+      if (!window.__navigationScheduled) {
+        window.__navigationScheduled = true;
+        setTimeout(() => location.assign('/after'), 0);
+      }
+      return new Promise(() => {});
+    })() : false`;
+    const exhaustedStartedAt = Date.now();
+    const exhausted = await chrome.waitFor(exhaustedExpression, 5_000, 'wait expires after a navigation error')
+      .then(() => ({ resolved: true }), error => ({ resolved: false, error })); // budget: declared 5s private observation ceiling for a local page condition that remains false.
+    assert.equal(exhausted.resolved, false, 'the condition remains pending until its declared deadline');
+    assert.match(exhausted.error.message, /did not arrive within 5000ms/u);
+    assert.match(exhausted.error.message, /last evaluation failed: DevTools command failed: Runtime\.evaluate/u,
+      'the exhausted wait names its last navigation error');
+    assert.match(exhausted.error.message, /CDP error -32000/u);
+    assert.match(exhausted.error.message, /page navigated since command was sent: yes/u);
+    assert.ok(Date.now() - exhaustedStartedAt >= 5_000, 'the wait reaches its requested deadline'); // budget: declared 5s observation ceiling must actually expire.
+    assert.equal(afterRequests, 2, 'the exhausted wait observes a second real navigation');
+
+    let receiveMessage;
+    let commandCount = 0;
+    const fakeSocket = {
+      addEventListener(type, listener) {
+        assert.equal(type, 'message');
+        receiveMessage = listener;
+      },
+      send(frame) {
+        const { id } = JSON.parse(frame);
+        commandCount += 1;
+        queueMicrotask(() => receiveMessage({ data: JSON.stringify(commandCount === 1
+          ? { id, error: { code: -32000, message: 'Target closed' } }
+          : { id, result: { result: { value: true } } }) }));
+      },
+    };
+    const protocolSend = createSender(fakeSocket, new Map(), () => 1, 15_000, { max: 0 }, new Set());
+    const protocolEvaluate = createEvaluator(protocolSend);
+    const protocolWait = createWaiter(protocolEvaluate, { commandTimeoutMs: 5_000 });
+    const noNavigation = await protocolWait('true', 5_000, 'no-navigation protocol error')
+      .then(() => ({ rejected: false }), error => ({ rejected: true, error }));
+    assert.equal(noNavigation.rejected, true, 'a no-navigation protocol error is rethrown immediately');
+    assert.equal(noNavigation.error.code, -32000, 'the original CDP code is preserved');
+    assert.equal(noNavigation.error.navigated, false, 'the sender observed no main-frame navigation');
+    assert.match(noNavigation.error.message, /page navigated since command was sent: no/u);
+    assert.equal(commandCount, 1, 'the wait does not retry a no-navigation CDP error');
   } finally {
     await chrome.close();
   }

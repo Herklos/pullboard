@@ -23,6 +23,26 @@ function pause(ms) {
   return new Promise((resolvePause) => setTimeout(resolvePause, ms));
 }
 
+/** Build the shared bounded page-condition loop around the real CDP evaluator. */
+export function createWaiter(evaluate, { commandTimeoutMs = COMMAND_TIMEOUT_MS, pauseFor = pause } = {}) {
+  return async function waitFor(expression, timeoutMs = commandTimeoutMs, label = 'wait for page condition') {
+    const waitDeadline = Date.now() + timeoutMs;
+    let lastEvaluationError = null;
+    while (Date.now() < waitDeadline) {
+      try {
+        if (await evaluate(expression, label, waitDeadline - Date.now())) return;
+      } catch (error) {
+        if (error instanceof Error && (error.message.startsWith('Browser evaluation failed:')
+          || (error.code === -32000 && error.navigated === true))) lastEvaluationError = error;
+        else if (error.code !== 'CDP_TIMEOUT' || Date.now() < waitDeadline) throw error;
+      }
+      await pauseFor(Math.max(0, Math.min(50, waitDeadline - Date.now())));
+    }
+    const exception = lastEvaluationError instanceof Error ? `; last evaluation failed: ${lastEvaluationError.message}` : '';
+    throw new Error(`Browser condition "${label}" did not arrive within ${timeoutMs}ms; expression: ${expression.slice(0, 200)}${exception}.`);
+  };
+}
+
 /** Keep the most recent diagnostic bytes while continuously draining Chrome's stderr pipe. */
 function appendStderr(current, chunk) {
   const next = current + chunk;
@@ -161,22 +181,7 @@ export async function startChrome({
     async function navigate(nextUrl) {
       await send('Page.navigate', { url: nextUrl }, 'navigate page');
     }
-    /** Wait until a page expression becomes truthy, treating document-transition evaluation errors as pending. */
-    async function waitFor(expression, timeoutMs = commandTimeoutMs, label = 'wait for page condition') {
-      const waitDeadline = Date.now() + timeoutMs;
-      let lastEvaluationError = null;
-      while (Date.now() < waitDeadline) {
-        try {
-          if (await evaluate(expression, label, waitDeadline - Date.now())) return;
-        } catch (error) {
-          if (error instanceof Error && error.message.startsWith('Browser evaluation failed:')) lastEvaluationError = error;
-          else if (error.code !== 'CDP_TIMEOUT' || Date.now() < waitDeadline) throw error;
-        }
-        await pause(Math.max(0, Math.min(50, waitDeadline - Date.now())));
-      }
-      const exception = lastEvaluationError instanceof Error ? `; last evaluation failed: ${lastEvaluationError.message}` : '';
-      throw new Error(`Browser condition "${label}" did not arrive within ${timeoutMs}ms; expression: ${expression.slice(0, 200)}${exception}.`);
-    }
+    const waitFor = createWaiter(evaluate, { commandTimeoutMs });
     /** Wait for non-stream relay traffic to finish before an idle-network assertion. */
     async function waitForRelayIdle(timeoutMs = commandTimeoutMs) {
       const deadline = Date.now() + timeoutMs;
@@ -337,6 +342,7 @@ export function createSender(socket, pending, nextId, timeoutMs, loopDelay, rela
       const navigation = navigated ? `yes (${mainFrameNavigationEvent})` : 'no';
       const error = new Error(`DevTools command failed: ${waiter.method} "${waiter.label}"; CDP error ${cdpError.code}: ${cdpError.message}; page navigated since command was sent: ${navigation}.`);
       error.code = cdpError.code;
+      error.navigated = navigated;
       waiter.reject(error);
     } else waiter.resolve(message.result);
   }
@@ -381,7 +387,7 @@ export function createSender(socket, pending, nextId, timeoutMs, loopDelay, rela
 }
 
 /** Evaluate a page expression by value and retain bounded diagnostics for page exceptions. */
-function createEvaluator(send) {
+export function createEvaluator(send) {
   return async (expression, label = 'evaluate page expression', remainingMs) => {
     const result = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, label, remainingMs);
     if (result.exceptionDetails) {
