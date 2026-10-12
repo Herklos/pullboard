@@ -551,7 +551,7 @@ function timeline(item) {
     const final = FLOW.states.some((f) => f.id === state && f.final);
     const next = steps.slice(index + 1).find((n) => n.move);
     const named = s.kind === 'reject' ? 'sent back' : state;
-    const stay = !enters || final ? ''
+    const stay = !enters || (final && !next) ? ''
       : !s.at ? esc(named + (next ? ' after the ' : ' so far since the ') + s.kind + ', length not logged')
       : !next ? esc(named) + ' for ' + age(s.at) + ' so far'
       : !next.at ? esc(named + ' until the ' + next.kind + ', length not logged')
@@ -588,7 +588,8 @@ function timeline(item) {
  * tie, its states joined by straight arrows. A pair of states a move leads back along takes a dashed
  * square route above the row, the further back the higher. The moves that keep a state are written
  * in its box after a ↻. A state off the row sits below the last state on the row that leads to it,
- * and the routes into it join into one, labelled once. Final states have a double border. Boxes
+ * and routes into it from the row join into one, labelled once. Moves out of those states take
+ * separate routes below the boxes, with their words above each route. Final states have a double border. Boxes
  * count the items there now; labels count the moves made along each route, or name its moves when
  * none was. Words are wrapped and placed by a generous estimate of their width, so none overlaps.
  */
@@ -677,7 +678,8 @@ function flowSvg(p) {
     const from = row.filter((r) => leads(r).includes(s.id));
     pos.set(s.id, { x: from.length ? pos.get(from[from.length - 1]).x : W / 2, y: bottom + 80 + BH / 2 });
   }
-  const H = (below.length ? bottom + 80 + BH : bottom) + 14;
+  const outgoing = pairs.filter((pair) => pair.from !== pair.to && below.some((state) => state.id === pair.from));
+  const H = (below.length ? bottom + 80 + BH : bottom) + 14 + (outgoing.length ? 44 + 40 * (outgoing.length - 1) : 0);
 
   const group = (pairList, route, label) => pairList.map((pair, n) => '<g><title>' + esc(says(pair)) + '</title><path class="edge' + (route.back ? ' back' : '') + '" d="' + route.d + '" marker-end="url(#pb-head' + (route.back ? '-back' : '') + ')"/>' + (n === 0 ? label : '') + '</g>').join('');
   const tone = (said, extra = '') => 'tag' + (said.idle ? ' idle' : '') + extra;
@@ -694,7 +696,7 @@ function flowSvg(p) {
   }
   // Down from the row, joining into one route per state below, labelled once on the way in.
   for (const s of below) {
-    const t = pos.get(s.id), into = pairs.filter((pair) => pair.to === s.id && pos.has(pair.from) && pair.from !== s.id);
+    const t = pos.get(s.id), into = pairs.filter((pair) => pair.to === s.id && col(pair.from) >= 0);
     const said = told(into), tTop = t.y - BH / 2;
     const xs = into.map((pair) => pos.get(pair.from).x).sort((a, b) => a - b);
     const left = xs.filter((x) => x < t.x - 0.5), right = xs.filter((x) => x > t.x + 0.5);
@@ -711,6 +713,16 @@ function flowSvg(p) {
       routes.push(group([pair], { d }, n === 0 ? label : ''));
     });
   }
+  // A below-row state can move back into the row or on to another below-row state.
+  outgoing.forEach((pair, index) => {
+    const from = pos.get(pair.from), to = pos.get(pair.to);
+    const lane = bottom + 80 + BH + 26 + index * 40;
+    const side = to.x < from.x ? to.x + BW / 2 + 1 : to.x - BW / 2 - 1;
+    const said = told([pair]);
+    const room = Math.max(40, Math.abs(side - from.x) - 24);
+    const label = lines((from.x + side) / 2, lane - 8, wrap(said.words, room, 12), tone(said));
+    routes.push(group([pair], { d: path([[from.x, from.y + BH / 2], [from.x, lane], [side, lane], [side, to.y]]) }, label));
+  });
 
   const boxes = FLOW.states.map((s) => {
     const { x, y } = pos.get(s.id), box = inside.get(s.id), left = x - BW / 2, boxTop = y - BH / 2;
