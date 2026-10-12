@@ -186,7 +186,7 @@ test('an approval delivered while the page is busy still becomes a card [H15,H12
   })()`;
   const preloadScript = await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: preload });
   await chrome.send('Page.reload');
-  await chrome.waitFor('window.__keyLoadGate?.started === true', 20_000, 'the real browser is loading its wrapped board key');
+  await chrome.waitFor('window.__keyLoadGate?.started === true', 20_000, 'the real browser is loading its wrapped board key'); // budget: hang ceiling for the deliberately held key-load stage handshake; no throughput claim.
   const firstToken = await issueToken(box, 'approval-key-load');
   const keyLoad = await startRevocation(box, native, firstToken.id);
   const deviceId = JSON.parse(readFileSync(join(box.env.PULLBOARD_HOME, 'relay-machine/state.json'), 'utf8')).devices[0].deviceId;
@@ -234,7 +234,7 @@ test('an approval delivered while the page is busy still becomes a card [H15,H12
   await holdNextApprovalDecrypt(chrome);
   const secondToken = await issueToken(box, 'approval-render');
   const render = await startRevocation(box, native, secondToken.id);
-  await chrome.waitFor('window.__approvalDecrypt?.started === true', 20_000, 'the real sealed approval is being decrypted before rendering');
+  await chrome.waitFor('window.__approvalDecrypt?.started === true', 20_000, 'the real sealed approval is being decrypted before rendering'); // budget: hang ceiling for the deliberately held approval-decrypt stage handshake; no throughput claim.
   assert.equal(await chrome.evaluate(`document.querySelector('#phone-approve-${render.context.id}') === null`), true,
     'the card is not asserted before actual decryption finishes');
   assert.ok((await chrome.evaluate('window.__approvalObservations')).some(poll => poll.ids.includes(render.context.id)),
@@ -263,7 +263,7 @@ test('an approval delivered while the page is busy still becomes a card [H15,H12
     await chrome.waitFor(`document.querySelector('#phone-approve-${earlier.context.id}') !== null`);
     await holdAuthorizeResponse(chrome, earlier.context.id);
     await chrome.evaluate(`document.querySelector('#phone-approve-${earlier.context.id}').click()`);
-    await chrome.waitFor('window.__authorizeGate?.started === true', 20_000, 'the first real approval is in flight');
+    await chrome.waitFor('window.__authorizeGate?.started === true', 20_000, 'the first real approval is in flight'); // budget: hang ceiling for the deliberately held authorize-response stage handshake; no throughput claim.
     const second = await startRevocation(box, native, deviceId);
     assert.equal(second.context.action, 'revoke-device');
     await chrome.waitFor(`document.querySelector('#phone-approve-${second.context.id}') !== null`);

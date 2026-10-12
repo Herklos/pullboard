@@ -152,6 +152,20 @@ const SCHEMA = `
   );
 `;
 
+/** Open an existing board without migrations, waiting for the same locks as openBoard. */
+export function openBoardReadOnly(file) {
+  const startedAt = Date.now();
+  let db;
+  try {
+    db = new DatabaseSync(file, { readOnly: true });
+    db.exec(`PRAGMA busy_timeout = ${BOARD_BUSY_TIMEOUT_MS}`);
+    return db;
+  } catch (error) {
+    try { db?.close(); } catch {}
+    throw boardBusyError(file, startedAt, error);
+  }
+}
+
 /**
  * Open, or create, the board at `file`. Tests pass `:memory:`.
  *
@@ -171,8 +185,7 @@ export function openBoard(file, clock = systemClock, { isMain } = {}) {
       const startedAt = Date.now();
       let current;
       try {
-        current = new DatabaseSync(file, { readOnly: true });
-        current.exec(`PRAGMA busy_timeout = ${BOARD_BUSY_TIMEOUT_MS}`);
+        current = openBoardReadOnly(file);
         boardVersion = current.prepare('PRAGMA user_version').get().user_version;
         logVersion = readEventLogVersion(current);
       } catch (error) {
