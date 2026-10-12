@@ -1206,7 +1206,7 @@ test('Pipeline view shows every stage, status counts, stage ages, detail links a
         const selector = `document.querySelector('#pipeline .pipeline-item[data-item="${id}"]')`;
         await chrome.stable(`globalThis.__pipelinePressDiagnostic.arm(${selector})`);
         await press(chrome, selector);
-        await waitForPipelineItem(chrome, id);
+        await waitForPipelineItem(chrome, id); // budget: hang-only ceiling for the opened Pipeline item; no speed target.
         assert.equal(await chrome.stable('view.item'), id, `${width}: every item opens its detail`);
         await chrome.waitFor(`document.querySelector('#detail h2')?.textContent.includes('#${id}')`);
       }
