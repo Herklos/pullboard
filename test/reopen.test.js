@@ -121,7 +121,7 @@ test('a reopened item resubmits at a new head after a criterion edit [V2,V6,H16]
   const move = prepareEngineMove(copies[0], 'reopen', [1, {
     agentId: 'coordinator', note: 'replay the no-verdict return',
   }], { id: 'reopen-engine-roundtrip', actor: 'coordinator' });
-  assert.equal(move.engine, 8);
+  assert.equal(move.engine, ENGINE_VERSION, "new moves use the current engine while legacy receipts retain their recorded engine");
   const oldReceiver = store.openBoard(join(box.dir, 'old-engine.sqlite'));
   t.after(() => store.closeBoard(oldReceiver));
   importBoard(oldReceiver, exportBoard(copies[0]));

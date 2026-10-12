@@ -100,7 +100,7 @@ test('a shout shows the evidence it carries [B22]', async () => {
   const view = await startView(box);
   try {
     const feed = (await openPage(view)).show('feed');
-    const card = (kind, outcome) => `<div class="receipt"><div><span class="badge">${kind}</span> <span class="outcome">${outcome}</span></div><div class="receipt-foot"><button class="ref" data-go="item:1" title="Greeting" type="button">#1</button> · web-1 (Test Model) · <code class="inline sha" title="${head}">${head.slice(0, 10)}</code></div></div>`;
+    const card = (kind, outcome) => `<div class="receipt"><div><span class="badge">${kind}</span> <span class="outcome">${outcome}</span></div><div class="receipt-foot"><a class="ref" href="/items/1?k=${view.key}" data-go="item:1" title="Greeting">#1</a> · web-1 (Test Model) · <code class="inline sha" title="${head}">${head.slice(0, 10)}</code></div></div>`;
     const after = (text) => feed.slice(feed.indexOf(text + '</div>') + text.length + 6).replace(/^<button class="more" data-more type="button">more<\/button>/, '');
     assert.ok(after('the page loads in 80ms').startsWith(card('receipt', 'measured &lt;fast&gt;')), `what was measured, for which item, by whom, at which commit: ${after('the page loads in 80ms').slice(0, 400)}`);
     assert.ok(after('tried a cache').startsWith(card('attempt', 'failed')), 'and what was tried');
@@ -252,7 +252,7 @@ test('real Chrome styles shout code and item text without growing linked lines [
         askHtml: ask.innerHTML, titleHtml: titleNode.innerHTML,
         linkedMetrics: lineMetrics('X #1'), plainMetrics: lineMetrics('X'),
         wrapLinked: lineMetrics(${JSON.stringify(wrappedLinkedText)}), wrapPlain: lineMetrics('OK'),
-        linkedButtons: [...document.querySelectorAll('#feed > .shout')].find((entry) => entry.textContent.includes('A linked line'))?.querySelectorAll('button.ref').length,
+        linkedButtons: [...document.querySelectorAll('#feed > .shout')].find((entry) => entry.textContent.includes('A linked line'))?.querySelectorAll('a.ref[data-go]').length,
         previewLinks: shout.querySelectorAll('button[data-code^="SPEC.md:1-2@"]').length,
         outsideHtml: outside.innerHTML, askNestedButtons: [...ask.querySelectorAll('button')].filter(link => link.parentElement.closest('button')).length,
         criterionHtml: itemDetail.querySelector('.text')?.innerHTML, briefHtml: itemDetail.querySelector('.text.muted')?.innerHTML,
@@ -469,7 +469,7 @@ test('shouts read as cards [N26]', { timeout: 120_000 }, async (t) => {
         asks: { friday: card('#decisions', ${ids['Launch on Friday?']}), colour: card('#decisions', ${ids[colour]}) },
         answerTarget: !!document.getElementById('shout-${answerId}'),
         repeated: [...document.querySelectorAll('[id]')].map((e) => e.id).filter((id, n, all) => all.indexOf(id) !== n),
-        chips: { ref: chip('button.ref'), path: chip('code.path'), sha: chip('code.sha'), cmd: chip('code.cmd'), code: chip('code.inline:not(.path):not(.sha):not(.cmd)') },
+        chips: { ref: chip('a.ref[data-go]'), path: chip('code.path'), sha: chip('code.sha'), cmd: chip('code.cmd'), code: chip('code.inline:not(.path):not(.sha):not(.cmd)') },
       };
     })())`));
 

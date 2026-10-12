@@ -115,8 +115,11 @@ async function relayServer(t, directory, auth) {
   api = createRelayHandler({ directory, auth, publicOrigin: origin, pollMs: 10, maintenanceMs: 0, now: () => now });
   t.after(async () => {
     api.close();
+    const closed = new Promise((ready, reject) => {
+      server.close((error) => error ? reject(error) : ready());
+    });
     server.closeAllConnections();
-    await new Promise((ready) => server.close(ready));
+    await closed;
   });
   return { origin, calls, uploads, failMoves(value) { refuseMoves = value; }, dropNextReply({ offline = false } = {}) { loseReply = true; blockAfterDrop = offline; }, failReads(value) { refuseReads = value; }, advance(days) { now = Date.now() + days * 86400000; } };
 }

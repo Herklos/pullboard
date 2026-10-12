@@ -95,7 +95,7 @@ test('each row says what it waits on [N26]', async () => {
     }]));
     assert.deepEqual(rows['1'], { chip: 'free: unclaimed', edge: false, waits: [] }, 'free to claim');
     assert.deepEqual(rows['2'], { chip: 'busy: web-1 (Test Model)', edge: false, waits: [] }, 'a claim names its holder');
-    assert.deepEqual(rows['3'], { chip: 'gate: gated', edge: true, waits: ['<span class="wait-unit">waits on <button class="ref" data-go="item:2" type="button">#2</button>'] }, 'gated on #2, which is still being built');
+    assert.deepEqual(rows['3'], { chip: 'gate: gated', edge: true, waits: [`<span class="wait-unit">waits on <a class="ref" href="/items/2?k=${view.key}" data-go="item:2">#2</a>`] }, 'gated on #2, which is still being built');
     assert.deepEqual(rows['4'], { chip: 'gate: lane held', edge: true, waits: ['lane held: API &lt;freeze&gt; until Friday'] });
     assert.deepEqual(rows['5'], { chip: 'warn: to verify', edge: false, waits: [] });
     assert.deepEqual(rows['6'], { chip: 'no: sent back', edge: false, waits: [] });
@@ -611,12 +611,12 @@ test('shout ids, search and narrow windows reach the item [N26]', async () => {
     await page.type('q', '');
 
     const feed = page.show('feed');
-    assert.ok(feed.includes('<button class="ref" data-go="item:1" title="Greeting" type="button">#1</button> is next;'), feed);
-    assert.ok(feed.includes('<button class="ref" data-go="item:2" title="Farewell banner" type="button">#2</button> shipped'));
-    assert.ok(feed.includes('(#99 is not an item) and it&#39;s done'), 'no link for a missing item, and the apostrophe stays intact');
-    const ref = (id, title) => `<button class="ref" data-go="item:${id}" title="${title}" type="button">#${id}</button>`;
+    assert.ok(feed.includes(`<a class="ref" href="/items/1?k=${view.key}" data-go="item:1" title="Greeting">#1</a> is next;`), feed);
+    assert.ok(feed.includes(`<a class="ref" href="/items/2?k=${view.key}" data-go="item:2" title="Farewell banner">#2</a> shipped`));
+    assert.ok(feed.includes(`(<a class="ref" href="/items/99?k=${view.key}" data-go="item:99">#99</a> is not an item) and it&#39;s done`), 'an unknown item still has its address, and the apostrophe stays intact');
+    const ref = (id, title) => `<a class="ref" href="/items/${id}?k=${view.key}" data-go="item:${id}" title="${title}">#${id}</a>`;
     assert.ok(feed.includes(`${ref(7, 'Filler 7')}, see${ref(7, 'Filler 7')} and ${ref(7, 'Filler 7')}${ref(8, 'Filler 8')}: it&#39;s 5 o&#39;clock`), 'every #id links, whatever stands next to it');
-    assert.equal(feed.match(/class="ref"/g).length, 6);
+    assert.equal(feed.match(/class="ref"/g).length, 7);
     await page.click({ go: 'item:2', classes: 'ref' });
     assert.equal(page.run('view.tab'), 'items', 'the link opens the Items tab');
     assert.match(page.show('detail'), /<h2><span>#2<\/span>Farewell banner<\/h2>/, 'on that item');
@@ -905,9 +905,9 @@ test('in-text item references stay inline and open their target at phone and des
       const rendered = JSON.parse(await chrome.stable(`JSON.stringify((() => {
         const row = document.querySelector('#chain .row[data-item="2"]');
         const plain = document.querySelector('#chain .row[data-item="1"]');
-        const titleRef = row?.querySelector('.t button.ref');
+        const titleRef = row?.querySelector('.t a.ref[data-go]');
         const need = [...document.querySelectorAll('#needs .row')].find((entry) => entry.textContent.includes('Please choose'));
-        const needRef = need?.querySelector('.t button.ref');
+        const needRef = need?.querySelector('.t a.ref[data-go]');
         const needAction = need;
         const realButton = document.querySelector('#new-item');
         /** Measure the element box independently of the inline-link assertion. */
@@ -973,24 +973,24 @@ test('in-text item references stay inline and open their target at phone and des
       }
 
       await chrome.click(`document.querySelector('[data-tab="items"]')`);
-      await chrome.click(`document.querySelector('#chain .row[data-item="2"] .t button.ref')`);
+      await chrome.click(`document.querySelector('#chain .row[data-item="2"] .t a.ref[data-go]')`);
       await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('Target item')");
       await chooseFilter(chrome, 'state:active');
-      await chrome.click(`document.querySelector('#needs .row .t button.ref')`);
+      await chrome.click(`document.querySelector('#needs .row .t a.ref[data-go]')`);
       await chrome.waitFor("document.querySelector('[data-tab=items].on') && document.querySelector('#detail h2')?.textContent.includes('Target item')");
 
       await chrome.click(`document.querySelector('[data-tab="activity"]')`);
-      await chrome.waitFor("document.querySelector('#activity .what button.ref')");
-      await chrome.click(`document.querySelector('#activity .what button.ref')`);
+      await chrome.waitFor("document.querySelector('#activity .what a.ref[data-go]')");
+      await chrome.click(`document.querySelector('#activity .what a.ref[data-go]')`);
       await chrome.waitFor("document.querySelector('[data-tab=items].on') && document.querySelector('#detail h2')?.textContent.includes('Target item')");
 
       await chrome.click(`document.querySelector('#chain .row[data-item="2"]')`);
-      await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('Title links to #1') && document.querySelector('#detail .text button.ref') && document.querySelector('#detail .text.muted button.ref')");
-      await chrome.click(`document.querySelector('#detail .text button.ref')`);
+      await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('Title links to #1') && document.querySelector('#detail .text a.ref[data-go]') && document.querySelector('#detail .text.muted a.ref[data-go]')");
+      await chrome.click(`document.querySelector('#detail .text a.ref[data-go]')`);
       await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('Target item')");
       await chrome.click(`document.querySelector('#chain .row[data-item="2"]')`);
-      await chrome.waitFor("document.querySelector('#detail .text.muted button.ref')");
-      await chrome.click(`document.querySelector('#detail .text.muted button.ref')`);
+      await chrome.waitFor("document.querySelector('#detail .text.muted a.ref[data-go]')");
+      await chrome.click(`document.querySelector('#detail .text.muted a.ref[data-go]')`);
       await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('Target item')");
     }
   } finally {
@@ -1109,6 +1109,57 @@ function pipelineBoard(box, alpha) {
   return { base, arrivals: { open: [5, 0], claimed: [4, 12], submitted: [3, 11], accepted: [2, 9], merged: [1, 6] } };
 }
 
+/** Installs capture diagnostics for real Pipeline card presses and leaves the original timeout error intact. */
+async function installPipelinePressDiagnostics(chrome) {
+  const setup = await chrome.stable(`(() => {
+    const pipeline = document.querySelector('#pipeline');
+    if (!pipeline) throw new Error('Pipeline container is missing');
+    const state = { armed: false, redraws: 0, redrawsAtPress: 0, expected: null, down: null, up: null, click: null };
+    const observer = new MutationObserver(records => { state.redraws += records.filter(record => record.target === pipeline && record.type === 'childList').length; });
+    observer.observe(pipeline, { childList: true });
+    const flush = () => { state.redraws += observer.takeRecords().filter(record => record.target === pipeline && record.type === 'childList').length; return state.redraws; };
+    const describe = node => node instanceof Element ? node.tagName.toLowerCase() + (node.id ? '#' + node.id : '') + (typeof node.className === 'string' && node.className ? '.' + node.className.trim().split(/\\s+/).join('.') : '') : String(node);
+    const listen = kind => event => {
+      if (!state.armed) return;
+      const card = event.composedPath().find(node => node instanceof Element && node.classList.contains('pipeline-item')) ?? null;
+      state[kind] = { target: describe(event.target), dataItem: card?.dataset.item ?? null, connected: card?.isConnected ?? false,
+        viewItem: view.item, pathname: location.pathname, innerWidth, redraws: flush(), node: card };
+      if (kind === 'up' && state.down) state.down.connectedAtUp = Boolean(state.down.node?.isConnected);
+      if (kind === 'click' && state.down) state.click.sameNodeAsDown = state.click.node === state.down.node;
+    };
+    document.addEventListener('mousedown', listen('down'), true);
+    document.addEventListener('mouseup', listen('up'), true);
+    document.addEventListener('click', listen('click'), true);
+    state.arm = card => { flush(); state.expected = { dataItem: card?.dataset.item ?? null, connected: Boolean(card?.isConnected), disabled: card?.disabled ?? null };
+      state.expectedNode = card; state.down = state.up = state.click = null; state.redrawsAtPress = state.redraws; state.armed = true; return state.expected; };
+    state.snapshot = () => {
+      const redraws = flush();
+      const clean = event => event && ({ target: event.target, dataItem: event.dataItem, connected: event.connected, connectedAtUp: event.connectedAtUp,
+        disabled: event.disabled, viewItem: event.viewItem, pathname: event.pathname, innerWidth: event.innerWidth, redraws: event.redraws,
+        sameNodeAsDown: event.sameNodeAsDown });
+      return { expected: state.expected, down: clean(state.down), up: clean(state.up), click: clean(state.click), refresh: state.refresh ?? null, expectedNodeConnected: Boolean(state.expectedNode?.isConnected),
+        downNodeConnectedNow: Boolean(state.down?.node?.isConnected), viewItem: view.item, pathname: location.pathname, innerWidth,
+        pipelineRedrawsSincePress: redraws - state.redrawsAtPress,
+        pipelineRedrawsBetweenDownAndUp: state.down && state.up ? state.up.redraws - state.down.redraws : null };
+    };
+    globalThis.__pipelinePressDiagnostic = state;
+    return { ready: true, pathname: location.pathname, selected: view.item };
+  })()`);
+  assert.equal(setup.ready, true, 'the real Pipeline diagnostics are installed');
+}
+
+/** Waits for the original Pipeline selection predicate and adds real press diagnostics if its wait times out. */
+async function waitForPipelineItem(chrome, id) {
+  try {
+    await chrome.waitFor(`view.item === ${id}`);
+  } catch (error) {
+    let snapshot = 'diagnostics unavailable';
+    try { snapshot = await chrome.stable('JSON.stringify(globalThis.__pipelinePressDiagnostic?.snapshot() ?? null)'); } catch {}
+    error.message += `; Pipeline press diagnostics for #${id}: ${snapshot}`;
+    throw error;
+  }
+}
+
 test('Pipeline view shows every stage, status counts, stage ages, detail links and its phone address [N26,N38]', { timeout: 120_000 }, async () => {
   const executable = chromeExecutable();
   assert.ok(executable, 'Chrome is required for the Pipeline view criterion');
@@ -1127,7 +1178,7 @@ test('Pipeline view shows every stage, status counts, stage ages, detail links a
     assert.equal(await chrome.stable('location.pathname'), '/items/pipeline', 'Pipeline has its own shareable address');
     await chrome.waitFor("typeof data !== 'undefined' && location.pathname === '/items/pipeline' && !document.querySelector('#pipeline').hidden");
     const expectedCounts = [status.open, status.claimed, status.submitted, 1, 1];
-    const read = JSON.parse(await chrome.stable(`JSON.stringify([...document.querySelectorAll('[data-pipeline-stage]')].map(stage => ({ stage:stage.dataset.pipelineStage, label:stage.querySelector('h2').textContent, count:Number(stage.querySelector('[data-stage-count]').textContent), oldest:Number(stage.querySelector('.pipeline-oldest [data-item]')?.dataset.item || 0), since:stage.querySelector('.pipeline-oldest time')?.dataset.ago || null, age:stage.querySelector('.pipeline-oldest time')?.textContent || '', ids:[...stage.querySelectorAll('.pipeline-item')].map(item => Number(item.dataset.item)) })))`));
+    const read = JSON.parse(await chrome.stable(`JSON.stringify([...document.querySelectorAll('[data-pipeline-stage]')].map(stage => ({ stage:stage.dataset.pipelineStage, label:stage.querySelector('h2').textContent, count:Number(stage.querySelector('[data-stage-count]').textContent), oldest:Number(stage.querySelector('.pipeline-oldest a[data-go]')?.dataset.go.slice('item:'.length) || 0), since:stage.querySelector('.pipeline-oldest time')?.dataset.ago || null, age:stage.querySelector('.pipeline-oldest time')?.textContent || '', ids:[...stage.querySelectorAll('.pipeline-item')].map(item => Number(item.dataset.item)) })))`));
     assert.deepEqual(read.map(stage => stage.label), ['Not started', 'Building', 'Waiting for review', 'Accepted, waiting to merge', 'Merged']);
     assert.deepEqual(read.map(stage => stage.count), expectedCounts, 'open/claimed/submitted match status; accepted plus merged equals verified');
     assert.equal(read[3].count + read[4].count, status.verified);
@@ -1143,6 +1194,7 @@ test('Pipeline view shows every stage, status counts, stage ages, detail links a
       assert.ok(Math.abs(elapsed - (observedAt - Date.parse(since)) / 60_000) <= 1, stage.stage + ': elapsed time matches native fixture arrival'); // budget: one minute is the display's measured-age rounding unit.
     }
     assert.equal(await chrome.stable("document.querySelector('#item-list').hidden"), true);
+    await installPipelinePressDiagnostics(chrome);
     for (const width of [375, 1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
       await chrome.waitFor(`innerWidth === ${width}`);
@@ -1151,8 +1203,10 @@ test('Pipeline view shows every stage, status counts, stage ages, detail links a
       await chrome.stable('(async()=>{await new Promise(requestAnimationFrame);await new Promise(requestAnimationFrame)})()');
       assert.equal(await chrome.stable('document.documentElement.dataset.scheme'), scheme);
       for (const id of [1, 2, 3, 4, 5, 6]) {
-        await press(chrome, `document.querySelector('#pipeline .pipeline-item[data-item="${id}"]')`);
-        await chrome.waitFor(`view.item === ${id}`);
+        const selector = `document.querySelector('#pipeline .pipeline-item[data-item="${id}"]')`;
+        await chrome.stable(`globalThis.__pipelinePressDiagnostic.arm(${selector})`);
+        await press(chrome, selector);
+        await waitForPipelineItem(chrome, id); // budget: hang-only ceiling for the opened Pipeline item; no speed target.
         assert.equal(await chrome.stable('view.item'), id, `${width}: every item opens its detail`);
         await chrome.waitFor(`document.querySelector('#detail h2')?.textContent.includes('#${id}')`);
       }
@@ -1189,6 +1243,110 @@ test('Pipeline view shows every stage, status counts, stage ages, detail links a
   }
 });
 
+/** A real card press records click delivery, Pipeline redraws and address selection under CPU throttling [N26,N38,C7]. */
+test('the pipeline opens the clicked item under a 6× CPU throttle [N26,N38,C7]', { timeout: 120_000 }, async (t) => { // budget: hang ceiling for one browser journey at the declared 6× CPU load.
+  const executable = chromeExecutable();
+  assert.ok(executable, 'Chrome is required for the throttled Pipeline click diagnostic');
+  const box = machine(), alpha = project(box, 'pipeline-click-under-load');
+  pipelineBoard(box, alpha);
+  const view = await startView(box), profile = mkdtempSync(join(tmpdir(), 'pullboard-pipeline-click-chrome-'));
+  let chrome;
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.waitFor(`data?.project?.root === ${JSON.stringify(alpha.repo)} && document.querySelector('#chain [data-item="5"]')`);
+    await chrome.send('Emulation.setDeviceMetricsOverride', { width: 375, height: 900, deviceScaleFactor: 1, mobile: false });
+    await press(chrome, "document.querySelector('[data-items-view=\"pipeline\"]')");
+    await chrome.waitFor("location.pathname === '/items/pipeline' && !document.querySelector('#pipeline').hidden");
+    await chrome.send('Emulation.setCPUThrottlingRate', { rate: 6 });
+    await installPipelinePressDiagnostics(chrome);
+    const id = 2;
+    const selector = `document.querySelector('#pipeline .pipeline-item[data-item="${id}"]')`;
+    const armed = await chrome.stable(`globalThis.__pipelinePressDiagnostic.arm(${selector})`);
+    assert.deepEqual(armed, { dataItem: String(id), connected: true, disabled: false }, 'the intended real card is present and enabled before press');
+    let failure = null;
+    try {
+      await press(chrome, selector);
+      await chrome.waitFor(`(() => { const evidence = globalThis.__pipelinePressDiagnostic.snapshot(); globalThis.__pipelinePressDiagnostic.last = evidence; return evidence.viewItem === ${id}; })()`, 15_000); // budget: hang ceiling for the clicked item to reach its detail, not a speed target.
+    } catch (error) {
+      failure = error;
+    }
+    const evidence = JSON.parse(await chrome.stable('JSON.stringify(globalThis.__pipelinePressDiagnostic.last || globalThis.__pipelinePressDiagnostic.snapshot())'));
+    assert.equal(failure, null, `${failure?.message || 'the selected item matched'}; Pipeline click evidence: ${JSON.stringify(evidence)}`);
+    assert.equal(evidence.down?.dataItem, String(id), `the mousedown reached the intended card: ${JSON.stringify(evidence)}`);
+    assert.equal(evidence.up?.dataItem, String(id), `the mouseup remained on the intended card: ${JSON.stringify(evidence)}`);
+    assert.equal(evidence.click?.dataItem, String(id), `the real click reached the intended card: ${JSON.stringify(evidence)}`);
+    assert.equal(evidence.viewItem, id, `the intended item is selected: ${JSON.stringify(evidence)}`);
+    assert.equal(evidence.pathname, `/items/${id}`, `the address names the intended item: ${JSON.stringify(evidence)}`);
+    await chrome.waitFor(`document.querySelector('#detail h2')?.textContent.includes('#${id}')`);
+    t.diagnostic(`375px 6× Pipeline click: ${JSON.stringify(evidence)}`);
+    assert.deepEqual(chrome.exceptions, [], 'the throttled Pipeline click has no uncaught page errors');
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    await view.stop();
+    rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+/** A real API refresh while the pointer is held must leave the pressed Pipeline card for its click. */
+test('a refresh between pointer down and up does not lose the click [N26,N38,C7]', { timeout: 120_000 }, async (t) => { // budget: hang ceiling for one native press and forced local refresh; no speed threshold.
+  const executable = chromeExecutable();
+  assert.ok(executable, 'Chrome is required for the held-pointer refresh journey');
+  const box = machine(), alpha = project(box, 'pipeline-refresh-under-press');
+  pipelineBoard(box, alpha);
+  const view = await startView(box), profile = mkdtempSync(join(tmpdir(), 'pullboard-pipeline-refresh-press-chrome-'));
+  let chrome;
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.waitFor(`data?.project?.root === ${JSON.stringify(alpha.repo)} && document.querySelector('#chain [data-item="5"]')`);
+    await chrome.send('Emulation.setDeviceMetricsOverride', { width: 375, height: 900, deviceScaleFactor: 1, mobile: false });
+    await press(chrome, "document.querySelector('[data-items-view=\"pipeline\"]')");
+    await chrome.waitFor("location.pathname === '/items/pipeline' && !document.querySelector('#pipeline').hidden");
+    await chrome.send('Emulation.setCPUThrottlingRate', { rate: 6 });
+    await installPipelinePressDiagnostics(chrome);
+    await chrome.stable(`globalThis.__pipelinePressDiagnostic.arm(document.querySelector('#pipeline .pipeline-item[data-item="2"]'))`);
+    let refreshObservation;
+    await press(chrome, "document.querySelector('#pipeline .pipeline-item[data-item=\"2\"]')", {
+      afterMouseDown: async () => {
+        const title = 'A new item arrives during the held Pipeline press';
+        box.run(alpha.repo, 'add', 'web', title, '--specs', 'G1', '--criterion', 'Refresh the board while a card is pressed');
+        refreshObservation = JSON.parse(await chrome.stable(`(async () => {
+          await refresh();
+          const old = globalThis.__pipelinePressDiagnostic.down?.node;
+          const observation = { fetchedNewItem: data.project.items.some(item => item.title === ${JSON.stringify(title)}),
+            originalCardConnectedWhileHeld: Boolean(old?.isConnected), selected: view.item, pathname: location.pathname, innerWidth,
+            pipelineRedrawsBeforeRelease: globalThis.__pipelinePressDiagnostic.snapshot().pipelineRedrawsSincePress };
+          globalThis.__pipelinePressDiagnostic.refresh = observation;
+          return JSON.stringify(observation);
+        })()`));
+        assert.equal(refreshObservation.fetchedNewItem, true, `the real API refresh received the new native board item: ${JSON.stringify(refreshObservation)}`);
+        assert.equal(refreshObservation.originalCardConnectedWhileHeld, true, `the changed board does not replace the pressed card before mouseup: ${JSON.stringify(refreshObservation)}`);
+        assert.equal(refreshObservation.pipelineRedrawsBeforeRelease, 0, `the Pipeline has not redrawn while the pointer is held: ${JSON.stringify(refreshObservation)}`);
+      },
+    });
+    const evidence = JSON.parse(await chrome.stable('JSON.stringify(globalThis.__pipelinePressDiagnostic.snapshot())'));
+    assert.equal(evidence.down?.dataItem, '2', `mousedown reached the intended item: ${JSON.stringify(evidence)}`);
+    assert.equal(evidence.up?.dataItem, '2', `mouseup reached the intended item: ${JSON.stringify(evidence)}`);
+    assert.equal(evidence.click?.dataItem, '2', `the browser dispatched click to the intended item: ${JSON.stringify(evidence)}`);
+    assert.equal(evidence.down?.connectedAtUp, true, `the original card remained connected through mouseup: ${JSON.stringify(evidence)}`);
+    assert.equal(evidence.click?.sameNodeAsDown, true, `the click belongs to the card that received mousedown: ${JSON.stringify(evidence)}`);
+    assert.equal(evidence.viewItem, 2, `the native click opens item #2: ${JSON.stringify(evidence)}`);
+    assert.equal(evidence.pathname, '/items/2', `the item address agrees with the real selection: ${JSON.stringify(evidence)}`);
+    assert.equal(evidence.pipelineRedrawsBetweenDownAndUp, 0, `no Pipeline redraw separates mousedown and mouseup: ${JSON.stringify(evidence)}`);
+    await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('#2')");
+    await chrome.stable('refresh()');
+    assert.equal(await chrome.stable('view.item'), 2, 'refresh preserves the selected item instead of an address candidate');
+    await chrome.send('Page.reload', {});
+    await settled(chrome, "typeof data !== 'undefined' && location.pathname === '/items/2' && view.item === 2");
+    assert.equal(await chrome.stable('view.item'), 2, 'reload restores the selected item from its address');
+    t.diagnostic(`375px 6× held-pointer API refresh: ${JSON.stringify({ refreshObservation, evidence })}`);
+    assert.deepEqual(chrome.exceptions, [], 'the refresh and held-pointer click produce no uncaught page errors');
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    await view.stop();
+    rmSync(profile, { recursive: true, force: true });
+  }
+});
+
 test('Pipeline view dates an expired claim from its recorded deadline [N26,N38]', async () => {
   const box = machine(), alpha = project(box, 'pipeline-lapse');
   const base = Date.now() - 60 * 60_000, commit = box.git(alpha.repo, 'rev-parse', 'HEAD');
@@ -1204,11 +1362,11 @@ test('Pipeline view dates an expired claim from its recorded deadline [N26,N38]'
     const page = await openPage(view);
     await page.click({itemsView:'pipeline'});
     const open = () => page.show('pipeline').split('data-pipeline-stage="open"')[1].split('</header>')[1].split('</p>')[0];
-    assert.match(open(), /data-item="2"/, 'an open item from minute35 is older than a claim that lapses at minute40');
+    assert.match(open(), /data-go="item:2"/, 'an open item from minute35 is older than a claim that lapses at minute40');
     assert.match(open(), new RegExp(new Date(base+35*60_000).toISOString()), 'the oldest open timestamp is the arrival');
     box.run(alpha.repo, 'withdraw', '2', 'Private fixture now isolates the lapse age');
     await page.run('refresh()');
-    assert.match(open(), /data-item="1"/);
+    assert.match(open(), /data-go="item:1"/);
     assert.match(open(), new RegExp(new Date(base+40*60_000).toISOString()), 'expired claim age starts at its native lease deadline');
   } finally { await view.stop(); }
 });
