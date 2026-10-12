@@ -2739,11 +2739,14 @@ async function readStdin(stdin) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-/** Read hook identity and landing facts without migrating the shared board from newer source. */
+/** Wait up to the board's shared busy timeout while reading hook facts, without migrating its schema. */
 function hookRead(ctx, read) {
   if (!existsSync(ctx.file)) return null;
   const db = new DatabaseSync(ctx.file, { readOnly: true });
-  try { return read({ db, clock: ctx.clock }); }
+  try {
+    db.exec('PRAGMA busy_timeout = 10000');
+    return read({ db, clock: ctx.clock });
+  }
   finally { db.close(); }
 }
 

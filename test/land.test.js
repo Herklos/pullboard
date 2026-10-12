@@ -29,6 +29,54 @@ function calls(box) {
   return existsSync(box.calls) ? readFileSync(box.calls, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line)) : [];
 }
 
+/** Start a separate process holding an exclusive write transaction on the fixture board. */
+function startExclusiveBoardWriter(box, boardFile, name) {
+  const ready = join(box.dir, `${name}-ready`);
+  const release = join(box.dir, `${name}-release`);
+  const released = join(box.dir, `${name}-released`);
+  const source = [
+    "const fs = require('node:fs'); const { DatabaseSync } = require('node:sqlite');",
+    'const [file, ready, release, released] = process.argv.slice(1);',
+    'const db = new DatabaseSync(file);',
+    "try { const journal = db.prepare('PRAGMA journal_mode = DELETE').get().journal_mode;",
+    "const locking = db.prepare('PRAGMA locking_mode = EXCLUSIVE').get().locking_mode;",
+    "if (journal !== 'delete' || locking !== 'exclusive') throw new Error('fixture did not acquire rollback-journal exclusive mode');",
+    "db.exec('BEGIN EXCLUSIVE'); db.exec('CREATE TABLE IF NOT EXISTS fixture_write (value INTEGER)'); db.exec('INSERT INTO fixture_write (value) VALUES (1)');",
+    'fs.writeFileSync(ready, JSON.stringify({ journal, locking })); const deadline = Date.now() + 20_000;',
+    'while (!fs.existsSync(release) && Date.now() < deadline) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);',
+    "if (!fs.existsSync(release)) throw new Error('writer release was not received');",
+    "db.exec('COMMIT'); db.close(); fs.writeFileSync(released, 'released');",
+    "} catch (error) { try { db.close(); } catch {} process.stderr.write(error.stack + '\\n'); process.exitCode = 1; }",
+  ].join('\n');
+  const child = startFixtureChild(process.execPath, ['-e', source, boardFile, ready, release, released], {
+    cwd: box.repo, env: box.env, detached: true, stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  return { child, closed: childOutcome(child), ready, release, released };
+}
+
+/** Resolve when an owned fixture child closes or fails to spawn. */
+function childOutcome(child) {
+  return new Promise((resolveOutcome) => {
+    let spawnError = null;
+    child.once('error', (error) => { spawnError = error; });
+    child.once('close', (code, signal) => resolveOutcome({ code, signal, error: spawnError }));
+  });
+}
+
+/** Run the real pre-commit hook with a preload observing its agentAt SQLite read. */
+function startHookRead(box, probe, marker) {
+  const env = { ...box.env, HOOK_READ_ATTEMPT: marker };
+  const child = startFixtureChild(process.execPath, ['--import', probe, BIN, 'hook', 'pre-commit'], {
+    cwd: box.web, env, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  child.stdoutText = '';
+  child.stderrText = '';
+  child.stdout.setEncoding('utf8').on('data', (part) => { child.stdoutText += part; });
+  child.stderr.setEncoding('utf8').on('data', (part) => { child.stderrText += part; });
+  child.closed = childOutcome(child);
+  return child;
+}
+
 /** Emit real failing TAP and a separate single-file runner, recording every invocation. */
 function gateFixture(box) {
   const gate = join(box.dir, 'land-gate.cjs');
@@ -72,6 +120,82 @@ function landProject() {
   assert.equal(pushed.status, 0, pushed.stderr);
   return { ...fixture, ...commands, remote };
 }
+
+test('a hook read waits for another process\'s lock [C7,B3]', { timeout: 40_000 }, // budget: hang-only ceiling covers the real writer, hook and fixture cleanup; no speed claim.
+async (t) => {
+  const box = landProject();
+  const boardFile = join(box.repo, '.git', 'pullboard', 'board.sqlite');
+  const probe = join(box.dir, 'observe-hook-read.mjs');
+  const marker = join(box.dir, 'hook-read-attempted');
+  writeFileSync(probe, [
+    "import { writeFileSync } from 'node:fs';",
+    "import { DatabaseSync } from 'node:sqlite';",
+    'const prepare = DatabaseSync.prototype.prepare;',
+    'DatabaseSync.prototype.prepare = function (sql, ...args) {',
+    "  if (String(sql) !== 'SELECT * FROM agent WHERE agent_path = ?') return Reflect.apply(prepare, this, [sql, ...args]);",
+    "  writeFileSync(process.env.HOOK_READ_ATTEMPT, JSON.stringify({ phase: 'prepare-started' }));",
+    '  try {',
+    '    const statement = Reflect.apply(prepare, this, [sql, ...args]);',
+    '    const get = statement.get;',
+    '    statement.get = function (...values) {',
+    "      writeFileSync(process.env.HOOK_READ_ATTEMPT, JSON.stringify({ phase: 'get-started' }));",
+    '      try { return Reflect.apply(get, this, values); }',
+    "      catch (error) { writeFileSync(process.env.HOOK_READ_ATTEMPT, JSON.stringify({ phase: 'error', code: error.code ?? null, errcode: error.errcode ?? null, message: error.message })); throw error; }",
+    '    };',
+    '    return statement;',
+    "  } catch (error) { writeFileSync(process.env.HOOK_READ_ATTEMPT, JSON.stringify({ phase: 'error', code: error.code ?? null, errcode: error.errcode ?? null, message: error.message })); throw error; }",
+    '};',
+  ].join('\n'));
+  const writers = [];
+  const hooks = [];
+  t.after(async () => {
+    const settle = async (promise, timeoutMs) => {
+      let timer;
+      try { return await Promise.race([promise, new Promise((resolveTimeout) => { timer = setTimeout(() => resolveTimeout(false), timeoutMs); })]); }
+      finally { clearTimeout(timer); }
+    };
+    for (const writer of writers) {
+      writeFileSync(writer.release, 'release');
+      if (!await settle(writer.closed, 1_000) && writer.child.exitCode === null && writer.child.signalCode === null) {
+        try { process.kill(-writer.child.pid, 'SIGTERM'); } catch {}
+        if (!await settle(writer.closed, 1_000) && writer.child.exitCode === null && writer.child.signalCode === null) {
+          try { process.kill(-writer.child.pid, 'SIGKILL'); } catch {}
+          await writer.closed;
+        }
+      }
+    }
+    for (const hook of hooks) {
+      if (!await settle(hook.closed, 1_000) && hook.exitCode === null && hook.signalCode === null) {
+        hook.kill('SIGTERM');
+        if (!await settle(hook.closed, 1_000) && hook.exitCode === null && hook.signalCode === null) {
+          hook.kill('SIGKILL');
+          await hook.closed;
+        }
+      }
+    }
+  });
+
+  const writer = startExclusiveBoardWriter(box, boardFile, 'hook-read');
+  writers.push(writer);
+  await waitFor(() => existsSync(writer.ready), 'exclusive rollback-journal writer');
+  assert.deepEqual(JSON.parse(readFileSync(writer.ready, 'utf8')), { journal: 'delete', locking: 'exclusive' });
+  const hook = startHookRead(box, probe, marker);
+  hooks.push(hook);
+  await waitFor(() => existsSync(marker), 'hook agentAt query attempt');
+  await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
+  const observation = JSON.parse(readFileSync(marker, 'utf8'));
+  const sqliteBusy = observation.code === 'SQLITE_BUSY' || ((observation.errcode ?? 0) & 0xff) === 5;
+  assert.equal(sqliteBusy, false, `hookRead must wait for the released lock, not return SQLITE_BUSY: ${JSON.stringify(observation)} ${hook.stderrText}`);
+  assert.ok(['prepare-started', 'get-started'].includes(observation.phase), `hook reached its native SQLite read: ${JSON.stringify(observation)}`);
+  assert.equal(hook.exitCode, null, `hook read remains pending during the real exclusive writer: ${hook.stderrText}`);
+  writeFileSync(writer.release, 'release');
+  const [writerResult, hookResult] = await Promise.all([writer.closed, hook.closed]);
+  assert.equal(writerResult.error, null, `exclusive writer spawned: ${writerResult.error?.message ?? ''}`);
+  assert.deepEqual({ code: writerResult.code, signal: writerResult.signal }, { code: 0, signal: null }, writer.child.fixtureFailure ?? 'exclusive writer commits and closes');
+  assert.equal(hookResult.error, null, `hook child spawned: ${hookResult.error?.message ?? ''}`);
+  assert.deepEqual({ code: hookResult.code, signal: hookResult.signal }, { code: 0, signal: null }, hook.stderrText);
+  assert.ok(existsSync(writer.released), 'writer releases its lock after commit and close');
+});
 
 /** Give one private item a distinct canonical lane identity and an independent main base. */
 function itemWorktree(box, number, file = FILES[number - 1], afterIds = []) {
