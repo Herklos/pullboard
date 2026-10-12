@@ -338,8 +338,7 @@ test('replay speed is judged by its scheduled delay [A10,C7]', { timeout: 90_000
 });
 
 /** Measure every interactive replay control through its real start, pause, and end states. */
-test('the replay controls don\'t move when the replay starts [A10,C7]', { timeout: 60_000 }, // budget: hang-only ceiling for two viewport geometry passes.
-async function replayControlsStayPut(t) {
+const replayControlsStayPut = (wideFonts = false, classicScrollbar = false) => async function replayControlsStayPutCase(t) {
   const executable = chromeExecutable();
   assert.ok(executable, 'Chrome is required for replay control geometry coverage');
   const box = machine();
@@ -349,6 +348,10 @@ async function replayControlsStayPut(t) {
   }
   const folder = join(box.dir, 'stable-replay-controls-export');
   box.run(alpha.repo, 'view', '--export', folder);
+  if (classicScrollbar) {
+    const stylesheet = join(folder, 'view.css');
+    writeFileSync(stylesheet, readFileSync(stylesheet, 'utf8') + '\n::-webkit-scrollbar { width: 15px; }\n');
+  }
   const host = await serveFolder(folder, '/demo/');
   const profile = join(box.dir, 'stable-replay-controls-chrome');
   let chrome;
@@ -399,12 +402,28 @@ async function replayControlsStayPut(t) {
       })())`));
       t.diagnostic('replay control boxes ' + JSON.stringify({ width, state,
         runner: { node: process.version, platform: process.platform, arch: process.arch }, ...capture }));
+      if (classicScrollbar && state === 'end') {
+        assert.equal(capture.viewport.scrollbarWidth, 15, `${width}: the fixture uses the measured native 15px classic scrollbar`);
+        if (width === 375) assert.ok(capture.viewport.scrollHeight > capture.viewport.clientHeight, `${width}: the final event list needs vertical scrolling`);
+      }
       return capture.boxes;
     };
     /** Exercise real browser input and compare control geometry within one viewport. */
     const verifyWidth = async (width) => {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
       await chrome.waitFor(`innerWidth === ${width}`);
+      if (wideFonts) {
+        await chrome.stable(`(() => {
+          const sheet = document.styleSheets[0];
+          sheet.insertRule('.snapshot-controls, .snapshot-controls * { letter-spacing: .12em !important; }', sheet.cssRules.length);
+        })()`);
+        const spacing = JSON.parse(await chrome.stable(`JSON.stringify(
+          ['#snapshot-controls > span', '#replay-play', '#replay-pause', '#replay-speed', '#replay-progress']
+            .map(selector => getComputedStyle(document.querySelector(selector)).letterSpacing)
+        )`));
+        assert.ok(spacing.every(value => Number.parseFloat(value) > 0),
+          `${width}: every replay control receives the wide-font fixture`);
+      }
       await chrome.stable(`(() => {
         replayPosition(0);
         const speed = document.querySelector('#replay-speed');
@@ -435,7 +454,7 @@ async function replayControlsStayPut(t) {
         assert.deepEqual(boxes, atStart, `${width}: every interactive replay control keeps its box unchanged ${state}`);
       }
     };
-    for (const width of [375, 1280]) {
+    for (const width of (wideFonts ? [375] : [375, 1280])) {
       await verifyWidth(width);
     }
   } finally {
@@ -443,7 +462,16 @@ async function replayControlsStayPut(t) {
     await host.close();
     rmSync(profile, { recursive: true, force: true });
   }
-});
+};
+
+test('the replay controls don\'t move when the replay starts [A10,C7]', { timeout: 60_000 }, // budget: hang-only ceiling for two viewport geometry passes.
+  replayControlsStayPut());
+
+test('the replay controls hold their place at 375 with wide fonts [A10,C7]', { timeout: 60_000 }, // budget: hang-only ceiling for one viewport geometry pass.
+  replayControlsStayPut(true));
+
+test('the replay controls hold their place with a classic scrollbar [A10,C7]', { timeout: 60_000 }, // budget: hang-only ceiling for two viewport geometry passes.
+  replayControlsStayPut(false, true));
 
 test('static export redacts structured checkout paths but preserves paths people wrote [A10]', async () => {
   const box = machine();
