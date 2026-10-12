@@ -17,7 +17,7 @@ import { cockpitPage } from './cockpit.js';
 import { displayAgentName } from './agent-names.js';
 import { COORDINATOR, loadConfig } from './config.js';
 import { doctrineHistory, loadDoctrine, standardDoctrine } from './doctrine.js';
-import { repoInfo, resolveCommit } from './git.js';
+import { codeIsFromMain, repoInfo, resolveCommit } from './git.js';
 import { committedIds } from './history.js';
 import { productSummaries } from './products.js';
 import { listApiProjects, registryFile } from './projects.js';
@@ -146,7 +146,7 @@ function rememberPort(port) {
 }
 
 /**
- * Open a project's board, read from it, and always close it.
+ * Open a project's board using running-source migration authority, or borrow a staged connection.
  *
  * @template T
  * @param {string} root
@@ -157,7 +157,7 @@ function rememberPort(port) {
 function withProject(root, read, providedBoard = null) {
   const info = repoInfo(root);
   const config = loadConfig(info.root);
-  const board = providedBoard ?? store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'));
+  const board = providedBoard ?? store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), undefined, { isMain: codeIsFromMain() });
   try {
     return read(board, info, config);
   } finally {

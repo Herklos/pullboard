@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 392" width="840" height="392" role="img" aria-labelledby="title desc">
-<title id="title">An item's life</title><desc id="desc">Drawn from src/machine.js. An item starts open and ends verified or withdrawn. open to claimed: claim. claimed to open: release, lapse (clock), escalate, refreeze. claimed to submitted: submit. submitted to verified: accept. submitted to open: reject, reopen, refreeze. open to withdrawn: withdraw. claimed to withdrawn: withdraw. submitted to withdrawn: withdraw.</desc>
+<title id="title">An item's life</title><desc id="desc">Drawn from src/machine.js. An item starts open and ends withdrawn. open to claimed: claim. claimed to open: release, lapse (clock), escalate, refreeze. claimed to submitted: submit. submitted to verified: accept. submitted to open: reject, reopen, refreeze. verified to open: reopen. open to withdrawn: withdraw. claimed to withdrawn: withdraw. submitted to withdrawn: withdraw.</desc>
 <style>
 text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif; fill: #1f2328; }
 .mono { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; }
@@ -52,11 +52,11 @@ text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', 
 </defs>
 <rect class="card" x="0.5" y="0.5" width="839" height="391" rx="12"/>
 <text class="head" x="24" y="34">An item's life</text>
-<text class="aside" x="140" y="34">starts open; ends verified or withdrawn</text>
+<text class="aside" x="140" y="34">starts open; ends withdrawn</text>
 <g class="plain"><rect x="25" y="150" width="160" height="58" rx="8"/><text class="t1" x="105" y="175" text-anchor="middle">open</text><text class="t2" x="105" y="193" text-anchor="middle">↻ escalate · refreeze</text></g>
 <g class="plain"><rect x="235" y="150" width="160" height="58" rx="8"/><text class="t1" x="315" y="175" text-anchor="middle">claimed</text><text class="t2" x="315" y="193" text-anchor="middle">↻ claim · refreeze</text></g>
 <g class="plain"><rect x="445" y="150" width="160" height="58" rx="8"/><text class="t1" x="525" y="175" text-anchor="middle">submitted</text><text class="t2" x="525" y="193" text-anchor="middle">↻ reserve</text></g>
-<g class="done" data-final="verified"><rect x="655" y="150" width="160" height="58" rx="8"/><rect x="659" y="154" width="152" height="50" rx="5" fill="none"/><text class="t1" x="735" y="184" text-anchor="middle">verified</text></g>
+<g class="done"><rect x="655" y="150" width="160" height="58" rx="8"/><text class="t1" x="735" y="184" text-anchor="middle">verified</text></g>
 <g class="plain" data-final="withdrawn"><rect x="445" y="284" width="160" height="58" rx="8"/><rect x="449" y="288" width="152" height="50" rx="5" fill="none"/><text class="t1" x="525" y="318" text-anchor="middle">withdrawn</text></g>
 <path class="edge" d="M 185 179 L 231 179" marker-end="url(#tip)"/>
 <text class="label" x="208" y="171" text-anchor="middle">claim</text>
@@ -69,17 +69,12 @@ text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', 
 <text class="label" x="628" y="171" text-anchor="middle">accept</text>
 <path class="edge back" d="M 545 150 L 545 66 L 115 66 L 115 146" marker-end="url(#tip-back)"/>
 <text class="label back" x="330" y="58" text-anchor="middle">reject · reopen · refreeze</text>
+<path class="edge back" d="M 815 179 L 830 179 L 830 8 L 15 8 L 15 179 L 25 179" marker-end="url(#tip-back)"/>
+<text class="label back" x="425" y="30" text-anchor="middle">reopen</text>
 <path class="edge" d="M 105 208 L 105 313 L 441 313" marker-end="url(#tip)"/>
 <text class="label" x="210" y="305" text-anchor="middle">withdraw</text>
 <path class="edge" d="M 315 208 L 315 313"/>
 <path class="edge" d="M 525 208 L 525 280" marker-end="url(#tip)"/>
-<g class="plain"><rect x="640" y="26" width="176" height="94" rx="8"/></g>
-<text class="label" x="652" y="46">every way into verified</text>
-<text class="code mono" x="652" y="64">NOT_AT_COMMIT</text>
-<text class="code mono" x="652" y="80">SELF_VERIFY</text>
-<text class="code mono" x="652" y="96">CRITERIA_CHANGED</text>
-<text class="code mono" x="652" y="112">PROOF_REQUIRED</text>
-<path class="edge leader" d="M 735 122 L 735 146"/>
 <g class="plain"><rect x="640" y="284" width="176" height="62" rx="8"/></g>
 <text class="label" x="652" y="304">every way into withdrawn</text>
 <text class="code mono" x="652" y="322">COORDINATOR_ONLY</text>
