@@ -1165,69 +1165,89 @@ test('[N38] local API and sealed presentation resolve shouts beyond recent state
 
 test('[A2] local HTTP v1 versions state and moves, authenticates, and preserves CLI refusals', async (t) => {
   const box = project();
-  const api = await startApi(t, box);
-  /** Validate one captured HTTP refusal while keeping its originating step and response in every failure. */
-  function errorDocument(result) {
-    assertRequiredShape(result.document, JSON_SHAPES.error.required, `HTTP refusal\n${result.evidence}`);
-    assertRequiredShape(result.document.error, JSON_SHAPES.errorFields, `HTTP refusal fields\n${result.evidence}`);
-    return result.document.error;
+  let lastStepEvidence = 'create local API';
+  /** Retain the last completed HTTP step if downstream response inspection fails. */
+  async function observedApiStep(...args) {
+    const result = await apiStep(...args);
+    lastStepEvidence = result.evidence;
+    return result;
   }
+  /** Retain CLI step evidence before downstream JSON inspection. */
+  function observedFixtureStep(...args) {
+    const result = fixtureJsonStep(...args);
+    lastStepEvidence = result.evidence;
+    return result;
+  }
+  try {
+    const api = await startApi(t, box);
+    /** Validate one captured HTTP refusal while keeping its originating step and response in every failure. */
+    function errorDocument(result) {
+      assertRequiredShape(result.document, JSON_SHAPES.error.required, `HTTP refusal\n${result.evidence}`);
+      assertRequiredShape(result.document.error, JSON_SHAPES.errorFields, `HTTP refusal fields\n${result.evidence}`);
+      return result.document.error;
+    }
 
-  const boardsStep = await apiStep('list registered boards', apiFetch(api, '/api/v1/boards'), box.env);
-  assertRequiredShape(boardsStep.document, JSON_SHAPES.http.boards.required, `boards response\n${boardsStep.evidence}`);
-  const board = boardsStep.document.boards.find((candidate) => candidate.root === box.repo);
-  assert.ok(board?.id, boardsStep.evidence);
-  const boardPath = `/api/v1/boards/${board.id}`;
+    const boardsStep = await observedApiStep('list registered boards', apiFetch(api, '/api/v1/boards'), box.env);
+    assertRequiredShape(boardsStep.document, JSON_SHAPES.http.boards.required, `boards response\n${boardsStep.evidence}`);
+    const board = boardsStep.document.boards.find((candidate) => candidate.root === box.repo);
+    assert.ok(board?.id, boardsStep.evidence);
+    const boardPath = `/api/v1/boards/${board.id}`;
 
-  const missingSecretStep = await apiStep('read boards without the session secret', apiFetch(api, '/api/v1/boards', { noSecret: true }), box.env, 401);
-  assert.equal(errorDocument(missingSecretStep).code, 'AUTH_REQUIRED', missingSecretStep.evidence);
-  const wrongSecretStep = await apiStep('read boards with a wrong session secret', apiFetch(api, '/api/v1/boards', { headers: { 'x-pullboard-key': 'wrong-session-secret' } }), box.env, 401);
-  assert.equal(errorDocument(wrongSecretStep).code, 'AUTH_REQUIRED', wrongSecretStep.evidence);
-  const unknownBoardStep = await apiStep('read state for an unknown board', apiFetch(api, `/api/v1/boards/${'0'.repeat(32)}/state`), box.env, 404);
-  assert.equal(errorDocument(unknownBoardStep).code, 'NO_BOARD', unknownBoardStep.evidence);
+    const missingSecretStep = await observedApiStep('read boards without the session secret', apiFetch(api, '/api/v1/boards', { noSecret: true }), box.env, 401);
+    assert.equal(errorDocument(missingSecretStep).code, 'AUTH_REQUIRED', missingSecretStep.evidence);
+    const wrongSecretStep = await observedApiStep('read boards with a wrong session secret', apiFetch(api, '/api/v1/boards', { headers: { 'x-pullboard-key': 'wrong-session-secret' } }), box.env, 401);
+    assert.equal(errorDocument(wrongSecretStep).code, 'AUTH_REQUIRED', wrongSecretStep.evidence);
+    const unknownBoardStep = await observedApiStep('read state for an unknown board', apiFetch(api, `/api/v1/boards/${'0'.repeat(32)}/state`), box.env, 404);
+    assert.equal(errorDocument(unknownBoardStep).code, 'NO_BOARD', unknownBoardStep.evidence);
 
-  const stateStep = await apiStep('read versioned board state', apiFetch(api, `${boardPath}/state`), box.env);
-  assertRequiredShape(stateStep.document, JSON_SHAPES.http.state.required, `state response\n${stateStep.evidence}`);
-  assert.equal(stateStep.document.version, 1, stateStep.evidence);
-  assert.equal(stateStep.document.eventLogVersion, EVENT_LOG_VERSION, stateStep.evidence);
-  const eventsStep = await apiStep('read versioned board events', apiFetch(api, `${boardPath}/events?after=0`), box.env);
-  assertRequiredShape(eventsStep.document, JSON_SHAPES.http.events.required, `events response\n${eventsStep.evidence}`);
-  assert.equal(eventsStep.document.version, 1, eventsStep.evidence);
-  assert.equal(eventsStep.document.eventLogVersion, EVENT_LOG_VERSION, eventsStep.evidence);
+    const stateStep = await observedApiStep('read versioned board state', apiFetch(api, `${boardPath}/state`), box.env);
+    assertRequiredShape(stateStep.document, JSON_SHAPES.http.state.required, `state response\n${stateStep.evidence}`);
+    assert.equal(stateStep.document.version, 1, stateStep.evidence);
+    assert.equal(stateStep.document.eventLogVersion, EVENT_LOG_VERSION, stateStep.evidence);
+    const eventsStep = await observedApiStep('read versioned board events', apiFetch(api, `${boardPath}/events?after=0`), box.env);
+    assertRequiredShape(eventsStep.document, JSON_SHAPES.http.events.required, `events response\n${eventsStep.evidence}`);
+    assert.equal(eventsStep.document.version, 1, eventsStep.evidence);
+    assert.equal(eventsStep.document.eventLogVersion, EVENT_LOG_VERSION, eventsStep.evidence);
 
-  const malformedStep = await apiStep('reject malformed move JSON', apiFetch(api, `${boardPath}/moves`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{bad json' }), box.env, 400);
-  assert.equal(errorDocument(malformedStep).code, 'BAD_REQUEST', malformedStep.evidence);
-  const oversizedStep = await apiStep('reject an oversized move title', apiFetch(api, `${boardPath}/moves`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ verb: 'add', args: { lane: 'app', title: 'x'.repeat(100_001) } }) }), box.env, 400);
-  assert.equal(errorDocument(oversizedStep).code, 'BAD_REQUEST', oversizedStep.evidence);
-  const unknownVerbStep = await apiStep('reject an unknown move verb', apiFetch(api, `${boardPath}/moves`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ verb: 'pretend', args: {} }) }), box.env, 400);
-  assert.equal(errorDocument(unknownVerbStep).code, 'BAD_REQUEST', unknownVerbStep.evidence);
-  const unknownArgumentStep = await apiStep('reject an unknown move argument', apiFetch(api, `${boardPath}/moves`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ verb: 'add', args: { lane: 'app', title: 'Ignored', extra: true } }) }), box.env, 400);
-  assert.equal(errorDocument(unknownArgumentStep).code, 'BAD_REQUEST', unknownArgumentStep.evidence);
+    const malformedStep = await observedApiStep('reject malformed move JSON', apiFetch(api, `${boardPath}/moves`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{bad json' }), box.env, 400);
+    assert.equal(errorDocument(malformedStep).code, 'BAD_REQUEST', malformedStep.evidence);
+    const oversizedStep = await observedApiStep('reject an oversized move title', apiFetch(api, `${boardPath}/moves`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ verb: 'add', args: { lane: 'app', title: 'x'.repeat(100_001) } }) }), box.env, 400);
+    assert.equal(errorDocument(oversizedStep).code, 'BAD_REQUEST', oversizedStep.evidence);
+    const unknownVerbStep = await observedApiStep('reject an unknown move verb', apiFetch(api, `${boardPath}/moves`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ verb: 'pretend', args: {} }) }), box.env, 400);
+    assert.equal(errorDocument(unknownVerbStep).code, 'BAD_REQUEST', unknownVerbStep.evidence);
+    const unknownArgumentStep = await observedApiStep('reject an unknown move argument', apiFetch(api, `${boardPath}/moves`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ verb: 'add', args: { lane: 'app', title: 'Ignored', extra: true } }) }), box.env, 400);
+    assert.equal(errorDocument(unknownArgumentStep).code, 'BAD_REQUEST', unknownArgumentStep.evidence);
 
-  const cliClaimStep = fixtureJsonStep(box, 'claim an unknown item through the CLI', box.repo, 'claim', ['999'], 1);
-  const cliRefusal = cliClaimStep.document.error;
-  assertRequiredShape(cliRefusal, JSON_SHAPES.errorFields, `CLI claim refusal\n${cliClaimStep.evidence}`);
-  const httpClaimStep = await apiStep('claim an unknown item through HTTP', apiFetch(api, `${boardPath}/moves`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ verb: 'claim', item: 999, args: {} }) }), box.env, 409);
-  assert.deepEqual(errorDocument(httpClaimStep), cliRefusal, `${httpClaimStep.evidence}\nCLI evidence:\n${cliClaimStep.evidence}`);
+    const cliClaimStep = observedFixtureStep(box, 'claim an unknown item through the CLI', box.repo, 'claim', ['999'], 1);
+    const cliRefusal = cliClaimStep.document.error;
+    assertRequiredShape(cliRefusal, JSON_SHAPES.errorFields, `CLI claim refusal\n${cliClaimStep.evidence}`);
+    const httpClaimStep = await observedApiStep('claim an unknown item through HTTP', apiFetch(api, `${boardPath}/moves`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ verb: 'claim', item: 999, args: {} }) }), box.env, 409);
+    assert.deepEqual(errorDocument(httpClaimStep), cliRefusal, `${httpClaimStep.evidence}\nCLI evidence:\n${cliClaimStep.evidence}`);
 
-  const cliNextStep = fixtureJsonStep(box, 'request available work through the CLI', box.repo, 'next', [], 1);
-  const noWork = cliNextStep.document.error;
-  assert.equal(noWork.code, 'NOTHING_FREE', cliNextStep.evidence);
-  const httpNextStep = await apiStep('request available work through HTTP', apiFetch(api, `${boardPath}/moves`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ verb: 'next', args: {} }) }), box.env, 409);
-  assert.deepEqual(errorDocument(httpNextStep), noWork, `${httpNextStep.evidence}\nCLI evidence:\n${cliNextStep.evidence}`);
+    const cliNextStep = observedFixtureStep(box, 'request available work through the CLI', box.repo, 'next', [], 1);
+    const noWork = cliNextStep.document.error;
+    assert.equal(noWork.code, 'NOTHING_FREE', cliNextStep.evidence);
+    const httpNextStep = await observedApiStep('request available work through HTTP', apiFetch(api, `${boardPath}/moves`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ verb: 'next', args: {} }) }), box.env, 409);
+    assert.deepEqual(errorDocument(httpNextStep), noWork, `${httpNextStep.evidence}\nCLI evidence:\n${cliNextStep.evidence}`);
 
-  const cliVerifyStep = fixtureJsonStep(box, 'verify an unknown item through the CLI', box.repo, 'verify', ['999', 'accept', '--as', 'coordinator', '--note', 'checked the API'], 1);
-  const verifierRefusal = cliVerifyStep.document.error;
-  assertRequiredShape(verifierRefusal, JSON_SHAPES.errorFields, `CLI verify refusal\n${cliVerifyStep.evidence}`);
-  const httpVerifyStep = await apiStep('verify an unknown item through HTTP', apiFetch(api, `${boardPath}/moves`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ verb: 'verify', item: 999, args: { decision: 'accept', as: 'coordinator', note: 'checked the API' } }) }), box.env, 409);
-  assert.deepEqual(errorDocument(httpVerifyStep), verifierRefusal, `${httpVerifyStep.evidence}\nCLI evidence:\n${cliVerifyStep.evidence}`);
+    const cliVerifyStep = observedFixtureStep(box, 'verify an unknown item through the CLI', box.repo, 'verify', ['999', 'accept', '--as', 'coordinator', '--note', 'checked the API'], 1);
+    const verifierRefusal = cliVerifyStep.document.error;
+    assertRequiredShape(verifierRefusal, JSON_SHAPES.errorFields, `CLI verify refusal\n${cliVerifyStep.evidence}`);
+    const httpVerifyStep = await observedApiStep('verify an unknown item through HTTP', apiFetch(api, `${boardPath}/moves`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ verb: 'verify', item: 999, args: { decision: 'accept', as: 'coordinator', note: 'checked the API' } }) }), box.env, 409);
+    assert.deepEqual(errorDocument(httpVerifyStep), verifierRefusal, `${httpVerifyStep.evidence}\nCLI evidence:\n${cliVerifyStep.evidence}`);
 
-  const movedStep = await apiStep('add a move with a dash-prefixed title', apiFetch(api, `${boardPath}/moves`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ verb: 'add', args: { lane: 'app', title: '--help' } }) }), box.env);
-  assertRequiredShape(movedStep.document, JSON_SHAPES.http.move.required, `move response\n${movedStep.evidence}`);
-  assert.equal(movedStep.document.result.item.item_title, '--help', movedStep.evidence);
-  assert.equal(movedStep.document.event.event_kind, 'add', movedStep.evidence);
-  assert.equal(movedStep.document.event.event_id, eventsStep.document.events.at(-1)?.event_id + 1, movedStep.evidence);
-  assert.equal(api.stderr(), '', movedStep.evidence);
+    const movedStep = await observedApiStep('add a move with a dash-prefixed title', apiFetch(api, `${boardPath}/moves`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ verb: 'add', args: { lane: 'app', title: '--help' } }) }), box.env);
+    assertRequiredShape(movedStep.document, JSON_SHAPES.http.move.required, `move response\n${movedStep.evidence}`);
+    assert.ok(movedStep.document.result?.item && typeof movedStep.document.result.item === 'object',
+      `add response must include its nested item\n${movedStep.evidence}`);
+    assert.equal(movedStep.document.result.item.item_title, '--help', movedStep.evidence);
+    assert.equal(movedStep.document.event.event_kind, 'add', movedStep.evidence);
+    assert.equal(movedStep.document.event.event_id, eventsStep.document.events.at(-1)?.event_id + 1, movedStep.evidence);
+    assert.equal(api.stderr(), '', movedStep.evidence);
+  } catch (error) {
+    error.message = `${error.message}\n${lastStepEvidence}`;
+    throw error;
+  }
 });
 
 test('[A2] moves run as the named worktree agent and requests stay visible until answered', async (t) => {
