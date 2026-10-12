@@ -197,6 +197,77 @@ async (t) => {
   assert.ok(existsSync(writer.released), 'writer releases its lock after commit and close');
 });
 
+test('a staged approved-row hook read waits for another process\'s lock [C7,B3,S19]', { timeout: 40_000 }, // budget: hang-only ceiling covers native Git, the exclusive writer and fixture cleanup; no speed claim.
+async (t) => {
+  const box = landProject();
+  const specPath = join(box.repo, 'SPEC.md');
+  writeFileSync(specPath, readFileSync(specPath, 'utf8').replace('The page renders.', 'The changed page renders.'));
+  box.git(box.repo, 'add', 'SPEC.md');
+  const before = box.git(box.repo, 'rev-parse', 'HEAD');
+  const staged = box.git(box.repo, 'write-tree');
+  const control = box.tryGit(box.repo, 'commit', '-m', 'feat: change approved promise [G1]');
+  assert.equal(control.status, 1, control.stderr);
+  assert.match(control.stderr, /G1 changes approved text without the person's exact approval/);
+
+  const marker = join(box.dir, 'approved-read-attempted');
+  const probe = join(box.dir, 'observe-approved-read.mjs');
+  const ready = join(box.dir, 'approved-read-ready');
+  writeFileSync(probe, [
+    "import { existsSync, writeFileSync } from 'node:fs';",
+    "import { DatabaseSync } from 'node:sqlite';",
+    'const prepare = DatabaseSync.prototype.prepare;',
+    'DatabaseSync.prototype.prepare = function (sql, ...args) {',
+    "  if (String(sql) !== 'SELECT meta_value FROM board_meta WHERE meta_key=?') return Reflect.apply(prepare, this, [sql, ...args]);",
+    "  writeFileSync(process.env.APPROVED_READ_MARKER, JSON.stringify({ phase: 'before-lock' }));",
+    '  const deadline = Date.now() + 8000;',
+    '  while (!existsSync(process.env.APPROVED_READ_READY) && Date.now() < deadline) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);',
+    "  if (!existsSync(process.env.APPROVED_READ_READY)) throw new Error('exclusive writer did not become ready');",
+    "  writeFileSync(process.env.APPROVED_READ_MARKER, JSON.stringify({ phase: 'read-started' }));",
+    '  try { return Reflect.apply(prepare, this, [sql, ...args]); }',
+    "  catch (error) { writeFileSync(process.env.APPROVED_READ_MARKER, JSON.stringify({ phase: 'error', code: error.code ?? null, errcode: error.errcode ?? null, message: error.message })); throw error; }",
+    '};',
+  ].join('\n'));
+  let writer;
+  let hook;
+  t.after(async () => {
+    if (writer) {
+      writeFileSync(writer.release, 'release');
+      await writer.closed;
+    }
+    if (hook && hook.exitCode === null && hook.signalCode === null) {
+      hook.kill('SIGKILL');
+      await hook.closed;
+    }
+  });
+  hook = startFixtureChild('git', ['commit', '-m', 'feat: change approved promise [G1]'], {
+    cwd: box.repo, env: { ...box.env, NODE_OPTIONS: `--import=${probe}`, APPROVED_READ_MARKER: marker, APPROVED_READ_READY: ready },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  hook.stderrText = '';
+  hook.stdout.resume();
+  hook.stderr.setEncoding('utf8').on('data', (part) => { hook.stderrText += part; });
+  hook.closed = childOutcome(hook);
+  await waitFor(() => existsSync(marker), 'native staged-approval hook query');
+  assert.equal(JSON.parse(readFileSync(marker, 'utf8')).phase, 'before-lock');
+  writer = startExclusiveBoardWriter(box, join(box.repo, '.git', 'pullboard', 'board.sqlite'), 'approved-read');
+  await waitFor(() => existsSync(writer.ready), 'approved-row exclusive writer');
+  await waitFor(() => JSON.parse(readFileSync(marker, 'utf8')).phase !== 'before-lock', 'approved-row read under the exclusive lock');
+  await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
+  const observation = JSON.parse(readFileSync(marker, 'utf8'));
+  const sqliteBusy = observation.code === 'SQLITE_BUSY' || ((observation.errcode ?? 0) & 0xff) === 5;
+  assert.equal(sqliteBusy, false, `staged approval read must wait, not return SQLITE_BUSY: ${JSON.stringify(observation)} ${hook.stderrText}`);
+  assert.equal(observation.phase, 'read-started');
+  assert.equal(hook.exitCode, null, `native hook remains pending during the writer: ${hook.stderrText}`);
+  writeFileSync(writer.release, 'release');
+  const [writerResult, hookResult] = await Promise.all([writer.closed, hook.closed]);
+  assert.deepEqual({ code: writerResult.code, signal: writerResult.signal }, { code: 0, signal: null }, writer.child.fixtureFailure);
+  assert.deepEqual({ code: hookResult.code, signal: hookResult.signal }, { code: 1, signal: null }, hook.stderrText);
+  assert.match(hook.stderrText, /G1 changes approved text without the person's exact approval/);
+  assert.doesNotMatch(hook.stderrText, /database is locked|restore valid staged SSH trust files/);
+  assert.equal(box.git(box.repo, 'rev-parse', 'HEAD'), before, 'normal approval refusal leaves the commit unchanged');
+  assert.equal(box.git(box.repo, 'write-tree'), staged, 'the staged approved-row change remains available for person approval');
+});
+
 /** Give one private item a distinct canonical lane identity and an independent main base. */
 function itemWorktree(box, number, file = FILES[number - 1], afterIds = []) {
   const path = join(box.dir, `land-${number}`);

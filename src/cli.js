@@ -8,7 +8,6 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
-import { DatabaseSync } from 'node:sqlite';
 import * as store from './board.js';
 import { CONFIG_FILE, COORDINATOR, DOCTRINE_FILE, LEGACY_DOCTRINE_FILE, loadConfig } from './config.js';
 import { displayAgentName } from './agent-names.js';
@@ -2742,9 +2741,8 @@ async function readStdin(stdin) {
 /** Wait up to the board's shared busy timeout while reading hook facts, without migrating its schema. */
 function hookRead(ctx, read) {
   if (!existsSync(ctx.file)) return null;
-  const db = new DatabaseSync(ctx.file, { readOnly: true });
+  const db = store.openBoardReadOnly(ctx.file);
   try {
-    db.exec('PRAGMA busy_timeout = 10000');
     return read({ db, clock: ctx.clock });
   }
   finally { db.close(); }
