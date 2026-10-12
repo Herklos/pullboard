@@ -14,8 +14,6 @@ import { createServer } from 'node:http';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import * as store from './board.js';
 import { cockpitPage } from './cockpit.js';
-import { releaseHeadlinesBetween } from './changelog.js';
-import { VERSION } from './help.js';
 import { displayAgentName } from './agent-names.js';
 import { COORDINATOR, loadConfig } from './config.js';
 import { doctrineHistory, loadDoctrine, standardDoctrine } from './doctrine.js';
@@ -221,7 +219,6 @@ export function projectState(root, { seen = null, board: providedBoard = null } 
     const lastMove = new Map(log.map((event) => [event.event_by, event.event_at]));
     return {
       root: info.root,
-      releaseNotes: { version: VERSION, releases: releaseHeadlinesBetween('0.0.0', VERSION), notes: 'https://github.com/pullboard-dev/pullboard/blob/main/CHANGELOG.md' },
       rowAgesAt: { [config.spec]: head, [doctrine.name]: head },
       lanes: [COORDINATOR, ...Object.keys(config.lanes)],
       // The lanes that own folders, where builders work; review lanes own none.

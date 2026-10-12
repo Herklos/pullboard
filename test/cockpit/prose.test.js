@@ -77,7 +77,7 @@ test('the view chips a command the CLI adds [N26]', async (t) => {
   const demo = project(box, 'help-copy');
   const cli = join(box.dir, 'cli-copy');
   mkdirSync(cli);
-  for (const entry of ['bin', 'src', 'relay', 'test', 'skills', 'package.json', 'CHANGELOG.md']) {
+  for (const entry of ['bin', 'src', 'relay', 'test', 'skills', 'package.json']) {
     cpSync(resolve(import.meta.dirname, '../..', entry), join(cli, entry), { recursive: true });
   }
   const helpFile = join(cli, 'src', 'help.js');

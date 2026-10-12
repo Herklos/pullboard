@@ -243,13 +243,6 @@ main { padding: 16px 18px 56px; }
 .pipeline-item > span:first-child { color: var(--ink-faint); font-family: var(--mono); }
 .pipeline-item > span:last-child { overflow-wrap: anywhere; }
 .card-panel { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); min-width: 0; }
-/* Upgrade details scroll within one card so the first item remains in the viewport. */
-.upgrade-note { padding: 12px; max-height: min(24vh, 190px); overflow-y: auto; overflow-wrap: anywhere; }
-.upgrade-note header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.upgrade-note h2 { margin: 0; font-size: 16px; }
-.upgrade-note h3 { margin: 10px 0 4px; font-size: 13px; }
-.upgrade-note p, .upgrade-note footer { margin: 4px 0; font-size: 12px; }
-.upgrade-note button { flex: none; min-height: var(--tap); }
 /* The Items toolbar keeps its view, filters, and creation action together on one line. */
 .toolbar { display: flex; flex-wrap: nowrap; gap: 6px; align-items: center; min-width: 0; padding: 10px; }
 .toolbar .go { flex: none; margin-left: auto; }
