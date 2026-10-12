@@ -1,5 +1,5 @@
-# A release is a tag on a green commit (I15). Pushing a tag vX.Y.Z runs the gate on that exact commit,
-# checks the tag matches package.json's version, and publishes to npm with provenance through npm's
+# A release is a tag on a green commit (I15). Pushing a tag vX.Y.Z checks the Linux gate jobs for that
+# exact commit on main, checks package.json's version, and publishes to npm with provenance through npm's
 # trusted publishing: no token is stored anywhere. npmjs.com must list this workflow (release.yml in
 # pullboard-dev/pullboard) as the package's trusted publisher, set once by the person.
 name: release
@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
   id-token: write
 
 jobs:
@@ -25,7 +26,40 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
       - name: The tag names package.json's version
         run: test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME"
-      - run: npm run gate
+      - name: Main CI passed this commit
+        id: main-ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow gate.yml --branch main --event push --commit "$GITHUB_SHA" --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+          if [ -z "$run_id" ]; then
+            printf '::error::No gate.yml run for commit %s on main; refusing npm publish.\n' "$GITHUB_SHA"
+            exit 1
+          fi
+          if ! gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json databaseId,headSha,headBranch,event,url,jobs > "$RUNNER_TEMP/release-gate.json"; then
+            printf '::error::Could not read gate.yml run %s; refusing npm publish.\n' "$run_id"
+            exit 1
+          fi
+          node --input-type=module <<'NODE'
+          import { appendFileSync, readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          const run = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'release-gate.json'), 'utf8'));
+          const label = `gate.yml run ${run.databaseId} (${run.url})`;
+          const linux = (run.jobs ?? []).filter(job => /^linux(?:\s|$)/u.test(job.name));
+          const failed = linux.filter(job => job.status !== 'completed' || job.conclusion !== 'success');
+          if (run.headSha !== process.env.GITHUB_SHA || run.headBranch !== 'main' || run.event !== 'push') {
+            throw new Error(`${label} is not main CI for tagged commit ${process.env.GITHUB_SHA}; refusing npm publish.`);
+          }
+          if (!linux.length) throw new Error(`${label} has no Linux jobs; refusing npm publish.`);
+          if (failed.length) {
+            const names = failed.map(job => `${job.name}: ${job.status}/${job.conclusion || 'pending'}`).join(', ');
+            throw new Error(`${label} has Linux jobs that did not succeed: ${names}; refusing npm publish.`);
+          }
+          console.log(`${label}: all ${linux.length} Linux jobs succeeded for ${run.headSha}.`);
+          appendFileSync(process.env.GITHUB_OUTPUT, 'passed=true\n');
+          NODE
       - name: npm new enough for trusted publishing
         run: npm install -g npm@latest
-      - run: npm publish --provenance --access public
+      - if: ${{ steps.main-ci.outputs.passed == 'true' }}
+        run: npm publish --provenance --access public

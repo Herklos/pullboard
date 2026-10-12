@@ -52,6 +52,94 @@ async function measureNaturalSpecChips(chrome, beforeMeasure = null) {
   })())`, "document.querySelectorAll('#spec-chips button:not([data-natural-chip])')"));
 }
 
+/** Observe the decision target, its render-time replacement, and native pointer geometry without changing input. */
+async function armDecisionPressCapture(chrome, selector) {
+  return JSON.parse(await chrome.stable(`JSON.stringify((() => {
+    const root = document.querySelector('#decisions');
+    const initial = document.querySelector(${JSON.stringify(selector)});
+    if (!root || !initial) return { armed: false, reason: 'decision target was absent before press' };
+    const events = [], renders = [], mutations = [], resizes = [];
+    /** Read the old or current button's viewport box without mutating layout. */
+    const box = element => {
+      if (!element) return null;
+      const rect = element.getBoundingClientRect();
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height, connected: element.isConnected };
+    };
+    /** Identify the action node and record whether it is the original native target. */
+    const identity = element => element ? { tag: element.tagName, className: String(element.className || '').slice(0, 80),
+      action: element.getAttribute('data-go'), connected: element.isConnected, isInitial: element === initial, box: box(element) } : null;
+    const initialSnapshot = identity(initial);
+    /** Keep a bounded native-event sample with both target identities and their measured boxes. */
+    const sample = (type, detail = {}) => {
+      if (events.length >= 40) return;
+      const current = document.querySelector(${JSON.stringify(selector)});
+      events.push({ type, at: performance.now(), pointerId: detail.pointerId ?? null,
+        x: detail.clientX ?? null, y: detail.clientY ?? null, hitWasInitial: detail.hitWasInitial ?? null,
+        scrollX, scrollY,
+        initial: identity(initial), initialAtArm: initialSnapshot, current: identity(current) });
+    };
+    let prototype = root, descriptor = null;
+    while (prototype && !descriptor) {
+      descriptor = Object.getOwnPropertyDescriptor(prototype, 'innerHTML');
+      prototype = Object.getPrototypeOf(prototype);
+    }
+    if (!descriptor?.get || !descriptor?.set) return { armed: false, reason: 'native innerHTML descriptor unavailable' };
+    const previousOwn = Object.getOwnPropertyDescriptor(root, 'innerHTML');
+    Object.defineProperty(root, 'innerHTML', { configurable: true, enumerable: descriptor.enumerable,
+      /** Preserve the native element getter while observing production assignments to the decision panel. */
+      get() { return descriptor.get.call(root); },
+      /** Retain inline cockpit frames without exposing the view URL or its capability. */
+      set(value) {
+        if (renders.length < 20) renders.push({ at: performance.now(), oldInitialConnected: initial.isConnected,
+          stack: (new Error().stack || '').split('\\n').filter(line => line.includes(location.origin))
+            .map(line => line.replace(/https?:\\/\\/[^\\s)]+:(\\d+):(\\d+)/g, 'cockpit.inline:$1:$2')).slice(0, 4) });
+        return descriptor.set.call(root, value);
+      } });
+    /** Record real browser pointer and mouse events at the document capture boundary. */
+    const listener = event => {
+      const hasPoint = Number.isFinite(event.clientX) && Number.isFinite(event.clientY);
+      sample(event.type, { pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY,
+        hitWasInitial: hasPoint ? document.elementFromPoint(event.clientX, event.clientY) === initial : null });
+    };
+    for (const type of ['pointermove', 'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click']) document.addEventListener(type, listener, true);
+    window.addEventListener('scroll', listener, true);
+    /** Record bounded panel mutations, including whether the original action was removed. */
+    const observer = new MutationObserver(records => {
+      if (mutations.length < 20) mutations.push({ at: performance.now(), records: records.length,
+        removedInitial: records.some(record => [...record.removedNodes].some(node => node === initial || node.contains?.(initial))),
+        current: identity(document.querySelector(${JSON.stringify(selector)})) });
+    });
+    observer.observe(root, { childList: true, subtree: true, attributes: true, characterData: true });
+    /** Record native box-size notifications for the original and current action. */
+    const resize = new ResizeObserver(entries => {
+      if (resizes.length < 20) resizes.push({ at: performance.now(), entries: entries.length,
+        initial: box(initial), current: box(document.querySelector(${JSON.stringify(selector)})) });
+    });
+    resize.observe(initial);
+    window.__decisionPressCapture = { armed: true, selector: ${JSON.stringify(selector)}, viewport: { width: innerWidth, height: innerHeight, dpr: devicePixelRatio },
+      armedAt: performance.now(), initial: identity(initial), events, renders, mutations, resizes,
+      /** Stop all observation and restore the native innerHTML property before returning evidence. */
+      finish() {
+        sample('capture-finish');
+        observer.disconnect(); resize.disconnect();
+        for (const type of ['pointermove', 'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click']) document.removeEventListener(type, listener, true);
+        window.removeEventListener('scroll', listener, true);
+        if (previousOwn) Object.defineProperty(root, 'innerHTML', previousOwn); else delete root.innerHTML;
+        const result = { armed: true, selector: this.selector, viewport: this.viewport, armedAt: this.armedAt,
+          initial: this.initial, events: this.events, renders: this.renders, mutations: this.mutations, resizes: this.resizes };
+        delete window.__decisionPressCapture;
+        return result;
+      } };
+    sample('capture-armed');
+    return { armed: true, initial: identity(initial), viewport: { width: innerWidth, height: innerHeight, dpr: devicePixelRatio } };
+  })())`, "document.querySelector('#decisions')"));
+}
+
+/** Finish capture on the stable Needs-you root, removing every observer even after a failed press. */
+async function finishDecisionPressCapture(chrome) {
+  return JSON.parse(await chrome.stable(`JSON.stringify(window.__decisionPressCapture?.finish() || null)`, "document.querySelector('#decisions')"));
+}
+
 
 test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N26,N27]', { timeout: 120_000 }, async (t) => {
   const executable = chromeExecutable();
@@ -88,9 +176,10 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
         return !element.closest('[hidden]') && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
       }));
     })()`);
-    /** Click the actual control through Chrome input coordinates. */
-    const click = async (selector) => {
+    /** Click the actual control through Chrome input coordinates, optionally arming a diagnostic before press. */
+    const click = async (selector, beforePress = null) => {
       await waitRendered([selector]);
+      if (beforePress) await beforePress();
       await press(chrome, `document.querySelector(${JSON.stringify(selector)})`);
     };
     /** Fill a form field and deliver its input and change events. */
@@ -252,7 +341,34 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
       await chrome.waitFor("!!document.querySelector('#decisions [data-go]')");
       const decision = await chrome.stable("document.querySelector('#decisions [data-go]')?.getAttribute('data-go')");
       assert.ok(decision, `${width}: a decision is offered for answer`);
-      await click(`#decisions [data-go="${decision}"]`);
+      const decisionSelector = `#decisions [data-go="${decision}"]`;
+      let decisionCaptureArmed = false;
+      let decisionPressError = null;
+      let decisionCapture = null;
+      let decisionCaptureError = null;
+      /** Arm the bounded capture after rendered readiness and immediately before the shared native press. */
+      const beforeDecisionPress = async () => {
+        const armed = await armDecisionPressCapture(chrome, decisionSelector);
+        decisionCaptureArmed = armed.armed === true;
+        if (!decisionCaptureArmed) throw new Error(`decision press capture did not arm: ${JSON.stringify(armed)}`);
+      };
+      try {
+        await click(decisionSelector, beforeDecisionPress);
+      } catch (error) { decisionPressError = error; }
+      finally {
+        if (decisionCaptureArmed) {
+          try { decisionCapture = await finishDecisionPressCapture(chrome); }
+          catch (error) { decisionCaptureError = `${error.name}: ${error.message}`; }
+        }
+      }
+      if (decisionPressError) {
+        const captureText = `decision press capture: ${JSON.stringify({ width, decision, capture: decisionCapture, captureError: decisionCaptureError, rootCauseStatus: 'NOT PROVEN' })}`;
+        t.diagnostic(captureText);
+        decisionPressError.message = `${decisionPressError.message}; ROOT-CAUSE STATUS: NOT PROVEN; ${captureText}`;
+        throw decisionPressError;
+      }
+      assert.equal(decisionCaptureError, null, `${width}: decision press capture finishes without error`);
+      assert.ok(decisionCapture?.armed, `${width}: decision press capture returns its observation`);
       await checkLayout(width, 'answer form');
       const answerText = `Phone answer ${width}`;
       const answerRequests = new Map();

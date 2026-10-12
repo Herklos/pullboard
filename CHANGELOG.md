@@ -4,6 +4,16 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.8.10] - 2026-10-11
+
+### Accumulated judgement
+
+The README now opens with what Pullboard is for: accumulated judgement for agents, and a figure of how it holds.
+
+### Fixed
+
+- A board read that still cannot get through after waiting says which board it was, that another process held it, and how long it waited, instead of a bare "database is locked".
+
 ## [0.8.9] - 2026-10-11
 
 ### 0.8.8 reaches npm
