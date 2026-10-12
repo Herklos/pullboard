@@ -198,6 +198,23 @@ test('the lifecycle figure is drawn from the declaration, and refuses a state or
   assert.match(texts(drawLifecycle(bench)).map((text) => text.words).join(' '), /\bbench\b/, 'a new move between drawn states is named without touching draw.mjs');
 });
 
+test('the lifecycle figure keeps the guards into a state that is not final [I10, M1]', () => {
+  const fixture = {
+    ...MACHINE,
+    states: MACHINE.states.map((state) => state.id === 'verified' ? { ...state, final: false } : state),
+    moves: [...MACHINE.moves, { verb: 'reopen', from: ['verified'], to: 'open', by: ['coordinator'], guards: [] }],
+  };
+  const svg = drawLifecycle(fixture);
+  const shown = texts(svg).map((text) => text.words).join(' \n ');
+  assert.ok(shown.includes('every way into verified'), 'the non-final guarded state has its entry note');
+  for (const guard of MACHINE.exitGuards.verified) {
+    assert.ok(shown.includes(MACHINE.guards.find((each) => each.id === guard).refuse), `the non-final verified note includes refusal ${guard}`);
+  }
+  assert.match(shown, /\breopen\b/, 'the verified-to-open move remains visible');
+  assert.ok(shown.includes('starts open; ends withdrawn'), 'the caption names only the declared final state');
+  assert.equal(svg.includes('data-final="verified"'), false, 'verified is not marked final in the fixture');
+});
+
 test('README pins its approved Philosophy, Key concepts and Why structure [I10,I12]', () => {
   const philosophy = README.indexOf('## Philosophy');
   const concepts = README.indexOf('### Key concepts', philosophy);
