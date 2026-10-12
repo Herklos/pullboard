@@ -112,7 +112,7 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
       return JSON.parse(await chrome.stable(`JSON.stringify((() => {
       const visible=e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return !e.disabled&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)!==0&&r.width>0&&r.height>0&&!e.closest('[hidden]')};
       const selector='button,a[href],input:not([type=hidden]),select,textarea,[role=button],[data-root],[data-tab],[data-go],[data-item],[data-state],[data-rows],[data-row],[data-release],[data-shout],[data-new],[data-code]';
-      const controls=[...new Set(document.querySelectorAll(selector))].filter(visible).map(e=>{const r=e.getBoundingClientRect();return {tag:e.tagName,id:e.id||'',text:(e.innerText||e.getAttribute('aria-label')||'').trim().slice(0,60),x:r.x,y:r.y,right:r.right,bottom:r.bottom,width:r.width,height:r.height,inlineReference:e.matches('.feed button.ref, .shout button.ref, .shout .band a, .detail button.ref')||!!e.closest('#chain .meta .gate, #detail .kv dd.waits-on'),statusBar:(!!e.closest('.status')||(!!e.closest('.composer')&&innerWidth>=900))&&!matchMedia('(pointer: coarse)').matches,oneLine:!e.closest('.status')||getComputedStyle(e).whiteSpace==='nowrap'}});
+      const controls=[...new Set(document.querySelectorAll(selector))].filter(visible).map(e=>{const r=e.getBoundingClientRect();return {tag:e.tagName,id:e.id||'',text:(e.innerText||e.getAttribute('aria-label')||'').trim().slice(0,60),x:r.x,y:r.y,right:r.right,bottom:r.bottom,width:r.width,height:r.height,inlineReference:e.matches('.feed button.ref, .feed a.ref[data-go], .shout button.ref, .shout a.ref[data-go], .shout .band a, .detail button.ref, .detail a.ref[data-go]')||!!e.closest('#chain .meta .gate, #detail .kv dd.waits-on'),statusBar:(!!e.closest('.status')||(!!e.closest('.composer')&&innerWidth>=900))&&!matchMedia('(pointer: coarse)').matches,oneLine:!e.closest('.status')||getComputedStyle(e).whiteSpace==='nowrap'}});
       const notice=document.querySelector('#console');
       const noticeBox=visible(notice)?notice.getBoundingClientRect():null;
       const toast=noticeBox?{x:noticeBox.x,y:noticeBox.y,right:noticeBox.right,bottom:noticeBox.bottom,visible:noticeBox.y>=0&&noticeBox.bottom<=innerHeight,
@@ -254,9 +254,129 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
       assert.ok(decision, `${width}: a decision is offered for answer`);
       await click(`#decisions [data-go="${decision}"]`);
       await checkLayout(width, 'answer form');
-      await fill('#shout-text', `Phone answer ${width}`);
-      await submit('#shout-form');
-      await chrome.waitFor(`document.querySelector('#feed').innerText.includes('Phone answer ${width}')`);
+      const answerText = `Phone answer ${width}`;
+      const answerRequests = new Map();
+      const answerNetwork = [];
+      let deadlineSnapshotTimer = null;
+      let deadlineSnapshotStarted = false;
+      let deadlineBoardSnapshot = null;
+      /** Record only the single move request made by this isolated answer action, without its sealed body. */
+      const observeAnswerNetwork = ({ data }) => {
+        const message = JSON.parse(String(data));
+        const event = message.params;
+        if (message.method === 'Network.requestWillBeSent' && event.request.method === 'POST' && new URL(event.request.url).pathname.endsWith('/moves')) {
+          // This listener is installed only around the one answer form submission; the body may be sealed.
+          answerRequests.set(event.requestId, true);
+          answerNetwork.push({ type: 'sent', at: Date.now(), method: event.request.method, path: '/api/v1/boards/:id/moves' });
+        } else if (answerRequests.has(event?.requestId) && message.method === 'Network.responseReceived') {
+          answerNetwork.push({ type: 'response', at: Date.now(), status: event.response.status });
+        } else if (answerRequests.has(event?.requestId) && message.method === 'Network.loadingFinished') {
+          answerNetwork.push({ type: 'finished', at: Date.now() });
+        } else if (answerRequests.has(event?.requestId) && message.method === 'Network.loadingFailed') {
+          answerNetwork.push({ type: 'failed', at: Date.now(), error: event.errorText });
+        }
+      };
+      chrome.socket.addEventListener('message', observeAnswerNetwork);
+      try {
+        await chrome.stable(`(() => {
+          const feed = document.querySelector('#feed');
+          const probe = { feed, armedAt: Date.now(), lastMutationAt: null, answerVisibleAt: null, answerText: ${JSON.stringify(answerText)} };
+          probe.observer = new MutationObserver(records => {
+            const currentFeed = document.querySelector('#feed');
+            const feedChanged = records.some(record => feed?.contains(record.target) || record.target === feed
+              || [...record.addedNodes, ...record.removedNodes].some(node => node === feed || node === currentFeed || node.contains?.(feed) || node.contains?.(currentFeed)));
+            if (!feedChanged) return;
+            probe.lastMutationAt = Date.now();
+            if (currentFeed?.innerText.includes(probe.answerText) && probe.answerVisibleAt === null) probe.answerVisibleAt = probe.lastMutationAt;
+          });
+          if (feed) probe.observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+          window.__phoneAnswerProbe = probe;
+        })()`);
+        await fill('#shout-text', answerText);
+        const answerActionAt = Date.now();
+        await submit('#shout-form');
+        const waitStartedAt = Date.now();
+        const waitDeadlineMs = 10_000;
+        let resolveDeadlineSnapshot;
+        deadlineBoardSnapshot = new Promise((resolve) => { resolveDeadlineSnapshot = resolve; });
+        // Observe the same existing browser wait deadline without extending or changing that wait.
+        deadlineSnapshotTimer = setTimeout(async () => {
+          deadlineSnapshotStarted = true;
+          const requestStartedAt = Date.now();
+          try {
+            const state = await boardOf(view, demo.repo);
+            resolveDeadlineSnapshot({ requestStartedAt, responseAt: Date.now(), state });
+          } catch (error) {
+            resolveDeadlineSnapshot({ requestStartedAt, responseAt: Date.now(), error: String(error.message || error) });
+          }
+        }, waitDeadlineMs);
+        try {
+          await chrome.waitFor(`document.querySelector('#feed').innerText.includes('Phone answer ${width}')`);
+          const waitSatisfiedAt = Date.now();
+          let feed = null;
+          let diagnosticError = null;
+          try {
+            feed = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+              const value = window.__phoneAnswerProbe;
+              const node = document.querySelector('#feed');
+              return { now: Date.now(), armedAt: value?.armedAt ?? null, textHasAnswer: !!node?.innerText.includes(value?.answerText || ''), feedRootSame: node === value?.feed, lastMutationAt: value?.lastMutationAt ?? null, answerVisibleAt: value?.answerVisibleAt ?? null };
+            })())`));
+          } catch (error) { diagnosticError = String(error.message || error); }
+          t.diagnostic(JSON.stringify({ width, answerText, answerActionAt, waitStartedAt, waitSatisfiedAt,
+            waitDeadlineMs, request: answerNetwork, feed, diagnosticError }));
+        } catch (waitError) {
+          const waitFailedAt = Date.now();
+          let feed = null;
+          let diagnosticError = null;
+          try {
+            feed = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+              const value = window.__phoneAnswerProbe;
+              const node = document.querySelector('#feed');
+              return { browserSampledAt: Date.now(), armedAt: value?.armedAt ?? null, textHasAnswer: !!node?.innerText.includes(value?.answerText || ''), feedRootSame: node === value?.feed, lastMutationAt: value?.lastMutationAt ?? null, answerVisibleAt: value?.answerVisibleAt ?? null };
+            })())`));
+          } catch (error) { diagnosticError = String(error.message || error); }
+          const deadlineBoard = await deadlineBoardSnapshot;
+          const board = deadlineBoard.state;
+          const matchingShouts = (board?.shouts || []).filter((shout) => shout.shout_from === 'person' && shout.shout_text === answerText);
+          const answerShout = matchingShouts.reduce((latest, shout) => !latest || shout.shout_id > latest.shout_id ? shout : latest, null);
+          const newestShout = (board?.shouts || []).reduce((latest, shout) => !latest || shout.shout_id > latest.shout_id ? shout : latest, null);
+          const sent = answerNetwork.find((event) => event.type === 'sent');
+          const response = answerNetwork.find((event) => event.type === 'response');
+          const deadlineAt = waitStartedAt + waitDeadlineMs;
+          const newest = newestShout ? { id: newestShout.shout_id, at: newestShout.shout_at,
+            from: newestShout.shout_from, text: String(newestShout.shout_text || '').slice(0, 120) } : null;
+          const answer = answerShout ? { id: answerShout.shout_id, at: answerShout.shout_at } : null;
+          const accepted = response?.status === 200 && matchingShouts.length > 0;
+          const answerAt = answer?.at ? Date.parse(answer.at) : null;
+          const arrivedLate = (sent?.at ?? 0) > deadlineAt || (response?.at ?? 0) > deadlineAt
+            || (Number.isFinite(answerAt) && answerAt > deadlineAt);
+          const acceptedByDeadline = accepted && Number.isFinite(answerAt) && answerAt <= deadlineAt;
+          const feedProbeValid = Boolean(feed) && diagnosticError === null && Number.isFinite(feed.armedAt)
+            && Number.isFinite(feed.browserSampledAt) && Object.hasOwn(feed, 'answerVisibleAt')
+            && (feed.answerVisibleAt === null || Number.isFinite(feed.answerVisibleAt))
+            && Object.hasOwn(feed, 'lastMutationAt') && (feed.lastMutationAt === null || Number.isFinite(feed.lastMutationAt));
+          const feedHadNoAnswerByDeadline = feedProbeValid && (feed.answerVisibleAt === null || feed.answerVisibleAt > deadlineAt);
+          const cause = !sent ? 'not sent'
+            : arrivedLate ? 'answer request or board arrival occurred after the wait deadline'
+              : acceptedByDeadline && feedHadNoAnswerByDeadline ? 'board records the answer before the deadline, but the feed has no answer render by the deadline'
+                : 'not distinguished by the captured request, board, and feed state';
+          const capture = { width, cause, waitDeadlineAt: deadlineAt, answerActionAt, waitStartedAt, waitFailedAt,
+            requestSentAt: sent?.at ?? null, response: response ? { status: response.status, at: response.at } : null,
+            answerShout: answer, newestBoardShout: newest, boardAnswerCount: matchingShouts.length,
+            boardReadStartedAt: deadlineBoard.requestStartedAt, boardReadCompletedAt: deadlineBoard.responseAt,
+            boardReadError: deadlineBoard.error ?? null, feedLastDomMutationAt: feed?.lastMutationAt ?? null,
+            answerVisibleAt: feed?.answerVisibleAt ?? null, feedBrowserSampledAt: feed?.browserSampledAt ?? null,
+            feedProbeValid, diagnosticError };
+          const captureText = `phone-answer capture: ${JSON.stringify(capture)}`;
+          t.diagnostic(captureText);
+          assert.fail(`${waitError.message}; ${captureText}`);
+        }
+        } finally {
+          if (deadlineSnapshotTimer !== null) clearTimeout(deadlineSnapshotTimer);
+          if (deadlineSnapshotStarted && deadlineBoardSnapshot) await deadlineBoardSnapshot;
+          chrome.socket.removeEventListener('message', observeAnswerNetwork);
+          await chrome.stable(`window.__phoneAnswerProbe?.observer.disconnect(); delete window.__phoneAnswerProbe`).catch(() => undefined);
+      }
 
       await fill('#hold-lane', 'web');
       await fill('#hold-reason', `Phone hold ${width}`);

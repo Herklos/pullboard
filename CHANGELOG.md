@@ -4,6 +4,32 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.8.8] - 2026-10-11
+
+### Steadier CI, safer boards
+
+A worktree's unmerged code can no longer upgrade the board everyone shares, from the CLI or from Pullboard View. CI now runs in shards and drops runs a newer push has replaced, and the clicks it caught going missing under load now land.
+
+### Added
+
+- A rejected commit can be submitted again, unchanged, after the coordinator corrects its bar and the builder refreezes it. This is engine 9: upgrade every linked device before using it.
+- Through the relay, a shout's address opens even a shout older than the forty most recent.
+
+### Changed
+
+- CI splits each run into shards and cancels a run on main once a newer push replaces it.
+- The README's board shots are retaken from the current view.
+
+### Fixed
+
+- An agent's worktree running newer code never migrates the shared board or its event log, and Pullboard View's server opens boards through the same guard.
+- Item links work everywhere an item is named, and an exported snapshot keeps its addresses.
+- Verdict notes keep their line breaks, and code in them stays literal.
+- The Lanes panel stays inside its card at every width, including the Hold a lane form.
+- A click on an item in the Pipeline view opens it even while the view redraws.
+- The Spec tab's decline button keeps working through a refresh.
+- The replay controls stay in place when a replay starts.
+
 ## [0.8.7] - 2026-10-11
 
 ### What you see first

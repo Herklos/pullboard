@@ -328,7 +328,7 @@ test('activity rows say what each shout and answer said [N26]', { timeout: 120_0
       const rows = JSON.parse(await chrome.stable(`JSON.stringify([...document.querySelectorAll('#activity .act')].map((row) => {
         const said = row.querySelector('.said');
         const lines = said ? Math.round(said.getBoundingClientRect().height / parseFloat(getComputedStyle(said).lineHeight)) : 0;
-        return { text: row.textContent, said: said?.textContent ?? null, tip: said?.title ?? null, lines, refs: said ? said.querySelectorAll('button.ref').length : 0,
+        return { text: row.textContent, said: said?.textContent ?? null, tip: said?.title ?? null, lines, refs: said ? said.querySelectorAll('a.ref[data-go]').length : 0,
           code: said ? [...said.querySelectorAll('code')].map((code) => code.textContent) : [], ellipsis: said ? getComputedStyle(said).textOverflow === 'ellipsis' : null,
           cut: said ? said.scrollWidth > said.clientWidth : null };
       }))`));
@@ -363,7 +363,7 @@ test('activity names the item each event moved [N26]', async () => {
     const rows = page.show('activity').split('<div><time>').slice(1);
     const about = rows.filter((row) => row.includes('data-go="item:1"'));
     assert.equal(about.length, 2, 'the add and the claim');
-    for (const row of about) assert.match(row, /type="button">#1<\/button> <span class="what">Greeting &lt;b&gt;bold&lt;\/b&gt;<\/span><\/div>/, 'the escaped title follows the link');
+    for (const row of about) assert.match(row, /data-go="item:1">#1<\/a> <span class="what">Greeting &lt;b&gt;bold&lt;\/b&gt;<\/span><\/div>/, 'the escaped title follows the link');
     const joins = rows.filter((row) => /<\/b> join<\/div>/.test(row));
     assert.ok(joins.length > 0 && joins.every((row) => !row.includes('class="what"')), 'an event about no item names none');
     assert.match(await styleOf(view), /\.feed \.act \.what \{ flex: 1 1 auto; min-width: 0; overflow-wrap: break-word;/, 'activity titles wrap at words and permit an overflowing token to break');

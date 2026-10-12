@@ -211,7 +211,7 @@ test('the status bar holds one line under no pointer [N26]', { timeout: 120_000 
     const audit = JSON.parse(await chrome.stable(`JSON.stringify((() => {
       const visible=e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return !e.disabled&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)!==0&&r.width>0&&r.height>0&&!e.closest('[hidden]')};
       const selector='button,a[href],input:not([type=hidden]),select,textarea,[role=button],[data-root],[data-tab],[data-go],[data-item],[data-state],[data-rows],[data-row],[data-release],[data-shout],[data-new],[data-code]';
-      const controls=[...new Set(document.querySelectorAll(selector))].filter(visible).map(e=>{const r=e.getBoundingClientRect();return {text:(e.innerText||e.getAttribute('aria-label')||'').trim(),height:r.height,inlineReference:e.matches('.feed button.ref, .shout button.ref, .shout .band a, .detail button.ref')||!!e.closest('#chain .meta .gate, #detail .kv dd.waits-on'),statusBar:!!e.closest('.status')&&!matchMedia('(pointer: coarse)').matches,oneLine:!e.closest('.status')||getComputedStyle(e).whiteSpace==='nowrap'}});
+      const controls=[...new Set(document.querySelectorAll(selector))].filter(visible).map(e=>{const r=e.getBoundingClientRect();return {text:(e.innerText||e.getAttribute('aria-label')||'').trim(),height:r.height,inlineReference:e.matches('.feed button.ref, .feed a.ref[data-go], .shout button.ref, .shout a.ref[data-go], .shout .band a, .detail button.ref, .detail a.ref[data-go]')||!!e.closest('#chain .meta .gate, #detail .kv dd.waits-on'),statusBar:!!e.closest('.status')&&!matchMedia('(pointer: coarse)').matches,oneLine:!e.closest('.status')||getComputedStyle(e).whiteSpace==='nowrap'}});
       return {controls,tap:getComputedStyle(document.documentElement).getPropertyValue('--tap').trim(),wrapped:controls.filter(c=>!c.oneLine)};
     })())`));
     assert.equal(audit.tap, '32px', `with no pointer at 1280 the targets are the compact ones a mouse gets; touch keeps 44px: ${JSON.stringify(audit.controls)}`);
@@ -615,7 +615,7 @@ test('targets are 44px for touch and compact under a mouse [N26]', { timeout: 15
     const selector = 'button,a[href],input:not([type=hidden]),select,textarea,[role=button],[data-tab],[data-go],[data-item],[data-state],[data-row],[data-new]';
     // A reference inside running text is exempt from 44px, as WCAG 2.5.8 exempts inline targets: only the elements named
     // here, and only where text that is not another control's shares their line in the same block.
-    const named = (e) => e.matches('.feed button.ref, .shout button.ref, .shout .band a, .detail button.ref, .t button.ref') || !!e.closest('#chain .meta .gate, #detail .kv dd.waits-on');
+    const named = (e) => e.matches('.feed button.ref, .feed a.ref[data-go], .shout button.ref, .shout a.ref[data-go], .shout .band a, .detail button.ref, .detail a.ref[data-go], .t button.ref, .t a.ref[data-go]') || !!e.closest('#chain .meta .gate, #detail .kv dd.waits-on');
     const inLine = (e) => {
       let block = e.parentElement;
       while (block.parentElement && getComputedStyle(block).display.startsWith('inline')) block = block.parentElement;
