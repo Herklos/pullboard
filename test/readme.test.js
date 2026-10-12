@@ -204,7 +204,13 @@ test('README pins its approved Philosophy, Key concepts and Why structure [I10,I
   const whyStart = README.indexOf('### Why', concepts);
   const nextTopLevel = README.indexOf('\n## ', philosophy + 1);
   assert.ok(philosophy >= 0 && philosophy < concepts && concepts < whyStart && whyStart < nextTopLevel, 'Philosophy contains Key concepts and Why before the next top-level section');
+  const approvedOpening = "**Accumulated judgement for agents.** Agents are good at tasks and bad at projects: every new session starts without what you decided, so you become the glue. The agents scale; your judgement doesn't. Pullboard is a structural approach to orchestrating agents coherently over long-term builds, so you can trust your agentic workforce to fill in the blanks the way you would, without re-prompting them.";
+  const openingWithFigure = `${approvedOpening}\n\n![How it holds. Your decision becomes a bar each piece of work is frozen against; a second agent checks the exact commit; the board keeps what passed, what failed and why; the next agent starts from there.](docs/img/holds.svg)\n\n**Vibe code a real product.**`;
+  assert.ok(README.includes(openingWithFigure), 'the approved opening and holds figure sit directly before the unchanged lead');
+  assert.equal(README.split(approvedOpening).length - 1, 1, 'the approved opening appears exactly once');
+  assert.doesNotMatch(`${approvedOpening} ${FIGURES.holds()}`, /\b(?:memory|remember)\b/iu, 'the opening and its figure avoid those terms');
   const section = README.slice(philosophy, nextTopLevel);
+  assert.ok(section.includes("On Pullboard itself, a second agent's check catches one in three tasks that already passed their own tests."), 'Why pins the approved proof line');
   for (const text of [
     'You do not explain twice. You rule the agents. Hierarchy is enforced. Judgement is yours. Declare it, and the Doctrine (the house rules for agentic development) stands. **You speak the constraints, agents fill in the blanks.** The Spec is canon. Then code. Then proof.',
     'Five primitives. Everything else is built on them.',

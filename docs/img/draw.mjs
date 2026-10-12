@@ -369,8 +369,69 @@ export function drawChain() {
   });
 }
 
+
+/** Draw one record layer with its writer's palette and left/right aligned evidence. */
+function recordLayer({ x, y, width, height, kind, title, detail, dashed = false }) {
+  return `<g class="${kind}"><rect x="${x}" y="${y}" width="${width}" height="${height}" rx="8"${dashed ? ' stroke-dasharray="4 3"' : ''}/>${text(x + 14, y + height / 2 + 5, title, 't1')}${text(x + width - 14, y + height / 2 + 5, detail, 't2', 'end')}</g>`;
+}
+
+/** How decisions become a shared record that later agents can query and build from. */
+export function drawHolds() {
+  const width = 1020;
+  const height = 430;
+  const body = [
+    text(24, 34, 'Judgement accumulates', 'head'),
+    text(24, 55, 'Every piece of work starts from everything decided and proved before it.', 'aside'),
+    '<rect class="frame" x="24" y="76" width="220" height="310" rx="10"/>',
+    '<rect class="frame" x="288" y="76" width="430" height="310" rx="10"/>',
+    '<rect class="frame" x="770" y="76" width="226" height="310" rx="10"/>',
+    text(40, 101, 'You', 't1'),
+    text(304, 101, "The board · the project's record", 't1'),
+    text(786, 101, 'Agents · one lane each', 't1'),
+    box({ x: 40, y: 124, w: 188, h: 66, kind: 'person', title: 'Your decisions', sub: 'rows · doctrine · answers' }),
+    box({ x: 40, y: 264, w: 188, h: 66, kind: 'plain', title: 'Only your calls', sub: 'questions passed up' }),
+    recordLayer({ x: 306, y: 116, width: 394, height: 42, kind: 'person', title: 'Approved rows', detail: 'what must be true' }),
+    recordLayer({ x: 306, y: 164, width: 394, height: 42, kind: 'person', title: 'Frozen bars', detail: 'one per item, from the rows', dashed: true }),
+    recordLayer({ x: 306, y: 212, width: 394, height: 42, kind: 'check', title: 'Proofs', detail: 'the exact commit each verdict checked' }),
+    recordLayer({ x: 306, y: 260, width: 394, height: 42, kind: 'agent', title: 'Verdicts', detail: 'every accept and reject, with the reason' }),
+    '<g class="done"><rect x="306" y="316" width="394" height="8" rx="4"/></g>',
+    text(503, 346, 'each item adds to the record · each session starts from it', 'label', 'middle'),
+    text(700, 375, 'each layer takes the colour of who wrote it', 'aside', 'end'),
+    box({ x: 786, y: 132, w: 194, h: 66, kind: 'check', title: 'Builder', sub: 'builds to the bar' }),
+    box({ x: 786, y: 264, w: 194, h: 66, kind: 'agent', title: 'Second agent', sub: 'checks it against the bar' }),
+    edge([[228, 157], [300, 137]]),
+    '<rect class="card" x="228" y="137" width="70" height="22" rx="11"/>',
+    text(263, 152, 'approve once', 'label', 'middle'),
+    edge([[700, 185], [748, 185], [748, 165], [780, 165]]),
+    edge([[748, 185], [748, 297], [780, 297]]),
+    '<circle class="tip" cx="748" cy="185" r="3"/>',
+    '<rect class="card" x="704" y="169" width="70" height="22" rx="11"/>',
+    text(739, 184, 'frozen bar', 'label', 'middle'),
+    edge([[882, 198], [882, 258]]),
+    '<rect class="card" x="837" y="217" width="90" height="22" rx="11"/>',
+    text(882, 232, 'exact commit', 'label', 'middle'),
+    edge([[786, 297], [706, 281]]),
+    '<rect class="card" x="700" y="267" width="120" height="22" rx="11"/>',
+    text(760, 282, 'verdict + reason', 'label', 'middle'),
+    edge([[306, 281], [234, 297]], { leader: true }),
+    '<rect class="card" x="226" y="287" width="78" height="22" rx="11"/>',
+    text(265, 302, 'only your calls', 'label', 'middle'),
+    edge([[786, 143], [754, 143], [754, 86], [505, 86], [505, 80]], { leader: true }),
+    edge([[786, 275], [746, 275], [746, 86], [505, 86], [505, 80]], { leader: true }),
+    '<rect class="card" x="638" y="76" width="112" height="22" rx="11"/>',
+    text(694, 91, 'query any time', 'label', 'middle'),
+  ];
+  return figure({
+    width,
+    height,
+    title: 'Judgement accumulates',
+    desc: 'You approve rows, doctrine and answers once. The board keeps approved rows, a frozen bar for each item, proofs with exact commits and every verdict with its reason. The builder and second agent each receive the item’s frozen bar, and either can query the whole board at any time. The builder hands over its exact commit; the second agent checks it and returns a verdict and reason. Only your calls come back to you. Each item adds to the record, and each session starts from it.',
+    body,
+  });
+}
+
 /** Every figure the README links, by file name under docs/img. */
-export const FIGURES = { loop: drawLoop, lifecycle: drawLifecycle, layout: drawLayout, 'agent-start': drawAgentStart, chain: drawChain };
+export const FIGURES = { loop: drawLoop, lifecycle: drawLifecycle, layout: drawLayout, 'agent-start': drawAgentStart, chain: drawChain, holds: drawHolds };
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   for (const [name, draw] of Object.entries(FIGURES)) {
