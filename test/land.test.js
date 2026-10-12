@@ -329,17 +329,18 @@ function startExclusiveWriter(box, boardFile, name) {
     "const locking = db.prepare('PRAGMA locking_mode = EXCLUSIVE').get().locking_mode;",
     "if (journal !== 'delete' || locking !== 'exclusive') throw new Error('fixture did not acquire rollback-journal exclusive mode');",
     "db.exec('BEGIN EXCLUSIVE'); db.exec('CREATE TABLE IF NOT EXISTS fixture_write (value INTEGER)'); db.exec('INSERT INTO fixture_write (value) VALUES (1)');",
-    'fs.writeFileSync(ready, JSON.stringify({ journal, locking })); const deadline = Date.now() + 20_000;',
+    'fs.writeFileSync(ready, JSON.stringify({ journal, locking, lockedAt: Date.now(), pid: process.pid })); const deadline = Date.now() + 20_000;',
     'while (!fs.existsSync(release) && Date.now() < deadline) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);',
     "if (!fs.existsSync(release)) throw new Error('writer release was not received');",
-    "db.exec('COMMIT'); db.close(); fs.writeFileSync(released, 'released');",
+    "const commitAt = Date.now(); db.exec('COMMIT'); db.close(); fs.writeFileSync(released, JSON.stringify({ commitAt, releasedAt: Date.now(), pid: process.pid }));",
     '} catch (error) { try { db.close(); } catch {} process.stderr.write(error.stack + \'\\n\'); process.exitCode = 1; }',
   ].join('\n');
   const child = startFixtureChild(process.execPath, ['-e', source, boardFile, ready, release, released], {
     cwd: box.repo, env: box.env, detached: true, stdio: ['ignore', 'ignore', 'pipe'],
   });
+  child.once('exit', (code, signal) => { child.writerExit = { observedAt: Date.now(), code, signal }; });
   const closed = lockChildOutcome(child);
-  return { child, closed, ready, release, released };
+  return { name, child, closed, ready, release, released };
 }
 
 /** Resolve when an owned child closes or fails to spawn, whichever happens first. */
@@ -360,9 +361,14 @@ function lockChildOutcome(child) {
  */
 function launchHookProbe(box, probe, marker) {
   const env = { ...box.env, HOOK_READ_ATTEMPT: marker };
+  const hookTiming = { launchRequestedAt: Date.now(), marker };
   const child = startFixtureChild(process.execPath, ['--import', probe, BIN, 'hook', 'pre-commit'], {
     cwd: box.web, env, stdio: ['ignore', 'pipe', 'pipe'],
   });
+  child.hookTiming = hookTiming;
+  child.once('spawn', () => { hookTiming.spawnObservedAt = Date.now(); });
+  child.once('error', (error) => { hookTiming.spawnErrorObservedAt = Date.now(); hookTiming.spawnError = error.message; });
+  child.once('exit', (code, signal) => { hookTiming.exitObservedAt = Date.now(); hookTiming.code = code; hookTiming.signal = signal; });
   child.stdoutText = '';
   child.stderrText = '';
   child.stdout.setEncoding('utf8').on('data', (part) => { child.stdoutText += part; });
@@ -575,24 +581,52 @@ async (t) => {
   const probe = join(box.dir, 'observe-hook-read.mjs');
   const observedSql = join(box.dir, 'hook-read-attempted');
   writeFileSync(probe, [
-    "import { writeFileSync } from 'node:fs';",
+    "import { appendFileSync, writeFileSync } from 'node:fs';",
     "import { DatabaseSync } from 'node:sqlite';",
     'const prepare = DatabaseSync.prototype.prepare;',
+    "/** Record native-process times without changing the hook result. */",
+    "const record = (row) => { try { appendFileSync(process.env.HOOK_READ_ATTEMPT + '.trace', JSON.stringify({ at: Date.now(), pid: process.pid, ...row }) + '\\n'); } catch {} };",
+    "record({ phase: 'hook-started', at: Math.round(performance.timeOrigin) });",
+    "process.on('exit', () => record({ phase: 'hook-exit', code: process.exitCode ?? 0 }));",
+    'const exec = DatabaseSync.prototype.exec;',
+    '/** Observe the connection timeout after the production statement executes. */',
+    'DatabaseSync.prototype.exec = function (sql, ...args) {',
+    '  const value = Reflect.apply(exec, this, [sql, ...args]);',
+    "  if (/PRAGMA busy_timeout/u.test(String(sql))) record({ phase: 'busy-timeout', value: Reflect.apply(prepare, this, ['PRAGMA busy_timeout']).get() });",
+    '  return value;',
+    '};',
     'DatabaseSync.prototype.prepare = function (sql, ...args) {',
     "  if (String(sql) !== 'SELECT * FROM agent WHERE agent_path = ?') return Reflect.apply(prepare, this, [sql, ...args]);",
-    "  writeFileSync(process.env.HOOK_READ_ATTEMPT, JSON.stringify({ phase: 'prepare-started' }));",
+    "  record({ phase: 'busy-timeout-at-read', value: Reflect.apply(prepare, this, ['PRAGMA busy_timeout']).get() });",
+    "  record({ phase: 'prepare-started' }); writeFileSync(process.env.HOOK_READ_ATTEMPT, JSON.stringify({ phase: 'prepare-started', at: Date.now() }));",
     '  try {',
     '    const statement = Reflect.apply(prepare, this, [sql, ...args]);',
+    "    record({ phase: 'prepare-returned' });",
     '    const get = statement.get;',
     '    statement.get = function (...values) {',
-    "      writeFileSync(process.env.HOOK_READ_ATTEMPT, JSON.stringify({ phase: 'get-started' }));",
-    '      try { return Reflect.apply(get, this, values); }',
-    '      catch (error) { writeFileSync(process.env.HOOK_READ_ATTEMPT, JSON.stringify({ phase: \'error\', code: error.code ?? null, errcode: error.errcode ?? null, message: error.message })); throw error; }',
+    "      record({ phase: 'get-started' }); writeFileSync(process.env.HOOK_READ_ATTEMPT, JSON.stringify({ phase: 'get-started', at: Date.now() }));",
+    "      try { const value = Reflect.apply(get, this, values); record({ phase: 'get-returned' }); return value; }",
+    '      catch (error) { record({ phase: \'read-error\', message: error.message, errcode: error.errcode }); writeFileSync(process.env.HOOK_READ_ATTEMPT, JSON.stringify({ phase: \'error\', code: error.code ?? null, errcode: error.errcode ?? null, message: error.message })); throw error; }',
     '    };',
     '    return statement;',
-    '  } catch (error) { writeFileSync(process.env.HOOK_READ_ATTEMPT, JSON.stringify({ phase: \'error\', code: error.code ?? null, errcode: error.errcode ?? null, message: error.message })); throw error; }',
+    '  } catch (error) { record({ phase: \'read-error\', message: error.message, errcode: error.errcode }); writeFileSync(process.env.HOOK_READ_ATTEMPT, JSON.stringify({ phase: \'error\', code: error.code ?? null, errcode: error.errcode ?? null, message: error.message })); throw error; }',
     '};',
   ].join('\n'));
+  /** Emit actual cross-process lock/read times even when the original assertion refuses. */
+  const timing = (name, writer, marker) => {
+    try {
+      t.diagnostic('hook read timings ' + JSON.stringify({
+        name, platform: process.platform, node: process.version, observedAt: Date.now(),
+        hook: hooks.find((hook) => hook.hookTiming?.marker === marker)?.hookTiming ?? null,
+        writerExit: writer.child.writerExit ?? null,
+        locked: existsSync(writer.ready) ? JSON.parse(readFileSync(writer.ready, 'utf8')) : null,
+        released: existsSync(writer.released) ? JSON.parse(readFileSync(writer.released, 'utf8')) : null,
+        read: existsSync(marker + '.trace') ? readFileSync(marker + '.trace', 'utf8').trim().split('\n').map(JSON.parse) : [],
+      }));
+    } catch (error) {
+      t.diagnostic('hook read timings ' + JSON.stringify({ name, captureError: error.message }));
+    }
+  };
   const writers = [];
   const hooks = [];
   t.after(async () => {
@@ -620,6 +654,7 @@ async (t) => {
         }
       }
     }
+    for (const writer of writers) timing('cleanup-' + writer.name, writer, `${observedSql}-${writer.name}`);
   });
   /** Start both isolated processes and wait for the hook's exact agentAt query attempt. */
   const runHookWhileWriterHolds = async (name) => {
@@ -641,6 +676,7 @@ async (t) => {
   assert.ok(['prepare-started', 'get-started'].includes(successObservation.phase), `the hook reached native SQLite prepare or get before release: ${JSON.stringify(successObservation)}`);
   writeFileSync(successful.writer.release, 'release');
   const [writerSuccess, hookSuccess] = await Promise.all([successful.writer.closed, successful.hook.closed]);
+  timing('successful-wait', successful.writer, successful.marker);
   assert.equal(writerSuccess.error, null, `the exclusive writer spawned: ${writerSuccess.error?.message ?? ''}`);
   assert.deepEqual({ code: writerSuccess.code, signal: writerSuccess.signal }, { code: 0, signal: null }, successful.writer.child.fixtureFailure ?? 'the exclusive writer commits and closes');
   assert.equal(hookSuccess.error, null, `the hook child spawned: ${hookSuccess.error?.message ?? ''}`);
@@ -652,7 +688,7 @@ async (t) => {
   const timeoutResult = await Promise.race([
     timeout.hook.closed,
     new Promise((_, reject) => { timeoutTimer = setTimeout(() => reject(new Error('hook read exceeded the stated 10s busy timeout')), 15_000); }), // budget: hang ceiling derived from the declared 10s SQLite wait plus 5s for child startup and scheduling.
-  ]).finally(() => clearTimeout(timeoutTimer));
+  ]).finally(() => { clearTimeout(timeoutTimer); timing('timeout-diagnostic', timeout.writer, timeout.marker); });
   assert.equal(timeoutResult.error, null, `the timeout hook child spawned: ${timeoutResult.error?.message ?? ''}`);
   assert.equal(timeoutResult.code, 1, timeout.hook.stderrText);
   assert.match(timeout.hook.stderrText, /BOARD_BUSY/u);
@@ -664,6 +700,7 @@ async (t) => {
   assert.ok((timeoutObservation.errcode & 0xff) === 5 || timeoutObservation.code === 'SQLITE_BUSY', `the underlying failure is SQLITE_BUSY/5: ${JSON.stringify(timeoutObservation)}`);
   writeFileSync(timeout.writer.release, 'release');
   const writerTimeout = await timeout.writer.closed;
+  timing('timeout-released', timeout.writer, timeout.marker);
   assert.equal(writerTimeout.error, null, `the diagnostic writer spawned: ${writerTimeout.error?.message ?? ''}`);
   assert.deepEqual({ code: writerTimeout.code, signal: writerTimeout.signal }, { code: 0, signal: null }, timeout.writer.child.fixtureFailure ?? 'the diagnostic fixture writer closes cleanly');
   assert.ok(existsSync(timeout.writer.released), 'the diagnostic writer releases after the hook reports its timeout');
