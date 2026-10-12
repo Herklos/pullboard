@@ -1,6 +1,6 @@
 /** The public, versioned JSON surface of every pullboard command (A1). */
 import assert from 'node:assert/strict';
-import { runFixtureExecFile as execFileSync, startFixtureChild as spawn, runFixtureChild as spawnSync, reportFixtureChildFailure, runFixtureChild, runFixtureGit } from './fixture-child.js';
+import { runFixtureExecFile as execFileSync, startFixtureChild as spawn, runFixtureChild as spawnSync, reportFixtureChildFailure, runFixtureChild, runFixtureGit, safeFixtureDiagnostic } from './fixture-child.js';
 import { performance } from 'node:perf_hooks';
 import {
   chmodSync,
@@ -236,6 +236,42 @@ function json(box, cwd, command, args = [], subcommand) {
   assert.equal(document.version, 1, `${command} --json has a version 1 envelope`);
   assertRequiredShape(document, shapeFor(command, subcommand).required, command);
   return document;
+}
+
+/** Include a fixture CLI result's timing and JSON output when a named test step fails. */
+function fixtureCommandEvidence(step, result, env) {
+  return `${step}\n${result.context}\nstdout: ${safeFixtureDiagnostic(result.stdout, env)}`;
+}
+
+/** Run a named CLI JSON step and retain its stdout, exit code and timing for assertions. */
+function fixtureJsonStep(box, step, cwd, command, args = []) {
+  const result = box.run(cwd, command, ...args, '--json');
+  const evidence = fixtureCommandEvidence(step, result, box.env);
+  assert.equal(result.status, 0, evidence);
+  assert.equal(result.stderr, '', evidence);
+  let document;
+  try { document = JSON.parse(result.stdout); }
+  catch (error) { assert.fail(`${evidence}\ninvalid JSON: ${error.message}`); }
+  assert.equal(document.version, 1, evidence);
+  assertRequiredShape(document, shapeFor(command).required, `${step} JSON\n${evidence}`);
+  return { document, evidence };
+}
+
+/** Run one named API step and preserve its status, elapsed time and response body on failure. */
+async function apiStep(step, request, env) {
+  const started = performance.now();
+  let response;
+  try { response = await request; }
+  catch (error) { throw new Error(`${step}: HTTP request failed after ${Math.round(performance.now() - started)}ms; response unavailable: ${error.message}`, { cause: error }); }
+  let body;
+  try { body = await response.text(); }
+  catch (error) { throw new Error(`${step}: HTTP ${response.status}; response body read failed after ${Math.round(performance.now() - started)}ms: ${error.message}`, { cause: error }); }
+  const evidence = `${step}\nHTTP status: ${response.status}\nElapsed: ${Math.round(performance.now() - started)}ms\nBody: ${safeFixtureDiagnostic(body, env)}`;
+  assert.equal(response.status, 200, evidence);
+  let document;
+  try { document = JSON.parse(body); }
+  catch (error) { assert.fail(`${evidence}\ninvalid JSON: ${error.message}`); }
+  return { document, evidence };
 }
 
 /** Check one refusal document, including the exact public code, message and next step. */
@@ -1186,58 +1222,81 @@ test('[A2] local HTTP v1 versions state and moves, authenticates, and preserves 
 
 test('[A2] moves run as the named worktree agent and requests stay visible until answered', async (t) => {
   const box = project();
-  const app = join(box.dir, 'app-1');
-  box.git(box.repo, 'worktree', 'add', '-q', '-b', 'app/one', app);
-  assert.equal(box.run(app, 'join', 'app').status, 0);
-  const api = await startApi(t, box);
-  const boards = await (await apiFetch(api, '/api/v1/boards')).json();
-  const board = boards.boards.find((candidate) => candidate.root === box.repo);
-  const path = `/api/v1/boards/${board.id}`;
+  let lastStepEvidence = 'join worktree agent';
+  /** Retain the last completed HTTP step if its response fails during field access. */
+  async function observedApiStep(...args) {
+    const result = await apiStep(...args);
+    lastStepEvidence = result.evidence;
+    return result;
+  }
+  /** Retain CLI step evidence before downstream response fields are inspected. */
+  function observedFixtureStep(...args) {
+    const result = fixtureJsonStep(...args);
+    lastStepEvidence = result.evidence;
+    return result;
+  }
+  try {
+    const app = join(box.dir, 'app-1');
+    box.git(box.repo, 'worktree', 'add', '-q', '-b', 'app/one', app);
+    const joined = box.run(app, 'join', 'app');
+    lastStepEvidence = fixtureCommandEvidence('join worktree agent', joined, box.env);
+    assert.equal(joined.status, 0, lastStepEvidence);
+    const api = await startApi(t, box);
+    const boardsResponse = await observedApiStep('list registered boards', apiFetch(api, '/api/v1/boards'), box.env);
+    const board = boardsResponse.document.boards.find((candidate) => candidate.root === box.repo);
+    assert.ok(board, boardsResponse.evidence);
+    const path = `/api/v1/boards/${board.id}`;
 
-  const added = await (await apiFetch(api, `${path}/moves`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ verb: 'add', args: { lane: 'app', title: 'Agent work' } }) })).json();
-  const claimedResponse = await apiFetch(api, `${path}/moves`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ verb: 'next', args: {}, agent: 'app-1' }) });
-  assert.equal(claimedResponse.status, 200, await claimedResponse.clone().text());
-  const claimed = await claimedResponse.json();
-  assert.equal(claimed.event.event_by, 'app-1');
-  assert.equal(claimed.event.event_kind, 'claim');
-  assert.equal(claimed.result.item.item_id, added.result.item.item_id);
+    const addedStep = await observedApiStep('add API move', apiFetch(api, `${path}/moves`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ verb: 'add', args: { lane: 'app', title: 'Agent work' } }) }), box.env);
+    const added = addedStep.document;
+    const claimedStep = await observedApiStep('claim API move as app-1', apiFetch(api, `${path}/moves`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ verb: 'next', args: {}, agent: 'app-1' }) }), box.env);
+    const claimed = claimedStep.document;
+    assert.ok(claimed?.event && typeof claimed.event === 'object', `claim response must contain an event\n${claimedStep.evidence}`);
+    assert.equal(claimed.event.event_by, 'app-1', claimedStep.evidence);
+    assert.equal(claimed.event.event_kind, 'claim', claimedStep.evidence);
+    assert.equal(claimed.result.item.item_id, added.result.item.item_id, claimedStep.evidence);
 
-  const renewedResponse = await apiFetch(api, `${path}/moves`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ verb: 'next', args: {}, agent: 'app-1' }) });
-  assert.equal(renewedResponse.status, 200);
-  const renewed = await renewedResponse.json();
-  assert.equal(renewed.result.held, true);
-  assert.equal(renewed.event.event_kind, 'renew');
-  assert.ok(renewed.event.event_id > claimed.event.event_id);
-  assert.equal(renewed.result.item.item_id, claimed.result.item.item_id);
+    const renewedStep = await observedApiStep('renew API move as app-1', apiFetch(api, `${path}/moves`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ verb: 'next', args: {}, agent: 'app-1' }) }), box.env);
+    const renewed = renewedStep.document;
+    assert.equal(renewed.result.held, true, renewedStep.evidence);
+    assert.equal(renewed.event.event_kind, 'renew', renewedStep.evidence);
+    assert.ok(renewed.event.event_id > claimed.event.event_id, renewedStep.evidence);
+    assert.equal(renewed.result.item.item_id, claimed.result.item.item_id, renewedStep.evidence);
 
-  const escalatedResponse = await apiFetch(api, `${path}/moves`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ verb: 'escalate', item: added.result.item.item_id, args: { note: 'Two attempts failed' }, agent: 'app-1' }) });
-  assert.equal(escalatedResponse.status, 200);
-  const escalated = await escalatedResponse.json();
-  assert.equal(escalated.event.event_kind, 'escalate', 'a move returns its own event even when it also sends a coordinator shout');
-  const afterEscalation = (await (await apiFetch(api, `${path}/events?after=${renewed.event.event_id}`)).json()).events;
-  assert.deepEqual(afterEscalation.map((event) => event.event_kind), ['escalate', 'shout']);
-  assert.equal(afterEscalation[0].event_id, escalated.event.event_id);
+    const escalatedStep = await observedApiStep('escalate API move as app-1', apiFetch(api, `${path}/moves`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ verb: 'escalate', item: added.result.item.item_id, args: { note: 'Two attempts failed' }, agent: 'app-1' }) }), box.env);
+    const escalated = escalatedStep.document;
+    assert.equal(escalated.event.event_kind, 'escalate', escalatedStep.evidence);
+    const eventsStep = await observedApiStep('read events after escalation', apiFetch(api, `${path}/events?after=${renewed.event.event_id}`), box.env);
+    const afterEscalation = eventsStep.document.events;
+    assert.deepEqual(afterEscalation.map((event) => event.event_kind), ['escalate', 'shout'], eventsStep.evidence);
+    assert.equal(afterEscalation[0].event_id, escalated.event.event_id, eventsStep.evidence);
 
-  const requestResponse = await apiFetch(api, `${path}/requests`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: 'Approve the API row' }) });
-  assert.equal(requestResponse.status, 200);
-  const requested = await requestResponse.json();
-  assertRequiredShape(requested, JSON_SHAPES.http.request.required, 'request response');
-  const requestId = requested.result.id;
-  assert.equal(requested.event.event_by, 'person');
-  const state = (await (await apiFetch(api, `${path}/state`)).json()).state;
-  assert.deepEqual(state.requests.map((entry) => entry.shout_id), [requestId]);
-  assert.ok(!state.decisions.some((entry) => entry.shout_id === requestId), 'person requests are not open decisions');
-  const inbox = json(box, box.repo, 'inbox');
-  assert.equal(inbox.shouts[0].shout_id, requestId, 'coordinator inbox places the request first');
-  const resumed = json(box, box.repo, 'resume');
-  assert.equal(resumed.requests[0].shout_id, requestId, 'coordinator resume places the request first');
+    const requestStep = await observedApiStep('create person request', apiFetch(api, `${path}/requests`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: 'Approve the API row' }) }), box.env);
+    const requested = requestStep.document;
+    assertRequiredShape(requested, JSON_SHAPES.http.request.required, `create person request\n${requestStep.evidence}`);
+    const requestId = requested.result.id;
+    assert.equal(requested.event.event_by, 'person', requestStep.evidence);
+    const stateStep = await observedApiStep('read request state before answering', apiFetch(api, `${path}/state`), box.env);
+    const state = stateStep.document.state;
+    assert.deepEqual(state.requests.map((entry) => entry.shout_id), [requestId], stateStep.evidence);
+    assert.ok(!state.decisions.some((entry) => entry.shout_id === requestId), `person requests are not open decisions\n${stateStep.evidence}`);
+    const inboxStep = observedFixtureStep(box, 'read coordinator inbox', box.repo, 'inbox');
+    const inbox = inboxStep.document;
+    assert.equal(inbox.shouts[0].shout_id, requestId, inboxStep.evidence);
+    const resumeStep = observedFixtureStep(box, 'read coordinator resume', box.repo, 'resume');
+    const resumed = resumeStep.document;
+    assert.equal(resumed.requests[0].shout_id, requestId, resumeStep.evidence);
 
-  const answerResponse = await apiFetch(api, `${path}/moves`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ verb: 'answer', item: requestId, args: { text: 'done' } }) });
-  assert.equal(answerResponse.status, 200);
-  const answered = await answerResponse.json();
-  assert.equal(answered.event.event_kind, 'answer');
-  assert.equal(answered.event.event_by, 'coordinator');
-  assert.deepEqual((await (await apiFetch(api, `${path}/state`)).json()).state.requests, []);
+    const answerStep = await observedApiStep('answer request through API move', apiFetch(api, `${path}/moves`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ verb: 'answer', item: requestId, args: { text: 'done' } }) }), box.env);
+    const answered = answerStep.document;
+    assert.equal(answered.event.event_kind, 'answer', answerStep.evidence);
+    assert.equal(answered.event.event_by, 'coordinator', answerStep.evidence);
+    const finalStateStep = await observedApiStep('confirm request disappears after answer', apiFetch(api, `${path}/state`), box.env);
+    assert.deepEqual(finalStateStep.document.state.requests, [], finalStateStep.evidence);
+  } catch (error) {
+    error.message = `${error.message}\n${lastStepEvidence}`;
+    throw error;
+  }
 });
 
 test('[A2,B25,B26,B27] HTTP decisions preserve routing, passing and explicit person answers', async (t) => {
