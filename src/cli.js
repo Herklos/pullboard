@@ -1278,7 +1278,7 @@ function setupCommands(io, { first, values }) {
       const staging = notes.at(-1)?.startsWith('git add -f -- ') ? notes.at(-1) : null;
       (staging ? notes.slice(0, -1) : notes).forEach((note) => io.say(note));
       if (await registerProjectAndLink(info.root, new Date(), loadConfig(info.root), io)) io.say('registered this project on this machine, so pullboard view lists it');
-      io.say('Next: ask your agent to set up Pullboard here');
+      io.say('Next: ask your agent to set up Pullboard here; in Claude Code, start a new session first so it loads the Pullboard skills.');
       if (staging) io.say(staging);
       return 0;
     },

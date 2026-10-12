@@ -44,7 +44,7 @@ test('a fresh init tells the person and the agent how to start [I9,I1]', t => {
   rmSync(join(box.root, 'pullboard.json'));
   const initialized = box.output('init');
   assert.equal(initialized.code, 0, initialized.stderr);
-  assert.match(initialized.stdout, /^Next: ask your agent to set up Pullboard here$/mu, 'init prints the single plain setup instruction');
+  assert.match(initialized.stdout, /^Next: ask your agent to set up Pullboard here; in Claude Code, start a new session first so it loads the Pullboard skills\.$/mu, 'init gives one setup instruction and preserves Claude Code skill loading');
   assert.match(initialized.stdout, /git add -f --/u, 'the init output keeps its staging instruction');
 
   const agents = readFileSync(join(box.root, 'AGENTS.md'), 'utf8');

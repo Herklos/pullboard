@@ -119,7 +119,7 @@ test("the coordinator's resume names its next step from the spec and the board, 
   mkdirSync(repo);
   fresh.git(repo, 'init', '-q', '-b', 'main');
   const initialized = fresh.run(repo, 'init');
-  assert.match(initialized.out, /^Next: ask your agent to set up Pullboard here$/m, 'init gives one setup instruction');
+  assert.match(initialized.out, /^Next: ask your agent to set up Pullboard here; in Claude Code, start a new session first so it loads the Pullboard skills\.$/m, 'init gives one setup instruction and preserves Claude Code skill loading');
   assert.match(next(fresh, repo), /^turn what the person wants into spec rows with them: the pullboard-decompose skill/);
   assert.equal(fresh.run(repo, 'add', 'coordinator', 'Tidy the readme').code, 0);
   assert.equal(fresh.run(repo, 'claim', '1').code, 0);
