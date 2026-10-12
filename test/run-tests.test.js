@@ -205,6 +205,18 @@ function outsideGitDiscoveryTest(t) {
   const selected = runShardFixture(fixture, null);
   assert.deepEqual([...selected].sort(), fixture.expected,
     'without a Git work tree Node still discovers and executes every fixture test');
+
+  writeFileSync(fixture.capture, '');
+  writeFileSync(join(fixture.root, '.git'), 'gitdir: missing-git-directory\n');
+  const broken = runFixtureChild(process.execPath, [fixture.runner], {
+    cwd: fixture.root,
+    encoding: 'utf8',
+    env: { ...process.env, PULLBOARD_SHARD_CAPTURE: fixture.capture },
+  });
+  assert.equal(broken.status, 1, broken.context);
+  assert.match(broken.stderr, /could not list tracked test files/u,
+    'a damaged checkout is refused rather than mistaken for an ordinary non-Git folder');
+  assert.equal(readFileSync(fixture.capture, 'utf8'), '', 'no filesystem tests run after Git metadata fails');
 }
 
 test('the runner keeps native discovery outside a Git work tree [C7]', outsideGitDiscoveryTest);

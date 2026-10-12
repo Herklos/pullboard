@@ -317,7 +317,7 @@ function isGitWorkTree(cwd, env) {
   });
   if (result.error) throw result.error;
   if (result.status === 0) return result.stdout.trim() === 'true';
-  if (result.status === 128 && /fatal: not a git repository\b/u.test(result.stderr)) return false;
+  if (result.status === 128 && /^fatal: not a git repository \(or any /u.test(result.stderr)) return false;
   throw new Error(result.stderr.trim() || `git rev-parse failed (status ${result.status})`);
 }
 
