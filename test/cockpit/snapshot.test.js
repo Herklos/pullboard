@@ -339,7 +339,7 @@ test('replay speed is judged by its scheduled delay [A10,C7]', { timeout: 90_000
 
 /** Measure every interactive replay control through its real start, pause, and end states. */
 test('the replay controls don\'t move when the replay starts [A10,C7]', { timeout: 60_000 }, // budget: hang-only ceiling for two viewport geometry passes.
-async function replayControlsStayPut() {
+async function replayControlsStayPut(t) {
   const executable = chromeExecutable();
   assert.ok(executable, 'Chrome is required for replay control geometry coverage');
   const box = machine();
@@ -358,14 +358,49 @@ async function replayControlsStayPut() {
     await chrome.send('Emulation.setCPUThrottlingRate', { rate: 6 });
     const total = await chrome.stable('snapshotReplay.events.length');
     assert.ok(total >= 6, 'the exported replay has enough events to exercise all control states');
-    /** Sample all three interactive control rectangles without inserting a browser wait between them. */
-    const readControlBoxes = async () => JSON.parse(await chrome.stable(`JSON.stringify(Object.fromEntries(
-      ['#replay-play', '#replay-pause', '#replay-speed'].map(selector => {
-        const node = document.querySelector(selector);
-        const rect = node.getBoundingClientRect();
-        return [selector, { x: rect.x, y: rect.y, width: rect.width, height: rect.height }];
-      })
-    ))`));
+    /** Sample original comparison boxes and runner layout evidence in the same browser evaluation. */
+    const readControlBoxes = async (width, state) => {
+      const capture = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+        const selectors = ['#replay-play', '#replay-pause', '#replay-speed'];
+        const boxes = Object.fromEntries(selectors.map(selector => {
+          const node = document.querySelector(selector);
+          const rect = node.getBoundingClientRect();
+          return [selector, { x: rect.x, y: rect.y, width: rect.width, height: rect.height }];
+        }));
+        const controls = selectors.map(selector => {
+          const node = document.querySelector(selector);
+          const style = getComputedStyle(node);
+          const parent = node.parentElement;
+          const track = getComputedStyle(parent);
+          return { id: node.id, box: boxes[selector], label: node.textContent,
+            selectedLabel: node.selectedOptions?.[0]?.textContent ?? null,
+            fontFamily: style.fontFamily, fontSize: style.fontSize, fontWeight: style.fontWeight,
+            lineHeight: style.lineHeight, letterSpacing: style.letterSpacing,
+            width: style.width, minWidth: style.minWidth, maxWidth: style.maxWidth,
+            track: { parent: parent.id || parent.className, display: track.display,
+              columns: track.gridTemplateColumns, rows: track.gridTemplateRows,
+              flexDirection: track.flexDirection, flexWrap: track.flexWrap,
+              gap: track.gap, parentWidth: track.width, flexBasis: style.flexBasis,
+              flexGrow: style.flexGrow, flexShrink: style.flexShrink,
+              columnStart: style.gridColumnStart, columnEnd: style.gridColumnEnd } };
+        });
+        const root = document.documentElement;
+        const scroller = document.scrollingElement;
+        const rootStyle = getComputedStyle(root);
+        return { boxes, controls, observedAt: Date.now(),
+          viewport: { innerWidth, innerHeight, clientWidth: root.clientWidth,
+            bodyClientWidth: document.body.clientWidth, scrollWidth: scroller.scrollWidth,
+            scrollHeight: scroller.scrollHeight, clientHeight: scroller.clientHeight,
+            scrollbarWidth: innerWidth - root.clientWidth,
+            scrollbarGutter: rootStyle.scrollbarGutter, overflowY: rootStyle.overflowY },
+          browser: { userAgent: navigator.userAgent, platform: navigator.platform, devicePixelRatio },
+          replay: { index: snapshotReplay.index, total: snapshotReplay.events.length,
+            playing: snapshotReplay.playing } };
+      })())`));
+      t.diagnostic('replay control boxes ' + JSON.stringify({ width, state,
+        runner: { node: process.version, platform: process.platform, arch: process.arch }, ...capture }));
+      return capture.boxes;
+    };
     /** Exercise real browser input and compare control geometry within one viewport. */
     const verifyWidth = async (width) => {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
@@ -376,15 +411,15 @@ async function replayControlsStayPut() {
         speed.value = '1';
         speed.dispatchEvent(new Event('change', { bubbles: true }));
       })()`);
-      const atStart = await readControlBoxes();
+      const atStart = await readControlBoxes(width, 'start');
       assert.equal(await chrome.stable("document.querySelector('#replay-play').textContent"), 'Play',
         `${width}: the start-state label is the short Play label`);
       await press(chrome, "document.querySelector('#replay-play')");
       assert.equal(await chrome.stable('snapshotReplay.playing'), true, `${width}: native Play starts replay`);
-      const whilePlaying = await readControlBoxes();
+      const whilePlaying = await readControlBoxes(width, 'after Play');
       await press(chrome, "document.querySelector('#replay-pause')");
       assert.equal(await chrome.stable('snapshotReplay.playing'), false, `${width}: native Pause pauses replay`);
-      const whilePaused = await readControlBoxes();
+      const whilePaused = await readControlBoxes(width, 'after Pause');
       await chrome.stable(`(() => {
         replayPosition(snapshotReplay.events.length - 1);
         document.querySelector('#replay-speed').value = '16';
@@ -393,7 +428,7 @@ async function replayControlsStayPut() {
       await press(chrome, "document.querySelector('#replay-play')");
       assert.equal(await chrome.stable('snapshotReplay.index'), total, `${width}: final Play renders the end state`);
       assert.equal(await chrome.stable('snapshotReplay.playing'), false, `${width}: replay stops at its final event`);
-      const atEnd = await readControlBoxes();
+      const atEnd = await readControlBoxes(width, 'end');
       assert.equal(await chrome.stable("document.querySelector('#replay-play').textContent"), 'Play from first event',
         `${width}: the end-state label exercises the longer Play text`);
       for (const [state, boxes] of Object.entries({ whilePlaying, whilePaused, atEnd })) {
