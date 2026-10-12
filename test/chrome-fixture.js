@@ -308,10 +308,28 @@ export function createSender(socket, pending, nextId, timeoutMs, loopDelay, rela
   let mainFrameNavigation = 0;
   let mainFrameId;
   let mainFrameNavigationEvent = 'none';
+  let terminalError = null;
+  /** Reject in-flight commands once the target or its DevTools transport is gone. */
+  function failPending(reason, code = 'CDP_TARGET_CLOSED') {
+    if (terminalError) return;
+    terminalError = { reason, code };
+    for (const [requestId, waiter] of pending) {
+      pending.delete(requestId);
+      cancel(waiter.timer);
+      const error = new Error(`DevTools command failed: ${waiter.method} "${waiter.label}"; ${reason}.`);
+      error.code = code;
+      error.navigated = false;
+      waiter.reject(error);
+    }
+  }
   /** Resolve or reject the request matching one CDP response without logging its payload. */
   function onMessage(event) {
     let message;
     try { message = JSON.parse(String(event.data)); } catch { return; }
+    if (message.method === 'Inspector.detached') {
+      failPending(`DevTools target detached${message.params?.reason ? `: ${message.params.reason}` : ''}`);
+      return;
+    }
     if (message.method === 'Page.frameNavigated' && !message.params?.frame?.parentId) {
       mainFrameId = message.params.frame.id;
       mainFrameNavigation += 1;
@@ -347,7 +365,19 @@ export function createSender(socket, pending, nextId, timeoutMs, loopDelay, rela
     } else waiter.resolve(message.result);
   }
   socket.addEventListener('message', onMessage);
+  socket.addEventListener('close', (event) => {
+    const detail = Number.isInteger(event?.code) ? `DevTools socket closed (code ${event.code})` : 'DevTools socket closed';
+    failPending(detail);
+  });
+  socket.addEventListener('error', () => failPending('DevTools socket failed'));
   return (method, params = {}, label = method, remainingMs = timeoutMs) => new Promise((resolveResult, rejectResult) => {
+    if (terminalError) {
+      const error = new Error(`DevTools command failed: ${method} "${label}"; ${terminalError.reason}.`);
+      error.code = terminalError.code;
+      error.navigated = false;
+      rejectResult(error);
+      return;
+    }
     const requestId = nextId();
     const startedAt = now();
     const durationMs = Math.max(1, Math.min(timeoutMs, remainingMs));

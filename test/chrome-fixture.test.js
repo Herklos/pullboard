@@ -284,6 +284,67 @@ test('a failed DevTools command names its CDP error [C7]', {
   }
 });
 
+/** Prove a confirmed target close rejects a pending command instead of consuming the wait deadline [C7]. */
+test('a confirmed target close rejects pending DevTools commands [C7]', {
+  skip: !findChromeExecutable() && 'Chrome is not installed',
+  timeout: 70_000, // budget: outer hang ceiling for the real Chrome closure scenario; each private wait and fetch also has its own 5s ceiling.
+}, async () => {
+  const chrome = await startChrome();
+  let browserSocket;
+  try {
+    await chrome.waitFor("document.readyState === 'complete'", 5_000, 'initial document ready'); // budget: hang ceiling for this private close-control handshake.
+    const target = await chrome.send('Target.getTargetInfo', {}, 'identify page to close', 5_000); // budget: hang ceiling for the private target-identification handshake.
+    const pending = chrome.waitFor('(window.__pendingCloseEntered = true, new Promise(() => {}))', 5_000,
+      'wait for a command on the closing target').then(() => ({ error: null }), error => ({ error }));
+    await chrome.waitFor('window.__pendingCloseEntered === true', 5_000, 'pending evaluation entered'); // budget: hang ceiling for the private pending-command handshake.
+
+    const version = await fetch(`http://127.0.0.1:${Number(readFileSync(join(chrome.profileDirectory, 'DevToolsActivePort'), 'utf8').split('\n')[0])}/json/version`,
+      { signal: AbortSignal.timeout(5_000) }) // budget: hang ceiling for the private browser-control discovery request.
+      .then(response => response.json());
+    browserSocket = new WebSocket(version.webSocketDebuggerUrl);
+    await new Promise((resolveOpen, rejectOpen) => {
+      const timer = setTimeout(() => rejectOpen(new Error('Chrome browser control socket did not open.')), 5_000); // budget: hang ceiling for the private browser-control handshake.
+      browserSocket.addEventListener('open', () => { clearTimeout(timer); resolveOpen(); }, { once: true });
+      browserSocket.addEventListener('error', () => { clearTimeout(timer); rejectOpen(new Error('Chrome browser control socket failed.')); }, { once: true });
+    });
+    const closeResponse = await new Promise((resolveResponse, rejectResponse) => {
+      const timer = setTimeout(() => rejectResponse(new Error('Chrome did not answer the private target-close command.')), 5_000); // budget: hang ceiling for the private browser-control handshake.
+      browserSocket.addEventListener('message', event => {
+        let message;
+        try { message = JSON.parse(String(event.data)); } catch { return; }
+        if (message.id !== 1) return;
+        clearTimeout(timer);
+        if (message.error) rejectResponse(new Error(`Chrome refused the private target-close command: ${message.error.message}`));
+        else resolveResponse(message.result);
+      });
+      browserSocket.send(JSON.stringify({ id: 1, method: 'Target.closeTarget', params: { targetId: target.targetInfo.targetId } }));
+    });
+    assert.equal(closeResponse.success, true, 'the independent browser control confirms the actual page target closed');
+    const targets = await fetch(`http://127.0.0.1:${Number(readFileSync(join(chrome.profileDirectory, 'DevToolsActivePort'), 'utf8').split('\n')[0])}/json/list`,
+      { signal: AbortSignal.timeout(5_000) }) // budget: hang ceiling for confirming target removal from the private browser list.
+      .then(response => response.json());
+    assert.equal(targets.some(candidate => candidate.id === target.targetInfo.targetId), false,
+      'the closed target is absent from the owned browser target list');
+
+    const outcome = await pending;
+    assert.ok(outcome.error instanceof Error, 'the pending Runtime.evaluate rejects when its target closes');
+    assert.equal(outcome.error.code, 'CDP_TARGET_CLOSED', 'target closure has a distinct non-navigation error code');
+    assert.equal(outcome.error.navigated, false, 'target closure is not mislabeled as main-frame navigation');
+    assert.match(outcome.error.message, /Runtime\.evaluate "wait for a command on the closing target"/u,
+      'the actual pending operation remains named in the closure error');
+    assert.match(outcome.error.message, /target detached|socket closed|socket failed/u,
+      'the pending command receives the actual transport or Inspector closure signal');
+    await assert.rejects(chrome.send('Runtime.evaluate', { expression: 'true' }, 'send after target close'), error => {
+      assert.equal(error.code, 'CDP_TARGET_CLOSED', 'a closed target refuses later commands with the same terminal code');
+      assert.match(error.message, /send after target close/u, 'the refused later command remains named');
+      return true;
+    });
+  } finally {
+    browserSocket?.close();
+    await chrome.close();
+  }
+});
+
 /** Prove a page condition cannot spend the much longer general command allowance. */
 test('a stalled condition uses its remaining operation budget [C7]', {
   skip: !findChromeExecutable() && 'Chrome is not installed',
@@ -532,8 +593,7 @@ test('a wait keeps waiting through a DevTools error from a page navigation [C7]'
     let commandCount = 0;
     const fakeSocket = {
       addEventListener(type, listener) {
-        assert.equal(type, 'message');
-        receiveMessage = listener;
+        if (type === 'message') receiveMessage = listener;
       },
       send(frame) {
         const { id } = JSON.parse(frame);
