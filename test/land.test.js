@@ -651,7 +651,7 @@ async (t) => {
   let timeoutTimer;
   const timeoutResult = await Promise.race([
     timeout.hook.closed,
-    new Promise((_, reject) => { timeoutTimer = setTimeout(() => reject(new Error('hook read exceeded the stated 10s busy timeout')), 15_000); }),
+    new Promise((_, reject) => { timeoutTimer = setTimeout(() => reject(new Error('hook read exceeded the stated 10s busy timeout')), 15_000); }), // budget: hang ceiling derived from the declared 10s SQLite wait plus 5s for child startup and scheduling.
   ]).finally(() => clearTimeout(timeoutTimer));
   assert.equal(timeoutResult.error, null, `the timeout hook child spawned: ${timeoutResult.error?.message ?? ''}`);
   assert.equal(timeoutResult.code, 1, timeout.hook.stderrText);
