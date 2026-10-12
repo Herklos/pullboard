@@ -4,6 +4,18 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.8.11] - 2026-10-12
+
+### A proper first visit, safer releases
+
+A brand-new project opens on a calm board, not a list of decisions, and a release can no longer publish anything main's CI did not pass.
+
+### Changed
+
+- On a new project, Pullboard View shows the starter house rules as defaults to review, not as decisions waiting for you. The tour's board is listed and marked demo, and New item defaults to the first building lane.
+- The gate runs only the test files git tracks, so scratch copies and agent worktree folders in your repo can no longer fail it.
+- A tagged release publishes to npm only when main's CI already passed that exact commit.
+
 ## [0.8.10] - 2026-10-11
 
 ### Accumulated judgement
