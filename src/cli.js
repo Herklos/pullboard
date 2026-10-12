@@ -4,8 +4,10 @@
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { loadavg } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import * as store from './board.js';
@@ -83,6 +85,21 @@ import { engineReceipt } from './engine.js';
 import { land } from './land.js';
 
 const CHECKOUT_LEASES = new WeakMap();
+let startupMainTraced = false;
+
+/** Append an opt-in startup phase marker for the real CLI fixture measurement [A2,C7]. */
+function traceServeStartup(phase) {
+  const path = process.env.PULLBOARD_STARTUP_TRACE_FILE;
+  const entry = process.env.PULLBOARD_STARTUP_TRACE_ENTRY;
+  if (!path || !entry || resolve(process.argv[1] ?? '') !== resolve(entry)) return;
+  try {
+    appendFileSync(path, `${JSON.stringify({ phase, at: Date.now(), elapsedMs: performance.now(),
+      processId: process.pid, cpuUsage: process.cpuUsage(), loadAverage: loadavg(),
+      eventLoopUtilization: performance.eventLoopUtilization() })}\n`);
+  } catch {
+    // Diagnostic tracing must not change normal CLI behavior.
+  }
+}
 
 /**
  * Read the collision baseline from the primary branch, retained trunk, or detached HEAD default.
@@ -1199,16 +1216,23 @@ async function viewHere(io, values) {
 
 /** Serve API v1 until a shutdown signal, printing its address before waiting (A2). */
 async function serveHere(io, values) {
+  traceServeStartup('serve-context-start');
   const ctx = context(io);
+  traceServeStartup('serve-context-ready');
   const mainRoot = git(ctx.info.root, ['worktree', 'list', '--porcelain']).split('\n')[0].slice('worktree '.length);
+  traceServeStartup('serve-registration-start');
   await registerProjectAndLink(mainRoot, new Date(), loadConfig(mainRoot), io);
+  traceServeStartup('serve-registration-ready');
   const port = values.port === undefined ? 0 : Number(values.port);
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Refused('USAGE', '--port is a number from 0 to 65535; use 0 to choose a free one');
+  traceServeStartup('serve-listen-start');
   const api = await serveApi({ port, runCommand: main, isMain: ctx.allowSchemaUpgrade });
+  traceServeStartup('serve-listen-ready');
   io.result?.({ url: api.url, port: api.port });
   io.say(`Pullboard API v1: ${api.url}`);
   io.say('Only this machine can reach it, with its session secret. Ctrl-C stops it.');
   io.flush?.(0);
+  traceServeStartup('serve-ready-written');
   await new Promise((stop) => {
     const stopped = () => { process.off('SIGINT', stopped); process.off('SIGTERM', stopped); stop(); };
     process.once('SIGINT', stopped);
@@ -2968,6 +2992,10 @@ function rememberTrunk(io) {
 
 /** Run one command and emit its single versioned JSON result when requested (A1). */
 export async function main(argv, streams) {
+  if (argv[0] === 'serve' && !startupMainTraced) {
+    startupMainTraced = true;
+    traceServeStartup('cli-main-enter');
+  }
   return withGitFacts(() => runMain(argv, streams));
 }
 
@@ -3019,6 +3047,7 @@ async function runMain(argv, streams) {
       }
     };
     if (needsRepo) rememberTrunk(io);
+    traceServeStartup('cli-command-preamble-start');
     if (sync) {
       try { await autoLinkProject(io.cwd, io); } catch (error) { if (!(error instanceof Refused)) throw error; }
       await retry();
@@ -3028,6 +3057,7 @@ async function runMain(argv, streams) {
         if (!['NOT_A_REPO', 'NO_REPO', 'NO_CONFIG', 'CORE_BARE'].includes(error.code)) io.err(`pullboard: ${displayedRefusal(io, error)}\nnext: ${refusalDocument(error).error.next}`);
       }
     }
+    traceServeStartup('cli-command-preamble-ready');
     const code = await runCommand(argv, io);
     if (code === 0) await checkoutSession?.finish?.();
     if (sync && code === 0) await retry();
@@ -3049,4 +3079,10 @@ export function resultCommands() {
     ...Object.keys(workCommands({}, args)),
     'help', 'version', 'tour', 'lifecycle', 'view', 'serve', 'forget', 'spec', 'prompt', 'hook', 'gate', 'settings', 'relay',
   ])].sort();
+}
+
+// This marker is emitted once when the actual CLI entrypoint finishes evaluating.
+if (process.env.PULLBOARD_STARTUP_TRACE_ENTRY
+  && resolve(process.argv[1] ?? '') === resolve(process.env.PULLBOARD_STARTUP_TRACE_ENTRY)) {
+  traceServeStartup('cli-module-load-complete');
 }
