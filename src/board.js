@@ -135,6 +135,18 @@ const SCHEMA = `
   );
 `;
 
+/** Open an existing board without migrations, waiting for the same locks as openBoard. */
+export function openBoardReadOnly(file) {
+  const db = new DatabaseSync(file, { readOnly: true });
+  try {
+    db.exec('PRAGMA busy_timeout = 10000');
+    return db;
+  } catch (error) {
+    db.close();
+    throw error;
+  }
+}
+
 /**
  * Open, or create, the board at `file`. Tests pass `:memory:`.
  *
@@ -151,9 +163,8 @@ export function openBoard(file, clock = systemClock, { isMain } = {}) {
     let boardVersion = 0;
     let logVersion = 0;
     if (existsSync(file)) {
-      const current = new DatabaseSync(file, { readOnly: true });
+      const current = openBoardReadOnly(file);
       try {
-        current.exec('PRAGMA busy_timeout = 10000');
         boardVersion = current.prepare('PRAGMA user_version').get().user_version;
         logVersion = readEventLogVersion(current);
       } finally {

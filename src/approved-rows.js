@@ -2,10 +2,9 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 import { spawnSync } from 'node:child_process';
 import { parseSpec, SIGNOFFS_FILE } from './spec.js';
-import { rowDecisions } from './board.js';
+import { openBoardReadOnly, rowDecisions } from './board.js';
 import { hasSignerFile, verifySignedRecords } from './signature.js';
 import { Refused } from './refused.js';
 import { CONFIG_FILE, configFromSource } from './config.js';
@@ -38,7 +37,7 @@ function rowSourceAt(root, revision, file, kind) {
 /** Read the shared decision index without opening the board's migrator or changing its evidence. */
 function boardApprovals(file) {
   if (!file || !existsSync(file)) return [];
-  const db = new DatabaseSync(file, { readOnly: true });
+  const db = openBoardReadOnly(file);
   try { return rowDecisions({ db }); }
   finally { db.close(); }
 }

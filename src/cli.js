@@ -8,7 +8,6 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
-import { DatabaseSync } from 'node:sqlite';
 import * as store from './board.js';
 import { CONFIG_FILE, COORDINATOR, DOCTRINE_FILE, LEGACY_DOCTRINE_FILE, loadConfig } from './config.js';
 import { displayAgentName } from './agent-names.js';
@@ -2739,11 +2738,13 @@ async function readStdin(stdin) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-/** Read hook identity and landing facts without migrating the shared board from newer source. */
+/** Wait up to the board's shared busy timeout while reading hook facts, without migrating its schema. */
 function hookRead(ctx, read) {
   if (!existsSync(ctx.file)) return null;
-  const db = new DatabaseSync(ctx.file, { readOnly: true });
-  try { return read({ db, clock: ctx.clock }); }
+  const db = store.openBoardReadOnly(ctx.file);
+  try {
+    return read({ db, clock: ctx.clock });
+  }
   finally { db.close(); }
 }
 
