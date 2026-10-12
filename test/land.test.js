@@ -338,12 +338,12 @@ function startExclusiveWriter(box, boardFile, name) {
   const child = startFixtureChild(process.execPath, ['-e', source, boardFile, ready, release, released], {
     cwd: box.repo, env: box.env, detached: true, stdio: ['ignore', 'ignore', 'pipe'],
   });
-  const closed = childOutcome(child);
+  const closed = lockChildOutcome(child);
   return { child, closed, ready, release, released };
 }
 
 /** Resolve when an owned child closes or fails to spawn, whichever happens first. */
-function childOutcome(child) {
+function lockChildOutcome(child) {
   return new Promise((resolveOutcome) => {
     let spawnError = null;
     child.once('error', (error) => { spawnError = error; });
@@ -367,7 +367,7 @@ function launchHookProbe(box, probe, marker) {
   child.stderrText = '';
   child.stdout.setEncoding('utf8').on('data', (part) => { child.stdoutText += part; });
   child.stderr.setEncoding('utf8').on('data', (part) => { child.stderrText += part; });
-  child.closed = childOutcome(child);
+  child.closed = lockChildOutcome(child);
   return child;
 }
 
