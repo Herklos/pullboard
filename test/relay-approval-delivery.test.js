@@ -96,13 +96,41 @@ async function observeApprovals(chrome) {
   await chrome.evaluate(`(() => {
     const original = window.fetch.bind(window);
     window.__approvalObservations = [];
+    window.__approvalRelayResponses = [];
+    window.__approvalLastActionResponse = null;
+    window.__approvalObservationStartedAt = performance.now();
     window.fetch = async (input, init) => {
       const url = new URL(typeof input === 'string' ? input : input.url, location.href);
       const response = await original(input, init);
-      if (url.pathname.endsWith('/approvals') && (init?.method ?? input?.method ?? 'GET') === 'GET') {
-        const document = await response.clone().json();
-        window.__approvalObservations.push({ count: document.approvals.length,
-          ids: document.approvals.map(row => row.context.id) });
+      const method = (init?.method ?? input?.method ?? 'GET').toUpperCase();
+      const path = url.pathname.split('/');
+      const apiDevicePath = path[1] === 'api' && path[2] === 'v1' && path[3] === 'devices';
+      const list = method === 'GET' && apiDevicePath && path.length === 6 && path[5] === 'approvals';
+      const action = apiDevicePath && path.length === 7 && path[4] === 'approvals' && ['authorize', 'complete'].includes(path[6]);
+      if (list || action) {
+        const matchesDiagnosticRequest = action
+          ? path[5] === window.__approvalDiagnosticRequest
+          : window.__approvalDiagnosticRequest !== undefined;
+        const entry = { elapsedMs: Math.round(performance.now() - window.__approvalObservationStartedAt),
+          route: list ? 'approval-list' : 'approval-' + path[6], status: response.status, ok: response.ok,
+          errorCode: null, approvalCount: null, containsRequest: null, matchesDiagnosticRequest };
+        try {
+          const document = await response.clone().json();
+          const code = document.error?.code;
+          entry.errorCode = typeof code === 'string' && /^[A-Z0-9_-]{1,64}$/u.test(code) ? code : code ? 'OTHER' : null;
+          if (list) {
+            entry.approvalCount = document.approvals.length;
+            entry.containsRequest = document.approvals.some(row => row.context.id === window.__approvalDiagnosticRequest);
+            entry.matchesDiagnosticRequest = window.__approvalDiagnosticRequest !== undefined;
+            window.__approvalObservations.push({ elapsedMs: entry.elapsedMs, status: response.status,
+              count: entry.approvalCount, ids: document.approvals.map(row => row.context.id) });
+          }
+        } catch { entry.errorCode = 'NON_JSON_RESPONSE'; }
+        if (entry.matchesDiagnosticRequest) {
+          if (action) window.__approvalLastActionResponse = { ...entry };
+          window.__approvalRelayResponses.push(entry);
+          window.__approvalRelayResponses = window.__approvalRelayResponses.slice(-12);
+        }
       }
       return response;
     };
@@ -149,10 +177,52 @@ async function holdAuthorizeResponse(chrome, requestId) {
 async function approve(chrome, requestId, command) {
   await assert.doesNotReject(() => chrome.waitFor(`document.querySelector('#phone-approve-${requestId}') !== null`),
     'the delivered approval becomes a visible card');
+  await chrome.evaluate(`(() => {
+    window.__approvalDiagnosticRequest = ${JSON.stringify(requestId)};
+    window.__approvalRelayResponses = [];
+    window.__approvalLastActionResponse = null;
+  })()`);
   await chrome.evaluate(`document.querySelector('#phone-approve-${requestId}').click()`);
   const result = await command.done;
   assert.equal(result.code, 0, 'one real phone tap completes its native approval command');
-  await chrome.waitFor(`document.querySelector('#phone-approve-${requestId}') === null`);
+  try {
+    await chrome.waitFor(`document.querySelector('#phone-approve-${requestId}') === null`);
+  } catch (error) {
+    let page;
+    try {
+      const relaySnapshot = await chrome.evaluate(`(() => {
+        const lastRelayResponses = (window.__approvalRelayResponses ?? []).slice(-8).map(entry => ({ ...entry }));
+        const lastActionResponse = window.__approvalLastActionResponse ? { ...window.__approvalLastActionResponse } : null;
+        window.__approvalFailureRelayResponses = lastRelayResponses;
+        return { observedAt: new Date().toISOString(), entries: lastRelayResponses, lastActionResponse };
+      })()`);
+      const observation = await chrome.evaluate(`(() => {
+        const card = document.querySelector('.phone-approval[data-request="${requestId}"]');
+        const button = card?.querySelector('button');
+        return {
+          capturedAt: new Date().toISOString(), capturedAfter: 'the existing card-removal wait rejected',
+          elapsedMs: Math.round(performance.now() - (window.__approvalObservationStartedAt ?? performance.now())),
+          card: { present: Boolean(card), requestMatches: card?.dataset.request === ${JSON.stringify(requestId)},
+            buttonText: (button?.textContent ?? '').slice(0, 80) || null, buttonDisabled: button?.disabled ?? null },
+          panelError: (document.querySelector('#phone-approvals')?.getAttribute('data-error') ?? '').slice(0, 240) || null,
+          refusalNotice: (document.querySelector('#relay-notice')?.textContent ?? '').slice(0, 240) || null,
+        };
+      })()`);
+      const targetAction = relaySnapshot.lastActionResponse?.matchesDiagnosticRequest === true
+        ? relaySnapshot.lastActionResponse : null;
+      const lastRelayResponse = relaySnapshot.entries.at(-1) ?? null;
+      page = { ...observation, relayResponsesObservedAt: relaySnapshot.observedAt,
+        lastRelayResponses: relaySnapshot.entries,
+        targetResponse: targetAction ? `${targetAction.route}:${targetAction.status}:matched` : 'none',
+        lastRelayResponse: lastRelayResponse ? `${lastRelayResponse.route}:${lastRelayResponse.status}:matched` : 'none' };
+    } catch (captureError) {
+      page = { captureError: String(captureError?.message ?? captureError).slice(0, 240) };
+    }
+    const errorCode = typeof error?.code === 'string' && /^[A-Z0-9_-]{1,64}$/u.test(error.code) ? error.code : 'none';
+    const captureSummary = page.captureError ? 'captureError=true' : `captureError=false; cardPresent=${page.card?.present === true}; requestMatches=${page.card?.requestMatches === true}; targetResponse=${page.targetResponse ?? 'none'}; lastRelayResponse=${page.lastRelayResponse ?? 'none'}`;
+    error.message = `${String(error?.message ?? error).slice(0, 500)}; ROOT-CAUSE STATUS: NOT PROVEN; capture follows the original wait failure and contains no response bodies; waitCode=${errorCode}; ${captureSummary}; page=${JSON.stringify(page)}`;
+    throw error;
+  }
   return result;
 }
 
@@ -168,9 +238,40 @@ test('an approval delivered while the page is busy still becomes a card [H15,H12
   const preload = `(() => {
     const original = window.fetch.bind(window);
     window.__keyLoadGate = { started: false, release: null, polls: [] };
+    window.__approvalRelayResponses = [];
+    window.__approvalLastActionResponse = null;
+    window.__approvalObservationStartedAt = performance.now();
     window.fetch = async (input, init) => {
       const url = new URL(typeof input === 'string' ? input : input.url, location.href);
       const response = await original(input, init);
+      const method = (init?.method ?? input?.method ?? 'GET').toUpperCase();
+      const path = url.pathname.split('/');
+      const apiDevicePath = path[1] === 'api' && path[2] === 'v1' && path[3] === 'devices';
+      const list = method === 'GET' && apiDevicePath && path.length === 6 && path[5] === 'approvals';
+      const action = apiDevicePath && path.length === 7 && path[4] === 'approvals' && ['authorize', 'complete'].includes(path[6]);
+      if (list || action) {
+        const matchesDiagnosticRequest = action
+          ? path[5] === window.__approvalDiagnosticRequest
+          : window.__approvalDiagnosticRequest !== undefined;
+        const entry = { elapsedMs: Math.round(performance.now() - window.__approvalObservationStartedAt),
+          route: list ? 'approval-list' : 'approval-' + path[6], status: response.status, ok: response.ok,
+          errorCode: null, approvalCount: null, containsRequest: null, matchesDiagnosticRequest };
+        try {
+          const document = await response.clone().json();
+          const code = document.error?.code;
+          entry.errorCode = typeof code === 'string' && /^[A-Z0-9_-]{1,64}$/u.test(code) ? code : code ? 'OTHER' : null;
+          if (list) {
+            entry.approvalCount = document.approvals.length;
+            entry.containsRequest = document.approvals.some(row => row.context.id === window.__approvalDiagnosticRequest);
+            entry.matchesDiagnosticRequest = window.__approvalDiagnosticRequest !== undefined;
+          }
+        } catch { entry.errorCode = 'NON_JSON_RESPONSE'; }
+        if (entry.matchesDiagnosticRequest) {
+          if (action) window.__approvalLastActionResponse = { ...entry };
+          window.__approvalRelayResponses.push(entry);
+          window.__approvalRelayResponses = window.__approvalRelayResponses.slice(-12);
+        }
+      }
       if (url.pathname.startsWith('/api/v1/devices/device-') && url.pathname.endsWith('/boards') && window.__keyLoadGate) {
         window.__keyLoadGate.started = true;
         await new Promise(resolve => { window.__keyLoadGate.release = resolve; });
