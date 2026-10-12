@@ -4,6 +4,17 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.8.13] - 2026-10-12
+
+### Replays hold still
+
+A shared replay's Pause button stays where it is while you press it, and Pullboard's own checks now hold on Linux and macOS under load.
+
+### Fixed
+
+- In a static export's replay, the Pause button no longer shifts under your pointer as the replay runs, so a press lands on it.
+- Pullboard's own tests keep waiting through a page navigation, run the three-replica relay check as two tests that each fit their time, and name the startup step when the local server is slow to start.
+
 ## [0.8.12] - 2026-10-12
 
 ### Your answer always lands
