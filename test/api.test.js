@@ -244,14 +244,17 @@ function fixtureCommandEvidence(step, result, env) {
 }
 
 /** Run a named CLI JSON step and retain its stdout, exit code and timing for assertions. */
-function fixtureJsonStep(box, step, cwd, command, args = [], expectedStatus = 0) {
+function fixtureJsonStep(box, step, cwd, command, args = [], expectedStatus = 0, onEvidence) {
   const result = box.run(cwd, command, ...args, '--json');
   const evidence = fixtureCommandEvidence(step, result, box.env);
+  onEvidence?.(evidence);
   assert.equal(result.status, expectedStatus, evidence);
   assert.equal(result.stderr, '', evidence);
   let document;
   try { document = JSON.parse(result.stdout); }
   catch (error) { assert.fail(`${evidence}\ninvalid JSON: ${error.message}`); }
+  assert.ok(document !== null && typeof document === 'object' && !Array.isArray(document),
+    `${step} JSON response must be an object\n${evidence}`);
   assert.equal(document.version, 1, evidence);
   if (expectedStatus === 0) {
     assertRequiredShape(document, shapeFor(command).required, `${step} JSON\n${evidence}`);
@@ -1173,10 +1176,9 @@ test('[A2] local HTTP v1 versions state and moves, authenticates, and preserves 
     return result;
   }
   /** Retain CLI step evidence before downstream JSON inspection. */
-  function observedFixtureStep(...args) {
-    const result = fixtureJsonStep(...args);
-    lastStepEvidence = result.evidence;
-    return result;
+  function observedFixtureStep(box, step, cwd, command, args = [], expectedStatus = 0) {
+    return fixtureJsonStep(box, step, cwd, command, args, expectedStatus,
+      (evidence) => { lastStepEvidence = evidence; });
   }
   try {
     const api = await startApi(t, box);
