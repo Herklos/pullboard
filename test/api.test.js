@@ -803,7 +803,7 @@ test('[A1] long-running servers flush one JSON document before shutdown', async 
         rejectReady(new Error(reportFixtureChildFailure({ command: process.execPath, args, status, signal,
           elapsedMs: performance.now() - startedAt, stderr, env: box.env, detail })));
       };
-      const timeout = setTimeout(() => failStartup('server readiness deadline (10000ms) expired'), 10_000);
+      const timeout = setTimeout(() => failStartup('server readiness deadline (10000ms) expired'), 10_000); // budget: hang ceiling for private server readiness; no throughput claim.
       child.stdout.on('data', () => {
         try {
           const document = JSON.parse(stdout);
@@ -993,7 +993,7 @@ async function startApi(t, box) {
       rejectReady(new Error(reportFixtureChildFailure({ command: process.execPath, args, status, signal,
         elapsedMs: performance.now() - startedAt, stderr, env: box.env, detail })));
     };
-    const timeout = setTimeout(() => failStartup('serve readiness deadline (10000ms) expired'), 10_000);
+    const timeout = setTimeout(() => failStartup('serve readiness deadline (10000ms) expired'), 10_000); // budget: hang ceiling for private serve readiness; no throughput claim.
     const check = () => {
       try {
         const parsed = JSON.parse(stdout);

@@ -279,7 +279,7 @@ test('[H18] a move holding the shared process lock refreshes activity before an 
     /** Await a specific worker phase with a bounded deadline, without relying on a startup sleep. */
     function phase(kind) {
       return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => { waiters.delete(check); reject(new Error('fixture worker phase timed out')); }, 10_000);
+        const timer = setTimeout(() => { waiters.delete(check); reject(new Error('fixture worker phase timed out')); }, 10_000); // budget: hang ceiling for a private worker phase handshake; no throughput claim.
         /** Resolve only the requested safe phase, and surface a fixed refusal code on worker failure. */
         function check() {
           const failure = messages.find((entry) => entry.kind === 'failed');
