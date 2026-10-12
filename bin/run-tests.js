@@ -310,9 +310,20 @@ function typeScriptTestDiscovery(args, env) {
   return !['false', 'undefined', ''].includes(result.stdout.trim());
 }
 
+/** Preserve native discovery outside Git, but never hide a repository access failure. */
+function isGitWorkTree(cwd, env) {
+  const result = spawnSync('git', ['rev-parse', '--is-inside-work-tree'], {
+    cwd, env: { ...env, LC_ALL: 'C' }, encoding: 'utf8',
+  });
+  if (result.error) throw result.error;
+  if (result.status === 0) return result.stdout.trim() === 'true';
+  if (result.status === 128 && /fatal: not a git repository\b/u.test(result.stderr)) return false;
+  throw new Error(result.stderr.trim() || `git rev-parse failed (status ${result.status})`);
+}
+
 /** List tracked files matching Node's runtime default patterns, excluding worktree copies. */
-function trackedDefaultTestFiles(cwd = process.cwd(), includeTypeScript = false) {
-  const output = execFileSync('git', ['ls-files', '-z'], { cwd, encoding: 'utf8' });
+function trackedDefaultTestFiles(cwd, includeTypeScript, env) {
+  const output = execFileSync('git', ['ls-files', '-z'], { cwd, env, encoding: 'utf8' });
   return output.split('\0').filter(path => path && isDefaultTestFile(path, includeTypeScript)).sort()
     .map(path => `./${path}`);
 }
@@ -352,18 +363,22 @@ function executeTests(args, sandbox, gateSlotHeld, fullSuite) {
   let selectedArgs = args;
   if (fullSuite) {
     let files;
-    try { files = trackedDefaultTestFiles(process.cwd(), typeScriptTestDiscovery(args, env)); }
+    try {
+      files = isGitWorkTree(process.cwd(), env)
+        ? trackedDefaultTestFiles(process.cwd(), typeScriptTestDiscovery(args, env), env)
+        : null;
+    }
     catch (error) {
       process.stderr.write(`run-tests: could not list tracked test files: ${error.message}\n`);
       process.exitCode = 1;
       return { status: 1, signal: null };
     }
-    if (files.length === 0) {
+    if (files?.length === 0) {
       process.stderr.write('run-tests: no tracked Node test files found; refusing filesystem discovery\n');
       process.exitCode = 1;
       return { status: 1, signal: null };
     }
-    selectedArgs = [...args, ...files];
+    if (files) selectedArgs = [...args, ...files];
   }
   const result = runTests(selectedArgs, env);
   if (result.error) throw result.error;

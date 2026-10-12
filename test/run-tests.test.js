@@ -198,6 +198,17 @@ function shardsSplitTest(t) {
 
 test('shards split the test files with none twice and none missing [C7]', shardsSplitTest);
 
+/** Keep plain temporary projects runnable without requiring a Git index. */
+function outsideGitDiscoveryTest(t) {
+  const fixture = makeShardFixture(t);
+  rmSync(join(fixture.root, '.git'), { recursive: true, force: true });
+  const selected = runShardFixture(fixture, null);
+  assert.deepEqual([...selected].sort(), fixture.expected,
+    'without a Git work tree Node still discovers and executes every fixture test');
+}
+
+test('the runner keeps native discovery outside a Git work tree [C7]', outsideGitDiscoveryTest);
+
 /** Assert the production runner names malformed shard ranges and their expected form. */
 function badShardTest() {
   const badValues = ['0/3', '4/3', '2', 'a/b'];
