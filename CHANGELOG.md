@@ -4,7 +4,21 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.8.9] - 2026-10-11
+
+### 0.8.8 reaches npm
+
+0.8.8 was tagged but never published: its publish gate failed when a git hook read the board while another process was writing it. 0.8.9 is everything in 0.8.8, plus that fix and a few more from the same night.
+
+### Fixed
+
+- A git hook that reads the board waits for another process to finish writing, up to the same ten seconds every other board connection waits, instead of failing at once with "database is locked".
+- A request from your phone never moves the row you are reading in Pullboard View.
+- An action only you may take, tried from an agent's terminal, is refused at once with "send it from the paired phone", even when the relay is slow to answer.
+
 ## [0.8.8] - 2026-10-11
+
+Tagged but never published to npm; everything below ships in 0.8.9.
 
 ### Steadier CI, safer boards
 
