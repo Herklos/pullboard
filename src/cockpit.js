@@ -1782,12 +1782,13 @@ function render() {
   for (const kind of ['spec', 'doctrine']) {
     const rows = kind === 'spec' ? p.spec : p.practice;
     const filter = view.rows[kind];
-    const labels = { decide: 'Needs your decision', all: 'All rows', approved: 'Approved' };
-    /** A source row stays in Needs your decision until its person decision is recorded. */
-    const undecided = (r) => ['pending', 'draft'].includes(r.status) && !r.decision;
-    const n = { decide: rows.filter(undecided).length, all: rows.length, approved: rows.filter((r) => r.status === 'approved').length };
+    const defaults = kind === 'doctrine' ? rows.filter((r) => r.origin === 'standard') : [];
+    const labels = { decide: 'Needs your decision', ...(defaults.length ? { defaults: 'Defaults to review' } : {}), all: 'All rows', approved: 'Approved' };
+    /** Inherited defaults are reviewed in the repo's doctrine; only local proposals ask for a decision. */
+    const undecided = (r) => ['pending', 'draft'].includes(r.status) && !r.decision && !(kind === 'doctrine' && r.origin === 'standard');
+    const n = { decide: rows.filter(undecided).length, defaults: defaults.length, all: rows.length, approved: rows.filter((r) => r.status === 'approved').length };
     $(kind + '-chips').innerHTML = Object.keys(labels).map((f) => '<button data-rows="' + kind + ':' + f + '" class="' + (filter === f ? 'on' : '') + '" type="button">' + labels[f] + '<b>' + n[f] + '</b></button>').join('');
-    const shownRows = rows.filter((r) => filter === 'all' || (filter === 'decide' ? undecided(r) : r.status === 'approved'));
+    const shownRows = rows.filter((r) => filter === 'all' || (filter === 'decide' ? undecided(r) : filter === 'defaults' ? r.origin === 'standard' : r.status === 'approved'));
     // With no row picked, or the pick filtered out, the detail opens on the first row shown, as Items does.
     if (!(view.tab === kind && view.addressDetail !== null) && !shownRows.some((r) => r.id === view.row[kind])) view.row[kind] = shownRows[0]?.id ?? null;
     const feedback = view.specFeedback?.kind === kind && view.specFeedback.root === view.root && view.specFeedback.from === 'list' ? view.specFeedback : null;
@@ -1817,7 +1818,7 @@ function render() {
     const text = row ? declined ? '<s>' + linked(row.standardText || row.text, titles) + '</s>' : linked(row.text, titles) : '';
     const source = kind === 'doctrine' && row ? '<span class="chip" title="' + esc(ruleSourceTitle(row)) + '">' + esc(ruleSource(row)) + '</span>' : '';
     const reason = declined && row.reason ? '<dt>reason</dt><dd>' + linked(row.reason, titles) + '</dd>' : '';
-    const home = kind === 'doctrine' && row && row.origin === 'standard' ? 'Standard rules come with Pullboard; override or decline one in DOCTRINE.md.' : 'Rows change in ' + (kind === 'spec' ? 'SPEC.md' : 'DOCTRINE.md') + ', and only you approve them.';
+    const home = kind === 'doctrine' && row && row.origin === 'standard' ? 'Standard rules come with Pullboard as defaults to review; override or decline one in DOCTRINE.md.' : 'Rows change in ' + (kind === 'spec' ? 'SPEC.md' : 'DOCTRINE.md') + ', and only you approve them.';
     const rowStatus = row?.stage || row?.status;
     const rowDecisionActions = !snapshot && (!readOnly || requests) && row && undecided(row) && (kind === 'spec' || row.origin !== 'standard')
       ? '<div class="spec-decision-actions detail-decision-actions"><button class="approve-row" data-row-decision="approve" data-row-kind="' + kind + '" data-row-id="' + esc(row.id) + '" title="Approve (A, from the list)" type="button">Approve <kbd>A</kbd></button><button class="decline-row" data-row-decision="decline" data-row-kind="' + kind + '" data-row-id="' + esc(row.id) + '" title="Decline (D, from the list)" type="button">Decline <kbd>D</kbd></button></div>'

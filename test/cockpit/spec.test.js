@@ -274,11 +274,7 @@ test('spec rows read as a list, decided in the panel [N26]', { timeout: 300_000 
   try {
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
     await chrome.waitFor("typeof data === 'object' && !!data?.project?.spec?.length && data.project.practice.some((r) => r.id === 'D8')");
-    // Pullboard's own rules can wait on the person too; they list under Needs your decision, in the board's order, but are
-    // changed in DOCTRINE.md rather than decided here.
-    const order = JSON.parse(await chrome.stable("JSON.stringify(data.project.practice.map((r) => [r.id, r.origin, r.status, !!r.decision]))"));
-    const standardWaiting = order.filter(([, origin, status, decided]) => origin === 'standard' && ['pending', 'draft'].includes(status) && !decided).map(([id, , status]) => [id, status === 'draft' ? null : status]);
-    expected.doctrine.decide = [...standardWaiting, ...expected.doctrine.decide].sort(([a], [b]) => order.findIndex(([id]) => id === a) - order.findIndex(([id]) => id === b));
+    // Inherited defaults have their own review filter; local proposals still wait for the person's decision.
     for (const scheme of ['light', 'dark']) {
       for (const width of [1280, 375]) {
         await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
