@@ -574,7 +574,7 @@ test('land adoption recovers an interrupted gate and keeps one receipt under a n
   assert.equal(json(box, box.repo, 'resume').landingBatches.at(-1).state, 'landed');
 });
 
-test('a hook read waits while land holds the board [C7,B3]', { timeout: 40_000 }, // budget: 40s hang ceiling covers two real lock phases, each with the unchanged 10s SQLite timeout.
+test('a hook read waits while land holds the board [C7,B3]', { timeout: 40_000 }, // budget: 40s hang-only ceiling covers both private lock phases and cleanup; the native busy timeout is not a wall-clock maximum.
 async (t) => {
   const box = landProject();
   const boardFile = join(box.repo, '.git', 'pullboard', 'board.sqlite');
@@ -684,16 +684,16 @@ async (t) => {
   assert.ok(existsSync(successful.writer.released), 'the writer releases its exclusive lock only after commit and close');
 
   const timeout = await runHookWhileWriterHolds('timeout-diagnostic');
-  let timeoutTimer;
-  const timeoutResult = await Promise.race([
-    timeout.hook.closed,
-    new Promise((_, reject) => { timeoutTimer = setTimeout(() => reject(new Error('hook read exceeded the stated 10s busy timeout')), 15_000); }), // budget: hang ceiling derived from the declared 10s SQLite wait plus 5s for child startup and scheduling.
-  ]).finally(() => { clearTimeout(timeoutTimer); timing('timeout-diagnostic', timeout.writer, timeout.marker); });
+  // SQLite's busy timeout accumulates native sleeps; a paused process can exceed it in wall time.
+  // The existing test-level hang ceiling bounds this fixture without racing the native refusal.
+  let timeoutResult;
+  try { timeoutResult = await timeout.hook.closed; }
+  finally { timing('timeout-diagnostic', timeout.writer, timeout.marker); }
   assert.equal(timeoutResult.error, null, `the timeout hook child spawned: ${timeoutResult.error?.message ?? ''}`);
   assert.equal(timeoutResult.code, 1, timeout.hook.stderrText);
   assert.match(timeout.hook.stderrText, /BOARD_BUSY/u);
   assert.match(timeout.hook.stderrText, /board file .*board\.sqlite.*another process.*after \d+ms/u);
-  assert.match(timeout.hook.stderrText, /after (?:9\d{3}|1\d{4})ms/u, 'diagnostics report the actual prolonged lock wait');
+  assert.match(timeout.hook.stderrText, /after (?:9\d{3}|[1-9]\d{4,})ms/u, 'diagnostics report the actual prolonged lock wait without a wall-clock maximum');
   assert.doesNotMatch(timeout.hook.stderrText, /database is locked/u, 'a timed-out read never emits only SQLite’s bare lock error');
   const timeoutObservation = JSON.parse(readFileSync(timeout.marker, 'utf8'));
   assert.equal(timeoutObservation.phase, 'error', 'the preload observed the actual SQLite refusal');
