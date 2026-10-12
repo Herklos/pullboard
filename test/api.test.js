@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { runFixtureExecFile as execFileSync, startFixtureChild as spawn, runFixtureChild as spawnSync, reportFixtureChildFailure, runFixtureChild, runFixtureGit, safeFixtureDiagnostic } from './fixture-child.js';
 import { performance } from 'node:perf_hooks';
 import {
+  appendFileSync,
   chmodSync,
   cpSync,
   existsSync,
@@ -106,6 +107,11 @@ function sandbox() {
     PULLBOARD_MACHINE_HOME: join(dir, 'home'),
   };
   delete env.PULLBOARD_RELAY_TOKEN;
+  delete env.PULLBOARD_STARTUP_TRACE_FILE;
+  delete env.PULLBOARD_STARTUP_TRACE_ENTRY;
+  delete env.PULLBOARD_STARTUP_TEST_HOLD_PHASE;
+  delete env.PULLBOARD_STARTUP_TEST_PHASE_REACHED_FILE;
+  delete env.PULLBOARD_STARTUP_TEST_RELEASE_FILE;
   for (const marker of SSH_SHELL_MARKERS) delete env[marker];
   const git = (cwd, ...args) => runFixtureGit(args, { cwd, env, encoding: 'utf8', stdio: 'pipe' });
   const run = (cwd, ...args) => runFixtureChild(process.execPath, [BIN, ...args], { cwd, env, encoding: 'utf8' });
@@ -1009,10 +1015,51 @@ test('[N26,A2] roadmap text, JSON and API state follow live local and registered
 });
 
 /** Start the real local API server and stop it when its test finishes. */
-async function startApi(t, box) {
-  const args = [BIN, 'serve', '--port', '0', '--json'];
+async function startApi(t, box, { traceStartup = false, traceFile: requestedTraceFile, readinessTimeoutMs = 10_000,
+  holdPhase, phaseReachedFile, releaseFile } = {}) {
+  const traceFile = requestedTraceFile ?? (traceStartup
+    ? process.env.PULLBOARD_STARTUP_TRACE_FILE ?? join(box.dir, 'serve-startup-trace.jsonl')
+    : process.env.PULLBOARD_STARTUP_TRACE_FILE);
+  const preloadFile = traceFile ? join(box.dir, 'startup-trace-preload.mjs') : null;
+  const childEnv = traceFile ? { ...box.env, PULLBOARD_STARTUP_TRACE_FILE: traceFile,
+    PULLBOARD_STARTUP_TRACE_ENTRY: BIN,
+    ...(holdPhase ? { PULLBOARD_STARTUP_TEST_HOLD_PHASE: holdPhase,
+      PULLBOARD_STARTUP_TEST_PHASE_REACHED_FILE: phaseReachedFile,
+      PULLBOARD_STARTUP_TEST_RELEASE_FILE: releaseFile } : {}) } : box.env;
   const startedAt = performance.now();
-  const child = spawn(process.execPath, args, { cwd: box.repo, env: box.env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const args = traceFile
+    ? ['--import', preloadFile, BIN, 'serve', '--port', '0', '--json']
+    : [BIN, 'serve', '--port', '0', '--json'];
+  if (traceFile) {
+    const preloadLines = [
+      "import fs from 'node:fs';",
+      "import { syncBuiltinESMExports } from 'node:module';",
+      "import { loadavg } from 'node:os';",
+      "import { performance } from 'node:perf_hooks';",
+      'const originalAppendFileSync = fs.appendFileSync.bind(fs);',
+      'fs.appendFileSync = (path, data, ...options) => {',
+      '  const result = originalAppendFileSync(path, data, ...options);',
+      "  if (String(path) === process.env.PULLBOARD_STARTUP_TRACE_FILE && process.env.PULLBOARD_STARTUP_TEST_HOLD_PHASE) {",
+      "    const text = Buffer.isBuffer(data) ? data.toString('utf8') : String(data);",
+      "    for (const line of text.split('\\n')) {",
+      '      let event;',
+      '      try { event = JSON.parse(line); } catch { continue; }',
+      '      if (event.phase !== process.env.PULLBOARD_STARTUP_TEST_HOLD_PHASE) continue;',
+      "      originalAppendFileSync(process.env.PULLBOARD_STARTUP_TEST_PHASE_REACHED_FILE, 'phase reached\\n');",
+      '      const waitCell = new Int32Array(new SharedArrayBuffer(4));',
+      '      while (!fs.existsSync(process.env.PULLBOARD_STARTUP_TEST_RELEASE_FILE)) Atomics.wait(waitCell, 0, 0, 25);',
+      '      break;',
+      '    }',
+      '  }',
+      '  return result;',
+      '};',
+      'syncBuiltinESMExports();',
+      "originalAppendFileSync(process.env.PULLBOARD_STARTUP_TRACE_FILE, JSON.stringify({ phase: 'process-entry', at: Date.now(), elapsedMs: performance.now(), processId: process.pid, cpuUsage: process.cpuUsage(), loadAverage: loadavg(), eventLoopUtilization: performance.eventLoopUtilization() }) + '\\n');",
+    ];
+    writeFileSync(preloadFile, `${preloadLines.join('\n')}\n`);
+    appendFileSync(traceFile, `${JSON.stringify({ phase: 'parent-spawn', at: Date.now(), elapsedMs: 0, processId: process.pid })}\n`);
+  }
+  const child = spawn(process.execPath, args, { cwd: box.repo, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '';
   let stderr = '';
   child.stdout.setEncoding('utf8');
@@ -1034,16 +1081,54 @@ async function startApi(t, box) {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      rejectReady(new Error(reportFixtureChildFailure({ command: process.execPath, args, status, signal,
-        elapsedMs: performance.now() - startedAt, stderr, env: box.env, detail })));
+      clearInterval(phaseWait);
+      let startupDiagnostics = '';
+      let startupPhases = [];
+      if (traceFile) {
+        try {
+          startupPhases = readFileSync(traceFile, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
+        } catch { /* An unavailable trace is reported as an empty capture. */ }
+        const childStartedAt = startupPhases.find(({ phase }) => phase === 'process-entry')?.at ?? startupPhases[0]?.at;
+        const phaseLines = startupPhases.map(({ phase, at }) => {
+          const elapsed = Number.isFinite(at) && Number.isFinite(childStartedAt) ? Math.max(0, at - childStartedAt) : null;
+          return `- ${phase}: ${elapsed === null ? 'time unavailable' : `${elapsed}ms since child start`}`;
+        });
+        const lastPhase = startupPhases.at(-1)?.phase ?? 'no startup phase was recorded';
+        startupDiagnostics = `serve startup phases:\n${phaseLines.length ? phaseLines.join('\n') : '- no startup phases were recorded'}\nlast phase reached: ${lastPhase}`;
+        t.diagnostic(startupDiagnostics);
+      }
+      if (releaseFile && holdPhase) writeFileSync(releaseFile, 'release after timeout trace snapshot\n');
+      const failure = new Error(reportFixtureChildFailure({ command: process.execPath, args, status, signal,
+        elapsedMs: performance.now() - startedAt, stderr, env: box.env,
+        detail: startupDiagnostics ? `${detail}\n${startupDiagnostics}` : detail,
+      }));
+      failure.startupDiagnostics = startupDiagnostics;
+      failure.startupPhases = startupPhases;
+      rejectReady(failure);
     };
-    const timeout = setTimeout(() => failStartup('serve readiness deadline (10000ms) expired'), 10_000); // budget: hang ceiling for private serve readiness; no throughput claim.
+    let timeout;
+    let phaseWait;
+    const armReadinessDeadline = () => {
+      clearTimeout(timeout);
+      timeout = setTimeout(() => failStartup(`serve readiness deadline (${readinessTimeoutMs}ms) expired`), readinessTimeoutMs); // budget: caller-selected ceiling; default remains 10000ms from spawn.
+    };
+    if (holdPhase && phaseReachedFile) {
+      timeout = setTimeout(() => failStartup(`test fixture did not reach startup phase ${holdPhase} within 10000ms`), 10_000); // budget: hang ceiling for deterministic phase arrival only.
+      phaseWait = setInterval(() => {
+        if (!existsSync(phaseReachedFile)) return;
+        clearInterval(phaseWait);
+        armReadinessDeadline();
+      }, 5);
+    } else {
+      armReadinessDeadline();
+    }
     const check = () => {
       try {
         const parsed = JSON.parse(stdout);
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
+        clearInterval(phaseWait);
         resolveReady(parsed);
       } catch {
         // The startup envelope is pretty-printed across several chunks.
@@ -1056,6 +1141,9 @@ async function startApi(t, box) {
       if (code !== 0) { clearTimeout(timeout); rejectReady(new Error(`serve exited ${code}: ${stderr}`)); }
     });
   });
+  if (traceFile) {
+    appendFileSync(traceFile, `${JSON.stringify({ phase: 'parent-ready-observed', at: Date.now(), elapsedMs: performance.now() - startedAt, processId: process.pid })}\n`);
+  }
   assert.equal(document.version, 1);
   const parsed = new URL(document.url);
   const secret = parsed.searchParams.get('k');
@@ -1166,6 +1254,39 @@ test('[N38] local API and sealed presentation resolve shouts beyond recent state
     'addressed reads and refusals do not change the recent-40 projection');
 });
 
+test('[A2,C7] a missed serve readiness deadline names the slow startup phase', async (t) => {
+  const box = project();
+  const phaseReachedFile = join(box.dir, 'startup-phase-reached');
+  const releaseFile = join(box.dir, 'release-held-startup');
+  const traceFile = join(box.dir, 'held-startup-trace.jsonl');
+  rmSync(phaseReachedFile, { force: true });
+  rmSync(releaseFile, { force: true });
+  await assert.rejects(startApi(t, box, {
+    traceStartup: true,
+    traceFile,
+    readinessTimeoutMs: 1_000, // budget: short deterministic observation ceiling after the held registration-start phase.
+    holdPhase: 'serve-registration-start',
+    phaseReachedFile,
+    releaseFile,
+  }), (error) => {
+    assert.match(error.message, /serve readiness deadline \(1000ms\) expired/);
+    assert.match(error.message, /last phase reached: serve-registration-start/);
+    assert.match(error.message, /process-entry: \d+ms since child start/);
+    assert.match(error.message, /cli-module-load-complete: \d+ms since child start/);
+    assert.match(error.message, /cli-command-preamble-ready: \d+ms since child start/);
+    assert.match(error.message, /serve-context-start: \d+ms since child start/);
+    assert.match(error.message, /serve-context-ready: \d+ms since child start/,
+      'the timeout names the recorded context-ready phase');
+    assert.ok(error.startupPhases.length > 0, 'the timeout retains its captured phases');
+    for (const { phase } of error.startupPhases) assert.ok(error.startupDiagnostics.includes(`- ${phase}:`),
+      `the diagnostic lists recorded phase ${phase}`);
+    assert.ok(error.message.includes(error.startupDiagnostics), 'the thrown error includes the emitted diagnostic lines');
+    assert.deepEqual(error.startupPhases.map(({ phase }) => phase).slice(-1), ['serve-registration-start']);
+    assert.match(error.startupDiagnostics, /last phase reached: serve-registration-start/);
+    return true;
+  });
+});
+
 test('[A2] local HTTP v1 versions state and moves, authenticates, and preserves CLI refusals', async (t) => {
   const box = project();
   let lastStepEvidence = 'create local API';
@@ -1181,7 +1302,7 @@ test('[A2] local HTTP v1 versions state and moves, authenticates, and preserves 
       (evidence) => { lastStepEvidence = evidence; });
   }
   try {
-    const api = await startApi(t, box);
+    const api = await startApi(t, box, { traceStartup: true });
     /** Validate one captured HTTP refusal while keeping its originating step and response in every failure. */
     function errorDocument(result) {
       assertRequiredShape(result.document, JSON_SHAPES.error.required, `HTTP refusal\n${result.evidence}`);

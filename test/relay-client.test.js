@@ -172,7 +172,7 @@ function threeReplicaPhaseCapture(t) {
         throw error;
       }
     },
-    /** Finish the final phase and require all four named phases to have completed. */
+    /** Finish the final phase and require this scenario's named phases to have completed. */
     finish(expected) {
       finishPhase();
       assert.deepEqual(completed.map(({ phase }) => phase), expected, 'all named relay phases completed in order');
@@ -486,9 +486,8 @@ test('[H1,H3,H7,H15,H16] relay on snapshots and orders ciphertext, refuses offli
     'person deletion removes the relay journal and SQLite sidecars');
 });
 
-test('[H3,H16,V1,V17] three cloned linked replicas order competing claims and recover lost replies once', { timeout: 240_000 }, async (t) => {
-  const timing = threeReplicaPhaseCapture(t);
-  return timing.run(async () => {
+/** Create the same three real linked replicas for each independently budgeted scenario. */
+async function threeReplicaFixture(t, timing) {
   timing.begin('cloning three replicas', 'create the isolated seed repo, three clones, and their linked worktrees');
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-relay-clone-race-')));
   const seed = join(scratch, 'seed');
@@ -622,6 +621,22 @@ test('[H3,H16,V1,V17] three cloned linked replicas order competing claims and re
   }));
   assert.equal(uploaded.status, 200, await timing.wait('read an unexpected initial snapshot-upload response', () => uploaded.text()));
 
+  const replicaFiles = clones.map((clone, index) => join(commonDir(clone, envs[index]), 'pullboard', 'board.sqlite'));
+  return { scratch, clones, worktrees, envs, gitAt, commonDir, auth, relay, person, key, boardId, replicaFiles };
+}
+
+/** Read replay receipts without changing either replica's event cursor. */
+function receipts(file) {
+  const db = new DatabaseSync(file, { readOnly: true });
+  try {
+    return db.prepare("SELECT meta_value FROM board_meta WHERE meta_key LIKE 'relay_receipt_%'")
+      .all().map(({ meta_value }) => JSON.parse(meta_value));
+  } finally { db.close(); }
+}
+
+/** Preserve the competing CLI claims, durable refusals, registration and local API ordering checks. */
+async function competingReplicaClaims(fixture, timing) {
+  const { clones, worktrees, envs, gitAt, auth, relay, person, key, boardId, replicaFiles } = fixture;
   timing.begin('competing claims', 'send each paired claim through two clones, release the winner, and compare ordered receipts');
   const refusals = new Map();
   for (let id = 1; id <= 20; id += 1) {
@@ -645,16 +660,6 @@ test('[H3,H16,V1,V17] three cloned linked replicas order competing claims and re
   const synced = await timing.wait('sync the three replicas after the competing claims', () => Promise.all(clones.map((clone, index) => cliResult(worktrees[index], envs[index], 'status'))));
   assert.ok(synced.every((result) => result.status === 0), 'both replicas finish by applying the same relay prefix');
 
-  /** Read replay receipts without changing either replica's event cursor. */
-  function receipts(file) {
-    const db = new DatabaseSync(file, { readOnly: true });
-    try {
-      return db.prepare("SELECT meta_value FROM board_meta WHERE meta_key LIKE 'relay_receipt_%'")
-        .all().map(({ meta_value }) => JSON.parse(meta_value));
-    } finally { db.close(); }
-  }
-
-  const replicaFiles = clones.map((clone, index) => join(commonDir(clone, envs[index]), 'pullboard', 'board.sqlite'));
   const eventRows = replicaFiles.map((file) => localEvents(file));
   const receiptRows = replicaFiles.map(receipts);
   for (let id = 1; id <= 20; id += 1) {
@@ -762,7 +767,11 @@ test('[H3,H16,V1,V17] three cloned linked replicas order competing claims and re
     assert.equal(apiRetryResult.result.item.item_title, apiLostTitle);
     assert.equal(relay.uploads.length, beforeLostApi + 1, 'local API retry returns its original emitted event without posting again');
   } finally { await timing.wait('close the local clone API server', () => localApi.close()); }
+}
 
+/** Preserve lost CLI replies, original outcomes and the receipt-missing stack guard. */
+async function recoverReplicaReplies(fixture, timing) {
+  const { scratch, clones, worktrees, envs, gitAt, commonDir, relay, key, boardId, replicaFiles } = fixture;
   timing.begin('lost-reply recovery', 'exercise dropped CLI replies, replay recovery, and durable outcome ordering across all replicas');
   const beforeDropped = relay.uploads.length;
   relay.dropNextReply({ offline: true });
@@ -963,15 +972,22 @@ test('[H3,H16,V1,V17] three cloned linked replicas order competing claims and re
   const freshAfter = store.openBoard(replicaFiles[2]);
   try { assert.equal(store.getItem(freshAfter, freshB).item_status, 'claimed'); }
   finally { store.closeBoard(freshAfter); }
+}
 
+/** Reject the future engine move after all three replicas have recovered their ordered prefix. */
+async function finalReplicaOrder(fixture, timing) {
+  const { clones, worktrees, envs, auth, relay, person, key, boardId, replicaFiles } = fixture;
   timing.begin('final order check', 'sync the worktrees, reject the future engine move, and confirm no replica applies later events');
   await timing.wait('sync all worktrees before the final engine-version check', () => Promise.all(worktrees.map((root, index) => cli(root, envs[index], 'status'))));
   const updated = store.openBoard(replicaFiles[0]);
   let future;
+  let next;
   try {
     next = appliedSequence(updated) + 1;
     future = { ...prepareEngineMove(updated, 'addItem', [{ by: 'coordinator', lane: 'web', title: 'Future engine item' }]), engine: ENGINE_VERSION + 1 };
   } finally { store.closeBoard(updated); }
+  const coordinatorCredential = await timing.wait('issue the coordinator fixture credential for the final order check', () => auth.issueToken(person.token, { board: boardId, agent: 'coordinator' }));
+  const headers = { 'x-pullboard-engine': String(ENGINE_VERSION), authorization: 'Bearer ' + coordinatorCredential.token, 'content-type': 'application/json' };
   const futureSealed = Buffer.from(await timing.wait('seal the future-engine move', () => seal(key, new TextEncoder().encode(JSON.stringify(future)), {
     boardId, kind: 'move', sequence: next,
   }))).toString('base64url');
@@ -987,7 +1003,24 @@ test('[H3,H16,V1,V17] three cloned linked replicas order competing claims and re
     assert.match(result.document.error.next, /upgrade/);
   }
   assert.deepEqual(replicaFiles.map(localEvents), beforeFuture, 'neither clone applies a future engine or its own later move');
-  timing.finish(['cloning three replicas', 'competing claims', 'lost-reply recovery', 'final order check']);
+}
+
+test('[H3,H16,V1,V17] three cloned linked replicas order competing claims', { timeout: 240_000 }, async (t) => { // 20 paired rounds (60 CLI spawns), six sync/registration spawns and three local API calls took 170s on Studio; setup fits the remaining ceiling.
+  const timing = threeReplicaPhaseCapture(t);
+  return timing.run(async () => {
+    const fixture = await threeReplicaFixture(t, timing);
+    await competingReplicaClaims(fixture, timing);
+    timing.finish(['cloning three replicas', 'competing claims']);
+  });
+});
+
+test('[H3,H16,V1,V17] three cloned linked replicas recover lost replies once', { timeout: 200_000 }, async (t) => { // 45 recovery/final-order CLI spawns at the captured ~4s per recovery wait, plus 20s for fixture setup; excludes the preceding 170s claims.
+  const timing = threeReplicaPhaseCapture(t);
+  return timing.run(async () => {
+    const fixture = await threeReplicaFixture(t, timing);
+    await recoverReplicaReplies(fixture, timing);
+    await finalReplicaOrder(fixture, timing);
+    timing.finish(['cloning three replicas', 'lost-reply recovery', 'final order check']);
   });
 });
 

@@ -588,7 +588,8 @@ code.inline.long { white-space: break-spaces; overflow-wrap: anywhere; }
 .snapshot-controls:not([hidden]) { display: grid; grid-template-columns: minmax(0, 18rem) max-content max-content; align-items: center; gap: 10px; margin-bottom: 16px; padding: 12px 16px; }
 .snapshot-controls > span { grid-column: 1 / -1; font-weight: 600; }
 #replay-play { grid-column: 1; min-inline-size: 0; }
-#replay-pause { grid-column: 2; }
+/* Reserve Pause's tap box as replay ends, independently of its intrinsic text width. */
+#replay-pause { grid-column: 2; inline-size: 5rem; }
 .snapshot-controls label { grid-column: 3; display: flex; align-items: center; gap: 6px; }
 .snapshot-controls output { grid-column: 1 / -1; min-width: 0; overflow-wrap: anywhere; color: var(--ink-muted); font: 12px/1.5 var(--mono); }
 @media (width < 600px) {
