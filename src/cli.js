@@ -4,7 +4,7 @@
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { loadavg } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -30,7 +30,7 @@ import {
   pushesTrunk,
   unwiredHookProblems,
 } from './hooks.js';
-import { initRepo } from './init.js';
+import { detectGate, initRepo } from './init.js';
 import { lifecycleMarkdown } from './machine.js';
 import { HELP, VERSION } from './help.js';
 export { HELP, VERSION };
@@ -1042,6 +1042,36 @@ function resumeReleaseNotes(info) {
   return releases.length ? { releases: releases.slice(0, 3), omitted: Math.max(0, releases.length - 3), notes: 'CHANGELOG.md' } : null;
 }
 
+/** Derive the next setup question from the real requirements, config, items and view receipt. */
+function boardSetup(ctx, card) {
+  const rows = loadSpec(ctx.info.root, ctx.config).rows;
+  const approved = rows.filter(row => row.status === 'approved');
+  const lanes = laneNames(ctx.config).filter(lane => !['review', COORDINATOR].includes(lane));
+  const folders = readdirSync(ctx.info.root, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules')
+    .map(entry => entry.name).sort();
+  const lane = lanes[0] ?? folders[0] ?? 'app';
+  /** Quote the exact suggested command safely for a shell. */
+  const quote = value => "'" + String(value).replaceAll("'", "'\\''") + "'";
+  /** Preserve all existing configuration when recording one setup answer. */
+  const configure = patch => `node -e ${quote(`const fs=require('node:fs');const p='pullboard.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));${patch};fs.writeFileSync(p,JSON.stringify(c,null,2)+${JSON.stringify('\n')})`)}`;
+  const steps = [
+    { number: 1, done: approved.length > 0, question: 'Ask the person: what are we building, and who will use it? Draft a few requirements as pending, then ask the person to approve them.',
+      command: `node -e ${quote(`require('node:fs').appendFileSync(${JSON.stringify(ctx.config.spec)},${JSON.stringify('\n- G1 [pending, must] Describe the first thing the person wants. | gate: review\n')})`)}`,
+      afterAnswer: 'Replace the proposed text with the person’s answer; the person runs pullboard spec approve G1, then the agent runs pullboard spec apply.' },
+    { number: 2, done: lanes.length > 0, question: `Ask the person: how should we divide the work? Suggested folders: ${folders.join(', ') || 'app/ (create it for the app)'}.`,
+      command: configure(`c.lanes[${JSON.stringify(lane)}]={owns:[${JSON.stringify(lane + '/')}]}`) },
+    { number: 3, done: Boolean(ctx.config.gate?.trim()), question: `Ask the person: which command proves the build works? Suggested: ${detectGate(ctx.info.root) || 'choose the repo’s test command'}.`,
+      command: configure(`c.gate=${JSON.stringify(detectGate(ctx.info.root) || '<test command>')}`) },
+    { number: 4, done: card.all.length > 0, question: 'Ask the person: what is the first small piece we should build?',
+      command: `pullboard add ${quote(lane)} 'First small piece' --specs ${quote(approved[0]?.id ?? 'G1')} --criterion 'Describe what the person will be able to do'` },
+    { number: 5, done: card.viewOpened || card.agents.some(agent => !['coordinator', 'review'].includes(agent.agent_lane)),
+      question: 'Ask the person: shall we open the board so you can follow the work?', command: 'pullboard view' },
+  ];
+  const current = steps.find(step => !step.done);
+  return current ? { step: current.number, total: 5, ...current, steps } : null;
+}
+
 /**
  * `pullboard resume` (N19): one short card that puts an agent back to work after a fresh start,
  * a restart or a compaction, from the board rather than from a summary.
@@ -1078,6 +1108,7 @@ function resumeHere(io) {
       unread: store.unreadCount(board, me.id),
       newest: store.peekShouts(board, me.id, 1),
       agents: store.listAgents(board),
+      viewOpened: store.allShouts(board).some(shout => shout.shout_text === 'Opened Pullboard view for this board.'),
     };
   });
   card.relayProblems = unlinkedRelayProjects();
@@ -1102,6 +1133,13 @@ function resumeHere(io) {
   for (const problem of card.hookProblems) say(`${problem.message}; ${problem.next}`);
   const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
   say(`resume: ${me.displayName}${me.family ? ` [family ${me.family}]` : ''}, ${me.lane} lane${isMain ? ', the main checkout' : ''}, at ${root}`);
+  card.setup = boardSetup(ctx, card);
+  if (card.setup) {
+    say(`Setting up: step ${card.setup.step} of 5`);
+    say(card.setup.question);
+    say(`Record the answer: ${card.setup.command}`);
+    if (card.setup.afterAnswer) say(card.setup.afterAnswer);
+  }
   const dirty = dirtyFiles(root).length;
   if (!isMain) {
     const branch = tryGit(root, ['rev-parse', '--abbrev-ref', 'HEAD']).stdout || 'HEAD';
@@ -1166,6 +1204,7 @@ function resumeHere(io) {
   else if (inLane.length) next = `pullboard next --wait 9 (minutes); ${inLane.length} in your lane ${inLane.length === 1 ? 'waits' : 'wait'} on other work`;
   else if (card.awaiting.length) next = 'pullboard next --wait 9 (minutes); a rejected item comes back to your lane';
   else next = 'nothing open in your lane; pullboard next --verify names work you can check';
+  if (card.setup) next = card.setup.command;
   io.result?.({ ...card, root, dirty, next });
   say(`next: ${next}`);
   const flowAlert = isMain ? flowAlertLine(card.flow) : null;
@@ -1198,6 +1237,19 @@ async function viewHere(io, values) {
   const port = values.port === undefined ? 0 : Number(values.port);
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Refused('USAGE', '--port is a number from 0 to 65535; 0 picks a free one');
   const view = await serveView({ port, isMain: codeIsFromMain() });
+  // Record the actual successful server bind, rather than an agent-controlled setup flag.
+  try {
+    const ctx = existsSync(join(io.cwd, CONFIG_FILE)) ? context(io) : null;
+    if (ctx?.info.isMain) await withBoard(ctx, async board => {
+      if (!store.allShouts(board).some(shout => shout.shout_text === 'Opened Pullboard view for this board.')) {
+        await ordered(ctx, board, 'shout', [{ from: COORDINATOR, to: 'all',
+          text: 'Opened Pullboard view for this board.', lanes: laneNames(ctx.config) }]);
+      }
+    });
+  } catch (error) {
+    await view.close();
+    throw error;
+  }
   io.result?.({ url: view.url, port: view.port });
   io.say(`Pullboard view: ${view.url}`);
   io.say('Only this machine can reach it, and only with that link. Ctrl-C stops it.');
