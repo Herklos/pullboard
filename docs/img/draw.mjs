@@ -370,63 +370,62 @@ export function drawChain() {
 }
 
 
-/** Draw one record layer with its writer's palette and left/right aligned evidence. */
-function recordLayer({ x, y, width, height, kind, title, detail, dashed = false }) {
-  return `<g class="${kind}"><rect x="${x}" y="${y}" width="${width}" height="${height}" rx="8"${dashed ? ' stroke-dasharray="4 3"' : ''}/>${text(x + 14, y + height / 2 + 5, title, 't1')}${text(x + width - 14, y + height / 2 + 5, detail, 't2', 'end')}</g>`;
-}
-
-/** How decisions become a shared record that later agents can query and build from. */
+/** Draw the approved judgement figure inside the shared accessible light/dark card [I10]. */
 export function drawHolds() {
-  const width = 1020;
-  const height = 430;
-  const body = [
-    text(24, 34, 'Judgement accumulates', 'head'),
-    text(24, 55, 'Every piece of work starts from everything decided and proved before it.', 'aside'),
-    '<rect class="frame" x="24" y="76" width="220" height="310" rx="10"/>',
-    '<rect class="frame" x="288" y="76" width="430" height="310" rx="10"/>',
-    '<rect class="frame" x="770" y="76" width="226" height="310" rx="10"/>',
-    text(40, 101, 'You', 't1'),
-    text(304, 101, "The board · the project's record", 't1'),
-    text(786, 101, 'Agents · one lane each', 't1'),
-    box({ x: 40, y: 124, w: 188, h: 66, kind: 'person', title: 'Your decisions', sub: 'rows · doctrine · answers' }),
-    box({ x: 40, y: 264, w: 188, h: 66, kind: 'plain', title: 'Only your calls', sub: 'questions passed up' }),
-    recordLayer({ x: 306, y: 116, width: 394, height: 42, kind: 'person', title: 'Approved rows', detail: 'what must be true' }),
-    recordLayer({ x: 306, y: 164, width: 394, height: 42, kind: 'person', title: 'Frozen bars', detail: 'one per item, from the rows', dashed: true }),
-    recordLayer({ x: 306, y: 212, width: 394, height: 42, kind: 'check', title: 'Proofs', detail: 'the exact commit each verdict checked' }),
-    recordLayer({ x: 306, y: 260, width: 394, height: 42, kind: 'agent', title: 'Verdicts', detail: 'every accept and reject, with the reason' }),
-    '<g class="done"><rect x="306" y="316" width="394" height="8" rx="4"/></g>',
-    text(503, 346, 'each item adds to the record · each session starts from it', 'label', 'middle'),
-    text(700, 375, 'each layer takes the colour of who wrote it', 'aside', 'end'),
-    box({ x: 786, y: 132, w: 194, h: 66, kind: 'check', title: 'Builder', sub: 'builds to the bar' }),
-    box({ x: 786, y: 264, w: 194, h: 66, kind: 'agent', title: 'Second agent', sub: 'checks it against the bar' }),
-    edge([[228, 157], [300, 137]]),
-    '<rect class="card" x="228" y="137" width="70" height="22" rx="11"/>',
-    text(263, 152, 'approve once', 'label', 'middle'),
-    edge([[700, 185], [748, 185], [748, 165], [780, 165]]),
-    edge([[748, 185], [748, 297], [780, 297]]),
-    '<circle class="tip" cx="748" cy="185" r="3"/>',
-    '<rect class="card" x="704" y="169" width="70" height="22" rx="11"/>',
-    text(739, 184, 'frozen bar', 'label', 'middle'),
-    edge([[882, 198], [882, 258]]),
-    '<rect class="card" x="837" y="217" width="90" height="22" rx="11"/>',
-    text(882, 232, 'exact commit', 'label', 'middle'),
-    edge([[786, 297], [706, 281]]),
-    '<rect class="card" x="700" y="267" width="120" height="22" rx="11"/>',
-    text(760, 282, 'verdict + reason', 'label', 'middle'),
-    edge([[306, 281], [234, 297]], { leader: true }),
-    '<rect class="card" x="226" y="287" width="78" height="22" rx="11"/>',
-    text(265, 302, 'only your calls', 'label', 'middle'),
-    edge([[786, 143], [754, 143], [754, 86], [505, 86], [505, 80]], { leader: true }),
-    edge([[786, 275], [746, 275], [746, 86], [505, 86], [505, 80]], { leader: true }),
-    '<rect class="card" x="638" y="76" width="112" height="22" rx="11"/>',
-    text(694, 91, 'query any time', 'label', 'middle'),
-  ];
   return figure({
-    width,
-    height,
+    width: 960,
+    height: 374,
     title: 'Judgement accumulates',
-    desc: 'You approve rows, doctrine and answers once. The board keeps approved rows, a frozen bar for each item, proofs with exact commits and every verdict with its reason. The builder and second agent each receive the item’s frozen bar, and either can query the whole board at any time. The builder hands over its exact commit; the second agent checks it and returns a verdict and reason. Only your calls come back to you. Each item adds to the record, and each session starts from it.',
-    body,
+    desc: "You approve decisions once, as spec rows, doctrine and answers. The board keeps them as the project's record, with a frozen bar for each item, every verdict and its reason, and the exact commit each verdict checked. A builder agent and a second agent both receive the item's frozen bar, and either can query the whole record at any time: the approved rows, every frozen bar, earlier proofs and every verdict with its reason; the builder hands over its exact commit, and the second agent checks it against the bar and writes the verdict and reason back to the record. Only your calls come back to you. Every item adds to the record, and every new session starts from all of it.",
+    // Keep the approved layout and palette together; the shared wrapper still supplies its card.
+    body: [
+      `<style>
+text{font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
+.card{fill:#fff;stroke:#dce5df}.title{font-size:16px;font-weight:650;fill:#101714}.sub{font-size:12px;fill:#4f5b55}
+.zone{fill:none;stroke:#c9d4cd;stroke-dasharray:4 4}.zl{font-size:10.5px;font-weight:650;letter-spacing:.08em;fill:#65746b}
+.b{stroke-width:1}.h{font-size:13px;font-weight:650;fill:#101714}.m{font-size:11.5px;fill:#4f5b55}
+.you{fill:#e8f0f8;stroke:#9bb7d4}.plain{fill:#fff;stroke:#c9d4cd}.rows{fill:#efe9ff;stroke:#b9a6f0}.lay{fill:#f6f8f7;stroke:#c9d4cd}.ver{fill:#dff4e8;stroke:#9fd6b6}.bld{fill:#fdf6e3;stroke:#e2c98a}.youL{fill:#e8f0f8;stroke:#9bb7d4}.youL2{fill:#f3f7fb;stroke:#9bb7d4;stroke-dasharray:3 2}.bldL{fill:#fdf6e3;stroke:#e2c98a}.chkL{fill:#efe9ff;stroke:#b9a6f0}.key{font-size:10.5px;fill:#65746b}.chk{fill:#efe9ff;stroke:#b9a6f0}
+.ln{stroke:#65746b;stroke-width:1.5;fill:none}.ln.d{stroke-dasharray:5 4}.hd{fill:#65746b}
+.pill{fill:#fff;stroke:#dce5df}.pt{font-size:11px;fill:#4f5b55}
+.cap{font-size:12.5px;fill:#4f5b55}
+@media(prefers-color-scheme:dark){.card{fill:#111714;stroke:#34443a}.title,.h{fill:#e9eeeb}.sub,.m,.pt,.cap{fill:#b6c3bc}.zone{stroke:#3a4a40}.zl{fill:#9cafa3}
+.you{fill:#14243a;stroke:#3f6a96}.plain{fill:#111714;stroke:#3a4a40}.rows{fill:#231d3a;stroke:#6b57b8}.lay{fill:#18201c;stroke:#3a4a40}.ver{fill:#163829;stroke:#2f7a55}.bld{fill:#2e2614;stroke:#8a6f2c}.youL{fill:#14243a;stroke:#3f6a96}.youL2{fill:#101b2b;stroke:#3f6a96;stroke-dasharray:3 2}.bldL{fill:#2e2614;stroke:#8a6f2c}.chkL{fill:#231d3a;stroke:#6b57b8}.key{fill:#9cafa3}.chk{fill:#231d3a;stroke:#6b57b8}
+.ln{stroke:#9cafa3}.hd{fill:#9cafa3}.pill{fill:#111714;stroke:#34443a}}
+</style>`,
+      `<defs>
+<linearGradient id="grow" x1="0" x2="1"><stop offset="0" stop-color="#087546" stop-opacity="0.08"/><stop offset="1" stop-color="#087546" stop-opacity="0.85"/></linearGradient>
+</defs>`,
+      `<text class="title" x="24" y="34">Judgement accumulates</text>
+<text class="sub" x="24" y="54">Every piece of work starts from everything decided and proved before it.</text>
+<rect class="zone" x="24" y="92" width="190" height="252" rx="10"/><text class="zl" x="38" y="112">YOU</text>
+<rect class="zone" x="304" y="92" width="352" height="252" rx="10"/><text class="zl" x="318" y="112">THE BOARD · THE PROJECT'S RECORD</text>
+<rect class="zone" x="746" y="92" width="190" height="252" rx="10"/><text class="zl" x="760" y="112">AGENTS · ONE LANE EACH</text>
+<rect class="you b" x="38" y="122" width="162" height="60" rx="8"/><text class="h" x="119" y="147" text-anchor="middle">Your decisions</text><text class="m" x="119" y="165" text-anchor="middle">rows · doctrine · answers</text>
+<rect class="plain b" x="38" y="252" width="162" height="60" rx="8"/><text class="h" x="119" y="277" text-anchor="middle">Only your calls</text><text class="m" x="119" y="295" text-anchor="middle">questions passed up</text>
+<rect class="youL b" x="322" y="122" width="316" height="38" rx="7"/><text class="h" x="336" y="146">Approved rows</text><text class="m" x="624" y="146" text-anchor="end">what must be true</text>
+<rect class="youL2 b" x="322" y="168" width="316" height="38" rx="7"/><text class="h" x="336" y="192">Frozen bars</text><text class="m" x="624" y="192" text-anchor="end">one per item, from the rows</text>
+<rect class="chkL b" x="322" y="260" width="316" height="38" rx="7"/><text class="h" x="336" y="284">Verdicts</text><text class="m" x="624" y="284" text-anchor="end">every accept and reject, with the reason</text>
+<rect class="bldL b" x="322" y="214" width="316" height="38" rx="7"/><text class="h" x="336" y="238">Proofs</text><text class="m" x="624" y="238" text-anchor="end">the exact commit each verdict checked</text>
+<rect x="322" y="310" width="316" height="7" rx="3.5" fill="url(#grow)"/>
+<text class="m" x="480" y="334" text-anchor="middle">each item adds to the record · each session starts from it</text>
+<rect class="bld b" x="760" y="122" width="162" height="60" rx="8"/><text class="h" x="841" y="147" text-anchor="middle">Builder</text><text class="m" x="841" y="165" text-anchor="middle">builds to the bar</text>
+<rect class="chk b" x="760" y="252" width="162" height="60" rx="8"/><text class="h" x="841" y="277" text-anchor="middle">Second agent</text><text class="m" x="841" y="295" text-anchor="middle">checks it against the bar</text>
+<path class="ln" d="M200 141 H316"/><path class="hd" d="M322 141 l-8 -4.5 v9 z"/>
+<rect class="pill" x="219" y="131" width="80" height="20" rx="10"/><text class="pt" x="259" y="145" text-anchor="middle">approve once</text>
+<path class="ln" d="M638 187 H736 V152 H754"/><path class="hd" d="M760 152 l-8 -4.5 v9 z"/>
+<path class="ln" d="M736 187 V262 H754"/><path class="hd" d="M760 262 l-8 -4.5 v9 z"/>
+<circle cx="736" cy="187" r="3" class="hd"/>
+<path class="ln d" d="M922 282 H946 V66 H480 V86"/><path class="hd" d="M480 92 l-4.5 -8 h9 z"/>
+<path class="ln d" d="M922 152 H946"/><circle cx="946" cy="152" r="3" class="hd"/>
+<rect class="pill" x="652" y="56" width="96" height="20" rx="10"/><text class="pt" x="700" y="70" text-anchor="middle">query any time</text>
+<rect class="pill" x="653" y="177" width="70" height="20" rx="10"/><text class="pt" x="688" y="191" text-anchor="middle">frozen bar</text>
+<path class="ln" d="M841 182 V246"/><path class="hd" d="M841 252 l-4.5 -8 h9 z"/>
+<rect class="pill" x="799" y="207" width="84" height="20" rx="10"/><text class="pt" x="841" y="221" text-anchor="middle">exact commit</text>
+<path class="ln" d="M760 279 H644"/><path class="hd" d="M638 279 l8 -4.5 v9 z"/>
+<rect class="pill" x="661" y="269" width="96" height="20" rx="10"/><text class="pt" x="709" y="283" text-anchor="middle">verdict + reason</text>
+<path class="ln d" d="M304 282 H206"/><path class="hd" d="M200 282 l8 -4.5 v9 z"/>
+<rect class="pill" x="223" y="272" width="64" height="20" rx="10"/><text class="pt" x="255" y="286" text-anchor="middle">your calls</text>`,
+    ],
   });
 }
 
