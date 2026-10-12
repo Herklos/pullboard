@@ -174,12 +174,13 @@ const ROUTES = {
   'submitted>verified': { points: [[605, 179], [651, 179]], label: [628, 171, 'middle'] },
   'claimed>open': { points: [[335, 150], [335, 120], [145, 120], [145, 146]], back: true, label: [240, 94, 'middle'], wrap: 2 },
   'submitted>open': { points: [[545, 150], [545, 66], [115, 66], [115, 146]], back: true, label: [330, 58, 'middle'] },
+  'verified>open': { points: [[815, 179], [830, 179], [830, 8], [15, 8], [15, 179], [25, 179]], back: true, label: [425, 30, 'middle'] },
   'open>withdrawn': { points: [[105, 208], [105, 313], [441, 313]], label: [210, 305, 'middle'] },
   'claimed>withdrawn': { points: [[315, 208], [315, 313]], tip: false },
   'submitted>withdrawn': { points: [[525, 208], [525, 280]] },
 };
 
-/** Where the guards every move into a final state passes are listed, by state id. */
+/** Where the guards every move into a guarded state passes are listed, by state id. */
 const GUARD_NOTES = {
   verified: { x: 640, y: 26, w: 176, leader: [[735, 122], [735, 146]] },
   withdrawn: { x: 640, y: 284, w: 176, leader: [[640, 313], [609, 313]] },
@@ -200,7 +201,7 @@ function wrapped(words, count) {
 /**
  * An item's life, drawn from the lifecycle declaration: every state, every move's verb between
  * each pair of states, the moves that keep a state, the final states, and the refusals every move
- * into a final state can raise.
+ * into a guarded state can raise.
  *
  * @param {any} [machine]
  * @returns {string}
@@ -222,6 +223,7 @@ export function drawLifecycle(machine = MACHINE) {
     }
   }
   const finals = machine.states.filter((state) => state.final).map((state) => state.id);
+  const guardedStates = machine.states.filter((state) => (machine.exitGuards[state.id] ?? []).length > 0).map((state) => state.id);
   const body = [text(24, 34, "An item's life", 'head'), text(140, 34, `starts ${machine.initial}; ends ${finals.join(' or ')}`, 'aside')];
   for (const state of machine.states) {
     const [x, y] = PLACES[state.id];
@@ -237,7 +239,7 @@ export function drawLifecycle(machine = MACHINE) {
     const [x, y, anchor] = route.label;
     wrapped(said, route.wrap ?? 1).forEach((line, i) => body.push(text(x, y + i * 15, line, `label${route.back ? ' back' : ''}`, anchor)));
   }
-  for (const id of finals) {
+  for (const id of guardedStates) {
     const note = GUARD_NOTES[id];
     if (!note) throw new Error(`no place for the guards into ${id}: add it to GUARD_NOTES in docs/img/draw.mjs`);
     const codes = machine.exitGuards[id].map((guard) => machine.guards.find((each) => each.id === guard).refuse);
@@ -368,8 +370,68 @@ export function drawChain() {
   });
 }
 
+
+/** Draw the approved judgement figure inside the shared accessible light/dark card [I10]. */
+export function drawHolds() {
+  return figure({
+    width: 960,
+    height: 374,
+    title: 'Judgement accumulates',
+    desc: "You approve decisions once, as spec rows, doctrine and answers. The board keeps them as the project's record, with a frozen bar for each item, every verdict and its reason, and the exact commit each verdict checked. A builder agent and a second agent both receive the item's frozen bar, and either can query the whole record at any time: the approved rows, every frozen bar, earlier proofs and every verdict with its reason; the builder hands over its exact commit, and the second agent checks it against the bar and writes the verdict and reason back to the record. Only your calls come back to you. Every item adds to the record, and every new session starts from all of it.",
+    // Keep the approved layout and palette together; the shared wrapper still supplies its card.
+    body: [
+      `<style>
+text{font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
+.card{fill:#fff;stroke:#dce5df}.title{font-size:16px;font-weight:650;fill:#101714}.sub{font-size:12px;fill:#4f5b55}
+.zone{fill:none;stroke:#c9d4cd;stroke-dasharray:4 4}.zl{font-size:10.5px;font-weight:650;letter-spacing:.08em;fill:#65746b}
+.b{stroke-width:1}.h{font-size:13px;font-weight:650;fill:#101714}.m{font-size:11.5px;fill:#4f5b55}
+.you{fill:#e8f0f8;stroke:#9bb7d4}.plain{fill:#fff;stroke:#c9d4cd}.rows{fill:#efe9ff;stroke:#b9a6f0}.lay{fill:#f6f8f7;stroke:#c9d4cd}.ver{fill:#dff4e8;stroke:#9fd6b6}.bld{fill:#fdf6e3;stroke:#e2c98a}.youL{fill:#e8f0f8;stroke:#9bb7d4}.youL2{fill:#f3f7fb;stroke:#9bb7d4;stroke-dasharray:3 2}.bldL{fill:#fdf6e3;stroke:#e2c98a}.chkL{fill:#efe9ff;stroke:#b9a6f0}.key{font-size:10.5px;fill:#65746b}.chk{fill:#efe9ff;stroke:#b9a6f0}
+.ln{stroke:#65746b;stroke-width:1.5;fill:none}.ln.d{stroke-dasharray:5 4}.hd{fill:#65746b}
+.pill{fill:#fff;stroke:#dce5df}.pt{font-size:11px;fill:#4f5b55}
+.cap{font-size:12.5px;fill:#4f5b55}
+@media(prefers-color-scheme:dark){.card{fill:#111714;stroke:#34443a}.title,.h{fill:#e9eeeb}.sub,.m,.pt,.cap{fill:#b6c3bc}.zone{stroke:#3a4a40}.zl{fill:#9cafa3}
+.you{fill:#14243a;stroke:#3f6a96}.plain{fill:#111714;stroke:#3a4a40}.rows{fill:#231d3a;stroke:#6b57b8}.lay{fill:#18201c;stroke:#3a4a40}.ver{fill:#163829;stroke:#2f7a55}.bld{fill:#2e2614;stroke:#8a6f2c}.youL{fill:#14243a;stroke:#3f6a96}.youL2{fill:#101b2b;stroke:#3f6a96;stroke-dasharray:3 2}.bldL{fill:#2e2614;stroke:#8a6f2c}.chkL{fill:#231d3a;stroke:#6b57b8}.key{fill:#9cafa3}.chk{fill:#231d3a;stroke:#6b57b8}
+.ln{stroke:#9cafa3}.hd{fill:#9cafa3}.pill{fill:#111714;stroke:#34443a}}
+</style>`,
+      `<defs>
+<linearGradient id="grow" x1="0" x2="1"><stop offset="0" stop-color="#087546" stop-opacity="0.08"/><stop offset="1" stop-color="#087546" stop-opacity="0.85"/></linearGradient>
+</defs>`,
+      `<text class="title" x="24" y="34">Judgement accumulates</text>
+<text class="sub" x="24" y="54">Every piece of work starts from everything decided and proved before it.</text>
+<rect class="zone" x="24" y="92" width="190" height="252" rx="10"/><text class="zl" x="38" y="112">YOU</text>
+<rect class="zone" x="304" y="92" width="352" height="252" rx="10"/><text class="zl" x="318" y="112">THE BOARD · THE PROJECT'S RECORD</text>
+<rect class="zone" x="746" y="92" width="190" height="252" rx="10"/><text class="zl" x="760" y="112">AGENTS · ONE LANE EACH</text>
+<rect class="you b" x="38" y="122" width="162" height="60" rx="8"/><text class="h" x="119" y="147" text-anchor="middle">Your decisions</text><text class="m" x="119" y="165" text-anchor="middle">rows · doctrine · answers</text>
+<rect class="plain b" x="38" y="252" width="162" height="60" rx="8"/><text class="h" x="119" y="277" text-anchor="middle">Only your calls</text><text class="m" x="119" y="295" text-anchor="middle">questions passed up</text>
+<rect class="youL b" x="322" y="122" width="316" height="38" rx="7"/><text class="h" x="336" y="146">Approved rows</text><text class="m" x="624" y="146" text-anchor="end">what must be true</text>
+<rect class="youL2 b" x="322" y="168" width="316" height="38" rx="7"/><text class="h" x="336" y="192">Frozen bars</text><text class="m" x="624" y="192" text-anchor="end">one per item, from the rows</text>
+<rect class="chkL b" x="322" y="260" width="316" height="38" rx="7"/><text class="h" x="336" y="284">Verdicts</text><text class="m" x="624" y="284" text-anchor="end">every accept and reject, with the reason</text>
+<rect class="bldL b" x="322" y="214" width="316" height="38" rx="7"/><text class="h" x="336" y="238">Proofs</text><text class="m" x="624" y="238" text-anchor="end">the exact commit each verdict checked</text>
+<rect x="322" y="310" width="316" height="7" rx="3.5" fill="url(#grow)"/>
+<text class="m" x="480" y="334" text-anchor="middle">each item adds to the record · each session starts from it</text>
+<rect class="bld b" x="760" y="122" width="162" height="60" rx="8"/><text class="h" x="841" y="147" text-anchor="middle">Builder</text><text class="m" x="841" y="165" text-anchor="middle">builds to the bar</text>
+<rect class="chk b" x="760" y="252" width="162" height="60" rx="8"/><text class="h" x="841" y="277" text-anchor="middle">Second agent</text><text class="m" x="841" y="295" text-anchor="middle">checks it against the bar</text>
+<path class="ln" d="M200 141 H316"/><path class="hd" d="M322 141 l-8 -4.5 v9 z"/>
+<rect class="pill" x="219" y="131" width="80" height="20" rx="10"/><text class="pt" x="259" y="145" text-anchor="middle">approve once</text>
+<path class="ln" d="M638 187 H736 V152 H754"/><path class="hd" d="M760 152 l-8 -4.5 v9 z"/>
+<path class="ln" d="M736 187 V262 H754"/><path class="hd" d="M760 262 l-8 -4.5 v9 z"/>
+<circle cx="736" cy="187" r="3" class="hd"/>
+<path class="ln d" d="M922 282 H946 V66 H480 V86"/><path class="hd" d="M480 92 l-4.5 -8 h9 z"/>
+<path class="ln d" d="M922 152 H946"/><circle cx="946" cy="152" r="3" class="hd"/>
+<rect class="pill" x="652" y="56" width="96" height="20" rx="10"/><text class="pt" x="700" y="70" text-anchor="middle">query any time</text>
+<rect class="pill" x="653" y="177" width="70" height="20" rx="10"/><text class="pt" x="688" y="191" text-anchor="middle">frozen bar</text>
+<path class="ln" d="M841 182 V246"/><path class="hd" d="M841 252 l-4.5 -8 h9 z"/>
+<rect class="pill" x="799" y="207" width="84" height="20" rx="10"/><text class="pt" x="841" y="221" text-anchor="middle">exact commit</text>
+<path class="ln" d="M760 279 H644"/><path class="hd" d="M638 279 l8 -4.5 v9 z"/>
+<rect class="pill" x="661" y="269" width="96" height="20" rx="10"/><text class="pt" x="709" y="283" text-anchor="middle">verdict + reason</text>
+<path class="ln d" d="M304 282 H206"/><path class="hd" d="M200 282 l8 -4.5 v9 z"/>
+<rect class="pill" x="223" y="272" width="64" height="20" rx="10"/><text class="pt" x="255" y="286" text-anchor="middle">your calls</text>`,
+    ],
+  });
+}
+
 /** Every figure the README links, by file name under docs/img. */
-export const FIGURES = { loop: drawLoop, lifecycle: drawLifecycle, layout: drawLayout, 'agent-start': drawAgentStart, chain: drawChain };
+export const FIGURES = { loop: drawLoop, lifecycle: drawLifecycle, layout: drawLayout, 'agent-start': drawAgentStart, chain: drawChain, holds: drawHolds };
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   for (const [name, draw] of Object.entries(FIGURES)) {

@@ -9,7 +9,7 @@ import { appliedSequence, applyRelayMove, checkpointSequence, engineReceipt, pre
 import { relayMoveActor } from './relay-sender.js';
 import { ENGINE_VERSION } from './machine.js';
 import { presentationDigest, relayPresentation, relaySnapshot } from './relay-presentation.js';
-import { repoInfo, tryGit } from './git.js';
+import { codeIsFromMain, repoInfo, tryGit } from './git.js';
 import { forgetBoardKey, readBoardKey, storeBoardKey } from './relay-key.js';
 import { encodeBoardKey, generateBoardKey, seal, unseal } from './seal.js';
 import { terminalQr } from './qr.js';
@@ -179,9 +179,9 @@ async function request(state, path, { method = 'GET', body, allowMissing = false
 }
 
 /** Read durable local event rows; their ids are the crash-safe outbox after the saved cursor. */
-function localRecords(root, work) {
+export function localRecords(root, work) {
   const info = repoInfo(root);
-  const board = store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'));
+  const board = store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), undefined, { isMain: codeIsFromMain() });
   try { return work(board); } finally { store.closeBoard(board); }
 }
 
@@ -720,7 +720,7 @@ async function catchUp(root, file, state, io) {
   }
   let pendingRefusal;
   for (const record of remote.events) {
-    const board = store.openBoard(join(repoInfo(root).commonDir, 'pullboard', 'board.sqlite'));
+    const board = store.openBoard(join(repoInfo(root).commonDir, 'pullboard', 'board.sqlite'), undefined, { isMain: codeIsFromMain() });
     let outcome;
     try { outcome = await replayRelayRecord(board, key, state, record); } finally { store.closeBoard(board); }
     // Exact ciphertext identifies an interrupted send even when its document was refused before replay.
@@ -865,6 +865,9 @@ export async function relayOperation(root, operation, args, io, command, applyLo
     const state = loadLink(file);
     if (!state || state.unlinking) throw new Refused('RELAY_UNLINK_PENDING', 'finish unlinking this device with pullboard relay off before sending a move');
     if (state.recovery) throw new Refused('RELAY_RECOVERY_PENDING', `finish the saved recovery for sequence ${state.recovery.skip} before sending a linked move`);
+    if (credentialActor({ operation, args, personRequest: io?.personRequest }) === 'person') {
+      throw new Refused('HUMAN_REQUIRED', 'send this person action from the paired phone');
+    }
     let moves = CHECKPOINT_MOVES.get(io);
     if (!moves) { moves = new Set(); CHECKPOINT_MOVES.set(io, moves); }
     if (moves.has(state.board)) CHECKPOINT_NOTICES.get(io)?.delete(state.board);
@@ -1080,7 +1083,7 @@ export async function relayRecover(root, skip, io) {
     const state = loadLink(file);
     if (!state || state.unlinking || state.mode !== 'ordered') throw new Refused('RELAY_LINKED', 'link this ordered relay board before recovering a blocked sequence');
     const boardFile = join(repoInfo(root).commonDir, 'pullboard', 'board.sqlite');
-    const source = store.openBoard(boardFile);
+    const source = store.openBoard(boardFile, undefined, { isMain: codeIsFromMain() });
     const staged = store.openBoard(':memory:');
     try {
       const cursor = appliedSequence(source);

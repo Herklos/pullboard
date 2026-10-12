@@ -7,6 +7,35 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { SPEC, machine, project, startView, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, searchFor, press } from './fixture.js';
 
+/** Capture the current search page and its last real board-state request without exposing the session key. */
+async function searchSetupState(chrome) {
+  const caughtAt = new Date().toISOString();
+  const requests = chrome.requests.filter(({ method, url }) => {
+    let path;
+    try { path = new URL(url).pathname; } catch { return false; }
+    return method === 'GET' && /^\/api\/v1\/boards\/[^/]+\/state$/.test(path);
+  });
+  const last = requests.at(-1);
+  let page = null, captureError = null;
+  try {
+    page = JSON.parse(await chrome.stable(`JSON.stringify({
+      project: typeof data === 'object' && data?.project ? { root: data.project.root, name: data.project.name ?? null } : null,
+      itemCount: typeof data === 'object' && Array.isArray(data?.project?.items) ? data.project.items.length : null
+    })`));
+  } catch (error) {
+    captureError = `${error.name}: ${error.message}`;
+  }
+  return {
+    caughtAt,
+    pageObservedAt: new Date().toISOString(),
+    project: page?.project ?? null,
+    itemCount: page?.itemCount ?? null,
+    lastStateRequest: last ? { method: last.method, path: new URL(last.url).pathname } : null,
+    captureError,
+    rootCauseStatus: 'NOT PROVEN',
+  };
+}
+
 /** Commit between actual Git reads, preserving each real command's output and exit status. */
 function interleavedAges(file, when) {
   const box = machine();
@@ -90,7 +119,7 @@ test('row ages read from one captured commit [N26]', () => {
 
 /** Wait for committed row order, rather than rows that may already be visible as uncommitted edits. */
 async function committedRows(chrome, head) {
-  await chrome.waitFor(`data?.project?.rowAgesAt?.['SPEC.md'] === ${JSON.stringify(head)} && data.project.rowAgesAt['ways.md'] === ${JSON.stringify(head)}`, 15_000);
+  await chrome.waitFor(`data?.project?.rowAgesAt?.['SPEC.md'] === ${JSON.stringify(head)} && data.project.rowAgesAt['ways.md'] === ${JSON.stringify(head)}`, 15_000); // budget: hang ceiling for the committed row-age snapshot to arrive; no throughput claim.
 }
 
 /** Observe the old and refreshed captures around real commits without replacing any Git or HTTP response. */
@@ -428,7 +457,25 @@ test('the search step names its state on timeout [N26]', { timeout: 60_000 }, as
   const record = (error) => JSON.parse(error.message.slice(error.message.indexOf('{')));
   try {
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
-    await chrome.waitFor("typeof data === 'object' && data?.project?.items?.length === 1");
+    try {
+      await chrome.waitFor("typeof data === 'object' && data?.project?.items?.length === 1");
+    } catch (error) {
+      // Snapshot the request list before the asynchronous page observation; never replace the wait failure.
+      let capture;
+      try {
+        capture = await searchSetupState(chrome);
+      } catch (captureError) {
+        capture = {
+          caughtAt: new Date().toISOString(), pageObservedAt: null,
+          project: null, itemCount: null, lastStateRequest: null,
+          captureError: `${captureError.name}: ${captureError.message}`,
+          rootCauseStatus: 'NOT PROVEN',
+        };
+      }
+      error.diagnostic = capture;
+      error.message += `; search setup state observed after timeout ${JSON.stringify(capture)}`;
+      throw error;
+    }
     // A field that takes no typing: the step times out, and its message says how far the search got.
     await chrome.stable("document.querySelector('#q').disabled = true");
     let stalled;

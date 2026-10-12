@@ -4,6 +4,96 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.8.11] - 2026-10-12
+
+### A proper first visit, safer releases
+
+A brand-new project opens on a calm board, not a list of decisions, and a release can no longer publish anything main's CI did not pass.
+
+### Changed
+
+- On a new project, Pullboard View shows the starter house rules as defaults to review, not as decisions waiting for you. The tour's board is listed and marked demo, and New item defaults to the first building lane.
+- The gate runs only the test files git tracks, so scratch copies and agent worktree folders in your repo can no longer fail it.
+- A tagged release publishes to npm only when main's CI already passed that exact commit.
+
+## [0.8.10] - 2026-10-11
+
+### Accumulated judgement
+
+The README now opens with what Pullboard is for: accumulated judgement for agents, and a figure of how it holds.
+
+### Fixed
+
+- A board read that still cannot get through after waiting says which board it was, that another process held it, and how long it waited, instead of a bare "database is locked".
+
+## [0.8.9] - 2026-10-11
+
+### 0.8.8 reaches npm
+
+0.8.8 was tagged but never published: its publish gate failed when a git hook read the board while another process was writing it. 0.8.9 is everything in 0.8.8, plus that fix and a few more from the same night.
+
+### Fixed
+
+- A git hook that reads the board waits for another process to finish writing, up to the same ten seconds every other board connection waits, instead of failing at once with "database is locked".
+- A request from your phone never moves the row you are reading in Pullboard View.
+- An action only you may take, tried from an agent's terminal, is refused at once with "send it from the paired phone", even when the relay is slow to answer.
+
+## [0.8.8] - 2026-10-11
+
+Tagged but never published to npm; everything below ships in 0.8.9.
+
+### Steadier CI, safer boards
+
+A worktree's unmerged code can no longer upgrade the board everyone shares, from the CLI or from Pullboard View. CI now runs in shards and drops runs a newer push has replaced, and the clicks it caught going missing under load now land.
+
+### Added
+
+- A rejected commit can be submitted again, unchanged, after the coordinator corrects its bar and the builder refreezes it. This is engine 9: upgrade every linked device before using it.
+- Through the relay, a shout's address opens even a shout older than the forty most recent.
+
+### Changed
+
+- CI splits each run into shards and cancels a run on main once a newer push replaces it.
+- The README's board shots are retaken from the current view.
+
+### Fixed
+
+- An agent's worktree running newer code never migrates the shared board or its event log, and Pullboard View's server opens boards through the same guard.
+- Item links work everywhere an item is named, and an exported snapshot keeps its addresses.
+- Verdict notes keep their line breaks, and code in them stays literal.
+- The Lanes panel stays inside its card at every width, including the Hold a lane form.
+- A click on an item in the Pipeline view opens it even while the view redraws.
+- The Spec tab's decline button keeps working through a refresh.
+- The replay controls stay in place when a replay starts.
+
+## [0.8.7] - 2026-10-11
+
+### What you see first
+
+Pullboard View opens on your work. The Items tab leads with your list, with the board's stats in one line above it. The Roadmap leads with the next release, keeps every upcoming one open, and has a panel for moving between them. Every tab, item, row and shout now has an address you can share, reload and come back to.
+
+### Added
+
+- Every tab, item, Spec row, Doctrine row and shout in Pullboard View has its own address. Open it directly, go back and forward, or reload and stay where you were.
+- The Roadmap has a panel on the right that jumps to each release and shows how much of the next one is open, building, in review and done.
+- `pullboard resume` says what is new since the checkout last ran, once for each release, and `resume --json` carries the same notes as `whatsNew`.
+- The coordinator and every agent on the demo board declare their model.
+
+### Changed
+
+- The Items tab opens on the work. The stats take one line above the list, and that line opens and folds the full card. Times read like "3 h 34 min", and the card no longer lists every agent.
+- `pullboard stats`, its JSON and the coordinator's resume give times in hours and minutes, and name at most three items before "+N more".
+- The Items toolbar is one row: List or Pipeline, a Filter menu for what to show and which lane, and New item.
+- The Roadmap leads with the next release and keeps every upcoming release open. Shipped releases fold away.
+- Doctrine and Spec rows read like Items rows: two lines, with the full rule a click away.
+- The README's board shots show the stats line, and its "What's next" lists only work that isn't built yet.
+- The shipped skills teach every command in `pullboard help`, and a test keeps a new command from shipping untaught.
+
+### Fixed
+
+- Rows added in the same second list newest first, even when a commit lands while the view is reading.
+- A late transport call is no longer counted as a refused write.
+
 ## [0.8.6] - 2026-10-11
 
 ### See the flow
@@ -215,7 +305,8 @@ Pullboard View got a full design pass, so the board is cleaner and easier on the
 - A local, spec-backed work board gives each item a frozen criterion, a separate worktree lane, a gated submission, and an independent review receipt.
 - The timed tour demonstrates a change being rejected, corrected, and accepted with proof.
 
-[Unreleased]: https://github.com/pullboard-dev/pullboard/compare/v0.8.6...HEAD
+[Unreleased]: https://github.com/pullboard-dev/pullboard/compare/v0.8.7...HEAD
+[0.8.7]: https://github.com/pullboard-dev/pullboard/compare/v0.8.6...v0.8.7
 [0.8.6]: https://github.com/pullboard-dev/pullboard/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/pullboard-dev/pullboard/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/pullboard-dev/pullboard/compare/v0.8.3...v0.8.4

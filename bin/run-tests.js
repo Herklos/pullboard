@@ -13,6 +13,7 @@ import { AGENT_SHELL_MARKERS, SSH_SHELL_MARKERS } from '../src/person.js';
 
 const runner = fileURLToPath(import.meta.url);
 export const DEFAULT_TEST_TIMEOUT_MS = 660_000;
+export const DEFAULT_TEST_FILE_TIMEOUT_MS = 30_000;
 
 const watchdogSource = `
 const { parentPort } = require('node:worker_threads');
@@ -21,8 +22,38 @@ const timers = new Map();
 parentPort.on('message', (message) => {
   if (message.type === 'stop') {
     const active = timers.get(message.id);
-    if (active) clearTimeout(active.timer);
+    if (active) {
+      clearTimeout(active.timer);
+      if (active.probe) clearTimeout(active.probe);
+    }
     timers.delete(message.id);
+    return;
+  }
+  if (message.type === 'file-diagnostic-update') {
+    const active = timers.get(message.id);
+    if (active) {
+      active.handles = message.handles;
+      active.observedAt = message.observedAt;
+      active.updated = true;
+    }
+    return;
+  }
+  if (message.type === 'start-file') {
+    const active = { handles: message.handles, observedAt: Date.now(), updated: false, timer: null, probe: null };
+    active.probe = setTimeout(() => {
+      parentPort.postMessage({ type: 'file-diagnostic-request', id: message.id });
+    }, Math.max(0, message.timeoutMs - 50));
+    active.timer = setTimeout(() => {
+      const ports = active.handles.ports.length ? active.handles.ports.join(', ') : 'none';
+      const handles = active.handles.types.length ? active.handles.types.join(', ') : 'none';
+      const ageMs = Date.now() - active.observedAt;
+      const freshness = active.updated ? 'latest responsive snapshot' : 'fallback; main thread did not answer';
+      writeSync(2, 'run-tests: test file "' + message.file + '" failed: its process did not exit within ' +
+        message.timeoutMs + 'ms file-exit timeout; listening ports: ' + ports + '; live handles: ' + handles +
+        '; live-handle snapshot age: ' + ageMs + 'ms (' + freshness + ')\\n');
+      try { process.kill(message.pid, 'SIGKILL'); } catch { /* The timed-out test-file process already exited. */ }
+    }, message.timeoutMs);
+    timers.set(message.id, active);
     return;
   }
   if (message.type !== 'start') return;
@@ -52,6 +83,34 @@ function testTimeoutMs(value = process.env.PULLBOARD_TEST_TIMEOUT_MS) {
   return Number(value);
 }
 
+/** Read the per-file exit ceiling so a completed file cannot keep the gate open. */
+function testFileTimeoutMs(value = process.env.PULLBOARD_TEST_FILE_TIMEOUT_MS) {
+  if (value === undefined) return DEFAULT_TEST_FILE_TIMEOUT_MS;
+  if (!/^[1-9][0-9]*$/u.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) > 2_147_483_647) {
+    throw new Error('PULLBOARD_TEST_FILE_TIMEOUT_MS must be a positive integer no greater than 2147483647 milliseconds');
+  }
+  return Number(value);
+}
+
+/** Describe listening ports and live handle types when the test-file exit ceiling expires. */
+function activeHandleSummary() {
+  const handles = process._getActiveHandles();
+  const ports = [];
+  const types = [];
+  for (const handle of handles) {
+    const type = handle?.constructor?.name ?? 'Unknown';
+    types.push(type);
+    if (typeof handle?.address !== 'function' || !handle.listening) continue;
+    try {
+      const address = handle.address();
+      if (address && typeof address === 'object' && typeof address.port === 'number') {
+        ports.push(`${address.address}:${address.port}`);
+      }
+    } catch { /* A handle may close while its diagnostic is collected. */ }
+  }
+  return { ports: [...new Set(ports)].slice(0, 20), types: [...new Set(types)].slice(0, 20) };
+}
+
 /**
  * Keep an independent watchdog for every active test in this test-file process.
  *
@@ -59,27 +118,57 @@ function testTimeoutMs(value = process.env.PULLBOARD_TEST_TIMEOUT_MS) {
  */
 function installTestWatchdog() {
   const timeoutMs = testTimeoutMs();
+  const fileTimeoutMs = testFileTimeoutMs();
   const file = process.env.PULLBOARD_TEST_FILE ?? process.argv[1] ?? '<unknown test file>';
   const watchdog = new Worker(watchdogSource, { eval: true });
+  watchdog.on('message', (message) => {
+    if (message.type !== 'file-diagnostic-request') return;
+    watchdog.postMessage({
+      type: 'file-diagnostic-update', id: message.id,
+      handles: activeHandleSummary(), observedAt: Date.now(),
+    });
+  });
+  // Message listeners ref the worker port; unref only after installing the diagnostic listener.
   watchdog.unref();
   const activeTests = new WeakMap();
+  const runningTests = new Set();
+  const fileId = `${process.pid}:file`;
+  let fileWatchdogArmed = false;
   let nextTestId = 0;
 
   beforeEach((context) => {
+    if (fileWatchdogArmed) {
+      watchdog.postMessage({ type: 'stop', id: fileId });
+      fileWatchdogArmed = false;
+    }
     const id = `${process.pid}:${++nextTestId}`;
     const name = String(context.name).replace(/[\r\n\t\u0000-\u001f]/gu, ' ').slice(0, 200);
     activeTests.set(context, id);
+    runningTests.add(id);
     watchdog.postMessage({ type: 'start', id, name, file, timeoutMs, pid: process.pid });
   });
 
   afterEach((context) => {
     const id = activeTests.get(context);
-    if (id !== undefined) watchdog.postMessage({ type: 'stop', id });
+    if (id !== undefined) {
+      watchdog.postMessage({ type: 'stop', id });
+      runningTests.delete(id);
+    }
+    // A suite's after hooks run before root after; start the idle ceiling here.
+    if (runningTests.size === 0) armFileExitWatchdog();
   });
 
-  after(async () => {
-    await watchdog.terminate();
-  });
+  /** Bound cleanup between completed tests, cancelling the ceiling when another test starts. */
+  function armFileExitWatchdog() {
+    if (fileWatchdogArmed) return;
+    fileWatchdogArmed = true;
+    watchdog.postMessage({
+      type: 'start-file', id: fileId, file,
+      timeoutMs: fileTimeoutMs, pid: process.pid, handles: activeHandleSummary(),
+    });
+  }
+
+  after(armFileExitWatchdog);
 }
 
 /** Quote a path for the private Git shim without interpreting shell metacharacters. */
@@ -190,11 +279,108 @@ function hasTestFiles(args) {
   return false;
 }
 
+/** Match Node's default test-file patterns against a Git path for this runtime. */
+function isDefaultTestFile(path, includeTypeScript) {
+  const normalized = path.replaceAll('\\', '/');
+  const parts = normalized.split('/');
+  if (parts.some(part => part === 'node_modules' || part.startsWith('.'))) return false;
+  const basename = parts.at(-1);
+  const extension = includeTypeScript ? /\.(?:cjs|mjs|js|cts|mts|ts)$/u : /\.(?:cjs|mjs|js)$/u;
+  if (!extension.test(basename)) return false;
+  return parts.slice(0, -1).includes('test') ||
+    /^test(?:-|\.)/u.test(basename) ||
+    (includeTypeScript
+      ? /(?:\.test|-test|_test)\.(?:cjs|mjs|js|cts|mts|ts)$/u
+      : /(?:\.test|-test|_test)\.(?:cjs|mjs|js)$/u).test(basename);
+}
+
+/** Probe the effective TypeScript mode of the Node child that will execute tests. */
+function typeScriptTestDiscovery(args, env) {
+  const typeFlags = args.filter(argument => [
+    '--experimental-strip-types', '--strip-types', '--experimental-transform-types',
+    '--no-experimental-strip-types', '--no-strip-types',
+  ].includes(argument));
+  const result = spawnSync(process.execPath, [...typeFlags, '-p', 'String(process.features?.typescript ?? false)'], {
+    cwd: process.cwd(), encoding: 'utf8', env, timeout: 5_000,
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(`Node could not report TypeScript test discovery mode (status ${result.status}, signal ${result.signal ?? 'none'}): ${result.stderr.trim()}`);
+  }
+  return !['false', 'undefined', ''].includes(result.stdout.trim());
+}
+
+/** Preserve native discovery outside Git, but never hide a repository access failure. */
+function isGitWorkTree(cwd, env) {
+  const result = spawnSync('git', ['rev-parse', '--is-inside-work-tree'], {
+    cwd, env: { ...env, LC_ALL: 'C' }, encoding: 'utf8',
+  });
+  if (result.error) throw result.error;
+  if (result.status === 0) return result.stdout.trim() === 'true';
+  if (result.status === 128 && /^fatal: not a git repository \(or any /u.test(result.stderr)) return false;
+  throw new Error(result.stderr.trim() || `git rev-parse failed (status ${result.status})`);
+}
+
+/** List tracked files matching Node's runtime default patterns, excluding worktree copies. */
+function trackedDefaultTestFiles(cwd, includeTypeScript, env) {
+  const output = execFileSync('git', ['ls-files', '-z'], { cwd, env, encoding: 'utf8' });
+  return output.split('\0').filter(path => path && isDefaultTestFile(path, includeTypeScript)).sort()
+    .map(path => `./${path}`);
+}
+
+/** Translate the runner's shard option to Node's native test-shard option, refusing malformed ranges. */
+function shardArguments(args) {
+  const forwarded = [];
+  let shard;
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === '--') {
+      forwarded.push(...args.slice(index));
+      break;
+    }
+    if (argument === '--shard' || argument.startsWith('--shard=')) {
+      if (shard !== undefined) return { error: `duplicate --shard; expected one <i>/<n> value` };
+      shard = argument === '--shard' ? args[++index] : argument.slice('--shard='.length);
+      if (shard === undefined) return { error: '--shard requires a value; expected <i>/<n> with 1 <= i <= n' };
+      continue;
+    }
+    forwarded.push(argument);
+  }
+  if (shard === undefined) return { args: forwarded };
+  const match = shard.match(/^([1-9][0-9]*)\/([1-9][0-9]*)$/u);
+  const index = match ? Number(match[1]) : NaN;
+  const total = match ? Number(match[2]) : NaN;
+  if (!Number.isSafeInteger(index) || !Number.isSafeInteger(total) || index > total) {
+    return { error: `invalid --shard value "${shard}"; expected <i>/<n> with 1 <= i <= n` };
+  }
+  return { args: [`--test-shard=${shard}`, ...forwarded] };
+}
+
 /** Run tests in the disposable environment, preserving a marker only when a parent holds the slot. */
-function executeTests(args, sandbox, gateSlotHeld) {
+function executeTests(args, sandbox, gateSlotHeld, fullSuite) {
   const env = testEnvironment(sandbox);
   if (gateSlotHeld) env.PULLBOARD_GATE_SLOT_HELD = '1';
-  const result = runTests(args, env);
+  let selectedArgs = args;
+  if (fullSuite) {
+    let files;
+    try {
+      files = isGitWorkTree(process.cwd(), env)
+        ? trackedDefaultTestFiles(process.cwd(), typeScriptTestDiscovery(args, env), env)
+        : null;
+    }
+    catch (error) {
+      process.stderr.write(`run-tests: could not list tracked test files: ${error.message}\n`);
+      process.exitCode = 1;
+      return { status: 1, signal: null };
+    }
+    if (files?.length === 0) {
+      process.stderr.write('run-tests: no tracked Node test files found; refusing filesystem discovery\n');
+      process.exitCode = 1;
+      return { status: 1, signal: null };
+    }
+    if (files) selectedArgs = [...args, ...files];
+  }
+  const result = runTests(selectedArgs, env);
   if (result.error) throw result.error;
   return result;
 }
@@ -213,6 +399,13 @@ async function main(args) {
     process.exitCode = 1;
     return;
   }
+  const sharding = shardArguments(args);
+  if (sharding.error) {
+    process.stderr.write(`run-tests: ${sharding.error}\n`);
+    process.exitCode = 1;
+    return;
+  }
+  args = sharding.args;
   const fullSuite = !hasTestFiles(args);
   const inheritedSlot = process.env.PULLBOARD_GATE_SLOT_HELD === '1';
   let signal = null;
@@ -220,7 +413,7 @@ async function main(args) {
   const run = (gateSlotHeld) => {
     const sandbox = mkdtempSync(join(tmpdir(), 'pullboard-test-run-'));
     try {
-      const result = executeTests(args, sandbox, gateSlotHeld);
+      const result = executeTests(args, sandbox, gateSlotHeld, fullSuite);
       signal = result.signal;
       process.exitCode = result.status ?? 1;
     } finally { rmSync(sandbox, { recursive: true, force: true }); }

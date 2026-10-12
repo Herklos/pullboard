@@ -196,7 +196,7 @@ globalThis.fetch = function tracedFetch(input, init) {
   let revokeOnNextListing = false;
   const boardsWithoutSnapshots = new Map();
   const injectedSnapshotWriteDelayMs = Number(process.env.PULLBOARD_TEST_SNAPSHOT_WRITE_DELAY_MS ?? 0);
-  assert.ok(Number.isSafeInteger(injectedSnapshotWriteDelayMs) && injectedSnapshotWriteDelayMs >= 0 && injectedSnapshotWriteDelayMs <= 15000,
+  assert.ok(Number.isSafeInteger(injectedSnapshotWriteDelayMs) && injectedSnapshotWriteDelayMs >= 0 && injectedSnapshotWriteDelayMs <= 15000, // budget: declared snapshot-delay fixture input range is 0..15000ms; configuration validation, not throughput.
     'injected snapshot delay is within the product wait bound');
   let snapshotWriteDelayMs = 0;
   let oneSnapshotDelay = null;

@@ -16,6 +16,10 @@
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/npm/l/pullboard?style=flat-square&color=6b4fc8"></a>
 </p>
 
+**Accumulated judgement for agents.** Agents are good at tasks and bad at projects: every new session starts without what you decided, so you become the glue. The agents scale; your judgement doesn't. Pullboard is a structural approach to orchestrating agents coherently over long-term builds, so you can trust your agentic workforce to fill in the blanks the way you would, without re-prompting them.
+
+![How it holds. Your decision becomes a bar each piece of work is frozen against; a second agent checks the exact commit; the board keeps what passed, what failed and why; the next agent starts from there.](docs/img/holds.svg)
+
 **Vibe code a real product.** Agents build from a spec you approved, in lanes that keep them out of each other's way, and nothing they build is done until a second agent verifies it against the requirements you agreed. Pullboard is a coordination queue for serious software. It's how we develop our quantitative systems.
 
 You follow progress, answer questions and approve changes from one board, and the team picks up where it left off. Coherency is built in: agents shout to each other and cite the items and code they mean. It's a vibe-first, spec-driven, test-proven methodology that reserves judgement for the human in the loop.
@@ -42,6 +46,8 @@ Past the demo, the same things break.
 - **It forgot what you decided.** Decisions live in your spec, not in a chat that ended.
 - **Two agents, one file.** Each agent gets its own worktree and lane.
 - **A fix broke something.** Nothing is submitted until your tests pass.
+
+On Pullboard itself, a second agent's check catches one in three tasks that already passed their own tests.
 
 ## How it works
 
@@ -276,10 +282,13 @@ Pullboard exists to keep a team of agents coherent over a long build.
 - You can skip a hook with `--no-verify`. The pre-push gate and the verifier are the backstops.
 - CI runs on Linux and macOS. Windows isn't tested yet.
 
-### Planned features
+### What's next
 
-- **The relay.** Your boards, live on your phone and other machines. Sealed records, never code.
-- **A roadmap in Pullboard View.** Every milestone and what's left in it, at a glance.
+- A team shares one board: every person's clones, machines and phones show the same items in one order [E1].
+- Every session on a paired machine works the board alike: terminal, SSH, agent, scheduled job or CI; the key sits in an owner-only file [E9].
+- Each person may keep a private board per repo in ~/.pullboard; its items stay on that person's devices [E11].
+
+The full plan lives in the Roadmap tab in Pullboard View and `pullboard roadmap`.
 
 ### Docs
 

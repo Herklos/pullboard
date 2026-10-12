@@ -8,7 +8,9 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { FIGURES, drawLifecycle } from '../docs/img/draw.mjs';
+import { HELP, commandPhrases } from '../src/help.js';
 import { MACHINE } from '../src/machine.js';
+import { agentsBlock } from '../src/templates.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const README = readFileSync(join(ROOT, 'README.md'), 'utf8');
@@ -158,10 +160,59 @@ test('the lifecycle figure is drawn from the declaration, and refuses a state or
   }
   const parked = { ...MACHINE, states: [...MACHINE.states, { id: 'parked', means: 'set aside', requires: [] }] };
   assert.throws(() => drawLifecycle(parked), /no place for state parked/);
-  const reopen = { ...MACHINE, moves: [...MACHINE.moves, { verb: 'reopen', from: ['verified'], to: 'open', by: ['coordinator'], guards: [] }] };
-  assert.throws(() => drawLifecycle(reopen), /no route for verified > open/);
+  const unsupported = { ...MACHINE, moves: [...MACHINE.moves, { verb: 'restore', from: ['withdrawn'], to: 'open', by: ['coordinator'], guards: [] }] };
+  assert.throws(() => drawLifecycle(unsupported), /no route for withdrawn > open/);
+  const reopen = { ...MACHINE,
+    states: MACHINE.states.map((state) => state.id === 'verified' ? { ...state, final: false } : state),
+    moves: [...MACHINE.moves, { verb: 'reopen', from: ['verified'], to: 'open', by: ['coordinator'], guards: [] }],
+  };
+  let reopenedSvg;
+  assert.doesNotThrow(() => { reopenedSvg = drawLifecycle(reopen); }, 'the synthetic verified reopen has a declared drawing route');
+  assert.ok(texts(reopenedSvg).some((text) => text.words === 'reopen'), 'the synthetic verified reopen is named');
+  assert.ok(reopenedSvg.includes('class="edge back" d="M 815 179 L 830 179 L 830 8 L 15 8 L 15 179 L 25 179" marker-end="url(#tip-back)"'),
+    'verified-to-open uses the dashed return route');
+  const reopenTexts = texts(reopenedSvg);
+  const reopenLabel = reopenTexts.find((text) => text.words === 'reopen');
+  assert.ok(reopenLabel, 'the synthetic reopen label has a measurable text box');
+  for (const other of reopenTexts.filter((text) => text !== reopenLabel)) {
+    const separated = reopenLabel.right <= other.left || other.right <= reopenLabel.left || reopenLabel.bottom <= other.top || other.bottom <= reopenLabel.top;
+    assert.ok(separated, `the reopen label does not overlap “${other.words}”`);
+  }
+  const drawing = reopenedSvg.slice(reopenedSvg.indexOf('</defs>') + '</defs>'.length);
+  for (const [, x, y, width, height] of drawing.matchAll(/<rect(?! class="card")\b[^>]*\bx="([\d.]+)"\s+y="([\d.]+)"\s+width="([\d.]+)"\s+height="([\d.]+)"/gu)) {
+    const box = { left: Number(x), right: Number(x) + Number(width), top: Number(y), bottom: Number(y) + Number(height) };
+    const separated = reopenLabel.right <= box.left || box.right <= reopenLabel.left || reopenLabel.bottom <= box.top || box.bottom <= reopenLabel.top;
+    assert.ok(separated, `the reopen label does not overlap the box at ${x},${y}`);
+  }
+  for (const [, path] of drawing.matchAll(/<path\b[^>]*\bd="([^"]+)"/gu)) {
+    const points = [...path.matchAll(/[ML]\s*([\d.]+)\s+([\d.]+)/gu)].map(([, x, y]) => ({ x: Number(x), y: Number(y) }));
+    for (let index = 1; index < points.length; index++) {
+      const first = points[index - 1];
+      const second = points[index];
+      const segment = { left: Math.min(first.x, second.x), right: Math.max(first.x, second.x), top: Math.min(first.y, second.y), bottom: Math.max(first.y, second.y) };
+      const separated = reopenLabel.right <= segment.left || segment.right <= reopenLabel.left || reopenLabel.bottom <= segment.top || segment.bottom <= reopenLabel.top;
+      assert.ok(separated, `the reopen label does not overlap path segment ${index}: ${path}`);
+    }
+  }
   const bench = { ...MACHINE, moves: [...MACHINE.moves, { verb: 'bench', from: ['claimed'], to: 'open', by: ['coordinator'], guards: [] }] };
   assert.match(texts(drawLifecycle(bench)).map((text) => text.words).join(' '), /\bbench\b/, 'a new move between drawn states is named without touching draw.mjs');
+});
+
+test('the lifecycle figure keeps the guards into a state that is not final [I10, M1]', () => {
+  const fixture = {
+    ...MACHINE,
+    states: MACHINE.states.map((state) => state.id === 'verified' ? { ...state, final: false } : state),
+    moves: [...MACHINE.moves, { verb: 'reopen', from: ['verified'], to: 'open', by: ['coordinator'], guards: [] }],
+  };
+  const svg = drawLifecycle(fixture);
+  const shown = texts(svg).map((text) => text.words).join(' \n ');
+  assert.ok(shown.includes('every way into verified'), 'the non-final guarded state has its entry note');
+  for (const guard of MACHINE.exitGuards.verified) {
+    assert.ok(shown.includes(MACHINE.guards.find((each) => each.id === guard).refuse), `the non-final verified note includes refusal ${guard}`);
+  }
+  assert.match(shown, /\breopen\b/, 'the verified-to-open move remains visible');
+  assert.ok(shown.includes('starts open; ends withdrawn'), 'the caption names only the declared final state');
+  assert.equal(svg.includes('data-final="verified"'), false, 'verified is not marked final in the fixture');
 });
 
 test('README pins its approved Philosophy, Key concepts and Why structure [I10,I12]', () => {
@@ -170,7 +221,13 @@ test('README pins its approved Philosophy, Key concepts and Why structure [I10,I
   const whyStart = README.indexOf('### Why', concepts);
   const nextTopLevel = README.indexOf('\n## ', philosophy + 1);
   assert.ok(philosophy >= 0 && philosophy < concepts && concepts < whyStart && whyStart < nextTopLevel, 'Philosophy contains Key concepts and Why before the next top-level section');
+  const approvedOpening = "**Accumulated judgement for agents.** Agents are good at tasks and bad at projects: every new session starts without what you decided, so you become the glue. The agents scale; your judgement doesn't. Pullboard is a structural approach to orchestrating agents coherently over long-term builds, so you can trust your agentic workforce to fill in the blanks the way you would, without re-prompting them.";
+  const openingWithFigure = `${approvedOpening}\n\n![How it holds. Your decision becomes a bar each piece of work is frozen against; a second agent checks the exact commit; the board keeps what passed, what failed and why; the next agent starts from there.](docs/img/holds.svg)\n\n**Vibe code a real product.**`;
+  assert.ok(README.includes(openingWithFigure), 'the approved opening and holds figure sit directly before the unchanged lead');
+  assert.equal(README.split(approvedOpening).length - 1, 1, 'the approved opening appears exactly once');
+  assert.doesNotMatch(`${approvedOpening} ${FIGURES.holds()}`, /\b(?:memory|remember)\b/iu, 'the opening and its figure avoid those terms');
   const section = README.slice(philosophy, nextTopLevel);
+  assert.ok(section.includes("On Pullboard itself, a second agent's check catches one in three tasks that already passed their own tests."), 'Why pins the approved proof line');
   for (const text of [
     'You do not explain twice. You rule the agents. Hierarchy is enforced. Judgement is yours. Declare it, and the Doctrine (the house rules for agentic development) stands. **You speak the constraints, agents fill in the blanks.** The Spec is canon. Then code. Then proof.',
     'Five primitives. Everything else is built on them.',
@@ -267,4 +324,57 @@ test('README is concise and skimmable without removing its instructions or figur
     const cells = proseLines[index].replace(/^\||\|$/gu, '').split('|').map((cell) => cell.trim());
     assert.ok(cells.length > 0 && cells.every(Boolean), 'tables have no empty header cells');
   }
+});
+
+test("what's next lists only unbuilt work [I11]", () => {
+  const spec = readFileSync(join(ROOT, 'SPEC.md'), 'utf8');
+  const sectionStart = README.indexOf("### What's next\n");
+  assert.notEqual(sectionStart, -1, "the README replaces 'Planned features' with What's next");
+  const sectionEnd = README.indexOf('\n### Docs\n', sectionStart);
+  assert.notEqual(sectionEnd, -1, "What's next ends before the Docs section");
+  const section = README.slice(sectionStart, sectionEnd);
+  const lines = section.split(/\r?\n/u).slice(1).map((line) => line.trim()).filter(Boolean);
+  const bullets = lines.filter((line) => line.startsWith('- '));
+  assert.ok(bullets.length > 0, "What's next contains cited work");
+
+  const specRows = new Set([...spec.matchAll(/^- ([A-Za-z]+\d+(?:\.\d+)*) \[/gmu)].map(([, id]) => id));
+  for (const bullet of bullets) {
+    const citations = [...bullet.matchAll(/\[([^\]]+)\]/gu)];
+    assert.ok(citations.length > 0, `each bullet cites a SPEC row: ${bullet}`);
+    for (const [, group] of citations) {
+      for (const id of group.split(/,\s*/u)) assert.ok(specRows.has(id), `${bullet} cites existing row ${id}`);
+    }
+  }
+
+  assert.doesNotMatch(bullets.join('\n'), /\b(?:relay|roadmap)\b/iu, 'shipped relay and roadmap work do not remain in the upcoming bullets');
+  assert.equal(lines.at(-1), 'The full plan lives in the Roadmap tab in Pullboard View and `pullboard roadmap`.', 'the section ends by pointing to the full plan');
+});
+
+test('every command in help is taught to agents [I11]', () => {
+  const skillFiles = readdirSync(join(ROOT, 'skills'), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => join(ROOT, 'skills', entry.name, 'SKILL.md'));
+  const instructionLines = `${skillFiles.map((file) => readFileSync(file, 'utf8')).join('\n')}\n${agentsBlock()}`.split(/\r?\n/u);
+  const phrases = new Set(commandPhrases({ all: HELP.all, commands: {} }));
+  for (const declaration of Object.values(HELP.commands)) {
+    for (const usage of declaration.usages) {
+      for (const phrase of commandPhrases({ all: `  ${usage}`, commands: {} })) phrases.add(phrase);
+    }
+  }
+  const personOnly = new Map([
+    ['spec approve', 'Only the person approves a SPEC row.'],
+    ['spec decline', 'Only the person declines a SPEC row.'],
+    ['relay recover', 'The command is explicitly reserved for person-only recovery.'],
+  ]);
+  assert.ok(personOnly.size <= 4, 'the person-only exception list stays short');
+  for (const [phrase, reason] of personOnly) {
+    assert.ok(phrases.has(phrase), `${phrase} is still a command in help`);
+    assert.ok(reason.trim(), `${phrase} has a reason agents must not run it`);
+  }
+  const untaught = [...phrases].filter((phrase) => {
+    const command = phrase.split(' ').map((word) => word.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')).join('\\s+');
+    const taught = instructionLines.some((line) => new RegExp(`(?:^|[^A-Za-z0-9_-])pullboard\\s+${command}(?=$|[^A-Za-z0-9_-])`, 'u').test(line));
+    return !taught && !personOnly.has(phrase);
+  });
+  assert.deepEqual(untaught, [], `teach each command where agents need it, or explain a person-only exception:\n${untaught.join('\n')}`);
 });

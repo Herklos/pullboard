@@ -5,7 +5,7 @@ import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { tapTarget, machine, project, startView, boardOf, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, press } from './fixture.js';
+import { tapTarget, SPEC, machine, project, startView, boardOf, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, press } from './fixture.js';
 import { assertFirstStateDelay } from './stable.js';
 
 /** Stage real chip clones and retain their node identities to diagnose a redraw between browser evaluations. */
@@ -52,6 +52,94 @@ async function measureNaturalSpecChips(chrome, beforeMeasure = null) {
   })())`, "document.querySelectorAll('#spec-chips button:not([data-natural-chip])')"));
 }
 
+/** Observe the decision target, its render-time replacement, and native pointer geometry without changing input. */
+async function armDecisionPressCapture(chrome, selector) {
+  return JSON.parse(await chrome.stable(`JSON.stringify((() => {
+    const root = document.querySelector('#decisions');
+    const initial = document.querySelector(${JSON.stringify(selector)});
+    if (!root || !initial) return { armed: false, reason: 'decision target was absent before press' };
+    const events = [], renders = [], mutations = [], resizes = [];
+    /** Read the old or current button's viewport box without mutating layout. */
+    const box = element => {
+      if (!element) return null;
+      const rect = element.getBoundingClientRect();
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height, connected: element.isConnected };
+    };
+    /** Identify the action node and record whether it is the original native target. */
+    const identity = element => element ? { tag: element.tagName, className: String(element.className || '').slice(0, 80),
+      action: element.getAttribute('data-go'), connected: element.isConnected, isInitial: element === initial, box: box(element) } : null;
+    const initialSnapshot = identity(initial);
+    /** Keep a bounded native-event sample with both target identities and their measured boxes. */
+    const sample = (type, detail = {}) => {
+      if (events.length >= 40) return;
+      const current = document.querySelector(${JSON.stringify(selector)});
+      events.push({ type, at: performance.now(), pointerId: detail.pointerId ?? null,
+        x: detail.clientX ?? null, y: detail.clientY ?? null, hitWasInitial: detail.hitWasInitial ?? null,
+        scrollX, scrollY,
+        initial: identity(initial), initialAtArm: initialSnapshot, current: identity(current) });
+    };
+    let prototype = root, descriptor = null;
+    while (prototype && !descriptor) {
+      descriptor = Object.getOwnPropertyDescriptor(prototype, 'innerHTML');
+      prototype = Object.getPrototypeOf(prototype);
+    }
+    if (!descriptor?.get || !descriptor?.set) return { armed: false, reason: 'native innerHTML descriptor unavailable' };
+    const previousOwn = Object.getOwnPropertyDescriptor(root, 'innerHTML');
+    Object.defineProperty(root, 'innerHTML', { configurable: true, enumerable: descriptor.enumerable,
+      /** Preserve the native element getter while observing production assignments to the decision panel. */
+      get() { return descriptor.get.call(root); },
+      /** Retain inline cockpit frames without exposing the view URL or its capability. */
+      set(value) {
+        if (renders.length < 20) renders.push({ at: performance.now(), oldInitialConnected: initial.isConnected,
+          stack: (new Error().stack || '').split('\\n').filter(line => line.includes(location.origin))
+            .map(line => line.replace(/https?:\\/\\/[^\\s)]+:(\\d+):(\\d+)/g, 'cockpit.inline:$1:$2')).slice(0, 4) });
+        return descriptor.set.call(root, value);
+      } });
+    /** Record real browser pointer and mouse events at the document capture boundary. */
+    const listener = event => {
+      const hasPoint = Number.isFinite(event.clientX) && Number.isFinite(event.clientY);
+      sample(event.type, { pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY,
+        hitWasInitial: hasPoint ? document.elementFromPoint(event.clientX, event.clientY) === initial : null });
+    };
+    for (const type of ['pointermove', 'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click']) document.addEventListener(type, listener, true);
+    window.addEventListener('scroll', listener, true);
+    /** Record bounded panel mutations, including whether the original action was removed. */
+    const observer = new MutationObserver(records => {
+      if (mutations.length < 20) mutations.push({ at: performance.now(), records: records.length,
+        removedInitial: records.some(record => [...record.removedNodes].some(node => node === initial || node.contains?.(initial))),
+        current: identity(document.querySelector(${JSON.stringify(selector)})) });
+    });
+    observer.observe(root, { childList: true, subtree: true, attributes: true, characterData: true });
+    /** Record native box-size notifications for the original and current action. */
+    const resize = new ResizeObserver(entries => {
+      if (resizes.length < 20) resizes.push({ at: performance.now(), entries: entries.length,
+        initial: box(initial), current: box(document.querySelector(${JSON.stringify(selector)})) });
+    });
+    resize.observe(initial);
+    window.__decisionPressCapture = { armed: true, selector: ${JSON.stringify(selector)}, viewport: { width: innerWidth, height: innerHeight, dpr: devicePixelRatio },
+      armedAt: performance.now(), initial: identity(initial), events, renders, mutations, resizes,
+      /** Stop all observation and restore the native innerHTML property before returning evidence. */
+      finish() {
+        sample('capture-finish');
+        observer.disconnect(); resize.disconnect();
+        for (const type of ['pointermove', 'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click']) document.removeEventListener(type, listener, true);
+        window.removeEventListener('scroll', listener, true);
+        if (previousOwn) Object.defineProperty(root, 'innerHTML', previousOwn); else delete root.innerHTML;
+        const result = { armed: true, selector: this.selector, viewport: this.viewport, armedAt: this.armedAt,
+          initial: this.initial, events: this.events, renders: this.renders, mutations: this.mutations, resizes: this.resizes };
+        delete window.__decisionPressCapture;
+        return result;
+      } };
+    sample('capture-armed');
+    return { armed: true, initial: identity(initial), viewport: { width: innerWidth, height: innerHeight, dpr: devicePixelRatio } };
+  })())`, "document.querySelector('#decisions')"));
+}
+
+/** Finish capture on the stable Needs-you root, removing every observer even after a failed press. */
+async function finishDecisionPressCapture(chrome) {
+  return JSON.parse(await chrome.stable(`JSON.stringify(window.__decisionPressCapture?.finish() || null)`, "document.querySelector('#decisions')"));
+}
+
 
 test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N26,N27]', { timeout: 120_000 }, async (t) => {
   const executable = chromeExecutable();
@@ -88,9 +176,10 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
         return !element.closest('[hidden]') && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
       }));
     })()`);
-    /** Click the actual control through Chrome input coordinates. */
-    const click = async (selector) => {
+    /** Click the actual control through Chrome input coordinates, optionally arming a diagnostic before press. */
+    const click = async (selector, beforePress = null) => {
       await waitRendered([selector]);
+      if (beforePress) await beforePress();
       await press(chrome, `document.querySelector(${JSON.stringify(selector)})`);
     };
     /** Fill a form field and deliver its input and change events. */
@@ -112,7 +201,7 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
       return JSON.parse(await chrome.stable(`JSON.stringify((() => {
       const visible=e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return !e.disabled&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)!==0&&r.width>0&&r.height>0&&!e.closest('[hidden]')};
       const selector='button,a[href],input:not([type=hidden]),select,textarea,[role=button],[data-root],[data-tab],[data-go],[data-item],[data-state],[data-rows],[data-row],[data-release],[data-shout],[data-new],[data-code]';
-      const controls=[...new Set(document.querySelectorAll(selector))].filter(visible).map(e=>{const r=e.getBoundingClientRect();return {tag:e.tagName,id:e.id||'',text:(e.innerText||e.getAttribute('aria-label')||'').trim().slice(0,60),x:r.x,y:r.y,right:r.right,bottom:r.bottom,width:r.width,height:r.height,inlineReference:e.matches('.feed button.ref, .shout button.ref, .shout .band a, .detail button.ref')||!!e.closest('#chain .meta .gate, #detail .kv dd.waits-on'),statusBar:(!!e.closest('.status')||(!!e.closest('.composer')&&innerWidth>=900))&&!matchMedia('(pointer: coarse)').matches,oneLine:!e.closest('.status')||getComputedStyle(e).whiteSpace==='nowrap'}});
+      const controls=[...new Set(document.querySelectorAll(selector))].filter(visible).map(e=>{const r=e.getBoundingClientRect();return {tag:e.tagName,id:e.id||'',text:(e.innerText||e.getAttribute('aria-label')||'').trim().slice(0,60),x:r.x,y:r.y,right:r.right,bottom:r.bottom,width:r.width,height:r.height,inlineReference:e.matches('.feed button.ref, .feed a.ref[data-go], .shout button.ref, .shout a.ref[data-go], .shout .band a, .detail button.ref, .detail a.ref[data-go]')||!!e.closest('#chain .meta .gate, #detail .kv dd.waits-on'),statusBar:(!!e.closest('.status')||(!!e.closest('.composer')&&innerWidth>=900))&&!matchMedia('(pointer: coarse)').matches,oneLine:!e.closest('.status')||getComputedStyle(e).whiteSpace==='nowrap'}});
       const notice=document.querySelector('#console');
       const noticeBox=visible(notice)?notice.getBoundingClientRect():null;
       const toast=noticeBox?{x:noticeBox.x,y:noticeBox.y,right:noticeBox.right,bottom:noticeBox.bottom,visible:noticeBox.y>=0&&noticeBox.bottom<=innerHeight,
@@ -156,7 +245,7 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
     for (const width of [375, 1280]) {
       if (width === 1280) {
         box.run(demo.repo, 'shout', 'person', 'Should the desktop demo ship?', '--decision');
-        await chrome.waitFor("document.querySelector('#needs').innerText.includes('Should the desktop demo ship?')", 15_000);
+        await chrome.waitFor("document.querySelector('#needs').innerText.includes('Should the desktop demo ship?')", 15_000); // budget: hang ceiling for the demo decision shout to appear in Needs; no throughput claim.
       }
       await setViewport(width);
       await click('[data-tab="items"]');
@@ -252,11 +341,158 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
       await chrome.waitFor("!!document.querySelector('#decisions [data-go]')");
       const decision = await chrome.stable("document.querySelector('#decisions [data-go]')?.getAttribute('data-go')");
       assert.ok(decision, `${width}: a decision is offered for answer`);
-      await click(`#decisions [data-go="${decision}"]`);
+      const decisionSelector = `#decisions [data-go="${decision}"]`;
+      let decisionCaptureArmed = false;
+      let decisionPressError = null;
+      let decisionCapture = null;
+      let decisionCaptureError = null;
+      /** Arm the bounded capture after rendered readiness and immediately before the shared native press. */
+      const beforeDecisionPress = async () => {
+        const armed = await armDecisionPressCapture(chrome, decisionSelector);
+        decisionCaptureArmed = armed.armed === true;
+        if (!decisionCaptureArmed) throw new Error(`decision press capture did not arm: ${JSON.stringify(armed)}`);
+      };
+      try {
+        await click(decisionSelector, beforeDecisionPress);
+      } catch (error) { decisionPressError = error; }
+      finally {
+        if (decisionCaptureArmed) {
+          try { decisionCapture = await finishDecisionPressCapture(chrome); }
+          catch (error) { decisionCaptureError = `${error.name}: ${error.message}`; }
+        }
+      }
+      if (decisionPressError) {
+        const captureText = `decision press capture: ${JSON.stringify({ width, decision, capture: decisionCapture, captureError: decisionCaptureError, rootCauseStatus: 'NOT PROVEN' })}`;
+        t.diagnostic(captureText);
+        decisionPressError.message = `${decisionPressError.message}; ROOT-CAUSE STATUS: NOT PROVEN; ${captureText}`;
+        throw decisionPressError;
+      }
+      assert.equal(decisionCaptureError, null, `${width}: decision press capture finishes without error`);
+      assert.ok(decisionCapture?.armed, `${width}: decision press capture returns its observation`);
       await checkLayout(width, 'answer form');
-      await fill('#shout-text', `Phone answer ${width}`);
-      await submit('#shout-form');
-      await chrome.waitFor(`document.querySelector('#feed').innerText.includes('Phone answer ${width}')`);
+      const answerText = `Phone answer ${width}`;
+      const answerRequests = new Map();
+      const answerNetwork = [];
+      let deadlineSnapshotTimer = null;
+      let deadlineSnapshotStarted = false;
+      let deadlineBoardSnapshot = null;
+      /** Record only the single move request made by this isolated answer action, without its sealed body. */
+      const observeAnswerNetwork = ({ data }) => {
+        const message = JSON.parse(String(data));
+        const event = message.params;
+        if (message.method === 'Network.requestWillBeSent' && event.request.method === 'POST' && new URL(event.request.url).pathname.endsWith('/moves')) {
+          // This listener is installed only around the one answer form submission; the body may be sealed.
+          answerRequests.set(event.requestId, true);
+          answerNetwork.push({ type: 'sent', at: Date.now(), method: event.request.method, path: '/api/v1/boards/:id/moves' });
+        } else if (answerRequests.has(event?.requestId) && message.method === 'Network.responseReceived') {
+          answerNetwork.push({ type: 'response', at: Date.now(), status: event.response.status });
+        } else if (answerRequests.has(event?.requestId) && message.method === 'Network.loadingFinished') {
+          answerNetwork.push({ type: 'finished', at: Date.now() });
+        } else if (answerRequests.has(event?.requestId) && message.method === 'Network.loadingFailed') {
+          answerNetwork.push({ type: 'failed', at: Date.now(), error: event.errorText });
+        }
+      };
+      chrome.socket.addEventListener('message', observeAnswerNetwork);
+      try {
+        await chrome.stable(`(() => {
+          const feed = document.querySelector('#feed');
+          const probe = { feed, armedAt: Date.now(), lastMutationAt: null, answerVisibleAt: null, answerText: ${JSON.stringify(answerText)} };
+          probe.observer = new MutationObserver(records => {
+            const currentFeed = document.querySelector('#feed');
+            const feedChanged = records.some(record => feed?.contains(record.target) || record.target === feed
+              || [...record.addedNodes, ...record.removedNodes].some(node => node === feed || node === currentFeed || node.contains?.(feed) || node.contains?.(currentFeed)));
+            if (!feedChanged) return;
+            probe.lastMutationAt = Date.now();
+            if (currentFeed?.innerText.includes(probe.answerText) && probe.answerVisibleAt === null) probe.answerVisibleAt = probe.lastMutationAt;
+          });
+          if (feed) probe.observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+          window.__phoneAnswerProbe = probe;
+        })()`);
+        await fill('#shout-text', answerText);
+        const answerActionAt = Date.now();
+        await submit('#shout-form');
+        const waitStartedAt = Date.now();
+        const waitDeadlineMs = 10_000;
+        let resolveDeadlineSnapshot;
+        deadlineBoardSnapshot = new Promise((resolve) => { resolveDeadlineSnapshot = resolve; });
+        // Observe the same existing browser wait deadline without extending or changing that wait.
+        deadlineSnapshotTimer = setTimeout(async () => {
+          deadlineSnapshotStarted = true;
+          const requestStartedAt = Date.now();
+          try {
+            const state = await boardOf(view, demo.repo);
+            resolveDeadlineSnapshot({ requestStartedAt, responseAt: Date.now(), state });
+          } catch (error) {
+            resolveDeadlineSnapshot({ requestStartedAt, responseAt: Date.now(), error: String(error.message || error) });
+          }
+        }, waitDeadlineMs);
+        try {
+          await chrome.waitFor(`document.querySelector('#feed').innerText.includes('Phone answer ${width}')`);
+          const waitSatisfiedAt = Date.now();
+          let feed = null;
+          let diagnosticError = null;
+          try {
+            feed = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+              const value = window.__phoneAnswerProbe;
+              const node = document.querySelector('#feed');
+              return { now: Date.now(), armedAt: value?.armedAt ?? null, textHasAnswer: !!node?.innerText.includes(value?.answerText || ''), feedRootSame: node === value?.feed, lastMutationAt: value?.lastMutationAt ?? null, answerVisibleAt: value?.answerVisibleAt ?? null };
+            })())`));
+          } catch (error) { diagnosticError = String(error.message || error); }
+          t.diagnostic(JSON.stringify({ width, answerText, answerActionAt, waitStartedAt, waitSatisfiedAt,
+            waitDeadlineMs, request: answerNetwork, feed, diagnosticError }));
+        } catch (waitError) {
+          const waitFailedAt = Date.now();
+          let feed = null;
+          let diagnosticError = null;
+          try {
+            feed = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+              const value = window.__phoneAnswerProbe;
+              const node = document.querySelector('#feed');
+              return { browserSampledAt: Date.now(), armedAt: value?.armedAt ?? null, textHasAnswer: !!node?.innerText.includes(value?.answerText || ''), feedRootSame: node === value?.feed, lastMutationAt: value?.lastMutationAt ?? null, answerVisibleAt: value?.answerVisibleAt ?? null };
+            })())`));
+          } catch (error) { diagnosticError = String(error.message || error); }
+          const deadlineBoard = await deadlineBoardSnapshot;
+          const board = deadlineBoard.state;
+          const matchingShouts = (board?.shouts || []).filter((shout) => shout.shout_from === 'person' && shout.shout_text === answerText);
+          const answerShout = matchingShouts.reduce((latest, shout) => !latest || shout.shout_id > latest.shout_id ? shout : latest, null);
+          const newestShout = (board?.shouts || []).reduce((latest, shout) => !latest || shout.shout_id > latest.shout_id ? shout : latest, null);
+          const sent = answerNetwork.find((event) => event.type === 'sent');
+          const response = answerNetwork.find((event) => event.type === 'response');
+          const deadlineAt = waitStartedAt + waitDeadlineMs;
+          const newest = newestShout ? { id: newestShout.shout_id, at: newestShout.shout_at,
+            from: newestShout.shout_from, text: String(newestShout.shout_text || '').slice(0, 120) } : null;
+          const answer = answerShout ? { id: answerShout.shout_id, at: answerShout.shout_at } : null;
+          const accepted = response?.status === 200 && matchingShouts.length > 0;
+          const answerAt = answer?.at ? Date.parse(answer.at) : null;
+          const arrivedLate = (sent?.at ?? 0) > deadlineAt || (response?.at ?? 0) > deadlineAt
+            || (Number.isFinite(answerAt) && answerAt > deadlineAt);
+          const acceptedByDeadline = accepted && Number.isFinite(answerAt) && answerAt <= deadlineAt;
+          const feedProbeValid = Boolean(feed) && diagnosticError === null && Number.isFinite(feed.armedAt)
+            && Number.isFinite(feed.browserSampledAt) && Object.hasOwn(feed, 'answerVisibleAt')
+            && (feed.answerVisibleAt === null || Number.isFinite(feed.answerVisibleAt))
+            && Object.hasOwn(feed, 'lastMutationAt') && (feed.lastMutationAt === null || Number.isFinite(feed.lastMutationAt));
+          const feedHadNoAnswerByDeadline = feedProbeValid && (feed.answerVisibleAt === null || feed.answerVisibleAt > deadlineAt);
+          const cause = !sent ? 'not sent'
+            : arrivedLate ? 'answer request or board arrival occurred after the wait deadline'
+              : acceptedByDeadline && feedHadNoAnswerByDeadline ? 'board records the answer before the deadline, but the feed has no answer render by the deadline'
+                : 'not distinguished by the captured request, board, and feed state';
+          const capture = { width, cause, waitDeadlineAt: deadlineAt, answerActionAt, waitStartedAt, waitFailedAt,
+            requestSentAt: sent?.at ?? null, response: response ? { status: response.status, at: response.at } : null,
+            answerShout: answer, newestBoardShout: newest, boardAnswerCount: matchingShouts.length,
+            boardReadStartedAt: deadlineBoard.requestStartedAt, boardReadCompletedAt: deadlineBoard.responseAt,
+            boardReadError: deadlineBoard.error ?? null, feedLastDomMutationAt: feed?.lastMutationAt ?? null,
+            answerVisibleAt: feed?.answerVisibleAt ?? null, feedBrowserSampledAt: feed?.browserSampledAt ?? null,
+            feedProbeValid, diagnosticError };
+          const captureText = `phone-answer capture: ${JSON.stringify(capture)}`;
+          t.diagnostic(captureText);
+          assert.fail(`${waitError.message}; ${captureText}`);
+        }
+        } finally {
+          if (deadlineSnapshotTimer !== null) clearTimeout(deadlineSnapshotTimer);
+          if (deadlineSnapshotStarted && deadlineBoardSnapshot) await deadlineBoardSnapshot;
+          chrome.socket.removeEventListener('message', observeAnswerNetwork);
+          await chrome.stable(`window.__phoneAnswerProbe?.observer.disconnect(); delete window.__phoneAnswerProbe`).catch(() => undefined);
+      }
 
       await fill('#hold-lane', 'web');
       await fill('#hold-reason', `Phone hold ${width}`);
@@ -369,5 +605,60 @@ test('the spec chip measurement survives a redraw [N26,C7]', {
     if (chrome) await closeSnapshotChrome(chrome);
     await view.stop();
     rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+test('the lanes panel fits its card at every width [N26]', {
+  timeout: 120_000, // budget: hang ceiling for real Chrome startup and eight viewport and scheme layouts of one side card.
+}, async () => {
+  const executable = chromeExecutable();
+  assert.ok(executable, 'Chrome is installed or PULLBOARD_CHROME points to it');
+  const box = machine();
+  const demo = project(box, 'lanes-panel-fit', SPEC, { lanes: { web: { owns: ['web/'], specs: ['G'] }, review: { owns: ['review/'], specs: [] } } });
+  // A holder whose name is longer than the README demo's "coordinator (Demo coordinator)", which already overflowed.
+  const model = 'Demo coordinator with a long model name';
+  box.run(demo.repo, 'join', 'coordinator', '--model', model);
+  box.run(demo.repo, 'hold', 'review', '--reason', 'Waiting for the next demo item.');
+  const held = `held by coordinator (${model})`;
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-lanes-panel-'));
+  let chrome;
+  /** The card's content box, its sideways scroll and the page's, the holder chip, and every lane and form box that leaves the content box. */
+  const measure = async () => JSON.parse(await chrome.stable(`JSON.stringify((() => {
+    const card = document.querySelector('#shouts-pane aside[aria-label="Agents and lanes"]'), s = getComputedStyle(card), r = card.getBoundingClientRect();
+    const left = r.left + card.clientLeft + parseFloat(s.paddingLeft), right = r.left + card.clientLeft + card.clientWidth - parseFloat(s.paddingRight);
+    const name = (e) => e.id ? '#' + e.id : (e.className && typeof e.className === 'string' ? '.' + e.className.split(' ').join('.') : e.tagName.toLowerCase()) + (e.textContent.trim() ? ' "' + e.textContent.trim().slice(0, 24) + '"' : '');
+    const boxes = [...card.querySelectorAll('#lanes .lane, #lanes .lane *, #hold-form, #hold-form *')].filter((e) => e.getClientRects().length).map((e) => [name(e), e.getBoundingClientRect()]);
+    const past = boxes.filter(([, b]) => b.left < left - 0.5 || b.right > right + 0.5).map(([n, b]) => [n, Math.round(b.left), Math.round(b.right)]);
+    const chip = card.querySelector('#lanes [data-release="review"]')?.closest('.lane')?.querySelector('.chip'), cs = chip && getComputedStyle(chip);
+    const form = card.querySelector('#hold-form'), widths = ['#hold-form', '#hold-lane', '#hold-reason', '#hold-form button[type=submit]'].map((q) => Math.round(card.querySelector(q).getBoundingClientRect().width * 10) / 10);
+    return { content: [Math.round(left), Math.round(right)], column: s.gridTemplateColumns, card: [card.scrollWidth, card.clientWidth], page: [Math.max(document.documentElement.scrollWidth, document.body.scrollWidth), document.documentElement.clientWidth],
+      chip: chip && { text: chip.textContent.trim(), title: chip.title, wraps: cs.whiteSpace === 'normal', ellipsis: cs.textOverflow === 'ellipsis' && cs.overflow === 'hidden', clipped: chip.scrollWidth > chip.clientWidth },
+      widths, past };
+  })())`));
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await chrome.waitFor('innerWidth === 1440');
+    await press(chrome, "document.querySelector('[data-tab=shouts]')");
+    await chrome.waitFor("!!document.querySelector('#shouts-pane:not([hidden]) #lanes [data-release=review]')");
+    for (const scheme of ['light', 'dark']) {
+      await chrome.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: scheme }] });
+      await chrome.waitFor(`document.documentElement.dataset.scheme === '${scheme}'`);
+      for (const width of [375, 900, 1280, 1440]) {
+        await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
+        await chrome.waitFor(`innerWidth === ${width}`);
+        const at = `${width}/${scheme}`, m = await measure();
+        assert.deepEqual(m.past, [], `${at}: every lane and form control stays inside the card's content box ${m.content}: ${JSON.stringify(m)}`);
+        assert.ok(m.card[0] <= m.card[1] && m.page[0] <= m.page[1], `${at}: neither the card nor the page scrolls sideways: ${JSON.stringify(m)}`);
+        assert.equal(m.chip.text, held, `${at}: the chip names the whole holder`);
+        assert.ok(m.chip.wraps || (m.chip.ellipsis && m.chip.title === held), `${at}: a long holder wraps, or ends in an ellipsis with the full name on hover: ${JSON.stringify(m.chip)}`);
+        assert.ok(m.widths.every((w) => Math.abs(w - (m.content[1] - m.content[0])) <= 1), `${at}: the hold form, its lane, its reason and its button take the card's width ${m.content[1] - m.content[0]}: ${m.widths}`);
+      }
+    }
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    rmSync(profile, { recursive: true, force: true });
+    await view.stop();
   }
 });

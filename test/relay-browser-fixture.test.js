@@ -100,7 +100,7 @@ test('relay idle readiness waits for a real held request and then observes its c
   const deadline = Date.now() + relayWorkBudgetMs(1);
   while (box.stateReadStarted() === before && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
   assert.ok(box.stateReadStarted() > before);
-  await assert.rejects(chrome.waitForRelayIdle(200), /did not become idle within 200ms/);
+  await assert.rejects(chrome.waitForRelayIdle(200), /did not become idle within 200ms/); // budget: declared 200ms idle deadline for a deliberately stalled page.
   release();
   assert.equal(await chrome.pollTask(task), 200);
   await chrome.waitForRelayIdle();

@@ -4,7 +4,7 @@
  */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { test } from 'node:test';
@@ -78,7 +78,7 @@ test('the demo board declares every agent\'s model [I11,I13]', () => {
     const root = join(fixture, 'repo');
     mkdirSync(root);
     for (const directory of ['src', 'bin', 'docs/shots', 'skills']) cpSync(join(source, directory), join(root, directory), { recursive: true });
-    for (const file of ['test/chrome-fixture.js', 'test/fixture-child.js', 'package.json']) cpSync(join(source, file), join(root, file));
+    for (const file of ['test/chrome-fixture.js', 'test/fixture-child.js', 'package.json', 'CHANGELOG.md']) cpSync(join(source, file), join(root, file));
     const shims = join(fixture, 'bin');
     mkdirSync(shims);
     const pullboard = join(shims, 'pullboard');
@@ -97,6 +97,50 @@ test('the demo board declares every agent\'s model [I11,I13]', () => {
       assert.ok(typeof detail.model === 'string' && detail.model.trim() && detail.model !== 'unknown', `${event.event_by} ${event.event_kind} declares its model`);
     }
     assert.deepEqual([...models].sort(), [['app-1', 'Demo builder'], ['coordinator', 'Demo coordinator'], ['review-1', 'Demo reviewer']]);
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test('the README capture runs end to end [I11,I13]', { timeout: 240_000 }, () => { // budget: outer ceiling gives the bounded capture process 30s to clean up.
+  const fixture = mkdtempSync(join(tmpdir(), 'pullboard-readme-capture-'));
+  try {
+    const source = fileURLToPath(ROOT);
+    const root = join(fixture, 'repo');
+    mkdirSync(root);
+    for (const directory of ['bin', 'src', 'skills', 'docs/shots']) {
+      cpSync(join(source, directory), join(root, directory), { recursive: true });
+    }
+    mkdirSync(join(root, 'test'));
+    for (const file of ['package.json', 'CHANGELOG.md', 'test/chrome-fixture.js', 'test/fixture-child.js']) {
+      cpSync(join(source, file), join(root, file));
+    }
+    const shims = join(fixture, 'bin');
+    mkdirSync(shims);
+    const pullboard = join(shims, 'pullboard');
+    writeFileSync(pullboard, `#!/bin/sh\nexec "${process.execPath}" "${join(root, 'bin/pullboard.js')}" "$@"\n`);
+    chmodSync(pullboard, 0o755);
+    const images = ['desktop.png', 'phone.png', 'shouts.png'];
+    for (const image of images) rmSync(join(root, 'docs/shots', image), { force: true });
+    const chrome = process.env.PULLBOARD_CHROME || [
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser',
+    ].find((candidate) => { try { return spawnSync(candidate, ['--version'], { stdio: 'ignore' }).status === 0; } catch { return false; } });
+    assert.ok(chrome, 'the README capture requires installed headless Chrome');
+    const result = spawnSync(process.execPath, [join(root, 'docs/shots/demo.mjs'), '--screenshots-only'], {
+      cwd: root,
+      env: { ...process.env, PATH: [shims, process.env.PATH].filter(Boolean).join(delimiter), PULLBOARD_CHROME: chrome, HOME: join(fixture, 'home'), PULLBOARD_HOME: join(fixture, 'home'), PULLBOARD_MACHINE_HOME: join(fixture, 'home') },
+      encoding: 'utf8',
+      timeout: 210_000, // budget: isolated board build, export and three Chrome captures; 30s remains for cleanup.
+    });
+    assert.equal(result.status, 0, `the isolated README capture completes in headless Chrome: ${result.stderr}\n${result.stdout}`);
+    for (const image of images) {
+      assert.ok(existsSync(join(root, 'docs/shots', image)), `${image} was captured`);
+      const bytes = readFileSync(join(root, 'docs/shots', image));
+      assert.ok(bytes.length > 8, `${image} was captured`);
+      assert.deepEqual([...bytes.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10], `${image} is a PNG screenshot`);
+    }
+    assert.ok(statSync(join(root, 'docs/demo/index.html')).size > 0, 'the demo export was rebuilt');
   } finally {
     rmSync(fixture, { recursive: true, force: true });
   }

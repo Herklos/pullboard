@@ -100,7 +100,7 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
   function denied() {
     if (accessLost) return;
     accessLost = true;
-    for (const entry of paired.values()) { entry.stream?.close(); entry.state = null; }
+    for (const entry of paired.values()) { entry.stream?.close(); entry.state = null; entry.shouts = null; }
     paired.clear();
     document.querySelector('main')?.replaceChildren();
     location.replace('/');
@@ -129,6 +129,7 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
   function waitForFirstSnapshot(entry) {
     entry.stream?.close();
     entry.state = null;
+    entry.shouts = null;
     paired.delete(entry.id);
     const board = available.find(value => value.id === entry.id);
     waitingBoards.set(entry.id, board?.repository ?? entry.repository ?? 'This board');
@@ -167,6 +168,7 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
     entry.snapshotTag = response.headers.get('etag');
     if (row.sequence >= entry.cursor) {
       entry.state = state;
+      entry.shouts = Array.isArray(value.presentation?.shouts) ? value.presentation.shouts : null;
       entry.cursor = row.sequence;
     }
   }
@@ -214,6 +216,7 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
     if (move.engine !== ENGINE_VERSION) throw new Refused('RELAY_ENGINE_VERSION', 'This board needs engine ' + move.engine + '; this browser reads engine ' + ENGINE_VERSION + '. Upgrade the browser client.');
     if (move.presentation) {
       entry.state = presentationState(move.presentation, entry.id);
+      entry.shouts = Array.isArray(move.presentation.shouts) ? move.presentation.shouts : null;
       entry.cursor = row.event_id;
     } else {
       // A snapshot may be uploaded just after this ACK and compact the event immediately. Keep
@@ -333,7 +336,7 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
       if (paired.has(board.id) && pair?.board !== board.id && encodeBoardKey(paired.get(board.id).key) === encoded) continue;
       if (!encoded) continue;
       try {
-        const entry = { id: board.id, repository: board.repository, key: decodeBoardKey(encoded), cursor: -1, state: null, outbox: null };
+        const entry = { id: board.id, repository: board.repository, key: decodeBoardKey(encoded), cursor: -1, state: null, shouts: null, outbox: null };
         await snapshot(entry);
         await catchUp(entry);
         if (accessLost) throw new Error('Sign in again to read this board.');
@@ -411,6 +414,23 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
     return enqueueStream(entry, work);
   }
 
+  /** Resolve one addressed shout from this paired device's complete sealed presentation. */
+  function addressedShout(entry, rawId) {
+    if (!/^[1-9]\d*$/.test(rawId) || !Number.isSafeInteger(Number(rawId))) {
+      throw new Refused('BAD_REQUEST', 'shout needs a positive integer id; use the id from the event or recent state');
+    }
+    if (!Array.isArray(entry.shouts)) {
+      throw new Refused('SHOUT_NOT_AVAILABLE', 'this snapshot does not include addressed shout history; refresh it with a current CLI');
+    }
+    const id = Number(rawId);
+    const found = entry.shouts.find(shout => shout.shout_id === id);
+    if (!found) throw new Refused('NO_SHOUT', `no shout #${id}`);
+    const answer = found.shout_decision ? entry.shouts.find(shout => shout.shout_answers === id) ?? null : null;
+    return { version: 1, shout: { ...found,
+      decision_state: found.shout_decision ? (answer ? 'answered' : 'open') : null,
+      decision_answer: answer } };
+  }
+
   /** Seal an unchanged intent at its current public sequence after another client wins the order. */
   async function requestEnvelope(entry, value, sequence) {
     const bytes = await seal(entry.key, new TextEncoder().encode(JSON.stringify(value)), { boardId: entry.id, kind: 'request', sequence });
@@ -471,9 +491,12 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
       if (url.origin !== location.origin) throw new Error('Use this relay origin to read a board.');
       if (url.pathname === '/api/v1/boards') { if (body !== undefined && body !== null) throw new Refused('BAD_REQUEST', 'Send person intent to a paired board.'); return listing(); }
       const match = /^\/api\/v1\/boards\/([0-9a-f]{32})\/(state|events|moves|requests)$/.exec(url.pathname);
-      const entry = match && paired.get(match[1]);
+      const shoutMatch = /^\/api\/v1\/boards\/([0-9a-f]{32})\/shouts\/([^/]+)$/.exec(url.pathname);
+      const route = match ?? shoutMatch;
+      const entry = route && paired.get(route[1]);
       if (!entry) throw new Error('Pair this browser to read that board.');
       if (body !== undefined && body !== null) {
+        if (shoutMatch) throw new Refused('BAD_REQUEST', 'read an addressed shout with GET; use a board move to create or answer shouts');
         if (!['moves', 'requests'].includes(match[2])) throw new Refused('BAD_REQUEST', 'Send person intent to this board’s moves endpoint.');
         const value = preparePersonRequest(body);
         const send = enqueue(entry, async () => {
@@ -484,6 +507,14 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
           return sendOutbox(entry);
         });
         return send;
+      }
+      if (shoutMatch) {
+        return enqueue(entry, async () => {
+          await flushOutbox(entry);
+          await snapshot(entry);
+          await catchUp(entry);
+          return addressedShout(entry, shoutMatch[2]);
+        });
       }
       if (!['state', 'events'].includes(match[2])) throw new Refused('BAD_REQUEST', 'Read this board’s state or events endpoint.');
       return enqueue(entry, async () => {

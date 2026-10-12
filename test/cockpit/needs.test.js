@@ -135,7 +135,7 @@ test("needs-you holds only the person's calls; the rest show on the board with w
     page.run("view.agent = 'web-1'; render();");
     assert.deepEqual(agentEntries(page.show('agents')).find((agent) => agent.id === 'web-1').holds, ['#2 Farewell: sent back', '#1 Greeting: to verify'], 'the agent that built them holds both');
     page.run('view.agent = null; render();');
-    assert.match(page.show('lanes'), /<b>web<\/b> <span class="chip no">held by coordinator \(unknown\)<\/span> <span class="muted">G3 is open<\/span>/, 'a held lane names who holds it');
+    assert.match(page.show('lanes'), /<b>web<\/b> <span class="chip no" title="held by coordinator \(unknown\)">held by coordinator \(unknown\)<\/span> <span class="muted">G3 is open<\/span>/, 'a held lane names who holds it');
 
     // The sidebar counts exactly the person's calls; its line still says what the agents are doing.
     assert.deepEqual(projectRows(page.show('proj-list')).map((row) => [row.needs, row.line]), [['4', '1 decision · 1 question · 1 draft row · 1 lane held · 1 sent back · 1 to verify']]);
@@ -264,20 +264,20 @@ test('needs you and the asks sit in their lists [N26]', { timeout: 180_000 }, as
     await chrome.stable("document.querySelector('#shout-text').focus()");
     await chrome.send('Input.insertText', { text: 'Footer after the greeting.' });
     await click('#shout-send');
-    await chrome.waitFor("[...document.querySelectorAll('#feed .shout .text')].some((text) => text.textContent === 'Footer after the greeting.')", 15_000);
+    await chrome.waitFor("[...document.querySelectorAll('#feed .shout .text')].some((text) => text.textContent === 'Footer after the greeting.')", 15_000); // budget: hang ceiling for the sent shout to appear in the feed; no throughput claim.
     r = await read();
     assert.equal(r.okNote, false, 'a sent shout is its card, with no note beside the composer');
     // However many calls there are, each is a row: six more decisions make ten rows, none folded into a count.
     for (const n of [1, 2, 3, 4, 5, 6]) box.run(alpha.repo, 'shout', 'person', `Ship part ${n} today?`, '--decision');
     await click('[data-tab=items]');
-    await chrome.waitFor("document.querySelectorAll('#needs > .row').length >= 10", 15_000);
+    await chrome.waitFor("document.querySelectorAll('#needs > .row').length >= 10", 15_000); // budget: hang ceiling for ten native decision rows to appear; no throughput claim.
     r = await read();
     assert.deepEqual([r.needs.length, r.needs.filter((need) => /^Ship part [1-6] today\?$/.test(need.words)).length, r.needs.every((need) => need.label)], [10, 6, true],
       `ten calls, ten rows, each with its kind in the warning colour: ${JSON.stringify(r.needs)}`);
     assert.equal(await chrome.stable("document.querySelector('#needs').textContent.includes('more need you')"), false, 'no call is folded into a count');
     // Narrowed to the unread shouts from the status bar, the feed carries its bar with show all; show all clears it.
     box.run(alpha.web, 'shout', 'coordinator', 'Greeting is half done.');
-    await chrome.waitFor("!document.querySelector('#status-unread')?.hidden", 15_000);
+    await chrome.waitFor("!document.querySelector('#status-unread')?.hidden", 15_000); // budget: hang ceiling for the unread badge after a new shout; no throughput claim.
     await click('#status-unread');
     await chrome.waitFor("view.tab === 'shouts' && !!document.querySelector('#feed .feed-bar')");
     assert.match(await chrome.stable("document.querySelector('#feed .feed-bar').textContent"), /^\d+ unread\s*show all$/, 'narrowed to the unread shouts, the feed carries its bar with show all');

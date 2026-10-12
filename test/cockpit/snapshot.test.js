@@ -337,6 +337,79 @@ test('replay speed is judged by its scheduled delay [A10,C7]', { timeout: 90_000
   }
 });
 
+/** Measure every interactive replay control through its real start, pause, and end states. */
+test('the replay controls don\'t move when the replay starts [A10,C7]', { timeout: 60_000 }, // budget: hang-only ceiling for two viewport geometry passes.
+async function replayControlsStayPut() {
+  const executable = chromeExecutable();
+  assert.ok(executable, 'Chrome is required for replay control geometry coverage');
+  const box = machine();
+  const alpha = project(box, 'stable-replay-controls');
+  for (let id = 1; id <= 6; id++) {
+    box.run(alpha.repo, 'add', 'web', `Replay geometry item ${id}`, '--specs', 'G1', '--criterion', 'replay controls stay put');
+  }
+  const folder = join(box.dir, 'stable-replay-controls-export');
+  box.run(alpha.repo, 'view', '--export', folder);
+  const host = await serveFolder(folder, '/demo/');
+  const profile = join(box.dir, 'stable-replay-controls-chrome');
+  let chrome;
+  try {
+    chrome = await openSnapshotChrome(executable, `${host.base}/demo/`, profile);
+    await settled(chrome, "document.body.classList.contains('snapshot') && !!data?.project && snapshotReplay.index === snapshotReplay.events.length");
+    await chrome.send('Emulation.setCPUThrottlingRate', { rate: 6 });
+    const total = await chrome.stable('snapshotReplay.events.length');
+    assert.ok(total >= 6, 'the exported replay has enough events to exercise all control states');
+    /** Sample all three interactive control rectangles without inserting a browser wait between them. */
+    const readControlBoxes = async () => JSON.parse(await chrome.stable(`JSON.stringify(Object.fromEntries(
+      ['#replay-play', '#replay-pause', '#replay-speed'].map(selector => {
+        const node = document.querySelector(selector);
+        const rect = node.getBoundingClientRect();
+        return [selector, { x: rect.x, y: rect.y, width: rect.width, height: rect.height }];
+      })
+    ))`));
+    /** Exercise real browser input and compare control geometry within one viewport. */
+    const verifyWidth = async (width) => {
+      await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
+      await chrome.waitFor(`innerWidth === ${width}`);
+      await chrome.stable(`(() => {
+        replayPosition(0);
+        const speed = document.querySelector('#replay-speed');
+        speed.value = '1';
+        speed.dispatchEvent(new Event('change', { bubbles: true }));
+      })()`);
+      const atStart = await readControlBoxes();
+      assert.equal(await chrome.stable("document.querySelector('#replay-play').textContent"), 'Play',
+        `${width}: the start-state label is the short Play label`);
+      await press(chrome, "document.querySelector('#replay-play')");
+      assert.equal(await chrome.stable('snapshotReplay.playing'), true, `${width}: native Play starts replay`);
+      const whilePlaying = await readControlBoxes();
+      await press(chrome, "document.querySelector('#replay-pause')");
+      assert.equal(await chrome.stable('snapshotReplay.playing'), false, `${width}: native Pause pauses replay`);
+      const whilePaused = await readControlBoxes();
+      await chrome.stable(`(() => {
+        replayPosition(snapshotReplay.events.length - 1);
+        document.querySelector('#replay-speed').value = '16';
+        document.querySelector('#replay-speed').dispatchEvent(new Event('change', { bubbles: true }));
+      })()`);
+      await press(chrome, "document.querySelector('#replay-play')");
+      assert.equal(await chrome.stable('snapshotReplay.index'), total, `${width}: final Play renders the end state`);
+      assert.equal(await chrome.stable('snapshotReplay.playing'), false, `${width}: replay stops at its final event`);
+      const atEnd = await readControlBoxes();
+      assert.equal(await chrome.stable("document.querySelector('#replay-play').textContent"), 'Play from first event',
+        `${width}: the end-state label exercises the longer Play text`);
+      for (const [state, boxes] of Object.entries({ whilePlaying, whilePaused, atEnd })) {
+        assert.deepEqual(boxes, atStart, `${width}: every interactive replay control keeps its box unchanged ${state}`);
+      }
+    };
+    for (const width of [375, 1280]) {
+      await verifyWidth(width);
+    }
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    await host.close();
+    rmSync(profile, { recursive: true, force: true });
+  }
+});
+
 test('static export redacts structured checkout paths but preserves paths people wrote [A10]', async () => {
   const box = machine();
   const alpha = project(box, 'private-project');
@@ -449,7 +522,7 @@ test('an exported roadmap has its own address under a folder, and Back and Forwa
     await travel(chrome, 1);
     await settled(chrome, `${ready} && ${showing('roadmap', '/demo/#roadmap')} && !!${roadmapRow('#2')}`);
     await press(chrome, roadmapRow('#2'));
-    await chrome.waitFor(`${showing('items', '/demo/')} && document.querySelector('#detail h2')?.innerText.includes('Open page')`);
+    await chrome.waitFor(`${showing('items', '/demo/#items/2')} && document.querySelector('#detail h2')?.innerText.includes('Open page')`);
     await travel(chrome, -1);
     await settled(chrome, `${ready} && ${showing('roadmap', '/demo/#roadmap')}`);
 

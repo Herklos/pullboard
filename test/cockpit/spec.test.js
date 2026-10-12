@@ -8,6 +8,118 @@ import { standardDoctrine } from '../../src/doctrine.js';
 import { loadConfig } from '../../src/config.js';
 import { tapTarget, SPEC, machine, project, build, startView, styleOf, openPage, boardOf, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, watchSpecDecisionWait, press } from './fixture.js';
 
+/** Observe a real Spec control's native pointer sequence and any replacement inside its detail card. */
+async function watchSpecPress(chrome, selector) {
+  await chrome.stable(`(() => {
+    const target = document.querySelector(${JSON.stringify(selector)}), detail = document.querySelector('#spec-detail');
+    if (!target || !detail) throw Error('Spec press observer target is missing: ' + ${JSON.stringify(selector)});
+    const name = node => node ? { tag: node.tagName, id: node.id, decision: node.dataset.rowDecision || '', connected: node.isConnected } : null;
+    const box = node => { const r = node?.getBoundingClientRect(); return r ? { x:r.x, y:r.y, width:r.width, height:r.height } : null; };
+    const originalRender = window.render;
+    if (typeof originalRender !== 'function') throw Error('Spec press observer cannot instrument the real render function');
+    const trace = window.__pullboardSpecPress = { selector:${JSON.stringify(selector)}, target, initial:box(target), events:[], childListRecords:0, renderAttempts:0, removedTarget:false, originalRender };
+    window.render = function(...args) { trace.renderAttempts += 1; return originalRender.apply(this, args); };
+    const types = ['mousedown', 'mouseup', 'click'];
+    trace.listeners = types.map(type => {
+      const listener = event => {
+        const current = document.querySelector(trace.selector);
+        trace.events.push({ type, at:performance.now(), target:name(event.target), intendedConnected:target.isConnected,
+          intendedBox:box(target), currentSame:current === target, currentBox:box(current), hit:name(document.elementFromPoint(event.clientX, event.clientY)),
+          renderAttempts:trace.renderAttempts, childListRecords:trace.childListRecords, dialogHidden:document.querySelector('#spec-decline-dialog').hidden,
+          selected:view.row.spec, path:location.pathname, x:event.clientX, y:event.clientY });
+      };
+      document.addEventListener(type, listener, true);
+      return [type, listener];
+    });
+    trace.observer = new MutationObserver(records => {
+      trace.childListRecords += records.length;
+      trace.removedTarget ||= records.some(record => [...record.removedNodes].some(node => node === target || node.contains?.(target)));
+    });
+    trace.observer.observe(document.body, { childList:true, subtree:true });
+  })()`);
+  return {
+    /** Capture original/current identity, event targets and selected state without changing the page. */
+    async snapshot() {
+      return JSON.parse(await chrome.stable(`JSON.stringify((() => {
+        const trace = window.__pullboardSpecPress, current = document.querySelector(trace.selector);
+        const box = node => { const r = node?.getBoundingClientRect(); return r ? { x:r.x, y:r.y, width:r.width, height:r.height } : null; };
+        return { width:innerWidth, path:location.pathname, selected:view.row.spec, dialogHidden:document.querySelector('#spec-decline-dialog').hidden,
+          originalConnected:trace.target.isConnected, originalBox:box(trace.target), currentSame:current === trace.target, currentBox:box(current),
+          childListRecords:trace.childListRecords, renderAttempts:trace.renderAttempts, removedTarget:trace.removedTarget, events:trace.events };
+      })())`));
+    },
+    /** Disconnect only the observers installed for this trace. */
+    async dispose() {
+      await chrome.stable(`(() => { const trace=window.__pullboardSpecPress; if (!trace) return; trace.observer.disconnect(); for (const [type, listener] of trace.listeners) document.removeEventListener(type, listener, true); window.render=trace.originalRender; delete window.__pullboardSpecPress; })()`);
+    },
+  };
+}
+
+/** Record real filter input and completed Spec renders so a stale row read can name its render provenance. */
+async function watchSpecFilter(chrome) {
+  await chrome.stable(`(() => {
+    const originalRender = window.render;
+    if (typeof originalRender !== 'function') throw Error('Spec filter observer cannot instrument the real render function');
+    const trace = window.__specFilterTrace = { originalRender, renderCount:0, renderAttemptCount:0, lastRow:null, lastRenderId:null, events:[], attempts:[], renders:[], listeners:[], captureErrors:[] };
+    /** Read source state and the row DOM immediately after a completed render. */
+    const state = () => {
+      const row = document.querySelector('#spec-list [data-row="spec:G1"]');
+      const chip = row?.querySelector(':scope > .chip');
+      const filter = typeof view === 'object' ? view.rows?.spec ?? null : null;
+      const source = typeof data === 'object' ? data.project?.spec?.find(entry => entry.id === 'G1') : null;
+      return { readAt:performance.now(), filter, sourceDataStatus:source?.status ?? null, rowStatus:chip?.textContent.trim() ?? null, row };
+    };
+    /** Keep diagnostic failures from changing the original page action or renderer result. */
+    const recordError = error => {
+      try { trace.captureErrors.push(String(error?.stack || error)); if (trace.captureErrors.length > 4) trace.captureErrors.shift(); }
+      catch { /* Diagnostics never replace the original page behavior. */ }
+    };
+    /** Preserve the actual renderer while assigning an ordinal and post-render snapshot. */
+    window.render = function(...args) {
+      const result = originalRender.apply(this, args);
+      try {
+        const current = state();
+        trace.renderAttemptCount += 1;
+        if (typeof deferredClickRender !== 'undefined' && deferredClickRender) {
+          trace.attempts.push({ at:current.readAt, deferred:true, filter:current.filter, sourceDataStatus:current.sourceDataStatus, rowStatus:current.rowStatus });
+          if (trace.attempts.length > 8) trace.attempts.shift();
+        } else {
+          trace.renderCount += 1;
+          trace.lastRow = current.row;
+          trace.lastRenderId = trace.renderCount;
+          trace.renders.push({ id:trace.renderCount, at:current.readAt, filter:current.filter, sourceDataStatus:current.sourceDataStatus, rowStatus:current.rowStatus });
+          if (trace.renders.length > 8) trace.renders.shift();
+        }
+      } catch (error) { recordError(error); }
+      return result;
+    };
+    /** Record the filter control and pre-handler state for the native pointer sequence. */
+    const listen = type => {
+      const listener = event => {
+        const target = event.target.closest?.('[data-rows^="spec:"]');
+        if (!target) return;
+        try {
+          const current = state();
+          trace.events.push({ type, at:current.readAt, target:target.dataset.rows, filter:current.filter, sourceDataStatus:current.sourceDataStatus, rowStatus:current.rowStatus });
+          if (trace.events.length > 8) trace.events.shift();
+        } catch (error) { recordError(error); }
+      };
+      document.addEventListener(type, listener, true);
+      trace.listeners.push([type, listener]);
+    };
+    for (const type of ['mousedown', 'mouseup', 'click']) listen(type);
+  })()`);
+  return {
+    /** Restore only the renderer and pointer listeners installed for this measurement. */
+    async dispose() {
+      try {
+        await chrome.stable(`(() => { const trace=window.__specFilterTrace; if (!trace) return; window.render=trace.originalRender; for (const [type, listener] of trace.listeners) document.removeEventListener(type, listener, true); delete window.__specFilterTrace; })()`);
+        return null;
+      } catch (error) { return String(error?.stack || error); }
+    },
+  };
+}
+
 
 test('spec rows read across a phone [N26,D1]', async () => {
   const box = machine();
@@ -162,11 +274,7 @@ test('spec rows read as a list, decided in the panel [N26]', { timeout: 300_000 
   try {
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
     await chrome.waitFor("typeof data === 'object' && !!data?.project?.spec?.length && data.project.practice.some((r) => r.id === 'D8')");
-    // Pullboard's own rules can wait on the person too; they list under Needs your decision, in the board's order, but are
-    // changed in DOCTRINE.md rather than decided here.
-    const order = JSON.parse(await chrome.stable("JSON.stringify(data.project.practice.map((r) => [r.id, r.origin, r.status, !!r.decision]))"));
-    const standardWaiting = order.filter(([, origin, status, decided]) => origin === 'standard' && ['pending', 'draft'].includes(status) && !decided).map(([id, , status]) => [id, status === 'draft' ? null : status]);
-    expected.doctrine.decide = [...standardWaiting, ...expected.doctrine.decide].sort(([a], [b]) => order.findIndex(([id]) => id === a) - order.findIndex(([id]) => id === b));
+    // Inherited defaults have their own review filter; local proposals still wait for the person's decision.
     for (const scheme of ['light', 'dark']) {
       for (const width of [1280, 375]) {
         await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
@@ -197,7 +305,7 @@ test('spec rows read as a list, decided in the panel [N26]', { timeout: 300_000 
           await tap(`#${kind}-list [data-row="${kind}:${first}"]`);
           await chrome.waitFor(`view.row['${kind}'] === '${first}' && document.activeElement === document.querySelector('#${kind}-list')`);
           // At 375 the detail stacks under the list: tapping a row brings its decision into view.
-          if (width === 375) await chrome.waitFor(`(() => { const d = document.querySelector('#${kind}-detail [data-row-decision="approve"]')?.getBoundingClientRect(); return !!d && d.top >= 0 && d.bottom <= innerHeight; })()`, 10_000);
+          if (width === 375) await chrome.waitFor(`(() => { const d = document.querySelector('#${kind}-detail [data-row-decision="approve"]')?.getBoundingClientRect(); return !!d && d.top >= 0 && d.bottom <= innerHeight; })()`, 10_000); // budget: hang ceiling for the selected mobile decision to enter the viewport; no speed threshold.
           // The picked row's detail holds its decision once, a 44px target each.
           const held = await read(kind);
           assert.deepEqual(held.decide.map((b) => b.word), ['Approve', 'Decline'], `${tab}: the picked row's detail holds its decision`);
@@ -208,7 +316,7 @@ test('spec rows read as a list, decided in the panel [N26]', { timeout: 300_000 
           assert.equal(await chrome.stable(`view.row['${kind}']`), first, `${tab}: and up moves it back`);
           await pressKey('a', 'KeyA', 65);
           const after = undecidedNow[undecidedNow.findIndex(([id]) => id === first) + 1][0];
-          await chrome.waitFor(`!!document.querySelector('#${kind}-list .spec-feedback.ok') && view.row['${kind}'] === '${after}'`, 15_000);
+          await chrome.waitFor(`!!document.querySelector('#${kind}-list .spec-feedback.ok') && view.row['${kind}'] === '${after}'`, 15_000); // budget: hang ceiling for the saved decision and next row selection; no throughput claim.
           assert.deepEqual([await recorded(kind, first), await recorded(kind, second)], [{ stage: 'approved, pending apply', decided: 'approved' }, { stage: 'draft', decided: null }],
             `${tab}: A approved the picked ${first}, and only ${first}`);
           assert.equal(await chrome.stable(`document.activeElement === document.querySelector('#${kind}-list')`), true, `${tab}: the list keeps focus for the next key`);
@@ -222,14 +330,14 @@ test('spec rows read as a list, decided in the panel [N26]', { timeout: 300_000 
           assert.deepEqual(await recorded(kind, second), { stage: 'draft', decided: null }, `${tab}: and decides nothing`);
           await chrome.send('Input.insertText', { text: ' clearer outcome, please' });
           await chrome.click("document.querySelector('#spec-decline-submit')");
-          await chrome.waitFor(`document.querySelector('#spec-decline-dialog').hidden && !!document.querySelector('#${kind}-list .spec-feedback.ok')`, 15_000);
+          await chrome.waitFor(`document.querySelector('#spec-decline-dialog').hidden && !!document.querySelector('#${kind}-list .spec-feedback.ok')`, 15_000); // budget: hang ceiling for the saved decline and dialog close; no throughput claim.
           assert.deepEqual(await recorded(kind, second), { stage: 'declined, pending apply', decided: 'a clearer outcome, please' }, `${tab}: D declined ${second} with its reason`);
           // The last layout decides the last two drafts, so only the earlier ones have a row after them to stay untouched.
           if (third) assert.deepEqual(await recorded(kind, third), { stage: 'draft', decided: null }, `${tab}: and nothing else`);
           assert.equal(await chrome.stable(`document.activeElement === document.querySelector('#${kind}-list')`), true, `${tab}: the dialog returns to the list`);
           // The two decided rows leave Needs your decision.
           expected[kind].decide = undecidedNow.filter(([id]) => id !== first && id !== second);
-          await chrome.waitFor(`![...document.querySelectorAll('#${kind}-list .srow')].some((row) => ['${kind}:${first}', '${kind}:${second}'].includes(row.dataset.row))`, 15_000);
+          await chrome.waitFor(`![...document.querySelectorAll('#${kind}-list .srow')].some((row) => ['${kind}:${first}', '${kind}:${second}'].includes(row.dataset.row))`, 15_000); // budget: hang ceiling for decided rows to leave Needs; no throughput claim.
 
           // Under All rows, every row not approved says what it is.
           await filter(kind, 'all');
@@ -267,6 +375,26 @@ test('real Chrome records Spec row decisions from the row, detail and confirmed 
   /** Click a visible control through Chrome's input path without scrolling the result away. */
   const click = async (chrome, selector) => {
     await press(chrome, `document.querySelector(${JSON.stringify(selector)})`);
+  };
+
+  /** Preserve an original native click while recording the landed node, redraws and address. */
+  const diagnosticClick = async (chrome, selector, width, label) => {
+    const trace = await watchSpecPress(chrome, selector);
+    let clickFailure;
+    try {
+      await click(chrome, selector);
+    } catch (error) {
+      clickFailure = error;
+    } finally {
+      try {
+        t.diagnostic(`${width}: original ${label}: ${JSON.stringify(await trace.snapshot())}`);
+      } catch (error) {
+        t.diagnostic(`${width}: original ${label} snapshot failed: ${error.message}`);
+      }
+      try { await trace.dispose(); }
+      catch (error) { if (!clickFailure) clickFailure = error; }
+    }
+    if (clickFailure) throw clickFailure;
   };
 
   /** Run the full decision story in a fresh real board and browser at one viewport width. */
@@ -332,7 +460,7 @@ test('real Chrome records Spec row decisions from the row, detail and confirmed 
       assert.equal(await chrome.stable("!!document.querySelector('#spec-list [data-row=\"spec:G1\"]')"), false, `${width}: approval immediately leaves Needs your decision`);
       await chrome.click("document.querySelector('#spec-chips [data-rows=\"spec:all\"]')");
 
-      await click(chrome, '#spec-detail [data-row-decision="decline"]');
+      await diagnosticClick(chrome, '#spec-detail [data-row-decision="decline"]', width, 'detail decline before cancel');
       assert.ok(await chrome.stable("!document.querySelector('#spec-decline-dialog').hidden && document.querySelector('#spec-decline-title').textContent === 'Decline G2'"), `${width}: G2 decline opens the reason form`);
       assert.ok(await chrome.stable(`[...document.querySelectorAll('#spec-decline-dialog input,#spec-decline-dialog button')].every(e => e.getBoundingClientRect().height >= ${tapTarget(width)})`), `${width}: decline reason and controls meet the 44px target`);
       await click(chrome, '#spec-decline-cancel');
@@ -340,12 +468,12 @@ test('real Chrome records Spec row decisions from the row, detail and confirmed 
       assert.equal(state.events.filter((event) => event.event_kind === 'row_decision').length, 1, `${width}: cancelling decline records no event`);
       assert.equal(state.spec.find((row) => row.id === 'G2')?.decision, undefined, `${width}: cancelling leaves G2 undecided`);
 
-      await click(chrome, '#spec-detail [data-row-decision="decline"]');
+      await diagnosticClick(chrome, '#spec-detail [data-row-decision="decline"]', width, 'detail decline before saved decision');
       await chrome.stable("document.querySelector('#spec-decline-reason').value = 'Needs a clearer outcome'");
       box.run(demo.repo, 'shout', 'person', `refresh probe ${width}`);
       await chrome.waitFor(`data.project.shouts.some(shout => shout.shout_text === 'refresh probe ${width}')`);
       assert.equal(await chrome.stable("document.querySelector('#spec-decline-reason').value"), 'Needs a clearer outcome', `${width}: typed reason survives a live refresh`);
-      await click(chrome, '#spec-decline-submit');
+      await diagnosticClick(chrome, '#spec-decline-submit', width, 'decline submit');
       await chrome.waitFor("!!document.querySelector('#spec-detail .spec-feedback.ok,#spec-detail .spec-feedback.no')");
 
       await chrome.stable("window.__sectionConfirm = null; window.confirm = message => { window.__sectionConfirm = message; return false; }");
@@ -421,7 +549,7 @@ test('the spec decision wait names its state on timeout [N26]', { timeout: 60_00
     await chrome.waitFor("view.row.spec === 'G2'");
 
     let timeout;
-    try { await diagnostics.waitFor('false', 10); } catch (error) { timeout = error; }
+    try { await diagnostics.waitFor('false', 10); } catch (error) { timeout = error; } // budget: declared 10 ms negative timeout diagnostic deadline.
     assert.match(timeout?.message ?? '', /Browser condition did not arrive: false/, 'the test deliberately drives the real wait helper to timeout');
     assert.deepEqual(timeout.diagnostic.selectedRow, 'G2', 'the timeout record names the currently selected row');
     assert.equal(timeout.diagnostic.focusedElement.id, 'spec-list', 'the timeout record names the focused list');
@@ -436,6 +564,82 @@ test('the spec decision wait names its state on timeout [N26]', { timeout: 60_00
       finally {
         try { rmSync(profile, { recursive: true, force: true }); }
         finally { await view.stop(); }
+      }
+    }
+  }
+});
+
+test('the Spec decline opens its reason form under a 6× CPU throttle [N26]', { timeout: 120_000 }, async (t) => { // budget: Chrome startup plus the actual three-second state poll and cleanup under CPU throttling.
+  const executable = chromeExecutable();
+  assert.ok(executable, 'the required Spec interaction test needs real Chrome');
+  const spec = '# Decline under load\n\n## G · Goals\n- G1 [draft, must] Keep the reviewed result visible. | gate: web test\n';
+  const box = machine();
+  const demo = project(box, 'spec-decline-load', spec);
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-spec-decline-load-'));
+  let chrome;
+  let controlTrace;
+  let refreshTrace;
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.waitFor("typeof data === 'object' && !!data?.project");
+    await chrome.send('Emulation.setDeviceMetricsOverride', { width:375, height:812, deviceScaleFactor:1, mobile:false });
+    await chrome.send('Emulation.setCPUThrottlingRate', { rate:6 });
+    await chrome.click("document.querySelector('[data-tab=spec]')");
+    await chrome.waitFor("innerWidth === 375 && !!document.querySelector('#spec-list [data-row=\"spec:G1\"]')");
+    await press(chrome, "document.querySelector('#spec-list [data-row=\"spec:G1\"]')");
+    await chrome.waitFor("!!document.querySelector('#spec-detail [data-row-decision=\"decline\"]')");
+
+    const decline = '#spec-detail [data-row-decision="decline"]';
+    controlTrace = await watchSpecPress(chrome, decline);
+    try {
+      await press(chrome, `document.querySelector(${JSON.stringify(decline)})`);
+      const control = await controlTrace.snapshot();
+      t.diagnostic(`6× no-refresh control: ${JSON.stringify(control)}`);
+      assert.equal(control.dialogHidden, false, 'without an intervening refresh the real detail decline opens its reason form');
+      assert.deepEqual(control.events.map(event => event.type), ['mousedown', 'mouseup', 'click'], 'the no-refresh control received one native click');
+    } finally {
+      await controlTrace.dispose();
+      controlTrace = null;
+    }
+    await press(chrome, "document.querySelector('#spec-decline-cancel')");
+    await chrome.waitFor("document.querySelector('#spec-decline-dialog').hidden");
+
+    refreshTrace = await watchSpecPress(chrome, decline);
+    const refreshText = 'refresh while Spec decline pointer is held';
+    let refreshFailure;
+    try {
+      await press(chrome, `document.querySelector(${JSON.stringify(decline)})`, { afterMouseDown: async () => {
+        box.run(demo.repo, 'shout', 'person', refreshText);
+        await chrome.waitFor(`data.project.shouts.some(shout => shout.shout_text === ${JSON.stringify(refreshText)})`, 20_000); // budget: hang-only ceiling for the real view poll to carry the private CLI write while native mouse input is held; no throughput claim.
+        t.diagnostic(`6× pointer-held refresh before mouseup: ${JSON.stringify(await refreshTrace.snapshot())}`);
+      } });
+    } catch (error) {
+      refreshFailure = error;
+    }
+    let refreshed;
+    try {
+      refreshed = await refreshTrace.snapshot();
+      t.diagnostic(`6× pointer-held refresh after mouseup: ${JSON.stringify(refreshed)}`);
+    } catch (error) {
+      t.diagnostic(`6× pointer-held refresh snapshot failed: ${error.message}`);
+      if (!refreshFailure) refreshFailure = error;
+    }
+    if (refreshFailure) throw refreshFailure;
+    assert.equal(refreshed.dialogHidden, false, 'the real Spec decline still opens its reason form when a board refresh arrives during the native press');
+    assert.ok(refreshed.events.some(event => event.type === 'click'), `the native release produced a click after the refresh: ${JSON.stringify(refreshed)}`);
+    await refreshTrace.dispose();
+    refreshTrace = null;
+  } finally {
+    try { await refreshTrace?.dispose(); }
+    finally {
+      try { await controlTrace?.dispose(); }
+      finally {
+        try { if (chrome) await closeSnapshotChrome(chrome); }
+        finally {
+          try { await view.stop(); }
+          finally { rmSync(profile, { recursive:true, force:true }); }
+        }
       }
     }
   }
@@ -469,6 +673,7 @@ test('doctrine and spec rows share the items row [N26]', { timeout: 300_000 }, a
   const view = await startView(box);
   const profile = mkdtempSync(join(tmpdir(), 'pullboard-shared-rows-chrome-'));
   let chrome;
+  let filterTrace;
   /** Save a full-page proof of the actual rendered tab when a proof folder is requested. */
   const shot = async (kind, width, theme) => {
     if (!process.env.PULLBOARD_ROWS_PROOF) return;
@@ -485,9 +690,17 @@ test('doctrine and spec rows share the items row [N26]', { timeout: 300_000 }, a
     const style = e => { if (!e) return null; const s=getComputedStyle(e); return {display:s.display,dotColumn:s.gridTemplateColumns.split(" ")[0],gridTemplateAreas:s.gridTemplateAreas,columnGap:s.columnGap,rowGap:s.rowGap,padding:s.padding,fontFamily:s.fontFamily,fontSize:s.fontSize,fontWeight:s.fontWeight,lineHeight:s.lineHeight}; };
     const title = row?.querySelector('.t'), meta = row?.querySelector('.meta'), source = row?.querySelector('.rule-source'), reason = row?.querySelector('.rule-reason');
     const age = row?.querySelector('.row-age');
+    const trace = window.__specFilterTrace;
+    const currentRow = document.querySelector('#spec-list [data-row="spec:G1"]');
     return {tag:row?.tagName ?? null, className:row?.className ?? '', title:title?.textContent ?? '', titleFull:row?.getAttribute('title') ?? '', titleBox:box(title), titleStyle:title&&{overflow:getComputedStyle(title).textOverflow,whiteSpace:getComputedStyle(title).whiteSpace,lines:Math.ceil(title.getBoundingClientRect().height/parseFloat(getComputedStyle(title).lineHeight))},
       rowBox:box(row), rowStyle:style(row), dot:!!row?.querySelector(':scope > .dot'), meta:meta?.textContent ?? '', metaBox:box(source), source:source?.textContent ?? null, sourceBox:box(source), reason:reason?.textContent ?? null, reasonBox:box(reason), gate:row?.querySelector('.meta .gate')?.textContent ?? null, gateBox:box(row?.querySelector('.meta .gate')),
       count:age?.textContent.trim() ?? null, countBox:box(age), status:row?.querySelector(':scope > .chip')?.textContent.trim() ?? null, statusBox:box(row?.querySelector(':scope > .chip')),
+      renderProvenance:trace ? { readAt:performance.now(), currentFilter:typeof view === 'object' ? view.rows?.spec ?? null : null,
+        sourceDataStatus:typeof data === 'object' ? data.project?.spec?.find(entry => entry.id === 'G1')?.status ?? null : null,
+        events:trace.events.slice(-8), attempts:trace.attempts.slice(-8), renders:trace.renders.slice(-8),
+        renderAttemptCount:trace.renderAttemptCount, renderCount:trace.renderCount,
+        lastRenderId:trace.lastRenderId, currentRowRenderId:currentRow === trace.lastRow ? trace.lastRenderId : null,
+        currentRowIsLastRendered:currentRow === trace.lastRow, captureErrors:trace.captureErrors.slice(-4) } : null,
       overflow:document.documentElement.scrollWidth > document.documentElement.clientWidth, pageWidth:document.documentElement.clientWidth, pageScrollWidth:document.documentElement.scrollWidth};
   })())`));
 
@@ -531,11 +744,31 @@ test('doctrine and spec rows share the items row [N26]', { timeout: 300_000 }, a
         assert.match(header.approve ?? '', /Approve all 2/u, `${width}px ${theme}: Spec keeps its two-undecided-row Approve all action`);
         assert.ok(header.button >= tapTarget(width), `${width}px ${theme}: Approve all meets the #371 target size`);
 
-        await press(chrome, "document.querySelector('#spec-chips [data-rows=\"spec:decide\"]')");
-        const draft = await rowState('#spec-list [data-row="spec:G1"]');
-        const pending = await rowState('#spec-list [data-row="spec:G2"]');
-        assert.equal(draft.status, 'must', `${width}px ${theme}: the filter-implied draft status gives way to its tier`);
-        assert.equal(pending.status, 'pending', `${width}px ${theme}: a non-implied pending status remains explicit`);
+        filterTrace = await watchSpecFilter(chrome);
+        let assertionError;
+        try {
+          await press(chrome, "document.querySelector('#spec-chips [data-rows=\"spec:decide\"]')");
+          const draft = await rowState('#spec-list [data-row="spec:G1"]');
+          const pending = await rowState('#spec-list [data-row="spec:G2"]');
+          const capture = JSON.stringify({ row: draft, currentFilter: draft.renderProvenance?.currentFilter,
+            sourceDataStatus: draft.renderProvenance?.sourceDataStatus, rowStatus: draft.status,
+            renderAttemptCount: draft.renderProvenance?.renderAttemptCount, renderCount: draft.renderProvenance?.renderCount,
+            currentRowRenderId: draft.renderProvenance?.currentRowRenderId,
+            events: draft.renderProvenance?.events, attempts: draft.renderProvenance?.attempts, renders: draft.renderProvenance?.renders,
+            captureErrors: draft.renderProvenance?.captureErrors });
+          assert.equal(draft.status, 'must', `${width}px ${theme}: the filter-implied draft status gives way to its tier; row/render capture ${capture}; ROOT-CAUSE STATUS: NOT PROVEN`);
+          assert.equal(pending.status, 'pending', `${width}px ${theme}: a non-implied pending status remains explicit; row/render capture ${JSON.stringify({ row: pending, rootCauseStatus: 'NOT PROVEN' })}; ROOT-CAUSE STATUS: NOT PROVEN`);
+        } catch (error) {
+          assertionError = error;
+          throw error;
+        } finally {
+          const disposeError = await filterTrace.dispose();
+          if (disposeError) {
+            if (assertionError) assertionError.message += `; filter-observer cleanup also failed: ${disposeError}`;
+            else throw new Error(`filter-observer cleanup failed: ${disposeError}`);
+          }
+          filterTrace = null;
+        }
         await press(chrome, "document.querySelector('#spec-chips [data-rows=\"spec:approved\"]')");
         const approved = await rowState('#spec-list [data-row="spec:G3"]');
         assert.equal(approved.status, 'must', `${width}px ${theme}: the approved filter-implied status gives way to its tier`);
@@ -617,8 +850,13 @@ test('doctrine and spec rows share the items row [N26]', { timeout: 300_000 }, a
       assert.ok(targets.heights.length > 2 && targets.heights.every(target => target.height >= 44), kind + ': rows and both detail decisions meet the touch target: ' + JSON.stringify(targets));
     }
   } finally {
-    if (chrome) await closeSnapshotChrome(chrome);
-    rmSync(profile, { recursive: true, force: true });
-    await view.stop();
+    try { await filterTrace?.dispose(); }
+    finally {
+      try { if (chrome) await closeSnapshotChrome(chrome); }
+      finally {
+        rmSync(profile, { recursive: true, force: true });
+        await view.stop();
+      }
+    }
   }
 });

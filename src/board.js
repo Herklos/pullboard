@@ -7,7 +7,7 @@
  * spec know: the commit, the verifier's checkout, the frozen criterion.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { briefFiles, briefSections } from './brief.js';
@@ -21,6 +21,23 @@ export const PERSON = 'person';
 
 /** Version of the persisted append-only event record format; bump for incompatible format changes. */
 export const EVENT_LOG_VERSION = 1;
+
+/** Maximum time a board connection waits for another process to release SQLite's lock. */
+export const BOARD_BUSY_TIMEOUT_MS = 10_000;
+
+/**
+ * Replace SQLite's bare lock error with the board path and elapsed wait when the wait expires.
+ *
+ * @param {string} file
+ * @param {number} startedAt
+ * @param {Error & { errcode?: number }} error
+ * @returns {Error}
+ */
+export function boardBusyError(file, startedAt, error) {
+  const sqliteCode = Number.isInteger(error.errcode) ? error.errcode & 0xff : null;
+  if (sqliteCode !== 5 && error.code !== 'SQLITE_BUSY' && !/database is locked/iu.test(error.message ?? '')) return error;
+  return new Refused('BOARD_BUSY', `board file ${file} remained held by another process after ${Date.now() - startedAt}ms; wait for it to finish and retry`);
+}
 
 /**
  * Who can take an item (B13), as tiers in order of the model an item needs: `light` is work a small
@@ -135,6 +152,20 @@ const SCHEMA = `
   );
 `;
 
+/** Open an existing board without migrations, waiting for the same locks as openBoard. */
+export function openBoardReadOnly(file) {
+  const startedAt = Date.now();
+  let db;
+  try {
+    db = new DatabaseSync(file, { readOnly: true });
+    db.exec(`PRAGMA busy_timeout = ${BOARD_BUSY_TIMEOUT_MS}`);
+    return db;
+  } catch (error) {
+    try { db?.close(); } catch {}
+    throw boardBusyError(file, startedAt, error);
+  }
+}
+
 /**
  * Open, or create, the board at `file`. Tests pass `:memory:`.
  *
@@ -143,13 +174,42 @@ const SCHEMA = `
  *
  * @param {string} file
  * @param {{ now: () => Date }} [clock]
+ * @param {{ isMain?: boolean }} [options] Only the main checkout may upgrade a shared board.
  * @returns {{ db: DatabaseSync, clock: { now: () => Date } }}
  */
-export function openBoard(file, clock = systemClock) {
+export function openBoard(file, clock = systemClock, { isMain } = {}) {
+  if (file !== ':memory:' && isMain === false) {
+    let boardVersion = 0;
+    let logVersion = 0;
+    if (existsSync(file)) {
+      const startedAt = Date.now();
+      let current;
+      try {
+        current = openBoardReadOnly(file);
+        boardVersion = current.prepare('PRAGMA user_version').get().user_version;
+        logVersion = readEventLogVersion(current);
+      } catch (error) {
+        throw boardBusyError(file, startedAt, error);
+      } finally {
+        current?.close();
+      }
+      if (SCHEMA_VERSION > boardVersion) {
+        throw new Refused(
+          'UNMERGED_SCHEMA',
+          `this worktree expects board schema ${SCHEMA_VERSION}, newer than the shared board's version ${boardVersion}; merge this code into the main checkout first, or test it against a throwaway board`,
+        );
+      }
+      if (EVENT_LOG_VERSION > logVersion) {
+        throw new Refused('UNMERGED_SCHEMA', `this worktree expects event log ${EVENT_LOG_VERSION}, newer than the shared board's version ${logVersion}; merge this code into the main checkout first, or test it against a throwaway board`);
+      }
+    }
+  }
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
-  const db = new DatabaseSync(file);
+  const startedAt = Date.now();
+  let db;
   try {
-    db.exec('PRAGMA busy_timeout = 10000');
+    db = new DatabaseSync(file);
+    db.exec(`PRAGMA busy_timeout = ${BOARD_BUSY_TIMEOUT_MS}`);
     if (file !== ':memory:') db.exec('PRAGMA journal_mode = WAL');
     migrateEventLogVersion(db);
     migrate(db);
@@ -159,8 +219,8 @@ export function openBoard(file, clock = systemClock) {
     guardMoves(board);
     return board;
   } catch (error) {
-    db.close();
-    throw error;
+    try { db?.close(); } catch {}
+    throw boardBusyError(file, startedAt, error);
   }
 }
 
@@ -1114,9 +1174,12 @@ export function submit(board, id, { agentId, commit, tree, files = [], policyCom
           return total ? new Refused('CHILDREN_OPEN', `item #${id} has ${total} unfinished child items`) : null;
         },
         headIsNew: (found) => {
-          const wasRejected = board.db.prepare("SELECT 1 FROM verdict WHERE item_id = ? AND verdict_decision = 'REJECT' AND verdict_commit = ?").get(id, commit);
+          const engineVersion = board.executionEngineVersion ?? ENGINE_VERSION;
+          const rejectedHead = board.db.prepare(
+            "SELECT 1 FROM verdict WHERE item_id = ? AND verdict_decision = 'REJECT' AND verdict_commit = ? AND (? < 9 OR verdict_digest = ?) LIMIT 1",
+          ).get(id, commit, engineVersion, found.item_frozen_digest);
           const sameReopenedHead = found.item_verdict === null && found.item_commit === commit;
-          return wasRejected || sameReopenedHead
+          return rejectedHead || sameReopenedHead
             ? new Refused('HEAD_NOT_NEW', `#${id} already has a submission at ${commit.slice(0, 12)}; commit the rework first`)
             : null;
         },
@@ -1132,7 +1195,14 @@ export function submit(board, id, { agentId, commit, tree, files = [], policyCom
         item_files: [...new Set([...(found.item_files ?? '').split('\n').filter(Boolean), ...files])].join('\n'),
       }),
     });
-    logEvent(board, agentId, 'submit', id, { commit, tree, ...(policyCommit ? { policyCommit } : {}) });
+    const engineVersion = board.executionEngineVersion ?? ENGINE_VERSION;
+    const criterionDigest = engineVersion >= 9 ? getItem(board, id).item_frozen_digest : null;
+    logEvent(board, agentId, 'submit', id, {
+      commit,
+      tree,
+      ...(policyCommit ? { policyCommit } : {}),
+      ...(criterionDigest ? { criterionDigest } : {}),
+    });
   });
 }
 

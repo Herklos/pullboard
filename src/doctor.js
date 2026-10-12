@@ -3,11 +3,10 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { DOCTRINE_FILE, LEGACY_DOCTRINE_FILE } from './config.js';
 import { tryGit } from './git.js';
-import { DatabaseSync } from 'node:sqlite';
 import { checkAtCommit, submissionPaths, dependencySnapshots } from './trusted-policy.js';
 import { BLANKS, STATES, storeTriggers } from './machine.js';
 
-import { readEventLogVersion, SCHEMA_VERSION } from './board.js';
+import { boardBusyError, EVENT_LOG_VERSION, openBoardReadOnly, readEventLogVersion, SCHEMA_VERSION } from './board.js';
 import { staleFrozenItems, staleItemFinding } from './approved-rows.js';
 import { loadSpec } from './spec.js';
 import { loadDoctrine } from './doctrine.js';
@@ -30,15 +29,26 @@ export function doctrineProblems(root, config) {
  * @param {string} root
  * @param {(root: string, args: string[]) => { status: number, stdout: string }} tryGit
  * @param {any} [config] - Compare frozen rows with this checkout's current source when supplied.
+ * @param {{ isMain?: boolean }} [options] - Give older-board repair steps for the running source.
  * @returns {{ code: string, message: string, next: string }[]}
  */
-export function doctorProblems(file, root, tryGit, config) {
+export function doctorProblems(file, root, tryGit, config, { isMain = true } = {}) {
   if (!existsSync(file)) return [finding('BOARD_MISSING', 'board file is missing', 'run pullboard status to create a new board')];
-  const db = new DatabaseSync(file, { readOnly: true });
+  const startedAt = Date.now();
+  let db;
   try {
-    const schemaProblems = versionProblems(db);
+    db = openBoardReadOnly(file);
+    const schemaProblems = versionProblems(db, isMain);
     if (schemaProblems.length) return schemaProblems;
-    try { readEventLogVersion(db); }
+    const eventProblems = [];
+    try {
+      const version = readEventLogVersion(db);
+      if (version < EVENT_LOG_VERSION) {
+        const next = isMain ? 'run pullboard status to upgrade this event log'
+          : 'merge this code into the main checkout first, then run pullboard status there; or test it against a throwaway board';
+        eventProblems.push(finding('EVENT_LOG_VERSION', `event log version is ${version}; this pullboard expects ${EVENT_LOG_VERSION}`, next));
+      }
+    }
     catch (error) {
       if (error.code !== 'EVENT_LOG_VERSION') throw error;
       return [finding(error.code, error.message, 'upgrade pullboard to read this event log, or restore a compatible board')];
@@ -47,6 +57,7 @@ export function doctorProblems(file, root, tryGit, config) {
     return [
       ...preMergeHookProblems(root),
       ...unwiredHookProblems(root),
+      ...eventProblems,
       ...triggerProblems(db),
       ...layout.problems,
       ...(layout.itemFields ? itemProblems(db) : []),
@@ -55,8 +66,10 @@ export function doctorProblems(file, root, tryGit, config) {
       ...(layout.itemAudit ? submissionProblems(db, root) : []),
       ...(layout.itemAudit && config ? staleFrozenItems(db.prepare('SELECT * FROM item ORDER BY item_id').all(), loadSpec(root, config).rows, loadDoctrine(root, config).rows).map(staleItemFinding) : []),
     ];
+  } catch (error) {
+    throw boardBusyError(file, startedAt, error);
   } finally {
-    db.close();
+    db?.close();
   }
 }
 
@@ -106,11 +119,11 @@ function layoutProblems(db) {
  * @param {DatabaseSync} db
  * @returns {{ code: string, message: string, next: string }[]}
  */
-function versionProblems(db) {
+function versionProblems(db, isMain) {
   const version = db.prepare('PRAGMA user_version').get().user_version;
   if (version === SCHEMA_VERSION) return [];
   const repair = version < SCHEMA_VERSION
-    ? 'run pullboard status to upgrade this board'
+    ? (isMain ? 'run pullboard status to upgrade this board' : 'merge this code into the main checkout first, then run pullboard status there; or test it against a throwaway board')
     : 'use a pullboard version that supports this board schema';
   return [finding('SCHEMA_VERSION', `schema version is ${version}; this pullboard expects ${SCHEMA_VERSION}`, repair)];
 }

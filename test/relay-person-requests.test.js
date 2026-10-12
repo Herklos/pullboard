@@ -251,7 +251,7 @@ test('real paired Chrome transports a person shout while its native snapshot is 
     assert.equal(status.result.snapshotUploads, trace.length);
     assert.equal(status.result.snapshotDeadlineMs, cliChildDeadlineMs(trace.length), 'the child deadline follows this run’s observed upload count');
     assertSnapshotCheckpoints(trace, 3);
-    assert.ok(delays.every(delay => delay >= 7900), 'the relay delayed every native snapshot by 8 seconds');
+    assert.ok(delays.every(delay => delay >= 7900), 'the relay delayed every native snapshot by 8 seconds'); // budget: declared eight-second native snapshot delay (7900ms lower bound).
     timing.finish();
     timing.begin('paired-browser request completion poll', '85,000 ms in-page poll; 110,000 ms outer CDP task bound');
     const latest = await waitForRequest(chrome, link.board, receipt.result.request.id, 'done');
@@ -296,7 +296,7 @@ test('real paired Chrome approval remains pending until coordinator applies and 
   assert.equal(native.result.code, 0);
   const delays = box.snapshotWriteDelays().slice(delayedBefore);
   assertSnapshotCheckpoints(native.result.snapshotTrace, 4);
-  assert.ok(delays.every(delay => delay >= 7900), 'the relay delayed every approval snapshot by 8 seconds');
+  assert.ok(delays.every(delay => delay >= 7900), 'the relay delayed every approval snapshot by 8 seconds'); // budget: declared eight-second approval snapshot delay (7900ms lower bound).
   const pendingState = await waitForRequest(chrome, link.board, approval.result.request.id, 'waiting', true);
   assert.equal(readFileSync(row.path, 'utf8'), before, 'the received approval records a row decision but does not edit SPEC.md');
   const decisionEvents = (await box.cli('export')).document.tables.event.filter(event => event.event_kind === 'row_decision' && event.event_by === 'person');
@@ -410,7 +410,7 @@ test('coordinator decline resolves a paired approval request with a reason and l
   assert.equal(native.result.snapshotDeadlineMs, cliChildDeadlineMs(trace.length),
     'the decline status deadline follows its observed uploads');
   assertSnapshotCheckpoints(trace, 4);
-  assert.ok(delays.every(delay => delay >= 7900), 'the relay delayed every decline snapshot by 8 seconds');
+  assert.ok(delays.every(delay => delay >= 7900), 'the relay delayed every decline snapshot by 8 seconds'); // budget: declared eight-second decline snapshot delay (7900ms lower bound).
   const pending = (await finalState(chrome, link.board)).state.personRequests.find(record => record.id === queued.result.request.id);
   assert.equal(pending.status, 'waiting');
   assert.ok(Number.isSafeInteger(pending.coordinatorRequest));
@@ -455,7 +455,7 @@ test('a timed-out checkpoint PUT retries identical ciphertext through the native
   assertSnapshotCheckpoints(trace, 3);
   assert.equal(trace.length, 4, 'one product abort adds exactly one transport attempt');
   assert.equal(trace[1].abort?.name, 'TimeoutError');
-  assert.ok(trace[1].elapsedMs >= 9900, 'the actual ten-second product request bound expired');
+  assert.ok(trace[1].elapsedMs >= 9900, 'the actual ten-second product request bound expired'); // budget: declared ten-second product request deadline (9900ms lower bound).
   assert.equal(trace[2].sequence, trace[1].sequence);
   assert.equal(trace[2].ciphertext, trace[1].ciphertext);
   assert.equal(trace[2].status, 200);
@@ -493,7 +493,7 @@ test('a newer acknowledged checkpoint covers an earlier timed-out PUT [H16,C7]',
   assertSnapshotCheckpoints(trace, 3);
   assert.equal(trace.length, 3, 'a newer committed checkpoint supersedes the timed-out projection');
   assert.equal(trace[0].abort?.name, 'TimeoutError');
-  assert.ok(trace[0].elapsedMs >= 9900, 'the actual ten-second product request bound expired');
+  assert.ok(trace[0].elapsedMs >= 9900, 'the actual ten-second product request bound expired'); // budget: declared ten-second product request deadline (9900ms lower bound).
   assert.ok(trace[1].sequence > trace[0].sequence);
   assert.ok(trace[2].sequence > trace[1].sequence);
   assert.equal(trace[2].status, 200);

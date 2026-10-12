@@ -19,7 +19,7 @@ import { VERSION } from './help.js';
 import { displayAgentName } from './agent-names.js';
 import { COORDINATOR, loadConfig } from './config.js';
 import { doctrineHistory, loadDoctrine, standardDoctrine } from './doctrine.js';
-import { repoInfo, resolveCommit } from './git.js';
+import { codeIsFromMain, repoInfo, resolveCommit } from './git.js';
 import { committedIds } from './history.js';
 import { productSummaries } from './products.js';
 import { listApiProjects, registryFile } from './projects.js';
@@ -148,7 +148,7 @@ function rememberPort(port) {
 }
 
 /**
- * Open a project's board, read from it, and always close it.
+ * Open a project's board using running-source migration authority, or borrow a staged connection.
  *
  * @template T
  * @param {string} root
@@ -159,7 +159,7 @@ function rememberPort(port) {
 function withProject(root, read, providedBoard = null) {
   const info = repoInfo(root);
   const config = loadConfig(info.root);
-  const board = providedBoard ?? store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'));
+  const board = providedBoard ?? store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), undefined, { isMain: codeIsFromMain() });
   try {
     return read(board, info, config);
   } finally {
@@ -355,7 +355,7 @@ export async function serveView({ port = 0, secret = randomBytes(18).toString('b
     if (!isOwnHost || given.length !== key.length || !timingSafeEqual(given, key)) return json(res, 403, { error: 'this view needs its own address and secret: open the link pullboard view printed' });
     try {
       // The board, and the Roadmap at its own address (N38), are the one page.
-      if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/roadmap')) return reply(res, 200, 'text/html; charset=utf-8', cockpitPage(secret, { paths: true }));
+      if (req.method === 'GET' && (url.pathname === '/' || /^\/(?:[^/]+\/)?(?:items|shouts|spec|doctrine|activity|roadmap)(?:\/[^/]+)?$/.test(url.pathname))) return reply(res, 200, 'text/html; charset=utf-8', cockpitPage(secret, { paths: true }));
       if (req.method === 'GET' && url.pathname === '/view.css') return reply(res, 200, 'text/css; charset=utf-8', VIEW_CSS);
       return json(res, 404, { error: 'no such page' });
     } catch (error) {

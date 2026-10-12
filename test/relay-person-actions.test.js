@@ -248,7 +248,7 @@ test('a person action completes with late native snapshots after 8 seconds [H12,
     assert.equal(status.result.code, 0, 'the real native CLI reports success');
     const delays = box.snapshotWriteDelays().slice(delayedBefore);
     assertSnapshotCheckpoints(status.result.snapshotTrace, 3);
-    assert.ok(delays.every(delay => delay >= 7900), 'the relay delayed every native snapshot by 8 seconds');
+    assert.ok(delays.every(delay => delay >= 7900), 'the relay delayed every native snapshot by 8 seconds'); // budget: declared eight-second native snapshot delay (7900ms lower bound).
     timing.finish();
     timing.begin('paired-browser request completion poll', '85,000 ms in-page poll; 110,000 ms outer CDP task bound');
     const completed = await waitRequest(chrome, link.board, action.result.request.id, 'done');
