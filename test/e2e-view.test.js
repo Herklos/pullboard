@@ -35,6 +35,115 @@ const {
   startView, LIGHT_BRIEF,
 } = e2e;
 
+/** Stop the exact detached view server returned by an isolated fixture invocation. */
+function stopOwnedView(pid, signal = 'SIGTERM') {
+  try { process.kill(pid, signal); }
+  catch (error) { if (error.code !== 'ESRCH') throw error; }
+}
+
+/** Wait until the owned listener has closed, treating only a refused socket as completion. */
+async function waitForViewStopped(url) {
+  const deadline = Date.now() + 5_000; // budget: hang ceiling for observing graceful SIGTERM cleanup.
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetchFresh(url, { signal: AbortSignal.timeout(500) });
+      if (!response.ok) throw new Error('the view listener remained open after its owner stopped');
+    } catch (error) {
+      if (error.cause?.code === 'ECONNREFUSED') return;
+      if (error.message.includes('listener remained open')) throw error;
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+  }
+  throw new Error('the owned view listener did not close after SIGTERM');
+}
+
+test("an agent's pullboard view prints its link and returns [N26,N32]", async () => {
+  const box = project();
+  const env = { ...box.env };
+  delete env.AI_AGENT;
+  const args = [BIN, 'view', '--no-open', '--port', '0', '--json'];
+  const owned = [];
+  try {
+    const started = execFileSync(process.execPath, args, { cwd: box.repo, env, encoding: 'utf8', timeout: 40_000 });
+    const first = JSON.parse(started);
+    owned.push({ pid: first.pid, port: first.port, url: first.url });
+    assert.equal(first.reused, false, 'the first unattended start owns the newly bound listener');
+    assert.ok(Number.isInteger(first.pid), 'the successful response identifies its owning process');
+    assert.ok(Number.isFinite(Date.parse(first.boundAt)), 'the response reports the actual bind time');
+    const firstUrl = new URL(first.url);
+    assert.equal(firstUrl.pathname, '/');
+    const stateFile = join(env.PULLBOARD_HOME, `view-${first.port}.json`);
+    const state = JSON.parse(readFileSync(stateFile, 'utf8'));
+    assert.equal((statSync(stateFile).mode & 0o077) === 0, true, 'the persisted session secret is private to this user');
+    assert.equal(state.pid === first.pid && state.boundAt === first.boundAt, true, 'the runtime record matches the successful bind receipt');
+    assert.equal(state.secret === firstUrl.searchParams.get('k'), true, 'the private record authenticates the returned link');
+    const page = await fetchFresh(firstUrl);
+    assert.equal(page.status, 200, 'the returned link fetches the live view page');
+
+    const secondResult = execFileSync(process.execPath, [BIN, 'view', '--no-open', '--port', String(first.port), '--json'], {
+      cwd: box.repo, env, encoding: 'utf8', timeout: 40_000,
+    });
+    const second = JSON.parse(secondResult);
+    assert.equal(second.reused, true, 'a second start reuses the authenticated listener');
+    assert.equal(second.url === first.url, true, 'the second start returns the same private link');
+    assert.equal(second.pid === first.pid, true, 'the second start identifies the same owner');
+    assert.equal(second.boundAt === first.boundAt, true, 'reusing a server preserves its real bind time');
+
+    const agentEnv = { ...env, AI_AGENT: '1' };
+    const agentStarted = execFileSync(process.execPath, [BIN, 'view', '--no-open', '--port', '0', '--json'], {
+      cwd: box.repo, env: agentEnv, encoding: 'utf8', timeout: 40_000,
+    });
+    const agent = JSON.parse(agentStarted);
+    owned.push({ pid: agent.pid, port: agent.port, url: agent.url });
+    assert.equal(agent.reused, false, 'an explicit agent start also creates and returns its owned view');
+    assert.equal((await fetchFresh(agent.url)).status, 200, 'the explicit agent link fetches its live page');
+  } finally {
+    try {
+      const port = JSON.parse(readFileSync(join(env.PULLBOARD_HOME, 'view.json'), 'utf8')).port;
+      const state = JSON.parse(readFileSync(join(env.PULLBOARD_HOME, `view-${port}.json`), 'utf8'));
+      if (!owned.some((view) => view.pid === state.pid)) owned.push({ pid: state.pid, url: `http://127.0.0.1:${state.port}/?k=${encodeURIComponent(state.secret)}` });
+    } catch { /* No server record means the fixture never bound. */ }
+    let cleanupError;
+    for (const view of owned.reverse()) {
+      if (!Number.isInteger(view.pid)) continue;
+      try {
+        stopOwnedView(view.pid);
+        await waitForViewStopped(view.url);
+      }
+      catch (error) {
+        cleanupError ??= error;
+        try {
+          stopOwnedView(view.pid, 'SIGKILL');
+          await waitForViewStopped(view.url);
+        } catch (forceError) { cleanupError ??= forceError; }
+      }
+    }
+    if (cleanupError) throw cleanupError;
+  }
+});
+
+test('a person running view with JSON in a terminal keeps the server in that terminal [N26,N32]', () => {
+  const box = sandbox();
+  box.env.PULLBOARD_MODEL ??= 'Fixture Model';
+  project(CONFIG.gate, box);
+  const helper = resolve(import.meta.dirname, 'fixtures/view-person-pty.py');
+  const result = JSON.parse(execFileSync('python3', [helper], {
+    cwd: box.repo,
+    env: box.env,
+    input: JSON.stringify({ repo: box.repo, node: process.execPath, bin: BIN, env: box.env }),
+    encoding: 'utf8',
+    timeout: 45_000,
+  }));
+  assert.equal(result.actualStdoutTTY, true);
+  assert.equal(result.aiAgent, false);
+  assert.equal(result.jsonMode, true);
+  assert.equal(result.pageStatus, 200);
+  assert.equal(result.parentRemainedForeground, true);
+  assert.equal(result.serverPidMatchesParent, true);
+  assert.equal(result.processesGone, true);
+  assert.equal(result.listenerClosed, true);
+});
+
 test('view serves every project on this machine, on loopback, behind its secret and its own Host [N26, I8]', async () => {
   const box = project();
   box.run(box.repo, 'add', 'web', 'Page', '--specs', 'G1', '--criterion', 'renders');

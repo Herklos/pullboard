@@ -151,6 +151,7 @@ export function commandOutput(argv, streams) {
   };
   return {
     ...streams,
+    physicalStdoutIsTTY: Boolean(streams.stdout.isTTY),
     stdout: { get isTTY() { return enabled ? false : streams.stdout.isTTY; }, write: (text) => streams.stdout.write(text) },
     say: (line) => emit(streams.stdout, messages, line),
     err: (line) => emit(streams.stderr, diagnostics, line),

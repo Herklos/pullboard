@@ -170,7 +170,7 @@ const LIGHT_BRIEF = 'Files:\n- web/page.js\nChange:\n- copy the header from the 
 
 async function startView(box, cwd) {
   const startedAt = performance.now();
-  const child = spawn(process.execPath, [BIN, 'view', '--no-open'], { cwd, env: box.env });
+  const child = spawn(process.execPath, [BIN, 'view', '--no-open'], { cwd, env: { ...box.env, PULLBOARD_VIEW_FOREGROUND: '1' } });
   const link = await new Promise((found, fail) => {
     let out = '';
     let stderr = '';
