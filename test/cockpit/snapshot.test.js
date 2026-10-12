@@ -262,6 +262,65 @@ test('static export stays in its prefix and replays read-only in Chrome [A10,A3]
   }
 });
 
+test("the static export's Pause keeps its box through a press [A10,N26,C7]", { timeout: 60_000 }, // budget: hang-only ceiling for two viewport press journeys in isolated Chrome.
+  async () => {
+    const executable = chromeExecutable();
+    assert.ok(executable, 'Chrome is required for the static Pause press proof');
+    const box = machine();
+    const alpha = project(box, 'snapshot replay');
+    box.run(alpha.repo, 'add', 'web', 'Replay greeting', '--specs', 'G1', '--criterion', 'renders');
+    build(box, alpha, 1, 'greeting.html');
+    sendBack(box, alpha, 1, 'the first greeting needs a correction');
+    build(box, alpha, 1, 'greeting-fix.html');
+    box.git(alpha.repo, 'switch', '-q', '--detach', alpha.branch);
+    try { box.run(alpha.repo, 'verify', '1', 'accept', '--note', 'the corrected greeting renders', '--as', 'coordinator'); }
+    finally { box.git(alpha.repo, 'switch', '-q', 'main'); }
+    box.run(alpha.repo, 'shout', 'person', 'Should the replay stay read-only?', '--decision');
+    box.run(alpha.repo, 'hold', 'web', '--reason', 'Snapshot stays read-only');
+    box.run(alpha.repo, 'shout', 'all', '<script>window.__snapshotShoutRan = true</script>');
+    const folder = join(box.dir, 'pause-export');
+    box.run(alpha.repo, 'view', '--export', folder);
+    const host = await serveFolder(folder, '/demo/');
+    let chrome;
+    try {
+      chrome = await openSnapshotChrome(executable, `${host.base}/demo/`, join(box.dir, 'pause-chrome'));
+      await settled(chrome, "document.body.classList.contains('snapshot') && !!data?.project && snapshotReplay.index === snapshotReplay.events.length");
+      for (const width of [null, 375]) {
+        if (width !== null) await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
+        await chrome.stable(`replayPosition(snapshotReplay.events.length)`);
+        await press(chrome, "document.querySelector('#replay-play')");
+        const before = await chrome.stable(`(() => {
+          // Hold only the next callback until the real pointer move, then deliver real replay steps.
+          clearTimeout(snapshotReplay.timer);
+          const pause = document.querySelector('#replay-pause');
+          window.__pauseEndWitness = { before: { index: snapshotReplay.index, playing: snapshotReplay.playing,
+            disabled: pause.disabled, label: pause.textContent }, moves: 0 };
+          /** Finish the actual replay between the original shared press's aim and assertion. */
+          pause.addEventListener('mousemove', () => {
+            window.__pauseEndWitness.moves++;
+            while (snapshotReplay.playing) { clearTimeout(snapshotReplay.timer); advanceReplay(); }
+            clearTimeout(snapshotReplay.timer);
+            window.__pauseEndWitness.after = { index: snapshotReplay.index, playing: snapshotReplay.playing,
+              disabled: pause.disabled, label: pause.textContent };
+          }, { once: true });
+          return window.__pauseEndWitness.before;
+        })()`);
+        assert.equal(before.playing, true, `${width}: Pause is aimed while replay is running`);
+        assert.equal(before.disabled, false, `${width}: Pause starts enabled`);
+        await press(chrome, "document.querySelector('#replay-pause')");
+        const seen = await chrome.stable('({ witness: window.__pauseEndWitness, total: snapshotReplay.events.length })');
+        assert.equal(seen.witness.moves, 1, `${width}: native pointer movement delivers the controlled interleaving`);
+        assert.deepEqual(seen.witness.after, { index: seen.total, playing: false, disabled: true, label: 'Pause' },
+          `${width}: actual replay end disables the same Pause label during the press`);
+        console.log('PULLBOARD_499_END_PRESS ' + JSON.stringify({ width, ...seen }));
+      }
+      assert.deepEqual(chrome.exceptions, [], 'the end-during-press snapshot has no browser exceptions');
+    } finally {
+      if (chrome) await closeSnapshotChrome(chrome);
+      await host.close();
+    }
+  });
+
 test('replay speed is judged by its scheduled delay [A10,C7]', { timeout: 90_000 }, async () => {
   const executable = chromeExecutable();
   assert.ok(executable, 'Chrome is required for the throttled replay timing proof');
