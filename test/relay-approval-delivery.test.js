@@ -448,14 +448,15 @@ test('a completed approval keeps its visible refusal in the retained card [H15,H
     assert.equal(observed.card.text,
       'Approval failed: [REVIEWER_COMPLETE_REFUSED] The completion response was refused after sealed delivery.',
       'the retained card displays the exact completion refusal captured on timeout');
-    await assert.rejects(waitForApprovalCardRemoval(chrome, approval.context.id, 1_000), error => {
-      assert.match(error.message,
-        /"cardRefusal":"Approval failed: \[REVIEWER_COMPLETE_REFUSED\] The completion response was refused after sealed delivery\./u,
-        'the original wait-failure capture includes the actual visible per-card refusal');
-      assert.match(error.message, /targetResponse=approval-complete:403:matched/u,
-        'the same captured failure retains the matched completion 403 witness');
-      return true;
-    }, 'the retained card keeps its visible refusal after the real completion response'); // budget: 1s hang ceiling only for this already-refused card, not the original 85000ms scenario.
+    await assert.rejects(waitForApprovalCardRemoval(chrome, approval.context.id, 1_000), // budget: 1s is only a hang ceiling for this already-refused-card observation; the original scenario keeps its 85s window.
+      error => {
+        assert.match(error.message,
+          /"cardRefusal":"Approval failed: \[REVIEWER_COMPLETE_REFUSED\] The completion response was refused after sealed delivery\./u,
+          'the original wait-failure capture includes the actual visible per-card refusal');
+        assert.match(error.message, /targetResponse=approval-complete:403:matched/u,
+          'the same captured failure retains the matched completion 403 witness');
+        return true;
+    }, 'the retained card keeps its visible refusal after the real completion response');
     const completed = box.transit.findLast(record => record.method === 'POST'
       && record.path === '/api/v1/devices/approvals/' + approval.context.id + '/complete');
     assert.ok(completed, 'the real relay received the phone completion POST');
