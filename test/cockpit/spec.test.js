@@ -550,7 +550,7 @@ test('the Spec decline opens its reason form under a 6× CPU throttle [N26]', { 
     try {
       await press(chrome, `document.querySelector(${JSON.stringify(decline)})`, { afterMouseDown: async () => {
         box.run(demo.repo, 'shout', 'person', refreshText);
-        await chrome.waitFor(`data.project.shouts.some(shout => shout.shout_text === ${JSON.stringify(refreshText)})`, 20_000); // budget: observe the real view poll carrying the private CLI write while native mouse input remains pressed.
+        await chrome.waitFor(`data.project.shouts.some(shout => shout.shout_text === ${JSON.stringify(refreshText)})`, 20_000); // budget: hang-only ceiling for the real view poll to carry the private CLI write while native mouse input is held; no throughput claim.
         t.diagnostic(`6× pointer-held refresh before mouseup: ${JSON.stringify(await refreshTrace.snapshot())}`);
       } });
     } catch (error) {
