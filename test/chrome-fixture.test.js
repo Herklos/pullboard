@@ -346,6 +346,18 @@ test('a DevTools timer that fires early still times out at its budget [C7]', asy
 
 test('a wait that throws while the page changes keeps waiting [C7]', async (t) => {
   let replacementResponse;
+  const transition = {
+    replacementStartedAt: null,
+    firstRendererSampleAt: null,
+    firstRendererSampleHadBody: null,
+    rendererSampleStatus: 'not-reported',
+    gapSampledAt: null,
+    gapAcknowledgedAt: null,
+    responseFinishedAt: null,
+    firstRaceBranch: null,
+    waitError: null,
+    cpuThrottleRate: null,
+  };
   const server = createServer((request, response) => {
     if (request.url === '/before') {
       response.writeHead(200, { 'content-type': 'text/html' });
@@ -354,15 +366,24 @@ test('a wait that throws while the page changes keeps waiting [C7]', async (t) =
     }
     if (request.url === '/next') {
       response.writeHead(200, { 'content-type': 'text/html' });
+      transition.replacementStartedAt = Date.now();
       response.write('<!doctype html><html><head><title>loading');
       replacementResponse = response;
       return;
     }
-    if (request.url === '/observed-null') {
+    if (request.url.startsWith('/observed-null?')) {
       response.writeHead(204);
       response.end();
+      const query = new URL(request.url, 'http://127.0.0.1').searchParams;
+      transition.firstRendererSampleAt = Number(query.get('sampledAt'));
+      transition.firstRendererSampleHadBody = query.get('body') === 'true';
+      transition.rendererSampleStatus = 'server-received-gap-sample';
+      transition.gapSampledAt = transition.firstRendererSampleAt;
+      transition.gapAcknowledgedAt = Date.now();
       server.emit('document-gap-observed');
-      replacementResponse?.end('</title></head><body>ready</body></html>');
+      replacementResponse?.end('</title></head><body>ready</body></html>', () => {
+        transition.responseFinishedAt = Date.now();
+      });
       return;
     }
     response.writeHead(404);
@@ -379,17 +400,46 @@ test('a wait that throws while the page changes keeps waiting [C7]', async (t) =
   const chrome = await startChrome({ url: `http://127.0.0.1:${server.address().port}/before` });
   try {
     await chrome.waitFor("typeof window.goNext === 'function'", 5_000, 'initial document ready'); // budget: hang ceiling for the private navigation control handshake; no throughput claim.
+    await chrome.send('Emulation.setCPUThrottlingRate', { rate: 6 });
+    transition.cpuThrottleRate = 6;
     await chrome.evaluate('setTimeout(() => window.goNext(), 0); true');
-    const expression = "location.pathname === '/next' && document.body === null ? (() => { if (!window.__gapNotified) { window.__gapNotified = true; fetch('/observed-null'); } return document.body.textContent.includes('ready'); })() : document.body?.textContent.includes('ready') === true";
+    const expression = "location.pathname === '/next' ? (() => { if (!window.__raceSampled) { window.__raceSampled = true; window.__raceSampledAt = Date.now(); window.__raceSampledHadBody = Boolean(document.body); if (!window.__raceSampledHadBody) fetch('/observed-null?sampledAt=' + window.__raceSampledAt + '&body=false'); } return document.body.textContent.includes('ready'); })() : false";
     const waiting = chrome.waitFor(expression, 5_000, 'wait for the replacement document')
       .then(() => ({ error: null }), (error) => ({ error }));
     const first = await Promise.race([
-      documentGapObserved.then(() => ({ gapObserved: true })),
-      waiting.then((result) => ({ result })),
+      documentGapObserved.then(() => ({ branch: 'gap-observed' })),
+      waiting.then((result) => ({ branch: result.error ? 'wait-rejected' : 'wait-resolved', result })),
     ]);
-    assert.equal(first.gapObserved, true, 'the real page expression observed its document without a body');
-    const waitResult = await waiting;
-    assert.equal(waitResult.error, null, 'the document-transition exception stays pending until the next page is ready');
+    transition.firstRaceBranch = first.branch;
+    if (first.result?.error) transition.waitError = {
+      name: first.result.error.name,
+      code: first.result.error.code ?? null,
+      message: first.result.error.message,
+    };
+    if (first.branch === 'wait-rejected') transition.rendererSampleStatus = 'unavailable-after-wait-rejection';
+    if (first.branch === 'gap-observed') {
+      const waitResult = await waiting;
+      transition.waitError = waitResult.error ? {
+        name: waitResult.error.name,
+        code: waitResult.error.code ?? null,
+        message: waitResult.error.message,
+      } : null;
+    } else if (first.branch === 'wait-resolved') {
+      const sample = await chrome.evaluate('({ sampledAt: window.__raceSampledAt ?? null, bodyPresent: window.__raceSampledHadBody ?? null })');
+      transition.firstRendererSampleAt = sample.sampledAt;
+      transition.firstRendererSampleHadBody = sample.bodyPresent;
+      transition.rendererSampleStatus = 'browser-readback-after-wait-resolution';
+    }
+    const evidence = JSON.stringify(transition);
+    t.diagnostic(`6× wait transition capture: ${evidence}`);
+    assert.equal(first.branch, 'gap-observed', `the wait samples the no-body gap before resolving; transition=${evidence}`);
+    assert.equal(transition.rendererSampleStatus, 'server-received-gap-sample', `the server records the renderer gap sample; transition=${evidence}`);
+    assert.equal(transition.firstRendererSampleHadBody, false, `the renderer sampled the replacement before its body; transition=${evidence}`);
+    assert.ok(Number.isFinite(transition.firstRendererSampleAt) && Number.isFinite(transition.gapAcknowledgedAt), `the sample and server acknowledgement were both recorded; transition=${evidence}`);
+    assert.ok(transition.gapSampledAt <= transition.gapAcknowledgedAt, `the server acknowledgement follows the renderer sample; transition=${evidence}`);
+    assert.ok(Number.isFinite(transition.responseFinishedAt), `the server records replacement response completion; transition=${evidence}`);
+    assert.ok(transition.gapAcknowledgedAt <= transition.responseFinishedAt, `the held response finishes after the server acknowledges the gap; transition=${evidence}`);
+    assert.equal(transition.waitError, null, `the document-transition exception stays pending until the next page is ready; transition=${evidence}`);
     assert.equal(await chrome.evaluate('document.body.textContent'), 'ready', 'the replacement document completed');
 
     const alwaysThrows = '(() => { throw new Error("persistent evaluation failure"); })()';
@@ -402,6 +452,10 @@ test('a wait that throws while the page changes keeps waiting [C7]', async (t) =
       return true;
     });
 
+  } catch (error) {
+    transition.waitError ??= { name: error.name, code: error.code ?? null, message: error.message };
+    t.diagnostic(`transition capture before test failure: ${JSON.stringify(transition)}`);
+    throw error;
   } finally {
     await chrome.close();
   }
