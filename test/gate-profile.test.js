@@ -100,7 +100,7 @@ async function occupyGateSlot(box, repo) {
   const source = `import { takeResource } from ${JSON.stringify(RESOURCE_MODULE)};\nconst lease = await takeResource({ name: 'gate', capacity: 1, scope: 'machine', root: ${JSON.stringify(repo)}, agent: 'profile-test-holder' });\nconsole.log('ready');\nfor await (const line of process.stdin) if (line.trim() === 'release') { lease.release(); break; }`;
   const child = spawn(process.execPath, ['--input-type=module', '-e', source], { cwd: repo, env: box.env, stdio: ['pipe', 'pipe', 'pipe'] });
   const ready = new Promise((resolveReady, reject) => {
-    const timer = setTimeout(() => reject(new Error('gate slot holder did not start')), 10_000);
+    const timer = setTimeout(() => reject(new Error('gate slot holder did not start')), 10_000); // budget: hang ceiling for the private gate holder readiness handshake.
     child.once('error', error => { clearTimeout(timer); reject(error); });
     child.stdout.once('data', data => {
       clearTimeout(timer);
@@ -157,7 +157,7 @@ test('a timing profile records two runner invocations and the real gate-slot wai
     }
     let gateTimer;
     const timeout = new Promise((_, reject) => {
-      gateTimer = setTimeout(() => reject(new Error('private gate did not finish within 60 seconds')), 60_000);
+      gateTimer = setTimeout(() => reject(new Error('private gate did not finish within 60 seconds')), 60_000); // budget: hang ceiling for private gate completion; no throughput claim.
     });
     let status;
     try { [status] = await Promise.race([gateExited, timeout]); }
@@ -186,11 +186,11 @@ test('a timing profile records two runner invocations and the real gate-slot wai
   assert.ok(existsSync(profilePath.slice(0, -'.profile.json'.length)));
   const profile = JSON.parse(readFileSync(profilePath, 'utf8'));
   assert.equal(statSync(profilePath).mode & 0o777, 0o600);
-  assert.ok(profile.waitMs >= 100, `recorded queue wait ${profile.waitMs}ms`);
-  assert.ok(profile.wallMs > 0 && elapsedMs + 30 >= profile.waitMs + profile.wallMs, `${elapsedMs}ms total vs ${profile.waitMs}ms wait + ${profile.wallMs}ms wall`);
+  assert.ok(profile.waitMs >= 100, `recorded queue wait ${profile.waitMs}ms`); // budget: declared 300ms queue hold; recorded wait must include it.
+  assert.ok(profile.wallMs > 0 && elapsedMs + 30 >= profile.waitMs + profile.wallMs, `${elapsedMs}ms total vs ${profile.waitMs}ms wait + ${profile.wallMs}ms wall`); // budget: measured queue and work durations compared to their enclosing clock; 30ms rounding allowance.
   assert.deepEqual(profile.files, [], 'ordinary TAP supplies no file wall measurements');
   assert.deepEqual(profile.tests.map(test => test.name).sort(), ['[redacted GitHub token]', 'fast timing profile sample', 'nested timing profile sample'].sort());
-  assert.ok(profile.tests.find(test => test.name === '[redacted GitHub token]').durationMs >= 130, 'the actual slow test duration is retained');
+  assert.ok(profile.tests.find(test => test.name === '[redacted GitHub token]').durationMs >= 130, 'the actual slow test duration is retained'); // budget: declared 150ms slow-test sleep must appear in its timing profile.
   assert.doesNotMatch(result.stdout, /slowest test files:/);
   assert.ok(!result.stdout.includes(FAKE_SECRET));
   assert.ok(!readFileSync(profilePath, 'utf8').includes(FAKE_SECRET));
@@ -237,7 +237,7 @@ test('item-check and ACCEPT timing profiles sit beside their sanitized logs [C7,
   assert.equal(statSync(directPath).mode & 0o777, 0o600);
   const directProfile = JSON.parse(readFileSync(directPath, 'utf8'));
   assert.deepEqual(directProfile.files, []);
-  assert.ok(directProfile.tests.find(test => test.name === 'slow timing profile check').durationMs >= 30);
+  assert.ok(directProfile.tests.find(test => test.name === 'slow timing profile check').durationMs >= 30); // budget: declared 40ms slow-test sleep must appear in its timing profile.
   assert.ok(existsSync(directPath.slice(0, -'.profile.json'.length) + '.log'));
 
   assert.equal(box.run(box.web, 'submit', '1').status, 0);
@@ -255,7 +255,7 @@ test('item-check and ACCEPT timing profiles sit beside their sanitized logs [C7,
   const verified = JSON.parse(readFileSync(verifyPath, 'utf8'));
   assert.ok(verified.waitMs >= 0 && verified.wallMs > 0);
   assert.deepEqual(verified.files, []);
-  assert.ok(verified.tests.find(test => test.name === 'slow timing profile check').durationMs >= 30);
+  assert.ok(verified.tests.find(test => test.name === 'slow timing profile check').durationMs >= 30); // budget: declared 40ms slow-test sleep must appear in its timing profile.
 
   assert.equal(box.run(box.repo, 'add', 'web', 'Shell-only check', '--specs', 'G1', '--criterion', 'shell-only checks still save timings', '--check', 'true').status, 0);
   assert.equal(box.run(box.web, 'claim', '2').status, 0);
@@ -285,7 +285,7 @@ test('item-check and ACCEPT timing profiles sit beside their sanitized logs [C7,
   assert.equal(shellVerify.state, 'pass');
   assert.deepEqual(shellVerify.profile.files, []);
   assert.deepEqual(shellVerify.profile.tests, []);
-  assert.equal(shellVerify.profile.waitMs, 17);
+  assert.equal(shellVerify.profile.waitMs, 17); // budget: declared synthetic waitMs=17 input is retained exactly, not elapsed wall work.
   assert.ok(shellVerify.profile.wallMs > 0 && existsSync(shellVerify.profilePath));
   const context = process.env.NODE_TEST_CONTEXT;
   delete process.env.NODE_TEST_CONTEXT;
@@ -404,7 +404,7 @@ async function runProfileSubmission(box, queue) {
     try {
       result = await Promise.race([
         submit.finished,
-        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('private profile submit exceeded 60 seconds')), 60_000); }),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('private profile submit exceeded 60 seconds')), 60_000); }), // budget: hang ceiling for private submission completion; no throughput claim.
       ]);
     } finally {
       clearTimeout(timer);
@@ -511,21 +511,21 @@ test('a submit timing profile records both phases and one queue wait for selecte
     assert.ok(existsSync(gate.log));
 
     const checkProfile = JSON.parse(readFileSync(gate.check.profilePath, 'utf8'));
-    if (scenario.queue) assert.ok(checkProfile.waitMs >= 100, `actual queued check waited ${checkProfile.waitMs}ms`);
+    if (scenario.queue) assert.ok(checkProfile.waitMs >= 100, `actual queued check waited ${checkProfile.waitMs}ms`); // budget: declared 300ms private queue hold must appear in the recorded wait.
     const proofProfile = JSON.parse(readFileSync(gate.proofProfilePath, 'utf8'));
     const combined = JSON.parse(readFileSync(gate.profilePath, 'utf8'));
     assert.deepEqual(checkProfile.files, [], 'TAP test timings are not invented file measurements');
     assert.equal(checkProfile.tests[0].name, 'frozen check profile sample [C7]');
-    assert.ok(checkProfile.tests[0].durationMs >= 50);
+    assert.ok(checkProfile.tests[0].durationMs >= 50); // budget: declared 70ms frozen-check sleep must appear in its profile.
     assert.deepEqual(proofProfile.files, []);
     assert.deepEqual(proofProfile.tests.map(value => value.name).sort(), scenario.full
       ? ['unaffected proof profile sample [C7]', 'frozen check profile sample [C7]', 'affected proof profile sample [C7]'].sort()
       : ['affected proof profile sample [C7]']);
     assert.equal(proofProfile.waitMs, 0, 'the second phase reuses the submission lease instead of queueing again');
     assert.equal(combined.waitMs, checkProfile.waitMs, 'the combined profile records the real queue wait once');
-    assert.ok(combined.wallMs >= checkProfile.wallMs + proofProfile.wallMs - 25,
+    assert.ok(combined.wallMs >= checkProfile.wallMs + proofProfile.wallMs - 25, // budget: measured check and proof phase durations; 25ms rounding allowance.
       'the combined wall time includes both measured phases without adding their queue waits');
-    assert.ok(submission.elapsedMs + 50 >= combined.waitMs + combined.wallMs,
+    assert.ok(submission.elapsedMs + 50 >= combined.waitMs + combined.wallMs, // budget: measured combined wait/work against the enclosing clock; 50ms rounding allowance.
       `${submission.elapsedMs}ms total vs ${combined.waitMs}ms one wait + ${combined.wallMs}ms combined work`);
     assert.deepEqual(combined.files, []);
     assert.ok(combined.tests.some(value => value.name === 'frozen check profile sample [C7]'));

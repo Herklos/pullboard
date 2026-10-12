@@ -528,7 +528,7 @@ test('land bisect adoption retains completed gates, isolated diagnostics and ori
     writeFileSync(box.release, 'release');
     if (child.exitCode === null && child.signalCode === null) { try { process.kill(-child.pid, 'SIGKILL'); } catch {} }
   });
-  await waitFor(() => existsSync(box.entered), 'third full gate inside bisection', 20000);
+  await waitFor(() => existsSync(box.entered), 'third full gate inside bisection', 20000); // budget: hang ceiling for the third private bisection gate entry handshake; no throughput claim.
   const interrupted = json(box, box.repo, 'resume').landingBatches.at(-1);
   assert.equal(interrupted.items.length, 2, 'the current half differs from the original four candidates');
   assert.equal(interrupted.gateResults.length, 2);
