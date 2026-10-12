@@ -17,7 +17,7 @@ const BIN = join(ROOT, 'bin', 'pullboard.js');
 const OUTPUT = fileURLToPath(new URL('./', import.meta.url));
 const DEMO_OUTPUT = join(ROOT, 'docs', 'demo');
 const DEMO_BOARD_ID = 'demo-board';
-const CHROME = ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser'];
+const CHROME = [process.env.PULLBOARD_CHROME, '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser'].filter(Boolean);
 
 /** Set the deterministic lifecycle clock used by the next isolated board command. */
 function setDemoMinutes(env, minutes) {
@@ -190,11 +190,11 @@ else {
         view = await browser(chrome, join(base, 'chrome-profile'), url);
         await waitForDemoBoard(view, repo);
         await view.viewport(1440, 900);
-        await view.evaluate("document.querySelector('[data-state=all]').click()");
+        await view.evaluate("document.querySelector('#filter-toggle').click(); document.querySelector('#filter-menu [data-filter-choice=\"state:all\"]').click()");
         await view.waitFor("!!document.querySelector('#chain .row[data-item=\"1\"]')", 'accepted item in All');
         await view.evaluate("(()=>{document.documentElement.dataset.theme='light'; localStorage.setItem('pb.theme','light'); document.querySelector('#chain .row[data-item=\"1\"]').click()})()");
         await view.waitFor("view.item === 1 && !!document.querySelector('#chain .row.on[data-item=\"1\"]') && document.querySelector('#detail').textContent.includes('Reviewed and accepted') && document.querySelector('#detail').textContent.includes('REJECT') && document.querySelector('#detail').textContent.includes('ACCEPT')", 'selected accepted item and both verdicts');
-        await view.evaluate("document.querySelector('[data-state=active]').click()");
+        await view.evaluate("document.querySelector('#filter-toggle').click(); document.querySelector('#filter-menu [data-filter-choice=\"state:active\"]').click()");
         await view.waitFor("!document.querySelector('#needs').hidden && document.querySelector('#needs').textContent.includes('NEEDS YOU') && document.querySelector('#detail').textContent.includes('ACCEPT')", 'Active items, Needs you and the selected review history');
         await view.evaluate('document.fonts.ready.then(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))');
         await view.screenshot(join(OUTPUT, 'desktop.png'));
