@@ -1,6 +1,7 @@
 /** Find unexplained wall-clock judgments in test source, without executing it [C7]. */
-import { readdirSync, readFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { existsSync, lstatSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 /** Mask comments and quoted fixture text while retaining exact offsets and comment lines. */
 function codeOnly(source) {
@@ -161,21 +162,25 @@ export function fixedWallMargins(source, file) {
   return [...found.values()];
 }
 
-/** Scan every test file under a checkout, including nested tests and documentation tests. */
+/** Scan every tracked test file under a checkout, including nested and documentation tests. */
 export function wallClockViolations(root) {
   const found = [];
-  /** Walk source directories without visiting generated artifacts, dependencies or preserved work. */
-  function visit(directory, underTestDirectory = false) {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) {
-        if (!['.git', 'node_modules', 'work'].includes(entry.name)) visit(path, underTestDirectory || entry.name === 'test');
-      } else if (entry.isFile() && /\.[cm]?js$/u.test(entry.name)
-        && (underTestDirectory || /^(?:test|test[-_.].+|.+[-_.]test)\.[cm]?js$/u.test(entry.name))) {
-        found.push(...fixedWallMargins(readFileSync(path, 'utf8'), relative(root, path).replaceAll('\\', '/')));
-      }
+  const tracked = execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8' }).split('\0').filter(Boolean);
+  for (const file of tracked) {
+    const parts = file.split('/');
+    const name = parts.at(-1);
+    const underTestDirectory = parts.slice(0, -1).includes('test');
+    if (parts.some(part => ['.git', 'node_modules', 'work'].includes(part)) || !/\.[cm]?js$/u.test(name)
+      || (!underTestDirectory && !/^(?:test|test[-_.].+|.+[-_.]test)\.[cm]?js$/u.test(name))) continue;
+    let path = root;
+    let regularFile = true;
+    for (const [index, part] of parts.entries()) {
+      path = join(path, part);
+      if (!existsSync(path)) { regularFile = false; break; }
+      const entry = lstatSync(path);
+      if (index < parts.length - 1 ? !entry.isDirectory() : !entry.isFile()) { regularFile = false; break; }
     }
+    if (regularFile) found.push(...fixedWallMargins(readFileSync(path, 'utf8'), file));
   }
-  visit(root);
   return found.sort();
 }
