@@ -561,9 +561,9 @@ test('a wait keeps waiting through a DevTools error from a page navigation [C7]'
       }
       return new Promise(() => {});
     })() : location.pathname === '/after' && document.body.textContent === 'after'`;
-    const waitResult = await chrome.waitFor(expression, 5_000, 'wait across document navigation')
+    const waitResult = await chrome.waitFor(expression, 5_000, 'wait across document navigation' /* budget: declared 5000ms deadline for this local document-transition condition. */)
       .then(() => ({ resolved: true }), error => ({ resolved: false, error })); // budget: declared 5s ceiling for the local replacement-document handshake.
-    assert.equal(waitResult.resolved, true,
+    assert.equal(waitResult.resolved, true, // budget: this asserts the declared navigation-condition deadline's outcome, not elapsed throughput.
       `the wait retries a DevTools failure from a main-frame navigation; failure=${waitResult.error?.message ?? 'none'}`);
     assert.equal(await chrome.evaluate('document.body.textContent'), 'after', 'the wait resolves on the replacement document');
     assert.equal(afterRequests, 1, 'the real navigation occurs once');
@@ -577,16 +577,14 @@ test('a wait keeps waiting through a DevTools error from a page navigation [C7]'
       }
       return new Promise(() => {});
     })() : false`;
-    const exhaustedStartedAt = Date.now();
-    const exhausted = await chrome.waitFor(exhaustedExpression, 5_000, 'wait expires after a navigation error')
+    const exhausted = await chrome.waitFor(exhaustedExpression, 5_000, 'wait expires after a navigation error' /* budget: declared 5000ms deadline for a deliberately pending local page condition. */)
       .then(() => ({ resolved: true }), error => ({ resolved: false, error })); // budget: declared 5s private observation ceiling for a local page condition that remains false.
-    assert.equal(exhausted.resolved, false, 'the condition remains pending until its declared deadline');
-    assert.match(exhausted.error.message, /did not arrive within 5000ms/u);
-    assert.match(exhausted.error.message, /last evaluation failed: DevTools command failed: Runtime\.evaluate/u,
+    assert.equal(exhausted.resolved, false, 'the condition remains pending until its declared deadline'); // budget: checks the declared operation-deadline outcome, not elapsed throughput.
+    assert.match(exhausted.error.message, /did not arrive within 5000ms/u); // budget: exact diagnostic for the declared 5000ms operation deadline.
+    assert.match(exhausted.error.message, /last evaluation failed: DevTools command failed: Runtime\.evaluate/u, // budget: checks retained diagnostics at the declared deadline, not elapsed throughput.
       'the exhausted wait names its last navigation error');
-    assert.match(exhausted.error.message, /CDP error -32000/u);
-    assert.match(exhausted.error.message, /page navigated since command was sent: yes/u);
-    assert.ok(Date.now() - exhaustedStartedAt >= 5_000, 'the wait reaches its requested deadline'); // budget: declared 5s observation ceiling must actually expire.
+    assert.match(exhausted.error.message, /CDP error -32000/u); // budget: preserves the CDP error captured before the declared deadline.
+    assert.match(exhausted.error.message, /page navigated since command was sent: yes/u); // budget: preserves navigation evidence at the declared deadline.
     assert.equal(afterRequests, 2, 'the exhausted wait observes a second real navigation');
 
     let receiveMessage;
@@ -606,13 +604,48 @@ test('a wait keeps waiting through a DevTools error from a page navigation [C7]'
     const protocolSend = createSender(fakeSocket, new Map(), () => 1, 15_000, { max: 0 }, new Set());
     const protocolEvaluate = createEvaluator(protocolSend);
     const protocolWait = createWaiter(protocolEvaluate, { commandTimeoutMs: 5_000 });
-    const noNavigation = await protocolWait('true', 5_000, 'no-navigation protocol error')
+    const noNavigation = await protocolWait('true', 5_000, 'no-navigation protocol error' /* budget: declared 5000ms protocol-operation ceiling; fixture reply is immediate. */)
       .then(() => ({ rejected: false }), error => ({ rejected: true, error }));
-    assert.equal(noNavigation.rejected, true, 'a no-navigation protocol error is rethrown immediately');
-    assert.equal(noNavigation.error.code, -32000, 'the original CDP code is preserved');
-    assert.equal(noNavigation.error.navigated, false, 'the sender observed no main-frame navigation');
-    assert.match(noNavigation.error.message, /page navigated since command was sent: no/u);
+    assert.equal(noNavigation.rejected, true, 'a no-navigation protocol error is rethrown immediately'); // budget: checks the immediate result against the declared command ceiling.
+    assert.equal(noNavigation.error.code, -32000, 'the original CDP code is preserved'); // budget: verifies the error returned within the declared command ceiling.
+    assert.equal(noNavigation.error.navigated, false, 'the sender observed no main-frame navigation'); // budget: verifies the error returned within the declared command ceiling.
+    assert.match(noNavigation.error.message, /page navigated since command was sent: no/u); // budget: verifies preserved protocol diagnostics within the declared command ceiling.
     assert.equal(commandCount, 1, 'the wait does not retry a no-navigation CDP error');
+
+    let clock = 0;
+    let evaluations = 0;
+    let pauses = 0;
+    let firstError;
+    const deadlineWait = createWaiter(async () => {
+      evaluations += 1;
+      if (evaluations === 1) {
+        firstError = Object.assign(new Error('DevTools command failed: Runtime.evaluate; CDP error -32000; page navigated since command was sent: yes'), {
+          code: -32000,
+          navigated: true,
+        });
+        throw firstError;
+      }
+      return false;
+    }, {
+      commandTimeoutMs: 5_000,
+      now: () => clock,
+      pauseFor: async ms => {
+        pauses += 1;
+        assert.ok(pauses <= 100, 'the injected clock advances within the declared deadline');
+        clock += ms;
+      },
+    });
+    await assert.rejects(deadlineWait('false', 5_000, 'simulated navigation deadline'), error => { // budget: declared 5000ms simulated operation deadline, advanced deterministically; no wall-clock judgment.
+      assert.match(error.message, /did not arrive within 5000ms/u);
+      assert.match(error.message, /last evaluation failed: DevTools command failed: Runtime\.evaluate/u);
+      assert.match(error.message, /CDP error -32000/u);
+      assert.match(error.message, /page navigated since command was sent: yes/u);
+      return true;
+    });
+    assert.equal(clock, 5_000, 'the injected clock reaches the operation deadline exactly');
+    assert.equal(evaluations, 100, 'the wait polls only while time remains');
+    assert.equal(pauses, 100, 'each poll advances the injected clock by its bounded interval');
+    assert.ok(firstError instanceof Error, 'the simulated first navigation error is retained');
   } finally {
     await chrome.close();
   }

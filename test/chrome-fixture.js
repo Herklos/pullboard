@@ -24,19 +24,19 @@ function pause(ms) {
 }
 
 /** Build the shared bounded page-condition loop around the real CDP evaluator. */
-export function createWaiter(evaluate, { commandTimeoutMs = COMMAND_TIMEOUT_MS, pauseFor = pause } = {}) {
+export function createWaiter(evaluate, { commandTimeoutMs = COMMAND_TIMEOUT_MS, pauseFor = pause, now = Date.now } = {}) {
   return async function waitFor(expression, timeoutMs = commandTimeoutMs, label = 'wait for page condition') {
-    const waitDeadline = Date.now() + timeoutMs;
+    const waitDeadline = now() + timeoutMs;
     let lastEvaluationError = null;
-    while (Date.now() < waitDeadline) {
+    while (now() < waitDeadline) {
       try {
-        if (await evaluate(expression, label, waitDeadline - Date.now())) return;
+        if (await evaluate(expression, label, waitDeadline - now())) return;
       } catch (error) {
         if (error instanceof Error && (error.message.startsWith('Browser evaluation failed:')
           || (error.code === -32000 && error.navigated === true))) lastEvaluationError = error;
-        else if (error.code !== 'CDP_TIMEOUT' || Date.now() < waitDeadline) throw error;
+        else if (error.code !== 'CDP_TIMEOUT' || now() < waitDeadline) throw error;
       }
-      await pauseFor(Math.max(0, Math.min(50, waitDeadline - Date.now())));
+      await pauseFor(Math.max(0, Math.min(50, waitDeadline - now())));
     }
     const exception = lastEvaluationError instanceof Error ? `; last evaluation failed: ${lastEvaluationError.message}` : '';
     throw new Error(`Browser condition "${label}" did not arrive within ${timeoutMs}ms; expression: ${expression.slice(0, 200)}${exception}.`);
