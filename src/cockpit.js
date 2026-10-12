@@ -2693,9 +2693,16 @@ $('add-form').addEventListener('submit', async (event) => {
 $('shout-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   const text = $('shout-text').value;
+  const root = view.root;
   const ask = view.answering;
+  const answerRoot = ask?.root ?? null;
+  const answerId = ask?.id ?? null;
   if (ask && ask.root !== view.root) return answer(null);
   if (!(await (ask ? act('answer', { id: ask.id, text }, event.currentTarget) : ($('shout-to').value === 'coordinator' ? act('request', { text }, event.currentTarget) : act('shout', { to: $('shout-to').value, text }, event.currentTarget))))) return;
+  const currentAnswer = view.answering;
+  // An older completion must not erase a newer draft or answer selection.
+  if (view.root !== root || $('shout-text').value !== text || (currentAnswer?.root ?? null) !== answerRoot
+      || (currentAnswer?.id ?? null) !== answerId) return;
   $('shout-text').value = '';
   answer(null);
 });
