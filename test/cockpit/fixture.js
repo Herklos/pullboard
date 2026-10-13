@@ -151,7 +151,7 @@ function fetchLive(url, init = {}) {
 
 /** Start the real view and wait for a complete HTTP answer, rather than just its printed link. */
 async function startView(box, { bin = BIN } = {}) {
-  const child = spawn(process.execPath, [bin, 'view', '--no-open'], { cwd: box.dir, env: { ...box.env, PULLBOARD_VIEW_FOREGROUND: '1' } });
+  const child = spawn(process.execPath, [bin, 'view', '--no-open', '--port', '0'], { cwd: box.dir, env: { ...box.env, PULLBOARD_VIEW_FOREGROUND: '1' } });
   const link = await new Promise((found, fail) => {
     let out = '';
     child.stdout.on('data', (chunk) => {

@@ -179,7 +179,7 @@ else {
       const repo = await buildBoard(base, env);
       await exportBoard(repo, env);
       if (!boardOnly) {
-        server = spawn(process.execPath, [BIN, 'view', '--no-open'], { cwd: repo, env, stdio: ['ignore', 'pipe', 'ignore'] });
+        server = spawn(process.execPath, [BIN, 'view', '--no-open', '--port', '0'], { cwd: repo, env, stdio: ['ignore', 'pipe', 'ignore'] });
         const url = await new Promise((resolveUrl, reject) => {
           let output = '';
           const timer = setTimeout(() => reject(new Error('The demo view did not start')), 10000);

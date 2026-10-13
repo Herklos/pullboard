@@ -218,6 +218,11 @@ test('the exported demo is synthetic and contains no machine paths or unrelated 
   ].includes(shout.shout_text) || /^#1 passes the edge that failed before\. The fix is in src\/demo\.js:1@[a-f0-9]{40}\.$/.test(shout.shout_text)), 'the board contains only the synthetic conversation');
 });
 
+test('the demo capture starts its view on a free port [I11,I13]', () => {
+  const script = readFileSync(shots('demo.mjs'), 'utf8');
+  assert.match(script, /spawn\(process\.execPath, \[BIN, 'view', '--no-open', '--port', '0'\]/, 'the demo view asks the OS for an available port');
+});
+
 test('the demo rebuild script uses a temporary repo and isolated home [I11,I13]', () => {
   const script = readFileSync(shots('demo.mjs'), 'utf8');
   assert.match(script, /mkdtemp\(join\(tmpdir\(\)/);
