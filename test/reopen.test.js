@@ -68,7 +68,7 @@ function reserveFixtureReview(box) {
 
 /** Configure a real private main, joined builder, failing landing test and bare origin. */
 function landingProject() {
-  const box = project('node --test web/landing.test.js');
+  const box = project('node --test --test-reporter=tap web/landing.test.js');
   // The private landing runs a real nested Node test runner, not the parent's test worker.
   delete box.env.NODE_TEST_CONTEXT;
   mkdirSync(join(box.repo, 'web'), { recursive: true });
@@ -82,7 +82,7 @@ function landingProject() {
   ].join('\n'));
   const configPath = join(box.repo, 'pullboard.json');
   const config = JSON.parse(readFileSync(configPath, 'utf8'));
-  config.affectedTests = 'node --test';
+  config.affectedTests = 'node --test --test-reporter=tap';
   writeFileSync(configPath, JSON.stringify(config, null, 2));
   box.git(box.repo, 'add', 'web/landing.test.js', 'web/feature.js', 'pullboard.json');
   box.git(box.repo, 'commit', '-q', '-m', 'test(web): add landing behavior check');
@@ -255,7 +255,7 @@ test('a red landing gate returns a verified item to its builder [B3,V4]', async 
   assert.equal(JSON.parse(nonCoordinator.out).error.code, 'COORDINATOR_ONLY');
 
   const landing = box.run(box.repo, 'land', '--max', '1', '--json');
-  assert.equal(landing.code, 0, landing.err);
+  assert.equal(landing.code, 0, `${landing.err}\n${landing.out}`);
   const landingResult = JSON.parse(landing.out);
   assert.deepEqual(landingResult.culprits.map((culprit) => culprit.id), [item.id], JSON.stringify(landingResult));
   assert.equal(landingResult.culprits[0].mergeCommit, landingResult.batch.tip);
