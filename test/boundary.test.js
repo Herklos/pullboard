@@ -39,6 +39,7 @@ test('only explicit relay commands open outbound connections; the view and API s
     (file === 'src/relay-pairing-client.js' && line.trim() === 'response = await fetch(new URL(path, url), {') ||
     (['src/serve.js', 'src/api.js'].includes(file) && line.trim() === "import { createServer } from 'node:http';") ||
     (file === 'src/serve.js' && line.trim() === "const reply = await fetch(address.origin + path, { headers: { 'x-pullboard-key': address.searchParams.get('k') } });") ||
+    (file === 'src/view-session.js' && line.trim() === "const response = await fetch(`http://${LOOPBACK}:${view.port}/api/v1/boards?k=${encodeURIComponent(view.secret)}`, {") ||
     (file === 'src/cockpit.js' && /^\s*const res = await fetch\(path, /.test(line));
   const found = sources().flatMap(({ file, lines }) =>
     lines.flatMap((line, index) => (NETWORK.test(line) && !allowed(file, line) ? [`${file}:${index + 1}: ${line.trim()}`] : [])),
@@ -47,6 +48,9 @@ test('only explicit relay commands open outbound connections; the view and API s
   const serve = readFileSync(join(ROOT, 'src', 'serve.js'), 'utf8');
   assert.match(serve, /export const LOOPBACK = '127\.0\.0\.1';/);
   assert.match(serve, /server\.listen\(port, LOOPBACK, /);
+  const viewSession = readFileSync(join(ROOT, 'src', 'view-session.js'), 'utf8');
+  assert.match(viewSession, /import \{ LOOPBACK, lastPort \} from '\.\/serve\.js';/);
+  assert.match(viewSession, /redirect: 'manual'/, 'the local reuse probe cannot follow a remote redirect');
   const api = readFileSync(join(ROOT, 'src', 'api.js'), 'utf8');
   assert.match(api, /const ADDRESS = '127\.0\.0\.1';/);
   assert.match(api, /server\.listen\(port, ADDRESS, /);
