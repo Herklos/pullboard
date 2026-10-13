@@ -23,6 +23,7 @@ import { codeIsFromMain, repoInfo, resolveCommit } from './git.js';
 import { committedIds } from './history.js';
 import { productSummaries } from './products.js';
 import { listApiProjects, registryFile } from './projects.js';
+import { fetchLocal } from './local-fetch.js';
 import { Refused } from './refused.js';
 import { loadSpec } from './spec.js';
 
@@ -81,7 +82,13 @@ export async function exportView(root, directory) {
     const address = new URL(api.url);
     /** Read an authenticated API document without putting its private key in the snapshot. */
     const read = async (path) => {
-      const reply = await fetch(address.origin + path, { headers: { 'x-pullboard-key': address.searchParams.get('k') } });
+      let reply;
+      try {
+        reply = await fetchLocal(address.origin + path, { headers: { 'x-pullboard-key': address.searchParams.get('k') } });
+      } catch (error) {
+        if (!(error instanceof TypeError)) throw error;
+        throw new Refused('VIEW_UNAVAILABLE', `could not read view at ${address.origin} while exporting; retry when the local view is available`);
+      }
       const document = await reply.json();
       if (!reply.ok) throw new Refused(document.error.code, document.error.message);
       return document;
