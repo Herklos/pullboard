@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync }
 import { dirname, join } from 'node:path';
 import { LOOPBACK, lastPort } from './serve.js';
 import { registryFile } from './projects.js';
+import { fetchLocal } from './local-fetch.js';
 
 /** The per-port record keeps the secret out of CLI output and mode 0600 on disk. */
 function sessionFile(port) {
@@ -61,7 +62,7 @@ export async function runningView(port = 0) {
   if (!view) return null;
   try {
     process.kill(view.pid, 0);
-    const response = await fetch(`http://${LOOPBACK}:${view.port}/api/v1/boards?k=${encodeURIComponent(view.secret)}`, {
+    const response = await fetchLocal(`http://${LOOPBACK}:${view.port}/api/v1/boards?k=${encodeURIComponent(view.secret)}`, {
       signal: AbortSignal.timeout(1_000),
       redirect: 'manual',
     });
