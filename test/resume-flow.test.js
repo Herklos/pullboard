@@ -1,6 +1,6 @@
 /** Coordinator flow alerts reuse the real Git/SQLite statistics and documented thresholds [N32,R1,R2]. */
 import assert from 'node:assert/strict';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -10,6 +10,7 @@ import { spawn } from 'node:child_process';
 import { AGENT_SHELL_MARKERS, SSH_SHELL_MARKERS } from '../src/person.js';
 import { proofStats } from '../src/stats.js';
 import { runFixtureChild, runFixtureGit } from './fixture-child.js';
+import { takeDefaultViewPort } from './view-port-fixture.js';
 
 const PRIVATE_CHANGELOG = `# Changelog\n\n## [0.8.7] - 2026-10-12\n\n### A new session\n\nThe latest headline paragraph.\n\n### Added\n\n- The detailed release list is not part of the resume.\n\n## [0.8.6] - 2026-10-11\n\n### See the flow\n\nThe middle headline paragraph.\n\n### Fixed\n\n- A detailed fix.\n\n## [0.8.5] - 2026-10-10\n\n### A prettier board\n\nThe previous release.\n`;
 const LONG_CHANGELOG = `# Changelog\n\n## [0.8.9] - 2026-10-14\n\n### Nine\n\nNine paragraph.\n\n## [0.8.8] - 2026-10-13\n\n### Eight\n\nEight paragraph.\n\n## [0.8.7] - 2026-10-12\n\n### Seven\n\nSeven paragraph.\n\n## [0.8.6] - 2026-10-11\n\n### Six\n\nSix paragraph.\n\n## [0.8.5] - 2026-10-10\n\n### Five\n\nFive paragraph.\n\n## [0.8.4] - 2026-10-09\n\n### Added\n\nThis category heading is not a release headline.\n`;
@@ -323,6 +324,80 @@ function assertViewReceipt(box) {
   }
   writeFileSync(receiptPath, receiptBytes);
 }
+
+test('a reused authenticated view completes setup for its new board [N26,N32]', async t => {
+  const firstBoard = releaseFixture(t);
+  const secondBoard = releaseFixture(t);
+  const refusedBoard = releaseFixture(t);
+  const lease = await takeDefaultViewPort(firstBoard.root);
+  t.after(() => lease.release());
+  for (const box of [firstBoard, secondBoard, refusedBoard]) {
+    box.env.PULLBOARD_HOME = firstBoard.env.PULLBOARD_HOME;
+    box.env.PULLBOARD_MACHINE_HOME = firstBoard.env.PULLBOARD_MACHINE_HOME;
+    delete box.env.PULLBOARD_VIEW_FOREGROUND;
+    const file = join(box.repo, 'pullboard.json');
+    const config = JSON.parse(readFileSync(file, 'utf8'));
+    config.gate = 'true';
+    config.lanes = { app: { owns: ['app/'] } };
+    writeFileSync(file, JSON.stringify(config));
+    const added = box.run(box.repo, 'add', 'app', 'First setup item', '--specs', 'N19', '--criterion', 'The fixture has work.');
+    assert.equal(added.status, 0, added.failure || added.stderr || added.stdout);
+    assert.equal(JSON.parse(box.run(box.repo, 'resume', '--json').stdout).setup?.step, 5);
+  }
+  const child = spawn(process.execPath, [join(firstBoard.root, 'cli/bin/pullboard.js'), 'view', '--no-open', '--json'],
+    { cwd: firstBoard.repo, env: { ...firstBoard.env, PULLBOARD_VIEW_FOREGROUND: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const closed = new Promise(resolve => child.once('close', resolve));
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+    await closed;
+  });
+  const first = await new Promise((resolve, reject) => {
+    let output = '', errors = '';
+    child.once('error', reject);
+    child.once('close', code => reject(new Error(`owned view exited ${code}: ${errors}`)));
+    child.stderr.on('data', bytes => { errors += bytes; });
+    child.stdout.on('data', bytes => {
+      output += bytes;
+      try { resolve(JSON.parse(output)); } catch { /* Wait for the complete ready document. */ }
+    });
+  });
+  assert.equal(first.port, 4890);
+  assert.equal(JSON.parse(firstBoard.run(firstBoard.repo, 'resume', '--json').stdout).setup, null);
+  const reused = secondBoard.run(secondBoard.repo, 'view', '--no-open', '--json');
+  assert.equal(reused.status, 0, reused.failure || reused.stderr || reused.stdout);
+  const second = JSON.parse(reused.stdout);
+  assert.equal(second.reused, true);
+  assert.equal(second.url, first.url);
+  assert.equal(JSON.parse(secondBoard.run(secondBoard.repo, 'resume', '--json').stdout).setup, null,
+    'the exact offered view command completes setup on the second board');
+  const receiptPath = join(secondBoard.repo, '.git/pullboard/view-bind.json');
+  const bytes = readFileSync(receiptPath);
+  const receipt = JSON.parse(bytes);
+  assert.equal(receipt.type, 'pullboard.view.reused');
+  assert.equal(receipt.boundAt, first.boundAt, 'reuse retains the original bind time');
+  assert.equal(receipt.pid, first.pid);
+  assert.equal(receipt.port, first.port);
+  assert.equal(statSync(receiptPath).mode & 0o077, 0);
+  assert.equal(Object.hasOwn(receipt, 'url'), false, 'the setup receipt never copies the session secret');
+  for (const invalid of [{ ...receipt, boardId: 'another-board' },
+    { ...receipt, setupStartedAt: '2000-01-01T00:00:00.000Z' },
+    { ...receipt, openedAt: '2000-01-01T00:00:00.000Z' }]) {
+    writeFileSync(receiptPath, JSON.stringify(invalid));
+    assert.equal(JSON.parse(secondBoard.run(secondBoard.repo, 'resume', '--json').stdout).setup?.step, 5,
+      'another board or an observation before this setup cannot complete it');
+  }
+  writeFileSync(receiptPath, bytes);
+  const sessionPath = join(firstBoard.env.PULLBOARD_HOME, 'view-4890.json');
+  const sessionBytes = readFileSync(sessionPath);
+  try {
+    writeFileSync(sessionPath, JSON.stringify({ ...JSON.parse(sessionBytes), secret: 'not-the-listener-secret' }));
+    const refused = refusedBoard.run(refusedBoard.repo, 'view', '--no-open', '--json');
+    assert.equal(refused.status, 1, refused.failure || refused.stderr || refused.stdout);
+    assert.equal(JSON.parse(refused.stdout).error.code, 'PORT_BUSY');
+    assert.equal(JSON.parse(refusedBoard.run(refusedBoard.repo, 'resume', '--json').stdout).setup?.step, 5,
+      'an unauthenticated listener cannot complete setup');
+  } finally { writeFileSync(sessionPath, sessionBytes); }
+});
 
 /** Drive the same actual commands a newcomer receives, with a private fixture person approval. */
 async function finishSetup(box, observe = () => {}) {
