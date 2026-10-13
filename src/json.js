@@ -74,6 +74,7 @@ export const JSON_SHAPES = {
     'spec check': shape({ rows: 'array' }),
     'spec view': shape({ path: 'string' }),
     'spec show': shape({ row: 'object', standing: 'object' }),
+    'spec draft': shape({ id: 'string', row: 'object' }),
     'spec unmet': shape({ rows: 'array' }),
     'spec signoff': shape({ count: 'number', by: 'string', ids: 'array', evidence: 'array' }),
     'spec signers': shape({ added: 'boolean', by: 'string', path: 'string', initial: 'boolean' }),

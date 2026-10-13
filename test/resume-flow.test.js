@@ -276,6 +276,58 @@ test('agent resume keeps its next step without a coordinator flow alert [N32,R1,
   assert.equal(Object.hasOwn(await box.run(['resume', '--json'], box.web), 'flow'), false);
 });
 
+test('spec draft adds a pending row and resume names it [N32]', t => {
+  const box = releaseFixture(t, { freshSetup: true });
+  const initial = JSON.parse(box.run(box.repo, 'resume', '--json').stdout);
+  assert.equal(initial.setup.step, 1);
+  assert.match(initial.setup.command, /^pullboard spec draft/u);
+  assert.doesNotMatch(initial.setup.command, /node -e|appendFileSync/u);
+  assert.match(initial.setup.afterAnswer, /record each answer with pullboard spec draft/iu);
+
+  const help = box.run(box.repo, 'help', 'spec', '--json');
+  assert.equal(help.status, 0, help.failure || help.stderr);
+  assert.match(JSON.parse(help.stdout).help, /spec draft <text>.*any agent: append a pending row/u);
+
+  const first = box.run(box.repo, 'spec', 'draft', 'Describe the first requirement', '--json');
+  const second = box.run(box.repo, 'spec', 'draft', 'Describe the second requirement', '--aim', '--gate', 'node --test', '--json');
+  assert.equal(first.status, 0, first.failure || first.stderr);
+  assert.equal(second.status, 0, second.failure || second.stderr);
+  const rows = JSON.parse(box.run(box.repo, 'spec', '--json').stdout).rows;
+  assert.deepEqual(rows.filter(row => ['G1', 'G2'].includes(row.id)).map(({ id, status, tier, text, gate }) => ({ id, status, tier, text, gate })), [
+    { id: 'G1', status: 'pending', tier: 'must', text: 'Describe the first requirement', gate: 'review' },
+    { id: 'G2', status: 'pending', tier: 'aim', text: 'Describe the second requirement', gate: 'node --test' },
+  ], 'draft appends two sequential pending rows with the requested defaults');
+  assert.equal(JSON.parse(first.stdout).id, 'G1');
+  assert.equal(JSON.parse(second.stdout).id, 'G2');
+  const beforeEmpty = readFileSync(join(box.repo, 'SPEC.md'), 'utf8');
+  const empty = box.run(box.repo, 'spec', 'draft', '   ', '--json');
+  assert.notEqual(empty.status, 0);
+  assert.equal(JSON.parse(empty.stdout).error.code, 'USAGE');
+  assert.equal(readFileSync(join(box.repo, 'SPEC.md'), 'utf8'), beforeEmpty, 'an empty draft does not change the spec');
+
+  const next = JSON.parse(box.run(box.repo, 'resume', '--json').stdout);
+  assert.equal(next.setup.step, 1);
+  assert.match(next.setup.command, /^pullboard spec draft/u);
+
+  const custom = releaseFixture(t, { freshSetup: true });
+  const customSpec = [
+    '# Existing requirements', '', '## G · Goals',
+    '- G1 [approved, must] Keep the approved row. | gate: existing',
+    '- G3 [retired, aim] Keep the retired row. | gate: archive',
+    '- G5 [draft, must] Keep the draft row. | gate: review',
+    '- G6 [wont, aim] Keep the declined row. | gate: closed', '',
+    '## N · Notes', '- G2 [approved, must] Another section owns this id. | gate: existing', '',
+  ].join('\r\n');
+  writeFileSync(join(custom.repo, 'SPEC.md'), customSpec);
+  const customDraft = custom.run(custom.repo, 'spec', 'draft', 'Keep line endings intact', '--json');
+  assert.equal(customDraft.status, 0, customDraft.failure || customDraft.stderr);
+  assert.equal(JSON.parse(customDraft.stdout).id, 'G7');
+  const updatedSpec = readFileSync(join(custom.repo, 'SPEC.md'), 'utf8');
+  assert.equal(updatedSpec.replaceAll('\r\n', '').includes('\n'), false, 'draft preserves the source newline style');
+  assert.equal(updatedSpec, customSpec.replace('\r\n\r\n## N · Notes', '\r\n- G7 [pending, must] Keep line endings intact | gate: review\r\n\r\n## N · Notes'),
+    'draft preserves every existing status row and inserts in the first section');
+});
+
 test('coordinator resume finds the oldest unreserved item behind an older live review [N32,R1,R2]', async t => {
   const box = fixture(t, { age: 190, otherAge: 181, reservation: 'live' });
   alert(await box.run(['resume']), 'flow: unreviewed #2 waiting 3 h 1 min (> 3 h 0 min); bottleneck: not measured yet');
@@ -342,11 +394,14 @@ async function finishSetup(box, observe = () => {}) {
     return setup;
   }
   const requirements = step(1);
-  assert.match(requirements.afterAnswer, /person approves G1,G2 in Pullboard View or runs pullboard spec approve G1,G2 in their own terminal/u);
+  assert.match(requirements.afterAnswer, /person approves the returned ids in Pullboard View or runs pullboard spec approve <ids> in their own terminal/u);
   assert.match(requirements.afterAnswer, /coordinator runs pullboard spec apply/u);
-  recordSetupAnswer(box, requirements.command);
+  const drafted = ['Describe the first thing the person wants.', 'Describe how the person will know it works.']
+    .map(text => box.run(box.repo, 'spec', 'draft', text, '--json'));
+  for (const result of drafted) assert.equal(result.status, 0, result.failure || result.stderr || result.stdout);
+  const requirementIds = drafted.map(result => JSON.parse(result.stdout).id).join(',');
   // The person decision is recorded through the real CLI in a synthetic, private person environment.
-  for (const args of [['spec', 'approve', 'G1,G2'], ['spec', 'apply']]) {
+  for (const args of [['spec', 'approve', requirementIds], ['spec', 'apply']]) {
     const result = box.run(box.repo, ...args);
     assert.equal(result.status, 0, result.failure || result.stderr || result.stdout);
   }
