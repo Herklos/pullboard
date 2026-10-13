@@ -8,6 +8,8 @@ import { test } from 'node:test';
 import { MACHINE } from '../../src/machine.js';
 import { machine, project, build, sendBack, fetchLive, startView, styleOf, element, storage, openPage, timelineRows, agentEntries, drawing, textBoxes, meet, accept, itemRow, chromeExecutable, openSnapshotChrome, closeSnapshotChrome } from './fixture.js';
 
+const verifiedIsFinal = Boolean(MACHINE.states.find((state) => state.id === 'verified').final);
+
 
 /** Verify a verified stay ends at its next state move, while a quiet merge remains untimed. */
 test('the timeline times a verified item that goes back to open [N26, M1]', async () => {
@@ -133,7 +135,7 @@ test("the history is a timeline of the item's states [N26]", async () => {
       ['tl-verified', 'accept coordinator (unknown)'],
       ['tl-verified tl-quiet', 'merged coordinator (unknown)'],
     ], 'a dot per event in the colour of the state it led to; a merge moves nothing');
-    assert.deepEqual(done.map((row) => row.stay.replace(/ for .*/, ' for')), ['open for', 'claimed for', 'submitted for', 'sent back for', 'claimed for', 'submitted for', '', ''], 'each stay until the next move; a final state has none');
+    assert.deepEqual(done.map((row) => row.stay.replace(/ for .*/, ' for')), ['open for', 'claimed for', 'submitted for', 'sent back for', 'claimed for', 'submitted for', verifiedIsFinal ? '' : 'verified for', ''], 'each stay until the next move; a final state has none and a quiet merge stays untimed');
     assert.ok(done.slice(0, 6).every((row) => / for (under a minute|\d+m)$/.test(row.stay)), done.map((row) => row.stay).join(', '));
     assert.ok(done.every((row) => /^\d\d:\d\d$/.test(row.time)), 'every event keeps its time');
 
@@ -230,9 +232,10 @@ test('the activity tab draws the lifecycle from the declaration, as the README d
       'claimed>submitted': 'submit 3',
       'submitted>verified': 'accept 1',
       'submitted>open': 'reject 1',
-      'open>withdrawn': 'withdraw 4',
-      'claimed>withdrawn': null,
-      'submitted>withdrawn': null,
+      'open>withdrawn': verifiedIsFinal ? 'withdraw 4' : 'withdraw 1',
+      'claimed>withdrawn': verifiedIsFinal ? null : 'withdraw 2',
+      'submitted>withdrawn': verifiedIsFinal ? null : 'withdraw 1',
+      ...(!verifiedIsFinal ? { 'verified>open': 'reopen (none yet)' } : {}),
     });
 
     // Every route is square, and the ones back to an earlier state are dashed, each at its own height.
@@ -248,6 +251,14 @@ test('the activity tab draws the lifecycle from the declaration, as the README d
     const texts = textBoxes(svg);
     const rects = [...svg.matchAll(/<rect class="box" x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)"/g)].map(([, x, y, w, h]) => ({ left: Number(x), top: Number(y), right: Number(x) + Number(w), bottom: Number(y) + Number(h) }));
     const segments = routes.flatMap((route) => route.points.slice(1).map(([x, y], n) => ({ left: Math.min(x, route.points[n][0]), right: Math.max(x, route.points[n][0]) + 0.01, top: Math.min(y, route.points[n][1]), bottom: Math.max(y, route.points[n][1]) + 0.01 })));
+    if (!verifiedIsFinal) {
+      const verifiedReturn = routes.find((route) => route.pair === 'verified>open');
+      assert.ok(verifiedReturn, 'the non-final verified state has a route back to open');
+      assert.equal(verifiedReturn.label, 'reopen (none yet)', 'the verified return route carries its label');
+      assert.equal(verifiedReturn.back, false, 'the lower-lane return is not an above-row back route');
+      assert.equal(verifiedReturn.points[1][1], verifiedReturn.points[2][1], 'the verified return runs through a horizontal lower lane');
+      assert.ok(verifiedReturn.points[1][1] > Math.max(...rects.map((rect) => rect.bottom)), 'the lower lane clears every state box');
+    }
     texts.forEach((one, n) => {
       for (const other of texts.slice(n + 1)) assert.ok(!meet(one, other, 2), `"${one.words}" and "${other.words}" overlap`);
       const home = rects.filter((rect) => meet(one, rect, one.inside ? 0 : 2));
