@@ -4,6 +4,25 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.8.15] - 2026-10-13
+
+### Setup without snags
+
+Your agent can now record your first requirements in one command, gets its terminal back when it opens the view, and help names every spec command and who runs it.
+
+### Added
+
+- pullboard spec draft "<text>" adds a pending requirement with the next free id, and setup names it as the way to record your answers.
+
+### Changed
+
+- pullboard help spec lists every spec command and says which are yours and which are the coordinator's.
+- An agent that starts pullboard view gets the link and its terminal back; a person at a terminal still runs it in the foreground.
+
+### Fixed
+
+- Submitting a change to a test now also runs the checks that scan every test file, so they no longer fail only after landing.
+
 ## [0.8.14] - 2026-10-13
 
 ### Your agent sets it up
