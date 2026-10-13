@@ -248,7 +248,8 @@ test('a changed cockpit test selects the shared-wait scanner [C7,B3]', (t) => {
   const git = (...args) => execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', ...args], { cwd: root, encoding: 'utf8' }).trim();
   writeFileSync(join(root, 'test/cockpit/shared-wait.test.js'), readFileSync(join(COCKPIT, 'shared-wait.test.js')));
   git('add', '--', 'test/cockpit/shared-wait.test.js');
-  git('commit', '--quiet', '-m', 'test(view): preserve actual scanner input [C7,B3]');
+  // A committed scanner already matches its clone; an empty baseline still pins that input.
+  git('commit', '--allow-empty', '--quiet', '-m', 'test(view): preserve actual scanner input [C7,B3]');
   const base = git('rev-parse', 'HEAD');
   appendFileSync(join(root, 'test/cockpit/demo.test.js'), '\n// Only the cockpit scanner input changes.\n');
   git('add', '--', 'test/cockpit/demo.test.js');
