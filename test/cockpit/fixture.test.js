@@ -7,6 +7,7 @@ import { createServer, request } from 'node:http';
 import diagnosticsChannel from 'node:diagnostics_channel';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import { addItem, closeBoard, openBoard } from '../../src/board.js';
 import { exportBoard, importBoard } from '../../src/exchange.js';
@@ -24,6 +25,43 @@ test('the cockpit fixture inits its board without a model [N26]', () => {
   assert.ok(join, 'the fixture ran a later agent join');
   assert.equal(join.hasModel, true, 'later agent joins retain the machine model');
   assert.equal(join.model, 'Test Model');
+});
+
+test('the cockpit helper starts its view in the foreground [C7,N26]', async t => {
+  const box = machine();
+  project(box, 'foreground-view');
+  delete box.env.PULLBOARD_VIEW_FOREGROUND;
+  const receipt = join(box.dir, 'view-processes.jsonl');
+  const observer = join(box.dir, 'observe-view.mjs');
+  // A preload observes the real spawned Node environment without replacing the CLI or server.
+  writeFileSync(observer, `import { appendFileSync } from 'node:fs';\nappendFileSync(${JSON.stringify(receipt)}, JSON.stringify({ pid: process.pid, marker: process.env.PULLBOARD_VIEW_FOREGROUND ?? null }) + '\\n', { mode: 0o600 });\n`);
+  box.env.NODE_OPTIONS = `${box.env.NODE_OPTIONS ?? ''} --import ${pathToFileURL(observer).href}`.trim();
+  /** Read only the PIDs and marker observed by this fixture's actual Node children. */
+  const observed = () => {
+    try { return readFileSync(receipt, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)); }
+    catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+  };
+  /** Stop any owned child if a failed assertion interrupted the helper's normal cleanup. */
+  t.after(() => {
+    for (const { pid } of observed()) {
+      try { process.kill(pid, 'SIGKILL'); }
+      catch (error) { if (error.code !== 'ESRCH') throw error; }
+    }
+  });
+  const view = await startView(box);
+  let children;
+  try {
+    children = observed();
+    assert.equal(children.length, 1, 'the helper owns one foreground view process');
+    assert.equal(children[0].marker, '1', 'the actual spawned child receives the foreground marker');
+    assert.doesNotThrow(() => process.kill(children[0].pid, 0), 'the owned child stays alive while serving');
+  } finally {
+    await view.stop();
+  }
+  assert.throws(() => process.kill(children[0].pid, 0), error => error.code === 'ESRCH',
+    'stopping the helper removes its actual view process');
+  await assert.rejects(fetchLive(view.link, { signal: AbortSignal.timeout(1_000) }),
+    error => error.cause?.code === 'ECONNREFUSED', 'stopping the helper also closes the owned listener');
 });
 
 test('borrowed board presentation keeps parity, shows staged rows, and leaves the caller connection open [N26,H16]', () => {

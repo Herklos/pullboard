@@ -4,11 +4,11 @@
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { loadavg } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import * as store from './board.js';
 import { CONFIG_FILE, COORDINATOR, DOCTRINE_FILE, LEGACY_DOCTRINE_FILE, loadConfig } from './config.js';
@@ -30,7 +30,7 @@ import {
   pushesTrunk,
   unwiredHookProblems,
 } from './hooks.js';
-import { initRepo } from './init.js';
+import { detectGate, initRepo } from './init.js';
 import { lifecycleMarkdown } from './machine.js';
 import { HELP, VERSION } from './help.js';
 export { HELP, VERSION };
@@ -66,6 +66,7 @@ import { milestoneRoadmap } from './roadmap.js';
 import { listResources } from './resources.js';
 import { citedTestFiles, rowEvidence, rowStage } from './evidence.js';
 import { exportView, serveView } from './serve.js';
+import { forgetView, rememberView, runningView } from './view-session.js';
 import { serveApi } from './api.js';
 import { doctorProblems, doctrineProblems } from './doctor.js';
 import { staleFrozenItems, staleItemFinding } from './approved-rows.js';
@@ -166,6 +167,19 @@ function commandHelp(name) {
     ...entry.usages.slice(1).map((usage) => `       ${usage}`),
     'Flags:',
     ...(entry.flags.length ? entry.flags.map((flag) => `  ${flag}`) : ['  none']),
+    ...(name === 'spec' ? [
+      'Subcommands:',
+      '  pullboard spec --json — agent or person: print the parsed spec and practice rows',
+      '  pullboard spec check — agent or person: lint the spec and practice files',
+      '  pullboard spec view — agent or person: write the offline spec page',
+      '  pullboard spec show <id> — agent or person: inspect one row and its sign-offs',
+      '  pullboard spec unmet — agent or person: list approved rows without current sign-off',
+      '  pullboard spec signoff <ids> — person: sign rows with evidence',
+      '  pullboard spec signers add — person: register an SSH signing key',
+      '  pullboard spec approve <ids> — person: decide from their own terminal or Pullboard View',
+      '  pullboard spec decline <ids> — person: decide from their own terminal or Pullboard View',
+      '  pullboard spec apply — coordinator: apply recorded row decisions to the files',
+    ] : []),
     'Example:',
     `  ${entry.example}`,
   ].join('\n');
@@ -1042,6 +1056,66 @@ function resumeReleaseNotes(info) {
   return releases.length ? { releases: releases.slice(0, 3), omitted: Math.max(0, releases.length - 3), notes: 'CHANGELOG.md' } : null;
 }
 
+/** Identify setup from this board's coordinator enrollment, independently of agent flags. */
+function setupIdentity(board) {
+  return { boardId: store.boardId(board),
+    setupStartedAt: store.listAgents(board).find(agent => agent.agent_id === COORDINATOR)?.agent_created_at };
+}
+
+/** Read only the view's typed successful-bind receipt for this board and setup. */
+function viewSetupComplete(ctx, board) {
+  let receipt;
+  try { receipt = JSON.parse(readFileSync(join(ctx.info.commonDir, 'pullboard', 'view-bind.json'), 'utf8')); }
+  catch (error) { if (error.code === 'ENOENT' || error instanceof SyntaxError) return false; throw error; }
+  const identity = setupIdentity(board);
+  return receipt?.type === 'pullboard.view.bound' && receipt.version === 1
+    && receipt.boardId === identity.boardId && receipt.setupStartedAt === identity.setupStartedAt
+    && Number.isFinite(Date.parse(receipt.boundAt))
+    && Date.parse(receipt.boundAt) >= Date.parse(identity.setupStartedAt);
+}
+
+/** Atomically record a successful real view bind, scoped to this board's current setup. */
+function recordViewBind(ctx, board, boundAt) {
+  const file = join(ctx.info.commonDir, 'pullboard', 'view-bind.json');
+  const temporary = file + '.' + randomUUID() + '.tmp';
+  const receipt = { type: 'pullboard.view.bound', version: 1, ...setupIdentity(board), boundAt };
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(temporary, JSON.stringify(receipt) + '\n', { mode: 0o600 });
+  renameSync(temporary, file);
+}
+
+/** Derive the next setup question from the real requirements, config, items and view receipt. */
+function boardSetup(ctx, card) {
+  const rows = loadSpec(ctx.info.root, ctx.config).rows;
+  const approved = rows.filter(row => row.status === 'approved');
+  const lanes = laneNames(ctx.config).filter(lane => !['review', COORDINATOR].includes(lane));
+  const folders = readdirSync(ctx.info.root, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules')
+    .map(entry => entry.name).sort();
+  const lane = lanes[0] ?? folders[0] ?? 'app';
+  /** Quote the exact suggested command safely for a shell. */
+  const quote = value => "'" + String(value).replaceAll("'", "'\\''") + "'";
+  /** Preserve all existing configuration when recording one setup answer. */
+  const configure = patch => `node -e ${quote(`const fs=require('node:fs');const p='pullboard.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));${patch};fs.writeFileSync(p,JSON.stringify(c,null,2)+${JSON.stringify('\n')})`)}`;
+  const proposedIds = rows.length ? rows.map(row => row.id).join(',') : 'G1,G2';
+  const steps = [
+    { number: 1, done: approved.length > 0, question: 'Ask the person: what are we building, and who will use it? Draft a few requirements as pending, then ask the person to approve them.',
+      command: rows.length ? `pullboard spec show ${quote(rows[0].id)}` : `node -e ${quote(`require('node:fs').appendFileSync(${JSON.stringify(ctx.config.spec)},${JSON.stringify('\n- G1 [pending, must] Describe the first thing the person wants. | gate: review\n- G2 [pending, must] Describe how the person will know it works. | gate: review\n')})`)}`,
+      afterAnswer: `Replace the proposed text with the person’s answer; the person approves ${proposedIds} in Pullboard View or runs pullboard spec approve ${proposedIds} in their own terminal; then the coordinator runs pullboard spec apply.` },
+    { number: 2, done: lanes.length > 0, question: `Ask the person: how should we divide the work? Suggested folders: ${folders.join(', ') || 'app/ (create it for the app)'}.`,
+      command: configure(`c.lanes[${JSON.stringify(lane)}]={owns:[${JSON.stringify(lane + '/')}]}`) },
+    { number: 3, done: Boolean(ctx.config.gate?.trim()), question: `Ask the person: which command proves the build works? Suggested: ${detectGate(ctx.info.root) || 'choose the repo’s test command'}.`,
+      command: configure(`c.gate=${JSON.stringify(detectGate(ctx.info.root) || '<test command>')}`) },
+    { number: 4, done: card.all.length > 0, question: 'Ask the person: what is the first small piece we should build?',
+      command: `pullboard add ${quote(lane)} 'First small piece' --specs ${quote(approved[0]?.id ?? 'G1')} --criterion 'Describe what the person will be able to do'` },
+    { number: 5, done: card.viewOpened,
+      question: 'Ask the person: shall we open the board so you can follow the work?', command: 'pullboard view',
+      afterAnswer: 'Run this in the person’s own terminal, or start it in the background as the agent so setup can continue. The view records its successful bind for this board.' },
+  ];
+  const current = steps.find(step => !step.done);
+  return current ? { step: current.number, total: 5, ...current, steps } : null;
+}
+
 /**
  * `pullboard resume` (N19): one short card that puts an agent back to work after a fresh start,
  * a restart or a compaction, from the board rather than from a summary.
@@ -1078,6 +1152,7 @@ function resumeHere(io) {
       unread: store.unreadCount(board, me.id),
       newest: store.peekShouts(board, me.id, 1),
       agents: store.listAgents(board),
+      viewOpened: viewSetupComplete(ctx, board),
     };
   });
   card.relayProblems = unlinkedRelayProjects();
@@ -1102,6 +1177,13 @@ function resumeHere(io) {
   for (const problem of card.hookProblems) say(`${problem.message}; ${problem.next}`);
   const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
   say(`resume: ${me.displayName}${me.family ? ` [family ${me.family}]` : ''}, ${me.lane} lane${isMain ? ', the main checkout' : ''}, at ${root}`);
+  card.setup = boardSetup(ctx, card);
+  if (card.setup) {
+    say(`Setting up: step ${card.setup.step} of 5`);
+    say(card.setup.question);
+    say(`Record the answer: ${card.setup.command}`);
+    if (card.setup.afterAnswer) say(card.setup.afterAnswer);
+  }
   const dirty = dirtyFiles(root).length;
   if (!isMain) {
     const branch = tryGit(root, ['rev-parse', '--abbrev-ref', 'HEAD']).stdout || 'HEAD';
@@ -1166,6 +1248,7 @@ function resumeHere(io) {
   else if (inLane.length) next = `pullboard next --wait 9 (minutes); ${inLane.length} in your lane ${inLane.length === 1 ? 'waits' : 'wait'} on other work`;
   else if (card.awaiting.length) next = 'pullboard next --wait 9 (minutes); a rejected item comes back to your lane';
   else next = 'nothing open in your lane; pullboard next --verify names work you can check';
+  if (card.setup) next = card.setup.command;
   io.result?.({ ...card, root, dirty, next });
   say(`next: ${next}`);
   const flowAlert = isMain ? flowAlertLine(card.flow) : null;
@@ -1189,20 +1272,61 @@ async function viewHere(io, values) {
     io.say(`wrote snapshot ${exported.path}`);
     return 0;
   }
+  const port = values.port === undefined ? 0 : Number(values.port);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Refused('USAGE', '--port is a number from 0 to 65535; 0 picks a free one');
   try {
     const info = repoInfo(io.cwd);
     if (info.isMain && existsSync(join(info.root, CONFIG_FILE))) await registerProjectAndLink(info.root, new Date(), loadConfig(info.root), io);
   } catch (error) {
     if (!(error instanceof Refused)) throw error;
   }
-  const port = values.port === undefined ? 0 : Number(values.port);
-  if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Refused('USAGE', '--port is a number from 0 to 65535; 0 picks a free one');
-  const view = await serveView({ port, isMain: codeIsFromMain() });
-  io.result?.({ url: view.url, port: view.port });
-  io.say(`Pullboard view: ${view.url}`);
-  io.say('Only this machine can reach it, and only with that link. Ctrl-C stops it.');
+  const internalForeground = process.env.PULLBOARD_VIEW_BACKGROUND_CHILD === '1'
+    || process.env.PULLBOARD_VIEW_FOREGROUND === '1';
+  if (!internalForeground) {
+    const existing = port ? await runningView(port) : null;
+    if (existing) {
+      reportView(io, { ...existing, reused: true });
+      return 0;
+    }
+    if (process.env.AI_AGENT !== undefined || !io.physicalStdoutIsTTY) return await launchBackgroundView(io, port);
+  }
+  let view;
+  try {
+    view = await serveView({ port, isMain: codeIsFromMain() });
+    const boundAt = new Date().toISOString();
+    const closeServer = view.close;
+    view = {
+      ...view,
+      pid: process.pid,
+      boundAt,
+      close: async () => { forgetView(view.port); await closeServer(); },
+    };
+    try {
+      rememberView({ port: view.port, secret: new URL(view.url).searchParams.get('k'), pid: process.pid, boundAt }, { rememberPort: port === 0 });
+    } catch (error) {
+      throw new Refused('VIEW_STATE', `could not save the private view session: ${error.message}`);
+    }
+    // Only a successful fresh bind writes this board's typed setup receipt.
+    let info;
+    try { info = repoInfo(io.cwd); }
+    catch (error) { if (!(error instanceof Refused)) throw error; }
+    if (info && existsSync(join(info.root, CONFIG_FILE))) {
+      const ctx = context(io);
+      withBoard(ctx, board => recordViewBind(ctx, board, boundAt));
+    }
+  } catch (error) {
+    if (view) await view.close();
+    if (process.env.PULLBOARD_VIEW_BACKGROUND_CHILD === '1' && process.send) {
+      process.send({ type: 'startup-error', code: error.code ?? 'VIEW_START', message: error.message });
+    }
+    throw error;
+  }
+  reportView(io, { ...view, reused: false });
+  if (process.env.PULLBOARD_VIEW_BACKGROUND_CHILD === '1' && process.send) {
+    process.send({ type: 'ready', url: view.url, port: view.port, pid: process.pid, boundAt: view.boundAt });
+  }
   io.flush?.(0);
-  if (!values['no-open']) {
+  if (!values['no-open'] && process.env.PULLBOARD_VIEW_BACKGROUND_CHILD !== '1') {
     const opener = process.platform === 'darwin' ? ['open', [view.url]] : process.platform === 'win32' ? ['cmd', ['/c', 'start', '', view.url]] : ['xdg-open', [view.url]];
     spawn(opener[0], opener[1], { detached: true, stdio: 'ignore' }).on('error', () => {}).unref();
   }
@@ -1212,6 +1336,61 @@ async function viewHere(io, values) {
   });
   await view.close();
   return 0;
+}
+
+/** Print a live or reused view link and the exact stop action for its owning process. */
+function reportView(io, view) {
+  io.result?.({ url: view.url, port: view.port, pid: view.pid, boundAt: view.boundAt, reused: view.reused });
+  io.say(`Pullboard view: ${view.url}`);
+  io.say(`Only this machine can reach it, and only with that link. To stop it: ${process.platform === 'win32' ? `taskkill /PID ${view.pid} /T` : `kill ${view.pid}`}`);
+}
+
+/** Start the view in a detached CLI child, forwarding only its bound address over IPC. */
+async function launchBackgroundView(io, port) {
+  const args = [fileURLToPath(new URL('../bin/pullboard.js', import.meta.url)), 'view', '--no-open'];
+  if (port) args.push('--port', String(port));
+  const child = spawn(process.execPath, args, {
+    cwd: io.cwd,
+    env: { ...process.env, PULLBOARD_VIEW_BACKGROUND_CHILD: '1' },
+    detached: true,
+    stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+  });
+  let stderr = '';
+  child.stderr.setEncoding('utf8').on('data', (part) => { stderr += part; });
+  const startup = new Promise((resolveStartup, rejectStartup) => {
+    let settled = false;
+    const finish = (error, result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      error ? rejectStartup(error) : resolveStartup(result);
+    };
+    const timer = setTimeout(() => finish(new Refused('VIEW_START', 'the view did not bind in time; run pullboard view in the foreground for details')),
+      35_000); // budget: the 30s registry lock ceiling plus 5s for local bind and IPC delivery.
+    child.on('message', (message) => {
+      if (message?.type === 'ready') finish(null, message);
+      else if (message?.type === 'startup-error') {
+        const prefix = `[${message.code}] `;
+        finish(new Refused(message.code, message.message.startsWith(prefix) ? message.message.slice(prefix.length) : message.message));
+      }
+    });
+    child.once('error', (error) => finish(new Refused('VIEW_START', `could not start the view: ${error.message}`)));
+    child.once('exit', (code, signal) => {
+      finish(new Refused('VIEW_START', `the view stopped before binding (exit ${code ?? signal ?? 'unknown'}): ${stderr.trim() || 'no startup details'}`));
+    });
+  });
+  try {
+    const view = await startup;
+    child.stderr.destroy();
+    child.unref();
+    child.disconnect();
+    reportView(io, { ...view, reused: false });
+    io.flush?.(0);
+    return 0;
+  } catch (error) {
+    child.kill('SIGTERM');
+    throw error;
+  }
 }
 
 /** Serve API v1 until a shutdown signal, printing its address before waiting (A2). */
@@ -1278,8 +1457,7 @@ function setupCommands(io, { first, values }) {
       const staging = notes.at(-1)?.startsWith('git add -f -- ') ? notes.at(-1) : null;
       (staging ? notes.slice(0, -1) : notes).forEach((note) => io.say(note));
       if (await registerProjectAndLink(info.root, new Date(), loadConfig(info.root), io)) io.say('registered this project on this machine, so pullboard view lists it');
-      io.say('next: write SPEC.md rows, declare lanes in pullboard.json, then: pullboard add <lane> <title>');
-      io.say('with an agent: start a new Claude Code session here, which loads the pullboard skills, then tell it what to build; the pullboard-run skill runs the team');
+      io.say('Next: ask your agent to set up Pullboard here; in Claude Code, start a new session first so it loads the Pullboard skills.');
       if (staging) io.say(staging);
       return 0;
     },

@@ -833,7 +833,9 @@ test('[A1] long-running servers flush one JSON document before shutdown', async 
     t.after(() => rmSync(box.dir, { recursive: true, force: true }));
     const args = [BIN, command, ...(command === 'view' ? ['--no-open'] : []), '--port', '0', '--json'];
     const startedAt = performance.now();
-    const child = spawn(process.execPath, args, { cwd: box.repo, env: box.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, args, { cwd: box.repo,
+      env: command === 'view' ? { ...box.env, PULLBOARD_VIEW_FOREGROUND: '1' } : box.env,
+      stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     child.stdout.setEncoding('utf8');

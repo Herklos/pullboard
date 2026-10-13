@@ -28,11 +28,30 @@ function fixture(t, ignore) {
     const result = runFixtureChild(process.execPath, [cliPath, ...args, '--json'], { cwd: root, env, encoding: 'utf8' });
     return { code: result.status, document: JSON.parse(result.stdout), stderr: result.failure ?? result.stderr, failure: result.failure };
   }
+  /** Run the real CLI in its person-facing output mode. */
+  function output(...args) {
+    const result = runFixtureChild(process.execPath, [cliPath, ...args], { cwd: root, env, encoding: 'utf8' });
+    return { code: result.status, stdout: result.stdout, stderr: result.failure ?? result.stderr, failure: result.failure };
+  }
   git('init', '-q', '-b', 'main');
   writeFileSync(join(root, 'pullboard.json'), JSON.stringify({ gate: 'true', lanes: { web: { owns: ['web/'], specs: [] } } }));
   if (ignore !== undefined) writeFileSync(join(root, '.gitignore'), ignore);
-  return { root, git, cli };
+  return { root, git, cli, output };
 }
+
+test('a fresh init tells the person and the agent how to start [I9,I1]', t => {
+  const box = fixture(t);
+  rmSync(join(box.root, 'pullboard.json'));
+  const initialized = box.output('init');
+  assert.equal(initialized.code, 0, initialized.stderr);
+  assert.match(initialized.stdout, /^Next: ask your agent to set up Pullboard here; in Claude Code, start a new session first so it loads the Pullboard skills\.$/mu, 'init gives one setup instruction and preserves Claude Code skill loading');
+  assert.match(initialized.stdout, /git add -f --/u, 'the init output keeps its staging instruction');
+
+  const agents = readFileSync(join(box.root, 'AGENTS.md'), 'utf8');
+  const section = agents.slice(agents.indexOf('## A new board'), agents.indexOf('## Working here: pullboard'));
+  assert.equal(section, '## A new board\n\nOn a board that is not set up, run `pullboard resume` first. Walk the person through its setup steps before anything else.\n\n', 'AGENTS.md includes the new-board setup section');
+  assert.doesNotMatch(section, /\b(?:spec|lanes|gates)\b/iu, 'the first setup guidance uses plain words');
+});
 
 test('init appends only the agent-worktree ignore rule and the second init writes nothing [I1,I2,I16]', t => {
   for (const previous of [undefined, '', '# existing rules\r\nnode_modules/\r\n!keep-this', '.claude/worktrees/\n# already configured\n']) {

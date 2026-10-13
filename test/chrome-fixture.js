@@ -23,6 +23,20 @@ function pause(ms) {
   return new Promise((resolvePause) => setTimeout(resolvePause, ms));
 }
 
+/** Confirm removal from Chrome's target list within one declared operation deadline. */
+export async function waitForTargetAbsent(listTargets, targetId, {
+  timeoutMs = 5_000, now = Date.now, pauseFor = pause,
+} = {}) {
+  const deadline = now() + timeoutMs;
+  do {
+    const targets = await listTargets(Math.max(1, deadline - now()));
+    if (!targets.some(candidate => candidate.id === targetId)) return;
+    if (now() >= deadline) break;
+    await pauseFor(Math.max(0, Math.min(50, deadline - now())));
+  } while (now() < deadline);
+  throw new Error(`Closed DevTools target ${targetId} remained listed within ${timeoutMs}ms.`);
+}
+
 /** Build the shared bounded page-condition loop around the real CDP evaluator. */
 export function createWaiter(evaluate, { commandTimeoutMs = COMMAND_TIMEOUT_MS, pauseFor = pause, now = Date.now } = {}) {
   return async function waitFor(expression, timeoutMs = commandTimeoutMs, label = 'wait for page condition') {
