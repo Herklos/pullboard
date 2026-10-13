@@ -165,7 +165,7 @@ function sourceRow(box, file, id) {
 /** Start the private real view with clean person credentials and expose authenticated requests. */
 async function startView(t, box, extraEnv = {}) {
   const args = [BIN, 'view', '--no-open', '--port', '0', '--json'];
-  const env = { ...personEnvironment(box.env), ...extraEnv, CODEX_SHELL: 'private-agent-view-host' };
+  const env = { ...personEnvironment(box.env), ...extraEnv, CODEX_SHELL: 'private-agent-view-host', PULLBOARD_VIEW_FOREGROUND: '1' };
   const startedAt = performance.now();
   const child = spawn(process.execPath, args, {
     cwd: box.root, env, stdio: ['ignore', 'pipe', 'pipe'],

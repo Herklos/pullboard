@@ -167,7 +167,7 @@ async function startView(t, box, extraEnv = {}) {
   const args = [BIN, 'view', '--no-open', '--port', '0', '--json'];
   const startedAt = performance.now();
   const child = spawn(process.execPath, args, {
-    cwd: box.repo, env: { ...box.env, ...MARKERS, ...extraEnv }, stdio: ['ignore', 'pipe', 'pipe'],
+    cwd: box.repo, env: { ...box.env, ...MARKERS, ...extraEnv, PULLBOARD_VIEW_FOREGROUND: '1' }, stdio: ['ignore', 'pipe', 'pipe'],
   });
   let output = '';
   let diagnostics = '';
