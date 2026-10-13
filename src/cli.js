@@ -1062,18 +1062,29 @@ function setupIdentity(board) {
     setupStartedAt: store.listAgents(board).find(agent => agent.agent_id === COORDINATOR)?.agent_created_at };
 }
 
-/** Read the view's typed fresh-bind or authenticated-reuse receipt for this board and setup. */
-function viewSetupComplete(ctx, board) {
+/** Read only the view's typed successful-bind receipt for this board and setup. */
+function viewBindComplete(ctx, board) {
   let receipt;
   try { receipt = JSON.parse(readFileSync(join(ctx.info.commonDir, 'pullboard', 'view-bind.json'), 'utf8')); }
   catch (error) { if (error.code === 'ENOENT' || error instanceof SyntaxError) return false; throw error; }
   const identity = setupIdentity(board);
-  const observedAt = receipt?.type === 'pullboard.view.bound' ? receipt.boundAt
-    : receipt?.type === 'pullboard.view.reused' ? receipt.openedAt : null;
-  return receipt?.version === 1
+  return receipt?.type === 'pullboard.view.bound' && receipt.version === 1
     && receipt.boardId === identity.boardId && receipt.setupStartedAt === identity.setupStartedAt
-    && Number.isFinite(Date.parse(observedAt))
-    && Date.parse(observedAt) >= Date.parse(identity.setupStartedAt);
+    && Number.isFinite(Date.parse(receipt.boundAt))
+    && Date.parse(receipt.boundAt) >= Date.parse(identity.setupStartedAt);
+}
+
+/** A separately typed, authenticated reuse also proves that this board's view was opened. */
+function viewSetupComplete(ctx, board) {
+  if (viewBindComplete(ctx, board)) return true;
+  let receipt;
+  try { receipt = JSON.parse(readFileSync(join(ctx.info.commonDir, 'pullboard', 'view-reuse.json'), 'utf8')); }
+  catch (error) { if (error.code === 'ENOENT' || error instanceof SyntaxError) return false; throw error; }
+  const identity = setupIdentity(board);
+  return receipt?.type === 'pullboard.view.reused' && receipt.version === 1
+    && receipt.boardId === identity.boardId && receipt.setupStartedAt === identity.setupStartedAt
+    && Number.isFinite(Date.parse(receipt.openedAt))
+    && Date.parse(receipt.openedAt) >= Date.parse(identity.setupStartedAt);
 }
 
 /** Atomically record a successful real view bind, scoped to this board's current setup. */
@@ -1088,7 +1099,7 @@ function recordViewBind(ctx, board, boundAt) {
 
 /** Record this board's authenticated reuse without claiming that its existing listener bound again. */
 function recordViewReuse(ctx, board, view) {
-  const file = join(ctx.info.commonDir, 'pullboard', 'view-bind.json');
+  const file = join(ctx.info.commonDir, 'pullboard', 'view-reuse.json');
   const temporary = file + '.' + randomUUID() + '.tmp';
   const receipt = { type: 'pullboard.view.reused', version: 1, ...setupIdentity(board),
     openedAt: new Date().toISOString(), boundAt: view.boundAt, port: view.port, pid: view.pid };

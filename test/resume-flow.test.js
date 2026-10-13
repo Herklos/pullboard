@@ -327,11 +327,10 @@ function assertViewReceipt(box) {
 
 test('a reused authenticated view completes setup for its new board [N26,N32]', async t => {
   const firstBoard = releaseFixture(t);
-  const secondBoard = releaseFixture(t);
-  const refusedBoard = releaseFixture(t);
   const lease = await takeDefaultViewPort(firstBoard.root);
   t.after(() => lease.release());
-  for (const box of [firstBoard, secondBoard, refusedBoard]) {
+  /** Prepare a real board through the first four setup steps, leaving only its view unopened. */
+  function awaitingView(box) {
     box.env.PULLBOARD_HOME = firstBoard.env.PULLBOARD_HOME;
     box.env.PULLBOARD_MACHINE_HOME = firstBoard.env.PULLBOARD_MACHINE_HOME;
     delete box.env.PULLBOARD_VIEW_FOREGROUND;
@@ -344,6 +343,7 @@ test('a reused authenticated view completes setup for its new board [N26,N32]', 
     assert.equal(added.status, 0, added.failure || added.stderr || added.stdout);
     assert.equal(JSON.parse(box.run(box.repo, 'resume', '--json').stdout).setup?.step, 5);
   }
+  awaitingView(firstBoard);
   const child = spawn(process.execPath, [join(firstBoard.root, 'cli/bin/pullboard.js'), 'view', '--no-open', '--json'],
     { cwd: firstBoard.repo, env: { ...firstBoard.env, PULLBOARD_VIEW_FOREGROUND: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
   const closed = new Promise(resolve => child.once('close', resolve));
@@ -363,6 +363,10 @@ test('a reused authenticated view completes setup for its new board [N26,N32]', 
   });
   assert.equal(first.port, 4890);
   assert.equal(JSON.parse(firstBoard.run(firstBoard.repo, 'resume', '--json').stdout).setup, null);
+  const secondBoard = releaseFixture(t);
+  const refusedBoard = releaseFixture(t);
+  awaitingView(secondBoard);
+  awaitingView(refusedBoard);
   const reused = secondBoard.run(secondBoard.repo, 'view', '--no-open', '--json');
   assert.equal(reused.status, 0, reused.failure || reused.stderr || reused.stdout);
   const second = JSON.parse(reused.stdout);
@@ -370,7 +374,7 @@ test('a reused authenticated view completes setup for its new board [N26,N32]', 
   assert.equal(second.url, first.url);
   assert.equal(JSON.parse(secondBoard.run(secondBoard.repo, 'resume', '--json').stdout).setup, null,
     'the exact offered view command completes setup on the second board');
-  const receiptPath = join(secondBoard.repo, '.git/pullboard/view-bind.json');
+  const receiptPath = join(secondBoard.repo, '.git/pullboard/view-reuse.json');
   const bytes = readFileSync(receiptPath);
   const receipt = JSON.parse(bytes);
   assert.equal(receipt.type, 'pullboard.view.reused');
