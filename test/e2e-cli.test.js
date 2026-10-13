@@ -345,8 +345,11 @@ test('output into a reader that stops early ends quietly [N24]', async () => {
   assert.equal(code, 0);
 });
 
-test('every wait pullboard suggests names its unit and fits one ten-minute tool call [N25]', () => {
+test('every wait pullboard suggests names its unit and fits one ten-minute tool call [N25]', async () => {
   const box = project();
+  box.env.PULLBOARD_VIEW_FOREGROUND = '1';
+  const view = await e2e.startView(box, box.repo);
+  await view.stop();
   box.run(box.repo, 'add', 'web', 'Page', '--specs', 'G1');
   box.run(box.repo, 'add', 'web', 'Second', '--specs', 'G1', '--after', '1');
   box.run(box.web, 'claim', '1');

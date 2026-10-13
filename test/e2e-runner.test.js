@@ -229,8 +229,11 @@ test('pre-commit runs the fixers on fully staged files and restages them; partly
   assert.equal(committedText('docs/e.js'), 'const e = 1;   \n');
 });
 
-test('resume puts an agent back to work from the board: its claim, its branch, what came back, the next step [N19]', () => {
+test('resume puts an agent back to work from the board: its claim, its branch, what came back, the next step [N19]', async () => {
   const box = project();
+  box.env.PULLBOARD_VIEW_FOREGROUND = '1';
+  const view = await e2e.startView(box, box.repo);
+  await view.stop();
   box.run(box.repo, 'add', 'web', 'Page', '--specs', 'G1', '--brief', 'Files: web/page.html');
   const fresh = box.run(box.web, 'resume');
   assert.equal(fresh.code, 0, fresh.err);

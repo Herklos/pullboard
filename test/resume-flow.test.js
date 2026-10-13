@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import * as store from '../src/board.js';
 import { main } from '../src/cli.js';
+import { spawn } from 'node:child_process';
+import { AGENT_SHELL_MARKERS, SSH_SHELL_MARKERS } from '../src/person.js';
 import { proofStats } from '../src/stats.js';
 import { runFixtureChild, runFixtureGit } from './fixture-child.js';
 
@@ -13,14 +15,14 @@ const PRIVATE_CHANGELOG = `# Changelog\n\n## [0.8.7] - 2026-10-12\n\n### A new s
 const LONG_CHANGELOG = `# Changelog\n\n## [0.8.9] - 2026-10-14\n\n### Nine\n\nNine paragraph.\n\n## [0.8.8] - 2026-10-13\n\n### Eight\n\nEight paragraph.\n\n## [0.8.7] - 2026-10-12\n\n### Seven\n\nSeven paragraph.\n\n## [0.8.6] - 2026-10-11\n\n### Six\n\nSix paragraph.\n\n## [0.8.5] - 2026-10-10\n\n### Five\n\nFive paragraph.\n\n## [0.8.4] - 2026-10-09\n\n### Added\n\nThis category heading is not a release headline.\n`;
 
 /** Build an isolated copy of the production CLI at a chosen release version. */
-function releaseFixture(t, { previous = null, version = '0.8.7', changelog = PRIVATE_CHANGELOG } = {}) {
+function releaseFixture(t, { previous = null, version = '0.8.7', changelog = PRIVATE_CHANGELOG, freshSetup = false } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-resume-release-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const cli = join(root, 'cli');
   const repo = join(root, 'repo');
   mkdirSync(cli);
   mkdirSync(repo);
-  writeFileSync(join(repo, 'SPEC.md'), '# Release fixture\n\n## N · Resume\n- N19 [approved, must] Resume announces released headlines once per checkout. | gate: review\n');
+  if (!freshSetup) writeFileSync(join(repo, 'SPEC.md'), '# Release fixture\n\n## N · Resume\n- N19 [approved, must] Resume announces released headlines once per checkout. | gate: review\n');
   cpSync(join(import.meta.dirname, '../src'), join(cli, 'src'), { recursive: true });
   cpSync(join(import.meta.dirname, '../bin'), join(cli, 'bin'), { recursive: true });
   cpSync(join(import.meta.dirname, '../skills'), join(cli, 'skills'), { recursive: true });
@@ -32,6 +34,7 @@ function releaseFixture(t, { previous = null, version = '0.8.7', changelog = PRI
     GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'Fixture',
     GIT_AUTHOR_EMAIL: 'fixture@example.com', GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.com' };
   delete env.PULLBOARD_RELAY_TOKEN;
+  for (const name of [...AGENT_SHELL_MARKERS, ...SSH_SHELL_MARKERS]) delete env[name];
   runFixtureGit(['init', '-q', '-b', 'main'], { cwd: repo, env });
   /** Run the copied production CLI in the selected real checkout. */
   const run = (cwd, ...args) => runFixtureChild(process.execPath, [join(cli, 'bin/pullboard.js'), ...args], { cwd, env, encoding: 'utf8' });
@@ -277,4 +280,119 @@ test('coordinator resume finds the oldest unreserved item behind an older live r
   const box = fixture(t, { age: 190, otherAge: 181, reservation: 'live' });
   alert(await box.run(['resume']), 'flow: unreviewed #2 waiting 3 h 1 min (> 3 h 0 min); bottleneck: not measured yet');
   assert.deepEqual(box.stats().flow.unreviewed, { size: 1, oldest: { id: 2, since: '2026-10-10T05:19:00.000Z', ageMinutes: 181 } });
+});
+
+/** Execute the exact record-answer command offered by resume inside its private repository. */
+function recordSetupAnswer(box, command) {
+  const result = runFixtureChild('sh', ['-c', command], { cwd: box.repo, env: box.env, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.failure || result.stderr || result.stdout);
+}
+
+/** Open the real local view and wait for its ready line before stopping its owned child. */
+async function openSetupView(box) {
+  const child = spawn(process.execPath, [join(box.root, 'cli/bin/pullboard.js'), 'view', '--no-open'],
+    { cwd: box.repo, env: { ...box.env, PULLBOARD_VIEW_FOREGROUND: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = '', errors = '';
+  const closed = new Promise(resolve => child.once('close', (code, signal) => resolve({ code, signal })));
+  try {
+    await new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', () => reject(new Error(errors || output || 'view closed before ready')));
+      child.stderr.on('data', bytes => { errors += bytes; });
+      child.stdout.on('data', bytes => { output += bytes; if (output.includes('Pullboard view: http://')) resolve(); });
+    });
+    assert.match(output, /Pullboard view: http:\/\/127\.0\.0\.1:/u);
+  } finally {
+    child.kill('SIGTERM');
+    await closed;
+  }
+}
+
+/** Reject stale or foreign receipt data while preserving the view's exact successful receipt. */
+function assertViewReceipt(box) {
+  const receiptPath = join(box.repo, '.git/pullboard/view-bind.json');
+  const receiptBytes = readFileSync(receiptPath);
+  const receipt = JSON.parse(receiptBytes);
+  assert.equal(receipt.type, 'pullboard.view.bound');
+  for (const invalid of [{ ...receipt, boardId: 'another-board' },
+    { ...receipt, setupStartedAt: '2000-01-01T00:00:00.000Z' },
+    { ...receipt, boundAt: '2000-01-01T00:00:00.000Z' }]) {
+    writeFileSync(receiptPath, JSON.stringify(invalid));
+    assert.equal(JSON.parse(box.run(box.repo, 'resume', '--json').stdout).setup?.step, 5,
+      'a receipt for another board or before this setup cannot complete it');
+  }
+  writeFileSync(receiptPath, receiptBytes);
+}
+
+/** Drive the same actual commands a newcomer receives, with a private fixture person approval. */
+async function finishSetup(box, observe = () => {}) {
+  /** Assert the next setup block in both the actual text and JSON CLI output. */
+  function step(number) {
+    const text = box.run(box.repo, 'resume');
+    assert.equal(text.status, 0, text.failure || text.stderr);
+    assert.match(text.stdout, new RegExp(`Setting up: step ${number} of 5`));
+    const json = box.run(box.repo, 'resume', '--json');
+    assert.equal(json.status, 0, json.failure || json.stderr);
+    const setup = JSON.parse(json.stdout).setup;
+    assert.equal(setup.step, number);
+    assert.equal(setup.total, 5);
+    assert.ok(setup.question.startsWith('Ask the person:'));
+    assert.ok(text.stdout.includes(setup.command));
+    observe(number, setup);
+    return setup;
+  }
+  const requirements = step(1);
+  assert.match(requirements.afterAnswer, /person approves G1,G2 in Pullboard View or runs pullboard spec approve G1,G2 in their own terminal/u);
+  assert.match(requirements.afterAnswer, /coordinator runs pullboard spec apply/u);
+  recordSetupAnswer(box, requirements.command);
+  // The person decision is recorded through the real CLI in a synthetic, private person environment.
+  for (const args of [['spec', 'approve', 'G1,G2'], ['spec', 'apply']]) {
+    const result = box.run(box.repo, ...args);
+    assert.equal(result.status, 0, result.failure || result.stderr || result.stdout);
+  }
+  recordSetupAnswer(box, step(2).command);
+  writeFileSync(join(box.repo, 'package.json'), JSON.stringify({ scripts: { test: 'node -e ""' } }));
+  const gate = step(3);
+  assert.match(gate.question, /Suggested: npm test/u);
+  recordSetupAnswer(box, gate.command);
+  recordSetupAnswer(box, step(4).command);
+  const view = step(5);
+  assert.equal(view.command, 'pullboard view');
+  assert.match(view.afterAnswer, /person’s own terminal, or start it in the background as the agent/u);
+  box.git(box.repo, 'add', '-A');
+  box.git(box.repo, 'commit', '-q', '-m', 'chore: set up private fixture');
+  const builder = box.run(box.repo, 'worktree', 'app', '--model', 'Fixture');
+  assert.equal(builder.status, 0, builder.failure || builder.stderr);
+  const stillWaiting = JSON.parse(box.run(box.repo, 'resume', '--json').stdout);
+  assert.equal(stillWaiting.setup?.step, 5, 'registering a builder does not stand in for the view’s own bind receipt');
+  const shouted = box.run(box.repo, 'shout', 'all', 'Opened Pullboard view for this board.');
+  assert.equal(shouted.status, 0, shouted.failure || shouted.stderr);
+  assert.equal(JSON.parse(box.run(box.repo, 'resume', '--json').stdout).setup?.step, 5,
+    'an ordinary same-text shout cannot impersonate a successful view bind');
+  await openSetupView(box);
+  assertViewReceipt(box);
+}
+
+test('resume walks a new board through setup one step at a time [N32,N19]', async t => {
+  const box = releaseFixture(t, { freshSetup: true });
+  mkdirSync(join(box.repo, 'app'));
+  const seen = [];
+  await finishSetup(box, (number, setup) => {
+    seen.push(number);
+    if (number === 2) assert.match(setup.question, /Suggested folders: app/u);
+  });
+  assert.deepEqual(seen, [1, 2, 3, 4, 5]);
+  const result = box.run(box.repo, 'resume', '--json');
+  assert.equal(result.status, 0, result.failure || result.stderr);
+  assert.equal(JSON.parse(result.stdout).setup, null, 'actual successful view bind completes the board setup');
+});
+
+test("a set-up board's resume prints no setup steps [N32,N19]", async t => {
+  const box = releaseFixture(t, { freshSetup: true });
+  await finishSetup(box);
+  const result = box.run(box.repo, 'resume');
+  assert.equal(result.status, 0, result.failure || result.stderr);
+  assert.doesNotMatch(result.stdout, /Setting up: step/u);
+  const json = box.run(box.repo, 'resume', '--json');
+  assert.equal(JSON.parse(json.stdout).setup, null);
 });
