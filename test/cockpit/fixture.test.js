@@ -1,5 +1,7 @@
 /** Cockpit fixture checks, using the shared real-board fixtures [N26]. */
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, request } from 'node:http';
 import diagnosticsChannel from 'node:diagnostics_channel';
@@ -82,6 +84,52 @@ test('borrowed board presentation keeps parity, shows staged rows, and leaves th
   } finally {
     closeBoard(staged);
     closeBoard(source);
+  }
+});
+
+test('the view reads its release notes once, not on every state [N26]', () => {
+  const box = machine();
+  const p = project(box, 'release-note-cache');
+  box.run(p.repo, 'add', 'web', 'A real board row', '--specs', 'G1');
+  const changelog = readFileSync(resolve(import.meta.dirname, '../../CHANGELOG.md'));
+  const expectedHash = createHash('sha256').update(changelog).digest('hex');
+  const serveUrl = new URL('../../src/serve.js', import.meta.url).href;
+  const script = `
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+import { basename } from 'node:path';
+import { fileURLToPath } from 'node:url';
+const repo = ${JSON.stringify(p.repo)};
+const observedReads = [];
+const originalReadFileSync = fs.readFileSync;
+fs.readFileSync = function (file, ...args) {
+  const value = Reflect.apply(originalReadFileSync, this, [file, ...args]);
+  let name = '';
+  try { name = basename(file instanceof URL ? fileURLToPath(file) : String(file)); } catch { /* non-path input */ }
+  if (name === 'CHANGELOG.md') {
+    const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value);
+    observedReads.push({ sha256: createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length });
+  }
+  return value;
+};
+syncBuiltinESMExports();
+const { projectState } = await import(${JSON.stringify(serveUrl)} + '?release-cache-regression');
+const states = [projectState(repo), projectState(repo), projectState(repo)];
+assert.equal(states.length, 3);
+process.stdout.write(JSON.stringify({ observedReads, releaseNotes: states.map(state => state.releaseNotes) }) + '\\n');
+`;
+  const env = { ...box.env };
+  delete env.NODE_TEST_CONTEXT;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], { cwd: box.dir, env, encoding: 'utf8', maxBuffer: 2 * 1024 * 1024 });
+  assert.equal(child.status, 0, `fresh real project-state process: ${child.stderr}`);
+  const observation = JSON.parse(child.stdout);
+  assert.equal(observation.observedReads.length, 1, 'one successful filesystem changelog read serves multiple project states');
+  assert.deepEqual(observation.observedReads[0], { sha256: expectedHash, bytes: changelog.length }, 'the read returns the unchanged shipped changelog bytes');
+  assert.equal(observation.releaseNotes.length, 3, 'three real SQLite-backed project states were built');
+  for (const releaseNotes of observation.releaseNotes.slice(1)) {
+    assert.deepEqual(releaseNotes, observation.releaseNotes[0], 'cached release content is identical in every state');
   }
 });
 

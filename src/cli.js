@@ -174,6 +174,7 @@ function commandHelp(name) {
       '  pullboard spec view — agent or person: write the offline spec page',
       '  pullboard spec show <id> — agent or person: inspect one row and its sign-offs',
       '  pullboard spec unmet — agent or person: list approved rows without current sign-off',
+      '  pullboard spec draft <text> [--aim] [--gate "<gate>"] — any agent: append a pending row; never approve it',
       '  pullboard spec signoff <ids> — person: sign rows with evidence',
       '  pullboard spec signers add — person: register an SSH signing key',
       '  pullboard spec approve <ids> — person: decide from their own terminal or Pullboard View',
@@ -236,6 +237,8 @@ const OPTIONS = {
   brief: { type: 'string' },
   'brief-file': { type: 'string' },
   text: { type: 'string' },
+  gate: { type: 'string' },
+  aim: { type: 'boolean' },
   route: { type: 'string' },
   family: { type: 'string' },
   model: { type: 'string' },
@@ -1121,11 +1124,10 @@ function boardSetup(ctx, card) {
   const quote = value => "'" + String(value).replaceAll("'", "'\\''") + "'";
   /** Preserve all existing configuration when recording one setup answer. */
   const configure = patch => `node -e ${quote(`const fs=require('node:fs');const p='pullboard.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));${patch};fs.writeFileSync(p,JSON.stringify(c,null,2)+${JSON.stringify('\n')})`)}`;
-  const proposedIds = rows.length ? rows.map(row => row.id).join(',') : 'G1,G2';
   const steps = [
     { number: 1, done: approved.length > 0, question: 'Ask the person: what are we building, and who will use it? Draft a few requirements as pending, then ask the person to approve them.',
-      command: rows.length ? `pullboard spec show ${quote(rows[0].id)}` : `node -e ${quote(`require('node:fs').appendFileSync(${JSON.stringify(ctx.config.spec)},${JSON.stringify('\n- G1 [pending, must] Describe the first thing the person wants. | gate: review\n- G2 [pending, must] Describe how the person will know it works. | gate: review\n')})`)}`,
-      afterAnswer: `Replace the proposed text with the person’s answer; the person approves ${proposedIds} in Pullboard View or runs pullboard spec approve ${proposedIds} in their own terminal; then the coordinator runs pullboard spec apply.` },
+      command: 'pullboard spec draft "<text>"',
+      afterAnswer: 'Record each answer with pullboard spec draft "<text>"; the person approves the returned ids in Pullboard View or runs pullboard spec approve <ids> in their own terminal; then the coordinator runs pullboard spec apply.' },
     { number: 2, done: lanes.length > 0, question: `Ask the person: how should we divide the work? Suggested folders: ${folders.join(', ') || 'app/ (create it for the app)'}.`,
       command: configure(`c.lanes[${JSON.stringify(lane)}]={owns:[${JSON.stringify(lane + '/')}]}`) },
     { number: 3, done: Boolean(ctx.config.gate?.trim()), question: `Ask the person: which command proves the build works? Suggested: ${detectGate(ctx.info.root) || 'choose the repo’s test command'}.`,
@@ -2748,11 +2750,12 @@ async function specCommand(io, { first, second, rest, values }) {
     unmet: ['must'],
     signoff: ['by', 'note', 'note-file'],
     signers: ['key', 'by'],
+    draft: ['aim', 'gate'],
     approve: ['by', 'text'],
     decline: ['reason'],
     apply: [],
   }[first ?? '--json'];
-  if (!commandFlags) throw new Refused('USAGE', 'use pullboard spec --json | check | view | show <id> | unmet [--must] | signoff <ids> | approve <ids> | decline <ids> --reason "why" | apply');
+  if (!commandFlags) throw new Refused('USAGE', 'use pullboard spec --json | check | view | show <id> | unmet [--must] | draft "<text>" | signoff <ids> | approve <ids> | decline <ids> --reason "why" | apply');
   const allowedFlags = [...new Set([...commandFlags, 'json'])];
   for (const flag of Object.keys(values)) {
     if (!allowedFlags.includes(flag)) {
@@ -2764,6 +2767,38 @@ async function specCommand(io, { first, second, rest, values }) {
   if (!spec.exists) throw new Refused('NO_SPEC', `no ${ctx.config.spec}; run: pullboard init`);
   const practice = ctx.doctrine;
   const signoffs = readSignoffs(ctx.info.root);
+  if (first === 'draft') {
+    if (!second?.trim() || rest.length || /[\r\n|]/u.test(second)) {
+      throw new Refused('USAGE', 'give one nonempty, single-line requirement: pullboard spec draft "<text>"');
+    }
+    if (values.gate !== undefined && (!values.gate.trim() || /[\r\n|]/u.test(values.gate))) {
+      throw new Refused('USAGE', 'give one nonempty, single-line gate without a field separator, or omit --gate to use review');
+    }
+    const section = spec.sections[0];
+    if (!section) throw new Refused('NO_SECTION', `no section in ${ctx.config.spec}; add a section heading, then draft the requirement`);
+    const prefix = /^([A-Z][A-Z0-9]*)\s*[·.:-]/u.exec(section.name)?.[1];
+    if (!prefix) throw new Refused('SPEC_SECTION', `the first section "${section.name}" needs an id prefix such as G · Goals before drafting`);
+    const numbered = spec.rows.map((row) => new RegExp(`^${prefix}(\\d+)$`, 'u').exec(row.id)?.[1]).filter(Boolean).map(Number);
+    let next = Math.max(0, ...numbered) + 1;
+    while (spec.rows.some((row) => row.id === `${prefix}${next}`)) next += 1;
+    const id = `${prefix}${next}`;
+    const tier = values.aim ? 'aim' : 'must';
+    const gate = values.gate?.trim() ?? 'review';
+    const row = `- ${id} [pending, ${tier}] ${second.trim()} | gate: ${gate}`;
+    const source = readFileSync(spec.file, 'utf8');
+    const newline = source.includes('\r\n') ? '\r\n' : '\n';
+    const lines = source.split(/\r?\n/u);
+    const following = spec.sections.find((entry) => entry.line > section.line);
+    let insertion = following ? following.line - 1 : lines.length;
+    while (insertion > section.line && !lines[insertion - 1].trim()) insertion -= 1;
+    lines.splice(insertion, 0, row);
+    const after = lines.join(newline);
+    writeRowApply(ctx.info.root, { records: [], files: [{ file: ctx.config.spec, before: source, after }],
+      signoffs: { before: null, receipts: [] } });
+    io.result?.({ id, row: { id, status: 'pending', tier, text: second.trim(), gate, section: section.name } });
+    io.say(id);
+    return 0;
+  }
   if (first === 'approve' || first === 'decline') {
     requirePersonChannel(io.personChannel);
     return withBoard(ctx, async (board) => {
@@ -2943,7 +2978,7 @@ async function specCommand(io, { first, second, rest, values }) {
     io.say(`signed ${count} rows as ${by}; commit .pullboard/signoffs.jsonl`);
     return 0;
   }
-  throw new Refused('USAGE', 'pullboard spec --json | check | view | show <id> | unmet [--must] | signoff <ids> | signers add | approve <ids> | decline <ids> --reason "why" | apply');
+  throw new Refused('USAGE', 'pullboard spec --json | check | view | show <id> | unmet [--must] | draft "<text>" | signoff <ids> | signers add | approve <ids> | decline <ids> --reason "why" | apply');
 }
 
 /** Read one consent line without waiting for EOF in an interactive terminal [V2]. */

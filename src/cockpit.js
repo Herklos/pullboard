@@ -111,6 +111,7 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
         <div class="filter-control"><button class="filter-toggle" id="filter-toggle" data-filter-toggle type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="filter-menu"><span class="filter-label" id="filter-label">Filter</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg></button><div class="filter-menu" id="filter-menu" role="menu" aria-label="Filter" hidden></div></div>
         <button class="go" id="new-item" type="button" aria-label="New item"><span class="new-item-wide">New item</span><span class="new-item-narrow" aria-hidden="true">New</span></button>
       </div>
+      <section class="card-panel upgrade-note" id="upgrade-note" aria-label="What is new" hidden></section>
       <div class="card-panel list-card" id="item-list"><ol class="needs" id="needs" aria-label="What needs you" hidden></ol><ol class="chain" id="chain" aria-label="Items"></ol></div>
       <ol class="pipeline" id="pipeline" aria-label="Item pipeline" hidden></ol>
     </div>
@@ -662,6 +663,15 @@ function flowSvg(p) {
     up.said = told([up.pair]);
     up.lines = wrap(up.said.words, Math.abs(up.start - up.end) - 20, 12);
   }
+  // Higher routes cross this level vertically; put its words in the widest gap between them.
+  for (const up of ups) {
+    const left = Math.min(up.start, up.end), right = Math.max(up.start, up.end);
+    const cuts = [left, ...ups.filter((other) => other.span > up.span).flatMap((other) => [other.start, other.end]).filter((x) => x > left && x < right), right].sort((a, b) => a - b);
+    const rooms = cuts.slice(1).map((end, index) => ({ left: cuts[index], right: end })).sort((a, b) => (b.right - b.left) - (a.right - a.left));
+    const room = rooms[0];
+    up.labelX = (room.left + room.right) / 2;
+    up.lines = wrap(up.said.words, room.right - room.left - 20, 12);
+  }
   // Each level stands clear of the words of the level below it.
   const rise = [];
   for (const level of spans.keys()) {
@@ -687,12 +697,15 @@ function flowSvg(p) {
   // Straight along the row.
   for (const pair of pairs.filter((pair) => col(pair.from) >= 0 && col(pair.to) === col(pair.from) + 1)) {
     const a = pos.get(pair.from), b = pos.get(pair.to), said = told([pair]);
-    routes.push(group([pair], { d: path([[a.x + BW / 2, Y], [b.x - BW / 2 - 1, Y]]) }, text((a.x + b.x) / 2, Y - 8, said.words.join(' · '), tone(said))));
+    const words = said.words.join(' · ');
+    // A long label sits above the boxes when the gap cannot hold it with clearance.
+    const labelY = wide(words, 12) + 8 > b.x - a.x - BW ? top - 8 : Y - 8;
+    routes.push(group([pair], { d: path([[a.x + BW / 2, Y], [b.x - BW / 2 - 1, Y]]) }, text((a.x + b.x) / 2, labelY, words, tone(said))));
   }
   // Square, above the row.
   for (const up of ups) {
     const isBack = col(up.pair.to) < col(up.pair.from), y = top - rise[up.level];
-    routes.push(group([up.pair], { back: isBack, d: path([[up.start, top], [up.start, y], [up.end, y], [up.end, top - 1]]) }, lines((up.start + up.end) / 2, y - 7, up.lines, tone(up.said, isBack ? ' back' : ''))));
+    routes.push(group([up.pair], { back: isBack, d: path([[up.start, top], [up.start, y], [up.end, y], [up.end, top - 1]]) }, lines(up.labelX, y - 7, up.lines, tone(up.said, isBack ? ' back' : ''))));
   }
   // Down from the row, joining into one route per state below, labelled once on the way in.
   for (const s of below) {
@@ -1482,6 +1495,39 @@ if (typeof MutationObserver === 'function') new MutationObserver((changes) => {
   }
 }).observe(document.body, { childList: true, subtree: true });
 
+const releaseNotices = new Map();
+
+/** Compare already parsed release versions without treating 0.8.10 as older than 0.8.9. */
+function newerRelease(version, previous) {
+  if (!/^[0-9]+[.][0-9]+[.][0-9]+$/.test(previous)) return false;
+  const left = version.split('.').map(Number), right = previous.split('.').map(Number);
+  for (let index = 0; index < 3; index += 1) if (left[index] !== right[index]) return left[index] > right[index];
+  return false;
+}
+
+/** Remember one upgrade per board while retaining its card through this page's background refreshes. */
+function renderReleaseNotes(project) {
+  const region = $('upgrade-note');
+  region.hidden = true;
+  if (snapshot || !project?.releaseNotes) return;
+  const info = project.releaseNotes;
+  let notice = releaseNotices.get(project.root);
+  if (notice?.version !== info.version) {
+    const key = 'pb.release.' + project.root;
+    const previous = keep(key);
+    const releases = previous ? info.releases.filter((release) => newerRelease(release.version, previous)) : [];
+    notice = { version: info.version, releases, notes: info.notes };
+    releaseNotices.set(project.root, notice);
+    keep(key, info.version);
+  }
+  if (!notice.releases.length) return;
+  region.innerHTML = '<header><h2>New in ' + esc(notice.version) + '</h2><button class="ghost" type="button" data-upgrade-dismiss>Dismiss</button></header>'
+    + notice.releases.slice(0, 3).map((release) => '<article><h3>' + esc(release.version) + ' · ' + esc(release.headline) + '</h3><p>' + esc(release.paragraph) + '</p></article>').join('')
+    + '<footer>' + (notice.releases.length > 3 ? '<span>+' + (notice.releases.length - 3) + ' more</span> · ' : '')
+    + '<a href="' + esc(notice.notes) + '" target="_blank" rel="noopener noreferrer">Full release notes</a></footer>';
+  region.hidden = false;
+}
+
 /** Draw the board shown: the sidebar, then every tab's panes from the project's board. */
 function render() {
   if (heldClickPointer !== null) { deferredClickRender = true; return; }
@@ -1501,6 +1547,7 @@ function render() {
   $('tabs').hidden = Boolean(group);
   document.querySelectorAll('[data-pane]').forEach((pane) => { pane.hidden = Boolean(group) || pane.dataset.pane !== view.tab; });
   $('products').hidden = !p || !p.products.length;
+  renderReleaseNotes(group ? null : p);
   renderPersonRequests(p);
   renderCredentials();
   if (group) { renderGroup(group); return; }
@@ -1707,7 +1754,6 @@ function render() {
   const addressed = addressedShouts.get(JSON.stringify([view.root, view.shout]));
   const feedShouts = addressed?.shout && !p.shouts.some((entry) => entry.shout_id === view.shout) ? [...p.shouts, addressed.shout] : p.shouts;
   const heard = unread ? feedShouts.filter((x) => x.shout_id > unread.after) : view.agent ? feedShouts.filter((x) => x.shout_from === view.agent || x.shout_to === view.agent) : feedShouts;
-  if (view.tab === 'shouts' && view.shout !== null) openShouts.add(view.shout);
   const bar = !unread && !view.agent ? '' : '<div class="feed-bar">' + (unread ? '<span><b>' + heard.length + '</b> unread <button class="link" data-unread type="button">show all</button></span>'
     : '<span>Shouts with <b>' + esc(agentName(view.agent)) + '</b> <button class="link" data-agent="" type="button">show all</button></span>') + '</div>';
   $('shouts-pane').classList.toggle('bare', view.agentsHidden);
@@ -1726,7 +1772,7 @@ function render() {
   // One card for a shout, in the feed and among the asks; tail adds what the place needs, such as Answer. Only the
   // feed's copy carries the band and the id an answer's link lands on, so an ask shown twice never repeats an id.
   const card = (x, tail = '', inFeed = true) => '<article class="shout h' + hue(x.shout_from) + (lead(x.shout_from) ? ' lead' : '') + (openShouts.has(x.shout_id) ? ' open' : '') + (inFeed && x.shout_id === view.shout ? ' found' : '') + '"' + (inFeed ? ' id="shout-' + x.shout_id + '"' : '') + ' data-shout-id="' + x.shout_id + '">'
-    + (lead(x.shout_from) ? '<span class="avatar">' + LEAD + '</span>' : '<span class="avatar' + (initials(x.shout_from).length > 3 ? ' wide' : '') + '" aria-hidden="true">' + esc(initials(x.shout_from)) + '</span>') + '<div class="shout-main">' + (inFeed && x.shout_id === view.shout ? '<h2>Shout #' + x.shout_id + '</h2>' : '') + '<header><b class="who">' + shoutAgentName(x.shout_from) + '</b><span class="to">→ ' + shoutAgentName(x.shout_to) + '</span>'
+    + (lead(x.shout_from) ? '<span class="avatar">' + LEAD + '</span>' : '<span class="avatar' + (initials(x.shout_from).length > 3 ? ' wide' : '') + '" aria-hidden="true">' + esc(initials(x.shout_from)) + '</span>') + '<div class="shout-main">' + (inFeed && x.shout_id === view.shout ? '<h2 class="visually-hidden">Shout #' + x.shout_id + '</h2>' : '') + '<header><b class="who">' + shoutAgentName(x.shout_from) + '</b><span class="to">→ ' + shoutAgentName(x.shout_to) + '</span>'
     + (itemOf(x) ? '<span class="item">#' + esc(itemOf(x)) + '</span>' : '') + mark(x) + '<time class="long" data-ago="' + esc(x.shout_at) + '" title="' + esc(when(x.shout_at)) + '">' + agoLong(x.shout_at) + '</time></header>'
     + '<div class="text">' + rich(x.shout_text, titles) + '</div><button class="more" data-more type="button">' + (openShouts.has(x.shout_id) ? 'less' : 'more') + '</button>' + (inFeed ? band(x) + heardBy(x) : '') + evidence(x) + tail + '</div></article>';
   $('feed').innerHTML = (view.shout !== null && !feedShouts.some((entry) => entry.shout_id === view.shout) ? '<p class="empty" id="shout-address-status" role="status">' + esc(addressed?.error || 'Loading shout #' + view.shout + '…') + '</p>' : '') + bar + (heard.length ? dayRules(heard, (x) => x.shout_at, card) : '<div class="empty">' + (unread ? 'No unread shouts.' : view.agent ? 'No shouts with ' + esc(agentName(view.agent)) + ' among the last forty.' : 'No shouts yet.') + '</div>');
@@ -2616,6 +2662,12 @@ for (const kind of ['spec', 'doctrine']) $(kind + '-list').addEventListener('key
 });
 // The form covers the picked item rather than dropping it, so Cancel brings it back.
 $('new-item').addEventListener('click', () => { view.adding = true; render(); $('add-title').focus(); });
+$('upgrade-note').addEventListener('click', (event) => {
+  if (!event.target.closest('[data-upgrade-dismiss]')) return;
+  const notice = releaseNotices.get(data.project?.root);
+  if (notice) notice.releases = [];
+  renderReleaseNotes(data.project);
+});
 $('add-cancel').addEventListener('click', () => { view.adding = false; render(); });
 $('spec-decline-cancel').addEventListener('click', () => { view.declining = null; $('spec-decline-dialog').hidden = true; if (view.declineFrom === 'list') $(view.declineKind + '-list').focus({ preventScroll: true }); });
 $('spec-decline-form').addEventListener('submit', (event) => {

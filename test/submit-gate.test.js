@@ -1,3 +1,4 @@
+/** @pullboard-test-input test-tree */
 /**
  * Submit proves its frozen item check and the import closure its change can reach; only a full
  * selection can stand in for the project gate, which still runs at landing [V4,C7,V16].
@@ -446,6 +447,55 @@ test('computed imports in test files are always selected in both graphs without 
   selection = selectAffectedTests(box.root, { base, commit, changed: ['src/a.js'] });
   assert.equal(selection.full, false);
   assert.deepEqual(selection.files, ['test/a.test.js', 'test/c.test.js'], 'the old graph keeps its computed-import test selected');
+});
+
+
+/** Test-tree readers are data dependencies even when no import reaches their scanner. */
+test('a changed test file selects the scanners that read test files [C7,B3]', (t) => {
+  const box = privateRepo(t);
+  seedGraph(box);
+  const declaration = '/** @pullboard-test-input test-tree */\n';
+  put(box.root, 'test/chrome-fixture.test.js', "import 'node:assert/strict';\n");
+  put(box.root, 'test/wall-clock-budgets.test.js', declaration + "import 'node:assert/strict';\n");
+  put(box.root, 'test/nested/reader.test.mjs', declaration + "import 'node:fs';\n");
+  put(box.root, 'test/comment-only.test.js', "const text = '/** @pullboard-test-input test-tree */';\n");
+  const base = commitAll(box);
+  put(box.root, 'test/chrome-fixture.test.js', "import 'node:assert/strict';\n// changed test behavior\n");
+  const commit = commitAll(box, 'test(core): change browser regression [G1]');
+  const expected = ['test/chrome-fixture.test.js', 'test/nested/reader.test.mjs', 'test/wall-clock-budgets.test.js'];
+  const selection = selectAffectedTests(box.root, { base, commit });
+  assert.equal(selection.full, false, 'declared scanners add their own files without selecting unrelated tests');
+  assert.deepEqual(selection.files, expected, 'a change only to the browser test selects the real scanner names');
+  assert.ok(readFileSync(join(import.meta.dirname, 'wall-clock-budgets.test.js'), 'utf8').startsWith(declaration),
+    'the repository clock scanner declares its test-tree input');
+  for (const path of ['test/support.js', 'test/new.test.js', 'test.js']) {
+    assert.deepEqual(selectAffectedTests(box.root, { base, commit, changed: [path] }).files,
+      expected.filter(file => file !== 'test/chrome-fixture.test.js'), path + ' changes the scanner input tree');
+  }
+  assert.deepEqual(selectAffectedTests(box.root, { base, commit, changed: ['src/a.js'] }).files, ['test/a.test.js'],
+    'a source-only change keeps the normal import closure');
+  put(box.root, 'test/wall-clock-budgets.test.js', "import 'node:assert/strict';\n");
+  const removed = commitAll(box, 'test(core): remove scanner declaration [G1]');
+  assert.deepEqual(selectAffectedTests(box.root, { base: commit, commit: removed, changed: ['test/chrome-fixture.test.js'] }).files,
+    expected, 'the old graph retains a scanner whose declaration was removed');
+
+  // Use committed repository sources so a real scanner cannot be replaced by a synthetic stand-in.
+  const repository = resolve(import.meta.dirname, '..');
+  const actual = privateRepo(t);
+  const tracked = execFileSync('git', ['ls-files', '-z', 'src/', 'test/'], {
+    cwd: repository, encoding: 'utf8',
+  }).split('\0').filter(path => /\.[cm]?js$/u.test(path));
+  for (const path of tracked) put(actual.root, path, readFileSync(join(repository, path), 'utf8'));
+  const actualBase = commitAll(actual);
+  appendFileSync(join(actual.root, 'test/cockpit/demo.test.js'), '\n// Only the cockpit input changes.\n');
+  const actualCommit = commitAll(actual, 'test(core): change cockpit input [G1]');
+  assert.deepEqual(actual.git('diff', '--name-only', actualBase, actualCommit).split('\n'),
+    ['test/cockpit/demo.test.js'], 'the real-source fixture changes only the cockpit test');
+  const actualSelection = selectAffectedTests(actual.root, { base: actualBase, commit: actualCommit });
+  assert.equal(actualSelection.full, false, 'a cockpit-only input keeps affected selection');
+  for (const scanner of ['test/wall-clock-budgets.test.js', 'test/submit-gate.test.js']) {
+    assert.ok(actualSelection.files.includes(scanner), 'actual test-tree reader selected: ' + scanner);
+  }
 });
 
 test('affected selection says explicitly when no claim head was recorded [V4,C7]', (t) => {
