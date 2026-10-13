@@ -64,11 +64,11 @@ test("a named port that is busy is refused with the way out, not a stack trace [
 });
 
 /** Wait until the owned default listener has closed after its process stops. */
-async function waitForPortToClose(port) {
+async function waitForPortToClose(port, request = fetchFresh) {
   const deadline = Date.now() + 5_000; // budget: hang ceiling for observing the owned view's graceful close.
   while (Date.now() < deadline) {
     try {
-      const response = await fetchFresh(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(500) });
+      const response = await request(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(500) });
       await response.body?.cancel();
     } catch (error) {
       if (error.cause?.code === 'ECONNREFUSED') return;
@@ -331,20 +331,17 @@ test('a broken pipe during view shutdown is observed until the listener really c
     listener.listen(0, '127.0.0.1', ready);
   });
   t.after(() => listener.listening ? new Promise(done => listener.close(done)) : undefined);
-  const nativeFetch = globalThis.fetch;
   let probes = 0;
   /** Inject the captured transport-error shape once, then use real HTTP and real connection refusal. */
-  globalThis.fetch = async (...args) => {
+  const request = async (...args) => {
     probes += 1;
     if (probes === 1) {
       assert.equal(listener.listening, true, 'EPIPE alone does not mean the listener has closed');
       throw new TypeError('controlled write failure', { cause: Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }) });
     }
-    return nativeFetch(...args);
+    return fetchFresh(...args);
   };
-  try {
-    await assert.doesNotReject(waitForPortToClose(listener.address().port), 'a broken pipe keeps observing until actual connection refusal');
-  } finally { globalThis.fetch = nativeFetch; }
+  await assert.doesNotReject(waitForPortToClose(listener.address().port, request), 'a broken pipe keeps observing until actual connection refusal');
   assert.equal(connections, 1, 'the observer reaches the still-open real HTTP listener after EPIPE');
   assert.ok(probes >= 3, 'success requires a later real connection refusal');
   assert.equal(listener.listening, false);
