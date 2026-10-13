@@ -117,6 +117,77 @@ test("the coordinator corrects a claimed item's criterion without release [V2]",
 
 });
 
+test("edit adds and clears an item's dependencies [B3,V2]", (t) => {
+  const box = e2e.project('true');
+  t.after(e2e.cleanup);
+  const board = store.openBoard(join(box.repo, '.git/pullboard/board.sqlite'));
+  t.after(() => store.closeBoard(board));
+  /** Add one independent item through the real CLI and return its public id. */
+  const add = (title) => {
+    const result = box.run(box.repo, 'add', 'web', title, '--criterion', title, '--json');
+    assert.equal(result.code, 0, result.err || result.out);
+    return JSON.parse(result.out).item.item_id;
+  };
+  const first = add('First dependency');
+  const second = add('Second dependency');
+  const target = add('Dependency target');
+
+  const added = box.run(box.repo, 'edit', String(target), '--after', `${first},${second}`, '--json');
+  assert.equal(added.code, 0, added.err || added.out);
+  assert.equal(store.getItem(board, target).item_after, `${first},${second}`, 'edit stores both dependency ids in order');
+  const addEvent = store.events(board, { itemId: target }).findLast((event) => event.event_kind === 'edit');
+  assert.deepEqual(JSON.parse(addEvent.event_detail).after, [first, second], 'history records the dependency replacement');
+
+  const cleared = box.run(box.repo, 'edit', String(target), '--after', 'none', '--json');
+  assert.equal(cleared.code, 0, cleared.err || cleared.out);
+  assert.equal(store.getItem(board, target).item_after, '', 'none clears all dependencies');
+  const clearEvent = store.events(board, { itemId: target }).findLast((event) => event.event_kind === 'edit');
+  assert.deepEqual(JSON.parse(clearEvent.event_detail).after, [], 'history records a clear distinctly from an omitted edit');
+
+  const unchanged = store.getItem(board, target);
+  const eventCount = store.events(board, { itemId: target }).length;
+  refusal(box.run(box.repo, 'edit', String(target), '--after', '999999', '--json'), 'NO_ITEM');
+  assert.equal(store.getItem(board, target).item_after, unchanged.item_after, 'a missing dependency leaves the item unchanged');
+  assert.equal(store.events(board, { itemId: target }).length, eventCount, 'a refused dependency creates no history event');
+
+  assert.equal(box.run(box.repo, 'edit', String(first), '--after', String(second), '--json').code, 0);
+  const cycle = box.run(box.repo, 'edit', String(second), '--after', String(first), '--json');
+  refusal(cycle, 'DEPENDENCY_CYCLE');
+  assert.equal(store.getItem(board, second).item_after, '', 'a refused cycle leaves the edge unchanged');
+
+  const claimed = add('Claimed dependency target');
+  const claim = box.run(box.web, 'claim', String(claimed), '--json');
+  assert.equal(claim.code, 0, claim.err || claim.out);
+  const beforeCorrection = store.getItem(board, claimed);
+  const correction = box.run(box.repo, 'edit', String(claimed), '--after', String(first), '--json');
+  assert.equal(correction.code, 0, correction.err || correction.out);
+  const pending = store.getItem(board, claimed);
+  assert.equal(pending.item_after, String(first));
+  assert.equal(pending.item_owner, beforeCorrection.item_owner);
+  assert.equal(pending.item_lease_until, beforeCorrection.item_lease_until);
+  assert.equal(pending.item_claim_head, beforeCorrection.item_claim_head);
+  assert.equal(pending.item_frozen_digest, beforeCorrection.item_frozen_digest, 'the holder keeps the old frozen bar until refreeze');
+  assert.deepEqual(store.pendingRefreeze(board, claimed), ['after']);
+  const correctionEvent = store.events(board, { itemId: claimed }).findLast((event) => event.event_kind === 'edit');
+  assert.deepEqual(JSON.parse(correctionEvent.event_detail).pendingRefreeze, ['after']);
+  assert.deepEqual(JSON.parse(correctionEvent.event_detail).after, [first]);
+  assert.ok(store.inbox(board, beforeCorrection.item_owner).some((entry) =>
+    entry.shout_text.includes(`pending after correction for #${claimed}`)
+      && entry.shout_text.endsWith(`next: pullboard refreeze ${claimed}`)), 'the holder receives the pending-correction instruction');
+  refusal(box.run(box.web, 'submit', String(claimed), '--json'), 'PENDING_REFREEZE', claimed, ['after']);
+
+  const refrozen = box.run(box.web, 'refreeze', String(claimed), '--json');
+  assert.equal(refrozen.code, 0, refrozen.err || refrozen.out);
+  assert.equal(JSON.parse(refrozen.out).retainedClaim, true, 'the holder adopts the corrected bar without losing the claim');
+  const adopted = store.getItem(board, claimed);
+  assert.equal(adopted.item_status, 'claimed');
+  assert.equal(adopted.item_after, String(first));
+  assert.equal(adopted.item_owner, beforeCorrection.item_owner);
+  assert.equal(adopted.item_lease_until, beforeCorrection.item_lease_until);
+  assert.equal(store.pendingRefreeze(board, claimed).length, 0);
+  assert.ok(store.events(board, { itemId: claimed }).some((event) => event.event_kind === 'refreeze'), 'the holder refreeze is recorded in history');
+});
+
 test('ordered refreeze corrections retain engine-7 history and engine-8 live claims [V2,H16]', (t) => {
   const replicaDirectory = mkdtempSync(join(tmpdir(), 'pullboard-refreeze-replicas-'));
   const replicaBoards = [];
