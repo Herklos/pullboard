@@ -1,8 +1,11 @@
 /** Cockpit projects checks, using the shared real-board fixtures [N26]. */
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { tapTarget, SPEC, machine, project, build, sendBack, fetchLive, startView, styleOf, element, openPage, projectRows, productEntries, accept, boardId, boardOf, chromeExecutable, openSnapshotChrome, closeSnapshotChrome } from './fixture.js';
 
@@ -498,4 +501,79 @@ test('the project switcher\'s arrow turns with the list [N26]', { timeout: 120_0
     rmSync(profile, { recursive: true, force: true });
     await view.stop();
   }
+});
+
+
+/** Exercise the real linked-source guard and project list using two private SQLite boards. */
+test('a migration-refused project stays quiet beside a normal board [A5,A6,N26]', { timeout: 120_000 }, async () => { // budget: hang-only ceiling for private Git setup and two local servers.
+  const box = machine();
+  const refused = project(box, 'refused-board', SPEC, { name: 'Refused board' });
+  const normal = project(box, 'normal-board', SPEC, { name: 'Normal board' });
+  box.run(normal.repo, 'add', 'web', 'Readable beside the refused board', '--specs', 'G1');
+  const primary = join(box.dir, 'migration-cli');
+  const linked = join(box.dir, 'migration-cli-linked');
+  mkdirSync(primary);
+  for (const name of ['bin', 'src', 'skills', 'package.json', 'CHANGELOG.md']) {
+    cpSync(resolve(import.meta.dirname, '../..', name), join(primary, name), { recursive: true });
+  }
+  box.git(primary, 'init', '-q', '-b', 'main');
+  box.git(primary, 'add', '-A');
+  box.git(primary, 'commit', '-q', '-m', 'chore: retain migration fixture source');
+  box.git(primary, 'worktree', 'add', '-q', '-b', 'view/future', linked, 'main');
+  const boardSource = join(linked, 'src/board.js');
+  const original = readFileSync(boardSource, 'utf8');
+  const future = original.replace('export const SCHEMA_VERSION = 2;', 'export const SCHEMA_VERSION = 3;');
+  assert.notEqual(future, original, 'only the linked running code expects the future schema');
+  writeFileSync(boardSource, future);
+  const file = join(refused.repo, '.git/pullboard/board.sqlite');
+  const before = createHash('sha256').update(readFileSync(file)).digest('hex');
+  const ordinary = new DatabaseSync(join(normal.repo, '.git/pullboard/board.sqlite'));
+  try { ordinary.exec('PRAGMA user_version = 3'); } finally { ordinary.close(); }
+  /** Check the persistent shared board through a read-only connection and its exact bytes. */
+  const unchanged = () => {
+    const db = new DatabaseSync(file, { readOnly: true });
+    try { assert.equal(db.prepare('PRAGMA user_version').get().user_version, 2, 'refused board schema is not migrated'); }
+    finally { db.close(); }
+    assert.equal(createHash('sha256').update(readFileSync(file)).digest('hex'), before, 'refused board file is byte-identical');
+  };
+  const projection = await import(pathToFileURL(join(linked, 'src/serve.js')).href);
+  assert.throws(() => projection.projectState(refused.repo), error => error.code === 'UNMERGED_SCHEMA',
+    'the view projector uses the running linked-source guard');
+  unchanged();
+  assert.ok(projection.projectState(normal.repo).items.some(item => item.title === 'Readable beside the refused board'));
+  const projects = [{ root: refused.repo, name: 'Refused board', project: '', added: '2026-01-01' },
+    { root: normal.repo, name: 'Normal board', project: '', added: '2026-01-01' }];
+  const { serveApi } = await import(pathToFileURL(join(linked, 'src/api.js')).href);
+  const { main } = await import(pathToFileURL(join(linked, 'src/cli.js')).href);
+  const api = await serveApi({ port: 0, projects: () => projects, runCommand: main });
+  /** Require the public API to retain the refusal and the healthy project together. */
+  const listing = async (base, key) => {
+    const reply = await fetchLive(base + '/api/v1/boards', { headers: { 'x-pullboard-key': key } });
+    assert.equal(reply.status, 200, 'one refused board does not crash the listing');
+    const document = await reply.json();
+    assert.deepEqual(document.boards.map(board => board.root), [normal.repo], 'the readable board remains listed');
+    assert.equal(document.warnings.length, 1, 'the migration refusal remains visible in the listing');
+    assert.equal(document.warnings[0].root, refused.repo);
+    assert.equal(document.warnings[0].error.error.code, 'UNMERGED_SCHEMA');
+    assert.match(document.warnings[0].error.error.message, /schema 3.*version 2.*merge.*main checkout.*throwaway board/);
+    unchanged();
+  };
+  try {
+    const address = new URL(api.url);
+    await listing(address.origin, address.searchParams.get('k'));
+  } finally { await api.close(); }
+  const view = await startView(box, { bin: join(linked, 'bin/pullboard.js') });
+  try {
+    await listing(view.base, view.key);
+    const page = await openPage(view);
+    const sidebar = page.show('proj-list');
+    assert.match(sidebar, /class="repo-error" role="status"><b>Refused board:<\/b> this worktree expects board schema 3/,
+      'the refused project has a quiet status card naming the schema refusal');
+    assert.match(sidebar, /merge this code into the main checkout first, or test it against a throwaway board/,
+      'the quiet card tells the person the next step');
+    assert.doesNotMatch(sidebar, /class="small bad"|class="bad"|stack trace/);
+    assert.ok(projectRows(sidebar).some(row => row.name === 'Normal board'), 'a healthy project stays beside the refusal');
+    assert.match(page.show('chain'), /Readable beside the refused board/, 'the healthy project still renders its actual item');
+    unchanged();
+  } finally { await view.stop(); }
 });
