@@ -4,6 +4,24 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.8.16] - 2026-10-13
+
+### Steadier views
+
+pullboard view now has one address on your machine, and running it again reuses the view that is already open. On Node 24 it no longer stalls or crashes.
+
+### Changed
+
+- pullboard view listens on 127.0.0.1:4890 by default, and running it again reuses the view already there for every board on this machine. --port 0 still picks a free port, and --port N still wins.
+- If another program holds port 4890, pullboard view says so and suggests --port.
+- Setup's last step completes when your agent reuses a view that is already running.
+
+### Fixed
+
+- On Node 24, a connection that closes at the wrong moment no longer crashes pullboard view or its check for a running view.
+- The note about what is new after an upgrade no longer stalls the view on Node 24.
+- Opening a shout from its link no longer changes the card's layout.
+
 ## [0.8.15] - 2026-10-13
 
 ### Setup without snags
