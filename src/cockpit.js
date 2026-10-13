@@ -662,6 +662,15 @@ function flowSvg(p) {
     up.said = told([up.pair]);
     up.lines = wrap(up.said.words, Math.abs(up.start - up.end) - 20, 12);
   }
+  // Higher routes cross this level vertically; put its words in the widest gap between them.
+  for (const up of ups) {
+    const left = Math.min(up.start, up.end), right = Math.max(up.start, up.end);
+    const cuts = [left, ...ups.filter((other) => other.span > up.span).flatMap((other) => [other.start, other.end]).filter((x) => x > left && x < right), right].sort((a, b) => a - b);
+    const rooms = cuts.slice(1).map((end, index) => ({ left: cuts[index], right: end })).sort((a, b) => (b.right - b.left) - (a.right - a.left));
+    const room = rooms[0];
+    up.labelX = (room.left + room.right) / 2;
+    up.lines = wrap(up.said.words, room.right - room.left - 20, 12);
+  }
   // Each level stands clear of the words of the level below it.
   const rise = [];
   for (const level of spans.keys()) {
@@ -687,12 +696,15 @@ function flowSvg(p) {
   // Straight along the row.
   for (const pair of pairs.filter((pair) => col(pair.from) >= 0 && col(pair.to) === col(pair.from) + 1)) {
     const a = pos.get(pair.from), b = pos.get(pair.to), said = told([pair]);
-    routes.push(group([pair], { d: path([[a.x + BW / 2, Y], [b.x - BW / 2 - 1, Y]]) }, text((a.x + b.x) / 2, Y - 8, said.words.join(' · '), tone(said))));
+    const words = said.words.join(' · ');
+    // A long label sits above the boxes when the gap cannot hold it with clearance.
+    const labelY = wide(words, 12) + 8 > b.x - a.x - BW ? top - 8 : Y - 8;
+    routes.push(group([pair], { d: path([[a.x + BW / 2, Y], [b.x - BW / 2 - 1, Y]]) }, text((a.x + b.x) / 2, labelY, words, tone(said))));
   }
   // Square, above the row.
   for (const up of ups) {
     const isBack = col(up.pair.to) < col(up.pair.from), y = top - rise[up.level];
-    routes.push(group([up.pair], { back: isBack, d: path([[up.start, top], [up.start, y], [up.end, y], [up.end, top - 1]]) }, lines((up.start + up.end) / 2, y - 7, up.lines, tone(up.said, isBack ? ' back' : ''))));
+    routes.push(group([up.pair], { back: isBack, d: path([[up.start, top], [up.start, y], [up.end, y], [up.end, top - 1]]) }, lines(up.labelX, y - 7, up.lines, tone(up.said, isBack ? ' back' : ''))));
   }
   // Down from the row, joining into one route per state below, labelled once on the way in.
   for (const s of below) {
