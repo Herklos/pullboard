@@ -58,7 +58,7 @@ async function waitForViewStopped(url) {
 }
 
 test("an agent's pullboard view prints its link and returns [N26,N32]", async () => {
-  const box = project();
+  const box = project(CONFIG.gate);
   const env = { ...box.env };
   delete env.AI_AGENT;
   const args = [BIN, 'view', '--no-open', '--port', '0', '--json'];
@@ -79,6 +79,11 @@ test("an agent's pullboard view prints its link and returns [N26,N32]", async ()
     assert.equal(state.secret === firstUrl.searchParams.get('k'), true, 'the private record authenticates the returned link');
     const page = await fetchFresh(firstUrl);
     assert.equal(page.status, 200, 'the returned link fetches the live view page');
+    const receiptFile = join(box.repo, '.git', 'pullboard', 'view-bind.json');
+    assert.equal(existsSync(receiptFile), true, 'a fresh bind writes the setup receipt');
+    const firstReceipt = JSON.parse(readFileSync(receiptFile, 'utf8'));
+    assert.equal(firstReceipt.boundAt, first.boundAt, 'the setup receipt records this actual fresh bind');
+    rmSync(receiptFile);
 
     const secondResult = execFileSync(process.execPath, [BIN, 'view', '--no-open', '--port', String(first.port), '--json'], {
       cwd: box.repo, env, encoding: 'utf8', timeout: 40_000,
@@ -88,6 +93,7 @@ test("an agent's pullboard view prints its link and returns [N26,N32]", async ()
     assert.equal(second.url === first.url, true, 'the second start returns the same private link');
     assert.equal(second.pid === first.pid, true, 'the second start identifies the same owner');
     assert.equal(second.boundAt === first.boundAt, true, 'reusing a server preserves its real bind time');
+    assert.equal(existsSync(receiptFile), false, 'named-port reuse does not mint a fresh setup receipt');
 
     const agentEnv = { ...env, AI_AGENT: '1' };
     const agentStarted = execFileSync(process.execPath, [BIN, 'view', '--no-open', '--port', '0', '--json'], {
@@ -97,6 +103,9 @@ test("an agent's pullboard view prints its link and returns [N26,N32]", async ()
     owned.push({ pid: agent.pid, port: agent.port, url: agent.url });
     assert.equal(agent.reused, false, 'an explicit agent start also creates and returns its owned view');
     assert.equal((await fetchFresh(agent.url)).status, 200, 'the explicit agent link fetches its live page');
+    assert.equal(existsSync(receiptFile), true, 'a new port-0 bind writes a new setup receipt');
+    const agentReceipt = JSON.parse(readFileSync(receiptFile, 'utf8'));
+    assert.equal(agentReceipt.boundAt, agent.boundAt, 'a new port-0 bind records its actual setup receipt');
   } finally {
     try {
       const port = JSON.parse(readFileSync(join(env.PULLBOARD_HOME, 'view.json'), 'utf8')).port;
@@ -123,9 +132,9 @@ test("an agent's pullboard view prints its link and returns [N26,N32]", async ()
 });
 
 test('a person running view with JSON in a terminal keeps the server in that terminal [N26,N32]', () => {
-  const box = sandbox();
+  let box = sandbox();
   box.env.PULLBOARD_MODEL ??= 'Fixture Model';
-  project(CONFIG.gate, box);
+  box = project(CONFIG.gate, box);
   const helper = resolve(import.meta.dirname, 'fixtures/view-person-pty.py');
   const result = JSON.parse(execFileSync('python3', [helper], {
     cwd: box.repo,
