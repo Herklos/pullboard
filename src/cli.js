@@ -1066,7 +1066,7 @@ function setupIdentity(board) {
 }
 
 /** Read only the view's typed successful-bind receipt for this board and setup. */
-function viewSetupComplete(ctx, board) {
+function viewBindComplete(ctx, board) {
   let receipt;
   try { receipt = JSON.parse(readFileSync(join(ctx.info.commonDir, 'pullboard', 'view-bind.json'), 'utf8')); }
   catch (error) { if (error.code === 'ENOENT' || error instanceof SyntaxError) return false; throw error; }
@@ -1077,11 +1077,35 @@ function viewSetupComplete(ctx, board) {
     && Date.parse(receipt.boundAt) >= Date.parse(identity.setupStartedAt);
 }
 
+/** A separately typed, authenticated reuse also proves that this board's view was opened. */
+function viewSetupComplete(ctx, board) {
+  if (viewBindComplete(ctx, board)) return true;
+  let receipt;
+  try { receipt = JSON.parse(readFileSync(join(ctx.info.commonDir, 'pullboard', 'view-reuse.json'), 'utf8')); }
+  catch (error) { if (error.code === 'ENOENT' || error instanceof SyntaxError) return false; throw error; }
+  const identity = setupIdentity(board);
+  return receipt?.type === 'pullboard.view.reused' && receipt.version === 1
+    && receipt.boardId === identity.boardId && receipt.setupStartedAt === identity.setupStartedAt
+    && Number.isFinite(Date.parse(receipt.openedAt))
+    && Date.parse(receipt.openedAt) >= Date.parse(identity.setupStartedAt);
+}
+
 /** Atomically record a successful real view bind, scoped to this board's current setup. */
 function recordViewBind(ctx, board, boundAt) {
   const file = join(ctx.info.commonDir, 'pullboard', 'view-bind.json');
   const temporary = file + '.' + randomUUID() + '.tmp';
   const receipt = { type: 'pullboard.view.bound', version: 1, ...setupIdentity(board), boundAt };
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(temporary, JSON.stringify(receipt) + '\n', { mode: 0o600 });
+  renameSync(temporary, file);
+}
+
+/** Record this board's authenticated reuse without claiming that its existing listener bound again. */
+function recordViewReuse(ctx, board, view) {
+  const file = join(ctx.info.commonDir, 'pullboard', 'view-reuse.json');
+  const temporary = file + '.' + randomUUID() + '.tmp';
+  const receipt = { type: 'pullboard.view.reused', version: 1, ...setupIdentity(board),
+    openedAt: new Date().toISOString(), boundAt: view.boundAt, port: view.port, pid: view.pid };
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(temporary, JSON.stringify(receipt) + '\n', { mode: 0o600 });
   renameSync(temporary, file);
@@ -1112,7 +1136,7 @@ function boardSetup(ctx, card) {
       command: `pullboard add ${quote(lane)} 'First small piece' --specs ${quote(approved[0]?.id ?? 'G1')} --criterion 'Describe what the person will be able to do'` },
     { number: 5, done: card.viewOpened,
       question: 'Ask the person: shall we open the board so you can follow the work?', command: 'pullboard view',
-      afterAnswer: 'Run this in the person’s own terminal, or start it in the background as the agent so setup can continue. The view records its successful bind for this board.' },
+      afterAnswer: 'Run this in the person’s own terminal, or start it in the background as the agent so setup can continue. The view records its successful bind or authenticated reuse for this board.' },
   ];
   const current = steps.find(step => !step.done);
   return current ? { step: current.number, total: 5, ...current, steps } : null;
@@ -1274,10 +1298,11 @@ async function viewHere(io, values) {
     io.say(`wrote snapshot ${exported.path}`);
     return 0;
   }
-  const port = values.port === undefined ? 0 : Number(values.port);
+  const port = values.port === undefined ? 4890 : Number(values.port);
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Refused('USAGE', '--port is a number from 0 to 65535; 0 picks a free one');
+  let info;
   try {
-    const info = repoInfo(io.cwd);
+    info = repoInfo(io.cwd);
     if (info.isMain && existsSync(join(info.root, CONFIG_FILE))) await registerProjectAndLink(info.root, new Date(), loadConfig(info.root), io);
   } catch (error) {
     if (!(error instanceof Refused)) throw error;
@@ -1287,6 +1312,10 @@ async function viewHere(io, values) {
   if (!internalForeground) {
     const existing = port ? await runningView(port) : null;
     if (existing) {
+      if (info && existsSync(join(info.root, CONFIG_FILE))) {
+        const ctx = context(io);
+        withBoard(ctx, board => recordViewReuse(ctx, board, existing));
+      }
       reportView(io, { ...existing, reused: true });
       return 0;
     }
@@ -1318,6 +1347,9 @@ async function viewHere(io, values) {
     }
   } catch (error) {
     if (view) await view.close();
+    if (error instanceof Refused && error.code === 'PORT_BUSY') {
+      error = new Refused('PORT_BUSY', `port ${port} is in use: name another with --port N, or use --port 0 to take a free one`);
+    }
     if (process.env.PULLBOARD_VIEW_BACKGROUND_CHILD === '1' && process.send) {
       process.send({ type: 'startup-error', code: error.code ?? 'VIEW_START', message: error.message });
     }
@@ -1350,7 +1382,7 @@ function reportView(io, view) {
 /** Start the view in a detached CLI child, forwarding only its bound address over IPC. */
 async function launchBackgroundView(io, port) {
   const args = [fileURLToPath(new URL('../bin/pullboard.js', import.meta.url)), 'view', '--no-open'];
-  if (port) args.push('--port', String(port));
+  args.push('--port', String(port));
   const child = spawn(process.execPath, args, {
     cwd: io.cwd,
     env: { ...process.env, PULLBOARD_VIEW_BACKGROUND_CHILD: '1' },

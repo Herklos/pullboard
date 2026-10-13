@@ -1,13 +1,39 @@
 /** Keep the view's exact named-port refusal covered in a core-owned file [N26]. */
 import assert from 'node:assert/strict';
-import { runFixtureChild } from './fixture-child.js';
+import { runFixtureChild, startFixtureChild } from './fixture-child.js';
 import { createServer } from 'node:net';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { createServer as createHttpServer } from 'node:http';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
+import { takeDefaultViewPort } from './view-port-fixture.js';
+import { fetchFresh } from './http-fixture.js';
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
+
+/** Summarize an error without exposing authenticated URLs, keys, tokens, or record content. */
+function safeErrorSummary(error) {
+  const name = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/u.test(error?.name ?? '') ? error.name : 'Error';
+  const code = /^[A-Za-z0-9_.-]{1,64}$/u.test(error?.code ?? '') ? ` [${error.code}]` : '';
+  const message = String(error?.message ?? error)
+    .replace(/https?:\/\/[^\s"'<>]+/giu, '[redacted URL]')
+    .replace(/([?&](?:k|key|token)=)[^&\s"'<>]+/giu, '$1[redacted]')
+    .replace(/\b(?:Bearer\s+)?[A-Za-z0-9._~-]{32,}\b/gu, '[redacted credential]');
+  const nested = error instanceof AggregateError
+    ? [...error.errors].map(safeErrorSummary).map((detail) => `\n  ${detail}`).join('')
+    : '';
+  return `${name}${code}: ${message}${nested}`;
+}
+
+/** Preserve error identity while replacing potentially sensitive text with its safe summary. */
+function safeReportedError(error) {
+  const reported = new Error(safeErrorSummary(error));
+  if (/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/u.test(error?.name ?? '')) reported.name = error.name;
+  if (/^[A-Za-z0-9_.-]{1,64}$/u.test(error?.code ?? '')) reported.code = error.code;
+  return reported;
+}
 
 test("a named port that is busy is refused with the way out, not a stack trace [N26]", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'pullboard-view-port-'));
@@ -34,5 +60,292 @@ test("a named port that is busy is refused with the way out, not a stack trace [
   assert.equal(json.status, 1, json.stderr);
   const refusal = JSON.parse(json.stdout).error;
   assert.equal(refusal.code, 'PORT_BUSY');
-  assert.equal(result.stderr.trim(), `pullboard: [PORT_BUSY] port ${port} is in use: name another with --port, or leave --port out to take any free one\nnext: ${refusal.next}`);
+  assert.equal(result.stderr.trim(), `pullboard: [PORT_BUSY] port ${port} is in use: name another with --port N, or use --port 0 to take a free one\nnext: ${refusal.next}`);
+});
+
+/** Wait until the owned default listener has closed after its process stops. */
+async function waitForPortToClose(port) {
+  const deadline = Date.now() + 5_000; // budget: hang ceiling for observing the owned view's graceful close.
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetchFresh(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(500) });
+      await response.body?.cancel();
+    } catch (error) {
+      if (error.cause?.code === 'ECONNREFUSED') return;
+      if (!['ECONNRESET', 'UND_ERR_SOCKET', 'EPIPE'].includes(error.cause?.code)) throw error;
+    }
+    await new Promise((done) => setTimeout(done, 25));
+  }
+  throw new Error(`the owned view listener on ${port} did not close after SIGTERM`);
+}
+
+test('a reset during view shutdown is observed until the listener really closes [N26,C7]', async (t) => {
+  let connections = 0;
+  const listener = createServer((socket) => {
+    connections += 1;
+    if (connections === 1) socket.resetAndDestroy();
+    else {
+      socket.end('HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok');
+      listener.close();
+    }
+  });
+  await new Promise((ready, fail) => {
+    listener.once('error', fail);
+    listener.listen(0, '127.0.0.1', ready);
+  });
+  t.after(() => listener.listening ? new Promise((done) => listener.close(done)) : undefined);
+  await assert.doesNotReject(waitForPortToClose(listener.address().port),
+    'a connection reset is a shutdown observation, not proof that the listener is closed');
+  assert.equal(connections, 2, 'the observer checks the still-open listener after its reset');
+  assert.equal(listener.listening, false, 'success follows a definite connection refusal');
+});
+
+/** Start an owned worker that holds the real fixed port under its test-home-independent lease. */
+function portLeaseWorker(directory) {
+  const fixture = pathToFileURL(resolve(import.meta.dirname, 'view-port-fixture.js')).href;
+  const source = `
+    import { createServer } from 'node:net';
+    import { takeDefaultViewPort } from ${JSON.stringify(fixture)};
+    const lease = await takeDefaultViewPort(process.cwd(), {
+      agent: 'port-worker-' + process.pid,
+      onWait: () => process.stdout.write('queued\\n'),
+    });
+    const listener = createServer();
+    try {
+      await new Promise((ready, fail) => {
+        listener.once('error', fail);
+        listener.listen(4890, '127.0.0.1', ready);
+      });
+      process.stdout.write('ready\\n');
+      for await (const input of process.stdin) if (String(input).includes('release')) break;
+    } finally {
+      if (listener.listening) await new Promise((done) => listener.close(done));
+      lease.release();
+    }
+  `;
+  const child = startFixtureChild(process.execPath, ['--input-type=module', '-e', source], {
+    cwd: directory, env: { ...process.env, PULLBOARD_MACHINE_HOME: join(directory, 'private-machine') },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  let output = '';
+  let errorOutput = '';
+  let finished = false;
+  const waiting = new Map();
+  child.stdin.on('error', () => {}); // Cleanup may release an owned worker that already reported its exit.
+  child.stdout.on('data', (chunk) => {
+    output += chunk;
+    for (const [line, waiter] of waiting) {
+      if (output.split('\n').includes(line)) { waiting.delete(line); waiter.resolve(); }
+    }
+  });
+  child.stderr.on('data', (chunk) => { errorOutput += chunk; });
+  const closed = new Promise((done) => child.once('close', (code, signal) => {
+    finished = true;
+    for (const waiter of waiting.values()) waiter.reject(new Error(`port worker exited ${code}/${signal}: ${errorOutput}`));
+    waiting.clear();
+    done({ code, signal });
+  }));
+  return {
+    closed,
+    line: (line) => output.split('\n').includes(line) ? Promise.resolve()
+      : finished ? Promise.reject(new Error(`port worker exited before ${line}: ${errorOutput}`))
+        : new Promise((resolveLine, reject) => waiting.set(line, { resolve: resolveLine, reject })),
+    release: () => { if (!child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end('release\n'); },
+  };
+}
+
+test('view tests with separate private homes serialize the fixed loopback port [N26,C7]', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'pullboard-view-port-peers-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const first = portLeaseWorker(dir);
+  let second;
+  try {
+    await first.line('ready');
+    const other = mkdtempSync(join(tmpdir(), 'pullboard-view-port-peer-'));
+    t.after(() => rmSync(other, { recursive: true, force: true }));
+    second = portLeaseWorker(other);
+    await assert.doesNotReject(second.line('queued'), 'a separate test home still waits for the real machine port');
+    first.release();
+    assert.equal((await first.closed).code, 0);
+    await second.line('ready');
+    second.release();
+    assert.equal((await second.closed).code, 0, 'the waiting peer binds only after the first listener closes');
+  } finally {
+    first.release();
+    second?.release();
+    await Promise.all([first.closed, second?.closed]);
+  }
+});
+
+/** Stop only listeners authenticated by session records in this test's private Pullboard home. */
+async function cleanupFixtureViews(home) {
+  let names;
+  try { names = readdirSync(home); }
+  catch (error) { if (error.code === 'ENOENT') return; throw error; }
+  const failures = [];
+  for (const name of names.filter((entry) => /^view-\d+\.json$/u.test(entry))) {
+    const port = Number(/^view-(\d+)\.json$/u.exec(name)[1]);
+    try {
+      const record = JSON.parse(readFileSync(join(home, name), 'utf8'));
+      if (record.port !== port || !Number.isInteger(record.pid) || record.pid < 1
+        || typeof record.secret !== 'string' || !record.secret) {
+        failures.push(new Error(`private fixture session on port ${port} is malformed; listener left untouched`));
+        continue;
+      }
+      let response;
+      try {
+        response = await fetchFresh(`http://127.0.0.1:${port}/api/v1/boards`, {
+          headers: { 'x-pullboard-key': record.secret }, redirect: 'manual', signal: AbortSignal.timeout(1_000),
+        });
+      } catch (error) {
+        if (error.cause?.code === 'ECONNREFUSED') continue;
+        throw error;
+      }
+      if (!response.ok) await response.body?.cancel();
+      const listing = response.ok ? await response.json() : null;
+      if (!Array.isArray(listing?.boards) || !Array.isArray(listing?.warnings)) {
+        failures.push(new Error(`private fixture session on port ${port} did not authenticate; listener left untouched`));
+        continue;
+      }
+      try { process.kill(record.pid, 'SIGTERM'); }
+      catch (error) { if (error.code !== 'ESRCH') throw error; }
+      await waitForPortToClose(port);
+    } catch (error) {
+      failures.push(new Error(`could not clean up the fixture view on port ${port}: ${error.message}`));
+    }
+  }
+  if (failures.length) throw new AggregateError(failures, 'one or more fixture views could not be stopped safely');
+}
+
+test('pullboard view uses its fixed default port and reuses its authenticated listener [N26]', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'pullboard-view-default-'));
+  let preserveFixture = false;
+  t.after(() => { if (!preserveFixture) rmSync(dir, { recursive: true, force: true }); });
+  const lease = await takeDefaultViewPort(dir, { agent: `view-port-${process.pid}` });
+  t.after(() => lease.release());
+  const env = {
+    ...process.env,
+    HOME: join(dir, 'home'),
+    PULLBOARD_HOME: join(dir, 'home', '.pullboard'),
+    PULLBOARD_MACHINE_HOME: join(dir, 'machine-home'),
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+  };
+  delete env.AI_AGENT;
+  delete env.PULLBOARD_VIEW_FOREGROUND;
+  let primaryError;
+  try {
+    const unrelated = createHttpServer((_request, response) => response.end('unrelated listener'));
+    try {
+      await new Promise((ready, fail) => {
+        unrelated.once('error', fail);
+        unrelated.listen(4890, '127.0.0.1', ready);
+      });
+      const busy = runFixtureChild(process.execPath, [BIN, 'view', '--no-open', '--json'], {
+        cwd: dir, env, encoding: 'utf8', timeout: 40_000, umask: 0o022,
+      });
+      assert.equal(busy.status, 1, busy.failure ?? busy.stderr);
+      const refusal = JSON.parse(busy.stdout).error;
+      assert.equal(refusal.code, 'PORT_BUSY');
+      assert.match(refusal.message, /4890/u);
+      assert.match(refusal.message, /--port/u);
+      assert.equal(await (await fetchFresh('http://127.0.0.1:4890/')).text(), 'unrelated listener', 'the refusal leaves another listener untouched');
+    } finally {
+      if (unrelated.listening) await new Promise((done) => unrelated.close(done));
+    }
+
+    const firstResult = runFixtureChild(process.execPath, [BIN, 'view', '--no-open', '--json'], {
+      cwd: dir, env, encoding: 'utf8', timeout: 40_000, umask: 0o022,
+    });
+    assert.equal(firstResult.status, 0, firstResult.failure ?? firstResult.stderr);
+    const first = JSON.parse(firstResult.stdout);
+    assert.equal(first.port, 4890, 'an omitted port binds the fixed loopback port');
+    assert.equal(first.reused, false, 'the first invocation owns the new listener');
+    const sessionFile = join(env.PULLBOARD_HOME, 'view-4890.json');
+    assert.equal((statSync(sessionFile).mode & 0o077) === 0, true, 'the session secret stays private under umask 022');
+    const page = await fetchFresh(first.url);
+    assert.equal(page.status, 200, 'the printed secret link reaches the view');
+    await page.body?.cancel();
+
+    const secondResult = runFixtureChild(process.execPath, [BIN, 'view', '--no-open'], {
+      cwd: dir, env, encoding: 'utf8', timeout: 40_000, umask: 0o022,
+    });
+    assert.equal(secondResult.status, 0, secondResult.failure ?? secondResult.stderr);
+    const printedLink = /^Pullboard view: (https?:\/\/127\.0\.0\.1:\d+\/\?k=\S+)$/mu.exec(secondResult.stdout)?.[1];
+    assert.ok(printedLink, 'the second invocation prints the view link and stop action');
+    assert.ok(printedLink === first.url, 'reuse prints the same authenticated link');
+    assert.match(secondResult.stdout, /To stop it: /u);
+
+    const freeResult = runFixtureChild(process.execPath, [BIN, 'view', '--no-open', '--port', '0', '--json'], {
+      cwd: dir, env, encoding: 'utf8', timeout: 40_000, umask: 0o022,
+    });
+    assert.equal(freeResult.status, 0, freeResult.failure ?? freeResult.stderr);
+    const free = JSON.parse(freeResult.stdout);
+    assert.notEqual(free.port, 4890, 'explicit port 0 still asks the operating system for a free port');
+    assert.equal(free.reused, false, 'explicit port 0 does not silently reuse the fixed default');
+
+    const reserved = createServer();
+    await new Promise((ready, fail) => {
+      reserved.once('error', fail);
+      reserved.listen(0, '127.0.0.1', ready);
+    });
+    const requestedPort = reserved.address().port;
+    await new Promise((done) => reserved.close(done));
+    const namedResult = runFixtureChild(process.execPath, [BIN, 'view', '--no-open', '--port', String(requestedPort), '--json'], {
+      cwd: dir, env, encoding: 'utf8', timeout: 40_000, umask: 0o022,
+    });
+    assert.equal(namedResult.status, 0, namedResult.failure ?? namedResult.stderr);
+    assert.equal(JSON.parse(namedResult.stdout).port, requestedPort, 'an explicit nonzero port overrides the default');
+  } catch (error) { primaryError = error; }
+  let cleanupError;
+  try { await cleanupFixtureViews(env.PULLBOARD_HOME); }
+  catch (error) {
+    preserveFixture = true;
+    cleanupError = error;
+  }
+  try { lease.release(); }
+  catch (error) {
+    cleanupError = cleanupError ? new AggregateError([cleanupError, error], 'fixture cleanup and resource release both failed') : error;
+  }
+  if (primaryError && cleanupError) {
+    throw new AggregateError([safeReportedError(primaryError), safeReportedError(cleanupError)],
+      `view test failed and cleanup also failed:\n  ${safeErrorSummary(primaryError)}\n  ${safeErrorSummary(cleanupError)}; private fixture records retained at ${env.PULLBOARD_HOME}`);
+  }
+  if (primaryError) throw primaryError;
+  if (cleanupError) {
+    throw new AggregateError([safeReportedError(cleanupError)],
+      `${safeErrorSummary(cleanupError)}; private fixture records retained at ${env.PULLBOARD_HOME}`);
+  }
+});
+
+/** A broken pipe is inconclusive while the real listener remains open; only refusal proves closure. */
+test('a broken pipe during view shutdown is observed until the listener really closes [N26,C7]', async (t) => {
+  let connections = 0;
+  const listener = createServer(socket => {
+    connections += 1;
+    socket.end('HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok');
+    listener.close();
+  });
+  await new Promise((ready, fail) => {
+    listener.once('error', fail);
+    listener.listen(0, '127.0.0.1', ready);
+  });
+  t.after(() => listener.listening ? new Promise(done => listener.close(done)) : undefined);
+  const nativeFetch = globalThis.fetch;
+  let probes = 0;
+  /** Inject the captured transport-error shape once, then use real HTTP and real connection refusal. */
+  globalThis.fetch = async (...args) => {
+    probes += 1;
+    if (probes === 1) {
+      assert.equal(listener.listening, true, 'EPIPE alone does not mean the listener has closed');
+      throw new TypeError('controlled write failure', { cause: Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }) });
+    }
+    return nativeFetch(...args);
+  };
+  try {
+    await assert.doesNotReject(waitForPortToClose(listener.address().port), 'a broken pipe keeps observing until actual connection refusal');
+  } finally { globalThis.fetch = nativeFetch; }
+  assert.equal(connections, 1, 'the observer reaches the still-open real HTTP listener after EPIPE');
+  assert.ok(probes >= 3, 'success requires a later real connection refusal');
+  assert.equal(listener.listening, false);
 });
