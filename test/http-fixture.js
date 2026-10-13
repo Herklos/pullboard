@@ -1,4 +1,5 @@
 /** Fixture HTTP requests never reuse an idle connection, so a stalled test cannot meet a closed socket [C7]. */
+import { fetchLocal, isLocalHttp } from '../src/local-fetch.js';
 
 /**
  * Send one request to a live fixture server on a connection of its own, and name the cause if it fails.
@@ -16,7 +17,7 @@ export async function fetchFresh(url, init = {}) {
   const headers = new Headers(init.headers);
   headers.set('connection', 'close');
   try {
-    return await fetch(url, { ...init, headers });
+    return await (isLocalHttp(url) ? fetchLocal : fetch)(url, { ...init, headers });
   } catch (error) {
     // The path names the request; the query is left out because fixtures carry their key there.
     const message = `${init.method ?? 'GET'} ${new URL(url).pathname} failed: ${causeChain(error)}`;

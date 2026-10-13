@@ -249,6 +249,242 @@ async function finishPhoneAnswerLifecycleCapture(chrome) {
 }
 
 
+/** Attach the bounded capture to the original shared-press error and return its TAP diagnostic line. */
+function includeLaneReleaseCapture(error, detail) {
+  const diagnostic = 'lane-release capture: ' + JSON.stringify(detail);
+  error.message += '; ' + diagnostic;
+  return diagnostic;
+}
+
+/** Observe page boxes and native scroll events around the lane-release press without changing the action. */
+async function armLaneReleaseCapture(chrome, selector, stableRoot = "document.querySelector('#lanes')") {
+  const trace = { events: [], matching: 0, dropped: 0, complete: false, startError: null, endError: null };
+  const traceLimit = 24;
+  const traceByteLimit = 10_000;
+  let traceBytes = 0;
+  const safeTraceValue = (value, depth = 0) => {
+    if (value === null || ['string', 'number', 'boolean'].includes(typeof value)) {
+      return typeof value === 'string' ? value.slice(0, 140) : value;
+    }
+    if (depth >= 2) return '[nested]';
+    if (Array.isArray(value)) return value.slice(0, 4).map(item => safeTraceValue(item, depth + 1));
+    if (typeof value === 'object') {
+      return Object.fromEntries(Object.entries(value).filter(([key]) => ['type', 'value', 'description', 'delta'].includes(key))
+        .slice(0, 4).map(([key, item]) => [key, safeTraceValue(item, depth + 1)]));
+    }
+    return String(value).slice(0, 80);
+  };
+  const onTraceMessage = ({ data }) => {
+    let message;
+    try { message = JSON.parse(String(data)); } catch { return; }
+    if (message.method === 'Tracing.tracingComplete') trace.complete = true;
+    if (message.method !== 'Tracing.dataCollected') return;
+    for (const event of message.params?.value ?? []) {
+      if (!['FindAnchor', 'ComputeAdjustment'].includes(event.name)) continue;
+      trace.matching++;
+      const args = Object.fromEntries(Object.entries(event.args ?? {}).filter(([key]) => ['anchor_object_', 'delta'].includes(key))
+        .map(([key, value]) => [key, safeTraceValue(value)]));
+      const retained = { name: event.name, ts: event.ts ?? null, cat: String(event.cat ?? '').slice(0, 100), ph: event.ph ?? null, args };
+      const bytes = Buffer.byteLength(JSON.stringify(retained), 'utf8');
+      if (trace.events.length >= traceLimit || traceBytes + bytes > traceByteLimit) { trace.dropped++; continue; }
+      trace.events.push(retained); traceBytes += bytes;
+    }
+  };
+  chrome.socket.addEventListener('message', onTraceMessage);
+  let traceStarted = false;
+  try {
+    await chrome.send('Tracing.start', { categories: 'disabled-by-default-blink.debug', transferMode: 'ReportEvents' });
+    traceStarted = true;
+  } catch (error) { trace.startError = String(error.message || error).slice(0, 240); }
+  let pageArm;
+  try {
+    pageArm = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+    const target = document.querySelector(${JSON.stringify(selector)});
+    if (!target) return { armed: false };
+    const identities = new WeakMap(), prior = new Map(), baseline = new Map(), retained = new Map(), changes = new Map(), events = [], scrollCalls = [];
+    const dropped = { nodeLimit: 0, changedNodeLimit: 0, eventLimit: 0, scrollCallLimit: 0, frameLimit: 0 };
+    let nextId = 0, frames = 0, stopped = false, animation = null;
+    /** Name nodes without collecting board text, URLs or session capabilities. */
+    const name = node => {
+      if (!(node instanceof Element)) return null;
+      if (!identities.has(node)) identities.set(node, ++nextId);
+      return { node: identities.get(node), tag: node.tagName.toLowerCase(), id: node.id.slice(0, 80),
+        className: typeof node.className === 'string' ? node.className.slice(0, 120) : '' };
+    };
+    /** Measure document and viewport coordinates separately to distinguish scrolling from layout movement. */
+    const box = node => {
+      const rect = node.getBoundingClientRect(), style = getComputedStyle(node);
+      const visible = !node.closest('[hidden]') && style.display !== 'none' && style.visibility !== 'hidden'
+        && Number(style.opacity) !== 0 && rect.width > 0 && rect.height > 0;
+      return { ...name(node), top: rect.top, documentTop: rect.top + scrollY, height: rect.height,
+        width: rect.width, hidden: !!node.closest('[hidden]'), visible, overflowAnchor: style.overflowAnchor,
+        position: style.position, connected: node.isConnected };
+    };
+    const aimedTarget = target, aimedTargetBox = box(target);
+    let removedTargetRecorded = false;
+    /** Retain bounded observations, reporting truncation instead of treating missing rows as evidence. */
+    const append = (list, row, cap, reason) => { if (list.length < cap) list.push(row); else dropped[reason]++; };
+    /** Keep one bounded history per node so early low-priority motion cannot evict later resizes. */
+    const recordChange = (type, old, now) => {
+      old = baseline.get(now.node) ?? old;
+      let entry = changes.get(now.node);
+      if (!entry) {
+        if (changes.size >= 2000) { dropped.changedNodeLimit++; return; }
+        entry = { node: { node: now.node, tag: now.tag, id: now.id, className: now.className }, firstAt: performance.now(),
+          lastAt: performance.now(), first: old, last: now, minHeight: Math.min(old?.height ?? now.height, now.height),
+          maxHeight: Math.max(old?.height ?? now.height, now.height),
+          minDocumentTop: Math.min(old?.documentTop ?? now.documentTop, now.documentTop),
+          maxDocumentTop: Math.max(old?.documentTop ?? now.documentTop, now.documentTop), transitions: 1, types: [type] };
+        changes.set(now.node, entry);
+        return;
+      }
+      if (!entry.first && old) { entry.first = old; entry.firstAt = performance.now(); }
+      entry.lastAt = performance.now();
+      entry.last = now;
+      entry.minHeight = Math.min(entry.minHeight, old?.height ?? now.height, now.height);
+      entry.maxHeight = Math.max(entry.maxHeight, old?.height ?? now.height, now.height);
+      entry.minDocumentTop = Math.min(entry.minDocumentTop, old?.documentTop ?? now.documentTop, now.documentTop);
+      entry.maxDocumentTop = Math.max(entry.maxDocumentTop, old?.documentTop ?? now.documentTop, now.documentTop);
+      entry.transitions++;
+      if (!entry.types.includes(type)) entry.types.push(type);
+    };
+    /** Compare only the bounded aim-time set, even if its boxes later move below the target. */
+    const sample = (type, point = null) => {
+      const target = document.querySelector(${JSON.stringify(selector)}), targetBox = target ? box(target) : null;
+      if (!aimedTarget.isConnected && !removedTargetRecorded) {
+        recordChange(type, aimedTargetBox, { ...aimedTargetBox, connected: false, height: 0, width: 0 });
+        removedTargetRecorded = true;
+      }
+      for (const node of retained.values()) {
+        const now = box(node), old = prior.get(now.node);
+        if (old && (old.connected !== now.connected || old.height !== now.height || old.documentTop !== now.documentTop
+          || old.hidden !== now.hidden || old.visible !== now.visible)) {
+          recordChange(type, old, now);
+        }
+        if (!old) recordChange(type, null, now);
+        prior.set(now.node, now);
+      }
+      for (const [id, node] of retained) {
+        const old = prior.get(id);
+        if (!node.isConnected && old.connected) {
+          const now = { ...old, connected: false, height: 0, width: 0 };
+          recordChange(type, old, now); prior.set(id, now);
+        }
+      }
+      append(events, { type, at: performance.now(), scrollX, scrollY, target: targetBox,
+        point, activeElement: name(document.activeElement) }, 160, 'eventLimit');
+    };
+    // Freeze eligibility at aim: DOM-earlier boxes below cannot evict an above-target zero-height box.
+    const targetTop = target.getBoundingClientRect().top;
+    const initialNodes = [...document.body.querySelectorAll('*')].filter(node => {
+      if (node === target || node.contains(target)) return false;
+      const rect = node.getBoundingClientRect(), style = getComputedStyle(node);
+      return node.getClientRects().length > 0 && !node.closest('[hidden]') && style.visibility !== 'hidden'
+        && (rect.top < targetTop || (rect.height === 0 && rect.top === targetTop));
+    });
+    dropped.nodeLimit = Math.max(0, initialNodes.length - 2000);
+    const initial = initialNodes.slice(0, 2000).map(node => {
+      const entry = box(node);
+      baseline.set(entry.node, entry); prior.set(entry.node, entry); retained.set(entry.node, node);
+      return entry;
+    });
+    /** Observe native pointer boundaries before the shared press rechecks its aimed point. */
+    const listener = event => sample(event.type, Number.isFinite(event.clientX)
+      ? { x: event.clientX, y: event.clientY, target: name(event.target) } : null);
+    for (const type of ['pointermove', 'pointerdown', 'mousedown', 'click']) document.addEventListener(type, listener, true);
+    window.addEventListener('scroll', listener, true);
+    const originalScrollIntoView = Element.prototype.scrollIntoView;
+    /** Record the shared helper's real scroll request while preserving its native arguments and return value. */
+    Element.prototype.scrollIntoView = function(...args) {
+      const call = { at: performance.now(), method: 'scrollIntoView', target: name(this), scrollYBefore: scrollY };
+      const result = Reflect.apply(originalScrollIntoView, this, args);
+      call.scrollYAfter = scrollY;
+      append(scrollCalls, call, 40, 'scrollCallLimit');
+      return result;
+    };
+    /** Sample layout changes per animation frame without scheduling any extra production work. */
+    const tick = () => {
+      if (stopped) return;
+      if (++frames > 120) { dropped.frameLimit++; return; }
+      sample('frame'); animation = requestAnimationFrame(tick);
+    };
+    sample('armed'); animation = requestAnimationFrame(tick);
+    window.__laneReleaseCapture = {
+      /** Disconnect all observers and restore the native method even when the original press refused to click. */
+      finish() {
+        stopped = true;
+        try {
+          sample('finish');
+        } finally {
+          cancelAnimationFrame(animation);
+          for (const type of ['pointermove', 'pointerdown', 'mousedown', 'click']) document.removeEventListener(type, listener, true);
+          window.removeEventListener('scroll', listener, true);
+          Element.prototype.scrollIntoView = originalScrollIntoView;
+          delete window.__laneReleaseCapture;
+        }
+        /** Keep only the named box fields needed to compare layout before and after the press. */
+        const summarizeBox = value => value && ({ node: value.node, tag: value.tag, id: value.id,
+          className: value.className, top: value.top, documentTop: value.documentTop, height: value.height,
+          hidden: value.hidden, visible: value.visible, connected: value.connected, position: value.position });
+        const changed = [...changes.values()].map(raw => {
+          const entry = { ...raw, first: summarizeBox(raw.first), last: summarizeBox(raw.last), lastPosition: raw.last.position };
+          const final = entry.last;
+          const first = entry.first;
+          const heightChanged = entry.minHeight !== entry.maxHeight;
+          const connectionOrVisibilityChanged = first !== null && (first.connected !== final.connected || first.visible !== final.visible);
+          const visibleFlowMoved = first !== null && first.connected && final.connected && first.visible && final.visible
+            && !['fixed', 'sticky'].includes(entry.lastPosition) && first.documentTop !== final.documentTop;
+          const priority = connectionOrVisibilityChanged ? 0 : heightChanged ? 1 : visibleFlowMoved ? 2 : 3;
+          return { ...entry, priority, heightChanged, connectionOrVisibilityChanged, visibleFlowMoved };
+        }).sort((a, b) => a.priority - b.priority || a.firstAt - b.firstAt);
+        const keyEvents = events.filter(event => event.type !== 'frame').map(event => ({
+          type: event.type, at: event.at, scrollX: event.scrollX, scrollY: event.scrollY,
+          target: summarizeBox(event.target), point: event.point,
+          activeElement: event.activeElement && ({ tag: event.activeElement.tag, id: event.activeElement.id,
+            className: event.activeElement.className })
+        }));
+        return { armed: true, observedNodes: initial.length, changedNodes: changed.slice(0, 10).map(({ priority, heightChanged,
+          connectionOrVisibilityChanged, visibleFlowMoved, ...entry }) => ({ ...entry, priority, heightChanged,
+          connectionOrVisibilityChanged, visibleFlowMoved })),
+          eventSamples: keyEvents.slice(0, 16), scrollCalls: scrollCalls.slice(0, 8), frames,
+          scrollY: { before: scrollCalls[0]?.scrollYAfter ?? events[0]?.scrollY ?? null, after: scrollY },
+          changeCounts: { collected: changed.length, heightChanged: changed.filter(entry => entry.heightChanged).length,
+            connectionOrVisibilityChanged: changed.filter(entry => entry.connectionOrVisibilityChanged).length,
+            visibleFlowMoved: changed.filter(entry => entry.visibleFlowMoved).length },
+          truncated: { droppedByReason: dropped, remainingChangedNodes: Math.max(0, changed.length - 10),
+            eventSamples: Math.max(0, keyEvents.length - 16), scrollCalls: Math.max(0, scrollCalls.length - 8) },
+          scrollAnchoring: { selectedNode: null, status: 'The browser-selected anchor is not captured by this probe; geometry alone does not identify it.' },
+          rootCauseStatus: 'NOT PROVEN' };
+      }
+    };
+    return { armed: true, observed: initial.length };
+  })())`, stableRoot));
+  } catch (error) {
+    pageArm = { armed: false, error: String(error.message || error).slice(0, 240) };
+  }
+  return { ...pageArm, trace, traceStarted, onTraceMessage, stableRoot };
+}
+
+/** Finish lane-release observations through the stable root after either a successful or refused press. */
+async function finishLaneReleaseCapture(chrome, capture) {
+  if (capture?.traceStarted) {
+    try {
+      await chrome.send('Tracing.end');
+      /** Budget: bounded wait for the trace-complete event after Tracing.end, not a browser timing assertion. */
+      const deadline = Date.now() + 2000;
+      while (!capture.trace.complete && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+      if (!capture.trace.complete) capture.trace.endError = 'Tracing.tracingComplete was not observed within the cleanup bound';
+    } catch (error) { capture.trace.endError = String(error.message || error).slice(0, 240); }
+  }
+  if (capture?.onTraceMessage) chrome.socket.removeEventListener('message', capture.onTraceMessage);
+  let page = null, pageError = null;
+  try { page = JSON.parse(await chrome.stable('JSON.stringify(window.__laneReleaseCapture?.finish() || null)', capture?.stableRoot ?? "document.querySelector('#lanes')")); }
+  catch (error) { pageError = String(error.message || error).slice(0, 240); }
+  return { page, pageError, tracing: capture ? { events: capture.trace.events, matching: capture.trace.matching,
+    dropped: capture.trace.dropped, complete: capture.trace.complete, started: capture.traceStarted,
+    startError: capture.trace.startError, endError: capture.trace.endError } : null };
+}
+
 test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N26,N27]', { timeout: 120_000 }, async (t) => {
   const executable = chromeExecutable();
   if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME for viewport checks.');
@@ -624,7 +860,23 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
       await fill('#hold-reason', `Phone hold ${width}`);
       await submit('#hold-form');
       await chrome.waitFor("!!document.querySelector('#lanes [data-release=web]')");
-      await click('#lanes [data-release="web"]');
+      const releaseSelector = '#lanes [data-release="web"]';
+      let laneCapture = null, laneCaptureError = null, lanePressError = null, laneCaptureSetup = null;
+      try {
+        await click(releaseSelector, async () => {
+          laneCaptureSetup = await armLaneReleaseCapture(chrome, releaseSelector);
+          if (!laneCaptureSetup.armed) throw new Error('lane-release capture target was absent');
+        });
+      } catch (error) { lanePressError = error; }
+      finally {
+        try { laneCapture = await finishLaneReleaseCapture(chrome, laneCaptureSetup); }
+        catch (error) { laneCaptureError = String(error.message || error); }
+      }
+      if (lanePressError) {
+        const laneDiagnostic = includeLaneReleaseCapture(lanePressError, { width, capture: laneCapture, captureError: laneCaptureError });
+        t.diagnostic(laneDiagnostic);
+        throw lanePressError;
+      }
       await chrome.waitFor("!document.querySelector('#lanes [data-release=web]')");
     }
 
@@ -793,5 +1045,596 @@ test('the lanes panel fits its card at every width [N26]', {
     if (chrome) await closeSnapshotChrome(chrome);
     rmSync(profile, { recursive: true, force: true });
     await view.stop();
+  }
+});
+
+test('a moved press target names the element that moved it [N26,C7]', {
+  timeout: 120_000, // budget: hang-only ceiling for real Chrome startup and one deterministic pointer-movement capture.
+}, async (t) => {
+  const executable = chromeExecutable();
+  if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME for the moved-press capture.');
+
+  const box = machine();
+  project(box, 'moved-press-capture');
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-moved-press-'));
+  let chrome;
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.send('Emulation.setDeviceMetricsOverride', { width: 375, height: 900, deviceScaleFactor: 1, mobile: false });
+    await chrome.waitFor("innerWidth === 375 && document.readyState === 'complete' && !!document.querySelector('#lanes')");
+    await chrome.stable(`(() => {
+      const standIn = document.createElement('div');
+      standIn.id = 'press-move-stand-in';
+      standIn.style.cssText = 'height:18px;background:#ddd;overflow-anchor:none';
+      const target = document.createElement('button');
+      target.id = 'press-move-target';
+      target.type = 'button';
+      target.textContent = 'Press target';
+      target.style.cssText = 'display:block;height:44px;overflow-anchor:auto';
+      const spacer = document.createElement('div');
+      spacer.style.cssText = 'height:1100px;overflow-anchor:none';
+      document.body.prepend(spacer, standIn, target);
+      let grew = false;
+      const growAboveTarget = event => {
+        if (!grew && event.target === target) {
+          grew = true;
+          standIn.style.height = '98px';
+        }
+      };
+      document.addEventListener('pointermove', growAboveTarget, true);
+      window.__pressMoveFixture = { grew: () => grew, cleanup() {
+        document.removeEventListener('pointermove', growAboveTarget, true);
+        spacer.remove(); standIn.remove(); target.remove(); delete window.__pressMoveFixture;
+      } };
+      return { standIn: standIn.id, target: target.id };
+    })()`);
+    const captureSetup = await armLaneReleaseCapture(chrome, '#press-move-target', 'document.documentElement');
+    assert.equal(captureSetup.armed, true, `the named stand-in target is present before the shared press: ${JSON.stringify({ armed: captureSetup.armed, error: captureSetup.error ?? null })}`);
+    let pressError = null;
+    try { await press(chrome, "document.querySelector('#press-move-target')"); }
+    catch (error) { pressError = error; }
+    const capture = await finishLaneReleaseCapture(chrome, captureSetup);
+    const fixture = JSON.parse(await chrome.stable('JSON.stringify({ grew: window.__pressMoveFixture?.grew() ?? false })'));
+    const changed = capture.page?.changedNodes ?? [];
+    const moved = changed.find(node => node.node?.id === 'press-move-stand-in');
+    const captureDetail = { capture, captureError: null };
+    if (pressError) includeLaneReleaseCapture(pressError, captureDetail);
+    const failureText = `${pressError?.message ?? 'shared press unexpectedly completed without an error'}; lane-release capture: ${JSON.stringify(captureDetail)}`;
+    assert.ok(fixture.grew, 'the stand-in box grows during the shared press pointer movement');
+    assert.ok(pressError, 'the unchanged shared press refuses the moved target instead of clicking it');
+    assert.equal(pressError.code, 'ERR_ASSERTION', `the shared press keeps its native assertion failure: ${pressError.message}`);
+    assert.match(pressError.message, /shared press: target stays under the pointer/,
+      `the refusal comes from the shared press geometry guard: ${pressError.message}`);
+    assert.equal(capture.pageError, null, `the page capture finishes without a probe error: ${failureText}`);
+    assert.equal(capture.page?.armed, true, `the capture returns its completed page observations: ${failureText}`);
+    assert.ok(moved, `the failure capture names the changed box and its old/new geometry: ${failureText}`);
+    assert.equal(moved.first.id, 'press-move-stand-in', `the captured old box is the named stand-in: ${failureText}`);
+    assert.ok([moved.first.top, moved.first.height, moved.last.top, moved.last.height].every(Number.isFinite),
+      `the named box has finite old/new top and height measurements: ${failureText}`);
+    assert.notEqual(moved.first.height, moved.last.height, `the captured stand-in height changed: ${failureText}`);
+    assert.ok(capture.page.changedNodes.length <= 10 && Number.isInteger(capture.page.truncated.remainingChangedNodes),
+      `the failure capture caps box details at ten and counts the remainder: ${failureText}`);
+    assert.ok(Number.isFinite(capture.page.scrollY.before) && Number.isFinite(capture.page.scrollY.after)
+      && capture.page.scrollY.before !== capture.page.scrollY.after,
+      `the failure capture records the native scroll-anchor adjustment before and after the press: ${failureText}`);
+    assert.match(pressError.message, /lane-release capture: .*press-move-stand-in.*scrollY.*before.*after/s,
+      `the failed press message carries the changed box and scroll positions: ${failureText}`);
+    assert.match(pressError.message, /remainingChangedNodes/, `the failure message reports the count of other changed boxes: ${failureText}`);
+    assert.ok(Object.hasOwn(capture.page, 'scrollAnchoring'), `the capture records whether Chromium reported an anchor: ${failureText}`);
+  } finally {
+    if (chrome) {
+      await chrome.stable('window.__pressMoveFixture?.cleanup()').catch(() => undefined);
+      await closeSnapshotChrome(chrome);
+    }
+    await view.stop();
+    rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+test('a removed lane-release target still cleans up its capture [N26,C7]', {
+  timeout: 120_000, // budget: hang-only ceiling for real Chrome startup and one target-removal cleanup check.
+}, async (t) => {
+  const executable = chromeExecutable();
+  if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME for the removed-target cleanup check.');
+
+  const box = machine();
+  project(box, 'removed-press-target');
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-removed-press-'));
+  let chrome, captureSetup = null, captureFinishAttempted = false;
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.waitFor("document.readyState === 'complete' && !!document.body");
+    await chrome.stable(`(() => {
+      const target = document.createElement('button');
+      target.id = 'removed-press-target';
+      target.type = 'button';
+      target.textContent = 'Temporary target';
+      document.body.append(target);
+      window.__removedPressOriginalScrollIntoView = Element.prototype.scrollIntoView;
+    })()`);
+    captureSetup = await armLaneReleaseCapture(chrome, '#removed-press-target', 'document.documentElement');
+    assert.equal(captureSetup.armed, true, `the capture arms before its target is removed: ${JSON.stringify(captureSetup)}`);
+
+    await chrome.stable("document.querySelector('#removed-press-target').remove()");
+    captureFinishAttempted = true;
+    const capture = await finishLaneReleaseCapture(chrome, captureSetup);
+    assert.equal(capture.pageError, null, `finishing after target removal does not throw: ${JSON.stringify(capture)}`);
+    const removed = capture.page?.changedNodes.find((entry) => entry.node.id === 'removed-press-target');
+    assert.equal(removed?.last.connected, false, `the bounded sample records that its target disappeared: ${JSON.stringify(capture.page?.changedNodes)}`);
+    const cleanup = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+      const state = { captureInstalled: Boolean(window.__laneReleaseCapture), scrollIntoViewRestored:
+        Element.prototype.scrollIntoView === window.__removedPressOriginalScrollIntoView };
+      delete window.__removedPressOriginalScrollIntoView;
+      return state;
+    })())`));
+    assert.deepEqual(cleanup, { captureInstalled: false, scrollIntoViewRestored: true },
+      `the finish path removes its global and restores the native method: ${JSON.stringify(cleanup)}`);
+  } finally {
+    if (chrome) {
+      if (captureSetup && !captureFinishAttempted) await finishLaneReleaseCapture(chrome, captureSetup).catch(() => undefined);
+      await chrome.stable('delete window.__removedPressOriginalScrollIntoView').catch(() => undefined);
+      await closeSnapshotChrome(chrome);
+    }
+    await view.stop();
+    rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+test('a moved press target names a rendered-above box later in DOM order [N26,C7]', {
+  timeout: 120_000, // budget: hang-only ceiling for real Chrome startup and one deterministic pointer-movement capture.
+}, async (t) => {
+  const executable = chromeExecutable();
+  if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME for the moved-press capture.');
+
+  const box = machine();
+  project(box, 'moved-press-capture');
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-moved-press-'));
+  let chrome;
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.send('Emulation.setDeviceMetricsOverride', { width: 375, height: 900, deviceScaleFactor: 1, mobile: false });
+    await chrome.waitFor("innerWidth === 375 && document.readyState === 'complete' && !!document.querySelector('#lanes')");
+    await chrome.stable(`(() => {
+      const standIn = document.createElement('div');
+      standIn.id = 'press-move-stand-in';
+      standIn.style.cssText = 'height:18px;background:#ddd;overflow-anchor:none';
+      const target = document.createElement('button');
+      target.id = 'press-move-target';
+      target.type = 'button';
+      target.textContent = 'Press target';
+      target.style.cssText = 'display:block;height:44px;overflow-anchor:auto';
+      const spacer = document.createElement('div');
+      spacer.style.cssText = 'height:1100px;overflow-anchor:none';
+      const group = document.createElement('div');
+      group.style.cssText = 'display:flex;flex-direction:column;overflow-anchor:auto';
+      standIn.style.order = '-1';
+      target.style.order = '0';
+      group.append(target, standIn);
+      document.body.prepend(spacer, group);
+      let grew = false;
+      const growAboveTarget = event => {
+        if (!grew && event.target === target) {
+          grew = true;
+          standIn.style.height = '98px';
+        }
+      };
+      document.addEventListener('pointermove', growAboveTarget, true);
+      window.__pressMoveFixture = { grew: () => grew, cleanup() {
+        document.removeEventListener('pointermove', growAboveTarget, true);
+        spacer.remove(); group.remove(); delete window.__pressMoveFixture;
+      } };
+      return { standIn: standIn.id, target: target.id };
+    })()`);
+    const order = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+      const above = document.querySelector('#press-move-stand-in');
+      const target = document.querySelector('#press-move-target');
+      return { above: above.getBoundingClientRect().bottom <= target.getBoundingClientRect().top,
+        later: Boolean(target.compareDocumentPosition(above) & Node.DOCUMENT_POSITION_FOLLOWING) };
+    })())`));
+    assert.deepEqual(order, { above: true, later: true }, 'the box renders above the target despite following it in DOM order');
+    const captureSetup = await armLaneReleaseCapture(chrome, '#press-move-target', 'document.documentElement');
+    assert.equal(captureSetup.armed, true, `the named stand-in target is present before the shared press: ${JSON.stringify({ armed: captureSetup.armed, error: captureSetup.error ?? null })}`);
+    let pressError = null;
+    try { await press(chrome, "document.querySelector('#press-move-target')"); }
+    catch (error) { pressError = error; }
+    const capture = await finishLaneReleaseCapture(chrome, captureSetup);
+    const fixture = JSON.parse(await chrome.stable('JSON.stringify({ grew: window.__pressMoveFixture?.grew() ?? false })'));
+    const changed = capture.page?.changedNodes ?? [];
+    const moved = changed.find(node => node.node?.id === 'press-move-stand-in');
+    const captureDetail = { capture, captureError: null };
+    if (pressError) includeLaneReleaseCapture(pressError, captureDetail);
+    const failureText = `${pressError?.message ?? 'shared press unexpectedly completed without an error'}; lane-release capture: ${JSON.stringify(captureDetail)}`;
+    assert.ok(fixture.grew, 'the stand-in box grows during the shared press pointer movement');
+    assert.ok(pressError, 'the unchanged shared press refuses the moved target instead of clicking it');
+    assert.equal(pressError.code, 'ERR_ASSERTION', `the shared press keeps its native assertion failure: ${pressError.message}`);
+    assert.match(pressError.message, /shared press: target stays under the pointer/,
+      `the refusal comes from the shared press geometry guard: ${pressError.message}`);
+    assert.equal(capture.pageError, null, `the page capture finishes without a probe error: ${failureText}`);
+    assert.equal(capture.page?.armed, true, `the capture returns its completed page observations: ${failureText}`);
+    assert.ok(moved, `the failure capture names the changed box and its old/new geometry: ${failureText}`);
+    assert.equal(moved.first.id, 'press-move-stand-in', `the captured old box is the named stand-in: ${failureText}`);
+    assert.ok([moved.first.top, moved.first.height, moved.last.top, moved.last.height].every(Number.isFinite),
+      `the named box has finite old/new top and height measurements: ${failureText}`);
+    assert.notEqual(moved.first.height, moved.last.height, `the captured stand-in height changed: ${failureText}`);
+    assert.ok(capture.page.changedNodes.length <= 10 && Number.isInteger(capture.page.truncated.remainingChangedNodes),
+      `the failure capture caps box details at ten and counts the remainder: ${failureText}`);
+    assert.ok(Number.isFinite(capture.page.scrollY.before) && Number.isFinite(capture.page.scrollY.after),
+      `the failure capture records scroll positions even when flex layout moves the target without scrolling: ${failureText}`);
+    assert.match(pressError.message, /lane-release capture: .*press-move-stand-in.*scrollY.*before.*after/s,
+      `the failed press message carries the changed box and scroll positions: ${failureText}`);
+    assert.match(pressError.message, /remainingChangedNodes/, `the failure message reports the count of other changed boxes: ${failureText}`);
+    assert.ok(Object.hasOwn(capture.page, 'scrollAnchoring'), `the capture records whether Chromium reported an anchor: ${failureText}`);
+  } finally {
+    if (chrome) {
+      await chrome.stable('window.__pressMoveFixture?.cleanup()').catch(() => undefined);
+      await closeSnapshotChrome(chrome);
+    }
+    await view.stop();
+    rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+test('a zero-height box above a moved target keeps its old geometry [N26,C7]', {
+  timeout: 120_000, // budget: hang-only ceiling for real Chrome startup and one deterministic pointer-movement capture.
+}, async (t) => {
+  const executable = chromeExecutable();
+  if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME for the moved-press capture.');
+
+  const box = machine();
+  project(box, 'moved-press-capture');
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-moved-press-'));
+  let chrome;
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.send('Emulation.setDeviceMetricsOverride', { width: 375, height: 900, deviceScaleFactor: 1, mobile: false });
+    await chrome.waitFor("innerWidth === 375 && document.readyState === 'complete' && !!document.querySelector('#lanes')");
+    await chrome.stable(`(() => {
+      const standIn = document.createElement('div');
+      standIn.id = 'press-move-stand-in';
+      standIn.style.cssText = 'height:0px;background:#ddd;overflow-anchor:none';
+      const target = document.createElement('button');
+      target.id = 'press-move-target';
+      target.type = 'button';
+      target.textContent = 'Press target';
+      target.style.cssText = 'display:block;height:44px;overflow-anchor:auto';
+      const spacer = document.createElement('div');
+      spacer.style.cssText = 'height:1100px;overflow-anchor:none';
+      const group = document.createElement('div');
+      group.style.cssText = 'display:flex;flex-direction:column;overflow-anchor:auto';
+      standIn.style.order = '-1';
+      target.style.order = '0';
+      const below = Array.from({ length: 12 }, (_, index) => {
+        const node = document.createElement('div');
+        node.id = 'press-below-' + index;
+        node.style.cssText = 'height:0px;order:1;overflow-anchor:none';
+        return node;
+      });
+      group.append(target, standIn, ...below);
+      document.body.prepend(spacer, group);
+      let grew = false;
+      const growAboveTarget = event => {
+        if (!grew && event.target === target) {
+          grew = true;
+          standIn.style.height = '98px';
+          below.forEach(node => { node.style.height = '12px'; });
+        }
+      };
+      document.addEventListener('pointermove', growAboveTarget, true);
+      window.__pressMoveFixture = { grew: () => grew, cleanup() {
+        document.removeEventListener('pointermove', growAboveTarget, true);
+        spacer.remove(); group.remove(); delete window.__pressMoveFixture;
+      } };
+      return { standIn: standIn.id, target: target.id };
+    })()`);
+    const order = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+      const above = document.querySelector('#press-move-stand-in');
+      const target = document.querySelector('#press-move-target');
+      const before = above.getBoundingClientRect();
+      return { above: before.bottom <= target.getBoundingClientRect().top,
+        later: Boolean(target.compareDocumentPosition(above) & Node.DOCUMENT_POSITION_FOLLOWING),
+        before: { top: before.top, documentTop: before.top + scrollY, height: before.height } };
+    })())`));
+    assert.deepEqual({ above: order.above, later: order.later, height: order.before.height }, { above: true, later: true, height: 0 },
+      'the initially zero-height box is physically above the target but later in DOM order');
+    const captureSetup = await armLaneReleaseCapture(chrome, '#press-move-target', 'document.documentElement');
+    assert.equal(captureSetup.armed, true, `the named stand-in target is present before the shared press: ${JSON.stringify({ armed: captureSetup.armed, error: captureSetup.error ?? null })}`);
+    let pressError = null;
+    try { await press(chrome, "document.querySelector('#press-move-target')"); }
+    catch (error) { pressError = error; }
+    const capture = await finishLaneReleaseCapture(chrome, captureSetup);
+    const fixture = JSON.parse(await chrome.stable(`JSON.stringify({ grew: window.__pressMoveFixture?.grew() ?? false,
+      targetTop: document.querySelector('#press-move-target').getBoundingClientRect().top,
+      below: [...document.querySelectorAll('[id^="press-below-"]')].map(node => ({
+        top: node.getBoundingClientRect().top, height: node.getBoundingClientRect().height })) })`));
+    const changed = capture.page?.changedNodes ?? [];
+    const moved = changed.find(node => node.node?.id === 'press-move-stand-in');
+    const captureDetail = { capture, captureError: null };
+    if (pressError) includeLaneReleaseCapture(pressError, captureDetail);
+    const failureText = `${pressError?.message ?? 'shared press unexpectedly completed without an error'}; lane-release capture: ${JSON.stringify(captureDetail)}`;
+    assert.ok(fixture.grew, 'the stand-in box grows during the shared press pointer movement');
+    assert.ok(pressError, 'the unchanged shared press refuses the moved target instead of clicking it');
+    assert.equal(pressError.code, 'ERR_ASSERTION', `the shared press keeps its native assertion failure: ${pressError.message}`);
+    assert.match(pressError.message, /shared press: target stays under the pointer/,
+      `the refusal comes from the shared press geometry guard: ${pressError.message}`);
+    assert.equal(capture.pageError, null, `the page capture finishes without a probe error: ${failureText}`);
+    assert.equal(capture.page?.armed, true, `the capture returns its completed page observations: ${failureText}`);
+    assert.ok(moved, `the failure capture names the changed box and its old/new geometry: ${failureText}`);
+    assert.ok(moved.first, 'a box growing from zero above target retains old top/height: ' + failureText);
+    assert.deepEqual({ top: moved.first.top, documentTop: moved.first.documentTop, height: moved.first.height }, order.before,
+      'old top and height are the actual measurements before aim');
+    assert.equal(moved.last.height, 98, 'the new height is the actual grown box');
+    assert.equal(fixture.below.length, 12);
+    assert.ok(fixture.below.every(box => box.height === 12 && box.top > fixture.targetTop),
+      'twelve other zero-height boxes really grew below the target');
+    assert.ok(changed.every(entry => !entry.node.id.startsWith('press-below-')),
+      'below-target changes cannot crowd the rendered-above diagnostic');
+    assert.equal(capture.page.truncated.remainingChangedNodes, 0, 'below-target growth does not consume the ten-detail allowance');
+    assert.equal(moved.first.id, 'press-move-stand-in', `the captured old box is the named stand-in: ${failureText}`);
+    assert.ok([moved.first.top, moved.first.height, moved.last.top, moved.last.height].every(Number.isFinite),
+      `the named box has finite old/new top and height measurements: ${failureText}`);
+    assert.notEqual(moved.first.height, moved.last.height, `the captured stand-in height changed: ${failureText}`);
+    assert.ok(capture.page.changedNodes.length <= 10 && Number.isInteger(capture.page.truncated.remainingChangedNodes),
+      `the failure capture caps box details at ten and counts the remainder: ${failureText}`);
+    assert.ok(Number.isFinite(capture.page.scrollY.before) && Number.isFinite(capture.page.scrollY.after),
+      `the failure capture records scroll positions even when flex layout moves the target without scrolling: ${failureText}`);
+    assert.match(pressError.message, /lane-release capture: .*press-move-stand-in.*scrollY.*before.*after/s,
+      `the failed press message carries the changed box and scroll positions: ${failureText}`);
+    assert.match(pressError.message, /remainingChangedNodes/, `the failure message reports the count of other changed boxes: ${failureText}`);
+    assert.ok(Object.hasOwn(capture.page, 'scrollAnchoring'), `the capture records whether Chromium reported an anchor: ${failureText}`);
+  } finally {
+    if (chrome) {
+      await chrome.stable('window.__pressMoveFixture?.cleanup()').catch(() => undefined);
+      await closeSnapshotChrome(chrome);
+    }
+    await view.stop();
+    rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+test('below-target boxes cannot crowd the above-target aim cache [N26,C7]', {
+  timeout: 120_000, // budget: hang-only ceiling for real Chrome startup and one deterministic pointer-movement capture.
+}, async (t) => {
+  const executable = chromeExecutable();
+  if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME for the moved-press capture.');
+
+  const box = machine();
+  project(box, 'moved-press-capture');
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-moved-press-'));
+  let chrome;
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.send('Emulation.setDeviceMetricsOverride', { width: 375, height: 900, deviceScaleFactor: 1, mobile: false });
+    await chrome.waitFor("innerWidth === 375 && document.readyState === 'complete' && !!document.querySelector('#lanes')");
+    await chrome.stable(`(() => {
+      const standIn = document.createElement('div');
+      standIn.id = 'press-move-stand-in';
+      standIn.style.cssText = 'height:0px;background:#ddd;overflow-anchor:none';
+      const target = document.createElement('button');
+      target.id = 'press-move-target';
+      target.type = 'button';
+      target.textContent = 'Press target';
+      target.style.cssText = 'display:block;height:44px;overflow-anchor:auto';
+      const spacer = document.createElement('div');
+      spacer.style.cssText = 'height:1100px;overflow-anchor:none';
+      const group = document.createElement('div');
+      group.style.cssText = 'display:flex;flex-direction:column;overflow-anchor:auto';
+      standIn.style.order = '-1';
+      target.style.order = '0';
+      const below = Array.from({ length: 2001 }, (_, index) => {
+        const node = document.createElement('div');
+        node.id = 'press-below-' + index;
+        node.style.cssText = 'height:0px;order:1;overflow-anchor:none';
+        return node;
+      });
+      group.append(...below, target, standIn);
+      for (const existing of document.body.children) existing.hidden = true;
+      const tail = document.createElement('div');
+      tail.style.cssText = 'height:1100px;overflow-anchor:none';
+      document.body.prepend(spacer, group, tail);
+      let grew = false;
+      const growAboveTarget = event => {
+        if (!grew && event.target === target) {
+          grew = true;
+          standIn.style.height = '98px';
+          below.forEach(node => { node.style.height = '12px'; });
+        }
+      };
+      document.addEventListener('pointermove', growAboveTarget, true);
+      window.__pressMoveFixture = { grew: () => grew, cleanup() {
+        document.removeEventListener('pointermove', growAboveTarget, true);
+        spacer.remove(); group.remove(); tail.remove(); delete window.__pressMoveFixture;
+      } };
+      return { standIn: standIn.id, target: target.id };
+    })()`);
+    const order = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+      const above = document.querySelector('#press-move-stand-in');
+      const target = document.querySelector('#press-move-target');
+      const before = above.getBoundingClientRect();
+      return { above: before.bottom <= target.getBoundingClientRect().top,
+        later: Boolean(target.compareDocumentPosition(above) & Node.DOCUMENT_POSITION_FOLLOWING),
+        before: { top: before.top, documentTop: before.top + scrollY, height: before.height } };
+    })())`));
+    assert.deepEqual({ above: order.above, later: order.later, height: order.before.height }, { above: true, later: true, height: 0 },
+      'the initially zero-height box is physically above the target but later in DOM order');
+    const captureSetup = await armLaneReleaseCapture(chrome, '#press-move-target', 'document.documentElement');
+    assert.equal(captureSetup.armed, true, `the named stand-in target is present before the shared press: ${JSON.stringify({ armed: captureSetup.armed, error: captureSetup.error ?? null })}`);
+    let pressError = null;
+    try { await press(chrome, "document.querySelector('#press-move-target')"); }
+    catch (error) { pressError = error; }
+    const capture = await finishLaneReleaseCapture(chrome, captureSetup);
+    const fixture = JSON.parse(await chrome.stable(`JSON.stringify({ grew: window.__pressMoveFixture?.grew() ?? false,
+      targetTop: document.querySelector('#press-move-target').getBoundingClientRect().top,
+      below: [...document.querySelectorAll('[id^="press-below-"]')].map(node => ({
+        top: node.getBoundingClientRect().top, height: node.getBoundingClientRect().height })) })`));
+    const changed = capture.page?.changedNodes ?? [];
+    const moved = changed.find(node => node.node?.id === 'press-move-stand-in');
+    const captureDetail = { capture, captureError: null };
+    if (pressError) includeLaneReleaseCapture(pressError, captureDetail);
+    const failureText = `${pressError?.message ?? 'shared press unexpectedly completed without an error'}; lane-release capture: ${JSON.stringify(captureDetail)}`;
+    assert.ok(fixture.grew, 'the stand-in box grows during the shared press pointer movement');
+    assert.ok(pressError, 'the unchanged shared press refuses the moved target instead of clicking it');
+    assert.equal(pressError.code, 'ERR_ASSERTION', `the shared press keeps its native assertion failure: ${pressError.message}`);
+    assert.match(pressError.message, /shared press: target stays under the pointer/,
+      `the refusal comes from the shared press geometry guard: ${pressError.message}`);
+    assert.equal(capture.pageError, null, `the page capture finishes without a probe error: ${failureText}`);
+    assert.equal(capture.page?.armed, true, `the capture returns its completed page observations: ${failureText}`);
+    assert.ok(moved, `the failure capture names the changed box and its old/new geometry: ${failureText}`);
+    assert.ok(moved.first, 'a box growing from zero above target retains old top/height: ' + failureText);
+    assert.deepEqual({ top: moved.first.top, documentTop: moved.first.documentTop, height: moved.first.height }, order.before,
+      'old top and height are the actual measurements before aim');
+    assert.equal(moved.last.height, 98, 'the new height is the actual grown box');
+    assert.equal(fixture.below.length, 2001);
+    assert.ok(fixture.below.every(box => box.height === 12 && box.top > fixture.targetTop),
+      '2001 DOM-earlier zero-height boxes really grew below the target');
+    assert.ok(changed.every(entry => !entry.node.id.startsWith('press-below-')),
+      'below-target changes cannot crowd the rendered-above diagnostic');
+    assert.equal(capture.page.truncated.droppedByReason.nodeLimit, 0, 'unrelated below-target boxes never consume the aim cache');
+    assert.equal(capture.page.truncated.remainingChangedNodes, 0, 'below-target growth does not consume the ten-detail allowance');
+    assert.equal(moved.first.id, 'press-move-stand-in', `the captured old box is the named stand-in: ${failureText}`);
+    assert.ok([moved.first.top, moved.first.height, moved.last.top, moved.last.height].every(Number.isFinite),
+      `the named box has finite old/new top and height measurements: ${failureText}`);
+    assert.notEqual(moved.first.height, moved.last.height, `the captured stand-in height changed: ${failureText}`);
+    assert.ok(capture.page.changedNodes.length <= 10 && Number.isInteger(capture.page.truncated.remainingChangedNodes),
+      `the failure capture caps box details at ten and counts the remainder: ${failureText}`);
+    assert.ok(Number.isFinite(capture.page.scrollY.before) && Number.isFinite(capture.page.scrollY.after),
+      `the failure capture records scroll positions even when flex layout moves the target without scrolling: ${failureText}`);
+    assert.match(pressError.message, /lane-release capture: .*press-move-stand-in.*scrollY.*before.*after/s,
+      `the failed press message carries the changed box and scroll positions: ${failureText}`);
+    assert.match(pressError.message, /remainingChangedNodes/, `the failure message reports the count of other changed boxes: ${failureText}`);
+    assert.ok(Object.hasOwn(capture.page, 'scrollAnchoring'), `the capture records whether Chromium reported an anchor: ${failureText}`);
+  } finally {
+    if (chrome) {
+      await chrome.stable('window.__pressMoveFixture?.cleanup()').catch(() => undefined);
+      await closeSnapshotChrome(chrome);
+    }
+    await view.stop();
+    rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+test('the above-target aim cache counts boxes beyond its limit [N26,C7]', {
+  timeout: 120_000, // budget: hang-only ceiling for real Chrome startup and one deterministic pointer-movement capture.
+}, async (t) => {
+  const executable = chromeExecutable();
+  if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME for the moved-press capture.');
+
+  const box = machine();
+  project(box, 'moved-press-capture');
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-moved-press-'));
+  let chrome;
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.send('Emulation.setDeviceMetricsOverride', { width: 375, height: 900, deviceScaleFactor: 1, mobile: false });
+    await chrome.waitFor("innerWidth === 375 && document.readyState === 'complete' && !!document.querySelector('#lanes')");
+    await chrome.stable(`(() => {
+      const standIn = document.createElement('div');
+      standIn.id = 'press-move-stand-in';
+      standIn.style.cssText = 'height:0px;background:#ddd;overflow-anchor:none';
+      const target = document.createElement('button');
+      target.id = 'press-move-target';
+      target.type = 'button';
+      target.textContent = 'Press target';
+      target.style.cssText = 'display:block;height:44px;overflow-anchor:auto';
+      const spacer = document.createElement('div');
+      spacer.style.cssText = 'height:1100px;overflow-anchor:none';
+      const group = document.createElement('div');
+      group.style.cssText = 'display:flex;flex-direction:column;overflow-anchor:auto';
+      standIn.style.order = '-1';
+      target.style.order = '0';
+      const extraAbove = Array.from({ length: 2001 }, (_, index) => {
+        const node = document.createElement('div');
+        node.id = 'press-extra-above-' + index;
+        node.style.cssText = 'height:0px;order:-2;overflow-anchor:none';
+        return node;
+      });
+      group.append(target, standIn, ...extraAbove);
+      for (const existing of document.body.children) existing.hidden = true;
+      const tail = document.createElement('div');
+      tail.style.cssText = 'height:1100px;overflow-anchor:none';
+      document.body.prepend(spacer, group, tail);
+      let grew = false;
+      const growAboveTarget = event => {
+        if (!grew && event.target === target) {
+          grew = true;
+          standIn.style.height = '98px';
+        }
+      };
+      document.addEventListener('pointermove', growAboveTarget, true);
+      window.__pressMoveFixture = { grew: () => grew, cleanup() {
+        document.removeEventListener('pointermove', growAboveTarget, true);
+        spacer.remove(); group.remove(); tail.remove(); delete window.__pressMoveFixture;
+      } };
+      return { standIn: standIn.id, target: target.id };
+    })()`);
+    const order = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+      const above = document.querySelector('#press-move-stand-in');
+      const target = document.querySelector('#press-move-target');
+      const before = above.getBoundingClientRect();
+      return { above: before.bottom <= target.getBoundingClientRect().top,
+        later: Boolean(target.compareDocumentPosition(above) & Node.DOCUMENT_POSITION_FOLLOWING),
+        before: { top: before.top, documentTop: before.top + scrollY, height: before.height } };
+    })())`));
+    assert.deepEqual({ above: order.above, later: order.later, height: order.before.height }, { above: true, later: true, height: 0 },
+      'the initially zero-height box is physically above the target but later in DOM order');
+    const overflowGeometry = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+      const targetTop = document.querySelector('#press-move-target').getBoundingClientRect().top;
+      const extras = [...document.querySelectorAll('[id^="press-extra-above-"]')];
+      return { count: extras.length, allAbove: extras.every(node => {
+        const rect = node.getBoundingClientRect();
+        return rect.height === 0 && rect.top <= targetTop;
+      }) };
+    })())`));
+    assert.deepEqual(overflowGeometry, { count: 2001, allAbove: true }, 'all overflow boxes really render above the target');
+    const captureSetup = await armLaneReleaseCapture(chrome, '#press-move-target', 'document.documentElement');
+    assert.equal(captureSetup.armed, true, `the named stand-in target is present before the shared press: ${JSON.stringify({ armed: captureSetup.armed, error: captureSetup.error ?? null })}`);
+    let pressError = null;
+    try { await press(chrome, "document.querySelector('#press-move-target')"); }
+    catch (error) { pressError = error; }
+    const capture = await finishLaneReleaseCapture(chrome, captureSetup);
+    const changed = capture.page?.changedNodes ?? [];
+    const moved = changed.find(node => node.node?.id === 'press-move-stand-in');
+    const captureDetail = { capture, captureError: null };
+    if (pressError) includeLaneReleaseCapture(pressError, captureDetail);
+    const failureText = `${pressError?.message ?? 'shared press unexpectedly completed without an error'}; lane-release capture: ${JSON.stringify(captureDetail)}`;
+    assert.equal(await chrome.stable('window.__pressMoveFixture.grew()'), true, 'the stand-in really grows during pointer movement');
+    assert.ok(pressError, 'the unchanged shared press refuses the moved target instead of clicking it');
+    assert.equal(pressError.code, 'ERR_ASSERTION', `the shared press keeps its native assertion failure: ${pressError.message}`);
+    assert.match(pressError.message, /shared press: target stays under the pointer/,
+      `the refusal comes from the shared press geometry guard: ${pressError.message}`);
+    assert.equal(capture.pageError, null, `the page capture finishes without a probe error: ${failureText}`);
+    assert.equal(capture.page?.armed, true, `the capture returns its completed page observations: ${failureText}`);
+    assert.ok(moved, `the failure capture names the changed box and its old/new geometry: ${failureText}`);
+    assert.ok(moved.first, 'a box growing from zero above target retains old top/height: ' + failureText);
+    assert.deepEqual({ top: moved.first.top, documentTop: moved.first.documentTop, height: moved.first.height }, order.before,
+      'old top and height are the actual measurements before aim');
+    assert.equal(moved.last.height, 98, 'the new height is the actual grown box');
+    assert.equal(capture.page.observedNodes, 2000, 'the aim cache retains at most 2000 above-target boxes');
+    assert.equal(capture.page.truncated.droppedByReason.nodeLimit, 3, '2001 extra above boxes plus the spacer and stand-in drop exactly three');
+    assert.equal(capture.page.truncated.remainingChangedNodes, 0, 'unchanged overflow boxes do not create changed-box remainder');
+    assert.equal(moved.first.id, 'press-move-stand-in', `the captured old box is the named stand-in: ${failureText}`);
+    assert.ok([moved.first.top, moved.first.height, moved.last.top, moved.last.height].every(Number.isFinite),
+      `the named box has finite old/new top and height measurements: ${failureText}`);
+    assert.notEqual(moved.first.height, moved.last.height, `the captured stand-in height changed: ${failureText}`);
+    assert.ok(capture.page.changedNodes.length <= 10 && Number.isInteger(capture.page.truncated.remainingChangedNodes),
+      `the failure capture caps box details at ten and counts the remainder: ${failureText}`);
+    assert.ok(Number.isFinite(capture.page.scrollY.before) && Number.isFinite(capture.page.scrollY.after),
+      `the failure capture records scroll positions even when flex layout moves the target without scrolling: ${failureText}`);
+    assert.match(pressError.message, /lane-release capture: .*press-move-stand-in.*scrollY.*before.*after/s,
+      `the failed press message carries the changed box and scroll positions: ${failureText}`);
+    assert.match(pressError.message, /remainingChangedNodes/, `the failure message reports the count of other changed boxes: ${failureText}`);
+    assert.ok(Object.hasOwn(capture.page, 'scrollAnchoring'), `the capture records whether Chromium reported an anchor: ${failureText}`);
+  } finally {
+    if (chrome) {
+      await chrome.stable('window.__pressMoveFixture?.cleanup()').catch(() => undefined);
+      await closeSnapshotChrome(chrome);
+    }
+    await view.stop();
+    rmSync(profile, { recursive: true, force: true });
   }
 });

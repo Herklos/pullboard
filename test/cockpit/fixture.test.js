@@ -143,7 +143,15 @@ test('[N38,C7] real cockpit fixture reads close API and stylesheet connections',
   function recordHeaders({ request: outgoing, headers }) {
     if (origin && String(outgoing?.origin) === origin) sent.push({ path: outgoing.path, headers: String(headers) });
   }
+  const httpChannel = diagnosticsChannel.channel('http.client.request.start');
+  /** Observe node:http requests at the same wire boundary without depending on a client transport. */
+  function recordHttpHeaders({ request: outgoing }) {
+    if (!origin || 'http://' + outgoing.getHeader('host') !== origin) return;
+    const headers = Object.entries(outgoing.getHeaders()).map(([name, value]) => `${name}: ${value}`).join('\r\n');
+    sent.push({ path: outgoing.path, headers });
+  }
   channel.subscribe(recordHeaders);
+  httpChannel.subscribe(recordHttpHeaders);
   let view;
   try {
     view = await startView(box);
@@ -152,6 +160,7 @@ test('[N38,C7] real cockpit fixture reads close API and stylesheet connections',
     assert.notEqual(await boardId(view, fixtureProject.repo), 'not-registered');
   } finally {
     channel.unsubscribe(recordHeaders);
+    httpChannel.unsubscribe(recordHttpHeaders);
     await view?.stop();
   }
   const closes = (request) => /(?:^|\r?\n)connection:\s*close(?:\r?\n|$)/iu.test(request.headers);
