@@ -2630,7 +2630,9 @@ function workCommands(io, args) {
     reopen: () => act(async (ctx, board, me) => {
       const result = await ordered(ctx, board, 'reopen', [idArg(first), { agentId: me.id, note: textArg(io, values, 'note') ?? '' }]);
       io.result?.(result);
-      io.say(`reopened #${first} without a verdict; previous commit ${result.commit.slice(0, 12)} remains recorded`);
+      io.say(result.landingFailure
+        ? `reopened #${first} after landing failure; previous accept remains recorded at ${result.commit.slice(0, 12)}`
+        : `reopened #${first} without a verdict; previous commit ${result.commit.slice(0, 12)} remains recorded`);
       return 0;
     }),
     shout: () => act(async (ctx, board, me) => {

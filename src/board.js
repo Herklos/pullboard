@@ -1456,23 +1456,51 @@ export function verify(board, id, { agentId, decision, reason, note = '', head, 
   });
 }
 
-/** Return a submission for criterion correction without recording a verifier's judgment [V2,V6].
- * The prior commit remains as the base the builder must change before resubmitting.
+/** Return a submission for correction, or a verified item after a recorded red landing, without
+ * rewriting its prior verdict [V2,V6]. The prior commit remains the builder's rework base.
  *
  * @param {any} board
  * @param {number} id
  * @param {{ agentId: string, note: string }} request
- * @returns {{ id: number, commit: string }}
+ * @returns {{ id: number, commit: string, supersedes?: number, landingFailure?: object }}
  */
 export function reopen(board, id, { agentId, note }) {
   return atomic(board, () => {
     let submittedCommit = null;
+    let supersedes;
+    let landingFailure;
+    const currentEngine = board.executionEngineVersion ?? ENGINE_VERSION;
+    const declaredTransition = MOVES.find((entry) => entry.verb === 'reopen');
+    const transition = currentEngine >= 10 ? declaredTransition : { ...declaredTransition, from: ['submitted'] };
     const item = moveItem(board, id, 'reopen', {
+      transition,
       checks: {
         joined: null,
         [IN_STATE]: (found) => new Refused('NOT_SUBMITTED', `item #${id} is ${current(board, found).item_status}, not submitted`),
         coordinatorOnly: () => onlyCoordinator(agentId, 'reopens submissions'),
         noteGiven: () => (note.trim() ? null : new Refused('NOTE_REQUIRED', 'say why the criterion needs correction: --note "why"')),
+        notMerged: (found) => found.item_status !== 'verified' || !found.item_merged_commit
+          ? null
+          : new Refused('ALREADY_MERGED', `item #${id} was merged as ${found.item_merged_commit}; merged items cannot be reopened`),
+        landingFailureRecorded: (found) => {
+          if (found.item_status !== 'verified') return null;
+          const accepted = events(board, { itemId: id }).findLast((event) => {
+            if (event.event_kind !== 'accept') return false;
+            return JSON.parse(event.event_detail).commit === found.item_commit;
+          });
+          const recorded = landingBatches(board).flatMap((batch) => (batch.culprits ?? []).map((culprit) => ({ batch, culprit })))
+            .find(({ culprit }) => culprit.id === id && culprit.commit === found.item_commit && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(culprit.mergeCommit ?? '')
+              && Array.isArray(culprit.tests) && culprit.tests.length
+              && culprit.tests.every((failure) => typeof failure.file === 'string' && typeof failure.name === 'string'
+                && note.includes(`${failure.file}: ${failure.name}`) && note.includes(culprit.mergeCommit)));
+          const manual = manualLandingFailure(note);
+          if (!accepted || (!recorded && !manual)) return new Refused('LANDING_FAILURE_REQUIRED', `reopening verified item #${id} needs a failing test and merge commit in --note`);
+          supersedes = accepted.event_id;
+          landingFailure = recorded
+            ? { batch: recorded.batch.id, tests: recorded.culprit.tests, mergeCommit: recorded.culprit.mergeCommit }
+            : { batch: null, tests: [manual.test], mergeCommit: manual.mergeCommit };
+          return null;
+        },
       },
       set: (found) => {
         submittedCommit = found.item_commit;
@@ -1486,9 +1514,18 @@ export function reopen(board, id, { agentId, note }) {
         };
       },
     });
-    logEvent(board, agentId, 'reopen', id, { commit: submittedCommit, note: note.trim(), judgment: null });
-    return { id: item.item_id, commit: submittedCommit };
+    logEvent(board, agentId, 'reopen', id, { commit: submittedCommit, note: note.trim(), judgment: null,
+      ...(supersedes ? { supersedes, landingFailure } : {}) });
+    return { id: item.item_id, commit: submittedCommit, ...(supersedes ? { supersedes, landingFailure } : {}) };
   });
+}
+
+/** Read test and merge-commit evidence from a Studio/manual landing note without checking Git. */
+function manualLandingFailure(note) {
+  const test = note.match(/(?<file>(?:[\w.-]+\/)+[\w.-]+):\s*(?<name>[^;\n]+?)(?=\s*;\s*merge commit\b|$)/iu);
+  const mergeCommit = note.match(/\bmerge commit\s+([a-f0-9]{40}|[a-f0-9]{64})\b/iu)?.[1];
+  if (!test || !test.groups.name.trim() || !mergeCommit) return null;
+  return { test: { file: test.groups.file, name: test.groups.name.trim() }, mergeCommit };
 }
 
 /**
