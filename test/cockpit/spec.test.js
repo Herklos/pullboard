@@ -55,6 +55,71 @@ async function watchSpecPress(chrome, selector) {
   };
 }
 
+/** Record real filter input and completed Spec renders so a stale row read can name its render provenance. */
+async function watchSpecFilter(chrome) {
+  await chrome.stable(`(() => {
+    const originalRender = window.render;
+    if (typeof originalRender !== 'function') throw Error('Spec filter observer cannot instrument the real render function');
+    const trace = window.__specFilterTrace = { originalRender, renderCount:0, renderAttemptCount:0, lastRow:null, lastRenderId:null, events:[], attempts:[], renders:[], listeners:[], captureErrors:[] };
+    /** Read source state and the row DOM immediately after a completed render. */
+    const state = () => {
+      const row = document.querySelector('#spec-list [data-row="spec:G1"]');
+      const chip = row?.querySelector(':scope > .chip');
+      const filter = typeof view === 'object' ? view.rows?.spec ?? null : null;
+      const source = typeof data === 'object' ? data.project?.spec?.find(entry => entry.id === 'G1') : null;
+      return { readAt:performance.now(), filter, sourceDataStatus:source?.status ?? null, rowStatus:chip?.textContent.trim() ?? null, row };
+    };
+    /** Keep diagnostic failures from changing the original page action or renderer result. */
+    const recordError = error => {
+      try { trace.captureErrors.push(String(error?.stack || error)); if (trace.captureErrors.length > 4) trace.captureErrors.shift(); }
+      catch { /* Diagnostics never replace the original page behavior. */ }
+    };
+    /** Preserve the actual renderer while assigning an ordinal and post-render snapshot. */
+    window.render = function(...args) {
+      const result = originalRender.apply(this, args);
+      try {
+        const current = state();
+        trace.renderAttemptCount += 1;
+        if (typeof deferredClickRender !== 'undefined' && deferredClickRender) {
+          trace.attempts.push({ at:current.readAt, deferred:true, filter:current.filter, sourceDataStatus:current.sourceDataStatus, rowStatus:current.rowStatus });
+          if (trace.attempts.length > 8) trace.attempts.shift();
+        } else {
+          trace.renderCount += 1;
+          trace.lastRow = current.row;
+          trace.lastRenderId = trace.renderCount;
+          trace.renders.push({ id:trace.renderCount, at:current.readAt, filter:current.filter, sourceDataStatus:current.sourceDataStatus, rowStatus:current.rowStatus });
+          if (trace.renders.length > 8) trace.renders.shift();
+        }
+      } catch (error) { recordError(error); }
+      return result;
+    };
+    /** Record the filter control and pre-handler state for the native pointer sequence. */
+    const listen = type => {
+      const listener = event => {
+        const target = event.target.closest?.('[data-rows^="spec:"]');
+        if (!target) return;
+        try {
+          const current = state();
+          trace.events.push({ type, at:current.readAt, target:target.dataset.rows, filter:current.filter, sourceDataStatus:current.sourceDataStatus, rowStatus:current.rowStatus });
+          if (trace.events.length > 8) trace.events.shift();
+        } catch (error) { recordError(error); }
+      };
+      document.addEventListener(type, listener, true);
+      trace.listeners.push([type, listener]);
+    };
+    for (const type of ['mousedown', 'mouseup', 'click']) listen(type);
+  })()`);
+  return {
+    /** Restore only the renderer and pointer listeners installed for this measurement. */
+    async dispose() {
+      try {
+        await chrome.stable(`(() => { const trace=window.__specFilterTrace; if (!trace) return; window.render=trace.originalRender; for (const [type, listener] of trace.listeners) document.removeEventListener(type, listener, true); delete window.__specFilterTrace; })()`);
+        return null;
+      } catch (error) { return String(error?.stack || error); }
+    },
+  };
+}
+
 
 test('spec rows read across a phone [N26,D1]', async () => {
   const box = machine();
@@ -209,11 +274,7 @@ test('spec rows read as a list, decided in the panel [N26]', { timeout: 300_000 
   try {
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
     await chrome.waitFor("typeof data === 'object' && !!data?.project?.spec?.length && data.project.practice.some((r) => r.id === 'D8')");
-    // Pullboard's own rules can wait on the person too; they list under Needs your decision, in the board's order, but are
-    // changed in DOCTRINE.md rather than decided here.
-    const order = JSON.parse(await chrome.stable("JSON.stringify(data.project.practice.map((r) => [r.id, r.origin, r.status, !!r.decision]))"));
-    const standardWaiting = order.filter(([, origin, status, decided]) => origin === 'standard' && ['pending', 'draft'].includes(status) && !decided).map(([id, , status]) => [id, status === 'draft' ? null : status]);
-    expected.doctrine.decide = [...standardWaiting, ...expected.doctrine.decide].sort(([a], [b]) => order.findIndex(([id]) => id === a) - order.findIndex(([id]) => id === b));
+    // Inherited defaults have their own review filter; local proposals still wait for the person's decision.
     for (const scheme of ['light', 'dark']) {
       for (const width of [1280, 375]) {
         await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
@@ -550,7 +611,7 @@ test('the Spec decline opens its reason form under a 6× CPU throttle [N26]', { 
     try {
       await press(chrome, `document.querySelector(${JSON.stringify(decline)})`, { afterMouseDown: async () => {
         box.run(demo.repo, 'shout', 'person', refreshText);
-        await chrome.waitFor(`data.project.shouts.some(shout => shout.shout_text === ${JSON.stringify(refreshText)})`, 20_000); // budget: observe the real view poll carrying the private CLI write while native mouse input remains pressed.
+        await chrome.waitFor(`data.project.shouts.some(shout => shout.shout_text === ${JSON.stringify(refreshText)})`, 20_000); // budget: hang-only ceiling for the real view poll to carry the private CLI write while native mouse input is held; no throughput claim.
         t.diagnostic(`6× pointer-held refresh before mouseup: ${JSON.stringify(await refreshTrace.snapshot())}`);
       } });
     } catch (error) {
@@ -612,6 +673,7 @@ test('doctrine and spec rows share the items row [N26]', { timeout: 300_000 }, a
   const view = await startView(box);
   const profile = mkdtempSync(join(tmpdir(), 'pullboard-shared-rows-chrome-'));
   let chrome;
+  let filterTrace;
   /** Save a full-page proof of the actual rendered tab when a proof folder is requested. */
   const shot = async (kind, width, theme) => {
     if (!process.env.PULLBOARD_ROWS_PROOF) return;
@@ -628,9 +690,17 @@ test('doctrine and spec rows share the items row [N26]', { timeout: 300_000 }, a
     const style = e => { if (!e) return null; const s=getComputedStyle(e); return {display:s.display,dotColumn:s.gridTemplateColumns.split(" ")[0],gridTemplateAreas:s.gridTemplateAreas,columnGap:s.columnGap,rowGap:s.rowGap,padding:s.padding,fontFamily:s.fontFamily,fontSize:s.fontSize,fontWeight:s.fontWeight,lineHeight:s.lineHeight}; };
     const title = row?.querySelector('.t'), meta = row?.querySelector('.meta'), source = row?.querySelector('.rule-source'), reason = row?.querySelector('.rule-reason');
     const age = row?.querySelector('.row-age');
+    const trace = window.__specFilterTrace;
+    const currentRow = document.querySelector('#spec-list [data-row="spec:G1"]');
     return {tag:row?.tagName ?? null, className:row?.className ?? '', title:title?.textContent ?? '', titleFull:row?.getAttribute('title') ?? '', titleBox:box(title), titleStyle:title&&{overflow:getComputedStyle(title).textOverflow,whiteSpace:getComputedStyle(title).whiteSpace,lines:Math.ceil(title.getBoundingClientRect().height/parseFloat(getComputedStyle(title).lineHeight))},
       rowBox:box(row), rowStyle:style(row), dot:!!row?.querySelector(':scope > .dot'), meta:meta?.textContent ?? '', metaBox:box(source), source:source?.textContent ?? null, sourceBox:box(source), reason:reason?.textContent ?? null, reasonBox:box(reason), gate:row?.querySelector('.meta .gate')?.textContent ?? null, gateBox:box(row?.querySelector('.meta .gate')),
       count:age?.textContent.trim() ?? null, countBox:box(age), status:row?.querySelector(':scope > .chip')?.textContent.trim() ?? null, statusBox:box(row?.querySelector(':scope > .chip')),
+      renderProvenance:trace ? { readAt:performance.now(), currentFilter:typeof view === 'object' ? view.rows?.spec ?? null : null,
+        sourceDataStatus:typeof data === 'object' ? data.project?.spec?.find(entry => entry.id === 'G1')?.status ?? null : null,
+        events:trace.events.slice(-8), attempts:trace.attempts.slice(-8), renders:trace.renders.slice(-8),
+        renderAttemptCount:trace.renderAttemptCount, renderCount:trace.renderCount,
+        lastRenderId:trace.lastRenderId, currentRowRenderId:currentRow === trace.lastRow ? trace.lastRenderId : null,
+        currentRowIsLastRendered:currentRow === trace.lastRow, captureErrors:trace.captureErrors.slice(-4) } : null,
       overflow:document.documentElement.scrollWidth > document.documentElement.clientWidth, pageWidth:document.documentElement.clientWidth, pageScrollWidth:document.documentElement.scrollWidth};
   })())`));
 
@@ -674,11 +744,31 @@ test('doctrine and spec rows share the items row [N26]', { timeout: 300_000 }, a
         assert.match(header.approve ?? '', /Approve all 2/u, `${width}px ${theme}: Spec keeps its two-undecided-row Approve all action`);
         assert.ok(header.button >= tapTarget(width), `${width}px ${theme}: Approve all meets the #371 target size`);
 
-        await press(chrome, "document.querySelector('#spec-chips [data-rows=\"spec:decide\"]')");
-        const draft = await rowState('#spec-list [data-row="spec:G1"]');
-        const pending = await rowState('#spec-list [data-row="spec:G2"]');
-        assert.equal(draft.status, 'must', `${width}px ${theme}: the filter-implied draft status gives way to its tier`);
-        assert.equal(pending.status, 'pending', `${width}px ${theme}: a non-implied pending status remains explicit`);
+        filterTrace = await watchSpecFilter(chrome);
+        let assertionError;
+        try {
+          await press(chrome, "document.querySelector('#spec-chips [data-rows=\"spec:decide\"]')");
+          const draft = await rowState('#spec-list [data-row="spec:G1"]');
+          const pending = await rowState('#spec-list [data-row="spec:G2"]');
+          const capture = JSON.stringify({ row: draft, currentFilter: draft.renderProvenance?.currentFilter,
+            sourceDataStatus: draft.renderProvenance?.sourceDataStatus, rowStatus: draft.status,
+            renderAttemptCount: draft.renderProvenance?.renderAttemptCount, renderCount: draft.renderProvenance?.renderCount,
+            currentRowRenderId: draft.renderProvenance?.currentRowRenderId,
+            events: draft.renderProvenance?.events, attempts: draft.renderProvenance?.attempts, renders: draft.renderProvenance?.renders,
+            captureErrors: draft.renderProvenance?.captureErrors });
+          assert.equal(draft.status, 'must', `${width}px ${theme}: the filter-implied draft status gives way to its tier; row/render capture ${capture}; ROOT-CAUSE STATUS: NOT PROVEN`);
+          assert.equal(pending.status, 'pending', `${width}px ${theme}: a non-implied pending status remains explicit; row/render capture ${JSON.stringify({ row: pending, rootCauseStatus: 'NOT PROVEN' })}; ROOT-CAUSE STATUS: NOT PROVEN`);
+        } catch (error) {
+          assertionError = error;
+          throw error;
+        } finally {
+          const disposeError = await filterTrace.dispose();
+          if (disposeError) {
+            if (assertionError) assertionError.message += `; filter-observer cleanup also failed: ${disposeError}`;
+            else throw new Error(`filter-observer cleanup failed: ${disposeError}`);
+          }
+          filterTrace = null;
+        }
         await press(chrome, "document.querySelector('#spec-chips [data-rows=\"spec:approved\"]')");
         const approved = await rowState('#spec-list [data-row="spec:G3"]');
         assert.equal(approved.status, 'must', `${width}px ${theme}: the approved filter-implied status gives way to its tier`);
@@ -760,8 +850,13 @@ test('doctrine and spec rows share the items row [N26]', { timeout: 300_000 }, a
       assert.ok(targets.heights.length > 2 && targets.heights.every(target => target.height >= 44), kind + ': rows and both detail decisions meet the touch target: ' + JSON.stringify(targets));
     }
   } finally {
-    if (chrome) await closeSnapshotChrome(chrome);
-    rmSync(profile, { recursive: true, force: true });
-    await view.stop();
+    try { await filterTrace?.dispose(); }
+    finally {
+      try { if (chrome) await closeSnapshotChrome(chrome); }
+      finally {
+        rmSync(profile, { recursive: true, force: true });
+        await view.stop();
+      }
+    }
   }
 });

@@ -151,7 +151,7 @@ function fetchLive(url, init = {}) {
 
 /** Start the real view and wait for a complete HTTP answer, rather than just its printed link. */
 async function startView(box, { bin = BIN } = {}) {
-  const child = spawn(process.execPath, [bin, 'view', '--no-open'], { cwd: box.dir, env: box.env });
+  const child = spawn(process.execPath, [bin, 'view', '--no-open'], { cwd: box.dir, env: { ...box.env, PULLBOARD_VIEW_FOREGROUND: '1' } });
   const link = await new Promise((found, fail) => {
     let out = '';
     child.stdout.on('data', (chunk) => {
@@ -591,8 +591,16 @@ async function startSnapshotChrome(executable, profile, { timeoutMs = 30_000 } =
     '--disable-background-networking', '--disable-sync', '--disable-extensions', '--no-proxy-server',
     '--use-mock-keychain', '--password-store=basic', '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'];
   let lastFailure = '';
+  let lastFailureKind = '';
+  const firstLaunchStartedAt = Date.now();
+  const launchAttempts = [];
   for (let attempt = 1; attempt <= 2; attempt += 1) {
-    if (attempt > 1) rmSync(join(profile, 'DevToolsActivePort'), { force: true });
+    if (attempt > 1) {
+      process.stderr.write(`${JSON.stringify({ event: 'chrome-relaunch', attempt, elapsedMs: Date.now() - firstLaunchStartedAt,
+        previousFailure: lastFailureKind })}\n`);
+      rmSync(join(profile, 'DevToolsActivePort'), { force: true });
+    }
+    const startedAt = Date.now();
     const child = spawn(executable, args, { detached: true, stdio: ['ignore', 'ignore', 'pipe'] });
     const stopped = new Promise((resolve) => child.once('close', (code, signal) => resolve({ code, signal })));
     let stderr = '';
@@ -616,21 +624,51 @@ async function startSnapshotChrome(executable, profile, { timeoutMs = 30_000 } =
       ]);
       if (exit) break;
     }
-    if (port) return { child, stopped, port, stderr: () => stderr };
+    if (port) {
+      launchAttempts.push({ attempt, elapsedMs: Date.now() - startedAt, portPublished: true });
+      return { child, stopped, port, startedAt, launchAttempts, stderr: () => stderr };
+    }
     const details = [stderr.trim(), exit?.status?.signal && `signal ${exit.status.signal}`,
       exit?.status && exit.status.code !== null && `exit ${exit.status.code}`].filter(Boolean).join('; ') || 'no stderr';
     lastFailure = exit
       ? `Chrome exited before publishing DevToolsActivePort (${details})`
       : `Chrome did not publish DevToolsActivePort within ${timeoutMs}ms (${details})`;
+    lastFailureKind = exit ? 'process-exited-before-devtools-port' : 'devtools-port-timeout';
+    launchAttempts.push({ attempt, elapsedMs: Date.now() - startedAt, portPublished: false,
+      failure: lastFailureKind, exitCode: exit?.status?.code ?? null, signal: exit?.status?.signal ?? null });
     await stopOwnedChrome(child, stopped);
   }
-  throw new Error(`Chrome failed to start after 2 launches; final stderr: ${lastFailure}`);
+  throw new Error(`Chrome failed to start after 2 launches; attempts: ${JSON.stringify(launchAttempts)}; final stderr: ${lastFailure}`);
+}
+
+/** Read a bounded, sanitized view of DevTools targets after a command times out. */
+async function snapshotDevToolsTargets(port) {
+  const response = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(1_000) });
+  if (!response.ok) throw new Error(`target list returned HTTP ${response.status}`);
+  const targets = await response.json();
+  if (!Array.isArray(targets)) throw new Error('target list was not an array');
+  return targets.slice(0, 20).map((target) => {
+    let safeUrl = { scheme: 'unknown', path: '', omitted: true };
+    try {
+      const parsed = new URL(target.url ?? '');
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        safeUrl = { scheme: parsed.protocol.slice(0, -1), path: parsed.pathname.slice(0, 160), omitted: false };
+      } else if (parsed.protocol === 'about:' && parsed.pathname === 'blank') {
+        safeUrl = { scheme: 'about', path: 'about:blank', omitted: false };
+      } else {
+        safeUrl = { scheme: parsed.protocol.slice(0, 20).replace(/:$/, '') || 'unknown', path: '', omitted: true };
+      }
+    } catch { /* A malformed target URL is still represented by its type and id. */ }
+    return { id: String(target.id ?? '').slice(0, 80), type: String(target.type ?? '').slice(0, 40), url: safeUrl };
+  });
 }
 
 /** Start one isolated headless Chrome and expose its page through a small CDP client. */
 async function openSnapshotChrome(executable, url, profile) {
   const launched = await startSnapshotChrome(executable, profile);
   const { child, stopped, port } = launched;
+  let pageTargetEverAppearedBeforeTimeout = false;
+  let pageTargetAppearedAtElapsedMs = null;
   let socket;
   let id = 0;
   const pending = new Map();
@@ -638,6 +676,10 @@ async function openSnapshotChrome(executable, url, profile) {
   const exceptions = [];
   try {
     const target = await (await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: 'PUT', signal: AbortSignal.timeout(10_000) })).json();
+    if (target.type === 'page') {
+      pageTargetEverAppearedBeforeTimeout = true;
+      pageTargetAppearedAtElapsedMs = Date.now() - launched.startedAt;
+    }
     socket = new WebSocket(target.webSocketDebuggerUrl);
     await new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('DevTools socket did not open')), 10_000); // budget: hang ceiling for the local DevTools socket-open handshake; no throughput claim.
@@ -688,14 +730,42 @@ async function openSnapshotChrome(executable, url, profile) {
       })()` });
     }
     const chrome = await stableChrome({ child, stopped, socket, send, requests, exceptions });
+    chrome.launchAttempts = launched.launchAttempts;
+    chrome.startedAt = launched.startedAt;
     await chrome.send('Page.navigate', { url });
     await chrome.waitFor("matchMedia('(prefers-reduced-motion: reduce)').matches");
     return chrome;
   } catch (error) {
+    let message = error.message;
+    if (/^DevTools timed out: /.test(message)) {
+      const timeoutObservedAt = Date.now();
+      const capture = {
+        rootCauseStatus: 'NOT PROVEN',
+        timeoutObservedAt,
+        timeoutElapsedMsSinceLaunch: timeoutObservedAt - launched.startedAt,
+        pageTargetEverAppearedBeforeTimeout,
+        pageTargetAppearedAtElapsedMs,
+        launchAttempts: launched.launchAttempts,
+      };
+      try {
+        capture.targetListRequestStartedAt = Date.now();
+        capture.targetListRequestStartedElapsedMs = capture.targetListRequestStartedAt - launched.startedAt;
+        capture.targets = await snapshotDevToolsTargets(port);
+        capture.targetListObservedAt = Date.now();
+        capture.targetListObservedElapsedMs = capture.targetListObservedAt - launched.startedAt;
+        capture.pageTargetObservedInTimeoutList = capture.targets.some((entry) => entry.type === 'page');
+      } catch (captureError) {
+        capture.targetListObservedAt = Date.now();
+        capture.targetListObservedElapsedMs = capture.targetListObservedAt - launched.startedAt;
+        capture.pageTargetObservedInTimeoutList = null;
+        capture.targetListError = `${captureError.name}: ${captureError.message}`;
+      }
+      message = `${message}; ROOT-CAUSE STATUS: NOT PROVEN; Chrome timeout capture ${JSON.stringify(capture)}`;
+    }
     socket?.close();
     await stopOwnedChrome(child, stopped);
     const chromeStderr = launched.stderr().trim();
-    throw new Error(chromeStderr ? `${error.message}; Chrome stderr: ${chromeStderr}` : error.message, { cause: error });
+    throw new Error(chromeStderr ? `${message}; Chrome stderr: ${chromeStderr}` : message, { cause: error });
   }
 }
 

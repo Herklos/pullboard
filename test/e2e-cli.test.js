@@ -65,7 +65,7 @@ test('the tour runs a reject and its rework on a throwaway repo, in under thirty
   const started = Date.now();
   const shown = spawnSync(process.execPath, [BIN, 'tour'], { cwd: box.dir, env: plainEnv, encoding: 'utf8' });
   assert.equal(shown.status, 0, `${shown.stdout}${shown.stderr}`);
-  assert.ok(Date.now() - started < 30_000, 'thirty seconds');
+  assert.ok(Date.now() - started < 30_000, 'thirty seconds'); // budget: approved row N10 states thirty seconds.
   assert.doesNotMatch(shown.stdout, /\u001b\[/, 'piped output stays plain');
   assert.match(shown.stdout, /review-1 \(Scripted\) \$ pullboard verify 1 reject --reason BEHAVIOR_MISMATCH/);
   assert.match(shown.stdout, /sent back: #1 BEHAVIOR_MISMATCH by review-1 \(Scripted\): greet\(''\) returns "Hello, !"/);
@@ -345,8 +345,11 @@ test('output into a reader that stops early ends quietly [N24]', async () => {
   assert.equal(code, 0);
 });
 
-test('every wait pullboard suggests names its unit and fits one ten-minute tool call [N25]', () => {
+test('every wait pullboard suggests names its unit and fits one ten-minute tool call [N25]', async () => {
   const box = project();
+  box.env.PULLBOARD_VIEW_FOREGROUND = '1';
+  const view = await e2e.startView(box, box.repo);
+  await view.stop();
   box.run(box.repo, 'add', 'web', 'Page', '--specs', 'G1');
   box.run(box.repo, 'add', 'web', 'Second', '--specs', 'G1', '--after', '1');
   box.run(box.web, 'claim', '1');

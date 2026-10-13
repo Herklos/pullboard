@@ -23,6 +23,40 @@ function pause(ms) {
   return new Promise((resolvePause) => setTimeout(resolvePause, ms));
 }
 
+/** Confirm removal from Chrome's target list within one declared operation deadline. */
+export async function waitForTargetAbsent(listTargets, targetId, {
+  timeoutMs = 5_000, now = Date.now, pauseFor = pause,
+} = {}) {
+  const deadline = now() + timeoutMs;
+  do {
+    const targets = await listTargets(Math.max(1, deadline - now()));
+    if (!targets.some(candidate => candidate.id === targetId)) return;
+    if (now() >= deadline) break;
+    await pauseFor(Math.max(0, Math.min(50, deadline - now())));
+  } while (now() < deadline);
+  throw new Error(`Closed DevTools target ${targetId} remained listed within ${timeoutMs}ms.`);
+}
+
+/** Build the shared bounded page-condition loop around the real CDP evaluator. */
+export function createWaiter(evaluate, { commandTimeoutMs = COMMAND_TIMEOUT_MS, pauseFor = pause, now = Date.now } = {}) {
+  return async function waitFor(expression, timeoutMs = commandTimeoutMs, label = 'wait for page condition') {
+    const waitDeadline = now() + timeoutMs;
+    let lastEvaluationError = null;
+    while (now() < waitDeadline) {
+      try {
+        if (await evaluate(expression, label, waitDeadline - now())) return;
+      } catch (error) {
+        if (error instanceof Error && (error.message.startsWith('Browser evaluation failed:')
+          || (error.code === -32000 && error.navigated === true))) lastEvaluationError = error;
+        else if (error.code !== 'CDP_TIMEOUT' || now() < waitDeadline) throw error;
+      }
+      await pauseFor(Math.max(0, Math.min(50, waitDeadline - now())));
+    }
+    const exception = lastEvaluationError instanceof Error ? `; last evaluation failed: ${lastEvaluationError.message}` : '';
+    throw new Error(`Browser condition "${label}" did not arrive within ${timeoutMs}ms; expression: ${expression.slice(0, 200)}${exception}.`);
+  };
+}
+
 /** Keep the most recent diagnostic bytes while continuously draining Chrome's stderr pipe. */
 function appendStderr(current, chunk) {
   const next = current + chunk;
@@ -161,22 +195,7 @@ export async function startChrome({
     async function navigate(nextUrl) {
       await send('Page.navigate', { url: nextUrl }, 'navigate page');
     }
-    /** Wait until a page expression becomes truthy, treating document-transition evaluation errors as pending. */
-    async function waitFor(expression, timeoutMs = commandTimeoutMs, label = 'wait for page condition') {
-      const waitDeadline = Date.now() + timeoutMs;
-      let lastEvaluationError = null;
-      while (Date.now() < waitDeadline) {
-        try {
-          if (await evaluate(expression, label, waitDeadline - Date.now())) return;
-        } catch (error) {
-          if (error instanceof Error && error.message.startsWith('Browser evaluation failed:')) lastEvaluationError = error;
-          else if (error.code !== 'CDP_TIMEOUT' || Date.now() < waitDeadline) throw error;
-        }
-        await pause(Math.max(0, Math.min(50, waitDeadline - Date.now())));
-      }
-      const exception = lastEvaluationError instanceof Error ? `; last evaluation failed: ${lastEvaluationError.message}` : '';
-      throw new Error(`Browser condition "${label}" did not arrive within ${timeoutMs}ms; expression: ${expression.slice(0, 200)}${exception}.`);
-    }
+    const waitFor = createWaiter(evaluate, { commandTimeoutMs });
     /** Wait for non-stream relay traffic to finish before an idle-network assertion. */
     async function waitForRelayIdle(timeoutMs = commandTimeoutMs) {
       const deadline = Date.now() + timeoutMs;
@@ -303,10 +322,28 @@ export function createSender(socket, pending, nextId, timeoutMs, loopDelay, rela
   let mainFrameNavigation = 0;
   let mainFrameId;
   let mainFrameNavigationEvent = 'none';
+  let terminalError = null;
+  /** Reject in-flight commands once the target or its DevTools transport is gone. */
+  function failPending(reason, code = 'CDP_TARGET_CLOSED') {
+    if (terminalError) return;
+    terminalError = { reason, code };
+    for (const [requestId, waiter] of pending) {
+      pending.delete(requestId);
+      cancel(waiter.timer);
+      const error = new Error(`DevTools command failed: ${waiter.method} "${waiter.label}"; ${reason}.`);
+      error.code = code;
+      error.navigated = false;
+      waiter.reject(error);
+    }
+  }
   /** Resolve or reject the request matching one CDP response without logging its payload. */
   function onMessage(event) {
     let message;
     try { message = JSON.parse(String(event.data)); } catch { return; }
+    if (message.method === 'Inspector.detached') {
+      failPending(`DevTools target detached${message.params?.reason ? `: ${message.params.reason}` : ''}`);
+      return;
+    }
     if (message.method === 'Page.frameNavigated' && !message.params?.frame?.parentId) {
       mainFrameId = message.params.frame.id;
       mainFrameNavigation += 1;
@@ -337,11 +374,24 @@ export function createSender(socket, pending, nextId, timeoutMs, loopDelay, rela
       const navigation = navigated ? `yes (${mainFrameNavigationEvent})` : 'no';
       const error = new Error(`DevTools command failed: ${waiter.method} "${waiter.label}"; CDP error ${cdpError.code}: ${cdpError.message}; page navigated since command was sent: ${navigation}.`);
       error.code = cdpError.code;
+      error.navigated = navigated;
       waiter.reject(error);
     } else waiter.resolve(message.result);
   }
   socket.addEventListener('message', onMessage);
+  socket.addEventListener('close', (event) => {
+    const detail = Number.isInteger(event?.code) ? `DevTools socket closed (code ${event.code})` : 'DevTools socket closed';
+    failPending(detail);
+  });
+  socket.addEventListener('error', () => failPending('DevTools socket failed'));
   return (method, params = {}, label = method, remainingMs = timeoutMs) => new Promise((resolveResult, rejectResult) => {
+    if (terminalError) {
+      const error = new Error(`DevTools command failed: ${method} "${label}"; ${terminalError.reason}.`);
+      error.code = terminalError.code;
+      error.navigated = false;
+      rejectResult(error);
+      return;
+    }
     const requestId = nextId();
     const startedAt = now();
     const durationMs = Math.max(1, Math.min(timeoutMs, remainingMs));
@@ -381,7 +431,7 @@ export function createSender(socket, pending, nextId, timeoutMs, loopDelay, rela
 }
 
 /** Evaluate a page expression by value and retain bounded diagnostics for page exceptions. */
-function createEvaluator(send) {
+export function createEvaluator(send) {
   return async (expression, label = 'evaluate page expression', remainingMs) => {
     const result = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, label, remainingMs);
     if (result.exceptionDetails) {

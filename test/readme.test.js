@@ -198,13 +198,36 @@ test('the lifecycle figure is drawn from the declaration, and refuses a state or
   assert.match(texts(drawLifecycle(bench)).map((text) => text.words).join(' '), /\bbench\b/, 'a new move between drawn states is named without touching draw.mjs');
 });
 
+test('the lifecycle figure keeps the guards into a state that is not final [I10, M1]', () => {
+  const fixture = {
+    ...MACHINE,
+    states: MACHINE.states.map((state) => state.id === 'verified' ? { ...state, final: false } : state),
+    moves: [...MACHINE.moves, { verb: 'reopen', from: ['verified'], to: 'open', by: ['coordinator'], guards: [] }],
+  };
+  const svg = drawLifecycle(fixture);
+  const shown = texts(svg).map((text) => text.words).join(' \n ');
+  assert.ok(shown.includes('every way into verified'), 'the non-final guarded state has its entry note');
+  for (const guard of MACHINE.exitGuards.verified) {
+    assert.ok(shown.includes(MACHINE.guards.find((each) => each.id === guard).refuse), `the non-final verified note includes refusal ${guard}`);
+  }
+  assert.match(shown, /\breopen\b/, 'the verified-to-open move remains visible');
+  assert.ok(shown.includes('starts open; ends withdrawn'), 'the caption names only the declared final state');
+  assert.equal(svg.includes('data-final="verified"'), false, 'verified is not marked final in the fixture');
+});
+
 test('README pins its approved Philosophy, Key concepts and Why structure [I10,I12]', () => {
   const philosophy = README.indexOf('## Philosophy');
   const concepts = README.indexOf('### Key concepts', philosophy);
   const whyStart = README.indexOf('### Why', concepts);
   const nextTopLevel = README.indexOf('\n## ', philosophy + 1);
   assert.ok(philosophy >= 0 && philosophy < concepts && concepts < whyStart && whyStart < nextTopLevel, 'Philosophy contains Key concepts and Why before the next top-level section');
+  const approvedOpening = "**Accumulated judgement for agents.** Agents are good at tasks and bad at projects: every new session starts without what you decided, so you become the glue. The agents scale; your judgement doesn't. Pullboard is a structural approach to orchestrating agents coherently over long-term builds, so you can trust your agentic workforce to fill in the blanks the way you would, without re-prompting them.";
+  const openingWithFigure = `${approvedOpening}\n\n![How it holds. Your decision becomes a bar each piece of work is frozen against; a second agent checks the exact commit; the board keeps what passed, what failed and why; the next agent starts from there.](docs/img/holds.svg)\n\n**Vibe code a real product.**`;
+  assert.ok(README.includes(openingWithFigure), 'the approved opening and holds figure sit directly before the unchanged lead');
+  assert.equal(README.split(approvedOpening).length - 1, 1, 'the approved opening appears exactly once');
+  assert.doesNotMatch(`${approvedOpening} ${FIGURES.holds()}`, /\b(?:memory|remember)\b/iu, 'the opening and its figure avoid those terms');
   const section = README.slice(philosophy, nextTopLevel);
+  assert.ok(section.includes("On Pullboard itself, a second agent's check catches one in three tasks that already passed their own tests."), 'Why pins the approved proof line');
   for (const text of [
     'You do not explain twice. You rule the agents. Hierarchy is enforced. Judgement is yours. Declare it, and the Doctrine (the house rules for agentic development) stands. **You speak the constraints, agents fill in the blanks.** The Spec is canon. Then code. Then proof.',
     'Five primitives. Everything else is built on them.',

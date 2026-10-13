@@ -551,7 +551,7 @@ function timeline(item) {
     const final = FLOW.states.some((f) => f.id === state && f.final);
     const next = steps.slice(index + 1).find((n) => n.move);
     const named = s.kind === 'reject' ? 'sent back' : state;
-    const stay = !enters || final ? ''
+    const stay = !enters || (final && !next) ? ''
       : !s.at ? esc(named + (next ? ' after the ' : ' so far since the ') + s.kind + ', length not logged')
       : !next ? esc(named) + ' for ' + age(s.at) + ' so far'
       : !next.at ? esc(named + ' until the ' + next.kind + ', length not logged')
@@ -588,7 +588,8 @@ function timeline(item) {
  * tie, its states joined by straight arrows. A pair of states a move leads back along takes a dashed
  * square route above the row, the further back the higher. The moves that keep a state are written
  * in its box after a ↻. A state off the row sits below the last state on the row that leads to it,
- * and the routes into it join into one, labelled once. Final states have a double border. Boxes
+ * and routes into it from the row join into one, labelled once. Moves out of those states take
+ * separate routes below the boxes, with their words above each route. Final states have a double border. Boxes
  * count the items there now; labels count the moves made along each route, or name its moves when
  * none was. Words are wrapped and placed by a generous estimate of their width, so none overlaps.
  */
@@ -677,7 +678,8 @@ function flowSvg(p) {
     const from = row.filter((r) => leads(r).includes(s.id));
     pos.set(s.id, { x: from.length ? pos.get(from[from.length - 1]).x : W / 2, y: bottom + 80 + BH / 2 });
   }
-  const H = (below.length ? bottom + 80 + BH : bottom) + 14;
+  const outgoing = pairs.filter((pair) => pair.from !== pair.to && below.some((state) => state.id === pair.from));
+  const H = (below.length ? bottom + 80 + BH : bottom) + 14 + (outgoing.length ? 44 + 40 * (outgoing.length - 1) : 0);
 
   const group = (pairList, route, label) => pairList.map((pair, n) => '<g><title>' + esc(says(pair)) + '</title><path class="edge' + (route.back ? ' back' : '') + '" d="' + route.d + '" marker-end="url(#pb-head' + (route.back ? '-back' : '') + ')"/>' + (n === 0 ? label : '') + '</g>').join('');
   const tone = (said, extra = '') => 'tag' + (said.idle ? ' idle' : '') + extra;
@@ -694,7 +696,7 @@ function flowSvg(p) {
   }
   // Down from the row, joining into one route per state below, labelled once on the way in.
   for (const s of below) {
-    const t = pos.get(s.id), into = pairs.filter((pair) => pair.to === s.id && pos.has(pair.from) && pair.from !== s.id);
+    const t = pos.get(s.id), into = pairs.filter((pair) => pair.to === s.id && col(pair.from) >= 0);
     const said = told(into), tTop = t.y - BH / 2;
     const xs = into.map((pair) => pos.get(pair.from).x).sort((a, b) => a - b);
     const left = xs.filter((x) => x < t.x - 0.5), right = xs.filter((x) => x > t.x + 0.5);
@@ -711,6 +713,16 @@ function flowSvg(p) {
       routes.push(group([pair], { d }, n === 0 ? label : ''));
     });
   }
+  // A below-row state can move back into the row or on to another below-row state.
+  outgoing.forEach((pair, index) => {
+    const from = pos.get(pair.from), to = pos.get(pair.to);
+    const lane = bottom + 80 + BH + 26 + index * 40;
+    const side = to.x < from.x ? to.x + BW / 2 + 1 : to.x - BW / 2 - 1;
+    const said = told([pair]);
+    const room = Math.max(40, Math.abs(side - from.x) - 24);
+    const label = lines((from.x + side) / 2, lane - 8, wrap(said.words, room, 12), tone(said));
+    routes.push(group([pair], { d: path([[from.x, from.y + BH / 2], [from.x, lane], [side, lane], [side, to.y]]) }, label));
+  });
 
   const boxes = FLOW.states.map((s) => {
     const { x, y } = pos.get(s.id), box = inside.get(s.id), left = x - BW / 2, boxTop = y - BH / 2;
@@ -1782,12 +1794,13 @@ function render() {
   for (const kind of ['spec', 'doctrine']) {
     const rows = kind === 'spec' ? p.spec : p.practice;
     const filter = view.rows[kind];
-    const labels = { decide: 'Needs your decision', all: 'All rows', approved: 'Approved' };
-    /** A source row stays in Needs your decision until its person decision is recorded. */
-    const undecided = (r) => ['pending', 'draft'].includes(r.status) && !r.decision;
-    const n = { decide: rows.filter(undecided).length, all: rows.length, approved: rows.filter((r) => r.status === 'approved').length };
+    const defaults = kind === 'doctrine' ? rows.filter((r) => r.origin === 'standard') : [];
+    const labels = { decide: 'Needs your decision', ...(defaults.length ? { defaults: 'Defaults to review' } : {}), all: 'All rows', approved: 'Approved' };
+    /** Inherited defaults are reviewed in the repo's doctrine; only local proposals ask for a decision. */
+    const undecided = (r) => ['pending', 'draft'].includes(r.status) && !r.decision && !(kind === 'doctrine' && r.origin === 'standard');
+    const n = { decide: rows.filter(undecided).length, defaults: defaults.length, all: rows.length, approved: rows.filter((r) => r.status === 'approved').length };
     $(kind + '-chips').innerHTML = Object.keys(labels).map((f) => '<button data-rows="' + kind + ':' + f + '" class="' + (filter === f ? 'on' : '') + '" type="button">' + labels[f] + '<b>' + n[f] + '</b></button>').join('');
-    const shownRows = rows.filter((r) => filter === 'all' || (filter === 'decide' ? undecided(r) : r.status === 'approved'));
+    const shownRows = rows.filter((r) => filter === 'all' || (filter === 'decide' ? undecided(r) : filter === 'defaults' ? r.origin === 'standard' : r.status === 'approved'));
     // With no row picked, or the pick filtered out, the detail opens on the first row shown, as Items does.
     if (!(view.tab === kind && view.addressDetail !== null) && !shownRows.some((r) => r.id === view.row[kind])) view.row[kind] = shownRows[0]?.id ?? null;
     const feedback = view.specFeedback?.kind === kind && view.specFeedback.root === view.root && view.specFeedback.from === 'list' ? view.specFeedback : null;
@@ -1817,7 +1830,7 @@ function render() {
     const text = row ? declined ? '<s>' + linked(row.standardText || row.text, titles) + '</s>' : linked(row.text, titles) : '';
     const source = kind === 'doctrine' && row ? '<span class="chip" title="' + esc(ruleSourceTitle(row)) + '">' + esc(ruleSource(row)) + '</span>' : '';
     const reason = declined && row.reason ? '<dt>reason</dt><dd>' + linked(row.reason, titles) + '</dd>' : '';
-    const home = kind === 'doctrine' && row && row.origin === 'standard' ? 'Standard rules come with Pullboard; override or decline one in DOCTRINE.md.' : 'Rows change in ' + (kind === 'spec' ? 'SPEC.md' : 'DOCTRINE.md') + ', and only you approve them.';
+    const home = kind === 'doctrine' && row && row.origin === 'standard' ? 'Standard rules come with Pullboard as defaults to review; override or decline one in DOCTRINE.md.' : 'Rows change in ' + (kind === 'spec' ? 'SPEC.md' : 'DOCTRINE.md') + ', and only you approve them.';
     const rowStatus = row?.stage || row?.status;
     const rowDecisionActions = !snapshot && (!readOnly || requests) && row && undecided(row) && (kind === 'spec' || row.origin !== 'standard')
       ? '<div class="spec-decision-actions detail-decision-actions"><button class="approve-row" data-row-decision="approve" data-row-kind="' + kind + '" data-row-id="' + esc(row.id) + '" title="Approve (A, from the list)" type="button">Approve <kbd>A</kbd></button><button class="decline-row" data-row-decision="decline" data-row-kind="' + kind + '" data-row-id="' + esc(row.id) + '" title="Decline (D, from the list)" type="button">Decline <kbd>D</kbd></button></div>'
@@ -2320,7 +2333,8 @@ async function decideRow(kind, command, args, anchor) {
   const feedback = { kind, root, id: ids[0], next, from: anchor?.closest('#' + kind + '-detail') ? 'detail' : 'list', tone: '', text: 'Recording decision…' };
   view.specFeedback = feedback;
   render();
-  window.scrollTo({ top: scroll, behavior: 'instant' });
+  // A waiting request keeps its row; let browser anchoring follow growth above it.
+  if (!requests) window.scrollTo({ top: scroll, behavior: 'instant' });
   try {
     const move = pageMove(command, kind === 'doctrine' ? { ...args, ids: ids.map((id) => 'doctrine:' + id).join(' ') } : args);
     const result = requests ? await sendPersonRequest(root, move.body) : await api(boardPath(root) + '/moves', move.body);
@@ -2339,7 +2353,7 @@ async function decideRow(kind, command, args, anchor) {
   }
   if (root === view.root && view.specFeedback === feedback) {
     render();
-    window.scrollTo({ top: scroll, behavior: 'instant' });
+    if (!requests) window.scrollTo({ top: scroll, behavior: 'instant' });
     // A phone row click jumps to its detail. A later list-key decision returns the next pick to view,
     // instead of restoring that detail's scroll position with the focused list still offscreen.
     if (feedback.from === 'list' && feedback.tone === 'ok' && next && view.row[kind] === next) {
@@ -2691,9 +2705,16 @@ $('add-form').addEventListener('submit', async (event) => {
 $('shout-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   const text = $('shout-text').value;
+  const root = view.root;
   const ask = view.answering;
+  const answerRoot = ask?.root ?? null;
+  const answerId = ask?.id ?? null;
   if (ask && ask.root !== view.root) return answer(null);
   if (!(await (ask ? act('answer', { id: ask.id, text }, event.currentTarget) : ($('shout-to').value === 'coordinator' ? act('request', { text }, event.currentTarget) : act('shout', { to: $('shout-to').value, text }, event.currentTarget))))) return;
+  const currentAnswer = view.answering;
+  // An older completion must not erase a newer draft or answer selection.
+  if (view.root !== root || $('shout-text').value !== text || (currentAnswer?.root ?? null) !== answerRoot
+      || (currentAnswer?.id ?? null) !== answerId) return;
   $('shout-text').value = '';
   answer(null);
 });

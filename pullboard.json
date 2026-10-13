@@ -13,6 +13,7 @@
         "test/",
         "package.json",
         ".github/workflows/gate.yml",
+        ".github/workflows/release.yml",
         "relay/",
         "docs/api.md",
         "docs/api.test.js",

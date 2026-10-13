@@ -92,6 +92,10 @@ Inherits Pullboard standard doctrine version 1.
  */
 export function agentsBlock(doctrine = standardDoctrine()) {
   return `${AGENTS_START}
+## A new board
+
+On a board that is not set up, run \`pullboard resume\` first. Walk the person through its setup steps before anything else.
+
 ## Working here: pullboard
 
 This repo runs on pullboard: a work board, lanes and a spec that live in git. Nothing ships until a second agent verifies it.

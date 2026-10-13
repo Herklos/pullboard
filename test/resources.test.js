@@ -320,7 +320,7 @@ test('[Q1,Q2] a waiting landing keeps a current holder from taking the second sl
 
   await release(secondHolder);
   assert.equal((await event(landing)).acquired, 'landing');
-  await assert.rejects(event(secondSlot, 250), /worker timed out/u, 'the holder cannot take its second slot ahead of a waiting landing');
+  await assert.rejects(event(secondSlot, 250), /worker timed out/u, 'the holder cannot take its second slot ahead of a waiting landing'); // budget: declared negative observation window while an explicitly held landing blocks this waiter.
   await release(landing);
   assert.equal((await event(secondSlot)).acquired, 'same-run');
   await release(secondSlot);
@@ -509,7 +509,7 @@ test('[Q2,Q3] a stopped head waiter keeps its place ahead of the next process', 
   const second = worker(box, { agent: 'second' });
   assert.equal((await event(second)).waiting, 2);
   await release(holder);
-  await assert.rejects(event(second, 800), /worker timed out/u, 'the second waiter cannot jump the stopped head');
+  await assert.rejects(event(second, 800), /worker timed out/u, 'the second waiter cannot jump the stopped head'); // budget: declared negative observation window while the stopped queue head blocks this waiter.
   first.kill('SIGCONT');
   assert.equal((await event(first)).acquired, 'stopped-first');
   await release(first);
@@ -541,8 +541,8 @@ test('[Q3] a live stalled holder keeps its place beyond the lease timeout', asyn
   assert.equal((await event(holder)).acquired, 'stalled-holder');
   const waiter = worker(box, { agent: 'queued-behind-live-holder', env: { TZ: 'Pacific/Honolulu', PATH: '/usr/bin' } });
   assert.equal((await event(waiter)).waiting, 1);
-  await assert.rejects(event(waiter, 20_500), /worker timed out/u, 'a live OS process must not be evicted when its heartbeat pauses');
-  assert.equal((await event(holder, 5_000)).resumed, true);
+  await assert.rejects(event(waiter, 20_500), /worker timed out/u, 'a live OS process must not be evicted when its heartbeat pauses'); // budget: declared 22000ms holder stall; observe it still held at 20500ms.
+  assert.equal((await event(holder, 5_000)).resumed, true); // budget: hang ceiling for the stalled holder resume handshake; no throughput claim.
   await release(holder);
   assert.equal((await event(waiter)).acquired, 'queued-behind-live-holder');
   await release(waiter);
@@ -596,8 +596,8 @@ test('[Q3] an unreadable process identity keeps a live holder', { skip: !SANDBOX
   assert.equal((await acquired(holder)).acquired, 'sandbox-live-holder');
   const waiter = worker(box, { agent: 'sandbox-live-waiter', sandboxProcessInfo: true });
   assert.equal((await event(waiter)).waiting, 1);
-  await assert.rejects(event(waiter, 20_500), /worker timed out/u, 'denied process-info access is not proof that a live PID died');
-  assert.equal((await event(holder, 8_000)).resumed, true);
+  await assert.rejects(event(waiter, 20_500), /worker timed out/u, 'denied process-info access is not proof that a live PID died'); // budget: declared 22000ms holder stall with denied process-info access; observe at 20500ms.
+  assert.equal((await event(holder, 8_000)).resumed, true); // budget: hang ceiling for the stalled holder resume handshake; no throughput claim.
   await release(holder);
   assert.equal((await acquired(waiter)).acquired, 'sandbox-live-waiter');
   await release(waiter);
@@ -777,7 +777,7 @@ test('[Q4] a red gate releases its lease before the same process starts another 
   try {
     const result = await Promise.race([
       closed,
-      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('the red gate kept its lease and blocked the same process')), 5_000); }),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('the red gate kept its lease and blocked the same process')), 5_000); }), // budget: hang ceiling for the same process to reacquire its released gate slot.
     ]);
     assert.equal(result.code, 0, stderr);
     assert.deepEqual(JSON.parse(stdout.trim()), { firstGreen: false, secondGreen: true });

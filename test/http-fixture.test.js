@@ -61,7 +61,7 @@ async function startView(t, box) {
       fail(new Error(reportFixtureChildFailure({ command: process.execPath, args, status, signal,
         elapsedMs: performance.now() - startedAt, stderr, env: box.env, detail })));
     };
-    const timer = setTimeout(() => failStartup('view readiness deadline (30000ms) expired'), 30_000);
+    const timer = setTimeout(() => failStartup('view readiness deadline (30000ms) expired'), 30_000); // budget: hang ceiling for private view readiness; no throughput claim.
     child.stdout.setEncoding('utf8').on('data', (part) => {
       stdout += part;
       try {

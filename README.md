@@ -16,6 +16,10 @@
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/npm/l/pullboard?style=flat-square&color=6b4fc8"></a>
 </p>
 
+**Accumulated judgement for agents.** Agents are good at tasks and bad at projects: every new session starts without what you decided, so you become the glue. The agents scale; your judgement doesn't. Pullboard is a structural approach to orchestrating agents coherently over long-term builds, so you can trust your agentic workforce to fill in the blanks the way you would, without re-prompting them.
+
+![How it holds. Your decision becomes a bar each piece of work is frozen against; a second agent checks the exact commit; the board keeps what passed, what failed and why; the next agent starts from there.](docs/img/holds.svg)
+
 **Vibe code a real product.** Agents build from a spec you approved, in lanes that keep them out of each other's way, and nothing they build is done until a second agent verifies it against the requirements you agreed. Pullboard is a coordination queue for serious software. It's how we develop our quantitative systems.
 
 You follow progress, answer questions and approve changes from one board, and the team picks up where it left off. Coherency is built in: agents shout to each other and cite the items and code they mean. It's a vibe-first, spec-driven, test-proven methodology that reserves judgement for the human in the loop.
@@ -42,6 +46,8 @@ Past the demo, the same things break.
 - **It forgot what you decided.** Decisions live in your spec, not in a chat that ended.
 - **Two agents, one file.** Each agent gets its own worktree and lane.
 - **A fix broke something.** Nothing is submitted until your tests pass.
+
+On Pullboard itself, a second agent's check catches one in three tasks that already passed their own tests.
 
 ## How it works
 

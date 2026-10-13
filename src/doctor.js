@@ -3,11 +3,10 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { DOCTRINE_FILE, LEGACY_DOCTRINE_FILE } from './config.js';
 import { tryGit } from './git.js';
-import { DatabaseSync } from 'node:sqlite';
 import { checkAtCommit, submissionPaths, dependencySnapshots } from './trusted-policy.js';
 import { BLANKS, STATES, storeTriggers } from './machine.js';
 
-import { EVENT_LOG_VERSION, readEventLogVersion, SCHEMA_VERSION } from './board.js';
+import { boardBusyError, EVENT_LOG_VERSION, openBoardReadOnly, readEventLogVersion, SCHEMA_VERSION } from './board.js';
 import { staleFrozenItems, staleItemFinding } from './approved-rows.js';
 import { loadSpec } from './spec.js';
 import { loadDoctrine } from './doctrine.js';
@@ -35,8 +34,10 @@ export function doctrineProblems(root, config) {
  */
 export function doctorProblems(file, root, tryGit, config, { isMain = true } = {}) {
   if (!existsSync(file)) return [finding('BOARD_MISSING', 'board file is missing', 'run pullboard status to create a new board')];
-  const db = new DatabaseSync(file, { readOnly: true });
+  const startedAt = Date.now();
+  let db;
   try {
+    db = openBoardReadOnly(file);
     const schemaProblems = versionProblems(db, isMain);
     if (schemaProblems.length) return schemaProblems;
     const eventProblems = [];
@@ -65,8 +66,10 @@ export function doctorProblems(file, root, tryGit, config, { isMain = true } = {
       ...(layout.itemAudit ? submissionProblems(db, root) : []),
       ...(layout.itemAudit && config ? staleFrozenItems(db.prepare('SELECT * FROM item ORDER BY item_id').all(), loadSpec(root, config).rows, loadDoctrine(root, config).rows).map(staleItemFinding) : []),
     ];
+  } catch (error) {
+    throw boardBusyError(file, startedAt, error);
   } finally {
-    db.close();
+    db?.close();
   }
 }
 

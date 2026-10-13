@@ -24,7 +24,7 @@ test('timing profile reads direct and native TAP without inventing file rows [C7
     assert.equal(direct.isGreen, true, direct.output);
     assert.match(direct.output, /slow direct sample/);
     if (/^TAP version \d+/mu.test(direct.output)) {
-      assert.ok(direct.profile.tests.some(entry => entry.name.includes('slow direct sample') && entry.durationMs >= 100));
+      assert.ok(direct.profile.tests.some(entry => entry.name.includes('slow direct sample') && entry.durationMs >= 100)); // budget: declared 130ms slow sample must appear in the measured duration.
       assert.equal(direct.profile.format, 'tap');
       assert.equal(direct.profile.unavailable, null);
     } else {
@@ -32,8 +32,8 @@ test('timing profile reads direct and native TAP without inventing file rows [C7
       assert.equal(direct.profile.unavailable, 'per-test timing unavailable: output was not TAP or JUnit');
     }
     assert.deepEqual(direct.profile.files, [], 'test timing without a file timing must not become a file row');
-    assert.equal(direct.profile.waitMs, 17);
-    assert.ok(direct.profile.wallMs >= 100);
+    assert.equal(direct.profile.waitMs, 17); // budget: declared synthetic waitMs=17 input is retained exactly.
+    assert.ok(direct.profile.wallMs >= 100); // budget: declared 130ms slow sample contributes to measured wall time.
   });
 
   await t.test('native default output preserves caller argv and execArgv [C7,V10]', () => {
@@ -55,7 +55,7 @@ test('timing profile reads direct and native TAP without inventing file rows [C7
     assert.deepEqual(native.profile.files, [], 'default TAP does not provide a trustworthy file-duration row');
     if (/^TAP version \d+/mu.test(native.output)) assert.ok(native.profile.tests.some(entry => entry.name.includes('native default sample')));
     else assert.equal(native.profile.unavailable, 'per-test timing unavailable: output was not TAP or JUnit');
-    assert.equal(native.profile.waitMs, 17);
+    assert.equal(native.profile.waitMs, 17); // budget: declared synthetic waitMs=17 input is retained exactly.
   });
 
   await t.test('explicit TAP reporter remains caller-selected and retains its timing [C7,V10]', () => {
@@ -64,7 +64,7 @@ test('timing profile reads direct and native TAP without inventing file rows [C7
     assert.equal(explicit.isGreen, true, explicit.output);
     assert.match(explicit.output, /TAP version 13/);
     assert.match(explicit.output, /slow direct sample/);
-    assert.ok(explicit.profile.tests.some(entry => entry.name.includes('slow direct sample') && entry.durationMs >= 100));
+    assert.ok(explicit.profile.tests.some(entry => entry.name.includes('slow direct sample') && entry.durationMs >= 100)); // budget: declared 130ms slow sample must appear in the measured duration.
     assert.deepEqual(explicit.profile.files, []);
   });
 });
@@ -75,7 +75,7 @@ test('timing profile reads caller-selected native JUnit stdout [C7,V10]', () => 
   const run = runProfiledShell(repo, 'node --test --test-reporter=junit junit.test.mjs', {artifactDirectory:join(repo,'artifacts'),persistLog:true,waitMs:17});
   assert.equal(run.isGreen,true,run.output);
   assert.equal(run.profile.format,'junit');
-  assert.ok(run.profile.tests.some(value=>value.name==='native JUnit slow sample' && value.durationMs>=100));
+  assert.ok(run.profile.tests.some(value=>value.name==='native JUnit slow sample' && value.durationMs>=100)); // budget: declared 130ms slow sample must appear in the measured duration.
   assert.deepEqual(run.profile.files,[],'native JUnit supplies no explicit file duration');
 });
 
@@ -87,11 +87,11 @@ test('timing profile uses only actual JUnit file and test metadata [C7,V10]', ()
   const failed = runProfiledShell(repo, command, { artifactDirectory: join(repo, 'artifacts'), persistLog: true, waitMs: 17 });
   assert.equal(failed.isGreen, false);
   assert.match(failed.output, /testsuite/);
-  assert.ok(failed.profile.wallMs >= 100);
+  assert.ok(failed.profile.wallMs >= 100); // budget: declared 130ms JUnit fixture sleep contributes to wall time.
   assert.equal(failed.profile.format, 'junit');
-  assert.ok(failed.profile.files.some(file => file.path === 'timed/suite.test.js' && file.durationMs >= 100));
-  assert.ok(failed.profile.tests.some(entry => entry.file === 'timed/suite.test.js' && entry.name === 'slow & measured' && entry.durationMs >= 100 && !entry.passed));
-  assert.equal(failed.profile.waitMs, 17);
+  assert.ok(failed.profile.files.some(file => file.path === 'timed/suite.test.js' && file.durationMs >= 100)); // budget: declared 130ms JUnit fixture sleep is emitted as file duration.
+  assert.ok(failed.profile.tests.some(entry => entry.file === 'timed/suite.test.js' && entry.name === 'slow & measured' && entry.durationMs >= 100 && !entry.passed)); // budget: declared 130ms JUnit fixture sleep is emitted as test duration.
+  assert.equal(failed.profile.waitMs, 17); // budget: declared synthetic waitMs=17 input is retained exactly.
   assert.match(gateReport({ ...failed, log: failed.logPath }), /slowest test files:[\s\S]*timed\/suite\.test\.js/);
 });
 
@@ -113,7 +113,7 @@ test('timing profile leaves unsupported runner commands and destinations untouch
   assert.equal(result.profile.format, 'none');
   assert.match(result.profile.runner, /node/);
   assert.equal(result.profile.unavailable, 'per-test timing unavailable: output was not TAP or JUnit');
-  assert.equal(result.profile.waitMs, 17);
+  assert.equal(result.profile.waitMs, 17); // budget: declared synthetic waitMs=17 input is retained exactly.
   assert.ok(result.profile.wallMs >= 0);
   assert.match(gateReport({ ...result, log: result.logPath }), /per-test timing unavailable: output was not TAP or JUnit/);
   assert.match(gateReport({ ...result, log: result.logPath }), /node/);

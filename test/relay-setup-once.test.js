@@ -331,7 +331,7 @@ test('a set-up-once run stretched past 30 seconds still gets its approval card [
   const stretchStarted = Date.now();
   await new Promise(resolve => setTimeout(resolve, 40_100));
   const elapsed = Date.now() - stretchStarted;
-  assert.ok(elapsed >= 40_000, 'the fixture waits at least 40 real seconds; it does not advance a frozen relay clock');
+  assert.ok(elapsed >= 40_000, 'the fixture waits at least 40 real seconds; it does not advance a frozen relay clock'); // budget: declared 40100ms fixture sleep must span at least 40 real seconds.
 
   const delayed = await project(box, 'delayed-approval-project');
   const proposal = JSON.parse(readFileSync(machineFile, 'utf8')).approvals.find(entry => entry.root === delayed);

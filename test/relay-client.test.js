@@ -5,6 +5,7 @@ import { createServer } from 'node:http';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { delimiter, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import { performance } from 'node:perf_hooks';
 import { after, test } from 'node:test';
 import { gunzipSync } from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
@@ -67,6 +68,119 @@ function localEvents(file) {
   const db = new DatabaseSync(file, { readOnly: true });
   try { return JSON.parse(JSON.stringify(db.prepare('SELECT * FROM event ORDER BY event_id').all())); }
   finally { db.close(); }
+}
+
+/** Keep sanitized timings for the three-clone fixture without extending its test timeout. */
+function threeReplicaPhaseCapture(t) {
+  const testStartedAt = performance.now();
+  const completed = [];
+  let active = null;
+  let timeoutSignal = null;
+
+  /** Record one completed phase while excluding fixture contents and credentials. */
+  function finishPhase() {
+    if (!active) return;
+    completed.push({
+      phase: active.phase,
+      startedAtMs: Math.round(active.startedAt - testStartedAt),
+      elapsedMs: Math.round(performance.now() - active.startedAt),
+      lastCompletedWait: active.lastCompletedWait,
+      waitingDescription: active.waitingDescription ?? null,
+      completedWaits: active.completedWaits,
+      activeWaits: active.activeWaits.map(({ operation, startedAt }) => ({ operation, elapsedMs: Math.round(performance.now() - startedAt) })),
+    });
+    active = null;
+  }
+
+  /** Return only timing labels and safe error identifiers for failure diagnostics. */
+  function snapshot(outcome, error = null) {
+    const now = performance.now();
+    const running = active && {
+      phase: active.phase,
+      startedAtMs: Math.round(active.startedAt - testStartedAt),
+      elapsedMs: Math.round(now - active.startedAt),
+      waitingOn: active.activeWaits.at(-1)?.operation ?? active.waitingDescription ?? null,
+      waitingElapsedMs: active.activeWaits.length ? Math.round(now - active.activeWaits.at(-1).startedAt) : null,
+      activeWaits: active.activeWaits.map(({ operation, startedAt }) => ({ operation, elapsedMs: Math.round(now - startedAt) })),
+      completedWaits: active.completedWaits,
+      lastCompletedWait: active.lastCompletedWait,
+    };
+    return {
+      outcome,
+      timeoutSignalled: timeoutSignal !== null,
+      timeoutSignalName: timeoutSignal?.name ?? null,
+      timeoutSignalCode: timeoutSignal?.code ?? null,
+      totalElapsedMs: Math.round(now - testStartedAt),
+      activePhase: running?.phase ?? null,
+      activeWait: running,
+      lastCompletedPhase: completed.at(-1)?.phase ?? null,
+      completedPhases: completed,
+      errorName: error?.name ?? null,
+      errorCode: error?.code ?? null,
+    };
+  }
+
+  /** Emit one bounded timing record before teardown, without replacing the original failure. */
+  function report(outcome, error = null) {
+    try { process.stderr.write('[three-replica-phase] ' + JSON.stringify(snapshot(outcome, error)) + '\n'); }
+    catch { /* Diagnostics must never replace the test result or timeout error. */ }
+  }
+
+  const onAbort = () => {
+    timeoutSignal = t.signal.reason ?? new Error('test timeout signal');
+    report('timeout-signal', timeoutSignal);
+  };
+  t.signal?.addEventListener('abort', onAbort, { once: true });
+  t.after(() => {
+    t.signal?.removeEventListener('abort', onAbort);
+    report('test-after-hook');
+  });
+
+  return {
+    /** Start a phase with a safe description of the operation it is waiting on. */
+    begin(phase, waitingOn) {
+      finishPhase();
+      active = { phase, startedAt: performance.now(), activeWaits: [], completedWaits: [], lastCompletedWait: null };
+      if (waitingOn) active.waitingDescription = waitingOn;
+    },
+    /** Time one unchanged operation and name the wait before yielding. */
+    async wait(label, operation) {
+      assert.ok(active, 'a named phase is active before every asynchronous wait');
+      const phase = active;
+      const frame = { operation: label, startedAt: performance.now() };
+      phase.activeWaits.push(frame);
+      let outcome = 'resolved';
+      try {
+        return await operation();
+      } catch (error) {
+        outcome = error?.name ?? 'rejected';
+        throw error;
+      } finally {
+        const waitReceipt = { operation: label, elapsedMs: Math.round(performance.now() - frame.startedAt), outcome };
+        phase.completedWaits.push(waitReceipt);
+        phase.lastCompletedWait = waitReceipt;
+        const index = phase.activeWaits.indexOf(frame);
+        if (index !== -1) phase.activeWaits.splice(index, 1);
+      }
+    },
+    /** Run the existing body and report the same thrown object after recording safe diagnostics. */
+    async run(body) {
+      try {
+        return await body();
+      } catch (error) {
+        report('test-error', error);
+        throw error;
+      }
+    },
+    /** Finish the final phase and require this scenario's named phases to have completed. */
+    finish(expected) {
+      finishPhase();
+      assert.deepEqual(completed.map(({ phase }) => phase), expected, 'all named relay phases completed in order');
+      assert.ok(completed.every((phase) => Number.isFinite(phase.startedAtMs) && Number.isFinite(phase.elapsedMs)),
+        'every phase has finite start and elapsed timings');
+      return completed;
+    },
+  };
 }
 
 /** Run the real auth and opaque board handlers together on a private loopback port. */
@@ -372,7 +486,9 @@ test('[H1,H3,H7,H15,H16] relay on snapshots and orders ciphertext, refuses offli
     'person deletion removes the relay journal and SQLite sidecars');
 });
 
-test('[H3,H16,V1,V17] three cloned linked replicas order competing claims and recover lost replies once', { timeout: 240_000 }, async (t) => {
+/** Create the same three real linked replicas for each independently budgeted scenario. */
+async function threeReplicaFixture(t, timing) {
+  timing.begin('cloning three replicas', 'create the isolated seed repo, three clones, and their linked worktrees');
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-relay-clone-race-')));
   const seed = join(scratch, 'seed');
   const clones = [join(scratch, 'clone-a'), join(scratch, 'clone-b'), join(scratch, 'clone-c')];
@@ -454,17 +570,17 @@ test('[H3,H16,V1,V17] three cloned linked replicas order competing claims and re
     try { importBoard(replica, snapshot); } finally { store.closeBoard(replica); }
   }
 
-  const provider = await githubFixture(t);
+  const provider = await timing.wait('start the private GitHub fixture', () => githubFixture(t));
   const auth = createRelayAuth({ database: join(scratch, 'auth.sqlite'), github: createGitHubClient(provider.config) });
   t.after(() => auth.close());
-  const relay = await relayServer(t, relayDirectory, auth);
+  const relay = await timing.wait('start the three-replica relay server', () => relayServer(t, relayDirectory, auth));
   const flow = auth.beginWeb();
-  const authorization = await fetch(flow.authorizationURL, { redirect: 'manual' });
+  const authorization = await timing.wait('complete the private OAuth authorization request', () => fetch(flow.authorizationURL, { redirect: 'manual' }));
   const callback = new URL(authorization.headers.get('location'));
-  const person = await auth.finishWeb(callback.searchParams.get('state'), callback.searchParams.get('code'), flow.binding);
-  await auth.linkBoard(person.token, boardId, 'fixture/repository');
+  const person = await timing.wait('exchange the fixture OAuth callback', () => auth.finishWeb(callback.searchParams.get('state'), callback.searchParams.get('code'), flow.binding));
+  await timing.wait('link the cloned board to the fixture person', () => auth.linkBoard(person.token, boardId, 'fixture/repository'));
 
-  const key = await generateBoardKey();
+  const key = await timing.wait('generate the shared test board key', () => generateBoardKey());
   const cloneCredentials = [];
   const savedPath = process.env.PATH;
   const savedHome = process.env.PULLBOARD_HOME;
@@ -476,7 +592,7 @@ test('[H3,H16,V1,V17] three cloned linked replicas order competing claims and re
       const keyFile = join(envs[index].PULLBOARD_HOME, 'relay-keys', `${boardId}.key`);
       assert.equal(statSync(keyFile).mode & 0o777, 0o600);
       const machine = 'machine-clone-' + (index + 1);
-      const machineCredential = await auth.issueMachine(person.token, { board: boardId, machine });
+      const machineCredential = await timing.wait(`issue the machine credential for clone ${index + 1}`, () => auth.issueMachine(person.token, { board: boardId, machine }));
       cloneCredentials.push(machineCredential);
       assert.match(machineCredential.token, /^pm_[A-Za-z0-9_-]{43}$/u);
       const state = {
@@ -496,21 +612,38 @@ test('[H3,H16,V1,V17] three cloned linked replicas order competing claims and re
   assert.equal(new Set(cloneCredentials.map(value => value.token)).size, clones.length,
     'each clone receives a distinct real board-scoped machine credential');
 
-  const sealed = Buffer.from(await seal(key, new TextEncoder().encode(JSON.stringify(snapshot)), {
+  const sealed = Buffer.from(await timing.wait('seal the initial board snapshot', () => seal(key, new TextEncoder().encode(JSON.stringify(snapshot)), {
     boardId, kind: 'snapshot', sequence: 0,
-  })).toString('base64url');
-  const uploaded = await fetch(`${relay.origin}/api/v1/boards/${boardId}/state`, {
+  }))).toString('base64url');
+  const uploaded = await timing.wait('upload the initial board snapshot', () => fetch(`${relay.origin}/api/v1/boards/${boardId}/state`, {
     method: 'PUT', headers: { 'x-pullboard-engine': String(ENGINE_VERSION), authorization: `Bearer ${cloneCredentials[0].token}`, 'content-type': 'application/json' },
     body: JSON.stringify({ sequence: 0, sealed }),
-  });
-  assert.equal(uploaded.status, 200, await uploaded.text());
+  }));
+  assert.equal(uploaded.status, 200, await timing.wait('read an unexpected initial snapshot-upload response', () => uploaded.text()));
 
+  const replicaFiles = clones.map((clone, index) => join(commonDir(clone, envs[index]), 'pullboard', 'board.sqlite'));
+  return { scratch, clones, worktrees, envs, gitAt, commonDir, auth, relay, person, key, boardId, replicaFiles };
+}
+
+/** Read replay receipts without changing either replica's event cursor. */
+function receipts(file) {
+  const db = new DatabaseSync(file, { readOnly: true });
+  try {
+    return db.prepare("SELECT meta_value FROM board_meta WHERE meta_key LIKE 'relay_receipt_%'")
+      .all().map(({ meta_value }) => JSON.parse(meta_value));
+  } finally { db.close(); }
+}
+
+/** Preserve the competing CLI claims, durable refusals, registration and local API ordering checks. */
+async function competingReplicaClaims(fixture, timing) {
+  const { clones, worktrees, envs, gitAt, auth, relay, person, key, boardId, replicaFiles } = fixture;
+  timing.begin('competing claims', 'send each paired claim through two clones, release the winner, and compare ordered receipts');
   const refusals = new Map();
   for (let id = 1; id <= 20; id += 1) {
-    const [left, right] = await Promise.all([
+    const [left, right] = await timing.wait(`run the two competing CLI claims for item #${id}`, () => Promise.all([
       cliResult(worktrees[0], envs[0], 'claim', String(id)),
       cliResult(worktrees[1], envs[1], 'claim', String(id)),
-    ]);
+    ]));
     const attempts = [left, right];
     assert.equal(attempts.filter((result) => result.status === 0).length, 1, `one clone claims #${id}`);
     const winner = attempts.findIndex((result) => result.status === 0);
@@ -520,23 +653,13 @@ test('[H3,H16,V1,V17] three cloned linked replicas order competing claims and re
     assert.equal(typeof loser.document.error.message, 'string');
     assert.equal(typeof loser.document.error.next, 'string');
     refusals.set(id, loser.document.error);
-    const released = await cliResult(worktrees[winner], envs[winner], 'release', String(id));
+    const released = await timing.wait(`release item #${id} from its winning clone`, () => cliResult(worktrees[winner], envs[winner], 'release', String(id)));
     assert.equal(released.status, 0, `the winner releases #${id} before the next round`);
   }
 
-  const synced = await Promise.all(clones.map((clone, index) => cliResult(worktrees[index], envs[index], 'status')));
+  const synced = await timing.wait('sync the three replicas after the competing claims', () => Promise.all(clones.map((clone, index) => cliResult(worktrees[index], envs[index], 'status'))));
   assert.ok(synced.every((result) => result.status === 0), 'both replicas finish by applying the same relay prefix');
 
-  /** Read replay receipts without changing either replica's event cursor. */
-  function receipts(file) {
-    const db = new DatabaseSync(file, { readOnly: true });
-    try {
-      return db.prepare("SELECT meta_value FROM board_meta WHERE meta_key LIKE 'relay_receipt_%'")
-        .all().map(({ meta_value }) => JSON.parse(meta_value));
-    } finally { db.close(); }
-  }
-
-  const replicaFiles = clones.map((clone, index) => join(commonDir(clone, envs[index]), 'pullboard', 'board.sqlite'));
   const eventRows = replicaFiles.map((file) => localEvents(file));
   const receiptRows = replicaFiles.map(receipts);
   for (let id = 1; id <= 20; id += 1) {
@@ -560,7 +683,7 @@ test('[H3,H16,V1,V17] three cloned linked replicas order competing claims and re
   relay.failMoves(true);
   const beforeWorktreeFailure = localEvents(replicaFiles[0]);
   const beforeWorktrees = gitAt(clones[0], envs[0], 'worktree', 'list', '--porcelain');
-  const failedWorktree = await cliResult(clones[0], envs[0], 'worktree', 'web', '--model', 'Fixture Model');
+  const failedWorktree = await timing.wait('register the new worktree while relay moves are refused', () => cliResult(clones[0], envs[0], 'worktree', 'web', '--model', 'Fixture Model'));
   assert.equal(failedWorktree.status, 1);
   assert.equal(failedWorktree.document.error.code, 'TEMPORARY');
   assert.equal(gitAt(clones[0], envs[0], 'worktree', 'list', '--porcelain'), beforeWorktrees,
@@ -570,12 +693,12 @@ test('[H3,H16,V1,V17] three cloned linked replicas order competing claims and re
   }).status, 1, 'the unregistered new branch is removed too');
   assert.deepEqual(localEvents(replicaFiles[0]), beforeWorktreeFailure, 'registration never runs locally before sequencing');
   relay.failMoves(false);
-  await cli(clones[0], envs[0], 'status');
+  await timing.wait('sync clone A after the refused worktree registration', () => cli(clones[0], envs[0], 'status'));
 
   const beforeInit = localEvents(replicaFiles[0]);
   const modelFreeInitEnv = { ...envs[0] };
   delete modelFreeInitEnv.PULLBOARD_MODEL;
-  const initializedClone = await cli(clones[0], modelFreeInitEnv, 'init');
+  const initializedClone = await timing.wait('initialize clone A without bypassing relay ordering', () => cli(clones[0], modelFreeInitEnv, 'init'));
   assert.equal(initializedClone.root, clones[0]);
   assert.deepEqual(localEvents(replicaFiles[0]), beforeInit, 'repeated init cannot bypass relay ordering to rewrite coordinator registration');
 
@@ -586,14 +709,14 @@ test('[H3,H16,V1,V17] three cloned linked replicas order competing claims and re
     next = appliedSequence(board) + 1;
     earlier = prepareEngineMove(board, 'addItem', [{ by: 'coordinator', lane: 'web', title: 'Earlier remote item' }]);
   } finally { store.closeBoard(board); }
-  const earlierSealed = Buffer.from(await seal(key, new TextEncoder().encode(JSON.stringify(earlier)), {
+  const earlierSealed = Buffer.from(await timing.wait('seal the earlier coordinator move', () => seal(key, new TextEncoder().encode(JSON.stringify(earlier)), {
     boardId, kind: 'move', sequence: next,
-  })).toString('base64url');
-  const coordinatorCredential = await auth.issueToken(person.token, { board: boardId, agent: 'coordinator' });
+  }))).toString('base64url');
+  const coordinatorCredential = await timing.wait('issue the coordinator fixture credential', () => auth.issueToken(person.token, { board: boardId, agent: 'coordinator' }));
   const headers = { 'x-pullboard-engine': String(ENGINE_VERSION), authorization: 'Bearer ' + coordinatorCredential.token, 'content-type': 'application/json' };
-  assert.equal((await fetch(`${relay.origin}/api/v1/boards/${boardId}/moves`, {
+  assert.equal((await timing.wait('append the earlier coordinator move', () => fetch(`${relay.origin}/api/v1/boards/${boardId}/moves`, {
     method: 'POST', headers, body: JSON.stringify({ sequence: next, sealed: earlierSealed }),
-  })).status, 200);
+  }))).status, 200);
 
   /** Run the actual local API command under this clone's isolated device credentials. */
   async function apiCommand(argv, io) {
@@ -601,21 +724,21 @@ test('[H3,H16,V1,V17] three cloned linked replicas order competing claims and re
     const previous = new Map(names.map((name) => [name, process.env[name]]));
     try {
       for (const name of names) process.env[name] = envs[0][name];
-      return await main(argv, io);
+      return await timing.wait('execute one local CLI operation for the cloned-board HTTP API', () => main(argv, io));
     } finally {
       for (const [name, value] of previous) {
         if (value === undefined) delete process.env[name]; else process.env[name] = value;
       }
     }
   }
-  const localApi = await serveApi({ runCommand: apiCommand, projects: () => [{ root: clones[0], name: 'Clone API' }] });
+  const localApi = await timing.wait('start the local API used to exercise relay ordering', () => serveApi({ runCommand: apiCommand, projects: () => [{ root: clones[0], name: 'Clone API' }] }));
   try {
     const address = new URL(localApi.url);
-    const response = await fetchFresh(`${address.origin}/api/v1/boards/${boardId}/moves`, {
+    const response = await timing.wait('send the first API move through clone A', () => fetchFresh(`${address.origin}/api/v1/boards/${boardId}/moves`, {
       method: 'POST', headers: { 'x-pullboard-key': address.searchParams.get('k'), 'content-type': 'application/json' },
       body: JSON.stringify({ verb: 'add', args: { lane: 'web', title: 'This API item' } }),
-    });
-    const result = await response.json();
+    }));
+    const result = await timing.wait('read the first API move response', () => response.json());
     assert.equal(response.status, 200, JSON.stringify(result));
     assert.equal(result.event.event_kind, 'add');
     assert.equal(result.event.item_id, result.result.item.item_id, 'the API returns its own event despite catching up an earlier add');
@@ -626,33 +749,38 @@ test('[H3,H16,V1,V17] three cloned linked replicas order competing claims and re
     const apiLostHeaders = { 'x-pullboard-key': address.searchParams.get('k'), 'content-type': 'application/json' };
     const beforeLostApi = relay.uploads.length;
     relay.dropNextReply({ offline: true });
-    const lostApi = await fetchFresh(`${address.origin}/api/v1/boards/${boardId}/moves`, {
+    const lostApi = await timing.wait('send the API move whose reply is dropped', () => fetchFresh(`${address.origin}/api/v1/boards/${boardId}/moves`, {
       method: 'POST', headers: apiLostHeaders, body: apiLostBody,
-    });
-    const lostApiResult = await lostApi.json();
+    }));
+    const lostApiResult = await timing.wait('read the dropped-reply API response', () => lostApi.json());
     assert.equal(lostApi.status, 409, JSON.stringify(lostApiResult));
     assert.equal(lostApiResult.error.code, 'RELAY_UNAVAILABLE');
     relay.failReads(false);
-    await cli(clones[0], envs[0], 'status');
-    const apiRetry = await fetchFresh(`${address.origin}/api/v1/boards/${boardId}/moves`, {
+    await timing.wait('sync clone A before retrying its lost API reply', () => cli(clones[0], envs[0], 'status'));
+    const apiRetry = await timing.wait('retry the API move after its dropped reply', () => fetchFresh(`${address.origin}/api/v1/boards/${boardId}/moves`, {
       method: 'POST', headers: apiLostHeaders, body: apiLostBody,
-    });
-    const apiRetryResult = await apiRetry.json();
+    }));
+    const apiRetryResult = await timing.wait('read the recovered API move response', () => apiRetry.json());
     assert.equal(apiRetry.status, 200, JSON.stringify(apiRetryResult));
     assert.equal(apiRetryResult.event.event_kind, 'add');
     assert.equal(apiRetryResult.event.item_id, apiRetryResult.result.item.item_id);
     assert.equal(apiRetryResult.result.item.item_title, apiLostTitle);
     assert.equal(relay.uploads.length, beforeLostApi + 1, 'local API retry returns its original emitted event without posting again');
-  } finally { await localApi.close(); }
+  } finally { await timing.wait('close the local clone API server', () => localApi.close()); }
+}
 
+/** Preserve lost CLI replies, original outcomes and the receipt-missing stack guard. */
+async function recoverReplicaReplies(fixture, timing) {
+  const { scratch, clones, worktrees, envs, gitAt, commonDir, relay, key, boardId, replicaFiles } = fixture;
+  timing.begin('lost-reply recovery', 'exercise dropped CLI replies, replay recovery, and durable outcome ordering across all replicas');
   const beforeDropped = relay.uploads.length;
   relay.dropNextReply({ offline: true });
-  const lostAdd = await cliResult(clones[0], envs[0], 'add', 'web', 'Lost clone reply');
+  const lostAdd = await timing.wait('send clone A add with its reply dropped', () => cliResult(clones[0], envs[0], 'add', 'web', 'Lost clone reply'));
   assert.equal(lostAdd.status, 1);
   assert.equal(lostAdd.document.error.code, 'RELAY_UNAVAILABLE');
   relay.failReads(false);
-  await Promise.all(clones.map((root, index) => cli(root, envs[index], 'status')));
-  const retriedAdd = await cli(clones[0], envs[0], 'add', 'web', 'Lost clone reply');
+  await timing.wait('sync all clones before retrying the lost add', () => Promise.all(clones.map((root, index) => cli(root, envs[index], 'status'))));
+  const retriedAdd = await timing.wait('retry the lost clone add', () => cli(clones[0], envs[0], 'add', 'web', 'Lost clone reply'));
   assert.equal(relay.uploads.length, beforeDropped + 1, 'three-clone recovery never posts a second operation');
   const retriedId = retriedAdd.item.item_id;
   for (const file of replicaFiles) {
@@ -662,29 +790,29 @@ test('[H3,H16,V1,V17] three cloned linked replicas order competing claims and re
   assert.deepEqual(localEvents(replicaFiles[0]), localEvents(replicaFiles[1]));
   assert.deepEqual(localEvents(replicaFiles[1]), localEvents(replicaFiles[2]));
 
-  await cli(worktrees[0], envs[0], 'claim', '1');
+  await timing.wait('claim item 1 before its competing lost-reply refusal', () => cli(worktrees[0], envs[0], 'claim', '1'));
   const beforeDenied = relay.uploads.length;
   relay.dropNextReply({ offline: true });
-  const lostDenial = await cliResult(worktrees[1], envs[1], 'claim', '1');
+  const lostDenial = await timing.wait('send clone B competing claim with its reply dropped', () => cliResult(worktrees[1], envs[1], 'claim', '1'));
   assert.equal(lostDenial.status, 1);
   assert.equal(lostDenial.document.error.code, 'RELAY_UNAVAILABLE');
   relay.failReads(false);
-  await cli(clones[1], envs[1], 'status');
+  await timing.wait('sync clone B after its lost claim reply', () => cli(clones[1], envs[1], 'status'));
   const pendingState = JSON.parse(readFileSync(join(commonDir(clones[1], envs[1]), 'pullboard', 'relay.json'), 'utf8'));
   const recordedDenial = receipts(replicaFiles[1]).find((receipt) => JSON.parse(receipt.move).id === pendingState.recovered.move.id);
   assert.equal(recordedDenial.outcome.error.code, 'HELD');
-  const retriedDenial = await cliResult(worktrees[1], envs[1], 'claim', '1');
+  const retriedDenial = await timing.wait('retry the claim that already has a durable refusal', () => cliResult(worktrees[1], envs[1], 'claim', '1'));
   assert.equal(retriedDenial.status, 1);
   assert.deepEqual(retriedDenial.document.error, recordedDenial.outcome.error, 'retry reports the original canonical refusal');
   assert.equal(relay.uploads.length, beforeDenied + 1, 'a refused move also keeps its original relay position');
-  await cli(worktrees[0], envs[0], 'release', '1');
-  await cli(worktrees[0], envs[0], 'claim', '2');
+  await timing.wait('release item 1 after its durable refusal is checked', () => cli(worktrees[0], envs[0], 'release', '1'));
+  await timing.wait('claim item 2 before its lost submission reply', () => cli(worktrees[0], envs[0], 'claim', '2'));
   relay.dropNextReply({ offline: true });
-  const lostSubmit = await cliResult(worktrees[0], envs[0], 'submit', '2');
+  const lostSubmit = await timing.wait('submit item 2 with its relay reply dropped', () => cliResult(worktrees[0], envs[0], 'submit', '2'));
   assert.equal(lostSubmit.status, 1);
   assert.equal(lostSubmit.document.error.code, 'RELAY_UNAVAILABLE');
   relay.failReads(false);
-  await cli(clones[0], envs[0], 'status');
+  await timing.wait('sync clone A after the lost submission reply', () => cli(clones[0], envs[0], 'status'));
   const beforeSubmitRetry = relay.uploads.length;
   const originalCommit = gitAt(worktrees[0], envs[0], 'rev-parse', 'HEAD');
   writeFileSync(join(worktrees[0], 'web', 'README.md'), 'new committed work while the original submission reply is missing\n');
@@ -692,7 +820,7 @@ test('[H3,H16,V1,V17] three cloned linked replicas order competing claims and re
   gitAt(worktrees[0], envs[0], 'commit', '-q', '-m', 'test: move HEAD during submission recovery [G1]');
   assert.notEqual(gitAt(worktrees[0], envs[0], 'rev-parse', 'HEAD'), originalCommit);
   writeFileSync(join(worktrees[0], 'web', 'README.md'), 'dirty current work is not a fresh submission\n');
-  const retriedSubmit = await cli(worktrees[0], envs[0], 'submit', '2');
+  const retriedSubmit = await timing.wait('retry the original lost submission outcome', () => cli(worktrees[0], envs[0], 'submit', '2'));
   assert.equal(retriedSubmit.commit, originalCommit);
   assert.equal(retriedSubmit.gate.green, true);
   assert.match(retriedSubmit.gate.report, /recovered the original submission/,
@@ -702,13 +830,13 @@ test('[H3,H16,V1,V17] three cloned linked replicas order competing claims and re
   gitAt(worktrees[0], envs[0], 'restore', 'web/README.md');
 
   relay.dropNextReply({ offline: true });
-  const lostVerify = await cliResult(worktrees[1], envs[1], 'verify', '2', 'accept', '--note', 'Lost verdict acknowledgement');
+  const lostVerify = await timing.wait('verify item 2 with its acknowledgement dropped', () => cliResult(worktrees[1], envs[1], 'verify', '2', 'accept', '--note', 'Lost verdict acknowledgement'));
   assert.equal(lostVerify.status, 1);
   assert.equal(lostVerify.document.error.code, 'RELAY_UNAVAILABLE');
   relay.failReads(false);
-  await cli(clones[1], envs[1], 'status');
+  await timing.wait('sync clone B after the lost verdict acknowledgement', () => cli(clones[1], envs[1], 'status'));
   const beforeVerifyRetry = relay.uploads.length;
-  const retriedVerify = await cli(worktrees[1], envs[1], 'verify', '2', 'accept', '--note', 'Lost verdict acknowledgement');
+  const retriedVerify = await timing.wait('retry the already-accepted verdict', () => cli(worktrees[1], envs[1], 'verify', '2', 'accept', '--note', 'Lost verdict acknowledgement'));
   assert.equal(retriedVerify.decision, 'ACCEPT');
   assert.equal(relay.uploads.length, beforeVerifyRetry, 'verified-state preconditions also preserve the original outcome');
 
@@ -716,12 +844,12 @@ test('[H3,H16,V1,V17] three cloned linked replicas order competing claims and re
   writeFileSync(lostEditBrief, 'Files: web/README.md\nTest: the original edit is recovered once.\n');
   const beforeEdit = relay.uploads.length;
   relay.dropNextReply({ offline: true });
-  const lostEdit = await cliResult(clones[0], envs[0], 'edit', '1', '--brief-file', lostEditBrief);
+  const lostEdit = await timing.wait('edit item 1 with its relay reply dropped', () => cliResult(clones[0], envs[0], 'edit', '1', '--brief-file', lostEditBrief));
   assert.equal(lostEdit.document.error.code, 'RELAY_UNAVAILABLE');
   relay.failReads(false);
-  await cli(clones[0], envs[0], 'status');
+  await timing.wait('sync clone A before retrying the edit', () => cli(clones[0], envs[0], 'status'));
   rmSync(lostEditBrief);
-  const editRetry = await cli(clones[0], envs[0], 'edit', '1', '--brief-file', lostEditBrief);
+  const editRetry = await timing.wait('retry the original edit after its brief file is removed', () => cli(clones[0], envs[0], 'edit', '1', '--brief-file', lostEditBrief));
   assert.equal(editRetry.item.item_brief, 'Files: web/README.md\nTest: the original edit is recovered once.');
   assert.equal(relay.uploads.length, beforeEdit + 1, 'edit retries recover the original receipt after its brief disappears');
 
@@ -729,35 +857,35 @@ test('[H3,H16,V1,V17] three cloned linked replicas order competing claims and re
   gitAt(clones[0], envs[0], 'tag', lostRef, originalCommit);
   const beforeMerge = relay.uploads.length;
   relay.dropNextReply({ offline: true });
-  const lostMerge = await cliResult(clones[0], envs[0], 'merged', '2', lostRef);
+  const lostMerge = await timing.wait('merge the lost reference with its reply dropped', () => cliResult(clones[0], envs[0], 'merged', '2', lostRef));
   assert.equal(lostMerge.document.error.code, 'RELAY_UNAVAILABLE');
   relay.failReads(false);
-  await cli(clones[0], envs[0], 'status');
+  await timing.wait('sync clone A before retrying the merge', () => cli(clones[0], envs[0], 'status'));
   gitAt(clones[0], envs[0], 'tag', '-d', lostRef);
-  const mergeRetry = await cli(clones[0], envs[0], 'merged', '2', lostRef);
+  const mergeRetry = await timing.wait('retry the original merge after its tag is removed', () => cli(clones[0], envs[0], 'merged', '2', lostRef));
   assert.equal(mergeRetry.commit, originalCommit);
   assert.equal(relay.uploads.length, beforeMerge + 1, 'merge retries report the original full commit after its ref disappears');
 
   const beforeAutomatic = relay.uploads.length;
   relay.dropNextReply();
-  const automatic = await cli(clones[2], envs[2], 'add', 'web', 'Automatically recovered reply');
+  const automatic = await timing.wait('recover a dropped reply automatically on clone C', () => cli(clones[2], envs[2], 'add', 'web', 'Automatically recovered reply'));
   assert.equal(automatic.item.item_title, 'Automatically recovered reply');
   assert.equal(relay.uploads.length, beforeAutomatic + 1, 'automatic recovery keeps one ordered move');
   assert.equal(JSON.parse(readFileSync(join(commonDir(clones[2], envs[2]), 'pullboard', 'relay.json'), 'utf8')).recovered,
     undefined, 'automatic success consumes its recovered outcome');
 
-  await Promise.all(worktrees.map((root, index) => cli(root, envs[index], 'status')));
+  await timing.wait('sync all worktrees before recovered-stack scenarios', () => Promise.all(worktrees.map((root, index) => cli(root, envs[index], 'status'))));
 
   // A lost submit reply is already an outcome, even if another item becomes stacked while this
   // replica is behind. A third, receipt-missing recovered descriptor still takes the fresh guard.
   const stackBrief = join(scratch, 'recovered-stack-brief.md');
   writeFileSync(stackBrief, 'Files: web/\nTest: only an exact durable receipt bypasses the fresh stack guard.\n');
-  const stackedA = (await cli(clones[0], envs[0], 'add', 'web', 'Relay recovered stack A', '--route', 'light', '--brief-file', stackBrief, '--specs', 'G1', '--criterion', 'exact durable receipt preserves recovery and missing receipts enforce stacking', '--check', 'true')).item.item_id;
-  const stackedB = (await cli(clones[0], envs[0], 'add', 'web', 'Relay recovered stack B', '--route', 'light', '--brief-file', stackBrief, '--specs', 'G1', '--criterion', 'exact durable receipt preserves recovery and missing receipts enforce stacking', '--check', 'true')).item.item_id;
-  const freshB = (await cli(clones[0], envs[0], 'add', 'web', 'Receipt-missing recovered stack', '--route', 'light', '--brief-file', stackBrief, '--specs', 'G1', '--criterion', 'exact durable receipt preserves recovery and missing receipts enforce stacking', '--check', 'true')).item.item_id;
-  await cli(worktrees[0], envs[0], 'claim', String(stackedB));
-  await cli(worktrees[1], envs[1], 'claim', String(stackedA));
-  await cli(worktrees[2], envs[2], 'claim', String(freshB));
+  const stackedA = (await timing.wait('add the first recovered-stack item', () => cli(clones[0], envs[0], 'add', 'web', 'Relay recovered stack A', '--route', 'light', '--brief-file', stackBrief, '--specs', 'G1', '--criterion', 'exact durable receipt preserves recovery and missing receipts enforce stacking', '--check', 'true'))).item.item_id;
+  const stackedB = (await timing.wait('add the second recovered-stack item', () => cli(clones[0], envs[0], 'add', 'web', 'Relay recovered stack B', '--route', 'light', '--brief-file', stackBrief, '--specs', 'G1', '--criterion', 'exact durable receipt preserves recovery and missing receipts enforce stacking', '--check', 'true'))).item.item_id;
+  const freshB = (await timing.wait('add the receipt-missing recovered-stack item', () => cli(clones[0], envs[0], 'add', 'web', 'Receipt-missing recovered stack', '--route', 'light', '--brief-file', stackBrief, '--specs', 'G1', '--criterion', 'exact durable receipt preserves recovery and missing receipts enforce stacking', '--check', 'true'))).item.item_id;
+  await timing.wait('claim recovered-stack item B on worktree A', () => cli(worktrees[0], envs[0], 'claim', String(stackedB)));
+  await timing.wait('claim recovered-stack item A on worktree B', () => cli(worktrees[1], envs[1], 'claim', String(stackedA)));
+  await timing.wait('claim receipt-missing stack item on worktree C', () => cli(worktrees[2], envs[2], 'claim', String(freshB)));
 
   writeFileSync(join(worktrees[1], 'web', 'recovery-a.txt'), 'the first submitted commit\n');
   gitAt(worktrees[1], envs[1], 'add', 'web/recovery-a.txt');
@@ -781,14 +909,14 @@ test('[H3,H16,V1,V17] three cloned linked replicas order competing claims and re
 
   const beforeRecoveredStack = relay.uploads.length;
   relay.dropNextReply({ offline: true });
-  const lostStackSubmit = await cliResult(worktrees[0], envs[0], 'submit', String(stackedB));
+  const lostStackSubmit = await timing.wait('submit recovered-stack item B with its reply dropped', () => cliResult(worktrees[0], envs[0], 'submit', String(stackedB)));
   assert.equal(lostStackSubmit.status, 1);
   assert.equal(lostStackSubmit.document.error.code, 'RELAY_UNAVAILABLE');
   relay.failReads(false);
-  const laterA = await cliResult(worktrees[1], envs[1], 'submit', String(stackedA));
+  const laterA = await timing.wait('submit stack item A after B has a lost reply', () => cliResult(worktrees[1], envs[1], 'submit', String(stackedA)));
   assert.equal(laterA.status, 0, laterA.stderr);
   assert.equal(laterA.document.commit, firstRecoveryCommit);
-  await cli(clones[0], envs[0], 'status');
+  await timing.wait('sync clone A to recover stacked submission B', () => cli(clones[0], envs[0], 'status'));
 
   const recoveredLink = join(commonDir(clones[0], envs[0]), 'pullboard', 'relay.json');
   const pendingOutcome = JSON.parse(readFileSync(recoveredLink, 'utf8')).recovered;
@@ -799,12 +927,12 @@ test('[H3,H16,V1,V17] three cloned linked replicas order competing claims and re
   assert.deepEqual(JSON.parse(recoveredReceipt.move), pendingOutcome.move, 'the pending reply has the exact durable engine receipt');
   const beforeOutcomeRetry = relay.uploads.length;
   assert.equal(beforeOutcomeRetry, beforeRecoveredStack + 2, 'the relay applied B and then A once each');
-  const originalOutcome = await cli(worktrees[0], envs[0], 'submit', String(stackedB));
+  const originalOutcome = await timing.wait('read the durable original submission outcome for B', () => cli(worktrees[0], envs[0], 'submit', String(stackedB)));
   assert.equal(originalOutcome.commit, recoveredStackCommit);
   assert.match(originalOutcome.gate.report, /recovered the original submission/u);
   assert.equal(relay.uploads.length, beforeOutcomeRetry, 'reporting the durable outcome creates no new relay move');
 
-  await cli(clones[2], envs[2], 'status');
+  await timing.wait('sync clone C before checking its fabricated receiptless descriptor', () => cli(clones[2], envs[2], 'status'));
   const freshLinkFile = join(commonDir(clones[2], envs[2]), 'pullboard', 'relay.json');
   const freshLink = JSON.parse(readFileSync(freshLinkFile, 'utf8'));
   const freshBoard = store.openBoard(replicaFiles[2]);
@@ -824,9 +952,9 @@ test('[H3,H16,V1,V17] three cloned linked replicas order competing claims and re
       'the recovery descriptor has no durable engine receipt');
   } finally { store.closeBoard(freshBoard); }
   const freshSequence = freshLink.sequence + 1;
-  const freshSealed = Buffer.from(await seal(key, new TextEncoder().encode(JSON.stringify(fabricatedReceiptlessMove)), {
+  const freshSealed = Buffer.from(await timing.wait('seal the receiptless recovery descriptor', () => seal(key, new TextEncoder().encode(JSON.stringify(fabricatedReceiptlessMove)), {
     boardId, kind: 'move', sequence: freshSequence,
-  })).toString('base64url');
+  }))).toString('base64url');
   freshLink.recovered = {
     move: fabricatedReceiptlessMove,
     intent: JSON.stringify({ operation: 'submit', args: fabricatedReceiptlessMove.args }),
@@ -835,7 +963,7 @@ test('[H3,H16,V1,V17] three cloned linked replicas order competing claims and re
   };
   writeFileSync(freshLinkFile, JSON.stringify(freshLink) + '\n', { mode: 0o600 });
   const beforeFreshRefusal = relay.uploads.length;
-  const freshRefusal = await cliResult(worktrees[2], envs[2], 'submit', String(freshB));
+  const freshRefusal = await timing.wait('submit the receiptless descriptor and verify the fresh stack guard', () => cliResult(worktrees[2], envs[2], 'submit', String(freshB)));
   assert.equal(freshRefusal.status, 1);
   assert.equal(freshRefusal.document.error.code, 'STACKED_ON_UNVERIFIED');
   assert.match(freshRefusal.document.error.message, new RegExp(`#${stackedA}\\b`, 'u'));
@@ -844,22 +972,30 @@ test('[H3,H16,V1,V17] three cloned linked replicas order competing claims and re
   const freshAfter = store.openBoard(replicaFiles[2]);
   try { assert.equal(store.getItem(freshAfter, freshB).item_status, 'claimed'); }
   finally { store.closeBoard(freshAfter); }
+}
 
-  await Promise.all(worktrees.map((root, index) => cli(root, envs[index], 'status')));
+/** Reject the future engine move after all three replicas have recovered their ordered prefix. */
+async function finalReplicaOrder(fixture, timing) {
+  const { clones, worktrees, envs, auth, relay, person, key, boardId, replicaFiles } = fixture;
+  timing.begin('final order check', 'sync the worktrees, reject the future engine move, and confirm no replica applies later events');
+  await timing.wait('sync all worktrees before the final engine-version check', () => Promise.all(worktrees.map((root, index) => cli(root, envs[index], 'status'))));
   const updated = store.openBoard(replicaFiles[0]);
   let future;
+  let next;
   try {
     next = appliedSequence(updated) + 1;
     future = { ...prepareEngineMove(updated, 'addItem', [{ by: 'coordinator', lane: 'web', title: 'Future engine item' }]), engine: ENGINE_VERSION + 1 };
   } finally { store.closeBoard(updated); }
-  const futureSealed = Buffer.from(await seal(key, new TextEncoder().encode(JSON.stringify(future)), {
+  const coordinatorCredential = await timing.wait('issue the coordinator fixture credential for the final order check', () => auth.issueToken(person.token, { board: boardId, agent: 'coordinator' }));
+  const headers = { 'x-pullboard-engine': String(ENGINE_VERSION), authorization: 'Bearer ' + coordinatorCredential.token, 'content-type': 'application/json' };
+  const futureSealed = Buffer.from(await timing.wait('seal the future-engine move', () => seal(key, new TextEncoder().encode(JSON.stringify(future)), {
     boardId, kind: 'move', sequence: next,
-  })).toString('base64url');
-  assert.equal((await fetch(`${relay.origin}/api/v1/boards/${boardId}/moves`, {
+  }))).toString('base64url');
+  assert.equal((await timing.wait('append the future-engine move to the relay', () => fetch(`${relay.origin}/api/v1/boards/${boardId}/moves`, {
     method: 'POST', headers, body: JSON.stringify({ sequence: next, sealed: futureSealed }),
-  })).status, 200);
+  }))).status, 200);
   const beforeFuture = replicaFiles.map(localEvents);
-  const incompatible = await Promise.all(clones.map((root, index) => cliResult(root, envs[index], 'add', 'web', 'Must not apply')));
+  const incompatible = await timing.wait('ask all three replicas to reject the future engine move', () => Promise.all(clones.map((root, index) => cliResult(root, envs[index], 'add', 'web', 'Must not apply'))));
   for (const result of incompatible) {
     assert.equal(result.status, 1);
     assert.equal(result.document.error.code, 'ENGINE_VERSION');
@@ -867,7 +1003,25 @@ test('[H3,H16,V1,V17] three cloned linked replicas order competing claims and re
     assert.match(result.document.error.next, /upgrade/);
   }
   assert.deepEqual(replicaFiles.map(localEvents), beforeFuture, 'neither clone applies a future engine or its own later move');
+}
 
+test('[H3,H16,V1,V17] three cloned linked replicas order competing claims', { timeout: 240_000 }, async (t) => { // 20 paired rounds (60 CLI spawns), six sync/registration spawns and three local API calls took 170s on Studio; setup fits the remaining ceiling.
+  const timing = threeReplicaPhaseCapture(t);
+  return timing.run(async () => {
+    const fixture = await threeReplicaFixture(t, timing);
+    await competingReplicaClaims(fixture, timing);
+    timing.finish(['cloning three replicas', 'competing claims']);
+  });
+});
+
+test('[H3,H16,V1,V17] three cloned linked replicas recover lost replies once', { timeout: 200_000 }, async (t) => { // 45 recovery/final-order CLI spawns at the captured ~4s per recovery wait, plus 20s for fixture setup; excludes the preceding 170s claims.
+  const timing = threeReplicaPhaseCapture(t);
+  return timing.run(async () => {
+    const fixture = await threeReplicaFixture(t, timing);
+    await recoverReplicaReplies(fixture, timing);
+    await finalReplicaOrder(fixture, timing);
+    timing.finish(['cloning three replicas', 'lost-reply recovery', 'final order check']);
+  });
 });
 
 /** Exercise migration of an old local-first mirror queue into the ordered native checkpoint. */

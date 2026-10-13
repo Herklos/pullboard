@@ -4,7 +4,81 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.8.14] - 2026-10-13
+
+### Your agent sets it up
+
+Run pullboard init, then ask your agent to set up Pullboard here. Whatever model it is, it now walks you through what you are building, your lanes, the command that proves the build, your first item, and opening the view.
+
+### Added
+
+- On a board that is not set up yet, pullboard resume walks any agent through setup one step at a time, phrased as what to ask you, and each step completes from the board's real state.
+- pullboard init ends with one plain instruction, and the agent guide it writes starts with what to do on a new board.
+
+### Fixed
+
+- Pullboard's own tests no longer fail when Chrome still lists a tab it just closed, so its CI is green on Linux and macOS.
+
+## [0.8.13] - 2026-10-12
+
+### Replays hold still
+
+A shared replay's Pause button stays where it is while you press it, and Pullboard's own checks now hold on Linux and macOS under load.
+
+### Fixed
+
+- In a static export's replay, the Pause button no longer shifts under your pointer as the replay runs, so a press lands on it.
+- Pullboard's own tests keep waiting through a page navigation, run the three-replica relay check as two tests that each fit their time, and name the startup step when the local server is slow to start.
+
+## [0.8.12] - 2026-10-12
+
+### Your answer always lands
+
+An answer you send in Pullboard View is recorded as your answer, even while your previous shout is still sending.
+
+### Fixed
+
+- Answering a question while your previous shout was still sending could drop your answer, or record it as a plain shout instead of your answer. The earlier send no longer clears what you wrote next.
+- The replay controls stay in place at phone width when a scrollbar appears at the end of a replay.
+- Tests that waited too long on a busy machine now say which step they were waiting on, and the hook-read lock test holds on macOS.
+
+## [0.8.11] - 2026-10-12
+
+### A proper first visit, safer releases
+
+A brand-new project opens on a calm board, not a list of decisions, and a release can no longer publish anything main's CI did not pass.
+
+### Changed
+
+- On a new project, Pullboard View shows the starter house rules as defaults to review, not as decisions waiting for you. The tour's board is listed and marked demo, and New item defaults to the first building lane.
+- The gate runs only the test files git tracks, so scratch copies and agent worktree folders in your repo can no longer fail it.
+- A tagged release publishes to npm only when main's CI already passed that exact commit.
+
+## [0.8.10] - 2026-10-11
+
+### Accumulated judgement
+
+The README now opens with what Pullboard is for: accumulated judgement for agents, and a figure of how it holds.
+
+### Fixed
+
+- A board read that still cannot get through after waiting says which board it was, that another process held it, and how long it waited, instead of a bare "database is locked".
+
+## [0.8.9] - 2026-10-11
+
+### 0.8.8 reaches npm
+
+0.8.8 was tagged but never published: its publish gate failed when a git hook read the board while another process was writing it. 0.8.9 is everything in 0.8.8, plus that fix and a few more from the same night.
+
+### Fixed
+
+- A git hook that reads the board waits for another process to finish writing, up to the same ten seconds every other board connection waits, instead of failing at once with "database is locked".
+- A request from your phone never moves the row you are reading in Pullboard View.
+- An action only you may take, tried from an agent's terminal, is refused at once with "send it from the paired phone", even when the relay is slow to answer.
+
 ## [0.8.8] - 2026-10-11
+
+Tagged but never published to npm; everything below ships in 0.8.9.
 
 ### Steadier CI, safer boards
 
