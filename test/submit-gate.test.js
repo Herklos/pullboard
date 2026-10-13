@@ -532,9 +532,11 @@ test('a source change selects the tests that scan sources [C7,B3]', (t) => {
   const removed = commitAll(box, 'test(core): remove source declaration [G1]');
   assert.deepEqual(selectAffectedTests(box.root, { base: commit, commit: removed, changed: ['src/new.js'] }).files,
     readers, 'old declarations retain readers across removal');
+  put(box.root, 'test/scanner.test.js', sourceInput + "import 'node:fs';\n");
+  const deletionBase = commitAll(box, 'test(core): restore scanner declaration [G1]');
   box.git('rm', 'src/a.js');
   const deleted = commitAll(box, 'refactor(core): remove source input [G1]');
-  assert.deepEqual(selectAffectedTests(box.root, { base: commit, commit: deleted }).files,
+  assert.deepEqual(selectAffectedTests(box.root, { base: deletionBase, commit: deleted }).files,
     ['test/a.test.js', ...readers].sort(), 'source deletion retains old importers and scanners');
 
   const repository = resolve(import.meta.dirname, '..');
