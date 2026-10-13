@@ -19,8 +19,9 @@ Set up
   pullboard takeover                   rebind this checkout when the same agent starts a new session
   pullboard resources                  local resource holders and their FIFO queues
   pullboard settings [gateSlots <n>]    view or set this machine's gate slots (default 2)
-  pullboard view [--port N] [--no-open]  every project on this machine in your browser: items, shouts, doctrine,
-                                        agents and activity, live; add items, shout and hold lanes from it
+  pullboard view [--port N] [--no-open]  every project on this machine in your browser; default http://127.0.0.1:4890
+                                        items, shouts, doctrine, agents and activity; --port 0 chooses a free port
+                                        add items, shout and hold lanes from it
   pullboard view --export <dir>         a read-only snapshot with event replay, for any static host
   pullboard serve [--port N]           local API v1: boards, state, moves, requests and live events,
                                         behind the session secret in its printed address

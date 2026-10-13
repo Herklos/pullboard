@@ -170,7 +170,7 @@ const LIGHT_BRIEF = 'Files:\n- web/page.js\nChange:\n- copy the header from the 
 
 async function startView(box, cwd) {
   const startedAt = performance.now();
-  const child = spawn(process.execPath, [BIN, 'view', '--no-open'], { cwd, env: { ...box.env, PULLBOARD_VIEW_FOREGROUND: '1' } });
+  const child = spawn(process.execPath, [BIN, 'view', '--no-open', '--port', '0'], { cwd, env: { ...box.env, PULLBOARD_VIEW_FOREGROUND: '1' } });
   const link = await new Promise((found, fail) => {
     let out = '';
     let stderr = '';
@@ -178,7 +178,7 @@ async function startView(box, cwd) {
     const rejectStartup = (code, signal, extra = '') => {
       if (settled) return;
       settled = true;
-      const failure = reportFixtureChildFailure({ command: process.execPath, args: [BIN, 'view', '--no-open'],
+      const failure = reportFixtureChildFailure({ command: process.execPath, args: [BIN, 'view', '--no-open', '--port', '0'],
         status: code, signal, elapsedMs: performance.now() - startedAt, stderr, env: box.env, detail: extra });
       fail(new Error(failure));
     };

@@ -1272,7 +1272,7 @@ async function viewHere(io, values) {
     io.say(`wrote snapshot ${exported.path}`);
     return 0;
   }
-  const port = values.port === undefined ? 0 : Number(values.port);
+  const port = values.port === undefined ? 4890 : Number(values.port);
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Refused('USAGE', '--port is a number from 0 to 65535; 0 picks a free one');
   try {
     const info = repoInfo(io.cwd);
@@ -1316,6 +1316,9 @@ async function viewHere(io, values) {
     }
   } catch (error) {
     if (view) await view.close();
+    if (error instanceof Refused && error.code === 'PORT_BUSY') {
+      error = new Refused('PORT_BUSY', `port ${port} is in use: name another with --port N, or use --port 0 to take a free one`);
+    }
     if (process.env.PULLBOARD_VIEW_BACKGROUND_CHILD === '1' && process.send) {
       process.send({ type: 'startup-error', code: error.code ?? 'VIEW_START', message: error.message });
     }
@@ -1348,7 +1351,7 @@ function reportView(io, view) {
 /** Start the view in a detached CLI child, forwarding only its bound address over IPC. */
 async function launchBackgroundView(io, port) {
   const args = [fileURLToPath(new URL('../bin/pullboard.js', import.meta.url)), 'view', '--no-open'];
-  if (port) args.push('--port', String(port));
+  args.push('--port', String(port));
   const child = spawn(process.execPath, args, {
     cwd: io.cwd,
     env: { ...process.env, PULLBOARD_VIEW_BACKGROUND_CHILD: '1' },
