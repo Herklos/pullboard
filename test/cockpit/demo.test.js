@@ -249,8 +249,15 @@ async function finishPhoneAnswerLifecycleCapture(chrome) {
 }
 
 
+/** Attach the bounded capture to the original shared-press error and return its TAP diagnostic line. */
+function includeLaneReleaseCapture(error, detail) {
+  const diagnostic = 'lane-release capture: ' + JSON.stringify(detail);
+  error.message += '; ' + diagnostic;
+  return diagnostic;
+}
+
 /** Observe page boxes and native scroll events around the lane-release press without changing the action. */
-async function armLaneReleaseCapture(chrome, selector) {
+async function armLaneReleaseCapture(chrome, selector, stableRoot = "document.querySelector('#lanes')") {
   const trace = { events: [], matching: 0, dropped: 0, complete: false, startError: null, endError: null };
   const traceLimit = 24;
   const traceByteLimit = 10_000;
@@ -292,8 +299,8 @@ async function armLaneReleaseCapture(chrome, selector) {
   let pageArm;
   try {
     pageArm = JSON.parse(await chrome.stable(`JSON.stringify((() => {
-    const lanes = document.querySelector('#lanes');
-    if (!lanes || !document.querySelector(${JSON.stringify(selector)})) return { armed: false };
+    const target = document.querySelector(${JSON.stringify(selector)});
+    if (!target) return { armed: false };
     const identities = new WeakMap(), prior = new Map(), retained = new Map(), changes = new Map(), events = [], scrollCalls = [];
     const dropped = { nodeLimit: 0, changedNodeLimit: 0, eventLimit: 0, scrollCallLimit: 0, frameLimit: 0 };
     let nextId = 0, frames = 0, stopped = false, animation = null;
@@ -341,8 +348,8 @@ async function armLaneReleaseCapture(chrome, selector) {
     /** Compare every preceding element, including hidden panels that could become visible in a refresh. */
     const sample = (type, point = null) => {
       const target = document.querySelector(${JSON.stringify(selector)}), targetBox = target ? box(target) : null;
-      const nodes = [...document.body.querySelectorAll('*')].filter(node => node === lanes
-        || !!(node.compareDocumentPosition(lanes) & Node.DOCUMENT_POSITION_FOLLOWING));
+      const nodes = [...document.body.querySelectorAll('*')].filter(node => node === target
+        || (!node.contains(target) && !!(node.compareDocumentPosition(target) & Node.DOCUMENT_POSITION_FOLLOWING)));
       if (nodes.length > 2000) dropped.nodeLimit += nodes.length - 2000;
       for (const node of nodes.slice(0, 2000)) {
         const now = box(node), old = prior.get(now.node);
@@ -363,8 +370,9 @@ async function armLaneReleaseCapture(chrome, selector) {
       append(events, { type, at: performance.now(), scrollX, scrollY, target: targetBox,
         point, activeElement: name(document.activeElement) }, 160, 'eventLimit');
     };
-    const initial = [...document.body.querySelectorAll('*')].filter(node => node === lanes
-      || !!(node.compareDocumentPosition(lanes) & Node.DOCUMENT_POSITION_FOLLOWING)).slice(0, 2000).map(box);
+    const initial = [...document.body.querySelectorAll('*')].filter(node => node === target
+      || (!node.contains(target) && !!(node.compareDocumentPosition(target) & Node.DOCUMENT_POSITION_FOLLOWING)))
+      .slice(0, 2000).map(box);
     for (const entry of initial) prior.set(entry.node, entry);
     /** Observe native pointer boundaries before the shared press rechecks its aimed point. */
     const listener = event => sample(event.type, Number.isFinite(event.clientX)
@@ -374,8 +382,11 @@ async function armLaneReleaseCapture(chrome, selector) {
     const originalScrollIntoView = Element.prototype.scrollIntoView;
     /** Record the shared helper's real scroll request while preserving its native arguments and return value. */
     Element.prototype.scrollIntoView = function(...args) {
-      append(scrollCalls, { at: performance.now(), method: 'scrollIntoView', target: name(this), scrollY }, 40, 'scrollCallLimit');
-      return Reflect.apply(originalScrollIntoView, this, args);
+      const call = { at: performance.now(), method: 'scrollIntoView', target: name(this), scrollYBefore: scrollY };
+      const result = Reflect.apply(originalScrollIntoView, this, args);
+      call.scrollYAfter = scrollY;
+      append(scrollCalls, call, 40, 'scrollCallLimit');
+      return result;
     };
     /** Sample layout changes per animation frame without scheduling any extra production work. */
     const tick = () => {
@@ -413,25 +424,26 @@ async function armLaneReleaseCapture(chrome, selector) {
           activeElement: event.activeElement && ({ tag: event.activeElement.tag, id: event.activeElement.id,
             className: event.activeElement.className })
         }));
-        return { armed: true, observedNodes: initial.length, changedNodes: changed.slice(0, 24).map(({ priority, heightChanged,
+        return { armed: true, observedNodes: initial.length, changedNodes: changed.slice(0, 10).map(({ priority, heightChanged,
           connectionOrVisibilityChanged, visibleFlowMoved, ...entry }) => ({ ...entry, priority, heightChanged,
           connectionOrVisibilityChanged, visibleFlowMoved })),
           eventSamples: keyEvents.slice(0, 16), scrollCalls: scrollCalls.slice(0, 8), frames,
+          scrollY: { before: scrollCalls[0]?.scrollYAfter ?? events[0]?.scrollY ?? null, after: scrollY },
           changeCounts: { collected: changed.length, heightChanged: changed.filter(entry => entry.heightChanged).length,
             connectionOrVisibilityChanged: changed.filter(entry => entry.connectionOrVisibilityChanged).length,
             visibleFlowMoved: changed.filter(entry => entry.visibleFlowMoved).length },
-          truncated: { droppedByReason: dropped, changedNodes: Math.max(0, changed.length - 24),
+          truncated: { droppedByReason: dropped, remainingChangedNodes: Math.max(0, changed.length - 10),
             eventSamples: Math.max(0, keyEvents.length - 16), scrollCalls: Math.max(0, scrollCalls.length - 8) },
           scrollAnchoring: { selectedNode: null, status: 'The browser-selected anchor is not captured by this probe; geometry alone does not identify it.' },
           rootCauseStatus: 'NOT PROVEN' };
       }
     };
     return { armed: true, observed: initial.length };
-  })())`, "document.querySelector('#lanes')"));
+  })())`, stableRoot));
   } catch (error) {
     pageArm = { armed: false, error: String(error.message || error).slice(0, 240) };
   }
-  return { ...pageArm, trace, traceStarted, onTraceMessage };
+  return { ...pageArm, trace, traceStarted, onTraceMessage, stableRoot };
 }
 
 /** Finish lane-release observations through the stable root after either a successful or refused press. */
@@ -447,7 +459,7 @@ async function finishLaneReleaseCapture(chrome, capture) {
   }
   if (capture?.onTraceMessage) chrome.socket.removeEventListener('message', capture.onTraceMessage);
   let page = null, pageError = null;
-  try { page = JSON.parse(await chrome.stable('JSON.stringify(window.__laneReleaseCapture?.finish() || null)', "document.querySelector('#lanes')")); }
+  try { page = JSON.parse(await chrome.stable('JSON.stringify(window.__laneReleaseCapture?.finish() || null)', capture?.stableRoot ?? "document.querySelector('#lanes')")); }
   catch (error) { pageError = String(error.message || error).slice(0, 240); }
   return { page, pageError, tracing: capture ? { events: capture.trace.events, matching: capture.trace.matching,
     dropped: capture.trace.dropped, complete: capture.trace.complete, started: capture.traceStarted,
@@ -841,10 +853,9 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
         try { laneCapture = await finishLaneReleaseCapture(chrome, laneCaptureSetup); }
         catch (error) { laneCaptureError = String(error.message || error); }
       }
-      const laneDiagnostic = 'lane-release capture: ' + JSON.stringify({ width, capture: laneCapture, captureError: laneCaptureError });
-      t.diagnostic(laneDiagnostic);
       if (lanePressError) {
-        lanePressError.message += '; ' + laneDiagnostic;
+        const laneDiagnostic = includeLaneReleaseCapture(lanePressError, { width, capture: laneCapture, captureError: laneCaptureError });
+        t.diagnostic(laneDiagnostic);
         throw lanePressError;
       }
       await chrome.waitFor("!document.querySelector('#lanes [data-release=web]')");
@@ -1015,5 +1026,89 @@ test('the lanes panel fits its card at every width [N26]', {
     if (chrome) await closeSnapshotChrome(chrome);
     rmSync(profile, { recursive: true, force: true });
     await view.stop();
+  }
+});
+
+test('a moved press target names the element that moved it [N26,C7]', {
+  timeout: 120_000, // budget: hang-only ceiling for real Chrome startup and one deterministic pointer-movement capture.
+}, async (t) => {
+  const executable = chromeExecutable();
+  if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME for the moved-press capture.');
+
+  const box = machine();
+  project(box, 'moved-press-capture');
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-moved-press-'));
+  let chrome;
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.send('Emulation.setDeviceMetricsOverride', { width: 375, height: 900, deviceScaleFactor: 1, mobile: false });
+    await chrome.waitFor("innerWidth === 375 && document.readyState === 'complete' && !!document.querySelector('#lanes')");
+    await chrome.stable(`(() => {
+      const standIn = document.createElement('div');
+      standIn.id = 'press-move-stand-in';
+      standIn.style.cssText = 'height:18px;background:#ddd;overflow-anchor:none';
+      const target = document.createElement('button');
+      target.id = 'press-move-target';
+      target.type = 'button';
+      target.textContent = 'Press target';
+      target.style.cssText = 'display:block;height:44px;overflow-anchor:auto';
+      const spacer = document.createElement('div');
+      spacer.style.cssText = 'height:1100px;overflow-anchor:none';
+      document.body.prepend(spacer, standIn, target);
+      let grew = false;
+      const growAboveTarget = event => {
+        if (!grew && event.target === target) {
+          grew = true;
+          standIn.style.height = '98px';
+        }
+      };
+      document.addEventListener('pointermove', growAboveTarget, true);
+      window.__pressMoveFixture = { grew: () => grew, cleanup() {
+        document.removeEventListener('pointermove', growAboveTarget, true);
+        spacer.remove(); standIn.remove(); target.remove(); delete window.__pressMoveFixture;
+      } };
+      return { standIn: standIn.id, target: target.id };
+    })()`);
+    const captureSetup = await armLaneReleaseCapture(chrome, '#press-move-target', 'document.documentElement');
+    assert.equal(captureSetup.armed, true, `the named stand-in target is present before the shared press: ${JSON.stringify({ armed: captureSetup.armed, error: captureSetup.error ?? null })}`);
+    let pressError = null;
+    try { await press(chrome, "document.querySelector('#press-move-target')"); }
+    catch (error) { pressError = error; }
+    const capture = await finishLaneReleaseCapture(chrome, captureSetup);
+    const fixture = JSON.parse(await chrome.stable('JSON.stringify({ grew: window.__pressMoveFixture?.grew() ?? false })'));
+    const changed = capture.page?.changedNodes ?? [];
+    const moved = changed.find(node => node.node?.id === 'press-move-stand-in');
+    const captureDetail = { capture, captureError: null };
+    if (pressError) includeLaneReleaseCapture(pressError, captureDetail);
+    const failureText = `${pressError?.message ?? 'shared press unexpectedly completed without an error'}; lane-release capture: ${JSON.stringify(captureDetail)}`;
+    assert.ok(fixture.grew, 'the stand-in box grows during the shared press pointer movement');
+    assert.ok(pressError, 'the unchanged shared press refuses the moved target instead of clicking it');
+    assert.equal(pressError.code, 'ERR_ASSERTION', `the shared press keeps its native assertion failure: ${pressError.message}`);
+    assert.match(pressError.message, /shared press: target stays under the pointer/,
+      `the refusal comes from the shared press geometry guard: ${pressError.message}`);
+    assert.equal(capture.pageError, null, `the page capture finishes without a probe error: ${failureText}`);
+    assert.equal(capture.page?.armed, true, `the capture returns its completed page observations: ${failureText}`);
+    assert.ok(moved, `the failure capture names the changed box and its old/new geometry: ${failureText}`);
+    assert.equal(moved.first.id, 'press-move-stand-in', `the captured old box is the named stand-in: ${failureText}`);
+    assert.ok([moved.first.top, moved.first.height, moved.last.top, moved.last.height].every(Number.isFinite),
+      `the named box has finite old/new top and height measurements: ${failureText}`);
+    assert.notEqual(moved.first.height, moved.last.height, `the captured stand-in height changed: ${failureText}`);
+    assert.ok(capture.page.changedNodes.length <= 10 && Number.isInteger(capture.page.truncated.remainingChangedNodes),
+      `the failure capture caps box details at ten and counts the remainder: ${failureText}`);
+    assert.ok(Number.isFinite(capture.page.scrollY.before) && Number.isFinite(capture.page.scrollY.after)
+      && capture.page.scrollY.before !== capture.page.scrollY.after,
+      `the failure capture records the native scroll-anchor adjustment before and after the press: ${failureText}`);
+    assert.match(pressError.message, /lane-release capture: .*press-move-stand-in.*scrollY.*before.*after/s,
+      `the failed press message carries the changed box and scroll positions: ${failureText}`);
+    assert.match(pressError.message, /remainingChangedNodes/, `the failure message reports the count of other changed boxes: ${failureText}`);
+    assert.ok(Object.hasOwn(capture.page, 'scrollAnchoring'), `the capture records whether Chromium reported an anchor: ${failureText}`);
+  } finally {
+    if (chrome) {
+      await chrome.stable('window.__pressMoveFixture?.cleanup()').catch(() => undefined);
+      await closeSnapshotChrome(chrome);
+    }
+    await view.stop();
+    rmSync(profile, { recursive: true, force: true });
   }
 });
