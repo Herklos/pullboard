@@ -1,5 +1,6 @@
 /** The public, versioned JSON surface of every pullboard command (A1). */
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { runFixtureExecFile as execFileSync, startFixtureChild as spawn, runFixtureChild as spawnSync, reportFixtureChildFailure, runFixtureChild, runFixtureGit, safeFixtureDiagnostic } from './fixture-child.js';
 import { performance } from 'node:perf_hooks';
 import {
@@ -17,9 +18,11 @@ import {
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { once } from 'node:events';
+import { createServer } from 'node:http';
 import { join, dirname, resolve, basename, delimiter } from 'node:path';
 import { after, test } from 'node:test';
-import { resultCommands } from '../src/cli.js';
+import { main, resultCommands } from '../src/cli.js';
+import { createLocalApiHandler } from '../src/api.js';
 import { allShouts, EVENT_LOG_VERSION, closeBoard, openBoard } from '../src/board.js';
 import { presentationShout, relayPresentation } from '../src/relay-presentation.js';
 import { JSON_SHAPES } from '../src/json.js';
@@ -78,6 +81,34 @@ test('[O8] authenticated API state exposes model labels and configured stable di
   assert.equal(prefix.find((agent) => agent.agent_id === 'app-1').agent_id, 'app-1', 'display styles do not change stable ids');
   assert.equal(prefix.find((agent) => agent.agent_id === 'app-1').displayName, 'claude-sonnet-app-1');
   assert.equal(prefix.find((agent) => agent.agent_id === 'coordinator').displayName, 'unknown-coordinator');
+});
+
+test('[A2] the local API admits only its listed origins', async (t) => {
+  const box = project();
+  const listedOrigin = 'https://app.pullboard.dev';
+  const configured = await startLocalHandler(t, box, { allowedOrigins: [listedOrigin] });
+  const listed = await apiFetch(configured, '/api/v1/boards', { headers: { origin: listedOrigin } });
+  assert.equal(listed.status, 200);
+  assert.equal((await listed.json()).boards.length, 1, 'the allowed origin reaches the regular board handler');
+
+  for (const origin of [
+    'https://app.pullboard.dev.attacker.invalid',
+    'https://sub.app.pullboard.dev',
+    'https://app.pullboard.dev:444',
+    'https://different.invalid',
+  ]) {
+    const response = await apiFetch(configured, '/api/v1/boards', { headers: { origin } });
+    assert.equal((await apiError(response, 403)).code, 'API_ORIGIN', `an unlisted origin is refused: ${origin}`);
+  }
+
+  const missingKey = await apiFetch(configured, '/api/v1/boards', { noSecret: true, headers: { origin: listedOrigin } });
+  assert.equal((await apiError(missingKey, 401)).code, 'AUTH_REQUIRED', 'an allowed origin still needs the session key');
+  const wrongKey = await apiFetch(configured, '/api/v1/boards', { headers: { origin: listedOrigin, 'x-pullboard-key': randomUUID() } });
+  assert.equal((await apiError(wrongKey, 401)).code, 'AUTH_REQUIRED', 'an allowed origin does not replace the session key');
+
+  const defaulted = await startLocalHandler(t, box);
+  const defaultOrigin = await apiFetch(defaulted, '/api/v1/boards', { headers: { origin: listedOrigin } });
+  assert.equal((await apiError(defaultOrigin, 403)).code, 'API_ORIGIN', 'omitting the option preserves same-origin-only behavior');
 });
 
 /** Quote a literal executable path for the fixture hook's POSIX shim. */
@@ -1016,6 +1047,34 @@ test('[N26,A2] roadmap text, JSON and API state follow live local and registered
   assert.equal(response.status, 200);
   assert.deepEqual(state.state.milestones, document.milestones);
 });
+
+/** Serve the local API adapter directly so tests can exercise its optional origin allowlist. */
+async function startLocalHandler(t, box, options = {}) {
+  const secret = randomUUID();
+  let port = 0;
+  const handler = createLocalApiHandler({
+    secret,
+    getPort: () => port,
+    runCommand: main,
+    projects: () => [{ root: box.repo, name: 'API fixture', project: '', added: '2026-01-01T00:00:00.000Z' }],
+    ...(options.allowedOrigins === undefined ? {} : { allowedOrigins: options.allowedOrigins }),
+  });
+  const server = createServer(handler);
+  await new Promise((resolveReady, rejectReady) => {
+    server.once('error', rejectReady);
+    server.listen(0, '127.0.0.1', () => {
+      port = server.address().port;
+      resolveReady();
+    });
+  });
+  t.after(async () => {
+    handler.close();
+    const closed = new Promise((resolveClosed) => server.close(resolveClosed));
+    server.closeAllConnections();
+    await closed;
+  });
+  return { origin: `http://127.0.0.1:${port}`, secret };
+}
 
 /** Start the real local API server and stop it when its test finishes. */
 async function startApi(t, box, { traceStartup = false, traceFile: requestedTraceFile, readinessTimeoutMs = 10_000,
