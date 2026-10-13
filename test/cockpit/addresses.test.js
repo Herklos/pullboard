@@ -422,6 +422,57 @@ test('a shout address opens an old shout [N38,N26]', { timeout: 180_000 }, async
   });
 });
 
+/** Read stable document-space boxes and the accessible heading for one addressed shout. */
+async function shoutLayout(chrome, id) {
+  return JSON.parse(await chrome.stable(`JSON.stringify((() => {
+    const card = document.querySelector('#shout-${id}');
+    /** Convert one rendered node to stable document-space geometry. */
+    const box = node => {
+      if (!node) return null;
+      const rect = node.getBoundingClientRect();
+      return { left: rect.left + scrollX, top: rect.top + scrollY, width: rect.width, height: rect.height };
+    };
+    const heading = card?.querySelector('h2');
+    return { card: box(card), avatar: box(card?.querySelector('.avatar')), header: box(card?.querySelector('header')),
+      heading: heading ? { tag: heading.tagName, text: heading.textContent } : null,
+      found: card?.classList.contains('found') ?? false };
+  })())`));
+}
+
+test('an addressed shout is highlighted without changing its layout [N26,N38]', { timeout: 180_000 }, async (t) => { // budget: hang-only ceiling for four real Chrome viewport and theme checks.
+  const box = machine(), alpha = addressBoard(box, 'shout-layout');
+  const text = 'Shout whose address must not change its layout.';
+  box.run(alpha.repo, 'shout', 'person', text);
+  await withBrowser(box, async (chrome, server) => {
+    const shout = (await boardOf(server, alpha.repo)).shouts.find(one => one.shout_text === text);
+    assert.ok(shout?.shout_id, 'the real board contains the addressed shout');
+    for (const scheme of ['light', 'dark']) {
+      await chrome.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: scheme }] });
+      assert.equal(await chrome.stable(`matchMedia('(prefers-color-scheme: ${scheme})').matches`), true, `${scheme} media is active`);
+      for (const width of [375, 1280]) {
+        await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
+        await chrome.waitFor(`innerWidth === ${width}`);
+        await openAddress(chrome, server, '/shouts');
+        await assertPlace(chrome, '/shouts', 'shouts', alpha.repo);
+        const before = await shoutLayout(chrome, shout.shout_id);
+        assert.ok(before.card && before.avatar && before.header, `${width}px ${scheme}: the unaddressed shout has its layout boxes`);
+        assert.equal(before.heading, null, `${width}px ${scheme}: the unaddressed shout has no detail heading`);
+        await openAddress(chrome, server, `/shouts/${shout.shout_id}`);
+        await assertPlace(chrome, `/shouts/${shout.shout_id}`, 'shouts', alpha.repo);
+        await assertShout(chrome, shout.shout_id, text);
+        const after = await shoutLayout(chrome, shout.shout_id);
+        t.diagnostic('515-layout-geometry ' + JSON.stringify({ width, scheme, before, after }));
+        assert.equal(after.heading?.tag, 'H2', `${width}px ${scheme}: address keeps its semantic heading`);
+        assert.equal(after.heading?.text, `Shout #${shout.shout_id}`, `${width}px ${scheme}: heading names the shout`);
+        assert.equal(after.found, true, `${width}px ${scheme}: addressed card is highlighted`);
+        assert.deepEqual(after.card, before.card, `${width}px ${scheme}: addressed card keeps its document-space box`);
+        assert.deepEqual(after.avatar, before.avatar, `${width}px ${scheme}: avatar stays in place`);
+        assert.deepEqual(after.header, before.header, `${width}px ${scheme}: header stays in place`);
+      }
+    }
+  });
+});
+
 test('grouped repos each get their own address [N38,N26]', { timeout: 180_000 }, async () => { // budget: hang-only ceiling for grouped repo switching and a separate one-repo machine.
   const box = machine(), alpha = addressBoard(box, 'alpha', 'same-suite'), beta = addressBoard(box, 'beta', 'same-suite');
   await withBrowser(box, async (chrome, server) => {
