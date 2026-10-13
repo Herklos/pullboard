@@ -1,9 +1,11 @@
 /** One real machine setup reaches current and future projects through one phone key [H5,H15,H17]. */
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 import { startFixtureChild as spawn, runFixtureChild as spawnSync } from './fixture-child.js';
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { test } from 'node:test';
+import { createPageStepEvaluator } from './chrome-fixture.js';
 import { relayClientFixture } from './relay-client-fixture.js';
 import { startChrome, findChromeExecutable } from './relay-browser-fixture.js';
 
@@ -65,6 +67,116 @@ function browserDeviceExpression() {
       read.onsuccess = () => { const value=read.result; db.close(); resolve({id:value.deviceId,extractable:value.privateKey.extractable}); }; read.onerror=reject; }; request.onerror=reject; })`;
 }
 
+/** Label a set-up-once page wait without changing the existing timeout or expression. */
+function pageWait(chrome, step, expression, timeoutMs) {
+  return chrome.waitFor(expression, timeoutMs, step);
+}
+
+/** Label a set-up-once page evaluation without changing its expression or deadline. */
+function pageEvaluate(chrome, step, expression) {
+  return chrome.evaluate(expression, step);
+}
+
+test('the set-up-once wait names the step it is on [H5,C7]', {
+  skip: !findChromeExecutable() && 'Chrome is not installed',
+}, async t => {
+  let pendingFetchResponse;
+  const server = createServer((request, response) => {
+    if (request.method === 'POST' && request.url?.startsWith('/api/v1/boards/')) {
+      request.resume();
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.flushHeaders();
+      pendingFetchResponse = response;
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end('<!doctype html><html><head><title>Capture test</title></head><body>stand-in page</body></html>');
+  });
+  await new Promise((resolveListen, rejectListen) => {
+    server.once('error', rejectListen);
+    server.listen(0, '127.0.0.1', resolveListen);
+  });
+  let chrome;
+  t.after(async () => {
+    pendingFetchResponse?.end();
+    await chrome?.close();
+    await new Promise(resolveClose => server.close(resolveClose));
+  });
+  const address = server.address();
+  chrome = await startChrome({
+    url: `http://127.0.0.1:${address.port}/stand-in`,
+    commandTimeoutMs: 1_000,
+    diagnosticTimeoutMs: 200,
+    capturePageSteps: true,
+  });
+  await pageWait(chrome, 'stand-in document is ready', 'document.readyState === "complete"');
+  await pageEvaluate(chrome, 'stand-in device-key step', `Promise.all([
+    crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']),
+    new Promise((resolve, reject) => { const request = indexedDB.open('page-step-capture-probe', 1);
+      request.onsuccess = () => { request.result.close(); resolve(true); }; request.onerror = () => reject(new Error('storage probe failed')); })
+  ]).then(() => true)`);
+  const pathSentinel = 'unknown-path-sentinel';
+  const querySentinel = 'query-sentinel';
+  const fragmentSentinel = 'fragment-sentinel';
+  const bodySentinel = 'body-sentinel';
+  const presentRequestId = '12345678-1234-4234-8234-123456789abc';
+  const absentRequestId = '87654321-4321-4321-8321-cba987654321';
+  const probeUrl = `/api/v1/boards/${pathSentinel}/state?marker=${querySentinel}#${fragmentSentinel}`;
+  await pageEvaluate(chrome, 'start pending privacy probe fetch', `(() => {
+    window.__pullboardCaptureProbe = fetch(${JSON.stringify(probeUrl)}, {
+      method: 'POST', credentials: 'omit', body: ${JSON.stringify(bodySentinel)}
+    }).catch(() => {});
+    return true;
+  })()`);
+  await pageEvaluate(chrome, `install approval card ${presentRequestId}`, `(() => {
+    const card = document.createElement('div'); card.className = 'phone-approval'; card.dataset.request = ${JSON.stringify(presentRequestId)};
+    card.append(document.createElement('button')); document.body.append(card); return true;
+  })()`);
+  /** Assert that forced timeout diagnostics contain only the expected stand-in page state. */
+  const assertPageCapture = (error, step, approvalCard) => {
+    const encoded = /page-step capture: (\{[^\n]+\})/u.exec(error.message)?.[1];
+    assert.ok(encoded, 'the timeout carries one bounded page-state record');
+    const capture = JSON.parse(encoded);
+    assert.equal(capture.stage, step);
+    assert.equal(capture.readyState, 'complete');
+    assert.match(capture.lastDeviceKeyStep, /crypto\.subtle\.generateKey started/u);
+    assert.equal(capture.storageOpenState, 'open');
+    assert.equal(capture.pendingFetches.length, 1);
+    assert.deepEqual({ method: capture.pendingFetches[0].method, path: capture.pendingFetches[0].path }, {
+      method: 'POST', path: '/api/v1/boards/:id/state',
+    });
+    assert.ok(Number.isFinite(capture.pendingFetches[0].ageMs) && capture.pendingFetches[0].ageMs >= 0);
+    assert.deepEqual(capture.approvalCard, approvalCard);
+    for (const sentinel of [pathSentinel, querySentinel, fragmentSentinel, bodySentinel]) {
+      assert.equal(error.message.includes(sentinel), false, `timeout diagnostics omit ${sentinel}`);
+    }
+    return true;
+  };
+  await assert.rejects(pageWait(chrome, `stand-in forced condition step ${presentRequestId}`, 'false', 120), error => assertPageCapture(
+    error, `stand-in forced condition step ${presentRequestId}`,
+    { requestId: presentRequestId, state: 'present', actionCount: 1 },
+  ));
+  await assert.rejects(pageWait(chrome, `stand-in absent approval ${absentRequestId}`, 'false', 80), error => assertPageCapture(
+    error, `stand-in absent approval ${absentRequestId}`,
+    { requestId: absentRequestId, state: 'absent', actionCount: 0 },
+  ));
+  await assert.rejects(pageWait(chrome, 'stand-in forced condition step', 'false', 80), error => assertPageCapture(
+    error, 'stand-in forced condition step', null,
+  ));
+  await assert.rejects(pageEvaluate(chrome, 'stand-in forced evaluate step', 'new Promise(() => {})'), error => {
+    assert.equal(error.code, 'CDP_TIMEOUT');
+    return assertPageCapture(error, 'stand-in forced evaluate step', null);
+  });
+  const originalTimeout = Object.assign(new Error('DevTools Runtime.evaluate timed out after 17ms.'), { code: 'CDP_TIMEOUT' });
+  const unavailableCapture = createPageStepEvaluator(async () => { throw originalTimeout; }, async () => { throw new Error('forced unavailable diagnostic'); });
+  await assert.rejects(unavailableCapture('true', 'forced fallback step'), error => {
+    assert.strictEqual(error, originalTimeout);
+    assert.equal(error.code, 'CDP_TIMEOUT');
+    assert.match(error.message, /^DevTools Runtime\.evaluate timed out after 17ms\.; page-step capture unavailable$/u);
+    return true;
+  });
+});
+
 test('set up once links three registered boards, later registration and a persistent phone without another pairing [H5,H15,H17]', {
   skip: !findChromeExecutable() && 'Chrome is not installed',
 }, async t => {
@@ -89,16 +201,16 @@ test('set up once links three registered boards, later registration and a persis
   assert.equal(box.calls.filter(call => call.path === '/auth/device/start').length, 1, 'one GitHub device sign-in covers the entire machine');
 
   const profileDirectory = join(dirname(box.root), 'phone-profile');
-  chrome = await startChrome({ profileDirectory });
+  chrome = await startChrome({ profileDirectory, capturePageSteps: true });
   assert.equal((await chrome.send('Network.setCookie', { name: 'pb_session', value: (await box.phoneSession()).token, url: box.origin, httpOnly: true, sameSite: 'Lax' })).success, true);
   await chrome.navigate(box.origin + '/#device=' + pending.locator + '.' + pending.secret);
   const completed = await setup.done;
   assert.equal(completed.code, 0);
   assert.equal(completed.document.linked.length, 3);
   assert.equal(completed.document.paired, true);
-  await chrome.waitFor("document.querySelectorAll('#proj-list .proj.repo').length === 3");
-  assert.equal(await chrome.evaluate('location.hash'), '', 'the one-use secret is stripped from browser history');
-  const device = await chrome.evaluate(browserDeviceExpression());
+  await pageWait(chrome, 'initial pairing renders registered boards', "document.querySelectorAll('#proj-list .proj.repo').length === 3");
+  assert.equal(await pageEvaluate(chrome, 'initial pairing strips the one-use fragment', 'location.hash'), '', 'the one-use secret is stripped from browser history');
+  const device = await pageEvaluate(chrome, 'initial pairing reads the persisted device key', browserDeviceExpression());
   assert.equal(device.extractable, false, 'the private phone key is persisted non-extractable in IndexedDB');
   assert.equal(JSON.parse(readFileSync(machineFile, 'utf8')).devices[0].deviceId, device.id);
   assert.equal(JSON.parse(readFileSync(machineFile, 'utf8')).pending, null);
@@ -130,16 +242,16 @@ test('set up once links three registered boards, later registration and a persis
   assert.equal(approvalPosts(), 1, 'status and doctor do not replace or duplicate the request');
   await chrome.navigate(box.origin);
   const approveLinkButton = '#phone-approve-' + linkProposal.context.id;
-  await chrome.waitFor(`document.querySelector(${JSON.stringify(approveLinkButton)}) !== null`);
-  const linkCard = await chrome.evaluate(`({text: document.querySelector('.phone-approval[data-request="${linkProposal.context.id}"]').innerText,
+  await pageWait(chrome, `link approval card ${linkProposal.context.id}`, `document.querySelector(${JSON.stringify(approveLinkButton)}) !== null`);
+  const linkCard = await pageEvaluate(chrome, `read link approval card ${linkProposal.context.id}`, `({text: document.querySelector('.phone-approval[data-request="${linkProposal.context.id}"]').innerText,
     action: document.querySelector(${JSON.stringify(approveLinkButton)}).innerText})`);
   assert.match(linkCard.text, /Link fourth-project\?/u);
   assert.match(linkCard.text, /fixture\/repository/u);
   assert.match(linkCard.text, new RegExp(new Date(linkProposal.context.expires).toISOString().replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')));
   assert.equal(linkCard.action, 'Link project', 'the paired phone presents an explicit one-tap link action');
   const approvalsBeforeLinkTap = box.calls.filter(call => call.path.endsWith('/authorize')).length;
-  await chrome.evaluate(`document.querySelector(${JSON.stringify(approveLinkButton)}).click()`);
-  await chrome.waitFor(`document.querySelector(${JSON.stringify(approveLinkButton)}) === null`);
+  await pageEvaluate(chrome, `tap link approval ${linkProposal.context.id}`, `document.querySelector(${JSON.stringify(approveLinkButton)}).click()`);
+  await pageWait(chrome, `link approval completes ${linkProposal.context.id}`, `document.querySelector(${JSON.stringify(approveLinkButton)}) === null`);
   assert.equal(box.calls.filter(call => call.path.endsWith('/authorize')).length, approvalsBeforeLinkTap + 1,
     'one explicit phone tap authorizes the link proposal once');
   const linkedFourth = await command(fourth, box.env, ['status']).done;
@@ -148,18 +260,18 @@ test('set up once links three registered boards, later registration and a persis
   assert.equal(JSON.parse(readFileSync(approvalFile, 'utf8')).approvals.some(entry => entry.root === fourth), false);
   assert.equal(approvalPosts(), 1, 'consuming the phone reply does not submit another proposal');
   assert.equal(box.calls.filter(call => call.path === '/auth/device/start').length, 1, 'no second machine sign-in');
-  await chrome.waitFor("document.querySelectorAll('#proj-list .proj.repo').length === 4");
-  assert.deepEqual(await chrome.evaluate(browserDeviceExpression()), device, 'a new page retrieves the same private device key');
+  await pageWait(chrome, 'fourth board appears after approval', "document.querySelectorAll('#proj-list .proj.repo').length === 4");
+  assert.deepEqual(await pageEvaluate(chrome, 'new page retrieves the paired device key', browserDeviceExpression()), device, 'a new page retrieves the same private device key');
   await chrome.close();
   rmSync(join(profileDirectory, 'DevToolsActivePort'), { force: true });
-  chrome = await startChrome({ profileDirectory });
+  chrome = await startChrome({ profileDirectory, capturePageSteps: true });
   assert.equal((await chrome.send('Network.setCookie', { name: 'pb_session', value: (await box.phoneSession()).token, url: box.origin, httpOnly: true, sameSite: 'Lax' })).success, true);
   await chrome.navigate(box.origin);
-  await chrome.waitFor("document.querySelectorAll('#proj-list .proj.repo').length === 4");
-  assert.deepEqual(await chrome.evaluate(browserDeviceExpression()), device, 'a new browser process retrieves the original non-extractable key');
+  await pageWait(chrome, 'reopened browser renders linked boards', "document.querySelectorAll('#proj-list .proj.repo').length === 4");
+  assert.deepEqual(await pageEvaluate(chrome, 'reopened browser retrieves the paired device key', browserDeviceExpression()), device, 'a new browser process retrieves the original non-extractable key');
   for (const root of allRoots) {
     const board = link(root).board;
-    assert.equal(await chrome.evaluate(`Object.hasOwn(JSON.parse(localStorage.getItem('pullboard.relay.keys.v1')), ${JSON.stringify(board)})`), true,
+    assert.equal(await pageEvaluate(chrome, 'reopened browser loads a linked board key', `Object.hasOwn(JSON.parse(localStorage.getItem('pullboard.relay.keys.v1')), ${JSON.stringify(board)})`), true,
       'the actual browser unwrapped each board key, including the later board');
   }
 
@@ -171,7 +283,7 @@ test('set up once links three registered boards, later registration and a persis
   assert.equal(box.calls.filter(call => call.path === '/auth/device/start').length, 2, 'explicit relay on --all performs a fresh foreground sign-in');
   assert.equal(box.calls.filter(call => call.method === 'POST' && call.path.startsWith('/api/v1/devices/enrollments/')).length, 1,
     'the existing paired phone is retained without another pairing enrollment');
-  assert.deepEqual(await chrome.evaluate(browserDeviceExpression()), device);
+  assert.deepEqual(await pageEvaluate(chrome, 'explicit setup retains the paired device key', browserDeviceExpression()), device);
 
   const off = await command(fourth, box.env, ['relay', 'off']).done;
   assert.equal(off.code, 0);
@@ -182,8 +294,8 @@ test('set up once links three registered boards, later registration and a persis
   const deleteApproval = JSON.parse(deletePost.request.toString('utf8')).context;
   assert.equal(deleteApproval.action, 'delete-board', 'remote deletion is a separate phone-approved action');
   assert.equal(deleteApproval.target, fourthBoard);
-  await chrome.waitFor(`document.querySelector('.phone-approval[data-request="${deleteApproval.id}"]') !== null`);
-  const deleteCard = await chrome.evaluate(`({text: document.querySelector('.phone-approval[data-request="${deleteApproval.id}"]').innerText,
+  await pageWait(chrome, `delete approval card ${deleteApproval.id}`, `document.querySelector('.phone-approval[data-request="${deleteApproval.id}"]') !== null`);
+  const deleteCard = await pageEvaluate(chrome, `read delete approval card ${deleteApproval.id}`, `({text: document.querySelector('.phone-approval[data-request="${deleteApproval.id}"]').innerText,
     action: document.querySelector('.phone-approval[data-request="${deleteApproval.id}"] button').innerText})`);
   assert.match(deleteCard.text, new RegExp(deleteApproval.target));
   assert.equal(deleteCard.action, 'Delete relay copy');
@@ -193,8 +305,8 @@ test('set up once links three registered boards, later registration and a persis
   assert.equal((await boardsBeforeDeleteTap.json()).boards.some(board => board.id === fourthBoard), true,
     'relay off leaves the remote board in place while its phone approval is pending');
   const beforeDeleteTap = box.calls.filter(call => call.path.endsWith('/authorize')).length;
-  await chrome.evaluate(`document.querySelector('.phone-approval[data-request="${deleteApproval.id}"] button').click()`);
-  await chrome.waitFor(`document.querySelector('.phone-approval[data-request="${deleteApproval.id}"]') === null`);
+  await pageEvaluate(chrome, `tap delete approval ${deleteApproval.id}`, `document.querySelector('.phone-approval[data-request="${deleteApproval.id}"] button').click()`);
+  await pageWait(chrome, `delete approval completes ${deleteApproval.id}`, `document.querySelector('.phone-approval[data-request="${deleteApproval.id}"]') === null`);
   assert.equal(box.calls.filter(call => call.path.endsWith('/authorize')).length, beforeDeleteTap + 1,
     'the remote copy is deleted only after the deliberate phone tap');
   const boardsAfterDeleteTap = await fetch(box.origin + '/auth/boards', { headers: { cookie: 'pb_session=' + phone.token } });
@@ -215,8 +327,8 @@ test('set up once links three registered boards, later registration and a persis
     'explicitly linking the board again requires a foreground sign-in');
   assert.equal(JSON.parse(readFileSync(machineFile, 'utf8')).excluded.includes(fourth), false,
     'explicit board linking clears its opt-out');
-  await chrome.waitFor("document.querySelectorAll('#proj-list .proj.repo').length === 4");
-  assert.deepEqual(await chrome.evaluate(browserDeviceExpression()), device,
+  await pageWait(chrome, 'relinking renders four linked boards', "document.querySelectorAll('#proj-list .proj.repo').length === 4");
+  assert.deepEqual(await pageEvaluate(chrome, 'relinking retains the paired device key', browserDeviceExpression()), device,
     'relinking wraps the board for the same paired phone key');
   assert.equal(box.calls.filter(call => call.path === '/auth/device/start').length, 4);
   assert.equal(box.calls.filter(call => call.method === 'POST' && call.path.startsWith('/api/v1/devices/enrollments/')).length, 1);
@@ -231,15 +343,23 @@ test('set up once links three registered boards, later registration and a persis
     assert.equal(durableBytes.includes(Buffer.from(raw, 'base64url')), false, 'no raw board-key bytes in relay records');
   }
 
+  const approvalsBeforeRevoke = box.transit.filter(record => record.method === 'POST' && record.path === '/api/v1/devices/approvals').length;
   const revokeCommand = command(box.root, box.env, ['relay', 'revoke', device.id]);
   t.after(async () => { if (revokeCommand.child.exitCode === null) revokeCommand.child.kill('SIGTERM'); await revokeCommand.done.catch(() => {}); });
-  await chrome.waitFor(`[...document.querySelectorAll('.phone-approval')].some(node => node.textContent.includes(${JSON.stringify(device.id)}))`);
-  const revocationCard = await chrome.evaluate(`({text: [...document.querySelectorAll('.phone-approval')].find(node => node.textContent.includes(${JSON.stringify(device.id)})).innerText,
+  /** Read the request id for the newly published revocation without adding another wait. */
+  const revokeRequestId = () => {
+    const approvals = box.transit.filter(record => record.method === 'POST' && record.path === '/api/v1/devices/approvals');
+    const post = approvals.length > approvalsBeforeRevoke ? approvals.at(-1) : null;
+    return post ? JSON.parse(post.request.toString('utf8')).context.id : 'request pending';
+  };
+  await pageWait(chrome, () => `device revocation approval ${revokeRequestId()}`, `[...document.querySelectorAll('.phone-approval')].some(node => node.textContent.includes(${JSON.stringify(device.id)}))`);
+  const revokeId = revokeRequestId();
+  const revocationCard = await pageEvaluate(chrome, `read device revocation approval ${revokeId}`, `({text: [...document.querySelectorAll('.phone-approval')].find(node => node.textContent.includes(${JSON.stringify(device.id)})).innerText,
     action: [...document.querySelectorAll('.phone-approval')].find(node => node.textContent.includes(${JSON.stringify(device.id)})).querySelector('button').innerText})`);
   assert.match(revocationCard.text, new RegExp(device.id));
   assert.equal(revocationCard.action, 'Approve revocation');
   const beforeRevokeTap = box.calls.filter(call => call.path.endsWith('/authorize')).length;
-  await chrome.evaluate(`[...document.querySelectorAll('.phone-approval')].find(node => node.textContent.includes(${JSON.stringify(device.id)})).querySelector('button').click()`);
+  await pageEvaluate(chrome, `tap device revocation approval ${revokeId}`, `[...document.querySelectorAll('.phone-approval')].find(node => node.textContent.includes(${JSON.stringify(device.id)})).querySelector('button').click()`);
   const revoked = await revokeCommand.done;
   assert.equal(revoked.code, 0);
   assert.match(revoked.document.notice, /already received remain known/u);
@@ -318,7 +438,7 @@ test('a set-up-once run stretched past 30 seconds still gets its approval card [
     return JSON.parse(readFileSync(machineFile, 'utf8')).pending;
   }, 'set-up-once publishes a real pending phone enrollment');
   const profileDirectory = join(dirname(box.root), 'stretched-approval-phone-profile');
-  chrome = await startChrome({ profileDirectory });
+  chrome = await startChrome({ profileDirectory, capturePageSteps: true });
   const session = await box.phoneSession();
   assert.equal((await chrome.send('Network.setCookie', { name: 'pb_session', value: session.token,
     url: box.origin, httpOnly: true, sameSite: 'Lax' })).success, true);
@@ -326,7 +446,7 @@ test('a set-up-once run stretched past 30 seconds still gets its approval card [
   const completed = await setup.done;
   assert.equal(completed.code, 0, 'the actual machine setup pairs the phone');
   assert.equal(completed.document.paired, true);
-  await chrome.waitFor("document.querySelectorAll('#proj-list .proj.repo').length === 1");
+  await pageWait(chrome, 'initial pairing renders the registered board', "document.querySelectorAll('#proj-list .proj.repo').length === 1");
 
   const stretchStarted = Date.now();
   await new Promise(resolve => setTimeout(resolve, 40_100));
@@ -338,16 +458,16 @@ test('a set-up-once run stretched past 30 seconds still gets its approval card [
   assert.ok(proposal, 'the later real project registration creates its phone approval');
   const button = '#phone-approve-' + proposal.context.id;
   await assert.doesNotReject(
-    chrome.waitFor(`document.querySelector(${JSON.stringify(button)}) !== null`),
+    pageWait(chrome, `delayed project approval card ${proposal.context.id}`, `document.querySelector(${JSON.stringify(button)}) !== null`),
     'the elapsed-clock approval becomes a visible card',
   );
   assert.equal(proposal.published, true, 'the relay accepts the native approval after the elapsed delay');
-  const card = await chrome.evaluate(`({text: document.querySelector('.phone-approval[data-request="${proposal.context.id}"]').innerText,
+  const card = await pageEvaluate(chrome, `read delayed project approval card ${proposal.context.id}`, `({text: document.querySelector('.phone-approval[data-request="${proposal.context.id}"]').innerText,
     action: document.querySelector(${JSON.stringify(button)}).innerText})`);
   assert.match(card.text, /Link delayed-approval-project\?/u);
   assert.equal(card.action, 'Link project');
-  await chrome.evaluate(`document.querySelector(${JSON.stringify(button)}).click()`);
-  await chrome.waitFor(`document.querySelector(${JSON.stringify(button)}) === null`);
+  await pageEvaluate(chrome, `tap delayed project approval ${proposal.context.id}`, `document.querySelector(${JSON.stringify(button)}).click()`);
+  await pageWait(chrome, `delayed project approval completes ${proposal.context.id}`, `document.querySelector(${JSON.stringify(button)}) === null`);
   const consumed = await command(delayed, box.env, ['status']).done;
   assert.equal(consumed.code, 0, 'the real native follow-up consumes the phone approval');
   assert.equal(existsSync(join(delayed, '.git/pullboard/relay.json')), true);

@@ -38,13 +38,15 @@ export async function waitForTargetAbsent(listTargets, targetId, {
 }
 
 /** Build the shared bounded page-condition loop around the real CDP evaluator. */
-export function createWaiter(evaluate, { commandTimeoutMs = COMMAND_TIMEOUT_MS, pauseFor = pause, now = Date.now } = {}) {
+export function createWaiter(evaluate, { commandTimeoutMs = COMMAND_TIMEOUT_MS, pauseFor = pause, now = Date.now,
+  includeExpression = true, captureTimeout } = {}) {
   return async function waitFor(expression, timeoutMs = commandTimeoutMs, label = 'wait for page condition') {
     const waitDeadline = now() + timeoutMs;
     let lastEvaluationError = null;
+    const currentLabel = () => typeof label === 'function' ? label() : label;
     while (now() < waitDeadline) {
       try {
-        if (await evaluate(expression, label, waitDeadline - now())) return;
+        if (await evaluate(expression, currentLabel(), waitDeadline - now())) return;
       } catch (error) {
         if (error instanceof Error && (error.message.startsWith('Browser evaluation failed:')
           || (error.code === -32000 && error.navigated === true))) lastEvaluationError = error;
@@ -52,8 +54,16 @@ export function createWaiter(evaluate, { commandTimeoutMs = COMMAND_TIMEOUT_MS, 
       }
       await pauseFor(Math.max(0, Math.min(50, waitDeadline - now())));
     }
-    const exception = lastEvaluationError instanceof Error ? `; last evaluation failed: ${lastEvaluationError.message}` : '';
-    throw new Error(`Browser condition "${label}" did not arrive within ${timeoutMs}ms; expression: ${expression.slice(0, 200)}${exception}.`);
+    const exception = lastEvaluationError instanceof Error
+      ? includeExpression ? `; last evaluation failed: ${lastEvaluationError.message}` : '; last page evaluation did not complete'
+      : '';
+    const expressionDetail = includeExpression ? `; expression: ${expression.slice(0, 200)}` : '';
+    let capture = '';
+    if (captureTimeout) {
+      try { capture = await captureTimeout(currentLabel()); }
+      catch { capture = '; page-step capture unavailable'; }
+    }
+    throw new Error(`Browser condition "${currentLabel()}" did not arrive within ${timeoutMs}ms${expressionDetail}${exception}${capture}.`);
   };
 }
 
@@ -163,6 +173,8 @@ export async function startChrome({
   commandTimeoutMs = COMMAND_TIMEOUT_MS,
   taskTimeoutMs = 25_000,
   cleanupTimeoutMs = CLEANUP_TIMEOUT_MS,
+  capturePageSteps = false,
+  diagnosticTimeoutMs = 750,
   env = process.env,
 } = {}) {
   if (!executable) throw new Error('Chrome was not found; install Chrome or set PULLBOARD_CHROME.');
@@ -187,15 +199,44 @@ export async function startChrome({
     loopDelay = monitorEventLoopDelay({ resolution: 10 });
     loopDelay.enable();
     const relayRequests = new Set();
-    const send = createSender(socket, pending, () => ++id, commandTimeoutMs, loopDelay, relayRequests);
-    const evaluate = createEvaluator(send);
+    const pageFetches = capturePageSteps ? new Map() : null;
+    const send = createSender(socket, pending, () => ++id, commandTimeoutMs, loopDelay, relayRequests, {}, pageFetches);
+    const rawEvaluate = createEvaluator(send);
+    /** Capture bounded page metadata after a timeout without changing the original operation's deadline. */
+    async function capturePageState(label) {
+      let page = { readyState: 'unavailable', lastDeviceKeyStep: 'unavailable', storageOpenState: 'unavailable', approvalCard: null };
+      const approvalRequestId = /\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/iu.exec(String(label))?.[1] ?? null;
+      if (approvalRequestId) page.approvalCard = { requestId: approvalRequestId, state: 'unavailable', actionCount: 0 };
+      try {
+        page = await rawEvaluate(`({ readyState: document.readyState,
+          lastDeviceKeyStep: window.__pullboardPageStepCapture?.lastDeviceKeyStep ?? 'not observed',
+          storageOpenState: window.__pullboardPageStepCapture?.storageOpenState ?? 'not observed',
+          approvalCard: ${JSON.stringify(approvalRequestId)} === null ? null : (() => {
+            const card = document.querySelector('.phone-approval[data-request="' + ${JSON.stringify(approvalRequestId)} + '"]');
+            return { requestId: ${JSON.stringify(approvalRequestId)}, state: card ? 'present' : 'absent', actionCount: card?.querySelectorAll('button').length ?? 0 };
+          })() })`,
+        'capture page state after timeout', Math.max(1, Math.min(750, diagnosticTimeoutMs, commandTimeoutMs)));
+      } catch { /* A page that cannot answer diagnostics still gets a named timeout. */ }
+      const pendingFetches = [...pageFetches.values()].map((request) => ({
+        method: request.method,
+        path: request.path,
+        ageMs: Math.max(0, Date.now() - request.startedAt),
+      }));
+      const stage = String(label).replace(/[\r\n\t]/gu, ' ').slice(0, 120);
+      return `; page-step capture: ${JSON.stringify({ stage, ...page, pendingFetches })}`;
+    }
+    const evaluate = capturePageSteps ? createPageStepEvaluator(rawEvaluate, capturePageState) : rawEvaluate;
     let closed = false;
     let taskSequence = 0;
     /** Navigate the existing isolated browser profile to a local or test-owned URL. */
     async function navigate(nextUrl) {
       await send('Page.navigate', { url: nextUrl }, 'navigate page');
     }
-    const waitFor = createWaiter(evaluate, { commandTimeoutMs });
+    const waitFor = createWaiter(evaluate, {
+      commandTimeoutMs,
+      includeExpression: !capturePageSteps,
+      ...(capturePageSteps ? { captureTimeout: capturePageState } : {}),
+    });
     /** Wait for non-stream relay traffic to finish before an idle-network assertion. */
     async function waitForRelayIdle(timeoutMs = commandTimeoutMs) {
       const deadline = Date.now() + timeoutMs;
@@ -243,6 +284,7 @@ export async function startChrome({
     await send('Network.enable', {}, 'enable network diagnostics', deadline - Date.now());
     await send('Page.enable', {}, 'enable page diagnostics', deadline - Date.now());
     await send('Runtime.enable', {}, 'enable runtime diagnostics', deadline - Date.now());
+    if (capturePageSteps) await send('Page.addScriptToEvaluateOnNewDocument', { source: pageStepCaptureScript() }, 'install page-step capture', deadline - Date.now());
     await send('Page.navigate', { url }, 'open initial page', deadline - Date.now());
     const launchDurationMs = launched.launchDurationMs;
     process.stderr.write(`Chrome ready in ${launchDurationMs}ms (${startupTimeoutMs}ms DevTools budget)\n`);
@@ -315,7 +357,7 @@ async function connectDevTools(debuggerUrl, deadline) {
 }
 
 /** Create a CDP sender with a deadline checked on the same clock used by timeout diagnostics. */
-export function createSender(socket, pending, nextId, timeoutMs, loopDelay, relayRequests, timers = {}) {
+export function createSender(socket, pending, nextId, timeoutMs, loopDelay, relayRequests, timers = {}, pageFetches = null) {
   const now = timers.now ?? Date.now;
   const schedule = timers.setTimeout ?? setTimeout;
   const cancel = timers.clearTimeout ?? clearTimeout;
@@ -357,12 +399,30 @@ export function createSender(socket, pending, nextId, timeoutMs, loopDelay, rela
     if (message.method === 'Network.requestWillBeSent') {
       const request = message.params?.request;
       const url = request?.url ?? '';
+      if (pageFetches && ['Fetch', 'XHR'].includes(message.params?.type)) {
+        let path = '/';
+        try {
+          path = new URL(url).pathname.split('/').map((segment) => {
+            if (!segment) return '';
+            return new Set(['api', 'auth', 'boards', 'devices', 'approvals', 'enrollments', 'start', 'state', 'events', 'requests', 'authorize', 'github', 'session', 'tokens', 'machines']).has(segment)
+              || /^v[0-9]{1,3}$/u.test(segment)
+              ? segment : ':id';
+          }).join('/');
+        } catch { path = '/[unavailable]'; }
+          pageFetches.set(message.params.requestId, {
+            method: /^[A-Za-z]{1,12}$/u.test(request?.method ?? '') ? request.method.toUpperCase() : 'OTHER',
+            path: path.slice(0, 160),
+            startedAt: now(),
+          });
+          while (pageFetches.size > 32) pageFetches.delete(pageFetches.keys().next().value);
+      }
       const eventStream = /\/api\/v1\/boards\/[0-9a-f]{32}\/events(?:\?|$)/.test(url)
         && /text\/event-stream/i.test(request?.headers?.Accept ?? request?.headers?.accept ?? '');
       if (/\/api\/v1\/boards\//.test(url) && !eventStream) relayRequests.add(message.params.requestId);
     }
     if (['Network.loadingFinished', 'Network.loadingFailed'].includes(message.method)) {
       relayRequests.delete(message.params?.requestId);
+      pageFetches?.delete(message.params?.requestId);
     }
     const waiter = pending.get(message.id);
     if (!waiter) return;
@@ -448,6 +508,49 @@ export function createEvaluator(send) {
     }
     return result.result?.value;
   };
+}
+
+/** Add bounded page-state capture to evaluation timeouts while preserving the original failure. */
+export function createPageStepEvaluator(evaluate, captureTimeout) {
+  return async (expression, label = 'evaluate page expression', remainingMs) => {
+    try { return await evaluate(expression, label, remainingMs); }
+    catch (error) {
+      if (error?.code !== 'CDP_TIMEOUT') throw error;
+      try { error.message += await captureTimeout(label); }
+      catch { error.message += '; page-step capture unavailable'; }
+      throw error;
+    }
+  };
+}
+
+/** Instrument only bounded operation names so a timeout can distinguish crypto and storage stages. */
+function pageStepCaptureScript() {
+  return `(() => {
+    const state = window.__pullboardPageStepCapture = { lastDeviceKeyStep: 'no device-key operation observed', storageOpenState: 'not opened' };
+    try {
+      const prototype = Object.getPrototypeOf(indexedDB);
+      const originalOpen = prototype.open;
+      prototype.open = function (...args) {
+        state.storageOpenState = 'opening';
+        const request = originalOpen.apply(this, args);
+        request.addEventListener('success', () => { state.storageOpenState = 'open'; }, { once: true });
+        request.addEventListener('error', () => { state.storageOpenState = 'failed'; }, { once: true });
+        request.addEventListener('blocked', () => { state.storageOpenState = 'blocked'; }, { once: true });
+        return request;
+      };
+    } catch {}
+    try {
+      const prototype = Object.getPrototypeOf(crypto.subtle);
+      for (const name of ['generateKey', 'importKey', 'deriveBits', 'deriveKey', 'encrypt', 'decrypt', 'sign', 'verify', 'exportKey']) {
+        const original = prototype[name];
+        if (typeof original !== 'function') continue;
+        prototype[name] = function (...args) {
+          state.lastDeviceKeyStep = 'crypto.subtle.' + name + ' started';
+          return original.apply(this, args);
+        };
+      }
+    } catch {}
+  })();`;
 }
 
 /** Reject outstanding CDP requests during close or startup failure without exposing payloads. */
