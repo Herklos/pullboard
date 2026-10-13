@@ -152,15 +152,15 @@ test('the set-up-once wait names the step it is on [H5,C7]', {
     }
     return true;
   };
-  await assert.rejects(pageWait(chrome, `stand-in forced condition step ${presentRequestId}`, 'false', 120), error => assertPageCapture(
+  await assert.rejects(pageWait(chrome, `stand-in forced condition step ${presentRequestId}`, 'false', 120), error => assertPageCapture( // budget: 120 ms hang ceiling for forced stand-in timeout capture
     error, `stand-in forced condition step ${presentRequestId}`,
     { requestId: presentRequestId, state: 'present', actionCount: 1 },
   ));
-  await assert.rejects(pageWait(chrome, `stand-in absent approval ${absentRequestId}`, 'false', 80), error => assertPageCapture(
+  await assert.rejects(pageWait(chrome, `stand-in absent approval ${absentRequestId}`, 'false', 80), error => assertPageCapture( // budget: 80 ms hang ceiling for forced stand-in timeout capture
     error, `stand-in absent approval ${absentRequestId}`,
     { requestId: absentRequestId, state: 'absent', actionCount: 0 },
   ));
-  await assert.rejects(pageWait(chrome, 'stand-in forced condition step', 'false', 80), error => assertPageCapture(
+  await assert.rejects(pageWait(chrome, 'stand-in forced condition step', 'false', 80), error => assertPageCapture( // budget: 80 ms hang ceiling for forced stand-in timeout capture
     error, 'stand-in forced condition step', null,
   ));
   await assert.rejects(pageEvaluate(chrome, 'stand-in forced evaluate step', 'new Promise(() => {})'), error => {
