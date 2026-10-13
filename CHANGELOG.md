@@ -4,6 +4,21 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.8.14] - 2026-10-13
+
+### Your agent sets it up
+
+Run pullboard init, then ask your agent to set up Pullboard here. Whatever model it is, it now walks you through what you are building, your lanes, the command that proves the build, your first item, and opening the view.
+
+### Added
+
+- On a board that is not set up yet, pullboard resume walks any agent through setup one step at a time, phrased as what to ask you, and each step completes from the board's real state.
+- pullboard init ends with one plain instruction, and the agent guide it writes starts with what to do on a new board.
+
+### Fixed
+
+- Pullboard's own tests no longer fail when Chrome still lists a tab it just closed, so its CI is green on Linux and macOS.
+
 ## [0.8.13] - 2026-10-12
 
 ### Replays hold still
