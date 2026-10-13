@@ -1522,7 +1522,7 @@ export function reopen(board, id, { agentId, note }) {
 
 /** Read test and merge-commit evidence from a Studio/manual landing note without checking Git. */
 function manualLandingFailure(note) {
-  const test = note.match(/(?<file>(?:[\w.-]+\/)+[\w.-]+):\s*(?<name>[^;\n]+?)(?=\s*;\s*merge commit\b|$)/iu);
+  const test = note.match(/(?<file>(?:[\w.-]+\/)*[\w.-]+):\s*(?<name>[^;\n]+?)(?=\s*;\s*merge commit\b|$)/iu);
   const mergeCommit = note.match(/\bmerge commit\s+([a-f0-9]{40}|[a-f0-9]{64})\b/iu)?.[1];
   if (!test || !test.groups.name.trim() || !mergeCommit) return null;
   return { test: { file: test.groups.file, name: test.groups.name.trim() }, mergeCommit };

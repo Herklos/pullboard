@@ -1,5 +1,6 @@
 /** Real Git, SQLite and ordered-engine coverage for coordinator criterion reopen [V2,V6,H16]. */
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -355,6 +356,57 @@ test('a red landing gate returns a verified item to its builder [B3,V4]', async 
   const mergedReopen = box.run(box.repo, 'reopen', String(item.id), '--note', landingNote, '--json');
   assert.equal(mergedReopen.code, 1);
   assert.equal(JSON.parse(mergedReopen.out).error.code, 'ALREADY_MERGED');
+});
+
+test('manual reopen accepts a failing root-level test after an unrecorded two-parent merge [B3,V4]', (t) => {
+  const box = landingProject();
+  const item = submitLandingFixture(box, 1, 'export const status = "RED";\n');
+  acceptLandingFixture(box, item);
+
+  writeFileSync(join(box.repo, 'root.test.js'), [
+    "import assert from 'node:assert/strict';",
+    "import { readFileSync } from 'node:fs';",
+    "import { test } from 'node:test';",
+    "test('root-level landing behavior remains green', () => assert.match(readFileSync(new URL('./web/feature.js', import.meta.url), 'utf8'), /export const status = [\"']PASS[\"']/u));",
+    '',
+  ].join('\n'));
+  box.git(box.repo, 'add', 'root.test.js');
+  box.git(box.repo, 'commit', '-q', '-m', 'test: guard root-level landing behavior [G1]');
+
+  const merged = box.tryGit(box.repo, 'merge', '--no-ff', '--no-edit', item.commit);
+  assert.equal(merged.status, 0, merged.failure ?? merged.stderr);
+  const mergeCommit = box.git(box.repo, 'rev-parse', 'HEAD');
+  const mergeParents = box.git(box.repo, 'rev-list', '--parents', '-n', '1', mergeCommit).split(' ');
+  assert.equal(mergeParents.length, 3, 'the manual landing evidence names a real two-parent merge commit');
+  assert.equal(mergeParents[2], item.commit, 'the second parent is the accepted item commit');
+
+  const failingRootTest = spawnSync(process.execPath, ['--test', '--test-reporter=tap', 'root.test.js'], {
+    cwd: box.repo, env: box.env, encoding: 'utf8',
+  });
+  assert.equal(failingRootTest.status, 1, failingRootTest.stderr || failingRootTest.stdout);
+  assert.match(failingRootTest.stdout, /not ok 1 - root-level landing behavior remains green/u);
+
+  const board = openFixtureBoard(t, box);
+  assert.deepEqual(store.landingBatches(board), [], 'a hand-run merge has no recorded landing batch');
+  const accepted = readItem(box, item.id).thread.findLast((event) => event.type === 'move' && event.kind === 'accept');
+  assert.ok(accepted, 'the item has the original accept that the landing failure supersedes');
+  const note = `root.test.js: root-level landing behavior remains green; merge commit ${mergeCommit}`;
+  const reopened = box.run(box.repo, 'reopen', String(item.id), '--note', note, '--json');
+  assert.equal(reopened.code, 0, [reopened.err, reopened.out].filter(Boolean).join('\n'));
+  assert.deepEqual(JSON.parse(reopened.out).landingFailure, {
+    batch: null,
+    tests: [{ file: 'root.test.js', name: 'root-level landing behavior remains green' }],
+    mergeCommit,
+  });
+
+  const returned = readItem(box, item.id);
+  assert.equal(returned.item_status, 'open');
+  assert.equal(returned.item_commit, item.commit, 'the accepted commit remains recorded');
+  const reopenEvent = returned.thread.findLast((event) => event.type === 'move' && event.kind === 'reopen');
+  assert.equal(reopenEvent.detail.supersedes, accepted.eventId);
+  assert.deepEqual(reopenEvent.detail.landingFailure, JSON.parse(reopened.out).landingFailure);
+  assert.ok(returned.thread.some((event) => event.eventId === accepted.eventId && event.kind === 'accept'),
+    'the append-only accept remains in history');
 });
 
 test('a reopened item resubmits at a new head after a criterion edit [V2,V6,H16]', async (t) => {
