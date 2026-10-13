@@ -348,8 +348,8 @@ async function armLaneReleaseCapture(chrome, selector, stableRoot = "document.qu
     /** Compare every preceding element, including hidden panels that could become visible in a refresh. */
     const sample = (type, point = null) => {
       const target = document.querySelector(${JSON.stringify(selector)}), targetBox = target ? box(target) : null;
-      const nodes = [...document.body.querySelectorAll('*')].filter(node => node === target
-        || (!node.contains(target) && !!(node.compareDocumentPosition(target) & Node.DOCUMENT_POSITION_FOLLOWING)));
+      const nodes = target ? [...document.body.querySelectorAll('*')].filter(node => node === target
+        || (!node.contains(target) && !!(node.compareDocumentPosition(target) & Node.DOCUMENT_POSITION_FOLLOWING))) : [];
       if (nodes.length > 2000) dropped.nodeLimit += nodes.length - 2000;
       for (const node of nodes.slice(0, 2000)) {
         const now = box(node), old = prior.get(now.node);
@@ -398,11 +398,16 @@ async function armLaneReleaseCapture(chrome, selector, stableRoot = "document.qu
     window.__laneReleaseCapture = {
       /** Disconnect all observers and restore the native method even when the original press refused to click. */
       finish() {
-        stopped = true; cancelAnimationFrame(animation); sample('finish');
+        stopped = true;
+        try {
+          sample('finish');
+        } finally {
+          cancelAnimationFrame(animation);
           for (const type of ['pointermove', 'pointerdown', 'mousedown', 'click']) document.removeEventListener(type, listener, true);
-        window.removeEventListener('scroll', listener, true);
-        Element.prototype.scrollIntoView = originalScrollIntoView;
-        delete window.__laneReleaseCapture;
+          window.removeEventListener('scroll', listener, true);
+          Element.prototype.scrollIntoView = originalScrollIntoView;
+          delete window.__laneReleaseCapture;
+        }
         /** Keep only the named box fields needed to compare layout before and after the press. */
         const summarizeBox = value => value && ({ node: value.node, tag: value.tag, id: value.id,
           className: value.className, top: value.top, documentTop: value.documentTop, height: value.height,
@@ -1106,6 +1111,56 @@ test('a moved press target names the element that moved it [N26,C7]', {
   } finally {
     if (chrome) {
       await chrome.stable('window.__pressMoveFixture?.cleanup()').catch(() => undefined);
+      await closeSnapshotChrome(chrome);
+    }
+    await view.stop();
+    rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+test('a removed lane-release target still cleans up its capture [N26,C7]', {
+  timeout: 120_000, // budget: hang-only ceiling for real Chrome startup and one target-removal cleanup check.
+}, async (t) => {
+  const executable = chromeExecutable();
+  if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME for the removed-target cleanup check.');
+
+  const box = machine();
+  project(box, 'removed-press-target');
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-removed-press-'));
+  let chrome, captureSetup = null, captureFinishAttempted = false;
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.waitFor("document.readyState === 'complete' && !!document.body");
+    await chrome.stable(`(() => {
+      const target = document.createElement('button');
+      target.id = 'removed-press-target';
+      target.type = 'button';
+      target.textContent = 'Temporary target';
+      document.body.append(target);
+      window.__removedPressOriginalScrollIntoView = Element.prototype.scrollIntoView;
+    })()`);
+    captureSetup = await armLaneReleaseCapture(chrome, '#removed-press-target', 'document.documentElement');
+    assert.equal(captureSetup.armed, true, `the capture arms before its target is removed: ${JSON.stringify(captureSetup)}`);
+
+    await chrome.stable("document.querySelector('#removed-press-target').remove()");
+    captureFinishAttempted = true;
+    const capture = await finishLaneReleaseCapture(chrome, captureSetup);
+    assert.equal(capture.pageError, null, `finishing after target removal does not throw: ${JSON.stringify(capture)}`);
+    const removed = capture.page?.changedNodes.find((entry) => entry.node.id === 'removed-press-target');
+    assert.equal(removed?.last.connected, false, `the bounded sample records that its target disappeared: ${JSON.stringify(capture.page?.changedNodes)}`);
+    const cleanup = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+      const state = { captureInstalled: Boolean(window.__laneReleaseCapture), scrollIntoViewRestored:
+        Element.prototype.scrollIntoView === window.__removedPressOriginalScrollIntoView };
+      delete window.__removedPressOriginalScrollIntoView;
+      return state;
+    })())`));
+    assert.deepEqual(cleanup, { captureInstalled: false, scrollIntoViewRestored: true },
+      `the finish path removes its global and restores the native method: ${JSON.stringify(cleanup)}`);
+  } finally {
+    if (chrome) {
+      if (captureSetup && !captureFinishAttempted) await finishLaneReleaseCapture(chrome, captureSetup).catch(() => undefined);
+      await chrome.stable('delete window.__removedPressOriginalScrollIntoView').catch(() => undefined);
       await closeSnapshotChrome(chrome);
     }
     await view.stop();
