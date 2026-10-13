@@ -127,3 +127,26 @@ test('command phrases match help --all, longest first [N26]', async t => {
   }
   assert.equal(new Set(added).size, added.length, 'each phrase occurs once');
 });
+
+test('help spec lists every spec subcommand and who runs it [N32]', t => {
+  const e2e = createE2eHelpers();
+  t.after(e2e.cleanup);
+  const box = e2e.sandbox();
+  const result = box.run(box.dir, 'help', 'spec');
+  assert.equal(result.code, 0, result.err);
+  for (const command of [
+    'pullboard spec --json',
+    'pullboard spec check',
+    'pullboard spec view',
+    'pullboard spec show <id>',
+    'pullboard spec unmet',
+    'pullboard spec signoff <ids>',
+    'pullboard spec signers add',
+    'pullboard spec approve <ids>',
+    'pullboard spec decline <ids>',
+    'pullboard spec apply',
+  ]) assert.ok(result.out.includes(`  ${command} —`), `help spec names ${command}`);
+  assert.match(result.out, /spec approve <ids> — person: decide from their own terminal or Pullboard View/u);
+  assert.match(result.out, /spec decline <ids> — person: decide from their own terminal or Pullboard View/u);
+  assert.match(result.out, /spec apply — coordinator: apply recorded row decisions to the files/u);
+});

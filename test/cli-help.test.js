@@ -25,7 +25,7 @@ function run(...args) {
 function flagsFrom(text) {
   const lines = text.split('\n');
   const start = lines.indexOf('Flags:');
-  const end = lines.indexOf('Example:');
+  const end = lines.findIndex((line, index) => index > start && ['Subcommands:', 'Example:'].includes(line));
   return lines.slice(start + 1, end).map((line) => line.trim()).filter((line) => line !== 'none');
 }
 
