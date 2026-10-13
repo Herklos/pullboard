@@ -290,7 +290,7 @@ function recordSetupAnswer(box, command) {
 
 /** Open the real local view and wait for its ready line before stopping its owned child. */
 async function openSetupView(box) {
-  const child = spawn(process.execPath, [join(box.root, 'cli/bin/pullboard.js'), 'view', '--no-open'],
+  const child = spawn(process.execPath, [join(box.root, 'cli/bin/pullboard.js'), 'view', '--no-open', '--port', '0'],
     { cwd: box.repo, env: { ...box.env, PULLBOARD_VIEW_FOREGROUND: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '', errors = '';
   const closed = new Promise(resolve => child.once('close', (code, signal) => resolve({ code, signal })));
