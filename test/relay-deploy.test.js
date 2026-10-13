@@ -129,6 +129,11 @@ async function copiedServerFailure(child, budgetMs) {
   return { code: child.exitCode, description: `exited ${child.exitCode}` };
 }
 
+/** Compare a rounded wait against its budget, allowing Node's whole-millisecond timer granularity. */
+function damagedServerWaitMeetsBudget(elapsedMs, budgetMs) {
+  return elapsedMs >= budgetMs - 1;
+}
+
 /** Require the Docker omission to fail before startup, naming the missing source and observed outcome. */
 async function requireCopiedServerFailure(child, budgetMs, omitted) {
   const outcome = await copiedServerFailure(child, budgetMs);
@@ -411,11 +416,17 @@ test('[H5,H18] a damaged relay copy is judged by its own boot time', { timeout: 
     'a damaged copy that never exits names the omitted file and its observed timeout',
   );
   const elapsed = Number(/still running after (\d+) ms/u.exec(neverMessage)?.[1]);
-  assert.ok(elapsed >= budgetMs, `the reported elapsed wait ${elapsed} ms reached the ${budgetMs} ms budget`);
+  assert.ok(damagedServerWaitMeetsBudget(elapsed, budgetMs), `the reported elapsed wait ${elapsed} ms reached the ${budgetMs} ms budget (allowing one millisecond for timer granularity)`);
   const exitsZero = standInServer(t, 'setImmediate(() => process.exit(0))');
   await assert.rejects(
     requireCopiedServerFailure(exitsZero, budgetMs, 'src/relay/browser-model.js'),
     /omitting src\/relay\/browser-model\.js .*exited 0/u,
     'a clean exit is identified as not being a startup failure',
   );
+});
+
+test('a timer that fires a millisecond early still meets the damaged-copy budget [H18,C7]', () => {
+  const budgetMs = DAMAGED_SERVER_FAILURE_FLOOR_MS;
+  assert.equal(damagedServerWaitMeetsBudget(budgetMs - 1, budgetMs), true, 'one millisecond early fits timer granularity');
+  assert.equal(damagedServerWaitMeetsBudget(budgetMs - 2, budgetMs), false, 'two milliseconds early remains below budget');
 });
