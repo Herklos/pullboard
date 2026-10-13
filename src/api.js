@@ -138,11 +138,12 @@ async function createRequest(root, body, isMain) {
 }
 
 /** Create the authenticated local adapter used by the HTTP server and other local transports. */
-export function createLocalApiHandler({ secret, getPort, runCommand, projects = listApiProjects, isMain } = {}) {
+export function createLocalApiHandler({ secret, getPort, runCommand, projects = listApiProjects, isMain, allowedOrigins = [] } = {}) {
   if (typeof getPort !== 'function') throw new TypeError('createLocalApiHandler needs a bound-port getter');
   if (typeof runCommand !== 'function') throw new TypeError('createLocalApiHandler needs the actual CLI entry point as runCommand');
   const codeIsMain = codeIsFromMain() && isMain !== false;
   const key = Buffer.from(secret);
+  const permittedOrigins = new Set(allowedOrigins);
   return createApiHandler({
     authenticate: (req) => {
       const url = new URL(req.url ?? '/', 'http://' + ADDRESS);
@@ -151,7 +152,7 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
       const bound = getPort();
       const ownHost = req.headers.host === ADDRESS + ':' + bound || req.headers.host === 'localhost:' + bound;
       if (!ownHost || given.length !== key.length || !timingSafeEqual(given, key)) throw new Refused('AUTH_REQUIRED', 'this API needs its session secret and own host; use the address pullboard serve printed');
-      if (req.headers.origin && req.headers.origin !== 'http://' + req.headers.host) throw new Refused('API_ORIGIN', 'use the API from its own origin');
+      if (req.headers.origin && req.headers.origin !== 'http://' + req.headers.host && !permittedOrigins.has(req.headers.origin)) throw new Refused('API_ORIGIN', 'use the API from its own origin');
       return { local: true };
     },
     boards: () => apiBoardListing(projects, codeIsMain),
