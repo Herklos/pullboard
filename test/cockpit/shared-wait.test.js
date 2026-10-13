@@ -1,9 +1,12 @@
+/** @pullboard-test-input test-tree */
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
+import { execFileSync } from 'node:child_process';
+import { selectAffectedTests } from '../../src/affected-tests.js';
 import { machine, project, startView, chromeExecutable, openSnapshotChrome, closeSnapshotChrome } from './fixture.js';
 import { press, waitForStableBoxes } from './stable.js';
 
@@ -233,4 +236,26 @@ test('a timeout always reports the last sample [N26,C7]', { timeout: 90_000 }, a
     if (chrome) await closeSnapshotChrome(chrome);
     await view.stop();
   }
+});
+
+
+test('a changed cockpit test selects the shared-wait scanner [C7,B3]', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'pullboard-view-scanner-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const root = join(directory, 'repo');
+  execFileSync('git', ['clone', '--quiet', '--no-hardlinks', ROOT, root]);
+  /** Commit real private repository inputs without changing the user's Git identity. */
+  const git = (...args) => execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', ...args], { cwd: root, encoding: 'utf8' }).trim();
+  writeFileSync(join(root, 'test/cockpit/shared-wait.test.js'), readFileSync(join(COCKPIT, 'shared-wait.test.js')));
+  git('add', '--', 'test/cockpit/shared-wait.test.js');
+  git('commit', '--quiet', '-m', 'test(view): preserve actual scanner input [C7,B3]');
+  const base = git('rev-parse', 'HEAD');
+  appendFileSync(join(root, 'test/cockpit/demo.test.js'), '\n// Only the cockpit scanner input changes.\n');
+  git('add', '--', 'test/cockpit/demo.test.js');
+  git('commit', '--quiet', '-m', 'test(view): change only cockpit input [C7,B3]');
+  const commit = git('rev-parse', 'HEAD');
+  assert.deepEqual(git('diff', '--name-only', base, commit).split('\n'), ['test/cockpit/demo.test.js'], 'the actual repository changes only the cockpit test');
+  const selection = selectAffectedTests(root, { base, commit });
+  assert.equal(selection.full, false, 'a cockpit-only change retains affected selection');
+  assert.ok(selection.files.includes('test/cockpit/shared-wait.test.js'), 'the actual shared-wait scanner is selected');
 });
