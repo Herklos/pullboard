@@ -132,7 +132,7 @@ function fixture(t, count, slots = 2) {
   const added = cli(box, root, 'add', 'core', 'Retain the native red verdict', '--specs', 'G1', '--route', 'mid',
     '--criterion', 'A red test is refused', '--check', 'true', '--brief', 'Files: test/\nTest: native comparison');
   assert.equal(added.status, 0, added.stderr);
-  box.item = JSON.parse(added.stdout).id;
+  box.item = JSON.parse(added.stdout).item.item_id;
   const made = cli(box, root, 'worktree', 'core', '--model', 'Fixture Model');
   assert.equal(made.status, 0, made.stderr);
   box.builder = JSON.parse(made.stdout).path;
