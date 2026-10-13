@@ -4,7 +4,7 @@
  * tree's id in the git dir, so the same tree is never checked twice. An agent sees a digest of the
  * run, not the run (V10): a passing suite's output costs tokens and says nothing.
  */
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -145,6 +145,40 @@ export function runProfiledShell(root, command, { waitMs = 0, artifactDirectory,
   });
   if (logPath) writeFileSync(logPath, safeLog(run.output), { mode: 0o600 });
   return { ...run, profile, profilePath, logPath };
+}
+
+/** Run an independent focused comparison without blocking other holders of the machine pool.
+ * @param {string} root
+ * @param {string} command
+ * @param {{ waitMs?: number, gateSlotHeld?: boolean }} [options]
+ * @returns {Promise<object>} The unchanged shell verdict and its private timing profile.
+ */
+export async function runProfiledShellAsync(root, command, { waitMs = 0, gateSlotHeld = false } = {}) {
+  const started = Date.now();
+  const env = { ...gitChildEnv(root), ...(gateSlotHeld ? { [GATE_SLOT_HELD_ENV]: '1' } : {}) };
+  const child = spawn(`(\n${command}\n) 2>&1`, { cwd: root, env, shell: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const chunks = [];
+  let bytes = 0;
+  let overflow = false;
+  let failure = null;
+  /** Retain merged shell output within the same one-GiB limit as the synchronous gate runner. */
+  const capture = part => {
+    bytes += Buffer.byteLength(part);
+    if (bytes > 2 ** 30) { overflow = true; child.kill(); }
+    else chunks.push(part);
+  };
+  child.stdout.setEncoding('utf8').on('data', capture);
+  child.stderr.setEncoding('utf8').on('data', capture);
+  child.once('error', error => { failure = error; });
+  const status = await new Promise(resolveClose => child.once('close', resolveClose));
+  invalidateGitFacts();
+  const output = chunks.join('') + (overflow ? '\nFocused comparison output exceeded one GiB.\n' : '')
+    + (failure ? `\n${failure.message}\n` : '');
+  const wallMs = Math.max(0, Date.now() - started);
+  const profilePath = join(dirname(gitPath(root, LOG)), `pullboard-gate-${randomUUID()}.profile.json`);
+  const profile = writeTimingProfile(profilePath, { ...timingFromOutput(output, timingRunner(command)),
+    waitMs: Math.max(0, Math.round(waitMs)), wallMs });
+  return { isGreen: status === 0 && !overflow && !failure, output, seconds: Math.round(wallMs / 1000), profile, profilePath, logPath: null };
 }
 
 /** Persist one sanitized timing profile as a private artifact.
