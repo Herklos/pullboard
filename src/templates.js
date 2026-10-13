@@ -94,7 +94,7 @@ export function agentsBlock(doctrine = standardDoctrine()) {
   return `${AGENTS_START}
 ## A new board
 
-On a board that is not set up, run \`pullboard resume\` first. Walk the person through its setup steps before anything else.
+On a board that is not set up, run \`pullboard resume\` first. Walk the person through its setup steps before anything else. Propose each requirement with \`pullboard spec draft "<text>"\`; it returns the pending row id for the person to approve.
 
 ## Working here: pullboard
 
