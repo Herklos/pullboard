@@ -14,6 +14,8 @@ import { createServer } from 'node:http';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import * as store from './board.js';
 import { cockpitPage } from './cockpit.js';
+import { releaseHeadlinesBetween } from './changelog.js';
+import { VERSION } from './help.js';
 import { displayAgentName } from './agent-names.js';
 import { COORDINATOR, loadConfig } from './config.js';
 import { doctrineHistory, loadDoctrine, standardDoctrine } from './doctrine.js';
@@ -189,6 +191,19 @@ function rowAges(root, file, head, history = committedIds) {
 /** @type {Map<string, { head: string | null, ages: Map<string, number> }>} */
 const agesKept = new Map();
 
+let keptViewReleaseNotes;
+/** Lazily read the immutable release note summary once for this view process. */
+function viewReleaseNotes() {
+  if (!keptViewReleaseNotes) {
+    keptViewReleaseNotes = {
+      version: VERSION,
+      releases: releaseHeadlinesBetween('0.0.0', VERSION),
+      notes: 'https://github.com/pullboard-dev/pullboard/blob/main/CHANGELOG.md',
+    };
+  }
+  return { ...keptViewReleaseNotes, releases: keptViewReleaseNotes.releases.map((release) => ({ ...release })) };
+}
+
 /**
  * Everything the page shows for one project. Given the newest shout the person has seen there,
  * it also counts every shout since, which the forty it sends cannot always show.
@@ -219,6 +234,7 @@ export function projectState(root, { seen = null, board: providedBoard = null } 
     const lastMove = new Map(log.map((event) => [event.event_by, event.event_at]));
     return {
       root: info.root,
+      releaseNotes: viewReleaseNotes(),
       rowAgesAt: { [config.spec]: head, [doctrine.name]: head },
       lanes: [COORDINATOR, ...Object.keys(config.lanes)],
       // The lanes that own folders, where builders work; review lanes own none.

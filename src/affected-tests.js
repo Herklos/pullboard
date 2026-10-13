@@ -6,6 +6,8 @@ import { importsIn } from './module-imports.js';
 
 const MODULE = /\.[cm]?js$/u;
 const TEST = /\.(?:test|spec)\.[cm]?js$/u;
+// A scanner declares this header rather than executing code while the graph is read.
+const TEST_TREE_INPUT = '/** @pullboard-test-input test-tree */';
 const GLOBAL = new Set(['bin/run-tests.js', 'package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'src/gate.js', 'src/cli.js', 'src/hooks.js', 'src/trusted-policy.js', 'src/affected-tests.js', 'src/module-imports.js']);
 
 /** Read exact objects from this checkout, ignoring ambient Git selectors and replacement refs. */
@@ -63,7 +65,9 @@ function graphAt(root, commit) {
   const reverse = new Map();
   const unknown = new Map();
   const always = new Set();
+  const testTreeReaders = new Set();
   paths.forEach((path, index) => {
+    if (TEST.test(path) && modules.get(path).split(/\r?\n/u, 1)[0] === TEST_TREE_INPUT) testTreeReaders.add(path);
     for (const target of imports[index]) {
       if (target === 'node:module') { unknown.set(path, 'a reached module may create CommonJS imports'); continue; }
       if (target.startsWith('node:')) continue;
@@ -78,12 +82,13 @@ function graphAt(root, commit) {
       reverse.get(dependency).add(path);
     }
   });
-  return { paths, reverse, unknown, always };
+  return { paths, reverse, unknown, always, testTreeReaders };
 }
 
 /**
  * Select changed tests and every transitive importer in the old and new trees. Old edges cover
- * deletions and renames; process launches and filesystem reads are deliberately not import edges.
+ * deletions and renames; declared test-tree readers also cover changed test inputs. Other filesystem
+ * reads and process launches are deliberately not import edges.
  *
  * @param {string} root
  * @param {{base:string|null, trunk?:string, commit?:string, changed?:string[]}} options
@@ -121,7 +126,9 @@ export function selectAffectedTests(root, { base, trunk, commit = 'HEAD', change
         }
       }
     }
-    const selected = files.filter(path => reached.has(path) || before.always.has(path) || after.always.has(path));
+    const changedTestInput = changed.some(path => path.startsWith('test/') || TEST.test(path) || /^test\.[cm]?js$/u.test(path));
+    const selected = files.filter(path => reached.has(path) || before.always.has(path) || after.always.has(path)
+      || (changedTestInput && (before.testTreeReaders.has(path) || after.testTreeReaders.has(path))));
     if (selected.length === files.length) return { full: true, reason: 'the change reaches every test file', files };
     return { full: false, reason: '', files: selected };
   } catch (error) {
