@@ -590,9 +590,10 @@ test('[A1] command results match the catalog across roots and subcommands', () =
   json(box, repo, 'spec', ['view', '--out', join(box.dir, 'spec.html')], 'view');
   json(box, repo, 'spec', ['show', 'G1'], 'show');
   json(box, repo, 'spec', ['unmet'], 'unmet');
+  assert.equal(json(box, repo, 'spec', ['draft', 'A pending API catalogue row'], 'draft').id, 'G2');
   mkdirSync(join(repo, 'test'));
   writeFileSync(join(repo, 'test', 'proof.test.js'), "import { test } from 'node:test';\ntest('proof [G1]', () => {});\n");
-  box.git(repo, 'add', 'test/proof.test.js');
+  box.git(repo, 'add', 'SPEC.md', 'test/proof.test.js');
   box.git(repo, 'commit', '-q', '-m', 'test: cite the fixture');
   const signerKey = join(box.dir, 'signer-key');
   execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', signerKey], { stdio: 'pipe' });
