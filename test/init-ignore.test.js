@@ -5,6 +5,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
+import { AGENT_SHELL_MARKERS } from '../src/person.js';
 
 /** Create a private Git repo whose installed hooks invoke this candidate CLI only. */
 function fixture(t, ignore) {
@@ -30,7 +31,9 @@ function fixture(t, ignore) {
   }
   /** Run the real CLI in its person-facing output mode. */
   function output(...args) {
-    const result = runFixtureChild(process.execPath, [cliPath, ...args], { cwd: root, env, encoding: 'utf8' });
+    const personEnv = { ...env };
+    for (const marker of AGENT_SHELL_MARKERS) delete personEnv[marker];
+    const result = runFixtureChild(process.execPath, [cliPath, ...args], { cwd: root, env: personEnv, encoding: 'utf8' });
     return { code: result.status, stdout: result.stdout, stderr: result.failure ?? result.stderr, failure: result.failure };
   }
   git('init', '-q', '-b', 'main');
