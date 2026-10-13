@@ -14,6 +14,16 @@ const e2e = createE2eHelpers();
 after(e2e.cleanup);
 const { sandbox, project, commitFile, waitFor, BIN } = e2e;
 const FILES = [1, 2, 3, 4].map((n) => `web/land-${n}.test.js`);
+const MARKER_NOT_YET = Symbol('marker not yet written');
+
+/** Read a complete marker, treating a missing or mid-write file as unpublished. */
+function readMarker(file) {
+  try { return JSON.parse(readFileSync(file, 'utf8')); }
+  catch (error) {
+    if (error.code === 'ENOENT' || error instanceof SyntaxError) return MARKER_NOT_YET;
+    throw error;
+  }
+}
 
 /** Read a private board through public functions, never by mutating its database. */
 function onBoard(box, action, clock) {
@@ -213,18 +223,20 @@ async (t) => {
   const probe = join(box.dir, 'observe-approved-read.mjs');
   const ready = join(box.dir, 'approved-read-ready');
   writeFileSync(probe, [
-    "import { existsSync, writeFileSync } from 'node:fs';",
+    "import { existsSync, renameSync, writeFileSync } from 'node:fs';",
     "import { DatabaseSync } from 'node:sqlite';",
+    '/** Publish a complete marker atomically so readers never see a truncated destination. */',
+    'const publish = (value) => { const target = process.env.APPROVED_READ_MARKER; const temporary = `${target}.${process.pid}.tmp`; writeFileSync(temporary, JSON.stringify(value), { mode: 0o600 }); renameSync(temporary, target); };',
     'const prepare = DatabaseSync.prototype.prepare;',
     'DatabaseSync.prototype.prepare = function (sql, ...args) {',
     "  if (String(sql) !== 'SELECT meta_value FROM board_meta WHERE meta_key=?') return Reflect.apply(prepare, this, [sql, ...args]);",
-    "  writeFileSync(process.env.APPROVED_READ_MARKER, JSON.stringify({ phase: 'before-lock' }));",
+    "  publish({ phase: 'before-lock' });",
     '  const deadline = Date.now() + 8000;',
     '  while (!existsSync(process.env.APPROVED_READ_READY) && Date.now() < deadline) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);',
     "  if (!existsSync(process.env.APPROVED_READ_READY)) throw new Error('exclusive writer did not become ready');",
-    "  writeFileSync(process.env.APPROVED_READ_MARKER, JSON.stringify({ phase: 'read-started' }));",
+    "  publish({ phase: 'read-started' });",
     '  try { return Reflect.apply(prepare, this, [sql, ...args]); }',
-    "  catch (error) { writeFileSync(process.env.APPROVED_READ_MARKER, JSON.stringify({ phase: 'error', code: error.code ?? null, errcode: error.errcode ?? null, message: error.message })); throw error; }",
+    "  catch (error) { publish({ phase: 'error', code: error.code ?? null, errcode: error.errcode ?? null, message: error.message }); throw error; }",
     '};',
   ].join('\n'));
   let writer;
@@ -247,13 +259,16 @@ async (t) => {
   hook.stdout.resume();
   hook.stderr.setEncoding('utf8').on('data', (part) => { hook.stderrText += part; });
   hook.closed = childOutcome(hook);
-  await waitFor(() => existsSync(marker), 'native staged-approval hook query');
-  assert.equal(JSON.parse(readFileSync(marker, 'utf8')).phase, 'before-lock');
+  await waitFor(() => readMarker(marker) !== MARKER_NOT_YET, 'native staged-approval hook query');
+  assert.equal(readMarker(marker).phase, 'before-lock');
   writer = startExclusiveBoardWriter(box, join(box.repo, '.git', 'pullboard', 'board.sqlite'), 'approved-read');
   await waitFor(() => existsSync(writer.ready), 'approved-row exclusive writer');
-  await waitFor(() => JSON.parse(readFileSync(marker, 'utf8')).phase !== 'before-lock', 'approved-row read under the exclusive lock');
+  await waitFor(() => {
+    const observation = readMarker(marker);
+    return observation !== MARKER_NOT_YET && observation.phase !== 'before-lock';
+  }, 'approved-row read under the exclusive lock');
   await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
-  const observation = JSON.parse(readFileSync(marker, 'utf8'));
+  const observation = readMarker(marker);
   const sqliteBusy = observation.code === 'SQLITE_BUSY' || ((observation.errcode ?? 0) & 0xff) === 5;
   assert.equal(sqliteBusy, false, `staged approval read must wait, not return SQLITE_BUSY: ${JSON.stringify(observation)} ${hook.stderrText}`);
   assert.equal(observation.phase, 'read-started');
@@ -266,6 +281,63 @@ async (t) => {
   assert.doesNotMatch(hook.stderrText, /database is locked|restore valid staged SSH trust files/);
   assert.equal(box.git(box.repo, 'rev-parse', 'HEAD'), before, 'normal approval refusal leaves the commit unchanged');
   assert.equal(box.git(box.repo, 'write-tree'), staged, 'the staged approved-row change remains available for person approval');
+});
+
+test('a half-written hook-read marker is read as not yet written [C7,B3,S19]', { timeout: 40_000 }, // budget: hang-only ceiling covers the real hook and its fixture cleanup.
+async (t) => {
+  const box = landProject();
+  const specPath = join(box.repo, 'SPEC.md');
+  writeFileSync(specPath, readFileSync(specPath, 'utf8').replace('The page renders.', 'The changed page renders.'));
+  box.git(box.repo, 'add', 'SPEC.md');
+  const marker = join(box.dir, 'half-written-hook-read');
+  const ready = join(box.dir, 'half-written-hook-read-ready');
+  const release = join(box.dir, 'half-written-hook-read-release');
+  const probe = join(box.dir, 'observe-half-written-hook-read.mjs');
+  writeFileSync(probe, [
+    "import { appendFileSync, existsSync, writeFileSync } from 'node:fs';",
+    "import { DatabaseSync } from 'node:sqlite';",
+    'const prepare = DatabaseSync.prototype.prepare;',
+    'DatabaseSync.prototype.prepare = function (sql, ...args) {',
+    "  if (String(sql) !== 'SELECT meta_value FROM board_meta WHERE meta_key=?') return Reflect.apply(prepare, this, [sql, ...args]);",
+    "  writeFileSync(process.env.APPROVED_READ_MARKER, '{\"phase\":', { mode: 0o600 });",
+    "  writeFileSync(process.env.APPROVED_READ_READY, 'ready', { mode: 0o600 });",
+    '  const deadline = Date.now() + 8000;',
+    '  while (!existsSync(process.env.APPROVED_READ_RELEASE) && Date.now() < deadline) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);',
+    "  if (!existsSync(process.env.APPROVED_READ_RELEASE)) throw new Error('hook marker release was not received');",
+    "  appendFileSync(process.env.APPROVED_READ_MARKER, '\"before-lock\"}');",
+    '  return Reflect.apply(prepare, this, [sql, ...args]);',
+    '};',
+  ].join('\n'));
+  let hook;
+  t.after(async () => {
+    writeFileSync(release, 'release', { mode: 0o600 });
+    if (hook && hook.exitCode === null && hook.signalCode === null) {
+      await Promise.race([hook.closed, new Promise((resolveTimeout) => setTimeout(resolveTimeout, 1_000))]);
+      if (hook.exitCode === null && hook.signalCode === null) {
+        hook.kill('SIGTERM');
+        await Promise.race([hook.closed, new Promise((resolveTimeout) => setTimeout(resolveTimeout, 1_000))]);
+        if (hook.exitCode === null && hook.signalCode === null) { hook.kill('SIGKILL'); await hook.closed; }
+      }
+    }
+  });
+  hook = startFixtureChild('git', ['commit', '-m', 'feat: change approved promise [G1]'], {
+    cwd: box.repo,
+    env: { ...box.env, NODE_OPTIONS: `--import=${probe}`, APPROVED_READ_MARKER: marker, APPROVED_READ_READY: ready, APPROVED_READ_RELEASE: release },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  hook.stderrText = '';
+  hook.stdout.resume();
+  hook.stderr.setEncoding('utf8').on('data', (part) => { hook.stderrText += part; });
+  hook.closed = childOutcome(hook);
+  await waitFor(() => existsSync(ready), 'native hook probe paused mid-write');
+  assert.doesNotThrow(() => readMarker(marker), 'a partial marker is an unpublished observation, not a test error');
+  assert.equal(readMarker(marker), MARKER_NOT_YET);
+  writeFileSync(release, 'release', { mode: 0o600 });
+  const result = await hook.closed;
+  assert.equal(result.error, null, `native Git hook child spawned: ${result.error?.message ?? ''}`);
+  assert.equal(result.code, 1, hook.stderrText);
+  assert.match(hook.stderrText, /G1 changes approved text without the person's exact approval/);
+  assert.deepEqual(readMarker(marker), { phase: 'before-lock' }, 'the probe publishes a complete marker after release');
 });
 
 /** Give one private item a distinct canonical lane identity and an independent main base. */
