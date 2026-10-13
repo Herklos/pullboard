@@ -320,6 +320,8 @@ async function armLaneReleaseCapture(chrome, selector, stableRoot = "document.qu
         width: rect.width, hidden: !!node.closest('[hidden]'), visible, overflowAnchor: style.overflowAnchor,
         position: style.position, connected: node.isConnected };
     };
+    const aimedTarget = target, aimedTargetBox = box(target);
+    let removedTargetRecorded = false;
     /** Retain bounded observations, reporting truncation instead of treating missing rows as evidence. */
     const append = (list, row, cap, reason) => { if (list.length < cap) list.push(row); else dropped[reason]++; };
     /** Keep one bounded history per node so early low-priority motion cannot evict later resizes. */
@@ -349,6 +351,10 @@ async function armLaneReleaseCapture(chrome, selector, stableRoot = "document.qu
     /** Compare only the bounded aim-time set, even if its boxes later move below the target. */
     const sample = (type, point = null) => {
       const target = document.querySelector(${JSON.stringify(selector)}), targetBox = target ? box(target) : null;
+      if (!aimedTarget.isConnected && !removedTargetRecorded) {
+        recordChange(type, aimedTargetBox, { ...aimedTargetBox, connected: false, height: 0, width: 0 });
+        removedTargetRecorded = true;
+      }
       for (const node of retained.values()) {
         const now = box(node), old = prior.get(now.node);
         if (old && (old.connected !== now.connected || old.height !== now.height || old.documentTop !== now.documentTop
