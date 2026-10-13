@@ -446,7 +446,7 @@ test('a reused authenticated view completes setup for its new board [N26,N32]', 
   const sessionPath = join(firstBoard.env.PULLBOARD_HOME, 'view-4890.json');
   const sessionBytes = readFileSync(sessionPath);
   try {
-    writeFileSync(sessionPath, JSON.stringify({ ...JSON.parse(sessionBytes), secret: 'not-the-listener-secret' }));
+    writeFileSync(sessionPath, JSON.stringify({ ...JSON.parse(sessionBytes), secret: 'wrong' }));
     const refused = refusedBoard.run(refusedBoard.repo, 'view', '--no-open', '--json');
     assert.equal(refused.status, 1, refused.failure || refused.stderr || refused.stdout);
     assert.equal(JSON.parse(refused.stdout).error.code, 'PORT_BUSY');
