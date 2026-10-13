@@ -1,4 +1,4 @@
-/** Local view requests use node:http so undici's first-write socket options cannot escape [C7,N26]. */
+/** Local view requests use a fresh HTTP transport so undici's first-write socket options cannot escape [C7,N26]. */
 import { request as httpRequest } from 'node:http';
 import { Readable } from 'node:stream';
 
