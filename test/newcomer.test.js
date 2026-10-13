@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
+import { AGENT_SHELL_MARKERS } from '../src/person.js';
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
 
@@ -57,6 +58,23 @@ test('init ends with a working staging line for exactly its own writes [I1,I2,D1
   const secondStage = rerun.stdout.trimEnd().split('\n').at(-1);
   assert.doesNotMatch(secondStage, /^git add -f -- /, 'idempotent setup writes and stages nothing on its second run');
   assert.equal(box.git('diff', '--cached', '--name-only'), '');
+});
+
+test('an agent that runs init continues setup in the same session [I1,I2]', (t) => {
+  const human = project(t);
+  for (const marker of AGENT_SHELL_MARKERS) delete human.env[marker];
+  const humanResult = human.run('init');
+  assert.equal(humanResult.status, 0, humanResult.stderr);
+  assert.ok(humanResult.stdout.includes('Next: ask your agent to set up Pullboard here; in Claude Code, start a new session first so it loads the Pullboard skills.'));
+  assert.doesNotMatch(humanResult.stdout, /run pullboard resume now/u);
+
+  const agent = project(t);
+  for (const marker of AGENT_SHELL_MARKERS) delete agent.env[marker];
+  agent.env.CLAUDECODE = '1';
+  const agentResult = agent.run('init');
+  assert.equal(agentResult.status, 0, agentResult.stderr);
+  assert.ok(agentResult.stdout.includes('Next: run pullboard resume now to continue setup in this session; the new skills load next session, and setup does not need them.'));
+  assert.doesNotMatch(agentResult.stdout, /Next: ask your agent/u);
 });
 
 test('init detects language gates and gives an example in the same ecosystem [I1,I2]', (t) => {
