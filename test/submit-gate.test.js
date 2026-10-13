@@ -550,6 +550,8 @@ test('a source change selects the tests that scan sources [C7,B3]', (t) => {
   assert.equal(actualSelection.full, false, 'an unimported source addition keeps affected selection');
   for (const scanner of ['test/boundary.test.js', 'test/machine.test.js', 'test/package.test.js',
     'test/submit-gate.test.js', 'test/wall-clock-budgets.test.js']) {
+    assert.ok(readFileSync(join(repository, scanner), 'utf8').split(/\r?\n/u).slice(0, 2).includes(sourceInput.trimEnd()),
+      'actual source-tree reader declares its input: ' + scanner);
     assert.ok(actualSelection.files.includes(scanner), 'actual source-tree reader selected: ' + scanner);
   }
 });
