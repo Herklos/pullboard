@@ -53,11 +53,11 @@ async function observed(predicate, label) {
   assert.ok(predicate(), label);
 }
 
-/** Read a private native queue or board without changing its state. */
+/** Read a private queue or board, allowing the same short SQLite writer contention as the resource API. */
 function rows(file, sql) {
   if (!existsSync(file)) return [];
   const db = new DatabaseSync(file, { readOnly: true });
-  try { db.exec('PRAGMA query_only=ON'); return db.prepare(sql).all(); }
+  try { db.exec('PRAGMA busy_timeout=10000; PRAGMA query_only=ON'); return db.prepare(sql).all(); }
   finally { db.close(); }
 }
 
