@@ -7,7 +7,7 @@ import { loadavg, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { test } from 'node:test';
-import { createEvaluator, createSender, createWaiter, findChromeExecutable, launchChromeProcess, startChrome } from './chrome-fixture.js';
+import { createEvaluator, createSender, createWaiter, findChromeExecutable, launchChromeProcess, startChrome, waitForTargetAbsent } from './chrome-fixture.js';
 
 /** Pause between checks while waiting for a fixture helper's readiness marker. */
 function pause(ms) {
@@ -320,11 +320,10 @@ test('a confirmed target close rejects pending DevTools commands [C7]', {
       browserSocket.send(JSON.stringify({ id: 1, method: 'Target.closeTarget', params: { targetId: target.targetInfo.targetId } }));
     });
     assert.equal(closeResponse.success, true, 'the independent browser control confirms the actual page target closed');
-    const targets = await fetch(`http://127.0.0.1:${Number(readFileSync(join(chrome.profileDirectory, 'DevToolsActivePort'), 'utf8').split('\n')[0])}/json/list`,
-      { signal: AbortSignal.timeout(5_000) }) // budget: hang ceiling for confirming target removal from the private browser list.
-      .then(response => response.json());
-    assert.equal(targets.some(candidate => candidate.id === target.targetInfo.targetId), false,
-      'the closed target is absent from the owned browser target list');
+    await waitForTargetAbsent(remainingMs => fetch(`http://127.0.0.1:${Number(readFileSync(join(chrome.profileDirectory, 'DevToolsActivePort'), 'utf8').split('\n')[0])}/json/list`,
+      { signal: AbortSignal.timeout(remainingMs) })
+      .then(response => response.json()), target.targetInfo.targetId,
+    { timeoutMs: 5_000 }); // budget: one total deadline for confirming target removal from the private browser list.
 
     const outcome = await pending;
     assert.ok(outcome.error instanceof Error, 'the pending Runtime.evaluate rejects when its target closes');
@@ -343,6 +342,30 @@ test('a confirmed target close rejects pending DevTools commands [C7]', {
     browserSocket?.close();
     await chrome.close();
   }
+});
+
+/** Exercise the actual target-removal waiter with one stale list and a controlled deadline. */
+test('a closed target that is still listed once is not reported as open [C7]', async () => {
+  let clock = 0;
+  let reads = 0;
+  const budgets = [];
+  const options = { timeoutMs: 100, now: () => clock, pauseFor: async ms => { clock += ms; } };
+  const error = await waitForTargetAbsent(async remainingMs => {
+    budgets.push(remainingMs);
+    reads += 1;
+    return reads === 1 ? [{ id: 'closed-target' }] : [{ id: 'other-target' }];
+  }, 'closed-target', options).then(() => null, failure => failure);
+  assert.equal(error, null, 'a first stale target list must be followed by confirmation of removal');
+  assert.equal(reads, 2, 'the waiter reads Chrome again before confirming removal');
+  assert.deepEqual(budgets, [100, 50], 'each list request receives only the remaining operation budget');
+
+  clock = 0;
+  reads = 0;
+  await assert.rejects(waitForTargetAbsent(async () => {
+    reads += 1;
+    return [{ id: 'closed-target' }];
+  }, 'closed-target', options), /Closed DevTools target closed-target remained listed within 100ms/u);
+  assert.equal(reads, 2, 'a target that stays listed cannot silently pass or poll beyond its declared deadline');
 });
 
 /** Prove a page condition cannot spend the much longer general command allowance. */
