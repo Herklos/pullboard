@@ -72,7 +72,7 @@ async function waitForPortToClose(port) {
       await response.body?.cancel();
     } catch (error) {
       if (error.cause?.code === 'ECONNREFUSED') return;
-      if (!['ECONNRESET', 'UND_ERR_SOCKET'].includes(error.cause?.code)) throw error;
+      if (!['ECONNRESET', 'UND_ERR_SOCKET', 'EPIPE'].includes(error.cause?.code)) throw error;
     }
     await new Promise((done) => setTimeout(done, 25));
   }
@@ -316,4 +316,36 @@ test('pullboard view uses its fixed default port and reuses its authenticated li
     throw new AggregateError([safeReportedError(cleanupError)],
       `${safeErrorSummary(cleanupError)}; private fixture records retained at ${env.PULLBOARD_HOME}`);
   }
+});
+
+/** A broken pipe is inconclusive while the real listener remains open; only refusal proves closure. */
+test('a broken pipe during view shutdown is observed until the listener really closes [N26,C7]', async (t) => {
+  let connections = 0;
+  const listener = createServer(socket => {
+    connections += 1;
+    socket.end('HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok');
+    listener.close();
+  });
+  await new Promise((ready, fail) => {
+    listener.once('error', fail);
+    listener.listen(0, '127.0.0.1', ready);
+  });
+  t.after(() => listener.listening ? new Promise(done => listener.close(done)) : undefined);
+  const nativeFetch = globalThis.fetch;
+  let probes = 0;
+  /** Inject the captured transport-error shape once, then use real HTTP and real connection refusal. */
+  globalThis.fetch = async (...args) => {
+    probes += 1;
+    if (probes === 1) {
+      assert.equal(listener.listening, true, 'EPIPE alone does not mean the listener has closed');
+      throw new TypeError('controlled write failure', { cause: Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }) });
+    }
+    return nativeFetch(...args);
+  };
+  try {
+    await assert.doesNotReject(waitForPortToClose(listener.address().port), 'a broken pipe keeps observing until actual connection refusal');
+  } finally { globalThis.fetch = nativeFetch; }
+  assert.equal(connections, 1, 'the observer reaches the still-open real HTTP listener after EPIPE');
+  assert.ok(probes >= 3, 'success requires a later real connection refusal');
+  assert.equal(listener.listening, false);
 });
