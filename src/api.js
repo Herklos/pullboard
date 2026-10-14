@@ -219,7 +219,7 @@ function agentPath(root, name = COORDINATOR, isMain) {
 }
 
 /** Execute one actual CLI command and retain its emitted event without a latest-row race. */
-export async function executeMove(root, body, runCommand, isMain) {
+export async function executeMove(root, body, runCommand, isMain, personChannel = 'view') {
   if (Object.keys(body).some((key) => !['verb', 'item', 'args', 'agent'].includes(key))) throw new Refused('BAD_REQUEST', 'a move takes only verb, item, args and agent; remove the unknown fields');
   const argv = moveArgs(body);
   let cwd;
@@ -232,7 +232,7 @@ export async function executeMove(root, body, runCommand, isMain) {
   const events = [];
   const status = await runCommand(argv, {
     cwd,
-    personChannel: 'view',
+    personChannel,
     stdout: { isTTY: false, write: (text) => { output += text; } },
     stderr: { write: (text) => { diagnostics += text; } },
     onEvent: (row) => { events.push(row); },
@@ -264,8 +264,8 @@ async function createRequest(root, body, isMain) {
   }, isMain);
 }
 
-/** Create the authenticated local adapter used by the HTTP server and other local transports. */
-export function createLocalApiHandler({ secret, getPort, runCommand, projects = listApiProjects, isMain, allowedOrigins = [], onStateBuild } = {}) {
+/** Share the local router with the person's view; the standalone API explicitly denies person authority. */
+export function createLocalApiHandler({ secret, getPort, runCommand, projects = listApiProjects, isMain, allowedOrigins = [], onStateBuild, personChannel = 'view' } = {}) {
   if (typeof getPort !== 'function') throw new TypeError('createLocalApiHandler needs a bound-port getter');
   if (typeof runCommand !== 'function') throw new TypeError('createLocalApiHandler needs the actual CLI entry point as runCommand');
   const codeIsMain = codeIsFromMain() && isMain !== false;
@@ -323,10 +323,10 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
     code: (board, ref) => codeAt(board.root, ref),
     events: (board, after) => afterEvents(board.root, after, codeIsMain),
     eventLogVersion: () => store.EVENT_LOG_VERSION,
-    move: (board, body) => executeMove(board.root, body, runCommand, codeIsMain),
+    move: (board, body) => executeMove(board.root, body, runCommand, codeIsMain, personChannel),
     request: (board, body) => createRequest(board.root, body, codeIsMain),
     tokens: async (board) => (await relayTokens(board.root, { err() {} })).tokens,
-    revokeToken: (board, id) => relayRevoke(board.root, id, { personChannel: 'view', say() {}, err() {} }),
+    revokeToken: (board, id) => relayRevoke(board.root, id, { personChannel, say() {}, err() {} }),
   });
 }
 
@@ -334,7 +334,8 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
 export function serveApi({ port = 0, secret = randomBytes(18).toString('base64url'), runCommand, projects = listApiProjects, isMain, onStateBuild } = {}) {
   if (typeof runCommand !== 'function') throw new TypeError('serveApi needs the actual CLI entry point as runCommand');
   let bound;
-  const handler = createLocalApiHandler({ secret, getPort: () => bound, runCommand, projects, isMain, onStateBuild });
+  // A serve key authenticates board access, never a person, even in an ordinary terminal.
+  const handler = createLocalApiHandler({ secret, getPort: () => bound, runCommand, projects, isMain, onStateBuild, personChannel: 'api' });
   const server = createServer(handler);
   server.requestTimeout = 15_000;
   return new Promise((ready, fail) => {
