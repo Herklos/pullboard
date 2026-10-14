@@ -72,8 +72,12 @@ function documentationInputs(path, source, imports) {
   const inputs = new Set();
   if (source.split(/\r?\n/u).includes(DOCS_TREE_INPUT)) inputs.add('docs');
   const markdownReader = imports.some(target => target === 'node:fs' || target === 'node:fs/promises');
-  const literals = /(['"])(?:\\[\s\S]|(?!\1)[^\\\r\n])*\1|`(?:\\[\s\S]|[^`\\])*`/gu;
-  for (const match of source.matchAll(literals)) {
+  const literals = /(['"])(?:\\[\s\S]|(?!\1)[^\\\r\n])*\1|`(?:\\[\s\S]|[^`\\])*`/uy;
+  // Try every quote start: a quote in a comment or regular expression must not hide a later real path.
+  for (const quote of source.matchAll(/['"`]/gu)) {
+    literals.lastIndex = quote.index;
+    const match = literals.exec(source);
+    if (!match) continue;
     let value;
     if (match[0][0] === '`') {
       const text = match[0].slice(1,-1);
@@ -97,6 +101,7 @@ function documentationInputs(path, source, imports) {
     const directoryReader = /\b(?:readdir|glob|opendir)/u.test(source);
     if (!value.includes('/') && !value.endsWith('.md') && value !== 'docs' && !directoryReader) continue;
     const prefix = value === 'docs' || value.endsWith('.md') ? source.slice(0,match.index).trimEnd() : '';
+    if (/\.(?:startsWith|endsWith|includes|indexOf)\($/u.test(prefix)) continue;
     if (markdownReader && value.endsWith('.md') && !value.includes('docs/')
       && (/\+$/u.test(prefix) || /^\s*\+/u.test(source.slice(match.index + match[0].length)))) inputs.add('docs');
     // Bare "docs" is also a commit type or lane. In a call/path assignment, or a directory
@@ -111,7 +116,7 @@ function documentationInputs(path, source, imports) {
 }
 
 /** Compile import edges for one tree; computed imports stay attached to their importing file. */
-function graphAt(root, commit) {
+function graphAt(root, commit, readDocs = false) {
   const modules = modulesAt(root, commit);
   const paths = [...modules.keys()];
   const imports = importsIn([...modules.values()]);
@@ -122,7 +127,7 @@ function graphAt(root, commit) {
   const sourceTreeReaders = new Set();
   const docInputs = new Map();
   paths.forEach((path, index) => {
-    docInputs.set(path, documentationInputs(path, modules.get(path), imports[index]));
+    if (readDocs) docInputs.set(path, documentationInputs(path, modules.get(path), imports[index]));
     if (TEST.test(path)) {
       for (const line of modules.get(path).split(/\r?\n/u)) {
         if (line === TEST_TREE_INPUT) testTreeReaders.add(path);
@@ -170,14 +175,15 @@ export function selectAffectedTests(root, { base, trunk, commit = 'HEAD', change
       changed = undefined;
     }
     changed ??= selectionGit(root, ['diff', '--no-renames', '--name-only', '-z', base, commit]).split('\0').filter(Boolean);
-    const after = graphAt(root, commit);
+    const readDocs = changed.some(path => DOC.test(path));
+    const after = graphAt(root, commit, readDocs);
     files = after.paths.filter(path => TEST.test(path)).sort();
     const fallback = changed.find(path => GLOBAL.has(path) || path.startsWith('.githooks/'));
     if (fallback) return { full: true, reason: `${fallback} controls the gate or dependency selection`, files };
     if (!files.length) return { full: true, reason: 'no committed Node test files can be selected', files };
     const unsupported = changed.find(path => !MODULE.test(path) && !DOC.test(path));
     if (unsupported) return { full: true, reason: `import selection cannot compute the effect of ${unsupported}`, files };
-    const before = graphAt(root, base);
+    const before = graphAt(root, base, readDocs);
     const reached = new Set(changed);
     const queue = [...changed];
     for (const doc of changed.filter(path => DOC.test(path))) {

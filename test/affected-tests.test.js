@@ -24,7 +24,7 @@ function graph(t) {
   put('package.json','{"type":"module"}\n');
   put('src/api.js','export const version = 1;\n');
   put('test/api.test.js',"import '../src/api.js';\n");
-  put('src/labels.js',"import {readFileSync} from 'node:fs'; export const types=['feat','fix','docs','test']; export const config=()=>readFileSync('config.json');\n");
+  put('src/labels.js',"import {readFileSync} from 'node:fs'; export const types=['feat','fix','docs','test']; export const config=()=>readFileSync('config.json'); export const isDoc=path=>path.startsWith('docs/');\n");
   put('test/unrelated.test.js',"import '../src/labels.js'; import assert from 'node:assert/strict'; assert.ok(true);\n");
   put('docs/api.md','# API\n');
   put('docs/other.md','# Other\n');
@@ -62,12 +62,13 @@ test('doc readers include helper imports, directory paths and old edges [V4,C7]'
   box.put('test/prefixed-reader.test.js',"import {readFileSync} from 'node:fs'; const root='.'; readFileSync(root + '/docs/api.md');\n");
   box.put('test/computed-reader.test.js',"import {readFileSync} from 'node:fs'; import {join} from 'node:path'; const name='api'; readFileSync(join('d'+'ocs',name+'.md'));\n");
   box.put('test/declared-reader.test.js',"/** @pullboard-test-input docs-tree */\nimport {readFileSync} from 'node:fs'; readFileSync(process.env.INPUT);\n");
+  box.put('test/regex-reader.test.js', `import {readFileSync} from 'node:fs'; const quote=/['"]/; readFileSync('docs/api.md');\n`);
   const base = box.commit();
   box.put('test/doc-helper.js','export const text="no longer read";\n');
   const commit = box.commit();
   const selection = selectAffectedTests(box.root,{base,commit,changed:['docs/api.md']});
   assert.equal(selection.full,false);
-  assert.deepEqual(selection.files,['docs/api.test.js','test/computed-reader.test.js','test/declared-reader.test.js','test/escaped-reader.test.js','test/glob-reader.test.js','test/helper-reader.test.js','test/prefixed-reader.test.js','test/root-template.test.js','test/split-reader.test.js','test/template-reader.test.js']);
+  assert.deepEqual(selection.files,['docs/api.test.js','test/computed-reader.test.js','test/declared-reader.test.js','test/escaped-reader.test.js','test/glob-reader.test.js','test/helper-reader.test.js','test/prefixed-reader.test.js','test/regex-reader.test.js','test/root-template.test.js','test/split-reader.test.js','test/template-reader.test.js']);
 });
 
 test('an unread doc adds no tests and doc readers come from Git objects [V4,C7]', (t) => {
