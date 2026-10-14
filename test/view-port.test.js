@@ -10,6 +10,7 @@ import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import { takeDefaultViewPort } from './view-port-fixture.js';
 import { fetchFresh } from './http-fixture.js';
+import { fetchPrintedViewLink } from './view-link-fixture.js';
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
 
@@ -263,7 +264,7 @@ test('pullboard view uses its fixed default port and reuses its authenticated li
     assert.equal(first.reused, false, 'the first invocation owns the new listener');
     const sessionFile = join(env.PULLBOARD_HOME, 'view-4890.json');
     assert.equal((statSync(sessionFile).mode & 0o077) === 0, true, 'the session secret stays private under umask 022');
-    const page = await fetchFresh(first.url);
+    const page = await fetchPrintedViewLink(first.url);
     assert.equal(page.status, 200, 'the printed secret link reaches the view');
     await page.body?.cancel();
 

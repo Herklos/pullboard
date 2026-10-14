@@ -14,6 +14,7 @@ import { githubFixture } from './relay-fixture.js';
 import { relayClientFixture } from './relay-client-fixture.js';
 import { serveView } from '../src/serve.js';
 import { fetchFresh } from './http-fixture.js';
+import { fetchPrintedViewLink } from './view-link-fixture.js';
 
 /** Use real private SQLite and an actual HTTP provider with a controllable expiry clock. */
 async function fixture(t, options = {}) {
@@ -511,7 +512,7 @@ test('offline linked reads use the local board, moves refuse, and the same relay
   let view;
   try {
     view = await serveView({ port: 0 });
-    const page = await fetchFresh(view.url);
+    const page = await fetchPrintedViewLink(view.url);
     assert.equal(page.status, 200, 'the real local view page remains available');
     assert.match(page.headers.get('content-type') ?? '', /text\/html/);
 

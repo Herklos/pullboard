@@ -1,4 +1,5 @@
 """Run one person-mode pullboard view command with real terminal file descriptors."""
+import http.cookiejar
 import json
 import os
 import pty
@@ -70,7 +71,8 @@ def main():
                     break
         assert document is not None, "person PTY command did not print its JSON view link"
         server_pid = document.get("pid")
-        with urllib.request.urlopen(document["url"], timeout=5) as response:
+        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        with opener.open(document["url"], timeout=5) as response:
             page_status = response.status
         assert page_status == 200, "the PTY view link did not fetch the page"
         stayed_foreground = child.poll() is None
