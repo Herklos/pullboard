@@ -17,7 +17,7 @@ import { proofStats } from './stats.js';
 import { prepareFlowHistory, projectFlowStats } from './stats-flow.js';
 import { projectRowDecisions } from './row-decisions.js';
 import { Refused } from './refused.js';
-import { codeAt, projectState } from './serve.js';
+import { codeAt, projectItemState, projectState } from './serve.js';
 import { relayPresentationShout } from './relay-presentation.js';
 import { createApiHandler } from './api-http.js';
 import { moveArgs } from './api-moves.js';
@@ -82,7 +82,7 @@ function boardStateRevision(root, id, isMain) {
     const hasExternalMilestones = inputs.milestones.some((milestone) => milestone.items.some((item) => typeof item !== 'number'));
     return { ...inputs, externalMilestones: hasExternalMilestones ? milestoneRoadmap(info.root, board) : null };
   }, isMain);
-  const revision = stateRevision({
+  const inputs = {
     identity: [info.commonDir, id],
     head: resolveCommit(info.root, 'HEAD'),
     files,
@@ -93,8 +93,10 @@ function boardStateRevision(root, id, isMain) {
     milestones: local.milestones,
     externalRoadmap: local.externalMilestones,
     eventLogVersion: store.EVENT_LOG_VERSION,
-  });
-  return { cacheId: info.commonDir + '\0' + id, revision, event: local.event, milestones: local.externalMilestones, cacheable: true };
+  };
+  const revision = stateRevision(inputs);
+  return { cacheId: info.commonDir + '\0' + id, revision, event: local.event, milestones: local.externalMilestones,
+    inputs: { ...inputs, leases: local.leases }, cacheable: true };
 }
 
 /** Cheap file identity for an event-stream poll; content is read only after this marker changes. */
@@ -347,36 +349,103 @@ function watchLocalStateRevision(board) {
 }
 
 /** Build the complete local API state, including fields that the shared project snapshot omits. */
-function buildLocalBoardState(board, codeIsMain, milestones) {
-  let state = projectState(board.root, { seen: null, isMain: codeIsMain });
-  const config = loadConfig(board.root);
-  state.agents = state.agents.map((agent) => ({
-    ...agent,
-    model: agent.agent_model ?? 'unknown',
-    displayName: displayAgentName(agent, config.agents.names),
-  }));
-  state.board = board.id;
-  const projectData = withBoard(board.root, (db) => ({
-    requests: store.openRequests(db),
-    personRequests: personRequestStatuses(db),
-    milestones: milestones ?? store.roadmap(db),
-    rowDecisions: store.rowDecisions(db),
-    checks: new Map(store.listItems(db, { all: true }).map((item) => store.getItem(db, item.item_id)).map((item) => [item.item_id, {
-      check: item.item_check,
-      ...(item.item_check_baseline ? { checkBaseline: item.item_check_baseline } : {}),
-    }])),
-    proofStats: proofStats(db),
-    threads: new Map(store.listItems(db, { all: true }).map((item) => [item.item_id, store.itemThread(db, item.item_id)])),
-    leases: new Map(store.listItems(db, { all: true }).map((item) => [item.item_id, item.item_lease_until ?? null])),
-  }), codeIsMain);
-  state.proofStats = projectData.proofStats;
-  state.requests = projectData.requests;
-  state.personRequests = projectData.personRequests;
-  state.milestones = projectData.milestones;
-  state.items = state.items.map((item) => ({ ...item, ...projectData.checks.get(item.id) }));
-  state = projectRowDecisions(projectData.rowDecisions, state);
-  state.items = state.items.map((item) => ({ ...item, thread: projectData.threads.get(item.id) ?? [] }));
-  return withListFields(state, projectData.leases);
+function buildLocalBoardState(root, boardId, board, codeIsMain, { previous = null, fullItemRebuild = true, afterSequence = 0, changedLeases = new Set(), onItemBuild } = {}) {
+  board.db.exec('BEGIN');
+  try {
+    const sequence = board.db.prepare('SELECT COALESCE(MAX(event_id), 0) AS id FROM event').get().id;
+    let rebuildAll = fullItemRebuild || (previous && previous.sequence > sequence);
+    const eventRows = rebuildAll || !previous ? [] : board.db.prepare('SELECT event_id, item_id FROM event WHERE event_id > ? ORDER BY event_id').all(afterSequence);
+    if (!rebuildAll && previous && eventRows.length !== sequence - previous.sequence) rebuildAll = true;
+    const dirtyIds = new Set(rebuildAll ? [] : [...changedLeases]);
+    for (const event of eventRows) if (event.item_id !== null) dirtyIds.add(event.item_id);
+
+    const currentItems = store.listItems(board, { all: true });
+    const currentById = new Map(currentItems.map((item) => [item.item_id, item]));
+    const currentDependencies = new Map(currentItems.map((item) => [item.item_id, dependencyIds(item)]));
+    const milestoneNames = milestoneNamesByItem(store.milestones(board));
+    for (const prior of previous?.itemMeta.values() ?? []) {
+      if (!currentById.has(prior.id)) dirtyIds.add(prior.id);
+    }
+    for (const item of currentItems) {
+      const prior = previous?.itemMeta.get(item.item_id);
+      if (rebuildAll || !previous?.items.has(item.item_id) || !prior || prior.raw !== JSON.stringify(item)) dirtyIds.add(item.item_id);
+      if (prior && prior.milestone !== (milestoneNames.get(item.item_id) ?? null)) dirtyIds.add(item.item_id);
+    }
+    // A dirty item's status affects the blockedBy list of every direct old or new dependent.
+    const changedIds = [...dirtyIds];
+    for (const dependent of previous?.itemMeta.values() ?? []) {
+      if (changedIds.some((id) => dependent.dependencies.includes(id))) dirtyIds.add(dependent.id);
+    }
+    for (const [id, dependencies] of currentDependencies) {
+      if (changedIds.some((changed) => dependencies.includes(changed))) dirtyIds.add(id);
+    }
+
+    const config = loadConfig(root);
+    const state = projectState(root, { seen: null, board, itemProjector: (item, context) => {
+      if (dirtyIds.has(item.item_id)) return context.project();
+      return previous.items.get(item.item_id);
+    } });
+    state.agents = state.agents.map((agent) => ({ ...agent, model: agent.agent_model ?? 'unknown', displayName: displayAgentName(agent, config.agents.names) }));
+    state.board = boardId;
+    const projectData = {
+      requests: store.openRequests(board),
+      personRequests: personRequestStatuses(board),
+      milestones: milestoneRoadmap(root, board),
+      rowDecisions: store.rowDecisions(board),
+      proofStats: proofStats(board),
+    };
+    state.proofStats = projectData.proofStats;
+    state.requests = projectData.requests;
+    state.personRequests = projectData.personRequests;
+    state.milestones = projectData.milestones;
+    const decorated = projectRowDecisions(projectData.rowDecisions, state);
+    const bases = new Map(decorated.items.map((item) => [item.id, item]));
+    for (const id of dirtyIds) {
+      if (!currentById.has(id)) continue;
+      const item = store.getItem(board, id);
+      const base = bases.get(id);
+      const full = {
+        ...base,
+        check: item.item_check,
+        ...(item.item_check_baseline ? { checkBaseline: item.item_check_baseline } : {}),
+        thread: store.itemThread(board, id),
+      };
+      bases.set(id, full);
+      onItemBuild?.({ board: boardId, itemId: id });
+    }
+    decorated.items = decorated.items.map((item) => bases.get(item.id) ?? item);
+    const leases = new Map(currentItems.map((item) => [item.item_id, item.item_lease_until ?? null]));
+    const listFields = withListFields(decorated, leases, { previous, dirtyIds });
+    const itemMeta = new Map(currentItems.map((item) => [item.item_id, {
+      id: item.item_id,
+      raw: JSON.stringify(item),
+      dependencies: currentDependencies.get(item.item_id) ?? [],
+      milestone: milestoneNames.get(item.item_id) ?? null,
+    }]));
+    const history = store.events(board);
+    board.db.exec('COMMIT');
+    return { state: listFields.state, itemMeta, itemMoveCounts: listFields.itemMoveCounts, sequence, history };
+  } catch (error) {
+    try { board.db.exec('ROLLBACK'); } catch { /* Preserve the projection failure. */ }
+    throw error;
+  }
+}
+
+/** Parse an item's ordered prerequisite IDs from its persisted row. */
+function dependencyIds(item) {
+  return item.item_after ? item.item_after.split(',').map(Number) : [];
+}
+
+/** Match the first local milestone name exactly as the state list projection does. */
+function milestoneNamesByItem(milestones) {
+  const names = new Map();
+  for (const milestone of milestones ?? []) {
+    for (const entry of milestone.items ?? []) {
+      const id = typeof entry === 'number' ? entry : entry?.id;
+      if (typeof id === 'number' && !names.has(id)) names.set(id, milestone.name);
+    }
+  }
+  return names;
 }
 
 /** What a board-state item summary keeps: what the lists and the roadmap read (A2, N26). */
@@ -439,30 +508,37 @@ function stageSince(item, steps) {
  * @param {Map<number, string | null>} leases Each item's recorded claim deadline.
  * @returns {any}
  */
-function withListFields(state, leases) {
-  const milestones = new Map();
-  for (const milestone of state.milestones ?? []) {
-    for (const entry of milestone.items) if (typeof entry.id === 'number' && !milestones.has(entry.id)) milestones.set(entry.id, milestone.name);
-  }
+function withListFields(state, leases, { previous = null, dirtyIds = new Set(state.items.map((item) => item.id)) } = {}) {
+  const milestones = milestoneNamesByItem(state.milestones);
   const moveCounts = {};
+  const itemMoveCounts = new Map();
   const items = state.items.map((item) => {
-    const steps = lifecycleSteps(item.history, item.status);
-    for (const step of steps) {
-      const key = step.move && step.from + '>' + step.move.to + ':' + step.move.verb;
-      if (key) moveCounts[key] = (moveCounts[key] ?? 0) + 1;
+    let contribution = previous?.itemMoveCounts.get(item.id);
+    let projected = item;
+    if (!previous || dirtyIds.has(item.id) || !previous.items.has(item.id)) {
+      const steps = lifecycleSteps(item.history, item.status);
+      contribution = {};
+      for (const step of steps) {
+        const key = step.move && step.from + '>' + step.move.to + ':' + step.move.verb;
+        if (key) contribution[key] = (contribution[key] ?? 0) + 1;
+      }
+      // Who holds the item under a live lease: its builder while claimed, its reviewer while reserved.
+      const claim = item.status === 'claimed' && item.owner ? { by: item.owner, until: leases.get(item.id) ?? null }
+        : item.status === 'submitted' && item.reviewer ? { by: item.reviewer, until: item.reviewUntil } : null;
+      projected = { ...item,
+        milestone: milestones.get(item.id) ?? null,
+        claim,
+        stage: item.merged ? 'merged' : item.status === 'verified' ? 'accepted' : item.status,
+        since: stageSince(item, steps),
+        counts: { verdicts: item.verdicts.length, facts: item.thread.filter((entry) => entry.type === 'fact').length },
+      };
     }
-    // Who holds the item under a live lease: its builder while claimed, its reviewer while reserved.
-    const claim = item.status === 'claimed' && item.owner ? { by: item.owner, until: leases.get(item.id) ?? null }
-      : item.status === 'submitted' && item.reviewer ? { by: item.reviewer, until: item.reviewUntil } : null;
-    return { ...item,
-      milestone: milestones.get(item.id) ?? null,
-      claim,
-      stage: item.merged ? 'merged' : item.status === 'verified' ? 'accepted' : item.status,
-      since: stageSince(item, steps),
-      counts: { verdicts: item.verdicts.length, facts: item.thread.filter((entry) => entry.type === 'fact').length },
-    };
+    contribution ??= {};
+    itemMoveCounts.set(item.id, contribution);
+    for (const [key, count] of Object.entries(contribution)) moveCounts[key] = (moveCounts[key] ?? 0) + count;
+    return projected;
   });
-  return { ...state, items, moveCounts };
+  return { state: { ...state, items, moveCounts }, itemMoveCounts };
 }
 
 /**
@@ -488,10 +564,10 @@ function searchText(item) {
 }
 
 /** One cached board build: the full state, its item summaries, its delta fingerprint and the lookups that serve them. */
-function snapshotEntry(revision, state, preparedFlow) {
+function snapshotEntry(revision, state, preparedFlow, { inputs = null, itemMeta = new Map(), itemMoveCounts = new Map() } = {}) {
   const summary = { ...state, items: state.items.map(itemSummary) };
   return { revision, sequence: state.sequence, state, summary, preparedFlow, summaryFields: prepareStateJson(summary), stateJsonFields: null,
-    print: fingerprint(summary), items: new Map(state.items.map((item) => [item.id, item])), searchTexts: null };
+    print: fingerprint(summary), items: new Map(state.items.map((item) => [item.id, item])), itemMeta, itemMoveCounts, inputs, searchTexts: null };
 }
 
 /** State fields every delta carries whole: this request's unread count and flow, and the small Needs-you lists. */
@@ -747,7 +823,7 @@ function credentialMatches(candidate, expected) {
 }
 
 /** Share the local router with the person's view and other local transports; the standalone API explicitly denies person authority. */
-export function createLocalApiHandler({ secret, getPort, runCommand, projects = listApiProjects, isMain, allowedOrigins = [], onStateBuild, personChannel = 'view', stateDetail = 'full', sessionCookie } = {}) {
+export function createLocalApiHandler({ secret, getPort, runCommand, projects = listApiProjects, isMain, allowedOrigins = [], onStateBuild, onItemBuild, personChannel = 'view', stateDetail = 'full', sessionCookie } = {}) {
   if (typeof getPort !== 'function') throw new TypeError('createLocalApiHandler needs a bound-port getter');
   if (typeof runCommand !== 'function') throw new TypeError('createLocalApiHandler needs the actual CLI entry point as runCommand');
   // A page that still reads each item's detail from the state keeps full items until it opts in.
@@ -775,6 +851,19 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
     while (kept.builds.length > DELTA_BASES) kept.forgottenThrough = Math.max(kept.forgottenThrough, kept.builds.shift().sequence);
     deltaBases.set(entry.cacheId, kept);
   }
+  /** File, identity, HEAD or wire-version changes invalidate the item projector's assumptions. */
+  function needsFullItemRebuild(cached, before) {
+    if (!cached || !before.cacheable || cached.sequence > before.event) return true;
+    const previous = cached.inputs;
+    const current = before.inputs;
+    if (!previous) return true;
+    return ['identity', 'head', 'files', 'eventLogVersion'].some((key) => JSON.stringify(previous[key]) !== JSON.stringify(current[key]));
+  }
+  /** Changed lease tuples include eventless claim/review expiry. */
+  function changedLeaseItems(cached, before) {
+    const oldLeases = new Map((cached?.inputs?.leases ?? []).map((row) => [row[0], JSON.stringify(row)]));
+    return new Set((before.inputs.leases ?? []).filter((row) => oldLeases.get(row[0]) !== JSON.stringify(row)).map((row) => row[0]));
+  }
   /**
    * Read the current board build through `read(entry, cached)`, reusing the cached build while every
    * input revision holds before and after the read, and building it again when one moved.
@@ -792,11 +881,23 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
       }
     }
 
+    const fullItemRebuild = needsFullItemRebuild(cached, before);
+    const changedLeases = fullItemRebuild ? new Set() : changedLeaseItems(cached, before);
     onStateBuild?.({ board: board.id });
-    // The build names the event it was read at, so a client can ask for what changed after it.
-    const state = { ...buildLocalBoardState(board, codeIsMain, before.milestones), sequence: before.event };
-    const history = withBoard(board.root, (db) => store.events(db), codeIsMain);
-    const entry = snapshotEntry(before.revision, state, prepareFlowHistory(history));
+    // Keep projection, global fields, event history and sequence in one SQLite read transaction.
+    const built = withBoard(board.root, (currentBoard) => buildLocalBoardState(board.root, board.id, currentBoard, codeIsMain, {
+      previous: fullItemRebuild ? null : cached,
+      fullItemRebuild,
+      afterSequence: cached?.sequence ?? 0,
+      changedLeases,
+      onItemBuild,
+    }), codeIsMain);
+    const state = { ...built.state, sequence: built.sequence };
+    const entry = snapshotEntry(before.revision, state, prepareFlowHistory(built.history), {
+      inputs: before.inputs,
+      itemMeta: built.itemMeta,
+      itemMoveCounts: built.itemMoveCounts,
+    });
     entry.cacheId = before.cacheId;
     const after = boardStateRevision(board.root, board.id, codeIsMain);
     if (before.cacheable && after.cacheable && before.revision === after.revision) {
@@ -848,10 +949,39 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
   }
   /** One item's detail from the current build, or null when the board has no such item. */
   function localItem(board, id) {
-    return withSnapshot(board, (entry) => {
-      const item = entry.items.get(id);
-      return item ? itemDetail(item) : null;
-    });
+    return withBoard(board.root, (currentBoard) => {
+      currentBoard.db.exec('BEGIN');
+      try {
+        let source;
+        try { source = store.getItem(currentBoard, id); }
+        catch (error) {
+          if (error instanceof Refused && error.code === 'NO_ITEM') {
+            currentBoard.db.exec('COMMIT');
+            return null;
+          }
+          throw error;
+        }
+        const status = new Map();
+        for (const dependency of dependencyIds(source)) {
+          const row = currentBoard.db.prepare('SELECT item_status FROM item WHERE item_id = ?').get(dependency);
+          if (row) status.set(dependency, row.item_status);
+        }
+        const base = projectItemState(currentBoard, source, status);
+        const projected = {
+          ...base,
+          check: source.item_check,
+          ...(source.item_check_baseline ? { checkBaseline: source.item_check_baseline } : {}),
+          thread: store.itemThread(currentBoard, id),
+        };
+        onItemBuild?.({ board: board.id, itemId: id });
+        const detail = itemDetail(projected);
+        currentBoard.db.exec('COMMIT');
+        return detail;
+      } catch (error) {
+        try { currentBoard.db.exec('ROLLBACK'); } catch { /* Preserve the projection failure. */ }
+        throw error;
+      }
+    }, codeIsMain);
   }
   /** The ids of the items the view's search would show for this text, in board-state order. */
   function localSearch(board, text) {
@@ -901,11 +1031,11 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
  * Serve the RFC 0002 API only on loopback, behind the same session-secret boundary as the view. Its
  * state sends item summaries unless asked for detail=full; each item's detail has its own path (A2).
  */
-export function serveApi({ port = 0, secret = randomBytes(18).toString('base64url'), runCommand, projects = listApiProjects, isMain, onStateBuild, stateDetail = 'summary' } = {}) {
+export function serveApi({ port = 0, secret = randomBytes(18).toString('base64url'), runCommand, projects = listApiProjects, isMain, onStateBuild, onItemBuild, stateDetail = 'summary' } = {}) {
   if (typeof runCommand !== 'function') throw new TypeError('serveApi needs the actual CLI entry point as runCommand');
   let bound;
   // A serve key authenticates board access, never a person, even in an ordinary terminal.
-  const handler = createLocalApiHandler({ secret, getPort: () => bound, runCommand, projects, isMain, onStateBuild, personChannel: 'api', stateDetail });
+  const handler = createLocalApiHandler({ secret, getPort: () => bound, runCommand, projects, isMain, onStateBuild, onItemBuild, personChannel: 'api', stateDetail });
   const server = createServer(handler);
   server.requestTimeout = 15_000;
   return new Promise((ready, fail) => {
