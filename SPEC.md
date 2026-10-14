@@ -119,7 +119,7 @@ Statuses: approved = decided · draft = proposed · pending = open question · f
 - D2 [approved, must] A repo's PRACTICE.md adds rules, overrides one by its PB id, or declines one with a wont row and reason. | gate: test/practice.test.js | serves: D1
 - D3 [draft, must] Agents and the view see one doctrine in force: inherited rules and the repo's own, each marked with its source and version. | gate: test/practice.test.js | serves: D1
 - D4 [draft, must] Init writes a DOCTRINE.md for the repo's own rules only; the standard needs no copy. | gate: test/e2e.test.js | serves: D1
-- D5 [draft, aim] `pullboard practice` prints the merged doctrine and what the standard changed since the repo last looked. | gate: test/practice.test.js | serves: D1
+- D5 [draft, aim] `pullboard doctrine` prints the doctrine in force and what the standard changed since the repo last looked. | gate: test/practice.test.js | serves: D1
 - D6 [draft, must] The standard changes only by an accepted RFC in docs/rfcs, and each change bumps its version. | gate: review | serves: D1
 
 ## C · Commits
