@@ -535,7 +535,9 @@ test('a timed-out wait names what moved [N26,C7]', { timeout: 60_000 }, async ()
       assert.equal(capture.page.switching, true);
       assert.ok(JSON.stringify(capture).length < 7000, 'the diagnostic is bounded independently of the page contents');
       assert.ok(!JSON.stringify(capture).includes('private stand-in text'), 'text changes do not copy board contents');
-      if (kind !== 'target') assert.equal(capture.changes.target, 0, 'replacement, text and page scroll are distinct from target box movement');
+      for (const absent of ['target', 'replacement', 'text', 'scroll'].filter(signal => signal !== kind)) {
+        assert.equal(capture.changes[absent], 0, `${kind} does not falsely report ${absent}`);
+      }
     }
     await assert.rejects(chrome.waitFor('false', 1000), error => { // budget: declared negative-control deadline for a condition that never becomes true.
       const capture = JSON.parse(error.message.split('; readiness capture ')[1]);
