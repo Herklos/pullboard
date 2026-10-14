@@ -100,6 +100,42 @@ async function httpBox(t, { includeMissing = false, onStateBuild } = {}) {
   return { ...box, api, origin, key, id, call, path: '/api/v1/boards/' + id };
 }
 
+/** Serve one registered private fixture through the actual person's view adapter. */
+async function viewHttpBox(t, existing = null) {
+  const box = existing ?? fixture(t);
+  const previousHome = process.env.PULLBOARD_HOME;
+  let view;
+  t.after(async () => {
+    try { await view?.close(); }
+    finally {
+      if (previousHome === undefined) delete process.env.PULLBOARD_HOME;
+      else process.env.PULLBOARD_HOME = previousHome;
+    }
+  });
+  process.env.PULLBOARD_HOME = box.env.PULLBOARD_HOME;
+  registerProject(box.root);
+  view = await serveView({ port: 0 });
+  const url = new URL(view.url);
+  const key = url.searchParams.get('k');
+  const origin = url.origin;
+  /** Make a real HTTP call to this fixture's person-owned view and decode its versioned response. */
+  async function call(path, value, headers = {}) {
+    const response = await fetchFresh(origin + path, {
+      method: value === undefined ? 'GET' : 'POST',
+      headers: { 'x-pullboard-key': key, ...(value === undefined ? {} : { 'content-type': 'application/json' }), ...headers },
+      ...(value === undefined ? {} : { body: JSON.stringify(value) }),
+    });
+    const document = await response.json();
+    assert.equal(document.version, 1);
+    return { status: response.status, document };
+  }
+  const listed = await call('/api/v1/boards');
+  assert.equal(listed.status, 200);
+  assert.equal(listed.document.boards.length, 1);
+  const id = listed.document.boards[0].id;
+  return { ...box, api: view, origin, key, id, call, path: '/api/v1/boards/' + id };
+}
+
 test('[A2] a stale registered folder does not hide another readable board', async (t) => {
   const box = await httpBox(t, { includeMissing: true });
   const listed = await box.call('/api/v1/boards');
@@ -475,7 +511,7 @@ test('[A2,V2] HTTP add and edit preserve explicit blocking baseline requests', a
 });
 
 test('[A2, H12, R2] requests and shouts append events and requests stay outside decisions', async (t) => {
-  const box = await httpBox(t);
+  const box = await viewHttpBox(t);
   const requested = await box.call(box.path + '/requests', { text: 'Please approve the fixture row.' });
   assert.equal(requested.status, 200);
   assert.equal(requested.document.result.request, true);
@@ -774,5 +810,56 @@ async (t) => {
   assert.equal(response.status, 200, 'the actual view keeps the person channel');
   const approved = (await response.json()).event;
   assert.equal(approved.event_by, 'person');
+  assert.equal(box.cli(box.root, 'log').events.length, before + 1);
+});
+
+test("a request through serve is never the person's [P6,B26,A2]", { timeout: 60_000 }, // budget: private CLI/API startup and request-channel checks, not a throughput claim.
+async (t) => {
+  const box = fixture(t);
+  const child = startFixtureChild(process.execPath, [BIN, 'serve', '--port', '0', '--json'], {
+    cwd: box.root, env: { ...box.env, CLAUDECODE: '1' }, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const closed = new Promise(resolveClosed => child.once('close', resolveClosed));
+  let stopped = false;
+  /** Stop only the private server and await its terminal close before deleting its fixture. */
+  async function stopServer() {
+    if (stopped) return;
+    stopped = true;
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+    let timer;
+    try {
+      const ended = await Promise.race([closed.then(() => true), new Promise(resolveWait => { timer = setTimeout(() => resolveWait(false), 2000); })]); // budget: owned fixture server TERM grace before its bounded KILL fallback.
+      if (!ended) { child.kill('SIGKILL'); await closed; }
+    } finally { clearTimeout(timer); }
+  }
+  t.after(stopServer);
+  const served = await new Promise((resolveAddress, rejectAddress) => {
+    let output = '';
+    const timer = setTimeout(() => rejectAddress(new Error('private agent serve did not announce its address')), 20_000); // budget: private CLI address startup ceiling.
+    child.once('exit', () => { clearTimeout(timer); rejectAddress(new Error('private agent serve exited before its address')); });
+    child.stdout.on('data', chunk => {
+      output += chunk;
+      try {
+        const document = JSON.parse(output);
+        if (typeof document.url === 'string') { clearTimeout(timer); resolveAddress(new URL(document.url)); }
+      } catch { /* Wait for the complete private JSON announcement, never print its key. */ }
+    });
+  });
+  const headers = { 'x-pullboard-key': served.searchParams.get('k'), 'content-type': 'application/json' };
+  const listing = await (await fetchFresh(served.origin + '/api/v1/boards', { headers })).json();
+  const id = listing.boards.find(board => resolve(board.root) === resolve(box.root)).id;
+  const path = '/api/v1/boards/' + id;
+  const before = box.cli(box.root, 'log').events.length;
+  const refused = await fetchFresh(served.origin + path + '/requests', {
+    method: 'POST', headers, body: JSON.stringify({ text: 'Please review this private fixture.' }),
+  });
+  assert.equal((await refused.json()).error?.code, 'B26_PERSON_CHANNEL');
+  assert.notEqual(refused.status, 200);
+  assert.equal(box.cli(box.root, 'log').events.length, before, 'a standalone serve request adds no event');
+  await stopServer();
+  const view = await viewHttpBox(t, box);
+  const requested = await view.call(view.path + '/requests', { text: 'Please review this from the actual view.' });
+  assert.equal(requested.status, 200, "the actual view keeps the person's request channel");
+  assert.equal(requested.document.event.event_by, 'person');
   assert.equal(box.cli(box.root, 'log').events.length, before + 1);
 });

@@ -248,8 +248,9 @@ export async function executeMove(root, body, runCommand, isMain, personChannel 
   return { status: 200, body: { version: VERSION, event, result } };
 }
 
-/** Create a person's coordinator request through the same shout transaction as the CLI. */
-async function createRequest(root, body, isMain) {
+/** Create a person's coordinator request through the view's channel, never a standalone serve key. */
+async function createRequest(root, body, isMain, personChannel) {
+  if (personChannel !== 'view') throw new Refused('B26_PERSON_CHANNEL', 'person requests use the terminal or the view; run pullboard view');
   if (typeof body.text !== 'string' || !body.text.trim() || Object.keys(body).some((key) => key !== 'text')) throw new Refused('BAD_REQUEST', 'a request needs {text: "what the coordinator should do"}');
   const message = { from: 'person', to: COORDINATOR, text: body.text, request: true, lanes: laneNames(loadConfig(root)) };
   if (relayLinked(root)) {
@@ -324,7 +325,7 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
     events: (board, after) => afterEvents(board.root, after, codeIsMain),
     eventLogVersion: () => store.EVENT_LOG_VERSION,
     move: (board, body) => executeMove(board.root, body, runCommand, codeIsMain, personChannel),
-    request: (board, body) => createRequest(board.root, body, codeIsMain),
+    request: (board, body) => createRequest(board.root, body, codeIsMain, personChannel),
     tokens: async (board) => (await relayTokens(board.root, { err() {} })).tokens,
     revokeToken: (board, id) => relayRevoke(board.root, id, { personChannel, say() {}, err() {} }),
   });
