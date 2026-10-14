@@ -66,7 +66,7 @@ export function createApiHandler(adapter, { pollMs = 200 } = {}) {
   const streams = new Set();
 
   /** Replay and follow records, respecting slow clients and revocation between polls. */
-  async function stream(req, res, board, who, after, initial) {
+  async function stream(req, res, board, who, after, initial, watcher, lastRevision) {
     res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store', connection: 'keep-alive', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer' });
     res.write(': API v1\n\n');
     streams.add(res);
@@ -81,6 +81,7 @@ export function createApiHandler(adapter, { pollMs = 200 } = {}) {
       closed = true;
       clearInterval(timer);
       streams.delete(res);
+      watcher?.close();
       res.end();
     }
     /** Deliver only records after the latest delivered sequence, with no overlapping polls. */
@@ -102,6 +103,14 @@ export function createApiHandler(adapter, { pollMs = 200 } = {}) {
             if (closed) break;
             after = event.event_id;
             if (!res.write('id: ' + after + '\ndata: ' + JSON.stringify({ version: 1, event }) + '\n\n')) { blocked = true; break; }
+          }
+          if (!closed && !blocked && watcher) {
+            const revision = await watcher.revision();
+            if (revision !== lastRevision) {
+              const accepted = res.write('event: changed\ndata: {"version":1,"event":{"event_kind":"changed"}}\n\n');
+              lastRevision = revision;
+              if (!accepted) blocked = true;
+            }
           }
         } catch (error) {
           if (!closed) res.write('event: error\ndata: ' + JSON.stringify(refusal(error)) + '\n\n');
@@ -192,9 +201,19 @@ export function createApiHandler(adapter, { pollMs = 200 } = {}) {
       }
       if (req.method === 'GET' && route[2] === 'events') {
         const after = eventCursor(req.headers['last-event-id'] ?? url.searchParams.get('after'));
-        const initial = await adapter.events(board, after, who);
         const live = String(req.headers.accept ?? '').split(',').some((part) => /^\s*text\/event-stream\s*(?:;|$)/i.test(part));
-        if (live) return await stream(req, res, board, who, after, initial);
+        if (live) {
+          const watcher = await adapter.watchRevision?.(board, who);
+          try {
+            const lastRevision = await watcher?.revision();
+            const initial = await adapter.events(board, after, who);
+            return await stream(req, res, board, who, after, initial, watcher, lastRevision);
+          } catch (error) {
+            watcher?.close();
+            throw error;
+          }
+        }
+        const initial = await adapter.events(board, after, who);
         const warning = await adapter.warning?.(board, who);
         const eventLogVersion = await adapter.eventLogVersion?.(board, who);
         return json(res, 200, { events: initial, ...(eventLogVersion === undefined ? {} : { eventLogVersion }), ...(warning ? { warning } : {}) });

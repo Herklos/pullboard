@@ -51,4 +51,6 @@ test('[A2] API guide documents the local HTTP response catalog', () => {
   assert.match(guide, /`ITEM_NOT_AVAILABLE`/);
   assert.match(guide, /`GET \/api\/v1\/boards\/:board\/code\?ref=path:lines@commit&before=\.\.\.`/);
   assert.match(guide, /`CODE_NOT_AVAILABLE` refusal/);
+  assert.match(guide, /`event: changed` with `data: \{"version":1,"event":\{"event_kind":"changed"\}\}`/);
+  assert.match(guide, /notification has no `id` and does not move the reconnect cursor/);
 });

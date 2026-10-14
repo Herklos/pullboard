@@ -251,7 +251,7 @@ The SQLite schema marker is now `PRAGMA user_version = 2`. Opening an older boar
 
 A request body is `{text}`. It creates a request from the person to the coordinator. Open requests stay first in coordinator `resume` and `inbox` until answered `done`, or `declined` with a reason, and do not count as open decisions.
 
-For live events, send `Accept: text/event-stream` to the events path. Each message's `id` is its event sequence and its `data` has the `stream` shape above. Reconnect with `Last-Event-ID` to resume after that sequence; it takes precedence over `after`.
+For live events, send `Accept: text/event-stream` to the events path. Ordinary messages have an `id` equal to their event sequence and `data` has the `stream` shape above. The local server also sends `event: changed` with `data: {"version":1,"event":{"event_kind":"changed"}}` when a view input changes without a board event; that notification has no `id` and does not move the reconnect cursor. Reconnect with `Last-Event-ID` to resume after the last ordinary event sequence; it takes precedence over `after`.
 
 The local server uses a shared HTTP router. Streams recheck access before each poll and close with a versioned refusal if access ends. Slow readers pause delivery and resume from the last delivered sequence.
 
@@ -299,3 +299,10 @@ Row approval and decline first record the person's exact decision through the sa
 `pullboard land [--max N] [--dry-run] [--adopt]` is coordinator-only. It merges verified items in verdict order in a separate landing worktree, gates the batch once and records pushed merges. Conflicts and stacked unverified items are named separately. Reproducible failures are bisected; a failing file which passes alone files one flake and holds the batch without retries. Resume includes `landingBatches`, each with its state, owner, exact tip, items and log path.
 
 Only the person can run `pullboard land --waive <test> --until <date> --reason "why"`. A waiver retains every test in the full gate. The batch records its exact tree and each failing test with its covering live waiver; pre-push validates that distinct proof and creates no ordinary green stamp. Expired waivers cannot authorize a push. Existing gate-stamped pushes and `pullboard merged` remain available.
+
+
+### Person authority stays outside the standalone API
+
+A `pullboard serve` key grants access to a board; it does not identify the person. API moves always use a non-person channel, including when the server was started in an ordinary terminal. `spec-approve`, `spec-decline`, answering or verifying with `as: person`, and any other person-only move are refused with `B26_PERSON_CHANNEL` without recording an event. Token revocation through the standalone API is refused for the same reason. Spec signing off is not an offered API move. Use the person's terminal or the actual `pullboard view` page for person actions; ordinary agent moves remain available through the API.
+
+The view's own page retains its person channel. Residual: an agent that starts `pullboard view` itself also holds that view's link; this change does not isolate that link from the agent. Signed person moves (#408) address that separate boundary. A coordinator request (`POST /api/v1/boards/:board/requests`) is still recorded as sent by the person on either server; it approves, answers and signs nothing, and its sender attribution is a separate follow-up.

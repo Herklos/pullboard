@@ -1,8 +1,8 @@
 /** The local API v1: the CLI's moves, persistent board identities and live events (A2). */
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
-import { join } from 'node:path';
-import { existsSync, readFileSync } from 'node:fs';
+import { basename, join, resolve } from 'node:path';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { displayAgentName } from './agent-names.js';
 import * as store from './board.js';
 import { CONFIG_FILE, COORDINATOR, loadConfig } from './config.js';
@@ -11,7 +11,7 @@ import { refusalDocument } from './json.js';
 import { relayLinked, relayOperation, relayRevoke, relayTokens } from './relay.js';
 import { laneNames } from './lanes.js';
 import { MACHINE } from './machine.js';
-import { listApiProjects } from './projects.js';
+import { listApiProjects, registryFile } from './projects.js';
 import { milestoneRoadmap } from './roadmap.js';
 import { proofStats } from './stats.js';
 import { prepareFlowHistory, projectFlowStats } from './stats-flow.js';
@@ -24,48 +24,326 @@ import { moveArgs } from './api-moves.js';
 import { personRequestStatuses } from './relay-requests.js';
 export { moveArgs } from './api-moves.js';
 
-/** Hash the exact bytes of one state input, preserving a missing-file marker. */
-function fileRevision(root, file) {
-  const path = join(root, file);
-  if (!existsSync(path)) return [file, null];
-  return [file, createHash('sha256').update(readFileSync(path)).digest('hex')];
+/** Inputs shared by the complete state cache and the lightweight live-change watcher. */
+const STATE_REVISION_INPUTS = Object.freeze([
+  'identity', 'head', 'files', 'event', 'agents', 'leases', 'requestReceipts', 'milestones', 'externalRoadmap', 'eventLogVersion',
+]);
+
+/** Serialize named state inputs in one stable order for cache and stream comparisons. */
+function stateRevision(inputs) {
+  return JSON.stringify(STATE_REVISION_INPUTS.map((name) => [name, inputs[name]]));
+}
+
+/** Name project and built-in files separately, even when their basenames collide. */
+function stateFileInputs(root, config) {
+  return [
+    { name: `config:${CONFIG_FILE}`, path: join(root, CONFIG_FILE) },
+    { name: `spec:${config.spec}`, path: join(root, config.spec) },
+    { name: `practice:${config.practice}`, path: join(root, config.practice) },
+    { name: 'builtin:standard-doctrine.md', path: new URL('./standard-doctrine.md', import.meta.url) },
+  ];
+}
+
+/** Hash the exact bytes of one named input, preserving a missing-file marker. */
+function fileRevision(file) {
+  if (!existsSync(file.path)) return [file.name, null];
+  return [file.name, createHash('sha256').update(readFileSync(file.path)).digest('hex')];
+}
+
+/**
+ * Read this board's own revision inputs from one open connection, for the cache and the watcher alike.
+ * nextExpiry is the earliest live claim or review lease, when a lease turns over with no write.
+ */
+function localRevisionInputs(board, now) {
+  const leases = board.db.prepare('SELECT item_id, item_status, item_owner, item_lease_until, item_review_by, item_review_until FROM item ORDER BY item_id').all()
+    .map((item) => [
+      item.item_id, item.item_status, item.item_owner, item.item_lease_until, item.item_review_by, item.item_review_until,
+      item.item_status === 'claimed' && (item.item_lease_until ?? '') > now,
+      item.item_status === 'submitted' && Boolean(item.item_review_by) && (item.item_review_until ?? '') > now,
+    ]);
+  const expiries = leases.flatMap(([, , , leaseUntil, , reviewUntil, claimLive, reviewLive]) => [claimLive ? leaseUntil : null, reviewLive ? reviewUntil : null]);
+  return {
+    event: board.db.prepare('SELECT COALESCE(MAX(event_id), 0) AS id FROM event').get().id,
+    agents: store.listAgents(board),
+    leases,
+    requestReceipts: board.db.prepare('SELECT meta_value FROM board_meta WHERE meta_key = ?').get('relay_person_requests')?.meta_value ?? null,
+    milestones: store.milestones(board),
+    nextExpiry: expiries.filter(Boolean).sort()[0] ?? null,
+  };
 }
 
 /** Capture the inexpensive inputs that can invalidate a complete board-state snapshot. */
 function boardStateRevision(root, id, isMain) {
   const info = repoInfo(root);
   const config = loadConfig(info.root);
-  const files = [
-    fileRevision(info.root, CONFIG_FILE),
-    fileRevision(info.root, config.spec),
-    fileRevision(info.root, config.practice),
-    ['standard-doctrine.md', createHash('sha256').update(readFileSync(new URL('./standard-doctrine.md', import.meta.url))).digest('hex')],
-  ];
+  const files = stateFileInputs(info.root, config).map(fileRevision);
   const local = withBoard(info.root, (board) => {
-    const now = board.clock.now().toISOString();
-    const agents = store.listAgents(board);
-    const leases = board.db.prepare('SELECT item_id, item_status, item_owner, item_lease_until, item_review_by, item_review_until FROM item ORDER BY item_id').all()
-      .map((item) => [
-        item.item_id, item.item_status, item.item_owner, item.item_lease_until, item.item_review_by, item.item_review_until,
-        item.item_status === 'claimed' && (item.item_lease_until ?? '') > now,
-        item.item_status === 'submitted' && Boolean(item.item_review_by) && (item.item_review_until ?? '') > now,
-      ]);
-    const milestones = store.milestones(board);
-    const hasExternalMilestones = milestones.some((milestone) => milestone.items.some((item) => typeof item !== 'number'));
-    return {
-      event: board.db.prepare('SELECT COALESCE(MAX(event_id), 0) AS id FROM event').get().id,
-      agents,
-      leases,
-      requestReceipts: board.db.prepare('SELECT meta_value FROM board_meta WHERE meta_key = ?').get('relay_person_requests')?.meta_value ?? null,
-      milestones,
-      externalMilestones: hasExternalMilestones ? milestoneRoadmap(info.root, board) : null,
-    };
+    const inputs = localRevisionInputs(board, board.clock.now().toISOString());
+    const hasExternalMilestones = inputs.milestones.some((milestone) => milestone.items.some((item) => typeof item !== 'number'));
+    return { ...inputs, externalMilestones: hasExternalMilestones ? milestoneRoadmap(info.root, board) : null };
   }, isMain);
-  const revision = JSON.stringify([
-    info.commonDir, id, resolveCommit(info.root, 'HEAD'), files,
-    local.event, local.agents, local.leases, local.requestReceipts, local.milestones, local.externalMilestones, store.EVENT_LOG_VERSION,
-  ]);
+  const revision = stateRevision({
+    identity: [info.commonDir, id],
+    head: resolveCommit(info.root, 'HEAD'),
+    files,
+    event: local.event,
+    agents: local.agents,
+    leases: local.leases,
+    requestReceipts: local.requestReceipts,
+    milestones: local.milestones,
+    externalRoadmap: local.externalMilestones,
+    eventLogVersion: store.EVENT_LOG_VERSION,
+  });
   return { cacheId: info.commonDir + '\0' + id, revision, milestones: local.externalMilestones, cacheable: true };
+}
+
+/** Cheap file identity for an event-stream poll; content is read only after this marker changes. */
+function fileMarker(file) {
+  try {
+    const stat = statSync(file.path);
+    return [file.name, stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs];
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return [file.name, null];
+    throw error;
+  }
+}
+
+/** Capture a marker for a single absolute path, including an explicit missing-file value. */
+function fileMarkerForPath(path) {
+  try {
+    const stat = statSync(path);
+    return JSON.stringify([stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs]);
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return 'missing';
+    throw error;
+  }
+}
+
+/** Read HEAD and its selected ref without spawning Git on every 200 ms poll. */
+function headFileRevision(info) {
+  const head = readFileSync(join(info.gitDir, 'HEAD'), 'utf8').trim();
+  if (/^[0-9a-f]{40,64}$/iu.test(head)) return head.toLowerCase();
+  const symbolic = /^ref: (.+)$/.exec(head);
+  if (!symbolic) return head;
+  const ref = symbolic[1];
+  try { return readFileSync(join(info.commonDir, ref), 'utf8').trim(); }
+  catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    let packed;
+    try { packed = readFileSync(join(info.commonDir, 'packed-refs'), 'utf8'); }
+    catch (packedError) {
+      if (packedError.code === 'ENOENT') return head;
+      throw packedError;
+    }
+    return packed.split('\n').find((line) => line.endsWith(' ' + ref))?.split(' ')[0] ?? head;
+  }
+}
+
+/**
+ * Read the machine registry that milestoneRoadmap resolves against, without listApiProjects' pruning
+ * or metadata writes: a poll must not rewrite the registry it watches.
+ */
+function registeredProjects() {
+  try {
+    const value = JSON.parse(readFileSync(registryFile(), 'utf8'));
+    if (!Array.isArray(value.projects)) return [];
+    return value.projects.filter((project) => typeof project?.root === 'string').map((project) => ({
+      ...project,
+      root: resolve(project.root),
+      name: project.name ?? basename(project.root),
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/** Open only boards named by this board's external milestone references. */
+function openRoadmapInputs(root, milestones, localDb) {
+  const references = milestones.flatMap((milestone) => milestone.items.filter((item) => typeof item !== 'number'));
+  const registered = references.length ? registeredProjects() : [];
+  const opened = new Map();
+  const pathMarkers = new Map();
+  const watchPath = (path) => {
+    if (!pathMarkers.has(path)) pathMarkers.set(path, fileMarkerForPath(path));
+  };
+  let inputs;
+  try {
+    inputs = references.map((reference) => {
+      const match = /^(.+)#([1-9]\d*)$/.exec(reference);
+      if (!match) return { reference, unavailable: true };
+      const [, repo, number] = match;
+      const candidates = registered.filter((project) => project.name === repo || basename(project.root) === repo);
+      for (const candidate of candidates) {
+        watchPath(candidate.root);
+        watchPath(join(candidate.root, '.git'));
+      }
+      if (candidates.length !== 1) return { reference, unavailable: true };
+      try {
+        const info = repoInfo(candidates[0].root);
+        const path = join(info.commonDir, 'pullboard', 'board.sqlite');
+        watchPath(path);
+        const db = resolve(candidates[0].root) === resolve(root) ? localDb : (opened.get(path) ?? store.openBoardReadOnly(path));
+        if (db !== localDb) opened.set(path, db);
+        return { reference, id: Number(number), db, path };
+      } catch {
+        return { reference, unavailable: true };
+      }
+    });
+  } catch (error) {
+    for (const db of opened.values()) {
+      try { db.close(); } catch {}
+    }
+    throw error;
+  }
+  return {
+    inputs,
+    close() {
+      for (const db of opened.values()) {
+        try { db.close(); } catch {}
+      }
+    },
+    needsRefresh() {
+      for (const [path, marker] of pathMarkers) if (fileMarkerForPath(path) !== marker) return true;
+      return false;
+    },
+    revision(now) {
+      const values = [];
+      let nextExpiry = null;
+      for (const input of inputs) {
+        if (input.unavailable) { values.push([input.reference, 'unavailable']); continue; }
+        const item = input.db.prepare('SELECT item_title, item_status, item_lease_until FROM item WHERE item_id = ?').get(input.id);
+        if (!item) { values.push([input.reference, 'missing']); continue; }
+        const status = item.item_status === 'claimed' && (item.item_lease_until ?? '') <= now ? 'open' : item.item_status;
+        if (item.item_status === 'claimed' && item.item_lease_until > now && (!nextExpiry || item.item_lease_until < nextExpiry)) nextExpiry = item.item_lease_until;
+        values.push([input.reference, item.item_title, status]);
+      }
+      return { values, nextExpiry };
+    },
+  };
+}
+
+/** Watch the same named state inputs as the cache without rebuilding a board-state response. */
+function watchLocalStateRevision(board) {
+  const info = repoInfo(board.root);
+  const config = loadConfig(info.root);
+  let files = stateFileInputs(info.root, config);
+  const dbPath = join(info.commonDir, 'pullboard', 'board.sqlite');
+  let db = store.openBoardReadOnly(dbPath);
+  let closed = false;
+  let dbMarker;
+  let fileMarkers;
+  let fileContent;
+  let head;
+  let dataVersion;
+  let local = null;
+  let external = null;
+  let externalVersion = new Map();
+  let externalValues = null;
+  let externalNextExpiry = null;
+  let externalReferences = null;
+  let registryMarker = null;
+
+  try {
+    dbMarker = fileMarkerForPath(dbPath);
+    fileMarkers = files.map(fileMarker);
+    fileContent = files.map(fileRevision);
+    head = headFileRevision(info);
+    dataVersion = db.prepare('PRAGMA data_version').get().data_version;
+  } catch (error) {
+    db.close();
+    throw error;
+  }
+
+  /** Refresh related external board reads only after their retained connection reports a commit. */
+  function externalInputs(now, milestoneDefinitions, localChanged) {
+    const references = milestoneDefinitions.flatMap((milestone) => milestone.items.filter((item) => typeof item !== 'number'));
+    const currentRegistryMarker = fileMarkerForPath(registryFile());
+    const registryChanged = registryMarker !== currentRegistryMarker;
+    if (!external || JSON.stringify(externalReferences) !== JSON.stringify(references) || registryChanged || external.needsRefresh()) {
+      external?.close();
+      external = openRoadmapInputs(info.root, milestoneDefinitions, db);
+      externalVersion = new Map();
+      externalValues = null;
+      externalNextExpiry = null;
+      externalReferences = references;
+      registryMarker = currentRegistryMarker;
+    }
+    let changed = false;
+    for (const input of external.inputs) {
+      if (!input.unavailable && input.db !== db) {
+        // Keep the version observed before row reads. A commit during revision() is then
+        // detected on the next poll instead of pairing old rows with a newer version.
+        const value = input.db.prepare('PRAGMA data_version').get().data_version;
+        const key = input.db;
+        if (externalVersion.has(key) && externalVersion.get(key) !== value) changed = true;
+        externalVersion.set(key, value);
+      }
+    }
+    if (changed || localChanged || !externalValues || (externalNextExpiry && externalNextExpiry <= now)) {
+      const current = external.revision(now);
+      externalValues = current.values;
+      externalNextExpiry = current.nextExpiry;
+    }
+    return externalValues;
+  }
+
+  /** Return the current cheap revision, updating heavier SQL projections only when needed. */
+  function revision() {
+    if (closed) throw new Error('the event-stream revision watcher is closed');
+    const latestDbMarker = fileMarkerForPath(dbPath);
+    if (latestDbMarker !== dbMarker) {
+      const replacement = store.openBoardReadOnly(dbPath);
+      const replacementVersion = replacement.prepare('PRAGMA data_version').get().data_version;
+      external?.close();
+      external = null;
+      db.close();
+      db = replacement;
+      dbMarker = latestDbMarker;
+      dataVersion = replacementVersion;
+      local = null;
+      externalValues = null;
+      externalVersion = new Map();
+    }
+    const currentMarkers = files.map(fileMarker);
+    if (JSON.stringify(currentMarkers) !== JSON.stringify(fileMarkers)) {
+      const latestConfig = loadConfig(info.root);
+      files = stateFileInputs(info.root, latestConfig);
+      fileMarkers = files.map(fileMarker);
+      fileContent = files.map(fileRevision);
+    }
+    const latestHead = headFileRevision(info);
+    const latestDataVersion = db.prepare('PRAGMA data_version').get().data_version;
+    const now = new Date().toISOString();
+    const localChanged = latestDataVersion !== dataVersion;
+    const localExpiryChanged = Boolean(local?.nextExpiry && local.nextExpiry <= now);
+    if (!local || localChanged || localExpiryChanged) {
+      local = localRevisionInputs({ db, clock: store.systemClock }, now);
+      dataVersion = latestDataVersion;
+    }
+    head = latestHead;
+    const externalRoadmap = externalInputs(now, local.milestones, localChanged || localExpiryChanged);
+    return stateRevision({
+      identity: [info.commonDir, board.id],
+      head,
+      files: fileContent,
+      event: local.event,
+      agents: local.agents,
+      leases: local.leases,
+      requestReceipts: local.requestReceipts,
+      milestones: local.milestones,
+      externalRoadmap,
+      eventLogVersion: store.EVENT_LOG_VERSION,
+    });
+  }
+
+  return {
+    revision,
+    close() {
+      if (closed) return;
+      closed = true;
+      try { external?.close(); } finally { db.close(); }
+    },
+  };
 }
 
 /** Build the complete local API state, including fields that the shared project snapshot omits. */
@@ -336,7 +614,7 @@ function agentPath(root, name = COORDINATOR, isMain) {
 }
 
 /** Execute one actual CLI command and retain its emitted event without a latest-row race. */
-export async function executeMove(root, body, runCommand, isMain) {
+export async function executeMove(root, body, runCommand, isMain, personChannel = 'view') {
   if (Object.keys(body).some((key) => !['verb', 'item', 'args', 'agent'].includes(key))) throw new Refused('BAD_REQUEST', 'a move takes only verb, item, args and agent; remove the unknown fields');
   const argv = moveArgs(body);
   let cwd;
@@ -349,7 +627,7 @@ export async function executeMove(root, body, runCommand, isMain) {
   const events = [];
   const status = await runCommand(argv, {
     cwd,
-    personChannel: 'view',
+    personChannel,
     stdout: { isTTY: false, write: (text) => { output += text; } },
     stderr: { write: (text) => { diagnostics += text; } },
     onEvent: (row) => { events.push(row); },
@@ -381,8 +659,8 @@ async function createRequest(root, body, isMain) {
   }, isMain);
 }
 
-/** Create the authenticated local adapter used by the HTTP server and other local transports. */
-export function createLocalApiHandler({ secret, getPort, runCommand, projects = listApiProjects, isMain, allowedOrigins = [], onStateBuild, stateDetail = 'full' } = {}) {
+/** Share the local router with the person's view; the standalone API explicitly denies person authority. */
+export function createLocalApiHandler({ secret, getPort, runCommand, projects = listApiProjects, isMain, allowedOrigins = [], onStateBuild, personChannel = 'view', stateDetail = 'full' } = {}) {
   if (typeof getPort !== 'function') throw new TypeError('createLocalApiHandler needs a bound-port getter');
   if (typeof runCommand !== 'function') throw new TypeError('createLocalApiHandler needs the actual CLI entry point as runCommand');
   // A page that still reads each item's detail from the state keeps full items until it opts in.
@@ -461,6 +739,7 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
     board: (id) => findBoard(id, projects, codeIsMain),
     state: (board, who, seen, options) => localState(board, seen, options).state,
     stateJson: (board, who, seen, options) => localState(board, seen, options).json,
+    watchRevision: (board) => watchLocalStateRevision(board),
     item: (board, id) => localItem(board, id),
     search: (board, text) => localSearch(board, text),
     shout: (board, id) => relayLinked(board.root)
@@ -469,10 +748,10 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
     code: (board, ref) => codeAt(board.root, ref),
     events: (board, after) => afterEvents(board.root, after, codeIsMain),
     eventLogVersion: () => store.EVENT_LOG_VERSION,
-    move: (board, body) => executeMove(board.root, body, runCommand, codeIsMain),
+    move: (board, body) => executeMove(board.root, body, runCommand, codeIsMain, personChannel),
     request: (board, body) => createRequest(board.root, body, codeIsMain),
     tokens: async (board) => (await relayTokens(board.root, { err() {} })).tokens,
-    revokeToken: (board, id) => relayRevoke(board.root, id, { personChannel: 'view', say() {}, err() {} }),
+    revokeToken: (board, id) => relayRevoke(board.root, id, { personChannel, say() {}, err() {} }),
   });
 }
 
@@ -483,7 +762,8 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
 export function serveApi({ port = 0, secret = randomBytes(18).toString('base64url'), runCommand, projects = listApiProjects, isMain, onStateBuild, stateDetail = 'summary' } = {}) {
   if (typeof runCommand !== 'function') throw new TypeError('serveApi needs the actual CLI entry point as runCommand');
   let bound;
-  const handler = createLocalApiHandler({ secret, getPort: () => bound, runCommand, projects, isMain, onStateBuild, stateDetail });
+  // A serve key authenticates board access, never a person, even in an ordinary terminal.
+  const handler = createLocalApiHandler({ secret, getPort: () => bound, runCommand, projects, isMain, onStateBuild, personChannel: 'api', stateDetail });
   const server = createServer(handler);
   server.requestTimeout = 15_000;
   return new Promise((ready, fail) => {

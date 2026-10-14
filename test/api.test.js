@@ -1550,7 +1550,18 @@ test('[A2,B25,B26,B27] HTTP decisions preserve routing, passing and explicit per
   const personRequired = JSON.parse(box.run(box.repo, 'answer', String(passed.result.id), 'Approved', '--json').stdout).error;
   assert.equal(personRequired.code, 'B26_PERSON_ANSWER');
   assert.deepEqual(await apiError(await move('answer', { text: 'Approved' }, passed.result.id), 409), personRequired);
-  const answerResponse = await move('answer', { text: 'Approved', as: 'person' }, passed.result.id);
+  // A serve key is not the person: an explicit person answer through the standalone API records nothing [P6].
+  const eventsBefore = json(box, box.repo, 'log').events.length;
+  assert.equal((await apiError(await move('answer', { text: 'Approved', as: 'person' }, passed.result.id), 409)).code, 'B26_PERSON_CHANNEL');
+  assert.equal(json(box, box.repo, 'log').events.length, eventsBefore, 'a refused API person answer records no event');
+  assert.ok((await (await apiFetch(api, `${path}/state`)).json()).state.decisions.some((entry) => entry.shout_id === passed.result.id),
+    'the passed decision still waits for the person');
+  // The view's own adapter keeps the person channel, so the person's explicit answer still routes back to the asker.
+  const view = await startLocalHandler(t, box);
+  const answerResponse = await apiFetch(view, `${path}/moves`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ verb: 'answer', item: passed.result.id, args: { text: 'Approved', as: 'person' }, agent: 'coordinator' }),
+  });
   assert.equal(answerResponse.status, 200);
   const answered = await answerResponse.json();
   assert.equal(answered.version, 1);
