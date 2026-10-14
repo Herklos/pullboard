@@ -723,14 +723,43 @@ async function createRequest(root, body, isMain) {
   }, isMain);
 }
 
+/** Return one unambiguous value for a named request cookie, or null when absent or duplicated. */
+function requestCookie(header, name) {
+  if (typeof header !== 'string') return null;
+  let found = null;
+  for (const part of header.split(';')) {
+    const separator = part.indexOf('=');
+    if (separator < 0) {
+      if (part.trim() === name) return null;
+      continue;
+    }
+    if (part.slice(0, separator).trim() !== name) continue;
+    if (found !== null) return null;
+    found = part.slice(separator + 1).trim();
+  }
+  return found;
+}
+
+/** Compare two credential buffers without exposing their contents or comparing equal-length values ordinarily. */
+function credentialMatches(candidate, expected) {
+  return candidate.length === expected.length && timingSafeEqual(candidate, expected);
+}
+
 /** Share the local router with the person's view and other local transports; the standalone API explicitly denies person authority. */
-export function createLocalApiHandler({ secret, getPort, runCommand, projects = listApiProjects, isMain, allowedOrigins = [], onStateBuild, personChannel = 'view', stateDetail = 'full' } = {}) {
+export function createLocalApiHandler({ secret, getPort, runCommand, projects = listApiProjects, isMain, allowedOrigins = [], onStateBuild, personChannel = 'view', stateDetail = 'full', sessionCookie } = {}) {
   if (typeof getPort !== 'function') throw new TypeError('createLocalApiHandler needs a bound-port getter');
   if (typeof runCommand !== 'function') throw new TypeError('createLocalApiHandler needs the actual CLI entry point as runCommand');
   // A page that still reads each item's detail from the state keeps full items until it opts in.
   if (!['full', 'summary'].includes(stateDetail)) throw new TypeError('createLocalApiHandler stateDetail is full or summary');
+  if (sessionCookie !== undefined && (!sessionCookie || typeof sessionCookie.name !== 'string'
+    || !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(sessionCookie.name)
+    || typeof sessionCookie.value !== 'string' || !/^[\x21\x23-\x2B\x2D-\x3A\x3C-\x5B\x5D-\x7E]+$/u.test(sessionCookie.value))) {
+    throw new TypeError('createLocalApiHandler sessionCookie needs a cookie name and value');
+  }
   const codeIsMain = codeIsFromMain() && isMain !== false;
   const key = Buffer.from(secret);
+  const cookieName = sessionCookie?.name;
+  const cookieKey = sessionCookie === undefined ? null : Buffer.from(sessionCookie.value);
   const permittedOrigins = new Set(allowedOrigins);
   const stateCache = new Map();
   // The fingerprints of the summary states each board's clients were sent, least recently sent
@@ -838,7 +867,11 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
       const given = Buffer.from(String(req.headers['x-pullboard-key'] ?? (authorization.startsWith('Bearer ') ? authorization.slice(7) : url.searchParams.get('k') ?? '')));
       const bound = getPort();
       const ownHost = req.headers.host === ADDRESS + ':' + bound || req.headers.host === 'localhost:' + bound;
-      if (!ownHost || given.length !== key.length || !timingSafeEqual(given, key)) throw new Refused('AUTH_REQUIRED', 'this API needs its session secret and own host; use the address pullboard serve printed');
+      const validKey = credentialMatches(given, key);
+      const cookieValue = cookieKey ? requestCookie(req.headers.cookie, cookieName) : null;
+      const givenCookie = Buffer.from(cookieValue ?? '');
+      const validCookie = cookieKey !== null && cookieValue !== null && credentialMatches(givenCookie, cookieKey);
+      if (!ownHost || (!validKey && !validCookie)) throw new Refused('AUTH_REQUIRED', 'this API needs its session secret and own host; use the address pullboard serve printed');
       if (req.headers.origin && req.headers.origin !== 'http://' + req.headers.host && !permittedOrigins.has(req.headers.origin)) throw new Refused('API_ORIGIN', 'use the API from its own origin');
       return { local: true };
     },
