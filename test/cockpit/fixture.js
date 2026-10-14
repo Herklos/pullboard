@@ -947,12 +947,7 @@ async function pressedInto(chrome, expression, timeoutMs = 10_000) {
 
 /** Wait for a page condition that may span a page load, when the page asked may still be loading. */
 async function settled(chrome, expression, timeoutMs = 15_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try { if (await chrome.stable(expression)) return; } catch { /* The next page is still loading. */ }
-    await browserPause(50);
-  }
-  throw new Error(`Browser condition did not arrive: ${expression}`);
+  return chrome.waitFor(expression, timeoutMs);
 }
 
 /** A page expression for the Roadmap row showing an id, such as #3 or beacon#1. */
