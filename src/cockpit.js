@@ -24,7 +24,7 @@ function lifecycle() {
 
 /**
  * The page `pullboard view` serves (N26): one self-contained file, no assets from anywhere, that
- * reads the board through the server's JSON and refreshes itself. The layout is the one the person
+ * reads the board through the server's JSON and follows its events. The layout is the one the person
  * asked for: a sidebar listing every project on the machine with what needs them there, and a main
  * column with the tabs over two panes, a list and the selected thing's detail. Activity draws the
  * item lifecycle from src/machine.js with this board's counts. Under 900px wide the sidebar folds
@@ -1039,8 +1039,142 @@ async function refresh() {
     snapshotReplay.index = snapshotReplay.events.length;
     replayControls();
   }
-  $('live').textContent = snapshot ? 'read-only snapshot' : '';
+  if (!snapshot && !transportModule) follow();
+  $('live').textContent = snapshot ? 'read-only snapshot' : liveLine();
 }
+
+// The local view follows each shown board's event stream instead of a timer (#545): it reads the board once, waits
+// on the board's events after that read's latest one, and reads again only when an event or the stream's changed
+// signal (#554) arrives, so a page whose board is quiet makes no requests. The relay transport keeps its own stream.
+const streams = new Map();
+let catching = null;
+let catchAgain = false;
+let catchWhenShown = false;
+/** How often a page with no live stream reads its board instead, until the stream is back. */
+const FALLBACK_MS = 15000;
+
+/** Whether this browser reads a response as it arrives; one that cannot keeps only the fallback refresh. */
+const canStream = () => typeof AbortController === 'function' && typeof ReadableStream === 'function' && typeof TextDecoderStream === 'function';
+
+/** The latest event a board state already shows; its events are newest first. */
+const latestEvent = (state) => Number(state?.events?.[0]?.event_id ?? 0);
+
+/** Whether every board on screen has its stream up or opening, so nothing needs a timed read. */
+const connected = () => streams.size > 0 && [...streams.values()].every((entry) => entry.status !== 'down');
+
+/** Say nothing while every shown board's stream is up, and why the page is not live while one is down. */
+function liveLine() {
+  const down = [...streams.values()].filter((entry) => entry.status === 'down');
+  if (!down.length) return '';
+  if (down.some((entry) => entry.offline)) return 'offline: is pullboard view still running?';
+  return (canStream() ? 'reconnecting' : 'no live stream in this browser') + ': refreshing every ' + FALLBACK_MS / 1000 + 's';
+}
+
+/** Follow each board the page shows and stop following the rest, starting a new stream after the state just read. */
+function follow() {
+  const shown = new Map(data.group ? data.group.repos.map((repo) => [repo.root, repo.board]) : data.project ? [[view.root, data.project]] : []);
+  for (const [root, entry] of streams) {
+    if (shown.has(root)) continue;
+    entry.controller?.abort();
+    clearTimeout(entry.retry);
+    streams.delete(root);
+  }
+  for (const [root, state] of shown) {
+    const board = data.projects.find((entry) => entry.root === root && entry.ok);
+    const entry = streams.get(root);
+    // A board's events after the latest one this page shows are what changed it since.
+    if (entry && entry.id === board?.id) { entry.shown = Math.max(entry.shown, latestEvent(state)); continue; }
+    if (entry) { entry.controller?.abort(); clearTimeout(entry.retry); streams.delete(root); }
+    if (!board) continue;
+    const next = { root, id: board.id, after: latestEvent(state), shown: latestEvent(state), status: 'opening', offline: false, failures: 0, controller: null, retry: 0 };
+    streams.set(root, next);
+    void listen(next);
+  }
+}
+
+/** Read one server-sent message: its event name, its data and its numeric id. */
+function streamMessage(block) {
+  const message = { event: 'message', data: '', id: null };
+  for (const line of block.split('\\n')) {
+    if (!line || line.startsWith(':')) continue;
+    const colon = line.indexOf(':');
+    const field = colon < 0 ? line : line.slice(0, colon);
+    const value = colon < 0 ? '' : line.slice(colon + 1).replace(/^ /, '');
+    if (field === 'event') message.event = value;
+    else if (field === 'data') message.data += (message.data ? '\\n' : '') + value;
+    else if (field === 'id' && /^\\d+$/.test(value)) message.id = Number(value);
+  }
+  return message;
+}
+
+/** The rule and next step a stream's refusal carries. */
+function streamRefusal(data) {
+  try {
+    const refusal = JSON.parse(data).error;
+    return refusal && typeof refusal === 'object' ? '[' + refusal.code + '] ' + refusal.message : String(refusal || 'the board stream refused this view');
+  } catch { return 'the board stream refused this view'; }
+}
+
+/**
+ * Hold one board's event stream open, and read the board when its events say it changed. When the stream ends or
+ * fails, try again with Last-Event-ID, waiting longer after each failure; the fallback refresh covers the gap.
+ */
+async function listen(entry) {
+  const controller = canStream() ? new AbortController() : null;
+  entry.controller = controller;
+  try {
+    if (!controller) throw new Error('this browser cannot read a stream');
+    const res = await fetch(connection.base + '/api/v1/boards/' + encodeURIComponent(entry.id) + '/events', {
+      headers: { ...connection.headers, accept: 'text/event-stream', 'last-event-id': String(entry.after) }, cache: 'no-store', signal: controller.signal,
+    });
+    if (!res.ok || !res.body) throw new Error('the board stream answered ' + res.status);
+    entry.status = 'up';
+    entry.offline = false;
+    entry.failures = 0;
+    $('live').textContent = liveLine();
+    const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+    let buffer = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += value;
+      let moved = false;
+      for (let end = buffer.indexOf('\\n\\n'); end >= 0; end = buffer.indexOf('\\n\\n')) {
+        const message = streamMessage(buffer.slice(0, end));
+        buffer = buffer.slice(end + 2);
+        if (message.event === 'error') throw new Error(streamRefusal(message.data));
+        if (message.id !== null) entry.after = message.id;
+        // An event after the latest one shown, or a signal with no id: a warning, or the board changed without a move.
+        if (message.id !== null ? message.id > entry.shown : Boolean(message.data) || message.event !== 'message') moved = true;
+      }
+      // One read covers every event that arrived together.
+      if (moved) catchUp();
+    }
+    throw new Error('the board stream ended');
+  } catch (error) {
+    if (controller?.signal.aborted || streams.get(entry.root) !== entry) return;
+    entry.status = 'down';
+    // A request that never reached the view is a TypeError; a refusal or an ended stream is not.
+    entry.offline = error instanceof TypeError;
+    entry.failures += 1;
+    $('live').textContent = liveLine();
+    if (controller) entry.retry = setTimeout(() => { if (streams.get(entry.root) === entry) void listen(entry); }, Math.min(FALLBACK_MS, 1000 * 2 ** Math.min(entry.failures - 1, 4)));
+  }
+}
+
+/**
+ * The one catch-up function: bring the page up to date after the events that arrived, one read at a time, by reading
+ * the board's state again. A hidden page catches up when it is shown. #555 switches this read to #552's since=N delta.
+ */
+function catchUp() {
+  if (document.hidden) { catchWhenShown = true; return; }
+  if (catching) { catchAgain = true; return; }
+  catching = refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }).finally(() => {
+    catching = null;
+    if (catchAgain) { catchAgain = false; catchUp(); }
+  });
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden && catchWhenShown) { catchWhenShown = false; catchUp(); } });
 
 /** Display the current event and make the replay's play, pause and end states explicit. */
 function replayControls() {
@@ -2802,7 +2936,10 @@ async function startPage() {
   await refresh();
 }
 startPage().catch((error) => { document.body.classList.remove('loading'); $('live').textContent = 'cannot reach the view: ' + error.message; });
-if (!snapshot) setInterval(() => { if (!document.hidden && (!transportModule || transport)) refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }); }, 3000);
+// The relay transport keeps its own stream and timer. The local view reads on a timer only while it has no live
+// stream, and its live line says so (#545).
+if (!snapshot && transportModule) setInterval(() => { if (!document.hidden && transport) refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }); }, 3000);
+if (!snapshot && !transportModule) setInterval(() => { if (!document.hidden && !connected()) refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }); }, FALLBACK_MS);
 setInterval(tickAges, 60000);
 </script>
 </body>
