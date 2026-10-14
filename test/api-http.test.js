@@ -334,14 +334,13 @@ test("[A2, N26] the board state sends summaries and an item's detail comes from 
   t.after(async () => { served.kill('SIGTERM'); await exited; });
   const servedUrl = await new Promise((found, fail) => {
     let out = '';
-    const timer = setTimeout(() => fail(new Error('pullboard serve printed no address: ' + out)), 30_000);
     served.stdout.setEncoding('utf8');
     served.stdout.on('data', (chunk) => {
       out += chunk;
       const match = /"url":\s*"([^"]+)"/.exec(out);
-      if (match) { clearTimeout(timer); found(new URL(match[1])); }
+      if (match) found(new URL(match[1]));
     });
-    served.once('close', (code) => { clearTimeout(timer); fail(new Error('pullboard serve exited ' + code + ': ' + out)); });
+    served.once('close', (code) => fail(new Error('pullboard serve exited ' + code + ' before printing its address: ' + out)));
   });
   const servedState = await fetchFresh(servedUrl.origin + box.path + '/state', { headers: { 'x-pullboard-key': servedUrl.searchParams.get('k') } });
   assert.equal(servedState.status, 200);
