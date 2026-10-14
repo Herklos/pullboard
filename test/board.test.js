@@ -415,7 +415,7 @@ test('a rejected commit resubmits after its bar is corrected [V4,B3]', async (t)
   const reviewer = store.register(durable, { lane: 'web', path: join(directory, 'web-2') });
   /** Freeze the current criterion deterministically for this real-board replay test. */
   const criterionFreeze = (item) => ({ text: item.item_criterion, digest: `digest:${item.item_criterion}` });
-  assert.equal(ENGINE_VERSION, 9, 'corrected-bar resubmission is an engine-9 move rule');
+  assert.ok(ENGINE_VERSION >= 9, 'engine 9 introduces corrected-bar resubmission');
   const id = store.addItem(durable, {
     by: 'coordinator', lane: 'web', title: 'Page', criterion: 'the page renders its heading',
   });

@@ -528,7 +528,8 @@ test('land bisects a real red, skips named conflicts and refuses an unverified s
   const afterCalls = calls(box).length;
   const again = json(box, box.repo, 'land');
   assert.deepEqual(again.landed, []);
-  assert.ok(again.blocked.some((entry) => entry.code === 'LAND_KNOWN_RED' && entry.id === entries[2].item));
+  assert.equal(json(box, box.repo, 'show', String(entries[2].item)).item_status, 'open', 'the known red is returned to its builder');
+  assert.ok(!again.blocked.some((entry) => entry.id === entries[2].item), 'returned work is not offered as a verified landing candidate');
   assert.equal(calls(box).length, afterCalls, 'known unchanged red is not retried');
 });
 
