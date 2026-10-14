@@ -26,7 +26,8 @@ import { createLocalApiHandler } from '../src/api.js';
 import { allShouts, EVENT_LOG_VERSION, closeBoard, openBoard } from '../src/board.js';
 import { presentationShout, relayPresentation } from '../src/relay-presentation.js';
 import { JSON_SHAPES } from '../src/json.js';
-import { projectState } from '../src/serve.js';
+import { projectState, serveView } from '../src/serve.js';
+import { registerProject } from '../src/projects.js';
 import { SSH_SHELL_MARKERS } from '../src/person.js';
 import { fetchFresh } from './http-fixture.js';
 
@@ -1486,7 +1487,29 @@ test('[A2] moves run as the named worktree agent and requests stay visible until
     assert.deepEqual(afterEscalation.map((event) => event.event_kind), ['escalate', 'shout'], eventsStep.evidence);
     assert.equal(afterEscalation[0].event_id, escalated.event.event_id, eventsStep.evidence);
 
-    const requestStep = await observedApiStep('create person request', apiFetch(api, `${path}/requests`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: 'Approve the API row' }) }), box.env);
+    const previousHome = process.env.PULLBOARD_HOME;
+    process.env.PULLBOARD_HOME = box.env.PULLBOARD_HOME;
+    let personView;
+    let requestStep;
+    try {
+      registerProject(box.repo);
+      personView = await serveView({ port: 0 });
+      const viewUrl = new URL(personView.url);
+      requestStep = await observedApiStep('create person request through the actual view', apiFetch({
+        origin: viewUrl.origin,
+        secret: viewUrl.searchParams.get('k'),
+      }, `${path}/requests`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text: 'Approve the API row' }),
+      }), box.env);
+    } finally {
+      try { await personView?.close(); }
+      finally {
+        if (previousHome === undefined) delete process.env.PULLBOARD_HOME;
+        else process.env.PULLBOARD_HOME = previousHome;
+      }
+    }
     const requested = requestStep.document;
     assertRequiredShape(requested, JSON_SHAPES.http.request.required, `create person request\n${requestStep.evidence}`);
     const requestId = requested.result.id;
