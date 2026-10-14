@@ -63,6 +63,11 @@ async function cuttableProxy(view) {
   };
 }
 
+/** Wait until the page's stream is open and the read it makes on opening has landed, so the page is quiet. */
+async function liveReady(chrome) {
+  await chrome.waitFor("typeof stream !== 'undefined' && stream?.status === 'up' && catching === null && catchRoots.size === 0 && !catchEvery");
+}
+
 /** A board with one open item, served by the real view and opened in real Chrome on the Items list. */
 async function liveBoard(name, { proxied = false } = {}) {
   const executable = chromeExecutable();
@@ -77,6 +82,7 @@ async function liveBoard(name, { proxied = false } = {}) {
     proxy = proxied ? await cuttableProxy(view) : null;
     chrome = await openSnapshotChrome(executable, proxy?.href ?? view.link.href, profile);
     await chrome.waitFor('data?.project?.items?.some(item => item.id === 1) && !!document.querySelector(\'#chain [data-item="1"]\')');
+    await liveReady(chrome);
   } catch (error) {
     if (chrome) await closeSnapshotChrome(chrome);
     await proxy?.close();
@@ -260,6 +266,7 @@ async function groupClaim(t, name, count, mover) {
     await chrome.waitFor(`data?.projects?.length === ${count} && !!${group}`);
     await pickProject(chrome, group);
     await chrome.waitFor(`data?.group?.repos?.length === ${count} && document.querySelector('#live').textContent === ''`);
+    await liveReady(chrome);
     const ids = (await Promise.all(repos.map((repo) => boardId(view, repo.repo)))).sort();
     assert.deepEqual(groupStreamReads(chrome).at(-1), ids, 'the group follows every repo it shows on one stream');
     const shown = `data?.group?.repos?.find(repo => repo.root === ${JSON.stringify(repos[mover].repo)})?.board.items.find(item => item.id === 1)?.status`;

@@ -1204,17 +1204,15 @@ async function listen(entry) {
       headers: { ...connection.headers, accept: 'text/event-stream', 'last-event-id': entry.cursor }, cache: 'no-store', signal: controller.signal,
     });
     if (!res.ok || !res.body) throw new Error('the board stream answered ' + res.status);
-    // A change with no event while the stream was down, such as a SPEC.md edit, is not replayed by Last-Event-ID, and
-    // the reopened stream's changed signal starts after it. So a stream that reopens reads its boards once.
-    const reopened = entry.status === 'down';
     entry.status = 'up';
     entry.offline = false;
     entry.failures = 0;
     $('live').textContent = liveLine();
-    if (reopened) {
-      for (const board of entry.boards) catchRoots.add(board.root);
-      catchUp();
-    }
+    // A change with no event made before the stream opened, such as a SPEC.md edit after the snapshot was read or
+    // while a dropped stream was down, is not replayed by Last-Event-ID, and the stream's changed signal starts after
+    // it. So each time the stream opens, the page reads its boards once.
+    for (const board of entry.boards) catchRoots.add(board.root);
+    catchUp();
     const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
     let buffer = '';
     for (;;) {
