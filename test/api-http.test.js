@@ -1150,6 +1150,90 @@ test('[A2, N26] one event stream serves many boards', async (t) => {
   assert.match(repeated.document.error.message, new RegExp(box.id));
 });
 
+test('[A2,N39] the local API accepts the view session cookie', async (t) => {
+  const box = fixture(t);
+  const secret = randomUUID();
+  const sessionCookie = {
+    name: `pullboard_view_${randomUUID().replaceAll('-', '')}`,
+    value: randomUUID(),
+  };
+  let bound;
+  const handler = createLocalApiHandler({
+    secret,
+    getPort: () => bound,
+    runCommand: main,
+    projects: () => [{ root: box.root, name: 'Cookie fixture' }],
+    personChannel: 'api',
+    sessionCookie,
+  });
+  const server = createServer(handler);
+  await new Promise((ready, fail) => {
+    server.once('error', fail);
+    server.listen(0, '127.0.0.1', () => { bound = server.address().port; ready(); });
+  });
+  t.after(() => new Promise((closed) => server.close(closed)));
+  const origin = `http://127.0.0.1:${bound}`;
+  const cookie = `${sessionCookie.name}=${sessionCookie.value}`;
+  /** Send one real HTTP request to the private API handler. */
+  const request = (path, headers = {}, init = {}) => fetchFresh(origin + path, {
+    ...init,
+    headers: { ...headers, ...(init.body === undefined ? {} : { 'content-type': 'application/json' }) },
+    ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
+  });
+  /** Decode the handler's versioned refusal and check its authentication result. */
+  async function refused(response, status, code = 'AUTH_REQUIRED') {
+    assert.equal(response.status, status);
+    const document = await response.json();
+    assert.equal(document.version, 1);
+    assert.equal(document.error.code, code);
+  }
+
+  const cookieListing = await request('/api/v1/boards', { cookie });
+  assert.equal(cookieListing.status, 200, 'the current view cookie authenticates the actual local API');
+  const listing = await cookieListing.json();
+  assert.equal(listing.version, 1);
+  const board = listing.boards.find((entry) => resolve(entry.root) === resolve(box.root));
+  assert.ok(board, 'the private Git fixture is listed through cookie authentication');
+  const state = await request(`/api/v1/boards/${board.id}/state`, { cookie });
+  assert.equal(state.status, 200, 'cookie-authenticated state reads the fixture SQLite board');
+
+  await refused(await request('/api/v1/boards'), 401, 'AUTH_REQUIRED');
+  await refused(await request('/api/v1/boards', { cookie: `${sessionCookie.name}=wrong-cookie-value` }), 401, 'AUTH_REQUIRED');
+  await refused(await request('/api/v1/boards', { cookie: `${sessionCookie.name}=expired-session-value` }), 401, 'AUTH_REQUIRED');
+  await refused(await request('/api/v1/boards', { cookie: `${cookie}; ${cookie}` }), 401, 'AUTH_REQUIRED');
+  await refused(await request('/api/v1/boards', { cookie: `${sessionCookie.name}=wrong-cookie-value; ${cookie}` }), 401, 'AUTH_REQUIRED');
+  await refused(await request('/api/v1/boards', { cookie: `${sessionCookie.name}; ${cookie}` }), 401, 'AUTH_REQUIRED');
+  const staleName = `${sessionCookie.name}_old`;
+  await refused(await request('/api/v1/boards', { cookie: `${staleName}=${sessionCookie.value}` }), 401, 'AUTH_REQUIRED');
+
+  const foreignHost = await new Promise((done, reject) => {
+    const outbound = httpRequest(origin + '/api/v1/boards', { headers: { host: 'foreign.invalid', cookie } }, (response) => {
+      let text = '';
+      response.on('data', (chunk) => { text += chunk; });
+      response.on('end', () => done({ status: response.statusCode, document: JSON.parse(text) }));
+    });
+    outbound.once('error', reject);
+    outbound.end();
+  });
+  assert.equal(foreignHost.status, 401, 'a valid cookie cannot cross the API host boundary');
+  assert.equal(foreignHost.document.error.code, 'AUTH_REQUIRED');
+  await refused(await request('/api/v1/boards', { cookie, origin: 'https://foreign.invalid' }), 403, 'API_ORIGIN');
+
+  const keyHeader = await request('/api/v1/boards', { 'x-pullboard-key': secret });
+  assert.equal(keyHeader.status, 200, 'the existing key header remains valid');
+  const bearer = await request('/api/v1/boards', { authorization: `Bearer ${secret}` });
+  assert.equal(bearer.status, 200, 'the existing Bearer key remains valid');
+  const queryKey = await request(`/api/v1/boards?k=${encodeURIComponent(secret)}`);
+  assert.equal(queryKey.status, 200, 'the existing query key remains valid');
+  const badCookieWithKey = await request('/api/v1/boards', { cookie: `${sessionCookie.name}=wrong-cookie-value`, 'x-pullboard-key': secret });
+  assert.equal(badCookieWithKey.status, 200, 'a bad cookie does not override a valid key');
+
+  const personMove = await request(`/api/v1/boards/${board.id}/moves`, { cookie }, {
+    method: 'POST', body: { verb: 'next', args: { as: 'person' } },
+  });
+  await refused(personMove, 409, 'B26_PERSON_CHANNEL');
+});
+
 test('[A2] local auth, origin, unknown board and malformed calls refuse without moving', async (t) => {
   const box = await httpBox(t);
   const unauthenticated = await fetchFresh(box.origin + '/api/v1/boards');
