@@ -249,7 +249,7 @@ const tourOnly = process.argv.includes('--tour-only');
 const chrome = !tourOnly && !boardOnly && CHROME.find((path) => { try { return spawnSync(path, ['--version'], { stdio: 'ignore' }).status === 0; } catch { return false; } });
 if (!chrome && !tourOnly && !boardOnly) { process.stderr.write('pullboard demo: install Google Chrome to capture the board screenshots.\n'); process.exitCode = 1; }
 else {
-  const base = await realpath(await mkdtemp(join(tmpdir(), 'pullboard-readme-demo-')));
+  const base = await realpath(await mkdtemp(join(tmpdir(), 'rd-')));
   let view;
   let server;
   const observationPath = process.env.PULLBOARD_README_CAPTURE_OBSERVATION_PATH;

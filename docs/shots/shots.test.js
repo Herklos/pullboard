@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { delimiter, join, posix } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { evaluationValue } from './devtools-evaluation.mjs';
@@ -102,6 +102,31 @@ test('the demo board declares every agent\'s model [I11,I13]', () => {
   }
 });
 
+/** Keep the capture's fixture directory independent of its descriptive evidence arm. */
+function captureFixturePrefix() {
+  return 'rc-';
+}
+
+test("the README capture's Chrome socket path fits the Linux limit [I11,C7]", () => {
+  const script = readFileSync(shots('demo.mjs'), 'utf8');
+  const demoPrefix = script.match(/mkdtemp\(join\(tmpdir\(\), '([^']+)'\)\)/)?.[1];
+  assert.ok(demoPrefix, 'the capture demo temporary prefix is measured from its actual creation');
+  // Model the real runner's six-character mkdtemp suffix, independent of the host OS.
+  const linuxRun = '/tmp/pullboard-test-run-XXXXXX';
+  for (const arm of ['unchanged-default', 'foreground-control']) {
+    const fixture = posix.join(linuxRun, captureFixturePrefix() + 'XXXXXX');
+    const demo = posix.join(fixture, demoPrefix + 'XXXXXX');
+    const paths = [posix.join(demo, 'chrome-profile', 'SingletonSocket')];
+    for (const temporary of [fixture, demo]) {
+      for (const browser of ['com.google.Chrome', '.org.chromium.Chromium']) {
+        paths.push(posix.join(temporary, browser + '.XXXXXX', 'SingletonSocket'));
+      }
+    }
+    for (const socket of paths) assert.ok(Buffer.byteLength(socket) < 100,
+      `${arm}: Chrome socket path needs fewer than 100 bytes, got ${Buffer.byteLength(socket)}: ${socket}`);
+  }
+});
+
 test('the README capture leaves no view running [I11,I13]', { timeout: 240_000 }, () => {
   const source = fileURLToPath(ROOT);
   const images = ['desktop.png', 'phone.png', 'shouts.png'];
@@ -114,7 +139,7 @@ test('the README capture leaves no view running [I11,I13]', { timeout: 240_000 }
   const arm = foregroundControl ? 'foreground-control' : 'unchanged-default';
   const evidenceDirectory = process.env.PULLBOARD_README_CAPTURE_EVIDENCE_DIR;
   if (evidenceDirectory) mkdirSync(evidenceDirectory, { recursive: true, mode: 0o700 });
-  const fixture = mkdtempSync(join(tmpdir(), `pullboard-readme-capture-${arm}-`));
+  const fixture = mkdtempSync(join(tmpdir(), captureFixturePrefix()));
   try {
     const root = join(fixture, 'repo');
     mkdirSync(root);
