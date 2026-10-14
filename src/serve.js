@@ -94,7 +94,8 @@ export async function exportView(root, directory) {
       throw new Refused('NO_BOARD', 'no readable board to export; run pullboard init in this repo');
     }
     const path = '/api/v1/boards/' + encodeURIComponent(board.id);
-    state = await read(path + '/state');
+    // Ask for every item's thread, verdicts and criterion: the snapshot has no API to fetch them from later.
+    state = await read(path + '/state?detail=full');
     events = await read(path + '/events');
     const last = state.state.events[0]?.event_id ?? 0;
     events.events = events.events.filter((event) => event.event_id <= last);
