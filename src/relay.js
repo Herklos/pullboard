@@ -1216,7 +1216,7 @@ export async function relayOn(root, address, io, { session, credential, quiet = 
         baselineAccepted: false, linkPending: true };
       state.snapshot = { sequence: 0, sealed: await sealedRecord(key, snapshot.document, state, 'snapshot', 0) };
     }
-    state.account = signed.account ?? signed.user?.id;
+    const account = signed.account ?? signed.user?.id;
     // Persist the exact sealed snapshot and a recoverable link intent before making the remote link.
     saveLink(file, state);
     if (state.linkPending) {
@@ -1227,6 +1227,9 @@ export async function relayOn(root, address, io, { session, credential, quiet = 
     const machine = updateRelayMachine(settings => settings.machine);
     const issued = credential ?? await request({ ...state, token: signed.token }, '/auth/machines', { method: 'POST', body: { board: state.board, machine } }, io);
     if (!/^pm_[A-Za-z0-9_-]{43}$/u.test(issued.token ?? '') || issued.board !== state.board || issued.machine !== machine) throw new Refused('RELAY_RESPONSE', 'the relay did not issue this board’s machine credential; sign in again');
+    // Cached agent credentials belong to the account that minted them.
+    if (state.account !== account) delete state.agentTokens;
+    state.account = account;
     state.token = issued.token;
     state.tokenId = issued.id;
     state.machine = machine;
