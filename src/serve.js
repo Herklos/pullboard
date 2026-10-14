@@ -57,12 +57,15 @@ export function portableSnapshot(value, root, field = '') {
 /**
  * Export one board through the same API v1 used by the live page, closing its temporary local
  * transport before returning. The static page needs neither that transport nor its session key.
+ * Its API reads go through fetchApi, fetchLocal unless a caller passes another; a test passes one
+ * that records each address and then reads through fetchLocal, so it sees the requests the export sends.
  *
  * @param {string} root
  * @param {string} directory
+ * @param {{ fetchApi?: typeof fetchLocal }} [options]
  * @returns {Promise<{path: string}>}
  */
-export async function exportView(root, directory) {
+export async function exportView(root, directory, { fetchApi = fetchLocal } = {}) {
   const output = resolve(directory);
   if (existsSync(output) && (!statSync(output).isDirectory() || readdirSync(output).length)) {
     throw new Refused('EXPORT_EXISTS', `snapshot folder ${output} is not empty; use an empty folder`);
@@ -84,7 +87,7 @@ export async function exportView(root, directory) {
     const read = async (path) => {
       let reply;
       try {
-        reply = await fetchLocal(address.origin + path, { headers: { 'x-pullboard-key': address.searchParams.get('k') } });
+        reply = await fetchApi(address.origin + path, { headers: { 'x-pullboard-key': address.searchParams.get('k') } });
       } catch (error) {
         if (!(error instanceof TypeError)) throw error;
         throw new Refused('VIEW_UNAVAILABLE', `could not read view at ${address.origin} while exporting; retry when the local view is available`);
