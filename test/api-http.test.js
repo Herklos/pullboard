@@ -543,12 +543,8 @@ test('[A2, N26] the event stream says when the board changes without a move', as
   const boardListing = await box.call('/api/v1/boards');
   const externalId = boardListing.document.boards.find((entry) => resolve(entry.root) === resolve(external.root)).id;
   const configPath = join(box.root, 'pullboard.json');
-  const config = JSON.parse(readFileSync(configPath, 'utf8'));
-  writeFileSync(configPath, JSON.stringify({ ...config, spec: 'standard-doctrine.md' }));
-  const projectSpec = join(box.root, 'standard-doctrine.md');
-  writeFileSync(projectSpec, '# Project spec\n\n## Goals\n- G1 [approved, must] Keep the board. | gate: true\n');
-  runFixtureGit(['add', '--', 'pullboard.json', 'standard-doctrine.md'], { cwd: box.root, env: box.env, stdio: 'pipe' });
-  runFixtureGit(['commit', '-q', '-m', 'chore: select the project spec input', '--', 'pullboard.json', 'standard-doctrine.md'], { cwd: box.root, env: box.env, stdio: 'pipe' });
+  const specPath = join(box.root, 'SPEC.md');
+  const doctrinePath = join(box.root, 'DOCTRINE.md');
   box.cli(box.root, 'milestone', 'add', 'External work', '--items', `Roadmap fixture#${externalAdded.item.item_id}`);
   box.cli(box.root, 'shout', 'all', 'mark this after the stream starts');
   const agent = box.cli(box.root, 'worktree', 'app', '--model', 'fixture-agent');
@@ -627,10 +623,17 @@ test('[A2, N26] the event stream says when the board changes without a move', as
 
   await quietPeriod();
 
-  writeFileSync(projectSpec, '# Project spec\n\n## Goals\n- G1 [approved, must] Keep the board fresh. | gate: true\n');
-  await changedOnce('project-spec');
+  writeFileSync(specPath, readFileSync(specPath, 'utf8') + '\nThe served board follows this file.\n');
+  await changedOnce('SPEC.md');
 
-  runFixtureGit(['commit', '--allow-empty', '-m', 'chore(test): move fixture head'], { cwd: box.root, env: box.env, encoding: 'utf8' });
+  writeFileSync(doctrinePath, '# Doctrine\n\nKeep the board honest.\n');
+  await changedOnce('DOCTRINE.md');
+
+  writeFileSync(configPath, JSON.stringify(JSON.parse(readFileSync(configPath, 'utf8')), null, 2) + '\n');
+  await changedOnce('pullboard.json');
+
+  // Committing the edited files moves HEAD alone: their bytes and stats are already seen.
+  runFixtureGit(['commit', '-q', '-m', 'chore(test): move fixture head', '--', 'SPEC.md', 'DOCTRINE.md', 'pullboard.json'], { cwd: box.root, env: box.env, stdio: 'pipe' });
   await changedOnce('head');
 
   const externalClaim = await box.call('/api/v1/boards/' + externalId + '/moves', { verb: 'claim', item: externalAdded.item.item_id, agent: externalAgent.agent });

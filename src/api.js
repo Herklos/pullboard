@@ -49,30 +49,37 @@ function fileRevision(file) {
   return [file.name, createHash('sha256').update(readFileSync(file.path)).digest('hex')];
 }
 
+/**
+ * Read this board's own revision inputs from one open connection, for the cache and the watcher alike.
+ * nextExpiry is the earliest live claim or review lease, when a lease turns over with no write.
+ */
+function localRevisionInputs(board, now) {
+  const leases = board.db.prepare('SELECT item_id, item_status, item_owner, item_lease_until, item_review_by, item_review_until FROM item ORDER BY item_id').all()
+    .map((item) => [
+      item.item_id, item.item_status, item.item_owner, item.item_lease_until, item.item_review_by, item.item_review_until,
+      item.item_status === 'claimed' && (item.item_lease_until ?? '') > now,
+      item.item_status === 'submitted' && Boolean(item.item_review_by) && (item.item_review_until ?? '') > now,
+    ]);
+  const expiries = leases.flatMap(([, , , leaseUntil, , reviewUntil, claimLive, reviewLive]) => [claimLive ? leaseUntil : null, reviewLive ? reviewUntil : null]);
+  return {
+    event: board.db.prepare('SELECT COALESCE(MAX(event_id), 0) AS id FROM event').get().id,
+    agents: store.listAgents(board),
+    leases,
+    requestReceipts: board.db.prepare('SELECT meta_value FROM board_meta WHERE meta_key = ?').get('relay_person_requests')?.meta_value ?? null,
+    milestones: store.milestones(board),
+    nextExpiry: expiries.filter(Boolean).sort()[0] ?? null,
+  };
+}
+
 /** Capture the inexpensive inputs that can invalidate a complete board-state snapshot. */
 function boardStateRevision(root, id, isMain, projects) {
   const info = repoInfo(root);
   const config = loadConfig(info.root);
   const files = stateFileInputs(info.root, config).map(fileRevision);
   const local = withBoard(info.root, (board) => {
-    const now = board.clock.now().toISOString();
-    const agents = store.listAgents(board);
-    const leases = board.db.prepare('SELECT item_id, item_status, item_owner, item_lease_until, item_review_by, item_review_until FROM item ORDER BY item_id').all()
-      .map((item) => [
-        item.item_id, item.item_status, item.item_owner, item.item_lease_until, item.item_review_by, item.item_review_until,
-        item.item_status === 'claimed' && (item.item_lease_until ?? '') > now,
-        item.item_status === 'submitted' && Boolean(item.item_review_by) && (item.item_review_until ?? '') > now,
-      ]);
-    const milestones = store.milestones(board);
-    const hasExternalMilestones = milestones.some((milestone) => milestone.items.some((item) => typeof item !== 'number'));
-    return {
-      event: board.db.prepare('SELECT COALESCE(MAX(event_id), 0) AS id FROM event').get().id,
-      agents,
-      leases,
-      requestReceipts: board.db.prepare('SELECT meta_value FROM board_meta WHERE meta_key = ?').get('relay_person_requests')?.meta_value ?? null,
-      milestones,
-      externalMilestones: hasExternalMilestones ? milestoneRoadmap(info.root, board, projects) : null,
-    };
+    const inputs = localRevisionInputs(board, board.clock.now().toISOString());
+    const hasExternalMilestones = inputs.milestones.some((milestone) => milestone.items.some((item) => typeof item !== 'number'));
+    return { ...inputs, externalMilestones: hasExternalMilestones ? milestoneRoadmap(info.root, board, projects) : null };
   }, isMain);
   const revision = stateRevision({
     identity: [info.commonDir, id],
@@ -244,28 +251,6 @@ function watchLocalStateRevision(board, projects) {
     throw error;
   }
 
-  /** Capture only the board columns that the cached view exposes. */
-  function localInputs(now) {
-    const agents = store.listAgents({ db, clock: store.systemClock });
-    const leases = db.prepare('SELECT item_id, item_status, item_owner, item_lease_until, item_review_by, item_review_until FROM item ORDER BY item_id').all()
-      .map((item) => [
-        item.item_id, item.item_status, item.item_owner, item.item_lease_until, item.item_review_by, item.item_review_until,
-        item.item_status === 'claimed' && (item.item_lease_until ?? '') > now,
-        item.item_status === 'submitted' && Boolean(item.item_review_by) && (item.item_review_until ?? '') > now,
-      ]);
-    const milestones = store.milestones({ db });
-    const expiries = db.prepare(`SELECT MIN(CASE WHEN item_status = 'claimed' AND item_lease_until > ? THEN item_lease_until END) AS claim,
-      MIN(CASE WHEN item_status = 'submitted' AND item_review_by IS NOT NULL AND item_review_until > ? THEN item_review_until END) AS review FROM item`).get(now, now);
-    return {
-      event: db.prepare('SELECT COALESCE(MAX(event_id), 0) AS id FROM event').get().id,
-      agents,
-      leases,
-      requestReceipts: db.prepare('SELECT meta_value FROM board_meta WHERE meta_key = ?').get('relay_person_requests')?.meta_value ?? null,
-      milestones,
-      nextExpiry: [expiries.claim, expiries.review].filter(Boolean).sort()[0] ?? null,
-    };
-  }
-
   /** Refresh related external board reads only after their retained connection reports a commit. */
   function externalInputs(now, milestoneDefinitions, localChanged) {
     const references = milestoneDefinitions.flatMap((milestone) => milestone.items.filter((item) => typeof item !== 'number'));
@@ -318,7 +303,6 @@ function watchLocalStateRevision(board, projects) {
     }
     const currentMarkers = files.map(fileMarker);
     if (JSON.stringify(currentMarkers) !== JSON.stringify(fileMarkers)) {
-      fileMarkers = currentMarkers;
       const latestConfig = loadConfig(info.root);
       files = stateFileInputs(info.root, latestConfig);
       fileMarkers = files.map(fileMarker);
@@ -330,7 +314,7 @@ function watchLocalStateRevision(board, projects) {
     const localChanged = latestDataVersion !== dataVersion;
     const localExpiryChanged = Boolean(local?.nextExpiry && local.nextExpiry <= now);
     if (!local || localChanged || localExpiryChanged) {
-      local = localInputs(now);
+      local = localRevisionInputs({ db, clock: store.systemClock }, now);
       dataVersion = latestDataVersion;
     }
     head = latestHead;
