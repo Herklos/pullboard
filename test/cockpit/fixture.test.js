@@ -1,8 +1,8 @@
 /** Cockpit fixture checks, using the shared real-board fixtures [N26]. */
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, request } from 'node:http';
 import diagnosticsChannel from 'node:diagnostics_channel';
 import { tmpdir } from 'node:os';
@@ -393,4 +393,92 @@ test('a Chrome wait whose condition throws while the next document loads keeps p
     await new Promise((resolve) => server.close(resolve));
     rmSync(profile, { recursive: true, force: true });
   }
+});
+
+test('owned Chrome cleanup waits out a slow exit and still fails a real hang [C7,N26]', async t => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-owned-chrome-cleanup-')));
+  scratch.push(dir);
+  const launched = [];
+  const independent = [];
+  /** Launch a private stand-in and retain its close promise just as the cockpit launcher does. */
+  function launch(code, args = []) {
+    const child = spawn(process.execPath, ['-e', code, ...args], { detached: true, stdio: ['ignore', 'ignore', 'pipe'] });
+    child.stderr.resume();
+    const stopped = new Promise(resolve => child.once('close', resolve));
+    const result = { child, stopped };
+    launched.push(result);
+    return result;
+  }
+  /** Wait for the child to install its signal handlers before testing cleanup. */
+  async function ready(path) {
+    const deadline = Date.now() + 10_000;
+    while (!existsSync(path) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+    assert.ok(existsSync(path), 'the owned stand-in installed its handlers');
+  }
+  t.after(async () => {
+    for (const pid of independent) {
+      try { process.kill(pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+    }
+    for (const { child, stopped } of launched) {
+      try { process.kill(-child.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+      child.stderr.destroy();
+      await stopped;
+    }
+  });
+
+  const pipeReady = join(dir, 'pipe-ready');
+  const holder = `const fs = require('node:fs'); fs.writeFileSync(process.argv[1], String(process.pid)); setInterval(() => {}, 1000);`;
+  const pipe = launch(`const { spawn } = require('node:child_process');
+    process.on('SIGTERM', () => process.exit(0));
+    const helper = spawn(process.execPath, ['-e', process.argv[1], process.argv[2]], { detached: true, stdio: ['ignore', 'ignore', 'inherit'] });
+    helper.unref(); setInterval(() => {}, 1000);`, [holder, pipeReady]);
+  await ready(pipeReady);
+  const holderPid = Number(readFileSync(pipeReady, 'utf8'));
+  independent.push(holderPid);
+  const nativeKill = process.kill.bind(process);
+  let permissionProbe = false;
+  const kill = t.mock.method(process, 'kill', (pid, signal) => {
+    if (pid === -pipe.child.pid && signal === 0 && !permissionProbe) {
+      permissionProbe = true;
+      throw Object.assign(new Error('probe temporarily refused'), { code: 'EPERM' });
+    }
+    return nativeKill(pid, signal);
+  });
+  try { await stopOwnedChrome(pipe.child, pipe.stopped); }
+  finally { kill.mock.restore(); }
+  assert.equal(permissionProbe, true, 'a refused group probe cannot prove the group has exited');
+  assert.doesNotThrow(() => process.kill(holderPid, 0), 'cleanup releases stderr without killing an independent holder');
+  assert.ok(pipe.child.exitCode !== null || pipe.child.signalCode !== null, 'the owned leader exited');
+
+  const slowReady = join(dir, 'slow-ready');
+  const slowFinished = join(dir, 'slow-finished');
+  const slowHelper = `const fs = require('node:fs');
+    process.on('SIGTERM', () => setTimeout(() => { fs.writeFileSync(process.argv[2], 'finished'); process.exit(0); }, 150));
+    fs.writeFileSync(process.argv[1], 'ready'); setInterval(() => {}, 1000);`;
+  const slow = launch(`const { spawn } = require('node:child_process');
+    process.on('SIGTERM', () => process.exit(0));
+    spawn(process.execPath, ['-e', process.argv[1], process.argv[2], process.argv[3]], { stdio: 'ignore' });
+    setInterval(() => {}, 1000);`, [slowHelper, slowReady, slowFinished]);
+  await ready(slowReady);
+  await stopOwnedChrome(slow.child, slow.stopped);
+  assert.equal(readFileSync(slowFinished, 'utf8'), 'finished', 'cleanup waited for the helper after the leader and its pipe closed');
+  assert.throws(() => process.kill(-slow.child.pid, 0), { code: 'ESRCH' }, 'no owned helper survives successful cleanup');
+
+  const hangReady = join(dir, 'hang-ready');
+  const hung = launch(`const fs = require('node:fs'); fs.writeFileSync(process.argv[1], 'ready'); setInterval(() => {}, 1000);`, [hangReady]);
+  await ready(hangReady);
+  const signals = [];
+  await assert.rejects(stopOwnedChrome(hung.child, hung.stopped, {
+    timeoutMs: 100, // budget: the stand-in intentionally survives both signals; bound only this forced failure.
+    signal: (pid, name) => { signals.push({ pid, name }); },
+  }), error => {
+    assert.match(error.message, /did not exit after SIGKILL; waited \d+ms; live pids:/u);
+    assert.ok(error.message.split('live pids: ')[1].split(', ').includes(String(hung.child.pid)), 'the hang names its surviving pid');
+    assert.doesNotThrow(() => process.kill(hung.child.pid, 0), 'the reported hang is an actual surviving stand-in');
+    return true;
+  });
+  assert.deepEqual(signals, [
+    { pid: -hung.child.pid, name: 'SIGTERM' },
+    { pid: -hung.child.pid, name: 'SIGKILL' },
+  ], 'cleanup tries both signals against only its owned group');
 });
