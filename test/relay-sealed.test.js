@@ -13,7 +13,8 @@ import { serveRelay } from '../relay/service.js';
 import { createRelayAuth } from '../relay/auth.js';
 import { createGitHubClient } from '../relay/github.js';
 import { githubFixture } from './relay-fixture.js';
-import { serveApi } from '../src/api.js';
+import { serveView } from '../src/serve.js';
+import { registerProject } from '../src/projects.js';
 import * as store from '../src/board.js';
 
 import { main } from '../src/cli.js';
@@ -731,19 +732,20 @@ test('person recovery explicitly skips one future-engine blocker and publishes a
   assert.equal(humanStatus.status, 0);
   assert.equal(humanStatus.stdout.includes('recovery pending for sequence 1; retry pullboard relay recover --skip 1'), true,
     'human status shows the actionable recovery without counting it as an upload');
-  const localApi = await serveApi({ runCommand: main, projects: () => [{ root: box.root, name: 'private recovery fixture' }] });
+  registerProject(box.root);
+  const localView = await serveView({ port: 0 });
   try {
-    const apiAddress = new URL(localApi.url);
-    const apiRequest = await fetch(apiAddress.origin + '/api/v1/boards/' + box.id + '/requests', {
-      method: 'POST', headers: { 'x-pullboard-key': apiAddress.searchParams.get('k'), 'content-type': 'application/json' },
+    const viewAddress = new URL(localView.url);
+    const apiRequest = await fetch(viewAddress.origin + '/api/v1/boards/' + box.id + '/requests', {
+      method: 'POST', headers: { 'x-pullboard-key': viewAddress.searchParams.get('k'), 'content-type': 'application/json' },
       body: JSON.stringify({ text: 'request while recovery is pending' }),
     });
     const apiRequestResult = await apiRequest.json();
-    assert.equal(apiRequestResult.error.code, 'RELAY_RECOVERY_PENDING', 'linked local API requests are guarded by the recovery lock');
+    assert.equal(apiRequestResult.error.code, 'RELAY_RECOVERY_PENDING', 'the actual view request is guarded by the recovery lock');
     const afterApiRequest = store.openBoard(join(box.root, '.git/pullboard/board.sqlite'));
     try { assert.deepEqual(exportBoard(afterApiRequest), originalDocument, 'the refused API request leaves native tables unchanged'); }
     finally { store.closeBoard(afterApiRequest); }
-  } finally { await localApi.close(); }
+  } finally { await localView.close(); }
   const beforeInbox = store.openBoard(join(box.root, '.git/pullboard/board.sqlite'));
   let cursorBeforeInbox;
   try { cursorBeforeInbox = beforeInbox.db.prepare("SELECT agent_last_shout_id FROM agent WHERE agent_id='coordinator'").get().agent_last_shout_id; }
