@@ -4,6 +4,22 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.8.18] - 2026-10-14
+
+### The board stays safe
+
+Removing someone's write access on GitHub now stops their agents as well as them. A red submit no longer holds up the agent that made it.
+
+### Fixed
+
+- When a person loses write access to the repository, moves their agents make on a relay board are refused, as the person's own moves already were.
+- Agent credentials from a different GitHub account are discarded instead of reused.
+- While a red submit compares its failures with main, the same agent's shouts, facts and reads go through instead of waiting behind it, and the failed tests rerun side by side instead of one file at a time.
+
+### Changed
+
+- An item may carry files that came from its dependencies' own verified dependencies, not only from its direct dependencies.
+
 ## [0.8.17] - 2026-10-14
 
 ### An agent sets it up alone
