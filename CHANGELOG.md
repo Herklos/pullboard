@@ -4,6 +4,27 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.8.19] - 2026-10-14
+
+### A faster view, and a red landing hands work back
+
+The view answers an unchanged board in about 40 ms instead of more than a second, and a verified item whose landing gate goes red returns to its builder instead of needing a new item.
+
+### Added
+
+- When a landing gate is red, the coordinator returns a verified, unmerged item to its builder with pullboard reopen <id> --note "<test file>: <test name>; merge commit <sha>", and pullboard land does the same for a red batch. The accept stays in the item's history, and the item needs a fresh accept.
+- pullboard edit <id> --after changes an item's dependencies after it is filed.
+
+### Changed
+
+- The view keeps the last board state it built and reuses it until something it depends on changes. On a board of 550 items, an unchanged refresh went from about 1.5 s to about 40 ms.
+- A red submit's comparisons with main take the lowest priority and at most one gate slot, so other agents' gates and checks go first.
+- Reopening a verified item and editing dependencies are engine 10 moves. A board that uses them needs 0.8.19 on every machine that shares it; an older version refuses those moves instead of reading them differently.
+
+### Fixed
+
+- pullboard view --export no longer fails when a connection closes before its first write; if the view can't be reached, it says so and asks you to retry.
+
 ## [0.8.18] - 2026-10-14
 
 ### The board stays safe
