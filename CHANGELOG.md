@@ -4,6 +4,23 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.8.20] - 2026-10-14
+
+### A lighter board, and the local API can't speak for you
+
+The board now answers with item summaries instead of every item's full history, a client can ask for only what changed, and nothing sent through the local API counts as you.
+
+### Changed
+
+- pullboard serve sends item summaries. On a board of 595 items the state is about 581 KB instead of 6.4 MB. GET /api/v1/boards/:board/items/:id returns one item's full detail, GET /api/v1/boards/:board/items?q=<text> searches, and GET .../state?detail=full still returns everything. A sent-back item's summary carries the first line of its reject note.
+- GET /api/v1/boards/:board/state?since=N returns only what changed after event N; with nothing changed it is about 23 KB.
+- The event stream sends a "changed" event when the board changes without a move: an edit to SPEC.md, DOCTRINE.md or pullboard.json, a new commit, a claim or review expiring, a move on a board the roadmap reads, or a change to what you have seen.
+
+### Fixed
+
+- Moves sent through pullboard serve no longer carry the person's channel, so an agent can't approve rows, answer your decisions or sign off through the local API. The view's own page is unchanged.
+- After an action, the view no longer scrolls again when a late refresh arrives, so the next button stays under your pointer.
+
 ## [0.8.19] - 2026-10-14
 
 ### A faster view, and a red landing hands work back

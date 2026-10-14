@@ -46,6 +46,8 @@ test('[A2] API guide documents the local HTTP response catalog', () => {
   assert.match(guide, /`warnings` with its registry display fields and a versioned refusal/);
   assert.match(guide, /`GET \/api\/v1\/boards\/:board\/state\?seen=N`/);
   assert.match(guide, /`GET \/api\/v1\/boards\/:board\/state\?detail=full`/);
+  assert.match(guide, /`GET \/api\/v1\/boards\/:board\/state\?since=N`/);
+  assert.match(guide, /`BASE_NOT_KEPT`/);
   assert.match(guide, /`GET \/api\/v1\/boards\/:board\/items\/:id`/);
   assert.match(guide, /`GET \/api\/v1\/boards\/:board\/items\?q=text`/);
   assert.match(guide, /`ITEM_NOT_AVAILABLE`/);
