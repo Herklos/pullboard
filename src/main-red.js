@@ -6,7 +6,7 @@ import { join, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { stripVTControlCharacters } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { runProfiledShell, withGateSlot } from './gate.js';
+import { runProfiledShellAsync, withGateSlot } from './gate.js';
 import { cleanGitEnvironment, mainCheckout } from './git.js';
 import { mainPolicy, policyAt } from './trusted-policy.js';
 import { parseSpec } from './spec.js';
@@ -112,7 +112,7 @@ function gitCall(cwd, args, env) {
 }
 
 /** Build one clean temporary checkout at the exact main commit and always remove it. */
-function withMainCheckout(root, commit, run) {
+async function withMainCheckout(root, commit, run) {
   const directory = join(tmpdir(), `pullboard-main-red-${randomUUID()}`);
   mkdirSync(directory, { mode: 0o700 });
   const checkout = join(directory, 'checkout');
@@ -127,7 +127,7 @@ function withMainCheckout(root, commit, run) {
     if (clean.status !== 0 || clean.stdout !== '' || head.status !== 0 || head.stdout.trim() !== commit) {
       return { unavailable: 'the temporary main checkout was not clean at the captured commit' };
     }
-    return run(checkout);
+    return await run(checkout);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -158,31 +158,26 @@ export async function compareMainFailures(root, profile, onWait, output = '') {
     agent: process.env.PULLBOARD_AGENT ?? `pid-${process.pid}`,
     onWait,
   });
-  try { return await withGateSlot(root, () => {
+  try {
     let cache = readCache(file);
-    const results = [];
     const missing = files.filter(path => !['red', 'green'].includes(cache.entries[main.commit]?.[path]?.result));
-    if (missing.length) {
-      const outcomes = {};
-      for (const path of missing) {
-        const measured = withMainCheckout(root, main.commit, checkout => {
-          const command = `${policy.config.affectedTests.trimEnd()} ${shellWord('./' + path)}`;
-          const run = runProfiledShell(checkout, command, { gateSlotHeld: true });
-          return { result: run.isGreen ? 'green' : 'red' };
-        });
-        if (measured.unavailable) return { main: main.commit, files: [], unavailable: measured.unavailable };
-        outcomes[path] = measured;
-      }
+    const outcomes = await Promise.allSettled(missing.map(path => withGateSlot(root, async lease => {
+      const measured = await withMainCheckout(root, main.commit, async checkout => {
+        const command = `${policy.config.affectedTests.trimEnd()} ${shellWord('./' + path)}`;
+        const run = await runProfiledShellAsync(checkout, command, { gateSlotHeld: true, waitMs: lease.waitMs });
+        return { result: run.isGreen ? 'green' : 'red' };
+      });
+      if (measured.unavailable) throw new Error(measured.unavailable);
+      // The cache lease excludes other comparisons; synchronous persistence keeps each finished result.
       cache = readCache(file);
-      const prior = cache.entries[main.commit] && typeof cache.entries[main.commit] === 'object' && !Array.isArray(cache.entries[main.commit])
-        ? cache.entries[main.commit] : {};
-      cache.entries[main.commit] = { ...prior, ...outcomes };
-      try { writeCache(file, cache); }
-      catch { return { main: main.commit, files: [], unavailable: 'main results could not be saved to the machine-local cache' }; }
-    }
-    for (const path of files) results.push({ file: path, result: cache.entries[main.commit][path].result });
-    return { main: main.commit, files: results };
-  }, { onWait });
+      cache.entries[main.commit] ??= {};
+      cache.entries[main.commit][path] = measured;
+      writeCache(file, cache);
+    }, { onWait })));
+    const failed = outcomes.find(outcome => outcome.status === 'rejected');
+    if (failed) return { main: main.commit, files: [], unavailable: failed.reason?.message ?? 'main comparison could not be completed' };
+    cache = readCache(file);
+    return { main: main.commit, files: files.map(path => ({ file: path, result: cache.entries[main.commit][path].result })) };
   } finally { cacheLease.release(); }
 }
 
