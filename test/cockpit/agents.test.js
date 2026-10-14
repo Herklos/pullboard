@@ -366,12 +366,18 @@ test('local agents panel inventories and phone-revokes a scoped credential [H2,H
   assert.equal(other.code, 0, other.failure ?? 'a second agent receives its own credential');
   const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));
   const oldPA = link.agentTokens[agentId], otherPA = link.agentTokens[other.document.agent];
+  // Every seat this machine holds a token for. Today that is the two agents; when the main checkout
+  // authenticates as the coordinator to create them (#579), the coordinator's own token joins them.
+  const expectedAgents = Object.keys(link.agentTokens).sort();
+  assert.deepEqual(expectedAgents.filter(seat => ![agentId, other.document.agent, 'coordinator'].includes(seat)), [],
+    'the machine holds tokens only for the two agents and the coordinator that created them');
+  assert.ok([agentId, other.document.agent].every(seat => expectedAgents.includes(seat)), 'each agent holds its own cached token');
   assert.match(oldPA.token, /^pa_[A-Za-z0-9_-]{43}$/u);
   const listed = await box.cli('relay', 'tokens');
   assert.equal(listed.code, 0, listed.failure ?? 'the real CLI reads token metadata');
   const expected = listed.document.tokens.find(row => row.agent === agentId);
   assert.ok(expected?.id && expected.created && expected.expires);
-  assert.deepEqual(listed.document.tokens.map(row => row.agent).sort(), [agentId, other.document.agent].sort(), 'both independent agent credentials are listed');
+  assert.deepEqual(listed.document.tokens.map(row => row.agent).sort(), expectedAgents, 'both independent agent credentials are listed');
   assert.equal(JSON.stringify(listed.document).includes(oldPA.token), false, 'the native inventory contains no PA value');
 
   const view = await startView({ dir: box.root, env: personEnv });
@@ -401,7 +407,7 @@ test('local agents panel inventories and phone-revokes a scoped credential [H2,H
           assert.ok(row.text.includes(value), `${width}/${scheme}: the row shows token id, agent and ISO creation/expiry`);
         }
         assert.equal(row.text.includes(oldPA.token), false, 'the credential value never enters the DOM');
-        for (const secret of [oldPA.token, otherPA.token, link.token, phone.token, readFileSync(box.keyFile, 'utf8').trim()]) {
+        for (const secret of [oldPA.token, otherPA.token, ...Object.values(link.agentTokens).map(row => row.token), link.token, phone.token, readFileSync(box.keyFile, 'utf8').trim()]) {
           assert.equal(await localChrome.stable(`document.documentElement.outerHTML.includes(${JSON.stringify(secret)}) || JSON.stringify(data).includes(${JSON.stringify(secret)}) || JSON.stringify([...credentials]).includes(${JSON.stringify(secret)})`), false,
             'the local page, projected board and inventory retain no credential value or board key');
         }
