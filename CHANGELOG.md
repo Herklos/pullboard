@@ -4,6 +4,43 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.8.19] - 2026-10-14
+
+### A faster view, and a red landing hands work back
+
+The view answers an unchanged board in about 40 ms instead of more than a second, and a verified item whose landing gate goes red returns to its builder instead of needing a new item.
+
+### Added
+
+- When a landing gate is red, the coordinator returns a verified, unmerged item to its builder with pullboard reopen <id> --note "<test file>: <test name>; merge commit <sha>", and pullboard land does the same for a red batch. The accept stays in the item's history, and the item needs a fresh accept.
+- pullboard edit <id> --after changes an item's dependencies after it is filed.
+
+### Changed
+
+- The view keeps the last board state it built and reuses it until something it depends on changes. On a board of 550 items, an unchanged refresh went from about 1.5 s to about 40 ms.
+- A red submit's comparisons with main take the lowest priority and at most one gate slot, so other agents' gates and checks go first.
+- Reopening a verified item and editing dependencies are engine 10 moves. A board that uses them needs 0.8.19 on every machine that shares it; an older version refuses those moves instead of reading them differently.
+
+### Fixed
+
+- pullboard view --export no longer fails when a connection closes before its first write; if the view can't be reached, it says so and asks you to retry.
+
+## [0.8.18] - 2026-10-14
+
+### The board stays safe
+
+Removing someone's write access on GitHub now stops their agents as well as them. A red submit no longer holds up the agent that made it.
+
+### Fixed
+
+- When a person loses write access to the repository, moves their agents make on a relay board are refused, as the person's own moves already were.
+- Agent credentials from a different GitHub account are discarded instead of reused.
+- While a red submit compares its failures with main, the same agent's shouts, facts and reads go through instead of waiting behind it, and the failed tests rerun side by side instead of one file at a time.
+
+### Changed
+
+- An item may carry files that came from its dependencies' own verified dependencies, not only from its direct dependencies.
+
 ## [0.8.17] - 2026-10-14
 
 ### An agent sets it up alone

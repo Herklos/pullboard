@@ -226,6 +226,7 @@ Statuses: approved = decided · draft = proposed · pending = open question · f
 - H16 [approved, must] Every client applies moves in the relay's order with the CLI's engine, refusing what the CLI refuses. | gate: test/relay.test.js | serves: H3
 - H17 [approved, must] A phone or machine joins a board by pairing once, from a code or QR a linked machine prints. | gate: test/relay.test.js | serves: H15
 - H18 [approved, must] The relay keeps a board only while linked: unlinking deletes it; 90 idle days delete it; backups last 14 days. | gate: test/relay.test.js | serves: H7
+- H19 [draft, aim] Without the relay, a phone sees and acts on a board through the view on the local network, after scanning a pairing code. | gate: test/cockpit/lan.test.js
 
 ## E · Teams: many people, one board
 
@@ -259,6 +260,19 @@ Statuses: approved = decided · draft = proposed · pending = open question · f
 - E28 [draft, must] A machine joins a trunk's landing pool by its own setting, and every gate run and verdict records the environment it ran in. | gate: test/team.test.js
 - E29 [draft, must] A red batch that bisects to no culprit files a defect against the failing test; the trunk holds until it's fixed or an approver signs an expiring waiver. | gate: test/team.test.js
 - E30 [draft, aim] A merge queue lands verified items in the trunk board's order, with no one running land by hand. | gate: test/team.test.js
+- E31 [draft, aim] A private item lands on the repo's trunk with a receipt: its id, commit and verifier, never its text. | gate: test/team.test.js
+- E32 [draft, aim] A repo's board can name a parent board, and approvers on both sides sign the link. | gate: test/team.test.js
+- E33 [draft, aim] A parent item shows its children's states from the boards below, never their text. | gate: test/team.test.js
+- E34 [draft, aim] A board chooses what its link carries up: states, counts or nothing. | gate: test/team.test.js
+- E35 [draft, aim] A board offers an item to a board below, which accepts it as a child or declines with a reason. | gate: test/team.test.js
+- E36 [draft, aim] A rule set on a board holds on every board below it. | gate: test/team.test.js
+- E37 [draft, aim] A board below loosens an inherited rule only with an approver's signed, expiring waiver. | gate: test/team.test.js
+- E38 [draft, aim] Rules reach boards below as a signed bundle any board can verify offline. | gate: test/team.test.js
+- E39 [draft, aim] A decision spanning two boards with no common parent needs an approver from each. | gate: test/team.test.js
+- E40 [draft, aim] A planning repo's board sits above team boards, and its members are that repo's writers. | gate: test/team.test.js
+- E41 [draft, aim] A board can have two parents, and both parents' rules apply. | gate: test/team.test.js
+- E42 [draft, aim] Detaching a board keeps its inherited rules as its own, and its old parent stops receiving its states. | gate: test/team.test.js
+- E43 [draft, aim] Handles carry an organization prefix across organizations, as acme/web#12. | gate: test/team.test.js
 
 ## Q · Queues and procedures
 - Q1 [approved, must] A resource has a name, a capacity, a scope (machine, repo or board) and a queue. | gate: test/resources.test.js

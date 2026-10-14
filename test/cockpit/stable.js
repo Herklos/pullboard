@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 
 const clients = new WeakMap();
+const waitCaptures = new WeakMap();
 
 /** Evaluate only inside the shared boundary; tests receive no raw page evaluator. */
 async function rawChromeEvaluation(chrome, expression) {
@@ -24,36 +25,94 @@ export async function waitForStableBoxes(chrome, find = 'document.documentElemen
     /** Compare exact layout geometry without tolerances that hide movement. */
     const box = element => { const rect = element.getBoundingClientRect(); return [rect.x, rect.y, rect.width, rect.height]; };
     let lastSeen = 'no frame sampled';
+    const started = performance.now(), samples = [];
+    let frames = 0, previousAt = started, maxFrameGapMs = 0, priorSample = null;
+    let priorTexts = [], priorScroll = null;
+    const changes = { target: 0, replacement: 0, text: 0, scroll: 0, page: 0 };
+    let requiredNodes = [], pageNodes = [], priorRequired = [], priorPageNodes = [];
+    /** Name only geometry-bearing nodes, without copying page text or private attributes. */
+    const name = element => element ? (element.tagName.toLowerCase() + (element.id ? '#' + element.id : '')).slice(0, 120) : null;
+    /** Capture document readiness without addresses, board contents, or session keys. */
+    const pageState = () => ({ readyState: document.readyState,
+      loading: !!document.body?.classList.contains('loading'), switching: !!document.body?.classList.contains('switching') });
+    /** Return only the bounded tail, counters, and timing observations. */
+    const capture = () => ({ elapsedMs: Math.round(performance.now() - started), frames,
+      maxFrameGapMs: Math.round(maxFrameGapMs), changes, page: pageState(), samples });
+    /** Retain a bounded tail that separates target changes from unrelated page geometry. */
+    const record = (current, frame, sampleStarted) => {
+      const at = performance.now(), gapMs = at - previousAt;
+      if (frame) { frames++; maxFrameGapMs = Math.max(maxFrameGapMs, gapMs); }
+      let pageChange = null;
+      if (current && priorSample) {
+        const before = priorSample.page, after = current.page;
+        let index;
+        for (let i = 0; i < Math.max(before.length, after.length); i++) {
+          const left = before[i], right = after[i];
+          const same = Array.isArray(left) && Array.isArray(right)
+            ? left.length === right.length && left.every((value, n) => value === right[n]) : left === right;
+          if (!same) { index = i; break; }
+        }
+        if (index !== undefined) pageChange = {
+          index, before: before[index] ?? null, after: after[index] ?? null,
+          beforeNode: index >= 5 ? name(priorPageNodes[index - 5]) : null,
+          afterNode: index >= 5 ? name(pageNodes[index - 5]) : null,
+        };
+      }
+      const texts = requiredNodes.slice(0, 4).map(node => node instanceof Element ? node.textContent : null);
+      const targetChanged = current && priorSample ? JSON.stringify(current.targets) !== JSON.stringify(priorSample.targets) : null;
+      const targetReplaced = requiredNodes.some((node, i) => priorRequired[i] && node !== priorRequired[i]);
+      const textChanged = texts.some((text, i) => i < priorTexts.length && text !== priorTexts[i]);
+      const scroll = [scrollX, scrollY], scrolled = !!priorScroll && scroll.some((value, i) => value !== priorScroll[i]);
+      if (targetChanged) changes.target++;
+      if (targetReplaced) changes.replacement++;
+      if (textChanged) changes.text++;
+      if (scrolled) changes.scroll++;
+      if (pageChange) changes.page++;
+      samples.push({ atMs: Math.round(at - started), gapMs: Math.round(gapMs), sampleMs: Math.round(at - sampleStarted), frame,
+        targets: current?.targets.slice(0, 4) ?? null,
+        targetChanged, targetReplaced, textChanged, scrolled, pageChange, scroll, page: pageState(), error: current ? null : lastSeen.slice(0, 300),
+      });
+      if (samples.length > 4) samples.shift();
+      previousAt = at; priorSample = current; priorRequired = requiredNodes; priorPageNodes = pageNodes;
+      priorTexts = texts; priorScroll = scroll;
+    };
     /** Capture required targets, descendants and page extents in one layout sample. */
     const sample = () => {
+      requiredNodes = []; pageNodes = [];
       const required = targets();
+      requiredNodes = required;
       lastSeen = required.length ? JSON.stringify(required.map(element => element instanceof Element
         ? { tag: element.tagName, id: element.id, connected: element.isConnected, hidden: !!element.closest('[hidden]'), box: box(element) }
         : { target: String(element) })) : 'no matching target';
       if (!required.length || !required.every(element => element instanceof Element && element.isConnected && visible(element))) return null;
       const elements = [...document.querySelectorAll('body, body *')].filter(visible);
+      pageNodes = elements;
       return { targets: required.map(box), page: [scrollX, scrollY, document.documentElement.clientWidth, document.documentElement.scrollWidth, document.documentElement.scrollHeight, ...elements.map(box)] };
     };
     return await new Promise((resolve, reject) => {
       let previous = '', unchanged = 0, frameId = 0;
-      const timer = setTimeout(() => { cancelAnimationFrame(frameId); reject(Error('shared wait: target missing, zero-sized or moving: ' + ${JSON.stringify(find)} + '; last saw ' + lastSeen)); }, ${timeoutMs});
+      const timer = setTimeout(() => { cancelAnimationFrame(frameId); reject(Error('shared wait: target missing, zero-sized or moving: ' + ${JSON.stringify(find)} + '; last saw ' + lastSeen + '; wait capture ' + JSON.stringify(capture()))); }, ${timeoutMs});
       /** Resolve only after two complete frame intervals have unchanged nonzero geometry. */
       const frame = () => {
+        const sampleStarted = performance.now();
         let current;
         try { current = sample(); } catch (error) { current = null; lastSeen = error.name + ': ' + error.message; }
+        record(current, true, sampleStarted);
         const signature = current ? JSON.stringify(current) : '';
         unchanged = signature && signature === previous ? unchanged + 1 : 0;
         previous = signature;
-        if (unchanged >= 2) { clearTimeout(timer); resolve(current.targets); return; }
+        if (unchanged >= 2) { clearTimeout(timer); resolve({ targets: current.targets, capture: capture() }); return; }
         frameId = requestAnimationFrame(frame);
       };
       // Sample synchronously before yielding so even an expired short timer has a real diagnostic.
-      try { sample(); } catch (error) { lastSeen = error.name + ': ' + error.message; }
+      const sampleStarted = performance.now();
+      try { record(sample(), false, sampleStarted); } catch (error) { lastSeen = error.name + ': ' + error.message; record(null, false, sampleStarted); }
       frameId = requestAnimationFrame(frame);
     });
   })()`);
-  assert.ok(Array.isArray(result) && result.length > 0, `shared wait finds a rendered target: ${find}`);
-  return result;
+  waitCaptures.set(chrome, { observedAt: Date.now(), ...result.capture });
+  assert.ok(Array.isArray(result.targets) && result.targets.length > 0, `shared wait finds a rendered target: ${find}`);
+  return result.targets;
 }
 
 /**
@@ -140,15 +199,20 @@ export async function stableChrome(raw) {
   /** Poll readiness through the same measurement boundary, with the last page error on a bounded failure. */
   chrome.waitFor = async (expression, timeoutMs = 10_000) => {
     // budget: a bounded readiness wait fails a missing page, not a rendering speed requirement.
-    const deadline = Date.now() + timeoutMs;
-    let lastError = '';
+    const started = Date.now(), deadline = started + timeoutMs;
+    let lastError = '', polls = 0, falseResults = 0, lastPollMs = 0, maxPollMs = 0;
     while (Date.now() < deadline) {
+      const pollStarted = Date.now();
+      polls++;
       try {
         if (await chrome.stable(expression)) return;
+        falseResults++;
       } catch (error) { lastError = error.message; }
+      lastPollMs = Date.now() - pollStarted;
+      maxPollMs = Math.max(maxPollMs, lastPollMs);
       await new Promise(resolve => setTimeout(resolve, 50));
     }
-    throw new Error(`Browser condition did not arrive: ${expression}${lastError ? `; it last threw: ${lastError}` : ''}`);
+    throw new Error(`Browser condition did not arrive: ${expression}${lastError ? `; it last threw: ${lastError}` : ''}; readiness capture ${JSON.stringify({ elapsedMs: Date.now() - started, polls, falseResults, lastPollMs, maxPollMs, lastStable: waitCaptures.get(chrome) ?? null })}`);
   };
   await chrome.send('Emulation.setEmulatedMedia', { features: [] });
   return chrome;

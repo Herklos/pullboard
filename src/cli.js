@@ -328,6 +328,17 @@ function idArg(text, what = 'an item id') {
  */
 const idList = (text) => (text ?? '').split(',').map((id) => id.trim()).filter(Boolean);
 
+/** Parse an edit's dependency replacement, with the explicit word `none` meaning clear all. */
+function editAfter(text) {
+  if (text === undefined) return undefined;
+  if (text.trim() === 'none') return [];
+  const parts = text.split(',').map((part) => part.trim());
+  if (!text.trim() || parts.some((part) => !part || part === 'none')) {
+    throw new Refused('USAGE', 'use --after <id>[,<id>...] or --after none');
+  }
+  return parts.map((part) => idArg(part, 'an item id after --after'));
+}
+
 /**
  * Text a command was given as --<name> "..." or as --<name>-file <file>, or undefined when neither.
  * A file carries text past the shell exactly: backticks, dollar signs and quotes included.
@@ -2452,6 +2463,7 @@ function workCommands(io, args) {
         route: values.route,
         criterion: values.criterion,
         check: values.check,
+        after: editAfter(values.after),
       };
       const { item, command } = store.validateItemEdit(board, id, change);
       if (command && command !== item.item_check) change.checkBaseline = values.wait ? checkBaseline(ctx.info.root, command) : prepareCheckBaseline(ctx.info.root, command);
@@ -2639,7 +2651,9 @@ function workCommands(io, args) {
     reopen: () => act(async (ctx, board, me) => {
       const result = await ordered(ctx, board, 'reopen', [idArg(first), { agentId: me.id, note: textArg(io, values, 'note') ?? '' }]);
       io.result?.(result);
-      io.say(`reopened #${first} without a verdict; previous commit ${result.commit.slice(0, 12)} remains recorded`);
+      io.say(result.landingFailure
+        ? `reopened #${first} after landing failure; previous accept remains recorded at ${result.commit.slice(0, 12)}`
+        : `reopened #${first} without a verdict; previous commit ${result.commit.slice(0, 12)} remains recorded`);
       return 0;
     }),
     shout: () => act(async (ctx, board, me) => {

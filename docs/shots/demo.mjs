@@ -4,6 +4,7 @@
  * The disposable repo and private PULLBOARD_HOME keep personal projects and shouts out of the art.
  */
 import { spawn, spawnSync } from 'node:child_process';
+import { readlinkSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -11,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { browser, waitForDemoBoard } from './capture-browser.mjs';
 import { FIXED_TIME, isolatedEnv } from './demo-env.mjs';
 import { renderTour } from './tour-renderer.mjs';
+import { AGENT_SHELL_MARKERS } from '../../src/person.js';
 
 const ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const BIN = join(ROOT, 'bin', 'pullboard.js');
@@ -36,6 +38,87 @@ async function stop(child) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   child.kill();
   await new Promise((resolveStop) => child.once('close', resolveStop));
+}
+
+/** Read one process identity without capturing its environment or application data. */
+function processIdentity(pid) {
+  if (!Number.isInteger(pid) || pid < 1) return null;
+  const result = spawnSync('ps', ['-ww', '-p', String(pid), '-o', 'pid=', '-o', 'ppid=', '-o', 'pgid=', '-o', 'lstart=', '-o', 'command='], { encoding: 'utf8' });
+  if (result.status !== 0) return null;
+  const fields = result.stdout.trim().split(/\s+/);
+  if (fields.length < 9 || Number(fields[0]) !== pid) return null;
+  const identity = { pid, ppid: Number(fields[1]), pgid: Number(fields[2]), birth: fields.slice(3, 8).join(' '), command: fields.slice(8).join(' ') };
+  if (process.platform === 'linux') {
+    try { identity.cwd = readlinkSync(`/proc/${pid}/cwd`); } catch { identity.cwd = null; }
+  } else if (process.platform === 'darwin') {
+    const cwd = spawnSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], { encoding: 'utf8' });
+    identity.cwd = cwd.status === 0 ? cwd.stdout.split(/\r?\n/).find((line) => line.startsWith('n'))?.slice(1) ?? null : null;
+  } else identity.cwd = null;
+  return identity;
+}
+
+/** List fixture-owned command lines while the temporary directory still exists. */
+function fixtureProcessIdentities(directory, knownViewPid) {
+  const result = spawnSync('ps', ['-ww', '-A', '-o', 'pid=', '-o', 'ppid=', '-o', 'pgid=', '-o', 'lstart=', '-o', 'command='], { encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(`could not inspect processes for the README capture (ps status ${result.status})`);
+  return result.stdout.split(/\r?\n/).flatMap((line) => {
+    const fields = line.trim().split(/\s+/);
+    const pid = Number(fields[0]);
+    if (!Number.isInteger(pid) || pid < 1 || pid === process.pid || fields.length < 9) return [];
+    const identity = { pid, ppid: Number(fields[1]), pgid: Number(fields[2]), birth: fields.slice(3, 8).join(' '), command: fields.slice(8).join(' ') };
+    if (!identity.command.includes(directory) && identity.pid !== knownViewPid) return [];
+    return [{ ...identity, cwd: processIdentity(identity.pid)?.cwd ?? null }];
+  });
+}
+
+/** In the opt-in test receipt only, stop the one exact view PID this capture reported. */
+async function stopObservedView(observation) {
+  const record = observation.viewBeforeStop;
+  const current = processIdentity(observation.viewPid);
+  const cleanup = { attempted: false, pid: observation.viewPid ?? null, signal: null, exited: current === null, refused: null };
+  if (!current) return cleanup;
+  if (!record || current.birth !== record.birth || current.command !== record.command
+    || !current.command.includes(observation.entrypoint)
+    || !/\bview\s+--no-open\s+--port\s+0(?:\s|$)/.test(current.command)
+    || current.cwd !== record.cwd || record.cwd !== observation.repo) {
+    cleanup.refused = 'the live PID did not match the recorded fixture view identity';
+    cleanup.exited = false;
+    return cleanup;
+  }
+  cleanup.attempted = true;
+  cleanup.signal = 'SIGTERM';
+  try { process.kill(current.pid, 'SIGTERM'); }
+  catch (error) { cleanup.refused = `${error.code ?? error.name}: could not signal recorded view PID`; cleanup.exited = false; return cleanup; }
+  const deadline = Date.now() + 5_000;
+  let stillLive = processIdentity(current.pid);
+  while (stillLive && Date.now() < deadline) {
+    if (stillLive.birth !== record.birth || stillLive.command !== record.command) {
+      cleanup.refused = 'the PID identity changed during bounded cleanup';
+      cleanup.exited = false;
+      return cleanup;
+    }
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+    stillLive = processIdentity(current.pid);
+  }
+  cleanup.exited = stillLive === null;
+  if (!cleanup.exited) cleanup.refused = 'the exact view PID remained after bounded SIGTERM cleanup';
+  return cleanup;
+}
+
+/** Record all fixture processes and the exact view identity before the ordinary stop. */
+function recordBeforeViewStop(observation) {
+  if (!observation || observation.fixtureProcessesBeforeStop) return;
+  observation.viewBeforeStop = processIdentity(observation.viewPid);
+  observation.fixtureProcessesBeforeStop = fixtureProcessIdentities(observation.demoDirectory, observation.viewPid);
+}
+
+/** Record ordinary-stop survivors, apply only the owned test cleanup, then rescan. */
+async function recordAfterViewStop(observation) {
+  if (!observation || observation.fixtureProcessesAfterStop) return;
+  observation.viewAfterStop = processIdentity(observation.viewPid);
+  observation.fixtureProcessesAfterStop = fixtureProcessIdentities(observation.demoDirectory, observation.viewPid);
+  observation.testCleanup = await stopObservedView(observation);
+  observation.fixtureProcessesAfterTestCleanup = fixtureProcessIdentities(observation.demoDirectory, observation.viewPid);
 }
 
 /** Export the board, then replace its random storage id with a stable public snapshot id. */
@@ -169,6 +252,19 @@ else {
   const base = await realpath(await mkdtemp(join(tmpdir(), 'pullboard-readme-demo-')));
   let view;
   let server;
+  const observationPath = process.env.PULLBOARD_README_CAPTURE_OBSERVATION_PATH;
+  const requestedForeground = process.env.PULLBOARD_README_CAPTURE_FOREGROUND === '1';
+  const observation = observationPath ? {
+    arm: requestedForeground ? 'foreground-control' : 'unchanged-default',
+    startedAt: new Date().toISOString(),
+    demoDirectory: base,
+    repo: join(base, 'demo-board'),
+    entrypoint: BIN,
+    sourceEnv: {
+      aiAgentPresent: process.env.AI_AGENT !== undefined,
+      requestedForeground,
+    },
+  } : null;
   try {
     const clockShim = join(base, 'fixed-clock.mjs');
     await writeFile(clockShim, `const NativeDate = Date;\nconst fixed = NativeDate.parse(process.env.PULLBOARD_DEMO_NOW || ${JSON.stringify(FIXED_TIME)});\nclass FixedDate extends NativeDate { constructor(...args) { super(...(args.length ? args : [fixed])); } static now() { return fixed; } }\nglobalThis.Date = FixedDate;\n`);
@@ -179,14 +275,49 @@ else {
       const repo = await buildBoard(base, env);
       await exportBoard(repo, env);
       if (!boardOnly) {
-        server = spawn(process.execPath, [BIN, 'view', '--no-open', '--port', '0'], { cwd: repo, env, stdio: ['ignore', 'pipe', 'ignore'] });
+        const viewEnv = { ...env };
+        delete viewEnv.PULLBOARD_README_CAPTURE_FOREGROUND;
+        delete viewEnv.PULLBOARD_README_CAPTURE_OBSERVATION_PATH;
+        delete viewEnv.PULLBOARD_README_CAPTURE_EVIDENCE_DIR;
+        viewEnv.PULLBOARD_VIEW_FOREGROUND = '1';
+        server = spawn(process.execPath, [BIN, 'view', '--no-open', '--port', '0'], { cwd: repo, env: viewEnv, stdio: ['ignore', 'pipe', 'ignore'] });
+        if (observation) {
+          observation.viewLaunch = {
+            directPid: server.pid,
+            cwd: repo,
+            stdoutIsTTY: Boolean(server.stdout?.isTTY),
+            foregroundEnv: viewEnv.PULLBOARD_VIEW_FOREGROUND === '1',
+            aiAgentPresent: viewEnv.AI_AGENT !== undefined,
+            agentMarkersPresent: AGENT_SHELL_MARKERS.some((name) => viewEnv[name] !== undefined),
+          };
+        }
         const url = await new Promise((resolveUrl, reject) => {
           let output = '';
+          let pageUrl;
           const timer = setTimeout(() => reject(new Error('The demo view did not start')), 10000);
+          const resolveWhenReady = () => {
+            if (pageUrl && (!observation || observation.viewPid)) {
+              if (observation) observation.viewOutput = output.replace(/(https?:\/\/[^\s?#]+)\?[^\s#]*/g, '$1?[redacted]');
+              clearTimeout(timer);
+              resolveUrl(pageUrl);
+            }
+          };
           server.stdout.setEncoding('utf8');
-          server.stdout.on('data', (chunk) => { output += chunk; const match = /Pullboard view: (http:\/\/[^\s]+)/.exec(output); if (match) { clearTimeout(timer); resolveUrl(match[1]); } });
+          server.stdout.on('data', (chunk) => {
+            output += chunk;
+            const match = /Pullboard view: (http:\/\/[^\s]+)/.exec(output);
+            const pid = /To stop it: (?:kill|taskkill \/PID) (\d+)/.exec(output);
+            if (pid && observation) observation.viewPid = Number(pid[1]);
+            if (match) pageUrl = match[1];
+            resolveWhenReady();
+          });
           server.once('close', () => { clearTimeout(timer); reject(new Error('The demo view stopped before it opened')); });
         });
+        if (observation) {
+          observation.viewLaunch.actualViewPid = observation.viewPid ?? null;
+          observation.viewLaunch.branch = observation.viewPid === server.pid ? 'foreground' : observation.viewPid ? 'background' : 'unknown';
+          observation.viewLaunch.reportedIdentity = processIdentity(observation.viewPid);
+        }
         view = await browser(chrome, join(base, 'chrome-profile'), url);
         await waitForDemoBoard(view, repo);
         await view.viewport(1440, 900);
@@ -207,13 +338,32 @@ else {
         await view.evaluate('document.fonts.ready.then(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))');
         await view.screenshot(join(OUTPUT, 'shouts.png'));
         await view.close(); view = null;
+        recordBeforeViewStop(observation);
         await stop(server); server = null;
+        await recordAfterViewStop(observation);
         if (!screenshotsOnly) await recordTour(env);
+        if (observation) observation.outcome = 'completed';
       }
     }
   } finally {
-    if (view) await view.close();
-    if (server) await stop(server);
+    const teardownErrors = [];
+    if (view) {
+      try { await view.close(); } catch (error) { teardownErrors.push(`${error.name}: browser close failed`); }
+      view = null;
+    }
+    try { recordBeforeViewStop(observation); } catch (error) { teardownErrors.push(`${error.name}: pre-stop process snapshot failed`); }
+    if (server) {
+      try { await stop(server); } catch (error) { teardownErrors.push(`${error.name}: view launcher stop failed`); }
+      server = null;
+    }
+    try { await recordAfterViewStop(observation); } catch (error) { teardownErrors.push(`${error.name}: post-stop process snapshot failed`); }
+    if (observation) {
+      observation.teardownErrors = teardownErrors;
+      observation.finishedAt = new Date().toISOString();
+      try { await writeFile(observationPath, `${JSON.stringify(observation, null, 2)}\n`, { mode: 0o600 }); }
+      catch (error) { teardownErrors.push(`${error.name}: observation receipt write failed`); }
+    }
+    if (teardownErrors.length) process.exitCode = 1;
     await rm(base, { recursive: true, force: true });
   }
 }
