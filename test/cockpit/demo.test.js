@@ -934,6 +934,88 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
   }
 });
 
+/** Release a completed real hold refresh at the next pointer aim, reproducing the captured late console scroll. */
+test('a finished lane hold does not scroll after the next press is aimed [N26,C7]', {
+  timeout: 60_000, // budget: bound a hung real browser journey, not the duration of a successful request.
+}, async (t) => {
+  const executable = chromeExecutable();
+  assert.ok(executable, 'Chrome is required for the late action scroll control');
+  const box = machine();
+  const demo = project(box, 'late-hold-demo');
+  project(box, 'other-late-hold-demo');
+  box.run(demo.repo, 'add', 'web', 'Hold control', '--specs', 'G1', '--criterion', 'the next press remains where it was aimed');
+  box.run(demo.repo, 'shout', 'person', 'Should the hold control ship?', '--decision');
+  // The captured desktop journey follows phone and desktop shouts; keep that real feed tall enough to scroll.
+  for (const text of ['Phone shout 375', 'Phone answer 375', 'Phone shout 1280', 'Phone answer 1280']) {
+    box.run(demo.repo, 'shout', 'web', text);
+  }
+  for (let index = 0; index < 8; index++) box.run(demo.web, 'shout', 'coordinator', 'Earlier board discussion ' + index);
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-late-hold-'));
+  let chrome;
+  try {
+    chrome = await openSnapshotChrome(executable, 'about:blank', profile);
+    await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+    await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: `
+      const nativeInterval = window.setInterval.bind(window);
+      /** Keep this one real refresh under test control; every HTTP response and render remains real. */
+      window.setInterval = (callback, delay, ...args) => delay === 3000 ? 0 : nativeInterval(callback, delay, ...args);
+    ` });
+    await chrome.send('Page.navigate', { url: view.link.href });
+    await chrome.waitFor('data?.project?.items.some(item => item.title === "Hold control")');
+    await press(chrome, 'document.querySelector("[data-tab=shouts]")');
+    await chrome.stable(`(() => {
+      const originalRefresh = refresh;
+      window.__lateHold = { ready: false, aimed: false, completed: false };
+      /** Pause only the continuation after the real hold state has rendered. */
+      refresh = async function() {
+        await originalRefresh();
+        refresh = originalRefresh;
+        window.__lateHold.ready = true;
+        await new Promise(resolve => { window.__lateHold.finish = resolve; });
+        window.__lateHold.completed = true;
+      };
+      document.querySelector('#hold-lane').value = 'web';
+      document.querySelector('#hold-reason').value = 'Keep the next press steady';
+      document.querySelector('#hold-form').requestSubmit();
+    })()`);
+    await chrome.waitFor('window.__lateHold.ready && !!document.querySelector("#lanes [data-release=web]")');
+    const geometry = JSON.parse(await chrome.stable(`JSON.stringify({ height: innerHeight,
+      pageHeight: document.documentElement.scrollHeight, scrollY,
+      console: document.querySelector('#console').getBoundingClientRect().toJSON(),
+      success: document.querySelector('#console').classList.contains('ok') })`));
+    t.diagnostic('late hold geometry: ' + JSON.stringify(geometry));
+    assert.ok(geometry.pageHeight > geometry.height, 'the real feed can scroll, so a redundant scroll cannot pass vacuously');
+    assert.ok(geometry.success && geometry.console.height > 0 && geometry.console.top >= 0 && geometry.console.bottom <= geometry.height,
+      'the hold result is already visible before its refresh continuation resumes');
+    await chrome.stable(`(() => {
+      /** Finish the previous action exactly after Chrome aims at the next real button. */
+      function finishAtAim(event) {
+        if (!event.target.closest('#lanes [data-release=web]')) return;
+        document.removeEventListener('pointermove', finishAtAim, true);
+        window.__lateHold.aimed = true;
+        window.__lateHold.before = scrollY;
+        window.__lateHold.finish();
+      }
+      document.addEventListener('pointermove', finishAtAim, true);
+    })()`);
+    const captureSetup = await armLaneReleaseCapture(chrome, '#lanes [data-release=web]');
+    try {
+      await press(chrome, 'document.querySelector("#lanes [data-release=web]")');
+    } finally {
+      const capture = await finishLaneReleaseCapture(chrome, captureSetup);
+      t.diagnostic('late hold continuation: ' + JSON.stringify(capture));
+    }
+    assert.deepEqual(JSON.parse(await chrome.stable('JSON.stringify({ aimed: window.__lateHold.aimed, completed: window.__lateHold.completed })')),
+      { aimed: true, completed: true }, 'the real completed refresh resumed after pointer aim');
+    await chrome.waitFor('!document.querySelector("#lanes [data-release=web]")');
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    await view.stop();
+    rmSync(profile, { recursive: true, force: true });
+  }
+});
+
 test('the spec chip measurement survives a redraw [N26,C7]', {
   timeout: 30_000, // budget: stop a hung local Chrome flow; not a rendering-speed assertion.
 }, async () => {

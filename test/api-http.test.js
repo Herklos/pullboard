@@ -4,10 +4,11 @@ import { randomUUID } from 'node:crypto';
 import { runFixtureChild, runFixtureGit, startFixtureChild } from './fixture-child.js';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { spawn } from 'node:child_process';
 import { createServer, request as httpRequest } from 'node:http';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
-import { serveApi } from '../src/api.js';
+import { createLocalApiHandler, serveApi } from '../src/api.js';
 import { serveView } from '../src/serve.js';
 import { main } from '../src/cli.js';
 import { createApiHandler } from '../src/api-http.js';
@@ -206,12 +207,156 @@ async function cachedHttpStateTest(t) {
   t.mock.timers.tick(Math.max(1, Date.parse(leaseUntil) - now + 1));
   const expired = await box.call(box.path + '/state');
   assert.equal(expired.document.state.items.find((item) => item.id === itemId).status, 'open');
-  assert.equal(expired.document.state.items.find((item) => item.id === itemId).owner, null);
+  assert.equal(expired.document.state.items.find((item) => item.id === itemId).claim, null);
+  assert.equal((await box.call(box.path + '/items/' + itemId)).document.item.owner, null);
   assert.equal(expired.document.state.events[0].event_id, lastEvent, 'lease expiry changed no board event');
   assert.equal(builds, 10, 'clock-only lease expiry invalidates the cached state');
 }
 
 test('[A2, N26] an unchanged board state is reused and a move rebuilds it', cachedHttpStateTest);
+
+test("[A2, N26] the board state sends summaries and an item's detail comes from its own path", async (t) => {
+  const box = await httpBox(t);
+  const builder = box.cli(box.root, 'worktree', 'app', '--model', 'fixture-builder');
+  const verifier = box.cli(box.root, 'worktree', 'app', '--model', 'fixture-verifier');
+  /** Make one real board move through HTTP and return its result. */
+  async function move(body) {
+    const moved = await box.call(box.path + '/moves', body);
+    assert.equal(moved.status, 200, JSON.stringify(moved.document));
+    return moved.document.result;
+  }
+  const accepted = (await move({ verb: 'add', args: {
+    lane: 'app', title: 'Accepted summary item', criterion: 'Every list reads the Zebra marker', brief: 'A brief only the detail carries',
+    specs: 'G1', check: 'true', wait: true,
+  } })).item.item_id;
+  await move({ verb: 'claim', item: accepted, agent: builder.agent });
+  await move({ verb: 'fact', item: accepted, agent: builder.agent, args: { kind: 'note', text: 'a fact only the thread carries' } });
+  await move({ verb: 'submit', item: accepted, agent: builder.agent });
+  await move({ verb: 'next', agent: verifier.agent, args: { verify: true } });
+  await move({ verb: 'verify', item: accepted, agent: verifier.agent, args: { decision: 'accept', reason: 'CRITERION_MET', note: 'ran the check and read the summary' } });
+  const claimed = (await move({ verb: 'add', args: { lane: 'app', title: 'Claimed summary item', criterion: 'stays claimed', specs: 'G1' } })).item.item_id;
+  await move({ verb: 'claim', item: claimed, agent: builder.agent });
+  const open = (await move({ verb: 'add', args: { lane: 'app', title: 'Open summary item', criterion: 'waits for a builder', specs: 'G1' } })).item.item_id;
+  box.cli(box.root, 'milestone', 'add', 'Delivery', '--items', String(accepted));
+  const board = store.openBoard(join(box.root, '.git', 'pullboard', 'board.sqlite'));
+  let leaseUntil;
+  try { leaseUntil = board.db.prepare('SELECT item_lease_until FROM item WHERE item_id = ?').get(claimed).item_lease_until; } finally { store.closeBoard(board); }
+
+  const summaryFields = ['id', 'title', 'lane', 'status', 'route', 'milestone', 'specs', 'claim', 'builtBy', 'blockedBy', 'updatedAt', 'stage', 'since', 'counts', 'verdict'];
+  const summaryState = await box.call(box.path + '/state');
+  assert.equal(summaryState.status, 200);
+  const fullState = await box.call(box.path + '/state?detail=full');
+  assert.equal(fullState.status, 200);
+  const summaries = new Map(summaryState.document.state.items.map((item) => [item.id, item]));
+  const fulls = new Map(fullState.document.state.items.map((item) => [item.id, item]));
+  assert.deepEqual([...summaries.keys()], [open, claimed, accepted], 'the state still lists every item, in board order');
+  assert.deepEqual([...fulls.keys()], [...summaries.keys()]);
+  for (const summary of summaries.values()) {
+    assert.deepEqual(Object.keys(summary), summaryFields, `#${summary.id} carries only the summary fields`);
+  }
+  for (const full of fulls.values()) {
+    for (const field of ['thread', 'verdicts', 'history', 'brief', 'criterion', 'check', ...summaryFields]) assert.ok(Object.hasOwn(full, field), `detail=full keeps #${full.id}'s ${field}`);
+  }
+  assert.ok(Buffer.byteLength(JSON.stringify(summaryState.document)) < Buffer.byteLength(JSON.stringify(fullState.document)));
+  assert.equal(JSON.stringify(summaryState.document).includes('A brief only the detail carries'), false, 'no brief text in the summaries');
+  assert.equal(JSON.stringify(summaryState.document).includes('Zebra'), false, 'no criterion text in the summaries');
+
+  const acceptedFull = fulls.get(accepted);
+  assert.deepEqual(summaries.get(accepted), {
+    id: accepted, title: 'Accepted summary item', lane: 'app', status: 'verified', route: acceptedFull.route, milestone: 'Delivery',
+    specs: ['G1'], claim: null, builtBy: builder.agent, blockedBy: [], updatedAt: acceptedFull.updatedAt, stage: 'accepted',
+    since: acceptedFull.history.findLast((event) => event.kind === 'accept').at, counts: { verdicts: 1, facts: 1 },
+    verdict: { decision: 'ACCEPT', reason: 'CRITERION_MET' },
+  });
+  const claimedFull = fulls.get(claimed);
+  assert.deepEqual(summaries.get(claimed).claim, { by: builder.agent, until: leaseUntil });
+  assert.equal(summaries.get(claimed).stage, 'claimed');
+  assert.equal(summaries.get(claimed).since, claimedFull.history.findLast((event) => event.kind === 'claim').at);
+  assert.deepEqual(summaries.get(open), {
+    id: open, title: 'Open summary item', lane: 'app', status: 'open', route: fulls.get(open).route, milestone: null,
+    specs: ['G1'], claim: null, builtBy: null, blockedBy: [], updatedAt: fulls.get(open).updatedAt, stage: 'open',
+    since: fulls.get(open).history.find((event) => event.kind === 'add').at, counts: { verdicts: 0, facts: 0 }, verdict: null,
+  });
+  assert.deepEqual(summaryState.document.state.moveCounts, {
+    'open>claimed:claim': 2, 'claimed>submitted:submit': 1, 'submitted>submitted:reserve': 1, 'submitted>verified:accept': 1,
+  }, 'the lifecycle drawing tallies the moves without any history');
+  assert.deepEqual(fullState.document.state.moveCounts, summaryState.document.state.moveCounts);
+
+  for (const [id, full] of fulls) {
+    const detail = await box.call(box.path + '/items/' + id);
+    assert.equal(detail.status, 200);
+    assert.deepEqual({ ...summaries.get(id), ...detail.document.item }, full, `#${id}'s summary and detail make its full item`);
+    const carried = Object.keys(detail.document.item).filter((field) => summaryFields.includes(field));
+    assert.deepEqual(carried, ['id', 'verdict'], 'the detail repeats only the id and the whole latest verdict');
+    for (const field of ['thread', 'verdicts', 'history', 'brief', 'criterion', 'check', 'owner', 'reviewer', 'reviewUntil', 'verifiedBy', 'commit', 'merged']) {
+      assert.ok(Object.hasOwn(detail.document.item, field), `#${id}'s detail carries ${field}`);
+    }
+  }
+  const acceptedDetail = (await box.call(box.path + '/items/' + accepted)).document.item;
+  assert.equal(acceptedDetail.brief, 'A brief only the detail carries');
+  assert.equal(acceptedDetail.criterion, 'Every list reads the Zebra marker');
+  assert.equal(acceptedDetail.check, 'true');
+  assert.equal(acceptedDetail.checkBaseline.result, 'green');
+  assert.equal(acceptedDetail.verdict.note, 'ran the check and read the summary');
+  assert.deepEqual(acceptedDetail.thread.filter((entry) => entry.type === 'fact').map((entry) => entry.text), ['a fact only the thread carries']);
+
+  /** Search through HTTP and return the matching ids in board order. */
+  const search = async (text) => {
+    const found = await box.call(box.path + '/items?q=' + encodeURIComponent(text));
+    assert.equal(found.status, 200);
+    return found.document.ids;
+  };
+  assert.deepEqual(await search('zebra'), [accepted], 'the criterion is searched without being in the state');
+  assert.deepEqual(await search('  CLAIMED summary '), [claimed], 'trimmed text matches a title, ignoring case');
+  assert.deepEqual(await search('#' + open), [open], 'an #id matches its item');
+  assert.deepEqual(await search('g1'), [open, claimed, accepted], 'spec ids match');
+  assert.deepEqual(await search('APP'), [open, claimed, accepted], 'the lane matches');
+  assert.deepEqual(await search(''), [open, claimed, accepted], 'no text matches every item, as the view shows them all');
+  assert.deepEqual(await search('no item says this'), []);
+
+  const missing = await box.call(box.path + '/items/9999');
+  assert.equal(missing.status, 404);
+  assert.equal(missing.document.error.code, 'NO_ITEM');
+  for (const rawId of ['0', 'abc', '1.5']) {
+    const malformed = await box.call(box.path + '/items/' + rawId);
+    assert.equal(malformed.status, 400);
+    assert.equal(malformed.document.error.code, 'BAD_REQUEST');
+  }
+  const posted = await box.call(box.path + '/items/' + accepted, {});
+  assert.equal(posted.status, 400);
+  const badDetail = await box.call(box.path + '/state?detail=everything');
+  assert.equal(badDetail.status, 400);
+  assert.equal(badDetail.document.error.code, 'BAD_REQUEST');
+  assert.deepEqual((await box.call(box.path + '/state?detail=summary')).document.state.items, summaryState.document.state.items);
+
+  // pullboard serve itself sends summaries; a page's own server, built as the view builds it, keeps full items until it opts in.
+  const served = spawn(process.execPath, [BIN, 'serve', '--port', '0', '--json'], { cwd: box.root, env: box.env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const exited = new Promise((done) => served.once('close', done));
+  t.after(async () => { served.kill('SIGTERM'); await exited; });
+  const servedUrl = await new Promise((found, fail) => {
+    let out = '';
+    served.stdout.setEncoding('utf8');
+    served.stdout.on('data', (chunk) => {
+      out += chunk;
+      const match = /"url":\s*"([^"]+)"/.exec(out);
+      if (match) found(new URL(match[1]));
+    });
+    served.once('close', (code) => fail(new Error('pullboard serve exited ' + code + ' before printing its address: ' + out)));
+  });
+  const servedState = await fetchFresh(servedUrl.origin + box.path + '/state', { headers: { 'x-pullboard-key': servedUrl.searchParams.get('k') } });
+  assert.equal(servedState.status, 200);
+  assert.deepEqual((await servedState.json()).state.items, summaryState.document.state.items, 'pullboard serve sends the same summaries');
+  let pagePort;
+  const pageHandler = createLocalApiHandler({ secret: 'page-fixture-secret', getPort: () => pagePort, runCommand: main, projects: () => [{ root: box.root, name: 'HTTP fixture' }] });
+  const page = createServer(pageHandler);
+  await new Promise((done) => page.listen(0, '127.0.0.1', done));
+  pagePort = page.address().port;
+  t.after(() => new Promise((done) => { pageHandler.close(); page.close(done); page.closeIdleConnections(); }));
+  const pageState = await fetchFresh('http://127.0.0.1:' + pagePort + box.path + '/state', { headers: { 'x-pullboard-key': 'page-fixture-secret' } });
+  assert.deepEqual((await pageState.json()).state.items, fullState.document.state.items, 'a page server that has not opted in keeps every item in full');
+  const pageSummary = await fetchFresh('http://127.0.0.1:' + pagePort + box.path + '/state?detail=summary', { headers: { 'x-pullboard-key': 'page-fixture-secret' } });
+  assert.deepEqual((await pageSummary.json()).state.items, summaryState.document.state.items, 'and sends summaries when asked');
+});
 
 test('[A2, N26] local milestone item status refreshes after an item event', async (t) => {
   let builds = 0;
@@ -390,7 +535,8 @@ test('[A2] real HTTP state, moves and refusals use the CLI and exact committed e
   assert.deepEqual(refused.document.error, JSON.parse(terminal.stdout).error, 'the original CLI refusal keeps its message and next step');
   const state = await box.call(box.path + '/state');
   assert.equal(state.document.state.board, box.id);
-  assert.equal(state.document.state.items.find((item) => item.id === id).owner, one.agent);
+  assert.equal(state.document.state.items.find((item) => item.id === id).claim.by, one.agent);
+  assert.equal((await box.call(box.path + '/items/' + id)).document.item.owner, one.agent);
   const events = await box.call(box.path + '/events?after=' + added.document.event.event_id);
   assert.deepEqual(events.document.events, [claimed.document.event]);
   const badAgent = await box.call(box.path + '/moves', { verb: 'release', item: id, agent: 'absent-agent' });
@@ -418,22 +564,22 @@ test('[A2,V2,H16] board-state JSON retains pending and red baselines and removes
     id = store.addItem(board, { by: 'coordinator', lane: 'app', title: 'Captured API observation',
       check: pending.command, checkBaseline: pending });
   } finally { store.closeBoard(board); }
-  const initial = await box.call(box.path + '/state');
-  assert.deepEqual(initial.document.state.items.find((item) => item.id === id).checkBaseline, pending,
+  const initial = await box.call(box.path + '/items/' + id);
+  assert.deepEqual(initial.document.item.checkBaseline, pending,
     'a pending captured request reaches the public state endpoint before completion');
   const completed = store.openBoard(join(box.root, '.git', 'pullboard', 'board.sqlite'));
   try {
     store.completeCheckBaseline(completed, id, { agentId: 'coordinator', expected: pending,
       baseline: { command: pending.command, main: pending.main, result: 'red', seconds: 1 } });
   } finally { store.closeBoard(completed); }
-  const redState = await box.call(box.path + '/state');
-  const red = redState.document.state.items.find((item) => item.id === id).checkBaseline;
+  const redState = await box.call(box.path + '/items/' + id);
+  const red = redState.document.item.checkBaseline;
   assert.deepEqual(red, { command: pending.command, main: pending.main, result: 'red', seconds: 1, request: pending.request });
   assert.equal(Object.hasOwn(red, 'warning'), false, 'a failing baseline has no proves-nothing warning');
   const cleared = await box.call(box.path + '/moves', { verb: 'edit', item: id, args: { check: '' } });
   assert.equal(cleared.status, 200, JSON.stringify(cleared.document));
-  const clearedState = await box.call(box.path + '/state');
-  const clearedItem = clearedState.document.state.items.find((item) => item.id === id);
+  const clearedState = await box.call(box.path + '/items/' + id);
+  const clearedItem = clearedState.document.item;
   assert.equal(clearedItem.check, '');
   assert.equal(Object.hasOwn(clearedItem, 'checkBaseline'), false, 'clearing the check removes its old observation from API state');
 });
@@ -455,8 +601,8 @@ test('[A2,V2] HTTP add and edit preserve explicit blocking baseline requests', a
   assert.equal(item.item_check_baseline.result, 'green', '--wait returns a terminal observation in the add response');
   assert.equal(item.item_check_baseline.warning, 'CRITERION_PROVES_NOTHING');
   assert.equal(readFileSync(firstMarker, 'utf8'), 'finished');
-  const addedState = await box.call(box.path + '/state');
-  const projected = addedState.document.state.items.find((row) => row.id === item.item_id);
+  const addedState = await box.call(box.path + '/items/' + item.item_id);
+  const projected = addedState.document.item;
   assert.equal(projected.check, check);
   assert.deepEqual(projected.checkBaseline, item.item_check_baseline, 'board-state item JSON carries the same complete observation and warning');
   const secondMarker = join(box.dir, 'edit-finished');
@@ -468,9 +614,9 @@ test('[A2,V2] HTTP add and edit preserve explicit blocking baseline requests', a
   assert.equal(edited.document.result.item.item_check_baseline.command, editedCheck);
   assert.equal(edited.document.result.item.item_check_baseline.result, 'green', '--wait also blocks edit until its new check finishes');
   assert.equal(readFileSync(secondMarker, 'utf8'), 'finished');
-  const editedState = await box.call(box.path + '/state');
+  const editedState = await box.call(box.path + '/items/' + item.item_id);
   const editedItem = edited.document.result.item;
-  assert.deepEqual(editedState.document.state.items.find((row) => row.id === item.item_id).checkBaseline,
+  assert.deepEqual(editedState.document.item.checkBaseline,
     editedItem.item_check_baseline, 'board-state JSON replaces the observation when the check changes');
 });
 
@@ -806,6 +952,11 @@ test('[A2] adapters without a committed-code capability return a versioned refus
   assert.equal(document.version, 1);
   assert.equal(document.error.code, 'CODE_NOT_AVAILABLE');
   assert.match(document.error.next, /local view|local API/);
+  for (const path of ['/items/1', '/items?q=anything']) {
+    const unavailable = await fetchFresh('http://127.0.0.1:' + server.address().port + '/api/v1/boards/' + id + path);
+    assert.equal(unavailable.status, 400);
+    assert.equal((await unavailable.json()).error.code, 'ITEM_NOT_AVAILABLE', 'an adapter whose state carries full items offers no item reads');
+  }
 });
 
 test('[A2, N26] state JSON fragments preserve the API envelope and legacy adapter fallback', async (t) => {

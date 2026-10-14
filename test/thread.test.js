@@ -306,16 +306,17 @@ test('[B29,B30,B31,B32,A2] CLI and HTTP facts share stamped threads, guard judge
   });
   const observationId = observation.document.result.fact.id;
 
-  const beforeRefusal = await box.call(box.path + '/state');
-  const existingThread = beforeRefusal.document.state.items.find((entry) => entry.id === id).thread;
+  const beforeRefusal = await box.call(box.path + '/items/' + id);
+  const existingThread = beforeRefusal.document.item.thread;
+  assert.ok(existingThread.some((entry) => entry.id === observationId), 'the item detail carries the thread');
   const refused = await box.call(box.path + '/moves', {
     verb: 'fact', item: id, agent: observer.agent,
     args: { kind: 'decision', text: 'observer cannot decide' },
   });
   assert.equal(refused.status, 409);
   assert.equal(refused.document.error.code, 'FACT_JUDGEMENT');
-  const afterRefusal = await box.call(box.path + '/state');
-  assert.deepEqual(afterRefusal.document.state.items.find((entry) => entry.id === id).thread, existingThread, 'a refused judgement appends no event');
+  const afterRefusal = await box.call(box.path + '/items/' + id);
+  assert.deepEqual(afterRefusal.document.item.thread, existingThread, 'a refused judgement appends no event');
 
   const correctionRun = box.run(holder.path, 'fact', String(id), 'supersession', '--supersedes', observationId, '--json', '--', 'corrected evidence');
   assert.equal(correctionRun.status, 0, correctionRun.stderr);
@@ -338,8 +339,8 @@ test('[B29,B30,B31,B32,A2] CLI and HTTP facts share stamped threads, guard judge
   assert.ok(terminalShow.stdout.includes(`ref: thread-fixture.txt:1@${box.commit}`), 'show keeps the full commit reference');
 
   const terminalJson = JSON.parse(box.run(box.root, 'show', String(id), '--json').stdout);
-  const apiState = await box.call(box.path + '/state');
-  const apiItem = apiState.document.state.items.find((entry) => entry.id === id);
+  const apiState = await box.call(box.path + '/items/' + id);
+  const apiItem = apiState.document.item;
   assert.deepEqual(terminalJson.thread, apiItem.thread, 'CLI JSON and API state expose the same stamped thread');
   assert.deepEqual(relayPresentation(box.root).state.items.find((entry) => entry.id === id).thread, apiItem.thread, 'sealed presentation carries the same facts');
   assert.deepEqual(apiItem.thread.filter((entry) => entry.type === 'fact').map(({ id: factId, text, supersedes }) => ({ id: factId, text, supersedes })), [
