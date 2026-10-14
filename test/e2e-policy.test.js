@@ -310,7 +310,8 @@ test("a dependency's own verified dependency admits its files [N16,V4]", () => {
   const targetChange = commitFile(box, design, 'design/target.txt', 'target bytes\n', 'feat(design): target fixture [G1]');
   assert.equal(targetChange.status, 0, targetChange.stderr || targetChange.failure || 'target commit');
   const submitted = box.run(design, 'submit', String(designItem), '--json');
-  assert.equal(submitted.code, 0, submitted.err || submitted.out);
+  const submitFailure = submitted.out ? JSON.parse(submitted.out).error?.code : submitted.err;
+  assert.equal(submitted.code, 0, submitFailure);
   const targetCommit = box.git(design, 'rev-parse', 'HEAD');
   const target = JSON.parse(box.run(design, 'show', String(designItem), '--json').out);
   assert.equal(JSON.parse(box.run(box.repo, 'show', String(webItem), '--json').out).item_commit, webCommit);
