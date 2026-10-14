@@ -126,6 +126,14 @@ test('setup offers a gate to a board with no build [I1,I2]', (t) => {
   assert.equal(JSON.parse(readFileSync(configPath, 'utf8')).gate, 'pullboard spec check');
   assert.equal(JSON.parse(box.run('resume', '--json').stdout).setup.step, 4);
 
+  box.git('add', '-f', '--', 'pullboard.json', 'SPEC.md', 'DOCTRINE.md', 'AGENTS.md', '.gitignore', '.githooks', '.claude');
+  const stagedPaths = box.git('diff', '--cached', '--name-only').split('\n');
+  assert.ok(stagedPaths.length > 0);
+  const allowedSetupFiles = new Set(['pullboard.json', 'SPEC.md', 'DOCTRINE.md', 'AGENTS.md', '.gitignore']);
+  assert.ok(stagedPaths.every(path => allowedSetupFiles.has(path) || path.startsWith('.githooks/') || path.startsWith('.claude/')), stagedPaths.join('\n'));
+  box.git('-c', 'user.name=Pullboard fixture', '-c', 'user.email=pullboard-fixture@example.test', '-c', 'commit.gpgsign=false', 'commit', '-m', 'chore: initialize Pullboard fixture');
+
+  // The real gate reads committed main policy; commit only the setup paths created above first.
   box.env.PULLBOARD_MACHINE_HOME = join(box.root, '.private-machine-home');
   const gate = box.run('gate');
   assert.equal(gate.status, 0, gate.failure ?? gate.stderr);
