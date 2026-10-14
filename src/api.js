@@ -10,6 +10,7 @@ import { codeIsFromMain, repoInfo, resolveCommit } from './git.js';
 import { refusalDocument } from './json.js';
 import { relayLinked, relayOperation, relayRevoke, relayTokens } from './relay.js';
 import { laneNames } from './lanes.js';
+import { MACHINE } from './machine.js';
 import { listApiProjects, registryFile } from './projects.js';
 import { milestoneRoadmap } from './roadmap.js';
 import { proofStats } from './stats.js';
@@ -366,6 +367,7 @@ function buildLocalBoardState(board, codeIsMain, milestones) {
     }])),
     proofStats: proofStats(db),
     threads: new Map(store.listItems(db, { all: true }).map((item) => [item.item_id, store.itemThread(db, item.item_id)])),
+    leases: new Map(store.listItems(db, { all: true }).map((item) => [item.item_id, item.item_lease_until ?? null])),
   }), codeIsMain);
   state.proofStats = projectData.proofStats;
   state.requests = projectData.requests;
@@ -374,7 +376,117 @@ function buildLocalBoardState(board, codeIsMain, milestones) {
   state.items = state.items.map((item) => ({ ...item, ...projectData.checks.get(item.id) }));
   state = projectRowDecisions(projectData.rowDecisions, state);
   state.items = state.items.map((item) => ({ ...item, thread: projectData.threads.get(item.id) ?? [] }));
-  return state;
+  return withListFields(state, projectData.leases);
+}
+
+/** What a board-state item summary keeps: what the lists and the roadmap read (A2, N26). */
+const SUMMARY_FIELDS = Object.freeze(['id', 'title', 'lane', 'status', 'route', 'milestone', 'specs', 'claim', 'builtBy',
+  'blockedBy', 'updatedAt', 'stage', 'since', 'counts', 'verdict']);
+const SUMMARY_KEYS = new Set(SUMMARY_FIELDS);
+const CLOCK_MOVES = MACHINE.moves.filter((move) => move.by.includes('clock'));
+
+/**
+ * Replay an item's recorded events through the declared lifecycle, as the view's timeline does
+ * (M1). The board logs a claim on a claimed item as renew, and never the clock's lapse, so a move
+ * that cannot start where the replay stands, or a status the history does not reach, puts the
+ * lapse in first.
+ *
+ * @param {{ kind: string, at: string }[]} history
+ * @param {string} status
+ * @returns {{ from: string, move: object | null, at: string | null }[]}
+ */
+function lifecycleSteps(history, status) {
+  const steps = [];
+  let at = MACHINE.initial;
+  /** Record where the replay stands and the move it makes, if any, then follow that move. */
+  const step = (move, event) => {
+    steps.push({ from: at, move, at: event ? event.at : null });
+    if (move) at = move.to;
+  };
+  for (const event of history) {
+    const verb = event.kind === 'renew' ? 'claim' : event.kind;
+    /** The declared move this event makes from a state; a renew is the claim that stays claimed. */
+    const fits = (state) => MACHINE.moves.find((move) => move.verb === verb && move.from.includes(state)
+      && (verb !== 'claim' || (event.kind === 'renew') === (move.to === state)));
+    const lapse = fits(at) ? null : CLOCK_MOVES.find((move) => move.from.includes(at) && fits(move.to));
+    if (lapse) step(lapse, null);
+    step(fits(at) || null, event);
+  }
+  const lapse = at === status ? null : CLOCK_MOVES.find((move) => move.from.includes(at) && move.to === status);
+  if (lapse) step(lapse, null);
+  return steps;
+}
+
+/** When an item arrived in its list stage; edits, review reservations and renewals do not restart it. */
+function stageSince(item, steps) {
+  if (item.merged) return item.history.findLast((event) => event.kind === 'merged')?.at || item.updatedAt;
+  const arrival = steps.findLast((step) => step.move && step.from !== step.move.to);
+  // A lapse is inferred, but the claim's own receipt records the deadline that caused it.
+  if (arrival?.move?.verb === 'lapse') {
+    const claim = item.thread.findLast((entry) => entry.type === 'move' && ['claim', 'renew'].includes(entry.kind));
+    if (claim?.detail?.leaseUntil) return claim.detail.leaseUntil;
+  }
+  return arrival ? arrival.at || item.updatedAt : item.history.find((event) => event.kind === 'add')?.at || item.updatedAt;
+}
+
+/**
+ * Give every item what its list rows read without its history: its list stage and when it entered
+ * it, its roadmap milestone, the live lease on it, and its verdict and fact counts. A recorded merge,
+ * not an accept, ends the pipeline. The board's moves are tallied once, keyed from>to:verb as the
+ * lifecycle drawing sums them.
+ *
+ * @param {any} state
+ * @param {Map<number, string | null>} leases Each item's recorded claim deadline.
+ * @returns {any}
+ */
+function withListFields(state, leases) {
+  const milestones = new Map();
+  for (const milestone of state.milestones ?? []) {
+    for (const entry of milestone.items) if (typeof entry.id === 'number' && !milestones.has(entry.id)) milestones.set(entry.id, milestone.name);
+  }
+  const moveCounts = {};
+  const items = state.items.map((item) => {
+    const steps = lifecycleSteps(item.history, item.status);
+    for (const step of steps) {
+      const key = step.move && step.from + '>' + step.move.to + ':' + step.move.verb;
+      if (key) moveCounts[key] = (moveCounts[key] ?? 0) + 1;
+    }
+    // Who holds the item under a live lease: its builder while claimed, its reviewer while reserved.
+    const claim = item.status === 'claimed' && item.owner ? { by: item.owner, until: leases.get(item.id) ?? null }
+      : item.status === 'submitted' && item.reviewer ? { by: item.reviewer, until: item.reviewUntil } : null;
+    return { ...item,
+      milestone: milestones.get(item.id) ?? null,
+      claim,
+      stage: item.merged ? 'merged' : item.status === 'verified' ? 'accepted' : item.status,
+      since: stageSince(item, steps),
+      counts: { verdicts: item.verdicts.length, facts: item.thread.filter((entry) => entry.type === 'fact').length },
+    };
+  });
+  return { ...state, items, moveCounts };
+}
+
+/** Keep the summary fields; the latest verdict keeps only its decision and reason. */
+function itemSummary(item) {
+  const summary = Object.fromEntries(SUMMARY_FIELDS.map((key) => [key, item[key]]));
+  summary.verdict = item.verdict && { decision: item.verdict.decision, reason: item.verdict.reason };
+  return summary;
+}
+
+/** Everything a summary leaves out, with the latest verdict whole: laid over its summary, it is the full item. */
+function itemDetail(item) {
+  return Object.fromEntries(Object.entries(item).filter(([key]) => key === 'id' || key === 'verdict' || !SUMMARY_KEYS.has(key)));
+}
+
+/** The text the view's search matches for an item, lowercased: its #id, title, lane, spec ids and criterion. */
+function searchText(item) {
+  return ('#' + item.id + ' ' + item.title + ' ' + item.lane + ' ' + item.specs.join(' ') + ' ' + (item.criterion || '')).toLowerCase();
+}
+
+/** One cached board build: the full state, its item summaries and the lookups that serve them. */
+function snapshotEntry(revision, state, preparedFlow) {
+  const summary = { ...state, items: state.items.map(itemSummary) };
+  return { revision, state, summary, preparedFlow, summaryFields: prepareStateJson(summary), stateJsonFields: null,
+    items: new Map(state.items.map((item) => [item.id, item])), searchTexts: null };
 }
 
 /** Add the request-specific unread count without mutating the reusable snapshot. */
@@ -542,43 +654,70 @@ async function createRequest(root, body, isMain) {
   }, isMain);
 }
 
-/** Share the local router with the person's view; the standalone API explicitly denies person authority. */
-export function createLocalApiHandler({ secret, getPort, runCommand, projects = listApiProjects, isMain, allowedOrigins = [], onStateBuild, personChannel = 'view' } = {}) {
+/** Share the local router with the person's view and other local transports; the standalone API explicitly denies person authority. */
+export function createLocalApiHandler({ secret, getPort, runCommand, projects = listApiProjects, isMain, allowedOrigins = [], onStateBuild, personChannel = 'view', stateDetail = 'full' } = {}) {
   if (typeof getPort !== 'function') throw new TypeError('createLocalApiHandler needs a bound-port getter');
   if (typeof runCommand !== 'function') throw new TypeError('createLocalApiHandler needs the actual CLI entry point as runCommand');
+  // A page that still reads each item's detail from the state keeps full items until it opts in.
+  if (!['full', 'summary'].includes(stateDetail)) throw new TypeError('createLocalApiHandler stateDetail is full or summary');
   const codeIsMain = codeIsFromMain() && isMain !== false;
   const key = Buffer.from(secret);
   const permittedOrigins = new Set(allowedOrigins);
   const stateCache = new Map();
-  /** Return the current state and its cached-static JSON representation under revision checks. */
-  function localState(board, seen) {
+  /**
+   * Read the current board build through `read(entry, cached)`, reusing the cached build while every
+   * input revision holds before and after the read, and building it again when one moved.
+   */
+  function withSnapshot(board, read) {
     const before = boardStateRevision(board.root, board.id, codeIsMain);
     const cached = stateCache.get(before.cacheId);
     if (before.cacheable && cached?.revision === before.revision) {
-      const state = stateForRequest(cached.state, board.root, seen, cached.preparedFlow, true, codeIsMain);
+      const result = read(cached, true);
       const after = boardStateRevision(board.root, board.id, codeIsMain);
       if (after.cacheable && after.revision === before.revision) {
         stateCache.delete(before.cacheId);
         stateCache.set(before.cacheId, cached);
-        return { state, json: serializeState(state, cached.stateJsonFields) };
+        return result;
       }
     }
 
     onStateBuild?.({ board: board.id });
     const state = buildLocalBoardState(board, codeIsMain, before.milestones);
     const history = withBoard(board.root, (db) => store.events(db), codeIsMain);
-    const preparedFlow = prepareFlowHistory(history);
+    const entry = snapshotEntry(before.revision, state, prepareFlowHistory(history));
     const after = boardStateRevision(board.root, board.id, codeIsMain);
-    const stateJsonFields = prepareStateJson(state);
     if (before.cacheable && after.cacheable && before.revision === after.revision) {
-      const entry = { revision: before.revision, state, preparedFlow, stateJsonFields };
       stateCache.set(before.cacheId, entry);
       while (stateCache.size > 32) stateCache.delete(stateCache.keys().next().value);
     } else {
       stateCache.delete(before.cacheId);
     }
-    const projected = stateForRequest(state, board.root, seen, null, false, codeIsMain);
-    return { state: projected, json: serializeState(projected, stateJsonFields) };
+    return read(entry, false);
+  }
+  /** Return item summaries or every item in full, as asked or by this server's default, and the JSON for either. */
+  function localState(board, seen, { detail = null } = {}) {
+    return withSnapshot(board, (entry, cached) => {
+      const full = (detail ?? stateDetail) === 'full';
+      const state = stateForRequest(full ? entry.state : entry.summary, board.root, seen, entry.preparedFlow, cached, codeIsMain);
+      // Full fragments wait for the first full request, so a server sending summaries never builds them.
+      const fields = full ? (entry.stateJsonFields ??= prepareStateJson(entry.state)) : entry.summaryFields;
+      return { state, json: serializeState(state, fields) };
+    });
+  }
+  /** One item's detail from the current build, or null when the board has no such item. */
+  function localItem(board, id) {
+    return withSnapshot(board, (entry) => {
+      const item = entry.items.get(id);
+      return item ? itemDetail(item) : null;
+    });
+  }
+  /** The ids of the items the view's search would show for this text, in board-state order. */
+  function localSearch(board, text) {
+    const words = String(text).trim().toLowerCase();
+    return withSnapshot(board, (entry) => {
+      entry.searchTexts ??= entry.state.items.map((item) => [item.id, searchText(item)]);
+      return entry.searchTexts.filter(([, searched]) => !words || searched.includes(words)).map(([id]) => id);
+    });
   }
   return createApiHandler({
     authenticate: (req) => {
@@ -593,9 +732,11 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
     },
     boards: () => apiBoardListing(projects, codeIsMain),
     board: (id) => findBoard(id, projects, codeIsMain),
-    state: (board, who, seen) => localState(board, seen).state,
-    stateJson: (board, who, seen) => localState(board, seen).json,
+    state: (board, who, seen, options) => localState(board, seen, options).state,
+    stateJson: (board, who, seen, options) => localState(board, seen, options).json,
     watchRevision: (board) => watchLocalStateRevision(board),
+    item: (board, id) => localItem(board, id),
+    search: (board, text) => localSearch(board, text),
     shout: (board, id) => relayLinked(board.root)
       ? relayPresentationShout(board.root, id)
       : withBoard(board.root, (db) => store.shoutDetails(db, id), codeIsMain),
@@ -609,12 +750,15 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
   });
 }
 
-/** Serve the RFC 0002 API only on loopback, behind the same session-secret boundary as the view. */
-export function serveApi({ port = 0, secret = randomBytes(18).toString('base64url'), runCommand, projects = listApiProjects, isMain, onStateBuild } = {}) {
+/**
+ * Serve the RFC 0002 API only on loopback, behind the same session-secret boundary as the view. Its
+ * state sends item summaries unless asked for detail=full; each item's detail has its own path (A2).
+ */
+export function serveApi({ port = 0, secret = randomBytes(18).toString('base64url'), runCommand, projects = listApiProjects, isMain, onStateBuild, stateDetail = 'summary' } = {}) {
   if (typeof runCommand !== 'function') throw new TypeError('serveApi needs the actual CLI entry point as runCommand');
   let bound;
   // A serve key authenticates board access, never a person, even in an ordinary terminal.
-  const handler = createLocalApiHandler({ secret, getPort: () => bound, runCommand, projects, isMain, onStateBuild, personChannel: 'api' });
+  const handler = createLocalApiHandler({ secret, getPort: () => bound, runCommand, projects, isMain, onStateBuild, personChannel: 'api', stateDetail });
   const server = createServer(handler);
   server.requestTimeout = 15_000;
   return new Promise((ready, fail) => {
