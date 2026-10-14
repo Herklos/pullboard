@@ -1524,9 +1524,12 @@ export function reopen(board, id, { agentId, note }) {
 function manualLandingFailure(note) {
   const generatedPrefix = /^Landing batch [a-z0-9_-]{1,80} failed /iu.exec(note);
   const body = generatedPrefix ? note.slice(generatedPrefix[0].length) : note;
-  const evidence = body.match(/^(?<tests>.+);[ \t]*merge commit[ \t]+(?<mergeCommit>[a-f0-9]{40}|[a-f0-9]{64})$/iu);
+  const evidence = body.match(/;[ \t]*merge commit[ \t]+(?<mergeCommit>[a-f0-9]{40}|[a-f0-9]{64})$/iu);
   if (!evidence) return null;
-  const tests = evidence.groups.tests.split(/;[ \t]*/u).map((entry) => {
+  const failureText = body.slice(0, evidence.index);
+  const firstTest = /(?<file>(?:[\w.-]+\/)*[\w.-]+\.[a-z0-9]+):[ \t]*/iu.exec(failureText);
+  if (!firstTest) return null;
+  const tests = failureText.slice(firstTest.index).split(/;[ \t]*/u).map((entry) => {
     const test = entry.match(/^(?<file>(?:[\w.-]+\/)*[\w.-]+\.[a-z0-9]+):[ \t]*(?<name>[^;\r\n]+)$/iu);
     if (!test || !test.groups.name.trim()) return null;
     return { file: test.groups.file, name: test.groups.name.trim() };
