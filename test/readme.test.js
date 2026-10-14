@@ -249,6 +249,24 @@ test('README has a manual workflow and shell examples without inline comments [I
   }
 });
 
+test('the README starts setup with your agent [I1]', () => {
+  const start = README.indexOf('### Project setup\n');
+  const end = README.indexOf('\n### Manual workflow\n', start);
+  assert.ok(start >= 0 && end > start, 'the setup section precedes the manual workflow');
+  const setup = README.slice(start, end);
+  const prompt = "Install Pullboard and set it up here; it's for <what you are building>.";
+  const promptAt = setup.indexOf(prompt);
+  const commands = '```sh\npullboard init\ngit add -A && git commit -m "chore(repo): set up pullboard"\n```';
+  const commandsAt = setup.indexOf(commands);
+  assert.ok(promptAt >= 0 && commandsAt > promptAt, 'the agent instruction comes before the unchanged manual commands');
+  assert.ok(setup.includes('Your agent installs Pullboard, runs `pullboard init` and commits the setup.'), 'the agent does the setup work');
+  assert.ok(setup.includes('You approve your requirements and answer its questions.'), 'the person supplies decisions');
+  assert.ok(setup.includes('in the view it opens'), 'the agent opens the view for those decisions');
+  assert.ok(setup.includes("![Starting with an agent. You ask your agent to install Pullboard and set it up for what you're building. It runs the install and pullboard init, commits the setup, then walks you through your requirements and questions in the view it opens for you.](docs/img/agent-start.svg)"), 'the figure describes the complete agent path');
+  assert.ok(setup.indexOf('You can also run it yourself.') > promptAt, 'running setup yourself is the second path');
+  assert.ok(setup.includes('`init` writes your spec, doctrine and agent instructions, and installs the hooks and the board. Commit what it wrote, then open Claude Code in the repo and say what to build. That agent becomes your coordinator.'), 'the manual explanation remains unchanged');
+});
+
 test('README is concise and skimmable without removing its instructions or figures [I10,I12]', () => {
   const lines = README.split(/\r?\n/u);
   let insideFence = false;

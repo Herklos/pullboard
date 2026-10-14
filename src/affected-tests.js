@@ -8,6 +8,7 @@ const MODULE = /\.[cm]?js$/u;
 const TEST = /\.(?:test|spec)\.[cm]?js$/u;
 // A scanner declares this header rather than executing code while the graph is read.
 const TEST_TREE_INPUT = '/** @pullboard-test-input test-tree */';
+const SOURCE_TREE_INPUT = '/** @pullboard-test-input source-tree */';
 const GLOBAL = new Set(['bin/run-tests.js', 'package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'src/gate.js', 'src/cli.js', 'src/hooks.js', 'src/trusted-policy.js', 'src/affected-tests.js', 'src/module-imports.js']);
 
 /** Read exact objects from this checkout, ignoring ambient Git selectors and replacement refs. */
@@ -66,8 +67,15 @@ function graphAt(root, commit) {
   const unknown = new Map();
   const always = new Set();
   const testTreeReaders = new Set();
+  const sourceTreeReaders = new Set();
   paths.forEach((path, index) => {
-    if (TEST.test(path) && modules.get(path).split(/\r?\n/u, 1)[0] === TEST_TREE_INPUT) testTreeReaders.add(path);
+    if (TEST.test(path)) {
+      for (const line of modules.get(path).split(/\r?\n/u)) {
+        if (line === TEST_TREE_INPUT) testTreeReaders.add(path);
+        else if (line === SOURCE_TREE_INPUT) sourceTreeReaders.add(path);
+        else break;
+      }
+    }
     for (const target of imports[index]) {
       if (target === 'node:module') { unknown.set(path, 'a reached module may create CommonJS imports'); continue; }
       if (target.startsWith('node:')) continue;
@@ -82,12 +90,12 @@ function graphAt(root, commit) {
       reverse.get(dependency).add(path);
     }
   });
-  return { paths, reverse, unknown, always, testTreeReaders };
+  return { paths, reverse, unknown, always, testTreeReaders, sourceTreeReaders };
 }
 
 /**
  * Select changed tests and every transitive importer in the old and new trees. Old edges cover
- * deletions and renames; declared test-tree readers also cover changed test inputs. Other filesystem
+ * deletions and renames; declared tree readers also cover changed test or source inputs. Other filesystem
  * reads and process launches are deliberately not import edges.
  *
  * @param {string} root
@@ -127,8 +135,10 @@ export function selectAffectedTests(root, { base, trunk, commit = 'HEAD', change
       }
     }
     const changedTestInput = changed.some(path => path.startsWith('test/') || TEST.test(path) || /^test\.[cm]?js$/u.test(path));
+    const changedSourceInput = changed.some(path => path.startsWith('src/') || path.startsWith('bin/'));
     const selected = files.filter(path => reached.has(path) || before.always.has(path) || after.always.has(path)
-      || (changedTestInput && (before.testTreeReaders.has(path) || after.testTreeReaders.has(path))));
+      || (changedTestInput && (before.testTreeReaders.has(path) || after.testTreeReaders.has(path)))
+      || (changedSourceInput && (before.sourceTreeReaders.has(path) || after.sourceTreeReaders.has(path))));
     if (selected.length === files.length) return { full: true, reason: 'the change reaches every test file', files };
     return { full: false, reason: '', files: selected };
   } catch (error) {

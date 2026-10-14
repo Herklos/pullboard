@@ -1120,6 +1120,7 @@ function boardSetup(ctx, card) {
     .filter(entry => entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules')
     .map(entry => entry.name).sort();
   const lane = lanes[0] ?? folders[0] ?? 'app';
+  const detectedGate = detectGate(ctx.info.root);
   /** Quote the exact suggested command safely for a shell. */
   const quote = value => "'" + String(value).replaceAll("'", "'\\''") + "'";
   /** Preserve all existing configuration when recording one setup answer. */
@@ -1130,8 +1131,11 @@ function boardSetup(ctx, card) {
       afterAnswer: 'Record each answer with pullboard spec draft "<text>"; the person approves the returned ids in Pullboard View or runs pullboard spec approve <ids> in their own terminal; then the coordinator runs pullboard spec apply.' },
     { number: 2, done: lanes.length > 0, question: `Ask the person: how should we divide the work? Suggested folders: ${folders.join(', ') || 'app/ (create it for the app)'}.`,
       command: configure(`c.lanes[${JSON.stringify(lane)}]={owns:[${JSON.stringify(lane + '/')}]}`) },
-    { number: 3, done: Boolean(ctx.config.gate?.trim()), question: `Ask the person: which command proves the build works? Suggested: ${detectGate(ctx.info.root) || 'choose the repo’s test command'}.`,
-      command: configure(`c.gate=${JSON.stringify(detectGate(ctx.info.root) || '<test command>')}`) },
+    { number: 3, done: Boolean(ctx.config.gate?.trim()),
+      question: detectedGate
+        ? `Ask the person: which command proves the build works? Suggested: ${detectedGate}.`
+        : 'Ask the person: if this board has no build, use `pullboard spec check` to check its spec and practice files; a second agent review checks the actual work. Or choose a custom gate command.',
+      command: configure(`c.gate=${JSON.stringify(detectedGate || 'pullboard spec check')}`) },
     { number: 4, done: card.all.length > 0, question: 'Ask the person: what is the first small piece we should build?',
       command: `pullboard add ${quote(lane)} 'First small piece' --specs ${quote(approved[0]?.id ?? 'G1')} --criterion 'Describe what the person will be able to do'` },
     { number: 5, done: card.viewOpened,
@@ -2008,6 +2012,9 @@ async function submitHere(ctx, id) {
   const gate = await runSubmitGate(root, ctx.config, { base: claimHead, trunk: acceptedMain.commit, check: frozenCheck(held), onWait: gateWaitReporter(ctx.io) });
   if (!gate.isGreen) {
     const message = `the submission proof is red at ${commit.slice(0, 12)}; fix it, commit, submit again. ${submitGateReport(gate)}`;
+    // No submission can follow this verdict. Read-only main comparisons must not retain the seat's write lease.
+    CHECKOUT_LEASES.get(ctx.io)?.release();
+    CHECKOUT_LEASES.delete(ctx.io);
     let comparison = { main: null, files: [], unavailable: 'main comparison could not be completed' };
     try { comparison = await compareMainFailures(root, gate.profile, gateWaitReporter(ctx.io), gate.output); } catch { /* Keep the original gate refusal if main evidence is unavailable. */ }
     const mainNote = withBoard(ctx, board => mainRedMessage(root, board, gate.profile, comparison));

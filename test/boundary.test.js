@@ -1,3 +1,4 @@
+/** @pullboard-test-input source-tree */
 /**
  * The boundary (P5): the core stays free of any particular model, inference engine or model vendor,
  * and of the network. Agents meet it only through the agent contract, so the core never couples to

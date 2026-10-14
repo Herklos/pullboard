@@ -1,4 +1,5 @@
 /** @pullboard-test-input test-tree */
+/** @pullboard-test-input source-tree */
 /** Keep test timing judgments accountable to their actual work [C7]. */
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
