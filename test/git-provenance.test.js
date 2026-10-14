@@ -1,11 +1,12 @@
 /** Running source provenance ignores inherited Git hook repository overrides [A5,A6]. */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
+import { codeIsFromMain, withGitFacts } from '../src/git.js';
 
 /** Run Git in a disposable fixture without depending on user or system config. */
 function git(cwd, args, env) {
@@ -63,4 +64,41 @@ test('[A5,A6] code provenance strips inherited GIT_DIR in both worktree-to-main 
     ...baseEnv, GIT_DIR: linkedGitDir, GIT_WORK_TREE: linked, GIT_COMMON_DIR: commonGitDir,
   });
   assert.equal(mainAsWorktree, true, 'main source can upgrade in a hook that inherits linked-worktree variables');
+});
+
+test('[A2,N26,A5,A6] code provenance is cached per request and refreshes for the next request', async (t) => {
+  const fixture = mkdtempSync(join(tmpdir(), 'pullboard-git-provenance-scope-'));
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  const main = join(fixture, 'main');
+  const linked = join(fixture, 'linked');
+  const alias = join(fixture, 'active');
+  mkdirSync(main);
+  const baseEnv = {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_AUTHOR_NAME: 'Provenance test',
+    GIT_AUTHOR_EMAIL: 'provenance@example.test',
+    GIT_COMMITTER_NAME: 'Provenance test',
+    GIT_COMMITTER_EMAIL: 'provenance@example.test',
+  };
+  const init = git(main, ['init', '-q', '-b', 'main'], baseEnv);
+  assert.equal(init.status, 0, init.stderr);
+  writeFileSync(join(main, 'README.md'), 'fixture\n');
+  for (const args of [['add', 'README.md'], ['commit', '-q', '-m', 'fixture']]) {
+    const result = git(main, args, baseEnv);
+    assert.equal(result.status, 0, result.stderr);
+  }
+  const worktree = git(main, ['worktree', 'add', '-q', '-b', 'feature', linked], baseEnv);
+  assert.equal(worktree.status, 0, worktree.stderr);
+  symlinkSync(main, alias);
+
+  await withGitFacts(async () => {
+    assert.equal(codeIsFromMain(alias), true, 'the primary checkout has main-checkout provenance');
+    unlinkSync(alias);
+    symlinkSync(linked, alias);
+    assert.equal(codeIsFromMain(alias), true, 'one request keeps a consistent provenance fact');
+  });
+
+  assert.equal(codeIsFromMain(alias), false, 'the next request recomputes linked-worktree provenance');
 });

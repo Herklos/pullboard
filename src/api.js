@@ -13,7 +13,7 @@ import { laneNames } from './lanes.js';
 import { listApiProjects } from './projects.js';
 import { milestoneRoadmap } from './roadmap.js';
 import { proofStats } from './stats.js';
-import { flowStats } from './stats-flow.js';
+import { prepareFlowHistory, projectFlowStats } from './stats-flow.js';
 import { projectRowDecisions } from './row-decisions.js';
 import { Refused } from './refused.js';
 import { codeAt, projectState } from './serve.js';
@@ -98,14 +98,14 @@ function buildLocalBoardState(board, codeIsMain, milestones) {
 }
 
 /** Add the request-specific unread count without mutating the reusable snapshot. */
-function stateForRequest(state, root, seen, history, refreshFlow, isMain) {
+function stateForRequest(state, root, seen, preparedFlow, refreshFlow, isMain) {
   const projection = seen === null ? { unseen: null } : withBoard(root, (board) => ({
     unseen: { since: seen, count: board.db.prepare('SELECT COUNT(*) AS n FROM shout WHERE shout_id > ?').get(seen).n },
   }), isMain);
-  if (refreshFlow && history) {
+  if (refreshFlow && preparedFlow) {
     projection.proofStats = {
       ...state.proofStats,
-      flow: flowStats(history, null, Date.now(), state.proofStats),
+      flow: projectFlowStats(preparedFlow, null, Date.now(), state.proofStats),
     };
   }
   return { ...state, ...projection };
@@ -252,7 +252,7 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
       const before = boardStateRevision(board.root, board.id, codeIsMain);
       const cached = stateCache.get(before.cacheId);
       if (before.cacheable && cached?.revision === before.revision) {
-        const afterProjection = stateForRequest(cached.state, board.root, seen, cached.history, true, codeIsMain);
+        const afterProjection = stateForRequest(cached.state, board.root, seen, cached.preparedFlow, true, codeIsMain);
         const after = boardStateRevision(board.root, board.id, codeIsMain);
         if (after.cacheable && after.revision === before.revision) {
           stateCache.delete(before.cacheId);
@@ -264,9 +264,10 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
       onStateBuild?.({ board: board.id });
       const state = buildLocalBoardState(board, codeIsMain, before.milestones);
       const history = withBoard(board.root, (db) => store.events(db), codeIsMain);
+      const preparedFlow = prepareFlowHistory(history);
       const after = boardStateRevision(board.root, board.id, codeIsMain);
       if (before.cacheable && after.cacheable && before.revision === after.revision) {
-        stateCache.set(before.cacheId, { revision: before.revision, state, history });
+        stateCache.set(before.cacheId, { revision: before.revision, state, preparedFlow });
         while (stateCache.size > 32) stateCache.delete(stateCache.keys().next().value);
       } else {
         stateCache.delete(before.cacheId);

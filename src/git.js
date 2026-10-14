@@ -271,21 +271,23 @@ function readRepoInfo(cwd, env) {
  * @returns {boolean}
  */
 export function codeIsFromMain(root = CODE_ROOT) {
-  const env = gitChildEnv(root);
-  const top = tryGit(root, ['rev-parse', '--show-toplevel'], { env });
-  if (top.status === 0) return repoInfo(root, { env }).isMain;
-  let folder = resolve(root);
-  while (true) {
-    try {
-      lstatSync(join(folder, '.git'));
-      throw new Refused('UNMERGED_SCHEMA', 'the running code has Git metadata that cannot be read; restore its Git link before retrying, or install a released pullboard outside this checkout');
-    } catch (error) {
-      if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error;
+  return fact(`codeIsFromMain:${resolve(root)}`, () => {
+    const env = gitChildEnv(root);
+    const top = tryGit(root, ['rev-parse', '--show-toplevel'], { env });
+    if (top.status === 0) return repoInfo(root, { env }).isMain;
+    let folder = resolve(root);
+    while (true) {
+      try {
+        lstatSync(join(folder, '.git'));
+        throw new Refused('UNMERGED_SCHEMA', 'the running code has Git metadata that cannot be read; restore its Git link before retrying, or install a released pullboard outside this checkout');
+      } catch (error) {
+        if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error;
+      }
+      const parent = dirname(folder);
+      if (parent === folder) return true;
+      folder = parent;
     }
-    const parent = dirname(folder);
-    if (parent === folder) return true;
-    folder = parent;
-  }
+  });
 }
 
 /**
