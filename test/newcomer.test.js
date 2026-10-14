@@ -34,7 +34,10 @@ test('init ends with a working staging line for exactly its own writes [I1,I2,D1
   writeFileSync(join(box.root, 'AGENTS.md'), '# My instructions\n');
   const result = box.run('init');
   assert.equal(result.status, 0, result.stderr);
-  const command = result.stdout.trimEnd().split('\n').at(-1);
+  const stagingLine = result.stdout.trimEnd().split('\n').at(-1);
+  const label = "To commit Pullboard's files: ";
+  assert.ok(stagingLine.startsWith(label), `expected the final line to start with ${label}`);
+  const command = stagingLine.slice(label.length);
   assert.match(command, /^git add -f -- /);
   const staged = spawnSync('sh', ['-c', command], { cwd: box.root, env: box.env, encoding: 'utf8' });
   assert.equal(staged.status, 0, staged.stderr);
