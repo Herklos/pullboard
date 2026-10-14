@@ -55,12 +55,13 @@ function boardStateRevision(root, id, isMain) {
       event: board.db.prepare('SELECT COALESCE(MAX(event_id), 0) AS id FROM event').get().id,
       agents,
       leases,
+      requestReceipts: board.db.prepare('SELECT meta_value FROM board_meta WHERE meta_key = ?').get('relay_person_requests')?.meta_value ?? null,
       milestones: hasExternalMilestones ? milestoneRoadmap(info.root, board) : store.roadmap(board),
     };
   }, isMain);
   const revision = JSON.stringify([
     info.commonDir, id, resolveCommit(info.root, 'HEAD'), files,
-    local.event, local.agents, local.leases, local.milestones, store.EVENT_LOG_VERSION,
+    local.event, local.agents, local.leases, local.requestReceipts, local.milestones, store.EVENT_LOG_VERSION,
   ]);
   return { cacheId: info.commonDir + '\0' + id, revision, milestones: local.milestones, cacheable: true };
 }

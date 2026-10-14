@@ -13,6 +13,8 @@ import { createApiHandler } from '../src/api-http.js';
 import { registryFile, registerProject } from '../src/projects.js';
 import { Refused } from '../src/refused.js';
 import * as store from '../src/board.js';
+import { preparePersonRequest } from '../src/person-request.js';
+import { receivePersonRequest } from '../src/relay-requests.js';
 import { fetchFresh } from './http-fixture.js';
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
@@ -209,6 +211,32 @@ async function cachedHttpStateTest(t) {
 }
 
 test('[A2, N26] an unchanged board state is reused and a move rebuilds it', cachedHttpStateTest);
+
+test('[A2, N26] a person request receipt refreshes cached state without an event', async (t) => {
+  let builds = 0;
+  const box = await httpBox(t, { onStateBuild: () => { builds += 1; } });
+  const first = await box.call(box.path + '/state');
+  assert.equal(first.status, 200);
+  assert.equal(builds, 1);
+
+  const board = store.openBoard(join(box.root, '.git', 'pullboard', 'board.sqlite'));
+  let eventCountBefore;
+  let eventCountAfter;
+  try {
+    eventCountBefore = board.db.prepare('SELECT COUNT(*) AS count FROM event').get().count;
+    const document = preparePersonRequest({ verb: 'add', args: { lane: 'app', title: 'Private receipt fixture' } }, 'cache-receipt-1');
+    assert.equal(receivePersonRequest(board, document, {
+      sequence: 1, at: new Date().toISOString(), sender: { kind: 'person', userId: 'private-fixture-person' },
+    }).status, 'waiting');
+    eventCountAfter = board.db.prepare('SELECT COUNT(*) AS count FROM event').get().count;
+  } finally { store.closeBoard(board); }
+  assert.equal(eventCountAfter, eventCountBefore, 'ordinary person request receipt intake writes no board event');
+
+  const refreshed = await box.call(box.path + '/state');
+  assert.ok(refreshed.document.state.personRequests.some((request) => request.id === 'cache-receipt-1'),
+    'the next state response includes the receipt received after the previous cache fill');
+  assert.equal(builds, 2, 'request-receipt metadata invalidates the state snapshot');
+});
 
 test('[A2] local HTTP state accepts a safe seen cursor and committed code previews', async (t) => {
   const box = await httpBox(t);
