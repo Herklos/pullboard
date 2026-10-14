@@ -158,9 +158,15 @@ On a throwaway repo, **you** approve one rule: greet a blank name as "world". Th
 
 ### Project setup
 
-Set it up once, then talk to one agent.
+Give your agent this line in an empty or existing git repo.
 
-![Starting with an agent. You run pullboard init in your git repo, commit what it wrote, open a new Claude Code session in that folder and say what to build. That agent becomes the coordinator: it takes the spec with you, plans lanes and items, runs a builder per lane and a verifier that built none of it, and merges verified work only.](docs/img/agent-start.svg)
+> `Install Pullboard and set it up here; it's for <what you are building>.`
+
+Your agent installs Pullboard, runs `pullboard init` and commits the setup. It then walks you through setup in the view it opens. You approve your requirements and answer its questions.
+
+![Starting with an agent. You ask your agent to install Pullboard and set it up for what you're building. It runs the install and pullboard init, commits the setup, then walks you through your requirements and questions in the view it opens for you.](docs/img/agent-start.svg)
+
+You can also run it yourself.
 
 `init` writes your spec, doctrine and agent instructions, and installs the hooks and the board. Commit what it wrote, then open Claude Code in the repo and say what to build. That agent becomes your coordinator.
 
