@@ -1,17 +1,19 @@
 /** The local API v1: the CLI's moves, persistent board identities and live events (A2). */
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
 import { displayAgentName } from './agent-names.js';
 import * as store from './board.js';
-import { COORDINATOR, loadConfig } from './config.js';
-import { codeIsFromMain, repoInfo } from './git.js';
+import { CONFIG_FILE, COORDINATOR, loadConfig } from './config.js';
+import { codeIsFromMain, repoInfo, resolveCommit } from './git.js';
 import { refusalDocument } from './json.js';
 import { relayLinked, relayOperation, relayRevoke, relayTokens } from './relay.js';
 import { laneNames } from './lanes.js';
 import { listApiProjects } from './projects.js';
 import { milestoneRoadmap } from './roadmap.js';
 import { proofStats } from './stats.js';
+import { flowStats } from './stats-flow.js';
 import { projectRowDecisions } from './row-decisions.js';
 import { Refused } from './refused.js';
 import { codeAt, projectState } from './serve.js';
@@ -20,6 +22,94 @@ import { createApiHandler } from './api-http.js';
 import { moveArgs } from './api-moves.js';
 import { personRequestStatuses } from './relay-requests.js';
 export { moveArgs } from './api-moves.js';
+
+/** Hash the exact bytes of one state input, preserving a missing-file marker. */
+function fileRevision(root, file) {
+  const path = join(root, file);
+  if (!existsSync(path)) return [file, null];
+  return [file, createHash('sha256').update(readFileSync(path)).digest('hex')];
+}
+
+/** Capture the inexpensive inputs that can invalidate a complete board-state snapshot. */
+function boardStateRevision(root, id, isMain) {
+  const info = repoInfo(root);
+  const config = loadConfig(info.root);
+  const files = [
+    fileRevision(info.root, CONFIG_FILE),
+    fileRevision(info.root, config.spec),
+    fileRevision(info.root, config.practice),
+    ['standard-doctrine.md', createHash('sha256').update(readFileSync(new URL('./standard-doctrine.md', import.meta.url))).digest('hex')],
+  ];
+  const local = withBoard(info.root, (board) => {
+    const now = board.clock.now().toISOString();
+    const agents = store.listAgents(board);
+    const leases = board.db.prepare('SELECT item_id, item_status, item_owner, item_lease_until, item_review_by, item_review_until FROM item ORDER BY item_id').all()
+      .map((item) => [
+        item.item_id, item.item_status, item.item_owner, item.item_lease_until, item.item_review_by, item.item_review_until,
+        item.item_status === 'claimed' && (item.item_lease_until ?? '') > now,
+        item.item_status === 'submitted' && Boolean(item.item_review_by) && (item.item_review_until ?? '') > now,
+      ]);
+    const milestones = store.milestones(board);
+    const hasExternalMilestones = milestones.some((milestone) => milestone.items.some((item) => typeof item !== 'number'));
+    return {
+      event: board.db.prepare('SELECT COALESCE(MAX(event_id), 0) AS id FROM event').get().id,
+      agents,
+      leases,
+      milestones: hasExternalMilestones ? milestoneRoadmap(info.root, board) : store.roadmap(board),
+    };
+  }, isMain);
+  const revision = JSON.stringify([
+    info.commonDir, id, resolveCommit(info.root, 'HEAD'), files,
+    local.event, local.agents, local.leases, local.milestones, store.EVENT_LOG_VERSION,
+  ]);
+  return { cacheId: info.commonDir + '\0' + id, revision, milestones: local.milestones, cacheable: true };
+}
+
+/** Build the complete local API state, including fields that the shared project snapshot omits. */
+function buildLocalBoardState(board, codeIsMain, milestones) {
+  let state = projectState(board.root, { seen: null, isMain: codeIsMain });
+  const config = loadConfig(board.root);
+  state.agents = state.agents.map((agent) => ({
+    ...agent,
+    model: agent.agent_model ?? 'unknown',
+    displayName: displayAgentName(agent, config.agents.names),
+  }));
+  state.board = board.id;
+  const projectData = withBoard(board.root, (db) => ({
+    requests: store.openRequests(db),
+    personRequests: personRequestStatuses(db),
+    milestones,
+    rowDecisions: store.rowDecisions(db),
+    checks: new Map(store.listItems(db, { all: true }).map((item) => store.getItem(db, item.item_id)).map((item) => [item.item_id, {
+      check: item.item_check,
+      ...(item.item_check_baseline ? { checkBaseline: item.item_check_baseline } : {}),
+    }])),
+    proofStats: proofStats(db),
+    threads: new Map(store.listItems(db, { all: true }).map((item) => [item.item_id, store.itemThread(db, item.item_id)])),
+  }), codeIsMain);
+  state.proofStats = projectData.proofStats;
+  state.requests = projectData.requests;
+  state.personRequests = projectData.personRequests;
+  state.milestones = projectData.milestones;
+  state.items = state.items.map((item) => ({ ...item, ...projectData.checks.get(item.id) }));
+  state = projectRowDecisions(projectData.rowDecisions, state);
+  state.items = state.items.map((item) => ({ ...item, thread: projectData.threads.get(item.id) ?? [] }));
+  return state;
+}
+
+/** Add the request-specific unread count without mutating the reusable snapshot. */
+function stateForRequest(state, root, seen, history, refreshFlow, isMain) {
+  const projection = seen === null ? { unseen: null } : withBoard(root, (board) => ({
+    unseen: { since: seen, count: board.db.prepare('SELECT COUNT(*) AS n FROM shout WHERE shout_id > ?').get(seen).n },
+  }), isMain);
+  if (refreshFlow && history) {
+    projection.proofStats = {
+      ...state.proofStats,
+      flow: flowStats(history, null, Date.now(), state.proofStats),
+    };
+  }
+  return { ...state, ...projection };
+}
 
 const ADDRESS = '127.0.0.1';
 const VERSION = 1;
@@ -138,12 +228,13 @@ async function createRequest(root, body, isMain) {
 }
 
 /** Create the authenticated local adapter used by the HTTP server and other local transports. */
-export function createLocalApiHandler({ secret, getPort, runCommand, projects = listApiProjects, isMain, allowedOrigins = [] } = {}) {
+export function createLocalApiHandler({ secret, getPort, runCommand, projects = listApiProjects, isMain, allowedOrigins = [], onStateBuild } = {}) {
   if (typeof getPort !== 'function') throw new TypeError('createLocalApiHandler needs a bound-port getter');
   if (typeof runCommand !== 'function') throw new TypeError('createLocalApiHandler needs the actual CLI entry point as runCommand');
   const codeIsMain = codeIsFromMain() && isMain !== false;
   const key = Buffer.from(secret);
   const permittedOrigins = new Set(allowedOrigins);
+  const stateCache = new Map();
   return createApiHandler({
     authenticate: (req) => {
       const url = new URL(req.url ?? '/', 'http://' + ADDRESS);
@@ -158,34 +249,29 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
     boards: () => apiBoardListing(projects, codeIsMain),
     board: (id) => findBoard(id, projects, codeIsMain),
     state: (board, who, seen) => {
-      let state = projectState(board.root, { seen, isMain: codeIsMain });
-      const config = loadConfig(board.root);
-      state.agents = state.agents.map((agent) => ({
-        ...agent,
-        model: agent.agent_model ?? 'unknown',
-        displayName: displayAgentName(agent, config.agents.names),
-      }));
-      state.board = board.id;
-      const projectData = withBoard(board.root, (db) => ({
-        requests: store.openRequests(db),
-        personRequests: personRequestStatuses(db),
-        milestones: milestoneRoadmap(board.root, db),
-        rowDecisions: store.rowDecisions(db),
-        checks: new Map(store.listItems(db, { all: true }).map((item) => store.getItem(db, item.item_id)).map((item) => [item.item_id, {
-          check: item.item_check,
-          ...(item.item_check_baseline ? { checkBaseline: item.item_check_baseline } : {}),
-        }])),
-        proofStats: proofStats(db),
-        threads: new Map(store.listItems(db, { all: true }).map((item) => [item.item_id, store.itemThread(db, item.item_id)])),
-      }), codeIsMain);
-      state.proofStats = projectData.proofStats;
-      state.requests = projectData.requests;
-      state.personRequests = projectData.personRequests;
-      state.milestones = projectData.milestones;
-      state.items = state.items.map((item) => ({ ...item, ...projectData.checks.get(item.id) }));
-      state = projectRowDecisions(projectData.rowDecisions, state);
-      state.items = state.items.map((item) => ({ ...item, thread: projectData.threads.get(item.id) ?? [] }));
-      return state;
+      const before = boardStateRevision(board.root, board.id, codeIsMain);
+      const cached = stateCache.get(before.cacheId);
+      if (before.cacheable && cached?.revision === before.revision) {
+        const afterProjection = stateForRequest(cached.state, board.root, seen, cached.history, true, codeIsMain);
+        const after = boardStateRevision(board.root, board.id, codeIsMain);
+        if (after.cacheable && after.revision === before.revision) {
+          stateCache.delete(before.cacheId);
+          stateCache.set(before.cacheId, cached);
+          return afterProjection;
+        }
+      }
+
+      onStateBuild?.({ board: board.id });
+      const state = buildLocalBoardState(board, codeIsMain, before.milestones);
+      const history = withBoard(board.root, (db) => store.events(db), codeIsMain);
+      const after = boardStateRevision(board.root, board.id, codeIsMain);
+      if (before.cacheable && after.cacheable && before.revision === after.revision) {
+        stateCache.set(before.cacheId, { revision: before.revision, state, history });
+        while (stateCache.size > 32) stateCache.delete(stateCache.keys().next().value);
+      } else {
+        stateCache.delete(before.cacheId);
+      }
+      return stateForRequest(state, board.root, seen, null, false, codeIsMain);
     },
     shout: (board, id) => relayLinked(board.root)
       ? relayPresentationShout(board.root, id)
@@ -201,10 +287,10 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
 }
 
 /** Serve the RFC 0002 API only on loopback, behind the same session-secret boundary as the view. */
-export function serveApi({ port = 0, secret = randomBytes(18).toString('base64url'), runCommand, projects = listApiProjects, isMain } = {}) {
+export function serveApi({ port = 0, secret = randomBytes(18).toString('base64url'), runCommand, projects = listApiProjects, isMain, onStateBuild } = {}) {
   if (typeof runCommand !== 'function') throw new TypeError('serveApi needs the actual CLI entry point as runCommand');
   let bound;
-  const handler = createLocalApiHandler({ secret, getPort: () => bound, runCommand, projects, isMain });
+  const handler = createLocalApiHandler({ secret, getPort: () => bound, runCommand, projects, isMain, onStateBuild });
   const server = createServer(handler);
   server.requestTimeout = 15_000;
   return new Promise((ready, fail) => {

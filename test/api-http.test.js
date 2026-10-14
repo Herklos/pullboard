@@ -46,7 +46,17 @@ function fixture(t) {
   /** Decode one successful versioned CLI invocation without printing session links. */
   function cli(cwd, ...args) {
     const result = run(cwd, ...args, '--json');
-    assert.equal(result.status, 0, result.stderr);
+    let reason = result.stderr;
+    if (result.status !== 0 && result.stdout) {
+      try {
+        const response = JSON.parse(result.stdout);
+        const error = response?.error;
+        if (error && typeof error === 'object') {
+          reason = [result.stderr, error.code, error.message].filter(Boolean).join('\n');
+        }
+      } catch { /* Keep the existing stderr-only diagnostic for non-JSON failures. */ }
+    }
+    assert.equal(result.status, 0, reason);
     return JSON.parse(result.stdout);
   }
   git('init', '-q', '-b', 'main');
@@ -61,9 +71,9 @@ function fixture(t) {
 }
 
 /** Serve this fixture's explicit project, avoiding any registry outside its private home. */
-async function httpBox(t, { includeMissing = false } = {}) {
+async function httpBox(t, { includeMissing = false, onStateBuild } = {}) {
   const box = fixture(t);
-  const api = await serveApi({ runCommand: main, projects: () => [...(includeMissing ? [{ root: join(box.dir, 'gone'), name: 'Missing fixture' }] : []), { root: box.root, name: 'HTTP fixture' }] });
+  const api = await serveApi({ runCommand: main, onStateBuild, projects: () => [...(includeMissing ? [{ root: join(box.dir, 'gone'), name: 'Missing fixture' }] : []), { root: box.root, name: 'HTTP fixture' }] });
   t.after(() => api.close());
   const url = new URL(api.url);
   const key = url.searchParams.get('k');
@@ -100,6 +110,102 @@ test('[A2] a stale registered folder does not hide another readable board', asyn
   assert.equal(state.status, 200);
   assert.equal(state.document.state.board, box.id);
 });
+
+/** Prove the authenticated HTTP state reuses a complete snapshot until one of its inputs changes. */
+async function cachedHttpStateTest(t) {
+  let builds = 0;
+  const box = await httpBox(t, { onStateBuild: () => { builds += 1; } });
+  const agent = box.cli(box.root, 'worktree', 'app', '--model', 'fixture-agent');
+  box.cli(box.root, 'shout', 'app', 'cache baseline');
+
+  const first = await box.call(box.path + '/state');
+  assert.equal(first.status, 200);
+  assert.equal(builds, 1);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const unchanged = await box.call(box.path + '/state');
+  assert.equal(builds, 1, 'an identical refresh reuses the complete board state');
+  assert.notEqual(unchanged.document.state.proofStats.flow.asOf, first.document.state.proofStats.flow.asOf);
+
+  const latestShout = first.document.state.shouts.at(-1).shout_id;
+  const unread = await box.call(box.path + '/state?seen=0');
+  assert.equal(unread.document.state.unseen.since, 0);
+  assert.ok(unread.document.state.unseen.count > 0);
+  const read = await box.call(box.path + '/state?seen=' + latestShout);
+  assert.deepEqual(read.document.state.unseen, { since: latestShout, count: 0 });
+  assert.equal(builds, 1, 'the request-specific seen cursor does not rebuild or mutate the shared state');
+
+  box.cli(box.root, 'add', 'app', 'cache invalidation item', '--criterion', 'visible after the next refresh', '--specs', 'G1');
+  const moved = await box.call(box.path + '/state');
+  assert.equal(builds, 2);
+  assert.ok(moved.document.state.items.some((item) => item.title === 'cache invalidation item'));
+
+  writeFileSync(join(box.root, 'SPEC.md'), '# HTTP fixture\n\n## Goals\n- G1 [approved, must] Keep the board. | gate: true\n- G2 [approved, must] Keep the cache fresh. | gate: true\n');
+  const spec = await box.call(box.path + '/state');
+  assert.equal(builds, 3);
+  assert.ok(spec.document.state.spec.some((row) => row.id === 'G2'));
+
+  const configFile = join(box.root, 'pullboard.json');
+  const config = JSON.parse(readFileSync(configFile, 'utf8'));
+  writeFileSync(configFile, JSON.stringify({ ...config, lease: '1m', lanes: { ...config.lanes, ops: { owns: [] } } }));
+  const configured = await box.call(box.path + '/state');
+  assert.equal(builds, 4);
+  assert.ok(configured.document.state.lanes.includes('ops'));
+
+  writeFileSync(join(box.root, 'DOCTRINE.md'), '# Local rules\n\n## Team Rules\n\n- LOCAL1 [approved, must] Keep the local board readable. | gate: true\n');
+  const doctrine = await box.call(box.path + '/state');
+  assert.equal(builds, 5);
+  assert.ok(doctrine.document.state.practice.some((row) => row.id === 'LOCAL1'));
+
+  writeFileSync(join(box.root, 'cache-head.txt'), 'advance HEAD without a board event\n');
+  runFixtureGit(['add', 'cache-head.txt'], { cwd: box.root, env: box.env, stdio: 'pipe' });
+  runFixtureGit(['commit', '-q', '-m', 'chore: advance fixture head'], { cwd: box.root, env: box.env, stdio: 'pipe' });
+  const headed = await box.call(box.path + '/state');
+  assert.equal(builds, 6);
+  const head = runFixtureGit(['rev-parse', 'HEAD'], { cwd: box.root, env: box.env, stdio: 'pipe' });
+  assert.equal(headed.document.state.rowAgesAt['SPEC.md'], head);
+
+  box.cli(box.root, 'shout', 'app', 'agent inbox cursor');
+  const beforeInbox = await box.call(box.path + '/state');
+  const agentBeforeInbox = beforeInbox.document.state.agents.find((entry) => entry.agent_id === agent.agent);
+  const boardBeforeInbox = store.openBoard(join(box.root, '.git', 'pullboard', 'board.sqlite'));
+  try {
+    store.inbox(boardBeforeInbox, agent.agent);
+  } finally {
+    store.closeBoard(boardBeforeInbox);
+  }
+  const afterInbox = await box.call(box.path + '/state');
+  const agentAfterInbox = afterInbox.document.state.agents.find((entry) => entry.agent_id === agent.agent);
+  assert.equal(agentAfterInbox.agent_last_shout_id, Math.max(...beforeInbox.document.state.shouts.map((shout) => shout.shout_id)));
+  assert.notEqual(agentAfterInbox.agent_last_shout_id, agentBeforeInbox.agent_last_shout_id);
+  assert.equal(builds, 8, 'an inbox cursor change without an event invalidates the agent projection');
+
+  const added = await box.call(box.path + '/moves', { verb: 'add', args: { lane: 'app', title: 'Lease cache item', criterion: 'remain current', specs: 'G1' } });
+  assert.equal(added.status, 200);
+  const itemId = added.document.result.item.item_id;
+  const claimed = await box.call(box.path + '/moves', { verb: 'claim', item: itemId, agent: agent.agent });
+  assert.equal(claimed.status, 200);
+  const active = await box.call(box.path + '/state');
+  assert.equal(active.document.state.items.find((item) => item.id === itemId).status, 'claimed');
+  const lastEvent = active.document.state.events[0].event_id;
+  const leaseBoard = store.openBoard(join(box.root, '.git', 'pullboard', 'board.sqlite'));
+  let leaseUntil;
+  try {
+    leaseUntil = leaseBoard.db.prepare('SELECT item_lease_until FROM item WHERE item_id = ?').get(itemId).item_lease_until;
+  } finally {
+    store.closeBoard(leaseBoard);
+  }
+  assert.ok(Number.isFinite(Date.parse(leaseUntil)));
+  const now = Date.now();
+  t.mock.timers.enable({ apis: ['Date'], now });
+  t.mock.timers.tick(Math.max(1, Date.parse(leaseUntil) - now + 1));
+  const expired = await box.call(box.path + '/state');
+  assert.equal(expired.document.state.items.find((item) => item.id === itemId).status, 'open');
+  assert.equal(expired.document.state.items.find((item) => item.id === itemId).owner, null);
+  assert.equal(expired.document.state.events[0].event_id, lastEvent, 'lease expiry changed no board event');
+  assert.equal(builds, 10, 'clock-only lease expiry invalidates the cached state');
+}
+
+test('[A2, N26] an unchanged board state is reused and a move rebuilds it', cachedHttpStateTest);
 
 test('[A2] local HTTP state accepts a safe seen cursor and committed code previews', async (t) => {
   const box = await httpBox(t);
