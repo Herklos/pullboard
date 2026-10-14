@@ -117,9 +117,9 @@ Statuses: approved = decided · draft = proposed · pending = open question · f
 ## D · Doctrine
 - D1 [approved, must] Pullboard ships a standard doctrine, versioned, with PB ids; every repo inherits it, Pullboard's own included. | gate: test/practice.test.js
 - D2 [approved, must] A repo's PRACTICE.md adds rules, overrides one by its PB id, or declines one with a wont row and reason. | gate: test/practice.test.js | serves: D1
-- D3 [draft, must] Agents and the view see one doctrine in force: inherited rules and the repo's own, each marked with its source and version. | gate: test/practice.test.js | serves: D1
-- D4 [draft, must] Init writes a DOCTRINE.md for the repo's own rules only; the standard needs no copy. | gate: test/e2e.test.js | serves: D1
-- D5 [draft, aim] `pullboard doctrine` prints the doctrine in force and what the standard changed since the repo last looked. | gate: test/practice.test.js | serves: D1
+- D3 [approved, must] Agents and the view see one doctrine in force: inherited rules and the repo's own, each marked with its source and version. | gate: test/practice.test.js | serves: D1
+- D4 [approved, must] Init writes a DOCTRINE.md for the repo's own rules only; the standard needs no copy. | gate: test/e2e.test.js | serves: D1
+- D5 [wont, aim] Covered: D6 versions every change; the changelog shows it. | gate: test/practice.test.js | serves: D1
 - D6 [draft, must] The standard changes only by an accepted RFC in docs/rfcs, and each change bumps its version. | gate: review | serves: D1
 
 ## C · Commits
@@ -230,11 +230,11 @@ Statuses: approved = decided · draft = proposed · pending = open question · f
 
 ## E · Teams: many people, one board
 
-- E1 [draft, must] A team shares one board: every person's clones, machines and phones show the same items in one order. | gate: test/team.test.js
-- E2 [draft, must] Two people adding or claiming at once never make two #1s or two holders; the relay's order decides. | gate: test/team.test.js
-- E3 [draft, must] Each person signs in as themselves; every move records the person, and the agent if one made it. | gate: test/team.test.js
+- E1 [approved, must] A team shares one board: every person's clones, machines and phones show the same items in one order. | gate: test/team.test.js
+- E2 [approved, must] Two people adding or claiming at once never make two #1s or two holders; the relay's order decides. | gate: test/team.test.js
+- E3 [approved, must] Each person signs in as themselves; every move records the person, and the agent if one made it. | gate: test/team.test.js
 - E4 [draft, must] A board's people are its repository's writers; pullboard.json names its approvers; only approvers approve rows, answer person decisions or unlink the board. | gate: test/team.test.js
-- E5 [draft, must] Every agent acts with its own token under the person running it, never as its checkout path; removing a person stops their agents. | gate: test/team.test.js
+- E5 [approved, must] Every agent acts with its own token under the person running it, never as its checkout path; removing a person stops their agents. | gate: test/team.test.js
 - E6 [draft, must] Removing a person's write access removes them from the board; the next member device online rotates the key, so their devices read nothing made after it. | gate: test/team.test.js
 - E7 [draft, must] Main moves in one landing order, sequenced on the trunk's board; a second landing builds on the first or is refused. | gate: test/team.test.js
 - E8 [draft, must] A verdict reads stale on every replica once main moves under it in a file the item changed, until re-verified or landed. | gate: test/team.test.js
