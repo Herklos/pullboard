@@ -116,7 +116,9 @@ function documentationInputs(path, source, imports) {
       // Bare "docs" is also a commit type or lane. In a call/path assignment, or a directory
       // scanner, it can name an input; a declaration of commit types alone is not a reader.
       const callArgument = /[,(]$/u.test(prefix) && prefix.lastIndexOf('(') > prefix.lastIndexOf('[');
-      if (value === 'docs' && !callArgument && !/(?<![=!<>])=$/u.test(prefix) && !directoryReader) continue;
+      const joinedArray = prefix.lastIndexOf('[') > prefix.lastIndexOf(']')
+        && /^[^\]]*\]\s*\.join\s*\(/u.test(source.slice(match.index + match[0].length));
+      if (value === 'docs' && !callArgument && !joinedArray && !/(?<![=!<>])=$/u.test(prefix) && !directoryReader) continue;
       for (const candidate of [posix.normalize(value), posix.normalize(posix.join(posix.dirname(path),value))]) {
         if (candidate === 'docs' || candidate.startsWith('docs/')) inputs.add(candidate.replace(/\/$/u,''));
       }

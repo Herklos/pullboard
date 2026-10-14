@@ -105,3 +105,17 @@ test('escaped literal templates select their documentation inputs [V4,C7]', (t) 
   assert.deepEqual(selectAffectedTests(box.root,{base,commit,changed:['docs/X63.md']}).files,
     ['test/template-identity.test.js'],'uppercase X is an identity escape, not hexadecimal');
 });
+
+
+test('a docs path built inline still selects its reader [V4,C7]', (t) => {
+  const box = graph(t);
+  box.put('test/array-reader.test.js', `import {readFileSync} from 'node:fs'; readFileSync(new URL(['..','docs','api.md'].join('/'),import.meta.url),'utf8');\n`);
+  box.put('test/inline-join.test.js', "import {readFileSync} from 'node:fs'; import {join} from 'node:path'; const root='.',name='api.md'; readFileSync(join(root,'docs',name),'utf8');\n");
+  box.put('test/inline-template.test.js', "import {readFileSync} from 'node:fs'; readFileSync(`do\\x63s/api.md`,'utf8');\n");
+  const base = box.commit();
+  box.put('docs/api.md','# Updated API\n');
+  const commit = box.commit();
+  assert.deepEqual(selectAffectedTests(box.root,{base,commit}).files,
+    ['docs/api.test.js','test/array-reader.test.js','test/inline-join.test.js','test/inline-template.test.js'],
+    'a joined literal array must retain its documentation reader');
+});
