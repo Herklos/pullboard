@@ -435,7 +435,18 @@ test('owned Chrome cleanup waits out a slow exit and still fails a real hang [C7
   await ready(pipeReady);
   const holderPid = Number(readFileSync(pipeReady, 'utf8'));
   independent.push(holderPid);
-  await stopOwnedChrome(pipe.child, pipe.stopped);
+  const nativeKill = process.kill.bind(process);
+  let permissionProbe = false;
+  const kill = t.mock.method(process, 'kill', (pid, signal) => {
+    if (pid === -pipe.child.pid && signal === 0 && !permissionProbe) {
+      permissionProbe = true;
+      throw Object.assign(new Error('probe temporarily refused'), { code: 'EPERM' });
+    }
+    return nativeKill(pid, signal);
+  });
+  try { await stopOwnedChrome(pipe.child, pipe.stopped); }
+  finally { kill.mock.restore(); }
+  assert.equal(permissionProbe, true, 'a refused group probe cannot prove the group has exited');
   assert.doesNotThrow(() => process.kill(holderPid, 0), 'cleanup releases stderr without killing an independent holder');
   assert.ok(pipe.child.exitCode !== null || pipe.child.signalCode !== null, 'the owned leader exited');
 

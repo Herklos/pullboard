@@ -773,8 +773,8 @@ async function openSnapshotChrome(executable, url, profile) {
 function ownedChromeGroupAlive(pid) {
   try { process.kill(-pid, 0); return true; }
   catch (error) {
-    if (error.code === 'ESRCH') return false;
-    throw error;
+    // A permission error cannot prove that Chrome's sandboxed helpers have exited.
+    return error.code !== 'ESRCH';
   }
 }
 
