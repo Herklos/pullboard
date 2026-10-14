@@ -1029,12 +1029,15 @@ async function liveFrames(t, url, headers) {
     pending ??= read().finally(() => { pending = null; });
     return pending;
   }
-  /** Read the next frame, failing rather than hanging if none comes. */
-  function frame(label) {
-    return Promise.race([
-      next(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error(`no frame arrived (${label})`)), 10_000)), // budget: hang ceiling for one live frame, not a latency claim.
-    ]);
+  /** Read the next frame, failing rather than hanging if none comes, and clear the ceiling either way. */
+  async function frame(label) {
+    let timer;
+    try {
+      return await Promise.race([
+        next(),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`no frame arrived (${label})`)), 10_000); }), // budget: hang ceiling for one live frame, not a latency claim.
+      ]);
+    } finally { clearTimeout(timer); }
   }
   /** Read frames until each predicate has matched one, returning every frame read. */
   async function until(label, ...wanted) {
@@ -1048,10 +1051,14 @@ async function liveFrames(t, url, headers) {
     }
     return frames;
   }
-  /** Require silence for longer than one server poll. */
+  /** Require silence for longer than one server poll, clearing the window's timer either way. */
   async function quiet(label) {
-    const extra = await Promise.race([next().then((value) => ({ value })), new Promise((resolve) => setTimeout(() => resolve(null), 350))]);
-    assert.equal(extra, null, `nothing is sent while nothing changes (${label})`); // budget: silence across more than one 200 ms server poll.
+    let timer;
+    const silence = new Promise((resolve) => { timer = setTimeout(() => resolve(null), 350); }); // budget: silence across more than one 200 ms server poll.
+    try {
+      const extra = await Promise.race([next().then((value) => ({ value })), silence]);
+      assert.equal(extra, null, `nothing is sent while nothing changes (${label})`); // budget: silence across more than one 200 ms server poll.
+    } finally { clearTimeout(timer); }
   }
   /** Stop the response and settle any pending read on pass and failure paths. */
   async function close() {
