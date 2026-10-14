@@ -1043,10 +1043,12 @@ async function refresh() {
   $('live').textContent = snapshot ? 'read-only snapshot' : liveLine();
 }
 
-// The local view follows each shown board's event stream instead of a timer (#545): it reads the board once, waits
+// The local view follows the shown board's event stream instead of a timer (#545): it reads the board once, waits
 // on the board's events after that read's latest one, and reads again only when an event or the stream's changed
 // signal (#554) arrives, so a page whose board is quiet makes no requests. The relay transport keeps its own stream.
-const streams = new Map();
+// A page holds at most one stream: Chrome allows six connections per host, a held stream keeps one for good, and the
+// catch-up read needs the rest. Six held streams left none, and the page waited forever for its own read.
+let stream = null;
 let catching = null;
 let catchAgain = false;
 let catchWhenShown = false;
@@ -1059,37 +1061,38 @@ const canStream = () => typeof AbortController === 'function' && typeof Readable
 /** The latest event a board state already shows; its events are newest first. */
 const latestEvent = (state) => Number(state?.events?.[0]?.event_id ?? 0);
 
-/** Whether every board on screen has its stream up or opening, so nothing needs a timed read. */
-const connected = () => streams.size > 0 && [...streams.values()].every((entry) => entry.status !== 'down');
+/** Whether the page's stream is up or opening, so nothing needs a timed read. */
+const connected = () => Boolean(stream) && stream.status !== 'down';
 
-/** Say nothing while every shown board's stream is up, and why the page is not live while one is down. */
+/** Say nothing while the page's stream is up, and why the page is not live while it is down. */
 function liveLine() {
-  const down = [...streams.values()].filter((entry) => entry.status === 'down');
-  if (!down.length) return '';
-  if (down.some((entry) => entry.offline)) return 'offline: is pullboard view still running?';
+  if (!stream || stream.status !== 'down') return '';
+  if (stream.offline) return 'offline: is pullboard view still running?';
   return (canStream() ? 'reconnecting' : 'no live stream in this browser') + ': refreshing every ' + FALLBACK_MS / 1000 + 's';
 }
 
-/** Follow each board the page shows and stop following the rest, starting a new stream after the state just read. */
+/** Stop following a board: close its stream and any retry waiting to reopen it. */
+function unfollow() {
+  if (!stream) return;
+  stream.controller?.abort();
+  clearTimeout(stream.retry);
+  stream = null;
+}
+
+/**
+ * Follow the one board the page shows, or a shown group's first repo, starting a new stream after the state just
+ * read. Every catch-up reads every board, so the group's other repos and the sidebar's boards update with it, and on
+ * a project switch, without a stream of their own.
+ */
 function follow() {
-  const shown = new Map(data.group ? data.group.repos.map((repo) => [repo.root, repo.board]) : data.project ? [[view.root, data.project]] : []);
-  for (const [root, entry] of streams) {
-    if (shown.has(root)) continue;
-    entry.controller?.abort();
-    clearTimeout(entry.retry);
-    streams.delete(root);
-  }
-  for (const [root, state] of shown) {
-    const board = data.projects.find((entry) => entry.root === root && entry.ok);
-    const entry = streams.get(root);
-    // A board's events after the latest one this page shows are what changed it since.
-    if (entry && entry.id === board?.id) { entry.shown = Math.max(entry.shown, latestEvent(state)); continue; }
-    if (entry) { entry.controller?.abort(); clearTimeout(entry.retry); streams.delete(root); }
-    if (!board) continue;
-    const next = { root, id: board.id, after: latestEvent(state), shown: latestEvent(state), status: 'opening', offline: false, failures: 0, controller: null, retry: 0 };
-    streams.set(root, next);
-    void listen(next);
-  }
+  const repo = data.group ? data.group.repos[0] : data.project ? { root: view.root, board: data.project } : null;
+  const board = repo && data.projects.find((entry) => entry.root === repo.root && entry.ok);
+  // The board's events after the latest one this page shows are what changed it since.
+  if (stream && board && stream.id === board.id) { stream.shown = Math.max(stream.shown, latestEvent(repo.board)); return; }
+  unfollow();
+  if (!board) return;
+  stream = { root: repo.root, id: board.id, after: latestEvent(repo.board), shown: latestEvent(repo.board), status: 'opening', offline: false, failures: 0, controller: null, retry: 0 };
+  void listen(stream);
 }
 
 /** Read one server-sent message: its event name, its data and its numeric id. */
@@ -1154,13 +1157,13 @@ async function listen(entry) {
     }
     throw new Error('the board stream ended');
   } catch (error) {
-    if (controller?.signal.aborted || streams.get(entry.root) !== entry) return;
+    if (controller?.signal.aborted || stream !== entry) return;
     entry.status = 'down';
     // A request that never reached the view is a TypeError; a refusal or an ended stream is not.
     entry.offline = error instanceof TypeError;
     entry.failures += 1;
     $('live').textContent = liveLine();
-    if (controller) entry.retry = setTimeout(() => { if (streams.get(entry.root) === entry) void listen(entry); }, Math.min(FALLBACK_MS, 1000 * 2 ** Math.min(entry.failures - 1, 4)));
+    if (controller) entry.retry = setTimeout(() => { if (stream === entry) void listen(entry); }, Math.min(FALLBACK_MS, 1000 * 2 ** Math.min(entry.failures - 1, 4)));
   }
 }
 
