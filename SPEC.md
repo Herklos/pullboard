@@ -241,7 +241,7 @@ Statuses: approved = decided · draft = proposed · pending = open question · f
 - E9 [draft, must] Every session on a paired machine works the board alike: terminal, SSH, agent, scheduled job or CI; the key sits in an owner-only file. | gate: test/team.test.js
 - E10 [draft, must] A CI drill proves it: two people, two machines, a keyless session and a private board share work through a local relay. | gate: test/team.test.js
 - E11 [draft, must] Each person may keep a private board per repo in ~/.pullboard; its items stay on that person's devices. | gate: test/team.test.js
-- E12 [draft, must] pullboard.json names the repo's board and its approvers; a clone of a linked repo joins that board, and the relay refuses a second one. | gate: test/team.test.js
+- E12 [draft, must] pullboard.json names the repo's board and its approvers; a clone of a linked repo joins that board, and the relay refuses to link a second team board to the same repo. | gate: test/team.test.js
 - E13 [draft, must] A new item goes to the repo's board; --private keeps it on the person's own board. | gate: test/team.test.js
 - E14 [draft, must] Across boards an item is named handle#id, as web#12 or alice/web#7. | gate: test/team.test.js
 - E15 [draft, must] Move re-homes an open or verified item in one sequenced move; its old id points to the new one and is never reused. | gate: test/team.test.js
