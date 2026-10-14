@@ -22,6 +22,13 @@ export const ENGINE_OPERATIONS = Object.freeze([
 /** Engine version at which each ordered operation first has stable replay semantics. */
 const OPERATION_ENGINE = Object.freeze({ reopen: 8, recordLandingBatch: 8, recordLandingWaiver: 8, recordLandingFlake: 8, finishLandingBatch: 8 });
 
+/** Dependency edits add engine-10 meaning without changing ordinary historical edit envelopes. */
+function minimumOperationEngine(operation, args) {
+  const options = args[1];
+  return operation === 'editItem' && options && Object.hasOwn(options, 'after') && options.after !== undefined
+    ? 10 : OPERATION_ENGINE[operation] ?? 1;
+}
+
 /** Read a replica's committed prefix without trusting an independently saved transport cursor. */
 export function appliedSequence(board) {
   const row = board.db.prepare('SELECT meta_value FROM board_meta WHERE meta_key=?').get('relay_applied_sequence');
@@ -58,7 +65,7 @@ export function startRelayEpoch(board) {
 /** Turn caller-only callbacks into deterministic values before sealing an executable operation. */
 export function prepareEngineMove(board, operation, args, { id = randomUUID(), actor } = {}) {
   if (!ENGINE_OPERATIONS.includes(operation) || !Array.isArray(args)) throw new Refused('RELAY_MOVE', 'use a supported board-engine operation with its argument array');
-  const minimumEngine = OPERATION_ENGINE[operation] ?? 1;
+  const minimumEngine = minimumOperationEngine(operation, args);
   if (ENGINE_VERSION < minimumEngine) throw new Refused('ENGINE_VERSION', `${operation} requires engine version ${minimumEngine}; this pullboard uses engine ${ENGINE_VERSION}; upgrade before sending it`);
   const values = args.map((value) => value && typeof value === 'object' ? { ...value } : value);
   if (operation === 'release') {
@@ -96,7 +103,7 @@ function validateMove(move) {
   if (!move || move.version !== 1 || !Number.isSafeInteger(move.engine) || move.engine < 1) throw new Refused('RELAY_MOVE', 'this executable move format is invalid; upgrade pullboard or restore a consistent relay snapshot');
   requireSupportedEngine(move);
   if (typeof move.id !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(move.id) || !ENGINE_OPERATIONS.includes(move.operation) || !Array.isArray(move.args)) throw new Refused('RELAY_MOVE', 'this sealed operation is invalid; use a supported board-engine operation');
-  const minimumEngine = OPERATION_ENGINE[move.operation] ?? 1;
+  const minimumEngine = minimumOperationEngine(move.operation, move.args);
   if (move.engine < minimumEngine) throw new Refused('RELAY_MOVE', `${move.operation} cannot be replayed from engine version ${move.engine}; it was introduced in engine ${minimumEngine}; restore a consistent relay prefix`);
 }
 

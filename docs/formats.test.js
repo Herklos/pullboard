@@ -276,6 +276,9 @@ function recordEventContract() {
   const fact = appendFact(board, first, { agentId: builder, kind: 'note', text: 'Captured evidence', ref: 'docs/formats.md:1-3@' + 'a'.repeat(40) });
   appendFact(board, first, { agentId: coordinator, kind: 'measurement', text: 'Corrected evidence', supersedes: fact.id });
   editItem(board, first, { agentId: coordinator, brief: 'Files: docs/formats.md\nTest: docs/formats.test.js', route: 'mid', criterion: 'Changed', check: 'node test' });
+  const dependency = addItem(board, { by: coordinator, lane: 'docs', title: 'Dependency example' });
+  editItem(board, first, { agentId: coordinator, after: [dependency] });
+  editItem(board, first, { agentId: coordinator, after: [] });
   holdItem(board, first, { agentId: coordinator, reason: 'fixture item hold' });
   releaseItemHold(board, first, { agentId: coordinator });
   recordAttempt(board, first, { agentId: builder, n: 1, seconds: 2, result: 'failed' });
