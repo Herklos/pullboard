@@ -4,6 +4,22 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.8.17] - 2026-10-14
+
+### An agent sets it up alone
+
+Tell your agent "install Pullboard and set it up here". It runs init, carries on in the same session, and walks you through setup. A board with no build to prove, such as research or writing, still gets a gate.
+
+### Added
+
+- During setup, a board with no detected build is offered pullboard spec check as its gate, so setup can finish.
+
+### Changed
+
+- When an agent runs pullboard init, it is told to continue setup in the same session with pullboard resume. A person at a terminal still sees the new-session note.
+- Init's last line says what it is for: "To commit Pullboard's files: git add -f -- …".
+- The README's setup starts with the one sentence to give your agent; running it yourself is the second path.
+
 ## [0.8.16] - 2026-10-13
 
 ### Steadier views
