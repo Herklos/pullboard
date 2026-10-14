@@ -111,6 +111,41 @@ function stateForRequest(state, root, seen, preparedFlow, refreshFlow, isMain) {
   return { ...state, ...projection };
 }
 
+/** Cache JSON fragments for state fields whose values stay fixed across a cache hit. */
+function prepareStateJson(state) {
+  const fields = Object.entries(state).map(([key, value]) => {
+    if (key === 'unseen') return { dynamic: key };
+    if (key === 'proofStats') {
+      const stats = Object.entries(value).filter(([name]) => name !== 'flow').map(([name, entry]) => jsonField(name, entry)).filter(Boolean);
+      return { dynamic: key, stats };
+    }
+    return { static: jsonField(key, value) };
+  });
+  if (!fields.some((field) => field.dynamic === 'unseen')) fields.push({ dynamic: 'unseen' });
+  return fields;
+}
+
+/** Serialize a state field through JSON.stringify, omitting values JSON would omit. */
+function jsonField(key, value) {
+  const encoded = JSON.stringify(value);
+  return encoded === undefined ? '' : JSON.stringify(key) + ':' + encoded;
+}
+
+/** Reuse static state fragments while encoding request-specific unread and flow data. */
+function serializeState(state, fields) {
+  if (!fields) return JSON.stringify(state);
+  const encoded = fields.map((field) => {
+    if (field.static !== undefined) return field.static;
+    if (field.dynamic === 'unseen') return jsonField('unseen', state.unseen);
+    if (field.dynamic === 'proofStats') {
+      const flow = jsonField('flow', state.proofStats?.flow);
+      return '"proofStats":{' + [...field.stats, flow].filter(Boolean).join(',') + '}';
+    }
+    return '';
+  }).filter(Boolean);
+  return '{' + encoded.join(',') + '}';
+}
+
 const ADDRESS = '127.0.0.1';
 const VERSION = 1;
 
@@ -235,6 +270,36 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
   const key = Buffer.from(secret);
   const permittedOrigins = new Set(allowedOrigins);
   const stateCache = new Map();
+  /** Return the current state and its cached-static JSON representation under revision checks. */
+  function localState(board, seen) {
+    const before = boardStateRevision(board.root, board.id, codeIsMain);
+    const cached = stateCache.get(before.cacheId);
+    if (before.cacheable && cached?.revision === before.revision) {
+      const state = stateForRequest(cached.state, board.root, seen, cached.preparedFlow, true, codeIsMain);
+      const after = boardStateRevision(board.root, board.id, codeIsMain);
+      if (after.cacheable && after.revision === before.revision) {
+        stateCache.delete(before.cacheId);
+        stateCache.set(before.cacheId, cached);
+        return { state, json: serializeState(state, cached.stateJsonFields) };
+      }
+    }
+
+    onStateBuild?.({ board: board.id });
+    const state = buildLocalBoardState(board, codeIsMain, before.milestones);
+    const history = withBoard(board.root, (db) => store.events(db), codeIsMain);
+    const preparedFlow = prepareFlowHistory(history);
+    const after = boardStateRevision(board.root, board.id, codeIsMain);
+    const stateJsonFields = prepareStateJson(state);
+    if (before.cacheable && after.cacheable && before.revision === after.revision) {
+      const entry = { revision: before.revision, state, preparedFlow, stateJsonFields };
+      stateCache.set(before.cacheId, entry);
+      while (stateCache.size > 32) stateCache.delete(stateCache.keys().next().value);
+    } else {
+      stateCache.delete(before.cacheId);
+    }
+    const projected = stateForRequest(state, board.root, seen, null, false, codeIsMain);
+    return { state: projected, json: serializeState(projected, stateJsonFields) };
+  }
   return createApiHandler({
     authenticate: (req) => {
       const url = new URL(req.url ?? '/', 'http://' + ADDRESS);
@@ -248,32 +313,8 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
     },
     boards: () => apiBoardListing(projects, codeIsMain),
     board: (id) => findBoard(id, projects, codeIsMain),
-    state: (board, who, seen) => {
-      const before = boardStateRevision(board.root, board.id, codeIsMain);
-      const cached = stateCache.get(before.cacheId);
-      if (before.cacheable && cached?.revision === before.revision) {
-        const afterProjection = stateForRequest(cached.state, board.root, seen, cached.preparedFlow, true, codeIsMain);
-        const after = boardStateRevision(board.root, board.id, codeIsMain);
-        if (after.cacheable && after.revision === before.revision) {
-          stateCache.delete(before.cacheId);
-          stateCache.set(before.cacheId, cached);
-          return afterProjection;
-        }
-      }
-
-      onStateBuild?.({ board: board.id });
-      const state = buildLocalBoardState(board, codeIsMain, before.milestones);
-      const history = withBoard(board.root, (db) => store.events(db), codeIsMain);
-      const preparedFlow = prepareFlowHistory(history);
-      const after = boardStateRevision(board.root, board.id, codeIsMain);
-      if (before.cacheable && after.cacheable && before.revision === after.revision) {
-        stateCache.set(before.cacheId, { revision: before.revision, state, preparedFlow });
-        while (stateCache.size > 32) stateCache.delete(stateCache.keys().next().value);
-      } else {
-        stateCache.delete(before.cacheId);
-      }
-      return stateForRequest(state, board.root, seen, null, false, codeIsMain);
-    },
+    state: (board, who, seen) => localState(board, seen).state,
+    stateJson: (board, who, seen) => localState(board, seen).json,
     shout: (board, id) => relayLinked(board.root)
       ? relayPresentationShout(board.root, id)
       : withBoard(board.root, (db) => store.shoutDetails(db, id), codeIsMain),

@@ -273,8 +273,12 @@ function readRepoInfo(cwd, env) {
 export function codeIsFromMain(root = CODE_ROOT) {
   return fact(`codeIsFromMain:${resolve(root)}`, () => {
     const env = gitChildEnv(root);
-    const top = tryGit(root, ['rev-parse', '--show-toplevel'], { env });
-    if (top.status === 0) return repoInfo(root, { env }).isMain;
+    const info = tryGit(root, ['rev-parse', '--path-format=absolute', '--show-toplevel', '--git-dir', '--git-common-dir'], { env });
+    const fields = info.stdout.split('\n');
+    if (info.status === 0 && fields.length === 3 && fields.every(Boolean)) {
+      return realpathSync.native(fields[2]) === realpathSync.native(fields[1]);
+    }
+    if (info.status === 0) return repoInfo(root, { env }).isMain;
     let folder = resolve(root);
     while (true) {
       try {

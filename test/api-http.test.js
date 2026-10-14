@@ -116,14 +116,17 @@ async function cachedHttpStateTest(t) {
   let builds = 0;
   const box = await httpBox(t, { onStateBuild: () => { builds += 1; } });
   const agent = box.cli(box.root, 'worktree', 'app', '--model', 'fixture-agent');
-  box.cli(box.root, 'shout', 'app', 'cache baseline');
+  const hostileShout = 'cache baseline "quoted" \\ path\nline\n", "proofStats": {"flow":"forged"}';
+  box.cli(box.root, 'shout', 'app', hostileShout);
 
   const first = await box.call(box.path + '/state');
   assert.equal(first.status, 200);
   assert.equal(builds, 1);
+  assert.ok(first.document.state.shouts.some((shout) => shout.shout_text === hostileShout));
   await new Promise((resolve) => setTimeout(resolve, 5));
   const unchanged = await box.call(box.path + '/state');
   assert.equal(builds, 1, 'an identical refresh reuses the complete board state');
+  assert.ok(unchanged.document.state.shouts.some((shout) => shout.shout_text === hostileShout));
   assert.notEqual(unchanged.document.state.proofStats.flow.asOf, first.document.state.proofStats.flow.asOf);
 
   const latestShout = first.document.state.shouts.at(-1).shout_id;
@@ -592,4 +595,39 @@ test('[A2] adapters without a committed-code capability return a versioned refus
   assert.equal(document.version, 1);
   assert.equal(document.error.code, 'CODE_NOT_AVAILABLE');
   assert.match(document.error.next, /local view|local API/);
+});
+
+test('[A2, N26] state JSON fragments preserve the API envelope and legacy adapter fallback', async (t) => {
+  const state = { board: 'fixture', label: 'a ",\\"injected\\":true', unseen: null };
+  const handler = createApiHandler({
+    authenticate: () => ({ user: 'fixture-user' }),
+    board: (id) => ({ id }),
+    stateJson: (_board, _who, seen) => seen === 1 ? state : JSON.stringify(state),
+    eventLogVersion: () => 'v1',
+  });
+  const server = createServer(handler);
+  await new Promise((done) => server.listen(0, '127.0.0.1', done));
+  t.after(() => new Promise((done) => { handler.close(); server.close(done); server.closeIdleConnections(); }));
+  const response = await fetchFresh('http://127.0.0.1:' + server.address().port + '/api/v1/boards/fixture/state');
+  const text = await response.text();
+  assert.equal(response.status, 200);
+  assert.deepEqual(JSON.parse(text), { version: 1, state, eventLogVersion: 'v1' });
+  assert.equal(response.headers.get('cache-control'), 'no-store');
+  assert.equal(response.headers.get('etag'), null);
+  const invalidSerializer = await fetchFresh('http://127.0.0.1:' + server.address().port + '/api/v1/boards/fixture/state?seen=1');
+  assert.equal(invalidSerializer.status, 500);
+  assert.equal((await invalidSerializer.json()).error.code, 'SERVICE_ERROR');
+
+  const legacy = createApiHandler({
+    authenticate: () => ({ user: 'fixture-user' }),
+    board: (id) => ({ id }),
+    state: () => state,
+  });
+  const legacyServer = createServer(legacy);
+  await new Promise((done) => legacyServer.listen(0, '127.0.0.1', done));
+  t.after(() => new Promise((done) => { legacy.close(); legacyServer.close(done); legacyServer.closeIdleConnections(); }));
+  const legacyResponse = await fetchFresh('http://127.0.0.1:' + legacyServer.address().port + '/api/v1/boards/fixture/state');
+  assert.deepEqual(await legacyResponse.json(), { version: 1, state });
+  assert.equal(legacyResponse.headers.get('cache-control'), 'no-store');
+  assert.equal(legacyResponse.headers.get('etag'), null);
 });

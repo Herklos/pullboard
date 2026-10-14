@@ -101,4 +101,5 @@ test('[A2,N26,A5,A6] code provenance is cached per request and refreshes for the
   });
 
   assert.equal(codeIsFromMain(alias), false, 'the next request recomputes linked-worktree provenance');
+  assert.equal(codeIsFromMain(fixture), true, 'a source path outside Git retains released-source provenance');
 });
