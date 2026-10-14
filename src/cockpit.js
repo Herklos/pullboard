@@ -1124,7 +1124,9 @@ async function listen(entry) {
   entry.controller = controller;
   try {
     if (!controller) throw new Error('this browser cannot read a stream');
-    const res = await fetch(connection.base + '/api/v1/boards/' + encodeURIComponent(entry.id) + '/events', {
+    // The stream goes where every API read goes: the serving host's base, with its credential headers.
+    const path = connection.base + '/api/v1/boards/' + encodeURIComponent(entry.id) + '/events';
+    const res = await fetch(path, {
       headers: { ...connection.headers, accept: 'text/event-stream', 'last-event-id': String(entry.after) }, cache: 'no-store', signal: controller.signal,
     });
     if (!res.ok || !res.body) throw new Error('the board stream answered ' + res.status);
