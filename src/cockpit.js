@@ -1043,11 +1043,12 @@ async function refresh() {
   $('live').textContent = snapshot ? 'read-only snapshot' : liveLine();
 }
 
-// The local view follows the shown board's event stream instead of a timer (#545): it reads the board once, waits
-// on the board's events after that read's latest one, and reads again only when an event or the stream's changed
-// signal (#554) arrives, so a page whose board is quiet makes no requests. The relay transport keeps its own stream.
+// The local view follows the shown boards' events instead of a timer (#545): it reads the board once, waits on its
+// events after that read's latest one, and reads again only when an event or the stream's changed signal (#554)
+// arrives, so a page whose boards are quiet makes no requests. The relay transport keeps its own stream.
 // A page holds at most one stream: Chrome allows six connections per host, a held stream keeps one for good, and the
-// catch-up read needs the rest. Six held streams left none, and the page waited forever for its own read.
+// catch-up read needs the rest. Six held streams, one per repo of a group, left none, and the page waited forever for
+// its own read. So a group follows every repo it shows through one multiplexed stream (#600).
 let stream = null;
 let catching = null;
 let catchAgain = false;
@@ -1080,22 +1081,31 @@ function unfollow() {
 }
 
 /**
- * Follow the one board the page shows, or a shown group's first repo, starting a new stream after the state just
- * read. Every catch-up reads every board, so the group's other repos and the sidebar's boards update with it, and on
- * a project switch, without a stream of their own.
+ * Follow every board the page shows, the board or each repo of a group, on one stream that starts each board after
+ * the state just read. Every catch-up reads every board, so the sidebar's boards update with it and on a project
+ * switch, without a stream of their own.
  */
 function follow() {
-  const repo = data.group ? data.group.repos[0] : data.project ? { root: view.root, board: data.project } : null;
-  const board = repo && data.projects.find((entry) => entry.root === repo.root && entry.ok);
-  // The board's events after the latest one this page shows are what changed it since.
-  if (stream && board && stream.id === board.id) { stream.shown = Math.max(stream.shown, latestEvent(repo.board)); return; }
+  const repos = data.group ? data.group.repos.map((repo) => [repo.root, repo.board]) : data.project ? [[view.root, data.project]] : [];
+  const boards = repos.flatMap(([root, state]) => {
+    const board = data.projects.find((entry) => entry.root === root && entry.ok);
+    return board ? [{ root, id: board.id, shown: latestEvent(state) }] : [];
+  });
+  const key = boards.map((board) => board.id).join(',');
+  // A board's events after the latest one this page shows are what changed it since.
+  if (stream && boards.length && stream.key === key) {
+    for (const board of boards) { const kept = stream.boards.find((entry) => entry.id === board.id); kept.shown = Math.max(kept.shown, board.shown); }
+    return;
+  }
   unfollow();
-  if (!board) return;
-  stream = { root: repo.root, id: board.id, after: latestEvent(repo.board), shown: latestEvent(repo.board), status: 'opening', offline: false, failures: 0, controller: null, retry: 0 };
+  if (!boards.length) return;
+  // One board's cursor is its latest event; a group's names each board's latest event, as #600 resumes them.
+  const cursor = boards.length === 1 ? String(boards[0].shown) : boards.map((board) => board.id + ':' + board.shown).join(',');
+  stream = { key, boards, cursor, status: 'opening', offline: false, failures: 0, controller: null, retry: 0 };
   void listen(stream);
 }
 
-/** Read one server-sent message: its event name, its data and its numeric id. */
+/** Read one server-sent message: its event name, its data and its id, as sent. */
 function streamMessage(block) {
   const message = { event: 'message', data: '', id: null };
   for (const line of block.split('\\n')) {
@@ -1105,9 +1115,22 @@ function streamMessage(block) {
     const value = colon < 0 ? '' : line.slice(colon + 1).replace(/^ /, '');
     if (field === 'event') message.event = value;
     else if (field === 'data') message.data += (message.data ? '\\n' : '') + value;
-    else if (field === 'id' && /^\\d+$/.test(value)) message.id = Number(value);
+    else if (field === 'id' && !value.includes('\\0')) message.id = value;
   }
   return message;
+}
+
+/**
+ * Whether a message changes what the page shows: an event after the latest one its board shows, or a signal with no
+ * event, such as a warning or the board changing without a move. A group's stream names each event's board (#600).
+ */
+function streamMoved(entry, message) {
+  let body = null;
+  try { body = message.data ? JSON.parse(message.data) : null; } catch { return true; }
+  const board = entry.boards.length === 1 ? entry.boards[0] : entry.boards.find((candidate) => candidate.id === body?.board);
+  const id = Number(body?.event?.event_id ?? (entry.boards.length === 1 && /^\\d+$/.test(message.id ?? '') ? message.id : NaN));
+  if (board && Number.isSafeInteger(id)) return id > board.shown;
+  return Boolean(message.data) || message.event !== 'message';
 }
 
 /** The rule and next step a stream's refusal carries. */
@@ -1127,10 +1150,13 @@ async function listen(entry) {
   entry.controller = controller;
   try {
     if (!controller) throw new Error('this browser cannot read a stream');
-    // The stream goes where every API read goes: the serving host's base, with its credential headers.
-    const path = connection.base + '/api/v1/boards/' + encodeURIComponent(entry.id) + '/events';
+    // The stream goes where every API read goes: the serving host's base, with its credential headers. One board has
+    // its own events; a group's repos share one multiplexed stream (#600).
+    const single = entry.boards.length === 1;
+    const path = connection.base + (single ? '/api/v1/boards/' + encodeURIComponent(entry.boards[0].id) + '/events'
+      : '/api/v1/events?boards=' + entry.boards.map((board) => encodeURIComponent(board.id)).join(','));
     const res = await fetch(path, {
-      headers: { ...connection.headers, accept: 'text/event-stream', 'last-event-id': String(entry.after) }, cache: 'no-store', signal: controller.signal,
+      headers: { ...connection.headers, accept: 'text/event-stream', 'last-event-id': entry.cursor }, cache: 'no-store', signal: controller.signal,
     });
     if (!res.ok || !res.body) throw new Error('the board stream answered ' + res.status);
     entry.status = 'up';
@@ -1148,9 +1174,8 @@ async function listen(entry) {
         const message = streamMessage(buffer.slice(0, end));
         buffer = buffer.slice(end + 2);
         if (message.event === 'error') throw new Error(streamRefusal(message.data));
-        if (message.id !== null) entry.after = message.id;
-        // An event after the latest one shown, or a signal with no id: a warning, or the board changed without a move.
-        if (message.id !== null ? message.id > entry.shown : Boolean(message.data) || message.event !== 'message') moved = true;
+        if (message.id !== null) entry.cursor = message.id;
+        if (streamMoved(entry, message)) moved = true;
       }
       // One read covers every event that arrived together.
       if (moved) catchUp();

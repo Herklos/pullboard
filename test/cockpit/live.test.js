@@ -23,6 +23,12 @@ function streamReads(chrome) {
     && /text\/event-stream/.test(header(request, 'accept') ?? '')).map((request) => header(request, 'last-event-id'));
 }
 
+/** The multiplexed event-stream reads the page opened (#600), each with the boards it names. */
+function groupStreamReads(chrome) {
+  return chrome.requests.filter((request) => /^https?:/.test(request.url) && new URL(request.url).pathname === '/api/v1/events'
+    && /text\/event-stream/.test(header(request, 'accept') ?? '')).map((request) => (new URL(request.url).searchParams.get('boards') ?? '').split(',').sort());
+}
+
 /**
  * A loopback HTTP proxy in front of the real view, so a test can cut every connection through it and refuse new ones
  * until it is restored, as a lost network does. It names the view's own host, which the view's secret check requires.
@@ -175,33 +181,35 @@ test('a dropped stream reconnects from its last event [N26,A2]', { timeout: 120_
   }
 });
 
-// core-188's six-repo case (#545 review): one held stream per repo took all six of Chrome's connections to the view,
-// so the catch-up read for a committed claim never left the page.
-test('a group of six repos catches up on one stream [N26,A2]', { timeout: 120_000 }, async (t) => {
+/**
+ * A project group of `count` real repos, opened in real Chrome as the group, where a claim on `mover`'s item must
+ * show within two seconds while the page follows every repo on one stream.
+ */
+async function groupClaim(t, name, count, mover) {
   const executable = chromeExecutable();
   assert.ok(executable, 'Chrome is required for the live view checks');
   const box = machine();
   const repos = [];
-  for (let index = 0; index < 6; index++) repos.push(project(box, `capacity-${index}`, SPEC, { project: 'Stream capacity', name: `Capacity ${index}` }));
-  box.run(repos[0].repo, 'add', 'web', 'Group catch-up', '--specs', 'G1', '--criterion', 'updates');
+  for (let index = 0; index < count; index++) repos.push(project(box, `${name}-${index}`, SPEC, { project: name, name: `${name} ${index}` }));
+  box.run(repos[mover].repo, 'add', 'web', 'Group catch-up', '--specs', 'G1', '--criterion', 'updates');
   const view = await startView(box);
-  const profile = mkdtempSync(join(tmpdir(), 'pullboard-live-group-chrome-'));
+  const profile = mkdtempSync(join(tmpdir(), `pullboard-${name}-chrome-`));
   let chrome;
   try {
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
-    const group = 'document.querySelector(\'#proj-list [data-root="group:Stream capacity"]\')';
-    await chrome.waitFor(`data?.projects?.length === 6 && !!${group}`);
+    const group = `document.querySelector('#proj-list [data-root="group:${name}"]')`;
+    await chrome.waitFor(`data?.projects?.length === ${count} && !!${group}`);
     await pickProject(chrome, group);
-    await chrome.waitFor('data?.group?.repos?.length === 6 && document.querySelector(\'#live\').textContent === \'\'');
-    const opened = streamReads(chrome).length;
-    // The group shows each repo's board; the first repo's item is the one that moves.
-    const shown = `data?.group?.repos?.find(repo => repo.root === ${JSON.stringify(repos[0].repo)})?.board.items.find(item => item.id === 1)?.status`;
+    await chrome.waitFor(`data?.group?.repos?.length === ${count} && document.querySelector('#live').textContent === ''`);
+    const ids = (await Promise.all(repos.map((repo) => boardId(view, repo.repo)))).sort();
+    assert.deepEqual(groupStreamReads(chrome).at(-1), ids, 'the group follows every repo it shows on one stream');
+    const shown = `data?.group?.repos?.find(repo => repo.root === ${JSON.stringify(repos[mover].repo)})?.board.items.find(item => item.id === 1)?.status`;
     await watchFor(chrome, '__groupClaimAt', `${shown} === 'claimed'`);
-    box.run(repos[0].web, 'claim', '1');
-    assert.equal((await boardOf(view, repos[0].repo)).items.find((item) => item.id === 1).status, 'claimed', 'the board has the claim');
+    box.run(repos[mover].web, 'claim', '1');
+    assert.equal((await boardOf(view, repos[mover].repo)).items.find((item) => item.id === 1).status, 'claimed', 'the board has the claim');
     await chrome.waitFor('window.__groupClaimAt !== null', 15_000); // budget: hang ceiling for the claim to arrive; the latency is judged below.
-    const latency = await chrome.stable('window.__groupClaimAt') - await eventAt(view, repos[0].repo, 'claim', 1);
-    t.diagnostic(`the group showed the claim ${latency} ms after the board recorded it, with ${opened} stream read(s) opened`);
+    const latency = await chrome.stable('window.__groupClaimAt') - await eventAt(view, repos[mover].repo, 'claim', 1);
+    t.diagnostic(`a group of ${count} showed repo ${mover + 1}'s claim ${latency} ms after the board recorded it`);
     assert.ok(latency <= 2_000, `the group shows the claim ${latency} ms after the board recorded it`); // budget: declared by #545's frozen criterion: a move appears within 2000 ms.
     assert.deepEqual(chrome.exceptions, [], 'the page raises no uncaught exception');
   } finally {
@@ -209,4 +217,15 @@ test('a group of six repos catches up on one stream [N26,A2]', { timeout: 120_00
     rmSync(profile, { recursive: true, force: true });
     await view.stop();
   }
+}
+
+// core-188's six-repo case (#545 review): one held stream per repo took all six of Chrome's connections to the view,
+// so the catch-up read for a committed claim never left the page.
+test('a group of six repos catches up on one stream [N26,A2]', { timeout: 120_000 }, async (t) => {
+  await groupClaim(t, 'capacity', 6, 0);
+});
+
+// docs-28's two-repo case (#545 review): a move made only in a group's second repo must wake the page too.
+test("a move made only in a group's second repo appears as fast as one in its first [N26,A2]", { timeout: 120_000 }, async (t) => {
+  await groupClaim(t, 'second', 2, 1);
 });
