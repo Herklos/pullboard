@@ -1231,7 +1231,7 @@ test('[A2,N39] the local API accepts the view session cookie', async (t) => {
   const personMove = await request(`/api/v1/boards/${board.id}/moves`, { cookie }, {
     method: 'POST', body: { verb: 'next', args: { as: 'person' } },
   });
-  await refused(personMove, 400, 'B26_PERSON_CHANNEL');
+  await refused(personMove, 409, 'B26_PERSON_CHANNEL');
 });
 
 test('[A2] local auth, origin, unknown board and malformed calls refuse without moving', async (t) => {
