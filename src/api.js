@@ -94,7 +94,7 @@ function boardStateRevision(root, id, isMain) {
     externalRoadmap: local.externalMilestones,
     eventLogVersion: store.EVENT_LOG_VERSION,
   });
-  return { cacheId: info.commonDir + '\0' + id, revision, milestones: local.externalMilestones, cacheable: true };
+  return { cacheId: info.commonDir + '\0' + id, revision, event: local.event, milestones: local.externalMilestones, cacheable: true };
 }
 
 /** Cheap file identity for an event-stream poll; content is read only after this marker changes. */
@@ -487,11 +487,75 @@ function searchText(item) {
   return ('#' + item.id + ' ' + item.title + ' ' + item.lane + ' ' + item.specs.join(' ') + ' ' + (item.criterion || '')).toLowerCase();
 }
 
-/** One cached board build: the full state, its item summaries and the lookups that serve them. */
+/** One cached board build: the full state, its item summaries, its delta fingerprint and the lookups that serve them. */
 function snapshotEntry(revision, state, preparedFlow) {
   const summary = { ...state, items: state.items.map(itemSummary) };
-  return { revision, state, summary, preparedFlow, summaryFields: prepareStateJson(summary), stateJsonFields: null,
-    items: new Map(state.items.map((item) => [item.id, item])), searchTexts: null };
+  return { revision, sequence: state.sequence, state, summary, preparedFlow, summaryFields: prepareStateJson(summary), stateJsonFields: null,
+    print: fingerprint(summary), items: new Map(state.items.map((item) => [item.id, item])), searchTexts: null };
+}
+
+/** State fields every delta carries whole: this request's unread count and flow, and the small Needs-you lists. */
+const DELTA_WHOLE = new Set(['unseen', 'proofStats', 'decisions', 'holds', 'requests', 'personRequests']);
+/** The state lists a delta merges entry by entry, and the field that names each entry. */
+const DELTA_KEYS = Object.freeze({ items: 'id', shouts: 'shout_id', asked: 'shout_id', events: 'event_id', agents: 'agent_id', spec: 'id', practice: 'id', milestones: 'name' });
+/** How many recent builds of each board a server keeps as possible delta bases. */
+const DELTA_BASES = 24;
+
+/** A digest of one value's JSON, which is what a client holds of it. */
+function jsonDigest(value) {
+  return createHash('sha256').update(JSON.stringify(value) ?? 'undefined').digest('base64');
+}
+
+/**
+ * Fingerprint a summary build without keeping it: a digest of each field, and for each keyed list
+ * its entry order and each entry's digest. A list whose keys repeat or are missing is a whole field.
+ */
+function fingerprint(state) {
+  const fields = new Map();
+  const lists = new Map();
+  for (const [field, value] of Object.entries(state)) {
+    if (DELTA_WHOLE.has(field)) continue;
+    const key = Object.hasOwn(DELTA_KEYS, field) ? DELTA_KEYS[field] : null;
+    const ids = key && Array.isArray(value) ? value.map((entry) => entry?.[key]) : null;
+    if (ids && ids.every((id) => typeof id === 'number' || typeof id === 'string') && new Set(ids).size === ids.length) {
+      lists.set(field, { key, ids, digests: new Map(value.map((entry) => [entry[key], jsonDigest(entry)])) });
+    } else fields.set(field, jsonDigest(value));
+  }
+  return { fields, lists };
+}
+
+/** Whether two key lists name the same entries in the same order. */
+function sameIds(left, right) {
+  return left.length === right.length && left.every((id, at) => id === right[at]);
+}
+
+/**
+ * What changed from each of these bases to the current build. Changed values travel whole, so the
+ * delta applied to any one of the bases gives the current state; the request's own fields and the
+ * Needs-you lists always come whole. A keyed list sends only its changed entries, and its full key
+ * order when entries were added, removed or moved.
+ *
+ * @param {{ fields: Map<string, string>, lists: Map<string, any> }[]} bases
+ * @param {{ fields: Map<string, string>, lists: Map<string, any> }} current
+ * @param {any} state The current summary state, projected for this request.
+ * @returns {{ replace: object, merge: object, remove?: string[] }}
+ */
+function stateDelta(bases, current, state) {
+  const replace = {};
+  const merge = {};
+  for (const [field, value] of Object.entries(state)) {
+    if (DELTA_WHOLE.has(field)) { replace[field] = value; continue; }
+    const list = current.lists.get(field);
+    if (list && bases.every((base) => base.lists.get(field)?.key === list.key)) {
+      const set = value.filter((entry) => bases.some((base) => base.lists.get(field).digests.get(entry[list.key]) !== list.digests.get(entry[list.key])));
+      const moved = bases.some((base) => !sameIds(base.lists.get(field).ids, list.ids));
+      if (set.length || moved) merge[field] = { key: list.key, set, ...(moved ? { ids: list.ids } : {}) };
+    } else if (list || bases.some((base) => base.fields.get(field) !== current.fields.get(field))) {
+      replace[field] = value;
+    }
+  }
+  const remove = [...new Set(bases.flatMap((base) => [...base.fields.keys(), ...base.lists.keys()]))].filter((field) => !Object.hasOwn(state, field));
+  return { replace, merge, ...(remove.length ? { remove } : {}) };
 }
 
 /** Add the request-specific unread count without mutating the reusable snapshot. */
@@ -669,6 +733,15 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
   const key = Buffer.from(secret);
   const permittedOrigins = new Set(allowedOrigins);
   const stateCache = new Map();
+  // Each board's recent build fingerprints, oldest first, and the latest sequence a forgotten build had.
+  const deltaBases = new Map();
+  /** Keep a new build as a possible delta base, forgetting the oldest beyond the limit. */
+  function keepBase(cacheId, entry) {
+    const kept = deltaBases.get(cacheId) ?? { builds: [], forgottenThrough: -1 };
+    kept.builds.push({ sequence: entry.sequence, print: entry.print });
+    while (kept.builds.length > DELTA_BASES) kept.forgottenThrough = Math.max(kept.forgottenThrough, kept.builds.shift().sequence);
+    deltaBases.set(cacheId, kept);
+  }
   /**
    * Read the current board build through `read(entry, cached)`, reusing the cached build while every
    * input revision holds before and after the read, and building it again when one moved.
@@ -687,9 +760,12 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
     }
 
     onStateBuild?.({ board: board.id });
-    const state = buildLocalBoardState(board, codeIsMain, before.milestones);
+    // The build names the event it was read at, so a client can ask for what changed after it.
+    const state = { ...buildLocalBoardState(board, codeIsMain, before.milestones), sequence: before.event };
     const history = withBoard(board.root, (db) => store.events(db), codeIsMain);
     const entry = snapshotEntry(before.revision, state, prepareFlowHistory(history));
+    entry.cacheId = before.cacheId;
+    keepBase(before.cacheId, entry);
     const after = boardStateRevision(board.root, board.id, codeIsMain);
     if (before.cacheable && after.cacheable && before.revision === after.revision) {
       stateCache.set(before.cacheId, entry);
@@ -707,6 +783,29 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
       // Full fragments wait for the first full request, so a server sending summaries never builds them.
       const fields = full ? (entry.stateJsonFields ??= prepareStateJson(entry.state)) : entry.summaryFields;
       return { state, json: serializeState(state, fields) };
+    });
+  }
+  /**
+   * What changed in the item summaries' state since the build this server sent at event `since`.
+   * Builds made by this request are not bases: a server that never sent a snapshot at `since`, or
+   * has forgotten one, answers with a reset that names why instead of guessing.
+   */
+  function localDelta(board, seen, { since, eventLogVersion = null }) {
+    return withSnapshot(board, (entry, cached) => {
+      const state = stateForRequest(entry.summary, board.root, seen, entry.preparedFlow, cached, codeIsMain);
+      const answer = { since, sequence: entry.sequence, eventLogVersion: store.EVENT_LOG_VERSION };
+      const path = '/api/v1/boards/' + board.id + '/state';
+      /** Tell the client to load a fresh snapshot, and why. */
+      const reset = (code, message) => ({ ...answer, delta: null, reset: refusalDocument(new Refused(code, message)).error });
+      if (eventLogVersion !== null && eventLogVersion !== String(store.EVENT_LOG_VERSION)) {
+        return reset('FORMAT_CHANGED', `this server writes event-log format ${store.EVENT_LOG_VERSION}, not ${eventLogVersion}; use GET ${path} for a fresh snapshot`);
+      }
+      if (since > entry.sequence) return reset('BASE_AHEAD', `this board's latest event is ${entry.sequence}, before ${since}; use GET ${path} for a fresh snapshot`);
+      const kept = deltaBases.get(entry.cacheId) ?? { builds: [], forgottenThrough: -1 };
+      const bases = since <= kept.forgottenThrough ? []
+        : kept.builds.filter((build) => build.sequence === since && (cached || build.print !== entry.print)).map((build) => build.print);
+      if (!bases.length) return reset('BASE_NOT_KEPT', `this server keeps no snapshot it sent at event ${since}; use GET ${path} for a fresh snapshot`);
+      return { ...answer, delta: stateDelta(bases, entry.print, state) };
     });
   }
   /** One item's detail from the current build, or null when the board has no such item. */
@@ -740,6 +839,7 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
     state: (board, who, seen, options) => localState(board, seen, options).state,
     stateJson: (board, who, seen, options) => localState(board, seen, options).json,
     watchRevision: (board) => watchLocalStateRevision(board),
+    delta: (board, who, seen, options) => localDelta(board, seen, options),
     item: (board, id) => localItem(board, id),
     search: (board, text) => localSearch(board, text),
     shout: (board, id) => relayLinked(board.root)
