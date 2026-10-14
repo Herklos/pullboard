@@ -395,19 +395,22 @@ function startExclusiveWriter(box, boardFile, name) {
   const released = join(box.dir, `${name}-released`);
   const source = [
     "const fs = require('node:fs'); const { DatabaseSync } = require('node:sqlite');",
-    'const [file, ready, release, released] = process.argv.slice(1);',
+    'const [file, ready, release, released, ownerPid] = process.argv.slice(1); const owner = Number(ownerPid);',
     'const db = new DatabaseSync(file);',
     "try { const journal = db.prepare('PRAGMA journal_mode = DELETE').get().journal_mode;",
     "const locking = db.prepare('PRAGMA locking_mode = EXCLUSIVE').get().locking_mode;",
     "if (journal !== 'delete' || locking !== 'exclusive') throw new Error('fixture did not acquire rollback-journal exclusive mode');",
     "db.exec('BEGIN EXCLUSIVE'); db.exec('CREATE TABLE IF NOT EXISTS fixture_write (value INTEGER)'); db.exec('INSERT INTO fixture_write (value) VALUES (1)');",
-    'fs.writeFileSync(ready, JSON.stringify({ journal, locking, lockedAt: Date.now(), pid: process.pid })); const deadline = Date.now() + 20_000;',
-    'while (!fs.existsSync(release) && Date.now() < deadline) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);',
-    "if (!fs.existsSync(release)) throw new Error('writer release was not received');",
+    'fs.writeFileSync(ready, JSON.stringify({ journal, locking, lockedAt: Date.now(), pid: process.pid }));',
+    // Only the owning test releases the lock; an abandoned owner must not leave an orphan writer.
+    'while (!fs.existsSync(release)) {',
+    "  try { process.kill(owner, 0); } catch (error) { if (error.code === 'ESRCH') throw new Error('writer owner exited before release'); if (error.code !== 'EPERM') throw error; }",
+    '  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);',
+    '}',
     "const commitAt = Date.now(); db.exec('COMMIT'); db.close(); fs.writeFileSync(released, JSON.stringify({ commitAt, releasedAt: Date.now(), pid: process.pid }));",
     '} catch (error) { try { db.close(); } catch {} process.stderr.write(error.stack + \'\\n\'); process.exitCode = 1; }',
   ].join('\n');
-  const child = startFixtureChild(process.execPath, ['-e', source, boardFile, ready, release, released], {
+  const child = startFixtureChild(process.execPath, ['-e', source, boardFile, ready, release, released, String(process.pid)], {
     cwd: box.repo, env: box.env, detached: true, stdio: ['ignore', 'ignore', 'pipe'],
   });
   child.once('exit', (code, signal) => { child.writerExit = { observedAt: Date.now(), code, signal }; });
@@ -777,6 +780,65 @@ async (t) => {
   assert.equal(writerTimeout.error, null, `the diagnostic writer spawned: ${writerTimeout.error?.message ?? ''}`);
   assert.deepEqual({ code: writerTimeout.code, signal: writerTimeout.signal }, { code: 0, signal: null }, timeout.writer.child.fixtureFailure ?? 'the diagnostic fixture writer closes cleanly');
   assert.ok(existsSync(timeout.writer.released), 'the diagnostic writer releases after the hook reports its timeout');
+});
+
+test('a hook read waits for the lock however slowly it sleeps [C7,B3]', { timeout: 60_000 }, // budget: hang-only ceiling includes the declared 21s delayed-reader input and owned cleanup.
+async (t) => {
+  const box = landProject();
+  const marker = join(box.dir, 'slow-hook-read');
+  const attempted = marker + '-attempted';
+  const returned = marker + '-returned';
+  const probe = join(box.dir, 'delay-hook-read.mjs');
+  let writer, hook;
+  /** Bound cleanup of the two exact children even when the negative control refuses. */
+  const stop = async (child, closed, group = false) => {
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    for (const signal of ['SIGTERM', 'SIGKILL']) {
+      try { group ? process.kill(-child.pid, signal) : child.kill(signal); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+      let timer;
+      try {
+        if (await Promise.race([closed.then(() => true), new Promise(resolve => { timer = setTimeout(() => resolve(false), 1000); })])) return;
+      } finally { clearTimeout(timer); }
+    }
+    throw new Error('Owned hook-read child did not close: ' + child.pid);
+  };
+  t.after(async () => {
+    if (writer) writeFileSync(writer.release, 'cleanup');
+    try { if (hook) await stop(hook, hook.closed); }
+    finally { if (writer) await stop(writer.child, writer.closed, true); }
+  });
+  writer = startExclusiveWriter(box, join(box.repo, '.git', 'pullboard', 'board.sqlite'), 'slow-reader');
+  await waitFor(() => existsSync(writer.ready), 'exclusive writer before the delayed hook');
+  writeFileSync(probe, [
+    "import { existsSync, writeFileSync } from 'node:fs';",
+    "import { DatabaseSync } from 'node:sqlite';",
+    'const prepare = DatabaseSync.prototype.prepare; let delayed = false;',
+    '/** Delay the real reader beyond the old writer expiry without slowing unrelated processes. */',
+    'DatabaseSync.prototype.prepare = function(sql, ...args) {',
+    "  if (delayed || String(sql) !== 'SELECT * FROM agent WHERE agent_path = ?') return Reflect.apply(prepare, this, [sql, ...args]);",
+    '  delayed = true;',
+    "  writeFileSync(process.env.HOOK_READ_ATTEMPT, 'reader paused');",
+    '  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 21_000);', // budget: declared 21s reader delay crosses the former 20s writer expiry; this is the negative-control input, not a speed assertion.
+    "  writeFileSync(process.env.HOOK_READ_ATTEMPT + '-attempted', 'reader resumed');",
+    '  const statement = Reflect.apply(prepare, this, [sql, ...args]);',
+    "  writeFileSync(process.env.HOOK_READ_ATTEMPT + '-returned', JSON.stringify({ released: existsSync(" + JSON.stringify(writer.release) + ") }));",
+    '  return statement;',
+    '};',
+  ].join('\n'));
+  hook = launchHookProbe(box, probe, marker);
+  await waitFor(() => existsSync(marker), 'reader entered its controlled pause');
+  await waitFor(() => existsSync(attempted), 'reader resumed after the old writer expiry', 30_000); // budget: event ceiling covers the declared 21s reader pause.
+  assert.equal(writer.child.exitCode, null, 'the writer still holds its lock after the delayed reader resumes');
+  assert.equal(writer.child.signalCode, null);
+  assert.equal(existsSync(writer.released), false, 'no release was requested or performed');
+  assert.equal(hook.exitCode, null, 'the real hook is still waiting for the held board');
+  assert.equal(existsSync(returned), false, 'the native agentAt prepare has not returned through the lock');
+  writeFileSync(writer.release, 'release');
+  const [writerResult, hookResult] = await Promise.all([writer.closed, hook.closed]);
+  assert.deepEqual(writerResult, { code: 0, signal: null, error: null }, writer.child.fixtureFailure);
+  assert.deepEqual(hookResult, { code: 0, signal: null, error: null }, hook.stderrText);
+  assert.deepEqual(JSON.parse(readFileSync(returned, 'utf8')), { released: true }, 'the hook completed only after the test released the writer');
+  assert.ok(existsSync(writer.released), 'the writer committed and closed its lock');
 });
 
 test('landing diagnostics retain unknown failures and merge subjects obey typed 72-character headers [B3,R3]', () => {
