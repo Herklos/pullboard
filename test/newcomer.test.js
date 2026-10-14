@@ -1,7 +1,7 @@
 /** First-run guidance on private Git repos, including unrelated files setup must not stage [I1,I2]. */
 import assert from 'node:assert/strict';
 import { runFixtureExecFile as execFileSync, runFixtureChild as spawnSync, runFixtureChild, runFixtureGit } from './fixture-child.js';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
@@ -103,6 +103,61 @@ test('init detects language gates and gives an example in the same ecosystem [I1
   writeFileSync(join(mixed.root, 'go.mod'), 'module example.test/project\n');
   assert.equal(mixed.run('init').status, 0);
   assert.equal(JSON.parse(readFileSync(join(mixed.root, 'pullboard.json'), 'utf8')).gate, 'go test ./...');
+
+  const emptyConfigured = project(t);
+  writeFileSync(join(emptyConfigured.root, 'package.json'), JSON.stringify({ scripts: { test: 'node --test' } }));
+  assert.equal(emptyConfigured.run('init').status, 0);
+  const configPath = join(emptyConfigured.root, 'pullboard.json');
+  const config = JSON.parse(readFileSync(configPath, 'utf8'));
+  config.gate = '';
+  writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+  const rerun = emptyConfigured.run('init');
+  assert.equal(rerun.status, 0, rerun.stderr);
+  assert.match(rerun.stdout, /no gate yet: set "gate" in pullboard\.json to the command that proves the build/u);
+  assert.doesNotMatch(rerun.stdout, /if this board has no build/u);
+});
+
+test('setup offers a gate to a board with no build [I1,I2]', (t) => {
+  const box = project(t);
+  const initialized = box.run('init');
+  assert.equal(initialized.status, 0, initialized.stderr);
+  assert.match(initialized.stdout, /if this board has no build.*pullboard spec check.*second agent review checks the actual work/u);
+
+  const fixtureBin = join(box.root, 'fixture-bin');
+  mkdirSync(fixtureBin);
+  symlinkSync(BIN, join(fixtureBin, 'pullboard'));
+  box.env.PATH = `${fixtureBin}:${process.env.PATH}`;
+  const specCheck = runFixtureChild('pullboard', ['spec', 'check'], { cwd: box.root, env: box.env, encoding: 'utf8' });
+  assert.equal(specCheck.status, 0, specCheck.failure ?? specCheck.stderr);
+
+  const configPath = join(box.root, 'pullboard.json');
+  const config = JSON.parse(readFileSync(configPath, 'utf8'));
+  config.lanes.app = { owns: ['app/'] };
+  writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+  const specPath = join(box.root, 'SPEC.md');
+  writeFileSync(specPath, `${readFileSync(specPath, 'utf8')}- G1 [approved, must] The board can check its own requirements. | gate: pullboard spec check\n`);
+
+  const before = JSON.parse(box.run('resume', '--json').stdout);
+  assert.equal(before.setup.step, 3);
+  assert.match(before.setup.question, /if this board has no build.*pullboard spec check.*second agent review checks the actual work/u);
+  assert.match(before.setup.question, /choose a custom gate command/u);
+  assert.match(before.setup.command, /pullboard spec check/u);
+  const answer = runFixtureChild('sh', ['-c', before.setup.command], { cwd: box.root, env: box.env, encoding: 'utf8' });
+  assert.equal(answer.status, 0, answer.failure ?? answer.stderr);
+  assert.equal(JSON.parse(readFileSync(configPath, 'utf8')).gate, 'pullboard spec check');
+  assert.equal(JSON.parse(box.run('resume', '--json').stdout).setup.step, 4);
+
+  box.git('add', '-f', '--', 'pullboard.json', 'SPEC.md', 'DOCTRINE.md', 'AGENTS.md', '.gitignore', '.githooks', '.claude');
+  const stagedPaths = box.git('diff', '--cached', '--name-only').split('\n');
+  assert.ok(stagedPaths.length > 0);
+  const allowedSetupFiles = new Set(['pullboard.json', 'SPEC.md', 'DOCTRINE.md', 'AGENTS.md', '.gitignore']);
+  assert.ok(stagedPaths.every(path => allowedSetupFiles.has(path) || path.startsWith('.githooks/') || path.startsWith('.claude/')), stagedPaths.join('\n'));
+  box.git('-c', 'user.name=Pullboard fixture', '-c', 'user.email=pullboard-fixture@example.test', '-c', 'commit.gpgsign=false', 'commit', '-m', 'chore: initialize Pullboard fixture');
+
+  // The real gate reads committed main policy; commit only the setup paths created above first.
+  box.env.PULLBOARD_MACHINE_HOME = join(box.root, '.private-machine-home');
+  const gate = box.run('gate');
+  assert.equal(gate.status, 0, gate.failure ?? gate.stderr);
 });
 
 test('bare pullboard starts with the tour and init pointer; explicit help and JSON stay usable [I1,I2]', (t) => {

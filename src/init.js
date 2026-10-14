@@ -219,7 +219,9 @@ export function initRepo({ info, openBoardHere, register, closeBoard, model }) {
   }
   notes.push('opened the board in the git dir; this checkout is the coordinator');
   if (!configuredGate(root)) {
-    notes.push('no gate yet: set "gate" in pullboard.json to the command that proves the build');
+    notes.push(gate
+      ? 'no gate yet: set "gate" in pullboard.json to the command that proves the build'
+      : 'if this board has no build, use `pullboard spec check` to check its spec and practice files; a second agent review checks the actual work');
   }
   if (written.length) notes.push(`git add -f -- ${written.map((path) => `'${path.replaceAll("'", "'\\''")}'`).join(' ')}`);
   return notes;
