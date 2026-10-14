@@ -53,6 +53,12 @@ function seenCursor(value) {
   return eventCursor(value);
 }
 
+/** A delta's base is the sequence of a state the client holds; unlike an omitted events cursor, blank is invalid. */
+function sinceCursor(value) {
+  if (value === '') throw new Refused('BAD_CURSOR', "since needs a nonnegative integer; use the sequence of the state you hold");
+  return eventCursor(value);
+}
+
 /** Read a state request's detail choice: item summaries, every item in full, or null for the server's default (A2). */
 function stateDetail(value) {
   if (value === null) return null;
@@ -182,6 +188,12 @@ export function createApiHandler(adapter, { pollMs = 200 } = {}) {
       if (req.method === 'GET' && route[2] === 'state') {
         const seen = url.searchParams.has('seen') ? seenCursor(url.searchParams.get('seen')) : null;
         const options = { detail: stateDetail(url.searchParams.get('detail')) };
+        if (url.searchParams.has('since')) {
+          const since = sinceCursor(url.searchParams.get('since'));
+          if (options.detail === 'full') throw new Refused('BAD_REQUEST', 'a delta brings item summaries up to date; use since=N without detail=full');
+          if (typeof adapter.delta !== 'function') throw new Refused('DELTA_NOT_AVAILABLE', 'this API adapter does not answer since=N; use its board state');
+          return json(res, 200, await adapter.delta(board, who, seen, { since, eventLogVersion: url.searchParams.get('eventLogVersion') }));
+        }
         if (typeof adapter.stateJson === 'function') {
           const state = await adapter.stateJson(board, who, seen, options);
           if (typeof state !== 'string') throw new TypeError('the local state serializer must return JSON text');
@@ -234,6 +246,26 @@ export function createApiHandler(adapter, { pollMs = 200 } = {}) {
   return handle;
 }
 
+
+/**
+ * Apply a state delta (GET .../state?since=N) to the state it extends, giving the state a fresh
+ * snapshot would. It recomputes nothing: whole fields replace, and keyed lists take their changed
+ * entries and, when given, their new key order (A2).
+ *
+ * @param {any} state
+ * @param {{ replace: object, merge: Record<string, { key: string, set: object[], ids?: (string|number)[] }>, remove?: string[] }} delta
+ * @returns {any}
+ */
+export function applyStateDelta(state, delta) {
+  const next = { ...state, ...delta.replace };
+  for (const field of delta.remove ?? []) delete next[field];
+  for (const [field, { key, set, ids }] of Object.entries(delta.merge)) {
+    const entries = new Map((state[field] ?? []).map((entry) => [entry[key], entry]));
+    for (const entry of set) entries.set(entry[key], entry);
+    next[field] = (ids ?? (state[field] ?? []).map((entry) => entry[key])).map((id) => entries.get(id));
+  }
+  return next;
+}
 
 /** Choose the same HTTP refusal class for local and sealed relay adapters. */
 export function apiStatus(error) {

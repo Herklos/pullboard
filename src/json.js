@@ -89,6 +89,7 @@ export const JSON_SHAPES = {
   http: {
     boards: shape({ boards: 'array' }),
     state: shape({ state: 'object' }),
+    delta: shape({ since: 'number', sequence: 'number', delta: 'object|null' }),
     shout: shape({ shout: 'object' }),
     item: shape({ item: 'object' }),
     items: shape({ ids: 'array' }),
