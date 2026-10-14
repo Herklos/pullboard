@@ -205,6 +205,7 @@ The server checks any Origin against its own address and grants no CORS permissi
 | `GET /api/v1/boards/:board/shouts/:id` | One shout from any point in the board's history, including its decision and answer fields |
 | `GET /api/v1/boards/:board/code?ref=path:lines@commit&before=...` | A bounded preview of committed file lines from that registered board |
 | `GET /api/v1/boards/:board/events?after=N` | Events after sequence N, in order, and their event-log format version |
+| `GET /api/v1/events?boards=<id>,<id>` | One live stream of every named board's events and changed signals, each tagged with its board |
 | `POST /api/v1/boards/:board/moves` | One CLI move and its emitted event |
 | `POST /api/v1/boards/:board/requests` | A person's request for the coordinator (view only) |
 
@@ -258,6 +259,8 @@ The SQLite schema marker is now `PRAGMA user_version = 2`. Opening an older boar
 A request body is `{text}`. It creates a request from the person to the coordinator. Open requests stay first in coordinator `resume` and `inbox` until answered `done`, or `declined` with a reason, and do not count as open decisions.
 
 For live events, send `Accept: text/event-stream` to the events path. Ordinary messages have an `id` equal to their event sequence and `data` has the `stream` shape above. The local server also sends `event: changed` with `data: {"version":1,"event":{"event_kind":"changed"}}` when a view input changes without a board event; that notification has no `id` and does not move the reconnect cursor. Reconnect with `Last-Event-ID` to resume after the last ordinary event sequence; it takes precedence over `after`.
+
+To follow several boards on one connection, send `Accept: text/event-stream` to `GET /api/v1/events?boards=<id>,<id>`, naming each board once by its id from `GET /api/v1/boards`. A browser holds at most six connections per origin, so a project group's view follows all its repos through this one stream. Each frame's `data` also names its `board`: an event is `{"version":1,"board":"<id>","event":{...}}`, and the changed signal is `{"version":1,"board":"<id>","event":{"event_kind":"changed"}}`, sent on the same terms as a single board's. An ordinary event's `id` carries one cursor per board, `<id>:<sequence>` pairs joined by commas, so reconnecting with `Last-Event-ID`, or passing the same cursor as `after`, resumes each board where it left off. A followed board the cursor leaves out starts from its first event, and a pair for a board not followed is ignored. Every named board must be one the caller may read: otherwise the request is refused with that board's refusal, naming the board, and nothing is streamed. The path is live only; a request without `Accept: text/event-stream` is refused with `BAD_REQUEST`. The single-board events path is unchanged.
 
 The local server uses a shared HTTP router. Streams recheck access before each poll and close with a versioned refusal if access ends. Slow readers pause delivery and resume from the last delivered sequence.
 

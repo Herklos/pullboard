@@ -1030,6 +1030,162 @@ test('[A2, N26] the event stream says when the board changes without a move', as
   await closeStream();
 });
 
+/**
+ * Open a live event stream and read its frames one at a time. A pending read is shared across
+ * timeouts, so a quiet-period check cannot consume a later frame.
+ */
+async function liveFrames(t, url, headers) {
+  const controller = new AbortController();
+  const response = await fetchFresh(url, { headers: { ...headers, accept: 'text/event-stream' }, signal: controller.signal });
+  assert.equal(response.status, 200, 'the stream opens');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffered = '';
+  let pending = null;
+  let closing = false;
+  /** Parse the next complete frame that carries data, skipping comments. */
+  async function read() {
+    while (true) {
+      const boundary = buffered.indexOf('\n\n');
+      if (boundary >= 0) {
+        const raw = buffered.slice(0, boundary);
+        buffered = buffered.slice(boundary + 2);
+        const data = /^data: (.+)$/m.exec(raw)?.[1];
+        if (raw.startsWith(':') || data === undefined) continue;
+        return { event: /^event: (.+)$/m.exec(raw)?.[1] ?? 'message', id: /^id: (.+)$/m.exec(raw)?.[1] ?? null, data: JSON.parse(data) };
+      }
+      const { value, done } = await reader.read();
+      if (done && closing) return null;
+      assert.equal(done, false, 'the live stream stays open while its boards are served');
+      buffered += decoder.decode(value, { stream: true });
+    }
+  }
+  /** Share one pending read until it settles. */
+  function next() {
+    pending ??= read().finally(() => { pending = null; });
+    return pending;
+  }
+  /** Read the next frame, failing rather than hanging if none comes, and clear the ceiling either way. */
+  async function frame(label) {
+    let timer;
+    try {
+      return await Promise.race([
+        next(),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`no frame arrived (${label})`)), 10_000); }), // budget: hang ceiling for one live frame, not a latency claim.
+      ]);
+    } finally { clearTimeout(timer); }
+  }
+  /** Read frames until each predicate has matched one, returning every frame read. */
+  async function until(label, ...wanted) {
+    const frames = [];
+    const left = [...wanted];
+    while (left.length) {
+      const got = await frame(label);
+      frames.push(got);
+      const matched = left.findIndex((predicate) => predicate(got));
+      if (matched >= 0) left.splice(matched, 1);
+    }
+    return frames;
+  }
+  /** Require silence for longer than one server poll, clearing the window's timer either way. */
+  async function quiet(label) {
+    let timer;
+    const silence = new Promise((resolve) => { timer = setTimeout(() => resolve(null), 350); }); // budget: silence across more than one 200 ms server poll.
+    try {
+      const extra = await Promise.race([next().then((value) => ({ value })), silence]);
+      assert.equal(extra, null, `nothing is sent while nothing changes (${label})`); // budget: silence across more than one 200 ms server poll.
+    } finally { clearTimeout(timer); }
+  }
+  /** Stop the response and settle any pending read on pass and failure paths. */
+  async function close() {
+    if (closing) return;
+    closing = true;
+    controller.abort();
+    await reader.cancel().catch(() => {});
+    await pending?.catch(() => {});
+  }
+  t.after(close);
+  return { until, quiet, close };
+}
+
+/** Read a many-board event id as one cursor per board. */
+function boardCursorMap(id) {
+  return Object.fromEntries(id.split(',').map((pair) => {
+    const [, board, sequence] = /^(.+):(\d+)$/.exec(pair);
+    return [board, Number(sequence)];
+  }));
+}
+
+test('[A2, N26] one event stream serves many boards', async (t) => {
+  const other = fixture(t);
+  const box = await httpBox(t, { additionalProjects: [{ root: other.root, name: 'Second fixture' }] });
+  const listing = await box.call('/api/v1/boards');
+  const otherId = listing.document.boards.find((entry) => resolve(entry.root) === resolve(other.root)).id;
+  const boards = [box.id, otherId];
+  const latest = async (id) => (await box.call('/api/v1/boards/' + id + '/events')).document.events.at(-1).event_id;
+  const start = { [box.id]: await latest(box.id), [otherId]: await latest(otherId) };
+  const headers = { 'x-pullboard-key': box.key };
+  const many = box.origin + '/api/v1/events?boards=' + boards.join(',');
+  /** A frame of this kind for this board, and for one item when given. */
+  const is = (event, board, item) => (frame) => frame.event === event && frame.data.board === board
+    && (item === undefined || frame.data.event.item_id === item);
+
+  const first = await liveFrames(t, many + '&after=' + encodeURIComponent(boards.map((id) => id + ':' + start[id]).join(',')), headers);
+  await first.quiet('both boards unchanged');
+
+  // A move on each board arrives on the one connection, tagged with that board, with its changed signal.
+  const moves = [];
+  let lastId = null;
+  for (const [board, cli, root] of [[box.id, box.cli, box.root], [otherId, other.cli, other.root]]) {
+    const added = cli(root, 'add', 'app', 'Move on ' + board, '--criterion', 'arrives tagged', '--specs', 'G1').item;
+    const frames = await first.until(board, is('message', board, added.item_id), is('changed', board));
+    assert.deepEqual(frames.map((frame) => frame.data.board), frames.map(() => board), 'every frame names the board that moved');
+    const event = frames.find((frame) => frame.event === 'message');
+    assert.equal(event.data.version, 1);
+    assert.equal(event.data.event.event_kind, 'add');
+    lastId = event.id;
+    assert.equal(boardCursorMap(lastId)[board], event.data.event.event_id, 'the id carries this board at its new sequence');
+    assert.deepEqual(Object.keys(boardCursorMap(lastId)).sort(), [...boards].sort(), 'the id carries one cursor per followed board');
+    moves.push(event.data.event.event_id);
+    await first.quiet('after the move on ' + board);
+  }
+  assert.deepEqual(boardCursorMap(lastId), { [box.id]: moves[0], [otherId]: moves[1] });
+
+  // An edit that writes no event sends the changed signal for that board alone, with no id.
+  writeFileSync(join(other.root, 'SPEC.md'), readFileSync(join(other.root, 'SPEC.md'), 'utf8') + '\nThe second board follows this file.\n');
+  const edited = await first.until('eventless edit', is('changed', otherId));
+  assert.deepEqual(edited.map(({ event, id, data }) => ({ event, id, data })), [
+    { event: 'changed', id: null, data: { version: 1, board: otherId, event: { event_kind: 'changed' } } },
+  ]);
+  await first.quiet('after the eventless edit');
+  await first.close();
+
+  // Resuming from the last id picks up each board where it left off, and nothing earlier.
+  const missed = [
+    box.cli(box.root, 'add', 'app', 'Missed on the first board', '--criterion', 'replays', '--specs', 'G1').item.item_id,
+    other.cli(other.root, 'add', 'app', 'Missed on the second board', '--criterion', 'replays', '--specs', 'G1').item.item_id,
+  ];
+  const resumed = await liveFrames(t, many, { ...headers, 'last-event-id': lastId });
+  const replay = await resumed.until('resume', is('message', box.id, missed[0]), is('message', otherId, missed[1]));
+  assert.deepEqual(replay.map((frame) => [frame.event, frame.data.board, frame.data.event.item_id]), [
+    ['message', box.id, missed[0]],
+    ['message', otherId, missed[1]],
+  ], 'the resume replays only what each board wrote after its cursor');
+  assert.deepEqual(boardCursorMap(replay.at(-1).id), { [box.id]: replay[0].data.event.event_id, [otherId]: replay[1].data.event.event_id });
+  await resumed.quiet('after the resume');
+  await resumed.close();
+
+  // A board the caller cannot read is refused by name, and nothing streams.
+  const missing = 'f'.repeat(32);
+  const refused = await box.call('/api/v1/events?boards=' + box.id + ',' + missing, undefined, { accept: 'text/event-stream' });
+  assert.equal(refused.status, 404);
+  assert.equal(refused.document.error.code, 'NO_BOARD');
+  assert.match(refused.document.error.message, new RegExp(missing));
+  const repeated = await box.call('/api/v1/events?boards=' + box.id + ',' + box.id, undefined, { accept: 'text/event-stream' });
+  assert.equal(repeated.status, 400);
+  assert.match(repeated.document.error.message, new RegExp(box.id));
+});
+
 test('[A2] local auth, origin, unknown board and malformed calls refuse without moving', async (t) => {
   const box = await httpBox(t);
   const unauthenticated = await fetchFresh(box.origin + '/api/v1/boards');
