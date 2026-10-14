@@ -777,6 +777,10 @@ export function editItem(board, id, { agentId, brief, route, criterion, check, a
 
 /** Validate an edit without side effects, so a refused change never starts a shell baseline. */
 export function validateItemEdit(board, id, { agentId, brief, route, criterion, check, after }) {
+  const engine = board.executionEngineVersion ?? ENGINE_VERSION;
+  if (after !== undefined && engine < 10) {
+    throw new Refused('ENGINE_VERSION', `editing item dependencies requires engine 10; this board uses engine ${engine}; upgrade Pullboard before using --after`);
+  }
   let item = (board.executionEngineVersion ?? ENGINE_VERSION) >= 8 ? current(board, itemById(board, id)) : null;
   if (item?.item_status === 'claimed' && agentId !== COORDINATOR) {
     throw new Refused('HELD', `item #${id} is claimed; only the coordinator may edit it while held; shout coordinator`);
@@ -792,7 +796,12 @@ export function validateItemEdit(board, id, { agentId, brief, route, criterion, 
   if (['verified', 'withdrawn'].includes(item.item_status)) {
     throw new Refused('CLOSED', `item #${id} is ${item.item_status}`);
   }
-  if (after !== undefined) validateItemDependencies(board, id, after);
+  if (after !== undefined) {
+    if (!Array.isArray(after) || !after.every((dependency) => Number.isSafeInteger(dependency) && dependency > 0)) {
+      throw new Refused('BAD_DEPENDENCIES', 'item dependencies must be an array of positive integer item ids; use --after 1,2 or --after none');
+    }
+    validateItemDependencies(board, id, after);
+  }
   const next = {
     item_brief: brief === undefined ? item.item_brief : brief.trim(),
     item_route: route ?? item.item_route,
