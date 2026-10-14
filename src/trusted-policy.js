@@ -119,14 +119,21 @@ export function submissionPaths(root, item, commit, { config, mainCommit, depend
   return paths;
 }
 
-/** Verified dependencies may contribute their own unchanged lane files before the coordinator merges them [N16]. */
+/** Verified dependencies may contribute their own unchanged lane files, including through a verified chain [N16]. */
 export function dependencySnapshots(db, item) {
-  const ids = String(item.item_after ?? '').split(',').map(Number).filter(id => Number.isSafeInteger(id) && id > 0);
-  return ids.flatMap(id => {
-    const row = db.prepare("SELECT item_lane, item_claim_head, item_commit FROM item WHERE item_id=? AND item_status='verified' AND EXISTS (SELECT 1 FROM verdict WHERE item_id=? AND verdict_decision='ACCEPT' AND verdict_commit=item.item_commit)").get(id, id);
-    return row?.item_claim_head && /^[0-9a-f]{40,64}$/.test(row.item_commit ?? '')
-      ? [{ lane: row.item_lane, base: row.item_claim_head, commit: row.item_commit }] : [];
-  });
+  const pending = String(item.item_after ?? '').split(',').map(Number).filter(id => Number.isSafeInteger(id) && id > 0);
+  const visited = new Set();
+  const snapshots = [];
+  while (pending.length) {
+    const id = pending.shift();
+    if (visited.has(id)) continue;
+    visited.add(id);
+    const row = db.prepare("SELECT item_lane, item_claim_head, item_commit, item_after FROM item WHERE item_id=? AND item_status='verified' AND EXISTS (SELECT 1 FROM verdict WHERE item_id=? AND verdict_decision='ACCEPT' AND verdict_commit=item.item_commit)").get(id, id);
+    if (!row?.item_claim_head || !/^[0-9a-f]{40,64}$/.test(row.item_commit ?? '')) continue;
+    snapshots.push({ lane: row.item_lane, base: row.item_claim_head, commit: row.item_commit });
+    pending.push(...String(row.item_after ?? '').split(',').map(Number).filter(dependency => Number.isSafeInteger(dependency) && dependency > 0));
+  }
+  return snapshots;
 }
 
 /** Read the command frozen with the criterion, preventing a later edit from changing its proof. */
