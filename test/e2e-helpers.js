@@ -12,6 +12,7 @@ import { join, resolve } from 'node:path';
 import * as store from '../src/board.js';
 import { AGENT_SHELL_MARKERS, SSH_SHELL_MARKERS } from '../src/person.js';
 import { fetchFresh } from './http-fixture.js';
+import { fetchPrintedViewLink } from './view-link-fixture.js';
 
 /** Create isolated real-repository helpers for one parallel end-to-end test file. */
 export function createE2eHelpers() {
@@ -194,35 +195,8 @@ async function startView(box, cwd) {
   const key = link.searchParams.get('k');
   const base = `http://127.0.0.1:${link.port}`;
   const headers = { 'x-pullboard-key': key };
-  /**
-   * Fetch the page through either the accepted printed-key response or the cookie exchange.
-   * Keeping these paths in one fixture lets the API assertions stay independent of page auth.
-   */
-  const page = async () => {
-    const response = await fetchFresh(link, { redirect: 'manual' });
-    if (response.status === 200) return response;
-    assert.equal(response.status, 303, 'the printed link either serves the legacy page or exchanges its key');
-
-    const rawLocation = response.headers.get('location');
-    assert.ok(rawLocation, 'the cookie exchange has a redirect target');
-    const location = new URL(rawLocation, base);
-    assert.equal(location.origin, new URL(base).origin, 'the cookie exchange stays on this view origin');
-    assert.equal(location.pathname, '/', 'the cookie exchange returns to the clean page path');
-    assert.equal(location.search, '', 'the redirect does not keep credentials in the address');
-    assert.equal(location.hash, '', 'the redirect has no credential-bearing fragment');
-
-    const cookies = response.headers.getSetCookie?.() ?? [response.headers.get('set-cookie')].filter(Boolean);
-    assert.equal(cookies.length, 1, 'the exchange sets one session cookie');
-    const [pair, ...attributes] = cookies[0].split(';').map((part) => part.trim());
-    assert.match(pair, /^[A-Za-z0-9_-]+=[A-Za-z0-9._~-]+$/u, 'the session cookie has a valid nonempty name and value');
-    assert.ok(attributes.some((attribute) => /^httponly$/iu.test(attribute)), 'the session cookie is HttpOnly');
-    assert.ok(attributes.some((attribute) => /^samesite=strict$/iu.test(attribute)), 'the session cookie is SameSite=Strict');
-    assert.ok(attributes.some((attribute) => /^path=\/$/iu.test(attribute)), 'the session cookie is scoped to the view');
-
-    const pageResponse = await fetchFresh(location, { headers: { cookie: pair }, redirect: 'manual' });
-    assert.equal(pageResponse.status, 200, 'the cookie jar fetches the page after the exchange');
-    return pageResponse;
-  };
+  /** Read the page through either the legacy link or the cookie exchange. */
+  const page = () => fetchPrintedViewLink(link);
   /** Read the public listing through the view's real authenticated API. */
   const boards = async () => {
     const response = await fetchFresh(`${base}/api/v1/boards`, { headers });

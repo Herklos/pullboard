@@ -17,7 +17,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { request } from 'node:http';
+import { createServer, request } from 'node:http';
 import { connect } from 'node:net';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
@@ -27,6 +27,7 @@ import * as store from '../src/board.js';
 
 import { createE2eHelpers } from './e2e-helpers.js';
 import { fetchFresh } from './http-fixture.js';
+import { fetchPrintedViewLink } from './view-link-fixture.js';
 const e2e = createE2eHelpers();
 after(e2e.cleanup);
 const {
@@ -46,7 +47,7 @@ async function waitForViewStopped(url) {
   const deadline = Date.now() + 5_000; // budget: hang ceiling for observing graceful SIGTERM cleanup.
   while (Date.now() < deadline) {
     try {
-      const response = await fetchFresh(url, { signal: AbortSignal.timeout(500) });
+      const response = await fetchPrintedViewLink(url, { signal: AbortSignal.timeout(500) });
       if (!response.ok) throw new Error('the view listener remained open after its owner stopped');
     } catch (error) {
       if (error.cause?.code === 'ECONNREFUSED') return;
@@ -77,7 +78,7 @@ test("an agent's pullboard view prints its link and returns [N26,N32]", async ()
     assert.equal((statSync(stateFile).mode & 0o077) === 0, true, 'the persisted session secret is private to this user');
     assert.equal(state.pid === first.pid && state.boundAt === first.boundAt, true, 'the runtime record matches the successful bind receipt');
     assert.equal(state.secret === firstUrl.searchParams.get('k'), true, 'the private record authenticates the returned link');
-    const page = await fetchFresh(firstUrl);
+    const page = await fetchPrintedViewLink(firstUrl);
     assert.equal(page.status, 200, 'the returned link fetches the live view page');
     const receiptFile = join(box.repo, '.git', 'pullboard', 'view-bind.json');
     assert.equal(existsSync(receiptFile), true, 'a fresh bind writes the setup receipt');
@@ -102,7 +103,7 @@ test("an agent's pullboard view prints its link and returns [N26,N32]", async ()
     const agent = JSON.parse(agentStarted);
     owned.push({ pid: agent.pid, port: agent.port, url: agent.url });
     assert.equal(agent.reused, false, 'an explicit agent start also creates and returns its owned view');
-    assert.equal((await fetchFresh(agent.url)).status, 200, 'the explicit agent link fetches its live page');
+    assert.equal((await fetchPrintedViewLink(agent.url)).status, 200, 'the explicit agent link fetches its live page');
     assert.equal(existsSync(receiptFile), true, 'a new port-0 bind writes a new setup receipt');
     const agentReceipt = JSON.parse(readFileSync(receiptFile, 'utf8'));
     assert.equal(agentReceipt.boundAt, agent.boundAt, 'a new port-0 bind records its actual setup receipt');
@@ -129,6 +130,65 @@ test("an agent's pullboard view prints its link and returns [N26,N32]", async ()
     }
     if (cleanupError) throw cleanupError;
   }
+});
+
+test('a printed view link opens through its cookie redirect [N39,N26]', async (t) => {
+  const requests = [];
+  const server = createServer((req, res) => {
+    requests.push({ url: req.url, cookie: req.headers.cookie ?? '' });
+    if (req.url === '/?k=legacy-key') {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end('legacy view page');
+    } else if (req.url === '/?k=fixture-key') {
+      res.writeHead(303, {
+        location: '/',
+        'set-cookie': 'pb_view=fixture-cookie; Path=/; HttpOnly; SameSite=Strict',
+      }).end();
+    } else if (req.url === '/?k=invalid-userinfo') {
+      const target = new URL('/', origin);
+      target.username = 'user';
+      target.password = 'pass';
+      res.writeHead(303, {
+        location: target.href,
+        'set-cookie': 'pb_view=fixture-cookie; Path=/; HttpOnly; SameSite=Strict',
+      }).end();
+    } else if (req.url === '/?k=foreign-domain') {
+      res.writeHead(303, {
+        location: '/',
+        'set-cookie': 'pb_view=foreign-cookie; Path=/; HttpOnly; SameSite=Strict; Domain=foreign.invalid',
+      }).end();
+    } else if (req.url === '/' && req.headers.cookie === 'pb_view=fixture-cookie') {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end('browser opened the view');
+    } else {
+      res.writeHead(403).end('the clean address requires the cookie');
+    }
+  });
+  await new Promise((ready, fail) => {
+    server.once('error', fail);
+    server.listen(0, '127.0.0.1', ready);
+  });
+  t.after(() => new Promise((done) => server.close(done)));
+
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const legacy = await fetchPrintedViewLink(`${origin}/?k=legacy-key`);
+  assert.equal(legacy.status, 200);
+  assert.equal(await legacy.text(), 'legacy view page');
+  assert.deepEqual(requests.splice(0), [{ url: '/?k=legacy-key', cookie: '' }]);
+
+  const page = await fetchPrintedViewLink(`${origin}/?k=fixture-key`);
+  assert.equal(page.status, 200);
+  assert.equal(await page.text(), 'browser opened the view');
+  assert.deepEqual(requests, [
+    { url: '/?k=fixture-key', cookie: '' },
+    { url: '/', cookie: 'pb_view=fixture-cookie' },
+  ]);
+
+  requests.length = 0;
+  await assert.rejects(fetchPrintedViewLink(`${origin}/?k=invalid-userinfo`), { name: 'AssertionError' });
+  assert.deepEqual(requests, [{ url: '/?k=invalid-userinfo', cookie: '' }]);
+
+  requests.length = 0;
+  await assert.rejects(fetchPrintedViewLink(`${origin}/?k=foreign-domain`), { name: 'AssertionError' });
+  assert.deepEqual(requests, [{ url: '/?k=foreign-domain', cookie: '' }]);
 });
 
 test('a person running view with JSON in a terminal keeps the server in that terminal [N26,N32]', () => {
