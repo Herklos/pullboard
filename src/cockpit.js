@@ -205,6 +205,9 @@ function homeTab() {
 }
 const view = { roadmapOpen: new Map(), root: keep('pb.project'), tab: addressTab() || homeTab(), itemsView: typeof location !== 'undefined' && location.hash === '#items/pipeline' ? 'pipeline' : 'list', filterOpen: false, seen: {}, code: {}, item: null, adding: false, declining: null, state: 'active', rows: { spec: 'decide', doctrine: 'all' }, row: { spec: null, doctrine: null }, agent: null, allAgents: false, agentsHidden: keep('pb.agents') === 'hidden', statsOpen: false, open: {}, addressDetail: null, shout: null, scrollPlace: false };
 let switchGeneration = 0;
+// Each board read in the order it started, and the newest one drawn: an answer older than that one is stale.
+let refreshStarted = 0;
+let refreshDrawn = { generation: 0, full: true };
 if (snapshot) view.state = 'all';
 let data = null;
 let seen = '';
@@ -912,12 +915,32 @@ function boardPath(root) {
   return '/api/v1/boards/' + encodeURIComponent(board.id);
 }
 
-/** Compose the multi-repo page from the public board list and each board's public state. */
-async function boardState(root, mark) {
+/**
+ * What the page last drew for a listed board, to stand in for it in a catch-up that does not read it: its sidebar
+ * row, and its state when the page shows it. Nothing when the page has no such row, or shows the board without one.
+ */
+function lastRead(board, root) {
+  const row = data?.projects.find((entry) => entry.root === board.root && entry.id === board.id && entry.ok);
+  if (!row) return null;
+  const state = data.root === board.root ? data.project : data.group?.repos.find((repo) => repo.root === board.root)?.board ?? null;
+  if (!state && (board.root === root || root === 'group:' + board.project)) return null;
+  return { row: { ...row, ...board, ok: true }, state };
+}
+
+/**
+ * Compose the multi-repo page from the public board list and each board's public state. A catch-up names the boards
+ * whose events arrived in fresh and reads only those; every other board keeps what the page last drew (#545).
+ */
+async function boardState(root, mark, fresh = null) {
   const listed = await api('/api/v1/boards');
   const states = new Map();
   const cursor = mark !== null && mark !== undefined && /^\\d+$/.test(String(mark)) && Number.isSafeInteger(Number(mark)) ? Number(mark) : null;
   const projects = await Promise.all(listed.boards.map(async (board) => {
+    const kept = fresh && !fresh.has(board.root) ? lastRead(board, root) : null;
+    if (kept) {
+      if (kept.state) states.set(board.root, kept.state);
+      return kept.row;
+    }
     try {
       const query = board.root === root && cursor !== null ? '?seen=' + encodeURIComponent(cursor) : '';
       const reply = await api('/api/v1/boards/' + encodeURIComponent(board.id) + '/state' + query);
@@ -996,13 +1019,21 @@ async function revokeCredential(id) {
   if (root === view.root) renderCredentials();
 }
 
-/** Refresh from API v1 and discard a response for a project the person already left. */
-async function refresh() {
+/** Refresh from API v1, every board or only those in fresh, and discard a response for a project the person left. */
+async function refresh(fresh = null) {
+  const generation = ++refreshStarted;
   const root = view.root;
   const mark = root ? view.seen['pb.seen.' + root] ?? keep('pb.seen.' + root) : null;
-  const next = await boardState(root, mark);
+  const next = await boardState(root, mark, fresh);
   // The person switched projects while this answer was on its way: the switch's own refresh shows it.
   if (root !== view.root) return;
+  // A board left and opened again: an answer that started before one already drawn is older than it, so it is not
+  // drawn over it. When it read every board and the newer one read only some, the rest are read once more.
+  if (generation < refreshDrawn.generation) {
+    if (!fresh && !refreshDrawn.full) { catchEvery = true; catchUp(); }
+    return;
+  }
+  refreshDrawn = { generation, full: !fresh };
   if (!next.project && !next.group && next.projects.some((p) => p.ok)) {
     view.root = next.projects.find((p) => p.ok).root;
     keep('pb.project', view.root);
@@ -1053,6 +1084,9 @@ let stream = null;
 let catching = null;
 let catchAgain = false;
 let catchWhenShown = false;
+// The boards whose events arrived since the last catch-up, or every board when a message names none.
+const catchRoots = new Set();
+let catchEvery = false;
 /** How often a page with no live stream reads its board instead, until the stream is back. */
 const FALLBACK_MS = 15000;
 
@@ -1121,16 +1155,27 @@ function streamMessage(block) {
 }
 
 /**
- * Whether a message changes what the page shows: an event after the latest one its board shows, or a signal with no
- * event, such as a warning or the board changing without a move. A group's stream names each event's board (#600).
+ * The board a message changed, by root: an event after the latest one that board shows, or its changed signal, sent
+ * when the board changes without a move (#554). Undefined when the page already shows it, and null, for every board,
+ * when a message names no board this stream follows, as a warning does. A group's stream names each event's board
+ * (#600); a single board's stream is that board's.
  */
-function streamMoved(entry, message) {
+function streamChange(entry, message) {
+  if (!message.data && message.event === 'message') return undefined;
   let body = null;
-  try { body = message.data ? JSON.parse(message.data) : null; } catch { return true; }
+  try { body = JSON.parse(message.data); } catch { return null; }
   const board = entry.boards.length === 1 ? entry.boards[0] : entry.boards.find((candidate) => candidate.id === body?.board);
-  const id = Number(body?.event?.event_id ?? (entry.boards.length === 1 && /^\\d+$/.test(message.id ?? '') ? message.id : NaN));
-  if (board && Number.isSafeInteger(id)) return id > board.shown;
-  return Boolean(message.data) || message.event !== 'message';
+  if (!board || !body?.event) return null;
+  const id = Number(body.event.event_id);
+  if (!Number.isSafeInteger(id)) return board.root;
+  return id > board.shown ? board.root : undefined;
+}
+
+/** The boards a shown board's milestones name, by root: its Roadmap reads their items, so its catch-up reads them. */
+function namedBoards(root) {
+  const state = data?.root === root ? data.project : data?.group?.repos.find((repo) => repo.root === root)?.board;
+  const names = new Set((state?.milestones || []).flatMap((milestone) => milestone.items || []).map((entry) => /^(.+)#[1-9]\\d*$/.exec(String(entry.id))?.[1]).filter(Boolean));
+  return (data?.projects || []).filter((row) => names.has(row.name) || names.has(String(row.root).split('/').pop())).map((row) => row.root);
 }
 
 /** The rule and next step a stream's refusal carries. */
@@ -1159,10 +1204,17 @@ async function listen(entry) {
       headers: { ...connection.headers, accept: 'text/event-stream', 'last-event-id': entry.cursor }, cache: 'no-store', signal: controller.signal,
     });
     if (!res.ok || !res.body) throw new Error('the board stream answered ' + res.status);
+    // A change with no event while the stream was down, such as a SPEC.md edit, is not replayed by Last-Event-ID, and
+    // the reopened stream's changed signal starts after it. So a stream that reopens reads its boards once.
+    const reopened = entry.status === 'down';
     entry.status = 'up';
     entry.offline = false;
     entry.failures = 0;
     $('live').textContent = liveLine();
+    if (reopened) {
+      for (const board of entry.boards) catchRoots.add(board.root);
+      catchUp();
+    }
     const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
     let buffer = '';
     for (;;) {
@@ -1175,7 +1227,10 @@ async function listen(entry) {
         buffer = buffer.slice(end + 2);
         if (message.event === 'error') throw new Error(streamRefusal(message.data));
         if (message.id !== null) entry.cursor = message.id;
-        if (streamMoved(entry, message)) moved = true;
+        const change = streamChange(entry, message);
+        if (change === undefined) continue;
+        if (change === null) catchEvery = true; else catchRoots.add(change);
+        moved = true;
       }
       // One read covers every event that arrived together.
       if (moved) catchUp();
@@ -1194,12 +1249,18 @@ async function listen(entry) {
 
 /**
  * The one catch-up function: bring the page up to date after the events that arrived, one read at a time, by reading
- * the board's state again. A hidden page catches up when it is shown. #555 switches this read to #552's since=N delta.
+ * the state of each board they changed again. A hidden page catches up when it is shown. #555 switches this read to
+ * #552's since=N delta.
  */
 function catchUp() {
   if (document.hidden) { catchWhenShown = true; return; }
   if (catching) { catchAgain = true; return; }
-  catching = refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }).finally(() => {
+  if (!catchEvery && !catchRoots.size) return;
+  const fresh = catchEvery ? null : new Set(catchRoots);
+  for (const root of catchEvery ? [] : catchRoots) for (const named of namedBoards(root)) fresh.add(named);
+  catchEvery = false;
+  catchRoots.clear();
+  catching = refresh(fresh).catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }).finally(() => {
     catching = null;
     if (catchAgain) { catchAgain = false; catchUp(); }
   });

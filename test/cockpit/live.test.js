@@ -1,11 +1,11 @@
 /** The view follows the board's event stream instead of a timer, in real Chrome [N26,A2]. */
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { createServer, request as forward } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { SPEC, browserPause, boardId, boardOf, chromeExecutable, closeSnapshotChrome, fetchLive, machine, openSnapshotChrome, pickProject, project, startView } from './fixture.js';
+import { SPEC, browserPause, boardId, boardOf, chromeExecutable, closeSnapshotChrome, fetchLive, machine, openPage, openSnapshotChrome, pickProject, project, startView } from './fixture.js';
 
 /** The page's HTTP requests from a mark on, as method and path, leaving out data: URLs. */
 function sent(chrome, mark = 0) {
@@ -178,6 +178,65 @@ test('a dropped stream reconnects from its last event [N26,A2]', { timeout: 120_
     assert.deepEqual(chrome.exceptions, [], 'the page raises no uncaught exception');
   } finally {
     await close();
+  }
+});
+
+// core-188's first static concern (#545 review): an edit with no event, made while the stream is down, is not in
+// Last-Event-ID's replay, and the reopened stream's changed signal starts after it.
+test('a change with no event while the stream is down shows once it reconnects [N26,A2]', { timeout: 120_000 }, async () => {
+  const { alpha, chrome, proxy, close } = await liveBoard('live-gap', { proxied: true });
+  try {
+    await chrome.waitFor('document.querySelector(\'#live\').textContent === \'\'');
+    proxy.cut();
+    await chrome.waitFor('/^(offline|reconnecting)/.test(document.querySelector(\'#live\').textContent)', 15_000); // budget: hang ceiling for the dropped stream to show.
+    appendFileSync(join(alpha.repo, 'SPEC.md'), '- G3 [pending, must] Should the page wave back? | gate: web test\n');
+    proxy.restore();
+    await chrome.waitFor('data?.project?.spec?.some(row => row.id === "G3")', 30_000); // budget: hang ceiling for one reconnect after the stream's longest 15000 ms wait.
+    await chrome.waitFor('document.querySelector(\'#live\').textContent === \'\'');
+    assert.deepEqual(chrome.exceptions, [], 'the page raises no uncaught exception');
+  } finally {
+    await close();
+  }
+});
+
+// core-188's second static concern (#545 review): with the board left and opened again, the first answer for it can
+// arrive after the newer one. It must not be drawn over it.
+test('an older answer for a board opened again is not drawn over a newer one [N26]', async () => {
+  const box = machine();
+  const alpha = project(box, 'stale-alpha');
+  const beta = project(box, 'stale-beta');
+  box.run(alpha.repo, 'add', 'web', 'Older', '--specs', 'G1', '--criterion', 'renders');
+  const view = await startView(box);
+  try {
+    const page = await openPage(view);
+    assert.equal(page.run('view.root'), alpha.repo, 'the page opens on the first board');
+    // Hold the next read of alpha's state, so the first answer for alpha arrives last.
+    page.run(`(() => {
+      const real = fetch, id = data.projects.find((row) => row.root === ${JSON.stringify(alpha.repo)}).id;
+      let armed = true;
+      globalThis.__releaseOlder = () => {};
+      fetch = (path, init) => {
+        if (!armed || !path.includes('/boards/' + id + '/state')) return real(path, init);
+        armed = false;
+        // The read happens now, before the newer item exists; only its answer waits.
+        const answer = globalThis.__olderRead = real(path, init);
+        return new Promise((resolve) => { globalThis.__releaseOlder = () => resolve(answer); });
+      };
+    })()`);
+    const older = page.run('refresh()');
+    // The held read is sent and answered before the board changes; only the page has not seen the answer yet.
+    while (!page.run('Boolean(globalThis.__olderRead)')) await new Promise((resolve) => setImmediate(resolve));
+    await page.run('__olderRead');
+    await page.run(`view.root = ${JSON.stringify(beta.repo)}; refresh()`);
+    box.run(alpha.repo, 'add', 'web', 'Newer', '--specs', 'G1', '--criterion', 'renders');
+    await page.run(`view.root = ${JSON.stringify(alpha.repo)}; refresh()`);
+    const titles = () => JSON.parse(page.run('JSON.stringify(data.project.items.map((item) => item.title).sort())'));
+    assert.deepEqual(titles(), ['Newer', 'Older'], 'the newer answer shows both items');
+    page.run('__releaseOlder()');
+    await older;
+    assert.deepEqual(titles(), ['Newer', 'Older'], 'the older answer, arriving last, is not drawn over it');
+  } finally {
+    await view.stop();
   }
 });
 
