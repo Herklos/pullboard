@@ -212,6 +212,36 @@ async function cachedHttpStateTest(t) {
 
 test('[A2, N26] an unchanged board state is reused and a move rebuilds it', cachedHttpStateTest);
 
+test('[A2, N26] local milestone item status refreshes after an item event', async (t) => {
+  let builds = 0;
+  const box = await httpBox(t, { onStateBuild: () => { builds += 1; } });
+  const agent = box.cli(box.root, 'worktree', 'app', '--model', 'fixture-agent');
+  const added = await box.call(box.path + '/moves', {
+    verb: 'add', args: { lane: 'app', title: 'Roadmap item', criterion: 'refresh local status', specs: 'G1' },
+  });
+  assert.equal(added.status, 200);
+  const itemId = added.document.result.item.item_id;
+  box.cli(box.root, 'milestone', 'add', 'Delivery', '--items', String(itemId));
+
+  const before = await box.call(box.path + '/state');
+  assert.equal(builds, 1);
+  assert.deepEqual(before.document.state.milestones[0].items[0], {
+    id: itemId, title: 'Roadmap item', status: 'open',
+  });
+
+  const unchanged = await box.call(box.path + '/state');
+  assert.equal(builds, 1, 'an unchanged local roadmap state reuses its cached snapshot');
+  assert.deepEqual(unchanged.document.state.milestones, before.document.state.milestones);
+
+  const claimed = await box.call(box.path + '/moves', { verb: 'claim', item: itemId, agent: agent.agent });
+  assert.equal(claimed.status, 200);
+  const after = await box.call(box.path + '/state');
+  assert.equal(builds, 2, 'a real item event rebuilds the cached local roadmap');
+  assert.deepEqual(after.document.state.milestones[0].items[0], {
+    id: itemId, title: 'Roadmap item', status: 'claimed',
+  });
+});
+
 test('[A2, N26] a person request receipt refreshes cached state without an event', async (t) => {
   let builds = 0;
   const box = await httpBox(t, { onStateBuild: () => { builds += 1; } });

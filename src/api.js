@@ -56,14 +56,15 @@ function boardStateRevision(root, id, isMain) {
       agents,
       leases,
       requestReceipts: board.db.prepare('SELECT meta_value FROM board_meta WHERE meta_key = ?').get('relay_person_requests')?.meta_value ?? null,
-      milestones: hasExternalMilestones ? milestoneRoadmap(info.root, board) : store.roadmap(board),
+      milestones,
+      externalMilestones: hasExternalMilestones ? milestoneRoadmap(info.root, board) : null,
     };
   }, isMain);
   const revision = JSON.stringify([
     info.commonDir, id, resolveCommit(info.root, 'HEAD'), files,
-    local.event, local.agents, local.leases, local.requestReceipts, local.milestones, store.EVENT_LOG_VERSION,
+    local.event, local.agents, local.leases, local.requestReceipts, local.milestones, local.externalMilestones, store.EVENT_LOG_VERSION,
   ]);
-  return { cacheId: info.commonDir + '\0' + id, revision, milestones: local.milestones, cacheable: true };
+  return { cacheId: info.commonDir + '\0' + id, revision, milestones: local.externalMilestones, cacheable: true };
 }
 
 /** Build the complete local API state, including fields that the shared project snapshot omits. */
@@ -79,7 +80,7 @@ function buildLocalBoardState(board, codeIsMain, milestones) {
   const projectData = withBoard(board.root, (db) => ({
     requests: store.openRequests(db),
     personRequests: personRequestStatuses(db),
-    milestones,
+    milestones: milestones ?? store.roadmap(db),
     rowDecisions: store.rowDecisions(db),
     checks: new Map(store.listItems(db, { all: true }).map((item) => store.getItem(db, item.item_id)).map((item) => [item.item_id, {
       check: item.item_check,
