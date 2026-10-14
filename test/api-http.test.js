@@ -357,6 +357,43 @@ test("[A2, N26] the board state sends summaries and an item's detail comes from 
   assert.deepEqual((await pageSummary.json()).state.items, summaryState.document.state.items, 'and sends summaries when asked');
 });
 
+test("[A2, N26] a sent-back item's summary carries its reject note's first line", async (t) => {
+  const box = await httpBox(t);
+  const builder = box.cli(box.root, 'worktree', 'app', '--model', 'fixture-builder');
+  const verifier = box.cli(box.root, 'worktree', 'app', '--model', 'fixture-verifier');
+  /** Make one real board move through HTTP and return its result. */
+  async function move(body) {
+    const moved = await box.call(box.path + '/moves', body);
+    assert.equal(moved.status, 200, JSON.stringify(moved.document));
+    return moved.document.result;
+  }
+  /** Build an item to submission and reserve its review for the verifier. */
+  async function submitted(title) {
+    const id = (await move({ verb: 'add', args: { lane: 'app', title, criterion: 'shows a greeting', specs: 'G1' } })).item.item_id;
+    await move({ verb: 'claim', item: id, agent: builder.agent });
+    await move({ verb: 'submit', item: id, agent: builder.agent });
+    await move({ verb: 'next', agent: verifier.agent, args: { verify: true } });
+    return id;
+  }
+  const note = 'The page shows no greeting.\nThe second line stays in the detail.';
+  const rejected = await submitted('Rejected item');
+  await move({ verb: 'verify', item: rejected, agent: verifier.agent, args: { decision: 'reject', reason: 'BEHAVIOR_MISMATCH', note } });
+  const accepted = await submitted('Accepted item');
+  await move({ verb: 'verify', item: accepted, agent: verifier.agent, args: { decision: 'accept', reason: 'CRITERION_MET', note: 'The page greets by name.\nChecked twice.' } });
+
+  const summaries = new Map((await box.call(box.path + '/state')).document.state.items.map((item) => [item.id, item]));
+  assert.deepEqual(summaries.get(rejected).verdict, { decision: 'REJECT', reason: 'BEHAVIOR_MISMATCH', note: 'The page shows no greeting.' },
+    'a sent-back row keeps its reason and the first line of the note');
+  assert.deepEqual(summaries.get(accepted).verdict, { decision: 'ACCEPT', reason: 'CRITERION_MET' }, 'an accepted item carries no note');
+  assert.equal((await box.call(box.path + '/items/' + rejected)).document.item.verdict.note, note, 'the whole note stays in the detail');
+
+  await move({ verb: 'claim', item: rejected, agent: builder.agent });
+  const reworked = (await box.call(box.path + '/state')).document.state.items.find((item) => item.id === rejected);
+  assert.equal(reworked.verdict.note, 'The page shows no greeting.', 'a row being reworked still says why');
+  const full = (await box.call(box.path + '/state?detail=full')).document.state.items.find((item) => item.id === rejected);
+  assert.deepEqual({ ...reworked, ...(await box.call(box.path + '/items/' + rejected)).document.item }, full, 'the detail still completes the summary');
+});
+
 test('[A2, N26] local milestone item status refreshes after an item event', async (t) => {
   let builds = 0;
   const box = await httpBox(t, { onStateBuild: () => { builds += 1; } });

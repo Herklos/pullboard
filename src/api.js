@@ -187,10 +187,15 @@ function withListFields(state, leases) {
   return { ...state, items, moveCounts };
 }
 
-/** Keep the summary fields; the latest verdict keeps only its decision and reason. */
+/**
+ * Keep the summary fields. The latest verdict keeps its decision and reason, and, for an item sent
+ * back and not verified, the first line of its note, which the Items list shows beside the reason.
+ */
 function itemSummary(item) {
   const summary = Object.fromEntries(SUMMARY_FIELDS.map((key) => [key, item[key]]));
-  summary.verdict = item.verdict && { decision: item.verdict.decision, reason: item.verdict.reason };
+  const sentBack = item.verdict?.decision === 'REJECT' && item.status !== 'verified';
+  summary.verdict = item.verdict && { decision: item.verdict.decision, reason: item.verdict.reason,
+    ...(sentBack ? { note: String(item.verdict.note ?? '').split('\n').map((line) => line.trim()).find(Boolean) ?? '' } : {}) };
   return summary;
 }
 
