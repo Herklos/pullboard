@@ -1494,11 +1494,11 @@ export function reopen(board, id, { agentId, note }) {
               && culprit.tests.every((failure) => typeof failure.file === 'string' && typeof failure.name === 'string'
                 && note.includes(`${failure.file}: ${failure.name}`) && note.includes(culprit.mergeCommit)));
           const manual = manualLandingFailure(note);
-          if (!accepted || (!recorded && !manual)) return new Refused('LANDING_FAILURE_REQUIRED', `reopening verified item #${id} needs a failing test and merge commit in --note`);
+          if (!accepted || (!recorded && !manual)) return new Refused('LANDING_FAILURE_REQUIRED', `reopening verified item #${id} needs --note in the format <test file>: <test name>; merge commit <sha>`);
           supersedes = accepted.event_id;
           landingFailure = recorded
             ? { batch: recorded.batch.id, tests: recorded.culprit.tests, mergeCommit: recorded.culprit.mergeCommit }
-            : { batch: null, tests: [manual.test], mergeCommit: manual.mergeCommit };
+            : { batch: null, tests: manual.tests, mergeCommit: manual.mergeCommit };
           return null;
         },
       },
@@ -1522,10 +1522,17 @@ export function reopen(board, id, { agentId, note }) {
 
 /** Read test and merge-commit evidence from a Studio/manual landing note without checking Git. */
 function manualLandingFailure(note) {
-  const test = note.match(/(?<file>(?:[\w.-]+\/)*[\w.-]+):\s*(?<name>[^;\n]+?)(?=\s*;\s*merge commit\b|$)/iu);
-  const mergeCommit = note.match(/\bmerge commit\s+([a-f0-9]{40}|[a-f0-9]{64})\b/iu)?.[1];
-  if (!test || !test.groups.name.trim() || !mergeCommit) return null;
-  return { test: { file: test.groups.file, name: test.groups.name.trim() }, mergeCommit };
+  const generatedPrefix = /^Landing batch [a-z0-9_-]{1,80} failed /iu.exec(note);
+  const body = generatedPrefix ? note.slice(generatedPrefix[0].length) : note;
+  const evidence = body.match(/^(?<tests>.+);[ \t]*merge commit[ \t]+(?<mergeCommit>[a-f0-9]{40}|[a-f0-9]{64})$/iu);
+  if (!evidence) return null;
+  const tests = evidence.groups.tests.split(/;[ \t]*/u).map((entry) => {
+    const test = entry.match(/^(?<file>(?:[\w.-]+\/)*[\w.-]+\.[a-z0-9]+):[ \t]*(?<name>[^;\r\n]+)$/iu);
+    if (!test || !test.groups.name.trim()) return null;
+    return { file: test.groups.file, name: test.groups.name.trim() };
+  });
+  if (!tests.length || tests.some((test) => !test)) return null;
+  return { tests, mergeCommit: evidence.groups.mergeCommit };
 }
 
 /**
