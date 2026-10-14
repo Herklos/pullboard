@@ -72,14 +72,14 @@ function localRevisionInputs(board, now) {
 }
 
 /** Capture the inexpensive inputs that can invalidate a complete board-state snapshot. */
-function boardStateRevision(root, id, isMain, projects) {
+function boardStateRevision(root, id, isMain) {
   const info = repoInfo(root);
   const config = loadConfig(info.root);
   const files = stateFileInputs(info.root, config).map(fileRevision);
   const local = withBoard(info.root, (board) => {
     const inputs = localRevisionInputs(board, board.clock.now().toISOString());
     const hasExternalMilestones = inputs.milestones.some((milestone) => milestone.items.some((item) => typeof item !== 'number'));
-    return { ...inputs, externalMilestones: hasExternalMilestones ? milestoneRoadmap(info.root, board, projects) : null };
+    return { ...inputs, externalMilestones: hasExternalMilestones ? milestoneRoadmap(info.root, board) : null };
   }, isMain);
   const revision = stateRevision({
     identity: [info.commonDir, id],
@@ -138,9 +138,11 @@ function headFileRevision(info) {
   }
 }
 
-/** Read default registry names without listApiProjects' pruning or metadata writes. */
-function watcherProjects(projects) {
-  if (projects !== listApiProjects) return projects();
+/**
+ * Read the machine registry that milestoneRoadmap resolves against, without listApiProjects' pruning
+ * or metadata writes: a poll must not rewrite the registry it watches.
+ */
+function registeredProjects() {
   try {
     const value = JSON.parse(readFileSync(registryFile(), 'utf8'));
     if (!Array.isArray(value.projects)) return [];
@@ -155,9 +157,9 @@ function watcherProjects(projects) {
 }
 
 /** Open only boards named by this board's external milestone references. */
-function openRoadmapInputs(root, milestones, projects, localDb) {
+function openRoadmapInputs(root, milestones, localDb) {
   const references = milestones.flatMap((milestone) => milestone.items.filter((item) => typeof item !== 'number'));
-  const registered = references.length ? watcherProjects(projects) : [];
+  const registered = references.length ? registeredProjects() : [];
   const opened = new Map();
   const pathMarkers = new Map();
   const watchPath = (path) => {
@@ -220,7 +222,7 @@ function openRoadmapInputs(root, milestones, projects, localDb) {
 }
 
 /** Watch the same named state inputs as the cache without rebuilding a board-state response. */
-function watchLocalStateRevision(board, projects) {
+function watchLocalStateRevision(board) {
   const info = repoInfo(board.root);
   const config = loadConfig(info.root);
   let files = stateFileInputs(info.root, config);
@@ -258,7 +260,7 @@ function watchLocalStateRevision(board, projects) {
     const registryChanged = registryMarker !== currentRegistryMarker;
     if (!external || JSON.stringify(externalReferences) !== JSON.stringify(references) || registryChanged || external.needsRefresh()) {
       external?.close();
-      external = openRoadmapInputs(info.root, milestoneDefinitions, projects, db);
+      external = openRoadmapInputs(info.root, milestoneDefinitions, db);
       externalVersion = new Map();
       externalValues = null;
       externalNextExpiry = null;
@@ -550,11 +552,11 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
   const stateCache = new Map();
   /** Return the current state and its cached-static JSON representation under revision checks. */
   function localState(board, seen) {
-    const before = boardStateRevision(board.root, board.id, codeIsMain, projects);
+    const before = boardStateRevision(board.root, board.id, codeIsMain);
     const cached = stateCache.get(before.cacheId);
     if (before.cacheable && cached?.revision === before.revision) {
       const state = stateForRequest(cached.state, board.root, seen, cached.preparedFlow, true, codeIsMain);
-      const after = boardStateRevision(board.root, board.id, codeIsMain, projects);
+      const after = boardStateRevision(board.root, board.id, codeIsMain);
       if (after.cacheable && after.revision === before.revision) {
         stateCache.delete(before.cacheId);
         stateCache.set(before.cacheId, cached);
@@ -566,7 +568,7 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
     const state = buildLocalBoardState(board, codeIsMain, before.milestones);
     const history = withBoard(board.root, (db) => store.events(db), codeIsMain);
     const preparedFlow = prepareFlowHistory(history);
-    const after = boardStateRevision(board.root, board.id, codeIsMain, projects);
+    const after = boardStateRevision(board.root, board.id, codeIsMain);
     const stateJsonFields = prepareStateJson(state);
     if (before.cacheable && after.cacheable && before.revision === after.revision) {
       const entry = { revision: before.revision, state, preparedFlow, stateJsonFields };
@@ -593,7 +595,7 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
     board: (id) => findBoard(id, projects, codeIsMain),
     state: (board, who, seen) => localState(board, seen).state,
     stateJson: (board, who, seen) => localState(board, seen).json,
-    watchRevision: (board) => watchLocalStateRevision(board, projects),
+    watchRevision: (board) => watchLocalStateRevision(board),
     shout: (board, id) => relayLinked(board.root)
       ? relayPresentationShout(board.root, id)
       : withBoard(board.root, (db) => store.shoutDetails(db, id), codeIsMain),

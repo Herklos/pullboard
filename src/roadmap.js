@@ -5,13 +5,13 @@ import { codeIsFromMain, repoInfo } from './git.js';
 import { listApiProjects } from './projects.js';
 
 /** Resolve a repo-qualified milestone item against this machine's registered boards. */
-export function milestoneRoadmap(root, board, projects = listApiProjects) {
-  const registered = projects();
+export function milestoneRoadmap(root, board) {
+  const projects = listApiProjects();
   const resolveExternal = (reference) => {
     const match = /^(.+)#([1-9]\d*)$/.exec(reference);
     if (!match) return { id: reference, title: reference, status: 'unavailable' };
     const [, repo, number] = match;
-    const candidates = registered.filter((project) => project.name === repo || basename(project.root) === repo);
+    const candidates = projects.filter((project) => project.name === repo || basename(project.root) === repo);
     if (candidates.length !== 1) return { id: reference, title: `#${number} (${repo})`, status: 'unavailable' };
     try {
       const info = repoInfo(candidates[0].root);

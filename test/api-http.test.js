@@ -537,9 +537,17 @@ test('[A2] a live HTTP stream follows CLI writes and reconnects after Last-Event
 
 test('[A2, N26] the event stream says when the board changes without a move', async (t) => {
   const external = fixture(t);
+  const externalConfigPath = join(external.root, 'pullboard.json');
+  writeFileSync(externalConfigPath, JSON.stringify({ ...JSON.parse(readFileSync(externalConfigPath, 'utf8')), name: 'Roadmap fixture' }));
+  runFixtureGit(['commit', '-q', '-m', 'chore: name the roadmap fixture', '--', 'pullboard.json'], { cwd: external.root, env: external.env, stdio: 'pipe' });
   const externalAdded = external.cli(external.root, 'add', 'app', 'Roadmap item', '--criterion', 'remain open', '--specs', 'G1');
   const externalAgent = external.cli(external.root, 'worktree', 'app', '--model', 'fixture-agent');
   const box = await httpBox(t, { additionalProjects: [{ root: external.root, name: 'Roadmap fixture' }] });
+  // The roadmap resolves other repos through this machine's registry, as an export does.
+  const priorHome = process.env.PULLBOARD_HOME;
+  process.env.PULLBOARD_HOME = box.env.PULLBOARD_HOME;
+  t.after(() => { if (priorHome === undefined) delete process.env.PULLBOARD_HOME; else process.env.PULLBOARD_HOME = priorHome; });
+  registerProject(external.root);
   const boardListing = await box.call('/api/v1/boards');
   const externalId = boardListing.document.boards.find((entry) => resolve(entry.root) === resolve(external.root)).id;
   const configPath = join(box.root, 'pullboard.json');
@@ -613,7 +621,7 @@ test('[A2, N26] the event stream says when the board changes without a move', as
   async function changedOnce(label) {
     const frame = await Promise.race([
       nextFrame(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error(`changed event did not arrive within two seconds (${label})`)), 2000)),
+      new Promise((_, reject) => setTimeout(() => reject(new Error(`changed event did not arrive within two seconds (${label})`)), 2000)), // budget: #554's criterion bounds a changed event at two seconds.
     ]);
     assert.equal(frame.event, 'changed');
     assert.equal(frame.id, null, 'a state notification does not advance the append-only event cursor');
