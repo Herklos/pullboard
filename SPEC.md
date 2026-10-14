@@ -233,7 +233,7 @@ Statuses: approved = decided · draft = proposed · pending = open question · f
 - E1 [approved, must] A team shares one board: every person's clones, machines and phones show the same items in one order. | gate: test/team.test.js
 - E2 [approved, must] Two people adding or claiming at once never make two #1s or two holders; the relay's order decides. | gate: test/team.test.js
 - E3 [approved, must] Each person signs in as themselves; every move records the person, and the agent if one made it. | gate: test/team.test.js
-- E4 [draft, must] A board's people are its repository's writers; pullboard.json names its approvers; only approvers approve rows, answer person decisions or unlink the board. | gate: test/team.test.js
+- E4 [draft, must] A board's people are its repository's writers; only the approvers pullboard.json names approve rows or answer person decisions, and a change to that list takes effect only once an existing approver approves it. | gate: test/team.test.js
 - E5 [approved, must] Every agent acts with its own token under the person running it, never as its checkout path; removing a person stops their agents. | gate: test/team.test.js
 - E6 [draft, must] Removing a person's write access removes them from the board; the next member device online rotates the key, so their devices read nothing made after it. | gate: test/team.test.js
 - E7 [draft, must] Main moves in one landing order, sequenced on the trunk's board; a second landing builds on the first or is refused. | gate: test/team.test.js
