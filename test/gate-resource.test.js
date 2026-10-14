@@ -483,7 +483,7 @@ syncBuiltinESMExports();
   assert.equal(readFileSync(marker, 'utf8'), '1', 'the final marker contains the complete slot value');
 });
 
-test('a focused run takes no slot [Q4]', async () => {
+test('a focused run queues behind a held gate slot [Q4,C7]', async () => {
   const box = fixture();
   const release = join(box.dir, 'release-focused-holder');
   const holderRoot = gateRepo(box, 'focused-holder', 0.1, release);
@@ -500,15 +500,18 @@ test('a focused run takes no slot [Q4]', async () => {
       'test/probe.test.js',
     ], marker);
     const outcome = await waitFor(() => { // budget: hang ceiling for the focused runner to announce its actual start state; no throughput claim.
-      if (existsSync(marker)) return 'ran';
       if (focusedRun.stderrText.includes('waiting for a gate slot:')) return 'waiting';
+      if (existsSync(marker)) return 'ran';
       return false;
-    }, 'the focused test to run without joining the machine gate queue', 15_000);
-    assert.equal(outcome, 'ran', 'a named test file is focused even when test options have separate values');
+    }, 'the focused test to queue behind the held machine gate slot', 15_000);
+    assert.equal(outcome, 'waiting', 'a named test file is queued even when test options have separate values');
+    assert.equal(existsSync(marker), false, 'the focused test does not execute while the original holder owns the only slot');
+    assert.deepEqual(events(box), ['focused-holder start'], 'the original gate still owns its slot while the focused run waits');
+    writeFileSync(release, 'release\n');
     const focusedResult = await focusedRun.closed;
     assert.equal(focusedResult.code, 0, `${focusedRun.stderrText}${focusedRun.stdoutText}`);
-    assert.equal(readFileSync(marker, 'utf8'), 'none', 'the focused run does not claim or propagate a full-suite slot');
-    assert.deepEqual(events(box), ['focused-holder start'], 'the original gate still owns its slot while the focused run completes');
+    assert.equal(readFileSync(marker, 'utf8'), '1', 'the focused run propagates its public held-slot marker to the test process');
+    assert.deepEqual(events(box), ['focused-holder start', 'focused-holder end'], 'the original holder releases before the focused run proceeds');
   } finally {
     writeFileSync(release, 'release\n');
     await Promise.all([holder, focusedRun].filter(Boolean).map(child => child.closed));
