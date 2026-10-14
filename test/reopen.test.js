@@ -299,12 +299,45 @@ test('a red landing gate returns a verified item to its builder [B3,V4]', async 
   const manualItem = submitLandingFixture(manualBox, 1, 'export const status = "PASS_MANUAL";\n');
   acceptLandingFixture(manualBox, manualItem);
   const manualBoard = store.openBoard(join(manualBox.repo, '.git', 'pullboard', 'board.sqlite'));
-  try { assert.deepEqual(store.landingBatches(manualBoard), [], 'hand-run landing evidence starts with no recorded batch'); }
+  let manualSnapshot;
+  try {
+    assert.deepEqual(store.landingBatches(manualBoard), [], 'hand-run landing evidence starts with no recorded batch');
+    manualSnapshot = exportBoard(manualBoard);
+  }
   finally { store.closeBoard(manualBoard); }
   const manualAccept = readItem(manualBox, manualItem.id).thread.find((event) => event.type === 'move' && event.kind === 'accept');
+  const generatedBoard = store.openBoard(':memory:');
+  importBoard(generatedBoard, manualSnapshot);
+  t.after(() => store.closeBoard(generatedBoard));
+  const generatedNote = `Landing batch fixture_batch-1 failed web/landing.test.js: first red; nested/roadmap.test.js: second red; merge commit ${'f'.repeat(40)}`;
+  const generatedReopen = store.reopen(generatedBoard, manualItem.id, { agentId: 'coordinator', note: generatedNote });
+  assert.equal(store.getItem(generatedBoard, manualItem.id).item_status, 'open');
+  assert.deepEqual(generatedReopen.landingFailure, {
+    batch: null,
+    tests: [
+      { file: 'web/landing.test.js', name: 'first red' },
+      { file: 'nested/roadmap.test.js', name: 'second red' },
+    ],
+    mergeCommit: 'f'.repeat(40),
+  }, 'the exact landing-generated note prefix retains every failure when the batch is absent');
+  assert.deepEqual(JSON.parse(store.events(generatedBoard).at(-1).event_detail).landingFailure, generatedReopen.landingFailure,
+    'the absent-batch fallback records every generated failure in immutable history');
   const noNamedTest = manualBox.run(manualBox.repo, 'reopen', String(manualItem.id), '--note', `merge commit ${'d'.repeat(40)}`, '--json');
   assert.equal(noNamedTest.code, 1);
   assert.equal(JSON.parse(noNamedTest.out).error.code, 'LANDING_FAILURE_REQUIRED');
+  for (const invalidNote of [
+    `Landing failed: gate red; merge commit ${'d'.repeat(40)}`,
+    `Studio landing gate red: see the log; merge commit ${'d'.repeat(40)}`,
+    `Reopening #12: the gate was red; merge commit ${'d'.repeat(40)}`,
+    `Gate red at 10:30, test/a.test.js: keeps it; merge commit ${'d'.repeat(40)}`,
+  ]) {
+    const refused = manualBox.run(manualBox.repo, 'reopen', String(manualItem.id), '--note', invalidNote, '--json');
+    assert.equal(refused.code, 1, invalidNote);
+    assert.equal(JSON.parse(refused.out).error.code, 'LANDING_FAILURE_REQUIRED', invalidNote);
+    assert.equal(readItem(manualBox, manualItem.id).item_status, 'verified', 'a malformed manual note leaves the item verified');
+  }
+  assert.match(JSON.parse(noNamedTest.out).error.message,
+    /<test file>: <test name>; merge commit <sha>/u, 'the refusal explains the exact manual evidence format');
   const manualNote = `web/landing.test.js: keeps the landed behavior; merge commit ${'d'.repeat(40)}`;
   const manual = manualBox.run(manualBox.repo, 'reopen', String(manualItem.id), '--note', manualNote, '--json');
   assert.equal(manual.code, 0, manual.err);
