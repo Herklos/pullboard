@@ -1,4 +1,5 @@
 /** @pullboard-test-input test-tree */
+/** @pullboard-test-input source-tree */
 /**
  * Submit proves its frozen item check and the import closure its change can reach; only a full
  * selection can stand in for the project gate, which still runs at landing [V4,C7,V16].
@@ -495,6 +496,65 @@ test('a changed test file selects the scanners that read test files [C7,B3]', (t
   assert.equal(actualSelection.full, false, 'a cockpit-only input keeps affected selection');
   for (const scanner of ['test/wall-clock-budgets.test.js', 'test/submit-gate.test.js']) {
     assert.ok(actualSelection.files.includes(scanner), 'actual test-tree reader selected: ' + scanner);
+  }
+});
+
+/** Source-tree declarations cover text scanners without broadening unrelated import closures. */
+test('a source change selects the tests that scan sources [C7,B3]', (t) => {
+  const box = privateRepo(t);
+  seedGraph(box);
+  const sourceInput = '/** @pullboard-test-input source-tree */\n';
+  const testInput = '/** @pullboard-test-input test-tree */\n';
+  put(box.root, 'test/scanner.test.js', sourceInput + "import 'node:fs';\n");
+  put(box.root, 'test/both.test.js', testInput + sourceInput + "import 'node:fs';\n");
+  put(box.root, 'test/nested/both.test.mjs', (sourceInput + testInput).replaceAll('\n', '\r\n') + "import 'node:fs';\n");
+  put(box.root, 'test/tests-only.test.js', testInput + "import 'node:fs';\n");
+  put(box.root, 'test/quoted.test.js', "const text = '/** @pullboard-test-input source-tree */';\n");
+  put(box.root, 'test/late.test.js', "// Not an input declaration.\n" + sourceInput);
+  const base = commitAll(box);
+  put(box.root, 'src/a.js', 'export const value = 2;\n');
+  const commit = commitAll(box, 'feat(core): change source scanner input [G1]');
+  const readers = ['test/both.test.js', 'test/nested/both.test.mjs', 'test/scanner.test.js'];
+  const selection = selectAffectedTests(box.root, { base, commit });
+  assert.equal(selection.full, false, 'scanner declarations keep affected selection');
+  assert.deepEqual(selection.files, ['test/a.test.js', ...readers].sort(),
+    'the source change adds declared scanners to its normal import closure');
+  for (const path of ['src/new.js', 'bin/tool.mjs']) {
+    assert.deepEqual(selectAffectedTests(box.root, { base, commit, changed: [path] }).files, readers,
+      path + ' selects scanners without an import edge');
+  }
+  assert.deepEqual(selectAffectedTests(box.root, { base, commit, changed: ['test/c.test.js'] }).files,
+    ['test/both.test.js', 'test/c.test.js', 'test/nested/both.test.mjs', 'test/tests-only.test.js'],
+    'both declaration orders retain test-tree selection without adding source-only readers');
+  assert.deepEqual(selectAffectedTests(box.root, { base, commit, changed: ['lib/unrelated.js'] }).files, [],
+    'other trees keep their existing import selection');
+  put(box.root, 'test/scanner.test.js', "import 'node:fs';\n");
+  const removed = commitAll(box, 'test(core): remove source declaration [G1]');
+  assert.deepEqual(selectAffectedTests(box.root, { base: commit, commit: removed, changed: ['src/new.js'] }).files,
+    readers, 'old declarations retain readers across removal');
+  put(box.root, 'test/scanner.test.js', sourceInput + "import 'node:fs';\n");
+  const deletionBase = commitAll(box, 'test(core): restore scanner declaration [G1]');
+  box.git('rm', 'src/a.js');
+  const deleted = commitAll(box, 'refactor(core): remove source input [G1]');
+  assert.deepEqual(selectAffectedTests(box.root, { base: deletionBase, commit: deleted }).files,
+    ['test/a.test.js', ...readers].sort(), 'source deletion retains old importers and scanners');
+
+  const repository = resolve(import.meta.dirname, '..');
+  const actual = privateRepo(t);
+  const tracked = execFileSync('git', ['ls-files', '-z', 'src/', 'bin/', 'test/'], {
+    cwd: repository, encoding: 'utf8',
+  }).split('\0').filter(path => /\.[cm]?js$/u.test(path));
+  for (const path of tracked) put(actual.root, path, readFileSync(join(repository, path), 'utf8'));
+  const actualBase = commitAll(actual);
+  put(actual.root, 'src/scanner-input.js', 'export const scannerInput = true;\n');
+  const actualCommit = commitAll(actual, 'test(core): add an unimported source input [G1]');
+  const actualSelection = selectAffectedTests(actual.root, { base: actualBase, commit: actualCommit });
+  assert.equal(actualSelection.full, false, 'an unimported source addition keeps affected selection');
+  for (const scanner of ['test/boundary.test.js', 'test/machine.test.js', 'test/package.test.js',
+    'test/submit-gate.test.js', 'test/wall-clock-budgets.test.js']) {
+    assert.ok(readFileSync(join(repository, scanner), 'utf8').split(/\r?\n/u).slice(0, 2).includes(sourceInput.trimEnd()),
+      'actual source-tree reader declares its input: ' + scanner);
+    assert.ok(actualSelection.files.includes(scanner), 'actual source-tree reader selected: ' + scanner);
   }
 });
 

@@ -1,3 +1,4 @@
+/** @pullboard-test-input source-tree */
 /**
  * The package stays dependency-free (P3): nothing to install but Node, nothing in node_modules to
  * trust, and every import is a Node built-in or a file of its own.
