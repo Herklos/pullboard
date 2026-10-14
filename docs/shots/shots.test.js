@@ -102,10 +102,20 @@ test('the demo board declares every agent\'s model [I11,I13]', () => {
   }
 });
 
-test('the README capture runs end to end [I11,I13]', { timeout: 240_000 }, () => { // budget: outer ceiling gives the bounded capture process 30s to clean up.
-  const fixture = mkdtempSync(join(tmpdir(), 'pullboard-readme-capture-'));
+test('the README capture leaves no view running [I11,I13]', { timeout: 240_000 }, () => {
+  const source = fileURLToPath(ROOT);
+  const images = ['desktop.png', 'phone.png', 'shouts.png'];
+  const chrome = process.env.PULLBOARD_CHROME || [
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    '/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser',
+  ].find((candidate) => { try { return spawnSync(candidate, ['--version'], { stdio: 'ignore' }).status === 0; } catch { return false; } });
+  assert.ok(chrome, 'the README capture requires installed headless Chrome');
+  const foregroundControl = process.env.PULLBOARD_README_CAPTURE_FOREGROUND === '1';
+  const arm = foregroundControl ? 'foreground-control' : 'unchanged-default';
+  const evidenceDirectory = process.env.PULLBOARD_README_CAPTURE_EVIDENCE_DIR;
+  if (evidenceDirectory) mkdirSync(evidenceDirectory, { recursive: true, mode: 0o700 });
+  const fixture = mkdtempSync(join(tmpdir(), `pullboard-readme-capture-${arm}-`));
   try {
-    const source = fileURLToPath(ROOT);
     const root = join(fixture, 'repo');
     mkdirSync(root);
     for (const directory of ['bin', 'src', 'skills', 'docs/shots']) {
@@ -120,27 +130,59 @@ test('the README capture runs end to end [I11,I13]', { timeout: 240_000 }, () =>
     const pullboard = join(shims, 'pullboard');
     writeFileSync(pullboard, `#!/bin/sh\nexec "${process.execPath}" "${join(root, 'bin/pullboard.js')}" "$@"\n`);
     chmodSync(pullboard, 0o755);
-    const images = ['desktop.png', 'phone.png', 'shouts.png'];
     for (const image of images) rmSync(join(root, 'docs/shots', image), { force: true });
-    const chrome = process.env.PULLBOARD_CHROME || [
-      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-      '/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser',
-    ].find((candidate) => { try { return spawnSync(candidate, ['--version'], { stdio: 'ignore' }).status === 0; } catch { return false; } });
-    assert.ok(chrome, 'the README capture requires installed headless Chrome');
+    const observationPath = join(fixture, 'capture-observation.json');
+    const env = {
+      ...process.env,
+      PATH: [shims, process.env.PATH].filter(Boolean).join(delimiter),
+      PULLBOARD_CHROME: chrome,
+      PULLBOARD_README_CAPTURE_OBSERVATION_PATH: observationPath,
+      TMPDIR: fixture,
+      TMP: fixture,
+      TEMP: fixture,
+      HOME: join(fixture, 'home'),
+      PULLBOARD_HOME: join(fixture, 'home'),
+      PULLBOARD_MACHINE_HOME: join(fixture, 'home'),
+    };
+    delete env.PULLBOARD_VIEW_FOREGROUND;
+    if (!foregroundControl) delete env.PULLBOARD_README_CAPTURE_FOREGROUND;
     const result = spawnSync(process.execPath, [join(root, 'docs/shots/demo.mjs'), '--screenshots-only'], {
       cwd: root,
-      env: { ...process.env, PATH: [shims, process.env.PATH].filter(Boolean).join(delimiter), PULLBOARD_CHROME: chrome, HOME: join(fixture, 'home'), PULLBOARD_HOME: join(fixture, 'home'), PULLBOARD_MACHINE_HOME: join(fixture, 'home') },
+      env,
       encoding: 'utf8',
-      timeout: 210_000, // budget: isolated board build, export and three Chrome captures; 30s remains for cleanup.
+      timeout: 210_000,
     });
-    assert.equal(result.status, 0, `the isolated README capture completes in headless Chrome: ${result.stderr}\n${result.stdout}`);
+    const observation = existsSync(observationPath) ? JSON.parse(readFileSync(observationPath, 'utf8')) : null;
+    const outcome = {
+      arm,
+      runtime: process.version,
+      platform: process.platform,
+      status: result.status,
+      signal: result.signal,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      observation,
+    };
+    if (evidenceDirectory) writeFileSync(join(evidenceDirectory, `${arm}.json`), `${JSON.stringify(outcome, null, 2)}\n`, { mode: 0o600 });
+    assert.equal(result.status, 0, `${arm}: the isolated README capture completes in headless Chrome: ${result.stderr}\n${result.stdout}`);
     for (const image of images) {
-      assert.ok(existsSync(join(root, 'docs/shots', image)), `${image} was captured`);
+      assert.ok(existsSync(join(root, 'docs/shots', image)), `${arm}: ${image} was captured`);
       const bytes = readFileSync(join(root, 'docs/shots', image));
-      assert.ok(bytes.length > 8, `${image} was captured`);
-      assert.deepEqual([...bytes.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10], `${image} is a PNG screenshot`);
+      assert.ok(bytes.length > 8, `${arm}: ${image} was captured`);
+      assert.deepEqual([...bytes.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10], `${arm}: ${image} is a PNG screenshot`);
     }
-    assert.ok(statSync(join(root, 'docs/demo/index.html')).size > 0, 'the demo export was rebuilt');
+    assert.ok(statSync(join(root, 'docs/demo/index.html')).size > 0, `${arm}: the demo export was rebuilt`);
+    assert.ok(observation, `${arm}: the capture process identity receipt was written`);
+    assert.equal(observation.viewLaunch.stdoutIsTTY, false, `${arm}: the nested view stdout is piped`);
+    assert.equal(observation.viewLaunch.aiAgentPresent, false, `${arm}: the nested view has no AI_AGENT marker`);
+    assert.equal(observation.viewLaunch.agentMarkersPresent, false, `${arm}: the nested view has no agent shell markers`);
+    assert.notEqual(observation.viewLaunch.branch, 'unknown', `${arm}: the foreground/background branch is observed`);
+    if (foregroundControl) assert.equal(observation.viewLaunch.branch, 'foreground', 'the fixture-only foreground control selects the foreground server');
+    assert.equal(observation.viewAfterStop, null, `${arm}: the view PID is gone after the ordinary capture cleanup`);
+    assert.deepEqual(observation.fixtureProcessesAfterStop, [], `${arm}: no process from the fixture survives capture cleanup`);
+    assert.equal(observation.testCleanup.exited, true, `${arm}: the test-only exact-PID cleanup completed`);
+    assert.deepEqual(observation.fixtureProcessesAfterTestCleanup, [], `${arm}: test cleanup leaves no fixture process behind`);
+    assert.deepEqual(observation.teardownErrors, [], `${arm}: capture teardown completed without errors`);
   } finally {
     rmSync(fixture, { recursive: true, force: true });
   }
