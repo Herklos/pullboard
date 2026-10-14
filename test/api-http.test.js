@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { runFixtureChild, runFixtureGit, startFixtureChild } from './fixture-child.js';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createServer, request as httpRequest } from 'node:http';
 import { join, resolve } from 'node:path';
@@ -74,9 +74,9 @@ function fixture(t) {
 }
 
 /** Serve this fixture's explicit project, avoiding any registry outside its private home. */
-async function httpBox(t, { includeMissing = false, onStateBuild } = {}) {
+async function httpBox(t, { includeMissing = false, onStateBuild, additionalProjects = [] } = {}) {
   const box = fixture(t);
-  const api = await serveApi({ runCommand: main, onStateBuild, projects: () => [...(includeMissing ? [{ root: join(box.dir, 'gone'), name: 'Missing fixture' }] : []), { root: box.root, name: 'HTTP fixture' }] });
+  const api = await serveApi({ runCommand: main, onStateBuild, projects: () => [...(includeMissing ? [{ root: join(box.dir, 'gone'), name: 'Missing fixture' }] : []), { root: box.root, name: 'HTTP fixture' }, ...additionalProjects] });
   t.after(() => api.close());
   const url = new URL(api.url);
   const key = url.searchParams.get('k');
@@ -94,8 +94,8 @@ async function httpBox(t, { includeMissing = false, onStateBuild } = {}) {
   }
   const listed = await call('/api/v1/boards');
   assert.equal(listed.status, 200);
-  assert.equal(listed.document.boards.length, 1);
-  const id = listed.document.boards[0].id;
+  assert.equal(listed.document.boards.length, 1 + additionalProjects.length);
+  const id = listed.document.boards.find((entry) => resolve(entry.root) === resolve(box.root)).id;
   assert.match(id, /^[0-9a-f]{32}$/);
   return { ...box, api, origin, key, id, call, path: '/api/v1/boards/' + id };
 }
@@ -534,6 +534,158 @@ test('[A2] a live HTTP stream follows CLI writes and reconnects after Last-Event
   const invalid = await box.call(box.path + '/events?after=1.5');
   assert.equal(invalid.status, 400);
   assert.equal(invalid.document.error.code, 'BAD_CURSOR');
+});
+
+test('[A2, N26] the event stream says when the board changes without a move', async (t) => {
+  const external = fixture(t);
+  const externalConfigPath = join(external.root, 'pullboard.json');
+  writeFileSync(externalConfigPath, JSON.stringify({ ...JSON.parse(readFileSync(externalConfigPath, 'utf8')), name: 'Roadmap fixture' }));
+  runFixtureGit(['commit', '-q', '-m', 'chore: name the roadmap fixture', '--', 'pullboard.json'], { cwd: external.root, env: external.env, stdio: 'pipe' });
+  const externalAdded = external.cli(external.root, 'add', 'app', 'Roadmap item', '--criterion', 'remain open', '--specs', 'G1');
+  const externalAgent = external.cli(external.root, 'worktree', 'app', '--model', 'fixture-agent');
+  const box = await httpBox(t, { additionalProjects: [{ root: external.root, name: 'Roadmap fixture' }] });
+  // The roadmap resolves other repos through this machine's registry, as an export does.
+  const priorHome = process.env.PULLBOARD_HOME;
+  process.env.PULLBOARD_HOME = box.env.PULLBOARD_HOME;
+  t.after(() => { if (priorHome === undefined) delete process.env.PULLBOARD_HOME; else process.env.PULLBOARD_HOME = priorHome; });
+  registerProject(external.root);
+  const boardListing = await box.call('/api/v1/boards');
+  const externalId = boardListing.document.boards.find((entry) => resolve(entry.root) === resolve(external.root)).id;
+  const configPath = join(box.root, 'pullboard.json');
+  const specPath = join(box.root, 'SPEC.md');
+  const doctrinePath = join(box.root, 'DOCTRINE.md');
+  box.cli(box.root, 'milestone', 'add', 'External work', '--items', `Roadmap fixture#${externalAdded.item.item_id}`);
+  box.cli(box.root, 'shout', 'all', 'mark this after the stream starts');
+  const agent = box.cli(box.root, 'worktree', 'app', '--model', 'fixture-agent');
+  const leaseItem = box.cli(box.root, 'add', 'app', 'Expiring stream claim', '--criterion', 'becomes open', '--specs', 'G1').item;
+  const localClaim = await box.call(box.path + '/moves', { verb: 'claim', item: leaseItem.item_id, agent: agent.agent });
+  assert.equal(localClaim.status, 200);
+  const leaseUntil = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+  const db = store.openBoard(join(box.root, '.git', 'pullboard', 'board.sqlite'));
+  try {
+    db.db.prepare('UPDATE item SET item_lease_until = ? WHERE item_id = ?')
+      .run(leaseUntil, leaseItem.item_id);
+  } finally { store.closeBoard(db); }
+  const initial = await box.call(box.path + '/events');
+  const after = initial.document.events.at(-1).event_id;
+  const controller = new AbortController();
+  const response = await fetchFresh(box.origin + box.path + '/events?after=' + after, {
+    headers: { 'x-pullboard-key': box.key, accept: 'text/event-stream' },
+    signal: controller.signal,
+  });
+  const reader = response.body.getReader();
+  let buffered = '';
+  let pendingFrame;
+  let closing = false;
+  let streamClosed = false;
+  /** Stop the live response and settle any pending frame read on both pass and failure paths. */
+  async function closeStream() {
+    if (streamClosed) return;
+    streamClosed = true;
+    closing = true;
+    controller.abort();
+    await reader.cancel().catch(() => {});
+    await pendingFrame?.catch(() => {});
+  }
+  t.after(closeStream);
+  /** Read and parse the next complete server-sent-event frame. */
+  async function readFrame() {
+    while (true) {
+      const boundary = buffered.indexOf('\n\n');
+      if (boundary >= 0) {
+        const raw = buffered.slice(0, boundary);
+        buffered = buffered.slice(boundary + 2);
+        if (raw.startsWith(':')) continue;
+        const event = /^event: (.+)$/m.exec(raw)?.[1] ?? 'message';
+        const id = /^id: (\d+)$/m.exec(raw)?.[1];
+        const data = /^data: (.+)$/m.exec(raw)?.[1];
+        if (data !== undefined) return { event, id: id === undefined ? null : Number(id), data: JSON.parse(data) };
+        continue;
+      }
+      const { value, done } = await reader.read();
+      if (done && closing) return { event: 'closed', id: null, data: null };
+      assert.equal(done, false, 'the live stream remains open while the board is served');
+      buffered += new TextDecoder().decode(value);
+    }
+  }
+  /** Share a pending frame read across timeouts so a quiet-period check cannot consume a later frame. */
+  function nextFrame() {
+    if (!pendingFrame) pendingFrame = readFrame().finally(() => { pendingFrame = null; });
+    return pendingFrame;
+  }
+  /** Require an unchanged view to remain silent for longer than one server poll. */
+  async function quietPeriod() {
+    const extra = await Promise.race([nextFrame().then((value) => ({ value })), new Promise((resolve) => setTimeout(() => resolve(null), 350))]);
+    assert.equal(extra, null, 'a quiet interval produces no duplicate or unrelated frame');
+  }
+  /** Require exactly one changed notification for the most recent input change. */
+  async function changedOnce(label) {
+    const frame = await Promise.race([
+      nextFrame(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error(`changed event did not arrive within two seconds (${label})`)), 2000)), // budget: #554's criterion bounds a changed event at two seconds.
+    ]);
+    assert.equal(frame.event, 'changed');
+    assert.equal(frame.id, null, 'a state notification does not advance the append-only event cursor');
+    assert.deepEqual(frame.data, { version: 1, event: { event_kind: 'changed' } });
+    await quietPeriod();
+  }
+
+  await quietPeriod();
+
+  writeFileSync(specPath, readFileSync(specPath, 'utf8') + '\nThe served board follows this file.\n');
+  await changedOnce('SPEC.md');
+
+  writeFileSync(doctrinePath, '# Doctrine\n\nKeep the board honest.\n');
+  await changedOnce('DOCTRINE.md');
+
+  writeFileSync(configPath, JSON.stringify(JSON.parse(readFileSync(configPath, 'utf8')), null, 2) + '\n');
+  await changedOnce('pullboard.json');
+
+  // Committing the edited files moves HEAD alone: their bytes and stats are already seen.
+  runFixtureGit(['commit', '-q', '-m', 'chore(test): move fixture head', '--', 'SPEC.md', 'DOCTRINE.md', 'pullboard.json'], { cwd: box.root, env: box.env, stdio: 'pipe' });
+  await changedOnce('head');
+
+  const externalClaim = await box.call('/api/v1/boards/' + externalId + '/moves', { verb: 'claim', item: externalAdded.item.item_id, agent: externalAgent.agent });
+  assert.equal(externalClaim.status, 200);
+  await changedOnce('external-claim');
+
+  const unavailableRoot = external.root + '.temporarily-unavailable';
+  renameSync(external.root, unavailableRoot);
+  await changedOnce('external-unavailable');
+  renameSync(unavailableRoot, external.root);
+  await changedOnce('external-restored');
+
+  const localBoardPath = join(box.root, '.git', 'pullboard', 'board.sqlite');
+  const cursorBefore = store.openBoard(localBoardPath);
+  let beforeSeen;
+  let beforeEvent;
+  try {
+    beforeSeen = store.listAgents(cursorBefore).find((entry) => entry.agent_id === agent.agent).agent_last_shout_id;
+    beforeEvent = cursorBefore.db.prepare('SELECT COALESCE(MAX(event_id), 0) AS id FROM event').get().id;
+  } finally { store.closeBoard(cursorBefore); }
+  box.cli(agent.path, 'inbox');
+  const cursorAfter = store.openBoard(localBoardPath);
+  try {
+    const afterSeen = store.listAgents(cursorAfter).find((entry) => entry.agent_id === agent.agent).agent_last_shout_id;
+    const afterEvent = cursorAfter.db.prepare('SELECT COALESCE(MAX(event_id), 0) AS id FROM event').get().id;
+    assert.ok(afterSeen > beforeSeen, 'the joined agent inbox advances its shout cursor');
+    assert.equal(afterEvent, beforeEvent, 'reading the inbox changes no append-only board event');
+  } finally { store.closeBoard(cursorAfter); }
+  await changedOnce('seen-cursor');
+
+  const clockNow = Date.now();
+  t.mock.timers.enable({ apis: ['Date'], now: clockNow });
+  t.mock.timers.tick(Date.parse(leaseUntil) - clockNow + 1);
+  await changedOnce('lease-expiry');
+
+  const evented = box.cli(box.root, 'add', 'app', 'Event plus state notification', '--criterion', 'both frames arrive', '--specs', 'G1');
+  const eventFrame = await nextFrame();
+  assert.equal(eventFrame.event, 'message');
+  assert.equal(eventFrame.data.event.event_kind, 'add');
+  assert.equal(eventFrame.data.event.item_id, evented.item.item_id);
+  await changedOnce('ordinary-event-state');
+
+  await closeStream();
 });
 
 test('[A2] local auth, origin, unknown board and malformed calls refuse without moving', async (t) => {
