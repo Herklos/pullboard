@@ -16,6 +16,13 @@ function json(res, status, value) {
   res.end(JSON.stringify({ version: 1, ...value }));
 }
 
+/** Emit a local adapter's pre-serialized state inside the unchanged API v1 envelope. */
+function jsonState(res, status, state, eventLogVersion) {
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff' });
+  const version = eventLogVersion === undefined ? '' : ',"eventLogVersion":' + JSON.stringify(eventLogVersion);
+  res.end('{"version":1,"state":' + state + version + '}');
+}
+
 /** Read a bounded JSON object, draining oversize requests so a refusal reaches the caller. */
 async function readBody(req, { maxBytes = BODY_BYTES } = {}) {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 20_000_000) throw new TypeError('API body limit needs a positive safe integer no larger than twenty million');
@@ -144,6 +151,12 @@ export function createApiHandler(adapter, { pollMs = 200 } = {}) {
       }
       if (req.method === 'GET' && route[2] === 'state') {
         const seen = url.searchParams.has('seen') ? seenCursor(url.searchParams.get('seen')) : null;
+        if (typeof adapter.stateJson === 'function') {
+          const state = await adapter.stateJson(board, who, seen);
+          if (typeof state !== 'string') throw new TypeError('the local state serializer must return JSON text');
+          const eventLogVersion = await adapter.eventLogVersion?.(board, who);
+          return jsonState(res, 200, state, eventLogVersion);
+        }
         const state = await adapter.state(board, who, seen);
         const eventLogVersion = await adapter.eventLogVersion?.(board, who);
         return json(res, 200, { state, ...(eventLogVersion === undefined ? {} : { eventLogVersion }) });

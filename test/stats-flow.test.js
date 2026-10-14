@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import * as store from '../src/board.js';
 import { exportBoard, importBoard } from '../src/exchange.js';
 import { proofStats } from '../src/stats.js';
-import { flowLines } from '../src/stats-flow.js';
+import { flowLines, flowStats, prepareFlowHistory, projectFlowStats } from '../src/stats-flow.js';
 import { runFixtureGit } from './fixture-child.js';
 
 const BASE = Date.parse('2026-10-10T00:00:00Z');
@@ -257,6 +257,43 @@ test('a recommendation names at most three items [R1,R2]', t => {
   const flow = fixture(t, entries).stats().flow;
   assert.equal(flow.queues.accepted.size, 5, 'the five named recommendation targets remain genuinely accepted');
   assert.equal(flow.bottleneck.recommendation, 'land the accepted items: #1, #2, #3 +2 more');
+});
+
+test('a prepared flow projection matches fresh expiry and activity windows without mutation [R1,R2]', t => {
+  const commit = 'a'.repeat(40);
+  const entries = [
+    [-30, 'activity-only', 'shout', null],
+    [0, 'coordinator', 'add', 1, { lane: 'core' }], [10, 'core-1', 'claim', 1, { leaseUntil: at(30) }],
+    [0, 'coordinator', 'add', 2, { lane: 'core' }], [10, 'core-2', 'claim', 2, { leaseUntil: at(1000) }],
+    [20, 'core-2', 'submit', 2, { commit }], [21, 'review-1', 'reserve', 2, { until: at(30) }],
+  ];
+  const { board } = fixture(t, entries);
+  const history = store.events(board);
+  const counts = { submissions: 1, rejections: 0, rejectionShare: 0 };
+  const prepared = prepareFlowHistory(history);
+  const observe = minute => projectFlowStats(prepared, null, BASE + minute * 60_000, counts);
+  const reference = minute => flowStats(history, null, BASE + minute * 60_000, counts);
+
+  const beforeExpiry = observe(29);
+  assert.deepEqual(beforeExpiry, reference(29));
+  assert.equal(beforeExpiry.queues.claimed.size, 1);
+  assert.equal(beforeExpiry.unreviewed.size, 0);
+  assert.ok(beforeExpiry.activeAgents.agents.some(agent => agent.id === 'activity-only'));
+
+  const atExpiry = observe(30);
+  assert.deepEqual(atExpiry, reference(30));
+  assert.equal(atExpiry.queues.claimed.size, 0, 'a claim expires at its exact lease deadline');
+  assert.equal(atExpiry.queues.open.size, 1);
+  assert.equal(atExpiry.unreviewed.size, 1, 'a reservation expires at its exact deadline');
+  assert.ok(atExpiry.activeAgents.agents.some(agent => agent.id === 'activity-only'), 'the last-hour boundary is inclusive');
+
+  const afterExpiry = observe(31);
+  assert.deepEqual(afterExpiry, reference(31));
+  assert.equal(afterExpiry.stages.reviewWait.count, 0, 'an expired reservation no longer closes the wait stage');
+  assert.ok(!afterExpiry.activeAgents.agents.some(agent => agent.id === 'activity-only'), 'activity ages out after 60 minutes');
+  assert.deepEqual(observe(30), atExpiry, 'a later projection cannot mutate the prepared snapshot');
+  assert.deepEqual(observe(31), afterExpiry, 'repeating a projection yields the same time-specific result');
+  assert.ok(Object.isFrozen(prepared) && Object.isFrozen(prepared.items) && Object.isFrozen(prepared.items[0]));
 });
 
 test('flow reports no evidence instead of inventing a bottleneck or missing review time [R1,R2]', t => {
