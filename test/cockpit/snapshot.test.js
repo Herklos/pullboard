@@ -5,6 +5,7 @@ import { createServer, request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
+import { fetchLocal } from '../../src/local-fetch.js';
 import { exportView, portableSnapshot } from '../../src/serve.js';
 import { machine, project, build, sendBack, fetchLive, startView, accept, boardId, boardOf, assertObservationsEqual, chromeExecutable, browserPause, openSnapshotChrome, closeSnapshotChrome, press, travel, settled, roadmapRow, showing, readRoadmap, openRoadmapParts, serveFolder, proofShot } from './fixture.js';
 
@@ -686,17 +687,16 @@ test('the export asks for the full board [N26,A2]', { timeout: 90_000 }, // budg
     build(box, alpha, 1, 'greeting-fix.html');
     accept(box, alpha, 1);
 
-    // The export reads the board through the local API. Record each address it asks for, never its key.
+    // The export reads the board through the local API with fetchLocal. Record each address it asks
+    // for, never its key, and make every read through fetchLocal unchanged.
     const asked = [];
-    const nativeFetch = globalThis.fetch;
-    /** Note the address of each API read, then make the read unchanged. */
-    globalThis.fetch = (input, init) => {
-      asked.push(new URL(input instanceof Request ? input.url : String(input)));
-      return nativeFetch(input, init);
+    /** Note the address of each API read, then read it through the export's own transport. */
+    const fetchApi = (url, init) => {
+      asked.push(new URL(String(url)));
+      return fetchLocal(url, init);
     };
     const folder = join(box.dir, 'full-board-export');
-    try { await exportView(alpha.repo, folder); }
-    finally { globalThis.fetch = nativeFetch; }
+    await exportView(alpha.repo, folder, { fetchApi });
     const stateReads = asked.filter((url) => url.pathname.endsWith('/state'));
     assert.deepEqual(stateReads.map((url) => url.searchParams.get('detail')), ['full'],
       `the export reads the state once, asking for detail=full; it asked for ${asked.map((url) => url.pathname + url.search).join(', ')}`);
