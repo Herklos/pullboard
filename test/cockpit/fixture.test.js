@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
+import { waitForStableBoxes } from './stable.js';
 import { addItem, closeBoard, openBoard } from '../../src/board.js';
 import { exportBoard, importBoard } from '../../src/exchange.js';
 import { projectState } from '../../src/serve.js';
@@ -481,4 +482,79 @@ test('owned Chrome cleanup waits out a slow exit and still fails a real hang [C7
     { pid: -hung.child.pid, name: 'SIGTERM' },
     { pid: -hung.child.pid, name: 'SIGKILL' },
   ], 'cleanup tries both signals against only its owned group');
+});
+
+
+test('a timed-out wait names what moved [N26,C7]', { timeout: 60_000 }, async () => {
+  const executable = chromeExecutable();
+  assert.ok(executable, 'Chrome is required for the wait capture control');
+  const responses = new Set();
+  const server = createServer((request, response) => {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    // Keep parsing open so the loading observation is from a real unfinished document.
+    response.write('<!doctype html><html><body class="loading switching" style="height:4000px">'
+      + '<button id="capture-target" style="position:fixed;top:100px;left:20px;width:100px;height:40px">private stand-in text</button>'
+      + '<div id="capture-noise" style="width:20px;height:10px"></div>');
+    responses.add(response);
+    response.once('close', () => responses.delete(response));
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-wait-capture-'));
+  let chrome;
+  try {
+    chrome = await openSnapshotChrome(executable, `http://127.0.0.1:${server.address().port}`, profile);
+    await chrome.waitFor("!!document.querySelector('#capture-target')");
+    const controls = [
+      ['target', "node.style.width = (100 + step % 2) + 'px'"],
+      ['replacement', "const next = node.cloneNode(true); node.replaceWith(next); node = next"],
+      ['text', "node.textContent = String(step % 2)"],
+      ['scroll', "scrollTo(0, 30 * (step % 2))"],
+    ];
+    for (const [kind, mutate] of controls) {
+      await chrome.stable('window.__captureStep = 0');
+      const find = `(() => {
+        const step = ++window.__captureStep;
+        let node = document.querySelector('#capture-target');
+        document.querySelector('#capture-noise').style.width = (20 + step % 2) + 'px';
+        ${mutate};
+        return node;
+      })()`;
+      let failure;
+      try { await waitForStableBoxes(chrome, find, 1000); } // budget: declared negative-control deadline for a deliberately moving stand-in page.
+      catch (error) { failure = error; }
+      assert.match(failure?.message ?? '', /shared wait: target missing, zero-sized or moving:/);
+      assert.ok(failure.message.includes('; wait capture '), 'timeout includes bounded wait capture');
+      const capture = JSON.parse(failure.message.split('; wait capture ')[1].split('\n')[0]);
+      assert.ok(capture.changes[kind] > 0, `${kind} is measured: ${JSON.stringify(capture)}`);
+      assert.ok(capture.samples.length > 0 && capture.samples.length <= 4, 'only the bounded tail is retained');
+      assert.ok(capture.samples.some(sample => sample.targets?.length), 'the actual target boxes are retained');
+      assert.ok(capture.frames > 0 && capture.maxFrameGapMs >= 0, 'frame count and gap are measured');
+      assert.ok(capture.samples.every(sample => sample.sampleMs >= 0), 'each layout sample records its duration');
+      assert.equal(capture.page.readyState, 'loading');
+      assert.equal(capture.page.loading, true);
+      assert.equal(capture.page.switching, true);
+      assert.ok(JSON.stringify(capture).length < 7000, 'the diagnostic is bounded independently of the page contents');
+      assert.ok(!JSON.stringify(capture).includes('private stand-in text'), 'text changes do not copy board contents');
+      for (const absent of ['target', 'replacement', 'text', 'scroll'].filter(signal => signal !== kind)) {
+        assert.equal(capture.changes[absent], 0, `${kind} does not falsely report ${absent}`);
+      }
+    }
+    await assert.rejects(chrome.waitFor('false', 1000), error => { // budget: declared negative-control deadline for a condition that never becomes true.
+      const capture = JSON.parse(error.message.split('; readiness capture ')[1]);
+      assert.ok(capture.polls > 0 && capture.falseResults === capture.polls);
+      assert.ok(capture.lastPollMs >= 0 && capture.maxPollMs >= capture.lastPollMs);
+      assert.equal(capture.lastStable.page.readyState, 'loading');
+      assert.equal(capture.lastStable.page.switching, true);
+      assert.ok(capture.lastStable.samples.length <= 4);
+      return true;
+    });
+    for (const response of responses) response.end('</body></html>');
+    await chrome.waitFor("document.readyState === 'complete'");
+    assert.deepEqual(chrome.exceptions, [], 'capture does not create a page exception');
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+    rmSync(profile, { recursive: true, force: true });
+  }
 });
