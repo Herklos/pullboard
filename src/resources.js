@@ -1,4 +1,4 @@
-/** Machine and repository queues persist leases; landings, gates, and item checks run by priority [Q1,Q2,Q3,V18]. */
+/** Machine and repository queues persist leases; diagnostics yield to landings, gates and item checks [Q1,Q2,Q3,V18]. */
 import { mkdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
@@ -44,6 +44,7 @@ function open(file) {
       if (!columns.includes('started')) db.exec(`ALTER TABLE ${table} ADD COLUMN started TEXT NOT NULL DEFAULT ''`);
       if (!columns.includes('landing')) db.exec(`ALTER TABLE ${table} ADD COLUMN landing INTEGER NOT NULL DEFAULT 0`);
       if (!columns.includes('item_check')) db.exec(`ALTER TABLE ${table} ADD COLUMN item_check INTEGER NOT NULL DEFAULT 0`);
+      if (!columns.includes('diagnostic')) db.exec(`ALTER TABLE ${table} ADD COLUMN diagnostic INTEGER NOT NULL DEFAULT 0`);
     }
     db.exec('COMMIT');
     transaction = false;
@@ -129,12 +130,13 @@ function update(db, action) {
   }
 }
 
-/** Current holders and the landing-first line, then ordinary gates, then item checks. */
+/** Current holders and the landing-first line, then gates, item checks and diagnostics. */
 function snapshot(db, name) {
-  const holders = db.prepare('SELECT agent, repo, since, landing, item_check AS itemCheck FROM holder WHERE name = ? ORDER BY since, token').all(name)
-    .map((holder) => ({ ...holder, landing: holder.landing === 1, itemCheck: holder.itemCheck === 1 }));
-  const line = db.prepare('SELECT agent, repo, since, landing, item_check AS itemCheck FROM waiter WHERE name = ? ORDER BY landing DESC, item_check, ticket').all(name)
-    .map((waiter) => ({ ...waiter, landing: waiter.landing === 1, itemCheck: waiter.itemCheck === 1 }));
+  /** Preserve older public entries while naming diagnostics as a distinct queue class. */
+  const project = ({ diagnostic, ...entry }) => ({ ...entry, landing: entry.landing === 1,
+    itemCheck: entry.itemCheck === 1 && diagnostic !== 1, ...(diagnostic === 1 ? { diagnostic: true } : {}) });
+  const holders = db.prepare('SELECT agent, repo, since, landing, item_check AS itemCheck, diagnostic FROM holder WHERE name = ? ORDER BY since, token').all(name).map(project);
+  const line = db.prepare('SELECT agent, repo, since, landing, item_check AS itemCheck, diagnostic FROM waiter WHERE name = ? ORDER BY landing DESC, diagnostic, item_check, ticket').all(name).map(project);
   return { holders, line };
 }
 
@@ -153,6 +155,7 @@ function waiterPosition(db, name, ticket) {
   const currentIndex = eligible.findIndex((waiter) => waiter.ticket === ticket);
   if (currentIndex < 0) return Math.max(2, eligible.length + 1);
   /** Map queue entries to their declared precedence class. */
+  // Keep the older client's ranking: diagnostic takers yield their FIFO ticket to later checks.
   const rank = (waiter) => waiter.landing === 1 ? 0 : waiter.itemCheck === 1 ? 2 : 1;
   const currentRank = rank(current);
   return eligible.filter((waiter) => rank(waiter) < currentRank || (rank(waiter) === currentRank && waiter.ticket <= ticket)).length;
@@ -162,9 +165,9 @@ function waiterPosition(db, name, ticket) {
 function pause(ms) { return new Promise((resolvePromise) => setTimeout(resolvePromise, ms)); }
 
 /**
- * Join the queue, preserving FIFO within landing, ordinary-gate, and item-check classes.
+ * Join the existing queue; diagnostics rejoin behind later item checks so older clients agree on priority.
  *
- * @param {{ name: string, capacity: number, capacityProvider?: () => number, scope?: 'machine'|'repo'|'board', root?: string, agent?: string, repo?: string, landing?: boolean, itemCheck?: boolean, onWait?: (state: object) => void, allowIdleCapacityUpdate?: boolean }} options - Resource identity and queue class.
+ * @param {{ name: string, capacity: number, capacityProvider?: () => number, scope?: 'machine'|'repo'|'board', root?: string, agent?: string, repo?: string, landing?: boolean, itemCheck?: boolean, diagnostic?: boolean, onWait?: (state: object) => void, allowIdleCapacityUpdate?: boolean }} options - Resource identity and queue class.
  * @returns {Promise<{ name: string, scope: string, token: string, waitMs: number, release: () => void, renew: () => void }>}
  */
 export async function takeResource(options) {
@@ -173,7 +176,9 @@ export async function takeResource(options) {
   if (!Number.isSafeInteger(capacity) || capacity < 1) throw new Refused('BAD_RESOURCE_CAPACITY', 'resource capacity must be a positive integer');
   const landing = options.landing === true;
   const itemCheck = options.itemCheck === true;
+  const diagnostic = options.diagnostic === true;
   if (landing && itemCheck) throw new Refused('BAD_RESOURCE_PRIORITY', 'a gate slot cannot be both a landing and an item check');
+  if (diagnostic && (landing || itemCheck)) throw new Refused('BAD_RESOURCE_PRIORITY', 'a diagnostic slot cannot also be a landing or an item check');
   const file = databaseFile(scope, root);
   const db = open(file);
   const token = randomUUID();
@@ -196,15 +201,23 @@ export async function takeResource(options) {
         db.prepare('UPDATE resource SET capacity = ? WHERE name = ?').run(currentCapacity, name);
       }
       db.prepare('INSERT INTO resource(name, capacity) VALUES (?, ?) ON CONFLICT(name) DO NOTHING').run(name, currentCapacity);
-      db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck));
+      // Older queue clients see diagnostics as item checks, never as ordinary gates.
+      db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic));
     });
     while (true) {
       const acquired = update(db, () => {
-        const waiter = db.prepare('SELECT ticket, landing, item_check AS itemCheck FROM waiter WHERE token = ?').get(token);
+        let waiter = db.prepare('SELECT ticket, landing, item_check AS itemCheck, diagnostic FROM waiter WHERE token = ?').get(token);
         if (!waiter) {
           queuedAt = new Date().toISOString();
-          const rejoined = db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck));
+          const rejoined = db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic));
           return { acquired: false, state: { ...snapshot(db, name), position: waiterPosition(db, name, Number(rejoined.lastInsertRowid)), rejoined: true } };
+        }
+        if (diagnostic && db.prepare('SELECT 1 FROM waiter WHERE name=? AND diagnostic=0 AND item_check=1 AND ticket>? LIMIT 1').get(name, waiter.ticket)) {
+          // An older item-check client only knows FIFO within its class. Move behind it so both
+          // old and new callers agree who goes first instead of waiting on one another forever.
+          db.prepare('DELETE FROM waiter WHERE token=?').run(token);
+          const rejoined = db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), 0, 1, 1);
+          waiter = { ticket: Number(rejoined.lastInsertRowid) };
         }
         db.prepare('UPDATE waiter SET heartbeat = ? WHERE token = ?').run(Date.now(), token);
         const spot = snapshot(db, name);
@@ -213,7 +226,7 @@ export async function takeResource(options) {
         if (position === 1 && spot.holders.length < limit) {
           db.prepare('DELETE FROM waiter WHERE token = ?').run(token);
           const acquiredAt = new Date().toISOString();
-          db.prepare('INSERT INTO holder(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, acquiredAt, Date.now(), Number(landing), Number(itemCheck));
+          db.prepare('INSERT INTO holder(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, acquiredAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic));
           return { acquired: true, state: { ...spot, position: 0 } };
         }
         return { acquired: false, state: { ...spot, position } };

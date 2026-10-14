@@ -161,21 +161,26 @@ export async function compareMainFailures(root, profile, onWait, output = '') {
   try {
     let cache = readCache(file);
     const missing = files.filter(path => !['red', 'green'].includes(cache.entries[main.commit]?.[path]?.result));
-    const outcomes = await Promise.allSettled(missing.map(path => withGateSlot(root, async lease => {
-      const measured = await withMainCheckout(root, main.commit, async checkout => {
-        const command = `${policy.config.affectedTests.trimEnd()} ${shellWord('./' + path)}`;
-        const run = await runProfiledShellAsync(checkout, command, { gateSlotHeld: true, waitMs: lease.waitMs });
-        return { result: run.isGreen ? 'green' : 'red' };
-      });
-      if (measured.unavailable) throw new Error(measured.unavailable);
-      // The cache lease excludes other comparisons; synchronous persistence keeps each finished result.
-      cache = readCache(file);
-      cache.entries[main.commit] ??= {};
-      cache.entries[main.commit][path] = measured;
-      writeCache(file, cache);
-    }, { onWait })));
-    const failed = outcomes.find(outcome => outcome.status === 'rejected');
-    if (failed) return { main: main.commit, files: [], unavailable: failed.reason?.message ?? 'main comparison could not be completed' };
+    let failed = null;
+    for (const path of missing) {
+      try {
+        await withGateSlot(root, async lease => {
+          const measured = await withMainCheckout(root, main.commit, async checkout => {
+            const command = `${policy.config.affectedTests.trimEnd()} ${shellWord('./' + path)}`;
+            const run = await runProfiledShellAsync(checkout, command, { gateSlotHeld: true, waitMs: lease.waitMs });
+            return { result: run.isGreen ? 'green' : 'red' };
+          });
+          if (measured.unavailable) throw new Error(measured.unavailable);
+          // The cache lease excludes other comparisons; persist each result before yielding again.
+          cache = readCache(file);
+          cache.entries[main.commit] ??= {};
+          cache.entries[main.commit][path] = measured;
+          writeCache(file, cache);
+        }, { diagnostic: true, onWait });
+      }
+      catch (error) { failed ??= error; }
+    }
+    if (failed) return { main: main.commit, files: [], unavailable: failed.message ?? 'main comparison could not be completed' };
     cache = readCache(file);
     return { main: main.commit, files: files.map(path => ({ file: path, result: cache.entries[main.commit][path].result })) };
   } finally { cacheLease.release(); }
