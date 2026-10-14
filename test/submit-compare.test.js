@@ -181,19 +181,19 @@ test('a shout completes while a submit compares with main [V4,C7,B7]', async t =
   await assertRed(box, submission);
 });
 
-test('a red submit reruns its failed files in parallel within the pool [V4,C7,Q4]', async t => {
+test('a red submit reruns its failed files one slot at a time within the pool [V4,C7,Q4]', async t => {
   const box = fixture(t, 3, 2);
   const submission = launch(box, 'submit', String(box.item));
-  await observed(() => events(box).filter(event => event.phase === 'start').length >= 2,
-    'two independent exact-main comparisons start before either is released');
-  assert.equal(rows(box.machineQueue, "SELECT token FROM holder WHERE name='gate'").length, 2,
-    'both running comparisons hold actual pool slots');
-  await observed(() => rows(box.machineQueue, "SELECT ticket FROM waiter WHERE name='gate'").length === 1,
-    'the third file waits in the actual machine pool');
+  await observed(() => events(box).filter(event => event.phase === 'start').length === 1,
+    'the first exact-main comparison starts');
+  assert.equal(rows(box.machineQueue, "SELECT token FROM holder WHERE name='gate'").length, 1,
+    'the running comparison holds one actual pool slot');
+  assert.equal(rows(box.machineQueue, "SELECT ticket FROM waiter WHERE name='gate'").length, 0,
+    'the remaining files do not flood the machine queue');
   const first = events(box).find(event => event.phase === 'start').name;
   writeFileSync(join(box.control, first + '.release'), 'release');
-  await observed(() => events(box).filter(event => event.phase === 'start').length === 3,
-    'the third file starts after a slot is released');
+  await observed(() => events(box).filter(event => event.phase === 'start').length === 2,
+    'the second file starts after the first finishes');
   assert.equal(JSON.parse(readFileSync(box.cache, 'utf8')).entries[box.main][`test/${first}.test.js`].result,
     first === 'b' ? 'red' : 'green', 'the completed result is saved while other files still wait');
   for (const name of box.names) writeFileSync(join(box.control, name + '.release'), 'release');
@@ -205,7 +205,7 @@ test('a red submit reruns its failed files in parallel within the pool [V4,C7,Q4
     active += event.phase === 'start' ? 1 : -1;
     maximum = Math.max(maximum, active);
   }
-  assert.equal(maximum, 2, 'comparisons overlap without exceeding the configured two slots');
+  assert.equal(maximum, 1, 'one submit leaves the other machine slot available');
   assert.equal(active, 0);
   assert.deepEqual(JSON.parse(readFileSync(box.cache, 'utf8')).entries[box.main], {
     'test/a.test.js': { result: 'green' }, 'test/b.test.js': { result: 'red' }, 'test/c.test.js': { result: 'green' },
