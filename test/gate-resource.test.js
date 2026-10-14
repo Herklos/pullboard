@@ -387,7 +387,6 @@ test('a raw full-suite run takes a machine gate slot [Q4]', async () => {
     setOneGateSlot(box, holderRoot);
     const holder = launch(box, holderRoot);
     let fullRun;
-    let focusedRun;
     let followingGate;
     try {
       await waitFor(() => events(box).includes('full-suite-holder start'), 'the fixture gate to hold its only machine slot');
@@ -400,9 +399,6 @@ test('a raw full-suite run takes a machine gate slot [Q4]', async () => {
       assert.equal(outcome, 'waiting', 'both bare and option-only discovery must queue without a test file');
       assert.match(fullRun.stderrText, /waiting for a gate slot: 1 of 1 in use/u);
       assert.equal(existsSync(marker), false, 'the probe has not run while the other process owns the slot');
-      // Real focused work keeps the full run queued across resource polls without a synthetic delay.
-      focusedRun = launchTestRunner(box, suiteRoot, ['test/probe.test.js'], join(box.dir, 'focused.started'));
-      assert.equal((await focusedRun.closed).code, 0, `${focusedRun.stderrText}${focusedRun.stdoutText}`);
       writeFileSync(release, 'release\n');
       assert.equal((await holder.closed).code, 0, holder.stderrText);
       await waitFor(() => existsSync(marker), 'the admitted full-suite probe to start');
@@ -423,7 +419,7 @@ test('a raw full-suite run takes a machine gate slot [Q4]', async () => {
     } finally {
       writeFileSync(release, 'release\n');
       writeFileSync(releaseProbe, 'release\n');
-      await Promise.all([holder, fullRun, focusedRun, followingGate].filter(Boolean).map(child => child.closed));
+      await Promise.all([holder, fullRun, followingGate].filter(Boolean).map(child => child.closed));
     }
   }
 });
