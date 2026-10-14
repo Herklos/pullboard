@@ -723,7 +723,7 @@ async function createRequest(root, body, isMain) {
   }, isMain);
 }
 
-/** Share the local router with the person's view; the standalone API explicitly denies person authority. */
+/** Share the local router with the person's view and other local transports; the standalone API explicitly denies person authority. */
 export function createLocalApiHandler({ secret, getPort, runCommand, projects = listApiProjects, isMain, allowedOrigins = [], onStateBuild, personChannel = 'view', stateDetail = 'full' } = {}) {
   if (typeof getPort !== 'function') throw new TypeError('createLocalApiHandler needs a bound-port getter');
   if (typeof runCommand !== 'function') throw new TypeError('createLocalApiHandler needs the actual CLI entry point as runCommand');
