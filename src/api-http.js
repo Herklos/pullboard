@@ -59,6 +59,43 @@ function sinceCursor(value) {
   return eventCursor(value);
 }
 
+/** Read a many-board stream's board ids: at least one, each named once (A2). */
+function boardList(value) {
+  const ids = String(value ?? '').split(',');
+  if (ids.some((id) => !id)) throw new Refused('BAD_REQUEST', 'name the boards to follow: /api/v1/events?boards=<id>,<id> with ids from GET /api/v1/boards');
+  const repeated = ids.find((id, index) => ids.indexOf(id) !== index);
+  if (repeated) throw new Refused('BAD_REQUEST', `board ${repeated} is named twice; name each board once`);
+  return ids;
+}
+
+/**
+ * Read a many-board cursor: board:sequence pairs joined by commas, one per board. A followed board
+ * the cursor leaves out starts from its first event, and a pair for a board not followed is ignored.
+ */
+function boardCursors(value) {
+  const cursors = new Map();
+  if (value === null || value === undefined || value === '') return cursors;
+  for (const part of String(value).split(',')) {
+    const pair = /^(.+):(\d+)$/.exec(part);
+    if (!pair || !Number.isSafeInteger(Number(pair[2])) || cursors.has(pair[1])) {
+      throw new Refused('BAD_CURSOR', 'a many-board cursor is board:sequence pairs joined by commas, each board once; use the last event id received');
+    }
+    cursors.set(pair[1], Number(pair[2]));
+  }
+  return cursors;
+}
+
+/** Name the board a many-board stream refused, unless the refusal already does (A2). */
+function namedRefusal(id, error) {
+  if (!(error instanceof Refused) || error.message.includes(id)) return error;
+  return new Refused(error.code, `board ${id}: ${error.message.replace(/^\[[A-Z0-9_]+\] /u, '')}`);
+}
+
+/** Whether a request asks for a live text/event-stream response rather than JSON. */
+function wantsLive(req) {
+  return String(req.headers.accept ?? '').split(',').some((part) => /^\s*text\/event-stream\s*(?:;|$)/i.test(part));
+}
+
 /** Read a state request's detail choice: item summaries, every item in full, or null for the server's default (A2). */
 function stateDetail(value) {
   if (value === null) return null;
@@ -71,15 +108,34 @@ export function createApiHandler(adapter, { pollMs = 200 } = {}) {
   if (!Number.isInteger(pollMs) || pollMs < 10 || pollMs > 60_000) throw new Refused('API_POLL', 'use a poll interval from 10 to 60000 milliseconds');
   const streams = new Set();
 
-  /** Replay and follow records, respecting slow clients and revocation between polls. */
-  async function stream(req, res, board, who, after, initial, watcher, lastRevision) {
+  /**
+   * Open one board for a stream: its watcher and revision come before its replay, so a change
+   * between them is still signalled.
+   */
+  async function openFollow(board, who, after) {
+    const watcher = await adapter.watchRevision?.(board, who);
+    try {
+      const lastRevision = await watcher?.revision();
+      const initial = await adapter.events(board, after, who);
+      return { board, who, after, initial, watcher, lastRevision, lastWarning: null };
+    } catch (error) {
+      watcher?.close();
+      throw error;
+    }
+  }
+
+  /**
+   * Replay and follow one or more boards' records on one response, respecting slow clients and
+   * revocation between polls. A tagged stream names each frame's board, and each ordinary
+   * event's id carries every followed board's cursor, so one Last-Event-ID resumes them all.
+   */
+  async function stream(req, res, follows, tagged) {
     res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store', connection: 'keep-alive', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer' });
     res.write(': API v1\n\n');
     streams.add(res);
     let closed = false;
     let busy = false;
     let blocked = false;
-    let lastWarning = null;
     let timer;
     /** Remove this stream and its timer once the client disconnects or access is revoked. */
     function stop() {
@@ -87,39 +143,47 @@ export function createApiHandler(adapter, { pollMs = 200 } = {}) {
       closed = true;
       clearInterval(timer);
       streams.delete(res);
-      watcher?.close();
+      for (const follow of follows) follow.watcher?.close();
       res.end();
     }
-    /** Deliver only records after the latest delivered sequence, with no overlapping polls. */
+    /** Serialize one frame's data, naming its board on a tagged stream. */
+    const frame = (follow, fields) => JSON.stringify(tagged ? { version: 1, board: follow.board.id, ...fields } : { version: 1, ...fields });
+    /** The id of an ordinary event: its sequence, or every followed board's cursor on a tagged stream. */
+    const eventId = (follow) => tagged ? follows.map((each) => each.board.id + ':' + each.after).join(',') : String(follow.after);
+    /** Deliver only records after each board's latest delivered sequence, with no overlapping polls. */
     async function send() {
       return withGitFacts(async () => {
         if (closed || busy || blocked) return;
         busy = true;
+        let current = null;
         try {
-          who = await adapter.authenticate(req, { board: board.id, write: false });
-          const warning = await adapter.warning?.(board, who);
-          const serialized = warning ? JSON.stringify({ version: 1, warning }) : null;
-          if (serialized !== lastWarning) {
-            lastWarning = serialized;
-            if (serialized && !res.write('event: warning\ndata: ' + serialized + '\n\n')) { blocked = true; return; }
-          }
-          const records = initial ?? await adapter.events(board, after, who);
-          initial = null;
-          for (const event of records) {
-            if (closed) break;
-            after = event.event_id;
-            if (!res.write('id: ' + after + '\ndata: ' + JSON.stringify({ version: 1, event }) + '\n\n')) { blocked = true; break; }
-          }
-          if (!closed && !blocked && watcher) {
-            const revision = await watcher.revision();
-            if (revision !== lastRevision) {
-              const accepted = res.write('event: changed\ndata: {"version":1,"event":{"event_kind":"changed"}}\n\n');
-              lastRevision = revision;
-              if (!accepted) blocked = true;
+          for (const follow of follows) {
+            current = follow;
+            follow.who = await adapter.authenticate(req, { board: follow.board.id, write: false });
+            const warning = await adapter.warning?.(follow.board, follow.who);
+            const serialized = warning ? frame(follow, { warning }) : null;
+            if (serialized !== follow.lastWarning) {
+              follow.lastWarning = serialized;
+              if (serialized && !res.write('event: warning\ndata: ' + serialized + '\n\n')) { blocked = true; return; }
+            }
+            const records = follow.initial ?? await adapter.events(follow.board, follow.after, follow.who);
+            follow.initial = null;
+            for (const event of records) {
+              if (closed) break;
+              follow.after = event.event_id;
+              if (!res.write('id: ' + eventId(follow) + '\ndata: ' + frame(follow, { event }) + '\n\n')) { blocked = true; break; }
+            }
+            if (closed || blocked) return;
+            if (follow.watcher) {
+              const revision = await follow.watcher.revision();
+              if (revision !== follow.lastRevision) {
+                follow.lastRevision = revision;
+                if (!res.write('event: changed\ndata: ' + frame(follow, { event: { event_kind: 'changed' } }) + '\n\n')) { blocked = true; return; }
+              }
             }
           }
         } catch (error) {
-          if (!closed) res.write('event: error\ndata: ' + JSON.stringify(refusal(error)) + '\n\n');
+          if (!closed) res.write('event: error\ndata: ' + JSON.stringify(refusal(tagged && current ? namedRefusal(current.board.id, error) : error)) + '\n\n');
           stop();
         } finally { busy = false; }
       });
@@ -149,6 +213,28 @@ export function createApiHandler(adapter, { pollMs = 200 } = {}) {
       if (req.method === 'GET' && url.pathname === '/api/v1/boards') {
         const listing = await adapter.boards(who);
         return json(res, 200, Array.isArray(listing) ? { boards: listing } : listing);
+      }
+      if (url.pathname === '/api/v1/events') {
+        // One connection follows many boards, so a group view stays inside a browser's six per origin.
+        if (req.method !== 'GET') throw new Refused('BAD_REQUEST', 'follow boards with GET /api/v1/events?boards=<id>,<id>');
+        if (!wantsLive(req)) throw new Refused('BAD_REQUEST', "the many-board events path is a live stream; send Accept: text/event-stream, or read one board's events at /api/v1/boards/:board/events");
+        const ids = boardList(url.searchParams.get('boards'));
+        const cursors = boardCursors(req.headers['last-event-id'] ?? url.searchParams.get('after'));
+        const follows = [];
+        try {
+          for (const id of ids) {
+            try {
+              const reader = await adapter.authenticate(req, { board: id, write: false });
+              follows.push(await openFollow(await adapter.board(id, reader), reader, cursors.get(id) ?? 0));
+            } catch (error) {
+              throw namedRefusal(id, error);
+            }
+          }
+          return await stream(req, res, follows, true);
+        } catch (error) {
+          for (const follow of follows) follow.watcher?.close();
+          throw error;
+        }
       }
       if (!route && !shoutRoute && !itemRoute) return json(res, 404, refusal(new Refused('NO_ENDPOINT', 'no API v1 endpoint here; use /api/v1/boards and a board state, item, shout, code, events, moves or requests path')));
       const board = await adapter.board(boardId, who);
@@ -213,15 +299,12 @@ export function createApiHandler(adapter, { pollMs = 200 } = {}) {
       }
       if (req.method === 'GET' && route[2] === 'events') {
         const after = eventCursor(req.headers['last-event-id'] ?? url.searchParams.get('after'));
-        const live = String(req.headers.accept ?? '').split(',').some((part) => /^\s*text\/event-stream\s*(?:;|$)/i.test(part));
-        if (live) {
-          const watcher = await adapter.watchRevision?.(board, who);
+        if (wantsLive(req)) {
+          const follow = await openFollow(board, who, after);
           try {
-            const lastRevision = await watcher?.revision();
-            const initial = await adapter.events(board, after, who);
-            return await stream(req, res, board, who, after, initial, watcher, lastRevision);
+            return await stream(req, res, [follow], false);
           } catch (error) {
-            watcher?.close();
+            follow.watcher?.close();
             throw error;
           }
         }
