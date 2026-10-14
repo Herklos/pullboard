@@ -80,3 +80,28 @@ test('an unread doc adds no tests and doc readers come from Git objects [V4,C7]'
   assert.deepEqual(selectAffectedTests(box.root,{base,commit}),{full:false,reason:'',files:[]});
   assert.deepEqual(selectAffectedTests(box.root,{base,commit,changed:['src/api.js','docs/unread.md']}).files,['test/api.test.js']);
 });
+
+
+test('escaped literal templates select their documentation inputs [V4,C7]', (t) => {
+  const box = graph(t);
+  box.put('test/template-hex.test.js',"import {readFileSync} from 'node:fs'; readFileSync(`do\\x63s/api.md`);\n");
+  box.put('test/template-unicode.test.js',"import {readFileSync} from 'node:fs'; readFileSync(`do\\u0063s/api.md`);\n");
+  box.put('test/template-point.test.js',"import {readFileSync} from 'node:fs'; readFileSync(`do\\u{63}s/api.md`);\n");
+  box.put('test/template-raw.test.js',"import {readFileSync} from 'node:fs'; readFileSync(String.raw`docs/api\\x2e.md`);\n");
+  box.put('test/template-identity.test.js',"import {readFileSync} from 'node:fs'; readFileSync(`docs/\\X63.md`);\n");
+  const base = box.commit();
+  box.put('docs/api.md','# Updated API\n');
+  box.put('docs/api\\x2e.md','# Raw template path\n');
+  box.put('docs/X63.md','# Identity escape path\n');
+  box.put('docs/api..md','# Conservatively cooked raw-tag path\n');
+  const commit = box.commit();
+  assert.deepEqual(selectAffectedTests(box.root,{base,commit,changed:['docs/api.md']}).files,
+    ['docs/api.test.js','test/template-hex.test.js','test/template-point.test.js','test/template-unicode.test.js'],
+    'escaped literal templates must retain their documentation readers');
+  assert.deepEqual(selectAffectedTests(box.root,{base,commit,changed:['docs/api\\x2e.md']}).files,
+    ['test/template-raw.test.js'],'raw tags retain their raw input path');
+  assert.deepEqual(selectAffectedTests(box.root,{base,commit,changed:['docs/api..md']}).files,
+    ['test/template-raw.test.js'],'unknown tags also retain the conservative cooked path');
+  assert.deepEqual(selectAffectedTests(box.root,{base,commit,changed:['docs/X63.md']}).files,
+    ['test/template-identity.test.js'],'uppercase X is an identity escape, not hexadecimal');
+});

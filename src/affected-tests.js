@@ -78,38 +78,48 @@ function documentationInputs(path, source, imports) {
     literals.lastIndex = quote.index;
     const match = literals.exec(source);
     if (!match) continue;
-    let value;
+    let values;
     if (match[0][0] === '`') {
-      const text = match[0].slice(1,-1);
-      const rootDoc = /(?:^|\/)docs(?:\/|$)/u.exec(text);
-      if (!rootDoc && text.includes('${') && text.endsWith('.md') && markdownReader) inputs.add('docs');
-      value = (rootDoc ? text.slice(rootDoc.index + (rootDoc[0].startsWith('/') ? 1 : 0)) : text).split('${',1)[0];
+      const raw = match[0].slice(1,-1);
+      // Cook escape sequences only; never evaluate an interpolation. Keep raw text too for tags.
+      const cooked = raw.replace(/\\(u\{[\da-fA-F]+\}|u[\da-fA-F]{4}|x[\da-fA-F]{2}|\r\n|[\s\S])/gu, (_, escape) => {
+        if (/^u\{[\da-fA-F]+\}$/u.test(escape)) return String.fromCodePoint(parseInt(escape.slice(2,-1),16));
+        if (/^(?:u[\da-fA-F]{4}|x[\da-fA-F]{2})$/u.test(escape)) return String.fromCharCode(parseInt(escape.slice(1),16));
+        return ({ n:'\n', r:'\r', t:'\t', b:'\b', f:'\f', v:'\v', 0:'\0', '\n':'', '\r':'', '\r\n':'' })[escape] ?? escape;
+      });
+      values = [...new Set([raw,cooked])].map(text => {
+        const rootDoc = /(?:^|\/)docs(?:\/|$)/u.exec(text);
+        if (!rootDoc && text.includes('${') && text.endsWith('.md') && markdownReader) inputs.add('docs');
+        return (rootDoc ? text.slice(rootDoc.index + (rootDoc[0].startsWith('/') ? 1 : 0)) : text).split('${',1)[0];
+      });
     }
     else {
       // Only a complete quoted string matched above is evaluated, never a template or expression.
-      try { value = match[0].includes('\\') ? new Function(`return ${match[0]};`)() : match[0].slice(1,-1); }
+      try { values = [match[0].includes('\\') ? new Function(`return ${match[0]};`)() : match[0].slice(1,-1)]; }
       catch { continue; }
     }
-    if (typeof value !== 'string') continue;
-    value = value.split(/[?#]/u)[0].replace(/\/$/u,'');
-    const embeddedRoot = /\/docs(?:\/|$)/u.exec(value);
-    if (embeddedRoot) value = value.slice(embeddedRoot.index + 1);
-    const wildcard = value.search(/[\*\[\{]/u);
-    if (wildcard !== -1) value = value.slice(0,value.lastIndexOf('/',wildcard) + 1);
-    if (value === '.md' && markdownReader) { inputs.add('docs'); continue; }
-    if (!value) continue;
-    const directoryReader = /\b(?:readdir|glob|opendir)/u.test(source);
-    if (!value.includes('/') && !value.endsWith('.md') && value !== 'docs' && !directoryReader) continue;
-    const prefix = value === 'docs' || value.endsWith('.md') ? source.slice(0,match.index).trimEnd() : '';
-    if (/\.(?:startsWith|endsWith|includes|indexOf)\($/u.test(prefix)) continue;
-    if (markdownReader && value.endsWith('.md') && !value.includes('docs/')
-      && (/\+$/u.test(prefix) || /^\s*\+/u.test(source.slice(match.index + match[0].length)))) inputs.add('docs');
-    // Bare "docs" is also a commit type or lane. In a call/path assignment, or a directory
-    // scanner, it can name an input; a declaration of commit types alone is not a reader.
-    const callArgument = /[,(]$/u.test(prefix) && prefix.lastIndexOf('(') > prefix.lastIndexOf('[');
-    if (value === 'docs' && !callArgument && !/(?<![=!<>])=$/u.test(prefix) && !directoryReader) continue;
-    for (const candidate of [posix.normalize(value), posix.normalize(posix.join(posix.dirname(path),value))]) {
-      if (candidate === 'docs' || candidate.startsWith('docs/')) inputs.add(candidate.replace(/\/$/u,''));
+    for (let value of values) {
+      if (typeof value !== 'string') continue;
+      value = value.split(/[?#]/u)[0].replace(/\/$/u,'');
+      const embeddedRoot = /\/docs(?:\/|$)/u.exec(value);
+      if (embeddedRoot) value = value.slice(embeddedRoot.index + 1);
+      const wildcard = value.search(/[\*\[\{]/u);
+      if (wildcard !== -1) value = value.slice(0,value.lastIndexOf('/',wildcard) + 1);
+      if (value === '.md' && markdownReader) { inputs.add('docs'); continue; }
+      if (!value) continue;
+      const directoryReader = /\b(?:readdir|glob|opendir)/u.test(source);
+      if (!value.includes('/') && !value.endsWith('.md') && value !== 'docs' && !directoryReader) continue;
+      const prefix = value === 'docs' || value.endsWith('.md') ? source.slice(0,match.index).trimEnd() : '';
+      if (/\.(?:startsWith|endsWith|includes|indexOf)\($/u.test(prefix)) continue;
+      if (markdownReader && value.endsWith('.md') && !value.includes('docs/')
+        && (/\+$/u.test(prefix) || /^\s*\+/u.test(source.slice(match.index + match[0].length)))) inputs.add('docs');
+      // Bare "docs" is also a commit type or lane. In a call/path assignment, or a directory
+      // scanner, it can name an input; a declaration of commit types alone is not a reader.
+      const callArgument = /[,(]$/u.test(prefix) && prefix.lastIndexOf('(') > prefix.lastIndexOf('[');
+      if (value === 'docs' && !callArgument && !/(?<![=!<>])=$/u.test(prefix) && !directoryReader) continue;
+      for (const candidate of [posix.normalize(value), posix.normalize(posix.join(posix.dirname(path),value))]) {
+        if (candidate === 'docs' || candidate.startsWith('docs/')) inputs.add(candidate.replace(/\/$/u,''));
+      }
     }
   }
   return inputs;
