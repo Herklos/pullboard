@@ -53,6 +53,13 @@ function seenCursor(value) {
   return eventCursor(value);
 }
 
+/** Read a state request's detail choice: item summaries, every item in full, or null for the server's default (A2). */
+function stateDetail(value) {
+  if (value === null) return null;
+  if (value === 'full' || value === 'summary') return value;
+  throw new Refused('BAD_REQUEST', 'state detail is full or summary; use detail=full for every item in full, or detail=summary for item summaries');
+}
+
 /** Create the common API router; an adapter controls authorization and board storage. */
 export function createApiHandler(adapter, { pollMs = 200 } = {}) {
   if (!Number.isInteger(pollMs) || pollMs < 10 || pollMs > 60_000) throw new Refused('API_POLL', 'use a poll interval from 10 to 60000 milliseconds');
@@ -128,16 +135,30 @@ export function createApiHandler(adapter, { pollMs = 200 } = {}) {
     try {
       let url;
       try { url = new URL(req.url ?? '/', 'http://127.0.0.1'); } catch { throw new Refused('BAD_REQUEST', 'use a valid path under /api/v1/boards'); }
-      const route = /^\/api\/v1\/boards\/([^/]+)\/(state|events|moves|requests|code|tokens)$/.exec(url.pathname);
+      const route = /^\/api\/v1\/boards\/([^/]+)\/(state|events|moves|requests|code|tokens|items)$/.exec(url.pathname);
       const shoutRoute = /^\/api\/v1\/boards\/([^/]+)\/shouts\/([^/]+)$/.exec(url.pathname);
-      const boardId = route?.[1] ?? shoutRoute?.[1] ?? null;
+      const itemRoute = /^\/api\/v1\/boards\/([^/]+)\/items\/([^/]+)$/.exec(url.pathname);
+      const boardId = route?.[1] ?? shoutRoute?.[1] ?? itemRoute?.[1] ?? null;
       const who = await adapter.authenticate(req, { board: boardId, write: req.method === 'POST' });
       if (req.method === 'GET' && url.pathname === '/api/v1/boards') {
         const listing = await adapter.boards(who);
         return json(res, 200, Array.isArray(listing) ? { boards: listing } : listing);
       }
-      if (!route && !shoutRoute) return json(res, 404, refusal(new Refused('NO_ENDPOINT', 'no API v1 endpoint here; use /api/v1/boards and a board state, shout, code, events, moves or requests path')));
+      if (!route && !shoutRoute && !itemRoute) return json(res, 404, refusal(new Refused('NO_ENDPOINT', 'no API v1 endpoint here; use /api/v1/boards and a board state, item, shout, code, events, moves or requests path')));
       const board = await adapter.board(boardId, who);
+      if (itemRoute) {
+        if (req.method !== 'GET') throw new Refused('BAD_REQUEST', 'read an item with GET; use a board move to change it');
+        const rawId = itemRoute[2];
+        if (!/^[1-9]\d*$/.test(rawId) || !Number.isSafeInteger(Number(rawId))) throw new Refused('BAD_REQUEST', 'item needs a positive integer id; use an id from the board state');
+        if (typeof adapter.item !== 'function') throw new Refused('ITEM_NOT_AVAILABLE', "this API adapter does not provide item detail reads; use its board state, which carries each item's full detail");
+        const item = await adapter.item(board, Number(rawId), who);
+        if (!item) return json(res, 404, refusal(new Refused('NO_ITEM', `no item #${rawId} on this board; use an id from the board state`)));
+        return json(res, 200, { item });
+      }
+      if (req.method === 'GET' && route?.[2] === 'items') {
+        if (typeof adapter.search !== 'function') throw new Refused('ITEM_NOT_AVAILABLE', "this API adapter does not provide item search; use its board state, which carries each item's full detail");
+        return json(res, 200, { ids: await adapter.search(board, url.searchParams.get('q') ?? '', who) });
+      }
       if (req.method === 'GET' && shoutRoute) {
         const rawId = shoutRoute[2];
         if (!/^[1-9]\d*$/.test(rawId) || !Number.isSafeInteger(Number(rawId))) throw new Refused('BAD_REQUEST', 'shout needs a positive integer id; use the id from the event or recent state');
@@ -160,13 +181,14 @@ export function createApiHandler(adapter, { pollMs = 200 } = {}) {
       }
       if (req.method === 'GET' && route[2] === 'state') {
         const seen = url.searchParams.has('seen') ? seenCursor(url.searchParams.get('seen')) : null;
+        const options = { detail: stateDetail(url.searchParams.get('detail')) };
         if (typeof adapter.stateJson === 'function') {
-          const state = await adapter.stateJson(board, who, seen);
+          const state = await adapter.stateJson(board, who, seen, options);
           if (typeof state !== 'string') throw new TypeError('the local state serializer must return JSON text');
           const eventLogVersion = await adapter.eventLogVersion?.(board, who);
           return jsonState(res, 200, state, eventLogVersion);
         }
-        const state = await adapter.state(board, who, seen);
+        const state = await adapter.state(board, who, seen, options);
         const eventLogVersion = await adapter.eventLogVersion?.(board, who);
         return json(res, 200, { state, ...(eventLogVersion === undefined ? {} : { eventLogVersion }) });
       }
