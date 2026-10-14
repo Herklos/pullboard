@@ -733,14 +733,17 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
   const key = Buffer.from(secret);
   const permittedOrigins = new Set(allowedOrigins);
   const stateCache = new Map();
-  // Each board's recent build fingerprints, oldest first, and the latest sequence a forgotten build had.
+  // The fingerprints of the summary states each board's clients were sent, least recently sent
+  // first, and the latest sequence a forgotten one had. A build only read for an item, a search or
+  // a reset was never sent, so no client holds it and it is never a base.
   const deltaBases = new Map();
-  /** Keep a new build as a possible delta base, forgetting the oldest beyond the limit. */
-  function keepBase(cacheId, entry) {
-    const kept = deltaBases.get(cacheId) ?? { builds: [], forgottenThrough: -1 };
+  /** Keep a summary state just sent, as a snapshot or as a delta's result, forgetting the oldest beyond the limit. */
+  function keepSentBase(entry) {
+    const kept = deltaBases.get(entry.cacheId) ?? { builds: [], forgottenThrough: -1 };
+    kept.builds = kept.builds.filter((build) => build.print !== entry.print);
     kept.builds.push({ sequence: entry.sequence, print: entry.print });
     while (kept.builds.length > DELTA_BASES) kept.forgottenThrough = Math.max(kept.forgottenThrough, kept.builds.shift().sequence);
-    deltaBases.set(cacheId, kept);
+    deltaBases.set(entry.cacheId, kept);
   }
   /**
    * Read the current board build through `read(entry, cached)`, reusing the cached build while every
@@ -765,7 +768,6 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
     const history = withBoard(board.root, (db) => store.events(db), codeIsMain);
     const entry = snapshotEntry(before.revision, state, prepareFlowHistory(history));
     entry.cacheId = before.cacheId;
-    keepBase(before.cacheId, entry);
     const after = boardStateRevision(board.root, board.id, codeIsMain);
     if (before.cacheable && after.cacheable && before.revision === after.revision) {
       stateCache.set(before.cacheId, entry);
@@ -777,21 +779,25 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
   }
   /** Return item summaries or every item in full, as asked or by this server's default, and the JSON for either. */
   function localState(board, seen, { detail = null } = {}) {
-    return withSnapshot(board, (entry, cached) => {
-      const full = (detail ?? stateDetail) === 'full';
+    const full = (detail ?? stateDetail) === 'full';
+    const sent = withSnapshot(board, (entry, cached) => {
       const state = stateForRequest(full ? entry.state : entry.summary, board.root, seen, entry.preparedFlow, cached, codeIsMain);
       // Full fragments wait for the first full request, so a server sending summaries never builds them.
       const fields = full ? (entry.stateJsonFields ??= prepareStateJson(entry.state)) : entry.summaryFields;
-      return { state, json: serializeState(state, fields) };
+      return { state, json: serializeState(state, fields), entry };
     });
+    // Only the build actually returned is sent; a delta extends summaries, never a full state.
+    if (!full) keepSentBase(sent.entry);
+    return sent;
   }
   /**
-   * What changed in the item summaries' state since the build this server sent at event `since`.
-   * Builds made by this request are not bases: a server that never sent a snapshot at `since`, or
-   * has forgotten one, answers with a reset that names why instead of guessing.
+   * What changed in the item summaries' state since the summary state this server sent at event
+   * `since`. A server that never sent one at `since`, or has forgotten it, answers with a reset that
+   * names why instead of guessing; a delta's result is what the client then holds, so it is kept.
    */
   function localDelta(board, seen, { since, eventLogVersion = null }) {
-    return withSnapshot(board, (entry, cached) => {
+    /** One build's answer: its delta from the summary states sent at `since`, or a reset naming why there is none. */
+    const answerFor = (entry, cached) => {
       const state = stateForRequest(entry.summary, board.root, seen, entry.preparedFlow, cached, codeIsMain);
       const answer = { since, sequence: entry.sequence, eventLogVersion: store.EVENT_LOG_VERSION };
       const path = '/api/v1/boards/' + board.id + '/state';
@@ -802,11 +808,13 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
       }
       if (since > entry.sequence) return reset('BASE_AHEAD', `this board's latest event is ${entry.sequence}, before ${since}; use GET ${path} for a fresh snapshot`);
       const kept = deltaBases.get(entry.cacheId) ?? { builds: [], forgottenThrough: -1 };
-      const bases = since <= kept.forgottenThrough ? []
-        : kept.builds.filter((build) => build.sequence === since && (cached || build.print !== entry.print)).map((build) => build.print);
+      const bases = since <= kept.forgottenThrough ? [] : kept.builds.filter((build) => build.sequence === since).map((build) => build.print);
       if (!bases.length) return reset('BASE_NOT_KEPT', `this server keeps no snapshot it sent at event ${since}; use GET ${path} for a fresh snapshot`);
       return { ...answer, delta: stateDelta(bases, entry.print, state) };
-    });
+    };
+    const sent = withSnapshot(board, (entry, cached) => ({ entry, answer: answerFor(entry, cached) }));
+    if (sent.answer.delta) keepSentBase(sent.entry);
+    return sent.answer;
   }
   /** One item's detail from the current build, or null when the board has no such item. */
   function localItem(board, id) {

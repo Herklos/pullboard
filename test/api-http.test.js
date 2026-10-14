@@ -487,13 +487,30 @@ test('[A2, N26] a delta brings a snapshot up to date', async (t) => {
   const format = await box.call(box.path + '/state?since=' + held.sequence + '&eventLogVersion=0');
   assert.equal(format.document.delta, null);
   assert.equal(format.document.reset.code, 'FORMAT_CHANGED', 'a snapshot in another event-log format is never extended');
+  // A restarted server that has only read an item, or searched, never sent a snapshot: it cannot
+  // extend the held one, even when a change with no event leaves the sequence where it was.
+  writeFileSync(join(box.root, 'DOCTRINE.md'), '# Local rules\n\n## Team Rules\n\n- LOCAL1 [approved, must] A restarted server knows only what it sent. | gate: true\n');
   const restarted = await serveApi({ runCommand: main, projects: () => [{ root: box.root, name: 'HTTP fixture' }] });
   t.after(() => restarted.close());
   const restartedUrl = new URL(restarted.url);
-  const unknown = await fetchFresh(restartedUrl.origin + box.path + '/state?since=' + held.sequence, { headers: { 'x-pullboard-key': restartedUrl.searchParams.get('k') } });
-  const unknownDocument = await unknown.json();
-  assert.equal(unknownDocument.delta, null);
+  /** Read through the restarted server with its own key. */
+  const restartedRead = async (path) => (await fetchFresh(restartedUrl.origin + box.path + path, { headers: { 'x-pullboard-key': restartedUrl.searchParams.get('k') } })).json();
+  assert.equal((await restartedRead('/items/' + item)).item.id, item);
+  assert.deepEqual((await restartedRead('/items?q=delta')).ids, [item]);
+  const unknownDocument = await restartedRead('/state?since=' + held.sequence);
+  assert.equal(unknownDocument.delta, null, JSON.stringify(unknownDocument.delta));
   assert.equal(unknownDocument.reset.code, 'BASE_NOT_KEPT', 'a server that never sent that snapshot says so instead of guessing');
+  const resent = (await restartedRead('/state')).state;
+  assert.equal(resent.sequence, held.sequence, 'the doctrine edit wrote no event');
+  assert.notDeepEqual(resent.practice, held.practice, 'so the held snapshot really is stale');
+  assert.equal((await restartedRead('/state?since=' + held.sequence)).delta === null, false, 'once it sends a snapshot at that sequence, it can extend it');
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  try {
+    const extended = applyStateDelta(resent, (await restartedRead('/state?since=' + resent.sequence)).delta);
+    assert.deepEqual(extended, (await restartedRead('/state')).state, 'and its delta still brings that snapshot up to date');
+  } finally {
+    t.mock.timers.reset();
+  }
   for (const [query, code] of [['since=', 'BAD_CURSOR'], ['since=-1', 'BAD_CURSOR'], ['since=1.5', 'BAD_CURSOR'], ['since=1&detail=full', 'BAD_REQUEST']]) {
     const refused = await box.call(box.path + '/state?' + query);
     assert.equal(refused.status, 400, query);
