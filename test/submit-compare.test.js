@@ -56,10 +56,10 @@ async function observed(predicate, label) {
 }
 
 /** Read a private queue or board, allowing the same short SQLite writer contention as the resource API. */
-function rows(file, sql) {
+function rows(file, sql, parameters = []) {
   if (!existsSync(file)) return [];
   const db = new DatabaseSync(file, { readOnly: true });
-  try { db.exec('PRAGMA busy_timeout=10000; PRAGMA query_only=ON'); return db.prepare(sql).all(); }
+  try { db.exec('PRAGMA busy_timeout=10000; PRAGMA query_only=ON'); return db.prepare(sql).all(...parameters); }
   finally { db.close(); }
 }
 
@@ -165,8 +165,10 @@ test('a shout completes while a submit compares with main [V4,C7,B7]', async t =
   const submission = launch(box, 'submit', String(box.item));
   await observed(() => events(box).some(event => event.phase === 'start'), 'the real main comparison is waiting');
   const shout = launch(box, 'shout', 'coordinator', 'Comparison is still running');
-  await observed(() => shout.exitCode !== null || rows(box.repoQueue,
-    "SELECT ticket FROM waiter WHERE name LIKE 'checkout-session:%'").length > 0, 'the shout lands or reaches the checkout guard');
+  await observed(() => shout.exitCode !== null || (rows(box.repoQueue,
+    "SELECT token FROM holder WHERE name LIKE 'checkout-session:%' AND pid=?", [submission.pid]).length > 0
+    && rows(box.repoQueue, "SELECT ticket FROM waiter WHERE name LIKE 'checkout-session:%'").length > 0),
+  'the shout completes or waits behind the submitting process');
   assert.equal(shout.exitCode, 0, 'the same-seat shout completes before releasing the comparison');
   assert.equal((await shout.closed).code, 0);
   assert.equal(rows(box.board, "SELECT shout_text FROM shout WHERE shout_text='Comparison is still running'").length, 1);
