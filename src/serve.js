@@ -23,6 +23,7 @@ import { codeIsFromMain, repoInfo, resolveCommit } from './git.js';
 import { committedIds } from './history.js';
 import { productSummaries } from './products.js';
 import { listApiProjects, registryFile } from './projects.js';
+import { fetchLocal } from './local-fetch.js';
 import { Refused } from './refused.js';
 import { loadSpec } from './spec.js';
 
@@ -56,12 +57,15 @@ export function portableSnapshot(value, root, field = '') {
 /**
  * Export one board through the same API v1 used by the live page, closing its temporary local
  * transport before returning. The static page needs neither that transport nor its session key.
+ * Its API reads go through fetchApi, fetchLocal unless a caller passes another; a test passes one
+ * that records each address and then reads through fetchLocal, so it sees the requests the export sends.
  *
  * @param {string} root
  * @param {string} directory
+ * @param {{ fetchApi?: typeof fetchLocal }} [options]
  * @returns {Promise<{path: string}>}
  */
-export async function exportView(root, directory) {
+export async function exportView(root, directory, { fetchApi = fetchLocal } = {}) {
   const output = resolve(directory);
   if (existsSync(output) && (!statSync(output).isDirectory() || readdirSync(output).length)) {
     throw new Refused('EXPORT_EXISTS', `snapshot folder ${output} is not empty; use an empty folder`);
@@ -81,7 +85,13 @@ export async function exportView(root, directory) {
     const address = new URL(api.url);
     /** Read an authenticated API document without putting its private key in the snapshot. */
     const read = async (path) => {
-      const reply = await fetch(address.origin + path, { headers: { 'x-pullboard-key': address.searchParams.get('k') } });
+      let reply;
+      try {
+        reply = await fetchApi(address.origin + path, { headers: { 'x-pullboard-key': address.searchParams.get('k') } });
+      } catch (error) {
+        if (!(error instanceof TypeError)) throw error;
+        throw new Refused('VIEW_UNAVAILABLE', `could not read view at ${address.origin} while exporting; retry when the local view is available`);
+      }
       const document = await reply.json();
       if (!reply.ok) throw new Refused(document.error.code, document.error.message);
       return document;
@@ -94,7 +104,8 @@ export async function exportView(root, directory) {
       throw new Refused('NO_BOARD', 'no readable board to export; run pullboard init in this repo');
     }
     const path = '/api/v1/boards/' + encodeURIComponent(board.id);
-    state = await read(path + '/state');
+    // Ask for every item's thread, verdicts and criterion: the snapshot has no API to fetch them from later.
+    state = await read(path + '/state?detail=full');
     events = await read(path + '/events');
     const last = state.state.events[0]?.event_id ?? 0;
     events.events = events.events.filter((event) => event.event_id <= last);

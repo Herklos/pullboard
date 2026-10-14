@@ -227,14 +227,14 @@ function hasPipeline(command) {
   return false;
 }
 
-/** Run work under the machine gate queue, keeping landing gates ahead of ordinary gates and item checks last.
+/** Run work under the machine queue: landing gates, ordinary gates, item checks, then diagnostics.
  *
  * @param {string} root - Checkout used to locate the machine resource database.
  * @param {(lease: { waitMs: number }) => any | Promise<any>} action - Work to perform while holding a slot.
- * @param {{ landing?: boolean, itemCheck?: boolean, onWait?: (state: object) => void }} [options] - Queue class and progress reporter.
+ * @param {{ landing?: boolean, itemCheck?: boolean, diagnostic?: boolean, onWait?: (state: object) => void }} [options] - Queue class and progress reporter.
  * @returns {Promise<any>} The action's result after releasing its lease.
  */
-export async function withGateSlot(root, action, { landing = false, itemCheck = false, onWait } = {}) {
+export async function withGateSlot(root, action, { landing = false, itemCheck = false, diagnostic = false, onWait } = {}) {
   const capacityProvider = () => loadMachineSettings().gateSlots;
   const lease = await takeResource({
     name: 'gate',
@@ -245,6 +245,7 @@ export async function withGateSlot(root, action, { landing = false, itemCheck = 
     repo: root,
     landing,
     itemCheck,
+    diagnostic,
     allowIdleCapacityUpdate: true,
     onWait,
   });

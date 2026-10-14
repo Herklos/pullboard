@@ -2,7 +2,7 @@
 
 Generated from src/machine.js by `pullboard lifecycle`. Do not edit it by hand: change the declaration, then run `pullboard lifecycle > docs/lifecycle.md`.
 
-An item starts open. Its final states, verified and withdrawn, cannot be left, and every way into them passes the same exit guards, whatever command gets there. The board file itself refuses any move not declared here.
+An item starts open. Its final states, withdrawn, cannot be left. Every move into a guarded state passes the same transition guards, whatever command gets there. The board file itself refuses any move not declared here.
 
 ## Frozen check policy
 
@@ -22,6 +22,7 @@ stateDiagram-v2
   submitted --> verified: accept
   submitted --> open: reject
   submitted --> open: reopen
+  verified --> open: reopen
   open --> open: escalate
   claimed --> open: escalate
   open --> open: refreeze
@@ -31,7 +32,6 @@ stateDiagram-v2
   open --> withdrawn: withdraw
   claimed --> withdrawn: withdraw
   submitted --> withdrawn: withdraw
-  verified --> [*]
   withdrawn --> [*]
 ```
 
@@ -42,7 +42,7 @@ stateDiagram-v2
 | open | waiting for a builder; claimable once what it waits on is verified | none |
 | claimed | an agent holds it under a lease, its criterion frozen | item_owner, item_lease_until, item_frozen_digest |
 | submitted | built and gated green at a pinned commit, waiting for another agent | item_built_by, item_commit, item_frozen_digest |
-| verified (final) | another agent accepted it at the submitted commit | item_verified_by, item_commit |
+| verified | another agent accepted it at the submitted commit | item_verified_by, item_commit |
 | withdrawn (final) | nobody should build it; the reason stays on it | item_withdrawn_reason |
 
 ## Moves
@@ -58,15 +58,15 @@ Each move checks its guards in this order and refuses with the first one that do
 | reserve | submitted | submitted | agent, coordinator | coordinatorSaysAs (MAIN_IS_COORDINATOR), joined (NOT_JOINED), roadmapReadable (MILESTONES_CORRUPT), itemExists (NO_ITEM), inState (NOT_SUBMITTED), reviewCooldownElapsed (REVIEW_COOLDOWN), notBuilder (SELF_VERIFY), routeAllows (ROUTE), policyAllows (COORDINATOR_VERIFIES), familyAllows (O2_FAMILY_MATCH), reviewFree (REVIEW_HELD) |
 | accept | submitted | verified | agent, coordinator | coordinatorSaysAs (MAIN_IS_COORDINATOR), joined (NOT_JOINED), itemExists (NO_ITEM), inState (NOT_SUBMITTED), atSubmittedCommit (NOT_AT_COMMIT or OUTSIDE_LANE or NO_POLICY or BAD_CONFIG or GIT_GRAFTS), notBuilder (SELF_VERIFY), routeAllows (ROUTE), policyAllows (COORDINATOR_VERIFIES), familyAllows (O2_FAMILY_MATCH), reviewFree (REVIEW_HELD), criterionUnchanged (CRITERIA_CHANGED), reasonIsMet (BAD_REASON), trunkMergeClean (MERGE_CONFLICT or MERGE_CHECK_FAILED or NO_POLICY or NO_TRUNK), noUnverifiedStack (STACKED_ON_UNVERIFIED), itemCheckGreen (CHECK_RED or CHECK_UNVERIFIED), proofNoted (PROOF_REQUIRED) |
 | reject | submitted | open | agent, coordinator | coordinatorSaysAs (MAIN_IS_COORDINATOR), joined (NOT_JOINED), itemExists (NO_ITEM), inState (NOT_SUBMITTED), atSubmittedCommit (NOT_AT_COMMIT or OUTSIDE_LANE or NO_POLICY or BAD_CONFIG or GIT_GRAFTS), notBuilder (SELF_VERIFY), routeAllows (ROUTE), policyAllows (COORDINATOR_VERIFIES), familyAllows (O2_FAMILY_MATCH), reviewFree (REVIEW_HELD), criterionUnchanged (CRITERIA_CHANGED), reasonCoded (BAD_REASON), noteGiven (NOTE_REQUIRED) |
-| reopen | submitted | open | coordinator | joined (NOT_JOINED), itemExists (NO_ITEM), inState (NOT_SUBMITTED), coordinatorOnly (COORDINATOR_ONLY), noteGiven (NOTE_REQUIRED) |
+| reopen | submitted, verified | open | coordinator | joined (NOT_JOINED), itemExists (NO_ITEM), inState (NOT_SUBMITTED), coordinatorOnly (COORDINATOR_ONLY), noteGiven (NOTE_REQUIRED), notMerged (ALREADY_MERGED), landingFailureRecorded (LANDING_FAILURE_REQUIRED) |
 | escalate | open, claimed | open | agent, coordinator | joined (NOT_JOINED), noteGiven (NOTE_REQUIRED), itemExists (NO_ITEM), holderOrCoordinator (NOT_YOURS), inState (CLOSED) |
 | refreeze | open, claimed, submitted | open | coordinator, when there is no live claim awaiting a coordinator correction | joined (NOT_JOINED), coordinatorOnly (COORDINATOR_ONLY), itemExists (NO_ITEM), inState (CLOSED), rowsInForce (UNKNOWN_SPEC or A5_GRAMMAR_VERSION or NO_POLICY or BAD_CONFIG or SPEC_BEHIND_MAIN) |
 | refreeze | claimed | claimed | agent, coordinator, when a live claim has a pending coordinator correction | joined (NOT_JOINED), itemExists (NO_ITEM), holderOrCoordinator (NOT_YOURS), inState (CLOSED), rowsInForce (UNKNOWN_SPEC or A5_GRAMMAR_VERSION or NO_POLICY or BAD_CONFIG or SPEC_BEHIND_MAIN) |
 | withdraw | open, claimed, submitted | withdrawn | coordinator | joined (NOT_JOINED), coordinatorOnly (COORDINATOR_ONLY), noteGiven (NOTE_REQUIRED), itemExists (NO_ITEM), inState (CLOSED) |
 
-## Exit guards
+## Required transition guards
 
-| Final state | Every move into it passes |
+| State entered | Every move into it passes |
 | --- | --- |
 | verified | atSubmittedCommit, notBuilder, criterionUnchanged, proofNoted |
 | withdrawn | coordinatorOnly, noteGiven |
@@ -81,7 +81,7 @@ Each move checks its guards in this order and refuses with the first one that do
 | NOT_SUBMITTED | reserve: the item is in submitted | pullboard show <id> |
 | NOT_SUBMITTED | accept: the item is in submitted | pullboard show <id> |
 | NOT_SUBMITTED | reject: the item is in submitted | pullboard show <id> |
-| NOT_SUBMITTED | reopen: the item is in submitted | pullboard show <id> |
+| NOT_SUBMITTED | reopen: the item is in submitted, verified | pullboard show <id> |
 | CLOSED | escalate: the item is in open, claimed | pullboard show <id> |
 | CLOSED | refreeze: the item is in open, claimed, submitted | pullboard show <id> |
 | CLOSED | refreeze: the item is in claimed | pullboard show <id> |
@@ -142,6 +142,8 @@ Each move checks its guards in this order and refuses with the first one that do
 | NOTE_REQUIRED | a review release gives a nonempty one-line reason, engine 5 or newer, only when freeing a submitted review reservation | release with --note "why", or --note-file <file> |
 | REVIEW_COOLDOWN | the reviewer has not released this submission within the past hour, engine 5 or newer, only for the same reviewer and current submission | let another reviewer take it, or wait an hour or for a new submission |
 | NOTE_REQUIRED | the move carries a note: what failed, what was tried, or why | --note "..." or --note-file <file> |
+| ALREADY_MERGED | the item has no recorded merge receipt | a merged item cannot be reopened |
+| LANDING_FAILURE_REQUIRED | a verified item note names the failing test and landing merge commit | cite the recorded batch, or name the test and merge commit in a manual note |
 | BAD_DECISION | a verdict is accept or reject | pullboard verify <id> accept, or reject --reason CODE --note "..." |
 
 For check diagnostics, a refusal from a failed or unverifiable check includes an output digest, sanitized tail, and a private full-output path in the CLI message (also `error.message` in JSON). The artifact is owner-readable only. If it cannot be saved, the tail remains available and the message names the storage error instead of claiming a path.

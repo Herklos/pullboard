@@ -305,23 +305,20 @@ test('ordered agent joins mint scoped tokens and retain authenticated native act
   assert.equal(box.calls.filter((call) => call.path.endsWith('/authorize')).length, firstApprovalCount + 1,
     'one explicit phone approval authorizes native revocation');
 
+  // A serve key is not the person [P6,B26]: revoking the still-live second token is refused before any phone proposal.
   const apiApprovalCount = box.calls.filter((call) => call.path.endsWith('/authorize')).length;
   const apiRevokeStart = box.transit.length;
-  const apiRevokePending = fetchFresh(tokenUrl, {
-    method: 'POST', headers: apiHeaders, body: JSON.stringify({ id: firstTokenRow.id }),
+  const apiRevokeResponse = await fetchFresh(tokenUrl, {
+    method: 'POST', headers: apiHeaders, body: JSON.stringify({ id: secondTokenRow.id }),
   });
-  const apiProposal = await waitForPhoneProposal(box, apiRevokeStart, firstTokenRow.id);
-  assert.equal(box.calls.filter((call) => call.path.endsWith('/authorize')).length, apiApprovalCount,
-    'local API revocation waits for a phone tap');
-  await approvePhoneProposal(box, chrome, apiProposal);
-  const apiRevokeResponse = await apiRevokePending;
-  assert.equal(apiRevokeResponse.status, 200, 'local API accepts the opaque id-only revocation body');
-  assert.equal(box.calls.filter((call) => call.path.endsWith('/authorize')).length, apiApprovalCount + 1,
-    'one explicit phone approval authorizes local API revocation');
+  assert.notEqual(apiRevokeResponse.status, 200, 'the standalone API cannot revoke a token');
   const apiRevoke = await apiRevokeResponse.json();
-  assert.equal(apiRevoke.id, firstTokenRow.id);
-  assert.equal(apiRevoke.revoked, true);
-  assertMetadataOnly(apiRevoke, [firstToken, secondToken, personState.token, boardKey], 'local API revocation response contains no credential');
+  assert.equal(apiRevoke.error?.code, 'B26_PERSON_CHANNEL', 'a serve key carries no person authority to revoke');
+  assert.equal(box.transit.slice(apiRevokeStart).some((row) => row.method === 'POST' && row.path === '/api/v1/devices/approvals'), false,
+    'a refused API revocation publishes no phone approval request');
+  assert.equal(box.calls.filter((call) => call.path.endsWith('/authorize')).length, apiApprovalCount,
+    'a refused API revocation reaches no phone approval');
+  assertMetadataOnly(apiRevoke, [firstToken, secondToken, personState.token, boardKey], 'local API refusal contains no credential');
 
   // Capture authenticated journal records before a person command checkpoints their prefix.
   const remoteState = await fetch(`${box.origin}/api/v1/boards/${personState.board}/state`, {

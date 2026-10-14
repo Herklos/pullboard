@@ -769,21 +769,60 @@ async function openSnapshotChrome(executable, url, profile) {
   }
 }
 
-/** Stop only an owned Chrome process group, with bounded TERM and KILL waits. */
-async function stopOwnedChrome(child, stopped) {
-  /** Wait for the owned process to exit, bounding and clearing the timeout either way. */
-  const waitBounded = async (ms) => {
-    let timer;
-    const exited = await Promise.race([stopped.then(() => true), new Promise((resolve) => {
-      timer = setTimeout(() => resolve(false), ms);
-    })]);
-    clearTimeout(timer);
-    return exited;
+/** Check the owned group, since a leader's close event also waits for inherited pipes. */
+function ownedChromeGroupAlive(pid) {
+  try { process.kill(-pid, 0); return true; }
+  catch (error) {
+    // A permission error cannot prove that Chrome's sandboxed helpers have exited.
+    return error.code !== 'ESRCH';
+  }
+}
+
+/** Bound the whole group's lifetime, including helpers whose leader has already exited. */
+async function waitForOwnedChromeGroup(pid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (ownedChromeGroupAlive(pid)) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await browserPause(Math.min(20, remaining));
+  }
+  return true;
+}
+
+/** Name surviving group members without exposing any browser arguments or profile paths. */
+function ownedChromeGroupPids(pid) {
+  const rows = execFileSync('ps', ['-axo', 'pid=,pgid='], { encoding: 'utf8' });
+  return rows.trim().split('\n').map(row => row.trim().split(/\s+/u))
+    .filter(row => Number(row[1]) === pid).map(row => Number(row[0]));
+}
+
+/** Stop only an owned Chrome group, then release pipes held by independent crash reporters. */
+async function stopOwnedChrome(child, stopped, { timeoutMs = 5_000, signal = process.kill } = {}) {
+  const pid = child.pid;
+  assert.ok(Number.isSafeInteger(pid) && pid > 0, 'Chrome cleanup requires its owned group leader pid');
+  const startedAt = Date.now();
+  /** An already-exited group needs no signal; other signal failures must stay visible. */
+  const send = name => {
+    try { signal(-pid, name); }
+    catch (error) { if (error.code !== 'ESRCH') throw error; }
   };
-  try { process.kill(-child.pid, 'SIGTERM'); } catch { /* The owned Chrome group already exited. */ }
-  if (await waitBounded(5_000)) return;
-  try { process.kill(-child.pid, 'SIGKILL'); } catch { /* The owned Chrome group already exited. */ }
-  assert.ok(await waitBounded(5_000), 'owned Chrome exits after SIGKILL within the bounded cleanup window'); // budget: hang ceiling for owned Chrome process-group cleanup; no throughput claim.
+  if (ownedChromeGroupAlive(pid)) send('SIGTERM');
+  if (!await waitForOwnedChromeGroup(pid, timeoutMs)) {
+    send('SIGKILL');
+    if (!await waitForOwnedChromeGroup(pid, timeoutMs)) {
+      const pids = ownedChromeGroupPids(pid);
+      throw new Error(`owned Chrome group ${pid} did not exit after SIGKILL; waited ${Date.now() - startedAt}ms; live pids: ${pids.join(', ') || 'none at final capture'}`);
+    }
+  }
+  // An independent process can inherit stderr without belonging to the owned Chrome group.
+  child.stderr?.destroy();
+  let timer;
+  try {
+    const closed = await Promise.race([stopped.then(() => true), new Promise(resolve => {
+      timer = setTimeout(() => resolve(false), timeoutMs);
+    })]);
+    assert.ok(closed, `owned Chrome group ${pid} is gone but its leader did not close; waited ${Date.now() - startedAt}ms`);
+  } finally { clearTimeout(timer); }
 }
 
 /** Close the CDP socket and stop only this test's isolated Chrome process group. */
@@ -908,12 +947,7 @@ async function pressedInto(chrome, expression, timeoutMs = 10_000) {
 
 /** Wait for a page condition that may span a page load, when the page asked may still be loading. */
 async function settled(chrome, expression, timeoutMs = 15_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try { if (await chrome.stable(expression)) return; } catch { /* The next page is still loading. */ }
-    await browserPause(50);
-  }
-  throw new Error(`Browser condition did not arrive: ${expression}`);
+  return chrome.waitFor(expression, timeoutMs);
 }
 
 /** A page expression for the Roadmap row showing an id, such as #3 or beacon#1. */

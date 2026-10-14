@@ -40,6 +40,7 @@ import {
   release,
   releaseLane,
   releaseItemHold,
+  reopen,
   reserveReview,
   SCHEMA_VERSION,
   submit,
@@ -275,6 +276,9 @@ function recordEventContract() {
   const fact = appendFact(board, first, { agentId: builder, kind: 'note', text: 'Captured evidence', ref: 'docs/formats.md:1-3@' + 'a'.repeat(40) });
   appendFact(board, first, { agentId: coordinator, kind: 'measurement', text: 'Corrected evidence', supersedes: fact.id });
   editItem(board, first, { agentId: coordinator, brief: 'Files: docs/formats.md\nTest: docs/formats.test.js', route: 'mid', criterion: 'Changed', check: 'node test' });
+  const dependency = addItem(board, { by: coordinator, lane: 'docs', title: 'Dependency example' });
+  editItem(board, first, { agentId: coordinator, after: [dependency] });
+  editItem(board, first, { agentId: coordinator, after: [] });
   holdItem(board, first, { agentId: coordinator, reason: 'fixture item hold' });
   releaseItemHold(board, first, { agentId: coordinator });
   recordAttempt(board, first, { agentId: builder, n: 1, seconds: 2, result: 'failed' });
@@ -309,13 +313,25 @@ function recordEventContract() {
   assert.deepEqual(JSON.parse(events(board).filter((row) => row.event_kind === 'edit').at(-1).event_detail).pendingRefreeze, ['criterion']);
   refreeze(board, corrected, { agentId: builder, freeze: freeze('adopted-correction') });
 
+  const returnedBuilder = register(board, { lane: 'docs', path: '/returned-builder', model: 'builder' });
+  const returned = addItem(board, { by: coordinator, lane: 'docs', title: 'Returned landing example' });
+  claim(board, returned, { agentId: returnedBuilder, lane: 'docs', leaseMs: 60_000, freeze: freeze('returned') });
+  const returnedCommit = 'f'.repeat(40);
+  submit(board, returned, { agentId: returnedBuilder, commit: returnedCommit, tree: 'e'.repeat(40) });
+  verify(board, returned, { agentId: reviewer, decision: 'ACCEPT', reason: ACCEPT_REASON, note: 'checked the returned example', head: returnedCommit, digest: 'returned', policy: 'agents' });
+  const failureBatch = recordLandingBatch(board, { agentId: coordinator, batch: { version: 1, id: 'format-red-example', base: 'a'.repeat(40), tip: 'c'.repeat(40),
+    root: '/landing-red', branch: 'refs/heads/main', state: 'blocked', owner: 'format-red-example', logPath: '/landing-red.log',
+    items: [{ id: returned, commit: returnedCommit }], culprits: [{ id: returned, commit: returnedCommit, mergeCommit: 'c'.repeat(40),
+      tests: [{ file: 'test/format.test.js', name: 'keeps the example' }] }] } });
+  reopen(board, returned, { agentId: coordinator, note: `Landing batch ${failureBatch.id} failed test/format.test.js: keeps the example; merge commit ${'c'.repeat(40)}` });
+
   const withdrawn = addItem(board, { by: coordinator, lane: 'docs', title: 'Withdrawn example' });
   withdraw(board, withdrawn, { agentId: coordinator, reason: 'duplicate fixture' });
   holdLane(board, 'view', { agentId: coordinator, reason: 'fixture hold' });
   releaseLane(board, 'view', { agentId: coordinator });
   const rows = events(board).map((row) => ({ ...row, detail: JSON.parse(row.event_detail) }));
   closeBoard(board);
-  return { rows, actors: { [coordinator]: 'coordinator', [builder]: 'builder', [reviewer]: 'reviewer', [PERSON]: 'person', board: 'board' } };
+  return { rows, actors: { [coordinator]: 'coordinator', [builder]: 'builder', [returnedBuilder]: 'builder', [reviewer]: 'reviewer', [PERSON]: 'person', board: 'board' } };
 }
 
 /** Reopen a file after removing old-format objects and report the repaired guard event. */
@@ -424,6 +440,8 @@ test('[A5,H16] grammar and executable engine versions match the format guide', (
   assert.equal(versionOf('move engine'), ENGINE_VERSION);
   assert.match(versions, /Bump when a move's meaning changes/);
   assert.match(versions, /`ENGINE_VERSION`.*naming both versions/);
+  assert.match(guide, /Engine 10 adds coordinator-only reopening for an unmerged verified item after a red landing candidate/u);
+  assert.match(guide, /Engines 8 and 9 retain their submitted-only `reopen` behavior/u);
   assert.match(versions, /`SPEC_GRAMMAR_VERSION`/);
   assert.match(versions, /`JSON_SHAPES\.version`/);
   assert.match(versions, /`SCHEMA_VERSION`/);

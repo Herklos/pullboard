@@ -682,6 +682,29 @@ export function addItem(board, { by, lane, title, criterion = '', specIds = [], 
   });
 }
 
+/** Validate that dependencies exist, remain usable, and cannot lead back to the edited item. */
+function validateItemDependencies(board, itemId, after) {
+  const direct = after.map((dependency) => itemById(board, dependency));
+  const withdrawn = direct.find((dependency) => dependency.item_status === 'withdrawn');
+  if (withdrawn) {
+    throw new Refused('WITHDRAWN', `item #${withdrawn.item_id} is withdrawn; nothing can wait on it`);
+  }
+  if (itemId === null) return;
+
+  const visited = new Set();
+  const pending = [...after];
+  while (pending.length) {
+    const dependency = pending.pop();
+    if (dependency === itemId) {
+      throw new Refused('DEPENDENCY_CYCLE', `item #${itemId} cannot wait on itself through its dependencies; change --after to remove the cycle`);
+    }
+    if (visited.has(dependency)) continue;
+    const item = itemById(board, dependency);
+    visited.add(dependency);
+    pending.push(...(item.item_after ? item.item_after.split(',').map(Number) : []));
+  }
+}
+
 /** Validate an addition before its sender runs a new check, and again when the ordered move applies. */
 export function validateItemAddition(board, { by, lane, title, criterion = '', parentId = null, after = [], brief = '', route = 'strong', check }) {
   const command = coordinatorCheck(by, check) ?? '';
@@ -698,32 +721,29 @@ export function validateItemAddition(board, { by, lane, title, criterion = '', p
       throw new Refused('PARENT_CLOSED', `item #${parentId} is ${parent.item_status}`);
     }
   }
-  for (const dependency of after) {
-    if (itemById(board, dependency).item_status === 'withdrawn') {
-      throw new Refused('WITHDRAWN', `item #${dependency} is withdrawn; nothing can wait on it`);
-    }
-  }
+  validateItemDependencies(board, null, after);
   return { command, cleanTitle };
 }
 
 /**
- * Change an item's brief, route, criterion or check (B10, B13, B14). The coordinator may make a
- * claimed criterion/check correction at engine 8; the live holder must refreeze before renewal or
- * submission, and keeps the claim while adopting the new frozen bar.
+ * Change an item's brief, route, criterion, check or dependencies (B10, B13, B14). At engine 8 the
+ * coordinator may correct a claimed criterion, check or dependency; its holder refreezes before
+ * renewal or submission and keeps the claim while adopting the correction.
  *
  * @param {any} board
  * @param {number} id
- * @param {{ agentId: string, brief?: string, route?: string, criterion?: string, check?: string }} change
+ * @param {{ agentId: string, brief?: string, route?: string, criterion?: string, check?: string, after?: number[] }} change
  */
-export function editItem(board, id, { agentId, brief, route, criterion, check, checkBaseline }) {
+export function editItem(board, id, { agentId, brief, route, criterion, check, after, checkBaseline }) {
   atomic(board, () => {
     const stored = itemById(board, id);
     const expiredHolder = stored.item_status === 'claimed' && !isHeld(board, stored) ? stored.item_owner : null;
-    const { item, next, command, unfreeze } = validateItemEdit(board, id, { agentId, brief, route, criterion, check });
+    const { item, next, command, unfreeze } = validateItemEdit(board, id, { agentId, brief, route, criterion, check, after });
     const baseline = normalizeCheckBaseline(agentId, command, checkBaseline);
     const pendingFields = [
       ...(next.item_criterion !== item.item_criterion ? ['criterion'] : []),
       ...(command !== undefined && next.item_check !== item.item_check ? ['check'] : []),
+      ...(next.item_after !== item.item_after ? ['after'] : []),
     ];
     const pendingRefreeze = (board.executionEngineVersion ?? ENGINE_VERSION) >= 8
       && item.item_status === 'claimed' && agentId === COORDINATOR && pendingFields.length > 0;
@@ -738,6 +758,7 @@ export function editItem(board, id, { agentId, brief, route, criterion, check, c
       ...(next.item_route !== item.item_route ? { route: next.item_route } : {}),
       ...(next.item_criterion !== item.item_criterion ? { criterion: next.item_criterion } : {}),
       ...(command !== undefined ? { check: next.item_check } : {}),
+      ...(next.item_after !== item.item_after ? { after: next.item_after ? next.item_after.split(',').map(Number) : [] } : {}),
       ...(baseline ? { checkBaseline: baseline } : {}),
       ...(pendingRefreeze ? { pendingRefreeze: pendingFields } : {}),
       ...(clearFrozen && item.item_frozen_digest ? { unfrozen: item.item_frozen_digest } : {}),
@@ -755,14 +776,18 @@ export function editItem(board, id, { agentId, brief, route, criterion, check, c
 }
 
 /** Validate an edit without side effects, so a refused change never starts a shell baseline. */
-export function validateItemEdit(board, id, { agentId, brief, route, criterion, check }) {
+export function validateItemEdit(board, id, { agentId, brief, route, criterion, check, after }) {
+  const engine = board.executionEngineVersion ?? ENGINE_VERSION;
+  if (after !== undefined && engine < 10) {
+    throw new Refused('ENGINE_VERSION', `editing item dependencies requires engine 10; this board uses engine ${engine}; upgrade Pullboard before using --after`);
+  }
   let item = (board.executionEngineVersion ?? ENGINE_VERSION) >= 8 ? current(board, itemById(board, id)) : null;
   if (item?.item_status === 'claimed' && agentId !== COORDINATOR) {
     throw new Refused('HELD', `item #${id} is claimed; only the coordinator may edit it while held; shout coordinator`);
   }
   const command = coordinatorCheck(agentId, check);
-  if ([brief, route, criterion, check].every((value) => value === undefined)) {
-    throw new Refused('USAGE', 'say what changes: --brief "...", --brief-file <file>, --route light|mid|strong, --criterion "..." or --check "<command>"');
+  if ([brief, route, criterion, check, after].every((value) => value === undefined)) {
+    throw new Refused('USAGE', 'say what changes: --brief "...", --brief-file <file>, --route light|mid|strong, --criterion "...", --check "<command>" or --after <ids|none>');
   }
   item ??= current(board, itemById(board, id));
   if (agentId !== COORDINATOR && agentId !== item.item_created_by) {
@@ -771,18 +796,25 @@ export function validateItemEdit(board, id, { agentId, brief, route, criterion, 
   if (['verified', 'withdrawn'].includes(item.item_status)) {
     throw new Refused('CLOSED', `item #${id} is ${item.item_status}`);
   }
+  if (after !== undefined) {
+    if (!Array.isArray(after) || !after.every((dependency) => Number.isSafeInteger(dependency) && dependency > 0)) {
+      throw new Refused('BAD_DEPENDENCIES', 'item dependencies must be an array of positive integer item ids; use --after 1,2 or --after none');
+    }
+    validateItemDependencies(board, id, after);
+  }
   const next = {
     item_brief: brief === undefined ? item.item_brief : brief.trim(),
     item_route: route ?? item.item_route,
     item_criterion: criterion === undefined ? item.item_criterion : criterion.trim(),
     item_check: command === undefined ? item.item_check : command,
+    item_after: after === undefined ? item.item_after : after.join(','),
   };
   checkRoute(next.item_route);
-  const moved = ['item_route', 'item_criterion', 'item_check'].filter((key) => next[key] !== item[key]);
+  const moved = ['item_route', 'item_criterion', 'item_check', 'item_after'].filter((key) => next[key] !== item[key]);
   const routeChanged = next.item_route !== item.item_route;
   const correctionWhileClaimed = (board.executionEngineVersion ?? ENGINE_VERSION) >= 8
     && item.item_status === 'claimed' && agentId === COORDINATOR
-    && (next.item_criterion !== item.item_criterion || next.item_check !== item.item_check);
+    && (next.item_criterion !== item.item_criterion || next.item_check !== item.item_check || next.item_after !== item.item_after);
   if (moved.length && item.item_status !== 'open' && (routeChanged || !correctionWhileClaimed)) {
     throw new Refused('HELD', `item #${id} is ${item.item_status}; change its route, criterion or check only while it is open`);
   }
@@ -1456,23 +1488,51 @@ export function verify(board, id, { agentId, decision, reason, note = '', head, 
   });
 }
 
-/** Return a submission for criterion correction without recording a verifier's judgment [V2,V6].
- * The prior commit remains as the base the builder must change before resubmitting.
+/** Return a submission for correction, or a verified item after a recorded red landing, without
+ * rewriting its prior verdict [V2,V6]. The prior commit remains the builder's rework base.
  *
  * @param {any} board
  * @param {number} id
  * @param {{ agentId: string, note: string }} request
- * @returns {{ id: number, commit: string }}
+ * @returns {{ id: number, commit: string, supersedes?: number, landingFailure?: object }}
  */
 export function reopen(board, id, { agentId, note }) {
   return atomic(board, () => {
     let submittedCommit = null;
+    let supersedes;
+    let landingFailure;
+    const currentEngine = board.executionEngineVersion ?? ENGINE_VERSION;
+    const declaredTransition = MOVES.find((entry) => entry.verb === 'reopen');
+    const transition = currentEngine >= 10 ? declaredTransition : { ...declaredTransition, from: ['submitted'] };
     const item = moveItem(board, id, 'reopen', {
+      transition,
       checks: {
         joined: null,
         [IN_STATE]: (found) => new Refused('NOT_SUBMITTED', `item #${id} is ${current(board, found).item_status}, not submitted`),
         coordinatorOnly: () => onlyCoordinator(agentId, 'reopens submissions'),
         noteGiven: () => (note.trim() ? null : new Refused('NOTE_REQUIRED', 'say why the criterion needs correction: --note "why"')),
+        notMerged: (found) => found.item_status !== 'verified' || !found.item_merged_commit
+          ? null
+          : new Refused('ALREADY_MERGED', `item #${id} was merged as ${found.item_merged_commit}; merged items cannot be reopened`),
+        landingFailureRecorded: (found) => {
+          if (found.item_status !== 'verified') return null;
+          const accepted = events(board, { itemId: id }).findLast((event) => {
+            if (event.event_kind !== 'accept') return false;
+            return JSON.parse(event.event_detail).commit === found.item_commit;
+          });
+          const recorded = landingBatches(board).flatMap((batch) => (batch.culprits ?? []).map((culprit) => ({ batch, culprit })))
+            .find(({ culprit }) => culprit.id === id && culprit.commit === found.item_commit && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(culprit.mergeCommit ?? '')
+              && Array.isArray(culprit.tests) && culprit.tests.length
+              && culprit.tests.every((failure) => typeof failure.file === 'string' && typeof failure.name === 'string'
+                && note.includes(`${failure.file}: ${failure.name}`) && note.includes(culprit.mergeCommit)));
+          const manual = manualLandingFailure(note);
+          if (!accepted || (!recorded && !manual)) return new Refused('LANDING_FAILURE_REQUIRED', `reopening verified item #${id} needs --note in the format <test file>: <test name>; merge commit <sha>`);
+          supersedes = accepted.event_id;
+          landingFailure = recorded
+            ? { batch: recorded.batch.id, tests: recorded.culprit.tests, mergeCommit: recorded.culprit.mergeCommit }
+            : { batch: null, tests: manual.tests, mergeCommit: manual.mergeCommit };
+          return null;
+        },
       },
       set: (found) => {
         submittedCommit = found.item_commit;
@@ -1486,9 +1546,28 @@ export function reopen(board, id, { agentId, note }) {
         };
       },
     });
-    logEvent(board, agentId, 'reopen', id, { commit: submittedCommit, note: note.trim(), judgment: null });
-    return { id: item.item_id, commit: submittedCommit };
+    logEvent(board, agentId, 'reopen', id, { commit: submittedCommit, note: note.trim(), judgment: null,
+      ...(supersedes ? { supersedes, landingFailure } : {}) });
+    return { id: item.item_id, commit: submittedCommit, ...(supersedes ? { supersedes, landingFailure } : {}) };
   });
+}
+
+/** Read test and merge-commit evidence from a Studio/manual landing note without checking Git. */
+function manualLandingFailure(note) {
+  const generatedPrefix = /^Landing batch [a-z0-9_-]{1,80} failed /iu.exec(note);
+  const body = generatedPrefix ? note.slice(generatedPrefix[0].length) : note;
+  const evidence = body.match(/;[ \t]*merge commit[ \t]+(?<mergeCommit>[a-f0-9]{40}|[a-f0-9]{64})$/iu);
+  if (!evidence) return null;
+  const failureText = body.slice(0, evidence.index);
+  const firstTest = /(?<file>(?:[\w.-]+\/)*[\w.-]+\.[a-z0-9]+):[ \t]*/iu.exec(failureText);
+  if (!firstTest) return null;
+  const tests = failureText.slice(firstTest.index).split(/;[ \t]*/u).map((entry) => {
+    const test = entry.match(/^(?<file>(?:[\w.-]+\/)*[\w.-]+\.[a-z0-9]+):[ \t]*(?<name>[^;\r\n]+)$/iu);
+    if (!test || !test.groups.name.trim()) return null;
+    return { file: test.groups.file, name: test.groups.name.trim() };
+  });
+  if (!tests.length || tests.some((test) => !test)) return null;
+  return { tests, mergeCommit: evidence.groups.mergeCommit };
 }
 
 /**
@@ -1601,7 +1680,7 @@ export function pendingRefreeze(board, id) {
   const fields = new Set();
   for (const edit of edits) {
     const details = JSON.parse(edit.event_detail);
-    for (const field of details.pendingRefreeze ?? []) if (['criterion', 'check'].includes(field)) fields.add(field);
+    for (const field of details.pendingRefreeze ?? []) if (['after', 'criterion', 'check'].includes(field)) fields.add(field);
   }
   return [...fields].sort();
 }

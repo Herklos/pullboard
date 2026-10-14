@@ -10,7 +10,7 @@
  */
 
 /** Executable move semantics, carried by every sealed move and retained during replay [H16]. */
-export const ENGINE_VERSION = 9;
+export const ENGINE_VERSION = 10;
 
 /** @typedef {'agent' | 'coordinator' | 'clock'} Role */
 
@@ -57,7 +57,7 @@ export const ENGINE_VERSION = 9;
  * @property {State[]} states
  * @property {Guard[]} guards
  * @property {Move[]} moves
- * @property {Record<string, string[]>} exitGuards - Per final state, the guards every move into it names.
+ * @property {Record<string, string[]>} exitGuards - Per target state, guards every move into it must name.
  * @property {{ refuse: string, rule: string, next: string }} unknownMove - The refusal for a move that does not exist.
  */
 
@@ -84,7 +84,7 @@ export const STATES = [
   { id: 'claimed', means: 'an agent holds it under a lease, its criterion frozen', requires: ['item_owner', 'item_lease_until', 'item_frozen_digest'] },
   { id: 'submitted', means: 'built and gated green at a pinned commit, waiting for another agent', requires: ['item_built_by', 'item_commit', 'item_frozen_digest'] },
   {
-    id: 'verified', final: true, means: 'another agent accepted it at the submitted commit', requires: ['item_verified_by', 'item_commit'],
+    id: 'verified', means: 'another agent accepted it at the submitted commit', requires: ['item_verified_by', 'item_commit'],
     proof: {
       says: 'an ACCEPT at the submitted commit, on the frozen criterion, by the agent it names as verifier, who did not build it',
       sql: "EXISTS (SELECT 1 FROM verdict v WHERE v.item_id = NEW.item_id AND v.verdict_decision = 'ACCEPT' AND v.verdict_commit = NEW.item_commit AND v.verdict_digest = NEW.item_frozen_digest AND v.verdict_by = NEW.item_verified_by AND v.verdict_by <> NEW.item_built_by)",
@@ -137,6 +137,8 @@ export const GUARDS = [
   { id: 'reviewReleaseExplained', refuse: 'NOTE_REQUIRED', rule: 'a review release gives a nonempty one-line reason', next: 'release with --note "why", or --note-file <file>', source: 'board', when: 'engine 5 or newer, only when freeing a submitted review reservation' },
   { id: 'reviewCooldownElapsed', refuse: 'REVIEW_COOLDOWN', rule: 'the reviewer has not released this submission within the past hour', next: 'let another reviewer take it, or wait an hour or for a new submission', source: 'board', when: 'engine 5 or newer, only for the same reviewer and current submission' },
   { id: 'noteGiven', refuse: 'NOTE_REQUIRED', rule: 'the move carries a note: what failed, what was tried, or why', next: '--note "..." or --note-file <file>', source: 'board' },
+  { id: 'notMerged', refuse: 'ALREADY_MERGED', rule: 'the item has no recorded merge receipt', next: 'a merged item cannot be reopened', source: 'board' },
+  { id: 'landingFailureRecorded', refuse: 'LANDING_FAILURE_REQUIRED', rule: 'a verified item note names the failing test and landing merge commit', next: 'cite the recorded batch, or name the test and merge commit in a manual note', source: 'board' },
 ];
 
 /** @type {Move[]} */
@@ -172,8 +174,8 @@ export const MOVES = [
     command: 'pullboard verify <id> reject --reason CODE --note "..."',
   },
   {
-    verb: 'reopen', from: ['submitted'], to: 'open', by: ['coordinator'], refuse: 'NOT_SUBMITTED',
-    guards: ['joined', 'itemExists', IN_STATE, 'coordinatorOnly', 'noteGiven'],
+    verb: 'reopen', from: ['submitted', 'verified'], to: 'open', by: ['coordinator'], refuse: 'NOT_SUBMITTED',
+    guards: ['joined', 'itemExists', IN_STATE, 'coordinatorOnly', 'noteGiven', 'notMerged', 'landingFailureRecorded'],
     sets: ['item_verdict', 'item_verified_by', 'item_owner', 'item_lease_until', 'item_review_by', 'item_review_until'],
     command: 'pullboard reopen <id> --note "why"',
   },
@@ -201,7 +203,7 @@ export const MOVES = [
 ];
 
 /**
- * What every move into a final state must pass, whatever the command (M2). The interpreter adds
+ * Guards shared by every move into a target state, whatever the command (M2). The interpreter adds
  * any a move leaves out, and `machineProblems` reports the move anyway: a guard nobody can see in
  * a move's list is a guard nobody reviews.
  *
@@ -302,7 +304,8 @@ function unreachable(machine) {
 }
 
 /**
- * Properties 3 and 4: every final state has exit guards, and every move into it names them all.
+ * Properties 3 and 4: every final state has exit guards, and every guarded target requires all
+ * moves into it to name those guards.
  * A move that leaves one out is a second door (M2).
  *
  * @param {Machine} machine
@@ -496,7 +499,7 @@ function guardLabel(machine, move, id) {
 
 /**
  * The lifecycle as a markdown page: a Mermaid state diagram, every move with its guards in the
- * order they are checked (exit guards included), each final state's exit guards, and every refusal
+ * order they are checked (transition guards included), each guarded target's required guards, and every refusal
  * with the rule behind it and the next step (M1, P4). docs/lifecycle.md is this page, written by
  * `pullboard lifecycle`, and a test fails when the two differ, so the page cannot drift from the code.
  *
@@ -506,6 +509,7 @@ function guardLabel(machine, move, id) {
 export function lifecycleMarkdown(machine = MACHINE) {
   const cell = (text) => String(text).replaceAll('|', '\\|');
   const finals = machine.states.filter((state) => state.final);
+  const transitionGuards = Object.entries(machine.exitGuards);
   const edges = machine.moves.flatMap((move) => move.from.map((from) => `  ${from} --> ${move.to}: ${move.verb}${move.by.includes('clock') ? ' (clock)' : ''}`));
   const moves = machine.moves.map((move) => {
     const who = move.when ? `${move.by.join(', ')}, when ${move.when}` : move.by.join(', ');
@@ -523,7 +527,7 @@ export function lifecycleMarkdown(machine = MACHINE) {
     '',
     'Generated from src/machine.js by `pullboard lifecycle`. Do not edit it by hand: change the declaration, then run `pullboard lifecycle > docs/lifecycle.md`.',
     '',
-    `An item starts ${machine.initial}. Its final states, ${finals.map((state) => state.id).join(' and ')}, cannot be left, and every way into them passes the same exit guards, whatever command gets there. The board file itself refuses any move not declared here.`,
+    `An item starts ${machine.initial}. Its final states, ${finals.map((state) => state.id).join(' and ')}, cannot be left. Every move into a guarded state passes the same transition guards, whatever command gets there. The board file itself refuses any move not declared here.`,
     '',
     '## Frozen check policy',
     '',
@@ -552,11 +556,11 @@ export function lifecycleMarkdown(machine = MACHINE) {
     '| --- | --- | --- | --- | --- |',
     ...moves,
     '',
-    '## Exit guards',
+    '## Required transition guards',
     '',
-    '| Final state | Every move into it passes |',
+    '| State entered | Every move into it passes |',
     '| --- | --- |',
-    ...finals.map((state) => `| ${state.id} | ${(machine.exitGuards[state.id] ?? []).join(', ')} |`),
+    ...transitionGuards.map(([state, guards]) => `| ${state} | ${guards.join(', ')} |`),
     '',
     '## Refusals',
     '',

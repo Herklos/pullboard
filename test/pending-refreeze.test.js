@@ -3,11 +3,14 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import * as store from '../src/board.js';
-import { applyRelayMove, prepareEngineMove } from '../src/engine.js';
+import { appliedSequence, applyRelayMove, prepareEngineMove } from '../src/engine.js';
 import { exportBoard, importBoard } from '../src/exchange.js';
+import { ENGINE_VERSION } from '../src/machine.js';
 import { createE2eHelpers } from './e2e-helpers.js';
+import { unpackRelease } from './release-archive.js';
 
 const e2e = createE2eHelpers();
 
@@ -115,6 +118,208 @@ test("the coordinator corrects a claimed item's criterion without release [V2]",
   assert.equal(store.getItem(board, checkId).item_status, 'claimed');
   assert.equal(store.pendingRefreeze(board, checkId).length, 0);
 
+});
+
+test("edit adds and clears an item's dependencies [B3,V2]", (t) => {
+  const box = e2e.project('true');
+  t.after(e2e.cleanup);
+  const board = store.openBoard(join(box.repo, '.git/pullboard/board.sqlite'));
+  t.after(() => store.closeBoard(board));
+  /** Add one independent item through the real CLI and return its public id. */
+  const add = (title) => {
+    const result = box.run(box.repo, 'add', 'web', title, '--criterion', title, '--json');
+    assert.equal(result.code, 0, result.err || result.out);
+    return JSON.parse(result.out).item.item_id;
+  };
+  const first = add('First dependency');
+  const second = add('Second dependency');
+  const target = add('Dependency target');
+
+  const added = box.run(box.repo, 'edit', String(target), '--after', `${first},${second}`, '--json');
+  assert.equal(added.code, 0, added.err || added.out);
+  assert.equal(store.getItem(board, target).item_after, `${first},${second}`, 'edit stores both dependency ids in order');
+  const addEvent = store.events(board, { itemId: target }).findLast((event) => event.event_kind === 'edit');
+  assert.deepEqual(JSON.parse(addEvent.event_detail).after, [first, second], 'history records the dependency replacement');
+
+  const cleared = box.run(box.repo, 'edit', String(target), '--after', 'none', '--json');
+  assert.equal(cleared.code, 0, cleared.err || cleared.out);
+  assert.equal(store.getItem(board, target).item_after, '', 'none clears all dependencies');
+  const clearEvent = store.events(board, { itemId: target }).findLast((event) => event.event_kind === 'edit');
+  assert.deepEqual(JSON.parse(clearEvent.event_detail).after, [], 'history records a clear distinctly from an omitted edit');
+
+  const unchanged = store.getItem(board, target);
+  const eventCount = store.events(board, { itemId: target }).length;
+  refusal(box.run(box.repo, 'edit', String(target), '--after', '999999', '--json'), 'NO_ITEM');
+  assert.equal(store.getItem(board, target).item_after, unchanged.item_after, 'a missing dependency leaves the item unchanged');
+  assert.equal(store.events(board, { itemId: target }).length, eventCount, 'a refused dependency creates no history event');
+
+  assert.equal(box.run(box.repo, 'edit', String(first), '--after', String(second), '--json').code, 0);
+  const cycle = box.run(box.repo, 'edit', String(second), '--after', String(first), '--json');
+  refusal(cycle, 'DEPENDENCY_CYCLE');
+  assert.equal(store.getItem(board, second).item_after, '', 'a refused cycle leaves the edge unchanged');
+
+  const claimed = add('Claimed dependency target');
+  const claim = box.run(box.web, 'claim', String(claimed), '--json');
+  assert.equal(claim.code, 0, claim.err || claim.out);
+  const beforeCorrection = store.getItem(board, claimed);
+  const correction = box.run(box.repo, 'edit', String(claimed), '--after', String(first), '--json');
+  assert.equal(correction.code, 0, correction.err || correction.out);
+  const pending = store.getItem(board, claimed);
+  assert.equal(pending.item_after, String(first));
+  assert.equal(pending.item_owner, beforeCorrection.item_owner);
+  assert.equal(pending.item_lease_until, beforeCorrection.item_lease_until);
+  assert.equal(pending.item_claim_head, beforeCorrection.item_claim_head);
+  assert.equal(pending.item_frozen_digest, beforeCorrection.item_frozen_digest, 'the holder keeps the old frozen bar until refreeze');
+  assert.deepEqual(store.pendingRefreeze(board, claimed), ['after']);
+  const correctionEvent = store.events(board, { itemId: claimed }).findLast((event) => event.event_kind === 'edit');
+  assert.deepEqual(JSON.parse(correctionEvent.event_detail).pendingRefreeze, ['after']);
+  assert.deepEqual(JSON.parse(correctionEvent.event_detail).after, [first]);
+  assert.ok(store.inbox(board, beforeCorrection.item_owner).some((entry) =>
+    entry.shout_text.includes(`pending after correction for #${claimed}`)
+      && entry.shout_text.endsWith(`next: pullboard refreeze ${claimed}`)), 'the holder receives the pending-correction instruction');
+  refusal(box.run(box.web, 'submit', String(claimed), '--json'), 'PENDING_REFREEZE', claimed, ['after']);
+
+  const refrozen = box.run(box.web, 'refreeze', String(claimed), '--json');
+  assert.equal(refrozen.code, 0, refrozen.err || refrozen.out);
+  assert.equal(JSON.parse(refrozen.out).retainedClaim, true, 'the holder adopts the corrected bar without losing the claim');
+  const adopted = store.getItem(board, claimed);
+  assert.equal(adopted.item_status, 'claimed');
+  assert.equal(adopted.item_after, String(first));
+  assert.equal(adopted.item_owner, beforeCorrection.item_owner);
+  assert.equal(adopted.item_lease_until, beforeCorrection.item_lease_until);
+  assert.equal(store.pendingRefreeze(board, claimed).length, 0);
+  assert.ok(store.events(board, { itemId: claimed }).some((event) => event.event_kind === 'refreeze'), 'the holder refreeze is recorded in history');
+});
+
+/** Exercise real older executables, rather than treating a retagged current move as an old client. */
+async function checkDependencyLegacyClients(cleanup, directory, snapshot, target, add, clear) {
+  for (const [version, reference] of [[7, 'v0.8.4'], [8, 'v0.8.6'], [9, '314ef28751c44c96186b337cc4ace0fd8bf33d42']]) {
+    const source = join(directory, `client-${version}`);
+    mkdirSync(source);
+    unpackRelease(reference, source);
+    const legacyStore = await import(pathToFileURL(join(source, 'src/board.js')).href);
+    const legacyEngine = await import(pathToFileURL(join(source, 'src/engine.js')).href);
+    const legacyExchange = await import(pathToFileURL(join(source, 'src/exchange.js')).href);
+    const legacyMachine = await import(pathToFileURL(join(source, 'src/machine.js')).href);
+    assert.equal(legacyMachine.ENGINE_VERSION, version, 'the archived executable has the claimed engine');
+    const old = legacyStore.openBoard(join(directory, `client-${version}.sqlite`));
+    const current = store.openBoard(join(directory, `current-from-${version}.sqlite`));
+    cleanup.push(() => { legacyStore.closeBoard(old); store.closeBoard(current); });
+    legacyExchange.importBoard(old, snapshot);
+    importBoard(current, snapshot);
+    const ordinary = legacyEngine.prepareEngineMove(old, 'editItem', [target, {
+      agentId: 'coordinator', brief: `Ordinary edit from actual engine ${version}.`,
+    }], { id: `ordinary-client-${version}`, actor: 'coordinator' });
+    const receipt = { sequence: 1, at: '2026-10-13T12:00:01.000Z', kind: 'move',
+      sender: { kind: 'agent', userId: 'fixture-user', agent: 'coordinator' } };
+    const oldResult = legacyEngine.applyRelayMove(old, ordinary, receipt);
+    assert.equal(oldResult.error, undefined, JSON.stringify(oldResult));
+    const result = applyRelayMove(current, ordinary, receipt);
+    assert.equal(result.error, undefined, JSON.stringify(result));
+    assert.deepEqual(store.getItem(current, target), legacyStore.getItem(old, target), 'ordinary legacy edits retain their exact row');
+    assert.deepEqual(store.events(current), legacyStore.events(old), 'ordinary legacy edits retain their event history');
+    const before = legacyExchange.exportBoard(old);
+    for (const move of [add, clear]) {
+      assert.throws(() => legacyEngine.applyRelayMove(old, move, { ...receipt, sequence: 2 }),
+        (error) => error.code === 'ENGINE_VERSION', 'a genuine future envelope is refused by the actual old client');
+      assert.deepEqual(legacyExchange.exportBoard(old), before, 'future refusal changes no board rows or replay metadata');
+      assert.equal(legacyEngine.appliedSequence(old), 1, 'future refusal leaves the committed prefix unchanged');
+    }
+  }
+}
+
+test('dependency edits replay the same on every engine [B3,V2,H16]', async (t) => {
+  assert.equal(ENGINE_VERSION, 10);
+  const directory = mkdtempSync(join(tmpdir(), 'pullboard-dependency-engines-'));
+  const cleanup = [];
+  t.after(() => {
+    for (const close of cleanup) close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+  /** Open a private, file-backed SQLite board and optionally import its real snapshot. */
+  function open(name, snapshot) {
+    const board = store.openBoard(join(directory, `${name}.sqlite`));
+    cleanup.push(() => store.closeBoard(board));
+    if (snapshot) importBoard(board, snapshot);
+    return board;
+  }
+  const seed = open('seed');
+  store.register(seed, { lane: 'coordinator', path: '/dependency/coordinator' });
+  /** Add independent real items to the seed board. */
+  function addItem(title) {
+    return store.addItem(seed, { by: 'coordinator', lane: 'web', title, criterion: title, brief: e2e.LIGHT_BRIEF });
+  }
+  const dependency = addItem('First prerequisite');
+  const secondDependency = addItem('Second prerequisite');
+  const target = addItem('Work with dependencies');
+  const snapshot = exportBoard(seed);
+  const sender = { kind: 'agent', userId: 'fixture-user', agent: 'coordinator' };
+  const add = prepareEngineMove(seed, 'editItem', [target, { agentId: 'coordinator', after: [dependency, secondDependency] }],
+    { id: 'dependency-add', actor: 'coordinator' });
+  const clear = prepareEngineMove(seed, 'editItem', [target, { agentId: 'coordinator', after: [] }],
+    { id: 'dependency-clear', actor: 'coordinator' });
+  assert.equal(add.engine, 10);
+  assert.equal(clear.engine, 10);
+  const copies = [open('one', snapshot), open('two', snapshot)];
+  for (const [index, move] of [add, clear].entries()) {
+    const receipt = { sequence: index + 1, at: `2026-10-13T12:00:0${index + 1}.000Z`, sender, kind: 'move' };
+    const results = copies.map((board) => applyRelayMove(board, move, receipt));
+    assert.equal(results[0].error, undefined, JSON.stringify(results[0]));
+    assert.deepEqual(results[1], results[0]);
+    assert.deepEqual(exportBoard(copies[1]), exportBoard(copies[0]), 'current replicas have identical rows, events and prefix');
+    assert.equal(store.getItem(copies[0], target).item_after, index === 0 ? `${dependency},${secondDependency}` : '');
+    const event = store.events(copies[0], { itemId: target }).findLast((entry) => entry.event_kind === 'edit');
+    assert.deepEqual(JSON.parse(event.event_detail).after, index === 0 ? [dependency, secondDependency] : []);
+    assert.equal(appliedSequence(copies[0]), index + 1);
+  }
+  for (let version = 1; version < 10; version++) {
+    const board = open(`tag-${version}`, snapshot);
+    const ordinary = prepareEngineMove(board, 'editItem', [target, {
+      agentId: 'coordinator', brief: `Ordinary historical engine ${version}.`, after: undefined,
+    }], { id: `ordinary-tag-${version}`, actor: 'coordinator' });
+    assert.equal(Object.hasOwn(ordinary.args[1], 'after'), false, 'an omitted CLI flag stays omitted on the wire');
+    ordinary.engine = version;
+    const receipt = { sequence: 1, at: '2026-10-13T12:00:01.000Z', sender, kind: 'move' };
+    let result;
+    assert.doesNotThrow(() => { result = applyRelayMove(board, ordinary, receipt); },
+      `ordinary engine-${version} edits remain executable`);
+    assert.equal(result.error, undefined, `ordinary engine-${version} edit remains valid: ${JSON.stringify(result)}`);
+    const event = store.events(board, { itemId: target }).findLast((entry) => entry.event_kind === 'edit');
+    assert.equal(Object.hasOwn(JSON.parse(event.event_detail), 'after'), false);
+    const before = exportBoard(board);
+    for (const move of [add, clear]) {
+      assert.throws(() => applyRelayMove(board, { ...move, id: `${move.id}-tag-${version}`, engine: version },
+        { ...receipt, sequence: 2 }), (error) => error.code === 'RELAY_MOVE' && /engine 10/u.test(error.message),
+      'old-tag dependency fields, including empty-on-empty clears, cannot enter replay');
+      assert.deepEqual(exportBoard(board), before, 'malformed old-tag moves change no row, event, receipt or cursor');
+    }
+    board.executionEngineVersion = version;
+    try {
+      for (const after of [[dependency], []]) {
+        for (const edit of [store.validateItemEdit, store.editItem]) {
+          assert.throws(() => edit(board, target, { agentId: 'coordinator', after }),
+            (error) => error.code === 'ENGINE_VERSION' && error.message.includes(`engine ${version}`)
+              && /engine 10/u.test(error.message) && /upgrade/iu.test(error.message));
+          assert.deepEqual(exportBoard(board), before, 'direct and preflight old-engine dependency refusals change nothing');
+        }
+      }
+    } finally { delete board.executionEngineVersion; }
+  }
+  for (const [index, after] of [null, '1', {}, [0], [-1], [1.5], [{}], ['1']].entries()) {
+    const board = open(`invalid-${index}`, snapshot);
+    const before = store.getItem(board, target);
+    const beforeEvents = store.events(board);
+    const move = prepareEngineMove(board, 'editItem', [target, { agentId: 'coordinator', after }],
+      { id: `invalid-dependencies-${index}`, actor: 'coordinator' });
+    let result;
+    assert.doesNotThrow(() => { result = applyRelayMove(board, move, { sequence: 1, at: '2026-10-13T12:00:01.000Z', sender, kind: 'move' }); },
+      'malformed dependencies are a typed operation refusal, never an unhandled exception');
+    assert.equal(result.error?.code, 'BAD_DEPENDENCIES', 'malformed current dependencies yield a typed refusal');
+    assert.deepEqual(store.getItem(board, target), before);
+    assert.deepEqual(store.events(board), beforeEvents, 'a typed operation refusal creates no edit event');
+    assert.equal(appliedSequence(board), 1, 'the refused current operation has one consumed receipt');
+  }
+  await checkDependencyLegacyClients(cleanup, directory, snapshot, target, add, clear);
 });
 
 test('ordered refreeze corrections retain engine-7 history and engine-8 live claims [V2,H16]', (t) => {

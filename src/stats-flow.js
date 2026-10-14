@@ -90,30 +90,32 @@ function queuesFrom(items, now) {
   const openByLane = new Map();
   const accepted = [];
   for (const item of items) {
-    expireClaim(item, now);
-    const queue = queues[item.state];
+    const current = item.state === 'claimed' && Number.isFinite(item.leaseUntil) && item.leaseUntil <= now
+      ? { ...item, state: 'open', openAt: item.leaseUntil }
+      : item;
+    const queue = queues[current.state];
     if (!queue) continue;
     queue.size += 1;
-    const start = { open: item.openAt, claimed: item.claimAt, submitted: item.submitAt, accepted: item.acceptAt }[item.state];
+    const start = { open: current.openAt, claimed: current.claimAt, submitted: current.submitAt, accepted: current.acceptAt }[current.state];
     const ageMinutes = interval(start, now);
     if (ageMinutes !== null && (!queue.oldest || ageMinutes > queue.oldest.ageMinutes ||
-      ageMinutes === queue.oldest.ageMinutes && item.id < queue.oldest.id)) queue.oldest = { id: item.id, since: new Date(start).toISOString(), ageMinutes };
-    if (item.state === 'submitted' && (!item.reserve || Number.isFinite(item.reserve.until) && item.reserve.until <= now)) {
+      ageMinutes === queue.oldest.ageMinutes && current.id < queue.oldest.id)) queue.oldest = { id: current.id, since: new Date(start).toISOString(), ageMinutes };
+    if (current.state === 'submitted' && (!current.reserve || Number.isFinite(current.reserve.until) && current.reserve.until <= now)) {
       unreviewed.size += 1;
       if (ageMinutes !== null && (!unreviewed.oldest || ageMinutes > unreviewed.oldest.ageMinutes ||
-        ageMinutes === unreviewed.oldest.ageMinutes && item.id < unreviewed.oldest.id)) {
-        unreviewed.oldest = { id: item.id, since: new Date(start).toISOString(), ageMinutes };
+        ageMinutes === unreviewed.oldest.ageMinutes && current.id < unreviewed.oldest.id)) {
+        unreviewed.oldest = { id: current.id, since: new Date(start).toISOString(), ageMinutes };
       }
     }
-    if (item.state === 'open') openByLane.set(item.lane, (openByLane.get(item.lane) ?? 0) + 1);
-    if (item.state === 'accepted') accepted.push(item.id);
+    if (current.state === 'open') openByLane.set(current.lane, (openByLane.get(current.lane) ?? 0) + 1);
+    if (current.state === 'accepted') accepted.push(current.id);
   }
   return { queues, unreviewed, openByLane, accepted: accepted.sort((a, b) => a - b) };
 }
 
 /** Attribute last-hour activity using the latest recorded role, including a prior role when only shouts are recent. */
 function activeFrom(actors, now) {
-  const agents = [...actors.values()].filter(actor => actor.lastAt >= now - 60 * MINUTE && actor.lastAt <= now)
+  const agents = [...actors].filter(actor => actor.lastAt >= now - 60 * MINUTE && actor.lastAt <= now)
     .map(({ id, lane, role }) => ({ id, lane, role })).sort((a, b) => a.id.localeCompare(b.id));
   const roles = { builder: 0, verifier: 0, coordinator: 0, unknown: 0 };
   const lanes = new Map();
@@ -142,19 +144,11 @@ function recommendation(stage, { activeAgents, queues, openByLane, accepted, cou
   return accepted.length ? `land the accepted items: ${named}${more}` : 'land the accepted items (none waiting)';
 }
 
-/** Derive flow from the same immutable history used for counts, with an injectable observation time for fixtures. */
-export function flowStats(history, boundary, now, counts) {
+/** Compile immutable lifecycle facts once so API cache hits only need a time-specific projection. */
+export function prepareFlowHistory(history) {
   const items = new Map();
   const actors = new Map();
-  const daily = new Map();
-  /** Include a stage or first completion at the exact lower boundary. */
-  const selected = at => !boundary || at >= Date.parse(boundary);
-  /** Count each day's additions and first completed merges without filling gaps with invented moves. */
-  function day(at) {
-    const date = new Date(at).toISOString().slice(0, 10);
-    if (!daily.has(date)) daily.set(date, { date, added: 0, merged: 0 });
-    return daily.get(date);
-  }
+  const dailyEvents = [];
   for (const event of history) {
     const detail = JSON.parse(event.event_detail);
     const at = Date.parse(event.event_at);
@@ -169,16 +163,35 @@ export function flowStats(history, boundary, now, counts) {
     if (event.item_id === null || event.item_id === undefined) continue;
     if (!items.has(event.item_id)) items.set(event.item_id, { id: event.item_id, lane: 'unknown' });
     const item = items.get(event.item_id);
-    if (event.event_kind === 'add' && selected(at)) day(at).added += 1;
-    if (event.event_kind === 'merged' && item.mergeAt === undefined && selected(at)) day(at).merged += 1;
+    if (event.event_kind === 'add') dailyEvents.push({ at, kind: 'added' });
+    if (event.event_kind === 'merged' && item.mergeAt === undefined) dailyEvents.push({ at, kind: 'merged' });
     move(item, event, detail, at);
+  }
+  const frozenItems = [...items.values()].map((item) => Object.freeze({
+    ...item,
+    ...(item.reserve ? { reserve: Object.freeze({ ...item.reserve }) } : {}),
+  }));
+  const frozenActors = [...actors.values()].map((actor) => Object.freeze({ ...actor }));
+  const frozenDailyEvents = dailyEvents.map((event) => Object.freeze(event));
+  return Object.freeze({ items: Object.freeze(frozenItems), actors: Object.freeze(frozenActors), dailyEvents: Object.freeze(frozenDailyEvents) });
+}
+
+/** Project current queues and time windows from compiled facts without mutating the cached snapshot. */
+export function projectFlowStats(prepared, boundary, now, counts) {
+  const selected = at => !boundary || at >= Date.parse(boundary);
+  const daily = new Map();
+  for (const event of prepared.dailyEvents) {
+    if (!selected(event.at)) continue;
+    const date = new Date(event.at).toISOString().slice(0, 10);
+    if (!daily.has(date)) daily.set(date, { date, added: 0, merged: 0 });
+    daily.get(date)[event.kind] += 1;
   }
   const samples = Object.fromEntries(STAGES.map(stage => [stage, []]));
   const cycleTotals = Object.fromEntries(STAGES.map(stage => [stage, 0]));
   let completedItems = 0;
   let fullyMeasuredCycles = 0;
   const unmeasured = Object.fromEntries(STAGES.map(stage => [stage, 0]));
-  for (const item of items.values()) {
+  for (const item of prepared.items) {
     const measured = itemStages(item, now);
     for (const stage of STAGES) {
       const sample = measured[stage];
@@ -192,8 +205,8 @@ export function flowStats(history, boundary, now, counts) {
     for (const stage of STAGES) cycleTotals[stage] += measured[stage].minutes ?? 0;
   }
   const stages = Object.fromEntries(STAGES.map(stage => [stage, { ...summarize(samples[stage]), unmeasuredCompleted: unmeasured[stage] }]));
-  const queueData = queuesFrom(items.values(), now);
-  const activeAgents = activeFrom(actors, now);
+  const queueData = queuesFrom(prepared.items, now);
+  const activeAgents = activeFrom(prepared.actors, now);
   const stage = STAGES.reduce((largest, next) => cycleTotals[next] > cycleTotals[largest] ? next : largest);
   const totalCycleMinutes = Object.values(cycleTotals).reduce((sum, value) => sum + value, 0);
   const bottleneck = fullyMeasuredCycles ? {
@@ -206,6 +219,11 @@ export function flowStats(history, boundary, now, counts) {
       `not enough flow to name a bottleneck (0 items completed since ${boundary ?? 'the beginning'})`, recommendation: null };
   return { asOf: new Date(now).toISOString(), stages, queues: queueData.queues, unreviewed: queueData.unreviewed, daily: [...daily.values()].sort((a, b) => a.date.localeCompare(b.date)),
     submitsPerMerged: completedItems ? counts.submissions / completedItems : 0, activeAgents, bottleneck };
+}
+
+/** Derive flow from an immutable history with an injectable observation time for fixtures. */
+export function flowStats(history, boundary, now, counts) {
+  return projectFlowStats(prepareFlowHistory(history), boundary, now, counts);
 }
 
 /** Format elapsed minutes in rounded human units while JSON retains its original numeric precision. */
