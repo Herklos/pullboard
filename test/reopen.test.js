@@ -329,7 +329,6 @@ test('a red landing gate returns a verified item to its builder [B3,V4]', async 
     `Landing failed: gate red; merge commit ${'d'.repeat(40)}`,
     `Studio landing gate red: see the log; merge commit ${'d'.repeat(40)}`,
     `Reopening #12: the gate was red; merge commit ${'d'.repeat(40)}`,
-    `Gate red at 10:30, test/a.test.js: keeps it; merge commit ${'d'.repeat(40)}`,
   ]) {
     const refused = manualBox.run(manualBox.repo, 'reopen', String(manualItem.id), '--note', invalidNote, '--json');
     assert.equal(refused.code, 1, invalidNote);
@@ -438,6 +437,57 @@ test('manual reopen accepts a failing root-level test after an unrecorded two-pa
   const reopenEvent = returned.thread.findLast((event) => event.type === 'move' && event.kind === 'reopen');
   assert.equal(reopenEvent.detail.supersedes, accepted.eventId);
   assert.deepEqual(reopenEvent.detail.landingFailure, JSON.parse(reopened.out).landingFailure);
+  assert.ok(returned.thread.some((event) => event.eventId === accepted.eventId && event.kind === 'accept'),
+    'the append-only accept remains in history');
+});
+
+test('manual reopen records a timestamp-prefixed failing test after an unrecorded two-parent merge [B3,V4]', (t) => {
+  const box = landingProject();
+  const item = submitLandingFixture(box, 1, 'export const status = "RED";\n');
+  acceptLandingFixture(box, item);
+
+  mkdirSync(join(box.repo, 'test'), { recursive: true });
+  writeFileSync(join(box.repo, 'test', 'a.test.js'), [
+    "import assert from 'node:assert/strict';",
+    "import { readFileSync } from 'node:fs';",
+    "import { test } from 'node:test';",
+    "test('keeps it', () => assert.match(readFileSync(new URL('../web/feature.js', import.meta.url), 'utf8'), /export const status = [\"']PASS[\"']/u));",
+    '',
+  ].join('\n'));
+  box.git(box.repo, 'add', 'test/a.test.js');
+  box.git(box.repo, 'commit', '-q', '-m', 'test: keep the released landing behavior [G1]');
+
+  const merged = box.tryGit(box.repo, 'merge', '--no-ff', '--no-edit', item.commit);
+  assert.equal(merged.status, 0, merged.failure ?? merged.stderr);
+  const mergeCommit = box.git(box.repo, 'rev-parse', 'HEAD');
+  const mergeParents = box.git(box.repo, 'rev-list', '--parents', '-n', '1', mergeCommit).split(' ');
+  assert.equal(mergeParents.length, 3, 'the valid contextual note names an actual two-parent merge');
+  assert.equal(mergeParents[2], item.commit, 'the accepted item is the second parent');
+
+  const failingTest = spawnSync(process.execPath, ['--test', '--test-reporter=tap', 'test/a.test.js'], {
+    cwd: box.repo, env: box.env, encoding: 'utf8',
+  });
+  assert.equal(failingTest.status, 1, failingTest.stderr || failingTest.stdout);
+  assert.match(failingTest.stdout, /not ok 1 - keeps it/u);
+
+  const board = openFixtureBoard(t, box);
+  assert.deepEqual(store.landingBatches(board), [], 'a hand-run merge has no recorded landing batch');
+  const accepted = readItem(box, item.id).thread.findLast((event) => event.type === 'move' && event.kind === 'accept');
+  assert.ok(accepted, 'the verified item keeps its original accept');
+  const note = `Gate red at 10:30, test/a.test.js: keeps it; merge commit ${mergeCommit}`;
+  const reopened = box.run(box.repo, 'reopen', String(item.id), '--note', note, '--json');
+  assert.equal(reopened.code, 0, [reopened.err, reopened.out].filter(Boolean).join('\n'));
+  const landingFailure = {
+    batch: null,
+    tests: [{ file: 'test/a.test.js', name: 'keeps it' }],
+    mergeCommit,
+  };
+  assert.deepEqual(JSON.parse(reopened.out).landingFailure, landingFailure);
+  const returned = readItem(box, item.id);
+  assert.equal(returned.item_status, 'open');
+  const reopenEvent = returned.thread.findLast((event) => event.type === 'move' && event.kind === 'reopen');
+  assert.equal(reopenEvent.detail.supersedes, accepted.eventId);
+  assert.deepEqual(reopenEvent.detail.landingFailure, landingFailure);
   assert.ok(returned.thread.some((event) => event.eventId === accepted.eventId && event.kind === 'accept'),
     'the append-only accept remains in history');
 });
