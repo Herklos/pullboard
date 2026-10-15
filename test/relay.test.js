@@ -18,21 +18,76 @@ import { fetchPrintedViewLink } from './view-link-fixture.js';
 
 const relaySetupURL = new URL('../src/relay-setup.js', import.meta.url).href;
 const relayMachineURL = new URL('../src/relay-machine.js', import.meta.url).href;
+const relayDeviceKeysURL = new URL('../src/relay-device-keys.js', import.meta.url).href;
 
 /** Call the shared setup flow with a private caller signal and credential-free output streams. */
 async function runRelayOnAll(box, signalMode) {
   return box.script(`
     import { relayOnAll } from ${JSON.stringify(relaySetupURL)};
+    import { readRelayMachine } from ${JSON.stringify(relayMachineURL)};
+    import { createDeviceKeys, signDeviceEnrollment } from ${JSON.stringify(relayDeviceKeysURL)};
     const controller = new AbortController();
     const originalFetch = globalThis.fetch;
-    if (${JSON.stringify(signalMode)} === 'during-poll') {
+    const mode = ${JSON.stringify(signalMode)};
+    const pairingCallbacks = [];
+    const messages = [];
+    let enrollmentUploaded = false;
+    if (['pairing-cancel', 'pairing-cancel-delete-fails', 'pairing-complete', 'pairing-abort-during-acceptance'].includes(mode)) {
+      globalThis.fetch = async (input, init) => {
+        const url = new URL(input instanceof URL ? input.href : typeof input === 'string' ? input : input.url);
+        const method = init?.method ?? input?.method ?? 'GET';
+        if (mode === 'pairing-cancel-delete-fails' && url.pathname.startsWith('/api/v1/devices/enrollments/') && method === 'DELETE') {
+          return new Response(JSON.stringify({ version: 1, error: { code: 'RELAY_UNAVAILABLE', message: 'fixture cleanup was not acknowledged' } }),
+            { status: 503, headers: { 'content-type': 'application/json' } });
+        }
+        if (url.pathname.startsWith('/api/v1/devices/enrollments/') && method === 'GET' && controller.signal.aborted) {
+          return new Response(JSON.stringify({ version: 1, error: { code: 'DEVICE_PAIR_EXPIRED', message: 'fixture stopped an ignored pairing cancellation' } }),
+            { status: 410, headers: { 'content-type': 'application/json' } });
+        }
+        const response = await originalFetch(input, init);
+        if (url.pathname.startsWith('/api/v1/devices/enrollments/') && method === 'GET') {
+          if (mode.startsWith('pairing-cancel')) setImmediate(() => controller.abort());
+          if (!mode.startsWith('pairing-cancel') && !enrollmentUploaded && !(await response.clone().json()).enrollment) {
+            const callback = pairingCallbacks[0];
+            const pairingUrl = callback?.url ?? messages.find(value => value.startsWith('Pair your phone once: '))?.slice('Pair your phone once: '.length);
+            if (!pairingUrl) throw new Error('fixture could not find the in-memory pairing link');
+            const fragment = new URL(pairingUrl).hash.slice('#device='.length);
+            const [locator, secret] = fragment.split('.');
+            const headers = new Headers(init?.headers ?? input?.headers);
+            const authorization = headers.get('authorization');
+            const engine = headers.get('x-pullboard-engine');
+            const identityResponse = await originalFetch(new URL('/api/v1/devices/session', url.origin), {
+              headers: { authorization, 'x-pullboard-engine': engine },
+            });
+            const { account } = await identityResponse.json();
+            const keys = await createDeviceKeys();
+            const enrollment = await signDeviceEnrollment(secret, {
+              v: 1, account, locator, deviceId: keys.deviceId, publicKey: keys.publicKey,
+              label: 'fixture phone', createdAt: new Date().toISOString(),
+            });
+            const enrolled = await originalFetch(url.href, {
+              method: 'PUT', headers: { authorization, 'x-pullboard-engine': engine, 'content-type': 'application/json' },
+              body: JSON.stringify(enrollment),
+            });
+            if (!enrolled.ok) throw new Error('fixture device enrollment was refused');
+            enrollmentUploaded = true;
+            if (mode === 'pairing-abort-during-acceptance') {
+              const subtle = globalThis.crypto.subtle;
+              const verify = subtle.verify.bind(subtle);
+              subtle.verify = async (...args) => { controller.abort(); subtle.verify = verify; return verify(...args); };
+            }
+          }
+        }
+        return response;
+      };
+    } else if (mode === 'during-poll') {
       globalThis.fetch = async (input, init) => {
         const response = await originalFetch(input, init);
         const url = new URL(input instanceof URL ? input.href : typeof input === 'string' ? input : input.url);
         if (url.pathname === '/auth/device/start') setImmediate(() => controller.abort());
         return response;
       };
-    } else if (${JSON.stringify(signalMode)} === 'during-flush') {
+    } else if (mode === 'during-flush') {
       globalThis.fetch = async (input, init) => {
         const url = new URL(input instanceof URL ? input.href : typeof input === 'string' ? input : input.url);
         if (init?.method === 'DELETE' && url.pathname.startsWith('/api/v1/devices/')) {
@@ -42,10 +97,10 @@ async function runRelayOnAll(box, signalMode) {
         return originalFetch(input, init);
       };
     } else if (['held-poll-response', 'held-poll-response-cancel-fails',
-      'held-poll-response-denied', 'held-poll-response-expired'].includes(${JSON.stringify(signalMode)})) {
+      'held-poll-response-denied', 'held-poll-response-expired'].includes(mode)) {
       globalThis.fetch = async (input, init) => {
         const url = new URL(input instanceof URL ? input.href : typeof input === 'string' ? input : input.url);
-        if (url.pathname === '/auth/device/cancel' && ${JSON.stringify(signalMode)} === 'held-poll-response-cancel-fails') {
+        if (url.pathname === '/auth/device/cancel' && mode === 'held-poll-response-cancel-fails') {
           return new Response(JSON.stringify({ version: 1, error: { code: 'RELAY_ROUTE', message: 'fixture route is unavailable' } }),
             { status: 404, headers: { 'content-type': 'application/json' } });
         }
@@ -60,12 +115,23 @@ async function runRelayOnAll(box, signalMode) {
         }
         return response;
       };
-    } else if (${JSON.stringify(signalMode)} === 'already-aborted') controller.abort();
+    } else if (mode === 'already-aborted') controller.abort();
     const output = { personChannel: 'view', cwd: process.cwd(),
-      stderr: { write() {} }, say() {}, err() {} };
+      stderr: { write() {} }, say(value) { messages.push(String(value)); }, err(value) { messages.push(String(value)); } };
     try {
-      const result = await relayOnAll(${JSON.stringify(box.origin)}, output, { signal: controller.signal });
-      process.stdout.write(JSON.stringify(result));
+      const result = await relayOnAll(${JSON.stringify(box.origin)}, output, {
+        signal: controller.signal, onPairingURL(value) { pairingCallbacks.push(value); },
+      });
+      const machine = readRelayMachine();
+      process.stdout.write(JSON.stringify({ ...result,
+        pairingCallbackCount: pairingCallbacks.length,
+        pairingCallbackHasCode: Boolean(pairingCallbacks[0]?.url.includes('#device=')),
+        pairingCallbackExpires: Number.isSafeInteger(pairingCallbacks[0]?.expires),
+        pairingUrlPrinted: messages.some(value => value.includes('#device=')),
+        pairingCleanupWarningShown: messages.some(value => value.includes('may retain this request')),
+        signalAborted: controller.signal.aborted,
+        enrollmentUploaded, pendingCleared: machine.pending === null, deviceCount: machine.devices.length,
+      }));
     } catch (error) {
       process.stdout.write(JSON.stringify({ errorCode: error.code ?? 'UNEXPECTED_ERROR' }));
       process.exitCode = 1;
@@ -341,6 +407,64 @@ test('linking every board stops cleanly when the sign-in is declined or cancelle
     assert.equal(box.transit.some(record => record.path === '/auth/boards/link' || record.path === '/auth/machines'), false,
       'failed cancellation never begins a board or machine write');
     revokeFixtureSessions(box, leaked);
+  });
+});
+
+test('a cancel during pairing keeps the links and stops pairing cleanly [H5,N26]', async (t) => {
+  await t.test('cancellation before the first link remains a no-link outcome', async (t) => {
+    const box = await relayClientFixture(t);
+    await registerSecondProject(box);
+    const result = await runRelayOnAll(box, 'already-aborted');
+    assert.equal(result.code, 0);
+    assert.equal(result.document.outcome, 'cancelled');
+    assert.deepEqual(result.document.linked ?? [], []);
+    assert.equal(box.transit.some(record => record.path === '/auth/boards/link'), false, 'no board-link request starts');
+    assert.equal(result.document.pairingCallbackCount, 0, 'no pairing URL is announced');
+  });
+
+  for (const mode of ['pairing-cancel', 'pairing-cancel-delete-fails']) await t.test(mode, async (t) => {
+    const box = await relayClientFixture(t);
+    await registerSecondProject(box);
+    const result = await runRelayOnAll(box, mode);
+    assert.equal(result.code, 0, 'pairing cancellation is a named successful setup outcome');
+    assert.equal(result.document.pairingOutcome, 'cancelled');
+    assert.equal(result.document.paired, false);
+    assert.equal(result.document.linked.length, 2, 'the completed board links remain in the result');
+    assert.deepEqual(result.document.failed, []);
+    assert.equal(result.document.pendingCleared, true, 'the local pending enrollment is removed');
+    assert.equal(result.document.deviceCount, 0, 'cancellation before acceptance records no device');
+    assert.equal(result.document.pairingCallbackCount, 1, 'the optional pairing callback receives the pairing address');
+    assert.equal(result.document.pairingCallbackHasCode, true);
+    assert.equal(result.document.pairingCallbackExpires, true);
+    assert.equal(result.document.pairingUrlPrinted, false, 'the callback replaces CLI URL/QR output');
+    assert.equal(result.document.signalAborted, true);
+    if (mode === 'pairing-cancel') {
+      assert.equal(result.document.pairingCleanup, 'confirmed');
+      assert.equal(box.transit.filter(record => record.method === 'DELETE' && /\/api\/v1\/devices\/enrollments\//u.test(record.path)).length, 1);
+    } else {
+      assert.equal(result.document.pairingCleanup, 'unconfirmed', 'a refused DELETE is not reported as cleanup success');
+      assert.equal(result.document.pairingCleanupWarningShown, true);
+    }
+  });
+
+  for (const mode of ['pairing-complete', 'pairing-abort-during-acceptance']) await t.test(mode, async (t) => {
+    const box = await relayClientFixture(t);
+    await registerSecondProject(box);
+    const result = await runRelayOnAll(box, mode);
+    assert.equal(result.code, 0, 'the real loopback enrollment completes');
+    assert.equal(result.document.pairingCallbackCount, 1, 'the optional pairing callback receives the pairing address');
+    assert.equal(result.document.pairingUrlPrinted, false, 'the callback replaces CLI URL/QR output');
+    assert.equal(result.document.pairingOutcome, 'paired');
+    assert.equal(result.document.paired, true);
+    assert.equal(result.document.linked.length, 2);
+    assert.deepEqual(result.document.failed, []);
+    assert.equal(result.document.pairingCallbackHasCode, true);
+    assert.equal(result.document.enrollmentUploaded, true);
+    assert.equal(result.document.pendingCleared, true);
+    assert.equal(result.document.deviceCount, 1);
+    assert.equal(box.transit.filter(record => record.method === 'PUT' && /\/api\/v1\/devices\/device-[0-9a-f]{32}\/boards\//u.test(record.path)).length, 2,
+      'the enrolled device receives wraps for every linked board');
+    assert.equal(result.document.signalAborted, mode === 'pairing-abort-during-acceptance');
   });
 });
 

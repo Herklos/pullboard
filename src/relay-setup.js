@@ -121,46 +121,100 @@ async function linkProjects(session, io) {
   return { linked, failed };
 }
 
-/** Publish a one-use public locator and wait in this command; no service or unattended daemon is added. */
-async function pairFirstDevice(session, board, linked, io) {
+/** Wait for the next pairing poll or an abort without leaving an abort listener behind. */
+function waitForPairingPoll(signal) {
+  return new Promise(resolve => {
+    if (signal?.aborted) { resolve(); return; }
+    const finish = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, 500);
+    signal?.addEventListener('abort', finish, { once: true });
+  });
+}
+
+/** Publish a one-use locator and wait in this command; cancellation never undoes linked boards. */
+async function pairFirstDevice(session, board, linked, io, { signal, onPairingURL } = {}) {
+  if (signal?.aborted) {
+    io.say('Boards linked; phone pairing cancelled. Run pullboard relay on --all for a fresh code.');
+    return { paired: false, interrupted: false, pairingOutcome: 'cancelled', pairingCleanup: 'not-published' };
+  }
   const pending = beginDeviceEnrollment(board, session);
   const path = '/api/v1/devices/enrollments/' + pending.locator;
-  await relayDeviceRequest(session, path, { method: 'POST', body: {} }, io);
   const link = session.url + '/#device=' + pending.locator + '.' + pending.secret;
-  io.say('Pair your phone once: ' + link);
-  try { io.say(terminalQr(link)); }
-  catch (error) { if (error.code !== 'PAIR_LINK_LONG') throw error; io.say('Open the pairing link above.'); }
   let interrupted = false;
-  /** End foreground pairing without discarding successful board links or saving a partial device. */
+  let pairingOutcome = 'expired';
+  let pairingCleanup = 'not-published';
+  let locatorMayExist = false;
+  let deviceId;
+  /** Stop foreground polling without discarding successful board links or saving a partial device. */
   const stop = () => { interrupted = true; };
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
   try {
-    while (!interrupted && Date.now() < pending.expires) {
-      const result = await relayDeviceRequest(session, path, {}, io);
-      if (interrupted) break;
+    locatorMayExist = true;
+    try { await relayDeviceRequest(session, path, { method: 'POST', body: {}, signal }, io); }
+    catch (error) {
+      if (signal?.aborted && error.code === 'OAUTH_CANCELLED') pairingOutcome = 'cancelled';
+      else throw error;
+    }
+    if (signal?.aborted || interrupted) pairingOutcome = 'cancelled';
+    else if (onPairingURL) onPairingURL({ url: link, expires: pending.expires });
+    else {
+      io.say('Pair your phone once: ' + link);
+      try { io.say(terminalQr(link)); }
+      catch (error) { if (error.code !== 'PAIR_LINK_LONG') throw error; io.say('Open the pairing link above.'); }
+    }
+    while (!signal?.aborted && !interrupted && Date.now() < pending.expires) {
+      let result;
+      try { result = await relayDeviceRequest(session, path, { signal }, io); }
+      catch (error) {
+        if (signal?.aborted && error.code === 'OAUTH_CANCELLED') { pairingOutcome = 'cancelled'; break; }
+        throw error;
+      }
+      if (signal?.aborted || interrupted) { pairingOutcome = 'cancelled'; break; }
       if (result.enrollment) {
+        // Cancellation may prevent acceptance only before its asynchronous authentication starts.
+        if (signal?.aborted) { pairingOutcome = 'cancelled'; break; }
         const device = await acceptDeviceEnrollment(result.enrollment);
         await relayDeviceRequest(session, '/api/v1/devices/' + device.deviceId, { method: 'POST', body: {} }, io);
         await relayDeviceRequest(session, path, { method: 'DELETE' }, io);
+        locatorMayExist = false;
+        pairingCleanup = 'confirmed';
         for (const project of linked) await deliverDeviceWraps(project.root, io);
         io.say('Phone paired; current and future linked boards will appear here.');
-        return { paired: true, deviceId: device.deviceId };
+        deviceId = device.deviceId;
+        pairingOutcome = 'paired';
+        break;
       }
-      await new Promise(resolve => { setTimeout(resolve, 500); });
+      await waitForPairingPoll(signal);
     }
-    io.say('Boards linked; phone pairing stopped. Run pullboard relay on --all for a fresh code.');
-    return { paired: false, interrupted };
+    if (pairingOutcome !== 'paired' && (signal?.aborted || interrupted)) pairingOutcome = 'cancelled';
   } finally {
     process.off('SIGINT', stop); process.off('SIGTERM', stop);
-    updateRelayMachine(state => { if (state.pending?.locator === pending.locator) state.pending = null; });
-    // Best-effort remove the public locator. Its relay lifetime remains ten minutes on an outage.
-    try { await relayDeviceRequest(session, path, { method: 'DELETE' }, io); } catch { /* Never undo completed links after a pairing timeout. */ }
+    try { updateRelayMachine(state => { if (state.pending?.locator === pending.locator) state.pending = null; }); }
+    finally {
+      if (locatorMayExist) {
+        // Cleanup is independent of the caller's aborted signal; never claim deletion if unconfirmed.
+        try {
+          await relayDeviceRequest(session, path, { method: 'DELETE' }, io);
+          pairingCleanup = 'confirmed';
+        } catch { pairingCleanup = 'unconfirmed'; }
+      }
+    }
   }
+  if (pairingOutcome === 'paired') return { paired: true, deviceId, pairingOutcome, pairingCleanup };
+  io.say((onPairingURL
+    ? `Boards linked; phone pairing ${pairingOutcome}. Run pullboard relay on --all for a fresh code.`
+    : 'Boards linked; phone pairing stopped. Run pullboard relay on --all for a fresh code.')
+    + (pairingCleanup === 'unconfirmed' ? ' The relay may retain this request until it expires.' : ''));
+  return { paired: false, interrupted: interrupted || Boolean(signal?.aborted), pairingOutcome, pairingCleanup };
 }
 
 /** Explicit foreground sign-in repairs links; only board machine credentials survive this command. */
-export async function relayOnAll(address, io, { signal } = {}) {
+export async function relayOnAll(address, io, { signal, onPairingURL } = {}) {
   requirePersonChannel(io.personChannel);
   // A cancelled or declined sign-in must not migrate machine state or scrub existing board links.
   const owner = relayMachineOwner();
@@ -186,6 +240,6 @@ export async function relayOnAll(address, io, { signal } = {}) {
   const result = await linkProjects(session, io);
   const devices = readRelayMachine().devices.filter(device => device.account === session.account && device.url === session.url);
   const pairing = devices.length || !result.linked.length ? { paired: devices.length > 0 }
-    : await pairFirstDevice(session, result.linked[0].board, result.linked, io);
+    : await pairFirstDevice(session, result.linked[0].board, result.linked, io, { signal, onPairingURL });
   return { ...result, ...pairing, autoLink: true };
 }
