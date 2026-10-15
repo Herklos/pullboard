@@ -137,7 +137,7 @@ function documentationInputs(path, source, imports, changedDocs = []) {
   return inputs;
 }
 
-/** Compile import edges for one tree; computed imports stay attached to their importing file. */
+/** Compile this tree's import edges, plus the literal child-CLI dependency used by fixture modules. */
 function graphAt(root, commit, changedDocs = []) {
   const modules = modulesAt(root, commit);
   const paths = [...modules.keys()];
@@ -171,6 +171,12 @@ function graphAt(root, commit, changedDocs = []) {
       if (!reverse.has(dependency)) reverse.set(dependency, new Set());
       reverse.get(dependency).add(path);
     }
+    // A child process is not an import edge, but tests and helpers that name the CLI entry depend on
+    // every module it imports. Keep this literal path edge narrow and build it for each committed tree.
+    if (modules.get(path).includes('bin/pullboard.js')) {
+      if (!reverse.has('bin/pullboard.js')) reverse.set('bin/pullboard.js', new Set());
+      reverse.get('bin/pullboard.js').add(path);
+    }
   });
   return { paths, reverse, unknown, always, testTreeReaders, sourceTreeReaders, docInputs };
 }
@@ -178,7 +184,8 @@ function graphAt(root, commit, changedDocs = []) {
 /**
  * Select changed tests and every transitive importer in the old and new trees. Old edges cover
  * deletions and renames; declared tree readers also cover changed test or source inputs. Other filesystem
- * reads and process launches are deliberately not import edges, except literal documentation inputs.
+ * reads and process launches are not import edges, except literal documentation inputs and modules that
+ * mention the Pullboard CLI entry (`bin/pullboard.js`), whose imported modules they exercise as subprocesses.
  *
  * @param {string} root
  * @param {{base:string|null, trunk?:string, commit?:string, changed?:string[]}} options
