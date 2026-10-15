@@ -7,7 +7,7 @@ import { requirePersonChannel } from './person.js';
 import { codeIsFromMain, repoInfo } from './git.js';
 import { listApiProjects } from './projects.js';
 import { acceptDeviceEnrollment, beginDeviceEnrollment, readRelayMachine, relayMachineOwner, updateRelayMachine } from './relay-machine.js';
-import { deliverDeviceWraps, relayDeviceRequest, relayMachineSignIn, relayMachineContext, relayRevokeDevice, relayOn, relayStatus, originRepository } from './relay.js';
+import { deliverDeviceWraps, relayDeviceRequest, relayMachineSignIn, relayMachineContext, relayRevokeDevice, relayOn, relayStatus, originRepository, revokeRelayPersonSession } from './relay.js';
 import { terminalQr } from './qr.js';
 import { Refused } from './refused.js';
 
@@ -166,9 +166,20 @@ export async function relayOnAll(address, io, { signal } = {}) {
   const owner = relayMachineOwner();
   const session = await relayMachineSignIn(address || owner?.url, io, { signal });
   if (session.outcome) return session;
-  if (signal?.aborted) return { outcome: 'cancelled' };
-  await flushRevocations(session, io);
-  if (signal?.aborted) return { outcome: 'cancelled' };
+  if (signal?.aborted) {
+    await revokeRelayPersonSession(session, io);
+    return { outcome: 'cancelled' };
+  }
+  try { await flushRevocations(session, io); }
+  catch (error) {
+    if (!signal?.aborted) throw error;
+    await revokeRelayPersonSession(session, io);
+    return { outcome: 'cancelled' };
+  }
+  if (signal?.aborted) {
+    await revokeRelayPersonSession(session, io);
+    return { outcome: 'cancelled' };
+  }
   // From this synchronous commit point onward the first board-link attempt is underway; later
   // cancellation must not claim that already-started link writes were rolled back.
   updateRelayMachine(state => { state.autoLink = true; state.owner = { account: session.account, url: session.url }; state.approvals = []; });

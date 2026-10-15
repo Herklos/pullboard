@@ -1192,26 +1192,53 @@ function waitForDevicePoll(seconds, signal) {
   });
 }
 
+/** Cancel one device ticket without the already-aborted caller signal. */
+async function cancelDeviceFlow(url, ticket, io) {
+  let result;
+  try { result = await request({ url }, '/auth/device/cancel', { method: 'POST', body: { ticket } }, io); }
+  catch {
+    throw new Refused('OAUTH_CLEANUP', 'the relay could not confirm cleanup of the cancelled sign-in; retry before linking boards');
+  }
+  if (result.cancelled !== true) throw new Refused('OAUTH_CLEANUP', 'the relay did not confirm cleanup of the cancelled sign-in; retry before linking boards');
+}
+
+/** Revoke only the fresh person session created by this explicit device sign-in. */
+export async function revokeRelayPersonSession(session, io) {
+  if (!session || typeof session.token !== 'string' || !/^ps_[A-Za-z0-9_-]{43}$/.test(session.token) || typeof session.id !== 'string') {
+    throw new Refused('OAUTH_CLEANUP', 'the relay session could not be identified for cancellation cleanup');
+  }
+  const result = await request({ url: session.url, token: session.token }, '/auth/tokens/revoke', { method: 'POST', body: { id: session.id } }, io);
+  if (result.id !== session.id || result.revoked !== true) throw new Refused('OAUTH_CLEANUP', 'the relay did not confirm cleanup of the cancelled sign-in; retry before linking boards');
+}
+
 /** Sign in with the caller's cancellation signal; no board credential is persisted here. */
 async function deviceSignIn(url, io, { signal } = {}) {
   cancellationOutcome(signal);
   const client = { url };
   const flow = await request(client, '/auth/device/start', { method: 'POST', body: {}, signal }, io);
-  cancellationOutcome(signal);
-  io.stderr.write(`Sign in with GitHub: open ${flow.verificationURL} and enter ${flow.userCode}\n`);
-  const expires = Date.now() + flow.expiresIn * 1000;
-  let signed;
-  let wait = flow.interval;
-  do {
-    await waitForDevicePoll(wait, signal);
-    if (Date.now() >= expires) throw new Refused('OAUTH_EXPIRED', 'GitHub device sign-in expired; run pullboard relay on again');
-    signed = await request(client, '/auth/device/poll', { method: 'POST', body: { ticket: flow.ticket }, signal }, io);
+  try {
     cancellationOutcome(signal);
-    wait = signed.retryAfter ?? flow.interval;
-  } while (signed.pending);
-  const token = signed.token;
-  if (!/^ps_[A-Za-z0-9_-]{43}$/.test(token)) throw new Refused('RELAY_RESPONSE', 'the relay did not issue a person session; sign in again');
-  return signed;
+    io.stderr.write(`Sign in with GitHub: open ${flow.verificationURL} and enter ${flow.userCode}\n`);
+    const expires = Date.now() + flow.expiresIn * 1000;
+    let signed;
+    let wait = flow.interval;
+    do {
+      await waitForDevicePoll(wait, signal);
+      if (Date.now() >= expires) throw new Refused('OAUTH_EXPIRED', 'GitHub device sign-in expired; run pullboard relay on again');
+      signed = await request(client, '/auth/device/poll', { method: 'POST', body: { ticket: flow.ticket }, signal }, io);
+      cancellationOutcome(signal);
+      wait = signed.retryAfter ?? flow.interval;
+    } while (signed.pending);
+    const token = signed.token;
+    if (!/^ps_[A-Za-z0-9_-]{43}$/.test(token)) throw new Refused('RELAY_RESPONSE', 'the relay did not issue a person session; sign in again');
+    return signed;
+  } catch (error) {
+    if (signal?.aborted || error.code === 'OAUTH_CANCELLED') {
+      await cancelDeviceFlow(url, flow.ticket, io);
+      throw new Refused('OAUTH_CANCELLED', 'GitHub device sign-in was cancelled; no board was linked');
+    }
+    throw error;
+  }
 }
 
 /** Explicitly sign in through the relay and persist a sealed initial snapshot before uploading it. */
@@ -1338,12 +1365,16 @@ export async function relayMachineSignIn(address, io, { signal } = {}) {
   let signed;
   try { signed = await deviceSignIn(url, io, { signal }); }
   catch (error) {
+    if (error.code === 'OAUTH_CLEANUP') throw error;
     if (signal?.aborted || error.code === 'OAUTH_CANCELLED') return { outcome: 'cancelled' };
     if (error.code === 'OAUTH_DENIED') return { outcome: 'declined' };
     if (error.code === 'OAUTH_EXPIRED') return { outcome: 'expired' };
     throw error;
   }
-  if (signal?.aborted) return { outcome: 'cancelled' };
+  if (signal?.aborted) {
+    await revokeRelayPersonSession({ ...signed, url }, io);
+    return { outcome: 'cancelled' };
+  }
   if (typeof signed.user?.id !== 'string') throw new Refused('RELAY_RESPONSE', 'Sign in again to receive an authenticated account identity.');
   return { token: signed.token, id: signed.id, account: signed.user.id, url };
 }
