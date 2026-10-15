@@ -15,7 +15,7 @@ async function stalledCommand(chrome, label, pending) {
       assert.match(error.message, new RegExp(label));
       const elapsed = /timed out after (\d+)ms/u.exec(error.message);
       assert.ok(elapsed, 'the diagnostic reports the measured elapsed time');
-      assert.ok(Number(elapsed[1]) >= 15000, 'the command does not time out before its configured deadline');
+      assert.ok(Number(elapsed[1]) >= 15000, 'the command does not time out before its configured deadline'); // budget: declared CDP commandTimeoutMs is 15000 in both fixtures; the timeout may not precede that deadline.
       assert.match(error.message, /maximum event-loop delay \d+ms/);
       assert.match(error.message, new RegExp('relay request pending: ' + pending));
       return true;
