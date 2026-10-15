@@ -1123,22 +1123,49 @@ function recordViewReuse(ctx, board, view) {
   renameSync(temporary, file);
 }
 
+/** Read a typed setup receipt only for this board's current coordinator enrollment. */
+function setupReceiptMatches(ctx, identity, state) {
+  let receipt;
+  try { receipt = JSON.parse(readFileSync(join(ctx.info.commonDir, 'pullboard', `setup-${state}.json`), 'utf8')); }
+  catch (error) { if (error.code === 'ENOENT' || error instanceof SyntaxError) return false; throw error; }
+  return receipt?.type === `pullboard.setup.${state === 'complete' ? 'completed' : state}` && receipt.version === 1
+    && receipt.boardId === identity.boardId && receipt.setupStartedAt === identity.setupStartedAt;
+}
+
+/** Atomically record a setup transition, scoped to this board enrollment. */
+function recordSetupState(ctx, identity, state) {
+  const file = join(ctx.info.commonDir, 'pullboard', `setup-${state}.json`);
+  const temporary = file + '.' + randomUUID() + '.tmp';
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(temporary, JSON.stringify({ type: `pullboard.setup.${state === 'complete' ? 'completed' : state}`, version: 1, ...identity }) + '\n', { mode: 0o600 });
+  renameSync(temporary, file);
+}
+
 /** Derive the next setup question from the real requirements, config, items and view receipt. */
-function boardSetup(ctx, card) {
+function boardSetup(ctx, card, identity) {
   const rows = loadSpec(ctx.info.root, ctx.config).rows;
   const approved = rows.filter(row => row.status === 'approved');
+  const drafted = rows.filter(row => row.status === 'draft' || row.status === 'pending');
+  const recordedComplete = setupReceiptMatches(ctx, identity, 'complete');
+  const started = setupReceiptMatches(ctx, identity, 'started');
   const lanes = laneNames(ctx.config).filter(lane => !['review', COORDINATOR].includes(lane));
   const folders = readdirSync(ctx.info.root, { withFileTypes: true })
     .filter(entry => entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules')
     .map(entry => entry.name).sort();
   const lane = lanes[0] ?? folders[0] ?? 'app';
+  // Older installations had no setup marker. Preserve their completed five-step state on upgrade.
+  const legacyUnmarked = !existsSync(join(ctx.info.commonDir, 'pullboard', 'setup-started.json'))
+    && !existsSync(join(ctx.info.commonDir, 'pullboard', 'setup-complete.json'));
+  const legacyComplete = legacyUnmarked && approved.length > 0 && lanes.length > 0
+    && Boolean(ctx.config.gate?.trim()) && card.all.length > 0 && card.viewOpened;
+  const completed = recordedComplete || legacyComplete;
   const detectedGate = detectGate(ctx.info.root);
   /** Quote the exact suggested command safely for a shell. */
   const quote = value => "'" + String(value).replaceAll("'", "'\\''") + "'";
   /** Preserve all existing configuration when recording one setup answer. */
   const configure = patch => `node -e ${quote(`const fs=require('node:fs');const p='pullboard.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));${patch};fs.writeFileSync(p,JSON.stringify(c,null,2)+${JSON.stringify('\n')})`)}`;
   const steps = [
-    { number: 1, done: approved.length > 0, question: 'Ask the person: what are we building, and who will use it? Draft a few requirements, then ask the person to approve them.',
+    { number: 1, done: approved.length > 0 && (!drafted.length || completed), question: 'Ask the person: what are we building, and who will use it? Draft a few requirements, then ask the person to approve them.',
       command: 'pullboard spec draft "<text>"',
       afterAnswer: 'Record each answer with pullboard spec draft "<text>"; the person approves the returned ids in Pullboard View or runs pullboard spec approve <ids> in their own terminal; then the coordinator runs pullboard spec apply.' },
     { number: 2, done: lanes.length > 0, question: `Ask the person: how should we divide the work? Suggested folders: ${folders.join(', ') || 'app/ (create it for the app)'}.`,
@@ -1155,6 +1182,19 @@ function boardSetup(ctx, card) {
       afterAnswer: 'Run this in the person’s own terminal, or start it in the background as the agent so setup can continue. The view records its successful bind or authenticated reuse for this board.' },
   ];
   const current = steps.find(step => !step.done);
+  if (!current && !recordedComplete) recordSetupState(ctx, identity, 'complete');
+  else if (current && !completed && !started) recordSetupState(ctx, identity, 'started');
+  if (current?.number === 1 && drafted.length) {
+    const rowIds = drafted.map(row => row.id);
+    const names = rowIds.join(', ');
+    const command = `pullboard spec show ${rowIds[0]}`;
+    return { step: 1, total: 5, ...current, steps, waitingOn: 'person-approval', rowIds,
+      question: `Waiting for the person to approve ${names}.`, command,
+      personCommand: `pullboard spec approve ${rowIds.join(',')}`,
+      afterAnswer: 'The person approves these rows in Pullboard View or their own terminal; then the coordinator runs pullboard spec apply.',
+      meanwhile: 'While waiting, the agent may review independent approved work or prepare questions for the person.',
+      agentNext: `wait for the person to approve ${names}; meanwhile ${command}` };
+  }
   return current ? { step: current.number, total: 5, ...current, steps } : null;
 }
 
@@ -1168,7 +1208,9 @@ function boardSetup(ctx, card) {
 function resumeHere(io) {
   const ctx = context(io);
   const { root, isMain } = ctx.info;
+  let setupScope;
   const card = withBoard(ctx, (board) => {
+    setupScope = setupIdentity(board);
     const me = whoAmI(ctx, board);
     const all = store.listItems(board, { all: true });
     const toMerge = all.filter((item) => item.item_status === 'verified' && !item.item_merged_commit);
@@ -1219,12 +1261,13 @@ function resumeHere(io) {
   for (const problem of card.hookProblems) say(`${problem.message}; ${problem.next}`);
   const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
   say(`resume: ${me.displayName}${me.family ? ` [family ${me.family}]` : ''}, ${me.lane} lane${isMain ? ', the main checkout' : ''}, at ${root}`);
-  card.setup = boardSetup(ctx, card);
+  card.setup = boardSetup(ctx, card, setupScope);
   if (card.setup) {
     say(`Setting up: step ${card.setup.step} of 5`);
     say(card.setup.question);
-    say(`Record the answer: ${card.setup.command}`);
+    say(card.setup.personCommand ? `For the person: ${card.setup.personCommand}` : `Record the answer: ${card.setup.command}`);
     if (card.setup.afterAnswer) say(card.setup.afterAnswer);
+    if (card.setup.meanwhile) say(card.setup.meanwhile);
   }
   const dirty = dirtyFiles(root).length;
   if (!isMain) {
@@ -1290,7 +1333,7 @@ function resumeHere(io) {
   else if (inLane.length) next = `pullboard next --wait 9 (minutes); ${inLane.length} in your lane ${inLane.length === 1 ? 'waits' : 'wait'} on other work`;
   else if (card.awaiting.length) next = 'pullboard next --wait 9 (minutes); a rejected item comes back to your lane';
   else next = 'nothing open in your lane; pullboard next --verify names work you can check';
-  if (card.setup) next = card.setup.command;
+  if (card.setup) next = card.setup.agentNext ?? card.setup.command;
   io.result?.({ ...card, root, dirty, next });
   say(`next: ${next}`);
   const flowAlert = isMain ? flowAlertLine(card.flow) : null;
@@ -1492,7 +1535,12 @@ function setupCommands(io, { first, values }) {
         openBoardHere: () => store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), io.clock, { isMain: codeIsFromMain() }),
         /** Keep a linked coordinator's canonical identity without writing a clone-local path. */
         register: (board, options) => {
-          if (!linked) return store.register(board, options);
+          if (!linked) {
+            const existing = board.db.prepare('SELECT 1 FROM agent WHERE agent_id=?').get(COORDINATOR);
+            const registered = store.register(board, options);
+            if (!existing) recordSetupState({ info }, setupIdentity(board), 'started');
+            return registered;
+          }
           if (!board.db.prepare('SELECT 1 FROM agent WHERE agent_id=?').get(COORDINATOR)) {
             throw new Refused('NO_AGENT', 'the linked snapshot has no coordinator; restore a consistent relay snapshot before initializing');
           }

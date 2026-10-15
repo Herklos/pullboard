@@ -308,7 +308,8 @@ test('spec draft adds draft rows and resume names them [N32]', t => {
 
   const next = JSON.parse(box.run(box.repo, 'resume', '--json').stdout);
   assert.equal(next.setup.step, 1);
-  assert.match(next.setup.command, /^pullboard spec draft/u);
+  assert.match(next.setup.question, /waiting.*person.*approv/iu);
+  assert.deepEqual(next.setup.rowIds, ['G1', 'G2']);
 
   const custom = releaseFixture(t, { freshSetup: true });
   const customSpec = [
@@ -327,6 +328,58 @@ test('spec draft adds draft rows and resume names them [N32]', t => {
   assert.equal(updatedSpec.replaceAll('\r\n', '').includes('\n'), false, 'draft preserves the source newline style');
   assert.equal(updatedSpec, customSpec.replace('\r\n\r\n## N · Notes', '\r\n- G7 [draft, must] Keep line endings intact | gate: review\r\n\r\n## N · Notes'),
     'draft preserves every existing status row and inserts in the first section');
+});
+
+test("resume says setup waits on the person's approval [I1,I2]", async t => {
+  const box = releaseFixture(t, { freshSetup: true });
+  box.env.AI_AGENT = 'fixture-agent';
+  const drafted = [
+    box.run(box.repo, 'spec', 'draft', 'The person can choose a project name.', '--json'),
+    box.run(box.repo, 'spec', 'draft', 'The person can choose a project color.', '--json'),
+  ];
+  for (const result of drafted) assert.equal(result.status, 0, result.failure || result.stderr || result.stdout);
+  const ids = drafted.map(result => JSON.parse(result.stdout).id);
+  assert.deepEqual(ids, ['G1', 'G2']);
+
+  const waiting = box.run(box.repo, 'resume');
+  assert.equal(waiting.status, 0, waiting.failure || waiting.stderr || waiting.stdout);
+  assert.match(waiting.stdout, /waiting.*person.*approv/iu, 'setup waits for the person after the rows are drafted');
+  for (const id of ids) assert.match(waiting.stdout, new RegExp(`\\b${id}\\b`, 'u'));
+  assert.match(waiting.stdout, /agent[^\n]*may[^\n]*review[^\n]*independent approved work/iu,
+    'resume names permissible independent work while approval is pending');
+  assert.doesNotMatch(waiting.stdout, /^next: .*spec (?:draft|approve)/mu,
+    'the agent is not told to draft again or perform the person-only approval');
+  const waitingJson = box.run(box.repo, 'resume', '--json');
+  assert.equal(waitingJson.status, 0, waitingJson.failure || waitingJson.stderr || waitingJson.stdout);
+  const card = JSON.parse(waitingJson.stdout);
+  assert.equal(card.setup?.step, 1);
+  assert.equal(card.setup.waitingOn, 'person-approval');
+  assert.deepEqual(card.setup.rowIds, ids);
+  assert.match(card.next, /^wait for the person to approve G1, G2; meanwhile pullboard spec show G1$/u);
+
+  // Opening the real view to approve these rows cannot stand in for completing setup.
+  await openSetupView(box);
+
+  delete box.env.AI_AGENT;
+  const approval = box.run(box.repo, 'spec', 'approve', ids[0]);
+  assert.equal(approval.status, 0, approval.failure || approval.stderr || approval.stdout);
+  const applied = box.run(box.repo, 'spec', 'apply');
+  assert.equal(applied.status, 0, applied.failure || applied.stderr || applied.stdout);
+  const partial = box.run(box.repo, 'resume', '--json');
+  assert.equal(partial.status, 0, partial.failure || partial.stderr || partial.stdout);
+  const pending = JSON.parse(partial.stdout);
+  assert.equal(pending.setup?.step, 1, 'one approved row does not stand in for the remaining setup draft');
+  assert.deepEqual(pending.setup.rowIds, [ids[1]]);
+  assert.match(pending.setup.question, /Waiting for the person to approve G2/u);
+  const finalApproval = box.run(box.repo, 'spec', 'approve', ids[1]);
+  assert.equal(finalApproval.status, 0, finalApproval.failure || finalApproval.stderr || finalApproval.stdout);
+  const finalApply = box.run(box.repo, 'spec', 'apply');
+  assert.equal(finalApply.status, 0, finalApply.failure || finalApply.stderr || finalApply.stdout);
+  const resumed = box.run(box.repo, 'resume', '--json');
+  assert.equal(resumed.status, 0, resumed.failure || resumed.stderr || resumed.stdout);
+  const next = JSON.parse(resumed.stdout);
+  assert.equal(next.setup?.step, 2, 'person approval advances setup to its next unanswered step');
+  assert.equal(next.setup.waitingOn, undefined);
 });
 
 test('coordinator resume finds the oldest unreserved item behind an older live review [N32,R1,R2]', async t => {
@@ -530,4 +583,76 @@ test("a set-up board's resume prints no setup steps [N32,N19]", async t => {
   assert.doesNotMatch(result.stdout, /Setting up: step/u);
   const json = box.run(box.repo, 'resume', '--json');
   assert.equal(JSON.parse(json.stdout).setup, null);
+  const proposed = box.run(box.repo, 'spec', 'draft', 'A later proposal for the person', '--json');
+  assert.equal(proposed.status, 0, proposed.failure || proposed.stderr || proposed.stdout);
+  const later = box.run(box.repo, 'resume', '--json');
+  assert.equal(later.status, 0, later.failure || later.stderr || later.stdout);
+  assert.equal(JSON.parse(later.stdout).setup, null, 'a later proposal does not reopen completed setup');
+});
+
+
+test('a new preconfigured board waits for every initial approval [I1,I2]', async t => {
+  const box = releaseFixture(t, { freshSetup: true });
+  const marker = join(box.repo, '.git/pullboard/setup-started.json');
+  const started = JSON.parse(readFileSync(marker, 'utf8'));
+  assert.equal(started.type, 'pullboard.setup.started');
+  assert.equal(started.version, 1);
+  assert.equal(statSync(marker).mode & 0o077, 0);
+  const board = store.openBoard(join(box.repo, '.git/pullboard/board.sqlite'));
+  try {
+    assert.equal(started.boardId, store.boardId(board));
+    assert.equal(started.setupStartedAt, store.listAgents(board).find(agent => agent.agent_id === 'coordinator').agent_created_at);
+  } finally { store.closeBoard(board); }
+  const configPath = join(box.repo, 'pullboard.json');
+  const config = JSON.parse(readFileSync(configPath, 'utf8'));
+  writeFileSync(configPath, JSON.stringify({ ...config, gate: 'true', lanes: { app: { owns: ['app/'] } } }));
+  for (const text of ['The person chooses the name.', 'The person chooses the color.']) {
+    const draft = box.run(box.repo, 'spec', 'draft', text);
+    assert.equal(draft.status, 0, draft.failure || draft.stderr || draft.stdout);
+  }
+  for (const args of [['spec', 'approve', 'G1'], ['spec', 'apply'],
+    ['add', 'app', 'First setup item', '--specs', 'G1', '--criterion', 'The fixture has work.']]) {
+    const result = box.run(box.repo, ...args);
+    assert.equal(result.status, 0, result.failure || result.stderr || result.stdout);
+  }
+  await openSetupView(box);
+  const result = box.run(box.repo, 'resume', '--json');
+  assert.equal(result.status, 0, result.failure || result.stderr || result.stdout);
+  const setup = JSON.parse(result.stdout).setup;
+  assert.equal(setup?.step, 1, 'an early view and preconfigured answers cannot bypass the remaining initial approval');
+  assert.deepEqual(setup.rowIds, ['G2']);
+  const startedBytes = readFileSync(marker);
+  for (const invalid of ['{', JSON.stringify({ ...started, boardId: 'another-board' }),
+    JSON.stringify({ ...started, setupStartedAt: '2000-01-01T00:00:00.000Z' })]) {
+    writeFileSync(marker, invalid);
+    const resumed = box.run(box.repo, 'resume', '--json');
+    assert.equal(resumed.status, 0, resumed.failure || resumed.stderr || resumed.stdout);
+    assert.deepEqual(JSON.parse(resumed.stdout).setup?.rowIds, ['G2'],
+      'an invalid progress receipt is not evidence of a completed legacy setup');
+  }
+  writeFileSync(marker, startedBytes);
+});
+
+test('an upgraded configured board stays set up before its first resume [I1,I2]', async t => {
+  const box = releaseFixture(t, { freshSetup: true });
+  await finishSetup(box);
+  // Legacy installations have these actual completed setup facts, but neither new lifecycle receipt.
+  const stateDirectory = join(box.repo, '.git/pullboard');
+  for (const name of ['setup-started.json', 'setup-complete.json']) rmSync(join(stateDirectory, name), { force: true });
+  const reinitialized = box.run(box.repo, 'init');
+  assert.equal(reinitialized.status, 0, reinitialized.failure || reinitialized.stderr || reinitialized.stdout);
+  assert.throws(() => readFileSync(join(stateDirectory, 'setup-started.json')), { code: 'ENOENT' },
+    'idempotent init does not classify an existing coordinator as a new enrollment');
+  const proposed = box.run(box.repo, 'spec', 'draft', 'A proposal drafted before the first upgraded resume', '--json');
+  assert.equal(proposed.status, 0, proposed.failure || proposed.stderr || proposed.stdout);
+  const result = box.run(box.repo, 'resume', '--json');
+  assert.equal(result.status, 0, result.failure || result.stderr || result.stdout);
+  assert.equal(JSON.parse(result.stdout).setup, null, 'a later draft does not reopen a legacy completed setup');
+  const complete = JSON.parse(readFileSync(join(stateDirectory, 'setup-complete.json'), 'utf8'));
+  const view = JSON.parse(readFileSync(join(stateDirectory, 'view-bind.json'), 'utf8'));
+  assert.equal(complete.type, 'pullboard.setup.completed');
+  assert.equal(complete.version, 1);
+  assert.equal(complete.boardId, view.boardId);
+  assert.equal(complete.setupStartedAt, view.setupStartedAt);
+  assert.equal(statSync(join(stateDirectory, 'setup-complete.json')).mode & 0o077, 0);
 });
