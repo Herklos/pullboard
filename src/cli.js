@@ -1707,8 +1707,8 @@ function readCommands(io, { first, second, rest, values }) {
       if (!resources.length) io.say('no resources have been used');
       for (const resource of resources) {
         io.say(`${resource.name} (${resource.scope}, capacity ${resource.capacity})`);
-        for (const holder of resource.holders) io.say(`  held by ${agentDisplayName(agents, ctx.config, holder.agent)}${holder.repo ? ` in ${holder.repo}` : ''}${holder.landing ? ' (landing)' : holder.itemCheck ? ' (item check)' : ''} since ${holder.since}`);
-        resource.line.forEach((waiter, index) => io.say(`  ${index + 1}. waiting: ${agentDisplayName(agents, ctx.config, waiter.agent)}${waiter.repo ? ` in ${waiter.repo}` : ''}${waiter.landing ? ' (landing)' : waiter.itemCheck ? ' (item check)' : ''}`));
+        for (const holder of resource.holders) io.say(`  held by ${agentDisplayName(agents, ctx.config, holder.agent)}${holder.repo ? ` in ${holder.repo}` : ''}${resourceRunLabel(holder)} since ${holder.since}`);
+        resource.line.forEach((waiter, index) => io.say(`  ${index + 1}. waiting: ${agentDisplayName(agents, ctx.config, waiter.agent)}${waiter.repo ? ` in ${waiter.repo}` : ''}${resourceRunLabel(waiter)}`));
       }
       return 0;
     },
@@ -2021,7 +2021,7 @@ async function submitHere(ctx, id) {
   withBoard(ctx, (board) => refuseUnverifiedStack(root, board, held, commit, trunk));
   // Every submit proves its frozen check and reachable tests anew on this exact commit (V4,V16).
   // A full-gate stamp never substitutes for either proof; only an actual full fallback may stamp.
-  const gate = await runSubmitGate(root, ctx.config, { base: claimHead, trunk: acceptedMain.commit, check: frozenCheck(held), onWait: gateWaitReporter(ctx.io) });
+  const gate = await runSubmitGate(root, ctx.config, { base: claimHead, trunk: acceptedMain.commit, check: frozenCheck(held), agent: me.id, item: String(id), onWait: gateWaitReporter(ctx.io) });
   if (!gate.isGreen) {
     const message = `the submission proof is red at ${commit.slice(0, 12)}; fix it, commit, submit again. ${submitGateReport(gate)}`;
     // No submission can follow this verdict. Read-only main comparisons must not retain the seat's write lease.
@@ -2112,7 +2112,7 @@ async function verifyHere(ctx, id, { second, values }) {
       if (digest !== item.item_frozen_digest) throw new Refused('CRITERIA_CHANGED', 'the criterion changed; ask the coordinator to refreeze this item before checking it');
       const trunk = requireTrunkMerge(root, commit);
       refuseUnverifiedStack(root, board, item, commit, trunk);
-      check = await withGateSlot(root, (lease) => checkAtCommit(root, item, { waitMs: lease.waitMs, gateSlotHeld: true }), { itemCheck: true, onWait: gateWaitReporter(ctx.io) });
+      check = await withGateSlot(root, (lease) => checkAtCommit(root, item, { waitMs: lease.waitMs, gateLease: lease }), { browser: true, agent: me.id, item: String(id), kind: 'review', itemCheck: true, onWait: gateWaitReporter(ctx.io) });
       verificationProfile = check.profile ?? null;
       const evidence = check.checked
         ? `\nlast output lines (up to 40):\n${(check.outputTail ?? '(no output)').split('\n').map((line) => `  ${line}`).join('\n')}\nfull output file: ${check.outputPath ?? `(unavailable${check.outputError ? `: ${check.outputError}` : ''})`}`
@@ -2515,7 +2515,7 @@ function workCommands(io, args) {
           throw new Refused('CHECK_CONFIRM', `the check set by ${authorName} was not run: ${check}; run pullboard check ${item.item_id} --yes after reading the command, or answer yes at the prompt`);
         }
       }
-      const run = await withGateSlot(ctx.info.root, (lease) => runProfiledShell(ctx.info.root, check, { waitMs: lease.waitMs, artifactPrefix: `pullboard-check-${item.item_id}`, persistLog: true, gateSlotHeld: true }), { itemCheck: true, onWait: gateWaitReporter(io) });
+      const run = await withGateSlot(ctx.info.root, (lease) => runProfiledShell(ctx.info.root, check, { waitMs: lease.waitMs, artifactPrefix: `pullboard-check-${item.item_id}`, persistLog: true, gateLease: lease }), { browser: true, agent: caller, item: String(item.item_id), kind: 'check', itemCheck: true, onWait: gateWaitReporter(io) });
       io.result?.({ id: item.item_id, green: run.isGreen, seconds: run.seconds, check, by, report: run.isGreen ? '' : digestOf(run.output) });
       const timings = timingDigest(run.profile);
       const compact = timings && !run.profile.files.length
@@ -2691,6 +2691,18 @@ function workCommands(io, args) {
       return 0;
     }),
   };
+}
+
+/** Label the kind and item of a queued run without hiding older queue-class labels. */
+function resourceRunLabel(entry) {
+  const kind = entry.kind || (entry.landing ? 'landing' : entry.itemCheck ? 'item check' : '');
+  const labels = [kind, entry.item ? `#${entry.item}` : '', entry.browser ? 'browser' : ''].filter(Boolean);
+  return labels.length ? ` (${labels.join(', ')})` : '';
+}
+
+/** Name a known board seat for queue diagnostics without requiring an unjoined checkout to join. */
+function resourceAgent(ctx) {
+  return ctx.info.isMain ? COORDINATOR : withBoard(ctx, board => store.agentAt(board, ctx.info.root)?.agent_id);
 }
 
 /** Build a de-duplicated queue message for a gate waiting on machine capacity. */
@@ -3082,7 +3094,7 @@ async function hookCommand(io, { first, second }) {
       if (waived && isClean(info.root) && !untracked(info.root).length) io.say(`pre-push: exact landing tree covered by live person waivers in batch ${waived.id}; no ordinary green stamp`);
       else if (recordedException) problems = ['the landing proof has an expired or missing person waiver; ask the person for a new expiring waiver'];
       else {
-        const gate = await runGate(info.root, ctx.config, { landing, onWait: gateWaitReporter(io) });
+        const gate = await runGate(info.root, ctx.config, { landing, agent: resourceAgent(ctx), onWait: gateWaitReporter(io) });
         if (gate.isCached) io.say('pre-push: the gate passed on this exact tree; not running it twice');
         if (!gate.isGreen) problems = [`the gate is red; fix it before pushing. ${gateReport(gate)}`];
       }
@@ -3227,7 +3239,7 @@ async function runCommand(argv, io) {
     }
     if (command === 'gate') {
       const ctx = context(io);
-      const gate = await runGate(ctx.info.root, mainPolicy(ctx.info.root).config, { landing: values.landing, onWait: gateWaitReporter(io) });
+      const gate = await runGate(ctx.info.root, mainPolicy(ctx.info.root).config, { landing: values.landing, agent: resourceAgent(ctx), onWait: gateWaitReporter(io) });
       io.result?.({ green: gate.isGreen, report: gateReport(gate) });
       io.say(gateReport(gate));
       return gate.isGreen ? 0 : 1;

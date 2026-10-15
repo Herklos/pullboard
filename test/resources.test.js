@@ -16,6 +16,24 @@ const TEMP = [];
 const CHILDREN = new Set();
 const MODULE = pathToFileURL(resolve(import.meta.dirname, '../src/resources.js')).href;
 const GATE_MODULE = pathToFileURL(resolve(import.meta.dirname, '../src/gate.js')).href;
+const POOL_MODULE_WORKER = `
+import { takeResource } from ${JSON.stringify(MODULE)};
+let announced = false;
+const [root, agent, browserText, item, kind] = process.argv.slice(1);
+const lease = await takeResource({
+  name: 'gate', capacity: 2, scope: 'machine', root, agent,
+  browser: browserText === 'true', item, kind, itemCheck: kind === 'review',
+  onWait: (state) => {
+    if (!announced) { announced = true; console.log(JSON.stringify({ queued: state })); }
+  },
+});
+try {
+  console.log(JSON.stringify({ acquired: agent }));
+  for await (const line of process.stdin) {
+    if (String(line).trim() === 'release') break;
+  }
+} finally { lease.release(); }
+`;
 const PROCESS_INFO_POLICY = '(version 1)(allow default)(deny process-info*)';
 const SANDBOX_EXEC = process.platform === 'darwin' && existsSync('/usr/bin/sandbox-exec');
 const PERL_FORK = process.platform === 'darwin' && existsSync('/usr/bin/perl');
@@ -144,6 +162,48 @@ function worker(box, { name = 'gate', capacity = 1, scope = 'machine', root = bo
     for (const waiter of child.lineWaiters.splice(0)) {
       clearTimeout(waiter.timer);
       waiter.reject(new Error(child.failure ?? `worker exited ${code}/${signal}: ${child.errors}`));
+    }
+    resolveExit(child.exitResult);
+  }));
+  child.stderr.setEncoding('utf8').on('data', (chunk) => { child.errors += chunk; });
+  child.lines.on('line', (line) => {
+    const waiter = child.lineWaiters.shift();
+    if (waiter) { clearTimeout(waiter.timer); waiter.resolve(line); }
+    else child.pendingLines.push(line);
+  });
+  CHILDREN.add(child);
+  return child;
+}
+
+/** Launch a dedicated gate-pool worker carrying browser and review metadata. */
+function poolWorker(box, { agent, browser = false, item = '', kind = '' }) {
+  const workerArgs = ['--input-type=module', '-e', POOL_MODULE_WORKER, box.first, agent, String(browser), item, kind];
+  const startedAt = performance.now();
+  const child = spawn(process.execPath, workerArgs, {
+    env: box.env, stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  child.startedAt = startedAt;
+  child.spawnEnv = box.env;
+  child.lines = createInterface({ input: child.stdout });
+  child.errors = '';
+  child.pendingLines = [];
+  child.lineWaiters = [];
+  child.exitResult = null;
+  child.failureReported = false;
+  let spawnError = null;
+  child.once('error', (error) => { spawnError = error; });
+  child.finished = new Promise((resolveExit) => child.once('close', (code, signal) => {
+    child.exitResult = { code, signal };
+    CHILDREN.delete(child);
+    if ((code !== 0 || signal || spawnError) && !child.failureReported) {
+      child.failureReported = true;
+      child.failure = reportFixtureChildFailure({ command: process.execPath, args: workerArgs, status: code, signal,
+        elapsedMs: performance.now() - startedAt, stderr: child.errors, env: box.env,
+        detail: spawnError?.message ?? '' });
+    }
+    for (const waiter of child.lineWaiters.splice(0)) {
+      clearTimeout(waiter.timer);
+      waiter.reject(new Error(child.failure ?? `pool worker exited ${code}/${signal}: ${child.errors}`));
     }
     resolveExit(child.exitResult);
   }));
@@ -304,6 +364,59 @@ test('[Q1,Q2] landing waiters jump ordinary gates but keep FIFO within each clas
   await release(ordinaryFirst);
   assert.equal((await event(ordinarySecond)).acquired, 'ordinary-second');
   await release(ordinarySecond);
+});
+
+test('the pool alone orders submits, reviews and browser runs [C7]', async () => {
+  const box = fixture();
+  const firstHolder = poolWorker(box, { agent: 'submit-one' });
+  const secondHolder = poolWorker(box, { agent: 'submit-two' });
+  assert.equal((await acquired(firstHolder)).acquired, 'submit-one');
+  assert.equal((await acquired(secondHolder)).acquired, 'submit-two');
+
+  const firstReview = poolWorker(box, { agent: 'review-one', browser: true, item: '618', kind: 'review' });
+  const firstQueued = await event(firstReview);
+  assert.equal(firstQueued.queued.position, 1, 'a review waits while both submit slots are occupied');
+  let browser = privateList(box).find(({ name }) => name === 'browser');
+  assert.ok(browser, 'the pool must expose browser capacity and its waiting review');
+  assert.equal(browser.capacity, 1, 'the browser pool has its fixed single slot');
+  assert.deepEqual(browser.line.map(({ agent, browser: ownsBrowser, itemCheck, item, kind }) =>
+    [agent, ownsBrowser, itemCheck, item, kind]), [['review-one', true, true, '618', 'review']]);
+
+  // Releasing one holder is the only signal; the oldest eligible review acquires on its own poll.
+  await release(firstHolder);
+  assert.equal((await acquired(firstReview)).acquired, 'review-one');
+  let gate = privateList(box).find(({ name }) => name === 'gate');
+  assert.ok(gate.holders.some(({ agent, browser: ownsBrowser, itemCheck, item, kind }) =>
+    agent === 'review-one' && ownsBrowser && itemCheck && item === '618' && kind === 'review'));
+
+  const secondReview = poolWorker(box, { agent: 'review-two', browser: true, item: '619', kind: 'review' });
+  const secondQueued = await event(secondReview);
+  assert.equal(secondQueued.queued.position, 1, 'the browser waiter reports its actual queue position');
+  const thirdSubmit = poolWorker(box, { agent: 'submit-three' });
+  const submitQueued = await event(thirdSubmit);
+  assert.equal(submitQueued.queued.position, 1,
+    'a browser waiter does not head-of-line block ordinary gate work');
+  browser = privateList(box).find(({ name }) => name === 'browser');
+  assert.deepEqual(browser.line.map(({ agent, itemCheck, item, kind }) => [agent, itemCheck, item, kind]), [
+    ['review-two', true, '619', 'review'],
+  ], 'the active browser review is listed as a holder, not as a waiter');
+  assert.ok(browser.holders.some(({ agent, browser: ownsBrowser, itemCheck, item, kind }) =>
+    agent === 'review-one' && ownsBrowser && itemCheck && item === '618' && kind === 'review'));
+
+  // A free gate slot appears while the browser slot remains held; the queued submit proceeds.
+  await release(secondHolder);
+  assert.equal((await acquired(thirdSubmit)).acquired, 'submit-three');
+  assert.ok(privateList(box).find(({ name }) => name === 'browser').line
+    .some(({ agent }) => agent === 'review-two'), 'the second review stays queued while the browser slot is occupied');
+
+  // Releasing both older leases lets the oldest eligible browser waiter proceed without a message.
+  await release(thirdSubmit);
+  await release(firstReview);
+  assert.equal((await acquired(secondReview)).acquired, 'review-two');
+  gate = privateList(box).find(({ name }) => name === 'gate');
+  assert.ok(gate.holders.some(({ agent, browser: ownsBrowser, itemCheck, item, kind }) =>
+    agent === 'review-two' && ownsBrowser && itemCheck && item === '619' && kind === 'review'));
+  await release(secondReview);
 });
 
 test('[Q1,Q2] a waiting landing keeps a current holder from taking the second slot [Q1,Q2]', async () => {
