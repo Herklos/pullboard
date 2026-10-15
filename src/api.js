@@ -695,7 +695,7 @@ const VERSION = 1;
 function withBoard(root, read, isMain) {
   const info = repoInfo(root);
   loadConfig(info.root);
-  const board = store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), undefined, { isMain: codeIsFromMain() && isMain !== false });
+  const board = store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), undefined, { isMain: isMain !== false && codeIsFromMain() });
   try { return read(board, info); } finally { store.closeBoard(board); }
 }
 
