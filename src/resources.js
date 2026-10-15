@@ -1,4 +1,4 @@
-/** Machine and repository queues persist leases; diagnostics yield to landings, gates and item checks [Q1,Q2,Q3,V18]. */
+/** Machine and repository queues persist leases; landings go first, then eligible waiters in arrival order [Q1,Q2,Q3]. */
 import { mkdirSync, realpathSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -171,7 +171,7 @@ function update(db, action) {
   }
 }
 
-/** Current holders and the landing-first line, then gates, item checks and diagnostics. */
+/** Current holders and the landing-first line, then every other kind in arrival order. */
 function snapshot(db, name) {
   /** Preserve older public entries while naming diagnostics as a distinct queue class. */
   const project = ({ diagnostic, browser, item, kind, ...entry }) => ({ ...entry, landing: entry.landing === 1,
@@ -181,7 +181,7 @@ function snapshot(db, name) {
   const where = name === 'browser' ? 'name = ? AND browser = 1' : 'name = ?';
   const sourceName = name === 'browser' ? 'gate' : name;
   const holders = db.prepare(`SELECT agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, item, kind FROM holder WHERE ${where} ORDER BY since, token`).all(sourceName).map(project);
-  const line = db.prepare(`SELECT agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, item, kind FROM waiter WHERE ${where} ORDER BY landing DESC, diagnostic, item_check, ticket`).all(sourceName).map(project);
+  const line = db.prepare(`SELECT agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, item, kind FROM waiter WHERE ${where} ORDER BY landing DESC, ticket`).all(sourceName).map(project);
   return { holders, line };
 }
 
@@ -197,8 +197,7 @@ function waiterPosition(db, name, ticket, { eligibleOnly = false } = {}) {
   const blockedByLanding = (waiter) => holdsSlot(waiter)
     && waiters.some((other) => other.landing === 1 && other.pid !== waiter.pid);
   /** Map queue entries to their declared precedence class. */
-  // Keep the older client's ranking: diagnostic takers yield their FIFO ticket to later checks.
-  const rank = (waiter) => waiter.landing === 1 ? 0 : waiter.itemCheck === 1 ? 2 : 1;
+  const rank = (waiter) => waiter.landing === 1 ? 0 : 1;
   const line = name === 'browser' ? waiters.filter((waiter) => waiter.browser === 1) : waiters;
   const considered = line.filter((waiter) => !blockedByLanding(waiter)
     // Browser availability affects admission only; reported positions retain every browser waiter.
@@ -215,7 +214,7 @@ function waiterPosition(db, name, ticket, { eligibleOnly = false } = {}) {
 function pause(ms) { return new Promise((resolvePromise) => setTimeout(resolvePromise, ms)); }
 
 /**
- * Join the existing queue; diagnostics rejoin behind later item checks so older clients agree on priority.
+ * Join the landing-first queue; every other kind keeps its original FIFO ticket.
  *
  * @param {{ name: string, capacity: number, capacityProvider?: () => number, scope?: 'machine'|'repo'|'board', root?: string, agent?: string, repo?: string, landing?: boolean, itemCheck?: boolean, diagnostic?: boolean, browser?: boolean, item?: string, kind?: string, onWait?: (state: object) => void, allowIdleCapacityUpdate?: boolean }} options - Resource identity and queue class.
  * @returns {Promise<{ name: string, scope: string, token: string, pool: string, browser: boolean, waitMs: number, release: () => void, renew: () => void }>}
@@ -265,23 +264,16 @@ export async function takeResource(options) {
         if (browserResource && browserResource.capacity !== 1) throw new Refused('RESOURCE_CAPACITY_MISMATCH', 'resource "browser" has fixed capacity 1');
         db.prepare("INSERT INTO resource(name, capacity) VALUES ('browser', 1) ON CONFLICT(name) DO NOTHING").run();
       }
-      // Older queue clients see diagnostics as item checks, never as ordinary gates.
+      // Retain queue metadata for older readers; admission uses landing priority and arrival only.
       db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind);
     });
     while (true) {
       const acquired = update(db, () => {
-        let waiter = db.prepare('SELECT ticket, landing, item_check AS itemCheck, diagnostic FROM waiter WHERE token = ?').get(token);
+        const waiter = db.prepare('SELECT ticket FROM waiter WHERE token = ?').get(token);
         if (!waiter) {
           queuedAt = new Date().toISOString();
           const rejoined = db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind);
           return { acquired: false, state: { ...snapshot(db, name), position: waiterPosition(db, name, Number(rejoined.lastInsertRowid)), rejoined: true } };
-        }
-        if (diagnostic && db.prepare('SELECT 1 FROM waiter WHERE name=? AND diagnostic=0 AND item_check=1 AND ticket>? LIMIT 1').get(name, waiter.ticket)) {
-          // An older item-check client only knows FIFO within its class. Move behind it so both
-          // old and new callers agree who goes first instead of waiting on one another forever.
-          db.prepare('DELETE FROM waiter WHERE token=?').run(token);
-          const rejoined = db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), 0, 1, 1, Number(browser), item, kind);
-          waiter = { ticket: Number(rejoined.lastInsertRowid) };
         }
         db.prepare('UPDATE waiter SET heartbeat = ? WHERE token = ?').run(Date.now(), token);
         const spot = snapshot(db, name);

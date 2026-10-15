@@ -230,7 +230,7 @@ function hasPipeline(command) {
   return false;
 }
 
-/** Run work under the machine queue: landing gates, ordinary gates, item checks, then diagnostics.
+/** Run work under the machine queue: landings first, then every other eligible waiter in arrival order.
  *
  * @param {string} root - Checkout used to locate the machine resource database.
  * @param {(lease: { waitMs: number, token?: string, pool?: string, browser?: boolean, release: () => void }) => any | Promise<any>} action - Work to perform while holding a slot.
