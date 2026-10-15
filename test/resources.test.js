@@ -16,6 +16,25 @@ const TEMP = [];
 const CHILDREN = new Set();
 const MODULE = pathToFileURL(resolve(import.meta.dirname, '../src/resources.js')).href;
 const GATE_MODULE = pathToFileURL(resolve(import.meta.dirname, '../src/gate.js')).href;
+const POOL_MODULE_WORKER = `
+import { takeResource } from ${JSON.stringify(MODULE)};
+let announced = false;
+const [root, agent, browserText, item, kind, landingText] = process.argv.slice(1);
+const lease = await takeResource({
+  name: 'gate', capacity: 2, scope: 'machine', root, agent,
+  browser: browserText === 'true', item, kind, itemCheck: kind === 'review',
+  diagnostic: kind === 'diagnostic', landing: landingText === 'true',
+  onWait: (state) => {
+    if (!announced) { announced = true; console.log(JSON.stringify({ queued: state })); }
+  },
+});
+try {
+  console.log(JSON.stringify({ acquired: agent }));
+  for await (const line of process.stdin) {
+    if (String(line).trim() === 'release') break;
+  }
+} finally { lease.release(); }
+`;
 const PROCESS_INFO_POLICY = '(version 1)(allow default)(deny process-info*)';
 const SANDBOX_EXEC = process.platform === 'darwin' && existsSync('/usr/bin/sandbox-exec');
 const PERL_FORK = process.platform === 'darwin' && existsSync('/usr/bin/perl');
@@ -144,6 +163,48 @@ function worker(box, { name = 'gate', capacity = 1, scope = 'machine', root = bo
     for (const waiter of child.lineWaiters.splice(0)) {
       clearTimeout(waiter.timer);
       waiter.reject(new Error(child.failure ?? `worker exited ${code}/${signal}: ${child.errors}`));
+    }
+    resolveExit(child.exitResult);
+  }));
+  child.stderr.setEncoding('utf8').on('data', (chunk) => { child.errors += chunk; });
+  child.lines.on('line', (line) => {
+    const waiter = child.lineWaiters.shift();
+    if (waiter) { clearTimeout(waiter.timer); waiter.resolve(line); }
+    else child.pendingLines.push(line);
+  });
+  CHILDREN.add(child);
+  return child;
+}
+
+/** Launch a dedicated gate-pool worker carrying browser and queue-priority metadata. */
+function poolWorker(box, { agent, browser = false, item = '', kind = '', landing = false }) {
+  const workerArgs = ['--input-type=module', '-e', POOL_MODULE_WORKER, box.first, agent, String(browser), item, kind, String(landing)];
+  const startedAt = performance.now();
+  const child = spawn(process.execPath, workerArgs, {
+    env: box.env, stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  child.startedAt = startedAt;
+  child.spawnEnv = box.env;
+  child.lines = createInterface({ input: child.stdout });
+  child.errors = '';
+  child.pendingLines = [];
+  child.lineWaiters = [];
+  child.exitResult = null;
+  child.failureReported = false;
+  let spawnError = null;
+  child.once('error', (error) => { spawnError = error; });
+  child.finished = new Promise((resolveExit) => child.once('close', (code, signal) => {
+    child.exitResult = { code, signal };
+    CHILDREN.delete(child);
+    if ((code !== 0 || signal || spawnError) && !child.failureReported) {
+      child.failureReported = true;
+      child.failure = reportFixtureChildFailure({ command: process.execPath, args: workerArgs, status: code, signal,
+        elapsedMs: performance.now() - startedAt, stderr: child.errors, env: box.env,
+        detail: spawnError?.message ?? '' });
+    }
+    for (const waiter of child.lineWaiters.splice(0)) {
+      clearTimeout(waiter.timer);
+      waiter.reject(new Error(child.failure ?? `pool worker exited ${code}/${signal}: ${child.errors}`));
     }
     resolveExit(child.exitResult);
   }));
@@ -304,6 +365,125 @@ test('[Q1,Q2] landing waiters jump ordinary gates but keep FIFO within each clas
   await release(ordinaryFirst);
   assert.equal((await event(ordinarySecond)).acquired, 'ordinary-second');
   await release(ordinarySecond);
+});
+
+test('the pool alone orders submits, reviews and browser runs [C7]', async () => {
+  const orderBox = fixture();
+  const orderHolder = poolWorker(orderBox, { agent: 'order-holder' });
+  const otherHolder = poolWorker(orderBox, { agent: 'other-holder' });
+  assert.equal((await acquired(orderHolder)).acquired, 'order-holder');
+  assert.equal((await acquired(otherHolder)).acquired, 'other-holder');
+
+  const olderReview = poolWorker(orderBox, { agent: 'older-review', browser: true, item: '620', kind: 'review' });
+  assert.equal((await event(olderReview)).queued.position, 1);
+  const laterFocused = poolWorker(orderBox, { agent: 'later-focused', kind: 'focused' });
+  assert.ok((await event(laterFocused)).queued, 'later focused work has joined behind the review');
+
+  await release(orderHolder);
+  await waitUntil(() => privateList(orderBox).find(({ name }) => name === 'gate').holders
+    .some(({ agent }) => agent === 'older-review' || agent === 'later-focused'), 'the first eligible waiter to acquire');
+  let orderedGate = privateList(orderBox).find(({ name }) => name === 'gate');
+  assert.ok(orderedGate.holders.some(({ agent, itemCheck, item }) =>
+    agent === 'older-review' && itemCheck && item === '620'),
+  'an older eligible review stays ahead of later focused work');
+  assert.ok(!orderedGate.holders.some(({ agent }) => agent === 'later-focused'),
+    'later focused work cannot jump the older review');
+  assert.equal((await acquired(olderReview)).acquired, 'older-review');
+
+  const diagnosticOne = poolWorker(orderBox, { agent: 'diagnostic-one', kind: 'diagnostic' });
+  assert.equal((await event(diagnosticOne)).queued.position, 2);
+  const laterReview = poolWorker(orderBox, { agent: 'later-review', item: '621', kind: 'review' });
+  assert.equal((await event(laterReview)).queued.position, 3);
+  const diagnosticTwo = poolWorker(orderBox, { agent: 'diagnostic-two', kind: 'diagnostic' });
+  assert.equal((await event(diagnosticTwo)).queued.position, 4);
+  const laterGate = poolWorker(orderBox, { agent: 'later-gate', kind: 'focused' });
+  assert.equal((await event(laterGate)).queued.position, 5);
+  const laterLanding = poolWorker(orderBox, { agent: 'later-landing', landing: true });
+  await event(laterLanding);
+  orderedGate = privateList(orderBox).find(({ name }) => name === 'gate');
+  assert.deepEqual(orderedGate.line.map(({ agent, landing, diagnostic, itemCheck, kind }) =>
+    [agent, landing, diagnostic === true, itemCheck, kind ?? '']), [
+    ['later-landing', true, false, false, ''],
+    ['later-focused', false, false, false, 'focused'],
+    ['diagnostic-one', false, true, false, 'diagnostic'],
+    ['later-review', false, false, true, 'review'],
+    ['diagnostic-two', false, true, false, 'diagnostic'],
+    ['later-gate', false, false, false, 'focused'],
+  ], 'landing moves ahead while all other kinds retain their arrival order');
+
+  await release(otherHolder);
+  assert.equal((await acquired(laterLanding)).acquired, 'later-landing',
+    'a later landing jumps the older focused and diagnostic waiters');
+  orderedGate = privateList(orderBox).find(({ name }) => name === 'gate');
+  assert.ok(orderedGate.holders.some(({ agent, landing }) => agent === 'later-landing' && landing));
+
+  await release(laterLanding);
+  assert.equal((await acquired(laterFocused)).acquired, 'later-focused',
+    'the oldest eligible non-landing waiter acquires next');
+  await release(laterFocused);
+  assert.equal((await acquired(diagnosticOne)).acquired, 'diagnostic-one');
+  await release(diagnosticOne);
+  assert.equal((await acquired(laterReview)).acquired, 'later-review',
+    'a diagnostic does not yield its older ticket to a later item check');
+  await release(laterReview);
+  assert.equal((await acquired(diagnosticTwo)).acquired, 'diagnostic-two',
+    'diagnostics keep their FIFO place around a later item check');
+  await release(diagnosticTwo);
+  assert.equal((await acquired(laterGate)).acquired, 'later-gate',
+    'a diagnostic does not yield its older ticket to later ordinary gate work');
+  await release(laterGate);
+  await release(olderReview);
+
+  const box = fixture();
+  const firstHolder = poolWorker(box, { agent: 'submit-one' });
+  const secondHolder = poolWorker(box, { agent: 'submit-two' });
+  assert.equal((await acquired(firstHolder)).acquired, 'submit-one');
+  assert.equal((await acquired(secondHolder)).acquired, 'submit-two');
+
+  const firstReview = poolWorker(box, { agent: 'review-one', browser: true, item: '618', kind: 'review' });
+  const firstQueued = await event(firstReview);
+  assert.equal(firstQueued.queued.position, 1, 'a review waits while both submit slots are occupied');
+  let browser = privateList(box).find(({ name }) => name === 'browser');
+  assert.ok(browser, 'the pool must expose browser capacity and its waiting review');
+  assert.equal(browser.capacity, 1, 'the browser pool has its fixed single slot');
+  assert.deepEqual(browser.line.map(({ agent, browser: ownsBrowser, itemCheck, item, kind }) =>
+    [agent, ownsBrowser, itemCheck, item, kind]), [['review-one', true, true, '618', 'review']]);
+
+  // Releasing one holder is the only signal; the oldest eligible review acquires on its own poll.
+  await release(firstHolder);
+  assert.equal((await acquired(firstReview)).acquired, 'review-one');
+  let gate = privateList(box).find(({ name }) => name === 'gate');
+  assert.ok(gate.holders.some(({ agent, browser: ownsBrowser, itemCheck, item, kind }) =>
+    agent === 'review-one' && ownsBrowser && itemCheck && item === '618' && kind === 'review'));
+
+  const secondReview = poolWorker(box, { agent: 'review-two', browser: true, item: '619', kind: 'review' });
+  const secondQueued = await event(secondReview);
+  assert.equal(secondQueued.queued.position, 1, 'the browser waiter reports its actual queue position');
+  const thirdSubmit = poolWorker(box, { agent: 'submit-three' });
+  const submitQueued = await event(thirdSubmit);
+  assert.equal(submitQueued.queued.position, 2,
+    'the visible queue preserves FIFO position behind its earlier browser waiter');
+  browser = privateList(box).find(({ name }) => name === 'browser');
+  assert.deepEqual(browser.line.map(({ agent, itemCheck, item, kind }) => [agent, itemCheck, item, kind]), [
+    ['review-two', true, '619', 'review'],
+  ], 'the active browser review is listed as a holder, not as a waiter');
+  assert.ok(browser.holders.some(({ agent, browser: ownsBrowser, itemCheck, item, kind }) =>
+    agent === 'review-one' && ownsBrowser && itemCheck && item === '618' && kind === 'review'));
+
+  // A free gate slot appears while the browser slot remains held; the queued submit proceeds.
+  await release(secondHolder);
+  assert.equal((await acquired(thirdSubmit)).acquired, 'submit-three');
+  assert.ok(privateList(box).find(({ name }) => name === 'browser').line
+    .some(({ agent }) => agent === 'review-two'), 'the second review stays queued while the browser slot is occupied');
+
+  // Releasing both older leases lets the oldest eligible browser waiter proceed without a message.
+  await release(thirdSubmit);
+  await release(firstReview);
+  assert.equal((await acquired(secondReview)).acquired, 'review-two');
+  gate = privateList(box).find(({ name }) => name === 'gate');
+  assert.ok(gate.holders.some(({ agent, browser: ownsBrowser, itemCheck, item, kind }) =>
+    agent === 'review-two' && ownsBrowser && itemCheck && item === '619' && kind === 'review'));
+  await release(secondReview);
 });
 
 test('[Q1,Q2] a waiting landing keeps a current holder from taking the second slot [Q1,Q2]', async () => {

@@ -466,6 +466,23 @@ function launchFocusedPoolRunner(fixture, testFile, extraEnv = {}) {
   return child;
 }
 
+test('a legacy held marker alone cannot bypass focused test admission [C7]', t => {
+  const fixture = makeFocusedPoolFixture(t);
+  const env = {
+    ...process.env,
+    PULLBOARD_MACHINE_HOME: fixture.machine,
+    PULLBOARD_GATE_SLOT_HELD: '1',
+    PULLBOARD_C7_SECOND_STARTED: fixture.secondStarted,
+  };
+  for (const key of ['PULLBOARD_GATE_SLOT_POOL', 'PULLBOARD_GATE_SLOT_TOKEN', 'PULLBOARD_BROWSER_SLOT_HELD']) delete env[key];
+  const result = runFixtureChild(process.execPath, [fixture.runner, 'test/second.test.js'], {
+    cwd: fixture.root, env, encoding: 'utf8',
+  });
+  assert.equal(result.status, 1, 'a self-declared legacy marker does not prove a live reservation');
+  assert.match(result.stderr, /live machine gate lease/u);
+  assert.equal(existsSync(fixture.secondStarted), false, 'the unadmitted test never starts');
+});
+
 /** Read the real machine queue from the fixture pool while preserving this test process's environment. */
 function focusedPoolSnapshot(machine) {
   const previous = process.env.PULLBOARD_MACHINE_HOME;

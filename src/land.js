@@ -127,7 +127,7 @@ async function gateGroup(state, label) {
   mkdirSync(directory, { recursive: true });
   const logPath = join(directory, `${label}-${state.batch.revision}.log`);
   await save(state, { state: 'gating', tip: headCommit(state.batch.root), logPath });
-  const gate = await runGate(state.batch.root, state.config, { trustStamp: false, landing: true, onWait: state.onWait });
+  const gate = await runGate(state.batch.root, state.config, { trustStamp: false, landing: true, agent: 'coordinator', onWait: state.onWait });
   copyFileSync(gate.log, logPath);
   if (gate.profilePath) copyFileSync(gate.profilePath, `${logPath}.profile.json`);
   const result = { ...gate, failures: landingFailures(gate.output, state.batch.root), tree, logPath };
@@ -146,8 +146,8 @@ async function diagnose(state, failures) {
     const runner = state.config.affectedTests || (/\.[cm]?js$/u.test(file) ? 'node --test' : null);
     if (!runner) throw new Refused('LAND_DIAGNOSTIC', `no runner can isolate ${file}; configure affectedTests for the project’s test runner`);
     const result = await withGateSlot(state.batch.root, (lease) => runProfiledShell(state.batch.root, `${runner} ${quote(file)}`, {
-      waitMs: lease.waitMs, artifactDirectory: dirname(state.batch.logPath), artifactPrefix: 'diagnostic', persistLog: true, pipefail: true, gateSlotHeld: true,
-    }), { landing: true, onWait: state.onWait });
+      waitMs: lease.waitMs, artifactDirectory: dirname(state.batch.logPath), artifactPrefix: 'diagnostic', persistLog: true, pipefail: true, gateLease: lease,
+    }), { landing: true, browser: true, agent: 'coordinator', kind: 'land-diagnostic', onWait: state.onWait });
     state.diagnosed.set(file, result.isGreen);
     await save(state, { diagnostics: [...state.diagnosed].map(([test, isGreen]) => ({ test, isGreen })) });
     if (result.isGreen) flakes.push(file);
