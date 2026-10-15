@@ -8,7 +8,7 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ### Project switches you can trust, and a 98-second explainer
 
-New on [pullboard.dev](https://pullboard.dev): a 98-second explainer video on the home page that shows the whole loop, from a decision to a checked, landed piece of work.
+New on [pullboard.dev](https://pullboard.dev): a 98-second explainer video on the home page, showing some of the problems Pullboard addresses.
 
 ### Fixed
 
