@@ -206,9 +206,9 @@ async function openNetworkCapture(profile, localOrigin, targetId) {
     if (observerError) return rejectCommand(observerError);
     if (closed) return rejectCommand(new Error('local Chrome network observer is closed'));
     const id = ++nextCommand;
-    const timer = setTimeout(() => {
+    const timer = setTimeout(() => { // budget: five-second hang ceiling for a stalled local DevTools command.
       failObserver('local Chrome network observation command timed out');
-    }, 5_000); // budget: five-second hang ceiling for a stalled local DevTools command.
+    }, 5_000);
     commands.set(id, { resolve: resolveCommand, reject: rejectCommand, timer });
     try { socket.send(JSON.stringify({ id, method, params })); } catch {
       failObserver('local Chrome network observer could not send a command');
