@@ -308,3 +308,22 @@ console.log(JSON.stringify({ first, repeated, repeatedCalls }));
   assert.equal(result.repeated, true, 'the same negative repository discovery remains consistent');
   assert.equal(result.repeatedCalls, 0, 'a repeated installed-source read does not retry Git discovery');
 });
+
+test('API HEAD facts remain null outside Git [A2,N26,C7]', (t) => {
+  const box = fixture(t);
+  const result = readFactScenario(box, box.dir, `
+import { headTree } from ${JSON.stringify(GIT_MODULE)};
+const root = process.argv[1];
+let facts;
+try {
+  facts = withGitReadFacts(() => ({ head: headCommit(root), tree: headTree(root) }));
+  facts.refusal = null;
+} catch (error) {
+  facts = { head: undefined, tree: undefined, refusal: { name: error.name, code: error.code ?? null } };
+}
+console.log(JSON.stringify(facts));
+`);
+  assert.equal(result.refusal, null, 'an API read outside a Git repository returns normally');
+  assert.deepEqual({ head: result.head, tree: result.tree }, { head: null, tree: null },
+    'missing HEAD facts stay null rather than turning into a NOT_A_REPO refusal');
+});
