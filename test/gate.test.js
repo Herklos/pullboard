@@ -101,6 +101,42 @@ test('gate before the first commit names the uncommitted config [I1,C7]', () => 
     'other genuine NO_POLICY failures keep their specific message');
 });
 
+test('gate after init in an existing repo says to commit the init files [I1,C7]', () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-init-history-')));
+  dirs.push(dir);
+  const repo = join(dir, 'repo');
+  mkdirSync(repo);
+  const env = {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_AUTHOR_NAME: 'Test Agent',
+    GIT_AUTHOR_EMAIL: 'agent@example.com',
+    GIT_COMMITTER_NAME: 'Test Agent',
+    GIT_COMMITTER_EMAIL: 'agent@example.com',
+    PULLBOARD_HOME: join(dir, 'home'),
+    PULLBOARD_MACHINE_HOME: join(dir, 'home'),
+  };
+  const git = (...args) => runFixtureGit(args, { cwd: repo, env });
+  const run = (...args) => runFixtureChild(process.execPath, [BIN, ...args], { cwd: repo, env, encoding: 'utf8' });
+  git('init', '-q', '-b', 'main');
+  writeFileSync(join(repo, 'README.md'), '# Existing repository\n');
+  git('add', 'README.md');
+  git('commit', '-q', '-m', 'chore: create existing repository');
+  assert.equal(run('init', '--model', 'Test Coordinator').status, 0);
+
+  const refused = run('gate', '--json');
+  assert.equal(refused.status, 1, 'the gate cannot read the policy until init files are committed');
+  const refusal = JSON.parse(refused.stdout).error;
+  assert.equal(refusal.code, 'NO_POLICY');
+  const message = refusal.message;
+  assert.match(message, /pullboard\.json and Pullboard's initialized setup files are uncommitted/u);
+  assert.match(message, /git add(?: -f)? -- .*pullboard\.json/u, 'the refusal gives a scoped staging command');
+  assert.match(message, /&& git commit -q -m "chore: set up pullboard"/u, 'the refusal explains the needed commit');
+  for (const path of ['SPEC.md', 'DOCTRINE.md']) assert.ok(message.includes(path), message);
+  assert.ok(!message.includes('README.md'), 'unrelated existing files are not included in the staging command');
+});
+
 test('a digest keeps the failures and the end within its cap, however long one line is [V10]', () => {
   const digest = digestOf(`not ok 1 - ${'x'.repeat(3500)}\n${'ok\n'.repeat(50)}# fail 1\nsummary: 1 failed`);
   assert.ok(digest.length <= 3000, `${digest.length} characters`);

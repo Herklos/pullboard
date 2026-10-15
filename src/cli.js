@@ -1719,6 +1719,21 @@ function uncommittedSetup(mainRoot, config) {
   };
 }
 
+/** Find initialized setup that is on disk but absent from the primary checkout's committed policy. */
+function uncommittedPolicySetup(info) {
+  const primary = mainCheckout(info.root);
+  if (!primary?.commit) return null;
+  const committedConfig = tryGit(info.root, ['ls-tree', '-z', primary.commit, '--', `:(literal)${CONFIG_FILE}`]);
+  if (committedConfig.status !== 0 || committedConfig.stdout) return null;
+
+  const mainRoot = resolve(info.commonDir, '..');
+  let config;
+  try { config = loadConfig(mainRoot); }
+  catch { return null; }
+  const setup = uncommittedSetup(mainRoot, config);
+  return setup?.files.includes(CONFIG_FILE) ? setup : null;
+}
+
 /**
  * Refuse a worktree whose agent would start without pullboard's files as the main checkout has
  * them: no config, rules or hooks, or older ones (I4). Name each file and how it differs, and the
@@ -3340,6 +3355,14 @@ async function runCommand(argv, io) {
           && error.message.includes('the coordinator checkout has no commit on ')
           && existsSync(join(ctx.info.root, CONFIG_FILE))) {
           throw new Refused('NO_POLICY', `${CONFIG_FILE} is not committed; add and commit the initialized project before running the gate: git add ${CONFIG_FILE}`);
+        }
+        if (error instanceof Refused && error.code === 'NO_POLICY'
+          && error.message === 'the committed coordinator policy or claim base is missing; restore its Git objects or ask the coordinator to refreeze the item') {
+          const setup = uncommittedPolicySetup(ctx.info);
+          if (setup) {
+            const files = setup.files.map(shellWord).join(' ');
+            throw new Refused('NO_POLICY', `${CONFIG_FILE} and Pullboard's initialized setup files are uncommitted; commit them before running the gate: ${setup.stage} && git commit -q -m "chore: set up pullboard" -- ${files}`);
+          }
         }
         throw error;
       }
