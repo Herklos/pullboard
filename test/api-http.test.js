@@ -63,24 +63,57 @@ const { serveView } = await import(pathToFileURL(serveFile).href);
 const view = await serveView({ port: 0 });
 const address = new URL(view.url);
 const key = address.searchParams.get('k');
+let pageReady = false;
+let pageUrl = view.url;
+let pageCookie = '';
 let requestCount = 0;
 /** Fetch one authenticated API response and reject failed fixture requests. */
 async function readApi(path) {
   requestCount += 1;
-  const response = await fetch(address.origin + path, { headers: { 'x-pullboard-key': key, connection: 'close' } });
+  const response = await fetch(address.origin + path, { headers: { ...(pageCookie ? { cookie: pageCookie } : { 'x-pullboard-key': key }), connection: 'close' } });
   const document = await response.json();
   assert.equal(response.status, 200, JSON.stringify(document));
   return document;
 }
 /** Fetch the actual local view page and require a successful response. */
 async function readPage() {
+  if (!pageReady) {
+    requestCount += 1;
+    const exchange = await fetch(view.url, { headers: { connection: 'close' }, redirect: 'manual' });
+    if (exchange.status === 200) {
+      assert.match(await exchange.text(), /<!doctype html>/iu);
+      pageReady = true;
+      return;
+    }
+    assert.equal(exchange.status, 303, 'the printed view link either serves the page or trades its key for a session cookie');
+    const location = exchange.headers.get('location');
+    assert.ok(location, 'the key exchange redirects to the clean page address');
+    let cleanAddress;
+    try { cleanAddress = new URL(location, address.origin); }
+    catch { assert.fail('the key exchange returns a valid clean page address'); }
+    assert.equal(cleanAddress.origin, address.origin, 'the key exchange stays on this view');
+    assert.equal(cleanAddress.searchParams.has('k'), false, 'the redirected page address drops the key');
+    const setCookie = exchange.headers.get('set-cookie');
+    assert.ok(setCookie, 'the key exchange sets a session cookie');
+    const cookieParts = setCookie.split(';');
+    const cookiePair = cookieParts.shift();
+    const cookieAttributes = new Set(cookieParts.map((part) => part.trim().toLowerCase()));
+    assert.equal(/^pullboard_view_[0-9a-f]{18}=[A-Za-z0-9_-]+$/u.test(cookiePair), true, 'the response sets a per-view session cookie');
+    assert.equal(cookieAttributes.has('path=/'), true, 'the session cookie covers the view routes');
+    assert.equal(cookieAttributes.has('httponly'), true, 'the session cookie is not readable by page scripts');
+    assert.equal(cookieAttributes.has('samesite=strict'), true, 'the session cookie is same-site only');
+    pageUrl = cleanAddress;
+    pageCookie = cookiePair;
+    pageReady = true;
+  }
   requestCount += 1;
-  const response = await fetch(view.url, { headers: { connection: 'close' } });
+  const response = await fetch(pageUrl, { headers: { connection: 'close', ...(pageCookie ? { cookie: pageCookie } : { 'x-pullboard-key': key }) } });
   assert.equal(response.status, 200);
   assert.match(await response.text(), /<!doctype html>/iu);
 }
 /** Read each selected board state and one known item detail. */
 async function readAllRoutes(boards) {
+  await readPage();
   await readApi('/api/v1/boards');
   for (const project of projects) {
     const board = boards.find((entry) => resolve(entry.root) === resolve(project.root));
@@ -89,10 +122,10 @@ async function readAllRoutes(boards) {
     await readApi(path + '/state');
     await readApi(path + '/items/' + project.item);
   }
-  await readPage();
 }
 
 try {
+  await readPage();
   const initial = await readApi('/api/v1/boards');
   assert.equal(initial.boards.length, 3);
   const boards = initial.boards;
@@ -311,7 +344,7 @@ async function viewHttpBox(t, existing = null) {
 }
 
 /** Prove warmed reads across three registered projects start no child processes and changes refresh state. */
-test('a repeated read spawns no process [A2,N26]', (t) => {
+test('a repeated read through the view page spawns no process [A2,N26]', (t) => {
   const box = fixture(t);
   const roots = [box.root];
   for (const number of [2, 3]) {
@@ -357,7 +390,7 @@ test('a repeated read spawns no process [A2,N26]', (t) => {
   assert.ok(result.stdout.trim(), result.failure ?? result.stderr);
   const lines = result.stdout.trim().split('\n');
   const measurement = JSON.parse(lines[0]).measurement;
-  process.stderr.write(`a repeated read spawns no process: boards=${measurement.boards}, routes=${measurement.routes}, requests=${measurement.requests}, rounds=${measurement.rounds}, processes=${JSON.stringify(measurement.processes)}, elapsed=${measurement.elapsedMs}ms\n`);
+  process.stderr.write(`a repeated read through the view page spawns no process: boards=${measurement.boards}, routes=${measurement.routes}, requests=${measurement.requests}, rounds=${measurement.rounds}, processes=${JSON.stringify(measurement.processes)}, elapsed=${measurement.elapsedMs}ms\n`);
   assert.deepEqual({ git: measurement.processes.git, node: measurement.processes.node, other: measurement.processes.other },
     { git: 0, node: 0, other: 0 }, 'repeated board-list, state, item-detail, and page reads start no child process after warm-up');
   assert.equal(result.status, 0, result.failure ?? result.stderr);
