@@ -1,9 +1,9 @@
 /** Classify whether selected tests may launch Chrome; uncertainty keeps browser coverage enabled. */
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { posix, relative, resolve, sep } from 'node:path';
-import { importsIn } from './module-imports.js';
+import { commonJsIn, importsIn } from './module-imports.js';
 
-const MODULE_SUFFIXES = ['.js', '.mjs', '.cjs', '.json'];
+const MODULE_SUFFIXES = ['.js', '.mjs', '.cjs', '.cts', '.json'];
 const CHROME_FIXTURE = 'test/chrome-fixture.js';
 
 /** Convert an in-root absolute or relative selection to a normalized repository-relative path. */
@@ -62,16 +62,19 @@ export async function testsNeedBrowser(root, files) {
         seen.add(path);
         if (path === CHROME_FIXTURE) return true;
         if (path.endsWith('.json')) continue;
+        if (/\.(?:cjs|cts)$/u.test(path)) return true;
         const absolute = resolve(root, ...path.split('/'));
         if (!(await staysInside(root, absolute))) return true;
         paths.push(path);
         sources.push(await readFile(absolute, 'utf8'));
       }
       if (!sources.length) break;
+      if (commonJsIn(sources).some(Boolean)) return true;
       const imports = importsIn(sources);
       const next = new Set();
       for (let index = 0; index < imports.length; index += 1) {
         for (const request of imports[index]) {
+          if (request === 'node:module') return true;
           if (request.startsWith('node:')) continue;
           if (!request.startsWith('.')) return true;
           const target = await localTarget(root, paths[index], request);

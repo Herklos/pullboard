@@ -2695,9 +2695,9 @@ function workCommands(io, args) {
 
 /** Label the kind and item of a queued run without hiding older queue-class labels. */
 function resourceRunLabel(entry) {
-  const kind = entry.kind || (entry.landing ? 'landing' : entry.itemCheck ? 'item check' : '');
-  const labels = [kind, entry.item ? `#${entry.item}` : '', entry.browser ? 'browser' : ''].filter(Boolean);
-  return labels.length ? ` (${labels.join(', ')})` : '';
+  const priority = entry.landing ? 'landing' : entry.itemCheck ? 'item check' : entry.diagnostic ? 'diagnostic' : '';
+  const details = [entry.kind !== priority ? entry.kind : '', entry.item ? `#${entry.item}` : '', entry.browser ? 'browser' : ''].filter(Boolean);
+  return `${priority ? ` (${priority})` : ''}${details.length ? ` (${details.join(', ')})` : ''}`;
 }
 
 /** Name a known board seat for queue diagnostics without requiring an unjoined checkout to join. */

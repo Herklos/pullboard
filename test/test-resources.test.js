@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
-import { testsNeedBrowser } from '../src/test-resources.js';
+import { testsNeedBrowser } from '../src/browser-admission.js';
 
 /** Create source files for a dependency graph whose modules must never execute during admission. */
 function sourceFixture(t, files) {
@@ -48,4 +48,28 @@ test('full, cockpit and uncertain test selections reserve browser capacity [C7]'
     ['test/computed.test.js'], ['test/broken.test.js'], [join(root, '../outside.test.js')]]) {
     assert.equal(await testsNeedBrowser(root, files), true);
   }
+});
+
+test('only actual CommonJS loader words trigger browser admission in JavaScript source [C7]', async t => {
+  const root = sourceFixture(t, {
+    'test/mentions.test.js': "// require('./chrome-fixture.js') and createRequire are only comments\nconst note = 'require createRequire';\nconst pattern = /require|createRequire/;",
+    'test/require.test.js': 'const load = require;',
+    'test/create-require.test.js': "import { createRequire } from 'node:module'; const load = createRequire(import.meta.url);",
+    'test/escaped-require.test.js': 'const load = requ\\u0069re;',
+    'test/escaped-create-require.test.js': 'const load = createRequ\\u0069re;',
+    'test/escaped-text.test.js': '// requ\\u0069re and createRequ\\u0069re are just comment text\nconst note = "requ\\u0069re createRequ\\u0069re";',
+    'test/module-computed.test.js': "import * as runtime from 'node:module'; const load = runtime['create' + 'Require'];",
+    'test/browser.test.cjs': "require('./chrome-fixture.js');",
+  });
+  assert.equal(await testsNeedBrowser(root, ['test/mentions.test.js']), false,
+    'comments, strings, and regular-expression text do not represent CommonJS loading');
+  assert.equal(await testsNeedBrowser(root, ['test/require.test.js']), true);
+  assert.equal(await testsNeedBrowser(root, ['test/create-require.test.js']), true);
+  assert.equal(await testsNeedBrowser(root, ['test/escaped-require.test.js']), true);
+  assert.equal(await testsNeedBrowser(root, ['test/escaped-create-require.test.js']), true);
+  assert.equal(await testsNeedBrowser(root, ['test/escaped-text.test.js']), false,
+    'Unicode escape text in comments and strings does not represent an identifier');
+  assert.equal(await testsNeedBrowser(root, ['test/module-computed.test.js']), true,
+    'node:module can create a loader through aliases or computed properties');
+  assert.equal(await testsNeedBrowser(root, ['test/browser.test.cjs']), true);
 });

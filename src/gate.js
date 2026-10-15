@@ -14,7 +14,7 @@ import { Refused } from './refused.js';
 import { GATE_SLOT_HELD_ENV, gateSlotEnvironment, inheritedGateSlot, takeResource } from './resources.js';
 import { loadMachineSettings } from './settings.js';
 import { selectAffectedTests } from './affected-tests.js';
-import { testsNeedBrowser } from './test-resources.js';
+import { testsNeedBrowser } from './browser-admission.js';
 import { timingFromOutput, timingRunner } from './timing.js';
 
 const STAMP = 'pullboard-gate-green';

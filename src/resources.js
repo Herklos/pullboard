@@ -1,7 +1,7 @@
 /** Machine and repository queues persist leases; diagnostics yield to landings, gates and item checks [Q1,Q2,Q3,V18]. */
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, realpathSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { repoInfo } from './git.js';
@@ -36,9 +36,31 @@ export function gateSlotEnvironment(lease) {
 /** Resolve the local database for the requested scope. */
 function databaseFile(scope, root) {
   if (scope === 'board') throw new Refused('BOARD_SCOPE_UNAVAILABLE', 'board-scoped resources need the relay; run pullboard relay on');
-  if (scope === 'machine') return join(machineHome(), 'resources.sqlite');
+  if (scope === 'machine') return machineResourceFile();
   if (scope === 'repo') return join(repoInfo(root).commonDir, 'pullboard', 'resources.sqlite');
   throw new Refused('BAD_RESOURCE_SCOPE', `unknown resource scope "${scope}"; use machine or repo`);
+}
+
+/** Resolve the database path for the machine-wide resource pool. */
+function machineResourceFile() {
+  return join(machineHome(), 'resources.sqlite');
+}
+
+/** Canonicalize an absolute resource path without creating a missing foreign pool. */
+function canonicalResourceFile(file) {
+  let candidate = resolve(file);
+  const missing = [];
+  while (true) {
+    try {
+      return resolve(realpathSync(candidate), ...missing);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      const parent = dirname(candidate);
+      if (parent === candidate) throw error;
+      missing.unshift(basename(candidate));
+      candidate = parent;
+    }
+  }
 }
 
 /** Open and initialize the small durable queue database. */
@@ -214,8 +236,10 @@ export async function takeResource(options) {
   if (landing && itemCheck) throw new Refused('BAD_RESOURCE_PRIORITY', 'a gate slot cannot be both a landing and an item check');
   if (diagnostic && (landing || itemCheck)) throw new Refused('BAD_RESOURCE_PRIORITY', 'a diagnostic slot cannot also be a landing or an item check');
   const file = databaseFile(scope, root);
-  const pool = resolve(file);
   const db = open(file);
+  let pool;
+  try { pool = canonicalResourceFile(file); }
+  catch (error) { db.close(); throw error; }
   const token = randomUUID();
   const requestedAt = Date.now();
   const pid = process.pid;
@@ -321,9 +345,9 @@ export function inheritedGateSlot({ root = process.cwd(), browser = false } = {}
   const token = process.env[GATE_SLOT_TOKEN_ENV] ?? '';
   if (!markedPool && !token) return null;
   if (!markedPool) throw new Refused('GATE_SLOT_MARKER_INVALID', 'the inherited gate token has no pool marker; start the child with gateSlotEnvironment(lease)');
-  const pool = resolve(databaseFile('machine', root));
+  const pool = canonicalResourceFile(machineResourceFile());
   // A process with a different PULLBOARD_MACHINE_HOME is independent and must join its own queue.
-  if (markedPool !== pool) return null;
+  if (canonicalResourceFile(markedPool) !== pool) return null;
   if (process.env[GATE_SLOT_HELD_ENV] !== '1') throw new Refused('GATE_SLOT_MARKER_INVALID', 'the inherited gate lease is missing its legacy held marker; start the child with gateSlotEnvironment(lease)');
   if (!token) throw new Refused('GATE_SLOT_TOKEN_REQUIRED', 'the inherited gate pool marker has no lease token; restart the child with gateSlotEnvironment(lease)');
   const db = open(pool);

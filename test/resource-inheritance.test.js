@@ -1,8 +1,8 @@
 /** Scoped machine-lease inheritance checks [Q1,Q2,Q3]. */
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { after, test } from 'node:test';
 import {
   BROWSER_SLOT_HELD_ENV,
@@ -66,7 +66,7 @@ test('a same-pool child reuses the live gate lease without taking another slot [
   try {
     const markers = gateSlotEnvironment(lease);
     assert.equal(markers[GATE_SLOT_HELD_ENV], '1');
-    assert.equal(markers[GATE_SLOT_POOL_ENV], resolve(join(home, 'resources.sqlite')));
+    assert.equal(markers[GATE_SLOT_POOL_ENV], realpathSync(join(home, 'resources.sqlite')));
     assert.equal(markers[GATE_SLOT_TOKEN_ENV], lease.token);
     assert.equal(markers[BROWSER_SLOT_HELD_ENV], '');
     const reused = withEnvironment({ PULLBOARD_MACHINE_HOME: home, ...markers }, () => inheritedGateSlot({ root: process.cwd() }));
@@ -75,6 +75,25 @@ test('a same-pool child reuses the live gate lease without taking another slot [
     });
     reused.release();
     assert.equal(resourcesAt(home)[0].holders.length, 1, 'the child release is inert and leaves the parent lease alive');
+  } finally { lease.release(); }
+});
+
+/** Prove a symlinked machine-home path reuses the exact live database lease at capacity one. */
+test('a symlink alias to the same machine pool reuses its live gate lease [Q1,Q2,Q3]', async () => {
+  const realHome = machinePool();
+  const aliasParent = machinePool();
+  const aliasHome = join(aliasParent, 'machine-home');
+  symlinkSync(realHome, aliasHome, 'dir');
+  const lease = await acquireGate(realHome);
+  try {
+    const markers = gateSlotEnvironment(lease);
+    const reused = withEnvironment({ PULLBOARD_MACHINE_HOME: aliasHome, ...markers }, () => inheritedGateSlot({ root: process.cwd() }));
+    assert.ok(reused, 'the symlink spelling identifies the live parent pool');
+    assert.equal(lease.pool, realpathSync(join(realHome, 'resources.sqlite')));
+    assert.equal(reused.token, lease.token, 'the aliased child reuses the parent token rather than joining its own queue');
+    assert.equal(reused.pool, lease.pool, 'both spellings identify the same canonical database file');
+    reused.release();
+    assert.equal(resourcesAt(realHome).find((resource) => resource.name === 'gate').holders.length, 1, 'the child release leaves the parent lease alive');
   } finally { lease.release(); }
 });
 

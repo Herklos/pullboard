@@ -426,7 +426,7 @@ async function main(args) {
   const fullSuite = !hasTestFiles(args);
   let browser = fullSuite;
   if (!browser) {
-    const { testsNeedBrowser } = await import('../src/test-resources.js');
+    const { testsNeedBrowser } = await import('../src/browser-admission.js');
     browser = await testsNeedBrowser(process.cwd(), explicitTestFiles(args));
   }
   let signal = null;
@@ -448,8 +448,7 @@ async function main(args) {
       if (inherited) run(gateSlotEnvironment(inherited));
       else await acquire();
     } else if (legacyHeld) {
-      if (browser) throw new Error('this legacy gate marker does not include the browser slot; restart the parent runner with a scoped gate lease before running browser tests');
-      run({ [GATE_SLOT_HELD_ENV]: '1' });
+      throw new Error('this legacy gate marker does not identify a live machine gate lease; restart the parent runner with a scoped gate lease');
     } else await acquire();
 
     /** Acquire all required capabilities before creating the sandbox or starting test processes. */
