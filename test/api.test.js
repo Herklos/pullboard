@@ -23,7 +23,7 @@ import { join, dirname, resolve, basename, delimiter } from 'node:path';
 import { after, test } from 'node:test';
 import { main, resultCommands } from '../src/cli.js';
 import { createLocalApiHandler } from '../src/api.js';
-import { allShouts, EVENT_LOG_VERSION, closeBoard, openBoard } from '../src/board.js';
+import { addItem as addBoardItem, allShouts, EVENT_LOG_VERSION, closeBoard, events as boardEvents, openBoard, verdictsFor } from '../src/board.js';
 import { presentationShout, relayPresentation } from '../src/relay-presentation.js';
 import { JSON_SHAPES } from '../src/json.js';
 import { projectState, serveView } from '../src/serve.js';
@@ -1056,9 +1056,13 @@ async function startLocalHandler(t, box, options = {}) {
   const handler = createLocalApiHandler({
     secret,
     getPort: () => port,
-    runCommand: main,
+    runCommand: options.runCommand ?? main,
     projects: () => [{ root: box.repo, name: 'API fixture', project: '', added: '2026-01-01T00:00:00.000Z' }],
     ...(options.allowedOrigins === undefined ? {} : { allowedOrigins: options.allowedOrigins }),
+    ...(options.onStateBuild === undefined ? {} : { onStateBuild: options.onStateBuild }),
+    ...(options.onItemBuild === undefined ? {} : { onItemBuild: options.onItemBuild }),
+    ...(options.stateDetail === undefined ? {} : { stateDetail: options.stateDetail }),
+    ...(options.personChannel === undefined ? {} : { personChannel: options.personChannel }),
   });
   const server = createServer(handler);
   await new Promise((resolveReady, rejectReady) => {
@@ -1068,13 +1072,17 @@ async function startLocalHandler(t, box, options = {}) {
       resolveReady();
     });
   });
-  t.after(async () => {
+  let stopped = false;
+  const close = async () => {
+    if (stopped) return;
+    stopped = true;
     handler.close();
     const closed = new Promise((resolveClosed) => server.close(resolveClosed));
     server.closeAllConnections();
     await closed;
-  });
-  return { origin: `http://127.0.0.1:${port}`, secret };
+  };
+  t.after(close);
+  return { origin: `http://127.0.0.1:${port}`, secret, close };
 }
 
 /** Start the real local API server and stop it when its test finishes. */
@@ -1701,4 +1709,246 @@ test('[A5] view export preserves the typed future-version refusal without creati
   assert.equal(existsSync(output), false, 'refused export creates no output directory or files');
   assert.deepEqual(readFileSync(file), before, 'refused export preserves every board byte');
   assert.equal(readEventLogVersion(file), String(EVENT_LOG_VERSION + 1));
+});
+
+test('one move recomputes only the items it touched [A2,N26]', async (t) => {
+  const box = project();
+  const boardFile = join(box.repo, '.git', 'pullboard', 'board.sqlite');
+  const board = openBoard(boardFile, undefined, { isMain: true });
+  const ids = [];
+  try {
+    for (let index = 0; index < 300; index += 1) {
+      ids.push(addBoardItem(board, {
+        by: 'coordinator', lane: 'app', title: `Incremental item ${String(index + 1).padStart(3, '0')}`,
+        criterion: `Exercise item projection ${index + 1}`, specIds: ['G1'],
+        route: 'light',
+        brief: 'Files:\n- app/incremental-fixture.js\nChange:\n- Preserve the fixture item.\nTest:\n- The API projection matches a full rebuild.',
+        check: 'true',
+        ...(index === 1 ? { after: [ids[0]] } : {}),
+      }));
+    }
+  } finally {
+    closeBoard(board);
+  }
+  assert.equal(ids.length, 300);
+
+  const builder = json(box, box.repo, 'worktree', ['app', '--route', 'light', '--model', 'fixture-builder']);
+  const verifier = json(box, box.repo, 'worktree', ['app', '--route', 'light', '--model', 'fixture-verifier']);
+  /** Execute the real CLI with only this test's private homes, Git config and PATH. */
+  async function runFixtureCommand(argv, io) {
+    const keys = new Set([...Object.keys(box.env), 'PULLBOARD_RELAY_TOKEN', 'npm_config_cache']);
+    const previous = new Map([...keys].map((key) => [key, process.env[key]]));
+    try {
+      for (const key of keys) {
+        if (Object.hasOwn(box.env, key)) process.env[key] = box.env[key];
+        else delete process.env[key];
+      }
+      process.env.npm_config_cache = join(box.dir, 'npm-cache');
+      return await main(argv, io);
+    } finally {
+      for (const [key, value] of previous) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  }
+  const realDateNow = Date.now.bind(Date);
+  const realWallStart = realDateNow();
+  let clockOffsetMs = 0;
+  t.mock.timers.enable({ apis: ['Date'], now: realWallStart });
+  /** Preserve real elapsed wall time while allowing an explicit offset for eventless expiry. */
+  function setTestClock() {
+    t.mock.timers.setTime(realWallStart + (realDateNow() - realWallStart) + clockOffsetMs);
+  }
+  setTestClock();
+  const builds = [];
+  let stateBuilds = 0;
+  const api = await startLocalHandler(t, box, {
+    runCommand: runFixtureCommand,
+    personChannel: 'api', stateDetail: 'full',
+    onStateBuild: () => { stateBuilds += 1; },
+    onItemBuild: (entry) => builds.push(entry.itemId),
+  });
+  const boardListing = await apiFetch(api, '/api/v1/boards');
+  assert.equal(boardListing.status, 200);
+  const boardId = (await boardListing.json()).boards.find((entry) => entry.root === box.repo).id;
+  const path = `/api/v1/boards/${boardId}`;
+
+  /** Send one authenticated local API move and return its versioned response. */
+  async function move(verb, item, args = {}, agent = 'coordinator') {
+    setTestClock();
+    const response = await apiFetch(api, `${path}/moves`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ verb, ...(item === undefined ? {} : { item }), args, agent }),
+    });
+    const document = await response.json();
+    assert.equal(response.status, 200, `${verb} move: ${JSON.stringify(document)}`);
+    return document;
+  }
+
+  /** Compare the live cached handler's full state with a newly constructed full projection. */
+  async function assertFreshFullState(label) {
+    setTestClock();
+    const comparisonTime = Date.now();
+    const currentResponse = await apiFetch(api, `${path}/state?detail=full`);
+    assert.equal(currentResponse.status, 200, `${label}: live state response`);
+    const current = await currentResponse.json();
+    const fresh = await startLocalHandler(t, box, { personChannel: 'api', stateDetail: 'full' });
+    try {
+      const freshResponse = await apiFetch(fresh, `${path}/state?detail=full`);
+      assert.equal(freshResponse.status, 200, `${label}: fresh full state response`);
+      assert.deepEqual(current.state, (await freshResponse.json()).state, `${label}: incremental state equals a clean full rebuild`);
+      assert.equal(Date.now(), comparisonTime, `${label}: both state projections use the same controlled instant`);
+    } finally {
+      await fresh.close();
+    }
+    return current.state;
+  }
+
+  /** Read one item's current lease from the fixture board without changing its event cursor. */
+  function leaseUntil(itemId) {
+    const current = openBoard(boardFile, undefined, { isMain: true });
+    try { return current.db.prepare('SELECT item_lease_until FROM item WHERE item_id = ?').get(itemId).item_lease_until; }
+    finally { closeBoard(current); }
+  }
+
+  try {
+    const initialResponse = await apiFetch(api, `${path}/state?detail=full`);
+    assert.equal(initialResponse.status, 200);
+    const initial = await initialResponse.json();
+    assert.equal(initial.state.items.length, 300);
+    assert.equal(builds.length, 300, 'the initial full snapshot projects each item once');
+    assert.equal(stateBuilds, 1);
+
+    builds.length = 0;
+    await move('edit', ids[2], { criterion: 'One item changed after the warm snapshot' });
+    const edited = await assertFreshFullState('single item edit');
+    assert.deepEqual(builds, [ids[2]], 'one item move rebuilds only its touched item');
+    assert.equal(edited.items.find((item) => item.id === ids[2]).criterion, 'One item changed after the warm snapshot');
+
+    builds.length = 0;
+    await move('claim', ids[0], {}, builder.agent);
+    await move('submit', ids[0], {}, builder.agent);
+    await move('next', undefined, { verify: true }, verifier.agent);
+    await move('verify', ids[0], { decision: 'accept', reason: 'CRITERION_MET', note: 'verified dependency' }, verifier.agent);
+    builds.length = 0;
+    const dependencyState = await assertFreshFullState('verified dependency');
+    assert.deepEqual(builds, [ids[0], ids[1]], 'the changed item and its dependent are recomputed');
+    assert.deepEqual(dependencyState.items.find((item) => item.id === ids[1]).blockedBy, [],
+      'the waiting item becomes unblocked when its dependency is verified');
+
+    builds.length = 0;
+    await move('shout', undefined, { to: 'all', text: 'Board-only change for incremental projection' });
+    const shouted = await assertFreshFullState('board-only shout');
+    assert.deepEqual(builds, [], 'an event with no item_id recomputes zero item bodies');
+    assert.ok(shouted.shouts.some((entry) => entry.shout_text === 'Board-only change for incremental projection'));
+
+    const detailBuilds = [];
+    let detailStateBuilds = 0;
+    const detailOnly = await startLocalHandler(t, box, {
+      personChannel: 'api', stateDetail: 'full',
+      onStateBuild: () => { detailStateBuilds += 1; },
+      onItemBuild: (entry) => detailBuilds.push(entry.itemId),
+    });
+    try {
+      const detailResponse = await apiFetch(detailOnly, `${path}/items/${ids[17]}`);
+      assert.equal(detailResponse.status, 200);
+      assert.equal((await detailResponse.json()).item.id, ids[17]);
+      assert.deepEqual(detailBuilds, [ids[17]], 'a cold item detail projects only its requested item');
+      assert.equal(detailStateBuilds, 0, 'a cold item detail does not build or queue behind a full board snapshot');
+    } finally {
+      await detailOnly.close();
+    }
+
+    builds.length = 0;
+    const specFile = join(box.repo, 'SPEC.md');
+    writeFileSync(specFile, SPEC.replace('The fixture keeps its board.', 'The fixture keeps its changed specification.'));
+    await assertFreshFullState('SPEC.md change');
+
+    builds.length = 0;
+    const configFile = join(box.repo, 'pullboard.json');
+    const config = JSON.parse(readFileSync(configFile, 'utf8'));
+    config.agents.names = 'prefix';
+    writeFileSync(configFile, `${JSON.stringify(config, null, 2)}\n`);
+    await assertFreshFullState('pullboard.json change');
+
+    builds.length = 0;
+    const milestone = box.run(box.repo, 'milestone', 'add', 'Incremental milestone', '--items', String(ids[4]));
+    assert.equal(milestone.status, 0, milestone.stderr || milestone.stdout);
+    const milestoneState = await assertFreshFullState('milestone change');
+    assert.deepEqual(builds, [ids[4]], 'changing one milestone membership recomputes only the affected item');
+    assert.equal(milestoneState.items.find((item) => item.id === ids[4]).milestone, 'Incremental milestone');
+
+    builds.length = 0;
+    await move('claim', ids[299], {}, builder.agent);
+    const claimed = await assertFreshFullState('claim before lease expiry');
+    assert.equal(claimed.items.find((item) => item.id === ids[299]).status, 'claimed');
+    const lease = leaseUntil(ids[299]);
+    const sequenceBeforeExpiry = claimed.sequence;
+    clockOffsetMs += Date.parse(lease) - Date.now() + 1;
+    setTestClock();
+    builds.length = 0;
+    const expired = await assertFreshFullState('eventless claim lease expiry');
+    assert.equal(leaseUntil(ids[299]), lease, 'advancing the test clock leaves the persisted lease deadline unchanged');
+    assert.equal(expired.sequence, sequenceBeforeExpiry, 'lease expiry appends no board event');
+    assert.equal(expired.items.find((item) => item.id === ids[299]).status, 'open');
+    assert.deepEqual(builds, [ids[299]], 'eventless lease expiry recomputes only the expired claim');
+
+    const queryBoard = openBoard(boardFile, undefined, { isMain: true });
+    try {
+      const queries = [];
+      const trackedBoard = { ...queryBoard, db: {
+        prepare(sql) {
+          const statement = queryBoard.db.prepare(sql);
+          return { all(...params) { queries.push({ sql, params }); return statement.all(...params); } };
+        },
+      } };
+      boardEvents(trackedBoard, { itemId: ids[17] });
+      verdictsFor(trackedBoard, ids[17]);
+      const itemQueries = queries.filter(({ sql }) => /\bFROM\s+(?:event|verdict)\b/iu.test(sql));
+      assert.ok(itemQueries.some(({ sql }) => /FROM\s+event\s+WHERE\s+item_id\s*=\s*\?/iu.test(sql)),
+        'the production item-events query binds item_id directly');
+      assert.ok(itemQueries.some(({ sql }) => /FROM\s+verdict\s+WHERE\s+item_id\s*=\s*\?/iu.test(sql)),
+        'the production verdict query binds item_id directly');
+      assert.ok(!itemQueries.some(({ sql }) => /\?\s+IS\s+NULL\s+OR\s+item_id/iu.test(sql)),
+        'the production item-events query has no index-blocking optional-filter form');
+      for (const { sql, params } of itemQueries) {
+        const plan = queryBoard.db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...params).map(({ detail }) => detail).join('\n');
+        if (/\bFROM\s+event\b/iu.test(sql)) {
+          assert.match(plan, /SEARCH\s+event\s+USING\s+(?:COVERING\s+)?INDEX\s+event_item_id_event_id/iu,
+            `item event query uses its item_id index:\n${sql}\n${plan}`);
+        } else {
+          assert.match(plan, /SEARCH\s+verdict\s+USING\s+(?:COVERING\s+)?INDEX\s+verdict_item_id_verdict_id/iu,
+            `item verdict query uses its item_id index:\n${sql}\n${plan}`);
+        }
+        assert.doesNotMatch(plan, /SCAN\s+(?:event|verdict)\b/iu, `item query has no full-table scan:\n${sql}\n${plan}`);
+      }
+      assert.ok(itemQueries.some(({ sql }) => /FROM\s+event\s+WHERE\s+item_id\s*=\s*\?.*event_kind/isu.test(sql)),
+        "verdict receipts are read from the item's event rows");
+      assert.ok(itemQueries.some(({ sql, params }) => /FROM\s+event\s+WHERE\s+item_id\s*=\s*\?/iu.test(sql)
+        && params.length === 1 && params[0] === ids[17]), 'the production scoped event query binds the requested item id');
+      assert.ok(itemQueries.some(({ sql, params }) => /FROM\s+verdict\s+WHERE\s+item_id\s*=\s*\?/iu.test(sql)
+        && params.length === 1 && params[0] === ids[17]), 'the production scoped verdict query binds the requested item id');
+      const indexes = queryBoard.db.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(({ name }) => name);
+      assert.ok(indexes.includes('event_item_id_event_id'));
+      assert.ok(indexes.includes('verdict_item_id_verdict_id'));
+    } finally {
+      closeBoard(queryBoard);
+    }
+
+    await api.close();
+    const legacy = new DatabaseSync(boardFile);
+    try { legacy.exec('DROP INDEX event_item_id_event_id; DROP INDEX verdict_item_id_verdict_id;'); }
+    finally { legacy.close(); }
+    const migrated = openBoard(boardFile, undefined, { isMain: true });
+    try {
+      const restored = migrated.db.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(({ name }) => name);
+      assert.ok(restored.includes('event_item_id_event_id'), 'reopening an existing board restores the event item index');
+      assert.ok(restored.includes('verdict_item_id_verdict_id'), 'reopening an existing board restores the verdict item index');
+    } finally {
+      closeBoard(migrated);
+    }
+  } finally {
+    await api.close();
+  }
 });
