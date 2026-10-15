@@ -64,6 +64,31 @@ test('full, cockpit and uncertain test selections reserve browser capacity [C7]'
   }
 });
 
+test('module launchers and dynamic builtins keep browser admission conservative [C7]', async t => {
+  const root = sourceFixture(t, {
+    'test/workers.test.js': "import { Worker } from 'node:worker_threads'; void Worker;",
+    'test/cluster.test.js': "import cluster from 'node:cluster'; void cluster;",
+    'test/vm.test.js': "import vm from 'node:vm'; void vm;",
+    'test/builtin.test.js': "const builtin = process.getBuiltinModule('node:worker_threads'); void builtin;",
+    'test/computed-builtin.test.js': "const builtin = process['getBuiltinModule']('node:cluster'); void builtin;",
+    'test/computed-expression.test.js': "const builtin = process['get' + 'BuiltinModule']('node:worker_threads'); void builtin;",
+    'test/escaped-builtin.test.js': "const builtin = process['getBuiltin\\u004dodule']('node:cluster'); void builtin;",
+    'test/optional-builtin.test.js': "const builtin = process?.['getBuiltinModule']('node:cluster'); void builtin;",
+    'test/destructured-builtin.test.js': "const { getBuiltinModule: load } = process; void load;",
+    'test/computed-process-alias.test.js': "const proc = process; const builtin = proc[property]; void builtin;",
+  });
+  for (const file of ['workers', 'cluster', 'vm', 'builtin', 'computed-builtin', 'computed-expression',
+    'escaped-builtin', 'optional-builtin', 'destructured-builtin', 'computed-process-alias']) {
+    assert.equal(await testsNeedBrowser(root, [`test/${file}.test.js`]), true, file);
+  }
+
+  mkdirSync(join(root, 'src'), { recursive: true });
+  copyFileSync(resolve(import.meta.dirname, '../src/module-imports.js'), join(root, 'src/module-imports.js'));
+  writeFileSync(join(root, 'test/parser.test.js'), "import '../src/module-imports.js';\n");
+  assert.equal(await testsNeedBrowser(root, ['test/parser.test.js']), false,
+    'the reviewed V8 compile-only import parser may use node:vm without evaluating the test graph');
+});
+
 test('only actual CommonJS loader words trigger browser admission in JavaScript source [C7]', async t => {
   const root = sourceFixture(t, {
     'test/mentions.test.js': "// require('./chrome-fixture.js') and createRequire are only comments\nconst note = 'require createRequire';\nconst pattern = /require|createRequire/;",

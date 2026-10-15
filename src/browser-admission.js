@@ -158,7 +158,11 @@ function committedTarget(files, importer, request) {
   return found.length === 1 && ['100644', '100755'].includes(files.get(found[0]).mode) ? found[0] : null;
 }
 
-/** Allow only a side-effect fixture import or the fixed-Git helper; generic command helpers keep browser admission. */
+/** Allow only a side-effect fixture import or the fixed-Git helper; generic command helpers keep browser admission.
+ * @param {string} source
+ * @param {string} request
+ * @returns {boolean}
+ */
 function safeFixtureChildImport(source, request) {
   const escaped = request.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
   const sideEffect = new RegExp(`^[ \\t]*import[ \\t]*(['"])${escaped}\\1[ \\t]*;?[ \\t]*$`, 'u');
@@ -177,6 +181,22 @@ function safeFixtureChildImport(source, request) {
 /** Detect direct literal Chrome launchers without treating help text or refusal messages as launches. */
 function namesChromeLauncher(source) {
   return /\b(?:spawn|spawnSync|exec|execSync|execFile|execFileSync|fork)\s*\(\s*(['"`])[^'"`\r\n]*\b(?:chrome|chromium|playwright|puppeteer)\b/iu.test(source);
+}
+
+/** Detect dynamic process builtin access, which can load launch-capable modules.
+ * @param {string} source
+ * @returns {boolean}
+ */
+function usesDynamicBuiltinLoader(source) {
+  const loaderName = ['getBuiltin', 'Module'].join('');
+  if (source.includes(loaderName) || /getBuiltin\\u(?:004d|\{4d\})odule/iu.test(source)) return true;
+  if (/\bprocess\s*(?:\?\.)?\s*\[\s*(?!(['"])env\1\s*\])/u.test(source)) return true;
+  const aliases = [...source.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*process\b/gu)].map(match => match[1]);
+  return aliases.some(alias => {
+    const escapedAlias = alias.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+    const computedAlias = new RegExp(`\\b${escapedAlias}\\s*(?:\\?\\.)?\\[\\s*(?!(['"])env\\1\\s*\\])`, 'u');
+    return computedAlias.test(source);
+  });
 }
 
 /** Report a one-line explanation when uncertainty reserves browser capacity.
@@ -297,6 +317,8 @@ async function testsNeedBrowserInTree(root, files, committed = null, onFallback)
       if (!sources.length) break;
       if (paths.some((path, index) => (path.startsWith('test/') || SAFE_CHILD_PROCESS_MODULES.has(path))
         && namesChromeLauncher(sources[index]))) return true;
+      const dynamicLoaderIndex = sources.findIndex(usesDynamicBuiltinLoader);
+      if (dynamicLoaderIndex >= 0) return browserFallback(onFallback, paths[dynamicLoaderIndex], 'dynamic process builtin loading can load an unclassified module');
       const commonJsIndex = commonJsIn(sources).findIndex(Boolean);
       if (commonJsIndex >= 0) return browserFallback(onFallback, paths[commonJsIndex], 'CommonJS loading is not statically classified');
       const imports = importsIn(sources);
@@ -309,6 +331,12 @@ async function testsNeedBrowserInTree(root, files, committed = null, onFallback)
             continue;
           }
           if (request === 'node:module') return browserFallback(onFallback, paths[index], 'node:module can create a dynamic loader');
+          if (request === 'node:worker_threads' || request === 'node:cluster') {
+            return browserFallback(onFallback, paths[index], `${request} can launch an unclassified module`);
+          }
+          if (request === 'node:vm' && paths[index] !== 'src/module-imports.js') {
+            return browserFallback(onFallback, paths[index], 'node:vm can evaluate an unclassified module');
+          }
           if (request.startsWith('node:')) continue;
           if (!request.startsWith('.')) return browserFallback(onFallback, paths[index], `non-local import ${request} is not classified`);
           const target = committed
