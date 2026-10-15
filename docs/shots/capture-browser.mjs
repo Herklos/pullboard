@@ -30,6 +30,6 @@ export async function browser(chrome, profile, url) {
 
 /** Wait for this demo's API data and rendered controls before storage writes or selection. */
 export async function waitForDemoBoard(view, repo) {
-  const ready = `typeof data !== 'undefined' && data?.project?.root === ${JSON.stringify(repo)} && data.root === view.root && view.tab === 'items' && data.projects.some(project => project.root === ${JSON.stringify(repo)} && project.ok && project.name === 'Demo board') && data.project.items.some(item => item.id === 1 && item.title === 'Reviewed and accepted' && item.verdicts.some(verdict => verdict.decision === 'REJECT') && item.verdicts.at(-1)?.decision === 'ACCEPT') && !!document.querySelector('#filter-toggle')`;
-  await view.waitFor(ready, 'addressed demo board, populated item history and current Filter control');
+  const ready = `typeof data !== 'undefined' && data?.project?.root === ${JSON.stringify(repo)} && data.root === view.root && view.tab === 'items' && data.projects.some(project => project.root === ${JSON.stringify(repo)} && project.ok && project.name === 'Demo board') && data.project.items.some(item => item.id === 1 && item.title === 'Reviewed and accepted') && !!document.querySelector('#filter-toggle')`;
+  await view.waitFor(ready, 'addressed demo board, reviewed item summary and current Filter control');
 }
