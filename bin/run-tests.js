@@ -398,7 +398,7 @@ function executeTests(args, sandbox, gateMarkers, fullSuite, concurrency) {
   // This is an inner file limit; the real machine gate/browser lease remains unchanged.
   env.PULLBOARD_TEST_BROWSER_RESOURCE = 'test-browser-files:' + randomUUID();
   env.PULLBOARD_TEST_BROWSER_CAPACITY = String(concurrency.browser);
-  delete env.PULLBOARD_TEST_RUNNER_PID;
+  delete env.PULLBOARD_TEST_BROWSER_OWNER_PID;
   let selectedArgs = args;
   if (fullSuite) {
     let files;
@@ -505,7 +505,9 @@ if (process.argv[1] && resolve(process.argv[1]) === runner) {
   await main(process.argv.slice(2));
 } else if (process.argv[1]) {
   process.env.PULLBOARD_TEST_FILE = process.argv[1];
-  if (process.env.PULLBOARD_TEST_BROWSER_RESOURCE && process.ppid === Number(process.env.PULLBOARD_TEST_RUNNER_PID)) {
+  if (process.env.PULLBOARD_TEST_BROWSER_RESOURCE && process.env.NODE_TEST_CONTEXT === 'child-v8' && !process.env.PULLBOARD_TEST_BROWSER_OWNER_PID) {
+    // Each native worker inherits an empty owner; its own forks inherit this PID and must not queue behind it.
+    process.env.PULLBOARD_TEST_BROWSER_OWNER_PID = String(process.pid);
     const { testsNeedBrowser } = await import('../src/browser-admission.js');
     if (await testsNeedBrowser(process.cwd(), [process.argv[1]])) {
       const { takeResource } = await import('../src/resources.js');
@@ -516,7 +518,4 @@ if (process.argv[1] && resolve(process.argv[1]) === runner) {
     }
   }
   installTestWatchdog();
-} else if (process.env.PULLBOARD_TEST_BROWSER_RESOURCE) {
-  // Native --test preloads this module before it creates workers. Forks inside tests do not own file slots.
-  process.env.PULLBOARD_TEST_RUNNER_PID = String(process.pid);
 }
