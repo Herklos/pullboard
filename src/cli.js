@@ -3333,7 +3333,17 @@ async function runCommand(argv, io) {
     }
     if (command === 'gate') {
       const ctx = context(io);
-      const gate = await runGate(ctx.info.root, mainPolicy(ctx.info.root).config, { landing: values.landing, agent: resourceAgent(ctx), onWait: gateWaitReporter(io) });
+      let config;
+      try { config = mainPolicy(ctx.info.root).config; }
+      catch (error) {
+        if (error instanceof Refused && error.code === 'NO_POLICY'
+          && error.message.includes('the coordinator checkout has no commit on ')
+          && existsSync(join(ctx.info.root, CONFIG_FILE))) {
+          throw new Refused('NO_POLICY', `${CONFIG_FILE} is not committed; add and commit the initialized project before running the gate: git add ${CONFIG_FILE}`);
+        }
+        throw error;
+      }
+      const gate = await runGate(ctx.info.root, config, { landing: values.landing, agent: resourceAgent(ctx), onWait: gateWaitReporter(io) });
       io.result?.({ green: gate.isGreen, report: gateReport(gate) });
       io.say(gateReport(gate));
       return gate.isGreen ? 0 : 1;
