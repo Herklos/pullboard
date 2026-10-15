@@ -211,3 +211,17 @@ test('frozen checks classify only explicit source-backed test commands [C7]', as
   assert.equal(await checkNeedsBrowser(root, command, { commit, env: classifyEnv }), false,
     'review checks follow the exact submitted commit rather than a later checkout edit');
 });
+
+test('Unicode ranges do not turn ordinary tests into browser files [C7]', async t => {
+  const root = sourceFixture(t, {
+    'test/plain.test.js': "import '../config.js';",
+    'config.js': String.raw`export const controlCharacters = /[\u0000-\u001f\u007f-\u009f]/u;`,
+    'test/escaped-loader.test.js': String.raw`const load = requ\u0069re;`,
+    'test/escaped-braced-loader.test.js': String.raw`const load = requ\u{69}re;`,
+  });
+  assert.equal(await testsNeedBrowser(root, ['test/plain.test.js']), false,
+    'a control-character regex in a shared config helper does not reserve a browser slot');
+  assert.equal(await testsNeedBrowser(root, ['test/escaped-loader.test.js']), true,
+    'an escaped loader identifier still requires conservative browser admission');
+  assert.equal(await testsNeedBrowser(root, ['test/escaped-braced-loader.test.js']), true);
+});
