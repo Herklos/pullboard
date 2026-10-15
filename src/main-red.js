@@ -167,7 +167,7 @@ export async function compareMainFailures(root, profile, onWait, output = '') {
         await withGateSlot(root, async lease => {
           const measured = await withMainCheckout(root, main.commit, async checkout => {
             const command = `${policy.config.affectedTests.trimEnd()} ${shellWord('./' + path)}`;
-            const run = await runProfiledShellAsync(checkout, command, { gateSlotHeld: true, waitMs: lease.waitMs });
+            const run = await runProfiledShellAsync(checkout, command, { gateLease: lease, waitMs: lease.waitMs });
             return { result: run.isGreen ? 'green' : 'red' };
           });
           if (measured.unavailable) throw new Error(measured.unavailable);
@@ -176,7 +176,7 @@ export async function compareMainFailures(root, profile, onWait, output = '') {
           cache.entries[main.commit] ??= {};
           cache.entries[main.commit][path] = measured;
           writeCache(file, cache);
-        }, { diagnostic: true, onWait });
+        }, { diagnostic: true, browser: true, agent: process.env.PULLBOARD_AGENT, kind: 'main-red', onWait });
       }
       catch (error) { failed ??= error; }
     }

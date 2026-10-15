@@ -182,7 +182,7 @@ function shellWord(value) {
  * @param {string} sandbox
  * @returns {NodeJS.ProcessEnv}
  */
-function testEnvironment(sandbox) {
+function testEnvironment(sandbox, gateMarkers = {}) {
   const home = join(sandbox, 'home');
   const shims = join(sandbox, 'bin');
   mkdirSync(home, { recursive: true });
@@ -223,6 +223,7 @@ function testEnvironment(sandbox) {
   delete env.PULLBOARD_RELAY_TOKEN; // Fixtures must supply their own scoped credentials, never an agent’s live bearer.
   delete env.NODE_TEST_CONTEXT;
   delete env.PULLBOARD_TEST_FILE;
+  Object.assign(env, gateMarkers);
   return env;
 }
 
@@ -277,6 +278,23 @@ function hasTestFiles(args) {
     return true;
   }
   return false;
+}
+
+/** Extract explicit test paths while skipping option values, returning an empty list for discovery. */
+function explicitTestFiles(args) {
+  const files = [];
+  let takesValue = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (takesValue) { takesValue = false; continue; }
+    if (argument === '--') { files.push(...args.slice(index + 1)); break; }
+    if (argument.startsWith('-')) {
+      if (!argument.includes('=')) takesValue = optionTakesValue(argument);
+      continue;
+    }
+    files.push(argument);
+  }
+  return files;
 }
 
 /** Match Node's default test-file patterns against a Git path for this runtime. */
@@ -357,9 +375,8 @@ function shardArguments(args) {
 }
 
 /** Run tests in the disposable environment, preserving a marker only when a parent holds the slot. */
-function executeTests(args, sandbox, gateSlotHeld, fullSuite) {
-  const env = testEnvironment(sandbox);
-  if (gateSlotHeld) env.PULLBOARD_GATE_SLOT_HELD = '1';
+function executeTests(args, sandbox, gateMarkers, fullSuite) {
+  const env = testEnvironment(sandbox, gateMarkers);
   let selectedArgs = args;
   if (fullSuite) {
     let files;
@@ -407,32 +424,54 @@ async function main(args) {
   }
   args = sharding.args;
   const fullSuite = !hasTestFiles(args);
-  const inheritedSlot = process.env.PULLBOARD_GATE_SLOT_HELD === '1';
+  let browser = fullSuite;
+  if (!browser) {
+    const { testsNeedBrowser } = await import('../src/browser-admission.js');
+    browser = await testsNeedBrowser(process.cwd(), explicitTestFiles(args));
+  }
   let signal = null;
   /** Keep sandbox lifetime inside the held lease, including the complete child process. */
-  const run = (gateSlotHeld) => {
+  const run = (gateMarkers) => {
     const sandbox = mkdtempSync(join(tmpdir(), 'pullboard-test-run-'));
     try {
-      const result = executeTests(args, sandbox, gateSlotHeld, fullSuite);
+      const result = executeTests(args, sandbox, gateMarkers, fullSuite);
       signal = result.signal;
       process.exitCode = result.status ?? 1;
     } finally { rmSync(sandbox, { recursive: true, force: true }); }
   };
-  if (inheritedSlot) run(true);
-  else {
-    // Direct runs, focused or full, use the public queue; preload-only imports never call main.
-    const [{ withGateSlot }, { loadMachineSettings }] = await Promise.all([
-      import('../src/gate.js'), import('../src/settings.js'),
-    ]);
-    const capacity = loadMachineSettings().gateSlots;
-    let announced = false;
-    await withGateSlot(process.cwd(), () => run(true), {
-      onWait: ({ holders }) => {
-        if (announced) return;
-        announced = true;
-        process.stderr.write(`waiting for a gate slot: ${holders.length} of ${capacity} in use\n`);
-      },
-    });
+  try {
+    const { GATE_SLOT_HELD_ENV, GATE_SLOT_POOL_ENV, GATE_SLOT_TOKEN_ENV, gateSlotEnvironment, inheritedGateSlot } = await import('../src/resources.js');
+    const scopedMarker = process.env[GATE_SLOT_POOL_ENV] || process.env[GATE_SLOT_TOKEN_ENV];
+    const legacyHeld = process.env[GATE_SLOT_HELD_ENV] === '1';
+    if (scopedMarker) {
+      const inherited = inheritedGateSlot({ root: process.cwd(), browser });
+      if (inherited) run(gateSlotEnvironment(inherited));
+      else await acquire();
+    } else if (legacyHeld) {
+      throw new Error('this legacy gate marker does not identify a live machine gate lease; restart the parent runner with a scoped gate lease');
+    } else await acquire();
+
+    /** Acquire all required capabilities before creating the sandbox or starting test processes. */
+    async function acquire() {
+      // Direct runs use the public queue, requesting gate and browser capacity atomically when needed.
+      const [{ withGateSlot }, { loadMachineSettings }] = await Promise.all([
+        import('../src/gate.js'), import('../src/settings.js'),
+      ]);
+      const capacity = loadMachineSettings().gateSlots;
+      let announced = false;
+      await withGateSlot(process.cwd(), (lease) => run(gateSlotEnvironment(lease)), {
+        browser, kind: fullSuite ? 'gate' : 'focused',
+        onWait: ({ holders }) => {
+          if (announced) return;
+          announced = true;
+          process.stderr.write(`waiting for a gate slot: ${holders.length} of ${capacity} in use\n`);
+        },
+      });
+    }
+  } catch (error) {
+    process.stderr.write(`run-tests: ${error.message}\n`);
+    process.exitCode = 1;
+    return;
   }
   if (signal) process.kill(process.pid, signal);
 }

@@ -46,6 +46,10 @@ function look(sources) {
 
 /** Every place the whole word import appears, in code or not; Unicode letters count as part of a word. */
 const IMPORT = /(?<![\p{ID_Continue}$\u200c\u200d#])import(?![\p{ID_Continue}$\u200c\u200d])/gu;
+/** CommonJS loader words, matched with the same identifier boundaries as import. */
+const COMMON_JS = /(?<![\p{ID_Continue}$\u200c\u200d#])(?:require|createRequire)(?![\p{ID_Continue}$\u200c\u200d])/gu;
+/** Unicode escapes can spell any identifier character, so V8 probes them without decoding source. */
+const UNICODE_ESCAPE = /\\u(?:[\da-fA-F]{4}|\{[\da-fA-F]{1,6}\})/gu;
 
 /** Whitespace and comments, which may sit between import, its parenthesis and its argument. A line comment ends at any line terminator. */
 const GAP = /^(?:\s|\/\/[^\n\r\u2028\u2029]*|\/\*[\s\S]*?\*\/)*/;
@@ -115,5 +119,31 @@ export function importsIn(sources) {
       return isCode && isCall;
     });
     return [...looks[index].imports, ...dynamic.map((at) => dynamicAt(source, at))];
+  });
+}
+
+/** Detect actual CommonJS loader words without executing source; invalid modules are conservatively unknown.
+ *
+ * @param {string[]} sources
+ * @returns {boolean[]}
+ */
+export function commonJsIn(sources) {
+  const occurrences = sources.map((source) => [...new Set([
+    ...[...source.matchAll(COMMON_JS)].map((match) => match.index),
+    ...[...source.matchAll(UNICODE_ESCAPE)].map((match) => match.index),
+  ])]);
+  const variants = sources.flatMap((source, index) =>
+    occurrences[index].map((at) => `${source.slice(0, at)}\u0000${source.slice(at)}`),
+  );
+  const looks = look([...sources, ...variants]);
+  let next = sources.length;
+  return sources.map((source, index) => {
+    if (!looks[index].compiles) return true;
+    let found = false;
+    for (const _at of occurrences[index]) {
+      if (!looks[next].compiles) found = true;
+      next += 1;
+    }
+    return found;
   });
 }

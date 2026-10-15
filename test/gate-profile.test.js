@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
@@ -365,10 +365,12 @@ function waitProfileCleanup(ms) {
 function copyProfileRunner(box) {
   const source = resolve(import.meta.dirname, '..');
   mkdirSync(join(box.repo, 'bin'), { recursive: true });
-  mkdirSync(join(box.repo, 'src'), { recursive: true });
-  for (const file of ['bin/run-tests.js', 'src/person.js', 'src/refused.js']) {
-    writeFileSync(join(box.repo, file), readFileSync(join(source, file)));
-  }
+  writeFileSync(join(box.repo, 'bin/run-tests.js'), readFileSync(join(source, 'bin/run-tests.js')));
+  const fixtureSource = join(box.repo, 'src');
+  if (existsSync(fixtureSource)) {
+    assert.deepEqual(readdirSync(fixtureSource), [], 'the profile fixture has no local source files to overwrite');
+  } else mkdirSync(fixtureSource, { recursive: true });
+  cpSync(join(source, 'src'), fixtureSource, { recursive: true });
 }
 
 /** Run one real submission with an optional real machine-slot wait and await every owned child. */

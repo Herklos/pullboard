@@ -5,10 +5,12 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
+import { pathToFileURL } from 'node:url';
 import { GATE_SLOT_HELD_ENV } from '../src/resources.js';
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
 const RUNNER = resolve(import.meta.dirname, '../bin/run-tests.js');
+const GATE_MODULE = pathToFileURL(resolve(import.meta.dirname, '../src/gate.js')).href;
 const PROBE_NAME = 'machine gate slot runner probe [Q4]';
 const PROBE_PATTERN = '^machine gate slot runner probe \\[Q4\\]$';
 const PROBE_PATH_ENV = 'PULLBOARD_GATE_RESOURCE_PROBE_PATH';
@@ -70,6 +72,33 @@ function launchTestRunner(box, root, args, marker, release, extraEnv = {}) {
   return child;
 }
 
+/** Launch a real process that holds the production diagnostic resource class until released. */
+function launchDiagnostic(box, root, name, started, release, waiting) {
+  const script = join(box.dir, `${name}.mjs`);
+  writeFileSync(script, `import { existsSync, renameSync, writeFileSync } from 'node:fs';
+import { withGateSlot } from ${JSON.stringify(GATE_MODULE)};
+/** Publish a complete handshake so its visible file always contains its value. */
+function publish(file, value) { writeFileSync(file + '.tmp', value); renameSync(file + '.tmp', file); }
+await withGateSlot(process.cwd(), async () => {
+  publish(${JSON.stringify(started)}, 'started');
+  while (!existsSync(${JSON.stringify(release)})) await new Promise(done => setTimeout(done, 10));
+}, { diagnostic: true, kind: 'main-red', agent: ${JSON.stringify(name)}, onWait: state => publish(${JSON.stringify(waiting)}, String(state.position)) });
+`);
+  const child = spawn(process.execPath, [script], { cwd: root, env: box.env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  child.stdoutText = '';
+  child.stderrText = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', chunk => { child.stdoutText += chunk; });
+  child.stderr.on('data', chunk => { child.stderrText += chunk; });
+  CHILDREN.add(child);
+  child.closed = new Promise(resolveClose => child.once('close', (code, signal) => {
+    CHILDREN.delete(child);
+    resolveClose({ code, signal });
+  }));
+  return child;
+}
+
 /** Create a clean gate repo whose start and end record observable execution, optionally waiting for a release file. */
 function gateRepo(box, name, delay = 0.25, releaseFile = null) {
   const root = join(box.dir, name);
@@ -102,8 +131,8 @@ function launch(box, root, args = ['gate']) {
   return child;
 }
 
-/** Create a real claimed item with a failing-at-baseline check that leaves an execution marker. */
-function checkProject(box) {
+/** Create a real claimed item whose check can pause after admission and leave an execution marker. */
+function checkProject(box, { releaseCheck = null } = {}) {
   const root = join(box.dir, 'check-project');
   const runner = join(box.dir, 'check-runner');
   const script = join(box.dir, 'item-check.cjs');
@@ -126,10 +155,14 @@ function checkProject(box) {
   assert.equal(spawnSync('git', ['worktree', 'add', '-q', runner, '-b', 'web/runner'], { cwd: root, env: box.env }).status, 0);
   const joined = spawnSync(process.execPath, [BIN, 'join', 'web'], { cwd: runner, env: box.env, encoding: 'utf8' });
   assert.equal(joined.status, 0, joined.stderr);
-  writeFileSync(script, `const fs = require('node:fs'); fs.appendFileSync(${JSON.stringify(box.events)}, 'item check\\n'); process.exitCode = fs.existsSync('web/result.txt') ? 0 : 1;\n`);
+  writeFileSync(script, releaseCheck
+    ? `const fs = require('node:fs');\n(async () => {\n  fs.appendFileSync(${JSON.stringify(box.events)}, 'item check start\\n');\n  while (!fs.existsSync(${JSON.stringify(releaseCheck)})) await new Promise(done => setTimeout(done, 10));\n  fs.appendFileSync(${JSON.stringify(box.events)}, 'item check\\n');\n  process.exitCode = fs.existsSync('web/result.txt') ? 0 : 1;\n})();\n`
+    : `const fs = require('node:fs'); fs.appendFileSync(${JSON.stringify(box.events)}, 'item check\\n'); process.exitCode = fs.existsSync('web/result.txt') ? 0 : 1;\n`);
+  if (releaseCheck) writeFileSync(releaseCheck, 'baseline runs without a hold\n');
   const added = spawnSync(process.execPath, [BIN, 'add', 'web', 'Check item', '--specs', 'G1', '--route', 'light', '--criterion', 'the item check runs', '--check', `node '${script}'`, '--wait', '--brief', 'Files: web/result.txt\nTest: run the item check and observe its result.'], { cwd: root, env: box.env, encoding: 'utf8' });
   assert.equal(added.status, 0, added.stderr);
   assert.equal(spawnSync(process.execPath, [BIN, 'claim', '1'], { cwd: runner, env: box.env }).status, 0);
+  if (releaseCheck) rmSync(releaseCheck, { force: true });
   writeFileSync(box.events, '');
   return { root, runner };
 }
@@ -302,12 +335,13 @@ test('[Q4] SIGKILL during a gate releases its machine slot for the next process'
   assert.ok(events(box).includes('next start'));
 });
 
-test('[Q1,Q2,V18] item checks wait for a gate slot and ordinary gates precede them', async () => {
+test('[Q1,Q2,V18] an older item check keeps its place ahead of a later ordinary gate', async () => {
   const box = fixture();
   const release = join(box.dir, 'release-holder');
+  const checkRelease = join(box.dir, 'release-item-check');
   const firstRoot = gateRepo(box, 'slot-holder', 0.1, release);
   const nextRoot = gateRepo(box, 'ordinary-gate', 0.15);
-  const { root, runner } = checkProject(box);
+  const { root, runner } = checkProject(box, { releaseCheck: checkRelease });
   assert.equal(spawnSync(process.execPath, [BIN, 'settings', 'gateSlots', '1'], { cwd: firstRoot, env: box.env }).status, 0);
 
   const first = launch(box, firstRoot);
@@ -319,18 +353,21 @@ test('[Q1,Q2,V18] item checks wait for a gate slot and ordinary gates precede th
   assert.deepEqual(events(box), ['slot-holder start'], 'the item check command has not started while the gate holds the slot');
   const ordinary = launch(box, nextRoot);
   await waitFor(() => /place [12]/u.test(ordinary.stdoutText), 'the later ordinary gate to enter the queue');
-  assert.ok(ordinary.stdoutText.includes('place 1'), 'the ordinary gate is granted priority over the queued item check');
+  assert.ok(ordinary.stdoutText.includes('place 2'), 'the later ordinary gate stays second behind the item check');
   assert.deepEqual(events(box), ['slot-holder start'], 'neither queued command runs before the holder releases');
 
   writeFileSync(release, 'release\n');
-  await waitFor(() => events(box).includes('ordinary-gate start'), 'the waiting ordinary gate to acquire the released slot');
-  assert.equal(events(box).includes('item check'), false, 'the ordinary gate starts before the lower-priority item check');
+  await waitFor(() => events(box).includes('item check start'), 'the older item check to acquire the released slot');
+  assert.equal(events(box).includes('ordinary-gate start'), false, 'the later ordinary gate stays behind the older item check');
+  writeFileSync(checkRelease, 'release\n');
+  await waitFor(() => events(box).includes('item check'), 'the older item check to release its slot');
+  await waitFor(() => events(box).includes('ordinary-gate start'), 'the later ordinary gate to acquire after the item check');
   await waitFor(() => events(box).includes('ordinary-gate end'), 'the ordinary gate to finish');
   const [firstResult, ordinaryResult, checkResult] = await Promise.all([first.closed, ordinary.closed, check.closed]);
   assert.equal(firstResult.code, 0);
   assert.equal(ordinaryResult.code, 0, ordinary.stderrText);
   assert.equal(checkResult.code, 1, check.stderrText);
-  assert.deepEqual(events(box), ['slot-holder start', 'slot-holder end', 'ordinary-gate start', 'ordinary-gate end', 'item check']);
+  assert.deepEqual(events(box), ['slot-holder start', 'slot-holder end', 'item check start', 'item check', 'ordinary-gate start', 'ordinary-gate end']);
 
   mkdirSync(join(runner, 'web'));
   writeFileSync(join(runner, 'web', 'result.txt'), 'ready\n');
@@ -339,6 +376,7 @@ test('[Q1,Q2,V18] item checks wait for a gate slot and ordinary gates precede th
   assert.equal(commit.status, 0, commit.stderr);
   const submitted = spawnSync(process.execPath, [BIN, 'submit', '1'], { cwd: runner, env: box.env, encoding: 'utf8' });
   assert.equal(submitted.status, 0, submitted.stderr);
+  rmSync(checkRelease, { force: true });
   const review = join(box.dir, 'check-review');
   const itemCommit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: runner, env: box.env, encoding: 'utf8' }).stdout.trim();
   assert.equal(spawnSync('git', ['worktree', 'add', '-q', '--detach', review, itemCommit], { cwd: root, env: box.env }).status, 0);
@@ -348,26 +386,69 @@ test('[Q1,Q2,V18] item checks wait for a gate slot and ordinary gates precede th
   writeFileSync(box.events, '');
   const verifyRelease = join(box.dir, 'release-verify-holder');
   const verifyHolderRoot = gateRepo(box, 'verify-holder', 0.1, verifyRelease);
-  const verifyNextRoot = gateRepo(box, 'verify-next-gate', 0.15);
+  const verifyFocusedRoot = probeSuite(box, 'verify-focused-suite');
+  const verifyFocusedMarker = join(box.dir, 'verify-focused.started');
+  const verifyFocusedRelease = join(box.dir, 'release-verify-focused');
   const verifyHolder = launch(box, verifyHolderRoot);
   await waitFor(() => events(box).includes('verify-holder start') && !events(box).includes('verify-holder end'), 'a gate to hold the slot before accepting an item');
   const verify = launch(box, review, ['verify', '1', 'accept', '--note', 'queue fixture']);
   await waitFor(() => verify.stdoutText.includes('place 1') || verify.exitCode !== null, 'verify accept to queue for the gate slot');
   assert.ok(verify.stdoutText.includes('place 1'), 'verify accept prints its queued gate-slot position');
   assert.match(verify.stdoutText, /gate waiting:/);
-  const verifyNext = launch(box, verifyNextRoot);
-  await waitFor(() => /place [12]/u.test(verifyNext.stdoutText), 'the ordinary gate to enter the queue ahead of accept');
-  assert.ok(verifyNext.stdoutText.includes('place 1'), 'the ordinary gate is granted priority over the queued accept check');
+  const verifyNext = launchTestRunner(box, verifyFocusedRoot, ['--test-name-pattern', PROBE_PATTERN, 'test/probe.test.js'], verifyFocusedMarker, verifyFocusedRelease);
+  await waitFor(() => /waiting for a gate slot:/u.test(verifyNext.stderrText) || verifyNext.exitCode !== null, 'the later focused run to enter the queue');
+  assert.equal(existsSync(verifyFocusedMarker), false, 'the focused run has not started while the holder owns the slot');
   assert.equal(events(box).includes('item check'), false);
   writeFileSync(verifyRelease, 'release\n');
-  await waitFor(() => events(box).includes('verify-next-gate start'), 'the waiting ordinary gate to acquire before accept');
-  assert.equal(events(box).includes('item check'), false);
-  await waitFor(() => events(box).includes('verify-next-gate end'), 'the ordinary gate before accept to finish');
-  const [verifyHolderResult, verifyNextResult, verifyResult] = await Promise.all([verifyHolder.closed, verifyNext.closed, verify.closed]);
+  await waitFor(() => events(box).includes('item check start'), 'the older verify check to acquire the released slot');
+  assert.equal(existsSync(verifyFocusedMarker), false, 'the later focused run stays behind review');
+  writeFileSync(checkRelease, 'release\n');
+  await waitFor(() => events(box).includes('item check'), 'the verify check to release its slot');
+  await waitFor(() => existsSync(verifyFocusedMarker), 'the focused run to start after review releases');
+  const verifyRun = await verify.closed;
+  assert.equal(verifyRun.code, 0, `${verify.stderrText}${verify.stdoutText}`);
+  writeFileSync(verifyFocusedRelease, 'release\n');
+  const [verifyHolderResult, verifyNextResult] = await Promise.all([verifyHolder.closed, verifyNext.closed]);
   assert.equal(verifyHolderResult.code, 0);
-  assert.equal(verifyNextResult.code, 0, verifyNext.stderrText);
-  assert.equal(verifyResult.code, 0, `${verify.stderrText}${verify.stdoutText}`);
-  assert.deepEqual(events(box), ['verify-holder start', 'verify-holder end', 'verify-next-gate start', 'verify-next-gate end', 'item check']);
+  assert.equal(verifyNextResult.code, 0, verifyNext.stderrText + verifyNext.stdoutText);
+  assert.deepEqual(events(box), ['verify-holder start', 'verify-holder end', 'item check start', 'item check']);
+});
+
+test('[Q1,Q2] an older diagnostic stays ahead of a later ordinary gate', async () => {
+  const box = fixture();
+  const holderRelease = join(box.dir, 'release-diagnostic-holder');
+  const diagnosticRelease = join(box.dir, 'release-diagnostic');
+  const diagnosticStarted = join(box.dir, 'older-diagnostic.started');
+  const diagnosticWaiting = join(box.dir, 'older-diagnostic.waiting');
+  const holderRoot = gateRepo(box, 'diagnostic-holder', 0.1, holderRelease);
+  const ordinaryRoot = gateRepo(box, 'later-ordinary-gate', 0.1);
+  setOneGateSlot(box, holderRoot);
+  const holder = launch(box, holderRoot);
+  let diagnostic;
+  let ordinary;
+  try {
+    await waitFor(() => events(box).includes('diagnostic-holder start'), 'the holder to acquire the only gate slot');
+    diagnostic = launchDiagnostic(box, holderRoot, 'older-diagnostic', diagnosticStarted, diagnosticRelease, diagnosticWaiting);
+    await waitFor(() => existsSync(diagnosticWaiting) || diagnostic.exitCode !== null, 'the older diagnostic to enter the queue');
+    assert.equal(readFileSync(diagnosticWaiting, 'utf8'), '1', 'diagnostic is first in the waiting line');
+    ordinary = launch(box, ordinaryRoot);
+    await waitFor(() => ordinary.stdoutText.includes('place 2') || ordinary.exitCode !== null, 'the later ordinary gate to join behind the diagnostic');
+    assert.ok(ordinary.stdoutText.includes('place 2'), 'the ordinary gate is physically second in the queue');
+    writeFileSync(holderRelease, 'release\n');
+    await waitFor(() => existsSync(diagnosticStarted), 'the older diagnostic to acquire the released slot');
+    assert.equal(events(box).includes('later-ordinary-gate start'), false, 'the later ordinary gate stays queued while diagnostics hold the slot');
+    writeFileSync(diagnosticRelease, 'release\n');
+    await waitFor(() => events(box).includes('later-ordinary-gate start'), 'the ordinary gate to start after diagnostics release');
+    const [holderResult, diagnosticResult, ordinaryResult] = await Promise.all([holder.closed, diagnostic.closed, ordinary.closed]);
+    assert.equal(holderResult.code, 0, holder.stderrText);
+    assert.equal(diagnosticResult.code, 0, diagnostic.stderrText + diagnostic.stdoutText);
+    assert.equal(ordinaryResult.code, 0, ordinary.stderrText);
+    assert.deepEqual(events(box), ['diagnostic-holder start', 'diagnostic-holder end', 'later-ordinary-gate start', 'later-ordinary-gate end']);
+  } finally {
+    writeFileSync(holderRelease, 'release\n');
+    writeFileSync(diagnosticRelease, 'release\n');
+    await Promise.all([holder, diagnostic, ordinary].filter(Boolean).map(child => child.closed));
+  }
 });
 
 test('a raw full-suite run takes a machine gate slot [Q4]', async () => {
