@@ -2,8 +2,8 @@
 /**
  * Run the test suite with a private home, no inherited Git identity or config, and a refusing CLI shim.
  */
-import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { delimiter, join, resolve } from 'node:path';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -21,6 +21,7 @@ export const DEFAULT_TEST_TIMEOUT_MS = 660_000;
 export const DEFAULT_TEST_FILE_TIMEOUT_MS = 30_000;
 // Worker identity startup retries stay below the ordinary per-file ceiling even if ps is unavailable.
 const LANDING_WORKER_IDENTITY_TIMEOUT_MS = 12_000;
+const LANDING_CHILD_CUSTODY_TIMEOUT_MS = 12_000;
 
 const watchdogSource = `
 const { parentPort } = require('node:worker_threads');
@@ -403,11 +404,19 @@ function landingProcessTable() {
   return parseLandingProcessTable(output);
 }
 
+/** Mark a worker identity retry interrupted by the runner's explicit SIGTERM cancellation. */
+function landingWorkerCancellationError(cause) {
+  const error = new Error('landing test worker identity retry was interrupted', cause ? { cause } : undefined);
+  error.code = 'LANDING_CANCELLED';
+  return error;
+}
+
 /** Retry a worker's initial process-identity receipt without blocking its event loop or exceeding the file-start ceiling. */
 async function landingWorkerIdentity(pid, timeoutMs = LANDING_WORKER_IDENTITY_TIMEOUT_MS) {
   if (process.platform === 'win32') return null;
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
+  let retryNoticeReported = false;
   let stopping = false;
   let snapshotChild = null;
   const stopSnapshot = () => {
@@ -417,7 +426,7 @@ async function landingWorkerIdentity(pid, timeoutMs = LANDING_WORKER_IDENTITY_TI
   process.once('SIGTERM', stopSnapshot);
   try {
     while (Date.now() < deadline) {
-      if (stopping) throw new Error('landing test worker identity retry was interrupted');
+      if (stopping) throw landingWorkerCancellationError();
       const remaining = deadline - Date.now();
       if (remaining <= 0) break;
       try {
@@ -431,20 +440,31 @@ async function landingWorkerIdentity(pid, timeoutMs = LANDING_WORKER_IDENTITY_TI
           snapshotChild = child;
           if (stopping) child.kill('SIGTERM');
         });
+        if (stopping) throw landingWorkerCancellationError();
         const identity = parseLandingProcessTable(output).find(processInfo => processInfo.pid === pid);
-        if (identity) return identity;
+        if (identity) {
+          if (stopping) throw landingWorkerCancellationError();
+          return identity;
+        }
       } catch (error) {
-        if (stopping) throw new Error('landing test worker identity retry was interrupted', { cause: error });
-        const snapshotTimedOut = error.code === 'ETIMEDOUT' || (error.killed === true && error.signal === 'SIGTERM'
-          && error.cmd === 'ps -axo pid=,ppid=,pgid=,stat=,lstart=,command=');
-        if (!snapshotTimedOut) throw error;
+        if (stopping || error.code === 'LANDING_CANCELLED') throw landingWorkerCancellationError(error);
         lastError = error;
-        process.stderr.write('run-tests: worker identity snapshot timed out; retrying before file execution\n');
+        if (!retryNoticeReported) {
+          retryNoticeReported = true;
+          const timedOut = error.code === 'ETIMEDOUT' || (error.killed === true && error.signal === 'SIGTERM'
+            && error.cmd === 'ps -axo pid=,ppid=,pgid=,stat=,lstart=,command=');
+          process.stderr.write(timedOut
+            ? 'run-tests: worker identity snapshot timed out; retrying before file execution\n'
+            : `run-tests: worker identity snapshot failed (${error.code ?? 'unknown'}); retrying before file execution\n`);
+        }
       }
       const wait = Math.min(100, deadline - Date.now());
       if (wait > 0) await new Promise(resolveReady => setTimeout(resolveReady, wait));
     }
-    throw new Error(`landing test worker identity was unavailable within ${timeoutMs}ms`, { cause: lastError });
+    if (stopping) throw landingWorkerCancellationError();
+    const unavailable = new Error(`landing test worker identity was unavailable within ${timeoutMs}ms`, { cause: lastError });
+    unavailable.code = 'LANDING_IDENTITY_UNAVAILABLE';
+    throw unavailable;
   } finally {
     process.off('SIGTERM', stopSnapshot);
     snapshotChild = null;
@@ -478,7 +498,44 @@ function landingWorkerDescendants(workerRoots, processes = landingProcessTable()
   return found;
 }
 
-/** Journal detached child identities at spawn time, before a short-lived worker can exit. */
+/** Confirm a direct child is the announced Node worker for exactly one selected test file. */
+function landingWorkerCommandMatchesFile(processInfo, file) {
+  const command = processInfo.command.trimEnd();
+  const executable = command.match(/^(?:"([^"]+)"|'([^']+)'|(\S+))/u);
+  if (!executable) return false;
+  const executablePath = executable[1] ?? executable[2] ?? executable[3];
+  if (basename(executablePath) !== basename(process.execPath)) return false;
+  let offset = command.indexOf(file);
+  while (offset !== -1) {
+    const before = offset === 0 || /[\s"']/u.test(command[offset - 1]);
+    const afterIndex = offset + file.length;
+    const after = afterIndex === command.length || /[\s"']/u.test(command[afterIndex]);
+    if (before && after) return true;
+    offset = command.indexOf(file, offset + 1);
+  }
+  return false;
+}
+
+/** Match an announced ChildProcess spawn to the fresh command line without trusting its PID alone. */
+function landingChildCommandMatchesSpawn(processInfo, receipt) {
+  const command = processInfo.command.trimEnd();
+  const executable = command.match(/^(?:"([^"]+)"|'([^']+)'|(\S+))/u);
+  if (!executable || basename(executable[1] ?? executable[2] ?? executable[3]) !== basename(receipt.spawnFile ?? '')) return false;
+  return receipt.spawnArgs.slice(1).every(argument => {
+    if (typeof argument !== 'string' || !argument) return false;
+    let offset = command.indexOf(argument);
+    while (offset !== -1) {
+      const before = offset === 0 || /[\s"']/u.test(command[offset - 1]);
+      const afterIndex = offset + argument.length;
+      const after = afterIndex === command.length || /[\s"']/u.test(command[afterIndex]);
+      if (before && after) return true;
+      offset = command.indexOf(argument, offset + 1);
+    }
+    return false;
+  });
+}
+
+/** Keep the established healthy-worker path: snapshot only detached children at spawn time. */
 function watchLandingChildSpawns(startsPath, attempt) {
   let recording = false;
   channel('child_process').subscribe(({ process: child }) => {
@@ -500,9 +557,105 @@ function watchLandingChildSpawns(startsPath, attempt) {
   });
 }
 
+/** Publish child announcements without inspection, then retain degraded-worker custody until the parent responds. */
+function watchLandingChildCustody(startsPath, attempt) {
+  let sequence = 0;
+  const pending = new Map();
+  let poll = null;
+  let announcementFailureDeadline = null;
+  let announcedUnavailable = false;
+  let announcementFailureReportedToParent = false;
+  const directory = dirname(startsPath);
+  const prefix = `${basename(startsPath)}.child.${attempt}.${process.pid}.`;
+  const pollAcks = () => {
+    if (!pending.size && announcementFailureDeadline === null) return;
+    try {
+      for (const name of readdirSync(directory)) {
+        if (!name.startsWith(prefix) || !name.endsWith('.json')) continue;
+        const recordPath = join(directory, name);
+        if (!existsSync(`${recordPath}.ack`)) continue;
+        const record = JSON.parse(readFileSync(recordPath, 'utf8'));
+        const ack = JSON.parse(readFileSync(`${recordPath}.ack`, 'utf8'));
+        if (record.attempt !== attempt || record.parentPid !== process.pid
+            || ack.attempt !== attempt || ack.parentPid !== process.pid || ack.pid !== record.pid
+            || !['bound', 'drained', 'unverified'].includes(ack.status)) continue;
+        pending.delete(recordPath);
+        renameSync(`${recordPath}.ack`, `${recordPath}.acked`);
+      }
+    } catch { /* An unreadable acknowledgement retains worker custody. */ }
+    const now = Date.now();
+    const expired = [...pending].filter(([, deadline]) => now >= deadline).map(([path]) => path);
+    if (expired.length) {
+      for (const recordPath of expired) {
+        pending.delete(recordPath);
+        try {
+          const marker = `${recordPath}.expired`;
+          if (!existsSync(marker)) writeFileSync(marker, JSON.stringify({ attempt, parentPid: process.pid,
+            expiredAt: new Date(now).toISOString() }), { mode: 0o600, flag: 'wx' });
+        } catch { /* Parent-side cleanup reports uncertainty from the original child receipt. */ }
+      }
+    }
+    if (announcementFailureDeadline !== null && now >= announcementFailureDeadline && !announcedUnavailable) {
+      announcedUnavailable = true;
+      if (!announcementFailureReportedToParent) {
+        process.stderr.write('run-tests: cleanup for selected test file UNVERIFIED: child ownership announcement failed; no unverified process was signaled\n');
+      }
+    }
+    if (!pending.size && (announcementFailureDeadline === null || announcedUnavailable) && poll) { clearInterval(poll); poll = null; }
+  };
+  channel('child_process').subscribe(({ process: child }) => {
+    if (!child || typeof child.once !== 'function') return;
+    child.once('spawn', () => {
+      if (!Number.isInteger(child.pid)) return;
+      const recordPath = join(directory, `${prefix}${sequence++}.${randomUUID()}.json`);
+      const record = { type: 'child-pending', attempt, file: process.env.PULLBOARD_TEST_FILE,
+        parentPid: process.pid, pid: child.pid, spawnFile: child.spawnfile,
+        spawnArgs: Array.isArray(child.spawnargs) ? child.spawnargs : [] };
+      try {
+        const temporary = `${recordPath}.tmp`;
+        writeFileSync(temporary, JSON.stringify(record), { mode: 0o600, flag: 'wx' });
+        renameSync(temporary, recordPath);
+        pending.set(recordPath, Date.now() + LANDING_CHILD_CUSTODY_TIMEOUT_MS);
+        if (!poll) poll = setInterval(pollAcks, 25);
+      } catch (error) {
+        announcementFailureDeadline ??= Date.now() + LANDING_CHILD_CUSTODY_TIMEOUT_MS;
+        const code = String(error?.code ?? 'announcement-error').replace(/[\u0000-\u001f\u007f]/gu, ' ').slice(0, 80);
+        const reason = String(error?.message ?? error).replace(/[\u0000-\u001f\u007f]/gu, ' ').slice(0, 256);
+        let failurePublished = false;
+        try {
+          const failed = `${recordPath}.failure.json`;
+          const temporary = `${failed}.${randomUUID()}.tmp`;
+          writeFileSync(temporary, JSON.stringify({ type: 'child-announcement-failed', attempt,
+            file: record.file, parentPid: process.pid, pid: child.pid, code, reason }), { mode: 0o600, flag: 'wx' });
+          renameSync(temporary, failed);
+          failurePublished = true;
+        } catch { /* The worker still releases on its bounded timer; no process is signaled by guess. */ }
+        try {
+          appendFileSync(startsPath, `${JSON.stringify({ type: 'child-announcement-unavailable', attempt,
+            file: record.file, parentPid: process.pid, pid: child.pid, code, reason })}\n`);
+          failurePublished = true;
+        } catch { /* Worker stderr is the last bounded diagnostic fallback. */ }
+        announcementFailureReportedToParent ||= failurePublished;
+        if (!poll) poll = setInterval(pollAcks, 25);
+      }
+    });
+  });
+}
+
 /** Match a PID to its captured identity so cleanup never signals a reused PID. */
 function sameProcessIdentity(candidate, captured) {
   return candidate && candidate.pid === captured.pid && candidate.pgid === captured.pgid && candidate.started === captured.started;
+}
+
+/** Publish an acknowledgement only after the parent has bound a child identity or observed a previously bound exit. */
+function writeChildAcknowledgement(recordPath, receipt, identity, status) {
+  const acknowledgement = `${recordPath}.ack`;
+  if (existsSync(acknowledgement) || existsSync(`${recordPath}.acked`)) return;
+  const temporary = `${acknowledgement}.${randomUUID()}.tmp`;
+  writeFileSync(temporary, JSON.stringify({ attempt: receipt.attempt, parentPid: receipt.parentPid,
+    pid: receipt.pid, status, identity }), { mode: 0o600, flag: 'wx' });
+  try { renameSync(temporary, acknowledgement); }
+  catch (error) { rmSync(temporary, { force: true }); if (error.code !== 'EEXIST') throw error; }
 }
 
 /** Read only complete append-only worker journal rows while workers may be writing. */
@@ -513,23 +666,19 @@ function landingWorkerReceipts(path) {
 }
 
 /** Terminate owned descendants as the live receipt set grows, then wait for the run and every identity to drain. */
-async function drainLandingWorkerDescendants(ownedDescendants, refreshOwnedDescendants, runFinished) {
+async function drainLandingWorkerDescendants(ownedDescendants, refreshOwnedDescendants, runFinished, reportUnverified, cleanupDeadline) {
   let firstError = null;
-  let snapshotTimeoutReported = false;
+  let snapshotFailureSince = null;
+  let lastSnapshotError = null;
   const rememberError = error => {
     firstError ??= error;
     if (firstError === error) {
       process.stderr.write(`run-tests: descendant cleanup encountered ${error.message}; retaining the gate slot until captured processes drain\n`);
     }
   };
-  // A missed observation proves neither a leak nor an empty process table. Retry it;
-  // only a later successful census can authorize signaling or release the lease.
   const rememberSnapshotError = error => {
-    if (error.code !== 'ETIMEDOUT') { rememberError(error); return; }
-    if (!snapshotTimeoutReported) {
-      snapshotTimeoutReported = true;
-      process.stderr.write('run-tests: process snapshot timed out; retrying ownership census before gate-slot release\n');
-    }
+    snapshotFailureSince ??= Date.now();
+    lastSnapshotError = error;
   };
   const snapshot = () => {
     try { return new Map(landingProcessTable().map(processInfo => [processInfo.pid, processInfo])); }
@@ -568,13 +717,20 @@ async function drainLandingWorkerDescendants(ownedDescendants, refreshOwnedDesce
   const signalState = new Map();
   let nextSignal = 0;
   let runFinishedWithoutOwnedProcesses = false;
+  let unresolvedSince = null;
   while (true) {
     let captureSucceeded = false;
     try {
-      refreshOwnedDescendants();
-      captureSucceeded = true;
+      captureSucceeded = refreshOwnedDescendants() !== false;
     } catch (error) { rememberSnapshotError(error); }
+    if (captureSucceeded) unresolvedSince = null;
+    else unresolvedSince ??= Date.now();
     const stillOwned = remaining();
+    if (captureSucceeded && stillOwned) { snapshotFailureSince = null; lastSnapshotError = null; }
+    if ((snapshotFailureSince || unresolvedSince) && Date.now() >= cleanupDeadline) {
+      reportUnverified(lastSnapshotError);
+      break;
+    }
     if (runFinished() && captureSucceeded && stillOwned && stillOwned.length === 0) {
       if (runFinishedWithoutOwnedProcesses) break;
       runFinishedWithoutOwnedProcesses = true;
@@ -666,28 +822,138 @@ async function runLandingTests(args, env) {
   let reportersEnded = false;
   let abortCleaned = false;
   let abortPromise = null;
+  let cleanupDeadline = null;
   let workerDrain = Promise.resolve();
   let runFinished = false;
   const ownedDescendants = new Map();
-  let snapshotTimeoutReported = false;
+  const pendingWorkerBindings = new Map();
+  const pendingChildBindings = new Map();
+  const unverifiedChildBindings = new Set();
+  const acknowledgedChildDrains = new Set();
+  const selectedFileSet = new Set(selectedFiles ?? []);
+  let cleanupUnverifiedReported = false;
+  let lastCleanupSnapshotError = null;
+  const cleanupUnverifiedFiles = new Set();
+  const reportCleanupUnverified = error => {
+    if (cleanupUnverifiedReported) return;
+    cleanupUnverifiedReported = true;
+    const files = [...cleanupUnverifiedFiles].map(file => basename(file));
+    const fallbackFiles = [...selectedFileSet].map(file => basename(file));
+    const namedFiles = files.length ? files : fallbackFiles;
+    const shownFiles = namedFiles.slice(0, 12);
+    const subject = shownFiles.length ? `${shownFiles.join(', ')}${namedFiles.length > shownFiles.length ? ` (+${namedFiles.length - shownFiles.length} more)` : ''}` : 'selected test files';
+    const code = String(error?.code ?? 'snapshot-unavailable')
+      .replace(/[\u0000-\u001f\u007f]/gu, ' ').slice(0, 80);
+    const detail = String(error?.message ?? 'process identity census unavailable')
+      .replace(/[\u0000-\u001f\u007f]/gu, ' ').slice(0, 256);
+    const reason = detail === code ? code : `${code}: ${detail}`;
+    process.stderr.write(`run-tests: cleanup for ${subject} UNVERIFIED: ${reason}; no unverified process was signaled\n`);
+  };
   const rememberSnapshotError = error => {
-    if (error.code !== 'ETIMEDOUT') { reporterError ??= error; return; }
-    if (!snapshotTimeoutReported) {
-      snapshotTimeoutReported = true;
-      process.stderr.write('run-tests: process snapshot timed out; awaiting a successful ownership census\n');
-    }
+    lastCleanupSnapshotError = error;
   };
   const captureOwnedDescendants = () => {
     const processes = landingProcessTable();
     const receipts = landingWorkerReceipts(workerStartsPath).filter(receipt => receipt.attempt === attempt);
-    const workerRoots = receipts.filter(receipt => receipt.type === 'worker' && sameProcessIdentity(
-      processes.find(processInfo => processInfo.pid === receipt.pid), receipt));
     const current = new Map(processes.map(processInfo => [processInfo.pid, processInfo]));
+    const workerRoots = receipts.filter(receipt => receipt.type === 'worker' && selectedFileSet.has(receipt.file)
+      && sameProcessIdentity(current.get(receipt.pid), receipt));
+    for (const receipt of receipts) {
+      if (receipt.type !== 'worker-pending' || !selectedFileSet.has(receipt.file)
+          || receipt.parentPid !== process.pid || !Number.isInteger(receipt.pid)) continue;
+      const key = `${receipt.attempt}:${receipt.pid}:${receipt.file}`;
+      const previouslyBound = pendingWorkerBindings.get(key);
+      if (previouslyBound) {
+        if (sameProcessIdentity(current.get(previouslyBound.pid), previouslyBound)) workerRoots.push(previouslyBound);
+        continue;
+      }
+      const candidate = current.get(receipt.pid);
+      if (!candidate || candidate.ppid !== process.pid || candidate.state.startsWith('Z')
+          || !Number.isInteger(candidate.pgid) || !candidate.started
+          || !landingWorkerCommandMatchesFile(candidate, receipt.file)) continue;
+      // Bind an announcement once. A later process reusing this PID can never replace it.
+      pendingWorkerBindings.set(key, candidate);
+      workerRoots.push(candidate);
+      appendFileSync(workerStartsPath, `${JSON.stringify({ type: 'worker-bound', attempt, file: receipt.file,
+        pid: candidate.pid, parentPid: process.pid, pgid: candidate.pgid, started: candidate.started })}\n`);
+    }
+    const workerByPid = new Map(workerRoots.map(root => [root.pid, root]));
+    let unsettledChild = false;
+    for (const receipt of receipts) {
+      if (receipt.type !== 'child-announcement-unavailable' || !selectedFileSet.has(receipt.file)) continue;
+      unsettledChild = true;
+      cleanupUnverifiedFiles.add(receipt.file);
+      lastCleanupSnapshotError = { code: receipt.code, message: receipt.reason };
+    }
+    for (const name of readdirSync(dirname(workerStartsPath))) {
+      const prefix = `${basename(workerStartsPath)}.child.${attempt}.`;
+      if (!name.startsWith(prefix) || !name.endsWith('.json')) continue;
+      const recordPath = join(dirname(workerStartsPath), name);
+      let receipt;
+      try { receipt = JSON.parse(readFileSync(recordPath, 'utf8')); }
+      catch { continue; }
+      if (receipt.type === 'child-announcement-failed' && receipt.attempt === attempt
+          && selectedFileSet.has(receipt.file)) {
+        unsettledChild = true;
+        cleanupUnverifiedFiles.add(receipt.file);
+        lastCleanupSnapshotError = { code: receipt.code, message: receipt.reason };
+        continue;
+      }
+      if (receipt.type !== 'child-pending' || receipt.attempt !== attempt || !selectedFileSet.has(receipt.file)
+          || !Number.isInteger(receipt.parentPid) || !Number.isInteger(receipt.pid)) continue;
+      const key = `${receipt.attempt}:${receipt.parentPid}:${receipt.pid}:${name}`;
+      if (unverifiedChildBindings.has(key)) continue;
+      const prior = pendingChildBindings.get(key);
+      if (prior) {
+        const live = current.get(prior.pid);
+        if (sameProcessIdentity(live, prior)) ownedDescendants.set(`${prior.pid}:${prior.pgid}:${prior.started}`, prior);
+        else if (!live || live.state.startsWith('Z')) {
+          if (!acknowledgedChildDrains.has(key)) {
+            writeChildAcknowledgement(recordPath, receipt, prior, 'drained');
+            acknowledgedChildDrains.add(key);
+          }
+        }
+        else unsettledChild = true;
+        continue;
+      }
+      const worker = workerByPid.get(receipt.parentPid);
+      const candidate = current.get(receipt.pid);
+      if (!worker || !candidate || candidate.ppid !== worker.pid || candidate.state.startsWith('Z')
+          || !Number.isInteger(candidate.pgid) || !candidate.started
+          || !landingChildCommandMatchesSpawn(candidate, receipt)) { unsettledChild = true; cleanupUnverifiedFiles.add(receipt.file); continue; }
+      // Capture ownership before acknowledging. The worker cannot exit/reparent this child first.
+      pendingChildBindings.set(key, candidate);
+      ownedDescendants.set(`${candidate.pid}:${candidate.pgid}:${candidate.started}`, candidate);
+      writeChildAcknowledgement(recordPath, receipt, candidate, 'bound');
+    }
     const childRoots = receipts.filter(receipt => receipt.type === 'child' && sameProcessIdentity(current.get(receipt.pid), receipt));
     const knownRoots = [...ownedDescendants.values()].filter(root => sameProcessIdentity(current.get(root.pid), root));
     for (const root of childRoots) ownedDescendants.set(`${root.pid}:${root.pgid}:${root.started}`, current.get(root.pid));
     for (const child of landingWorkerDescendants([...workerRoots, ...childRoots, ...knownRoots], processes)) {
       ownedDescendants.set(`${child.pid}:${child.pgid}:${child.started}`, child);
+    }
+    return !unsettledChild;
+  };
+  const markPendingChildrenUnverified = () => {
+    const prefix = `${basename(workerStartsPath)}.child.${attempt}.`;
+    for (const name of readdirSync(dirname(workerStartsPath))) {
+      if (!name.startsWith(prefix) || !name.endsWith('.json')) continue;
+      const recordPath = join(dirname(workerStartsPath), name);
+      let receipt;
+      try { receipt = JSON.parse(readFileSync(recordPath, 'utf8')); }
+      catch { continue; }
+      if (receipt.type === 'child-announcement-failed' && receipt.attempt === attempt
+          && selectedFileSet.has(receipt.file)) {
+        cleanupUnverifiedFiles.add(receipt.file);
+        lastCleanupSnapshotError = { code: receipt.code, message: receipt.reason };
+        continue;
+      }
+      if (receipt.type !== 'child-pending' || receipt.attempt !== attempt || !selectedFileSet.has(receipt.file)) continue;
+      const key = `${receipt.attempt}:${receipt.parentPid}:${receipt.pid}:${name}`;
+      if (pendingChildBindings.has(key)) continue;
+      cleanupUnverifiedFiles.add(receipt.file);
+      if (!existsSync(`${recordPath}.expired`)) writeChildAcknowledgement(recordPath, receipt, null, 'unverified');
+      unverifiedChildBindings.add(key);
     }
   };
   // Capture identities while worker ancestry still exists; a detached child can be
@@ -705,19 +971,23 @@ async function runLandingTests(args, env) {
   const abortLandingRun = () => {
     if (abortPromise) return abortPromise;
     abortCleaned = true;
+    cleanupDeadline = Date.now() + LANDING_CHILD_CUSTODY_TIMEOUT_MS;
     let resolveAbort;
     abortPromise = new Promise(resolve => { resolveAbort = resolve; });
     void (async () => {
-      // A failed process-table snapshot cannot authorize signals or lease release. Retry until
-      // ownership is known, then drain while the file workers still have their identities.
-      while (true) {
-        try { captureOwnedDescendants(); break; }
-        catch (error) {
-          rememberSnapshotError(error);
-          await new Promise(resolveReady => setTimeout(resolveReady, 100));
+      try {
+        const captured = captureOwnedDescendants();
+        if (!captured) {
+          markPendingChildrenUnverified();
+          reportCleanupUnverified(lastCleanupSnapshotError);
         }
+      } catch (error) {
+        rememberSnapshotError(error);
+        markPendingChildrenUnverified();
+        reportCleanupUnverified(lastCleanupSnapshotError);
+      } finally {
+        controller.abort();
       }
-      controller.abort();
     })().then(resolveAbort, error => { reporterError ??= error; resolveAbort(); });
     return abortPromise;
   };
@@ -781,13 +1051,15 @@ async function runLandingTests(args, env) {
     await Promise.all(reporterEnds);
     runFinished = true;
     for (const receipt of landingWorkerReceipts(workerStartsPath)) {
-      if (receipt.attempt === attempt && receipt.type === 'worker' && typeof receipt.file === 'string') startedFiles.add(receipt.file);
+      if (receipt.attempt === attempt && ['worker', 'worker-identity-unavailable'].includes(receipt.type)
+          && typeof receipt.file === 'string') startedFiles.add(receipt.file);
     }
   } finally {
     if (!abortCleaned) await abortLandingRun();
     else await abortPromise;
     runFinished = true;
-    workerDrain = drainLandingWorkerDescendants(ownedDescendants, captureOwnedDescendants, () => runFinished)
+    workerDrain = drainLandingWorkerDescendants(ownedDescendants, captureOwnedDescendants, () => runFinished,
+      reportCleanupUnverified, cleanupDeadline ?? Date.now() + LANDING_CHILD_CUSTODY_TIMEOUT_MS)
       .catch(error => { reporterError ??= error; });
     await workerDrain;
     clearInterval(descendantMonitor);
@@ -1056,10 +1328,25 @@ if (process.argv[1] && resolve(process.argv[1]) === runner) {
   const startsPath = process.env[LANDING_WORKER_STARTS_ENV];
   const attempt = process.env[LANDING_ATTEMPT_ENV];
   if (startsPath && attempt) {
-    const identity = await landingWorkerIdentity(process.pid);
-    if (!identity) throw new Error('landing test worker could not prove its process identity');
-    appendFileSync(startsPath, `${JSON.stringify({ type: 'worker', attempt, file: resolve(process.argv[1]),
-      pid: identity.pid, pgid: identity.pgid, started: identity.started })}\n`);
-    watchLandingChildSpawns(startsPath, attempt);
+    const file = resolve(process.argv[1]);
+    let identityAvailable = false;
+    appendFileSync(startsPath, `${JSON.stringify({ type: 'worker-pending', attempt, file,
+      pid: process.pid, parentPid: process.ppid })}\n`);
+    try {
+      const identity = await landingWorkerIdentity(process.pid);
+      appendFileSync(startsPath, `${JSON.stringify({ type: 'worker', attempt, file,
+        pid: identity.pid, pgid: identity.pgid, started: identity.started })}\n`);
+      identityAvailable = true;
+    } catch (error) {
+      if (error.code === 'LANDING_CANCELLED') throw error;
+      const code = error.cause?.code ?? error.code ?? 'snapshot-error';
+      const reason = String(error.cause?.message ?? error.message ?? error)
+        .replace(/[\u0000-\u001f\u007f]/gu, ' ').slice(0, 512);
+      appendFileSync(startsPath, `${JSON.stringify({ type: 'worker-identity-unavailable', attempt, file,
+        pid: process.pid, parentPid: process.ppid, code, reason })}\n`);
+      process.stderr.write(`run-tests: worker identity unavailable (${code}): ${reason}\n`);
+    }
+    if (identityAvailable) watchLandingChildSpawns(startsPath, attempt);
+    else watchLandingChildCustody(startsPath, attempt);
   }
 }
