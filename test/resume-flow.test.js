@@ -277,7 +277,7 @@ test('agent resume keeps its next step without a coordinator flow alert [N32,R1,
   assert.equal(Object.hasOwn(await box.run(['resume', '--json'], box.web), 'flow'), false);
 });
 
-test('spec draft adds a pending row and resume names it [N32]', t => {
+test('spec draft adds draft rows and resume names them [N32]', t => {
   const box = releaseFixture(t, { freshSetup: true });
   const initial = JSON.parse(box.run(box.repo, 'resume', '--json').stdout);
   assert.equal(initial.setup.step, 1);
@@ -287,7 +287,7 @@ test('spec draft adds a pending row and resume names it [N32]', t => {
 
   const help = box.run(box.repo, 'help', 'spec', '--json');
   assert.equal(help.status, 0, help.failure || help.stderr);
-  assert.match(JSON.parse(help.stdout).help, /spec draft <text>.*any agent: append a pending row/u);
+  assert.match(JSON.parse(help.stdout).help, /spec draft <text>.*any agent: append a draft row/u);
 
   const first = box.run(box.repo, 'spec', 'draft', 'Describe the first requirement', '--json');
   const second = box.run(box.repo, 'spec', 'draft', 'Describe the second requirement', '--aim', '--gate', 'node --test', '--json');
@@ -295,9 +295,9 @@ test('spec draft adds a pending row and resume names it [N32]', t => {
   assert.equal(second.status, 0, second.failure || second.stderr);
   const rows = JSON.parse(box.run(box.repo, 'spec', '--json').stdout).rows;
   assert.deepEqual(rows.filter(row => ['G1', 'G2'].includes(row.id)).map(({ id, status, tier, text, gate }) => ({ id, status, tier, text, gate })), [
-    { id: 'G1', status: 'pending', tier: 'must', text: 'Describe the first requirement', gate: 'review' },
-    { id: 'G2', status: 'pending', tier: 'aim', text: 'Describe the second requirement', gate: 'node --test' },
-  ], 'draft appends two sequential pending rows with the requested defaults');
+    { id: 'G1', status: 'draft', tier: 'must', text: 'Describe the first requirement', gate: 'review' },
+    { id: 'G2', status: 'draft', tier: 'aim', text: 'Describe the second requirement', gate: 'node --test' },
+  ], 'draft appends two sequential draft rows with the requested defaults');
   assert.equal(JSON.parse(first.stdout).id, 'G1');
   assert.equal(JSON.parse(second.stdout).id, 'G2');
   const beforeEmpty = readFileSync(join(box.repo, 'SPEC.md'), 'utf8');
@@ -325,7 +325,7 @@ test('spec draft adds a pending row and resume names it [N32]', t => {
   assert.equal(JSON.parse(customDraft.stdout).id, 'G7');
   const updatedSpec = readFileSync(join(custom.repo, 'SPEC.md'), 'utf8');
   assert.equal(updatedSpec.replaceAll('\r\n', '').includes('\n'), false, 'draft preserves the source newline style');
-  assert.equal(updatedSpec, customSpec.replace('\r\n\r\n## N · Notes', '\r\n- G7 [pending, must] Keep line endings intact | gate: review\r\n\r\n## N · Notes'),
+  assert.equal(updatedSpec, customSpec.replace('\r\n\r\n## N · Notes', '\r\n- G7 [draft, must] Keep line endings intact | gate: review\r\n\r\n## N · Notes'),
     'draft preserves every existing status row and inserts in the first section');
 });
 

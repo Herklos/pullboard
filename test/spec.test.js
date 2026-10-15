@@ -391,6 +391,32 @@ function specBox(t, { specName = 'SPEC.md', practiceName = 'PRACTICE.md', practi
   return { root, run, command, env, git, specName, practiceName };
 }
 
+test('a drafted row reads as draft [S1,C7]', (t) => {
+  const specSource = SPEC.replace(
+    '- G2 [retired] Old idea.',
+    '- G2 [retired] Old idea.\n- G3 [pending, must] Still a question. | gate: review',
+  );
+  const box = specBox(t, { specSource });
+
+  const drafted = box.run('draft', 'A proposed requirement');
+  assert.equal(drafted.status, 0, drafted.stderr);
+  assert.equal(drafted.stdout.trim(), 'G4');
+
+  const rows = () => parseSpec(readFileSync(join(box.root, box.specName), 'utf8')).rows;
+  assert.deepEqual(rows().filter((row) => ['G3', 'G4'].includes(row.id)).map(({ id, status }) => [id, status]), [
+    ['G3', 'pending'],
+    ['G4', 'draft'],
+  ], 'the existing question stays pending and the newly drafted row is distinct');
+  const approved = box.run('approve', 'G3', 'G4');
+  assert.equal(approved.status, 0, approved.stderr);
+  const applied = box.run('apply');
+  assert.equal(applied.status, 0, applied.stderr);
+  assert.deepEqual(rows().filter((row) => ['G3', 'G4'].includes(row.id)).map(({ id, status }) => [id, status]), [
+    ['G3', 'approved'],
+    ['G4', 'approved'],
+  ], 'both an existing pending question and a newly drafted row remain approvable');
+});
+
 test('spec --json emits one versioned document with every field, including empty fields [S13]', (t) => {
   const box = specBox(t);
   const shown = box.run('--json');
