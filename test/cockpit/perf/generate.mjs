@@ -76,7 +76,7 @@ function specText(seed, size) {
 
 /** Write a private board config with the lanes exercised by the generated items. */
 function writeConfig(root) {
-  const lanes = Object.fromEntries([...LANES, 'review'].map((lane) => [lane, {
+  const lanes = Object.fromEntries([...LANES.filter((lane) => lane !== 'coordinator'), 'review'].map((lane) => [lane, {
     owns: lane === 'review' ? [] : [`${lane}/`], specs: lane === 'review' ? [] : ['P'],
   }]));
   const config = { name: 'Generated stress board', project: 'Pullboard performance fixture', spec: 'SPEC.md',

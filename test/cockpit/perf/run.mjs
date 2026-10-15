@@ -254,6 +254,27 @@ function pause(ms) {
   return new Promise((resolvePause) => setTimeout(resolvePause, ms)); // budget: the required idle observation lasts exactly the configured 30000ms by default.
 }
 
+/** Keep useful startup diagnostics while removing URL credentials and query secrets. */
+function safeStartupDiagnostic(stderr) {
+  return stderr
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, '')
+    .replace(/https?:\/\/[^\s"'<>]+/gu, (value) => {
+      try {
+        const url = new URL(value);
+        url.username = '';
+        url.password = '';
+        if (url.search) url.search = '?[redacted]';
+        if (url.hash) url.hash = '#[redacted]';
+        return url.href;
+      } catch {
+        return '[redacted URL]';
+      }
+    })
+    .replace(/((?:token|secret|key|credential|authorization)\s*[:=]\s*)[^\s,;]+/giu, '$1[redacted]')
+    .trim()
+    .slice(-2_048);
+}
+
 /** Start the generated board's foreground view server without exposing its local key in diagnostics. */
 async function startView(board) {
   const env = { ...board.env, PULLBOARD_VIEW_FOREGROUND: '1' };
@@ -278,7 +299,8 @@ async function startView(board) {
     await pause(25); // budget: polling bounds discovery of the fixture server URL, not product speed.
   }
   await stopView({ child, closed });
-  throw new Error(`the isolated view did not publish a local link within ${VIEW_START_TIMEOUT_MS}ms${spawnError ? '; child could not start' : closeResult ? `; it exited with status ${closeResult.code ?? 'null'}` : ''}`);
+  const diagnostic = safeStartupDiagnostic(stderr);
+  throw new Error(`the isolated view did not publish a local link within ${VIEW_START_TIMEOUT_MS}ms${spawnError ? `; child could not start: ${spawnError.message}` : closeResult ? `; it exited with status ${closeResult.code ?? 'null'}` : ''}${diagnostic ? `; stderr: ${diagnostic}` : ''}`);
 }
 
 /** Stop the one view process started by this harness and wait for its direct child to close. */
