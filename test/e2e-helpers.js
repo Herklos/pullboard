@@ -202,13 +202,13 @@ async function startView(box, cwd) {
     const response = await fetchFresh(`${base}/api/v1/boards`, { headers });
     return { status: response.status, document: await response.json() };
   };
-  /** Resolve a registered board id and read its public state. */
+  /** Resolve a registered board id and read full public state for test ground truth. */
   const state = async (root) => {
     const listing = await boards();
     if (listing.status !== 200) return listing;
     const board = listing.document.boards.find((entry) => entry.root === root);
     if (!board) return { ...listing.document, project: null };
-    const response = await fetchFresh(`${base}/api/v1/boards/${encodeURIComponent(board.id)}/state`, { headers });
+    const response = await fetchFresh(`${base}/api/v1/boards/${encodeURIComponent(board.id)}/state?detail=full`, { headers });
     return { ...listing.document, project: (await response.json()).state };
   };
   /** Send a public move to the registered board or a deliberately unknown id. */

@@ -4,6 +4,25 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.8.23] - 2026-10-15
+
+### Faster reads, and your approvals stay on their board
+
+A repeated read starts no processes, "Approve all" and declines happen in the page and stay on the board they were opened on, and agents' heavy test runs queue on their own.
+
+### Changed
+
+- Reading the view no longer starts git or node processes once it's warm. On a 600-item board over a tunnel, the board list went from about 70 ms to about 12 ms and a board's state from about 240 ms to about 135 ms.
+- "Approve all" in a Spec section asks for confirmation in the page instead of the browser's confirm dialog. It records every row it names, or shows why it didn't.
+- A drafted spec row reads as a draft, not as an open question.
+- An agent's messages and reads go out while its own submit is running, so it can tell others it's testing instead of going silent for the whole run.
+- For teams running agents: every test run on a machine, reviews and browser runs included, waits in the gate pool. Landing goes first, then first come, first served, so nobody has to hand turns over by message. A focused run takes a slot too, so the pool shows it.
+
+### Fixed
+
+- The "Approve all" confirmation and the decline dialog are bound to the board they were opened on. Switching board or project, going back or forward, or a refresh that moves to another board closes them without recording anything, and focus stays inside them while they're open. Before, two boards with the same row ids could get your approval or decline on the wrong one.
+- For contributors: tests no longer need port 4890 free, so a running view doesn't break the gate; a test that starts the CLI is selected by what the CLI imports; and tests that hold a capture also hold the page's live updates.
+
 ## [0.8.22] - 2026-10-14
 
 ### The view follows the board, and reads stay fast
