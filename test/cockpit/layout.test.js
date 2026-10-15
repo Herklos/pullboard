@@ -522,7 +522,8 @@ test('the project corner and the theme read the same everywhere [N26]', { timeou
   const middle = (b) => b.top + b.height / 2;
   try {
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
-    await chrome.waitFor("typeof data === 'object' && data?.projects?.length === 2 && !!document.querySelector('#proj-list .proj.repo')");
+    // Project names can arrive before their states; measure the corner only after the board is drawn.
+    await chrome.waitFor("data?.projects?.length === 2 && data.root === view.root && !document.body.classList.contains('loading') && document.querySelector('header.top').getBoundingClientRect().width > 0 && !!document.querySelector('#proj-list .proj.repo')");
     for (const scheme of ['light', 'dark']) {
       for (const width of [1280, 375]) {
         await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });

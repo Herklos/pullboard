@@ -10,6 +10,89 @@ import { test } from 'node:test';
 import { tapTarget, SPEC, machine, project, build, sendBack, fetchLive, startView, styleOf, element, openPage, projectRows, productEntries, accept, boardId, boardOf, chromeExecutable, openSnapshotChrome, closeSnapshotChrome } from './fixture.js';
 
 
+test('a project switch never shows the old project\'s numbers [N26,A2]', { timeout: 120_000 }, async (t) => {
+  const executable = chromeExecutable();
+  if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME for project switch checks.');
+  const box = machine();
+  const alpha = project(box, 'alpha');
+  const beta = project(box, 'beta');
+  box.run(alpha.repo, 'add', 'web', 'Alpha-only first item', '--specs', 'G1', '--criterion', 'shown');
+  box.run(alpha.repo, 'add', 'web', 'Alpha-only second item', '--specs', 'G2', '--criterion', 'shown');
+  box.run(beta.repo, 'add', 'web', 'Beta-only item', '--specs', 'G1', '--criterion', 'shown');
+  let view, profile, chrome;
+  /** Read only the rendered project names and visible board content, including the status counts. */
+  const read = async () => JSON.parse(await chrome.stable(`JSON.stringify({
+    names: [...document.querySelectorAll('#proj-list .pname')].map((node) => node.textContent),
+    lines: [...document.querySelectorAll('#proj-list .repo small')].map((node) => node.textContent),
+    name: document.querySelector('#proj-name').textContent,
+    main: document.querySelector('main').innerText,
+    products: document.querySelector('#products').hidden ? '' : document.querySelector('#products').innerText,
+    status: document.querySelector('#status-board').innerText,
+  })`));
+  try {
+    view = await startView(box);
+    profile = mkdtempSync(join(tmpdir(), 'pullboard-project-switch-chrome-'));
+    const betaId = await boardId(view, beta.repo);
+    chrome = await openSnapshotChrome(executable, 'about:blank', profile);
+    // Hold requests before real HTTP, without replacing any SQLite state or API reply.
+    await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+      const nativeFetch = window.fetch.bind(window);
+      const gate = window.__projectStateGate = { all: true, board: null, blocked: [] };
+      gate.release = () => { gate.all = false; gate.board = null; gate.blocked.splice(0).forEach((entry) => entry.resolve()); };
+      window.fetch = async (input, init) => {
+        const path = new URL(typeof input === 'string' ? input : input.url, location.href).pathname;
+        if (/^\\/api\\/v1\\/boards\\/[^/]+\\/state$/.test(path) && (gate.all || path === '/api/v1/boards/' + gate.board + '/state')) {
+          await new Promise((resolve) => gate.blocked.push({ path, resolve }));
+        }
+        return nativeFetch(input, init);
+      };
+    })()` });
+    await chrome.send('Page.navigate', { url: view.link.href });
+    await chrome.waitFor('window.__projectStateGate?.blocked.length >= 2');
+    const listed = await read();
+    assert.deepEqual(listed.names, ['alpha', 'beta'], 'the known project names draw before any delayed board state arrives');
+    assert.deepEqual(listed.lines, ['Loading…', 'Loading…'], 'unknown counts say loading rather than inventing zeros');
+    await chrome.stable('window.__projectStateGate.release()');
+    await chrome.waitFor(`data?.root === ${JSON.stringify(alpha.repo)} && !document.body.classList.contains('loading')`);
+    const before = await read();
+    assert.match(before.main, /Alpha-only/);
+    assert.match(before.status, /^2\s+items\b/u);
+    assert.deepEqual(before.lines, ['2 items open', '1 item open']);
+
+    await chrome.stable(`window.__projectStateGate.board = ${JSON.stringify(betaId)}`);
+    if (await chrome.stable("getComputedStyle(document.querySelector('#side .side-body')).display === 'none'")) {
+      await chrome.click("document.querySelector('#proj-switch')");
+    }
+    await chrome.click(`document.querySelector('#proj-list [data-root="${beta.repo}"]')`);
+    await chrome.waitFor('window.__projectStateGate.blocked.length > 0');
+    const pending = await read();
+    assert.deepEqual(pending.names, ['alpha', 'beta'], 'the cached project list stays available during the switch');
+    assert.equal(pending.name, 'beta', 'the selected project is named immediately');
+    assert.match(pending.main, /Loading project…/, 'the target board has an explicit loading state');
+    assert.doesNotMatch(pending.main, /Alpha-only/, 'the old board is hidden beneath the new project name');
+    assert.equal(pending.status, '', 'the old item and agent counts are absent until the target state arrives');
+    assert.equal(pending.products, '', 'the old project progress is absent too');
+    assert.deepEqual(pending.lines, before.lines, 'cached sidebar summaries retain their own project identities');
+    await chrome.stable('window.__projectStateGate.release()');
+    await chrome.waitFor(`data?.root === ${JSON.stringify(beta.repo)} && !document.body.classList.contains('switching')`);
+    const after = await read();
+    assert.match(after.main, /Beta-only item/);
+    assert.doesNotMatch(after.main, /Alpha-only|Loading project…/);
+    assert.match(after.status, /^1\s+items\b/u);
+    assert.deepEqual(chrome.exceptions, [], 'the delayed switch raises no uncaught exception');
+  } finally {
+    try {
+      if (chrome) {
+        await chrome.stable('window.__projectStateGate?.release()').catch(() => {});
+        await closeSnapshotChrome(chrome);
+      }
+    } finally {
+      try { if (profile) rmSync(profile, { recursive: true, force: true }); }
+      finally { if (view) await view.stop(); }
+    }
+  }
+});
+
 test('the sidebar lists every project and what needs the person [N26]', async () => {
   const box = machine();
   const alpha = project(box, 'alpha');
