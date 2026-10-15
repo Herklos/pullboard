@@ -8,6 +8,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { availableParallelism } from 'node:os';
 import { gitChildEnv, gitPath, headTree, invalidateGitFacts, isClean, untracked } from './git.js';
 import { secretsIn } from './hooks.js';
 import { Refused } from './refused.js';
@@ -27,6 +28,36 @@ const FAILURE_RE = /fail|error|expected|received|assert|not ok|✗|×|cannot|und
 const PASSING_RE = /^\s*(ok \d+\b|# Subtest:)/;
 // Lines kept under a failure, where test runners say why: the message, expected and actual.
 const CONTEXT_LINES = 10;
+
+/** Detect the performance-core budget on Apple Silicon, or the runtime's usable CPU budget elsewhere. */
+export function performanceCores() {
+  if (process.platform === 'darwin') {
+    const result = spawnSync('/usr/sbin/sysctl', ['-n', 'hw.perflevel0.physicalcpu'], { encoding: 'utf8' });
+    const count = Number(result.stdout?.trim());
+    if (result.status === 0 && Number.isSafeInteger(count) && count > 0) return count;
+  }
+  return Math.max(1, availableParallelism());
+}
+
+/** One policy for native file concurrency and the separate per-run browser-file limit. */
+export function testConcurrency(root, cores = performanceCores()) {
+  const file = join(root, 'pullboard.json');
+  let config = {};
+  if (existsSync(file)) {
+    try { config = JSON.parse(readFileSync(file, 'utf8')); }
+    catch { throw new Refused('BAD_CONFIG', 'pullboard.json must be valid JSON before running tests'); }
+  }
+  const setting = config.testConcurrency ?? {};
+  if (!setting || typeof setting !== 'object' || Array.isArray(setting)) {
+    throw new Refused('BAD_CONFIG', 'testConcurrency must be an object with positive integer files and browser fields');
+  }
+  const files = setting.files ?? cores;
+  const browser = setting.browser ?? 2;
+  if (!Number.isSafeInteger(files) || files < 1 || !Number.isSafeInteger(browser) || browser < 1 || browser > 2) {
+    throw new Refused('BAD_CONFIG', 'testConcurrency.files must be positive; testConcurrency.browser must be 1 or 2');
+  }
+  return { files, browser: Math.min(files, browser) };
+}
 
 /**
  * The lines of a failure worth an agent's attention: each line that looks like a failure with the

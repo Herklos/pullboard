@@ -133,7 +133,12 @@ export function commonJsIn(sources) {
     ...[...source.matchAll(UNICODE_ESCAPE)].map((match) => match.index),
   ])]);
   const variants = sources.flatMap((source, index) =>
-    occurrences[index].map((at) => `${source.slice(0, at)}\u0000${source.slice(at)}`),
+    occurrences[index].map((at) => {
+      // Poison after an escape: before a range endpoint, NUL can invalidate a harmless regex range.
+      const escaped = /^\\u(?:[\da-fA-F]{4}|\{[\da-fA-F]{1,6}\})/u.exec(source.slice(at));
+      const cut = at + (escaped?.[0].length ?? 0);
+      return `${source.slice(0, cut)}\u0000${source.slice(cut)}`;
+    }),
   );
   const looks = look([...sources, ...variants]);
   let next = sources.length;
