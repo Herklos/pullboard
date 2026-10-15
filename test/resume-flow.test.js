@@ -385,6 +385,7 @@ test('a reused authenticated view completes setup for its new board [N26,N32]', 
   function awaitingView(box) {
     box.env.PULLBOARD_HOME = firstBoard.env.PULLBOARD_HOME;
     box.env.PULLBOARD_MACHINE_HOME = firstBoard.env.PULLBOARD_MACHINE_HOME;
+    box.env.PULLBOARD_VIEW_PORT = String(lease.port);
     delete box.env.PULLBOARD_VIEW_FOREGROUND;
     const file = join(box.repo, 'pullboard.json');
     const config = JSON.parse(readFileSync(file, 'utf8'));
@@ -413,7 +414,7 @@ test('a reused authenticated view completes setup for its new board [N26,N32]', 
       try { resolve(JSON.parse(output)); } catch { /* Wait for the complete ready document. */ }
     });
   });
-  assert.equal(first.port, 4890);
+  assert.equal(first.port, lease.port);
   assert.equal(JSON.parse(firstBoard.run(firstBoard.repo, 'resume', '--json').stdout).setup, null);
   const secondBoard = releaseFixture(t);
   const refusedBoard = releaseFixture(t);
@@ -443,7 +444,7 @@ test('a reused authenticated view completes setup for its new board [N26,N32]', 
       'another board or an observation before this setup cannot complete it');
   }
   writeFileSync(receiptPath, bytes);
-  const sessionPath = join(firstBoard.env.PULLBOARD_HOME, 'view-4890.json');
+  const sessionPath = join(firstBoard.env.PULLBOARD_HOME, `view-${lease.port}.json`);
   const sessionBytes = readFileSync(sessionPath);
   try {
     writeFileSync(sessionPath, JSON.stringify({ ...JSON.parse(sessionBytes), secret: 'wrong' }));
