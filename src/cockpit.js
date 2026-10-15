@@ -1103,7 +1103,7 @@ async function refresh(fresh = null) {
   }
   const text = boardText(next);
   const changed = text !== seen;
-  if (changed) {
+  if (text !== seen) {
     seen = text;
     data = next;
     render();
