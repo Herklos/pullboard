@@ -15,7 +15,7 @@ import { CONFIG_FILE, COORDINATOR, DOCTRINE_FILE, LEGACY_DOCTRINE_FILE, loadConf
 import { displayAgentName } from './agent-names.js';
 import { doctrineHistory, loadDoctrine } from './doctrine.js';
 import { agentSessionDigest, requirePersonChannel } from './person.js';
-import { bindLocalSession } from './agent-session.js';
+import { bindLocalSession, localSessionMatches } from './agent-session.js';
 import { decisionProjection, planRowApply, prepareRowDecisions, restoreRowApply, writeRowApply } from './row-decisions.js';
 import { digestOf, gateReport, runGate, runProfiledShell, runSubmitGate, submitGateReport, timingDigest, withGateSlot } from './gate.js';
 import { bareWorktreeFinding, codeIsFromMain, contains, differFromHead, git, gitChildEnv, headCommit, headTree, invalidateGitFacts, isClean, mainCheckout, patchId, repoInfo, resolveCommit, tryGit, untracked, withGitFacts } from './git.js';
@@ -87,6 +87,7 @@ import { engineReceipt } from './engine.js';
 import { land } from './land.js';
 
 const CHECKOUT_LEASES = new WeakMap();
+const CHECKOUT_BOARD_ONLY = new WeakMap();
 let startupMainTraced = false;
 
 /** Append an opt-in startup phase marker for the real CLI fixture measurement [A2,C7]. */
@@ -528,6 +529,10 @@ async function ordered(ctx, board, operation, args) {
   const execute = () => relayLinked(ctx.info.root)
     ? relayOperation(ctx.info.root, operation, args, ctx.io, command, () => store[operation](board, ...args)) : store[operation](board, ...args);
   const digest = agentSessionDigest();
+  const boardOnly = CHECKOUT_BOARD_ONLY.get(ctx.io);
+  const boardOnlyOperation = (boardOnly === 'shout' && operation === 'shout') || (boardOnly === 'fact' && operation === 'appendFact');
+  const boardOnlyAgent = ctx.info.isMain ? COORDINATOR : store.agentAt(board, ctx.info.root)?.agent_id ?? 'unjoined agent';
+  if (boardOnlyOperation && digest && localSessionMatches(ctx.info, { agent: boardOnlyAgent, digest })) return execute();
   if (CHECKOUT_LEASES.has(ctx.io) || !digest || ctx.io.personChannel === 'view' || ctx.io.personRequest) return execute();
   const agent = ctx.info.isMain ? COORDINATOR : store.agentAt(board, ctx.info.root)?.agent_id ?? 'unjoined agent';
   const lease = await bindLocalSession(ctx.info, { agent, digest, keepLease: true });
@@ -558,6 +563,10 @@ async function bindCheckoutSession(io, positionals, values) {
     agent = withBoard(ctx, (board) => store.agentAt(board, info.root)?.agent_id
       ?? (command === 'hook' && store.landingBatches(board).some((batch) => batch.root === info.root && !['landed', 'blocked'].includes(batch.state)) ? COORDINATOR : null));
     if (!agent && command !== 'join') throw new Refused('NOT_JOINED', 'this worktree has not joined a lane; run pullboard join <lane> --model "<model name>"');
+  }
+  if (['shout', 'fact'].includes(command) && localSessionMatches(info, { agent: agent ?? 'unjoined agent', digest })) {
+    CHECKOUT_BOARD_ONLY.set(io, command);
+    return;
   }
   const lease = await bindLocalSession(info, { agent: agent ?? 'unjoined agent', digest, takeover: command === 'takeover', keepLease: !['run', 'next'].includes(command),
     /** Use an existing ordered shout so takeover has a receipt without changing the board format. */
@@ -3395,6 +3404,7 @@ async function runMain(argv, streams) {
     return status;
   } finally {
     CHECKOUT_LEASES.delete(io);
+    CHECKOUT_BOARD_ONLY.delete(io);
     checkoutSession?.lease?.release();
   }
 }

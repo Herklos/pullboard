@@ -23,6 +23,12 @@ function readBinding(file, takeover) {
   }
 }
 
+/** Check whether this already-bound checkout belongs to the invoking agent session. */
+export function localSessionMatches(info, { agent, digest }) {
+  const current = readBinding(checkoutSessionFile(info), false);
+  return current !== null && current.agent === agent && current.digest === digest;
+}
+
 /** Serialize local binding changes, record an explicit takeover, and replace complete JSON atomically. */
 export async function bindLocalSession(info, { agent, digest, takeover = false, recordTakeover, keepLease = false }) {
   const file = checkoutSessionFile(info);
