@@ -2,18 +2,25 @@
 /**
  * Run the test suite with a private home, no inherited Git identity or config, and a refusing CLI shim.
  */
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { delimiter, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { after, afterEach, beforeEach } from 'node:test';
 import { Worker } from 'node:worker_threads';
+import { randomUUID } from 'node:crypto';
+import { channel } from 'node:diagnostics_channel';
 import { AGENT_SHELL_MARKERS, SSH_SHELL_MARKERS } from '../src/person.js';
 
 const runner = fileURLToPath(import.meta.url);
+const LANDING_RUN_ENV = 'PULLBOARD_LANDING_RUN';
+const LANDING_WORKER_STARTS_ENV = 'PULLBOARD_LANDING_WORKER_STARTS';
+const LANDING_ATTEMPT_ENV = 'PULLBOARD_LANDING_ATTEMPT';
 export const DEFAULT_TEST_TIMEOUT_MS = 660_000;
 export const DEFAULT_TEST_FILE_TIMEOUT_MS = 30_000;
+// Worker identity startup retries stay below the ordinary per-file ceiling even if ps is unavailable.
+const LANDING_WORKER_IDENTITY_TIMEOUT_MS = 12_000;
 
 const watchdogSource = `
 const { parentPort } = require('node:worker_threads');
@@ -223,7 +230,13 @@ function testEnvironment(sandbox, gateMarkers = {}) {
   delete env.PULLBOARD_RELAY_TOKEN; // Fixtures must supply their own scoped credentials, never an agent’s live bearer.
   delete env.NODE_TEST_CONTEXT;
   delete env.PULLBOARD_TEST_FILE;
+  delete env[LANDING_WORKER_STARTS_ENV];
+  delete env[LANDING_ATTEMPT_ENV];
+  // The outer gate decides whether this invocation is fail-fast. Its test workers and
+  // any nested runner commands always retain ordinary runner semantics.
+  env[LANDING_RUN_ENV] = '0';
   Object.assign(env, gateMarkers);
+  env[LANDING_RUN_ENV] = '0';
   return env;
 }
 
@@ -245,6 +258,563 @@ function runTests(args, env) {
     ...args,
   ];
   return spawnSync(process.execPath, nodeArgs, { env, stdio: 'inherit' });
+}
+
+/** Convert the Node test CLI subset to the supported node:test run() options. */
+async function landingTestOptions(args, env) {
+  const options = { concurrency: true, isolation: 'process', execArgv: ['--disable-warning=ExperimentalWarning', '--import', runner] };
+  const reporters = [];
+  const selectors = [];
+  const patterns = [];
+  const skipPatterns = [];
+  const coverageExcludeGlobs = [];
+  const coverageIncludeGlobs = [];
+  const execArgv = [];
+  let expectValue = null;
+  for (let index = 0; index < args.length; index += 1) {
+    let argument = args[index];
+    if (expectValue) {
+      expectValue(argument);
+      expectValue = null;
+      continue;
+    }
+    if (argument === '--') { selectors.push(...args.slice(index + 1)); break; }
+    const valueOption = (name, take) => {
+      if (argument === name) { expectValue = take; return true; }
+      if (argument.startsWith(`${name}=`)) { take(argument.slice(name.length + 1)); return true; }
+      return false;
+    };
+    if (valueOption('--test-concurrency', value => {
+      if (value === 'true') options.concurrency = true;
+      else if (value === 'false') options.concurrency = false;
+      else if (/^[1-9][0-9]*$/u.test(value)) options.concurrency = Number(value);
+      else throw new Error(`invalid --test-concurrency value: ${value}`);
+    })) continue;
+    if (valueOption('--test-name-pattern', value => patterns.push(value))) continue;
+    if (valueOption('--test-skip-pattern', value => skipPatterns.push(value))) continue;
+    if (valueOption('--test-timeout', value => { options.timeout = Number(value); })) continue;
+    if (valueOption('--test-reporter', value => reporters.push(value))) continue;
+    if (valueOption('--test-reporter-destination', value => { (options.reporterDestinations ??= []).push(value); })) continue;
+    if (valueOption('--test-coverage-include', value => coverageIncludeGlobs.push(value))) continue;
+    if (valueOption('--test-coverage-exclude', value => coverageExcludeGlobs.push(value))) continue;
+    if (valueOption('--test-coverage-lines', value => { options.lineCoverage = Number(value); })) continue;
+    if (valueOption('--test-coverage-branches', value => { options.branchCoverage = Number(value); })) continue;
+    if (valueOption('--test-coverage-functions', value => { options.functionCoverage = Number(value); })) continue;
+    if (argument === '--test-only') { options.only = true; continue; }
+    if (argument === '--experimental-test-coverage') { options.coverage = true; continue; }
+    if (argument.startsWith('--experimental-test-isolation=')) {
+      options.isolation = argument.slice(argument.indexOf('=') + 1);
+      continue;
+    }
+    if (argument.startsWith('--test-isolation=')) {
+      options.isolation = argument.slice(argument.indexOf('=') + 1);
+      continue;
+    }
+    if (argument === '--test-isolation') {
+      expectValue = value => { options.isolation = value; };
+      continue;
+    }
+    if (argument === '--experimental-test-isolation') {
+      expectValue = value => { options.isolation = value; };
+      continue;
+    }
+    if (argument === '--test-shard') { index += 1; continue; }
+    if (argument.startsWith('--test-shard=')) continue;
+    if (argument.startsWith('-')) {
+      execArgv.push(argument);
+      if (!argument.includes('=') && optionTakesValue(argument)) {
+        if (args[index + 1] === undefined) throw new Error(`${argument} requires a value`);
+        execArgv.push(args[++index]);
+      }
+      continue;
+    }
+    selectors.push(argument);
+  }
+  if (expectValue) throw new Error('missing value for a Node test runner option');
+  options.execArgv = [...options.execArgv, ...execArgv];
+  if (selectors.length) {
+    const { glob } = await import('node:fs/promises');
+    const files = [];
+    for (const selector of selectors) {
+      if (!/[?*[{]/u.test(selector)) {
+        files.push(resolve(selector));
+        continue;
+      }
+      const matches = [];
+      for await (const match of glob(selector, { cwd: process.cwd() })) matches.push(resolve(match));
+      if (!matches.length) throw new Error(`test file pattern matched no files: ${selector}`);
+      files.push(...matches.sort());
+    }
+    options.files = [...new Set(files)];
+  }
+  if (patterns.length) options.testNamePatterns = patterns;
+  if (skipPatterns.length) options.testSkipPatterns = skipPatterns;
+  if (coverageExcludeGlobs.length) options.coverageExcludeGlobs = coverageExcludeGlobs;
+  if (coverageIncludeGlobs.length) options.coverageIncludeGlobs = coverageIncludeGlobs;
+  if (args.includes('--test-shard') || args.some(argument => argument.startsWith('--test-shard='))) {
+    const shardArgument = args.find(argument => argument === '--test-shard' || argument.startsWith('--test-shard='));
+    const shard = shardArgument === '--test-shard' ? args[args.indexOf(shardArgument) + 1] : shardArgument.slice('--test-shard='.length);
+    const match = shard?.match(/^([1-9][0-9]*)\/([1-9][0-9]*)$/u);
+    if (!match) throw new Error(`invalid --test-shard value: ${shard ?? '(missing)'}`);
+    options.shard = { index: Number(match[1]), total: Number(match[2]) };
+  }
+  let selectedCandidates = options.files;
+  if (!selectedCandidates) {
+    const { glob } = await import('node:fs/promises');
+    const defaults = ['**/*.test.{cjs,mjs,js}', '**/*-test.{cjs,mjs,js}', '**/*_test.{cjs,mjs,js}',
+      '**/test-*.{cjs,mjs,js}', '**/test.{cjs,mjs,js}', '**/test/**/*.{cjs,mjs,js}'];
+    const matches = new Set();
+    for (const pattern of defaults) {
+      for await (const file of glob(pattern, { cwd: process.cwd() })) {
+        if (!file.split(/[\\/]/u).includes('node_modules')) matches.add(resolve(file));
+      }
+    }
+    selectedCandidates = [...matches].sort();
+  }
+  options.selectedFiles = selectedCandidates.filter((_file, index) => !options.shard || index % options.shard.total === options.shard.index - 1);
+  if (!reporters.length) reporters.push('tap');
+  const destinations = options.reporterDestinations ?? (reporters.length === 1 ? ['stdout'] : []);
+  if (destinations.length !== reporters.length) throw new Error('each --test-reporter requires a matching --test-reporter-destination');
+  options.reporters = reporters.map((reporter, index) => ({ reporter, destination: destinations[index] }));
+  delete options.reporterDestinations;
+  return { options, env };
+}
+
+/** Parse a POSIX process census into PID, group, and start identities used for safe cleanup. */
+function parseLandingProcessTable(output) {
+  const processes = [];
+  for (const line of output.split(/\r?\n/u)) {
+    const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.+)$/u);
+    if (!match) continue;
+    const [, pidText, ppidText, pgidText, state, rest] = match;
+    const fields = rest.trim().split(/\s+/u);
+    if (fields.length < 5) continue;
+    const started = fields.slice(0, 5).join(' ');
+    const command = fields.slice(5).join(' ');
+    processes.push({ pid: Number(pidText), ppid: Number(ppidText), pgid: Number(pgidText), state, started, command, depth: 0 });
+  }
+  return processes;
+}
+
+/** Snapshot process identities on POSIX hosts, where the runner can verify process ancestry. */
+function landingProcessTable() {
+  if (process.platform === 'win32') return [];
+  const output = execFileSync('ps', ['-axo', 'pid=,ppid=,pgid=,stat=,lstart=,command='], { encoding: 'utf8', timeout: 2000 });
+  return parseLandingProcessTable(output);
+}
+
+/** Retry a worker's initial process-identity receipt without blocking its event loop or exceeding the file-start ceiling. */
+async function landingWorkerIdentity(pid, timeoutMs = LANDING_WORKER_IDENTITY_TIMEOUT_MS) {
+  if (process.platform === 'win32') return null;
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  let stopping = false;
+  let snapshotChild = null;
+  const stopSnapshot = () => {
+    stopping = true;
+    snapshotChild?.kill('SIGTERM');
+  };
+  process.once('SIGTERM', stopSnapshot);
+  try {
+    while (Date.now() < deadline) {
+      if (stopping) throw new Error('landing test worker identity retry was interrupted');
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      try {
+        const output = await new Promise((resolveOutput, rejectOutput) => {
+          const child = execFile('ps', ['-axo', 'pid=,ppid=,pgid=,stat=,lstart=,command='], {
+            encoding: 'utf8', timeout: Math.min(2000, Math.max(1, remaining)),
+          }, (error, stdout) => {
+            if (snapshotChild === child) snapshotChild = null;
+            error ? rejectOutput(error) : resolveOutput(stdout);
+          });
+          snapshotChild = child;
+          if (stopping) child.kill('SIGTERM');
+        });
+        const identity = parseLandingProcessTable(output).find(processInfo => processInfo.pid === pid);
+        if (identity) return identity;
+      } catch (error) {
+        if (stopping) throw new Error('landing test worker identity retry was interrupted', { cause: error });
+        const snapshotTimedOut = error.code === 'ETIMEDOUT' || (error.killed === true && error.signal === 'SIGTERM'
+          && error.cmd === 'ps -axo pid=,ppid=,pgid=,stat=,lstart=,command=');
+        if (!snapshotTimedOut) throw error;
+        lastError = error;
+        process.stderr.write('run-tests: worker identity snapshot timed out; retrying before file execution\n');
+      }
+      const wait = Math.min(100, deadline - Date.now());
+      if (wait > 0) await new Promise(resolveReady => setTimeout(resolveReady, wait));
+    }
+    throw new Error(`landing test worker identity was unavailable within ${timeoutMs}ms`, { cause: lastError });
+  } finally {
+    process.off('SIGTERM', stopSnapshot);
+    snapshotChild = null;
+  }
+}
+
+/** Snapshot descendants only from worker identities still matching their startup receipts. */
+function landingWorkerDescendants(workerRoots, processes = landingProcessTable()) {
+  if (!workerRoots.length || process.platform === 'win32') return [];
+  const byParent = new Map();
+  const byPid = new Map(processes.map(processInfo => [processInfo.pid, processInfo]));
+  for (const child of processes) {
+    const children = byParent.get(child.ppid) ?? [];
+    children.push(child);
+    byParent.set(child.ppid, children);
+  }
+  const found = [];
+  const validRoots = workerRoots.filter(root => sameProcessIdentity(byPid.get(root.pid), root));
+  const visited = new Set(validRoots.map(root => root.pid));
+  const queue = validRoots.map(root => ({ pid: root.pid, depth: 0 }));
+  while (queue.length) {
+    const parent = queue.shift();
+    for (const child of byParent.get(parent.pid) ?? []) {
+      if (visited.has(child.pid)) continue;
+      visited.add(child.pid);
+      child.depth = parent.depth + 1;
+      found.push(child);
+      queue.push({ pid: child.pid, depth: child.depth });
+    }
+  }
+  return found;
+}
+
+/** Journal detached child identities at spawn time, before a short-lived worker can exit. */
+function watchLandingChildSpawns(startsPath, attempt) {
+  let recording = false;
+  channel('child_process').subscribe(({ process: child }) => {
+    if (recording || !child || typeof child.once !== 'function') return;
+    child.once('spawn', () => {
+      if (!Number.isInteger(child.pid)) return;
+      recording = true;
+      try {
+        const byPid = new Map(landingProcessTable().map(processInfo => [processInfo.pid, processInfo]));
+        const parent = byPid.get(process.pid);
+        const spawned = byPid.get(child.pid);
+        if (parent && spawned && spawned.pgid !== parent.pgid) {
+          appendFileSync(startsPath, `${JSON.stringify({ type: 'child', attempt, parentPid: process.pid,
+            pid: spawned.pid, pgid: spawned.pgid, started: spawned.started })}\n`);
+        }
+      } catch { /* The ancestry monitor remains the fallback if a receipt cannot be written. */ }
+      finally { recording = false; }
+    });
+  });
+}
+
+/** Match a PID to its captured identity so cleanup never signals a reused PID. */
+function sameProcessIdentity(candidate, captured) {
+  return candidate && candidate.pid === captured.pid && candidate.pgid === captured.pgid && candidate.started === captured.started;
+}
+
+/** Read only complete append-only worker journal rows while workers may be writing. */
+function landingWorkerReceipts(path) {
+  const contents = readFileSync(path, 'utf8');
+  const complete = contents.endsWith('\n') ? contents : contents.slice(0, contents.lastIndexOf('\n') + 1);
+  return complete.split(/\r?\n/u).filter(Boolean).map(line => JSON.parse(line));
+}
+
+/** Terminate owned descendants as the live receipt set grows, then wait for the run and every identity to drain. */
+async function drainLandingWorkerDescendants(ownedDescendants, refreshOwnedDescendants, runFinished) {
+  let firstError = null;
+  let snapshotTimeoutReported = false;
+  const rememberError = error => {
+    firstError ??= error;
+    if (firstError === error) {
+      process.stderr.write(`run-tests: descendant cleanup encountered ${error.message}; retaining the gate slot until captured processes drain\n`);
+    }
+  };
+  // A missed observation proves neither a leak nor an empty process table. Retry it;
+  // only a later successful census can authorize signaling or release the lease.
+  const rememberSnapshotError = error => {
+    if (error.code !== 'ETIMEDOUT') { rememberError(error); return; }
+    if (!snapshotTimeoutReported) {
+      snapshotTimeoutReported = true;
+      process.stderr.write('run-tests: process snapshot timed out; retrying ownership census before gate-slot release\n');
+    }
+  };
+  const snapshot = () => {
+    try { return new Map(landingProcessTable().map(processInfo => [processInfo.pid, processInfo])); }
+    catch (error) { rememberSnapshotError(error); return null; }
+  };
+  const signalDue = captured => {
+    const current = snapshot();
+    if (!current) return;
+    const now = Date.now();
+    for (const owned of captured) {
+      const live = current.get(owned.pid);
+      if (!sameProcessIdentity(live, owned) || live.state.startsWith('Z')) continue;
+      const key = `${owned.pid}:${owned.pgid}:${owned.started}`;
+      const state = signalState.get(key) ?? { termAt: null, killSent: false };
+      const signal = state.termAt === null ? 'SIGTERM' : now - state.termAt >= 750 && !state.killSent ? 'SIGKILL' : null;
+      if (!signal) continue;
+      try {
+        process.kill(owned.pid, signal);
+        if (signal === 'SIGTERM') state.termAt = now;
+        else state.killSent = true;
+      } catch (error) {
+        if (error.code === 'ESRCH') continue;
+        rememberError(error);
+      }
+      signalState.set(key, state);
+    }
+  };
+  const remaining = () => {
+    const current = snapshot();
+    if (!current) return null;
+    return [...ownedDescendants.values()].filter(owned => {
+      const live = current.get(owned.pid);
+      return sameProcessIdentity(live, owned) && !live.state.startsWith('Z');
+    });
+  };
+  const signalState = new Map();
+  let nextSignal = 0;
+  let runFinishedWithoutOwnedProcesses = false;
+  while (true) {
+    let captureSucceeded = false;
+    try {
+      refreshOwnedDescendants();
+      captureSucceeded = true;
+    } catch (error) { rememberSnapshotError(error); }
+    const stillOwned = remaining();
+    if (runFinished() && captureSucceeded && stillOwned && stillOwned.length === 0) {
+      if (runFinishedWithoutOwnedProcesses) break;
+      runFinishedWithoutOwnedProcesses = true;
+    } else {
+      runFinishedWithoutOwnedProcesses = false;
+    }
+    if (Date.now() >= nextSignal) {
+      signalDue([...ownedDescendants.values()]);
+      nextSignal = Date.now() + 100;
+    }
+    await new Promise(resolveReady => setTimeout(resolveReady, 100));
+  }
+  if (firstError) throw new Error(`owned descendants drained after cleanup error: ${firstError.message}`, { cause: firstError });
+}
+
+/** Run a landing check with execution-ordered failure detection and native runner reporters. */
+async function runLandingTests(args, env) {
+  const { run } = await import('node:test');
+  const { PassThrough } = await import('node:stream');
+  const { createWriteStream } = await import('node:fs');
+  const { pathToFileURL } = await import('node:url');
+  const { options, env: testEnv } = await landingTestOptions(args, env);
+  if (options.isolation !== 'process') {
+    throw new Error('landing gate early-stop requires --test-isolation=process so started files and owned children can be tracked safely');
+  }
+  if (process.platform === 'win32') {
+    throw new Error('landing gate early-stop requires POSIX process identities to track and drain started files safely');
+  }
+  const attempt = randomUUID();
+  const workerStartsPath = join(testEnv.TMPDIR ?? tmpdir(), `landing-worker-starts-${attempt}.jsonl`);
+  writeFileSync(workerStartsPath, '', { mode: 0o600 });
+  testEnv[LANDING_WORKER_STARTS_ENV] = workerStartsPath;
+  testEnv[LANDING_ATTEMPT_ENV] = attempt;
+  watchLandingChildSpawns(workerStartsPath, attempt);
+  const selectedFiles = options.selectedFiles;
+  delete options.selectedFiles;
+  const reporterEntries = options.reporters;
+  delete options.reporters;
+  const loadedReporters = [];
+  for (const entry of reporterEntries) {
+    let reporter;
+    if (['tap', 'spec', 'dot', 'junit', 'lcov'].includes(entry.reporter)) {
+      reporter = (await import('node:test/reporters'))[entry.reporter];
+    } else {
+      const moduleSpecifier = entry.reporter.startsWith('.') || entry.reporter.startsWith('/')
+        ? pathToFileURL(resolve(entry.reporter)).href : entry.reporter;
+      const imported = await import(moduleSpecifier);
+      reporter = imported.default;
+    }
+    if (!reporter) throw new Error(`unknown test reporter: ${entry.reporter}`);
+    loadedReporters.push(reporter);
+  }
+  const reporters = [];
+  const reporterEnds = [];
+  const controller = new AbortController();
+  let reporterError = null;
+  for (const [index, entry] of reporterEntries.entries()) {
+    const reporter = loadedReporters[index];
+    const input = new PassThrough({ objectMode: true });
+    const output = input.compose(reporter);
+    const destination = entry.destination === 'stdout' ? process.stdout
+      : entry.destination === 'stderr' ? process.stderr : createWriteStream(resolve(entry.destination));
+    const readableEnd = new Promise(resolveEnd => {
+      output.once('end', resolveEnd);
+      output.once('close', resolveEnd);
+    });
+    const handleReporterError = error => { reporterError ??= error; abortLandingRun(); };
+    if (entry.destination === 'stdout' || entry.destination === 'stderr') {
+      output.once('error', handleReporterError);
+      destination.once('error', handleReporterError);
+      output.pipe(destination);
+      reporterEnds.push(readableEnd.finally(() => destination.off('error', handleReporterError)));
+    } else {
+      const writableEnd = new Promise((resolveEnd, reject) => {
+        destination.once('finish', resolveEnd);
+        destination.once('error', error => { handleReporterError(error); reject(error); });
+        output.once('error', error => { handleReporterError(error); reject(error); });
+      });
+      output.pipe(destination);
+      reporterEnds.push(Promise.all([readableEnd, writableEnd]).catch(error => { reporterError = error; abortLandingRun(); }));
+    }
+    reporters.push(input);
+  }
+  const startedFiles = new Set();
+  const completedFiles = new Set();
+  const failureDiagnostics = new Map();
+  let firstFailure = null;
+  let successful = true;
+  let reportersEnded = false;
+  let abortCleaned = false;
+  let abortPromise = null;
+  let workerDrain = Promise.resolve();
+  let runFinished = false;
+  const ownedDescendants = new Map();
+  let snapshotTimeoutReported = false;
+  const rememberSnapshotError = error => {
+    if (error.code !== 'ETIMEDOUT') { reporterError ??= error; return; }
+    if (!snapshotTimeoutReported) {
+      snapshotTimeoutReported = true;
+      process.stderr.write('run-tests: process snapshot timed out; awaiting a successful ownership census\n');
+    }
+  };
+  const captureOwnedDescendants = () => {
+    const processes = landingProcessTable();
+    const receipts = landingWorkerReceipts(workerStartsPath).filter(receipt => receipt.attempt === attempt);
+    const workerRoots = receipts.filter(receipt => receipt.type === 'worker' && sameProcessIdentity(
+      processes.find(processInfo => processInfo.pid === receipt.pid), receipt));
+    const current = new Map(processes.map(processInfo => [processInfo.pid, processInfo]));
+    const childRoots = receipts.filter(receipt => receipt.type === 'child' && sameProcessIdentity(current.get(receipt.pid), receipt));
+    const knownRoots = [...ownedDescendants.values()].filter(root => sameProcessIdentity(current.get(root.pid), root));
+    for (const root of childRoots) ownedDescendants.set(`${root.pid}:${root.pgid}:${root.started}`, current.get(root.pid));
+    for (const child of landingWorkerDescendants([...workerRoots, ...childRoots, ...knownRoots], processes)) {
+      ownedDescendants.set(`${child.pid}:${child.pgid}:${child.started}`, child);
+    }
+  };
+  // Capture identities while worker ancestry still exists; a detached child can be
+  // reparented before the failure event reaches this process.
+  const descendantMonitor = setInterval(() => {
+    try { captureOwnedDescendants(); }
+    catch (error) { rememberSnapshotError(error); }
+  }, 1000);
+  descendantMonitor.unref();
+  const endReporters = () => {
+    if (reportersEnded) return;
+    reportersEnded = true;
+    for (const reporter of reporters) reporter.end();
+  };
+  const abortLandingRun = () => {
+    if (abortPromise) return abortPromise;
+    abortCleaned = true;
+    let resolveAbort;
+    abortPromise = new Promise(resolve => { resolveAbort = resolve; });
+    void (async () => {
+      // A failed process-table snapshot cannot authorize signals or lease release. Retry until
+      // ownership is known, then drain while the file workers still have their identities.
+      while (true) {
+        try { captureOwnedDescendants(); break; }
+        catch (error) {
+          rememberSnapshotError(error);
+          await new Promise(resolveReady => setTimeout(resolveReady, 100));
+        }
+      }
+      controller.abort();
+    })().then(resolveAbort, error => { reporterError ??= error; resolveAbort(); });
+    return abortPromise;
+  };
+  const originalEnv = { ...process.env };
+  for (const key of Object.keys(process.env)) delete process.env[key];
+  Object.assign(process.env, testEnv, { [LANDING_RUN_ENV]: '0' });
+  try {
+    const stream = run({ ...options, signal: controller.signal,
+      setup(tests) {
+        tests.on('test:complete', data => {
+          const { file, name, details } = data;
+          if (file && details?.type === 'test' && details.passed === false && !firstFailure) {
+            firstFailure = { file, name, error: details.error };
+            abortLandingRun();
+          }
+        });
+        tests.on('test:summary', data => {
+          if (data.success === false) successful = false;
+          if (data.file) {
+            startedFiles.add(data.file);
+            completedFiles.add(data.file);
+            if (data.success === false && !firstFailure) {
+              firstFailure = { file: data.file, name: 'test file failed before a test completed' };
+              abortLandingRun();
+            }
+          }
+        });
+      },
+    });
+    stream.on('data', event => {
+      // Node 22's execution-complete event may describe only the failed file wrapper;
+      // its ordered failure event retains the actual assertion once reporters drain.
+      if (event.type === 'test:fail') {
+        const data = event.data;
+        const error = data.details?.error;
+        if (data.file && error && !['testAborted', 'subtestsFailed'].includes(error.failureType)
+            && !failureDiagnostics.has(data.file)) failureDiagnostics.set(data.file, data);
+      }
+      for (const reporter of reporters) reporter.write(event);
+    });
+    stream.on('end', endReporters);
+    let streamClosed = false;
+    let resolveClosed;
+    const closed = new Promise(resolveDone => { resolveClosed = resolveDone; });
+    stream.once('close', () => { streamClosed = true; resolveClosed(); });
+    let streamErrored = false;
+    await new Promise(resolveDone => {
+      const finish = () => resolveDone();
+      stream.once('end', finish);
+      stream.once('close', finish);
+      stream.once('error', error => {
+        streamErrored = true;
+        reporterError ??= error;
+        abortLandingRun();
+        endReporters();
+        finish();
+      });
+    });
+    if (streamErrored && !streamClosed) await closed;
+    await abortPromise;
+    await Promise.all(reporterEnds);
+    runFinished = true;
+    for (const receipt of landingWorkerReceipts(workerStartsPath)) {
+      if (receipt.attempt === attempt && receipt.type === 'worker' && typeof receipt.file === 'string') startedFiles.add(receipt.file);
+    }
+  } finally {
+    if (!abortCleaned) await abortLandingRun();
+    else await abortPromise;
+    runFinished = true;
+    workerDrain = drainLandingWorkerDescendants(ownedDescendants, captureOwnedDescendants, () => runFinished)
+      .catch(error => { reporterError ??= error; });
+    await workerDrain;
+    clearInterval(descendantMonitor);
+    endReporters();
+    for (const key of Object.keys(process.env)) delete process.env[key];
+    Object.assign(process.env, originalEnv);
+  }
+  if (reporterError) throw reporterError;
+  if (firstFailure) {
+    const diagnostic = failureDiagnostics.get(firstFailure.file);
+    if (diagnostic) firstFailure = { file: firstFailure.file, name: diagnostic.name, error: diagnostic.details.error };
+    const notRun = (selectedFiles ?? []).filter(file => !startedFiles.has(file));
+    const interrupted = [...startedFiles].filter(file => !completedFiles.has(file));
+    process.stderr.write(`\nLanding gate stopped early after ${firstFailure.file}: ${firstFailure.name}\n`);
+    if (firstFailure.error) {
+      const error = firstFailure.error;
+      const cause = error.cause?.message;
+      const message = [...new Set([error.message, cause].filter(Boolean))].join(': ')
+        .replace(/[\u0000-\u001f\u007f]/gu, ' ').slice(0, 4096);
+      if (message) process.stderr.write(`Triggering test error: ${message}\n`);
+    }
+    if (interrupted.length) process.stderr.write(`Interrupted test files: ${interrupted.join(', ')}\n`);
+    if (notRun.length) process.stderr.write(`Files not run: ${notRun.join(', ')}\n`);
+    process.exitCode = 1;
+    return { status: 1, signal: null };
+  }
+  return { status: successful ? 0 : 1, signal: null };
 }
 
 let nodeOptionsWithValues;
@@ -375,7 +945,7 @@ function shardArguments(args) {
 }
 
 /** Run tests in the disposable environment, preserving a marker only when a parent holds the slot. */
-function executeTests(args, sandbox, gateMarkers, fullSuite) {
+async function executeTests(args, sandbox, gateMarkers, fullSuite) {
   const env = testEnvironment(sandbox, gateMarkers);
   let selectedArgs = args;
   if (fullSuite) {
@@ -397,7 +967,9 @@ function executeTests(args, sandbox, gateMarkers, fullSuite) {
     }
     if (files) selectedArgs = [...args, ...files];
   }
-  const result = runTests(selectedArgs, env);
+  const result = process.env[LANDING_RUN_ENV] === '1'
+    ? await runLandingTests(selectedArgs, env)
+    : runTests(selectedArgs, env);
   if (result.error) throw result.error;
   return result;
 }
@@ -431,10 +1003,10 @@ async function main(args) {
   }
   let signal = null;
   /** Keep sandbox lifetime inside the held lease, including the complete child process. */
-  const run = (gateMarkers) => {
+  const run = async (gateMarkers) => {
     const sandbox = mkdtempSync(join(tmpdir(), 'pullboard-test-run-'));
     try {
-      const result = executeTests(args, sandbox, gateMarkers, fullSuite);
+      const result = await executeTests(args, sandbox, gateMarkers, fullSuite);
       signal = result.signal;
       process.exitCode = result.status ?? 1;
     } finally { rmSync(sandbox, { recursive: true, force: true }); }
@@ -445,7 +1017,7 @@ async function main(args) {
     const legacyHeld = process.env[GATE_SLOT_HELD_ENV] === '1';
     if (scopedMarker) {
       const inherited = inheritedGateSlot({ root: process.cwd(), browser });
-      if (inherited) run(gateSlotEnvironment(inherited));
+      if (inherited) await run(gateSlotEnvironment(inherited));
       else await acquire();
     } else if (legacyHeld) {
       throw new Error('this legacy gate marker does not identify a live machine gate lease; restart the parent runner with a scoped gate lease');
@@ -481,4 +1053,13 @@ if (process.argv[1] && resolve(process.argv[1]) === runner) {
 } else if (process.argv[1]) {
   process.env.PULLBOARD_TEST_FILE = process.argv[1];
   installTestWatchdog();
+  const startsPath = process.env[LANDING_WORKER_STARTS_ENV];
+  const attempt = process.env[LANDING_ATTEMPT_ENV];
+  if (startsPath && attempt) {
+    const identity = await landingWorkerIdentity(process.pid);
+    if (!identity) throw new Error('landing test worker could not prove its process identity');
+    appendFileSync(startsPath, `${JSON.stringify({ type: 'worker', attempt, file: resolve(process.argv[1]),
+      pid: identity.pid, pgid: identity.pgid, started: identity.started })}\n`);
+    watchLandingChildSpawns(startsPath, attempt);
+  }
 }
