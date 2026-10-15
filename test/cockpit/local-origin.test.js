@@ -117,7 +117,10 @@ test('a pullboard.dev page reads the local board [N26,A2]', { timeout: 120_000 }
         return nativeFetch(input, init);
       };
     })()` });
-    const relayPage = (relaySession) => cockpitPage('', { readOnly: true, requests: true, transportModule: '/relay/client.js', apiHeaders: {}, stylesheet: '/view.css', hostedLocal: true, relaySession, signIn: '/auth/github/start' });
+    // The page as relay/browser-page.js serves it, with its own banner, which the relay client fills.
+    const relayPage = (relaySession) => cockpitPage('', { readOnly: true, requests: true, transportModule: '/relay/client.js', apiHeaders: {}, stylesheet: '/view.css', hostedLocal: true, relaySession, signIn: '/auth/github/start' })
+      .replace('<main>', '<main><section class="card-panel" id="relay-notice" role="status"><p>Pairing this browser…</p></section>');
+    const banner = "document.querySelector('#relay-notice').hidden";
     stopStandIn = await hostedStandIn(chrome, { anonymous: relayPage(false), relay: relayPage(true) }, await styleOf(view));
     const trips = () => chrome.requests.filter((entry) => entry.url === LOCAL + '/local/connect').length;
     const relayModule = () => chrome.requests.filter((entry) => entry.url === HOSTED + '/relay/client.js').length;
@@ -140,6 +143,7 @@ test('a pullboard.dev page reads the local board [N26,A2]', { timeout: 120_000 }
     const away = JSON.parse(await chrome.stable("JSON.stringify({ links: !document.querySelector('#local-note-links').hidden, view: document.querySelector('#local-note-view').href, signIn: document.querySelector('#local-note-sign-in').hidden ? null : document.querySelector('#local-note-sign-in').getAttribute('href') })"));
     assert.deepEqual(away, { links: true, view: LOCAL + '/local/view', signIn: '/auth/github/start' }, 'an unreachable view is named, with the local view and sign-in linked');
     assert.equal(relayModule(), 0, 'without a relay session the relay module is never loaded');
+    assert.equal(await chrome.stable(banner), true, 'and the relay\'s banner does not speak for it');
     await chrome.send('Page.navigate', { url: HOSTED + '/?relay' });
     await chrome.waitFor("location.search === '?relay' && !document.querySelector('#local-note-links').hidden", 20_000); // budget: hang ceiling for one refused loopback request.
     // A browser that has since refused this page the access is named as the reason, as it is the one the page knows.
@@ -147,6 +151,7 @@ test('a pullboard.dev page reads the local board [N26,A2]', { timeout: 120_000 }
     assert.match(second.text, second.permission === 'denied' ? /has refused this page access to apps on this device/ : /cannot reach a local view/, `the page names what it knows: ${JSON.stringify(second)}`);
     await relayAsked(1);
     assert.equal(await chrome.stable("document.querySelector('#local-note-sign-in').hidden"), true, 'a person with a relay session is not asked to sign in');
+    assert.equal(await chrome.stable(banner), false, 'and the relay page keeps its banner');
     // A relay pairing link stays the relay's: the page does not look for this machine on that load.
     await chrome.send('Page.navigate', { url: HOSTED + '/#board=b1&key=k1' });
     await relayAsked(2);
@@ -176,6 +181,7 @@ test('a pullboard.dev page reads the local board [N26,A2]', { timeout: 120_000 }
     assert.equal(shown.base, LOCAL, 'the page reads the local view at its default address');
     assert.equal(shown.readOnly, false, 'the local board is not read-only');
     assert.equal(shown.transportModule, null, 'the relay transport is never loaded');
+    assert.equal(await chrome.stable(banner), true, 'and the relay\'s banner is hidden over the local board');
     assert.deepEqual(JSON.parse(shown.kept), { version: 1, origin: LOCAL, key: view.key }, 'the session is kept for this tab');
     assert.ok(!shown.lasting.includes(view.key), 'nothing lasting holds the secret');
     const local = shown.log.filter((entry) => entry.url.startsWith(LOCAL));

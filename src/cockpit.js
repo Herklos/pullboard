@@ -283,6 +283,12 @@ function localNote(text, ways = false) {
   if (hosted.signIn) $('local-note-sign-in').href = hosted.signIn;
 }
 
+/** Hide the relay's own banner, which speaks for the relay, on a page the relay does not serve this time. */
+function hideRelayNotice() {
+  const banner = document.getElementById('relay-notice');
+  if (banner) banner.hidden = true;
+}
+
 /** Send this tab on the round trip to the local view, which sends it straight back here; two tries in a row at most. */
 function localTrip(base) {
   const trips = Number(tabValue(LOCAL_TRIPS) || 0);
@@ -346,6 +352,7 @@ async function connectLocal() {
   transportModule = null;
   transport = null;
   document.body.classList.remove('read-only', 'requests');
+  hideRelayNotice();
   localNote(null);
   return 'local';
 }
@@ -2939,7 +2946,7 @@ async function startPage() {
     if (localProblem) localNote(localProblem, true);
     else local = await connectLocal();
     if (local === 'away') return;
-    if (local === 'unreachable' && !hosted.relaySession) return;
+    if (local === 'unreachable' && !hosted.relaySession) { hideRelayNotice(); return; }
   }
   if (transportModule) {
     try {
