@@ -2497,7 +2497,7 @@ function workCommands(io, args) {
       return 0;
     }),
     add: () => act(async (ctx, board, me) => {
-      const recovered = await relayCommandReceipt(ctx.info.root, io.relayCommand);
+      const recovered = await relayCommandReceipt(ctx.info.root, io.relayCommand, io);
       if (recovered) {
         for (const event of recovered.events) io.onEvent?.(event);
         const id = recovered.result;
@@ -2537,7 +2537,7 @@ function workCommands(io, args) {
     }),
     edit: () => act(async (ctx, board, me) => {
       const id = idArg(first);
-      const recovered = await relayCommandReceipt(ctx.info.root, io.relayCommand);
+      const recovered = await relayCommandReceipt(ctx.info.root, io.relayCommand, io);
       if (recovered) {
         for (const event of recovered.events) io.onEvent?.(event);
         io.result?.({ item: store.getItem(board, id) });
@@ -2692,7 +2692,7 @@ function workCommands(io, args) {
       return 0;
     }),
     merged: () => act(async (ctx, board, me) => {
-      const recovered = await relayCommandReceipt(ctx.info.root, io.relayCommand);
+      const recovered = await relayCommandReceipt(ctx.info.root, io.relayCommand, io);
       if (recovered) {
         for (const event of recovered.events) io.onEvent?.(event);
         const commit = recovered.move.args[1].commit;

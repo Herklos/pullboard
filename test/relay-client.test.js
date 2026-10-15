@@ -502,6 +502,70 @@ test('[H1,H3,H7,H15,H16] relay on snapshots and orders ciphertext, refuses offli
     'person deletion removes the relay journal and SQLite sidecars');
 });
 
+/** Inject a lost reply at the transport, then recover its move on the repeated command [H16,C7]. */
+
+test('[H16,C7] a relay transport failure names its cause', async (t) => {
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-relay-cause-')));
+  const root = join(scratch, 'repo');
+  const home = join(scratch, 'home');
+  const pullboardHome = join(home, '.pullboard');
+  const privateBin = join(scratch, 'path');
+  mkdirSync(root); mkdirSync(home, { mode: 0o700 }); mkdirSync(privateBin, { mode: 0o700 });
+  chmodSync(home, 0o700); chmodSync(privateBin, 0o700);
+  const gitBinary = process.env.PATH.split(delimiter).map((entry) => join(entry, 'git')).find(existsSync);
+  assert.ok(gitBinary, 'the fixture PATH contains git');
+  symlinkSync(realpathSync(gitBinary), join(privateBin, 'git'));
+  symlinkSync(realpathSync(process.execPath), join(privateBin, 'node'));
+  symlinkSync(realpathSync('/bin/sh'), join(privateBin, 'sh'));
+  const env = {
+    ...process.env, HOME: home, PULLBOARD_HOME: pullboardHome, PATH: privateBin,
+    GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
+    GIT_AUTHOR_NAME: 'Relay Test', GIT_AUTHOR_EMAIL: 'relay-test@example.com',
+    GIT_COMMITTER_NAME: 'Relay Test', GIT_COMMITTER_EMAIL: 'relay-test@example.com',
+  };
+  for (const name of [...AGENT_SHELL_MARKERS, ...SSH_SHELL_MARKERS]) delete env[name];
+  for (const name of ['PULLBOARD_RELAY_KEY', 'PULLBOARD_RELAY_TOKEN']) delete env[name];
+  const provider = await githubFixture(t);
+  SIGN_INS.set(root, async () => {
+    assert.equal((await fetch(provider.origin + '/login/device')).status, 200);
+  });
+  t.after(() => SIGN_INS.delete(root));
+  const auth = createRelayAuth({ database: join(scratch, 'auth.sqlite'), github: createGitHubClient(provider.config) });
+  t.after(() => { auth.close(); });
+  const relay = await relayServer(t, join(scratch, 'relay'), auth);
+  t.after(() => { rmSync(scratch, { recursive: true, force: true }); });
+
+  runFixtureGit(['init', '-q', '-b', 'main'], { cwd: root, env, encoding: 'utf8' });
+  await cli(root, env, 'init');
+  runFixtureGit(['remote', 'add', 'origin', 'git@github.com:fixture/repository.git'], { cwd: root, env, encoding: 'utf8' });
+  const lane = Object.keys(JSON.parse(readFileSync(join(root, 'pullboard.json'), 'utf8')).lanes)[0];
+  mkdirSync(join(pullboardHome, 'relay-keys'), { recursive: true, mode: 0o700 });
+  await cli(root, env, 'relay', 'on', '--url', relay.origin);
+
+  // The relay applies the move but the client loses its reply at the transport.
+  relay.dropNextReply({ offline: true });
+  const lost = await cliResult(root, env, 'add', lane, 'reply lost at the transport');
+  assert.equal(lost.status, 1);
+  const refusal = lost.document.error;
+  assert.equal(refusal.code, 'RELAY_UNAVAILABLE', 'the refusal code is unchanged');
+  assert.match(refusal.next, /\S/, 'the refusal keeps its next step');
+  assert.ok(refusal.message.includes(relay.origin), 'the refusal names the relay address');
+  assert.match(refusal.message, /did not answer \((?:timed out|no connection|[A-Z][A-Z0-9_]+) after \d+ ms on POST \/api\/v1\/boards\/[0-9a-f]{32}\/moves\)/u,
+    'the refusal names the underlying transport failure and the request');
+  const cause = /did not answer \(([^)]+?) after \d+ ms/u.exec(refusal.message)[1];
+
+  // A later command that recovers the move says so once, with the earlier cause.
+  relay.failReads(false);
+  const repeated = await cliResult(root, env, 'add', lane, 'reply lost at the transport');
+  assert.equal(repeated.status, 0, repeated.stderr);
+  // --json carries diagnostic lines in the document; plain output writes the same lines to stderr.
+  const printed = [...(repeated.document.diagnostics ?? []), repeated.stderr].join('\n').split('\n');
+  const recoveredLines = printed.filter((line) => line.includes('whose earlier reply was lost'));
+  assert.equal(recoveredLines.length, 1, printed.join('\n'));
+  assert.match(recoveredLines[0], new RegExp(`^pullboard: recovered move \\d+ \\(addItem\\) whose earlier reply was lost: ${cause.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}$`, 'u'));
+  assert.equal(repeated.document.item.item_title, 'reply lost at the transport', 'the recovered command reports its original outcome');
+});
+
 /** Create the same three real linked replicas for each independently budgeted scenario. */
 async function threeReplicaFixture(t, timing) {
   timing.begin('cloning three replicas', 'create the isolated seed repo, three clones, and their linked worktrees');

@@ -1057,8 +1057,11 @@ export async function relayRevoke(root, id, io) {
   });
 }
 
-/** Read an acknowledged exact CLI result before changed spec, brief or Git refs can block it. */
-export async function relayCommandReceipt(root, command) {
+/**
+ * Read an acknowledged exact CLI result before changed spec, brief or Git refs can block it.
+ * Why io: a recovered move whose earlier reply was lost says so once on this command (#642).
+ */
+export async function relayCommandReceipt(root, command, io) {
   if (!command) return null;
   const file = linkFile(root);
   return locked(file, async () => {
@@ -1071,7 +1074,7 @@ export async function relayCommandReceipt(root, command) {
     }
     const expected = { add: 'addItem', edit: 'editItem', merged: 'merged' }[command.cliOperation];
     if (!recovered.move || recovered.move.operation !== expected) throw new Refused('RELAY_STORAGE', 'restore the interrupted command metadata before retrying');
-    const move = recoveredMove(root, state, recovered.move.operation, recovered.move.args, command);
+    const move = recoveredMove(root, state, recovered.move.operation, recovered.move.args, command, io);
     const receipt = localRecords(root, board => engineReceipt(board, move.id));
     if (receipt.outcome.error) {
       delete state.recovered;
