@@ -124,7 +124,7 @@ async function fixture(t, options = {}) {
   const config = { database, github, now: clock, ...options };
   const auth = createRelayAuth(config);
   t.after(() => { auth.close(); rmSync(root, { recursive: true, force: true }); });
-  return { ...provider, providerConfig: provider.config, auth, database, config, advance(ms) { time += ms; } };
+  return { ...provider, providerConfig: provider.config, auth, database, config, now: () => time, advance(ms) { time += ms; } };
 }
 
 /** Complete a real stand-in device grant, advancing only the injected relay expiry clock. */
@@ -134,6 +134,55 @@ async function login(box) {
   box.advance(grant.interval * 1000);
   return box.auth.pollDevice(grant.ticket);
 }
+
+test('a minted device session stays cancellable after its device grant expires [H5,N26]', async (t) => {
+  const box = await fixture(t);
+  const prior = await login(box);
+  const grantStarted = box.now();
+  box.state.deviceAuthorized = true;
+  const grant = await box.auth.beginDevice();
+  box.advance(grant.interval * 1000);
+  const minted = await box.auth.pollDevice(grant.ticket);
+  assert.equal(box.now(), grantStarted + grant.interval * 1000, 'the grant uses the injected auth clock');
+  const beforeExpiry = livePersonSessionIds({ authDatabase: box.database });
+  assert.equal(beforeExpiry.includes(prior.id), true, 'the preexisting session remains live');
+  assert.equal(beforeExpiry.includes(minted.id), true, 'the device grant minted one new live session');
+
+  box.advance((grant.expiresIn - grant.interval) * 1000);
+  assert.equal(box.now(), grantStarted + grant.expiresIn * 1000, 'the clock reaches the exact grant deadline');
+  await assert.rejects(box.auth.pollDevice(grant.ticket), { code: 'OAUTH_EXPIRED' }, 'polling remains strictly expired at the grant deadline');
+  assert.deepEqual(await box.auth.cancelDevice(grant.ticket), { cancelled: true }, 'the bounded cleanup receipt revokes the session after its grant expires');
+  assert.deepEqual(await box.auth.cancelDevice(grant.ticket), { cancelled: true }, 'a known cleanup remains idempotent');
+  await assert.rejects(box.auth.authenticate(minted.token), { code: 'AUTH_REQUIRED' }, 'only the newly minted session is revoked');
+  assert.equal((await box.auth.authenticate(prior.token)).id, prior.id, 'cleanup preserves the preexisting session');
+  assert.deepEqual(livePersonSessionIds({ authDatabase: box.database }), [prior.id], 'the expired grant receipt cannot revoke another live session');
+  assert.deepEqual(await box.auth.cancelDevice('pd_' + 'x'.repeat(43)), { cancelled: false }, 'an unknown ticket is never treated as cleaned up');
+});
+
+test('device-session cleanup survives grant pruning but ends at session expiry [H5,N26]', async (t) => {
+  const box = await fixture(t, { sessionTTL: 30 * 60_000 });
+  const prior = await login(box);
+  const grantStarted = box.now();
+  box.state.deviceAuthorized = true;
+  const grant = await box.auth.beginDevice();
+  box.advance(grant.interval * 1000);
+  const minted = await box.auth.pollDevice(grant.ticket);
+  box.advance((grant.expiresIn - grant.interval) * 1000);
+
+  const nextGrant = await box.auth.beginDevice(); // pruneFlows removes the expired flow first
+  assert.equal(box.now(), grantStarted + grant.expiresIn * 1000, 'the session cleanup receipt outlives only the original grant');
+  await assert.rejects(box.auth.pollDevice(grant.ticket), { code: 'OAUTH_EXPIRED' }, 'pruning never makes an expired ticket pollable');
+  assert.deepEqual(await box.auth.cancelDevice(grant.ticket), { cancelled: true }, 'flow pruning preserves the exact live session cleanup receipt');
+  assert.deepEqual(await box.auth.cancelDevice(grant.ticket), { cancelled: true }, 'the pruned ticket receipt remains idempotent');
+  await assert.rejects(box.auth.authenticate(minted.token), { code: 'AUTH_REQUIRED' }, 'the receipt revoked its own session');
+  assert.equal((await box.auth.authenticate(prior.token)).id, prior.id, 'pruned-flow cleanup preserves the prior session');
+  assert.deepEqual(await box.auth.cancelDevice(nextGrant.ticket), { cancelled: true }, 'the replacement grant remains independently cancellable');
+
+  box.advance(minted.expires - box.now());
+  assert.equal(box.now(), minted.expires, 'the cleanup receipt reaches the exact session expiry');
+  assert.deepEqual(await box.auth.cancelDevice(grant.ticket), { cancelled: false }, 'expired cleanup receipts are no longer accepted as cancellation proof');
+  await assert.rejects(box.auth.pollDevice(grant.ticket), { code: 'OAUTH_EXPIRED' }, 'an expired cleanup receipt never restores poll access');
+});
 
 test('linking every board stops cleanly when the sign-in is declined or cancelled [H5,N26]', async (t) => {
   for (const scenario of ['already-cancelled', 'declined', 'expired', 'cancelled-during-sign-in', 'cancelled-after-sign-in']) await t.test(scenario, async (t) => {

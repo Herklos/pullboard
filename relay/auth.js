@@ -60,6 +60,8 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
   const permissions = new Map();
   const webFlows = new Map();
   const deviceFlows = new Map();
+  // A hashed ticket may revoke only its minted session, retained until that session expires.
+  const deviceSessionReceipts = new Map();
   let closed = false;
   let locked = false;
 
@@ -114,7 +116,9 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
   function pruneFlows() {
     open();
     for (const map of [webFlows, deviceFlows]) for (const [key, flow] of map) if (flow.expires <= now() && !flow.busy) map.delete(key);
-    if (webFlows.size + deviceFlows.size >= 10_000) throw new Refused('SIGN_IN_BUSY', 'too many sign-ins are pending; retry shortly');
+    for (const [key, receipt] of deviceSessionReceipts) if (receipt.expires <= now()) deviceSessionReceipts.delete(key);
+    const activeTickets = new Set([...deviceFlows.keys(), ...deviceSessionReceipts.keys()]);
+    if (new Set([...webFlows.keys(), ...activeTickets]).size >= 10_000) throw new Refused('SIGN_IN_BUSY', 'too many sign-ins are pending; retry shortly');
   }
 
   /** Hide public boards below triage, and refuse actions below write without hiding readable private boards. */
@@ -222,9 +226,12 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
         // boundary. If cancellation raced the synchronous insert, revoke only this flow's row.
         flow.deviceCode = null;
         flow.sessionId = session.id;
+        flow.sessionExpires = session.expires;
         flow.completed = true;
+        deviceSessionReceipts.set(key, { sessionId: session.id, expires: session.expires, revoked: false });
         if (flow.cancelled || flow.expires <= now()) {
           db.prepare("UPDATE relay_credentials SET revoked=1 WHERE id=? AND kind='session'").run(flow.sessionId);
+          deviceSessionReceipts.get(key).revoked = true;
           throw flow.cancelled
             ? new Refused('OAUTH_CANCELLED', 'GitHub device sign-in was cancelled; no board was linked')
             : new Refused('OAUTH_EXPIRED', 'CLI sign-in expired; start again');
@@ -241,17 +248,32 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
       open();
       if (typeof ticket !== 'string' || !/^pd_[A-Za-z0-9_-]{43}$/u.test(ticket)) return { cancelled: false };
       const key = hash(ticket);
-      const flow = deviceFlows.get(key);
-      if (!flow || (flow.expires <= now() && !flow.busy)) {
-        if (flow && !flow.busy) deviceFlows.delete(key);
-        return { cancelled: false };
+      let flow = deviceFlows.get(key);
+      let receipt = deviceSessionReceipts.get(key);
+      if (flow && flow.expires <= now() && !flow.busy) {
+        deviceFlows.delete(key);
+        flow = null;
       }
-      flow.cancelled = true;
-      const pollSettled = flow.pollSettled;
-      if (pollSettled) await pollSettled;
-      flow.deviceCode = null;
-      if (flow.sessionId) db.prepare("UPDATE relay_credentials SET revoked=1 WHERE id=? AND kind='session'").run(flow.sessionId);
-      flow.sessionId = null;
+      if (receipt && receipt.expires <= now()) {
+        deviceSessionReceipts.delete(key);
+        receipt = null;
+      }
+      if (!flow && !receipt) return { cancelled: false };
+      if (flow) {
+        flow.cancelled = true;
+        const pollSettled = flow.pollSettled;
+        if (pollSettled) await pollSettled;
+        flow.deviceCode = null;
+        receipt = deviceSessionReceipts.get(key) ?? receipt;
+      }
+      const sessionId = receipt?.sessionId ?? flow?.sessionId;
+      const sessionExpires = receipt?.expires ?? flow?.sessionExpires;
+      if (sessionId && !Number.isSafeInteger(sessionExpires)) throw new Refused('OAUTH_CLEANUP', 'the relay cannot confirm cleanup for this sign-in; retry or sign in again');
+      if (sessionId && !receipt?.revoked) {
+        db.prepare("UPDATE relay_credentials SET revoked=1 WHERE id=? AND kind='session' AND expires=?").run(sessionId, sessionExpires);
+        if (receipt) receipt.revoked = true;
+      }
+      if (flow) flow.sessionId = null;
       return { cancelled: true };
     },
     /** Authenticate a human or a scoped agent; every board write asks GitHub again. */
