@@ -540,7 +540,7 @@ export async function runPerfHarness(options = {}) {
 async function main(argv) {
   const parsed = parseArgs({ args: argv, options: {
     seed: { type: 'string', default: 'pullboard-perf-606' }, size: { type: 'string', default: '3000' },
-    runs: { type: 'string', default: '5' }, idle: { type: 'string', default: '30' }, liveEvery: { type: 'string', default: '5' },
+    runs: { type: 'string', default: '5' }, idle: { type: 'string', default: '30' }, 'live-every': { type: 'string', default: '5' },
     keep: { type: 'boolean', default: false }, help: { type: 'boolean', default: false },
   } });
   if (parsed.values.help) {
@@ -554,7 +554,7 @@ async function main(argv) {
       board = generateStressBoard({ seed: parsed.values.seed, size: Number(parsed.values.size) });
       try {
         const report = await run({ board, runs: Number(parsed.values.runs), idleMs: Number(parsed.values.idle) * 1_000,
-          liveEveryMs: Number(parsed.values.liveEvery) * 1_000 });
+          liveEveryMs: Number(parsed.values['live-every']) * 1_000 });
         process.stdout.write(`${JSON.stringify(report, null, 2)}\n\n${report.table}\n`);
         if (parsed.values.keep) process.stdout.write(`Generated board kept at ${board.root}\n`);
         completed = true;
