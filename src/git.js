@@ -1,16 +1,27 @@
 /**
- * The few git facts pullboard needs: where the repo is, which worktree this is, what HEAD holds,
- * and whether the tree is clean (R3). Every call is a plain `git` child process.
+ * The few Git facts pullboard needs: repository/worktree identity, selected refs and tree cleanliness.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Refused } from './refused.js';
 
 const GIT_FLAGS = ['--no-replace-objects', '-c', 'core.quotepath=false'];
 const gitFacts = new AsyncLocalStorage();
+const gitReadFacts = new AsyncLocalStorage();
+const READ_FACT_LIMIT = 512;
+const persistentReadFacts = new Map();
+
+/** Mark API read work so selected facts use the bounded process-lifetime, filesystem-validated cache.
+ *
+ * @param {() => any} work
+ * @returns {any}
+ */
+export function withGitReadFacts(work) {
+  return gitReadFacts.run(true, work);
+}
 
 /** Reuse facts within one CLI invocation, while isolating concurrent commands and expiring settled ones.
  *
@@ -19,18 +30,204 @@ const gitFacts = new AsyncLocalStorage();
  */
 export async function withGitFacts(work) {
   const cache = { active: true, facts: new Map() };
-  return gitFacts.run(cache, async () => {
+  const run = () => gitFacts.run(cache, async () => {
     try { return await work(); }
     finally {
       cache.active = false;
       cache.facts.clear();
     }
   });
+  // CLI authority must always use fresh Git facts, even when invoked from an API read callback.
+  return gitReadFacts.getStore() === true ? gitReadFacts.run(null, run) : run();
 }
 
 /** Drop facts after this command changes Git state such as refs, configuration, or worktrees. */
 export function invalidateGitFacts() {
   gitFacts.getStore()?.facts.clear();
+  persistentReadFacts.clear();
+}
+
+/** Return a stable, cheap signature for a path, including file contents against coarse timestamps. */
+function fileSignature(path, includeContents = true) {
+  try {
+    const stat = lstatSync(path, { bigint: true });
+    let target = null;
+    let targetIsFile = false;
+    if (stat.isSymbolicLink()) {
+      try {
+        const followed = statSync(path, { bigint: true });
+        target = [String(followed.dev), String(followed.ino), String(followed.mode), String(followed.size), String(followed.mtimeNs), String(followed.ctimeNs)];
+        targetIsFile = followed.isFile();
+      } catch (error) {
+        target = ['unreadable', error.code ?? 'ERROR'];
+      }
+    }
+    let contents = null;
+    if (includeContents && (stat.isFile() || targetIsFile)) contents = readFileSync(path, 'utf8');
+    return [String(stat.dev), String(stat.ino), String(stat.mode), String(stat.size), String(stat.mtimeNs), String(stat.ctimeNs), contents, target];
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return null;
+    return ['unreadable', error.code ?? 'ERROR'];
+  }
+}
+
+/** Refuse caching when config includes external files or selects a ref backend this signature cannot track. */
+function configNeedsFallback(path) {
+  try {
+    const source = readFileSync(path, 'utf8');
+    return /^\s*\[\s*include(?:if\b|[\s\]])/imu.test(source)
+      || /^\s*refstorage\s*=\s*reftable\s*$/imu.test(source);
+  } catch (error) {
+    return error.code !== 'ENOENT' && error.code !== 'ENOTDIR';
+  }
+}
+
+/** Describe worktree discovery and ref files without invoking Git, so a warm read can validate facts. */
+function repositorySignature(cwd, info = null, includeHead = false) {
+  const markers = [];
+  try { markers.push(['physical-cwd', realpathSync.native(cwd)]); }
+  catch (error) { markers.push(['physical-cwd', error.code ?? 'ERROR']); }
+  let folder = resolve(cwd);
+  let discoveredGitDir = null;
+  let discoveredCommonDir = null;
+  while (true) {
+    const markerPath = join(folder, '.git');
+    const marker = fileSignature(markerPath);
+    markers.push([markerPath, marker]);
+    if (marker) {
+      if (info && folder === resolve(info.root)) {
+        discoveredGitDir = info.gitDir;
+        discoveredCommonDir = info.commonDir;
+      } else {
+        let isDirectory = marker[2] && (BigInt(marker[2]) & 0o170000n) === 0o040000n;
+        if (!isDirectory) {
+          try { isDirectory = statSync(markerPath).isDirectory(); } catch { /* Git reports malformed or missing metadata. */ }
+        }
+        if (isDirectory) {
+          try {
+            discoveredGitDir = realpathSync.native(markerPath);
+            discoveredCommonDir = discoveredGitDir;
+          } catch {
+            discoveredGitDir = null;
+            discoveredCommonDir = null;
+          }
+        } else if (typeof marker[6] === 'string') {
+          const pointer = /^gitdir: (.+)\n?$/u.exec(marker[6]);
+          if (pointer) {
+            try {
+              discoveredGitDir = realpathSync.native(resolve(folder, pointer[1]));
+              const common = fileSignature(join(discoveredGitDir, 'commondir'));
+              discoveredCommonDir = common?.[6]
+                ? realpathSync.native(resolve(discoveredGitDir, common[6].trim()))
+                : discoveredGitDir;
+            } catch {
+              // Let Git's normal reader report malformed or inaccessible worktree metadata.
+              discoveredGitDir = null;
+              discoveredCommonDir = null;
+            }
+          }
+        }
+      }
+      break;
+    }
+    const parent = dirname(folder);
+    if (parent === folder) break;
+    folder = parent;
+  }
+  const rootPath = info?.root ?? folder;
+  const gitDir = info?.gitDir ?? discoveredGitDir;
+  const commonDir = info?.commonDir ?? discoveredCommonDir;
+  if (!gitDir || !commonDir) return JSON.stringify(markers);
+  const configPaths = [join(gitDir, 'config'), join(commonDir, 'config'), join(gitDir, 'config.worktree')];
+  if (configPaths.some(configNeedsFallback)) return null;
+  for (const path of [rootPath, gitDir, commonDir]) markers.push([path, fileSignature(path, false)]);
+  for (const path of [join(gitDir, 'commondir'), ...configPaths]) {
+    markers.push([path, fileSignature(path, basename(path) === 'commondir')]);
+  }
+  if (includeHead) {
+    const headPath = join(gitDir, 'HEAD');
+    const headMark = fileSignature(headPath);
+    markers.push([headPath, headMark]);
+    const head = headMark?.[6];
+    const symbolic = typeof head === 'string' ? /^ref: (.+)\n?$/u.exec(head) : null;
+    if (symbolic) {
+      const ref = symbolic[1];
+      if (!ref.startsWith('refs/') || ref.includes('\\')
+        || !ref.split('/').every((part) => part && part !== '.' && part !== '..')) return null;
+      for (const path of [join(gitDir, ref), join(commonDir, ref), join(commonDir, 'packed-refs')]) {
+        const marker = fileSignature(path, path !== join(commonDir, 'packed-refs'));
+        markers.push([path, marker]);
+        if (marker?.[6]?.startsWith('ref: ')) return null;
+      }
+    }
+  }
+  return JSON.stringify(markers);
+}
+
+/** Describe relevant Git environment/config so harmless process settings can still share read facts. */
+function readCacheContext() {
+  const env = process.env;
+  const discoverySelectors = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_CEILING_DIRECTORIES',
+    'GIT_DISCOVERY_ACROSS_FILESYSTEM', 'GIT_IMPLICIT_WORK_TREE', 'GIT_OBJECT_DIRECTORY',
+    'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_SHALLOW_FILE', 'GIT_GRAFT_FILE'];
+  if (discoverySelectors.some((name) => env[name] !== undefined && env[name] !== '')) return null;
+
+  const names = Object.keys(env).filter((name) => name === 'GIT_CONFIG' || name === 'GIT_CONFIG_PARAMETERS'
+    || name === 'GIT_CONFIG_COUNT' || name === 'GIT_CONFIG_GLOBAL' || name === 'GIT_CONFIG_SYSTEM'
+    || name === 'GIT_CONFIG_NOSYSTEM' || /^GIT_CONFIG_(?:KEY|VALUE)_\d+$/u.test(name)).sort();
+  const values = names.map((name) => [name, env[name]]);
+  if (env.GIT_CONFIG_PARAMETERS) return null;
+  const count = env.GIT_CONFIG_COUNT === undefined ? 0 : Number(env.GIT_CONFIG_COUNT);
+  if (!Number.isSafeInteger(count) || count < 0 || count > 16) return null;
+  // Identity validation and automatic housekeeping do not select repositories or Git objects.
+  const safeOverrides = new Set(['user.useconfigonly', 'gc.auto', 'maintenance.auto']);
+  for (let index = 0; index < count; index += 1) {
+    const key = env[`GIT_CONFIG_KEY_${index}`];
+    const value = env[`GIT_CONFIG_VALUE_${index}`];
+    if (!key || value === undefined || !safeOverrides.has(key.toLowerCase())) return null;
+  }
+  const files = new Set();
+  if (env.GIT_CONFIG) files.add(env.GIT_CONFIG);
+  if (env.GIT_CONFIG_GLOBAL) files.add(env.GIT_CONFIG_GLOBAL);
+  else {
+    const xdg = env.XDG_CONFIG_HOME || (env.HOME ? join(env.HOME, '.config') : null);
+    if (xdg) files.add(join(xdg, 'git', 'config'));
+    if (env.HOME) files.add(join(env.HOME, '.gitconfig'));
+  }
+  if (env.GIT_CONFIG_NOSYSTEM !== '1') {
+    if (env.GIT_CONFIG_SYSTEM) files.add(env.GIT_CONFIG_SYSTEM);
+    else if (process.platform !== 'win32') files.add('/etc/gitconfig');
+  }
+  const paths = [...files].sort();
+  if (paths.some(configNeedsFallback)) return null;
+  const fileMarkers = paths.map((path) => [path, fileSignature(path, false)]);
+  return JSON.stringify({ cwd: process.cwd(), values, home: env.HOME ?? null, xdg: env.XDG_CONFIG_HOME ?? null, files: fileMarkers });
+}
+
+/** Return a validated cached read fact, refreshing it when its filesystem signature changes. */
+function readFact(key, signature, read) {
+  if (gitReadFacts.getStore() !== true) return read();
+  const context = readCacheContext();
+  if (context === null) return read();
+  key = `${context}\0${key}`;
+  const cached = persistentReadFacts.get(key);
+  const before = signature(cached?.value);
+  if (before === null) return read();
+  if (cached && cached.signature === before) {
+    persistentReadFacts.delete(key);
+    persistentReadFacts.set(key, cached);
+    return cached.value;
+  }
+  const value = read();
+  const after = signature(value);
+  if (before === after) {
+    persistentReadFacts.delete(key);
+    persistentReadFacts.set(key, { signature: after, value });
+    while (persistentReadFacts.size > READ_FACT_LIMIT) persistentReadFacts.delete(persistentReadFacts.keys().next().value);
+  } else {
+    persistentReadFacts.delete(key);
+  }
+  return value;
 }
 
 /** Return one cached value for this command, or compute it when no command scope is active.
@@ -245,7 +442,11 @@ export function bareWorktreeFinding(cwd) {
  */
 export function repoInfo(cwd, { env } = {}) {
   if (env) return readRepoInfo(cwd, env);
-  return fact(`repoInfo:${resolve(cwd)}`, () => readRepoInfo(cwd));
+  const key = `repoInfo:${resolve(cwd)}`;
+  if (gitReadFacts.getStore() === true) {
+    return readFact(key, () => repositorySignature(cwd), () => readRepoInfo(cwd));
+  }
+  return fact(key, () => readRepoInfo(cwd));
 }
 
 /** Read top level, worktree Git dir and shared Git dir in one process.
@@ -271,27 +472,34 @@ function readRepoInfo(cwd, env) {
  * @returns {boolean}
  */
 export function codeIsFromMain(root = CODE_ROOT) {
-  return fact(`codeIsFromMain:${resolve(root)}`, () => {
-    const env = gitChildEnv(root);
-    const info = tryGit(root, ['rev-parse', '--path-format=absolute', '--show-toplevel', '--git-dir', '--git-common-dir'], { env });
-    const fields = info.stdout.split('\n');
-    if (info.status === 0 && fields.length === 3 && fields.every(Boolean)) {
-      return realpathSync.native(fields[2]) === realpathSync.native(fields[1]);
+  const key = `codeIsFromMain:${resolve(root)}`;
+  if (gitReadFacts.getStore() === true) {
+    return readFact(key, () => repositorySignature(root), () => readCodeIsFromMain(root));
+  }
+  return fact(key, () => readCodeIsFromMain(root));
+}
+
+/** Determine whether the code is from its main checkout, retaining the non-repository fallback. */
+function readCodeIsFromMain(root) {
+  const env = gitChildEnv(root);
+  const info = tryGit(root, ['rev-parse', '--path-format=absolute', '--show-toplevel', '--git-dir', '--git-common-dir'], { env });
+  const fields = info.stdout.split('\n');
+  if (info.status === 0 && fields.length === 3 && fields.every(Boolean)) {
+    return realpathSync.native(fields[2]) === realpathSync.native(fields[1]);
+  }
+  if (info.status === 0) return repoInfo(root, { env }).isMain;
+  let folder = resolve(root);
+  while (true) {
+    try {
+      lstatSync(join(folder, '.git'));
+      throw new Refused('UNMERGED_SCHEMA', 'the running code has Git metadata that cannot be read; restore its Git link before retrying, or install a released pullboard outside this checkout');
+    } catch (error) {
+      if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error;
     }
-    if (info.status === 0) return repoInfo(root, { env }).isMain;
-    let folder = resolve(root);
-    while (true) {
-      try {
-        lstatSync(join(folder, '.git'));
-        throw new Refused('UNMERGED_SCHEMA', 'the running code has Git metadata that cannot be read; restore its Git link before retrying, or install a released pullboard outside this checkout');
-      } catch (error) {
-        if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error;
-      }
-      const parent = dirname(folder);
-      if (parent === folder) return true;
-      folder = parent;
-    }
-  });
+    const parent = dirname(folder);
+    if (parent === folder) return true;
+    folder = parent;
+  }
 }
 
 /**
@@ -316,10 +524,16 @@ export function resolveCommit(root, ref) {
  * @returns {string | null}
  */
 export function headCommit(root) {
-  return fact(`headCommit:${resolve(root)}`, () => {
+  const key = `headCommit:${resolve(root)}`;
+  const read = () => {
     const result = tryGit(root, ['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']);
     return result.status === 0 ? result.stdout : null;
-  });
+  };
+  if (gitReadFacts.getStore() === true) {
+    const info = repoInfo(root);
+    return readFact(key, () => repositorySignature(root, info, true), read);
+  }
+  return fact(key, read);
 }
 
 /**
@@ -329,10 +543,16 @@ export function headCommit(root) {
  * @returns {string | null}
  */
 export function headTree(root) {
-  return fact(`headTree:${resolve(root)}`, () => {
+  const key = `headTree:${resolve(root)}`;
+  const read = () => {
     const result = tryGit(root, ['rev-parse', '--verify', '--quiet', 'HEAD^{tree}']);
     return result.status === 0 ? result.stdout : null;
-  });
+  };
+  if (gitReadFacts.getStore() === true) {
+    const info = repoInfo(root);
+    return readFact(key, () => repositorySignature(root, info, true), read);
+  }
+  return fact(key, read);
 }
 
 /**

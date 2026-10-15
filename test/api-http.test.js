@@ -21,6 +21,171 @@ import { fetchFresh } from './http-fixture.js';
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
 
+/** Run a private view in a child process with child-process accounting enabled only for warmed reads. */
+const REPEATED_READ_HARNESS = `
+import assert from 'node:assert/strict';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { basename, resolve } from 'node:path';
+import { performance } from 'node:perf_hooks';
+import { pathToFileURL } from 'node:url';
+
+const require = createRequire(import.meta.url);
+const childProcess = require('node:child_process');
+const gitIdentity = { ...process.env, GIT_AUTHOR_NAME: 'HTTP Agent', GIT_AUTHOR_EMAIL: 'agent@example.invalid',
+  GIT_COMMITTER_NAME: 'HTTP Agent', GIT_COMMITTER_EMAIL: 'agent@example.invalid' };
+const counters = { git: 0, node: 0, other: 0, methods: {} };
+let counting = false;
+const childMethods = ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork'];
+/** Count one child-process API call by its executable class while measurement is enabled. */
+function countChild(method, args) {
+  const raw = method === 'fork' ? process.execPath : String(args[0] ?? '');
+  const command = raw.trim().split(/\\s+/u)[0].replace(/^['"]|['"]$/gu, '');
+  const base = basename(command).replace(/\\.exe$/iu, '').toLowerCase();
+  const kind = base === 'git' ? 'git' : (command === process.execPath || base === 'node' ? 'node' : 'other');
+  counters[kind] += 1;
+  counters.methods[method] = (counters.methods[method] ?? 0) + 1;
+}
+for (const method of childMethods) {
+  const original = childProcess[method];
+  /** Count this built-in call when measured, then preserve its original behavior. */
+  childProcess[method] = function (...args) {
+    if (counting) countChild(method, args);
+    return Reflect.apply(original, this, args);
+  };
+}
+syncBuiltinESMExports();
+
+const [serveFile, projectJson] = process.argv.slice(1);
+const projects = JSON.parse(projectJson);
+const { serveView } = await import(pathToFileURL(serveFile).href);
+const view = await serveView({ port: 0 });
+const address = new URL(view.url);
+const key = address.searchParams.get('k');
+let requestCount = 0;
+/** Fetch one authenticated API response and reject failed fixture requests. */
+async function readApi(path) {
+  requestCount += 1;
+  const response = await fetch(address.origin + path, { headers: { 'x-pullboard-key': key, connection: 'close' } });
+  const document = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(document));
+  return document;
+}
+/** Fetch the actual local view page and require a successful response. */
+async function readPage() {
+  requestCount += 1;
+  const response = await fetch(view.url, { headers: { connection: 'close' } });
+  assert.equal(response.status, 200);
+  assert.match(await response.text(), /<!doctype html>/iu);
+}
+/** Read each selected board state and one known item detail. */
+async function readAllRoutes(boards) {
+  await readApi('/api/v1/boards');
+  for (const project of projects) {
+    const board = boards.find((entry) => resolve(entry.root) === resolve(project.root));
+    assert.ok(board, 'the private registry lists every fixture project');
+    const path = '/api/v1/boards/' + board.id;
+    await readApi(path + '/state');
+    await readApi(path + '/items/' + project.item);
+  }
+  await readPage();
+}
+
+try {
+  const initial = await readApi('/api/v1/boards');
+  assert.equal(initial.boards.length, 3);
+  const boards = initial.boards;
+  await readAllRoutes(boards);
+  const measuredRequests = requestCount;
+  counters.git = 0;
+  counters.node = 0;
+  counters.other = 0;
+  counters.methods = {};
+  requestCount = 0;
+  const started = performance.now();
+  counting = true;
+  try {
+    await readAllRoutes(boards);
+    await readAllRoutes(boards);
+  } finally { counting = false; }
+  const elapsedMs = performance.now() - started;
+  const measurement = { boards: boards.length, routes: 'GET /api/v1/boards; 3x GET state; 3x GET item detail; GET /',
+    warmupRequests: measuredRequests, requests: requestCount,
+    rounds: 2, elapsedMs: Number(elapsedMs.toFixed(2)), processes: { ...counters, methods: { ...counters.methods } } };
+  process.stdout.write(JSON.stringify({ measurement }) + '\\n');
+
+  const target = projects[0];
+  const board = boards.find((entry) => resolve(entry.root) === resolve(target.root));
+  const boardPath = '/api/v1/boards/' + board.id;
+  const specPath = resolve(target.root, 'SPEC.md');
+  const configPath = resolve(target.root, 'pullboard.json');
+  const doctrinePath = resolve(target.root, 'DOCTRINE.md');
+  /** Read the target state and return its payload. */
+  async function state() { return (await readApi(boardPath + '/state')).state; }
+  /** Change the target SPEC.md with a new approved goal row. */
+  function writeSpec(id) {
+    writeFileSync(specPath, '# HTTP fixture\\n\\n## Goals\\n- G1 [approved, must] Keep the board. | gate: true\\n- ' + id + ' [approved, must] Keep reads current. | gate: true\\n');
+  }
+  writeSpec('G2');
+  execFileSync('git', ['add', 'SPEC.md'], { cwd: target.root, env: process.env, stdio: 'ignore' });
+  execFileSync('git', ['commit', '-q', '-m', 'docs: refresh fixture spec [A2]'], { cwd: target.root, env: gitIdentity, stdio: 'ignore' });
+  let current = await state();
+  let head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: target.root, env: process.env, encoding: 'utf8' }).trim();
+  assert.ok(current.spec.some((row) => row.id === 'G2'));
+  assert.equal(current.rowAgesAt['SPEC.md'], head, 'a new commit refreshes the file HEAD');
+
+  execFileSync('git', ['switch', '-q', '-c', 'freshness-branch'], { cwd: target.root, env: process.env, stdio: 'ignore' });
+  writeSpec('G3');
+  execFileSync('git', ['add', 'SPEC.md'], { cwd: target.root, env: process.env, stdio: 'ignore' });
+  execFileSync('git', ['commit', '-q', '-m', 'docs: update branch fixture spec [A2]'], { cwd: target.root, env: gitIdentity, stdio: 'ignore' });
+  current = await state();
+  head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: target.root, env: process.env, encoding: 'utf8' }).trim();
+  assert.ok(current.spec.some((row) => row.id === 'G3'));
+  assert.equal(current.rowAgesAt['SPEC.md'], head, 'a branch switch refreshes the selected HEAD');
+
+  execFileSync('git', ['pack-refs', '--all', '--prune'], { cwd: target.root, env: process.env, stdio: 'ignore' });
+  assert.ok(readFileSync(resolve(target.root, '.git', 'packed-refs'), 'utf8').includes(' refs/heads/main\\n'),
+    'the private fixture has a packed main ref');
+  execFileSync('git', ['switch', '-q', 'main'], { cwd: target.root, env: process.env, stdio: 'ignore' });
+  current = await state();
+  assert.ok(current.spec.some((row) => row.id === 'G2'), 'switching back refreshes the original branch state');
+  execFileSync('git', ['pack-refs', '--all', '--prune'], { cwd: target.root, env: process.env, stdio: 'ignore' });
+  const packedRefs = readFileSync(resolve(target.root, '.git', 'packed-refs'), 'utf8');
+  assert.ok(packedRefs.includes(' refs/heads/freshness-branch\\n'), 'the alternate ref is packed while main is checked out');
+  execFileSync('git', ['switch', '-q', 'freshness-branch'], { cwd: target.root, env: process.env, stdio: 'ignore' });
+  current = await state();
+  assert.ok(current.spec.some((row) => row.id === 'G3'), 'switching to a packed ref refreshes the selected state');
+  execFileSync('git', ['switch', '-q', 'main'], { cwd: target.root, env: process.env, stdio: 'ignore' });
+
+  writeSpec('G4');
+  current = await state();
+  assert.ok(current.spec.some((row) => row.id === 'G4'), 'an uncommitted SPEC.md edit appears on the next read');
+  writeFileSync(doctrinePath, '# Local rules\\n\\n## Team Rules\\n\\n- LOCAL1 [approved, must] Keep the board readable. | gate: true\\n');
+  current = await state();
+  assert.ok(current.practice.some((row) => row.id === 'LOCAL1'), 'a DOCTRINE.md edit appears on the next read');
+  const config = JSON.parse(readFileSync(configPath, 'utf8'));
+  writeFileSync(configPath, JSON.stringify({ ...config, lanes: { ...config.lanes, ops: { owns: [] } } }));
+  current = await state();
+  assert.ok(current.lanes.includes('ops'), 'a pullboard.json edit appears on the next read');
+
+  const linked = projects[2];
+  const linkedBoard = boards.find((entry) => resolve(entry.root) === resolve(linked.root));
+  const linkedPath = '/api/v1/boards/' + linkedBoard.id + '/state';
+  execFileSync('git', ['switch', '-q', '-c', 'linked-refresh'], { cwd: linked.root, env: process.env, stdio: 'ignore' });
+  writeFileSync(resolve(linked.root, 'SPEC.md'), '# HTTP fixture\\n\\n## Goals\\n- G1 [approved, must] Keep the board. | gate: true\\n- G5 [approved, must] Keep the linked worktree current. | gate: true\\n');
+  execFileSync('git', ['add', 'SPEC.md'], { cwd: linked.root, env: process.env, stdio: 'ignore' });
+  execFileSync('git', ['commit', '-q', '-m', 'docs: refresh linked worktree [A2]'], { cwd: linked.root, env: gitIdentity, stdio: 'ignore' });
+  const linkedState = (await readApi(linkedPath)).state;
+  const linkedHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: linked.root, env: process.env, encoding: 'utf8' }).trim();
+  assert.ok(linkedState.spec.some((row) => row.id === 'G5'));
+  assert.equal(linkedState.rowAgesAt['SPEC.md'], linkedHead, 'a linked worktree branch change refreshes its state');
+  process.stdout.write(JSON.stringify({ fresh: true }) + '\\n');
+} finally {
+  await view.close();
+}
+`;
+
 /** Quote an executable path literally for the fixture's source-bin hook shim. */
 function shellWord(value) {
   return "'" + value.replace(/'/g, "'\\''") + "'";
@@ -136,6 +301,56 @@ async function viewHttpBox(t, existing = null) {
   const id = listed.document.boards[0].id;
   return { ...box, api: view, origin, key, id, call, path: '/api/v1/boards/' + id };
 }
+
+/** Prove warmed reads across three registered projects start no child processes and changes refresh state. */
+test('a repeated read spawns no process [A2,N26]', (t) => {
+  const box = fixture(t);
+  const roots = [box.root];
+  for (const number of [2, 3]) {
+    const root = join(box.dir, 'repo-' + number);
+    mkdirSync(root);
+    runFixtureGit(['init', '-q', '-b', 'main'], { cwd: root, env: box.env, stdio: 'pipe' });
+    box.cli(root, 'init');
+    const configPath = join(root, 'pullboard.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf8'));
+    writeFileSync(configPath, JSON.stringify({ ...config, gate: 'true', lanes: { app: { owns: ['app/'] }, review: { owns: [] } } }));
+    writeFileSync(join(root, 'SPEC.md'), '# HTTP fixture\n\n## Goals\n- G1 [approved, must] Keep the board. | gate: true\n');
+    writeFileSync(join(root, 'DOCTRINE.md'), '');
+    runFixtureGit(['add', '-A'], { cwd: root, env: box.env, stdio: 'pipe' });
+    runFixtureGit(['commit', '-q', '-m', 'chore: private HTTP fixture [A2]'], { cwd: root, env: box.env, stdio: 'pipe' });
+    if (number === 3) {
+      const linked = join(box.dir, 'repo-3-linked');
+      runFixtureGit(['worktree', 'add', '-q', '-b', 'view-feature', linked], { cwd: root, env: box.env, stdio: 'pipe' });
+      roots.push(linked);
+    } else roots.push(root);
+  }
+
+  const previousHome = process.env.PULLBOARD_HOME;
+  process.env.PULLBOARD_HOME = box.env.PULLBOARD_HOME;
+  try { for (const root of roots) registerProject(root); }
+  finally {
+    if (previousHome === undefined) delete process.env.PULLBOARD_HOME;
+    else process.env.PULLBOARD_HOME = previousHome;
+  }
+
+  const projects = roots.map((root, index) => {
+    const added = box.cli(root, 'add', 'app', 'Read fixture item ' + (index + 1), '--criterion', 'appears in item detail', '--specs', 'G1');
+    return { root, item: added.item.item_id };
+  });
+  // Keep the fixture's ordinary private Git config and identity; run-tests removes inherited repo/object selectors.
+  const result = runFixtureChild(process.execPath, [
+    '--input-type=module', '-e', REPEATED_READ_HARNESS,
+    resolve(import.meta.dirname, '../src/serve.js'), JSON.stringify(projects),
+  ], { cwd: box.root, env: box.env, encoding: 'utf8' });
+  const lines = result.stdout.trim().split('\n');
+  const measurement = JSON.parse(lines[0]).measurement;
+  process.stderr.write(`a repeated read spawns no process: boards=${measurement.boards}, routes=${measurement.routes}, requests=${measurement.requests}, rounds=${measurement.rounds}, processes=${JSON.stringify(measurement.processes)}, elapsed=${measurement.elapsedMs}ms\n`);
+  assert.deepEqual({ git: measurement.processes.git, node: measurement.processes.node, other: measurement.processes.other },
+    { git: 0, node: 0, other: 0 }, 'repeated board-list, state, item-detail, and page reads start no child process after warm-up');
+  assert.equal(result.status, 0, result.failure ?? result.stderr);
+  const report = JSON.parse(lines.at(-1));
+  assert.equal(report.fresh, true, 'commit, packed refs, linked worktree, SPEC.md, DOCTRINE.md, and pullboard.json changes appear on the next read');
+});
 
 test('[A2] a stale registered folder does not hide another readable board', async (t) => {
   const box = await httpBox(t, { includeMissing: true });
