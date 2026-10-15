@@ -3362,9 +3362,12 @@ async function runCommand(argv, io) {
           && existsSync(join(ctx.info.root, CONFIG_FILE))) {
           throw new Refused('NO_POLICY', `${CONFIG_FILE} is not committed; add and commit the initialized project before running the gate: git add ${CONFIG_FILE}`);
         }
-        if (error instanceof Refused && error.code === 'NO_POLICY'
-          && error.message === 'the committed coordinator policy or claim base is missing; restore its Git objects or ask the coordinator to refreeze the item') {
-          const setup = uncommittedPolicySetup(ctx.info);
+        // Refused prefixes its message with the code, so match the condition itself, not the text:
+        // pullboard.json on disk but absent from the primary checkout's commit. Any other
+        // missing policy or claim base keeps its own refusal.
+        if (error instanceof Refused && error.code === 'NO_POLICY') {
+          let setup = null;
+          try { setup = uncommittedPolicySetup(ctx.info); } catch { /* Report the original refusal below. */ }
           if (setup) {
             const files = setup.files.map(shellWord).join(' ');
             throw new Refused('NO_POLICY', `${CONFIG_FILE} and Pullboard's initialized setup files are uncommitted; commit them before running the gate: ${setup.stage} && git commit -q -m "chore: set up pullboard" -- ${files}`);

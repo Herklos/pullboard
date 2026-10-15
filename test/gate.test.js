@@ -135,6 +135,25 @@ test('gate after init in an existing repo says to commit the init files [I1,C7]'
   assert.match(message, /&& git commit -q -m "chore: set up pullboard"/u, 'the refusal explains the needed commit');
   for (const path of ['SPEC.md', 'DOCTRINE.md']) assert.ok(message.includes(path), message);
   assert.ok(!message.includes('README.md'), 'unrelated existing files are not included in the staging command');
+
+  // The command the refusal prints is the one that fixes it.
+  const fix = message.slice(message.indexOf('commit them before running the gate: ') + 'commit them before running the gate: '.length);
+  // init installs hooks that call `pullboard`; a person has it installed, so the fixture provides it.
+  const shims = join(dir, 'bin');
+  mkdirSync(shims);
+  writeFileSync(join(shims, 'pullboard'), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(BIN)} "$@"\n`, { mode: 0o755 });
+  const applied = runFixtureChild('/bin/sh', ['-c', fix], { cwd: repo, env: { ...env, PATH: `${shims}:${env.PATH ?? ''}` }, encoding: 'utf8' });
+  assert.equal(applied.status, 0, `${applied.stdout}${applied.stderr}`);
+  const afterFix = run('gate', '--json');
+  assert.notEqual(afterFix.stdout ? JSON.parse(afterFix.stdout).error?.code : undefined, 'NO_POLICY', 'the printed commit lets the gate read its policy');
+
+  // A policy missing for any other reason keeps its own refusal.
+  git('switch', '-q', '--detach', 'HEAD');
+  const detached = run('gate', '--json');
+  assert.equal(detached.status, 1);
+  const otherMissing = JSON.parse(detached.stdout).error;
+  assert.equal(otherMissing.code, 'NO_POLICY');
+  assert.doesNotMatch(otherMissing.message, /uncommitted/u, 'a committed config never gets the commit-your-setup message');
 });
 
 test('a digest keeps the failures and the end within its cap, however long one line is [V10]', () => {
