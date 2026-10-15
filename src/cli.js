@@ -64,7 +64,7 @@ import { tour } from './tour.js';
 import { commandOutput, refusalDocument } from './json.js';
 import { forgetProject, registerProjectAndLink } from './projects.js';
 import { milestoneRoadmap } from './roadmap.js';
-import { listResources } from './resources.js';
+import { listResources, runnerResourceStatus } from './resources.js';
 import { citedTestFiles, rowEvidence, rowStage } from './evidence.js';
 import { exportView, serveView } from './serve.js';
 import { forgetView, rememberView, runningView } from './view-session.js';
@@ -77,7 +77,7 @@ import { flowLines, flowAlertLine } from './stats-flow.js';
 import { releaseHeadlinesBetween } from './changelog.js';
 import { exportBoard, importBoard } from './exchange.js';
 import { addSigner, assertRequiredSigners, defaultPrincipal, hasSignerFile } from './signature.js';
-import { loadMachineSettings, setGateSlots } from './settings.js';
+import { addRunner, loadMachineSettings, setGateSlots } from './settings.js';
 import { formatSnapshotLimit, pendingSnapshotSize, pendingCheckpointProblem, relayCommandReceipt, relayCommandReceiptReported, relayLinked, relayOff, relayOn, relayOperation, relayRecover, relayRecovered, relayRevoke, relayStatus, relayTokens, syncRelay } from './relay.js';
 import { autoLinkProject, relayOnAll, revokeRelayDevice, unlinkedRelayProjects } from './relay-setup.js';
 import { readRelayMachine } from './relay-machine.js';
@@ -228,6 +228,8 @@ const OPTIONS = {
   reason: { type: 'string' },
   off: { type: 'boolean' },
   port: { type: 'string' },
+  slots: { type: 'string' },
+  browser: { type: 'string' },
   export: { type: 'string' },
   'no-open': { type: 'boolean' },
   note: { type: 'string' },
@@ -1792,13 +1794,15 @@ function readCommands(io, { first, second, rest, values }) {
         ...listResources({ scope: 'machine' }).map((resource) => ({ ...resource, scope: 'machine' })),
         ...listResources({ scope: 'repo', root: ctx.info.root }).map((resource) => ({ ...resource, scope: 'repo' })),
       ];
-      io.result?.({ resources });
+      const runners = runnerResourceStatus(loadMachineSettings().runners ?? []);
+      io.result?.({ resources, runners });
       if (!resources.length) io.say('no resources have been used');
       for (const resource of resources) {
         io.say(`${resource.name} (${resource.scope}, capacity ${resource.capacity})`);
         for (const holder of resource.holders) io.say(`  held by ${agentDisplayName(agents, ctx.config, holder.agent)}${holder.repo ? ` in ${holder.repo}` : ''}${resourceRunLabel(holder)} since ${holder.since}`);
         resource.line.forEach((waiter, index) => io.say(`  ${index + 1}. waiting: ${agentDisplayName(agents, ctx.config, waiter.agent)}${waiter.repo ? ` in ${waiter.repo}` : ''}${resourceRunLabel(waiter)}`));
       }
+      for (const runner of runners) io.say(`runner ${runner.host}: ${runner.inUse}/${runner.slots} slots, ${runner.browserInUse}/${runner.browser} browser${runner.unavailable ? ' (unavailable; re-register after checking the host)' : ''}`);
       return 0;
     },
     resume: () => resumeHere(io),
@@ -2797,7 +2801,11 @@ function resourceAgent(ctx) {
 /** Build a de-duplicated queue message for a gate waiting on machine capacity. */
 function gateWaitReporter(io) {
   let last = '';
-  return ({ holders, position }) => {
+  return ({ holders, position, runnerUnavailable }) => {
+    if (runnerUnavailable) {
+      io.say(`runner ${runnerUnavailable.host} unavailable: ${runnerUnavailable.reason}; until ${runnerUnavailable.until}; requeueing the run`);
+      return;
+    }
     const repos = holders.map(({ repo }) => repo).filter(Boolean);
     const message = `gate waiting: ${holders.length} running${repos.length ? ` in ${repos.join(', ')}` : ''}; place ${position}`;
     if (message !== last) {
@@ -2821,6 +2829,18 @@ function settingsCommand(io, { first, second, rest }) {
   const settings = setGateSlots(Number(second));
   io.result?.({ settings });
   io.say(`gateSlots set to ${settings.gateSlots}`);
+  return 0;
+}
+
+/** Register machine-level SSH capacity without requiring a board identity or a runner account. */
+function runnerCommand(io, { first, second, rest, values }) {
+  if (first !== 'add' || !second || rest.length || !/^[1-9]\d*$/u.test(values.slots ?? '')
+    || !/^(?:0|[1-9]\d*)$/u.test(values.browser ?? '')) {
+    throw new Refused('USAGE', 'pullboard runner add <ssh-host> --slots <positive integer> --browser <integer from zero through slots>');
+  }
+  const runner = addRunner({ host: second, slots: Number(values.slots), browser: Number(values.browser) });
+  io.result?.({ runner });
+  io.say(`registered runner ${runner.host}: ${runner.slots} slots, ${runner.browser} browser`);
   return 0;
 }
 
@@ -3273,6 +3293,7 @@ async function runCommand(argv, io) {
     }
     if (command === 'hook') return await hookCommand(io, args);
     if (command === 'settings') return settingsCommand(io, args);
+    if (command === 'runner') return runnerCommand(io, args);
     if (command === 'relay') {
       if (first === 'recover') {
         if (second || rest.length || !values.skip || values.url || values.all) throw new Refused('USAGE', 'pullboard relay recover --skip <exact blocked next sequence>');
@@ -3469,7 +3490,7 @@ export function resultCommands() {
     ...Object.keys(setupCommands({}, args)),
     ...Object.keys(readCommands({}, args)),
     ...Object.keys(workCommands({}, args)),
-    'help', 'version', 'tour', 'lifecycle', 'view', 'serve', 'forget', 'spec', 'prompt', 'hook', 'gate', 'settings', 'relay',
+    'help', 'version', 'tour', 'lifecycle', 'view', 'serve', 'forget', 'spec', 'prompt', 'hook', 'gate', 'settings', 'runner', 'relay',
   ])].sort();
 }
 

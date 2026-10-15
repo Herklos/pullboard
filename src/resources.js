@@ -73,9 +73,10 @@ function open(file) {
     db.exec('BEGIN IMMEDIATE');
     transaction = true;
     db.exec(`CREATE TABLE IF NOT EXISTS resource (name TEXT PRIMARY KEY, capacity INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS holder (token TEXT PRIMARY KEY, name TEXT NOT NULL, pid INTEGER NOT NULL, started TEXT NOT NULL DEFAULT '', agent TEXT NOT NULL, repo TEXT NOT NULL, since TEXT NOT NULL, heartbeat INTEGER NOT NULL, landing INTEGER NOT NULL DEFAULT 0, item_check INTEGER NOT NULL DEFAULT 0, browser INTEGER NOT NULL DEFAULT 0, item TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT '');
+      CREATE TABLE IF NOT EXISTS holder (token TEXT PRIMARY KEY, name TEXT NOT NULL, pid INTEGER NOT NULL, started TEXT NOT NULL DEFAULT '', agent TEXT NOT NULL, repo TEXT NOT NULL, since TEXT NOT NULL, heartbeat INTEGER NOT NULL, landing INTEGER NOT NULL DEFAULT 0, item_check INTEGER NOT NULL DEFAULT 0, browser INTEGER NOT NULL DEFAULT 0, item TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT '', runner TEXT NOT NULL DEFAULT '');
       CREATE INDEX IF NOT EXISTS holder_name ON holder(name);
-      CREATE TABLE IF NOT EXISTS waiter (ticket INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT UNIQUE NOT NULL, name TEXT NOT NULL, pid INTEGER NOT NULL, started TEXT NOT NULL DEFAULT '', agent TEXT NOT NULL, repo TEXT NOT NULL, since TEXT NOT NULL, heartbeat INTEGER NOT NULL, landing INTEGER NOT NULL DEFAULT 0, item_check INTEGER NOT NULL DEFAULT 0, browser INTEGER NOT NULL DEFAULT 0, item TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT '');
+      CREATE TABLE IF NOT EXISTS waiter (ticket INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT UNIQUE NOT NULL, name TEXT NOT NULL, pid INTEGER NOT NULL, started TEXT NOT NULL DEFAULT '', agent TEXT NOT NULL, repo TEXT NOT NULL, since TEXT NOT NULL, heartbeat INTEGER NOT NULL, landing INTEGER NOT NULL DEFAULT 0, item_check INTEGER NOT NULL DEFAULT 0, browser INTEGER NOT NULL DEFAULT 0, item TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT '', remote INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS runner_unavailable (host TEXT PRIMARY KEY, since TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '');
       CREATE INDEX IF NOT EXISTS waiter_name_ticket ON waiter(name, ticket);`);
     for (const table of ['holder', 'waiter']) {
       const columns = db.prepare(`PRAGMA table_info(${table})`).all().map(({ name }) => name);
@@ -86,6 +87,8 @@ function open(file) {
       if (!columns.includes('browser')) db.exec(`ALTER TABLE ${table} ADD COLUMN browser INTEGER NOT NULL DEFAULT 0`);
       if (!columns.includes('item')) db.exec(`ALTER TABLE ${table} ADD COLUMN item TEXT NOT NULL DEFAULT ''`);
       if (!columns.includes('kind')) db.exec(`ALTER TABLE ${table} ADD COLUMN kind TEXT NOT NULL DEFAULT ''`);
+      if (table === 'holder' && !columns.includes('runner')) db.exec("ALTER TABLE holder ADD COLUMN runner TEXT NOT NULL DEFAULT ''");
+      if (table === 'waiter' && !columns.includes('remote')) db.exec('ALTER TABLE waiter ADD COLUMN remote INTEGER NOT NULL DEFAULT 0');
     }
     db.exec('COMMIT');
     transaction = false;
@@ -174,14 +177,15 @@ function update(db, action) {
 /** Current holders and the landing-first line, then every other kind in arrival order. */
 function snapshot(db, name) {
   /** Preserve older public entries while naming diagnostics as a distinct queue class. */
-  const project = ({ diagnostic, browser, item, kind, ...entry }) => ({ ...entry, landing: entry.landing === 1,
+  const project = ({ diagnostic, browser, remote, runner, item, kind, ...entry }) => ({ ...entry, landing: entry.landing === 1,
     itemCheck: entry.itemCheck === 1 && diagnostic !== 1, ...(diagnostic === 1 ? { diagnostic: true } : {}),
-    ...(browser === 1 ? { browser: true } : {}), ...(item ? { item } : {}), ...(kind ? { kind } : {}) });
+    ...(browser === 1 ? { browser: true } : {}), ...(remote === 1 ? { remote: true } : {}),
+    ...(runner ? { runner } : {}), ...(item ? { item } : {}), ...(kind ? { kind } : {}) });
   // Browser is an additional capability on a gate lease, not a second partially held row.
   const where = name === 'browser' ? 'name = ? AND browser = 1' : 'name = ?';
   const sourceName = name === 'browser' ? 'gate' : name;
-  const holders = db.prepare(`SELECT agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, item, kind FROM holder WHERE ${where} ORDER BY since, token`).all(sourceName).map(project);
-  const line = db.prepare(`SELECT agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, item, kind FROM waiter WHERE ${where} ORDER BY landing DESC, ticket`).all(sourceName).map(project);
+  const holders = db.prepare(`SELECT agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, runner, item, kind FROM holder WHERE ${where} ORDER BY since, token`).all(sourceName).map(project);
+  const line = db.prepare(`SELECT agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, remote, item, kind FROM waiter WHERE ${where} ORDER BY landing DESC, ticket`).all(sourceName).map(project);
   return { holders, line };
 }
 
@@ -210,14 +214,98 @@ function waiterPosition(db, name, ticket, { eligibleOnly = false } = {}) {
   return considered.filter((waiter) => rank(waiter) < currentRank || (rank(waiter) === currentRank && waiter.ticket <= ticket)).length;
 }
 
+/** Validate the configured remote executors before using them in a queue transaction. */
+function validatedRunners(value) {
+  if (!Array.isArray(value)) throw new Refused('BAD_RUNNER_POOL', 'runnerProvider must return an array of runner settings');
+  const seen = new Set();
+  return value.map((runner) => {
+    if (!runner || typeof runner.host !== 'string' || !runner.host.trim() || runner.host.trim() !== runner.host
+      || !Number.isSafeInteger(runner.slots) || runner.slots < 1
+      || !Number.isSafeInteger(runner.browser) || runner.browser < 0 || runner.browser > runner.slots
+      || seen.has(runner.host)) {
+      throw new Refused('BAD_RUNNER_POOL', 'runners require unique nonempty hosts, positive slots, and browser capacity from zero through slots');
+    }
+    seen.add(runner.host);
+    return { host: runner.host, slots: runner.slots, browser: runner.browser };
+  });
+}
+
+/** Find the earliest compatible free executor while allowing CPU waiters past browser-only blocks. */
+function gateAdmission(db, ticket, capacity, runners) {
+  const waiters = db.prepare("SELECT ticket, pid, landing, browser, remote FROM waiter WHERE name = 'gate' ORDER BY landing DESC, ticket").all();
+  const holders = db.prepare("SELECT pid, landing, browser, runner FROM holder WHERE name = 'gate'").all();
+  const localUsed = holders.filter(holder => !holder.runner).length;
+  const localBrowsers = holders.filter(holder => !holder.runner && holder.browser === 1).length;
+  const usage = new Map(runners.map(runner => [runner.host, {
+    slots: holders.filter(holder => holder.runner === runner.host).length,
+    browsers: holders.filter(holder => holder.runner === runner.host && holder.browser === 1).length,
+  }]));
+  const unavailable = new Set(db.prepare('SELECT host FROM runner_unavailable').all().map(row => row.host));
+  /** Keep an already holding process from taking another slot ahead of a different landing. */
+  const blockedByLanding = waiter => holders.some(holder => holder.pid === waiter.pid)
+    && waiters.some(other => other.landing === 1 && other.pid !== waiter.pid);
+  /** Find a currently free compatible slot without reserving it for later queue entries. */
+  function available(waiter) {
+    if (blockedByLanding(waiter)) return null;
+    if (localUsed < capacity && (waiter.browser !== 1 || localBrowsers < 1)) {
+      return { host: '', slots: capacity, browser: waiter.browser === 1 ? 1 : 0 };
+    }
+    if (waiter.remote === 1) {
+      for (const runner of runners) {
+        if (unavailable.has(runner.host) || (waiter.browser === 1 && runner.browser < 1)) continue;
+        const used = usage.get(runner.host);
+        if (used.slots >= runner.slots || (waiter.browser === 1 && used.browsers >= runner.browser)) continue;
+        return runner;
+      }
+    }
+    return null;
+  }
+  for (const waiter of waiters) {
+    const executor = available(waiter);
+    if (executor) return waiter.ticket === ticket ? executor : null;
+  }
+  return null;
+}
+
+/** List configured runners with active slot usage from the same local admission database. */
+export function runnerResourceStatus(runners) {
+  const configured = validatedRunners(runners);
+  const db = open(machineResourceFile());
+  try {
+    return update(db, () => configured.map(runner => {
+      const holders = db.prepare("SELECT agent, repo, since, browser, item, kind FROM holder WHERE name = 'gate' AND runner = ? ORDER BY since, token").all(runner.host);
+      const unavailable = db.prepare('SELECT since, detail FROM runner_unavailable WHERE host = ?').get(runner.host);
+      return { ...runner, inUse: holders.length, browserInUse: holders.filter(holder => holder.browser === 1).length,
+        unavailable: Boolean(unavailable), ...(unavailable ? { unavailableSince: unavailable.since, unavailableReason: unavailable.detail } : {}), holders };
+    }));
+  } finally { db.close(); }
+}
+
+/** Serialize runner-setting changes against active remote leases and clear that host's quarantine. */
+export function updateRunnerSettings(host, persist) {
+  if (typeof host !== 'string' || !host.trim() || host.trim() !== host || typeof persist !== 'function') {
+    throw new Refused('BAD_RUNNER_SETTINGS', 'a runner host and settings persistence callback are required');
+  }
+  const db = open(machineResourceFile());
+  try {
+    return update(db, () => {
+      const held = db.prepare("SELECT COUNT(*) AS count FROM holder WHERE name = 'gate' AND runner = ?").get(host).count;
+      if (held) throw new Refused('RUNNER_BUSY', `runner ${host} has ${held} active slot(s); wait for them to finish before changing its settings`);
+      const result = persist();
+      db.prepare('DELETE FROM runner_unavailable WHERE host = ?').run(host);
+      return result;
+    });
+  } finally { db.close(); }
+}
+
 /** Pause briefly between durable queue checks. */
 function pause(ms) { return new Promise((resolvePromise) => setTimeout(resolvePromise, ms)); }
 
 /**
  * Join the landing-first queue; every other kind keeps its original FIFO ticket.
  *
- * @param {{ name: string, capacity: number, capacityProvider?: () => number, scope?: 'machine'|'repo'|'board', root?: string, agent?: string, repo?: string, landing?: boolean, itemCheck?: boolean, diagnostic?: boolean, browser?: boolean, item?: string, kind?: string, onWait?: (state: object) => void, allowIdleCapacityUpdate?: boolean }} options - Resource identity and queue class.
- * @returns {Promise<{ name: string, scope: string, token: string, pool: string, browser: boolean, waitMs: number, release: () => void, renew: () => void }>}
+ * @param {{ name: string, capacity: number, capacityProvider?: () => number, scope?: 'machine'|'repo'|'board', root?: string, agent?: string, repo?: string, landing?: boolean, itemCheck?: boolean, diagnostic?: boolean, browser?: boolean, remote?: boolean, runnerProvider?: () => Array<{host:string,slots:number,browser:number}>, item?: string, kind?: string, onWait?: (state: object) => void, allowIdleCapacityUpdate?: boolean, _resume?: object }} options - Resource identity, queue class and optional remote executor pool.
+ * @returns {Promise<{ name: string, scope: string, token: string, pool: string, browser: boolean, runner?: {host:string,slots:number,browser:number}, waitMs: number, release: () => void, renew: () => void, requeueRunner?: () => Promise<object> }>}
  */
 export async function takeResource(options) {
   const { name, capacity, scope = 'machine', root = process.cwd(), allowIdleCapacityUpdate = false } = options;
@@ -227,9 +315,13 @@ export async function takeResource(options) {
   const itemCheck = options.itemCheck === true;
   const diagnostic = options.diagnostic === true;
   const browser = options.browser === true;
+  const remote = options.remote === true;
+  const runnerProvider = options.runnerProvider;
   const item = options.item ?? '';
   const kind = options.kind ?? '';
   if (browser && name !== 'gate') throw new Refused('BAD_BROWSER_RESOURCE', 'browser capacity can only be acquired together with the machine gate; request name "gate" with browser: true');
+  if ((remote || runnerProvider !== undefined) && name !== 'gate') throw new Refused('BAD_REMOTE_RESOURCE', 'remote executors can only be acquired together with the machine gate');
+  if (runnerProvider !== undefined && typeof runnerProvider !== 'function') throw new Refused('BAD_RUNNER_POOL', 'runnerProvider must be a function returning configured runners');
   if (name === 'browser' && !browser) throw new Refused('BAD_BROWSER_RESOURCE', 'browser capacity is acquired only as part of a gate lease; request name "gate" with browser: true');
   if (typeof item !== 'string' || typeof kind !== 'string') throw new Refused('BAD_RESOURCE_METADATA', 'resource item and kind metadata must be text');
   if (landing && itemCheck) throw new Refused('BAD_RESOURCE_PRIORITY', 'a gate slot cannot be both a landing and an item check');
@@ -239,21 +331,26 @@ export async function takeResource(options) {
   let pool;
   try { pool = canonicalResourceFile(file); }
   catch (error) { db.close(); throw error; }
-  const token = randomUUID();
-  const requestedAt = Date.now();
+  const resume = options._resume;
+  const token = resume?.token ?? randomUUID();
+  const requestedAt = resume?.requestedAt ?? Date.now();
+  let priorWaitMs = resume?.priorWaitMs ?? 0;
+  let waitStartedAt = resume?.waitStartedAt ?? Date.now();
   const pid = process.pid;
   const agent = options.agent ?? process.env.PULLBOARD_AGENT ?? `pid-${pid}`;
   const started = processStarted(pid);
   const repo = options.repo ?? repoRoot(root);
-  let queuedAt = new Date().toISOString();
+  let queuedAt = resume?.queuedAt ?? new Date().toISOString();
   try {
+    let initialTicket = resume?.ticket;
     update(db, () => {
       const currentCapacity = options.capacityProvider?.() ?? capacity;
       if (!Number.isSafeInteger(currentCapacity) || currentCapacity < 1) throw new Refused('BAD_RESOURCE_CAPACITY', 'resource capacity must be a positive integer');
       const row = db.prepare('SELECT capacity FROM resource WHERE name = ?').get(name);
       if (row && row.capacity !== currentCapacity) {
         const state = snapshot(db, name);
-        if (!allowIdleCapacityUpdate || state.holders.length || state.line.length) {
+        const activeHolders = name === 'gate' ? state.holders.filter(holder => !holder.runner).length : state.holders.length;
+        if (!allowIdleCapacityUpdate || activeHolders || state.line.length) {
           throw new Refused('RESOURCE_CAPACITY_MISMATCH', `resource "${name}" already has capacity ${row.capacity}`);
         }
         db.prepare('UPDATE resource SET capacity = ? WHERE name = ?').run(currentCapacity, name);
@@ -264,54 +361,72 @@ export async function takeResource(options) {
         if (browserResource && browserResource.capacity !== 1) throw new Refused('RESOURCE_CAPACITY_MISMATCH', 'resource "browser" has fixed capacity 1');
         db.prepare("INSERT INTO resource(name, capacity) VALUES ('browser', 1) ON CONFLICT(name) DO NOTHING").run();
       }
-      // Retain queue metadata for older readers; admission uses landing priority and arrival only.
-      db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind);
+      if (!resume) {
+        // Remote eligibility is metadata on this same ticket, preserving one landing/FIFO queue.
+        const inserted = db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, remote) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, Number(remote));
+        initialTicket = Number(inserted.lastInsertRowid);
+      }
     });
     while (true) {
+      const runners = runnerProvider ? validatedRunners(runnerProvider()) : [];
       const acquired = update(db, () => {
         const waiter = db.prepare('SELECT ticket FROM waiter WHERE token = ?').get(token);
         if (!waiter) {
+          if (resume && initialTicket) {
+            db.prepare('INSERT OR IGNORE INTO waiter(ticket, token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, remote) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(initialTicket, token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, Number(remote));
+            return { acquired: false, state: { ...snapshot(db, name), position: waiterPosition(db, name, initialTicket), rejoined: true } };
+          }
           queuedAt = new Date().toISOString();
-          const rejoined = db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind);
-          return { acquired: false, state: { ...snapshot(db, name), position: waiterPosition(db, name, Number(rejoined.lastInsertRowid)), rejoined: true } };
+          const rejoined = db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, remote) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, Number(remote));
+          initialTicket = Number(rejoined.lastInsertRowid);
+          return { acquired: false, state: { ...snapshot(db, name), position: waiterPosition(db, name, initialTicket), rejoined: true } };
         }
         db.prepare('UPDATE waiter SET heartbeat = ? WHERE token = ?').run(Date.now(), token);
         const spot = snapshot(db, name);
         const reportPosition = waiterPosition(db, name, waiter.ticket);
-        const admissionPosition = waiterPosition(db, name, waiter.ticket, { eligibleOnly: true });
         const limit = db.prepare('SELECT capacity FROM resource WHERE name = ?').get(name).capacity;
-        const browserAdmissionPosition = browser ? waiterPosition(db, 'browser', waiter.ticket, { eligibleOnly: true }) : 0;
-        const browserHolders = browser ? db.prepare("SELECT COUNT(*) AS count FROM holder WHERE name = 'gate' AND browser = 1").get().count : 0;
-        if (admissionPosition === 1 && spot.holders.length < limit && (!browser || (browserAdmissionPosition === 1 && browserHolders < 1))) {
+        const executor = name === 'gate'
+          ? gateAdmission(db, waiter.ticket, limit, runners)
+          : (waiterPosition(db, name, waiter.ticket, { eligibleOnly: true }) === 1 && spot.holders.length < limit ? { host: '' } : null);
+        if (executor) {
           db.prepare('DELETE FROM waiter WHERE token = ?').run(token);
           const acquiredAt = new Date().toISOString();
-          db.prepare('INSERT INTO holder(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, acquiredAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind);
-          return { acquired: true, state: { ...spot, position: 0 } };
+          db.prepare('INSERT INTO holder(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, runner) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, acquiredAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, executor.host);
+          return { acquired: true, state: { ...spot, position: 0 }, ticket: waiter.ticket, runner: executor.host ? executor : undefined };
         }
         return { acquired: false, state: { ...spot, position: reportPosition } };
       });
       if (acquired.acquired) {
+        const acquiredWaitMs = priorWaitMs + Math.max(0, Date.now() - waitStartedAt);
         let released = false;
+        let transferred = false;
         let lost = false;
-        const heartbeat = setInterval(() => {
-          if (released || lost) return;
-          try {
-            const changed = update(db, () => db.prepare('UPDATE holder SET heartbeat = ? WHERE token = ?').run(Date.now(), token).changes);
-            if (!changed) { lost = true; clearInterval(heartbeat); }
-          } catch { /* Lease expiry remains the crash fallback. */ }
-        }, HEARTBEAT_MS);
-        heartbeat.unref();
-        /** Release the resource and close its SQLite handle. */
+        let heartbeat;
+        /** Keep the active holder lease alive while its executor is running. */
+        const startHeartbeat = () => {
+          heartbeat = setInterval(() => {
+            if (released || transferred || lost) return;
+            try {
+              const changed = update(db, () => db.prepare('UPDATE holder SET heartbeat = ? WHERE token = ?').run(Date.now(), token).changes);
+              if (!changed) { lost = true; clearInterval(heartbeat); }
+            } catch { /* Lease expiry remains the crash fallback. */ }
+          }, HEARTBEAT_MS);
+          heartbeat.unref();
+        };
+        startHeartbeat();
+        /** Release this holder and close its SQLite handle unless ownership was transferred. */
         const release = () => {
-          if (released) return;
+          if (released || transferred) return;
           released = true;
           clearInterval(heartbeat);
-          try { update(db, () => db.prepare('DELETE FROM holder WHERE token = ?').run(token)); }
+          try {
+            update(db, () => db.prepare('DELETE FROM holder WHERE token = ?').run(token));
+          }
           finally { db.close(); }
         };
         /** Refresh this lease, or refuse if another process already evicted it. */
         const renew = () => {
-          if (released || lost) throw new Refused('RESOURCE_LEASE_LOST', `resource lease for "${name}" is no longer held`);
+          if (released || transferred || lost) throw new Refused('RESOURCE_LEASE_LOST', `resource lease for "${name}" is no longer held`);
           const changed = update(db, () => db.prepare('UPDATE holder SET heartbeat = ? WHERE token = ?').run(Date.now(), token).changes);
           if (!changed) {
             lost = true;
@@ -319,7 +434,37 @@ export async function takeResource(options) {
             throw new Refused('RESOURCE_LEASE_LOST', `resource lease for "${name}" is no longer held`);
           }
         };
-        return { name, scope, token, pool, browser, waitMs: Math.max(0, Date.now() - requestedAt), release, renew };
+        /** Quarantine a failed remote host and retry this exact ticket on another executor. */
+        const requeueRunner = async () => {
+          if (!acquired.runner) throw new Refused('LOCAL_RUNNER_REQUEUE', 'only a remote lease can be returned to the runner queue');
+          if (released || transferred || lost) throw new Refused('RESOURCE_LEASE_LOST', `resource lease for "${name}" is no longer held`);
+          transferred = true;
+          clearInterval(heartbeat);
+          let requeueTicket = acquired.ticket;
+          try {
+            update(db, () => {
+              db.prepare('INSERT INTO runner_unavailable(host, since, detail) VALUES (?, ?, ?) ON CONFLICT(host) DO UPDATE SET since = excluded.since, detail = excluded.detail')
+                .run(acquired.runner.host, new Date().toISOString(), 'TRANSPORT_LOST');
+              const holder = db.prepare('SELECT token FROM holder WHERE token = ?').get(token);
+              if (!holder) throw new Refused('RESOURCE_LEASE_LOST', `remote lease for "${name}" is no longer held`);
+              const minimumTicket = db.prepare("SELECT MIN(ticket) AS ticket FROM waiter WHERE name = 'gate' AND landing = ?").get(Number(landing)).ticket;
+              requeueTicket = Math.min(0, minimumTicket ?? 0) - 1;
+              db.prepare('DELETE FROM holder WHERE token = ?').run(token);
+              db.prepare('INSERT INTO waiter(ticket, token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, remote) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+                .run(requeueTicket, token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, Number(remote));
+            });
+          } catch (error) {
+            transferred = false;
+            startHeartbeat();
+            throw error;
+          }
+          db.close();
+          return takeResource({ ...options, _resume: { token, ticket: requeueTicket ?? acquired.ticket,
+            queuedAt, requestedAt, priorWaitMs: acquiredWaitMs, waitStartedAt: Date.now() } });
+        };
+        return { name, scope, token, pool, browser, ...(acquired.runner ? { runner: acquired.runner } : {}),
+          waitMs: acquiredWaitMs, release, renew,
+          ...(acquired.runner ? { requeueRunner } : {}) };
       }
       options.onWait?.(acquired.state);
       await pause(POLL_MS);

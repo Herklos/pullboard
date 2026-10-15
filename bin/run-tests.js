@@ -3,7 +3,7 @@
  * Run the test suite with a private home, no inherited Git identity or config, and a refusing CLI shim.
  */
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { delimiter, join, resolve } from 'node:path';
+import { delimiter, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -460,9 +460,26 @@ async function main(args) {
       ]);
       const capacity = loadMachineSettings().gateSlots;
       let announced = false;
-      await withGateSlot(process.cwd(), (lease) => run(gateSlotEnvironment(lease)), {
+      const runnerPath = relative(process.cwd(), runner);
+      const canShipRunner = runnerPath && runnerPath !== '..' && !runnerPath.startsWith(`..${sep}`);
+      await withGateSlot(process.cwd(), async (lease) => {
+        if (!lease.runner) return run(gateSlotEnvironment(lease));
+        const { runOnRunner } = await import('../src/runners.js');
+        /** Quote the unchanged runner arguments for the remote command shell. */
+        const word = value => `'${String(value).replaceAll("'", "'\\''")}'`;
+        const command = ['node', `./${runnerPath}`, ...args].map(word).join(' ');
+        const result = runOnRunner(process.cwd(), command, { runner: lease.runner, source: lease.source,
+          browser, metadata: lease.runMetadata });
+        process.stdout.write(result.output);
+        process.exitCode = result.exitCode;
+      }, {
         browser, kind: fullSuite ? 'gate' : 'focused',
-        onWait: ({ holders }) => {
+        remote: Boolean(canShipRunner),
+        onWait: ({ holders, runnerUnavailable }) => {
+          if (runnerUnavailable) {
+            process.stderr.write(`runner ${runnerUnavailable.host} unavailable: ${runnerUnavailable.reason}; until ${runnerUnavailable.until}; requeueing the run\n`);
+            return;
+          }
           if (announced) return;
           announced = true;
           process.stderr.write(`waiting for a gate slot: ${holders.length} of ${capacity} in use\n`);

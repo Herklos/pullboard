@@ -54,6 +54,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `lanes` | `version:number`, `lanes:object`, `shared:array`, `coordinator:string` |
 | `resources` | `version:number`, `resources:array` |
 | `settings` | `version:number`, `settings:object` |
+| `runner` | `version:number`, `runner:object` |
 | `relay` | `version:number`, `linked:boolean`, `board:string`, `url:string`, `link:string`, `sequence:number`, `behind:number`, `recovery:object` |
 | `list` | `version:number`, `items:array` |
 | `roadmap` | `version:number`, `milestones:array` |

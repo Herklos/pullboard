@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { machineHome } from './machine-home.js';
-import { setResourceCapacity } from './resources.js';
+import { setResourceCapacity, updateRunnerSettings } from './resources.js';
+import { validateRunner } from './runners.js';
 import { Refused } from './refused.js';
 
 const DEFAULT_GATE_SLOTS = 2;
@@ -27,7 +28,15 @@ export function loadMachineSettings() {
   if (!Number.isSafeInteger(gateSlots) || gateSlots < 1) {
     throw new Refused('BAD_GATE_SLOTS', `gateSlots in ${file} must be a positive integer; run pullboard settings gateSlots <n>`);
   }
-  return { ...value, gateSlots };
+  const runners = value.runners ?? [];
+  if (!Array.isArray(runners)) throw new Refused('BAD_MACHINE_SETTINGS', 'runners must be an array; use pullboard runner add <ssh-host> --slots <n> --browser <n>');
+  const seen = new Set();
+  for (const runner of runners) {
+    validateRunner(runner);
+    if (seen.has(runner.host)) throw new Refused('BAD_MACHINE_SETTINGS', 'runner hosts must be unique; remove the duplicate machine setting');
+    seen.add(runner.host);
+  }
+  return { ...value, gateSlots, ...(runners.length ? { runners } : {}) };
 }
 
 /** Atomically replace machine settings without exposing a partial JSON file. */
@@ -48,4 +57,18 @@ export function setGateSlots(capacity) {
   const next = { ...current, gateSlots: capacity };
   setResourceCapacity({ name: 'gate', capacity, scope: 'machine', persist: () => writeMachineSettings(next) });
   return next;
+}
+
+/** Register plain SSH capacity without storing credentials, and serialize updates with active dispatches. */
+export function addRunner(value) {
+  const runner = validateRunner(value);
+  return updateRunnerSettings(runner.host, () => {
+    const current = loadMachineSettings();
+    const runners = [...(current.runners ?? [])];
+    const index = runners.findIndex(entry => entry.host === runner.host);
+    if (index < 0) runners.push(runner);
+    else runners[index] = runner;
+    writeMachineSettings({ ...current, runners });
+    return runner;
+  });
 }
