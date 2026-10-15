@@ -91,7 +91,10 @@ function boardStateRevision(root, id, isMain, { projects = listApiProjects, scop
     const inputs = localRevisionInputs(board, board.clock.now().toISOString());
     const hasExternalMilestones = inputs.milestones.some((milestone) => milestone.items.some((item) => typeof item !== 'number'));
     return { ...inputs, externalMilestones: hasExternalMilestones
-      ? milestoneRoadmap(info.root, board, { projects, hideOutOfScope: scopeCommonDir !== null }) : null };
+      ? scopeCommonDir === null
+        ? milestoneRoadmap(info.root, board)
+        : milestoneRoadmap(info.root, board, { projects, hideOutOfScope: true })
+      : null };
   }, isMain);
   const inputs = {
     identity: [info.commonDir, id],
@@ -405,7 +408,9 @@ function buildLocalBoardState(root, boardId, board, codeIsMain, { previous = nul
     const projectData = {
       requests: store.openRequests(board),
       personRequests: personRequestStatuses(board),
-      milestones: milestoneRoadmap(root, board, { projects, hideOutOfScope: scopeCommonDir !== null }),
+      milestones: scopeCommonDir === null
+        ? milestoneRoadmap(root, board)
+        : milestoneRoadmap(root, board, { projects, hideOutOfScope: true }),
       rowDecisions: store.rowDecisions(board),
       proofStats: proofStats(board),
     };

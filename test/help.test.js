@@ -80,7 +80,7 @@ test('help has no import path back to the CLI [N26]', () => {
 
 test('view help names its fixed loopback port and explicit port 0 [N26]', async () => {
   const { HELP } = await import('../src/help.js');
-  assert.match(HELP.all, /pullboard view \[--port N\].*default http:\/\/127\.0\.0\.1:4890/u);
+  assert.match(HELP.all, /pullboard view \[--project\] \[--port N\].*default http:\/\/127\.0\.0\.1:4890/u);
   assert.match(HELP.all, /--port 0 chooses a free port/u);
 });
 
