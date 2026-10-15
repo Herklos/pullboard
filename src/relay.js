@@ -856,7 +856,7 @@ function operationIntent(operation, args) {
 }
 
 /** Keep a recovered outcome until its caller repeats the interrupted operation to receive it. */
-function recoveredMove(root, state, operation, args, command) {
+function recoveredMove(root, state, operation, args, command, io) {
   if (!state.recovered) return null;
   const recovered = state.recovered;
   const intent = recovered.intent ?? operationIntent(recovered.move.operation, recovered.move.args);
@@ -871,6 +871,8 @@ function recoveredMove(root, state, operation, args, command) {
   if (receipt.move !== JSON.stringify(recovered.move)) {
     throw new Refused('RELAY_MOVE', 'the recovered operation differs from its durable receipt; restore consistent relay metadata before retrying');
   }
+  // The earlier command gave up on this move's reply; say so once, with the cause it saw (#642).
+  if (recovered.lostReply) io?.err?.(`pullboard: recovered move ${recovered.sequence} (${recovered.move.operation}) whose earlier reply was lost: ${recovered.lostReply}`);
   return recovered.move;
 }
 
@@ -915,7 +917,7 @@ export async function relayOperation(root, operation, args, io, command, applyLo
         for (const event of previousReceipt.outcome.events ?? []) io.onEvent?.(event);
         return previousReceipt.outcome.result;
       }
-      let move = recoveredMove(root, state, operation, args, command);
+      let move = recoveredMove(root, state, operation, args, command, io);
       if (!move) {
         move = localRecords(root, (board) => prepareEngineMove(board, operation, args, io.personRequestMoveId ? { id: io.personRequestMoveId } : {}));
         if (io.personRequest) move.personRequest = structuredClone(io.personRequest);
@@ -931,6 +933,11 @@ export async function relayOperation(root, operation, args, io, command, applyLo
         try { await sendPending(root, file, state, io); }
         catch (error) {
           if (!['RELAY_UNAVAILABLE', 'RELAY_RESPONSE'].includes(error.code)) throw error;
+          // Keep why the reply was lost, so whichever later command recovers this move can say so.
+          if (state.pending?.move?.id === move.id) {
+            state.pending.lostReply = error.transportFailure ?? error.code;
+            saveLink(file, state);
+          }
           // A lost acknowledgement can be recovered now without asking the caller to retry side effects.
           try { await catchUp(root, file, state, io); } catch { throw error; }
           if (!localRecords(root, (board) => engineReceipt(board, move.id))) throw error;
