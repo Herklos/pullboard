@@ -145,3 +145,34 @@ test('a docs path built inline still selects its reader [V4,C7]', (t) => {
   assert.ok(!selected.includes('test/unicode-mark-prefix.test.js'), 'a combining mark before the basename prevents a whole-word match');
   assert.ok(!selected.includes('test/unicode-mark-suffix.test.js'), 'a combining mark after the basename prevents a whole-word match');
 });
+
+test('a test that spawns the CLI is selected by what the CLI imports [C7]', (t) => {
+  const box = graph(t);
+  box.put('bin/pullboard.js', "import '../src/cli.js';\n");
+  box.put('src/cli.js', "import './serve.js';\n");
+  box.put('src/serve.js', "import './cockpit.js';\n");
+  box.put('src/cockpit.js', 'export const version = 1;\n');
+  box.put('src/unrelated.js', 'export const value = 1;\n');
+  box.put('test/cockpit/fixture.js', "const BIN = '../../bin/pullboard.js';\n");
+  box.put('test/cockpit/items.test.js', "import './fixture.js';\n");
+  box.put('test/direct-cli.test.js', "const BIN = '../bin/pullboard.js';\n");
+  const base = box.commit();
+
+  box.put('src/cockpit.js', 'export const version = 2;\n');
+  const commit = box.commit();
+  const changedCockpit = selectAffectedTests(box.root, { base, commit });
+  assert.equal(changedCockpit.full, false, 'the imported CLI dependency keeps focused selection');
+  assert.ok(changedCockpit.files.includes('test/direct-cli.test.js'), 'a test naming the direct CLI child is selected');
+  assert.ok(changedCockpit.files.includes('test/cockpit/items.test.js'), 'a test importing the CLI-launching fixture is selected transitively');
+
+  box.put('src/unrelated.js', 'export const value = 2;\n');
+  const unrelatedCommit = box.commit();
+  const unrelated = selectAffectedTests(box.root, { base: commit, commit: unrelatedCommit });
+  assert.equal(unrelated.full, false);
+  assert.ok(!unrelated.files.includes('test/direct-cli.test.js'), 'an unrelated source change does not select a direct CLI test');
+  assert.ok(!unrelated.files.includes('test/cockpit/items.test.js'), 'an unrelated source change does not select a fixture caller');
+
+  box.put('src/cli.js', 'export const uncommitted = true;\n');
+  const committedGraph = selectAffectedTests(box.root, { base, commit });
+  assert.deepEqual(committedGraph.files, changedCockpit.files, 'selection ignores uncommitted source bytes');
+});
