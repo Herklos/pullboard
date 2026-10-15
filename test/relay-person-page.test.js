@@ -11,6 +11,81 @@ import { relayClientFixture } from './relay-client-fixture.js';
 
 const chromeOptions = { skip: !findChromeExecutable() && 'Chrome is not installed' };
 
+test("the relay page opens without a session and may call only the local view's default port [N26,H5,A2]", async t => {
+  const box = await relayClientFixture(t);
+  const privateTitle = 'PRIVATE_RELAY_BOARD_533';
+  assert.equal((await box.cli('add', box.lane, privateTitle)).code, 0);
+  await box.link();
+  const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));
+  const privateKey = readFileSync(box.keyFile, 'utf8').trim();
+  const response = await fetch(box.origin + '/');
+  assert.equal(response.status, 200, 'the public entry does not require a relay session');
+  const page = await response.text();
+  assert.ok(page.includes('id="chain"'), 'the anonymous response is the cockpit shell');
+  for (const privateValue of [privateTitle, link.board, privateKey, link.token]) {
+    assert.equal(page.includes(privateValue), false, 'the shell contains no private board or credential value');
+  }
+  const policy = response.headers.get('content-security-policy');
+  const directives = new Map(policy.split(';').map(part => part.trim().split(/\s+/u)).map(([name, ...values]) => [name, values]));
+  assert.deepEqual(directives.get('connect-src'), ["'self'", 'http://127.0.0.1:4890', 'http://localhost:4890'],
+    'only the relay itself and the two exact loopback default-port origins can be contacted');
+  assert.deepEqual(directives.get('frame-ancestors'), ["'none'"]);
+  assert.equal(response.headers.get('cache-control'), 'no-store');
+  assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+  assert.equal(response.headers.get('referrer-policy'), 'no-referrer');
+  assert.match(page, /Sign in with GitHub/u, 'relay mode retains its sign-in path');
+});
+
+test('relay data still needs a session [N26,H5,A2]', async t => {
+  const box = await relayClientFixture(t);
+  const before = (await box.cli('export')).document.tables;
+  const board = 'a'.repeat(32);
+  const device = 'device-' + 'b'.repeat(32);
+  const locator = 'c'.repeat(22);
+  const prefix = '/api/v1/boards/' + board;
+  const routes = [
+    ['GET', '/api/v1/boards'], ['GET', '/api/v1/events?boards=' + board],
+    ['GET', prefix + '/state'], ['PUT', prefix + '/state'], ['DELETE', prefix],
+    ['GET', prefix + '/events?after=0'], ['POST', prefix + '/moves'], ['POST', prefix + '/requests'],
+    ['GET', prefix + '/code'], ['GET', prefix + '/tokens'], ['POST', prefix + '/tokens'],
+    ['GET', prefix + '/items'], ['GET', prefix + '/items/1'], ['GET', prefix + '/shouts/1'],
+    ['POST', '/api/v1/pairings/' + board + '/' + locator],
+    ['POST', '/api/v1/pairings/' + board + '/' + locator + '/consume'],
+    ['GET', '/api/v1/devices/session'], ['POST', '/api/v1/devices/approvals'],
+    ['GET', '/api/v1/devices/approvals/approval'],
+    ...['authorize', 'complete', 'execute'].map(action => ['POST', '/api/v1/devices/approvals/approval/' + action]),
+    ['GET', '/api/v1/devices/' + device + '/approvals'],
+    ...['GET', 'POST', 'PUT', 'DELETE'].map(method => [method, '/api/v1/devices/enrollments/' + locator]),
+    ['GET', '/api/v1/devices/' + device + '/boards'],
+    ['PUT', '/api/v1/devices/' + device + '/boards/' + board],
+    ['POST', '/api/v1/devices/' + device], ['DELETE', '/api/v1/devices/' + device],
+    ...['session', 'boards'].map(path => ['GET', '/auth/' + path]),
+    ['GET', '/auth/tokens?board=' + board],
+    ['POST', '/auth/boards/link', { board, repository: 'fixture/project' }],
+    ['POST', '/auth/machines', { board, machine: 'fixture-machine' }],
+    ['POST', '/auth/tokens', { board, agent: 'fixture-agent' }],
+    ['POST', '/auth/tokens/revoke', { id: 'fixture-token-id' }],
+  ];
+  for (const [method, path, payload] of routes) {
+    const response = await fetch(box.origin + path, {
+      method,
+      headers: { origin: box.origin, 'content-type': 'application/json', 'x-pullboard-engine': String(ENGINE_VERSION),
+        ...(path.startsWith('/api/v1/events?') ? { accept: 'text/event-stream' } : {}) },
+      ...(['POST', 'PUT'].includes(method) ? { body: JSON.stringify(payload ?? {}) } : {}),
+    });
+    const document = await response.json();
+    assert.equal(response.status, 401, method + ' ' + path + ' refuses before returning data or applying an action');
+    assert.equal(document.error?.code, 'AUTH_REQUIRED', method + ' ' + path + ' reaches its authentication boundary');
+    for (const field of ['boards', 'state', 'events', 'item', 'shout', 'session', 'tokens', 'wraps', 'approval']) {
+      assert.equal(Object.hasOwn(document, field), false, 'an anonymous refusal carries no relay data');
+    }
+  }
+  const after = (await box.cli('export')).document.tables;
+  for (const table of ['item', 'event', 'shout', 'verdict']) {
+    assert.deepEqual(after[table], before[table], 'anonymous relay calls do not change local board ' + table);
+  }
+});
+
 test('the actual relay page seals its shout and refuses generic direct moves [H12,H5]', chromeOptions, async t => {
   const box = await relayClientFixture(t);
   await box.link();
