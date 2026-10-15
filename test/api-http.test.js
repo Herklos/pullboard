@@ -12,7 +12,7 @@ import { createLocalApiHandler, serveApi } from '../src/api.js';
 import { serveView } from '../src/serve.js';
 import { main } from '../src/cli.js';
 import { applyStateDelta, createApiHandler } from '../src/api-http.js';
-import { registryFile, registerProject } from '../src/projects.js';
+import { registryFile, registerProject, forgetProject } from '../src/projects.js';
 import { Refused } from '../src/refused.js';
 import * as store from '../src/board.js';
 import { preparePersonRequest } from '../src/person-request.js';
@@ -325,20 +325,22 @@ test('a repeated read spawns no process [A2,N26]', (t) => {
     } else roots.push(root);
   }
 
-  const previousHome = process.env.PULLBOARD_HOME;
-  process.env.PULLBOARD_HOME = box.env.PULLBOARD_HOME;
-  try { for (const root of roots) registerProject(root); }
-  finally {
-    if (previousHome === undefined) delete process.env.PULLBOARD_HOME;
-    else process.env.PULLBOARD_HOME = previousHome;
-  }
-
   const projects = roots.map((root, index) => {
     // Write the shared board from its primary checkout; the linked checkout remains a read-only fixture.
     const itemRoot = index === 2 ? join(box.dir, 'repo-3') : root;
     const added = box.cli(itemRoot, 'add', 'app', 'Read fixture item ' + (index + 1), '--criterion', 'appears in item detail', '--specs', 'G1');
     return { root, item: added.item.item_id };
   });
+  const previousHome = process.env.PULLBOARD_HOME;
+  process.env.PULLBOARD_HOME = box.env.PULLBOARD_HOME;
+  try {
+    // CLI setup registers the primary; measure its linked checkout instead as the third board.
+    forgetProject(join(box.dir, 'repo-3'));
+    for (const root of roots) registerProject(root);
+  } finally {
+    if (previousHome === undefined) delete process.env.PULLBOARD_HOME;
+    else process.env.PULLBOARD_HOME = previousHome;
+  }
   // Keep the fixture's ordinary private Git config and identity; run-tests removes inherited repo/object selectors.
   const result = runFixtureChild(process.execPath, [
     '--input-type=module', '-e', REPEATED_READ_HARNESS,
