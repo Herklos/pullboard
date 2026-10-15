@@ -661,6 +661,69 @@ test('land stops again with an expired waiver, and a changed test on main releas
   assert.deepEqual(calls(box).slice(start), [[]], 'corrected test is gated afresh');
 });
 
+test("a person's waiver lets a submit and a landing gate through only the waived test [B3,R3,C7]", () => {
+  const box = landProject();
+  const past = { now: () => new Date('2000-01-01T00:00:00Z') };
+  const stampOf = (cwd) => {
+    const stamp = join(cwd, box.git(cwd, 'rev-parse', '--git-path', 'pullboard-gate-green'));
+    return existsSync(stamp) ? readFileSync(stamp, 'utf8').trim() : null;
+  };
+  const waived = itemWorktree(box, 1);
+  assert.equal(commitFile(box, waived.path, waived.file, 'RED\n', `feat(web): build land fixture ${waived.item} [G1]`).status, 0);
+  const unwaived = box.run(waived.path, 'submit', String(waived.item), '--json');
+  assert.equal(JSON.parse(unwaived.out).error?.code, 'GATE_RED', 'an unwaived failure refuses the submission');
+  onBoard(box, (board) => {
+    store.recordLandingWaiver(board, { agentId: 'person', channel: 'terminal', id: 'expired-submit', test: FILES[0], until: '2000-01-02', reason: 'expired submit fixture' });
+    store.recordLandingWaiver(board, { agentId: 'person', channel: 'terminal', id: 'expired-landing', test: FILES[1], until: '2000-01-02', reason: 'expired landing fixture' });
+  }, past);
+  const expired = box.run(waived.path, 'submit', String(waived.item), '--json');
+  assert.equal(JSON.parse(expired.out).error?.code, 'GATE_RED', 'an expired waiver covers nothing');
+  assert.equal(JSON.parse(box.run(waived.path, 'land', '--waive', FILES[0], '--until', '2099-01-01', '--reason', 'agent attempt', '--json').out).error?.code, 'COORDINATOR_ONLY', 'an agent seat cannot waive');
+  box.env.CLAUDECODE = '1';
+  assert.equal(JSON.parse(box.run(box.repo, 'land', '--waive', FILES[0], '--until', '2099-01-01', '--reason', 'agent shell attempt', '--json').out).error?.code, 'B26_PERSON_CHANNEL', 'an agent shell in the main checkout cannot waive');
+  delete box.env.CLAUDECODE;
+  onBoard(box, (board) => {
+    const attempt = { channel: 'terminal', id: 'agent-attempt', test: FILES[0], until: '2099-01-01', reason: 'agent attempt' };
+    assert.throws(() => store.recordLandingWaiver(board, { ...attempt, agentId: 'coordinator' }), /LAND_PERSON_ONLY/u);
+    assert.throws(() => store.recordLandingWaiver(board, { ...attempt, agentId: 'web-1' }), /LAND_PERSON_ONLY/u);
+    assert.throws(() => store.recordLandingWaiver(board, { ...attempt, agentId: 'person', channel: 'api' }), /B26_PERSON_CHANNEL/u);
+    assert.equal(store.landingWaiverFor(board, { file: FILES[0], name: FILES[0] }), null, 'no attempt recorded a live waiver');
+  });
+  const waiver = json(box, box.repo, 'land', '--waive', FILES[0], '--until', '2099-01-01', '--reason', 'private flaky fixture tracked elsewhere').waiver;
+  const line = new RegExp(`waived: .*\\(${FILES[0].replaceAll('.', '\\.')}\\) by person waiver ${waiver.id} for ${FILES[0].replaceAll('.', '\\.')}: private flaky fixture tracked elsewhere; expires 2099-01-01T00:00:00\\.000Z`, 'u');
+
+  const mixed = itemWorktree(box, 2);
+  assert.equal(commitFile(box, mixed.path, FILES[0], 'RED\n', `feat(web): build land fixture ${mixed.item} [G1]`).status, 0);
+  assert.equal(commitFile(box, mixed.path, mixed.file, 'RED\n', `feat(web): build land fixture ${mixed.item} again [G1]`).status, 0);
+  const partial = box.run(mixed.path, 'submit', String(mixed.item), '--json');
+  assert.equal(JSON.parse(partial.out).error?.code, 'GATE_RED', 'a waiver for one test never passes another failure');
+  assert.equal(json(box, box.repo, 'show', String(mixed.item)).item_status, 'claimed');
+
+  const submitted = box.run(waived.path, 'submit', String(waived.item));
+  assert.equal(submitted.code, 0, `${submitted.err}\n${submitted.out}`);
+  assert.match(submitted.out, line, 'the submission names the waiver, its reason and its expiry');
+  assert.match(submitted.out, /waived, not green/u);
+  assert.equal(json(box, box.repo, 'show', String(waived.item)).item_status, 'submitted');
+  const facts = events(box).filter((event) => event.event_kind === 'fact' && event.item_id === waived.item).map((event) => JSON.parse(event.event_detail).text);
+  assert.ok(facts.some((text) => /recorded as waived, not green/u.test(text) && line.test(text)), 'the waived submission is recorded on the item');
+  assert.notEqual(stampOf(waived.path), box.git(waived.path, 'rev-parse', 'HEAD^{tree}'), 'a waived submission writes no green stamp');
+
+  assert.equal(commitFile(box, box.repo, FILES[0], 'RED\n', 'chore: install a flaky fixture test').status, 0);
+  const landing = box.run(box.repo, 'gate', '--landing');
+  assert.equal(landing.code, 0, `${landing.err}\n${landing.out}`);
+  assert.match(landing.out, line, 'the landing gate names the waiver, its reason and its expiry');
+  assert.match(landing.out, /landing gate waived, not green/u);
+  const landingJson = json(box, box.repo, 'gate', '--landing');
+  assert.equal(landingJson.green, false, 'a waived landing gate is never reported green');
+  assert.deepEqual(landingJson.waived.map((entry) => [entry.file, entry.waiver]), [[FILES[0], waiver.id]]);
+  assert.notEqual(stampOf(box.repo), box.git(box.repo, 'rev-parse', 'HEAD^{tree}'), 'a waived landing gate writes no green stamp');
+  assert.equal(commitFile(box, box.repo, FILES[1], 'RED\n', 'chore: install a second failing fixture test').status, 0);
+  const refused = box.run(box.repo, 'gate', '--landing');
+  assert.equal(refused.code, 1, 'a failure with only an expired waiver refuses the landing gate');
+  assert.match(refused.out, /gate red/u);
+  assert.doesNotMatch(refused.out, /waived, not green/u);
+});
+
 test('land adoption recovers an interrupted gate and keeps one receipt under a new coordinator [B3,R3]', async (t) => {
   const box = landProject();
   const entries = verifiedFour(box);

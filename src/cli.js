@@ -84,7 +84,7 @@ import { readRelayMachine } from './relay-machine.js';
 import { relayJoin, relayPair } from './relay-pairing-client.js';
 import { executePersonRequests } from './relay-request-execution.js';
 import { engineReceipt } from './engine.js';
-import { land } from './land.js';
+import { land, landingFailures, waivedFailures, waiverLine } from './land.js';
 
 const CHECKOUT_LEASES = new WeakMap();
 const CHECKOUT_BOARD_ONLY = new WeakMap();
@@ -2111,7 +2111,9 @@ async function submitHere(ctx, id) {
   // Every submit proves its frozen check and reachable tests anew on this exact commit (V4,V16).
   // A full-gate stamp never substitutes for either proof; only an actual full fallback may stamp.
   const gate = await runSubmitGate(root, ctx.config, { base: claimHead, trunk: acceptedMain.commit, check: frozenCheck(held), agent: me.id, item: String(id), onWait: gateWaitReporter(ctx.io) });
-  if (!gate.isGreen) {
+  // Only the person's live waivers can pass a red proof, failure by failure; the item's own check is never waived [B3].
+  const waived = !gate.isGreen && gate.check?.green ? withBoard(ctx, (board) => waivedFailures(board, landingFailures(gate.output ?? '', root))) : null;
+  if (!gate.isGreen && !waived) {
     const message = `the submission proof is red at ${commit.slice(0, 12)}; fix it, commit, submit again. ${submitGateReport(gate)}`;
     // No submission can follow this verdict. Read-only main comparisons must not retain the seat's write lease.
     CHECKOUT_LEASES.get(ctx.io)?.release();
@@ -2128,12 +2130,19 @@ async function submitHere(ctx, id) {
     );
   }
   const currentTrunk = requireTrunkMerge(root, commit); // The trunk may have moved while the gate ran.
+  const waivedLines = waived ? waived.map(waiverLine) : [];
   await withBoard(ctx, async (board) => {
     refuseUnverifiedStack(root, board, store.getItem(board, id), commit, currentTrunk);
+    // The waived run is written to the item's thread before the submission, so no waived proof reads as green.
+    if (waived) await ordered(ctx, board, 'appendFact', [id, { agentId: me.id, kind: 'measurement', text: `submission proof at ${commit.slice(0, 12)} was red and is recorded as waived, not green; every failure is covered by a live person waiver:\n${waivedLines.join('\n')}` }]);
     return await ordered(ctx, board, 'submit', [id, { agentId: me.id, commit, tree: headTree(root) ?? '', files: filesSince(root, id, claimHead, commit), policyCommit: acceptedMain.commit }]);
   });
-  return reportSubmission(ctx, id, commit, { green: gate.isGreen, report: submitGateReport(gate), files: gate.files, full: gate.full, reason: gate.reason, check: gate.check,
-    log: gate.log, profile: gate.profile, profilePath: gate.profilePath, proofLog: gate.proofLog, proofProfilePath: gate.proofProfilePath });
+  const report = waived
+    ? `submission proof waived, not green: ${waived.length} failure(s), each covered by a live person waiver; the whole output is in ${gate.log}\n${waivedLines.join('\n')}`
+    : submitGateReport(gate);
+  return reportSubmission(ctx, id, commit, { green: gate.isGreen, report, files: gate.files, full: gate.full, reason: gate.reason, check: gate.check,
+    log: gate.log, profile: gate.profile, profilePath: gate.profilePath, proofLog: gate.proofLog, proofProfilePath: gate.proofProfilePath,
+    ...(waived ? { waived: waived.map(({ file, name, waiver }) => ({ file, name, waiver: waiver.id, reason: waiver.reason, until: waiver.until })) } : {}) });
 }
 
 /** Report and pin the original submitted commit, including a recovered acknowledged outcome. */
@@ -3350,6 +3359,15 @@ async function runCommand(argv, io) {
         throw error;
       }
       const gate = await runGate(ctx.info.root, config, { landing: values.landing, agent: resourceAgent(ctx), onWait: gateWaitReporter(io) });
+      // A landing gate honours the person's live waivers exactly as land does; a red run never stamps, so it stays waived, not green [B3,R3].
+      const waived = values.landing && !gate.isGreen ? withBoard(ctx, (board) => waivedFailures(board, landingFailures(gate.output ?? '', ctx.info.root))) : null;
+      if (waived) {
+        const lines = waived.map(waiverLine);
+        const report = `landing gate waived, not green: ${waived.length} failure(s), each covered by a live person waiver; the whole output is in ${gate.log}\n${lines.join('\n')}`;
+        io.result?.({ green: false, waived: waived.map(({ file, name, waiver }) => ({ file, name, waiver: waiver.id, reason: waiver.reason, until: waiver.until })), report });
+        io.say(report);
+        return 0;
+      }
       io.result?.({ green: gate.isGreen, report: gateReport(gate) });
       io.say(gateReport(gate));
       return gate.isGreen ? 0 : 1;

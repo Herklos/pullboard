@@ -155,11 +155,26 @@ async function diagnose(state, failures) {
   return flakes;
 }
 
+/**
+ * Pair every named failure of a red run with the live person waiver covering it, or return null.
+ * One unnamed, unfiled or unwaived failure voids the whole run, so a waiver never hides another red [B3,R3].
+ */
+export function waivedFailures(board, failures) {
+  if (!failures.length || failures.some((entry) => !entry.file)) return null;
+  const covered = failures.map((failure) => ({ ...failure, waiver: store.landingWaiverFor(board, failure) }));
+  return covered.every((entry) => entry.waiver) ? covered : null;
+}
+
+/** Name one waived failure with the person's waiver, its reason and its expiry [B3]. */
+export function waiverLine(failure) {
+  const { waiver } = failure;
+  return `waived: ${failure.name} (${failure.file}) by person waiver ${waiver.id} for ${waiver.test}: ${waiver.reason}; expires ${waiver.until}`;
+}
+
 /** Record every failure's exact live waiver rather than changing which tests the gate runs. */
 function waivedProof(state, gate) {
-  if (!gate.failures.length || gate.failures.some((entry) => !entry.file)) return null;
-  const failures = gate.failures.map((failure) => ({ ...failure, waiver: store.landingWaiverFor(state.board, failure)?.id }));
-  return failures.every((entry) => entry.waiver) ? { tree: gate.tree, failures, logPath: gate.logPath } : null;
+  const failures = waivedFailures(state.board, gate.failures);
+  return failures ? { tree: gate.tree, failures: failures.map((entry) => ({ ...entry, waiver: entry.waiver.id })), logPath: gate.logPath } : null;
 }
 
 /** Bisect a reproducible red without retrying any previously tested group. */
