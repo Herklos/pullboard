@@ -127,9 +127,17 @@ try {
   function writeSpec(id) {
     writeFileSync(specPath, '# HTTP fixture\\n\\n## Goals\\n- G1 [approved, must] Keep the board. | gate: true\\n- ' + id + ' [approved, must] Keep reads current. | gate: true\\n');
   }
+  /** Advance the real fixture branch with Git plumbing; unrelated Pullboard commit hooks do not shape this cache probe. */
+  function commitFixture(root, message) {
+    const options = { cwd: root, env: gitIdentity, encoding: 'utf8' };
+    const tree = execFileSync('git', ['write-tree'], options).trim();
+    const parent = execFileSync('git', ['rev-parse', 'HEAD'], options).trim();
+    const commit = execFileSync('git', ['commit-tree', tree, '-p', parent], { ...options, input: message }).trim();
+    execFileSync('git', ['update-ref', 'HEAD', commit], options);
+  }
   writeSpec('G2');
   execFileSync('git', ['add', 'SPEC.md'], { cwd: target.root, env: process.env, stdio: 'ignore' });
-  execFileSync('git', ['commit', '-q', '-m', 'docs: refresh fixture spec [G1]'], { cwd: target.root, env: gitIdentity, stdio: 'ignore' });
+  commitFixture(target.root, 'docs: refresh fixture spec [G1]');
   let current = await state();
   let head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: target.root, env: process.env, encoding: 'utf8' }).trim();
   assert.ok(current.spec.some((row) => row.id === 'G2'));
@@ -138,7 +146,7 @@ try {
   execFileSync('git', ['switch', '-q', '-c', 'freshness-branch'], { cwd: target.root, env: process.env, stdio: 'ignore' });
   writeSpec('G3');
   execFileSync('git', ['add', 'SPEC.md'], { cwd: target.root, env: process.env, stdio: 'ignore' });
-  execFileSync('git', ['commit', '-q', '-m', 'docs: update branch fixture spec [G1]'], { cwd: target.root, env: gitIdentity, stdio: 'ignore' });
+  commitFixture(target.root, 'docs: update branch fixture spec [G1]');
   current = await state();
   head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: target.root, env: process.env, encoding: 'utf8' }).trim();
   assert.ok(current.spec.some((row) => row.id === 'G3'));
@@ -175,7 +183,7 @@ try {
   execFileSync('git', ['switch', '-q', '-c', 'linked-refresh'], { cwd: linked.root, env: process.env, stdio: 'ignore' });
   writeFileSync(resolve(linked.root, 'SPEC.md'), '# HTTP fixture\\n\\n## Goals\\n- G1 [approved, must] Keep the board. | gate: true\\n- G5 [approved, must] Keep the linked worktree current. | gate: true\\n');
   execFileSync('git', ['add', 'SPEC.md'], { cwd: linked.root, env: process.env, stdio: 'ignore' });
-  execFileSync('git', ['commit', '-q', '-m', 'docs: refresh linked worktree [G1]'], { cwd: linked.root, env: gitIdentity, stdio: 'ignore' });
+  commitFixture(linked.root, 'docs: refresh linked worktree [G1]');
   const linkedState = (await readApi(linkedPath)).state;
   const linkedHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: linked.root, env: process.env, encoding: 'utf8' }).trim();
   assert.ok(linkedState.spec.some((row) => row.id === 'G5'));
