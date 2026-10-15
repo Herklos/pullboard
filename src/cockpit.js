@@ -2228,8 +2228,8 @@ function applyPlace(place, kept = null) {
 /** Restore the address on Back and Forward, with a scoped refresh when the repo changes. */
 function fromAddress(event) {
   if (!data) return;
-  // Back and Forward close the Approve all confirmation without recording, wherever they lead.
-  if (view.approvingAll) closeApproveAll(false, true);
+  // Back and Forward close Approve all's confirmation and the decline dialog without recording, wherever they lead.
+  leaveDialogs();
   // The configured relay transport owns pairing fragments and removes their secrets itself.
   if (transportModule) {
     const pairing = new URLSearchParams((location.hash || '').slice(1));
@@ -2595,10 +2595,23 @@ function askDecline(kind, id, from) {
   view.declining = id;
   view.declineKind = kind;
   view.declineFrom = from;
+  // The dialog belongs to the board it was opened on, as Approve all's confirmation does (#612).
+  view.declineRoot = view.root;
   $('spec-decline-title').textContent = 'Decline ' + id;
   $('spec-decline-reason').value = '';
-  $('spec-decline-dialog').hidden = false;
-  $('spec-decline-reason').focus();
+  openModal($('spec-decline-dialog'), $('spec-decline-reason'));
+}
+
+/**
+ * Close the decline dialog and return what it asked about. Closed by the person, focus returns to the list it was asked
+ * from; closed because the page left its board, focus stays where the person put it.
+ */
+function closeDecline(left = false) {
+  const asked = view.declining ? { id: view.declining, kind: view.declineKind, root: view.declineRoot, from: view.declineFrom } : null;
+  view.declining = null;
+  closeModal($('spec-decline-dialog'));
+  if (!left && asked?.from === 'list') $(asked.kind + '-list').focus({ preventScroll: true });
+  return asked;
 }
 
 /**
@@ -2632,9 +2645,16 @@ function closeApproveAll(approved = false, left = false) {
   return asked;
 }
 
-/** Close, recording nothing, a confirmation opened on another board than the one the page now shows. */
+/** Close, recording nothing, a confirmation or decline opened on another board than the one the page now shows. */
 function closeIfLeft() {
   if (view.approvingAll && view.approvingAll.root !== view.root) closeApproveAll(false, true);
+  if (view.declining && view.declineRoot !== view.root) closeDecline(true);
+}
+
+/** Close every dialog bound to a board, recording nothing: the page is leaving the board it was asked on. */
+function leaveDialogs() {
+  if (view.approvingAll) closeApproveAll(false, true);
+  if (view.declining) closeDecline(true);
 }
 
 /**
@@ -2793,8 +2813,8 @@ function fold(open) {
 
 /** Show another project and its item; history restores keep the tab their entry named. */
 function switchTo(root, target = null, record = true) {
-  // Switching board or project closes the Approve all confirmation; it records nothing on either board.
-  if (view.approvingAll) closeApproveAll(false, true);
+  // Switching board or project closes Approve all's confirmation and the decline dialog; neither records on either board.
+  leaveDialogs();
   const generation = ++switchGeneration;
   answer(null);
   view.root = root;
@@ -2967,17 +2987,17 @@ $('upgrade-note').addEventListener('click', (event) => {
   renderReleaseNotes(data.project);
 });
 $('add-cancel').addEventListener('click', () => { view.adding = false; render(); });
-$('spec-decline-cancel').addEventListener('click', () => { view.declining = null; $('spec-decline-dialog').hidden = true; if (view.declineFrom === 'list') $(view.declineKind + '-list').focus({ preventScroll: true }); });
+$('spec-decline-cancel').addEventListener('click', () => { closeDecline(); });
+$('spec-decline-form').addEventListener('keydown', trapFocus);
+// The row the dialog named is declined, with its reason, on the board it was opened on and only there.
 $('spec-decline-form').addEventListener('submit', (event) => {
   event.preventDefault();
-  const id = view.declining, kind = view.declineKind;
   const reason = $('spec-decline-reason').value.trim();
-  if (!id || !reason) return;
-  view.declining = null;
-  $('spec-decline-dialog').hidden = true;
-  if (view.declineFrom === 'list') $(kind + '-list').focus({ preventScroll: true });
-  const anchor = view.declineFrom === 'detail' ? $(kind + '-detail') : [...$(kind + '-list').querySelectorAll('[data-row]')].find((row) => row.dataset.row === kind + ':' + id);
-  decideRow(kind, 'spec-decline', { ids: id, reason }, anchor);
+  if (!view.declining || !reason) return;
+  const asked = closeDecline();
+  if (asked.root !== view.root) return;
+  const anchor = asked.from === 'detail' ? $(asked.kind + '-detail') : [...$(asked.kind + '-list').querySelectorAll('[data-row]')].find((row) => row.dataset.row === asked.kind + ':' + asked.id);
+  decideRow(asked.kind, 'spec-decline', { ids: asked.id, reason }, anchor);
 });
 $('spec-approve-cancel').addEventListener('click', () => { closeApproveAll(); });
 $('spec-approve-form').addEventListener('keydown', (event) => { if (event.key === 'Escape') { event.preventDefault(); closeApproveAll(); } else trapFocus(event); });
