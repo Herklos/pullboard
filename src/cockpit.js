@@ -3163,6 +3163,8 @@ if (snapshot) {
 if (hosted.local) $('local-note-retry').addEventListener('click', () => {
   localProblem = null;
   tabValue(LOCAL_TRIPS, null);
+  // A page already on the relay starts again instead, so it never holds the relay's streams and the view's at once.
+  if (transport) { location.reload(); return; }
   connectLocal().then((local) => local === 'local' ? refresh() : null).catch((error) => localNote(error.message, true));
 });
 /** Load an explicitly configured transport before the first read; its updates refresh this page. */
