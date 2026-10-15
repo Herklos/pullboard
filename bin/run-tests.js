@@ -418,9 +418,9 @@ async function main(args) {
       process.exitCode = result.status ?? 1;
     } finally { rmSync(sandbox, { recursive: true, force: true }); }
   };
-  if (!fullSuite || inheritedSlot) run(inheritedSlot);
+  if (inheritedSlot) run(true);
   else {
-    // Focused and preload-only copies do not need the queue's repository dependencies.
+    // Direct runs, focused or full, use the public queue; preload-only imports never call main.
     const [{ withGateSlot }, { loadMachineSettings }] = await Promise.all([
       import('../src/gate.js'), import('../src/settings.js'),
     ]);

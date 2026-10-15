@@ -4,6 +4,21 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.8.21] - 2026-10-14
+
+### One stream for many boards, and the local API never speaks for you
+
+A project group can follow every board on one connection, and nothing sent through pullboard serve counts as you.
+
+### Changed
+
+- One event stream serves many boards: GET /api/v1/events?boards=<id>,<id> sends the events of every named board the caller may read on one connection, each tagged with its board, and resumes per board from Last-Event-ID. A browser's six-connection limit no longer starves a view of a project with several repos.
+- The local API can accept the view's session cookie as well as its key, ready for the view to take the key out of the address bar in a later release.
+
+### Fixed
+
+- A request to the coordinator sent through pullboard serve is no longer recorded as yours. Like the other person-only moves, it is refused there; the view's own page still sends your requests as you.
+
 ## [0.8.20] - 2026-10-14
 
 ### A lighter board, and the local API can't speak for you

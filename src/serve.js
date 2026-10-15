@@ -225,14 +225,66 @@ function viewReleaseNotes() {
 }
 
 /**
- * Everything the page shows for one project. Given the newest shout the person has seen there,
- * it also counts every shout since, which the forty it sends cannot always show.
+ * One verdict as the page shows it.
  *
- * @param {string} root
- * @param {{ seen?: number | null, board?: any }} [options] A supplied board stays owned by its caller.
+ * @param {any} row A verdict row from store.verdictsFor.
+ * @returns {{ decision: any, reason: any, note: any, by: any, at: any, commit: any }}
+ */
+function verdictOf(row) {
+  return { decision: row.verdict_decision, reason: row.verdict_reason, note: row.verdict_note, by: row.verdict_by, at: row.verdict_at, commit: row.verdict_commit };
+}
+
+/**
+ * One item as the page and the API show it (A2, N26): its fields, its verdicts, the items it waits on that are not yet
+ * verified, and its full history. The API projects one item's detail with it, without building the whole state, so
+ * the page and the API never word an item two ways. It only reads: it returns a fresh object and changes neither the
+ * row nor the map.
+ *
+ * @param {any} board
+ * @param {any} item The item's current row, as store.listItems reads it.
+ * @param {Map<number, string>} status Every current item's status by its id.
  * @returns {any}
  */
-export function projectState(root, { seen = null, board: providedBoard = null } = {}) {
+export function projectItemState(board, item, status) {
+  const verdicts = store.verdictsFor(board, item.item_id).map(verdictOf);
+  const after = item.item_after ? item.item_after.split(',').map(Number) : [];
+  return {
+    id: item.item_id,
+    title: item.item_title,
+    lane: item.item_lane,
+    status: item.item_status,
+    route: item.item_route,
+    owner: item.item_owner,
+    // Who holds the review under a live lease (V15), by the board's own rule.
+    reviewer: store.reviewHolder(board, item),
+    reviewUntil: item.item_review_until ?? null,
+    builtBy: item.item_built_by,
+    verifiedBy: item.item_verified_by,
+    specs: item.item_spec_ids ? item.item_spec_ids.split(',') : [],
+    criterion: item.item_criterion,
+    brief: item.item_brief,
+    commit: item.item_commit,
+    merged: item.item_merged_commit,
+    blockedBy: after.filter((id) => status.get(id) !== 'verified'),
+    updatedAt: item.item_updated_at,
+    verdict: verdicts.at(-1) ?? null,
+    verdicts,
+    history: store.events(board, { itemId: item.item_id }).map((event) => ({ kind: event.event_kind, by: event.event_by, at: event.event_at })),
+  };
+}
+
+/**
+ * Everything the page shows for one project. Given the newest shout the person has seen there,
+ * it also counts every shout since, which the forty it sends cannot always show. An itemProjector
+ * lets a caller that keeps its own item projections reuse them: it is called once per item, in
+ * order, and returns that item's projection, calling project() for a fresh one only when it has none.
+ *
+ * @param {string} root
+ * @param {{ seen?: number | null, board?: any, itemProjector?: ((item: any, context: { board: any, status: Map<number, string>, project: () => any }) => any) | null }} [options]
+ *   A supplied board stays owned by its caller.
+ * @returns {any}
+ */
+export function projectState(root, { seen = null, board: providedBoard = null, itemProjector = null } = {}) {
   return withProject(root, (board, info, config) => {
     const all = store.listItems(board, { all: true });
     const status = new Map(all.map((item) => [item.item_id, item.item_status]));
@@ -248,7 +300,6 @@ export function projectState(root, { seen = null, board: providedBoard = null } 
     // A decline's text is its reason. Keep the inherited rule available so the page strikes the
     // rule itself, while showing the repo's reason beside it.
     const inherited = new Map(standardDoctrine().rows.map((row) => [row.id, row.text]));
-    const verdict = (row) => ({ decision: row.verdict_decision, reason: row.verdict_reason, note: row.verdict_note, by: row.verdict_by, at: row.verdict_at, commit: row.verdict_commit });
     const log = store.events(board);
     // When each agent last moved on the board: the log is in order, so the last write wins.
     const lastMove = new Map(log.map((event) => [event.event_by, event.event_at]));
@@ -259,33 +310,10 @@ export function projectState(root, { seen = null, board: providedBoard = null } 
       lanes: [COORDINATOR, ...Object.keys(config.lanes)],
       // The lanes that own folders, where builders work; review lanes own none.
       owning: Object.keys(config.lanes).filter((lane) => (config.lanes[lane].owns ?? []).length > 0),
-      items: all.map((item) => {
-        const verdicts = store.verdictsFor(board, item.item_id).map(verdict);
-        const after = item.item_after ? item.item_after.split(',').map(Number) : [];
-        return {
-          id: item.item_id,
-          title: item.item_title,
-          lane: item.item_lane,
-          status: item.item_status,
-          route: item.item_route,
-          owner: item.item_owner,
-          // Who holds the review under a live lease (V15), by the board's own rule.
-          reviewer: store.reviewHolder(board, item),
-          reviewUntil: item.item_review_until ?? null,
-          builtBy: item.item_built_by,
-          verifiedBy: item.item_verified_by,
-          specs: item.item_spec_ids ? item.item_spec_ids.split(',') : [],
-          criterion: item.item_criterion,
-          brief: item.item_brief,
-          commit: item.item_commit,
-          merged: item.item_merged_commit,
-          blockedBy: after.filter((id) => status.get(id) !== 'verified'),
-          updatedAt: item.item_updated_at,
-          verdict: verdicts.at(-1) ?? null,
-          verdicts,
-          history: store.events(board, { itemId: item.item_id }).map((event) => ({ kind: event.event_kind, by: event.event_by, at: event.event_at })),
-        };
-      }),
+      // A caller with its own copy of an item returns it; project() builds the item only when asked.
+      items: all.map((item) => (itemProjector
+        ? itemProjector(item, { board, status, project: () => projectItemState(board, item, status) })
+        : projectItemState(board, item, status))),
       shouts: store.recentShouts(board, 40),
       // Every ask still waiting for an answer, however far back the forty shouts reach (B21): the
       // person's to answer here, and the rest with who holds them (B26).
