@@ -2,7 +2,23 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { generateStressBoard, removeStressBoard } from './perf/generate.mjs';
-import { withPerfSlot } from './perf/run.mjs';
+import { assertRequiredNetworkEvidence, selectNetworkTarget, withPerfSlot } from './perf/run.mjs';
+
+test('network observation stays attached to the selected page and rejects missing required bytes [N26]', () => {
+  const targets = [
+    { id: 'first-blank', type: 'page', url: 'about:blank', webSocketDebuggerUrl: 'ws://first' },
+    { id: 'owned-blank', type: 'page', url: 'about:blank', webSocketDebuggerUrl: 'ws://owned' },
+  ];
+  assert.equal(targets.find((target) => target.type === 'page' && target.url === 'about:blank').id, 'first-blank',
+    'the legacy first-blank lookup selects a different page in this two-target control');
+  assert.equal(selectNetworkTarget(targets, 'owned-blank').id, 'owned-blank',
+    'network observation follows the exact page selected by the Chrome fixture');
+  assert.throws(() => selectNetworkTarget(targets, 'missing'), /was not listed/u);
+  assert.throws(() => assertRequiredNetworkEvidence('firstLoad', [], 0), /unavailable/u);
+  assert.throws(() => assertRequiredNetworkEvidence('idleWithLiveWrites', [{ path: '/events' }], 0), /unavailable/u);
+  assert.doesNotThrow(() => assertRequiredNetworkEvidence('tab:shouts', [], 0),
+    'an action without network requests may report zero when the observer remains live');
+});
 
 test('the perf harness measures every action on a stress board [N26]', async (t) => {
   let first = null;

@@ -78,21 +78,52 @@ function timingScript() {
   })()`;
 }
 
+/** Select the exact page target opened by the Chrome fixture, never another blank tab. */
+export function selectNetworkTarget(targets, targetId) {
+  if (typeof targetId !== 'string' || targetId.length === 0) {
+    throw new Error('Chrome did not identify the page target for local network observation');
+  }
+  const target = targets.find((entry) => entry.id === targetId);
+  if (!target || target.type !== 'page' || target.url !== 'about:blank'
+      || typeof target.webSocketDebuggerUrl !== 'string') {
+    throw new Error('Chrome page target for local network observation was not listed');
+  }
+  return target;
+}
+
+/** Refuse required page-load/live-write samples that captured no actual response bytes. */
+export function assertRequiredNetworkEvidence(name, requests, requestBytes) {
+  if ((name === 'firstLoad' || name === 'idleWithLiveWrites')
+      && (requests.length === 0 || !Number.isSafeInteger(requestBytes) || requestBytes <= 0)) {
+    throw new Error(`${name} local network observation is unavailable: no encoded response bytes were captured`);
+  }
+}
+
 /** Attach a private CDP observer that retains local request paths and actual encoded response byte counts. */
-async function openNetworkCapture(profile, localOrigin) {
+async function openNetworkCapture(profile, localOrigin, targetId) {
   const port = Number(readFileSync(join(profile, 'DevToolsActivePort'), 'utf8').split('\n')[0]);
   if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) throw new Error('isolated Chrome did not publish a valid local DevTools port');
   const targetsResponse = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(5_000) });
   if (!targetsResponse.ok) throw new Error('isolated Chrome did not return its local page target');
   const targets = await targetsResponse.json();
-  const target = targets.find((entry) => entry.type === 'page' && entry.url === 'about:blank' && typeof entry.webSocketDebuggerUrl === 'string');
-  if (!target) throw new Error('isolated Chrome has no blank page target for local network observation');
+  const target = selectNetworkTarget(targets, targetId);
   const socket = new WebSocket(target.webSocketDebuggerUrl);
   const records = [];
   const active = new Map();
   const commands = new Map();
   let nextCommand = 0;
   let closed = false;
+  let observerError = null;
+  /** Poison the capture and reject every pending command after transport/protocol failure. */
+  const failObserver = (message) => {
+    if (observerError || closed) return;
+    observerError = new Error(message);
+    for (const [id, pending] of commands) {
+      clearTimeout(pending.timer);
+      pending.reject(observerError);
+      commands.delete(id);
+    }
+  };
   const opened = new Promise((resolveOpen, rejectOpen) => {
     const timeout = setTimeout(() => rejectOpen(new Error('local Chrome network observer did not connect')), 5_000);
     socket.addEventListener('open', () => { clearTimeout(timeout); resolveOpen(); }, { once: true });
@@ -101,14 +132,20 @@ async function openNetworkCapture(profile, localOrigin) {
   });
   socket.addEventListener('message', (event) => {
     let message;
-    try { message = JSON.parse(String(event.data)); } catch { return; }
+    try { message = JSON.parse(String(event.data)); } catch {
+      failObserver('local Chrome network observer received an invalid message');
+      return;
+    }
     if (message.id !== undefined) {
       const pending = commands.get(message.id);
       if (!pending) return;
+      if (message.error) {
+        failObserver('local Chrome network observation command failed');
+        return;
+      }
       commands.delete(message.id);
       clearTimeout(pending.timer);
-      if (message.error) pending.reject(new Error('local Chrome network observation command failed'));
-      else pending.resolve(message.result);
+      pending.resolve(message.result);
       return;
     }
     const params = message.params ?? {};
@@ -163,14 +200,19 @@ async function openNetworkCapture(profile, localOrigin) {
       active.delete(params.requestId);
     }
   });
+  socket.addEventListener('error', () => failObserver('local Chrome network observer failed after connecting'));
+  socket.addEventListener('close', () => failObserver('local Chrome network observer closed before capture completed'));
   const send = (method, params = {}) => new Promise((resolveCommand, rejectCommand) => {
+    if (observerError) return rejectCommand(observerError);
+    if (closed) return rejectCommand(new Error('local Chrome network observer is closed'));
     const id = ++nextCommand;
     const timer = setTimeout(() => {
-      commands.delete(id);
-      rejectCommand(new Error('local Chrome network observation command timed out'));
+      failObserver('local Chrome network observation command timed out');
     }, 5_000);
     commands.set(id, { resolve: resolveCommand, reject: rejectCommand, timer });
-    socket.send(JSON.stringify({ id, method, params }));
+    try { socket.send(JSON.stringify({ id, method, params })); } catch {
+      failObserver('local Chrome network observer could not send a command');
+    }
   });
   try {
     await opened;
@@ -180,7 +222,13 @@ async function openNetworkCapture(profile, localOrigin) {
     throw error;
   }
   return {
+    targetId,
+    assertAvailable() {
+      if (observerError) throw observerError;
+      if (closed) throw new Error('local Chrome network observer is closed');
+    },
     snapshot(name, startMs, endMs, timeOrigin) {
+      this.assertAvailable();
       const firstLoad = name === 'firstLoad';
       const requests = records.map((request) => {
         if (!Number.isFinite(request.startWallTimeMs)) return false;
@@ -199,7 +247,9 @@ async function openNetworkCapture(profile, localOrigin) {
           responseBytes, complete: request.complete, failed: request.failed,
           startMs: relative - startMs, durationMs: request.durationMs ?? null };
       }).filter(Boolean);
-      return { requests, requestBytes: requests.reduce((sum, request) => sum + request.responseBytes, 0),
+      const requestBytes = requests.reduce((sum, request) => sum + (Number.isSafeInteger(request.responseBytes) ? request.responseBytes : 0), 0);
+      assertRequiredNetworkEvidence(name, requests, requestBytes);
+      return { requests, requestBytes,
         incompleteRequests: requests.filter((request) => !request.complete).length };
     },
     close() {
@@ -352,7 +402,13 @@ async function measureRun(board, runIndex, executable, idleMs, liveEveryMs) {
     raw = await startChrome({ url: 'about:blank', executable, profileDirectory: profile,
       commandTimeoutMs: ACTION_TIMEOUT_MS, taskTimeoutMs: ACTION_TIMEOUT_MS,
       env: { HOME: profile, PATH: process.env.PATH ?? '/usr/bin:/bin', LANG: process.env.LANG ?? 'en_US.UTF-8' } });
-    network = await openNetworkCapture(raw.profileDirectory, view.link.origin);
+    const targetResult = await raw.send('Target.getTargetInfo', {}, 'identify the isolated Chrome page', ACTION_TIMEOUT_MS);
+    const targetId = targetResult?.targetInfo?.targetId;
+    if (typeof targetId !== 'string' || targetId.length === 0 || targetResult?.targetInfo?.type !== 'page') {
+      throw new Error('isolated Chrome did not identify its page target before navigation');
+    }
+    network = await openNetworkCapture(raw.profileDirectory, view.link.origin, targetId);
+    actions.networkTargetId = network.targetId;
     await raw.send('Network.setCacheDisabled', { cacheDisabled: true }, 'disable the fresh profile cache', ACTION_TIMEOUT_MS);
     await raw.send('Page.addScriptToEvaluateOnNewDocument', { source: timingScript() }, 'install performance observers', ACTION_TIMEOUT_MS);
     const browserVersion = await raw.send('Browser.getVersion', {}, 'pin the isolated browser runtime', ACTION_TIMEOUT_MS);
@@ -444,6 +500,7 @@ async function measureRun(board, runIndex, executable, idleMs, liveEveryMs) {
     idle.liveWrites = liveWrites;
     actions.push(idle);
     actions.browserVersion = browserVersion;
+    network.assertAvailable();
     return actions;
   } catch (error) {
     measurementError = error;
@@ -523,7 +580,8 @@ async function runPerfHarnessInSlot({ board, runs = 1, idleMs = 30_000, liveEver
       boardShape: { statuses: board.statusTotals, lanes: board.laneTotals, agents: board.agentCount,
         itemEvents: board.itemEvents, shouts: board.shoutCount, milestones: board.milestoneCount,
         milestoneRows: board.milestoneRows, specRows: board.specRows, specStatuses: board.specStatusTotals }, runs, idleMs, liveEveryMs,
-      browser: { input: 'real Chrome through CDP', executable, versions: captured.map(run => run.browserVersion) },
+      browser: { input: 'real Chrome through CDP', executable, versions: captured.map(run => run.browserVersion),
+        networkTargetIds: captured.map(run => run.networkTargetId) },
       actions, table: renderTable(actions) };
     writeFileSync(join(board.workspace, 'performance-report.json'), `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
     return report;
