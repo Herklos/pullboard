@@ -1711,7 +1711,7 @@ test('[A5] view export preserves the typed future-version refusal without creati
   assert.equal(readEventLogVersion(file), String(EVENT_LOG_VERSION + 1));
 });
 
-test('one move recomputes only the items it touched', async (t) => {
+test('one move recomputes only the items it touched [A2,N26]', async (t) => {
   const box = project();
   const boardFile = join(box.repo, '.git', 'pullboard', 'board.sqlite');
   const board = openBoard(boardFile, undefined, { isMain: true });
