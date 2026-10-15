@@ -491,6 +491,18 @@ function configHere(info) {
     }
     const mainRoot = resolve(info.commonDir, '..');
     if (info.isMain || !existsSync(join(mainRoot, CONFIG_FILE))) throw error;
+    let setup;
+    try {
+      setup = uncommittedSetup(mainRoot, loadConfig(mainRoot));
+    } catch {
+      // Keep the existing recovery for invalid or incomplete main-checkout configuration.
+    }
+    if (setup) {
+      throw new Refused(
+        'NO_CONFIG',
+        `this worktree has no ${CONFIG_FILE}, and the main checkout has uncommitted Pullboard setup files: ${setup.files.join(', ')}. Commit them in the main checkout first: ${setup.stage}`,
+      );
+    }
     throw new Refused(
       'NO_CONFIG',
       `this worktree's commit has no ${CONFIG_FILE}, though the main checkout has one: make a new worktree from the main checkout, which says what to commit first: ${cdTo(mainRoot)} pullboard worktree <lane> --model "<model name>"`,
@@ -1246,6 +1258,12 @@ function resumeHere(io) {
   } else if (dirty) {
     say(`${plural(dirty, 'file')} uncommitted in the main checkout`);
   }
+  if (isMain) {
+    const setup = uncommittedSetup(root, ctx.config);
+    if (setup) {
+      say(`The person must commit Pullboard's setup files before agents can use worktrees: ${setup.stage}`);
+    }
+  }
   for (const request of card.requests) say(`request #${request.shout_id}: ${request.shout_text}; answer with pullboard answer ${request.shout_id} done, or declined <reason>`);
   for (const item of card.holding) {
     say(`holding #${item.item_id} ${item.item_title}, lease ${span(ctx, item.item_lease_until)} left${item.item_check ? `; check: ${item.item_check}` : ''}`);
@@ -1637,6 +1655,19 @@ function setupFiles(mainRoot, config) {
   const hooks = tryGit(mainRoot, ['config', '--get', 'core.hooksPath']).stdout;
   const inEach = hooks && !isAbsolute(hooks) && !relative(mainRoot, resolve(mainRoot, hooks)).startsWith('..');
   return [CONFIG_FILE, config.spec, config.practice, 'AGENTS.md', ...(inEach ? [hooks] : [])].filter(Boolean);
+}
+
+/** Find setup files in the main checkout that a new worktree would not receive from HEAD. */
+function uncommittedSetup(mainRoot, config) {
+  if (headCommit(mainRoot) === null) return null;
+  const differ = differFromHead(mainRoot, setupFiles(mainRoot, config));
+  if (!differ.length) return null;
+  const words = differ.map(({ path }) => shellWord(path)).join(' ');
+  const force = differ.some(({ ignored }) => ignored) ? ' -f' : '';
+  return {
+    files: differ.map(({ path }) => path),
+    stage: `${cdTo(mainRoot)} git add${force} -- ${words}`,
+  };
 }
 
 /**
