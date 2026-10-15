@@ -82,12 +82,12 @@ function fileSignature(path, includeContents = true) {
   }
 }
 
-/** Refuse caching when config includes external files or selects a ref backend this signature cannot track. */
+/** Refuse caching for config includes or any explicit ref backend selection this signature cannot track. */
 function configNeedsFallback(path) {
   try {
     const source = readFileSync(path, 'utf8');
     return /^\s*\[\s*include(?:if\b|[\s\]])/imu.test(source)
-      || /^\s*refstorage\s*=\s*reftable\s*$/imu.test(source);
+      || /(?:^|\])\s*refstorage\s*=/imu.test(source);
   } catch (error) {
     return error.code !== 'ENOENT' && error.code !== 'ENOTDIR';
   }
@@ -148,7 +148,7 @@ function repositorySignature(cwd, info = null, includeHead = false) {
   const rootPath = info?.root ?? folder;
   const gitDir = info?.gitDir ?? discoveredGitDir;
   const commonDir = info?.commonDir ?? discoveredCommonDir;
-  if (!gitDir || !commonDir) return JSON.stringify(markers);
+  if (!gitDir || !commonDir) return includeHead ? null : JSON.stringify(markers);
   const configPaths = [join(gitDir, 'config'), join(commonDir, 'config'), join(gitDir, 'config.worktree')];
   if (configPaths.some(configNeedsFallback)) return null;
   for (const path of [rootPath, gitDir, commonDir]) markers.push([path, fileSignature(path, false)]);
@@ -541,8 +541,7 @@ export function headCommit(root) {
     return result.status === 0 ? result.stdout : null;
   };
   if (gitReadFacts.getStore() === true) {
-    const info = repoInfo(root);
-    return readFact(key, () => repositorySignature(root, info, true), read);
+    return readFact(key, () => repositorySignature(root, null, true), read);
   }
   return fact(key, read);
 }
@@ -560,8 +559,7 @@ export function headTree(root) {
     return result.status === 0 ? result.stdout : null;
   };
   if (gitReadFacts.getStore() === true) {
-    const info = repoInfo(root);
-    return readFact(key, () => repositorySignature(root, info, true), read);
+    return readFact(key, () => repositorySignature(root, null, true), read);
   }
   return fact(key, read);
 }
