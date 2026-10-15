@@ -194,6 +194,7 @@ Statuses: approved = decided · draft = proposed · pending = open question · f
 - N37 [draft, must] pullboard help keeps each command's usage apart from its words, so tools can read it. | gate: test/e2e.test.js
 - N38 [draft, must] Every tab, item, row and shout in the view has its own address, so any of them can be linked. | gate: test/cockpit.test.js | serves: N26
 - N39 [approved, must] The view's secret never stays in the address bar: the first link trades it for a cookie. | gate: test/cockpit.test.js | serves: N26
+- N40 [draft, must] Every action in the view answers within 100 ms and never over 250 ms, on a board of 3,000 items with eight projects open. | gate: test/cockpit/perf.test.js | serves: N26
 
 ## A · API: the engine others build on
 - A1 [approved, must] Every command prints --json in a documented shape, stable within a major version. | gate: test/api.test.js
