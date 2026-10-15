@@ -1,0 +1,107 @@
+/** Documentation input selection remains conservative across committed trees [V4,C7]. */
+import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { test } from 'node:test';
+import { runFixtureGit } from './fixture-child.js';
+import { selectAffectedTests } from '../src/affected-tests.js';
+
+/** Make a real committed ES-module graph without executing any candidate source. */
+function graph(t) {
+  const root = mkdtempSync(join(tmpdir(), 'pullboard-doc-selection-'));
+  t.after(() => rmSync(root, { recursive:true, force:true }));
+  const env = { ...process.env, GIT_CONFIG_GLOBAL:'/dev/null', GIT_CONFIG_NOSYSTEM:'1',
+    GIT_AUTHOR_NAME:'Test Agent', GIT_AUTHOR_EMAIL:'agent@example.com',
+    GIT_COMMITTER_NAME:'Test Agent', GIT_COMMITTER_EMAIL:'agent@example.com' };
+  /** Run Git with the fixture's own identity and configuration. */
+  const git = (...args) => runFixtureGit(args, { cwd:root, env });
+  /** Write a fixture module or document, creating its parent directories. */
+  const put = (path, body) => { mkdirSync(dirname(join(root,path)), { recursive:true }); writeFileSync(join(root,path),body); };
+  /** Snapshot real Git objects so selection cannot read uncommitted working-tree bytes. */
+  const commit = () => { git('add','-A'); git('commit','-qm','chore: selection fixture'); return git('rev-parse','HEAD').trim(); };
+  git('init','-q','-b','main');
+  put('package.json','{"type":"module"}\n');
+  put('src/api.js','export const version = 1;\n');
+  put('test/api.test.js',"import '../src/api.js';\n");
+  put('src/labels.js',"import {readFileSync} from 'node:fs'; export const types=['feat','fix','docs','test']; export const config=()=>readFileSync('config.json'); export const isDoc=path=>path.startsWith('docs/');\n");
+  put('test/unrelated.test.js',"import '../src/labels.js'; import assert from 'node:assert/strict'; assert.ok(true);\n");
+  put('docs/api.md','# API\n');
+  put('docs/other.md','# Other\n');
+  put('docs/api.test.js',"import {readFileSync} from 'node:fs'; readFileSync(new URL('./api.md',import.meta.url),'utf8');\n");
+  return { root,git,put,commit };
+}
+
+test('a docs change selects the tests that read it [V4,C7]', (t) => {
+  const box = graph(t);
+  box.put('test/docs.test.js',"import {readdirSync} from 'node:fs'; readdirSync('docs');\n");
+  const base = box.commit();
+  box.put('src/api.js','export const version = 2;\n');
+  box.put('docs/api.md','# Updated API\n');
+  const commit = box.commit();
+  const combined = selectAffectedTests(box.root,{base,commit});
+  assert.equal(combined.full,false,'documenting an API change must retain focused selection');
+  assert.deepEqual(combined.files,['docs/api.test.js','test/api.test.js','test/docs.test.js']);
+  const docs = selectAffectedTests(box.root,{base,commit,changed:['docs/api.md']});
+  assert.equal(docs.full,false);
+  assert.deepEqual(docs.files,['docs/api.test.js','test/docs.test.js']);
+  for (const path of ['package.json','config.json','unknown.txt','docs/image.svg']) {
+    assert.equal(selectAffectedTests(box.root,{base,commit,changed:[path]}).full,true,`${path} still needs the full suite`);
+  }
+});
+
+test('doc readers include helper imports, directory paths and old edges [V4,C7]', (t) => {
+  const box = graph(t);
+  box.put('test/doc-helper.js',"import {readFileSync} from 'node:fs'; export const text=readFileSync(new URL('../docs/api.md',import.meta.url),'utf8');\n");
+  box.put('test/helper-reader.test.js',"import './doc-helper.js';\n");
+  box.put('test/split-reader.test.js',"import {readFileSync} from 'node:fs'; import {join} from 'node:path'; readFileSync(join('docs','api.md'),'utf8');\n");
+  box.put('test/template-reader.test.js',"import {readdirSync} from 'node:fs'; const name='api'; readdirSync(`docs/${name}`);\n");
+  box.put('test/escaped-reader.test.js',"import {readFileSync} from 'node:fs'; readFileSync('do\\x63s/api.md');\n");
+  box.put('test/root-template.test.js',"import {readFileSync} from 'node:fs'; const root='.'; readFileSync(`${root}/docs/api.md`);\n");
+  box.put('test/glob-reader.test.js',"import {globSync} from 'node:fs'; globSync('docs/**/*.md');\n");
+  box.put('test/prefixed-reader.test.js',"import {readFileSync} from 'node:fs'; const root='.'; readFileSync(root + '/docs/api.md');\n");
+  box.put('test/computed-reader.test.js',"import {readFileSync} from 'node:fs'; import {join} from 'node:path'; const name='api'; readFileSync(join('d'+'ocs',name+'.md'));\n");
+  box.put('test/declared-reader.test.js',"/** @pullboard-test-input docs-tree */\nimport {readFileSync} from 'node:fs'; readFileSync(process.env.INPUT);\n");
+  box.put('test/regex-reader.test.js', `import {readFileSync} from 'node:fs'; const quote=/['"]/; readFileSync('docs/api.md');\n`);
+  const base = box.commit();
+  box.put('test/doc-helper.js','export const text="no longer read";\n');
+  const commit = box.commit();
+  const selection = selectAffectedTests(box.root,{base,commit,changed:['docs/api.md']});
+  assert.equal(selection.full,false);
+  assert.deepEqual(selection.files,['docs/api.test.js','test/computed-reader.test.js','test/declared-reader.test.js','test/escaped-reader.test.js','test/glob-reader.test.js','test/helper-reader.test.js','test/prefixed-reader.test.js','test/regex-reader.test.js','test/root-template.test.js','test/split-reader.test.js','test/template-reader.test.js']);
+});
+
+test('an unread doc adds no tests and doc readers come from Git objects [V4,C7]', (t) => {
+  const box = graph(t);
+  const base = box.commit();
+  box.put('docs/unread.md','# No readers\n');
+  const commit = box.commit();
+  box.put('test/unrelated.test.js',"import {readFileSync} from 'node:fs'; readFileSync('docs/unread.md');\n");
+  assert.deepEqual(selectAffectedTests(box.root,{base,commit}),{full:false,reason:'',files:[]});
+  assert.deepEqual(selectAffectedTests(box.root,{base,commit,changed:['src/api.js','docs/unread.md']}).files,['test/api.test.js']);
+});
+
+
+test('escaped literal templates select their documentation inputs [V4,C7]', (t) => {
+  const box = graph(t);
+  box.put('test/template-hex.test.js',"import {readFileSync} from 'node:fs'; readFileSync(`do\\x63s/api.md`);\n");
+  box.put('test/template-unicode.test.js',"import {readFileSync} from 'node:fs'; readFileSync(`do\\u0063s/api.md`);\n");
+  box.put('test/template-point.test.js',"import {readFileSync} from 'node:fs'; readFileSync(`do\\u{63}s/api.md`);\n");
+  box.put('test/template-raw.test.js',"import {readFileSync} from 'node:fs'; readFileSync(String.raw`docs/api\\x2e.md`);\n");
+  box.put('test/template-identity.test.js',"import {readFileSync} from 'node:fs'; readFileSync(`docs/\\X63.md`);\n");
+  const base = box.commit();
+  box.put('docs/api.md','# Updated API\n');
+  box.put('docs/api\\x2e.md','# Raw template path\n');
+  box.put('docs/X63.md','# Identity escape path\n');
+  box.put('docs/api..md','# Conservatively cooked raw-tag path\n');
+  const commit = box.commit();
+  assert.deepEqual(selectAffectedTests(box.root,{base,commit,changed:['docs/api.md']}).files,
+    ['docs/api.test.js','test/template-hex.test.js','test/template-point.test.js','test/template-unicode.test.js'],
+    'escaped literal templates must retain their documentation readers');
+  assert.deepEqual(selectAffectedTests(box.root,{base,commit,changed:['docs/api\\x2e.md']}).files,
+    ['test/template-raw.test.js'],'raw tags retain their raw input path');
+  assert.deepEqual(selectAffectedTests(box.root,{base,commit,changed:['docs/api..md']}).files,
+    ['test/template-raw.test.js'],'unknown tags also retain the conservative cooked path');
+  assert.deepEqual(selectAffectedTests(box.root,{base,commit,changed:['docs/X63.md']}).files,
+    ['test/template-identity.test.js'],'uppercase X is an identity escape, not hexadecimal');
+});
