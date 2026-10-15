@@ -1,6 +1,6 @@
 /** Real HTTP calls against an isolated Git repo and the actual board engine (A2). */
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { runFixtureChild, runFixtureGit, startFixtureChild } from './fixture-child.js';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -1414,13 +1414,20 @@ test('[A2, N26] one event stream serves many boards', async (t) => {
   assert.match(repeated.document.error.message, new RegExp(box.id));
 });
 
-test('[A2,N39] the local API accepts the view session cookie', async (t) => {
+test('[A2,N39] the view cookie check catches a weakened compare', async (t) => {
   const box = fixture(t);
   const secret = randomUUID();
   const sessionCookie = {
     name: `pullboard_view_${randomUUID().replaceAll('-', '')}`,
-    value: randomUUID(),
+    value: randomBytes(24).toString('base64url'),
   };
+  assert.throws(() => createLocalApiHandler({
+    secret,
+    getPort: () => 1,
+    runCommand: main,
+    projects: () => [],
+    sessionCookie: { name: sessionCookie.name, value: randomBytes(8).toString('base64url') },
+  }), /at least 128 bits/u, 'session cookies need capacity for at least 128 random bits');
   let bound;
   const handler = createLocalApiHandler({
     secret,
@@ -1437,6 +1444,14 @@ test('[A2,N39] the local API accepts the view session cookie', async (t) => {
   });
   t.after(() => new Promise((closed) => server.close(closed)));
   const origin = `http://127.0.0.1:${bound}`;
+  const otherPortServer = createServer();
+  await new Promise((ready, fail) => {
+    otherPortServer.once('error', fail);
+    otherPortServer.listen(0, '127.0.0.1', ready);
+  });
+  const otherLocalOrigin = `http://127.0.0.1:${otherPortServer.address().port}`;
+  t.after(() => new Promise((closed) => otherPortServer.close(closed)));
+  assert.notEqual(otherLocalOrigin, origin, 'the hostile same-site page uses a different localhost port');
   const cookie = `${sessionCookie.name}=${sessionCookie.value}`;
   /** Send one real HTTP request to the private API handler. */
   const request = (path, headers = {}, init = {}) => fetchFresh(origin + path, {
@@ -1452,7 +1467,7 @@ test('[A2,N39] the local API accepts the view session cookie', async (t) => {
     assert.equal(document.error.code, code);
   }
 
-  const cookieListing = await request('/api/v1/boards', { cookie });
+  const cookieListing = await request('/api/v1/boards', { cookie, 'sec-fetch-site': 'same-origin' });
   assert.equal(cookieListing.status, 200, 'the current view cookie authenticates the actual local API');
   const listing = await cookieListing.json();
   assert.equal(listing.version, 1);
@@ -1461,14 +1476,27 @@ test('[A2,N39] the local API accepts the view session cookie', async (t) => {
   const state = await request(`/api/v1/boards/${board.id}/state`, { cookie });
   assert.equal(state.status, 200, 'cookie-authenticated state reads the fixture SQLite board');
 
+  const sameOriginFallback = await request('/api/v1/boards', { cookie });
+  assert.equal(sameOriginFallback.status, 200, 'without Fetch-Site, the existing own Host/Origin checks still allow the cookie');
   await refused(await request('/api/v1/boards'), 401, 'AUTH_REQUIRED');
-  await refused(await request('/api/v1/boards', { cookie: `${sessionCookie.name}=wrong-cookie-value` }), 401, 'AUTH_REQUIRED');
+  await refused(await request('/api/v1/boards', { cookie: `${sessionCookie.name}=${'x'.repeat(sessionCookie.value.length)}` }), 401, 'AUTH_REQUIRED');
+  const caseChangedName = `${sessionCookie.name[0].toUpperCase()}${sessionCookie.name.slice(1)}`;
+  assert.notEqual(caseChangedName, sessionCookie.name);
+  await refused(await request('/api/v1/boards', { cookie: `${caseChangedName}=${sessionCookie.value}` }), 401, 'AUTH_REQUIRED');
   await refused(await request('/api/v1/boards', { cookie: `${sessionCookie.name}=expired-session-value` }), 401, 'AUTH_REQUIRED');
   await refused(await request('/api/v1/boards', { cookie: `${cookie}; ${cookie}` }), 401, 'AUTH_REQUIRED');
   await refused(await request('/api/v1/boards', { cookie: `${sessionCookie.name}=wrong-cookie-value; ${cookie}` }), 401, 'AUTH_REQUIRED');
   await refused(await request('/api/v1/boards', { cookie: `${sessionCookie.name}; ${cookie}` }), 401, 'AUTH_REQUIRED');
   const staleName = `${sessionCookie.name}_old`;
   await refused(await request('/api/v1/boards', { cookie: `${staleName}=${sessionCookie.value}` }), 401, 'AUTH_REQUIRED');
+  await refused(await request('/api/v1/boards', { cookie, 'sec-fetch-site': 'same-site' }), 401, 'AUTH_REQUIRED');
+  await refused(await request('/api/v1/boards', { cookie, origin: otherLocalOrigin, 'sec-fetch-site': 'same-site' }), 401, 'AUTH_REQUIRED');
+  await refused(await request(`/api/v1/boards/${board.id}/moves`, {
+    cookie, 'sec-fetch-site': 'same-site',
+  }, { method: 'POST', body: { verb: 'next', args: {} } }), 401, 'AUTH_REQUIRED');
+  await refused(await request(`/api/v1/boards/${board.id}/moves`, {
+    cookie, origin: otherLocalOrigin, 'sec-fetch-site': 'same-site',
+  }, { method: 'POST', body: { verb: 'next', args: {} } }), 401, 'AUTH_REQUIRED');
 
   const foreignHost = await new Promise((done, reject) => {
     const outbound = httpRequest(origin + '/api/v1/boards', { headers: { host: 'foreign.invalid', cookie } }, (response) => {
@@ -1482,8 +1510,11 @@ test('[A2,N39] the local API accepts the view session cookie', async (t) => {
   assert.equal(foreignHost.status, 401, 'a valid cookie cannot cross the API host boundary');
   assert.equal(foreignHost.document.error.code, 'AUTH_REQUIRED');
   await refused(await request('/api/v1/boards', { cookie, origin: 'https://foreign.invalid' }), 403, 'API_ORIGIN');
+  await refused(await request(`/api/v1/boards/${board.id}/moves`, { cookie, origin: 'https://foreign.invalid' }, {
+    method: 'POST', body: { verb: 'next', args: {} },
+  }), 403, 'API_ORIGIN');
 
-  const keyHeader = await request('/api/v1/boards', { 'x-pullboard-key': secret });
+  const keyHeader = await request('/api/v1/boards', { 'x-pullboard-key': secret, 'sec-fetch-site': 'cross-site' });
   assert.equal(keyHeader.status, 200, 'the existing key header remains valid');
   const bearer = await request('/api/v1/boards', { authorization: `Bearer ${secret}` });
   assert.equal(bearer.status, 200, 'the existing Bearer key remains valid');
