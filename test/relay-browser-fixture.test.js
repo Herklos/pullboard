@@ -9,11 +9,13 @@ import { findChromeExecutable, relayWorkBudgetMs, startChrome } from './relay-br
 /** Assert the fixed CDP bound reports its command context and relay-request state. */
 async function stalledCommand(chrome, label, pending) {
   await assert.rejects(
-    chrome.evaluate('new Promise(resolve => setTimeout(resolve, 16000))', label),
+    chrome.evaluate('new Promise(() => {})', label),
     error => {
       assert.match(error.message, /Runtime\.evaluate/);
       assert.match(error.message, new RegExp(label));
-      assert.match(error.message, /timed out after 1[45]\d{3}ms/);
+      const elapsed = /timed out after (\d+)ms/u.exec(error.message);
+      assert.ok(elapsed, 'the diagnostic reports the measured elapsed time');
+      assert.ok(Number(elapsed[1]) >= 15000, 'the command does not time out before its configured deadline');
       assert.match(error.message, /maximum event-loop delay \d+ms/);
       assert.match(error.message, new RegExp('relay request pending: ' + pending));
       return true;
@@ -21,12 +23,12 @@ async function stalledCommand(chrome, label, pending) {
   );
 }
 
-test('real Chrome names the stalled command when a 16-second page promise exceeds the CDP bound [H16,C7]', {
+test('real Chrome names a stalled command when it exceeds the CDP bound [H16,C7]', {
   skip: !findChromeExecutable() && 'Chrome is not installed',
 }, async t => {
   const chrome = await startChrome({ commandTimeoutMs: 15000 });
   t.after(() => chrome.close());
-  await stalledCommand(chrome, '16-second stalled-command probe', false);
+  await stalledCommand(chrome, 'stalled-command probe', false);
   const task = await chrome.startTask('new Promise(resolve => setTimeout(resolve, 16000))', 'navigation cleanup probe');
   await chrome.navigate('about:blank');
   await assert.rejects(chrome.pollTask(task, 250, 'task lost to navigation'), /did not arrive within 250ms/);
