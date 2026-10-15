@@ -168,7 +168,7 @@ export function waivedFailures(board, failures) {
 /** Name one waived failure with the person's waiver, its reason and its expiry [B3]. */
 export function waiverLine(failure) {
   const { waiver } = failure;
-  return `waived: ${failure.name} (${failure.file}) by person waiver ${waiver.id} for ${waiver.test}: ${waiver.reason}; expires ${waiver.until}`;
+  return `waived: ${failure.name} (${failure.file}) by person waiver ${waiver.id} for ${waiver.kind ?? store.landingWaiverKind(waiver.test)} ${waiver.test}: ${waiver.reason}; expires ${waiver.until}`;
 }
 
 /** Record every failure's exact live waiver rather than changing which tests the gate runs. */

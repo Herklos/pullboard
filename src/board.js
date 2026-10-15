@@ -2707,7 +2707,7 @@ export function recordLandingWaiver(board, { agentId, channel, id, test, until, 
     throw new Refused('LAND_WAIVER', 'name a test, a future --until date and a nonempty --reason; run pullboard land --waive <test> --until <date> --reason "why"');
   }
   return atomic(board, () => {
-    const waiver = { id, test, until: new Date(until).toISOString(), reason: reason.trim(), by: PERSON, channel };
+    const waiver = { id, test, kind: landingWaiverKind(test), until: new Date(until).toISOString(), reason: reason.trim(), by: PERSON, channel };
     logEvent(board, PERSON, 'landing_waiver', null, { waiver });
     return waiver;
   });
@@ -2720,10 +2720,26 @@ export function landingWaivers(board) {
     .map((row) => JSON.parse(row.event_detail).waiver);
 }
 
+/**
+ * Name what a waiver argument is: a test file path, or a test's name. A path has no spaces and a
+ * source extension; anything else is a name. Earlier waivers carry no kind and are read the same way.
+ */
+export function landingWaiverKind(test) {
+  return /^[^\s]+\.(?:[cm]?[jt]sx?|py)$/u.test(test) ? 'file' : 'name';
+}
+
+/**
+ * True when a waiver covers one failure: a file waiver only its file, a name waiver only its name.
+ * Keeping the kinds apart stops a new test named like a waived file from riding that waiver [B3,R3].
+ */
+export function landingWaiverCovers(waiver, failure) {
+  return (waiver.kind ?? landingWaiverKind(waiver.test)) === 'file' ? waiver.test === failure.file : waiver.test === failure.name;
+}
+
 /** Find a live person's waiver covering the exact failing file or test name [B3,R3]. */
 export function landingWaiverFor(board, failure) {
   return landingWaivers(board).findLast((waiver) => Date.parse(waiver.until) > board.clock.now().getTime()
-    && (waiver.test === failure.file || waiver.test === failure.name)) ?? null;
+    && landingWaiverCovers(waiver, failure)) ?? null;
 }
 
 /** File one durable defect per flaky test and retain its source digest [B3,R3]. */
@@ -2760,7 +2776,7 @@ export function waivedLandingProof(board, tree) {
     && batch.proof.failures.every((failure) => {
       const waiver = landingWaivers(board).find((entry) => entry.id === failure.waiver);
       return waiver && Date.parse(waiver.until) > board.clock.now().getTime()
-        && (waiver.test === failure.file || waiver.test === failure.name);
+        && landingWaiverCovers(waiver, failure);
     })) ?? null;
 }
 

@@ -104,7 +104,7 @@ function gateFixture(box) {
     "fs.appendFileSync(trace, JSON.stringify({ alone, files }) + '\\n'); const fullRuns = fs.readFileSync(trace, 'utf8').trim().split('\\n').map(line => JSON.parse(line)).filter(row => !row.alone).length;",
     "if (!alone && fs.existsSync(hold) && (fs.readFileSync(hold, 'utf8') === 'armed' || Number(fs.readFileSync(hold, 'utf8')) === fullRuns)) { fs.writeFileSync(entered, root); const end = Date.now() + 20000; while (!fs.existsSync(release) && Date.now() < end) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20); if (!fs.existsSync(release)) process.exit(24); }",
     "console.log('TAP version 13'); let failed = 0;",
-    "files.forEach((file, i) => { const text = fs.readFileSync(path.resolve(root, file), 'utf8'); const red = process.env.LAND_SUPPRESS_RED !== '1' && (text.includes('RED') || !alone && text.includes('FLAKE')); console.log('# Subtest: ' + file + ' keeps the landed behavior'); console.log((red ? 'not ok ' : 'ok ') + (i + 1) + ' - ' + file + ' keeps the landed behavior'); if (red) { failed++; console.log('  ---'); console.log('  location: ' + path.resolve(root, file) + ':1:1'); console.log('  failureType: testCodeFailure'); console.log('  error: fixture behavior is red'); console.log('  ...'); } });",
+    "files.forEach((file, i) => { const text = fs.readFileSync(path.resolve(root, file), 'utf8'); const red = process.env.LAND_SUPPRESS_RED !== '1' && (text.includes('RED') || !alone && text.includes('FLAKE')); const name = (/NAME:(\\S+)/.exec(text) || [])[1] || file + ' keeps the landed behavior'; console.log('# Subtest: ' + name); console.log((red ? 'not ok ' : 'ok ') + (i + 1) + ' - ' + name); if (red) { failed++; console.log('  ---'); console.log('  location: ' + path.resolve(root, file) + ':1:1'); console.log('  failureType: testCodeFailure'); console.log('  error: fixture behavior is red'); console.log('  ...'); } });",
     "console.log('1..' + files.length); console.log('# tests ' + files.length); console.log('# pass ' + (files.length - failed)); console.log('# fail ' + failed); process.exitCode = failed ? 1 : 0;",
   ].join('\n'));
   writeFileSync(checks, "const fs = require('node:fs'); const file = process.argv[2]; if (!fs.existsSync(file) || !fs.readFileSync(file, 'utf8').trim()) process.exit(1);\n");
@@ -690,7 +690,7 @@ test("a person's waiver lets a submit and a landing gate through only the waived
     assert.equal(store.landingWaiverFor(board, { file: FILES[0], name: FILES[0] }), null, 'no attempt recorded a live waiver');
   });
   const waiver = json(box, box.repo, 'land', '--waive', FILES[0], '--until', '2099-01-01', '--reason', 'private flaky fixture tracked elsewhere').waiver;
-  const line = new RegExp(`waived: .*\\(${FILES[0].replaceAll('.', '\\.')}\\) by person waiver ${waiver.id} for ${FILES[0].replaceAll('.', '\\.')}: private flaky fixture tracked elsewhere; expires 2099-01-01T00:00:00\\.000Z`, 'u');
+  const line = new RegExp(`waived: .*\\(${FILES[0].replaceAll('.', '\\.')}\\) by person waiver ${waiver.id} for file ${FILES[0].replaceAll('.', '\\.')}: private flaky fixture tracked elsewhere; expires 2099-01-01T00:00:00\\.000Z`, 'u');
 
   const mixed = itemWorktree(box, 2);
   assert.equal(commitFile(box, mixed.path, FILES[0], 'RED\n', `feat(web): build land fixture ${mixed.item} [G1]`).status, 0);
@@ -717,6 +717,17 @@ test("a person's waiver lets a submit and a landing gate through only the waived
   assert.equal(landingJson.green, false, 'a waived landing gate is never reported green');
   assert.deepEqual(landingJson.waived.map((entry) => [entry.file, entry.waiver]), [[FILES[0], waiver.id]]);
   assert.notEqual(stampOf(box.repo), box.git(box.repo, 'rev-parse', 'HEAD^{tree}'), 'a waived landing gate writes no green stamp');
+  onBoard(box, (board) => {
+    assert.equal(store.landingWaiverFor(board, { file: FILES[2], name: FILES[0] }), null, 'a file waiver never covers a test merely named like that file');
+    store.recordLandingWaiver(board, { agentId: 'person', channel: 'terminal', id: 'name-waiver', test: 'keeps a named behavior', until: '2099-01-01', reason: 'named fixture' });
+    assert.equal(store.landingWaiverFor(board, { file: FILES[3], name: 'keeps a named behavior' })?.kind, 'name');
+    assert.equal(store.landingWaiverFor(board, { file: 'keeps a named behavior', name: 'another behavior' }), null, 'a name waiver covers only that name');
+  });
+  assert.equal(commitFile(box, box.repo, FILES[2], `RED NAME:${FILES[0]}\n`, 'chore: install a test named like the waived file').status, 0);
+  const spoofed = box.run(box.repo, 'gate', '--landing');
+  assert.equal(spoofed.code, 1, 'a failing test named like a waived file path still refuses');
+  assert.doesNotMatch(spoofed.out, /waived, not green/u);
+  assert.equal(commitFile(box, box.repo, FILES[2], 'PASS\n', 'chore: correct the spoofed fixture test').status, 0);
   assert.equal(commitFile(box, box.repo, FILES[1], 'RED\n', 'chore: install a second failing fixture test').status, 0);
   const refused = box.run(box.repo, 'gate', '--landing');
   assert.equal(refused.code, 1, 'a failure with only an expired waiver refuses the landing gate');
