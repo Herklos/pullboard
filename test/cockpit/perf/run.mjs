@@ -125,7 +125,7 @@ async function openNetworkCapture(profile, localOrigin, targetId) {
     }
   };
   const opened = new Promise((resolveOpen, rejectOpen) => {
-    const timeout = setTimeout(() => rejectOpen(new Error('local Chrome network observer did not connect')), 5_000);
+    const timeout = setTimeout(() => rejectOpen(new Error('local Chrome network observer did not connect')), 5_000); // budget: five-second hang ceiling for observer setup, not action performance.
     socket.addEventListener('open', () => { clearTimeout(timeout); resolveOpen(); }, { once: true });
     socket.addEventListener('error', () => { clearTimeout(timeout); rejectOpen(new Error('local Chrome network observer failed to connect')); }, { once: true });
     socket.addEventListener('close', () => { clearTimeout(timeout); rejectOpen(new Error('local Chrome network observer closed before connecting')); }, { once: true });
@@ -208,7 +208,7 @@ async function openNetworkCapture(profile, localOrigin, targetId) {
     const id = ++nextCommand;
     const timer = setTimeout(() => {
       failObserver('local Chrome network observation command timed out');
-    }, 5_000);
+    }, 5_000); // budget: five-second hang ceiling for a stalled local DevTools command.
     commands.set(id, { resolve: resolveCommand, reject: rejectCommand, timer });
     try { socket.send(JSON.stringify({ id, method, params })); } catch {
       failObserver('local Chrome network observer could not send a command');
@@ -265,37 +265,27 @@ async function openNetworkCapture(profile, localOrigin, targetId) {
   };
 }
 
-/** Wait for the named target and condition to remain visibly unchanged for two animation frames. */
-async function waitPaintedAndStable(raw, network, name, selector, condition, firstLoad = false) {
-  const expression = `(() => {
-    const name = ${JSON.stringify(name)}, selector = ${JSON.stringify(selector)};
-    const startAt = ${firstLoad ? '0' : `window.__pb606?.marks[${JSON.stringify(name)}]`};
-    if (!Number.isFinite(startAt)) throw new Error('the measured input event was not observed');
-    const deadline = performance.now() + ${ACTION_TIMEOUT_MS};
-    return new Promise((resolve, reject) => {
-      let previous = '', stableFrames = 0;
-      const sample = () => {
-        const node = document.querySelector(selector);
-        const style = node ? getComputedStyle(node) : null;
-        const rect = node?.getBoundingClientRect();
-        const ready = !!node && !!rect && !node.closest('[hidden]') && !document.body.classList.contains('switching') && style.display !== 'none'
-          && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0 && (${condition});
-        const signature = ready ? JSON.stringify([rect.x, rect.y, rect.width, rect.height,
-          node.childElementCount, node.textContent.length]) : '';
-        stableFrames = signature && signature === previous ? stableFrames + 1 : 0;
-        previous = signature;
-        if (stableFrames >= 2) {
-          const endAt = performance.now();
-          resolve(window.__pb606Collect(name, startAt, endAt, true));
-          return;
-        }
-        if (performance.now() >= deadline) { reject(new Error('the named target did not become visibly stable')); return; }
-        requestAnimationFrame(sample);
-      };
-      requestAnimationFrame(sample);
-    });
+/** Wait for the browser condition and named target through the shared measurement boundary. */
+async function waitPaintedAndStable(chrome, network, name, selector, condition, firstLoad = false) {
+  const target = `document.querySelector(${JSON.stringify(selector)})`;
+  const ready = `(() => {
+    const node = ${target}, style = node && getComputedStyle(node), rect = node?.getBoundingClientRect();
+    return !!node && !!rect && !node.closest('[hidden]') && !document.body.classList.contains('switching')
+      && style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0 && (${condition});
   })()`;
-  const measurement = await raw.evaluate(expression, `measure ${name}`, ACTION_TIMEOUT_MS + 1_000);
+  await chrome.waitFor(ready, ACTION_TIMEOUT_MS); // budget: 60-second hang ceiling for an unreachable UI condition, not a speed bar.
+  const startAt = firstLoad ? '0' : `window.__pb606?.marks[${JSON.stringify(name)}]`;
+  const expression = `(() => {
+    const node = ${target}, style = node && getComputedStyle(node), rect = node?.getBoundingClientRect();
+    const ready = !!node && !!rect && !node.closest('[hidden]') && !document.body.classList.contains('switching')
+      && style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0 && (${condition});
+    if (!ready) throw new Error('the named target or browser condition stopped being ready');
+    const startAt = ${startAt};
+    if (!Number.isFinite(startAt)) throw new Error('the measured input event was not observed');
+    const endAt = performance.now();
+    return window.__pb606Collect(${JSON.stringify(name)}, startAt, endAt, true);
+  })()`;
+  const measurement = await chrome.stable(expression, target);
   return { ...measurement, ...network.snapshot(name, measurement.startMs, measurement.endMs, measurement.timeOrigin) };
 }
 
@@ -366,10 +356,10 @@ async function stopView(view) {
     clearTimeout(timer);
     return result;
   };
-  const result = await waitForClose(VIEW_STOP_TIMEOUT_MS);
+  const result = await waitForClose(VIEW_STOP_TIMEOUT_MS); // budget: five-second hang ceiling for owned-view shutdown before escalation.
   if (!result) {
     try { view.child.kill('SIGKILL'); } catch { /* The owned CLI process may have exited before escalation. */ }
-    const killed = await waitForClose(VIEW_STOP_TIMEOUT_MS);
+    const killed = await waitForClose(VIEW_STOP_TIMEOUT_MS); // budget: five-second hang ceiling for cleanup after owned-view escalation.
     if (!killed) throw new Error('the isolated view did not close after bounded cleanup');
   }
 }
@@ -383,8 +373,8 @@ async function typeKey(chrome, value) {
 }
 
 /** Begin measuring the next native input of the requested type without including setup waits. */
-async function beginAction(raw, name, eventType) {
-  await raw.evaluate(`window.__pb606Begin(${JSON.stringify(name)}, ${JSON.stringify(eventType)})`, `arm ${name}`, 2_000);
+async function beginAction(chrome, name, eventType) {
+  await chrome.stable(`window.__pb606Begin(${JSON.stringify(name)}, ${JSON.stringify(eventType)})`);
 }
 
 /** Capture one run's first load, six tabs, two item opens, search and live idle interval. */
@@ -392,66 +382,64 @@ async function measureRun(board, runIndex, executable, idleMs, liveEveryMs) {
   const profile = join(board.workspace, `chrome-${runIndex + 1}`);
   mkdirSync(profile, { recursive: true, mode: 0o700 });
   let view = null;
-  let raw = null;
   let chrome = null;
   let network = null;
   let measurementError = null;
   const actions = [];
   try {
     view = await startView(board);
-    raw = await startChrome({ url: 'about:blank', executable, profileDirectory: profile,
+    chrome = await stableChrome(await startChrome({ url: 'about:blank', executable, profileDirectory: profile,
       commandTimeoutMs: ACTION_TIMEOUT_MS, taskTimeoutMs: ACTION_TIMEOUT_MS,
-      env: { HOME: profile, PATH: process.env.PATH ?? '/usr/bin:/bin', LANG: process.env.LANG ?? 'en_US.UTF-8' } });
-    const targetResult = await raw.send('Target.getTargetInfo', {}, 'identify the isolated Chrome page', ACTION_TIMEOUT_MS);
+      env: { HOME: profile, PATH: process.env.PATH ?? '/usr/bin:/bin', LANG: process.env.LANG ?? 'en_US.UTF-8' } }));
+    const targetResult = await chrome.send('Target.getTargetInfo', {}, 'identify the isolated Chrome page', ACTION_TIMEOUT_MS);
     const targetId = targetResult?.targetInfo?.targetId;
     if (typeof targetId !== 'string' || targetId.length === 0 || targetResult?.targetInfo?.type !== 'page') {
       throw new Error('isolated Chrome did not identify its page target before navigation');
     }
-    network = await openNetworkCapture(raw.profileDirectory, view.link.origin, targetId);
+    network = await openNetworkCapture(chrome.profileDirectory, view.link.origin, targetId);
     actions.networkTargetId = network.targetId;
-    await raw.send('Network.setCacheDisabled', { cacheDisabled: true }, 'disable the fresh profile cache', ACTION_TIMEOUT_MS);
-    await raw.send('Page.addScriptToEvaluateOnNewDocument', { source: timingScript() }, 'install performance observers', ACTION_TIMEOUT_MS);
-    const browserVersion = await raw.send('Browser.getVersion', {}, 'pin the isolated browser runtime', ACTION_TIMEOUT_MS);
-    chrome = await stableChrome(raw);
-    await raw.navigate(view.link.href);
-    actions.push(await waitPaintedAndStable(raw, network, 'firstLoad', '#chain .row',
+    await chrome.send('Network.setCacheDisabled', { cacheDisabled: true }, 'disable the fresh profile cache', ACTION_TIMEOUT_MS);
+    await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: timingScript() }, 'install performance observers', ACTION_TIMEOUT_MS);
+    const browserVersion = await chrome.send('Browser.getVersion', {}, 'pin the isolated browser runtime', ACTION_TIMEOUT_MS);
+    await chrome.navigate(view.link.href);
+    actions.push(await waitPaintedAndStable(chrome, network, 'firstLoad', '#chain .row',
       `document.readyState === 'complete' && !document.body.classList.contains('loading')`, true));
 
     for (const [name, tab, target] of VIEWER_ACTIONS) {
-      await beginAction(raw, name, 'mousedown');
+      await beginAction(chrome, name, 'mousedown');
       await press(chrome, `document.querySelector('[data-tab="${tab}"]')`);
-      actions.push(await waitPaintedAndStable(raw, network, name, target,
+      actions.push(await waitPaintedAndStable(chrome, network, name, target,
         `document.querySelector('.tab.on')?.dataset.tab === ${JSON.stringify(tab)}`));
     }
 
     const smallRow = `document.querySelector('#chain .row[data-item="${board.smallItemId}"]')`;
-    await beginAction(raw, 'openSmallItem', 'mousedown');
+    await beginAction(chrome, 'openSmallItem', 'mousedown');
     await press(chrome, smallRow);
-    actions.push(await waitPaintedAndStable(raw, network, 'openSmallItem', '#detail .stack',
+    actions.push(await waitPaintedAndStable(chrome, network, 'openSmallItem', '#detail .stack',
       `view.item === ${board.smallItemId} && document.querySelector('#detail .stack h2')?.textContent.includes(${JSON.stringify(board.smallItemTitle)})`));
 
     const longRow = `document.querySelector('#chain .row[data-item="${board.longestHistoryItemId}"]')`;
-    await beginAction(raw, 'openLongestHistoryItem', 'mousedown');
+    await beginAction(chrome, 'openLongestHistoryItem', 'mousedown');
     await press(chrome, longRow);
-    actions.push(await waitPaintedAndStable(raw, network, 'openLongestHistoryItem', '#detail .stack',
+    actions.push(await waitPaintedAndStable(chrome, network, 'openLongestHistoryItem', '#detail .stack',
       `view.item === ${board.longestHistoryItemId} && document.querySelector('#detail .stack h2')?.textContent.includes(${JSON.stringify(board.longestHistoryTitle)})`));
 
     await press(chrome, "document.querySelector('#q')");
-    await beginAction(raw, 'search', 'keydown');
+    await beginAction(chrome, 'search', 'keydown');
     for (const character of 'Small') {
       await typeKey(chrome, character);
       await pause(90); // budget: reproduce the measured person's 90ms key cadence; the search sample starts at the first keydown.
     }
-    actions.push(await waitPaintedAndStable(raw, network, 'search', '#find-results [data-find]',
+    actions.push(await waitPaintedAndStable(chrome, network, 'search', '#find-results [data-find]',
       `document.querySelector('#q').value === 'Small' && !document.querySelector('#find-results').hidden`));
 
-    await beginAction(raw, 'idleSetup', 'mousedown');
+    await beginAction(chrome, 'idleSetup', 'mousedown');
     await press(chrome, "document.querySelector('[data-tab=\"shouts\"]')");
-    await waitPaintedAndStable(raw, network, 'idleSetup', '#feed .shout',
+    await waitPaintedAndStable(chrome, network, 'idleSetup', '#feed .shout',
       `document.querySelector('.tab.on')?.dataset.tab === 'shouts'`);
     const liveMessages = Array.from({ length: Math.ceil(idleMs / liveEveryMs) }, (_, index) =>
       `Live stress update ${index + 1} for seed ${board.seed}, run ${runIndex + 1}.`);
-    await raw.evaluate(`(() => {
+    await chrome.stable(`(() => {
       const feed = document.querySelector('#feed');
       if (!feed) throw new Error('the shouts feed is unavailable for the live observation');
       window.__pb606IdleExpected = new Map(${JSON.stringify(liveMessages)}.map(text => [text, null]));
@@ -468,10 +456,10 @@ async function measureRun(board, runIndex, executable, idleMs, liveEveryMs) {
       if ([...window.__pb606IdleExpected.values()].some(at => at !== null)) {
         throw new Error('a live update marker was already present before this idle sample');
       }
-    })()`, 'observe live feed updates', 2_000);
+      })()`, "document.querySelector('#feed .shout')");
     let liveBoard = null;
     let liveWrites = 0;
-    const idleStart = await raw.evaluate('performance.now()', 'start live idle window', 2_000);
+    const idleStart = await chrome.stable('performance.now()', "document.querySelector('#feed .shout')");
     const wallStart = nodePerformance.now();
     const liveWriteOffsetsMs = [];
     try {
@@ -489,14 +477,17 @@ async function measureRun(board, runIndex, executable, idleMs, liveEveryMs) {
     } finally {
       if (liveBoard) closeBoard(liveBoard);
     }
-    const idleEnd = await raw.evaluate('performance.now()', 'finish live idle window', 2_000);
-    const renderedAtMs = await raw.evaluate(`(() => { window.__pb606IdleScan?.(); return [...(window.__pb606IdleExpected ?? new Map())].map(([text, at]) => ({ text, at })); })()`, 'collect visible live writes', 2_000);
-    const renderedWrites = renderedAtMs.filter(({ at }) => Number.isFinite(at) && at <= idleEnd).length;
-    const idle = await raw.evaluate(`window.__pb606Collect('idleWithLiveWrites', ${idleStart}, ${idleEnd}, true)`, 'collect live idle metrics', 5_000);
-    idle.renderedWrites = renderedWrites;
+    const idle = await chrome.stable(`(() => {
+      window.__pb606IdleScan?.();
+      const endAt = performance.now();
+      const renderedAtMs = [...(window.__pb606IdleExpected ?? new Map())].map(([text, at]) => ({ text, at }));
+      const report = window.__pb606Collect('idleWithLiveWrites', ${idleStart}, endAt, true);
+      report.renderedWrites = renderedAtMs.filter(({ at }) => Number.isFinite(at) && at <= endAt).length;
+      report.renderedAtMs = renderedAtMs.map(({ at }) => Number.isFinite(at) ? at - ${idleStart} : null);
+      return report;
+    })()`, "document.querySelector('#feed .shout')");
     idle.liveWriteOffsetsMs = liveWriteOffsetsMs;
-    idle.renderedAtMs = renderedAtMs.map(({ at }) => Number.isFinite(at) ? at - idleStart : null);
-    Object.assign(idle, network.snapshot('idleWithLiveWrites', idleStart, idleEnd, idle.timeOrigin));
+    Object.assign(idle, network.snapshot('idleWithLiveWrites', idleStart, idle.endMs, idle.timeOrigin));
     idle.liveWrites = liveWrites;
     actions.push(idle);
     actions.browserVersion = browserVersion;
@@ -508,7 +499,7 @@ async function measureRun(board, runIndex, executable, idleMs, liveEveryMs) {
   } finally {
     const cleanupErrors = [];
     try { network?.close(); } catch (error) { cleanupErrors.push(`network observer: ${error.message}`); }
-    try { if (raw) await raw.close(); } catch (error) { cleanupErrors.push(`Chrome connection: ${error.message}`); }
+    try { if (chrome) await chrome.close(); } catch (error) { cleanupErrors.push(`Chrome connection: ${error.message}`); }
     try { if (view) await stopView(view); } catch (error) { cleanupErrors.push(`view process: ${error.message}`); }
     if (measurementError || cleanupErrors.length) {
       const failurePath = join(board.workspace, `run-${runIndex + 1}-failure.json`);
