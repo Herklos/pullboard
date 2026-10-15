@@ -14,7 +14,7 @@ import { Refused } from './refused.js';
 import { GATE_SLOT_HELD_ENV, gateSlotEnvironment, inheritedGateSlot, takeResource } from './resources.js';
 import { loadMachineSettings } from './settings.js';
 import { selectAffectedTests } from './affected-tests.js';
-import { testsNeedBrowser } from './browser-admission.js';
+import { checkNeedsBrowser, testsNeedBrowser } from './browser-admission.js';
 import { timingFromOutput, timingRunner } from './timing.js';
 
 const STAMP = 'pullboard-gate-green';
@@ -320,7 +320,7 @@ export async function runSubmitGate(root, config, { base, trunk, changed, check,
   const selection = config.affectedTests
     ? selectAffectedTests(root, { base, trunk, changed })
     : { full: true, reason: 'affected-test selection is not enabled for this project', files: [] };
-  const browser = Boolean(check) || selection.full || await testsNeedBrowser(root, selection.files);
+  const browser = (check ? await checkNeedsBrowser(root, check) : false) || selection.full || await testsNeedBrowser(root, selection.files);
   return await withGateSlot(root, (lease) => {
     const startedAt = Date.now();
     const log = gitPath(root, 'pullboard-submit.log');
