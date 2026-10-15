@@ -131,7 +131,7 @@ const FAILING_TEST = [
   "test('the inherited behavior remains broken [V1]', () => assert.equal(1, 2));",
 ].join('\n') + '\n';
 
-test("a red submit's comparisons yield to other agents' work [V4,C7]", async t => {
+test("a red submit's comparisons keep FIFO and release between files [V4,C7]", async t => {
   const box = fixture(t, { spec: RED_SPEC, source: FAILING_TEST });
   const control = join(box.directory, 'control');
   mkdirSync(control);
@@ -221,18 +221,29 @@ test("a red submit's comparisons yield to other agents' work [V4,C7]", async t =
     assert.equal(entries('waiter').filter(row => row.pid === comparison.pid).length, 1, 'one submit queues only one comparison lease');
     release('blocker.first');
     await observed(() => order().length > 0, 'one queued job begins in the released slot');
-    assert.equal(order()[0].name, 'item-check', 'the later independent item check precedes diagnostic work');
-    assert.equal(entries('holder').filter(row => row.pid === comparison.pid).length, 0);
-    release('check.release'); release('blocker.second');
-    await observed(() => order().some(row => row.name !== 'item-check' && row.phase === 'start'), 'the first diagnostic runs after the item check');
-    const first = order().find(row => row.name !== 'item-check' && row.phase === 'start').name;
+    const first = order()[0].name;
+    assert.notEqual(first, 'item-check', 'the older diagnostic keeps its ticket ahead of the later item check');
     assert.equal(entries('holder').filter(row => row.pid === comparison.pid).length, 1);
     assert.equal(entries('waiter').filter(row => row.pid === comparison.pid).length, 0, 'no second diagnostic is queued while the first owns a slot');
     release(first + '.release');
-    await observed(() => order().filter(row => row.name !== 'item-check' && row.phase === 'start').length === 2, 'the second diagnostic starts after the first finishes');
+    await observed(() => order().some(row => row.name === 'item-check' && row.phase === 'start')
+      && entries('waiter').some(row => row.pid === comparison.pid), 'the older queued item check starts before the newly queued second diagnostic');
+    assert.equal(order().filter(row => row.name !== 'item-check' && row.phase === 'start').length, 1,
+      'the second diagnostic waits while the older item check holds the only available slot');
+    assert.equal(entries('holder').filter(row => row.pid === comparison.pid).length, 0,
+      'the comparison releases its lease between files');
+    assert.equal(entries('holder').filter(row => row.pid === check.pid).length, 1);
+    assert.deepEqual(order().slice(0,3).map(({phase,name}) => [phase,name]), [
+      ['start', first], ['finish', first], ['start', 'item-check'],
+    ]);
+    assert.ok(JSON.parse(readFileSync(join(box.root,'.git/pullboard/main-red.json'),'utf8')).entries[main]['test/' + first],
+      'the first result is persisted before the next comparison acquires');
+    release('check.release');
+    await observed(() => order().filter(row => row.name !== 'item-check' && row.phase === 'start').length === 2,
+      'the second diagnostic starts after the older item check releases');
     const beforeSecond = order().filter(row => row.name !== 'item-check');
     assert.deepEqual(beforeSecond.slice(0,3).map(row => row.phase), ['start','finish','start']);
-    assert.ok(JSON.parse(readFileSync(join(box.root,'.git/pullboard/main-red.json'),'utf8')).entries[main]['test/' + first], 'the first result is persisted before the next finishes');
+    release('blocker.second');
     release('inherited.test.js.release'); release('unrelated.test.js.release');
     await observed(() => existsSync(join(control,'comparison.result')), 'both diagnostic results finish');
     assert.equal(maximum, 1, 'one submit never holds two machine slots');
