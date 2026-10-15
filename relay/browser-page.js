@@ -7,6 +7,9 @@ import { Refused } from '../src/refused.js';
 
 const STYLES = readFileSync(new URL('../src/view.css', import.meta.url), 'utf8');
 
+/** Refuse relay startup locally while the public shell has no relay session; keep its sign-in link and never reload. */
+const SIGN_IN_TRANSPORT = '/** A signed-out shell has no relay transport to start. */\nexport function createTransport() {\n  throw new Error("Sign in with GitHub to open your linked boards.");\n}\n';
+
 /** Serve a fixed asset with cache and browser isolation boundaries, never a filesystem-derived URL. */
 function respond(res, type, content, scriptHashes = []) {
   const hashes = scriptHashes.map(hash => "'sha256-" + hash + "'").join(' ');
@@ -26,6 +29,7 @@ export function createRelayBrowserHandler({ authenticate }) {
     ['/relay/relay-approval.js', ['text/javascript', readFileSync(new URL('../src/relay-approval.js', import.meta.url), 'utf8').replace("'./relay-device-keys.js'", "'./device-keys.js'")]],
     ['/relay/browser-devices.js', ['text/javascript', readFileSync(new URL('./browser-devices.js', import.meta.url), 'utf8')]],
     ['/relay/client.js', ['text/javascript', readFileSync(new URL('./browser-client.js', import.meta.url), 'utf8')]],
+    ['/relay/sign-in.js', ['text/javascript', SIGN_IN_TRANSPORT]],
     ['/relay/browser-notice.js', ['text/javascript', readFileSync(new URL('./browser-notice.js', import.meta.url), 'utf8')]],
     ['/relay/browser-stream.js', ['text/javascript', readFileSync(new URL('./browser-stream.js', import.meta.url), 'utf8')]],
     ['/relay/model.js', ['text/javascript', readFileSync(new URL('./browser-model.js', import.meta.url), 'utf8').replace("'../src/refused.js'", "'./refused.js'")]],
@@ -54,7 +58,7 @@ export function createRelayBrowserHandler({ authenticate }) {
     }
     const notice = relaySession ? '<p>Pairing this browser…</p>'
       : '<p>Connecting to this machine. Sign in to see your linked boards.</p><a href="/auth/github/start">Sign in with GitHub</a>';
-    const page = cockpitPage('', { readOnly: true, requests: true, transportModule: '/relay/client.js', apiHeaders: {}, stylesheet: '/view.css', hostedLocal: true, relaySession, signIn: '/auth/github/start' })
+    const page = cockpitPage('', { readOnly: true, requests: relaySession, transportModule: relaySession ? '/relay/client.js' : '/relay/sign-in.js', apiHeaders: {}, stylesheet: '/view.css', hostedLocal: true, relaySession, signIn: '/auth/github/start' })
       .replace('<main>', '<main><section class="card-panel" id="relay-notice" role="status">' + notice + '</section>');
     const scripts = [...page.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(match => createHash('sha256').update(match[1]).digest('base64'));
     respond(res, 'text/html', page, scripts);

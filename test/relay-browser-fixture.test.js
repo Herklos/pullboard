@@ -87,8 +87,7 @@ test('relay idle readiness waits for a real held request and then observes its c
   await box.link();
   const chrome = await startChrome();
   t.after(() => chrome.close());
-  // Measure only the held request on a static same-origin document, without cockpit startup traffic.
-  await chrome.navigate(box.origin + '/view.css');
+  await chrome.navigate(box.origin);
   await chrome.waitFor('document.readyState === "complete"');
   const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));
   const release = box.holdStateReads();

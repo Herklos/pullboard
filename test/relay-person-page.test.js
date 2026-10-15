@@ -36,6 +36,91 @@ test("the relay page opens without a session and may call only the local view's 
   assert.match(page, /Sign in with GitHub/u, 'relay mode retains its sign-in path');
 });
 
+
+test('a signed-out relay page keeps sign-in visible without starting relay reads [N26,H5,A2]', {
+  skip: !findChromeExecutable() && 'Chrome is not installed',
+}, async t => {
+  const box = await relayClientFixture(t);
+  const privateTitle = 'PRIVATE_RELAY_BOARD_533_ANONYMOUS';
+  assert.equal((await box.cli('add', box.lane, privateTitle)).code, 0);
+  await box.link();
+  const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));
+  const privateKey = readFileSync(box.keyFile, 'utf8').trim();
+  const chrome = await startChrome();
+  t.after(() => chrome.close());
+  await chrome.send('Page.enable', {});
+  await chrome.send('Page.addScriptToEvaluateOnNewDocument', {
+    source: "try { sessionStorage.setItem('relayAnonymousDocumentCount', String(Number(sessionStorage.getItem('relayAnonymousDocumentCount') || 0) + 1)); } catch {}",
+  });
+  const firstCall = box.calls.length;
+  await chrome.navigate(box.origin + '/');
+  // Budget: six seconds reproduce the reviewed reload loop and span a relay refresh interval.
+  await new Promise(resolve => setTimeout(resolve, 6000));
+  const calls = box.calls.slice(firstCall);
+  assert.equal(calls.filter(call => call.method === 'GET' && call.path === '/').length, 1,
+    'the anonymous shell does not reload');
+  await chrome.waitFor("document.readyState === 'complete' && !!document.querySelector('a[href=\"/auth/github/start\"]')");
+  const loads = await chrome.evaluate("Number(sessionStorage.getItem('relayAnonymousDocumentCount') || 0)");
+  const privateValues = [privateTitle, link.board, privateKey, link.token];
+  const retained = await chrome.evaluate(`({ html: document.documentElement.innerHTML,
+    local: JSON.stringify(localStorage), session: JSON.stringify(Object.fromEntries(
+      Array.from({ length: sessionStorage.length }, (_, index) => {
+        const key = sessionStorage.key(index); return [key, sessionStorage.getItem(key)];
+      }).filter(([key]) => key !== 'relayAnonymousDocumentCount'))) })`);
+  assert.equal(loads, 1, 'the anonymous shell does not reload');
+  assert.equal(calls.filter(call => call.method === 'GET' && call.path === '/api/v1/boards').length, 0,
+    'the anonymous shell never starts relay board reads');
+  assert.equal(await chrome.evaluate("!!document.querySelector('a[href=\"/auth/github/start\"]')"), true,
+    'the original sign-in link remains available');
+  assert.equal([retained.html, retained.local, retained.session].some(value => privateValues.some(secret => value.includes(secret))), false,
+    'the anonymous page and its browser storage retain no private board or credential value');
+});
+
+test('a revoked relay session settles on sign-in without a reload loop [N26,H5,A2]', {
+  skip: !findChromeExecutable() && 'Chrome is not installed',
+}, async t => {
+  const box = await relayClientFixture(t);
+  const privateTitle = 'PRIVATE_RELAY_BOARD_533_REVOKED';
+  assert.equal((await box.cli('add', box.lane, privateTitle)).code, 0);
+  await box.link();
+  const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));
+  const privateKey = readFileSync(box.keyFile, 'utf8').trim();
+  const phone = await box.phoneSession();
+  const chrome = await startChrome();
+  t.after(() => chrome.close());
+  await chrome.send('Page.enable', {});
+  await chrome.send('Page.addScriptToEvaluateOnNewDocument', {
+    source: "try { sessionStorage.setItem('relayRevokedDocumentCount', String(Number(sessionStorage.getItem('relayRevokedDocumentCount') || 0) + 1)); } catch {}",
+  });
+  const cookie = await chrome.send('Network.setCookie', {
+    name: 'pb_session', value: phone.token, url: box.origin, httpOnly: true, sameSite: 'Lax',
+  });
+  assert.equal(cookie.success, true);
+  box.revokeSessionOnNextListing();
+  const firstCall = box.calls.length;
+  await chrome.navigate(box.origin + '/');
+  await chrome.waitFor("document.readyState === 'complete' && !!document.querySelector('a[href=\"/auth/github/start\"]')");
+  // Budget: six seconds after reaching sign-in span a relay refresh interval.
+  await new Promise(resolve => setTimeout(resolve, 6000));
+  const loads = await chrome.evaluate("Number(sessionStorage.getItem('relayRevokedDocumentCount') || 0)");
+  const calls = box.calls.slice(firstCall);
+  const privateValues = [privateTitle, link.board, privateKey, link.token, phone.token];
+  const retained = await chrome.evaluate(`({ html: document.documentElement.innerHTML,
+    local: JSON.stringify(localStorage), session: JSON.stringify(Object.fromEntries(
+      Array.from({ length: sessionStorage.length }, (_, index) => {
+        const key = sessionStorage.key(index); return [key, sessionStorage.getItem(key)];
+      }).filter(([key]) => key !== 'relayRevokedDocumentCount'))) })`);
+  assert.equal(loads, 2, 'one authorization loss leads to one signed-out document');
+  assert.equal(calls.filter(call => call.method === 'GET' && call.path === '/').length, 2,
+    'the authenticated page redirects once to the signed-out entry');
+  assert.equal(calls.filter(call => call.method === 'GET' && call.path === '/api/v1/boards').length, 1,
+    'the invalidated session produces no repeated board listings');
+  assert.equal(await chrome.evaluate("!!document.querySelector('a[href=\"/auth/github/start\"]') && !!document.querySelector('#relay-notice')"), true,
+    'the signed-out notice and original sign-in link remain visible');
+  assert.equal([retained.html, retained.local, retained.session].some(value => privateValues.some(secret => value.includes(secret))), false,
+    'the signed-out page and browser storage retain no private board or credential value');
+});
+
 test('relay data still needs a session [N26,H5,A2]', async t => {
   const box = await relayClientFixture(t);
   const before = (await box.cli('export')).document.tables;
