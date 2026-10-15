@@ -4,6 +4,46 @@ import { test } from 'node:test';
 import { generateStressBoard, removeStressBoard } from './perf/generate.mjs';
 import { assertRequiredNetworkEvidence, selectNetworkTarget, withPerfSlot } from './perf/run.mjs';
 
+/** Check every observed JSON request is represented in the rendered action row. */
+async function tableListsRequestBytes(t) {
+  let fixture = null;
+  t.after(() => {
+    if (!t.passed) {
+      console.error(`Performance evidence retained at ${fixture?.workspace ?? 'fixture setup did not finish'}`);
+      return;
+    }
+    if (fixture) removeStressBoard(fixture);
+  });
+  await withPerfSlot(async (run) => {
+    const evidenceRoot = process.env.PULLBOARD_PERF_EVIDENCE_ROOT;
+    fixture = generateStressBoard({ seed: 'request-table', size: 5, ...(evidenceRoot ? { parent: evidenceRoot } : {}) });
+    const report = await run({ board: fixture, runs: 1, idleMs: 1_000, liveEveryMs: 1_000 });
+    const firstLoad = report.actions.find((action) => action.name === 'firstLoad')?.requestsPerRun[0] ?? [];
+    assert.ok(firstLoad.length > 0, 'the JSON report contains observed first-load requests');
+    const successfulFirstLoad = firstLoad.filter((request) => request.complete && !request.failed && request.status === 200
+      && Number.isSafeInteger(request.responseBytes) && request.responseBytes > 0);
+    assert.ok(successfulFirstLoad.some((request) => request.type === 'Document' && request.path === '/'),
+      'the JSON report contains the successful document response');
+    assert.ok(successfulFirstLoad.some((request) => request.method === 'GET' && request.path === '/api/v1/boards'),
+      'the JSON report contains the successful board-list response');
+    assert.ok(successfulFirstLoad.some((request) => request.method === 'GET' && /^\/api\/v1\/boards\/[^/]+\/state$/u.test(request.path)),
+      'the JSON report contains the successful board-state response');
+    assert.ok(report.actions.some((action) => action.requestsPerRun[0].length > 0),
+      'the table comparison has at least one observed request to verify');
+    for (const action of report.actions) {
+      const row = report.table.split('\n').find((line) => line.startsWith(`| ${action.name} |`));
+      assert.ok(row, `${action.name} has a table row`);
+      for (const request of action.requestsPerRun[0]) {
+        const bytes = Number.isSafeInteger(request.responseBytes) ? `${request.responseBytes} B` : 'unavailable';
+        assert.ok(row.includes(`${request.method} ${request.path} = ${bytes}`),
+          `${action.name} table row includes the request represented in JSON`);
+      }
+    }
+  });
+}
+
+test("the harness table lists each request's bytes [N26]", tableListsRequestBytes);
+
 test('network observation stays attached to the selected page and rejects missing required bytes [N26]', () => {
   const targets = [
     { id: 'first-blank', type: 'page', url: 'about:blank', webSocketDebuggerUrl: 'ws://first' },
