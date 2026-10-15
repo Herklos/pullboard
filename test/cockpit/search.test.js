@@ -5,7 +5,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { SPEC, machine, project, startView, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, searchFor, press } from './fixture.js';
+import { SPEC, machine, project, startView, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, searchFor, press, allowLiveHold, holdLive } from './fixture.js';
 
 /** Capture the current search page and its last real board-state request without exposing the session key. */
 async function searchSetupState(chrome) {
@@ -143,14 +143,11 @@ test('spec rows keep newest-first order across a capture that moves [N26]', { ti
   let chrome;
   try {
     chrome = await openSnapshotChrome(executable, 'about:blank', profile);
-    // Keep this controlled observation until an explicit real refresh; no API response is substituted.
-    await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: `
-      const nativeInterval = window.setInterval.bind(window);
-      /** Hold only the automatic board poll while the test observes one complete real response. */
-      window.setInterval = (callback, delay, ...args) => delay === 3000 ? 0 : nativeInterval(callback, delay, ...args);
-    ` });
+    // Keep this controlled observation until an explicit real refresh; no API response is substituted. The view's own
+    // live updates (the stream's catch-up, the fallback read) wait from the moment the board is ready (#622).
+    await allowLiveHold(chrome);
     await chrome.send('Page.navigate', { url: view.link.href });
-    await chrome.waitFor("data?.project?.spec.some(row => row.id === 'G3') && data.project.practice.some(row => row.id === 'R1')");
+    await holdLive(chrome, "data?.project?.spec.some(row => row.id === 'G3') && data.project.practice.some(row => row.id === 'R1')");
     // A new HEAD invalidates the age cache; R2 is already a visible working edit, as in the CI shape.
     writeFileSync(join(alpha.repo, 'ways.md'), r1 + r2);
     writeFileSync(join(alpha.repo, 'capture.txt'), 'The next state captures this commit.\n');
