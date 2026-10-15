@@ -1,7 +1,7 @@
 /** Relay identity, expiry, permission freshness and scoped credential isolation [H8, H1]. */
 import assert from 'node:assert/strict';
 import { runFixtureChild as spawnSync } from './fixture-child.js';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { test } from 'node:test';
@@ -15,6 +15,65 @@ import { relayClientFixture } from './relay-client-fixture.js';
 import { serveView } from '../src/serve.js';
 import { fetchFresh } from './http-fixture.js';
 import { fetchPrintedViewLink } from './view-link-fixture.js';
+
+const relaySetupURL = new URL('../src/relay-setup.js', import.meta.url).href;
+const relayMachineURL = new URL('../src/relay-machine.js', import.meta.url).href;
+
+/** Call the shared setup flow with a private caller signal and credential-free output streams. */
+async function runRelayOnAll(box, signalMode) {
+  return box.script(`
+    import { relayOnAll } from ${JSON.stringify(relaySetupURL)};
+    const controller = new AbortController();
+    const originalFetch = globalThis.fetch;
+    if (${JSON.stringify(signalMode)} === 'during-poll') {
+      globalThis.fetch = async (input, init) => {
+        const response = await originalFetch(input, init);
+        const url = new URL(input instanceof URL ? input.href : typeof input === 'string' ? input : input.url);
+        if (url.pathname === '/auth/device/start') setImmediate(() => controller.abort());
+        return response;
+      };
+    } else if (${JSON.stringify(signalMode)} === 'during-flush') {
+      globalThis.fetch = async (input, init) => {
+        const url = new URL(input instanceof URL ? input.href : typeof input === 'string' ? input : input.url);
+        if (init?.method === 'DELETE' && url.pathname.startsWith('/api/v1/devices/')) {
+          setImmediate(() => controller.abort());
+          await new Promise(resolve => controller.signal.addEventListener('abort', resolve, { once: true }));
+        }
+        return originalFetch(input, init);
+      };
+    } else if (${JSON.stringify(signalMode)} === 'already-aborted') controller.abort();
+    const output = { personChannel: 'view', cwd: process.cwd(),
+      stderr: { write() {} }, say() {}, err() {} };
+    const result = await relayOnAll(${JSON.stringify(box.origin)}, output, { signal: controller.signal });
+    process.stdout.write(JSON.stringify(result));
+  `);
+}
+
+/** Seed one prior cleanup obligation so cancellation can be observed after auth and during flush. */
+async function seedRevocation(box) {
+  return box.script(`
+    import { updateRelayMachine } from ${JSON.stringify(relayMachineURL)};
+    updateRelayMachine(state => { state.revocations = [{ deviceId: 'device-00000000000000000000000000000000', account: '7', url: ${JSON.stringify(box.origin)} }]; });
+    process.stdout.write(JSON.stringify({ seeded: true }));
+  `);
+}
+
+/** Snapshot only private local metadata that cancellation must leave byte-for-byte unchanged. */
+function fileSnapshot(path) { return existsSync(path) ? readFileSync(path) : null; }
+
+/** Register a second synthetic local project without linking it to the private relay. */
+async function registerSecondProject(box) {
+  const root = join(dirname(box.root), 'cancel-second-project');
+  mkdirSync(root);
+  for (const args of [['init', '-q', '-b', 'main'], ['-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-q', '-m', 'fixture base'],
+    ['remote', 'add', 'origin', 'git@github.com:fixture/repository.git']]) {
+    assert.equal(spawnSync('git', args, { cwd: root, env: box.env, encoding: 'utf8', timeout: 15_000 }).status, 0);
+  }
+  assert.equal((await box.cliAt(root, 'init')).code, 0, 'the second fixture project is registered on this machine');
+  const exported = await box.cliAt(root, 'export');
+  const id = exported.document.tables.board_meta.find(row => row.meta_key === 'board_id').meta_value;
+  return { linkFile: join(root, '.git', 'pullboard', 'relay.json'), keyFile: join(box.env.PULLBOARD_HOME, 'relay-keys', id + '.key') };
+}
 
 /** Use real private SQLite and an actual HTTP provider with a controllable expiry clock. */
 async function fixture(t, options = {}) {
@@ -37,6 +96,64 @@ async function login(box) {
   box.advance(grant.interval * 1000);
   return box.auth.pollDevice(grant.ticket);
 }
+
+test('linking every board stops cleanly when the sign-in is declined or cancelled [H5,N26]', async (t) => {
+  for (const scenario of ['already-cancelled', 'declined', 'expired', 'cancelled-during-sign-in', 'cancelled-after-sign-in']) await t.test(scenario, async (t) => {
+    const box = await relayClientFixture(t);
+    const second = await registerSecondProject(box);
+    box.refuseBoardLinks(true);
+    box.providerState.deviceAuthorized = scenario !== 'cancelled-during-sign-in';
+    box.providerState.deviceDeclined = scenario === 'declined';
+    box.providerState.deviceExpired = scenario === 'expired';
+    if (scenario === 'cancelled-after-sign-in') {
+      box.overrideDelete({ status: 200 });
+      assert.equal((await seedRevocation(box)).code, 0, 'a prior revocation is queued before setup begins');
+    }
+    const machineFile = join(box.env.PULLBOARD_HOME, 'relay-machine', 'state.json');
+    const before = new Map([box.linkFile, second.linkFile, box.keyFile, second.keyFile, machineFile].map(path => [path, fileSnapshot(path)]));
+    if (scenario === 'cancelled-during-sign-in') {
+      // A broken caller that ignores abort sees a provider denial at its first poll instead of hanging.
+      setTimeout(() => { box.providerState.deviceDeclined = true; }, 100);
+    }
+    const mode = scenario === 'already-cancelled' ? 'already-aborted'
+      : scenario === 'cancelled-during-sign-in' ? 'during-poll'
+      : scenario === 'cancelled-after-sign-in' ? 'during-flush' : 'none';
+    const result = await runRelayOnAll(box, mode);
+    assert.equal(result.code, 0, 'the private setup caller returns a structured terminal outcome');
+    const expected = scenario === 'declined' ? 'declined' : scenario === 'expired' ? 'expired' : 'cancelled';
+    assert.equal(result.document.outcome, expected, 'sign-in termination has a named outcome');
+    assert.deepEqual(result.document.linked ?? [], [], 'no board is linked after an interrupted sign-in');
+    assert.deepEqual(result.document.failed ?? [], [], 'cancellation is not reported as a per-board failure');
+    assert.deepEqual(fileSnapshot(box.linkFile), before.get(box.linkFile), 'cancelled sign-in leaves the board link file unchanged');
+    assert.deepEqual(fileSnapshot(second.linkFile), before.get(second.linkFile), 'cancellation leaves the second registered board unlinked');
+    assert.deepEqual(fileSnapshot(box.keyFile), before.get(box.keyFile), 'cancelled sign-in leaves the board key unchanged');
+    assert.deepEqual(fileSnapshot(second.keyFile), before.get(second.keyFile), 'cancellation leaves the second board key unstored');
+    if (scenario === 'cancelled-after-sign-in') {
+      const prior = JSON.parse(before.get(machineFile).toString('utf8'));
+      const after = JSON.parse(fileSnapshot(machineFile).toString('utf8'));
+      assert.equal(after.autoLink, prior.autoLink, 'cancellation before the first link does not enable auto-linking');
+      assert.deepEqual(after.owner, prior.owner, 'cancellation before the first link does not change the saved owner');
+      assert.deepEqual(after.approvals, prior.approvals, 'cancellation before the first link preserves pending approvals');
+      assert.deepEqual(after.revocations, [], 'the already-queued revocation is flushed as its existing cleanup obligation');
+    } else {
+      assert.deepEqual(fileSnapshot(machineFile), before.get(machineFile), 'decline or cancellation during sign-in does not mutate machine metadata');
+    }
+    assert.equal(box.transit.some(record => /\/auth\/boards\/link$|\/auth\/machines$|^\/api\/v1\/boards\//u.test(record.path)), false,
+      'no board or machine credential request begins before sign-in is committed');
+    if (scenario === 'already-cancelled') {
+      assert.equal(box.transit.some(record => record.path === '/auth/device/start'), false,
+        'an already-aborted signal prevents the device flow from starting');
+      assert.equal(box.providerCalls.some(call => call.path === '/login/oauth/access_token'), false,
+        'an already-aborted signal makes no provider request');
+    }
+    if (scenario === 'cancelled-during-sign-in') {
+      assert.equal(box.transit.some(record => record.path === '/auth/device/start'), true, 'the caller cancels an active device sign-in');
+    }
+    if (scenario === 'declined' || scenario === 'expired') {
+      assert.equal(box.providerCalls.some(call => call.path === '/login/oauth/access_token'), true, 'the real synthetic provider returns the terminal sign-in result');
+    }
+  });
+});
 
 test('browser state/cookie binding and one-use device ticket protect both sign-in flows [H8, H1]', async (t) => {
   const box = await fixture(t);

@@ -143,7 +143,7 @@ function notices(document, io) {
 }
 
 /** The sole outbound transport in the CLI: explicit sign-in or a saved, opted-in board link. */
-async function request(state, path, { method = 'GET', body, allowMissing = false, initialBaseline = false } = {}, io) {
+async function request(state, path, { method = 'GET', body, allowMissing = false, initialBaseline = false, signal } = {}, io) {
   const supplied = process.env.PULLBOARD_RELAY_TOKEN;
   const readToken = method === 'GET' && path.startsWith('/api/v1/boards/') ? supplied : undefined;
   if (readToken !== undefined && !/^pa_[A-Za-z0-9_-]{43}$/.test(readToken)) throw new Refused('AUTH_REQUIRED', 'supply a current scoped board token without including it in command arguments');
@@ -151,14 +151,18 @@ async function request(state, path, { method = 'GET', body, allowMissing = false
   let response;
   try {
     response = await fetch(relayOrigin(state.url) + path, {
-      method, redirect: 'error', signal: AbortSignal.timeout(10000),
+      method, redirect: 'error', signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10000)]) : AbortSignal.timeout(10000),
       headers: { 'x-pullboard-engine': String(ENGINE_VERSION), ...(token ? { authorization: 'Bearer ' + token } : {}), ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...(initialBaseline ? { 'if-none-match': '*' } : {}) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
-  } catch { throw new Refused('RELAY_UNAVAILABLE', `the relay ${state.url} did not answer; read the local board offline, then retry this move when the relay is reachable`); }
+  } catch {
+    if (signal?.aborted) throw new Refused('OAUTH_CANCELLED', 'GitHub device sign-in was cancelled; no board was linked');
+    throw new Refused('RELAY_UNAVAILABLE', `the relay ${state.url} did not answer; read the local board offline, then retry this move when the relay is reachable`);
+  }
   let document;
   try { document = await response.json(); }
   catch {
+    if (signal?.aborted) throw new Refused('OAUTH_CANCELLED', 'GitHub device sign-in was cancelled; no board was linked');
     const error = new Refused('RELAY_RESPONSE', 'the relay returned an invalid response; retry with the configured relay address');
     error.httpStatus = response.status;
     throw error;
@@ -1167,18 +1171,42 @@ export async function relayRecover(root, skip, io) {
 /** Read the local link and lag without opening a network connection or revealing its relay token. */
 export function relayStatus(root) { return summary(root, loadLink(linkFile(root))); }
 
-/** Renew a person session through the relay without changing this device's board key or cursors. */
-async function deviceSignIn(url, io) {
+/** Throw a named refusal when the caller has cancelled the in-progress device sign-in. */
+function cancellationOutcome(signal) {
+  if (signal?.aborted) throw new Refused('OAUTH_CANCELLED', 'GitHub device sign-in was cancelled; no board was linked');
+}
+
+/** Wait for one bounded device-flow poll interval and wake promptly on caller cancellation. */
+function waitForDevicePoll(seconds, signal) {
+  cancellationOutcome(signal);
+  return new Promise((resolve, reject) => {
+    const finish = (error) => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', cancel);
+      if (error) reject(error); else resolve();
+    };
+    const cancel = () => finish(new Refused('OAUTH_CANCELLED', 'GitHub device sign-in was cancelled; no board was linked'));
+    const timer = setTimeout(() => finish(), Math.max(1, seconds) * 1000);
+    signal?.addEventListener('abort', cancel, { once: true });
+    if (signal?.aborted) cancel();
+  });
+}
+
+/** Sign in with the caller's cancellation signal; no board credential is persisted here. */
+async function deviceSignIn(url, io, { signal } = {}) {
+  cancellationOutcome(signal);
   const client = { url };
-  const flow = await request(client, '/auth/device/start', { method: 'POST', body: {} }, io);
+  const flow = await request(client, '/auth/device/start', { method: 'POST', body: {}, signal }, io);
+  cancellationOutcome(signal);
   io.stderr.write(`Sign in with GitHub: open ${flow.verificationURL} and enter ${flow.userCode}\n`);
   const expires = Date.now() + flow.expiresIn * 1000;
   let signed;
   let wait = flow.interval;
   do {
-    await new Promise((resolve) => setTimeout(resolve, Math.max(1, wait) * 1000));
+    await waitForDevicePoll(wait, signal);
     if (Date.now() >= expires) throw new Refused('OAUTH_EXPIRED', 'GitHub device sign-in expired; run pullboard relay on again');
-    signed = await request(client, '/auth/device/poll', { method: 'POST', body: { ticket: flow.ticket } }, io);
+    signed = await request(client, '/auth/device/poll', { method: 'POST', body: { ticket: flow.ticket }, signal }, io);
+    cancellationOutcome(signal);
     wait = signed.retryAfter ?? flow.interval;
   } while (signed.pending);
   const token = signed.token;
@@ -1304,10 +1332,18 @@ export async function relayRequestDevice(root) {
 }
 
 /** Sign in once for machine setup; the saved account is the provider-authenticated identity. */
-export async function relayMachineSignIn(address, io) {
+export async function relayMachineSignIn(address, io, { signal } = {}) {
   requirePersonChannel(io.personChannel);
   const url = relayOrigin(address || DEFAULT_RELAY);
-  const signed = await deviceSignIn(url, io);
+  let signed;
+  try { signed = await deviceSignIn(url, io, { signal }); }
+  catch (error) {
+    if (signal?.aborted || error.code === 'OAUTH_CANCELLED') return { outcome: 'cancelled' };
+    if (error.code === 'OAUTH_DENIED') return { outcome: 'declined' };
+    if (error.code === 'OAUTH_EXPIRED') return { outcome: 'expired' };
+    throw error;
+  }
+  if (signal?.aborted) return { outcome: 'cancelled' };
   if (typeof signed.user?.id !== 'string') throw new Refused('RELAY_RESPONSE', 'Sign in again to receive an authenticated account identity.');
   return { token: signed.token, id: signed.id, account: signed.user.id, url };
 }

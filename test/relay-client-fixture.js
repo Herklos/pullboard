@@ -211,6 +211,7 @@ globalThis.fetch = function tracedFetch(input, init) {
   let rejectedStateReads = null;
   let beforeSnapshotWrite = null;
   let refuseRequestWrites = false;
+  let refuseBoardLinks = false;
   let refuseNextAcceptedApprovalCompletionResponse = false;
   let signIn;
   let api;
@@ -327,6 +328,12 @@ globalThis.fetch = function tracedFetch(input, init) {
     if (refuseRequestWrites && req.method === 'POST' && /\/api\/v1\/boards\/[0-9a-f]{32}\/requests$/.test(req.url ?? '')) {
       res.writeHead(503, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ version: 1, error: { code: 'RELAY_UNAVAILABLE', message: 'fixture request outage' } }));
+      return;
+    }
+    if (refuseBoardLinks && req.method === 'POST' && req.url === '/auth/boards/link') {
+      req.resume();
+      res.writeHead(503, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ version: 1, error: { code: 'FIXTURE_LINK_REFUSED', message: 'fixture link sentinel' } }));
       return;
     }
     if (refuseSnapshotWrites && req.method === 'PUT' && /\/api\/v1\/boards\/[0-9a-f]{32}\/state$/.test(req.url ?? '')) {
@@ -579,7 +586,7 @@ globalThis.fetch = function tracedFetch(input, init) {
     return childResult(root, env, ['--input-type=module', '-e', source]);
   }
   return {
-    transit, relayDirectory: join(scratch, 'relay'), authDatabase, otherDeviceJoin,
+    transit, providerState: provider.state, providerCalls: provider.calls, relayDirectory: join(scratch, 'relay'), authDatabase, otherDeviceJoin,
     root, env, origin, lane, before, linkFile, keyFile, calls, moveAcks, cli, cliAt, cliWithSnapshotUploads, cliWithSnapshotTrace, link, phoneSession, requireEngineThree, otherDeviceOff, additionalBoard, script, stopRelay, restartRelay,
     /** Assert the test consumed every declared child budget, with no hidden CLI calls. */
     assertCliChildrenComplete() {
@@ -626,6 +633,8 @@ globalThis.fetch = function tracedFetch(input, init) {
     /** Return how many state reads reached the private relay. */
     stateReadStarted() { return stateReadStarted; },
     refuseRequestWrites(value) { refuseRequestWrites = value; },
+    /** Fail a surprise first-link request promptly so cancellation regressions cannot reach phone pairing. */
+    refuseBoardLinks(value) { refuseBoardLinks = value; },
     /** Return HTTP 403 only after the real relay has stored one sealed approval completion. */
     refuseNextAcceptedApprovalCompletionResponse() { refuseNextAcceptedApprovalCompletionResponse = true; },
     mainURL: new URL('../src/cli.js', import.meta.url).href,

@@ -91,6 +91,13 @@ export function readRelayMachine() {
   return state;
 }
 
+/** Read only the saved person endpoint without migrating or scrubbing credentials. */
+export function relayMachineOwner() {
+  const state = readState();
+  const owner = state.owner ?? (state.session ? { account: state.session.account, url: state.session.url } : null);
+  return owner ? { account: owner.account, url: owner.url } : null;
+}
+
 /** Serialize cross-process read-modify-write and atomically replace the private machine file. */
 export function updateRelayMachine(mutate) {
   const folder = directory();

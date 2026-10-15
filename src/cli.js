@@ -3209,8 +3209,21 @@ async function runCommand(argv, io) {
       }
       if (values.all) {
         if (first !== 'on' || second || rest.length) throw new Refused('USAGE', 'pullboard relay on --all [--url <address>]');
-        const result = await relayOnAll(values.url, io);
-        io.result?.(result); return result.failed.length ? 1 : 0;
+        const controller = new AbortController();
+        const cancelSignIn = () => controller.abort();
+        process.once('SIGINT', cancelSignIn);
+        process.once('SIGTERM', cancelSignIn);
+        let result;
+        try { result = await relayOnAll(values.url, io, { signal: controller.signal }); }
+        finally { process.off('SIGINT', cancelSignIn); process.off('SIGTERM', cancelSignIn); }
+        io.result?.(result);
+        if (result.outcome) {
+          io.say(result.outcome === 'declined' ? 'GitHub sign-in was declined; no boards were linked.'
+            : result.outcome === 'expired' ? 'GitHub device sign-in expired; no boards were linked.'
+              : 'GitHub device sign-in was cancelled; no boards were linked.');
+          return 1;
+        }
+        return result.failed.length ? 1 : 0;
       }
       if (['tokens', 'revoke'].includes(first)) {
         if (rest.length || values.url || (first === 'tokens' && second) || (first === 'revoke' && !second)) {
