@@ -4,7 +4,7 @@
  */
 import assert from 'node:assert/strict';
 import { runFixtureExecFile as execFileSync, runFixtureChild as spawnSync, runFixtureChild, runFixtureGit } from './fixture-child.js';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
@@ -79,6 +79,20 @@ test('record real file ${id} [C7]', async () => {
     assert.deepEqual(peak.starts.sort((a, b) => a - b), Array.from({ length: 9 }, (_, id) => id), 'every selected file runs once');
     assert.match(result.stdout, /# tests 9\b/);
     assert.match(result.stdout, /# fail 0\b/);
+  }
+  let isolationCase = 0;
+  for (const flag of ['--test-isolation', '--test_isolation', '--experimental-test-isolation',
+    '--experimental_test_isolation', '--experimental_test-isolation', '--experimental-test_isolation']) {
+    for (const args of [[`${flag}=none`], [flag, 'none']]) {
+      const capture = join(root, `isolation-${isolationCase++}.jsonl`);
+      const result = runFixtureChild(process.execPath, [join(root, 'bin/run-tests.js'), ...args, selected.at(-1)], {
+        cwd: root, env: { ...process.env, PULLBOARD_CAP_CAPTURE: capture,
+          PULLBOARD_MACHINE_HOME: join(root, 'machine-isolation') }, encoding: 'utf8',
+      });
+      assert.notEqual(result.status, 0, `${args.join(' ')} must refuse non-isolated test files`);
+      assert.match(result.stderr, /bounded browser test files require process isolation/u);
+      assert.equal(existsSync(capture), false, 'a refused isolation mode never starts a test-file body');
+    }
   }
   writeFileSync(config, JSON.stringify({ testConcurrency: { browser: 3 } }));
   assert.throws(() => testConcurrency(root, 7), /browser must be 1 or 2/);

@@ -247,7 +247,7 @@ function runTests(args, env, concurrency) {
         throw new Error('--test-concurrency must be a positive integer');
       }
       files = Math.min(files, Number(value));
-    } else if (/^--(?:experimental-)?test[-_]isolation(?:=none|$)/u.test(argument) &&
+    } else if (/^--(?:experimental[-_])?test[-_]isolation(?:=none|$)/u.test(argument) &&
       (argument.endsWith('=none') || args[at + 1] === 'none')) {
       throw new Error('bounded browser test files require process isolation; remove --test-isolation=none');
     } else forwarded.push(argument);
