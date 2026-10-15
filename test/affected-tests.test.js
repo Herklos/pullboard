@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
-import { runFixtureGit } from './fixture-child.js';
+import { runFixtureChild, runFixtureGit } from './fixture-child.js';
 import { selectAffectedTests } from '../src/affected-tests.js';
 
 /** Make a real committed ES-module graph without executing any candidate source. */
@@ -96,26 +96,52 @@ test('escaped literal templates select their documentation inputs [V4,C7]', (t) 
   box.put('docs/api..md','# Conservatively cooked raw-tag path\n');
   const commit = box.commit();
   assert.deepEqual(selectAffectedTests(box.root,{base,commit,changed:['docs/api.md']}).files,
-    ['docs/api.test.js','test/template-hex.test.js','test/template-point.test.js','test/template-unicode.test.js'],
-    'escaped literal templates must retain their documentation readers');
+    ['docs/api.test.js','test/template-hex.test.js','test/template-identity.test.js','test/template-point.test.js','test/template-raw.test.js','test/template-unicode.test.js'],
+    'plain-text docs and .md markers conservatively include every matching source');
   assert.deepEqual(selectAffectedTests(box.root,{base,commit,changed:['docs/api\\x2e.md']}).files,
-    ['test/template-raw.test.js'],'raw tags retain their raw input path');
+    ['test/template-identity.test.js','test/template-raw.test.js'],'plain-text markers may select more than the raw-tag reader');
   assert.deepEqual(selectAffectedTests(box.root,{base,commit,changed:['docs/api..md']}).files,
-    ['test/template-raw.test.js'],'unknown tags also retain the conservative cooked path');
+    ['test/template-identity.test.js','test/template-raw.test.js'],'plain-text markers retain both raw and identity readers');
   assert.deepEqual(selectAffectedTests(box.root,{base,commit,changed:['docs/X63.md']}).files,
-    ['test/template-identity.test.js'],'uppercase X is an identity escape, not hexadecimal');
+    ['test/template-identity.test.js','test/template-raw.test.js'],'plain-text markers conservatively include both readers');
 });
 
 
 test('a docs path built inline still selects its reader [V4,C7]', (t) => {
   const box = graph(t);
-  box.put('test/array-reader.test.js', `import {readFileSync} from 'node:fs'; readFileSync(new URL(['..','docs','api.md'].join('/'),import.meta.url),'utf8');\n`);
+  box.put('test/array-reader.test.js', `import {readFileSync} from 'node:fs'; readFileSync(new URL(['..','docs','api.md'] /* docs input */ .join('/'),import.meta.url),'utf8');\n`);
   box.put('test/inline-join.test.js', "import {readFileSync} from 'node:fs'; import {join} from 'node:path'; const root='.',name='api.md'; readFileSync(join(root,'docs',name),'utf8');\n");
   box.put('test/inline-template.test.js', "import {readFileSync} from 'node:fs'; readFileSync(`do\\x63s/api.md`,'utf8');\n");
+  box.put('test/comment-only-reader.test.js', "// Reads api.md by name only; no path syntax here.\n");
+  box.put('test/marker-only-reader.test.js', "// docs tree readers can consume .md files after path expansion.\n");
+  box.put('test/marker-helper.js', "// docs roots and .md files feed this helper.\n");
+  box.put('test/transitive-marker-reader.test.js', "import './marker-helper.js';\n");
+  box.put('test/unrelated.test.js', "import assert from 'node:assert/strict'; assert.ok('no document inputs');\n");
+  box.put('test/embedded-name.test.js', "import assert from 'node:assert/strict'; assert.ok('notapi.md');\n");
+  box.put('test/underscore-prefix.test.js', "import assert from 'node:assert/strict'; assert.ok('_api.md');\n");
+  box.put('test/underscore-suffix.test.js', "import assert from 'node:assert/strict'; assert.ok('api.md_suffix');\n");
+  box.put('test/unicode-prefix.test.js', "import assert from 'node:assert/strict'; assert.ok('éapi.md');\n");
+  box.put('test/unicode-suffix.test.js', "import assert from 'node:assert/strict'; assert.ok('api.mdé');\n");
+  box.put('test/unicode-mark-prefix.test.js', "import assert from 'node:assert/strict'; assert.ok('éapi.md');\n");
+  box.put('test/unicode-mark-suffix.test.js', "import assert from 'node:assert/strict'; assert.ok('api.md́');\n");
   const base = box.commit();
   box.put('docs/api.md','# Updated API\n');
   const commit = box.commit();
+  const reader = runFixtureChild(process.execPath, [join(box.root,'test/array-reader.test.js')], { cwd:box.root, encoding:'utf8' });
+  assert.equal(reader.status,0,reader.failure ?? reader.stderr?.toString('utf8') ?? 'the committed array reader did not run');
   assert.deepEqual(selectAffectedTests(box.root,{base,commit}).files,
-    ['docs/api.test.js','test/array-reader.test.js','test/inline-join.test.js','test/inline-template.test.js'],
+    ['docs/api.test.js','test/array-reader.test.js','test/comment-only-reader.test.js','test/inline-join.test.js','test/inline-template.test.js','test/marker-only-reader.test.js','test/transitive-marker-reader.test.js'],
     'a joined literal array must retain its documentation reader');
+  const selected = selectAffectedTests(box.root,{base,commit,changed:['docs/api.md']}).files;
+  assert.ok(selected.includes('test/comment-only-reader.test.js'), 'a basename in a comment still selects its reader');
+  assert.ok(selected.includes('test/marker-only-reader.test.js'), 'the docs and .md text markers select a reader without the changed basename');
+  assert.ok(selected.includes('test/transitive-marker-reader.test.js'), 'a matching imported helper selects its test');
+  assert.ok(!selected.includes('test/unrelated.test.js'), 'a file without either documentation marker stays out');
+  assert.ok(!selected.includes('test/embedded-name.test.js'), 'a filename embedded inside another word does not count');
+  assert.ok(!selected.includes('test/underscore-prefix.test.js'), 'an underscore before the basename prevents a whole-word match');
+  assert.ok(!selected.includes('test/underscore-suffix.test.js'), 'an underscore after the basename prevents a whole-word match');
+  assert.ok(!selected.includes('test/unicode-prefix.test.js'), 'a Unicode letter before the basename prevents a whole-word match');
+  assert.ok(!selected.includes('test/unicode-suffix.test.js'), 'a Unicode letter after the basename prevents a whole-word match');
+  assert.ok(!selected.includes('test/unicode-mark-prefix.test.js'), 'a combining mark before the basename prevents a whole-word match');
+  assert.ok(!selected.includes('test/unicode-mark-suffix.test.js'), 'a combining mark after the basename prevents a whole-word match');
 });

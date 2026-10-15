@@ -68,9 +68,19 @@ function modulesAt(root, commit) {
  * Computed Markdown names select the docs tree; opaque helpers declare DOCS_TREE_INPUT. The
  * landing gate remains complete and never uses this submit-only optimization.
  */
-function documentationInputs(path, source, imports) {
+function documentationInputs(path, source, imports, changedDocs = []) {
   const inputs = new Set();
   if (source.split(/\r?\n/u).includes(DOCS_TREE_INPUT)) inputs.add('docs');
+  // Plain text is the required conservative rule: syntax, comments, and escapes do not matter.
+  // Keep the older literal-reader scan below as an additional conservative signal.
+  if (source.includes('docs') && source.includes('.md')) {
+    for (const doc of changedDocs) inputs.add(doc);
+  }
+  for (const doc of changedDocs) {
+    const basename = posix.basename(doc).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+    const wholeWord = new RegExp(`(?:^|[^\\p{L}\\p{M}\\p{N}_])${basename}(?:$|[^\\p{L}\\p{M}\\p{N}_])`, 'u');
+    if (wholeWord.test(source)) inputs.add(doc);
+  }
   const markdownReader = imports.some(target => target === 'node:fs' || target === 'node:fs/promises');
   const literals = /(['"])(?:\\[\s\S]|(?!\1)[^\\\r\n])*\1|`(?:\\[\s\S]|[^`\\])*`/uy;
   // Try every quote start: a quote in a comment or regular expression must not hide a later real path.
@@ -128,7 +138,7 @@ function documentationInputs(path, source, imports) {
 }
 
 /** Compile import edges for one tree; computed imports stay attached to their importing file. */
-function graphAt(root, commit, readDocs = false) {
+function graphAt(root, commit, changedDocs = []) {
   const modules = modulesAt(root, commit);
   const paths = [...modules.keys()];
   const imports = importsIn([...modules.values()]);
@@ -139,7 +149,7 @@ function graphAt(root, commit, readDocs = false) {
   const sourceTreeReaders = new Set();
   const docInputs = new Map();
   paths.forEach((path, index) => {
-    if (readDocs) docInputs.set(path, documentationInputs(path, modules.get(path), imports[index]));
+    if (changedDocs.length) docInputs.set(path, documentationInputs(path, modules.get(path), imports[index], changedDocs));
     if (TEST.test(path)) {
       for (const line of modules.get(path).split(/\r?\n/u)) {
         if (line === TEST_TREE_INPUT) testTreeReaders.add(path);
@@ -187,15 +197,15 @@ export function selectAffectedTests(root, { base, trunk, commit = 'HEAD', change
       changed = undefined;
     }
     changed ??= selectionGit(root, ['diff', '--no-renames', '--name-only', '-z', base, commit]).split('\0').filter(Boolean);
-    const readDocs = changed.some(path => DOC.test(path));
-    const after = graphAt(root, commit, readDocs);
+    const changedDocs = changed.filter(path => DOC.test(path));
+    const after = graphAt(root, commit, changedDocs);
     files = after.paths.filter(path => TEST.test(path)).sort();
     const fallback = changed.find(path => GLOBAL.has(path) || path.startsWith('.githooks/'));
     if (fallback) return { full: true, reason: `${fallback} controls the gate or dependency selection`, files };
     if (!files.length) return { full: true, reason: 'no committed Node test files can be selected', files };
     const unsupported = changed.find(path => !MODULE.test(path) && !DOC.test(path));
     if (unsupported) return { full: true, reason: `import selection cannot compute the effect of ${unsupported}`, files };
-    const before = graphAt(root, base, readDocs);
+    const before = graphAt(root, base, changedDocs);
     const reached = new Set(changed);
     const queue = [...changed];
     for (const doc of changed.filter(path => DOC.test(path))) {
