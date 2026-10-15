@@ -7,6 +7,7 @@ import { importsIn } from './module-imports.js';
 const MODULE = /\.[cm]?js$/u;
 const TEST = /\.(?:test|spec)\.[cm]?js$/u;
 const DOC = /^docs\/.+\.md$/u;
+const TEST_README = /^test\/(?:.*\/)?README\.md$/u;
 // A scanner declares this header rather than executing code while the graph is read.
 const TEST_TREE_INPUT = '/** @pullboard-test-input test-tree */';
 const SOURCE_TREE_INPUT = '/** @pullboard-test-input source-tree */';
@@ -138,7 +139,7 @@ function documentationInputs(path, source, imports, changedDocs = []) {
 }
 
 /** Compile this tree's import edges, plus the literal child-CLI dependency used by fixture modules. */
-function graphAt(root, commit, changedDocs = []) {
+function graphAt(root, commit, changedDocs = [], changedReadmes = []) {
   const modules = modulesAt(root, commit);
   const paths = [...modules.keys()];
   const imports = importsIn([...modules.values()]);
@@ -149,7 +150,14 @@ function graphAt(root, commit, changedDocs = []) {
   const sourceTreeReaders = new Set();
   const docInputs = new Map();
   paths.forEach((path, index) => {
-    if (changedDocs.length) docInputs.set(path, documentationInputs(path, modules.get(path), imports[index], changedDocs));
+    if (changedDocs.length || changedReadmes.length) {
+      const inputs = documentationInputs(path, modules.get(path), imports[index], changedDocs);
+      // Literal test README references are real inputs; a test-tree marker alone is not a reader.
+      for (const readme of changedReadmes) {
+        if (modules.get(path).includes(readme) || modules.get(path).includes(posix.relative(posix.dirname(path), readme))) inputs.add(readme);
+      }
+      docInputs.set(path, inputs);
+    }
     if (TEST.test(path)) {
       for (const line of modules.get(path).split(/\r?\n/u)) {
         if (line === TEST_TREE_INPUT) testTreeReaders.add(path);
@@ -205,17 +213,18 @@ export function selectAffectedTests(root, { base, trunk, commit = 'HEAD', change
     }
     changed ??= selectionGit(root, ['diff', '--no-renames', '--name-only', '-z', base, commit]).split('\0').filter(Boolean);
     const changedDocs = changed.filter(path => DOC.test(path));
-    const after = graphAt(root, commit, changedDocs);
+    const changedReadmes = changed.filter(path => TEST_README.test(path));
+    const after = graphAt(root, commit, changedDocs, changedReadmes);
     files = after.paths.filter(path => TEST.test(path)).sort();
     const fallback = changed.find(path => GLOBAL.has(path) || path.startsWith('.githooks/'));
     if (fallback) return { full: true, reason: `${fallback} controls the gate or dependency selection`, files };
     if (!files.length) return { full: true, reason: 'no committed Node test files can be selected', files };
-    const unsupported = changed.find(path => !MODULE.test(path) && !DOC.test(path));
+    const unsupported = changed.find(path => !MODULE.test(path) && !DOC.test(path) && !TEST_README.test(path));
     if (unsupported) return { full: true, reason: `import selection cannot compute the effect of ${unsupported}`, files };
-    const before = graphAt(root, base, changedDocs);
+    const before = graphAt(root, base, changedDocs, changedReadmes);
     const reached = new Set(changed);
     const queue = [...changed];
-    for (const doc of changed.filter(path => DOC.test(path))) {
+    for (const doc of [...changedDocs, ...changedReadmes]) {
       for (const graph of [before, after]) {
         for (const [reader, inputs] of graph.docInputs) {
           if ([...inputs].some(input => input === doc || doc.startsWith(input + '/'))) {
@@ -233,7 +242,7 @@ export function selectAffectedTests(root, { base, trunk, commit = 'HEAD', change
         }
       }
     }
-    const changedTestInput = changed.some(path => path.startsWith('test/') || TEST.test(path) || /^test\.[cm]?js$/u.test(path));
+    const changedTestInput = changed.some(path => !TEST_README.test(path) && (path.startsWith('test/') || TEST.test(path) || /^test\.[cm]?js$/u.test(path)));
     const changedSourceInput = changed.some(path => path.startsWith('src/') || path.startsWith('bin/'));
     const selected = files.filter(path => reached.has(path) || before.always.has(path) || after.always.has(path)
       || (changedTestInput && (before.testTreeReaders.has(path) || after.testTreeReaders.has(path)))
