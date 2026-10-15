@@ -175,7 +175,7 @@ function commandHelp(name) {
       '  pullboard spec view — agent or person: write the offline spec page',
       '  pullboard spec show <id> — agent or person: inspect one row and its sign-offs',
       '  pullboard spec unmet — agent or person: list approved rows without current sign-off',
-      '  pullboard spec draft <text> [--aim] [--gate "<gate>"] — any agent: append a pending row; never approve it',
+      '  pullboard spec draft <text> [--aim] [--gate "<gate>"] — any agent: append a draft row; never approve it',
       '  pullboard spec signoff <ids> — person: sign rows with evidence',
       '  pullboard spec signers add — person: register an SSH signing key',
       '  pullboard spec approve <ids> — person: decide from their own terminal or Pullboard View',
@@ -1138,7 +1138,7 @@ function boardSetup(ctx, card) {
   /** Preserve all existing configuration when recording one setup answer. */
   const configure = patch => `node -e ${quote(`const fs=require('node:fs');const p='pullboard.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));${patch};fs.writeFileSync(p,JSON.stringify(c,null,2)+${JSON.stringify('\n')})`)}`;
   const steps = [
-    { number: 1, done: approved.length > 0, question: 'Ask the person: what are we building, and who will use it? Draft a few requirements as pending, then ask the person to approve them.',
+    { number: 1, done: approved.length > 0, question: 'Ask the person: what are we building, and who will use it? Draft a few requirements, then ask the person to approve them.',
       command: 'pullboard spec draft "<text>"',
       afterAnswer: 'Record each answer with pullboard spec draft "<text>"; the person approves the returned ids in Pullboard View or runs pullboard spec approve <ids> in their own terminal; then the coordinator runs pullboard spec apply.' },
     { number: 2, done: lanes.length > 0, question: `Ask the person: how should we divide the work? Suggested folders: ${folders.join(', ') || 'app/ (create it for the app)'}.`,
@@ -2808,7 +2808,7 @@ async function specCommand(io, { first, second, rest, values }) {
     const id = `${prefix}${next}`;
     const tier = values.aim ? 'aim' : 'must';
     const gate = values.gate?.trim() ?? 'review';
-    const row = `- ${id} [pending, ${tier}] ${second.trim()} | gate: ${gate}`;
+    const row = `- ${id} [draft, ${tier}] ${second.trim()} | gate: ${gate}`;
     const source = readFileSync(spec.file, 'utf8');
     const newline = source.includes('\r\n') ? '\r\n' : '\n';
     const lines = source.split(/\r?\n/u);
@@ -2819,7 +2819,7 @@ async function specCommand(io, { first, second, rest, values }) {
     const after = lines.join(newline);
     writeRowApply(ctx.info.root, { records: [], files: [{ file: ctx.config.spec, before: source, after }],
       signoffs: { before: null, receipts: [] } });
-    io.result?.({ id, row: { id, status: 'pending', tier, text: second.trim(), gate, section: section.name } });
+    io.result?.({ id, row: { id, status: 'draft', tier, text: second.trim(), gate, section: section.name } });
     io.say(id);
     return 0;
   }
