@@ -4,7 +4,6 @@ import { after, test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { performance } from 'node:perf_hooks';
 import { createE2eHelpers } from './e2e-helpers.js';
 import { listResources } from '../src/resources.js';
 
@@ -87,18 +86,14 @@ test('a seat can shout while its own submit runs [V4,C7]', { timeout: 45_000 }, 
     assert.equal(submit.exitCode, null, 'submit remains active inside the gate');
 
     const beforeBoardOnly = boardState(database);
-    const shoutStarted = performance.now();
     const shout = launchAs(project, project.web, process.execPath, [helpers.BIN, 'shout', 'coordinator', 'still responsive during submit'], owner);
     children.push(shout);
     const shoutResult = await within(shout.closed, 5_000, 'same-session shout');
     assert.equal(shoutResult.code, 0, shout.failure ?? shout.stderrText);
-    assert.ok(performance.now() - shoutStarted < 5_000, 'same-session shout finishes within the board-only response budget');
-    const factStarted = performance.now();
     const fact = launchAs(project, project.web, process.execPath, [helpers.BIN, 'fact', '1', 'note', 'the held submit remains active'], owner);
     children.push(fact);
     const factResult = await within(fact.closed, 5_000, 'same-session fact');
     assert.equal(factResult.code, 0, fact.failure ?? fact.stderrText);
-    assert.ok(performance.now() - factStarted < 5_000, 'same-session fact finishes within the board-only response budget');
     const read = launchAs(project, project.web, process.execPath, [helpers.BIN, 'show', '1'], owner);
     children.push(read);
     const readResult = await within(read.closed, 5_000, 'same-session read');
