@@ -476,17 +476,23 @@ test('real Chrome records Spec row decisions from the row, detail and confirmed 
       await diagnosticClick(chrome, '#spec-decline-submit', width, 'decline submit');
       await chrome.waitFor("!!document.querySelector('#spec-detail .spec-feedback.ok,#spec-detail .spec-feedback.no')");
 
-      await chrome.stable("window.__sectionConfirm = null; window.confirm = message => { window.__sectionConfirm = message; return false; }");
+      await chrome.stable("window.__confirmCalls = 0; window.confirm = () => { window.__confirmCalls += 1; return false; }");
       const sectionSelector = `#spec-list [data-section-approve]`;
-      await chrome.click(`[...document.querySelectorAll(${JSON.stringify(sectionSelector)})].find(e=>e.parentElement.querySelector('h4')?.textContent.includes('Follow-up'))`);
+      const followUp = `[...document.querySelectorAll(${JSON.stringify(sectionSelector)})].find(e=>e.parentElement.querySelector('h4')?.textContent.includes('Follow-up'))`;
+      await chrome.click(followUp);
+      await chrome.waitFor("!document.querySelector('#spec-approve-dialog').hidden");
+      assert.match(await chrome.stable("document.querySelector('#spec-approve-title').textContent"), /Approve all 2 undecided rows in/, `${width}: section approval asks for confirmation in the page`);
+      assert.ok(await chrome.stable(`[...document.querySelectorAll('#spec-approve-dialog button')].every(e => e.getBoundingClientRect().height >= ${tapTarget(width)})`), `${width}: the Approve all confirmation's controls meet the 44px target`);
+      await click(chrome, '#spec-approve-cancel');
+      await chrome.waitFor("document.querySelector('#spec-approve-dialog').hidden");
       state = await boardOf(view, demo.repo);
-      assert.match(await chrome.stable('window.__sectionConfirm'), /Approve all 2 undecided rows in/, `${width}: section approval asks for confirmation`);
-      assert.equal(await chrome.stable("!!document.querySelector('#spec-list .spec-feedback')"), false, `${width}: dismissing the confirmation starts no move`);
-      assert.equal(state.events.filter((event) => event.event_kind === 'row_decision').length, 2, `${width}: dismissing section confirmation records no events`);
-      assert.equal(state.spec.find((row) => row.id === 'K1')?.decision, undefined, `${width}: dismissed section approval leaves K1 undecided`);
+      assert.equal(await chrome.stable("!!document.querySelector('#spec-list .spec-feedback')"), false, `${width}: cancelling the confirmation starts no move`);
+      assert.equal(state.events.filter((event) => event.event_kind === 'row_decision').length, 2, `${width}: cancelling section confirmation records no events`);
+      assert.equal(state.spec.find((row) => row.id === 'K1')?.decision, undefined, `${width}: cancelled section approval leaves K1 undecided`);
 
-      await chrome.stable("window.confirm = () => true");
-      await chrome.click(`[...document.querySelectorAll(${JSON.stringify(sectionSelector)})].find(e=>e.parentElement.querySelector('h4')?.textContent.includes('Follow-up'))`);
+      await chrome.click(followUp);
+      await chrome.waitFor("!document.querySelector('#spec-approve-dialog').hidden");
+      await click(chrome, '#spec-approve-submit');
       await chrome.waitFor("document.querySelector('#spec-list [data-row=\"spec:K1\"]').innerText.includes('approved, pending apply') && document.querySelector('#spec-list [data-row=\"spec:K2\"]').innerText.includes('approved, pending apply')");
       state = await boardOf(view, demo.repo);
       const decisions = state.events.filter((event) => event.event_kind === 'row_decision');
@@ -508,6 +514,7 @@ test('real Chrome records Spec row decisions from the row, detail and confirmed 
       await chrome.click("document.querySelector('#spec-chips [data-rows=\"spec:decide\"]')");
       await chrome.waitFor("document.querySelector('#spec-list [data-row=\"spec:G3\"]') && !document.querySelector('#spec-list [data-row=\"spec:G1\"]') && !document.querySelector('#spec-list [data-row=\"spec:G2\"]') && !document.querySelector('#spec-list [data-row=\"spec:K1\"]') && !document.querySelector('#spec-list [data-row=\"spec:K2\"]')");
       assert.ok(await chrome.stable("document.querySelector('#spec-chips [data-rows=\"spec:decide\"]').innerText.includes('27')"), `${width}: Needs your decision excludes all four decided rows`);
+      assert.equal(await chrome.stable('window.__confirmCalls'), 0, `${width}: Approve all never asks the browser's confirm dialog`);
       assert.deepEqual(chrome.exceptions, [], `${width}: Chrome reports no uncaught exceptions`);
     } finally {
       try { await diagnostics?.dispose(); }
@@ -523,6 +530,47 @@ test('real Chrome records Spec row decisions from the row, detail and confirmed 
 
   await runWidth(375);
   await runWidth(1280);
+});
+
+test('approve all records its rows without the browser confirm dialog [B26,N26]', { timeout: 120_000 }, async () => { // budget: hang-only ceiling for Chrome startup, one in-page confirmation and the recorded decisions.
+  const executable = chromeExecutable();
+  assert.ok(executable, 'the Approve all check needs real Chrome');
+  const spec = '# Approve all\n\n## G · Goals\n- G1 [draft, must] First goal. | gate: web test\n- G2 [draft, must] Second goal. | gate: web test\n- G3 [draft, must] Third goal. | gate: web test\n\n## K · Follow-up\n- K1 [draft, must] Follow-up one. | gate: web test\n';
+  const box = machine();
+  const demo = project(box, 'spec-approve-all', spec);
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-spec-approve-all-'));
+  let chrome;
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.waitFor("typeof data === 'object' && !!data?.project");
+    await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+    await chrome.click("document.querySelector('[data-tab=spec]')");
+    await chrome.waitFor("!!document.querySelector('#spec-list [data-row=\"spec:G3\"]') && !!document.querySelector('#spec-list [data-section-approve]')");
+    // A dismissed or blocked browser dialog answers false; the press must not depend on it.
+    await chrome.stable("window.__confirmCalls = 0; window.confirm = () => { window.__confirmCalls += 1; return false; }");
+    await press(chrome, "[...document.querySelectorAll('#spec-list [data-section-approve]')].find(e => e.parentElement.querySelector('h4')?.textContent.includes('Goals'))");
+    await chrome.waitFor("!document.querySelector('#spec-approve-dialog').hidden");
+    assert.match(await chrome.stable("document.querySelector('#spec-approve-title').textContent"), /^Approve all 3 undecided rows in “.*Goals”\?$/u, 'the page asks about the section and its count itself');
+    assert.equal(await chrome.stable("document.querySelector('#spec-approve-rows').textContent"), 'Rows: G1, G2, G3', 'the confirmation names the rows it will approve');
+    assert.equal(await chrome.stable('document.activeElement?.id'), 'spec-approve-submit', 'the confirmation takes focus on its Approve button');
+    await press(chrome, "document.querySelector('#spec-approve-submit')");
+    await chrome.waitFor("document.querySelector('#spec-approve-dialog').hidden && !!document.querySelector('#spec-list .spec-feedback.ok,#spec-list .spec-feedback.no')", 15_000); // budget: hang ceiling for the recorded decision and its note; no throughput claim.
+    assert.equal(await chrome.stable("document.querySelector('#spec-list .spec-feedback').textContent"), 'approved rows G1 G2 G3 (pending apply)', 'the note beside the rows says what the board recorded');
+    const state = await boardOf(view, demo.repo);
+    assert.deepEqual(['G1', 'G2', 'G3'].map((id) => state.spec.find((row) => row.id === id)?.stage), ['approved, pending apply', 'approved, pending apply', 'approved, pending apply'], 'each row the confirmation named is approved');
+    assert.equal(state.spec.find((row) => row.id === 'K1')?.decision, undefined, 'a row in another section stays undecided');
+    const decisions = state.events.filter((event) => event.event_kind === 'row_decision');
+    assert.deepEqual(decisions.map((event) => [event.event_by, JSON.parse(event.event_detail).channel]), [['person', 'view'], ['person', 'view'], ['person', 'view']], 'the person recorded one decision per row through the view');
+    assert.equal(await chrome.stable('window.__confirmCalls'), 0, "Approve all never asks the browser's confirm dialog");
+    assert.deepEqual(chrome.exceptions, [], 'Chrome reports no uncaught exceptions');
+  } finally {
+    try { if (chrome) await closeSnapshotChrome(chrome); }
+    finally {
+      try { await view.stop(); }
+      finally { rmSync(profile, { recursive: true, force: true }); }
+    }
+  }
 });
 
 test('the spec decision wait names its state on timeout [N26]', { timeout: 60_000 }, async (t) => {

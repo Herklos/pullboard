@@ -163,6 +163,13 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
     <div class="actions"><button class="go" id="spec-decline-submit" type="submit">Decline row</button><button class="ghost" id="spec-decline-cancel" type="button">Cancel</button></div>
   </form>
 </div>
+<div class="spec-reason-backdrop" id="spec-approve-dialog" hidden>
+  <form class="spec-reason-dialog" id="spec-approve-form" aria-labelledby="spec-approve-title">
+    <h2 id="spec-approve-title">Approve rows</h2>
+    <div class="muted" id="spec-approve-rows"></div>
+    <div class="actions"><button class="go" id="spec-approve-submit" type="submit">Approve rows</button><button class="ghost" id="spec-approve-cancel" type="button">Cancel</button></div>
+  </form>
+</div>
 <div class="console" id="console" title="Click to close" hidden></div>
 <script>
 const snapshot = ${JSON.stringify(snapshot)};
@@ -2591,6 +2598,35 @@ function askDecline(kind, id, from) {
 }
 
 /**
+ * Ask in the page before one press approves every undecided row of a Spec section (B26, N26). The browser's own confirm
+ * dialog can be dismissed or never shown, and then the press recorded nothing and said nothing; this one is the page's.
+ */
+function askApproveAll(section) {
+  const ids = data.project.spec.filter((row) => row.section === section && ['pending', 'draft'].includes(row.status) && !row.decision).map((row) => row.id);
+  // Every row was decided after the last redraw; this one drops the stale control.
+  if (!ids.length) { render(); return; }
+  view.approvingAll = { section, ids };
+  $('spec-approve-title').textContent = 'Approve all ' + ids.length + (ids.length === 1 ? ' undecided row in “' : ' undecided rows in “') + section + '”?';
+  $('spec-approve-rows').textContent = 'Rows: ' + ids.join(', ');
+  $('spec-approve-submit').textContent = 'Approve ' + ids.length + (ids.length === 1 ? ' row' : ' rows');
+  $('spec-approve-dialog').hidden = false;
+  $('spec-approve-submit').focus();
+}
+
+/**
+ * Close the Approve all confirmation. Cancelled, focus returns to the section control that opened it; approved, to the
+ * list, since the section's control leaves once its rows are decided.
+ */
+function closeApproveAll(approved = false) {
+  const asked = view.approvingAll;
+  view.approvingAll = null;
+  $('spec-approve-dialog').hidden = true;
+  const control = !approved && asked && [...$('spec-list').querySelectorAll('[data-section-approve]')].find((button) => button.dataset.sectionApprove === asked.section);
+  (control || $('spec-list')).focus({ preventScroll: true });
+  return asked;
+}
+
+/**
  * Record a Spec or Doctrine decision beside its row and retain the list's reading position (B26, N26). A Doctrine rule
  * goes to the board by its qualified id, doctrine:D1, as the command line names it (pullboard spec approve doctrine:D1).
  */
@@ -2823,11 +2859,7 @@ document.addEventListener('click', (event) => {
     if (t.dataset.rowDecision === 'approve') decideRow(kind, 'spec-approve', { ids: id }, t);
     else askDecline(kind, id, t.closest('#' + kind + '-detail') ? 'detail' : 'list');
   }
-  else if (t.dataset.sectionApprove) {
-    const section = t.dataset.sectionApprove;
-    const ids = data.project.spec.filter((row) => row.section === section && ['pending', 'draft'].includes(row.status) && !row.decision).map((row) => row.id);
-    if (ids.length && window.confirm('Approve all ' + ids.length + ' undecided rows in “' + section + '”?')) decideRow('spec', 'spec-approve', { ids: ids.join(' ') }, t);
-  }
+  else if (t.dataset.sectionApprove) askApproveAll(t.dataset.sectionApprove);
   else if (t.dataset.shoutId && !event.target.closest('button,a,input,textarea,select')) { go('shout:' + t.dataset.shoutId); }
   else if (t.dataset.row) {
     const [kind, id] = t.dataset.row.split(':');
@@ -2906,6 +2938,14 @@ $('spec-decline-form').addEventListener('submit', (event) => {
   if (view.declineFrom === 'list') $(kind + '-list').focus({ preventScroll: true });
   const anchor = view.declineFrom === 'detail' ? $(kind + '-detail') : [...$(kind + '-list').querySelectorAll('[data-row]')].find((row) => row.dataset.row === kind + ':' + id);
   decideRow(kind, 'spec-decline', { ids: id, reason }, anchor);
+});
+$('spec-approve-cancel').addEventListener('click', () => { closeApproveAll(); });
+$('spec-approve-form').addEventListener('keydown', (event) => { if (event.key === 'Escape') { event.preventDefault(); closeApproveAll(); } });
+// The rows the confirmation named are the rows approved; the decision's note beside them says what the board did.
+$('spec-approve-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const asked = closeApproveAll(true);
+  if (asked) decideRow('spec', 'spec-approve', { ids: asked.ids.join(' ') });
 });
 $('answer-cancel').addEventListener('click', () => answer(null));
 $('flow-hide').addEventListener('click', () => showFlow(false));
