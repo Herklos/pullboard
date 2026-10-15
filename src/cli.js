@@ -176,7 +176,7 @@ function commandHelp(name) {
       '  pullboard spec view — agent or person: write the offline spec page',
       '  pullboard spec show <id> — agent or person: inspect one row and its sign-offs',
       '  pullboard spec unmet — agent or person: list approved rows without current sign-off',
-      '  pullboard spec draft <text> [--aim] [--gate "<gate>"] — any agent: append a draft row; never approve it',
+      '  pullboard spec draft <text> [--section <letter>] [--aim] [--gate "<gate>"] — any agent: append a draft row; never approve it',
       '  pullboard spec signoff <ids> — person: sign rows with evidence',
       '  pullboard spec signers add — person: register an SSH signing key',
       '  pullboard spec approve <ids> — person: decide from their own terminal or Pullboard View',
@@ -241,6 +241,7 @@ const OPTIONS = {
   text: { type: 'string' },
   gate: { type: 'string' },
   aim: { type: 'boolean' },
+  section: { type: 'string' },
   route: { type: 'string' },
   family: { type: 'string' },
   model: { type: 'string' },
@@ -2795,7 +2796,7 @@ async function specCommand(io, { first, second, rest, values }) {
     unmet: ['must'],
     signoff: ['by', 'note', 'note-file'],
     signers: ['key', 'by'],
-    draft: ['aim', 'gate'],
+    draft: ['aim', 'gate', 'section'],
     approve: ['by', 'text'],
     decline: ['reason'],
     apply: [],
@@ -2819,10 +2820,15 @@ async function specCommand(io, { first, second, rest, values }) {
     if (values.gate !== undefined && (!values.gate.trim() || /[\r\n|]/u.test(values.gate))) {
       throw new Refused('USAGE', 'give one nonempty, single-line gate without a field separator, or omit --gate to use review');
     }
-    const section = spec.sections[0];
-    if (!section) throw new Refused('NO_SECTION', `no section in ${ctx.config.spec}; add a section heading, then draft the requirement`);
-    const prefix = /^([A-Z][A-Z0-9]*)\s*[·.:-]/u.exec(section.name)?.[1];
-    if (!prefix) throw new Refused('SPEC_SECTION', `the first section "${section.name}" needs an id prefix such as G · Goals before drafting`);
+    if (!spec.sections.length) throw new Refused('NO_SECTION', `no section in ${ctx.config.spec}; add a section heading, then draft the requirement`);
+    const sections = spec.sections.map(section => ({ ...section,
+      prefix: /^([A-Z][A-Z0-9]*)\s*[·.:-]/u.exec(section.name)?.[1] })).filter(section => section.prefix);
+    const requested = values.section ?? 'G';
+    const section = sections.find(section => section.prefix === requested);
+    if (!section) throw new Refused('SPEC_SECTION', `unknown section "${requested}" in ${ctx.config.spec}; ${sections.length
+      ? `choose one of: ${sections.map(section => section.prefix).join(', ')}`
+      : 'add a section heading with an id prefix such as G · Goals'}`);
+    const { prefix } = section;
     const numbered = spec.rows.map((row) => new RegExp(`^${prefix}(\\d+)$`, 'u').exec(row.id)?.[1]).filter(Boolean).map(Number);
     let next = Math.max(0, ...numbered) + 1;
     while (spec.rows.some((row) => row.id === `${prefix}${next}`)) next += 1;
