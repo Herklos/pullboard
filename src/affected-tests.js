@@ -7,7 +7,6 @@ import { importsIn } from './module-imports.js';
 const MODULE = /\.[cm]?js$/u;
 const TEST = /\.(?:test|spec)\.[cm]?js$/u;
 const DOC = /^docs\/.+\.md$/u;
-const TEST_README = /^test\/(?:.*\/)?README\.md$/u;
 // A scanner declares this header rather than executing code while the graph is read.
 const TEST_TREE_INPUT = '/** @pullboard-test-input test-tree */';
 const SOURCE_TREE_INPUT = '/** @pullboard-test-input source-tree */';
@@ -69,7 +68,7 @@ function modulesAt(root, commit) {
  * Computed Markdown names select the docs tree; opaque helpers declare DOCS_TREE_INPUT. The
  * landing gate remains complete and never uses this submit-only optimization.
  */
-function documentationInputs(path, source, imports, changedDocs = [], changedReadmes = []) {
+function documentationInputs(path, source, imports, changedDocs = []) {
   const inputs = new Set();
   if (source.split(/\r?\n/u).includes(DOCS_TREE_INPUT)) inputs.add('docs');
   // Plain text is the required conservative rule: syntax, comments, and escapes do not matter.
@@ -83,17 +82,6 @@ function documentationInputs(path, source, imports, changedDocs = [], changedRea
     if (wholeWord.test(source)) inputs.add(doc);
   }
   const markdownReader = imports.some(target => target === 'node:fs' || target === 'node:fs/promises');
-  if (changedReadmes.length) {
-    // Recognize literal join components without interpreting expressions or template interpolations.
-    const quoted = String.raw`(?:"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*')`;
-    const joins = new RegExp(String.raw`\b(?:[A-Za-z_$][\w$]*\.)?join\s*\(\s*(${quoted}(?:\s*,\s*${quoted})*)\s*,?\s*\)`, 'gu');
-    for (const match of source.matchAll(joins)) {
-      try {
-        const parts = [...match[1].matchAll(new RegExp(quoted, 'gu'))].map(part => new Function(`return ${part[0]};`)());
-        addReadmeInput(inputs, path, posix.join(...parts), changedReadmes);
-      } catch { /* Only complete valid string literals supply path inputs. */ }
-    }
-  }
   const literals = /(['"])(?:\\[\s\S]|(?!\1)[^\\\r\n])*\1|`(?:\\[\s\S]|[^`\\])*`/uy;
   // Try every quote start: a quote in a comment or regular expression must not hide a later real path.
   for (const quote of source.matchAll(/['"`]/gu)) {
@@ -144,21 +132,13 @@ function documentationInputs(path, source, imports, changedDocs = [], changedRea
       for (const candidate of [posix.normalize(value), posix.normalize(posix.join(posix.dirname(path),value))]) {
         if (candidate === 'docs' || candidate.startsWith('docs/')) inputs.add(candidate.replace(/\/$/u,''));
       }
-      addReadmeInput(inputs, path, value, changedReadmes);
     }
   }
   return inputs;
 }
 
-/** Match a complete literal README path from the repository or the reader's own directory. */
-function addReadmeInput(inputs, path, value, changedReadmes) {
-  for (const candidate of [posix.normalize(value), posix.normalize(posix.join(posix.dirname(path), value))]) {
-    if (changedReadmes.includes(candidate)) inputs.add(candidate);
-  }
-}
-
 /** Compile this tree's import edges, plus the literal child-CLI dependency used by fixture modules. */
-function graphAt(root, commit, changedDocs = [], changedReadmes = []) {
+function graphAt(root, commit, changedDocs = []) {
   const modules = modulesAt(root, commit);
   const paths = [...modules.keys()];
   const imports = importsIn([...modules.values()]);
@@ -169,10 +149,7 @@ function graphAt(root, commit, changedDocs = [], changedReadmes = []) {
   const sourceTreeReaders = new Set();
   const docInputs = new Map();
   paths.forEach((path, index) => {
-    if (changedDocs.length || changedReadmes.length) {
-      const inputs = documentationInputs(path, modules.get(path), imports[index], changedDocs, changedReadmes);
-      docInputs.set(path, inputs);
-    }
+    if (changedDocs.length) docInputs.set(path, documentationInputs(path, modules.get(path), imports[index], changedDocs));
     if (TEST.test(path)) {
       for (const line of modules.get(path).split(/\r?\n/u)) {
         if (line === TEST_TREE_INPUT) testTreeReaders.add(path);
@@ -228,18 +205,17 @@ export function selectAffectedTests(root, { base, trunk, commit = 'HEAD', change
     }
     changed ??= selectionGit(root, ['diff', '--no-renames', '--name-only', '-z', base, commit]).split('\0').filter(Boolean);
     const changedDocs = changed.filter(path => DOC.test(path));
-    const changedReadmes = changed.filter(path => TEST_README.test(path));
-    const after = graphAt(root, commit, changedDocs, changedReadmes);
+    const after = graphAt(root, commit, changedDocs);
     files = after.paths.filter(path => TEST.test(path)).sort();
     const fallback = changed.find(path => GLOBAL.has(path) || path.startsWith('.githooks/'));
     if (fallback) return { full: true, reason: `${fallback} controls the gate or dependency selection`, files };
     if (!files.length) return { full: true, reason: 'no committed Node test files can be selected', files };
-    const unsupported = changed.find(path => !MODULE.test(path) && !DOC.test(path) && !TEST_README.test(path));
+    const unsupported = changed.find(path => !MODULE.test(path) && !DOC.test(path));
     if (unsupported) return { full: true, reason: `import selection cannot compute the effect of ${unsupported}`, files };
-    const before = graphAt(root, base, changedDocs, changedReadmes);
+    const before = graphAt(root, base, changedDocs);
     const reached = new Set(changed);
     const queue = [...changed];
-    for (const doc of [...changedDocs, ...changedReadmes]) {
+    for (const doc of changed.filter(path => DOC.test(path))) {
       for (const graph of [before, after]) {
         for (const [reader, inputs] of graph.docInputs) {
           if ([...inputs].some(input => input === doc || doc.startsWith(input + '/'))) {
@@ -257,7 +233,7 @@ export function selectAffectedTests(root, { base, trunk, commit = 'HEAD', change
         }
       }
     }
-    const changedTestInput = changed.some(path => !TEST_README.test(path) && (path.startsWith('test/') || TEST.test(path) || /^test\.[cm]?js$/u.test(path)));
+    const changedTestInput = changed.some(path => path.startsWith('test/') || TEST.test(path) || /^test\.[cm]?js$/u.test(path));
     const changedSourceInput = changed.some(path => path.startsWith('src/') || path.startsWith('bin/'));
     const selected = files.filter(path => reached.has(path) || before.always.has(path) || after.always.has(path)
       || (changedTestInput && (before.testTreeReaders.has(path) || after.testTreeReaders.has(path)))

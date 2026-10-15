@@ -301,7 +301,7 @@ function explicitTestFiles(args) {
 function isDefaultTestFile(path) {
   const normalized = path.replaceAll('\\', '/');
   if (normalized.split('/').some(part => part === 'node_modules' || part.startsWith('.'))) return false;
-  return /^(?:test|docs)\/.+\.test\.(?:js|mjs)$/u.test(normalized);
+  return /(?:^|\/)[^/]+\.test\.(?:js|mjs)$/u.test(normalized);
 }
 
 /** Preserve native discovery outside Git, but never hide a repository access failure. */

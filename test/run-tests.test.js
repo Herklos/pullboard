@@ -8,7 +8,6 @@ import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { startFixtureChild, runFixtureChild, runFixtureGit } from './fixture-child.js';
 import { listResources } from '../src/resources.js';
-import { selectAffectedTests } from '../src/affected-tests.js';
 
 const runner = fileURLToPath(new URL('../bin/run-tests.js', import.meta.url));
 const shardFileCount = 9;
@@ -60,7 +59,7 @@ function makeTrackedSelectionFixture(t) {
   const source = join(root, 'src');
   const tests = join(root, 'test');
   const scratch = join(root, 'scratch');
-  const expected = ['tracked', 'docs-esm'];
+  const expected = ['tracked', 'docs-esm', 'dot-suffix'];
   mkdirSync(bin);
   mkdirSync(tests);
   mkdirSync(scratch);
@@ -178,7 +177,7 @@ function onlyTestEntriesTest(t) {
     mkdirSync(dirname(join(fixture.root, path)), { recursive: true });
     writeFileSync(join(fixture.root, path), body);
   };
-  /** Commit the fixture graph so the selector reads immutable Git objects. */
+  /** Commit the fixture entries in a real Git repository. */
   const commit = () => {
     runFixtureGit(['add', '-A'], { cwd: fixture.root, env });
     runFixtureGit(['commit', '-qm', 'chore: discovery fixture'], { cwd: fixture.root, env });
@@ -205,7 +204,7 @@ test('perf helpers remain importable [C7]', importedHelpersWork);
   put('docs/guide.test.mjs', "import { test } from 'node:test';\nimport { appendFileSync } from 'node:fs';\n/** Exercise a named documentation test entry. */\nfunction guide() { appendFileSync(process.env.PULLBOARD_SHARD_CAPTURE, 'docs/guide.test.mjs\\n'); }\ntest('documentation test entry [C7]', guide);\n");
   put('test/tree-reader.test.js', "/** @pullboard-test-input test-tree */\nimport { appendFileSync } from 'node:fs';\nappendFileSync(process.env.PULLBOARD_SHARD_CAPTURE, 'tree-reader.test.js\\n');\n");
   put('test/cockpit/perf/README.md', '# Perf harness\n');
-  const base = commit();
+  commit();
   const discovered = runFixtureChild(process.execPath, [fixture.runner], {
     cwd: fixture.root, encoding: 'utf8', env,
   });
@@ -235,43 +234,6 @@ test('perf helpers remain importable [C7]', importedHelpersWork);
   assert.equal(beforeTotal, afterTotal + helpers.length,
     'only the standalone helper-file records disappear from the raw TAP total');
   process.stderr.write(`fixture declared cases: before=${expectedCases.length}, after=${expectedCases.length}; raw TAP: before=${beforeTotal}, after=${afterTotal}; helper records removed=${helpers.length}\n`);
-  put('test/cockpit/perf/README.md', '# Updated harness instructions\n');
-  const head = commit();
-  const readme = selectAffectedTests(fixture.root, { base, commit: head });
-  assert.equal(readme.full, false, 'an unread test README does not force the full gate');
-  assert.deepEqual(readme.files, [], 'an unread README does not activate the test-tree scanner');
-  assert.equal(selectAffectedTests(fixture.root, {
-    base, commit: head, changed: ['test/cockpit/perf/unknown.json'],
-  }).full, true, 'unknown test assets still require the full gate');
-  put('test/cockpit/readme-helper.js', "import { readFileSync } from 'node:fs';\nexport const instructions = readFileSync(new URL('./perf/README.md', import.meta.url), 'utf8');\n");
-  put('test/cockpit/readme-reader.test.js', "import './readme-helper.js';\n");
-  put('test/cockpit/joined-helper.js', "import { readFileSync } from 'node:fs';\nimport { join } from 'node:path';\nexport const instructions = readFileSync(join('test', 'cockpit', 'perf', 'README.md'), 'utf8');\n");
-  put('test/cockpit/escaped-helper.js', "import { readFileSync } from 'node:fs';\nexport const instructions = readFileSync(new URL('./perf/REA\\x44ME.md', import.meta.url), 'utf8');\n");
-  for (const name of ['joined', 'escaped']) {
-    put(`test/cockpit/${name}-reader.test.js`, `import assert from 'node:assert/strict';
-import { test } from 'node:test';
-import { instructions } from './${name}-helper.js';
-/** Read and assert the actual fixture README through the helper. */
-function readInstructions() { assert.match(instructions, /Updated harness instructions/u); }
-test('${name} README reader [C7]', readInstructions);
-`);
-  }
-  const readerBase = commit();
-  const readerRun = runFixtureChild(process.execPath, [fixture.runner,
-    'test/cockpit/joined-reader.test.js', 'test/cockpit/escaped-reader.test.js'], {
-    cwd: fixture.root, encoding: 'utf8', env,
-  });
-  assert.equal(readerRun.status, 0, `${readerRun.context}\n${readerRun.stdout}`);
-  assert.match(readerRun.stdout, /^# tests 2$/mu, 'both literal readers actually execute their filesystem reads');
-  put('test/cockpit/readme-helper.js', "export const instructions = 'reader removed';\n");
-  put('test/cockpit/perf/README.md', '# Instructions after reader removal\n');
-  const readerHead = commit();
-  const readers = selectAffectedTests(fixture.root, {
-    base: readerBase, commit: readerHead, changed: ['test/cockpit/perf/README.md'],
-  });
-  assert.equal(readers.full, false);
-  assert.deepEqual(readers.files, ['test/cockpit/escaped-reader.test.js', 'test/cockpit/joined-reader.test.js', 'test/cockpit/readme-reader.test.js'],
-    'real literal readers and the removed helper edge remain selected, without test-tree-wide widening');
 }
 
 test('the suite runs only test files, not helpers or the perf harness [C7]', onlyTestEntriesTest);
