@@ -865,6 +865,11 @@ function flowMinutes(value) {
   return Math.floor(hours / 24) + ' d ' + hours % 24 + ' h';
 }
 
+/** A queue's oldest item and how long it has waited, as the flow card reads it. */
+function oldestLine(oldest) {
+  return 'Oldest: ' + (oldest ? '#' + oldest.id + ' · ' + flowMinutes(oldest.ageMinutes) : 'none');
+}
+
 /** Render the four stages, live queues and single recommendation supplied by stats [N26]. */
 function proofFlowCard(flow) {
   if (!flow) return '';
@@ -878,7 +883,7 @@ function proofFlowCard(flow) {
     const queue = flow.queues[key];
     const oldest = queue.oldest;
     return '<div><span>' + label + ' queue</span><b data-queue="' + key + '" data-value="' + esc(queue.size) + '">' + esc(queue.size) + '</b>'
-      + '<small data-oldest="' + key + '" data-value="' + esc(oldest?.ageMinutes ?? '') + '">Oldest: ' + (oldest ? '#' + esc(oldest.id) + ' · ' + esc(flowMinutes(oldest.ageMinutes)) : 'none') + '</small></div>';
+      + '<small data-oldest="' + key + '" data-value="' + esc(oldest?.ageMinutes ?? '') + '">' + esc(oldestLine(oldest)) + '</small></div>';
   }).join('');
   const bottleneck = flow.bottleneck;
   return '<div class="proof-stats-flow"><div class="proof-stats-grid">' + averages + waiting + '</div>'
@@ -1039,6 +1044,26 @@ async function revokeCredential(id) {
   if (root === view.root) renderCredentials();
 }
 
+/**
+ * A board read as text with its clock readings blanked: the flow's observation time (asOf) and each queue's oldest age
+ * (ageMinutes) are stamped afresh on every read, so two reads that differ only there show the same board (#644).
+ * Matching whole JSON keys is safe: a quote inside any string value is escaped, so no title can look like one.
+ */
+function boardText(state) {
+  return JSON.stringify(state).replace(/"(asOf|ageMinutes)":(?:"[^"]*"|[-+.0-9eE]+|null)/g, '"$1":null');
+}
+
+/** Show each queue's oldest age from the board on hand in place: the one thing on the page that moves with the clock alone. */
+function showFlowAges() {
+  const flow = data?.project?.proofStats?.flow;
+  if (!flow) return;
+  for (const node of document.querySelectorAll('#proof-stats [data-oldest]')) {
+    const oldest = flow.queues[node.dataset.oldest]?.oldest;
+    node.dataset.value = oldest?.ageMinutes ?? '';
+    node.textContent = oldestLine(oldest);
+  }
+}
+
 /** Refresh from API v1, every board or only those in fresh, and discard a response for a project the person left. */
 async function refresh(fresh = null) {
   const generation = ++refreshStarted;
@@ -1076,12 +1101,16 @@ async function refresh(fresh = null) {
     if (place) applyPlace(place, globalThis.history?.state);
     addressReady = true;
   }
-  const text = JSON.stringify(next);
+  const text = boardText(next);
   const changed = text !== seen;
-  if (text !== seen) {
+  if (changed) {
     seen = text;
     data = next;
     render();
+  } else if (data !== next) {
+    // The same board read again: keep its newest clock readings and show them in place, with no redraw (#644).
+    data = next;
+    showFlowAges();
   }
   if (changed) {
     address(false);

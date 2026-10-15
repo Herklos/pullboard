@@ -516,3 +516,64 @@ test('the stats card shows API flow and bottleneck at 375 and 1280 [N26]', { tim
     rmSync(profile, { recursive: true, force: true });
   }
 });
+
+test('an unchanged board does not redraw on refresh [N26,N40]', {
+  timeout: 90_000, // budget: hang ceiling for real board setup, Chrome and five real board reads.
+}, async (t) => {
+  // #644: every board read stamps the flow's observation clock (asOf) and each queue's oldest age afresh, so before
+  // this a refresh of an unchanged board redrew the whole page and replaced every control under the pointer.
+  const executable = chromeExecutable();
+  assert.ok(executable, 'Chrome is required for the refresh redraw criterion.');
+  const box = machine();
+  const alpha = project(box, 'flow-refresh');
+  stageFlowBoard(box, alpha);
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-flow-refresh-chrome-'));
+  let chrome;
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.waitFor('data?.project?.root === ' + JSON.stringify(alpha.repo) + ' && !!document.querySelector("[data-oldest=open]")');
+    await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+    await press(chrome, "document.querySelector('#proof-stats-summary')");
+    await chrome.waitFor("!document.querySelector('#proof-stats-full').hidden");
+    // Count every redraw from here on, and keep the nodes a person could be pointing at to see they survive.
+    await chrome.stable(`(() => {
+      const drawn = window.render;
+      window.__redraws = 0;
+      window.render = function (...args) { window.__redraws += 1; return drawn.apply(this, args); };
+      window.__kept = [...document.querySelectorAll('#tabs .tab, #proof-stats-summary, #chain > li, [data-oldest]')];
+      window.__scroll = [scrollX, scrollY];
+      return true;
+    })()`);
+    /** Read the board as the page's live catch-up does, then report what the read changed on the page. */
+    const reread = async () => JSON.parse(await chrome.stable(`(async () => {
+      const before = data.project.proofStats.flow.asOf;
+      await refresh();
+      const oldest = document.querySelector('[data-oldest=open]');
+      return JSON.stringify({ redraws: window.__redraws, newer: data.project.proofStats.flow.asOf > before,
+        kept: window.__kept.every((node) => node.isConnected), scroll: [scrollX, scrollY], start: window.__scroll,
+        shown: { value: oldest.dataset.value, text: oldest.textContent }, api: data.project.proofStats.flow.queues.open.oldest });
+    })()`));
+    for (let read = 1; read <= 3; read += 1) {
+      await chrome.stable('new Promise((resolve) => setTimeout(() => resolve(true), 5))');
+      const after = await reread();
+      t.diagnostic(`unchanged read ${read}: ${JSON.stringify(after)}`);
+      assert.equal(after.newer, true, `read ${read} is a fresh observation of the board: ${JSON.stringify(after)}`);
+      assert.equal(after.redraws, 0, `read ${read} of an unchanged board does not redraw the page: ${JSON.stringify(after)}`);
+      assert.equal(after.kept, true, `read ${read} keeps every element where it was: ${JSON.stringify(after)}`);
+      assert.deepEqual(after.scroll, after.start, `read ${read} keeps the scroll position`);
+      // What reads relative to now still follows the newest observation, without a redraw.
+      assert.deepEqual(after.shown, { value: String(after.api.ageMinutes), text: 'Oldest: #' + after.api.id + ' · ' + displayDuration(after.api.ageMinutes) }, `read ${read}: the oldest age is the newest observation's`);
+    }
+    // A changed board still redraws, once: the page's own stream catch-up and a further read together draw it once.
+    box.run(alpha.repo, 'shout', 'person', 'refresh redraw control');
+    await chrome.waitFor("data.project.shouts.some((shout) => shout.shout_text === 'refresh redraw control')");
+    const changed = await reread();
+    t.diagnostic(`changed read: ${JSON.stringify(changed)}`);
+    assert.equal(changed.redraws, 1, `a changed board redraws the page once: ${JSON.stringify(changed)}`);
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    await view.stop();
+    rmSync(profile, { recursive: true, force: true });
+  }
+});
