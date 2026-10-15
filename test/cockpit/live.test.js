@@ -246,6 +246,29 @@ test('an older answer for a board opened again is not drawn over a newer one [N2
   }
 });
 
+// The #545 landing failure: a catch-up that read only the shown board, while the view restarted, found it unreadable
+// and the other boards kept, and so moved the page to another board as if the shown one were gone.
+test('a catch-up that cannot read the shown board keeps it shown [N26]', async () => {
+  const box = machine();
+  const alpha = project(box, 'kept-alpha');
+  project(box, 'kept-beta');
+  const view = await startView(box);
+  try {
+    const page = await openPage(view);
+    assert.equal(page.run('view.root'), alpha.repo, 'the page opens on the first board');
+    page.run(`(() => {
+      const real = fetch, id = data.projects.find((row) => row.root === ${JSON.stringify(alpha.repo)}).id;
+      fetch = (path, init) => path.includes('/boards/' + id + '/state')
+        ? Promise.resolve({ ok: false, status: 503, json: async () => ({ version: 1, error: { code: 'SERVICE_ERROR', message: 'the view is restarting' } }) })
+        : real(path, init);
+    })()`);
+    await assert.rejects(page.run(`refresh(new Set([${JSON.stringify(alpha.repo)}]))`), /did not answer/, 'the catch-up fails as a read');
+    assert.equal(page.run('view.root'), alpha.repo, 'the page stays on the board it shows');
+  } finally {
+    await view.stop();
+  }
+});
+
 /**
  * A project group of `count` real repos, opened in real Chrome as the group, where a claim on `mover`'s item must
  * show within two seconds while the page follows every repo on one stream.

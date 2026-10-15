@@ -1033,6 +1033,9 @@ async function refresh(fresh = null) {
     if (!fresh && !refreshDrawn.full) { catchEvery = true; catchUp(); }
     return;
   }
+  // Only a read of every board can say the shown project is gone and choose another. A catch-up that could not read
+  // the shown board, as while the view restarts, failed; it keeps the board and the page says it is offline.
+  if (fresh && !next.project && !next.group) throw new Error('the board did not answer; is pullboard view still running?');
   refreshDrawn = { generation, full: !fresh };
   if (!next.project && !next.group && next.projects.some((p) => p.ok)) {
     view.root = next.projects.find((p) => p.ok).root;
