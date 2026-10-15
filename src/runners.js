@@ -1,13 +1,14 @@
 /** Exact committed source and bounded, credential-free SSH execution for machine runners [C7]. */
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync, writeSync } from 'node:fs';
+import { closeSync, createReadStream, existsSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { pipeline } from 'node:stream/promises';
 import { configFromSource, defaults } from './config.js';
 import { blockedPaths, secretsIn } from './hooks.js';
-import { cleanGitEnvironment, headCommit, headTree, isClean, untracked } from './git.js';
+import { cleanGitEnvironment, headCommit, headTree, isClean, repoInfo, untracked } from './git.js';
 import { Refused } from './refused.js';
 
 const MAX_OUTPUT_BYTES = 1024 ** 3;
@@ -65,7 +66,6 @@ function sourceObjects(root, source) {
   const configRecord = records.find(record => record.endsWith('\tpullboard.json'));
   const configObject = configRecord?.match(/^\d+ blob ([a-f0-9]{40,64})\t/u)?.[1];
   const config = configObject ? configFromSource(sourceGit(root, ['cat-file', 'blob', configObject])) : defaults();
-  const blobs = [];
   for (const record of records) {
     const match = /^(\d+) (\w+) ([a-f0-9]{40,64})\t([\s\S]+)$/u.exec(record);
     if (!match || match[2] !== 'blob') throw new Refused('RUNNER_SOURCE', 'runner source contains a submodule or unsupported object; keep this run local');
@@ -80,16 +80,112 @@ function sourceObjects(root, source) {
     const text = sourceGit(root, ['cat-file', 'blob', object]);
     const findings = secretsIn(text.split(/\r?\n/u).map((line, index) => ({ path, line: index + 1, text: line })));
     if (findings.length) throw new Refused('RUNNER_SECRET', `source leak scan refused ${findings[0]}; remove the secret before remote execution`);
-    blobs.push(object);
   }
   const commit = sourceGit(root, ['cat-file', 'commit', source.commit]);
   if (secretsIn(commit.split('\n').map((text, index) => ({ path: 'commit', line: index + 1, text }))).length) {
     throw new Refused('RUNNER_SECRET', 'the commit metadata contains a possible secret; keep this run local and correct the metadata');
   }
-  // Tree traversal includes all current trees and blobs, but never follows commit parents.
-  const objects = sourceGit(root, ['rev-list', '--objects', `${source.commit}^{tree}`])
-    .split('\n').filter(Boolean).map(line => line.split(' ')[0]);
-  return [...new Set([source.commit, ...objects, ...blobs])];
+
+}
+
+/** Reject blocked historical paths as well as current ones before an object pack crosses SSH. */
+function protectedHistoryPath(path, protect) {
+  return blockedPaths([path], protect).length || /(?:^|\/)board\.sqlite(?:-(?:wal|shm))?$/u.test(path);
+}
+
+/** Read one exact cat-file record without loading a repository's history into memory. */
+function objectRecord(descriptor) {
+  const header = [];
+  const byte = Buffer.alloc(1);
+  while (readSync(descriptor, byte, 0, 1, null)) {
+    if (byte[0] === 10) break;
+    if (header.length > 200) throw new Refused('RUNNER_SOURCE', 'invalid source object header; keep this run local');
+    header.push(byte[0]);
+  }
+  const match = /^([a-f0-9]{40,64}) (blob|tree|commit|tag) (\d+)$/u.exec(Buffer.from(header).toString('ascii'));
+  if (!match) throw new Refused('RUNNER_SOURCE', 'cannot scan the selected history objects; keep this run local');
+  const size = Number(match[3]);
+  if (!Number.isSafeInteger(size) || size > MAX_BLOB_BYTES) throw new Refused('RUNNER_SCAN_LIMIT', 'a historical object exceeds the safe runner scan limit; keep this run local');
+  const data = Buffer.alloc(size);
+  let offset = 0;
+  while (offset < size) {
+    const read = readSync(descriptor, data, offset, size - offset, null);
+    if (!read) throw new Refused('RUNNER_SOURCE', 'incomplete history object; retry from the committed repository');
+    offset += read;
+  }
+  if (readSync(descriptor, byte, 0, 1, null) !== 1 || byte[0] !== 10) throw new Refused('RUNNER_SOURCE', 'incomplete history object; retry from the committed repository');
+  return { object: match[1], type: match[2], data };
+}
+
+/** Scan and pack exactly the candidate objects absent from the locked remote cache inventory. */
+function historyPack(root, source, tips, directory) {
+  const known = sourceGit(root, ['cat-file', '--batch-check'], { input: tips.map(tip => `${tip}\n`).join('') })
+    .split('\n').map(line => /^([a-f0-9]{40,64}) commit \d+$/u.exec(line)?.[1]).filter(Boolean);
+  const records = sourceGit(root, ['rev-list', '--objects', source.commit, '--not', ...known])
+    .split('\n').filter(Boolean).map(line => {
+      const match = /^([a-f0-9]{40,64})(?: (.*))?$/u.exec(line);
+      if (!match) throw new Refused('RUNNER_SOURCE', 'unsupported history path; keep this run local');
+      return { object: match[1], path: match[2] ?? '' };
+    });
+  const objects = [...new Set(records.map(record => record.object))];
+  const names = new Map(records.map(record => [record.object, record.path]));
+  const historicalTrees = new Set();
+  const config = sourceGit(root, ['ls-tree', '--name-only', source.commit, '--', 'pullboard.json']).trim()
+    ? configFromSource(sourceGit(root, ['show', `${source.commit}:pullboard.json`])) : defaults();
+  const metadata = sourceGit(root, ['cat-file', '--batch-check'], { input: objects.map(object => `${object}\n`).join('') });
+  for (const line of metadata.split('\n').filter(Boolean)) {
+    const match = /^[a-f0-9]{40,64} (blob|tree|commit|tag) (\d+)$/u.exec(line);
+    if (!match || Number(match[2]) > MAX_BLOB_BYTES) throw new Refused('RUNNER_SCAN_LIMIT', 'a historical object exceeds the safe runner scan limit; keep this run local');
+  }
+  if (objects.length) {
+    const scanFile = join(directory, 'history.scan');
+    const output = openSync(scanFile, 'wx', 0o600);
+    try { sourceGit(root, ['cat-file', '--batch'], { input: `${objects.join('\n')}\n`, stdio: ['pipe', output, 'pipe'] }); }
+    finally { closeSync(output); }
+    const input = openSync(scanFile, 'r');
+    try {
+      for (let index = 0; index < objects.length; index++) {
+        const { object, type, data } = objectRecord(input);
+        const path = names.get(object) || `history/${object}`;
+        if (type === 'commit') {
+          const tree = /^tree ([a-f0-9]{40,64})$/mu.exec(data.toString('utf8'))?.[1];
+          if (!tree) throw new Refused('RUNNER_SOURCE', 'invalid historical commit; keep this run local');
+          historicalTrees.add(tree);
+        }
+        if (type === 'tree') {
+          let cursor = 0;
+          while (cursor < data.length) {
+            const space = data.indexOf(32, cursor), nul = data.indexOf(0, space + 1);
+            if (space < cursor || nul < 0) throw new Refused('RUNNER_SOURCE', 'invalid historical tree; keep this run local');
+            const mode = data.subarray(cursor, space).toString('ascii');
+            const name = data.subarray(space + 1, nul).toString('utf8');
+            const full = names.get(object) ? `${names.get(object)}/${name}` : name;
+            if (mode === '160000' || protectedHistoryPath(full, config.protect)
+              || secretsIn([{path:'historical tree',line:1,text:name}]).length) throw new Refused('RUNNER_SECRET', 'historical source includes a blocked private path or submodule; keep this run local');
+            cursor = nul + 1 + source.commit.length / 2;
+          }
+          if (cursor !== data.length) throw new Refused('RUNNER_SOURCE', 'invalid historical tree; keep this run local');
+        } else if (protectedHistoryPath(path, config.protect)
+          || secretsIn(data.toString('utf8').split(/\r?\n/u).map((text, line) => ({ path, line: line + 1, text }))).length) {
+          throw new Refused('RUNNER_SECRET', 'historical source failed its transfer scan; remove the private history or keep this run local');
+        }
+      }
+    } finally { closeSync(input); rmSync(scanFile, { force: true }); }
+  }
+  // Check every full historical path, including reused cached blobs moved beneath a newly blocked prefix.
+  for (const tree of historicalTrees) {
+    for (const record of sourceGit(root, ['ls-tree', '-r', '-z', '--full-tree', tree]).split('\0').filter(Boolean)) {
+      const match = /^(\d+) (\w+) [a-f0-9]{40,64}\t([\s\S]+)$/u.exec(record);
+      if (!match || match[2] !== 'blob' || protectedHistoryPath(match[3], config.protect)) {
+        throw new Refused('RUNNER_SECRET', 'historical source includes a blocked private path or submodule; keep this run local');
+      }
+    }
+  }
+  const pack = join(directory, 'source.pack');
+  const output = openSync(pack, 'wx', 0o600);
+  try { sourceGit(root, ['pack-objects', '--stdout'], { input: objects.map(object => `${object}\n`).join(''), stdio: ['pipe', output, 'pipe'] }); }
+  finally { closeSync(output); }
+  return pack;
 }
 
 /** Quote one remote shell argument without permitting substitutions or expansion. */
@@ -132,7 +228,22 @@ function trustedTooling() {
     runtime: { files: runtimeFiles, sha256: createHash('sha256').update(JSON.stringify(runtimeFiles)).digest('hex') } };
 }
 
-/** Prepare a single shallow object pack and an explicit worker request; cleanup owns only its scratch directory. */
+/** Use only a credential-free anonymous HTTPS origin; SSH authentication is never forwarded. */
+function anonymousOrigin(root) {
+  const result = spawnSync('git', ['config', '--get', 'remote.origin.url'], { cwd: root, env: cleanGitEnvironment(), encoding: 'utf8', maxBuffer: 4096 });
+  if (result.status !== 0) return undefined;
+  let address = result.stdout.trim();
+  const ssh = /^git@([A-Za-z0-9][A-Za-z0-9.-]*):([^\s?#]+)$/u.exec(address);
+  if (ssh) address = `https://${ssh[1]}/${ssh[2]}`;
+  try {
+    const url = new URL(address);
+    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || !url.hostname || address.length > 2048) return undefined;
+    if (secretsIn([{path:'anonymous origin',line:1,text:address}]).length) return undefined;
+    return url.href;
+  } catch { return undefined; }
+}
+
+/** Prepare the pinned request before negotiating history; cleanup owns only its scratch directory. */
 function requestFor(root, command, { runner, source, browser = false, pipefail = false, metadata = {} }) {
   runner = validateRunner(runner);
   const current = runnerSource(root);
@@ -142,33 +253,24 @@ function requestFor(root, command, { runner, source, browser = false, pipefail =
   if (secretsIn(command.split('\n').map((text, index) => ({ path: 'run command', line: index + 1, text }))).length) {
     throw new Refused('RUNNER_SECRET', 'the run command contains a possible secret; use a command that does not transfer credentials');
   }
-  const objects = sourceObjects(root, current);
+  sourceObjects(root, current);
+  const repoId = createHash('sha256').update(realpathSync(repoInfo(root).commonDir)).digest('hex');
   const directory = mkdtempSync(join(tmpdir(), 'pullboard-runner-send-'));
-  let descriptor;
   try {
     const { worker, tooling, runtime } = trustedTooling();
-    const spec = { version: 1, id: randomUUID(), runtime, tooling, ...current, command, pipefail, slots: runner.slots,
+    const spec = { version: 1, id: randomUUID(), repoId, origin: anonymousOrigin(root), runtime, tooling, ...current, command, pipefail, slots: runner.slots,
       browser: runner.browser, browserRequired: browser, landing: metadata.landing === true,
       itemCheck: metadata.itemCheck === true, diagnostic: metadata.diagnostic === true,
       item: String(metadata.item ?? ''), kind: String(metadata.kind ?? ''), ...(runner.root ? { root: runner.root } : {}) };
     const encodedSpec = Buffer.from(JSON.stringify(spec));
     if (encodedSpec.length > 1024 ** 2) throw new Refused('RUNNER_REQUEST_LIMIT', 'runner tooling request exceeds its safe transfer limit; keep this run local');
-    const framed = join(directory, 'request.bin');
-    const requestOutput = openSync(framed, 'wx', 0o600);
-    try {
-      writeSync(requestOutput, Buffer.from(`${encodedSpec.length}\n`));
-      writeSync(requestOutput, encodedSpec);
-      sourceGit(root, ['pack-objects', '--stdout'], { input: `${objects.join('\n')}\n`, stdio: ['pipe', requestOutput, 'pipe'] });
-    } finally { closeSync(requestOutput); }
-    descriptor = openSync(framed, 'r');
     const remote = `${shellWord(runner.node ?? 'node')} --input-type=module -e ${shellWord(worker)}`;
     // These are transport hang ceilings, independent of the command's execution budget.
     return { spec, runner, args: ['-T', '-o', 'BatchMode=yes', '-o', 'ForwardAgent=no', '-o', 'ClearAllForwardings=yes',
       '-o', 'SendEnv=-*', '-o', 'ConnectTimeout=10', '-o', 'ServerAliveInterval=10', '-o', 'ServerAliveCountMax=3',
-      '--', runner.host, remote], descriptor, env: sshEnvironment(),
-    cleanup() { closeSync(descriptor); rmSync(directory, { recursive: true, force: true }); } };
+      '--', runner.host, remote], root, source: current, directory, frame: Buffer.concat([Buffer.from(`${encodedSpec.length}\n`), encodedSpec]), env: sshEnvironment(),
+    cleanup() { rmSync(directory, { recursive: true, force: true }); } };
   } catch (error) {
-    if (descriptor !== undefined) closeSync(descriptor);
     rmSync(directory, { recursive: true, force: true });
     throw error;
   }
@@ -197,32 +299,69 @@ function resultFrom(request, result) {
     executionSource: { commit: receipt.commit, tree: receipt.tree, tooling: request.spec.tooling } };
 }
 
-/** Execute one committed command over SSH; an authentic test failure remains a test failure. */
+/** Keep synchronous gate callers on the same negotiated transport as asynchronous comparisons. */
 export function runOnRunner(root, command, options) {
-  const request = requestFor(root, command, options);
-  try {
-    const result = spawnSync('ssh', request.args, { env: request.env, stdio: [request.descriptor, 'pipe', 'pipe'], maxBuffer: MAX_OUTPUT_BYTES });
-    return resultFrom(request, result);
-  } finally { request.cleanup(); }
+  const script = `import { runOnRunnerAsync } from ${JSON.stringify(import.meta.url)};
+let input=''; for await (const chunk of process.stdin) input+=chunk;
+const request=JSON.parse(input);
+try { process.stdout.write(JSON.stringify({result:await runOnRunnerAsync(request.root,request.command,request.options)})); }
+catch(error) { process.stdout.write(JSON.stringify({error:{name:error.name,code:error.code,message:error.message,host:error.host}})); process.exitCode=1; }`;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    cwd: root, input: JSON.stringify({ root, command, options }), encoding: 'utf8', maxBuffer: MAX_OUTPUT_BYTES * 2,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  let reply;
+  try { reply = JSON.parse(child.stdout); } catch { throw new RunnerDropped(options.runner.host); }
+  if (reply.error?.name === 'Refused') {
+    const prefix = `[${reply.error.code}] `;
+    throw new Refused(reply.error.code, reply.error.message.startsWith(prefix) ? reply.error.message.slice(prefix.length) : reply.error.message);
+  }
+  if (reply.error || child.error || child.status !== 0) throw new RunnerDropped(options.runner.host);
+  return reply.result;
 }
 
-/** Execute a comparison asynchronously without blocking other local queue holders. */
+/** Negotiate missing history objects while the remote cache lease stays held in one SSH session. */
 export async function runOnRunnerAsync(root, command, options) {
   const request = requestFor(root, command, options);
   try {
-    const child = spawn('ssh', request.args, { env: request.env, stdio: [request.descriptor, 'pipe', 'pipe'] });
+    const child = spawn('ssh', request.args, { env: request.env, stdio: ['pipe', 'pipe', 'pipe'] });
     const output = [], diagnostics = [];
-    let bytes = 0, error;
-    /** Bound both protocol streams before appending buffers to a result. */
+    let bytes = 0, error, control = '', requested = false, transfer = null;
+    /** Bound both protocol streams before retaining a complete result. */
     const capture = (target, chunk) => {
       bytes += chunk.length;
       if (bytes > MAX_OUTPUT_BYTES) { error = new Error('runner output exceeded limit'); child.kill(); }
       else target.push(chunk);
     };
     child.stdout.on('data', chunk => capture(output, chunk));
-    child.stderr.on('data', chunk => capture(diagnostics, chunk));
+    child.stderr.on('data', chunk => {
+      capture(diagnostics, chunk);
+      control += chunk.toString('utf8');
+      if (control.length > 256 * 1024) { error = new Error('runner control frame exceeded limit'); child.kill(); return; }
+      let newline;
+      while ((newline = control.indexOf('\n')) >= 0) {
+        const line = control.slice(0, newline); control = control.slice(newline + 1);
+        const prefix = `PULLBOARD_RUNNER_NEED ${request.spec.id} `;
+        if (!line.startsWith(prefix)) continue;
+        if (requested) { error = new Error('duplicate runner inventory'); child.kill(); return; }
+        requested = true;
+        transfer = (async () => {
+          const inventory = JSON.parse(Buffer.from(line.slice(prefix.length), 'base64').toString('utf8'));
+          if (!Array.isArray(inventory.tips) || inventory.tips.length > 1024
+            || inventory.tips.some(tip => typeof tip !== 'string' || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(tip))) {
+            throw new Error('invalid runner inventory');
+          }
+          const pack = historyPack(root, request.source, inventory.tips, request.directory);
+          await pipeline(createReadStream(pack), child.stdin);
+        })().catch(failure => { error = failure; child.stdin.destroy(); child.kill(); });
+      }
+    });
+    child.stdin.on('error', failure => { if (failure.code !== 'EPIPE') error ??= failure; });
     child.once('error', failure => { error = failure; });
+    child.stdin.write(request.frame);
     const status = await new Promise(resolve => child.once('close', resolve));
+    if (transfer) await transfer;
+    if (error instanceof Refused) throw error;
     return resultFrom(request, { status, error, stdout: Buffer.concat(output), stderr: Buffer.concat(diagnostics) });
   } finally { request.cleanup(); }
 }

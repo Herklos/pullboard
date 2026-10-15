@@ -1,7 +1,7 @@
 /** Standalone SSH runner worker source; intentionally imports only Node built-ins. */
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, cpSync, createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { delimiter, dirname, isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -63,12 +63,21 @@ async function readSpec() {
     || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value.commit)
     || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value.tree)
     || value.commit.length !== value.tree.length
+    || !/^[a-f0-9]{64}$/u.test(value.repoId ?? '')
     || typeof value.command !== 'string' || !value.command.trim()
     || typeof value.pipefail !== 'boolean' || !Number.isSafeInteger(value.slots) || value.slots < 1
     || !Number.isSafeInteger(value.browser) || value.browser < 0
     || typeof value.browserRequired !== 'boolean'
     || !value.runtime || typeof value.runtime !== 'object' || !value.runtime.files || typeof value.runtime.files !== 'object'
     || typeof value.runtime.sha256 !== 'string') throw new Error('invalid work specification');
+  if (value.origin !== undefined) {
+    if (typeof value.origin !== 'string') throw new Error('invalid work specification');
+    let origin;
+    try { origin = new URL(value.origin); } catch { throw new Error('invalid work specification'); }
+    if (origin.protocol !== 'https:' || !origin.hostname || origin.username || origin.password || origin.search || origin.hash) {
+      throw new Error('invalid work specification');
+    }
+  }
   const runtimeNames = ['resources.js', 'git.js', 'machine-home.js', 'refused.js'];
   if (Object.keys(value.runtime.files).length !== runtimeNames.length
     || runtimeNames.some(name => typeof value.runtime.files[name] !== 'string')) throw new Error('invalid work specification');
@@ -104,6 +113,7 @@ function childEnvironment(home, temporary, machineHomePath = '') {
     CI: '1',
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_NO_REPLACE_OBJECTS: '1',
     GIT_TERMINAL_PROMPT: '0',
     GIT_OPTIONAL_LOCKS: '0',
     NPM_CONFIG_USERCONFIG: join(home, 'npm-userconfig'),
@@ -243,38 +253,129 @@ async function git(root, args, env) {
   return Buffer.concat(output).toString('utf8').trim();
 }
 
-/** Receive the entire stdin pack before queueing so a capacity wait cannot back up the SSH input pipe. */
+/** Receive the negotiated history pack after the worker announces the cache's candidate tips. */
 async function receivePack(packFile) {
   await pipeline(process.stdin, createWriteStream(packFile, { mode: 0o600, flags: 'wx' }));
 }
 
-/** Index the received pack, then attach only its exact commit as shallow history. */
-async function unpackSource(root, packFile, spec, env) {
-  const index = spawnOwned('git', ['index-pack', '--stdin'], { cwd: root, env, stdio: ['pipe', 'ignore', 'ignore'] });
+/** Receive only missing ancestry, validate the full graph, then copy the exact commit into a clean job repository. */
+async function checkoutHistory(api, runnerRoot, root, packFile, spec, env) {
+  const repositories = join(runnerRoot, 'repos');
+  mkdirSync(repositories, { recursive: true, mode: 0o700 });
+  chmodSync(repositories, 0o700);
+  const cache = join(repositories, `${spec.repoId}.git`);
+  const cacheLease = await acquireResourceApi(api, {
+    name: `repo-${spec.repoId}`, capacity: 1, scope: 'machine', root: runnerRoot,
+    repo: runnerRoot, agent: `pullboard-ssh-cache-${spec.id}`, kind: 'source-cache',
+    onWait: () => assertTransportLive(),
+  }, join(runnerRoot, 'cache', 'resource-pool'));
   try {
-    await pipeline(createReadStream(packFile), index.child.stdin);
-    const result = await index.closed;
-    await drainOwned(index);
-    if (result.error || result.code !== 0 || result.signal) throw new Error('source pack could not be indexed');
-  } catch (error) {
-    await drainOwned(index, true);
-    throw error;
+    if (!existsSync(cache)) {
+      const build = mkdtempSync(join(repositories, `.repo-${spec.repoId}-`));
+      const staged = join(build, 'cache.git');
+      try {
+        let cloned = false;
+        if (spec.origin) {
+          const clone = spawnOwned('git', ['clone', '--bare', '--no-hardlinks', '--origin=origin', spec.origin, staged], {
+            cwd: build, env, stdio: ['ignore', 'ignore', 'ignore'],
+          });
+          const result = await clone.closed;
+          await drainOwned(clone);
+          cloned = !result.error && result.code === 0 && !result.signal;
+          if (cloned) {
+            try {
+              cloned = await git(staged, ['rev-parse', '--is-bare-repository'], env) === 'true'
+                && await git(staged, ['rev-parse', '--show-object-format'], env) === (spec.commit.length === 64 ? 'sha256' : 'sha1')
+                && !existsSync(join(staged, 'shallow'))
+                && !existsSync(join(staged, 'objects', 'info', 'alternates'));
+            } catch { cloned = false; }
+          }
+          if (!cloned) rmSync(staged, { recursive: true, force: true });
+        }
+        if (!cloned) {
+          const initialized = spawnOwned('git', ['init', '--bare', `--object-format=${spec.commit.length === 64 ? 'sha256' : 'sha1'}`, staged], {
+            cwd: build, env, stdio: ['ignore', 'ignore', 'ignore'],
+          });
+          const result = await initialized.closed;
+          await drainOwned(initialized);
+          if (result.error || result.code !== 0 || result.signal) throw new Error('source history cache could not be initialized');
+        }
+        renameSync(staged, cache);
+      } finally { rmSync(build, { recursive: true, force: true }); }
+    }
+    if (await git(cache, ['rev-parse', '--is-bare-repository'], env) !== 'true'
+      || await git(cache, ['rev-parse', '--show-object-format'], env) !== (spec.commit.length === 64 ? 'sha256' : 'sha1')
+      || existsSync(join(cache, 'shallow')) || existsSync(join(cache, 'objects', 'info', 'alternates'))) {
+      throw new Error('source history cache has an incompatible format');
+    }
+    const refLines = await git(cache, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads', 'refs/pullboard/candidates'], env);
+    const tips = [];
+    if (refLines) for (const line of refLines.split(/\r?\n/u)) {
+      const split = /^(refs\/(?:heads|pullboard\/candidates)\/.+) ([a-f0-9]{40,64})$/u.exec(line);
+      if (!split || split[2].length !== spec.commit.length) {
+        throw new Error('source history cache contains an invalid candidate ref');
+      }
+      if (split[1].startsWith('refs/pullboard/candidates/')
+        && split[1].slice('refs/pullboard/candidates/'.length) !== split[2]) {
+        throw new Error('source history cache contains an invalid candidate ref');
+      }
+      if (await git(cache, ['cat-file', '-t', split[2]], env) !== 'commit') {
+        throw new Error('source history cache contains a non-commit tip');
+      }
+      tips.push(split[2]);
+    }
+    const uniqueTips = [...new Set(tips)];
+    if (uniqueTips.length > 1_024) throw new Error('source history cache needs maintenance');
+    await new Promise((resolveWrite, rejectWrite) => process.stderr.write(
+      `PULLBOARD_RUNNER_NEED ${spec.id} ${Buffer.from(JSON.stringify({ tips: uniqueTips })).toString('base64')}\n`,
+      error => error ? rejectWrite(error) : resolveWrite()));
+    await receivePack(packFile);
+
+    const priorIndexes = new Set(readdirSync(join(cache, 'objects', 'pack')).filter(name => name.endsWith('.idx')));
+    if (statSync(packFile).size < 12 + spec.commit.length / 2) throw new Error('source history pack is incomplete');
+    {
+      const index = spawnOwned('git', ['index-pack', '--stdin'], { cwd: cache, env, stdio: ['pipe', 'ignore', 'ignore'] });
+      try {
+        await pipeline(createReadStream(packFile), index.child.stdin);
+        const result = await index.closed;
+        await drainOwned(index);
+        if (result.error || result.code !== 0 || result.signal) throw new Error('source history pack could not be indexed');
+      } catch (error) { await drainOwned(index, true); throw error; }
+    }
+    const objectType = await git(cache, ['cat-file', '-t', spec.commit], env);
+    if (objectType !== 'commit' || await git(cache, ['rev-parse', `${spec.commit}^{tree}`], env) !== spec.tree) {
+      throw new Error('source history does not match the requested commit and tree');
+    }
+    const historyCount = Number(await git(cache, ['rev-list', '--count', spec.commit], env));
+    if (!Number.isSafeInteger(historyCount) || historyCount < 1) throw new Error('source history is incomplete');
+    const closure = new Set((await git(cache, ['rev-list', '--objects', spec.commit], env)).split(/\r?\n/u)
+      .map(line => line.match(/^([a-f0-9]{40,64})(?:\s|$)/u)?.[1]).filter(Boolean));
+    closure.add(spec.commit);
+    const packDirectory = join(cache, 'objects', 'pack');
+    const newIndexes = readdirSync(packDirectory).filter(name => name.endsWith('.idx') && !priorIndexes.has(name));
+    const received = new Set();
+    for (const indexName of newIndexes) {
+      for (const line of (await git(cache, ['verify-pack', '-v', join(packDirectory, indexName)], env)).split(/\r?\n/u)) {
+        const object = line.match(/^([a-f0-9]{40,64})\s+(?:commit|tree|blob|tag)\s/u)?.[1];
+        if (object) received.add(object);
+      }
+    }
+    if ([...received].some(object => !closure.has(object))) {
+      throw new Error('source history pack contains missing or unrelated objects');
+    }
+    await git(cache, ['update-ref', `refs/pullboard/candidates/${spec.commit}`, spec.commit], env);
+    await git(root, ['init', '-q', `--object-format=${spec.commit.length === 64 ? 'sha256' : 'sha1'}`], env);
+    await git(root, ['-c', 'protocol.file.allow=always', 'fetch', '--no-tags', cache, `refs/pullboard/candidates/${spec.commit}`], env);
+    await git(root, ['checkout', '--detach', 'FETCH_HEAD'], env);
+    if (await git(root, ['rev-parse', 'HEAD'], env) !== spec.commit
+      || await git(root, ['rev-parse', 'HEAD^{tree}'], env) !== spec.tree
+      || await git(root, ['rev-parse', '--is-shallow-repository'], env) !== 'false'
+      || existsSync(join(root, '.git', 'objects', 'info', 'alternates'))) {
+      throw new Error('isolated source checkout does not contain the complete requested history');
+    }
+  } finally {
+    try { cacheLease.release(); } catch { /* Retaining the lease on cleanup error is safer than speculative deletion. */ }
   }
-  writeFileSync(join(root, '.git', 'shallow'), `${spec.commit}\n`, { mode: 0o600 });
-  await git(root, ['update-ref', 'refs/heads/pullboard-run', spec.commit], env);
-  await git(root, ['checkout', '--detach', spec.commit], env);
-  if (await git(root, ['rev-parse', `${spec.commit}^{tree}`], env) !== spec.tree) throw new Error('source tree did not match the requested commit');
-  if (await git(root, ['rev-parse', 'HEAD'], env) !== spec.commit) throw new Error('source commit did not match the requested commit');
-  if (await git(root, ['rev-list', '--count', 'HEAD'], env) !== '1') throw new Error('source pack included commit history');
-  const reachable = new Set((await git(root, ['rev-list', '--objects', 'HEAD'], env)).split(/\r?\n/u)
-    .map(line => line.match(/^([a-f0-9]{40,64})(?:\s|$)/u)?.[1]).filter(Boolean));
-  reachable.add(spec.commit);
-  const packDirectory = join(root, '.git', 'objects', 'pack');
-  const indexes = readdirSync(packDirectory).filter(name => name.endsWith('.idx'));
-  if (indexes.length !== 1) throw new Error('source pack was not the single requested object set');
-  const packed = new Set((await git(root, ['verify-pack', '-v', join(packDirectory, indexes[0])], env))
-    .split(/\r?\n/u).map(line => line.match(/^([a-f0-9]{40,64})\s+(?:commit|tree|blob|tag)\s/u)?.[1]).filter(Boolean));
-  if (packed.size !== reachable.size || [...packed].some(object => !reachable.has(object))) throw new Error('source pack contains objects outside the requested tree');
   rmSync(packFile, { force: true });
 }
 
@@ -474,7 +575,6 @@ async function main() {
     writeFileSync(join(privateHome, 'npm-userconfig'), '', { mode: 0o600 });
     writeFileSync(join(privateHome, 'npm-globalconfig'), '', { mode: 0o600 });
     const packFile = join(runDirectory, 'source.pack');
-    await receivePack(packFile);
     lease = await acquireResourceApi(api, {
       name: 'gate', capacity: gateCapacity, scope: 'machine', root: runnerRoot,
       repo: runnerRoot, agent: `pullboard-ssh-${spec.id}`,
@@ -485,13 +585,7 @@ async function main() {
     }, machineHomePath);
     const canonicalMachineHome = machineHomePath;
     const env = scopedEnvironment(privateHome, temporary, canonicalMachineHome, lease, api);
-    const init = spawnOwned('git', ['init', '-q', `--object-format=${spec.commit.length === 64 ? 'sha256' : 'sha1'}`, root], {
-      cwd: runDirectory, env, stdio: ['ignore', 'ignore', 'ignore'],
-    });
-    const initResult = await init.closed;
-    await drainOwned(init);
-    if (initResult.error || initResult.code !== 0 || initResult.signal) throw new Error('source checkout could not be initialized');
-    await unpackSource(root, packFile, spec, env);
+    await checkoutHistory(api, runnerRoot, root, packFile, spec, env);
     await installDependencies(api, root, runnerRoot, privateHome, env, spec.tree);
     final = { ...(await runCommand(spec, root, env, sink)), root };
   } catch (error) {

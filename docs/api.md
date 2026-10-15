@@ -318,3 +318,5 @@ A `pullboard serve` key grants access to a board; it does not identify the perso
 The view's own page retains its person channel. The standalone API refuses `POST /api/v1/boards/:board/requests` with `B26_PERSON_CHANNEL`; the view continues to record the person's coordinator request. Residual: an agent that starts `pullboard view` itself also holds that view's link; this change does not isolate that link from the agent. Signed person moves (#408) address that separate boundary.
 
 `runner add` registers machine-local SSH capacity. Optional `--node` and `--root` select absolute remote paths when Node is outside the SSH login path or runner storage needs a specific location. The default storage root is `~/.pullboard-runner`; runner work shares the remote machine resource pool.
+
+Runner storage keeps one repository object cache and creates an isolated checkout per run. A locked inventory handshake transfers only missing committed objects after scanning their blobs, paths and commit metadata, including ancestors. Credential-free HTTPS origins may seed the cache anonymously; caller credentials are never forwarded.

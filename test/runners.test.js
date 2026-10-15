@@ -90,9 +90,10 @@ if (host !== ${JSON.stringify(HOST)} && host !== ${JSON.stringify(`${HOST}-drop`
   record({ refused: true, stdinBytes }); process.exit(255);
 }
 ${dropFirst ? `if (host.endsWith('-drop') && call === 1) {
-  process.stdin.resume(); process.stdin.on('end', () => {
+  process.stdin.once('data', () => {
     record({ dropped: true, stdinBytes, stdinSha256: stdinHash.digest('hex') }); process.exit(255);
   });
+  process.stdin.resume();
 } else` : ''} {
   const env = { PATH: process.env.PATH, HOME: home, TMPDIR: process.env.TMPDIR,
     PULLBOARD_HOME: home, PULLBOARD_MACHINE_HOME: machineHome, LANG: 'C', LC_ALL: 'C', TZ: 'UTC' };
@@ -130,7 +131,7 @@ ${dropFirst ? `if (host.endsWith('-drop') && call === 1) {
 }
 
 /** Build one committed probe that observes the actual checkout and remote process environment. */
-function writeProbe(repo, { remoteStateRoot, remoteMachineHome, sourceHome, sourceMachineHome, callerPool, callerToken }) {
+function writeProbe(repo, { remoteStateRoot, remoteMachineHome, sourceHome, sourceMachineHome, callerPool, callerToken, historyBaseCommit }) {
   const probe = `import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -142,6 +143,7 @@ test('runner executed the committed source in its private checkout', () => {
   const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).trim();
   const shallow = execFileSync('git', ['rev-parse', '--is-shallow-repository'], { encoding: 'utf8' }).trim();
   const count = execFileSync('git', ['rev-list', '--count', 'HEAD'], { encoding: 'utf8' }).trim();
+  const history = execFileSync('git', ['log', '--follow', '--format=%H', '--', 'history-renamed.txt'], { encoding: 'utf8' }).trim().split(/\r?\n/u);
   const runnerHome = process.env.HOME;
   const privateHomeRelative = relative(${JSON.stringify(remoteStateRoot)}, runnerHome);
   assert.ok(privateHomeRelative && !privateHomeRelative.startsWith('..' + sep) && privateHomeRelative !== '..', runnerHome);
@@ -152,8 +154,9 @@ test('runner executed the committed source in its private checkout', () => {
   assert.ok(isAbsolute(process.env.HOME));
   assert.equal(relative(process.cwd(), runnerHome), join('..', 'home'));
   assert.equal(process.env.PULLBOARD_MACHINE_HOME, ${JSON.stringify(remoteMachineHome)});
-  assert.equal(shallow, 'true');
-  assert.equal(count, '1', 'the worker has the selected commit without history');
+  assert.equal(shallow, 'false', 'the worker receives full selected-candidate history');
+  assert.equal(count, '3', 'the full selected candidate has the fixture base, rename, and probe commits');
+  assert.ok(history.includes(${JSON.stringify(historyBaseCommit)}), 'the rename retains its original committed file in history');
   assert.equal(execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim(), '');
   assert.equal(existsSync('.env'), false, 'ignored, untracked caller files are not transferred');
   assert.equal(process.env.PULLBOARD_RUNNER_FIXTURE_SECRET, undefined);
@@ -183,7 +186,7 @@ test('runner executed the committed source in its private checkout', () => {
 }
 
 /** Build a committed probe for the cache copy of one local workspace dependency. */
-function writeCacheProbe(repo, { remoteStateRoot, nodePath }) {
+function writeCacheProbe(repo, { remoteStateRoot, nodePath, historyBaseCommit }) {
   const probe = `import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFileSync, readlinkSync, realpathSync } from 'node:fs';
@@ -196,6 +199,12 @@ test('a cached workspace link resolves inside this fresh runner checkout', () =>
   assert.equal(process.execPath, ${JSON.stringify(nodePath)}, 'the configured runner Node executes the command');
   const commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
   const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).trim();
+  const shallow = execFileSync('git', ['rev-parse', '--is-shallow-repository'], { encoding: 'utf8' }).trim();
+  const count = execFileSync('git', ['rev-list', '--count', 'HEAD'], { encoding: 'utf8' }).trim();
+  const history = execFileSync('git', ['log', '--follow', '--format=%H', '--', 'history-renamed.txt'], { encoding: 'utf8' }).trim().split(/\r?\n/u);
+  assert.equal(shallow, 'false', 'the cache contains full candidate history');
+  assert.equal(count, '3', 'the cache preserves the complete selected history');
+  assert.ok(history.includes(${JSON.stringify(historyBaseCommit)}), 'cached history follows the original filename through the rename');
   const committed = execFileSync('git', ['show', 'HEAD:packages/runner-fixture-dep/witness.txt'], { encoding: 'utf8' });
   assert.equal(readFileSync('node_modules/.runner-cache-witness', 'utf8'), committed);
   const link = readlinkSync('node_modules/runner-fixture-dep');
@@ -204,7 +213,7 @@ test('a cached workspace link resolves inside this fresh runner checkout', () =>
   assert.equal(target, join(root, 'packages/runner-fixture-dep'));
   const targetRelative = relative(root, target);
   assert.ok(targetRelative && !targetRelative.startsWith('..' + sep) && targetRelative !== '..');
-  console.log('RUNNER_CACHE_FACT ' + JSON.stringify({ root, link, target, commit, tree }));
+  console.log('RUNNER_CACHE_FACT ' + JSON.stringify({ root, link, target, commit, tree, shallow, count, history }));
 });
 `;
   writeFileSync(join(repo, 'runner-cache-probe.test.js'), probe);
@@ -360,9 +369,13 @@ test('a queued run executes on a registered runner and its result comes back [C7
   assert.equal(initialized.status, 0, initialized.context);
   writeFileSync(join(repo, 'pullboard.json'), JSON.stringify({ gate: 'true' }));
   writeFileSync(join(repo, 'tracked.txt'), 'committed runner source\n');
+  writeFileSync(join(repo, 'history-original.txt'), 'committed history witness\n');
   writeFileSync(join(repo, '.gitignore'), '.env\n');
-  git(repo, env, 'add', '.gitignore', 'pullboard.json', 'tracked.txt');
+  git(repo, env, 'add', '.gitignore', 'pullboard.json', 'tracked.txt', 'history-original.txt');
   git(repo, env, 'commit', '-q', '-m', 'test: prepare registered runner fixture');
+  const historyBaseCommit = git(repo, env, 'rev-parse', 'HEAD');
+  git(repo, env, 'mv', 'history-original.txt', 'history-renamed.txt');
+  git(repo, env, 'commit', '-q', '-m', 'test: preserve renamed runner history witness');
   writeFileSync(join(repo, '.env'), SECRET);
   const commit = git(repo, env, 'rev-parse', 'HEAD');
   const tree = git(repo, env, 'rev-parse', 'HEAD^{tree}');
@@ -370,7 +383,7 @@ test('a queued run executes on a registered runner and its result comes back [C7
 
   const ssh = installSshStandIn({ bin, worker, home: remoteHome, machineHome: remoteMachineHome, requests });
   assert.ok(existsSync(ssh));
-  writeProbe(repo, { remoteStateRoot, remoteMachineHome, sourceHome: home, sourceMachineHome: machineHome,
+  writeProbe(repo, { remoteStateRoot, remoteMachineHome, sourceHome: home, sourceMachineHome: machineHome, historyBaseCommit,
     callerPool: 'caller-pool-marker', callerToken: 'caller-token-marker' });
   git(repo, env, 'add', 'runner-probe.test.js');
   git(repo, env, 'commit', '-q', '-m', 'test: add remote source probe [C7]');
@@ -448,6 +461,19 @@ test('a queued run executes on a registered runner and its result comes back [C7
   assert.equal(redResult.runner, HOST);
   const callsAfterExit7 = readFileSync(requests, 'utf8').trim().split('\n').length;
   assert.equal(callsAfterExit7, 2, 'a complete exit-7 receipt is a test failure, not a dropped-run retry');
+
+  // The secret is absent from HEAD but remains in a reachable commit; full-history scanning must
+  // refuse before transferring those historical objects to the registered worker.
+  git(repo, env, 'add', '-f', '.env');
+  git(repo, env, 'commit', '-q', '-m', 'test: add temporary historical private file');
+  git(repo, env, 'rm', '--cached', '.env');
+  git(repo, env, 'commit', '-q', '-m', 'test: remove current private file but retain history');
+  assert.doesNotMatch(git(repo, env, 'ls-tree', '-r', '--name-only', 'HEAD'), /(?:^|\n)\.env(?:$|\n)/u);
+  assert.equal(readFileSync(join(repo, '.env'), 'utf8'), SECRET, 'the ignored local fixture remains private');
+  const historicalRed = runThroughGate(repo, env, 'node -e "process.stdout.write(\'HISTORICAL_SECRET_SCAN_REACHED\\n\')"');
+  assert.equal(historicalRed.status, 1, historicalRed.context);
+  assert.match(historicalRed.stdout + historicalRed.stderr, /RUNNER_SECRET/u);
+  assert.doesNotMatch(historicalRed.stdout + historicalRed.stderr, new RegExp(SECRET, 'u'));
 
   assert.equal(commit.length, 40);
   assert.equal(tree.length, 40);
@@ -721,6 +747,7 @@ test('a queued run executes on a registered runner and its result comes back [C7
     name: 'runner-fixture-dep', version: '1.0.0', type: 'module', scripts: { postinstall: 'node postinstall.js' },
   }, null, 2) + '\n');
   writeFileSync(join(packageDirectory, 'witness.txt'), 'committed workspace witness\n');
+  writeFileSync(join(repo, 'history-original.txt'), 'committed cache history witness\n');
   writeFileSync(join(packageDirectory, 'postinstall.js'), `import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 const prefix = process.env.INIT_CWD;
@@ -735,8 +762,11 @@ appendFileSync(${JSON.stringify(installWitnesses)}, 'postinstall\\n');
     cwd: repo, env, encoding: 'utf8',
   });
   assert.equal(lock.status, 0, lock.context);
-  git(repo, env, 'add', '.gitignore', 'pullboard.json', 'package.json', 'package-lock.json', 'packages/runner-fixture-dep');
+  git(repo, env, 'add', '.gitignore', 'pullboard.json', 'package.json', 'package-lock.json', 'packages/runner-fixture-dep', 'history-original.txt');
   git(repo, env, 'commit', '-q', '-m', 'test: prepare cached local workspace dependency');
+  const historyBaseCommit = git(repo, env, 'rev-parse', 'HEAD');
+  git(repo, env, 'mv', 'history-original.txt', 'history-renamed.txt');
+  git(repo, env, 'commit', '-q', '-m', 'test: preserve cached runner history witness');
   installSshStandIn({ bin, worker, home: remoteHome, machineHome: remoteMachineHome, requests, nodeCommand: process.execPath });
   const added = cli(repo, env, 'runner', 'add', HOST, '--slots', '1', '--browser', '1', '--node', process.execPath,
     '--root', remoteStateRoot, '--json');
@@ -754,7 +784,7 @@ appendFileSync(${JSON.stringify(installWitnesses)}, 'postinstall\\n');
     held = await takeResource({ name: 'gate', capacity: 1, scope: 'machine', root: repo,
       agent: 'fixture-cache-local-holder', item: 'cache-local-holder', kind: 'force-registered-runner' });
     const command = 'node --test --test-reporter=tap runner-cache-probe.test.js';
-    writeCacheProbe(repo, { remoteStateRoot, nodePath: process.execPath });
+    writeCacheProbe(repo, { remoteStateRoot, nodePath: process.execPath, historyBaseCommit });
     git(repo, env, 'add', 'runner-cache-probe.test.js');
     git(repo, env, 'commit', '-q', '-m', 'test: assert cache symlink stays job-local');
     const cacheCommit = git(repo, env, 'rev-parse', 'HEAD');
@@ -764,6 +794,8 @@ appendFileSync(${JSON.stringify(installWitnesses)}, 'postinstall\\n');
     const firstFact = JSON.parse(/RUNNER_CACHE_FACT (\{[^\n]+\})/u.exec(first.stdout)?.[1] ?? 'null');
     assert.equal(firstFact.commit, cacheCommit);
     assert.equal(firstFact.tree, cacheTree);
+    assert.equal(firstFact.shallow, 'false');
+    assert.ok(firstFact.history.includes(historyBaseCommit));
     assert.equal(firstFact.root, firstFact.target.slice(0, firstFact.target.indexOf('/packages/runner-fixture-dep')));
     assert.equal(gateResult(first.stdout).runner, HOST);
     assert.equal(readFileSync(installWitnesses, 'utf8'), 'postinstall\n', 'the first exact-tree run installs the committed workspace dependency');
@@ -773,6 +805,8 @@ appendFileSync(${JSON.stringify(installWitnesses)}, 'postinstall\\n');
     const secondFact = JSON.parse(/RUNNER_CACHE_FACT (\{[^\n]+\})/u.exec(second.stdout)?.[1] ?? 'null');
     assert.equal(secondFact.commit, cacheCommit);
     assert.equal(secondFact.tree, cacheTree);
+    assert.equal(secondFact.shallow, 'false');
+    assert.ok(secondFact.history.includes(historyBaseCommit));
     assert.equal(gateResult(second.stdout).runner, HOST);
     assert.equal(secondFact.root, secondFact.target.slice(0, secondFact.target.indexOf('/packages/runner-fixture-dep')));
     assert.notEqual(firstFact.root, secondFact.root, 'each run unpacks a fresh checkout');
@@ -781,6 +815,8 @@ appendFileSync(${JSON.stringify(installWitnesses)}, 'postinstall\\n');
     assert.equal(readFileSync(installWitnesses, 'utf8'), 'postinstall\n', 'the second run reuses the dependency cache without a second install witness');
     const requestsSeen = readFileSync(requests, 'utf8').trim().split('\n').map(line => JSON.parse(line));
     assert.equal(requestsSeen.length, 2);
+    assert.ok(requestsSeen[0].stdinBytes > requestsSeen[1].stdinBytes,
+      'the cache hit sends fewer Git-pack bytes for the same selected candidate');
     assert.ok(requestsSeen.every(request => request.remoteStartsWithConfiguredNode), 'both remote workers use the configured absolute Node path');
   } finally {
     if (held) held.release();
