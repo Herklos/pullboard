@@ -93,13 +93,13 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
   <div class="top-find"><input id="q" type="search" placeholder="Search" aria-label="Search items, Spec, Doctrine and shouts" autocomplete="off"><div class="find-results" id="find-results" role="listbox" aria-label="Search results" hidden></div></div>
 </header>
 <main>
-  <section class="card-panel" id="local-note" role="status" hidden>
-    <p id="local-note-text"></p>
-    <p id="local-note-links" hidden><a id="local-note-view" href="http://127.0.0.1:4890/local/view">Open the local view</a> <a id="local-note-sign-in" hidden>Sign in to see linked boards</a> <button class="ghost" id="local-note-retry" type="button">Try again</button></p>
-  </section>
   <section class="card-panel first">
     <h2>No boards yet</h2>
     <p>Run <code>pullboard init</code> in a git repo, or ask an agent to. Its board shows up here by itself.</p>
+  </section>
+  <section class="card-panel" id="local-note" role="status" hidden>
+    <p id="local-note-text"></p>
+    <p id="local-note-links" hidden><a id="local-note-view" href="http://127.0.0.1:4890/local/view">Open the local view</a> <a id="local-note-sign-in" hidden>Sign in to see linked boards</a> <button class="ghost" id="local-note-retry" type="button">Try again</button></p>
   </section>
   <section class="card-panel snapshot-controls" id="snapshot-controls" ${snapshot ? '' : 'hidden'} aria-label="Snapshot replay">
     <span>Read-only snapshot</span>
