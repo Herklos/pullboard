@@ -7,7 +7,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { cockpitPage } from '../../src/cockpit.js';
-import { takeDefaultViewPort } from '../view-port-fixture.js';
 import { BIN, machine, project, startView, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, styleOf } from './fixture.js';
 
 const HOSTED = 'https://app.pullboard.dev';
@@ -59,11 +58,13 @@ function onwardOf(page) {
 }
 
 /**
- * Stand in for the hosted page at its real origin: Chrome answers every request for https://app.pullboard.dev with the
- * cockpit the relay would serve there and the view's styles, and nothing else is touched, so the requests to the
- * local view meet Chrome's own cross-origin rules.
+ * Stand in for the hosted page at its real origin, and for this machine's default view address. Chrome answers every
+ * request for https://app.pullboard.dev with the cockpit the relay would serve there and the view's styles. A request
+ * for http://127.0.0.1:4890 goes to the view the test runs on its own port, as if that view held the default one, or
+ * meets a closed port when the test names none: the suite never binds the machine's 4890, where a person's own view
+ * may run. Every other request, to the view's own port, is untouched and meets Chrome's own cross-origin rules.
  */
-async function hostedStandIn(chrome, pages, styles) {
+async function hostedStandIn(chrome, pages, styles, local) {
   const failures = [];
   const tasks = [];
   const listener = ({ data }) => {
@@ -71,22 +72,34 @@ async function hostedStandIn(chrome, pages, styles) {
     if (message.method !== 'Fetch.requestPaused') return;
     tasks.push((async () => {
       const { requestId, resourceType, request: asked } = message.params;
+      const address = new URL(asked.url);
+      if (address.origin === LOCAL) {
+        if (!local.target) return chrome.send('Fetch.failRequest', { requestId, errorReason: 'ConnectionRefused' });
+        const headers = Object.fromEntries(Object.entries(asked.headers).filter(([name]) => name.toLowerCase() !== 'host'));
+        const reply = await call({ base: local.target }, address.pathname + address.search, { method: asked.method, headers, body: asked.postData ?? '' });
+        return chrome.send('Fetch.fulfillRequest', {
+          requestId, responseCode: reply.status,
+          responseHeaders: Object.entries(reply.headers).filter(([name]) => !['content-length', 'transfer-encoding', 'connection', 'keep-alive', 'date'].includes(name)).map(([name, value]) => ({ name, value: String(value) })),
+          body: Buffer.from(reply.body).toString('base64'),
+        });
+      }
       const document = resourceType === 'Document';
-      const page = new URL(asked.url).search === '?relay' ? pages.relay : pages.anonymous;
+      const page = address.search === '?relay' ? pages.relay : pages.anonymous;
       await chrome.send('Fetch.fulfillRequest', {
         requestId, responseCode: 200,
         responseHeaders: [
           { name: 'Content-Type', value: document ? 'text/html; charset=utf-8' : 'text/css; charset=utf-8' },
           { name: 'Cache-Control', value: 'no-store' },
-          // The connections #533's relay page allows: its own origin and the local view's default address.
-          ...(document ? [{ name: 'Content-Security-Policy', value: `connect-src 'self' ${LOCAL} http://localhost:4890; frame-ancestors 'none'` }] : []),
+          // The connections #533's relay page allows, its own origin and the local view's default address, and here the
+          // test view's own port, which the round trip names.
+          ...(document ? [{ name: 'Content-Security-Policy', value: `connect-src 'self' ${LOCAL} http://localhost:4890 ${local.own}; frame-ancestors 'none'` }] : []),
         ],
         body: Buffer.from(document ? page : styles).toString('base64'),
       });
     })().catch((error) => failures.push(error.message)));
   };
   chrome.socket.addEventListener('message', listener);
-  await chrome.send('Fetch.enable', { patterns: [{ urlPattern: HOSTED + '/*', requestStage: 'Request' }] });
+  await chrome.send('Fetch.enable', { patterns: [{ urlPattern: HOSTED + '/*', requestStage: 'Request' }, { urlPattern: LOCAL + '/*', requestStage: 'Request' }] });
   return async () => {
     chrome.socket.removeEventListener('message', listener);
     try { await Promise.all(tasks); } finally { await chrome.send('Fetch.disable'); }
@@ -94,17 +107,18 @@ async function hostedStandIn(chrome, pages, styles) {
   };
 }
 
-test('a pullboard.dev page reads the local board [N26,A2]', { timeout: 120_000 }, async () => { // budget: hang ceiling for the default-port lease, two real round trips in Chrome and a view restart.
+test('a pullboard.dev page reads the local board [N26,A2]', { timeout: 120_000 }, async () => { // budget: hang ceiling for two real round trips in Chrome, a view restart and the unreachable cases.
   const executable = chromeExecutable();
   assert.ok(executable, 'the hosted page check needs real Chrome');
   const box = machine();
   const board = project(box, 'hosted-local');
   box.run(board.repo, 'add', 'web', 'A board that stays on this machine', '--specs', 'G1');
-  const lease = await takeDefaultViewPort(box.dir, { agent: 'local-origin-' + process.pid });
   const profile = mkdtempSync(join(tmpdir(), 'pullboard-local-origin-'));
-  let view, chrome, stopStandIn;
+  let view, chrome, stopStandIn, other;
   try {
-    view = await viewAt(box, 4890);
+    view = await startView(box);
+    const port = view.link.port;
+    const local = { own: view.base, target: null };
     chrome = await openSnapshotChrome(executable, 'about:blank', profile);
     // Each fetch the hosted page makes, with what the page showed and where its address stood as it made it.
     await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
@@ -121,24 +135,24 @@ test('a pullboard.dev page reads the local board [N26,A2]', { timeout: 120_000 }
     const relayPage = (relaySession) => cockpitPage('', { readOnly: true, requests: true, transportModule: '/relay/client.js', apiHeaders: {}, stylesheet: '/view.css', hostedLocal: true, relaySession, signIn: '/auth/github/start' })
       .replace('<main>', '<main><section class="card-panel" id="relay-notice" role="status"><p>Pairing this browser…</p></section>');
     const banner = "document.querySelector('#relay-notice').hidden";
-    stopStandIn = await hostedStandIn(chrome, { anonymous: relayPage(false), relay: relayPage(true) }, await styleOf(view));
-    const trips = () => chrome.requests.filter((entry) => entry.url === LOCAL + '/local/connect').length;
+    stopStandIn = await hostedStandIn(chrome, { anonymous: relayPage(false), relay: relayPage(true) }, await styleOf(view), local);
+    const trips = () => chrome.requests.filter((entry) => new URL(entry.url).pathname === '/local/connect').length;
     const relayModule = () => chrome.requests.filter((entry) => entry.url === HOSTED + '/relay/client.js').length;
     /** Wait until the page has asked for the relay module this many times in all. */
     const relayAsked = async (times) => {
       for (const deadline = Date.now() + 10_000; relayModule() < times && Date.now() < deadline;) await new Promise((later) => setTimeout(later, 50)); // budget: hang ceiling for the relay module request.
       assert.equal(relayModule(), times, 'the page loads the relay module');
     };
-    const localFetches = 'JSON.stringify((window.__localFetches || []).filter((entry) => entry.url.startsWith(' + JSON.stringify(LOCAL) + ')))';
+    const localFetches = "JSON.stringify((window.__localFetches || []).filter((entry) => entry.url.startsWith('http://127.0.0.1:')))";
 
-    // With nothing on this machine's port, the page says why and links the local view; a person with no relay session
-    // gets the sign-in link and the relay module is never loaded, while one with a session gets the relay page. The
-    // browser has not been allowed to reach this device yet, so the page says why it may ask before it first asks.
+    // With no view on this machine, the page says why and links the local view; a person with no relay session gets
+    // the sign-in link and the relay module is never loaded, while one with a session gets the relay page. The browser
+    // has not been allowed to reach this device yet, so the page says why it may ask before it first asks.
     await view.stop();
     await chrome.send('Page.navigate', { url: HOSTED + '/' });
     await chrome.waitFor("location.search === '' && /cannot reach a local view/.test(document.querySelector('#local-note-text')?.textContent)", 20_000); // budget: hang ceiling for one refused loopback request.
     const asked = JSON.parse(await chrome.stable(localFetches));
-    assert.equal(asked[0]?.url, LOCAL + '/local/protocol', 'the page first reads the local view\'s public protocol');
+    assert.equal(asked[0]?.url, LOCAL + '/local/protocol', 'the page first reads the public protocol at the default address');
     assert.ok(asked[0].note && /may ask to let this page reach apps on this device/.test(asked[0].text), `the line saying why the browser may ask is on screen before that request: ${JSON.stringify(asked[0])}`);
     const away = JSON.parse(await chrome.stable("JSON.stringify({ links: !document.querySelector('#local-note-links').hidden, view: document.querySelector('#local-note-view').href, signIn: document.querySelector('#local-note-sign-in').hidden ? null : document.querySelector('#local-note-sign-in').getAttribute('href') })"));
     assert.deepEqual(away, { links: true, view: LOCAL + '/local/view', signIn: '/auth/github/start' }, 'an unreachable view is named, with the local view and sign-in linked');
@@ -162,41 +176,44 @@ test('a pullboard.dev page reads the local board [N26,A2]', { timeout: 120_000 }
       try { await chrome.send('Browser.grantPermissions', { origin: HOSTED, permissions }); break; } catch { /* a name this Chrome does not have */ }
     }
     // A view that speaks another protocol is named as not matching this page.
-    const other = createServer((req, res) => {
+    other = createServer((req, res) => {
       res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': HOSTED });
       res.end(JSON.stringify({ version: 2, apiVersion: 2, hostedOrigin: HOSTED }));
     });
-    await new Promise((ready) => other.listen(4890, '127.0.0.1', ready));
-    try {
-      await chrome.send('Page.navigate', { url: HOSTED + '/?other' });
-      await chrome.waitFor("location.search === '?other' && /does not match this page/.test(document.querySelector('#local-note-text')?.textContent)", 20_000); // budget: hang ceiling for one loopback request.
-    } finally { await new Promise((closed) => { other.close(closed); other.closeAllConnections(); }); }
+    await new Promise((ready) => other.listen(0, '127.0.0.1', ready));
+    local.target = 'http://127.0.0.1:' + other.address().port;
+    await chrome.send('Page.navigate', { url: HOSTED + '/?other' });
+    await chrome.waitFor("location.search === '?other' && /does not match this page/.test(document.querySelector('#local-note-text')?.textContent)", 20_000); // budget: hang ceiling for one loopback request.
     assert.equal(trips(), 0, 'no round trip starts toward a view the page cannot use');
 
-    view = await viewAt(box, 4890);
+    // This machine's view: the page finds it at the default address, goes round for its secret, and reads the board.
+    view = await viewAt(box, port);
+    local.target = view.base;
     await chrome.send('Page.navigate', { url: HOSTED + '/' });
     await chrome.waitFor("location.origin === 'https://app.pullboard.dev' && document.querySelector('#chain')?.textContent.includes('A board that stays on this machine')", 30_000); // budget: hang ceiling for the discovery, one top-level round trip and the first board read.
     const shown = JSON.parse(await chrome.stable(`JSON.stringify({ address: location.href, base: connection.base, readOnly, transportModule, kept: sessionStorage.getItem('pullboard.local.session'), lasting: Object.keys(localStorage).map((name) => localStorage.getItem(name)).join(' '), log: window.__localFetches })`));
     assert.ok(!shown.address.includes('pullboard-local') && !shown.address.includes(view.key), 'the secret is gone from the address bar');
-    assert.equal(shown.base, LOCAL, 'the page reads the local view at its default address');
+    assert.equal(shown.base, view.base, 'the page reads the local view the round trip named');
     assert.equal(shown.readOnly, false, 'the local board is not read-only');
     assert.equal(shown.transportModule, null, 'the relay transport is never loaded');
     assert.equal(await chrome.stable(banner), true, 'and the relay\'s banner is hidden over the local board');
-    assert.deepEqual(JSON.parse(shown.kept), { version: 1, origin: LOCAL, key: view.key }, 'the session is kept for this tab');
+    assert.deepEqual(JSON.parse(shown.kept), { version: 1, origin: view.base, key: view.key }, 'the session is kept for this tab');
     assert.ok(!shown.lasting.includes(view.key), 'nothing lasting holds the secret');
-    const local = shown.log.filter((entry) => entry.url.startsWith(LOCAL));
-    assert.equal(local[0]?.url, LOCAL + '/local/protocol', 'the page first reads the local view\'s public protocol');
-    assert.ok(local.every((entry) => !entry.address.includes('pullboard-local')), 'no request is made while the secret is in the address');
-    assert.ok(local.some((entry) => entry.url.startsWith(LOCAL + '/api/')), 'the page reads the board through the view\'s API');
+    const atDefault = chrome.requests.map((entry) => entry.url).filter((url) => url.startsWith(LOCAL));
+    assert.deepEqual(atDefault.slice(-2), [LOCAL + '/local/protocol', LOCAL + '/local/connect'], 'the page found the view at the default address, then went round to it at the top level');
+    const reads = shown.log.filter((entry) => entry.url.startsWith(view.base));
+    assert.ok(reads.every((entry) => !entry.address.includes('pullboard-local')), 'no request is made while the secret is in the address');
+    assert.ok(reads.some((entry) => entry.url.startsWith(view.base + '/api/')), 'the page reads the board through the view\'s API');
     assert.equal(trips(), 1, 'the page itself started one top-level round trip');
-    const api = chrome.requests.filter((entry) => entry.url.startsWith(LOCAL + '/api/') && entry.method !== 'OPTIONS');
+    const api = chrome.requests.filter((entry) => entry.url.startsWith(view.base + '/api/') && entry.method !== 'OPTIONS');
     assert.ok(api.length > 0 && api.every((entry) => Object.entries(entry.headers).some(([name, value]) => name.toLowerCase() === 'x-pullboard-key' && value === view.key)), 'every API request carries the secret in x-pullboard-key');
     assert.ok(chrome.requests.every((entry) => !new URL(entry.url).search.includes(view.key)), 'no request carries the secret in its query');
 
     // The view restarts with a new secret: the page goes round again by itself.
     const before = view.key;
     await view.stop();
-    view = await viewAt(box, 4890);
+    view = await viewAt(box, port);
+    local.target = view.base;
     assert.notEqual(view.key, before, 'the restarted view has a new secret');
     await chrome.waitFor(`connection.headers['x-pullboard-key'] === ${JSON.stringify(view.key)} && document.querySelector('#chain')?.textContent.includes('A board that stays on this machine')`, 45_000); // budget: hang ceiling for the next refresh to meet the refusal, a second round trip and a read.
     assert.equal(trips(), 2, 'the page repeated the round trip without the person');
@@ -208,8 +225,11 @@ test('a pullboard.dev page reads the local board [N26,A2]', { timeout: 120_000 }
     finally {
       try { if (chrome) await closeSnapshotChrome(chrome); }
       finally {
-        try { if (view) await view.stop(); }
-        finally { rmSync(profile, { recursive: true, force: true }); await lease.release(); }
+        try { if (other) await new Promise((closed) => { other.close(closed); other.closeAllConnections(); }); }
+        finally {
+          try { if (view) await view.stop(); }
+          finally { rmSync(profile, { recursive: true, force: true }); }
+        }
       }
     }
   }
