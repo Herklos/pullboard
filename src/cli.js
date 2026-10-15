@@ -2802,7 +2802,7 @@ function resourceAgent(ctx) {
  * @returns {(decision:{file:string,reason:string})=>void}
  */
 function browserAdmissionReporter(io) {
-  return ({ file, reason }) => io.say(`browser admission fallback: ${file}: ${reason}`);
+  return ({ file, reason }) => io.stderr.write(`browser admission fallback: ${file}: ${reason}\n`);
 }
 
 /** Build a de-duplicated queue message for a gate waiting on machine capacity. */

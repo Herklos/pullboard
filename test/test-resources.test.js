@@ -138,6 +138,33 @@ test('frozen checks classify only explicit source-backed test commands [C7]', as
   assert.equal(await testsNeedBrowser(root, ['test/known-fixture.test.js']), true,
     'a literal Chrome launcher still overrides the path exception');
 
+  copyFileSync(resolve(import.meta.dirname, './fixture-child.js'), join(root, 'test/fixture-child.js'));
+  writeFileSync(join(root, 'test/known-fixture.test.js'), "import { runFixtureGit as git } from './fixture-child.js';\n");
+  assert.equal(await testsNeedBrowser(root, ['test/known-fixture.test.js']), false,
+    'the narrowly reviewed fixed-Git helper remains CPU-only');
+
+  for (const importer of [
+    "import { runFixtureChild as child } from './fixture-child.js';\n",
+    "import * as fixture from './fixture-child.js';\n",
+    "import { runFixtureChild as child } from './fixture-child.js'; child(process.env.BROWSER_BIN, []);\n",
+    "import * as fixture from './fixture-child.js'; fixture.runFixtureChild(process.env.BROWSER_BIN, []);\n",
+    "export { runFixtureGit } from './fixture-child.js';\n",
+    "const fixture = await import('./fixture-child.js');\n",
+    "import fixture from './fixture-child.js';\n",
+    "import './fixture-child.js';\nimport { runFixtureChild } from './fixture-child.js';\n",
+    "import { runFixtureGit } from './fixture-child.js';\nimport { runFixtureChild } from './fixture-child.js';\n",
+    "import { runFixtureGit } from './fixture-child.js';\nimport { runFixtureChild } from '.\\x2ffixture-child.js';\n",
+  ]) {
+    writeFileSync(join(root, 'test/known-fixture.test.js'), importer);
+    const decisions = [];
+    assert.equal(await testsNeedBrowser(root, ['test/known-fixture.test.js'], {
+      onFallback: decision => decisions.push(decision),
+    }), true, importer);
+    assert.equal(decisions.length, 1, importer);
+    assert.equal(decisions[0].file, 'test/known-fixture.test.js');
+    assert.match(decisions[0].reason, /caller-selected process target/u);
+  }
+
   writeFileSync(join(root, 'test/launcher.test.js'), "import { spawn } from 'node:child_process'; spawn('google-chrome', []);\n");
   const chromeFallbacks = [];
   assert.equal(await testsNeedBrowser(root, ['test/launcher.test.js'], { onFallback: decision => chromeFallbacks.push(decision) }), true,

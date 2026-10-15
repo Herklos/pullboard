@@ -7,6 +7,7 @@ import { cleanGitEnvironment, git } from './git.js';
 
 const MODULE_SUFFIXES = ['.js', '.mjs', '.cjs', '.cts', '.json'];
 const CHROME_FIXTURE = 'test/chrome-fixture.js';
+const FIXTURE_CHILD = 'test/fixture-child.js';
 const JOURNEYS_TEST = 'test/journeys.test.js';
 const TEST_RUNNER = 'bin/run-tests.js';
 const VALUE_OPTIONS = new Set(['--test-concurrency', '--test-name-pattern', '--test-shard', '--test-skip-pattern', '--test-timeout']);
@@ -157,6 +158,22 @@ function committedTarget(files, importer, request) {
   return found.length === 1 && ['100644', '100755'].includes(files.get(found[0]).mode) ? found[0] : null;
 }
 
+/** Allow only a side-effect fixture import or the fixed-Git helper; generic command helpers keep browser admission. */
+function safeFixtureChildImport(source, request) {
+  const escaped = request.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  const sideEffect = new RegExp(`^[ \\t]*import[ \\t]*(['"])${escaped}\\1[ \\t]*;?[ \\t]*$`, 'u');
+  const fixedGit = new RegExp(`^[ \\t]*import[ \\t]*\\{[ \\t]*runFixtureGit(?:[ \\t]+as[ \\t]+[A-Za-z_$][\\w$]*)?[ \\t]*\\}[ \\t]*from[ \\t]*(['"])${escaped}\\1[ \\t]*;?[ \\t]*$`, 'u');
+  let removedSafeImport = false;
+  const remaining = source.split(/\r?\n/u).filter(line => {
+    if (!line.includes(request)) return true;
+    if (!sideEffect.test(line) && !fixedGit.test(line)) return true;
+    removedSafeImport = true;
+    return false;
+  }).join('\n');
+  if (!removedSafeImport) return false;
+  try { return !importsIn([remaining])[0].includes(request); } catch { return false; }
+}
+
 /** Detect direct literal Chrome launchers without treating help text or refusal messages as launches. */
 function namesChromeLauncher(source) {
   return /\b(?:spawn|spawnSync|exec|execSync|execFile|execFileSync|fork)\s*\(\s*(['"`])[^'"`\r\n]*\b(?:chrome|chromium|playwright|puppeteer)\b/iu.test(source);
@@ -298,6 +315,9 @@ async function testsNeedBrowserInTree(root, files, committed = null, onFallback)
             ? committedTarget(committed, paths[index], request)
             : await localTarget(root, paths[index], request);
           if (!target) return browserFallback(onFallback, paths[index], `import ${request} is missing or ambiguous`);
+          if (target === FIXTURE_CHILD && !safeFixtureChildImport(sources[index], request)) {
+            return browserFallback(onFallback, paths[index], 'fixture-child import exposes a generic caller-selected process target');
+          }
           if (target === CHROME_FIXTURE) return true;
           if (!target.endsWith('.json') && !seen.has(target)) next.add(target);
         }
