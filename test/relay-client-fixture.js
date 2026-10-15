@@ -221,6 +221,8 @@ globalThis.fetch = function tracedFetch(input, init) {
   const responseWaiters = [];
   const moveAcks = [];
   const privateKeys = new Set();
+  let nextConfirmationStatusHold = null;
+  const confirmationStatusHolds = new Set();
   let keyLeaked = false;
   /** Wait until a named relay request has fully returned to its caller. */
   function waitForResponse(path) {
@@ -238,6 +240,27 @@ globalThis.fetch = function tracedFetch(input, init) {
         waiter.resolve(entry);
       }
     }
+  }
+  /** Hold one real confirmation-status request before the production auth handler for race tests. */
+  function holdNextConfirmationStatus() {
+    assert.equal(nextConfirmationStatusHold, null, 'only one confirmation-status hold is armed at a time');
+    let resolveStarted;
+    let resolveFinished;
+    let resolveGate;
+    const started = new Promise(resolve => { resolveStarted = resolve; });
+    const finished = new Promise(resolve => { resolveFinished = resolve; });
+    const gate = new Promise(resolve => { resolveGate = resolve; });
+    const control = { started, finished, gate, resolveStarted, resolveFinished, resolveGate, released: false };
+    confirmationStatusHolds.add(control);
+    /** Release the held request once so it can continue through the real auth handler. */
+    function release() {
+      if (control.released) return;
+      control.released = true;
+      control.resolveGate();
+    }
+    control.release = release;
+    nextConfirmationStatusHold = control;
+    return { started, finished, release };
   }
   const server = createServer(async (req, res) => {
     const snapshotWrite = req.method === 'PUT' && /\/api\/v1\/boards\/[0-9a-f]{32}\/state$/.test(req.url ?? '');
@@ -307,6 +330,18 @@ globalThis.fetch = function tracedFetch(input, init) {
       request: Buffer.concat(requestChunks), response: Buffer.concat(responseChunks) }));
     calls.push({ method: req.method, path: req.url, accept: req.headers.accept ?? '', engine: req.headers['x-pullboard-engine'],
       browser: String(req.headers.cookie ?? '').includes('pb_session=') });
+    if (req.method === 'POST' && req.url === '/auth/device/confirmation/status' && nextConfirmationStatusHold) {
+      const hold = nextConfirmationStatusHold;
+      nextConfirmationStatusHold = null;
+      hold.resolveStarted();
+      /** Mark completion after the held request returns from the real auth handler. */
+      function heldStatusFinished() {
+        hold.resolveFinished({ status: res.statusCode, response: Buffer.concat(responseChunks) });
+        confirmationStatusHolds.delete(hold);
+      }
+      res.once('finish', heldStatusFinished);
+      await hold.gate;
+    }
     if (revokeOnNextListing && req.method === 'GET' && req.url === '/api/v1/boards') {
       revokeOnNextListing = false;
       const session = await phoneSession();
@@ -403,6 +438,8 @@ globalThis.fetch = function tracedFetch(input, init) {
     return phone;
   }
   t.after(async () => {
+    nextConfirmationStatusHold = null;
+    for (const hold of confirmationStatusHolds) hold.release();
     api.close();
     server.closeAllConnections();
     if (server.listening) await new Promise(ready => server.close(ready));
@@ -640,7 +677,7 @@ globalThis.fetch = function tracedFetch(input, init) {
   }
   return {
     transit, relayDirectory: join(scratch, 'relay'), authDatabase, otherDeviceJoin,
-    root, env, origin, lane, before, linkFile, keyFile, calls, moveAcks, cli, cliAt, cliWithSnapshotUploads, cliWithSnapshotTrace, startCli, waitForResponse, link, phoneSession, requireEngineThree, otherDeviceOff, additionalBoard, script, stopRelay, restartRelay,
+    root, env, origin, lane, before, linkFile, keyFile, calls, moveAcks, cli, cliAt, cliWithSnapshotUploads, cliWithSnapshotTrace, startCli, waitForResponse, holdNextConfirmationStatus, link, phoneSession, requireEngineThree, otherDeviceOff, additionalBoard, script, stopRelay, restartRelay,
     /** Assert the test consumed every declared child budget, with no hidden CLI calls. */
     assertCliChildrenComplete() {
       if (cliChildren) assert.equal(cliChildIndex, cliChildren.length, 'every planned private CLI child ran exactly once');
