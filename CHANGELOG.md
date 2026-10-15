@@ -4,6 +4,25 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.8.24] - 2026-10-15
+
+### A first board without surprises
+
+Fixes from a newcomer's first board: setup tells you what it's waiting on, spec drafts go where you put them, and a fresh repo's errors name the real cause.
+
+### Changed
+
+- `pullboard spec draft --section <letter>` files the row in that section with its next free id. An unknown section is refused with the list of sections that exist. Goals (G) stays the default.
+- After the setup rows are drafted, `pullboard resume` says setup is waiting on you to approve them, names the rows, and says what the agent can do meanwhile. Before, it kept saying "step 1, next: spec draft".
+- For coordinators: after you reopen a submission to correct its bar, the builder can resubmit the same commit against the corrected bar. A rejected item still needs new work.
+
+### Fixed
+
+- A session in a worktree whose main checkout has uncommitted setup files is told exactly that, with the `git add` line to run in the main checkout. Before, every command refused with NO_CONFIG.
+- `pullboard gate` in a fresh repo before the first commit says pullboard.json isn't committed and gives the `git add` line, instead of a NO_POLICY error about a missing policy.
+- The view's cookie is honored only for requests from the view's own page. A request from another local port or site is refused, and a cookie with too little randomness is refused at startup.
+- For contributors: relay storage tests pass under any umask, and the pointer-refresh test holds under landing-gate load.
+
 ## [0.8.23] - 2026-10-15
 
 ### Faster reads, and your approvals stay on their board
