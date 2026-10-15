@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { basename, delimiter, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { test } from 'node:test';
-import { startFixtureChild, runFixtureChild } from './fixture-child.js';
+import { startFixtureChild, runFixtureChild, runFixtureGit } from './fixture-child.js';
 import { listResources } from '../src/resources.js';
 
 const runner = fileURLToPath(new URL('../bin/run-tests.js', import.meta.url));
@@ -513,7 +513,7 @@ if (process.argv[1]?.endsWith('/worker-start.test.js')) {
   ]);
   assert.ok(bodyStarted, `the runner exited before evaluating the worker test body\n${output}`);
   const worker = JSON.parse(readFileSync(ran, 'utf8'));
-  await waitForFixtureMarker(childReady, 'the detached child started', 5000);
+  await waitForFixtureMarker(childReady, 'the detached child started', 5000); // budget: hang ceiling for the child-ready handshake; the marker proves readiness.
   childIdentity = fixtureProcessIdentity(worker.childPid);
   assert.ok(childIdentity, 'the detached child has a capturable identity before release');
   assert.ok(existsSync(injected), 'the preload injected persistent ps timeouts only in the worker');
@@ -553,7 +553,7 @@ if (process.argv[1]?.endsWith('/worker-start.test.js')) {
   assert.ok(unavailable && unavailable.code === 'ETIMEDOUT', 'the worker recorded its exhausted local snapshot retries');
   assert.ok(JSON.parse(readFileSync(injected, 'utf8')).injections > 1, 'the worker-local ps failure persisted across retries');
 
-  await waitForFixtureMarker(childTermStarted, 'the child received cleanup only after its identity was bound', 10000);
+  await waitForFixtureMarker(childTermStarted, 'the child received cleanup only after its identity was bound', 10000); // budget: hang ceiling for the owned-child TERM handshake; the marker proves delivery.
   writeFileSync(release, 'release');
   const result = await runnerClosed;
   assert.deepEqual(result, { code: 0, signal: null }, output);
@@ -929,10 +929,11 @@ function makeTrackedSelectionFixture(t) {
   const source = join(root, 'src');
   const tests = join(root, 'test');
   const scratch = join(root, 'scratch');
-  const expected = ['tracked', 'dot-suffix', 'dash-suffix', 'underscore-suffix', 'test-prefix', 'test-name'];
+  const expected = ['tracked', 'docs-esm', 'dot-suffix'];
   mkdirSync(bin);
   mkdirSync(tests);
   mkdirSync(scratch);
+  mkdirSync(join(root, 'docs'));
   writeFileSync(join(root, 'package.json'), JSON.stringify({ type: 'module' }));
   writeFileSync(join(root, '.gitignore'), 'scratch/\n');
   copyFileSync(runner, join(bin, 'run-tests.js'));
@@ -940,6 +941,7 @@ function makeTrackedSelectionFixture(t) {
   const capture = join(root, 'selected-files.txt');
   const trackedSources = new Map([
     ['test/tracked.test.js', trackedFixtureSource('tracked')],
+    ['docs/guide.test.mjs', trackedFixtureSource('docs-esm')],
     ['prefix.test.js', trackedFixtureSource('dot-suffix')],
     ['prefix-test.cjs', trackedFixtureSource('dash-suffix')],
     ['prefix_test.mjs', trackedFixtureSource('underscore-suffix')],
@@ -997,7 +999,7 @@ function trackedSelectionTest(t) {
     'the failing scratch test is actually ignored by Git');
   const tracked = execFileSync('git', ['ls-files'], { cwd: fixture.root, encoding: 'utf8' }).trim().split(/\r?\n/u);
   assert.ok(tracked.includes('.gitignore') && tracked.includes('tracked.spec.js'), 'the non-default and ignore control files are tracked');
-  assert.equal(tracked.length, fixture.expected.length + 2, 'all pattern cases and non-default controls are tracked');
+  assert.equal(tracked.length, 9, 'all pattern cases and non-default controls are tracked');
   const result = runFixtureChild(process.execPath, [fixture.runner], {
     cwd: fixture.root,
     encoding: 'utf8',
@@ -1008,19 +1010,19 @@ function trackedSelectionTest(t) {
   for (const label of fixture.expected) assert.match(result.stdout, new RegExp(`ok [0-9]+ - tracked .*${label}.* pattern ran \\[C7\\]`, 'u'));
   assert.doesNotMatch(`${result.stdout}\n${result.stderr ?? ''}`, /ignored test was executed|untracked test was executed|non-default test was executed/u);
   assert.deepEqual(readFileSync(fixture.capture, 'utf8').trim().split(/\r?\n/u).sort(),
-    ['tracked', 'dot-suffix', 'dash-suffix', 'underscore-suffix', 'test-prefix', 'test-name'].sort(),
-    'every default filename pattern runs exactly once');
+    fixture.expected.toSorted(),
+    'only repository test entry names run exactly once');
 
   writeFileSync(fixture.capture, '');
-  const filtered = runFixtureChild(process.execPath, [fixture.runner, '--test-name-pattern', 'dot-suffix'], {
+  const filtered = runFixtureChild(process.execPath, [fixture.runner, '--test-name-pattern', 'docs-esm'], {
     cwd: fixture.root,
     encoding: 'utf8',
     env: { ...process.env, PULLBOARD_TRACKED_CAPTURE: fixture.capture },
   });
   assert.equal(filtered.status, 0, filtered.context);
-  assert.match(filtered.stdout, /ok [0-9]+ - tracked dot-suffix pattern ran \[C7\]/u,
+  assert.match(filtered.stdout, /ok [0-9]+ - tracked docs-esm pattern ran \[C7\]/u,
     'name filters still apply to the tracked default list');
-  assert.equal(readFileSync(fixture.capture, 'utf8'), 'dot-suffix\n');
+  assert.equal(readFileSync(fixture.capture, 'utf8'), 'docs-esm\n');
 
   const explicit = runFixtureChild(process.execPath, [fixture.runner, 'test/untracked.test.js'], {
     cwd: fixture.root,
@@ -1033,6 +1035,78 @@ function trackedSelectionTest(t) {
 }
 
 test('the runner skips test files git does not track [C7]', trackedSelectionTest);
+
+/** Keep perf-shaped helpers importable without launching their standalone entry points. */
+function onlyTestEntriesTest(t) {
+  const fixture = makeShardFixture(t);
+  const env = { ...process.env, PULLBOARD_SHARD_CAPTURE: fixture.capture,
+    GIT_AUTHOR_NAME: 'Test Agent', GIT_AUTHOR_EMAIL: 'agent@example.com',
+    GIT_COMMITTER_NAME: 'Test Agent', GIT_COMMITTER_EMAIL: 'agent@example.com' };
+  /** Write one tracked fixture input with its real repository-relative path. */
+  const put = (path, body) => {
+    mkdirSync(dirname(join(fixture.root, path)), { recursive: true });
+    writeFileSync(join(fixture.root, path), body);
+  };
+  /** Commit the fixture entries in a real Git repository. */
+  const commit = () => {
+    runFixtureGit(['add', '-A'], { cwd: fixture.root, env });
+    runFixtureGit(['commit', '-qm', 'chore: discovery fixture'], { cwd: fixture.root, env });
+    return runFixtureGit(['rev-parse', 'HEAD'], { cwd: fixture.root, env }).trim();
+  };
+  const helpers = ['test/cockpit/perf/run.mjs', 'test/cockpit/perf/generate.mjs',
+    'test/cockpit/fixture.js', 'test/view-link-fixture.js'];
+  put('.gitignore', 'selected-files.txt\n');
+  for (const path of helpers) put(path, `import { fileURLToPath } from 'node:url';
+export const value = 42;
+if (process.argv[1] === fileURLToPath(import.meta.url)) throw new Error('standalone helper: ${path}');
+`);
+  put('test/cockpit/perf.test.js', `import assert from 'node:assert/strict';
+import { appendFileSync } from 'node:fs';
+import { test } from 'node:test';
+import { value as run } from './perf/run.mjs';
+import { value as generate } from './perf/generate.mjs';
+import { value as fixture } from './fixture.js';
+import { value as link } from '../view-link-fixture.js';
+/** Exercise every imported helper without its standalone workload. */
+function importedHelpersWork() { assert.deepEqual([run, generate, fixture, link], [42,42,42,42]); appendFileSync(process.env.PULLBOARD_SHARD_CAPTURE, 'cockpit/perf.test.js\\n'); }
+test('perf helpers remain importable [C7]', importedHelpersWork);
+`);
+  put('docs/guide.test.mjs', "import { test } from 'node:test';\nimport { appendFileSync } from 'node:fs';\n/** Exercise a named documentation test entry. */\nfunction guide() { appendFileSync(process.env.PULLBOARD_SHARD_CAPTURE, 'docs/guide.test.mjs\\n'); }\ntest('documentation test entry [C7]', guide);\n");
+  put('test/tree-reader.test.js', "/** @pullboard-test-input test-tree */\nimport { appendFileSync } from 'node:fs';\nappendFileSync(process.env.PULLBOARD_SHARD_CAPTURE, 'tree-reader.test.js\\n');\n");
+  put('test/cockpit/perf/README.md', '# Perf harness\n');
+  commit();
+  const discovered = runFixtureChild(process.execPath, [fixture.runner], {
+    cwd: fixture.root, encoding: 'utf8', env,
+  });
+  assert.equal(discovered.status, 0, `${discovered.context}\n${discovered.stdout}`);
+  assert.doesNotMatch(discovered.stdout + discovered.stderr, /standalone helper:/u);
+  assert.match(discovered.stdout, /ok [0-9]+ - perf helpers remain importable/u);
+  assert.match(discovered.stdout, /ok [0-9]+ - documentation test entry/u);
+  assert.deepEqual(readFileSync(fixture.capture, 'utf8').trim().split('\n').sort(),
+    [...fixture.expected, 'cockpit/perf.test.js', 'docs/guide.test.mjs', 'tree-reader.test.js'].sort(),
+    'each expected test entry executes once, including a file with only a tree-reader declaration');
+  const entries = [...fixture.expected.map(name => `test/${name}`),
+    'test/cockpit/perf.test.js', 'docs/guide.test.mjs', 'test/tree-reader.test.js'];
+  const before = runFixtureChild(process.execPath, [fixture.runner, ...entries, ...helpers], {
+    cwd: fixture.root, encoding: 'utf8', env,
+  });
+  assert.equal(before.status, 1, 'the old broad file list launches the standalone-only helper controls');
+  assert.match(before.stdout, /standalone helper:/u);
+  const expectedCases = [...fixture.expected.map(name => `record ${name} [C7]`),
+    'perf helpers remain importable [C7]', 'documentation test entry [C7]'].sort();
+  /** Separate declared case titles from Node's synthetic path-only test-file records. */
+  const declaredCases = output => [...output.matchAll(/^# Subtest: (.+)$/gmu)].map(match => match[1])
+    .filter(name => ![...entries, ...helpers].some(path => name === path || name.endsWith('/' + path))).sort();
+  assert.deepEqual(declaredCases(before.stdout), expectedCases, 'the old broad list runs every declared case');
+  assert.deepEqual(declaredCases(discovered.stdout), expectedCases, 'test-only discovery preserves every declared case');
+  const beforeTotal = Number(before.stdout.match(/^# tests (\d+)$/mu)?.[1]);
+  const afterTotal = Number(discovered.stdout.match(/^# tests (\d+)$/mu)?.[1]);
+  assert.equal(beforeTotal, afterTotal + helpers.length,
+    'only the standalone helper-file records disappear from the raw TAP total');
+  process.stderr.write(`fixture declared cases: before=${expectedCases.length}, after=${expectedCases.length}; raw TAP: before=${beforeTotal}, after=${afterTotal}; helper records removed=${helpers.length}\n`);
+}
+
+test('the suite runs only test files, not helpers or the perf harness [C7]', onlyTestEntriesTest);
 
 /** Run the copied production runner and return the test filenames it actually executed. */
 function runShardFixture(fixture, shard) {
