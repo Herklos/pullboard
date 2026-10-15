@@ -69,7 +69,7 @@ function modulesAt(root, commit) {
  * Computed Markdown names select the docs tree; opaque helpers declare DOCS_TREE_INPUT. The
  * landing gate remains complete and never uses this submit-only optimization.
  */
-function documentationInputs(path, source, imports, changedDocs = []) {
+function documentationInputs(path, source, imports, changedDocs = [], changedReadmes = []) {
   const inputs = new Set();
   if (source.split(/\r?\n/u).includes(DOCS_TREE_INPUT)) inputs.add('docs');
   // Plain text is the required conservative rule: syntax, comments, and escapes do not matter.
@@ -83,6 +83,17 @@ function documentationInputs(path, source, imports, changedDocs = []) {
     if (wholeWord.test(source)) inputs.add(doc);
   }
   const markdownReader = imports.some(target => target === 'node:fs' || target === 'node:fs/promises');
+  if (changedReadmes.length) {
+    // Recognize literal join components without interpreting expressions or template interpolations.
+    const quoted = String.raw`(?:"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*')`;
+    const joins = new RegExp(String.raw`\b(?:[A-Za-z_$][\w$]*\.)?join\s*\(\s*(${quoted}(?:\s*,\s*${quoted})*)\s*,?\s*\)`, 'gu');
+    for (const match of source.matchAll(joins)) {
+      try {
+        const parts = [...match[1].matchAll(new RegExp(quoted, 'gu'))].map(part => new Function(`return ${part[0]};`)());
+        addReadmeInput(inputs, path, posix.join(...parts), changedReadmes);
+      } catch { /* Only complete valid string literals supply path inputs. */ }
+    }
+  }
   const literals = /(['"])(?:\\[\s\S]|(?!\1)[^\\\r\n])*\1|`(?:\\[\s\S]|[^`\\])*`/uy;
   // Try every quote start: a quote in a comment or regular expression must not hide a later real path.
   for (const quote of source.matchAll(/['"`]/gu)) {
@@ -133,9 +144,17 @@ function documentationInputs(path, source, imports, changedDocs = []) {
       for (const candidate of [posix.normalize(value), posix.normalize(posix.join(posix.dirname(path),value))]) {
         if (candidate === 'docs' || candidate.startsWith('docs/')) inputs.add(candidate.replace(/\/$/u,''));
       }
+      addReadmeInput(inputs, path, value, changedReadmes);
     }
   }
   return inputs;
+}
+
+/** Match a complete literal README path from the repository or the reader's own directory. */
+function addReadmeInput(inputs, path, value, changedReadmes) {
+  for (const candidate of [posix.normalize(value), posix.normalize(posix.join(posix.dirname(path), value))]) {
+    if (changedReadmes.includes(candidate)) inputs.add(candidate);
+  }
 }
 
 /** Compile this tree's import edges, plus the literal child-CLI dependency used by fixture modules. */
@@ -151,11 +170,7 @@ function graphAt(root, commit, changedDocs = [], changedReadmes = []) {
   const docInputs = new Map();
   paths.forEach((path, index) => {
     if (changedDocs.length || changedReadmes.length) {
-      const inputs = documentationInputs(path, modules.get(path), imports[index], changedDocs);
-      // Literal test README references are real inputs; a test-tree marker alone is not a reader.
-      for (const readme of changedReadmes) {
-        if (modules.get(path).includes(readme) || modules.get(path).includes(posix.relative(posix.dirname(path), readme))) inputs.add(readme);
-      }
+      const inputs = documentationInputs(path, modules.get(path), imports[index], changedDocs, changedReadmes);
       docInputs.set(path, inputs);
     }
     if (TEST.test(path)) {

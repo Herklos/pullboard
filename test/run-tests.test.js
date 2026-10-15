@@ -218,13 +218,23 @@ test('perf helpers remain importable [C7]', importedHelpersWork);
     'each expected test entry executes once, including a file with only a tree-reader declaration');
   const entries = [...fixture.expected.map(name => `test/${name}`),
     'test/cockpit/perf.test.js', 'docs/guide.test.mjs', 'test/tree-reader.test.js'];
-  const explicit = runFixtureChild(process.execPath, [fixture.runner, ...entries], {
+  const before = runFixtureChild(process.execPath, [fixture.runner, ...entries, ...helpers], {
     cwd: fixture.root, encoding: 'utf8', env,
   });
-  assert.equal(explicit.status, 0, `${explicit.context}\n${explicit.stdout}`);
-  assert.equal(discovered.stdout.match(/^# tests (\d+)$/mu)?.[1],
-    explicit.stdout.match(/^# tests (\d+)$/mu)?.[1],
-    'discovery runs exactly the same test cases as the explicit test-entry list');
+  assert.equal(before.status, 1, 'the old broad file list launches the standalone-only helper controls');
+  assert.match(before.stdout, /standalone helper:/u);
+  const expectedCases = [...fixture.expected.map(name => `record ${name} [C7]`),
+    'perf helpers remain importable [C7]', 'documentation test entry [C7]'].sort();
+  /** Separate declared case titles from Node's synthetic path-only test-file records. */
+  const declaredCases = output => [...output.matchAll(/^# Subtest: (.+)$/gmu)].map(match => match[1])
+    .filter(name => ![...entries, ...helpers].some(path => name === path || name.endsWith('/' + path))).sort();
+  assert.deepEqual(declaredCases(before.stdout), expectedCases, 'the old broad list runs every declared case');
+  assert.deepEqual(declaredCases(discovered.stdout), expectedCases, 'test-only discovery preserves every declared case');
+  const beforeTotal = Number(before.stdout.match(/^# tests (\d+)$/mu)?.[1]);
+  const afterTotal = Number(discovered.stdout.match(/^# tests (\d+)$/mu)?.[1]);
+  assert.equal(beforeTotal, afterTotal + helpers.length,
+    'only the standalone helper-file records disappear from the raw TAP total');
+  process.stderr.write(`fixture declared cases: before=${expectedCases.length}, after=${expectedCases.length}; raw TAP: before=${beforeTotal}, after=${afterTotal}; helper records removed=${helpers.length}\n`);
   put('test/cockpit/perf/README.md', '# Updated harness instructions\n');
   const head = commit();
   const readme = selectAffectedTests(fixture.root, { base, commit: head });
@@ -235,7 +245,24 @@ test('perf helpers remain importable [C7]', importedHelpersWork);
   }).full, true, 'unknown test assets still require the full gate');
   put('test/cockpit/readme-helper.js', "import { readFileSync } from 'node:fs';\nexport const instructions = readFileSync(new URL('./perf/README.md', import.meta.url), 'utf8');\n");
   put('test/cockpit/readme-reader.test.js', "import './readme-helper.js';\n");
+  put('test/cockpit/joined-helper.js', "import { readFileSync } from 'node:fs';\nimport { join } from 'node:path';\nexport const instructions = readFileSync(join('test', 'cockpit', 'perf', 'README.md'), 'utf8');\n");
+  put('test/cockpit/escaped-helper.js', "import { readFileSync } from 'node:fs';\nexport const instructions = readFileSync(new URL('./perf/REA\\x44ME.md', import.meta.url), 'utf8');\n");
+  for (const name of ['joined', 'escaped']) {
+    put(`test/cockpit/${name}-reader.test.js`, `import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { instructions } from './${name}-helper.js';
+/** Read and assert the actual fixture README through the helper. */
+function readInstructions() { assert.match(instructions, /Updated harness instructions/u); }
+test('${name} README reader [C7]', readInstructions);
+`);
+  }
   const readerBase = commit();
+  const readerRun = runFixtureChild(process.execPath, [fixture.runner,
+    'test/cockpit/joined-reader.test.js', 'test/cockpit/escaped-reader.test.js'], {
+    cwd: fixture.root, encoding: 'utf8', env,
+  });
+  assert.equal(readerRun.status, 0, `${readerRun.context}\n${readerRun.stdout}`);
+  assert.match(readerRun.stdout, /^# tests 2$/mu, 'both literal readers actually execute their filesystem reads');
   put('test/cockpit/readme-helper.js', "export const instructions = 'reader removed';\n");
   put('test/cockpit/perf/README.md', '# Instructions after reader removal\n');
   const readerHead = commit();
@@ -243,8 +270,8 @@ test('perf helpers remain importable [C7]', importedHelpersWork);
     base: readerBase, commit: readerHead, changed: ['test/cockpit/perf/README.md'],
   });
   assert.equal(readers.full, false);
-  assert.deepEqual(readers.files, ['test/cockpit/readme-reader.test.js'],
-    'a real README reader remains selected through its old helper edge, without test-tree-wide widening');
+  assert.deepEqual(readers.files, ['test/cockpit/escaped-reader.test.js', 'test/cockpit/joined-reader.test.js', 'test/cockpit/readme-reader.test.js'],
+    'real literal readers and the removed helper edge remain selected, without test-tree-wide widening');
 }
 
 test('the suite runs only test files, not helpers or the perf harness [C7]', onlyTestEntriesTest);
