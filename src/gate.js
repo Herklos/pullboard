@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { availableParallelism } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { gitChildEnv, gitPath, headTree, invalidateGitFacts, isClean, untracked } from './git.js';
 import { secretsIn } from './hooks.js';
 import { Refused } from './refused.js';
@@ -231,9 +232,14 @@ function runTiming(run, command) {
   if (!run.executionRunner) return profile;
   /** Relocate only paths inside the actual remote checkout, never a foreign absolute path. */
   const localPath = path => {
-    if (typeof path !== 'string' || !isAbsolute(path)) return path;
+    if (typeof path !== 'string') return path;
+    const original = path;
+    if (path.startsWith('file:')) {
+      try { path = fileURLToPath(path); } catch { return original; }
+    }
+    if (!isAbsolute(path)) return original;
     const suffix = relative(run.executionRoot, path);
-    return suffix && suffix !== '..' && !suffix.startsWith(`..${sep}`) && !isAbsolute(suffix) ? suffix : path;
+    return suffix && suffix !== '..' && !suffix.startsWith(`..${sep}`) && !isAbsolute(suffix) ? suffix : original;
   };
   return { ...profile, executionRunner: run.executionRunner,
     files: (profile.files ?? []).map(file => ({ ...file, path: localPath(file.path) })),

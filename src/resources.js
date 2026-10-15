@@ -226,7 +226,9 @@ function validatedRunners(value) {
       throw new Refused('BAD_RUNNER_POOL', 'runners require unique nonempty hosts, positive slots, and browser capacity from zero through slots');
     }
     seen.add(runner.host);
-    return { host: runner.host, slots: runner.slots, browser: runner.browser };
+    return { host: runner.host, slots: runner.slots, browser: runner.browser,
+      ...(typeof runner.node === 'string' ? { node: runner.node } : {}),
+      ...(typeof runner.root === 'string' ? { root: runner.root } : {}) };
   });
 }
 

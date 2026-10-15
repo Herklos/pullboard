@@ -1,11 +1,11 @@
 /** Exact committed source and bounded, credential-free SSH execution for machine runners [C7]. */
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { closeSync, mkdtempSync, openSync, readFileSync, rmSync } from 'node:fs';
+import { closeSync, mkdtempSync, openSync, readFileSync, rmSync, writeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig } from './config.js';
+import { configFromSource, defaults } from './config.js';
 import { blockedPaths, secretsIn } from './hooks.js';
 import { cleanGitEnvironment, headCommit, headTree, isClean, untracked } from './git.js';
 import { Refused } from './refused.js';
@@ -20,7 +20,14 @@ export function validateRunner(value) {
     || !Number.isSafeInteger(value.browser) || value.browser < 0 || value.browser > value.slots) {
     throw new Refused('BAD_RUNNER', 'use an SSH host or alias, positive --slots, and --browser from zero through slots');
   }
-  return { host: value.host, slots: value.slots, browser: value.browser };
+  for (const key of ['node', 'root']) {
+    if (value[key] !== undefined && (typeof value[key] !== 'string' || /[\u0000-\u001f\u007f]/u.test(value[key])
+      || !(value[key].startsWith('/') && value[key].length > 1 || key === 'node' && value[key] === 'node'))) {
+      throw new Refused('BAD_RUNNER', `runner ${key} must be an absolute remote path${key === 'node' ? ' or node' : ''}`);
+    }
+  }
+  return { host: value.host, slots: value.slots, browser: value.browser,
+    ...(value.node ? { node: value.node } : {}), ...(value.root ? { root: value.root } : {}) };
 }
 
 /** Dirty or non-repository commands cannot claim to execute an exact committed source remotely. */
@@ -52,7 +59,10 @@ function sourceGit(root, args, options = {}) {
 /** Scan every current blob and the commit message before any source bytes leave the controller. */
 function sourceObjects(root, source) {
   const records = sourceGit(root, ['ls-tree', '-r', '-z', '--full-tree', source.commit]).split('\0').filter(Boolean);
-  const config = loadConfig(root);
+  // Protection is pinned to the admitted commit, never a concurrently edited working file.
+  const configRecord = records.find(record => record.endsWith('\tpullboard.json'));
+  const configObject = configRecord?.match(/^\d+ blob ([a-f0-9]{40,64})\t/u)?.[1];
+  const config = configObject ? configFromSource(sourceGit(root, ['cat-file', 'blob', configObject])) : defaults();
   const blobs = [];
   for (const record of records) {
     const match = /^(\d+) (\w+) ([a-f0-9]{40,64})\t([\s\S]+)$/u.exec(record);
@@ -106,17 +116,25 @@ function requestFor(root, command, { runner, source, browser = false, pipefail =
   const directory = mkdtempSync(join(tmpdir(), 'pullboard-runner-send-'));
   let descriptor;
   try {
-    const pack = join(directory, 'source.pack');
-    const output = openSync(pack, 'wx', 0o600);
-    try { sourceGit(root, ['pack-objects', '--stdout'], { input: `${objects.join('\n')}\n`, stdio: ['pipe', output, 'pipe'] }); }
-    finally { closeSync(output); }
-    descriptor = openSync(pack, 'r');
-    const spec = { version: 1, id: randomUUID(), ...current, command, pipefail, slots: runner.slots,
+    const runtimeFiles = Object.fromEntries(['resources.js', 'git.js', 'machine-home.js', 'refused.js']
+      .map(name => [name, readFileSync(fileURLToPath(new URL(`./${name}`, import.meta.url)), 'utf8')]));
+    const runtime = { files: runtimeFiles, sha256: createHash('sha256').update(JSON.stringify(runtimeFiles)).digest('hex') };
+    const spec = { version: 1, id: randomUUID(), runtime, ...current, command, pipefail, slots: runner.slots,
       browser: runner.browser, browserRequired: browser, landing: metadata.landing === true,
       itemCheck: metadata.itemCheck === true, diagnostic: metadata.diagnostic === true,
-      item: String(metadata.item ?? ''), kind: String(metadata.kind ?? '') };
+      item: String(metadata.item ?? ''), kind: String(metadata.kind ?? ''), ...(runner.root ? { root: runner.root } : {}) };
     const worker = readFileSync(fileURLToPath(new URL('./runner-worker.js', import.meta.url)), 'utf8');
-    const remote = `node --input-type=module -e ${shellWord(worker)} ${shellWord(Buffer.from(JSON.stringify(spec)).toString('base64'))}`;
+    const encodedSpec = Buffer.from(JSON.stringify(spec));
+    if (encodedSpec.length > 1024 ** 2) throw new Refused('RUNNER_REQUEST_LIMIT', 'runner tooling request exceeds its safe transfer limit; keep this run local');
+    const framed = join(directory, 'request.bin');
+    const requestOutput = openSync(framed, 'wx', 0o600);
+    try {
+      writeSync(requestOutput, Buffer.from(`${encodedSpec.length}\n`));
+      writeSync(requestOutput, encodedSpec);
+      sourceGit(root, ['pack-objects', '--stdout'], { input: `${objects.join('\n')}\n`, stdio: ['pipe', requestOutput, 'pipe'] });
+    } finally { closeSync(requestOutput); }
+    descriptor = openSync(framed, 'r');
+    const remote = `${shellWord(runner.node ?? 'node')} --input-type=module -e ${shellWord(worker)}`;
     // These are transport hang ceilings, independent of the command's execution budget.
     return { spec, runner, args: ['-T', '-o', 'BatchMode=yes', '-o', 'ForwardAgent=no', '-o', 'ClearAllForwardings=yes',
       '-o', 'SendEnv=-*', '-o', 'ConnectTimeout=10', '-o', 'ServerAliveInterval=10', '-o', 'ServerAliveCountMax=3',
@@ -141,7 +159,7 @@ function resultFrom(request, result) {
     receipt = JSON.parse(Buffer.from(receipts[0].slice(prefix.length), 'base64').toString('utf8'));
   } catch { throw new RunnerDropped(request.runner.host); }
   if (result.error || result.status !== 0 || receipt.id !== request.spec.id || receipt.commit !== request.spec.commit
-    || receipt.tree !== request.spec.tree || !Number.isInteger(receipt.code) || receipt.code < 0 || receipt.code > 255
+    || receipt.tree !== request.spec.tree || receipt.runtimeSha256 !== request.spec.runtime.sha256 || !Number.isInteger(receipt.code) || receipt.code < 0 || receipt.code > 255
     || typeof receipt.root !== 'string' || !Number.isFinite(receipt.wallMs) || receipt.wallMs < 0
     || receipt.outputSha256 !== createHash('sha256').update(output).digest('hex')) {
     throw new RunnerDropped(request.runner.host);

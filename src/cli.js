@@ -230,6 +230,8 @@ const OPTIONS = {
   port: { type: 'string' },
   slots: { type: 'string' },
   browser: { type: 'string' },
+  node: { type: 'string' },
+  root: { type: 'string' },
   export: { type: 'string' },
   'no-open': { type: 'boolean' },
   note: { type: 'string' },
@@ -2838,7 +2840,8 @@ function runnerCommand(io, { first, second, rest, values }) {
     || !/^(?:0|[1-9]\d*)$/u.test(values.browser ?? '')) {
     throw new Refused('USAGE', 'pullboard runner add <ssh-host> --slots <positive integer> --browser <integer from zero through slots>');
   }
-  const runner = addRunner({ host: second, slots: Number(values.slots), browser: Number(values.browser) });
+  const runner = addRunner({ host: second, slots: Number(values.slots), browser: Number(values.browser),
+    ...(values.node !== undefined ? { node: values.node } : {}), ...(values.root !== undefined ? { root: values.root } : {}) });
   io.result?.({ runner });
   io.say(`registered runner ${runner.host}: ${runner.slots} slots, ${runner.browser} browser`);
   return 0;

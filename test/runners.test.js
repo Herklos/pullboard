@@ -1,9 +1,10 @@
 /** Registered SSH runner execution stays inside a committed, secret-free worker checkout [C7]. */
 import assert from 'node:assert/strict';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, watch, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { test } from 'node:test';
 import { takeResource } from '../src/resources.js';
@@ -32,13 +33,13 @@ function cli(repo, env, ...args) {
 }
 
 /** Make a local ssh stand-in that executes the actual worker command in a second private machine. */
-function installSshStandIn({ bin, worker, home, machineHome, requests, dropFirst = false }) {
+function installSshStandIn({ bin, worker, home, machineHome, requests, nodeCommand = 'node', dropFirst = false, dropAfterMarker }) {
   const ssh = join(bin, 'ssh');
   const source = `#!/usr/bin/env node
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, watch, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 const argv = process.argv.slice(2);
 const divider = argv.indexOf('--');
 const host = divider >= 0 ? argv[divider + 1] : '';
@@ -47,6 +48,8 @@ const requests = ${JSON.stringify(requests)};
 const worker = ${JSON.stringify(worker)};
 const home = ${JSON.stringify(home)};
 const machineHome = ${JSON.stringify(machineHome)};
+const configuredNode = ${JSON.stringify(`${shellQuote(nodeCommand)} --input-type=module -e `)};
+const dropAfterMarker = ${JSON.stringify(dropAfterMarker ?? '')};
 const secret = ${JSON.stringify(SECRET)};
 const call = existsSync(requests) ? readFileSync(requests, 'utf8').split('\\n').filter(Boolean).length + 1 : 1;
 const stdinHash = createHash('sha256');
@@ -55,10 +58,35 @@ process.stdin.on('data', part => { stdinBytes += part.length; stdinHash.update(p
 const record = extra => appendFileSync(requests, JSON.stringify({ call, host,
   options: divider < 0 ? [] : argv.slice(0, divider), remoteHasSecret: remoteCommand.includes(secret),
   framed: divider >= 0 && argv[divider] === '--', remoteCommandPresent: Boolean(remoteCommand),
+  remoteStartsWithConfiguredNode: remoteCommand.startsWith(configuredNode),
   remoteHasLocalPath: remoteCommand.includes(${JSON.stringify(worker)}),
   remoteHasSourceHome: remoteCommand.includes(${JSON.stringify(home)}),
   remoteHasSourceMachineHome: remoteCommand.includes(${JSON.stringify(machineHome)}), ...extra }) + '\\n');
-if (host !== ${JSON.stringify(HOST)} && host !== ${JSON.stringify(`${HOST}-drop`)}) {
+const waitForMarker = path => {
+  let cancel = () => {};
+  const promise = new Promise((resolve, reject) => {
+    if (existsSync(path)) return resolve(true);
+    const watcher = watch(dirname(path), { persistent: false });
+    let timer;
+    let settled = false;
+    const finish = (error, found = true) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer); watcher.close(); error ? reject(error) : resolve(found);
+    };
+    cancel = () => finish(null, false);
+    const check = (_event, filename) => {
+      if ((filename === null || String(filename) === basename(path)) && existsSync(path)) finish();
+    };
+    watcher.on('change', check);
+    watcher.once('error', finish);
+    timer = setTimeout(() => finish(new Error('setup marker hang ceiling exceeded')), 20_000); // budget: bound the SSH-to-setup disconnect handshake.
+    check('rename', basename(path));
+  });
+  return { promise, cancel: () => cancel() };
+};
+let cancelDropWait = () => {};
+if (host !== ${JSON.stringify(HOST)} && host !== ${JSON.stringify(`${HOST}-drop`)} && host !== ${JSON.stringify(`${HOST}-setup`)}) {
   record({ refused: true, stdinBytes }); process.exit(255);
 }
 ${dropFirst ? `if (host.endsWith('-drop') && call === 1) {
@@ -68,12 +96,25 @@ ${dropFirst ? `if (host.endsWith('-drop') && call === 1) {
 } else` : ''} {
   const env = { PATH: process.env.PATH, HOME: home, TMPDIR: process.env.TMPDIR,
     PULLBOARD_HOME: home, PULLBOARD_MACHINE_HOME: machineHome, LANG: 'C', LC_ALL: 'C', TZ: 'UTC' };
-  const child = spawn('/bin/sh', ['-c', remoteCommand], { cwd: worker, env,
+  // Replace the marker-driven shell so the injected HUP reaches the actual worker process.
+  const child = spawn('/bin/sh', ['-c', dropAfterMarker ? 'exec ' + remoteCommand : remoteCommand], { cwd: worker, env,
     stdio: ['pipe', 'inherit', 'inherit'] });
   process.stdin.pipe(child.stdin);
+  let droppedAfterSetup = false;
+  if (dropAfterMarker) {
+    const waiting = waitForMarker(dropAfterMarker);
+    cancelDropWait = waiting.cancel;
+    waiting.promise.then(found => {
+      if (found === false) return;
+      droppedAfterSetup = true;
+      process.kill(child.pid, 'SIGHUP');
+    }, error => { record({ setupMarkerError: error.message }); child.kill('SIGKILL'); });
+  }
   child.once('error', error => { record({ spawnError: error.code ?? error.name, stdinBytes }); process.exitCode = 255; });
   child.once('close', (code, signal) => {
+    cancelDropWait();
     record({ workerStarted: true, code, signal, stdinBytes, stdinSha256: stdinHash.digest('hex'),
+      droppedAfterSetup,
       secretInLocalSshEnv: Object.hasOwn(process.env, 'PULLBOARD_RUNNER_FIXTURE_SECRET'),
       localPoolMarkerInLocalSshEnv: Object.hasOwn(process.env, 'PULLBOARD_GATE_SLOT_POOL'),
       localHeldMarkerInLocalSshEnv: Object.hasOwn(process.env, 'PULLBOARD_GATE_SLOT_HELD'),
@@ -89,7 +130,7 @@ ${dropFirst ? `if (host.endsWith('-drop') && call === 1) {
 }
 
 /** Build one committed probe that observes the actual checkout and remote process environment. */
-function writeProbe(repo, { remoteHome, remoteMachineHome, sourceHome, sourceMachineHome, callerPool, callerToken }) {
+function writeProbe(repo, { remoteStateRoot, remoteMachineHome, sourceHome, sourceMachineHome, callerPool, callerToken }) {
   const probe = `import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -102,13 +143,14 @@ test('runner executed the committed source in its private checkout', () => {
   const shallow = execFileSync('git', ['rev-parse', '--is-shallow-repository'], { encoding: 'utf8' }).trim();
   const count = execFileSync('git', ['rev-list', '--count', 'HEAD'], { encoding: 'utf8' }).trim();
   const runnerHome = process.env.HOME;
-  assert.equal(runnerHome, ${JSON.stringify(remoteHome)});
-  const jobs = join(runnerHome, '.pullboard', 'runner-jobs');
-  const checkoutRelative = relative(jobs, process.cwd());
+  const privateHomeRelative = relative(${JSON.stringify(remoteStateRoot)}, runnerHome);
+  assert.ok(privateHomeRelative && !privateHomeRelative.startsWith('..' + sep) && privateHomeRelative !== '..', runnerHome);
+  const checkoutRelative = relative(${JSON.stringify(remoteStateRoot)}, process.cwd());
+  assert.equal(checkoutRelative.split(sep)[0], 'jobs', checkoutRelative);
   assert.notEqual(process.cwd(), ${JSON.stringify(sourceHome)});
   assert.ok(checkoutRelative && !checkoutRelative.startsWith('..' + sep) && checkoutRelative !== '..', process.cwd());
   assert.ok(isAbsolute(process.env.HOME));
-  assert.ok(process.env.HOME.startsWith(join(jobs, checkoutRelative.split(sep)[0]) + sep), process.env.HOME);
+  assert.equal(relative(process.cwd(), runnerHome), join('..', 'home'));
   assert.equal(process.env.PULLBOARD_MACHINE_HOME, ${JSON.stringify(remoteMachineHome)});
   assert.equal(shallow, 'true');
   assert.equal(count, '1', 'the worker has the selected commit without history');
@@ -133,7 +175,7 @@ test('runner executed the committed source in its private checkout', () => {
   assert.notEqual(process.env.PULLBOARD_HOME, ${JSON.stringify(sourceHome)});
   assert.notEqual(process.env.PULLBOARD_MACHINE_HOME, ${JSON.stringify(sourceMachineHome)});
   console.log('RUNNER_FACT ' + JSON.stringify({ commit, tree, cwd: process.cwd(), home: process.env.HOME,
-    runnerHome, machineHome: process.env.PULLBOARD_MACHINE_HOME, gatePool: process.env.PULLBOARD_GATE_SLOT_POOL,
+    runnerHome, stateRoot: ${JSON.stringify(remoteStateRoot)}, machineHome: process.env.PULLBOARD_MACHINE_HOME, gatePool: process.env.PULLBOARD_GATE_SLOT_POOL,
     gateToken: process.env.PULLBOARD_GATE_SLOT_TOKEN, browser: process.env.PULLBOARD_BROWSER_SLOT_HELD }));
 });
 `;
@@ -141,7 +183,7 @@ test('runner executed the committed source in its private checkout', () => {
 }
 
 /** Build a committed probe for the cache copy of one local workspace dependency. */
-function writeCacheProbe(repo) {
+function writeCacheProbe(repo, { remoteStateRoot, nodePath }) {
   const probe = `import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFileSync, readlinkSync, realpathSync } from 'node:fs';
@@ -149,6 +191,9 @@ import { isAbsolute, join, relative, sep } from 'node:path';
 import { test } from 'node:test';
 test('a cached workspace link resolves inside this fresh runner checkout', () => {
   const root = process.cwd();
+  const stateRelative = relative(${JSON.stringify(remoteStateRoot)}, root);
+  assert.ok(stateRelative && !stateRelative.startsWith('..' + sep) && stateRelative !== '..');
+  assert.equal(process.execPath, ${JSON.stringify(nodePath)}, 'the configured runner Node executes the command');
   const commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
   const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).trim();
   const committed = execFileSync('git', ['show', 'HEAD:packages/runner-fixture-dep/witness.txt'], { encoding: 'utf8' });
@@ -185,6 +230,14 @@ function gateResult(stdout) {
   const line = stdout.split(/\r?\n/u).findLast(value => value.startsWith('PULLBOARD_RUN_RESULT '));
   assert.ok(line, stdout);
   return JSON.parse(line.slice('PULLBOARD_RUN_RESULT '.length));
+}
+
+/** Read the remote machine's live gate holders without changing its shared admission state. */
+function readRemoteGateHolders(file) {
+  const db = new DatabaseSync(file, { readOnly: true });
+  try {
+    return db.prepare("SELECT token, pid, agent, browser, item, kind FROM holder WHERE name = 'gate'").all();
+  } finally { db.close(); }
 }
 
 /** Wait for a marker from an external queue observer, with a ceiling for a broken fixture. */
@@ -247,7 +300,7 @@ const result = await withGateSlot(root, async lease => {
   { browser: true, remote: ${remote}, item: ${JSON.stringify(item)}, kind: 'runner-retry-test', agent: ${JSON.stringify(item)},
   onWait(state) {
     const rows = state.line ?? [];
-    if (rows.some(row => row.item === ${JSON.stringify(item)}) && (firstItem === null || rows.some(row => row.item === firstItem))) {
+    if (queueMarker && rows.some(row => row.item === ${JSON.stringify(item)}) && (firstItem === null || rows.some(row => row.item === firstItem))) {
       writeFileSync(${JSON.stringify(queueMarker)}, 'both retry tickets are queued\\n');
     }
   }
@@ -275,12 +328,13 @@ test('a queued run executes on a registered runner and its result comes back [C7
   const home = join(dir, 'home');
   const machineHome = join(home, '.pullboard');
   const remoteHome = join(dir, 'worker-home');
+  const remoteStateRoot = join(remoteHome, '.pullboard-runner');
   const remoteMachineHome = join(remoteHome, '.pullboard');
   const repo = join(dir, 'repo');
   const worker = join(dir, 'second-machine');
   const bin = join(dir, 'bin');
   const requests = join(dir, 'ssh-requests.jsonl');
-  for (const folder of [repo, worker, bin, home, remoteHome, remoteMachineHome, machineHome]) mkdirSync(folder, { recursive: true });
+  for (const folder of [repo, worker, bin, home, remoteHome, remoteStateRoot, remoteMachineHome, machineHome]) mkdirSync(folder, { recursive: true });
   writeFileSync(join(machineHome, 'settings.json'), JSON.stringify({ gateSlots: 1 }));
   const env = {
     ...process.env,
@@ -315,7 +369,7 @@ test('a queued run executes on a registered runner and its result comes back [C7
 
   const ssh = installSshStandIn({ bin, worker, home: remoteHome, machineHome: remoteMachineHome, requests });
   assert.ok(existsSync(ssh));
-  writeProbe(repo, { remoteHome, remoteMachineHome, sourceHome: home, sourceMachineHome: machineHome,
+  writeProbe(repo, { remoteStateRoot, remoteMachineHome, sourceHome: home, sourceMachineHome: machineHome,
     callerPool: 'caller-pool-marker', callerToken: 'caller-token-marker' });
   git(repo, env, 'add', 'runner-probe.test.js');
   git(repo, env, 'commit', '-q', '-m', 'test: add remote source probe [C7]');
@@ -347,7 +401,8 @@ test('a queued run executes on a registered runner and its result comes back [C7
   assert.equal(fact.commit, selectedCommit);
   assert.equal(fact.tree, selectedTree);
   assert.notEqual(fact.cwd, repo);
-  assert.ok(fact.cwd.includes('/.pullboard/runner-jobs/'));
+  const remotePath = relative(remoteStateRoot, fact.cwd);
+  assert.ok(remotePath && !remotePath.startsWith('..' + sep) && remotePath !== '..');
   assert.ok(fact.home.startsWith(fact.cwd.slice(0, fact.cwd.indexOf('/checkout'))));
   assert.notEqual(fact.gatePool, 'caller-pool-marker');
   assert.notEqual(fact.gateToken, 'caller-token-marker');
@@ -486,20 +541,157 @@ while(!fs.existsSync(${JSON.stringify(releaseFirst)})) await sleep(5); })().catc
   }
 });
 
-test('a queued run executes on a registered runner and its result comes back [C7] (cached workspace dependencies stay linked to fresh checkouts)', async (t) => {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-runner-cache-')));
+test('a queued run executes on a registered runner and its result comes back [C7] (disconnect drains an npm setup child before releasing its gate holder)', async (t) => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-runner-setup-disconnect-')));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const home = join(dir, 'home');
   const machineHome = join(home, '.pullboard');
   const remoteHome = join(dir, 'worker-home');
   const remoteMachineHome = join(remoteHome, '.pullboard');
   const repo = join(dir, 'repo');
+  const packageDirectory = join(repo, 'packages', 'setup-fixture-dep');
   const worker = join(dir, 'second-machine');
   const bin = join(dir, 'bin');
   const requests = join(dir, 'ssh-requests.jsonl');
-  const npmCalls = join(dir, 'remote-npm-invocations');
+  const setupReady = join(dir, 'setup-ready');
+  const setupPid = join(dir, 'setup-pid');
+  const setupTerm = join(dir, 'setup-term');
+  const releaseSetup = join(dir, 'release-setup');
+  const setupGone = join(dir, 'setup-gone');
+  const remoteDatabase = join(remoteMachineHome, 'resources.sqlite');
+  for (const folder of [repo, worker, bin, home, machineHome, remoteHome, remoteMachineHome, packageDirectory]) mkdirSync(folder, { recursive: true });
+  writeFileSync(join(machineHome, 'settings.json'), JSON.stringify({ gateSlots: 1 }));
+  const env = {
+    ...process.env, HOME: home, PULLBOARD_HOME: home, PULLBOARD_MACHINE_HOME: machineHome,
+    PATH: `${bin}:${process.env.PATH}`, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
+    GIT_AUTHOR_NAME: 'Runner Setup Fixture', GIT_AUTHOR_EMAIL: 'runner-setup@example.invalid',
+    GIT_COMMITTER_NAME: 'Runner Setup Fixture', GIT_COMMITTER_EMAIL: 'runner-setup@example.invalid',
+  };
+  const initialized = runFixtureChild('git', ['init', '-q', '-b', 'main'], { cwd: repo, env, encoding: 'utf8' });
+  assert.equal(initialized.status, 0, initialized.context);
+  writeFileSync(join(repo, '.gitignore'), 'node_modules/\n');
+  writeFileSync(join(repo, 'pullboard.json'), JSON.stringify({ gate: 'true' }));
+  writeFileSync(join(repo, 'package.json'), JSON.stringify({
+    name: 'runner-setup-fixture', version: '1.0.0', private: true, type: 'module',
+    workspaces: ['packages/setup-fixture-dep'], dependencies: { 'setup-fixture-dep': '1.0.0' },
+  }, null, 2) + '\n');
+  writeFileSync(join(packageDirectory, 'package.json'), JSON.stringify({
+    name: 'setup-fixture-dep', version: '1.0.0', scripts: { postinstall: 'node postinstall.js' },
+  }, null, 2) + '\n');
+  writeFileSync(join(packageDirectory, 'witness.txt'), 'setup fixture package source\n');
+  writeFileSync(join(packageDirectory, 'postinstall.js'), `import { existsSync, watch, writeFileSync } from 'node:fs';
+import { basename, dirname } from 'node:path';
+const ready = ${JSON.stringify(setupReady)};
+const pidFile = ${JSON.stringify(setupPid)};
+const term = ${JSON.stringify(setupTerm)};
+const release = ${JSON.stringify(releaseSetup)};
+const gone = ${JSON.stringify(setupGone)};
+const waitForRelease = new Promise((resolve, reject) => {
+  if (existsSync(release)) return resolve();
+  const watcher = watch(dirname(release), { persistent: false });
+  let timer;
+  const finish = error => { clearTimeout(timer); watcher.close(); error ? reject(error) : resolve(); };
+  const check = (_event, filename) => {
+    if ((filename === null || String(filename) === basename(release)) && existsSync(release)) finish();
+  };
+  watcher.on('change', check);
+  watcher.once('error', finish);
+  timer = setTimeout(() => finish(new Error('postinstall release hang ceiling exceeded')), 20_000); // budget: bound a broken fixture handshake.
+  check('rename', basename(release));
+});
+let stopping = false;
+process.on('SIGTERM', () => {
+  if (stopping) return;
+  stopping = true;
+  writeFileSync(term, 'term received\\n');
+  waitForRelease.then(() => { writeFileSync(gone, 'setup child exited\\n'); process.exit(0); }, error => {
+    console.error(error.message); process.exit(2);
+  });
+});
+writeFileSync(pidFile, String(process.pid) + '\\n');
+writeFileSync(ready, 'setup started\\n');
+`);
+  const npmPathResult = runFixtureChild('which', ['npm'], { cwd: repo, env, encoding: 'utf8' });
+  assert.equal(npmPathResult.status, 0, npmPathResult.context);
+  const packageLock = runFixtureChild(npmPathResult.stdout.trim(), ['install', '--package-lock-only', '--ignore-scripts', '--offline'], {
+    cwd: repo, env, encoding: 'utf8',
+  });
+  assert.equal(packageLock.status, 0, packageLock.context);
+  git(repo, env, 'add', '.gitignore', 'pullboard.json', 'package.json', 'package-lock.json', 'packages/setup-fixture-dep');
+  git(repo, env, 'commit', '-q', '-m', 'test: prepare disconnect during runner setup');
+
+  installSshStandIn({ bin, worker, home: remoteHome, machineHome: remoteMachineHome, requests, dropAfterMarker: setupReady });
+  const host = `${HOST}-setup`;
+  const added = cli(repo, env, 'runner', 'add', host, '--slots', '1', '--browser', '1', '--json');
+  assert.equal(added.status, 0, added.context);
+
+  const previousHome = process.env.PULLBOARD_HOME;
+  const previousMachineHome = process.env.PULLBOARD_MACHINE_HOME;
+  process.env.PULLBOARD_HOME = home;
+  process.env.PULLBOARD_MACHINE_HOME = machineHome;
+  let held;
+  let run;
+  try {
+    held = await takeResource({ name: 'gate', capacity: 1, scope: 'machine', root: repo,
+      agent: 'fixture-local-holder', item: 'setup-local-holder', kind: 'force-registered-runner' });
+    const code = `process.stdout.write('SETUP_RETRY_LOCAL\\n')`;
+    run = observe(startQueueController(repo, env, `node -e ${shellQuote(code)}`,
+      { item: 'setup-disconnect', firstItem: null }));
+
+    await waitForMarker(setupReady);
+    const childPid = Number(readFileSync(setupPid, 'utf8').trim());
+    assert.ok(Number.isSafeInteger(childPid) && childPid > 0);
+    await waitForMarker(setupTerm);
+    const liveHolders = readRemoteGateHolders(remoteDatabase);
+    assert.equal(liveHolders.length, 1, 'the remote gate holder remains while its setup child is handling termination');
+    assert.ok(liveHolders[0].agent.startsWith('pullboard-ssh-'));
+    assert.equal(liveHolders[0].item, 'setup-disconnect');
+    assert.equal(liveHolders[0].kind, 'runner-retry-test');
+    assert.equal(liveHolders[0].browser, 1);
+    assert.notEqual(liveHolders[0].pid, childPid, 'the holder belongs to the worker, not its npm setup child');
+    assert.equal(existsSync(setupGone), false, 'the setup child has not exited before its release handshake');
+
+    held.release();
+    held = null;
+    writeFileSync(releaseSetup, 'release setup child\\n');
+    await waitForMarker(setupGone);
+    const result = await run.closed;
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.match(result.stdout, /SETUP_RETRY_LOCAL/u, 'the transport drop requeues the run onto the local slot');
+    assert.equal(gateResult(result.stdout).isGreen, true);
+    assert.equal(readFileSync(requests, 'utf8').trim().split('\n').length, 1);
+    const request = JSON.parse(readFileSync(requests, 'utf8').trim().split('\n')[0]);
+    assert.equal(request.droppedAfterSetup, true, 'the stand-in drops the connection after npm setup actually starts');
+    assert.equal(request.workerStarted, true);
+    assert.notEqual(request.code, 0, 'the worker exits without a complete success receipt after HUP');
+    assert.equal(readRemoteGateHolders(remoteDatabase).length, 0, 'the remote holder is released after the owned setup child exits');
+  } finally {
+    if (held) held.release();
+    writeFileSync(releaseSetup, 'cleanup release\\n');
+    if (run?.child && run.child.exitCode === null && run.child.signalCode === null) run.child.kill('SIGTERM');
+    await run?.closed;
+    if (previousHome === undefined) delete process.env.PULLBOARD_HOME;
+    else process.env.PULLBOARD_HOME = previousHome;
+    if (previousMachineHome === undefined) delete process.env.PULLBOARD_MACHINE_HOME;
+    else process.env.PULLBOARD_MACHINE_HOME = previousMachineHome;
+  }
+});
+
+test('a queued run executes on a registered runner and its result comes back [C7] (cached workspace dependencies stay linked to fresh checkouts)', async (t) => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-runner-cache-')));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const home = join(dir, 'home');
+  const machineHome = join(home, '.pullboard');
+  const remoteHome = join(dir, 'worker-home');
+  const remoteStateRoot = join(remoteHome, 'private-runner-root');
+  const remoteMachineHome = join(remoteHome, '.pullboard');
+  const repo = join(dir, 'repo');
+  const worker = join(dir, 'second-machine');
+  const bin = join(dir, 'bin');
+  const requests = join(dir, 'ssh-requests.jsonl');
+  const installWitnesses = join(dir, 'remote-install-witnesses');
   const packageDirectory = join(repo, 'packages', 'runner-fixture-dep');
-  for (const folder of [repo, worker, bin, home, machineHome, remoteHome, remoteMachineHome, packageDirectory]) {
+  for (const folder of [repo, worker, bin, home, machineHome, remoteHome, remoteStateRoot, remoteMachineHome, packageDirectory]) {
     mkdirSync(folder, { recursive: true });
   }
   writeFileSync(join(machineHome, 'settings.json'), JSON.stringify({ gateSlots: 1 }));
@@ -521,11 +713,12 @@ test('a queued run executes on a registered runner and its result comes back [C7
     name: 'runner-fixture-dep', version: '1.0.0', type: 'module', scripts: { postinstall: 'node postinstall.js' },
   }, null, 2) + '\n');
   writeFileSync(join(packageDirectory, 'witness.txt'), 'committed workspace witness\n');
-  writeFileSync(join(packageDirectory, 'postinstall.js'), `import { readFileSync, writeFileSync } from 'node:fs';
+  writeFileSync(join(packageDirectory, 'postinstall.js'), `import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 const prefix = process.env.INIT_CWD;
 if (!prefix) throw new Error('npm did not provide the install root');
 writeFileSync(join(prefix, 'node_modules', '.runner-cache-witness'), readFileSync(new URL('./witness.txt', import.meta.url)));
+appendFileSync(${JSON.stringify(installWitnesses)}, 'postinstall\\n');
 `);
   const npmPathResult = runFixtureChild('which', ['npm'], { cwd: repo, env, encoding: 'utf8' });
   assert.equal(npmPathResult.status, 0, npmPathResult.context);
@@ -536,15 +729,13 @@ writeFileSync(join(prefix, 'node_modules', '.runner-cache-witness'), readFileSyn
   assert.equal(lock.status, 0, lock.context);
   git(repo, env, 'add', '.gitignore', 'pullboard.json', 'package.json', 'package-lock.json', 'packages/runner-fixture-dep');
   git(repo, env, 'commit', '-q', '-m', 'test: prepare cached local workspace dependency');
-  const npmShim = join(bin, 'npm');
-  writeFileSync(npmShim, `#!/bin/sh
-printf 'npm\\n' >> ${shellQuote(npmCalls)}
-exec ${shellQuote(npmPath)} "$@"
-`, { mode: 0o700 });
-  chmodSync(npmShim, 0o700);
-  installSshStandIn({ bin, worker, home: remoteHome, machineHome: remoteMachineHome, requests });
-  const added = cli(repo, env, 'runner', 'add', HOST, '--slots', '1', '--browser', '1', '--json');
+  installSshStandIn({ bin, worker, home: remoteHome, machineHome: remoteMachineHome, requests, nodeCommand: process.execPath });
+  const added = cli(repo, env, 'runner', 'add', HOST, '--slots', '1', '--browser', '1', '--node', process.execPath,
+    '--root', remoteStateRoot, '--json');
   assert.equal(added.status, 0, added.context);
+  const registered = JSON.parse(added.stdout);
+  assert.equal(registered.runner.node, process.execPath);
+  assert.equal(registered.runner.root, remoteStateRoot);
 
   const previousHome = process.env.PULLBOARD_HOME;
   const previousMachineHome = process.env.PULLBOARD_MACHINE_HOME;
@@ -555,7 +746,7 @@ exec ${shellQuote(npmPath)} "$@"
     held = await takeResource({ name: 'gate', capacity: 1, scope: 'machine', root: repo,
       agent: 'fixture-cache-local-holder', item: 'cache-local-holder', kind: 'force-registered-runner' });
     const command = 'node --test runner-cache-probe.test.js';
-    writeCacheProbe(repo);
+    writeCacheProbe(repo, { remoteStateRoot, nodePath: process.execPath });
     git(repo, env, 'add', 'runner-cache-probe.test.js');
     git(repo, env, 'commit', '-q', '-m', 'test: assert cache symlink stays job-local');
     const cacheCommit = git(repo, env, 'rev-parse', 'HEAD');
@@ -567,7 +758,7 @@ exec ${shellQuote(npmPath)} "$@"
     assert.equal(firstFact.tree, cacheTree);
     assert.equal(firstFact.root, firstFact.target.slice(0, firstFact.target.indexOf('/packages/runner-fixture-dep')));
     assert.equal(gateResult(first.stdout).runner, HOST);
-    assert.equal(readFileSync(npmCalls, 'utf8'), 'npm\n', 'the first exact-tree run builds the dependency cache');
+    assert.equal(readFileSync(installWitnesses, 'utf8'), 'postinstall\n', 'the first exact-tree run installs the committed workspace dependency');
 
     const second = runThroughGate(repo, env, command, { item: 'cache-second' });
     assert.equal(second.status, 0, second.context);
@@ -579,7 +770,10 @@ exec ${shellQuote(npmPath)} "$@"
     assert.notEqual(firstFact.root, secondFact.root, 'each run unpacks a fresh checkout');
     assert.equal(git(repo, env, 'rev-parse', 'HEAD'), cacheCommit);
     assert.equal(git(repo, env, 'rev-parse', 'HEAD^{tree}'), cacheTree);
-    assert.equal(readFileSync(npmCalls, 'utf8'), 'npm\n', 'the second run copies the cached dependency tree without invoking npm');
+    assert.equal(readFileSync(installWitnesses, 'utf8'), 'postinstall\n', 'the second run reuses the dependency cache without a second install witness');
+    const requestsSeen = readFileSync(requests, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.equal(requestsSeen.length, 2);
+    assert.ok(requestsSeen.every(request => request.remoteStartsWithConfiguredNode), 'both remote workers use the configured absolute Node path');
   } finally {
     if (held) held.release();
     if (previousHome === undefined) delete process.env.PULLBOARD_HOME;
