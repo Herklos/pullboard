@@ -47,16 +47,25 @@ export function invalidateGitFacts() {
   persistentReadFacts.clear();
 }
 
+/** Recognize only the known null device whose timestamps change as unrelated readers touch it. */
+function isNullDevice(stat, path) {
+  return stat.isCharacterDevice() && path === '/dev/null';
+}
+
 /** Return a stable, cheap signature for a path, including file contents against coarse timestamps. */
 function fileSignature(path, includeContents = true) {
   try {
     const stat = lstatSync(path, { bigint: true });
+    const nullDevice = isNullDevice(stat, path);
     let target = null;
     let targetIsFile = false;
     if (stat.isSymbolicLink()) {
       try {
         const followed = statSync(path, { bigint: true });
-        target = [String(followed.dev), String(followed.ino), String(followed.mode), String(followed.size), String(followed.mtimeNs), String(followed.ctimeNs)];
+        const targetPath = realpathSync.native(path);
+        const targetIsNullDevice = isNullDevice(followed, targetPath);
+        target = [String(followed.dev), String(followed.ino), String(followed.mode), String(followed.size),
+          targetIsNullDevice ? null : String(followed.mtimeNs), targetIsNullDevice ? null : String(followed.ctimeNs)];
         targetIsFile = followed.isFile();
       } catch (error) {
         target = ['unreadable', error.code ?? 'ERROR'];
@@ -64,7 +73,9 @@ function fileSignature(path, includeContents = true) {
     }
     let contents = null;
     if (includeContents && (stat.isFile() || targetIsFile)) contents = readFileSync(path, 'utf8');
-    return [String(stat.dev), String(stat.ino), String(stat.mode), String(stat.size), String(stat.mtimeNs), String(stat.ctimeNs), contents, target];
+    // /dev/null's device timestamps advance on reads; its stable identity is enough for config context.
+    return [String(stat.dev), String(stat.ino), String(stat.mode), String(stat.size),
+      nullDevice ? null : String(stat.mtimeNs), nullDevice ? null : String(stat.ctimeNs), contents, target];
   } catch (error) {
     if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return null;
     return ['unreadable', error.code ?? 'ERROR'];
