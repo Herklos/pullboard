@@ -387,7 +387,6 @@ test('a raw full-suite run takes a machine gate slot [Q4]', async () => {
     setOneGateSlot(box, holderRoot);
     const holder = launch(box, holderRoot);
     let fullRun;
-    let focusedRun;
     let followingGate;
     try {
       await waitFor(() => events(box).includes('full-suite-holder start'), 'the fixture gate to hold its only machine slot');
@@ -400,9 +399,6 @@ test('a raw full-suite run takes a machine gate slot [Q4]', async () => {
       assert.equal(outcome, 'waiting', 'both bare and option-only discovery must queue without a test file');
       assert.match(fullRun.stderrText, /waiting for a gate slot: 1 of 1 in use/u);
       assert.equal(existsSync(marker), false, 'the probe has not run while the other process owns the slot');
-      // Real focused work keeps the full run queued across resource polls without a synthetic delay.
-      focusedRun = launchTestRunner(box, suiteRoot, ['test/probe.test.js'], join(box.dir, 'focused.started'));
-      assert.equal((await focusedRun.closed).code, 0, `${focusedRun.stderrText}${focusedRun.stdoutText}`);
       writeFileSync(release, 'release\n');
       assert.equal((await holder.closed).code, 0, holder.stderrText);
       await waitFor(() => existsSync(marker), 'the admitted full-suite probe to start');
@@ -423,7 +419,7 @@ test('a raw full-suite run takes a machine gate slot [Q4]', async () => {
     } finally {
       writeFileSync(release, 'release\n');
       writeFileSync(releaseProbe, 'release\n');
-      await Promise.all([holder, fullRun, focusedRun, followingGate].filter(Boolean).map(child => child.closed));
+      await Promise.all([holder, fullRun, followingGate].filter(Boolean).map(child => child.closed));
     }
   }
 });
@@ -483,7 +479,7 @@ syncBuiltinESMExports();
   assert.equal(readFileSync(marker, 'utf8'), '1', 'the final marker contains the complete slot value');
 });
 
-test('a focused run takes no slot [Q4]', async () => {
+test('a focused run queues behind a held gate slot [Q4,C7]', async () => {
   const box = fixture();
   const release = join(box.dir, 'release-focused-holder');
   const holderRoot = gateRepo(box, 'focused-holder', 0.1, release);
@@ -500,15 +496,18 @@ test('a focused run takes no slot [Q4]', async () => {
       'test/probe.test.js',
     ], marker);
     const outcome = await waitFor(() => { // budget: hang ceiling for the focused runner to announce its actual start state; no throughput claim.
-      if (existsSync(marker)) return 'ran';
       if (focusedRun.stderrText.includes('waiting for a gate slot:')) return 'waiting';
+      if (existsSync(marker)) return 'ran';
       return false;
-    }, 'the focused test to run without joining the machine gate queue', 15_000);
-    assert.equal(outcome, 'ran', 'a named test file is focused even when test options have separate values');
+    }, 'the focused test to queue behind the held machine gate slot', 15_000);
+    assert.equal(outcome, 'waiting', 'a named test file is queued even when test options have separate values');
+    assert.equal(existsSync(marker), false, 'the focused test does not execute while the original holder owns the only slot');
+    assert.deepEqual(events(box), ['focused-holder start'], 'the original gate still owns its slot while the focused run waits');
+    writeFileSync(release, 'release\n');
     const focusedResult = await focusedRun.closed;
     assert.equal(focusedResult.code, 0, `${focusedRun.stderrText}${focusedRun.stdoutText}`);
-    assert.equal(readFileSync(marker, 'utf8'), 'none', 'the focused run does not claim or propagate a full-suite slot');
-    assert.deepEqual(events(box), ['focused-holder start'], 'the original gate still owns its slot while the focused run completes');
+    assert.equal(readFileSync(marker, 'utf8'), '1', 'the focused run propagates its public held-slot marker to the test process');
+    assert.deepEqual(events(box), ['focused-holder start', 'focused-holder end'], 'the original holder releases before the focused run proceeds');
   } finally {
     writeFileSync(release, 'release\n');
     await Promise.all([holder, focusedRun].filter(Boolean).map(child => child.closed));
