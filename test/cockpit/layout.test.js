@@ -466,8 +466,8 @@ test('the board reads at a glance from the status bar [N26]', { timeout: 180_000
     await click('#feed [data-unread]');
     assert.equal((await feed()).length, alreadyRead + 1, 'show all brings back the shouts already read');
 
-    // Cut off from the board, the bar turns red and says why.
-    await chrome.stable("globalThis.fetch = () => Promise.reject(new TypeError('Failed to fetch'))");
+    // Cut off from the board, the bar turns red and says why. Stopping the view drops the board's event stream for real.
+    await view.stop();
     await chrome.waitFor("document.querySelector('#live').textContent.startsWith('offline')", 15_000); // budget: hang ceiling for the offline state after fetch rejection; no rendering-speed claim.
     r = await read();
     const [red, green, blue] = r.barTint;
