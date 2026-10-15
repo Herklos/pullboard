@@ -391,6 +391,50 @@ function specBox(t, { specName = 'SPEC.md', practiceName = 'PRACTICE.md', practi
   return { root, run, command, env, git, specName, practiceName };
 }
 
+test('spec draft files a row in the named section [S1,C7]', (t) => {
+  const specSource = `# Demo
+
+## K · Constraints
+- K1 [draft, must] Works locally. | gate: review
+
+## G · Goals
+- G1 [draft, must] The first goal. | gate: review
+- G2 [retired] An old goal.
+
+## Q · Questions
+- Q4 [pending, aim] A question. | gate: review
+`;
+  const box = specBox(t, { specSource });
+  const rows = () => parseSpec(readFileSync(join(box.root, box.specName), 'utf8')).rows;
+  const constraint = box.run('draft', 'Uses the local disk', '--section', 'K');
+  assert.equal(constraint.status, 0, constraint.stderr);
+  assert.equal(constraint.stdout.trim(), 'K2');
+  assert.equal(rows().find(row => row.id === 'K2').section, 'K · Constraints');
+
+  const goal = box.run('draft', 'A new goal');
+  assert.equal(goal.status, 0, goal.stderr);
+  assert.equal(goal.stdout.trim(), 'G3', 'G stays the default even when another section comes first');
+  assert.equal(rows().find(row => row.id === 'G3').section, 'G · Goals');
+
+  const question = box.run('draft', 'Another question', '--section', 'Q', '--aim', '--gate', 'question test', '--json');
+  assert.equal(question.status, 0, question.stderr);
+  const result = JSON.parse(question.stdout);
+  assert.equal(result.id, 'Q5');
+  assert.equal(result.row.section, 'Q · Questions');
+  assert.equal(result.row.tier, 'aim');
+  assert.equal(result.row.gate, 'question test');
+  assert.equal(rows().find(row => row.id === 'Q5').section, 'Q · Questions');
+
+  const before = readFileSync(join(box.root, box.specName), 'utf8');
+  const unknown = box.run('draft', 'Must not be written', '--section', 'Z');
+  assert.equal(unknown.status, 1);
+  assert.match(unknown.stderr, /SPEC_SECTION.*Z.*K.*G.*Q/u);
+  assert.equal(readFileSync(join(box.root, box.specName), 'utf8'), before);
+  const misplaced = box.run('check', '--section', 'K');
+  assert.equal(misplaced.status, 1);
+  assert.match(misplaced.stderr, /FLAG_NOT_ALLOWED.*section/u);
+});
+
 test('a drafted row reads as draft [S1,C7]', (t) => {
   const specSource = SPEC.replace(
     '- G2 [retired] Old idea.',

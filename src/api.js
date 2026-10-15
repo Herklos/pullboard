@@ -817,6 +817,13 @@ function requestCookie(header, name) {
   return found;
 }
 
+/** Require a canonical base64url cookie token with room for at least 128 random bits. */
+function hasCookieEntropyCapacity(value) {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]+$/u.test(value)) return false;
+  const bytes = Buffer.from(value, 'base64url');
+  return bytes.length >= 16 && bytes.toString('base64url') === value;
+}
+
 /** Compare two credential buffers without exposing their contents or comparing equal-length values ordinarily. */
 function credentialMatches(candidate, expected) {
   return candidate.length === expected.length && timingSafeEqual(candidate, expected);
@@ -830,8 +837,8 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
   if (!['full', 'summary'].includes(stateDetail)) throw new TypeError('createLocalApiHandler stateDetail is full or summary');
   if (sessionCookie !== undefined && (!sessionCookie || typeof sessionCookie.name !== 'string'
     || !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(sessionCookie.name)
-    || typeof sessionCookie.value !== 'string' || !/^[\x21\x23-\x2B\x2D-\x3A\x3C-\x5B\x5D-\x7E]+$/u.test(sessionCookie.value))) {
-    throw new TypeError('createLocalApiHandler sessionCookie needs a cookie name and value');
+    || !hasCookieEntropyCapacity(sessionCookie.value))) {
+    throw new TypeError('createLocalApiHandler sessionCookie needs a cookie name and a canonical base64url value with at least 128 bits of random capacity');
   }
   const codeIsMain = codeIsFromMain() && isMain !== false;
   const key = Buffer.from(secret);
@@ -1002,7 +1009,9 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
       const cookieValue = cookieKey ? requestCookie(req.headers.cookie, cookieName) : null;
       const givenCookie = Buffer.from(cookieValue ?? '');
       const validCookie = cookieKey !== null && cookieValue !== null && credentialMatches(givenCookie, cookieKey);
-      if (!ownHost || (!validKey && !validCookie)) throw new Refused('AUTH_REQUIRED', 'this API needs its session secret and own host; use the address pullboard serve printed');
+      const fetchSite = req.headers['sec-fetch-site'];
+      const cookieFetchSiteAllowed = fetchSite === undefined || fetchSite === 'same-origin';
+      if (!ownHost || (!validKey && (!validCookie || !cookieFetchSiteAllowed))) throw new Refused('AUTH_REQUIRED', 'this API needs its session secret and own host; use the address pullboard serve printed');
       if (req.headers.origin && req.headers.origin !== 'http://' + req.headers.host && !permittedOrigins.has(req.headers.origin)) throw new Refused('API_ORIGIN', 'use the API from its own origin');
       return { local: true };
     },
