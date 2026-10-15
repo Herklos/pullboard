@@ -8,11 +8,54 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
-import { takeDefaultViewPort } from './view-port-fixture.js';
+import { chooseViewPort, takeDefaultViewPort } from './view-port-fixture.js';
+import { DEFAULT_VIEW_PORT, defaultViewPort } from '../src/view-port.js';
+import { runFixtureChildAsync } from './fixture-child.js';
 import { fetchFresh } from './http-fixture.js';
 import { fetchPrintedViewLink } from './view-link-fixture.js';
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
+
+test('the shipped view port stays fixed and malformed environment overrides are refused [N26]', () => {
+  assert.equal(DEFAULT_VIEW_PORT, 4890);
+  assert.equal(defaultViewPort({}), DEFAULT_VIEW_PORT);
+  assert.equal(defaultViewPort({ PULLBOARD_VIEW_PORT: '0' }), 0);
+  assert.equal(defaultViewPort({ PULLBOARD_VIEW_PORT: '65535' }), 65535);
+  for (const value of ['', '-1', '65536', '4.5', '4890x', 'Infinity', ' 4890 ']) {
+    assert.throws(() => defaultViewPort({ PULLBOARD_VIEW_PORT: value }), { code: 'USAGE' });
+  }
+});
+
+test('the suite runs while a view holds the default port [N26,C7]', async (t) => {
+  const unrelated = createHttpServer((_request, response) => response.end('unrelated default listener'));
+  t.after(() => unrelated.listening ? new Promise((done) => unrelated.close(done)) : undefined);
+  try {
+    await new Promise((ready, fail) => {
+      unrelated.once('error', fail);
+      unrelated.listen(DEFAULT_VIEW_PORT, '127.0.0.1', ready);
+    });
+  } catch (error) {
+    if (error.code !== 'EADDRINUSE') throw error;
+    // A person's already-running view is the exact regression condition. Never stop or replace it.
+    t.diagnostic('the default port was already occupied; its existing listener is left untouched');
+  }
+  const names = [
+    'view tests with separate private homes serialize the fixed loopback port',
+    'pullboard view uses its fixed default port and reuses its authenticated listener',
+    'a reused authenticated view completes setup for its new board',
+  ];
+  const result = await runFixtureChildAsync(process.execPath, [
+    resolve(import.meta.dirname, '../bin/run-tests.js'), '--test-name-pattern', names.join('|'),
+    resolve(import.meta.dirname, 'view-port.test.js'), resolve(import.meta.dirname, 'resume-flow.test.js'),
+  ], { cwd: resolve(import.meta.dirname, '..'), env: { ...process.env } });
+  if (result.status !== 0) t.diagnostic(safeErrorSummary(result.stdout));
+  assert.equal(result.status, 0, result.failure ?? result.stderr);
+  for (const name of names) {
+    assert.ok(result.stdout.split('\n').some(line => /^ok \d+ - /u.test(line) && line.includes(name)),
+      `the occupied-default run must actually execute and pass: ${name}`);
+  }
+  assert.match(result.stdout, /^# fail 0$/mu);
+});
 
 /** Summarize an error without exposing authenticated URLs, keys, tokens, or record content. */
 function safeErrorSummary(error) {
@@ -102,12 +145,13 @@ test('a reset during view shutdown is observed until the listener really closes 
 });
 
 /** Start an owned worker that holds the real fixed port under its test-home-independent lease. */
-function portLeaseWorker(directory) {
+function portLeaseWorker(directory, port) {
   const fixture = pathToFileURL(resolve(import.meta.dirname, 'view-port-fixture.js')).href;
   const source = `
     import { createServer } from 'node:net';
     import { takeDefaultViewPort } from ${JSON.stringify(fixture)};
     const lease = await takeDefaultViewPort(process.cwd(), {
+      port: ${port},
       agent: 'port-worker-' + process.pid,
       onWait: () => process.stdout.write('queued\\n'),
     });
@@ -115,7 +159,7 @@ function portLeaseWorker(directory) {
     try {
       await new Promise((ready, fail) => {
         listener.once('error', fail);
-        listener.listen(4890, '127.0.0.1', ready);
+        listener.listen(${port}, '127.0.0.1', ready);
       });
       process.stdout.write('ready\\n');
       for await (const input of process.stdin) if (String(input).includes('release')) break;
@@ -158,13 +202,14 @@ function portLeaseWorker(directory) {
 test('view tests with separate private homes serialize the fixed loopback port [N26,C7]', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'pullboard-view-port-peers-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const first = portLeaseWorker(dir);
+  const port = await chooseViewPort();
+  const first = portLeaseWorker(dir, port);
   let second;
   try {
     await first.line('ready');
     const other = mkdtempSync(join(tmpdir(), 'pullboard-view-port-peer-'));
     t.after(() => rmSync(other, { recursive: true, force: true }));
-    second = portLeaseWorker(other);
+    second = portLeaseWorker(other, port);
     await assert.doesNotReject(second.line('queued'), 'a separate test home still waits for the real machine port');
     first.release();
     assert.equal((await first.closed).code, 0);
@@ -224,11 +269,13 @@ test('pullboard view uses its fixed default port and reuses its authenticated li
   t.after(() => { if (!preserveFixture) rmSync(dir, { recursive: true, force: true }); });
   const lease = await takeDefaultViewPort(dir, { agent: `view-port-${process.pid}` });
   t.after(() => lease.release());
+  const port = lease.port;
   const env = {
     ...process.env,
     HOME: join(dir, 'home'),
     PULLBOARD_HOME: join(dir, 'home', '.pullboard'),
     PULLBOARD_MACHINE_HOME: join(dir, 'machine-home'),
+    PULLBOARD_VIEW_PORT: String(port),
     GIT_CONFIG_GLOBAL: '/dev/null',
     GIT_CONFIG_NOSYSTEM: '1',
   };
@@ -240,7 +287,7 @@ test('pullboard view uses its fixed default port and reuses its authenticated li
     try {
       await new Promise((ready, fail) => {
         unrelated.once('error', fail);
-        unrelated.listen(4890, '127.0.0.1', ready);
+        unrelated.listen(port, '127.0.0.1', ready);
       });
       const busy = runFixtureChild(process.execPath, [BIN, 'view', '--no-open', '--json'], {
         cwd: dir, env, encoding: 'utf8', timeout: 40_000, umask: 0o022,
@@ -248,9 +295,9 @@ test('pullboard view uses its fixed default port and reuses its authenticated li
       assert.equal(busy.status, 1, busy.failure ?? busy.stderr);
       const refusal = JSON.parse(busy.stdout).error;
       assert.equal(refusal.code, 'PORT_BUSY');
-      assert.match(refusal.message, /4890/u);
+      assert.ok(refusal.message.includes(String(port)));
       assert.match(refusal.message, /--port/u);
-      assert.equal(await (await fetchFresh('http://127.0.0.1:4890/')).text(), 'unrelated listener', 'the refusal leaves another listener untouched');
+      assert.equal(await (await fetchFresh(`http://127.0.0.1:${port}/`)).text(), 'unrelated listener', 'the refusal leaves another listener untouched');
     } finally {
       if (unrelated.listening) await new Promise((done) => unrelated.close(done));
     }
@@ -260,9 +307,9 @@ test('pullboard view uses its fixed default port and reuses its authenticated li
     });
     assert.equal(firstResult.status, 0, firstResult.failure ?? firstResult.stderr);
     const first = JSON.parse(firstResult.stdout);
-    assert.equal(first.port, 4890, 'an omitted port binds the fixed loopback port');
+    assert.equal(first.port, port, 'an omitted port binds the configured fixed loopback port');
     assert.equal(first.reused, false, 'the first invocation owns the new listener');
-    const sessionFile = join(env.PULLBOARD_HOME, 'view-4890.json');
+    const sessionFile = join(env.PULLBOARD_HOME, `view-${port}.json`);
     assert.equal((statSync(sessionFile).mode & 0o077) === 0, true, 'the session secret stays private under umask 022');
     const page = await fetchPrintedViewLink(first.url);
     assert.equal(page.status, 200, 'the printed secret link reaches the view');
@@ -282,7 +329,7 @@ test('pullboard view uses its fixed default port and reuses its authenticated li
     });
     assert.equal(freeResult.status, 0, freeResult.failure ?? freeResult.stderr);
     const free = JSON.parse(freeResult.stdout);
-    assert.notEqual(free.port, 4890, 'explicit port 0 still asks the operating system for a free port');
+    assert.notEqual(free.port, port, 'explicit port 0 still asks the operating system for a free port');
     assert.equal(free.reused, false, 'explicit port 0 does not silently reuse the fixed default');
 
     const reserved = createServer();
@@ -293,7 +340,7 @@ test('pullboard view uses its fixed default port and reuses its authenticated li
     const requestedPort = reserved.address().port;
     await new Promise((done) => reserved.close(done));
     const namedResult = runFixtureChild(process.execPath, [BIN, 'view', '--no-open', '--port', String(requestedPort), '--json'], {
-      cwd: dir, env, encoding: 'utf8', timeout: 40_000, umask: 0o022,
+      cwd: dir, env: { ...env, PULLBOARD_VIEW_PORT: 'invalid' }, encoding: 'utf8', timeout: 40_000, umask: 0o022,
     });
     assert.equal(namedResult.status, 0, namedResult.failure ?? namedResult.stderr);
     assert.equal(JSON.parse(namedResult.stdout).port, requestedPort, 'an explicit nonzero port overrides the default');
