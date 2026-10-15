@@ -43,11 +43,36 @@ test('only explicit relay commands open outbound connections; the view and API s
     (file === 'src/local-fetch.js' && line.trim() === "import { request as httpRequest } from 'node:http';") ||
     (file === 'src/serve.js' && line.trim() === "const reply = await fetch(address.origin + path, { headers: { 'x-pullboard-key': address.searchParams.get('k') } });") ||
     (file === 'src/view-session.js' && line.trim() === "const response = await fetch(`http://${LOOPBACK}:${view.port}/api/v1/boards?k=${encodeURIComponent(view.secret)}`, {") ||
-    (file === 'src/cockpit.js' && /^\s*const res = await fetch\(path, /.test(line));
+    (file === 'src/cockpit.js' && /^\s*const res = await fetch\(path, /.test(line)) ||
+    (file === 'src/cockpit.js' && line.trim() === "try { reply = await fetch(base + '/local/protocol', { signal: AbortSignal.timeout(3000), credentials: 'omit', redirect: 'error' }); }");
   const found = sources().flatMap(({ file, lines }) =>
     lines.flatMap((line, index) => (NETWORK.test(line) && !allowed(file, line) ? [`${file}:${index + 1}: ${line.trim()}`] : [])),
   );
   assert.deepEqual(found, []);
+  const cockpitSource = readFileSync(join(ROOT, 'src', 'cockpit.js'), 'utf8');
+  const discoveryLines = cockpitSource.split('\n').filter((line) => /\bfetch\s*\(/u.test(line) && /\/local\/protocol\b/u.test(line));
+  if (discoveryLines.length) {
+    assert.equal(discoveryLines.length, 1, 'the cockpit makes only one local discovery request');
+    assert.equal(discoveryLines[0].trim(), "try { reply = await fetch(base + '/local/protocol', { signal: AbortSignal.timeout(3000), credentials: 'omit', redirect: 'error' }); }");
+    assert.match(discoveryLines[0], /signal: AbortSignal\.timeout\(3000\)/u);
+    assert.match(discoveryLines[0], /credentials: 'omit'/u);
+    assert.match(discoveryLines[0], /redirect: 'error'/u);
+    assert.match(cockpitSource, /const LOCAL_VIEW = 'http:\/\/127\.0\.0\.1:4890';/u, 'the fallback is the fixed local-view origin');
+    assert.match(cockpitSource, /const base = localSession\?\.origin \|\| LOCAL_VIEW;/u, 'the fetch base is the fixed origin or a validated local session');
+    const declarations = cockpitSource.split('\n').filter((line) => /\b(?:let|const|var)\s+localSession\s*=/.test(line));
+    assert.equal(declarations.length, 1, 'the local session has one declaration');
+    assert.match(declarations[0], /^\s*let\s+localSession\s*=\s*null;\s*$/u, 'the local session starts empty and only guarded assignments may populate it');
+    const assignments = cockpitSource.split('\n').filter((line) => /\blocalSession\s*=/.test(line) && !/\b(?:let|const|var)\s+localSession\s*=/.test(line) && !/\blocalSession\s*=\s*null\b/u.test(line));
+    assert.equal(assignments.length, 2, 'both non-null local-session assignments are guarded');
+    assert.ok(assignments.some((line) => /validLocalSession\(returnedSession\)\)\s*localSession\s*=\s*\{[^}]*returnedSession\.origin/u.test(line)), 'the returned session is validated before it is kept');
+    assert.ok(assignments.some((line) => /validLocalSession\(kept\)\)\s*localSession\s*=\s*kept\b/u.test(line)), 'the stored session is validated before it is reused');
+    const validator = /function validLocalSession\([^)]*\) \{([\s\S]*?)\n\}/u.exec(cockpitSource)?.[1];
+    assert.ok(validator, 'the local session base is accepted through its validator');
+    assert.match(validator, /address\.protocol\s*===\s*'http:'/u);
+    assert.match(validator, /\['127\.0\.0\.1',\s*'localhost'\]\.includes\(address\.hostname\)/u);
+    assert.match(validator, /address\.port\s*!==\s*''/u);
+    assert.match(validator, /address\.origin\s*===\s*value\.origin/u, 'origin equality rejects credentials and non-canonical origins');
+  }
   const localFetchPath = join(ROOT, 'src', 'local-fetch.js');
   const localFetchSource = readFileSync(localFetchPath, 'utf8');
   const httpImport = "import { request as httpRequest } from 'node:http';";
