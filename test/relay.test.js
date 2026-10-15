@@ -216,6 +216,56 @@ test('a confirmation approved before its deadline can reach the SSH CLI just aft
   assert.match(delivered.token, /^ps_[A-Za-z0-9_-]{43}$/u);
 });
 
+test('device authorization stays serialized while GitHub confirms its user [P6, H5]', async (t) => {
+  const box = await fixture(t);
+  const intent = { board: 'ssh-board', boardName: 'fixture-board', host: 'fixture-host', repository: 'fixture/repository' };
+  const flow = await box.auth.beginDevice({ intent });
+  const originalUser = box.config.github.user;
+  let releaseLookup;
+  let announceLookup;
+  const lookupStarted = new Promise((resolve) => { announceLookup = resolve; });
+  const lookupHeld = new Promise((resolve) => { releaseLookup = resolve; });
+  let lookupCount = 0;
+  box.config.github.user = async (token) => {
+    lookupCount += 1;
+    if (lookupCount === 1) {
+      announceLookup();
+      await lookupHeld;
+    }
+    return originalUser(token);
+  };
+  box.state.deviceAuthorized = true;
+  box.advance(flow.interval * 1000);
+  let firstPoll;
+  try {
+    firstPoll = box.auth.pollDevice(flow.ticket);
+    await lookupStarted;
+    const providerPolls = () => box.calls.filter((call) => call.path === '/login/oauth/access_token').length;
+    assert.equal(providerPolls(), 1, 'the first provider poll produced the grant now being resolved');
+    box.advance(flow.interval * 1000);
+    const concurrent = await box.auth.pollDevice(flow.ticket);
+    assert.equal(concurrent.pending, true, 'a second CLI request waits while identity confirmation finishes');
+    assert.equal(concurrent.pendingConfirmation, undefined, 'the held session is not exposed as ready yet');
+    assert.equal(providerPolls(), 1, 'the concurrent CLI request cannot consume the provider grant again');
+
+    releaseLookup();
+    const pending = await firstPoll;
+    assert.equal(pending.pendingConfirmation, true);
+    assert.equal('token' in pending, false, 'the held session remains unavailable before person approval');
+    const browser = box.auth.openDeviceConfirmation(flow.confirmationTicket);
+    const status = box.auth.deviceConfirmationStatus(flow.confirmationTicket, browser.binding);
+    assert.equal(status.ready, true, 'the original browser confirmation remains attached to the authorized device flow');
+    assert.equal('token' in status, false, 'browser status never returns the held session credential');
+    const waiting = await box.auth.pollDevice(flow.ticket);
+    assert.equal(waiting.pendingConfirmation, true, 'the CLI keeps waiting for the person decision');
+    assert.equal('token' in waiting, false);
+    assert.equal(lookupCount, 1, 'one successful device grant creates one server-held user session');
+  } finally {
+    releaseLookup();
+    if (firstPoll) await firstPoll.catch(() => {});
+  }
+});
+
 test('unreadable links are refused; agent tokens belong to exactly one board [H8, H1]', async (t) => {
   const box = await fixture(t);
   const signed = await login(box);

@@ -274,45 +274,48 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
       flow.next = now() + flow.interval * 1000;
       flow.busy = true;
       let result;
-      try { result = await github.pollDevice(flow.deviceCode); }
-      catch (error) {
-        if (['OAUTH_DENIED', 'OAUTH_EXPIRED'].includes(error.code)) {
+      try {
+        try { result = await github.pollDevice(flow.deviceCode); }
+        catch (error) {
+          if (['OAUTH_DENIED', 'OAUTH_EXPIRED'].includes(error.code)) {
+            deviceFlows.delete(key);
+            if (flow.confirmationTicket) deviceConfirmations.delete(hash(flow.confirmationTicket));
+          }
+          throw error;
+        }
+        if (flow.expires <= now()) {
           deviceFlows.delete(key);
           if (flow.confirmationTicket) deviceConfirmations.delete(hash(flow.confirmationTicket));
+          if (!flow.confirmed) discardDeviceSession(flow);
+          throw new Refused('OAUTH_EXPIRED', 'CLI sign-in expired; start again');
         }
-        throw error;
-      }
-      finally { flow.busy = false; }
-      if (flow.expires <= now()) {
-        deviceFlows.delete(key);
-        if (flow.confirmationTicket) deviceConfirmations.delete(hash(flow.confirmationTicket));
-        if (!flow.confirmed) discardDeviceSession(flow);
-        throw new Refused('OAUTH_EXPIRED', 'CLI sign-in expired; start again');
-      }
-      if (flow.declined) {
-        deviceFlows.delete(key);
-        if (flow.confirmationTicket) deviceConfirmations.delete(hash(flow.confirmationTicket));
-        throw new Refused('OAUTH_DENIED', 'the person declined to link this board; run pullboard relay on again to start a new sign-in');
-      }
-      if (result.pending) {
-        if (result.slow) flow.interval += 5;
-        if (Number.isFinite(result.interval) && result.interval > flow.interval) flow.interval = result.interval;
-        flow.next = now() + flow.interval * 1000;
-        return { pending: true, retryAfter: flow.interval };
-      }
-      if (flow.intent) {
-        flow.session = await signedIn(result);
-        if (flow.declined || flow.expires <= now()) {
-          discardDeviceSession(flow);
+        if (flow.declined) {
           deviceFlows.delete(key);
-          deviceConfirmations.delete(hash(flow.confirmationTicket));
-          throw new Refused(flow.declined ? 'OAUTH_DENIED' : 'OAUTH_EXPIRED', 'the person confirmation ended before sign-in completed; run pullboard relay on again');
+          if (flow.confirmationTicket) deviceConfirmations.delete(hash(flow.confirmationTicket));
+          throw new Refused('OAUTH_DENIED', 'the person declined to link this board; run pullboard relay on again to start a new sign-in');
         }
-        flow.expires = now() + 10 * 60_000;
-        return { pending: true, pendingConfirmation: true, confirmationExpiresIn: 600, retryAfter: flow.interval };
+        if (result.pending) {
+          if (result.slow) flow.interval += 5;
+          if (Number.isFinite(result.interval) && result.interval > flow.interval) flow.interval = result.interval;
+          flow.next = now() + flow.interval * 1000;
+          return { pending: true, retryAfter: flow.interval };
+        }
+        if (flow.intent) {
+          flow.session = await signedIn(result);
+          if (flow.declined || flow.expires <= now()) {
+            discardDeviceSession(flow);
+            deviceFlows.delete(key);
+            deviceConfirmations.delete(hash(flow.confirmationTicket));
+            throw new Refused(flow.declined ? 'OAUTH_DENIED' : 'OAUTH_EXPIRED', 'the person confirmation ended before sign-in completed; run pullboard relay on again');
+          }
+          flow.expires = now() + 10 * 60_000;
+          return { pending: true, pendingConfirmation: true, confirmationExpiresIn: 600, retryAfter: flow.interval };
+        }
+        deviceFlows.delete(key);
+        return signedIn(result);
+      } finally {
+        flow.busy = false;
       }
-      deviceFlows.delete(key);
-      return signedIn(result);
     },
     /** Start a cookie-bound browser visit for the separate one-use board confirmation nonce. */
     openDeviceConfirmation(ticket) {
