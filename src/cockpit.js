@@ -226,7 +226,7 @@ const $ = (id) => document.getElementById(id);
 
 /** Mark primary pointer targets whose click would be lost if a refresh replaces them. */
 function holdClickPointer(event) {
-  if (!event.isPrimary || event.button !== 0 || !(event.target instanceof Element && event.target.closest('#pipeline .pipeline-item, #spec-detail [data-row-decision="decline"], #spec-decline-submit'))) return;
+  if (!event.isPrimary || event.button !== 0 || !(event.target instanceof Element && event.target.closest('#pipeline .pipeline-item, #spec-detail [data-row-decision="decline"], #spec-decline-submit, #roadmap-panel [data-roadmap-jump]'))) return;
   heldClickPointer = event.pointerId;
 }
 

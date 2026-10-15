@@ -443,6 +443,51 @@ test('the roadmap keeps every upcoming release open [N26]', {
   }
 });
 
+/** Record target identity, geometry and native events without changing the Roadmap's input path. */
+async function watchRoadmapPress(chrome, key) {
+  await chrome.stable(`(() => {
+    const selector = '#roadmap-panel [data-roadmap-jump=' + CSS.escape(${JSON.stringify(key)}) + ']';
+    let original = document.querySelector(selector);
+    const originalRender = window.render;
+    const nodeIds = new WeakMap(); let nextNodeId = 0;
+    const nodeId = node => { if (!node) return null; if (!nodeIds.has(node)) nodeIds.set(node, ++nextNodeId); return nodeIds.get(node); };
+    const trace = window.__roadmapPress = { original, originalRender, samples:[], events:[] };
+    /** Keep bounded observations of the live target and its original node. */
+    const record = phase => {
+      const current = document.querySelector(selector), box = current?.getBoundingClientRect();
+      const panel = document.querySelector('#roadmap-panel'), list = document.querySelector('#roadmap-list');
+      trace.samples.push({ phase, at:performance.now(), connected:original.isConnected, same:current === original,
+        box:box ? [box.x,box.y,box.width,box.height] : null, scroll:[scrollX,scrollY],
+        panelId:nodeId(panel), panelCount:panel?.querySelectorAll('[data-roadmap-jump]').length,
+        listId:nodeId(list), listCount:list?.querySelectorAll(':scope > [data-key]').length,
+        panelScroll:panel?.scrollTop, count:current?.querySelector('b')?.textContent, deferred:deferredClickRender });
+      if (trace.samples.length > 8) trace.samples.shift();
+    };
+    trace.record = record;
+    window.render = function(...args) { record('before render'); const result = originalRender.apply(this,args); record('after render'); return result; };
+    trace.listeners = ['pointermove','pointerdown','pointerup','click'].map(type => {
+      const listener = event => {
+        const button = event.target.closest?.('[data-roadmap-jump]');
+        if (type === 'pointerdown' && button?.dataset.roadmapJump === ${JSON.stringify(key)}) { original = button; trace.original = button; }
+        record(type); trace.events.push({ type, key:button?.dataset.roadmapJump || null });
+        if(trace.events.length > 8) trace.events.shift();
+      };
+      document.addEventListener(type, listener, true); return [type,listener];
+    });
+    record('watch');
+  })()`);
+  return {
+    /** Read only bounded samples and event keys, never retain DOM objects in the host. */
+    async snapshot() {
+      return JSON.parse(await chrome.stable(`JSON.stringify((() => { const t=window.__roadmapPress; t.record('snapshot'); return {samples:t.samples,events:t.events}; })())`));
+    },
+    /** Restore the actual renderer and remove only this observer's event listeners. */
+    async dispose() {
+      await chrome.stable(`(() => { const t=window.__roadmapPress; if(!t)return; window.render=t.originalRender; for(const [type,listener] of t.listeners)document.removeEventListener(type,listener,true); delete window.__roadmapPress; })()`);
+    },
+  };
+}
+
 test('the roadmap panel jumps to each release [N26]', {
   timeout: 150_000, //budget: hang ceiling for real Chrome startup, fourteen jumps at two widths, and panel scrolling.
 }, async (t) => {
@@ -563,6 +608,61 @@ test('the roadmap panel jumps to each release [N26]', {
     if (chrome) await closeSnapshotChrome(chrome);
     rmSync(profile, { recursive: true, force: true });
     await view.stop();
+  }
+});
+
+test('a refresh between pointer down and up preserves a roadmap release click [N26,C7]', {
+  timeout: 90_000, // budget: hang ceiling for real board setup, Chrome and two pointer-held board refreshes.
+}, async (t) => {
+  const executable = chromeExecutable();
+  assert.ok(executable, 'Chrome is required for the Roadmap refresh control.');
+  const box = machine(), demo = project(box, 'roadmap-refresh-press');
+  for (const name of ['0.8.7','0.8.8','0.8.9','0.8.10','0.8.11','0.8.12','0.8.13','0.8.14']) {
+    box.run(demo.repo, 'milestone', 'add', name, '--note', 'Release navigation control.');
+  }
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-roadmap-refresh-press-'));
+  let chrome, trace;
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.waitFor('data?.project?.milestones?.length === 8');
+    for (const width of [375,1280]) {
+      await chrome.send('Emulation.setDeviceMetricsOverride', { width, height:900, deviceScaleFactor:1, mobile:false });
+      await press(chrome, "document.querySelector('[data-tab=roadmap]')");
+      const key = 'm:0.8.7';
+      trace = await watchRoadmapPress(chrome, key);
+      const message = `roadmap refresh while pointer held ${width}`;
+      let held;
+      await press(chrome, `document.querySelector('#roadmap-panel [data-roadmap-jump="${key}"]')`, {
+        afterMouseDown: async () => {
+          box.run(demo.repo, 'shout', 'person', message);
+          await chrome.waitFor(`data.project.shouts.some(shout => shout.shout_text === ${JSON.stringify(message)})`);
+          held = await trace.snapshot();
+          t.diagnostic(`${width}: held refresh: ${JSON.stringify(held)}`);
+        },
+      });
+      await chrome.waitFor(`document.querySelector('#feed')?.textContent.includes(${JSON.stringify(message)})`);
+      const released = await trace.snapshot();
+      t.diagnostic(`${width}: released: ${JSON.stringify(released)}`);
+      assert.ok(held.samples.some(sample => sample.phase === 'after render'), `${width}: the real board refresh attempted a render while held`);
+      assert.ok(held.samples.at(-1).connected && held.samples.at(-1).same, `${width}: the pressed button survives the refresh`);
+      assert.ok(held.samples.at(-1).deferred, `${width}: the render waits until the pointer release`);
+      assert.ok(released.events.some(event => event.type === 'click' && event.key === key), `${width}: the release produces the intended native click`);
+      const reached = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+        const target=document.querySelector('#roadmap-list [data-key="${key}"]'), r=target.getBoundingClientRect();
+        return {top:r.top,bottom:r.bottom,bar:document.querySelector('.top').getBoundingClientRect().bottom,
+          current:document.querySelector('#roadmap-panel [data-roadmap-jump="${key}"]').getAttribute('aria-current')};
+      })())`));
+      assert.ok(reached.bottom > reached.bar && reached.top < 900, `${width}: the selected release is visible: ${JSON.stringify(reached)}`);
+      assert.equal(reached.current, 'location', `${width}: the panel marks the selected release`);
+      await trace.dispose(); trace = null;
+    }
+  } finally {
+    try { if (trace) await trace.dispose(); }
+    finally {
+      try { if(chrome) await closeSnapshotChrome(chrome); }
+      finally { try { await view.stop(); } finally { rmSync(profile,{recursive:true,force:true}); } }
+    }
   }
 });
 
