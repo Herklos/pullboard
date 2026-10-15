@@ -235,7 +235,22 @@ async function relayServer(t, directory, auth) {
     server.closeAllConnections();
     await closed;
   });
-  return { origin, calls, uploads, failMoves(value) { refuseMoves = value; }, dropNextReply({ offline = false } = {}) { loseReply = true; blockAfterDrop = offline; }, failReads(value) { refuseReads = value; }, advance(days) { now = Date.now() + days * 86400000; } };
+  let dropArmedAt = null;
+  /**
+   * Refuse to continue while an armed reply drop was never consumed by a move.
+   * Why: the drop is global, so a step that failed before posting its move left it armed,
+   * and the next step's move (an innocent retry) was destroyed instead (#512).
+   */
+  function requireDropConsumed(at) {
+    if (!loseReply) return;
+    const since = calls.slice(dropArmedAt).map(({ method, path }) => `${method} ${path.split('?')[0]}`);
+    throw new Error(`relay fixture: the reply drop armed before ${at} was never consumed by a move; relay calls since arming: ${since.join(', ') || 'none'}`);
+  }
+  return { origin, calls, uploads, failMoves(value) { refuseMoves = value; },
+    dropNextReply({ offline = false } = {}) { requireDropConsumed('arming another drop'); loseReply = true; blockAfterDrop = offline; dropArmedAt = calls.length; },
+    dropPending() { return loseReply; },
+    failReads(value) { if (!value) requireDropConsumed('reads were restored'); refuseReads = value; },
+    advance(days) { now = Date.now() + days * 86400000; } };
 }
 
 test('[H1,H3,H7,H15,H16] relay on snapshots and orders ciphertext, refuses offline moves, and off preserves the board', async (t) => {

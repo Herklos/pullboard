@@ -142,6 +142,17 @@ function notices(document, io) {
   }
 }
 
+/**
+ * Name how a relay request failed before any response, from the error's own fields only.
+ * Why: a bare "did not answer" hid whether a request timed out, was refused or lost its socket,
+ * so load-dependent relay failures could not be attributed (#512).
+ */
+function transportFailure(error) {
+  if (error?.name === 'TimeoutError' || error?.name === 'AbortError') return 'timed out';
+  const code = error?.cause?.code ?? error?.code;
+  return typeof code === 'string' && /^[A-Z][A-Z0-9_]{1,40}$/u.test(code) ? code : 'no connection';
+}
+
 /** The sole outbound transport in the CLI: explicit sign-in or a saved, opted-in board link. */
 async function request(state, path, { method = 'GET', body, allowMissing = false, initialBaseline = false } = {}, io) {
   const supplied = process.env.PULLBOARD_RELAY_TOKEN;
@@ -149,13 +160,18 @@ async function request(state, path, { method = 'GET', body, allowMissing = false
   if (readToken !== undefined && !/^pa_[A-Za-z0-9_-]{43}$/.test(readToken)) throw new Refused('AUTH_REQUIRED', 'supply a current scoped board token without including it in command arguments');
   const token = readToken ?? state.token;
   let response;
+  const startedAt = Date.now();
   try {
     response = await fetch(relayOrigin(state.url) + path, {
       method, redirect: 'error', signal: AbortSignal.timeout(10000),
       headers: { 'x-pullboard-engine': String(ENGINE_VERSION), ...(token ? { authorization: 'Bearer ' + token } : {}), ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...(initialBaseline ? { 'if-none-match': '*' } : {}) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
-  } catch { throw new Refused('RELAY_UNAVAILABLE', `the relay ${state.url} did not answer; read the local board offline, then retry this move when the relay is reachable`); }
+  } catch (error) {
+    const refusal = new Refused('RELAY_UNAVAILABLE', `the relay ${state.url} did not answer (${transportFailure(error)} after ${Date.now() - startedAt} ms on ${method} ${path.split('?')[0]}); read the local board offline, then retry this move when the relay is reachable`);
+    refusal.transportFailure = transportFailure(error);
+    throw refusal;
+  }
   let document;
   try { document = await response.json(); }
   catch {
