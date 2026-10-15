@@ -352,7 +352,7 @@ test('the check command is part of the frozen bar; items without one keep their 
  * A real repo and board with an isolated registry, so JSON exercises the command's lint and history
  * checks rather than just serializing the parser. Its files may use the configured names.
  */
-function specBox(t, { specName = 'SPEC.md', practiceName = 'PRACTICE.md', practice, specSource = SPEC } = {}) {
+function specBox(t, { specName = 'SPEC.md', practiceName = 'PRACTICE.md', practice, specSource = SPEC, freshInit = false } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-spec-json-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const bin = join(root, '.bin');
@@ -380,6 +380,11 @@ function specBox(t, { specName = 'SPEC.md', practiceName = 'PRACTICE.md', practi
   const init = spawnSync(process.execPath, [resolve(import.meta.dirname, '../bin/pullboard.js'), 'init'], { cwd: root, env, encoding: 'utf8' });
   assert.equal(init.status, 0, init.stderr);
   const config = JSON.parse(readFileSync(join(root, 'pullboard.json'), 'utf8'));
+  if (freshInit) {
+    git('add', '-A');
+    git('commit', '-q', '-m', 'chore: fresh pullboard init');
+    return { root, run, command, env, git, specName: config.spec, practiceName: config.practice };
+  }
   writeFileSync(join(root, 'pullboard.json'), JSON.stringify({ ...config, spec: specName, practice: practiceName, gate: 'true', lanes: { review: { owns: [] } } }));
   rmSync(join(root, 'SPEC.md'), { force: true });
   rmSync(join(root, 'PRACTICE.md'), { force: true });
@@ -433,6 +438,40 @@ test('spec draft files a row in the named section [S1,C7]', (t) => {
   const misplaced = box.run('check', '--section', 'K');
   assert.equal(misplaced.status, 1);
   assert.match(misplaced.stderr, /FLAG_NOT_ALLOWED.*section/u);
+});
+
+/** Exercise fresh-init examples, cross-file ID reservation, and fail-closed malformed rows. */
+test('spec draft never reuses an existing id [S1,C7]', (t) => {
+  const fresh = specBox(t, { freshInit: true });
+  const freshSpec = join(fresh.root, fresh.specName);
+  assert.equal(parseSpec(readFileSync(freshSpec, 'utf8')).rows.length, 0, 'the fenced examples are not real rows');
+  const first = fresh.run('draft', 'The first real requirement');
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(first.stdout.trim(), 'G1', 'the first real requirement receives the first available id');
+  assert.deepEqual(parseSpec(readFileSync(freshSpec, 'utf8')).rows.map(({ id, status }) => [id, status]), [['G1', 'draft']]);
+
+  const doctrine = '# Doctrine\n\n## G · Goals\n- G3 [draft] A repo doctrine id occupies this number.\n';
+  const crossFile = specBox(t, { practiceName: 'DOCTRINE.md', practice: doctrine });
+  const next = crossFile.run('draft', 'The next requirement');
+  assert.equal(next.status, 0, next.stderr);
+  assert.equal(next.stdout.trim(), 'G4', 'the allocator reserves ids present in DOCTRINE.md as well as SPEC.md');
+  const specRows = parseSpec(readFileSync(join(crossFile.root, crossFile.specName), 'utf8')).rows;
+  const doctrineRows = parseSpec(readFileSync(join(crossFile.root, crossFile.practiceName), 'utf8')).rows;
+  assert.ok(specRows.some((row) => row.id === 'G4'));
+  assert.ok(doctrineRows.some((row) => row.id === 'G3'));
+
+  for (const source of ['spec', 'doctrine']) {
+    const malformed = specBox(t, {
+      ...(source === 'doctrine' ? { practiceName: 'DOCTRINE.md', practice: '# Doctrine\n\n## G · Goals\n- G3 [draft, must\n' } : {}),
+      ...(source === 'spec' ? { specSource: SPEC + '\n- G3 [draft, must\n' } : {}),
+    });
+    const target = join(malformed.root, source === 'spec' ? malformed.specName : malformed.practiceName);
+    const before = readFileSync(target);
+    const refused = malformed.run('draft', 'Cannot choose safely');
+    assert.notEqual(refused.status, 0, `${source} with an unparsed row-like entry refuses a draft`);
+    assert.match(refused.stderr, /SPEC_INVALID.*unparsed row/u);
+    assert.deepEqual(readFileSync(target), before, 'refusal leaves the source bytes unchanged');
+  }
 });
 
 test('a drafted row reads as draft [S1,C7]', (t) => {
