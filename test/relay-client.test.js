@@ -310,6 +310,7 @@ test('[H1,H3,H7,H15,H16] relay on snapshots and orders ciphertext, refuses offli
   assert.deepEqual(relay.calls, [], 'unlinked commands open no relay connection');
   const keysDirectory = join(pullboardHome, 'relay-keys');
   mkdirSync(keysDirectory, { recursive: true, mode: 0o755 });
+  chmodSync(keysDirectory, 0o755);
   await assert.rejects(cli(root, relayEnv, 'relay', 'on', '--url', relay.origin), /RELAY_KEY_STORAGE/);
   assert.deepEqual(await auth.boardsFor(person.token), [], 'a failed device key save creates no remote link');
   assert.ok(!relay.calls.some((call) => call.path === '/auth/boards/link'));
