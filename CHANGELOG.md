@@ -4,6 +4,18 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.8.25] - 2026-10-15
+
+### Project switches you can trust, and a 98-second explainer
+
+New on [pullboard.dev](https://pullboard.dev): a 98-second explainer video on the home page that shows the whole loop, from a decision to a checked, landed piece of work.
+
+### Fixed
+
+- Switching projects in the view never shows the previous project's numbers under the new project's name. The project list appears at once, and the new project's counts read as loading until they arrive.
+- `pullboard spec draft` never reuses an id that SPEC.md already has, including ids that DOCTRINE.md uses.
+- For contributors: the landing gate bounds its own concurrency (at most two real-Chrome test files at once, and no more test files at once than the machine has performance cores), so it no longer fails from its own load; the test runner runs only files named `*.test.js` or `*.test.mjs`, so fixtures and the view's performance harness no longer start as test files; the README capture follows the view's cookie redirect and is ready from what the page shows; and the repeated-read test goes through the view cookie.
+
 ## [0.8.24] - 2026-10-15
 
 ### A first board without surprises
