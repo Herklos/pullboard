@@ -6,7 +6,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { displayAgentName } from './agent-names.js';
 import * as store from './board.js';
 import { CONFIG_FILE, COORDINATOR, loadConfig } from './config.js';
-import { codeIsFromMain, repoInfo, resolveCommit } from './git.js';
+import { codeIsFromMain, repoInfo, resolveCommit, withGitReadFacts } from './git.js';
 import { refusalDocument } from './json.js';
 import { relayLinked, relayOperation, relayRevoke, relayTokens } from './relay.js';
 import { laneNames } from './lanes.js';
@@ -1006,19 +1006,22 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
       if (req.headers.origin && req.headers.origin !== 'http://' + req.headers.host && !permittedOrigins.has(req.headers.origin)) throw new Refused('API_ORIGIN', 'use the API from its own origin');
       return { local: true };
     },
-    boards: () => apiBoardListing(projects, codeIsMain),
-    board: (id) => findBoard(id, projects, codeIsMain),
-    state: (board, who, seen, options) => localState(board, seen, options).state,
-    stateJson: (board, who, seen, options) => localState(board, seen, options).json,
-    watchRevision: (board) => watchLocalStateRevision(board),
-    delta: (board, who, seen, options) => localDelta(board, seen, options),
-    item: (board, id) => localItem(board, id),
-    search: (board, text) => localSearch(board, text),
-    shout: (board, id) => relayLinked(board.root)
+    boards: () => withGitReadFacts(() => apiBoardListing(projects, codeIsMain)),
+    board: (id) => withGitReadFacts(() => findBoard(id, projects, codeIsMain)),
+    state: (board, who, seen, options) => withGitReadFacts(() => localState(board, seen, options).state),
+    stateJson: (board, who, seen, options) => withGitReadFacts(() => localState(board, seen, options).json),
+    watchRevision: (board) => {
+      const watcher = withGitReadFacts(() => watchLocalStateRevision(board));
+      return { ...watcher, revision: () => withGitReadFacts(() => watcher.revision()) };
+    },
+    delta: (board, who, seen, options) => withGitReadFacts(() => localDelta(board, seen, options)),
+    item: (board, id) => withGitReadFacts(() => localItem(board, id)),
+    search: (board, text) => withGitReadFacts(() => localSearch(board, text)),
+    shout: (board, id) => withGitReadFacts(() => relayLinked(board.root)
       ? relayPresentationShout(board.root, id)
-      : withBoard(board.root, (db) => store.shoutDetails(db, id), codeIsMain),
-    code: (board, ref) => codeAt(board.root, ref),
-    events: (board, after) => afterEvents(board.root, after, codeIsMain),
+      : withBoard(board.root, (db) => store.shoutDetails(db, id), codeIsMain)),
+    code: (board, ref) => withGitReadFacts(() => codeAt(board.root, ref)),
+    events: (board, after) => withGitReadFacts(() => afterEvents(board.root, after, codeIsMain)),
     eventLogVersion: () => store.EVENT_LOG_VERSION,
     move: (board, body) => executeMove(board.root, body, runCommand, codeIsMain, personChannel),
     request: (board, body) => createRequest(board.root, body, codeIsMain, personChannel),

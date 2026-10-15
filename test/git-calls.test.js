@@ -92,6 +92,21 @@ function resetAndCount(box, cwd, ...args) {
   return { result, count };
 }
 
+/** Run one isolated Node scenario with the real Git-counting shim and only repository-redirect selectors cleared. */
+function readFactScenario(box, root, body) {
+  const script = `import { codeIsFromMain, headCommit, withGitFacts, withGitReadFacts } from ${JSON.stringify(GIT_MODULE)};\n${body}`;
+  const env = { ...box.env };
+  // Keep the fixture's config and author settings; clear only selectors that redirect repository discovery.
+  for (const name of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_CEILING_DIRECTORIES',
+    'GIT_DISCOVERY_ACROSS_FILESYSTEM', 'GIT_IMPLICIT_WORK_TREE', 'GIT_OBJECT_DIRECTORY',
+    'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_SHALLOW_FILE', 'GIT_GRAFT_FILE']) delete env[name];
+  const result = runFixtureChild(process.execPath, ['--input-type=module', '-e', script, root], {
+    cwd: box.dir, env, encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+  return JSON.parse(result.stdout.trim());
+}
+
 test('help starts no Git and linked-worktree status spawns at most four Git processes [C7]', (t) => {
   const box = fixture(t);
   const version = resetAndCount(box, box.dir, '--version');
@@ -241,4 +256,74 @@ test('settled and concurrent commands do not share Git-fact caches [C7]', async 
   assert.deepEqual(await a, [secondCommit, secondCommit], 'one active command keeps its own fact values');
   assert.deepEqual(await b, [thirdCommit, thirdCommit], 'a concurrent command has a separate fact scope');
   assert.equal(headCommit(box.repo), fourthCommit, 'outside a command scope Git facts are read directly');
+});
+
+test('API read facts persist across request scopes and refresh after ref changes [A2,N26,C7]', (t) => {
+  const box = fixture(t);
+  const result = readFactScenario(box, box.repo, `
+import { execFileSync } from 'node:child_process';
+import { readFileSync, writeFileSync } from 'node:fs';
+const root = process.argv[1];
+const calls = process.env.PULLBOARD_GIT_CALLS;
+const readRequest = () => withGitFacts(() => withGitReadFacts(() => headCommit(root)));
+const initial = await readRequest();
+writeFileSync(calls, '');
+const repeated = await readRequest();
+const repeatedCalls = readFileSync(calls, 'utf8').trim().split('\\n').filter(Boolean).length;
+const mutation = await withGitReadFacts(async () => {
+  const before = headCommit(root);
+  const realGit = process.env.PULLBOARD_REAL_GIT;
+  const git = (args, input) => execFileSync(realGit, args, { cwd: root, input, encoding: 'utf8' }).trim();
+  const parent = git(['rev-parse', 'HEAD']);
+  const tree = git(['rev-parse', 'HEAD^{tree}']);
+  const next = git(['-c', 'user.name=Test Agent', '-c', 'user.email=agent@example.com', 'commit-tree', tree, '-p', parent], 'external ref change');
+  git(['update-ref', 'refs/heads/main', next]);
+  const command = await withGitFacts(() => headCommit(root));
+  const after = headCommit(root);
+  return { before, next, command, after };
+});
+console.log(JSON.stringify({ initial, repeated, repeatedCalls, mutation }));
+`);
+  assert.ok(result.initial, 'the fixture starts with a committed HEAD');
+  assert.equal(result.repeated, result.initial, 'a fresh API request reads the same HEAD');
+  assert.equal(result.repeatedCalls, 0, 'a warm read-fact cache starts no Git process on the next request');
+  assert.notEqual(result.mutation.next, result.mutation.before, 'the fixture advances its branch outside Pullboard');
+  assert.equal(result.mutation.command, result.mutation.next, 'a nested command scope bypasses the API read cache');
+  assert.equal(result.mutation.after, result.mutation.next, 'the next API read sees and refreshes the changed ref');
+});
+
+test('an installed-source provenance miss is reused outside Git [A2,N26,C7]', (t) => {
+  const box = fixture(t);
+  const result = readFactScenario(box, box.dir, `
+import { readFileSync, writeFileSync } from 'node:fs';
+const root = process.argv[1];
+const calls = process.env.PULLBOARD_GIT_CALLS;
+const first = withGitReadFacts(() => codeIsFromMain(root));
+writeFileSync(calls, '');
+const repeated = withGitReadFacts(() => codeIsFromMain(root));
+const repeatedCalls = readFileSync(calls, 'utf8').trim().split('\\n').filter(Boolean).length;
+console.log(JSON.stringify({ first, repeated, repeatedCalls }));
+`);
+  assert.equal(result.first, true, 'source without Git metadata has installed-source provenance');
+  assert.equal(result.repeated, true, 'the same negative repository discovery remains consistent');
+  assert.equal(result.repeatedCalls, 0, 'a repeated installed-source read does not retry Git discovery');
+});
+
+test('API HEAD facts remain null outside Git [A2,N26,C7]', (t) => {
+  const box = fixture(t);
+  const result = readFactScenario(box, box.dir, `
+import { headTree } from ${JSON.stringify(GIT_MODULE)};
+const root = process.argv[1];
+let facts;
+try {
+  facts = withGitReadFacts(() => ({ head: headCommit(root), tree: headTree(root) }));
+  facts.refusal = null;
+} catch (error) {
+  facts = { head: undefined, tree: undefined, refusal: { name: error.name, code: error.code ?? null } };
+}
+console.log(JSON.stringify(facts));
+`);
+  assert.equal(result.refusal, null, 'an API read outside a Git repository returns normally');
+  assert.deepEqual({ head: result.head, tree: result.tree }, { head: null, tree: null },
+    'missing HEAD facts stay null rather than turning into a NOT_A_REPO refusal');
 });
