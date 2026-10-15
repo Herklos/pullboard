@@ -1647,10 +1647,13 @@ function readMilestone(milestone, p) {
 
 /** Pick the first release with remaining work in roadmap order; empty plans wait behind it. */
 function nextMilestone(p) {
-  return (p.milestones || []).find((milestone) => {
+  const next = (p.milestones || []).find((milestone) => {
     const read = readMilestone(milestone, p);
     return read.rows.length > 0 && !read.shipped;
   });
+  if (!next) return next;
+  const read = readMilestone(next, p);
+  return { ...next, done: read.done, total: read.rows.length };
 }
 
 /**
