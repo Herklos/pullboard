@@ -334,7 +334,9 @@ test('a repeated read spawns no process [A2,N26]', (t) => {
   }
 
   const projects = roots.map((root, index) => {
-    const added = box.cli(root, 'add', 'app', 'Read fixture item ' + (index + 1), '--criterion', 'appears in item detail', '--specs', 'G1');
+    // Write the shared board from its primary checkout; the linked checkout remains a read-only fixture.
+    const itemRoot = index === 2 ? join(box.dir, 'repo-3') : root;
+    const added = box.cli(itemRoot, 'add', 'app', 'Read fixture item ' + (index + 1), '--criterion', 'appears in item detail', '--specs', 'G1');
     return { root, item: added.item.item_id };
   });
   // Keep the fixture's ordinary private Git config and identity; run-tests removes inherited repo/object selectors.
