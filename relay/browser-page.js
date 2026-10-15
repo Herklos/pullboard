@@ -8,7 +8,7 @@ import { Refused } from '../src/refused.js';
 const STYLES = readFileSync(new URL('../src/view.css', import.meta.url), 'utf8');
 
 /** Refuse relay startup locally while the public shell has no relay session; keep its sign-in link and never reload. */
-const SIGN_IN_TRANSPORT = '/** A signed-out shell has no relay transport to start. */\nexport function createTransport() {\n  throw new Error("Sign in with GitHub to open your linked boards.");\n}\n';
+const SIGN_IN_TRANSPORT = '/** Preserve device-only pairing before sign-in without starting relay reads. */\nimport { rememberPairing } from "./client.js";\nexport function createTransport() {\n  rememberPairing();\n  throw new Error("Sign in with GitHub to open your linked boards.");\n}\n';
 
 /** Serve a fixed asset with cache and browser isolation boundaries, never a filesystem-derived URL. */
 function respond(res, type, content, scriptHashes = []) {
