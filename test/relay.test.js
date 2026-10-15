@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import { runFixtureChild as spawnSync } from './fixture-child.js';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
+import { hostname } from 'node:os';
 import { ENGINE_VERSION } from '../src/machine.js';
 import { createGitHubClient } from '../relay/github.js';
 import { createRelayAuth, ACCESS_WINDOW_MS } from '../relay/auth.js';
@@ -15,6 +16,52 @@ import { relayClientFixture } from './relay-client-fixture.js';
 import { serveView } from '../src/serve.js';
 import { fetchFresh } from './http-fixture.js';
 import { fetchPrintedViewLink } from './view-link-fixture.js';
+
+const CLI = resolve(import.meta.dirname, '../bin/pullboard.js');
+
+/** Open the relay confirmation page and retain only its browser cookie and one-use ticket. */
+async function openRelayConfirmation(box, confirmationURL) {
+  const url = new URL(confirmationURL);
+  const ticket = decodeURIComponent(url.hash.slice(1));
+  assert.ok(ticket, 'confirmation nonce is carried in the browser fragment');
+  const page = await fetch(new URL('/auth/device/confirm', url.origin));
+  assert.equal(page.status, 200, 'relay serves the person confirmation page');
+  assert.equal(page.headers.get('referrer-policy'), 'no-referrer');
+  const html = await page.text();
+  assert.match(html, /textContent="Link "|textContent = "Link "/u, 'the page inserts board and host labels as text');
+  const wrongOrigin = await fetch(box.origin + '/auth/device/confirmation/open', {
+    method: 'POST', headers: { origin: 'https://foreign.invalid', 'content-type': 'application/json' }, body: JSON.stringify({ ticket }),
+  });
+  assert.equal(wrongOrigin.status, 403, 'a foreign page cannot open the browser confirmation');
+  const opened = await fetch(box.origin + '/auth/device/confirmation/open', {
+    method: 'POST', headers: { origin: box.origin, 'content-type': 'application/json' }, body: JSON.stringify({ ticket }),
+  });
+  assert.equal(opened.status, 200, 'the confirmation page receives a cookie-bound browser session');
+  const cookie = opened.headers.get('set-cookie')?.split(';', 1)[0];
+  assert.match(cookie ?? '', /^pb_device_confirmation=/u);
+  const cookieMaxAge = Number(/(?:^|;\s*)Max-Age=(\d+)/u.exec(opened.headers.get('set-cookie') ?? '')?.[1]);
+  /** Read confirmation status with same-origin browser credentials and no URL capability. */
+  async function status() {
+    const response = await fetch(box.origin + '/auth/device/confirmation/status', {
+      method: 'POST', headers: { origin: box.origin, cookie, 'content-type': 'application/json' }, body: JSON.stringify({ ticket }),
+    });
+    return { response, document: await response.json() };
+  }
+  /** Submit one explicit person decision through the browser-cookie and exact-Origin boundary. */
+  async function decide(decision, origin = box.origin) {
+    return fetch(box.origin + '/auth/device/confirmation', {
+      method: 'POST', headers: { origin, cookie, 'content-type': 'application/json' }, body: JSON.stringify({ ticket, decision }),
+    });
+  }
+  return { ticket, cookie, cookieMaxAge, html, status, decide };
+}
+
+/** Count linked boards through a separate read-only SQLite connection. */
+function linkedBoardCount(database) {
+  const db = new DatabaseSync(database, { readOnly: true });
+  try { return db.prepare('SELECT COUNT(*) AS count FROM relay_boards').get().count; }
+  finally { db.close(); }
+}
 
 /** Use real private SQLite and an actual HTTP provider with a controllable expiry clock. */
 async function fixture(t, options = {}) {
@@ -62,6 +109,111 @@ test('browser state/cookie binding and one-use device ticket protect both sign-i
   const cli = await box.auth.pollDevice(grant.ticket);
   assert.equal((await box.auth.authenticate(cli.token)).user.id, '7');
   await assert.rejects(box.auth.pollDevice(grant.ticket), { code: 'OAUTH_EXPIRED' });
+});
+
+test('relay on from an SSH shell links only after the person confirms in the browser [P6, H5, H8, B26]', async (t) => {
+  const box = await relayClientFixture(t);
+  const ssh = { SSH_CONNECTION: '192.0.2.10 12345 192.0.2.20 22', PULLBOARD_RELAY_TOKEN: 'pa_' + 'x'.repeat(43) };
+  const running = box.startCli(['relay', 'on', '--url', box.origin], ssh);
+  const marker = 'After sign-in, confirm the link in your browser: ';
+  const output = await running.waitForOutput(marker);
+  const startResponse = await box.waitForResponse('/auth/device/start');
+  const deviceGrant = JSON.parse(startResponse.response.toString());
+  const line = output.split('\n').find(value => value.includes(marker));
+  const confirmationURL = line?.slice(line.indexOf(marker) + marker.length).trim();
+  assert.ok(confirmationURL, 'SSH sign-in prints the separate browser confirmation address');
+  await box.waitForResponse('/auth/device/poll');
+  const browser = await openRelayConfirmation(box, confirmationURL);
+  assert.ok(browser.cookieMaxAge > 600 && browser.cookieMaxAge <= deviceGrant.expiresIn + 600,
+    'an early browser visit remains bound through the remaining device grant and ten-minute confirmation window');
+  const status = await browser.status();
+  assert.equal(status.response.status, 200);
+  assert.equal(status.document.ready, true, 'the relay holds the GitHub session until the device grant is complete');
+  assert.equal(status.document.intent.boardName, basename(box.root));
+  assert.equal(status.document.intent.host, hostname());
+  assert.equal(JSON.stringify(status.document).includes('token'), false, 'the browser status does not expose a relay credential');
+  assert.equal(linkedBoardCount(box.authDatabase), 0, 'no board is linked before the person confirms');
+  const foreignDecision = await browser.decide('confirm', 'https://foreign.invalid');
+  assert.equal(foreignDecision.status, 403, 'a foreign origin cannot confirm even with the browser cookie');
+  assert.equal(linkedBoardCount(box.authDatabase), 0, 'a refused cross-origin decision creates no link');
+  const confirmed = await browser.decide('confirm');
+  assert.equal(confirmed.status, 200, 'the exact-origin browser action confirms the displayed intent');
+  assert.equal(linkedBoardCount(box.authDatabase), 1, 'the relay links only after affirmative confirmation');
+  const completed = await running.closed;
+  assert.equal(completed.signal, null);
+  assert.equal(completed.code, 0, 'SSH relay on receives the person session only after confirmation');
+  assert.equal(JSON.parse(completed.stdout).linked, true);
+
+  const declineBox = await relayClientFixture(t);
+  const declinedRun = declineBox.startCli(['relay', 'on', '--url', declineBox.origin], { SSH_TTY: '/dev/pts/8' });
+  const declinedOutput = await declinedRun.waitForOutput(marker);
+  const declinedLine = declinedOutput.split('\n').find(value => value.includes(marker));
+  const declinedURL = declinedLine?.slice(declinedLine.indexOf(marker) + marker.length).trim();
+  assert.ok(declinedURL);
+  await declineBox.waitForResponse('/auth/device/poll');
+  const declinedBrowser = await openRelayConfirmation(declineBox, declinedURL);
+  assert.equal((await declinedBrowser.status()).document.ready, true);
+  assert.equal((await declinedBrowser.decide('decline')).status, 200);
+  const declined = await declinedRun.closed;
+  assert.equal(declined.code, 1, 'the CLI reports a person decline');
+  assert.equal(JSON.parse(declined.stdout).error.code, 'OAUTH_DENIED');
+  assert.equal(linkedBoardCount(declineBox.authDatabase), 0, 'declining leaves the board unlinked');
+
+  const startsBeforeRefusals = box.calls.filter(call => call.path === '/auth/device/start').length;
+  const agent = spawnSync(process.execPath, [CLI, 'relay', 'on', '--url', box.origin, '--json'], {
+    cwd: box.root, env: { ...box.env, SSH_CONNECTION: ssh.SSH_CONNECTION, AI_AGENT: '1' }, encoding: 'utf8',
+  });
+  assert.equal(agent.status, 1);
+  assert.equal(JSON.parse(agent.stdout).error.code, 'B26_PERSON_CHANNEL', 'an agent-marked SSH shell still cannot link');
+  const personAnswer = spawnSync(process.execPath, [CLI, 'answer', '1', 'yes', '--as', 'person', '--json'], {
+    cwd: box.root, env: { ...box.env, SSH_CONNECTION: ssh.SSH_CONNECTION }, encoding: 'utf8',
+  });
+  assert.equal(personAnswer.status, 1);
+  assert.equal(JSON.parse(personAnswer.stdout).error.code, 'B26_PERSON_CHANNEL', 'other person-only SSH actions remain refused');
+  assert.equal(box.calls.filter(call => call.path === '/auth/device/start').length, startsBeforeRefusals,
+    'refused shell actions never start another browser grant');
+});
+
+test('an unanswered device board confirmation expires after ten minutes [H8]', async (t) => {
+  const box = await fixture(t);
+  const intent = { board: 'ssh-board', boardName: 'fixture-board', host: 'fixture-host', repository: 'fixture/repository' };
+  const flow = await box.auth.beginDevice({ intent });
+  box.state.deviceAuthorized = true;
+  box.advance(flow.interval * 1000);
+  const pending = await box.auth.pollDevice(flow.ticket);
+  assert.equal(pending.pendingConfirmation, true);
+  assert.equal('token' in pending, false, 'the CLI ticket does not return the held person session');
+  const browser = box.auth.openDeviceConfirmation(flow.confirmationTicket);
+  const status = box.auth.deviceConfirmationStatus(flow.confirmationTicket, browser.binding);
+  assert.equal(status.ready, true);
+  assert.equal('token' in status, false, 'browser status contains no relay credential');
+  box.advance(10 * 60_000);
+  await assert.rejects(box.auth.pollDevice(flow.ticket), { code: 'OAUTH_EXPIRED' });
+  assert.equal(linkedBoardCount(box.database), 0, 'an unanswered intent never links a board');
+  const db = new DatabaseSync(box.database);
+  try {
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM relay_credentials WHERE kind='session' AND revoked=1").get().count, 1,
+      'the server-held session is revoked after the confirmation deadline');
+  } finally { db.close(); }
+});
+
+test('a confirmation approved before its deadline can reach the SSH CLI just after ten minutes [P6, H5]', async (t) => {
+  const box = await fixture(t);
+  const intent = { board: 'ssh-board', boardName: 'fixture-board', host: 'fixture-host', repository: 'fixture/repository' };
+  const flow = await box.auth.beginDevice({ intent });
+  const browser = box.auth.openDeviceConfirmation(flow.confirmationTicket);
+  box.state.deviceAuthorized = true;
+  box.advance(flow.interval * 1000);
+  const pending = await box.auth.pollDevice(flow.ticket);
+  assert.equal(pending.pendingConfirmation, true);
+  box.advance(599_000);
+  const approved = await box.auth.confirmDevice(flow.confirmationTicket, browser.binding, 'confirm');
+  assert.equal(approved.confirmed, true, 'the person approved before the original confirmation deadline');
+  box.advance(2_000);
+  const delivered = await box.auth.pollDevice(flow.ticket);
+  assert.equal(delivered.linkConfirmed, true, 'the valid approval remains retrievable after its decision deadline');
+  assert.equal(delivered.linkedBoard, intent.board);
+  assert.match(delivered.token, /^ps_[A-Za-z0-9_-]{43}$/u);
 });
 
 test('unreadable links are refused; agent tokens belong to exactly one board [H8, H1]', async (t) => {
