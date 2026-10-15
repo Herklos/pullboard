@@ -27,6 +27,10 @@ test('the perf harness measures every action on a stress board [N26]', async (t)
     assert.ok(Object.values(first.laneTotals).every((count) => count > 0), 'all four measured lanes are represented');
     assert.ok(first.itemEvents > 150, 'the generated board contains long item histories');
     assert.ok(first.shoutCount > 0 && first.milestoneRows > 0 && first.specRows > 0, 'the generated board covers feeds, roadmap and spec data');
+    assert.equal(first.specStatusTotals.draft, 1, 'one draft row is visible under the spec tab default filter');
+    assert.equal(first.specStatusTotals.approved, first.specRows - 1, 'the remaining generated spec rows stay approved');
+    assert.equal(Object.values(first.specStatusTotals).reduce((sum, count) => sum + count, 0), first.specRows,
+      'the spec status distribution matches the generated row count');
 
     const report = await run({ board: first, runs: 1, idleMs: 30_000, liveEveryMs: 5_000 });
     t.diagnostic(JSON.stringify({ performanceReport: report }));

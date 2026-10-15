@@ -522,7 +522,7 @@ async function runPerfHarnessInSlot({ board, runs = 1, idleMs = 30_000, liveEver
       gate: { browser: lease.browser === true, waitMs: lease.waitMs },
       boardShape: { statuses: board.statusTotals, lanes: board.laneTotals, agents: board.agentCount,
         itemEvents: board.itemEvents, shouts: board.shoutCount, milestones: board.milestoneCount,
-        milestoneRows: board.milestoneRows, specRows: board.specRows }, runs, idleMs, liveEveryMs,
+        milestoneRows: board.milestoneRows, specRows: board.specRows, specStatuses: board.specStatusTotals }, runs, idleMs, liveEveryMs,
       browser: { input: 'real Chrome through CDP', executable, versions: captured.map(run => run.browserVersion) },
       actions, table: renderTable(actions) };
     writeFileSync(join(board.workspace, 'performance-report.json'), `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });

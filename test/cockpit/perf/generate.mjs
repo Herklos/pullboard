@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { loadDoctrine } from '../../../src/doctrine.js';
-import { frozenCriterion, loadSpec } from '../../../src/spec.js';
+import { STATUSES, frozenCriterion, loadSpec } from '../../../src/spec.js';
 import {
   ACCEPT_REASON, addItem, addMilestone, allShouts, appendFact, claim, closeBoard,
   ensureCoordinator, events, listAgents, listItems, milestones, openBoard, recordAttempt,
@@ -66,11 +66,11 @@ function cleanEnvironment() {
   return Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('PULLBOARD_')));
 }
 
-/** Build an approved spec whose row count scales with the generated board size. */
+/** Build a spec whose row count scales with board size and whose first draft appears in the default view. */
 function specText(seed, size) {
   const count = Math.max(5, Math.round(size * 250 / 605));
   const rows = Array.from({ length: count }, (_, index) =>
-    `- P${index + 1} [approved, must] ${textOf(seed, `Spec row ${index + 1}`, 68)} | gate: none`);
+    `- P${index + 1} [${index === 0 ? 'draft' : 'approved'}, must] ${textOf(seed, `Spec row ${index + 1}`, 68)} | gate: none`);
   return `# Generated stress board\n\n## P · Performance fixtures\n${rows.join('\n')}\n`;
 }
 
@@ -316,6 +316,7 @@ export function generateStressBoard({ seed = 'pullboard-perf-606', size = 150, p
       const actualItems = listItems(board, { all: true });
       const statusTotals = Object.fromEntries(STATUS_NAMES.map((name) => [name, actualItems.filter((item) => item.item_status === name).length]));
       const actualLaneTotals = Object.fromEntries(LANES.map((lane) => [lane, actualItems.filter((item) => item.item_lane === lane).length]));
+      const specStatusTotals = Object.fromEntries(STATUSES.map((status) => [status, spec.rows.filter((row) => row.status === status).length]));
       if (JSON.stringify(statusTotals) !== JSON.stringify(Object.fromEntries(STATUS_NAMES.map((name) => [name, statuses.filter((status) => status === name).length])))) {
         throw new Error('the generated board lifecycle does not match its planned state counts');
       }
@@ -323,7 +324,7 @@ export function generateStressBoard({ seed = 'pullboard-perf-606', size = 150, p
       const manifest = { version: 1, seed, size, digest: boardDigest, root, home, machineHome, boardFile, parent: resolve(parent),
         smallItemId, smallItemTitle, longestHistoryItemId, longestHistoryTitle, liveWriter: agents.writer, itemEvents, shoutCount,
         milestoneCount, milestoneRows: rowCount, specRows: Math.max(5, Math.round(size * 250 / 605)), statusTotals, laneTotals: actualLaneTotals,
-        agentCount: listAgents(board).length };
+        specStatusTotals, agentCount: listAgents(board).length };
       writeFileSync(join(workspace, 'stress-board.json'), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
       keepWorkspace = true;
       return { ...manifest, workspace, env };
