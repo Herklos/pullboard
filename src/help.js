@@ -145,7 +145,8 @@ Spec
   pullboard spec view [--out file]      the spec, open questions, sign-offs and doctrine as one page
   pullboard spec show <id> | unmet [--must] | signoff <ids> [--by <principal>]
                                         signoff: --note "what was checked" stays with the receipt
-  pullboard spec draft <text> [--aim] [--gate "<gate>"]  any agent appends a draft row; never approves it
+  pullboard spec draft <text> [--section <letter>] [--aim] [--gate "<gate>"]  any agent appends a draft row; never approves it
+                                        --section chooses the section prefix; defaults to G
                                         Defaults to must and gate review.
   pullboard spec signers add [--key <path>] [--by <principal>]  opt into SSH-signed sign-offs
                                         principal defaults to Git user.email; --by overrides it
