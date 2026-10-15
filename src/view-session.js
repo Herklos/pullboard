@@ -15,7 +15,8 @@ function readSession(port) {
   try {
     const record = JSON.parse(readFileSync(sessionFile(port), 'utf8'));
     if (record.port !== port || !Number.isInteger(record.pid) || record.pid < 1
-      || typeof record.secret !== 'string' || typeof record.boundAt !== 'string') return null;
+      || typeof record.secret !== 'string' || typeof record.boundAt !== 'string'
+      || (record.scopeCommonDir !== undefined && (typeof record.scopeCommonDir !== 'string' || !record.scopeCommonDir))) return null;
     return record;
   } catch {
     return null;
@@ -55,11 +56,11 @@ export function forgetView(port) {
   }
 }
 
-/** Find and authenticate an existing listener for a named port or the remembered default. */
-export async function runningView(port = 0) {
+/** Find an authenticated listener only when its saved project scope matches this caller. */
+export async function runningView(port = 0, expectedScopeCommonDir = null) {
   const candidatePort = port || lastPort();
   const view = candidatePort ? readSession(candidatePort) : null;
-  if (!view) return null;
+  if (!view || (view.scopeCommonDir ?? null) !== (expectedScopeCommonDir ?? null)) return null;
   try {
     process.kill(view.pid, 0);
     const response = await fetchLocal(`http://${LOOPBACK}:${view.port}/api/v1/boards?k=${encodeURIComponent(view.secret)}`, {
