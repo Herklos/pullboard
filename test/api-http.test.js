@@ -344,6 +344,7 @@ test('a repeated read spawns no process [A2,N26]', (t) => {
     '--input-type=module', '-e', REPEATED_READ_HARNESS,
     resolve(import.meta.dirname, '../src/serve.js'), JSON.stringify(projects),
   ], { cwd: box.root, env: box.env, encoding: 'utf8' });
+  assert.ok(result.stdout.trim(), result.failure ?? result.stderr);
   const lines = result.stdout.trim().split('\n');
   const measurement = JSON.parse(lines[0]).measurement;
   process.stderr.write(`a repeated read spawns no process: boards=${measurement.boards}, routes=${measurement.routes}, requests=${measurement.requests}, rounds=${measurement.rounds}, processes=${JSON.stringify(measurement.processes)}, elapsed=${measurement.elapsedMs}ms\n`);
