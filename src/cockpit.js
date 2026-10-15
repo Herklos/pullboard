@@ -1,8 +1,40 @@
 import { effectiveGuards, IN_STATE, MACHINE } from './machine.js';
-import { commandPhrases } from './help.js';
+import { commandPhrases, VERSION } from './help.js';
+import { readFileSync } from 'node:fs';
 
 /** The CLI's default phrases, ordered by depth for the existing prose inventory guard. */
 export const PULLBOARD_COMMANDS = Object.freeze(commandPhrases().sort((left, right) => right.split(' ').length - left.split(' ').length));
+
+let hostedReleaseVersions;
+/** Return every shipped numeric release heading through the package version, including releases without headlines. */
+/**
+ * @param {string} changelog - Shipped changelog contents.
+ * @param {string} [currentVersion] - Highest package release to include.
+ * @returns {string[]} Numeric release versions in ascending order, without duplicates.
+ */
+export function releaseVersionsThrough(changelog, currentVersion = VERSION) {
+  const numeric = (version) => version.split('.').map(Number);
+  const compare = (left, right) => {
+    const a = numeric(left), b = numeric(right);
+    for (let index = 0; index < Math.max(a.length, b.length); index++) {
+      const difference = (a[index] ?? 0) - (b[index] ?? 0);
+      if (difference) return difference;
+    }
+    return 0;
+  };
+  return [...new Set([...changelog.matchAll(/^## \[(\d+\.\d+\.\d+)\](?:\s|$)/gmu)].map((match) => match[1]))]
+    .filter((version) => compare(version, currentVersion) <= 0)
+    .sort(compare);
+}
+
+/** Read and cache the shipped release ledger only when a hosted page needs its current version. */
+function shippedHostedReleaseVersions() {
+  if (!hostedReleaseVersions) {
+    const changelog = readFileSync(new URL('../CHANGELOG.md', import.meta.url), 'utf8');
+    hostedReleaseVersions = Object.freeze(releaseVersionsThrough(changelog));
+  }
+  return hostedReleaseVersions;
+}
 
 /**
  * The item lifecycle as the page draws it (M1): each state with what it means and, for a final
@@ -42,10 +74,10 @@ function lifecycle() {
  * cannot read a board here and links signIn.
  *
  * @param {string} [key] - The session's secret.
- * @param {{snapshot?: boolean, readOnly?: boolean, requests?: boolean, transportModule?: string|null, apiBase?: string, apiHeaders?: Record<string, string>, stylesheet?: string, paths?: boolean, hostedLocal?: boolean, relaySession?: boolean, signIn?: string|null}} [options] - Served connection and assets, optional person requests over a read-only transport, host routes, a static page with event replay, or the hosted page that reads this machine's view first.
+ * @param {{snapshot?: boolean, readOnly?: boolean, requests?: boolean, transportModule?: string|null, apiBase?: string, apiHeaders?: Record<string, string>, stylesheet?: string, paths?: boolean, hostedLocal?: boolean, relaySession?: boolean, signIn?: string|null, hostedReleaseVersion?: string, hostedReleaseVersions?: string[]|null}} [options] - Served connection and assets, optional person requests over a read-only transport, host routes, a static page with event replay, or the hosted page that reads this machine's view first.
  * @returns {string}
  */
-export function cockpitPage(key = '', { snapshot = false, readOnly = false, requests = false, transportModule = null, apiBase = '', apiHeaders = { 'x-pullboard-key': key }, stylesheet = null, paths = false, hostedLocal = false, relaySession = false, signIn = null } = {}) {
+export function cockpitPage(key = '', { snapshot = false, readOnly = false, requests = false, transportModule = null, apiBase = '', apiHeaders = { 'x-pullboard-key': key }, stylesheet = null, paths = false, hostedLocal = false, relaySession = false, signIn = null, hostedReleaseVersion = VERSION, hostedReleaseVersions: suppliedReleaseVersions = null } = {}) {
   // Derive the current CLI inventory for every served, relay or exported page.
   const COMMAND_SOURCE = 'pullboard (?:' + commandPhrases().join('|') + ')(?![\\w-])(?: (?:--?[\\w-]+|\\d+|#\\d+|"[^"\\n]*"|[A-Z][A-Z0-9_]*|[\\w-]*[\\/.:@][^\\s"]*|[a-z]+-\\d+)(?![\\w-]))*';
 
@@ -55,6 +87,8 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
   const requestMode = Boolean(readOnly && requests && !snapshot && transportModule);
   if (signIn !== null && (typeof signIn !== 'string' || !signIn.startsWith('/') || signIn.startsWith('//'))) throw new TypeError('signIn must be a path on the hosting site, or null');
   const hostedOptions = JSON.stringify({ local: Boolean(hostedLocal) && !snapshot, relaySession: Boolean(relaySession), signIn }).replace(/</g, '\\u003c');
+  const releaseVersions = suppliedReleaseVersions ?? (hostedLocal && !snapshot ? shippedHostedReleaseVersions() : []);
+  const releaseInfo = JSON.stringify({ version: hostedReleaseVersion, versions: releaseVersions }).replace(/</g, '\\u003c');
   const css = stylesheet ?? (snapshot ? 'view.css' : transportModule ? '/view.css' : '/view.css?k=' + encodeURIComponent(key));
   const cssAttribute = css.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
   return `<!doctype html>
@@ -100,6 +134,9 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
   <section class="card-panel" id="local-note" role="status" hidden>
     <p id="local-note-text"></p>
     <p id="local-note-links" hidden><a id="local-note-view" href="http://127.0.0.1:4890/local/view">Open the local view</a> <a id="local-note-sign-in" hidden>Sign in to see linked boards</a> <button class="ghost" id="local-note-retry" type="button">Try again</button></p>
+  </section>
+  <section class="card-panel" id="hosted-release-note" role="status" aria-label="Pullboard update" hidden>
+    <p><span id="hosted-release-text"></span> <code>npm i -g pullboard@latest</code> <a id="hosted-release-link" target="_blank" rel="noopener noreferrer">What changed</a> <button class="ghost" id="hosted-release-dismiss" type="button">Dismiss</button></p>
   </section>
   <section class="card-panel snapshot-controls" id="snapshot-controls" ${snapshot ? '' : 'hidden'} aria-label="Snapshot replay">
     <span>Read-only snapshot</span>
@@ -194,6 +231,7 @@ let transportLoadError = null;
 // with the secret in the address's fragment, which no request carries; the page takes it out of the address before
 // anything else reads the address, and keeps it for this tab only. Every request then sends it in x-pullboard-key.
 const hosted = ${hostedOptions};
+const hostedRelease = ${releaseInfo};
 const LOCAL_VIEW = 'http://127.0.0.1:4890';
 const LOCAL_TAB = 'pullboard.local.session';
 const LOCAL_TRIPS = 'pullboard.local.trips';
@@ -240,6 +278,7 @@ if (hosted.local && !relayPairing) {
 }
 const snapshotReplay = { final: null, events: [], index: 0, playing: false, timer: null };
 const keep = (name, value) => { name = snapshot ? 'snapshot.' + name : name; try { if (value === undefined) return localStorage.getItem(name); localStorage.setItem(name, value); } catch { return null; } return value; };
+const dismissedHostedReleases = new Set();
 // Whether the host serves this page at /roadmap as well as at /, so the Roadmap's address is a path;
 // anywhere else it is a #roadmap fragment on the page's own address (N38).
 const routed = ${JSON.stringify(Boolean(paths) && !snapshot)};
@@ -291,6 +330,30 @@ function localNote(text, ways = false) {
   $('local-note-view').href = (localSession?.origin || LOCAL_VIEW) + '/local/view';
   $('local-note-sign-in').hidden = !hosted.signIn || hosted.relaySession;
   if (hosted.signIn) $('local-note-sign-in').href = hosted.signIn;
+}
+
+/** Count known, shipped release entries between the installed and hosted versions; unknown versions get no guessed count. */
+function hostedReleaseDistance(installed, current, releases) {
+  if (typeof installed !== 'string' || typeof current !== 'string' || !Array.isArray(releases)) return 0;
+  const installedAt = releases.indexOf(installed), currentAt = releases.indexOf(current);
+  return installedAt >= 0 && currentAt > installedAt ? currentAt - installedAt : 0;
+}
+
+/** Show one dismissable update line only after this hosted page has read a known older local release. */
+function renderHostedReleaseNote(project) {
+  const region = $('hosted-release-note');
+  region.hidden = true;
+  const source = project?.releaseNotes ? project : data?.projects?.find((entry) => entry.ok && entry.releaseNotes);
+  if (!hosted.local || !localConfirmed || !localSession || connection.base !== localSession.origin
+      || transportModule || transport || !source?.releaseNotes) return;
+  const installed = source.releaseNotes.version;
+  const distance = hostedReleaseDistance(installed, hostedRelease.version, hostedRelease.versions);
+  if (!distance) return;
+  const dismissedKey = 'pb.hosted-release-dismissed.' + hostedRelease.version;
+  if (dismissedHostedReleases.has(hostedRelease.version) || keep(dismissedKey) === '1') return;
+  $('hosted-release-text').textContent = 'Pullboard ' + installed + ' is installed; ' + hostedRelease.version + ' is current, ' + distance + ' ' + (distance === 1 ? 'release' : 'releases') + ' behind. Update with';
+  $('hosted-release-link').href = 'https://github.com/pullboard-dev/pullboard/blob/main/CHANGELOG.md';
+  region.hidden = false;
 }
 
 /** Hide the relay's own banner, which speaks for the relay, on a page the relay does not serve this time. */
@@ -986,6 +1049,7 @@ function boardSummary(board, state) {
   const count = (test) => state.items.filter(test).length;
   return {
     ...board, ok: true,
+    releaseNotes: state.releaseNotes,
     building: count((item) => item.status === 'claimed'),
     awaiting: count((item) => item.status === 'submitted'),
     sentBack: count((item) => item.status === 'open' && item.verdict && item.verdict.decision === 'REJECT'),
@@ -1932,6 +1996,7 @@ function render() {
   document.querySelectorAll('[data-pane]').forEach((pane) => { pane.hidden = Boolean(group) || pane.dataset.pane !== view.tab; });
   $('products').hidden = !p || !p.products.length;
   renderReleaseNotes(group ? null : p);
+  renderHostedReleaseNote(p);
   renderPersonRequests(p);
   renderCredentials();
   if (group) { renderGroup(group); return; }
@@ -3134,6 +3199,11 @@ $('upgrade-note').addEventListener('click', (event) => {
   const notice = releaseNotices.get(data.project?.root);
   if (notice) notice.releases = [];
   renderReleaseNotes(data.project);
+});
+$('hosted-release-dismiss').addEventListener('click', () => {
+  dismissedHostedReleases.add(hostedRelease.version);
+  keep('pb.hosted-release-dismissed.' + hostedRelease.version, '1');
+  renderHostedReleaseNote(data.project);
 });
 $('add-cancel').addEventListener('click', () => { view.adding = false; render(); });
 $('spec-decline-cancel').addEventListener('click', () => { closeDecline(); });
