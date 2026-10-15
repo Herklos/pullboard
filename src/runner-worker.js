@@ -73,6 +73,14 @@ async function readSpec() {
   if (Object.keys(value.runtime.files).length !== runtimeNames.length
     || runtimeNames.some(name => typeof value.runtime.files[name] !== 'string')) throw new Error('invalid work specification');
   if (createHash('sha256').update(JSON.stringify(value.runtime.files)).digest('hex') !== value.runtime.sha256) throw new Error('invalid trusted runtime');
+  const workerFlag = process.execArgv.indexOf('-e');
+  const workerSource = workerFlag >= 0 ? process.execArgv[workerFlag + 1] : null;
+  const toolingFiles = { ...value.runtime.files, 'runner-worker.js': workerSource };
+  if (!workerSource || !value.tooling || !['git-checkout', 'installed-package'].includes(value.tooling.kind)
+    || value.tooling.name !== 'pullboard' || typeof value.tooling.version !== 'string'
+    || createHash('sha256').update(JSON.stringify(toolingFiles)).digest('hex') !== value.tooling.sha256) {
+    throw new Error('invalid trusted tooling identity');
+  }
   for (const field of ['landing', 'itemCheck', 'diagnostic']) {
     if (value[field] !== undefined && typeof value[field] !== 'boolean') throw new Error('invalid work specification');
   }
@@ -412,7 +420,7 @@ async function runCommand(spec, root, env, sink) {
 async function receipt(spec, fields, sink) {
   await flushStdout();
   const body = { id: spec.id, commit: spec.commit, tree: spec.tree, code: fields.code, signal: fields.signal,
-    runtimeSha256: spec.runtime.sha256, root: fields.root ?? '', outputSha256: sink.hash.digest('hex'), wallMs: Math.max(0, Date.now() - sink.wallStart) };
+    runtimeSha256: spec.runtime.sha256, toolingSha256: spec.tooling.sha256, root: fields.root ?? '', outputSha256: sink.hash.digest('hex'), wallMs: Math.max(0, Date.now() - sink.wallStart) };
   const encoded = Buffer.from(JSON.stringify(body)).toString('base64');
   await new Promise((resolveWrite, rejectWrite) => process.stderr.write(`${RECEIPT} ${spec.id} ${encoded}\n`, error => error ? rejectWrite(error) : resolveWrite()));
 }

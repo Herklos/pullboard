@@ -1,7 +1,7 @@
 /** Exact committed source and bounded, credential-free SSH execution for machine runners [C7]. */
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { closeSync, mkdtempSync, openSync, readFileSync, rmSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync, writeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +12,8 @@ import { Refused } from './refused.js';
 
 const MAX_OUTPUT_BYTES = 1024 ** 3;
 const MAX_BLOB_BYTES = 8 * 1024 ** 2;
+const TOOL_ROOT = fileURLToPath(new URL('../', import.meta.url));
+const RUNTIME_NAMES = ['resources.js', 'git.js', 'machine-home.js', 'refused.js'];
 
 /** Validate an SSH destination as one argument, never a command or an SSH option. */
 export function validateRunner(value) {
@@ -102,6 +104,34 @@ function sshEnvironment() {
   return { ...env, LC_ALL: 'C', LANG: 'C', TZ: 'UTC' };
 }
 
+/** Snapshot, scan and pin the actual tooling bytes independently of the project being tested. */
+function trustedTooling() {
+  const files = Object.fromEntries([...RUNTIME_NAMES, 'runner-worker.js']
+    .map(name => [name, readFileSync(fileURLToPath(new URL(`./${name}`, import.meta.url)), 'utf8')]));
+  for (const [name, source] of Object.entries(files)) {
+    if (Buffer.byteLength(source) > MAX_BLOB_BYTES
+      || secretsIn(source.split(/\r?\n/u).map((text, index) => ({ path: `tooling/${name}`, line: index + 1, text }))).length) {
+      throw new Refused('RUNNER_TOOLING_SECRET', 'the selected runner tooling failed its transfer scan; restore a trusted Pullboard installation');
+    }
+  }
+  const manifest = JSON.parse(readFileSync(join(TOOL_ROOT, 'package.json'), 'utf8'));
+  if (manifest.name !== 'pullboard' || typeof manifest.version !== 'string') {
+    throw new Refused('RUNNER_TOOLING_IDENTITY', 'runner tooling must come from a named Pullboard installation; reinstall Pullboard');
+  }
+  let provenance = { kind: 'installed-package', name: manifest.name, version: manifest.version };
+  if (existsSync(join(TOOL_ROOT, '.git'))) {
+    const selected = runnerSource(TOOL_ROOT);
+    if (!selected || Object.entries(files).some(([name, source]) => sourceGit(TOOL_ROOT, ['show', `${selected.commit}:src/${name}`]) !== source)) {
+      throw new Refused('RUNNER_TOOLING_CHANGED', 'runner tooling differs from its selected committed revision; restore or commit the tooling before remote execution');
+    }
+    provenance = { ...provenance, kind: 'git-checkout', ...selected };
+  }
+  const tooling = { ...provenance, sha256: createHash('sha256').update(JSON.stringify(files)).digest('hex') };
+  const runtimeFiles = Object.fromEntries(RUNTIME_NAMES.map(name => [name, files[name]]));
+  return { worker: files['runner-worker.js'], tooling,
+    runtime: { files: runtimeFiles, sha256: createHash('sha256').update(JSON.stringify(runtimeFiles)).digest('hex') } };
+}
+
 /** Prepare a single shallow object pack and an explicit worker request; cleanup owns only its scratch directory. */
 function requestFor(root, command, { runner, source, browser = false, pipefail = false, metadata = {} }) {
   runner = validateRunner(runner);
@@ -116,14 +146,11 @@ function requestFor(root, command, { runner, source, browser = false, pipefail =
   const directory = mkdtempSync(join(tmpdir(), 'pullboard-runner-send-'));
   let descriptor;
   try {
-    const runtimeFiles = Object.fromEntries(['resources.js', 'git.js', 'machine-home.js', 'refused.js']
-      .map(name => [name, readFileSync(fileURLToPath(new URL(`./${name}`, import.meta.url)), 'utf8')]));
-    const runtime = { files: runtimeFiles, sha256: createHash('sha256').update(JSON.stringify(runtimeFiles)).digest('hex') };
-    const spec = { version: 1, id: randomUUID(), runtime, ...current, command, pipefail, slots: runner.slots,
+    const { worker, tooling, runtime } = trustedTooling();
+    const spec = { version: 1, id: randomUUID(), runtime, tooling, ...current, command, pipefail, slots: runner.slots,
       browser: runner.browser, browserRequired: browser, landing: metadata.landing === true,
       itemCheck: metadata.itemCheck === true, diagnostic: metadata.diagnostic === true,
       item: String(metadata.item ?? ''), kind: String(metadata.kind ?? ''), ...(runner.root ? { root: runner.root } : {}) };
-    const worker = readFileSync(fileURLToPath(new URL('./runner-worker.js', import.meta.url)), 'utf8');
     const encodedSpec = Buffer.from(JSON.stringify(spec));
     if (encodedSpec.length > 1024 ** 2) throw new Refused('RUNNER_REQUEST_LIMIT', 'runner tooling request exceeds its safe transfer limit; keep this run local');
     const framed = join(directory, 'request.bin');
@@ -159,14 +186,15 @@ function resultFrom(request, result) {
     receipt = JSON.parse(Buffer.from(receipts[0].slice(prefix.length), 'base64').toString('utf8'));
   } catch { throw new RunnerDropped(request.runner.host); }
   if (result.error || result.status !== 0 || receipt.id !== request.spec.id || receipt.commit !== request.spec.commit
-    || receipt.tree !== request.spec.tree || receipt.runtimeSha256 !== request.spec.runtime.sha256 || !Number.isInteger(receipt.code) || receipt.code < 0 || receipt.code > 255
+    || receipt.tree !== request.spec.tree || receipt.runtimeSha256 !== request.spec.runtime.sha256 || receipt.toolingSha256 !== request.spec.tooling.sha256 || !Number.isInteger(receipt.code) || receipt.code < 0 || receipt.code > 255
     || typeof receipt.root !== 'string' || !Number.isFinite(receipt.wallMs) || receipt.wallMs < 0
     || receipt.outputSha256 !== createHash('sha256').update(output).digest('hex')) {
     throw new RunnerDropped(request.runner.host);
   }
   return { isGreen: receipt.code === 0 && !receipt.signal, output: output.toString('utf8'),
     seconds: Math.round(receipt.wallMs / 1000), exitCode: receipt.code,
-    executionRunner: request.runner.host, executionRoot: receipt.root, remoteWallMs: receipt.wallMs };
+    executionRunner: request.runner.host, executionRoot: receipt.root, remoteWallMs: receipt.wallMs,
+    executionSource: { commit: receipt.commit, tree: receipt.tree, tooling: request.spec.tooling } };
 }
 
 /** Execute one committed command over SSH; an authentic test failure remains a test failure. */

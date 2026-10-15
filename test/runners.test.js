@@ -290,6 +290,7 @@ function startQueueController(repo, env, command, { item, queueMarker, firstItem
 const { runProfiledShell, withGateSlot } = await import(${JSON.stringify(gateUrl)});
 const root = ${JSON.stringify(repo)};
 const command = ${JSON.stringify(command)};
+const queueMarker = ${JSON.stringify(queueMarker)};
 const firstItem = ${JSON.stringify(firstItem)};
 const result = await withGateSlot(root, async lease => {
   const run = await runProfiledShell(root, command, { gateLease: lease });
@@ -393,7 +394,7 @@ test('a queued run executes on a registered runner and its result comes back [C7
   try {
     held = await takeResource({ name: 'gate', capacity: 1, scope: 'machine', root: repo,
       agent: 'fixture-local-holder', item: 'runner-local-holder', kind: 'force-registered-runner' });
-    const successful = runThroughGate(repo, env, 'node --test runner-probe.test.js');
+    const successful = runThroughGate(repo, env, 'node --test --test-reporter=tap runner-probe.test.js');
   assert.equal(successful.status, 0, successful.context);
   assert.match(successful.stdout, /TAP version 13/);
   assert.match(successful.stdout, /RUNNER_FACT /);
@@ -412,6 +413,13 @@ test('a queued run executes on a registered runner and its result comes back [C7
   assert.equal(result.runner, HOST);
   assert.equal(result.profile.executionRunner, HOST);
   assert.equal(result.profile.tests.length, 1, 'TAP results are retained in the ordinary profile');
+  const source = result.profile.executionSource;
+  assert.equal(source.commit, selectedCommit);
+  assert.equal(source.tree, selectedTree);
+  assert.equal(source.tooling.name, 'pullboard');
+  assert.equal(source.tooling.kind, 'git-checkout');
+  assert.match(source.tooling.sha256, /^[a-f0-9]{64}$/u);
+  assert.notEqual(source.tooling.commit, selectedCommit, 'the tooling checkout has provenance separate from the tiny fixture project');
   const request = JSON.parse(readFileSync(requests, 'utf8').trim().split('\n')[0]);
   assert.equal(request.host, HOST);
   assert.equal(request.framed, true);
@@ -745,7 +753,7 @@ appendFileSync(${JSON.stringify(installWitnesses)}, 'postinstall\\n');
   try {
     held = await takeResource({ name: 'gate', capacity: 1, scope: 'machine', root: repo,
       agent: 'fixture-cache-local-holder', item: 'cache-local-holder', kind: 'force-registered-runner' });
-    const command = 'node --test runner-cache-probe.test.js';
+    const command = 'node --test --test-reporter=tap runner-cache-probe.test.js';
     writeCacheProbe(repo, { remoteStateRoot, nodePath: process.execPath });
     git(repo, env, 'add', 'runner-cache-probe.test.js');
     git(repo, env, 'commit', '-q', '-m', 'test: assert cache symlink stays job-local');

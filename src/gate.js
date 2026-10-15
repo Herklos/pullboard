@@ -241,7 +241,7 @@ function runTiming(run, command) {
     const suffix = relative(run.executionRoot, path);
     return suffix && suffix !== '..' && !suffix.startsWith(`..${sep}`) && !isAbsolute(suffix) ? suffix : original;
   };
-  return { ...profile, executionRunner: run.executionRunner,
+  return { ...profile, executionRunner: run.executionRunner, executionSource: run.executionSource,
     files: (profile.files ?? []).map(file => ({ ...file, path: localPath(file.path) })),
     tests: (profile.tests ?? []).map(test => ({ ...test, file: localPath(test.file) })) };
 }
@@ -279,6 +279,13 @@ export function writeTimingProfile(path, profile) {
     format: sanitize(profile.format ?? 'none', 'format'),
     unavailable: sanitize(profile.unavailable ?? null, 'availability'),
     ...(profile.executionRunner ? { executionRunner: sanitize(profile.executionRunner, 'execution runner') } : {}),
+    ...(profile.executionSource ? { executionSource: {
+      commit: sanitize(profile.executionSource.commit, 'execution commit'),
+      tree: sanitize(profile.executionSource.tree, 'execution tree'),
+      tooling: Object.fromEntries(Object.entries(profile.executionSource.tooling ?? {})
+        .filter(([key]) => ['kind', 'name', 'version', 'commit', 'tree', 'sha256'].includes(key))
+        .map(([key, value]) => [key, sanitize(value, `execution tooling ${key}`)])),
+    } } : {}),
   };
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   writeFileSync(path, `${JSON.stringify(sanitized, null, 2)}\n`, { mode: 0o600 });
@@ -419,7 +426,8 @@ export async function runSubmitGate(root, config, { base, trunk, changed, check,
         runner: [...new Set(profiles.map(value => value.runner))].join(', '),
         format: [...new Set(profiles.map(value => value.format))].join('+'),
         unavailable: profiles.some(value => value.unavailable) ? 'per-test timing unavailable: output was not TAP or JUnit (one or more phases)' : null,
-        ...(lease.runner ? { executionRunner: lease.runner.host } : {}),
+        ...(lease.runner ? { executionRunner: lease.runner.host,
+          executionSource: profiles.find(value => value.executionSource)?.executionSource } : {}),
       });
       return { ...proof, log, seconds: criterion.seconds + proof.seconds, ...selection, check: receipt,
         profile, profilePath, proofProfilePath: proof.profilePath, proofLog: proof.log };
