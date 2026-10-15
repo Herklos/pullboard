@@ -1353,6 +1353,8 @@ async function listen(entry) {
     const res = await fetch(path, {
       headers: { ...connection.headers, accept: 'text/event-stream', 'last-event-id': entry.cursor }, cache: 'no-store', signal: controller.signal,
     });
+    // This machine's view refused the hosted page's secret, as after a restart with a new one: go round again (#513).
+    if ((res.status === 401 || res.status === 403) && localSession && connection.base === localSession.origin) { localExpired(); return; }
     if (!res.ok || !res.body) throw new Error('the board stream answered ' + res.status);
     entry.status = 'up';
     entry.offline = false;
@@ -3190,9 +3192,10 @@ async function startPage() {
 }
 startPage().catch((error) => { document.body.classList.remove('loading'); $('live').textContent = 'cannot reach the view: ' + error.message; });
 // The relay transport keeps its own stream and timer. The local view reads on a timer only while it has no live
-// stream, and its live line says so (#545).
-if (!snapshot && transportModule) setInterval(() => { if (!document.hidden && transport) refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }); }, 3000);
-if (!snapshot && !transportModule) setInterval(() => { if (!document.hidden && !connected()) refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }); }, FALLBACK_MS);
+// stream, and its live line says so (#545). Each timer asks which the page uses as it fires: the hosted page starts
+// out on the relay and turns to this machine's view once it reaches it (#513).
+if (!snapshot) setInterval(() => { if (!document.hidden && transportModule && transport) refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }); }, 3000);
+if (!snapshot) setInterval(() => { if (!document.hidden && !transportModule && !connected()) refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }); }, FALLBACK_MS);
 setInterval(tickAges, 60000);
 </script>
 </body>
