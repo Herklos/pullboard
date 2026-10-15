@@ -312,15 +312,15 @@ function commandWord(value) {
  *
  * @param {string} root
  * @param {any} config
- * @param {{base:string|null, trunk?:string, changed?:string[], check:string, agent?:string, item?:string|number, kind?:string, onWait?:(state:object)=>void}} options
+ * @param {{base:string|null, trunk?:string, changed?:string[], check:string, agent?:string, item?:string|number, kind?:string, onWait?:(state:object)=>void, onBrowserFallback?:(decision:{file:string,reason:string})=>void}} options
  * @returns {Promise<any>}
  */
-export async function runSubmitGate(root, config, { base, trunk, changed, check, agent, item = '', kind = 'submit', onWait }) {
+export async function runSubmitGate(root, config, { base, trunk, changed, check, agent, item = '', kind = 'submit', onWait, onBrowserFallback }) {
   if (!config.gate.trim()) throw new Refused('NO_GATE', 'no gate configured; set "gate" in pullboard.json, e.g. "npm test"');
   const selection = config.affectedTests
     ? selectAffectedTests(root, { base, trunk, changed })
     : { full: true, reason: 'affected-test selection is not enabled for this project', files: [] };
-  const browser = (check ? await checkNeedsBrowser(root, check) : false) || selection.full || await testsNeedBrowser(root, selection.files);
+  const browser = (check ? await checkNeedsBrowser(root, check, { onFallback: onBrowserFallback }) : false) || selection.full || await testsNeedBrowser(root, selection.files, { onFallback: onBrowserFallback });
   return await withGateSlot(root, (lease) => {
     const startedAt = Date.now();
     const log = gitPath(root, 'pullboard-submit.log');

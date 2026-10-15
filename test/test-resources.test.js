@@ -1,7 +1,7 @@
 /** Browser admission follows current test dependencies without executing them [C7]. */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { test } from 'node:test';
@@ -104,6 +104,20 @@ test('frozen checks classify only explicit source-backed test commands [C7]', as
   assert.equal(await checkNeedsBrowser(root, command, { env: classifyEnv }), false);
   assert.equal(await checkNeedsBrowser(root, command, { env: classifyEnv }), false,
     'the supported captured runner form remains statically classifiable');
+
+  const runnerPath = join(root, 'bin/run-tests.js');
+  rmSync(runnerPath);
+  symlinkSync('/bin/echo', runnerPath);
+  const symlinkFallbacks = [];
+  assert.equal(await checkNeedsBrowser(root, command, { env: classifyEnv, onFallback: decision => symlinkFallbacks.push(decision) }), true,
+    'a symlinked runner outside the repository is browser-required');
+  assert.equal(symlinkFallbacks[0].file, 'bin/run-tests.js');
+  assert.match(symlinkFallbacks[0].reason, /regular in-repository file/u);
+  rmSync(runnerPath);
+  mkdirSync(runnerPath);
+  assert.equal(await checkNeedsBrowser(root, command, { env: classifyEnv }), true, 'a directory runner fails closed');
+  rmSync(runnerPath, { recursive: true, force: true });
+  copyFileSync(TEST_RUNNER, runnerPath);
   for (const opaque of [
     'node bin/run-tests.js test/plain.test.js; touch side-effect',
     'node bin/run-tests.js test/*.test.js',
@@ -116,17 +130,26 @@ test('frozen checks classify only explicit source-backed test commands [C7]', as
   copyFileSync(resolve(import.meta.dirname, './fixture-child.js'), join(root, 'test/fixture-child.js'));
   writeFileSync(join(root, 'test/known-fixture.test.js'), "import './fixture-child.js';\n");
   assert.equal(await testsNeedBrowser(root, ['test/known-fixture.test.js']), false,
-    'the hash-pinned shared fixture child helper remains CPU-only');
+    'the path-reviewed shared fixture child helper remains CPU-only');
+  writeFileSync(join(root, 'test/fixture-child.js'), "import { spawn } from 'node:child_process'; spawn('git', ['status']);\n");
+  assert.equal(await testsNeedBrowser(root, ['test/known-fixture.test.js']), false,
+    'the reviewed path exception does not depend on a content hash');
   writeFileSync(join(root, 'test/fixture-child.js'), "import { spawn } from 'node:child_process'; spawn('google-chrome', []);\n");
   assert.equal(await testsNeedBrowser(root, ['test/known-fixture.test.js']), true,
-    'changing an allowlisted helper invalidates its source hash and detects the Chrome launcher');
+    'a literal Chrome launcher still overrides the path exception');
 
   writeFileSync(join(root, 'test/launcher.test.js'), "import { spawn } from 'node:child_process'; spawn('google-chrome', []);\n");
-  assert.equal(await testsNeedBrowser(root, ['test/launcher.test.js']), true,
+  const chromeFallbacks = [];
+  assert.equal(await testsNeedBrowser(root, ['test/launcher.test.js'], { onFallback: decision => chromeFallbacks.push(decision) }), true,
     'a test source that names a Chrome launcher remains browser-required');
+  assert.deepEqual(chromeFallbacks, [], 'known Chrome launchers reserve browser capacity without uncertainty diagnostics');
   writeFileSync(join(root, 'test/computed-launch.test.js'), "import { spawn } from 'node:child_process'; spawn(process.env.BROWSER, []);\n");
-  assert.equal(await testsNeedBrowser(root, ['test/computed-launch.test.js']), true,
+  const fallbackReasons = [];
+  assert.equal(await testsNeedBrowser(root, ['test/computed-launch.test.js'], { onFallback: decision => fallbackReasons.push(decision) }), true,
     'an unknown computed child-process target remains browser-required');
+  assert.equal(fallbackReasons.length, 1);
+  assert.equal(fallbackReasons[0].file, 'test/computed-launch.test.js');
+  assert.match(fallbackReasons[0].reason, /child_process/u);
 
   const commit = commitSourceFixture(root);
   assert.equal(await checkNeedsBrowser(root, command, { commit, env: classifyEnv }), false,

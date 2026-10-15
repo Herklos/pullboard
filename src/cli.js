@@ -2111,7 +2111,7 @@ async function submitHere(ctx, id) {
   withBoard(ctx, (board) => refuseUnverifiedStack(root, board, held, commit, trunk));
   // Every submit proves its frozen check and reachable tests anew on this exact commit (V4,V16).
   // A full-gate stamp never substitutes for either proof; only an actual full fallback may stamp.
-  const gate = await runSubmitGate(root, ctx.config, { base: claimHead, trunk: acceptedMain.commit, check: frozenCheck(held), agent: me.id, item: String(id), onWait: gateWaitReporter(ctx.io) });
+  const gate = await runSubmitGate(root, ctx.config, { base: claimHead, trunk: acceptedMain.commit, check: frozenCheck(held), agent: me.id, item: String(id), onWait: gateWaitReporter(ctx.io), onBrowserFallback: browserAdmissionReporter(ctx.io) });
   if (!gate.isGreen) {
     const message = `the submission proof is red at ${commit.slice(0, 12)}; fix it, commit, submit again. ${submitGateReport(gate)}`;
     // No submission can follow this verdict. Read-only main comparisons must not retain the seat's write lease.
@@ -2202,7 +2202,7 @@ async function verifyHere(ctx, id, { second, values }) {
       if (digest !== item.item_frozen_digest) throw new Refused('CRITERIA_CHANGED', 'the criterion changed; ask the coordinator to refreeze this item before checking it');
       const trunk = requireTrunkMerge(root, commit);
       refuseUnverifiedStack(root, board, item, commit, trunk);
-      const browser = await checkNeedsBrowser(root, frozenCheck(item), { commit });
+      const browser = await checkNeedsBrowser(root, frozenCheck(item), { commit, onFallback: browserAdmissionReporter(ctx.io) });
       check = await withGateSlot(root, (lease) => checkAtCommit(root, item, { waitMs: lease.waitMs, gateLease: lease }), { browser, agent: me.id, item: String(id), kind: 'review', itemCheck: true, onWait: gateWaitReporter(ctx.io) });
       verificationProfile = check.profile ?? null;
       const evidence = check.checked
@@ -2606,7 +2606,7 @@ function workCommands(io, args) {
           throw new Refused('CHECK_CONFIRM', `the check set by ${authorName} was not run: ${check}; run pullboard check ${item.item_id} --yes after reading the command, or answer yes at the prompt`);
         }
       }
-      const browser = await checkNeedsBrowser(ctx.info.root, check);
+      const browser = await checkNeedsBrowser(ctx.info.root, check, { onFallback: browserAdmissionReporter(io) });
       const run = await withGateSlot(ctx.info.root, (lease) => runProfiledShell(ctx.info.root, check, { waitMs: lease.waitMs, artifactPrefix: `pullboard-check-${item.item_id}`, persistLog: true, gateLease: lease }), { browser, agent: caller, item: String(item.item_id), kind: 'check', itemCheck: true, onWait: gateWaitReporter(io) });
       io.result?.({ id: item.item_id, green: run.isGreen, seconds: run.seconds, check, by, report: run.isGreen ? '' : digestOf(run.output) });
       const timings = timingDigest(run.profile);
@@ -2795,6 +2795,14 @@ function resourceRunLabel(entry) {
 /** Name a known board seat for queue diagnostics without requiring an unjoined checkout to join. */
 function resourceAgent(ctx) {
   return ctx.info.isMain ? COORDINATOR : withBoard(ctx, board => store.agentAt(board, ctx.info.root)?.agent_id);
+}
+
+/** Print the file and reason when conservative uncertainty reserves browser capacity.
+ * @param {any} io
+ * @returns {(decision:{file:string,reason:string})=>void}
+ */
+function browserAdmissionReporter(io) {
+  return ({ file, reason }) => io.say(`browser admission fallback: ${file}: ${reason}`);
 }
 
 /** Build a de-duplicated queue message for a gate waiting on machine capacity. */
