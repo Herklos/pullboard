@@ -129,6 +129,7 @@ const SCHEMA = `
     verdict_head TEXT NOT NULL,
     verdict_at TEXT NOT NULL
   );
+  CREATE INDEX IF NOT EXISTS verdict_item_id_verdict_id ON verdict (item_id, verdict_id);
   CREATE TABLE IF NOT EXISTS shout (
     shout_id INTEGER PRIMARY KEY AUTOINCREMENT,
     shout_from TEXT NOT NULL,
@@ -144,6 +145,7 @@ const SCHEMA = `
     item_id INTEGER,
     event_detail TEXT NOT NULL DEFAULT '{}'
   );
+  CREATE INDEX IF NOT EXISTS event_item_id_event_id ON event (item_id, event_id);
   CREATE TABLE IF NOT EXISTS hold (
     hold_lane TEXT PRIMARY KEY,
     hold_reason TEXT NOT NULL,
@@ -2011,9 +2013,10 @@ export function unreadCount(board, agentId) {
  * @returns {any[]}
  */
 export function events(board, { itemId } = {}) {
-  return board.db
-    .prepare('SELECT * FROM event WHERE (? IS NULL OR item_id = ?) ORDER BY event_id')
-    .all(itemId ?? null, itemId ?? null);
+  if (itemId === undefined || itemId === null) {
+    return board.db.prepare('SELECT * FROM event ORDER BY event_id').all();
+  }
+  return board.db.prepare('SELECT * FROM event WHERE item_id = ? ORDER BY event_id').all(itemId);
 }
 
 /** Fact labels distinguish observations from judgements reserved to an item's live holder [B29,B30]. */

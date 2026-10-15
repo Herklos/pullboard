@@ -245,7 +245,9 @@ The following live SQLite declarations include nullability, defaults, primary an
 <!-- board-indexes:start -->
 | Index | Table | Columns | Unique |
 | --- | --- | --- | --- |
+| `event_item_id_event_id` | `event` | `item_id`, `event_id` | no |
 | `item_lane_status` | `item` | `item_lane`, `item_status` | no |
+| `verdict_item_id_verdict_id` | `verdict` | `item_id`, `verdict_id` | no |
 <!-- board-indexes:end -->
 
 `src/machine.js` declares the lifecycle and retained records. `src/board.js` installs these persistent triggers in the board file:
