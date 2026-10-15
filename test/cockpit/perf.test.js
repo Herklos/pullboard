@@ -1,0 +1,80 @@
+/** Exercise the deterministic stress fixture and the real-Chrome performance harness [N26]. */
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { generateStressBoard, removeStressBoard } from './perf/generate.mjs';
+import { assertRequiredNetworkEvidence, selectNetworkTarget, withPerfSlot } from './perf/run.mjs';
+
+test('network observation stays attached to the selected page and rejects missing required bytes [N26]', () => {
+  const targets = [
+    { id: 'first-blank', type: 'page', url: 'about:blank', webSocketDebuggerUrl: 'ws://first' },
+    { id: 'owned-blank', type: 'page', url: 'about:blank', webSocketDebuggerUrl: 'ws://owned' },
+  ];
+  assert.equal(targets.find((target) => target.type === 'page' && target.url === 'about:blank').id, 'first-blank',
+    'the legacy first-blank lookup selects a different page in this two-target control');
+  assert.equal(selectNetworkTarget(targets, 'owned-blank').id, 'owned-blank',
+    'network observation follows the exact page selected by the Chrome fixture');
+  assert.throws(() => selectNetworkTarget(targets, 'missing'), /was not listed/u);
+  assert.throws(() => assertRequiredNetworkEvidence('firstLoad', [], 0), /unavailable/u);
+  assert.throws(() => assertRequiredNetworkEvidence('idleWithLiveWrites', [{ path: '/events' }], 0), /unavailable/u);
+  assert.doesNotThrow(() => assertRequiredNetworkEvidence('tab:shouts', [], 0),
+    'an action without network requests may report zero when the observer remains live');
+});
+
+test('the perf harness measures every action on a stress board [N26]', async (t) => {
+  let first = null;
+  let second = null;
+  t.after(() => {
+    if (!t.passed) {
+      console.error(`Performance evidence retained at ${first?.workspace ?? 'fixture setup did not finish'}${second ? ` and ${second.workspace}` : ''}`);
+      return;
+    }
+    if (second) removeStressBoard(second);
+    if (first) removeStressBoard(first);
+  });
+  await withPerfSlot(async (run) => {
+    const evidenceRoot = process.env.PULLBOARD_PERF_EVIDENCE_ROOT;
+    first = generateStressBoard({ seed: 'named-perf-test', size: 150, ...(evidenceRoot ? { parent: evidenceRoot } : {}) });
+    second = generateStressBoard({ seed: 'named-perf-test', size: 150, ...(evidenceRoot ? { parent: evidenceRoot } : {}) });
+
+    assert.equal(first.digest, second.digest, 'the same seed and size produce the same board digest');
+    assert.equal(Object.values(first.statusTotals).reduce((sum, count) => sum + count, 0), 150);
+    assert.ok(Object.values(first.statusTotals).every((count) => count > 0), 'all five item states are represented');
+    assert.equal(Object.values(first.laneTotals).reduce((sum, count) => sum + count, 0), 150);
+    assert.ok(Object.values(first.laneTotals).every((count) => count > 0), 'all four measured lanes are represented');
+    assert.ok(first.itemEvents > 150, 'the generated board contains long item histories');
+    assert.ok(first.shoutCount > 0 && first.milestoneRows > 0 && first.specRows > 0, 'the generated board covers feeds, roadmap and spec data');
+    assert.equal(first.specStatusTotals.draft, 1, 'one draft row is visible under the spec tab default filter');
+    assert.equal(first.specStatusTotals.approved, first.specRows - 1, 'the remaining generated spec rows stay approved');
+    assert.equal(Object.values(first.specStatusTotals).reduce((sum, count) => sum + count, 0), first.specRows,
+      'the spec status distribution matches the generated row count');
+
+    const report = await run({ board: first, runs: 1, idleMs: 30_000, liveEveryMs: 5_000 });
+    t.diagnostic(JSON.stringify({ performanceReport: report }));
+    const expected = ['firstLoad', 'tab:shouts', 'tab:spec', 'tab:doctrine', 'tab:activity', 'tab:roadmap', 'tab:items',
+      'openSmallItem', 'openLongestHistoryItem', 'search', 'idleWithLiveWrites'];
+    assert.deepEqual(report.actions.map((action) => action.name), expected);
+    for (const action of report.actions) {
+      assert.ok(Number.isFinite(action.medianMs) && Number.isFinite(action.worstMs), `${action.name} has a stable-paint duration`);
+      assert.ok(action.samples.every((sample) => sample.stable === true), `${action.name} reached a stable visible target`);
+      assert.ok(action.samples.every((sample) => sample.longTaskObserverStatus === 'available'), `${action.name} has Long Task observation available`);
+      assert.ok(action.samples.every((sample) => Array.isArray(sample.longTasks)), `${action.name} reports its observed long-task entries`);
+      assert.ok(action.samples.every((sample) => sample.longTasks.every((task) => Number.isFinite(task.durationMs) && task.durationMs >= 0)),
+        `${action.name} reports finite observed long-task durations`);
+      assert.ok(action.samples.every((sample) => Number.isFinite(sample.largestLongTaskMs)), `${action.name} has a numeric largest long task when observation is available`);
+      assert.equal(action.requestBytesPerRun.length, 1, `${action.name} reports request bytes for the run`);
+      assert.ok(Number.isSafeInteger(action.requestBytesPerRun[0]), `${action.name} reports encoded response bytes`);
+      assert.ok(action.samples.every((sample) => Array.isArray(sample.requests)), `${action.name} reports individual local requests`);
+    }
+    const firstLoad = report.actions[0].samples[0];
+    const successfulFirstLoadRequests = firstLoad.requests.filter((request) =>
+      request.complete && !request.failed && request.status === 200 && Number.isSafeInteger(request.responseBytes) && request.responseBytes > 0);
+    assert.ok(successfulFirstLoadRequests.some((request) => request.type === 'Document' && request.path === '/'),
+      'first load captured the local document response with positive encoded bytes');
+    assert.ok(successfulFirstLoadRequests.some((request) => request.method === 'GET' && request.path === '/api/v1/boards'),
+      'first load captured the board-list API response with positive encoded bytes');
+    assert.ok(successfulFirstLoadRequests.some((request) => request.method === 'GET' && /^\/api\/v1\/boards\/[^/]+\/state$/u.test(request.path)),
+      'first load captured a board-state API response with positive encoded bytes');
+    assert.equal(report.actions.at(-1).samples[0].liveWrites, 6, 'the idle sample includes six five-second live writes');
+    assert.equal(report.actions.at(-1).samples[0].renderedWrites, 6, 'all six live writes appeared in the open feed during the idle sample');
+  });
+});
