@@ -23,7 +23,7 @@ const VIEWER_ACTIONS = [
   ['tab:spec', 'spec', '#spec-list .row'],
   ['tab:doctrine', 'doctrine', '#doctrine-list .row'],
   ['tab:activity', 'activity', '#activity > *'],
-  ['tab:roadmap', 'roadmap', '#roadmap .milestone'],
+  ['tab:roadmap', 'roadmap', '#roadmap-list > [data-key] > .milestone-head'],
   ['tab:items', 'items', '#chain .row'],
 ];
 
