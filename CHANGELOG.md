@@ -4,6 +4,18 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.8.22] - 2026-10-14
+
+### The view follows the board, and reads stay fast
+
+The view no longer re-reads the whole board every few seconds, and a change no longer makes the server rebuild every item.
+
+### Changed
+
+- The view loads the board once, then follows its event stream and catches up on each change. It no longer re-reads the whole board every 3 seconds (about 6 MB on a 600-item board). If the stream drops it reconnects and says so, and after an upgrade the page reloads into the new version.
+- One move recomputes only the items it touched. State and item reads no longer wait while the server rebuilds every item after each change, which took 2 to 3 seconds on a 600-item board while agents worked.
+- For contributors: a change to a doc runs only the tests that read it at submit, not the whole suite.
+
 ## [0.8.21] - 2026-10-14
 
 ### One stream for many boards, and the local API never speaks for you
