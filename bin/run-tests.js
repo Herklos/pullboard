@@ -248,21 +248,38 @@ function testEnvironment(sandbox, gateMarkers = {}) {
  * @param {NodeJS.ProcessEnv} env
  * @returns {import('node:child_process').SpawnSyncReturns<string>}
  */
-function runTests(args, env) {
+function runTests(args, env, concurrency) {
+  let files = concurrency.files;
+  const forwarded = [];
+  for (let at = 0; at < args.length; at += 1) {
+    const argument = args[at];
+    if (argument === '--') { forwarded.push(...args.slice(at)); break; }
+    if (/^--test[-_]concurrency(?:=|$)/u.test(argument)) {
+      const value = argument.includes('=') ? argument.slice(argument.indexOf('=') + 1) : args[++at];
+      if (!/^[1-9][0-9]*$/u.test(value ?? '') || !Number.isSafeInteger(Number(value))) {
+        throw new Error('--test-concurrency must be a positive integer');
+      }
+      files = Math.min(files, Number(value));
+    } else if (/^--(?:experimental[-_])?test[-_]isolation(?:=none|$)/u.test(argument) &&
+      (argument.endsWith('=none') || args[at + 1] === 'none')) {
+      throw new Error('bounded browser test files require process isolation; remove --test-isolation=none');
+    } else forwarded.push(argument);
+  }
   const reporter = args.some((argument) => argument === '--test-reporter' || argument.startsWith('--test-reporter='));
   const nodeArgs = [
     '--disable-warning=ExperimentalWarning',
     '--test',
+    `--test-concurrency=${files}`,
     ...(!reporter ? ['--test-reporter=tap'] : []),
     '--import',
     runner,
-    ...args,
+    ...forwarded,
   ];
   return spawnSync(process.execPath, nodeArgs, { env, stdio: 'inherit' });
 }
 
 /** Convert the Node test CLI subset to the supported node:test run() options. */
-async function landingTestOptions(args, env) {
+async function landingTestOptions(args, env, concurrency) {
   const options = { concurrency: true, isolation: 'process', execArgv: ['--disable-warning=ExperimentalWarning', '--import', runner] };
   const reporters = [];
   const selectors = [];
@@ -288,8 +305,14 @@ async function landingTestOptions(args, env) {
     if (valueOption('--test-concurrency', value => {
       if (value === 'true') options.concurrency = true;
       else if (value === 'false') options.concurrency = false;
-      else if (/^[1-9][0-9]*$/u.test(value)) options.concurrency = Number(value);
-      else throw new Error(`invalid --test-concurrency value: ${value}`);
+      else if (/^[1-9][0-9]*$/u.test(value)) {
+        const requested = Number(value);
+        // Validate before clamping: Node's run() accepts a positive uint32, not Infinity or larger integers.
+        if (!Number.isSafeInteger(requested) || requested > 4_294_967_295) {
+          throw new Error(`invalid --test-concurrency value: ${value}`);
+        }
+        options.concurrency = requested;
+      } else throw new Error(`invalid --test-concurrency value: ${value}`);
     })) continue;
     if (valueOption('--test-name-pattern', value => patterns.push(value))) continue;
     if (valueOption('--test-skip-pattern', value => skipPatterns.push(value))) continue;
@@ -333,6 +356,11 @@ async function landingTestOptions(args, env) {
   }
   if (expectValue) throw new Error('missing value for a Node test runner option');
   options.execArgv = [...options.execArgv, ...execArgv];
+  // Keep native run() from treating true/default or a larger explicit value as unbounded.
+  if (options.concurrency !== false) {
+    const requested = options.concurrency === true ? concurrency.files : options.concurrency;
+    options.concurrency = Math.min(concurrency.files, requested);
+  }
   if (selectors.length) {
     const { glob } = await import('node:fs/promises');
     const files = [];
@@ -747,12 +775,12 @@ async function drainLandingWorkerDescendants(ownedDescendants, refreshOwnedDesce
 }
 
 /** Run a landing check with execution-ordered failure detection and native runner reporters. */
-async function runLandingTests(args, env) {
+async function runLandingTests(args, env, concurrency) {
   const { run } = await import('node:test');
   const { PassThrough } = await import('node:stream');
   const { createWriteStream } = await import('node:fs');
   const { pathToFileURL } = await import('node:url');
-  const { options, env: testEnv } = await landingTestOptions(args, env);
+  const { options, env: testEnv } = await landingTestOptions(args, env, concurrency);
   if (options.isolation !== 'process') {
     throw new Error('landing gate early-stop requires --test-isolation=process so started files and owned children can be tracked safely');
   }
@@ -1193,8 +1221,12 @@ function shardArguments(args) {
 }
 
 /** Run tests in the disposable environment, preserving a marker only when a parent holds the slot. */
-async function executeTests(args, sandbox, gateMarkers, fullSuite) {
+async function executeTests(args, sandbox, gateMarkers, fullSuite, concurrency) {
   const env = testEnvironment(sandbox, gateMarkers);
+  // This is an inner file limit; the real machine gate/browser lease remains unchanged.
+  env.PULLBOARD_TEST_BROWSER_RESOURCE = 'test-browser-files:' + randomUUID();
+  env.PULLBOARD_TEST_BROWSER_CAPACITY = String(concurrency.browser);
+  delete env.PULLBOARD_TEST_BROWSER_OWNER_PID;
   let selectedArgs = args;
   if (fullSuite) {
     let files;
@@ -1216,8 +1248,8 @@ async function executeTests(args, sandbox, gateMarkers, fullSuite) {
     if (files) selectedArgs = [...args, ...files];
   }
   const result = process.env[LANDING_RUN_ENV] === '1'
-    ? await runLandingTests(selectedArgs, env)
-    : runTests(selectedArgs, env);
+    ? await runLandingTests(selectedArgs, env, concurrency)
+    : runTests(selectedArgs, env, concurrency);
   if (result.error) throw result.error;
   return result;
 }
@@ -1229,8 +1261,11 @@ async function executeTests(args, sandbox, gateMarkers, fullSuite) {
  * @returns {Promise<void>}
  */
 async function main(args) {
+  let concurrency;
   try {
     testTimeoutMs();
+    const { testConcurrency } = await import('../src/gate.js');
+    concurrency = testConcurrency(process.cwd());
   } catch (error) {
     process.stderr.write(`${error.message}\n`);
     process.exitCode = 1;
@@ -1254,7 +1289,7 @@ async function main(args) {
   const run = async (gateMarkers) => {
     const sandbox = mkdtempSync(join(tmpdir(), 'pullboard-test-run-'));
     try {
-      const result = await executeTests(args, sandbox, gateMarkers, fullSuite);
+      const result = await executeTests(args, sandbox, gateMarkers, fullSuite, concurrency);
       signal = result.signal;
       process.exitCode = result.status ?? 1;
     } finally { rmSync(sandbox, { recursive: true, force: true }); }
@@ -1300,10 +1335,12 @@ if (process.argv[1] && resolve(process.argv[1]) === runner) {
   await main(process.argv.slice(2));
 } else if (process.argv[1]) {
   process.env.PULLBOARD_TEST_FILE = process.argv[1];
-  installTestWatchdog();
   const startsPath = process.env[LANDING_WORKER_STARTS_ENV];
   const attempt = process.env[LANDING_ATTEMPT_ENV];
-  if (startsPath && attempt) {
+  const landingWorker = Boolean(startsPath && attempt);
+  if (landingWorker) {
+    // Preserve #589 timing/custody behavior and announce before any browser-capacity wait.
+    installTestWatchdog();
     const file = resolve(process.argv[1]);
     let identityAvailable = false;
     appendFileSync(startsPath, `${JSON.stringify({ type: 'worker-pending', attempt, file,
@@ -1325,4 +1362,18 @@ if (process.argv[1] && resolve(process.argv[1]) === runner) {
     if (identityAvailable) watchLandingChildSpawns(startsPath, attempt);
     else watchLandingChildCustody(startsPath, attempt);
   }
+  if (process.env.PULLBOARD_TEST_BROWSER_RESOURCE && process.env.NODE_TEST_CONTEXT === 'child-v8'
+      && !process.env.PULLBOARD_TEST_BROWSER_OWNER_PID) {
+    // The worker is announced to #589 before it can wait here; admission remains before file import/body.
+    process.env.PULLBOARD_TEST_BROWSER_OWNER_PID = String(process.pid);
+    const { testsNeedBrowser } = await import('../src/browser-admission.js');
+    if (await testsNeedBrowser(process.cwd(), [process.argv[1]])) {
+      const { takeResource } = await import('../src/resources.js');
+      const lease = await takeResource({ name: process.env.PULLBOARD_TEST_BROWSER_RESOURCE,
+        capacity: Number(process.env.PULLBOARD_TEST_BROWSER_CAPACITY), kind: 'test-browser-file', root: process.cwd() });
+      // Hold through file cleanup and process exit, including abort/watchdog paths.
+      process.once('exit', () => lease.release());
+    }
+  }
+  if (!landingWorker) installTestWatchdog();
 }
