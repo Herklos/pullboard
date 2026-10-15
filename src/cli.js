@@ -2923,9 +2923,15 @@ async function specCommand(io, { first, second, rest, values }) {
       ? `choose one of: ${sections.map(section => section.prefix).join(', ')}`
       : 'add a section heading with an id prefix such as G · Goals'}`);
     const { prefix } = section;
-    const numbered = spec.rows.map((row) => new RegExp(`^${prefix}(\\d+)$`, 'u').exec(row.id)?.[1]).filter(Boolean).map(Number);
+    const malformed = [[spec.file, spec.problems], [practice.repo.file, practice.repo.problems]].find(([, problems]) => problems.length);
+    if (malformed) {
+      throw new Refused('SPEC_INVALID', `fix the unparsed row in ${malformed[0]} before drafting; an existing id may be ambiguous`);
+    }
+    const usedRows = [...spec.rows, ...practice.repo.rows];
+    const usedIds = new Set(usedRows.map((row) => row.id));
+    const numbered = usedRows.map((row) => new RegExp(`^${prefix}(\\d+)$`, 'u').exec(row.id)?.[1]).filter(Boolean).map(Number);
     let next = Math.max(0, ...numbered) + 1;
-    while (spec.rows.some((row) => row.id === `${prefix}${next}`)) next += 1;
+    while (usedIds.has(`${prefix}${next}`)) next += 1;
     const id = `${prefix}${next}`;
     const tier = values.aim ? 'aim' : 'must';
     const gate = values.gate?.trim() ?? 'review';
