@@ -6,7 +6,9 @@ import { createServer } from 'node:http';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, copyFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
+import { releaseHeadlinesBetween } from '../src/changelog.js';
 import { ENGINE_VERSION } from '../src/machine.js';
 import { relayClientFixture } from './relay-client-fixture.js';
 import { githubFixture } from './relay-fixture.js';
@@ -46,6 +48,19 @@ function copiedImage(t, omitted = []) {
     for (const source of paths) copyDockerSource(source.replace(/\/$/u, ''), destinationPath, excluded);
   }
   return image;
+}
+
+/** Verify the copied image carries the exact shipped notes consumed by its runtime helper. */
+async function assertCopiedChangelog(image) {
+  const shipped = readFileSync(join(ROOT, 'CHANGELOG.md'));
+  const copied = readFileSync(join(image, 'CHANGELOG.md'));
+  assert.deepEqual(copied, shipped, 'the production image includes byte-identical shipped release notes');
+  const runtimeChangelog = await import(pathToFileURL(join(image, 'src/changelog.js')).href);
+  assert.deepEqual(
+    runtimeChangelog.releaseHeadlinesBetween('0.0.0', '99.99.99'),
+    releaseHeadlinesBetween('0.0.0', '99.99.99'),
+    'the copied runtime helper reads release headlines from the packaged notes',
+  );
 }
 
 /** Start the copied production entry point with private fixture storage and no inherited selectors. */
@@ -366,6 +381,7 @@ test('[H5,H18] the container entry point serves readiness and stays available', 
 test('[H5,H18] Docker COPY sources boot the relay and serve its browser page, while omitted runtime files refuse startup', async (t) => {
   const provider = await githubFixture(t);
   const image = copiedImage(t);
+  await assertCopiedChangelog(image);
   const port = await unusedPort();
   const origin = `http://127.0.0.1:${port}`;
   const running = copiedServer(t, image, port, provider);
