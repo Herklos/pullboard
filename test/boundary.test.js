@@ -59,6 +59,9 @@ test('only explicit relay commands open outbound connections; the view and API s
     assert.match(discoveryLines[0], /redirect: 'error'/u);
     assert.match(cockpitSource, /const LOCAL_VIEW = 'http:\/\/127\.0\.0\.1:4890';/u, 'the fallback is the fixed local-view origin');
     assert.match(cockpitSource, /const base = localSession\?\.origin \|\| LOCAL_VIEW;/u, 'the fetch base is the fixed origin or a validated local session');
+    const declarations = cockpitSource.split('\n').filter((line) => /\b(?:let|const|var)\s+localSession\s*=/.test(line));
+    assert.equal(declarations.length, 1, 'the local session has one declaration');
+    assert.match(declarations[0], /^\s*let\s+localSession\s*=\s*null;\s*$/u, 'the local session starts empty and only guarded assignments may populate it');
     const assignments = cockpitSource.split('\n').filter((line) => /\blocalSession\s*=/.test(line) && !/\b(?:let|const|var)\s+localSession\s*=/.test(line) && !/\blocalSession\s*=\s*null\b/u.test(line));
     assert.equal(assignments.length, 2, 'both non-null local-session assignments are guarded');
     assert.ok(assignments.some((line) => /validLocalSession\(returnedSession\)\)\s*localSession\s*=\s*\{[^}]*returnedSession\.origin/u.test(line)), 'the returned session is validated before it is kept');
