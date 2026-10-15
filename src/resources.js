@@ -86,6 +86,7 @@ function open(file) {
       if (!columns.includes('browser')) db.exec(`ALTER TABLE ${table} ADD COLUMN browser INTEGER NOT NULL DEFAULT 0`);
       if (!columns.includes('item')) db.exec(`ALTER TABLE ${table} ADD COLUMN item TEXT NOT NULL DEFAULT ''`);
       if (!columns.includes('kind')) db.exec(`ALTER TABLE ${table} ADD COLUMN kind TEXT NOT NULL DEFAULT ''`);
+      if (!columns.includes('lease_until')) db.exec(`ALTER TABLE ${table} ADD COLUMN lease_until TEXT NOT NULL DEFAULT ''`);
     }
     db.exec('COMMIT');
     transaction = false;
@@ -174,14 +175,15 @@ function update(db, action) {
 /** Current holders and the landing-first line, then every other kind in arrival order. */
 function snapshot(db, name) {
   /** Preserve older public entries while naming diagnostics as a distinct queue class. */
-  const project = ({ diagnostic, browser, item, kind, ...entry }) => ({ ...entry, landing: entry.landing === 1,
+  const project = ({ diagnostic, browser, item, kind, leaseUntil, ...entry }) => ({ ...entry, landing: entry.landing === 1,
     itemCheck: entry.itemCheck === 1 && diagnostic !== 1, ...(diagnostic === 1 ? { diagnostic: true } : {}),
-    ...(browser === 1 ? { browser: true } : {}), ...(item ? { item } : {}), ...(kind ? { kind } : {}) });
+    ...(browser === 1 ? { browser: true } : {}), ...(item ? { item } : {}), ...(kind ? { kind } : {}),
+    ...(leaseUntil ? { leaseUntil } : {}) });
   // Browser is an additional capability on a gate lease, not a second partially held row.
   const where = name === 'browser' ? 'name = ? AND browser = 1' : 'name = ?';
   const sourceName = name === 'browser' ? 'gate' : name;
-  const holders = db.prepare(`SELECT agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, item, kind FROM holder WHERE ${where} ORDER BY since, token`).all(sourceName).map(project);
-  const line = db.prepare(`SELECT agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, item, kind FROM waiter WHERE ${where} ORDER BY landing DESC, ticket`).all(sourceName).map(project);
+  const holders = db.prepare(`SELECT agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, item, kind, lease_until AS leaseUntil FROM holder WHERE ${where} ORDER BY since, token`).all(sourceName).map(project);
+  const line = db.prepare(`SELECT agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, item, kind, lease_until AS leaseUntil FROM waiter WHERE ${where} ORDER BY landing DESC, ticket`).all(sourceName).map(project);
   return { holders, line };
 }
 
@@ -216,7 +218,7 @@ function pause(ms) { return new Promise((resolvePromise) => setTimeout(resolvePr
 /**
  * Join the landing-first queue; every other kind keeps its original FIFO ticket.
  *
- * @param {{ name: string, capacity: number, capacityProvider?: () => number, scope?: 'machine'|'repo'|'board', root?: string, agent?: string, repo?: string, landing?: boolean, itemCheck?: boolean, diagnostic?: boolean, browser?: boolean, item?: string, kind?: string, onWait?: (state: object) => void, allowIdleCapacityUpdate?: boolean }} options - Resource identity and queue class.
+ * @param {{ name: string, capacity: number, capacityProvider?: () => number, scope?: 'machine'|'repo'|'board', root?: string, agent?: string, repo?: string, landing?: boolean, itemCheck?: boolean, diagnostic?: boolean, browser?: boolean, item?: string, kind?: string, onWait?: (state: object) => any | Promise<any>, allowIdleCapacityUpdate?: boolean }} options - An awaited wait callback may return {leaseUntil}; it then receives one final {admitted:true} callback before work starts.
  * @returns {Promise<{ name: string, scope: string, token: string, pool: string, browser: boolean, waitMs: number, release: () => void, renew: () => void }>}
  */
 export async function takeResource(options) {
@@ -246,6 +248,20 @@ export async function takeResource(options) {
   const started = processStarted(pid);
   const repo = options.repo ?? repoRoot(root);
   let queuedAt = new Date().toISOString();
+  let leaseUntil = '';
+  /** Record an item's lease only after its awaited owner renewal succeeds. */
+  const keepItemLease = async (state, table) => {
+    const result = await options.onWait?.(state);
+    if (result?.leaseUntil !== undefined) {
+      if (typeof result.leaseUntil !== 'string' || !Number.isFinite(Date.parse(result.leaseUntil))) {
+        throw new Refused('BAD_RESOURCE_METADATA', 'the waiting item renewal must return a valid leaseUntil timestamp');
+      }
+      leaseUntil = result.leaseUntil;
+      const changed = update(db, () => db.prepare(`UPDATE ${table} SET lease_until = ? WHERE token = ? AND pid = ? AND started = ?`)
+        .run(leaseUntil, token, pid, started));
+      if (changed.changes !== 1) throw new Refused('RESOURCE_LEASE_LOST', 'the queued resource lease disappeared during item renewal; retry the command');
+    }
+  };
   try {
     update(db, () => {
       const currentCapacity = options.capacityProvider?.() ?? capacity;
@@ -291,6 +307,15 @@ export async function takeResource(options) {
         return { acquired: false, state: { ...spot, position: reportPosition } };
       });
       if (acquired.acquired) {
+        // Only item-lease callbacks opt into admission. Await them so no renewal remains in
+        // flight during the run, and restart the ordinary item expiry from this boundary.
+        if (leaseUntil) {
+          try { await keepItemLease({ ...acquired.state, admitted: true }, 'holder'); }
+          catch (error) {
+            update(db, () => db.prepare('DELETE FROM holder WHERE token = ?').run(token));
+            throw error;
+          }
+        }
         let released = false;
         let lost = false;
         const heartbeat = setInterval(() => {
@@ -321,7 +346,7 @@ export async function takeResource(options) {
         };
         return { name, scope, token, pool, browser, waitMs: Math.max(0, Date.now() - requestedAt), release, renew };
       }
-      options.onWait?.(acquired.state);
+      await keepItemLease(acquired.state, 'waiter');
       await pause(POLL_MS);
     }
   } catch (error) {
