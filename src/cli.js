@@ -33,6 +33,7 @@ import {
 import { detectGate, initRepo } from './init.js';
 import { lifecycleMarkdown } from './machine.js';
 import { HELP, VERSION } from './help.js';
+import { defaultViewPort } from './view-port.js';
 export { HELP, VERSION };
 import { productLine, productProblems, productSummaries } from './products.js';
 import { isLane, laneNames, laneOf, outOfLane } from './lanes.js';
@@ -1313,7 +1314,7 @@ async function viewHere(io, values) {
     io.say(`wrote snapshot ${exported.path}`);
     return 0;
   }
-  const port = values.port === undefined ? 4890 : Number(values.port);
+  const port = values.port === undefined ? defaultViewPort() : Number(values.port);
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Refused('USAGE', '--port is a number from 0 to 65535; 0 picks a free one');
   let info;
   try {
