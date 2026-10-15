@@ -129,7 +129,7 @@ try {
   }
   writeSpec('G2');
   execFileSync('git', ['add', 'SPEC.md'], { cwd: target.root, env: process.env, stdio: 'ignore' });
-  execFileSync('git', ['commit', '-q', '-m', 'docs: refresh fixture spec [A2]'], { cwd: target.root, env: gitIdentity, stdio: 'ignore' });
+  execFileSync('git', ['commit', '-q', '-m', 'docs: refresh fixture spec [G1]'], { cwd: target.root, env: gitIdentity, stdio: 'ignore' });
   let current = await state();
   let head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: target.root, env: process.env, encoding: 'utf8' }).trim();
   assert.ok(current.spec.some((row) => row.id === 'G2'));
@@ -138,7 +138,7 @@ try {
   execFileSync('git', ['switch', '-q', '-c', 'freshness-branch'], { cwd: target.root, env: process.env, stdio: 'ignore' });
   writeSpec('G3');
   execFileSync('git', ['add', 'SPEC.md'], { cwd: target.root, env: process.env, stdio: 'ignore' });
-  execFileSync('git', ['commit', '-q', '-m', 'docs: update branch fixture spec [A2]'], { cwd: target.root, env: gitIdentity, stdio: 'ignore' });
+  execFileSync('git', ['commit', '-q', '-m', 'docs: update branch fixture spec [G1]'], { cwd: target.root, env: gitIdentity, stdio: 'ignore' });
   current = await state();
   head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: target.root, env: process.env, encoding: 'utf8' }).trim();
   assert.ok(current.spec.some((row) => row.id === 'G3'));
@@ -175,7 +175,7 @@ try {
   execFileSync('git', ['switch', '-q', '-c', 'linked-refresh'], { cwd: linked.root, env: process.env, stdio: 'ignore' });
   writeFileSync(resolve(linked.root, 'SPEC.md'), '# HTTP fixture\\n\\n## Goals\\n- G1 [approved, must] Keep the board. | gate: true\\n- G5 [approved, must] Keep the linked worktree current. | gate: true\\n');
   execFileSync('git', ['add', 'SPEC.md'], { cwd: linked.root, env: process.env, stdio: 'ignore' });
-  execFileSync('git', ['commit', '-q', '-m', 'docs: refresh linked worktree [A2]'], { cwd: linked.root, env: gitIdentity, stdio: 'ignore' });
+  execFileSync('git', ['commit', '-q', '-m', 'docs: refresh linked worktree [G1]'], { cwd: linked.root, env: gitIdentity, stdio: 'ignore' });
   const linkedState = (await readApi(linkedPath)).state;
   const linkedHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: linked.root, env: process.env, encoding: 'utf8' }).trim();
   assert.ok(linkedState.spec.some((row) => row.id === 'G5'));
@@ -317,7 +317,7 @@ test('a repeated read spawns no process [A2,N26]', (t) => {
     writeFileSync(join(root, 'SPEC.md'), '# HTTP fixture\n\n## Goals\n- G1 [approved, must] Keep the board. | gate: true\n');
     writeFileSync(join(root, 'DOCTRINE.md'), '');
     runFixtureGit(['add', '-A'], { cwd: root, env: box.env, stdio: 'pipe' });
-    runFixtureGit(['commit', '-q', '-m', 'chore: private HTTP fixture [A2]'], { cwd: root, env: box.env, stdio: 'pipe' });
+    runFixtureGit(['commit', '-q', '-m', 'chore: private HTTP fixture [G1]'], { cwd: root, env: box.env, stdio: 'pipe' });
     if (number === 3) {
       const linked = join(box.dir, 'repo-3-linked');
       runFixtureGit(['worktree', 'add', '-q', '-b', 'view-feature', linked], { cwd: root, env: box.env, stdio: 'pipe' });
