@@ -16,7 +16,7 @@ const PRIVATE_CHANGELOG = `# Changelog\n\n## [0.8.7] - 2026-10-12\n\n### A new s
 const LONG_CHANGELOG = `# Changelog\n\n## [0.8.9] - 2026-10-14\n\n### Nine\n\nNine paragraph.\n\n## [0.8.8] - 2026-10-13\n\n### Eight\n\nEight paragraph.\n\n## [0.8.7] - 2026-10-12\n\n### Seven\n\nSeven paragraph.\n\n## [0.8.6] - 2026-10-11\n\n### Six\n\nSix paragraph.\n\n## [0.8.5] - 2026-10-10\n\n### Five\n\nFive paragraph.\n\n## [0.8.4] - 2026-10-09\n\n### Added\n\nThis category heading is not a release headline.\n`;
 
 /** Build an isolated copy of the production CLI at a chosen release version. */
-function releaseFixture(t, { previous = null, version = '0.8.7', changelog = PRIVATE_CHANGELOG, freshSetup = false } = {}) {
+function releaseFixture(t, { previous = null, version = '0.8.7', changelog = PRIVATE_CHANGELOG, freshSetup = false, historyBeforeInit = false } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-resume-release-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const cli = join(root, 'cli');
@@ -37,6 +37,11 @@ function releaseFixture(t, { previous = null, version = '0.8.7', changelog = PRI
   delete env.PULLBOARD_RELAY_TOKEN;
   for (const name of [...AGENT_SHELL_MARKERS, ...SSH_SHELL_MARKERS]) delete env[name];
   runFixtureGit(['init', '-q', '-b', 'main'], { cwd: repo, env });
+  if (historyBeforeInit) {
+    writeFileSync(join(repo, 'README.md'), '# Existing repository\n');
+    runFixtureGit(['add', 'README.md'], { cwd: repo, env });
+    runFixtureGit(['commit', '-q', '-m', 'chore: create existing repository'], { cwd: repo, env });
+  }
   /** Run the copied production CLI in the selected real checkout. */
   const run = (cwd, ...args) => runFixtureChild(process.execPath, [join(cli, 'bin/pullboard.js'), ...args], { cwd, env, encoding: 'utf8' });
   /** Run Git with this fixture's private identity and configuration. */
@@ -50,6 +55,27 @@ function releaseFixture(t, { previous = null, version = '0.8.7', changelog = PRI
   }
   return { root, repo, run, git, env };
 }
+
+/** Prove an older agent worktree gets the exact commit-first instruction from its main checkout. */
+test('a worktree names its main checkout\'s uncommitted init files [I1,I2]', (t) => {
+  const box = releaseFixture(t, { freshSetup: true, historyBeforeInit: true });
+  const oldHead = box.git(box.repo, 'rev-parse', 'HEAD');
+  const worktree = join(box.root, 'old-agent-worktree');
+  box.git(box.repo, 'worktree', 'add', '-q', '--detach', worktree, oldHead);
+
+  const fromWorktree = box.run(worktree, 'status');
+  assert.equal(fromWorktree.status, 1, fromWorktree.failure || fromWorktree.stderr || fromWorktree.stdout);
+  assert.match(fromWorktree.stderr, /main checkout has uncommitted Pullboard setup files/u);
+  assert.ok(fromWorktree.stderr.includes(`cd ${box.repo} && git add`), fromWorktree.stderr);
+  for (const path of ['pullboard.json', 'SPEC.md', 'DOCTRINE.md']) assert.ok(fromWorktree.stderr.includes(path), fromWorktree.stderr);
+  assert.doesNotMatch(fromWorktree.stderr, /worktree <lane>/u);
+
+  const fromMain = box.run(box.repo, 'resume');
+  assert.equal(fromMain.status, 0, fromMain.failure || fromMain.stderr || fromMain.stdout);
+  assert.match(fromMain.stdout, /The person must commit Pullboard's setup files before agents can use worktrees/u);
+  assert.ok(fromMain.stdout.includes(`cd ${box.repo} && git add`), fromMain.stdout);
+  for (const path of ['pullboard.json', 'SPEC.md', 'DOCTRINE.md']) assert.ok(fromMain.stdout.includes(path), fromMain.stdout);
+});
 
 test('resume says what is new once after an upgrade [N19]', t => {
   const box = releaseFixture(t, { previous: '0.8.5' });
