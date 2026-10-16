@@ -70,6 +70,7 @@ import { citedTestFiles, rowEvidence, rowStage } from './evidence.js';
 import { exportView, serveView } from './serve.js';
 import { forgetView, rememberView, runningView } from './view-session.js';
 import { serveApi } from './api.js';
+import { serveMcp } from './mcp.js';
 import { doctorProblems, doctrineProblems } from './doctor.js';
 import { staleFrozenItems, staleItemFinding } from './approved-rows.js';
 import { mainPolicy, policyAt, itemPolicy, submissionPaths, frozenCheck, checkAtCommit, dependencySnapshots, requireTrunkMerge, trunkRef } from './trusted-policy.js';
@@ -1539,6 +1540,18 @@ async function launchBackgroundView(io, port, projectRoot) {
 }
 
 /** Serve API v1 until a shutdown signal, printing its address before waiting (A2). */
+/**
+ * Serve MCP over stdio as this checkout's agent (A9). Stdout carries only the protocol, so the command
+ * takes no --json; each tool call runs its own CLI command, with its own relay sync, through main.
+ * A person's move never comes through it (P6).
+ */
+async function mcpHere(io, { first, values }) {
+  if (first) throw new Refused('USAGE', 'pullboard mcp takes no arguments; run pullboard mcp from the agent\'s worktree');
+  if (values.json) throw new Refused('USAGE', 'pullboard mcp speaks MCP on stdout; run pullboard mcp without --json');
+  context(io);
+  return serveMcp({ cwd: io.cwd, input: io.stdin, output: io.stdout, log: io.stderr, runCommand: main });
+}
+
 async function serveHere(io, values) {
   traceServeStartup('serve-context-start');
   const ctx = context(io);
@@ -3296,6 +3309,7 @@ async function runCommand(argv, io) {
     }
     if (command === 'view') return await viewHere(io, values);
     if (command === 'serve') return await serveHere(io, values);
+    if (command === 'mcp') return await mcpHere(io, args);
     if (command === 'forget') {
       if (!first || second) throw new Refused('USAGE', 'pullboard forget <path>');
       const root = resolve(io.cwd, first);
@@ -3464,7 +3478,7 @@ async function runMain(argv, streams) {
       positionals: parsed.positionals.slice(1),
       values: Object.fromEntries(Object.keys(parsed.values).filter(key => key !== 'json').sort().map(key => [key, parsed.values[key]])) };
     sync = Boolean(command) && !parsed.values.help && !parsed.values.version
-      && !['help', 'version', 'hook', 'init', 'relay', 'tour'].includes(command)
+      && !['help', 'version', 'hook', 'init', 'relay', 'tour', 'mcp'].includes(command)
       // A coordinator declaration on a linked clone must refuse before auto-link or relay sync.
       && !(command === 'join' && parsed.positionals[1] === COORDINATOR);
     needsRepo = !(parsed.values.help || parsed.values.version || command === 'help' || command === 'version');
