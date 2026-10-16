@@ -13,7 +13,12 @@ import { parseArgs } from 'node:util';
 import * as store from './board.js';
 import { CONFIG_FILE, COORDINATOR, DOCTRINE_FILE, LEGACY_DOCTRINE_FILE, loadConfig } from './config.js';
 import { displayAgentName } from './agent-names.js';
-import { doctrineHistory, loadDoctrine } from './doctrine.js';
+import {
+  appliedDoctrine,
+  doctrineFromSource,
+  doctrineHistory,
+  loadDoctrine,
+} from './doctrine.js';
 import { agentSessionDigest, requirePersonChannel } from './person.js';
 import { bindLocalSession, localSessionMatches } from './agent-session.js';
 import { decisionProjection, planRowApply, prepareRowDecisions, restoreRowApply, writeRowApply } from './row-decisions.js';
@@ -243,6 +248,8 @@ const OPTIONS = {
   text: { type: 'string' },
   gate: { type: 'string' },
   aim: { type: 'boolean' },
+  doctrine: { type: 'boolean' },
+  source: { type: 'string' },
   section: { type: 'string' },
   route: { type: 'string' },
   family: { type: 'string' },
@@ -659,7 +666,7 @@ function whoAmI(ctx, board) {
  * @param {{ captureVerifyPolicy?: boolean }} [options]
  * @returns {(item: any) => { text: string, digest: string }}
  */
-function freezer(ctx, { captureVerifyPolicy = false } = {}) {
+function freezer(ctx, { captureVerifyPolicy = false, board } = {}) {
   /** Freeze the criterion and, when requested, the trunk lane and verifier policy. */
   return (item) => {
     const prior = item.item_frozen ? JSON.parse(item.item_frozen) : null;
@@ -678,7 +685,8 @@ function freezer(ctx, { captureVerifyPolicy = false } = {}) {
     } else {
       config = policy ? itemPolicy(ctx.info.root, { ...item, item_frozen: JSON.stringify({ policy }) }).config : ctx.config;
     }
-    const frozen = frozenCriterion(loadSpec(ctx.info.root, config), item, loadDoctrine(ctx.info.root, config));
+    const doctrine = board ? agentDoctrine(ctx, board) : loadDoctrine(ctx.info.root, config);
+    const frozen = frozenCriterion(loadSpec(ctx.info.root, config), item, doctrine);
     if (!policy) return frozen; // Legacy criteria retain their original digest and committed claim base.
     const text = JSON.stringify({ ...JSON.parse(frozen.text), policy });
     return { text, digest: createHash('sha256').update(text).digest('hex') };
@@ -736,11 +744,11 @@ class MainSpecMerged extends Error {
  * @param {any} ctx
  * @returns {(item: any) => { text: string, digest: string }}
  */
-function claimFreezer(ctx) {
+function claimFreezer(ctx, board) {
   return (item) => {
     const rows = prepareClaimSpec(ctx, item);
     if (rows) throw new MainSpecMerged(rows);
-    return freezer(ctx)(item);
+    return freezer(ctx, { board })(item);
   };
 }
 
@@ -1095,6 +1103,48 @@ function resumeReleaseNotes(info) {
   return releases.length ? { releases: releases.slice(0, 3), omitted: Math.max(0, releases.length - 3), notes: 'CHANGELOG.md' } : null;
 }
 
+/** Read accepted-main doctrine plus applied person decisions, independent of this checkout's age. */
+function agentDoctrine(ctx, board) {
+  const root = ctx.info.root;
+  const primary = mainCheckout(root);
+  const retained = primary?.commit ? null : trunkRef(root);
+  const commit = primary?.commit ?? (retained ? resolveCommit(root, retained) : null);
+  let doctrine = ctx.doctrine;
+  let name = doctrine.name;
+  if (commit && tryGit(root, ['show', `${commit}:${CONFIG_FILE}`]).status === 0) {
+    const config = policyAt(root, commit).config;
+    name = config.practice;
+    let source = tryGit(root, ['show', `${commit}:${name}`]);
+    if (source.status !== 0 && [DOCTRINE_FILE, LEGACY_DOCTRINE_FILE].includes(name)) {
+      const alias = name === DOCTRINE_FILE ? LEGACY_DOCTRINE_FILE : DOCTRINE_FILE;
+      const other = tryGit(root, ['show', `${commit}:${alias}`]);
+      if (other.status === 0) { name = alias; source = other; }
+    }
+    doctrine = doctrineFromSource(source.status === 0 ? source.stdout : null, name);
+  }
+  const entry = git(root, ['worktree', 'list', '--porcelain', '-z']).split('\0')[0];
+  const primaryRoot = entry.startsWith('worktree ') ? entry.slice('worktree '.length) : null;
+  const file = primaryRoot && join(primaryRoot, name);
+  const current = file && existsSync(file) ? readFileSync(file, 'utf8') : null;
+  return appliedDoctrine(doctrine, store.rowDecisions(board), current);
+}
+
+/** Record each checkout's displayed approved rules so another checkout keeps its own notices. */
+function resumeDoctrineNotes(info, doctrine) {
+  const record = join(info.gitDir, 'pullboard-checkout', 'resume-doctrine.json');
+  let previous = {};
+  try { previous = JSON.parse(readFileSync(record, 'utf8')); } catch { /* First doctrine resume. */ }
+  if (!previous || typeof previous !== 'object' || Array.isArray(previous)) previous = {};
+  const approved = doctrine.rows.filter(row => row.origin === 'repo' && row.status === 'approved');
+  /** Identify the exact approved guidance this checkout has already displayed. */
+  const fingerprint = row => createHash('sha256').update(JSON.stringify([row.text, row.gate])).digest('hex');
+  const notes = approved.filter(row => previous[row.id] !== fingerprint(row))
+    .map(row => ({ id: 'doctrine:' + row.id, text: row.text, gate: row.gate }));
+  mkdirSync(dirname(record), { recursive: true });
+  writeFileSync(record, JSON.stringify({ ...previous, ...Object.fromEntries(approved.map(row => [row.id, fingerprint(row)])) }) + '\n', { mode: 0o600 });
+  return notes;
+}
+
 /** Identify setup from this board's coordinator enrollment, independently of agent flags. */
 function setupIdentity(board) {
   return { boardId: store.boardId(board),
@@ -1233,8 +1283,10 @@ function resumeHere(io) {
   const ctx = context(io);
   const { root, isMain } = ctx.info;
   let setupScope;
+  let doctrine;
   const card = withBoard(ctx, (board) => {
     setupScope = setupIdentity(board);
+    doctrine = agentDoctrine(ctx, board);
     const me = whoAmI(ctx, board);
     const all = store.listItems(board, { all: true });
     const toMerge = all.filter((item) => item.item_status === 'verified' && !item.item_merged_commit);
@@ -1267,7 +1319,7 @@ function resumeHere(io) {
   card.hookProblems = unwiredHookProblems(root);
   const { me } = card;
   const name = (id) => agentDisplayName(card.agents, ctx.config, id);
-  card.stale = staleFrozenItems(card.all, loadSpec(root, ctx.config).rows, ctx.doctrine.rows).map((item) => ({ ...item, ...staleItemFinding(item) }));
+  card.stale = staleFrozenItems(card.all, loadSpec(root, ctx.config).rows, doctrine.rows).map((item) => ({ ...item, ...staleItemFinding(item) }));
   if (isMain) {
     card.staleFollowUps = { count: card.stale.length + card.staleIntegrations.length,
       list: 'pullboard resume --json', items: card.stale, integrations: card.staleIntegrations };
@@ -1275,6 +1327,8 @@ function resumeHere(io) {
     card.reviewQueue = { items: card.toVerify, awaiting: card.awaiting };
   }
   const say = (line) => io.say(line);
+  card.doctrineNotes = resumeDoctrineNotes(ctx.info, doctrine);
+  for (const row of card.doctrineNotes) say(`new doctrine ${row.id} — ${row.text}`);
   const releaseNotes = card.whatsNew = resumeReleaseNotes(ctx.info);
   for (const note of (releaseNotes?.releases ?? [])) {
     say(`new in ${note.version} — ${note.headline}: ${note.paragraph}`);
@@ -2113,7 +2167,7 @@ async function submitHere(ctx, id) {
       let digest = null;
       let unusable = '';
       try {
-        digest = freezer(ctx)(item).digest;
+        digest = freezer(ctx, { board })(item).digest;
       } catch (error) {
         if (!(error instanceof Refused) || error.code === 'A5_GRAMMAR_VERSION') throw error;
         unusable = error.message.replace(/^\[\w+\] /, '').split(';')[0];
@@ -2221,7 +2275,7 @@ async function verifyHere(ctx, id, { second, values }) {
     let digest = 'missing';
     let check;
     try {
-      digest = freezer(ctx)(item).digest;
+      digest = freezer(ctx, { board })(item).digest;
     } catch (error) {
       if (!(error instanceof Refused) || error.code === 'A5_GRAMMAR_VERSION') throw error;
     }
@@ -2296,7 +2350,7 @@ async function nextOnce(ctx, values) {
     const reviewSkipped = values.build && !held
       ? { offeredItem: offer?.item.item_id ?? null, ratio: ctx.config.verify.reviewRatio, ...store.reviewQueue(board) } : null;
     try {
-      await ordered(ctx, board, 'claim', [item.item_id, { agentId: me.id, lane: me.lane, leaseMs: ctx.config.leaseMs, freeze: claimFreezer(ctx), head: headCommit(ctx.info.root), reviewSkipped }]);
+      await ordered(ctx, board, 'claim', [item.item_id, { agentId: me.id, lane: me.lane, leaseMs: ctx.config.leaseMs, freeze: claimFreezer(ctx, board), head: headCommit(ctx.info.root), reviewSkipped }]);
     } catch (error) {
       if (error instanceof MainSpecMerged) return { retry: true, specMerged: { item: item.item_id, rows: error.rows } };
       if (error instanceof Refused && ['HELD', 'ITEM_HELD', 'BLOCKED', 'ONE_CLAIM'].includes(error.code)) return { retry: true };
@@ -2652,7 +2706,7 @@ function workCommands(io, args) {
       let result;
       for (;;) {
         try {
-          result = await ordered(ctx, board, 'claim', [id, { agentId: me.id, lane: me.lane, leaseMs: ctx.config.leaseMs, freeze: claimFreezer(ctx), head: headCommit(ctx.info.root) }]);
+          result = await ordered(ctx, board, 'claim', [id, { agentId: me.id, lane: me.lane, leaseMs: ctx.config.leaseMs, freeze: claimFreezer(ctx, board), head: headCommit(ctx.info.root) }]);
           break;
         } catch (error) {
           if (!(error instanceof MainSpecMerged)) throw error;
@@ -2763,7 +2817,7 @@ function workCommands(io, args) {
       return 0;
     }),
     refreeze: () => act(async (ctx, board, me) => {
-      const result = await ordered(ctx, board, 'refreeze', [idArg(first), { agentId: me.id, freeze: freezer(ctx, { captureVerifyPolicy: true }) }]);
+      const result = await ordered(ctx, board, 'refreeze', [idArg(first), { agentId: me.id, freeze: freezer(ctx, { captureVerifyPolicy: true, board }) }]);
       io.result?.({ id: idArg(first), ...result });
       io.say(`#${first} refrozen ${String(result.before).slice(0, 12)} -> ${result.after.slice(0, 12)}; ${result.retainedClaim ? 'claim retained' : 'open again'}`);
       return 0;
@@ -2904,6 +2958,47 @@ function specProof(ctx) {
   });
 }
 
+/** Propose one source-backed ruling without approving it or changing existing doctrine rows. */
+function proposeDoctrine(ctx, values, text) {
+  if (typeof values.source !== 'string' || !values.source.trim() || /[\r\n|]/u.test(values.source)) {
+    throw new Refused('USAGE', 'a doctrine ruling needs its source; give --source "shout 42" or --source "chat, 2026-10-16"');
+  }
+  withBoard(ctx, (board) => {
+    const me = whoAmI(ctx, board);
+    if (!ctx.info.isMain || me.id !== COORDINATOR) throw new Refused('COORDINATOR_ONLY', 'only the coordinator proposes standing rulings; ask your coordinator to run spec draft --doctrine --source');
+  });
+  const doctrine = ctx.doctrine;
+  if (!doctrine.repoExists) throw new Refused('NO_SPEC', `no ${doctrine.name}; run pullboard init before proposing doctrine`);
+  if (doctrine.repo.problems.length) throw new Refused('SPEC_INVALID', `fix the unparsed row in ${doctrine.name} before proposing a ruling`);
+  const sections = doctrine.repo.sections.map(section => ({ ...section,
+    prefix: /^([A-Z][A-Z0-9]*)\s*[·.:-]/u.exec(section.name)?.[1] })).filter(section => section.prefix);
+  const prefix = values.section ?? 'DR';
+  const section = sections.find(section => section.prefix === prefix);
+  if (!section && values.section) throw new Refused('SPEC_SECTION', `unknown section "${prefix}" in ${doctrine.name}; use a declared section or omit --section for rulings`);
+  const used = [...loadSpec(ctx.info.root, ctx.config).rows, ...doctrine.rows];
+  const numbers = used.map(row => new RegExp(`^${prefix}(\\d+)$`, 'u').exec(row.id)?.[1]).filter(Boolean).map(Number);
+  const id = `${prefix}${Math.max(0, ...numbers) + 1}`;
+  const tier = values.aim ? 'aim' : 'must';
+  const gate = values.gate?.trim() ?? 'review';
+  const ruling = `${text.trim()} Source: ${values.source.trim()}`;
+  const row = `- ${id} [draft, ${tier}] ${ruling} | gate: ${gate}`;
+  const source = readFileSync(doctrine.repo.file, 'utf8');
+  const newline = source.includes('\r\n') ? '\r\n' : '\n';
+  const lines = source.split(/\r?\n/u);
+  if (section) {
+    const following = doctrine.repo.sections.find(entry => entry.line > section.line);
+    let insertion = following ? following.line - 1 : lines.length;
+    while (insertion > section.line && !lines[insertion - 1].trim()) insertion -= 1;
+    lines.splice(insertion, 0, row);
+  } else {
+    while (lines.length && !lines.at(-1).trim()) lines.pop();
+    lines.push('', '## DR · Rulings', row, '');
+  }
+  writeRowApply(ctx.info.root, { records: [], files: [{ file: doctrine.name, before: source, after: lines.join(newline) }],
+    signoffs: { before: null, receipts: [] } });
+  return { id: 'doctrine:' + id, row: { id, status: 'draft', tier, text: ruling, gate, section: section?.name ?? 'DR · Rulings' } };
+}
+
 /**
  * The spec commands: reads, sign-offs and person decisions applied by the coordinator.
  *
@@ -2921,7 +3016,7 @@ async function specCommand(io, { first, second, rest, values }) {
     unmet: ['must'],
     signoff: ['by', 'note', 'note-file'],
     signers: ['key', 'by'],
-    draft: ['aim', 'gate', 'section'],
+    draft: ['aim', 'gate', 'section', 'doctrine', 'source'],
     approve: ['by', 'text'],
     decline: ['reason'],
     apply: [],
@@ -2945,6 +3040,13 @@ async function specCommand(io, { first, second, rest, values }) {
     if (values.gate !== undefined && (!values.gate.trim() || /[\r\n|]/u.test(values.gate))) {
       throw new Refused('USAGE', 'give one nonempty, single-line gate without a field separator, or omit --gate to use review');
     }
+    if (values.doctrine) {
+      const result = proposeDoctrine(ctx, values, second);
+      io.result?.(result);
+      io.say(result.id);
+      return 0;
+    }
+    if (values.source !== undefined) throw new Refused('FLAG_NOT_ALLOWED', 'spec draft --source belongs to --doctrine; use both when proposing a ruling');
     if (!spec.sections.length) throw new Refused('NO_SECTION', `no section in ${ctx.config.spec}; add a section heading, then draft the requirement`);
     const sections = spec.sections.map(section => ({ ...section,
       prefix: /^([A-Z][A-Z0-9]*)\s*[·.:-]/u.exec(section.name)?.[1] })).filter(section => section.prefix);

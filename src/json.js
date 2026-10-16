@@ -16,7 +16,7 @@ export const JSON_SHAPES = {
     join: shape({ agent: 'string', lane: 'string', route: 'string', path: 'string', model: 'string', displayName: 'string' }),
     takeover: shape({ agent: 'string', path: 'string' }),
     worktree: shape({ agent: 'string', lane: 'string', route: 'string', path: 'string', branch: 'string', prompt: 'string', model: 'string', displayName: 'string' }),
-    resume: shape({ me: 'object', all: 'array', requests: 'array', holding: 'array', sentBack: 'array', awaiting: 'array', toVerify: 'array', toMerge: 'array', open: 'array', stale: 'array', holds: 'array', unread: 'number', newest: 'array', root: 'string', dirty: 'number', next: 'string' }),
+    resume: shape({ me: 'object', all: 'array', requests: 'array', holding: 'array', sentBack: 'array', awaiting: 'array', toVerify: 'array', toMerge: 'array', open: 'array', stale: 'array', doctrineNotes: 'array', holds: 'array', unread: 'number', newest: 'array', root: 'string', dirty: 'number', next: 'string' }),
     whoami: shape({ id: 'string', lane: 'string', path: 'string', model: 'string', displayName: 'string' }),
     lanes: shape({ lanes: 'object', shared: 'array', coordinator: 'string' }),
     resources: shape({ resources: 'array' }),
