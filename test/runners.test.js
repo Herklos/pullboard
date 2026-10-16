@@ -34,7 +34,7 @@ function cli(repo, env, ...args) {
 }
 
 /** Make a local ssh stand-in that executes the actual worker command in a second private machine. */
-function installSshStandIn({ bin, worker, home, machineHome, requests, nodeCommand = 'node', dropFirst = false, dropAfterMarker }) {
+function installSshStandIn({ bin, worker, home, machineHome, requests, starts, nodeCommand = 'node', dropFirst = false, dropAfterMarker }) {
   const ssh = join(bin, 'ssh');
   const source = `#!/usr/bin/env node
 import { appendFileSync, existsSync, readFileSync, watch, writeFileSync } from 'node:fs';
@@ -46,6 +46,7 @@ const divider = argv.indexOf('--');
 const host = divider >= 0 ? argv[divider + 1] : '';
 const remoteCommand = divider >= 0 ? argv[divider + 2] : '';
 const requests = ${JSON.stringify(requests)};
+const starts = ${JSON.stringify(starts ?? '')};
 const worker = ${JSON.stringify(worker)};
 const home = ${JSON.stringify(home)};
 const machineHome = ${JSON.stringify(machineHome)};
@@ -90,6 +91,7 @@ let cancelDropWait = () => {};
 if (host !== ${JSON.stringify(HOST)} && host !== ${JSON.stringify(`${HOST}-drop`)} && host !== ${JSON.stringify(`${HOST}-setup`)}) {
   record({ refused: true, stdinBytes }); process.exit(255);
 }
+if (starts) appendFileSync(starts, JSON.stringify({ call, host }) + '\\n');
 ${dropFirst ? `if (host.endsWith('-drop') && call === 1) {
   process.stdin.once('data', () => {
     record({ dropped: true, stdinBytes, stdinSha256: stdinHash.digest('hex') }); process.exit(255);
@@ -182,7 +184,8 @@ test('runner executed the committed source in its private checkout', () => {
   assert.notEqual(process.env.PULLBOARD_MACHINE_HOME, ${JSON.stringify(sourceMachineHome)});
   console.log('RUNNER_FACT ' + JSON.stringify({ commit, tree, cwd: process.cwd(), home: process.env.HOME,
     runnerHome, stateRoot: ${JSON.stringify(remoteStateRoot)}, machineHome: process.env.PULLBOARD_MACHINE_HOME, gatePool: process.env.PULLBOARD_GATE_SLOT_POOL,
-    gateToken: process.env.PULLBOARD_GATE_SLOT_TOKEN, browser: process.env.PULLBOARD_BROWSER_SLOT_HELD }));
+    gateToken: process.env.PULLBOARD_GATE_SLOT_TOKEN, browser: process.env.PULLBOARD_BROWSER_SLOT_HELD,
+    landing: process.env.PULLBOARD_LANDING_RUN }));
 });
 `;
   writeFileSync(join(repo, 'runner-probe.test.js'), probe);
@@ -225,11 +228,11 @@ test('a cached workspace link resolves inside this fresh runner checkout', () =>
 }
 
 /** Run a gate command through its real lease and return the profile/result emitted by the API child. */
-function runThroughGate(repo, env, command, { browser = true, item = '663', kind = 'check' } = {}) {
+function runThroughGate(repo, env, command, { browser = true, item = '663', kind = 'check', landing = false } = {}) {
   const gateUrl = new URL('../src/gate.js', import.meta.url).href;
   const script = `const { runProfiledShell, withGateSlot } = await import(${JSON.stringify(gateUrl)});
-const result = await withGateSlot(${JSON.stringify(repo)}, lease => runProfiledShell(${JSON.stringify(repo)}, ${JSON.stringify(command)}, { gateLease: lease }),
-  { browser: ${browser}, item: ${JSON.stringify(item)}, kind: ${JSON.stringify(kind)}, agent: 'runner-fixture' });
+const result = await withGateSlot(${JSON.stringify(repo)}, lease => runProfiledShell(${JSON.stringify(repo)}, ${JSON.stringify(command)}, { gateLease: lease, landing: ${landing} }),
+  { browser: ${browser}, item: ${JSON.stringify(item)}, kind: ${JSON.stringify(kind)}, landing: ${landing}, agent: 'runner-fixture' });
 process.stdout.write(result.output);
 process.stdout.write('PULLBOARD_RUN_RESULT ' + JSON.stringify({ isGreen: result.isGreen, runner: result.profile.executionRunner, profile: result.profile }) + '\\n');
 process.exitCode = result.isGreen ? 0 : 1;
@@ -255,6 +258,7 @@ function fixtureResultContext(result) {
 function readRemoteGateHolders(file) {
   const db = new DatabaseSync(file, { readOnly: true });
   try {
+    db.exec('PRAGMA busy_timeout = 10000');
     return db.prepare("SELECT token, pid, agent, browser, item, kind FROM holder WHERE name = 'gate'").all();
   } finally { db.close(); }
 }
@@ -436,13 +440,14 @@ test('a queued run executes on a registered runner and its result comes back [C7
   try {
     held = await takeResource({ name: 'gate', capacity: 1, scope: 'machine', root: repo,
       agent: 'fixture-local-holder', item: 'runner-local-holder', kind: 'force-registered-runner' });
-    const successful = runThroughGate(repo, env, 'node --test --test-reporter=tap runner-probe.test.js');
+    const successful = runThroughGate(repo, env, 'node --test --test-reporter=tap runner-probe.test.js', { landing: true });
   assert.equal(successful.status, 0, fixtureResultContext(successful));
   assert.match(successful.stdout, /TAP version 13/);
   assert.match(successful.stdout, /RUNNER_FACT /);
   const fact = JSON.parse(/RUNNER_FACT (\{[^\n]+\})/u.exec(successful.stdout)?.[1] ?? 'null');
   assert.equal(fact.commit, selectedCommit);
   assert.equal(fact.tree, selectedTree);
+  assert.equal(fact.landing, '1', 'the remote landing command receives the trusted landing marker');
   assert.notEqual(fact.cwd, repo);
   const remotePath = relative(remoteStateRoot, fact.cwd);
   assert.ok(remotePath && !remotePath.startsWith('..' + sep) && remotePath !== '..');
@@ -482,7 +487,7 @@ test('a queued run executes on a registered runner and its result comes back [C7
   assert.equal(request.localMachineHomeInSshEnv, false);
   assert.doesNotMatch(successful.stdout + successful.stderr, new RegExp(SECRET, 'u'));
 
-  const red = runThroughGate(repo, env, "node -e 'process.stdout.write(\"RUNNER_EXIT_7\\n\"); process.exit(7)'");
+  const red = runThroughGate(repo, env, "node -e 'if (process.env.PULLBOARD_LANDING_RUN !== \"0\") process.exit(9); process.stdout.write(\"RUNNER_EXIT_7\\n\"); process.exit(7)'");
   assert.equal(red.status, 1, fixtureResultContext(red));
   assert.match(red.stdout, /RUNNER_EXIT_7/);
   const redResult = gateResult(red.stdout);
@@ -1136,6 +1141,7 @@ test('a queued run executes on a registered runner and its result comes back [C7
   const bin = join(dir, 'bin');
   const requests = join(dir, 'ssh-requests.jsonl');
   const bodyRan = join(remoteStateRoot, 'cleanup-timeout-body-ran');
+  const starts = join(dir, 'ssh-starts.jsonl');
   let commandChild;
   t.after(async () => {
     if (commandChild && commandChild.exitCode === null && commandChild.signalCode === null) {
@@ -1181,7 +1187,7 @@ console.log('RUNNER_CLEANUP_TIMEOUT_BODY_RAN');
 `);
   git(repo, env, 'add', 'pullboard.json', 'tracked.txt', 'runner-cleanup-timeout.js');
   git(repo, env, 'commit', '-q', '-m', 'test: prepare runner cleanup timeout fixture');
-  installSshStandIn({ bin, worker, home: remoteHome, machineHome: remoteMachineHome, requests });
+  installSshStandIn({ bin, worker, home: remoteHome, machineHome: remoteMachineHome, requests, starts });
   const added = cli(repo, env, 'runner', 'add', HOST, '--slots', '1', '--browser', '1', '--json');
   assert.equal(added.status, 0, added.context);
 
@@ -1204,7 +1210,7 @@ console.log('RUNNER_CLEANUP_TIMEOUT_BODY_RAN');
     const response = JSON.parse(completed.stdout.trim());
     assert.equal(response.error?.code, 'RUNNER_CLEANUP_TIMEOUT', JSON.stringify(response));
     assert.ok(existsSync(bodyRan), 'the committed command ran to completion and wrote its own overflow marker');
-    assert.equal(readFileSync(requests, 'utf8').trim().split('\n').length, 1, 'the refused cleanup result is not retried or sent to a local runner');
+    assert.equal(readFileSync(starts, 'utf8').trim().split('\n').length, 1, 'the refused cleanup result is not retried or sent to a local runner');
     await waitForCondition(() => readRemoteGateHolders(remoteDatabase).length === 0,
       'remote physical gate holder releases after the named cleanup timeout');
     assert.equal(readRemoteGateHolders(join(machineHome, 'resources.sqlite')).length, 1,

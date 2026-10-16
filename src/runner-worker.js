@@ -1072,7 +1072,7 @@ async function main() {
     const env = scopedEnvironment(privateHome, temporary, canonicalMachineHome, lease, api, tracker.nodeOptions);
     await checkoutHistory(api, runnerRoot, root, packFile, spec, env);
     await installDependencies(root, runnerRoot, env, tracker);
-    final = { ...(await runCommand(spec, root, env, sink, tracker)), root };
+    final = { ...(await runCommand(spec, root, { ...env, PULLBOARD_LANDING_RUN: spec.landing === true ? '1' : '0' }, sink, tracker)), root };
   } catch (error) {
     const message = safeSetupMessage(error);
     if (!transportLost) await sink.write(`${message}\n`);
