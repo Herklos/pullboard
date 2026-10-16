@@ -62,7 +62,7 @@ import { parseProblems, sweepItems } from './sweep.js';
 import { renderSpecView } from './view.js';
 import { tour } from './tour.js';
 import { commandOutput, refusalDocument } from './json.js';
-import { forgetProject, registerProjectAndLink } from './projects.js';
+import { forgetProject, listApiProjects, registerProjectAndLink } from './projects.js';
 import { milestoneRoadmap } from './roadmap.js';
 import { listResources, runnerResourceStatus } from './resources.js';
 import { citedTestFiles, rowEvidence, rowStage } from './evidence.js';
@@ -232,6 +232,7 @@ const OPTIONS = {
   browser: { type: 'string' },
   node: { type: 'string' },
   root: { type: 'string' },
+  project: { type: 'boolean' },
   export: { type: 'string' },
   'no-open': { type: 'boolean' },
   note: { type: 'string' },
@@ -1384,24 +1385,43 @@ function resumeHere(io) {
  */
 async function viewHere(io, values) {
   if (values.export !== undefined) {
+    if (values.project) throw new Refused('USAGE', 'choose either --project for a live scoped view or --export for a static snapshot');
     const exported = await exportView(io.cwd, resolve(io.cwd, values.export));
     io.result?.(exported);
     io.say(`wrote snapshot ${exported.path}`);
     return 0;
   }
-  const port = values.port === undefined ? defaultViewPort() : Number(values.port);
+  const projectRequested = Boolean(values.project);
+  const port = values.port === undefined ? (projectRequested ? 0 : defaultViewPort()) : Number(values.port);
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Refused('USAGE', '--port is a number from 0 to 65535; 0 picks a free one');
+  let projectRoot;
+  let scopeCommonDir;
   let info;
   try {
     info = repoInfo(io.cwd);
-    if (info.isMain && existsSync(join(info.root, CONFIG_FILE))) await registerProjectAndLink(info.root, new Date(), loadConfig(info.root), io);
+    if (projectRequested) {
+      const projects = listApiProjects();
+      const matches = projects.filter((project) => {
+        try { return repoInfo(project.root).commonDir === info.commonDir; }
+        catch { return false; }
+      });
+      if (matches.length !== 1) throw new Refused('PROJECT_NOT_REGISTERED', 'run pullboard view --project inside a registered project repository or linked worktree, or use plain pullboard view for every project');
+      projectRoot = matches[0].root;
+      scopeCommonDir = info.commonDir;
+    } else if (info.isMain && existsSync(join(info.root, CONFIG_FILE))) {
+      await registerProjectAndLink(info.root, new Date(), loadConfig(info.root), io);
+    }
   } catch (error) {
+    if (projectRequested && error instanceof Refused && error.code !== 'PROJECT_NOT_REGISTERED') {
+      throw new Refused('PROJECT_NOT_REGISTERED', 'run pullboard view --project inside a registered project repository or linked worktree, or use plain pullboard view for every project');
+    }
     if (!(error instanceof Refused)) throw error;
+    if (projectRequested) throw error;
   }
   const internalForeground = process.env.PULLBOARD_VIEW_BACKGROUND_CHILD === '1'
     || process.env.PULLBOARD_VIEW_FOREGROUND === '1';
   if (!internalForeground) {
-    const existing = port ? await runningView(port) : null;
+    const existing = port ? await runningView(port, scopeCommonDir) : null;
     if (existing) {
       if (info && existsSync(join(info.root, CONFIG_FILE))) {
         const ctx = context(io);
@@ -1410,11 +1430,12 @@ async function viewHere(io, values) {
       reportView(io, { ...existing, reused: true });
       return 0;
     }
-    if (process.env.AI_AGENT !== undefined || !io.physicalStdoutIsTTY) return await launchBackgroundView(io, port);
+    if (process.env.AI_AGENT !== undefined || !io.physicalStdoutIsTTY) return await launchBackgroundView(io, port, projectRoot);
   }
   let view;
   try {
-    view = await serveView({ port, isMain: codeIsFromMain() });
+    // The adapter override is carried only by the in-process command streams, for private CLI fixtures.
+    view = await (io.serveView ?? serveView)({ port, isMain: codeIsFromMain(), ...(projectRoot ? { projectRoot } : {}) });
     const boundAt = new Date().toISOString();
     const closeServer = view.close;
     view = {
@@ -1424,7 +1445,8 @@ async function viewHere(io, values) {
       close: async () => { forgetView(view.port); await closeServer(); },
     };
     try {
-      rememberView({ port: view.port, secret: new URL(view.url).searchParams.get('k'), pid: process.pid, boundAt }, { rememberPort: port === 0 });
+      rememberView({ port: view.port, secret: new URL(view.url).searchParams.get('k'), pid: process.pid, boundAt,
+        ...(scopeCommonDir ? { scopeCommonDir } : {}) }, { rememberPort: port === 0 && !scopeCommonDir });
     } catch (error) {
       throw new Refused('VIEW_STATE', `could not save the private view session: ${error.message}`);
     }
@@ -1471,11 +1493,12 @@ function reportView(io, view) {
 }
 
 /** Start the view in a detached CLI child, forwarding only its bound address over IPC. */
-async function launchBackgroundView(io, port) {
+async function launchBackgroundView(io, port, projectRoot) {
   const args = [fileURLToPath(new URL('../bin/pullboard.js', import.meta.url)), 'view', '--no-open'];
+  if (projectRoot) args.push('--project');
   args.push('--port', String(port));
   const child = spawn(process.execPath, args, {
-    cwd: io.cwd,
+    cwd: projectRoot ?? io.cwd,
     env: { ...process.env, PULLBOARD_VIEW_BACKGROUND_CHILD: '1' },
     detached: true,
     stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
