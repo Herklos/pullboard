@@ -1,6 +1,6 @@
 /** Real HTTP calls against an isolated Git repo and the actual board engine (A2). */
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { runFixtureChild, runFixtureGit, startFixtureChild } from './fixture-child.js';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -63,24 +63,57 @@ const { serveView } = await import(pathToFileURL(serveFile).href);
 const view = await serveView({ port: 0 });
 const address = new URL(view.url);
 const key = address.searchParams.get('k');
+let pageReady = false;
+let pageUrl = view.url;
+let pageCookie = '';
 let requestCount = 0;
 /** Fetch one authenticated API response and reject failed fixture requests. */
 async function readApi(path) {
   requestCount += 1;
-  const response = await fetch(address.origin + path, { headers: { 'x-pullboard-key': key, connection: 'close' } });
+  const response = await fetch(address.origin + path, { headers: { ...(pageCookie ? { cookie: pageCookie } : { 'x-pullboard-key': key }), connection: 'close' } });
   const document = await response.json();
   assert.equal(response.status, 200, JSON.stringify(document));
   return document;
 }
 /** Fetch the actual local view page and require a successful response. */
 async function readPage() {
+  if (!pageReady) {
+    requestCount += 1;
+    const exchange = await fetch(view.url, { headers: { connection: 'close' }, redirect: 'manual' });
+    if (exchange.status === 200) {
+      assert.match(await exchange.text(), /<!doctype html>/iu);
+      pageReady = true;
+      return;
+    }
+    assert.equal(exchange.status, 303, 'the printed view link either serves the page or trades its key for a session cookie');
+    const location = exchange.headers.get('location');
+    assert.ok(location, 'the key exchange redirects to the clean page address');
+    let cleanAddress;
+    try { cleanAddress = new URL(location, address.origin); }
+    catch { assert.fail('the key exchange returns a valid clean page address'); }
+    assert.equal(cleanAddress.origin, address.origin, 'the key exchange stays on this view');
+    assert.equal(cleanAddress.searchParams.has('k'), false, 'the redirected page address drops the key');
+    const setCookie = exchange.headers.get('set-cookie');
+    assert.ok(setCookie, 'the key exchange sets a session cookie');
+    const cookieParts = setCookie.split(';');
+    const cookiePair = cookieParts.shift();
+    const cookieAttributes = new Set(cookieParts.map((part) => part.trim().toLowerCase()));
+    assert.equal(/^pullboard_view_[0-9a-f]{18}=[A-Za-z0-9_-]+$/u.test(cookiePair), true, 'the response sets a per-view session cookie');
+    assert.equal(cookieAttributes.has('path=/'), true, 'the session cookie covers the view routes');
+    assert.equal(cookieAttributes.has('httponly'), true, 'the session cookie is not readable by page scripts');
+    assert.equal(cookieAttributes.has('samesite=strict'), true, 'the session cookie is same-site only');
+    pageUrl = cleanAddress;
+    pageCookie = cookiePair;
+    pageReady = true;
+  }
   requestCount += 1;
-  const response = await fetch(view.url, { headers: { connection: 'close' } });
+  const response = await fetch(pageUrl, { headers: { connection: 'close', ...(pageCookie ? { cookie: pageCookie } : { 'x-pullboard-key': key }) } });
   assert.equal(response.status, 200);
   assert.match(await response.text(), /<!doctype html>/iu);
 }
 /** Read each selected board state and one known item detail. */
 async function readAllRoutes(boards) {
+  await readPage();
   await readApi('/api/v1/boards');
   for (const project of projects) {
     const board = boards.find((entry) => resolve(entry.root) === resolve(project.root));
@@ -89,10 +122,10 @@ async function readAllRoutes(boards) {
     await readApi(path + '/state');
     await readApi(path + '/items/' + project.item);
   }
-  await readPage();
 }
 
 try {
+  await readPage();
   const initial = await readApi('/api/v1/boards');
   assert.equal(initial.boards.length, 3);
   const boards = initial.boards;
@@ -311,7 +344,7 @@ async function viewHttpBox(t, existing = null) {
 }
 
 /** Prove warmed reads across three registered projects start no child processes and changes refresh state. */
-test('a repeated read spawns no process [A2,N26]', (t) => {
+test('a repeated read through the view page spawns no process [A2,N26]', (t) => {
   const box = fixture(t);
   const roots = [box.root];
   for (const number of [2, 3]) {
@@ -357,7 +390,7 @@ test('a repeated read spawns no process [A2,N26]', (t) => {
   assert.ok(result.stdout.trim(), result.failure ?? result.stderr);
   const lines = result.stdout.trim().split('\n');
   const measurement = JSON.parse(lines[0]).measurement;
-  process.stderr.write(`a repeated read spawns no process: boards=${measurement.boards}, routes=${measurement.routes}, requests=${measurement.requests}, rounds=${measurement.rounds}, processes=${JSON.stringify(measurement.processes)}, elapsed=${measurement.elapsedMs}ms\n`);
+  process.stderr.write(`a repeated read through the view page spawns no process: boards=${measurement.boards}, routes=${measurement.routes}, requests=${measurement.requests}, rounds=${measurement.rounds}, processes=${JSON.stringify(measurement.processes)}, elapsed=${measurement.elapsedMs}ms\n`);
   assert.deepEqual({ git: measurement.processes.git, node: measurement.processes.node, other: measurement.processes.other },
     { git: 0, node: 0, other: 0 }, 'repeated board-list, state, item-detail, and page reads start no child process after warm-up');
   assert.equal(result.status, 0, result.failure ?? result.stderr);
@@ -1414,13 +1447,20 @@ test('[A2, N26] one event stream serves many boards', async (t) => {
   assert.match(repeated.document.error.message, new RegExp(box.id));
 });
 
-test('[A2,N39] the local API accepts the view session cookie', async (t) => {
+test('[A2,N39] the view cookie check catches a weakened compare', async (t) => {
   const box = fixture(t);
   const secret = randomUUID();
   const sessionCookie = {
     name: `pullboard_view_${randomUUID().replaceAll('-', '')}`,
-    value: randomUUID(),
+    value: randomBytes(24).toString('base64url'),
   };
+  assert.throws(() => createLocalApiHandler({
+    secret,
+    getPort: () => 1,
+    runCommand: main,
+    projects: () => [],
+    sessionCookie: { name: sessionCookie.name, value: randomBytes(8).toString('base64url') },
+  }), /at least 128 bits/u, 'session cookies need capacity for at least 128 random bits');
   let bound;
   const handler = createLocalApiHandler({
     secret,
@@ -1437,6 +1477,14 @@ test('[A2,N39] the local API accepts the view session cookie', async (t) => {
   });
   t.after(() => new Promise((closed) => server.close(closed)));
   const origin = `http://127.0.0.1:${bound}`;
+  const otherPortServer = createServer();
+  await new Promise((ready, fail) => {
+    otherPortServer.once('error', fail);
+    otherPortServer.listen(0, '127.0.0.1', ready);
+  });
+  const otherLocalOrigin = `http://127.0.0.1:${otherPortServer.address().port}`;
+  t.after(() => new Promise((closed) => otherPortServer.close(closed)));
+  assert.notEqual(otherLocalOrigin, origin, 'the hostile same-site page uses a different localhost port');
   const cookie = `${sessionCookie.name}=${sessionCookie.value}`;
   /** Send one real HTTP request to the private API handler. */
   const request = (path, headers = {}, init = {}) => fetchFresh(origin + path, {
@@ -1452,7 +1500,7 @@ test('[A2,N39] the local API accepts the view session cookie', async (t) => {
     assert.equal(document.error.code, code);
   }
 
-  const cookieListing = await request('/api/v1/boards', { cookie });
+  const cookieListing = await request('/api/v1/boards', { cookie, 'sec-fetch-site': 'same-origin' });
   assert.equal(cookieListing.status, 200, 'the current view cookie authenticates the actual local API');
   const listing = await cookieListing.json();
   assert.equal(listing.version, 1);
@@ -1461,14 +1509,27 @@ test('[A2,N39] the local API accepts the view session cookie', async (t) => {
   const state = await request(`/api/v1/boards/${board.id}/state`, { cookie });
   assert.equal(state.status, 200, 'cookie-authenticated state reads the fixture SQLite board');
 
+  const sameOriginFallback = await request('/api/v1/boards', { cookie });
+  assert.equal(sameOriginFallback.status, 200, 'without Fetch-Site, the existing own Host/Origin checks still allow the cookie');
   await refused(await request('/api/v1/boards'), 401, 'AUTH_REQUIRED');
-  await refused(await request('/api/v1/boards', { cookie: `${sessionCookie.name}=wrong-cookie-value` }), 401, 'AUTH_REQUIRED');
+  await refused(await request('/api/v1/boards', { cookie: `${sessionCookie.name}=${'x'.repeat(sessionCookie.value.length)}` }), 401, 'AUTH_REQUIRED');
+  const caseChangedName = `${sessionCookie.name[0].toUpperCase()}${sessionCookie.name.slice(1)}`;
+  assert.notEqual(caseChangedName, sessionCookie.name);
+  await refused(await request('/api/v1/boards', { cookie: `${caseChangedName}=${sessionCookie.value}` }), 401, 'AUTH_REQUIRED');
   await refused(await request('/api/v1/boards', { cookie: `${sessionCookie.name}=expired-session-value` }), 401, 'AUTH_REQUIRED');
   await refused(await request('/api/v1/boards', { cookie: `${cookie}; ${cookie}` }), 401, 'AUTH_REQUIRED');
   await refused(await request('/api/v1/boards', { cookie: `${sessionCookie.name}=wrong-cookie-value; ${cookie}` }), 401, 'AUTH_REQUIRED');
   await refused(await request('/api/v1/boards', { cookie: `${sessionCookie.name}; ${cookie}` }), 401, 'AUTH_REQUIRED');
   const staleName = `${sessionCookie.name}_old`;
   await refused(await request('/api/v1/boards', { cookie: `${staleName}=${sessionCookie.value}` }), 401, 'AUTH_REQUIRED');
+  await refused(await request('/api/v1/boards', { cookie, 'sec-fetch-site': 'same-site' }), 401, 'AUTH_REQUIRED');
+  await refused(await request('/api/v1/boards', { cookie, origin: otherLocalOrigin, 'sec-fetch-site': 'same-site' }), 401, 'AUTH_REQUIRED');
+  await refused(await request(`/api/v1/boards/${board.id}/moves`, {
+    cookie, 'sec-fetch-site': 'same-site',
+  }, { method: 'POST', body: { verb: 'next', args: {} } }), 401, 'AUTH_REQUIRED');
+  await refused(await request(`/api/v1/boards/${board.id}/moves`, {
+    cookie, origin: otherLocalOrigin, 'sec-fetch-site': 'same-site',
+  }, { method: 'POST', body: { verb: 'next', args: {} } }), 401, 'AUTH_REQUIRED');
 
   const foreignHost = await new Promise((done, reject) => {
     const outbound = httpRequest(origin + '/api/v1/boards', { headers: { host: 'foreign.invalid', cookie } }, (response) => {
@@ -1482,8 +1543,11 @@ test('[A2,N39] the local API accepts the view session cookie', async (t) => {
   assert.equal(foreignHost.status, 401, 'a valid cookie cannot cross the API host boundary');
   assert.equal(foreignHost.document.error.code, 'AUTH_REQUIRED');
   await refused(await request('/api/v1/boards', { cookie, origin: 'https://foreign.invalid' }), 403, 'API_ORIGIN');
+  await refused(await request(`/api/v1/boards/${board.id}/moves`, { cookie, origin: 'https://foreign.invalid' }, {
+    method: 'POST', body: { verb: 'next', args: {} },
+  }), 403, 'API_ORIGIN');
 
-  const keyHeader = await request('/api/v1/boards', { 'x-pullboard-key': secret });
+  const keyHeader = await request('/api/v1/boards', { 'x-pullboard-key': secret, 'sec-fetch-site': 'cross-site' });
   assert.equal(keyHeader.status, 200, 'the existing key header remains valid');
   const bearer = await request('/api/v1/boards', { authorization: `Bearer ${secret}` });
   assert.equal(bearer.status, 200, 'the existing Bearer key remains valid');

@@ -15,7 +15,7 @@ import { CONFIG_FILE, COORDINATOR, DOCTRINE_FILE, LEGACY_DOCTRINE_FILE, loadConf
 import { displayAgentName } from './agent-names.js';
 import { doctrineHistory, loadDoctrine } from './doctrine.js';
 import { agentSessionDigest, requirePersonChannel } from './person.js';
-import { bindLocalSession } from './agent-session.js';
+import { bindLocalSession, localSessionMatches } from './agent-session.js';
 import { decisionProjection, planRowApply, prepareRowDecisions, restoreRowApply, writeRowApply } from './row-decisions.js';
 import { digestOf, gateReport, runGate, runProfiledShell, runSubmitGate, submitGateReport, timingDigest, withGateSlot } from './gate.js';
 import { bareWorktreeFinding, codeIsFromMain, contains, differFromHead, git, gitChildEnv, headCommit, headTree, invalidateGitFacts, isClean, mainCheckout, patchId, repoInfo, resolveCommit, tryGit, untracked, withGitFacts } from './git.js';
@@ -62,7 +62,7 @@ import { parseProblems, sweepItems } from './sweep.js';
 import { renderSpecView } from './view.js';
 import { tour } from './tour.js';
 import { commandOutput, refusalDocument } from './json.js';
-import { forgetProject, registerProjectAndLink } from './projects.js';
+import { forgetProject, listApiProjects, registerProjectAndLink } from './projects.js';
 import { milestoneRoadmap } from './roadmap.js';
 import { listResources } from './resources.js';
 import { citedTestFiles, rowEvidence, rowStage } from './evidence.js';
@@ -87,6 +87,7 @@ import { engineReceipt } from './engine.js';
 import { land } from './land.js';
 
 const CHECKOUT_LEASES = new WeakMap();
+const CHECKOUT_BOARD_ONLY = new WeakMap();
 let startupMainTraced = false;
 
 /** Append an opt-in startup phase marker for the real CLI fixture measurement [A2,C7]. */
@@ -175,7 +176,7 @@ function commandHelp(name) {
       '  pullboard spec view — agent or person: write the offline spec page',
       '  pullboard spec show <id> — agent or person: inspect one row and its sign-offs',
       '  pullboard spec unmet — agent or person: list approved rows without current sign-off',
-      '  pullboard spec draft <text> [--aim] [--gate "<gate>"] — any agent: append a draft row; never approve it',
+      '  pullboard spec draft <text> [--section <letter>] [--aim] [--gate "<gate>"] — any agent: append a draft row; never approve it',
       '  pullboard spec signoff <ids> — person: sign rows with evidence',
       '  pullboard spec signers add — person: register an SSH signing key',
       '  pullboard spec approve <ids> — person: decide from their own terminal or Pullboard View',
@@ -227,6 +228,7 @@ const OPTIONS = {
   reason: { type: 'string' },
   off: { type: 'boolean' },
   port: { type: 'string' },
+  project: { type: 'boolean' },
   export: { type: 'string' },
   'no-open': { type: 'boolean' },
   note: { type: 'string' },
@@ -240,6 +242,7 @@ const OPTIONS = {
   text: { type: 'string' },
   gate: { type: 'string' },
   aim: { type: 'boolean' },
+  section: { type: 'string' },
   route: { type: 'string' },
   family: { type: 'string' },
   model: { type: 'string' },
@@ -490,6 +493,18 @@ function configHere(info) {
     }
     const mainRoot = resolve(info.commonDir, '..');
     if (info.isMain || !existsSync(join(mainRoot, CONFIG_FILE))) throw error;
+    let setup;
+    try {
+      setup = uncommittedSetup(mainRoot, loadConfig(mainRoot));
+    } catch {
+      // Keep the existing recovery for invalid or incomplete main-checkout configuration.
+    }
+    if (setup) {
+      throw new Refused(
+        'NO_CONFIG',
+        `this worktree has no ${CONFIG_FILE}, and the main checkout has uncommitted Pullboard setup files: ${setup.files.join(', ')}. Commit them in the main checkout first: ${setup.stage}`,
+      );
+    }
     throw new Refused(
       'NO_CONFIG',
       `this worktree's commit has no ${CONFIG_FILE}, though the main checkout has one: make a new worktree from the main checkout, which says what to commit first: ${cdTo(mainRoot)} pullboard worktree <lane> --model "<model name>"`,
@@ -528,6 +543,10 @@ async function ordered(ctx, board, operation, args) {
   const execute = () => relayLinked(ctx.info.root)
     ? relayOperation(ctx.info.root, operation, args, ctx.io, command, () => store[operation](board, ...args)) : store[operation](board, ...args);
   const digest = agentSessionDigest();
+  const boardOnly = CHECKOUT_BOARD_ONLY.get(ctx.io);
+  const boardOnlyOperation = (boardOnly === 'shout' && operation === 'shout') || (boardOnly === 'fact' && operation === 'appendFact');
+  const boardOnlyAgent = ctx.info.isMain ? COORDINATOR : store.agentAt(board, ctx.info.root)?.agent_id ?? 'unjoined agent';
+  if (boardOnlyOperation && digest && localSessionMatches(ctx.info, { agent: boardOnlyAgent, digest })) return execute();
   if (CHECKOUT_LEASES.has(ctx.io) || !digest || ctx.io.personChannel === 'view' || ctx.io.personRequest) return execute();
   const agent = ctx.info.isMain ? COORDINATOR : store.agentAt(board, ctx.info.root)?.agent_id ?? 'unjoined agent';
   const lease = await bindLocalSession(ctx.info, { agent, digest, keepLease: true });
@@ -558,6 +577,10 @@ async function bindCheckoutSession(io, positionals, values) {
     agent = withBoard(ctx, (board) => store.agentAt(board, info.root)?.agent_id
       ?? (command === 'hook' && store.landingBatches(board).some((batch) => batch.root === info.root && !['landed', 'blocked'].includes(batch.state)) ? COORDINATOR : null));
     if (!agent && command !== 'join') throw new Refused('NOT_JOINED', 'this worktree has not joined a lane; run pullboard join <lane> --model "<model name>"');
+  }
+  if (['shout', 'fact'].includes(command) && localSessionMatches(info, { agent: agent ?? 'unjoined agent', digest })) {
+    CHECKOUT_BOARD_ONLY.set(io, command);
+    return;
   }
   const lease = await bindLocalSession(info, { agent: agent ?? 'unjoined agent', digest, takeover: command === 'takeover', keepLease: !['run', 'next'].includes(command),
     /** Use an existing ordered shout so takeover has a receipt without changing the board format. */
@@ -1123,22 +1146,49 @@ function recordViewReuse(ctx, board, view) {
   renameSync(temporary, file);
 }
 
+/** Read a typed setup receipt only for this board's current coordinator enrollment. */
+function setupReceiptMatches(ctx, identity, state) {
+  let receipt;
+  try { receipt = JSON.parse(readFileSync(join(ctx.info.commonDir, 'pullboard', `setup-${state}.json`), 'utf8')); }
+  catch (error) { if (error.code === 'ENOENT' || error instanceof SyntaxError) return false; throw error; }
+  return receipt?.type === `pullboard.setup.${state === 'complete' ? 'completed' : state}` && receipt.version === 1
+    && receipt.boardId === identity.boardId && receipt.setupStartedAt === identity.setupStartedAt;
+}
+
+/** Atomically record a setup transition, scoped to this board enrollment. */
+function recordSetupState(ctx, identity, state) {
+  const file = join(ctx.info.commonDir, 'pullboard', `setup-${state}.json`);
+  const temporary = file + '.' + randomUUID() + '.tmp';
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(temporary, JSON.stringify({ type: `pullboard.setup.${state === 'complete' ? 'completed' : state}`, version: 1, ...identity }) + '\n', { mode: 0o600 });
+  renameSync(temporary, file);
+}
+
 /** Derive the next setup question from the real requirements, config, items and view receipt. */
-function boardSetup(ctx, card) {
+function boardSetup(ctx, card, identity) {
   const rows = loadSpec(ctx.info.root, ctx.config).rows;
   const approved = rows.filter(row => row.status === 'approved');
+  const drafted = rows.filter(row => row.status === 'draft' || row.status === 'pending');
+  const recordedComplete = setupReceiptMatches(ctx, identity, 'complete');
+  const started = setupReceiptMatches(ctx, identity, 'started');
   const lanes = laneNames(ctx.config).filter(lane => !['review', COORDINATOR].includes(lane));
   const folders = readdirSync(ctx.info.root, { withFileTypes: true })
     .filter(entry => entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules')
     .map(entry => entry.name).sort();
   const lane = lanes[0] ?? folders[0] ?? 'app';
+  // Older installations had no setup marker. Preserve their completed five-step state on upgrade.
+  const legacyUnmarked = !existsSync(join(ctx.info.commonDir, 'pullboard', 'setup-started.json'))
+    && !existsSync(join(ctx.info.commonDir, 'pullboard', 'setup-complete.json'));
+  const legacyComplete = legacyUnmarked && approved.length > 0 && lanes.length > 0
+    && Boolean(ctx.config.gate?.trim()) && card.all.length > 0 && card.viewOpened;
+  const completed = recordedComplete || legacyComplete;
   const detectedGate = detectGate(ctx.info.root);
   /** Quote the exact suggested command safely for a shell. */
   const quote = value => "'" + String(value).replaceAll("'", "'\\''") + "'";
   /** Preserve all existing configuration when recording one setup answer. */
   const configure = patch => `node -e ${quote(`const fs=require('node:fs');const p='pullboard.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));${patch};fs.writeFileSync(p,JSON.stringify(c,null,2)+${JSON.stringify('\n')})`)}`;
   const steps = [
-    { number: 1, done: approved.length > 0, question: 'Ask the person: what are we building, and who will use it? Draft a few requirements, then ask the person to approve them.',
+    { number: 1, done: approved.length > 0 && (!drafted.length || completed), question: 'Ask the person: what are we building, and who will use it? Draft a few requirements, then ask the person to approve them.',
       command: 'pullboard spec draft "<text>"',
       afterAnswer: 'Record each answer with pullboard spec draft "<text>"; the person approves the returned ids in Pullboard View or runs pullboard spec approve <ids> in their own terminal; then the coordinator runs pullboard spec apply.' },
     { number: 2, done: lanes.length > 0, question: `Ask the person: how should we divide the work? Suggested folders: ${folders.join(', ') || 'app/ (create it for the app)'}.`,
@@ -1155,6 +1205,19 @@ function boardSetup(ctx, card) {
       afterAnswer: 'Run this in the person’s own terminal, or start it in the background as the agent so setup can continue. The view records its successful bind or authenticated reuse for this board.' },
   ];
   const current = steps.find(step => !step.done);
+  if (!current && !recordedComplete) recordSetupState(ctx, identity, 'complete');
+  else if (current && !completed && !started) recordSetupState(ctx, identity, 'started');
+  if (current?.number === 1 && drafted.length) {
+    const rowIds = drafted.map(row => row.id);
+    const names = rowIds.join(', ');
+    const command = `pullboard spec show ${rowIds[0]}`;
+    return { step: 1, total: 5, ...current, steps, waitingOn: 'person-approval', rowIds,
+      question: `Waiting for the person to approve ${names}.`, command,
+      personCommand: `pullboard spec approve ${rowIds.join(',')}`,
+      afterAnswer: 'The person approves these rows in Pullboard View or their own terminal; then the coordinator runs pullboard spec apply.',
+      meanwhile: 'While waiting, the agent may review independent approved work or prepare questions for the person.',
+      agentNext: `wait for the person to approve ${names}; meanwhile ${command}` };
+  }
   return current ? { step: current.number, total: 5, ...current, steps } : null;
 }
 
@@ -1168,7 +1231,9 @@ function boardSetup(ctx, card) {
 function resumeHere(io) {
   const ctx = context(io);
   const { root, isMain } = ctx.info;
+  let setupScope;
   const card = withBoard(ctx, (board) => {
+    setupScope = setupIdentity(board);
     const me = whoAmI(ctx, board);
     const all = store.listItems(board, { all: true });
     const toMerge = all.filter((item) => item.item_status === 'verified' && !item.item_merged_commit);
@@ -1219,12 +1284,13 @@ function resumeHere(io) {
   for (const problem of card.hookProblems) say(`${problem.message}; ${problem.next}`);
   const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
   say(`resume: ${me.displayName}${me.family ? ` [family ${me.family}]` : ''}, ${me.lane} lane${isMain ? ', the main checkout' : ''}, at ${root}`);
-  card.setup = boardSetup(ctx, card);
+  card.setup = boardSetup(ctx, card, setupScope);
   if (card.setup) {
     say(`Setting up: step ${card.setup.step} of 5`);
     say(card.setup.question);
-    say(`Record the answer: ${card.setup.command}`);
+    say(card.setup.personCommand ? `For the person: ${card.setup.personCommand}` : `Record the answer: ${card.setup.command}`);
     if (card.setup.afterAnswer) say(card.setup.afterAnswer);
+    if (card.setup.meanwhile) say(card.setup.meanwhile);
   }
   const dirty = dirtyFiles(root).length;
   if (!isMain) {
@@ -1236,6 +1302,12 @@ function resumeHere(io) {
     say(`branch ${branch}: ${against}${dirty ? `; ${plural(dirty, 'file')} uncommitted` : ''}`);
   } else if (dirty) {
     say(`${plural(dirty, 'file')} uncommitted in the main checkout`);
+  }
+  if (isMain) {
+    const setup = uncommittedSetup(root, ctx.config);
+    if (setup) {
+      say(`The person must commit Pullboard's setup files before agents can use worktrees: ${setup.stage}`);
+    }
   }
   for (const request of card.requests) say(`request #${request.shout_id}: ${request.shout_text}; answer with pullboard answer ${request.shout_id} done, or declined <reason>`);
   for (const item of card.holding) {
@@ -1290,7 +1362,7 @@ function resumeHere(io) {
   else if (inLane.length) next = `pullboard next --wait 9 (minutes); ${inLane.length} in your lane ${inLane.length === 1 ? 'waits' : 'wait'} on other work`;
   else if (card.awaiting.length) next = 'pullboard next --wait 9 (minutes); a rejected item comes back to your lane';
   else next = 'nothing open in your lane; pullboard next --verify names work you can check';
-  if (card.setup) next = card.setup.command;
+  if (card.setup) next = card.setup.agentNext ?? card.setup.command;
   io.result?.({ ...card, root, dirty, next });
   say(`next: ${next}`);
   const flowAlert = isMain ? flowAlertLine(card.flow) : null;
@@ -1309,24 +1381,43 @@ function resumeHere(io) {
  */
 async function viewHere(io, values) {
   if (values.export !== undefined) {
+    if (values.project) throw new Refused('USAGE', 'choose either --project for a live scoped view or --export for a static snapshot');
     const exported = await exportView(io.cwd, resolve(io.cwd, values.export));
     io.result?.(exported);
     io.say(`wrote snapshot ${exported.path}`);
     return 0;
   }
-  const port = values.port === undefined ? defaultViewPort() : Number(values.port);
+  const projectRequested = Boolean(values.project);
+  const port = values.port === undefined ? (projectRequested ? 0 : defaultViewPort()) : Number(values.port);
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Refused('USAGE', '--port is a number from 0 to 65535; 0 picks a free one');
+  let projectRoot;
+  let scopeCommonDir;
   let info;
   try {
     info = repoInfo(io.cwd);
-    if (info.isMain && existsSync(join(info.root, CONFIG_FILE))) await registerProjectAndLink(info.root, new Date(), loadConfig(info.root), io);
+    if (projectRequested) {
+      const projects = listApiProjects();
+      const matches = projects.filter((project) => {
+        try { return repoInfo(project.root).commonDir === info.commonDir; }
+        catch { return false; }
+      });
+      if (matches.length !== 1) throw new Refused('PROJECT_NOT_REGISTERED', 'run pullboard view --project inside a registered project repository or linked worktree, or use plain pullboard view for every project');
+      projectRoot = matches[0].root;
+      scopeCommonDir = info.commonDir;
+    } else if (info.isMain && existsSync(join(info.root, CONFIG_FILE))) {
+      await registerProjectAndLink(info.root, new Date(), loadConfig(info.root), io);
+    }
   } catch (error) {
+    if (projectRequested && error instanceof Refused && error.code !== 'PROJECT_NOT_REGISTERED') {
+      throw new Refused('PROJECT_NOT_REGISTERED', 'run pullboard view --project inside a registered project repository or linked worktree, or use plain pullboard view for every project');
+    }
     if (!(error instanceof Refused)) throw error;
+    if (projectRequested) throw error;
   }
   const internalForeground = process.env.PULLBOARD_VIEW_BACKGROUND_CHILD === '1'
     || process.env.PULLBOARD_VIEW_FOREGROUND === '1';
   if (!internalForeground) {
-    const existing = port ? await runningView(port) : null;
+    const existing = port ? await runningView(port, scopeCommonDir) : null;
     if (existing) {
       if (info && existsSync(join(info.root, CONFIG_FILE))) {
         const ctx = context(io);
@@ -1335,11 +1426,12 @@ async function viewHere(io, values) {
       reportView(io, { ...existing, reused: true });
       return 0;
     }
-    if (process.env.AI_AGENT !== undefined || !io.physicalStdoutIsTTY) return await launchBackgroundView(io, port);
+    if (process.env.AI_AGENT !== undefined || !io.physicalStdoutIsTTY) return await launchBackgroundView(io, port, projectRoot);
   }
   let view;
   try {
-    view = await serveView({ port, isMain: codeIsFromMain() });
+    // The adapter override is carried only by the in-process command streams, for private CLI fixtures.
+    view = await (io.serveView ?? serveView)({ port, isMain: codeIsFromMain(), ...(projectRoot ? { projectRoot } : {}) });
     const boundAt = new Date().toISOString();
     const closeServer = view.close;
     view = {
@@ -1349,7 +1441,8 @@ async function viewHere(io, values) {
       close: async () => { forgetView(view.port); await closeServer(); },
     };
     try {
-      rememberView({ port: view.port, secret: new URL(view.url).searchParams.get('k'), pid: process.pid, boundAt }, { rememberPort: port === 0 });
+      rememberView({ port: view.port, secret: new URL(view.url).searchParams.get('k'), pid: process.pid, boundAt,
+        ...(scopeCommonDir ? { scopeCommonDir } : {}) }, { rememberPort: port === 0 && !scopeCommonDir });
     } catch (error) {
       throw new Refused('VIEW_STATE', `could not save the private view session: ${error.message}`);
     }
@@ -1396,11 +1489,12 @@ function reportView(io, view) {
 }
 
 /** Start the view in a detached CLI child, forwarding only its bound address over IPC. */
-async function launchBackgroundView(io, port) {
+async function launchBackgroundView(io, port, projectRoot) {
   const args = [fileURLToPath(new URL('../bin/pullboard.js', import.meta.url)), 'view', '--no-open'];
+  if (projectRoot) args.push('--project');
   args.push('--port', String(port));
   const child = spawn(process.execPath, args, {
-    cwd: io.cwd,
+    cwd: projectRoot ?? io.cwd,
     env: { ...process.env, PULLBOARD_VIEW_BACKGROUND_CHILD: '1' },
     detached: true,
     stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
@@ -1492,7 +1586,12 @@ function setupCommands(io, { first, values }) {
         openBoardHere: () => store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), io.clock, { isMain: codeIsFromMain() }),
         /** Keep a linked coordinator's canonical identity without writing a clone-local path. */
         register: (board, options) => {
-          if (!linked) return store.register(board, options);
+          if (!linked) {
+            const existing = board.db.prepare('SELECT 1 FROM agent WHERE agent_id=?').get(COORDINATOR);
+            const registered = store.register(board, options);
+            if (!existing) recordSetupState({ info }, setupIdentity(board), 'started');
+            return registered;
+          }
           if (!board.db.prepare('SELECT 1 FROM agent WHERE agent_id=?').get(COORDINATOR)) {
             throw new Refused('NO_AGENT', 'the linked snapshot has no coordinator; restore a consistent relay snapshot before initializing');
           }
@@ -1628,6 +1727,19 @@ function setupFiles(mainRoot, config) {
   const hooks = tryGit(mainRoot, ['config', '--get', 'core.hooksPath']).stdout;
   const inEach = hooks && !isAbsolute(hooks) && !relative(mainRoot, resolve(mainRoot, hooks)).startsWith('..');
   return [CONFIG_FILE, config.spec, config.practice, 'AGENTS.md', ...(inEach ? [hooks] : [])].filter(Boolean);
+}
+
+/** Find setup files in the main checkout that a new worktree would not receive from HEAD. */
+function uncommittedSetup(mainRoot, config) {
+  if (headCommit(mainRoot) === null) return null;
+  const differ = differFromHead(mainRoot, setupFiles(mainRoot, config));
+  if (!differ.length) return null;
+  const words = differ.map(({ path }) => shellWord(path)).join(' ');
+  const force = differ.some(({ ignored }) => ignored) ? ' -f' : '';
+  return {
+    files: differ.map(({ path }) => path),
+    stage: `${cdTo(mainRoot)} git add${force} -- ${words}`,
+  };
 }
 
 /**
@@ -2786,7 +2898,7 @@ async function specCommand(io, { first, second, rest, values }) {
     unmet: ['must'],
     signoff: ['by', 'note', 'note-file'],
     signers: ['key', 'by'],
-    draft: ['aim', 'gate'],
+    draft: ['aim', 'gate', 'section'],
     approve: ['by', 'text'],
     decline: ['reason'],
     apply: [],
@@ -2810,13 +2922,24 @@ async function specCommand(io, { first, second, rest, values }) {
     if (values.gate !== undefined && (!values.gate.trim() || /[\r\n|]/u.test(values.gate))) {
       throw new Refused('USAGE', 'give one nonempty, single-line gate without a field separator, or omit --gate to use review');
     }
-    const section = spec.sections[0];
-    if (!section) throw new Refused('NO_SECTION', `no section in ${ctx.config.spec}; add a section heading, then draft the requirement`);
-    const prefix = /^([A-Z][A-Z0-9]*)\s*[·.:-]/u.exec(section.name)?.[1];
-    if (!prefix) throw new Refused('SPEC_SECTION', `the first section "${section.name}" needs an id prefix such as G · Goals before drafting`);
-    const numbered = spec.rows.map((row) => new RegExp(`^${prefix}(\\d+)$`, 'u').exec(row.id)?.[1]).filter(Boolean).map(Number);
+    if (!spec.sections.length) throw new Refused('NO_SECTION', `no section in ${ctx.config.spec}; add a section heading, then draft the requirement`);
+    const sections = spec.sections.map(section => ({ ...section,
+      prefix: /^([A-Z][A-Z0-9]*)\s*[·.:-]/u.exec(section.name)?.[1] })).filter(section => section.prefix);
+    const requested = values.section ?? 'G';
+    const section = sections.find(section => section.prefix === requested);
+    if (!section) throw new Refused('SPEC_SECTION', `unknown section "${requested}" in ${ctx.config.spec}; ${sections.length
+      ? `choose one of: ${sections.map(section => section.prefix).join(', ')}`
+      : 'add a section heading with an id prefix such as G · Goals'}`);
+    const { prefix } = section;
+    const malformed = [[spec.file, spec.problems], [practice.repo.file, practice.repo.problems]].find(([, problems]) => problems.length);
+    if (malformed) {
+      throw new Refused('SPEC_INVALID', `fix the unparsed row in ${malformed[0]} before drafting; an existing id may be ambiguous`);
+    }
+    const usedRows = [...spec.rows, ...practice.repo.rows];
+    const usedIds = new Set(usedRows.map((row) => row.id));
+    const numbered = usedRows.map((row) => new RegExp(`^${prefix}(\\d+)$`, 'u').exec(row.id)?.[1]).filter(Boolean).map(Number);
     let next = Math.max(0, ...numbered) + 1;
-    while (spec.rows.some((row) => row.id === `${prefix}${next}`)) next += 1;
+    while (usedIds.has(`${prefix}${next}`)) next += 1;
     const id = `${prefix}${next}`;
     const tier = values.aim ? 'aim' : 'must';
     const gate = values.gate?.trim() ?? 'review';
@@ -3200,8 +3323,21 @@ async function runCommand(argv, io) {
       }
       if (values.all) {
         if (first !== 'on' || second || rest.length) throw new Refused('USAGE', 'pullboard relay on --all [--url <address>]');
-        const result = await relayOnAll(values.url, io);
-        io.result?.(result); return result.failed.length ? 1 : 0;
+        const controller = new AbortController();
+        const cancelSignIn = () => controller.abort();
+        process.once('SIGINT', cancelSignIn);
+        process.once('SIGTERM', cancelSignIn);
+        let result;
+        try { result = await relayOnAll(values.url, io, { signal: controller.signal }); }
+        finally { process.off('SIGINT', cancelSignIn); process.off('SIGTERM', cancelSignIn); }
+        io.result?.(result);
+        if (result.outcome) {
+          io.say(result.outcome === 'declined' ? 'GitHub sign-in was declined; no boards were linked.'
+            : result.outcome === 'expired' ? 'GitHub device sign-in expired; no boards were linked.'
+              : 'GitHub device sign-in was cancelled; no boards were linked.');
+          return 1;
+        }
+        return result.failed.length ? 1 : 0;
       }
       if (['tokens', 'revoke'].includes(first)) {
         if (rest.length || values.url || (first === 'tokens' && second) || (first === 'revoke' && !second)) {
@@ -3239,7 +3375,17 @@ async function runCommand(argv, io) {
     }
     if (command === 'gate') {
       const ctx = context(io);
-      const gate = await runGate(ctx.info.root, mainPolicy(ctx.info.root).config, { landing: values.landing, agent: resourceAgent(ctx), onWait: gateWaitReporter(io) });
+      let config;
+      try { config = mainPolicy(ctx.info.root).config; }
+      catch (error) {
+        if (error instanceof Refused && error.code === 'NO_POLICY'
+          && error.message.includes('the coordinator checkout has no commit on ')
+          && existsSync(join(ctx.info.root, CONFIG_FILE))) {
+          throw new Refused('NO_POLICY', `${CONFIG_FILE} is not committed; add and commit the initialized project before running the gate: git add ${CONFIG_FILE}`);
+        }
+        throw error;
+      }
+      const gate = await runGate(ctx.info.root, config, { landing: values.landing, agent: resourceAgent(ctx), onWait: gateWaitReporter(io) });
       io.result?.({ green: gate.isGreen, report: gateReport(gate) });
       io.say(gateReport(gate));
       return gate.isGreen ? 0 : 1;
@@ -3348,6 +3494,7 @@ async function runMain(argv, streams) {
     return status;
   } finally {
     CHECKOUT_LEASES.delete(io);
+    CHECKOUT_BOARD_ONLY.delete(io);
     checkoutSession?.lease?.release();
   }
 }

@@ -1114,7 +1114,7 @@ async function installPipelinePressDiagnostics(chrome) {
   const setup = await chrome.stable(`(() => {
     const pipeline = document.querySelector('#pipeline');
     if (!pipeline) throw new Error('Pipeline container is missing');
-    const state = { armed: false, redraws: 0, redrawsAtPress: 0, expected: null, down: null, up: null, click: null };
+    const state = { armed: false, redraws: 0, redrawsAtArm: 0, expected: null, down: null, up: null, click: null };
     const observer = new MutationObserver(records => { state.redraws += records.filter(record => record.target === pipeline && record.type === 'childList').length; });
     observer.observe(pipeline, { childList: true });
     const flush = () => { state.redraws += observer.takeRecords().filter(record => record.target === pipeline && record.type === 'childList').length; return state.redraws; };
@@ -1131,7 +1131,7 @@ async function installPipelinePressDiagnostics(chrome) {
     document.addEventListener('mouseup', listen('up'), true);
     document.addEventListener('click', listen('click'), true);
     state.arm = card => { flush(); state.expected = { dataItem: card?.dataset.item ?? null, connected: Boolean(card?.isConnected), disabled: card?.disabled ?? null };
-      state.expectedNode = card; state.down = state.up = state.click = null; state.redrawsAtPress = state.redraws; state.armed = true; return state.expected; };
+      state.expectedNode = card; state.down = state.up = state.click = null; state.redrawsAtArm = state.redraws; state.armed = true; return state.expected; };
     state.snapshot = () => {
       const redraws = flush();
       const clean = event => event && ({ target: event.target, dataItem: event.dataItem, connected: event.connected, connectedAtUp: event.connectedAtUp,
@@ -1139,7 +1139,9 @@ async function installPipelinePressDiagnostics(chrome) {
         sameNodeAsDown: event.sameNodeAsDown });
       return { expected: state.expected, down: clean(state.down), up: clean(state.up), click: clean(state.click), refresh: state.refresh ?? null, expectedNodeConnected: Boolean(state.expectedNode?.isConnected),
         downNodeConnectedNow: Boolean(state.down?.node?.isConnected), viewItem: view.item, pathname: location.pathname, innerWidth,
-        pipelineRedrawsSincePress: redraws - state.redrawsAtPress,
+        // press() scrolls and settles the target after arm(); those redraws precede the native press.
+        pipelineRedrawsBeforeDown: state.down ? state.down.redraws - state.redrawsAtArm : null,
+        pipelineRedrawsSinceDown: state.down ? redraws - state.down.redraws : null,
         pipelineRedrawsBetweenDownAndUp: state.down && state.up ? state.up.redraws - state.down.redraws : null };
     };
     globalThis.__pipelinePressDiagnostic = state;
@@ -1312,9 +1314,10 @@ test('a refresh between pointer down and up does not lose the click [N26,N38,C7]
         refreshObservation = JSON.parse(await chrome.stable(`(async () => {
           await refresh();
           const old = globalThis.__pipelinePressDiagnostic.down?.node;
+          const press = globalThis.__pipelinePressDiagnostic.snapshot();
           const observation = { fetchedNewItem: data.project.items.some(item => item.title === ${JSON.stringify(title)}),
             originalCardConnectedWhileHeld: Boolean(old?.isConnected), selected: view.item, pathname: location.pathname, innerWidth,
-            pipelineRedrawsBeforeRelease: globalThis.__pipelinePressDiagnostic.snapshot().pipelineRedrawsSincePress };
+            pipelineRedrawsBeforeRelease: press.pipelineRedrawsSinceDown, pipelineRedrawsBeforeDown: press.pipelineRedrawsBeforeDown };
           globalThis.__pipelinePressDiagnostic.refresh = observation;
           return JSON.stringify(observation);
         })()`));

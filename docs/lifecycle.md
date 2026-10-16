@@ -126,7 +126,7 @@ Each move checks its guards in this order and refuses with the first one that do
 | PIPEFAIL_UNAVAILABLE | the gate, which submit runs itself every time, is green at HEAD | rewrite the gate without a pipe |
 | MOVED_DURING_GATE | when the gate ends, HEAD and every tracked file are as they were when it started | leave the worktree alone until the gate finishes, then submit again |
 | CHILDREN_OPEN | every child item is verified or withdrawn | finish the child items, or the coordinator withdraws them |
-| HEAD_NOT_NEW | a verifier has not already rejected this commit | commit the rework, then submit |
+| HEAD_NOT_NEW | a verifier has not rejected this commit at this bar; after a no-verdict reopen, the bar was refrozen | commit the rework, or refreeze the bar after a no-verdict reopen before resubmitting the same commit |
 | NOT_AT_COMMIT | the caller's checkout contains the submitted commit | git switch --detach <commit> |
 | OUTSIDE_LANE | the caller's checkout contains the submitted commit | restore foreign paths before accepting |
 | NO_POLICY | the caller's checkout contains the submitted commit | restore the frozen policy objects |

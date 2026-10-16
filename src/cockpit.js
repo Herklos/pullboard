@@ -91,6 +91,7 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
     <h2>No boards yet</h2>
     <p>Run <code>pullboard init</code> in a git repo, or ask an agent to. Its board shows up here by itself.</p>
   </section>
+  <p class="empty" id="project-loading" role="status" hidden>Loading project…</p>
   <section class="card-panel snapshot-controls" id="snapshot-controls" ${snapshot ? '' : 'hidden'} aria-label="Snapshot replay">
     <span>Read-only snapshot</span>
     <button class="ghost" id="replay-play" type="button">Play from first event</button>
@@ -226,7 +227,7 @@ const $ = (id) => document.getElementById(id);
 
 /** Mark primary pointer targets whose click would be lost if a refresh replaces them. */
 function holdClickPointer(event) {
-  if (!event.isPrimary || event.button !== 0 || !(event.target instanceof Element && event.target.closest('#pipeline .pipeline-item, #spec-detail [data-row-decision="decline"], #spec-decline-submit'))) return;
+  if (!event.isPrimary || event.button !== 0 || !(event.target instanceof Element && event.target.closest('#pipeline .pipeline-item, #spec-detail [data-row-decision="decline"], #spec-decline-submit, #roadmap-panel [data-roadmap-jump]'))) return;
   heldClickPointer = event.pointerId;
 }
 
@@ -449,7 +450,7 @@ const count = (n, one, many = one) => n + ' ' + (n === 1 ? one : many);
 // the decisions passed up to them, spec rows waiting for them, and held lanes, which only the main
 // checkout, the person's seat, can set. Work waiting for a verdict or sent back belongs to the agents,
 // and the line under the project says so without counting it.
-const needCount = (x) => x.ok ? x.decisions + x.pending + x.drafts + x.holds : 0;
+const needCount = (x) => x.ok && !x.loading ? x.decisions + x.pending + x.drafts + x.holds : 0;
 const doing = (x) => [x.decisions && count(x.decisions, 'decision', 'decisions'), x.pending && count(x.pending, 'question', 'questions'), x.drafts && count(x.drafts, 'draft row', 'draft rows'), x.holds && count(x.holds, 'lane held', 'lanes held'), x.sentBack && count(x.sentBack, 'sent back'), x.awaiting && count(x.awaiting, 'to verify'), x.building && count(x.building, 'building')].filter(Boolean).join(' · ') || (x.open ? count(x.open, 'item open', 'items open') : 'nothing open');
 /** The person's calls in one repo, as its Needs-you panel shows them, reused by a combined project view. */
 function projectNeeds(p) {
@@ -928,10 +929,22 @@ function boardPath(root) {
  */
 function lastRead(board, root) {
   const row = data?.projects.find((entry) => entry.root === board.root && entry.id === board.id && entry.ok);
-  if (!row) return null;
+  if (!row || row.loading) return null;
   const state = data.root === board.root ? data.project : data.group?.repos.find((repo) => repo.root === board.root)?.board ?? null;
   if (!state && (board.root === root || root === 'group:' + board.project)) return null;
   return { row: { ...row, ...board, ok: true }, state };
+}
+
+/** Group the listed repositories without waiting for their individual board states. */
+function projectGroups(projects) {
+  const grouped = new Map();
+  for (const project of projects) {
+    if (!project.project) continue;
+    if (!grouped.has(project.project)) grouped.set(project.project, []);
+    grouped.get(project.project).push(project);
+  }
+  // One repository shows once, without a heading that repeats its name.
+  return [...grouped].filter(([, repos]) => repos.length > 1).map(([name, repos]) => ({ name, key: 'group:' + name, repos }));
 }
 
 /**
@@ -940,6 +953,14 @@ function lastRead(board, root) {
  */
 async function boardState(root, mark, fresh = null) {
   const listed = await api('/api/v1/boards');
+  if (!data) {
+    // Names are already known: a slow board must not leave the project picker blank.
+    const projects = listed.boards.map((board) => ({ ...board, ok: true, loading: true }));
+    projects.push(...(listed.warnings || []).map((warning) => ({ ...warning, ok: false, error: warning.error.error.message })));
+    data = { root: null, project: null, group: null, projects, groups: projectGroups(projects) };
+    renderSide();
+    $('project-loading').hidden = projects.length === 0;
+  }
   const states = new Map();
   const cursor = mark !== null && mark !== undefined && /^\\d+$/.test(String(mark)) && Number.isSafeInteger(Number(mark)) ? Number(mark) : null;
   const projects = await Promise.all(listed.boards.map(async (board) => {
@@ -958,15 +979,7 @@ async function boardState(root, mark, fresh = null) {
     }
   }));
   projects.push(...(listed.warnings || []).map((warning) => ({ ...warning, ok: false, error: warning.error.error.message })));
-  const grouped = new Map();
-  for (const project of projects) {
-    if (!project.project) continue;
-    if (!grouped.has(project.project)) grouped.set(project.project, []);
-    grouped.get(project.project).push(project);
-  }
-  // A project groups repos only when two or more share its name. One repo alone, as every board the relay
-  // lists is, shows as itself: a heading above the same board would only say it twice.
-  const groups = [...grouped].filter(([, repos]) => repos.length > 1).map(([name, repos]) => ({ name, key: 'group:' + name, repos }));
+  const groups = projectGroups(projects);
   const group = groups.find((entry) => entry.key === root);
   return {
     projects, groups, project: states.get(root) || null,
@@ -1399,7 +1412,7 @@ function renderSide() {
     if (!x.ok) return '<p class="repo-error" role="status"><b>' + esc(x.name) + ':</b> ' + esc(x.error) + '</p>';
     const on = x.root === view.root;
     const parts = doing(x).split(' · '), asks = [x.decisions, x.pending, x.drafts, x.holds].filter(Boolean).length;
-    const line = (asks ? '<span class="asks">' + esc(parts.slice(0, asks).join(' · ')) + '</span>' + (parts.length > asks ? ' · ' : '') : '') + esc(parts.slice(asks).join(' · '));
+    const line = x.loading ? 'Loading…' : (asks ? '<span class="asks">' + esc(parts.slice(0, asks).join(' · ')) + '</span>' + (parts.length > asks ? ' · ' : '') : '') + esc(parts.slice(asks).join(' · '));
     return '<button class="proj repo' + (on ? ' on' : '') + '"' + (on ? ' aria-current="true"' : '') + ' data-root="' + esc(x.root) + '" title="' + esc(x.root) + '" type="button"><span class="pname">' + esc(x.name) + '</span><small>' + line + '</small></button>';
   };
   const groupedRoots = new Set(data.groups.flatMap((group) => group.repos.map((repo) => repo.root)));
@@ -1413,7 +1426,8 @@ function renderSide() {
   $('proj-list').innerHTML = grouped || loose ? grouped + loose : '<div class="empty">None yet.</div>';
   const p = data.project;
   const selectedGroup = data.groups.find((group) => group.key === view.root);
-  $('proj-name').textContent = selectedGroup?.name || (p ? (data.projects.find((x) => x.root === view.root) || { name: p.root.split('/').pop() }).name : 'No project');
+  const selectedRepo = data.projects.find((x) => x.root === view.root);
+  $('proj-name').textContent = selectedGroup?.name || selectedRepo?.name || (p ? p.root.split('/').pop() : 'No project');
   // The browser tab says it too, for when the view sits behind other tabs.
   const needs = data.projects.reduce((n, x) => n + needCount(x), 0);
   document.title = p || selectedGroup ? (needs ? '(' + needs + ') ' : '') + $('proj-name').textContent + ' · Pullboard' : 'Pullboard';
@@ -1771,6 +1785,15 @@ function render() {
   const p = data.project;
   const group = data.group;
   renderSide();
+  $('project-loading').hidden = data.root === view.root;
+  if (data.root !== view.root) {
+    // Keep the cached picker available, but never label the last board's counts as the new one.
+    document.querySelectorAll('[data-pane]').forEach((pane) => { pane.hidden = true; });
+    for (const id of ['products', 'group-view', 'proof-stats', 'upgrade-note', 'person-requests', 'credentials', 'find-results']) $(id).hidden = true;
+    $('status-board').innerHTML = '';
+    $('live').textContent = 'Loading project…';
+    return;
+  }
   $('proof-stats').hidden = true;
   $('proof-stats').innerHTML = '';
   if (view.answering && view.answering.root !== view.root) answer(null);
@@ -2228,8 +2251,8 @@ function applyPlace(place, kept = null) {
 /** Restore the address on Back and Forward, with a scoped refresh when the repo changes. */
 function fromAddress(event) {
   if (!data) return;
-  // Back and Forward close the Approve all confirmation without recording, wherever they lead.
-  if (view.approvingAll) closeApproveAll(false, true);
+  // Back and Forward close Approve all's confirmation and the decline dialog without recording, wherever they lead.
+  leaveDialogs();
   // The configured relay transport owns pairing fragments and removes their secrets itself.
   if (transportModule) {
     const pairing = new URLSearchParams((location.hash || '').slice(1));
@@ -2595,10 +2618,23 @@ function askDecline(kind, id, from) {
   view.declining = id;
   view.declineKind = kind;
   view.declineFrom = from;
+  // The dialog belongs to the board it was opened on, as Approve all's confirmation does (#612).
+  view.declineRoot = view.root;
   $('spec-decline-title').textContent = 'Decline ' + id;
   $('spec-decline-reason').value = '';
-  $('spec-decline-dialog').hidden = false;
-  $('spec-decline-reason').focus();
+  openModal($('spec-decline-dialog'), $('spec-decline-reason'));
+}
+
+/**
+ * Close the decline dialog and return what it asked about. Closed by the person, focus returns to the list it was asked
+ * from; closed because the page left its board, focus stays where the person put it.
+ */
+function closeDecline(left = false) {
+  const asked = view.declining ? { id: view.declining, kind: view.declineKind, root: view.declineRoot, from: view.declineFrom } : null;
+  view.declining = null;
+  closeModal($('spec-decline-dialog'));
+  if (!left && asked?.from === 'list') $(asked.kind + '-list').focus({ preventScroll: true });
+  return asked;
 }
 
 /**
@@ -2632,9 +2668,16 @@ function closeApproveAll(approved = false, left = false) {
   return asked;
 }
 
-/** Close, recording nothing, a confirmation opened on another board than the one the page now shows. */
+/** Close, recording nothing, a confirmation or decline opened on another board than the one the page now shows. */
 function closeIfLeft() {
   if (view.approvingAll && view.approvingAll.root !== view.root) closeApproveAll(false, true);
+  if (view.declining && view.declineRoot !== view.root) closeDecline(true);
+}
+
+/** Close every dialog bound to a board, recording nothing: the page is leaving the board it was asked on. */
+function leaveDialogs() {
+  if (view.approvingAll) closeApproveAll(false, true);
+  if (view.declining) closeDecline(true);
 }
 
 /**
@@ -2793,8 +2836,8 @@ function fold(open) {
 
 /** Show another project and its item; history restores keep the tab their entry named. */
 function switchTo(root, target = null, record = true) {
-  // Switching board or project closes the Approve all confirmation; it records nothing on either board.
-  if (view.approvingAll) closeApproveAll(false, true);
+  // Switching board or project closes Approve all's confirmation and the decline dialog; neither records on either board.
+  leaveDialogs();
   const generation = ++switchGeneration;
   answer(null);
   view.root = root;
@@ -2808,7 +2851,7 @@ function switchTo(root, target = null, record = true) {
   fold(false);
   // The board that arrives is drawn even if it matches the last one seen, so the pick is made from it.
   seen = '';
-  if (data) renderSide();
+  if (data) render();
   document.body.classList.add('switching');
   refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }).finally(() => {
     if (generation === switchGeneration) document.body.classList.remove('switching');
@@ -2967,17 +3010,17 @@ $('upgrade-note').addEventListener('click', (event) => {
   renderReleaseNotes(data.project);
 });
 $('add-cancel').addEventListener('click', () => { view.adding = false; render(); });
-$('spec-decline-cancel').addEventListener('click', () => { view.declining = null; $('spec-decline-dialog').hidden = true; if (view.declineFrom === 'list') $(view.declineKind + '-list').focus({ preventScroll: true }); });
+$('spec-decline-cancel').addEventListener('click', () => { closeDecline(); });
+$('spec-decline-form').addEventListener('keydown', trapFocus);
+// The row the dialog named is declined, with its reason, on the board it was opened on and only there.
 $('spec-decline-form').addEventListener('submit', (event) => {
   event.preventDefault();
-  const id = view.declining, kind = view.declineKind;
   const reason = $('spec-decline-reason').value.trim();
-  if (!id || !reason) return;
-  view.declining = null;
-  $('spec-decline-dialog').hidden = true;
-  if (view.declineFrom === 'list') $(kind + '-list').focus({ preventScroll: true });
-  const anchor = view.declineFrom === 'detail' ? $(kind + '-detail') : [...$(kind + '-list').querySelectorAll('[data-row]')].find((row) => row.dataset.row === kind + ':' + id);
-  decideRow(kind, 'spec-decline', { ids: id, reason }, anchor);
+  if (!view.declining || !reason) return;
+  const asked = closeDecline();
+  if (asked.root !== view.root) return;
+  const anchor = asked.from === 'detail' ? $(asked.kind + '-detail') : [...$(asked.kind + '-list').querySelectorAll('[data-row]')].find((row) => row.dataset.row === asked.kind + ':' + asked.id);
+  decideRow(asked.kind, 'spec-decline', { ids: asked.id, reason }, anchor);
 });
 $('spec-approve-cancel').addEventListener('click', () => { closeApproveAll(); });
 $('spec-approve-form').addEventListener('keydown', (event) => { if (event.key === 'Escape') { event.preventDefault(); closeApproveAll(); } else trapFocus(event); });

@@ -65,7 +65,7 @@ export function createAuthHandler({ auth, publicOrigin }) {
   try { origin = new URL(publicOrigin); } catch { throw new Refused('RELAY_CONFIG', 'configure the relay public origin'); }
   if (origin.username || origin.password || origin.pathname !== '/' || origin.search || origin.hash || (origin.protocol !== 'https:' && !(origin.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(origin.hostname)))) throw new Refused('RELAY_CONFIG', 'use an HTTPS public origin, or a loopback HTTP origin for local tests');
   const secure = origin.protocol === 'https:' ? '; Secure' : '';
-  const routes = new Set(['GET /auth/github/start', 'GET /auth/github/callback', 'POST /auth/device/start', 'POST /auth/device/poll',
+  const routes = new Set(['GET /auth/github/start', 'GET /auth/github/callback', 'POST /auth/device/start', 'POST /auth/device/poll', 'POST /auth/device/cancel',
     'GET /auth/device/confirm', 'POST /auth/device/confirmation/open', 'POST /auth/device/confirmation/status', 'POST /auth/device/confirmation',
     'GET /auth/session', 'GET /auth/boards', 'POST /auth/boards/link', 'POST /auth/machines', 'GET /auth/tokens', 'POST /auth/tokens', 'POST /auth/tokens/revoke']);
 
@@ -109,6 +109,9 @@ export function createAuthHandler({ auth, publicOrigin }) {
       } else if (route === 'POST /auth/device/poll') {
         const input = await body(req);
         json(res, 200, await auth.pollDevice(input.ticket));
+      } else if (route === 'POST /auth/device/cancel') {
+        const input = await body(req);
+        json(res, 200, await auth.cancelDevice(input.ticket));
       } else if (route === 'GET /auth/device/confirm') {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
           'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY',

@@ -4,6 +4,56 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.8.25] - 2026-10-15
+
+### Project switches you can trust, and a 98-second explainer
+
+New on [pullboard.dev](https://pullboard.dev): a 98-second explainer video on the home page, showing some of the problems Pullboard addresses.
+
+### Fixed
+
+- Switching projects in the view never shows the previous project's numbers under the new project's name. The project list appears at once, and the new project's counts read as loading until they arrive.
+- `pullboard spec draft` never reuses an id that SPEC.md already has, including ids that DOCTRINE.md uses.
+- For contributors: the landing gate bounds its own concurrency (at most two real-Chrome test files at once, and no more test files at once than the machine has performance cores), so it no longer fails from its own load; the test runner runs only files named `*.test.js` or `*.test.mjs`, so fixtures and the view's performance harness no longer start as test files; the README capture follows the view's cookie redirect and is ready from what the page shows; and the repeated-read test goes through the view cookie.
+
+## [0.8.24] - 2026-10-15
+
+### A first board without surprises
+
+Fixes from a newcomer's first board: setup tells you what it's waiting on, spec drafts go where you put them, and a fresh repo's errors name the real cause.
+
+### Changed
+
+- `pullboard spec draft --section <letter>` files the row in that section with its next free id. An unknown section is refused with the list of sections that exist. Goals (G) stays the default.
+- After the setup rows are drafted, `pullboard resume` says setup is waiting on you to approve them, names the rows, and says what the agent can do meanwhile. Before, it kept saying "step 1, next: spec draft".
+- For coordinators: after you reopen a submission to correct its bar, the builder can resubmit the same commit against the corrected bar. A rejected item still needs new work.
+
+### Fixed
+
+- A session in a worktree whose main checkout has uncommitted setup files is told exactly that, with the `git add` line to run in the main checkout. Before, every command refused with NO_CONFIG.
+- `pullboard gate` in a fresh repo before the first commit says pullboard.json isn't committed and gives the `git add` line, instead of a NO_POLICY error about a missing policy.
+- The view's cookie is honored only for requests from the view's own page. A request from another local port or site is refused, and a cookie with too little randomness is refused at startup.
+- For contributors: relay storage tests pass under any umask, and the pointer-refresh test holds under landing-gate load.
+
+## [0.8.23] - 2026-10-15
+
+### Faster reads, and your approvals stay on their board
+
+A repeated read starts no processes, "Approve all" and declines happen in the page and stay on the board they were opened on, and agents' heavy test runs queue on their own.
+
+### Changed
+
+- Reading the view no longer starts git or node processes once it's warm. On a 600-item board over a tunnel, the board list went from about 70 ms to about 12 ms and a board's state from about 240 ms to about 135 ms.
+- "Approve all" in a Spec section asks for confirmation in the page instead of the browser's confirm dialog. It records every row it names, or shows why it didn't.
+- A drafted spec row reads as a draft, not as an open question.
+- An agent's messages and reads go out while its own submit is running, so it can tell others it's testing instead of going silent for the whole run.
+- For teams running agents: every test run on a machine, reviews and browser runs included, waits in the gate pool. Landing goes first, then first come, first served, so nobody has to hand turns over by message. A focused run takes a slot too, so the pool shows it.
+
+### Fixed
+
+- The "Approve all" confirmation and the decline dialog are bound to the board they were opened on. Switching board or project, going back or forward, or a refresh that moves to another board closes them without recording anything, and focus stays inside them while they're open. Before, two boards with the same row ids could get your approval or decline on the wrong one.
+- For contributors: tests no longer need port 4890 free, so a running view doesn't break the gate; a test that starts the CLI is selected by what the CLI imports; and tests that hold a capture also hold the page's live updates.
+
 ## [0.8.22] - 2026-10-14
 
 ### The view follows the board, and reads stay fast
