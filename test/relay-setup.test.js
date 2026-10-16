@@ -12,6 +12,7 @@ async function viewScenario(box, mode) {
   const relayModule = pathToFileURL(resolve(import.meta.dirname, '../src/relay.js')).href;
   const cliModule = pathToFileURL(resolve(import.meta.dirname, '../src/cli.js')).href;
   const fixtureModule = pathToFileURL(resolve(import.meta.dirname, 'fixture-child.js')).href;
+  const machineModule = pathToFileURL(resolve(import.meta.dirname, '../src/relay-machine.js')).href;
   return box.script(`
 import assert from 'node:assert/strict';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, writeFileSync } from 'node:fs';
@@ -20,10 +21,12 @@ import * as setup from ${JSON.stringify(setupModule)};
 import { relayLinkAvailability } from ${JSON.stringify(relayModule)};
 import { main } from ${JSON.stringify(cliModule)};
 import { runFixtureGit } from ${JSON.stringify(fixtureModule)};
+import { updateRelayMachine } from ${JSON.stringify(machineModule)};
 const root = ${JSON.stringify(box.root)};
 const relayUrl = ${JSON.stringify(box.origin)};
 const mode = ${JSON.stringify(mode)};
-const shouldLink = ['linked','pairing-cleanup-refused'].includes(mode);
+const shouldLink = ['linked','pairing-cleanup-refused','excluded'].includes(mode);
+const expectedLinked = mode === 'excluded' ? 1 : 2;
 const other = join(dirname(root), 'second-view-board');
 mkdirSync(other);
 for (const args of [['init','-q','-b','main'], ['-c','commit.gpgsign=false','commit','--allow-empty','-q','-m','chore: private view board'],
@@ -32,6 +35,7 @@ const quiet = {cwd:other,stdin:process.stdin,stdout:{isTTY:false,write(){}},stde
 assert.equal(await main(['init','--json'], quiet), 0, 'the second board is registered through the production CLI');
 const links = [root,other].map(repo => join(repo,'.git','pullboard','relay.json'));
 for (const repo of [root,other]) assert.deepEqual(relayLinkAvailability(repo),{linked:false,unlinking:false});
+if (mode === 'excluded') updateRelayMachine(state => { state.excluded.push(other); });
 let intentId;
 let linkingCancelRefused = false;
 let releasePairingDelete;
@@ -148,7 +152,12 @@ try {
       assert.equal(pairing,true);
       const publicStatus = setup.viewSignInStatus(intentId);
       assert.equal(publicStatus.boards.length,2);
-      assert.ok(publicStatus.boards.every(board => board.outcome === 'linked'));
+      if (mode === 'excluded') {
+        assert.equal(publicStatus.boards.find(board => board.root === root)?.outcome,'linked');
+        const skipped = publicStatus.boards.find(board => board.root === other);
+        assert.equal(skipped?.outcome,'skipped','an excluded registered board still has an explicit result');
+        assert.match(skipped.reason,/Excluded from automatic linking/u);
+      } else assert.ok(publicStatus.boards.every(board => board.outcome === 'linked'));
       assert.ok(!JSON.stringify(publicStatus).includes('#device='),'public status never contains the pairing capability');
       assert.ok(!/(?:ps_|pd_|pg_)[A-Za-z0-9_-]{43}/u.test(JSON.stringify(publicStatus)));
       const navigation = setup.viewSignInPairingNavigation(intentId);
@@ -166,11 +175,11 @@ try {
       } finally { releasePairingDelete?.(); }
       final = await cancellation;
       assert.equal(final.state,'pairing-stopped');
-      assert.equal(final.pairingCleanup,mode === 'linked' ? 'confirmed' : 'unconfirmed');
+      assert.equal(final.pairingCleanup,mode === 'pairing-cleanup-refused' ? 'unconfirmed' : 'confirmed');
       if (mode === 'pairing-cleanup-refused') assert.equal(final.error.code,'VIEW_PAIRING_CLEANUP',
         'unconfirmed remote deletion remains visible to the user');
-      assert.equal(final.boards.filter(board => board.outcome === 'linked').length,2);
-      for (const repo of [root,other]) assert.deepEqual(relayLinkAvailability(repo),{linked:true,unlinking:false});
+      assert.equal(final.boards.filter(board => board.outcome === 'linked').length,expectedLinked);
+      for (const repo of [root,other]) assert.deepEqual(relayLinkAvailability(repo),{linked:!(mode === 'excluded' && repo === other),unlinking:false});
       const saved = readFileSync(links[0],'utf8');
       try {
         writeFileSync(links[0],JSON.stringify({...JSON.parse(saved),unlinking:true}));
@@ -186,7 +195,7 @@ try {
       assert.equal(final.state,mode);
     }
     const linked = links.filter(existsSync).length;
-    assert.equal(linked,shouldLink ? 2 : 0,'only confirmed sign-in may link boards');
+    assert.equal(linked,shouldLink ? expectedLinked : 0,'only confirmed sign-in may link eligible boards');
     assert.equal(containsPersonMaterial(dirname(root)),false,'neither the person session nor the relay ticket is written to any fixture file');
     process.stdout.write(JSON.stringify({state:final.state,linked,storedPersonMaterial:false}));
   }
@@ -205,17 +214,17 @@ test("the view's sign-in links every board without a terminal or a stored sessio
   assert.equal(typeof setup.startViewSignIn, 'function', 'core exposes a view sign-in adapter');
   assert.equal(typeof setup.viewSignInStatus, 'function');
   assert.equal(typeof setup.cancelViewSignIn, 'function');
-  for (const mode of ['linked', 'cancel', 'declined', 'expired', 'abort-start', 'invalid-url', 'cleanup-refused', 'pairing-cleanup-refused']) {
+  for (const mode of ['linked', 'cancel', 'declined', 'expired', 'abort-start', 'invalid-url', 'cleanup-refused', 'pairing-cleanup-refused', 'excluded']) {
     await t.test(mode, async (t) => {
       const box = await relayClientFixture(t);
-      box.providerState.deviceAuthorized = ['linked','pairing-cleanup-refused'].includes(mode);
+      box.providerState.deviceAuthorized = ['linked','pairing-cleanup-refused','excluded'].includes(mode);
       box.providerState.deviceDeclined = mode === 'declined';
       box.providerState.deviceExpired = mode === 'expired';
       const before = box.providerCalls.filter(call => call.path === '/login/device/code').length;
       const result = await viewScenario(box, mode);
       assert.equal(result.code, 0, result.failure ?? 'the private view scenario failed');
       const outcome = result.document;
-      assert.equal(outcome.linked, ['linked','pairing-cleanup-refused'].includes(mode) ? 2 : 0);
+      assert.equal(outcome.linked, ['linked','pairing-cleanup-refused','excluded'].includes(mode) ? (mode === 'excluded' ? 1 : 2) : 0);
       assert.equal(outcome.storedPersonMaterial, false);
       const after = box.providerCalls.filter(call => call.path === '/login/device/code').length;
       assert.equal(after - before, mode === 'abort-start' ? 0 : ['invalid-url','cleanup-refused'].includes(mode) ? 2 : 1, 'one device sign-in serves each attempt, including explicit recovery after invalid instructions');

@@ -102,13 +102,16 @@ export async function revokeRelayDevice(deviceId, io) {
   throw new Refused('RELAY_NOT_LINKED', 'Link a board and pair the phone with pullboard relay on --all.');
 }
 
-/** Link every non-excluded registry entry, collecting project-specific partial failures. */
+/** Link non-excluded registry entries and report an explicit outcome for every registered project. */
 async function linkProjects(session, io, { onBoardOutcome } = {}) {
   const machine = readRelayMachine();
   const linked = [];
   const failed = [];
   for (const project of listApiProjects()) {
-    if (machine.excluded.includes(project.root)) continue;
+    if (machine.excluded.includes(project.root)) {
+      onBoardOutcome?.({ root: project.root, name: project.name, outcome: 'skipped', reason: 'Excluded from automatic linking on this machine.' });
+      continue;
+    }
     try {
       const result = await relayOn(project.root, session.url, io, { session, quiet: true, strict: true });
       linked.push({ project: project.name, root: project.root, board: result.board });
