@@ -36,12 +36,16 @@ function lifecycle() {
  * The Roadmap tab has its own address (N38): /roadmap on a host that serves the page there too,
  * which `paths` declares, and a #roadmap fragment anywhere else, such as a snapshot hosted under a
  * folder, where a path the host does not serve would leave a reload with nothing.
+ * The hosted page at https://app.pullboard.dev passes hostedLocal (N26, #513): on the machine that runs pullboard
+ * view, the page reads that view straight, writable, and the relay transport is never loaded; on any other device it
+ * is the relay page as before when relaySession says the request has a relay session, and otherwise it says why it
+ * cannot read a board here and links signIn.
  *
  * @param {string} [key] - The session's secret.
- * @param {{snapshot?: boolean, readOnly?: boolean, requests?: boolean, transportModule?: string|null, apiBase?: string, apiHeaders?: Record<string, string>, stylesheet?: string, paths?: boolean}} [options] - Served connection and assets, optional person requests over a read-only transport, host routes, or a static page with event replay.
+ * @param {{snapshot?: boolean, readOnly?: boolean, requests?: boolean, transportModule?: string|null, apiBase?: string, apiHeaders?: Record<string, string>, stylesheet?: string, paths?: boolean, hostedLocal?: boolean, relaySession?: boolean, signIn?: string|null}} [options] - Served connection and assets, optional person requests over a read-only transport, host routes, a static page with event replay, or the hosted page that reads this machine's view first.
  * @returns {string}
  */
-export function cockpitPage(key = '', { snapshot = false, readOnly = false, requests = false, transportModule = null, apiBase = '', apiHeaders = { 'x-pullboard-key': key }, stylesheet = null, paths = false } = {}) {
+export function cockpitPage(key = '', { snapshot = false, readOnly = false, requests = false, transportModule = null, apiBase = '', apiHeaders = { 'x-pullboard-key': key }, stylesheet = null, paths = false, hostedLocal = false, relaySession = false, signIn = null } = {}) {
   // Derive the current CLI inventory for every served, relay or exported page.
   const COMMAND_SOURCE = 'pullboard (?:' + commandPhrases().join('|') + ')(?![\\w-])(?: (?:--?[\\w-]+|\\d+|#\\d+|"[^"\\n]*"|[A-Z][A-Z0-9_]*|[\\w-]*[\\/.:@][^\\s"]*|[a-z]+-\\d+)(?![\\w-]))*';
 
@@ -49,6 +53,8 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
   const connection = JSON.stringify(transportModule ? { base: '', headers: {} } : { base: apiBase.replace(/\/$/, ''), headers: apiHeaders }).replace(/</g, '\\u003c');
   const moduleOption = JSON.stringify(transportModule).replace(/</g, '\\u003c');
   const requestMode = Boolean(readOnly && requests && !snapshot && transportModule);
+  if (signIn !== null && (typeof signIn !== 'string' || !signIn.startsWith('/') || signIn.startsWith('//'))) throw new TypeError('signIn must be a path on the hosting site, or null');
+  const hostedOptions = JSON.stringify({ local: Boolean(hostedLocal) && !snapshot, relaySession: Boolean(relaySession), signIn }).replace(/</g, '\\u003c');
   const css = stylesheet ?? (snapshot ? 'view.css' : transportModule ? '/view.css' : '/view.css?k=' + encodeURIComponent(key));
   const cssAttribute = css.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
   return `<!doctype html>
@@ -92,6 +98,10 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
     <p>Run <code>pullboard init</code> in a git repo, or ask an agent to. Its board shows up here by itself.</p>
   </section>
   <p class="empty" id="project-loading" role="status" hidden>Loading project…</p>
+  <section class="card-panel" id="local-note" role="status" hidden>
+    <p id="local-note-text"></p>
+    <p id="local-note-links" hidden><a id="local-note-view" href="http://127.0.0.1:4890/local/view">Open the local view</a> <a id="local-note-sign-in" hidden>Sign in to see linked boards</a> <button class="ghost" id="local-note-retry" type="button">Try again</button></p>
+  </section>
   <section class="card-panel snapshot-controls" id="snapshot-controls" ${snapshot ? '' : 'hidden'} aria-label="Snapshot replay">
     <span>Read-only snapshot</span>
     <button class="ghost" id="replay-play" type="button">Play from first event</button>
@@ -174,12 +184,61 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
 <div class="console" id="console" title="Click to close" hidden></div>
 <script>
 const snapshot = ${JSON.stringify(snapshot)};
-const readOnly = ${JSON.stringify(readOnly)};
-const requests = ${JSON.stringify(requestMode)};
-const transportModule = ${moduleOption};
+let readOnly = ${JSON.stringify(readOnly)};
+let requests = ${JSON.stringify(requestMode)};
+let transportModule = ${moduleOption};
 const connection = ${connection};
 let transport = null;
 let transportLoadError = null;
+// The hosted page (N26, #513): at https://app.pullboard.dev, on the machine that runs pullboard view, the page reads
+// that view straight instead of the relay. The view hands it the session's secret by a round trip that ends back here
+// with the secret in the address's fragment, which no request carries; the page takes it out of the address before
+// anything else reads the address, and keeps it for this tab only. Every request then sends it in x-pullboard-key.
+const hosted = ${hostedOptions};
+const LOCAL_VIEW = 'http://127.0.0.1:4890';
+const LOCAL_TAB = 'pullboard.local.session';
+const LOCAL_TRIPS = 'pullboard.local.trips';
+let localSession = null;
+let localProblem = null;
+let localConfirmed = false;
+/** Read, keep or forget a value for this tab only; a browser that refuses keeps nothing, and the page goes on. */
+function tabValue(name, value) {
+  try {
+    if (value === undefined) return sessionStorage.getItem(name);
+    if (value === null) sessionStorage.removeItem(name);
+    else sessionStorage.setItem(name, value);
+  } catch { return null; }
+  return value;
+}
+/** Whether a value is a local session this page may use: version 1, a loopback origin with its port, and a secret. */
+function validLocalSession(value) {
+  if (!value || value.version !== 1 || typeof value.key !== 'string' || !/^[\\x21-\\x7e]{1,256}$/.test(value.key) || typeof value.origin !== 'string') return false;
+  try {
+    const address = new URL(value.origin);
+    return address.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(address.hostname) && address.port !== '' && address.origin === value.origin;
+  } catch { return false; }
+}
+// A relay pairing link carries its own fragment; that load stays the relay's, as before.
+const relayPairing = hosted.local && ['board', 'key', 'device'].some((name) => new URLSearchParams(location.hash.slice(1)).has(name));
+if (hosted.local && !relayPairing) {
+  const fragment = new URLSearchParams(location.hash.slice(1));
+  const returned = fragment.get('pullboard-local');
+  if (returned !== null) {
+    fragment.delete('pullboard-local');
+    const rest = fragment.toString();
+    let removed = true;
+    try { history.replaceState(history.state, '', location.pathname + location.search + (rest ? '#' + rest : '')); }
+    catch { removed = false; }
+    let returnedSession = null;
+    try { returnedSession = JSON.parse(returned); } catch { /* refused below */ }
+    if (!removed) localProblem = 'This browser kept the connection secret in the address, so this page will not use it. Close this tab, then open the local view.';
+    else if (validLocalSession(returnedSession)) localSession = { version: 1, origin: returnedSession.origin, key: returnedSession.key };
+    else localProblem = 'The local view sent back a connection this page cannot read. Try again, or open the local view.';
+  } else {
+    try { const kept = JSON.parse(tabValue(LOCAL_TAB) ?? 'null'); if (validLocalSession(kept)) localSession = kept; } catch { /* nothing kept for this tab */ }
+  }
+  tabValue(LOCAL_TAB, localSession ? JSON.stringify(localSession) : null);
+}
 const snapshotReplay = { final: null, events: [], index: 0, playing: false, timer: null };
 const keep = (name, value) => { name = snapshot ? 'snapshot.' + name : name; try { if (value === undefined) return localStorage.getItem(name); localStorage.setItem(name, value); } catch { return null; } return value; };
 // Whether the host serves this page at /roadmap as well as at /, so the Roadmap's address is a path;
@@ -224,6 +283,90 @@ let heldClickPointer = null;
 let deferredClickRender = false;
 const addressedShouts = new Map();
 const $ = (id) => document.getElementById(id);
+
+/** Say in one line what the page is doing about this machine's view, or why it cannot read it, with the ways on. */
+function localNote(text, ways = false) {
+  $('local-note').hidden = !text;
+  $('local-note-text').textContent = text || '';
+  $('local-note-links').hidden = !ways;
+  $('local-note-view').href = (localSession?.origin || LOCAL_VIEW) + '/local/view';
+  $('local-note-sign-in').hidden = !hosted.signIn || hosted.relaySession;
+  if (hosted.signIn) $('local-note-sign-in').href = hosted.signIn;
+}
+
+/** Hide the relay's own banner, which speaks for the relay, on a page the relay does not serve this time. */
+function hideRelayNotice() {
+  const banner = document.getElementById('relay-notice');
+  if (banner) banner.hidden = true;
+}
+
+/** Send this tab on the round trip to the local view, which sends it straight back here; two tries in a row at most. */
+function localTrip(base) {
+  const trips = Number(tabValue(LOCAL_TRIPS) || 0);
+  if (trips >= 2) {
+    tabValue(LOCAL_TRIPS, null);
+    localNote('The local view did not give this page a session it accepts. Open the local view, or try again.', true);
+    return false;
+  }
+  tabValue(LOCAL_TRIPS, String(trips + 1));
+  location.assign(base + '/local/connect');
+  return true;
+}
+
+/** The local view refused this tab's secret, as after a restart with a new one: go round again for it, unasked. */
+function localExpired() {
+  const base = localSession.origin;
+  localSession = null;
+  localConfirmed = false;
+  tabValue(LOCAL_TAB, null);
+  localTrip(base);
+}
+
+/**
+ * Reach this machine's view: say first why the browser may ask about local network access, then read the view's
+ * public protocol, which holds no secret and no board, and take the session the round trip brought back. It is
+ * 'local' when the page now reads the local view, 'away' when the browser is on the round trip, and 'unreachable'
+ * when the page cannot read it, with what it knows of why on the page.
+ */
+async function connectLocal() {
+  const base = localSession?.origin || LOCAL_VIEW;
+  let permission = null;
+  for (const name of ['loopback-network', 'local-network-access']) {
+    try { permission = (await navigator.permissions.query({ name })).state; break; } catch { /* this browser has no such permission */ }
+  }
+  if (permission === 'denied') {
+    localNote('This browser has refused this page access to apps on this device, so it cannot read the board running here. Allow it in the site settings for app.pullboard.dev, or open the local view.', true);
+    return 'unreachable';
+  }
+  if (permission !== 'granted') {
+    localNote('Your browser may ask to let this page reach apps on this device: allow it, and the page reads the board pullboard view runs here, which never leaves this machine.');
+    // The line is on screen before the request that can raise the browser's prompt.
+    await new Promise((painted) => requestAnimationFrame(() => requestAnimationFrame(painted)));
+  }
+  let reply;
+  try { reply = await fetch(base + '/local/protocol', { signal: AbortSignal.timeout(3000), credentials: 'omit', redirect: 'error' }); }
+  catch {
+    localNote('This page cannot reach a local view: pullboard view may not be running, this browser may have refused it access to this device, or the installed Pullboard may be older than this page. Start pullboard view and try again, or open the link it printed.', true);
+    return 'unreachable';
+  }
+  let protocol = null;
+  try { protocol = await reply.json(); } catch { /* not this protocol */ }
+  if (!reply.ok || protocol?.version !== 1 || protocol?.apiVersion !== 1 || protocol?.hostedOrigin !== location.origin) {
+    localNote('The installed Pullboard does not match this page. Open the link pullboard view printed, or update Pullboard.', true);
+    return 'unreachable';
+  }
+  if (!localSession) return localTrip(base) ? 'away' : 'unreachable';
+  connection.base = localSession.origin;
+  connection.headers = { 'x-pullboard-key': localSession.key };
+  readOnly = false;
+  requests = false;
+  transportModule = null;
+  transport = null;
+  document.body.classList.remove('read-only', 'requests');
+  hideRelayNotice();
+  localNote(null);
+  return 'local';
+}
 
 /** Mark primary pointer targets whose click would be lost if a refresh replaces them. */
 function holdClickPointer(event) {
@@ -772,6 +915,10 @@ async function api(path, body) {
   path = snapshot ? path.split('?')[0].slice(1) + '.json' : connection.base + path;
   const res = await fetch(path, { method: body ? 'POST' : 'GET', headers: snapshot ? {} : { ...connection.headers, ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
   const json = await res.json();
+  if (localSession && connection.base === localSession.origin && !snapshot) {
+    if (res.status === 401 || res.status === 403) localExpired();
+    else if (res.ok && !localConfirmed) { localConfirmed = true; tabValue(LOCAL_TRIPS, null); }
+  }
   if (!res.ok) {
     const refusal = json.error;
     const message = refusal && typeof refusal === 'object' ? '[' + refusal.code + '] ' + refusal.message : refusal || res.status;
@@ -1226,6 +1373,8 @@ async function listen(entry) {
     const res = await fetch(path, {
       headers: { ...connection.headers, accept: 'text/event-stream', 'last-event-id': entry.cursor }, cache: 'no-store', signal: controller.signal,
     });
+    // This machine's view refused the hosted page's secret, as after a restart with a new one: go round again (#513).
+    if ((res.status === 401 || res.status === 403) && localSession && connection.base === localSession.origin) { localExpired(); return; }
     if (!res.ok || !res.body) throw new Error('the board stream answered ' + res.status);
     entry.status = 'up';
     entry.offline = false;
@@ -3138,8 +3287,24 @@ if (snapshot) {
     if (snapshotReplay.playing) { clearTimeout(snapshotReplay.timer); snapshotReplay.timer = setTimeout(advanceReplay, 1000 / Number($('replay-speed').value)); }
   });
 }
+if (hosted.local) $('local-note-retry').addEventListener('click', () => {
+  localProblem = null;
+  tabValue(LOCAL_TRIPS, null);
+  // A page already on the relay starts again instead, so it never holds the relay's streams and the view's at once.
+  if (transport) { location.reload(); return; }
+  connectLocal().then((local) => local === 'local' ? refresh() : null).catch((error) => localNote(error.message, true));
+});
 /** Load an explicitly configured transport before the first read; its updates refresh this page. */
 async function startPage() {
+  // The hosted page reads this machine's view when it can. When it cannot, it is the relay page as before, for a
+  // person signed in to the relay; anyone else sees why, and the ways on.
+  if (hosted.local && !relayPairing) {
+    let local = 'unreachable';
+    if (localProblem) localNote(localProblem, true);
+    else local = await connectLocal();
+    if (local === 'away') return;
+    if (local === 'unreachable' && !hosted.relaySession) { hideRelayNotice(); return; }
+  }
   if (transportModule) {
     try {
       const module = await import(transportModule);
@@ -3156,9 +3321,10 @@ async function startPage() {
 }
 startPage().catch((error) => { document.body.classList.remove('loading'); $('live').textContent = 'cannot reach the view: ' + error.message; });
 // The relay transport keeps its own stream and timer. The local view reads on a timer only while it has no live
-// stream, and its live line says so (#545).
-if (!snapshot && transportModule) setInterval(() => { if (!document.hidden && transport) refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }); }, 3000);
-if (!snapshot && !transportModule) setInterval(() => { if (!document.hidden && !connected()) refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }); }, FALLBACK_MS);
+// stream, and its live line says so (#545). Each timer asks which the page uses as it fires: the hosted page starts
+// out on the relay and turns to this machine's view once it reaches it (#513).
+if (!snapshot) setInterval(() => { if (!document.hidden && transportModule && transport) refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }); }, 3000);
+if (!snapshot) setInterval(() => { if (!document.hidden && !transportModule && !connected()) refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }); }, FALLBACK_MS);
 setInterval(tickAges, 60000);
 </script>
 </body>
