@@ -11,7 +11,7 @@ export const JSON_SHAPES = {
   commands: {
     help: shape({ help: 'string' }),
     version: shape({ release: 'string' }),
-    init: shape({ root: 'string', notes: 'array' }),
+    init: shape({ root: 'string', notes: 'array', proposedLanes: 'array' }),
     hooks: shape({ notes: 'array' }),
     join: shape({ agent: 'string', lane: 'string', route: 'string', path: 'string', model: 'string', displayName: 'string' }),
     takeover: shape({ agent: 'string', path: 'string' }),
@@ -19,6 +19,7 @@ export const JSON_SHAPES = {
     resume: shape({ me: 'object', all: 'array', requests: 'array', holding: 'array', sentBack: 'array', awaiting: 'array', toVerify: 'array', toMerge: 'array', open: 'array', stale: 'array', holds: 'array', unread: 'number', newest: 'array', root: 'string', dirty: 'number', next: 'string' }),
     whoami: shape({ id: 'string', lane: 'string', path: 'string', model: 'string', displayName: 'string' }),
     lanes: shape({ lanes: 'object', shared: 'array', coordinator: 'string' }),
+    'lane add': shape({ lane: 'string', owns: 'array' }),
     resources: shape({ resources: 'array' }),
     settings: shape({ settings: 'object' }),
     relay: shape({ linked: 'boolean', board: 'string', url: 'string', link: 'string', sequence: 'number', behind: 'number', recovery: 'object' }),
