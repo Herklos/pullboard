@@ -68,7 +68,7 @@ import { tour } from './tour.js';
 import { commandOutput, refusalDocument } from './json.js';
 import { forgetProject, listApiProjects, registerProjectAndLink } from './projects.js';
 import { milestoneRoadmap } from './roadmap.js';
-import { listResources, runnerResourceStatus } from './resources.js';
+import { listResources, memoryVerdict, readMachineMemory, runnerResourceStatus } from './resources.js';
 import { citedTestFiles, rowEvidence, rowStage } from './evidence.js';
 import { exportView, serveView } from './serve.js';
 import { forgetView, rememberView, runningView } from './view-session.js';
@@ -81,7 +81,7 @@ import { flowLines, flowAlertLine } from './stats-flow.js';
 import { releaseHeadlinesBetween } from './changelog.js';
 import { exportBoard, importBoard } from './exchange.js';
 import { addSigner, assertRequiredSigners, defaultPrincipal, hasSignerFile } from './signature.js';
-import { addRunner, browserFreeChecksEnabled, gateQueueSettings, loadMachineSettings, setBrowserSlots, setGateSlots } from './settings.js';
+import { addRunner, browserFreeChecksEnabled, gateQueueSettings, loadMachineSettings, memoryFloorMB, setBrowserSlots, setGateSlots } from './settings.js';
 import { formatSnapshotLimit, pendingSnapshotSize, pendingCheckpointProblem, relayCommandReceipt, relayCommandReceiptReported, relayLinked, relayOff, relayOn, relayOperation, relayRecover, relayRecovered, relayRevoke, relayStatus, relayTokens, syncRelay } from './relay.js';
 import { autoLinkProject, relayOnAll, revokeRelayDevice, unlinkedRelayProjects } from './relay-setup.js';
 import { readRelayMachine } from './relay-machine.js';
@@ -1873,19 +1873,22 @@ function readCommands(io, { first, second, rest, values }) {
       io.say(`imported version ${document.version} board tables: ${imported.tables.join(', ')}`);
       return 0;
     },
-    resources: () => {
+    resources: async () => {
       const ctx = context(io);
       const agents = withBoard(ctx, (board) => store.listAgents(board));
       const browserSlots = loadMachineSettings().browserSlots;
+      const floorMB = memoryFloorMB();
+      const memory = memoryVerdict(await readMachineMemory({ processes: true }), floorMB === null ? null : floorMB * 1024 ** 2);
       const resources = [
         ...listResources({ scope: 'machine' }).map((resource) => ({ ...resource, scope: 'machine' })),
         ...listResources({ scope: 'repo', root: ctx.info.root }).map((resource) => ({ ...resource, scope: 'repo' })),
       ];
       const runners = runnerResourceStatus(loadMachineSettings().runners ?? []);
       const queue = gateQueueSettings();
-      io.result?.({ resources, runners, browserSlots, queue });
+      io.result?.({ resources, runners, browserSlots, queue, memory });
       io.say(`browserSlots (machine setting): ${browserSlots}`);
       io.say(`machine queue order (gate.queue.reviewsFirst ${queue.reviewsFirst}): ${queue.reviewsFirst ? `landing, review, submit, other; a waiting run moves up one class every ${queue.agingMinutes} minutes` : 'landings first, then arrival'}`);
+      io.say(memory.line);
       if (!resources.length) io.say('no resources have been used');
       for (const resource of resources) {
         io.say(`${resource.name} (${resource.scope}, capacity ${resource.capacity})${resource.order === 'arrival' ? '; an older pullboard is waiting, so this line is in arrival order, landings first' : ''}`);
@@ -3025,14 +3028,29 @@ function browserAdmissionReporter(io, jsonMode = false) {
   };
 }
 
-/** Build a de-duplicated queue message for a gate waiting on machine capacity. */
-function gateWaitReporter(io) {
+/** Build de-duplicated queue messages for a gate waiting on machine capacity or memory; exported so tests can read what a person sees. */
+export function gateWaitReporter(io) {
   let last = '';
-  return ({ holders, position, runnerUnavailable }) => {
+  let warned = false;
+  let held = false;
+  return ({ holders, position, memory, runnerUnavailable }) => {
     if (runnerUnavailable) {
       io.say(`runner ${runnerUnavailable.host} unavailable: ${runnerUnavailable.reason}; until ${runnerUnavailable.until}; requeueing the run`);
       return;
     }
+    // Memory speaks once per state: one warning where it cannot be read, one line per hold.
+    if (memory && !memory.checked) {
+      if (!warned) io.say(memory.warning);
+      warned = true;
+      if (!position) return;
+    }
+    if (memory?.held) {
+      if (!held) io.say(memory.line);
+      held = true;
+      last = '';
+      return;
+    }
+    held = false;
     const repos = holders.map(({ repo }) => repo).filter(Boolean);
     const message = `gate waiting: ${holders.length} running${repos.length ? ` in ${repos.join(', ')}` : ''}; place ${position}`;
     if (message !== last) {
@@ -3048,11 +3066,12 @@ function settingsCommand(io, { first, second, rest }) {
     const settings = loadMachineSettings();
     const queue = gateQueueSettings();
     // The result names the queue order in effect, defaults included; the file keeps only what was set.
-    io.result?.({ settings: { ...settings, gate: { ...settings.gate, queue: { ...settings.gate?.queue, ...queue } } } });
+    io.result?.({ settings: { ...settings, gate: { ...settings.gate, queue: { ...settings.gate?.queue, ...queue } } }, memoryFloorMB: memoryFloorMB() });
     io.say(`gateSlots: ${settings.gateSlots}`);
     io.say(`browserSlots: ${settings.browserSlots}`);
     io.say(`gate.queue.reviewsFirst: ${queue.reviewsFirst}${queue.reviewsFirst ? '' : ' (landings first, then arrival order)'}`);
     io.say(`gate.queue.agingMinutes: ${queue.agingMinutes}${queue.reviewsFirst ? '' : ' (used only while reviewsFirst is true)'}`);
+    io.say(`gate.memoryFloorMB: ${memoryFloorMB() ?? 'off (the gate queue does not wait for memory)'}`);
     return 0;
   }
   if (!['gateSlots', 'browserSlots'].includes(first) || !second || rest.length) {

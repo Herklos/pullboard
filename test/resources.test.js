@@ -235,10 +235,10 @@ function worker(box, { name = 'gate', capacity = 1, scope = 'machine', root = bo
   return child;
 }
 
-/** Launch a dedicated gate-pool worker carrying browser and queue-priority metadata. */
-function poolWorker(box, { agent, browser = false, item = '', kind = '', landing = false, module = MODULE }) {
+/** Launch a dedicated gate-pool worker carrying browser and queue-priority metadata, or another pool script. */
+function poolWorker(box, { agent, browser = false, item = '', kind = '', landing = false, module = MODULE, script = POOL_MODULE_WORKER, args }) {
   // module swaps in another resources implementation, such as an older pullboard's, for mixed-version tests.
-  const workerArgs = ['--input-type=module', '-e', POOL_MODULE_WORKER.replace(JSON.stringify(MODULE), JSON.stringify(module)), box.first, agent, String(browser), item, kind, String(landing)];
+  const workerArgs = ['--input-type=module', '-e', script.replace(JSON.stringify(MODULE), JSON.stringify(module)), ...(args ?? [box.first, agent, String(browser), item, kind, String(landing)])];
   const startedAt = performance.now();
   const child = spawn(process.execPath, workerArgs, {
     env: box.env, stdio: ['pipe', 'pipe', 'pipe'],
@@ -1478,6 +1478,145 @@ test('[Q2,Q3] a SIGKILLed waiter is skipped while the next live waiter advances'
   await release(holder);
   assert.equal((await event(live)).acquired, 'live-waiter');
   await release(live);
+});
+
+const CLI_MODULE = pathToFileURL(resolve(import.meta.dirname, '../src/cli.js')).href;
+/** A gate run whose memory reading comes from a fixture file through the Linux reader's own parsing. */
+const MEMORY_WORKER = `
+import { readFileSync } from 'node:fs';
+import { withGateSlot } from ${JSON.stringify(GATE_MODULE)};
+import { readMachineMemory } from ${JSON.stringify(MODULE)};
+const [root, agent, source] = process.argv.slice(1);
+const ps = ['  6161   512000 /bin/zsh', '  4242 25165824 /usr/bin/python3', '    77     1024 /sbin/launchd',
+  '  5151  2097152 /usr/local/bin/node', '  4343 24117248 /opt/homebrew/bin/python3.12'].join('\\n');
+const cwds = { '/proc/4242/cwd': '/work/journal-reader', '/proc/4343/cwd': '/work/other-reader', '/proc/5151/cwd': '/work/pullboard' };
+/** Read the fixture's current machine state as Linux would present it. */
+const readMemory = (options) => source === 'win32' ? readMachineMemory({ ...options, platform: 'win32' }) : readMachineMemory({
+  ...options, platform: 'linux',
+  readText: async (file) => {
+    const reading = JSON.parse(readFileSync(source, 'utf8'));
+    if (file === '/proc/meminfo') return reading.meminfo;
+    if (file === '/proc/pressure/memory') return reading.psi;
+    throw new Error('unexpected file ' + file);
+  },
+  run: async (file) => { if (file === '/bin/ps') return ps; throw new Error('unexpected command ' + file); },
+  readLink: async (path) => { if (cwds[path]) return cwds[path]; throw new Error('EACCES'); },
+});
+let last = '';
+await withGateSlot(root, async () => {
+  console.log(JSON.stringify({ acquired: agent }));
+  for await (const line of process.stdin) if (String(line).trim() === 'release') break;
+}, { agent, kind: 'gate', readMemory, onWait: ({ position, memory }) => {
+  const state = JSON.stringify({ waiting: position, memory: memory ?? null });
+  if (state !== last) { last = state; console.log(state); }
+} });
+`;
+
+/** Write what /proc would say: total and available memory, and the pressure stall averages. */
+function writeMemoryReading(file, { availableMB, fullAvg10 = 0, someAvg10 = 0, broken = false }) {
+  const meminfo = broken ? 'MemTotal: 37748736 kB\n' : `MemTotal:       37748736 kB\nMemFree:          102400 kB\nMemAvailable:   ${availableMB * 1024} kB\n`;
+  const psi = `some avg10=${someAvg10.toFixed(2)} avg60=0.00 avg300=0.00 total=1\nfull avg10=${fullAvg10.toFixed(2)} avg60=0.00 avg300=0.00 total=1\n`;
+  writeFileSync(file, JSON.stringify({ meminfo, psi }));
+}
+
+/** Launch one gate run through withGateSlot with an injected memory source. */
+function memoryWorker(box, agent, source) {
+  return poolWorker(box, { agent, script: MEMORY_WORKER, args: [box.first, agent, source] });
+}
+
+test('the pool holds work while the machine is out of memory and names the biggest process [C7]', async () => {
+  const box = fixture();
+  mkdirSync(box.home, { recursive: true });
+  writeFileSync(join(box.home, 'settings.json'), `${JSON.stringify({ gate: { memoryFloorMB: 512 } })}\n`);
+  const reading = join(box.dir, 'memory.json');
+  const biggest = 'biggest: pid 4242 python3 24.0 GB in /work/journal-reader; pid 4343 python3.12 23.0 GB in /work/other-reader; pid 5151 node 2.0 GB in /work/pullboard';
+  writeMemoryReading(reading, { availableMB: 8192, fullAvg10: 42, someAvg10: 80 });
+  const run = memoryWorker(box, 'held-run', reading);
+
+  const critical = await event(run);
+  assert.equal(critical.acquired, undefined, 'a critical reading must not admit the run');
+  assert.equal(critical.waiting, 1, 'the held run keeps its place at the head of the line');
+  assert.equal(critical.memory?.held, true, `the run is held for memory: ${JSON.stringify(critical)}`);
+  assert.equal(critical.memory.line,
+    `memory: holding the gate queue because pressure is critical: pressure critical, 8.0 GB free of 36.0 GB (floor 512 MB); ${biggest}`,
+    'one line says why and names the three biggest processes with pid, size and working directory');
+  assert.doesNotMatch(critical.memory.line, /\n/u, 'the hold is one line');
+  const gate = privateList(box).find(({ name }) => name === 'gate');
+  assert.equal(gate.holders.length, 0, 'no run holds a slot while memory is critical, though both slots are free');
+  assert.deepEqual(gate.line.map(({ agent }) => agent), ['held-run'], 'the held run waits in the queue');
+  await delay(300);
+  assert.ok(!run.pendingLines.some((line) => JSON.parse(line).acquired), 'the run stays held while the reading stays critical');
+
+  writeMemoryReading(reading, { availableMB: 400 });
+  const low = await event(run);
+  assert.equal(low.memory?.held, true, `free memory under the settings floor still holds: ${JSON.stringify(low)}`);
+  assert.equal(low.memory.line,
+    `memory: holding the gate queue because free memory is under the floor: pressure normal, 400 MB free of 36.0 GB (floor 512 MB); ${biggest}`,
+    'the floor comes from gate.memoryFloorMB in pullboard settings');
+
+  writeMemoryReading(reading, { availableMB: 8192 });
+  const recovered = await acquired(run).catch((error) => assert.fail(`the held run is admitted once memory recovers: ${error.message.split('\n')[0]}`));
+  assert.equal(recovered.acquired, 'held-run', 'the held run is admitted once memory recovers');
+  await release(run);
+});
+
+test('the memory hold is off until a floor is set, an unread machine warns once, and resources prints the memory line [C7]', async () => {
+  const { gateWaitReporter } = await import(CLI_MODULE);
+  const said = [];
+  const report = gateWaitReporter({ say: (line) => said.push(line) });
+  report({ holders: [], position: 1, memory: { checked: true, held: true, line: 'memory: holding the gate queue because pressure is critical: first' } });
+  report({ holders: [], position: 1, memory: { checked: true, held: true, line: 'memory: holding the gate queue because pressure is critical: sizes moved' } });
+  report({ holders: [], position: 1 });
+  assert.deepEqual(said, ['memory: holding the gate queue because pressure is critical: first', 'gate waiting: 0 running; place 1'],
+    'a held run prints its line once per hold, then the ordinary queue line');
+  const warned = [];
+  const warn = gateWaitReporter({ say: (line) => warned.push(line) });
+  const unchecked = { checked: false, held: false, line: 'memory: not checked on win32', warning: 'memory: not checked on win32' };
+  warn({ holders: [], line: [], position: 0, memory: unchecked });
+  warn({ holders: [], line: [], position: 0, memory: unchecked });
+  assert.deepEqual(warned, ['memory: not checked on win32'], 'an unread machine prints one warning');
+
+  const box = fixture();
+  const critical = join(box.dir, 'critical.json');
+  writeMemoryReading(critical, { availableMB: 100, fullAvg10: 99 });
+  const unset = memoryWorker(box, 'unset-run', critical);
+  const unsetStart = await event(unset);
+  assert.equal(unsetStart.acquired, 'unset-run', `with gate.memoryFloorMB absent the pool admits by slots alone, as before: ${JSON.stringify(unsetStart)}`);
+  await release(unset);
+  const defaults = runFixtureChild(process.execPath, [BIN, 'settings', '--json'], { cwd: box.first, env: box.env, encoding: 'utf8' });
+  assert.equal(defaults.status, 0, defaults.stderr);
+  assert.equal(JSON.parse(defaults.stdout).memoryFloorMB, null, 'pullboard settings reports the hold as off when the floor is absent');
+  mkdirSync(box.home, { recursive: true });
+  writeFileSync(join(box.home, 'settings.json'), `${JSON.stringify({ gate: { memoryFloorMB: -1 } })}\n`);
+  const refused = runFixtureChild(process.execPath, [BIN, 'settings', '--json'], { cwd: box.first, env: box.env, encoding: 'utf8' });
+  assert.equal(refused.status, 1);
+  assert.equal(JSON.parse(refused.stdout).error.code, 'BAD_MACHINE_SETTINGS');
+  assert.match(JSON.parse(refused.stdout).error.message, /gate\.memoryFloorMB/u);
+  writeFileSync(join(box.home, 'settings.json'), `${JSON.stringify({ gate: { memoryFloorMB: 1024 } })}\n`);
+  const set = runFixtureChild(process.execPath, [BIN, 'settings'], { cwd: box.first, env: box.env, encoding: 'utf8' });
+  assert.equal(set.status, 0, set.stderr);
+  assert.match(set.stdout, /^gate\.memoryFloorMB: 1024$/mu, 'pullboard settings shows the floor once it is set');
+
+  for (const source of ['win32', 'broken']) {
+    const file = join(box.dir, `${source}.json`);
+    writeMemoryReading(file, { availableMB: 100, fullAvg10: 99, broken: true });
+    const run = memoryWorker(box, `${source}-run`, source === 'win32' ? 'win32' : file);
+    const first = await event(run);
+    assert.equal(first.memory?.checked, false, `${source}: the run hears that memory is not checked: ${JSON.stringify(first)}`);
+    assert.match(first.memory.warning, /^memory: not checked on (win32|linux) \(.+\); the gate pool admits by slots alone$/u);
+    assert.equal((await event(run)).acquired, `${source}-run`, `${source}: an unread machine admits as today, after exactly one warning`);
+    await release(run);
+  }
+
+  checkProject(box);
+  const human = runFixtureChild(process.execPath, [BIN, 'resources'], { cwd: box.first, env: box.env, encoding: 'utf8' });
+  assert.equal(human.status, 0, human.stderr);
+  const printed = human.stdout.split('\n').filter((line) => line.startsWith('memory: '));
+  assert.equal(printed.length, 1, `pullboard resources prints one machine memory line: ${human.stdout}`);
+  assert.match(printed[0], /^memory: (admitting: |holding the gate queue because |not checked on )/u);
+  const json = runFixtureChild(process.execPath, [BIN, 'resources', '--json'], { cwd: box.first, env: box.env, encoding: 'utf8' });
+  assert.equal(json.status, 0, json.stderr);
+  assert.match(JSON.parse(json.stdout).memory.line, /^memory: /u, 'the JSON result carries the same machine line');
 });
 
 test('[Q4] machine capacity changes atomically refuse an occupied or queued resource', async () => {
