@@ -339,3 +339,9 @@ Post-run cleanup reports `RUNNER_CLEANUP_TIMEOUT` after 30 seconds instead of le
 New acceptances seal the exact checked commit in `review.head`. A stale re-review lands that checked composition while retaining the original submitted commit as the item identity; landing snapshots record `reviewedCommit` when it differs. Adoption and publishing refuse if that proof changes. Historical released-engine receipts retain their original replay meaning. The checked commit is pinned at `refs/pullboard/items/<id>/<first-12-sha>`; another replica must fetch that ref's Git objects before the sealed re-review can clear its stale state. Missing objects fail closed. The checked-head meaning uses the next free release engine number, currently 13 on this candidate.
 
 A re-review seals the union of the original item paths and paths changed by the checked repair against its reviewed trunk. Files added by a repair therefore participate in later stale-verdict detection.
+
+Device-sealed presentations carry the same derived `verdictState`, including Git-only trunk movement and re-review, without changing native tables. Browser snapshot decoding preserves it. Repeated unchanged sealed snapshots reuse derived values and start no Git process after warm-up; staged supplied boards bypass that cache.
+
+Cold freshness reads query first-parent history limited to the item’s literal paths, then inspect matching commits. Unrelated main revisions do not each start a file-diff process; merge and revert changes still count.
+
+Unavailable Git-object verdict projections are retried on the next read, so fetching the sealed reviewed commit clears that uncertainty without a board event or trunk move. Known freshness projections remain cached.

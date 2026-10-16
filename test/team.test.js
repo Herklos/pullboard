@@ -12,6 +12,8 @@ import { createE2eHelpers } from './e2e-helpers.js';
 import { serveApi } from '../src/api.js';
 import { main } from '../src/cli.js';
 import { fetchFresh } from './http-fixture.js';
+import { relaySnapshot, presentationDigest } from '../src/relay-presentation.js';
+import { snapshotState } from '../relay/browser-model.js';
 
 const helpers = createE2eHelpers();
 after(helpers.cleanup);
@@ -46,6 +48,9 @@ test('a verdict reads stale when main moves under its files [E8]', { timeout: 12
   run(box, reviewer, 'join', 'web');
   run(box, reviewer, 'verify', '1', 'accept', '--note', 'The feature changes its first line and the frozen check observes it.');
   const original = withBoard(box.repo, board => store.verdictsFor(board, 1));
+  const mainEditor = join(box.dir, 'main-caller-editor');
+  box.git(box.repo, 'worktree', 'add', '-q', '--detach', mainEditor, 'main');
+  run(box, mainEditor, 'join', 'web');
   const peer = join(box.dir, 'replica');
   box.git(box.dir, 'clone', '-q', box.repo, peer);
   withBoard(peer, board => importBoard(board, withBoard(box.repo, exportBoard)));
@@ -77,6 +82,7 @@ test('a verdict reads stale when main moves under its files [E8]', { timeout: 12
     return document;
   };
   const initialState = (await http('/state')).state;
+  const phoneBefore = relaySnapshot(reviewer);
   await http('/state');
   assert.equal(builds, 1, 'unchanged HTTP reads reuse the state cache');
   await http('/items/1'); // Warm the independent detail freshness projection for a verified item.
@@ -92,14 +98,17 @@ test('a verdict reads stale when main moves under its files [E8]', { timeout: 12
     await http('/items/1');
     await http('/state');
     await http('/items/1');
-    assert.deepEqual(processCalls, [], 'unchanged accepted-item detail and state reads spawn no process');
+    relaySnapshot(reviewer);
+    relaySnapshot(reviewer);
+    assert.deepEqual(processCalls, [], 'unchanged accepted-item detail, state and sealed phone snapshot reads spawn no process');
   } finally {
     for (const [method, original] of originals) childProcess[method] = original;
     syncBuiltinESMExports();
   }
 
   assert.ok(items().every(item => !item.item_verdict_state));
-  assert.equal(helpers.commitFile(box, box.repo, 'web/unrelated.js', 'unrelated = 1\n', 'feat(web): unrelated [G1]').status, 0);
+  assert.equal(helpers.commitFile(box, mainEditor, 'web/unrelated.js', 'unrelated = 1\n', 'feat(web): unrelated [G1]').status, 0);
+  box.git(box.repo, 'merge', '-q', '--no-ff', box.git(mainEditor, 'rev-parse', 'HEAD'), '-m', 'chore(merge): unrelated main change [G1]');
   syncTrunk();
   assert.ok(items().every(item => !item.item_verdict_state), 'unrelated main files do not stale acceptance');
   assert.equal((await http('/state')).state.items[0].verdictState, undefined);
@@ -110,7 +119,9 @@ test('a verdict reads stale when main moves under its files [E8]', { timeout: 12
   });
   assert.equal(stream.status, 200);
   streamReader = stream.body.getReader();
-  assert.equal(helpers.commitFile(box, box.repo, 'web/feature.js', 'feature = 0\nmain = 1\n', 'feat(web): change main caller [G1]').status, 0);
+  box.git(mainEditor, 'merge', '-q', '--ff-only', 'main');
+  assert.equal(helpers.commitFile(box, mainEditor, 'web/feature.js', 'feature = 0\nmain = 1\n', 'feat(web): change main caller [G1]').status, 0);
+  box.git(box.repo, 'merge', '-q', '--no-ff', box.git(mainEditor, 'rev-parse', 'HEAD'), '-m', 'chore(merge): change main caller [G1]');
   const movingCommit = box.git(box.repo, 'rev-parse', 'HEAD');
   syncTrunk();
   for (const item of items()) {
@@ -124,6 +135,23 @@ test('a verdict reads stale when main moves under its files [E8]', { timeout: 12
   assert.equal(apiStale.sequence, initialState.sequence, 'Git movement needs no board event to invalidate the state cache');
   assert.equal(apiStale.items[0].verdictState?.code, 'STALE_VERDICT');
   assert.equal(apiStale.items[0].verdictState.commit, movingCommit);
+  const coldGit = [];
+  const originalSpawn = childProcess.spawnSync;
+  let phoneStale;
+  try {
+    childProcess.spawnSync = function (...args) {
+      if (args[0] === 'git') coldGit.push(args[1]);
+      return Reflect.apply(originalSpawn, this, args);
+    };
+    syncBuiltinESMExports();
+    phoneStale = relaySnapshot(reviewer);
+  } finally { childProcess.spawnSync = originalSpawn; syncBuiltinESMExports(); }
+  assert.ok(coldGit.filter(args => args.includes('diff')).length <= 1,
+    'unrelated main history must not start one file-diff process per commit: ' + JSON.stringify(coldGit));
+  const phoneState = snapshotState(phoneStale, withBoard(box.repo, store.boardId));
+  assert.equal(phoneState.items[0].verdictState?.commit, movingCommit, 'the sealed phone snapshot carries the same stale verdict at fixed served HEAD');
+  assert.notEqual(presentationDigest(phoneBefore.presentation), presentationDigest(phoneStale.presentation), 'Git-only freshness changes cause a new sealed presentation');
+
   assert.equal((await http('/items/1')).item.verdictState?.commit, movingCommit);
   const streamDeadline = setTimeout(() => streamController.abort(new Error('trunk movement produced no live changed event')), 5_000); // budget: hang ceiling for a fixture-local change notification; no throughput claim.
   try {
@@ -150,7 +178,7 @@ test('a verdict reads stale when main moves under its files [E8]', { timeout: 12
     assert.equal(error.code, 'STALE_VERDICT');
     assert.ok(error.message.includes('web/feature.js') && error.message.includes(movingCommit), error.message);
   }
-  box.git(box.repo, 'revert', '--no-edit', movingCommit);
+  box.git(box.repo, 'revert', '-m', '1', '--no-edit', movingCommit);
   syncTrunk();
   assert.ok(items().every(item => item.item_verdict_state?.commit === movingCommit), 'a revert cannot turn an old review into a new review');
   const priorChecks = readFileSync(checkedHeads, 'utf8');
@@ -178,10 +206,32 @@ test('a verdict reads stale when main moves under its files [E8]', { timeout: 12
   const reviewPin = `refs/pullboard/items/1/${composed.slice(0, 12)}`;
   assert.equal(box.git(box.repo, 'rev-parse', reviewPin), composed, 'the checked commit is pinned durably for other replicas to fetch');
   assert.equal(items()[1].item_verdict_state?.code, 'STALE_VERDICT', 'a replica without the checked Git objects fails closed');
+  const peerBoardId = withBoard(peer, store.boardId);
+  assert.equal(snapshotState(relaySnapshot(peer), peerBoardId).items[0].verdictState?.code, 'STALE_VERDICT',
+    'a sealed phone presentation also fails closed until the reviewed objects arrive');
+  const peerApi = await serveApi({ runCommand: main, projects: () => [{ root: peer, name: 'Peer verdict fixture' }] });
+  t.after(() => peerApi.close());
+  const peerAddress = new URL(peerApi.url);
+  /** Keep this peer's server alive across an object-only fetch without a board write. */
+  const peerHttp = async suffix => {
+    const response = await fetchFresh(peerAddress.origin + apiPath + suffix,
+      { headers: { 'x-pullboard-key': peerAddress.searchParams.get('k') } });
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+  assert.equal((await peerHttp('/state')).state.items[0].verdictState?.code, 'STALE_VERDICT');
+  assert.equal((await peerHttp('/items/1')).item.verdictState?.code, 'STALE_VERDICT');
   box.git(peer, 'fetch', '-q', 'origin', reviewPin);
+  assert.equal((await peerHttp('/items/1')).item.verdictState, undefined,
+    'an object-only fetch clears a cached unavailable HTTP detail');
+  assert.equal((await peerHttp('/state')).state.items[0].verdictState, undefined,
+    'an object-only fetch clears a cached unavailable HTTP state');
+  assert.equal(snapshotState(relaySnapshot(peer), peerBoardId).items[0].verdictState, undefined,
+    'fetching the exact reviewed objects clears the sealed phone presentation without another board event or main move');
   assert.ok(items().every(item => !item.item_verdict_state), 'the same sealed re-review clears both replicas');
   assert.equal((await http('/state')).state.items[0].verdictState, undefined, 'a newer acceptance invalidates stale cached state');
   assert.equal((await http('/items/1')).item.verdictState, undefined);
+  assert.equal(snapshotState(relaySnapshot(reviewer), withBoard(box.repo, store.boardId)).items[0].verdictState, undefined, 'the sealed phone presentation clears after the checked re-review');
   assert.deepEqual(withBoard(peer, board => store.verdictsFor(board, 1)), reviewed);
   box.git(box.repo, 'merge', '-q', '--no-edit', composed);
   syncTrunk();

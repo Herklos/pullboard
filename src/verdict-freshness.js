@@ -4,6 +4,7 @@ import * as store from './board.js';
 import { cleanGitEnvironment, mainCheckout } from './git.js';
 import { trunkRef } from './trusted-policy.js';
 import { Refused } from './refused.js';
+import { trunkRevisionReader } from './trunk-revision.js';
 
 /** Read exact Git objects without inherited selectors, replacements, or filename quoting. */
 function readGit(root, args) {
@@ -62,14 +63,22 @@ export function verdictProjector(root, board, { main } = {}) {
   let tip = main;
   let resolved = main !== undefined;
   const histories = new Map();
+  const validatedBaselines = new Set();
   const changes = new Map();
-  /** Cache each first-parent range once, including changes whose effects were later reverted. */
-  const history = baseline => {
-    if (!histories.has(baseline)) {
+  /** Query only first-parent commits touching these literal paths, retaining merges and reverts. */
+  const history = (baseline, paths) => {
+    if (!validatedBaselines.has(baseline)) {
       readGit(root, ['merge-base', '--is-ancestor', baseline, tip]);
-      histories.set(baseline, readGit(root, ['rev-list', '--first-parent', '--reverse', `${baseline}..${tip}`]).trim().split('\n').filter(Boolean));
+      validatedBaselines.add(baseline);
     }
-    return histories.get(baseline);
+    const key = JSON.stringify([baseline, [...paths]]);
+    if (!histories.has(key)) {
+      const commits = paths.size ? readGit(root, ['--literal-pathspecs', 'log', '--first-parent', '--full-history',
+        '--diff-merges=first-parent', '--no-renames', '--reverse', '--format=%H', `${baseline}..${tip}`, '--', ...paths])
+        .trim().split('\n').filter(Boolean) : [];
+      histories.set(key, commits);
+    }
+    return histories.get(key);
   };
   /** Compare every commit with its first parent, so a merge's files and a revert both count. */
   const changedFiles = commit => {
@@ -111,7 +120,7 @@ export function verdictProjector(root, board, { main } = {}) {
       }
       if (!review.legacy && store.verdictReviewProblem(review, item.item_commit)) throw new Error('The sealed review is invalid');
       const paths = new Set(review.paths);
-      for (const commit of history(review.trunk)) {
+      for (const commit of history(review.trunk, paths)) {
         const file = changedFiles(commit).find(path => paths.has(path));
         if (file) return { code: 'STALE_VERDICT', file, commit, reviewedTrunk: review.trunk, main: tip,
           ...(review.legacy ? { legacy: true } : {}) };
@@ -128,4 +137,33 @@ export function verdictProjector(root, board, { main } = {}) {
     return freshness ? { ...item, item_verdict_state: freshness } : item;
   };
   return { state, project, main: tip ?? null };
+}
+
+
+const PRESENTATION_VERDICTS = new Map();
+
+/** Reuse derived presentation values, never a closed board connection or mutable native row. */
+export function cachedVerdictStates(root, board, info) {
+  const tip = trunkRevisionReader(info)();
+  const event = board.db.prepare('SELECT COALESCE(MAX(event_id), 0) AS id FROM event').get().id;
+  const key = JSON.stringify([info.commonDir, store.boardId(board)]);
+  const revision = JSON.stringify([tip, event]);
+  let cached = PRESENTATION_VERDICTS.get(key);
+  if (cached?.revision !== revision) {
+    cached = { revision, states: new Map() };
+    PRESENTATION_VERDICTS.delete(key);
+    PRESENTATION_VERDICTS.set(key, cached);
+    while (PRESENTATION_VERDICTS.size > 32) PRESENTATION_VERDICTS.delete(PRESENTATION_VERDICTS.keys().next().value);
+  }
+  const projector = verdictProjector(root, board, { main: tip });
+  /** Refresh only a changed item; unchanged sealed presentations start no new Git process. */
+  return item => {
+    const raw = JSON.stringify(item);
+    const prior = cached.states.get(item.item_id);
+    if (prior?.raw === raw) return prior.state;
+    const state = projector.state(item);
+    // A fetched review pin can resolve missing objects without changing this revision.
+    if (!state?.reason) cached.states.set(item.item_id, { raw, state });
+    return state;
+  };
 }

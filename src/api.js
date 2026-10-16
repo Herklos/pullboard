@@ -18,7 +18,7 @@ import { prepareFlowHistory, projectFlowStats } from './stats-flow.js';
 import { projectRowDecisions } from './row-decisions.js';
 import { Refused } from './refused.js';
 import { verdictProjector } from './verdict-freshness.js';
-import { trunkRef } from './trusted-policy.js';
+import { trunkRevisionReader } from './trunk-revision.js';
 import { codeAt, projectItemState, projectState } from './serve.js';
 import { relayPresentationShout } from './relay-presentation.js';
 import { createApiHandler } from './api-http.js';
@@ -156,36 +156,6 @@ function headFileRevision(info) {
     }
     return packed.split('\n').find((line) => line.endsWith(' ' + ref))?.split(' ')[0] ?? head;
   }
-}
-
-const TRUNK_REVISION_READERS = new Map();
-
-/** Watch the primary trunk ref even when this served worktree's HEAD remains fixed [E8]. */
-function trunkRevisionReader(info) {
-  const cached = TRUNK_REVISION_READERS.get(info.commonDir);
-  if (cached) return cached;
-  let retainedMarker = null;
-  let retained = null;
-  /** Read loose or packed refs without spawning Git in every event-stream poll. */
-  const read = () => {
-    const head = readFileSync(join(info.commonDir, 'HEAD'), 'utf8').trim();
-    let ref = /^ref: (refs\/heads\/.+)$/u.exec(head)?.[1];
-    if (!ref) {
-      const marker = fileMarkerForPath(join(info.commonDir, 'config'));
-      if (marker !== retainedMarker) { retained = trunkRef(info.root); retainedMarker = marker; }
-      ref = retained;
-    }
-    if (!ref?.startsWith('refs/heads/') || ref.includes('\\') || ref.split('/').some(part => !part || part === '.' || part === '..')) return null;
-    try { return readFileSync(join(info.commonDir, ref), 'utf8').trim(); }
-    catch (error) { if (error.code !== 'ENOENT') throw error; }
-    try {
-      return readFileSync(join(info.commonDir, 'packed-refs'), 'utf8').split('\n')
-        .find(line => line.endsWith(' ' + ref))?.split(' ')[0] ?? null;
-    } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
-  };
-  TRUNK_REVISION_READERS.set(info.commonDir, read);
-  while (TRUNK_REVISION_READERS.size > 32) TRUNK_REVISION_READERS.delete(TRUNK_REVISION_READERS.keys().next().value);
-  return read;
 }
 
 /**
@@ -996,7 +966,9 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
     });
     entry.cacheId = before.cacheId;
     const after = boardStateRevision(board.root, board.id, codeIsMain, { projects: apiProjects, scopeCommonDir });
-    if (before.cacheable && after.cacheable && before.revision === after.revision) {
+    // Missing Git objects can arrive without a board event or trunk move; retry that uncertainty.
+    if (before.cacheable && after.cacheable && before.revision === after.revision &&
+        !state.items.some(item => item.verdictState?.reason)) {
       stateCache.set(before.cacheId, entry);
       while (stateCache.size > 32) stateCache.delete(stateCache.keys().next().value);
     } else {
@@ -1079,7 +1051,7 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
         // The projector owns this transaction's connection; only derived values cross requests.
         const verdictState = cachedVerdicts.states.has(id) ? cachedVerdicts.states.get(id)
           : verdictProjector(board.root, currentBoard, { main: tip }).state(source);
-        cachedVerdicts.states.set(id, verdictState);
+        if (!verdictState?.reason) cachedVerdicts.states.set(id, verdictState);
         const projected = {
           ...base,
           ...(verdictState ? { verdictState } : {}),
