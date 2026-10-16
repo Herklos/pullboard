@@ -17,7 +17,11 @@
  *   gate       "npm test"              optional, set in pullboard.json only when it has no gate
  *   rules      [{ key, text, why, tier?, gate? }]          tier must|aim (must), gate (review)
  *   questions  [{ key, ask, choices, default }]            default is one of choices
- *   items      [{ key, title, cites?, after?, lane?, route?, criterion?, brief? }]   route is strong
+ *   items      [{ key, title, cites?, after?, lane?, route?, criterion?, brief?, check? }]
+ *
+ * An item's route is light, mid or strong (strong when left out), as pullboard add takes it. Its
+ * brief, criterion and check pass through to add unchanged, so a light or mid item is filed when it
+ * carries what add requires for that route and refused with add's own refusal when it does not.
  *
  * Rule and question keys ("W1", "Q1") are unique within the file; an item cites them by key and
  * waits on other items by their keys. On a board they get real ids from the section's prefix.
@@ -38,6 +42,7 @@ const BUNDLED_DIR = fileURLToPath(new URL('./blueprints/', import.meta.url));
 const NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
 const KEY_RE = /^[A-Za-z0-9]+$/u;
 const PREFIX_RE = /^[A-Z][A-Z0-9]*$/u;
+const ROUTES = ['light', 'mid', 'strong'];
 
 /**
  * The names of the blueprints shipped with Pullboard, sorted.
@@ -161,8 +166,8 @@ export function validateBlueprint(value, source = 'blueprint') {
       if (!itemKeys.has(before) || before === item.key) fail(`${at}.after`, `names ${JSON.stringify(before)}, which is no earlier item key`);
     }
     line(`${at}.lane`, item.lane, { required: false });
-    // A light or mid item needs a coordinator's check and a cold brief, which a blueprint cannot carry.
-    if (item.route !== undefined && item.route !== 'strong') fail(`${at}.route`, 'must be strong or left out; add a light or mid item later with pullboard add and its check');
+    if (item.route !== undefined && !ROUTES.includes(item.route)) fail(`${at}.route`, `must be one of ${ROUTES.join(', ')}`);
+    line(`${at}.check`, item.check, { required: false });
     line(`${at}.criterion`, item.criterion, { required: false });
     if (item.brief !== undefined && typeof item.brief !== 'string') fail(`${at}.brief`, 'must be text');
   });
@@ -306,7 +311,7 @@ export function planBlueprint(blueprint, { source, spec, doctrine, existingItems
     const found = resumed && existingItems.find((entry) => entry.title === item.title.trim() && entry.specIds.join(',') === specIds.join(','));
     if (found) { existing[item.key] = found.id; continue; }
     items.push({ key: item.key, title: item.title.trim(), specIds, after: item.after,
-      ...(item.lane ? { lane: item.lane } : {}), route: item.route, criterion: item.criterion, brief: item.brief });
+      ...(item.lane ? { lane: item.lane } : {}), ...(item.check ? { check: item.check } : {}), route: item.route, criterion: item.criterion, brief: item.brief });
   }
   return { marked, resumed, section, rows, specRows, specAfter, ids, items, existing, gate: gateToSet };
 }
