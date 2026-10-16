@@ -123,7 +123,8 @@ function functionsIn(source) {
     const start = START.exec(line);
     if (!start) continue;
     const end = line.trimEnd();
-    if (start[1]) open = { name: start[1], lines: [line], ends: (next) => next === '}' };
+    if (start[1] && end.endsWith('}')) bodies.set(start[1], line);
+    else if (start[1]) open = { name: start[1], lines: [line], ends: (next) => next === '}' };
     else if (end.endsWith(';')) bodies.set(start[2], line);
     else if (end.endsWith('{')) open = { name: start[2], lines: [line], ends: (next) => next === '};' };
     else open = { name: start[2], lines: [line], ends: (next) => next.trimEnd().endsWith(';') };
