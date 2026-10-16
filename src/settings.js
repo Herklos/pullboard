@@ -1,47 +1,27 @@
 /** Machine-wide settings shared by every Pullboard checkout on this machine. */
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { machineHome } from './machine-home.js';
 import { setResourceCapacity, updateRunnerSettings } from './resources.js';
 import { validateRunner } from './runners.js';
 import { Refused } from './refused.js';
+import { gateQueueSettings, machineSettingsFile, readMachineSettingsFile, validateGateQueue } from './queue-settings.js';
+
+// The gate queue's settings live in queue-settings.js so the runner runtime can read them too.
+export { gateQueueSettings, machineSettingsFile };
 
 const DEFAULT_GATE_SLOTS = 2;
 const DEFAULT_BROWSER_SLOTS = 1;
-const DEFAULT_QUEUE_AGING_MINUTES = 30;
-
-/** Resolve the separate machine settings file. */
-export function machineSettingsFile() {
-  return join(machineHome(), 'settings.json');
-}
 
 /** Read and validate machine settings, preserving any unrelated settings. */
 export function loadMachineSettings() {
   const file = machineSettingsFile();
-  if (!existsSync(file)) return { gateSlots: DEFAULT_GATE_SLOTS, browserSlots: DEFAULT_BROWSER_SLOTS };
-  let value;
-  try { value = JSON.parse(readFileSync(file, 'utf8')); }
-  catch { throw new Refused('BAD_MACHINE_SETTINGS', `cannot read ${file}; fix its JSON before running Pullboard`); }
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Refused('BAD_MACHINE_SETTINGS', `settings in ${file} must be a JSON object; fix it before running Pullboard`);
-  }
-  if (value.gate !== undefined && (!value.gate || typeof value.gate !== 'object' || Array.isArray(value.gate))) {
-    throw new Refused('BAD_MACHINE_SETTINGS', `gate in ${file} must be an object; fix it before running Pullboard`);
-  }
+  const value = readMachineSettingsFile(file);
+  if (!value) return { gateSlots: DEFAULT_GATE_SLOTS, browserSlots: DEFAULT_BROWSER_SLOTS };
   if (value.gate?.browserFreeChecks !== undefined && typeof value.gate.browserFreeChecks !== 'boolean') {
     throw new Refused('BAD_MACHINE_SETTINGS', `gate.browserFreeChecks in ${file} must be true or false`);
   }
-  const queue = value.gate?.queue;
-  if (queue !== undefined && (!queue || typeof queue !== 'object' || Array.isArray(queue))) {
-    throw new Refused('BAD_MACHINE_SETTINGS', `gate.queue in ${file} must be an object; fix it before running Pullboard`);
-  }
-  if (queue?.reviewsFirst !== undefined && typeof queue.reviewsFirst !== 'boolean') {
-    throw new Refused('BAD_MACHINE_SETTINGS', `gate.queue.reviewsFirst in ${file} must be true or false`);
-  }
-  if (queue?.agingMinutes !== undefined && (!Number.isSafeInteger(queue.agingMinutes) || queue.agingMinutes < 1)) {
-    throw new Refused('BAD_MACHINE_SETTINGS', `gate.queue.agingMinutes in ${file} must be a positive whole number of minutes; fix it or remove it for the default ${DEFAULT_QUEUE_AGING_MINUTES}`);
-  }
+  validateGateQueue(value, file);
   const gateSlots = value.gateSlots ?? DEFAULT_GATE_SLOTS;
   if (!Number.isSafeInteger(gateSlots) || gateSlots < 1) {
     throw new Refused('BAD_GATE_SLOTS', `gateSlots in ${file} must be a positive integer; run pullboard settings gateSlots <n>`);
@@ -64,18 +44,6 @@ export function loadMachineSettings() {
 /** Browser-free check admission is deliberately opt-in per machine. */
 export function browserFreeChecksEnabled() {
   return loadMachineSettings().gate?.browserFreeChecks === true;
-}
-
-/**
- * The gate pool's admission order. Reviews-first class order is opt-in per machine because it
- * changes who waits for whom on every board sharing the pool; absent or false keeps landings
- * first, then arrival. agingMinutes only matters while class order is on.
- *
- * @returns {{ reviewsFirst: boolean, agingMinutes: number }}
- */
-export function gateQueueSettings() {
-  const queue = loadMachineSettings().gate?.queue;
-  return { reviewsFirst: queue?.reviewsFirst === true, agingMinutes: queue?.agingMinutes ?? DEFAULT_QUEUE_AGING_MINUTES };
 }
 
 /** Atomically replace machine settings without exposing a partial JSON file. */

@@ -7,7 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { repoInfo } from './git.js';
 import { machineHome, withMachineHomeWrite } from './machine-home.js';
 import { Refused } from './refused.js';
-import { gateQueueSettings } from './settings.js';
+import { gateQueueSettings } from './queue-settings.js';
 
 const LEASE_MS = 20_000;
 const HEARTBEAT_MS = 3_000;
@@ -247,6 +247,20 @@ export function queueClass(entry, now = Date.now(), ageMs = QUEUE_AGE_MS) {
  */
 function classOrderInEffect(waiters, order) {
   return order.reviewsFirst && waiters.every((waiter) => waiter.classed === 1);
+}
+
+/**
+ * The classed marker this process writes on its waiter: 1 only while it admits by class order.
+ * Why not always 1: a #651-only process reads classed=1 on every waiter as "everyone admits by
+ * class" and ranks by class, while a process with reviewsFirst off ranks by arrival; the two would
+ * disagree and a free slot could stay empty. Writing 0 with the setting off makes every process,
+ * old or new, fall back to arrival order together.
+ *
+ * @param {{ reviewsFirst: boolean }} order - This process's admission order setting, read this poll.
+ * @returns {0|1}
+ */
+function classedMarker(order) {
+  return order.reviewsFirst ? 1 : 0;
 }
 
 /**
@@ -524,7 +538,7 @@ export async function takeResource(options) {
       if (!resume) {
         // Remote eligibility is metadata on this same ticket; the kind and flags decide the
         // admission class, and the ticket keeps arrival order within it.
-        const inserted = db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, remote, classed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, Number(remote));
+        const inserted = db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, remote, classed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, Number(remote), classedMarker(queueOrder(scope)));
         initialTicket = Number(inserted.lastInsertRowid);
       }
     });
@@ -538,15 +552,16 @@ export async function takeResource(options) {
         const waiter = db.prepare('SELECT ticket FROM waiter WHERE token = ?').get(token);
         if (!waiter) {
           if (resume && initialTicket) {
-            db.prepare('INSERT OR IGNORE INTO waiter(ticket, token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, remote, classed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)').run(initialTicket, token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, Number(remote));
+            db.prepare('INSERT OR IGNORE INTO waiter(ticket, token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, remote, classed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(initialTicket, token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, Number(remote), classedMarker(order));
             return { acquired: false, state: { ...snapshot(db, name, order), position: waiterPosition(db, name, initialTicket, { order }), rejoined: true } };
           }
           queuedAt = new Date().toISOString();
-          const rejoined = db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, remote, classed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, Number(remote));
+          const rejoined = db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, remote, classed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, Number(remote), classedMarker(order));
           initialTicket = Number(rejoined.lastInsertRowid);
           return { acquired: false, state: { ...snapshot(db, name, order), position: waiterPosition(db, name, initialTicket, { order }), rejoined: true } };
         }
-        db.prepare('UPDATE waiter SET heartbeat = ? WHERE token = ?').run(Date.now(), token);
+        // The marker follows this poll's setting, so a change mid-wait reaches every process's ranking.
+        db.prepare('UPDATE waiter SET heartbeat = ?, classed = ? WHERE token = ?').run(Date.now(), classedMarker(order), token);
         const spot = snapshot(db, name, order);
         const reportPosition = waiterPosition(db, name, waiter.ticket, { order });
         const limit = db.prepare('SELECT capacity FROM resource WHERE name = ?').get(name).capacity;
@@ -618,14 +633,16 @@ export async function takeResource(options) {
               // served holds within each class (and its queuedAt, so its aging). Under arrival order
               // (reviewsFirst off, or an older pullboard waiting in the line) it takes #663's front
               // ticket ahead of its landing tier, as on main.
-              if (classOrderInEffect(db.prepare("SELECT classed FROM waiter WHERE name = 'gate'").all(), queueOrder(scope))) requeueTicket = acquired.ticket;
+              const requeueOrder = queueOrder(scope);
+              const marker = classedMarker(requeueOrder);
+              if (classOrderInEffect([...db.prepare("SELECT classed FROM waiter WHERE name = 'gate'").all(), { classed: marker }], requeueOrder)) requeueTicket = acquired.ticket;
               else {
                 const minimumTicket = db.prepare("SELECT MIN(ticket) AS ticket FROM waiter WHERE name = 'gate' AND landing = ?").get(Number(landing)).ticket;
                 requeueTicket = Math.min(0, minimumTicket ?? 0) - 1;
               }
               db.prepare('DELETE FROM holder WHERE token = ?').run(token);
-              db.prepare('INSERT INTO waiter(ticket, token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, remote, classed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)')
-                .run(requeueTicket, token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, Number(remote));
+              db.prepare('INSERT INTO waiter(ticket, token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, remote, classed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+                .run(requeueTicket, token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, Number(remote), marker);
             });
           } catch (error) {
             transferred = false;

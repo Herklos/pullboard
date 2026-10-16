@@ -457,6 +457,27 @@ function observe(child) {
   return { child, closed };
 }
 
+test("the runner's trusted runtime list is closed under its relative imports [C7,O5]", () => {
+  const src = resolve(import.meta.dirname, '../src');
+  /** Read a runtime list literal from its source file, so the test sees exactly what ships. */
+  const listIn = (file, pattern) => {
+    const found = pattern.exec(readFileSync(join(src, file), 'utf8'));
+    assert.ok(found, `${file} declares the runner runtime list`);
+    return JSON.parse(found[1].replaceAll("'", '"'));
+  };
+  const controller = listIn('runners.js', /const RUNTIME_NAMES = (\[[^\]]*\]);/u);
+  const worker = listIn('runner-worker.js', /const runtimeNames = (\[[^\]]*\]);/u);
+  assert.deepEqual([...worker].sort(), [...controller].sort(), 'the controller ships the files the worker expects');
+  // Every relative import of a shipped file (and of the worker itself) must ship too, or it fails on the runner.
+  for (const file of [...controller, 'runner-worker.js']) {
+    const text = readFileSync(join(src, file), 'utf8');
+    const imports = [...text.matchAll(/(?:\bfrom\s+|\bimport\s*\(\s*|^import\s+)'(\.\/[^']+)'/gmu)].map(([, path]) => basename(path));
+    for (const name of imports) {
+      assert.ok(controller.includes(name), `${file} imports ./${name}, which the runner runtime list does not ship`);
+    }
+  }
+});
+
 test('a queued run executes on a registered runner and its result comes back (host checkout isolation) [C7]', async (t) => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-runner-tooling-isolation-')));
   let completedCleanly = false;

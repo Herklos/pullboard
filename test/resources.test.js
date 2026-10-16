@@ -17,6 +17,7 @@ const TEMP = [];
 const CHILDREN = new Set();
 const MODULE = pathToFileURL(resolve(import.meta.dirname, '../src/resources.js')).href;
 const GATE_MODULE = pathToFileURL(resolve(import.meta.dirname, '../src/gate.js')).href;
+const PRE_RUNNER_MODULE = pathToFileURL(resolve(import.meta.dirname, './fixtures/resources-pre-runners.js')).href;
 const SETTINGS_MODULE = pathToFileURL(resolve(import.meta.dirname, '../src/settings.js')).href;
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
 const TEST_RUNNER = resolve(import.meta.dirname, '../bin/run-tests.js');
@@ -235,8 +236,9 @@ function worker(box, { name = 'gate', capacity = 1, scope = 'machine', root = bo
 }
 
 /** Launch a dedicated gate-pool worker carrying browser and queue-priority metadata. */
-function poolWorker(box, { agent, browser = false, item = '', kind = '', landing = false }) {
-  const workerArgs = ['--input-type=module', '-e', POOL_MODULE_WORKER, box.first, agent, String(browser), item, kind, String(landing)];
+function poolWorker(box, { agent, browser = false, item = '', kind = '', landing = false, module = MODULE }) {
+  // module swaps in another resources implementation, such as an older pullboard's, for mixed-version tests.
+  const workerArgs = ['--input-type=module', '-e', POOL_MODULE_WORKER.replace(JSON.stringify(MODULE), JSON.stringify(module)), box.first, agent, String(browser), item, kind, String(landing)];
   const startedAt = performance.now();
   const child = spawn(process.execPath, workerArgs, {
     env: box.env, stdio: ['pipe', 'pipe', 'pipe'],
@@ -918,12 +920,9 @@ test('a line holding an older pullboard waiter keeps arrival order, so mixed ver
   setQueueOrder(box, { reviewsFirst: true }); // #697: class order is a machine opt-in.
   const holders = [poolWorker(box, { agent: 'mixed-holder-one' }), poolWorker(box, { agent: 'mixed-holder-two' })];
   for (const holder of holders) await acquired(holder);
-  const older = poolWorker(box, { agent: 'older-focused', kind: 'focused' });
+  // A real older pullboard (before #651) writes no class marker; it admits landings first and then by ticket.
+  const older = poolWorker(box, { agent: 'older-focused', kind: 'focused', module: PRE_RUNNER_MODULE });
   await event(older);
-  // An older pullboard writes no class marker; it admits landings first and then by ticket.
-  const db = new DatabaseSync(join(box.home, 'resources.sqlite'));
-  try { db.prepare("UPDATE waiter SET classed = 0 WHERE agent = 'older-focused'").run(); }
-  finally { db.close(); }
   const review = poolWorker(box, { agent: 'newer-review', kind: 'review', item: '651' });
   assert.equal((await event(review)).queued.position, 2, 'the review waits behind the older waiter\'s earlier ticket');
   const gate = () => privateList(box).find(({ name }) => name === 'gate');
@@ -1046,6 +1045,47 @@ test('queue order follows the machine settings [C7,O5]', async () => {
   ], 'with reviewsFirst true the requeued remote run keeps its arrival place in its class');
   assert.equal(requeuedOn.tickets['remote-focused'], requeuedOn.lastIssued, 'with reviewsFirst true the requeued run keeps its original ticket');
   assert.deepEqual(requeuedOn.admitted, ['review-later', 'submit-later', 'focused-early', 'remote-focused']);
+
+  // Mixed versions agree on the next waiter. A #651-only process ranks by class only when every
+  // waiter is marked classed=1, and otherwise landings first, then ticket; a #697 process follows
+  // its setting and marks its waiters to match, so both rankers pick the same waiter off and on.
+  const { queueClass: classOf } = await import('../src/resources.js');
+  const agree = fixture();
+  const agreeHolders = [poolWorker(agree, { agent: 'agree-holder-one' }), poolWorker(agree, { agent: 'agree-holder-two' })];
+  for (const holder of agreeHolders) await acquired(holder);
+  const agreeFocused = poolWorker(agree, { agent: 'agree-focused', kind: 'focused' });
+  await event(agreeFocused);
+  const agreeReview = poolWorker(agree, { agent: 'agree-review', kind: 'review', item: '697' });
+  await event(agreeReview);
+  /** The raw waiter rows every process reads. */
+  const rows = () => {
+    const db = new DatabaseSync(join(agree.home, 'resources.sqlite'));
+    try { return db.prepare("SELECT ticket, agent, since, landing, item_check AS itemCheck, diagnostic, kind, classed FROM waiter WHERE name = 'gate'").all(); }
+    finally { db.close(); }
+  };
+  /** The next waiter as a #651-only process ranks the same rows. */
+  const next651 = (waiters) => {
+    const byClass = waiters.every((waiter) => waiter.classed === 1);
+    const rank = (waiter) => (byClass ? classOf(waiter).effective : waiter.landing === 1 ? 0 : 1);
+    return [...waiters].sort((left, right) => rank(left) - rank(right) || left.ticket - right.ticket)[0].agent;
+  };
+  assert.deepEqual(rows().map(({ classed }) => classed), [0, 0], 'with reviewsFirst off a waiter is marked as not admitting by class');
+  assert.equal(next651(rows()), gate(agree).line[0].agent, 'off: a #651-only process and this one pick the same next waiter');
+  assert.equal(gate(agree).line[0].agent, 'agree-focused', 'off: both pick by arrival');
+  setQueueOrder(agree, { reviewsFirst: true });
+  // Each waiter re-marks itself on its next poll, so a setting change reaches every ranking.
+  for (let tries = 0; rows().some(({ classed }) => classed !== 1); tries += 1) {
+    assert.ok(tries < 250, 'waiters re-mark themselves after the setting turns on');
+    await new Promise((resolveTick) => setTimeout(resolveTick, 20));
+  }
+  assert.equal(next651(rows()), gate(agree).line[0].agent, 'on: a #651-only process and this one pick the same next waiter');
+  assert.equal(gate(agree).line[0].agent, 'agree-review', 'on: both pick by class');
+  await release(agreeHolders[0]);
+  assert.equal((await acquired(agreeReview)).acquired, 'agree-review');
+  await release(agreeHolders[1]);
+  assert.equal((await acquired(agreeFocused)).acquired, 'agree-focused');
+  await release(agreeReview);
+  await release(agreeFocused);
 
   // An unusable value is refused by name, with the fix.
   setQueueOrder(aging, { reviewsFirst: 'yes' });
