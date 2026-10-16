@@ -567,6 +567,12 @@ function withBoard(ctx, work) {
 
 /** Dispatch a board mutation locally, or seal it before any linked replica applies it. */
 async function ordered(ctx, board, operation, args) {
+  // Every engine-13 registration records the seat that made it: the coordinator from the main
+  // checkout, the joined agent from its worktree, or `machine` for a join no seat made (#579).
+  if (operation === 'register' && args[0] && args[0].createdBy === undefined) {
+    const joined = store.agentAt(board, ctx.info.root)?.agent_id;
+    args = [{ ...args[0], createdBy: ctx.info.isMain ? COORDINATOR : joined ?? 'machine' }, ...args.slice(1)];
+  }
   const command = ['add', 'edit', 'merged'].includes(ctx.io.relayCommand?.cliOperation) ? ctx.io.relayCommand : undefined;
   /** Dispatch while this session holds the checkout, including long-running next/run loops. */
   const execute = () => relayLinked(ctx.info.root)
@@ -2469,8 +2475,10 @@ async function nextOnce(ctx, values) {
     const { item, reasons, shared } = store.nextFor(board, { agentId: me.id, lane: me.lane, runnable: values.runnable, routes: values.routes, warm,
       priority: mainRedReworkItems(ctx.info.root, board) });
     const held = item?.item_status === 'claimed';
-    const offer = held ? null : store.reviewOffer(board, { agentId: me.id, lane: me.lane, policy: ctx.config.verify.policy,
+    /** Offer only reviews this seat may give; a linked board previews its engine-13 verifier standing (#579). */
+    const findOffer = () => store.reviewOffer(board, { agentId: me.id, lane: me.lane, policy: ctx.config.verify.policy,
       familyPolicy: ctx.config.verify.family, ratio: ctx.config.verify.reviewRatio, runnable: values.runnable, routes: values.routes });
+    const offer = held ? null : relayLinked(ctx.info.root) ? store.withVerifierStanding(board, { root: true }, findOffer) : findOffer();
     if (offer && !values.build) return { item: offer.item, offer, build: item ?? null };
     if (!item) return { reasons };
     const reviewSkipped = values.build && !held
@@ -3570,6 +3578,8 @@ async function runCommand(argv, io) {
           const ctx = context(io);
           const agents = withBoard(ctx, (board) => store.listAgents(board));
           for (const row of result.tokens) io.say(row.id + '  ' + agentDisplayName(agents, ctx.config, row.agent) + '  ' + (row.revoked ? 'revoked' : 'expires ' + new Date(row.expires).toISOString()));
+          // The person-made coordinator credential events: who set it up, what it revoked, what it issued.
+          for (const row of result.coordinatorEvents ?? []) io.say(`coordinator ${row.reason} by person session ${row.session} at ${new Date(row.at).toISOString()}: issued ${row.issued}, revoked ${row.revoked.length ? row.revoked.join(', ') : 'none'}`);
         } else io.say('revoked token ' + result.id + '; other agent tokens are unchanged');
         return 0;
       }

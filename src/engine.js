@@ -1,8 +1,9 @@
 /** Versioned, deterministic replay through the CLI's existing board engine [H3,H16]. */
 import { createHash, randomUUID } from 'node:crypto';
 import * as store from './board.js';
+import { COORDINATOR } from './config.js';
 import { refusalDocument } from './json.js';
-import { ENGINE_VERSION } from './machine.js';
+import { ENGINE_VERSION, VERIFIER_STANDING_ENGINE } from './machine.js';
 import { Refused } from './refused.js';
 import { requestMoveProblem, recordRequestMove } from './relay-requests.js';
 import { relayMoveActor, relaySenderProblem, validRelaySender } from './relay-sender.js';
@@ -179,12 +180,49 @@ export function refuseRelayMove(board, move, { sequence, at, sender, kind, code,
   });
 }
 
+/**
+ * Bind an engine-13 registration to the relay's receipt (#579). A seat made by another seat names
+ * itself in the move (`id`) and arrives with the receipt the relay issued its first token under:
+ * same target, the authenticated creator, this position and these exact sealed bytes. A join no
+ * seat made is machine-sent and carries no receipt; a receipt on any other move is refused.
+ *
+ * @param {any} board
+ * @param {any} move
+ * @param {{ sender: any, registration?: any, sequence: number, digest: string | null }} record
+ * @returns {Refused | null}
+ */
+function registrationProblem(board, move, { sender, registration, sequence, digest }) {
+  const refuse = (why) => new Refused('RELAY_REGISTRATION', `${why}; register the seat again from its creating seat's checkout`);
+  const options = move?.operation === 'register' && move.engine >= VERIFIER_STANDING_ENGINE ? move.args?.[0] : null;
+  if (!options || sender?.kind === 'person') return registration === undefined || registration === null ? null : refuse('the relay attached a seat receipt to a move that registers no seat');
+  const existing = typeof options.path === 'string' ? store.agentAt(board, options.path) : null;
+  if (sender.kind === 'machine' || existing) {
+    if (registration !== undefined && registration !== null) return refuse('a machine join or a returning seat carries no seat receipt');
+    if (existing && sender.kind === 'agent' && existing.agent_id !== sender.agent) return refuse(`agent ${sender.agent} cannot register another seat's worktree`);
+    return null;
+  }
+  if (options.createdBy === COORDINATOR && sender.root !== true) {
+    return refuse('only the coordinator credential the person set up creates seats; run pullboard relay on in the main checkout once');
+  }
+  const receipt = registration ?? {};
+  if (typeof options.id !== 'string' || receipt.target !== options.id || receipt.creator !== sender.agent || receipt.creator !== options.createdBy ||
+      receipt.sequence !== sequence || typeof digest !== 'string' || receipt.digest !== digest) {
+    return refuse('a new seat needs the relay receipt its creator received for exactly this sealed move');
+  }
+  return null;
+}
+
 /** Authorize each public relay position before replay, retaining refusals atomically with its cursor. */
-export function applyRelayMove(board, move, { sequence, at, sender, kind, digest = null }) {
+export function applyRelayMove(board, move, { sequence, at, sender, kind, digest = null, registration }) {
   requireSupportedEngine(move);
   const phoneReceipt = sender?.kind === 'machine' && move?.engine >= 6 && Boolean(move.personRequest) && !requestMoveProblem(board, move, { checkExecutorLease: false });
-  const problem = relaySenderProblem(move, sender, kind, { phoneReceipt });
-  if (!problem) return applyEngineMove(board, move, { sequence, at });
+  const problem = relaySenderProblem(move, sender, kind, { phoneReceipt }) ?? (kind === 'move' ? registrationProblem(board, move, { sender, registration, sequence, digest }) : null);
+  if (!problem) {
+    // Engine-13 relay moves run under linked verifier standing; older recorded moves replay as they did.
+    // The person is above every seat; their own moves act with the coordinator's standing.
+    const standing = move?.engine >= VERIFIER_STANDING_ENGINE ? { root: sender?.root === true || sender?.kind === 'person' } : null;
+    return applyEngineMove(board, move, { sequence, at, standing, enrollment: registration?.target ?? null });
+  }
   return refuseRelayMove(board, move, { sequence, at, sender, kind, code: problem.code, digest, refusal: problem });
 }
 
@@ -192,7 +230,7 @@ export function applyRelayMove(board, move, { sequence, at, sender, kind, digest
  * Apply one relay position with the same board functions as the CLI, preserving its refusal.
  * A receipt and prefix commit atomically; duplicate ids return that receipt without another move.
  */
-export function applyEngineMove(board, move, { sequence, at }) {
+export function applyEngineMove(board, move, { sequence, at, standing = null, enrollment = null }) {
   validateMove(move);
   if (!Number.isSafeInteger(sequence) || sequence < 1 || !Number.isFinite(Date.parse(at))) throw new Refused('RELAY_MOVE', 'supply a valid relay sequence and receipt timestamp');
   return store.atomic(board, () => {
@@ -212,18 +250,21 @@ export function applyEngineMove(board, move, { sequence, at }) {
       board.clock = { now: () => new Date(at) };
       board.executionEngineVersion = move.engine;
       const firstEvent = board.emittedEvents?.length ?? 0;
+      if (enrollment !== null) board.relayEnrollment = enrollment;
       try {
-        const result = store.atomic(board, () => {
+        const execute = () => store.atomic(board, () => {
           const problem = requestMoveProblem(board, move);
           if (problem) throw problem;
           return store[move.operation](board, ...executableArgs(move, board));
         });
+        const result = standing ? store.withVerifierStanding(board, standing, execute) : execute();
         outcome = { result: result ?? null, events: (board.emittedEvents?.slice(firstEvent) ?? []).map((event) => ({ ...event })) };
       } catch (error) {
         if (!(error instanceof Refused)) throw error;
         outcome = { error: refusalDocument(error).error };
       } finally {
         board.clock = clock;
+        delete board.relayEnrollment;
         if (engineVersion === undefined) delete board.executionEngineVersion;
         else board.executionEngineVersion = engineVersion;
       }

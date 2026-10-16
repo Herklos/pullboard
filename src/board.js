@@ -12,7 +12,7 @@ import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { briefFiles, briefSections } from './brief.js';
 import { COORDINATOR } from './config.js';
-import { ENGINE_VERSION, GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, effectiveGuards, storeTriggers } from './machine.js';
+import { ENGINE_VERSION, GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, VERIFIER_STANDING_ENGINE, effectiveGuards, storeTriggers } from './machine.js';
 import { Refused } from './refused.js';
 import { parseSpec } from './spec.js';
 
@@ -533,12 +533,19 @@ function saveAgentModel(board, id, model) {
  * by the agent; the board neither names nor infers it. Registering again preserves the agent id;
  * explicitly supplied family and model values update their declarations, while omission preserves them.
  *
+ * From engine 13 a new seat records the seat that created it (`createdBy`: an agent id, or
+ * `machine` for a join no seat made), so a linked board can tell a builder's own seats from
+ * independent verifiers (#579). A creator may name the new seat (`id`, the lane's next form) when
+ * the relay already issued a token for the next name; ids then skip taken names.
+ *
  * @param {any} board
- * @param {{ lane: string, path: string, route?: string, family?: string | null, model?: string | null }} who
+ * @param {{ lane: string, path: string, route?: string, family?: string | null, model?: string | null, createdBy?: string, id?: string }} who
  * @returns {string} The agent's id.
  */
-export function register(board, { lane, path, route = 'strong', family, model }) {
-  if ((board.executionEngineVersion ?? ENGINE_VERSION) < 8) model = undefined;
+export function register(board, { lane, path, route = 'strong', family, model, createdBy, id: named }) {
+  const engine = board.executionEngineVersion ?? ENGINE_VERSION;
+  if (engine < 8) model = undefined;
+  if (engine < VERIFIER_STANDING_ENGINE) { createdBy = undefined; named = undefined; }
   checkRoute(route);
   if (lane === COORDINATOR && route !== 'strong') {
     throw new Refused('BAD_ROUTE', 'the coordinator plans, merges and verifies; it is always strong');
@@ -568,16 +575,154 @@ export function register(board, { lane, path, route = 'strong', family, model })
     if (lane === COORDINATOR && total > 0) {
       throw new Refused('ONE_COORDINATOR', 'the coordinator is the main checkout; it already has one');
     }
-    const id = lane === COORDINATOR ? COORDINATOR : `${lane}-${total + 1}`;
+    if (createdBy !== undefined && createdBy !== 'machine' && createdBy !== COORDINATOR && !board.db.prepare('SELECT 1 FROM agent WHERE agent_id = ?').get(createdBy)) {
+      throw new Refused('NO_AGENT', `the creating seat ${createdBy} is not registered; create new seats from a joined worktree or the main checkout`);
+    }
+    const id = lane === COORDINATOR ? COORDINATOR
+      : engine < VERIFIER_STANDING_ENGINE ? `${lane}-${total + 1}` : newSeatId(board, lane, total, named);
     board.db
       .prepare(
         'INSERT INTO agent (agent_id, agent_lane, agent_path, agent_route, agent_family, agent_created_at) VALUES (?, ?, ?, ?, ?, ?)',
       )
       .run(id, lane, path, route, family ?? null, now(board));
     if ((board.executionEngineVersion ?? ENGINE_VERSION) >= 8) saveAgentModel(board, id, model);
+    if (createdBy !== undefined) board.db.prepare('INSERT INTO board_meta (meta_key, meta_value) VALUES (?, ?)').run(`agent_creator:${id}`, createdBy);
+    // Only a relay replica replaying a receipt-bound registration marks the seat enrolled.
+    if (board.relayEnrollment === id && createdBy !== undefined && createdBy !== 'machine') {
+      board.db.prepare('INSERT INTO board_meta (meta_key, meta_value) VALUES (?, ?)').run(`agent_enrolled:${id}`, createdBy);
+    }
     logEvent(board, id, 'join', null, route === 'strong' ? { lane } : { lane, route });
     return id;
   });
+}
+
+/**
+ * The id an engine-13 registration gives a new seat: the named one when it is the lane's form and
+ * free, otherwise the lane's first free number from its count. Skipping taken numbers keeps a named
+ * seat from colliding with the next unnamed one.
+ *
+ * @param {any} board
+ * @param {string} lane
+ * @param {number} total
+ * @param {string | undefined} named
+ * @returns {string}
+ */
+function newSeatId(board, lane, total, named) {
+  if (named === undefined) return firstFreeSeatId(board, lane, total);
+  const number = typeof named === 'string' && named.startsWith(`${lane}-`) ? named.slice(lane.length + 1) : '';
+  if (!/^[1-9][0-9]{0,8}$/.test(number) || Number(number) <= total || board.db.prepare('SELECT 1 FROM agent WHERE agent_id = ?').get(named)) {
+    throw new Refused('BAD_SEAT_ID', `a new ${lane} seat is named ${lane}-<n> above the lane's count and not yet taken; register again without a name`);
+  }
+  return named;
+}
+
+/**
+ * The lane's first seat number above its count that no seat holds yet.
+ *
+ * @param {any} board
+ * @param {string} lane
+ * @param {number} total
+ * @returns {string}
+ */
+function firstFreeSeatId(board, lane, total) {
+  let n = total + 1;
+  while (board.db.prepare('SELECT 1 FROM agent WHERE agent_id = ?').get(`${lane}-${n}`)) n += 1;
+  return `${lane}-${n}`;
+}
+
+/**
+ * The seat that created this one, as its engine-13 registration recorded it: an agent id,
+ * `machine` for a join no seat made, or null for a seat registered before engine 13.
+ *
+ * @param {any} board
+ * @param {string} id
+ * @returns {string | null}
+ */
+export function agentCreator(board, id) {
+  return board.db.prepare('SELECT meta_value FROM board_meta WHERE meta_key = ?').get(`agent_creator:${id}`)?.meta_value ?? null;
+}
+
+/**
+ * Whether a relay replica enrolled this seat from its creator's receipt-bound registration (#579).
+ *
+ * @param {any} board
+ * @param {string} id
+ * @returns {boolean}
+ */
+export function seatEnrolled(board, id) {
+  return Boolean(board.db.prepare('SELECT 1 FROM board_meta WHERE meta_key = ?').get(`agent_enrolled:${id}`));
+}
+
+/**
+ * The id the next registration in a lane gets when it names none, for a creator that must
+ * predict it before sealing the move (the relay receipt names the target seat).
+ *
+ * @param {any} board
+ * @param {string} lane
+ * @returns {string}
+ */
+export function nextSeatId(board, lane) {
+  const { total } = board.db.prepare('SELECT COUNT(*) AS total FROM agent WHERE agent_lane = ?').get(lane);
+  return firstFreeSeatId(board, lane, total);
+}
+
+/**
+ * Run board work under linked-board verifier standing (#579): a relay replica replaying an
+ * engine-13 move, or a linked CLI previewing one. `root` says whether the acting coordinator's
+ * relay credential was set up by the person. Unlinked boards never enter this, so who may verify
+ * there is unchanged.
+ *
+ * @template T
+ * @param {any} board
+ * @param {{ root: boolean }} standing
+ * @param {() => T} work
+ * @returns {T}
+ */
+export function withVerifierStanding(board, standing, work) {
+  const previous = board.verifierStanding;
+  board.verifierStanding = { root: standing.root === true };
+  try { return work(); }
+  finally {
+    if (previous === undefined) delete board.verifierStanding;
+    else board.verifierStanding = previous;
+  }
+}
+
+/**
+ * Why this seat may not verify the builder's item on a linked board, or null when it may. The
+ * seat's creators are walked up to the coordinator: the builder, a join no seat made (`machine`),
+ * or a seat registered before engine 13 anywhere on the way means no standing. The coordinator
+ * stands only on a credential the person set up.
+ *
+ * @param {any} board
+ * @param {string} verifier
+ * @param {string} builder
+ * @returns {Refused | null}
+ */
+function standingProblem(board, verifier, builder) {
+  const standing = board.verifierStanding;
+  if (!standing || (board.executionEngineVersion ?? ENGINE_VERSION) < VERIFIER_STANDING_ENGINE) return null;
+  const refuse = (why) => new Refused('VERIFIER_STANDING',
+    `${verifier} cannot verify work built by ${builder} on this linked board: ${why}; ask the coordinator to make an independent verifier from the main checkout: pullboard worktree <lane> --model "<model name>"`);
+  if (builder === COORDINATOR) {
+    return new Refused('VERIFIER_STANDING', `${verifier} cannot verify work the coordinator built on this linked board: every seat the coordinator made shares its lineage; a seat from another machine's registration lineage, or the person, verifies it`);
+  }
+  const seen = new Set();
+  for (let seat = verifier; ;) {
+    if (seat === COORDINATOR) {
+      return standing.root || seat !== verifier ? null
+        : refuse('the coordinator credential was not set up by the person; run pullboard relay on in the main checkout once');
+    }
+    if (seen.has(seat)) return refuse('its line of creating seats loops');
+    seen.add(seat);
+    const creator = agentCreator(board, seat);
+    if (creator === 'machine') return refuse(`${seat} joined without a creating seat`);
+    if (creator === builder) return refuse(`${seat} was created by the builder`);
+    if (creator === null || !seatEnrolled(board, seat)) {
+      return refuse(`${seat} was not enrolled by its creating seat through the relay`);
+    }
+    seat = creator;
+  }
 }
 
 /**
@@ -1389,7 +1534,8 @@ export function reviewOffer(board, { agentId, lane, policy = 'any', familyPolicy
 function reviewerChecks(board, { agentId, policy, familyPolicy = 'off' }) {
   const family = board.db.prepare('SELECT agent_family FROM agent WHERE agent_id = ?').get(agentId)?.agent_family ?? null;
   return {
-    notBuilder: (found) => (found.item_built_by === agentId ? new Refused('SELF_VERIFY', 'the builder never verifies its own work; another agent must') : null),
+    notBuilder: (found) => (found.item_built_by === agentId ? new Refused('SELF_VERIFY', 'the builder never verifies its own work; another agent must')
+      : standingProblem(board, agentId, found.item_built_by)),
     routeAllows: (found) => {
       const route = routeOf(board, agentId);
       return canTake(route, found.item_route) ? null : new Refused('ROUTE', `item #${found.item_id} needs a ${found.item_route} verifier; you joined on the ${route} route`);
@@ -2166,7 +2312,9 @@ export function nextFor(board, { agentId, lane, verify = false, policy = 'any', 
   if (verify) {
     const family = board.db.prepare('SELECT agent_family FROM agent WHERE agent_id = ?').get(agentId)?.agent_family ?? null;
     const hasDifferentFamily = (entry) => Boolean(family && entry.item_builder_family && family !== entry.item_builder_family);
-    let reviewable = items.filter((entry) => entry.item_status === 'submitted' && entry.item_built_by !== agentId);
+    const unrelated = items.filter((entry) => entry.item_status === 'submitted' && entry.item_built_by !== agentId);
+    const standingRefusal = unrelated.map((entry) => standingProblem(board, agentId, entry.item_built_by)).find(Boolean);
+    let reviewable = unrelated.filter((entry) => !standingProblem(board, agentId, entry.item_built_by));
     if (policy === COORDINATOR && agentId !== COORDINATOR) reviewable = reviewable.filter((entry) => entry.item_lane === COORDINATOR);
     if (familyPolicy === 'require') reviewable = reviewable.filter(hasDifferentFamily);
     if (familyPolicy === 'prefer') reviewable.sort((first, second) => Number(hasDifferentFamily(second)) - Number(hasDifferentFamily(first)));
@@ -2185,7 +2333,8 @@ export function nextFor(board, { agentId, lane, verify = false, policy = 'any', 
       .map(({ entry, holder: reviewer }) => `${reviewer} holds the review of #${entry.item_id} until ${entry.item_review_until}`);
     const cooling = candidates.filter((candidate) => candidate.cooldown)
       .map(({ entry, cooldown }) => `you released the review of #${entry.item_id}; try again after ${cooldown}, or let another reviewer take it`);
-    return { item: null, reasons: [`nothing ${routed}submitted that you did not build${held.length ? ' and no other agent is reviewing' : ''}`, ...held, ...cooling] };
+    return { item: null, reasons: [`nothing ${routed}submitted that you did not build${held.length ? ' and no other agent is reviewing' : ''}`,
+      ...(standingRefusal ? [standingRefusal.message] : []), ...held, ...cooling] };
   }
   const held = items.find((entry) => entry.item_status === 'claimed' && entry.item_owner === agentId && entry.item_parent_id === null);
   if (held) return { item: held, reasons: [] };

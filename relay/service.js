@@ -12,6 +12,7 @@ import { createDeviceHandler } from './device-http.js';
 import { createPairingStore } from './pairing-store.js';
 import { createPairingHandler } from './pairing-http.js';
 import { createRelayBrowserHandler } from './browser-page.js';
+import { VERIFIER_STANDING_ENGINE } from '../src/machine.js';
 
 const SNAPSHOT_BODY = 14_000_000;
 const STORED_BYTES = 10_000_000;
@@ -53,8 +54,8 @@ function trustedOrigin(value) {
 }
 
 /** Decode only canonical transport bytes; sealed payloads are never parsed or unsealed. */
-function sealed(body) {
-  const keys = ['sealed', 'sequence'];
+function sealed(body, allowRegistration = false) {
+  const keys = allowRegistration ? ['sealed', 'sequence', 'registration'] : ['sealed', 'sequence'];
   if (!body || Object.keys(body).some((key) => !keys.includes(key)) || typeof body.sealed !== 'string' || !/^[A-Za-z0-9_-]+$/.test(body.sealed)) {
     throw new Refused('BAD_UPLOAD', 'send only sequence and a nonempty base64url sealed payload; keep keys on your device');
   }
@@ -64,7 +65,35 @@ function sealed(body) {
 }
 
 /** Give live events the common API cursor while keeping all board contents sealed. */
-function event(row) { return { event_id: row.sequence, event_at: row.receivedAt, kind: row.kind, sender: row.sender, sealed: row.bytes.toString('base64url') }; }
+function event(row) {
+  return { event_id: row.sequence, event_at: row.receivedAt, kind: row.kind, sender: row.sender,
+    ...(row.registration ? { registration: row.registration } : {}), sealed: row.bytes.toString('base64url') };
+}
+
+/**
+ * Check a seat receipt against what the relay itself knows (#579): the sending agent token is the
+ * creator, the target is another, non-coordinator seat, and sequence and digest name this exact
+ * upload. The relay never reads the sealed move; replicas bind the target to its contents.
+ */
+function seatReceipt(body, who) {
+  const value = body.registration;
+  const fields = ['creator', 'digest', 'sequence', 'target'];
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).sort().join() !== fields.join()) {
+    throw new Refused('BAD_REGISTRATION', 'send a seat receipt with exactly target, creator, sequence and digest');
+  }
+  const name = /^[A-Za-z0-9_.-]{1,128}$/;
+  if (who.kind !== 'board' || value.creator !== who.agent) throw new Refused('REGISTRATION_SENDER', 'register a seat with the creating seat\'s own token');
+  if (typeof value.target !== 'string' || !name.test(value.target) || ['.', '..', 'coordinator', who.agent].includes(value.target)) {
+    throw new Refused('BAD_REGISTRATION', 'name a new seat other than the creator and the coordinator');
+  }
+  if (value.sequence !== body.sequence || value.digest !== createHash('sha256').update(body.sealed).digest('hex')) {
+    throw new Refused('BAD_REGISTRATION', 'the seat receipt must name this upload\'s sequence and the SHA-256 of its sealed text');
+  }
+  if (value.creator === 'coordinator' && who.root !== true) {
+    throw new Refused('REGISTRATION_ROOT', 'only the coordinator credential the person set up creates seats; run pullboard relay on in the main checkout once');
+  }
+  return { target: value.target, creator: value.creator, sequence: value.sequence, digest: value.digest };
+}
 
 /** Give a snapshot its coverage cursor; clients unseal it and replay the following sealed events. */
 function state(row) { return { sequence: row.sequence, receivedAt: row.receivedAt, sender: row.sender, sealed: row.bytes.toString('base64url') }; }
@@ -73,7 +102,8 @@ function state(row) { return { sequence: row.sequence, receivedAt: row.receivedA
 function sender(who, personOnly = false) {
   if (personOnly && who.kind !== 'session' && !(personOnly === 'snapshot' && who.kind === 'machine')) throw new Refused('HUMAN_REQUIRED', 'approve this person action from the paired phone');
   return { kind: who.kind === 'session' ? 'person' : who.kind === 'machine' ? 'machine' : 'agent', userId: who.user.id,
-    ...(who.kind === 'board' ? { agent: who.agent } : who.kind === 'machine' ? { machine: who.machine } : {}) };
+    ...(who.kind === 'board' ? { agent: who.agent } : who.kind === 'machine' ? { machine: who.machine } : {}),
+    ...(personOnly === 'snapshot' ? {} : { policy: VERIFIER_STANDING_ENGINE, ...(who.root === true ? { root: true } : {}) }) };
 }
 
 /** Create a private relay handler; the caller owns sign-in lifecycle and service shutdown. */
@@ -172,12 +202,34 @@ export function createRelayHandler({ directory, auth, pollMs = 200, publicOrigin
 
   /** Append ciphertext under its server-allocated sequence, with no engine or filesystem access. */
   async function append(board, body, who, kind = 'move') {
-    const bytes = sealed(body);
+    const bytes = sealed(body, kind === 'move');
     if (!Number.isSafeInteger(body.sequence) || body.sequence < 1) throw new Refused('BAD_SEQUENCE', 'seal this move for the next positive sequence after the latest committed prefix');
-    const principal = sender(await authorized(who.credential, board.id, true));
+    const authenticated = await authorized(who.credential, board.id, true);
+    const principal = sender(authenticated);
+    if (body.registration === undefined) {
+      return withJournal(board.id, (journal) => {
+        const row = journal.append(body.sequence, bytes, kind, principal);
+        return { status: 200, body: { event: event(row), result: { sequence: row.sequence } } };
+      }, false, who.engineVersion);
+    }
+    // A registration move and its target's first token commit under one board lock; the token
+    // goes only to this authenticated creator, never into the public event (#579).
+    const receipt = seatReceipt(body, authenticated);
     return withJournal(board.id, (journal) => {
-      const row = journal.append(body.sequence, bytes, kind, principal);
-      return { status: 200, body: { event: event(row), result: { sequence: row.sequence } } };
+      const prior = auth.seatRecord(board.id, receipt.target);
+      const retry = prior && prior.origin === 'registered' && prior.creator === receipt.creator && prior.sequence === receipt.sequence && prior.digest === receipt.digest;
+      if (prior && !retry) throw new Refused('SEAT_TAKEN', `the relay already issued ${receipt.target} a token, so it cannot be registered again; register the next free name`);
+      let row;
+      try { row = retry ? journal.recordAt(receipt.sequence) : journal.append(body.sequence, bytes, kind, principal, receipt); }
+      catch (error) {
+        // The move committed but its seat did not: finish the enrollment for the exact same upload.
+        const saved = error.code === 'SEQUENCE_REPEAT' ? journal.recordAt(receipt.sequence) : null;
+        if (!saved || !saved.bytes.equals(bytes) || JSON.stringify(saved.registration) !== JSON.stringify(receipt) || saved.sender.agent !== receipt.creator) throw error;
+        row = saved;
+      }
+      const enrollment = auth.enrollSeat(who.credential, board.id, receipt);
+      const committed = row ? event(row) : { event_id: receipt.sequence, kind, sender: principal, registration: receipt, sealed: body.sealed };
+      return { status: 200, body: { event: committed, result: { sequence: receipt.sequence }, enrollment } };
     }, false, who.engineVersion);
   }
 

@@ -9,7 +9,7 @@ import { forgetBoardKey, readBoardKey, storeBoardKey } from './relay-key.js';
 import { encodeBoardKey } from './seal.js';
 import { createPairingCode, openPairingBundle, parsePairingCode, sealPairingBundle } from './pairing.js';
 import { terminalQr } from './qr.js';
-import { DEFAULT_RELAY, originRepository, relayStatus, syncRelay } from './relay.js';
+import { DEFAULT_RELAY, originRepository, relayPersonCoordinator, relayStatus, syncRelay } from './relay.js';
 import { ENGINE_VERSION } from './machine.js';
 import { Refused } from './refused.js';
 import { requirePersonChannel } from './person.js';
@@ -226,6 +226,8 @@ export async function relayJoin(root, code, address, io) {
     }
     throw error;
   }
+  // This machine's coordinator token comes from the same person sign-in, never the machine credential.
+  await relayPersonCoordinator(root, signed.token, io);
   await syncRelay(root, io);
   const result = { linked: true, board: bundle.board, url: bundle.url, sequence: bundle.sequence, behind: 0 };
   io.result?.(result);
