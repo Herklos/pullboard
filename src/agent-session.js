@@ -44,7 +44,8 @@ export async function bindLocalSession(info, { agent, digest, takeover = false, 
   try {
     const previous = readBinding(file, takeover);
     if (!takeover && previous && previous.digest !== digest) {
-      throw new Refused('NOT_YOUR_CHECKOUT', `this checkout belongs to ${previous.agent} in another agent session; run pullboard worktree <lane> and work there, or, if you are the same agent in a new session, run pullboard takeover`);
+      throw new Refused('NOT_YOUR_CHECKOUT', `this checkout belongs to ${previous.agent} in another agent session`,
+        'create a separate checkout with git worktree add --detach .claude/worktrees/<new-name> HEAD, using an unused folder; then cd there and run pullboard join <lane> --model "<model name>". If you are the same agent in a new session, run pullboard takeover instead');
     }
     if (takeover) await recordTakeover();
     if (!previous || takeover || previous.agent !== agent) persist(agent);

@@ -122,8 +122,8 @@ test('a second session cannot write in the main checkout until takeover [B3,B7]'
   const error = JSON.parse(refused.stdout).error;
   assert.equal(error.code, 'NOT_YOUR_CHECKOUT');
   assert.match(error.message, /coordinator/u);
-  assert.match(error.next, /pullboard worktree/u);
-  assert.match(error.message, /pullboard takeover/u);
+  assert.match(error.next, /git worktree add --detach/u);
+  assert.match(error.next, /pullboard takeover/u);
   assert.deepEqual(boardSnapshot(box.boardFile), before, 'refusal leaves all board counts unchanged');
   const worktrees = box.git(box.repo, 'worktree', 'list', '--porcelain');
   for (const args of [['init'], ['worktree', 'web'], ['hooks'], ['spec', 'apply'], ['hook', 'pre-commit'], ['submit', '1']]) {
@@ -163,7 +163,7 @@ test('lane ownership is session-scoped and takeover preserves the joined agent [
   assert.notEqual(refused.status, 0);
   assert.equal(JSON.parse(refused.stdout).error.code, 'NOT_YOUR_CHECKOUT');
   assert.match(JSON.parse(refused.stdout).error.message, /web-1/u);
-  assert.match(JSON.parse(refused.stdout).error.next, /pullboard worktree/u);
+  assert.match(JSON.parse(refused.stdout).error.next, /git worktree add --detach/u);
   assert.deepEqual(boardSnapshot(box.boardFile), before, 'refused lane write leaves event and item counts unchanged');
 
   const takeover = box.run(box.web, ['takeover', '--json'], { session: second, sessionKey: 'CODEX_THREAD_ID' });
