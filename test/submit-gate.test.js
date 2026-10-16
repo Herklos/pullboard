@@ -853,12 +853,48 @@ test('a sandbox-blocked gate asks the person [I1,C7]', async (t) => {
       assert.doesNotMatch(multilineAssertion.out + multilineAssertion.err, /SANDBOX_BLOCKED/u);
       assert.match(multilineAssertion.out, /ERR_ASSERTION/u);
       assert.match(multilineAssertion.out, /Error: EACCES: permission denied/u);
+      put(box.root, 'test/permission.test.js', prefix + `test('ordinary assertion logs a caught OS error', () => { try { ${operation}; } catch (error) { console.error(error); } assert.equal(1, 2); });\n`);
+      commitAll(box);
+      const caughtAssertion = box.run('gate');
+      assert.equal(caughtAssertion.code, 1);
+      assert.doesNotMatch(caughtAssertion.out + caughtAssertion.err, /SANDBOX_BLOCKED/u);
+      assert.match(caughtAssertion.out, /ERR_ASSERTION/u);
       put(box.root, 'test/permission.test.js', denied);
       commitAll(box);
     } finally { chmodSync(directory, 0o700); }
     const allowed = box.run('gate');
     assert.equal(allowed.code, 0, allowed.out + allowed.err);
     assert.equal(readFileSync(outside, 'utf8'), 'blocked', 'the unchanged real write succeeds when access is restored');
+  });
+  await t.test('module-startup outside-file denials preserve fatal TAP evidence [I1,C7]', (t) => {
+    const box = privateRepo(t);
+    const runner = `${JSON.stringify(process.execPath)} ${JSON.stringify(resolve(import.meta.dirname, '../bin/run-tests.js'))} test/permission.test.js`;
+    put(box.root, 'pullboard.json', JSON.stringify({ gate: runner }));
+    const directory = join(box.dir, 'readonly-module-startup');
+    mkdirSync(directory);
+    const outside = join(directory, 'outside.txt');
+    const testSource = `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(outside)}, 'blocked during module evaluation');\n`;
+    put(box.root, 'test/permission.test.js', testSource);
+    commitAll(box);
+    chmodSync(directory, 0o500);
+    try {
+      assert.throws(() => writeFileSync(outside, 'sentinel'), { code: 'EACCES' }, 'the OS blocks the exact outside path');
+      const result = box.run('gate');
+      const rawPath = resolve(box.root, box.git('rev-parse', '--git-path', 'pullboard-gate.log'));
+      const innerGateLog = readFileSync(rawPath, 'utf8');
+      t.diagnostic(JSON.stringify({ actualPermissionSentinel: 'EACCES', command: 'pullboard gate', code: result.code, stdout: result.out, stderr: result.err, innerGateLog }));
+      assert.equal(result.code, 1, result.out + result.err);
+      assert.match(result.err, /SANDBOX_BLOCKED/u, 'a real module-startup denial is named for the person');
+      assert.ok(result.err.includes(outside), 'the refusal identifies the outside path');
+      assert.match(innerGateLog, /# Error: EACCES: permission denied, open /u);
+      assert.ok(innerGateLog.includes(`path: '${outside}'`), 'the fatal stack keeps Node’s exact denied path');
+      assert.ok(innerGateLog.includes("code: 'ERR_TEST_FAILURE'"), 'Node frames the module-load denial as a test-file failure');
+      assert.match(innerGateLog, /failureType: '?testCodeFailure'?(?:\r?\n|$)/u);
+      assert.match(innerGateLog, /not ok \d+ - (?:.*\/)?test\/permission\.test\.js/u);
+    } finally { chmodSync(directory, 0o700); }
+    const allowed = box.run('gate');
+    assert.equal(allowed.code, 0, allowed.out + allowed.err);
+    assert.equal(readFileSync(outside, 'utf8'), 'blocked during module evaluation');
   });
   await t.test('frozen checks retain outside-file refusal before submit proof [I1,C7]', () => {
     let box = privateRepo(t);

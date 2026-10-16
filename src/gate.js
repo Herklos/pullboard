@@ -171,7 +171,7 @@ function diagnosticPath(path) {
 /** Describe one OS permission message, resolving file targets against the command's worktree. */
 function permissionOperation(root, message) {
   const network = /^(listen|bind) (EPERM|EACCES)\b/u.exec(message);
-  if (network) return { code: network[2], operation: `${network[1]} (${network[2]})` };
+  if (network) return { code: network[2], syscall: network[1], operation: `${network[1]} (${network[2]})` };
   const file = /^(EPERM|EACCES): [^\n]*?, (open|mkdir|read|write|rename|unlink|scandir|access) (['"])([^\n]+?)\3(?= -> |$)/u.exec(message);
   const python = /^PermissionError: \[Errno (?:1|13)\] [^\n]*?: ['"]([^'"\n]+)['"]/u.exec(message);
   if (!file && !python) return null;
@@ -181,7 +181,8 @@ function permissionOperation(root, message) {
   const within = relative(tree, path);
   if (within !== '..' && !within.startsWith('../') && !isAbsolute(within)) return null;
   const code = file ? file[1] : 'EACCES';
-  return { code, operation: `${file ? file[2] : 'file access'} ${JSON.stringify(path)} (${code})` };
+  return { code, path, syscall: file ? file[2] : null,
+    operation: `${file ? file[2] : 'file access'} ${JSON.stringify(path)} (${code})` };
 }
 
 /** Decode the single-line quoted YAML scalars emitted by Node's TAP reporter. */
@@ -199,7 +200,12 @@ export function sandboxBlockedScanner(root) {
   let fieldIndent = null;
   let permission = null;
   let code = null;
-  /** Read one line, retaining only the current failed TAP record's permission and code fields. */
+  let comment = null;
+  let startup = null;
+  let failureMessage = null;
+  let failureType = false;
+  let exitCode = null;
+  /** Retain one pending fatal diagnostic and the current failed TAP record. */
   return (raw) => {
     const line = raw.trim().replace(/^#\s*/u, '');
     const indent = raw.length - raw.trimStart().length;
@@ -210,20 +216,58 @@ export function sandboxBlockedScanner(root) {
       const direct = permissionOperation(root, line.replace(/^Error: /u, ''));
       if (direct) return direct.operation;
     }
+    if (/^TAP version \d+$/u.test(raw)) {
+      comment = null; startup = null;
+      failureIndent = null; fieldIndent = null; permission = null; code = null;
+      failureMessage = null; failureType = false; exitCode = null;
+    }
+    // Uncaught module-load errors are comments too. Keep their complete Node fatal
+    // diagnostic pending; it is evidence only if the following file record failed
+    // to start. A test logging a caught error and then asserting is not that record.
+    if (indent === 0 && raw.startsWith('#')) {
+      if (line.startsWith('Error: ')) {
+        const operation = permissionOperation(root, line.slice('Error: '.length));
+        comment = operation ? { operation, code: null, syscall: null, path: null, closed: false, fatal: false } : null;
+      } else if (comment) {
+        const field = /^(code|syscall|path): (.*)$/u.exec(line);
+        if (field) comment[field[1]] = tapScalar(field[2].replace(/,$/u, ''));
+        else if (line === '}') comment.closed = true;
+        else if (/^Node\.js v\d+\./u.test(line)) comment.fatal = true;
+        else if (line && !/^at |^errno: |^address: |^port: /u.test(line)
+          && !(comment.closed && comment.fatal && line.startsWith('Subtest: '))) comment = null;
+      }
+    }
     if (/^(?:not )?ok \d+\b/u.test(line)) {
       failureIndent = /^not ok /u.test(line) ? indent : null;
+      const operation = comment?.operation;
+      startup = failureIndent !== null && comment?.closed && comment.fatal
+        && comment.code === operation.code && comment.syscall === operation.syscall
+        && (!operation.path || (typeof comment.path === 'string'
+          && diagnosticPath(resolve(root, comment.path)) === operation.path)) ? operation : null;
+      comment = null;
       fieldIndent = null; permission = null; code = null;
+      failureMessage = null; failureType = false; exitCode = null;
     } else if (line === '---' && failureIndent !== null && indent === failureIndent + 2) {
       fieldIndent = indent;
     } else if (line === '...' && indent === fieldIndent) {
       failureIndent = null; fieldIndent = null; permission = null; code = null;
+      startup = null; comment = null;
+      failureMessage = null; failureType = false; exitCode = null;
     } else if (fieldIndent !== null && indent === fieldIndent) {
-      const field = /^(error|code): (.*)$/u.exec(line);
+      const field = /^(error|code|failureType|exitCode): (.*)$/u.exec(line);
       if (field) {
         const value = tapScalar(field[2]);
-        if (field[1] === 'error') permission = typeof value === 'string' ? permissionOperation(root, value) : null;
-        else code = value;
+        if (field[1] === 'error') {
+          failureMessage = value;
+          permission = typeof value === 'string' ? permissionOperation(root, value) : null;
+        } else if (field[1] === 'code') {
+          code = value;
+          if (code !== 'ERR_TEST_FAILURE') startup = null;
+        } else if (field[1] === 'failureType') failureType = value === 'testCodeFailure' || field[2] === 'testCodeFailure';
+        else exitCode = /^[1-9]\d*$/u.test(field[2]) && Number.isSafeInteger(Number(field[2])) ? Number(field[2]) : null;
         if (permission && permission.code === code) return permission.operation;
+        if (startup && code === 'ERR_TEST_FAILURE' && failureMessage === 'test failed'
+          && failureType && exitCode !== null) return startup.operation;
       }
     }
     return null;
