@@ -935,9 +935,152 @@ async function journeyRelaySite(box, localOrigin) {
 /** Route the hosted page and its fixed loopback discovery through owned fixture servers. */
 async function interceptJourneyOrigins(chrome, site, view) {
   const failures = [];
+  let failureCount = 0;
   const tasks = [];
+  const interceptions = [];
+  let stopping = false;
+  const byNetworkRequest = new Map();
+  const earlyNetworkFailures = new Map();
+  const networkFailureWaiters = new Set();
   const heldResponses = [];
   const releaseHeldResponses = new Set();
+  /** Keep bounded CDP code/message detail without retaining unrelated protocol payloads. */
+  function safeProtocolError(error) {
+    let detail = error?.message ?? error;
+    if (typeof detail === 'string') {
+      try { detail = JSON.parse(detail); } catch { /* Keep ordinary Error messages below. */ }
+    }
+    if (detail && typeof detail === 'object') {
+      const message = String(detail.message ?? 'unknown CDP error');
+      return {
+        ...(Number.isInteger(detail.code) ? { code: detail.code } : {}),
+        message: /^[A-Za-z0-9 _.:/-]{1,180}$/u.test(message) ? message : '<redacted protocol error>',
+      };
+    }
+    const message = String(detail ?? 'unknown error');
+    return /^[A-Za-z0-9 _.:/-]{1,180}$/u.test(message) ? message : '<redacted protocol error>';
+  }
+  /** Describe only an owned fixture origin and a query-free path with board identities redacted. */
+  function safeRequestAddress(url) {
+    const address = new URL(url);
+    const origin = address.origin === JOURNEY_HOSTED ? 'hosted'
+      : address.origin === JOURNEY_LOCAL ? 'loopback-discovery'
+        : address.origin === view.base ? 'local-view' : 'other';
+    const path = address.pathname.replace(/\/api\/v1\/boards\/[0-9a-f]{32}(?=\/|$)/gu, '/api/v1/boards/<board>');
+    return { origin, path };
+  }
+  /** Return request evidence without URL queries, headers, cookies, bodies or pairing values. */
+  function safeInterception(record) {
+    return {
+      fetchRequestId: record.fetchRequestId,
+      networkId: record.networkId ?? null,
+      resourceType: record.resourceType ?? null,
+      ...record.address,
+      method: record.method,
+      stage: record.stage,
+      timing: record.timing,
+      stopObserved: record.stopObserved,
+      completionTiming: record.completionTiming ?? null,
+      networkFailureTiming: record.networkFailureTiming ?? null,
+      responseStatus: record.responseStatus ?? null,
+      bodyCompleted: record.bodyCompleted,
+      bodyBytes: record.bodyBytes,
+      bodyBytesCapped: record.bodyBytesCapped,
+      completionAttempts: record.completionAttempts,
+      completion: record.completion ?? null,
+      networkFailure: record.networkFailure ?? null,
+      completed: record.completed,
+    };
+  }
+  /** Bound diagnostics to failed/incomplete requests and a short recent tail. */
+  function safeTrace() {
+    const incomplete = interceptions.filter((record) => !record.completed || record.completionAttempts !== 1);
+    const failed = interceptions.filter((record) => record.failure).slice(0, 20);
+    const relevant = new Set([...failed, ...incomplete.slice(0, 20), ...interceptions.slice(-8)]);
+    return {
+      requestCount: interceptions.length,
+      failureCount,
+      incompleteCount: incomplete.length,
+      requests: [...relevant].map(safeInterception),
+      failures: failures.slice(0, 20),
+    };
+  }
+  /** Send exactly one Fetch completion for a paused request and retain its protocol outcome. */
+  async function completePausedRequest(record, method, params) {
+    record.completionAttempts += 1;
+    if (record.completionAttempts !== 1) {
+      record.stage = 'duplicate-completion-refused';
+      throw new Error('a paused request received more than one Fetch completion command');
+    }
+    record.completionTiming = stopping ? 'during-stop' : 'active';
+    record.completion = { method, commandSent: true, status: 'pending', timing: record.completionTiming };
+    record.stage = 'completion-command-sent';
+    try {
+      await chrome.send(method, params);
+      record.completion.status = 'resolved';
+      record.completed = true;
+      record.stage = 'completed';
+    } catch (error) {
+      record.completion.status = 'rejected';
+      record.completion.error = safeProtocolError(error);
+      record.stage = 'completion-command-rejected';
+      throw error;
+    }
+  }
+  /** Await tasks added while earlier interception work was settling. */
+  async function drainTasks() {
+    let consumed = 0;
+    const errors = [];
+    while (consumed < tasks.length) {
+      const batch = tasks.slice(consumed);
+      consumed += batch.length;
+      for (const result of await Promise.allSettled(batch)) {
+        if (result.status === 'rejected') errors.push(result.reason);
+      }
+    }
+    if (errors.length) throw new AggregateError(errors, 'journey interception tasks failed');
+  }
+  /** Retain cancellation and error details keyed only by the ephemeral CDP network id. */
+  function onNetworkFailure(params) {
+    const details = {
+      type: String(params.type ?? '').slice(0, 40),
+      errorText: /^[A-Za-z0-9_:.-]{1,100}$/u.test(params.errorText ?? '') ? params.errorText : '<redacted>',
+      canceled: Boolean(params.canceled),
+      timing: stopping ? 'during-stop' : 'active',
+      ...(params.blockedReason ? { blockedReason: String(params.blockedReason).slice(0, 60) } : {}),
+    };
+    const id = String(params.requestId ?? '');
+    const records = byNetworkRequest.get(id);
+    if (!records?.length) {
+      const prior = earlyNetworkFailures.get(id) ?? [];
+      prior.push(details);
+      earlyNetworkFailures.set(id, prior);
+      return;
+    }
+    for (const record of records) {
+      record.networkFailure = details;
+      record.networkFailureTiming = details.timing;
+    }
+    for (const check of networkFailureWaiters) check();
+  }
+  /** Wait for a correlated network failure without retaining request credentials or bodies. */
+  function waitForNetworkFailure(matches) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        networkFailureWaiters.delete(check);
+        reject(new Error('the owned browser request did not report its expected network failure within 10 seconds'));
+      }, 10_000);
+      function check() {
+        const record = interceptions.find((entry) => matches(entry) && entry.networkFailure);
+        if (!record) return;
+        clearTimeout(timer);
+        networkFailureWaiters.delete(check);
+        resolve(safeInterception(record));
+      }
+      networkFailureWaiters.add(check);
+      check();
+    });
+  }
   const holdNextResponse = (matches) => {
     let entry;
     const pending = new Promise((resolve, reject) => {
@@ -956,56 +1099,148 @@ async function interceptJourneyOrigins(chrome, site, view) {
     void pending.catch(() => {});
     return pending;
   };
+  const networkListener = ({ data }) => {
+    try {
+      const message = JSON.parse(String(data));
+      if (message.method === 'Network.loadingFailed') onNetworkFailure(message.params);
+    } catch (error) {
+      failureCount += 1;
+      if (failures.length < 20) failures.push({ error: safeProtocolError(error), request: null });
+    }
+  };
   const listener = ({ data }) => {
-    const message = JSON.parse(String(data));
+    let message;
+    try { message = JSON.parse(String(data)); }
+    catch (error) {
+      failureCount += 1;
+      if (failures.length < 20) failures.push({ error: safeProtocolError(error), request: null });
+      return;
+    }
     if (message.method !== 'Fetch.requestPaused') return;
     tasks.push((async () => {
-      const { requestId, request: asked } = message.params;
-      const address = new URL(asked.url);
-      const base = address.origin === JOURNEY_HOSTED ? site.base
-        : [JOURNEY_LOCAL, view.base].includes(address.origin) ? view.base : null;
-      if (!base) return chrome.send('Fetch.failRequest', { requestId, errorReason: 'ConnectionRefused' });
-      const headers = Object.fromEntries(Object.entries(asked.headers).filter(([name]) => !['host', 'content-length'].includes(name.toLowerCase())));
-      const response = await fetchLive(base + address.pathname + address.search, {
-        method: asked.method, headers, redirect: 'manual',
-        ...(asked.postData === undefined ? {} : { body: asked.postData }),
-        signal: AbortSignal.timeout(10_000),
-      });
-      let body;
-      if (response.headers.get('content-type')?.startsWith('text/event-stream')) {
-        const reader = response.body.getReader();
-        const first = await reader.read();
-        await reader.cancel();
-        body = Buffer.from(first.value || []);
-      } else body = Buffer.from(await response.arrayBuffer());
-      const heldIndex = heldResponses.findIndex((entry) => entry.matches({ method: asked.method, path: address.pathname, status: response.status }));
-      if (heldIndex !== -1) {
-        const [held] = heldResponses.splice(heldIndex, 1);
-        let release;
-        const released = new Promise((resume) => {
-          release = () => { releaseHeldResponses.delete(release); resume(); };
-          releaseHeldResponses.add(release);
+      let record;
+      try {
+        const { requestId, networkId, resourceType, request: asked } = message.params;
+        record = {
+          fetchRequestId: String(requestId),
+          networkId: networkId ? String(networkId) : null,
+          resourceType: String(resourceType ?? '').slice(0, 40),
+          address: {
+            ...safeRequestAddress(asked.url),
+            fixtureCancelProbe: new URL(asked.url).search === '?fixture_cancel=1',
+          },
+          method: String(asked.method ?? '').slice(0, 16),
+          stage: 'paused',
+          completionAttempts: 0,
+          completion: null,
+          completed: false,
+          responseStatus: null,
+          bodyCompleted: false,
+          bodyBytes: 0,
+          bodyBytesCapped: false,
+          timing: stopping ? 'during-stop' : 'active',
+          stopObserved: false,
+          networkFailure: null,
+        };
+        interceptions.push(record);
+        if (record.networkId) {
+          const attached = byNetworkRequest.get(record.networkId) ?? [];
+          attached.push(record);
+          byNetworkRequest.set(record.networkId, attached);
+          const earlier = earlyNetworkFailures.get(record.networkId);
+          if (earlier?.length) {
+            record.networkFailure = earlier.at(-1);
+            record.networkFailureTiming = record.networkFailure.timing;
+            for (const check of networkFailureWaiters) check();
+          }
+        }
+        const address = new URL(asked.url);
+        const base = address.origin === JOURNEY_HOSTED ? site.base
+          : [JOURNEY_LOCAL, view.base].includes(address.origin) ? view.base : null;
+        if (!base) {
+          record.stage = 'reject-foreign-origin';
+          await completePausedRequest(record, 'Fetch.failRequest', { requestId, errorReason: 'ConnectionRefused' });
+          return;
+        }
+        record.stage = 'fetching-owned-fixture';
+        const headers = Object.fromEntries(Object.entries(asked.headers).filter(([name]) => !['host', 'content-length'].includes(name.toLowerCase())));
+        const response = await fetchLive(base + address.pathname + address.search, {
+          method: asked.method, headers, redirect: 'manual',
+          ...(asked.postData === undefined ? {} : { body: asked.postData }),
+          signal: AbortSignal.timeout(10_000),
         });
-        held.resolve({ status: response.status, release });
-        await released;
+        record.responseStatus = response.status;
+        record.stage = 'reading-owned-response';
+        let body;
+        if (response.headers.get('content-type')?.startsWith('text/event-stream')) {
+          const reader = response.body.getReader();
+          const first = await reader.read();
+          await reader.cancel();
+          body = Buffer.from(first.value || []);
+        } else body = Buffer.from(await response.arrayBuffer());
+        record.bodyBytes = Math.min(body.length, 1_000_000);
+        record.bodyBytesCapped = body.length > record.bodyBytes;
+        record.bodyCompleted = true;
+        const heldIndex = heldResponses.findIndex((entry) => entry.matches({ method: asked.method, path: address.pathname, search: address.search, status: response.status }));
+        if (heldIndex !== -1) {
+          record.stage = 'holding-owned-response';
+          const [held] = heldResponses.splice(heldIndex, 1);
+          let release;
+          const released = new Promise((resume) => {
+            release = () => { releaseHeldResponses.delete(release); resume(); };
+            releaseHeldResponses.add(release);
+          });
+          held.resolve({ status: response.status, release });
+          await released;
+        }
+        await completePausedRequest(record, 'Fetch.fulfillRequest', {
+          requestId, responseCode: response.status,
+          responseHeaders: [...response.headers].filter(([name]) => !['content-length', 'connection', 'transfer-encoding', 'keep-alive', 'date'].includes(name.toLowerCase())).map(([name, value]) => ({ name, value })),
+          body: body.toString('base64'),
+        });
+      } catch (error) {
+        if (record) {
+          record.stage = record.stage === 'completion-command-rejected' ? record.stage : 'interception-handler-failed';
+          record.failure = safeProtocolError(error);
+        }
+        failureCount += 1;
+        if (failures.length < 20) failures.push({ error: safeProtocolError(error), request: record ? safeInterception(record) : null });
       }
-      await chrome.send('Fetch.fulfillRequest', {
-        requestId, responseCode: response.status,
-        responseHeaders: [...response.headers].filter(([name]) => !['content-length', 'connection', 'transfer-encoding', 'keep-alive', 'date'].includes(name.toLowerCase())).map(([name, value]) => ({ name, value })),
-        body: body.toString('base64'),
-      });
-    })().catch((error) => failures.push(error.message)));
+    })());
   };
   chrome.socket.addEventListener('message', listener);
+  chrome.socket.addEventListener('message', networkListener);
   await chrome.send('Fetch.enable', { patterns: [{ urlPattern: JOURNEY_HOSTED + '/*', requestStage: 'Request' }, { urlPattern: JOURNEY_LOCAL + '/*', requestStage: 'Request' }, { urlPattern: view.base + '/*', requestStage: 'Request' }] });
   const stop = async () => {
+    stopping = true;
+    for (const record of interceptions) record.stopObserved = true;
     for (const held of heldResponses.splice(0)) held.cancel();
     for (const release of releaseHeldResponses) release();
-    chrome.socket.removeEventListener('message', listener);
-    try { await Promise.all(tasks); } finally { await chrome.send('Fetch.disable'); }
-    assert.deepEqual(failures, [], 'the hosted and loopback fixture requests complete');
+    let drainError;
+    let disableError;
+    try { await drainTasks(); } catch (error) { drainError = error; }
+    try { await chrome.send('Fetch.disable'); } catch (error) { disableError = error; }
+    try { await drainTasks(); } catch (error) { drainError ??= error; }
+    finally {
+      chrome.socket.removeEventListener('message', listener);
+      chrome.socket.removeEventListener('message', networkListener);
+    }
+    if (drainError || disableError) {
+      const errors = [drainError, disableError].filter(Boolean);
+      const summaries = errors.map((error) => {
+        const safe = safeProtocolError(error);
+        return (typeof safe === 'string' ? safe : safe.message).slice(0, 180);
+      });
+      throw new AggregateError(errors, 'journey interception cleanup failed: ' + summaries.join(' | '));
+    }
+    const incomplete = interceptions.filter((record) => !record.completed || record.completionAttempts !== 1);
+    const diagnostic = JSON.stringify(safeTrace());
+    assert.equal(failureCount, 0, 'the hosted and loopback fixture requests complete; safe interception trace: ' + diagnostic);
+    assert.equal(incomplete.length, 0, 'each paused request receives exactly one successful Fetch completion; safe interception trace: ' + diagnostic);
   };
   stop.holdNextResponse = holdNextResponse;
+  stop.waitForNetworkFailure = waitForNetworkFailure;
+  stop.trace = safeTrace;
   return stop;
 }
 
@@ -1051,6 +1286,11 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
   let chrome;
   let stopOrigins;
   const heldMoves = [];
+  let journeyBodyError;
+  const safeJourneyError = (error) => {
+    const message = String(error?.message ?? error ?? 'unknown error');
+    return /^[A-Za-z0-9 _.:/-]{1,180}$/u.test(message) ? message : '<redacted error>';
+  };
   try {
     localView = await startView(local);
     site = await journeyRelaySite(linked, localView.base);
@@ -1100,6 +1340,30 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
     const localRow = "Array.from(document.querySelectorAll('#proj-list .proj.repo')).find(row => row.textContent.includes('local-machine-b'))";
     await pickProject(chrome, localRow);
     await chrome.waitFor("view.root === data.projects.find(row => row.name === 'local-machine-b').root && document.querySelector('#chain')?.textContent.includes(" + JSON.stringify(localTitle) + ") && !readOnly && !requests");
+    const abortedPath = '/api/v1/boards/' + localId + '/state';
+    const heldAbort = stopOrigins.holdNextResponse(({ method, path, search }) =>
+      method === 'GET' && path === abortedPath && search === '?fixture_cancel=1');
+    assert.equal(await chrome.stable(`(async () => {
+      window.__journeyAbortController = new AbortController();
+      window.__journeyAbortResult = null;
+      window.__journeyAbortPromise = fetch(localReadBase + ${JSON.stringify(abortedPath + '?fixture_cancel=1')}, {
+        headers: localReadHeaders, cache: 'no-store', signal: window.__journeyAbortController.signal,
+      }).then(response => { window.__journeyAbortResult = { status: response.status }; return response.status; })
+        .catch(error => { window.__journeyAbortResult = { name: error.name }; return error.name; });
+      return 'started';
+    })()`), 'started');
+    const heldAbortResponse = await heldAbort;
+    assert.equal(heldAbortResponse.status, 200, 'the real local API completed before its browser response was held');
+    assert.deepEqual(await chrome.stable(`(async () => {
+      window.__journeyAbortController.abort();
+      await window.__journeyAbortPromise;
+      return window.__journeyAbortResult;
+    })()`), { name: 'AbortError' }, 'the page reports the actual browser fetch abort');
+    const canceledInterception = await stopOrigins.waitForNetworkFailure((record) =>
+      record.method === 'GET' && record.address.fixtureCancelProbe && record.networkFailure?.canceled === true);
+    assert.equal(canceledInterception.networkFailure.canceled, true,
+      'browser cancellation is correlated to this exact paused local-state request');
+    heldAbortResponse.release();
     const duplicateRow = "Array.from(document.querySelectorAll('#proj-list .proj.repo')).find(row => row.textContent.includes('local-machine-c'))";
     await pickProject(chrome, duplicateRow);
     await chrome.waitFor("view.root === data.projects.find(row => row.id === " + JSON.stringify(duplicateId) + ").root && document.querySelector('#chain')?.textContent.includes(" + JSON.stringify(duplicateTitle) + ") && !readOnly && !requests");
@@ -1163,18 +1427,33 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
     assert.equal(await chrome.stable("document.querySelector('#add-title').value"), 'replacement local draft', 'a completion after switching away and back preserves the replacement draft');
 
     assert.deepEqual(chrome.exceptions, [], 'the hosted mixed-board page reports no uncaught browser exceptions');
+  } catch (error) {
+    journeyBodyError = error;
+    throw error;
   } finally {
     for (const release of heldMoves) release();
-    try { if (stopOrigins) await stopOrigins(); }
-    finally {
-      try { if (chrome) await closeSnapshotChrome(chrome); }
-      finally {
-        try { if (localView) await localView.stop(); }
-        finally {
-          try { if (site?.server) { site.server.closeAllConnections(); if (site.server.listening) await new Promise((done) => site.server.close(done)); } }
-          finally { rmSync(profile, { recursive: true, force: true }); }
-        }
+    const journeyCleanupErrors = [];
+    try { if (stopOrigins) await stopOrigins(); } catch (error) { journeyCleanupErrors.push(error); }
+    try { if (chrome) await closeSnapshotChrome(chrome); } catch (error) { journeyCleanupErrors.push(error); }
+    try { if (localView) await localView.stop(); } catch (error) { journeyCleanupErrors.push(error); }
+    try {
+      if (site?.server) {
+        site.server.closeAllConnections();
+        if (site.server.listening) await new Promise((done, reject) => site.server.close((error) => error ? reject(error) : done()));
       }
+    } catch (error) { journeyCleanupErrors.push(error); }
+    try { rmSync(profile, { recursive: true, force: true }); } catch (error) { journeyCleanupErrors.push(error); }
+    if (journeyCleanupErrors.length) {
+      t.diagnostic(JSON.stringify({
+        testBodyCompletedSuccessfully: !journeyBodyError,
+        testBodyFailure: journeyBodyError ? { name: journeyBodyError.name, code: journeyBodyError.code ?? null,
+          stackFrames: String(journeyBodyError.stack ?? '').split('\n').filter((line) => /^\s+at\s/u.test(line)).slice(0, 6) } : null,
+        cleanupFailureCount: journeyCleanupErrors.length,
+        cleanupFailures: journeyCleanupErrors.slice(0, 8).map(safeJourneyError),
+        interception: stopOrigins?.trace?.() ?? null,
+      }));
+      const failures = journeyBodyError ? [journeyBodyError, ...journeyCleanupErrors] : journeyCleanupErrors;
+      throw new AggregateError(failures, 'hosted mixed-board test and/or cleanup failed: ' + failures.slice(0, 8).map(safeJourneyError).join(' | '));
     }
   }
 });
