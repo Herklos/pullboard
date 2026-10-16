@@ -67,18 +67,43 @@ test('record real file ${id} [C7]', async () => {
   for (const setting of [{ files: 3, browser: 2 }, { files: 2, browser: 1 }]) {
     writeFileSync(config, JSON.stringify({ testConcurrency: setting }));
     assert.deepEqual(testConcurrency(root, 7), setting, 'pullboard.json overrides the shared policy');
-    const capture = join(root, `overlap-${setting.files}.jsonl`);
-    const result = runFixtureChild(process.execPath, [join(root, 'bin/run-tests.js'), '--test-concurrency=9', ...selected], {
-      cwd: root, env: { ...process.env, PULLBOARD_CAP_CAPTURE: capture,
-        PULLBOARD_MACHINE_HOME: join(root, `machine-${setting.files}`) }, encoding: 'utf8',
+    const cases = [
+      { name: 'spawnSync explicit large integer', args: ['--test-concurrency=9'], landing: false },
+      { name: 'landing default', args: [], landing: true },
+      { name: 'landing true override', args: ['--test-concurrency=true'], landing: true },
+      { name: 'landing large integer override', args: ['--test-concurrency=9'], landing: true },
+      { name: 'landing serial override', args: ['--test-concurrency=false'], landing: true, serial: true },
+    ];
+    for (const [caseIndex, example] of cases.entries()) {
+      const capture = join(root, `overlap-${setting.files}-${caseIndex}.jsonl`);
+      const env = { ...process.env, PULLBOARD_CAP_CAPTURE: capture,
+        PULLBOARD_MACHINE_HOME: join(root, `machine-${setting.files}-${caseIndex}`) };
+      env.PULLBOARD_LANDING_RUN = example.landing ? '1' : '0';
+      const result = runFixtureChild(process.execPath, [join(root, 'bin/run-tests.js'), ...example.args, ...selected], {
+        cwd: root, env, encoding: 'utf8',
+      });
+      assert.equal(result.status, 0, `${example.name}: ${result.stdout}${result.stderr}`);
+      const peak = fileOverlap(capture);
+      assert.ok(peak.files <= setting.files, `${example.name}: file-body overlap ${peak.files} exceeds ${setting.files}`);
+      assert.ok(peak.browser <= setting.browser, `${example.name}: browser-file overlap ${peak.browser} exceeds ${setting.browser}`);
+      if (example.serial) assert.equal(peak.files, 1, 'false keeps the native runner serial');
+      assert.deepEqual(peak.starts.sort((a, b) => a - b), Array.from({ length: 9 }, (_, id) => id),
+        `${example.name}: every selected file runs once`);
+      assert.match(result.stdout, /# tests 9\b/u);
+      assert.match(result.stdout, /# fail 0\b/u);
+    }
+  }
+  writeFileSync(config, JSON.stringify({ testConcurrency: { files: 3, browser: 2 } }));
+  for (const value of ['4294967296', '9'.repeat(400)]) {
+    const capture = join(root, `invalid-concurrency-${value.length}.jsonl`);
+    const result = runFixtureChild(process.execPath, [join(root, 'bin/run-tests.js'),
+      `--test-concurrency=${value}`, ...selected], {
+      cwd: root, env: { ...process.env, PULLBOARD_LANDING_RUN: '1', PULLBOARD_CAP_CAPTURE: capture,
+        PULLBOARD_MACHINE_HOME: join(root, `machine-invalid-${value.length}`) }, encoding: 'utf8',
     });
-    assert.equal(result.status, 0, result.stdout + result.stderr);
-    const peak = fileOverlap(capture);
-    assert.ok(peak.files <= setting.files, `actual file-body overlap ${peak.files} exceeds ${setting.files}`);
-    assert.ok(peak.browser <= setting.browser, `actual browser-file overlap ${peak.browser} exceeds ${setting.browser}`);
-    assert.deepEqual(peak.starts.sort((a, b) => a - b), Array.from({ length: 9 }, (_, id) => id), 'every selected file runs once');
-    assert.match(result.stdout, /# tests 9\b/);
-    assert.match(result.stdout, /# fail 0\b/);
+    assert.notEqual(result.status, 0, 'an invalid native concurrency value is refused');
+    assert.match(result.stderr, /invalid --test-concurrency value/u);
+    assert.equal(existsSync(capture), false, 'invalid concurrency is refused before any file body runs');
   }
   let isolationCase = 0;
   for (const flag of ['--test-isolation', '--test_isolation', '--experimental-test-isolation',
