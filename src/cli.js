@@ -1929,7 +1929,7 @@ function readCommands(io, { first, second, rest, values }) {
           if (entry.ref) io.say(`    ref: ${entry.ref.path}:${entry.ref.start}${entry.ref.end === entry.ref.start ? '' : '-' + entry.ref.end}@${entry.ref.commit}`);
         } else {
           const detail = entry.detail;
-          io.say(`${stamp}${entry.kind}${detail.commit ? ' at ' + detail.commit : ''}${detail.reason ? ': ' + detail.reason : ''}`);
+          io.say(`${stamp}${entry.kind}${detail.commit ? ' at ' + detail.commit : ''}${detail.reason ? ': ' + detail.reason : ''}${detail.note ? `: ${detail.note}` : ''}`);
         }
       }
       return 0;
@@ -2133,7 +2133,8 @@ async function submitHere(ctx, id) {
   withBoard(ctx, (board) => refuseUnverifiedStack(root, board, held, commit, trunk));
   // Every submit proves its frozen check and reachable tests anew on this exact commit (V4,V16).
   // A full-gate stamp never substitutes for either proof; only an actual full fallback may stamp.
-  const gate = await runSubmitGate(root, ctx.config, { base: claimHead, trunk: acceptedMain.commit, check: frozenCheck(held), agent: me.id, item: String(id), onWait: gateWaitReporter(ctx.io) });
+  const submitConfig = { ...ctx.config, submitGate: acceptedMain.config.submitGate };
+  const gate = await runSubmitGate(root, submitConfig, { base: claimHead, trunk: acceptedMain.commit, check: frozenCheck(held), agent: me.id, item: String(id), onWait: gateWaitReporter(ctx.io) });
   if (!gate.isGreen) {
     const message = `the submission proof is red at ${commit.slice(0, 12)}; fix it, commit, submit again. ${submitGateReport(gate)}`;
     // No submission can follow this verdict. Read-only main comparisons must not retain the seat's write lease.
@@ -2153,9 +2154,10 @@ async function submitHere(ctx, id) {
   const currentTrunk = requireTrunkMerge(root, commit); // The trunk may have moved while the gate ran.
   await withBoard(ctx, async (board) => {
     refuseUnverifiedStack(root, board, store.getItem(board, id), commit, currentTrunk);
-    return await ordered(ctx, board, 'submit', [id, { agentId: me.id, commit, tree: headTree(root) ?? '', files: filesSince(root, id, claimHead, commit), policyCommit: acceptedMain.commit }]);
+    return await ordered(ctx, board, 'submit', [id, { agentId: me.id, commit, tree: headTree(root) ?? '', files: filesSince(root, id, claimHead, commit), policyCommit: acceptedMain.commit,
+      ...(gate.deferred ? { note: 'full suite deferred to the landing gate' } : {}) }]);
   });
-  return reportSubmission(ctx, id, commit, { green: gate.isGreen, report: submitGateReport(gate), files: gate.files, full: gate.full, reason: gate.reason, check: gate.check,
+  return reportSubmission(ctx, id, commit, { green: gate.isGreen, report: submitGateReport(gate), files: gate.files, full: gate.full, deferred: gate.deferred, deferFullFallback: gate.deferFullFallback, reason: gate.reason, check: gate.check,
     log: gate.log, profile: gate.profile, profilePath: gate.profilePath, proofLog: gate.proofLog, proofProfilePath: gate.proofProfilePath });
 }
 
