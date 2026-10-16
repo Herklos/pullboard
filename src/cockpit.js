@@ -944,7 +944,7 @@ async function jsonRequest(path, body, base, headers, cache) {
   path = base + path;
   const res = await fetch(path, { method: body ? 'POST' : 'GET', headers: { ...headers, ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined, cache });
   const json = await res.json();
-  if (session && localSession === session && base === session.origin) {
+  if (session && session === localSession && base === session.origin) {
     if (res.status === 401 || res.status === 403) localExpired();
     else if (res.ok && !localConfirmed) { localConfirmed = true; tabValue(LOCAL_TRIPS, null); }
   }
