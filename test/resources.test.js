@@ -306,7 +306,7 @@ function setQueueOrder(box, queue) {
  * to the pool. Shared by the class-order test (#651) and the settings test (#697).
  *
  * @param {object|undefined} queue - The fixture's gate.queue settings, or undefined for none.
- * @returns {Promise<{ order: string|undefined, line: Array<[string, string]>, admitted: string[] }>}
+ * @returns {Promise<{ order: string|undefined, line: Array<[string, string]>, admitted: string[], tickets: Record<string, number>, lastIssued: number }>}
  */
 async function requeuedRemoteRun(queue) {
   const box = fixture();
@@ -333,6 +333,13 @@ async function requeuedRemoteRun(queue) {
     while (!gate().line.some(({ agent }) => agent === 'remote-focused')) await new Promise((resolveTick) => setTimeout(resolveTick, 20));
     const { order, line } = gate();
     const listed = line.map(({ agent, queueClass: queueClassName }) => [agent, queueClassName]);
+    const ticketDb = new DatabaseSync(join(box.home, 'resources.sqlite'));
+    let tickets;
+    let lastIssued;
+    try {
+      tickets = Object.fromEntries(ticketDb.prepare("SELECT agent, ticket FROM waiter WHERE name = 'gate'").all().map(({ agent, ticket }) => [agent, ticket]));
+      lastIssued = ticketDb.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'waiter'").get().seq;
+    } finally { ticketDb.close(); }
     const admitted = [];
     // Free the oldest held slot, watch which waiter the pool admits into it, and repeat.
     const holding = [() => release(localHolders[0]), () => release(localHolders[1])];
@@ -354,7 +361,7 @@ async function requeuedRemoteRun(queue) {
       }
     }
     for (const releaseSlot of holding) await releaseSlot();
-    return { order, line: listed, admitted };
+    return { order, line: listed, admitted, tickets, lastIssued };
   } finally {
     requeued?.release();
     if (previousHome === undefined) delete process.env.PULLBOARD_HOME;
@@ -880,14 +887,17 @@ test('the pool admits reviews before submits before focused runs, and waiting ru
   for (const child of releasing) await release(child);
   assert.deepEqual(order, ['landing-one', 'review-one', 'focused-two', 'diagnostic-one', 'submit-one', 'focused-one']);
 
-  // A remote run whose runner drops is requeued and keeps class order: it leads its own class,
-  // behind waiting reviews and submits, and the line stays in class order (no fallback to arrival).
+  // A remote run whose runner drops is requeued with its original arrival ticket: it sits behind
+  // earlier runs of its own class and behind waiting reviews and submits, and the line stays in
+  // class order (the requeue is marked classed, so it never forces arrival).
   const requeued = await requeuedRemoteRun({ reviewsFirst: true });
   assert.equal(requeued.order, undefined, 'a requeued remote waiter is marked as class-ordered, so the pool keeps class order');
   assert.deepEqual(requeued.line, [
-    ['review-later', 'review'], ['submit-later', 'submit'], ['remote-focused', 'other'], ['focused-early', 'other'],
-  ], 'the requeued remote run leads its own class, behind later reviews and submits');
-  assert.deepEqual(requeued.admitted, ['review-later', 'submit-later', 'remote-focused', 'focused-early']);
+    ['review-later', 'review'], ['submit-later', 'submit'], ['focused-early', 'other'], ['remote-focused', 'other'],
+  ], 'the requeued remote run keeps first come, first served in its class, behind the earlier focused run');
+  assert.equal(requeued.tickets['remote-focused'], requeued.lastIssued, 'the requeued runner waiter keeps its original ticket, the last one issued');
+  assert.ok(requeued.tickets['focused-early'] < requeued.tickets['remote-focused'], 'an earlier same-class waiter keeps its earlier ticket');
+  assert.deepEqual(requeued.admitted, ['review-later', 'submit-later', 'focused-early', 'remote-focused']);
 
   // The class rule itself, against an injected clock rather than real waiting.
   const { QUEUE_AGE_MS, queueClass } = await import('../src/resources.js');
@@ -1018,21 +1028,24 @@ test('queue order follows the machine settings [C7,O5]', async () => {
   assert.deepEqual([0, 0.99, 1, 2, 3].map((minutes) => queueClass({ kind: 'focused', since }, queuedAt + minutes * 60_000, 60_000).name),
     ['other', 'other', 'submit', 'review', 'landing'], 'a one-minute aging moves a waiting run up one class per minute');
 
-  // A remote run whose runner drops is requeued at the front of its turn: with no settings that is
-  // ahead of every other non-landing waiter, as before; with reviewsFirst true it leads its own class
-  // and the pool stays in class order (the requeue is marked classed, so it never forces arrival).
+  // A remote run whose runner drops is requeued: with no settings it takes #663's front ticket,
+  // ahead of every other non-landing waiter, as before; with reviewsFirst true it keeps its original
+  // ticket, so it waits behind an earlier run of its own class, and the pool stays in class order
+  // (the requeue is marked classed, so it never forces arrival).
   const requeuedOff = await requeuedRemoteRun(undefined);
   assert.equal(requeuedOff.order, undefined);
   assert.deepEqual(requeuedOff.line, [
     ['remote-focused', 'other'], ['focused-early', 'other'], ['submit-later', 'submit'], ['review-later', 'review'],
   ], 'with no settings the requeued remote run goes first and the rest keep arrival order');
+  assert.ok(requeuedOff.tickets['remote-focused'] < 0, 'with no settings the requeued run takes the front ticket, as on main');
   assert.deepEqual(requeuedOff.admitted, ['remote-focused', 'focused-early', 'submit-later', 'review-later']);
   const requeuedOn = await requeuedRemoteRun({ reviewsFirst: true });
   assert.equal(requeuedOn.order, undefined, 'with reviewsFirst true a requeued remote run keeps the pool in class order');
   assert.deepEqual(requeuedOn.line, [
-    ['review-later', 'review'], ['submit-later', 'submit'], ['remote-focused', 'other'], ['focused-early', 'other'],
-  ], 'with reviewsFirst true the requeued remote run leads its own class');
-  assert.deepEqual(requeuedOn.admitted, ['review-later', 'submit-later', 'remote-focused', 'focused-early']);
+    ['review-later', 'review'], ['submit-later', 'submit'], ['focused-early', 'other'], ['remote-focused', 'other'],
+  ], 'with reviewsFirst true the requeued remote run keeps its arrival place in its class');
+  assert.equal(requeuedOn.tickets['remote-focused'], requeuedOn.lastIssued, 'with reviewsFirst true the requeued run keeps its original ticket');
+  assert.deepEqual(requeuedOn.admitted, ['review-later', 'submit-later', 'focused-early', 'remote-focused']);
 
   // An unusable value is refused by name, with the fix.
   setQueueOrder(aging, { reviewsFirst: 'yes' });

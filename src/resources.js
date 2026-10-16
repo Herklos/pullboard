@@ -238,6 +238,18 @@ export function queueClass(entry, now = Date.now(), ageMs = QUEUE_AGE_MS) {
 }
 
 /**
+ * Whether a line admits by class: only while the machine opts in to reviews first and every
+ * waiter in it was queued by a process that admits by class (see admissionRank for why).
+ *
+ * @param {Array<{ classed?: number }>} waiters - The whole line for one resource.
+ * @param {{ reviewsFirst: boolean }} order - The pool's admission order setting.
+ * @returns {boolean}
+ */
+function classOrderInEffect(waiters, order) {
+  return order.reviewsFirst && waiters.every((waiter) => waiter.classed === 1);
+}
+
+/**
  * The admission rank every process in this queue agrees on. Class order (with aging) applies only
  * while the machine opts in to reviews first and every waiter was queued by a process that admits
  * by class; otherwise landings come first and then arrival. Why: an older pullboard admits
@@ -251,8 +263,7 @@ export function queueClass(entry, now = Date.now(), ageMs = QUEUE_AGE_MS) {
  * @returns {(waiter: object) => number}
  */
 function admissionRank(waiters, now, order) {
-  const byClass = order.reviewsFirst && waiters.every((waiter) => waiter.classed === 1);
-  return byClass ? (waiter) => queueClass(waiter, now, order.ageMs).effective : (waiter) => (waiter.landing === 1 ? 0 : 1);
+  return classOrderInEffect(waiters, order) ? (waiter) => queueClass(waiter, now, order.ageMs).effective : (waiter) => (waiter.landing === 1 ? 0 : 1);
 }
 
 /** Current holders and the waiting line in admission order, each waiter naming its class (aged only while class order is on). */
@@ -603,9 +614,15 @@ export async function takeResource(options) {
               const holderName = runnerResourceName(acquired.runner.host);
               const holder = db.prepare('SELECT token FROM holder WHERE token = ? AND name = ? AND runner = ?').get(token, holderName, acquired.runner.host);
               if (!holder) throw new Refused('RESOURCE_LEASE_LOST', `remote lease for "${name}" is no longer held`);
-              // Ahead of every gate ticket, so it leads its admission class (it keeps its queuedAt, so its aging too).
-              const minimumTicket = db.prepare("SELECT MIN(ticket) AS ticket FROM waiter WHERE name = 'gate'").get().ticket;
-              requeueTicket = Math.min(0, minimumTicket ?? 0) - 1;
+              // Under the class order the run keeps its original arrival ticket, so first come, first
+              // served holds within each class (and its queuedAt, so its aging). Under arrival order
+              // (reviewsFirst off, or an older pullboard waiting in the line) it takes #663's front
+              // ticket ahead of its landing tier, as on main.
+              if (classOrderInEffect(db.prepare("SELECT classed FROM waiter WHERE name = 'gate'").all(), queueOrder(scope))) requeueTicket = acquired.ticket;
+              else {
+                const minimumTicket = db.prepare("SELECT MIN(ticket) AS ticket FROM waiter WHERE name = 'gate' AND landing = ?").get(Number(landing)).ticket;
+                requeueTicket = Math.min(0, minimumTicket ?? 0) - 1;
+              }
               db.prepare('DELETE FROM holder WHERE token = ?').run(token);
               db.prepare('INSERT INTO waiter(ticket, token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, remote, classed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)')
                 .run(requeueTicket, token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, Number(remote));
