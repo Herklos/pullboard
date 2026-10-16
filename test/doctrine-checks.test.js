@@ -64,7 +64,7 @@ test("a doctrine rule's check holds its count [D1,D3]", () => {
   // A rise above the committed count is refused, naming the rule, the counts and the new line.
   commitWeb(box, { 'b.html': 'TODO three\n', 'keep.txt': 'keep\n' }, 'feat(web): add a page [G1]');
   const rose = box.run(box.web, 'submit', '1');
-  assert.doesNotMatch(rose.err, /Q3/, 'files: api keeps a web-only change from running the rule');
+  assert.doesNotMatch(rose.err, /Q3 Api work/, 'files: api keeps a web-only change from running the rule');
   assert.equal(rose.code, 1, rose.out);
   assert.match(rose.err, /RATCHET_ROSE/);
   assert.match(rose.err, /Q1 Web pages carry no TODO markers\. rose to 3, was 2/);
@@ -115,7 +115,7 @@ test("a doctrine rule's check holds its count in watch mode and nightly [D1,D3]"
     ['- Q2 [approved, must] Web pages stay TODO-free overnight. | gate: check grep -rn TODO web | count: 3 | runs: nightly']);
   commitWeb(box, { 'b.html': 'TODO three\n' }, 'feat(web): add a page [G1]');
   const watched = box.run(box.web, 'submit', '1');
-  assert.doesNotMatch(`${watched.out}${watched.err}`, /Q2/, 'a nightly rule does not run at submit');
+  assert.doesNotMatch(`${watched.out}${watched.err}`, /Q2 Web pages/, 'a nightly rule does not run at submit');
   assert.equal(watched.code, 0, watched.err);
   assert.match(watched.out, /Q1 Web pages carry no TODO markers\. · 3, was 0 · watching/);
   const report = box.run(box.web, 'doctrine', 'check');
@@ -128,4 +128,33 @@ test("a doctrine rule's check holds its count in watch mode and nightly [D1,D3]"
   const rose = box.run(box.web, 'doctrine', 'check');
   assert.equal(rose.code, 1, 'a rule that rose fails doctrine check');
   assert.match(rose.out, /^Q2 Web pages stay TODO-free overnight\. · 4, was 3 · rose$/m);
+});
+
+test("a doctrine rule's check holds its count when its row is demoted [D1,D3]", () => {
+  const box = checkedProject('count: 2');
+  const file = join(box.repo, 'DOCTRINE.md');
+  const committed = readFileSync(file, 'utf8');
+
+  // A status-only demotion would switch the rule off, so it needs the person's approval too.
+  const demoted = editRule(box, 'Q1 [approved, must]', 'Q1 [draft, must]');
+  assert.notEqual(demoted.status, 0, 'an unsigned demotion is refused at commit');
+  assert.match(demoted.stderr, /Q1 takes its check out of force \(draft\) without the person's signature/);
+  writeFileSync(file, committed.replace(/^- Q1 .*\n/mu, ''));
+  box.git(box.repo, 'add', 'DOCTRINE.md');
+  const deleted = box.tryGit(box.repo, 'commit', '-q', '-m', 'chore: drop the quality rule');
+  assert.notEqual(deleted.status, 0, 'deleting the rule is refused at commit');
+  assert.match(deleted.stderr, /approved row Q1 is missing/);
+  writeFileSync(file, committed);
+  box.git(box.repo, 'add', 'DOCTRINE.md');
+  assert.equal(box.git(box.repo, 'status', '--porcelain', '--', 'DOCTRINE.md'), '', 'main keeps the approved rule');
+
+  const report = box.run(box.web, 'doctrine', 'check');
+  assert.equal(report.code, 0, report.err);
+  assert.equal(report.out.trim(), 'Q1 Web pages carry no TODO markers. · 2, was 2 · holding', 'doctrine check still lists the rule');
+
+  commitWeb(box, { 'b.html': 'TODO three\n' }, 'feat(web): add a page [G1]');
+  const rose = box.run(box.web, 'submit', '1');
+  assert.equal(rose.code, 1, rose.out);
+  assert.match(rose.err, /RATCHET_ROSE/);
+  assert.match(rose.err, /Q1 Web pages carry no TODO markers\. rose to 3, was 2/);
 });

@@ -46,6 +46,8 @@ export function ruleFiles(value) {
 export function checkLoosening(before, after) {
   const old = checkRule(before);
   if (!old) return '';
+  // Only approved rows are enforced, so any other status takes the check out of force.
+  if (before.status === 'approved' && after.status !== 'approved') return `takes its check out of force (${after.status})`;
   const next = checkRule(after);
   if (!next) return 'drops its check';
   if (next.command !== old.command) return 'changes its check command';
