@@ -4,6 +4,21 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.8.26] - 2026-10-15
+
+### One-project views, and linking you can cancel
+
+### Added
+
+- `pullboard view --project`, run inside a registered project's repository or one of its worktrees, opens a view of that project only: the boards list, each board and the roadmap show nothing from your other projects.
+- `pullboard gate --landing` now sets `PULLBOARD_LANDING_RUN=1` for your gate command, so your test runner can stop at its first failing file. See docs/api.md.
+
+### Fixed
+
+- Linking every board on this machine (`pullboard relay on --all`) can be cancelled. Declining or closing the sign-in links nothing and leaves nothing behind; a cancel during pairing keeps the boards already linked and stops pairing cleanly.
+- A browser that refuses storage keeps an early board pairing in memory until the page uses it.
+- For contributors: a red landing gate stops at its first failing test file (on Node 22.13 it still runs every file, as before; fixed in the next release); a check that needs no browser never waits for the browser slot; and a stress board with a harness times every view action, outside the suite.
+
 ## [0.8.25] - 2026-10-15
 
 ### Project switches you can trust, and a 98-second explainer
