@@ -166,16 +166,39 @@ test('blueprint add files a blueprint as drafts or nothing at all [S1,I1]', () =
   // A later starter the board refuses (here a brief over its limit) stops the add before any write.
   const late = refused('late-refusal', [{ key: '1', title: 'First starter', cites: ['W1'] }, { key: '2', title: 'Second starter', brief: 'x'.repeat(8001) }]);
   assert.equal(late.code, 'BRIEF_TOO_LONG');
-  // Light and mid starters need a coordinator's check and a cold brief, so a blueprint refuses them.
+  // A light or mid starter without what pullboard add requires is refused with add's own refusal.
   for (const route of ['light', 'mid']) {
     const error = refused(`${route}-route`, [{ key: '1', title: 'First starter', cites: ['W1'] }, { key: '2', title: 'Second starter', route }]);
-    assert.equal(error.code, 'BAD_BLUEPRINT');
-    assert.match(error.message, new RegExp(`items\\[1\\]\\.route must be strong`, 'u'));
+    assert.equal(error.code, 'NO_BRIEF');
+    assert.match(error.message, new RegExp(`an item routed ${route} must be buildable cold`, 'u'));
   }
   // After the refusals, the same blueprint fixed adds everything at once.
   const added = json(box, 'blueprint', 'add', 'web-app');
   assert.equal(added.rows.length, 10);
   assert.equal(added.items.length, 3);
+});
+
+test('blueprint add files a blueprint as drafts with light and mid starters add accepts [S1,I1]', () => {
+  // A light or mid starter carrying its brief, criterion and check is filed on that route, with
+  // all three passed to the item unchanged; a strong starter needs none of them.
+  const box = freshBoard({ gate: 'true' });
+  box.git('commit', '-q', '-am', 'chore: set the fixture gate');
+  const brief = 'Files:\n- web/index.html\nTest:\n- test/home.test.js asserts the page fits 375 pixels';
+  const items = [
+    { key: '1', title: 'Light starter', cites: ['W3'], route: 'light', brief, criterion: 'The home page fits 375 pixels.', check: 'true' },
+    { key: '2', title: 'Mid starter', cites: ['W1'], route: 'mid', brief, criterion: 'A test fails without the change.', check: 'true', after: ['1'] },
+    { key: '3', title: 'Strong starter', cites: ['W2'] },
+  ];
+  writeFileSync(join(box.repo, 'routes.json'), `${JSON.stringify({ ...PUBLISHED, name: 'routes', items })}\n`);
+  const added = json(box, 'blueprint', 'add', 'routes.json');
+  assert.equal(added.items.length, 3);
+  const filed = json(box, 'list', '--all').items.sort((a, b) => a.item_id - b.item_id);
+  assert.deepEqual(filed.map((item) => [item.item_title, item.item_route, item.item_check, item.item_criterion, item.item_brief]), [
+    ['Light starter', 'light', 'true', items[0].criterion, brief],
+    ['Mid starter', 'mid', 'true', items[1].criterion, brief],
+    ['Strong starter', 'strong', '', '', ''],
+  ]);
+  assert.equal(filed[1].item_after, String(filed[0].item_id));
 });
 
 test('blueprint add files a blueprint as drafts beside approved rows in its own section [S1,I1]', () => {

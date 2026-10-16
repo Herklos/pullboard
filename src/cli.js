@@ -2231,8 +2231,13 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
   // Every starter is checked before anything is written, so a refusal leaves the board as it was.
   const starters = plan.items.map((entry) => ({ key: entry.key, afterKeys: entry.after, item: { by: me.id,
     lane: entry.lane && entry.lane !== COORDINATOR && isLane(ctx.config, entry.lane) ? entry.lane : COORDINATOR,
-    title: entry.title, criterion: entry.criterion, specIds: entry.specIds, parentId: null, after: [], brief: entry.brief, route: entry.route } }));
-  for (const { item } of starters) store.validateItemAddition(board, item);
+    title: entry.title, criterion: entry.criterion, specIds: entry.specIds, parentId: null, after: [], brief: entry.brief, route: entry.route,
+    ...(entry.check === undefined ? {} : { check: entry.check }) } }));
+  for (const { item } of starters) {
+    // The same checks and check baseline pullboard add uses, before anything is written.
+    const { command } = store.validateItemAddition(board, item);
+    if (command) item.checkBaseline = prepareCheckBaseline(ctx.info.root, command);
+  }
   const files = [];
   if (plan.specRows !== source) files.push({ file: ctx.config.spec, before: source, after: plan.specRows });
   if (plan.gate) {
@@ -2249,6 +2254,7 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
     for (const { key, afterKeys, item } of starters) {
       item.after = afterKeys.map((before) => byKey[before]).filter(Boolean);
       const id = await ordered(ctx, board, 'addItem', [item]);
+      if (item.checkBaseline?.result === 'pending') await launchBaseline(ctx, board, id, item.checkBaseline);
       byKey[key] = id;
       added.push({ id, key, title: item.title, lane: item.lane, specIds: item.specIds, after: item.after });
     }
