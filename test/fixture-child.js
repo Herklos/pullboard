@@ -65,7 +65,10 @@ export function runFixtureChild(command, args = [], options = {}) {
   return { ...result, stderr: stderrIgnored ? null : result.stderr, command: [command, ...args], elapsedMs, context, failure };
 }
 
-/** Run an async fixture child, retaining redacted diagnostics without imposing a child clock. */
+/**
+ * Run an async fixture child, retaining redacted diagnostics without imposing a child clock.
+ * The returned promise carries the spawned process as `.child`, so a caller can stop it.
+ */
 export function runFixtureChildAsync(command, args, options = {}) {
   const { onStderrChunk, ...spawnOptions } = options;
   const started = performance.now();
@@ -73,7 +76,7 @@ export function runFixtureChildAsync(command, args, options = {}) {
   activeFixtureChildren.add(child);
   let stdout = '';
   let rawStderr = '';
-  return new Promise((resolveResult) => {
+  const result = new Promise((resolveResult) => {
     child.stdout.setEncoding('utf8').on('data', (part) => { stdout += part; });
     child.stderr.setEncoding('utf8').on('data', (part) => {
       rawStderr += part;
@@ -102,6 +105,8 @@ export function runFixtureChildAsync(command, args, options = {}) {
       resolveResult({ status, signal, stdout, stderr, elapsedMs, context, failure, error: spawnError });
     });
   });
+  result.child = child;
+  return result;
 }
 
 /** Stop only fixture children still alive when their owning test file has finished. */
