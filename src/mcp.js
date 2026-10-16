@@ -6,14 +6,12 @@
  * terminal and the local API use, with the API's move layer (moveArgs), so a refusal reaches the
  * client with the CLI's own code and next step.
  */
-import { join } from 'node:path';
-import * as store from './board.js';
-import { COORDINATOR, loadConfig } from './config.js';
-import { codeIsFromMain, repoInfo } from './git.js';
+import { COORDINATOR } from './config.js';
 import { VERSION } from './help.js';
 import { refusalDocument } from './json.js';
 import { moveArgs } from './api-moves.js';
 import { Refused } from './refused.js';
+import { projectState } from './serve.js';
 
 /** MCP revisions this server speaks; the first is offered when a client asks for one it does not know. */
 export const MCP_PROTOCOL_VERSIONS = Object.freeze(['2025-06-18', '2025-03-26', '2024-11-05']);
@@ -31,7 +29,7 @@ const PERSON_MOVE = /approv|declin|answer|sign_?off|decide|decision/u;
 export const MCP_TOOLS = Object.freeze([
   {
     name: 'board_status',
-    description: 'The board at a glance for this seat\'s agent: who you are, the open and active items, the review queue, unread shouts, and Needs-you (the person\'s open decisions, spec rows waiting for the person, held lanes). Mirrors pullboard status and pullboard list.',
+    description: 'The board at a glance for this seat\'s agent: who you are, the open and active items, the review queue, unread shouts, and needsYou: the decisions, holds and spec fields of the view\'s own board projection, as the view\'s Needs-you reads them. Mirrors pullboard status and pullboard list. It builds the full board projection, so it is slower on large boards.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
@@ -133,19 +131,6 @@ async function runCli(runCommand, cwd, argv) {
   return { status, document };
 }
 
-/**
- * The person's calls on this board, as the view's Needs-you list counts them: decisions passed up to the
- * person and held lanes, with the spec file whose waiting rows join them. A read only; it opens the board as pullboard status does and changes nothing.
- */
-function personCalls(cwd) {
-  const info = repoInfo(cwd);
-  const config = loadConfig(info.root);
-  const board = store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), undefined, { isMain: codeIsFromMain() });
-  try {
-    return { spec: config.spec, decisions: store.openDecisions(board, store.PERSON), holds: store.laneHolds(board) };
-  } finally { store.closeBoard(board); }
-}
-
 /** A tool result carrying one versioned document, flagged as an error when it is a refusal. */
 function toolResult(document, isError) {
   return { content: [{ type: 'text', text: JSON.stringify(document, null, 2) }], structuredContent: document, isError };
@@ -165,19 +150,14 @@ async function callTool(runCommand, cwd, name, args) {
     if (status.status) return toolResult(status.document, true);
     const list = await runCli(runCommand, cwd, ['list', '--json']);
     if (list.status) return toolResult(list.document, true);
-    const spec = await runCli(runCommand, cwd, ['spec', '--json']);
-    if (spec.status) return toolResult(spec.document, true);
-    const calls = personCalls(cwd);
+    // Needs-you comes from the view's own projection, unshaped and read-only: one builder, no second query.
+    const { decisions, holds, spec } = projectState(cwd);
     const { version, ...summary } = status.document;
     return toolResult({
       version,
       ...summary,
       items: list.document.items,
-      needsYou: {
-        decisions: calls.decisions,
-        rows: spec.document.rows.filter((row) => row.file === calls.spec && ['pending', 'draft'].includes(row.status)),
-        holds: calls.holds,
-      },
+      needsYou: { decisions, holds, spec },
     }, false);
   }
   if (name === 'show_item') {

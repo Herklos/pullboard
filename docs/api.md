@@ -198,10 +198,12 @@ It answers `initialize` with `protocolVersion` (the client's, when it is `2025-0
 
 | Tool | Input schema | Mirrors | Result |
 | --- | --- | --- | --- |
-| `board_status` | `{}` | `pullboard status` and `pullboard list` | the `status` document plus `items` (open and active items) and `needsYou`: `decisions` (open decisions addressed to the person), `rows` (spec rows that are `pending` or `draft`) and `holds` (held lanes) |
+| `board_status` | `{}` | `pullboard status` and `pullboard list` | the `status` document plus `items` (open and active items) and `needsYou`: the `decisions`, `holds` and `spec` fields of the view's board projection, unshaped, as the view's Needs-you reads them |
 | `show_item` | `{id: integer >= 1}` | `pullboard show <id>` | the `show` document |
 | `shout` | `{to: string, text: string}` | `pullboard shout <to> <text>` | the `shout` document |
 | `capture_idea` | `{text: string}` | `pullboard shout coordinator "idea: <text>"` | the `shout` document; until ideas become their own kind of item, an idea is a shout to the coordinator whose text starts `idea: ` |
+
+`needsYou` is read-only and comes from the same projection as the local API's board state and the view: `decisions` are the open decisions addressed to the person, `holds` the held lanes, and `spec` every row of the project's spec file with its `status`, so the person's rows are those `pending` or `draft`. Building that projection reads every item and the spec file's history, so `board_status` is slower on large boards than the other tools.
 
 Every input schema sets `additionalProperties: false`; an unknown or mistyped argument returns `BAD_REQUEST`. No argument names an author, a seat or a channel: the author of every move is the agent of the checkout the server runs in.
 
