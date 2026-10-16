@@ -292,6 +292,27 @@ test('init --blueprint starts a board from a blueprint [I1,S1]', () => {
   assert.deepEqual(readdirSync(unknown.repo).filter((name) => name !== '.git'), [], 'nothing is written');
   assert.equal(existsSync(join(unknown.repo, '.git', 'pullboard')), false, 'no board is created');
 
+  // Init executes nothing from a blueprint: a URL is refused unfetched, and a starter that carries
+  // a check is refused rather than launching its baseline. Both leave the repository untouched.
+  const remote = emptyRepo();
+  const fetched = remote.run('init', '--blueprint', 'https://example.invalid/web-app.json', '--json');
+  assert.notEqual(fetched.status, 0);
+  assert.equal(JSON.parse(fetched.stdout).error.code, 'BLUEPRINT_URL');
+  assert.deepEqual(readdirSync(remote.repo).filter((name) => name !== '.git'), [], 'a URL writes nothing');
+  assert.equal(existsSync(join(remote.repo, '.git', 'pullboard')), false, 'a URL creates no board');
+  const outside = mkdtempSync(join(tmpdir(), 'pullboard-blueprint-check-'));
+  const withCheck = join(outside, 'checked.blueprint.json');
+  writeFileSync(withCheck, JSON.stringify({ ...PUBLISHED, items: PUBLISHED.items.map((item, index) => (index === 0 ? { ...item, check: 'true' } : item)) }));
+  const checkedRepo = emptyRepo();
+  const checked = checkedRepo.run('init', '--blueprint', withCheck, '--json');
+  assert.notEqual(checked.status, 0);
+  const checkRefusal = JSON.parse(checked.stdout).error;
+  assert.equal(checkRefusal.code, 'BLUEPRINT_CHECK');
+  assert.match(checkRefusal.message, new RegExp(`items\\[${PUBLISHED.items[0].key}\\]`, 'u'), 'the refusal names the starter with a check');
+  assert.deepEqual(readdirSync(checkedRepo.repo).filter((name) => name !== '.git'), [], 'a check writes nothing');
+  assert.equal(existsSync(join(checkedRepo.repo, '.git', 'pullboard')), false, 'a check creates no board');
+  rmSync(outside, { recursive: true, force: true });
+
   // Plain init is unchanged: no blueprint section, no items, no summary line.
   const plain = emptyRepo();
   const initialized = plain.run('init');

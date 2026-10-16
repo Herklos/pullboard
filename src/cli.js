@@ -1582,8 +1582,17 @@ function setupCommands(io, { first, values }) {
     init: async () => {
       const info = repoInfo(io.cwd);
       // A named blueprint is read and checked before anything is written, so an unknown name
-      // or a broken file leaves the repository untouched (#678).
+      // or a broken file leaves the repository untouched (#678). Init executes nothing from a
+      // blueprint: it fetches no URL and launches no check baseline, so a starter with a check waits
+      // for pullboard blueprint add, where the coordinator's check rules apply.
+      if (values.blueprint !== undefined && /^[a-z][a-z0-9+.-]*:\/\//iu.test(values.blueprint)) {
+        throw new Refused('BLUEPRINT_URL', `init reads a bundled blueprint name or a local file, never a URL; download ${values.blueprint} yourself, read it, then run pullboard init --blueprint <file>`);
+      }
       const blueprint = values.blueprint === undefined ? null : readBlueprint(values.blueprint, info.root);
+      const checked = blueprint ? blueprint.items.filter((item) => item.check) : [];
+      if (checked.length) {
+        throw new Refused('BLUEPRINT_CHECK', `init launches no check baselines, and ${checked.map((item) => `items[${item.key}]`).join(', ')} carr${checked.length === 1 ? 'ies' : 'y'} a check; run pullboard init, then pullboard blueprint add ${values.blueprint} from the coordinator`);
+      }
       const model = optionalModel(values.model);
       const linked = relayLinked(info.root);
       const ctx = linked && model !== undefined ? context(io) : null;
