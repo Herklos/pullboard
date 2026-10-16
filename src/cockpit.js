@@ -36,16 +36,12 @@ function lifecycle() {
  * The Roadmap tab has its own address (N38): /roadmap on a host that serves the page there too,
  * which `paths` declares, and a #roadmap fragment anywhere else, such as a snapshot hosted under a
  * folder, where a path the host does not serve would leave a reload with nothing.
- * The hosted page at https://app.pullboard.dev passes hostedLocal (N26, #513): on this machine it reads the local view
- * and any linked relay boards through their own transports; local boards are writable, relay boards remain read-only.
- * On another device it uses the relay when relaySession says the request has a session, and otherwise explains how to
- * connect or sign in.
  *
  * @param {string} [key] - The session's secret.
- * @param {{snapshot?: boolean, readOnly?: boolean, requests?: boolean, transportModule?: string|null, apiBase?: string, apiHeaders?: Record<string, string>, stylesheet?: string, paths?: boolean, hostedLocal?: boolean, relaySession?: boolean, signIn?: string|null}} [options] - Served connection and assets, optional person requests over a read-only transport, host routes, a static page with event replay, or the hosted page that reads this machine's view first.
+ * @param {{snapshot?: boolean, readOnly?: boolean, requests?: boolean, transportModule?: string|null, apiBase?: string, apiHeaders?: Record<string, string>, stylesheet?: string, paths?: boolean}} [options] - Served connection and assets, optional person requests over a read-only transport, host routes, or a static page with event replay.
  * @returns {string}
  */
-export function cockpitPage(key = '', { snapshot = false, readOnly = false, requests = false, transportModule = null, apiBase = '', apiHeaders = { 'x-pullboard-key': key }, stylesheet = null, paths = false, hostedLocal = false, relaySession = false, signIn = null } = {}) {
+export function cockpitPage(key = '', { snapshot = false, readOnly = false, requests = false, transportModule = null, apiBase = '', apiHeaders = { 'x-pullboard-key': key }, stylesheet = null, paths = false } = {}) {
   // Derive the current CLI inventory for every served, relay or exported page.
   const COMMAND_SOURCE = 'pullboard (?:' + commandPhrases().join('|') + ')(?![\\w-])(?: (?:--?[\\w-]+|\\d+|#\\d+|"[^"\\n]*"|[A-Z][A-Z0-9_]*|[\\w-]*[\\/.:@][^\\s"]*|[a-z]+-\\d+)(?![\\w-]))*';
 
@@ -53,8 +49,6 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
   const connection = JSON.stringify(transportModule ? { base: '', headers: {} } : { base: apiBase.replace(/\/$/, ''), headers: apiHeaders }).replace(/</g, '\\u003c');
   const moduleOption = JSON.stringify(transportModule).replace(/</g, '\\u003c');
   const requestMode = Boolean(readOnly && requests && !snapshot && transportModule);
-  if (signIn !== null && (typeof signIn !== 'string' || !signIn.startsWith('/') || signIn.startsWith('//'))) throw new TypeError('signIn must be a path on the hosting site, or null');
-  const hostedOptions = JSON.stringify({ local: Boolean(hostedLocal) && !snapshot, relaySession: Boolean(relaySession), signIn }).replace(/</g, '\\u003c');
   const css = stylesheet ?? (snapshot ? 'view.css' : transportModule ? '/view.css' : '/view.css?k=' + encodeURIComponent(key));
   const cssAttribute = css.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
   return `<!doctype html>
@@ -98,10 +92,6 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
     <p>Run <code>pullboard init</code> in a git repo, or ask an agent to. Its board shows up here by itself.</p>
   </section>
   <p class="empty" id="project-loading" role="status" hidden>Loading project…</p>
-  <section class="card-panel" id="local-note" role="status" hidden>
-    <p id="local-note-text"></p>
-    <p id="local-note-links" hidden><a id="local-note-view" href="http://127.0.0.1:4890/local/view">Open the local view</a> <a id="local-note-sign-in" hidden>Sign in to see linked boards</a> <button class="ghost" id="local-note-retry" type="button">Try again</button></p>
-  </section>
   <section class="card-panel snapshot-controls" id="snapshot-controls" ${snapshot ? '' : 'hidden'} aria-label="Snapshot replay">
     <span>Read-only snapshot</span>
     <button class="ghost" id="replay-play" type="button">Play from first event</button>
@@ -184,71 +174,12 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
 <div class="console" id="console" title="Click to close" hidden></div>
 <script>
 const snapshot = ${JSON.stringify(snapshot)};
-let readOnly = ${JSON.stringify(readOnly)};
-let requests = ${JSON.stringify(requestMode)};
-const pageReadOnly = ${JSON.stringify(readOnly)};
-const pageRequests = ${JSON.stringify(requestMode)};
-const relayRequestsEnabled = requests;
-let transportModule = ${moduleOption};
+const readOnly = ${JSON.stringify(readOnly)};
+const requests = ${JSON.stringify(requestMode)};
+const transportModule = ${moduleOption};
 const connection = ${connection};
 let transport = null;
 let transportLoadError = null;
-// Hosted pages can read two independent authorities at once. Local boards use the view's API; relay boards
-// retain the relay client's device-only decryption and event stream. The board id, never a mutable global mode,
-// selects the authority for each request.
-const boardSources = new Map();
-const localBoardIds = new Set();
-let localReadBase = connection.base;
-let localReadHeaders = { ...connection.headers };
-// The hosted page (N26, #513): at https://app.pullboard.dev, on the machine that runs pullboard view, the page reads
-// that view straight instead of the relay. The view hands it the session's secret by a round trip that ends back here
-// with the secret in the address's fragment, which no request carries; the page takes it out of the address before
-// anything else reads the address, and keeps it for this tab only. Every request then sends it in x-pullboard-key.
-const hosted = ${hostedOptions};
-const LOCAL_VIEW = 'http://127.0.0.1:4890';
-const LOCAL_TAB = 'pullboard.local.session';
-const LOCAL_TRIPS = 'pullboard.local.trips';
-let localSession = null;
-let localProblem = null;
-let localConfirmed = false;
-/** Read, keep or forget a value for this tab only; a browser that refuses keeps nothing, and the page goes on. */
-function tabValue(name, value) {
-  try {
-    if (value === undefined) return sessionStorage.getItem(name);
-    if (value === null) sessionStorage.removeItem(name);
-    else sessionStorage.setItem(name, value);
-  } catch { return null; }
-  return value;
-}
-/** Whether a value is a local session this page may use: version 1, a loopback origin with its port, and a secret. */
-function validLocalSession(value) {
-  if (!value || value.version !== 1 || typeof value.key !== 'string' || !/^[\\x21-\\x7e]{1,256}$/.test(value.key) || typeof value.origin !== 'string') return false;
-  try {
-    const address = new URL(value.origin);
-    return address.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(address.hostname) && address.port !== '' && address.origin === value.origin;
-  } catch { return false; }
-}
-// A relay pairing link carries its own fragment; that load stays the relay's, as before.
-const relayPairing = hosted.local && ['board', 'key', 'device'].some((name) => new URLSearchParams(location.hash.slice(1)).has(name));
-if (hosted.local && !relayPairing) {
-  const fragment = new URLSearchParams(location.hash.slice(1));
-  const returned = fragment.get('pullboard-local');
-  if (returned !== null) {
-    fragment.delete('pullboard-local');
-    const rest = fragment.toString();
-    let removed = true;
-    try { history.replaceState(history.state, '', location.pathname + location.search + (rest ? '#' + rest : '')); }
-    catch { removed = false; }
-    let returnedSession = null;
-    try { returnedSession = JSON.parse(returned); } catch { /* refused below */ }
-    if (!removed) localProblem = 'This browser kept the connection secret in the address, so this page will not use it. Close this tab, then open the local view.';
-    else if (validLocalSession(returnedSession)) localSession = { version: 1, origin: returnedSession.origin, key: returnedSession.key };
-    else localProblem = 'The local view sent back a connection this page cannot read. Try again, or open the local view.';
-  } else {
-    try { const kept = JSON.parse(tabValue(LOCAL_TAB) ?? 'null'); if (validLocalSession(kept)) localSession = kept; } catch { /* nothing kept for this tab */ }
-  }
-  tabValue(LOCAL_TAB, localSession ? JSON.stringify(localSession) : null);
-}
 const snapshotReplay = { final: null, events: [], index: 0, playing: false, timer: null };
 const keep = (name, value) => { name = snapshot ? 'snapshot.' + name : name; try { if (value === undefined) return localStorage.getItem(name); localStorage.setItem(name, value); } catch { return null; } return value; };
 // Whether the host serves this page at /roadmap as well as at /, so the Roadmap's address is a path;
@@ -293,90 +224,6 @@ let heldClickPointer = null;
 let deferredClickRender = false;
 const addressedShouts = new Map();
 const $ = (id) => document.getElementById(id);
-
-/** Say in one line what the page is doing about this machine's view, or why it cannot read it, with the ways on. */
-function localNote(text, ways = false) {
-  $('local-note').hidden = !text;
-  $('local-note-text').textContent = text || '';
-  $('local-note-links').hidden = !ways;
-  $('local-note-view').href = (localSession?.origin || LOCAL_VIEW) + '/local/view';
-  $('local-note-sign-in').hidden = !hosted.signIn || hosted.relaySession;
-  if (hosted.signIn) $('local-note-sign-in').href = hosted.signIn;
-}
-
-/** Hide the relay's own banner, which speaks for the relay, on a page the relay does not serve this time. */
-function hideRelayNotice() {
-  const banner = document.getElementById('relay-notice');
-  if (banner) banner.hidden = true;
-}
-
-/** Send this tab on the round trip to the local view, which sends it straight back here; two tries in a row at most. */
-function localTrip(base) {
-  const trips = Number(tabValue(LOCAL_TRIPS) || 0);
-  if (trips >= 2) {
-    tabValue(LOCAL_TRIPS, null);
-    localNote('The local view did not give this page a session it accepts. Open the local view, or try again.', true);
-    return false;
-  }
-  tabValue(LOCAL_TRIPS, String(trips + 1));
-  location.assign(base + '/local/connect');
-  return true;
-}
-
-/** The local view refused this tab's secret, as after a restart with a new one: go round again for it, unasked. */
-function localExpired() {
-  const base = localSession.origin;
-  localSession = null;
-  localConfirmed = false;
-  tabValue(LOCAL_TAB, null);
-  localTrip(base);
-}
-
-/**
- * Reach this machine's view: say first why the browser may ask about local network access, then read the view's
- * public protocol, which holds no secret and no board, and take the session the round trip brought back. It is
- * 'local' when the page now reads the local view, 'away' when the browser is on the round trip, and 'unreachable'
- * when the page cannot read it, with what it knows of why on the page.
- */
-async function connectLocal() {
-  const base = localSession?.origin || LOCAL_VIEW;
-  let permission = null;
-  for (const name of ['loopback-network', 'local-network-access']) {
-    try { permission = (await navigator.permissions.query({ name })).state; break; } catch { /* this browser has no such permission */ }
-  }
-  if (permission === 'denied') {
-    localNote('This browser has refused this page access to apps on this device, so it cannot read the board running here. Allow it in the site settings for app.pullboard.dev, or open the local view.', true);
-    return 'unreachable';
-  }
-  if (permission !== 'granted') {
-    localNote('Your browser may ask to let this page reach apps on this device: allow it, and the page reads the board pullboard view runs here, which never leaves this machine.');
-    // The line is on screen before the request that can raise the browser's prompt.
-    await new Promise((painted) => requestAnimationFrame(() => requestAnimationFrame(painted)));
-  }
-  let reply;
-  try { reply = await fetch(base + '/local/protocol', { signal: AbortSignal.timeout(3000), credentials: 'omit', redirect: 'error' }); }
-  catch {
-    localNote('This page cannot reach a local view: pullboard view may not be running, this browser may have refused it access to this device, or the installed Pullboard may be older than this page. Start pullboard view and try again, or open the link it printed.', true);
-    return 'unreachable';
-  }
-  let protocol = null;
-  try { protocol = await reply.json(); } catch { /* not this protocol */ }
-  if (!reply.ok || protocol?.version !== 1 || protocol?.apiVersion !== 1 || protocol?.hostedOrigin !== location.origin) {
-    localNote('The installed Pullboard does not match this page. Open the link pullboard view printed, or update Pullboard.', true);
-    return 'unreachable';
-  }
-  if (!localSession) return localTrip(base) ? 'away' : 'unreachable';
-  connection.base = localSession.origin;
-  connection.headers = { 'x-pullboard-key': localSession.key };
-  localReadBase = connection.base;
-  localReadHeaders = { ...connection.headers };
-  readOnly = false;
-  requests = false;
-  document.body.classList.remove('read-only', 'requests');
-  hideRelayNotice();
-  localNote(null);
-  return 'local';
-}
 
 /** Mark primary pointer targets whose click would be lost if a refresh replaces them. */
 function holdClickPointer(event) {
@@ -916,34 +763,15 @@ function flowSvg(p) {
 
 /** Read or move through API v1, retaining the rule and repair guidance in a refusal. */
 async function api(path, body) {
-  if (snapshot) {
-    if (body !== undefined && body !== null) throw new Error('This is a read-only snapshot.');
-    const res = await fetch(path.split('?')[0].slice(1) + '.json');
-    const json = await res.json();
-    if (!res.ok) throw new Error(json.error || res.status);
-    return json;
+  if (body && (snapshot || readOnly)) throw new Error(snapshot ? 'This is a read-only snapshot.' : 'This is a read-only view.');
+  if (transportModule) {
+    if (transport) return transport.request(path, body);
+    if (transportLoadError) throw transportLoadError;
+    throw new Error('The browser transport is still loading.');
   }
-  if (path === '/api/v1/boards') return await listedBoards();
-  const boardId = /^\\/api\\/v1\\/boards\\/([0-9a-f]{32})(?:\\/|$)/u.exec(path)?.[1];
-  const source = boardId ? boardSources.get(boardId) : null;
-  if (boardId && !source) throw new Error('This board is not available in the current view. Refresh the board list and retry.');
-  if (boardId && source?.kind === 'relay') {
-    if (body !== undefined && body !== null) throw new Error('Relay boards are read-only in this view.');
-    if (!transport) throw transportLoadError || new Error('The relay transport is still loading.');
-    const reply = await transport.request(path, body);
-    if (path.includes('/state') && reply.state) return { ...reply, state: { ...reply.state, root: source.board.root } };
-    return reply;
-  }
-  if (body && (hosted.local ? readOnly && source?.kind !== 'local' : pageReadOnly)) throw new Error('This is a read-only view.');
-  const base = source?.kind === 'local' ? localReadBase : connection.base;
-  const headers = source?.kind === 'local' ? localReadHeaders : connection.headers;
-  path = base + path;
-  const res = await fetch(path, { method: body ? 'POST' : 'GET', headers: { ...headers, ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
+  path = snapshot ? path.split('?')[0].slice(1) + '.json' : connection.base + path;
+  const res = await fetch(path, { method: body ? 'POST' : 'GET', headers: snapshot ? {} : { ...connection.headers, ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
   const json = await res.json();
-  if (localSession && base === localSession.origin) {
-    if (res.status === 401 || res.status === 403) localExpired();
-    else if (res.ok && !localConfirmed) { localConfirmed = true; tabValue(LOCAL_TRIPS, null); }
-  }
   if (!res.ok) {
     const refusal = json.error;
     const message = refusal && typeof refusal === 'object' ? '[' + refusal.code + '] ' + refusal.message : refusal || res.status;
@@ -952,76 +780,9 @@ async function api(path, body) {
   return json;
 }
 
-/** Read this machine's API list and the signed-in relay list, preferring a local registration with the same id. */
-async function listedBoards() {
-  let local = { boards: [], warnings: [] };
-  let relay = { boards: [], warnings: [] };
-  const hasLocal = hosted.local ? Boolean(localReadBase) && Boolean(localSession) : transportModule === null;
-  if (hasLocal) {
-    try {
-      const response = await fetch(localReadBase + '/api/v1/boards', { headers: localReadHeaders, cache: 'no-store' });
-      const value = await response.json();
-      if ((response.status === 401 || response.status === 403) && localSession && localReadBase === localSession.origin) {
-        localExpired();
-        throw new Error('The local view session expired; reconnecting to this machine.');
-      }
-      if (!response.ok) throw new Error(value.error?.message || String(response.status));
-      if (localSession && localReadBase === localSession.origin && !localConfirmed) { localConfirmed = true; tabValue(LOCAL_TRIPS, null); }
-      local = value;
-    } catch (error) {
-      if (!transport) throw error;
-      localNote(String(error.message || error), true);
-    }
-  }
-  if (!hasLocal && transportModule && !transport) throw transportLoadError || new Error('The browser transport is still loading.');
-  if (transport) {
-    try { relay = await transport.request('/api/v1/boards'); }
-    catch (error) {
-      if (!hosted.local || !hasLocal) throw error;
-      localNote('Linked boards are unavailable: ' + String(error.message || error), true);
-    }
-  }
-  boardSources.clear();
-  localBoardIds.clear();
-  const boards = [];
-  for (const board of local.boards || []) {
-    if (typeof board.id !== 'string') continue;
-    const row = { ...board, source: 'local' };
-    boardSources.set(row.id, { kind: 'local', board: row });
-    localBoardIds.add(row.id);
-    boards.push(row);
-  }
-  for (const board of relay.boards || []) {
-    if (typeof board.id !== 'string' || boardSources.has(board.id)) continue;
-    const row = { ...board, root: board.id, source: 'relay' };
-    boardSources.set(row.id, { kind: 'relay', board: row });
-    boards.push(row);
-  }
-  return { version: 1, boards, warnings: [...(local.warnings || []), ...(relay.warnings || [])] };
-}
-
-/** Set presentation controls for the selected board; API routing still checks the target board independently. */
-function syncBoardMode(root) {
-  if (snapshot) return;
-  const board = data?.projects.find((entry) => entry.root === root && entry.ok);
-  const source = board && boardSources.get(board.id);
-  const relay = source?.kind === 'relay';
-  readOnly = hosted.local ? relay || (transportModule !== null && !source) : pageReadOnly;
-  requests = hosted.local ? Boolean(relay && relayRequestsEnabled) : pageRequests;
-  document.body.classList.toggle('read-only', readOnly);
-  document.body.classList.toggle('requests', requests);
-}
-
-/** Whether a selected project is backed by the read-only relay transport. */
-function relayProject(root = view.root) {
-  const board = data?.projects.find((entry) => entry.root === root && entry.ok);
-  return boardSources.get(board?.id)?.kind === 'relay';
-}
-
 /** Send only literal person intent; the transport seals it and generic API writes stay refused. */
 async function sendPersonRequest(root, move) {
   if (!requests || snapshot || !readOnly) throw new Error('This view cannot send person requests.');
-  if (!relayProject(root)) throw new Error('Person requests through the relay require a linked relay board.');
   if (!['add', 'shout', 'answer', 'hold', 'spec-approve', 'spec-decline'].includes(move.verb)) throw new Error('Choose a person action from the view controls.');
   if (!transport) throw transportLoadError || new Error('The browser transport is still loading.');
   return transport.request(boardPath(root) + '/moves', move);
@@ -1232,7 +993,7 @@ const credentials = new Map();
 /** Draw only allowlisted credential metadata; bearer values never enter page state or markup. */
 function renderCredentials() {
   const region = $('credentials');
-  region.hidden = snapshot || readOnly;
+  region.hidden = snapshot || readOnly || Boolean(transportModule);
   if (region.hidden) { region.innerHTML = ''; return; }
   const state = credentials.get(view.root);
   /** Render an inventory timestamp without shortening its date or timezone. */
@@ -1246,7 +1007,7 @@ function renderCredentials() {
 
 /** Load this board's public metadata on demand, without granting any person authority. */
 async function loadCredentials(root = view.root) {
-  if (snapshot || relayProject(root) || (!hosted.local && pageReadOnly)) return;
+  if (snapshot || readOnly || transportModule) return;
   const state = credentials.get(root) || { tokens: [], message: '', busy: false };
   credentials.set(root, state);
   state.message = 'Loading agent credentials…';
@@ -1261,7 +1022,7 @@ async function loadCredentials(root = view.root) {
 
 /** Revoke a listed id through the existing one-tap phone grant, then reread its public metadata. */
 async function revokeCredential(id) {
-  if (snapshot || relayProject(view.root) || (!hosted.local && pageReadOnly)) return;
+  if (snapshot || readOnly || transportModule) return;
   const root = view.root, state = credentials.get(root);
   if (!state || state.busy || !state.tokens.some((row) => row.id === id && !row.revoked)) return;
   state.busy = true;
@@ -1320,7 +1081,6 @@ async function refresh(fresh = null) {
   if (text !== seen) {
     seen = text;
     data = next;
-    syncBoardMode(view.root);
     render();
   }
   if (changed) {
@@ -1333,7 +1093,7 @@ async function refresh(fresh = null) {
     snapshotReplay.index = snapshotReplay.events.length;
     replayControls();
   }
-  if (!snapshot) follow();
+  if (!snapshot && !transportModule) follow();
   $('live').textContent = snapshot ? 'read-only snapshot' : liveLine();
 }
 
@@ -1386,7 +1146,7 @@ function follow() {
   const repos = data.group ? data.group.repos.map((repo) => [repo.root, repo.board]) : data.project ? [[view.root, data.project]] : [];
   const boards = repos.flatMap(([root, state]) => {
     const board = data.projects.find((entry) => entry.root === root && entry.ok);
-    return board && localBoardIds.has(board.id) ? [{ root, id: board.id, shown: latestEvent(state) }] : [];
+    return board ? [{ root, id: board.id, shown: latestEvent(state) }] : [];
   });
   const key = boards.map((board) => board.id).join(',');
   // A board's events after the latest one this page shows are what changed it since.
@@ -1458,16 +1218,14 @@ async function listen(entry) {
   entry.controller = controller;
   try {
     if (!controller) throw new Error('this browser cannot read a stream');
-    // Local board streams use the local view's base and credential, separate from the relay client's own streams.
-    // One board has its own events; a group's local repos share one multiplexed stream (#600).
+    // The stream goes where every API read goes: the serving host's base, with its credential headers. One board has
+    // its own events; a group's repos share one multiplexed stream (#600).
     const single = entry.boards.length === 1;
-    const path = localReadBase + (single ? '/api/v1/boards/' + encodeURIComponent(entry.boards[0].id) + '/events'
+    const path = connection.base + (single ? '/api/v1/boards/' + encodeURIComponent(entry.boards[0].id) + '/events'
       : '/api/v1/events?boards=' + entry.boards.map((board) => encodeURIComponent(board.id)).join(','));
     const res = await fetch(path, {
-      headers: { ...localReadHeaders, accept: 'text/event-stream', 'last-event-id': entry.cursor }, cache: 'no-store', signal: controller.signal,
+      headers: { ...connection.headers, accept: 'text/event-stream', 'last-event-id': entry.cursor }, cache: 'no-store', signal: controller.signal,
     });
-    // This machine's view refused the hosted page's secret, as after a restart with a new one: go round again (#513).
-    if ((res.status === 401 || res.status === 403) && localSession && localReadBase === localSession.origin) { localExpired(); return; }
     if (!res.ok || !res.body) throw new Error('the board stream answered ' + res.status);
     entry.status = 'up';
     entry.offline = false;
@@ -2540,7 +2298,7 @@ async function loadAddressedShout() {
     entry.shout = reply.shout;
   } catch (error) {
     const message = String(error.message || error);
-    entry.error = relayProject(root) && !message.includes('NO_SHOUT')
+    entry.error = transportModule && !message.includes('NO_SHOUT')
       ? 'This shout is older than the relay holds. Open its address in the local project view.'
       : 'No shout #' + id + ' exists here. ' + message;
   }
@@ -2761,7 +2519,7 @@ async function code(ref, before) {
     render();
     return;
   }
-  if (relayProject(view.root)) {
+  if (transportModule) {
     c.error = 'Source code is unavailable in a relay view; open this reference in the local project view.';
     render();
     return;
@@ -2781,7 +2539,7 @@ async function showAllCode(ref, before) {
   const c = view.code[root + '\\n' + before + '\\n' + ref];
   const parts = codeReferenceParts(ref);
   if (!c || c.allLoading) return;
-  if (relayProject(root)) { c.error = 'Source code is unavailable in a relay view; open this reference in the local project view.'; render(); return; }
+  if (transportModule) { c.error = 'Source code is unavailable in a relay view; open this reference in the local project view.'; render(); return; }
   if (!parts) { c.error = 'Code reference has an invalid path, range or commit SHA.'; render(); return; }
   c.error = null;
   c.allLoading = true;
@@ -2955,7 +2713,6 @@ function trapFocus(event) {
  */
 async function decideRow(kind, command, args, anchor) {
   if (snapshot || (readOnly && !requests)) return false;
-  const requestMode = requests;
   const root = view.root, scroll = window.scrollY;
   const ids = String(args.ids).split(/\s+/);
   const prefix = kind + ':';
@@ -2966,15 +2723,15 @@ async function decideRow(kind, command, args, anchor) {
   view.specFeedback = feedback;
   render();
   // A waiting request keeps its row; let browser anchoring follow growth above it.
-  if (!requestMode) window.scrollTo({ top: scroll, behavior: 'instant' });
+  if (!requests) window.scrollTo({ top: scroll, behavior: 'instant' });
   try {
     const move = pageMove(command, kind === 'doctrine' ? { ...args, ids: ids.map((id) => 'doctrine:' + id).join(' ') } : args);
-    const result = requestMode ? await sendPersonRequest(root, move.body) : await api(boardPath(root) + '/moves', move.body);
-    const request = requestMode && result?.result?.request;
-    if (requestMode && (!request?.id || !['waiting', 'done', 'refused'].includes(request.status))) throw new Error('The request did not include its status; refresh the board to check it.');
-    feedback.tone = requestMode ? request.status === 'done' ? 'ok' : request.status === 'refused' ? 'no' : '' : 'ok';
-    feedback.text = requestMode ? requestNotice(request) : moveMessage(move.body, result.result);
-    if (requestMode) { feedback.requestId = request.id; feedback.status = request.status; }
+    const result = requests ? await sendPersonRequest(root, move.body) : await api(boardPath(root) + '/moves', move.body);
+    const request = requests && result?.result?.request;
+    if (requests && (!request?.id || !['waiting', 'done', 'refused'].includes(request.status))) throw new Error('The request did not include its status; refresh the board to check it.');
+    feedback.tone = requests ? request.status === 'done' ? 'ok' : request.status === 'refused' ? 'no' : '' : 'ok';
+    feedback.text = requests ? requestNotice(request) : moveMessage(move.body, result.result);
+    if (requests) { feedback.requestId = request.id; feedback.status = request.status; }
     // Decided from the list, the pick moves on to the next row before the board redraws without the decided one, so
     // the next key decides that one.
     if (feedback.from === 'list' && feedback.tone !== 'no' && next && view.row[kind] === ids[0] && root === view.root) view.row[kind] = next;
@@ -2985,7 +2742,7 @@ async function decideRow(kind, command, args, anchor) {
   }
   if (root === view.root && view.specFeedback === feedback) {
     render();
-    if (!requestMode) window.scrollTo({ top: scroll, behavior: 'instant' });
+    if (!requests) window.scrollTo({ top: scroll, behavior: 'instant' });
     // A phone row click jumps to its detail. A later list-key decision returns the next pick to view,
     // instead of restoring that detail's scroll position with the focused list still offscreen.
     if (feedback.from === 'list' && feedback.tone === 'ok' && next && view.row[kind] === next) {
@@ -2994,16 +2751,15 @@ async function decideRow(kind, command, args, anchor) {
       // Center an offscreen pick: nearest can round a half-pixel edge just outside the viewport.
       if (rect && (rect.top < 0 || rect.bottom > innerHeight)) picked.scrollIntoView({ block: 'center', behavior: 'instant' });
     }
-    if (!requestMode || feedback.status === 'done') setTimeout(() => { if (view.specFeedback === feedback) { view.specFeedback = null; render(); } }, 6000);
+    if (!requests || feedback.status === 'done') setTimeout(() => { if (view.specFeedback === feedback) { view.specFeedback = null; render(); } }, 6000);
   }
-  return requestMode ? Boolean(feedback.requestId) && feedback.status !== 'refused' : feedback.tone === 'ok';
+  return requests ? Boolean(feedback.requestId) && feedback.status !== 'refused' : feedback.tone === 'ok';
 }
 
 /** Run a public API move beside its action and let only the latest one own the console and timer. */
 async function act(command, args, anchor) {
   const out = $('console');
   if (snapshot || (readOnly && !requests)) { out.hidden = false; out.className = 'console no'; out.textContent = snapshot ? 'This is a read-only snapshot.' : 'This is a read-only view.'; return false; }
-  const requestMode = requests;
   // A form's result stands above its actions, or above the shout composer's bar, never inside that one row.
   if (anchor) {
     const target = anchor.matches('form')
@@ -3018,28 +2774,28 @@ async function act(command, args, anchor) {
   clearTimeout(view.closing);
   out.hidden = false;
   out.className = 'console';
-  out.textContent = requestMode ? 'Request waiting…' : 'running…';
+  out.textContent = requests ? 'Request waiting…' : 'running…';
   out.scrollIntoView({ block: 'nearest' });
   try {
     // On the local view the person's word to the coordinator is the person's own request, not a shout the
     // coordinator sends itself; through the relay every action is already a sealed request.
-    const asked = command === 'request' && !requestMode;
+    const asked = command === 'request' && !requests;
     const move = asked ? null : pageMove(command === 'request' ? 'shout' : command, command === 'request' ? { to: 'coordinator', text: args.text } : args);
     const result = asked ? await api(boardPath(root) + '/requests', { text: String(args.text || '').trim() })
-      : requestMode ? await sendPersonRequest(root, move.body) : await api(boardPath(root) + '/moves', move.body);
-    const request = requestMode && result?.result?.request;
-    if (requestMode && (!request?.id || !['waiting', 'done', 'refused'].includes(request.status))) throw new Error('The request did not include its status; refresh the board to check it.');
+      : requests ? await sendPersonRequest(root, move.body) : await api(boardPath(root) + '/moves', move.body);
+    const request = requests && result?.result?.request;
+    if (requests && (!request?.id || !['waiting', 'done', 'refused'].includes(request.status))) throw new Error('The request did not include its status; refresh the board to check it.');
     if (latest()) {
-      out.className = 'console' + (requestMode ? request.status === 'done' ? ' ok' : request.status === 'refused' ? ' no' : '' : ' ok');
-      out.textContent = requestMode ? requestNotice(request) : asked ? 'Sent to the coordinator.' : '$ pullboard ' + move.label + '\\n' + moveMessage(move.body, result.result);
-      if (requestMode) view.request = { root, id: request.id, run };
+      out.className = 'console' + (requests ? request.status === 'done' ? ' ok' : request.status === 'refused' ? ' no' : '' : ' ok');
+      out.textContent = requests ? requestNotice(request) : asked ? 'Sent to the coordinator.' : '$ pullboard ' + move.label + '\\n' + moveMessage(move.body, result.result);
+      if (requests) view.request = { root, id: request.id, run };
       out.scrollIntoView({ block: 'center' });
       // What went through says so and then steps aside; a refusal stays until the person closes it.
-      if (!requestMode || request.status === 'done') view.closing = setTimeout(() => { if (latest()) out.hidden = true; }, 6000);
+      if (!requests || request.status === 'done') view.closing = setTimeout(() => { if (latest()) out.hidden = true; }, 6000);
     }
     await refresh();
     // The result was already revealed. A late refresh must not scroll after the person aims at the next action.
-    return !requestMode || request.status !== 'refused';
+    return !requests || request.status !== 'refused';
   } catch (error) {
     if (latest()) {
       out.className = 'console no';
@@ -3085,7 +2841,6 @@ function switchTo(root, target = null, record = true) {
   const generation = ++switchGeneration;
   answer(null);
   view.root = root;
-  syncBoardMode(root);
   const item = typeof target === 'number' ? target : /^item:(\\d+)$/.exec(target || '');
   const requestedItem = typeof item === 'number' ? item : item ? Number(item[1]) : null;
   view.item = requestedItem;
@@ -3342,12 +3097,7 @@ document.addEventListener('keydown', (event) => {
 });
 $('add-form').addEventListener('submit', async (event) => {
   event.preventDefault();
-  const root = view.root;
-  const submitted = { lane: $('add-lane').value, title: $('add-title').value, criterion: $('add-criterion').value, specs: $('add-specs').value, brief: $('add-brief').value };
-  if (await act('add', submitted, event.currentTarget) && view.root === root
-      && $('add-lane').value === submitted.lane && $('add-title').value === submitted.title
-      && $('add-criterion').value === submitted.criterion && $('add-specs').value === submitted.specs
-      && $('add-brief').value === submitted.brief) {
+  if (await act('add', { lane: $('add-lane').value, title: $('add-title').value, criterion: $('add-criterion').value, specs: $('add-specs').value, brief: $('add-brief').value }, event.currentTarget)) {
     $('add-title').value = '';
     $('add-criterion').value = '';
     $('add-specs').value = '';
@@ -3372,10 +3122,7 @@ $('shout-form').addEventListener('submit', async (event) => {
 });
 $('hold-form').addEventListener('submit', async (event) => {
   event.preventDefault();
-  const root = view.root;
-  const submitted = { lane: $('hold-lane').value, reason: $('hold-reason').value };
-  if (await act('hold', submitted, event.currentTarget) && view.root === root
-      && $('hold-lane').value === submitted.lane && $('hold-reason').value === submitted.reason) $('hold-reason').value = '';
+  if (await act('hold', { lane: $('hold-lane').value, reason: $('hold-reason').value }, event.currentTarget)) $('hold-reason').value = '';
 });
 // The first entry keeps the tab it opened on; Back and Forward show what each entry names.
 address(false);
@@ -3388,24 +3135,8 @@ if (snapshot) {
     if (snapshotReplay.playing) { clearTimeout(snapshotReplay.timer); snapshotReplay.timer = setTimeout(advanceReplay, 1000 / Number($('replay-speed').value)); }
   });
 }
-if (hosted.local) $('local-note-retry').addEventListener('click', () => {
-  localProblem = null;
-  tabValue(LOCAL_TRIPS, null);
-  // Reload both source-scoped connections together when relay streams are already active.
-  if (transport) { location.reload(); return; }
-  connectLocal().then((local) => local === 'local' ? refresh() : null).catch((error) => localNote(error.message, true));
-});
 /** Load an explicitly configured transport before the first read; its updates refresh this page. */
 async function startPage() {
-  // The hosted page reads this machine's view when it can. When it cannot, it is the relay page as before, for a
-  // person signed in to the relay; anyone else sees why, and the ways on.
-  let local = 'unreachable';
-  if (hosted.local && !relayPairing) {
-    if (localProblem) localNote(localProblem, true);
-    else local = await connectLocal();
-    if (local === 'away') return;
-    if (local === 'unreachable' && !hosted.relaySession) { hideRelayNotice(); return; }
-  }
   if (transportModule) {
     try {
       const module = await import(transportModule);
@@ -3415,18 +3146,16 @@ async function startPage() {
       transport = configured;
     } catch (error) {
       transportLoadError = error;
-      if (hosted.local && local === 'local') localNote('Linked boards are unavailable: ' + String(error.message || error), true);
-      else throw error;
+      throw error;
     }
   }
   await refresh();
 }
 startPage().catch((error) => { document.body.classList.remove('loading'); $('live').textContent = 'cannot reach the view: ' + error.message; });
 // The relay transport keeps its own stream and timer. The local view reads on a timer only while it has no live
-// stream, and its live line says so (#545). Each timer asks which the page uses as it fires: the hosted page starts
-// out on the relay and turns to this machine's view once it reaches it (#513).
-if (!snapshot) setInterval(() => { if (!document.hidden && transportModule && transport) refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }); }, 3000);
-if (!snapshot) setInterval(() => { if (!document.hidden && !transportModule && !connected()) refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }); }, FALLBACK_MS);
+// stream, and its live line says so (#545).
+if (!snapshot && transportModule) setInterval(() => { if (!document.hidden && transport) refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }); }, 3000);
+if (!snapshot && !transportModule) setInterval(() => { if (!document.hidden && !connected()) refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }); }, FALLBACK_MS);
 setInterval(tickAges, 60000);
 </script>
 </body>
