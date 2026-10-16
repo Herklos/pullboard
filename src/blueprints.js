@@ -350,8 +350,51 @@ function insertSection(source, spec, { existing, name, lines: added }) {
 // or a home-relative path. Bare names such as Next.js are words, not paths.
 const PATH_RE = /(?:^|[\s(`'"[])(?:~\/|\.{1,2}\/|\/)?[^\s/\\`'"()[\]]+[/\\][^\s`'"()[\]]+|(?:^|[\s(`'"[])~\//u;
 const EMAIL_RE = /[^\s@<>()[\]`'"]+@[^\s@<>()[\]`'"]+\.[^\s@<>()[\]`'"]+/u;
-const QUESTION_RE = /^(.+?): (.+)\. Choices: (.+)\.$/u;
-const RULE_RE = /^(.+?) Why: (.+)$/u;
+const CHOICES = '. Choices: ';
+const WHY = ' Why: ';
+const MOST_CHOICE_PARTS = 12;
+
+/** Every index where a separator starts in the text. */
+function positions(text, separator) {
+  const found = [];
+  for (let at = text.indexOf(separator); at !== -1; at = text.indexOf(separator, at + 1)) found.push(at);
+  return found;
+}
+
+/**
+ * Read an approved question row back into its ask, choices and answer, or say why it cannot be.
+ * The ask and the choices may hold ": " and ", ", so every split is tried: a reading counts only if
+ * its answer is one of two or more choices and questionText gives back the exact row text. One
+ * reading is kept; none or several leave the row out, so a save never changes a question [S1].
+ *
+ * @param {string} text
+ * @returns {{ question?: { ask: string, choices: string[], default: string }, reason?: string } | null} null when the row is no question
+ */
+function readQuestion(text) {
+  if (!text.endsWith('.') || !text.includes(CHOICES)) return null;
+  const readings = new Map();
+  for (const at of positions(text, CHOICES)) {
+    const head = text.slice(0, at);
+    const tokens = text.slice(at + CHOICES.length, -1).split(', ');
+    if (tokens.length > MOST_CHOICE_PARTS) return { reason: 'its choices are too many to read back exactly' };
+    for (const colon of positions(head, ': ')) {
+      const ask = head.slice(0, colon);
+      const answer = head.slice(colon + 2);
+      for (let mask = 0; mask < 2 ** (tokens.length - 1); mask += 1) {
+        const choices = [tokens[0]];
+        for (let index = 1; index < tokens.length; index += 1) {
+          if (mask & (2 ** (index - 1))) choices[choices.length - 1] += `, ${tokens[index]}`;
+          else choices.push(tokens[index]);
+        }
+        const question = { ask, choices, default: answer };
+        if (choices.length < 2 || !choices.includes(answer) || [ask, ...choices].some((part) => !part.trim() || part !== part.trim())) continue;
+        if (questionText(question) === text) readings.set(JSON.stringify(question), question);
+      }
+    }
+  }
+  if (readings.size === 1) return { question: [...readings.values()][0] };
+  return { reason: readings.size ? 'its question can be read more than one way' : 'its answer is not one of its choices, or its choices cannot be read back exactly' };
+}
 
 /**
  * Name why a piece of text may not leave this board, or return null when it may. Text that holds
@@ -399,25 +442,30 @@ export function saveBlueprint(spec, { name, title, gate, names, parts = [] }) {
     const text = String(row.text ?? '').trim();
     const privacy = privateTextReason(text, names, parts);
     if (privacy) { left.push({ id: row.id, reason: `it holds ${privacy}` }); continue; }
-    const question = QUESTION_RE.exec(text);
-    if (question) {
-      const choices = question[3].split(', ').map((choice) => choice.trim()).filter(Boolean);
-      const answer = question[2].trim();
-      if (!choices.includes(answer)) choices.push(answer);
-      if (choices.length < 2) { left.push({ id: row.id, reason: 'its question has fewer than two choices' }); continue; }
-      questions.push({ key: row.id, ask: question[1].trim(), choices, default: answer });
+    const asked = readQuestion(text);
+    if (asked) {
+      if (asked.reason) left.push({ id: row.id, reason: asked.reason });
+      else questions.push({ key: row.id, ...asked.question });
       continue;
     }
-    const rule = RULE_RE.exec(text);
-    if (!rule) { left.push({ id: row.id, reason: 'it has no "Why:" reason to carry' }); continue; }
-    rules.push({ key: row.id, text: rule[1].trim(), why: rule[2].trim(), tier: row.tier === 'aim' ? 'aim' : 'must', gate: 'review' });
+    // A rule carries exactly one reason, so the split is never a guess.
+    const reasons = positions(text, WHY);
+    if (reasons.length !== 1) { left.push({ id: row.id, reason: reasons.length ? 'it has more than one "Why:", so its reason cannot be read back exactly' : 'it has no "Why:" reason to carry' }); continue; }
+    const rule = { text: text.slice(0, reasons[0]), why: text.slice(reasons[0] + WHY.length) };
+    if (!rule.text.trim() || !rule.why.trim() || ruleText(rule) !== text) { left.push({ id: row.id, reason: 'its rule cannot be read back exactly' }); continue; }
+    rules.push({ key: row.id, ...rule, tier: row.tier === 'aim' ? 'aim' : 'must', gate: 'review' });
   }
-  const slug = String(name ?? '').normalize('NFKD').toLowerCase().replace(/[̀-ͯ]/gu, '').replace(/[^a-z0-9]+/gu, '-').replace(/^-|-$/gu, '') || 'board';
+  // The project's own name leaves only if no private name hides in it, in any case or spelling.
+  const strict = [...names, ...parts];
+  const loose = (text) => privateTextReason(text, strict) || privateTextReason(text.replace(/[^\p{L}\p{N}]+/gu, ' '), strict);
+  const raw = String(name ?? '').trim();
+  const slug = raw.normalize('NFKD').toLowerCase().replace(/[\u0300-\u036f]/gu, '').replace(/[^a-z0-9]+/gu, '-').replace(/^-|-$/gu, '');
+  const safeName = slug && !loose(raw) && !loose(slug) ? slug : 'board';
   const cleanTitle = String(title ?? '').trim();
   const value = {
     blueprint: BLUEPRINT_FORMAT,
-    name: slug,
-    title: cleanTitle && !/[\r\n|]/u.test(cleanTitle) && !privateTextReason(cleanTitle, names, parts) ? cleanTitle : slug,
+    name: safeName,
+    title: cleanTitle && !/[\r\n|]/u.test(cleanTitle) && !loose(cleanTitle) ? cleanTitle : safeName,
     version: 1,
     ...(gate?.trim() && !/[\r\n|]/u.test(gate) && !privateTextReason(gate.trim(), names, parts) ? { gate: gate.trim() } : {}),
     ...(rules.length ? { rules } : {}),
@@ -427,6 +475,6 @@ export function saveBlueprint(spec, { name, title, gate, names, parts = [] }) {
     throw new Refused('EMPTY_BLUEPRINT', `no approved row can leave this board${left.length ? ` (${left.length} left out: ${left.slice(0, 3).map((entry) => `${entry.id}, ${entry.reason}`).join('; ')})` : ''}; approve rules written as "<rule> Why: <reason>", then run pullboard blueprint save again`);
   }
   // Checked against the format blueprint add reads, then written exactly as allow-listed above.
-  validateBlueprint(value, `${slug}.blueprint.json`);
+  validateBlueprint(value, `${safeName}.blueprint.json`);
   return { blueprint: value, left };
 }

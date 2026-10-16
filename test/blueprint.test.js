@@ -229,6 +229,8 @@ test('a saved board adds back as the same rows [S1]', () => {
     '- K1 [approved, must] Every change ships with a test that fails without it. Why: a test that passes either way proves nothing. | gate: web/page.test.js | signers: DW',
     '- K2 [approved, aim] Every page works at phone width. Why: a page that only works on a laptop is a bug nobody reports. | gate: review',
     '- K3 [approved, must] The app is built with: SvelteKit. Choices: Next.js, SvelteKit, Rails. | gate: review',
+    '- K12 [approved, must] Deploy: where it goes: Fly.io. Choices: Vercel, Fly.io. | gate: review',
+    '- K13 [approved, must] People sign in with: Email, then a link. Choices: Email, then a link, Passwords. | gate: review',
   ];
   const planted = [
     '- K4 [approved, must] Logs live in web/logs/app.js. Why: one place to look. | gate: review',
@@ -239,9 +241,14 @@ test('a saved board adds back as the same rows [S1]', () => {
     '- K9 [approved, must] The page renders without a reason. | gate: review',
     '- K10 [draft, must] A draft never leaves. Why: nobody decided it. | gate: review',
     '- K11 [pending, must] Deploys go to: Vercel. Choices: Vercel, Fly.io. | gate: review',
+    '- K14 [approved, must] Pick one: x. Choices: x, y, z, w. | gate: review',
+    '- K15 [approved, must] Pick a host: Rails. Choices: Vercel, Fly.io. | gate: review',
+    '- K16 [approved, must] A rule. Why: one. Why: two. | gate: review',
   ];
+  const config = JSON.parse(readFileSync(join(box.repo, 'pullboard.json'), 'utf8'));
+  writeFileSync(join(box.repo, 'pullboard.json'), JSON.stringify({ ...config, name: 'Dana Whitlock board' }, null, 2));
   writeFileSync(join(box.repo, 'SPEC.md'), `${readFileSync(join(box.repo, 'SPEC.md'), 'utf8')}\n## K · Kept\n\n<!-- pullboard-blueprint kept 1 -->\n<!-- pullboard-blueprint kept 2 adding K1=K1 K3=K3 -->\n${[...kept, ...planted].join('\n')}\n`);
-  box.git(box.repo, 'add', 'SPEC.md');
+  box.git(box.repo, 'add', 'SPEC.md', 'pullboard.json');
   box.git(box.repo, 'commit', '-q', '-m', 'chore: plant private rows');
   const item = box.run(box.repo, 'add', 'web', 'Private item title zebra', '--specs', 'G1', '--criterion', 'secret criterion walrus');
   assert.equal(item.code, 0, item.err);
@@ -249,16 +256,17 @@ test('a saved board adds back as the same rows [S1]', () => {
 
   const saved = box.run(box.repo, 'blueprint', 'save', '--json');
   assert.equal(saved.code, 0, `${saved.err}\n${saved.out}`);
-  assert.deepEqual(JSON.parse(saved.out).left.map((entry) => entry.id).sort(), ['G1', 'G2', 'K4', 'K5', 'K6', 'K7', 'K8', 'K9'], 'only clean, reasoned approved rows leave');
-  const file = join(box.repo, 'repo.blueprint.json');
+  assert.deepEqual(JSON.parse(saved.out).left.map((entry) => entry.id).sort(), ['G1', 'G2', 'K14', 'K15', 'K16', 'K4', 'K5', 'K6', 'K7', 'K8', 'K9'], 'only clean, exactly readable approved rows leave');
+  const file = join(box.repo, 'Dana Whitlock board.blueprint.json');
   const text = readFileSync(file, 'utf8');
   for (const secret of ['web/', '@', 'Dana', 'Whitlock', 'web-1', machine, 'zebra', 'walrus', 'narwhal', 'signers', 'DW', 'items', 'pullboard-blueprint', 'Logs live', 'draft never', 'Deploys go']) {
     assert.ok(!text.includes(secret), `the blueprint never carries ${JSON.stringify(secret)}`);
   }
   const blueprint = JSON.parse(text);
+  assert.deepEqual([blueprint.name, blueprint.title], ['board', 'board'], 'a project named after a person leaves as board');
   assert.deepEqual(Object.keys(blueprint).sort(), ['blueprint', 'gate', 'name', 'questions', 'rules', 'title', 'version'], 'only allow-listed fields are written');
   assert.deepEqual(blueprint.rules.map((rule) => Object.keys(rule).sort()), [['gate', 'key', 'text', 'tier', 'why'], ['gate', 'key', 'text', 'tier', 'why']]);
-  assert.deepEqual(blueprint.questions.map((question) => Object.keys(question).sort()), [['ask', 'choices', 'default', 'key']]);
+  assert.deepEqual(blueprint.questions.map((question) => Object.keys(question).sort()), Array(3).fill(['ask', 'choices', 'default', 'key']));
   assert.equal(box.run(box.repo, 'blueprint', 'save', '--json').code, 1, 'an existing file is never overwritten');
 
   const fresh = e2e.project();
@@ -270,6 +278,8 @@ test('a saved board adds back as the same rows [S1]', () => {
     ['draft', 'must', 'Every change ships with a test that fails without it. Why: a test that passes either way proves nothing.'],
     ['draft', 'aim', 'Every page works at phone width. Why: a page that only works on a laptop is a bug nobody reports.'],
     ['pending', 'must', 'The app is built with: SvelteKit. Choices: Next.js, SvelteKit, Rails.'],
-  ], 'the approved rows come back as drafts, the answered question with its answer as the default');
+    ['pending', 'must', 'Deploy: where it goes: Fly.io. Choices: Vercel, Fly.io.'],
+    ['pending', 'must', 'People sign in with: Email, then a link. Choices: Email, then a link, Passwords.'],
+  ], 'the approved rows come back as drafts, each answered question exactly, its answer the default');
   assert.deepEqual(JSON.parse(fresh.run(fresh.repo, 'list', '--json').out).items ?? [], [], 'a saved blueprint files no items');
 });
