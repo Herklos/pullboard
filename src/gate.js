@@ -13,7 +13,7 @@ import { gitChildEnv, gitPath, headTree, invalidateGitFacts, isClean, untracked 
 import { secretsIn } from './hooks.js';
 import { Refused } from './refused.js';
 import { GATE_SLOT_HELD_ENV, gateSlotEnvironment, inheritedGateSlot, takeResource } from './resources.js';
-import { loadMachineSettings } from './settings.js';
+import { browserFreeChecksEnabled, loadMachineSettings } from './settings.js';
 import { selectAffectedTests } from './affected-tests.js';
 import { checkNeedsBrowser, testsNeedBrowser } from './browser-admission.js';
 import { timingFromOutput, timingRunner } from './timing.js';
@@ -362,8 +362,10 @@ export async function runSubmitGate(root, config, { base, trunk, changed, check,
     : { full: true, reason: 'affected-test selection is not enabled for this project', files: [] };
   const deferred = config.submitGate === 'landing';
   const deferFullFallback = deferred && selection.full;
-  const checkUsesBrowser = check ? await checkNeedsBrowser(root, check, { onFallback: onBrowserFallback }) : false;
-  const browser = checkUsesBrowser || (!deferFullFallback && (selection.full || await testsNeedBrowser(root, selection.files, { onFallback: onBrowserFallback })));
+  const allowBrowserFreeChecks = browserFreeChecksEnabled();
+  const checkUsesBrowser = check ? (!allowBrowserFreeChecks || await checkNeedsBrowser(root, check, { onFallback: onBrowserFallback })) : false;
+  const proofUsesBrowser = !deferFullFallback && (selection.full || !allowBrowserFreeChecks || await testsNeedBrowser(root, selection.files, { onFallback: onBrowserFallback }));
+  const browser = checkUsesBrowser || proofUsesBrowser;
   return await withGateSlot(root, (lease) => {
     const startedAt = Date.now();
     const log = gitPath(root, 'pullboard-submit.log');
