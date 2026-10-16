@@ -144,7 +144,7 @@ test('captured person decisions and coordinator apply replay identically without
 });
 
 test('engine 12 records preserved decline text and replays a separate reason [S18,S19,H16]', (t) => {
-  assert.equal(ENGINE_VERSION, 12);
+  assert.ok(ENGINE_VERSION >= 12);
   const { source, copies: [one, two] } = decisionCopies(t);
   const preserved = {
     kind: 'spec', file: 'SPEC.md', id: 'G2',
@@ -161,10 +161,10 @@ test('engine 12 records preserved decline text and replays a separate reason [S1
     agentId: 'person', channel: 'view', decisions: [legacy],
   }), { code: 'ROW_DECISION' }, 'engine 12 refuses a new legacy-shaped decline');
 
-  const move = prepareEngineMove(one, 'recordRowDecisions', [{
+  const move = { ...prepareEngineMove(one, 'recordRowDecisions', [{
     agentId: 'person', channel: 'view', decisions: [preserved],
-  }], { id: 'engine-12-preserved-decline' });
-  assert.equal(move.engine, ENGINE_VERSION);
+  }], { id: 'engine-12-preserved-decline' }), engine: 12 };
+  assert.equal(move.engine, 12);
   const first = applyEngineMove(one, move, { sequence: 1, at: RECORDED_AT });
   const second = applyEngineMove(two, move, { sequence: 1, at: RECORDED_AT });
   assert.deepEqual(first, second);

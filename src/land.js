@@ -7,6 +7,7 @@ import { git, headCommit, headTree, isClean, mainCheckout, repoInfo, tryGit, unt
 import { runGate, runProfiledShell, withGateSlot } from './gate.js';
 import { laneOf } from './lanes.js';
 import { Refused } from './refused.js';
+import { staleVerdictRefusal, verdictProjector } from './verdict-freshness.js';
 
 /** Quote a command argument without allowing shell interpolation. */
 function quote(value) { return `'${String(value).replaceAll("'", "'\\''")}'`; }
@@ -59,6 +60,7 @@ export function landingSubject(item) {
 /** Select verified, unmerged candidates in verdict order, retaining dependency order [B3,R3]. */
 function candidates(board, root, base, maximum) {
   const all = store.listItems(board, { all: true });
+  const projector = verdictProjector(root, board, { main: base });
   const pending = all.filter((item) => item.item_status === 'verified' && !item.item_merged_commit);
   const order = new Map();
   for (const event of store.events(board)) if (event.event_kind === 'accept') order.set(event.item_id, event.event_id);
@@ -67,6 +69,8 @@ function candidates(board, root, base, maximum) {
   const blocked = [];
   const knownReds = store.landingBatches(board).flatMap((batch) => batch.culprits ?? []);
   for (const item of pending) {
+    const stale = projector.state(item);
+    if (stale) { blocked.push({ id: item.item_id, ...stale }); continue; }
     const known = knownReds.find((entry) => entry.id === item.item_id && entry.commit === item.item_commit);
     if (known && !known.tests.every((failure) => store.landingWaiverFor(board, failure))) {
       blocked.push({ id: item.item_id, code: 'LAND_KNOWN_RED', tests: known.tests });
@@ -103,6 +107,8 @@ async function mergeGroup(state, items) {
   for (const entry of items) {
     const item = store.getItem(state.board, entry.id ?? entry.item_id);
     if (item.item_status !== 'verified' || item.item_commit !== (entry.commit ?? item.item_commit)) throw new Refused('LAND_ITEM_MOVED', `item #${item.item_id} changed; rebuild the batch from current verified work`);
+    const stale = verdictProjector(state.root, state.board, { main: batch.base }).state(item);
+    if (stale) throw staleVerdictRefusal(item, stale);
     const result = tryGit(batch.root, ['merge', '--no-ff', item.item_commit, '-m', landingSubject(item)]);
     if (result.status !== 0) {
       const files = tryGit(batch.root, ['diff', '--name-only', '--diff-filter=U']).stdout.split('\n').filter(Boolean);
@@ -262,6 +268,8 @@ export async function land({ root, board, config, write, say, owner, maximum = I
   if (!trunk?.commit) throw new Refused('LAND_TRUNK', 'landing needs the coordinator’s primary branch; return its checkout to the trunk');
   const unfinished = store.landingBatches(board).findLast((batch) => batch.state !== 'landed' && batch.state !== 'blocked');
   const selected = candidates(board, root, trunk.commit, maximum);
+  const stale = selected.blocked.find(item => item.code === 'STALE_VERDICT');
+  if (!selected.ready.length && stale) throw staleVerdictRefusal({ item_id: stale.id }, stale);
   if (dryRun) {
     const conflicts = [];
     for (const item of selected.ready) {

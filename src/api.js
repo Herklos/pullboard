@@ -17,6 +17,8 @@ import { proofStats } from './stats.js';
 import { prepareFlowHistory, projectFlowStats } from './stats-flow.js';
 import { projectRowDecisions } from './row-decisions.js';
 import { Refused } from './refused.js';
+import { verdictProjector } from './verdict-freshness.js';
+import { trunkRef } from './trusted-policy.js';
 import { codeAt, projectItemState, projectState } from './serve.js';
 import { relayPresentationShout } from './relay-presentation.js';
 import { createApiHandler } from './api-http.js';
@@ -26,7 +28,7 @@ export { moveArgs } from './api-moves.js';
 
 /** Inputs shared by the complete state cache and the lightweight live-change watcher. */
 const STATE_REVISION_INPUTS = Object.freeze([
-  'identity', 'head', 'files', 'event', 'agents', 'leases', 'requestReceipts', 'milestones', 'externalRoadmap', 'eventLogVersion',
+  'identity', 'head', 'trunk', 'files', 'event', 'agents', 'leases', 'requestReceipts', 'milestones', 'externalRoadmap', 'eventLogVersion',
 ]);
 
 /** Serialize named state inputs in one stable order for cache and stream comparisons. */
@@ -99,6 +101,7 @@ function boardStateRevision(root, id, isMain, { projects = listApiProjects, scop
   const inputs = {
     identity: [info.commonDir, id],
     head: resolveCommit(info.root, 'HEAD'),
+    trunk: trunkRevisionReader(info)(),
     files,
     event: local.event,
     agents: local.agents,
@@ -153,6 +156,36 @@ function headFileRevision(info) {
     }
     return packed.split('\n').find((line) => line.endsWith(' ' + ref))?.split(' ')[0] ?? head;
   }
+}
+
+const TRUNK_REVISION_READERS = new Map();
+
+/** Watch the primary trunk ref even when this served worktree's HEAD remains fixed [E8]. */
+function trunkRevisionReader(info) {
+  const cached = TRUNK_REVISION_READERS.get(info.commonDir);
+  if (cached) return cached;
+  let retainedMarker = null;
+  let retained = null;
+  /** Read loose or packed refs without spawning Git in every event-stream poll. */
+  const read = () => {
+    const head = readFileSync(join(info.commonDir, 'HEAD'), 'utf8').trim();
+    let ref = /^ref: (refs\/heads\/.+)$/u.exec(head)?.[1];
+    if (!ref) {
+      const marker = fileMarkerForPath(join(info.commonDir, 'config'));
+      if (marker !== retainedMarker) { retained = trunkRef(info.root); retainedMarker = marker; }
+      ref = retained;
+    }
+    if (!ref?.startsWith('refs/heads/') || ref.includes('\\') || ref.split('/').some(part => !part || part === '.' || part === '..')) return null;
+    try { return readFileSync(join(info.commonDir, ref), 'utf8').trim(); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    try {
+      return readFileSync(join(info.commonDir, 'packed-refs'), 'utf8').split('\n')
+        .find(line => line.endsWith(' ' + ref))?.split(' ')[0] ?? null;
+    } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  };
+  TRUNK_REVISION_READERS.set(info.commonDir, read);
+  while (TRUNK_REVISION_READERS.size > 32) TRUNK_REVISION_READERS.delete(TRUNK_REVISION_READERS.keys().next().value);
+  return read;
 }
 
 /**
@@ -245,6 +278,7 @@ function openRoadmapInputs(root, milestones, localDb, { scopeCommonDir = null } 
 /** Watch the same named state inputs as the cache without rebuilding a board-state response. */
 function watchLocalStateRevision(board, { scopeCommonDir = null } = {}) {
   const info = repoInfo(board.root);
+  const readTrunk = trunkRevisionReader(info);
   const config = loadConfig(info.root);
   let files = stateFileInputs(info.root, config);
   const dbPath = join(info.commonDir, 'pullboard', 'board.sqlite');
@@ -345,6 +379,7 @@ function watchLocalStateRevision(board, { scopeCommonDir = null } = {}) {
     return stateRevision({
       identity: [info.commonDir, board.id],
       head,
+      trunk: readTrunk(),
       files: fileContent,
       event: local.event,
       agents: local.agents,
@@ -399,8 +434,13 @@ function buildLocalBoardState(root, boardId, board, codeIsMain, { previous = nul
     }
 
     const config = loadConfig(root);
+    const freshness = verdictProjector(root, board, { main: trunkRevisionReader(repoInfo(root))() });
     const state = projectState(root, { seen: null, board, itemProjector: (item, context) => {
-      if (dirtyIds.has(item.item_id)) return context.project();
+      if (dirtyIds.has(item.item_id)) {
+        const projected = context.project();
+        const verdictState = freshness.state(item);
+        return verdictState ? { ...projected, verdictState } : projected;
+      }
       return previous.items.get(item.item_id);
     } });
     state.agents = state.agents.map((agent) => ({ ...agent, model: agent.agent_model ?? 'unknown', displayName: displayAgentName(agent, config.agents.names) }));
@@ -470,7 +510,7 @@ function milestoneNamesByItem(milestones) {
 
 /** What a board-state item summary keeps: what the lists and the roadmap read (A2, N26). */
 const SUMMARY_FIELDS = Object.freeze(['id', 'title', 'lane', 'status', 'route', 'milestone', 'specs', 'claim', 'builtBy',
-  'blockedBy', 'updatedAt', 'stage', 'since', 'counts', 'verdict']);
+  'blockedBy', 'updatedAt', 'stage', 'since', 'counts', 'verdict', 'verdictState']);
 const SUMMARY_KEYS = new Set(SUMMARY_FIELDS);
 const CLOCK_MOVES = MACHINE.moves.filter((move) => move.by.includes('clock'));
 
@@ -575,7 +615,7 @@ function itemSummary(item) {
 
 /** Everything a summary leaves out, with the latest verdict whole: laid over its summary, it is the full item. */
 function itemDetail(item) {
-  return Object.fromEntries(Object.entries(item).filter(([key]) => key === 'id' || key === 'verdict' || !SUMMARY_KEYS.has(key)));
+  return Object.fromEntries(Object.entries(item).filter(([key]) => key === 'id' || key === 'verdict' || key === 'verdictState' || !SUMMARY_KEYS.has(key)));
 }
 
 /** The text the view's search matches for an item, lowercased: its #id, title, lane, spec ids and criterion. */
@@ -892,6 +932,7 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
   const cookieKey = sessionCookie === undefined ? null : Buffer.from(sessionCookie.value);
   const permittedOrigins = new Set(allowedOrigins);
   const stateCache = new Map();
+  const verdictCache = new Map();
   // The fingerprints of the summary states each board's clients were sent, least recently sent
   // first, and the latest sequence a forgotten one had. A build only read for an item, a search or
   // a reset was never sent, so no client holds it and it is never a base.
@@ -910,7 +951,7 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
     const previous = cached.inputs;
     const current = before.inputs;
     if (!previous) return true;
-    return ['identity', 'head', 'files', 'eventLogVersion'].some((key) => JSON.stringify(previous[key]) !== JSON.stringify(current[key]));
+    return ['identity', 'head', 'trunk', 'files', 'eventLogVersion'].some((key) => JSON.stringify(previous[key]) !== JSON.stringify(current[key]));
   }
   /** Changed lease tuples include eventless claim/review expiry. */
   function changedLeaseItems(cached, before) {
@@ -1022,8 +1063,26 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
           if (row) status.set(dependency, row.item_status);
         }
         const base = projectItemState(currentBoard, source, status);
+        // Detail reads need no new Git process while the trunk and immutable receipt log hold.
+        const info = repoInfo(board.root);
+        const tip = trunkRevisionReader(info)();
+        const verdictCacheId = JSON.stringify([info.commonDir, board.id]);
+        const event = currentBoard.db.prepare('SELECT COALESCE(MAX(event_id), 0) AS id FROM event').get().id;
+        const revision = JSON.stringify([tip, event]);
+        let cachedVerdicts = verdictCache.get(verdictCacheId);
+        if (cachedVerdicts?.revision !== revision) {
+          cachedVerdicts = { revision, states: new Map() };
+          verdictCache.delete(verdictCacheId);
+          verdictCache.set(verdictCacheId, cachedVerdicts);
+          while (verdictCache.size > 32) verdictCache.delete(verdictCache.keys().next().value);
+        }
+        // The projector owns this transaction's connection; only derived values cross requests.
+        const verdictState = cachedVerdicts.states.has(id) ? cachedVerdicts.states.get(id)
+          : verdictProjector(board.root, currentBoard, { main: tip }).state(source);
+        cachedVerdicts.states.set(id, verdictState);
         const projected = {
           ...base,
+          ...(verdictState ? { verdictState } : {}),
           check: source.item_check,
           ...(source.item_check_baseline ? { checkBaseline: source.item_check_baseline } : {}),
           thread: store.itemThread(currentBoard, id),

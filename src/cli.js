@@ -76,6 +76,7 @@ import { serveApi } from './api.js';
 import { doctorProblems, doctrineProblems } from './doctor.js';
 import { staleFrozenItems, staleItemFinding } from './approved-rows.js';
 import { mainPolicy, policyAt, itemPolicy, submissionPaths, frozenCheck, checkAtCommit, dependencySnapshots, requireTrunkMerge, trunkRef } from './trusted-policy.js';
+import { captureVerdictReview, staleVerdictRefusal, verdictProjector, verdictTrunk } from './verdict-freshness.js';
 import { proofStats } from './stats.js';
 import { flowLines, flowAlertLine } from './stats-flow.js';
 import { releaseHeadlinesBetween } from './changelog.js';
@@ -841,8 +842,9 @@ function itemLine(item, name = (id) => id) {
   const after = item.item_after ? `  after ${item.item_after.split(',').map((id) => `#${id}`).join(',')}` : '';
   const rejected = item.item_status === 'open' && item.item_verdict === 'REJECT' ? ' (rejected)' : '';
   const light = item.item_route === 'strong' ? '' : `  ${item.item_route}`;
+  const staleVerdict = item.item_verdict_state ? `  ${item.item_verdict_state.code}` : '';
   const hold = item.item_hold_reason ? `  held by ${name(item.item_hold_by)}: ${item.item_hold_reason}` : '';
-  return `#${item.item_id}  ${item.item_status}${holder}${verifier}${rejected}  ${item.item_lane}  ${item.item_title}${specs}${parent}${after}${light}${hold}`;
+  return `#${item.item_id}  ${item.item_status}${holder}${verifier}${rejected}  ${item.item_lane}  ${item.item_title}${specs}${parent}${after}${light}${hold}${staleVerdict}`;
 }
 
 /** Format a stable agent id for human-facing CLI output. */
@@ -1033,6 +1035,10 @@ function coordinatorNext(card, rows) {
   if (card.toMerge.length) {
     const [first] = card.toMerge;
     return `merge #${first.item_id}: git merge --no-edit ${first.item_commit.slice(0, 12)}, run the gate, then pullboard merged ${first.item_id} <merge commit>`;
+  }
+  if (card.staleVerdicts?.length) {
+    const item = card.staleVerdicts[0];
+    return staleVerdictRefusal(item, item.item_verdict_state).message.replace(/^\[STALE_VERDICT\] /u, '');
   }
   if (card.open.length) {
     const lanes = [...new Set(card.open.map((item) => item.item_lane))];
@@ -1269,8 +1275,11 @@ function resumeHere(io) {
   const card = withBoard(ctx, (board) => {
     setupScope = setupIdentity(board);
     const me = whoAmI(ctx, board);
-    const all = store.listItems(board, { all: true });
-    const toMerge = all.filter((item) => item.item_status === 'verified' && !item.item_merged_commit);
+    const projector = verdictProjector(root, board);
+    const all = store.listItems(board, { all: true }).map(projector.project);
+    const pendingMerges = all.filter((item) => item.item_status === 'verified' && !item.item_merged_commit);
+    const toMerge = pendingMerges.filter(item => !item.item_verdict_state);
+    const staleVerdicts = pendingMerges.filter(item => item.item_verdict_state);
     const decisionSections = isMain ? coordinatorDecisionSections(board, ctx) : null;
     const { shouts = [], ...decisions } = decisionSections ?? {};
     return {
@@ -1286,6 +1295,7 @@ function resumeHere(io) {
       awaiting: all.filter((item) => item.item_status === 'submitted' && item.item_built_by === me.id),
       toVerify: all.filter((item) => item.item_status === 'submitted' && item.item_built_by !== me.id),
       toMerge,
+      staleVerdicts,
       ...(isMain ? { landingBatches: store.landingBatches(board) } : {}),
       open: all.filter((item) => item.item_status === 'open'),
       hold: store.laneHold(board, me.lane),
@@ -1354,6 +1364,7 @@ function resumeHere(io) {
   }
   if (isMain && card.staleFollowUps.count) say(`${plural(card.staleFollowUps.count, 'stale follow-up')}; list them with ${card.staleFollowUps.list}`);
   else if (!isMain) for (const item of card.stale) say(`stale: ${item.message}; next: ${item.next}`);
+  for (const item of card.staleVerdicts) say(staleVerdictRefusal(item, item.item_verdict_state).message);
   if (card.awaiting.length) say(`awaiting a verdict: ${card.awaiting.map((item) => `#${item.item_id} (${span(ctx, item.item_updated_at)})`).join(', ')}`);
   if (isMain) {
     for (const batch of card.landingBatches.filter((entry) => !['landed', 'blocked'].includes(entry.state))) say(`landing ${batch.id}: ${batch.state}, owner ${batch.owner}, tip ${batch.tip}; log ${batch.logPath}; next: pullboard land --adopt`);
@@ -1916,7 +1927,7 @@ function readCommands(io, { first, second, rest, values }) {
     list: () => {
       const ctx = context(io);
       const { items, agents } = withBoard(ctx, (board) => ({
-        items: store.listItems(board, { lane: first, all: values.all }),
+        items: store.listItems(board, { lane: first, all: values.all }).map(verdictProjector(ctx.info.root, board).project),
         agents: store.listAgents(board),
       }));
       const filtered = items.filter((item) => !values.route || item.item_route === values.route);
@@ -1945,7 +1956,7 @@ function readCommands(io, { first, second, rest, values }) {
       const ctx = context(io);
       const id = idArg(first);
       const { item, verdicts, moves, thread, related, reviewer, agents } = withBoard(ctx, (board) => ({
-        item: store.getItem(board, id),
+        item: verdictProjector(ctx.info.root, board).project(store.getItem(board, id)),
         verdicts: store.verdictsFor(board, id),
         moves: store.events(board, { itemId: id }).filter((event) => ['attempt', 'escalate'].includes(event.event_kind)),
         thread: store.itemThread(board, id),
@@ -1959,6 +1970,7 @@ function readCommands(io, { first, second, rest, values }) {
         return 0;
       }
       io.say(itemLine(item, agentName));
+      if (item.item_verdict_state) io.say(staleVerdictRefusal(item, item.item_verdict_state).message);
       if (item.item_criterion) io.say(`criterion: ${item.item_criterion}`);
       if (item.item_check) io.say(`check: ${item.item_check}`);
       sayCheckBaseline(io, item);
@@ -2388,7 +2400,9 @@ async function verifyHere(ctx, id, { second, values }) {
       return await ordered(ctx, board, 'verify', recovered.args);
     }
     const item = store.getItem(board, id);
-    if (item.item_status !== 'submitted') {
+    const reReview = item.item_status === 'verified' && !item.item_merged_commit;
+    const stale = reReview ? verdictProjector(root, board).state(item) : null;
+    if (item.item_status !== 'submitted' && !stale) {
       throw new Refused('NOT_SUBMITTED', `item #${id} is ${item.item_status}, not submitted`);
     }
     const policy = itemPolicy(root, item);
@@ -2400,6 +2414,7 @@ async function verifyHere(ctx, id, { second, values }) {
     }
     let digest = 'missing';
     let check;
+    let review;
     try {
       digest = freezer(ctx)(item).digest;
     } catch (error) {
@@ -2407,23 +2422,38 @@ async function verifyHere(ctx, id, { second, values }) {
     }
     if (decision === 'ACCEPT') {
       if (digest !== item.item_frozen_digest) throw new Refused('CRITERIA_CHANGED', 'the criterion changed; ask the coordinator to refreeze this item before checking it');
-      const trunk = requireTrunkMerge(root, commit);
-      refuseUnverifiedStack(root, board, item, commit, trunk);
-      const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(root, frozenCheck(item), { commit, onFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
-      check = await withGateSlot(root, (lease) => checkAtCommit(root, item, { waitMs: lease.waitMs, gateLease: lease }), { browser, agent: me.id, item: String(id), kind: 'review', itemCheck: true, onWait: gateWaitReporter(ctx.io) });
+      const checkedCommit = reReview ? head : commit;
+      const checkedLabel = reReview ? 'reviewed composition' : 'submitted commit';
+      const trunk = requireTrunkMerge(root, checkedCommit);
+      if (reReview) {
+        if (!isClean(root)) throw new Refused('DIRTY', 'commit the reviewed composition before re-reviewing the stale verdict');
+        if (untracked(root).length) throw new Refused('UNTRACKED', 'commit or ignore untracked files before re-reviewing the stale verdict');
+        if (!contains(root, trunk.commit, head)) throw staleVerdictRefusal(item, stale);
+      }
+      review = captureVerdictReview(root, board, item, trunk.commit);
+      refuseUnverifiedStack(root, board, item, checkedCommit, trunk);
+      const checkedItem = reReview ? { ...item, item_commit: checkedCommit } : item;
+      const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(root, frozenCheck(item), { commit: checkedCommit, onFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
+      check = await withGateSlot(root, (lease) => checkAtCommit(root, checkedItem, { waitMs: lease.waitMs, gateLease: lease }), { browser, agent: me.id, item: String(id), kind: 'review', itemCheck: true, onWait: gateWaitReporter(ctx.io) });
+      invalidateGitFacts(); // A private check can outlive changes in the reviewer's live checkout.
       verificationProfile = check.profile ?? null;
       const evidence = check.checked
         ? `\nlast output lines (up to 40):\n${(check.outputTail ?? '(no output)').split('\n').map((line) => `  ${line}`).join('\n')}\nfull output file: ${check.outputPath ?? `(unavailable${check.outputError ? `: ${check.outputError}` : ''})`}`
         : '';
       const checkTimings = timingDigest(check.profile);
       const timingEvidence = check.profilePath ? `\n${checkTimings}\ntiming profile: ${check.profilePath}` : '';
-      if (check.state === 'unverified') throw new Refused('CHECK_UNVERIFIED', `the frozen ${check.stage} could not be verified at the submitted commit; restore the install or check environment, then retry verification; output digest:\n${check.report.replace(/^/gm, '  ')}${evidence}${timingEvidence}`);
-      if (check.state === 'red') throw new Refused('CHECK_RED', `the frozen item check is red at the submitted commit (${check.stage}); check.install may be needed for dependencies; reject with the failing behavior or ask the builder to fix and resubmit; output digest:\n${check.report.replace(/^/gm, '  ')}${evidence}${timingEvidence}`);
+      if (check.state === 'unverified') throw new Refused('CHECK_UNVERIFIED', `the frozen ${check.stage} could not be verified at the ${checkedLabel}; restore the install or check environment, then retry verification; output digest:\n${check.report.replace(/^/gm, '  ')}${evidence}${timingEvidence}`);
+      if (check.state === 'red') throw new Refused('CHECK_RED', `the frozen item check is red at the ${checkedLabel} (${check.stage}); check.install may be needed for dependencies; reject with the failing behavior or ask the builder to fix and resubmit; output digest:\n${check.report.replace(/^/gm, '  ')}${evidence}${timingEvidence}`);
       const receipt = store.events(board, { itemId: id }).filter(event => event.event_kind === 'submit').map(event => JSON.parse(event.event_detail)).find(event => event.commit === commit);
       submissionPaths(root, item, commit, { mainCommit: receipt?.policyCommit, dependencies: dependencySnapshots(board.db, item) });
-      const currentTrunk = requireTrunkMerge(root, commit); // Re-read after the frozen check, before accepting.
-      refuseUnverifiedStack(root, board, item, commit, currentTrunk);
+      const currentTrunk = requireTrunkMerge(root, checkedCommit); // Re-read after the frozen check, before accepting.
+      if (currentTrunk.commit !== trunk.commit) throw new Refused('VERDICT_TRUNK_MOVED', `main moved from ${trunk.commit} to ${currentTrunk.commit} during review; merge the latest main and re-review the clean composition`);
+      if (headCommit(root) !== head || (reReview && (!isClean(root) || untracked(root).length))) {
+        throw new Refused('NOT_AT_COMMIT', 'the reviewed checkout moved during its check; restore the clean reviewed HEAD and retry verification');
+      }
+      refuseUnverifiedStack(root, board, item, checkedCommit, currentTrunk);
     }
+    review ??= captureVerdictReview(root, board, item, verdictTrunk(root));
     return await ordered(ctx, board, 'verify', [id, {
       agentId: me.id,
       decision,
@@ -2433,6 +2463,7 @@ async function verifyHere(ctx, id, { second, values }) {
       digest,
       policy: ctx.config.verify.policy,
       familyPolicy: ctx.config.verify.family,
+      review,
       ...(decision === 'ACCEPT' ? { check: check.checked ? 'green' : 'none' } : {}),
     }]);
   });
@@ -2906,6 +2937,7 @@ function workCommands(io, args) {
         write: (operation, parameters) => ordered(ctx, board, operation, parameters), say: io.say, owner: agentSessionDigest() ?? `pid-${process.pid}`,
         maximum: values.max === undefined ? Infinity : Number(values.max), dryRun: Boolean(values['dry-run']), adopt: Boolean(values.adopt), onWait: gateWaitReporter(io) });
       io.result?.(result);
+      for (const blocked of result.blocked ?? []) if (blocked.code === 'STALE_VERDICT') io.say(staleVerdictRefusal({ item_id: blocked.id }, blocked).message);
       if (!result.batch) io.say(result.items ? `would land: ${result.items.map((id) => `#${id}`).join(', ') || 'none'}` : 'no verified items ready to land');
       return 0;
     }),

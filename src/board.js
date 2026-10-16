@@ -12,7 +12,7 @@ import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { briefFiles, briefSections } from './brief.js';
 import { COORDINATOR } from './config.js';
-import { ENGINE_VERSION, GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, effectiveGuards, storeTriggers } from './machine.js';
+import { ENGINE_VERSION, VERDICT_REVIEW_ENGINE, GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, effectiveGuards, storeTriggers } from './machine.js';
 import { Refused } from './refused.js';
 import { parseSpec } from './spec.js';
 
@@ -1465,8 +1465,21 @@ function reserveWithin(board, id, { agentId, leaseMs, policy, familyPolicy = 'of
   return getItem(board, id);
 }
 
+/** Validate a sealed review without consulting Git or changing either replica [E8,H16]. */
+export function verdictReviewProblem(review, commit) {
+  const valid = review && typeof review === 'object' && !Array.isArray(review)
+    && Object.keys(review).sort().join(',') === 'commit,paths,trunk'
+    && review.commit === commit && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(review.commit ?? '')
+    && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(review.trunk ?? '')
+    && Array.isArray(review.paths) && review.paths.every(path => typeof path === 'string' && !path.includes('\0')
+      && path.split('/').every(part => part && part !== '.' && part !== '..'))
+    && JSON.stringify(review.paths) === JSON.stringify([...new Set(review.paths)].sort());
+  return valid ? null : new Refused('BAD_VERDICT_REVIEW', 'the review must bind the current submitted commit, its reviewed trunk and sorted unique candidate paths; use current Pullboard to review it again');
+}
+
 /**
- * Record a verdict on a submitted item (V1, V3, V5, V6, V8): an accept verifies it, a reject
+ * Record a verdict on submitted work, or a sealed re-review of unlanded work (E8,V1,V3,V8).
+ * An accept verifies it; a reject
  * reopens it for rework.
  *
  * The verdict binds the submitted commit and the digest frozen at claim. If the criterion's text
@@ -1478,21 +1491,32 @@ function reserveWithin(board, id, { agentId, leaseMs, policy, familyPolicy = 'of
  *
  * @param {any} board
  * @param {number} id
- * @param {{ agentId: string, decision: string, reason?: string, note?: string, head: string, digest: string, policy: string, familyPolicy?: string, check?: 'none' | 'green' }} verdict
+ * @param {{ agentId: string, decision: string, reason?: string, note?: string, head: string, digest: string, policy: string, familyPolicy?: string, check?: 'none' | 'green', review?: {commit: string, trunk: string, paths: string[]} }} verdict
  * @returns {{ decision: string, reason: string, check?: 'none' | 'green' }}
  */
-export function verify(board, id, { agentId, decision, reason, note = '', head, digest, policy, familyPolicy = 'off', check }) {
+export function verify(board, id, { agentId, decision, reason, note = '', head, digest, policy, familyPolicy = 'off', check, review }) {
   const verb = { ACCEPT: 'accept', REJECT: 'reject' }[decision];
   if (!verb) throw new Refused('BAD_DECISION', 'the decision is accept or reject');
   const isAccept = verb === 'accept';
   const code = isAccept ? ACCEPT_REASON : reason;
+  const engine = board.executionEngineVersion ?? ENGINE_VERSION;
+  const declaration = MOVES.find(move => move.verb === verb);
+  const newReview = engine >= VERDICT_REVIEW_ENGINE && review !== undefined;
+  // Without the new sealed metadata, old moves keep their exact submitted-only semantics.
+  const transition = newReview ? declaration : { ...declaration, from: ['submitted'],
+    guards: declaration.guards.filter(guard => !['notMerged', 'verdictReviewRecorded', 'reviewTreeCurrent'].includes(guard)) };
   return atomic(board, () => {
     const item = moveItem(board, id, verb, {
+      transition,
       checks: {
         coordinatorSaysAs: null,
         joined: null,
         [IN_STATE]: (found) => new Refused('NOT_SUBMITTED', `item #${id} is ${current(board, found).item_status}, not submitted`),
         atSubmittedCommit: null,
+        notMerged: found => !found.item_merged_commit ? null
+          : new Refused('ALREADY_MERGED', `item #${id} already landed; only unlanded acceptances can be re-reviewed`),
+        verdictReviewRecorded: found => verdictReviewProblem(review, found.item_commit),
+        reviewTreeCurrent: null,
         ...reviewerChecks(board, { agentId, policy, familyPolicy }),
         criterionUnchanged: (found) =>
           digest === found.item_frozen_digest
@@ -1523,6 +1547,7 @@ export function verify(board, id, { agentId, decision, reason, note = '', head, 
     });
     const detail = { reason: code, commit: item.item_commit };
     if (isAccept && check !== undefined) detail.check = check;
+    if (newReview) detail.review = { commit: review.commit, trunk: review.trunk, paths: [...review.paths] };
     logEvent(board, agentId, verb, id, detail);
     return { decision, reason: code, ...(isAccept && check !== undefined ? { check } : {}) };
   });
@@ -1797,7 +1822,7 @@ export function verdictsFor(board, id) {
   return verdicts.map((verdict, index) => {
     let detail = {};
     try { detail = JSON.parse(receipts[index]?.event_detail ?? '{}'); } catch { /* Malformed legacy details remain unknown. */ }
-    return { ...verdict, check: detail.check ?? 'unknown' };
+    return { ...verdict, check: detail.check ?? 'unknown', ...(detail.review ? { review: detail.review } : {}) };
   });
 }
 

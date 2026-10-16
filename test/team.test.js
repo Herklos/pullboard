@@ -1,0 +1,224 @@
+/** Two independent Git/SQLite replicas derive verdict freshness without rewriting proof [E8]. */
+import assert from 'node:assert/strict';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import { existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { after, test } from 'node:test';
+import * as store from '../src/board.js';
+import { exportBoard, importBoard } from '../src/exchange.js';
+import { applyEngineMove, prepareEngineMove } from '../src/engine.js';
+import { createE2eHelpers } from './e2e-helpers.js';
+import { serveApi } from '../src/api.js';
+import { main } from '../src/cli.js';
+import { fetchFresh } from './http-fixture.js';
+
+const helpers = createE2eHelpers();
+after(helpers.cleanup);
+
+/** Open a fixture's independent board and always close it after its observation or public move. */
+function withBoard(root, action) {
+  const board = store.openBoard(join(root, '.git', 'pullboard', 'board.sqlite'));
+  try { return action(board); }
+  finally { store.closeBoard(board); }
+}
+
+/** Run a real fixture CLI command, retaining the refusal or successful document verbatim. */
+function run(box, root, ...args) {
+  const result = box.run(root, ...args);
+  assert.equal(result.code, 0, `${args.join(' ')}: ${result.err}${result.out}`);
+  return result.out;
+}
+
+test('a verdict reads stale when main moves under its files [E8]', { timeout: 120_000 }, async t => { // budget: hang ceiling for two real replicas, CLI checks and Git history; not a speed target.
+  const box = helpers.project();
+  assert.equal(helpers.commitFile(box, box.repo, 'web/feature.js', 'feature = 0\nmain = 0\n', 'feat(web): baseline [G1]').status, 0);
+  box.git(box.web, 'merge', '-q', '--ff-only', 'main');
+  const checkedHeads = join(box.dir, 'checked-heads');
+  const check = `grep -q '^feature = 1$' web/feature.js && git rev-parse HEAD >> '${checkedHeads}'`;
+  run(box, box.repo, 'add', 'web', 'Feature', '--specs', 'G1', '--check', check, '--wait');
+  run(box, box.web, 'claim', '1');
+  assert.equal(helpers.commitFile(box, box.web, 'web/feature.js', 'feature = 1\nmain = 0\n', 'feat(web): feature [G1]').status, 0);
+  const submitted = box.git(box.web, 'rev-parse', 'HEAD');
+  run(box, box.web, 'submit', '1');
+  const reviewer = join(box.dir, 'web-2');
+  box.git(box.repo, 'worktree', 'add', '-q', '--detach', reviewer, submitted);
+  run(box, reviewer, 'join', 'web');
+  run(box, reviewer, 'verify', '1', 'accept', '--note', 'The feature changes its first line and the frozen check observes it.');
+  const original = withBoard(box.repo, board => store.verdictsFor(board, 1));
+  const peer = join(box.dir, 'replica');
+  box.git(box.dir, 'clone', '-q', box.repo, peer);
+  withBoard(peer, board => importBoard(board, withBoard(box.repo, exportBoard)));
+
+  /** Move only the peer's Git trunk; its independently stored acceptance stays unchanged. */
+  const syncTrunk = () => {
+    box.git(peer, 'fetch', '-q', 'origin', 'main');
+    box.git(peer, 'merge', '-q', '--ff-only', 'origin/main');
+  };
+  /** Read each replica through its actual public CLI, rather than a test-only freshness helper. */
+  const items = () => [box.repo, peer].map(root => JSON.parse(run(box, root, 'show', '1', '--json')));
+  let streamController;
+  let streamReader;
+  let builds = 0;
+  const api = await serveApi({ runCommand: main, projects: () => [{ root: reviewer, name: 'Verdict fixture' }], onStateBuild: () => { builds += 1; } });
+  t.after(async () => {
+    streamController?.abort();
+    await streamReader?.cancel().catch(() => {});
+    await api.close();
+  });
+  const address = new URL(api.url);
+  const headers = { 'x-pullboard-key': address.searchParams.get('k') };
+  const apiPath = '/api/v1/boards/' + withBoard(box.repo, store.boardId);
+  /** Read one authenticated public HTTP endpoint on the persistent worktree-backed server. */
+  const http = async suffix => {
+    const response = await fetchFresh(address.origin + apiPath + suffix, { headers });
+    const document = await response.json();
+    assert.equal(response.status, 200, JSON.stringify(document));
+    return document;
+  };
+  const initialState = (await http('/state')).state;
+  await http('/state');
+  assert.equal(builds, 1, 'unchanged HTTP reads reuse the state cache');
+  await http('/items/1'); // Warm the independent detail freshness projection for a verified item.
+  const processMethods = ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync'];
+  const originals = new Map(processMethods.map(method => [method, childProcess[method]]));
+  const processCalls = [];
+  try {
+    for (const method of processMethods) childProcess[method] = function (...args) {
+      processCalls.push({ method, command: args[0] });
+      return Reflect.apply(originals.get(method), this, args);
+    };
+    syncBuiltinESMExports();
+    await http('/items/1');
+    await http('/state');
+    await http('/items/1');
+    assert.deepEqual(processCalls, [], 'unchanged accepted-item detail and state reads spawn no process');
+  } finally {
+    for (const [method, original] of originals) childProcess[method] = original;
+    syncBuiltinESMExports();
+  }
+
+  assert.ok(items().every(item => !item.item_verdict_state));
+  assert.equal(helpers.commitFile(box, box.repo, 'web/unrelated.js', 'unrelated = 1\n', 'feat(web): unrelated [G1]').status, 0);
+  syncTrunk();
+  assert.ok(items().every(item => !item.item_verdict_state), 'unrelated main files do not stale acceptance');
+  assert.equal((await http('/state')).state.items[0].verdictState, undefined);
+  const beforeMoveHead = box.git(reviewer, 'rev-parse', 'HEAD');
+  streamController = new AbortController();
+  const stream = await fetchFresh(address.origin + apiPath + '/events?after=' + initialState.sequence, {
+    headers: { ...headers, accept: 'text/event-stream' }, signal: streamController.signal,
+  });
+  assert.equal(stream.status, 200);
+  streamReader = stream.body.getReader();
+  assert.equal(helpers.commitFile(box, box.repo, 'web/feature.js', 'feature = 0\nmain = 1\n', 'feat(web): change main caller [G1]').status, 0);
+  const movingCommit = box.git(box.repo, 'rev-parse', 'HEAD');
+  syncTrunk();
+  for (const item of items()) {
+    assert.equal(item.item_verdict_state?.code, 'STALE_VERDICT');
+    assert.equal(item.item_verdict_state.file, 'web/feature.js');
+    assert.equal(item.item_verdict_state.commit, movingCommit);
+    assert.equal(item.item_verdict, 'ACCEPT', 'the historical acceptance remains a fact');
+  }
+  assert.equal(box.git(reviewer, 'rev-parse', 'HEAD'), beforeMoveHead, 'the served worktree HEAD stayed fixed while main moved');
+  const apiStale = (await http('/state')).state;
+  assert.equal(apiStale.sequence, initialState.sequence, 'Git movement needs no board event to invalidate the state cache');
+  assert.equal(apiStale.items[0].verdictState?.code, 'STALE_VERDICT');
+  assert.equal(apiStale.items[0].verdictState.commit, movingCommit);
+  assert.equal((await http('/items/1')).item.verdictState?.commit, movingCommit);
+  const streamDeadline = setTimeout(() => streamController.abort(new Error('trunk movement produced no live changed event')), 5_000); // budget: hang ceiling for a fixture-local change notification; no throughput claim.
+  try {
+    let buffered = '';
+    while (!/event: changed\n/u.test(buffered)) {
+      const { value, done } = await streamReader.read();
+      assert.equal(done, false, 'the live stream stays open through the trunk change');
+      buffered += new TextDecoder().decode(value);
+    }
+  } finally { clearTimeout(streamDeadline); }
+  streamController.abort();
+  await streamReader.cancel().catch(() => {});
+  for (const root of [box.repo, peer]) {
+    assert.match(run(box, root, 'show', '1'), /STALE_VERDICT/u);
+    assert.equal(JSON.parse(run(box, root, 'list', '--all', '--json')).items[0].item_verdict_state?.commit, movingCommit);
+    const resume = JSON.parse(run(box, root, 'resume', '--json'));
+    assert.equal(resume.all[0].item_verdict_state?.commit, movingCommit);
+    assert.deepEqual(resume.toMerge, [], 'resume never suggests landing a stale acceptance');
+    assert.equal(resume.staleVerdicts[0].item_id, 1);
+    assert.deepEqual(withBoard(root, board => store.verdictsFor(board, 1)), original, 'read projection cannot rewrite original proof');
+    const refused = box.run(root, 'land', '--dry-run', '--json');
+    assert.equal(refused.code, 1, refused.out + refused.err);
+    const error = JSON.parse(refused.out).error;
+    assert.equal(error.code, 'STALE_VERDICT');
+    assert.ok(error.message.includes('web/feature.js') && error.message.includes(movingCommit), error.message);
+  }
+  box.git(box.repo, 'revert', '--no-edit', movingCommit);
+  syncTrunk();
+  assert.ok(items().every(item => item.item_verdict_state?.commit === movingCommit), 'a revert cannot turn an old review into a new review');
+  const priorChecks = readFileSync(checkedHeads, 'utf8');
+  const oldHead = box.run(reviewer, 'verify', '1', 'accept', '--note', 'Trying the old candidate is insufficient.');
+  assert.equal(oldHead.code, 1);
+  assert.equal(readFileSync(checkedHeads, 'utf8'), priorChecks, 'old candidate is refused before running its check');
+  box.git(reviewer, 'merge', '-q', '--no-edit', 'main');
+  const composed = box.git(reviewer, 'rev-parse', 'HEAD');
+  assert.notEqual(composed, submitted);
+  run(box, reviewer, 'verify', '1', 'accept', '--note', 'Re-reviewed the feature with the latest main caller and its reverted history.');
+  assert.equal(readFileSync(checkedHeads, 'utf8').trim().split('\n').at(-1), composed, 'the frozen check ran on the reviewed composition');
+  const reviewed = withBoard(box.repo, board => store.verdictsFor(board, 1));
+  assert.deepEqual(reviewed.slice(0, original.length), original);
+  assert.equal(reviewed.length, original.length + 1, 're-review appends independent proof');
+  const verdict = reviewed.at(-1);
+  const outcome = withBoard(peer, board => {
+    const move = prepareEngineMove(board, 'verify', [1, {
+      agentId: verdict.verdict_by, decision: 'ACCEPT', note: verdict.verdict_note,
+      head: verdict.verdict_head, digest: verdict.verdict_digest, policy: 'any',
+      check: verdict.check, review: verdict.review,
+    }]);
+    return applyEngineMove(board, move, { sequence: 1, at: verdict.verdict_at });
+  });
+  assert.equal(outcome.error, undefined, JSON.stringify(outcome));
+  assert.ok(items().every(item => !item.item_verdict_state), 'the same sealed re-review clears both replicas');
+  assert.equal((await http('/state')).state.items[0].verdictState, undefined, 'a newer acceptance invalidates stale cached state');
+  assert.equal((await http('/items/1')).item.verdictState, undefined);
+  assert.deepEqual(withBoard(peer, board => store.verdictsFor(board, 1)), reviewed);
+  box.git(box.repo, 'merge', '-q', '--no-edit', composed);
+  syncTrunk();
+  const landed = box.git(box.repo, 'rev-parse', 'HEAD');
+  for (const root of [box.repo, peer]) withBoard(root, board => store.merged(board, 1, { agentId: 'coordinator', commit: landed }));
+  assert.equal(helpers.commitFile(box, box.repo, 'web/feature.js', 'feature = 1\nmain = 2\n', 'feat(web): after landing [G1]').status, 0);
+  syncTrunk();
+  assert.ok(items().every(item => !item.item_verdict_state), 'landed items are not waiting for re-review');
+  assert.ok(existsSync(join(peer, '.git', 'pullboard', 'board.sqlite')));
+});
+
+
+test('a checkout or trunk moving during verification cannot acquire proof [E8]', () => {
+  const box = helpers.project();
+  const reviewer = join(box.dir, 'moving-reviewer');
+  const moveHead = join(box.dir, 'move-review-head');
+  const moveMain = join(box.dir, 'move-review-main');
+  const baseline = box.git(box.repo, 'rev-parse', 'main');
+  const check = `grep -q '^feature = 1$' web/feature.js && if test -f '${moveHead}'; then git -C '${reviewer}' checkout -q --detach '${baseline}'; fi && if test -f '${moveMain}'; then git -C '${box.repo}' commit -q --allow-empty -m 'chore: move review trunk [G1]'; fi`;
+  run(box, box.repo, 'add', 'web', 'Moving review', '--specs', 'G1', '--check', check, '--wait');
+  run(box, box.web, 'claim', '1');
+  assert.equal(helpers.commitFile(box, box.web, 'web/feature.js', 'feature = 1\n', 'feat(web): moving review feature [G1]').status, 0);
+  const submitted = box.git(box.web, 'rev-parse', 'HEAD');
+  run(box, box.web, 'submit', '1');
+  box.git(box.repo, 'worktree', 'add', '-q', '--detach', reviewer, submitted);
+  run(box, reviewer, 'join', 'web');
+  writeFileSync(moveHead, 'armed');
+  const moved = box.run(reviewer, 'verify', '1', 'accept', '--note', 'The check moved the live reviewer checkout.');
+  assert.equal(moved.code, 1, moved.out + moved.err);
+  assert.match(moved.err, /NOT_AT_COMMIT/u);
+  assert.equal(box.git(reviewer, 'rev-parse', 'HEAD'), baseline, 'the actual checkout moved while its private check was running');
+  assert.deepEqual(withBoard(box.repo, board => store.verdictsFor(board, 1)), []);
+  rmSync(moveHead);
+  box.git(reviewer, 'checkout', '-q', '--detach', submitted);
+  writeFileSync(moveMain, 'armed');
+  const mainMoved = box.run(reviewer, 'verify', '1', 'accept', '--note', 'The check moved the known main.');
+  assert.equal(mainMoved.code, 1, mainMoved.out + mainMoved.err);
+  assert.match(mainMoved.err, /VERDICT_TRUNK_MOVED/u);
+  assert.notEqual(box.git(box.repo, 'rev-parse', 'main'), baseline);
+  assert.deepEqual(withBoard(box.repo, board => store.verdictsFor(board, 1)), []);
+  rmSync(moveMain);
+  run(box, reviewer, 'verify', '1', 'accept', '--note', 'The candidate and known trunk stayed fixed through the complete frozen check.');
+  assert.equal(withBoard(box.repo, board => store.verdictsFor(board, 1)).length, 1);
+});

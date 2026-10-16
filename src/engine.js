@@ -2,7 +2,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import * as store from './board.js';
 import { refusalDocument } from './json.js';
-import { ENGINE_VERSION } from './machine.js';
+import { ENGINE_VERSION, VERDICT_REVIEW_ENGINE } from './machine.js';
 import { Refused } from './refused.js';
 import { requestMoveProblem, recordRequestMove } from './relay-requests.js';
 import { relayMoveActor, relaySenderProblem, validRelaySender } from './relay-sender.js';
@@ -22,9 +22,10 @@ export const ENGINE_OPERATIONS = Object.freeze([
 /** Engine version at which each ordered operation first has stable replay semantics. */
 const OPERATION_ENGINE = Object.freeze({ reopen: 8, recordLandingBatch: 8, recordLandingWaiver: 8, recordLandingFlake: 8, finishLandingBatch: 8 });
 
-/** Dependency edits add engine-10 meaning without changing ordinary historical edit envelopes. */
+/** Dependency edits and sealed review metadata need their own engine meanings; historical envelopes retain theirs. */
 function minimumOperationEngine(operation, args) {
   const options = args[1];
+  if (operation === 'verify' && options && Object.hasOwn(options, 'review')) return VERDICT_REVIEW_ENGINE;
   return operation === 'editItem' && options && Object.hasOwn(options, 'after') && options.after !== undefined
     ? 10 : OPERATION_ENGINE[operation] ?? 1;
 }
