@@ -2410,7 +2410,9 @@ async function verifyHere(ctx, id, { second, values }) {
       const trunk = requireTrunkMerge(root, commit);
       refuseUnverifiedStack(root, board, item, commit, trunk);
       const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(root, frozenCheck(item), { commit, onFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
-      check = await withGateSlot(root, (lease) => checkAtCommit(root, item, { waitMs: lease.waitMs, gateLease: lease }), { browser, agent: me.id, item: String(id), kind: 'review', itemCheck: true, onWait: gateWaitReporter(ctx.io) });
+      // The private check runs here, in a private clone, under this machine's gate markers; a runner
+      // lease cannot carry those markers, so the review queues for a local slot only [C7,V4].
+      check = await withGateSlot(root, (lease) => checkAtCommit(root, item, { waitMs: lease.waitMs, gateLease: lease }), { browser, remote: false, agent: me.id, item: String(id), kind: 'review', itemCheck: true, onWait: gateWaitReporter(ctx.io) });
       verificationProfile = check.profile ?? null;
       const evidence = check.checked
         ? `\nlast output lines (up to 40):\n${(check.outputTail ?? '(no output)').split('\n').map((line) => `  ${line}`).join('\n')}\nfull output file: ${check.outputPath ?? `(unavailable${check.outputError ? `: ${check.outputError}` : ''})`}`
