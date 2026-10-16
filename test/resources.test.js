@@ -807,8 +807,9 @@ test('the pool admits reviews before submits before focused runs, and waiting ru
   for (const child of releasing) await release(child);
   assert.deepEqual(order, ['landing-one', 'review-one', 'focused-two', 'diagnostic-one', 'submit-one', 'focused-one']);
 
-  // A remote run whose runner drops is requeued and keeps class order: it leads its own class,
-  // behind waiting reviews and submits, and the line stays in class order (no fallback to arrival).
+  // A remote run whose runner drops is requeued with its original arrival ticket: it sits behind
+  // earlier runs of its own class and behind waiting reviews and submits, and the line stays in
+  // class order (the requeue is marked classed, so it never forces arrival).
   const remoteBox = fixture();
   const localHolders = [poolWorker(remoteBox, { agent: 'local-one' }), poolWorker(remoteBox, { agent: 'local-two' })];
   for (const holder of localHolders) await acquired(holder);
@@ -832,8 +833,15 @@ test('the pool admits reviews before submits before focused runs, and waiting ru
     while (!remoteGate().line.some(({ agent }) => agent === 'remote-focused')) await new Promise((resolveTick) => setTimeout(resolveTick, 20));
     assert.equal(remoteGate().order, undefined, 'a requeued remote waiter is marked as class-ordered, so the pool keeps class order');
     assert.deepEqual(remoteGate().line.map(({ agent, queueClass: listed }) => [agent, listed]), [
-      ['review-later', 'review'], ['submit-later', 'submit'], ['remote-focused', 'other'], ['focused-early', 'other'],
-    ], 'the requeued remote run leads its own class, behind later reviews and submits');
+      ['review-later', 'review'], ['submit-later', 'submit'], ['focused-early', 'other'], ['remote-focused', 'other'],
+    ], 'the requeued remote run keeps first come, first served in its class, behind the earlier focused run');
+    const ticketDb = new DatabaseSync(join(remoteBox.home, 'resources.sqlite'));
+    try {
+      const tickets = Object.fromEntries(ticketDb.prepare("SELECT agent, ticket FROM waiter WHERE name = 'gate'").all().map(({ agent, ticket }) => [agent, ticket]));
+      const original = ticketDb.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'waiter'").get().seq;
+      assert.equal(tickets['remote-focused'], original, 'the requeued runner waiter keeps its original ticket, the last one issued');
+      assert.ok(tickets['focused-early'] < tickets['remote-focused'], 'an earlier same-class waiter keeps its earlier ticket');
+    } finally { ticketDb.close(); }
     const remoteOrder = [];
     /** Free one slot, then record which waiter the pool admits into it. */
     const admitNext = async (freed, agent) => {
@@ -846,9 +854,9 @@ test('the pool admits reviews before submits before focused runs, and waiting ru
     };
     await admitNext(localHolders[0], 'review-later');
     await admitNext(localHolders[1], 'submit-later');
-    await admitNext(remoteWaiting.get('review-later'), 'remote-focused');
-    await admitNext(remoteWaiting.get('submit-later'), 'focused-early');
-    assert.deepEqual(remoteOrder, ['review-later', 'submit-later', 'remote-focused', 'focused-early']);
+    await admitNext(remoteWaiting.get('review-later'), 'focused-early');
+    await admitNext(remoteWaiting.get('submit-later'), 'remote-focused');
+    assert.deepEqual(remoteOrder, ['review-later', 'submit-later', 'focused-early', 'remote-focused']);
     await release(remoteWaiting.get('focused-early'));
   } finally {
     requeued?.release();

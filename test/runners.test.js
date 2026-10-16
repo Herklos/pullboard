@@ -822,16 +822,17 @@ while(!fs.existsSync(${JSON.stringify(releaseFirst)})) await sleep(5); })().catc
     await waitForMarker(queueReady);
     held.release();
     held = null;
+    // #651 class order: the returned ticket keeps its original arrival place, behind the older same-class waiter.
+    await waitForMarker(olderStarted);
     await waitForMarker(firstStarted);
-    assert.equal(readFileSync(order, 'utf8'), 'retry-first\n', 'the returned remote ticket jumps ahead of the older local-only waiter');
+    assert.equal(readFileSync(order, 'utf8'), 'older-local\nretry-first\n', 'the returned remote ticket keeps its arrival place behind the older local-only waiter');
     writeFileSync(releaseFirst, 'continue\n');
     const [firstResult, secondResult] = await Promise.all([first.closed, second.closed]);
     assert.equal(firstResult.status, 0, `${firstResult.stdout}${firstResult.stderr}`);
     assert.equal(secondResult.status, 0, `${secondResult.stdout}${secondResult.stderr}`);
-    assert.equal(readFileSync(order, 'utf8'), 'retry-first\nolder-local\n');
-    assert.ok(existsSync(olderStarted), 'the older local-only waiter runs after the returned remote ticket');
+    assert.equal(readFileSync(order, 'utf8'), 'older-local\nretry-first\n');
     assert.equal(readFileSync(requests, 'utf8').trim().split('\n').length, 1,
-      'the quarantined host is not contacted again for the front-of-queue local retry');
+      'the quarantined host is not contacted again for the local retry');
     const retried = gateResult(firstResult.stdout);
     assert.equal(retried.isGreen, true, `${firstResult.stdout}${firstResult.stderr}`);
     assert.notEqual(retried.runner, host, 'the retried command completes after the failed runner is quarantined');
