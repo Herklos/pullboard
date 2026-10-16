@@ -23,10 +23,14 @@ let activeDescendantTracker = null;
 const CLEANUP_BUDGET_MS = 30_000;
 let cleanupDeadline = Infinity;
 let cleanupTimedOut = false;
+let cleanupTimer = null;
 
 /** Start the post-run budget once; later cleanup phases cannot extend it. */
 function beginCleanup() {
+  if (Number.isFinite(cleanupDeadline)) return;
   cleanupDeadline = Math.min(cleanupDeadline, Date.now() + CLEANUP_BUDGET_MS);
+  cleanupTimer = setTimeout(reportCleanupTimeout, CLEANUP_BUDGET_MS);
+  cleanupTimer.unref();
 }
 
 /** Report an unresolved cleanup once so the controller can fail without retrying the command. */
@@ -971,6 +975,9 @@ async function runCommand(spec, root, env, sink, tracker) {
   }
   const owned = spawnOwned(shell, args, { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
   const child = owned.child;
+  // A surviving descendant can keep stdio open after the command leader exits.
+  // Start the budget at exit rather than waiting for those pipes to close.
+  child.once('exit', beginCleanup);
   let outputError = null;
   let writes = Promise.resolve();
   const closed = owned.closed;
@@ -1084,8 +1091,9 @@ async function main() {
     }
     if (runDirectory) { try { rmSync(runDirectory, { recursive: true, force: true }); } catch {} }
   }
-  if (transportLost || cleanupTimedOut) { process.exitCode = 1; return; }
+  if (transportLost || cleanupTimedOut) { clearTimeout(cleanupTimer); process.exitCode = 1; return; }
   await receipt(spec, final, sink);
+  clearTimeout(cleanupTimer);
   process.exitCode = 0;
 }
 
