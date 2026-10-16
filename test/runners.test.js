@@ -348,20 +348,22 @@ async function stopGroup(child, closed) {
  * Wait for a runner round trip phase by phase: dispatch (until the stand-in is reached), remote run
  * (until the worker returns) and result return (until the controller exits). A phase past its
  * deadline stops the whole controller group and throws an error naming that phase, so a stuck
- * runner fails the test in about a minute instead of holding it to the per-test limit.
+ * runner fails the test in about a minute instead of holding it to the per-test limit. The caller
+ * passes the marker counts it read before spawning the child: a fast child can dispatch before this
+ * function first runs, and a baseline read here would swallow that dispatch.
  */
-async function awaitRoundTrip(child, closed, phasesFile, deadlines = ROUND_TRIP_DEADLINES) {
+async function awaitRoundTrip(child, closed, phasesFile, before, deadlines = ROUND_TRIP_DEADLINES) {
   const limits = { ...ROUND_TRIP_DEADLINES, ...deadlines };
   let done = null;
   closed.then(result => { done = result; });
   const timings = [];
   // The marker file may already hold earlier round trips of the same fixture; count only this one.
-  const before = phasesFile ? phaseCounts(phasesFile) : { dispatched: 0, returned: 0 };
+  assert.ok(!phasesFile || before, 'awaitRoundTrip needs the phase baseline read before the child was spawned');
   let phase = 'dispatch';
   let phaseStarted = Date.now();
   while (!done) {
-    const total = phasesFile ? phaseCounts(phasesFile) : before;
-    const counts = { dispatched: total.dispatched - before.dispatched, returned: total.returned - before.returned };
+    const total = phasesFile ? phaseCounts(phasesFile) : { dispatched: 0, returned: 0 };
+    const counts = phasesFile ? { dispatched: total.dispatched - before.dispatched, returned: total.returned - before.returned } : total;
     const next = counts.dispatched > counts.returned ? 'remote run' : counts.dispatched > 0 ? 'result return' : 'dispatch';
     if (next !== phase) { timings.push(`${phase} ${Date.now() - phaseStarted}ms`); phase = next; phaseStarted = Date.now(); }
     const spent = Date.now() - phaseStarted;
@@ -393,9 +395,12 @@ process.stdout.write('PULLBOARD_RUN_RESULT ' + JSON.stringify({ isGreen: result.
 process.exitCode = result.isGreen ? 0 : 1;
 `;
   try {
+    // Read the phase baseline before spawning, so a dispatch that beats the first poll still counts.
+    const phases = requests ? `${requests}.phases` : '';
+    const before = phases ? phaseCounts(phases) : null;
     // Its own process group, so a stuck phase can stop the controller, the stand-in and the worker together.
     const closed = runFixtureChildAsync(process.execPath, ['--input-type=module', '-e', script], { cwd: repo, env, detached: true });
-    const result = await awaitRoundTrip(closed.child, closed, requests ? `${requests}.phases` : '', deadlines);
+    const result = await awaitRoundTrip(closed.child, closed, phases, before, deadlines);
     if (result.status !== 0) snapshot.retained = true;
     return result;
   } catch (error) {
@@ -601,8 +606,9 @@ test('a queued run executes on a registered runner and its result comes back (ho
     assert.equal(requestsSeen[0].host, HOST);
     assert.equal(requestsSeen[0].workerStarted, true);
     assert.equal(requestsSeen[0].code, 0);
+    const cliBefore = phaseCounts(`${requests}.phases`);
     const cliRun = observe(startToolingCli(repo, env, ['gate', '--json'], { toolingRoot, detached: true }));
-    const cliResult = await awaitRoundTrip(cliRun.child, cliRun.closed, `${requests}.phases`);
+    const cliResult = await awaitRoundTrip(cliRun.child, cliRun.closed, `${requests}.phases`, cliBefore);
     assert.equal(cliResult.status, 0, fixtureResultContext(cliResult));
     assert.equal(JSON.parse(cliResult.stdout.trim()).green, true);
     const allRequests = readFileSync(requests, 'utf8').trim().split(/\r?\n/u).filter(Boolean).map(line => JSON.parse(line));
