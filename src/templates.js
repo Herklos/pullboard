@@ -21,6 +21,7 @@ export function configTemplate(gate, fix = []) {
     ...(fix.length ? { fix } : {}),
     spec: 'SPEC.md',
     practice: DOCTRINE_FILE,
+    worktrees: 'inside',
     verify: { policy: 'any', family: 'off' },
     agents: { names: 'suffix' },
     lease: '2h',
