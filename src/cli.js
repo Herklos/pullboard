@@ -1813,7 +1813,8 @@ function readCommands(io, { first, second, rest, values }) {
       const ctx = context(io);
       const agents = withBoard(ctx, (board) => store.listAgents(board));
       const browserSlots = loadMachineSettings().browserSlots;
-      const memory = memoryVerdict(await readMachineMemory({ processes: true }), memoryFloorMB() * 1024 ** 2);
+      const floorMB = memoryFloorMB();
+      const memory = memoryVerdict(await readMachineMemory({ processes: true }), floorMB === null ? null : floorMB * 1024 ** 2);
       const resources = [
         ...listResources({ scope: 'machine' }).map((resource) => ({ ...resource, scope: 'machine' })),
         ...listResources({ scope: 'repo', root: ctx.info.root }).map((resource) => ({ ...resource, scope: 'repo' })),
@@ -2872,7 +2873,7 @@ function settingsCommand(io, { first, second, rest }) {
     io.result?.({ settings, memoryFloorMB: memoryFloorMB() });
     io.say(`gateSlots: ${settings.gateSlots}`);
     io.say(`browserSlots: ${settings.browserSlots}`);
-    io.say(`gate.memoryFloorMB: ${memoryFloorMB()}`);
+    io.say(`gate.memoryFloorMB: ${memoryFloorMB() ?? 'off (the gate queue does not wait for memory)'}`);
     return 0;
   }
   if (!['gateSlots', 'browserSlots'].includes(first) || !second || rest.length) {

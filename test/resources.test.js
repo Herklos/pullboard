@@ -1203,7 +1203,7 @@ test('the pool holds work while the machine is out of memory and names the bigge
   await release(run);
 });
 
-test('an unread machine warns once and admits as before; pullboard resources prints the memory line [C7]', async () => {
+test('the memory hold is off until a floor is set, an unread machine warns once, and resources prints the memory line [C7]', async () => {
   const { gateWaitReporter } = await import(CLI_MODULE);
   const said = [];
   const report = gateWaitReporter({ say: (line) => said.push(line) });
@@ -1220,6 +1220,26 @@ test('an unread machine warns once and admits as before; pullboard resources pri
   assert.deepEqual(warned, ['memory: not checked on win32'], 'an unread machine prints one warning');
 
   const box = fixture();
+  const critical = join(box.dir, 'critical.json');
+  writeMemoryReading(critical, { availableMB: 100, fullAvg10: 99 });
+  const unset = memoryWorker(box, 'unset-run', critical);
+  const unsetStart = await event(unset);
+  assert.equal(unsetStart.acquired, 'unset-run', `with gate.memoryFloorMB absent the pool admits by slots alone, as before: ${JSON.stringify(unsetStart)}`);
+  await release(unset);
+  const defaults = runFixtureChild(process.execPath, [BIN, 'settings', '--json'], { cwd: box.first, env: box.env, encoding: 'utf8' });
+  assert.equal(defaults.status, 0, defaults.stderr);
+  assert.equal(JSON.parse(defaults.stdout).memoryFloorMB, null, 'pullboard settings reports the hold as off when the floor is absent');
+  mkdirSync(box.home, { recursive: true });
+  writeFileSync(join(box.home, 'settings.json'), `${JSON.stringify({ gate: { memoryFloorMB: -1 } })}\n`);
+  const refused = runFixtureChild(process.execPath, [BIN, 'settings', '--json'], { cwd: box.first, env: box.env, encoding: 'utf8' });
+  assert.equal(refused.status, 1);
+  assert.equal(JSON.parse(refused.stdout).error.code, 'BAD_MACHINE_SETTINGS');
+  assert.match(JSON.parse(refused.stdout).error.message, /gate\.memoryFloorMB/u);
+  writeFileSync(join(box.home, 'settings.json'), `${JSON.stringify({ gate: { memoryFloorMB: 1024 } })}\n`);
+  const set = runFixtureChild(process.execPath, [BIN, 'settings'], { cwd: box.first, env: box.env, encoding: 'utf8' });
+  assert.equal(set.status, 0, set.stderr);
+  assert.match(set.stdout, /^gate\.memoryFloorMB: 1024$/mu, 'pullboard settings shows the floor once it is set');
+
   for (const source of ['win32', 'broken']) {
     const file = join(box.dir, `${source}.json`);
     writeMemoryReading(file, { availableMB: 100, fullAvg10: 99, broken: true });
@@ -1230,17 +1250,6 @@ test('an unread machine warns once and admits as before; pullboard resources pri
     assert.equal((await event(run)).acquired, `${source}-run`, `${source}: an unread machine admits as today, after exactly one warning`);
     await release(run);
   }
-
-  const defaults = runFixtureChild(process.execPath, [BIN, 'settings', '--json'], { cwd: box.first, env: box.env, encoding: 'utf8' });
-  assert.equal(defaults.status, 0, defaults.stderr);
-  assert.equal(JSON.parse(defaults.stdout).memoryFloorMB, 1024, 'an unset machine holds under a 1 GB floor');
-  mkdirSync(box.home, { recursive: true });
-  writeFileSync(join(box.home, 'settings.json'), `${JSON.stringify({ gate: { memoryFloorMB: -1 } })}\n`);
-  const refused = runFixtureChild(process.execPath, [BIN, 'settings', '--json'], { cwd: box.first, env: box.env, encoding: 'utf8' });
-  assert.equal(refused.status, 1);
-  assert.equal(JSON.parse(refused.stdout).error.code, 'BAD_MACHINE_SETTINGS');
-  assert.match(JSON.parse(refused.stdout).error.message, /gate\.memoryFloorMB/u);
-  rmSync(join(box.home, 'settings.json'));
 
   checkProject(box);
   const human = runFixtureChild(process.execPath, [BIN, 'resources'], { cwd: box.first, env: box.env, encoding: 'utf8' });

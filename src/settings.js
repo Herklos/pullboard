@@ -8,8 +8,6 @@ import { Refused } from './refused.js';
 
 const DEFAULT_GATE_SLOTS = 2;
 const DEFAULT_BROWSER_SLOTS = 1;
-/** Free memory under which the machine gate queue waits; about one test run's worth of headroom. */
-export const DEFAULT_MEMORY_FLOOR_MB = 1024;
 
 /** Resolve the separate machine settings file. */
 export function machineSettingsFile() {
@@ -51,9 +49,13 @@ export function browserFreeChecksEnabled() {
   return loadMachineSettings().gate?.browserFreeChecks === true;
 }
 
-/** The free-memory floor, in megabytes, below which the machine gate pool holds its queue. */
+/**
+ * The free-memory floor, in megabytes, below which the machine gate pool holds its queue, or null
+ * when the hold is off. Gate and queue behavior is off by default, the person's rule, so an absent
+ * floor keeps today's admission by slots alone.
+ */
 export function memoryFloorMB() {
-  return loadMachineSettings().gate?.memoryFloorMB ?? DEFAULT_MEMORY_FLOOR_MB;
+  return loadMachineSettings().gate?.memoryFloorMB ?? null;
 }
 
 /** Atomically replace machine settings without exposing a partial JSON file. */

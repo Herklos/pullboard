@@ -283,6 +283,7 @@ export async function withGateSlot(root, action, { landing = false, itemCheck = 
     finally { inherited.release(); }
   }
   const settingsProvider = () => loadMachineSettings();
+  const floorMB = memoryFloorMB();
   const capacityProvider = () => settingsProvider().gateSlots;
   const lease = await takeResource({
     name: 'gate',
@@ -300,7 +301,7 @@ export async function withGateSlot(root, action, { landing = false, itemCheck = 
     diagnostic,
     browser,
     allowIdleCapacityUpdate: true,
-    memory: memoryAdmission({ floorBytes: () => memoryFloorMB() * 1024 ** 2, read: readMemory }),
+    memory: floorMB === null ? undefined : memoryAdmission({ floorBytes: () => (memoryFloorMB() ?? floorMB) * 1024 ** 2, read: readMemory }),
     onWait,
   });
   try {

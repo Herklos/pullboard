@@ -305,7 +305,7 @@ function memorySize(bytes) {
  * run and pullboard resources, so a person sees one description of the machine.
  *
  * @param {object} reading - A readMachineMemory result.
- * @param {number} floorBytes - Free memory under which the queue is held.
+ * @param {number|null} floorBytes - Free memory under which the queue is held; null when the hold is off.
  * @returns {{ checked: boolean, held: boolean, line: string, warning?: string }}
  */
 export function memoryVerdict(reading, floorBytes) {
@@ -313,15 +313,16 @@ export function memoryVerdict(reading, floorBytes) {
     const warning = `memory: not checked on ${reading?.platform ?? process.platform} (${reading?.reason ?? 'no reading'}); the gate pool admits by slots alone`;
     return { checked: false, held: false, line: warning, warning };
   }
-  const critical = reading.pressure === 'critical';
-  const low = reading.availableBytes < floorBytes;
+  const off = floorBytes === null;
+  const critical = !off && reading.pressure === 'critical';
+  const low = !off && reading.availableBytes < floorBytes;
   const held = critical || low;
   const why = [critical ? 'pressure is critical' : '', low ? 'free memory is under the floor' : ''].filter(Boolean).join(' and ');
   const pressure = reading.pressure === 'unknown' ? 'pressure not reported' : `pressure ${reading.pressure}`;
-  const state = `${pressure}, ${memorySize(reading.availableBytes)} free of ${memorySize(reading.totalBytes)} (floor ${memorySize(floorBytes)})`;
+  const state = `${pressure}, ${memorySize(reading.availableBytes)} free of ${memorySize(reading.totalBytes)}${off ? '' : ` (floor ${memorySize(floorBytes)})`}`;
   const biggest = (reading.processes ?? []).map(({ pid, name, bytes, cwd }) => `pid ${pid} ${name} ${memorySize(bytes)} in ${cwd || 'an unreadable directory'}`).join('; ');
-  const line = `memory: ${held ? `holding the gate queue because ${why}` : 'admitting'}: ${state}${biggest ? `; biggest: ${biggest}` : ''}`;
-  return { checked: true, held, line };
+  const verdict = off ? 'hold off (set gate.memoryFloorMB to turn it on)' : held ? `holding the gate queue because ${why}` : 'admitting';
+  return { checked: true, held, line: `memory: ${verdict}: ${state}${biggest ? `; biggest: ${biggest}` : ''}` };
 }
 
 /**
