@@ -1,7 +1,8 @@
 /** Find unexplained wall-clock judgments in test source, without executing it [C7]. */
 import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /** Mask comments and quoted fixture text while retaining exact offsets and comment lines. */
 function codeOnly(source) {
@@ -183,4 +184,13 @@ export function wallClockViolations(root) {
     if (regularFile) found.push(...fixedWallMargins(readFileSync(path, 'utf8'), file));
   }
   return found.sort();
+}
+
+// Imports remain side-effect free; Pullboard's own gate invokes this same scanner directly.
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const violations = wallClockViolations(process.cwd());
+  if (violations.length) {
+    process.stderr.write(`${violations.join('\n')}\n`);
+    process.exitCode = 1;
+  }
 }
