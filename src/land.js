@@ -125,10 +125,15 @@ function completionAccount() {
   let plan = null;
   let topLevel = 0;
   const counts = {};
+  /** Recognize canonical incomplete accounts even when only a bounded line prefix is retained. */
+  const markerPrefix = (text) => {
+    if (/^(?:Landing gate stopped early after |Files not run: |Interrupted test files: )/u.test(text)) early = true;
+  };
   return {
+    markerPrefix,
     /** Consume one complete output line without retaining test output or diagnostic blocks. */
     line(text) {
-      if (/^(?:Landing gate stopped early after |Files not run: |Interrupted test files: )/u.test(text)) early = true;
+      markerPrefix(text);
       if (/^(?:not )?ok \d+\b/u.test(text)) topLevel++;
       const planned = /^1\.\.(\d+)\s*$/u.exec(text);
       if (planned) plan = Number(planned[1]);
@@ -164,14 +169,16 @@ function completeGate(gate) {
       const parts = chunk.toString('latin1', 0, count).split('\n');
       for (const [index, part] of parts.entries()) {
         if (index) {
-          if (!oversized) account.line(pending);
+          if (oversized) account.markerPrefix(pending);
+          else account.line(pending);
           pending = ''; oversized = false;
         }
-        if (!oversized && pending.length + part.length <= 256) pending += part;
-        else { pending = ''; oversized = true; }
+        if (pending.length + part.length > 256) oversized = true;
+        pending += part.slice(0, 256 - pending.length);
       }
     }
-    if (!oversized) account.line(pending);
+    if (oversized) account.markerPrefix(pending);
+    else account.line(pending);
     return account.complete();
   } finally { closeSync(input); }
 }

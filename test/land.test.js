@@ -700,6 +700,52 @@ test('a waiver after an early-stopped gate runs the gate again [C7,V4]', async (
   });
 });
 
+test('a waiver after an early-stopped gate runs the gate again with legacy oversized markers [C7,V4]', () => {
+  const box = landProject();
+  const gate = join(box.dir, 'land-gate.cjs');
+  writeFileSync(gate, [
+    "const fs = require('node:fs'); const path = require('node:path');",
+    `const calls = ${JSON.stringify(box.calls)}; const trace = ${JSON.stringify(box.trace)};`,
+    "const args = process.argv.slice(2); const alone = args.includes('--alone'); fs.appendFileSync(calls, JSON.stringify(args) + '\\n');",
+    "const files = alone ? args.filter(arg => arg !== '--alone') : fs.readdirSync('web').filter(name => /^land-\\d+\\.test\\.js$/.test(name)).map(name => 'web/' + name);",
+    "console.log('TAP version 13'); let count = 0; let failed = 0;",
+    "for (const file of files) { const text = fs.readFileSync(file, 'utf8'); count++; fs.appendFileSync(trace, JSON.stringify({ alone, file }) + '\\n');",
+    "  const red = !alone && process.env.LAND_SUPPRESS_RED !== '1' && text.includes('FLAKE');",
+    "  console.log((red ? 'not ok ' : 'ok ') + count + ' - ' + file + ' keeps the landed behavior');",
+    "  if (red) { failed++; console.log('  ---\\n  location: ' + path.resolve(file) + ':1:1\\n  error: fixture failure\\n  ...');",
+    "    if (process.env.LAND_EARLY_STOP === '1') { console.error('Landing gate stopped early after ' + file + ': fixture failure' + ' '.repeat(300)); console.error('Files not run: ' + files.slice(count).join(', ') + ' '.repeat(300)); break; } }",
+    "}",
+    "console.log('1..' + count); console.log('# tests ' + count); console.log('# pass ' + (count - failed)); console.log('# fail ' + failed); process.exitCode = failed ? 1 : 0;",
+  ].join('\n'));
+  const entries = verifiedFour(box, { flaky: 0 });
+  box.env.LAND_EARLY_STOP = '1';
+  const held = json(box, box.repo, 'land');
+  assert.equal(held.batch.state, 'flaky');
+  assert.deepEqual(held.landed, []);
+  onBoard(box, board => {
+    const saved = store.landingBatches(board).find(batch => batch.id === held.batch.id);
+    store.recordLandingBatch(board, { agentId: 'coordinator', revision: saved.revision,
+      batch: { ...saved, gateResults: saved.gateResults.map(({ complete, requiresGreen, ...run }) => run) } });
+  });
+  const before = calls(box).length;
+  const initial = readFileSync(held.batch.logPath, 'utf8');
+  assert.ok(initial.split('\n').find(line => line.startsWith('Landing gate stopped early after ')).length > 256,
+    'the early-stop marker exceeds the legacy reader line cap');
+  assert.ok(initial.split('\n').find(line => line.startsWith('Files not run: ')).length > 256);
+  assert.doesNotMatch(initial, /ok 2 -/u, 'later files actually did not run');
+  json(box, box.repo, 'land', '--waive', FILES[0], '--until', '2099-01-01', '--reason', 'private first failure exception');
+  delete box.env.LAND_EARLY_STOP;
+  box.env.LAND_SUPPRESS_RED = '1';
+  const result = json(box, box.repo, 'land');
+  assert.deepEqual(calls(box).slice(before), [[]], 'exactly one fresh full gate runs after the waiver');
+  const rerun = readFileSync(result.batch.logPath, 'utf8');
+  assert.match(rerun, /ok 4 - web\/land-4/u, 'the fresh run reaches the previously untouched final file');
+  assert.doesNotMatch(rerun, /stopped early|Files not run/u);
+  assert.match(rerun, /# fail 0/u);
+  assert.deepEqual(result.landed, entries.map(entry => entry.item));
+  assert.equal(box.git(box.remote, 'rev-parse', 'main'), result.batch.tip);
+});
+
 test('land stops again with an expired waiver, and a changed test on main releases the held batch [B3,R3]', () => {
   const box = landProject();
   box.env.LAND_SUPPRESS_RED = '1';
