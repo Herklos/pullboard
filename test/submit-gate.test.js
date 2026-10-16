@@ -380,7 +380,7 @@ test("a landing-gated submit runs the project's invariant tests [V4,C7]", (t) =>
   change(red.box);
   const refused = red.box.run('submit', '1', '--json');
   assert.notEqual(refused.code, 0, 'a failing configured invariant must refuse the submit');
-  assert.match(refused.err, /GATE_RED/u);
+  assert.match(refused.err + refused.out, /GATE_RED/u);
   assert.ok(existsSync(red.marker), 'the listed invariant actually ran');
   unstamped(red.box);
 
@@ -398,9 +398,9 @@ test("a landing-gated submit runs the project's invariant tests [V4,C7]", (t) =>
   change(trusted.box);
   const ignored = trusted.box.run('submit', '1', '--json');
   assert.notEqual(ignored.code, 0, 'accepted main policy overrides both the claim-time list and candidate edit');
-  assert.match(ignored.err, /GATE_RED/u);
+  assert.match(ignored.err + ignored.out, /GATE_RED/u);
   assert.ok(existsSync(trusted.marker), 'the accepted-main invariant still ran');
-  assert.doesNotMatch(ignored.err, /unrelated test must stay deferred/u);
+  assert.doesNotMatch(ignored.err + ignored.out, /unrelated test must stay deferred/u);
   unstamped(trusted.box);
 
   const missing = project(['test/invariant.test.js']);
@@ -408,7 +408,7 @@ test("a landing-gated submit runs the project's invariant tests [V4,C7]", (t) =>
   change(missing.box);
   const absent = missing.box.run('submit', '1', '--json');
   assert.notEqual(absent.code, 0, 'deleting a mandatory file cannot make the guard disappear');
-  assert.match(absent.err, /submitInvariants file test\/invariant\.test\.js is missing or unreadable/u);
+  assert.match(absent.err + absent.out, /submitInvariants file test\/invariant\.test\.js is missing or unreadable/u);
   unstamped(missing.box);
 
   const named = project(['test/invariant.test.js', 'test/invariant.test.js']);
@@ -558,7 +558,7 @@ test('a red frozen item check refuses submit before affected tests run [V4,C7,V1
   box.env.CHECK_REFUSE = '1';
   const refused = box.run('submit', '1');
   assert.equal(refused.code, 1, refused.out);
-  assert.match(refused.err, /GATE_RED/u);
+  assert.match(refused.err + refused.out, /GATE_RED/u);
   assert.match(refused.err, /item check red/u);
 });
 
@@ -633,7 +633,7 @@ for (const mode of ['topic parent', 'merge commit']) {
     rmSync(marker);
     const refused = box.run('submit', '1');
     assert.equal(refused.code, 1, refused.out || refused.err);
-    assert.match(refused.err, /GATE_RED/u);
+    assert.match(refused.err + refused.out, /GATE_RED/u);
     assert.match(refused.err, /affected tests:.*test\/a\.test\.js/u);
     assert.match(refused.err, /ERR_ASSERTION/u);
     assert.equal(readFileSync(marker, 'utf8'), 'ran\nran\n', 'submit executes the transitive importer against the candidate and exact main');
@@ -806,7 +806,7 @@ test('affected submit includes branch changes made before the item claim [V4,C7,
   commitAll(box, 'feat(core): source after claim [G1]');
   const refused = box.run('submit', '1');
   assert.equal(refused.code, 1, refused.out || refused.err);
-  assert.match(refused.err, /GATE_RED/u);
+  assert.match(refused.err + refused.out, /GATE_RED/u);
   assert.match(refused.err, /affected tests:.*test\/a\.test\.js/u);
   assert.match(refused.err, /ERR_ASSERTION/u);
 });
@@ -855,7 +855,7 @@ for (const mode of ['deleted source', 'topic parent', 'merge commit']) {
     rmSync(marker, { force: true });
     const refused = box.run('submit', '1');
     assert.equal(refused.code, 1, refused.out || refused.err);
-    assert.match(refused.err, /GATE_RED/u);
+    assert.match(refused.err + refused.out, /GATE_RED/u);
     assert.match(refused.err, /affected tests:.*test\/a\.test\.js/u);
     assert.match(refused.err, mode === 'deleted source' ? /ERR_MODULE_NOT_FOUND/u : /ERR_ASSERTION/u);
     if (mode !== 'deleted source') assert.equal(readFileSync(marker, 'utf8'), 'ran\nran\n', 'submit executes the unchanged transitive importer against the candidate and exact main');

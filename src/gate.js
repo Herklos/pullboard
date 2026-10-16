@@ -432,7 +432,7 @@ export function submitGateReport(gate) {
     const detail = timings ? `\n${timings}\ntiming profile: ${gate.profilePath}` : '';
     const proof = gate.deferFullFallback
       ? `${gate.submitInvariants?.length ? 'submit invariants: ' + gate.submitInvariants.join(', ') + '; ' : ''}full suite deferred to the landing gate${reason}`
-      : `affected tests: ${gate.files.length ? gate.files.join(', ') : 'none'}; full suite deferred to the landing gate`;
+      : `affected tests: ${gate.files.length ? gate.files.join(', ') : 'none'}; full suite deferred to the landing gate${gate.submitInvariants?.length ? '; submit invariants: ' + gate.submitInvariants.join(', ') : ''}`;
     const result = gate.deferFullFallback && !gate.submitInvariants?.length ? '' : `; ${gate.isGreen ? `${gate.deferFullFallback ? 'submit invariants' : 'affected tests'} green in ${gate.seconds}s` : gateReport(gate)}`;
     return `${check}; ${proof}${result}${detail}`;
   }
