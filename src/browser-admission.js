@@ -105,10 +105,8 @@ function capturedRunner(command) {
   const inner = command.slice(opening[0].length, bodyEnd);
   const suffix = command.slice(bodyEnd + ending.length);
   const quotes = ['"', "'"];
-  // These are the two literal printf newline encodings used by current frozen checks. Keep
-  // the surrounding command exact: only quote choice and one/two backslashes may vary.
-  const prints = quotes.flatMap(quote => [1, 2].map(count =>
-    `printf ${quote}%s${'\\'.repeat(count)}n${quote} "$${variable}"`));
+  // Only the literal one-backslash newline form is part of the frozen capture shape.
+  const prints = quotes.map(quote => `printf ${quote}%s\\n${quote} "$${variable}"`);
   for (const firstPrint of prints) for (const secondPrint of prints) {
     const prefix = `; ${firstPrint}; ${secondPrint} | grep -Eq `;
     if (!suffix.startsWith(prefix)) continue;
