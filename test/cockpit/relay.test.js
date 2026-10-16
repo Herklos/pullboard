@@ -10,6 +10,7 @@ import { press, stableChrome } from './stable.js';
 import { cockpitPage } from '../../src/cockpit.js';
 import { createRelayBrowserHandler } from '../../relay/browser-page.js';
 import { relayClientFixture } from '../relay-client-fixture.js';
+import { runFixtureChildAsync } from '../fixture-child.js';
 import { findChromeExecutable, relayWorkBudgetMs, startChrome } from '../relay-browser-fixture.js';
 import { BIN, scratch, SPEC, machine, project, fetchLive, startView, target, chromeExecutable, browserPause, openSnapshotChrome, stopOwnedChrome, closeSnapshotChrome, pickProject } from './fixture.js';
 
@@ -1036,9 +1037,10 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
     PULLBOARD_MACHINE_HOME: local.env.PULLBOARD_MACHINE_HOME,
     PATH: local.env.PATH,
   };
-  const localRelayResult = await linked.cliAtWithEnv(duplicateProject.repo, localRelayEnv,
-    'relay', 'on', '--url', linked.origin);
-  assert.equal(localRelayResult.code, 0,
+  const localRelayResult = await runFixtureChildAsync(process.execPath,
+    [BIN, 'relay', 'on', '--url', linked.origin, '--json'],
+    { cwd: duplicateProject.repo, env: localRelayEnv, timeout: relayWorkBudgetMs() });
+  assert.equal(localRelayResult.status, 0,
     'C links its actual local board to the relay as a second source for the same board identity');
   const localRelay = JSON.parse(readFileSync(join(duplicateProject.repo, '.git', 'pullboard', 'relay.json'), 'utf8'));
   const localRelayKey = readFileSync(join(local.env.PULLBOARD_HOME, 'relay-keys', localRelay.board + '.key'), 'utf8').trim();
