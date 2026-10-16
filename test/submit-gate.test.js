@@ -837,6 +837,22 @@ test('a sandbox-blocked gate asks the person [I1,C7]', async (t) => {
       assert.equal(ordinary.code, 1);
       assert.match(ordinary.out, /ERR_ASSERTION/u);
       assert.doesNotMatch(ordinary.out + ordinary.err, /SANDBOX_BLOCKED/u);
+      const printedDiagnostic = `Error: EACCES: permission denied, open '${outside}'`;
+      put(box.root, 'test/permission.test.js', prefix + `test('ordinary assertion prints a permission-looking diagnostic', () => { console.error(${JSON.stringify(printedDiagnostic)}); assert.equal(1, 2); });\n`);
+      commitAll(box);
+      const printedAssertion = box.run('gate');
+      assert.equal(printedAssertion.code, 1);
+      assert.doesNotMatch(printedAssertion.out + printedAssertion.err, /SANDBOX_BLOCKED/u);
+      assert.match(printedAssertion.out, /ERR_ASSERTION/u);
+      assert.match(printedAssertion.out, /# Error: EACCES: permission denied/u, 'TAP retains the test diagnostic as a comment');
+      const multilineDiagnostic = `ordinary assertion detail\nError: EACCES: permission denied, open '${outside}'`;
+      put(box.root, 'test/permission.test.js', prefix + `test('multiline assertion detail contains a permission-looking line', () => { assert.fail(${JSON.stringify(multilineDiagnostic)}); });\n`);
+      commitAll(box);
+      const multilineAssertion = box.run('gate');
+      assert.equal(multilineAssertion.code, 1);
+      assert.doesNotMatch(multilineAssertion.out + multilineAssertion.err, /SANDBOX_BLOCKED/u);
+      assert.match(multilineAssertion.out, /ERR_ASSERTION/u);
+      assert.match(multilineAssertion.out, /Error: EACCES: permission denied/u);
       put(box.root, 'test/permission.test.js', denied);
       commitAll(box);
     } finally { chmodSync(directory, 0o700); }

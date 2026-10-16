@@ -202,11 +202,14 @@ export function sandboxBlockedScanner(root) {
   /** Read one line, retaining only the current failed TAP record's permission and code fields. */
   return (raw) => {
     const line = raw.trim().replace(/^#\s*/u, '');
-    if (/^(?:Error: |PermissionError: )/u.test(line)) {
+    const indent = raw.length - raw.trimStart().length;
+    // Node's TAP reporter prints test-console output as comments and assertion details
+    // as indented YAML. Neither is a standalone gate diagnostic, even when it contains
+    // text that looks exactly like an operating-system denial.
+    if (indent === 0 && !raw.startsWith('#') && /^(?:Error: |PermissionError: )/u.test(line)) {
       const direct = permissionOperation(root, line.replace(/^Error: /u, ''));
       if (direct) return direct.operation;
     }
-    const indent = raw.length - raw.trimStart().length;
     if (/^(?:not )?ok \d+\b/u.test(line)) {
       failureIndent = /^not ok /u.test(line) ? indent : null;
       fieldIndent = null; permission = null; code = null;
