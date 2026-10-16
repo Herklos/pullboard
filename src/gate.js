@@ -123,15 +123,95 @@ export function isStampedGreen(root) {
 }
 
 /**
+ * Split a gate command into its top-level stages, the commands joined by `&&`, `||`, `;` or a newline.
+ * Anything the split cannot read for certain (a subshell, a group, command substitution, a heredoc,
+ * a comment, a background job or an open quote) returns null, so no stage is ever guessed [B3,R3].
+ *
+ * @param {string} command
+ * @returns {Array<{ text: string, op: string }> | null}
+ */
+export function gateStages(command) {
+  const source = String(command).trim();
+  const stages = [];
+  let current = '';
+  let quote = null;
+  let variable = 0;
+  /** Close the current stage with the operator that follows it; an empty stage is unreadable. */
+  const close = (op) => {
+    if (!current.trim() || /\\$/u.test(current.trim())) return false;
+    stages.push({ text: current.trim(), op });
+    current = '';
+    return true;
+  };
+  for (let at = 0; at < source.length; at += 1) {
+    const char = source[at];
+    const next = source[at + 1];
+    if (quote === "'") { current += char; if (char === "'") quote = null; continue; }
+    if (char === '\\') { current += next === '\n' ? ' ' : char + (next ?? ''); at += 1; continue; }
+    if (char === '`' || (char === '$' && next === '(')) return null;
+    if (quote === '"') { current += char; if (char === '"') quote = null; continue; }
+    if (char === "'" || char === '"') { quote = char; current += char; continue; }
+    if (char === '$' && next === '{') { variable += 1; current += '${'; at += 1; continue; }
+    if (char === '}' && variable) { variable -= 1; current += char; continue; }
+    if ('(){}#'.includes(char) || (char === '<' && (next === '<' || next === '('))) return null;
+    if (char === '&') {
+      if (next === '&') { if (!close('&&')) return null; at += 1; continue; }
+      if (next === '>' || source[at - 1] === '>' || source[at - 1] === '<') { current += char; continue; }
+      return null;
+    }
+    if (char === '|' && next === '|') { if (!close('||')) return null; at += 1; continue; }
+    if (char === ';') { if (next === ';' || !close(';')) return null; continue; }
+    if (char === '\n') { if (current.trim() && !close(';')) return null; continue; }
+    current += char;
+  }
+  if (quote || variable || !current.trim() || /\\$/u.test(current.trim())) return null;
+  stages.push({ text: current.trim(), op: '' });
+  return stages;
+}
+
+/**
+ * Wrap each stage so the shell prints its start and its exit status between private marker lines.
+ * Control flow is unchanged: each wrapper exits with its stage's status, and an `exit` inside a
+ * stage still ends the run, which leaves that stage without an end marker and so unaccounted.
+ */
+function stagedScript(stages, marker) {
+  return stages.map((stage, index) => `{ printf '\\n${marker} begin ${index}\\n'; {\n${stage.text}\n}; pullboard_stage_status=$?; `
+    + `printf '\\n${marker} end ${index} %s\\n' "$pullboard_stage_status"; (exit "$pullboard_stage_status"); } ${stage.op}`).join('\n');
+}
+
+/** Cut a staged run's output back to the command's own lines and each stage's lines and status. */
+function readStages(output, marker, count) {
+  const stages = Array.from({ length: count }, () => ({ status: null, lines: [], began: false }));
+  const kept = [];
+  let open = null;
+  const lines = output.split('\n');
+  for (const [index, line] of lines.entries()) {
+    const found = line.startsWith(`${marker} `) ? /^(?:\S+) (begin|end) (\d+)(?: (\d+))?$/u.exec(line) : null;
+    if (found) {
+      if (kept.length && kept.at(-1) === '' && lines[index - 1] === '') kept.pop();
+      const stage = stages[Number(found[2])];
+      if (!stage) { open = null; continue; }
+      if (found[1] === 'begin') { stage.began = true; open = stage; }
+      else { stage.status = found[3] === undefined ? null : Number(found[3]); open = null; }
+      continue;
+    }
+    kept.push(line);
+    if (open) open.lines.push(line);
+  }
+  return { output: kept.join('\n'), stages: stages.map(({ status, lines: own, began }) => ({ status: began ? status : null, output: own.join('\n') })) };
+}
+
+/**
  * Run a shell command in a checkout for a digest: both streams in one pipe, in order, read whole
- * however long, stdin closed so nothing waits on a person.
+ * however long, stdin closed so nothing waits on a person. With `stages`, each top-level stage's
+ * exit status and own output are kept too, or `stages` is null when the command cannot be split.
  *
  * @param {string} root
  * @param {string} command
- * @param {{ pipefail?: boolean, env?: NodeJS.ProcessEnv }} [options] - Gate-only pipefail and additional child environment values.
- * @returns {{ isGreen: boolean, output: string, seconds: number }}
+ * @param {{ pipefail?: boolean, env?: NodeJS.ProcessEnv, stages?: boolean }} [options] - Gate-only pipefail, additional child environment values and per-stage accounting.
+ * @returns {{ isGreen: boolean, output: string, seconds: number, stages?: Array<{ status: number|null, output: string }> | null }}
  */
-export function runShell(root, command, { pipefail = false, env = {} } = {}) {
+export function runShell(root, command, { pipefail = false, env = {}, stages = false } = {}) {
   const started = Date.now();
   const options = { cwd: root, env: { ...gitChildEnv(root), ...env }, shell: true, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', maxBuffer: 2 ** 30 };
   let prefix = '';
@@ -143,10 +223,16 @@ export function runShell(root, command, { pipefail = false, env = {} } = {}) {
       throw new Refused('PIPEFAIL_UNAVAILABLE', 'the repo gate shell cannot enable pipefail; rewrite the gate without a pipe');
     }
   }
+  const split = stages ? gateStages(command) : null;
+  const marker = `PULLBOARD_STAGE_${randomUUID().replaceAll('-', '')}`;
   // Newlines, not spaces, around the command, so a trailing comment in it cannot swallow the `)`.
-  const result = spawnSync(`${prefix}(\n${command}\n) 2>&1`, options);
+  const result = spawnSync(`${prefix}(\n${split ? stagedScript(split, marker) : command}\n) 2>&1`, options);
   invalidateGitFacts();
-  return { isGreen: result.status === 0, output: `${result.stdout ?? ''}${result.stderr ?? ''}`, seconds: Math.round((Date.now() - started) / 1000) };
+  const raw = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+  const seconds = Math.round((Date.now() - started) / 1000);
+  if (!stages) return { isGreen: result.status === 0, output: raw, seconds };
+  if (!split) return { isGreen: result.status === 0, output: raw, seconds, stages: null };
+  return { isGreen: result.status === 0, seconds, ...readStages(raw, marker, split.length) };
 }
 
 /** Replace a possible secret-bearing line before persisting a direct item-check log. */
@@ -163,7 +249,7 @@ function safeLog(output) {
  * @param {string} command
  * @param {{ waitMs?: number, artifactDirectory?: string, artifactPrefix?: string, persistLog?: boolean, profileFile?: string, pipefail?: boolean, gateSlotHeld?: boolean, gateLease?: object }} [options]
  */
-export function runProfiledShell(root, command, { waitMs = 0, artifactDirectory, artifactPrefix = 'pullboard-gate', persistLog = false, profileFile, pipefail = false, gateSlotHeld = false, gateLease } = {}) {
+export function runProfiledShell(root, command, { waitMs = 0, artifactDirectory, artifactPrefix = 'pullboard-gate', persistLog = false, profileFile, pipefail = false, gateSlotHeld = false, gateLease, stages = false } = {}) {
   const directory = artifactDirectory ?? dirname(gitPath(root, LOG));
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const id = randomUUID();
@@ -171,7 +257,7 @@ export function runProfiledShell(root, command, { waitMs = 0, artifactDirectory,
   const logPath = persistLog ? join(directory, `${artifactPrefix}-${id}.log`) : null;
   const started = Date.now();
   const inherited = gateLease ? gateSlotEnvironment(gateLease) : gateSlotHeld ? { [GATE_SLOT_HELD_ENV]: '1' } : {};
-  const run = runShell(root, command, { pipefail, env: inherited });
+  const run = runShell(root, command, { pipefail, env: inherited, stages });
   const profile = writeTimingProfile(profilePath, {
     ...timingFromOutput(run.output, timingRunner(command)),
     waitMs: Math.max(0, Math.round(waitMs)), wallMs: Math.max(0, Date.now() - started),
@@ -312,24 +398,25 @@ export async function withGateSlot(root, action, { landing = false, itemCheck = 
  * @param {{ trustStamp?: boolean, onWait?: (state: object) => void, landing?: boolean, agent?: string, item?: string|number }} [options]
  * @returns {Promise<{ isGreen: boolean, isCached: boolean, output: string, seconds: number, log: string, profile?: object, profilePath?: string }>}
  */
-export async function runGate(root, config, { trustStamp = true, onWait, landing = false, agent, item = '' } = {}) {
+export async function runGate(root, config, { trustStamp = true, onWait, landing = false, agent, item = '', stages = false } = {}) {
   if (!config.gate.trim()) {
     throw new Refused('NO_GATE', 'no gate configured; set "gate" in pullboard.json, e.g. "npm test"');
   }
   if (trustStamp && isStampedGreen(root)) return { isGreen: true, isCached: true, output: '', seconds: 0, log: '' };
-  return await withGateSlot(root, (lease) => fullGateRun(root, config, trustStamp, { waitMs: lease.waitMs, gateLease: lease }), {
+  return await withGateSlot(root, (lease) => fullGateRun(root, config, trustStamp, { waitMs: lease.waitMs, gateLease: lease, stages }), {
     landing, browser: true, agent, item, kind: landing ? 'landing' : 'gate', onWait,
   });
 }
 
 /** Run a full gate while its caller owns the queue lease; only a full run may stamp its tree. */
-function fullGateRun(root, config, trustStamp = false, { waitMs = 0, log = gitPath(root, LOG), gateLease } = {}) {
+function fullGateRun(root, config, trustStamp = false, { waitMs = 0, log = gitPath(root, LOG), gateLease, stages = false } = {}) {
   if (trustStamp && isStampedGreen(root)) return { isGreen: true, isCached: true, output: '', seconds: 0, log: '' };
   const before = committedTree(root);
-  const { isGreen, output, seconds, profile, profilePath } = runProfiledShell(root, config.gate, { waitMs, pipefail: true, profileFile: `${log}.profile.json`, gateLease });
+  const run = runProfiledShell(root, config.gate, { waitMs, pipefail: true, profileFile: `${log}.profile.json`, gateLease, stages });
+  const { isGreen, output, seconds, profile, profilePath } = run;
   writeFileSync(log, output);
   if (isGreen && before !== null && committedTree(root) === before) writeFileSync(gitPath(root, STAMP), `${before}\n`);
-  return { isGreen, isCached: false, output, seconds, log, profile, profilePath };
+  return { isGreen, isCached: false, output, seconds, log, profile, profilePath, ...(stages ? { stages: run.stages } : {}) };
 }
 
 /** Quote a fixed executable or selected path without permitting shell expansion. */
@@ -384,11 +471,12 @@ export async function runSubmitGate(root, config, { base, trunk, changed, check,
     // The proof already owns this lease: its phase profile has no additional queue wait.
     const proofWait = check ? 0 : lease.waitMs;
     let proof;
-    if (selection.full) proof = fullGateRun(root, config, false, { waitMs: proofWait, log: proofLog, gateLease: lease });
+    // The proof keeps each stage's status, so a person's waiver can only ever explain named test failures.
+    if (selection.full) proof = fullGateRun(root, config, false, { waitMs: proofWait, log: proofLog, gateLease: lease, stages: true });
     else if (!selection.files.length) proof = { isGreen: true, output: '', seconds: 0, isCached: false, log: '' };
     else {
       const command = `${config.affectedTests.trimEnd()} ${selection.files.map(path => commandWord('./' + path)).join(' ')}`;
-      proof = { ...runProfiledShell(root, command, { waitMs: proofWait, profileFile: `${proofLog}.profile.json`, gateLease: lease }), isCached: false, log: proofLog };
+      proof = { ...runProfiledShell(root, command, { waitMs: proofWait, profileFile: `${proofLog}.profile.json`, gateLease: lease, stages: true }), isCached: false, log: proofLog };
       writeFileSync(proofLog, proof.output);
     }
     writeFileSync(log, `item check:\n${criterion.output}\n${selection.full ? 'full gate' : 'affected tests'}:\n${proof.output}`);

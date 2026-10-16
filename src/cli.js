@@ -84,7 +84,7 @@ import { readRelayMachine } from './relay-machine.js';
 import { relayJoin, relayPair } from './relay-pairing-client.js';
 import { executePersonRequests } from './relay-request-execution.js';
 import { engineReceipt } from './engine.js';
-import { land, landingFailures, waivedFailures, waiverLine } from './land.js';
+import { accountedFailures, land, waivedFailures, waiverLine } from './land.js';
 
 const CHECKOUT_LEASES = new WeakMap();
 const CHECKOUT_BOARD_ONLY = new WeakMap();
@@ -2135,7 +2135,7 @@ async function submitHere(ctx, id) {
   // A full-gate stamp never substitutes for either proof; only an actual full fallback may stamp.
   const gate = await runSubmitGate(root, ctx.config, { base: claimHead, trunk: acceptedMain.commit, check: frozenCheck(held), agent: me.id, item: String(id), onWait: gateWaitReporter(ctx.io) });
   // Only the person's live waivers can pass a red proof, failure by failure; the item's own check is never waived [B3].
-  const waived = !gate.isGreen && gate.check?.green ? withBoard(ctx, (board) => waivedFailures(board, landingFailures(gate.output ?? '', root))) : null;
+  const waived = !gate.isGreen && gate.check?.green ? withBoard(ctx, (board) => waivedFailures(board, accountedFailures(gate, root))) : null;
   if (!gate.isGreen && !waived) {
     const message = `the submission proof is red at ${commit.slice(0, 12)}; fix it, commit, submit again. ${submitGateReport(gate)}`;
     // No submission can follow this verdict. Read-only main comparisons must not retain the seat's write lease.
@@ -3381,9 +3381,9 @@ async function runCommand(argv, io) {
         }
         throw error;
       }
-      const gate = await runGate(ctx.info.root, config, { landing: values.landing, agent: resourceAgent(ctx), onWait: gateWaitReporter(io) });
+      const gate = await runGate(ctx.info.root, config, { landing: values.landing, agent: resourceAgent(ctx), onWait: gateWaitReporter(io), stages: Boolean(values.landing) });
       // A landing gate honours the person's live waivers exactly as land does; a red run never stamps, so it stays waived, not green [B3,R3].
-      const waived = values.landing && !gate.isGreen ? withBoard(ctx, (board) => waivedFailures(board, landingFailures(gate.output ?? '', ctx.info.root))) : null;
+      const waived = values.landing && !gate.isGreen ? withBoard(ctx, (board) => waivedFailures(board, accountedFailures(gate, ctx.info.root))) : null;
       if (waived) {
         const lines = waived.map(waiverLine);
         const report = `landing gate waived, not green: ${waived.length} failure(s), each covered by a live person waiver; the whole output is in ${gate.log}\n${lines.join('\n')}`;

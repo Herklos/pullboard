@@ -1,6 +1,6 @@
 /** Exercise landing against real private Git worktrees, hooks, SQLite and bare remotes [B3,R3]. */
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { after, test } from 'node:test';
 import * as store from '../src/board.js';
@@ -717,6 +717,40 @@ test("a person's waiver lets a submit and a landing gate through only the waived
   assert.equal(landingJson.green, false, 'a waived landing gate is never reported green');
   assert.deepEqual(landingJson.waived.map((entry) => [entry.file, entry.waiver]), [[FILES[0], waiver.id]]);
   assert.notEqual(stampOf(box.repo), box.git(box.repo, 'rev-parse', 'HEAD^{tree}'), 'a waived landing gate writes no green stamp');
+
+  // A separate stage that fails outside any test is never covered by a waiver for the test that also failed.
+  const setup = join(box.dir, 'stage-setup.cjs');
+  const runs = join(box.dir, 'stage-setup-runs');
+  const broken = join(box.dir, 'stage-setup-broken');
+  writeFileSync(setup, `const fs = require('node:fs'); fs.appendFileSync(${JSON.stringify(runs)}, 'x'); if (fs.existsSync(${JSON.stringify(broken)})) throw new Error('separate setup stage failed');\n`);
+  const configPath = join(box.repo, 'pullboard.json');
+  const original = readFileSync(configPath, 'utf8');
+  const gateCommand = JSON.parse(original).gate;
+  const setGate = (command, message) => {
+    writeFileSync(configPath, JSON.stringify({ ...JSON.parse(original), gate: command }, null, 2));
+    box.git(box.repo, 'add', 'pullboard.json');
+    box.git(box.repo, 'commit', '-q', '-m', message);
+  };
+  writeFileSync(broken, 'on\n');
+  setGate(`${gateCommand}; node ${JSON.stringify(setup)}`, 'chore: run a separate setup stage after the tests');
+  const staged = box.run(box.repo, 'gate', '--landing', '--json');
+  assert.equal(readFileSync(runs, 'utf8').length, 1, 'the failing setup stage really ran');
+  assert.equal(staged.code, 1, 'a waived test plus a separate failing stage refuses the landing gate');
+  assert.equal(JSON.parse(staged.out).waived, undefined, 'a refused run names no waived failures');
+  assert.doesNotMatch(staged.out, /waived, not green/u);
+  const stagedItem = itemWorktree(box, 4);
+  assert.equal(commitFile(box, stagedItem.path, stagedItem.file, 'PASS\n', `feat(web): build land fixture ${stagedItem.item} [G1]`).status, 0);
+  const stagedSubmit = box.run(stagedItem.path, 'submit', String(stagedItem.item), '--json');
+  assert.equal(JSON.parse(stagedSubmit.out).error?.code, 'GATE_RED', 'a waived test plus a separate failing stage refuses the submission');
+  assert.equal(readFileSync(runs, 'utf8').length, 2, 'the submission ran the failing setup stage');
+  assert.ok(!events(box).some((event) => event.event_kind === 'fact' && event.item_id === stagedItem.item), 'a refused submission records nothing as waived');
+  rmSync(broken);
+  setGate(`node ${JSON.stringify(setup)} && ${gateCommand}`, 'chore: run a passing setup stage before the tests');
+  const passingStage = box.run(box.repo, 'gate', '--landing');
+  assert.equal(passingStage.code, 0, `${passingStage.err}\n${passingStage.out}`);
+  assert.match(passingStage.out, line, 'a passing stage leaves only the waived test to subtract');
+  setGate(gateCommand, 'chore: restore the single-stage gate');
+
   onBoard(box, (board) => {
     assert.equal(store.landingWaiverFor(board, { file: FILES[2], name: FILES[0] }), null, 'a file waiver never covers a test merely named like that file');
     store.recordLandingWaiver(board, { agentId: 'person', channel: 'terminal', id: 'name-waiver', test: 'keeps a named behavior', until: '2099-01-01', reason: 'named fixture' });
