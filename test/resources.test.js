@@ -1,11 +1,11 @@
 /** Real-process resource queue and lease coverage [Q1,Q2,Q3]. */
 import assert from 'node:assert/strict';
-import { startFixtureChild as spawn, runFixtureChild as spawnSync, reportFixtureChildFailure, runFixtureChild } from './fixture-child.js';
+import { startFixtureChild as spawn, runFixtureChild as spawnSync, reportFixtureChildFailure, runFixtureChild, runFixtureChildAsync, runFixtureGit } from './fixture-child.js';
 import { performance } from 'node:perf_hooks';
 import { once } from 'node:events';
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, watch, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createInterface } from 'node:readline';
 import { after, test } from 'node:test';
@@ -13,6 +13,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { listResources, setResourceCapacity, takeResource } from '../src/resources.js';
 import * as store from '../src/board.js';
 import { createE2eHelpers } from './e2e-helpers.js';
+import { checkNeedsBrowser } from '../src/browser-admission.js';
 
 const TEMP = [];
 const CHILDREN = new Set();
@@ -28,6 +29,8 @@ process.exitCode = await main(process.argv.slice(1), {
   cwd: process.cwd(), clock, stdin: process.stdin, stdout: process.stdout, stderr: process.stderr,
 });
 `;
+const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
+const TEST_RUNNER = resolve(import.meta.dirname, '../bin/run-tests.js');
 const POOL_MODULE_WORKER = `
 import { takeResource } from ${JSON.stringify(MODULE)};
 let announced = false;
@@ -46,6 +49,14 @@ try {
     if (String(line).trim() === 'release') break;
   }
 } finally { lease.release(); }
+`;
+const SUBMIT_CHECK = `
+import { runSubmitGate } from ${JSON.stringify(GATE_MODULE)};
+const [root, base, check] = process.argv.slice(1);
+const result = await runSubmitGate(root, { gate: 'true', affectedTests: 'node bin/run-tests.js test/cpu-check.test.js' }, {
+  base, changed: ['test/cpu-check.test.js'], check, agent: 'submit-check', item: '636',
+});
+process.stdout.write(JSON.stringify({ green: result.isGreen, full: result.full, reason: result.reason, files: result.files, checkGreen: result.check.green }) + '\\n');
 `;
 const PROCESS_INFO_POLICY = '(version 1)(allow default)(deny process-info*)';
 const SANDBOX_EXEC = process.platform === 'darwin' && existsSync('/usr/bin/sandbox-exec');
@@ -93,6 +104,50 @@ function fixture() {
     assert.equal(result.status, 0, result.failure);
   }
   return { dir, home, first, second, env: { ...process.env, PULLBOARD_HOME: home, PULLBOARD_MACHINE_HOME: home } };
+}
+
+/** Wait for a fixture command to create a marker file, with a hang ceiling only for failure. */
+function waitForMarker(path, timeoutMs = 10_000) {
+  if (existsSync(path)) return Promise.resolve();
+  const watcher = watch(dirname(path), { persistent: false });
+  return new Promise((resolveMarker, rejectMarker) => {
+    const timer = setTimeout(() => rejectMarker(new Error(`timed out waiting for ${path}`)), timeoutMs);
+    const check = () => {
+      if (!existsSync(path)) return;
+      clearTimeout(timer);
+      watcher.close();
+      resolveMarker();
+    };
+    watcher.on('error', error => { clearTimeout(timer); rejectMarker(error); });
+    watcher.on('change', check);
+    watcher.on('rename', check);
+    check();
+  }).finally(() => watcher.close());
+}
+
+/** Create a minimal real board whose CPU check and affected tests share the private gate pool. */
+function checkProject(box) {
+  const repo = box.first;
+  runFixtureGit(['branch', '-M', 'main'], { cwd: repo, env: box.env });
+  const initialized = runFixtureChild(process.execPath, [BIN, 'init'], { cwd: repo, env: box.env, encoding: 'utf8' });
+  assert.equal(initialized.status, 0, initialized.stderr);
+  const configPath = join(repo, 'pullboard.json');
+  const config = JSON.parse(readFileSync(configPath, 'utf8'));
+  writeFileSync(configPath, `${JSON.stringify({ ...config, gate: 'true', spec: 'SPEC.md', affectedTests: 'node bin/run-tests.js', lanes: { web: { owns: ['web/'], specs: ['G1'] } }, shared: [] }, null, 2)}\n`);
+  writeFileSync(join(repo, 'SPEC.md'), '# CPU check fixture\n\n## G · Goals\n- G1 [approved, must] The fixture keeps its board. | gate: true\n');
+  writeFileSync(join(repo, 'package.json'), '{"type":"module"}\n');
+  mkdirSync(join(repo, 'bin'), { recursive: true });
+  cpSync(resolve(import.meta.dirname, '../src'), join(repo, 'src'), { recursive: true });
+  copyFileSync(TEST_RUNNER, join(repo, 'bin/run-tests.js'));
+  mkdirSync(join(repo, 'test'), { recursive: true });
+  writeFileSync(join(repo, 'test/unrelated.test.js'), "import { test } from 'node:test'; test('unrelated test', () => {});\n");
+  runFixtureGit(['add', '-A'], { cwd: repo, env: box.env });
+  runFixtureGit(['-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Resource fixture', '-c', 'user.email=resource@example.invalid', 'commit', '-q', '-m', 'fixture: initialize board'], { cwd: repo, env: box.env });
+  const base = runFixtureGit(['rev-parse', 'HEAD'], { cwd: repo, env: box.env });
+  writeFileSync(join(repo, 'test/cpu-check.test.js'), `import { writeFileSync } from 'node:fs';\nimport { test } from 'node:test';\ntest('item check marker', () => writeFileSync('item-check-started', 'started'));\ntest('submit check marker', () => writeFileSync('submit-check-started', 'started'));\n`);
+  runFixtureGit(['add', 'test/cpu-check.test.js'], { cwd: repo, env: box.env });
+  runFixtureGit(['-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Resource fixture', '-c', 'user.email=resource@example.invalid', 'commit', '-q', '-m', 'test: add CPU check'], { cwd: repo, env: box.env });
+  return { repo, base };
 }
 
 /** Create the previous private queue schema so simultaneous openers exercise its migration. */
@@ -318,6 +373,61 @@ async function release(child) {
   child.lines.close();
   assert.equal(code, 0, child.errors);
 }
+
+test('a non-browser check does not wait for the browser slot [C7]', async () => {
+  const box = fixture();
+  const { repo, base } = checkProject(box);
+  const itemCheck = 'node bin/run-tests.js --test-name-pattern "item check marker" test/cpu-check.test.js';
+  const submitCheck = 'node bin/run-tests.js --test-name-pattern "submit check marker" test/cpu-check.test.js';
+  assert.equal(await checkNeedsBrowser(repo, itemCheck), false, 'an explicit CPU-only test file is classifiable');
+  assert.equal(await checkNeedsBrowser(repo, 'node bin/run-tests.js test/cockpit/brief.test.js'), true,
+    'known browser suites remain browser-gated');
+  const added = runFixtureChild(process.execPath, [BIN, 'add', 'coordinator', 'CPU check item', '--check', itemCheck, '--wait', '--json'], {
+    cwd: repo, env: box.env, encoding: 'utf8',
+  });
+  assert.equal(added.status, 0, added.stderr);
+  const item = JSON.parse(added.stdout).item.item_id;
+  assert.equal(existsSync(join(repo, 'item-check-started')), false, 'the setup baseline ran in its private clone');
+
+  const browserHolder = poolWorker(box, { agent: 'check-browser-holder', browser: true, item: '636', kind: 'gate' });
+  await acquired(browserHolder);
+  const itemMarker = join(repo, 'item-check-started');
+  const itemStarted = waitForMarker(itemMarker);
+  const itemRun = runFixtureChildAsync(process.execPath, [BIN, 'check', String(item), '--yes'], { cwd: repo, env: box.env });
+  let itemResult;
+  try {
+    await itemStarted;
+    assert.ok(privateList(box).find(({ name }) => name === 'browser')?.holders.some(({ agent }) => agent === 'check-browser-holder'),
+      'the item check starts while the unrelated browser lease remains held');
+  } finally {
+    await release(browserHolder);
+    itemResult = await itemRun;
+  }
+  assert.equal(itemResult.status, 0, itemResult.failure ?? itemResult.stderr);
+  assert.equal(readFileSync(itemMarker, 'utf8'), 'started');
+
+  const nextBrowserHolder = poolWorker(box, { agent: 'submit-browser-holder', browser: true, item: '636', kind: 'gate' });
+  await acquired(nextBrowserHolder);
+  const submitMarker = join(repo, 'submit-check-started');
+  const submitStarted = waitForMarker(submitMarker);
+  const submitRun = runFixtureChildAsync(process.execPath, ['--input-type=module', '-e', SUBMIT_CHECK, repo, base, submitCheck], { cwd: repo, env: box.env });
+  let submitResult;
+  let submitStartFailure = null;
+  try {
+    try { await submitStarted; }
+    catch (error) { submitStartFailure = error; }
+    assert.ok(privateList(box).find(({ name }) => name === 'browser')?.holders.some(({ agent }) => agent === 'submit-browser-holder'),
+      'the submission check starts while the unrelated browser lease remains held');
+  } finally {
+    await release(nextBrowserHolder);
+    submitResult = await submitRun;
+  }
+  assert.equal(submitStartFailure, null, `${submitStartFailure?.message ?? ''}\n${submitResult.stdout}\n${submitResult.stderr}`);
+  assert.equal(submitResult.status, 0, submitResult.failure ?? submitResult.stderr);
+  assert.deepEqual(JSON.parse(submitResult.stdout), {
+    green: true, full: false, reason: '', files: ['test/cpu-check.test.js'], checkGreen: true,
+  }, submitResult.stderr);
+});
 
 /** Kill and reap every fixture worker before deleting its private files. */
 after(async () => {

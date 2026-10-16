@@ -18,6 +18,7 @@ import { agentSessionDigest, requirePersonChannel } from './person.js';
 import { bindLocalSession, localSessionMatches } from './agent-session.js';
 import { decisionProjection, planRowApply, prepareRowDecisions, restoreRowApply, writeRowApply } from './row-decisions.js';
 import { digestOf, gateReport, runGate, runProfiledShell, runSubmitGate, submitGateReport, timingDigest, withGateSlot } from './gate.js';
+import { checkNeedsBrowser } from './browser-admission.js';
 import { bareWorktreeFinding, codeIsFromMain, contains, differFromHead, git, gitChildEnv, headCommit, headTree, invalidateGitFacts, isClean, mainCheckout, patchId, repoInfo, resolveCommit, tryGit, untracked, withGitFacts } from './git.js';
 import {
   FIX_NOTE,
@@ -2145,7 +2146,7 @@ async function submitHere(ctx, id) {
   withBoard(ctx, (board) => refuseUnverifiedStack(root, board, held, commit, trunk));
   // Every submit proves its frozen check and reachable tests anew on this exact commit (V4,V16).
   // A full-gate stamp never substitutes for either proof; only an actual full fallback may stamp.
-  const gate = await runSubmitGate(root, ctx.config, { base: claimHead, trunk: acceptedMain.commit, check: frozenCheck(held), agent: me.id, item: String(id), onWait: queuedItemLease(ctx, held, me.id, 'build') });
+  const gate = await runSubmitGate(root, ctx.config, { base: claimHead, trunk: acceptedMain.commit, check: frozenCheck(held), agent: me.id, item: String(id), onWait: queuedItemLease(ctx, held, me.id, 'build'), onBrowserFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
   if (!gate.isGreen) {
     const message = `the submission proof is red at ${commit.slice(0, 12)}; fix it, commit, submit again. ${submitGateReport(gate)}`;
     // No submission can follow this verdict. Read-only main comparisons must not retain the seat's write lease.
@@ -2236,7 +2237,8 @@ async function verifyHere(ctx, id, { second, values }) {
       if (digest !== item.item_frozen_digest) throw new Refused('CRITERIA_CHANGED', 'the criterion changed; ask the coordinator to refreeze this item before checking it');
       const trunk = requireTrunkMerge(root, commit);
       refuseUnverifiedStack(root, board, item, commit, trunk);
-      check = await withGateSlot(root, (lease) => checkAtCommit(root, item, { waitMs: lease.waitMs, gateLease: lease }), { browser: true, agent: me.id, item: String(id), kind: 'review', itemCheck: true, onWait: queuedItemLease(ctx, item, me.id, 'review') });
+      const browser = await checkNeedsBrowser(root, frozenCheck(item), { commit, onFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
+      check = await withGateSlot(root, (lease) => checkAtCommit(root, item, { waitMs: lease.waitMs, gateLease: lease }), { browser, agent: me.id, item: String(id), kind: 'review', itemCheck: true, onWait: queuedItemLease(ctx, item, me.id, 'review') });
       verificationProfile = check.profile ?? null;
       const evidence = check.checked
         ? `\nlast output lines (up to 40):\n${(check.outputTail ?? '(no output)').split('\n').map((line) => `  ${line}`).join('\n')}\nfull output file: ${check.outputPath ?? `(unavailable${check.outputError ? `: ${check.outputError}` : ''})`}`
@@ -2639,7 +2641,8 @@ function workCommands(io, args) {
           throw new Refused('CHECK_CONFIRM', `the check set by ${authorName} was not run: ${check}; run pullboard check ${item.item_id} --yes after reading the command, or answer yes at the prompt`);
         }
       }
-      const run = await withGateSlot(ctx.info.root, (lease) => runProfiledShell(ctx.info.root, check, { waitMs: lease.waitMs, artifactPrefix: `pullboard-check-${item.item_id}`, persistLog: true, gateLease: lease }), { browser: true, agent: caller, item: String(item.item_id), kind: 'check', itemCheck: true, onWait: queuedItemLease(ctx, item, caller, 'build') });
+      const browser = await checkNeedsBrowser(ctx.info.root, check, { onFallback: browserAdmissionReporter(io, values.json) });
+      const run = await withGateSlot(ctx.info.root, (lease) => runProfiledShell(ctx.info.root, check, { waitMs: lease.waitMs, artifactPrefix: `pullboard-check-${item.item_id}`, persistLog: true, gateLease: lease }), { browser, agent: caller, item: String(item.item_id), kind: 'check', itemCheck: true, onWait: queuedItemLease(ctx, item, caller, 'build') });
       io.result?.({ id: item.item_id, green: run.isGreen, seconds: run.seconds, check, by, report: run.isGreen ? '' : digestOf(run.output) });
       const timings = timingDigest(run.profile);
       const compact = timings && !run.profile.files.length
@@ -2869,6 +2872,17 @@ function queuedItemLease(ctx, initial, agentId, kind) {
       confirmedLeaseUntil = current[field];
       return { leaseUntil: confirmedLeaseUntil };
     });
+  };
+}
+
+/** Print the file and reason when conservative uncertainty reserves browser capacity.
+ * @param {any} io
+ * @param {boolean} jsonMode
+ * @returns {(decision:{file:string,reason:string})=>void}
+ */
+function browserAdmissionReporter(io, jsonMode = false) {
+  return ({ file, reason }) => {
+    if (!jsonMode) io.stderr.write(`browser admission fallback: ${file}: ${reason}\n`);
   };
 }
 
@@ -3378,8 +3392,21 @@ async function runCommand(argv, io) {
       }
       if (values.all) {
         if (first !== 'on' || second || rest.length) throw new Refused('USAGE', 'pullboard relay on --all [--url <address>]');
-        const result = await relayOnAll(values.url, io);
-        io.result?.(result); return result.failed.length ? 1 : 0;
+        const controller = new AbortController();
+        const cancelSignIn = () => controller.abort();
+        process.once('SIGINT', cancelSignIn);
+        process.once('SIGTERM', cancelSignIn);
+        let result;
+        try { result = await relayOnAll(values.url, io, { signal: controller.signal }); }
+        finally { process.off('SIGINT', cancelSignIn); process.off('SIGTERM', cancelSignIn); }
+        io.result?.(result);
+        if (result.outcome) {
+          io.say(result.outcome === 'declined' ? 'GitHub sign-in was declined; no boards were linked.'
+            : result.outcome === 'expired' ? 'GitHub device sign-in expired; no boards were linked.'
+              : 'GitHub device sign-in was cancelled; no boards were linked.');
+          return 1;
+        }
+        return result.failed.length ? 1 : 0;
       }
       if (['tokens', 'revoke'].includes(first)) {
         if (rest.length || values.url || (first === 'tokens' && second) || (first === 'revoke' && !second)) {
