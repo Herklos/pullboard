@@ -59,8 +59,15 @@ async function stopRelayAll(run) {
   await run.done.catch(() => {});
 }
 
+/** Normalize only resource identifiers in API paths before retaining bounded fixture diagnostics. */
+function journeyApiPathKind(pathname) {
+  const names = new Set(['api', 'v1', 'boards', 'state', 'events', 'moves', 'items', 'shouts', 'answers', 'devices', 'session', 'enrollments', 'approvals', 'requests', 'keys']);
+  return pathname.split('/').map(part => !part || names.has(part) ? part : ':id').join('/');
+}
+
 /** Serve the real relay shell and proxy every API byte, including long-lived event streams. */
 async function journeyRelaySite(box, localOrigin) {
+  const apiObservations = [];
   const browser = createRelayBrowserHandler({
     async authenticate(req) {
       const token = /(?:^|;\s*)pb_session=([^;]+)/u.exec(req.headers.cookie || '')?.[1];
@@ -69,6 +76,14 @@ async function journeyRelaySite(box, localOrigin) {
     },
   });
   const server = createServer((req, res) => {
+    const address = new URL(req.url || '/', box.origin);
+    const observation = address.pathname.startsWith('/api/') && apiObservations.length < 64
+      ? { method: req.method, pathKind: journeyApiPathKind(address.pathname), personCookiePresent: /(?:^|;\s*)pb_session=[^;]+/u.test(req.headers.cookie || ''), statusOnFinish: null }
+      : null;
+    if (observation) {
+      apiObservations.push(observation);
+      res.once('finish', () => { observation.statusOnFinish = res.statusCode; });
+    }
     const originalWriteHead = res.writeHead.bind(res);
     res.writeHead = (status, headers, ...rest) => {
       if (headers && !Array.isArray(headers)) {
@@ -110,7 +125,7 @@ async function journeyRelaySite(box, localOrigin) {
     })().catch(() => { if (!res.headersSent) res.writeHead(500); res.end(); });
   });
   await new Promise((ready, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', ready); });
-  return { server, base: 'http://127.0.0.1:' + server.address().port };
+  return { server, base: 'http://127.0.0.1:' + server.address().port, apiObservations: () => apiObservations.map(value => ({ ...value })) };
 }
 
 /** Fulfill only the hosted document/assets; rewrite live API and local requests to owned HTTP servers. */
@@ -242,8 +257,13 @@ test('pullboard.dev shows every board, linked and local [N40]', {
       catch { /* Chrome versions expose different local-network permission names. */ }
     }
     await chromeB.send('Page.navigate', { url: JOURNEY_HOSTED + '/#device=' + pending.locator + '.' + pending.secret });
-    await waitFor(() => setup.child.exitCode !== null || setup.child.signalCode !== null,
-      'A completes the actual phone enrollment within its relay work allowance', relayWorkBudgetMs());
+    try {
+      await waitFor(() => setup.child.exitCode !== null || setup.child.signalCode !== null,
+        'A completes the actual phone enrollment within its relay work allowance', relayWorkBudgetMs());
+    } catch (error) {
+      error.message += '; bounded fixture API observations: ' + JSON.stringify(site.apiObservations());
+      throw error;
+    }
     const linkedSetup = await setup.done;
     assert.equal(linkedSetup.code, 0, 'A completes the real relay on --all after phone pairing');
     assert.equal(linkedSetup.document.linked.length, 1, 'the one registered A board links through the CLI');
