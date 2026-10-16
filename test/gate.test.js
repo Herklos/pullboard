@@ -206,6 +206,79 @@ test('gate before the first commit names the uncommitted config [I1,C7]', () => 
     'other genuine NO_POLICY failures keep their specific message');
 });
 
+test('gate after init in an existing repo says to commit the init files [I1,C7]', () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-init-history-')));
+  dirs.push(dir);
+  const repo = join(dir, 'repo');
+  mkdirSync(repo);
+  const env = {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_AUTHOR_NAME: 'Test Agent',
+    GIT_AUTHOR_EMAIL: 'agent@example.com',
+    GIT_COMMITTER_NAME: 'Test Agent',
+    GIT_COMMITTER_EMAIL: 'agent@example.com',
+    PULLBOARD_HOME: join(dir, 'home'),
+    PULLBOARD_MACHINE_HOME: join(dir, 'home'),
+  };
+  const git = (...args) => runFixtureGit(args, { cwd: repo, env });
+  const run = (...args) => runFixtureChild(process.execPath, [BIN, ...args], { cwd: repo, env, encoding: 'utf8' });
+  git('init', '-q', '-b', 'main');
+  writeFileSync(join(repo, 'README.md'), '# Existing repository\n');
+  git('add', 'README.md');
+  git('commit', '-q', '-m', 'chore: create existing repository');
+  assert.equal(run('init', '--model', 'Test Coordinator').status, 0);
+
+  const refused = run('gate', '--json');
+  assert.equal(refused.status, 1, 'the gate cannot read the policy until init files are committed');
+  const refusal = JSON.parse(refused.stdout).error;
+  assert.equal(refusal.code, 'NO_POLICY');
+  const message = refusal.message;
+  assert.match(message, /pullboard\.json and Pullboard's initialized setup files are uncommitted/u);
+  assert.match(message, /git add(?: -f)? -- .*pullboard\.json/u, 'the refusal gives a scoped staging command');
+  assert.match(message, /&& git commit -q -m "chore: set up pullboard"/u, 'the refusal explains the needed commit');
+  for (const path of ['SPEC.md', 'DOCTRINE.md']) assert.ok(message.includes(path), message);
+  assert.ok(!message.includes('README.md'), 'unrelated existing files are not included in the staging command');
+
+  // The command the refusal prints is the one that fixes it.
+  const fix = message.slice(message.indexOf('commit them before running the gate: ') + 'commit them before running the gate: '.length);
+  // init installs hooks that call `pullboard`; a person has it installed, so the fixture provides it.
+  const shims = join(dir, 'bin');
+  mkdirSync(shims);
+  writeFileSync(join(shims, 'pullboard'), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(BIN)} "$@"\n`, { mode: 0o755 });
+  const applied = runFixtureChild('/bin/sh', ['-c', fix], { cwd: repo, env: { ...env, PATH: `${shims}:${env.PATH ?? ''}` }, encoding: 'utf8' });
+  assert.equal(applied.status, 0, `${applied.stdout}${applied.stderr}`);
+  const afterFix = run('gate', '--json');
+  assert.notEqual(afterFix.stdout ? JSON.parse(afterFix.stdout).error?.code : undefined, 'NO_POLICY', 'the printed commit lets the gate read its policy');
+
+  // A policy missing for any other reason keeps its own refusal.
+  git('switch', '-q', '--detach', 'HEAD');
+  const detached = run('gate', '--json');
+  assert.equal(detached.status, 1);
+  const otherMissing = JSON.parse(detached.stdout).error;
+  assert.equal(otherMissing.code, 'NO_POLICY');
+  assert.doesNotMatch(otherMissing.message, /uncommitted/u, 'a committed config never gets the commit-your-setup message');
+
+  // Git metadata kept outside the project (git init --separate-git-dir) gets the same advice.
+  const separate = join(dir, 'separate');
+  mkdirSync(separate);
+  const separateGit = (...args) => runFixtureGit(args, { cwd: separate, env });
+  const separateRun = (...args) => runFixtureChild(process.execPath, [BIN, ...args], { cwd: separate, env, encoding: 'utf8' });
+  separateGit('init', '-q', '-b', 'main', '--separate-git-dir', join(dir, 'separate-metadata'));
+  writeFileSync(join(separate, 'README.md'), '# Existing repository\n');
+  separateGit('add', 'README.md');
+  separateGit('commit', '-q', '-m', 'chore: create existing repository');
+  assert.equal(separateRun('init', '--model', 'Test Coordinator').status, 0);
+  const separateRefused = separateRun('gate', '--json');
+  assert.equal(separateRefused.status, 1);
+  const separateRefusal = JSON.parse(separateRefused.stdout).error;
+  assert.equal(separateRefusal.code, 'NO_POLICY');
+  assert.match(separateRefusal.message, /pullboard\.json and Pullboard's initialized setup files are uncommitted/u,
+    'a separate Git directory still gets the commit-your-setup message');
+  assert.ok(separateRefusal.message.includes('SPEC.md') && !separateRefusal.message.includes('README.md'), separateRefusal.message);
+});
+
 test('a digest keeps the failures and the end within its cap, however long one line is [V10]', () => {
   const digest = digestOf(`not ok 1 - ${'x'.repeat(3500)}\n${'ok\n'.repeat(50)}# fail 1\nsummary: 1 failed`);
   assert.ok(digest.length <= 3000, `${digest.length} characters`);

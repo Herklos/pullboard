@@ -41,6 +41,7 @@ export function defaults() {
     spec: 'SPEC.md',
     practice: DOCTRINE_FILE,
     gate: '',
+    submitInvariants: [],
     lease: '2h',
     reviewLease: '30m',
     worktrees: 'beside',
@@ -165,6 +166,13 @@ export function configProblems(config) {
   }
   if (config.affectedTests !== undefined && (typeof config.affectedTests !== 'string' || !config.affectedTests.trim())) {
     problems.push('"affectedTests" is a nonempty command prefix used to run selected test files');
+  }
+  if (!isStringList(config.submitInvariants) || config.submitInvariants.some(path =>
+    !path || path.trim() !== path || /[\u0000-\u001f\u007f-\u009f\\]/u.test(path)
+      || path.startsWith('/') || /^[a-z]:/iu.test(path) || path.split('/').some(part => !part || part === '..' || part === '.'))) {
+    problems.push('"submitInvariants" is a list of literal repository-relative test file paths');
+  } else if (config.submitInvariants.length && (typeof config.affectedTests !== 'string' || !config.affectedTests.trim())) {
+    problems.push('"submitInvariants" requires an "affectedTests" command prefix for the project test runner');
   }
   if (!['any', COORDINATOR].includes(config.verify?.policy)) {
     problems.push('"verify.policy" is "any" (any other agent) or "coordinator"');
