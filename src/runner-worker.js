@@ -24,6 +24,9 @@ const CLEANUP_BUDGET_MS = 30_000;
 let cleanupDeadline = Infinity;
 let cleanupTimedOut = false;
 let cleanupTimer = null;
+let cleanupStage = 'command exit';
+let cleanupDirectory = null;
+let cleanupDetails = null;
 
 /** Start the post-run budget once; later cleanup phases cannot extend it. */
 function beginCleanup() {
@@ -37,6 +40,16 @@ function beginCleanup() {
 function reportCleanupTimeout() {
   if (cleanupTimedOut || Date.now() < cleanupDeadline) return;
   cleanupTimedOut = true;
+  const details = { id: workerId, stage: cleanupStage, ...(cleanupDetails?.() ?? {}) };
+  // A timeout may arrive after ordinary job deletion while output is still flushing.
+  // Keep a small diagnostic even then; it never contains command arguments or credentials.
+  if (cleanupDirectory) {
+    try {
+      mkdirSync(cleanupDirectory, { recursive: true, mode: 0o700 });
+      writeFileSync(join(cleanupDirectory, 'cleanup-timeout.json'), JSON.stringify(details) + '\n', { mode: 0o600 });
+    } catch { /* The named red result remains authoritative if diagnostic storage fails. */ }
+  }
+  process.stderr.write(`PULLBOARD_RUNNER_CLEANUP_UNVERIFIED ${workerId} ${details.reason || cleanupStage}\n`);
   process.stderr.write(`PULLBOARD_RUNNER_CLEANUP_TIMEOUT ${workerId}\n`);
 }
 
@@ -658,6 +671,12 @@ function createDescendantTracker(directory) {
   timer.unref();
   return {
     nodeOptions: journal.nodeOptions,
+    /** Describe the last observed cleanup state without treating it as a fresh ownership proof. */
+    cleanupState() {
+      return { reason, uncertain, censusFailure, knownCount: known.size,
+        pending: [...pendingIdentities].slice(0, 16).map(([pid, identity]) => ({ pid, birth: identity.birth })),
+        live: liveDescendants().slice(0, 16).map(({ pid, birth, group }) => ({ pid, birth, group })) };
+    },
     registerRoot,
     stopDescendants,
     /** Revalidate a process group immediately before signaling; null means census ambiguity. */
@@ -989,8 +1008,11 @@ async function runCommand(spec, root, env, sink, tracker) {
   forward(child.stdout); forward(child.stderr);
   const result = await closed;
   beginCleanup();
+  cleanupStage = 'command output';
   await writes;
+  cleanupStage = 'command descendants';
   await tracker.stopDescendants();
+  cleanupStage = 'command process group';
   await drainOwned(owned);
   if (transportDrain) await transportDrain;
   if (outputError) throw outputError;
@@ -1051,6 +1073,7 @@ async function main() {
     mkdirSync(base, { recursive: true, mode: 0o700 });
     chmodSync(base, 0o700);
     runDirectory = mkdtempSync(join(base, `${spec.id}-`));
+    cleanupDirectory = runDirectory;
     const root = join(runDirectory, 'checkout');
     const privateHome = join(runDirectory, 'home');
     const temporary = join(runDirectory, 'tmp');
@@ -1068,6 +1091,7 @@ async function main() {
     }, machineHomePath);
     const canonicalMachineHome = machineHomePath;
     tracker = createDescendantTracker(runDirectory);
+    cleanupDetails = tracker.cleanupState;
     activeDescendantTracker = tracker;
     const env = scopedEnvironment(privateHome, temporary, canonicalMachineHome, lease, api, tracker.nodeOptions);
     await checkoutHistory(api, runnerRoot, root, packFile, spec, env);
@@ -1079,19 +1103,25 @@ async function main() {
     final = { code: 1, signal: transportLost ? 'SIGHUP' : null, error: message, root: '' };
   } finally {
     beginCleanup();
+    cleanupStage = 'final descendants';
     if (tracker) await tracker.stopDescendants();
+    cleanupStage = 'final process groups';
     await drainAllOwned();
     if (tracker) {
+      cleanupStage = 'final verification';
       await tracker.verifyAfterGroups();
       tracker.stopMonitoring();
       activeDescendantTracker = null;
     }
     if (lease) {
+      cleanupStage = 'lease release';
       try { lease.release(); } catch { /* Retaining a lease on cleanup error is safer than speculative deletion. */ }
     }
-    if (runDirectory) { try { rmSync(runDirectory, { recursive: true, force: true }); } catch {} }
+    cleanupStage = 'job files';
+    if (runDirectory && !cleanupTimedOut) { try { rmSync(runDirectory, { recursive: true, force: true }); } catch {} }
   }
   if (transportLost || cleanupTimedOut) { clearTimeout(cleanupTimer); process.exitCode = 1; return; }
+  cleanupStage = 'result receipt';
   await receipt(spec, final, sink);
   clearTimeout(cleanupTimer);
   process.exitCode = 0;

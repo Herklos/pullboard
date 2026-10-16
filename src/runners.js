@@ -360,7 +360,7 @@ export async function runOnRunnerAsync(root, command, options) {
   try {
     const child = spawn('ssh', request.args, { env: request.env, stdio: ['pipe', 'pipe', 'pipe'] });
     const output = [], diagnostics = [];
-    let bytes = 0, error, control = '', requested = false, transfer = null;
+    let bytes = 0, error, control = '', requested = false, transfer = null, cleanupReason = '';
     const abort = () => { error ??= new Error('runner transport canceled'); child.stdin.destroy(); child.kill('SIGTERM'); };
     options.signal?.addEventListener('abort', abort, { once: true });
     removeAbort = () => options.signal?.removeEventListener('abort', abort);
@@ -379,8 +379,10 @@ export async function runOnRunnerAsync(root, command, options) {
       let newline;
       while ((newline = control.indexOf('\n')) >= 0) {
         const line = control.slice(0, newline); control = control.slice(newline + 1);
+        const cleanupPrefix = `PULLBOARD_RUNNER_CLEANUP_UNVERIFIED ${request.spec.id} `;
+        if (line.startsWith(cleanupPrefix)) cleanupReason = line.slice(cleanupPrefix.length, cleanupPrefix.length + 240);
         if (line === `PULLBOARD_RUNNER_CLEANUP_TIMEOUT ${request.spec.id}`) {
-          error = new Refused('RUNNER_CLEANUP_TIMEOUT', `runner ${request.runner.host} could not verify cleanup within 30 seconds; inspect the runner before another run`);
+          error = new Refused('RUNNER_CLEANUP_TIMEOUT', `runner ${request.runner.host} could not verify cleanup within 30 seconds${cleanupReason ? ': ' + cleanupReason : ''}; inspect job ${request.spec.id} under its runner namespace before another run`);
           child.stdin.destroy(); child.kill('SIGTERM'); return;
         }
         const prefix = `PULLBOARD_RUNNER_NEED ${request.spec.id} `;

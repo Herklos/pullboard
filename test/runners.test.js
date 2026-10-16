@@ -1,7 +1,7 @@
 /** Registered SSH runner execution stays inside a committed, secret-free worker checkout [C7]. */
 import assert from 'node:assert/strict';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, watch, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, watch, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { DatabaseSync } from 'node:sqlite';
@@ -1221,6 +1221,16 @@ console.log('RUNNER_CLEANUP_TIMEOUT_BODY_RAN');
     assert.equal(completed.status, 1, `${completed.stderr}\n${completed.stdout}`);
     const response = JSON.parse(completed.stdout.trim());
     assert.equal(response.error?.code, 'RUNNER_CLEANUP_TIMEOUT', JSON.stringify(response));
+    assert.match(response.error.message, /child spawn journal overflow or write failure/u,
+      'the named refusal retains the worker reason instead of losing it at the controller');
+    const jobId = /inspect job ([A-Za-z0-9_-]+)/u.exec(response.error.message)?.[1];
+    assert.ok(jobId, 'the refusal identifies the exact failed job for inspection');
+    const retained = readdirSync(join(remoteStateRoot, 'jobs')).find(name => name.startsWith(jobId + '-'));
+    assert.ok(retained, 'a cleanup timeout retains its private job diagnostics');
+    const diagnosis = JSON.parse(readFileSync(join(remoteStateRoot, 'jobs', retained, 'cleanup-timeout.json'), 'utf8'));
+    assert.equal(diagnosis.id, jobId);
+    assert.match(diagnosis.reason, /child spawn journal overflow or write failure/u);
+    assert.ok(diagnosis.stage, 'the timeout records which cleanup step was running');
     assert.ok(existsSync(bodyRan), 'the committed command ran to completion and wrote its own overflow marker');
     assert.equal(readFileSync(starts, 'utf8').trim().split('\n').length, 1, 'the refused cleanup result is not retried or sent to a local runner');
     await waitForCondition(() => readRemoteGateHolders(remoteDatabase).length === 0,
