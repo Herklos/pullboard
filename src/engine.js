@@ -23,9 +23,16 @@ export const ENGINE_OPERATIONS = Object.freeze([
 const OPERATION_ENGINE = Object.freeze({ reopen: 8, recordLandingBatch: 8, recordLandingWaiver: 8, recordLandingFlake: 8, finishLandingBatch: 8 });
 
 /** Dependency edits and sealed review metadata need their own engine meanings; historical envelopes retain theirs. */
-function minimumOperationEngine(operation, args) {
+function minimumOperationEngine(operation, args, board) {
   const options = args[1];
+  if (board && ['recordLandingBatch', 'finishLandingBatch'].includes(operation)) {
+    const id = operation === 'recordLandingBatch' ? args[0]?.batch?.id : args[0]?.id;
+    const prior = id && store.landingBatches(board).find(batch => batch.id === id);
+    if (prior && ['items', 'candidates'].some(key => Array.isArray(prior[key]) && prior[key].some(entry => entry && Object.hasOwn(entry, 'reviewedCommit')))) return VERDICT_REVIEW_ENGINE;
+  }
   if (operation === 'verify' && options && Object.hasOwn(options, 'review')) return VERDICT_REVIEW_ENGINE;
+  if (operation === 'recordLandingBatch' && args[0]?.batch
+    && ['items', 'candidates'].some(key => Array.isArray(args[0].batch[key]) && args[0].batch[key].some(entry => entry && typeof entry === 'object' && Object.hasOwn(entry, 'reviewedCommit')))) return VERDICT_REVIEW_ENGINE;
   return operation === 'editItem' && options && Object.hasOwn(options, 'after') && options.after !== undefined
     ? 10 : OPERATION_ENGINE[operation] ?? 1;
 }
@@ -66,7 +73,7 @@ export function startRelayEpoch(board) {
 /** Turn caller-only callbacks into deterministic values before sealing an executable operation. */
 export function prepareEngineMove(board, operation, args, { id = randomUUID(), actor } = {}) {
   if (!ENGINE_OPERATIONS.includes(operation) || !Array.isArray(args)) throw new Refused('RELAY_MOVE', 'use a supported board-engine operation with its argument array');
-  const minimumEngine = minimumOperationEngine(operation, args);
+  const minimumEngine = minimumOperationEngine(operation, args, board);
   if (ENGINE_VERSION < minimumEngine) throw new Refused('ENGINE_VERSION', `${operation} requires engine version ${minimumEngine}; this pullboard uses engine ${ENGINE_VERSION}; upgrade before sending it`);
   const values = args.map((value) => value && typeof value === 'object' ? { ...value } : value);
   if (operation === 'release') {
@@ -208,6 +215,9 @@ export function applyEngineMove(board, move, { sequence, at }) {
     if (sequence !== cursor + 1) throw new Refused('RELAY_ORDER', `relay sequence ${sequence} does not follow applied sequence ${cursor}; fetch and apply the missing prefix first`);
     let outcome = previous?.outcome;
     if (!outcome) {
+      // Existing receipts replay before consulting newer snapshot semantics.
+      const minimumEngine = minimumOperationEngine(move.operation, move.args, board);
+      if (move.engine < minimumEngine) throw new Refused('RELAY_MOVE', `${move.operation} cannot act on a checked-composition snapshot from engine ${move.engine}; use engine ${minimumEngine} or newer`);
       const clock = board.clock;
       const engineVersion = board.executionEngineVersion;
       board.clock = { now: () => new Date(at) };

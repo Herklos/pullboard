@@ -1466,15 +1466,17 @@ function reserveWithin(board, id, { agentId, leaseMs, policy, familyPolicy = 'of
 }
 
 /** Validate a sealed review without consulting Git or changing either replica [E8,H16]. */
-export function verdictReviewProblem(review, commit) {
+export function verdictReviewProblem(review, commit, { checked } = {}) {
   const valid = review && typeof review === 'object' && !Array.isArray(review)
-    && Object.keys(review).sort().join(',') === 'commit,paths,trunk'
+    && Object.keys(review).sort().join(',') === (checked === false ? 'commit,paths,trunk' : checked === true || Object.hasOwn(review, 'head') ? 'commit,head,paths,trunk' : 'commit,paths,trunk')
+    && (!checked || Object.hasOwn(review, 'head'))
+    && (!Object.hasOwn(review, 'head') || /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(review.head ?? ''))
     && review.commit === commit && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(review.commit ?? '')
     && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(review.trunk ?? '')
     && Array.isArray(review.paths) && review.paths.every(path => typeof path === 'string' && !path.includes('\0')
       && path.split('/').every(part => part && part !== '.' && part !== '..'))
     && JSON.stringify(review.paths) === JSON.stringify([...new Set(review.paths)].sort());
-  return valid ? null : new Refused('BAD_VERDICT_REVIEW', 'the review must bind the current submitted commit, its reviewed trunk and sorted unique candidate paths; use current Pullboard to review it again');
+  return valid ? null : new Refused('BAD_VERDICT_REVIEW', checked ? 'the review must bind the current submitted commit, its checked commit, reviewed trunk and sorted unique candidate paths; use current Pullboard to review it again' : 'the review must bind the current submitted commit, its reviewed trunk and sorted unique candidate paths; use current Pullboard to review it again');
 }
 
 /**
@@ -1491,7 +1493,7 @@ export function verdictReviewProblem(review, commit) {
  *
  * @param {any} board
  * @param {number} id
- * @param {{ agentId: string, decision: string, reason?: string, note?: string, head: string, digest: string, policy: string, familyPolicy?: string, check?: 'none' | 'green', review?: {commit: string, trunk: string, paths: string[]} }} verdict
+ * @param {{ agentId: string, decision: string, reason?: string, note?: string, head: string, digest: string, policy: string, familyPolicy?: string, check?: 'none' | 'green', review?: {commit: string, head?: string, trunk: string, paths: string[]} }} verdict
  * @returns {{ decision: string, reason: string, check?: 'none' | 'green' }}
  */
 export function verify(board, id, { agentId, decision, reason, note = '', head, digest, policy, familyPolicy = 'off', check, review }) {
@@ -1515,7 +1517,7 @@ export function verify(board, id, { agentId, decision, reason, note = '', head, 
         atSubmittedCommit: null,
         notMerged: found => !found.item_merged_commit ? null
           : new Refused('ALREADY_MERGED', `item #${id} already landed; only unlanded acceptances can be re-reviewed`),
-        verdictReviewRecorded: found => verdictReviewProblem(review, found.item_commit),
+        verdictReviewRecorded: found => verdictReviewProblem(review, found.item_commit, { checked: engine >= VERDICT_REVIEW_ENGINE }),
         reviewTreeCurrent: null,
         ...reviewerChecks(board, { agentId, policy, familyPolicy }),
         criterionUnchanged: (found) =>
@@ -1547,7 +1549,7 @@ export function verify(board, id, { agentId, decision, reason, note = '', head, 
     });
     const detail = { reason: code, commit: item.item_commit };
     if (isAccept && check !== undefined) detail.check = check;
-    if (newReview) detail.review = { commit: review.commit, trunk: review.trunk, paths: [...review.paths] };
+    if (newReview) detail.review = { commit: review.commit, ...(Object.hasOwn(review, 'head') ? { head: review.head } : {}), trunk: review.trunk, paths: [...review.paths] };
     logEvent(board, agentId, verb, id, detail);
     return { decision, reason: code, ...(isAccept && check !== undefined ? { check } : {}) };
   });
@@ -1824,6 +1826,17 @@ export function verdictsFor(board, id) {
     try { detail = JSON.parse(receipts[index]?.event_detail ?? '{}'); } catch { /* Malformed legacy details remain unknown. */ }
     return { ...verdict, check: detail.check ?? 'unknown', ...(detail.review ? { review: detail.review } : {}) };
   });
+}
+
+/** The latest matching acceptance; the submission stays immutable through later re-reviews. */
+export function acceptedVerdict(board, item) {
+  return verdictsFor(board, item.item_id).findLast(verdict =>
+    verdict.verdict_decision === 'ACCEPT' && verdict.verdict_commit === item.item_commit);
+}
+
+/** The exact checked composition for a new acceptance, or the historical submitted candidate. */
+export function checkedLandingCommit(board, item) {
+  return acceptedVerdict(board, item)?.review?.head ?? item.item_commit;
 }
 
 /**
@@ -2711,7 +2724,8 @@ export function recordLandingBatch(board, { agentId, batch, revision = 0 }) {
     || !['merging', 'gating', 'bisecting', 'flaky', 'blocked', 'ready', 'pushed', 'landed'].includes(batch.state)
     || !/^[a-f0-9]{40,64}$/u.test(batch.base ?? '') || !/^[a-f0-9]{40,64}$/u.test(batch.tip ?? '')
     || typeof batch.root !== 'string' || !batch.root || typeof batch.branch !== 'string' || !batch.branch.startsWith('refs/heads/')
-    || !Array.isArray(batch.items) || batch.items.some((entry) => !Number.isSafeInteger(entry?.id) || entry.id < 1 || !/^[a-f0-9]{40,64}$/u.test(entry.commit ?? ''))
+    || !Array.isArray(batch.items) || batch.items.some((entry) => !Number.isSafeInteger(entry?.id) || entry.id < 1 || !/^[a-f0-9]{40,64}$/u.test(entry.commit ?? '')
+      || ((board.executionEngineVersion ?? ENGINE_VERSION) >= VERDICT_REVIEW_ENGINE && Object.hasOwn(entry, 'reviewedCommit') && !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(entry.reviewedCommit ?? '')))
     || typeof batch.owner !== 'string' || !batch.owner || typeof batch.logPath !== 'string' || !batch.logPath
     || !Number.isSafeInteger(revision) || revision < 0) {
     throw new Refused('LAND_BATCH', 'a landing batch needs its exact base, tip, items, state, owner and log path; run pullboard land');
@@ -2809,6 +2823,10 @@ export function finishLandingBatch(board, { agentId, id, tip }) {
       const item = itemById(board, entry.id);
       if (item.item_commit !== entry.commit || item.item_status !== 'verified') {
         throw new Refused('LAND_ITEM_MOVED', `item #${entry.id} changed after the batch was gated; rebuild its landing`);
+      }
+      if ((board.executionEngineVersion ?? ENGINE_VERSION) >= VERDICT_REVIEW_ENGINE
+        && (entry.reviewedCommit ?? entry.commit) !== checkedLandingCommit(board, item)) {
+        throw new Refused('LAND_ITEM_MOVED', `item #${entry.id} was re-reviewed after the batch was gated; rebuild its landing`);
       }
       if (item.item_merged_commit && item.item_merged_commit !== entry.merge) {
         throw new Refused('LAND_ITEM_MOVED', `item #${entry.id} already has another landing receipt; read pullboard show ${entry.id}`);

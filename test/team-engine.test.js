@@ -82,7 +82,7 @@ test('engine 12 acceptance receipts stay exact and sealed re-review needs a newe
     }
   }
   const originalVerdicts = store.verdictsFor(one, 1);
-  const reReview = { ...prepareEngineMove(one, 'verify', [1, verdict({ commit: COMMIT, trunk: TRUNK, paths: ['web/feature.js'] })], { id: 'sealed-new-review' }), engine: VERDICT_REVIEW_ENGINE };
+  const reReview = { ...prepareEngineMove(one, 'verify', [1, verdict({ commit: COMMIT, head: COMMIT, trunk: TRUNK, paths: ['web/feature.js'] })], { id: 'sealed-new-review' }), engine: VERDICT_REVIEW_ENGINE };
   assert.equal(reReview.engine, 13, 'the feature replays at its introduction version even after a later writer upgrade');
   const oldBefore = oldExchange.exportBoard(old);
   assert.throws(() => oldEngine.applyEngineMove(old, reReview, { sequence: 3, at: AT }), { code: 'ENGINE_VERSION' });
@@ -101,8 +101,8 @@ test('engine 12 acceptance receipts stay exact and sealed re-review needs a newe
 test('malformed sealed reviews cannot append proof or bind a different submission [E8,H16,V8]', t => {
   const one = submitted(t);
   const two = replica(t, one);
-  const valid = { commit: COMMIT, trunk: TRUNK, paths: ['web/feature.js'] };
-  const invalid = [null, { ...valid, commit: BASE }, { ...valid, trunk: 'not-a-commit' },
+  const valid = { commit: COMMIT, head: COMMIT, trunk: TRUNK, paths: ['web/feature.js'] };
+  const invalid = [{ commit: COMMIT, trunk: TRUNK, paths: ['web/feature.js'] }, { ...valid, head: 'not-a-commit' }, null, { ...valid, commit: BASE }, { ...valid, trunk: 'not-a-commit' },
     { ...valid, paths: 'web/feature.js' }, { ...valid, paths: ['web/feature.js', 'web/feature.js'] },
     { ...valid, paths: ['web/z.js', 'web/a.js'] }, { ...valid, paths: ['/web/feature.js'] },
     { ...valid, paths: ['web/../feature.js'] }, { ...valid, paths: ['web//feature.js'] },
@@ -117,4 +117,70 @@ test('malformed sealed reviews cannot append proof or bind a different submissio
     assert.equal(store.getItem(one, 1).item_status, 'submitted');
     assert.deepEqual(exportBoard(one), exportBoard(two));
   }
+});
+
+
+test('a landing snapshot binds the checked composition through replay and final receipts [E8,H16,R3]', t => {
+  const one = submitted(t);
+  const two = replica(t, one);
+  const reviewed = { commit: COMMIT, head: TRUNK, trunk: BASE, paths: ['web/feature.js'] };
+  /** Capture the same acceptance timestamp in both replicas through their ordered public engine. */
+  const acceptAt = (head, sequence) => {
+    const move = prepareEngineMove(one, 'verify', [1, { ...verdict({ ...reviewed, head }), head }], { id: `checked-review-${sequence}` });
+    const first = applyEngineMove(one, move, { sequence, at: AT });
+    assert.equal(first.error, undefined, JSON.stringify(first));
+    assert.deepEqual(first, applyEngineMove(two, move, { sequence, at: AT }));
+  };
+  acceptAt(TRUNK, 1);
+  const entry = { id: 1, commit: COMMIT, reviewedCommit: TRUNK, merge: TRUNK };
+  const batch = { version: 1, id: 'reviewed-landing', state: 'pushed', base: BASE, tip: TRUNK,
+    branch: 'refs/heads/main', root: '/fixture/landing', owner: 'fixture', logPath: '/fixture/landing.log',
+    candidates: [entry], items: [entry], revision: 0 };
+  const record = prepareEngineMove(one, 'recordLandingBatch', [{ agentId: 'coordinator', batch }], { id: 'checked-landing-snapshot' });
+  assert.equal(record.engine, VERDICT_REVIEW_ENGINE);
+  const before = exportBoard(one);
+  assert.throws(() => applyEngineMove(one, { ...record, engine: 12 }, { sequence: 2, at: AT }), { code: 'RELAY_MOVE' });
+  assert.deepEqual(exportBoard(one), before, 'a downgraded checked-head snapshot cannot mutate the prefix');
+  assert.deepEqual(applyEngineMove(one, record, { sequence: 2, at: AT }), applyEngineMove(two, record, { sequence: 2, at: AT }));
+  acceptAt(COMMIT, 3);
+  const finish = prepareEngineMove(one, 'finishLandingBatch', [{ agentId: 'coordinator', id: batch.id, tip: TRUNK }], { id: 'stale-checked-landing' });
+  const beforeFinish = exportBoard(one);
+  assert.throws(() => applyEngineMove(one, { ...finish, engine: 12 }, { sequence: 4, at: AT }), { code: 'RELAY_MOVE' });
+  assert.deepEqual(exportBoard(one), beforeFinish, 'a legacy-tagged finish cannot bypass the checked snapshot binding');
+  const refused = applyEngineMove(one, finish, { sequence: 4, at: AT });
+  assert.equal(refused.error?.code, 'LAND_ITEM_MOVED', 'a later re-review cannot inherit a prior checked tree gate');
+  assert.deepEqual(refused, applyEngineMove(two, finish, { sequence: 4, at: AT }));
+  assert.equal(store.getItem(one, 1).item_merged_commit, null);
+  assert.equal(store.landingBatches(one)[0].state, 'pushed', 'a refused receipt leaves the exact prior snapshot intact');
+  acceptAt(TRUNK, 5);
+  const restored = { ...finish, id: 'matching-checked-landing' };
+  const landed = applyEngineMove(one, restored, { sequence: 6, at: AT });
+  assert.equal(landed.error, undefined, JSON.stringify(landed));
+  assert.deepEqual(landed, applyEngineMove(two, restored, { sequence: 6, at: AT }));
+  assert.equal(store.getItem(one, 1).item_commit, COMMIT);
+  assert.equal(store.getItem(one, 1).item_merged_commit, TRUNK);
+  assert.equal(store.landingBatches(one)[0].items[0].reviewedCommit, TRUNK);
+  assert.deepEqual(exportBoard(one), exportBoard(two));
+});
+
+test('an older landing refusal remains exact after its snapshot acquires checked-head binding [E8,H16,R3]', t => {
+  const board = submitted(t);
+  store.verify(board, 1, verdict({ commit: COMMIT, head: COMMIT, trunk: BASE, paths: ['web/feature.js'] }));
+  const batch = { version: 1, id: 'upgraded-snapshot', state: 'gating', base: BASE, tip: COMMIT,
+    branch: 'refs/heads/main', root: '/fixture/landing', owner: 'fixture', logPath: '/fixture/landing.log',
+    candidates: [{ id: 1, commit: COMMIT }], items: [{ id: 1, commit: COMMIT }], revision: 0 };
+  const legacy = { ...prepareEngineMove(board, 'recordLandingBatch', [{ agentId: 'coordinator', batch }], { id: 'legacy-snapshot' }), engine: 12 };
+  assert.equal(applyEngineMove(board, legacy, { sequence: 1, at: AT }).error, undefined);
+  const finish = { ...prepareEngineMove(board, 'finishLandingBatch', [{ agentId: 'coordinator', id: batch.id, tip: COMMIT }], { id: 'legacy-not-pushed' }), engine: 12 };
+  const original = applyEngineMove(board, finish, { sequence: 2, at: AT });
+  assert.equal(original.error?.code, 'LAND_NOT_PUSHED');
+  const saved = engineReceipt(board, finish.id);
+  const checked = { ...batch, revision: 1, candidates: [{ id: 1, commit: COMMIT, reviewedCommit: TRUNK }], items: [{ id: 1, commit: COMMIT, reviewedCommit: TRUNK }] };
+  const update = prepareEngineMove(board, 'recordLandingBatch', [{ agentId: 'coordinator', batch: checked, revision: 1 }], { id: 'checked-snapshot' });
+  assert.equal(applyEngineMove(board, update, { sequence: 3, at: AT }).error, undefined);
+  assert.deepEqual(applyEngineMove(board, finish, { sequence: 2, at: AT }), original);
+  assert.deepEqual(engineReceipt(board, finish.id), saved, 'a new snapshot meaning cannot alter an existing refusal receipt');
+  const before = exportBoard(board);
+  assert.throws(() => applyEngineMove(board, { ...finish, id: 'new-legacy-attempt' }, { sequence: 4, at: AT }), { code: 'RELAY_MOVE' });
+  assert.deepEqual(exportBoard(board), before);
 });

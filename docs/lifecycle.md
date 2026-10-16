@@ -134,7 +134,7 @@ Each move checks its guards in this order and refuses with the first one that do
 | NO_POLICY | the caller's checkout contains the submitted commit | restore the frozen policy objects |
 | BAD_CONFIG | the caller's checkout contains the submitted commit | repair the committed coordinator configuration |
 | GIT_GRAFTS | the caller's checkout contains the submitted commit | ask the coordinator to remove the Git graft file before retrying |
-| BAD_VERDICT_REVIEW | a new review binds the submitted commit, a valid trunk commit and canonical candidate paths | restore the submitted Git objects and retry the review with current Pullboard |
+| BAD_VERDICT_REVIEW | a new review binds the submitted commit, its exact checked commit, a valid trunk commit and canonical candidate paths | restore the submitted Git objects and retry the review with current Pullboard |
 | STALE_VERDICT | a stale acceptance is re-reviewed at a clean HEAD containing the current trunk, which stays fixed through its check | merge current main into the submitted commit and re-review it |
 | DIRTY | a stale acceptance is re-reviewed at a clean HEAD containing the current trunk, which stays fixed through its check | commit the reviewed composition before re-reviewing |
 | UNTRACKED | a stale acceptance is re-reviewed at a clean HEAD containing the current trunk, which stays fixed through its check | commit or ignore untracked files before re-reviewing |

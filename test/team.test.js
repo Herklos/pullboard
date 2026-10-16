@@ -175,6 +175,10 @@ test('a verdict reads stale when main moves under its files [E8]', { timeout: 12
     return applyEngineMove(board, move, { sequence: 1, at: verdict.verdict_at });
   });
   assert.equal(outcome.error, undefined, JSON.stringify(outcome));
+  const reviewPin = `refs/pullboard/items/1/${composed.slice(0, 12)}`;
+  assert.equal(box.git(box.repo, 'rev-parse', reviewPin), composed, 'the checked commit is pinned durably for other replicas to fetch');
+  assert.equal(items()[1].item_verdict_state?.code, 'STALE_VERDICT', 'a replica without the checked Git objects fails closed');
+  box.git(peer, 'fetch', '-q', 'origin', reviewPin);
   assert.ok(items().every(item => !item.item_verdict_state), 'the same sealed re-review clears both replicas');
   assert.equal((await http('/state')).state.items[0].verdictState, undefined, 'a newer acceptance invalidates stale cached state');
   assert.equal((await http('/items/1')).item.verdictState, undefined);
@@ -221,4 +225,50 @@ test('a checkout or trunk moving during verification cannot acquire proof [E8]',
   rmSync(moveMain);
   run(box, reviewer, 'verify', '1', 'accept', '--note', 'The candidate and known trunk stayed fixed through the complete frozen check.');
   assert.equal(withBoard(box.repo, board => store.verdictsFor(board, 1)).length, 1);
+});
+
+
+test('landing retains the exact repair that passed stale re-review [E8,V8,R3]', () => {
+  const box = helpers.project();
+  const source = (feature, expected) => `feature = ${feature}\n${'// independent caller line\n'.repeat(12)}expected = ${expected}\n`;
+  assert.equal(helpers.commitFile(box, box.repo, 'web/feature.txt', source(0, 1), 'feat(web): baseline caller [G1]').status, 0);
+  box.git(box.web, 'merge', '-q', '--ff-only', 'main');
+  const check = `test "$(sed -n 's/^feature = //p' web/feature.txt)" = "$(sed -n 's/^expected = //p' web/feature.txt)"`;
+  run(box, box.repo, 'add', 'web', 'Repair follows its review', '--specs', 'G1', '--check', check, '--wait');
+  run(box, box.web, 'claim', '1');
+  assert.equal(helpers.commitFile(box, box.web, 'web/feature.txt', source(1, 1), 'feat(web): original feature [G1]').status, 0);
+  const submitted = box.git(box.web, 'rev-parse', 'HEAD');
+  run(box, box.web, 'submit', '1');
+  const reviewer = join(box.dir, 'repair-reviewer');
+  box.git(box.repo, 'worktree', 'add', '-q', '--detach', reviewer, submitted);
+  run(box, reviewer, 'join', 'web');
+  run(box, reviewer, 'verify', '1', 'accept', '--note', 'The original feature matches the original caller.');
+  const original = withBoard(box.repo, board => store.verdictsFor(board, 1));
+  assert.equal(helpers.commitFile(box, box.repo, 'web/feature.txt', source(0, 2), 'feat(web): caller now requires two [G1]').status, 0);
+  assert.equal(JSON.parse(run(box, box.repo, 'show', '1', '--json')).item_verdict_state?.code, 'STALE_VERDICT');
+  box.git(reviewer, 'merge', '-q', '--no-edit', 'main');
+  assert.equal(helpers.commitFile(box, reviewer, 'web/feature.txt', source(2, 2), 'feat(web): repair against the new caller [G1]').status, 0);
+  assert.equal(helpers.commitFile(box, reviewer, 'web/repair.txt', 'ready\n', 'feat(web): add the repair companion [G1]').status, 0);
+  const checked = box.git(reviewer, 'rev-parse', 'HEAD');
+  run(box, reviewer, 'verify', '1', 'accept', '--note', 'The repaired composition matches the new caller; the original feature does not.');
+  const reviewed = withBoard(box.repo, board => store.verdictsFor(board, 1));
+  assert.deepEqual(reviewed.slice(0, original.length), original);
+  assert.equal(reviewed.at(-1).verdict_head, checked);
+  const probe = join(box.dir, 'repair-path-replica');
+  box.git(box.dir, 'clone', '-q', box.repo, probe);
+  withBoard(probe, board => importBoard(board, withBoard(box.repo, exportBoard)));
+  box.git(probe, 'fetch', '-q', 'origin', `refs/pullboard/items/1/${checked.slice(0, 12)}`);
+  assert.equal(helpers.commitFile(box, probe, 'web/repair.txt', 'main changed the repair\n', 'feat(web): main changes a repair file [G1]').status, 0);
+  const changedRepair = JSON.parse(run(box, probe, 'show', '1', '--json'));
+  assert.equal(changedRepair.item_verdict_state?.file, 'web/repair.txt', 'a file introduced by the checked repair must participate in later freshness');
+
+  const remote = join(box.dir, 'landing-remote.git');
+  box.git(box.dir, 'init', '-q', '--bare', remote);
+  box.git(box.repo, 'remote', 'add', 'origin', remote);
+  box.git(box.repo, 'push', '-q', '-u', 'origin', 'main');
+  const landed = JSON.parse(run(box, box.repo, 'land', '--json'));
+  assert.deepEqual(landed.landed, [1], JSON.stringify(landed));
+  assert.equal(box.git(box.repo, 'show', landed.batch.tip + ':web/feature.txt'), source(2, 2).trim(), 'landing must retain the exact repaired file that passed the frozen check');
+  assert.equal(box.git(box.remote ?? remote, 'rev-parse', 'main'), landed.batch.tip);
+  assert.equal(withBoard(box.repo, board => store.getItem(board, 1)).item_commit, submitted, 'the original submission remains the immutable item identity');
 });

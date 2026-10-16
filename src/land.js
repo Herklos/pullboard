@@ -57,6 +57,12 @@ export function landingSubject(item) {
   return `${prefix}${subject.replace(/\.$/u, '')}${suffix}`;
 }
 
+/** Keep the submitted identity and, when different, its sealed checked composition. */
+function landingEntry(item) {
+  return { id: item.item_id, commit: item.item_commit,
+    ...(item.item_landing_commit !== item.item_commit ? { reviewedCommit: item.item_landing_commit } : {}) };
+}
+
 /** Select verified, unmerged candidates in verdict order, retaining dependency order [B3,R3]. */
 function candidates(board, root, base, maximum) {
   const all = store.listItems(board, { all: true });
@@ -68,10 +74,12 @@ function candidates(board, root, base, maximum) {
   const ready = [];
   const blocked = [];
   const knownReds = store.landingBatches(board).flatMap((batch) => batch.culprits ?? []);
-  for (const item of pending) {
+  for (const original of pending) {
+    const item = { ...original, item_landing_commit: store.checkedLandingCommit(board, original) };
     const stale = projector.state(item);
     if (stale) { blocked.push({ id: item.item_id, ...stale }); continue; }
-    const known = knownReds.find((entry) => entry.id === item.item_id && entry.commit === item.item_commit);
+    const known = knownReds.find((entry) => entry.id === item.item_id && entry.commit === item.item_commit
+      && (entry.reviewedCommit ?? entry.commit) === item.item_landing_commit);
     if (known && !known.tests.every((failure) => store.landingWaiverFor(board, failure))) {
       blocked.push({ id: item.item_id, code: 'LAND_KNOWN_RED', tests: known.tests });
       continue;
@@ -79,7 +87,7 @@ function candidates(board, root, base, maximum) {
     const dependencies = (item.item_after || '').split(',').filter(Boolean).map(Number);
     if (dependencies.some((id) => !all.find((other) => other.item_id === id)?.item_merged_commit && !ready.some((other) => other.item_id === id))) continue;
     const stacked = store.unverifiedSubmissions(board).find((other) => other.item_id !== item.item_id
-      && tryGit(root, ['merge-base', '--is-ancestor', other.item_commit, item.item_commit]).status === 0
+      && tryGit(root, ['merge-base', '--is-ancestor', other.item_commit, item.item_landing_commit]).status === 0
       && tryGit(root, ['merge-base', '--is-ancestor', other.item_commit, base]).status !== 0);
     if (stacked) {
       blocked.push({ id: item.item_id, code: 'STACKED_UNVERIFIED', stacked: stacked.item_id });
@@ -107,9 +115,11 @@ async function mergeGroup(state, items) {
   for (const entry of items) {
     const item = store.getItem(state.board, entry.id ?? entry.item_id);
     if (item.item_status !== 'verified' || item.item_commit !== (entry.commit ?? item.item_commit)) throw new Refused('LAND_ITEM_MOVED', `item #${item.item_id} changed; rebuild the batch from current verified work`);
+    const checked = store.checkedLandingCommit(state.board, item);
+    if (checked !== (entry.reviewedCommit ?? entry.commit ?? item.item_commit)) throw new Refused('LAND_ITEM_MOVED', `item #${item.item_id} was re-reviewed; rebuild its landing from the checked commit`);
     const stale = verdictProjector(state.root, state.board, { main: batch.base }).state(item);
     if (stale) throw staleVerdictRefusal(item, stale);
-    const result = tryGit(batch.root, ['merge', '--no-ff', item.item_commit, '-m', landingSubject(item)]);
+    const result = tryGit(batch.root, ['merge', '--no-ff', checked, '-m', landingSubject(item)]);
     if (result.status !== 0) {
       const files = tryGit(batch.root, ['diff', '--name-only', '--diff-filter=U']).stdout.split('\n').filter(Boolean);
       if (!files.length) throw new Refused('LAND_MERGE', `merge of #${item.item_id} failed outside a conflict: ${result.stderr || result.stdout}; inspect ${batch.root} and its hooks before adopting`);
@@ -119,8 +129,8 @@ async function mergeGroup(state, items) {
       continue;
     }
     const first = git(batch.root, ['rev-list', '--first-parent', '--reverse', 'HEAD']).split('\n')
-      .find((commit) => tryGit(batch.root, ['merge-base', '--is-ancestor', item.item_commit, commit]).status === 0);
-    merged.push({ id: item.item_id, commit: item.item_commit, merge: first });
+      .find((commit) => tryGit(batch.root, ['merge-base', '--is-ancestor', checked, commit]).status === 0);
+    merged.push({ id: item.item_id, commit: item.item_commit, ...(checked !== item.item_commit ? { reviewedCommit: checked } : {}), merge: first });
   }
   return { items: merged, conflicts, tip: headCommit(batch.root) };
 }
@@ -177,7 +187,7 @@ async function bisect(state, items, failures, label = 'split') {
       await state.write('appendFact', [item.id, { agentId: 'coordinator', kind: 'measurement', text }]);
     }
     const mergeCommit = state.batch.tip;
-    if (!state.culprits.some((entry) => entry.id === item.id)) state.culprits.push({ id: item.id, commit: item.commit, mergeCommit, tests: failures });
+    if (!state.culprits.some((entry) => entry.id === item.id)) state.culprits.push({ id: item.id, commit: item.commit, ...(item.reviewedCommit ? { reviewedCommit: item.reviewedCommit } : {}), mergeCommit, tests: failures });
     await save(state, { culprits: state.culprits });
     await returnCulprits(state);
     state.say(`culprit #${item.id}: ${failures.map((failure) => failure.name).join(', ')}`);
@@ -208,6 +218,7 @@ async function returnCulprits(state) {
   for (const culprit of state.culprits) {
     const item = store.getItem(state.board, culprit.id);
     if (item.item_status !== 'verified' || item.item_merged_commit || item.item_commit !== culprit.commit
+      || (culprit.reviewedCommit ?? culprit.commit) !== store.checkedLandingCommit(state.board, item)
       || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(culprit.mergeCommit ?? '')) continue;
     const note = `Landing batch ${state.batch.id} failed ${culprit.tests.map((failure) => `${failure.file}: ${failure.name}`).join('; ')}; merge commit ${culprit.mergeCommit}`;
     await state.write('reopen', [culprit.id, { agentId: 'coordinator', note }]);
@@ -230,6 +241,13 @@ async function fileFlakes(state, gate, files) {
 /** Push the exact gated tip before recording receipts, then fast-forward only a clean unchanged main. */
 async function publish(state) {
   let batch = state.batch;
+  for (const entry of batch.items) {
+    const item = store.getItem(state.board, entry.id);
+    if (item.item_status !== 'verified' || item.item_commit !== entry.commit
+      || store.checkedLandingCommit(state.board, item) !== (entry.reviewedCommit ?? entry.commit)) {
+      throw new Refused('LAND_ITEM_MOVED', `item #${entry.id} changed its checked composition; rebuild the landing before publishing`);
+    }
+  }
   const remote = tryGit(state.root, ['config', '--get', `branch.${batch.branch.replace(/^refs\/heads\//u, '')}.remote`]).stdout || 'origin';
   if (batch.proof?.failures?.length && batch.state !== 'pushed') {
     const failures = batch.proof.failures.map((failure) => ({ ...failure, waiver: store.landingWaiverFor(state.board, failure)?.id }));
@@ -273,7 +291,7 @@ export async function land({ root, board, config, write, say, owner, maximum = I
   if (dryRun) {
     const conflicts = [];
     for (const item of selected.ready) {
-      const merge = tryGit(root, ['merge-tree', '--write-tree', '--name-only', '-z', trunk.commit, item.item_commit]);
+      const merge = tryGit(root, ['merge-tree', '--write-tree', '--name-only', '-z', trunk.commit, item.item_landing_commit]);
       if (merge.status === 1) {
         const parts = merge.stdout.split('\0').slice(1);
         const end = parts.indexOf('');
@@ -305,8 +323,8 @@ export async function land({ root, board, config, write, say, owner, maximum = I
     const id = randomUUID();
     const directory = join(repoInfo(root).commonDir, 'pullboard', 'landings', id);
     batch = { version: 1, id, base: trunk.commit, tip: trunk.commit, branch: trunk.branch, root: join(directory, 'worktree'),
-      candidates: selected.ready.map((item) => ({ id: item.item_id, commit: item.item_commit })),
-      items: selected.ready.map((item) => ({ id: item.item_id, commit: item.item_commit })), conflicts: [], blocked: selected.blocked,
+      candidates: selected.ready.map(landingEntry),
+      items: selected.ready.map(landingEntry), conflicts: [], blocked: selected.blocked,
       state: 'merging', owner, logPath: join(directory, 'logs', 'batch.log'), revision: 0 };
     batch = await write('recordLandingBatch', [{ agentId: 'coordinator', batch }]);
     mkdirSync(directory, { recursive: true });

@@ -2430,7 +2430,7 @@ async function verifyHere(ctx, id, { second, values }) {
         if (untracked(root).length) throw new Refused('UNTRACKED', 'commit or ignore untracked files before re-reviewing the stale verdict');
         if (!contains(root, trunk.commit, head)) throw staleVerdictRefusal(item, stale);
       }
-      review = captureVerdictReview(root, board, item, trunk.commit);
+      review = captureVerdictReview(root, board, item, trunk.commit, checkedCommit);
       refuseUnverifiedStack(root, board, item, checkedCommit, trunk);
       const checkedItem = reReview ? { ...item, item_commit: checkedCommit } : item;
       const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(root, frozenCheck(item), { commit: checkedCommit, onFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
@@ -2454,6 +2454,7 @@ async function verifyHere(ctx, id, { second, values }) {
       refuseUnverifiedStack(root, board, item, checkedCommit, currentTrunk);
     }
     review ??= captureVerdictReview(root, board, item, verdictTrunk(root));
+    if (decision === 'ACCEPT') git(root, ['update-ref', `refs/pullboard/items/${id}/${review.head.slice(0, 12)}`, review.head]);
     return await ordered(ctx, board, 'verify', [id, {
       agentId: me.id,
       decision,

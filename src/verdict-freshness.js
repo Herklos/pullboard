@@ -25,8 +25,8 @@ export function verdictTrunk(root) {
   }
 }
 
-/** Capture the review's trunk and candidate delta against its submitted coordinator snapshot. */
-export function captureVerdictReview(root, board, item, trunk = verdictTrunk(root)) {
+/** Capture the exact checked commit, review trunk and candidate delta against its submitted coordinator snapshot. */
+export function captureVerdictReview(root, board, item, trunk = verdictTrunk(root), head = item.item_commit) {
   const receipt = store.events(board, { itemId: item.item_id }).findLast(event => {
     if (event.event_kind !== 'submit') return false;
     return JSON.parse(event.event_detail).commit === item.item_commit;
@@ -36,9 +36,14 @@ export function captureVerdictReview(root, board, item, trunk = verdictTrunk(roo
   if (!base) throw new Refused('BAD_VERDICT_REVIEW', 'the submitted base is unavailable; restore its Git objects before reviewing');
   try {
     const ancestor = readGit(root, ['merge-base', base, item.item_commit]).trim();
-    const paths = readGit(root, ['diff', '--no-renames', '--name-only', '-z', ancestor, item.item_commit, '--'])
+    let paths = readGit(root, ['diff', '--no-renames', '--name-only', '-z', ancestor, item.item_commit, '--'])
       .split('\0').filter(Boolean).sort();
-    return { commit: item.item_commit, trunk, paths };
+    if (head !== item.item_commit) {
+      readGit(root, ['merge-base', '--is-ancestor', trunk, head]);
+      const repairs = readGit(root, ['diff', '--no-renames', '--name-only', '-z', trunk, head, '--']).split('\0').filter(Boolean);
+      paths = [...new Set([...paths, ...repairs])].sort();
+    }
+    return { commit: item.item_commit, head, trunk, paths };
   } catch {
     throw new Refused('BAD_VERDICT_REVIEW', 'the submitted paths cannot be read; restore the submitted commit and base objects before reviewing');
   }
@@ -82,14 +87,21 @@ export function verdictProjector(root, board, { main } = {}) {
         tip = verdictTrunk(root);
       }
       if (!tip) throw new Error('The known trunk is unavailable');
-      // A physical landing is final even before its board merge receipt reaches this replica.
-      const landed = spawnSync('git', ['--no-replace-objects', 'merge-base', '--is-ancestor', item.item_commit, tip],
+      const accepted = store.acceptedVerdict(board, item);
+      review = accepted?.review;
+      if (review && store.verdictReviewProblem(review, item.item_commit)) throw new Error('The sealed review is invalid');
+      const checked = review?.head ?? item.item_commit;
+      // A physical landing is final only when it includes the checked composition.
+      const landed = spawnSync('git', ['--no-replace-objects', 'merge-base', '--is-ancestor', checked, tip],
         { cwd: root, env: cleanGitEnvironment(), encoding: 'utf8' });
       if (landed.status === 0) return null;
-      if (landed.status !== 1) throw new Error('The submitted commit is unavailable');
-      const accepted = store.verdictsFor(board, item.item_id).findLast(verdict =>
-        verdict.verdict_decision === 'ACCEPT' && verdict.verdict_commit === item.item_commit);
-      review = accepted?.review;
+      if (landed.status !== 1) throw new Error('The checked commit is unavailable');
+      if (review && !review.head) return { code: 'STALE_VERDICT', file: null, commit: null,
+        reviewedTrunk: review.trunk, main: tip, reason: 'this acceptance predates checked-commit binding; re-review the clean composition with current Pullboard' };
+      if (review?.head && review.head !== item.item_commit) {
+        readGit(root, ['merge-base', '--is-ancestor', item.item_commit, review.head]);
+        readGit(root, ['merge-base', '--is-ancestor', review.trunk, review.head]);
+      }
       if (!review) {
         // Legacy receipts did not seal a reviewed trunk. Use a conservative claim-base bound,
         // never invent a capture time or rewrite those immutable receipts.

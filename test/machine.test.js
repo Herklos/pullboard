@@ -962,7 +962,7 @@ test('submit, accept and reject refuse in the declared order, one failure peeled
       const open = store.addItem(board, { by: 'coordinator', lane: 'web', title: 'Page' });
       store.reserveReview(board, built, { agentId: 'web-2', leaseMs: 3_600_000, policy: 'any' });
       const judge = (id, agentId, fields) =>
-        outcome(() => store.verify(board, id, { agentId, decision, head: SHA_A, digest: 'wrong', policy: 'coordinator', note: '', review: { commit: SHA_A, trunk: SHA_B, paths: ['web/page.js'] }, ...fields }));
+        outcome(() => store.verify(board, id, { agentId, decision, head: SHA_A, digest: 'wrong', policy: 'coordinator', note: '', review: { commit: SHA_A, head: SHA_A, trunk: SHA_B, paths: ['web/page.js'] }, ...fields }));
       const bad = verb === 'accept' ? 'TEST_FAILURE' : 'NOPE';
       const good = verb === 'accept' ? undefined : 'TEST_FAILURE';
       const fired = [
