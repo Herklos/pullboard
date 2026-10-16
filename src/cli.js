@@ -39,6 +39,8 @@ export { HELP, VERSION };
 import { productLine, productProblems, productSummaries } from './products.js';
 import { isLane, laneNames, laneOf, outOfLane } from './lanes.js';
 import { Refused } from './refused.js';
+import { personNeeds } from './needs.js';
+import { personNeedsState } from './needs-state.js';
 import { commitCitations, committedIds } from './history.js';
 import { promptFor, skillProblems, updateSkills } from './skills.js';
 import {
@@ -1279,6 +1281,7 @@ function resumeHere(io) {
     return {
       me,
       all,
+      needsYou: personNeeds(personNeedsState(root, { board })),
       ...(decisionSections ? { ...decisions, ...verifiedMergeGroups(root, toMerge, shouts, ctx.clock.now().getTime()),
         flow: proofStats(board, { now: ctx.clock.now().getTime() }).flow } : {}),
       requests: me.id === COORDINATOR ? store.openRequests(board) : [],
@@ -1376,7 +1379,9 @@ function resumeHere(io) {
       say(`verified, not merged — conflicts: ${listed(groups.conflicts, ({ item, files }) => `#${item.item_id} ${firstLine(item.item_title)} (${files.join(', ') || 'files unavailable'})`)}`);
       say(`verified, not merged — claimed for integration: ${listed(groups.integrating, ({ item, by, at, commit }) => `#${item.item_id} by ${name(by)} at ${at} (${commit.slice(0, 12)})`)}`);
     }
-    section(card.personQuestions, (ask) => `waiting on the person: #${ask.id} from ${name(ask.asker)} (${ask.age}): ${firstLine(ask.question)}`);
+    section(card.needsYou, (need) => need.kind === 'decision'
+      ? `waiting on the person: #${need.id} from ${need.ref} (${span(ctx, need.at)}): ${firstLine(need.text)}`
+      : `needs the person: ${need.ref}: ${firstLine(need.text)} (${need.what})`);
     if (card.toVerify.length) say('review queue:');
     section(card.toVerify, (item) => `  to verify: #${item.item_id} ${item.item_lane} (${span(ctx, item.item_updated_at)})`);
     if (card.toMerge.length) say('merge verified work, run the gate, then record each with pullboard merged <id> <commit>');
