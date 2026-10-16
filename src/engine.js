@@ -221,7 +221,12 @@ export function applyEngineMove(board, move, { sequence, at }) {
         outcome = { result: result ?? null, events: (board.emittedEvents?.slice(firstEvent) ?? []).map((event) => ({ ...event })) };
       } catch (error) {
         if (!(error instanceof Refused)) throw error;
-        outcome = { error: recordedRefusal(error) };
+        const refusal = recordedRefusal(error);
+        // Engine 8 stored generic merge-refusal guidance before the serializer recognized "merge".
+        if (move.engine === 8 && move.operation === 'merged' && error.code === 'NOT_VERIFIED') {
+          refusal.next = 'Run pullboard help, correct the reported problem, and retry the command.';
+        }
+        outcome = { error: refusal };
       } finally {
         board.clock = clock;
         if (engineVersion === undefined) delete board.executionEngineVersion;
