@@ -279,7 +279,7 @@ test('[B26,S19,V3] exact board approval and decline apply authorize only their a
   stage(box);
   const declinedCommit = commit(box, 'docs: apply person-declined wording');
   assert.equal(declinedCommit.status, 0, `${declinedCommit.stdout}${declinedCommit.stderr}`);
-  assert.match(readFileSync(join(box.root, 'SPEC.md'), 'utf8'), /G1 \[wont, must\] The promise is no longer required\./u);
+  assert.match(readFileSync(join(box.root, 'SPEC.md'), 'utf8'), /G1 \[wont, must\] The person approved this exact replacement\./u);
 });
 
 test('[S19] unchanged approved rows and draft-row wording remain committable', (t) => {

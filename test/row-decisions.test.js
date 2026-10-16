@@ -318,7 +318,7 @@ test('[B26] failed view request names its cause', async (t) => {
   assert.ok(!stderr.includes('stderr-tail-01'), 'stderr older than the last 20 lines is omitted');
 });
 
-test('[B26,S18,S19] person decisions wait on the board until one apply preserves every other field', async function pendingThenApply(t) {
+test('[B26,S18,S19] a declined row keeps its text and its reason', async function pendingThenApply(t) {
   const box = project();
   const specPath = join(box.root, SPEC_FILE);
   const doctrinePath = join(box.root, DOCTRINE_FILE);
@@ -345,19 +345,23 @@ test('[B26,S18,S19] person decisions wait on the board until one apply preserves
   assert.equal(readFileSync(doctrinePath, 'utf8'), beforeDoctrine, 'the doctrine source also waits for coordinator apply');
   assert.equal(eventCount(box), beforeEvents + 3, 'each decision is recorded as a board event');
 
+  let pendingG2;
+  let pendingG2Human;
   for (const [key, stage] of [['G1', 'approved, pending apply'], ['G2', 'declined, pending apply'], ['doctrine:L1', 'approved, pending apply']]) {
     const shown = command(box, box.root, 'spec', 'show', key, '--json');
     assert.equal(shown.status, 0, `${shown.stdout}${shown.stderr}`);
     const row = JSON.parse(shown.stdout).row;
     assert.ok(row.decision, `${key} includes the recorded decision`);
     assert.equal(row.stage, stage);
+    if (key === 'G2') {
+      pendingG2 = row;
+      pendingG2Human = command(box, box.root, 'spec', 'show', 'G2');
+      assert.equal(pendingG2Human.status, 0, `${pendingG2Human.stdout}${pendingG2Human.stderr}`);
+    }
   }
   const stateResponse = await request(`${boardPath}/state`);
   assert.equal(stateResponse.status, 200);
-  const state = await stateResponse.json();
-  assert.equal(state.state.spec.find((row) => row.id === 'G1').stage, 'approved, pending apply');
-  assert.equal(state.state.spec.find((row) => row.id === 'G2').stage, 'declined, pending apply');
-  assert.equal(state.state.practice.find((row) => row.id === 'L1').stage, 'approved, pending apply');
+  const pendingState = await stateResponse.json();
 
   const applied = command(box, box.root, 'spec', 'apply', '--json');
   assert.equal(applied.status, 0, `${applied.stdout}${applied.stderr}`);
@@ -372,9 +376,33 @@ test('[B26,S18,S19] person decisions wait on the board until one apply preserves
   assert.equal(g2.status, 'wont');
   assert.equal(g2.tier, 'aim');
   assert.equal(g2.gate, 'true');
-  assert.match(g2.text, /not needed/u, 'the decline reason is recorded in the row text');
+  assert.equal(g2.text, 'Decline this row.', 'applying a decline preserves the exact approved source text');
+  assert.equal(pendingG2.text, 'Decline this row.');
+  assert.equal(pendingG2.reason, 'not needed');
+  assert.match(pendingG2Human.stdout, /reason: not needed/u);
+  assert.equal(pendingState.state.spec.find((row) => row.id === 'G1').stage, 'approved, pending apply');
+  assert.equal(pendingState.state.spec.find((row) => row.id === 'G2').stage, 'declined, pending apply');
+  assert.equal(pendingState.state.spec.find((row) => row.id === 'G2').text, 'Decline this row.');
+  assert.equal(pendingState.state.spec.find((row) => row.id === 'G2').reason, 'not needed');
+  assert.equal(pendingState.state.practice.find((row) => row.id === 'L1').stage, 'approved, pending apply');
   assert.deepEqual(g3, { ...parseSpec(beforeSpec).rows.find((row) => row.id === 'G3') }, 'an unaffected row keeps every parsed field');
   assert.equal(l1.status, 'approved', 'coordinator apply also handles the repo doctrine file');
+  const shownApplied = command(box, box.root, 'spec', 'show', 'G2', '--json');
+  assert.equal(shownApplied.status, 0, `${shownApplied.stdout}${shownApplied.stderr}`);
+  assert.equal(JSON.parse(shownApplied.stdout).row.text, 'Decline this row.');
+  assert.equal(JSON.parse(shownApplied.stdout).row.reason, 'not needed');
+  const humanApplied = command(box, box.root, 'spec', 'show', 'G2');
+  assert.equal(humanApplied.status, 0, `${humanApplied.stdout}${humanApplied.stderr}`);
+  assert.match(humanApplied.stdout, /reason: not needed/u);
+  const appliedState = await request(`${boardPath}/state`);
+  assert.equal((await appliedState.json()).state.spec.find((row) => row.id === 'G2').reason, 'not needed');
+
+  writeFileSync(specPath, readFileSync(specPath, 'utf8').replace('Decline this row.', 'A later unrelated row text.'));
+  const staleReason = command(box, box.root, 'spec', 'show', 'G2', '--json');
+  assert.equal(staleReason.status, 0, `${staleReason.stdout}${staleReason.stderr}`);
+  assert.equal(Object.hasOwn(JSON.parse(staleReason.stdout).row, 'reason'), false, 'an applied reason is hidden once its exact row text changes');
+  const staleState = await request(`${boardPath}/state`);
+  assert.equal(Object.hasOwn((await staleState.json()).state.spec.find((row) => row.id === 'G2'), 'reason'), false);
   const afterEvents = eventCount(box);
   const again = command(box, box.root, 'spec', 'apply', '--json');
   assert.equal(again.status, 0, again.stderr);

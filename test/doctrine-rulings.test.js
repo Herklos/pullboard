@@ -106,3 +106,46 @@ test('a ruling the person approves reaches every agent once [D1,D3,B27]', (t) =>
   assert.equal(JSON.parse(refused.out).error.code, 'UNKNOWN_SPEC');
   assert.equal(json(other, 'show', String(retiredItem.item_id)).item_status, 'open', 'refusal leaves the item unclaimed');
 });
+
+test('local doctrine edits flag their frozen row without hiding shared approved rulings [D1,S19,V3]', (t) => {
+  const e2e = createE2eHelpers();
+  t.after(e2e.cleanup);
+  const box = e2e.project('true');
+  const oldHead = box.git(box.web, 'rev-parse', 'HEAD');
+  /** Exercise the real private CLI and retain its complete successful JSON result. */
+  function json(path, ...args) {
+    const result = box.run(path, ...args, '--json');
+    assert.equal(result.code, 0, result.err || result.out);
+    return JSON.parse(result.out);
+  }
+  const drafted = json(box.repo, 'spec', 'draft', 'Keep shared approved guidance visible.',
+    '--doctrine', '--source', 'chat, 2026-10-16');
+  box.git(box.repo, 'add', 'DOCTRINE.md');
+  box.git(box.repo, 'commit', '-q', '-m', 'docs(doctrine): propose shared guidance');
+  json(box.repo, 'spec', 'approve', drafted.id);
+  json(box.repo, 'spec', 'apply');
+  const shared = json(box.repo, 'add', 'web', 'Follow shared guidance', '--specs', drafted.id,
+    '--criterion', 'Shared approved guidance stays in force.', '--check', 'true').item;
+  const edited = json(box.repo, 'add', 'web', 'Follow inherited guidance', '--specs', 'doctrine:PB1',
+    '--criterion', 'A changed local row remains visible to diagnostics.', '--check', 'true').item;
+  for (const item of [shared, edited]) {
+    json(box.web, 'claim', String(item.item_id));
+    json(box.web, 'release', String(item.item_id));
+  }
+  const frozen = [shared, edited].map(item => json(box.web, 'show', String(item.item_id)).item_frozen);
+  const baseline = json(box.web, 'resume');
+  assert.deepEqual(baseline.stale, [], 'unchanged old-checkout files retain the shared approved rule');
+  assert.ok(baseline.doctrineNotes.some(note => note.id === drafted.id));
+  const file = join(box.web, 'DOCTRINE.md');
+  const original = readFileSync(file, 'utf8');
+  assert.ok(!original.includes('Keep shared approved guidance visible.'));
+  writeFileSync(file, original + '\n## Local diagnostic edit\n- PB1 [approved, must] A changed local inherited rule. | gate: true\n');
+  const changed = json(box.web, 'resume');
+  assert.deepEqual(changed.stale.map(item => [item.id, item.rows]), [[edited.item_id, ['doctrine:PB1']]],
+    'only the locally edited rule is stale; shared approved guidance is still available');
+  assert.deepEqual(changed.doctrineNotes, [], 'an unapproved working-copy edit is not announced as new guidance');
+  assert.equal(box.git(box.web, 'rev-parse', 'HEAD'), oldHead, 'diagnostics never advance the old checkout');
+  assert.deepEqual([shared, edited].map(item => json(box.web, 'show', String(item.item_id)).item_frozen), frozen);
+  writeFileSync(file, original);
+  assert.deepEqual(json(box.web, 'resume').stale, [], 'restoring the working file clears only its diagnostic change');
+});

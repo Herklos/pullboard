@@ -5,7 +5,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { loadavg } from 'node:os';
+import { hostname, loadavg } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -49,9 +49,11 @@ import { promptFor, skillProblems, updateSkills } from './skills.js';
 import {
   frozenCriterion,
   idProblems,
+  insertSectionRows,
   lintSpec,
   loadSpec,
   legacyDoctrineRenameBase,
+  nextRowId,
   permanenceProblems,
   parseSpec,
   readSignoffs,
@@ -59,6 +61,7 @@ import {
   standings,
   unmetRows,
 } from './spec.js';
+import { bundledBlueprints, planBlueprint, readBlueprint, saveBlueprint } from './blueprints.js';
 import { briefFiles } from './brief.js';
 import { checkBaseline, prepareCheckBaseline, sayCheckBaseline } from './check-baseline.js';
 import { retryCheckBaselines, startCheckBaseline } from './check-baseline-worker.js';
@@ -70,7 +73,7 @@ import { tour } from './tour.js';
 import { commandOutput, refusalDocument } from './json.js';
 import { forgetProject, listApiProjects, registerProjectAndLink } from './projects.js';
 import { milestoneRoadmap } from './roadmap.js';
-import { listResources } from './resources.js';
+import { listResources, runnerResourceStatus } from './resources.js';
 import { citedTestFiles, rowEvidence, rowStage } from './evidence.js';
 import { exportView, serveView } from './serve.js';
 import { forgetView, rememberView, runningView } from './view-session.js';
@@ -83,7 +86,7 @@ import { flowLines, flowAlertLine } from './stats-flow.js';
 import { releaseHeadlinesBetween } from './changelog.js';
 import { exportBoard, importBoard } from './exchange.js';
 import { addSigner, assertRequiredSigners, defaultPrincipal, hasSignerFile } from './signature.js';
-import { browserFreeChecksEnabled, loadMachineSettings, setBrowserSlots, setGateSlots } from './settings.js';
+import { addRunner, browserFreeChecksEnabled, loadMachineSettings, setBrowserSlots, setGateSlots } from './settings.js';
 import { formatSnapshotLimit, pendingSnapshotSize, pendingCheckpointProblem, relayCommandReceipt, relayCommandReceiptReported, relayLinked, relayOff, relayOn, relayOperation, relayRecover, relayRecovered, relayRevoke, relayStatus, relayTokens, syncRelay } from './relay.js';
 import { autoLinkProject, relayOnAll, revokeRelayDevice, unlinkedRelayProjects } from './relay-setup.js';
 import { readRelayMachine } from './relay-machine.js';
@@ -234,6 +237,10 @@ const OPTIONS = {
   reason: { type: 'string' },
   off: { type: 'boolean' },
   port: { type: 'string' },
+  slots: { type: 'string' },
+  browser: { type: 'string' },
+  node: { type: 'string' },
+  root: { type: 'string' },
   project: { type: 'boolean' },
   export: { type: 'string' },
   'no-open': { type: 'boolean' },
@@ -251,6 +258,7 @@ const OPTIONS = {
   doctrine: { type: 'boolean' },
   source: { type: 'string' },
   section: { type: 'string' },
+  blueprint: { type: 'string' },
   route: { type: 'string' },
   family: { type: 'string' },
   model: { type: 'string' },
@@ -276,6 +284,7 @@ const OPTIONS = {
   add: { type: 'string' },
   remove: { type: 'string' },
   name: { type: 'string' },
+  title: { type: 'string' },
   url: { type: 'string' },
   skip: { type: 'string' },
   wait: { type: 'string' },
@@ -438,6 +447,25 @@ function personMode(ctx, me, values) {
     throw new Refused('B26_PERSON_ANSWER', 'only the main checkout can act as the person; ask your coordinator to answer or pass this decision');
   }
   return true;
+}
+
+/**
+ * Refuse a build item in a lane that owns no files, such as review: whoever claims it there can
+ * commit nothing, so the item strands its builder. A review item, one that waits on the work it
+ * reviews with --after, still goes there. The refusal names the lanes that own files [I1].
+ * Until some lane owns files, as right after init, there is nowhere else to point, so the item is
+ * added as before.
+ *
+ * @param {any} config
+ * @param {string} lane
+ * @param {number[]} after
+ */
+function buildInFilelessLane(config, lane, after) {
+  const owns = (name) => (config.lanes[name]?.owns ?? []).length > 0;
+  if (lane === COORDINATOR || owns(lane) || after.length) return;
+  const owning = Object.keys(config.lanes).filter(owns);
+  if (!owning.length) return;
+  throw new Refused('NO_FILES_LANE', `the ${lane} lane owns no files, so a build item there strands its builder; file it in a lane that owns files (${owning.join(', ')}), or pass --after <id> if it reviews that item`);
 }
 
 /**
@@ -613,10 +641,14 @@ async function bindCheckoutSession(io, positionals, values) {
 }
 
 /** Choose an explicitly supplied model or the standard environment fallback, refusing an unknown identity. */
-function requiredModel(value, env = process.env) {
+function requiredModel(value, env = process.env, commandNext) {
   const model = (value ?? env.PULLBOARD_MODEL ?? '').trim();
   if (!model || /[\u0000-\u001f\u007f-\u009f]/u.test(model)) {
-    throw new Refused('MODEL_REQUIRED', 'give --model "<model name>" or set PULLBOARD_MODEL in this shell before joining');
+    const suffix = commandNext ? `; run pullboard ${commandNext} --model "<model name>"` : '';
+    const message = commandNext
+      ? `this session has not declared its model${suffix}`
+      : 'give --model "<model name>" or set PULLBOARD_MODEL in this shell before joining';
+    throw new Refused('MODEL_REQUIRED', message);
   }
   return model;
 }
@@ -859,6 +891,7 @@ function agentRefusalText(message, code, name) {
 
 /** Read current display settings for text refusals; the structured error retains its stable identifiers. */
 function displayedRefusal(io, error) {
+  if (error.code === 'MODEL_REQUIRED') return error.message.replace(/; run pullboard .+$/u, '');
   if (!['ALREADY_JOINED', 'HELD', 'ITEM_HELD', 'LANE_HELD', 'REVIEW_HELD', 'NOT_YOURS', 'NOT_YOUR_DECISION', 'NO_AGENT', 'NOT_YOUR_CHECKOUT', 'FACT_JUDGEMENT', 'RELAY_PERSON_ONLY', 'RELAY_SENDER_MISMATCH', 'SELF_SHOUT', 'NO_READER'].includes(error.code)) return error.message;
   try {
     const ctx = context(io);
@@ -1129,6 +1162,27 @@ function agentDoctrine(ctx, board) {
   return appliedDoctrine(doctrine, store.rowDecisions(board), current);
 }
 
+/** Compare frozen rows with shared rules plus actual local edits, without shadowing newer main rules. */
+function staleDoctrineRows(ctx, doctrine) {
+  const root = ctx.info.root;
+  const working = loadDoctrine(root, ctx.config);
+  let source = tryGit(root, ['show', `HEAD:${working.name}`]);
+  if (source.status !== 0 && [DOCTRINE_FILE, LEGACY_DOCTRINE_FILE].includes(working.name)) {
+    const alias = working.name === DOCTRINE_FILE ? LEGACY_DOCTRINE_FILE : DOCTRINE_FILE;
+    source = tryGit(root, ['show', `HEAD:${alias}`]);
+  }
+  const committed = doctrineFromSource(source.status === 0 ? source.stdout : null, working.name);
+  const before = new Map(committed.rows.map(row => [row.id, row]));
+  const current = new Map(working.rows.map(row => [row.id, row]));
+  const rows = new Map(doctrine.rows.map(row => [row.id, row]));
+  for (const id of new Set([...before.keys(), ...current.keys()])) {
+    if (before.get(id)?.text === current.get(id)?.text) continue;
+    if (current.has(id)) rows.set(id, current.get(id));
+    else rows.delete(id);
+  }
+  return [...rows.values()];
+}
+
 /** Record each checkout's displayed approved rules so another checkout keeps its own notices. */
 function resumeDoctrineNotes(info, doctrine) {
   const record = join(info.gitDir, 'pullboard-checkout', 'resume-doctrine.json');
@@ -1319,7 +1373,7 @@ function resumeHere(io) {
   card.hookProblems = unwiredHookProblems(root);
   const { me } = card;
   const name = (id) => agentDisplayName(card.agents, ctx.config, id);
-  card.stale = staleFrozenItems(card.all, loadSpec(root, ctx.config).rows, doctrine.rows).map((item) => ({ ...item, ...staleItemFinding(item) }));
+  card.stale = staleFrozenItems(card.all, loadSpec(root, ctx.config).rows, staleDoctrineRows(ctx, doctrine)).map((item) => ({ ...item, ...staleItemFinding(item) }));
   if (isMain) {
     card.staleFollowUps = { count: card.stale.length + card.staleIntegrations.length,
       list: 'pullboard resume --json', items: card.stale, integrations: card.staleIntegrations };
@@ -1631,6 +1685,10 @@ function setupCommands(io, { first, values }) {
   return {
     init: async () => {
       const info = repoInfo(io.cwd);
+      // A named blueprint is read and checked before anything is written, so an unknown name
+      // or a broken file or a URL leaves the repository untouched (#678). Past that, init adds the
+      // blueprint exactly as pullboard blueprint add does, through the same function.
+      const blueprint = values.blueprint === undefined ? null : readBlueprint(values.blueprint, io.cwd);
       const model = optionalModel(values.model);
       const linked = relayLinked(info.root);
       const ctx = linked && model !== undefined ? context(io) : null;
@@ -1657,9 +1715,17 @@ function setupCommands(io, { first, values }) {
       if (linked && model !== undefined) await withBoard(ctx, (board) => ordered(ctx, board, 'register', [
         { lane: COORDINATOR, path: info.root, model },
       ]));
-      io.result?.({ root: info.root, notes });
+      // init --blueprint: the same add as pullboard blueprint add, in the same command (#678).
+      const added = blueprint ? await addBlueprintHere(io, values.blueprint, { report: false, blueprint }) : null;
+      io.result?.({ root: info.root, notes, ...(added ? { blueprint: { name: added.blueprint.name, title: added.blueprint.title,
+        section: added.section, waiting: added.rows.length, items: added.items.length, gate: added.gate, checksNotRun: added.checksNotRun } } : {}) });
       const staging = notes.at(-1)?.startsWith('git add -f -- ') ? notes.at(-1) : null;
       (staging ? notes.slice(0, -1) : notes).forEach((note) => io.say(note));
+      if (added) {
+        io.say(`added the ${added.blueprint.title} blueprint: ${added.rows.length} ${added.rows.length === 1 ? 'row waits' : 'rows wait'} for your approval in SPEC.md (${added.section}), `
+          + `${added.items.length} starter ${added.items.length === 1 ? 'item' : 'items'} filed${added.gate ? `, gate set to ${added.gate}` : ''}`);
+        if (added.checksNotRun.length) io.say(`  checks stored, not run: ${added.checksNotRun.map((id) => `#${id}`).join(', ')}; no check baseline ran, so read each check before work starts: pullboard show <id>`);
+      }
       if (await registerProjectAndLink(info.root, new Date(), loadConfig(info.root), io)) io.say('registered this project on this machine, so pullboard view lists it');
       io.say(agentSessionDigest()
         ? 'Next: run pullboard resume now to continue setup in this session; the new skills load next session, and setup does not need them.'
@@ -1678,7 +1744,7 @@ function setupCommands(io, { first, values }) {
       if (ctx.info.isMain) {
         if (first !== COORDINATOR) throw new Refused('MAIN_IS_COORDINATOR', 'the main checkout is the coordinator; join from a worktree: git worktree add ../<dir>');
         const route = values.route ?? 'strong';
-        const model = requiredModel(values.model);
+        const model = requiredModel(values.model, process.env, `join ${shellWord(COORDINATOR)}${values.route ? ` --route ${shellWord(values.route)}` : ''}${values.family ? ` --family ${shellWord(values.family)}` : ''}`);
         if (relayLinked(ctx.info.root)) refuseRemoteCoordinatorModel(ctx, 'join coordinator');
         const id = await withBoard(ctx, async (board) => await ordered(ctx, board, 'register', [
           { lane: COORDINATOR, path: ctx.info.root, route, family: values.family, model },
@@ -1692,7 +1758,7 @@ function setupCommands(io, { first, values }) {
         throw new Refused('NO_LANE', `no lane "${first ?? ''}"; lanes: ${laneNames(ctx.config).slice(1).join(', ') || 'none yet, declare them in pullboard.json'}`);
       }
       const route = values.route ?? 'strong';
-      const model = requiredModel(values.model);
+      const model = requiredModel(values.model, process.env, `join ${shellWord(first)}${values.route ? ` --route ${shellWord(values.route)}` : ''}${values.family ? ` --family ${shellWord(values.family)}` : ''}`);
       const id = await withBoard(ctx, async (board) => await ordered(ctx, board, 'register', [{ lane: first, path: ctx.info.root, route, family: values.family, model }]));
       const displayName = displayAgentName({ agent_id: id, agent_model: model }, ctx.config.agents.names);
       io.result?.({ agent: id, lane: first, route, path: ctx.info.root, model, displayName });
@@ -1729,7 +1795,7 @@ async function worktreeFor(io, lane, route, family = null, model) {
   if (!store.ROUTES.includes(route)) {
     throw new Refused('BAD_ROUTE', `route "${route}" is strong (needs a frontier model) or light (any model can build it from the brief)`);
   }
-  model = requiredModel(model);
+  model = requiredModel(model, process.env, `worktree ${shellWord(lane)}${route === 'strong' ? '' : ` --route ${shellWord(route)}`}${family ? ` --family ${shellWord(family)}` : ''}`);
   const mainRoot = resolve(ctx.info.commonDir, '..');
   refuseUncommittedSetup(mainRoot, ctx.config);
   const pathFor = (n) => join(dirname(mainRoot), `${basename(mainRoot)}-${lane}-${n}`);
@@ -1795,6 +1861,25 @@ function uncommittedSetup(mainRoot, config) {
     files: differ.map(({ path }) => path),
     stage: `${cdTo(mainRoot)} git add${force} -- ${words}`,
   };
+}
+
+/** Find initialized setup that is on disk but absent from the primary checkout's committed policy. */
+function uncommittedPolicySetup(info) {
+  const primary = mainCheckout(info.root);
+  if (!primary?.commit) return null;
+  const committedConfig = tryGit(info.root, ['ls-tree', '-z', primary.commit, '--', `:(literal)${CONFIG_FILE}`]);
+  if (committedConfig.status !== 0 || committedConfig.stdout) return null;
+
+  // The primary checkout is info.root when the gate runs there. From a linked worktree, the
+  // common directory's parent is the primary checkout only for a plain .git directory: with
+  // git init --separate-git-dir it is unrelated, so report the original refusal instead.
+  const mainRoot = info.isMain ? info.root : basename(info.commonDir) === '.git' ? resolve(info.commonDir, '..') : null;
+  if (!mainRoot) return null;
+  let config;
+  try { config = loadConfig(mainRoot); }
+  catch { return null; }
+  const setup = uncommittedSetup(mainRoot, config);
+  return setup?.files.includes(CONFIG_FILE) ? setup : null;
 }
 
 /**
@@ -1871,7 +1956,8 @@ function readCommands(io, { first, second, rest, values }) {
         ...listResources({ scope: 'machine' }).map((resource) => ({ ...resource, scope: 'machine' })),
         ...listResources({ scope: 'repo', root: ctx.info.root }).map((resource) => ({ ...resource, scope: 'repo' })),
       ];
-      io.result?.({ resources, browserSlots });
+      const runners = runnerResourceStatus(loadMachineSettings().runners ?? []);
+      io.result?.({ resources, runners, browserSlots });
       io.say(`browserSlots (machine setting): ${browserSlots}`);
       if (!resources.length) io.say('no resources have been used');
       for (const resource of resources) {
@@ -1879,6 +1965,7 @@ function readCommands(io, { first, second, rest, values }) {
         for (const holder of resource.holders) io.say(`  held by ${agentDisplayName(agents, ctx.config, holder.agent)}${holder.repo ? ` in ${holder.repo}` : ''}${resourceRunLabel(holder)} since ${holder.since}`);
         resource.line.forEach((waiter, index) => io.say(`  ${index + 1}. waiting: ${agentDisplayName(agents, ctx.config, waiter.agent)}${waiter.repo ? ` in ${waiter.repo}` : ''}${resourceRunLabel(waiter)}`));
       }
+      for (const runner of runners) io.say(`runner ${runner.host}: ${runner.inUse}/${runner.slots} slots, ${runner.browserInUse}/${runner.browser} browser${runner.unavailable ? ' (unavailable; re-register after checking the host)' : ''}`);
       return 0;
     },
     resume: () => resumeHere(io),
@@ -2190,7 +2277,10 @@ async function submitHere(ctx, id) {
   withBoard(ctx, (board) => refuseUnverifiedStack(root, board, held, commit, trunk));
   // Every submit proves its frozen check and reachable tests anew on this exact commit (V4,V16).
   // A full-gate stamp never substitutes for either proof; only an actual full fallback may stamp.
-  const submitConfig = { ...ctx.config, submitGate: acceptedMain.config.submitGate };
+  const submitConfig = { ...ctx.config, submitGate: acceptedMain.config.submitGate,
+    submitInvariants: acceptedMain.config.submitInvariants,
+    // The accepted project runner interprets its current invariant files; candidate config cannot replace it.
+    ...(acceptedMain.config.submitInvariants.length ? { affectedTests: acceptedMain.config.affectedTests } : {}) };
   const gate = await runSubmitGate(root, submitConfig, { base: claimHead, trunk: acceptedMain.commit, check: frozenCheck(held), agent: me.id, item: String(id), onWait: gateWaitReporter(ctx.io), onBrowserFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
   if (!gate.isGreen) {
     const message = `the submission proof is red at ${commit.slice(0, 12)}; fix it, commit, submit again. ${submitGateReport(gate)}`;
@@ -2228,6 +2318,117 @@ function reportSubmission(ctx, id, commit, gate) {
   ctx.io.say(`pinned as ${pin}, so this work can't be lost; keep your worktree until it is merged`);
   ctx.io.say(`next: another agent checks out ${commit.slice(0, 12)} and runs: pullboard verify ${id} accept|reject`);
   return 0;
+}
+
+/**
+ * Add a blueprint to the board of the checkout io.cwd names, exactly as pullboard blueprint add
+ * does; init --blueprint calls it after setting up the repo. With report false it prints nothing
+ * and leaves the command's JSON result to the caller. A caller that already read the blueprint
+ * passes it, so the file is read once: init checks it before writing anything and must add the
+ * very blueprint it checked.
+ *
+ * @param {any} io
+ * @param {string} reference - A bundled blueprint name or a path to a blueprint file, relative to io.cwd.
+ * @param {{ report?: boolean, blueprint?: ReturnType<typeof readBlueprint> }} [options]
+ * @returns {Promise<BlueprintAdded>}
+ */
+export async function addBlueprintHere(io, reference, { report = true, blueprint = readBlueprint(reference, io.cwd) } = {}) {
+  const ctx = context(io);
+  return await withBoard(ctx, async (board) => await addBlueprint(ctx, board, whoAmI(ctx, board), blueprint, { report }));
+}
+
+/**
+ * @typedef {object} BlueprintAdded
+ * @property {{ name: string, title: string, version: number }} blueprint
+ * @property {string} section - The SPEC.md section heading the rows are in.
+ * @property {{ key: string, id: string, status: string, text: string }[]} rows - New rows; each waits for the person.
+ * @property {{ id: number, key: string, title: string, lane: string, specIds: string[], after: number[], check?: string }[]} items - New open items.
+ * @property {string | null} gate - The gate set in pullboard.json, or null when it was left alone.
+ * @property {boolean} marked - This blueprint version was already on the board, so nothing was added.
+ * @property {number[]} checksNotRun - New items that carry a check; no check baseline ran for them.
+ */
+
+/**
+ * Add a blueprint to this board in one step (I1): its rules and questions as draft and pending rows
+ * in a new SPEC.md section, its starter items as open items citing them, and its gate when
+ * pullboard.json has none. Rows are written the way spec draft writes them, so nothing is approved;
+ * a repeat of the same blueprint version adds nothing.
+ *
+ * @param {any} ctx
+ * @param {any} board
+ * @param {{ id: string }} me
+ * @param {import('./blueprints.js').Blueprint} blueprint
+ * @param {{ report?: boolean }} [options] - With report false, print nothing and set no JSON result.
+ * @returns {Promise<BlueprintAdded>}
+ */
+async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
+  const io = report ? ctx.io : { say: () => {} };
+  const spec = loadSpec(ctx.info.root, ctx.config);
+  if (!spec.exists) throw new Refused('NO_SPEC', `no ${ctx.config.spec}; run: pullboard init`);
+  const malformed = [[spec.file, spec.problems], [ctx.doctrine.repo.file, ctx.doctrine.repo.problems]].find(([, problems]) => problems.length);
+  if (malformed) throw new Refused('SPEC_INVALID', `fix the unparsed row in ${malformed[0]} before adding a blueprint; an existing id may be ambiguous`);
+  const source = readFileSync(spec.file, 'utf8');
+  const configFile = join(ctx.info.root, CONFIG_FILE);
+  const configSource = readFileSync(configFile, 'utf8');
+  const plan = planBlueprint(blueprint, { source, spec, doctrine: ctx.doctrine,
+    existingItems: store.listItems(board, { all: true }).map((item) => ({ id: item.item_id, title: item.item_title, specIds: item.item_spec_ids ? item.item_spec_ids.split(',') : [] })),
+    gate: String(JSON.parse(configSource).gate ?? '') });
+  // Every starter is checked before anything is written, so a refusal leaves the board as it was.
+  const starters = plan.items.map((entry) => ({ key: entry.key, afterKeys: entry.after, item: { by: me.id,
+    lane: entry.lane && entry.lane !== COORDINATOR && isLane(ctx.config, entry.lane) ? entry.lane : COORDINATOR,
+    title: entry.title, criterion: entry.criterion, specIds: entry.specIds, parentId: null, after: [], brief: entry.brief, route: entry.route,
+    ...(entry.check === undefined ? {} : { check: entry.check }) } }));
+  // The same checks pullboard add uses, before anything is written. A blueprint's item check is
+  // stored, never run: no check baseline starts during add, so nothing a blueprint supplies executes.
+  for (const { item } of starters) store.validateItemAddition(board, item);
+  const files = [];
+  if (plan.specRows !== source) files.push({ file: ctx.config.spec, before: source, after: plan.specRows });
+  if (plan.gate) {
+    const newline = configSource.includes('\r\n') ? '\r\n' : '\n';
+    files.push({ file: CONFIG_FILE, before: configSource,
+      after: `${JSON.stringify({ ...JSON.parse(configSource), gate: plan.gate }, null, 2).replaceAll('\n', newline)}${newline}` });
+  }
+  const write = { records: [], files, signoffs: { before: null, receipts: [] } };
+  writeRowApply(ctx.info.root, write);
+  const added = [];
+  try {
+    // A retry starts from the starters a failed add already put on the board.
+    const byKey = { ...plan.existing };
+    for (const { key, afterKeys, item } of starters) {
+      item.after = afterKeys.map((before) => byKey[before]).filter(Boolean);
+      const id = await ordered(ctx, board, 'addItem', [item]);
+      byKey[key] = id;
+      added.push({ id, key, title: item.title, lane: item.lane, specIds: item.specIds, after: item.after, ...(item.check ? { check: item.check } : {}) });
+    }
+  } catch (error) {
+    // Items already added stay on the board; with no marker yet, a retry adds only what is missing.
+    if (!added.length) restoreRowApply(ctx.info.root, write);
+    throw error;
+  }
+  // The marker goes in last, once every row and item is on the board.
+  if (plan.specAfter !== plan.specRows) {
+    writeRowApply(ctx.info.root, { records: [], files: [{ file: ctx.config.spec, before: plan.specRows, after: plan.specAfter }], signoffs: { before: null, receipts: [] } });
+  }
+  if (plan.specAfter !== source && !files.some((file) => file.file === ctx.config.spec)) files.unshift({ file: ctx.config.spec });
+  const rows = plan.rows.map(({ key, id, status, text }) => ({ key, id, status, text }));
+  const summary = { blueprint: { name: blueprint.name, title: blueprint.title, version: blueprint.version },
+    section: plan.section.name, rows, items: added, gate: plan.gate, marked: plan.marked,
+    // Item checks are stored and never run during add; the caller tells the reader so.
+    checksNotRun: added.filter((item) => item.check).map((item) => item.id) };
+  io.result?.(summary);
+  if (plan.marked) {
+    io.say(`${blueprint.title} (version ${blueprint.version}) is already on this board; nothing added`);
+    return summary;
+  }
+  io.say(`added ${blueprint.title} (version ${blueprint.version}) as drafts in ${ctx.config.spec}, section ${plan.section.name}`);
+  for (const row of rows) io.say(`  ${row.id} ${row.status}  ${row.text}`);
+  for (const item of added) io.say(`  #${item.id} open  ${item.title}${item.specIds.length ? `  cites ${item.specIds.join(', ')}` : ''}${item.after.length ? `  waits on #${item.after.join(', #')}` : ''}`);
+  const checked = added.filter((item) => item.check);
+  if (checked.length) io.say(`  checks stored, not run: ${checked.map((item) => `#${item.id}`).join(', ')}; no check baseline ran during add, so read each check before work starts: pullboard show <id>`);
+  if (plan.gate) io.say(`  gate set in ${CONFIG_FILE}: ${plan.gate}`);
+  const changed = files.map((file) => file.file);
+  io.say(`next: the person approves the rows in pullboard view or with pullboard spec approve <ids>${changed.length ? `; commit ${changed.join(' and ')}` : ''}`);
+  return summary;
 }
 
 /**
@@ -2522,6 +2723,13 @@ function workCommands(io, args) {
     return withBoard(ctx, (board) => work(ctx, board, whoAmI(ctx, board)));
   };
   return {
+    blueprint: () => act(async (ctx, board, me) => {
+      if (first !== 'add' || !second || rest.length) {
+        throw new Refused('USAGE', `pullboard blueprint add <name or file> | save [file]; bundled: ${bundledBlueprints().join(', ')}`);
+      }
+      await addBlueprint(ctx, board, me, readBlueprint(second, io.cwd));
+      return 0;
+    }),
     fact: () => act(async (ctx, board, me) => {
       if (!first || !second || rest.length !== 1) throw new Refused('USAGE', 'pullboard fact <id> <kind> <text> [--supersedes <fact-id>] [--ref path:lines@full-sha]');
       const id = idArg(first);
@@ -2609,6 +2817,7 @@ function workCommands(io, args) {
         route: values.route ?? 'strong',
         check: values.check,
       };
+      buildInFilelessLane(ctx.config, first, after);
       const { command } = store.validateItemAddition(board, item);
       if (command) item.checkBaseline = values.wait ? checkBaseline(ctx.info.root, command) : prepareCheckBaseline(ctx.info.root, command);
       const id = await ordered(ctx, board, 'addItem', [item]);
@@ -2892,7 +3101,11 @@ function browserAdmissionReporter(io, jsonMode = false) {
 /** Build a de-duplicated queue message for a gate waiting on machine capacity. */
 function gateWaitReporter(io) {
   let last = '';
-  return ({ holders, position }) => {
+  return ({ holders, position, runnerUnavailable }) => {
+    if (runnerUnavailable) {
+      io.say(`runner ${runnerUnavailable.host} unavailable: ${runnerUnavailable.reason}; until ${runnerUnavailable.until}; requeueing the run`);
+      return;
+    }
     const repos = holders.map(({ repo }) => repo).filter(Boolean);
     const message = `gate waiting: ${holders.length} running${repos.length ? ` in ${repos.join(', ')}` : ''}; place ${position}`;
     if (message !== last) {
@@ -2921,6 +3134,19 @@ function settingsCommand(io, { first, second, rest }) {
   const settings = first === 'browserSlots' ? setBrowserSlots(Number(second)) : setGateSlots(Number(second));
   io.result?.({ settings });
   io.say(`${first} set to ${settings[first]}`);
+  return 0;
+}
+
+/** Register machine-level SSH capacity without requiring a board identity or a runner account. */
+function runnerCommand(io, { first, second, rest, values }) {
+  if (first !== 'add' || !second || rest.length || !/^[1-9]\d*$/u.test(values.slots ?? '')
+    || !/^(?:0|[1-9]\d*)$/u.test(values.browser ?? '')) {
+    throw new Refused('USAGE', 'pullboard runner add <ssh-host> --slots <positive integer> --browser <integer from zero through slots>');
+  }
+  const runner = addRunner({ host: second, slots: Number(values.slots), browser: Number(values.browser),
+    ...(values.node !== undefined ? { node: values.node } : {}), ...(values.root !== undefined ? { root: values.root } : {}) });
+  io.result?.({ runner });
+  io.say(`registered runner ${runner.host}: ${runner.slots} slots, ${runner.browser} browser`);
   return 0;
 }
 
@@ -3060,23 +3286,12 @@ async function specCommand(io, { first, second, rest, values }) {
     if (malformed) {
       throw new Refused('SPEC_INVALID', `fix the unparsed row in ${malformed[0]} before drafting; an existing id may be ambiguous`);
     }
-    const usedRows = [...spec.rows, ...practice.repo.rows];
-    const usedIds = new Set(usedRows.map((row) => row.id));
-    const numbered = usedRows.map((row) => new RegExp(`^${prefix}(\\d+)$`, 'u').exec(row.id)?.[1]).filter(Boolean).map(Number);
-    let next = Math.max(0, ...numbered) + 1;
-    while (usedIds.has(`${prefix}${next}`)) next += 1;
-    const id = `${prefix}${next}`;
+    const id = nextRowId(prefix, [...spec.rows, ...practice.repo.rows]);
     const tier = values.aim ? 'aim' : 'must';
     const gate = values.gate?.trim() ?? 'review';
     const row = `- ${id} [draft, ${tier}] ${second.trim()} | gate: ${gate}`;
     const source = readFileSync(spec.file, 'utf8');
-    const newline = source.includes('\r\n') ? '\r\n' : '\n';
-    const lines = source.split(/\r?\n/u);
-    const following = spec.sections.find((entry) => entry.line > section.line);
-    let insertion = following ? following.line - 1 : lines.length;
-    while (insertion > section.line && !lines[insertion - 1].trim()) insertion -= 1;
-    lines.splice(insertion, 0, row);
-    const after = lines.join(newline);
+    const after = insertSectionRows(source, spec, section, [row]);
     writeRowApply(ctx.info.root, { records: [], files: [{ file: ctx.config.spec, before: source, after }],
       signoffs: { before: null, receipts: [] } });
     io.result?.({ id, row: { id, status: 'draft', tier, text: second.trim(), gate, section: section.name } });
@@ -3222,6 +3437,7 @@ async function specCommand(io, { first, second, rest, values }) {
     io.result?.({ row, standing });
     io.say(`${row.id} [${row.status}${row.tier ? `, ${row.tier}` : ''}] ${row.text}`);
     if (row.stage) io.say(row.stage);
+    if (row.reason) io.say(`reason: ${row.reason}`);
     if (row.gate) io.say(`gate: ${row.gate}`);
     if (row.serves.length) io.say(`serves: ${row.serves.join(', ')}`);
     io.say(`signed: ${standing.met.map((entry) => `${entry.by} ${entry.on}`).join(', ') || 'no'}${standing.stale.length ? `; stale: ${standing.stale.length}` : ''}`);
@@ -3421,6 +3637,7 @@ async function runCommand(argv, io) {
     }
     if (command === 'hook') return await hookCommand(io, args);
     if (command === 'settings') return settingsCommand(io, args);
+    if (command === 'runner') return runnerCommand(io, args);
     if (command === 'relay') {
       if (first === 'recover') {
         if (second || rest.length || !values.skip || values.url || values.all) throw new Refused('USAGE', 'pullboard relay recover --skip <exact blocked next sequence>');
@@ -3498,6 +3715,22 @@ async function runCommand(argv, io) {
       io.say(result.linked ? `${result.link}\nrelay: sequence ${result.sequence}; ${result.behind} pending uploads${result.recovery?.pending ? `; recovery pending for sequence ${result.recovery.skip}; retry ${result.recovery.next}` : ''}` : (result.notice || 'relay off; the local board is complete'));
       return 0;
     }
+    if (command === 'blueprint' && first === 'save') {
+      if (rest.length) throw new Refused('USAGE', 'pullboard blueprint save [file] [--name <name>] [--title "<title>"]');
+      const ctx = context(io);
+      const { root, commonDir } = ctx.info;
+      const project = ctx.config.project || ctx.config.name || basename(dirname(resolve(root, commonDir)));
+      const file = resolve(io.cwd ?? process.cwd(), second ?? `${project}.blueprint.json`);
+      if (existsSync(file)) throw new Refused('BLUEPRINT_EXISTS', `${file} already exists; name another file: pullboard blueprint save <file>`);
+      const spec = loadSpec(root, ctx.config);
+      const { names, parts } = withBoard(ctx, (board) => privateNames(root, board, spec));
+      const { blueprint, left } = saveBlueprint(spec, { name: values.name, title: values.title, gate: ctx.config.gate, names, parts });
+      writeFileSync(file, `${JSON.stringify(blueprint, null, 2)}\n`, { flag: 'wx' });
+      io.result?.({ file, name: blueprint.name, rules: blueprint.rules?.length ?? 0, questions: blueprint.questions?.length ?? 0, left });
+      io.say(`saved ${blueprint.rules?.length ?? 0} rules and ${blueprint.questions?.length ?? 0} answered questions to ${file}`);
+      for (const entry of left) io.say(`  left out ${entry.id}: ${entry.reason}`);
+      return 0;
+    }
     if (command === 'gate') {
       const ctx = context(io);
       let config;
@@ -3507,6 +3740,17 @@ async function runCommand(argv, io) {
           && error.message.includes('the coordinator checkout has no commit on ')
           && existsSync(join(ctx.info.root, CONFIG_FILE))) {
           throw new Refused('NO_POLICY', `${CONFIG_FILE} is not committed; add and commit the initialized project before running the gate: git add ${CONFIG_FILE}`);
+        }
+        // Refused prefixes its message with the code, so match the condition itself, not the text:
+        // pullboard.json on disk but absent from the primary checkout's commit. Any other
+        // missing policy or claim base keeps its own refusal.
+        if (error instanceof Refused && error.code === 'NO_POLICY') {
+          let setup = null;
+          try { setup = uncommittedPolicySetup(ctx.info); } catch { /* Report the original refusal below. */ }
+          if (setup) {
+            const files = setup.files.map(shellWord).join(' ');
+            throw new Refused('NO_POLICY', `${CONFIG_FILE} and Pullboard's initialized setup files are uncommitted; commit them before running the gate: ${setup.stage} && git commit -q -m "chore: set up pullboard" -- ${files}`);
+          }
         }
         throw error;
       }
@@ -3527,6 +3771,37 @@ async function runCommand(argv, io) {
     }
     throw error;
   }
+}
+
+/**
+ * Every private name a saved blueprint must never carry: each agent's id, display name, model
+ * and family, the person's Git name and email, everyone who signed off or signs rows, and this
+ * machine's host name, whole, plus the parts of each (a first name, an email's user) to match
+ * only as written. Missing sources add nothing; they never stop the save [S1].
+ */
+function privateNames(root, board, spec) {
+  const names = new Set();
+  const parts = new Set();
+  const add = (value) => {
+    const text = typeof value === 'string' ? value.trim() : '';
+    // "unknown" is the label for an undeclared model, not anyone's name.
+    if (!text || text === 'unknown') return;
+    names.add(text);
+    for (const part of text.split(/[\s@.<>()]+/u)) if (part.length >= 3 && part !== 'unknown' && part !== text) parts.add(part);
+  };
+  for (const agent of store.listAgents(board)) {
+    add(agent.agent_id); add(agent.agent_model); add(agent.agent_family); add(displayAgentName(agent)); add(displayAgentName(agent, 'prefix'));
+  }
+  for (const key of ['user.name', 'user.email']) add(tryGit(root, ['config', '--get', key]).stdout);
+  for (const ident of ['GIT_AUTHOR_IDENT', 'GIT_COMMITTER_IDENT']) {
+    const found = /^(.*?)\s*<([^>]*)>/u.exec(tryGit(root, ['var', ident]).stdout ?? '');
+    if (found) { add(found[1]); add(found[2]); }
+  }
+  try { for (const record of readSignoffs(root)) add(record.by); } catch { /* An unreadable sign-off file adds no names. */ }
+  for (const row of spec.rows) for (const signer of row.signers ?? []) add(signer);
+  add(hostname());
+  add(hostname().split('.')[0]);
+  return { names: [...names], parts: [...parts] };
 }
 
 /** Retain the primary branch on every command without creating a board for global help. */
@@ -3631,7 +3906,7 @@ export function resultCommands() {
     ...Object.keys(setupCommands({}, args)),
     ...Object.keys(readCommands({}, args)),
     ...Object.keys(workCommands({}, args)),
-    'help', 'version', 'tour', 'lifecycle', 'view', 'serve', 'forget', 'spec', 'prompt', 'hook', 'gate', 'settings', 'relay',
+    'help', 'version', 'tour', 'lifecycle', 'view', 'serve', 'forget', 'spec', 'prompt', 'hook', 'gate', 'settings', 'runner', 'relay',
   ])].sort();
 }
 

@@ -320,6 +320,110 @@ test('a landing-gated project defers the full suite from submit to landing [V4,C
   assert.equal(namedEvent.detail.note, 'full suite deferred to the landing gate', 'the reviewer sees deferral for named affected tests too');
 });
 
+test("a landing-gated submit runs the project's invariant tests [V4,C7]", (t) => {
+  /** Prepare accepted policy, then claim in a real separate builder checkout. */
+  function project(invariants, failing = false) {
+    let box = privateRepo(t);
+    put(box.root, 'pullboard.json', JSON.stringify({ gate: 'node --test', affectedTests: 'node --test',
+      submitGate: 'landing', shared: ['pullboard.json'], ...(invariants === undefined ? {} : { submitInvariants: invariants }) }));
+    seedGraph(box);
+    const marker = join(box.dir, 'invariants.log');
+    box.env.INVARIANT_MARKER = marker;
+    put(box.root, 'test/invariant.test.js', [
+      "import assert from 'node:assert/strict';",
+      "import { appendFileSync } from 'node:fs';",
+      "import { value } from '../src/a.js';",
+      "appendFileSync(process.env.INVARIANT_MARKER, 'invariant\\n');",
+      failing ? 'assert.equal(value, 1, "the project invariant stays enforced");' : 'assert.ok(value < 3);',
+    ].join('\n') + '\n');
+    put(box.root, 'test/a.test.js', "import '../src/entry.js';\nimport { appendFileSync } from 'node:fs';\nappendFileSync(process.env.INVARIANT_MARKER, 'selected\\n');\n");
+    put(box.root, 'test/c.test.js', "throw new Error('unrelated test must stay deferred');\n");
+    put(box.root, 'src/cli.js', 'export const version = 1;\n');
+    commitAll(box);
+    box = builderRepo(box);
+    assert.equal(box.coordinator('add', 'build', 'Invariant fixture', '--check', 'node -e "process.exit(0)"').code, 0);
+    assert.equal(box.run('claim', '1').code, 0);
+    return { box, marker };
+  }
+  /** A global edit exercises the uncertain-selector path without running a full suite. */
+  function change(box, global = true) {
+    put(box.root, 'src/a.js', 'export const value = 2;\n');
+    if (global) put(box.root, 'src/cli.js', 'export const version = 2;\n');
+    commitAll(box, 'feat(core): change invariant input [G1]');
+  }
+  /** A submit subset must never leave a full-gate stamp. */
+  function unstamped(box) {
+    const stamp = resolve(box.root, box.git('rev-parse', '--git-path', 'pullboard-gate-green'));
+    assert.equal(existsSync(stamp), false);
+  }
+
+  const empty = project();
+  change(empty.box);
+  const unchanged = empty.box.run('submit', '1', '--json');
+  assert.equal(unchanged.code, 0, unchanged.err);
+  assert.equal(existsSync(empty.marker), false, 'the empty default adds no tests');
+  unstamped(empty.box);
+
+  const mandatory = project(['test/invariant.test.js']);
+  change(mandatory.box);
+  const guarded = mandatory.box.run('submit', '1', '--json');
+  assert.equal(guarded.code, 0, guarded.err);
+  const guardedReceipt = JSON.parse(guarded.out);
+  assert.equal(guardedReceipt.gate.full, true, 'the selector still reports an uncertain full fallback');
+  assert.equal(guardedReceipt.gate.deferred, true);
+  assert.deepEqual(guardedReceipt.gate.files, ['test/invariant.test.js'], 'receipt names only the executed invariant subset');
+  assert.equal(readFileSync(mandatory.marker, 'utf8'), 'invariant\n', 'global fallback does not run unrelated selected/full tests');
+  assert.match(guardedReceipt.gate.report, /submit invariants: test\/invariant\.test\.js; full suite deferred/u);
+  unstamped(mandatory.box);
+
+  const red = project(['test/invariant.test.js'], true);
+  change(red.box);
+  const refused = red.box.run('submit', '1', '--json');
+  assert.notEqual(refused.code, 0, 'a failing configured invariant must refuse the submit');
+  assert.match(refused.err + refused.out, /GATE_RED/u);
+  assert.ok(existsSync(red.marker), 'the listed invariant actually ran');
+  unstamped(red.box);
+
+  const trusted = project([], true);
+  const acceptedRoot = join(trusted.box.dir, 'repo');
+  const policy = JSON.parse(readFileSync(join(acceptedRoot, 'pullboard.json'), 'utf8'));
+  policy.submitInvariants = ['test/invariant.test.js'];
+  put(acceptedRoot, 'pullboard.json', JSON.stringify(policy));
+  runFixtureGit(['add', 'pullboard.json'], { cwd: acceptedRoot, env: trusted.box.env });
+  runFixtureGit(['commit', '-q', '-m', 'chore: require project invariant'], { cwd: acceptedRoot, env: trusted.box.env });
+  trusted.box.git('merge', '--no-edit', 'main');
+  const candidate = JSON.parse(readFileSync(join(trusted.box.root, 'pullboard.json'), 'utf8'));
+  candidate.submitInvariants = ['test/c.test.js'];
+  put(trusted.box.root, 'pullboard.json', JSON.stringify(candidate));
+  change(trusted.box);
+  const ignored = trusted.box.run('submit', '1', '--json');
+  assert.notEqual(ignored.code, 0, 'accepted main policy overrides both the claim-time list and candidate edit');
+  assert.match(ignored.err + ignored.out, /GATE_RED/u);
+  assert.ok(existsSync(trusted.marker), 'the accepted-main invariant still ran');
+  assert.doesNotMatch(ignored.err + ignored.out, /unrelated test must stay deferred/u);
+  unstamped(trusted.box);
+
+  const missing = project(['test/invariant.test.js']);
+  rmSync(join(missing.box.root, 'test/invariant.test.js'));
+  change(missing.box);
+  const absent = missing.box.run('submit', '1', '--json');
+  assert.notEqual(absent.code, 0, 'deleting a mandatory file cannot make the guard disappear');
+  assert.match(absent.err + absent.out, /submitInvariants file test\/invariant\.test\.js is missing or unreadable/u);
+  unstamped(missing.box);
+
+  const named = project(['test/invariant.test.js', 'test/invariant.test.js']);
+  change(named.box, false);
+  const selected = named.box.run('submit', '1', '--json');
+  assert.equal(selected.code, 0, selected.err);
+  const receipt = JSON.parse(selected.out);
+  assert.equal(receipt.gate.full, false);
+  assert.equal(receipt.gate.deferred, true);
+  assert.deepEqual(receipt.gate.files, ['test/a.test.js', 'test/invariant.test.js']);
+  assert.deepEqual(readFileSync(named.marker, 'utf8').trim().split('\n').sort(), ['invariant', 'selected'], 'selected and mandatory overlap runs once');
+  assert.match(receipt.gate.report, /full suite deferred to the landing gate/u);
+  unstamped(named.box);
+});
+
 test('a jest project submits with its own gate [V4,C7]', (t) => {
   for (const optedIn of [false, true]) {
     let box = privateRepo(t);
@@ -407,6 +511,15 @@ test('affectedTests accepts only a nonempty command prefix [V4,C7]', () => {
   });
 });
 
+test('submitInvariants names literal project files and requires its explicit runner [V4,C7]', () => {
+  assert.deepEqual(configFromSource('{}').submitInvariants, []);
+  for (const submitInvariants of [null, 'test/a.test.js', [false], [''], ['../outside.test.js'], ['/outside.test.js'], ['C:/outside.test.js'], ['test/../a.test.js'], ['test/a.test.js\n'], ['test//a.test.js']]) {
+    assert.throws(() => configFromSource(JSON.stringify({ affectedTests: 'pytest', submitInvariants })), { code: 'BAD_CONFIG', message: /submitInvariants/u });
+  }
+  assert.throws(() => configFromSource(JSON.stringify({ submitInvariants: ['tests/guard.py'] })), { code: 'BAD_CONFIG', message: /requires.*affectedTests/u });
+  assert.deepEqual(configFromSource(JSON.stringify({ affectedTests: 'pytest', submitInvariants: ['tests/guard.py'] })).submitInvariants, ['tests/guard.py']);
+});
+
 test('submit without a frozen check reports no item check and still runs affected tests [V4,C7,V16]', (t) => {
   let box = privateRepo(t);
   put(box.root, 'pullboard.json', JSON.stringify({ gate: 'node --test', affectedTests: 'node --test' }));
@@ -445,7 +558,7 @@ test('a red frozen item check refuses submit before affected tests run [V4,C7,V1
   box.env.CHECK_REFUSE = '1';
   const refused = box.run('submit', '1');
   assert.equal(refused.code, 1, refused.out);
-  assert.match(refused.err, /GATE_RED/u);
+  assert.match(refused.err + refused.out, /GATE_RED/u);
   assert.match(refused.err, /item check red/u);
 });
 
@@ -520,7 +633,7 @@ for (const mode of ['topic parent', 'merge commit']) {
     rmSync(marker);
     const refused = box.run('submit', '1');
     assert.equal(refused.code, 1, refused.out || refused.err);
-    assert.match(refused.err, /GATE_RED/u);
+    assert.match(refused.err + refused.out, /GATE_RED/u);
     assert.match(refused.err, /affected tests:.*test\/a\.test\.js/u);
     assert.match(refused.err, /ERR_ASSERTION/u);
     assert.equal(readFileSync(marker, 'utf8'), 'ran\nran\n', 'submit executes the transitive importer against the candidate and exact main');
@@ -693,7 +806,7 @@ test('affected submit includes branch changes made before the item claim [V4,C7,
   commitAll(box, 'feat(core): source after claim [G1]');
   const refused = box.run('submit', '1');
   assert.equal(refused.code, 1, refused.out || refused.err);
-  assert.match(refused.err, /GATE_RED/u);
+  assert.match(refused.err + refused.out, /GATE_RED/u);
   assert.match(refused.err, /affected tests:.*test\/a\.test\.js/u);
   assert.match(refused.err, /ERR_ASSERTION/u);
 });
@@ -742,7 +855,7 @@ for (const mode of ['deleted source', 'topic parent', 'merge commit']) {
     rmSync(marker, { force: true });
     const refused = box.run('submit', '1');
     assert.equal(refused.code, 1, refused.out || refused.err);
-    assert.match(refused.err, /GATE_RED/u);
+    assert.match(refused.err + refused.out, /GATE_RED/u);
     assert.match(refused.err, /affected tests:.*test\/a\.test\.js/u);
     assert.match(refused.err, mode === 'deleted source' ? /ERR_MODULE_NOT_FOUND/u : /ERR_ASSERTION/u);
     if (mode !== 'deleted source') assert.equal(readFileSync(marker, 'utf8'), 'ran\nran\n', 'submit executes the unchanged transitive importer against the candidate and exact main');
