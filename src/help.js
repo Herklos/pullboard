@@ -10,7 +10,7 @@ Nothing ships until a second agent verifies it.
 
 Set up
   pullboard tour                        see it work: a reject and its rework, scripted, in thirty seconds
-  pullboard init [--model <name>]        config, SPEC.md, agent instructions, git hooks, board; optional coordinator model
+  pullboard init [--model <name>] [--blueprint <name or file>]  config, SPEC.md, agent instructions, git hooks, board; optional coordinator model
   pullboard worktree <lane> --model <name> [--route light] [--family <name>]   make and join a worktree for a new agent
   pullboard join <lane> --model <name> [--route light] [--family <name>]       register this worktree as an agent
                                         A model is required (or set PULLBOARD_MODEL); family is a separate declaration
@@ -186,7 +186,7 @@ const HELP_GROUPS = [
 ];
 
 const HELP_EXAMPLES = {
-  tour: 'pullboard tour', init: 'pullboard init', worktree: 'pullboard worktree web --model "my-model"',
+  tour: 'pullboard tour', init: 'pullboard init --blueprint web-app', worktree: 'pullboard worktree web --model "my-model"',
   join: 'pullboard join web --model "my-model"', resume: 'pullboard resume',
   add: 'pullboard add web "Upload page" --specs G1', list: 'pullboard list web', show: 'pullboard show 12',
   claim: 'pullboard claim 12', submit: 'pullboard submit 12', 'next --verify': 'pullboard next --verify',
@@ -232,6 +232,7 @@ const HELP_ALIASES = {
 
 const HELP_FLAG_EXPLANATIONS = {
   '--after': 'claiming waits until those items are verified',
+  '--blueprint': 'start from a bundled blueprint or a JSON file',
   '--brief': 'what a cold agent needs',
   '--check': 'the command that proves it',
   '--family': 'records the family name',
