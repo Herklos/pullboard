@@ -1,12 +1,13 @@
 /** Registered SSH runner execution stays inside a committed, secret-free worker checkout [C7]. */
 import assert from 'node:assert/strict';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, watch, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, watch, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
-import { test } from 'node:test';
+import { pathToFileURL } from 'node:url';
+import { after, test } from 'node:test';
 import { listResources, takeResource } from '../src/resources.js';
 import { listResources as listPreRunnerResources, takeResource as takePreRunnerResource } from './fixtures/resources-pre-runners.js';
 import { runFixtureChild, startFixtureChild } from './fixture-child.js';
@@ -15,6 +16,7 @@ const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
 const TEMP = [];
 const SECRET = ['fixture', 'runner', 'secret', 'must', 'stay', 'local'].join('-');
 const HOST = 'fixture-host';
+const TOOLING_SNAPSHOTS = new Map();
 
 /** Quote one literal value for the fixture's POSIX shell command. */
 function shellQuote(value) {
@@ -27,6 +29,47 @@ function git(repo, env, ...args) {
   assert.equal(result.status, 0, result.context);
   return result.stdout.trim();
 }
+
+/** Copy current tooling bytes into a private committed checkout for runner source validation. */
+function committedToolingSnapshot(sourceRoot, env) {
+  const key = realpathSync(sourceRoot);
+  const cached = TOOLING_SNAPSHOTS.get(key);
+  if (cached) return cached.root;
+  const directory = mkdtempSync(join(tmpdir(), 'pullboard-runner-tooling-'));
+  const root = join(directory, 'tooling');
+  const home = join(directory, 'home');
+  mkdirSync(root, { recursive: true });
+  mkdirSync(home, { recursive: true });
+  try {
+    copyFileSync(join(key, 'package.json'), join(root, 'package.json'));
+    cpSync(join(key, 'src'), join(root, 'src'), { recursive: true });
+    const gitEnv = { ...env, HOME: home, PULLBOARD_HOME: join(home, '.pullboard'),
+      PULLBOARD_MACHINE_HOME: join(home, '.pullboard'), GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_COUNT: '0',
+      GIT_AUTHOR_NAME: 'Runner Tooling Fixture', GIT_AUTHOR_EMAIL: 'runner-tooling@example.invalid',
+      GIT_COMMITTER_NAME: 'Runner Tooling Fixture', GIT_COMMITTER_EMAIL: 'runner-tooling@example.invalid' };
+    for (const key of ['GIT_CONFIG_PARAMETERS', 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR']) delete gitEnv[key];
+    git(root, gitEnv, 'init', '-q', '-b', 'main');
+    git(root, gitEnv, 'add', 'package.json', 'src');
+    git(root, gitEnv, 'commit', '-q', '-m', 'test: snapshot current runner tooling');
+  } catch (error) {
+    process.stderr.write(`retained incomplete runner tooling snapshot at ${directory}: ${error.message}\n`);
+    throw error;
+  }
+  TOOLING_SNAPSHOTS.set(key, { root, directory, active: 0, retained: false });
+  return root;
+}
+
+after(() => {
+  for (const record of TOOLING_SNAPSHOTS.values()) {
+    if (record.active || record.retained) {
+      process.stderr.write(`retained runner tooling snapshot at ${record.directory}\n`);
+      continue;
+    }
+    rmSync(record.directory, { recursive: true, force: true });
+  }
+  TOOLING_SNAPSHOTS.clear();
+});
 
 /** Spawn the exact checked-in CLI from a fixture checkout. */
 function cli(repo, env, ...args) {
@@ -243,8 +286,11 @@ test('a cached workspace link resolves inside this fresh runner checkout', () =>
 }
 
 /** Run a gate command through its real lease and return the profile/result emitted by the API child. */
-function runThroughGate(repo, env, command, { browser = true, item = '663', kind = 'check', landing = false } = {}) {
-  const gateUrl = new URL('../src/gate.js', import.meta.url).href;
+function runThroughGate(repo, env, command, { browser = true, item = '663', kind = 'check', landing = false, toolingRoot = resolve(import.meta.dirname, '..') } = {}) {
+  const sourceRoot = realpathSync(toolingRoot);
+  const gateUrl = pathToFileURL(join(committedToolingSnapshot(sourceRoot, env), 'src', 'gate.js')).href;
+  const snapshot = TOOLING_SNAPSHOTS.get(sourceRoot);
+  snapshot.active++;
   const script = `const { runProfiledShell, withGateSlot } = await import(${JSON.stringify(gateUrl)});
 const result = await withGateSlot(${JSON.stringify(repo)}, lease => runProfiledShell(${JSON.stringify(repo)}, ${JSON.stringify(command)}, { gateLease: lease, landing: ${landing} }),
   { browser: ${browser}, item: ${JSON.stringify(item)}, kind: ${JSON.stringify(kind)}, landing: ${landing}, agent: 'runner-fixture' });
@@ -252,9 +298,16 @@ process.stdout.write(result.output);
 process.stdout.write('PULLBOARD_RUN_RESULT ' + JSON.stringify({ isGreen: result.isGreen, runner: result.profile.executionRunner, profile: result.profile }) + '\\n');
 process.exitCode = result.isGreen ? 0 : 1;
 `;
-  return runFixtureChild(process.execPath, ['--input-type=module', '-e', script], {
-    cwd: repo, env, encoding: 'utf8',
-  });
+  try {
+    const result = runFixtureChild(process.execPath, ['--input-type=module', '-e', script], {
+      cwd: repo, env, encoding: 'utf8',
+    });
+    if (result.status !== 0) snapshot.retained = true;
+    return result;
+  } catch (error) {
+    snapshot.retained = true;
+    throw error;
+  } finally { snapshot.active--; }
 }
 
 /** Parse the bounded final API line without rewriting the command's raw TAP output. */
@@ -319,8 +372,11 @@ function processIsAlive(pid) {
 }
 
 /** Start an API child that requeues only an incomplete runner transport on its original ticket. */
-function startQueueController(repo, env, command, { item, queueMarker, firstItem = 'retry-first', remote = true } = {}) {
-  const gateUrl = new URL('../src/gate.js', import.meta.url).href;
+function startQueueController(repo, env, command, { item, queueMarker, firstItem = 'retry-first', remote = true, toolingRoot = resolve(import.meta.dirname, '..') } = {}) {
+  const sourceRoot = realpathSync(toolingRoot);
+  const gateUrl = pathToFileURL(join(committedToolingSnapshot(sourceRoot, env), 'src', 'gate.js')).href;
+  const snapshot = TOOLING_SNAPSHOTS.get(sourceRoot);
+  snapshot.active++;
   const script = `import { writeFileSync } from 'node:fs';
 const { runProfiledShell, withGateSlot } = await import(${JSON.stringify(gateUrl)});
 const root = ${JSON.stringify(repo)};
@@ -343,9 +399,25 @@ const result = await withGateSlot(root, async lease => {
 });
 process.exitCode = result.isGreen ? 0 : 1;
 `;
-  return startFixtureChild(process.execPath, ['--input-type=module', '-e', script], {
-    cwd: repo, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  try {
+    const child = startFixtureChild(process.execPath, ['--input-type=module', '-e', script], {
+      cwd: repo, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let settled = false;
+    const finish = (status, signal, failed) => {
+      if (settled) return;
+      settled = true;
+      snapshot.active--;
+      if (failed || status !== 0 || signal) snapshot.retained = true;
+    };
+    child.once('close', (status, signal) => finish(status, signal, false));
+    child.once('error', () => finish(null, null, true));
+    return child;
+  } catch (error) {
+    snapshot.active--;
+    snapshot.retained = true;
+    throw error;
+  }
 }
 
 /** Observe a running fixture child without hiding stdout, stderr, or its exit status. */
@@ -356,6 +428,80 @@ function observe(child) {
   const closed = once(child, 'close').then(([status, signal]) => ({ status, signal, stdout, stderr }));
   return { child, closed };
 }
+
+test('a queued run executes on a registered runner and its result comes back (host checkout isolation) [C7]', async (t) => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-runner-tooling-isolation-')));
+  let completedCleanly = false;
+  t.after(() => {
+    if (!completedCleanly) {
+      t.diagnostic('retained runner tooling isolation fixture at ' + dir);
+      return;
+    }
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const home = join(dir, 'home');
+  const machineHome = join(home, '.pullboard');
+  const remoteHome = join(dir, 'worker-home');
+  const remoteMachineHome = join(remoteHome, '.pullboard');
+  const remoteStateRoot = join(remoteHome, '.pullboard-runner');
+  const repo = join(dir, 'repo');
+  const worker = join(dir, 'second-machine');
+  const bin = join(dir, 'bin');
+  const toolingRoot = join(dir, 'owned-tooling');
+  const requests = join(dir, 'ssh-requests.jsonl');
+  for (const folder of [repo, worker, bin, home, machineHome, remoteHome, remoteMachineHome, remoteStateRoot, toolingRoot]) {
+    mkdirSync(folder, { recursive: true });
+  }
+  const env = {
+    ...process.env, HOME: home, PULLBOARD_HOME: home, PULLBOARD_MACHINE_HOME: machineHome,
+    PATH: bin + ':' + process.env.PATH, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
+    GIT_AUTHOR_NAME: 'Runner Tooling Isolation Fixture', GIT_AUTHOR_EMAIL: 'runner-tooling-isolation@example.invalid',
+    GIT_COMMITTER_NAME: 'Runner Tooling Isolation Fixture', GIT_COMMITTER_EMAIL: 'runner-tooling-isolation@example.invalid',
+  };
+  writeFileSync(join(machineHome, 'settings.json'), JSON.stringify({ gateSlots: 1 }));
+  const initialized = runFixtureChild('git', ['init', '-q', '-b', 'main'], { cwd: repo, env, encoding: 'utf8' });
+  assert.equal(initialized.status, 0, initialized.context);
+  writeFileSync(join(repo, 'pullboard.json'), JSON.stringify({ gate: 'true' }));
+  writeFileSync(join(repo, 'tracked.txt'), 'host checkout isolation fixture\n');
+  git(repo, env, 'add', 'pullboard.json', 'tracked.txt');
+  git(repo, env, 'commit', '-q', '-m', 'test: prepare host checkout isolation fixture');
+
+  const suiteRoot = resolve(import.meta.dirname, '..');
+  copyFileSync(join(suiteRoot, 'package.json'), join(toolingRoot, 'package.json'));
+  cpSync(join(suiteRoot, 'src'), join(toolingRoot, 'src'), { recursive: true });
+  git(toolingRoot, env, 'init', '-q', '-b', 'main');
+  git(toolingRoot, env, 'add', 'package.json', 'src');
+  git(toolingRoot, env, 'commit', '-q', '-m', 'test: commit current tooling bytes');
+  const ownedCommit = git(toolingRoot, env, 'rev-parse', 'HEAD');
+  writeFileSync(join(toolingRoot, 'LOCAL-NOTE.txt'), 'unrelated local note\n');
+  assert.match(git(toolingRoot, env, 'status', '--porcelain'), /^\?\? LOCAL-NOTE\.txt$/u);
+  const cleanToolingRoot = committedToolingSnapshot(toolingRoot, env);
+
+  installSshStandIn({ bin, worker, home: remoteHome, machineHome: remoteMachineHome, requests });
+  const added = cli(repo, env, 'runner', 'add', HOST, '--slots', '1', '--browser', '1', '--json');
+  assert.equal(added.status, 0, added.context);
+  const command = `node -e ${shellQuote('process.stdout.write("HOST_CHECKOUT_ISOLATED\\n")')}`;
+  const run = runThroughGate(repo, env, command, { item: 'tooling-isolation', toolingRoot });
+  assert.equal(run.status, 0, fixtureResultContext(run));
+  assert.match(run.stdout, /HOST_CHECKOUT_ISOLATED/u);
+  const result = gateResult(run.stdout);
+  assert.equal(result.isGreen, true);
+  assert.equal(result.runner, HOST);
+  assert.equal(result.profile.executionRunner, HOST);
+  assert.equal(result.profile.executionSource.tooling.name, 'pullboard');
+  assert.equal(result.profile.executionSource.tooling.kind, 'git-checkout');
+  assert.equal(result.profile.executionSource.tooling.commit, git(cleanToolingRoot, env, 'rev-parse', 'HEAD'),
+    'the execution imports its clean private tooling snapshot, not the unrelated-note checkout');
+  assert.notEqual(result.profile.executionSource.tooling.commit, ownedCommit);
+  const requestsSeen = readFileSync(requests, 'utf8').trim().split(/\r?\n/u).filter(Boolean).map(line => JSON.parse(line));
+  assert.equal(requestsSeen.length, 1, 'the actual remote command is sent exactly once');
+  assert.equal(requestsSeen[0].host, HOST);
+  assert.equal(requestsSeen[0].workerStarted, true);
+  assert.equal(requestsSeen[0].code, 0);
+  assert.equal(git(toolingRoot, env, 'status', '--porcelain'), '?? LOCAL-NOTE.txt',
+    'the owned source fixture remains dirty only by its unrelated note');
+  completedCleanly = true;
+});
 
 test('a queued run executes on a registered runner and its result comes back [C7]', async (t) => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-runner-')));
