@@ -1,0 +1,18 @@
+{
+  "blueprint": 1,
+  "name": "writing",
+  "title": "Writing and blog",
+  "version": 1,
+  "kind": "beyond-code",
+  "by": "Pullboard",
+  "summary": "Posts in your voice, fact-checked, and published only when you say so.",
+  "prefix": "WR",
+  "rules": [
+    { "key": "WR1", "text": "Every fact in a post links to where it came from.", "why": "a reader who cannot see where a fact came from has to take your word for it." },
+    { "key": "WR2", "text": "A post publishes only after you approve it.", "why": "a post goes out under your name, so you decide when it is ready." }
+  ],
+  "questions": [
+    { "key": "Q1", "ask": "The voice is", "choices": ["Plain and direct", "Friendly and casual", "Formal", "Like my past posts"], "default": "Plain and direct" },
+    { "key": "Q2", "ask": "Posts publish to", "choices": ["My own blog", "Substack", "Medium", "Somewhere else"], "default": "My own blog" }
+  ]
+}

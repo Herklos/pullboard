@@ -1,0 +1,18 @@
+{
+  "blueprint": 1,
+  "name": "library",
+  "title": "Open-source library",
+  "version": 1,
+  "kind": "product",
+  "by": "Pullboard",
+  "summary": "Your users get a changelog line and the right version bump, every release.",
+  "prefix": "LIB",
+  "rules": [
+    { "key": "LIB1", "text": "A breaking change bumps the major version.", "why": "people pin a major version, so a breaking change must never arrive inside one." },
+    { "key": "LIB2", "text": "Every public function has a working example in the docs.", "why": "an example that runs teaches a function fastest and breaks loudly when the function changes." }
+  ],
+  "questions": [
+    { "key": "Q1", "ask": "The library is written in", "choices": ["JavaScript or TypeScript", "Python", "Rust", "Something else"], "default": "JavaScript or TypeScript" },
+    { "key": "Q2", "ask": "It is published to", "choices": ["npm", "PyPI", "crates.io", "Somewhere else"], "default": "npm" }
+  ]
+}

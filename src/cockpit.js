@@ -1786,25 +1786,28 @@ function milestoneRow(row, titles) {
     : '<li><button ' + attributes + ' type="button">' + inner + '</button></li>';
 }
 
-/** Read a release once using the same terminal-item rule in the Roadmap and status bar. */
+/** Read the work still to ship before verified items, excluding withdrawn work from every count. */
 function readMilestone(milestone, p) {
-  const rows = milestone.items.map((entry) => milestoneItem(entry, p));
-  const done = rows.filter((row) => row.state === 'verified').length;
-  // A nonempty release has no work left when every item is verified or withdrawn.
-  return { milestone, rows, done, shipped: rows.length > 0 && rows.every((row) => row.state === 'verified' || row.state === 'withdrawn') };
+  const visible = milestone.items.map((entry) => milestoneItem(entry, p)).filter((row) => row.state !== 'withdrawn');
+  const verified = visible.filter((row) => row.state === 'verified');
+  const rows = visible.filter((row) => row.state !== 'verified').concat(verified);
+  return { milestone, rows, done: verified.length, shipped: rows.length > 0 && verified.length === rows.length };
 }
 
 /** Pick the first release with remaining work in roadmap order; empty plans wait behind it. */
 function nextMilestone(p) {
-  return (p.milestones || []).find((milestone) => {
+  const next = (p.milestones || []).find((milestone) => {
     const read = readMilestone(milestone, p);
     return read.rows.length > 0 && !read.shipped;
   });
+  if (!next) return next;
+  const read = readMilestone(next, p);
+  return { ...next, done: read.done, total: read.rows.length };
 }
 
 /**
  * The Roadmap (N26, N38) leads with what ships next: every milestone with work still to verify, in the board's order,
- * open by default; then one Shipped section, folded, holding nonempty milestones with only verified or withdrawn items, newest
+ * open by default; then one Shipped section, folded, holding nonempty milestones with only verified items, newest
  * first, each a line with its name, its item count and its note's first line. A milestone opens to a card as before:
  * how many of its items are verified as a count and a bar, a row for each, and the note to the person in its own
  * highlighted line; one with no items says so. Each part stays open or closed as the person left it.
