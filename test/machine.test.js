@@ -41,7 +41,7 @@ const NOT_MOVES = {
   RUNNER_TOOLING_IDENTITY: 'runner tooling comes from an identified Pullboard installation',
   RUNNER_TOOLING_CHANGED: 'runner tooling matches its selected committed revision',
   NOT_A_REPO: 'the remote source root must be a Git repository before transport starts',
-  GATE_SLOT_LEASE_REQUIRED: 'a nested runner must receive its live machine gate lease before starting',
+  GATE_SLOT_LEASE_REQUIRED: 'a child process must receive its live machine gate lease before starting',
   GATE_SLOT_MARKER_INVALID: 'an inherited machine gate capability is validated before nested work starts',
   GATE_SLOT_TOKEN_REQUIRED: 'an inherited machine gate capability needs its exact lease token',
   GATE_SLOT_LEASE_LOST: 'the exact machine gate lease must still be live before nested work starts',
@@ -72,7 +72,11 @@ const ENTRY_POINTS = [
 ];
 
 /** Setup refusals have no item move, but stay in the same reachability audit. */
-const NON_MOVE_ENTRY_POINTS = ['cli.js#refuseRemoteCoordinatorModel'];
+const NON_MOVE_ENTRY_POINTS = [
+  'cli.js#refuseRemoteCoordinatorModel',
+  // Child-process commands may be serialized into scripts, so audit this exported setup guard directly.
+  'resources.js#gateSlotEnvironment',
+];
 
 /** Board functions handed a function to call, and the one the CLI and the runner hand them. */
 const CALLBACKS = { 'board.js': { freeze: 'cli.js#freezer' } };

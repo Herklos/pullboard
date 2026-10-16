@@ -356,8 +356,9 @@ test('a non-browser check does not wait for the browser slot [C7]', async () => 
   const { repo, base } = checkProject(box);
   const itemCheck = 'node bin/run-tests.js --test-name-pattern "item check marker" test/cpu-check.test.js';
   const submitCheck = 'node bin/run-tests.js --test-name-pattern "submit check marker" test/cpu-check.test.js';
-  assert.equal(await checkNeedsBrowser(repo, itemCheck), false, 'an explicit CPU-only test file is classifiable');
-  assert.equal(await checkNeedsBrowser(repo, 'node bin/run-tests.js test/cockpit/brief.test.js'), true,
+  const classifyEnv = { ...process.env, NODE_OPTIONS: '' };
+  assert.equal(await checkNeedsBrowser(repo, itemCheck, { env: classifyEnv }), false, 'an explicit CPU-only test file is classifiable');
+  assert.equal(await checkNeedsBrowser(repo, 'node bin/run-tests.js test/cockpit/brief.test.js', { env: classifyEnv }), true,
     'known browser suites remain browser-gated');
   const added = runFixtureChild(process.execPath, [BIN, 'add', 'coordinator', 'CPU check item', '--check', itemCheck, '--wait', '--json'], {
     cwd: repo, env: box.env, encoding: 'utf8',

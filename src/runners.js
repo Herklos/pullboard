@@ -1,11 +1,12 @@
 /** Exact committed source and bounded, credential-free SSH execution for machine runners [C7]. */
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { closeSync, createReadStream, existsSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, rmSync } from 'node:fs';
+import { chmodSync, closeSync, createReadStream, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pipeline } from 'node:stream/promises';
+import { gunzipSync, gzipSync } from 'node:zlib';
 import { configFromSource, defaults } from './config.js';
 import { blockedPaths, secretsIn } from './hooks.js';
 import { cleanGitEnvironment, headCommit, headTree, isClean, repoInfo, untracked } from './git.js';
@@ -14,6 +15,8 @@ import { Refused } from './refused.js';
 // Budget: 64 MiB bounds worst-case JSON bridge escaping below Node string limits.
 const MAX_OUTPUT_BYTES = 64 * 1024 ** 2;
 const MAX_BLOB_BYTES = 8 * 1024 ** 2;
+const MAX_HISTORY_TAGS = 1_024;
+const MAX_TAG_CHAIN = 8;
 const TOOL_ROOT = fileURLToPath(new URL('../', import.meta.url));
 const RUNTIME_NAMES = ['resources.js', 'git.js', 'machine-home.js', 'refused.js'];
 
@@ -115,6 +118,66 @@ function originAncestor(root, source) {
   return result.status === 0 && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(base) ? base : undefined;
 }
 
+/** Select safe tags that point to commits in the exact candidate ancestry. */
+function candidateTags(root, source) {
+  const rows = sourceGit(root, ['for-each-ref', '--format=%(refname)%00%(objectname)%00%(objecttype)', 'refs/tags'])
+    .split('\n').filter(Boolean);
+  if (rows.length > MAX_HISTORY_TAGS) throw new Refused('RUNNER_SCAN_LIMIT', 'too many local tags to transfer safely; keep this run local');
+  const selected = [];
+  for (const row of rows) {
+    const fields = row.split('\0');
+    if (fields.length !== 3) throw new Refused('RUNNER_SOURCE', 'cannot read local tag refs safely; keep this run local');
+    const [name, object, declaredType] = fields;
+    if (!name.startsWith('refs/tags/') || name.length > 1_024 || /[\u0000-\u001f\u007f]/u.test(name)
+      || !/^[a-f0-9]{40,64}$/u.test(object) || object.length !== source.commit.length) {
+      throw new Refused('RUNNER_SECRET', 'a local tag ref failed the safe transfer check; keep this run local');
+    }
+    sourceGit(root, ['check-ref-format', name]);
+    let type = sourceGit(root, ['cat-file', '-t', object]).trim();
+    if (type !== declaredType) throw new Refused('RUNNER_SOURCE', 'a local tag ref changed while preparing the run; retry');
+    const peeledCommit = sourceGit(root, ['rev-parse', `${name}^{}`]).trim();
+    if (!/^[a-f0-9]{40,64}$/u.test(peeledCommit) || peeledCommit.length !== source.commit.length
+      || sourceGit(root, ['cat-file', '-t', peeledCommit]).trim() !== 'commit') continue;
+    const ancestor = spawnSync('git', ['--no-replace-objects', '-c', 'core.hooksPath=/dev/null', 'merge-base', '--is-ancestor', peeledCommit, source.commit], {
+      cwd: root, env: cleanGitEnvironment(), encoding: 'utf8', maxBuffer: 4096,
+    });
+    if (ancestor.status === 1) continue;
+    if (ancestor.status !== 0) throw new Refused('RUNNER_SOURCE', 'cannot validate tag ancestry; keep this run local');
+    if (secretsIn([{ path: 'tag ref', line: 1, text: name }]).length) {
+      throw new Refused('RUNNER_SECRET', 'a selected tag ref failed the safe transfer check; keep this run local');
+    }
+    const chain = [];
+    if (type === 'tag') {
+      let current = object;
+      const seen = new Set();
+      while (type === 'tag') {
+        if (chain.length >= MAX_TAG_CHAIN || seen.has(current)) {
+          throw new Refused('RUNNER_SCAN_LIMIT', 'an annotated tag chain exceeds the safe transfer limit; keep this run local');
+        }
+        seen.add(current);
+        const tagBody = sourceGit(root, ['cat-file', '-p', current]);
+        if (Buffer.byteLength(tagBody) > MAX_BLOB_BYTES) throw new Refused('RUNNER_SCAN_LIMIT', 'a tag annotation exceeds the safe transfer limit; keep this run local');
+        if (secretsIn(tagBody.split(/\r?\n/u).map((text, line) => ({ path: name, line: line + 1, text }))).length) {
+          throw new Refused('RUNNER_SECRET', 'an annotated tag failed the source privacy scan; keep this run local');
+        }
+        const header = tagBody.split(/\r?\n\r?\n/u, 1)[0];
+        const target = /^object ([a-f0-9]{40,64})$/mu.exec(header)?.[1];
+        const targetType = /^type (commit|tag|tree|blob)$/mu.exec(header)?.[1];
+        if (!target || target.length !== source.commit.length || !targetType
+          || sourceGit(root, ['cat-file', '-t', target]).trim() !== targetType) {
+          throw new Refused('RUNNER_SOURCE', 'an annotated tag has an invalid object chain; keep this run local');
+        }
+        chain.push(current);
+        current = target;
+        type = targetType;
+      }
+      if (type !== 'commit' || current !== peeledCommit) throw new Refused('RUNNER_SOURCE', 'an annotated tag did not peel to its declared commit');
+    } else if (type !== 'commit' || object !== peeledCommit) continue;
+    selected.push({ name, object, peeledCommit, chain });
+  }
+  return selected;
+}
+
 /** Read one exact cat-file record without loading a repository's history into memory. */
 function objectRecord(descriptor) {
   const header = [];
@@ -140,7 +203,8 @@ function objectRecord(descriptor) {
 }
 
 /** Scan and pack exactly the candidate objects absent from the locked remote cache inventory. */
-function historyPack(root, source, tips, directory) {
+function historyPack(root, source, tips, directory, tags = [], knownTagObjects = []) {
+  const knownTags = new Set(knownTagObjects);
   const known = sourceGit(root, ['cat-file', '--batch-check'], { input: tips.map(tip => `${tip}\n`).join('') })
     .split('\n').map(line => /^([a-f0-9]{40,64}) commit \d+$/u.exec(line)?.[1]).filter(Boolean);
   const records = sourceGit(root, ['rev-list', '--objects', source.commit, '--not', ...known])
@@ -149,8 +213,9 @@ function historyPack(root, source, tips, directory) {
       if (!match) throw new Refused('RUNNER_SOURCE', 'unsupported history path; keep this run local');
       return { object: match[1], path: match[2] ?? '' };
     });
-  const objects = [...new Set(records.map(record => record.object))];
+  const objects = [...new Set([...records.map(record => record.object), ...tags.flatMap(tag => tag.chain).filter(object => !knownTags.has(object))])];
   const names = new Map(records.map(record => [record.object, record.path]));
+  for (const tag of tags) for (const object of tag.chain) names.set(object, tag.name);
   const historicalTrees = new Set();
   const config = sourceGit(root, ['ls-tree', '--name-only', source.commit, '--', 'pullboard.json']).trim()
     ? configFromSource(sourceGit(root, ['show', `${source.commit}:pullboard.json`])) : defaults();
@@ -250,6 +315,48 @@ function trustedTooling() {
     runtime: { files: runtimeFiles, sha256: createHash('sha256').update(JSON.stringify(runtimeFiles)).digest('hex') } };
 }
 
+/** Install a complete immutable module capsule without reading the job's stdin stream. */
+function installRuntime(payload, expected, configuredRoot) {
+  const bytes = gunzipSync(Buffer.from(payload, 'base64'), { maxOutputLength: 1_048_576 });
+  if (createHash('sha256').update(bytes).digest('hex') !== expected) throw new Error('invalid capsule identity');
+  const files = JSON.parse(bytes);
+  const home = process.env.HOME;
+  if (!configuredRoot && (!home || !isAbsolute(home))) throw new Error('runner home must be absolute');
+  const root = configuredRoot || join(home, '.pullboard-runner');
+  const directory = join(root, 'runtime', expected);
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  chmodSync(root, 0o700);
+  mkdirSync(dirname(directory), { recursive: true, mode: 0o700 });
+  const build = mkdtempSync(join(dirname(directory), `${expected}.build-`));
+  try {
+    mkdirSync(join(build, 'src'), { mode: 0o700 });
+    writeFileSync(join(build, 'package.json'), '{"type":"module"}\n', { mode: 0o600 });
+    for (const [name, source] of Object.entries(files)) writeFileSync(join(build, 'src', name), source, { mode: 0o600 });
+    try { renameSync(build, directory); }
+    catch (error) { if (!['EEXIST', 'ENOTEMPTY'].includes(error.code)) throw error; }
+    if (readFileSync(join(directory, 'package.json'), 'utf8') !== '{"type":"module"}\n'
+      || Object.entries(files).some(([name, source]) => readFileSync(join(directory, 'src', name), 'utf8') !== source)) {
+      throw new Error('trusted capsule does not match the request');
+    }
+  } finally { rmSync(build, { recursive: true, force: true }); }
+}
+
+/** Install pinned bytes first, then replace the SSH shell with the file-based worker. */
+function remoteWorkerCommand(runner, worker, tooling, runtime) {
+  const files = { ...runtime.files, 'runner-worker.js': worker };
+  const payload = gzipSync(Buffer.from(JSON.stringify(files))).toString('base64');
+  const installer = `import { chmodSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, renameSync, rmSync } from 'node:fs';
+import { dirname, isAbsolute, join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { gunzipSync } from 'node:zlib';
+${installRuntime.toString()}
+installRuntime(${JSON.stringify(payload)}, ${JSON.stringify(tooling.sha256)}, ${JSON.stringify(runner.root ?? '')});`;
+  const node = shellWord(runner.node ?? 'node');
+  const suffix = `/runtime/${tooling.sha256}/src/runner-worker.js`;
+  const entry = runner.root ? shellWord(runner.root + suffix) : `"$HOME"${shellWord('/.pullboard-runner' + suffix)}`;
+  return `${node} --input-type=module -e ${shellWord(installer)} && exec ${node} ${entry}`;
+}
+
 /** Use only a credential-free anonymous HTTPS origin; SSH authentication is never forwarded. */
 function anonymousOrigin(root) {
   const result = spawnSync('git', ['config', '--get', 'remote.origin.url'], { cwd: root, env: cleanGitEnvironment(), encoding: 'utf8', maxBuffer: 4096 });
@@ -279,17 +386,18 @@ function requestFor(root, command, { runner, source, browser = false, pipefail =
   protectHistory(root, current, protect);
   const origin = anonymousOrigin(root);
   const originBase = origin ? originAncestor(root, current) : undefined;
+  const tags = candidateTags(root, current);
   const repoId = createHash('sha256').update(realpathSync(repoInfo(root).commonDir)).digest('hex');
   const directory = mkdtempSync(join(tmpdir(), 'pullboard-runner-send-'));
   try {
     const { worker, tooling, runtime } = trustedTooling();
-    const spec = { version: 1, id: randomUUID(), repoId, ...(originBase ? { origin, originBase } : {}), runtime, tooling, ...current, command, pipefail, slots: runner.slots,
+    const spec = { version: 1, id: randomUUID(), repoId, ...(originBase ? { origin, originBase } : {}), runtime, tooling, tags, ...current, command, pipefail, slots: runner.slots,
       browser: runner.browser, browserRequired: browser, landing: metadata.landing === true,
       itemCheck: metadata.itemCheck === true, diagnostic: metadata.diagnostic === true,
       item: String(metadata.item ?? ''), kind: String(metadata.kind ?? ''), ...(runner.root ? { root: runner.root } : {}) };
     const encodedSpec = Buffer.from(JSON.stringify(spec));
     if (encodedSpec.length > 1024 ** 2) throw new Refused('RUNNER_REQUEST_LIMIT', 'runner tooling request exceeds its safe transfer limit; keep this run local');
-    const remote = `${shellWord(runner.node ?? 'node')} --input-type=module -e ${shellWord(worker)}`;
+    const remote = remoteWorkerCommand(runner, worker, tooling, runtime);
     // These are transport hang ceilings, independent of the command's execution budget.
     return { spec, runner, args: ['-T', '-o', 'BatchMode=yes', '-o', 'ForwardAgent=no', '-o', 'ClearAllForwardings=yes',
       '-o', 'SendEnv=-*', '-o', 'ConnectTimeout=10', '-o', 'ServerAliveInterval=10', '-o', 'ServerAliveCountMax=3',
@@ -395,7 +503,11 @@ export async function runOnRunnerAsync(root, command, options) {
             || inventory.tips.some(tip => typeof tip !== 'string' || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(tip))) {
             throw new Error('invalid runner inventory');
           }
-          const pack = historyPack(root, request.source, inventory.tips, request.directory);
+          if (!Array.isArray(inventory.tagObjects) || inventory.tagObjects.length > 8_192
+            || inventory.tagObjects.some(object => typeof object !== 'string' || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(object))) {
+            throw new Error('invalid runner tag inventory');
+          }
+          const pack = historyPack(root, request.source, inventory.tips, request.directory, request.spec.tags, inventory.tagObjects);
           await pipeline(createReadStream(pack), child.stdin);
         })().catch(failure => { error = failure; child.stdin.destroy(); child.kill(); });
       }

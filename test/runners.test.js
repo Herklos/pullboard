@@ -136,7 +136,8 @@ ${dropFirst ? `if (host.endsWith('-drop') && call === 1) {
 }
 
 /** Build one committed probe that observes the actual checkout and remote process environment. */
-function writeProbe(repo, { remoteStateRoot, remoteMachineHome, sourceHome, sourceMachineHome, callerPool, callerToken, historyBaseCommit }) {
+function writeProbe(repo, { remoteStateRoot, remoteMachineHome, sourceHome, sourceMachineHome, callerPool, callerToken,
+  historyBaseCommit, annotatedTagObject, lightweightTagObject }) {
   const probe = `import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -162,6 +163,20 @@ test('runner executed the committed source in its private checkout', () => {
   assert.equal(shallow, 'false', 'the worker receives full selected-candidate history');
   assert.equal(count, '3', 'the full selected candidate has the fixture base, rename, and probe commits');
   assert.ok(history.includes(${JSON.stringify(historyBaseCommit)}), 'the rename retains its original committed file in history');
+  assert.equal(execFileSync('git', ['rev-parse', 'refs/tags/runner-release'], { encoding: 'utf8' }).trim(),
+    ${JSON.stringify(annotatedTagObject)}, 'the annotated tag ref keeps its original object identity');
+  assert.equal(execFileSync('git', ['rev-parse', 'refs/tags/runner-lightweight'], { encoding: 'utf8' }).trim(),
+    ${JSON.stringify(lightweightTagObject)}, 'the lightweight tag ref points to its original commit');
+  const annotation = execFileSync('git', ['cat-file', '-p', 'refs/tags/runner-release'], { encoding: 'utf8' });
+  assert.match(annotation, /runner release annotation witness/u);
+  const annotatedArchive = execFileSync('git', ['archive', '--format=tar', 'refs/tags/runner-release', 'history-original.txt']);
+  const lightweightArchive = execFileSync('git', ['archive', '--format=tar', 'refs/tags/runner-lightweight', 'history-original.txt']);
+  assert.ok(annotatedArchive.length > 512 && annotatedArchive.includes(Buffer.from('history-original.txt')),
+    'the annotated archive can read the tagged historical file');
+  assert.ok(lightweightArchive.length > 512 && lightweightArchive.includes(Buffer.from('history-original.txt')),
+    'the lightweight archive can read the tagged historical file');
+  assert.deepEqual(execFileSync('git', ['tag', '--list', 'runner-unrelated'], { encoding: 'utf8' }).trim(), '',
+    'a tag outside candidate ancestry is not copied');
   assert.equal(execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim(), '');
   assert.equal(existsSync('.env'), false, 'ignored, untracked caller files are not transferred');
   assert.equal(process.env.PULLBOARD_RUNNER_FIXTURE_SECRET, undefined);
@@ -303,28 +318,6 @@ function processIsAlive(pid) {
   }
 }
 
-/** Wait for the stand-in to record a particular invocation count, not for elapsed time. */
-async function waitForRequestCount(path, count) {
-  if (existsSync(path) && readFileSync(path, 'utf8').trim().split('\n').length >= count) return;
-  const watcher = watch(dirname(path), { persistent: false });
-  let timer;
-  try {
-    const hasCount = () => existsSync(path) && readFileSync(path, 'utf8').trim().split('\n').length >= count;
-    const changed = new Promise((resolve, reject) => {
-      const check = (_event, filename) => {
-        if ((filename === null || String(filename) === basename(path)) && hasCount()) resolve();
-      };
-      watcher.on('change', check);
-      watcher.once('error', reject);
-      check('change', basename(path));
-    });
-    if (hasCount()) return;
-    await Promise.race([changed, new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`runner request ${count} did not arrive`)), 20_000); // budget: hang ceiling for the fake SSH request handshake.
-    })]);
-  } finally { clearTimeout(timer); watcher.close(); }
-}
-
 /** Start an API child that requeues only an incomplete runner transport on its original ticket. */
 function startQueueController(repo, env, command, { item, queueMarker, firstItem = 'retry-first', remote = true } = {}) {
   const gateUrl = new URL('../src/gate.js', import.meta.url).href;
@@ -407,6 +400,12 @@ test('a queued run executes on a registered runner and its result comes back [C7
   git(repo, env, 'add', '.gitignore', 'pullboard.json', 'tracked.txt', 'history-original.txt');
   git(repo, env, 'commit', '-q', '-m', 'test: prepare registered runner fixture');
   const historyBaseCommit = git(repo, env, 'rev-parse', 'HEAD');
+  git(repo, env, 'tag', '-a', 'runner-release', '-m', 'runner release annotation witness', historyBaseCommit);
+  git(repo, env, 'tag', 'runner-lightweight', historyBaseCommit);
+  const annotatedTagObject = git(repo, env, 'rev-parse', 'refs/tags/runner-release');
+  const lightweightTagObject = git(repo, env, 'rev-parse', 'refs/tags/runner-lightweight');
+  const unrelatedCommit = git(repo, env, 'commit-tree', `${historyBaseCommit}^{tree}`, '-m', 'unrelated tag target');
+  git(repo, env, 'tag', 'runner-unrelated', unrelatedCommit);
   git(repo, env, 'mv', 'history-original.txt', 'history-renamed.txt');
   git(repo, env, 'commit', '-q', '-m', 'test: preserve renamed runner history witness');
   writeFileSync(join(repo, '.env'), SECRET);
@@ -417,6 +416,7 @@ test('a queued run executes on a registered runner and its result comes back [C7
   const ssh = installSshStandIn({ bin, worker, home: remoteHome, machineHome: remoteMachineHome, requests });
   assert.ok(existsSync(ssh));
   writeProbe(repo, { remoteStateRoot, remoteMachineHome, sourceHome: home, sourceMachineHome: machineHome, historyBaseCommit,
+    annotatedTagObject, lightweightTagObject,
     callerPool: 'caller-pool-marker', callerToken: 'caller-token-marker' });
   git(repo, env, 'add', 'runner-probe.test.js');
   git(repo, env, 'commit', '-q', '-m', 'test: add remote source probe [C7]');
@@ -526,6 +526,15 @@ console.log('RUNNER_JOURNAL_FILES ' + readdirSync(journal).filter(name => /^chil
   const callsAfterManyJournals = readFileSync(requests, 'utf8').trim().split('\n').length;
   assert.equal(callsAfterManyJournals, 3, 'the large-journal command ran remotely exactly once');
 
+  git(repo, env, 'tag', '-a', 'runner-private-tag', '-m', SECRET, 'HEAD');
+  const privateTag = runThroughGate(repo, env, 'node -e "process.stdout.write(\'PRIVATE_TAG_SCAN_REACHED\\n\')"');
+  assert.equal(privateTag.status, 1, fixtureResultContext(privateTag));
+  assert.match(privateTag.stdout + privateTag.stderr, /RUNNER_SECRET/u);
+  assert.doesNotMatch(privateTag.stdout + privateTag.stderr, new RegExp(SECRET, 'u'));
+  assert.equal(readFileSync(requests, 'utf8').trim().split('\n').length, callsAfterManyJournals,
+    'a secret annotated tag is refused before opening an SSH request');
+  git(repo, env, 'tag', '-d', 'runner-private-tag');
+
   // The secret is absent from HEAD but remains in a reachable commit; full-history scanning must
   // refuse before transferring those historical objects to the registered worker.
   git(repo, env, 'add', '-f', '.env');
@@ -608,7 +617,8 @@ while(!fs.existsSync(${JSON.stringify(releaseFirst)})) await sleep(5); })().catc
     await waitForMarker(olderQueued);
     first = observe(startQueueController(repo, env, `node -e ${shellQuote(firstCode)}`,
       { item: 'retry-first', queueMarker: queueReady, firstItem: 'older-local' }));
-    await waitForRequestCount(requests, 1);
+    // The SSH stand-in creates this file only after appending its first request record.
+    await waitForMarker(requests);
     const dropped = JSON.parse(readFileSync(requests, 'utf8').trim().split('\n')[0]);
     assert.equal(dropped.dropped, true, 'the first SSH connection drops without a completion receipt');
     await waitForMarker(queueReady);

@@ -1,10 +1,11 @@
-/** Standalone SSH runner worker source; intentionally imports only Node built-ins. */
+/** SSH runner entry point in a pinned capsule with a static trusted resource graph. */
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, closeSync, createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { delimiter, dirname, isAbsolute, join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import * as resourceApi from './resources.js';
 import { once } from 'node:events';
 import { pipeline } from 'node:stream/promises';
 
@@ -115,12 +116,25 @@ async function readSpec() {
   if (value.originBase !== undefined
     && (typeof value.originBase !== 'string' || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value.originBase)
       || value.originBase.length !== value.commit.length || !value.origin)) throw new Error('invalid work specification');
+  if (!Array.isArray(value.tags) || value.tags.length > 1_024) throw new Error('invalid tag manifest');
+  const tagNames = new Set();
+  for (const tag of value.tags) {
+    if (!tag || typeof tag.name !== 'string' || !tag.name.startsWith('refs/tags/') || tag.name.length > 1_024
+      || /[\u0000-\u001f\u007f]/u.test(tag.name) || tagNames.has(tag.name)
+      || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(tag.object ?? '')
+      || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(tag.peeledCommit ?? '')
+      || tag.object.length !== value.commit.length || tag.peeledCommit.length !== value.commit.length
+      || !Array.isArray(tag.chain) || tag.chain.length > 8
+      || tag.chain.some(object => typeof object !== 'string' || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(object)
+        || object.length !== value.commit.length)) throw new Error('invalid tag manifest');
+    tagNames.add(tag.name);
+    if (tag.chain.length ? tag.chain[0] !== tag.object : tag.object !== tag.peeledCommit) throw new Error('invalid tag manifest');
+  }
   const runtimeNames = ['resources.js', 'git.js', 'machine-home.js', 'refused.js'];
   if (Object.keys(value.runtime.files).length !== runtimeNames.length
     || runtimeNames.some(name => typeof value.runtime.files[name] !== 'string')) throw new Error('invalid work specification');
   if (createHash('sha256').update(JSON.stringify(value.runtime.files)).digest('hex') !== value.runtime.sha256) throw new Error('invalid trusted runtime');
-  const workerFlag = process.execArgv.indexOf('-e');
-  const workerSource = workerFlag >= 0 ? process.execArgv[workerFlag + 1] : null;
+  const workerSource = readFileSync(fileURLToPath(import.meta.url), 'utf8');
   const toolingFiles = { ...value.runtime.files, 'runner-worker.js': workerSource };
   if (!workerSource || !value.tooling || !['git-checkout', 'installed-package'].includes(value.tooling.kind)
     || value.tooling.name !== 'pullboard' || typeof value.tooling.version !== 'string'
@@ -168,29 +182,13 @@ function scopedEnvironment(home, temporary, machineHomePath, gateLease, resource
   };
 }
 
-/** Install the trusted resource implementation supplied and hashed by the controller. */
-async function loadResourceApi(runnerRoot, runtime) {
-  const directory = join(runnerRoot, 'runtime', runtime.sha256);
-  const parent = dirname(directory);
-  mkdirSync(parent, { recursive: true, mode: 0o700 });
-  const build = mkdtempSync(join(parent, `${runtime.sha256}.build-`));
-  try {
-    const sourceDirectory = join(build, 'src');
-    mkdirSync(sourceDirectory, { mode: 0o700 });
-    writeFileSync(join(build, 'package.json'), '{"type":"module"}\n', { mode: 0o600 });
-    for (const [name, source] of Object.entries(runtime.files)) writeFileSync(join(sourceDirectory, name), source, { mode: 0o600 });
-    try { renameSync(build, directory); }
-    catch (error) {
-      if (!['EEXIST', 'ENOTEMPTY'].includes(error.code)) throw error;
-    }
-    // Concurrent workers reuse only a complete, byte-identical trusted module graph.
-    if (readFileSync(join(directory, 'package.json'), 'utf8') !== '{"type":"module"}\n'
-      || Object.entries(runtime.files).some(([name, source]) => readFileSync(join(directory, 'src', name), 'utf8') !== source)) {
-      throw new Error('trusted runtime cache does not match the request');
-    }
-  } finally { rmSync(build, { recursive: true, force: true }); }
-  const sourceDirectory = join(directory, 'src');
-  return import(pathToFileURL(join(sourceDirectory, 'resources.js')).href);
+/** Check that this already installed capsule matches the controller before using its static API. */
+function loadResourceApi(runtime) {
+  const sourceDirectory = dirname(fileURLToPath(import.meta.url));
+  if (Object.entries(runtime.files).some(([name, source]) => readFileSync(join(sourceDirectory, name), 'utf8') !== source)) {
+    throw new Error('trusted runtime cache does not match the request');
+  }
+  return resourceApi;
 }
 
 /** Start a subprocess in a private process group so this worker can drain only its own descendants. */
@@ -769,11 +767,16 @@ async function acquireResourceApi(api, options, machineHomePath) {
 }
 
 /** Invoke one bounded Git command in an owned group and return its exact stdout. */
-async function git(root, args, env) {
-  const owned = spawnOwned('git', args, { cwd: root, env, stdio: ['ignore', 'pipe', 'ignore'] });
+async function git(root, args, env, input) {
+  const owned = spawnOwned('git', args, { cwd: root, env, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'ignore'] });
   const output = [];
   let bytes = 0;
   let overflow = false;
+  let inputError;
+  if (input !== undefined) {
+    owned.child.stdin.on('error', error => { inputError ??= error; });
+    owned.child.stdin.end(input);
+  }
   owned.child.stdout.on('data', chunk => {
     bytes += chunk.length;
     if (bytes > 128 * 1024 * 1024) {
@@ -782,7 +785,7 @@ async function git(root, args, env) {
   });
   const result = await owned.closed;
   await drainOwned(owned);
-  if (overflow || result.error || result.code !== 0 || result.signal) throw new Error('source checkout could not be verified');
+  if (overflow || inputError || result.error || result.code !== 0 || result.signal) throw new Error('source checkout could not be verified');
   return Buffer.concat(output).toString('utf8').trim();
 }
 
@@ -802,6 +805,7 @@ async function checkoutHistory(api, runnerRoot, root, packFile, spec, env) {
     repo: runnerRoot, agent: `pullboard-ssh-cache-${spec.id}`, kind: 'source-cache',
     onWait: () => assertTransportLive(),
   }, join(runnerRoot, 'cache', 'resource-pool'));
+  const deliveryRefs = [];
   try {
     if (!existsSync(cache)) {
       const build = mkdtempSync(join(repositories, `.repo-${spec.repoId}-`));
@@ -860,8 +864,22 @@ async function checkoutHistory(api, runnerRoot, root, packFile, spec, env) {
     }
     const uniqueTips = [...new Set(tips)];
     if (uniqueTips.length > 1_024) throw new Error('source history cache needs maintenance');
+    const requestedTagObjects = [...new Set(spec.tags.flatMap(tag => tag.chain))];
+    const knownTagObjects = [];
+    if (requestedTagObjects.length) {
+      const checks = await git(cache, ['cat-file', '--batch-check'], env, `${requestedTagObjects.join('\n')}\n`);
+      const lines = checks.split(/\r?\n/u).filter(Boolean);
+      if (lines.length !== requestedTagObjects.length) throw new Error('source tag inventory is incomplete');
+      for (let index = 0; index < lines.length; index++) {
+        const match = /^([a-f0-9]{40,64}) tag \d+$/u.exec(lines[index]);
+        if (match && match[1] === requestedTagObjects[index]) knownTagObjects.push(match[1]);
+        else if (!new RegExp(`^${requestedTagObjects[index]} missing$`, 'u').test(lines[index])) {
+          throw new Error('source tag inventory contains an invalid object');
+        }
+      }
+    }
     await new Promise((resolveWrite, rejectWrite) => process.stderr.write(
-      `PULLBOARD_RUNNER_NEED ${spec.id} ${Buffer.from(JSON.stringify({ tips: uniqueTips })).toString('base64')}\n`,
+      `PULLBOARD_RUNNER_NEED ${spec.id} ${Buffer.from(JSON.stringify({ tips: uniqueTips, tagObjects: knownTagObjects })).toString('base64')}\n`,
       error => error ? rejectWrite(error) : resolveWrite()));
     await receivePack(packFile);
 
@@ -886,6 +904,7 @@ async function checkoutHistory(api, runnerRoot, root, packFile, spec, env) {
     const closure = new Set((await git(cache, ['rev-list', '--objects', spec.commit], env)).split(/\r?\n/u)
       .map(line => line.match(/^([a-f0-9]{40,64})(?:\s|$)/u)?.[1]).filter(Boolean));
     closure.add(spec.commit);
+    const tagObjects = new Set(spec.tags.flatMap(tag => tag.chain));
     const packDirectory = join(cache, 'objects', 'pack');
     const newIndexes = readdirSync(packDirectory).filter(name => name.endsWith('.idx') && !priorIndexes.has(name));
     const received = new Set();
@@ -895,13 +914,50 @@ async function checkoutHistory(api, runnerRoot, root, packFile, spec, env) {
         if (object) received.add(object);
       }
     }
-    if ([...received].some(object => !closure.has(object))) {
+    if ([...received].some(object => !closure.has(object) && !tagObjects.has(object))) {
       throw new Error('source history pack contains missing or unrelated objects');
+    }
+    for (const tag of spec.tags) {
+      await git(cache, ['check-ref-format', tag.name], env);
+      if (tag.chain.length) {
+        let target = tag.object;
+        for (let index = 0; index < tag.chain.length; index++) {
+          const object = tag.chain[index];
+          if (target !== object || (!received.has(object) && !knownTagObjects.includes(object))
+            || await git(cache, ['cat-file', '-t', object], env) !== 'tag') {
+            throw new Error('source tag chain is incomplete or unrelated');
+          }
+          const body = await git(cache, ['cat-file', '-p', object], env);
+          const header = body.split(/\r?\n\r?\n/u, 1)[0];
+          const next = /^object ([a-f0-9]{40,64})$/mu.exec(header)?.[1];
+          const type = /^type (commit|tag|tree|blob)$/mu.exec(header)?.[1];
+          const expectedNext = tag.chain[index + 1] ?? tag.peeledCommit;
+          const expectedType = index + 1 < tag.chain.length ? 'tag' : 'commit';
+          if (!next || next !== expectedNext || type !== expectedType || next.length !== spec.commit.length) {
+            throw new Error('source tag chain failed validation');
+          }
+          target = next;
+        }
+      } else if (await git(cache, ['cat-file', '-t', tag.object], env) !== 'commit'
+        || tag.object !== tag.peeledCommit || !closure.has(tag.object)) {
+        throw new Error('lightweight source tag does not point into candidate history');
+      }
+      await git(cache, ['merge-base', '--is-ancestor', tag.peeledCommit, spec.commit], env);
     }
     await git(cache, ['update-ref', `refs/pullboard/candidates/${spec.commit}`, spec.commit], env);
     await git(root, ['init', '-q', `--object-format=${spec.commit.length === 64 ? 'sha256' : 'sha1'}`], env);
     await git(root, ['-c', 'protocol.file.allow=always', 'fetch', '--no-tags', cache, `refs/pullboard/candidates/${spec.commit}`], env);
     await git(root, ['checkout', '--detach', 'FETCH_HEAD'], env);
+    for (let index = 0; index < spec.tags.length; index++) {
+      const tag = spec.tags[index];
+      const deliveryRef = `refs/pullboard/tag-delivery/${spec.id}/${index}`;
+      await git(cache, ['update-ref', deliveryRef, tag.object], env);
+      deliveryRefs.push(deliveryRef);
+      await git(root, ['-c', 'protocol.file.allow=always', 'fetch', '--no-tags', cache, `${deliveryRef}:${tag.name}`], env);
+      if (await git(root, ['rev-parse', `${tag.name}^{}`], env) !== tag.peeledCommit) {
+        throw new Error('isolated source checkout has an invalid tag ref');
+      }
+    }
     if (await git(root, ['rev-parse', 'HEAD'], env) !== spec.commit
       || await git(root, ['rev-parse', 'HEAD^{tree}'], env) !== spec.tree
       || await git(root, ['rev-parse', '--is-shallow-repository'], env) !== 'false'
@@ -909,6 +965,9 @@ async function checkoutHistory(api, runnerRoot, root, packFile, spec, env) {
       throw new Error('isolated source checkout does not contain the complete requested history');
     }
   } finally {
+    for (const ref of deliveryRefs) {
+      try { await git(cache, ['update-ref', '-d', ref], env); } catch { /* Leave cache refs only if Git refuses safe removal. */ }
+    }
     try { cacheLease.release(); } catch { /* Retaining the lease on cleanup error is safer than speculative deletion. */ }
   }
   rmSync(packFile, { force: true });
@@ -1068,7 +1127,7 @@ async function main() {
     const configuredMachineHome = process.env.PULLBOARD_MACHINE_HOME;
     if (configuredMachineHome !== undefined && !isAbsolute(configuredMachineHome)) throw new Error('machine home is invalid');
     const machineHomePath = configuredMachineHome ?? join(runnerHome, '.pullboard');
-    api = await loadResourceApi(runnerRoot, spec.runtime);
+    api = loadResourceApi(spec.runtime);
     const previousMachineHome = process.env.PULLBOARD_MACHINE_HOME;
     let resources;
     try {
