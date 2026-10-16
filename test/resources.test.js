@@ -10,7 +10,7 @@ import { pathToFileURL } from 'node:url';
 import { createInterface } from 'node:readline';
 import { after, test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { QUEUE_AGE_MS, listResources, queueClass, setResourceCapacity, takeResource } from '../src/resources.js';
+import { listResources, setResourceCapacity, takeResource } from '../src/resources.js';
 import { checkNeedsBrowser } from '../src/browser-admission.js';
 
 const TEMP = [];
@@ -598,17 +598,7 @@ test('the pool alone orders submits, reviews and browser runs [C7]', async () =>
 });
 
 test('the pool admits reviews before submits before focused runs, and waiting runs age up [C7,V4]', async () => {
-  const queuedAt = Date.parse('2026-10-15T19:37:00.000Z');
-  const at = (minutes) => queuedAt + minutes * 60_000;
-  const since = new Date(queuedAt).toISOString();
-  assert.equal(QUEUE_AGE_MS, 30 * 60_000, 'a waiter moves up one class every 30 minutes');
-  assert.deepEqual([0, 29, 30, 60, 90, 300].map((minutes) => queueClass({ kind: 'focused', since }, at(minutes)).name),
-    ['other', 'other', 'submit', 'review', 'landing', 'landing'], 'a focused run ages up one class per 30 minutes waited');
-  assert.equal(queueClass({ kind: 'review', since }, at(30)).name, 'landing');
-  assert.equal(queueClass({ kind: 'main-red', diagnostic: 1, itemCheck: 1, since }, at(0)).name, 'other', 'a diagnostic is optional work');
-  assert.equal(queueClass({ kind: 'check', itemCheck: 1, since }, at(0)).name, 'submit', 'an item check ranks with submits');
-  assert.equal(queueClass({ landing: 1, since }, at(0)).name, 'landing');
-
+  const AGE_MS = 30 * 60_000;
   const box = fixture();
   const holders = [poolWorker(box, { agent: 'holder-one' }), poolWorker(box, { agent: 'holder-two' })];
   for (const holder of holders) await acquired(holder);
@@ -643,8 +633,8 @@ test('the pool admits reviews before submits before focused runs, and waiting ru
   const db = new DatabaseSync(join(box.home, 'resources.sqlite'));
   try {
     const backdate = db.prepare('UPDATE waiter SET since = ? WHERE agent = ?');
-    backdate.run(new Date(Date.now() - 2 * QUEUE_AGE_MS - 60_000).toISOString(), 'focused-two');
-    backdate.run(new Date(Date.now() - QUEUE_AGE_MS - 60_000).toISOString(), 'diagnostic-one');
+    backdate.run(new Date(Date.now() - 2 * AGE_MS - 60_000).toISOString(), 'focused-two');
+    backdate.run(new Date(Date.now() - AGE_MS - 60_000).toISOString(), 'diagnostic-one');
   } finally { db.close(); }
   assert.deepEqual(line(), [
     ['landing-one', 'landing', ''],
@@ -666,6 +656,19 @@ test('the pool admits reviews before submits before focused runs, and waiting ru
   }
   for (const child of releasing) await release(child);
   assert.deepEqual(order, ['landing-one', 'review-one', 'focused-two', 'diagnostic-one', 'submit-one', 'focused-one']);
+
+  // The class rule itself, against an injected clock rather than real waiting.
+  const { QUEUE_AGE_MS, queueClass } = await import('../src/resources.js');
+  const queuedAt = Date.parse('2026-10-15T19:37:00.000Z');
+  const at = (minutes) => queuedAt + minutes * 60_000;
+  const since = new Date(queuedAt).toISOString();
+  assert.equal(QUEUE_AGE_MS, 30 * 60_000, 'a waiter moves up one class every 30 minutes');
+  assert.deepEqual([0, 29, 30, 60, 90, 300].map((minutes) => queueClass({ kind: 'focused', since }, at(minutes)).name),
+    ['other', 'other', 'submit', 'review', 'landing', 'landing'], 'a focused run ages up one class per 30 minutes waited');
+  assert.equal(queueClass({ kind: 'review', since }, at(30)).name, 'landing');
+  assert.equal(queueClass({ kind: 'main-red', diagnostic: 1, itemCheck: 1, since }, at(0)).name, 'other', 'a diagnostic is optional work');
+  assert.equal(queueClass({ kind: 'check', itemCheck: 1, since }, at(0)).name, 'submit', 'an item check ranks with submits');
+  assert.equal(queueClass({ landing: 1, since }, at(0)).name, 'landing');
 });
 
 test('a line holding an older pullboard waiter keeps arrival order, so mixed versions never deadlock [C7]', async () => {
