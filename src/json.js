@@ -21,6 +21,7 @@ export const JSON_SHAPES = {
     lanes: shape({ lanes: 'object', shared: 'array', coordinator: 'string' }),
     resources: shape({ resources: 'array' }),
     settings: shape({ settings: 'object' }),
+    runner: shape({ runner: 'object' }),
     relay: shape({ linked: 'boolean', board: 'string', url: 'string', link: 'string', sequence: 'number', behind: 'number', recovery: 'object' }),
     list: shape({ items: 'array' }),
     roadmap: shape({ milestones: 'array' }),

@@ -7,8 +7,9 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { availableParallelism } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { gitChildEnv, gitPath, headTree, invalidateGitFacts, isClean, untracked } from './git.js';
 import { secretsIn } from './hooks.js';
 import { Refused } from './refused.js';
@@ -17,6 +18,7 @@ import { browserFreeChecksEnabled, loadMachineSettings } from './settings.js';
 import { selectAffectedTests } from './affected-tests.js';
 import { checkNeedsBrowser, testsNeedBrowser } from './browser-admission.js';
 import { timingFromOutput, timingRunner } from './timing.js';
+import { RunnerDropped, runOnRunner, runOnRunnerAsync, runnerSource } from './runners.js';
 
 const STAMP = 'pullboard-gate-green';
 const LOG = 'pullboard-gate.log';
@@ -172,12 +174,13 @@ export function runProfiledShell(root, command, { waitMs = 0, artifactDirectory,
   const logPath = persistLog ? join(directory, `${artifactPrefix}-${id}.log`) : null;
   const started = Date.now();
   const inherited = {
-    ...(gateLease ? gateSlotEnvironment(gateLease) : gateSlotHeld ? { [GATE_SLOT_HELD_ENV]: '1' } : {}),
+    ...(gateLease && !gateLease.runner ? gateSlotEnvironment(gateLease) : gateSlotHeld ? { [GATE_SLOT_HELD_ENV]: '1' } : {}),
     [LANDING_RUN_ENV]: landing ? '1' : '0',
   };
-  const run = runShell(root, command, { pipefail, env: inherited });
+  const run = gateLease?.runner ? runOnRunner(root, command, { runner: gateLease.runner, source: gateLease.source,
+    browser: gateLease.browser, pipefail, metadata: { ...(gateLease.runMetadata ?? {}), landing } }) : runShell(root, command, { pipefail, env: inherited });
   const profile = writeTimingProfile(profilePath, {
-    ...timingFromOutput(run.output, timingRunner(command)),
+    ...runTiming(run, command),
     waitMs: Math.max(0, Math.round(waitMs)), wallMs: Math.max(0, Date.now() - started),
   });
   if (logPath) writeFileSync(logPath, safeLog(run.output), { mode: 0o600 });
@@ -192,6 +195,14 @@ export function runProfiledShell(root, command, { waitMs = 0, artifactDirectory,
  */
 export async function runProfiledShellAsync(root, command, { waitMs = 0, gateSlotHeld = false, gateLease, landing = false } = {}) {
   const started = Date.now();
+  if (gateLease?.runner) {
+    const run = await runOnRunnerAsync(root, command, { runner: gateLease.runner, source: gateLease.source,
+      browser: gateLease.browser, metadata: { ...(gateLease.runMetadata ?? {}), landing } });
+    const wallMs = Math.max(0, Date.now() - started);
+    const profilePath = join(dirname(gitPath(root, LOG)), `pullboard-gate-${randomUUID()}.profile.json`);
+    const profile = writeTimingProfile(profilePath, { ...runTiming(run, command), waitMs, wallMs });
+    return { ...run, seconds: Math.round(wallMs / 1000), profile, profilePath, logPath: null };
+  }
   const inherited = {
     ...(gateLease ? gateSlotEnvironment(gateLease) : gateSlotHeld ? { [GATE_SLOT_HELD_ENV]: '1' } : {}),
     [LANDING_RUN_ENV]: landing ? '1' : '0',
@@ -220,6 +231,26 @@ export async function runProfiledShellAsync(root, command, { waitMs = 0, gateSlo
   const profile = writeTimingProfile(profilePath, { ...timingFromOutput(output, timingRunner(command)),
     waitMs: Math.max(0, Math.round(waitMs)), wallMs });
   return { isGreen: status === 0 && !overflow && !failure, output, seconds: Math.round(wallMs / 1000), profile, profilePath, logPath: null };
+}
+
+/** Keep raw remote TAP intact while resolving its measured filenames against the local source. */
+function runTiming(run, command) {
+  const profile = timingFromOutput(run.output, timingRunner(command));
+  if (!run.executionRunner) return profile;
+  /** Relocate only paths inside the actual remote checkout, never a foreign absolute path. */
+  const localPath = path => {
+    if (typeof path !== 'string') return path;
+    const original = path;
+    if (path.startsWith('file:')) {
+      try { path = fileURLToPath(path); } catch { return original; }
+    }
+    if (!isAbsolute(path)) return original;
+    const suffix = relative(run.executionRoot, path);
+    return suffix && suffix !== '..' && !suffix.startsWith(`..${sep}`) && !isAbsolute(suffix) ? suffix : original;
+  };
+  return { ...profile, executionRunner: run.executionRunner, executionSource: run.executionSource,
+    files: (profile.files ?? []).map(file => ({ ...file, path: localPath(file.path) })),
+    tests: (profile.tests ?? []).map(test => ({ ...test, file: localPath(test.file) })) };
 }
 
 /** Persist one sanitized timing profile as a private artifact.
@@ -254,6 +285,14 @@ export function writeTimingProfile(path, profile) {
     runner: sanitize(profile.runner ?? 'shell', 'runner'),
     format: sanitize(profile.format ?? 'none', 'format'),
     unavailable: sanitize(profile.unavailable ?? null, 'availability'),
+    ...(profile.executionRunner ? { executionRunner: sanitize(profile.executionRunner, 'execution runner') } : {}),
+    ...(profile.executionSource ? { executionSource: {
+      commit: sanitize(profile.executionSource.commit, 'execution commit'),
+      tree: sanitize(profile.executionSource.tree, 'execution tree'),
+      tooling: Object.fromEntries(Object.entries(profile.executionSource.tooling ?? {})
+        .filter(([key]) => ['kind', 'name', 'version', 'commit', 'tree', 'sha256'].includes(key))
+        .map(([key, value]) => [key, sanitize(value, `execution tooling ${key}`)])),
+    } } : {}),
   };
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   writeFileSync(path, `${JSON.stringify(sanitized, null, 2)}\n`, { mode: 0o600 });
@@ -275,7 +314,7 @@ function hasPipeline(command) {
  * @param {{ landing?: boolean, itemCheck?: boolean, diagnostic?: boolean, browser?: boolean, agent?: string, item?: string|number, kind?: string, onWait?: (state: object) => void }} [options] - Queue class and progress reporter.
  * @returns {Promise<any>} The action's result after releasing its lease.
  */
-export async function withGateSlot(root, action, { landing = false, itemCheck = false, diagnostic = false, browser = false, agent, item = '', kind = '', onWait } = {}) {
+export async function withGateSlot(root, action, { landing = false, itemCheck = false, diagnostic = false, browser = false, remote = true, agent, item = '', kind = '', onWait } = {}) {
   const inherited = inheritedGateSlot({ root, browser });
   if (inherited) {
     try { return await action(inherited); }
@@ -283,7 +322,8 @@ export async function withGateSlot(root, action, { landing = false, itemCheck = 
   }
   const settingsProvider = () => loadMachineSettings();
   const capacityProvider = () => settingsProvider().gateSlots;
-  const lease = await takeResource({
+  const source = runnerSource(root);
+  let lease = await takeResource({
     name: 'gate',
     capacity: capacityProvider(),
     capacityProvider,
@@ -299,10 +339,23 @@ export async function withGateSlot(root, action, { landing = false, itemCheck = 
     diagnostic,
     browser,
     allowIdleCapacityUpdate: true,
+    remote: remote && Boolean(source),
+    runnerProvider: () => loadMachineSettings().runners ?? [],
     onWait,
   });
   try {
-    return await action(lease);
+    while (true) {
+      lease.source = source;
+      lease.runMetadata = { landing, itemCheck, diagnostic, item: String(item), kind };
+      try { return await action(lease); }
+      catch (error) {
+        if (!(error instanceof RunnerDropped) || !lease.runner || !lease.requeueRunner) throw error;
+        const runnerUnavailable = { host: lease.runner.host, reason: 'transport lost before a complete result', until: 'the host is checked and re-registered' };
+        if (onWait) await onWait({ holders: [], line: [], position: 0, runnerUnavailable });
+        else process.stderr.write(`runner ${runnerUnavailable.host} unavailable: ${runnerUnavailable.reason}; until ${runnerUnavailable.until}; requeueing the run\n`);
+        lease = await lease.requeueRunner('transport-lost');
+      }
+    }
   } finally {
     lease.release();
   }
@@ -387,6 +440,8 @@ export async function runSubmitGate(root, config, { base, trunk, changed, check,
         runner: [...new Set(profiles.map(value => value.runner))].join(', '),
         format: [...new Set(profiles.map(value => value.format))].join('+'),
         unavailable: profiles.some(value => value.unavailable) ? 'per-test timing unavailable: output was not TAP or JUnit (one or more phases)' : null,
+        ...(lease.runner ? { executionRunner: lease.runner.host,
+          executionSource: profiles.find(value => value.executionSource)?.executionSource } : {}),
       });
       return { ...proof, log, seconds: criterion.seconds + proof.seconds, ...selection, deferred, deferFullFallback, check: receipt,
         profile, profilePath, proofProfilePath: proof.profilePath, proofLog: proof.log };
@@ -436,7 +491,7 @@ export function submitGateReport(gate) {
 export function timingDigest(profile) {
   if (!profile) return '';
   const measured = value => Number.isFinite(value) ? `${(value / 1000).toFixed(2)}s` : 'unavailable';
-  const summary = `timing (${profile.runner ?? 'shell'}): wall ${measured(profile.wallMs)}, slot wait ${measured(profile.waitMs)}`;
+  const summary = `timing (${profile.runner ?? 'shell'}${profile.executionRunner ? ` on runner ${profile.executionRunner}` : ''}): wall ${measured(profile.wallMs)}, slot wait ${measured(profile.waitMs)}`;
   const rows = [...(profile.files ?? [])].filter(file => typeof file.path === 'string' && Number.isFinite(file.durationMs) && file.durationMs >= 0).sort((left, right) => right.durationMs - left.durationMs).slice(0, 10);
   const files = rows.length ? `\nslowest test files:\n${rows.map(file => `  ${file.path}: ${(file.durationMs / 1000).toFixed(2)}s`).join('\n')}` : '';
   return `${summary}${profile.unavailable ? `\n${profile.unavailable}` : ''}${files}`;
