@@ -637,6 +637,69 @@ test('land holds a flake without retries and person waivers cover every failure 
   assert.equal(calls(box).length, beforeHook, 'expired proof is refused without rerunning the red gate');
 });
 
+test('a waiver after an early-stopped gate runs the gate again [C7,V4]', async (t) => {
+  for (const mode of ['early green', 'early red', 'unaccounted', 'complete']) await t.test(`${mode} keeps the exact landing proof [C7,V4]`, () => {
+    const box = landProject();
+    const gate = join(box.dir, 'land-gate.cjs');
+    writeFileSync(gate, [
+      "const fs = require('node:fs'); const path = require('node:path');",
+      `const calls = ${JSON.stringify(box.calls)}; const trace = ${JSON.stringify(box.trace)};`,
+      "const args = process.argv.slice(2); const alone = args.includes('--alone'); fs.appendFileSync(calls, JSON.stringify(args) + '\\n');",
+      "const files = alone ? args.filter(arg => arg !== '--alone') : fs.readdirSync('web').filter(name => /^land-\\d+\\.test\\.js$/.test(name)).map(name => 'web/' + name);",
+      "console.log('TAP version 13'); let count = 0; let failed = 0;",
+      "for (const file of files) { const text = fs.readFileSync(file, 'utf8'); count++; fs.appendFileSync(trace, JSON.stringify({ alone, file }) + '\\n');",
+      "  const red = !alone && process.env.LAND_SUPPRESS_RED !== '1' && text.includes('FLAKE');",
+      "  console.log((red ? 'not ok ' : 'ok ') + count + ' - ' + file + ' keeps the landed behavior');",
+      "  if (red) { failed++; console.log('  ---\\n  location: ' + path.resolve(file) + ':1:1\\n  error: fixture failure\\n  ...');",
+      "    if (process.env.LAND_EARLY_STOP === '1') { console.error('Landing gate stopped early after ' + file + ': fixture failure'); console.error('Files not run: ' + files.slice(count).join(', ')); break; } }",
+      "}",
+      "if (process.env.LAND_UNACCOUNTED === '1' && failed) process.exit(1);",
+      "console.log('1..' + count); console.log('# tests ' + count); console.log('# pass ' + (count - failed)); console.log('# fail ' + failed); process.exitCode = failed ? 1 : 0;",
+    ].join('\n'));
+    const entries = verifiedFour(box, { flaky: 0 });
+    if (mode.startsWith('early')) box.env.LAND_EARLY_STOP = '1';
+    if (mode === 'unaccounted') box.env.LAND_UNACCOUNTED = '1';
+    const base = box.git(box.repo, 'rev-parse', 'HEAD');
+    const held = json(box, box.repo, 'land');
+    assert.equal(held.batch.state, 'flaky');
+    assert.deepEqual(held.landed, []);
+    const before = calls(box).length;
+    const initial = readFileSync(held.batch.logPath, 'utf8');
+    if (mode.startsWith('early')) {
+      assert.match(initial, /Landing gate stopped early/u);
+      assert.ok(initial.includes(`Files not run: ${FILES.slice(1).join(', ')}`));
+      assert.doesNotMatch(initial, /ok 2 -/u, 'later files actually did not run');
+    } else {
+      assert.doesNotMatch(initial, /stopped early|Files not run/u);
+      if (mode === 'unaccounted') assert.doesNotMatch(initial, /^# fail /mu, 'the interrupted account has no positive completion footer');
+    }
+    json(box, box.repo, 'land', '--waive', FILES[0], '--until', '2099-01-01', '--reason', 'private first failure exception');
+    delete box.env.LAND_EARLY_STOP;
+    delete box.env.LAND_UNACCOUNTED;
+    if (mode === 'early green' || mode === 'unaccounted') box.env.LAND_SUPPRESS_RED = '1';
+    const result = json(box, box.repo, 'land');
+    if (mode === 'complete') {
+      assert.equal(calls(box).length, before, 'a complete recorded gate is reused after its waiver');
+      assert.deepEqual(result.landed, entries.map(entry => entry.item));
+    } else {
+      assert.deepEqual(calls(box).slice(before), [[]], 'exactly one fresh full gate runs after the waiver');
+      const rerun = readFileSync(result.batch.logPath, 'utf8');
+      assert.match(rerun, /ok 4 - web\/land-4/u, 'the fresh run reaches the previously untouched final file');
+      assert.doesNotMatch(rerun, /stopped early|Files not run/u);
+      if (mode === 'early green' || mode === 'unaccounted') {
+        assert.match(rerun, /# fail 0/u);
+        assert.deepEqual(result.landed, entries.map(entry => entry.item));
+        assert.equal(box.git(box.remote, 'rev-parse', 'main'), result.batch.tip);
+      } else {
+        assert.match(rerun, /# fail 1/u);
+        assert.deepEqual(result.landed, [], 'a fresh red gate cannot borrow the earlier waived partial proof');
+        assert.equal(box.git(box.repo, 'rev-parse', 'HEAD'), base);
+        assert.equal(box.git(box.remote, 'rev-parse', 'main'), base);
+      }
+    }
+  });
+});
+
 test('land stops again with an expired waiver, and a changed test on main releases the held batch [B3,R3]', () => {
   const box = landProject();
   box.env.LAND_SUPPRESS_RED = '1';
