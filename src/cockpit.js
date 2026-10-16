@@ -916,9 +916,10 @@ function flowSvg(p) {
 
 /** Read or move through API v1, retaining the rule and repair guidance in a refusal. */
 async function api(path, body) {
+  path = snapshot ? path.split('?')[0].slice(1) + '.json' : path;
   if (snapshot) {
     if (body !== undefined && body !== null) throw new Error('This is a read-only snapshot.');
-    const res = await fetch(path.split('?')[0].slice(1) + '.json');
+    const res = await fetch(path);
     const json = await res.json();
     if (!res.ok) throw new Error(json.error || res.status);
     return json;
