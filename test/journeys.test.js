@@ -139,7 +139,33 @@ async function routeJourneyOrigins(chrome, site, view) {
       const { requestId, request: asked } = message.params;
       const address = new URL(asked.url);
       if (address.origin === JOURNEY_HOSTED && address.pathname.startsWith('/api/')) {
-        await chrome.send('Fetch.continueRequest', { requestId, url: site.base + address.pathname + address.search });
+        const accept = Object.entries(asked.headers).find(([name]) => name.toLowerCase() === 'accept')?.[1] || '';
+        const liveStream = address.pathname.endsWith('/events') || String(accept).includes('text/event-stream');
+        if (liveStream) {
+          const headers = Object.entries(asked.headers)
+            .filter(([name]) => !['host', 'content-length'].includes(name.toLowerCase()))
+            .map(([name, value]) => ({ name, value }));
+          await chrome.send('Fetch.continueRequest', {
+            requestId, url: site.base + address.pathname + address.search, headers,
+          });
+          return;
+        }
+        const headers = Object.fromEntries(Object.entries(asked.headers)
+          .filter(([name]) => !['host', 'content-length'].includes(name.toLowerCase())));
+        const response = await fetchLive(site.base + address.pathname + address.search, {
+          method: asked.method, headers, redirect: 'manual',
+          ...(asked.postData === undefined ? {} : { body: asked.postData }),
+          signal: AbortSignal.timeout(10_000),
+        });
+        const body = Buffer.from(await response.arrayBuffer());
+        await chrome.send('Fetch.fulfillRequest', {
+          requestId,
+          responseCode: response.status,
+          responseHeaders: [...response.headers]
+            .filter(([name]) => !['content-length', 'connection', 'transfer-encoding', 'keep-alive', 'date'].includes(name.toLowerCase()))
+            .map(([name, value]) => ({ name, value })),
+          body: body.toString('base64'),
+        });
         return;
       }
       if (address.origin === JOURNEY_LOCAL) {
