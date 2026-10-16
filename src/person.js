@@ -35,3 +35,14 @@ export function requirePersonChannel(channel = 'terminal', environment = process
   }
   return channel;
 }
+
+/** Permit only relay-on's SSH device flow for a person; agent terminals stay refused. */
+export function requireRelayOnChannel(channel = 'terminal', environment = process.env) {
+  if (!['terminal', 'view'].includes(channel)) {
+    throw new Refused('B26_PERSON_CHANNEL', 'person actions use the terminal or the view; run pullboard view, the person’s channel');
+  }
+  if (channel === 'terminal' && AGENT_SHELL_MARKERS.some((name) => Boolean(environment[name]))) {
+    throw new Refused('B26_PERSON_CHANNEL', 'this terminal belongs to an agent; run pullboard view, the person’s channel, and let the person act there');
+  }
+  return channel;
+}

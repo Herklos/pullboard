@@ -4,6 +4,25 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.8.27] - 2026-10-16
+
+### A faster gate, and 0.8.26 reaches npm
+
+0.8.26 was tagged but never reached npm (its publish check refused a Node 22.13 test failure, fixed here). Everything in [0.8.26](https://github.com/pullboard-dev/pullboard/releases/tag/v0.8.26) ships in this release too.
+
+### Added
+
+- `"submitGate": "landing"` in `pullboard.json`: `pullboard submit` runs the item's check and the tests for the files you changed, and the whole suite runs once, at `pullboard gate --landing`. Off unless you set it.
+- `pullboard settings browserSlots <n>` runs up to that many real-browser test runs at once (default 1, at most `gateSlots`).
+- The machine setting `gate.browserFreeChecks`: a check Pullboard can prove needs no browser skips the browser queue. Off unless you set it.
+- `pullboard relay on` works from an SSH shell; you confirm the link in your browser.
+
+### Fixed
+
+- `pullboard view --project` keeps the local server to that project too: no page or API answer names another project.
+- Opening an item's detail after a cache miss starts no git process.
+- For contributors: the landing gate's early stop works on Node 22.13, and the one-project view test waits for its project before reading the page.
+
 ## [0.8.26] - 2026-10-15
 
 ### One-project views, and linking you can cancel

@@ -4,8 +4,10 @@
  * refreshing itself. Reads and actions use the shared local API v1 handler (A3); actions run the
  * real CLI in the project, so every rule and refusal applies exactly as at a terminal.
  *
- * It listens on the loopback address only and answers nothing without the session's secret and its
- * own Host, so another site in the browser cannot reach it. It opens no outbound connection (P5).
+ * It listens on the loopback address only and answers nothing without its own Host, and no board without the
+ * session's secret, so another site in the browser cannot reach it. Besides its own page, it answers one other origin,
+ * the hosted page at https://app.pullboard.dev, which gets the secret by a round trip that only ever returns there.
+ * It opens no outbound connection (P5).
  */
 import { spawnSync } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
@@ -30,6 +32,13 @@ import { loadSpec } from './spec.js';
 /** The page's styles (N26), read once: the page links them, so it needs no inline style. */
 const VIEW_CSS = readFileSync(new URL('./view.css', import.meta.url), 'utf8');
 export const LOOPBACK = '127.0.0.1';
+/**
+ * The hosted page's origin (N26, A2): the one origin besides the view's own page that may call the view, and the only
+ * place the view's round trip ever sends its secret.
+ */
+export const HOSTED_ORIGIN = 'https://app.pullboard.dev';
+/** The request headers the hosted page may send across origins: the secret, a JSON body's type, and a stream's cursor. */
+const HOSTED_HEADERS = ['x-pullboard-key', 'content-type', 'last-event-id'];
 
 /**
  * Replace only board-recorded filesystem fields in exported API documents. Event details are
@@ -368,19 +377,20 @@ export function codeAt(root, { path, from, to, commit, before = '' }) {
 }
 
 /**
- * Serve the view until stopped.
+ * Serve the view until stopped, optionally giving its API access to only one registered project.
  *
- * @param {{ port?: number, secret?: string }} [options]
+ * @param {{ port?: number, secret?: string, projectRoot?: string }} [options]
  * @returns {Promise<{ url: string, port: number, close: () => Promise<void> }>}
  */
-export async function serveView({ port = 0, secret = randomBytes(18).toString('base64url') } = {}) {
+export async function serveView({ port = 0, secret = randomBytes(18).toString('base64url'), projectRoot } = {}) {
   const key = Buffer.from(secret);
   let bound = 0;
   // The API reads projectState and codeAt from this module. Load its factory after our exports
   // initialize, and use the real CLI entry point without adding a second move implementation.
   const { createLocalApiHandler } = await import('./api.js');
   const { main } = await import('./cli.js');
-  const apiHandler = createLocalApiHandler({ secret, getPort: () => bound, runCommand: main });
+  const apiHandler = createLocalApiHandler({ secret, getPort: () => bound, runCommand: main,
+    allowedOrigins: [HOSTED_ORIGIN], ...(projectRoot === undefined ? {} : { scope: { projectRoot } }) });
   const reply = (res, code, type, body) => {
     res.writeHead(code, {
       'content-type': type,
@@ -392,6 +402,11 @@ export async function serveView({ port = 0, secret = randomBytes(18).toString('b
     res.end(body);
   };
   const json = (res, code, value) => reply(res, code, 'application/json; charset=utf-8', JSON.stringify(value));
+  // A page that only sends the browser on, and only when it is the top page: framed, it never runs and never shows.
+  const onward = (res, destination) => {
+    res.setHeader('x-frame-options', 'DENY');
+    return reply(res, 200, 'text/html; charset=utf-8', '<!doctype html><meta charset="utf-8"><title>Opening Pullboard</title><script>if (window.top === window.self) location.replace(' + JSON.stringify(destination).replace(/</g, '\\u003c') + ');</script>');
+  };
   const server = createServer(async (req, res) => {
     // A request line no URL parser accepts cannot carry the secret, so it gets the same 403, and it
     // must not be able to stop the server.
@@ -401,10 +416,53 @@ export async function serveView({ port = 0, secret = randomBytes(18).toString('b
     } catch {
       return json(res, 403, { error: 'this view needs its own address and secret: open the link pullboard view printed' });
     }
-    if (url.pathname.startsWith('/api/')) return apiHandler(req, res);
-    const given = Buffer.from(String(req.headers['x-pullboard-key'] ?? url.searchParams.get('k') ?? ''));
+    // Only the view's own address reaches it: a site that points a name of its own at 127.0.0.1 sends that name. The
+    // API refuses another Host in its own words.
     const isOwnHost = req.headers.host === `${LOOPBACK}:${bound}` || req.headers.host === `localhost:${bound}`;
-    if (!isOwnHost || given.length !== key.length || !timingSafeEqual(given, key)) return json(res, 403, { error: 'this view needs its own address and secret: open the link pullboard view printed' });
+    if (!isOwnHost) {
+      if (url.pathname.startsWith('/api/') && req.method !== 'OPTIONS') return apiHandler(req, res);
+      return json(res, 403, { error: 'this view answers only at 127.0.0.1 or localhost on its own port: open the link pullboard view printed' });
+    }
+    // A browser names the page a request comes from; the view answers its own page and the hosted one, nothing else.
+    const origin = req.headers.origin;
+    const hosted = origin === HOSTED_ORIGIN;
+    if (origin !== undefined && !hosted && origin !== `http://${LOOPBACK}:${bound}` && origin !== `http://localhost:${bound}`) {
+      return json(res, 403, { error: 'this view answers its own page and https://app.pullboard.dev only' });
+    }
+    res.setHeader('vary', 'Origin');
+    if (hosted) res.setHeader('access-control-allow-origin', HOSTED_ORIGIN);
+    if (req.method === 'OPTIONS') {
+      const asked = String(req.headers['access-control-request-headers'] ?? '').toLowerCase().split(',').map((name) => name.trim()).filter(Boolean);
+      const route = url.pathname.startsWith('/api/') || url.pathname === '/local/protocol';
+      if (!hosted || !route || !['GET', 'POST'].includes(req.headers['access-control-request-method']) || asked.some((name) => !HOSTED_HEADERS.includes(name))) {
+        return json(res, 403, { error: 'from https://app.pullboard.dev, ask for a GET or a JSON POST to /api/, sending only x-pullboard-key, content-type and last-event-id' });
+      }
+      res.setHeader('access-control-allow-methods', 'GET, POST');
+      res.setHeader('access-control-allow-headers', HOSTED_HEADERS.join(', '));
+      res.setHeader('access-control-allow-private-network', 'true');
+      res.setHeader('access-control-max-age', '600');
+      return reply(res, 204, 'text/plain; charset=utf-8', '');
+    }
+    // The round trip (N26): any page may send the browser here, and the secret goes back to the hosted page only, in
+    // the address's fragment, which no request carries. /local/view opens this view itself, as its printed link does.
+    // Each is a page of its own: a script's read or a frame gets nothing.
+    if (req.method === 'GET' && (url.pathname === '/local/connect' || url.pathname === '/local/view')) {
+      const destination = req.headers['sec-fetch-dest'];
+      if (origin !== undefined || (destination !== undefined && destination !== 'document')) return json(res, 403, { error: 'open this address as a page of its own, never from a script or inside a frame' });
+      if (url.pathname === '/local/view') return onward(res, `http://${LOOPBACK}:${bound}/?k=${secret}`);
+      return onward(res, HOSTED_ORIGIN + '/#' + new URLSearchParams({ 'pullboard-local': JSON.stringify({ version: 1, origin: `http://${LOOPBACK}:${bound}`, key: secret }) }));
+    }
+    // What the hosted page needs to know this view can take it: no secret, and no board data.
+    if (req.method === 'GET' && url.pathname === '/local/protocol') return json(res, 200, { version: 1, apiVersion: 1, hostedOrigin: HOSTED_ORIGIN, connect: '/local/connect', view: '/local/view' });
+    if (url.pathname.startsWith('/api/')) {
+      // The hosted page sends the secret in its header only, never in an address a history or a log could keep.
+      if (hosted && (url.searchParams.has('k') || req.headers.authorization !== undefined || req.headers['x-pullboard-key'] === undefined)) {
+        return json(res, 403, { error: 'from https://app.pullboard.dev, send the session secret in the x-pullboard-key header only' });
+      }
+      return apiHandler(req, res);
+    }
+    const given = Buffer.from(String(req.headers['x-pullboard-key'] ?? url.searchParams.get('k') ?? ''));
+    if (given.length !== key.length || !timingSafeEqual(given, key)) return json(res, 403, { error: 'this view needs its own address and secret: open the link pullboard view printed' });
     try {
       // The board, and the Roadmap at its own address (N38), are the one page.
       if (req.method === 'GET' && (url.pathname === '/' || /^\/(?:[^/]+\/)?(?:items|shouts|spec|doctrine|activity|roadmap)(?:\/[^/]+)?$/.test(url.pathname))) return reply(res, 200, 'text/html; charset=utf-8', cockpitPage(secret, { paths: true }));
@@ -431,7 +489,7 @@ export async function serveView({ port = 0, secret = randomBytes(18).toString('b
       server.listen(port, LOOPBACK, () => {
         server.off('error', failed);
         bound = /** @type {any} */ (server.address()).port;
-        if (asked === 0) rememberPort(bound);
+        if (asked === 0 && projectRoot === undefined) rememberPort(bound);
         ready({
           url: `http://${LOOPBACK}:${bound}/?k=${secret}`,
           port: bound,
