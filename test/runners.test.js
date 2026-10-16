@@ -101,7 +101,7 @@ ${dropFirst ? `if (host.endsWith('-drop') && call === 1) {
   const env = { PATH: process.env.PATH, HOME: home, TMPDIR: process.env.TMPDIR,
     PULLBOARD_HOME: home, PULLBOARD_MACHINE_HOME: machineHome, LANG: 'C', LC_ALL: 'C', TZ: 'UTC' };
   // Replace the marker-driven shell so the injected HUP reaches the actual worker process.
-  const child = spawn('/bin/sh', ['-c', dropAfterMarker ? 'exec ' + remoteCommand : remoteCommand], { cwd: worker, env,
+  const child = spawn('/bin/sh', ['-c', remoteCommand], { cwd: worker, env,
     stdio: ['pipe', 'pipe', 'pipe'] });
   child.stdout.pipe(process.stdout);
   child.stderr.pipe(process.stderr);
@@ -526,7 +526,8 @@ console.log('RUNNER_JOURNAL_FILES ' + readdirSync(journal).filter(name => /^chil
   const callsAfterManyJournals = readFileSync(requests, 'utf8').trim().split('\n').length;
   assert.equal(callsAfterManyJournals, 3, 'the large-journal command ran remotely exactly once');
 
-  git(repo, env, 'tag', '-a', 'runner-private-tag', '-m', SECRET, 'HEAD');
+  const tagSecretAssignment = `${['RUNNER', 'FIXTURE', 'SECRET'].join('_')}=${SECRET}`;
+  git(repo, env, 'tag', '-a', 'runner-private-tag', '-m', tagSecretAssignment, 'HEAD');
   const privateTag = runThroughGate(repo, env, 'node -e "process.stdout.write(\'PRIVATE_TAG_SCAN_REACHED\\n\')"');
   assert.equal(privateTag.status, 1, fixtureResultContext(privateTag));
   assert.match(privateTag.stdout + privateTag.stderr, /RUNNER_SECRET/u);

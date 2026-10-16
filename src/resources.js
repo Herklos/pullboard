@@ -208,7 +208,8 @@ function waiterPosition(db, name, ticket, { eligibleOnly = false } = {}) {
   const queueName = name === 'browser' ? 'gate' : name;
   const waiters = db.prepare('SELECT ticket, pid, agent, repo, landing, item_check AS itemCheck, browser FROM waiter WHERE name = ? ORDER BY ticket').all(queueName);
   const holders = db.prepare('SELECT pid, agent, repo FROM holder WHERE name = ?').all(queueName);
-  const browserBusy = db.prepare("SELECT COUNT(*) AS count FROM holder WHERE name = 'gate' AND browser = 1").get().count > 0;
+  const browserCapacity = db.prepare("SELECT capacity FROM resource WHERE name = 'browser'").get()?.capacity ?? 1;
+  const browserBusy = db.prepare("SELECT COUNT(*) AS count FROM holder WHERE name = 'gate' AND browser = 1").get().count >= browserCapacity;
   /** A live process owns its leases even if it changes descriptive agent or repository labels. */
   const holdsSlot = (waiter) => holders.some((holder) => holder.pid === waiter.pid);
   /** Leave a waiting independent landing a slot before a holder takes another lease. */
@@ -252,6 +253,7 @@ function gateAdmission(db, ticket, capacity, runners) {
   const holders = db.prepare("SELECT pid, landing, browser FROM holder WHERE name = 'gate'").all();
   const localUsed = holders.length;
   const localBrowsers = holders.filter(holder => holder.browser === 1).length;
+  const browserCapacity = db.prepare("SELECT capacity FROM resource WHERE name = 'browser'").get()?.capacity ?? 1;
   const usage = new Map(runners.map(runner => {
     // The reserved namespace is authoritative even for an older generic holder that
     // predates the name guard and has no runner column value.
@@ -268,7 +270,7 @@ function gateAdmission(db, ticket, capacity, runners) {
   /** Find a currently free compatible slot without reserving it for later queue entries. */
   function available(waiter) {
     if (blockedByLanding(waiter)) return null;
-    if (localUsed < capacity && (waiter.browser !== 1 || localBrowsers < 1)) {
+    if (localUsed < capacity && (waiter.browser !== 1 || localBrowsers < browserCapacity)) {
       return { host: '', slots: capacity, browser: waiter.browser === 1 ? 1 : 0 };
     }
     if (waiter.remote === 1) {
@@ -341,7 +343,7 @@ function pause(ms) { return new Promise((resolvePromise) => setTimeout(resolvePr
 /**
  * Join the landing-first queue; every other kind keeps its original FIFO ticket.
  *
- * @param {{ name: string, capacity: number, capacityProvider?: () => number, scope?: 'machine'|'repo'|'board', root?: string, agent?: string, repo?: string, landing?: boolean, itemCheck?: boolean, diagnostic?: boolean, browser?: boolean, remote?: boolean, runnerProvider?: () => Array<{host:string,slots:number,browser:number}>, item?: string, kind?: string, onWait?: (state: object) => void, allowIdleCapacityUpdate?: boolean, _resume?: object }} options - Resource identity, queue class and optional remote executor pool.
+ * @param {{ name: string, capacity: number, capacityProvider?: () => number, browserCapacityProvider?: () => number, scope?: 'machine'|'repo'|'board', root?: string, agent?: string, repo?: string, landing?: boolean, itemCheck?: boolean, diagnostic?: boolean, browser?: boolean, remote?: boolean, runnerProvider?: () => Array<{host:string,slots:number,browser:number}>, item?: string, kind?: string, onWait?: (state: object) => void, allowIdleCapacityUpdate?: boolean, _resume?: object }} options - Resource identity, queue class and optional remote executor pool.
  * @returns {Promise<{ name: string, scope: string, token: string, pool: string, browser: boolean, runner?: {host:string,slots:number,browser:number}, waitMs: number, release: () => void, renew: () => void, requeueRunner?: () => Promise<object> }>}
  */
 export async function takeResource(options) {
@@ -396,10 +398,20 @@ export async function takeResource(options) {
         db.prepare('UPDATE resource SET capacity = ? WHERE name = ?').run(currentCapacity, name);
       }
       db.prepare('INSERT INTO resource(name, capacity) VALUES (?, ?) ON CONFLICT(name) DO NOTHING').run(name, currentCapacity);
-      if (browser) {
+      if (name === 'gate' && scope === 'machine' && browser) {
+        const browserCapacity = options.browserCapacityProvider?.() ?? 1;
+        if (!Number.isSafeInteger(browserCapacity) || browserCapacity < 1 || browserCapacity > currentCapacity) {
+          throw new Refused('BAD_BROWSER_SLOTS', `browser capacity must be a positive integer no greater than gate capacity (${currentCapacity}); run pullboard settings browserSlots <n>`);
+        }
         const browserResource = db.prepare("SELECT capacity FROM resource WHERE name = 'browser'").get();
-        if (browserResource && browserResource.capacity !== 1) throw new Refused('RESOURCE_CAPACITY_MISMATCH', 'resource "browser" has fixed capacity 1');
-        db.prepare("INSERT INTO resource(name, capacity) VALUES ('browser', 1) ON CONFLICT(name) DO NOTHING").run();
+        if (browserResource && browserResource.capacity !== browserCapacity) {
+          const state = snapshot(db, 'browser');
+          if (!allowIdleCapacityUpdate || state.holders.length || state.line.length) {
+            throw new Refused('RESOURCE_CAPACITY_MISMATCH', `resource "browser" already has capacity ${browserResource.capacity}`);
+          }
+          db.prepare("UPDATE resource SET capacity = ? WHERE name = 'browser'").run(browserCapacity);
+        }
+        db.prepare("INSERT INTO resource(name, capacity) VALUES ('browser', ?) ON CONFLICT(name) DO NOTHING").run(browserCapacity);
       }
       if (!resume) {
         // Remote eligibility is metadata on this same ticket, preserving one landing/FIFO queue.
@@ -552,13 +564,12 @@ export function setResourceCapacity({ name, capacity, scope = 'machine', root = 
   if (typeof name !== 'string' || !name.trim() || name.trim() !== name) throw new Refused('BAD_RESOURCE_NAME', 'resource name must be nonempty trimmed text');
   if (name.startsWith('runner:')) throw new Refused('RESERVED_RUNNER_RESOURCE', 'runner resource rows are managed by the machine gate; use runner settings');
   if (!Number.isSafeInteger(capacity) || capacity < 1) throw new Refused('BAD_RESOURCE_CAPACITY', 'resource capacity must be a positive integer');
-  if (name === 'browser' && capacity !== 1) throw new Refused('BAD_RESOURCE_CAPACITY', 'browser resource capacity is fixed at 1');
   const db = open(databaseFile(scope, root));
   try {
     return update(db, () => {
       const state = snapshot(db, name);
       if (state.holders.length || state.line.length) {
-        throw new Refused('RESOURCE_BUSY', `resource "${name}" has ${state.holders.length} holder(s) and ${state.line.length} waiter(s); wait for it to become idle, then retry pullboard settings gateSlots ${capacity}`);
+        throw new Refused('RESOURCE_BUSY', `resource "${name}" has ${state.holders.length} holder(s) and ${state.line.length} waiter(s); wait for it to become idle, then retry pullboard settings ${name === 'browser' ? 'browserSlots' : 'gateSlots'} ${capacity}`);
       }
       persist();
       db.prepare('INSERT INTO resource(name, capacity) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET capacity = excluded.capacity').run(name, capacity);

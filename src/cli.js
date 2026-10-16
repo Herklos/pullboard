@@ -78,7 +78,7 @@ import { flowLines, flowAlertLine } from './stats-flow.js';
 import { releaseHeadlinesBetween } from './changelog.js';
 import { exportBoard, importBoard } from './exchange.js';
 import { addSigner, assertRequiredSigners, defaultPrincipal, hasSignerFile } from './signature.js';
-import { addRunner, loadMachineSettings, setGateSlots } from './settings.js';
+import { addRunner, loadMachineSettings, setBrowserSlots, setGateSlots } from './settings.js';
 import { formatSnapshotLimit, pendingSnapshotSize, pendingCheckpointProblem, relayCommandReceipt, relayCommandReceiptReported, relayLinked, relayOff, relayOn, relayOperation, relayRecover, relayRecovered, relayRevoke, relayStatus, relayTokens, syncRelay } from './relay.js';
 import { autoLinkProject, relayOnAll, revokeRelayDevice, unlinkedRelayProjects } from './relay-setup.js';
 import { readRelayMachine } from './relay-machine.js';
@@ -1816,12 +1816,14 @@ function readCommands(io, { first, second, rest, values }) {
     resources: () => {
       const ctx = context(io);
       const agents = withBoard(ctx, (board) => store.listAgents(board));
+      const browserSlots = loadMachineSettings().browserSlots;
       const resources = [
         ...listResources({ scope: 'machine' }).map((resource) => ({ ...resource, scope: 'machine' })),
         ...listResources({ scope: 'repo', root: ctx.info.root }).map((resource) => ({ ...resource, scope: 'repo' })),
       ];
       const runners = runnerResourceStatus(loadMachineSettings().runners ?? []);
-      io.result?.({ resources, runners });
+      io.result?.({ resources, runners, browserSlots });
+      io.say(`browserSlots (machine setting): ${browserSlots}`);
       if (!resources.length) io.say('no resources have been used');
       for (const resource of resources) {
         io.say(`${resource.name} (${resource.scope}, capacity ${resource.capacity})`);
@@ -2862,14 +2864,19 @@ function settingsCommand(io, { first, second, rest }) {
     const settings = loadMachineSettings();
     io.result?.({ settings });
     io.say(`gateSlots: ${settings.gateSlots}`);
+    io.say(`browserSlots: ${settings.browserSlots}`);
     return 0;
   }
-  if (first !== 'gateSlots' || !second || rest.length || !/^[1-9]\d*$/u.test(second) || !Number.isSafeInteger(Number(second))) {
-    throw new Refused('USAGE', 'pullboard settings gateSlots <positive integer>');
+  if (!['gateSlots', 'browserSlots'].includes(first) || !second || rest.length) {
+    throw new Refused('USAGE', 'pullboard settings gateSlots <n> | browserSlots <n>');
   }
-  const settings = setGateSlots(Number(second));
+  if (!/^[1-9]\d*$/u.test(second) || !Number.isSafeInteger(Number(second))) {
+    if (first === 'gateSlots') throw new Refused('USAGE', 'pullboard settings gateSlots <positive integer>');
+    throw new Refused(first === 'browserSlots' ? 'BAD_BROWSER_SLOTS' : 'BAD_GATE_SLOTS', `${first} must be a positive integer; run pullboard settings ${first} <n>`);
+  }
+  const settings = first === 'browserSlots' ? setBrowserSlots(Number(second)) : setGateSlots(Number(second));
   io.result?.({ settings });
-  io.say(`gateSlots set to ${settings.gateSlots}`);
+  io.say(`${first} set to ${settings[first]}`);
   return 0;
 }
 
