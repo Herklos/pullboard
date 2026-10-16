@@ -775,7 +775,6 @@ async function drainLandingWorkerDescendants(ownedDescendants, refreshOwnedDesce
   if (firstError) throw new Error(`owned descendants drained after cleanup error: ${firstError.message}`, { cause: firstError });
 }
 
-/** Run a landing check with execution-ordered failure detection and native runner reporters. */
 /**
  * Read the live person waivers Pullboard projects into a landing run, as `{kind, test}` pairs.
  * The projection only decides whether the run keeps going past a failure; whether the run is
@@ -795,6 +794,7 @@ function landingFailureWaived(waivers, file, name) {
   return waivers.some(waiver => waiver.kind === 'file' ? waiver.test === path : waiver.test === name);
 }
 
+/** Run a landing check with execution-ordered failure detection and native runner reporters. */
 async function runLandingTests(args, env, concurrency) {
   const waivers = landingWaiverProjection(process.env[LANDING_WAIVERS_ENV]);
   const waivedFiles = new Map();
@@ -1050,7 +1050,8 @@ async function runLandingTests(args, env, concurrency) {
       setup(tests) {
         tests.on('test:complete', data => {
           const { file, name, details } = data;
-          if (file && details?.type === 'test' && details.passed === false && !firstFailure) {
+          // Node 22.13 leaves ordinary/file completions untyped; newer versions label them as tests.
+          if (file && details?.passed === false && (details.type === undefined || details.type === 'test') && !firstFailure) {
             // A failure a live person waiver covers does not stop the run; every other file still runs.
             if (landingFailureWaived(waivers, file, name)) { waivedFiles.set(file, waivedFiles.get(file) ?? true); return; }
             waivedFiles.set(file, false);

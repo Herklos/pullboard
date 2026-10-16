@@ -1179,10 +1179,13 @@ export function release(board, id, agentId, note = '') {
  *
  * @param {any} board
  * @param {number} id
- * @param {{ agentId: string, commit: string, tree: string, files?: string[], policyCommit?: string }} at - `files`: what the
+ * @param {{ agentId: string, commit: string, tree: string, files?: string[], policyCommit?: string, note?: string }} at - `files`: what the
  *   item's own commits changed since its claim; a rework adds to what the first attempt changed.
  */
-export function submit(board, id, { agentId, commit, tree, files = [], policyCommit = null }) {
+export function submit(board, id, { agentId, commit, tree, files = [], policyCommit = null, note }) {
+  if (note !== undefined && (typeof note !== 'string' || !note.trim() || /[\r\n\u2028\u2029]/u.test(note))) {
+    throw new Refused('USAGE', 'a submission note, when present, is one nonempty line');
+  }
   atomic(board, () => {
     const notYours = () => new Refused('NOT_YOURS', `item #${id} is not claimed by you; claim it first`);
     moveItem(board, id, 'submit', {
@@ -1237,6 +1240,7 @@ export function submit(board, id, { agentId, commit, tree, files = [], policyCom
       tree,
       ...(policyCommit ? { policyCommit } : {}),
       ...(criterionDigest ? { criterionDigest } : {}),
+      ...(note === undefined ? {} : { note: note.trim() }),
     });
   });
 }

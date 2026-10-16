@@ -13,7 +13,7 @@ import { gitChildEnv, gitPath, headTree, invalidateGitFacts, isClean, untracked 
 import { secretsIn } from './hooks.js';
 import { Refused } from './refused.js';
 import { GATE_SLOT_HELD_ENV, gateSlotEnvironment, inheritedGateSlot, takeResource } from './resources.js';
-import { loadMachineSettings } from './settings.js';
+import { browserFreeChecksEnabled, loadMachineSettings } from './settings.js';
 import { selectAffectedTests } from './affected-tests.js';
 import { checkNeedsBrowser, testsNeedBrowser } from './browser-admission.js';
 import { timingFromOutput, timingRunner } from './timing.js';
@@ -370,11 +370,13 @@ export async function withGateSlot(root, action, { landing = false, itemCheck = 
     try { return await action(inherited); }
     finally { inherited.release(); }
   }
-  const capacityProvider = () => loadMachineSettings().gateSlots;
+  const settingsProvider = () => loadMachineSettings();
+  const capacityProvider = () => settingsProvider().gateSlots;
   const lease = await takeResource({
     name: 'gate',
     capacity: capacityProvider(),
     capacityProvider,
+    browserCapacityProvider: () => settingsProvider().browserSlots,
     scope: 'machine',
     root,
     repo: root,
@@ -448,7 +450,12 @@ export async function runSubmitGate(root, config, { base, trunk, changed, check,
   const selection = config.affectedTests
     ? selectAffectedTests(root, { base, trunk, changed })
     : { full: true, reason: 'affected-test selection is not enabled for this project', files: [] };
-  const browser = (check ? await checkNeedsBrowser(root, check, { onFallback: onBrowserFallback }) : false) || selection.full || await testsNeedBrowser(root, selection.files, { onFallback: onBrowserFallback });
+  const deferred = config.submitGate === 'landing';
+  const deferFullFallback = deferred && selection.full;
+  const allowBrowserFreeChecks = browserFreeChecksEnabled();
+  const checkUsesBrowser = check ? (!allowBrowserFreeChecks || await checkNeedsBrowser(root, check, { onFallback: onBrowserFallback })) : false;
+  const proofUsesBrowser = !deferFullFallback && (selection.full || !allowBrowserFreeChecks || await testsNeedBrowser(root, selection.files, { onFallback: onBrowserFallback }));
+  const browser = checkUsesBrowser || proofUsesBrowser;
   return await withGateSlot(root, (lease) => {
     const startedAt = Date.now();
     const log = gitPath(root, 'pullboard-submit.log');
@@ -471,7 +478,7 @@ export async function runSubmitGate(root, config, { base, trunk, changed, check,
         format: [...new Set(profiles.map(value => value.format))].join('+'),
         unavailable: profiles.some(value => value.unavailable) ? 'per-test timing unavailable: output was not TAP or JUnit (one or more phases)' : null,
       });
-      return { ...proof, log, seconds: criterion.seconds + proof.seconds, ...selection, check: receipt,
+      return { ...proof, log, seconds: criterion.seconds + proof.seconds, ...selection, deferred, deferFullFallback, check: receipt,
         profile, profilePath, proofProfilePath: proof.profilePath, proofLog: proof.log };
     };
     if (!criterion.isGreen) {
@@ -482,14 +489,16 @@ export async function runSubmitGate(root, config, { base, trunk, changed, check,
     const proofWait = check ? 0 : lease.waitMs;
     let proof;
     // The proof keeps each stage's status, so a person's waiver can only ever explain named test failures.
-    if (selection.full) proof = fullGateRun(root, config, false, { waitMs: proofWait, log: proofLog, gateLease: lease, stages: true });
+    if (deferFullFallback) proof = { isGreen: true, isCached: false, output: '', seconds: 0, log: '' };
+    else if (selection.full) proof = fullGateRun(root, config, false, { waitMs: proofWait, log: proofLog, gateLease: lease, stages: true });
     else if (!selection.files.length) proof = { isGreen: true, output: '', seconds: 0, isCached: false, log: '' };
     else {
       const command = `${config.affectedTests.trimEnd()} ${selection.files.map(path => commandWord('./' + path)).join(' ')}`;
       proof = { ...runProfiledShell(root, command, { waitMs: proofWait, profileFile: `${proofLog}.profile.json`, gateLease: lease, stages: true }), isCached: false, log: proofLog };
       writeFileSync(proofLog, proof.output);
     }
-    writeFileSync(log, `item check:\n${criterion.output}\n${selection.full ? 'full gate' : 'affected tests'}:\n${proof.output}`);
+    const phase = deferFullFallback ? 'full suite deferred to the landing gate' : selection.full ? 'full gate' : 'affected tests';
+    writeFileSync(log, `item check:\n${criterion.output}\n${phase}:\n${proof.output}`);
     return finish(proof);
   }, { browser, agent, item, kind, itemCheck: true, onWait });
 }
@@ -497,6 +506,16 @@ export async function runSubmitGate(root, config, { base, trunk, changed, check,
 /** Describe precisely which submission proof ran, including absent checks and full fallbacks. */
 export function submitGateReport(gate) {
   const check = gate.check.checked ? `item check ${gate.check.green ? 'green' : 'red'} in ${gate.check.seconds}s` : 'no item check';
+  if (gate.deferred) {
+    const reason = gate.reason ? `: ${gate.reason}` : '';
+    const timings = timingDigest(gate.profile);
+    const detail = timings ? `\n${timings}\ntiming profile: ${gate.profilePath}` : '';
+    const proof = gate.deferFullFallback
+      ? `full suite deferred to the landing gate${reason}`
+      : `affected tests: ${gate.files.length ? gate.files.join(', ') : 'none'}; full suite deferred to the landing gate`;
+    const result = gate.deferFullFallback ? '' : `; ${gate.isGreen ? `affected tests green in ${gate.seconds}s` : gateReport(gate)}`;
+    return `${check}; ${proof}${result}${detail}`;
+  }
   const selection = gate.full ? `full gate: ${gate.reason}` : `affected tests: ${gate.files.length ? gate.files.join(', ') : 'none'}`;
   const timings = timingDigest(gate.profile);
   const detail = timings ? `\n${timings}\ntiming profile: ${gate.profilePath}` : '';
