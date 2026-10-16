@@ -670,6 +670,13 @@ if (process.argv[1] === ${JSON.stringify(fixture.runner)}) {
       writeFileSync(${JSON.stringify(delivered)}, 'delivered');
       return result;
     }
+    // Keep failure reporting, but isolate this regression from the newer file-summary fallback.
+    if (type === 'test:summary' && data?.file === ${JSON.stringify(join(fixture.root, 'test/02-failing.test.js'))}
+      && data.success === false) {
+      const summary = { ...data };
+      delete summary.file;
+      args[0] = summary;
+    }
     return originalEmit.call(this, type, ...args);
   };
 }
