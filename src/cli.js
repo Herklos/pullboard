@@ -247,6 +247,7 @@ const OPTIONS = {
   gate: { type: 'string' },
   aim: { type: 'boolean' },
   section: { type: 'string' },
+  blueprint: { type: 'string' },
   route: { type: 'string' },
   family: { type: 'string' },
   model: { type: 'string' },
@@ -1580,6 +1581,9 @@ function setupCommands(io, { first, values }) {
   return {
     init: async () => {
       const info = repoInfo(io.cwd);
+      // A named blueprint is read and checked before anything is written, so an unknown name
+      // or a broken file leaves the repository untouched (#678).
+      const blueprint = values.blueprint === undefined ? null : readBlueprint(values.blueprint, info.root);
       const model = optionalModel(values.model);
       const linked = relayLinked(info.root);
       const ctx = linked && model !== undefined ? context(io) : null;
