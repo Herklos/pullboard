@@ -307,19 +307,19 @@ test('an agent in its worktree cannot mint a relay token [H2,V1,E3,E5,P6]', asyn
     assert.equal(person.result?.decision, 'ACCEPT', 'the person verifies coordinator-built work');
   });
 
-  await t.test('an engine-11 journal replays as before', (t) => {
-    const directory = mkdtempSync(join(tmpdir(), 'pullboard-mint-engine11-'));
+  for (const engine of [11, 12]) await t.test(`an engine-${engine} journal replays as before`, (t) => {
+    const directory = mkdtempSync(join(tmpdir(), `pullboard-mint-engine${engine}-`));
     t.after(() => rmSync(directory, { recursive: true, force: true }));
     const historical = store.openBoard(':memory:');
     t.after(() => store.closeBoard(historical));
-    historical.executionEngineVersion = 11;
+    historical.executionEngineVersion = engine;
     store.register(historical, { lane: 'coordinator', path: '/repo' });
     const legacyBuilder = store.register(historical, { lane: 'web', path: '/repo-web-1', createdBy: 'machine' });
     const legacyReviewer = store.register(historical, { lane: 'web', path: '/repo-web-2' });
     delete historical.executionEngineVersion;
-    assert.equal(store.agentCreator(historical, legacyBuilder), null, 'engine 11 records no provenance');
+    assert.equal(store.agentCreator(historical, legacyBuilder), null, `engine ${engine} records no provenance`);
     const item = submitted(historical, legacyBuilder, 'web');
-    const recorded = { version: 1, engine: 11, id: 'engine-11-verify', operation: 'verify',
+    const recorded = { version: 1, engine, id: `engine-${engine}-verify`, operation: 'verify',
       args: [item.item_id, { agentId: legacyReviewer, decision: 'ACCEPT', reason: 'CRITERION_MET', note: 'checked', head: 'd'.repeat(40), digest: item.item_frozen_digest }] };
     const boardId = 'e'.repeat(32);
     const path = join(directory, boardId + '.journal.sqlite');
@@ -338,16 +338,16 @@ test('an agent in its worktree cannot mint a relay token [H2,V1,E3,E5,P6]', asyn
     const journal = createRelayJournal({ directory, boardId });
     const [record] = journal.after();
     journal.close();
-    assert.deepEqual(record.sender, { kind: 'agent', userId: '202', agent: legacyReviewer }, 'the old record gains no stamp');
+    assert.deepEqual(record.sender, { kind: 'agent', userId: '202', agent: legacyReviewer }, `the engine-${engine} record gains no stamp`);
     assert.equal(record.registration, undefined);
     assert.deepEqual(JSON.parse(record.bytes.toString('utf8')), recorded, 'its move bytes are unchanged');
     const fresh = store.openBoard(':memory:');
     t.after(() => store.closeBoard(fresh));
-    const stamped = applyRelayMove(fresh, { ...recorded, engine: 11 }, { sequence: 1, at: record.receivedAt, kind: 'move',
+    const stamped = applyRelayMove(fresh, recorded, { sequence: 1, at: record.receivedAt, kind: 'move',
       sender: { ...record.sender, policy: VERIFIER_STANDING_ENGINE } });
     assert.equal(stamped.error?.code, 'ENGINE_VERSION', 'a newly stored record cannot claim an old engine');
     const replayed = applyRelayMove(historical, JSON.parse(record.bytes.toString('utf8')), { sequence: 1, at: record.receivedAt, kind: record.kind, sender: record.sender });
-    assert.equal(replayed.error, undefined, 'the engine-11 verdict replays with its old rules');
+    assert.equal(replayed.error, undefined, `the engine-${engine} verdict replays with its old rules`);
     assert.equal(replayed.result.decision, 'ACCEPT');
   });
 
