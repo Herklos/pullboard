@@ -49,6 +49,7 @@ const NOT_MOVES = {
   BAD_RUNNER: 'machine-wide SSH runner settings checked before remote execution',
   RUNNER_OUTPUT_LIMIT: 'remote execution output is bounded before accepting its result',
   RUNNER_CLEANUP_TIMEOUT: 'remote cleanup must report a bounded failure before returning capacity',
+  RUNNER_SETUP_REFUSED: 'a runner whose own resource pool refuses setup fails the run by name instead of hanging',
   RUNNER_SOURCE_CHANGED: 'remote execution requires the exact admitted committed source',
   RUNNER_SECRET: 'source and command transfer is refused before private content leaves the machine',
   RUNNER_REQUEST_LIMIT: 'remote tooling requests are bounded before transport starts',

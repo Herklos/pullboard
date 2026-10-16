@@ -1094,9 +1094,27 @@ async function runCommand(spec, root, env, sink, tracker) {
 async function receipt(spec, fields, sink) {
   await flushStdout();
   const body = { id: spec.id, commit: spec.commit, tree: spec.tree, code: fields.code, signal: fields.signal,
-    runtimeSha256: spec.runtime.sha256, toolingSha256: spec.tooling.sha256, root: fields.root ?? '', outputSha256: sink.hash.digest('hex'), wallMs: Math.max(0, Date.now() - sink.wallStart) };
+    runtimeSha256: spec.runtime.sha256, toolingSha256: spec.tooling.sha256, root: fields.root ?? '', outputSha256: sink.hash.digest('hex'), wallMs: Math.max(0, Date.now() - sink.wallStart),
+    ...(fields.refused ? { refused: fields.refused } : {}) };
   const encoded = Buffer.from(JSON.stringify(body)).toString('base64');
   await new Promise((resolveWrite, rejectWrite) => process.stderr.write(`${RECEIPT} ${spec.id} ${encoded}\n`, error => error ? rejectWrite(error) : resolveWrite()));
+}
+
+/**
+ * Name the rule when the runner's own resource API refused setup. The code is a fixed identifier,
+ * so it can travel to the controller where paths and runner state cannot.
+ */
+function setupRefusalCode(error) {
+  return error?.name === 'Refused' && /^[A-Z][A-Z0-9_]{0,63}$/u.test(String(error.code ?? '')) ? error.code : '';
+}
+
+/**
+ * End this worker's read of the controller's stream once nothing more will be read from it.
+ * Only the history pack drains stdin to its end; a run that stops before the pack would otherwise
+ * keep the worker, and so the SSH session and the run, alive after its receipt.
+ */
+function stopReading() {
+  process.stdin.destroy();
 }
 
 /** Turn an internal setup failure into a fixed safe line rather than disclosing paths or runner state. */
@@ -1167,9 +1185,10 @@ async function main() {
     await installDependencies(root, runnerRoot, env, tracker);
     final = { ...(await runCommand(spec, root, { ...env, PULLBOARD_LANDING_RUN: spec.landing === true ? '1' : '0' }, sink, tracker)), root };
   } catch (error) {
-    const message = safeSetupMessage(error);
+    const refused = setupRefusalCode(error);
+    const message = refused ? `${safeSetupMessage(error)} [${refused}]` : safeSetupMessage(error);
     if (!transportLost) await sink.write(`${message}\n`);
-    final = { code: 1, signal: transportLost ? 'SIGHUP' : null, error: message, root: '' };
+    final = { code: 1, signal: transportLost ? 'SIGHUP' : null, error: message, root: '', ...(refused ? { refused } : {}) };
   } finally {
     beginCleanup();
     cleanupStage = 'final descendants';
@@ -1189,11 +1208,12 @@ async function main() {
     cleanupStage = 'job files';
     if (runDirectory && !cleanupTimedOut) { try { rmSync(runDirectory, { recursive: true, force: true }); } catch {} }
   }
-  if (transportLost || cleanupTimedOut) { clearTimeout(cleanupTimer); process.exitCode = 1; return; }
+  if (transportLost || cleanupTimedOut) { clearTimeout(cleanupTimer); process.exitCode = 1; stopReading(); return; }
   cleanupStage = 'result receipt';
   await receipt(spec, final, sink);
   clearTimeout(cleanupTimer);
   process.exitCode = 0;
+  stopReading();
 }
 
 main().catch(() => { process.exitCode = 1; });
