@@ -2955,6 +2955,7 @@ function trapFocus(event) {
  */
 async function decideRow(kind, command, args, anchor) {
   if (snapshot || (readOnly && !requests)) return false;
+  const requestMode = requests;
   const root = view.root, scroll = window.scrollY;
   const ids = String(args.ids).split(/\s+/);
   const prefix = kind + ':';
@@ -2965,15 +2966,15 @@ async function decideRow(kind, command, args, anchor) {
   view.specFeedback = feedback;
   render();
   // A waiting request keeps its row; let browser anchoring follow growth above it.
-  if (!requests) window.scrollTo({ top: scroll, behavior: 'instant' });
+  if (!requestMode) window.scrollTo({ top: scroll, behavior: 'instant' });
   try {
     const move = pageMove(command, kind === 'doctrine' ? { ...args, ids: ids.map((id) => 'doctrine:' + id).join(' ') } : args);
-    const result = requests ? await sendPersonRequest(root, move.body) : await api(boardPath(root) + '/moves', move.body);
-    const request = requests && result?.result?.request;
-    if (requests && (!request?.id || !['waiting', 'done', 'refused'].includes(request.status))) throw new Error('The request did not include its status; refresh the board to check it.');
-    feedback.tone = requests ? request.status === 'done' ? 'ok' : request.status === 'refused' ? 'no' : '' : 'ok';
-    feedback.text = requests ? requestNotice(request) : moveMessage(move.body, result.result);
-    if (requests) { feedback.requestId = request.id; feedback.status = request.status; }
+    const result = requestMode ? await sendPersonRequest(root, move.body) : await api(boardPath(root) + '/moves', move.body);
+    const request = requestMode && result?.result?.request;
+    if (requestMode && (!request?.id || !['waiting', 'done', 'refused'].includes(request.status))) throw new Error('The request did not include its status; refresh the board to check it.');
+    feedback.tone = requestMode ? request.status === 'done' ? 'ok' : request.status === 'refused' ? 'no' : '' : 'ok';
+    feedback.text = requestMode ? requestNotice(request) : moveMessage(move.body, result.result);
+    if (requestMode) { feedback.requestId = request.id; feedback.status = request.status; }
     // Decided from the list, the pick moves on to the next row before the board redraws without the decided one, so
     // the next key decides that one.
     if (feedback.from === 'list' && feedback.tone !== 'no' && next && view.row[kind] === ids[0] && root === view.root) view.row[kind] = next;
@@ -2984,7 +2985,7 @@ async function decideRow(kind, command, args, anchor) {
   }
   if (root === view.root && view.specFeedback === feedback) {
     render();
-    if (!requests) window.scrollTo({ top: scroll, behavior: 'instant' });
+    if (!requestMode) window.scrollTo({ top: scroll, behavior: 'instant' });
     // A phone row click jumps to its detail. A later list-key decision returns the next pick to view,
     // instead of restoring that detail's scroll position with the focused list still offscreen.
     if (feedback.from === 'list' && feedback.tone === 'ok' && next && view.row[kind] === next) {
@@ -2993,15 +2994,16 @@ async function decideRow(kind, command, args, anchor) {
       // Center an offscreen pick: nearest can round a half-pixel edge just outside the viewport.
       if (rect && (rect.top < 0 || rect.bottom > innerHeight)) picked.scrollIntoView({ block: 'center', behavior: 'instant' });
     }
-    if (!requests || feedback.status === 'done') setTimeout(() => { if (view.specFeedback === feedback) { view.specFeedback = null; render(); } }, 6000);
+    if (!requestMode || feedback.status === 'done') setTimeout(() => { if (view.specFeedback === feedback) { view.specFeedback = null; render(); } }, 6000);
   }
-  return requests ? Boolean(feedback.requestId) && feedback.status !== 'refused' : feedback.tone === 'ok';
+  return requestMode ? Boolean(feedback.requestId) && feedback.status !== 'refused' : feedback.tone === 'ok';
 }
 
 /** Run a public API move beside its action and let only the latest one own the console and timer. */
 async function act(command, args, anchor) {
   const out = $('console');
   if (snapshot || (readOnly && !requests)) { out.hidden = false; out.className = 'console no'; out.textContent = snapshot ? 'This is a read-only snapshot.' : 'This is a read-only view.'; return false; }
+  const requestMode = requests;
   // A form's result stands above its actions, or above the shout composer's bar, never inside that one row.
   if (anchor) {
     const target = anchor.matches('form')
@@ -3016,28 +3018,28 @@ async function act(command, args, anchor) {
   clearTimeout(view.closing);
   out.hidden = false;
   out.className = 'console';
-  out.textContent = requests ? 'Request waiting…' : 'running…';
+  out.textContent = requestMode ? 'Request waiting…' : 'running…';
   out.scrollIntoView({ block: 'nearest' });
   try {
     // On the local view the person's word to the coordinator is the person's own request, not a shout the
     // coordinator sends itself; through the relay every action is already a sealed request.
-    const asked = command === 'request' && !requests;
+    const asked = command === 'request' && !requestMode;
     const move = asked ? null : pageMove(command === 'request' ? 'shout' : command, command === 'request' ? { to: 'coordinator', text: args.text } : args);
     const result = asked ? await api(boardPath(root) + '/requests', { text: String(args.text || '').trim() })
-      : requests ? await sendPersonRequest(root, move.body) : await api(boardPath(root) + '/moves', move.body);
-    const request = requests && result?.result?.request;
-    if (requests && (!request?.id || !['waiting', 'done', 'refused'].includes(request.status))) throw new Error('The request did not include its status; refresh the board to check it.');
+      : requestMode ? await sendPersonRequest(root, move.body) : await api(boardPath(root) + '/moves', move.body);
+    const request = requestMode && result?.result?.request;
+    if (requestMode && (!request?.id || !['waiting', 'done', 'refused'].includes(request.status))) throw new Error('The request did not include its status; refresh the board to check it.');
     if (latest()) {
-      out.className = 'console' + (requests ? request.status === 'done' ? ' ok' : request.status === 'refused' ? ' no' : '' : ' ok');
-      out.textContent = requests ? requestNotice(request) : asked ? 'Sent to the coordinator.' : '$ pullboard ' + move.label + '\\n' + moveMessage(move.body, result.result);
-      if (requests) view.request = { root, id: request.id, run };
+      out.className = 'console' + (requestMode ? request.status === 'done' ? ' ok' : request.status === 'refused' ? ' no' : '' : ' ok');
+      out.textContent = requestMode ? requestNotice(request) : asked ? 'Sent to the coordinator.' : '$ pullboard ' + move.label + '\\n' + moveMessage(move.body, result.result);
+      if (requestMode) view.request = { root, id: request.id, run };
       out.scrollIntoView({ block: 'center' });
       // What went through says so and then steps aside; a refusal stays until the person closes it.
-      if (!requests || request.status === 'done') view.closing = setTimeout(() => { if (latest()) out.hidden = true; }, 6000);
+      if (!requestMode || request.status === 'done') view.closing = setTimeout(() => { if (latest()) out.hidden = true; }, 6000);
     }
     await refresh();
     // The result was already revealed. A late refresh must not scroll after the person aims at the next action.
-    return !requests || request.status !== 'refused';
+    return !requestMode || request.status !== 'refused';
   } catch (error) {
     if (latest()) {
       out.className = 'console no';
@@ -3340,7 +3342,12 @@ document.addEventListener('keydown', (event) => {
 });
 $('add-form').addEventListener('submit', async (event) => {
   event.preventDefault();
-  if (await act('add', { lane: $('add-lane').value, title: $('add-title').value, criterion: $('add-criterion').value, specs: $('add-specs').value, brief: $('add-brief').value }, event.currentTarget)) {
+  const root = view.root;
+  const submitted = { lane: $('add-lane').value, title: $('add-title').value, criterion: $('add-criterion').value, specs: $('add-specs').value, brief: $('add-brief').value };
+  if (await act('add', submitted, event.currentTarget) && view.root === root
+      && $('add-lane').value === submitted.lane && $('add-title').value === submitted.title
+      && $('add-criterion').value === submitted.criterion && $('add-specs').value === submitted.specs
+      && $('add-brief').value === submitted.brief) {
     $('add-title').value = '';
     $('add-criterion').value = '';
     $('add-specs').value = '';
@@ -3365,7 +3372,10 @@ $('shout-form').addEventListener('submit', async (event) => {
 });
 $('hold-form').addEventListener('submit', async (event) => {
   event.preventDefault();
-  if (await act('hold', { lane: $('hold-lane').value, reason: $('hold-reason').value }, event.currentTarget)) $('hold-reason').value = '';
+  const root = view.root;
+  const submitted = { lane: $('hold-lane').value, reason: $('hold-reason').value };
+  if (await act('hold', submitted, event.currentTarget) && view.root === root
+      && $('hold-lane').value === submitted.lane && $('hold-reason').value === submitted.reason) $('hold-reason').value = '';
 });
 // The first entry keeps the tab it opened on; Back and Forward show what each entry names.
 address(false);

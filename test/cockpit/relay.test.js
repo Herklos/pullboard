@@ -935,6 +935,26 @@ async function journeyRelaySite(box, localOrigin) {
 async function interceptJourneyOrigins(chrome, site, view) {
   const failures = [];
   const tasks = [];
+  const heldResponses = [];
+  const releaseHeldResponses = new Set();
+  const holdNextResponse = (matches) => {
+    let entry;
+    const pending = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const index = heldResponses.indexOf(entry);
+        if (index !== -1) heldResponses.splice(index, 1);
+        reject(new Error('The real API response did not reach the fixture hold within 10 seconds.'));
+      }, 10_000);
+      entry = {
+        matches,
+        resolve(value) { clearTimeout(timer); resolve(value); },
+        cancel() { clearTimeout(timer); reject(new Error('The fixture closed before the held API response arrived.')); },
+      };
+      heldResponses.push(entry);
+    });
+    void pending.catch(() => {});
+    return pending;
+  };
   const listener = ({ data }) => {
     const message = JSON.parse(String(data));
     if (message.method !== 'Fetch.requestPaused') return;
@@ -957,6 +977,17 @@ async function interceptJourneyOrigins(chrome, site, view) {
         await reader.cancel();
         body = Buffer.from(first.value || []);
       } else body = Buffer.from(await response.arrayBuffer());
+      const heldIndex = heldResponses.findIndex((entry) => entry.matches({ method: asked.method, path: address.pathname, status: response.status }));
+      if (heldIndex !== -1) {
+        const [held] = heldResponses.splice(heldIndex, 1);
+        let release;
+        const released = new Promise((resume) => {
+          release = () => { releaseHeldResponses.delete(release); resume(); };
+          releaseHeldResponses.add(release);
+        });
+        held.resolve({ status: response.status, release });
+        await released;
+      }
       await chrome.send('Fetch.fulfillRequest', {
         requestId, responseCode: response.status,
         responseHeaders: [...response.headers].filter(([name]) => !['content-length', 'connection', 'transfer-encoding', 'keep-alive', 'date'].includes(name.toLowerCase())).map(([name, value]) => ({ name, value })),
@@ -966,11 +997,15 @@ async function interceptJourneyOrigins(chrome, site, view) {
   };
   chrome.socket.addEventListener('message', listener);
   await chrome.send('Fetch.enable', { patterns: [{ urlPattern: JOURNEY_HOSTED + '/*', requestStage: 'Request' }, { urlPattern: JOURNEY_LOCAL + '/*', requestStage: 'Request' }, { urlPattern: view.base + '/*', requestStage: 'Request' }] });
-  return async () => {
+  const stop = async () => {
+    for (const held of heldResponses.splice(0)) held.cancel();
+    for (const release of releaseHeldResponses) release();
     chrome.socket.removeEventListener('message', listener);
     try { await Promise.all(tasks); } finally { await chrome.send('Fetch.disable'); }
     assert.deepEqual(failures, [], 'the hosted and loopback fixture requests complete');
   };
+  stop.holdNextResponse = holdNextResponse;
+  return stop;
 }
 
 test('the hosted page lists linked and local boards together [N26,H5]', {
@@ -1003,6 +1038,7 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
   let site;
   let chrome;
   let stopOrigins;
+  const heldMoves = [];
   try {
     localView = await startView(local);
     site = await journeyRelaySite(linked, localView.base);
@@ -1068,8 +1104,49 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
       'C board events use C’s local view despite its paired relay copy');
     assert.equal(localReads.some((entry) => new URL(entry.url).pathname.includes(linkedId)), false,
       'the local view never receives A’s relay board id');
+
+    // Hold only delivery of a real local API response after the write has completed. Switching to a relay board
+    // while it is in flight must not reinterpret the local response as a sealed request or clear that board's form.
+    await press(chrome, localRow);
+    await chrome.waitFor("view.root === data.projects.find(row => row.name === 'local-machine-b').root && !readOnly && !requests");
+    await chrome.stable("window.__priorAct = act; window.__actOutcome = null; act = async (...args) => { const result = await window.__priorAct(...args); window.__actOutcome = result; return result; }; true");
+    await chrome.stable("document.querySelector('#new-item').click(); document.querySelector('#add-title').value = 'held local action'; true");
+    const firstHeld = stopOrigins.holdNextResponse(({ method, path }) => method === 'POST' && path === '/api/v1/boards/' + localId + '/moves');
+    await chrome.stable("document.querySelector('#add-title').value = 'held local action'; document.querySelector('#add-form').requestSubmit(); true");
+    const firstResponse = await firstHeld;
+    heldMoves.push(firstResponse.release);
+    assert.ok(firstResponse.status >= 200 && firstResponse.status < 300, 'the local board accepted the real move before response delivery was held');
+    await press(chrome, remoteRow);
+    await chrome.waitFor("view.root === data.projects.find(row => row.id === " + JSON.stringify(linkedId) + ").root && readOnly && requests");
+    await chrome.stable("document.querySelector('#new-item').click(); document.querySelector('#add-title').value = 'relay draft survives local completion'; true");
+    firstResponse.release();
+    await chrome.waitFor('window.__actOutcome !== null');
+    assert.equal(await chrome.stable('window.__actOutcome'), true, 'a local write response is parsed using the mode it started with after switching to relay');
+    assert.equal(await chrome.stable("document.querySelector('#add-title').value"), 'relay draft survives local completion', 'the older local completion does not clear the current relay draft');
+
+    // Switching away and back can leave the same root selected. A successful old submit must still preserve a new
+    // draft entered in that board's form while the response was held.
+    await press(chrome, localRow);
+    await chrome.waitFor("view.root === data.projects.find(row => row.name === 'local-machine-b').root && !readOnly && !requests");
+    await chrome.stable("document.querySelector('#new-item').click(); document.querySelector('#add-title').value = 'second held local action'; true");
+    const secondHeld = stopOrigins.holdNextResponse(({ method, path }) => method === 'POST' && path === '/api/v1/boards/' + localId + '/moves');
+    await chrome.stable('window.__actOutcome = null; true');
+    await chrome.stable("document.querySelector('#add-form').requestSubmit(); true");
+    const secondResponse = await secondHeld;
+    heldMoves.push(secondResponse.release);
+    assert.ok(secondResponse.status >= 200 && secondResponse.status < 300, 'the second real local write completes before delivery');
+    await press(chrome, remoteRow);
+    await chrome.waitFor("view.root === data.projects.find(row => row.id === " + JSON.stringify(linkedId) + ").root && readOnly && requests");
+    await press(chrome, localRow);
+    await chrome.waitFor("view.root === data.projects.find(row => row.name === 'local-machine-b').root && !readOnly && !requests");
+    await chrome.stable("document.querySelector('#new-item').click(); document.querySelector('#add-title').value = 'replacement local draft'; true");
+    secondResponse.release();
+    await chrome.waitFor('window.__actOutcome !== null');
+    assert.equal(await chrome.stable("document.querySelector('#add-title').value"), 'replacement local draft', 'a completion after switching away and back preserves the replacement draft');
+
     assert.deepEqual(chrome.exceptions, [], 'the hosted mixed-board page reports no uncaught browser exceptions');
   } finally {
+    for (const release of heldMoves) release();
     try { if (stopOrigins) await stopOrigins(); }
     finally {
       try { if (chrome) await closeSnapshotChrome(chrome); }
