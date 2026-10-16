@@ -22,6 +22,7 @@ import {
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { loadConfig } from './config.js';
+import { withMachineHomeWrite } from './machine-home.js';
 
 /**
  * The registry file.
@@ -80,23 +81,25 @@ function openRegistryLock(file) {
  */
 function withRegistry(mutate) {
   const file = registryFile();
-  mkdirSync(join(file, '..'), { recursive: true });
-  const database = openRegistryLock(file);
-  try {
-    const state = readRegistry();
-    const result = mutate(state.projects, state.readable);
-    database.exec('COMMIT');
-    return result;
-  } catch (error) {
+  return withMachineHomeWrite(join(file, '..'), () => {
+    mkdirSync(join(file, '..'), { recursive: true });
+    const database = openRegistryLock(file);
     try {
-      database.exec('ROLLBACK');
-    } catch {
-      // A failed commit may already have ended the transaction.
+      const state = readRegistry();
+      const result = mutate(state.projects, state.readable);
+      database.exec('COMMIT');
+      return result;
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK');
+      } catch {
+        // A failed commit may already have ended the transaction.
+      }
+      throw error;
+    } finally {
+      database.close();
     }
-    throw error;
-  } finally {
-    database.close();
-  }
+  });
 }
 
 /**

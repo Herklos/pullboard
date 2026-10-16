@@ -103,7 +103,7 @@ On a board that is not set up, run \`pullboard resume\` first. Walk the person t
 
 This repo runs on pullboard: a work board, lanes and a spec that live in git. Nothing ships until a second agent verifies it.
 
-**Source of truth.** \`SPEC.md\` holds every requirement as a row with an id, like \`G1.2\`. Code follows the spec. Commits cite the ids they serve: \`feat(scope): subject [G1.2]\`. Only a person approves or changes an approved row. Ids are permanent: a row the person cuts stays, marked \`wont\` (won't build), so every commit that cites it keeps its meaning. Propose each requirement with \`pullboard spec draft "<text>"\`; it returns the draft row id for the person to approve.
+**Source of truth.** \`SPEC.md\` holds every requirement as a row with an id, like \`G1.2\`. Code follows the spec. Commits cite the ids they serve: \`feat(scope): subject [G1.2]\`. Only a person approves or changes an approved row. Ids are permanent: a row the person cuts stays, marked \`wont\` (won't build), so every commit that cites it keeps its meaning. Propose each requirement with \`pullboard spec draft "<text>"\`; it returns the draft row id for the person to approve. To start from a blueprint's rules, questions and starter items, run \`pullboard blueprint add <name or file>\` (bundled: web-app); it files them all as drafts for the person to approve. To share this board's approved rules and answered questions as a blueprint, run \`pullboard blueprint save [file]\`; it never writes items, notes, paths, emails or names.
 
 **Doctrine.** Our house rules for agentic development. This repo inherits Pullboard standard doctrine version 1. ${doctrine.repo ? doctrine.name : DOCTRINE_FILE} adds the repo's own rows, overrides a standard rule by its PB id, or declines it with a wont row and its reason as the row text: - PB7 [wont] <why>. Approved rows are in force; follow them as you would the spec. Run pullboard spec --json to read the current merged rules. Re-run pullboard init after changing the doctrine to refresh this managed guidance.
 
@@ -129,6 +129,8 @@ It prints the folder to work in and what to run there first. Every join needs th
 7. Your lane is done when its items are verified, not when they are submitted. After your last submit, keep running \`pullboard next --wait 9\`: a rejected item comes back to your lane.
 
 The coordinator merges verified items into the main line; builders never merge.
+
+For spare test capacity, use \`pullboard runner add <ssh-host> --slots <n> --browser <n>\`. It registers SSH capacity on this machine; \`pullboard resources\` shows runners and their usage. Only committed source goes to a runner, and board moves stay here.
 
 If your item needs code another lane owns and it is not there yet, shout that lane and take another item. Never copy their code into your lane, and never build another lane's item, even one that was rejected and blocks you: shout that lane and the coordinator. A claim refused as BLOCKED names the item it waits on.
 

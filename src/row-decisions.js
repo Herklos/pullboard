@@ -50,7 +50,7 @@ export function prepareRowDecisions(root, config, { ids, decision, reason = '', 
   const principal = by ?? (signed ? defaultPrincipal(root) : 'person');
   return decisionRows(root, config, ids).map(({ kind, file, row, source }) => {
     const status = decision === 'approve' ? 'approved' : 'wont';
-    const text = decision === 'approve' ? proposedText?.trim() ?? row.text : reason.trim();
+    const text = decision === 'approve' ? proposedText?.trim() ?? row.text : row.text;
     const replacement = source.replace(/\[([a-z]+)(,\s*[a-z]+)?\]/u, (_, old, tier = '') => `[${status}${tier}]`)
       .replace(/(\]\s+)([^|]*)(?=\s*\||$)/u, (_, prefix, old) => `${prefix}${text}${old.match(/\s+$/u)?.[0] ?? ''}`);
     const record = { version: 1, type: 'row-decision', kind, file, id: row.id, source, replacement, text, decision, reason: decision === 'decline' ? reason.trim() : '', by: principal, on, commit, note: '' };
@@ -67,7 +67,15 @@ export function pendingRowDecision(records, row, kind) {
 /** Add pending status to existing rows without replacing their current file-backed status. */
 export function decisionProjection(records, row, kind) {
   const decision = pendingRowDecision(records, row, kind);
-  return decision ? { ...row, decision, stage: `${decision.decision === 'approve' ? 'approved' : 'declined'}, pending apply` } : row;
+  if (decision) return {
+    ...row,
+    decision,
+    stage: `${decision.decision === 'approve' ? 'approved' : 'declined'}, pending apply`,
+    ...(decision.decision === 'decline' ? { reason: decision.reason } : {}),
+  };
+  const appliedDecline = records.find((record) => record.kind === kind && record.id === row.id && record.applied
+    && record.decision === 'decline' && row.status === 'wont' && row.text === record.text);
+  return appliedDecline ? { ...row, reason: appliedDecline.reason } : row;
 }
 
 /** Decorate the shared API state so the cockpit receives the same pending decisions as spec show. */

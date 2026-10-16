@@ -4,9 +4,24 @@ import {
   join,
   resolve,
 } from 'node:path';
+import { Refused } from './refused.js';
 
 /** Use the OS account home unless a caller explicitly selects a private machine pool. */
 export function machineHome() {
   const override = process.env.PULLBOARD_MACHINE_HOME;
   return override ? resolve(override) : join(userInfo().homedir, '.pullboard');
+}
+
+/** Name inaccessible machine storage without disguising corruption or other database failures. */
+export function withMachineHomeWrite(directory, work) {
+  try { return work(); }
+  catch (error) {
+    const sqliteCode = error.code === 'ERR_SQLITE_ERROR' ? error.errcode & 0xff : null;
+    if (['EACCES', 'EPERM', 'EROFS', 'SQLITE_CANTOPEN', 'SQLITE_READONLY'].includes(error.code)
+        || sqliteCode === 14 || sqliteCode === 8) {
+      throw new Refused('MACHINE_HOME_NOT_WRITABLE',
+        `Cannot write machine home "${directory}". Give the agent write access to that directory (the access pullboard init grants), or run the command outside the sandbox.`);
+    }
+    throw error;
+  }
 }
