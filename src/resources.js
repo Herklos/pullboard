@@ -5,7 +5,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { repoInfo } from './git.js';
-import { machineHome } from './machine-home.js';
+import { machineHome, withMachineHomeWrite } from './machine-home.js';
 import { Refused } from './refused.js';
 
 const LEASE_MS = 20_000;
@@ -64,7 +64,12 @@ function canonicalResourceFile(file) {
 }
 
 /** Open and initialize the small durable queue database. */
-function open(file) {
+function open(file, machine = false) {
+  return machine ? withMachineHomeWrite(machineHome(), () => openQueue(file)) : openQueue(file);
+}
+
+/** Initialize a queue, leaving machine-storage error translation to its caller. */
+function openQueue(file) {
   mkdirSync(dirname(file), { recursive: true });
   const db = new DatabaseSync(file);
   db.exec('PRAGMA busy_timeout = 10000');
@@ -236,7 +241,7 @@ export async function takeResource(options) {
   if (landing && itemCheck) throw new Refused('BAD_RESOURCE_PRIORITY', 'a gate slot cannot be both a landing and an item check');
   if (diagnostic && (landing || itemCheck)) throw new Refused('BAD_RESOURCE_PRIORITY', 'a diagnostic slot cannot also be a landing or an item check');
   const file = databaseFile(scope, root);
-  const db = open(file);
+  const db = open(file, scope === 'machine');
   let pool;
   try { pool = canonicalResourceFile(file); }
   catch (error) { db.close(); throw error; }
@@ -354,7 +359,7 @@ export function inheritedGateSlot({ root = process.cwd(), browser = false } = {}
   if (canonicalResourceFile(markedPool) !== pool) return null;
   if (process.env[GATE_SLOT_HELD_ENV] !== '1') throw new Refused('GATE_SLOT_MARKER_INVALID', 'the inherited gate lease is missing its legacy held marker; start the child with gateSlotEnvironment(lease)');
   if (!token) throw new Refused('GATE_SLOT_TOKEN_REQUIRED', 'the inherited gate pool marker has no lease token; restart the child with gateSlotEnvironment(lease)');
-  const db = open(pool);
+  const db = open(pool, true);
   let holder;
   try {
     holder = update(db, () => db.prepare("SELECT browser FROM holder WHERE name = 'gate' AND token = ?").get(token));
@@ -373,7 +378,7 @@ export function inheritedGateSlot({ root = process.cwd(), browser = false } = {}
 export function setResourceCapacity({ name, capacity, scope = 'machine', root = process.cwd(), persist = () => {} }) {
   if (typeof name !== 'string' || !name.trim() || name.trim() !== name) throw new Refused('BAD_RESOURCE_NAME', 'resource name must be nonempty trimmed text');
   if (!Number.isSafeInteger(capacity) || capacity < 1) throw new Refused('BAD_RESOURCE_CAPACITY', 'resource capacity must be a positive integer');
-  const db = open(databaseFile(scope, root));
+  const db = open(databaseFile(scope, root), scope === 'machine');
   try {
     return update(db, () => {
       const state = snapshot(db, name);
@@ -389,7 +394,7 @@ export function setResourceCapacity({ name, capacity, scope = 'machine', root = 
 
 /** List resources and prune leases whose process died or lease expired. */
 export function listResources({ scope = 'machine', root = process.cwd() } = {}) {
-  const db = open(databaseFile(scope, root));
+  const db = open(databaseFile(scope, root), scope === 'machine');
   try {
     return update(db, () => db.prepare('SELECT name, capacity FROM resource ORDER BY name').all().map(({ name, capacity }) => ({ name, capacity, ...snapshot(db, name) })));
   } finally { db.close(); }
