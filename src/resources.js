@@ -1,4 +1,4 @@
-/** Machine and repository queues persist leases; landings go first, then eligible waiters in arrival order [Q1,Q2,Q3]. */
+/** Machine and repository queues persist leases; waiters are admitted by class (landing, review, submit, other), aging up over time, then in arrival order [Q1,Q2,Q3]. */
 import { mkdirSync, realpathSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -171,8 +171,38 @@ function update(db, action) {
   }
 }
 
-/** Current holders and the landing-first line, then every other kind in arrival order. */
-function snapshot(db, name) {
+/** Admission classes, most urgent first. */
+export const QUEUE_CLASSES = ['landing', 'review', 'submit', 'other'];
+/** A waiter moves up one class for every this long it has waited, so no class starves. */
+export const QUEUE_AGE_MS = 30 * 60_000;
+
+/**
+ * A waiter's admission class: its declared class from the run it names, and the class it holds now
+ * after aging up one class per QUEUE_AGE_MS waited. Landings come first, then reviews (they unblock
+ * landing), then submits and item checks, then focused, diagnostic and every other run.
+ *
+ * @param {{ landing?: number|boolean, itemCheck?: number|boolean, diagnostic?: number|boolean, kind?: string, since?: string }} entry
+ * @param {number} [now] - The clock reading to age against; injectable so tests need not wait.
+ * @returns {{ base: number, effective: number, name: string, declared: string }}
+ */
+export function queueClass(entry, now = Date.now()) {
+  const kind = entry.kind ?? '';
+  const base = entry.landing === true || entry.landing === 1 ? 0
+    : kind === 'review' ? 1
+      : !(entry.diagnostic === true || entry.diagnostic === 1) && (entry.itemCheck === true || entry.itemCheck === 1 || kind === 'submit' || kind === 'check') ? 2
+        : 3;
+  const waited = Math.max(0, now - (Date.parse(entry.since ?? '') || now));
+  const effective = Math.max(0, base - Math.floor(waited / QUEUE_AGE_MS));
+  return { base, effective, name: QUEUE_CLASSES[effective], declared: QUEUE_CLASSES[base] };
+}
+
+/** Sort waiters by their current class, then by arrival ticket within a class. */
+function byAdmission(now) {
+  return (left, right) => queueClass(left, now).effective - queueClass(right, now).effective || left.ticket - right.ticket;
+}
+
+/** Current holders and the waiting line in admission order, each waiter naming its class. */
+function snapshot(db, name, now = Date.now()) {
   /** Preserve older public entries while naming diagnostics as a distinct queue class. */
   const project = ({ diagnostic, browser, item, kind, ...entry }) => ({ ...entry, landing: entry.landing === 1,
     itemCheck: entry.itemCheck === 1 && diagnostic !== 1, ...(diagnostic === 1 ? { diagnostic: true } : {}),
@@ -181,14 +211,19 @@ function snapshot(db, name) {
   const where = name === 'browser' ? 'name = ? AND browser = 1' : 'name = ?';
   const sourceName = name === 'browser' ? 'gate' : name;
   const holders = db.prepare(`SELECT agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, item, kind FROM holder WHERE ${where} ORDER BY since, token`).all(sourceName).map(project);
-  const line = db.prepare(`SELECT agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, item, kind FROM waiter WHERE ${where} ORDER BY landing DESC, ticket`).all(sourceName).map(project);
+  const line = db.prepare(`SELECT ticket, agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, item, kind FROM waiter WHERE ${where}`).all(sourceName)
+    .sort(byAdmission(now))
+    .map(({ ticket, ...entry }) => {
+      const queued = queueClass(entry, now);
+      return { ...project(entry), queueClass: queued.name, ...(queued.effective < queued.base ? { agedFrom: queued.declared } : {}) };
+    });
   return { holders, line };
 }
 
 /** Count reported or admissible queue position separately so blocked work cannot distort the visible line. */
-function waiterPosition(db, name, ticket, { eligibleOnly = false } = {}) {
+function waiterPosition(db, name, ticket, { eligibleOnly = false, now = Date.now() } = {}) {
   const queueName = name === 'browser' ? 'gate' : name;
-  const waiters = db.prepare('SELECT ticket, pid, agent, repo, landing, item_check AS itemCheck, browser FROM waiter WHERE name = ? ORDER BY ticket').all(queueName);
+  const waiters = db.prepare('SELECT ticket, pid, agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, kind FROM waiter WHERE name = ? ORDER BY ticket').all(queueName);
   const holders = db.prepare('SELECT pid, agent, repo FROM holder WHERE name = ?').all(queueName);
   const browserBusy = db.prepare("SELECT COUNT(*) AS count FROM holder WHERE name = 'gate' AND browser = 1").get().count > 0;
   /** A live process owns its leases even if it changes descriptive agent or repository labels. */
@@ -196,8 +231,8 @@ function waiterPosition(db, name, ticket, { eligibleOnly = false } = {}) {
   /** Leave a waiting independent landing a slot before a holder takes another lease. */
   const blockedByLanding = (waiter) => holdsSlot(waiter)
     && waiters.some((other) => other.landing === 1 && other.pid !== waiter.pid);
-  /** Map queue entries to their declared precedence class. */
-  const rank = (waiter) => waiter.landing === 1 ? 0 : 1;
+  /** Map queue entries to their current admission class, aged by how long each has waited. */
+  const rank = (waiter) => queueClass(waiter, now).effective;
   const line = name === 'browser' ? waiters.filter((waiter) => waiter.browser === 1) : waiters;
   const considered = line.filter((waiter) => !blockedByLanding(waiter)
     // Browser availability affects admission only; reported positions retain every browser waiter.
@@ -214,7 +249,7 @@ function waiterPosition(db, name, ticket, { eligibleOnly = false } = {}) {
 function pause(ms) { return new Promise((resolvePromise) => setTimeout(resolvePromise, ms)); }
 
 /**
- * Join the landing-first queue; every other kind keeps its original FIFO ticket.
+ * Join the queue in its admission class (landing, review, submit, other), aging up over time; FIFO by ticket within a class.
  *
  * @param {{ name: string, capacity: number, capacityProvider?: () => number, scope?: 'machine'|'repo'|'board', root?: string, agent?: string, repo?: string, landing?: boolean, itemCheck?: boolean, diagnostic?: boolean, browser?: boolean, item?: string, kind?: string, onWait?: (state: object) => void, allowIdleCapacityUpdate?: boolean }} options - Resource identity and queue class.
  * @returns {Promise<{ name: string, scope: string, token: string, pool: string, browser: boolean, waitMs: number, release: () => void, renew: () => void }>}
@@ -264,7 +299,7 @@ export async function takeResource(options) {
         if (browserResource && browserResource.capacity !== 1) throw new Refused('RESOURCE_CAPACITY_MISMATCH', 'resource "browser" has fixed capacity 1');
         db.prepare("INSERT INTO resource(name, capacity) VALUES ('browser', 1) ON CONFLICT(name) DO NOTHING").run();
       }
-      // Retain queue metadata for older readers; admission uses landing priority and arrival only.
+      // The kind and flags decide the admission class; the ticket keeps arrival order within it.
       db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind);
     });
     while (true) {
