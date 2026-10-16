@@ -358,19 +358,23 @@ const RULE_RE = /^(.+?) Why: (.+)$/u;
  * a path, an email or any private name (a person, an agent, a model label or a machine) stays.
  *
  * @param {string} text
- * @param {string[]} names - Every private name known on this board and machine.
+ * @param {string[]} names - Every private name known on this board and machine, matched in any case.
+ * @param {string[]} [parts] - Parts of people's names, matched only as written.
  * @returns {string | null}
  */
-export function privateTextReason(text, names) {
+export function privateTextReason(text, names, parts = []) {
   if (PATH_RE.test(text)) return 'a file path';
   if (EMAIL_RE.test(text)) return 'an email address';
-  const lower = text.toLowerCase();
-  for (const name of names) {
-    const wanted = String(name ?? '').trim().toLowerCase();
-    if (wanted.length < 3) continue;
-    const escaped = wanted.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
-    if (new RegExp(`(?:^|[^\\p{L}\\p{N}_-])${escaped}(?:$|[^\\p{L}\\p{N}_-])`, 'u').test(lower)) return 'a private name';
-  }
+  /** True when the name stands as its own word in the text, in either case or exactly as written. */
+  const holds = (name, cased) => {
+    const wanted = String(name ?? '').trim();
+    if (wanted.length < 3) return false;
+    const escaped = (cased ? wanted : wanted.toLowerCase()).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+    return new RegExp(`(?:^|[^\\p{L}\\p{N}_-])${escaped}(?:$|[^\\p{L}\\p{N}_-])`, 'u').test(cased ? text : text.toLowerCase());
+  };
+  // A whole name matches in any case; a part of a person's name only as written, so the person
+  // "Test Agent" keeps "Test" out without losing every rule about a test.
+  if (names.some((name) => holds(name, false)) || parts.some((part) => holds(part, true))) return 'a private name';
   return null;
 }
 
@@ -383,17 +387,17 @@ export function privateTextReason(text, names) {
  * rule with no "Why:" reason to carry, is left out and named in `left`, never rewritten [S1].
  *
  * @param {{ rows: any[] }} spec - The parsed SPEC.md.
- * @param {{ name: string, title: string, gate?: string, names: string[] }} board
+ * @param {{ name: string, title: string, gate?: string, names: string[], parts?: string[] }} board
  * @returns {{ blueprint: Blueprint, left: { id: string, reason: string }[] }}
  */
-export function saveBlueprint(spec, { name, title, gate, names }) {
+export function saveBlueprint(spec, { name, title, gate, names, parts = [] }) {
   const rules = [];
   const questions = [];
   const left = [];
   for (const row of spec.rows) {
     if (row.status !== 'approved') continue;
     const text = String(row.text ?? '').trim();
-    const privacy = privateTextReason(text, names);
+    const privacy = privateTextReason(text, names, parts);
     if (privacy) { left.push({ id: row.id, reason: `it holds ${privacy}` }); continue; }
     const question = QUESTION_RE.exec(text);
     if (question) {
@@ -413,9 +417,9 @@ export function saveBlueprint(spec, { name, title, gate, names }) {
   const value = {
     blueprint: BLUEPRINT_FORMAT,
     name: slug,
-    title: cleanTitle && !/[\r\n|]/u.test(cleanTitle) && !privateTextReason(cleanTitle, names) ? cleanTitle : slug,
+    title: cleanTitle && !/[\r\n|]/u.test(cleanTitle) && !privateTextReason(cleanTitle, names, parts) ? cleanTitle : slug,
     version: 1,
-    ...(gate?.trim() && !/[\r\n|]/u.test(gate) && !privateTextReason(gate.trim(), names) ? { gate: gate.trim() } : {}),
+    ...(gate?.trim() && !/[\r\n|]/u.test(gate) && !privateTextReason(gate.trim(), names, parts) ? { gate: gate.trim() } : {}),
     ...(rules.length ? { rules } : {}),
     ...(questions.length ? { questions } : {}),
   };
