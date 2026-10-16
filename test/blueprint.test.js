@@ -292,8 +292,8 @@ test('init --blueprint starts a board from a blueprint [I1,S1]', () => {
   assert.deepEqual(readdirSync(unknown.repo).filter((name) => name !== '.git'), [], 'nothing is written');
   assert.equal(existsSync(join(unknown.repo, '.git', 'pullboard')), false, 'no board is created');
 
-  // Init executes nothing from a blueprint: a URL is refused unfetched, and a starter that carries
-  // a check is refused rather than launching its baseline. Both leave the repository untouched.
+  // A URL is refused unfetched and leaves the repository untouched. A starter that carries a check
+  // is filed with that check stored, exactly as pullboard blueprint add files it.
   const remote = emptyRepo();
   const fetched = remote.run('init', '--blueprint', 'https://example.invalid/web-app.json', '--json');
   assert.notEqual(fetched.status, 0);
@@ -304,13 +304,13 @@ test('init --blueprint starts a board from a blueprint [I1,S1]', () => {
   const withCheck = join(outside, 'checked.blueprint.json');
   writeFileSync(withCheck, JSON.stringify({ ...PUBLISHED, items: PUBLISHED.items.map((item, index) => (index === 0 ? { ...item, check: 'true' } : item)) }));
   const checkedRepo = emptyRepo();
-  const checked = checkedRepo.run('init', '--blueprint', withCheck, '--json');
-  assert.notEqual(checked.status, 0);
-  const checkRefusal = JSON.parse(checked.stdout).error;
-  assert.equal(checkRefusal.code, 'BLUEPRINT_CHECK');
-  assert.match(checkRefusal.message, new RegExp(`items\\[${PUBLISHED.items[0].key}\\]`, 'u'), 'the refusal names the starter with a check');
-  assert.deepEqual(readdirSync(checkedRepo.repo).filter((name) => name !== '.git'), [], 'a check writes nothing');
-  assert.equal(existsSync(join(checkedRepo.repo, '.git', 'pullboard')), false, 'a check creates no board');
+  const checked = checkedRepo.run('init', '--blueprint', withCheck);
+  assert.equal(checked.status, 0, checked.stdout + checked.stderr);
+  const filed = JSON.parse(checkedRepo.run('list', '--json').stdout).items ?? [];
+  assert.equal(filed.length, PUBLISHED.items.length, 'every starter is filed, the checked one included');
+  const starter = filed.find((item) => item.item_title === PUBLISHED.items[0].title);
+  assert.ok(starter, 'the checked starter is on the board');
+  assert.equal(starter.item_check, 'true', 'its check is stored as written');
   rmSync(outside, { recursive: true, force: true });
 
   // Plain init is unchanged: no blueprint section, no items, no summary line.
