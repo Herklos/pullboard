@@ -158,6 +158,9 @@ export function configProblems(config) {
   if (typeof config.spec !== 'string' || !config.spec) problems.push('"spec" names a file');
   if (typeof config.practice !== 'string' || !config.practice) problems.push('"practice" names the doctrine file');
   if (typeof config.gate !== 'string') problems.push('"gate" is a shell command, like "npm test"');
+  if (config.submitGate !== undefined && config.submitGate !== 'landing') {
+    problems.push('"submitGate" is "landing" when the full suite should be deferred until landing');
+  }
   if (config.affectedTests !== undefined && (typeof config.affectedTests !== 'string' || !config.affectedTests.trim())) {
     problems.push('"affectedTests" is a nonempty command prefix used to run selected test files');
   }
