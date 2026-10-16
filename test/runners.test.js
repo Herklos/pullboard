@@ -7,7 +7,7 @@ import { once } from 'node:events';
 import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { test } from 'node:test';
-import { takeResource } from '../src/resources.js';
+import { listResources, takeResource } from '../src/resources.js';
 import { listResources as listPreRunnerResources, takeResource as takePreRunnerResource } from './fixtures/resources-pre-runners.js';
 import { runFixtureChild, startFixtureChild } from './fixture-child.js';
 
@@ -734,6 +734,18 @@ writeFileSync(ready, 'setup started\\n');
     assert.equal(request.droppedAfterSetup, true, 'the stand-in drops the connection after npm setup actually starts');
     assert.equal(request.workerStarted, true);
     assert.notEqual(request.code, 0, 'the worker exits without a complete success receipt after HUP');
+    // Observe release through the actual pool, including its normal dead-worker lease reaping.
+    await waitForCondition(() => {
+      const previous = process.env.PULLBOARD_MACHINE_HOME;
+      process.env.PULLBOARD_MACHINE_HOME = remoteMachineHome;
+      try {
+        return listResources({ scope: 'machine', root: worker })
+          .some(resource => resource.name === 'gate' && resource.holders.length === 0);
+      } finally {
+        if (previous === undefined) delete process.env.PULLBOARD_MACHINE_HOME;
+        else process.env.PULLBOARD_MACHINE_HOME = previous;
+      }
+    }, 'the remote pool releases its setup holder after the owned child exits');
     assert.equal(readRemoteGateHolders(remoteDatabase).length, 0, 'the remote holder is released after the owned setup child exits');
   } finally {
     if (held) held.release();
