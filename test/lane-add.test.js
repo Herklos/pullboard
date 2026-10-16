@@ -63,6 +63,7 @@ test('lane add creates a lane and init proposes lanes from the layout [I1,I2,L1]
   const nested = box.run('lane', 'add', 'ui', '--owns', 'packages/web/src');
   assert.equal(nested.status, 1);
   assert.match(nested.stderr, /\[PATH_OWNED\] packages\/web\/src\/ is already owned by lane "web"/u);
+  assert.match(nested.stderr, /carving a sub-folder out of web is a hand edit of "lanes" in pullboard\.json/u);
   // A taken name is refused and names the lane that has it.
   const taken = box.run('lane', 'add', 'web', '--owns', 'site/');
   assert.equal(taken.status, 1);

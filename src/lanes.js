@@ -109,7 +109,7 @@ export function addLane(root, name, paths) {
   for (const path of owns) {
     const owner = laneOf(config, path);
     if (owner !== COORDINATOR) {
-      throw new Refused('PATH_OWNED', `${path} is already owned by lane "${owner}"; pick a folder no lane owns (see: pullboard lanes), or move it out of ${owner} in ${CONFIG_FILE} first`);
+      throw new Refused('PATH_OWNED', `${path} is already owned by lane "${owner}"; pick a folder no lane owns (see: pullboard lanes); carving a sub-folder out of ${owner} is a hand edit of "lanes" in ${CONFIG_FILE}`);
     }
   }
   const file = join(root, CONFIG_FILE);
