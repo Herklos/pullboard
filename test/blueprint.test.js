@@ -215,6 +215,7 @@ test('blueprint add files a blueprint as drafts after an add stopped part way [S
   assert.deepEqual(retried.items.find((item) => item.key === '3').after, [first.item.item_id], 'the third starter still waits on the first');
   assert.equal(readFileSync(join(box.repo, 'SPEC.md'), 'utf8'), finished, 'the finished marker replaces the under-way one');
   assert.equal(json(box, 'blueprint', 'add', 'web-app').items.length, 0, 'and then a repeat adds nothing');
+});
 
 const e2e = createE2eHelpers();
 after(e2e.cleanup);
