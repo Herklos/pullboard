@@ -3,7 +3,7 @@
  * Run the test suite with a private home, no inherited Git identity or config, and a refusing CLI shim.
  */
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { basename, delimiter, dirname, join, resolve } from 'node:path';
+import { basename, delimiter, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -17,6 +17,7 @@ const runner = fileURLToPath(import.meta.url);
 const LANDING_RUN_ENV = 'PULLBOARD_LANDING_RUN';
 const LANDING_WORKER_STARTS_ENV = 'PULLBOARD_LANDING_WORKER_STARTS';
 const LANDING_ATTEMPT_ENV = 'PULLBOARD_LANDING_ATTEMPT';
+const LANDING_WAIVERS_ENV = 'PULLBOARD_LANDING_WAIVERS';
 export const DEFAULT_TEST_TIMEOUT_MS = 660_000;
 export const DEFAULT_TEST_FILE_TIMEOUT_MS = 30_000;
 // Worker identity startup retries stay below the ordinary per-file ceiling even if ps is unavailable.
@@ -775,12 +776,34 @@ async function drainLandingWorkerDescendants(ownedDescendants, refreshOwnedDesce
 }
 
 /** Run a landing check with execution-ordered failure detection and native runner reporters. */
+/**
+ * Read the live person waivers Pullboard projects into a landing run, as `{kind, test}` pairs.
+ * The projection only decides whether the run keeps going past a failure; whether the run is
+ * waived is decided afterwards by Pullboard against the board, so a forged list only makes a run
+ * longer, never greener. Anything unreadable projects nothing, and the run stops as before [B3].
+ */
+function landingWaiverProjection(text) {
+  try {
+    const parsed = JSON.parse(text ?? '[]');
+    return Array.isArray(parsed) ? parsed.filter(entry => ['file', 'name'].includes(entry?.kind) && typeof entry.test === 'string' && entry.test) : [];
+  } catch { return []; }
+}
+
+/** True when a projected waiver covers this failing test by its file or by its exact name. */
+function landingFailureWaived(waivers, file, name) {
+  const path = typeof file === 'string' ? relative(process.cwd(), file.startsWith('file:') ? fileURLToPath(file) : file) : null;
+  return waivers.some(waiver => waiver.kind === 'file' ? waiver.test === path : waiver.test === name);
+}
+
 async function runLandingTests(args, env, concurrency) {
+  const waivers = landingWaiverProjection(process.env[LANDING_WAIVERS_ENV]);
+  const waivedFiles = new Map();
   const { run } = await import('node:test');
   const { PassThrough } = await import('node:stream');
   const { createWriteStream } = await import('node:fs');
   const { pathToFileURL } = await import('node:url');
   const { options, env: testEnv } = await landingTestOptions(args, env, concurrency);
+  delete testEnv[LANDING_WAIVERS_ENV];
   if (options.isolation !== 'process') {
     throw new Error('landing gate early-stop requires --test-isolation=process so started files and owned children can be tracked safely');
   }
@@ -1028,6 +1051,9 @@ async function runLandingTests(args, env, concurrency) {
         tests.on('test:complete', data => {
           const { file, name, details } = data;
           if (file && details?.type === 'test' && details.passed === false && !firstFailure) {
+            // A failure a live person waiver covers does not stop the run; every other file still runs.
+            if (landingFailureWaived(waivers, file, name)) { waivedFiles.set(file, waivedFiles.get(file) ?? true); return; }
+            waivedFiles.set(file, false);
             firstFailure = { file, name, error: details.error };
             abortLandingRun();
           }
@@ -1037,7 +1063,7 @@ async function runLandingTests(args, env, concurrency) {
           if (data.file) {
             startedFiles.add(data.file);
             completedFiles.add(data.file);
-            if (data.success === false && !firstFailure) {
+            if (data.success === false && !firstFailure && waivedFiles.get(data.file) !== true) {
               firstFailure = { file: data.file, name: 'test file failed before a test completed' };
               abortLandingRun();
             }

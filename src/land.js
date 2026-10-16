@@ -127,7 +127,7 @@ async function gateGroup(state, label) {
   mkdirSync(directory, { recursive: true });
   const logPath = join(directory, `${label}-${state.batch.revision}.log`);
   await save(state, { state: 'gating', tip: headCommit(state.batch.root), logPath });
-  const gate = await runGate(state.batch.root, state.config, { trustStamp: false, landing: true, agent: 'coordinator', onWait: state.onWait, stages: true });
+  const gate = await runGate(state.batch.root, state.config, { trustStamp: false, landing: true, agent: 'coordinator', onWait: state.onWait, stages: true, waivers: liveWaiverProjection(state.board) });
   copyFileSync(gate.log, logPath);
   if (gate.profilePath) copyFileSync(gate.profilePath, `${logPath}.profile.json`);
   const result = { ...gate, failures: landingFailures(gate.output, state.batch.root), accounted: accountedFailures(gate, state.batch.root), tree, logPath };
@@ -228,6 +228,13 @@ export function waivedFailures(board, failures) {
   if (!Array.isArray(failures) || !failures.length || failures.some((entry) => !entry.file)) return null;
   const covered = failures.map((failure) => ({ ...failure, waiver: store.landingWaiverFor(board, failure) }));
   return covered.every((entry) => entry.waiver) ? covered : null;
+}
+
+/** Project the live person waivers a landing run may read, so it does not stop early on one [B3]. */
+export function liveWaiverProjection(board) {
+  const now = board.clock.now().getTime();
+  return store.landingWaivers(board).filter((waiver) => Date.parse(waiver.until) > now)
+    .map((waiver) => ({ kind: waiver.kind ?? store.landingWaiverKind(waiver.test), test: waiver.test }));
 }
 
 /** Name one waived failure with the person's waiver, its reason and its expiry [B3]. */

@@ -1,7 +1,7 @@
 /** Exercise landing against real private Git worktrees, hooks, SQLite and bare remotes [B3,R3]. */
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { after, test } from 'node:test';
 import * as store from '../src/board.js';
 import { applyRelayMove, prepareEngineMove } from '../src/engine.js';
@@ -749,6 +749,23 @@ test("a person's waiver lets a submit and a landing gate through only the waived
   const passingStage = box.run(box.repo, 'gate', '--landing');
   assert.equal(passingStage.code, 0, `${passingStage.err}\n${passingStage.out}`);
   assert.match(passingStage.out, line, 'a passing stage leaves only the waived test to subtract');
+
+  // A real landing run does not stop early on a waived failure: every other file still runs, then the waiver subtracts it.
+  const laterRan = join(box.dir, 'later-file-ran');
+  const waivedFile = 'test/landing-waived.test.cjs';
+  assert.equal(commitFile(box, box.repo, waivedFile, "require('node:test').test('a flaky landing check', () => { throw new Error('known flake'); });\n", 'chore: add a flaky landing test').status, 0);
+  assert.equal(commitFile(box, box.repo, 'test/landing-later.test.cjs', `require('node:test').test('a later landing check', () => { require('node:fs').writeFileSync(${JSON.stringify(laterRan)}, 'ran'); });\n`, 'chore: add a later landing test').status, 0);
+  setGate(`node ${JSON.stringify(join(dirname(BIN), 'run-tests.js'))} --test-concurrency=1 ${waivedFile} test/landing-later.test.cjs`, 'chore: gate with the real test runner');
+  const stopped = box.run(box.repo, 'gate', '--landing');
+  assert.equal(stopped.code, 1, 'an unwaived failure still stops a landing run');
+  assert.match(`${stopped.out}\n${stopped.err}`, /stopped early/u);
+  assert.ok(!existsSync(laterRan), 'the early stop skipped the later file');
+  const runnerWaiver = json(box, box.repo, 'land', '--waive', waivedFile, '--until', '2099-01-01', '--reason', 'known landing flake').waiver;
+  const continued = box.run(box.repo, 'gate', '--landing');
+  assert.equal(continued.code, 0, `${continued.err}\n${continued.out}`);
+  assert.ok(existsSync(laterRan), 'every other file ran past the waived failure');
+  assert.doesNotMatch(`${continued.out}\n${continued.err}`, /stopped early/u);
+  assert.match(continued.out, new RegExp(`waived: a flaky landing check \\(${waivedFile.replaceAll('.', '\\.')}\\) by person waiver ${runnerWaiver.id} for file `, 'u'));
   setGate(gateCommand, 'chore: restore the single-stage gate');
 
   onBoard(box, (board) => {
