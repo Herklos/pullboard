@@ -2176,6 +2176,32 @@ function reportSubmission(ctx, id, commit, gate) {
 }
 
 /**
+ * Add a blueprint to the board of the checkout io.cwd names, exactly as pullboard blueprint add
+ * does; init --blueprint calls it after setting up the repo. With report false it prints nothing
+ * and leaves the command's JSON result to the caller.
+ *
+ * @param {any} io
+ * @param {string} reference - A bundled blueprint name or a path to a blueprint file.
+ * @param {{ report?: boolean }} [options]
+ * @returns {Promise<BlueprintAdded>}
+ */
+export async function addBlueprintHere(io, reference, { report = true } = {}) {
+  const blueprint = readBlueprint(reference, io.cwd);
+  const ctx = context(io);
+  return await withBoard(ctx, async (board) => await addBlueprint(ctx, board, whoAmI(ctx, board), blueprint, { report }));
+}
+
+/**
+ * @typedef {object} BlueprintAdded
+ * @property {{ name: string, title: string, version: number }} blueprint
+ * @property {string} section - The SPEC.md section heading the rows are in.
+ * @property {{ key: string, id: string, status: string, text: string }[]} rows - New rows; each waits for the person.
+ * @property {{ id: number, key: string, title: string, lane: string, specIds: string[], after: number[] }[]} items - New open items.
+ * @property {string | null} gate - The gate set in pullboard.json, or null when it was left alone.
+ * @property {boolean} marked - This blueprint version was already on the board, so nothing was added.
+ */
+
+/**
  * Add a blueprint to this board in one step (I1): its rules and questions as draft and pending rows
  * in a new SPEC.md section, its starter items as open items citing them, and its gate when
  * pullboard.json has none. Rows are written the way spec draft writes them, so nothing is approved;
@@ -2185,10 +2211,11 @@ function reportSubmission(ctx, id, commit, gate) {
  * @param {any} board
  * @param {{ id: string }} me
  * @param {import('./blueprints.js').Blueprint} blueprint
- * @returns {Promise<number>}
+ * @param {{ report?: boolean }} [options] - With report false, print nothing and set no JSON result.
+ * @returns {Promise<BlueprintAdded>}
  */
-async function addBlueprint(ctx, board, me, blueprint) {
-  const { io } = ctx;
+async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
+  const io = report ? ctx.io : { say: () => {} };
   const spec = loadSpec(ctx.info.root, ctx.config);
   if (!spec.exists) throw new Refused('NO_SPEC', `no ${ctx.config.spec}; run: pullboard init`);
   const malformed = [[spec.file, spec.problems], [ctx.doctrine.repo.file, ctx.doctrine.repo.problems]].find(([, problems]) => problems.length);
@@ -2225,11 +2252,12 @@ async function addBlueprint(ctx, board, me, blueprint) {
     throw error;
   }
   const rows = plan.rows.map(({ key, id, status, text }) => ({ key, id, status, text }));
-  io.result?.({ blueprint: { name: blueprint.name, title: blueprint.title, version: blueprint.version },
-    section: plan.section.name, rows, items: added, gate: plan.gate });
+  const summary = { blueprint: { name: blueprint.name, title: blueprint.title, version: blueprint.version },
+    section: plan.section.name, rows, items: added, gate: plan.gate, marked: plan.marked };
+  io.result?.(summary);
   if (!rows.length && !added.length && !plan.gate) {
     io.say(`${blueprint.title} (version ${blueprint.version}) is already on this board; nothing added`);
-    return 0;
+    return summary;
   }
   io.say(`added ${blueprint.title} (version ${blueprint.version}) as drafts in ${ctx.config.spec}, section ${plan.section.name}`);
   for (const row of rows) io.say(`  ${row.id} ${row.status}  ${row.text}`);
@@ -2237,7 +2265,7 @@ async function addBlueprint(ctx, board, me, blueprint) {
   if (plan.gate) io.say(`  gate set in ${CONFIG_FILE}: ${plan.gate}`);
   const changed = files.map((file) => file.file);
   io.say(`next: the person approves the rows in pullboard view or with pullboard spec approve <ids>${changed.length ? `; commit ${changed.join(' and ')}` : ''}`);
-  return 0;
+  return summary;
 }
 
 /**
@@ -2536,7 +2564,8 @@ function workCommands(io, args) {
       if (first !== 'add' || !second || rest.length) {
         throw new Refused('USAGE', `pullboard blueprint add <name or file>; bundled: ${bundledBlueprints().join(', ')}`);
       }
-      return await addBlueprint(ctx, board, me, readBlueprint(second, io.cwd));
+      await addBlueprint(ctx, board, me, readBlueprint(second, io.cwd));
+      return 0;
     }),
     fact: () => act(async (ctx, board, me) => {
       if (!first || !second || rest.length !== 1) throw new Refused('USAGE', 'pullboard fact <id> <kind> <text> [--supersedes <fact-id>] [--ref path:lines@full-sha]');
