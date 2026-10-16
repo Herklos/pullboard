@@ -43,6 +43,6 @@
   "homepage": "https://pullboard.dev",
   "scripts": {
     "test": "node bin/run-tests.js",
-    "gate": "node bin/pullboard.js spec check && npm test"
+    "gate": "node test/wall-clock-budgets.js && node bin/pullboard.js spec check && npm test"
   }
 }
