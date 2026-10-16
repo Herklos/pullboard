@@ -83,7 +83,7 @@ async function journeyRelaySite(box, localOrigin) {
         res.writeHead(204, {
           'access-control-allow-origin': JOURNEY_HOSTED,
           'access-control-allow-credentials': 'true',
-          'access-control-allow-methods': 'GET, POST, DELETE, OPTIONS',
+          'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS',
           'access-control-allow-headers': req.headers['access-control-request-headers'] || 'content-type',
           'access-control-allow-private-network': 'true',
           vary: 'Origin',
