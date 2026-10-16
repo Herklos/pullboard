@@ -1,7 +1,7 @@
 /** Durable sealed request intake and ordinary-move receipts; no replica executes CLI intent [H12,H16]. */
 import * as store from './board.js';
 import { createHash } from 'node:crypto';
-import { refusalDocument } from './json.js';
+import { recordedRefusal } from './recorded-refusal.js';
 import { Refused } from './refused.js';
 import { validatePersonRequest } from './person-request.js';
 import { relayMoveActor } from './relay-sender.js';
@@ -44,7 +44,7 @@ export function receivePersonRequest(board, document, { sequence, at, sender }) 
       request = validatePersonRequest(document);
     } catch (cause) {
       if (!(cause instanceof Refused)) throw cause;
-      error = refusalDocument(cause).error;
+      error = recordedRefusal(cause);
     }
     const id = request?.id ?? (typeof document?.id === 'string' && /^[A-Za-z0-9_-]{1,80}$/u.test(document.id) ? document.id : 'refused-' + sequence);
     const previous = records.find(record => record.id === id);
@@ -53,7 +53,7 @@ export function receivePersonRequest(board, document, { sequence, at, sender }) 
     if (previous && !error && previous.encoded === encoded) {
       record = { ...previous, sequence, received, duplicateOf: previous.sequence };
     } else {
-      if (previous) error = refusalDocument(new Refused('PERSON_REQUEST_ID', 'this request id already names different intent; reload the paired view and send a new request')).error;
+      if (previous) error = recordedRefusal(new Refused('PERSON_REQUEST_ID', 'this request id already names different intent; reload the paired view and send a new request'));
       record = { id: previous ? id + '-' + sequence : id, sequence, at, by: sender?.kind === 'person' ? 'person' : sender?.agent ?? '(unknown sender)', move: request?.move ?? null,
         encoded, received, status: error ? 'refused' : 'waiting', ...(error ? { error } : {}) };
       if (error) {
