@@ -5,15 +5,31 @@
  * write.
  */
 import { accessSync, appendFileSync, constants as fsConstants, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { delimiter, basename, join, resolve } from 'node:path';
+import { delimiter, basename, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
+import { userInfo } from 'node:os';
 import { CONFIG_FILE, COORDINATOR, doctrineFile, loadConfig } from './config.js';
 import { loadDoctrine } from './doctrine.js';
 import { installHooks } from './hooks.js';
+import { machineHome } from './machine-home.js';
 import { Refused } from './refused.js';
 import { installSkills } from './skills.js';
-import { AGENTS_END, AGENTS_START, agentsBlock, configTemplate, practiceTemplate, specTemplate } from './templates.js';
+import {
+  AGENTS_END, AGENTS_START, agentsBlock, claudeLoopRules, codexLoopRules, configTemplate,
+  plainGateWords, practiceTemplate, specTemplate,
+} from './templates.js';
 
 const NPM_DEFAULT_TEST = 'echo "Error: no test specified" && exit 1';
+
+/** Keep an automatic machine-home write grant below the OS user home and away from filesystem roots. */
+export function machineHomeWriteScopeIsNarrow(machinePath, userHome = userInfo().homedir) {
+  const target = resolve(machinePath);
+  const home = resolve(userHome);
+  if (target === parse(target).root) return false;
+  const homeFromTarget = relative(target, home);
+  const targetContainsHome = homeFromTarget === '' || (homeFromTarget !== '..'
+    && !homeFromTarget.startsWith(`..${sep}`) && !isAbsolute(homeFromTarget));
+  return !targetContainsHome;
+}
 
 /**
  * Detect an existing ecosystem's test command without running it during setup (I1, I2).
@@ -247,12 +263,116 @@ function writeSessionHook(root, onWrite) {
 }
 
 /**
+ * Merge Claude project rules and the exact machine-home sandbox write scope, preserving other settings.
+ *
+ * @param {string} root
+ * @param {string} gate
+ * @param {(path: string) => void} onWrite
+ * @returns {string} A concise setup note.
+ */
+function writeClaudeLoopPermissions(root, gate, onWrite) {
+  const file = join(root, '.claude', 'settings.json');
+  let settings = {};
+  if (existsSync(file)) {
+    try {
+      settings = JSON.parse(readFileSync(file, 'utf8'));
+    } catch {
+      settings = null;
+    }
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+      return 'kept .claude/settings.json because it is not a JSON object; add the Pullboard allow rules manually';
+    }
+  }
+  const current = settings.permissions;
+  if (current !== undefined && (!current || typeof current !== 'object' || Array.isArray(current))) {
+    return 'kept .claude/settings.json because permissions is not an object; add the Pullboard allow rules manually';
+  }
+  const permissions = current ?? {};
+  const allow = permissions.allow;
+  if (allow !== undefined && !Array.isArray(allow)) {
+    return 'kept .claude/settings.json because permissions.allow is not an array; add the Pullboard allow rules manually';
+  }
+  const existing = allow ?? [];
+  const requested = claudeLoopRules({ gate });
+  const missing = requested.filter(rule => !existing.includes(rule));
+  const sandbox = settings.sandbox;
+  if (sandbox !== undefined && (!sandbox || typeof sandbox !== 'object' || Array.isArray(sandbox))) {
+    return 'kept .claude/settings.json because sandbox is not an object; add the Pullboard machine-home sandbox write path manually';
+  }
+  const currentFilesystem = sandbox?.filesystem;
+  if (currentFilesystem !== undefined && (!currentFilesystem || typeof currentFilesystem !== 'object' || Array.isArray(currentFilesystem))) {
+    return 'kept .claude/settings.json because sandbox.filesystem is not an object; add the Pullboard machine-home sandbox write path manually';
+  }
+  const filesystem = currentFilesystem ?? {};
+  const allowWrite = filesystem.allowWrite;
+  if (allowWrite !== undefined && !Array.isArray(allowWrite)) {
+    return 'kept .claude/settings.json because sandbox.filesystem.allowWrite is not an array; add the Pullboard machine-home sandbox write path manually';
+  }
+  const machinePath = machineHome();
+  const machinePathIsNarrow = machineHomeWriteScopeIsNarrow(machinePath);
+  const machineWrites = allowWrite ?? [];
+  const missingMachineWrite = machinePathIsNarrow && !machineWrites.includes(machinePath);
+  if (missing.length || missingMachineWrite) {
+    settings.permissions = { ...permissions, allow: [...existing, ...missing] };
+    if (missingMachineWrite) {
+      settings.sandbox = {
+        ...sandbox,
+        filesystem: { ...filesystem, allowWrite: [...machineWrites, machinePath] },
+      };
+    }
+    mkdirSync(join(root, '.claude'), { recursive: true });
+    writeFileSync(file, `${JSON.stringify(settings, null, 2)}\n`);
+    onWrite('.claude/settings.json');
+  }
+  const gateWords = plainGateWords(gate);
+  const gateNote = gateWords ? `, and the detected gate (${gateWords.join(' ')})` : gate ? '; the configured shell gate was left for manual approval' : '';
+  const editNote = requested.some(rule => rule.startsWith('Edit(')) ? ', plus edits within this worktree' : '';
+  const permissionsNote = missing.length ? `allowed Claude Code's Pullboard loop and listed Git commands${gateNote}${editNote}` : 'kept the existing Claude Code Pullboard permissions';
+  const machineWriteNote = !machinePathIsNarrow
+    ? 'did not grant machine-home write because it is the OS home, an ancestor of the OS home, or a filesystem root; choose a narrower PULLBOARD_MACHINE_HOME'
+    : missingMachineWrite ? 'added the exact Pullboard machine-home Bash write path' : 'kept the existing exact Pullboard machine-home Bash write path';
+  return `${permissionsNote}; ${machineWriteNote}; an admin-required sandbox may ignore project-level write additions; existing deny and ask rules still apply`;
+}
+
+/**
+ * Write project-local Codex command rules without touching the user's home or active-session config.
+ *
+ * @param {string} root
+ * @param {string} gate
+ * @param {(path: string) => void} onWrite
+ * @returns {string} A concise setup note.
+ */
+function writeCodexLoopRules(root, gate, onWrite) {
+  const file = join(root, '.codex', 'rules', 'pullboard.rules');
+  const machinePath = machineHome();
+  const rules = codexLoopRules(gate);
+  let contents = '';
+  if (existsSync(file)) contents = readFileSync(file, 'utf8');
+  const lines = new Set(contents.split(/\r?\n/u));
+  const missing = rules.filter(rule => !lines.has(rule));
+  if (missing.length) {
+    mkdirSync(join(root, '.codex', 'rules'), { recursive: true });
+    const prefix = contents && !contents.endsWith('\n') ? `${contents}\n` : contents;
+    writeFileSync(file, `${prefix}${missing.join('\n')}\n`);
+    onWrite('.codex/rules/pullboard.rules');
+  }
+  const gateNote = plainGateWords(gate) ? '' : gate ? '; the configured shell gate was left for manual approval' : '';
+  const rulesNote = missing.length ? `added trusted-project Codex rules for Pullboard and the listed Git commands${gateNote}` : 'kept the existing Codex project rules';
+  if (!machineHomeWriteScopeIsNarrow(machinePath)) {
+    return `${rulesNote}; trust this project and restart the session to load rules. Machine-home write was not granted because the path is the OS home, an ancestor of it, or a filesystem root; choose a narrower PULLBOARD_MACHINE_HOME`;
+  }
+  const workspaceWrite = `[sandbox_workspace_write]\nwritable_roots=${JSON.stringify([machinePath])}`;
+  const profileWrite = `${JSON.stringify(machinePath)} = "write"`;
+  return `${rulesNote}; trust this project and restart the session to load rules. For machine-home access, legacy Codex settings add:\n${workspaceWrite}\nPermission-profile users add ${profileWrite} under their existing [permissions.<active-profile>.filesystem] table instead; do not mix the two configuration formats`;
+}
+
+/**
  * Set the repo up. Must run in the main checkout, which becomes the coordinator.
  *
- * @param {{ info: { root: string, isMain: boolean }, openBoardHere: () => any, register: Function, closeBoard: Function, model?: string }} context
+ * @param {{ info: { root: string, isMain: boolean }, openBoardHere: () => any, register: Function, closeBoard: Function, model?: string, permissions?: boolean }} context
  * @returns {string[]} What happened, one line each.
  */
-export function initRepo({ info, openBoardHere, register, closeBoard, model }) {
+export function initRepo({ info, openBoardHere, register, closeBoard, model, permissions = true }) {
   if (!info.isMain) {
     throw new Refused('NOT_MAIN', 'run init in the main checkout; worktrees join a lane instead');
   }
@@ -262,7 +382,7 @@ export function initRepo({ info, openBoardHere, register, closeBoard, model }) {
   const configured = configuredGate(root);
   const written = [];
   /** Record only paths setup actually writes; unrelated files never enter its staging command. */
-  const onWrite = (path) => written.push(path);
+  const onWrite = (path) => { if (!written.includes(path)) written.push(path); };
   const notes = [
     writeNew(join(root, CONFIG_FILE), configTemplate(gate, detectFixers(root)), CONFIG_FILE, onWrite),
     writeNew(join(root, 'SPEC.md'), specTemplate(basename(root), gate), 'SPEC.md', onWrite),
@@ -276,6 +396,11 @@ export function initRepo({ info, openBoardHere, register, closeBoard, model }) {
   if (gate && (!configured || configured === gate)) {
     const gateNote = missingGateNote(root, gate);
     if (gateNote) notes.push(gateNote);
+  }
+  if (permissions) {
+    const gateForPermissions = configuredGate(root) || gate;
+    notes.push(writeClaudeLoopPermissions(root, gateForPermissions, onWrite));
+    notes.push(writeCodexLoopRules(root, gateForPermissions, onWrite));
   }
   const board = openBoardHere();
   try {
