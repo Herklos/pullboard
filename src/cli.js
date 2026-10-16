@@ -1584,7 +1584,7 @@ function setupCommands(io, { first, values }) {
       // A named blueprint is read and checked before anything is written, so an unknown name
       // or a broken file or a URL leaves the repository untouched (#678). Past that, init adds the
       // blueprint exactly as pullboard blueprint add does, through the same function.
-      const blueprint = values.blueprint === undefined ? null : readBlueprint(values.blueprint, info.root);
+      const blueprint = values.blueprint === undefined ? null : readBlueprint(values.blueprint, io.cwd);
       const model = optionalModel(values.model);
       const linked = relayLinked(info.root);
       const ctx = linked && model !== undefined ? context(io) : null;
@@ -1612,7 +1612,7 @@ function setupCommands(io, { first, values }) {
         { lane: COORDINATOR, path: info.root, model },
       ]));
       // init --blueprint: the same add as pullboard blueprint add, in the same command (#678).
-      const added = blueprint ? await addBlueprintHere(io, values.blueprint, { report: false }) : null;
+      const added = blueprint ? await addBlueprintHere(io, values.blueprint, { report: false, blueprint }) : null;
       io.result?.({ root: info.root, notes, ...(added ? { blueprint: { name: added.blueprint.name, title: added.blueprint.title,
         section: added.section, waiting: added.rows.length, items: added.items.length, gate: added.gate, checksNotRun: added.checksNotRun } } : {}) });
       const staging = notes.at(-1)?.startsWith('git add -f -- ') ? notes.at(-1) : null;
@@ -2195,15 +2195,16 @@ function reportSubmission(ctx, id, commit, gate) {
 /**
  * Add a blueprint to the board of the checkout io.cwd names, exactly as pullboard blueprint add
  * does; init --blueprint calls it after setting up the repo. With report false it prints nothing
- * and leaves the command's JSON result to the caller.
+ * and leaves the command's JSON result to the caller. A caller that already read the blueprint
+ * passes it, so the file is read once: init checks it before writing anything and must add the
+ * very blueprint it checked.
  *
  * @param {any} io
- * @param {string} reference - A bundled blueprint name or a path to a blueprint file.
- * @param {{ report?: boolean }} [options]
+ * @param {string} reference - A bundled blueprint name or a path to a blueprint file, relative to io.cwd.
+ * @param {{ report?: boolean, blueprint?: ReturnType<typeof readBlueprint> }} [options]
  * @returns {Promise<BlueprintAdded>}
  */
-export async function addBlueprintHere(io, reference, { report = true } = {}) {
-  const blueprint = readBlueprint(reference, io.cwd);
+export async function addBlueprintHere(io, reference, { report = true, blueprint = readBlueprint(reference, io.cwd) } = {}) {
   const ctx = context(io);
   return await withBoard(ctx, async (board) => await addBlueprint(ctx, board, whoAmI(ctx, board), blueprint, { report }));
 }

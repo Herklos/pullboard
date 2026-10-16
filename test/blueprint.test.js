@@ -257,9 +257,10 @@ function emptyRepo() {
   });
   const repo = join(dir, 'repo');
   mkdirSync(repo);
-  const run = (...args) => runFixtureChild(process.execPath, [BIN, ...args], { cwd: repo, env, encoding: 'utf8' });
+  const runIn = (cwd, ...args) => runFixtureChild(process.execPath, [BIN, ...args], { cwd, env, encoding: 'utf8' });
+  const run = (...args) => runIn(repo, ...args);
   runFixtureGit(['init', '-q', '-b', 'main'], { cwd: repo, env });
-  return { dir, repo, run };
+  return { dir, repo, run, runIn };
 }
 
 test('init --blueprint starts a board from a blueprint [I1,S1]', () => {
@@ -314,6 +315,16 @@ test('init --blueprint starts a board from a blueprint [I1,S1]', () => {
   assert.equal(starter.item_check, 'true', 'its check is stored as written');
   assert.equal(starter.item_check_baseline ?? null, null, 'no check baseline was started');
   rmSync(outside, { recursive: true, force: true });
+
+  // Run from a subdirectory, a relative path names a file there: init reads it once, before
+  // writing anything, and adds that very blueprint.
+  const nested = emptyRepo();
+  mkdirSync(join(nested.repo, 'plans'));
+  writeFileSync(join(nested.repo, 'plans', 'local.json'), JSON.stringify({ ...PUBLISHED, name: 'local', title: 'Local plan' }));
+  const fromSub = nested.runIn(join(nested.repo, 'plans'), 'init', '--blueprint', 'local.json');
+  assert.equal(fromSub.status, 0, fromSub.stdout + fromSub.stderr);
+  assert.match(fromSub.stdout, /added the Local plan blueprint:/u, 'the file next to the caller is the one added');
+  assert.equal((JSON.parse(nested.run('list', '--json').stdout).items ?? []).length, PUBLISHED.items.length);
 
   // Plain init is unchanged: no blueprint section, no items, no summary line.
   const plain = emptyRepo();
