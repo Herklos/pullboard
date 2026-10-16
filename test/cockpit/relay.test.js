@@ -1068,10 +1068,13 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
     await chrome.waitFor('location.hash === ""', 10_000);
 
     // C's real local board is also paired on the relay so this catches duplicate-ID source preference.
-    // The client consumes pairing fragments only while a document boots, so force a new document before the second key.
+    // Start a fresh hosted document before pairing C, then wait for transport work rather than assuming C is selected.
     await chrome.send('Page.navigate', { url: 'about:blank' });
     await chrome.send('Page.navigate', { url: JOURNEY_HOSTED + '/#board=' + localRelay.board + '&key=' + encodeURIComponent(localRelayKey) });
-    await chrome.waitFor("document.querySelector('#chain')?.textContent.includes(" + JSON.stringify(duplicateTitle) + ')', 30_000);
+    await chrome.waitFor('location.hash === "" && !!JSON.parse(localStorage.getItem("pullboard.relay.keys.v1") || "{}")[' + JSON.stringify(localRelay.board) + ']', 30_000);
+    assert.ok(linked.calls.some(call => call.method === 'GET'
+      && call.path === '/api/v1/boards/' + localRelay.board + '/state' && call.browser),
+    'C’s private pairing key was consumed and its real snapshot was read by the authenticated browser');
 
     // The hosted page's real local-view handoff discovers B without a pasted key, URL or port.
     await chrome.send('Page.navigate', { url: 'about:blank' });
