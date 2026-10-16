@@ -1476,7 +1476,8 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
     await pickProject(chrome, localRow);
     await chrome.waitFor("view.root === data.projects.find(row => row.name === 'local-machine-b').root && !readOnly && !requests");
     await chrome.stable("window.__priorAct = act; window.__actOutcome = null; act = async (...args) => { const result = await window.__priorAct(...args); window.__actOutcome = result; return result; }; true");
-    await chrome.stable("document.querySelector('#new-item').click(); document.querySelector('#add-title').value = 'held local action'; true");
+    await chrome.click("document.querySelector('#new-item')");
+    await chrome.stable("document.querySelector('#add-title').value = 'held local action'; true");
     const firstHeld = stopOrigins.holdNextResponse(({ method, path }) => method === 'POST' && path === '/api/v1/boards/' + localId + '/moves');
     await chrome.stable("document.querySelector('#add-title').value = 'held local action'; document.querySelector('#add-form').requestSubmit(); true");
     const firstResponse = await firstHeld;
@@ -1484,7 +1485,8 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
     assert.ok(firstResponse.status >= 200 && firstResponse.status < 300, 'the local board accepted the real move before response delivery was held');
     await pickProject(chrome, remoteRow);
     await chrome.waitFor("view.root === data.projects.find(row => row.id === " + JSON.stringify(linkedId) + ").root && readOnly && requests");
-    await chrome.stable("document.querySelector('#new-item').click(); document.querySelector('#add-title').value = 'relay draft survives local completion'; true");
+    await chrome.click("document.querySelector('#new-item')");
+    await chrome.stable("document.querySelector('#add-title').value = 'relay draft survives local completion'; true");
     firstResponse.release();
     await chrome.waitFor('window.__actOutcome !== null');
     assert.equal(await chrome.stable('window.__actOutcome'), true, 'a local write response is parsed using the mode it started with after switching to relay');
@@ -1494,7 +1496,8 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
     // draft entered in that board's form while the response was held.
     await pickProject(chrome, localRow);
     await chrome.waitFor("view.root === data.projects.find(row => row.name === 'local-machine-b').root && !readOnly && !requests");
-    await chrome.stable("document.querySelector('#new-item').click(); document.querySelector('#add-title').value = 'second held local action'; true");
+    await chrome.click("document.querySelector('#new-item')");
+    await chrome.stable("document.querySelector('#add-title').value = 'second held local action'; true");
     const secondHeld = stopOrigins.holdNextResponse(({ method, path }) => method === 'POST' && path === '/api/v1/boards/' + localId + '/moves');
     await chrome.stable('window.__actOutcome = null; true');
     await chrome.stable("document.querySelector('#add-form').requestSubmit(); true");
@@ -1505,7 +1508,8 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
     await chrome.waitFor("view.root === data.projects.find(row => row.id === " + JSON.stringify(linkedId) + ").root && readOnly && requests");
     await pickProject(chrome, localRow);
     await chrome.waitFor("view.root === data.projects.find(row => row.name === 'local-machine-b').root && !readOnly && !requests");
-    await chrome.stable("document.querySelector('#new-item').click(); document.querySelector('#add-title').value = 'replacement local draft'; true");
+    await chrome.click("document.querySelector('#new-item')");
+    await chrome.stable("document.querySelector('#add-title').value = 'replacement local draft'; true");
     secondResponse.release();
     await chrome.waitFor('window.__actOutcome !== null');
     assert.equal(await chrome.stable("document.querySelector('#add-title').value"), 'replacement local draft', 'a completion after switching away and back preserves the replacement draft');
