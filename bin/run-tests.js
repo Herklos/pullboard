@@ -1054,6 +1054,8 @@ async function runLandingTests(args, env, concurrency) {
           if (file && details?.passed === false && (details.type === undefined || details.type === 'test') && !firstFailure) {
             // A failure a live person waiver covers does not stop the run; every other file still runs.
             if (landingFailureWaived(waivers, file, name)) { waivedFiles.set(file, waivedFiles.get(file) ?? true); return; }
+            // A file or suite failing only through its tests was decided by those tests already.
+            if (waivers.length && details.error?.failureType === 'subtestsFailed' && waivedFiles.get(file) === true) return;
             waivedFiles.set(file, false);
             firstFailure = { file, name, error: details.error };
             abortLandingRun();

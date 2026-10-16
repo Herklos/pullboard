@@ -766,6 +766,17 @@ test("a person's waiver lets a submit and a landing gate through only the waived
   assert.ok(existsSync(laterRan), 'every other file ran past the waived failure');
   assert.doesNotMatch(`${continued.out}\n${continued.err}`, /stopped early/u);
   assert.match(continued.out, new RegExp(`waived: a flaky landing check \\(${waivedFile.replaceAll('.', '\\.')}\\) by person waiver ${runnerWaiver.id} for file `, 'u'));
+  // A waiver by exact test name keeps the run going too, past the file that holds that test.
+  const namedFile = 'test/landing-named.test.cjs';
+  assert.equal(commitFile(box, box.repo, namedFile, "require('node:test').test('a named landing flake', () => { throw new Error('known flake'); });\n", 'chore: add a named flaky landing test').status, 0);
+  setGate(`node ${JSON.stringify(join(dirname(BIN), 'run-tests.js'))} --test-concurrency=1 ${namedFile} test/landing-later.test.cjs`, 'chore: gate the named flake with the real test runner');
+  const nameWaiver = json(box, box.repo, 'land', '--waive', 'a named landing flake', '--until', '2099-01-01', '--reason', 'known named flake').waiver;
+  rmSync(laterRan);
+  const named = box.run(box.repo, 'gate', '--landing');
+  assert.equal(named.code, 0, `${named.err}\n${named.out}`);
+  assert.ok(existsSync(laterRan), 'every other file ran past the failure waived by name');
+  assert.doesNotMatch(`${named.out}\n${named.err}`, /stopped early/u);
+  assert.match(named.out, new RegExp(`waived: a named landing flake \\(${namedFile.replaceAll('.', '\\.')}\\) by person waiver ${nameWaiver.id} for name a named landing flake: known named flake`, 'u'));
   setGate(gateCommand, 'chore: restore the single-stage gate');
 
   onBoard(box, (board) => {
