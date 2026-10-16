@@ -5,10 +5,12 @@
  * write.
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { userInfo } from 'node:os';
+import { basename, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { CONFIG_FILE, COORDINATOR, doctrineFile, loadConfig } from './config.js';
 import { loadDoctrine } from './doctrine.js';
 import { installHooks } from './hooks.js';
+import { machineHome } from './machine-home.js';
 import { Refused } from './refused.js';
 import { installSkills } from './skills.js';
 import {
@@ -17,6 +19,17 @@ import {
 } from './templates.js';
 
 const NPM_DEFAULT_TEST = 'echo "Error: no test specified" && exit 1';
+
+/** Keep an automatic machine-home write grant below the OS user home and away from filesystem roots. */
+export function machineHomeWriteScopeIsNarrow(machinePath, userHome = userInfo().homedir) {
+  const target = resolve(machinePath);
+  const home = resolve(userHome);
+  if (target === parse(target).root) return false;
+  const homeFromTarget = relative(target, home);
+  const targetContainsHome = homeFromTarget === '' || (homeFromTarget !== '..'
+    && !homeFromTarget.startsWith(`..${sep}`) && !isAbsolute(homeFromTarget));
+  return !targetContainsHome;
+}
 
 /**
  * Detect an existing ecosystem's test command without running it during setup (I1, I2).
@@ -189,7 +202,7 @@ function writeSessionHook(root, onWrite) {
 }
 
 /**
- * Merge only missing Claude project allow rules, preserving every unrelated setting and rule.
+ * Merge Claude project rules and the exact machine-home sandbox write scope, preserving other settings.
  *
  * @param {string} root
  * @param {string} gate
@@ -221,15 +234,43 @@ function writeClaudeLoopPermissions(root, gate, onWrite) {
   const existing = allow ?? [];
   const requested = claudeLoopRules({ gate });
   const missing = requested.filter(rule => !existing.includes(rule));
-  if (!missing.length) return 'kept the existing Claude Code Pullboard permissions';
-  settings.permissions = { ...permissions, allow: [...existing, ...missing] };
-  mkdirSync(join(root, '.claude'), { recursive: true });
-  writeFileSync(file, `${JSON.stringify(settings, null, 2)}\n`);
-  onWrite('.claude/settings.json');
+  const sandbox = settings.sandbox;
+  if (sandbox !== undefined && (!sandbox || typeof sandbox !== 'object' || Array.isArray(sandbox))) {
+    return 'kept .claude/settings.json because sandbox is not an object; add the Pullboard machine-home sandbox write path manually';
+  }
+  const currentFilesystem = sandbox?.filesystem;
+  if (currentFilesystem !== undefined && (!currentFilesystem || typeof currentFilesystem !== 'object' || Array.isArray(currentFilesystem))) {
+    return 'kept .claude/settings.json because sandbox.filesystem is not an object; add the Pullboard machine-home sandbox write path manually';
+  }
+  const filesystem = currentFilesystem ?? {};
+  const allowWrite = filesystem.allowWrite;
+  if (allowWrite !== undefined && !Array.isArray(allowWrite)) {
+    return 'kept .claude/settings.json because sandbox.filesystem.allowWrite is not an array; add the Pullboard machine-home sandbox write path manually';
+  }
+  const machinePath = machineHome();
+  const machinePathIsNarrow = machineHomeWriteScopeIsNarrow(machinePath);
+  const machineWrites = allowWrite ?? [];
+  const missingMachineWrite = machinePathIsNarrow && !machineWrites.includes(machinePath);
+  if (missing.length || missingMachineWrite) {
+    settings.permissions = { ...permissions, allow: [...existing, ...missing] };
+    if (missingMachineWrite) {
+      settings.sandbox = {
+        ...sandbox,
+        filesystem: { ...filesystem, allowWrite: [...machineWrites, machinePath] },
+      };
+    }
+    mkdirSync(join(root, '.claude'), { recursive: true });
+    writeFileSync(file, `${JSON.stringify(settings, null, 2)}\n`);
+    onWrite('.claude/settings.json');
+  }
   const gateWords = plainGateWords(gate);
   const gateNote = gateWords ? `, and the detected gate (${gateWords.join(' ')})` : gate ? '; the configured shell gate was left for manual approval' : '';
   const editNote = requested.some(rule => rule.startsWith('Edit(')) ? ', plus edits within this worktree' : '';
-  return `allowed Claude Code's Pullboard loop and listed Git commands${gateNote}${editNote}; existing deny and ask rules still apply`;
+  const permissionsNote = missing.length ? `allowed Claude Code's Pullboard loop and listed Git commands${gateNote}${editNote}` : 'kept the existing Claude Code Pullboard permissions';
+  const machineWriteNote = !machinePathIsNarrow
+    ? 'did not grant machine-home write because it is the OS home, an ancestor of the OS home, or a filesystem root; choose a narrower PULLBOARD_MACHINE_HOME'
+    : missingMachineWrite ? 'added the exact Pullboard machine-home Bash write path' : 'kept the existing exact Pullboard machine-home Bash write path';
+  return `${permissionsNote}; ${machineWriteNote}; an admin-required sandbox may ignore project-level write additions; existing deny and ask rules still apply`;
 }
 
 /**
@@ -242,18 +283,26 @@ function writeClaudeLoopPermissions(root, gate, onWrite) {
  */
 function writeCodexLoopRules(root, gate, onWrite) {
   const file = join(root, '.codex', 'rules', 'pullboard.rules');
+  const machinePath = machineHome();
   const rules = codexLoopRules(gate);
   let contents = '';
   if (existsSync(file)) contents = readFileSync(file, 'utf8');
   const lines = new Set(contents.split(/\r?\n/u));
   const missing = rules.filter(rule => !lines.has(rule));
-  if (!missing.length) return 'kept the existing Codex project rules';
-  mkdirSync(join(root, '.codex', 'rules'), { recursive: true });
-  const prefix = contents && !contents.endsWith('\n') ? `${contents}\n` : contents;
-  writeFileSync(file, `${prefix}${missing.join('\n')}\n`);
-  onWrite('.codex/rules/pullboard.rules');
+  if (missing.length) {
+    mkdirSync(join(root, '.codex', 'rules'), { recursive: true });
+    const prefix = contents && !contents.endsWith('\n') ? `${contents}\n` : contents;
+    writeFileSync(file, `${prefix}${missing.join('\n')}\n`);
+    onWrite('.codex/rules/pullboard.rules');
+  }
   const gateNote = plainGateWords(gate) ? '' : gate ? '; the configured shell gate was left for manual approval' : '';
-  return `added trusted-project Codex rules for Pullboard and the listed Git commands${gateNote}; trust this project and restart the session to load them`;
+  const rulesNote = missing.length ? `added trusted-project Codex rules for Pullboard and the listed Git commands${gateNote}` : 'kept the existing Codex project rules';
+  if (!machineHomeWriteScopeIsNarrow(machinePath)) {
+    return `${rulesNote}; trust this project and restart the session to load rules. Machine-home write was not granted because the path is the OS home, an ancestor of it, or a filesystem root; choose a narrower PULLBOARD_MACHINE_HOME`;
+  }
+  const workspaceWrite = `[sandbox_workspace_write]\nwritable_roots=${JSON.stringify([machinePath])}`;
+  const profileWrite = `${JSON.stringify(machinePath)} = "write"`;
+  return `${rulesNote}; trust this project and restart the session to load rules. For machine-home access, legacy Codex settings add:\n${workspaceWrite}\nPermission-profile users add ${profileWrite} under their existing [permissions.<active-profile>.filesystem] table instead; do not mix the two configuration formats`;
 }
 
 /**

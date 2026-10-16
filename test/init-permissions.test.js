@@ -2,8 +2,10 @@
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, parse, resolve } from 'node:path';
 import { test } from 'node:test';
+import { machineHomeWriteScopeIsNarrow } from '../src/init.js';
+import { machineHome } from '../src/machine-home.js';
 import { runFixtureChild, runFixtureGit } from './fixture-child.js';
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
@@ -48,7 +50,23 @@ function initFixture(t, { existingSettings, existingCodexRules } = {}) {
     const child = runFixtureChild(process.execPath, [BIN, 'init', ...args, '--json'], { cwd: root, env, encoding: 'utf8' });
     return { code: child.status, document: child.stdout ? JSON.parse(child.stdout) : null, stderr: child.failure ?? child.stderr };
   }
-  return { root, init };
+  return { root, env, init };
+}
+
+/** Resolve the fixture's real Pullboard machine home, while giving HOME a distinct decoy path. */
+function actualMachineHome(env) {
+  const priorHome = process.env.HOME;
+  const priorMachineHome = process.env.PULLBOARD_MACHINE_HOME;
+  try {
+    process.env.HOME = env.HOME;
+    process.env.PULLBOARD_MACHINE_HOME = env.PULLBOARD_MACHINE_HOME;
+    return machineHome();
+  } finally {
+    if (priorHome === undefined) delete process.env.HOME;
+    else process.env.HOME = priorHome;
+    if (priorMachineHome === undefined) delete process.env.PULLBOARD_MACHINE_HOME;
+    else process.env.PULLBOARD_MACHINE_HOME = priorMachineHome;
+  }
 }
 
 /** Parse Codex argv-prefix rules without depending on JSON whitespace. */
@@ -63,11 +81,20 @@ function codexPrefixes(contents) {
 }
 
 test('init grants the agent the permissions the Pullboard loop needs [I1,I2]', t => {
+  const syntheticHome = join(resolve(tmpdir()), 'permission-scope-user');
+  assert.equal(machineHomeWriteScopeIsNarrow(join(syntheticHome, '.pullboard'), syntheticHome), true, 'a private machine-home below the OS home is eligible for a write grant');
+  assert.equal(machineHomeWriteScopeIsNarrow(syntheticHome, syntheticHome), false, 'the OS home itself is never granted');
+  assert.equal(machineHomeWriteScopeIsNarrow(resolve(syntheticHome, '..'), syntheticHome), false, 'an ancestor containing the OS home is never granted');
+  assert.equal(machineHomeWriteScopeIsNarrow(parse(syntheticHome).root, syntheticHome), false, 'a filesystem root is never granted');
+
   const fresh = initFixture(t);
   const freshInit = fresh.init();
   assert.equal(freshInit.code, 0, freshInit.stderr);
   const freshSettings = JSON.parse(readFileSync(join(fresh.root, '.claude', 'settings.json'), 'utf8'));
+  const freshMachineHome = actualMachineHome(fresh.env);
   assert.ok(freshSettings.permissions?.allow?.includes('Bash(pullboard:*)'), 'fresh projects receive Claude loop rules');
+  assert.deepEqual(freshSettings.sandbox?.filesystem?.allowWrite, [freshMachineHome], 'Claude sandbox can write only to Pullboard machine home');
+  assert.notEqual(freshMachineHome, fresh.env.HOME, 'the effective machine home ignores HOME when an explicit machine-home override is set');
   const freshCodexRules = readFileSync(join(fresh.root, '.codex', 'rules', 'pullboard.rules'), 'utf8');
   assert.deepEqual(codexPrefixes(freshCodexRules), [['pullboard'], ['git', 'status'], ['git', 'diff'], ['git', 'log'], ['git', 'add'], ['git', 'commit'], ['git', 'merge'], ['git', 'rebase'], ['git', 'switch'], ['git', 'checkout'], ['git', 'worktree'], ['npm', 'test']], 'fresh projects receive only the required Codex command prefixes');
 
@@ -79,6 +106,7 @@ test('init grants the agent the permissions the Pullboard loop needs [I1,I2]', t
       ask: ['Bash(git push *)'],
       deny: ['Bash(rm -rf *)'],
     },
+    sandbox: { enabled: true, filesystem: { allowWrite: ['/tmp/existing-write'], denyWrite: ['/tmp/existing-deny'] } },
   };
   const box = initFixture(t, { existingSettings: existing, existingCodexRules: '# user rule stays\n' });
   const initialized = box.init();
@@ -91,6 +119,9 @@ test('init grants the agent the permissions the Pullboard loop needs [I1,I2]', t
   assert.ok(settings.hooks.SessionStart, 'the existing Pullboard resume hook remains installed');
   assert.deepEqual(settings.permissions.ask, existing.permissions.ask, 'existing ask rules remain unchanged');
   assert.deepEqual(settings.permissions.deny, existing.permissions.deny, 'existing deny rules remain unchanged');
+  const machineHomePath = actualMachineHome(box.env);
+  assert.deepEqual(settings.sandbox.filesystem.allowWrite, ['/tmp/existing-write', machineHomePath], 'the exact machine home is merged with existing sandbox write paths');
+  assert.deepEqual(settings.sandbox.filesystem.denyWrite, existing.sandbox.filesystem.denyWrite, 'existing sandbox deny paths remain unchanged');
   const claudeRules = settings.permissions.allow;
   for (const rule of [
     'Bash(pullboard:*)',
@@ -108,6 +139,9 @@ test('init grants the agent the permissions the Pullboard loop needs [I1,I2]', t
   assert.deepEqual(codexPrefixes(codexRules), [['pullboard'], ['git', 'status'], ['git', 'diff'], ['git', 'log'], ['git', 'add'], ['git', 'commit'], ['git', 'merge'], ['git', 'rebase'], ['git', 'switch'], ['git', 'checkout'], ['git', 'worktree'], ['npm', 'test']], 'Codex rules stay scoped to the exact loop commands');
   assert.ok(initialized.document.notes.some(note => /Claude Code.*Pullboard loop/u.test(note)), 'init says what Claude rules it added');
   assert.ok(initialized.document.notes.some(note => /trusted-project Codex rules.*trust this project and restart the session/u.test(note)), 'init explains trust and session restart for Codex rules');
+  const expectedLegacyCodex = `[sandbox_workspace_write]\nwritable_roots=${JSON.stringify([machineHomePath])}`;
+  assert.ok(initialized.document.notes.some(note => note.includes(expectedLegacyCodex)), 'Codex setup prints the exact machine-home legacy workspace-write lines');
+  assert.ok(initialized.document.notes.some(note => /permission-profile users.*existing \[permissions\.<active-profile>\.filesystem\].*do not mix/iu.test(note)), 'Codex setup explains the permission-profile alternative without mixing config systems');
 
   const settingsBytes = readFileSync(settingsPath, 'utf8');
   const codexBytes = readFileSync(codexPath, 'utf8');
@@ -128,9 +162,11 @@ test('init grants the agent the permissions the Pullboard loop needs [I1,I2]', t
   const skipSettingsPath = join(skipExisting.root, '.claude', 'settings.json');
   const skipCodexPath = join(skipExisting.root, '.codex', 'rules', 'pullboard.rules');
   const skipPermissions = JSON.parse(readFileSync(skipSettingsPath, 'utf8')).permissions;
+  const skipSandbox = JSON.parse(readFileSync(skipSettingsPath, 'utf8')).sandbox;
   const skipCodexBytes = readFileSync(skipCodexPath, 'utf8');
   const skipExistingResult = skipExisting.init('--no-permissions');
   assert.equal(skipExistingResult.code, 0, skipExistingResult.stderr);
   assert.deepEqual(JSON.parse(readFileSync(skipSettingsPath, 'utf8')).permissions, skipPermissions, '--no-permissions preserves existing Claude permissions');
+  assert.deepEqual(JSON.parse(readFileSync(skipSettingsPath, 'utf8')).sandbox, skipSandbox, '--no-permissions preserves existing sandbox scope');
   assert.equal(readFileSync(skipCodexPath, 'utf8'), skipCodexBytes, '--no-permissions preserves existing Codex rules byte-for-byte');
 });
