@@ -4,8 +4,8 @@
  * the main checkout as the coordinator. It runs again safely and never overwrites a file it did not
  * write.
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { accessSync, appendFileSync, constants as fsConstants, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { delimiter, basename, join, resolve } from 'node:path';
 import { CONFIG_FILE, COORDINATOR, doctrineFile, loadConfig } from './config.js';
 import { loadDoctrine } from './doctrine.js';
 import { installHooks } from './hooks.js';
@@ -36,6 +36,67 @@ export function detectGate(root) {
     if (existsSync(join(root, name)) && readFileSync(join(root, name), 'utf8').includes(`[${section}]`)) return 'pytest';
   }
   return '';
+}
+
+/** Check whether a command can be found on PATH or in a named project environment without running it. */
+function gateCommandAvailable(root, command) {
+  /** Check one file without executing it or resolving arbitrary shell syntax. */
+  const executableFile = (file) => {
+    try {
+      const info = statSync(file);
+      if (!info.isFile()) return false;
+      if (process.platform === 'win32') return true;
+      accessSync(file, fsConstants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  /** Return platform command-name variants for a directory lookup. */
+  const commandFiles = (directory) => {
+    const base = join(directory, command);
+    if (process.platform !== 'win32' || /\.[^\\/]+$/u.test(command)) return [base];
+    return (process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').map((extension) => `${base}${extension}`);
+  };
+  /** Check a PATH directory entry, using the process working directory for an empty entry. */
+  const onPath = (directory) => {
+    return commandFiles(directory || process.cwd()).some(executableFile);
+  };
+  if ((process.env.PATH ?? '').split(delimiter).some(onPath)) return true;
+
+  /** Check conventional executable directories inside a named environment. */
+  const hasEnvironmentCommand = (environment) => [
+    ...commandFiles(join(environment, 'bin')),
+    ...commandFiles(join(environment, 'Scripts')),
+  ].some(executableFile);
+
+  const environments = new Set([join(root, '.venv')]);
+  if (process.env.UV_PROJECT_ENVIRONMENT) {
+    const configured = process.env.UV_PROJECT_ENVIRONMENT;
+    environments.add(resolve(root, configured));
+  }
+  if (process.env.POETRY_ACTIVE && process.env.VIRTUAL_ENV) environments.add(process.env.VIRTUAL_ENV);
+  if ([...environments].some(hasEnvironmentCommand)) return true;
+  return false;
+}
+
+/** Describe a detected gate that init cannot resolve without executing it. */
+function missingGateNote(root, gate) {
+  if (!gate) return '';
+  const command = gate.trim().split(/\s+/u)[0];
+  if (gateCommandAvailable(root, command)) return '';
+  if (command === 'pytest') {
+    const hasPoetry = existsSync(join(root, 'poetry.lock'));
+    const hasUv = existsSync(join(root, 'uv.lock')) || Boolean(process.env.UV_PROJECT_ENVIRONMENT);
+    const searched = ['PATH', 'project `.venv`'];
+    if (process.env.UV_PROJECT_ENVIRONMENT) searched.push('configured uv environment');
+    if (process.env.POETRY_ACTIVE && process.env.VIRTUAL_ENV) searched.push('active Poetry environment');
+    const setupHint = hasUv ? 'run `uv sync` and activate its `.venv`'
+      : hasPoetry ? 'run `poetry install` and activate that environment'
+        : 'install pytest or activate the project `.venv`';
+    return `gate command "pytest" is not available on ${searched.join(', ')}; ${setupHint} before running it`;
+  }
+  return `gate command "${command}" is not available on PATH; install it before running the gate`;
 }
 
 /**
@@ -198,6 +259,7 @@ export function initRepo({ info, openBoardHere, register, closeBoard, model }) {
   const { root } = info;
   const doctrine = existsSync(join(root, CONFIG_FILE)) ? loadConfig(root).practice : doctrineFile(root);
   const gate = detectGate(root);
+  const configured = configuredGate(root);
   const written = [];
   /** Record only paths setup actually writes; unrelated files never enter its staging command. */
   const onWrite = (path) => written.push(path);
@@ -211,6 +273,10 @@ export function initRepo({ info, openBoardHere, register, closeBoard, model }) {
     ...installSkills(root, onWrite),
     writeSessionHook(root, onWrite),
   ];
+  if (gate && (!configured || configured === gate)) {
+    const gateNote = missingGateNote(root, gate);
+    if (gateNote) notes.push(gateNote);
+  }
   const board = openBoardHere();
   try {
     register(board, { lane: COORDINATOR, path: root, model });
