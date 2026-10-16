@@ -651,27 +651,28 @@ test('a failed test completion without a type still stops a landing run [C7,V4]'
   const fixture = makeLandingStopFixture(t);
   const preload = join(fixture.root, 'untyped-completion.mjs');
   const delivered = join(fixture.root, 'untyped-completion-delivered');
-  writeFileSync(preload, `import nodeTest from 'node:test';
-import { syncBuiltinESMExports } from 'node:module';
+  writeFileSync(preload, `import { EventEmitter } from 'node:events';
 import { writeFileSync } from 'node:fs';
-const originalRun = nodeTest.run;
-nodeTest.run = options => originalRun({ ...options, setup(tests) {
-  const originalOn = tests.on;
-  tests.on = function(type, listener) {
-    if (type !== 'test:complete') return originalOn.call(this, type, listener);
-    return originalOn.call(this, type, function(data) {
-      if (data.details?.passed === false && (data.details.type === undefined || data.details.type === 'test')) {
-        const details = { ...data.details };
-        delete details.type;
-        writeFileSync(${JSON.stringify(delivered)}, 'delivered');
-        return listener.call(this, { ...data, details });
-      }
-      return listener.call(this, data);
-    });
+// Prefix-only node:test exports are not updated by syncBuiltinESMExports.
+// Intercept the real listener's event while preserving the reporter stream's original object.
+if (process.argv[1] === ${JSON.stringify(fixture.runner)}) {
+  const originalEmit = EventEmitter.prototype.emit;
+  /** Deliver an untyped completion only for the intentional failure in this private fixture. */
+  EventEmitter.prototype.emit = function(type, ...args) {
+    const data = args[0];
+    if (type === 'test:complete' && data?.file === ${JSON.stringify(join(fixture.root, 'test/02-failing.test.js'))}
+      && data.details?.passed === false
+      && (data.details.type === undefined || data.details.type === 'test')) {
+      const details = { ...data.details };
+      delete details.type;
+      args[0] = { ...data, details };
+      const result = originalEmit.call(this, type, ...args);
+      writeFileSync(${JSON.stringify(delivered)}, 'delivered');
+      return result;
+    }
+    return originalEmit.call(this, type, ...args);
   };
-  return options.setup?.(tests);
-} });
-syncBuiltinESMExports();
+}
 `);
   const env = {
     ...process.env,

@@ -1028,7 +1028,7 @@ async function runLandingTests(args, env, concurrency) {
         tests.on('test:complete', data => {
           const { file, name, details } = data;
           // Node 22.13 leaves ordinary/file completions untyped; newer versions label them as tests.
-          if (file && details?.passed === false && (details.type === undefined || details.type === 'test') && !firstFailure) {
+          if (file && details?.type === 'test' && details.passed === false && !firstFailure) {
             firstFailure = { file, name, error: details.error };
             abortLandingRun();
           }
