@@ -154,6 +154,24 @@ test('gate after init in an existing repo says to commit the init files [I1,C7]'
   const otherMissing = JSON.parse(detached.stdout).error;
   assert.equal(otherMissing.code, 'NO_POLICY');
   assert.doesNotMatch(otherMissing.message, /uncommitted/u, 'a committed config never gets the commit-your-setup message');
+
+  // Git metadata kept outside the project (git init --separate-git-dir) gets the same advice.
+  const separate = join(dir, 'separate');
+  mkdirSync(separate);
+  const separateGit = (...args) => runFixtureGit(args, { cwd: separate, env });
+  const separateRun = (...args) => runFixtureChild(process.execPath, [BIN, ...args], { cwd: separate, env, encoding: 'utf8' });
+  separateGit('init', '-q', '-b', 'main', '--separate-git-dir', join(dir, 'separate-metadata'));
+  writeFileSync(join(separate, 'README.md'), '# Existing repository\n');
+  separateGit('add', 'README.md');
+  separateGit('commit', '-q', '-m', 'chore: create existing repository');
+  assert.equal(separateRun('init', '--model', 'Test Coordinator').status, 0);
+  const separateRefused = separateRun('gate', '--json');
+  assert.equal(separateRefused.status, 1);
+  const separateRefusal = JSON.parse(separateRefused.stdout).error;
+  assert.equal(separateRefusal.code, 'NO_POLICY');
+  assert.match(separateRefusal.message, /pullboard\.json and Pullboard's initialized setup files are uncommitted/u,
+    'a separate Git directory still gets the commit-your-setup message');
+  assert.ok(separateRefusal.message.includes('SPEC.md') && !separateRefusal.message.includes('README.md'), separateRefusal.message);
 });
 
 test('a digest keeps the failures and the end within its cap, however long one line is [V10]', () => {

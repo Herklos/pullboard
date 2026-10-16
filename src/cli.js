@@ -1726,7 +1726,11 @@ function uncommittedPolicySetup(info) {
   const committedConfig = tryGit(info.root, ['ls-tree', '-z', primary.commit, '--', `:(literal)${CONFIG_FILE}`]);
   if (committedConfig.status !== 0 || committedConfig.stdout) return null;
 
-  const mainRoot = resolve(info.commonDir, '..');
+  // The primary checkout is info.root when the gate runs there. From a linked worktree, the
+  // common directory's parent is the primary checkout only for a plain .git directory: with
+  // git init --separate-git-dir it is unrelated, so report the original refusal instead.
+  const mainRoot = info.isMain ? info.root : basename(info.commonDir) === '.git' ? resolve(info.commonDir, '..') : null;
+  if (!mainRoot) return null;
   let config;
   try { config = loadConfig(mainRoot); }
   catch { return null; }
