@@ -563,8 +563,8 @@ function landingChildCommandMatchesSpawn(processInfo, receipt) {
   });
 }
 
-/** Keep the established healthy-worker path: snapshot only detached children at spawn time. */
-function watchLandingChildSpawns(startsPath, attempt) {
+/** Snapshot detached children at spawn time, retaining worker uncertainty when that snapshot fails. */
+function watchLandingChildSpawns(startsPath, attempt, file = null) {
   let recording = false;
   channel('child_process').subscribe(({ process: child }) => {
     if (recording || !child || typeof child.once !== 'function') return;
@@ -579,7 +579,18 @@ function watchLandingChildSpawns(startsPath, attempt) {
           appendFileSync(startsPath, `${JSON.stringify({ type: 'child', attempt, parentPid: process.pid,
             pid: spawned.pid, pgid: spawned.pgid, started: spawned.started })}\n`);
         }
-      } catch { /* The ancestry monitor remains the fallback if a receipt cannot be written. */ }
+      } catch (error) {
+        // A worker can exit before the next ancestry census; absence then cannot prove its children drained.
+        if (!file) return;
+        const code = String(error?.code ?? 'snapshot-error').replace(/[\u0000-\u001f\u007f]/gu, ' ').slice(0, 80);
+        const reason = String(error?.message ?? error).replace(/[\u0000-\u001f\u007f]/gu, ' ').slice(0, 256);
+        try {
+          appendFileSync(startsPath, `${JSON.stringify({ type: 'child-snapshot-unavailable', attempt,
+            file, parentPid: process.pid, pid: child.pid, code, reason })}\n`);
+        } catch {
+          process.stderr.write(`run-tests: cleanup for ${basename(file)} UNVERIFIED: ${code}: ${reason}; no unverified process was signaled\n`);
+        }
+      }
       finally { recording = false; }
     });
   });
@@ -908,7 +919,8 @@ async function runLandingTests(args, env, concurrency) {
     const workerByPid = new Map(workerRoots.map(root => [root.pid, root]));
     let unsettledChild = false;
     for (const receipt of receipts) {
-      if (receipt.type !== 'child-announcement-unavailable' || !selectedFileSet.has(receipt.file)) continue;
+      if (!['child-announcement-unavailable', 'child-snapshot-unavailable'].includes(receipt.type)
+          || !selectedFileSet.has(receipt.file)) continue;
       unsettledChild = true;
       cleanupUnverifiedFiles.add(receipt.file);
       lastCleanupSnapshotError = { code: receipt.code, message: receipt.reason };
@@ -1377,7 +1389,7 @@ if (process.argv[1] && resolve(process.argv[1]) === runner) {
         pid: process.pid, parentPid: process.ppid, code, reason })}\n`);
       process.stderr.write(`run-tests: worker identity unavailable (${code}): ${reason}\n`);
     }
-    if (identityAvailable) watchLandingChildSpawns(startsPath, attempt);
+    if (identityAvailable) watchLandingChildSpawns(startsPath, attempt, file);
     else watchLandingChildCustody(startsPath, attempt);
   }
   if (process.env.PULLBOARD_TEST_BROWSER_RESOURCE && process.env.NODE_TEST_CONTEXT === 'child-v8'
