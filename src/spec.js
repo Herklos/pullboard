@@ -174,7 +174,9 @@ function rowFindings(row, maxWords) {
   }
   for (const signer of row.signers ?? []) if (!SIGNER_RE.test(signer)) add('error', `signer "${signer}" must be one SSH principal (no spaces or commas)`);
   if (new Set(row.signers ?? []).size !== (row.signers ?? []).length) add('error', 'signers are unique on a row');
-  const words = row.text.split(/\s+/).filter(Boolean).length;
+  // A rule's reason (" Why: ...") and a question's choices (" Choices: ...") ride on the row and
+  // are not counted: the limit keeps the requirement itself short (blueprint rows carry both).
+  const words = row.text.split(/ (?:Why|Choices): /u)[0].split(/\s+/).filter(Boolean).length;
   if (words > maxWords) add('warning', `${words} words; rows stay under ${maxWords}, the why goes elsewhere`);
   for (const part of row.unknown) add('error', `unknown field "${part}"; fields are gate, serves and signers`);
   return findings;
