@@ -193,6 +193,27 @@ The result and refusal tables are checked against `JSON_SHAPES` in `src/json.js`
 
 When `verify <id> accept` runs a frozen check and refuses with `CHECK_RED` or `CHECK_UNVERIFIED`, `error.message` includes its output digest, up to 40 sanitized tail lines, and `full output file: <path>`. The file is written with owner-only permissions. If diagnostic storage fails, the message says `full output file: (unavailable: CODE)` while retaining the bounded sanitized lines; the JSON error object remains `{ code, message, next }`. An item with no frozen check produces no check-output section.
 
+## MCP server
+
+`pullboard mcp` serves MCP tools over stdio for the agent of the checkout it starts in. The agent's own MCP client launches it from that agent's worktree, for example as a stdio server whose command is `pullboard mcp`. It speaks newline-delimited JSON-RPC 2.0 on stdin and stdout; stdout carries only protocol messages and diagnostics go to stderr. The server opens no network connection and needs no dependency. It exits when the client closes stdin. It takes no arguments, and `--json` is refused with `USAGE` because stdout belongs to the protocol.
+
+It answers `initialize` with `protocolVersion` (the client's, when it is `2025-06-18`, `2025-03-26` or `2024-11-05`, otherwise `2025-06-18`), `capabilities: {tools: {}}`, `serverInfo: {name: "pullboard", version}` and `instructions` naming the seat's agent. It also answers `ping`, `tools/list` and `tools/call`; notifications such as `notifications/initialized` get no reply, and any other method gets JSON-RPC error `-32601`.
+
+| Tool | Input schema | Mirrors | Result |
+| --- | --- | --- | --- |
+| `board_status` | `{}` | `pullboard status` and `pullboard list` | the `status` document plus `items` (open and active items) and `needsYou`: the `decisions` and `holds` fields of the view's board projection, unshaped, as the view's Needs-you reads them; spec rows that need the person come with #702 |
+| `show_item` | `{id: integer}` | `pullboard show <id>` | the `show` document |
+| `shout` | `{to: string, text: string}` | `pullboard shout <to> <text>` | the `shout` document |
+| `capture_idea` | `{text: string}` | `pullboard shout coordinator "idea: <text>"` | the `shout` document; until ideas become their own kind of item, an idea is a shout to the coordinator whose text starts `idea: ` |
+
+`needsYou` is read-only and comes from the same projection as the local API's board state and the view: `decisions` are the open decisions addressed to the person and `holds` the held lanes. It carries no spec rows yet; spec rows that need the person come with #702. Building that projection reads every item and the spec file's history, so `board_status` is slower on large boards than the other tools.
+
+Every input schema sets `additionalProperties: false`; an unknown argument or a value of the wrong type returns `BAD_REQUEST`. A value of the right type goes to the CLI as it is, so a blank shout returns the CLI's `EMPTY_SHOUT` and item `0` its `USAGE`. No argument names an author, a seat or a channel: the author of every move is the agent of the checkout the server runs in.
+
+Each tool runs the CLI command it mirrors through the same engine as the terminal and the local API, with its arguments as distinct argv entries after `--`, so a move records the same events and a refusal carries the CLI's own `code`, `message` and `next`. A result's `content` is one `text` part holding the versioned JSON document, which `structuredContent` repeats. A refusal is a result with `isError: true` and the versioned refusal document. A tool name the server does not offer gets JSON-RPC error `-32602` with an `UNKNOWN_TOOL` refusal in `data`.
+
+A person's own moves never come through MCP (P6). A tool call that names one (approving or declining rows, answering a decision, signing off) returns `HUMAN_REQUIRED` before any argument is read, whatever the client claims in its arguments, `_meta`, `clientInfo` or environment, and from any seat, including the main checkout. Every engine call the server makes also carries the `mcp` channel, which the CLI's own person check refuses. The refusal's `next` says to ask the coordinator to bring the call to the person. Live notifications over MCP are not offered yet.
+
 ## Local HTTP API v1
 
 Run `pullboard serve --port 0` to print a private API address on `127.0.0.1`. Authenticate each call with the address's `k` query parameter, an `X-Pullboard-Key` header, or `Authorization: Bearer <key>`. The secret belongs to that server session. Board ids are random 128-bit values stored in each board; reopening or moving a repo preserves its id.
