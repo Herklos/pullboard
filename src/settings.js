@@ -25,6 +25,12 @@ export function loadMachineSettings() {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Refused('BAD_MACHINE_SETTINGS', `settings in ${file} must be a JSON object; fix it before running Pullboard`);
   }
+  if (value.gate !== undefined && (!value.gate || typeof value.gate !== 'object' || Array.isArray(value.gate))) {
+    throw new Refused('BAD_MACHINE_SETTINGS', `gate in ${file} must be an object; fix it before running Pullboard`);
+  }
+  if (value.gate?.browserFreeChecks !== undefined && typeof value.gate.browserFreeChecks !== 'boolean') {
+    throw new Refused('BAD_MACHINE_SETTINGS', `gate.browserFreeChecks in ${file} must be true or false`);
+  }
   const gateSlots = value.gateSlots ?? DEFAULT_GATE_SLOTS;
   if (!Number.isSafeInteger(gateSlots) || gateSlots < 1) {
     throw new Refused('BAD_GATE_SLOTS', `gateSlots in ${file} must be a positive integer; run pullboard settings gateSlots <n>`);
@@ -42,6 +48,11 @@ export function loadMachineSettings() {
     seen.add(runner.host);
   }
   return { ...value, gateSlots, browserSlots, ...(runners.length ? { runners } : {}) };
+}
+
+/** Browser-free check admission is deliberately opt-in per machine. */
+export function browserFreeChecksEnabled() {
+  return loadMachineSettings().gate?.browserFreeChecks === true;
 }
 
 /** Atomically replace machine settings without exposing a partial JSON file. */
