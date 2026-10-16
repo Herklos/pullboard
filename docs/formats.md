@@ -359,6 +359,8 @@ Migration preserves event rows and adds only schema objects that are missing.
 
 `pullboard.json` may set `affectedTests` to a command prefix that runs selected test files. When it is absent, `submit` runs the configured `gate` in full. When present and the import graph can safely select a subset, Pullboard appends the selected file paths to this prefix; an uncertain selection still runs the full gate. For example, this repository opts in with `"affectedTests": "node bin/run-tests.js"`. Projects using another test framework can leave the setting out and keep their configured gate, such as `npm test`.
 
+A project with `"submitGate": "landing"` can also set `"submitInvariants": ["test/guard.test.js"]` to run a small set of project guard files on every submit, even when uncertain selection defers the full suite. The list defaults to empty and requires the project's explicit `affectedTests` runner; no framework or test files are added by default. Submit reads the list and its runner from accepted main, so a candidate cannot remove or replace its required files. Named affected tests and invariants run once per file, with their paths and results in the receipt. Missing invariant files refuse the submit, and subset passes never stamp the full gate. The coordinator still runs the configured full suite at landing.
+
 <!-- pass-rule:start -->
 The `pass` event is emitted by `passDecision` only for the coordinator; another agent receives `COORDINATOR_ONLY`. Its event actor is the coordinator. The person receives the passed decision, while the event table records who performed the pass.
 <!-- pass-rule:end -->
