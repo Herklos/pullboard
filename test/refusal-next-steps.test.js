@@ -44,6 +44,21 @@ test('every refusal names a next step that works [P4,I1,I2]', async () => {
   assert.equal(refusalDocument(new Refused('REMOTE_COORDINATOR_MODEL',
     "the coordinator's model is declared on its own checkout; run pullboard join coordinator there")).error.next,
   'run pullboard join coordinator there', 'a coordinator description does not hide the later recovery action');
+  assert.equal(refusalDocument(new Refused('PENDING_REFREEZE',
+    'item #12 has a pending correction.\nnext: pullboard refreeze 12')).error.next,
+  'pullboard refreeze 12', 'an existing specific next line survives serialization');
+  assert.equal(refusalDocument(new Refused('GATE_RED',
+    'the submission proof is red.\nnext: land #12 first, then submit again', 'fix the gate and retry')).error.next,
+  'land #12 first, then submit again', 'an inherited failure retains its specific recovery');
+  assert.equal(refusalDocument(new Refused('GATE_RED',
+    'the submission proof is red.\nnext: land #12 first, then submit again')).error.message,
+  'the submission proof is red.\nnext: land #12 first, then submit again', 'JSON retains the original message');
+  assert.equal(refusalDocument(new Refused('GATE_RED',
+    'reported output:\nnext: an unrelated printed line\nend of report', 'repair this fixture')).error.next,
+  'repair this fixture', 'nonterminal report text cannot override contextual recovery');
+  assert.equal(refusalDocument(new Refused('GATE_RED',
+    'the submission proof is red.', 'repair this fixture, commit, and submit again')).error.next,
+  'repair this fixture, commit, and submit again', 'contextual recovery remains explicit without a message next line');
 
   const box = e2e.sandbox();
   box.env.PULLBOARD_MODEL = 'Refusal Fixture Model';
@@ -85,6 +100,7 @@ test('every refusal names a next step that works [P4,I1,I2]', async () => {
   assert.equal((red.err.match(/\[GATE_RED\]/gu) ?? []).length, 1, `${red.out}\n${red.err}`);
   assert.equal((red.err.match(/GATE_FAILURE_MARKER/gu) ?? []).length, 1, `the failure report appears once\n${red.out}\n${red.err}`);
   assert.match(red.err, /next: .*fix.*commit.*submit/iu);
+  assert.equal((red.err.match(/^next: /gmu) ?? []).length, 1, 'plain refusals print one recovery footer');
   rmSync(join(gateWeb, 'web', 'RED'));
   gateBox.git(gateWeb, 'add', '-u');
   gateBox.git(gateWeb, 'commit', '-q', '-m', 'test: fix gate fixture [G1]');

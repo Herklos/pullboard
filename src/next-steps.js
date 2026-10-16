@@ -359,8 +359,8 @@ function stepInMessage(message) {
 }
 
 /**
- * The next step for one refusal: the step its raise site passed, else the one its message spells
- * out, else this code's row. Unknown remote codes ask the service owner about the displayed refusal.
+ * The next step for one refusal: its existing final next line, else the step its raise site passed,
+ * else prose guidance or this code's row. Unknown remote codes name the service owner and rule.
  *
  * @param {{ code?: string, next?: string } | null | undefined} error
  * @param {string} message
@@ -368,6 +368,8 @@ function stepInMessage(message) {
  */
 export function nextStepFor(error, message) {
   const code = typeof error?.code === 'string' ? error.code : '';
+  const finalStep = /(?:^|\r?\n)next:[ \t]*([^\r\n]*\S)[ \t]*(?:\r?\n)*$/u.exec(String(message))?.[1];
+  if (finalStep) return finalStep.trim();
   if (typeof error?.next === 'string' && error.next.trim()) return error.next.trim();
   if (code === 'SPEC_BEHIND_MAIN') return NEXT_STEPS.SPEC_BEHIND_MAIN;
   return stepInMessage(message) ?? NEXT_STEPS[code]

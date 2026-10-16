@@ -850,14 +850,15 @@ function agentRefusalText(message, code, name) {
   return patterns[code] ? message.replace(patterns[code], (_, before, id, after) => `${before}${name(id)}${after}`) : message;
 }
 
-/** Read current display settings for text refusals; the structured error retains its stable identifiers. */
+/** Render the refusal body without its existing final footer; structured errors retain the message. */
 function displayedRefusal(io, error) {
-  if (!['ALREADY_JOINED', 'HELD', 'ITEM_HELD', 'LANE_HELD', 'REVIEW_HELD', 'NOT_YOURS', 'NOT_YOUR_DECISION', 'NO_AGENT', 'NOT_YOUR_CHECKOUT', 'FACT_JUDGEMENT', 'RELAY_PERSON_ONLY', 'RELAY_SENDER_MISMATCH', 'SELF_SHOUT', 'NO_READER'].includes(error.code)) return error.message;
+  const message = error.message.replace(/\r?\nnext:[ \t]*[^\r\n]*\S[ \t]*(?:\r?\n)*$/u, '');
+  if (!['ALREADY_JOINED', 'HELD', 'ITEM_HELD', 'LANE_HELD', 'REVIEW_HELD', 'NOT_YOURS', 'NOT_YOUR_DECISION', 'NO_AGENT', 'NOT_YOUR_CHECKOUT', 'FACT_JUDGEMENT', 'RELAY_PERSON_ONLY', 'RELAY_SENDER_MISMATCH', 'SELF_SHOUT', 'NO_READER'].includes(error.code)) return message;
   try {
     const ctx = context(io);
     const agents = withBoard(ctx, (board) => store.listAgents(board));
-    return agentRefusalText(error.message, error.code, (id) => agentDisplayName(agents, ctx.config, id));
-  } catch { return error.message; }
+    return agentRefusalText(message, error.code, (id) => agentDisplayName(agents, ctx.config, id));
+  } catch { return message; }
 }
 
 /** Label the holder at the start of a generated wait reason without rewriting its quoted reason. */
