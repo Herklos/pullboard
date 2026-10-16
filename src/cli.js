@@ -44,9 +44,11 @@ import { promptFor, skillProblems, updateSkills } from './skills.js';
 import {
   frozenCriterion,
   idProblems,
+  insertSectionRows,
   lintSpec,
   loadSpec,
   legacyDoctrineRenameBase,
+  nextRowId,
   permanenceProblems,
   parseSpec,
   readSignoffs,
@@ -54,6 +56,7 @@ import {
   standings,
   unmetRows,
 } from './spec.js';
+import { bundledBlueprints, planBlueprint, readBlueprint } from './blueprints.js';
 import { briefFiles } from './brief.js';
 import { checkBaseline, prepareCheckBaseline, sayCheckBaseline } from './check-baseline.js';
 import { retryCheckBaselines, startCheckBaseline } from './check-baseline-worker.js';
@@ -2177,6 +2180,116 @@ function reportSubmission(ctx, id, commit, gate) {
 }
 
 /**
+ * Add a blueprint to the board of the checkout io.cwd names, exactly as pullboard blueprint add
+ * does; init --blueprint calls it after setting up the repo. With report false it prints nothing
+ * and leaves the command's JSON result to the caller.
+ *
+ * @param {any} io
+ * @param {string} reference - A bundled blueprint name or a path to a blueprint file.
+ * @param {{ report?: boolean }} [options]
+ * @returns {Promise<BlueprintAdded>}
+ */
+export async function addBlueprintHere(io, reference, { report = true } = {}) {
+  const blueprint = readBlueprint(reference, io.cwd);
+  const ctx = context(io);
+  return await withBoard(ctx, async (board) => await addBlueprint(ctx, board, whoAmI(ctx, board), blueprint, { report }));
+}
+
+/**
+ * @typedef {object} BlueprintAdded
+ * @property {{ name: string, title: string, version: number }} blueprint
+ * @property {string} section - The SPEC.md section heading the rows are in.
+ * @property {{ key: string, id: string, status: string, text: string }[]} rows - New rows; each waits for the person.
+ * @property {{ id: number, key: string, title: string, lane: string, specIds: string[], after: number[], check?: string }[]} items - New open items.
+ * @property {string | null} gate - The gate set in pullboard.json, or null when it was left alone.
+ * @property {boolean} marked - This blueprint version was already on the board, so nothing was added.
+ * @property {number[]} checksNotRun - New items that carry a check; no check baseline ran for them.
+ */
+
+/**
+ * Add a blueprint to this board in one step (I1): its rules and questions as draft and pending rows
+ * in a new SPEC.md section, its starter items as open items citing them, and its gate when
+ * pullboard.json has none. Rows are written the way spec draft writes them, so nothing is approved;
+ * a repeat of the same blueprint version adds nothing.
+ *
+ * @param {any} ctx
+ * @param {any} board
+ * @param {{ id: string }} me
+ * @param {import('./blueprints.js').Blueprint} blueprint
+ * @param {{ report?: boolean }} [options] - With report false, print nothing and set no JSON result.
+ * @returns {Promise<BlueprintAdded>}
+ */
+async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
+  const io = report ? ctx.io : { say: () => {} };
+  const spec = loadSpec(ctx.info.root, ctx.config);
+  if (!spec.exists) throw new Refused('NO_SPEC', `no ${ctx.config.spec}; run: pullboard init`);
+  const malformed = [[spec.file, spec.problems], [ctx.doctrine.repo.file, ctx.doctrine.repo.problems]].find(([, problems]) => problems.length);
+  if (malformed) throw new Refused('SPEC_INVALID', `fix the unparsed row in ${malformed[0]} before adding a blueprint; an existing id may be ambiguous`);
+  const source = readFileSync(spec.file, 'utf8');
+  const configFile = join(ctx.info.root, CONFIG_FILE);
+  const configSource = readFileSync(configFile, 'utf8');
+  const plan = planBlueprint(blueprint, { source, spec, doctrine: ctx.doctrine,
+    existingItems: store.listItems(board, { all: true }).map((item) => ({ id: item.item_id, title: item.item_title, specIds: item.item_spec_ids ? item.item_spec_ids.split(',') : [] })),
+    gate: String(JSON.parse(configSource).gate ?? '') });
+  // Every starter is checked before anything is written, so a refusal leaves the board as it was.
+  const starters = plan.items.map((entry) => ({ key: entry.key, afterKeys: entry.after, item: { by: me.id,
+    lane: entry.lane && entry.lane !== COORDINATOR && isLane(ctx.config, entry.lane) ? entry.lane : COORDINATOR,
+    title: entry.title, criterion: entry.criterion, specIds: entry.specIds, parentId: null, after: [], brief: entry.brief, route: entry.route,
+    ...(entry.check === undefined ? {} : { check: entry.check }) } }));
+  // The same checks pullboard add uses, before anything is written. A blueprint's item check is
+  // stored, never run: no check baseline starts during add, so nothing a blueprint supplies executes.
+  for (const { item } of starters) store.validateItemAddition(board, item);
+  const files = [];
+  if (plan.specRows !== source) files.push({ file: ctx.config.spec, before: source, after: plan.specRows });
+  if (plan.gate) {
+    const newline = configSource.includes('\r\n') ? '\r\n' : '\n';
+    files.push({ file: CONFIG_FILE, before: configSource,
+      after: `${JSON.stringify({ ...JSON.parse(configSource), gate: plan.gate }, null, 2).replaceAll('\n', newline)}${newline}` });
+  }
+  const write = { records: [], files, signoffs: { before: null, receipts: [] } };
+  writeRowApply(ctx.info.root, write);
+  const added = [];
+  try {
+    // A retry starts from the starters a failed add already put on the board.
+    const byKey = { ...plan.existing };
+    for (const { key, afterKeys, item } of starters) {
+      item.after = afterKeys.map((before) => byKey[before]).filter(Boolean);
+      const id = await ordered(ctx, board, 'addItem', [item]);
+      byKey[key] = id;
+      added.push({ id, key, title: item.title, lane: item.lane, specIds: item.specIds, after: item.after, ...(item.check ? { check: item.check } : {}) });
+    }
+  } catch (error) {
+    // Items already added stay on the board; with no marker yet, a retry adds only what is missing.
+    if (!added.length) restoreRowApply(ctx.info.root, write);
+    throw error;
+  }
+  // The marker goes in last, once every row and item is on the board.
+  if (plan.specAfter !== plan.specRows) {
+    writeRowApply(ctx.info.root, { records: [], files: [{ file: ctx.config.spec, before: plan.specRows, after: plan.specAfter }], signoffs: { before: null, receipts: [] } });
+  }
+  if (plan.specAfter !== source && !files.some((file) => file.file === ctx.config.spec)) files.unshift({ file: ctx.config.spec });
+  const rows = plan.rows.map(({ key, id, status, text }) => ({ key, id, status, text }));
+  const summary = { blueprint: { name: blueprint.name, title: blueprint.title, version: blueprint.version },
+    section: plan.section.name, rows, items: added, gate: plan.gate, marked: plan.marked,
+    // Item checks are stored and never run during add; the caller tells the reader so.
+    checksNotRun: added.filter((item) => item.check).map((item) => item.id) };
+  io.result?.(summary);
+  if (plan.marked) {
+    io.say(`${blueprint.title} (version ${blueprint.version}) is already on this board; nothing added`);
+    return summary;
+  }
+  io.say(`added ${blueprint.title} (version ${blueprint.version}) as drafts in ${ctx.config.spec}, section ${plan.section.name}`);
+  for (const row of rows) io.say(`  ${row.id} ${row.status}  ${row.text}`);
+  for (const item of added) io.say(`  #${item.id} open  ${item.title}${item.specIds.length ? `  cites ${item.specIds.join(', ')}` : ''}${item.after.length ? `  waits on #${item.after.join(', #')}` : ''}`);
+  const checked = added.filter((item) => item.check);
+  if (checked.length) io.say(`  checks stored, not run: ${checked.map((item) => `#${item.id}`).join(', ')}; no check baseline ran during add, so read each check before work starts: pullboard show <id>`);
+  if (plan.gate) io.say(`  gate set in ${CONFIG_FILE}: ${plan.gate}`);
+  const changed = files.map((file) => file.file);
+  io.say(`next: the person approves the rows in pullboard view or with pullboard spec approve <ids>${changed.length ? `; commit ${changed.join(' and ')}` : ''}`);
+  return summary;
+}
+
+/**
  * Verify from this checkout (V3, V7): the submitted commit must be here, at or under HEAD, and the
  * criterion is re-read from the spec, so a verdict is never given against a moved bar.
  *
@@ -2468,6 +2581,13 @@ function workCommands(io, args) {
     return withBoard(ctx, (board) => work(ctx, board, whoAmI(ctx, board)));
   };
   return {
+    blueprint: () => act(async (ctx, board, me) => {
+      if (first !== 'add' || !second || rest.length) {
+        throw new Refused('USAGE', `pullboard blueprint add <name or file>; bundled: ${bundledBlueprints().join(', ')}`);
+      }
+      await addBlueprint(ctx, board, me, readBlueprint(second, io.cwd));
+      return 0;
+    }),
     fact: () => act(async (ctx, board, me) => {
       if (!first || !second || rest.length !== 1) throw new Refused('USAGE', 'pullboard fact <id> <kind> <text> [--supersedes <fact-id>] [--ref path:lines@full-sha]');
       const id = idArg(first);
@@ -2958,23 +3078,12 @@ async function specCommand(io, { first, second, rest, values }) {
     if (malformed) {
       throw new Refused('SPEC_INVALID', `fix the unparsed row in ${malformed[0]} before drafting; an existing id may be ambiguous`);
     }
-    const usedRows = [...spec.rows, ...practice.repo.rows];
-    const usedIds = new Set(usedRows.map((row) => row.id));
-    const numbered = usedRows.map((row) => new RegExp(`^${prefix}(\\d+)$`, 'u').exec(row.id)?.[1]).filter(Boolean).map(Number);
-    let next = Math.max(0, ...numbered) + 1;
-    while (usedIds.has(`${prefix}${next}`)) next += 1;
-    const id = `${prefix}${next}`;
+    const id = nextRowId(prefix, [...spec.rows, ...practice.repo.rows]);
     const tier = values.aim ? 'aim' : 'must';
     const gate = values.gate?.trim() ?? 'review';
     const row = `- ${id} [draft, ${tier}] ${second.trim()} | gate: ${gate}`;
     const source = readFileSync(spec.file, 'utf8');
-    const newline = source.includes('\r\n') ? '\r\n' : '\n';
-    const lines = source.split(/\r?\n/u);
-    const following = spec.sections.find((entry) => entry.line > section.line);
-    let insertion = following ? following.line - 1 : lines.length;
-    while (insertion > section.line && !lines[insertion - 1].trim()) insertion -= 1;
-    lines.splice(insertion, 0, row);
-    const after = lines.join(newline);
+    const after = insertSectionRows(source, spec, section, [row]);
     writeRowApply(ctx.info.root, { records: [], files: [{ file: ctx.config.spec, before: source, after }],
       signoffs: { before: null, receipts: [] } });
     io.result?.({ id, row: { id, status: 'draft', tier, text: second.trim(), gate, section: section.name } });
