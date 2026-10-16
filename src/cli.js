@@ -1743,6 +1743,25 @@ function uncommittedSetup(mainRoot, config) {
   };
 }
 
+/** Find initialized setup that is on disk but absent from the primary checkout's committed policy. */
+function uncommittedPolicySetup(info) {
+  const primary = mainCheckout(info.root);
+  if (!primary?.commit) return null;
+  const committedConfig = tryGit(info.root, ['ls-tree', '-z', primary.commit, '--', `:(literal)${CONFIG_FILE}`]);
+  if (committedConfig.status !== 0 || committedConfig.stdout) return null;
+
+  // The primary checkout is info.root when the gate runs there. From a linked worktree, the
+  // common directory's parent is the primary checkout only for a plain .git directory: with
+  // git init --separate-git-dir it is unrelated, so report the original refusal instead.
+  const mainRoot = info.isMain ? info.root : basename(info.commonDir) === '.git' ? resolve(info.commonDir, '..') : null;
+  if (!mainRoot) return null;
+  let config;
+  try { config = loadConfig(mainRoot); }
+  catch { return null; }
+  const setup = uncommittedSetup(mainRoot, config);
+  return setup?.files.includes(CONFIG_FILE) ? setup : null;
+}
+
 /**
  * Refuse a worktree whose agent would start without pullboard's files as the main checkout has
  * them: no config, rules or hooks, or older ones (I4). Name each file and how it differs, and the
@@ -3405,6 +3424,17 @@ async function runCommand(argv, io) {
           && error.message.includes('the coordinator checkout has no commit on ')
           && existsSync(join(ctx.info.root, CONFIG_FILE))) {
           throw new Refused('NO_POLICY', `${CONFIG_FILE} is not committed; add and commit the initialized project before running the gate: git add ${CONFIG_FILE}`);
+        }
+        // Refused prefixes its message with the code, so match the condition itself, not the text:
+        // pullboard.json on disk but absent from the primary checkout's commit. Any other
+        // missing policy or claim base keeps its own refusal.
+        if (error instanceof Refused && error.code === 'NO_POLICY') {
+          let setup = null;
+          try { setup = uncommittedPolicySetup(ctx.info); } catch { /* Report the original refusal below. */ }
+          if (setup) {
+            const files = setup.files.map(shellWord).join(' ');
+            throw new Refused('NO_POLICY', `${CONFIG_FILE} and Pullboard's initialized setup files are uncommitted; commit them before running the gate: ${setup.stage} && git commit -q -m "chore: set up pullboard" -- ${files}`);
+          }
         }
         throw error;
       }
