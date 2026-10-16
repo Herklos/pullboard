@@ -6,7 +6,7 @@
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { availableParallelism } from 'node:os';
 import { gitChildEnv, gitPath, headTree, invalidateGitFacts, isClean, untracked } from './git.js';
@@ -362,9 +362,21 @@ export async function runSubmitGate(root, config, { base, trunk, changed, check,
     : { full: true, reason: 'affected-test selection is not enabled for this project', files: [] };
   const deferred = config.submitGate === 'landing';
   const deferFullFallback = deferred && selection.full;
+  const invariants = deferred ? [...new Set(config.submitInvariants ?? [])].sort() : [];
+  if (invariants.length && !config.affectedTests?.trim()) {
+    throw new Refused('BAD_CONFIG', 'submitInvariants requires the project affectedTests runner');
+  }
+  for (const path of invariants) {
+    let file = false;
+    try { file = statSync(join(root, path)).isFile(); } catch { /* Missing or unreadable invariants refuse rather than silently disappearing. */ }
+    if (!file) throw new Refused('BAD_CONFIG', `submitInvariants file ${path} is missing or unreadable; restore it or update the list on accepted main`);
+  }
+  const proofFiles = [...new Set([...(deferFullFallback ? [] : selection.files), ...invariants])].sort();
   const allowBrowserFreeChecks = browserFreeChecksEnabled();
   const checkUsesBrowser = check ? (!allowBrowserFreeChecks || await checkNeedsBrowser(root, check, { onFallback: onBrowserFallback })) : false;
-  const proofUsesBrowser = !deferFullFallback && (selection.full || !allowBrowserFreeChecks || await testsNeedBrowser(root, selection.files, { onFallback: onBrowserFallback }));
+  const proofUsesBrowser = deferFullFallback
+    ? (proofFiles.length > 0 && (!allowBrowserFreeChecks || await testsNeedBrowser(root, proofFiles, { onFallback: onBrowserFallback })))
+    : (selection.full || !allowBrowserFreeChecks || await testsNeedBrowser(root, proofFiles, { onFallback: onBrowserFallback }));
   const browser = checkUsesBrowser || proofUsesBrowser;
   return await withGateSlot(root, (lease) => {
     const startedAt = Date.now();
@@ -388,7 +400,7 @@ export async function runSubmitGate(root, config, { base, trunk, changed, check,
         format: [...new Set(profiles.map(value => value.format))].join('+'),
         unavailable: profiles.some(value => value.unavailable) ? 'per-test timing unavailable: output was not TAP or JUnit (one or more phases)' : null,
       });
-      return { ...proof, log, seconds: criterion.seconds + proof.seconds, ...selection, deferred, deferFullFallback, check: receipt,
+      return { ...proof, log, seconds: criterion.seconds + proof.seconds, ...selection, ...(deferred ? { files: proofFiles, submitInvariants: invariants } : {}), deferred, deferFullFallback, check: receipt,
         profile, profilePath, proofProfilePath: proof.profilePath, proofLog: proof.log };
     };
     if (!criterion.isGreen) {
@@ -398,15 +410,14 @@ export async function runSubmitGate(root, config, { base, trunk, changed, check,
     // The proof already owns this lease: its phase profile has no additional queue wait.
     const proofWait = check ? 0 : lease.waitMs;
     let proof;
-    if (deferFullFallback) proof = { isGreen: true, isCached: false, output: '', seconds: 0, log: '' };
-    else if (selection.full) proof = fullGateRun(root, config, false, { waitMs: proofWait, log: proofLog, gateLease: lease });
-    else if (!selection.files.length) proof = { isGreen: true, output: '', seconds: 0, isCached: false, log: '' };
+    if (!deferFullFallback && selection.full) proof = fullGateRun(root, config, false, { waitMs: proofWait, log: proofLog, gateLease: lease });
+    else if (!proofFiles.length) proof = { isGreen: true, output: '', seconds: 0, isCached: false, log: '' };
     else {
-      const command = `${config.affectedTests.trimEnd()} ${selection.files.map(path => commandWord('./' + path)).join(' ')}`;
+      const command = `${config.affectedTests.trimEnd()} ${proofFiles.map(path => commandWord('./' + path)).join(' ')}`;
       proof = { ...runProfiledShell(root, command, { waitMs: proofWait, profileFile: `${proofLog}.profile.json`, gateLease: lease }), isCached: false, log: proofLog };
       writeFileSync(proofLog, proof.output);
     }
-    const phase = deferFullFallback ? 'full suite deferred to the landing gate' : selection.full ? 'full gate' : 'affected tests';
+    const phase = deferFullFallback ? `submit invariants: ${invariants.length ? invariants.join(', ') : 'none'}; full suite deferred to the landing gate` : selection.full ? 'full gate' : 'affected tests';
     writeFileSync(log, `item check:\n${criterion.output}\n${phase}:\n${proof.output}`);
     return finish(proof);
   }, { browser, agent, item, kind, itemCheck: true, onWait });
@@ -420,9 +431,9 @@ export function submitGateReport(gate) {
     const timings = timingDigest(gate.profile);
     const detail = timings ? `\n${timings}\ntiming profile: ${gate.profilePath}` : '';
     const proof = gate.deferFullFallback
-      ? `full suite deferred to the landing gate${reason}`
+      ? `${gate.submitInvariants?.length ? 'submit invariants: ' + gate.submitInvariants.join(', ') + '; ' : ''}full suite deferred to the landing gate${reason}`
       : `affected tests: ${gate.files.length ? gate.files.join(', ') : 'none'}; full suite deferred to the landing gate`;
-    const result = gate.deferFullFallback ? '' : `; ${gate.isGreen ? `affected tests green in ${gate.seconds}s` : gateReport(gate)}`;
+    const result = gate.deferFullFallback && !gate.submitInvariants?.length ? '' : `; ${gate.isGreen ? `${gate.deferFullFallback ? 'submit invariants' : 'affected tests'} green in ${gate.seconds}s` : gateReport(gate)}`;
     return `${check}; ${proof}${result}${detail}`;
   }
   const selection = gate.full ? `full gate: ${gate.reason}` : `affected tests: ${gate.files.length ? gate.files.join(', ') : 'none'}`;

@@ -364,6 +364,18 @@ test("a landing-gated submit runs the project's invariant tests [V4,C7]", (t) =>
   assert.equal(existsSync(empty.marker), false, 'the empty default adds no tests');
   unstamped(empty.box);
 
+  const mandatory = project(['test/invariant.test.js']);
+  change(mandatory.box);
+  const guarded = mandatory.box.run('submit', '1', '--json');
+  assert.equal(guarded.code, 0, guarded.err);
+  const guardedReceipt = JSON.parse(guarded.out);
+  assert.equal(guardedReceipt.gate.full, true, 'the selector still reports an uncertain full fallback');
+  assert.equal(guardedReceipt.gate.deferred, true);
+  assert.deepEqual(guardedReceipt.gate.files, ['test/invariant.test.js'], 'receipt names only the executed invariant subset');
+  assert.equal(readFileSync(mandatory.marker, 'utf8'), 'invariant\n', 'global fallback does not run unrelated selected/full tests');
+  assert.match(guardedReceipt.gate.report, /submit invariants: test\/invariant\.test\.js; full suite deferred/u);
+  unstamped(mandatory.box);
+
   const red = project(['test/invariant.test.js'], true);
   change(red.box);
   const refused = red.box.run('submit', '1', '--json');
@@ -390,6 +402,14 @@ test("a landing-gated submit runs the project's invariant tests [V4,C7]", (t) =>
   assert.ok(existsSync(trusted.marker), 'the accepted-main invariant still ran');
   assert.doesNotMatch(ignored.err, /unrelated test must stay deferred/u);
   unstamped(trusted.box);
+
+  const missing = project(['test/invariant.test.js']);
+  rmSync(join(missing.box.root, 'test/invariant.test.js'));
+  change(missing.box);
+  const absent = missing.box.run('submit', '1', '--json');
+  assert.notEqual(absent.code, 0, 'deleting a mandatory file cannot make the guard disappear');
+  assert.match(absent.err, /submitInvariants file test\/invariant\.test\.js is missing or unreadable/u);
+  unstamped(missing.box);
 
   const named = project(['test/invariant.test.js', 'test/invariant.test.js']);
   change(named.box, false);
@@ -489,6 +509,15 @@ test('affectedTests accepts only a nonempty command prefix [V4,C7]', () => {
   assert.throws(() => configFromSource(JSON.stringify({ submitGate: 'submit' })), {
     code: 'BAD_CONFIG', message: /submitGate.*landing/u,
   });
+});
+
+test('submitInvariants names literal project files and requires its explicit runner [V4,C7]', () => {
+  assert.deepEqual(configFromSource('{}').submitInvariants, []);
+  for (const submitInvariants of [null, 'test/a.test.js', [false], [''], ['../outside.test.js'], ['/outside.test.js'], ['C:/outside.test.js'], ['test/../a.test.js'], ['test/a.test.js\n'], ['test//a.test.js']]) {
+    assert.throws(() => configFromSource(JSON.stringify({ affectedTests: 'pytest', submitInvariants })), { code: 'BAD_CONFIG', message: /submitInvariants/u });
+  }
+  assert.throws(() => configFromSource(JSON.stringify({ submitInvariants: ['tests/guard.py'] })), { code: 'BAD_CONFIG', message: /requires.*affectedTests/u });
+  assert.deepEqual(configFromSource(JSON.stringify({ affectedTests: 'pytest', submitInvariants: ['tests/guard.py'] })).submitInvariants, ['tests/guard.py']);
 });
 
 test('submit without a frozen check reports no item check and still runs affected tests [V4,C7,V16]', (t) => {
