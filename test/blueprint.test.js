@@ -180,21 +180,21 @@ test('blueprint add files a blueprint as drafts or nothing at all [S1,I1]', () =
 });
 
 /**
- * Each pullboard.dev/blueprints card's rules, word for word, and how many things it asks the
+ * Each pullboard.dev/blueprints card's title and rules, word for word, and how many things it asks the
  * person. web-app's own file is #677's; its card's second rule now ends "before it ships", which
  * the published detail page does not say yet, so only its first rule is pinned here.
  */
 const GALLERY = {
-  pullboard: { rules: ['A builder never verifies their own work.', "Every item's check fails before the change and passes after it.", 'Main only moves when the whole test suite passes.'], asks: 0 },
-  website: { rules: ['Every page reads in full with JavaScript turned off.', 'No change leaves a link pointing at a missing page.'], asks: 2 },
-  'web-app': { rules: ['Every change ships with a test that fails without it.'], asks: 3 },
-  library: { rules: ['A breaking change bumps the major version.', 'Every public function has a working example in the docs.'], asks: 2 },
-  'ios-app': { rules: ['Every screen has a light and a dark screenshot test.', 'No change removes a VoiceOver label from a screen.'], asks: 2 },
-  serverless: { rules: ['Every function has an alarm before it ships.', "No function runs past its platform's time limit."], asks: 3 },
-  'data-pipeline': { rules: ['A schema change ships with its migration.', 'A failed job names the rows and the reason.'], asks: 2 },
-  'test-reliability': { rules: ['No test waits on the wall clock or a fixed sleep.', 'A flake is pinned on a change only after a run without it.'], asks: 1 },
-  research: { rules: ['Every claim in a finding links to its source.', 'A finding counts only after a second agent rechecks its source.'], asks: 2 },
-  writing: { rules: ['Every fact in a post links to where it came from.', 'A post publishes only after you approve it.'], asks: 2 },
+  pullboard: { title: 'Pullboard, built on Pullboard', rules: ['A builder never verifies their own work.', "Every item's check fails before the change and passes after it.", 'Main only moves when the whole test suite passes.'], asks: 0 },
+  website: { title: 'Website', rules: ['Every page reads in full with JavaScript turned off.', 'No change leaves a link pointing at a missing page.'], asks: 2 },
+  'web-app': { title: 'Web app', rules: ['Every change ships with a test that fails without it.'], asks: 3 },
+  library: { title: 'Open-source library', rules: ['A breaking change bumps the major version.', 'Every public function has a working example in the docs.'], asks: 2 },
+  'ios-app': { title: 'iOS app', rules: ['Every screen has a light and a dark screenshot test.', 'No change removes a VoiceOver label from a screen.'], asks: 2 },
+  serverless: { title: 'Serverless', rules: ['Every function has an alarm before it ships.', "No function runs past its platform's time limit."], asks: 3 },
+  'data-pipeline': { title: 'Data pipeline', rules: ['A schema change ships with its migration.', 'A failed job names the rows and the reason.'], asks: 2 },
+  'test-reliability': { title: 'Test reliability', rules: ['No test waits on the wall clock or a fixed sleep.', 'A flake is pinned on a change only after a run without it.'], asks: 1 },
+  research: { title: 'Research board', rules: ['Every claim in a finding links to its source.', 'A finding counts only after a second agent rechecks its source.'], asks: 2 },
+  writing: { title: 'Writing and blog', rules: ['Every fact in a post links to where it came from.', 'A post publishes only after you approve it.'], asks: 2 },
 };
 
 test('every gallery blueprint is bundled and valid [S1]', () => {
@@ -202,6 +202,7 @@ test('every gallery blueprint is bundled and valid [S1]', () => {
   for (const [name, card] of Object.entries(GALLERY)) {
     const blueprint = readBlueprint(name, process.cwd());
     assert.equal(blueprint.name, name);
+    assert.equal(blueprint.title, card.title, `${name} carries its card's title`);
     assert.equal(blueprint.by, 'Pullboard', `${name} is made by Pullboard, not a client or private project`);
     const texts = blueprint.rules.map((rule) => rule.text);
     for (const rule of card.rules) assert.ok(texts.includes(rule), `${name} holds its card's rule word for word: ${rule}`);
