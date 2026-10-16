@@ -8,7 +8,7 @@ import { createRelayBrowserHandler } from '../relay/browser-page.js';
 import { relayClientFixture } from './relay-client-fixture.js';
 import { relayWorkBudgetMs, findChromeExecutable } from './relay-browser-fixture.js';
 import { startFixtureChild } from './fixture-child.js';
-import { machine, project, startView, fetchLive, openSnapshotChrome, closeSnapshotChrome, press } from './cockpit/fixture.js';
+import { machine, project, startView, fetchLive, openSnapshotChrome, closeSnapshotChrome, press, pickProject } from './cockpit/fixture.js';
 
 const JOURNEY_HOSTED = 'https://app.pullboard.dev';
 const JOURNEY_LOCAL = 'http://127.0.0.1:4890';
@@ -247,6 +247,7 @@ test('pullboard.dev shows every board, linked and local [N40]', {
     assert.equal(linkedSetup.document.linked.length, 1, 'the one registered A board links through the CLI');
     assert.equal(linkedSetup.document.paired, true, 'the fixture phone completes the actual device enrollment');
     await chromeB.waitFor("location.hash === '' && document.querySelector('#chain')?.textContent.includes('linked machine A board')", 45_000);
+    await chromeB.send('Page.navigate', { url: 'about:blank' });
     await chromeB.send('Page.navigate', { url: JOURNEY_HOSTED + '/' });
     await chromeB.waitFor("[...document.querySelectorAll('#proj-list .proj.repo')].some(row => row.textContent.includes('fixture/repository')) && [...document.querySelectorAll('#proj-list .proj.repo')].some(row => row.textContent.includes('local-machine-b'))", 45_000);
     const localOrigin = await chromeB.stable('localSession?.origin || null');
@@ -269,7 +270,7 @@ test('pullboard.dev shows every board, linked and local [N40]', {
 
     // A user action in A produces a real board move; B receives it through the live relay event stream.
     const remoteRow = "Array.from(document.querySelectorAll('#proj-list .proj.repo')).find(row => row.textContent.includes('fixture/repository'))";
-    await press(chromeB, remoteRow);
+    await pickProject(chromeB, remoteRow);
     await chromeB.waitFor("view.root === data.projects.find(row => row.id === " + JSON.stringify(boardAId) + ").root && document.querySelector('#chain')?.textContent.includes('linked machine A board')");
     const updatedTitle = 'A live move visible on B';
     await chromeB.stable(`(() => { const chain = document.querySelector('#chain'); window.__journeyUpdateAt = null; window.__journeyUpdateObserver = new MutationObserver(() => { if (chain.textContent.includes(${JSON.stringify(updatedTitle)})) { window.__journeyUpdateAt = performance.timeOrigin + performance.now(); window.__journeyUpdateObserver.disconnect(); } }); window.__journeyUpdateObserver.observe(chain, { childList: true, subtree: true, characterData: true }); return true; })()`);
@@ -288,7 +289,7 @@ test('pullboard.dev shows every board, linked and local [N40]', {
 
     // B's already-loaded 40-item local board opens one selected item's real detail under the 250ms bar.
     const localRow = "Array.from(document.querySelectorAll('#proj-list .proj.repo')).find(row => row.textContent.includes('local-machine-b'))";
-    await press(chromeB, localRow);
+    await pickProject(chromeB, localRow);
     await chromeB.waitFor("view.root === data.projects.find(row => row.name === 'local-machine-b')?.root && data.project.items.length === 40 && document.querySelector('#chain')?.textContent.includes('local B item 40')");
     const selectedItem = JSON.parse(await chromeB.stable(`JSON.stringify((() => { const first = document.querySelector('#chain [data-item]')?.dataset.item; const row = [...document.querySelectorAll('#chain [data-item]')].find(node => node.dataset.item !== String(view.item) && node.dataset.item !== first); const item = data.project.items.find(candidate => String(candidate.id) === row?.dataset.item); return row && item ? { id: row.dataset.item, title: item.title } : null; })())`));
     assert.ok(selectedItem?.id && selectedItem?.title, 'the 40-item board has an unopened item row');
