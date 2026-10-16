@@ -182,7 +182,6 @@ test('blueprint add files a blueprint as drafts with light and mid starters add 
   // A light or mid starter carrying its brief, criterion and check is filed on that route, with
   // all three passed to the item unchanged; a strong starter needs none of them.
   const box = freshBoard({ gate: 'true' });
-  box.git('commit', '-q', '-am', 'chore: set the fixture gate');
   const brief = 'Files:\n- web/index.html\nTest:\n- test/home.test.js asserts the page fits 375 pixels';
   const items = [
     { key: '1', title: 'Light starter', cites: ['W3'], route: 'light', brief, criterion: 'The home page fits 375 pixels.', check: 'true' },
