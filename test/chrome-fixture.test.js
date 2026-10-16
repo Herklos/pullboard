@@ -112,28 +112,33 @@ test('a missing DevTools port fails once with stderr and elapsed launch time [C7
   assert.equal(readFileSync(launches, 'utf8'), 'launch\n', 'the shared launcher never retries');
 });
 
-/** Prove startup timeout diagnostics preserve process and profile state before cleanup [C7]. */
-test("a DevTools port timeout names Chrome's state [C7]", async (t) => {
-  const directory = mkdtempSync(join(tmpdir(), 'pullboard-chrome-timeout-state-'));
-  t.after(() => rmSync(directory, { recursive: true, force: true }));
-  const startupTimeoutMs = 2_000;
+/**
+ * Write a stand-in Chrome that stays alive, holds its profile lock and never publishes a DevTools port.
+ * A /bin/sh launcher records its start and writes SingletonLock before it execs node to stay alive,
+ * so the lock is there within the startup budget even when node itself starts slowly under gate load.
+ */
+function liveNoPortStandIn(directory) {
+  const executable = join(directory, 'chrome-live-no-port');
+  writeFileSync(executable, [
+    '#!/bin/sh',
+    "printf 'start\\n' >> \"$CHROME_STARTS\"",
+    "printf 'held' > \"$CHROME_PROFILE/SingletonLock\"",
+    "exec \"$CHROME_NODE\" -e \"process.on('SIGTERM', () => process.exit(0)); setInterval(() => {}, 1000);\"",
+  ].join('\n') + '\n');
+  chmodSync(executable, 0o700);
+  return executable;
+}
+
+/** Start the live stand-in past its budget and assert the timeout names the leader, port, lock, elapsed time and load. */
+async function assertLiveTimeoutNamesState(directory, startupTimeoutMs, extraEnv = {}) {
   const liveProfile = join(directory, 'live-profile');
   const liveMarker = join(directory, 'live-starts');
-  const liveExecutable = join(directory, 'chrome-live-no-port');
-  writeFileSync(liveExecutable, [
-    '#!/usr/bin/env node',
-    "const fs = require('node:fs');",
-    "fs.appendFileSync(process.env.CHROME_STARTS, 'start\\n');",
-    "fs.writeFileSync(process.env.CHROME_PROFILE + '/SingletonLock', 'held');",
-    "process.on('SIGTERM', () => process.exit(0));",
-    'setInterval(() => {}, 1000);',
-  ].join('\n'));
-  chmodSync(liveExecutable, 0o700);
+  const liveExecutable = liveNoPortStandIn(directory);
   await assert.rejects(startChrome({
     executable: liveExecutable,
     profileDirectory: liveProfile,
     startupTimeoutMs,
-    env: { ...process.env, CHROME_STARTS: liveMarker, CHROME_PROFILE: liveProfile },
+    env: { ...process.env, ...extraEnv, CHROME_STARTS: liveMarker, CHROME_PROFILE: liveProfile, CHROME_NODE: process.execPath },
   }), (error) => {
     assert.match(error.message, /leader still alive/u);
     assert.match(error.message, /DevToolsActivePort absent/u);
@@ -145,6 +150,14 @@ test("a DevTools port timeout names Chrome's state [C7]", async (t) => {
     return true;
   });
   assert.equal(readFileSync(liveMarker, 'utf8'), 'start\n', 'the live stand-in launched only once');
+}
+
+/** Prove startup timeout diagnostics preserve process and profile state before cleanup [C7]. */
+test("a DevTools port timeout names Chrome's state [C7]", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'pullboard-chrome-timeout-state-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const startupTimeoutMs = 2_000;
+  await assertLiveTimeoutNamesState(directory, startupTimeoutMs);
 
   const exitedProfile = join(directory, 'exited-profile');
   const exitedMarker = join(directory, 'exited-starts');
@@ -170,6 +183,18 @@ test("a DevTools port timeout names Chrome's state [C7]", async (t) => {
     return true;
   });
   assert.equal(readFileSync(exitedMarker, 'utf8'), 'start\n', 'the exited stand-in launched only once');
+});
+
+/** Prove the timeout still names a live, locked Chrome when node takes longer than the whole budget to start [C7]. */
+test('the DevTools timeout test holds when its stand-in starts slowly [C7]', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'pullboard-chrome-slow-start-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const startupTimeoutMs = 2_000;
+  // Every node the stand-in runs blocks before its first line, as node did under gate load (measured 2014ms, load 10).
+  const slowStart = join(directory, 'slow-node-start.cjs');
+  writeFileSync(slowStart, 'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2500);\n'); // budget: declared start delay past the 2000ms startup deadline.
+  const nodeOptions = `${process.env.NODE_OPTIONS ?? ''} --require ${JSON.stringify(slowStart)}`.trim();
+  await assertLiveTimeoutNamesState(directory, startupTimeoutMs, { NODE_OPTIONS: nodeOptions });
 });
 
 

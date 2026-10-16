@@ -30,13 +30,44 @@ function json(res, status, data) {
   res.end(JSON.stringify({ version: 1, ...data }));
 }
 
+/** Render a fixed confirmation shell; all board and host text comes from textContent after fetch. */
+function deviceConfirmationPage() {
+  return '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
+    '<title>Confirm board link · Pullboard</title><main><h1>Confirm board link</h1><p id="status">Checking this sign-in…</p>' +
+    '<p id="intent"></p><button id="confirm" hidden>Confirm link</button> <button id="decline" hidden>Decline</button></main>' +
+    '<script>let ticket=decodeURIComponent(location.hash.slice(1));history.replaceState(null,"",location.pathname);const status=document.querySelector("#status");' +
+    'const intent=document.querySelector("#intent");const confirmButton=document.querySelector("#confirm");const declineButton=document.querySelector("#decline");' +
+    'let terminal=false;let pollTimer=null;/** Stop polling and make earlier status responses inert after a final decision. */function stopPolling(){terminal=true;if(pollTimer!==null){clearInterval(pollTimer);pollTimer=null;}}' +
+    '/** Bind this browser tab to the one-use ticket without putting it in a request URL. */ async function openConfirmation(){' +
+    'const response=await fetch("/auth/device/confirmation/open",{method:"POST",credentials:"same-origin",headers:{"content-type":"application/json"},body:JSON.stringify({ticket})});' +
+    'const value=await response.json();if(!response.ok)throw new Error(value.error?.message||"This confirmation expired.");}' +
+    '/** Read the current grant without exposing a session credential to the page. */ async function refresh(){if(terminal)return;try{' +
+    'const response=await fetch("/auth/device/confirmation/status",{method:"POST",credentials:"same-origin",headers:{"content-type":"application/json"},body:JSON.stringify({ticket})});' +
+    'if(terminal)return;const value=await response.json();if(terminal)return;if(!response.ok)throw new Error(value.error?.message||"This confirmation expired.");' +
+    'if(value.declined){stopPolling();status.textContent="You declined this board link. Nothing was linked.";return;}' +
+    'if(value.confirmed){stopPolling();status.textContent="The board is linked. You can return to the terminal.";return;}' +
+    'if(!value.ready){status.textContent="Finish GitHub sign-in in the other tab, then this page will ask you to confirm.";return;}' +
+    'status.textContent="Signed in as @"+value.account+". Confirm only if this is the board and machine you intended.";' +
+    'intent.textContent="Link "+value.intent.boardName+" from "+value.intent.host+"?";confirmButton.hidden=false;declineButton.hidden=false;' +
+    '}catch(error){if(terminal)return;status.textContent=error.message;confirmButton.hidden=true;declineButton.hidden=true;}}' +
+    '/** Send an exact-origin, cookie-bound confirmation decision. */ async function decide(decision){confirmButton.disabled=true;declineButton.disabled=true;try{' +
+    'const response=await fetch("/auth/device/confirmation",{method:"POST",credentials:"same-origin",headers:{"content-type":"application/json"},' +
+    'body:JSON.stringify({ticket,decision})});const value=await response.json();if(!response.ok)throw new Error(value.error?.message||"The relay could not confirm this link.");stopPolling();' +
+    'status.textContent=value.confirmed?"The board is linked. You can return to the terminal.":"You declined this board link. Nothing was linked.";' +
+    'confirmButton.hidden=true;declineButton.hidden=true;}catch(error){status.textContent=error.message;confirmButton.disabled=false;declineButton.disabled=false;}}' +
+    'confirmButton.onclick=()=>decide("confirm");declineButton.onclick=()=>decide("decline");' +
+    'void openConfirmation().then(refresh).catch(error=>{if(!terminal)status.textContent=error.message;});pollTimer=setInterval(()=>{if(!terminal&&confirmButton.hidden)void refresh();},2000);</script></html>';
+}
+
 /** Use a configured public origin, never a client-controlled Host or proxy header. */
 export function createAuthHandler({ auth, publicOrigin }) {
   let origin;
   try { origin = new URL(publicOrigin); } catch { throw new Refused('RELAY_CONFIG', 'configure the relay public origin'); }
   if (origin.username || origin.password || origin.pathname !== '/' || origin.search || origin.hash || (origin.protocol !== 'https:' && !(origin.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(origin.hostname)))) throw new Refused('RELAY_CONFIG', 'use an HTTPS public origin, or a loopback HTTP origin for local tests');
   const secure = origin.protocol === 'https:' ? '; Secure' : '';
-  const routes = new Set(['GET /auth/github/start', 'GET /auth/github/callback', 'POST /auth/device/start', 'POST /auth/device/poll', 'GET /auth/session', 'GET /auth/boards', 'POST /auth/boards/link', 'POST /auth/machines', 'GET /auth/tokens', 'POST /auth/tokens', 'POST /auth/tokens/revoke']);
+  const routes = new Set(['GET /auth/github/start', 'GET /auth/github/callback', 'POST /auth/device/start', 'POST /auth/device/poll', 'POST /auth/device/cancel',
+    'GET /auth/device/confirm', 'POST /auth/device/confirmation/open', 'POST /auth/device/confirmation/status', 'POST /auth/device/confirmation',
+    'GET /auth/session', 'GET /auth/boards', 'POST /auth/boards/link', 'POST /auth/machines', 'GET /auth/tokens', 'POST /auth/tokens', 'POST /auth/tokens/revoke']);
 
   /** Resolve a bearer or cookie credential; cookie writes require an exact trusted Origin. */
   function token(req, write = false) {
@@ -68,11 +99,39 @@ export function createAuthHandler({ auth, publicOrigin }) {
         res.writeHead(303, { location: '/', 'Cache-Control': 'no-store', 'Set-Cookie': ['pb_session=' + signed.token + '; Path=/; HttpOnly; SameSite=Lax; Max-Age=' + Math.max(0, Math.floor((signed.expires - Date.now()) / 1000)) + secure, 'pb_oauth_binding=; Path=/auth/github; HttpOnly; SameSite=Lax; Max-Age=0' + secure] });
         res.end();
       } else if (route === 'POST /auth/device/start') {
-        await body(req);
-        json(res, 200, await auth.beginDevice());
+        const input = await body(req);
+        const grant = await auth.beginDevice(input);
+        if (grant.confirmationTicket) {
+          grant.confirmationURL = new URL('/auth/device/confirm#' + encodeURIComponent(grant.confirmationTicket), origin).href;
+          delete grant.confirmationTicket;
+        }
+        json(res, 200, grant);
       } else if (route === 'POST /auth/device/poll') {
         const input = await body(req);
         json(res, 200, await auth.pollDevice(input.ticket));
+      } else if (route === 'POST /auth/device/cancel') {
+        const input = await body(req);
+        json(res, 200, await auth.cancelDevice(input.ticket));
+      } else if (route === 'GET /auth/device/confirm') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
+          'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY',
+          'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'" });
+        res.end(deviceConfirmationPage());
+      } else if (route === 'POST /auth/device/confirmation/open') {
+        if (req.headers.origin !== origin.origin) throw new Refused('BAD_ORIGIN', 'open a device confirmation from the relay origin');
+        const input = await body(req);
+        const flow = auth.openDeviceConfirmation(input.ticket);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
+          'Set-Cookie': 'pb_device_confirmation=' + flow.binding + '; Path=/auth/device; HttpOnly; SameSite=Strict; Max-Age=' + flow.cookieMaxAge + secure });
+        res.end(JSON.stringify({ version: 1, opened: true }));
+      } else if (route === 'POST /auth/device/confirmation/status') {
+        if (req.headers.origin !== origin.origin) throw new Refused('BAD_ORIGIN', 'read a device confirmation from the relay origin');
+        const input = await body(req);
+        json(res, 200, auth.deviceConfirmationStatus(input.ticket, cookie(req, 'pb_device_confirmation')));
+      } else if (route === 'POST /auth/device/confirmation') {
+        if (req.headers.origin !== origin.origin) throw new Refused('BAD_ORIGIN', 'send cookie-authorized confirmation from the relay origin');
+        const input = await body(req);
+        json(res, 200, await auth.confirmDevice(input.ticket, cookie(req, 'pb_device_confirmation'), input.decision));
       } else if (route === 'GET /auth/session') {
         json(res, 200, { session: await auth.authenticate(token(req), { ...(url.searchParams.has('board') ? { board: url.searchParams.get('board') } : {}) }) });
       } else if (route === 'GET /auth/boards') {

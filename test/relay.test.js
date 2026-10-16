@@ -1,9 +1,9 @@
 /** Relay identity, expiry, permission freshness and scoped credential isolation [H8, H1]. */
 import assert from 'node:assert/strict';
 import { runFixtureChild as spawnSync } from './fixture-child.js';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { hostname, tmpdir } from 'node:os';
+import { basename, dirname, join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { ENGINE_VERSION } from '../src/machine.js';
@@ -16,6 +16,215 @@ import { serveView } from '../src/serve.js';
 import { fetchFresh } from './http-fixture.js';
 import { fetchPrintedViewLink } from './view-link-fixture.js';
 
+const CLI = resolve(import.meta.dirname, '../bin/pullboard.js');
+
+/** Open the relay confirmation page and retain only its browser cookie and one-use ticket. */
+async function openRelayConfirmation(box, confirmationURL) {
+  const url = new URL(confirmationURL);
+  const ticket = decodeURIComponent(url.hash.slice(1));
+  assert.ok(ticket, 'confirmation nonce is carried in the browser fragment');
+  const page = await fetch(new URL('/auth/device/confirm', url.origin));
+  assert.equal(page.status, 200, 'relay serves the person confirmation page');
+  assert.equal(page.headers.get('referrer-policy'), 'no-referrer');
+  const html = await page.text();
+  assert.match(html, /textContent="Link "|textContent = "Link "/u, 'the page inserts board and host labels as text');
+  const wrongOrigin = await fetch(box.origin + '/auth/device/confirmation/open', {
+    method: 'POST', headers: { origin: 'https://foreign.invalid', 'content-type': 'application/json' }, body: JSON.stringify({ ticket }),
+  });
+  assert.equal(wrongOrigin.status, 403, 'a foreign page cannot open the browser confirmation');
+  const opened = await fetch(box.origin + '/auth/device/confirmation/open', {
+    method: 'POST', headers: { origin: box.origin, 'content-type': 'application/json' }, body: JSON.stringify({ ticket }),
+  });
+  assert.equal(opened.status, 200, 'the confirmation page receives a cookie-bound browser session');
+  const cookie = opened.headers.get('set-cookie')?.split(';', 1)[0];
+  assert.match(cookie ?? '', /^pb_device_confirmation=/u);
+  const cookieMaxAge = Number(/(?:^|;\s*)Max-Age=(\d+)/u.exec(opened.headers.get('set-cookie') ?? '')?.[1]);
+  /** Read confirmation status with same-origin browser credentials and no URL capability. */
+  async function status() {
+    const response = await fetch(box.origin + '/auth/device/confirmation/status', {
+      method: 'POST', headers: { origin: box.origin, cookie, 'content-type': 'application/json' }, body: JSON.stringify({ ticket }),
+    });
+    return { response, document: await response.json() };
+  }
+  /** Submit one explicit person decision through the browser-cookie and exact-Origin boundary. */
+  async function decide(decision, origin = box.origin) {
+    return fetch(box.origin + '/auth/device/confirmation', {
+      method: 'POST', headers: { origin, cookie, 'content-type': 'application/json' }, body: JSON.stringify({ ticket, decision }),
+    });
+  }
+  return { ticket, cookie, cookieMaxAge, html, status, decide };
+}
+
+/** Count linked boards through a separate read-only SQLite connection. */
+function linkedBoardCount(database) {
+  const db = new DatabaseSync(database, { readOnly: true });
+  try { return db.prepare('SELECT COUNT(*) AS count FROM relay_boards').get().count; }
+  finally { db.close(); }
+}
+
+const relaySetupURL = new URL('../src/relay-setup.js', import.meta.url).href;
+const relayMachineURL = new URL('../src/relay-machine.js', import.meta.url).href;
+const relayDeviceKeysURL = new URL('../src/relay-device-keys.js', import.meta.url).href;
+
+/** Call the shared setup flow with a private caller signal and credential-free output streams. */
+async function runRelayOnAll(box, signalMode) {
+  return box.script(`
+    import { relayOnAll } from ${JSON.stringify(relaySetupURL)};
+    import { readRelayMachine } from ${JSON.stringify(relayMachineURL)};
+    import { createDeviceKeys, signDeviceEnrollment } from ${JSON.stringify(relayDeviceKeysURL)};
+    const controller = new AbortController();
+    const originalFetch = globalThis.fetch;
+    const mode = ${JSON.stringify(signalMode)};
+    const pairingCallbacks = [];
+    const messages = [];
+    let enrollmentUploaded = false;
+    if (['pairing-cancel', 'pairing-cancel-delete-fails', 'pairing-complete', 'pairing-abort-during-acceptance'].includes(mode)) {
+      globalThis.fetch = async (input, init) => {
+        const url = new URL(input instanceof URL ? input.href : typeof input === 'string' ? input : input.url);
+        const method = init?.method ?? input?.method ?? 'GET';
+        if (mode === 'pairing-cancel-delete-fails' && url.pathname.startsWith('/api/v1/devices/enrollments/') && method === 'DELETE') {
+          return new Response(JSON.stringify({ version: 1, error: { code: 'RELAY_UNAVAILABLE', message: 'fixture cleanup was not acknowledged' } }),
+            { status: 503, headers: { 'content-type': 'application/json' } });
+        }
+        if (url.pathname.startsWith('/api/v1/devices/enrollments/') && method === 'GET' && controller.signal.aborted) {
+          return new Response(JSON.stringify({ version: 1, error: { code: 'DEVICE_PAIR_EXPIRED', message: 'fixture stopped an ignored pairing cancellation' } }),
+            { status: 410, headers: { 'content-type': 'application/json' } });
+        }
+        const response = await originalFetch(input, init);
+        if (url.pathname.startsWith('/api/v1/devices/enrollments/') && method === 'GET') {
+          if (mode.startsWith('pairing-cancel')) setImmediate(() => controller.abort());
+          if (!mode.startsWith('pairing-cancel') && !enrollmentUploaded && !(await response.clone().json()).enrollment) {
+            const callback = pairingCallbacks[0];
+            const pairingUrl = callback?.url ?? messages.find(value => value.startsWith('Pair your phone once: '))?.slice('Pair your phone once: '.length);
+            if (!pairingUrl) throw new Error('fixture could not find the in-memory pairing link');
+            const fragment = new URL(pairingUrl).hash.slice('#device='.length);
+            const [locator, secret] = fragment.split('.');
+            const headers = new Headers(init?.headers ?? input?.headers);
+            const authorization = headers.get('authorization');
+            const engine = headers.get('x-pullboard-engine');
+            const identityResponse = await originalFetch(new URL('/api/v1/devices/session', url.origin), {
+              headers: { authorization, 'x-pullboard-engine': engine },
+            });
+            const { account } = await identityResponse.json();
+            const keys = await createDeviceKeys();
+            const enrollment = await signDeviceEnrollment(secret, {
+              v: 1, account, locator, deviceId: keys.deviceId, publicKey: keys.publicKey,
+              label: 'fixture phone', createdAt: new Date().toISOString(),
+            });
+            const enrolled = await originalFetch(url.href, {
+              method: 'PUT', headers: { authorization, 'x-pullboard-engine': engine, 'content-type': 'application/json' },
+              body: JSON.stringify(enrollment),
+            });
+            if (!enrolled.ok) throw new Error('fixture device enrollment was refused');
+            enrollmentUploaded = true;
+            if (mode === 'pairing-abort-during-acceptance') {
+              const subtle = globalThis.crypto.subtle;
+              const verify = subtle.verify.bind(subtle);
+              subtle.verify = async (...args) => { controller.abort(); subtle.verify = verify; return verify(...args); };
+            }
+          }
+        }
+        return response;
+      };
+    } else if (mode === 'during-poll') {
+      globalThis.fetch = async (input, init) => {
+        const response = await originalFetch(input, init);
+        const url = new URL(input instanceof URL ? input.href : typeof input === 'string' ? input : input.url);
+        if (url.pathname === '/auth/device/start') setImmediate(() => controller.abort());
+        return response;
+      };
+    } else if (mode === 'during-flush') {
+      globalThis.fetch = async (input, init) => {
+        const url = new URL(input instanceof URL ? input.href : typeof input === 'string' ? input : input.url);
+        if (init?.method === 'DELETE' && url.pathname.startsWith('/api/v1/devices/')) {
+          setImmediate(() => controller.abort());
+          await new Promise(resolve => controller.signal.addEventListener('abort', resolve, { once: true }));
+        }
+        return originalFetch(input, init);
+      };
+    } else if (['held-poll-response', 'held-poll-response-cancel-fails',
+      'held-poll-response-denied', 'held-poll-response-expired'].includes(mode)) {
+      globalThis.fetch = async (input, init) => {
+        const url = new URL(input instanceof URL ? input.href : typeof input === 'string' ? input : input.url);
+        if (url.pathname === '/auth/device/cancel' && mode === 'held-poll-response-cancel-fails') {
+          return new Response(JSON.stringify({ version: 1, error: { code: 'RELAY_ROUTE', message: 'fixture route is unavailable' } }),
+            { status: 404, headers: { 'content-type': 'application/json' } });
+        }
+        const response = await originalFetch(input, init);
+        if (url.pathname === '/auth/device/poll') {
+          const body = await response.text();
+          await new Promise(resolve => {
+            controller.signal.addEventListener('abort', resolve, { once: true });
+            setImmediate(() => controller.abort());
+          });
+          return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
+        }
+        return response;
+      };
+    } else if (mode === 'already-aborted') controller.abort();
+    const output = { personChannel: 'view', cwd: process.cwd(),
+      stderr: { write() {} }, say(value) { messages.push(String(value)); }, err(value) { messages.push(String(value)); } };
+    try {
+      const result = await relayOnAll(${JSON.stringify(box.origin)}, output, {
+        signal: controller.signal, onPairingURL(value) { pairingCallbacks.push(value); },
+      });
+      const machine = readRelayMachine();
+      process.stdout.write(JSON.stringify({ ...result,
+        pairingCallbackCount: pairingCallbacks.length,
+        pairingCallbackHasCode: Boolean(pairingCallbacks[0]?.url.includes('#device=')),
+        pairingCallbackExpires: Number.isSafeInteger(pairingCallbacks[0]?.expires),
+        pairingUrlPrinted: messages.some(value => value.includes('#device=')),
+        pairingCleanupWarningShown: messages.some(value => value.includes('may retain this request')),
+        signalAborted: controller.signal.aborted,
+        enrollmentUploaded, pendingCleared: machine.pending === null, deviceCount: machine.devices.length,
+      }));
+    } catch (error) {
+      process.stdout.write(JSON.stringify({ errorCode: error.code ?? 'UNEXPECTED_ERROR' }));
+      process.exitCode = 1;
+    }
+  `);
+}
+
+/** Seed one prior cleanup obligation so cancellation can be observed after auth and during flush. */
+async function seedRevocation(box) {
+  return box.script(`
+    import { updateRelayMachine } from ${JSON.stringify(relayMachineURL)};
+    updateRelayMachine(state => { state.revocations = [{ deviceId: 'device-00000000000000000000000000000000', account: '7', url: ${JSON.stringify(box.origin)} }]; });
+    process.stdout.write(JSON.stringify({ seeded: true }));
+  `);
+}
+
+/** Snapshot only private local metadata that cancellation must leave byte-for-byte unchanged. */
+function fileSnapshot(path) { return existsSync(path) ? readFileSync(path) : null; }
+
+/** Count live person-session ids without reading bearer hashes or token plaintext. */
+function livePersonSessionIds(box) {
+  const db = new DatabaseSync(box.authDatabase ?? box.database, { readOnly: true });
+  try { return db.prepare("SELECT id FROM relay_credentials WHERE kind='session' AND revoked=0 AND expires>? ORDER BY id").all(Date.now()).map(row => row.id); }
+  finally { db.close(); }
+}
+
+/** Revoke only test-created session rows after asserting a fail-closed cleanup refusal. */
+function revokeFixtureSessions(box, ids) {
+  const db = new DatabaseSync(box.authDatabase ?? box.database);
+  try { for (const id of ids) db.prepare("UPDATE relay_credentials SET revoked=1 WHERE kind='session' AND id=?").run(id); }
+  finally { db.close(); }
+}
+
+/** Register a second synthetic local project without linking it to the private relay. */
+async function registerSecondProject(box) {
+  const root = join(dirname(box.root), 'cancel-second-project');
+  mkdirSync(root);
+  for (const args of [['init', '-q', '-b', 'main'], ['-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-q', '-m', 'fixture base'],
+    ['remote', 'add', 'origin', 'git@github.com:fixture/repository.git']]) {
+    assert.equal(spawnSync('git', args, { cwd: root, env: box.env, encoding: 'utf8', timeout: 15_000 }).status, 0);
+  }
+  assert.equal((await box.cliAt(root, 'init')).code, 0, 'the second fixture project is registered on this machine');
+  const exported = await box.cliAt(root, 'export');
+  const id = exported.document.tables.board_meta.find(row => row.meta_key === 'board_id').meta_value;
+  return { linkFile: join(root, '.git', 'pullboard', 'relay.json'), keyFile: join(box.env.PULLBOARD_HOME, 'relay-keys', id + '.key') };
+}
+
 /** Use real private SQLite and an actual HTTP provider with a controllable expiry clock. */
 async function fixture(t, options = {}) {
   const provider = await githubFixture(t);
@@ -27,7 +236,7 @@ async function fixture(t, options = {}) {
   const config = { database, github, now: clock, ...options };
   const auth = createRelayAuth(config);
   t.after(() => { auth.close(); rmSync(root, { recursive: true, force: true }); });
-  return { ...provider, providerConfig: provider.config, auth, database, config, advance(ms) { time += ms; } };
+  return { ...provider, providerConfig: provider.config, auth, database, config, now: () => time, advance(ms) { time += ms; } };
 }
 
 /** Complete a real stand-in device grant, advancing only the injected relay expiry clock. */
@@ -37,6 +246,273 @@ async function login(box) {
   box.advance(grant.interval * 1000);
   return box.auth.pollDevice(grant.ticket);
 }
+
+test('a minted device session stays cancellable after its device grant expires [H5,N26]', async (t) => {
+  const box = await fixture(t);
+  const prior = await login(box);
+  const grantStarted = box.now();
+  box.state.deviceAuthorized = true;
+  const grant = await box.auth.beginDevice();
+  box.advance(grant.interval * 1000);
+  const minted = await box.auth.pollDevice(grant.ticket);
+  assert.equal(box.now(), grantStarted + grant.interval * 1000, 'the grant uses the injected auth clock');
+  const beforeExpiry = livePersonSessionIds({ authDatabase: box.database });
+  assert.equal(beforeExpiry.includes(prior.id), true, 'the preexisting session remains live');
+  assert.equal(beforeExpiry.includes(minted.id), true, 'the device grant minted one new live session');
+
+  box.advance((grant.expiresIn - grant.interval) * 1000);
+  assert.equal(box.now(), grantStarted + grant.expiresIn * 1000, 'the clock reaches the exact grant deadline');
+  await assert.rejects(box.auth.pollDevice(grant.ticket), { code: 'OAUTH_EXPIRED' }, 'polling remains strictly expired at the grant deadline');
+  assert.deepEqual(await box.auth.cancelDevice(grant.ticket), { cancelled: true }, 'the bounded cleanup receipt revokes the session after its grant expires');
+  assert.deepEqual(await box.auth.cancelDevice(grant.ticket), { cancelled: true }, 'a known cleanup remains idempotent');
+  await assert.rejects(box.auth.authenticate(minted.token), { code: 'AUTH_REQUIRED' }, 'only the newly minted session is revoked');
+  assert.equal((await box.auth.authenticate(prior.token)).id, prior.id, 'cleanup preserves the preexisting session');
+  assert.deepEqual(livePersonSessionIds({ authDatabase: box.database }), [prior.id], 'the expired grant receipt cannot revoke another live session');
+  assert.deepEqual(await box.auth.cancelDevice('pd_' + 'x'.repeat(43)), { cancelled: false }, 'an unknown ticket is never treated as cleaned up');
+});
+
+test('device-session cleanup survives grant pruning but ends at session expiry [H5,N26]', async (t) => {
+  const box = await fixture(t, { sessionTTL: 30 * 60_000 });
+  const prior = await login(box);
+  const grantStarted = box.now();
+  box.state.deviceAuthorized = true;
+  const grant = await box.auth.beginDevice();
+  box.advance(grant.interval * 1000);
+  const minted = await box.auth.pollDevice(grant.ticket);
+  box.advance((grant.expiresIn - grant.interval) * 1000);
+
+  const nextGrant = await box.auth.beginDevice(); // pruneFlows removes the expired flow first
+  assert.equal(box.now(), grantStarted + grant.expiresIn * 1000, 'the session cleanup receipt outlives only the original grant');
+  await assert.rejects(box.auth.pollDevice(grant.ticket), { code: 'OAUTH_EXPIRED' }, 'pruning never makes an expired ticket pollable');
+  assert.deepEqual(await box.auth.cancelDevice(grant.ticket), { cancelled: true }, 'flow pruning preserves the exact live session cleanup receipt');
+  assert.deepEqual(await box.auth.cancelDevice(grant.ticket), { cancelled: true }, 'the pruned ticket receipt remains idempotent');
+  await assert.rejects(box.auth.authenticate(minted.token), { code: 'AUTH_REQUIRED' }, 'the receipt revoked its own session');
+  assert.equal((await box.auth.authenticate(prior.token)).id, prior.id, 'pruned-flow cleanup preserves the prior session');
+  assert.deepEqual(await box.auth.cancelDevice(nextGrant.ticket), { cancelled: true }, 'the replacement grant remains independently cancellable');
+
+  box.advance(minted.expires - box.now());
+  assert.equal(box.now(), minted.expires, 'the cleanup receipt reaches the exact session expiry');
+  assert.deepEqual(await box.auth.cancelDevice(grant.ticket), { cancelled: false }, 'expired cleanup receipts are no longer accepted as cancellation proof');
+  await assert.rejects(box.auth.pollDevice(grant.ticket), { code: 'OAUTH_EXPIRED' }, 'an expired cleanup receipt never restores poll access');
+});
+
+test('linking every board stops cleanly when the sign-in is declined or cancelled [H5,N26]', async (t) => {
+  for (const scenario of ['already-cancelled', 'declined', 'expired', 'cancelled-during-sign-in', 'cancelled-after-sign-in']) await t.test(scenario, async (t) => {
+    const box = await relayClientFixture(t);
+    const second = await registerSecondProject(box);
+    box.refuseBoardLinks(true);
+    box.providerState.deviceAuthorized = scenario !== 'cancelled-during-sign-in';
+    box.providerState.deviceDeclined = scenario === 'declined';
+    box.providerState.deviceExpired = scenario === 'expired';
+    if (scenario === 'cancelled-after-sign-in') {
+      box.overrideDelete({ status: 200 });
+      assert.equal((await seedRevocation(box)).code, 0, 'a prior revocation is queued before setup begins');
+    }
+    const priorSession = scenario === 'cancelled-after-sign-in' ? await box.phoneSession() : null;
+    const sessionsBefore = livePersonSessionIds(box);
+    const machineFile = join(box.env.PULLBOARD_HOME, 'relay-machine', 'state.json');
+    const before = new Map([box.linkFile, second.linkFile, box.keyFile, second.keyFile, machineFile].map(path => [path, fileSnapshot(path)]));
+    if (scenario === 'cancelled-during-sign-in') {
+      // A broken caller that ignores abort sees a provider denial at its first poll instead of hanging.
+      setTimeout(() => { box.providerState.deviceDeclined = true; }, 100);
+    }
+    const mode = scenario === 'already-cancelled' ? 'already-aborted'
+      : scenario === 'cancelled-during-sign-in' ? 'during-poll'
+      : scenario === 'cancelled-after-sign-in' ? 'during-flush' : 'none';
+    const result = await runRelayOnAll(box, mode);
+    assert.equal(result.code, 0, 'the private setup caller returns a structured terminal outcome');
+    const expected = scenario === 'declined' ? 'declined' : scenario === 'expired' ? 'expired' : 'cancelled';
+    assert.equal(result.document.outcome, expected, 'sign-in termination has a named outcome');
+    assert.deepEqual(result.document.linked ?? [], [], 'no board is linked after an interrupted sign-in');
+    assert.deepEqual(result.document.failed ?? [], [], 'cancellation is not reported as a per-board failure');
+    assert.deepEqual(fileSnapshot(box.linkFile), before.get(box.linkFile), 'cancelled sign-in leaves the board link file unchanged');
+    assert.deepEqual(fileSnapshot(second.linkFile), before.get(second.linkFile), 'cancellation leaves the second registered board unlinked');
+    assert.deepEqual(fileSnapshot(box.keyFile), before.get(box.keyFile), 'cancelled sign-in leaves the board key unchanged');
+    assert.deepEqual(fileSnapshot(second.keyFile), before.get(second.keyFile), 'cancellation leaves the second board key unstored');
+    assert.deepEqual(livePersonSessionIds(box), sessionsBefore, 'a pre-link terminal outcome leaves no new live person session');
+    if (priorSession) assert.equal((await box.auth.authenticate(priorSession.token)).id, priorSession.id, 'cancellation preserves the preexisting person session');
+    if (scenario === 'cancelled-after-sign-in') {
+      const prior = JSON.parse(before.get(machineFile).toString('utf8'));
+      const after = JSON.parse(fileSnapshot(machineFile).toString('utf8'));
+      assert.equal(after.autoLink, prior.autoLink, 'cancellation before the first link does not enable auto-linking');
+      assert.deepEqual(after.owner, prior.owner, 'cancellation before the first link does not change the saved owner');
+      assert.deepEqual(after.approvals, prior.approvals, 'cancellation before the first link preserves pending approvals');
+      assert.deepEqual(after.revocations, [], 'the already-queued revocation is flushed as its existing cleanup obligation');
+    } else {
+      assert.deepEqual(fileSnapshot(machineFile), before.get(machineFile), 'decline or cancellation during sign-in does not mutate machine metadata');
+    }
+    assert.equal(box.transit.some(record => /\/auth\/boards\/link$|\/auth\/machines$|^\/api\/v1\/boards\//u.test(record.path)), false,
+      'no board or machine credential request begins before sign-in is committed');
+    if (scenario === 'already-cancelled') {
+      assert.equal(box.transit.some(record => record.path === '/auth/device/start'), false,
+        'an already-aborted signal prevents the device flow from starting');
+      assert.equal(box.providerCalls.some(call => call.path === '/login/oauth/access_token'), false,
+        'an already-aborted signal makes no provider request');
+    }
+    if (scenario === 'cancelled-during-sign-in') {
+      assert.equal(box.transit.some(record => record.path === '/auth/device/start'), true, 'the caller cancels an active device sign-in');
+    }
+    if (scenario === 'declined' || scenario === 'expired') {
+      assert.equal(box.providerCalls.some(call => call.path === '/login/oauth/access_token'), true, 'the real synthetic provider returns the terminal sign-in result');
+    }
+  });
+
+  await t.test('cancellation revokes a session minted behind a held poll response', async (t) => {
+    const box = await relayClientFixture(t);
+    const second = await registerSecondProject(box);
+    box.refuseBoardLinks(true);
+    const priorSession = await box.phoneSession();
+    const sessionsBefore = livePersonSessionIds(box);
+    const before = [box.linkFile, second.linkFile, box.keyFile, second.keyFile].map(path => [path, fileSnapshot(path)]);
+    const result = await runRelayOnAll(box, 'held-poll-response');
+    assert.equal(result.code, 0, 'the held response is canceled through the ticket cleanup path');
+    assert.equal(result.document.outcome, 'cancelled', 'the caller reports cancellation only after cleanup confirmation');
+    assert.deepEqual(livePersonSessionIds(box), sessionsBefore, 'the just-minted session is revoked');
+    assert.equal((await box.auth.authenticate(priorSession.token)).id, priorSession.id, 'cleanup does not revoke a preexisting session');
+    assert.equal(box.transit.filter(record => record.method === 'POST' && record.path === '/auth/device/cancel').length, 1,
+      'the held device flow is canceled through its ticket');
+    for (const [path, contents] of before) assert.deepEqual(fileSnapshot(path), contents, 'a canceled poll leaves board links and keys unchanged');
+  });
+
+  for (const terminal of ['denied', 'expired']) await t.test(`cancellation acknowledges a held ${terminal} poll response without changing sessions`, async (t) => {
+    const box = await relayClientFixture(t);
+    const second = await registerSecondProject(box);
+    box.refuseBoardLinks(true);
+    box.providerState.deviceDeclined = terminal === 'denied';
+    box.providerState.deviceExpired = terminal === 'expired';
+    const priorSession = await box.phoneSession();
+    const providerCallsBeforeAttempt = box.providerCalls.length;
+    const sessionsBefore = livePersonSessionIds(box);
+    const before = [box.linkFile, second.linkFile, box.keyFile, second.keyFile].map(path => [path, fileSnapshot(path)]);
+    const result = await runRelayOnAll(box, `held-poll-response-${terminal}`);
+    assert.equal(result.code, 0, 'a known terminal provider result is cleanable while its response is held');
+    assert.equal(result.document.outcome, 'cancelled', 'cancellation is confirmed for this known terminal flow');
+    assert.deepEqual(livePersonSessionIds(box), sessionsBefore, 'terminal provider results mint no person session');
+    assert.equal((await box.auth.authenticate(priorSession.token)).id, priorSession.id, 'terminal cleanup preserves the prior session');
+    assert.equal(box.transit.filter(record => record.method === 'POST' && record.path === '/auth/device/cancel').length, 1,
+      'the terminal flow is acknowledged through its exact ticket');
+    assert.equal(box.providerCalls.slice(providerCallsBeforeAttempt).some(call => call.path === '/user'), false,
+      'a terminal provider response never reaches identity lookup');
+    assert.equal(box.transit.some(record => record.path === '/auth/boards/link' || record.path === '/auth/machines'), false,
+      'terminal cancellation never begins a board or machine write');
+    for (const [path, contents] of before) assert.deepEqual(fileSnapshot(path), contents, 'terminal cancellation leaves board links and keys unchanged');
+  });
+
+  await t.test('cancellation during provider polling does not mint a person session', async (t) => {
+    const box = await fixture(t);
+    let markStarted;
+    let release;
+    const started = new Promise(resolve => { markStarted = resolve; });
+    const held = new Promise(resolve => { release = resolve; });
+    box.state.deviceAuthorized = true;
+    box.state.beforeDevicePoll = async () => { box.state.beforeDevicePoll = null; markStarted(); await held; };
+    const grant = await box.auth.beginDevice();
+    box.advance(grant.interval * 1000);
+    const before = livePersonSessionIds({ authDatabase: box.database });
+    const poll = box.auth.pollDevice(grant.ticket);
+    await started;
+    const cancellation = box.auth.cancelDevice(grant.ticket);
+    release();
+    await assert.rejects(poll, { code: 'OAUTH_CANCELLED' }, 'the provider result is discarded after cancellation');
+    assert.deepEqual(await cancellation, { cancelled: true }, 'ticket cancellation waits for the provider operation to settle');
+    assert.deepEqual(livePersonSessionIds({ authDatabase: box.database }), before, 'the canceled provider result creates no session');
+  });
+
+  await t.test('cancellation during GitHub identity lookup does not mint a person session', async (t) => {
+    const box = await fixture(t);
+    let markStarted;
+    let release;
+    const started = new Promise(resolve => { markStarted = resolve; });
+    const held = new Promise(resolve => { release = resolve; });
+    box.state.deviceAuthorized = true;
+    box.state.beforeUser = async () => { box.state.beforeUser = null; markStarted(); await held; };
+    const grant = await box.auth.beginDevice();
+    box.advance(grant.interval * 1000);
+    const before = livePersonSessionIds({ authDatabase: box.database });
+    const poll = box.auth.pollDevice(grant.ticket);
+    await started;
+    const cancellation = box.auth.cancelDevice(grant.ticket);
+    release();
+    await assert.rejects(poll, { code: 'OAUTH_CANCELLED' }, 'the identity result is discarded after cancellation');
+    assert.deepEqual(await cancellation, { cancelled: true }, 'cancellation waits for identity lookup to settle');
+    assert.deepEqual(livePersonSessionIds({ authDatabase: box.database }), before, 'the canceled identity result creates no session');
+  });
+
+  await t.test('a failed cancellation acknowledgement is not reported as success', async (t) => {
+    const box = await relayClientFixture(t);
+    box.refuseBoardLinks(true);
+    const sessionsBefore = livePersonSessionIds(box);
+    const result = await runRelayOnAll(box, 'held-poll-response-cancel-fails');
+    assert.notEqual(result.code, 0, 'a failed cleanup acknowledgement fails the caller closed');
+    assert.equal(result.document.errorCode, 'OAUTH_CLEANUP', 'cleanup failure is surfaced as a typed refusal');
+    assert.equal(box.transit.some(record => record.method === 'POST' && record.path === '/auth/device/cancel'), false,
+      'the unavailable cancel endpoint receives no request at the fixture');
+    const after = livePersonSessionIds(box);
+    const leaked = after.filter(id => !sessionsBefore.includes(id));
+    assert.equal(leaked.length, 1, 'the test confirms cleanup was not falsely reported when the endpoint was unavailable');
+    assert.equal(box.transit.some(record => record.path === '/auth/boards/link' || record.path === '/auth/machines'), false,
+      'failed cancellation never begins a board or machine write');
+    revokeFixtureSessions(box, leaked);
+  });
+});
+
+test('a cancel during pairing keeps the links and stops pairing cleanly [H5,N26]', async (t) => {
+  await t.test('cancellation before the first link remains a no-link outcome', async (t) => {
+    const box = await relayClientFixture(t);
+    await registerSecondProject(box);
+    const result = await runRelayOnAll(box, 'already-aborted');
+    assert.equal(result.code, 0);
+    assert.equal(result.document.outcome, 'cancelled');
+    assert.deepEqual(result.document.linked ?? [], []);
+    assert.equal(box.transit.some(record => record.path === '/auth/boards/link'), false, 'no board-link request starts');
+    assert.equal(result.document.pairingCallbackCount, 0, 'no pairing URL is announced');
+  });
+
+  for (const mode of ['pairing-cancel', 'pairing-cancel-delete-fails']) await t.test(mode, async (t) => {
+    const box = await relayClientFixture(t);
+    await registerSecondProject(box);
+    const result = await runRelayOnAll(box, mode);
+    assert.equal(result.code, 0, 'pairing cancellation is a named successful setup outcome');
+    assert.equal(result.document.pairingOutcome, 'cancelled');
+    assert.equal(result.document.paired, false);
+    assert.equal(result.document.linked.length, 2, 'the completed board links remain in the result');
+    assert.deepEqual(result.document.failed, []);
+    assert.equal(result.document.pendingCleared, true, 'the local pending enrollment is removed');
+    assert.equal(result.document.deviceCount, 0, 'cancellation before acceptance records no device');
+    assert.equal(result.document.pairingCallbackCount, 1, 'the optional pairing callback receives the pairing address');
+    assert.equal(result.document.pairingCallbackHasCode, true);
+    assert.equal(result.document.pairingCallbackExpires, true);
+    assert.equal(result.document.pairingUrlPrinted, false, 'the callback replaces CLI URL/QR output');
+    assert.equal(result.document.signalAborted, true);
+    if (mode === 'pairing-cancel') {
+      assert.equal(result.document.pairingCleanup, 'confirmed');
+      assert.equal(box.transit.filter(record => record.method === 'DELETE' && /\/api\/v1\/devices\/enrollments\//u.test(record.path)).length, 1);
+    } else {
+      assert.equal(result.document.pairingCleanup, 'unconfirmed', 'a refused DELETE is not reported as cleanup success');
+      assert.equal(result.document.pairingCleanupWarningShown, true);
+    }
+  });
+
+  for (const mode of ['pairing-complete', 'pairing-abort-during-acceptance']) await t.test(mode, async (t) => {
+    const box = await relayClientFixture(t);
+    await registerSecondProject(box);
+    const result = await runRelayOnAll(box, mode);
+    assert.equal(result.code, 0, 'the real loopback enrollment completes');
+    assert.equal(result.document.pairingCallbackCount, 1, 'the optional pairing callback receives the pairing address');
+    assert.equal(result.document.pairingUrlPrinted, false, 'the callback replaces CLI URL/QR output');
+    assert.equal(result.document.pairingOutcome, 'paired');
+    assert.equal(result.document.paired, true);
+    assert.equal(result.document.linked.length, 2);
+    assert.deepEqual(result.document.failed, []);
+    assert.equal(result.document.pairingCallbackHasCode, true);
+    assert.equal(result.document.enrollmentUploaded, true);
+    assert.equal(result.document.pendingCleared, true);
+    assert.equal(result.document.deviceCount, 1);
+    assert.equal(box.transit.filter(record => record.method === 'PUT' && /\/api\/v1\/devices\/device-[0-9a-f]{32}\/boards\//u.test(record.path)).length, 2,
+      'the enrolled device receives wraps for every linked board');
+    assert.equal(result.document.signalAborted, mode === 'pairing-abort-during-acceptance');
+  });
+});
 
 test('browser state/cookie binding and one-use device ticket protect both sign-in flows [H8, H1]', async (t) => {
   const box = await fixture(t);
@@ -62,6 +538,161 @@ test('browser state/cookie binding and one-use device ticket protect both sign-i
   const cli = await box.auth.pollDevice(grant.ticket);
   assert.equal((await box.auth.authenticate(cli.token)).user.id, '7');
   await assert.rejects(box.auth.pollDevice(grant.ticket), { code: 'OAUTH_EXPIRED' });
+});
+
+test('relay on from an SSH shell links only after the person confirms in the browser [P6, H5, H8, B26]', async (t) => {
+  const box = await relayClientFixture(t);
+  const ssh = { SSH_CONNECTION: '192.0.2.10 12345 192.0.2.20 22', PULLBOARD_RELAY_TOKEN: 'pa_' + 'x'.repeat(43) };
+  const running = box.startCli(['relay', 'on', '--url', box.origin], ssh);
+  const marker = 'After sign-in, confirm the link in your browser: ';
+  const output = await running.waitForOutput(marker);
+  const startResponse = await box.waitForResponse('/auth/device/start');
+  const deviceGrant = JSON.parse(startResponse.response.toString());
+  const line = output.split('\n').find(value => value.includes(marker));
+  const confirmationURL = line?.slice(line.indexOf(marker) + marker.length).trim();
+  assert.ok(confirmationURL, 'SSH sign-in prints the separate browser confirmation address');
+  await box.waitForResponse('/auth/device/poll');
+  const browser = await openRelayConfirmation(box, confirmationURL);
+  assert.ok(browser.cookieMaxAge > 600 && browser.cookieMaxAge <= deviceGrant.expiresIn + 600,
+    'an early browser visit remains bound through the remaining device grant and ten-minute confirmation window');
+  const status = await browser.status();
+  assert.equal(status.response.status, 200);
+  assert.equal(status.document.ready, true, 'the relay holds the GitHub session until the device grant is complete');
+  assert.equal(status.document.intent.boardName, basename(box.root));
+  assert.equal(status.document.intent.host, hostname());
+  assert.equal(JSON.stringify(status.document).includes('token'), false, 'the browser status does not expose a relay credential');
+  assert.equal(linkedBoardCount(box.authDatabase), 0, 'no board is linked before the person confirms');
+  const foreignDecision = await browser.decide('confirm', 'https://foreign.invalid');
+  assert.equal(foreignDecision.status, 403, 'a foreign origin cannot confirm even with the browser cookie');
+  assert.equal(linkedBoardCount(box.authDatabase), 0, 'a refused cross-origin decision creates no link');
+  const confirmed = await browser.decide('confirm');
+  assert.equal(confirmed.status, 200, 'the exact-origin browser action confirms the displayed intent');
+  assert.equal(linkedBoardCount(box.authDatabase), 1, 'the relay links only after affirmative confirmation');
+  const completed = await running.closed;
+  assert.equal(completed.signal, null);
+  assert.equal(completed.code, 0, 'SSH relay on receives the person session only after confirmation');
+  assert.equal(JSON.parse(completed.stdout).linked, true);
+
+  const declineBox = await relayClientFixture(t);
+  const declinedRun = declineBox.startCli(['relay', 'on', '--url', declineBox.origin], { SSH_TTY: '/dev/pts/8' });
+  const declinedOutput = await declinedRun.waitForOutput(marker);
+  const declinedLine = declinedOutput.split('\n').find(value => value.includes(marker));
+  const declinedURL = declinedLine?.slice(declinedLine.indexOf(marker) + marker.length).trim();
+  assert.ok(declinedURL);
+  await declineBox.waitForResponse('/auth/device/poll');
+  const declinedBrowser = await openRelayConfirmation(declineBox, declinedURL);
+  assert.equal((await declinedBrowser.status()).document.ready, true);
+  assert.equal((await declinedBrowser.decide('decline')).status, 200);
+  const declined = await declinedRun.closed;
+  assert.equal(declined.code, 1, 'the CLI reports a person decline');
+  assert.equal(JSON.parse(declined.stdout).error.code, 'OAUTH_DENIED');
+  assert.equal(linkedBoardCount(declineBox.authDatabase), 0, 'declining leaves the board unlinked');
+
+  const startsBeforeRefusals = box.calls.filter(call => call.path === '/auth/device/start').length;
+  const agent = spawnSync(process.execPath, [CLI, 'relay', 'on', '--url', box.origin, '--json'], {
+    cwd: box.root, env: { ...box.env, SSH_CONNECTION: ssh.SSH_CONNECTION, AI_AGENT: '1' }, encoding: 'utf8',
+  });
+  assert.equal(agent.status, 1);
+  assert.equal(JSON.parse(agent.stdout).error.code, 'B26_PERSON_CHANNEL', 'an agent-marked SSH shell still cannot link');
+  const personAnswer = spawnSync(process.execPath, [CLI, 'answer', '1', 'yes', '--as', 'person', '--json'], {
+    cwd: box.root, env: { ...box.env, SSH_CONNECTION: ssh.SSH_CONNECTION }, encoding: 'utf8',
+  });
+  assert.equal(personAnswer.status, 1);
+  assert.equal(JSON.parse(personAnswer.stdout).error.code, 'B26_PERSON_CHANNEL', 'other person-only SSH actions remain refused');
+  assert.equal(box.calls.filter(call => call.path === '/auth/device/start').length, startsBeforeRefusals,
+    'refused shell actions never start another browser grant');
+});
+
+test('an unanswered device board confirmation expires after ten minutes [H8]', async (t) => {
+  const box = await fixture(t);
+  const intent = { board: 'ssh-board', boardName: 'fixture-board', host: 'fixture-host', repository: 'fixture/repository' };
+  const flow = await box.auth.beginDevice({ intent });
+  box.state.deviceAuthorized = true;
+  box.advance(flow.interval * 1000);
+  const pending = await box.auth.pollDevice(flow.ticket);
+  assert.equal(pending.pendingConfirmation, true);
+  assert.equal('token' in pending, false, 'the CLI ticket does not return the held person session');
+  const browser = box.auth.openDeviceConfirmation(flow.confirmationTicket);
+  const status = box.auth.deviceConfirmationStatus(flow.confirmationTicket, browser.binding);
+  assert.equal(status.ready, true);
+  assert.equal('token' in status, false, 'browser status contains no relay credential');
+  box.advance(10 * 60_000);
+  await assert.rejects(box.auth.pollDevice(flow.ticket), { code: 'OAUTH_EXPIRED' });
+  assert.equal(linkedBoardCount(box.database), 0, 'an unanswered intent never links a board');
+  const db = new DatabaseSync(box.database);
+  try {
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM relay_credentials WHERE kind='session' AND revoked=1").get().count, 1,
+      'the server-held session is revoked after the confirmation deadline');
+  } finally { db.close(); }
+});
+
+test('a confirmation approved before its deadline can reach the SSH CLI just after ten minutes [P6, H5]', async (t) => {
+  const box = await fixture(t);
+  const intent = { board: 'ssh-board', boardName: 'fixture-board', host: 'fixture-host', repository: 'fixture/repository' };
+  const flow = await box.auth.beginDevice({ intent });
+  const browser = box.auth.openDeviceConfirmation(flow.confirmationTicket);
+  box.state.deviceAuthorized = true;
+  box.advance(flow.interval * 1000);
+  const pending = await box.auth.pollDevice(flow.ticket);
+  assert.equal(pending.pendingConfirmation, true);
+  box.advance(599_000);
+  const approved = await box.auth.confirmDevice(flow.confirmationTicket, browser.binding, 'confirm');
+  assert.equal(approved.confirmed, true, 'the person approved before the original confirmation deadline');
+  box.advance(2_000);
+  const delivered = await box.auth.pollDevice(flow.ticket);
+  assert.equal(delivered.linkConfirmed, true, 'the valid approval remains retrievable after its decision deadline');
+  assert.equal(delivered.linkedBoard, intent.board);
+  assert.match(delivered.token, /^ps_[A-Za-z0-9_-]{43}$/u);
+});
+
+test('device authorization stays serialized while GitHub confirms its user [P6, H5]', async (t) => {
+  const box = await fixture(t);
+  const intent = { board: 'ssh-board', boardName: 'fixture-board', host: 'fixture-host', repository: 'fixture/repository' };
+  const flow = await box.auth.beginDevice({ intent });
+  const originalUser = box.config.github.user;
+  let releaseLookup;
+  let announceLookup;
+  const lookupStarted = new Promise((resolve) => { announceLookup = resolve; });
+  const lookupHeld = new Promise((resolve) => { releaseLookup = resolve; });
+  let lookupCount = 0;
+  box.config.github.user = async (token) => {
+    lookupCount += 1;
+    if (lookupCount === 1) {
+      announceLookup();
+      await lookupHeld;
+    }
+    return originalUser(token);
+  };
+  box.state.deviceAuthorized = true;
+  box.advance(flow.interval * 1000);
+  let firstPoll;
+  try {
+    firstPoll = box.auth.pollDevice(flow.ticket);
+    await lookupStarted;
+    const providerPolls = () => box.calls.filter((call) => call.path === '/login/oauth/access_token').length;
+    assert.equal(providerPolls(), 1, 'the first provider poll produced the grant now being resolved');
+    box.advance(flow.interval * 1000);
+    const concurrent = await box.auth.pollDevice(flow.ticket);
+    assert.equal(concurrent.pending, true, 'a second CLI request waits while identity confirmation finishes');
+    assert.equal(concurrent.pendingConfirmation, undefined, 'the held session is not exposed as ready yet');
+    assert.equal(providerPolls(), 1, 'the concurrent CLI request cannot consume the provider grant again');
+
+    releaseLookup();
+    const pending = await firstPoll;
+    assert.equal(pending.pendingConfirmation, true);
+    assert.equal('token' in pending, false, 'the held session remains unavailable before person approval');
+    const browser = box.auth.openDeviceConfirmation(flow.confirmationTicket);
+    const status = box.auth.deviceConfirmationStatus(flow.confirmationTicket, browser.binding);
+    assert.equal(status.ready, true, 'the original browser confirmation remains attached to the authorized device flow');
+    assert.equal('token' in status, false, 'browser status never returns the held session credential');
+    const waiting = await box.auth.pollDevice(flow.ticket);
+    assert.equal(waiting.pendingConfirmation, true, 'the CLI keeps waiting for the person decision');
+    assert.equal('token' in waiting, false);
+    assert.equal(lookupCount, 1, 'one successful device grant creates one server-held user session');
+  } finally {
+    releaseLookup();
+    if (firstPoll) await firstPoll.catch(() => {});
+  }
 });
 
 test('unreadable links are refused; agent tokens belong to exactly one board [H8, H1]', async (t) => {

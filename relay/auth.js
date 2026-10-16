@@ -60,6 +60,9 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
   const permissions = new Map();
   const webFlows = new Map();
   const deviceFlows = new Map();
+  const deviceConfirmations = new Map();
+  // A hashed ticket may revoke only its minted session, retained until that session expires.
+  const deviceSessionReceipts = new Map();
   let closed = false;
   let locked = false;
 
@@ -78,6 +81,16 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
     } catch (error) { db.exec('ROLLBACK'); throw error; }
     finally { locked = false; }
   }
+
+  /** Revoke a server-held device session when its person declined or abandoned confirmation. */
+  function discardDeviceSession(flow) {
+    if (!flow.session?.id) return;
+    lifecycle(() => db.prepare('UPDATE relay_credentials SET revoked=1 WHERE id=? AND kind=?').run(flow.session.id, 'session'));
+    flow.session = null;
+  }
+
+  /** Keep a confirmed device session retrievable only for its bounded CLI delivery window. */
+  function deviceFlowExpiry(flow) { return flow.confirmed ? flow.deliveryExpires : flow.expires; }
 
   /** Resolve a current credential and latest account login without storing its plaintext. */
   function credential(token) {
@@ -100,9 +113,10 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
   }
 
   /** Learn the immutable GitHub identity, then drop the user access credential immediately. */
-  async function signedIn(result) {
+  async function signedIn(result, { cancelled } = {}) {
     if (!result || result.pending) throw new Refused('OAUTH_STATE', 'complete GitHub sign-in before creating a relay session');
     const user = await github.user(result.accessToken);
+    if (cancelled?.()) throw new Refused('OAUTH_CANCELLED', 'GitHub device sign-in was cancelled; no board was linked');
     open();
     if (!user || !/^[1-9][0-9]*$/.test(String(user.id)) || typeof user.login !== 'string' || !/^[A-Za-z0-9-]+$/.test(user.login)) throw new Refused('GITHUB_AUTH', 'GitHub did not confirm your account; sign in again');
     db.prepare('INSERT INTO relay_users (id,login) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET login=excluded.login').run(String(user.id), user.login);
@@ -112,8 +126,41 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
   /** Remove expired in-memory flow secrets and limit anonymous sign-in allocations. */
   function pruneFlows() {
     open();
-    for (const map of [webFlows, deviceFlows]) for (const [key, flow] of map) if (flow.expires <= now()) map.delete(key);
-    if (webFlows.size + deviceFlows.size >= 10_000) throw new Refused('SIGN_IN_BUSY', 'too many sign-ins are pending; retry shortly');
+    for (const [key, flow] of deviceFlows) if (deviceFlowExpiry(flow) <= now() && !flow.busy) {
+      if (!flow.confirmed) discardDeviceSession(flow);
+      deviceFlows.delete(key);
+      if (flow.confirmationTicket) deviceConfirmations.delete(hash(flow.confirmationTicket));
+    }
+    for (const map of [webFlows, deviceConfirmations]) for (const [key, flow] of map) if (flow.expires <= now()) map.delete(key);
+    for (const [key, receipt] of deviceSessionReceipts) if (receipt.expires <= now()) deviceSessionReceipts.delete(key);
+    const activeTickets = new Set([...deviceFlows.keys(), ...deviceSessionReceipts.keys()]);
+    if (new Set([...webFlows.keys(), ...activeTickets]).size >= 10_000) throw new Refused('SIGN_IN_BUSY', 'too many sign-ins are pending; retry shortly');
+  }
+
+  /** Look up a live pending browser confirmation without accepting the CLI polling ticket. */
+  function confirmation(ticket) {
+    open();
+    if (typeof ticket !== 'string') throw new Refused('OAUTH_EXPIRED', 'the relay confirmation expired; run pullboard relay on again');
+    const key = hash(ticket);
+    const flow = deviceConfirmations.get(key);
+    if (!flow || flow.cancelled || flow.expires <= now()) {
+      deviceConfirmations.delete(key);
+      if (flow) {
+        if (!flow.confirmed) {
+          deviceFlows.delete(flow.deviceTicketHash);
+          discardDeviceSession(flow);
+        }
+      }
+      throw new Refused('OAUTH_EXPIRED', 'the relay confirmation expired; run pullboard relay on again');
+    }
+    return { key, flow };
+  }
+
+  /** Validate the browser-only cookie binding before reading or changing a pending confirmation. */
+  function confirmationBinding(flow, binding) {
+    if (!flow.confirmationBinding || !sameHash(flow.confirmationBinding, hash(binding ?? ''))) {
+      throw new Refused('OAUTH_STATE', 'open the relay confirmation link in this browser again');
+    }
   }
 
   /** Hide public boards below triage, and refuse actions below write without hiding readable private boards. */
@@ -172,13 +219,36 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
       return signedIn(await github.exchangeCode(code, flow.verifier));
     },
     /** Give the CLI a relay ticket; the GitHub device credential remains in RAM. */
-    async beginDevice() {
+    async beginDevice({ intent } = {}) {
       pruneFlows();
+      if (intent !== undefined && (!intent || typeof intent !== 'object' || Array.isArray(intent))) {
+        throw new Refused('BAD_REQUEST', 'start a relay sign-in with a valid board confirmation');
+      }
+      let pendingIntent;
+      if (intent !== undefined) {
+        if (Object.keys(intent).sort().join(',') !== 'board,boardName,host,repository') {
+          throw new Refused('BAD_REQUEST', 'start a relay sign-in with exactly one board confirmation');
+        }
+        identifier(intent.board, 'BAD_BOARD');
+        const repository = repositoryName(intent.repository);
+        if (typeof intent.host !== 'string' || !intent.host || intent.host.length > 255 || /[\u0000-\u001f\u007f]/u.test(intent.host) ||
+            typeof intent.boardName !== 'string' || !intent.boardName.trim() || intent.boardName.length > 200 || /[\u0000-\u001f\u007f]/u.test(intent.boardName)) {
+          throw new Refused('BAD_REQUEST', 'start a relay sign-in with a valid board name and machine host');
+        }
+        pendingIntent = Object.freeze({ board: intent.board, repository, host: intent.host, boardName: intent.boardName });
+      }
       const grant = await github.startDevice();
       pruneFlows();
       const ticket = random('pd_');
-      deviceFlows.set(hash(ticket), { deviceCode: grant.deviceCode, expires: now() + grant.expiresIn * 1000, interval: grant.interval, next: now() + grant.interval * 1000 });
-      return { ticket, userCode: grant.userCode, verificationURL: grant.verificationURL, expiresIn: grant.expiresIn, interval: grant.interval };
+      const grantExpires = now() + grant.expiresIn * 1000;
+      const deviceTicketHash = hash(ticket);
+      const flow = { deviceCode: grant.deviceCode, deviceTicketHash, grantExpires, expires: grantExpires, interval: grant.interval, next: now() + grant.interval * 1000,
+        cancelled: false, completed: false, terminalOutcome: null, sessionId: null, pollSettled: null,
+        ...(pendingIntent ? { intent: pendingIntent, confirmationTicket: random('pc_') } : {}) };
+      deviceFlows.set(deviceTicketHash, flow);
+      if (flow.confirmationTicket) deviceConfirmations.set(hash(flow.confirmationTicket), flow);
+      return { ticket, ...(flow.confirmationTicket ? { confirmationTicket: flow.confirmationTicket } : {}), userCode: grant.userCode,
+        verificationURL: grant.verificationURL, expiresIn: grant.expiresIn, interval: grant.interval };
     },
     /** Throttle device polling, honor slow-down, and consume a successful grant only once. */
     async pollDevice(ticket) {
@@ -186,23 +256,168 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
       if (typeof ticket !== 'string') throw new Refused('OAUTH_EXPIRED', 'start CLI sign-in again');
       const key = hash(ticket);
       const flow = deviceFlows.get(key);
-      if (!flow || flow.expires <= now()) { deviceFlows.delete(key); throw new Refused('OAUTH_EXPIRED', 'CLI sign-in expired; start again'); }
+      if (!flow || flow.cancelled || flow.completed) throw new Refused('OAUTH_EXPIRED', 'CLI sign-in expired; start again');
+      if (deviceFlowExpiry(flow) <= now() && !flow.busy) {
+        deviceFlows.delete(key);
+        if (flow?.confirmationTicket) deviceConfirmations.delete(hash(flow.confirmationTicket));
+        if (flow && !flow.confirmed) discardDeviceSession(flow);
+        throw new Refused('OAUTH_EXPIRED', 'CLI sign-in expired; start again');
+      }
+      if (flow.intent) {
+        if (flow.declined) {
+          discardDeviceSession(flow);
+          deviceFlows.delete(key);
+          deviceConfirmations.delete(hash(flow.confirmationTicket));
+          throw new Refused('OAUTH_DENIED', 'the person declined to link this board; run pullboard relay on again to start a new sign-in');
+        }
+        if (flow.confirmed) {
+          deviceFlows.delete(key);
+          deviceConfirmations.delete(hash(flow.confirmationTicket));
+          return { ...flow.session, linkConfirmed: true, linkedBoard: flow.intent.board };
+        }
+        if (flow.session) return { pending: true, pendingConfirmation: true, confirmationExpiresIn: Math.max(1, Math.ceil((flow.expires - now()) / 1000)), retryAfter: flow.interval };
+      }
       if (flow.busy || flow.next > now()) return { pending: true, retryAfter: Math.max(1, Math.ceil((flow.next - now()) / 1000)) };
       flow.next = now() + flow.interval * 1000;
       flow.busy = true;
       let result;
-      try { result = await github.pollDevice(flow.deviceCode); }
-      catch (error) { if (['OAUTH_DENIED', 'OAUTH_EXPIRED'].includes(error.code)) deviceFlows.delete(key); throw error; }
-      finally { flow.busy = false; }
-      if (flow.expires <= now()) { deviceFlows.delete(key); throw new Refused('OAUTH_EXPIRED', 'CLI sign-in expired; start again'); }
-      if (result.pending) {
-        if (result.slow) flow.interval += 5;
-        if (Number.isFinite(result.interval) && result.interval > flow.interval) flow.interval = result.interval;
-        flow.next = now() + flow.interval * 1000;
-        return { pending: true, retryAfter: flow.interval };
+      let settle;
+      flow.pollSettled = new Promise(resolve => { settle = resolve; });
+      try {
+        try { result = await github.pollDevice(flow.deviceCode); }
+        catch (error) {
+          if (flow.cancelled) throw new Refused('OAUTH_CANCELLED', 'GitHub device sign-in was cancelled; no board was linked');
+          if (['OAUTH_DENIED', 'OAUTH_EXPIRED'].includes(error.code)) {
+            // Retain the ticket hash until expiry so a racing cancellation can confirm cleanup.
+            flow.deviceCode = null;
+            flow.terminalOutcome = error.code;
+            flow.completed = true;
+          }
+          throw error;
+        }
+        if (flow.cancelled) throw new Refused('OAUTH_CANCELLED', 'GitHub device sign-in was cancelled; no board was linked');
+        if (flow.expires <= now()) {
+          deviceFlows.delete(key);
+          if (flow.confirmationTicket) deviceConfirmations.delete(hash(flow.confirmationTicket));
+          if (!flow.confirmed) discardDeviceSession(flow);
+          throw new Refused('OAUTH_EXPIRED', 'CLI sign-in expired; start again');
+        }
+        if (flow.declined) {
+          deviceFlows.delete(key);
+          if (flow.confirmationTicket) deviceConfirmations.delete(hash(flow.confirmationTicket));
+          throw new Refused('OAUTH_DENIED', 'the person declined to link this board; run pullboard relay on again to start a new sign-in');
+        }
+        if (result.pending) {
+          if (result.slow) flow.interval += 5;
+          if (Number.isFinite(result.interval) && result.interval > flow.interval) flow.interval = result.interval;
+          flow.next = now() + flow.interval * 1000;
+          return { pending: true, retryAfter: flow.interval };
+        }
+        const session = await signedIn(result, { cancelled: () => flow.cancelled });
+        flow.deviceCode = null;
+        flow.sessionId = session.id;
+        flow.sessionExpires = session.expires;
+        flow.completed = !flow.intent;
+        deviceSessionReceipts.set(key, { sessionId: session.id, expires: session.expires, revoked: false });
+        if (flow.cancelled || flow.expires <= now()) {
+          db.prepare("UPDATE relay_credentials SET revoked=1 WHERE id=? AND kind='session'").run(flow.sessionId);
+          deviceSessionReceipts.get(key).revoked = true;
+          throw flow.cancelled
+            ? new Refused('OAUTH_CANCELLED', 'GitHub device sign-in was cancelled; no board was linked')
+            : new Refused('OAUTH_EXPIRED', 'CLI sign-in expired; start again');
+        }
+        if (flow.intent) {
+          flow.session = session;
+          if (flow.declined || flow.expires <= now()) {
+            discardDeviceSession(flow);
+            deviceFlows.delete(key);
+            deviceConfirmations.delete(hash(flow.confirmationTicket));
+            throw new Refused(flow.declined ? 'OAUTH_DENIED' : 'OAUTH_EXPIRED', 'the person confirmation ended before sign-in completed; run pullboard relay on again');
+          }
+          flow.expires = now() + 10 * 60_000;
+          return { pending: true, pendingConfirmation: true, confirmationExpiresIn: 600, retryAfter: flow.interval };
+        }
+        return session;
+      } finally {
+        flow.busy = false;
+        flow.pollSettled = null;
+        settle();
       }
-      deviceFlows.delete(key);
-      return signedIn(result);
+    },
+    /** Cancel one bearer-ticket flow and revoke only the session it minted, if any. */
+    async cancelDevice(ticket) {
+      open();
+      if (typeof ticket !== 'string' || !/^pd_[A-Za-z0-9_-]{43}$/u.test(ticket)) return { cancelled: false };
+      const key = hash(ticket);
+      let flow = deviceFlows.get(key);
+      let receipt = deviceSessionReceipts.get(key);
+      if (flow && flow.expires <= now() && !flow.busy) {
+        deviceFlows.delete(key);
+        flow = null;
+      }
+      if (receipt && receipt.expires <= now()) {
+        deviceSessionReceipts.delete(key);
+        receipt = null;
+      }
+      if (!flow && !receipt) return { cancelled: false };
+      if (flow) {
+        flow.cancelled = true;
+        const pollSettled = flow.pollSettled;
+        if (pollSettled) await pollSettled;
+        flow.deviceCode = null;
+        receipt = deviceSessionReceipts.get(key) ?? receipt;
+      }
+      const sessionId = receipt?.sessionId ?? flow?.sessionId;
+      const sessionExpires = receipt?.expires ?? flow?.sessionExpires;
+      if (sessionId && !Number.isSafeInteger(sessionExpires)) throw new Refused('OAUTH_CLEANUP', 'the relay cannot confirm cleanup for this sign-in; retry or sign in again');
+      if (sessionId && !receipt?.revoked) {
+        db.prepare("UPDATE relay_credentials SET revoked=1 WHERE id=? AND kind='session' AND expires=?").run(sessionId, sessionExpires);
+        if (receipt) receipt.revoked = true;
+      }
+      if (flow) {
+        discardDeviceSession(flow);
+        flow.sessionId = null;
+        if (flow.confirmationTicket) deviceConfirmations.delete(hash(flow.confirmationTicket));
+      }
+      return { cancelled: true };
+    },
+    /** Start a cookie-bound browser visit for the separate one-use board confirmation nonce. */
+    openDeviceConfirmation(ticket) {
+      const { flow } = confirmation(ticket);
+      const binding = random('');
+      flow.confirmationBinding = hash(binding);
+      return { binding, cookieMaxAge: Math.max(1, Math.ceil((flow.grantExpires - now()) / 1000) + 600) };
+    },
+    /** Read only the immutable board intent and whether the matching device grant is ready. */
+    deviceConfirmationStatus(ticket, binding) {
+      const { flow } = confirmation(ticket);
+      confirmationBinding(flow, binding);
+      return { ready: Boolean(flow.session), confirmed: Boolean(flow.confirmed), declined: Boolean(flow.declined),
+        ...(flow.session ? { account: flow.session.user.login } : {}), intent: flow.intent };
+    },
+    /** Confirm or decline the exact board intent; only approval links it and releases the session to the CLI. */
+    async confirmDevice(ticket, binding, decision) {
+      const { flow } = confirmation(ticket);
+      confirmationBinding(flow, binding);
+      if (decision === 'decline') {
+        if (flow.confirmed) throw new Refused('OAUTH_STATE', 'this board link was already confirmed');
+        if (flow.confirming) throw new Refused('OAUTH_PENDING', 'the board link is being confirmed; wait for the relay page');
+        flow.declined = true;
+        discardDeviceSession(flow);
+        return { declined: true };
+      }
+      if (decision !== 'confirm') throw new Refused('BAD_REQUEST', 'choose confirm or decline on the relay page');
+      if (!flow.session) throw new Refused('OAUTH_PENDING', 'finish GitHub sign-in before confirming this board link');
+      if (!flow.confirmed) {
+        if (flow.confirming) throw new Refused('OAUTH_PENDING', 'the board link is being confirmed; wait for the relay page');
+        flow.confirming = true;
+        try {
+          await auth.linkBoard(flow.session.token, flow.intent.board, flow.intent.repository, flow.expires);
+          flow.confirmed = true;
+          flow.deliveryExpires = now() + 10 * 60_000;
+        } finally { flow.confirming = false; }
+      }
+      return { confirmed: true, board: flow.intent.board };
     },
     /** Authenticate a human or a scoped agent; every board write asks GitHub again. */
     async authenticate(token, { board, write = false } = {}) {
@@ -219,7 +434,7 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
       return { id: row.id, kind: row.kind, user: { id: row.user_id, login: row.login }, ...(row.board ? { board: row.board, ...(row.kind === 'machine' ? { machine: row.agent } : { agent: row.agent }) } : {}), ...(repository ? { permission: repository.permission, public: repository.public } : {}), expires: row.expires };
     },
     /** Accept a link only from a signed-in human with current repository write access. */
-    async linkBoard(token, board, repository) {
+    async linkBoard(token, board, repository, deadline = Infinity) {
       identifier(board, 'BAD_BOARD');
       repositoryName(repository);
       const row = credential(token);
@@ -227,6 +442,7 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
       const repo = await github.access({ id: row.user_id, login: row.login }, repository);
       authorize({ allowed: true, hidden: false, role: repo.permission, public: repo.public }, {}, true);
       credential(token);
+      if (deadline <= now()) throw new Refused('OAUTH_EXPIRED', 'the relay confirmation expired before the board link was made; run pullboard relay on again');
       open();
       lifecycle(() => {
         if (db.prepare('SELECT 1 FROM relay_cleanup WHERE board=?').get(board)) throw new Refused('RELAY_CLEANUP', 'finish pending board cleanup before linking again');
@@ -368,7 +584,7 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
     close() {
       if (closed) return;
       closed = true;
-      webFlows.clear(); deviceFlows.clear(); permissions.clear(); db.close();
+      webFlows.clear(); deviceFlows.clear(); deviceConfirmations.clear(); deviceSessionReceipts.clear(); permissions.clear(); db.close();
     },
   };
   return auth;
