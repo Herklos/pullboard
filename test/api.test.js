@@ -619,6 +619,7 @@ test('[A1] command results match the catalog across roots and subcommands', () =
 
   json(box, repo, 'spec', ['--json']);
   json(box, repo, 'spec', ['check'], 'check');
+  assert.deepEqual(json(box, repo, 'doctrine', ['check'], 'check').rules, [], 'a repo with no check rows reports no rules [D1]');
   json(box, repo, 'spec', ['view', '--out', join(box.dir, 'spec.html')], 'view');
   json(box, repo, 'spec', ['show', 'G1'], 'show');
   json(box, repo, 'spec', ['unmet'], 'unmet');

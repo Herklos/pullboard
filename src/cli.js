@@ -14,6 +14,7 @@ import * as store from './board.js';
 import { CONFIG_FILE, COORDINATOR, DOCTRINE_FILE, LEGACY_DOCTRINE_FILE, loadConfig } from './config.js';
 import { displayAgentName } from './agent-names.js';
 import { doctrineHistory, loadDoctrine } from './doctrine.js';
+import { checkRulesAt, doctrineReport, hasSubmitRules, holdDoctrine, ruleLine } from './doctrine-checks.js';
 import { agentSessionDigest, requirePersonChannel } from './person.js';
 import { bindLocalSession, localSessionMatches } from './agent-session.js';
 import { decisionProjection, planRowApply, prepareRowDecisions, restoreRowApply, writeRowApply } from './row-decisions.js';
@@ -1774,6 +1775,18 @@ function refuseUncommittedSetup(mainRoot, config) {
  */
 function readCommands(io, { first, second, rest, values }) {
   return {
+    doctrine: async () => {
+      if (first !== 'check' || second || rest.length) throw new Refused('USAGE', 'pullboard doctrine check');
+      const ctx = context(io);
+      // Only a repo whose committed doctrine carries a check takes a machine slot for it.
+      const rules = checkRulesAt(ctx.info.root, 'HEAD', ctx.config.practice).length
+        ? await withGateSlot(ctx.info.root, () => doctrineReport(ctx.info.root, ctx.config), { itemCheck: true, agent: resourceAgent(ctx), kind: 'doctrine', onWait: gateWaitReporter(io) })
+        : [];
+      io.result?.({ rules });
+      if (!rules.length) io.say('no committed doctrine rule carries a check; add one as | gate: check <command> | count: N');
+      for (const rule of rules) io.say(ruleLine(rule));
+      return rules.every((rule) => rule.holds) ? 0 : 1;
+    },
     skills: () => {
       if (first || second || rest.length || !values.update) throw new Refused('USAGE', 'pullboard skills --update');
       const ctx = context(io);
@@ -2134,6 +2147,12 @@ async function submitHere(ctx, id) {
   if (!commit) throw new Refused('NO_COMMIT', 'nothing committed yet');
   const trunk = requireTrunkMerge(root, commit);
   withBoard(ctx, (board) => refuseUnverifiedStack(root, board, held, commit, trunk));
+  // Doctrine counts only fall: accepted main's rules, at this exact commit (D1). No rule, no change.
+  const doctrine = hasSubmitRules(root, acceptedMain.commit, acceptedMain.config.practice)
+    ? await withGateSlot(root, () => holdDoctrine(root, { mainCommit: acceptedMain.commit, commit, practice: acceptedMain.config.practice, timeoutMs: acceptedMain.config.check?.timeoutMs }),
+      { itemCheck: true, agent: me.id, item: String(id), kind: 'doctrine', onWait: gateWaitReporter(ctx.io) })
+    : [];
+  for (const rule of doctrine) ctx.io.say(`doctrine: ${ruleLine(rule)}`);
   // Every submit proves its frozen check and reachable tests anew on this exact commit (V4,V16).
   // A full-gate stamp never substitutes for either proof; only an actual full fallback may stamp.
   const submitConfig = { ...ctx.config, submitGate: acceptedMain.config.submitGate };
@@ -2161,15 +2180,15 @@ async function submitHere(ctx, id) {
       ...(gate.deferred ? { note: 'full suite deferred to the landing gate' } : {}) }]);
   });
   return reportSubmission(ctx, id, commit, { green: gate.isGreen, report: submitGateReport(gate), files: gate.files, full: gate.full, deferred: gate.deferred, deferFullFallback: gate.deferFullFallback, reason: gate.reason, check: gate.check,
-    log: gate.log, profile: gate.profile, profilePath: gate.profilePath, proofLog: gate.proofLog, proofProfilePath: gate.proofProfilePath });
+    log: gate.log, profile: gate.profile, profilePath: gate.profilePath, proofLog: gate.proofLog, proofProfilePath: gate.proofProfilePath }, doctrine);
 }
 
 /** Report and pin the original submitted commit, including a recovered acknowledged outcome. */
-function reportSubmission(ctx, id, commit, gate) {
+function reportSubmission(ctx, id, commit, gate, doctrine = []) {
   const { root } = ctx.info;
   const pin = `refs/pullboard/items/${id}/${commit.slice(0, 12)}`;
   git(root, ['update-ref', pin, commit]);
-  ctx.io.result?.({ id, commit, pin, gate });
+  ctx.io.result?.({ id, commit, pin, gate, ...(doctrine.length ? { doctrine } : {}) });
   ctx.io.say(`submitted #${id} at ${commit.slice(0, 12)}; ${gate.report}`);
   ctx.io.say(`pinned as ${pin}, so this work can't be lost; keep your worktree until it is merged`);
   ctx.io.say(`next: another agent checks out ${commit.slice(0, 12)} and runs: pullboard verify ${id} accept|reject`);

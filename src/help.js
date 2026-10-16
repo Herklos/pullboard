@@ -155,6 +155,9 @@ Spec
   pullboard spec approve <ids> | decline <ids> --reason "why"  the person's exact-row decision
                                         approve <id> --text "new wording" approves an exact rewrite
   pullboard spec apply                  coordinator applies recorded row decisions to the files
+  pullboard doctrine check              each doctrine rule's check: its count, its committed count, whether it holds
+                                        a rule row adds | gate: check <command> | count: N; the command prints one line per problem
+                                        submit refuses a touched rule whose count rises; runs: nightly skips submit, mode: watch only counts
 
 Role guides
   pullboard prompt decompose|plan|signoff|review|verify   how to do each role; Claude Code gets them as skills
@@ -173,7 +176,7 @@ const HELP_NAMES = [
   'serve', 'relay', 'relay recover', 'resume', 'hooks', 'add', 'edit', 'escalate', 'run', 'list', 'doctor', 'skills', 'show', 'next', 'land',
   'check', 'claim', 'release', 'submit', 'done', 'verify', 'fact', 'shout', 'answer', 'pass', 'decisions', 'inbox', 'export', 'import',
   'sweep', 'merged', 'withdraw', 'refreeze', 'reopen', 'hold', 'stats', 'ledger', 'log', 'spec', 'spec check', 'spec view',
-  'spec show', 'spec unmet', 'spec signoff', 'spec draft', 'spec signers', 'spec signers add', 'forget', 'prompt', 'gate', 'hook',
+  'spec show', 'spec unmet', 'spec signoff', 'spec draft', 'spec signers', 'spec signers add', 'doctrine', 'doctrine check', 'forget', 'prompt', 'gate', 'hook',
   'hook pre-commit', 'hook pre-merge-commit', 'hook commit-msg', 'hook pre-push', 'view export', 'version', 'lifecycle', 'help',
   'roadmap', 'milestone',
 ];
@@ -201,6 +204,7 @@ const HELP_EXAMPLES = {
   escalate: 'pullboard escalate 12 --note "needs a manual step"', next: 'pullboard next',
   run: 'pullboard run --agent "node agent.js"', 'view export': 'pullboard view --export ./site',
   'spec check': 'pullboard spec check',
+  doctrine: 'pullboard doctrine check', 'doctrine check': 'pullboard doctrine check',
   'spec view': 'pullboard spec view', 'spec show': 'pullboard spec show G1',
   'spec draft': 'pullboard spec draft "Describe the first requirement"',
   'spec unmet': 'pullboard spec unmet', 'spec signoff': 'pullboard spec signoff G1',
@@ -223,6 +227,7 @@ const HELP_ALIASES = {
   'spec signoff': { usage: 'pullboard spec signoff <ids> [--by <principal>] [--note "..."] [--note-file <file>]', source: 'spec show', onlyFlags: ['--by', '--note', '--note-file'], extraFlags: ['--note-file <file>'] },
   'spec signers': { usage: 'pullboard spec signers add [--key <path>] [--by <principal>]', source: 'spec signers add' },
   'spec signers add': { usage: 'pullboard spec signers add [--key <path>] [--by <principal>]', source: 'spec signers add' },
+  doctrine: { usage: 'pullboard doctrine check', source: 'doctrine check' },
   hook: { usage: 'pullboard hook pre-commit|pre-merge-commit|commit-msg|pre-push', source: 'hook' },
   'hook pre-commit': { usage: 'pullboard hook pre-commit', source: 'hook' },
   'hook pre-merge-commit': { usage: 'pullboard hook pre-merge-commit', source: 'hook' },
