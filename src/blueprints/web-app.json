@@ -1,0 +1,30 @@
+{
+  "blueprint": 1,
+  "name": "web-app",
+  "title": "Solo web app",
+  "version": 1,
+  "kind": "app",
+  "by": "Pullboard",
+  "summary": "For one person building a web app with AI agents. One agent builds each change, a second checks it against your rules before it reaches main, and only your decisions reach you.",
+  "prefix": "W",
+  "gate": "npm test",
+  "rules": [
+    { "key": "W1", "text": "Every change ships with a test that fails without it.", "why": "a test that passes either way proves nothing." },
+    { "key": "W2", "text": "Main only moves when the whole test suite passes.", "why": "two changes can each pass alone and still break each other." },
+    { "key": "W3", "text": "Every page works at phone width.", "why": "a page that only works on a laptop is a bug nobody reports." },
+    { "key": "W4", "text": "Secrets never appear in code, logs or commits.", "why": "a key pushed once stays public, even after you delete it." },
+    { "key": "W5", "text": "A new dependency comes with a one-line reason.", "why": "every package you add is code you now maintain." },
+    { "key": "W6", "text": "An error a person sees says what to do next.", "why": "\"something went wrong\" is a support ticket waiting to happen." }
+  ],
+  "questions": [
+    { "key": "Q1", "ask": "The app is built with", "choices": ["Next.js", "SvelteKit", "Rails", "Something else"], "default": "Next.js" },
+    { "key": "Q2", "ask": "It deploys to", "choices": ["Vercel", "Netlify", "Fly.io", "My own server"], "default": "Vercel" },
+    { "key": "Q3", "ask": "People sign in with", "choices": ["Email links", "Passwords", "Google", "No sign-in yet"], "default": "Email links" },
+    { "key": "Q4", "ask": "A change is done when", "choices": ["It runs on a preview link", "Its tests pass", "I have looked at it"], "default": "It runs on a preview link" }
+  ],
+  "items": [
+    { "key": "1", "title": "Set up the test runner with one passing test", "cites": ["W1", "W2"] },
+    { "key": "2", "title": "The home page works at phone width", "cites": ["W3"] },
+    { "key": "3", "title": "Every change gets a preview link", "cites": ["Q2", "Q4"], "after": ["1"] }
+  ]
+}

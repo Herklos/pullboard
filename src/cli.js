@@ -2949,23 +2949,12 @@ async function specCommand(io, { first, second, rest, values }) {
     if (malformed) {
       throw new Refused('SPEC_INVALID', `fix the unparsed row in ${malformed[0]} before drafting; an existing id may be ambiguous`);
     }
-    const usedRows = [...spec.rows, ...practice.repo.rows];
-    const usedIds = new Set(usedRows.map((row) => row.id));
-    const numbered = usedRows.map((row) => new RegExp(`^${prefix}(\\d+)$`, 'u').exec(row.id)?.[1]).filter(Boolean).map(Number);
-    let next = Math.max(0, ...numbered) + 1;
-    while (usedIds.has(`${prefix}${next}`)) next += 1;
-    const id = `${prefix}${next}`;
+    const id = nextRowId(prefix, [...spec.rows, ...practice.repo.rows]);
     const tier = values.aim ? 'aim' : 'must';
     const gate = values.gate?.trim() ?? 'review';
     const row = `- ${id} [draft, ${tier}] ${second.trim()} | gate: ${gate}`;
     const source = readFileSync(spec.file, 'utf8');
-    const newline = source.includes('\r\n') ? '\r\n' : '\n';
-    const lines = source.split(/\r?\n/u);
-    const following = spec.sections.find((entry) => entry.line > section.line);
-    let insertion = following ? following.line - 1 : lines.length;
-    while (insertion > section.line && !lines[insertion - 1].trim()) insertion -= 1;
-    lines.splice(insertion, 0, row);
-    const after = lines.join(newline);
+    const after = insertSectionRows(source, spec, section, [row]);
     writeRowApply(ctx.info.root, { records: [], files: [{ file: ctx.config.spec, before: source, after }],
       signoffs: { before: null, receipts: [] } });
     io.result?.({ id, row: { id, status: 'draft', tier, text: second.trim(), gate, section: section.name } });

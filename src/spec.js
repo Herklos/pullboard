@@ -242,6 +242,43 @@ export function lintSpec(spec, { maxWords = 20 } = {}) {
 }
 
 /**
+ * The next free row id under a section prefix: one past the highest number the prefix uses, skipping
+ * any id already taken. Callers pass the rows of SPEC.md and the doctrine, so ids stay unique across
+ * both files (spec draft, blueprint add).
+ *
+ * @param {string} prefix
+ * @param {{ id: string }[]} rows
+ * @returns {string}
+ */
+export function nextRowId(prefix, rows) {
+  const used = new Set(rows.map((row) => row.id));
+  const numbered = rows.map((row) => new RegExp(`^${prefix}(\\d+)$`, 'u').exec(row.id)?.[1]).filter(Boolean).map(Number);
+  let next = Math.max(0, ...numbered) + 1;
+  while (used.has(`${prefix}${next}`)) next += 1;
+  return `${prefix}${next}`;
+}
+
+/**
+ * Insert row lines into spec text under one section: after its last line of content, before the
+ * next heading (spec draft, blueprint add).
+ *
+ * @param {string} source
+ * @param {{ sections: { line: number }[] }} spec - The parse of source.
+ * @param {{ line: number }} section
+ * @param {string[]} rows
+ * @returns {string}
+ */
+export function insertSectionRows(source, spec, section, rows) {
+  const newline = source.includes('\r\n') ? '\r\n' : '\n';
+  const lines = source.split(/\r?\n/u);
+  const following = spec.sections.find((entry) => entry.line > section.line);
+  let insertion = following ? following.line - 1 : lines.length;
+  while (insertion > section.line && !lines[insertion - 1].trim()) insertion -= 1;
+  lines.splice(insertion, 0, ...rows);
+  return lines.join(newline);
+}
+
+/**
  * The spec ids an item or a commit cites, checked against the spec: every one must exist, and a
  * retired row or one marked wont (won't build) cannot be built against.
  *
