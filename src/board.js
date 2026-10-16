@@ -1199,6 +1199,7 @@ export function submit(board, id, { agentId, commit, tree, files = [], policyCom
         trunkMergeClean: null,
         noUnverifiedStack: null,
         gateConfigured: null,
+        queuedItemLease: null,
         gateGreen: null,
         treeStillDuringGate: null,
         childrenDone: () => {
@@ -1497,6 +1498,7 @@ export function verify(board, id, { agentId, decision, reason, note = '', head, 
         reasonIsMet: () => (reason && reason !== ACCEPT_REASON ? new Refused('BAD_REASON', `accept means ${ACCEPT_REASON}; a failed criterion is a reject`) : null),
         trunkMergeClean: null,
         noUnverifiedStack: null,
+        queuedItemLease: null,
         itemCheckGreen: null,
         proofNoted: () =>
           note.trim()
