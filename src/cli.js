@@ -412,7 +412,8 @@ function checkMainVerifier(ctx, board, values) {
   const detached = tryGit(ctx.info.root, ['symbolic-ref', '-q', 'HEAD']).status !== 0 ? ' The main checkout is not on its branch; whoever switched it puts it back.' : '';
   throw new Refused(
     'MAIN_IS_COORDINATOR',
-    `this is the main checkout, so this verdict would be the coordinator's. An agent verifies from its own worktree, starting every command with cd <worktree> &&.${listed}${detached} The coordinator adds --as coordinator`,
+    `this is the main checkout, so this verdict would be the coordinator's.${listed}${detached}`,
+    'create a new reviewer worktree with git worktree add --detach .claude/worktrees/<reviewer-name> HEAD, using an unused folder; then cd there and run pullboard join <lane> --model "<model name>" and pullboard next --verify <id>. The reviewer must not be the builder. The coordinator instead adds --as coordinator',
   );
 }
 
@@ -2146,7 +2147,7 @@ async function submitHere(ctx, id) {
     let comparison = { main: null, files: [], unavailable: 'main comparison could not be completed' };
     try { comparison = await compareMainFailures(root, gate.profile, gateWaitReporter(ctx.io), gate.output); } catch { /* Keep the original gate refusal if main evidence is unavailable. */ }
     const mainNote = withBoard(ctx, board => mainRedMessage(root, board, gate.profile, comparison));
-    throw new Refused('GATE_RED', `${message}${mainNote ? `\n${mainNote}` : ''}`);
+    throw new Refused('GATE_RED', `${message}${mainNote ? `\n${mainNote}` : ''}`, 'fix the reported test or gate, commit the change, and run pullboard submit <id> again');
   }
   if (headCommit(root) !== commit || !isClean(root)) {
     throw new Refused(

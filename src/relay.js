@@ -172,7 +172,8 @@ async function request(state, path, { method = 'GET', body, allowMissing = false
   // Only off can forget a link after a supported API reports that the board is gone.
   if (allowMissing && method === 'DELETE' && response.status === 404 && document.version === 1) return { alreadyDeleted: true };
   if (!response.ok) {
-    const error = new Refused(document.error?.code || 'RELAY_UNAVAILABLE', (document.error?.code === 'AUTH_REQUIRED' ? ((state.agent || token?.startsWith('pa_')) ? 'this agent token is expired or revoked; use a new token issued by the person for this agent, then retry with PULLBOARD_RELAY_TOKEN' : 'the relay sign-in expired or was revoked; run pullboard relay on to sign in again without changing the board key') : (document.error?.message ? `the relay ${state.url}: ${document.error.message}` : null)) || 'the relay refused this send; retry this command explicitly when reachable');
+    const error = new Refused(document.error?.code || 'RELAY_UNAVAILABLE', (document.error?.code === 'AUTH_REQUIRED' ? ((state.agent || token?.startsWith('pa_')) ? 'this agent token is expired or revoked; use a new token issued by the person for this agent, then retry with PULLBOARD_RELAY_TOKEN' : 'the relay sign-in expired or was revoked; run pullboard relay on to sign in again without changing the board key') : (document.error?.message ? `the relay ${state.url}: ${document.error.message}` : null)) || 'the relay refused this send; retry this command explicitly when reachable',
+      document.error?.code === 'AUTH_REQUIRED' ? undefined : document.error?.next);
     error.httpStatus = response.status;
     error.relayVersion = document.version;
     error.relayCode = document.error?.code;
@@ -749,7 +750,7 @@ async function catchUp(root, file, state, io) {
     delete state.pending;
   }
   saveLink(file, state);
-  if (pendingRefusal) throw new Refused(pendingRefusal.code, pendingRefusal.message);
+  if (pendingRefusal) throw new Refused(pendingRefusal.code, pendingRefusal.message, pendingRefusal.next);
 }
 
 /** Finish a durable executable send; a collision reseals its unchanged id after applying the winner. */
@@ -906,7 +907,7 @@ export async function relayOperation(root, operation, args, io, command, applyLo
           delete state.recovered;
           saveLink(file, state);
         }
-        if (previousReceipt.outcome.error) throw new Refused(previousReceipt.outcome.error.code, previousReceipt.outcome.error.message);
+        if (previousReceipt.outcome.error) throw new Refused(previousReceipt.outcome.error.code, previousReceipt.outcome.error.message, previousReceipt.outcome.error.next);
         for (const event of previousReceipt.outcome.events ?? []) io.onEvent?.(event);
         return previousReceipt.outcome.result;
       }
@@ -942,7 +943,7 @@ export async function relayOperation(root, operation, args, io, command, applyLo
         if (error.code === 'AUTH_REQUIRED') reportExpiredSignIn(state, io);
         else io.err(`pullboard: ${error.message}`);
       }
-      if (receipt.outcome.error) throw new Refused(receipt.outcome.error.code, receipt.outcome.error.message);
+      if (receipt.outcome.error) throw new Refused(receipt.outcome.error.code, receipt.outcome.error.message, receipt.outcome.error.next);
       if (['register', 'ensureCoordinator'].includes(operation)) await actorTransport(root, file, state, receipt.outcome.result, io);
       for (const event of receipt.outcome.events ?? []) io.onEvent?.(event);
       return receipt.outcome.result;
@@ -1064,7 +1065,7 @@ export async function relayCommandReceipt(root, command) {
     if (receipt.outcome.error) {
       delete state.recovered;
       saveLink(file, state);
-      throw new Refused(receipt.outcome.error.code, receipt.outcome.error.message);
+      throw new Refused(receipt.outcome.error.code, receipt.outcome.error.message, receipt.outcome.error.next);
     }
     return { result: receipt.outcome.result, events: receipt.outcome.events ?? [], move };
   });
