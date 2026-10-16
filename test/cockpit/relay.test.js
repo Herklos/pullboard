@@ -1479,6 +1479,7 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
   let journeyFailureDiagnosticEmitted = false;
   let journeyAbortDiagnosticEmitted = false;
   let journeyTrace = () => null;
+  const journeyActionTrace = [];
   /** Emit one bounded event without exposing error messages, request URLs, or credentials. */
   const emitJourneyDiagnostic = (event, error = null, priorBodyError = null) => {
     let interception = null;
@@ -1492,7 +1493,7 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
     };
     const record = { kind: 'hosted-local-journey-diagnostic', event, phase: journeyPhase,
       elapsedMs: Math.round(performance.now() - journeyStartedAt), cleanupStage: journeyCleanupStage,
-      error: safeError(error), priorBodyError: safeError(priorBodyError), interception };
+      error: safeError(error), priorBodyError: safeError(priorBodyError), actionTrace: journeyActionTrace, interception };
     try { process.stderr.write('[hosted-local-journey] ' + JSON.stringify(record) + '\n'); } catch { /* Diagnostics must not replace the test failure. */ }
   };
   /** Report abort independently so a prior body-failure event cannot hide the cleanup stage. */
@@ -1607,6 +1608,21 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
       },
     });
     stopOrigins = await interceptJourneyOrigins(chrome, site, localView, { deadline: () => activeJourneyDeadline });
+    // Observe only fixed action-stage labels; no page values, request bodies or credentials enter diagnostics.
+    const actionStages = new Set(['api-started', 'api-parsed', 'api-rejected', 'act-started', 'act-completed', 'act-rejected']);
+    const actionListener = ({ data }) => {
+      let message;
+      try { message = JSON.parse(String(data)); } catch { return; }
+      if (message.method !== 'Runtime.consoleAPICalled') return;
+      const value = message.params?.args?.[0]?.value;
+      if (typeof value !== 'string' || !value.startsWith('[held-local-action] ')) return;
+      const stage = value.slice('[held-local-action] '.length);
+      if (!actionStages.has(stage)) return;
+      journeyActionTrace.push({ stage, phase: journeyPhase });
+      if (journeyActionTrace.length > 16) journeyActionTrace.shift();
+    };
+    chrome.socket.addEventListener('message', actionListener);
+    t.after(() => chrome.socket.removeEventListener('message', actionListener));
     const session = await journeyDeadline.wait('authenticate private browser', () => linked.phoneSession());
     assert.equal((await chrome.send('Network.setCookie', {
       name: 'pb_session', value: session.token, url: JOURNEY_HOSTED, httpOnly: true, sameSite: 'Lax',
@@ -1725,7 +1741,34 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
     // while it is in flight must not reinterpret the local response as a sealed request or clear that board's form.
     await pickProject(chrome, localRow);
     await chrome.waitFor("view.root === data.projects.find(row => row.name === 'local-machine-b').root && !readOnly && !requests");
-    await chrome.stable("window.__priorAct = act; window.__actOutcome = null; act = async (...args) => { const result = await window.__priorAct(...args); window.__actOutcome = result; return result; }; true");
+    await chrome.stable(`(() => {
+      const stage = value => console.info('[held-local-action] ' + value);
+      const priorApi = api;
+      api = async (path, body) => {
+        const tracked = body && path === ${JSON.stringify('/api/v1/boards/' + localId + '/moves')};
+        if (tracked) stage('api-started');
+        try {
+          const result = await priorApi(path, body);
+          if (tracked) stage('api-parsed');
+          return result;
+        } catch (error) {
+          if (tracked) stage('api-rejected');
+          throw error;
+        }
+      };
+      window.__priorAct = act;
+      window.__actOutcome = null;
+      act = async (...args) => {
+        stage('act-started');
+        try {
+          const result = await window.__priorAct(...args);
+          window.__actOutcome = result;
+          stage('act-completed');
+          return result;
+        } catch (error) { stage('act-rejected'); throw error; }
+      };
+      return true;
+    })()`);
     await chrome.click("document.querySelector('#new-item')");
     await chrome.stable("document.querySelector('#add-title').value = 'held local action'; true");
     const firstHeld = stopOrigins.holdNextResponse(({ method, path }) => method === 'POST' && path === '/api/v1/boards/' + localId + '/moves');
@@ -1811,7 +1854,7 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
     try { rmSync(profile, { recursive: true, force: true }); } catch (error) { journeyCleanupErrors.push(error); }
     if (!journeyBodyError && !journeyCleanupErrors.length) {
       const trace = stopOrigins.trace();
-      t.diagnostic(JSON.stringify({ kind: 'owned-browser-cancellation-proof', failureCount: trace.failureCount,
+      t.diagnostic(JSON.stringify({ kind: 'owned-browser-cancellation-proof', actionTrace: journeyActionTrace, failureCount: trace.failureCount,
         incompleteCount: trace.incompleteCount, confirmedBrowserCancellationCount: trace.confirmedBrowserCancellationCount,
         probe: trace.requests.find((record) => record.fixtureCancelProbe) }));
     }
