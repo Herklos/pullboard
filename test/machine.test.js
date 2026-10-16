@@ -27,6 +27,7 @@ const NOT_MOVES = {
   ALREADY_JOINED: 'registering who is asking, before any move',
   BAD_ROUTE: 'registering who is asking, before any move',
   ONE_COORDINATOR: 'registering who is asking, before any move',
+  SANDBOX_BLOCKED: 'the command environment must allow the gate or check operation',
   BAD_MACHINE_SETTINGS: 'machine-wide settings checked before a command runs',
   BAD_GATE_SLOTS: 'machine-wide gate capacity checked before a command runs',
   BAD_BROWSER_SLOTS: 'machine-wide browser capacity checked before a command runs',

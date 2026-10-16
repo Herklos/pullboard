@@ -6,8 +6,8 @@
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { availableParallelism } from 'node:os';
 import { gitChildEnv, gitPath, headTree, invalidateGitFacts, isClean, untracked } from './git.js';
 import { secretsIn } from './hooks.js';
@@ -147,7 +147,50 @@ export function runShell(root, command, { pipefail = false, env = {} } = {}) {
   // Newlines, not spaces, around the command, so a trailing comment in it cannot swallow the `)`.
   const result = spawnSync(`${prefix}(\n${command}\n) 2>&1`, options);
   invalidateGitFacts();
-  return { isGreen: result.status === 0, output: `${result.stdout ?? ''}${result.stderr ?? ''}`, seconds: Math.round((Date.now() - started) / 1000) };
+  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+  return { isGreen: result.status === 0, output, seconds: Math.round((Date.now() - started) / 1000),
+    sandboxBlocked: result.status === 0 ? null : sandboxBlockedOperation(root, output) };
+}
+
+/** Resolve existing path prefixes so a symlink cannot hide an outside-worktree operation. */
+function diagnosticPath(path) {
+  let current = resolve(path);
+  const missing = [];
+  for (;;) {
+    try { return resolve(realpathSync(current), ...missing); }
+    catch (error) {
+      if (!['ENOENT', 'ENOTDIR'].includes(error.code)) return null;
+      const parent = dirname(current);
+      if (parent === current) return null;
+      missing.unshift(relative(parent, current));
+      current = parent;
+    }
+  }
+}
+
+/** Recognize concrete OS permission diagnostics, keeping ordinary assertion failures ordinary. */
+export function sandboxBlockedOperation(root, output) {
+  for (const raw of output.split('\n')) {
+    const line = raw.trim().replace(/^#\s*/u, '');
+    const network = /^Error: (listen|bind) (EPERM|EACCES)\b/u.exec(line);
+    if (network) return `${network[1]} (${network[2]})`;
+    const file = /^Error: (EPERM|EACCES): [^\n]*?, (open|mkdir|read|write|rename|unlink|scandir|access) ['"]([^'"\n]+)['"]/u.exec(line);
+    const python = /^PermissionError: \[Errno (?:1|13)\] [^\n]*?: ['"]([^'"\n]+)['"]/u.exec(line);
+    if (!file && !python) continue;
+    const path = diagnosticPath(resolve(root, file ? file[3] : python[1]));
+    const tree = diagnosticPath(root);
+    if (!path || !tree) continue;
+    const within = relative(tree, path);
+    if (within !== '..' && !within.startsWith('../') && !isAbsolute(within)) continue;
+    return `${file ? file[2] : 'file access'} ${JSON.stringify(path)} (${file ? file[1] : 'EACCES'})`;
+  }
+  return null;
+}
+
+/** Refuse an environment-blocked proof after its ordinary raw logs and timings are persisted. */
+export function refuseSandboxBlocked(run) {
+  if (run.sandboxBlocked) throw new Refused('SANDBOX_BLOCKED',
+    `The environment refused ${run.sandboxBlocked}. Ask the person to allow this operation, or run the gate outside the sandbox; keep the tests unchanged.`);
 }
 
 /** Replace a possible secret-bearing line before persisting a direct item-check log. */
@@ -219,7 +262,7 @@ export async function runProfiledShellAsync(root, command, { waitMs = 0, gateSlo
   const profilePath = join(dirname(gitPath(root, LOG)), `pullboard-gate-${randomUUID()}.profile.json`);
   const profile = writeTimingProfile(profilePath, { ...timingFromOutput(output, timingRunner(command)),
     waitMs: Math.max(0, Math.round(waitMs)), wallMs });
-  return { isGreen: status === 0 && !overflow && !failure, output, seconds: Math.round(wallMs / 1000), profile, profilePath, logPath: null };
+  return { isGreen: status === 0 && !overflow && !failure, sandboxBlocked: status === 0 ? null : sandboxBlockedOperation(root, output), output, seconds: Math.round(wallMs / 1000), profile, profilePath, logPath: null };
 }
 
 /** Persist one sanitized timing profile as a private artifact.
@@ -335,8 +378,10 @@ export async function runGate(root, config, { trustStamp = true, onWait, landing
 function fullGateRun(root, config, trustStamp = false, { waitMs = 0, log = gitPath(root, LOG), gateLease, landing = false } = {}) {
   if (trustStamp && isStampedGreen(root)) return { isGreen: true, isCached: true, output: '', seconds: 0, log: '' };
   const before = committedTree(root);
-  const { isGreen, output, seconds, profile, profilePath } = runProfiledShell(root, config.gate, { waitMs, pipefail: true, profileFile: `${log}.profile.json`, gateLease, landing });
+  const run = runProfiledShell(root, config.gate, { waitMs, pipefail: true, profileFile: `${log}.profile.json`, gateLease, landing });
+  const { isGreen, output, seconds, profile, profilePath } = run;
   writeFileSync(log, output);
+  refuseSandboxBlocked(run);
   if (isGreen && before !== null && committedTree(root) === before) writeFileSync(gitPath(root, STAMP), `${before}\n`);
   return { isGreen, isCached: false, output, seconds, log, profile, profilePath };
 }
@@ -388,12 +433,13 @@ export async function runSubmitGate(root, config, { base, trunk, changed, check,
         format: [...new Set(profiles.map(value => value.format))].join('+'),
         unavailable: profiles.some(value => value.unavailable) ? 'per-test timing unavailable: output was not TAP or JUnit (one or more phases)' : null,
       });
+      refuseSandboxBlocked(proof);
       return { ...proof, log, seconds: criterion.seconds + proof.seconds, ...selection, deferred, deferFullFallback, check: receipt,
         profile, profilePath, proofProfilePath: proof.profilePath, proofLog: proof.log };
     };
     if (!criterion.isGreen) {
       writeFileSync(log, criterion.output);
-      return finish({ isGreen: false, isCached: false, output: criterion.output, seconds: 0, log: '' });
+      return finish({ isGreen: false, sandboxBlocked: criterion.sandboxBlocked, isCached: false, output: criterion.output, seconds: 0, log: '' });
     }
     // The proof already owns this lease: its phase profile has no additional queue wait.
     const proofWait = check ? 0 : lease.waitMs;
