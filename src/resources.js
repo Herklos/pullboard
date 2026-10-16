@@ -192,7 +192,8 @@ function waiterPosition(db, name, ticket, { eligibleOnly = false } = {}) {
   const queueName = name === 'browser' ? 'gate' : name;
   const waiters = db.prepare('SELECT ticket, pid, agent, repo, landing, item_check AS itemCheck, browser FROM waiter WHERE name = ? ORDER BY ticket').all(queueName);
   const holders = db.prepare('SELECT pid, agent, repo FROM holder WHERE name = ?').all(queueName);
-  const browserBusy = db.prepare("SELECT COUNT(*) AS count FROM holder WHERE name = 'gate' AND browser = 1").get().count > 0;
+  const browserCapacity = db.prepare("SELECT capacity FROM resource WHERE name = 'browser'").get()?.capacity ?? 1;
+  const browserBusy = db.prepare("SELECT COUNT(*) AS count FROM holder WHERE name = 'gate' AND browser = 1").get().count >= browserCapacity;
   /** A live process owns its leases even if it changes descriptive agent or repository labels. */
   const holdsSlot = (waiter) => holders.some((holder) => holder.pid === waiter.pid);
   /** Leave a waiting independent landing a slot before a holder takes another lease. */
@@ -218,7 +219,7 @@ function pause(ms) { return new Promise((resolvePromise) => setTimeout(resolvePr
 /**
  * Join the landing-first queue; every other kind keeps its original FIFO ticket.
  *
- * @param {{ name: string, capacity: number, capacityProvider?: () => number, scope?: 'machine'|'repo'|'board', root?: string, agent?: string, repo?: string, landing?: boolean, itemCheck?: boolean, diagnostic?: boolean, browser?: boolean, item?: string, kind?: string, onWait?: (state: object) => any | Promise<any>, allowIdleCapacityUpdate?: boolean }} options - An awaited wait callback may return {leaseUntil}; it then receives one final {admitted:true} callback before work starts.
+ * @param {{ name: string, capacity: number, capacityProvider?: () => number, browserCapacityProvider?: () => number, scope?: 'machine'|'repo'|'board', root?: string, agent?: string, repo?: string, landing?: boolean, itemCheck?: boolean, diagnostic?: boolean, browser?: boolean, item?: string, kind?: string, onWait?: (state: object) => any | Promise<any>, allowIdleCapacityUpdate?: boolean }} options - An awaited wait callback may return {leaseUntil}; it then receives one final {admitted:true} callback before work starts.
  * @returns {Promise<{ name: string, scope: string, token: string, pool: string, browser: boolean, waitMs: number, release: () => void, renew: () => void }>}
  */
 export async function takeResource(options) {
@@ -275,10 +276,20 @@ export async function takeResource(options) {
         db.prepare('UPDATE resource SET capacity = ? WHERE name = ?').run(currentCapacity, name);
       }
       db.prepare('INSERT INTO resource(name, capacity) VALUES (?, ?) ON CONFLICT(name) DO NOTHING').run(name, currentCapacity);
-      if (browser) {
+      if (name === 'gate' && scope === 'machine' && browser) {
+        const browserCapacity = options.browserCapacityProvider?.() ?? 1;
+        if (!Number.isSafeInteger(browserCapacity) || browserCapacity < 1 || browserCapacity > currentCapacity) {
+          throw new Refused('BAD_BROWSER_SLOTS', `browser capacity must be a positive integer no greater than gate capacity (${currentCapacity}); run pullboard settings browserSlots <n>`);
+        }
         const browserResource = db.prepare("SELECT capacity FROM resource WHERE name = 'browser'").get();
-        if (browserResource && browserResource.capacity !== 1) throw new Refused('RESOURCE_CAPACITY_MISMATCH', 'resource "browser" has fixed capacity 1');
-        db.prepare("INSERT INTO resource(name, capacity) VALUES ('browser', 1) ON CONFLICT(name) DO NOTHING").run();
+        if (browserResource && browserResource.capacity !== browserCapacity) {
+          const state = snapshot(db, 'browser');
+          if (!allowIdleCapacityUpdate || state.holders.length || state.line.length) {
+            throw new Refused('RESOURCE_CAPACITY_MISMATCH', `resource "browser" already has capacity ${browserResource.capacity}`);
+          }
+          db.prepare("UPDATE resource SET capacity = ? WHERE name = 'browser'").run(browserCapacity);
+        }
+        db.prepare("INSERT INTO resource(name, capacity) VALUES ('browser', ?) ON CONFLICT(name) DO NOTHING").run(browserCapacity);
       }
       // Retain queue metadata for older readers; admission uses landing priority and arrival only.
       db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind);
@@ -298,7 +309,8 @@ export async function takeResource(options) {
         const limit = db.prepare('SELECT capacity FROM resource WHERE name = ?').get(name).capacity;
         const browserAdmissionPosition = browser ? waiterPosition(db, 'browser', waiter.ticket, { eligibleOnly: true }) : 0;
         const browserHolders = browser ? db.prepare("SELECT COUNT(*) AS count FROM holder WHERE name = 'gate' AND browser = 1").get().count : 0;
-        if (admissionPosition === 1 && spot.holders.length < limit && (!browser || (browserAdmissionPosition === 1 && browserHolders < 1))) {
+        const browserLimit = browser ? db.prepare("SELECT capacity FROM resource WHERE name = 'browser'").get().capacity : 0;
+        if (admissionPosition === 1 && spot.holders.length < limit && (!browser || (browserAdmissionPosition === 1 && browserHolders < browserLimit))) {
           db.prepare('DELETE FROM waiter WHERE token = ?').run(token);
           const acquiredAt = new Date().toISOString();
           db.prepare('INSERT INTO holder(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, acquiredAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind);
@@ -386,13 +398,12 @@ export function inheritedGateSlot({ root = process.cwd(), browser = false } = {}
 export function setResourceCapacity({ name, capacity, scope = 'machine', root = process.cwd(), persist = () => {} }) {
   if (typeof name !== 'string' || !name.trim() || name.trim() !== name) throw new Refused('BAD_RESOURCE_NAME', 'resource name must be nonempty trimmed text');
   if (!Number.isSafeInteger(capacity) || capacity < 1) throw new Refused('BAD_RESOURCE_CAPACITY', 'resource capacity must be a positive integer');
-  if (name === 'browser' && capacity !== 1) throw new Refused('BAD_RESOURCE_CAPACITY', 'browser resource capacity is fixed at 1');
   const db = open(databaseFile(scope, root));
   try {
     return update(db, () => {
       const state = snapshot(db, name);
       if (state.holders.length || state.line.length) {
-        throw new Refused('RESOURCE_BUSY', `resource "${name}" has ${state.holders.length} holder(s) and ${state.line.length} waiter(s); wait for it to become idle, then retry pullboard settings gateSlots ${capacity}`);
+        throw new Refused('RESOURCE_BUSY', `resource "${name}" has ${state.holders.length} holder(s) and ${state.line.length} waiter(s); wait for it to become idle, then retry pullboard settings ${name === 'browser' ? 'browserSlots' : 'gateSlots'} ${capacity}`);
       }
       persist();
       db.prepare('INSERT INTO resource(name, capacity) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET capacity = excluded.capacity').run(name, capacity);
