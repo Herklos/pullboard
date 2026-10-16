@@ -22,6 +22,8 @@
  * An item's route is light, mid or strong (strong when left out), as pullboard add takes it. Its
  * brief, criterion and check pass through to add unchanged, so a light or mid item is filed when it
  * carries what add requires for that route and refused with add's own refusal when it does not.
+ * A check is stored on the item and never run during add: no check baseline starts, so nothing a
+ * blueprint supplies executes. A blueprint is read from the bundled set or a local path, never a URL.
  *
  * Rule and question keys ("W1", "Q1") are unique within the file; an item cites them by key and
  * waits on other items by their keys. On a board they get real ids from the section's prefix.
@@ -65,6 +67,10 @@ export function bundledBlueprints() {
 export function readBlueprint(reference, cwd) {
   const text = String(reference ?? '').trim();
   if (!text) throw new Refused('USAGE', `name a blueprint: pullboard blueprint add <name or file>; bundled: ${bundledBlueprints().join(', ')}`);
+  // Only the bundled set or a local file: nothing is fetched from a URL (P5).
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//u.test(text)) {
+    throw new Refused('BLUEPRINT_URL', `a blueprint is read from the bundled set or a local file, never a URL; download ${text} yourself, read it, then run pullboard blueprint add <file>`);
+  }
   const bundled = NAME_RE.test(text) && bundledBlueprints().includes(text);
   const file = bundled ? resolve(BUNDLED_DIR, `${text}.json`) : resolve(cwd, text);
   if (!bundled && !existsSync(file)) {

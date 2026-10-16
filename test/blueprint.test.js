@@ -321,3 +321,28 @@ test('init --blueprint starts a board from a blueprint [I1,S1]', () => {
   assert.doesNotMatch(readFileSync(join(plain.repo, 'SPEC.md'), 'utf8'), /pullboard-blueprint/u);
   assert.deepEqual(JSON.parse(plain.run('list', '--json').stdout).items ?? [], []);
 });
+
+test('blueprint add files a blueprint as drafts and runs nothing it supplies [S1,I1]', () => {
+  // A starter's check is stored on the item, but no check baseline starts: add executes nothing
+  // from a blueprint, and says so. A blueprint is never read from a URL.
+  const box = freshBoard({ gate: 'true' });
+  const marker = join(box.dir, 'check-ran');
+  const brief = 'Files:\n- web/index.html\nTest:\n- test/home.test.js asserts the page loads';
+  const check = `touch '${marker}'`;
+  writeFileSync(join(box.repo, 'checked.json'), `${JSON.stringify({ ...PUBLISHED, name: 'checked',
+    items: [{ key: '1', title: 'Checked starter', cites: ['W1'], route: 'light', brief, criterion: 'The page loads.', check }] })}\n`);
+  const added = json(box, 'blueprint', 'add', 'checked.json');
+  const id = added.items[0].id;
+  const item = json(box, 'show', String(id));
+  assert.equal(item.item_check, check, 'the check is stored unchanged');
+  assert.equal(item.item_check_baseline ?? null, null, 'no check baseline was started');
+  assert.equal(existsSync(marker), false, 'the check command never ran');
+  assert.deepEqual(added.checksNotRun, [id], 'the summary names the checks that were not run');
+  const text = box.run('blueprint', 'add', 'checked.json');
+  assert.match(text.stdout, /already on this board/u);
+  for (const url of ['https://pullboard.dev/blueprints/web-app.json', 'file:///tmp/web-app.json']) {
+    const refused = box.run('blueprint', 'add', url, '--json');
+    assert.equal(refused.status, 1, refused.stdout + refused.stderr);
+    assert.equal(JSON.parse(refused.stdout).error.code, 'BLUEPRINT_URL');
+  }
+});
