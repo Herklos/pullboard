@@ -161,9 +161,11 @@ async function request(state, path, { method = 'GET', body, allowMissing = false
   if (readToken !== undefined && !/^pa_[A-Za-z0-9_-]{43}$/.test(readToken)) throw new Refused('AUTH_REQUIRED', 'supply a current scoped board token without including it in command arguments');
   const token = readToken ?? state.token;
   let response;
+  // Validate first: a refusal below repeats this address, so it must already be credential-free.
+  const origin = relayOrigin(state.url);
   const startedAt = Date.now();
   try {
-    response = await fetch(relayOrigin(state.url) + path, {
+    response = await fetch(origin + path, {
       method, redirect: 'error', signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10000)]) : AbortSignal.timeout(10000),
       headers: { 'x-pullboard-engine': String(ENGINE_VERSION), ...(token ? { authorization: 'Bearer ' + token } : {}), ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...(initialBaseline ? { 'if-none-match': '*' } : {}) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -728,6 +730,31 @@ async function restoreCheckpoint(root, state, io, key) {
   localRecords(root, (board) => restoreRelaySnapshot(board, native, snapshot.sequence));
 }
 
+/**
+ * Keep why a move's reply was lost on its durable send record, then return the original refusal.
+ * Why: the command that gave up exits here, so only the saved cause lets whichever later command
+ * recovers the move say what the earlier request failed with (#642). It holds the cause name only.
+ */
+function rememberLostReply(file, state, id, error) {
+  const held = [state.pending, state.recovered].find((record) => record?.move?.id === id);
+  if (held) {
+    held.lostReply = error.transportFailure ?? error.code;
+    saveLink(file, state);
+  }
+  return error;
+}
+
+/**
+ * Say once that catch-up recovered a move whose earlier reply was lost, with that request's cause.
+ * Why: any later command, a read included, may be the one that recovers it; the saved cause is
+ * cleared here so the repeated command does not say it again (#642).
+ */
+function reportRecoveredReply(record, io) {
+  if (!record?.lostReply) return;
+  io?.err?.(`pullboard: recovered move ${record.sequence} (${record.move.operation}) whose earlier reply was lost: ${record.lostReply}`);
+  delete record.lostReply;
+}
+
 /** Apply a validated relay prefix with durable, transaction-bound receipts on this replica. */
 async function catchUp(root, file, state, io) {
   const key = readBoardKey(state.board);
@@ -753,12 +780,14 @@ async function catchUp(root, file, state, io) {
         && record.sealed === state.pending.sealed && outcome?.error
         && !localRecords(root, board => engineReceipt(board, state.pending.move.id))) {
       pendingRefusal = outcome.error;
+      reportRecoveredReply(state.pending, io);
       delete state.pending;
       delete state.recovered;
     }
   }
   state.sequence = localRecords(root, appliedSequence);
   if (state.pending?.move && localRecords(root, (board) => engineReceipt(board, state.pending.move.id))) {
+    reportRecoveredReply(state.pending, io);
     state.recovered = state.pending;
     delete state.pending;
   }
@@ -865,7 +894,7 @@ function operationIntent(operation, args) {
 }
 
 /** Keep a recovered outcome until its caller repeats the interrupted operation to receive it. */
-function recoveredMove(root, state, operation, args, command, io) {
+function recoveredMove(root, state, operation, args, command) {
   if (!state.recovered) return null;
   const recovered = state.recovered;
   const intent = recovered.intent ?? operationIntent(recovered.move.operation, recovered.move.args);
@@ -880,8 +909,6 @@ function recoveredMove(root, state, operation, args, command, io) {
   if (receipt.move !== JSON.stringify(recovered.move)) {
     throw new Refused('RELAY_MOVE', 'the recovered operation differs from its durable receipt; restore consistent relay metadata before retrying');
   }
-  // The earlier command gave up on this move's reply; say so once, with the cause it saw (#642).
-  if (recovered.lostReply) io?.err?.(`pullboard: recovered move ${recovered.sequence} (${recovered.move.operation}) whose earlier reply was lost: ${recovered.lostReply}`);
   return recovered.move;
 }
 
@@ -926,7 +953,7 @@ export async function relayOperation(root, operation, args, io, command, applyLo
         for (const event of previousReceipt.outcome.events ?? []) io.onEvent?.(event);
         return previousReceipt.outcome.result;
       }
-      let move = recoveredMove(root, state, operation, args, command, io);
+      let move = recoveredMove(root, state, operation, args, command);
       if (!move) {
         move = localRecords(root, (board) => prepareEngineMove(board, operation, args, io.personRequestMoveId ? { id: io.personRequestMoveId } : {}));
         if (io.personRequest) move.personRequest = structuredClone(io.personRequest);
@@ -942,14 +969,9 @@ export async function relayOperation(root, operation, args, io, command, applyLo
         try { await sendPending(root, file, state, io); }
         catch (error) {
           if (!['RELAY_UNAVAILABLE', 'RELAY_RESPONSE'].includes(error.code)) throw error;
-          // Keep why the reply was lost, so whichever later command recovers this move can say so.
-          if (state.pending?.move?.id === move.id) {
-            state.pending.lostReply = error.transportFailure ?? error.code;
-            saveLink(file, state);
-          }
           // A lost acknowledgement can be recovered now without asking the caller to retry side effects.
-          try { await catchUp(root, file, state, io); } catch { throw error; }
-          if (!localRecords(root, (board) => engineReceipt(board, move.id))) throw error;
+          try { await catchUp(root, file, state, io); } catch { throw rememberLostReply(file, state, move.id, error); }
+          if (!localRecords(root, (board) => engineReceipt(board, move.id))) throw rememberLostReply(file, state, move.id, error);
         }
       }
       const receipt = localRecords(root, (board) => engineReceipt(board, move.id));
@@ -1066,11 +1088,8 @@ export async function relayRevoke(root, id, io) {
   });
 }
 
-/**
- * Read an acknowledged exact CLI result before changed spec, brief or Git refs can block it.
- * Why io: a recovered move whose earlier reply was lost says so once on this command (#642).
- */
-export async function relayCommandReceipt(root, command, io) {
+/** Read an acknowledged exact CLI result before changed spec, brief or Git refs can block it. */
+export async function relayCommandReceipt(root, command) {
   if (!command) return null;
   const file = linkFile(root);
   return locked(file, async () => {
@@ -1083,7 +1102,7 @@ export async function relayCommandReceipt(root, command, io) {
     }
     const expected = { add: 'addItem', edit: 'editItem', merged: 'merged' }[command.cliOperation];
     if (!recovered.move || recovered.move.operation !== expected) throw new Refused('RELAY_STORAGE', 'restore the interrupted command metadata before retrying');
-    const move = recoveredMove(root, state, recovered.move.operation, recovered.move.args, command, io);
+    const move = recoveredMove(root, state, recovered.move.operation, recovered.move.args, command);
     const receipt = localRecords(root, board => engineReceipt(board, move.id));
     if (receipt.outcome.error) {
       delete state.recovered;

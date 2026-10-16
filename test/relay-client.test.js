@@ -502,9 +502,8 @@ test('[H1,H3,H7,H15,H16] relay on snapshots and orders ciphertext, refuses offli
     'person deletion removes the relay journal and SQLite sidecars');
 });
 
-/** Inject a lost reply at the transport, then recover its move on the repeated command [H16,C7]. */
-
-test('[H16,C7] a relay transport failure names its cause', async (t) => {
+/** Link one real repository to a local relay whose next move reply can be lost at the transport. */
+async function lostReplyFixture(t) {
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-relay-cause-')));
   const root = join(scratch, 'repo');
   const home = join(scratch, 'home');
@@ -524,6 +523,7 @@ test('[H16,C7] a relay transport failure names its cause', async (t) => {
     GIT_COMMITTER_NAME: 'Relay Test', GIT_COMMITTER_EMAIL: 'relay-test@example.com',
   };
   for (const name of [...AGENT_SHELL_MARKERS, ...SSH_SHELL_MARKERS]) delete env[name];
+  for (const name of Object.keys(env)) if (name.startsWith('GIT_') && !name.startsWith('GIT_CONFIG') && !name.startsWith('GIT_AUTHOR') && !name.startsWith('GIT_COMMITTER')) delete env[name];
   for (const name of ['PULLBOARD_RELAY_KEY', 'PULLBOARD_RELAY_TOKEN']) delete env[name];
   const provider = await githubFixture(t);
   SIGN_INS.set(root, async () => {
@@ -541,29 +541,97 @@ test('[H16,C7] a relay transport failure names its cause', async (t) => {
   const lane = Object.keys(JSON.parse(readFileSync(join(root, 'pullboard.json'), 'utf8')).lanes)[0];
   mkdirSync(join(pullboardHome, 'relay-keys'), { recursive: true, mode: 0o700 });
   await cli(root, env, 'relay', 'on', '--url', relay.origin);
+  return { root, env, lane, relay, pullboardHome };
+}
 
-  // The relay applies the move but the client loses its reply at the transport.
+/** Every credential string the linked replica holds: its relay tokens and its board key files. */
+function heldSecrets(root, pullboardHome) {
+  const secrets = [];
+  /** Collect every string under a key that names a token, a key or a secret. */
+  const walk = (value, name = '') => {
+    if (typeof value === 'string') { if (/token|key|secret|cookie/iu.test(name) && value.length >= 16) secrets.push(value); return; }
+    if (value && typeof value === 'object') for (const [key, inner] of Object.entries(value)) walk(inner, Array.isArray(value) ? name : key);
+  };
+  walk(JSON.parse(readFileSync(join(root, '.git', 'pullboard', 'relay.json'), 'utf8')));
+  const keys = join(pullboardHome, 'relay-keys');
+  for (const entry of readdirSync(keys, { recursive: true })) {
+    if (!statSync(join(keys, entry)).isFile()) continue;
+    const text = readFileSync(join(keys, entry), 'utf8').trim();
+    secrets.push(text);
+    try { walk(JSON.parse(text), 'key'); } catch { /* a raw key file is already held whole */ }
+  }
+  assert.ok(secrets.some((secret) => /^p[ma]_/u.test(secret)), 'the fixture holds a relay token to keep out of diagnostics');
+  return secrets;
+}
+
+/** Lose a move's reply at the transport and assert the refusal names its cause and keeps its contract. */
+async function loseReplyAtTransport({ root, env, lane, relay, pullboardHome }) {
   relay.dropNextReply({ offline: true });
   const lost = await cliResult(root, env, 'add', lane, 'reply lost at the transport');
-  assert.equal(lost.status, 1);
+  assert.equal(lost.status, 1, lost.stderr);
   const refusal = lost.document.error;
   assert.equal(refusal.code, 'RELAY_UNAVAILABLE', 'the refusal code is unchanged');
-  assert.match(refusal.next, /\S/, 'the refusal keeps its next step');
-  assert.ok(refusal.message.includes(relay.origin), 'the refusal names the relay address');
+  assert.ok(refusal.message.endsWith('; read the local board offline, then retry this move when the relay is reachable'), 'the refusal keeps its next step');
+  assert.match(refusal.next, /\S/u, 'the refusal document keeps a next step');
+  assert.ok(refusal.message.includes(`the relay ${relay.origin} did not answer`), 'the refusal names the relay address');
   assert.match(refusal.message, /did not answer \((?:timed out|no connection|[A-Z][A-Z0-9_]+) after \d+ ms on POST \/api\/v1\/boards\/[0-9a-f]{32}\/moves\)/u,
     'the refusal names the underlying transport failure and the request');
   const cause = /did not answer \(([^)]+?) after \d+ ms/u.exec(refusal.message)[1];
+  assert.notEqual(cause, 'no connection', `the injected socket loss is named by its error code: ${refusal.message}`);
+  const secrets = heldSecrets(root, pullboardHome);
+  for (const text of [JSON.stringify(lost.document), lost.stderr]) {
+    assert.ok(!secrets.some((secret) => text.includes(secret)), 'the refusal never prints a held token or key');
+    assert.doesNotMatch(text, /authorization|bearer|cookie|\bp[ma]_[A-Za-z0-9_-]{8,}|\?after=/iu, 'the refusal carries no credential, header or query string');
+  }
+  return { cause, secrets };
+}
 
-  // A later command that recovers the move says so once, with the earlier cause.
+/** Find the recovery lines a command printed, in --json diagnostics or on stderr. */
+function recoveryLines(result) {
+  return [...(result.document.diagnostics ?? []), result.stderr].join('\n').split('\n')
+    .filter((line) => line.includes('whose earlier reply was lost'));
+}
+
+/** Escape text for a literal match inside a regular expression. */
+function literal(text) { return text.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'); }
+
+test('[H16,C7] a relay transport failure names its cause', async (t) => {
+  const fixture = await lostReplyFixture(t);
+  const { root, env, lane, relay } = fixture;
+  const { cause, secrets } = await loseReplyAtTransport(fixture);
+
+  // The repeated command recovers the move and says so once, with the earlier cause.
   relay.failReads(false);
   const repeated = await cliResult(root, env, 'add', lane, 'reply lost at the transport');
   assert.equal(repeated.status, 0, repeated.stderr);
-  // --json carries diagnostic lines in the document; plain output writes the same lines to stderr.
-  const printed = [...(repeated.document.diagnostics ?? []), repeated.stderr].join('\n').split('\n');
-  const recoveredLines = printed.filter((line) => line.includes('whose earlier reply was lost'));
-  assert.equal(recoveredLines.length, 1, printed.join('\n'));
-  assert.match(recoveredLines[0], new RegExp(`^pullboard: recovered move \\d+ \\(addItem\\) whose earlier reply was lost: ${cause.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}$`, 'u'));
+  const lines = recoveryLines(repeated);
+  assert.equal(lines.length, 1, repeated.stderr);
+  assert.match(lines[0], new RegExp(`^pullboard: recovered move \\d+ \\(addItem\\) whose earlier reply was lost: ${literal(cause)}$`, 'u'));
+  assert.ok(!secrets.some((secret) => repeated.stderr.includes(secret) || JSON.stringify(repeated.document).includes(secret)), 'the recovery line never prints a held token or key');
   assert.equal(repeated.document.item.item_title, 'reply lost at the transport', 'the recovered command reports its original outcome');
+});
+
+test('[H16,C7] a relay transport failure names its cause when a read recovers the move', async (t) => {
+  const fixture = await lostReplyFixture(t);
+  const { root, env, lane, relay } = fixture;
+  const { cause, secrets } = await loseReplyAtTransport(fixture);
+
+  // A read-only command is the later command whose catch-up recovers the move: it prints the line.
+  relay.failReads(false);
+  const read = await cliResult(root, env, 'list', lane);
+  assert.equal(read.status, 0, read.stderr);
+  const lines = recoveryLines(read);
+  assert.equal(lines.length, 1, read.stderr);
+  assert.match(lines[0], new RegExp(`^pullboard: recovered move \\d+ \\(addItem\\) whose earlier reply was lost: ${literal(cause)}$`, 'u'));
+  assert.ok(!secrets.some((secret) => read.stderr.includes(secret) || JSON.stringify(read.document).includes(secret)), 'the recovery line never prints a held token or key');
+
+  // The line is said once: the repeated command receives the original outcome without repeating it.
+  const repeated = await cliResult(root, env, 'add', lane, 'reply lost at the transport');
+  assert.equal(repeated.status, 0, repeated.stderr);
+  assert.deepEqual(recoveryLines(repeated), [], 'the recovery line is printed once');
+  assert.equal(repeated.document.item.item_title, 'reply lost at the transport', 'the recovered command reports its original outcome');
+  const titles = (await cli(root, env, 'list', lane)).items.map((item) => item.item_title);
+  assert.equal(titles.filter((title) => title === 'reply lost at the transport').length, 1, 'the recovered move is never duplicated');
 });
 
 /** Create the same three real linked replicas for each independently budgeted scenario. */
