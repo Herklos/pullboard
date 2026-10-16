@@ -85,7 +85,7 @@ import { readRelayMachine } from './relay-machine.js';
 import { relayJoin, relayPair } from './relay-pairing-client.js';
 import { executePersonRequests } from './relay-request-execution.js';
 import { engineReceipt } from './engine.js';
-import { land } from './land.js';
+import { land, landingRemote, landingSubject } from './land.js';
 
 const CHECKOUT_LEASES = new WeakMap();
 const CHECKOUT_BOARD_ONLY = new WeakMap();
@@ -2190,7 +2190,9 @@ async function verifyHere(ctx, id, { second, values }) {
   if (!decision) throw new Refused('USAGE', 'pullboard verify <id> accept, or reject --reason CODE --note "..."');
   const { root } = ctx.info;
   let verificationProfile = null;
-  const result = await withBoard(ctx, async (board) => {
+  let accepted = null;
+  /** Record one verdict on the open board. */
+  const decide = async (board) => {
     checkMainVerifier(ctx, board, values);
     const me = whoAmI(ctx, board);
     const recovered = relayRecovered(root);
@@ -2255,6 +2257,11 @@ async function verifyHere(ctx, id, { second, values }) {
       familyPolicy: ctx.config.verify.family,
       ...(decision === 'ACCEPT' ? { check: check.checked ? 'green' : 'none' } : {}),
     }]);
+  };
+  const result = await withBoard(ctx, async (board) => {
+    const verdict = await decide(board);
+    if (verdict.decision === 'ACCEPT') accepted = store.getItem(board, id);
+    return verdict;
   });
   ctx.io.result?.({ id, ...result });
   const verifiedSummary = timingDigest(verificationProfile);
@@ -2262,7 +2269,24 @@ async function verifyHere(ctx, id, { second, values }) {
   ctx.io.say(result.decision === 'ACCEPT'
     ? `verified #${id}: ${result.reason}${result.check === 'none' ? '; no frozen check ran' : ''}${verifiedTiming}`
     : `rejected #${id}: ${result.reason}; it is open again for rework`);
+  if (accepted) ctx.io.say(landNext(ctx.info, accepted));
   return 0;
+}
+
+/**
+ * Say the exact command that lands an accepted item in this repo [B3].
+ * A repo with a push remote lands through pullboard land; one without merges by hand,
+ * because pullboard land would refuse LAND_PUSH there.
+ *
+ * @param {any} info
+ * @param {any} item
+ * @returns {string}
+ */
+function landNext(info, item) {
+  const mainRoot = resolve(info.commonDir, '..');
+  const branch = mainCheckout(info.root)?.branch ?? '';
+  if (landingRemote(info.root, branch)) return `next: the coordinator lands it: ${cdTo(mainRoot)} pullboard land`;
+  return `next: this repo has no remote for pullboard land to push to, so the coordinator merges it on ${branch.replace(/^refs\/heads\//u, '') || 'the trunk'}: ${cdTo(mainRoot)} git merge --no-ff ${item.item_commit} -m ${shellWord(landingSubject(item))} && pullboard merged ${item.item_id} HEAD`;
 }
 
 /**

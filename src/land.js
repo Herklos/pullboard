@@ -221,10 +221,41 @@ async function fileFlakes(state, gate, files) {
   state.say(`flake: ${files.join(', ')}; nothing landed; fix the test or ask the person for an expiring waiver`);
 }
 
+/** Name the remote a landing pushes the trunk to: the trunk branch's own remote, else origin [B3]. */
+function landingRemoteName(root, branch) {
+  return tryGit(root, ['config', '--get', `branch.${branch.replace(/^refs\/heads\//u, '')}.remote`]).stdout || 'origin';
+}
+
+/**
+ * Name the configured remote a landing would push the trunk to, or null when this repo has none [B3].
+ * An accept uses it to say which landing command fits this repo; the landing itself refuses on null.
+ */
+export function landingRemote(root, branch) {
+  const remote = landingRemoteName(root, branch);
+  return tryGit(root, ['remote', 'get-url', remote]).status === 0 ? remote : null;
+}
+
+/** Build the one LAND_PUSH refusal every landing push failure reports, real or previewed [B3]. */
+function pushRefused(reason, next = 'inspect the remote and hooks, then run pullboard land --adopt') {
+  return new Refused('LAND_PUSH', `the landing push failed: ${reason}; ${next}`);
+}
+
+/**
+ * Return the remote a landing pushes to, refusing LAND_PUSH when it does not exist [B3].
+ * The dry run and the real landing both call this, so a preview cannot say "would land" for a push that must fail.
+ */
+function requirePushTarget(root, branch) {
+  const remote = landingRemote(root, branch);
+  if (remote) return remote;
+  const missing = landingRemoteName(root, branch);
+  throw pushRefused(`this repo has no ${missing} remote to push ${branch.replace(/^refs\/heads\//u, '')} to`,
+    `add one with git remote add ${missing} <url> and run pullboard land again, or merge each verified commit on the trunk with git merge --no-ff and record it with pullboard merged <id> <commit>`);
+}
+
 /** Push the exact gated tip before recording receipts, then fast-forward only a clean unchanged main. */
 async function publish(state) {
   let batch = state.batch;
-  const remote = tryGit(state.root, ['config', '--get', `branch.${batch.branch.replace(/^refs\/heads\//u, '')}.remote`]).stdout || 'origin';
+  const remote = requirePushTarget(state.root, batch.branch);
   if (batch.proof?.failures?.length && batch.state !== 'pushed') {
     const failures = batch.proof.failures.map((failure) => ({ ...failure, waiver: store.landingWaiverFor(state.board, failure)?.id }));
     if (!failures.every((failure) => failure.waiver)) throw new Refused('LAND_WAIVER', 'the landing proof has an expired or missing person waiver; ask the person for a new expiring waiver, then adopt the batch');
@@ -237,7 +268,7 @@ async function publish(state) {
     const alreadyPushed = tryGit(batch.root, ['ls-remote', remote, batch.branch]).stdout.split(/\s+/u)[0] === batch.tip;
     if (!alreadyPushed) {
       const pushed = tryGit(batch.root, ['push', remote, `HEAD:${batch.branch}`]);
-      if (pushed.status !== 0) throw new Refused('LAND_PUSH', `the landing push failed: ${pushed.stderr || pushed.stdout}; inspect the remote and hooks, then run pullboard land --adopt`);
+      if (pushed.status !== 0) throw pushRefused(pushed.stderr || pushed.stdout);
     }
     await save(state, { state: 'pushed' });
   }
@@ -263,6 +294,7 @@ export async function land({ root, board, config, write, say, owner, maximum = I
   const unfinished = store.landingBatches(board).findLast((batch) => batch.state !== 'landed' && batch.state !== 'blocked');
   const selected = candidates(board, root, trunk.commit, maximum);
   if (dryRun) {
+    if (selected.ready.length) requirePushTarget(root, trunk.branch);
     const conflicts = [];
     for (const item of selected.ready) {
       const merge = tryGit(root, ['merge-tree', '--write-tree', '--name-only', '-z', trunk.commit, item.item_commit]);
@@ -294,6 +326,7 @@ export async function land({ root, board, config, write, say, owner, maximum = I
     return { batch: null, landed: [], conflicts: [], blocked: selected.blocked, culprits: [], flakes: [] };
   }
   if (!batch) {
+    requirePushTarget(root, trunk.branch);
     const id = randomUUID();
     const directory = join(repoInfo(root).commonDir, 'pullboard', 'landings', id);
     batch = { version: 1, id, base: trunk.commit, tip: trunk.commit, branch: trunk.branch, root: join(directory, 'worktree'),
