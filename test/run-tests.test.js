@@ -647,6 +647,68 @@ if (process.argv[1] === runner) {
   assert.ok(await waitForFixtureProcessDrain(childIdentity.pid), 'the fixture child drained after explicit owner cleanup');
 });
 
+test('a failed test completion without a type still stops a landing run [C7,V4]', async t => {
+  const fixture = makeLandingStopFixture(t);
+  const preload = join(fixture.root, 'untyped-completion.mjs');
+  const delivered = join(fixture.root, 'untyped-completion-delivered');
+  writeFileSync(preload, `import nodeTest from 'node:test';
+import { syncBuiltinESMExports } from 'node:module';
+import { writeFileSync } from 'node:fs';
+const originalRun = nodeTest.run;
+nodeTest.run = options => originalRun({ ...options, setup(tests) {
+  const originalOn = tests.on;
+  tests.on = function(type, listener) {
+    if (type !== 'test:complete') return originalOn.call(this, type, listener);
+    return originalOn.call(this, type, function(data) {
+      if (data.details?.passed === false && (data.details.type === undefined || data.details.type === 'test')) {
+        const details = { ...data.details };
+        delete details.type;
+        writeFileSync(${JSON.stringify(delivered)}, 'delivered');
+        return listener.call(this, { ...data, details });
+      }
+      return listener.call(this, data);
+    });
+  };
+  return options.setup?.(tests);
+} });
+syncBuiltinESMExports();
+`);
+  const env = {
+    ...process.env,
+    PULLBOARD_MACHINE_HOME: join(fixture.root, 'machine'),
+    PULLBOARD_LANDING_RUN: '1',
+    NODE_OPTIONS: [process.env.NODE_OPTIONS, '--import=' + pathToFileURL(preload).href].filter(Boolean).join(' '),
+    PULLBOARD_C7_SIBLING_STARTED: fixture.siblingStarted,
+    PULLBOARD_C7_SIBLING_FINISHED: fixture.siblingFinished,
+    PULLBOARD_C7_FAILURE: fixture.failure,
+    PULLBOARD_C7_RELEASE: fixture.release,
+    PULLBOARD_C7_QUEUED: fixture.queued,
+    PULLBOARD_C7_WORKER_MARKER: fixture.workerMarker,
+    PULLBOARD_C7_CHILD_READY: fixture.childReady,
+    PULLBOARD_C7_CHILD_PID: fixture.childPid,
+    PULLBOARD_C7_CHILD_DRAINED: fixture.childDrained,
+    PULLBOARD_C7_FAIL_CHILD_READY: fixture.failChildReady,
+    PULLBOARD_C7_FAIL_CHILD_PID: fixture.failChildPid,
+    PULLBOARD_C7_FAIL_CHILD_DRAINED: fixture.failChildDrained,
+  };
+  for (const key of ['PULLBOARD_GATE_SLOT_HELD', 'PULLBOARD_GATE_SLOT_POOL', 'PULLBOARD_GATE_SLOT_TOKEN', 'PULLBOARD_BROWSER_SLOT_HELD']) delete env[key];
+  const result = runFixtureChild(process.execPath, [fixture.runner, '--test-concurrency=2'], {
+    cwd: fixture.root, env, encoding: 'utf8', timeout: 15000,
+  });
+  assert.equal(result.status, 1, `${result.context}\n${result.stdout ?? ''}\n${result.stderr ?? ''}`);
+  assert.ok(existsSync(delivered), 'the actual failing completion reached the runner without a type');
+  assert.ok(existsSync(fixture.failure), 'the intentional failure completed');
+  assert.ok(existsSync(fixture.siblingStarted), 'the sibling was active before the failure');
+  assert.equal(existsSync(fixture.siblingFinished), false, 'the untyped completion interrupted the active sibling');
+  assert.equal(existsSync(fixture.queued), false, 'no queued sentinel started after the untyped failure');
+  assert.equal(existsSync(fixture.release), false, 'no queued sentinel released the active sibling');
+  for (const [pid, drained] of [[fixture.childPid, fixture.childDrained], [fixture.failChildPid, fixture.failChildDrained]]) {
+    assert.ok(existsSync(drained), 'the owned detached child acknowledged cleanup');
+    assert.ok(await waitForFixtureProcessDrain(readFileSync(pid, 'utf8').trim()), 'the owned detached child exited before return');
+  }
+  assert.match(`${result.stdout ?? ''}\n${result.stderr ?? ''}`, /Landing gate stopped early after .*02-failing\.test\.js/u);
+});
+
 test('a landing run stops at the first failing file [C7,V4]', async t => {
   const unrelatedRoot = mkdtempSync(join(tmpdir(), 'pullboard-landing-unrelated-'));
   const unrelatedReady = join(unrelatedRoot, 'ready');
