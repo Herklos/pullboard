@@ -17,7 +17,7 @@ import { doctrineHistory, loadDoctrine } from './doctrine.js';
 import { agentSessionDigest, requirePersonChannel } from './person.js';
 import { bindLocalSession, localSessionMatches } from './agent-session.js';
 import { decisionProjection, planRowApply, prepareRowDecisions, restoreRowApply, writeRowApply } from './row-decisions.js';
-import { digestOf, gateReport, runGate, runProfiledShell, runSubmitGate, submitGateReport, timingDigest, withGateSlot } from './gate.js';
+import { digestOf, gateReport, refuseSandboxBlocked, runGate, runProfiledShell, runSubmitGate, submitGateReport, timingDigest, withGateSlot } from './gate.js';
 import { checkNeedsBrowser } from './browser-admission.js';
 import { bareWorktreeFinding, codeIsFromMain, contains, differFromHead, git, gitChildEnv, headCommit, headTree, invalidateGitFacts, isClean, mainCheckout, patchId, repoInfo, resolveCommit, tryGit, untracked, withGitFacts } from './git.js';
 import {
@@ -2411,6 +2411,7 @@ async function verifyHere(ctx, id, { second, values }) {
       refuseUnverifiedStack(root, board, item, commit, trunk);
       const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(root, frozenCheck(item), { commit, onFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
       check = await withGateSlot(root, (lease) => checkAtCommit(root, item, { waitMs: lease.waitMs, gateLease: lease }), { browser, agent: me.id, item: String(id), kind: 'review', itemCheck: true, onWait: gateWaitReporter(ctx.io) });
+      refuseSandboxBlocked(check);
       verificationProfile = check.profile ?? null;
       const evidence = check.checked
         ? `\nlast output lines (up to 40):\n${(check.outputTail ?? '(no output)').split('\n').map((line) => `  ${line}`).join('\n')}\nfull output file: ${check.outputPath ?? `(unavailable${check.outputError ? `: ${check.outputError}` : ''})`}`
@@ -2823,6 +2824,7 @@ function workCommands(io, args) {
       }
       const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(ctx.info.root, check, { onFallback: browserAdmissionReporter(io, values.json) });
       const run = await withGateSlot(ctx.info.root, (lease) => runProfiledShell(ctx.info.root, check, { waitMs: lease.waitMs, artifactPrefix: `pullboard-check-${item.item_id}`, persistLog: true, gateLease: lease }), { browser, agent: caller, item: String(item.item_id), kind: 'check', itemCheck: true, onWait: gateWaitReporter(io) });
+      refuseSandboxBlocked(run);
       io.result?.({ id: item.item_id, green: run.isGreen, seconds: run.seconds, check, by, report: run.isGreen ? '' : digestOf(run.output) });
       const timings = timingDigest(run.profile);
       const compact = timings && !run.profile.files.length
