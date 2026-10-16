@@ -4,6 +4,27 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.8.28] - 2026-10-16
+
+### Blueprints, and a first run that tells you what to do
+
+### Added
+
+- Blueprints. `pullboard blueprint add <name>` files a blueprint's rules as draft spec rows for your approval, with its starter items. `pullboard init --blueprint <name>` starts a new board from one. `pullboard blueprint save` turns your board's approved rules into a blueprint you can reuse. The ten blueprints from the gallery are bundled.
+- `pullboard runner add <host> --slots <n> --browser <n>`: a test run waiting in the gate pool can run on another machine over SSH. Nothing changes unless you add a runner.
+- `submitInvariants` in `pullboard.json`: with `"submitGate": "landing"`, `pullboard submit` still runs these test files on every submit.
+- The Roadmap shows the work to ship first, with shipped work below it.
+
+### Fixed
+
+- `pullboard init` says when the gate command it found cannot run on this machine, and how to fix it. In an existing repo, the first gate after `init` says to commit the files `init` wrote.
+- `pullboard worktree <lane>` run from the main checkout creates and joins the worktree for the session that owns the checkout, and another session is still refused. Without a model it names the `--model` flag to add.
+- `pullboard add` refuses a build item in a lane that owns no files and names the lanes that do. A review item that names the work it reviews (`--after <id>`) is still accepted.
+- When `~/.pullboard` cannot be written (for example inside an agent's sandbox), commands refuse with `MACHINE_HOME_NOT_WRITABLE`, name the folder and say how to fix it, instead of SQLite's "unable to open database file".
+- A declined spec row keeps its text.
+- A relay connection failure names its cause.
+- The README's worktree command includes `--model`.
+
 ## [0.8.27] - 2026-10-16
 
 ### A faster gate, and 0.8.26 reaches npm
