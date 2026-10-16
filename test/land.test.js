@@ -722,6 +722,8 @@ test("a person's waiver lets a submit and a landing gate through only the waived
     store.recordLandingWaiver(board, { agentId: 'person', channel: 'terminal', id: 'name-waiver', test: 'keeps a named behavior', until: '2099-01-01', reason: 'named fixture' });
     assert.equal(store.landingWaiverFor(board, { file: FILES[3], name: 'keeps a named behavior' })?.kind, 'name');
     assert.equal(store.landingWaiverFor(board, { file: 'keeps a named behavior', name: 'another behavior' }), null, 'a name waiver covers only that name');
+    assert.deepEqual(['test/my check.test.js', 'tests/check.rb', 'web/land-1.test.js', 'check.py', 'keeps a named behavior', 'parses a/b in the header'].map(store.landingWaiverKind),
+      ['file', 'file', 'file', 'file', 'name', 'name'], 'paths with spaces or other languages stay file waivers');
   });
   assert.equal(commitFile(box, box.repo, FILES[2], `RED NAME:${FILES[0]}\n`, 'chore: install a test named like the waived file').status, 0);
   const spoofed = box.run(box.repo, 'gate', '--landing');

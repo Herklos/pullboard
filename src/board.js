@@ -2721,11 +2721,13 @@ export function landingWaivers(board) {
 }
 
 /**
- * Name what a waiver argument is: a test file path, or a test's name. A path has no spaces and a
- * source extension; anything else is a name. Earlier waivers carry no kind and are read the same way.
+ * Name what a waiver argument is: a test file path, or a test's name. A path is a directory and a
+ * file with an extension (spaces and any language allowed), or one spaceless file name with an
+ * extension; anything else is a name. Earlier waivers carry no kind and are read the same way.
+ * Guessing wrong only narrows a waiver, since each kind matches one field of a failure.
  */
 export function landingWaiverKind(test) {
-  return /^[^\s]+\.(?:[cm]?[jt]sx?|py)$/u.test(test) ? 'file' : 'name';
+  return /^[^\r\n]*\/[^/\r\n]*[^/\s.]\.[A-Za-z0-9]+$/u.test(test) || /^[^\s/]+\.[A-Za-z0-9]+$/u.test(test) ? 'file' : 'name';
 }
 
 /**
