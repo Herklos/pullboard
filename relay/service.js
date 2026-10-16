@@ -203,9 +203,10 @@ export function createRelayHandler({ directory, auth, pollMs = 200, publicOrigin
 
   /**
    * Let token issuance see a published seat receipt under the same board lock that appends it, so
-   * a receipt claims its target before, and whether or not, its enrollment finishes (#579).
+   * a receipt claims its target before, and whether or not, its enrollment finishes (#579). An
+   * auth stub without token issuance (some fixtures) has nothing to wire.
    */
-  auth.setRegistrationClaims((id, target) => {
+  auth.setRegistrationClaims?.((id, target) => {
     const file = join(root, identity(id) + '.journal.sqlite');
     try { if (!lstatSync(file).isFile()) return null; } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
     return auth.withBoard(id, () => {
