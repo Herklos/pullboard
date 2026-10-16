@@ -2859,6 +2859,7 @@ function settingsCommand(io, { first, second, rest }) {
     throw new Refused('USAGE', 'pullboard settings gateSlots <n> | browserSlots <n>');
   }
   if (!/^[1-9]\d*$/u.test(second) || !Number.isSafeInteger(Number(second))) {
+    if (first === 'gateSlots') throw new Refused('USAGE', 'pullboard settings gateSlots <positive integer>');
     throw new Refused(first === 'browserSlots' ? 'BAD_BROWSER_SLOTS' : 'BAD_GATE_SLOTS', `${first} must be a positive integer; run pullboard settings ${first} <n>`);
   }
   const settings = first === 'browserSlots' ? setBrowserSlots(Number(second)) : setGateSlots(Number(second));
