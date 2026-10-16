@@ -422,7 +422,8 @@ function checkMainVerifier(ctx, board, values) {
   const detached = tryGit(ctx.info.root, ['symbolic-ref', '-q', 'HEAD']).status !== 0 ? ' The main checkout is not on its branch; whoever switched it puts it back.' : '';
   throw new Refused(
     'MAIN_IS_COORDINATOR',
-    `this is the main checkout, so this verdict would be the coordinator's. An agent verifies from its own worktree, starting every command with cd <worktree> &&.${listed}${detached} The coordinator adds --as coordinator`,
+    `this is the main checkout, so this verdict would be the coordinator's.${listed}${detached}`,
+    'create a new reviewer worktree with git worktree add --detach .claude/worktrees/<reviewer-name> HEAD, using an unused folder; then cd there and run pullboard join <lane> --model "<model name>" and pullboard next --verify <id>. The reviewer must not be the builder. The coordinator instead adds --as coordinator',
   );
 }
 
@@ -882,15 +883,16 @@ function agentRefusalText(message, code, name) {
   return patterns[code] ? message.replace(patterns[code], (_, before, id, after) => `${before}${name(id)}${after}`) : message;
 }
 
-/** Read current display settings for text refusals; the structured error retains its stable identifiers. */
+/** Render the refusal body without its existing final footer; structured errors retain the message. */
 function displayedRefusal(io, error) {
-  if (error.code === 'MODEL_REQUIRED') return error.message.replace(/; run pullboard .+$/u, '');
-  if (!['ALREADY_JOINED', 'HELD', 'ITEM_HELD', 'LANE_HELD', 'REVIEW_HELD', 'NOT_YOURS', 'NOT_YOUR_DECISION', 'NO_AGENT', 'NOT_YOUR_CHECKOUT', 'FACT_JUDGEMENT', 'RELAY_PERSON_ONLY', 'RELAY_SENDER_MISMATCH', 'SELF_SHOUT', 'NO_READER'].includes(error.code)) return error.message;
+  const message = error.message.replace(/\r?\nnext:[ \t]*[^\r\n]*\S[ \t]*(?:\r?\n)*$/u, '');
+  if (error.code === 'MODEL_REQUIRED') return message.replace(/; run pullboard .+$/u, '');
+  if (!['ALREADY_JOINED', 'HELD', 'ITEM_HELD', 'LANE_HELD', 'REVIEW_HELD', 'NOT_YOURS', 'NOT_YOUR_DECISION', 'NO_AGENT', 'NOT_YOUR_CHECKOUT', 'FACT_JUDGEMENT', 'RELAY_PERSON_ONLY', 'RELAY_SENDER_MISMATCH', 'SELF_SHOUT', 'NO_READER'].includes(error.code)) return message;
   try {
     const ctx = context(io);
     const agents = withBoard(ctx, (board) => store.listAgents(board));
-    return agentRefusalText(error.message, error.code, (id) => agentDisplayName(agents, ctx.config, id));
-  } catch { return error.message; }
+    return agentRefusalText(message, error.code, (id) => agentDisplayName(agents, ctx.config, id));
+  } catch { return message; }
 }
 
 /** Label the holder at the start of a generated wait reason without rewriting its quoted reason. */
@@ -2228,7 +2230,7 @@ async function submitHere(ctx, id) {
     let comparison = { main: null, files: [], unavailable: 'main comparison could not be completed' };
     try { comparison = await compareMainFailures(root, gate.profile, gateWaitReporter(ctx.io), gate.output); } catch { /* Keep the original gate refusal if main evidence is unavailable. */ }
     const mainNote = withBoard(ctx, board => mainRedMessage(root, board, gate.profile, comparison));
-    throw new Refused('GATE_RED', `${message}${mainNote ? `\n${mainNote}` : ''}`);
+    throw new Refused('GATE_RED', `${message}${mainNote ? `\n${mainNote}` : ''}`, 'fix the reported test or gate, commit the change, and run pullboard submit <id> again');
   }
   if (headCommit(root) !== commit || !isClean(root)) {
     throw new Refused(
