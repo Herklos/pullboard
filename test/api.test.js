@@ -781,7 +781,7 @@ test('[A1,B21,B27] decisions shows an agent its direct and lane asks only', () =
     status: 1,
     code: 'NOT_YOUR_DECISION',
     message: `shout #${app2Ask} is addressed to app-2, not your app lane (agent app-1)`,
-    next: 'Run pullboard help, correct the reported problem, and retry the command.',
+    next: 'answer only decisions addressed to you; see pullboard inbox',
   });
   const coordinatorText = box.run(box.repo, 'decisions');
   assert.equal(coordinatorText.status, 0, coordinatorText.stderr);
@@ -803,7 +803,7 @@ test('[A1] refusals are one JSON document with exact public error fields', () =>
     status: 1,
     code: 'NO_ROW',
     message: 'no row G99 in SPEC.md',
-    next: 'Run pullboard help, correct the reported problem, and retry the command.',
+    next: 'list the rows with pullboard spec --json, then name one of them',
   }, 'show');
   assert.equal(noRow.error.code, 'NO_ROW');
 
@@ -858,7 +858,7 @@ test('[A1] refusals are one JSON document with exact public error fields', () =>
   shapeFor('spec', 'check');
   assert.equal(invalidDocument.error.code, 'COMMAND_FAILED');
   assert.equal(invalidDocument.error.message, textCheck.stdout.trim());
-  assert.equal(invalidDocument.error.next, 'Run pullboard help, correct the reported problem, and retry the command.');
+  assert.equal(invalidDocument.error.next, 'read the reported output above, fix what it names, and run the command again');
   rmSync(box.dir, { recursive: true, force: true });
 });
 
