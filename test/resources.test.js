@@ -17,14 +17,17 @@ const TEMP = [];
 const CHILDREN = new Set();
 const MODULE = pathToFileURL(resolve(import.meta.dirname, '../src/resources.js')).href;
 const GATE_MODULE = pathToFileURL(resolve(import.meta.dirname, '../src/gate.js')).href;
+const SETTINGS_MODULE = pathToFileURL(resolve(import.meta.dirname, '../src/settings.js')).href;
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
 const TEST_RUNNER = resolve(import.meta.dirname, '../bin/run-tests.js');
 const POOL_MODULE_WORKER = `
 import { takeResource } from ${JSON.stringify(MODULE)};
+import { loadMachineSettings } from ${JSON.stringify(SETTINGS_MODULE)};
 let announced = false;
 const [root, agent, browserText, item, kind, landingText] = process.argv.slice(1);
 const lease = await takeResource({
   name: 'gate', capacity: 2, scope: 'machine', root, agent,
+  browserCapacityProvider: () => loadMachineSettings().browserSlots,
   browser: browserText === 'true', item, kind, itemCheck: kind === 'review',
   diagnostic: kind === 'diagnostic', landing: landingText === 'true',
   onWait: (state) => {
@@ -273,6 +276,13 @@ function poolWorker(box, { agent, browser = false, item = '', kind = '', landing
   return child;
 }
 
+/** Configure browser slots through the public CLI in this fixture's private machine home. */
+function configureBrowserSlots(box, slots) {
+  return runFixtureChild(process.execPath, [BIN, 'settings', 'browserSlots', String(slots), '--json'], {
+    cwd: box.first, env: box.env, encoding: 'utf8',
+  });
+}
+
 /** Read the next worker event, failing promptly with its stderr if it exits unexpectedly. */
 async function event(child, timeoutMs = 10_000) {
   if (child.pendingLines.length) return JSON.parse(child.pendingLines.shift());
@@ -413,6 +423,55 @@ after(async () => {
   await Promise.all(running.map((child) => child.finished));
   for (const child of running) child.lines.close();
   TEMP.forEach((dir) => rmSync(dir, { recursive: true, force: true }));
+});
+
+/** Prove the machine setting changes real browser admission while retaining the single-slot default [C7]. */
+test('browserSlots admits that many browser runs and no more [C7]', async () => {
+  const defaults = fixture();
+  const defaultSettings = runFixtureChild(process.execPath, [BIN, 'settings', '--json'], {
+    cwd: defaults.first, env: defaults.env, encoding: 'utf8',
+  });
+  assert.equal(defaultSettings.status, 0, defaultSettings.stderr);
+  assert.equal(JSON.parse(defaultSettings.stdout).settings.browserSlots, 1, 'an unset machine keeps the existing single browser slot');
+
+  const box = fixture();
+  const configured = configureBrowserSlots(box, 2);
+  assert.equal(configured.status, 0, configured.stderr);
+  assert.equal(JSON.parse(configured.stdout).settings.browserSlots, 2);
+  const readBack = runFixtureChild(process.execPath, [BIN, 'settings', '--json'], {
+    cwd: box.first, env: box.env, encoding: 'utf8',
+  });
+  assert.equal(readBack.status, 0, readBack.stderr);
+  assert.equal(JSON.parse(readBack.stdout).settings.browserSlots, 2, 'the machine setting persists for other processes');
+  assert.equal(privateList(box).find(({ name }) => name === 'browser').capacity, 2,
+    'the shared browser resource row has the configured capacity before workers start');
+  const invalid = configureBrowserSlots(box, 3);
+  assert.equal(invalid.status, 1);
+  assert.equal(JSON.parse(invalid.stdout).error.code, 'BAD_BROWSER_SLOTS');
+  assert.match(JSON.parse(invalid.stdout).error.message, /pullboard settings gateSlots/u);
+
+  const first = poolWorker(box, { agent: 'browser-one', browser: true });
+  assert.equal((await acquired(first)).acquired, 'browser-one');
+  const second = poolWorker(box, { agent: 'browser-two', browser: true });
+  const secondStart = await event(second);
+  if (!secondStart.acquired) {
+    const gate = privateList(box).find(({ name }) => name === 'gate');
+    const browser = privateList(box).find(({ name }) => name === 'browser');
+    assert.fail(`the configured second browser lease queued: ${JSON.stringify({ state: secondStart.queued, gate, browser })}`);
+  }
+  assert.equal(secondStart.acquired, 'browser-two', 'the configured second browser lease starts while the first is held');
+  const third = poolWorker(box, { agent: 'browser-three', browser: true });
+  assert.equal((await event(third)).queued.position, 1, 'the next browser run waits for a configured slot');
+  const browser = privateList(box).find(({ name }) => name === 'browser');
+  assert.equal(browser.capacity, 2, 'resource listing reflects the machine browserSlots setting');
+  assert.equal(browser.holders.length, 2);
+  assert.deepEqual(browser.holders.map(({ agent }) => agent).sort(), ['browser-one', 'browser-two']);
+  assert.deepEqual(browser.line.map(({ agent }) => agent), ['browser-three']);
+
+  await release(first);
+  assert.equal((await acquired(third)).acquired, 'browser-three', 'a released browser lease admits the oldest waiting browser run');
+  await release(second);
+  await release(third);
 });
 
 test('[Q1,Q2] capacity-one takers acquire in strict FIFO arrival order', async () => {
