@@ -106,7 +106,6 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
   let failureBoard = null;
   let accessLost = false;
   let persistenceRequest = null;
-  let persistenceWarning = false;
   rememberPairing();
   let pair = takePairing() ?? stored(sessionStorage, PENDING, null);
   if (pair && (!BOARD.test(pair.board ?? '') || typeof pair.key !== 'string')) pair = null;
@@ -139,19 +138,21 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
       paragraph.textContent = text;
       element.append(paragraph);
     }
-    if (persistenceWarning) {
-      const paragraph = document.createElement('p');
-      paragraph.id = 'pairing-storage-notice';
-      paragraph.textContent = 'This browser may remove your pairing. Add Pullboard to your Home Screen to help keep it.';
-      element.append(paragraph);
-    }
   }
 
   /** Ask once after pairing, retaining one refusal line through later board refreshes. */
   function keepPairingStorage() {
     persistenceRequest ??= requestPairingPersistence().then(kept => {
-      persistenceWarning = !kept;
-      notice();
+      const current = document.getElementById('pairing-storage-notice');
+      if (kept) { current?.remove(); return; }
+      const target = document.getElementById('relay-notice');
+      if (!target || accessLost) return;
+      const paragraph = current ?? document.createElement('p');
+      paragraph.id = 'pairing-storage-notice';
+      paragraph.className = 'card-panel';
+      paragraph.setAttribute('role', 'status');
+      paragraph.textContent = 'This browser may remove your pairing. Add Pullboard to your Home Screen to help keep it.';
+      if (!current) target.insertAdjacentElement('afterend', paragraph);
     });
   }
 
