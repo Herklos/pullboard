@@ -1539,7 +1539,6 @@ async function launchBackgroundView(io, port, projectRoot) {
   }
 }
 
-/** Serve API v1 until a shutdown signal, printing its address before waiting (A2). */
 /**
  * Serve MCP over stdio as this checkout's agent (A9). Stdout carries only the protocol, so the command
  * takes no --json; each tool call runs its own CLI command, with its own relay sync, through main.
@@ -1552,6 +1551,7 @@ async function mcpHere(io, { first, values }) {
   return serveMcp({ cwd: io.cwd, input: io.stdin, output: io.stdout, log: io.stderr, runCommand: main });
 }
 
+/** Serve API v1 until a shutdown signal, printing its address before waiting (A2). */
 async function serveHere(io, values) {
   traceServeStartup('serve-context-start');
   const ctx = context(io);

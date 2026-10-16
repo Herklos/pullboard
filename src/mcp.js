@@ -3,13 +3,12 @@
  * coordinate on it as that agent (A9), and never make a person's move (P6). It is newline-delimited
  * JSON-RPC 2.0 on stdin and stdout, hand-written because Pullboard has no dependencies, and it opens
  * no network connection (P5). Every tool runs the CLI command it mirrors through the same `main` the
- * terminal and the local API use, with the API's move layer (moveArgs), so a refusal reaches the
- * client with the CLI's own code and next step.
+ * terminal and the local API use, with its arguments as distinct argv entries after --, the form the
+ * API's moveArgs builds, so a refusal reaches the client with the CLI's own code and next step.
  */
 import { COORDINATOR } from './config.js';
 import { VERSION } from './help.js';
 import { refusalDocument } from './json.js';
-import { moveArgs } from './api-moves.js';
 import { Refused } from './refused.js';
 import { projectState } from './serve.js';
 
@@ -29,7 +28,7 @@ const PERSON_MOVE = /approv|declin|answer|sign_?off|decide|decision/u;
 export const MCP_TOOLS = Object.freeze([
   {
     name: 'board_status',
-    description: 'The board at a glance for this seat\'s agent: who you are, the open and active items, the review queue, unread shouts, and needsYou: the decisions, holds and spec fields of the view\'s own board projection, as the view\'s Needs-you reads them. Mirrors pullboard status and pullboard list. It builds the full board projection, so it is slower on large boards.',
+    description: 'The board at a glance for this seat\'s agent: who you are, the open and active items, the review queue, unread shouts, and needsYou: the decisions and holds fields of the view\'s own board projection, as the view\'s Needs-you reads them; spec rows that need the person come with #702. Mirrors pullboard status and pullboard list. It builds the full board projection, so it is slower on large boards.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
@@ -37,7 +36,7 @@ export const MCP_TOOLS = Object.freeze([
     description: 'One item in full: its criterion, the check and criterion frozen at claim, its verdicts and its thread. Mirrors pullboard show <id>.',
     inputSchema: {
       type: 'object',
-      properties: { id: { type: 'integer', minimum: 1, description: 'The item id, as on the board.' } },
+      properties: { id: { type: 'integer', description: 'The item id, as on the board.' } },
       required: ['id'],
       additionalProperties: false,
     },
@@ -48,8 +47,8 @@ export const MCP_TOOLS = Object.freeze([
     inputSchema: {
       type: 'object',
       properties: {
-        to: { type: 'string', minLength: 1, description: 'A lane, an agent id, or all.' },
-        text: { type: 'string', minLength: 1, description: 'What to say.' },
+        to: { type: 'string', description: 'A lane, an agent id, or all.' },
+        text: { type: 'string', description: 'What to say.' },
       },
       required: ['to', 'text'],
       additionalProperties: false,
@@ -60,7 +59,7 @@ export const MCP_TOOLS = Object.freeze([
     description: 'Capture an idea for the coordinator: it goes as a shout to the coordinator, marked as an idea. Mirrors pullboard shout coordinator "idea: <text>".',
     inputSchema: {
       type: 'object',
-      properties: { text: { type: 'string', minLength: 1, description: 'The idea, in a sentence or two.' } },
+      properties: { text: { type: 'string', description: 'The idea, in a sentence or two.' } },
       required: ['text'],
       additionalProperties: false,
     },
@@ -87,11 +86,12 @@ function validateArguments(tool, args) {
   for (const [key, rule] of Object.entries(schema.properties)) {
     const value = args[key];
     if (value === undefined) continue;
-    if (rule.type === 'integer' && (!Number.isSafeInteger(value) || value < (rule.minimum ?? -Infinity))) {
-      throw new Refused('BAD_REQUEST', `${tool.name} needs ${key} as a positive whole number; use the item id from the board`);
+    // Types only: a blank text or an id the board rejects reaches the CLI, so its own refusal comes back.
+    if (rule.type === 'integer' && !Number.isSafeInteger(value)) {
+      throw new Refused('BAD_REQUEST', `${tool.name} needs ${key} as a whole number; use the item id from the board`);
     }
-    if (rule.type === 'string' && (typeof value !== 'string' || !value.trim())) {
-      throw new Refused('BAD_REQUEST', `${tool.name} needs ${key} as nonempty text; use the tool's input schema`);
+    if (rule.type === 'string' && typeof value !== 'string') {
+      throw new Refused('BAD_REQUEST', `${tool.name} needs ${key} as text; use the tool's input schema`);
     }
   }
   return args;
@@ -151,22 +151,24 @@ async function callTool(runCommand, cwd, name, args) {
     const list = await runCli(runCommand, cwd, ['list', '--json']);
     if (list.status) return toolResult(list.document, true);
     // Needs-you comes from the view's own projection, unshaped and read-only: one builder, no second query.
-    const { decisions, holds, spec } = projectState(cwd);
+    const { decisions, holds } = projectState(cwd);
     const { version, ...summary } = status.document;
     return toolResult({
       version,
       ...summary,
       items: list.document.items,
-      needsYou: { decisions, holds, spec },
+      needsYou: { decisions, holds },
     }, false);
   }
   if (name === 'show_item') {
-    const shown = await runCli(runCommand, cwd, ['show', String(input.id), '--json']);
+    const shown = await runCli(runCommand, cwd, ['show', '--json', '--', String(input.id)]);
     return toolResult(shown.document, Boolean(shown.status));
   }
+  // The CLI's own shout argv, positionals after --, as moveArgs builds it. moveArgs refuses blank text
+  // before the engine runs, so the text goes straight to the CLI, whose shout refuses it as EMPTY_SHOUT.
   const argv = name === 'shout'
-    ? moveArgs({ verb: 'shout', args: { to: input.to, text: input.text } })
-    : moveArgs({ verb: 'shout', args: { to: COORDINATOR, text: `${IDEA_PREFIX}${input.text}` } });
+    ? ['shout', '--json', '--', input.to, input.text]
+    : ['shout', '--json', '--', COORDINATOR, input.text.trim() ? `${IDEA_PREFIX}${input.text}` : input.text];
   const moved = await runCli(runCommand, cwd, argv);
   return toolResult(moved.document, Boolean(moved.status));
 }

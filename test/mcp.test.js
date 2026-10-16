@@ -235,11 +235,12 @@ test('[A9,P5] an MCP client reads the board and shouts as its agent', async (t) 
   assert.equal(status.structuredContent.me.id, box.agent, 'status reads as the seat\'s agent');
   assert.ok(status.structuredContent.items.some((item) => item.item_id === itemId && item.item_status === 'open'), 'status lists the open item');
   assert.deepEqual(status.structuredContent.needsYou.decisions.map((ask) => ask.shout_id), [decisionId], 'Needs-you carries the person\'s open decision');
-  assert.ok(status.structuredContent.needsYou.spec.some((row) => row.id === 'G2' && row.status === 'draft'), 'Needs-you carries the draft row');
   // One builder: needsYou is the view's own projection, unshaped, never a query of the tool's own.
+  // Spec rows that need the person come with #702, so needsYou carries decisions and holds only.
+  assert.deepEqual(Object.keys(status.structuredContent.needsYou).sort(), ['decisions', 'holds'], 'needsYou carries no spec rows until #702');
   const projection = JSON.parse(JSON.stringify(projectState(box.web)));
-  assert.deepEqual(status.structuredContent.needsYou, { decisions: projection.decisions, holds: projection.holds, spec: projection.spec },
-    'needsYou is projectState\'s decisions, holds and spec for the same board');
+  assert.deepEqual(status.structuredContent.needsYou, { decisions: projection.decisions, holds: projection.holds },
+    'needsYou is projectState\'s decisions and holds for the same board');
   assert.deepEqual(JSON.parse(status.content[0].text), status.structuredContent, 'the text content is the same document');
 
   const shown = await client.call('show_item', { id: itemId });
@@ -278,6 +279,21 @@ test('[A9,P5] an MCP client reads the board and shouts as its agent', async (t) 
   const missing = await client.call('show_item', { id: 999 });
   assert.equal(missing.isError, true);
   assert.deepEqual(missing.structuredContent, cli(box, box.web, ['show', '999']).document);
+  // Values of the right type reach the CLI, so its own refusal comes back: EMPTY_SHOUT and USAGE.
+  const blank = await client.call('shout', { to: 'coordinator', text: '   ' });
+  const cliBlank = cli(box, box.web, ['shout', 'coordinator', '   '], box.sessionA);
+  assert.equal(cliBlank.document.error.code, 'EMPTY_SHOUT');
+  assert.equal(blank.isError, true);
+  assert.deepEqual(blank.structuredContent, cliBlank.document, 'a blank shout is the CLI\'s EMPTY_SHOUT');
+  const blankIdea = await client.call('capture_idea', { text: '   ' });
+  assert.equal(blankIdea.structuredContent.error.code, 'EMPTY_SHOUT', 'a blank idea is the CLI\'s EMPTY_SHOUT');
+  const zero = await client.call('show_item', { id: 0 });
+  const cliZero = cli(box, box.web, ['show', '0']);
+  assert.equal(cliZero.document.error.code, 'USAGE');
+  assert.equal(zero.isError, true);
+  assert.deepEqual(zero.structuredContent, cliZero.document, 'item 0 is the CLI\'s USAGE');
+  const mistyped = await client.call('show_item', { id: '12' });
+  assert.equal(mistyped.structuredContent.error.code, 'BAD_REQUEST', 'a value of the wrong type is still refused');
 
   // Arguments are exactly the schema's: no argument can name another author, seat or channel.
   const spoofed = await client.call('shout', { to: 'all', text: 'from someone else', from: 'person' });

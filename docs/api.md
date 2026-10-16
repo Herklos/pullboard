@@ -198,16 +198,16 @@ It answers `initialize` with `protocolVersion` (the client's, when it is `2025-0
 
 | Tool | Input schema | Mirrors | Result |
 | --- | --- | --- | --- |
-| `board_status` | `{}` | `pullboard status` and `pullboard list` | the `status` document plus `items` (open and active items) and `needsYou`: the `decisions`, `holds` and `spec` fields of the view's board projection, unshaped, as the view's Needs-you reads them |
-| `show_item` | `{id: integer >= 1}` | `pullboard show <id>` | the `show` document |
+| `board_status` | `{}` | `pullboard status` and `pullboard list` | the `status` document plus `items` (open and active items) and `needsYou`: the `decisions` and `holds` fields of the view's board projection, unshaped, as the view's Needs-you reads them; spec rows that need the person come with #702 |
+| `show_item` | `{id: integer}` | `pullboard show <id>` | the `show` document |
 | `shout` | `{to: string, text: string}` | `pullboard shout <to> <text>` | the `shout` document |
 | `capture_idea` | `{text: string}` | `pullboard shout coordinator "idea: <text>"` | the `shout` document; until ideas become their own kind of item, an idea is a shout to the coordinator whose text starts `idea: ` |
 
-`needsYou` is read-only and comes from the same projection as the local API's board state and the view: `decisions` are the open decisions addressed to the person, `holds` the held lanes, and `spec` every row of the project's spec file with its `status`, so the person's rows are those `pending` or `draft`. Building that projection reads every item and the spec file's history, so `board_status` is slower on large boards than the other tools.
+`needsYou` is read-only and comes from the same projection as the local API's board state and the view: `decisions` are the open decisions addressed to the person and `holds` the held lanes. It carries no spec rows yet; spec rows that need the person come with #702. Building that projection reads every item and the spec file's history, so `board_status` is slower on large boards than the other tools.
 
-Every input schema sets `additionalProperties: false`; an unknown or mistyped argument returns `BAD_REQUEST`. No argument names an author, a seat or a channel: the author of every move is the agent of the checkout the server runs in.
+Every input schema sets `additionalProperties: false`; an unknown argument or a value of the wrong type returns `BAD_REQUEST`. A value of the right type goes to the CLI as it is, so a blank shout returns the CLI's `EMPTY_SHOUT` and item `0` its `USAGE`. No argument names an author, a seat or a channel: the author of every move is the agent of the checkout the server runs in.
 
-Each tool runs the CLI command it mirrors through the same engine as the terminal and the local API, with the API's move arguments, so a move records the same events and a refusal carries the CLI's own `code`, `message` and `next`. A result's `content` is one `text` part holding the versioned JSON document, which `structuredContent` repeats. A refusal is a result with `isError: true` and the versioned refusal document. A tool name the server does not offer gets JSON-RPC error `-32602` with an `UNKNOWN_TOOL` refusal in `data`.
+Each tool runs the CLI command it mirrors through the same engine as the terminal and the local API, with its arguments as distinct argv entries after `--`, so a move records the same events and a refusal carries the CLI's own `code`, `message` and `next`. A result's `content` is one `text` part holding the versioned JSON document, which `structuredContent` repeats. A refusal is a result with `isError: true` and the versioned refusal document. A tool name the server does not offer gets JSON-RPC error `-32602` with an `UNKNOWN_TOOL` refusal in `data`.
 
 A person's own moves never come through MCP (P6). A tool call that names one (approving or declining rows, answering a decision, signing off) returns `HUMAN_REQUIRED` before any argument is read, whatever the client claims in its arguments, `_meta`, `clientInfo` or environment, and from any seat, including the main checkout. Every engine call the server makes also carries the `mcp` channel, which the CLI's own person check refuses. The refusal's `next` says to ask the coordinator to bring the call to the person. Live notifications over MCP are not offered yet.
 
