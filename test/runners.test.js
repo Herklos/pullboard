@@ -481,26 +481,41 @@ test('a queued run executes on a registered runner and its result comes back (ho
   const added = cli(repo, env, 'runner', 'add', HOST, '--slots', '1', '--browser', '1', '--json');
   assert.equal(added.status, 0, added.context);
   const command = `node -e ${shellQuote('process.stdout.write("HOST_CHECKOUT_ISOLATED\\n")')}`;
-  const run = runThroughGate(repo, env, command, { item: 'tooling-isolation', toolingRoot });
-  assert.equal(run.status, 0, fixtureResultContext(run));
-  assert.match(run.stdout, /HOST_CHECKOUT_ISOLATED/u);
-  const result = gateResult(run.stdout);
-  assert.equal(result.isGreen, true);
-  assert.equal(result.runner, HOST);
-  assert.equal(result.profile.executionRunner, HOST);
-  assert.equal(result.profile.executionSource.tooling.name, 'pullboard');
-  assert.equal(result.profile.executionSource.tooling.kind, 'git-checkout');
-  assert.equal(result.profile.executionSource.tooling.commit, git(cleanToolingRoot, env, 'rev-parse', 'HEAD'),
-    'the execution imports its clean private tooling snapshot, not the unrelated-note checkout');
-  assert.notEqual(result.profile.executionSource.tooling.commit, ownedCommit);
-  const requestsSeen = readFileSync(requests, 'utf8').trim().split(/\r?\n/u).filter(Boolean).map(line => JSON.parse(line));
-  assert.equal(requestsSeen.length, 1, 'the actual remote command is sent exactly once');
-  assert.equal(requestsSeen[0].host, HOST);
-  assert.equal(requestsSeen[0].workerStarted, true);
-  assert.equal(requestsSeen[0].code, 0);
-  assert.equal(git(toolingRoot, env, 'status', '--porcelain'), '?? LOCAL-NOTE.txt',
-    'the owned source fixture remains dirty only by its unrelated note');
-  completedCleanly = true;
+  const previousHome = process.env.PULLBOARD_HOME;
+  const previousMachineHome = process.env.PULLBOARD_MACHINE_HOME;
+  process.env.PULLBOARD_HOME = home;
+  process.env.PULLBOARD_MACHINE_HOME = machineHome;
+  let held;
+  try {
+    held = await takeResource({ name: 'gate', capacity: 1, scope: 'machine', root: repo,
+      agent: 'tooling-isolation-local-holder', item: 'tooling-isolation-local-holder', kind: 'force-registered-runner' });
+    const run = runThroughGate(repo, env, command, { item: 'tooling-isolation', toolingRoot });
+    assert.equal(run.status, 0, fixtureResultContext(run));
+    assert.match(run.stdout, /HOST_CHECKOUT_ISOLATED/u);
+    const result = gateResult(run.stdout);
+    assert.equal(result.isGreen, true);
+    assert.equal(result.runner, HOST);
+    assert.equal(result.profile.executionRunner, HOST);
+    assert.equal(result.profile.executionSource.tooling.name, 'pullboard');
+    assert.equal(result.profile.executionSource.tooling.kind, 'git-checkout');
+    assert.equal(result.profile.executionSource.tooling.commit, git(cleanToolingRoot, env, 'rev-parse', 'HEAD'),
+      'the execution imports its clean private tooling snapshot, not the unrelated-note checkout');
+    assert.notEqual(result.profile.executionSource.tooling.commit, ownedCommit);
+    const requestsSeen = readFileSync(requests, 'utf8').trim().split(/\r?\n/u).filter(Boolean).map(line => JSON.parse(line));
+    assert.equal(requestsSeen.length, 1, 'the actual remote command is sent exactly once');
+    assert.equal(requestsSeen[0].host, HOST);
+    assert.equal(requestsSeen[0].workerStarted, true);
+    assert.equal(requestsSeen[0].code, 0);
+    assert.equal(git(toolingRoot, env, 'status', '--porcelain'), '?? LOCAL-NOTE.txt',
+      'the owned source fixture remains dirty only by its unrelated note');
+    completedCleanly = true;
+  } finally {
+    if (held) held.release();
+    if (previousHome === undefined) delete process.env.PULLBOARD_HOME;
+    else process.env.PULLBOARD_HOME = previousHome;
+    if (previousMachineHome === undefined) delete process.env.PULLBOARD_MACHINE_HOME;
+    else process.env.PULLBOARD_MACHINE_HOME = previousMachineHome;
+  }
 });
 
 test('a queued run executes on a registered runner and its result comes back [C7]', async (t) => {
