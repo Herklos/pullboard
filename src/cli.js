@@ -2224,7 +2224,8 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
   const configFile = join(ctx.info.root, CONFIG_FILE);
   const configSource = readFileSync(configFile, 'utf8');
   const plan = planBlueprint(blueprint, { source, spec, doctrine: ctx.doctrine,
-    itemTitles: store.listItems(board, { all: true }).map((item) => item.item_title), gate: String(JSON.parse(configSource).gate ?? '') });
+    existingItems: store.listItems(board, { all: true }).map((item) => ({ id: item.item_id, title: item.item_title, specIds: item.item_spec_ids ? item.item_spec_ids.split(',') : [] })),
+    gate: String(JSON.parse(configSource).gate ?? '') });
   // Every starter is checked before anything is written, so a refusal leaves the board as it was.
   const starters = plan.items.map((entry) => ({ key: entry.key, afterKeys: entry.after, item: { by: me.id,
     lane: entry.lane && entry.lane !== COORDINATOR && isLane(ctx.config, entry.lane) ? entry.lane : COORDINATOR,
@@ -2241,7 +2242,8 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
   writeRowApply(ctx.info.root, write);
   const added = [];
   try {
-    const byKey = {};
+    // A retry starts from the starters a failed add already put on the board.
+    const byKey = { ...plan.existing };
     for (const { key, afterKeys, item } of starters) {
       item.after = afterKeys.map((before) => byKey[before]).filter(Boolean);
       const id = await ordered(ctx, board, 'addItem', [item]);
@@ -2262,7 +2264,7 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
   const summary = { blueprint: { name: blueprint.name, title: blueprint.title, version: blueprint.version },
     section: plan.section.name, rows, items: added, gate: plan.gate, marked: plan.marked };
   io.result?.(summary);
-  if (!rows.length && !added.length && !plan.gate) {
+  if (plan.marked) {
     io.say(`${blueprint.title} (version ${blueprint.version}) is already on this board; nothing added`);
     return summary;
   }

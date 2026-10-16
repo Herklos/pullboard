@@ -177,3 +177,41 @@ test('blueprint add files a blueprint as drafts or nothing at all [S1,I1]', () =
   assert.equal(added.rows.length, 10);
   assert.equal(added.items.length, 3);
 });
+
+test('blueprint add files a blueprint as drafts beside approved rows in its own section [S1,I1]', () => {
+  // The person already wrote the blueprint's section, with one rule approved in the same words: a
+  // first add still files every rule as a draft and every question as a pending row.
+  const box = freshBoard();
+  const file = join(box.repo, 'SPEC.md');
+  const rule = `${PUBLISHED.rules[0].text} Why: ${PUBLISHED.rules[0].why}`;
+  writeFileSync(file, `${readFileSync(file, 'utf8').trimEnd()}\n\n## A · Web app\n\n- A1 [approved, must] ${rule} | gate: review\n- A2 [approved, must] ${PUBLISHED.questions[0].ask}: Rails. Choices: Rails, Next.js. | gate: review\n`);
+  box.git('commit', '-q', '-am', 'chore: approve rows in the blueprint section');
+  const added = json(box, 'blueprint', 'add', 'web-app');
+  assert.equal(added.section, 'A · Web app', 'the rows go in the existing section');
+  assert.deepEqual(added.rows.map((row) => [row.key, row.status]), [
+    ...PUBLISHED.rules.map((entry) => [entry.key, 'draft']), ...PUBLISHED.questions.map((entry) => [entry.key, 'pending'])]);
+  const spec = parseSpec(readFileSync(file, 'utf8'));
+  assert.deepEqual(spec.rows.filter((row) => row.status === 'approved').map((row) => row.id), ['A1', 'A2']);
+  assert.equal(spec.rows.filter((row) => row.section === 'A · Web app').length, 12);
+});
+
+test('blueprint add files a blueprint as drafts after an add stopped part way [S1,I1]', () => {
+  // A finished add on one board gives the exact rows; a second board is left where an add stops
+  // after its rows and first starter: the rows and the under-way marker written, item 1 added.
+  const reference = freshBoard();
+  const done = json(reference, 'blueprint', 'add', 'web-app');
+  const ids = Object.fromEntries(done.rows.map((row) => [row.key, row.id]));
+  const underWay = `<!-- pullboard-blueprint web-app 1 adding ${Object.entries(ids).map(([key, id]) => `${key}=${id}`).join(' ')} -->`;
+  const finished = readFileSync(join(reference.repo, 'SPEC.md'), 'utf8');
+  assert.ok(finished.includes('<!-- pullboard-blueprint web-app 1 -->'));
+  const box = freshBoard();
+  writeFileSync(join(box.repo, 'SPEC.md'), finished.replace('<!-- pullboard-blueprint web-app 1 -->', underWay));
+  box.git('commit', '-q', '-am', 'chore: leave an add part way');
+  const first = json(box, 'add', 'coordinator', PUBLISHED.items[0].title, '--specs', `${ids.W1},${ids.W2}`);
+  const retried = json(box, 'blueprint', 'add', 'web-app');
+  assert.deepEqual(retried.rows, [], 'no row is filed twice');
+  assert.deepEqual(retried.items.map((item) => item.key), ['2', '3'], 'only the missing starters are added');
+  assert.deepEqual(retried.items.find((item) => item.key === '3').after, [first.item.item_id], 'the third starter still waits on the first');
+  assert.equal(readFileSync(join(box.repo, 'SPEC.md'), 'utf8'), finished, 'the finished marker replaces the under-way one');
+  assert.equal(json(box, 'blueprint', 'add', 'web-app').items.length, 0, 'and then a repeat adds nothing');
+});

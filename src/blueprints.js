@@ -189,6 +189,32 @@ export function blueprintMarker(blueprint) {
 }
 
 /**
+ * The marker line written with the rows while an add is under way: it records which row id each
+ * rule and question key got, so a retry after a failure part way files no row twice and finds the
+ * starter items already added by those ids. The finished add replaces it with blueprintMarker.
+ *
+ * @param {{ name: string, version: number }} blueprint
+ * @param {Record<string, string>} ids - Row id by rule or question key.
+ * @returns {string}
+ */
+export function blueprintAddingMarker(blueprint, ids) {
+  return `<!-- pullboard-blueprint ${blueprint.name} ${blueprint.version} adding ${Object.entries(ids).map(([key, id]) => `${key}=${id}`).join(' ')} -->`;
+}
+
+/**
+ * Read an under-way marker line for this blueprint version, or null.
+ *
+ * @param {string} line
+ * @param {{ name: string, version: number }} blueprint
+ * @returns {Record<string, string> | null}
+ */
+function addingIds(line, blueprint) {
+  const match = /^<!-- pullboard-blueprint (\S+) (\d+) adding ((?:[A-Za-z0-9]+=[A-Za-z0-9.]+ ?)+) -->$/u.exec(line.trim());
+  if (!match || match[1] !== blueprint.name || Number(match[2]) !== blueprint.version) return null;
+  return Object.fromEntries(match[3].trim().split(' ').map((pair) => pair.split('=')));
+}
+
+/**
  * One rule's row text: the rule, then its reason.
  *
  * @param {{ text: string, why: string }} rule
@@ -209,72 +235,80 @@ export function questionText(question) {
 }
 
 /**
- * Work out what adding a blueprint changes, without writing anything: the section (found or new),
- * the rows not already in the spec with their new ids, the new SPEC.md text, and the items not
- * already on the board, each citing real row ids. A repeat of the same version plans nothing.
+ * Work out what adding a blueprint changes, without writing anything. A first add files every rule
+ * as a new draft row and every question as a new pending row, whatever the spec already says, in
+ * the blueprint's section (found by title, or new), and plans every starter item. A retry after a
+ * failure part way (the under-way marker is there) files no rows and plans only the starters not
+ * yet on the board, found by title and the row ids they cite. A finished add (the marker is there)
+ * plans nothing.
  *
  * @param {Blueprint} blueprint
- * @param {{ source: string, spec: any, doctrine: any, itemTitles: Iterable<string>, gate: string }} board
- *   source is SPEC.md's text and spec its parse; doctrine is loadDoctrine's result; itemTitles are
- *   every item title on the board; gate is pullboard.json's gate now.
- * @returns {{ marked: boolean, section: { prefix: string, name: string, isNew: boolean }, rows: { key: string, id: string, status: string, text: string, line: string }[], specRows: string, specAfter: string, ids: Record<string, string>, items: { key: string, title: string, specIds: string[], after: string[], lane?: string, route: string, criterion: string, brief: string }[], gate: string | null }}
+ * @param {{ source: string, spec: any, doctrine: any, existingItems: { id: number, title: string, specIds: string[] }[], gate: string }} board
+ *   source is SPEC.md's text and spec its parse; doctrine is loadDoctrine's result; existingItems
+ *   are the items on the board; gate is pullboard.json's gate now.
+ * @returns {{ marked: boolean, resumed: boolean, section: { prefix: string, name: string, isNew: boolean }, rows: { key: string, id: string, status: string, text: string, line: string }[], specRows: string, specAfter: string, ids: Record<string, string>, items: { key: string, title: string, specIds: string[], after: string[], lane?: string, route: string, criterion: string, brief: string }[], existing: Record<string, number>, gate: string | null }}
+ *   specRows is the text to write before the items (rows and the under-way marker), specAfter the
+ *   text once they are all added (the finished marker); existing maps starter keys already on the
+ *   board to their item ids.
  */
-export function planBlueprint(blueprint, { source, spec, doctrine, itemTitles, gate }) {
+export function planBlueprint(blueprint, { source, spec, doctrine, existingItems = [], gate }) {
   const marker = blueprintMarker(blueprint);
   const lines = source.split(/\r?\n/u);
   const marked = lines.some((text) => text.trim() === marker);
+  const addingLine = lines.find((text) => addingIds(text, blueprint));
+  const resumed = !marked && Boolean(addingLine);
   const allRows = [...spec.rows, ...(doctrine?.rows ?? []), ...(doctrine?.repo?.rows ?? [])];
   const prefixOf = (name) => /^([A-Z][A-Z0-9]*)\s*[·.:-]/u.exec(name)?.[1];
-  const existing = spec.sections.find((section) => section.name.replace(/^[A-Z][A-Z0-9]*\s*[·.:-]\s*/u, '') === blueprint.title.trim() && prefixOf(section.name));
+  const existingSection = spec.sections.find((section) => section.name.replace(/^[A-Z][A-Z0-9]*\s*[·.:-]\s*/u, '') === blueprint.title.trim() && prefixOf(section.name));
   const taken = new Set([
     ...allRows.map((row) => /^[A-Za-z]+/u.exec(row.id)?.[0].toUpperCase()),
     ...spec.sections.map((section) => prefixOf(section.name)),
     ...(doctrine?.sections ?? []).map((section) => prefixOf(section.name)),
   ].filter(Boolean));
-  const prefix = existing ? prefixOf(existing.name) : freePrefix(blueprint, taken);
-  const name = existing ? existing.name : `${prefix} · ${blueprint.title.trim()}`;
-  // Only the blueprint's own section counts as already filed: a row elsewhere with the same words,
-  // approved or not, belongs to the person's own spec, and the blueprint still files its drafts.
-  const own = existing ? spec.rows.filter((row) => row.section === existing.name) : [];
-  const byText = new Map(own.map((row) => [row.text, row.id]));
-  const askedIds = new Map(own.map((row) => [row.text.split(': ')[0], row.id]));
-  // The same rows spec draft numbers against: SPEC.md and the repo's own doctrine.
-  const numberedRows = [...spec.rows, ...(doctrine?.repo?.rows ?? [])];
-  const ids = {};
+  const prefix = existingSection ? prefixOf(existingSection.name) : freePrefix(blueprint, taken);
+  const name = existingSection ? existingSection.name : `${prefix} · ${blueprint.title.trim()}`;
+  const section = { prefix, name, isNew: !existingSection };
+  const gateToSet = !gate?.trim() && blueprint.gate ? blueprint.gate : null;
+  if (marked) return { marked, resumed: false, section, rows: [], specRows: source, specAfter: source, ids: {}, items: [], existing: {}, gate: null };
   const rows = [];
-  const allocate = () => {
-    const id = nextRowId(prefix, numberedRows);
-    numberedRows.push({ id });
-    return id;
-  };
-  for (const rule of blueprint.rules) {
-    const text = ruleText(rule);
-    if (byText.has(text)) { ids[rule.key] = byText.get(text); continue; }
-    if (marked) continue;
-    const id = allocate();
-    ids[rule.key] = id;
-    rows.push({ key: rule.key, id, status: 'draft', text, line: `- ${id} [draft, ${rule.tier}] ${text} | gate: ${rule.gate}` });
+  let ids;
+  let specRows = source;
+  if (resumed) ids = addingIds(addingLine, blueprint);
+  else {
+    // The same rows spec draft numbers against: SPEC.md and the repo's own doctrine.
+    const numberedRows = [...spec.rows, ...(doctrine?.repo?.rows ?? [])];
+    const allocate = () => {
+      const id = nextRowId(prefix, numberedRows);
+      numberedRows.push({ id });
+      return id;
+    };
+    ids = {};
+    for (const rule of blueprint.rules) {
+      const id = allocate();
+      const text = ruleText(rule);
+      ids[rule.key] = id;
+      rows.push({ key: rule.key, id, status: 'draft', text, line: `- ${id} [draft, ${rule.tier}] ${text} | gate: ${rule.gate}` });
+    }
+    for (const question of blueprint.questions) {
+      const id = allocate();
+      const text = questionText(question);
+      ids[question.key] = id;
+      rows.push({ key: question.key, id, status: 'pending', text, line: `- ${id} [pending, must] ${text} | gate: review` });
+    }
+    specRows = insertSection(source, spec, { existing: existingSection, name, lines: [...rows.map((row) => row.line), blueprintAddingMarker(blueprint, ids)] });
   }
-  for (const question of blueprint.questions) {
-    const asked = askedIds.get(question.ask.trim());
-    if (asked) { ids[question.key] = asked; continue; }
-    if (marked) continue;
-    const id = allocate();
-    const text = questionText(question);
-    ids[question.key] = id;
-    rows.push({ key: question.key, id, status: 'pending', text, line: `- ${id} [pending, must] ${text} | gate: review` });
+  const underWay = blueprintAddingMarker(blueprint, ids);
+  const specAfter = specRows.split(/(\r?\n)/u).map((part) => (part.trim() === underWay || (resumed && part === addingLine) ? part.replace(part.trim(), marker) : part)).join('');
+  const existing = {};
+  const items = [];
+  for (const item of blueprint.items) {
+    const specIds = item.cites.map((cited) => ids[cited]).filter(Boolean);
+    const found = resumed && existingItems.find((entry) => entry.title === item.title.trim() && entry.specIds.join(',') === specIds.join(','));
+    if (found) { existing[item.key] = found.id; continue; }
+    items.push({ key: item.key, title: item.title.trim(), specIds, after: item.after,
+      ...(item.lane ? { lane: item.lane } : {}), route: item.route, criterion: item.criterion, brief: item.brief });
   }
-  const titles = new Set(itemTitles);
-  const items = marked ? [] : blueprint.items.filter((item) => !titles.has(item.title.trim())).map((item) => ({
-    key: item.key, title: item.title.trim(), specIds: item.cites.map((cited) => ids[cited]).filter(Boolean), after: item.after,
-    ...(item.lane ? { lane: item.lane } : {}), route: item.route, criterion: item.criterion, brief: item.brief,
-  }));
-  const rowLines = rows.map((row) => row.line);
-  // Rows first, marker last: the caller writes specRows, adds the items, then writes specAfter, so a
-  // failure part way leaves no marker and a retry adds what is missing.
-  const specRows = marked || !rows.length ? source : insertSection(source, spec, { existing, name, lines: rowLines });
-  const specAfter = marked ? source : insertSection(source, spec, { existing, name, lines: [...rowLines, marker] });
-  return { marked, section: { prefix, name, isNew: !existing }, rows, specRows, specAfter, ids, items, gate: !gate?.trim() && blueprint.gate ? blueprint.gate : null };
+  return { marked, resumed, section, rows, specRows, specAfter, ids, items, existing, gate: gateToSet };
 }
 
 /**
