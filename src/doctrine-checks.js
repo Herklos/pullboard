@@ -1,9 +1,10 @@
 /**
  * Doctrine checks with a count that only falls (D1, D3). A rule row may carry
- * `| gate: check <command> | count: N`; the command prints one line per problem. Submit holds
- * every touched rule's count at or below its committed count and refuses a changed file that
- * gains a problem. Rules come only from committed doctrine: accepted main's at submit, HEAD's for
- * `pullboard doctrine check`, never a working-tree edit.
+ * `| gate: check <command> | count: N`, and `| files: <paths>` to narrow it; the command prints one
+ * line per problem and exits 0 or 1. Submit holds every touched rule's count at or below its
+ * committed count and refuses a changed file that gains a problem. Rules come only from committed
+ * doctrine: accepted main's at submit, HEAD's for `pullboard doctrine check`, never a working-tree
+ * edit.
  */
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -21,12 +22,17 @@ const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
  * are lint errors in `pullboard spec check`; here they simply carry no rule.
  *
  * @param {any} row
- * @returns {{ id: string, text: string, status: string, command: string, count: number, runs: string, mode: string } | null}
+ * @returns {{ id: string, text: string, status: string, command: string, count: number, runs: string, mode: string, files: string[] } | null}
  */
 export function checkRule(row) {
   if (!/^check\s/u.test(row?.gate ?? '') || checkFieldFindings(row).length) return null;
   return { id: row.id, text: row.text, status: row.status, command: row.gate.slice('check'.length).trim(),
-    count: Number(row.count), runs: row.runs ?? 'submit', mode: row.mode ?? 'hold' };
+    count: Number(row.count), runs: row.runs ?? 'submit', mode: row.mode ?? 'hold', files: ruleFiles(row.files) };
+}
+
+/** A row's `files:` paths, comma or space separated, without `./` or a trailing slash; none is the whole repo. */
+export function ruleFiles(value) {
+  return [...new Set(String(value ?? '').split(/[\s,]+/u).map((path) => path.replace(/^\.\//u, '').replace(/\/+$/u, '')).filter(Boolean))];
 }
 
 /**
@@ -46,6 +52,8 @@ export function checkLoosening(before, after) {
   if (next.count > old.count) return `raises count: from ${old.count} to ${next.count}`;
   if (old.mode === 'hold' && next.mode === 'watch') return 'sets mode: watch';
   if (old.runs === 'submit' && next.runs === 'nightly') return 'moves its check to runs: nightly';
+  // files: narrows a rule: adding it to a whole-repo rule, or dropping a path, covers less.
+  if ((!old.files.length && next.files.length) || old.files.some((path) => !next.files.includes(path))) return 'narrows its files:';
   return '';
 }
 
@@ -82,8 +90,9 @@ export function checkRulesAt(root, revision, name = DOCTRINE_FILE) {
 }
 
 /**
- * Run one check where it stands and keep each non-empty output line as a problem. The exit status
- * is not read: `grep` exits 1 when it finds nothing, which is zero problems.
+ * Run one check where it stands and keep each non-empty output line as a problem. Exit 0 or 1 is
+ * counted (`grep` exits 1 when it finds nothing); any other exit, a signal or a timeout cannot
+ * count, so its error lines never pass for problems.
  *
  * @param {string} cwd
  * @param {string} command
@@ -102,24 +111,10 @@ export function runRuleCheck(cwd, command, timeoutMs = DEFAULT_TIMEOUT_MS) {
     const broken = result.error.code === 'ETIMEDOUT' ? `timed out after ${Math.round(timeoutMs / 1000)}s` : `could not run (${result.error.code ?? 'error'})`;
     return { problems: [], broken, seconds };
   }
+  if (result.signal) return { problems: [], broken: `was killed by ${result.signal}`, seconds };
+  if (result.status !== 0 && result.status !== 1) return { problems: [], broken: `exited ${result.status}`, seconds };
   const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
   return { problems: output.split(/\r?\n/u).map((line) => line.trimEnd()).filter((line) => line.trim()), broken: '', seconds };
-}
-
-/**
- * The repo paths a check command names at a revision: the files it watches. A command that names
- * no existing path watches the whole repo.
- *
- * @param {string} root
- * @param {string} revision
- * @param {string} command
- * @returns {string[]}
- */
-export function ruleScope(root, revision, command) {
-  const words = command.split(/\s+/u)
-    .map((word) => word.replace(/^['"]|['"]$/gu, '').replace(/^\.\//u, '').replace(/\/+$/u, ''))
-    .filter((word) => word && !word.startsWith('-') && !/[*?[\]{}$`|;&<>()]/u.test(word) && !word.startsWith('/') && !word.split('/').includes('..'));
-  return [...new Set(words)].filter((word) => gitOut(root, ['rev-parse', '--verify', '--quiet', `${revision}:${word}`]) !== null);
 }
 
 /** True when a changed path is one of a rule's watched paths or lies under one. */
@@ -127,10 +122,9 @@ function inScope(scope, path) {
   return !scope.length || scope.some((watched) => path === watched || path.startsWith(`${watched}/`));
 }
 
-/** True when a problem line names a file, as `path:...`, `./path:...` or the bare path. */
+/** True when a problem line starts with the file's repo path, as `path:...` or `./path:...`. */
 function namesFile(line, file) {
-  const text = line.trim();
-  return text === file || text.startsWith(`${file}:`) || text.startsWith(`./${file}:`) || text.includes(` ${file}:`) || text.includes(` ./${file}:`);
+  return line.startsWith(`${file}:`) || line.startsWith(`./${file}:`);
 }
 
 /** A problem line without its line number, so a moved problem is not counted as new. */
@@ -158,14 +152,14 @@ function newLines(before, after) {
  * @returns {string}
  */
 export function ruleLine(result) {
-  const counts = result.broken ? `check ${result.broken}` : `${result.count}, was ${result.committed}`;
+  const counts = result.broken ? `cannot count: its check ${result.broken}, was ${result.committed}` : `${result.count}, was ${result.committed}`;
   return `${result.id} ${result.text} · ${counts} · ${result.state}`;
 }
 
-/** Name how a counted rule stands: watching never refuses; holding is at or below its count. */
+/** Name how a rule stands: a check that cannot count never holds; watching never refuses a count. */
 function ruleState(rule, count, committed, broken) {
+  if (broken) return 'uncounted';
   if (rule.mode === 'watch') return 'watching';
-  if (broken) return 'broken';
   return count <= committed ? 'holding' : 'rose';
 }
 
@@ -226,9 +220,9 @@ export function holdDoctrine(root, { mainCommit, commit, practice = DOCTRINE_FIL
   const changed = (gitOut(root, ['diff', '-z', '--no-renames', '--name-only', base, commit, '--']) ?? '').split('\0').filter(Boolean);
   const results = [];
   const refusals = [];
+  const uncounted = [];
   for (const rule of rules) {
-    const scope = ruleScope(root, commit, rule.command);
-    if (!changed.some((path) => inScope(scope, path))) continue;
+    if (!changed.some((path) => inScope(rule.files, path))) continue;
     const committed = Math.min(rule.count, lowered.get(rule.id) ?? rule.count);
     const run = runRuleCheck(root, rule.command, timeoutMs);
     const count = run.problems.length;
@@ -236,12 +230,13 @@ export function holdDoctrine(root, { mainCommit, commit, practice = DOCTRINE_FIL
     const result = { id: rule.id, text: rule.text, command: rule.command, count, committed,
       holds: state === 'holding' || state === 'watching', state, mode: rule.mode, runs: rule.runs, problems: run.problems, broken: run.broken };
     results.push(result);
-    if (rule.mode === 'watch') continue;
     const name = `${rule.id} ${rule.text}`;
+    // A broken check never passes, whatever its mode.
     if (run.broken) {
-      refusals.push(`${name} cannot count: its check ${run.broken}`);
+      uncounted.push(`${name} cannot count: its check ${run.broken}`);
       continue;
     }
+    if (rule.mode === 'watch') continue;
     const touched = changed.filter((path) => run.problems.some((line) => namesFile(line, path)));
     const before = touched.length ? runAtCommit(root, base, rule.command, timeoutMs) : { problems: [], broken: '' };
     if (count > committed) {
@@ -250,7 +245,7 @@ export function holdDoctrine(root, { mainCommit, commit, practice = DOCTRINE_FIL
       continue;
     }
     if (before.broken) {
-      refusals.push(`${name} cannot compare changed files: its check ${before.broken} at the base`);
+      uncounted.push(`${name} cannot count at the base ${base.slice(0, 12)}: its check ${before.broken}`);
       continue;
     }
     for (const path of touched) {
@@ -261,6 +256,9 @@ export function holdDoctrine(root, { mainCommit, commit, practice = DOCTRINE_FIL
       const fresh = newLines(then, now);
       refusals.push(`${name}: ${path} gains ${gained} problem${gained === 1 ? '' : 's'}, had ${then.length}:\n${(fresh.length ? fresh : now).map((line) => `  ${line}`).join('\n')}`);
     }
+  }
+  if (uncounted.length) {
+    throw new Refused('RATCHET_UNCOUNTED', `${uncounted.join('\n')}\na check exits 0 or 1 within its timeout; fix the check, or ask the coordinator to, then submit again`);
   }
   if (refusals.length) {
     throw new Refused('RATCHET_ROSE', `${refusals.join('\n')}\nthe doctrine holds these counts; fix the new problems, commit, and submit again; only the person's signature raises count:`);

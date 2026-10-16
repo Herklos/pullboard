@@ -1,6 +1,6 @@
 /** A doctrine rule can carry a check whose count only falls, held at submit [D1,D3]. */
 import assert from 'node:assert/strict';
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
 import { createE2eHelpers } from './e2e-helpers.js';
@@ -10,6 +10,8 @@ after(e2e.cleanup);
 const { project } = e2e;
 
 const RULE = '- Q1 [approved, must] Web pages carry no TODO markers. | gate: check grep -rn TODO web';
+const NARROWED = '- Q3 [approved, must] Api work keeps the TODO count. | gate: check grep -rn TODO web | count: 2 | files: api';
+const UNCOUNTABLE = '- Q4 [approved, must] The keep file stays. | gate: check test -f web/keep.txt || exit 3 | count: 0 | files: web/keep.txt';
 
 /**
  * A project whose doctrine has one check rule with the given trailing fields, two problems on
@@ -20,6 +22,7 @@ function checkedProject(fields, extraRows = []) {
   appendFileSync(join(box.repo, 'DOCTRINE.md'), `\n## Q · Quality\n${[`${RULE} | ${fields}`, ...extraRows].join('\n')}\n`);
   mkdirSync(join(box.repo, 'web'));
   writeFileSync(join(box.repo, 'web', 'a.html'), 'TODO one\nTODO two\n');
+  writeFileSync(join(box.repo, 'web', 'keep.txt'), 'keep\n');
   box.git(box.repo, 'add', '-A');
   box.git(box.repo, 'commit', '-q', '-m', 'chore: add the quality doctrine');
   box.git(box.web, 'merge', '-q', '--ff-only', 'main');
@@ -47,11 +50,21 @@ function editRule(box, from, to) {
 }
 
 test("a doctrine rule's check holds its count [D1,D3]", () => {
-  const box = checkedProject('count: 2');
+  const box = checkedProject('count: 2', [NARROWED, UNCOUNTABLE]);
+
+  // A check that exits other than 0 or 1 cannot count, so it refuses by name.
+  rmSync(join(box.web, 'web', 'keep.txt'));
+  box.git(box.web, 'add', '-A');
+  box.git(box.web, 'commit', '-q', '-m', 'feat(web): drop the keep file [G1]');
+  const uncounted = box.run(box.web, 'submit', '1');
+  assert.match(uncounted.err, /RATCHET_UNCOUNTED/);
+  assert.match(uncounted.err, /Q4 The keep file stays\. cannot count: its check exited 3/);
+  assert.equal(uncounted.code, 1, uncounted.out);
 
   // A rise above the committed count is refused, naming the rule, the counts and the new line.
-  commitWeb(box, { 'b.html': 'TODO three\n' }, 'feat(web): add a page [G1]');
+  commitWeb(box, { 'b.html': 'TODO three\n', 'keep.txt': 'keep\n' }, 'feat(web): add a page [G1]');
   const rose = box.run(box.web, 'submit', '1');
+  assert.doesNotMatch(rose.err, /Q3/, 'files: api keeps a web-only change from running the rule');
   assert.equal(rose.code, 1, rose.out);
   assert.match(rose.err, /RATCHET_ROSE/);
   assert.match(rose.err, /Q1 Web pages carry no TODO markers\. rose to 3, was 2/);
@@ -73,10 +86,14 @@ test("a doctrine rule's check holds its count [D1,D3]", () => {
   assert.match(fell.out, /Q1 Web pages carry no TODO markers\. · 1, was 2 · holding/);
   const report = box.run(box.web, 'doctrine', 'check');
   assert.equal(report.code, 0, report.err);
-  assert.equal(report.out.trim(), 'Q1 Web pages carry no TODO markers. · 1, was 2 · holding');
+  assert.equal(report.out.trim(), [
+    'Q1 Web pages carry no TODO markers. · 1, was 2 · holding',
+    'Q3 Api work keeps the TODO count. · 1, was 2 · holding',
+    'Q4 The keep file stays. · 0, was 0 · holding',
+  ].join('\n'));
   const json = JSON.parse(box.run(box.web, 'doctrine', 'check', '--json').out);
   assert.deepEqual(json.rules.map(({ id, count, committed, holds }) => ({ id, count, committed, holds })),
-    [{ id: 'Q1', count: 1, committed: 2, holds: true }]);
+    [{ id: 'Q1', count: 1, committed: 2, holds: true }, { id: 'Q3', count: 1, committed: 2, holds: true }, { id: 'Q4', count: 0, committed: 0, holds: true }]);
   assert.deepEqual(json.rules[0].problems, ['web/a.html:1:TODO two']);
 
   // Raising count: needs the person's signature; lowering it is a normal commit.

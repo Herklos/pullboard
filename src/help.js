@@ -156,7 +156,8 @@ Spec
                                         approve <id> --text "new wording" approves an exact rewrite
   pullboard spec apply                  coordinator applies recorded row decisions to the files
   pullboard doctrine check              each doctrine rule's check: its count, its committed count, whether it holds
-                                        a rule row adds | gate: check <command> | count: N; the command prints one line per problem
+                                        a rule row adds | gate: check <command> | count: N, and | files: <paths> to narrow it
+                                        the command prints one line per problem and exits 0 or 1; anything else cannot count
                                         submit refuses a touched rule whose count rises; runs: nightly skips submit, mode: watch only counts
 
 Role guides
