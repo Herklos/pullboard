@@ -377,19 +377,20 @@ export function codeAt(root, { path, from, to, commit, before = '' }) {
 }
 
 /**
- * Serve the view until stopped.
+ * Serve the view until stopped, optionally giving its API access to only one registered project.
  *
- * @param {{ port?: number, secret?: string }} [options]
+ * @param {{ port?: number, secret?: string, projectRoot?: string }} [options]
  * @returns {Promise<{ url: string, port: number, close: () => Promise<void> }>}
  */
-export async function serveView({ port = 0, secret = randomBytes(18).toString('base64url') } = {}) {
+export async function serveView({ port = 0, secret = randomBytes(18).toString('base64url'), projectRoot } = {}) {
   const key = Buffer.from(secret);
   let bound = 0;
   // The API reads projectState and codeAt from this module. Load its factory after our exports
   // initialize, and use the real CLI entry point without adding a second move implementation.
   const { createLocalApiHandler } = await import('./api.js');
   const { main } = await import('./cli.js');
-  const apiHandler = createLocalApiHandler({ secret, getPort: () => bound, runCommand: main, allowedOrigins: [HOSTED_ORIGIN] });
+  const apiHandler = createLocalApiHandler({ secret, getPort: () => bound, runCommand: main,
+    allowedOrigins: [HOSTED_ORIGIN], ...(projectRoot === undefined ? {} : { scope: { projectRoot } }) });
   const reply = (res, code, type, body) => {
     res.writeHead(code, {
       'content-type': type,
@@ -488,7 +489,7 @@ export async function serveView({ port = 0, secret = randomBytes(18).toString('b
       server.listen(port, LOOPBACK, () => {
         server.off('error', failed);
         bound = /** @type {any} */ (server.address()).port;
-        if (asked === 0) rememberPort(bound);
+        if (asked === 0 && projectRoot === undefined) rememberPort(bound);
         ready({
           url: `http://${LOOPBACK}:${bound}/?k=${secret}`,
           port: bound,
