@@ -135,3 +135,49 @@ If your item needs code another lane owns and it is not there yet, shout that la
 ${AGENTS_END}
 `;
 }
+
+/** Git subcommands used directly by Pullboard's documented agent loop, never all Git commands. */
+export const PULLBOARD_LOOP_GIT_COMMANDS = Object.freeze([
+  'status', 'diff', 'log', 'add', 'commit', 'merge', 'rebase', 'switch', 'checkout', 'worktree',
+]);
+
+/**
+ * Return gate argv only when the configured command is plain words; shell syntax is never widened
+ * into an allow rule that could hide other commands.
+ *
+ * @param {string} gate
+ * @returns {string[] | null}
+ */
+export function plainGateWords(gate) {
+  const text = String(gate ?? '').trim();
+  return /^[A-Za-z0-9_./:=@+-]+(?: [A-Za-z0-9_./:=@+-]+)*$/u.test(text) ? text.split(' ') : null;
+}
+
+/**
+ * Rules Claude Code can add to this project without changing the person's home or session settings.
+ *
+ * @param {{ gate?: string }} options
+ * @returns {string[]}
+ */
+export function claudeLoopRules({ gate = '' }) {
+  const rules = ['Bash(pullboard:*)', ...PULLBOARD_LOOP_GIT_COMMANDS.map(command => `Bash(git ${command}:*)`)];
+  const words = plainGateWords(gate);
+  if (words) rules.push(`Bash(${words.join(' ')})`);
+  // Project-relative rules follow each linked worktree's primary working directory.
+  rules.push('Edit(/**)');
+  return rules;
+}
+
+/**
+ * Codex project-local rules use argv prefixes and apply only after the project is trusted. Each
+ * pattern is intentionally scoped to one product command or one listed Git verb.
+ *
+ * @param {string} gate
+ * @returns {string[]}
+ */
+export function codexLoopRules(gate = '') {
+  const patterns = [['pullboard'], ...PULLBOARD_LOOP_GIT_COMMANDS.map(command => ['git', command])];
+  const words = plainGateWords(gate);
+  if (words) patterns.push(words);
+  return patterns.map(pattern => `prefix_rule(pattern=${JSON.stringify(pattern)}, decision="allow", justification="Run the Pullboard project loop.")`);
+}

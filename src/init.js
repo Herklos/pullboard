@@ -11,7 +11,10 @@ import { loadDoctrine } from './doctrine.js';
 import { installHooks } from './hooks.js';
 import { Refused } from './refused.js';
 import { installSkills } from './skills.js';
-import { AGENTS_END, AGENTS_START, agentsBlock, configTemplate, practiceTemplate, specTemplate } from './templates.js';
+import {
+  AGENTS_END, AGENTS_START, agentsBlock, claudeLoopRules, codexLoopRules, configTemplate,
+  plainGateWords, practiceTemplate, specTemplate,
+} from './templates.js';
 
 const NPM_DEFAULT_TEST = 'echo "Error: no test specified" && exit 1';
 
@@ -186,12 +189,80 @@ function writeSessionHook(root, onWrite) {
 }
 
 /**
+ * Merge only missing Claude project allow rules, preserving every unrelated setting and rule.
+ *
+ * @param {string} root
+ * @param {string} gate
+ * @param {(path: string) => void} onWrite
+ * @returns {string} A concise setup note.
+ */
+function writeClaudeLoopPermissions(root, gate, onWrite) {
+  const file = join(root, '.claude', 'settings.json');
+  let settings = {};
+  if (existsSync(file)) {
+    try {
+      settings = JSON.parse(readFileSync(file, 'utf8'));
+    } catch {
+      settings = null;
+    }
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+      return 'kept .claude/settings.json because it is not a JSON object; add the Pullboard allow rules manually';
+    }
+  }
+  const current = settings.permissions;
+  if (current !== undefined && (!current || typeof current !== 'object' || Array.isArray(current))) {
+    return 'kept .claude/settings.json because permissions is not an object; add the Pullboard allow rules manually';
+  }
+  const permissions = current ?? {};
+  const allow = permissions.allow;
+  if (allow !== undefined && !Array.isArray(allow)) {
+    return 'kept .claude/settings.json because permissions.allow is not an array; add the Pullboard allow rules manually';
+  }
+  const existing = allow ?? [];
+  const requested = claudeLoopRules({ gate });
+  const missing = requested.filter(rule => !existing.includes(rule));
+  if (!missing.length) return 'kept the existing Claude Code Pullboard permissions';
+  settings.permissions = { ...permissions, allow: [...existing, ...missing] };
+  mkdirSync(join(root, '.claude'), { recursive: true });
+  writeFileSync(file, `${JSON.stringify(settings, null, 2)}\n`);
+  onWrite('.claude/settings.json');
+  const gateWords = plainGateWords(gate);
+  const gateNote = gateWords ? `, and the detected gate (${gateWords.join(' ')})` : gate ? '; the configured shell gate was left for manual approval' : '';
+  const editNote = requested.some(rule => rule.startsWith('Edit(')) ? ', plus edits within this worktree' : '';
+  return `allowed Claude Code's Pullboard loop and listed Git commands${gateNote}${editNote}; existing deny and ask rules still apply`;
+}
+
+/**
+ * Write project-local Codex command rules without touching the user's home or active-session config.
+ *
+ * @param {string} root
+ * @param {string} gate
+ * @param {(path: string) => void} onWrite
+ * @returns {string} A concise setup note.
+ */
+function writeCodexLoopRules(root, gate, onWrite) {
+  const file = join(root, '.codex', 'rules', 'pullboard.rules');
+  const rules = codexLoopRules(gate);
+  let contents = '';
+  if (existsSync(file)) contents = readFileSync(file, 'utf8');
+  const lines = new Set(contents.split(/\r?\n/u));
+  const missing = rules.filter(rule => !lines.has(rule));
+  if (!missing.length) return 'kept the existing Codex project rules';
+  mkdirSync(join(root, '.codex', 'rules'), { recursive: true });
+  const prefix = contents && !contents.endsWith('\n') ? `${contents}\n` : contents;
+  writeFileSync(file, `${prefix}${missing.join('\n')}\n`);
+  onWrite('.codex/rules/pullboard.rules');
+  const gateNote = plainGateWords(gate) ? '' : gate ? '; the configured shell gate was left for manual approval' : '';
+  return `added trusted-project Codex rules for Pullboard and the listed Git commands${gateNote}; trust this project and restart the session to load them`;
+}
+
+/**
  * Set the repo up. Must run in the main checkout, which becomes the coordinator.
  *
- * @param {{ info: { root: string, isMain: boolean }, openBoardHere: () => any, register: Function, closeBoard: Function, model?: string }} context
+ * @param {{ info: { root: string, isMain: boolean }, openBoardHere: () => any, register: Function, closeBoard: Function, model?: string, permissions?: boolean }} context
  * @returns {string[]} What happened, one line each.
  */
-export function initRepo({ info, openBoardHere, register, closeBoard, model }) {
+export function initRepo({ info, openBoardHere, register, closeBoard, model, permissions = true }) {
   if (!info.isMain) {
     throw new Refused('NOT_MAIN', 'run init in the main checkout; worktrees join a lane instead');
   }
@@ -200,7 +271,7 @@ export function initRepo({ info, openBoardHere, register, closeBoard, model }) {
   const gate = detectGate(root);
   const written = [];
   /** Record only paths setup actually writes; unrelated files never enter its staging command. */
-  const onWrite = (path) => written.push(path);
+  const onWrite = (path) => { if (!written.includes(path)) written.push(path); };
   const notes = [
     writeNew(join(root, CONFIG_FILE), configTemplate(gate, detectFixers(root)), CONFIG_FILE, onWrite),
     writeNew(join(root, 'SPEC.md'), specTemplate(basename(root), gate), 'SPEC.md', onWrite),
@@ -211,6 +282,11 @@ export function initRepo({ info, openBoardHere, register, closeBoard, model }) {
     ...installSkills(root, onWrite),
     writeSessionHook(root, onWrite),
   ];
+  if (permissions) {
+    const gateForPermissions = configuredGate(root) || gate;
+    notes.push(writeClaudeLoopPermissions(root, gateForPermissions, onWrite));
+    notes.push(writeCodexLoopRules(root, gateForPermissions, onWrite));
+  }
   const board = openBoardHere();
   try {
     register(board, { lane: COORDINATOR, path: root, model });

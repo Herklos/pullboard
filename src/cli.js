@@ -232,6 +232,7 @@ const OPTIONS = {
   project: { type: 'boolean' },
   export: { type: 'string' },
   'no-open': { type: 'boolean' },
+  'no-permissions': { type: 'boolean' },
   note: { type: 'string' },
   'note-file': { type: 'string' },
   by: { type: 'string' },
@@ -1584,6 +1585,7 @@ function setupCommands(io, { first, values }) {
       const notes = initRepo({
         info,
         model,
+        permissions: !values['no-permissions'],
         openBoardHere: () => store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), io.clock, { isMain: codeIsFromMain() }),
         /** Keep a linked coordinator's canonical identity without writing a clone-local path. */
         register: (board, options) => {
