@@ -135,7 +135,7 @@ test('Pullboard\'s four checks count what main has [D1, C7]', async (t) => {
       assert.deepEqual(run.lines, expected[name], `${name} counts the pinned main's problems exactly`);
       assert.equal(run.status, 1, `${name} exits 1 with problems`);
       assert.equal(run.stderr, '', `${name} writes nothing else`);
-      assert.ok(run.ms < 10_000, `${name} took ${Math.round(run.ms)}ms on the pinned main`);
+      assert.ok(run.ms < 10_000, `${name} took ${Math.round(run.ms)}ms on the pinned main`); // budget: the bar's 10s ceiling per check run; each takes well under 1s.
       assert.deepEqual(runCheck(name, { cwd: dir, root: pinned }).lines, expected[name], `${name} scans its argument the same`);
     }
     assert.deepEqual(Object.fromEntries(CHECKS.map((name) => [name, expected[name].length])),
@@ -157,7 +157,7 @@ test('Pullboard\'s four checks count what main has [D1, C7]', async (t) => {
       assert.ok(run.status === 0 || run.status === 1, `${name} exits 0 or 1, not ${run.status}`);
       assert.equal(run.status, run.lines.length ? 1 : 0, `${name} exits 1 exactly when it prints problems`);
       assert.equal(run.stderr, '', `${name} writes nothing else`);
-      assert.ok(run.ms < 10_000, `${name} took ${Math.round(run.ms)}ms`);
+      assert.ok(run.ms < 10_000, `${name} took ${Math.round(run.ms)}ms`); // budget: the bar's 10s ceiling per check run; each takes well under 1s.
       for (const line of run.lines) assert.match(line, /^[^\s:/][^:]*:[1-9]\d*: \S/u, `${name} prints path:line: text`);
       assert.deepEqual(run.lines, sortedProblems(run.lines), `${name} sorts its output`);
       assert.equal(new Set(run.lines).size, run.lines.length, `${name} prints each problem once`);
