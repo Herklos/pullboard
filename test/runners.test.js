@@ -8,6 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { test } from 'node:test';
 import { takeResource } from '../src/resources.js';
+import { listResources as listPreRunnerResources, takeResource as takePreRunnerResource } from './fixtures/resources-pre-runners.js';
 import { runFixtureChild, startFixtureChild } from './fixture-child.js';
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
@@ -99,7 +100,9 @@ ${dropFirst ? `if (host.endsWith('-drop') && call === 1) {
     PULLBOARD_HOME: home, PULLBOARD_MACHINE_HOME: machineHome, LANG: 'C', LC_ALL: 'C', TZ: 'UTC' };
   // Replace the marker-driven shell so the injected HUP reaches the actual worker process.
   const child = spawn('/bin/sh', ['-c', dropAfterMarker ? 'exec ' + remoteCommand : remoteCommand], { cwd: worker, env,
-    stdio: ['pipe', 'inherit', 'inherit'] });
+    stdio: ['pipe', 'pipe', 'pipe'] });
+  child.stdout.pipe(process.stdout);
+  child.stderr.pipe(process.stderr);
   process.stdin.pipe(child.stdin);
   let droppedAfterSetup = false;
   if (dropAfterMarker) {
@@ -143,7 +146,7 @@ test('runner executed the committed source in its private checkout', () => {
   const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).trim();
   const shallow = execFileSync('git', ['rev-parse', '--is-shallow-repository'], { encoding: 'utf8' }).trim();
   const count = execFileSync('git', ['rev-list', '--count', 'HEAD'], { encoding: 'utf8' }).trim();
-  const history = execFileSync('git', ['log', '--follow', '--format=%H', '--', 'history-renamed.txt'], { encoding: 'utf8' }).trim().split(/\r?\n/u);
+  const history = execFileSync('git', ['log', '--follow', '--format=%H', '--', 'history-renamed.txt'], { encoding: 'utf8' }).trim().split(/\\r?\\n/u);
   const runnerHome = process.env.HOME;
   const privateHomeRelative = relative(${JSON.stringify(remoteStateRoot)}, runnerHome);
   assert.ok(privateHomeRelative && !privateHomeRelative.startsWith('..' + sep) && privateHomeRelative !== '..', runnerHome);
@@ -199,9 +202,11 @@ test('a cached workspace link resolves inside this fresh runner checkout', () =>
   assert.equal(process.execPath, ${JSON.stringify(nodePath)}, 'the configured runner Node executes the command');
   const commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
   const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).trim();
+  const generated = JSON.parse(readFileSync(join(root, 'generated/config.json'), 'utf8'));
+  assert.equal(generated.root, root, 'root prepare ran in this fresh checkout and generated a job-local file');
   const shallow = execFileSync('git', ['rev-parse', '--is-shallow-repository'], { encoding: 'utf8' }).trim();
   const count = execFileSync('git', ['rev-list', '--count', 'HEAD'], { encoding: 'utf8' }).trim();
-  const history = execFileSync('git', ['log', '--follow', '--format=%H', '--', 'history-renamed.txt'], { encoding: 'utf8' }).trim().split(/\r?\n/u);
+  const history = execFileSync('git', ['log', '--follow', '--format=%H', '--', 'history-renamed.txt'], { encoding: 'utf8' }).trim().split(/\\r?\\n/u);
   assert.equal(shallow, 'false', 'the cache contains full candidate history');
   assert.equal(count, '3', 'the cache preserves the complete selected history');
   assert.ok(history.includes(${JSON.stringify(historyBaseCommit)}), 'cached history follows the original filename through the rename');
@@ -213,7 +218,7 @@ test('a cached workspace link resolves inside this fresh runner checkout', () =>
   assert.equal(target, join(root, 'packages/runner-fixture-dep'));
   const targetRelative = relative(root, target);
   assert.ok(targetRelative && !targetRelative.startsWith('..' + sep) && targetRelative !== '..');
-  console.log('RUNNER_CACHE_FACT ' + JSON.stringify({ root, link, target, commit, tree, shallow, count, history }));
+  console.log('RUNNER_CACHE_FACT ' + JSON.stringify({ root, link, target, commit, tree, shallow, count, history, generatedRoot: generated.root }));
 });
 `;
   writeFileSync(join(repo, 'runner-cache-probe.test.js'), probe);
@@ -239,6 +244,11 @@ function gateResult(stdout) {
   const line = stdout.split(/\r?\n/u).findLast(value => value.startsWith('PULLBOARD_RUN_RESULT '));
   assert.ok(line, stdout);
   return JSON.parse(line.slice('PULLBOARD_RUN_RESULT '.length));
+}
+
+/** Include bounded command output when a remote fixture assertion fails. */
+function fixtureResultContext(result) {
+  return `${result.context}\nstdout tail:\n${String(result.stdout ?? '').slice(-4_000)}\nstderr tail:\n${String(result.stderr ?? '').slice(-4_000)}`;
 }
 
 /** Read the remote machine's live gate holders without changing its shared admission state. */
@@ -268,6 +278,25 @@ async function waitForMarker(path) {
       timer = setTimeout(() => reject(new Error(`fixture marker did not arrive: ${path}`)), 20_000); // budget: hang ceiling for the queue-to-parent handoff.
     })]);
   } finally { clearTimeout(timer); watcher.close(); }
+}
+
+/** Poll a concrete process/resource state; the deadline only bounds a broken cleanup handshake. */
+async function waitForCondition(check, label) {
+  const deadline = Date.now() + 20_000;
+  while (!check()) {
+    if (Date.now() >= deadline) throw new Error(`fixture cleanup state did not arrive: ${label}`);
+    await new Promise(resolve => setTimeout(resolve, 20)); // budget: polling interval for an observable cleanup condition.
+  }
+}
+
+/** Check exact PID presence without signalling or treating permission denial as absence. */
+function processIsAlive(pid) {
+  try { process.kill(pid, 0); return true; }
+  catch (error) {
+    if (error.code === 'ESRCH') return false;
+    if (error.code === 'EPERM') return true;
+    throw error;
+  }
 }
 
 /** Wait for the stand-in to record a particular invocation count, not for elapsed time. */
@@ -408,7 +437,7 @@ test('a queued run executes on a registered runner and its result comes back [C7
     held = await takeResource({ name: 'gate', capacity: 1, scope: 'machine', root: repo,
       agent: 'fixture-local-holder', item: 'runner-local-holder', kind: 'force-registered-runner' });
     const successful = runThroughGate(repo, env, 'node --test --test-reporter=tap runner-probe.test.js');
-  assert.equal(successful.status, 0, successful.context);
+  assert.equal(successful.status, 0, fixtureResultContext(successful));
   assert.match(successful.stdout, /TAP version 13/);
   assert.match(successful.stdout, /RUNNER_FACT /);
   const fact = JSON.parse(/RUNNER_FACT (\{[^\n]+\})/u.exec(successful.stdout)?.[1] ?? 'null');
@@ -454,7 +483,7 @@ test('a queued run executes on a registered runner and its result comes back [C7
   assert.doesNotMatch(successful.stdout + successful.stderr, new RegExp(SECRET, 'u'));
 
   const red = runThroughGate(repo, env, "node -e 'process.stdout.write(\"RUNNER_EXIT_7\\n\"); process.exit(7)'");
-  assert.equal(red.status, 1, red.context);
+  assert.equal(red.status, 1, fixtureResultContext(red));
   assert.match(red.stdout, /RUNNER_EXIT_7/);
   const redResult = gateResult(red.stdout);
   assert.equal(redResult.isGreen, false);
@@ -471,9 +500,11 @@ test('a queued run executes on a registered runner and its result comes back [C7
   assert.doesNotMatch(git(repo, env, 'ls-tree', '-r', '--name-only', 'HEAD'), /(?:^|\n)\.env(?:$|\n)/u);
   assert.equal(readFileSync(join(repo, '.env'), 'utf8'), SECRET, 'the ignored local fixture remains private');
   const historicalRed = runThroughGate(repo, env, 'node -e "process.stdout.write(\'HISTORICAL_SECRET_SCAN_REACHED\\n\')"');
-  assert.equal(historicalRed.status, 1, historicalRed.context);
+  assert.equal(historicalRed.status, 1, fixtureResultContext(historicalRed));
   assert.match(historicalRed.stdout + historicalRed.stderr, /RUNNER_SECRET/u);
   assert.doesNotMatch(historicalRed.stdout + historicalRed.stderr, new RegExp(SECRET, 'u'));
+  assert.equal(readFileSync(requests, 'utf8').trim().split('\n').length, callsAfterExit7,
+    'historical secret scanning refuses before opening an SSH request');
 
   assert.equal(commit.length, 40);
   assert.equal(tree.length, 40);
@@ -711,7 +742,7 @@ writeFileSync(ready, 'setup started\\n');
   }
 });
 
-test('a queued run executes on a registered runner and its result comes back [C7] (cached workspace dependencies stay linked to fresh checkouts)', async (t) => {
+test('a queued run executes on a registered runner and its result comes back [C7] (cached source and npm content retain fresh checkout lifecycles)', async (t) => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-runner-cache-')));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const home = join(dir, 'home');
@@ -737,12 +768,18 @@ test('a queued run executes on a registered runner and its result comes back [C7
   };
   const initialized = runFixtureChild('git', ['init', '-q', '-b', 'main'], { cwd: repo, env, encoding: 'utf8' });
   assert.equal(initialized.status, 0, initialized.context);
-  writeFileSync(join(repo, '.gitignore'), 'node_modules/\n');
+  writeFileSync(join(repo, '.gitignore'), 'node_modules/\ngenerated/\n');
   writeFileSync(join(repo, 'pullboard.json'), JSON.stringify({ gate: 'true' }));
   writeFileSync(join(repo, 'package.json'), JSON.stringify({
     name: 'runner-cache-fixture', version: '1.0.0', private: true, type: 'module',
+    scripts: { prepare: 'node prepare.js' },
     workspaces: ['packages/runner-fixture-dep'], dependencies: { 'runner-fixture-dep': '1.0.0' },
   }, null, 2) + '\n');
+  writeFileSync(join(repo, 'prepare.js'), `import { mkdirSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+mkdirSync('generated', { recursive: true });
+writeFileSync('generated/config.json', JSON.stringify({ root: resolve('.') }) + '\\n');
+`);
   writeFileSync(join(packageDirectory, 'package.json'), JSON.stringify({
     name: 'runner-fixture-dep', version: '1.0.0', type: 'module', scripts: { postinstall: 'node postinstall.js' },
   }, null, 2) + '\n');
@@ -762,7 +799,7 @@ appendFileSync(${JSON.stringify(installWitnesses)}, 'postinstall\\n');
     cwd: repo, env, encoding: 'utf8',
   });
   assert.equal(lock.status, 0, lock.context);
-  git(repo, env, 'add', '.gitignore', 'pullboard.json', 'package.json', 'package-lock.json', 'packages/runner-fixture-dep', 'history-original.txt');
+  git(repo, env, 'add', '.gitignore', 'pullboard.json', 'package.json', 'prepare.js', 'package-lock.json', 'packages/runner-fixture-dep', 'history-original.txt');
   git(repo, env, 'commit', '-q', '-m', 'test: prepare cached local workspace dependency');
   const historyBaseCommit = git(repo, env, 'rev-parse', 'HEAD');
   git(repo, env, 'mv', 'history-original.txt', 'history-renamed.txt');
@@ -790,7 +827,7 @@ appendFileSync(${JSON.stringify(installWitnesses)}, 'postinstall\\n');
     const cacheCommit = git(repo, env, 'rev-parse', 'HEAD');
     const cacheTree = git(repo, env, 'rev-parse', 'HEAD^{tree}');
     const first = runThroughGate(repo, env, command, { item: 'cache-first' });
-    assert.equal(first.status, 0, first.context);
+    assert.equal(first.status, 0, fixtureResultContext(first));
     const firstFact = JSON.parse(/RUNNER_CACHE_FACT (\{[^\n]+\})/u.exec(first.stdout)?.[1] ?? 'null');
     assert.equal(firstFact.commit, cacheCommit);
     assert.equal(firstFact.tree, cacheTree);
@@ -798,28 +835,287 @@ appendFileSync(${JSON.stringify(installWitnesses)}, 'postinstall\\n');
     assert.ok(firstFact.history.includes(historyBaseCommit));
     assert.equal(firstFact.root, firstFact.target.slice(0, firstFact.target.indexOf('/packages/runner-fixture-dep')));
     assert.equal(gateResult(first.stdout).runner, HOST);
-    assert.equal(readFileSync(installWitnesses, 'utf8'), 'postinstall\n', 'the first exact-tree run installs the committed workspace dependency');
+    assert.equal(firstFact.generatedRoot, firstFact.root, 'the first fresh checkout ran root prepare');
+    assert.equal(readFileSync(installWitnesses, 'utf8'), 'postinstall\n', 'the first fresh checkout runs the committed workspace postinstall');
 
     const second = runThroughGate(repo, env, command, { item: 'cache-second' });
-    assert.equal(second.status, 0, second.context);
+    assert.equal(second.status, 0, fixtureResultContext(second));
     const secondFact = JSON.parse(/RUNNER_CACHE_FACT (\{[^\n]+\})/u.exec(second.stdout)?.[1] ?? 'null');
     assert.equal(secondFact.commit, cacheCommit);
     assert.equal(secondFact.tree, cacheTree);
     assert.equal(secondFact.shallow, 'false');
     assert.ok(secondFact.history.includes(historyBaseCommit));
+    assert.equal(secondFact.generatedRoot, secondFact.root, 'the second fresh checkout reran root prepare');
     assert.equal(gateResult(second.stdout).runner, HOST);
     assert.equal(secondFact.root, secondFact.target.slice(0, secondFact.target.indexOf('/packages/runner-fixture-dep')));
     assert.notEqual(firstFact.root, secondFact.root, 'each run unpacks a fresh checkout');
     assert.equal(git(repo, env, 'rev-parse', 'HEAD'), cacheCommit);
     assert.equal(git(repo, env, 'rev-parse', 'HEAD^{tree}'), cacheTree);
-    assert.equal(readFileSync(installWitnesses, 'utf8'), 'postinstall\n', 'the second run reuses the dependency cache without a second install witness');
+    assert.equal(readFileSync(installWitnesses, 'utf8'), 'postinstall\npostinstall\n', 'the second fresh checkout runs its own workspace postinstall');
     const requestsSeen = readFileSync(requests, 'utf8').trim().split('\n').map(line => JSON.parse(line));
     assert.equal(requestsSeen.length, 2);
     assert.ok(requestsSeen[0].stdinBytes > requestsSeen[1].stdinBytes,
-      'the cache hit sends fewer Git-pack bytes for the same selected candidate');
+      'the same candidate sends fewer Git-pack bytes after its first cache import');
     assert.ok(requestsSeen.every(request => request.remoteStartsWithConfiguredNode), 'both remote workers use the configured absolute Node path');
   } finally {
     if (held) held.release();
+    if (previousHome === undefined) delete process.env.PULLBOARD_HOME;
+    else process.env.PULLBOARD_HOME = previousHome;
+    if (previousMachineHome === undefined) delete process.env.PULLBOARD_MACHINE_HOME;
+    else process.env.PULLBOARD_MACHINE_HOME = previousMachineHome;
+  }
+});
+
+test('a queued run executes on a registered runner and its result comes back [C7] (older resource clients keep local capacity separate)', async (t) => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-runner-old-resource-client-')));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const home = join(dir, 'home');
+  const machineHome = join(home, '.pullboard');
+  const remoteHome = join(dir, 'worker-home');
+  const remoteMachineHome = join(remoteHome, '.pullboard');
+  const repo = join(dir, 'repo');
+  const worker = join(dir, 'second-machine');
+  const bin = join(dir, 'bin');
+  const requests = join(dir, 'ssh-requests.jsonl');
+  const remoteReady = join(dir, 'remote-ready');
+  const releaseRemote = join(dir, 'release-remote');
+  const secondBrowserQueued = join(dir, 'second-browser-queued');
+  const secondBrowserAcquired = join(dir, 'second-browser-acquired');
+  const resourceDatabase = join(machineHome, 'resources.sqlite');
+  for (const folder of [repo, worker, bin, home, machineHome, remoteHome, remoteMachineHome]) {
+    mkdirSync(folder, { recursive: true });
+  }
+  writeFileSync(join(machineHome, 'settings.json'), JSON.stringify({ gateSlots: 2 }));
+  const env = {
+    ...process.env, HOME: home, PULLBOARD_HOME: home, PULLBOARD_MACHINE_HOME: machineHome,
+    PATH: `${bin}:${process.env.PATH}`, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
+    GIT_AUTHOR_NAME: 'Legacy Resource Fixture', GIT_AUTHOR_EMAIL: 'legacy-resource@example.invalid',
+    GIT_COMMITTER_NAME: 'Legacy Resource Fixture', GIT_COMMITTER_EMAIL: 'legacy-resource@example.invalid',
+  };
+  const initialized = runFixtureChild('git', ['init', '-q', '-b', 'main'], { cwd: repo, env, encoding: 'utf8' });
+  assert.equal(initialized.status, 0, initialized.context);
+  writeFileSync(join(repo, 'pullboard.json'), JSON.stringify({ gate: 'true' }));
+  writeFileSync(join(repo, 'tracked.txt'), 'registered runner fixture\n');
+  git(repo, env, 'add', 'pullboard.json', 'tracked.txt');
+  git(repo, env, 'commit', '-q', '-m', 'test: prepare mixed-version resource fixture');
+  installSshStandIn({ bin, worker, home: remoteHome, machineHome: remoteMachineHome, requests });
+  const added = cli(repo, env, 'runner', 'add', HOST, '--slots', '1', '--browser', '1', '--json');
+  assert.equal(added.status, 0, added.context);
+
+  const previousHome = process.env.PULLBOARD_HOME;
+  const previousMachineHome = process.env.PULLBOARD_MACHINE_HOME;
+  process.env.PULLBOARD_HOME = home;
+  process.env.PULLBOARD_MACHINE_HOME = machineHome;
+  let initialBrowser;
+  let localBrowser;
+  let localCpu;
+  let secondBrowser;
+  let secondBrowserPromise;
+  let remoteRun;
+  const inspectCapacity = expectedLocal => {
+    const db = new DatabaseSync(resourceDatabase, { readOnly: true });
+    try {
+      const local = db.prepare("SELECT name, runner, browser FROM holder WHERE name = 'gate'").all();
+      const remote = db.prepare('SELECT name, runner, browser FROM holder WHERE runner = ?').all(HOST);
+      assert.equal(db.prepare("SELECT capacity FROM resource WHERE name = 'gate'").get()?.capacity, 2);
+      assert.equal(db.prepare("SELECT capacity FROM resource WHERE name = 'browser'").get()?.capacity, 1);
+      const browserCount = local.filter(holder => holder.browser === 1).length;
+      assert.ok(local.length <= 2, 'local gate holders stay within the real SQLite gate capacity');
+      assert.ok(browserCount <= 1, 'local browser holders stay within the real SQLite browser capacity');
+      assert.equal(local.length, expectedLocal);
+      assert.equal(remote.length, 1, 'the remote runner holder remains independent of local capacity');
+      assert.equal(remote[0].name, `runner:${HOST}`);
+      return { local, remote, browserCount };
+    } finally { db.close(); }
+  };
+  try {
+    initialBrowser = await takePreRunnerResource({ name: 'gate', capacity: 2, scope: 'machine', root: repo,
+      agent: 'pre-runner-initial-browser', item: 'pre-runner-initial-browser', kind: 'fixture-hold', browser: true });
+    const remoteCode = `const fs=require('node:fs'); const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+(async()=>{ fs.writeFileSync(${JSON.stringify(remoteReady)}, 'ready\\n'); while(!fs.existsSync(${JSON.stringify(releaseRemote)})) await sleep(5); })().catch(error=>{console.error(error);process.exitCode=2});`;
+    remoteRun = observe(startQueueController(repo, env, `node -e ${shellQuote(remoteCode)}`,
+      { item: 'remote-capacity-holder', queueMarker: null, firstItem: null }));
+    await waitForMarker(remoteReady);
+
+    const heldBesideRemote = inspectCapacity(1);
+    assert.equal(heldBesideRemote.browserCount, 1, 'the remote lease leaves the legacy local browser holder unchanged');
+
+    initialBrowser.release();
+    initialBrowser = null;
+    localBrowser = await takePreRunnerResource({ name: 'gate', capacity: 2, scope: 'machine', root: repo,
+      agent: 'pre-runner-browser-one', item: 'pre-runner-browser-one', kind: 'fixture-browser', browser: true });
+    localCpu = await takePreRunnerResource({ name: 'gate', capacity: 2, scope: 'machine', root: repo,
+      agent: 'pre-runner-cpu', item: 'pre-runner-cpu', kind: 'fixture-cpu' });
+    secondBrowserPromise = takePreRunnerResource({ name: 'gate', capacity: 2, scope: 'machine', root: repo,
+      agent: 'pre-runner-browser-two', item: 'pre-runner-browser-two', kind: 'fixture-browser', browser: true,
+      onWait(state) {
+        if (state.line?.some(waiter => waiter.item === 'pre-runner-browser-two')) {
+          writeFileSync(secondBrowserQueued, 'queued\n');
+        }
+      },
+    }).then(lease => {
+      secondBrowser = lease;
+      writeFileSync(secondBrowserAcquired, 'acquired\n');
+      return lease;
+    });
+    await waitForMarker(secondBrowserQueued);
+    assert.equal(existsSync(secondBrowserAcquired), false, 'a second local browser waits even while its first slot is held');
+
+    const duringRemote = listPreRunnerResources({ scope: 'machine', root: repo });
+    const localGate = duringRemote.find(resource => resource.name === 'gate');
+    const runnerResource = duringRemote.find(resource => resource.name === `runner:${HOST}`);
+    assert.equal(localGate.holders.length, 2, 'the old API admits one local browser and one local CPU lease');
+    assert.equal(localGate.holders.filter(holder => holder.browser).length, 1);
+    assert.equal(runnerResource.holders.length, 1, 'the registered runner remains held independently');
+    assert.equal(inspectCapacity(2).browserCount, 1);
+    assert.equal(existsSync(secondBrowserAcquired), false, 'local browser capacity remains one');
+
+    localCpu.release();
+    localCpu = null;
+    localBrowser.release();
+    localBrowser = null;
+    await waitForMarker(secondBrowserAcquired);
+    secondBrowser = await secondBrowserPromise;
+    const afterHandoff = listPreRunnerResources({ scope: 'machine', root: repo });
+    assert.equal(afterHandoff.find(resource => resource.name === 'gate').holders.length, 1);
+    assert.equal(afterHandoff.find(resource => resource.name === `runner:${HOST}`).holders.length, 1,
+      'the remote run is still live while the old API hands off the local browser slot');
+    assert.equal(inspectCapacity(1).browserCount, 1);
+    secondBrowser.release();
+    secondBrowser = null;
+    writeFileSync(releaseRemote, 'release\n');
+    const completed = await remoteRun.closed;
+    remoteRun = null;
+    assert.equal(completed.status, 0, fixtureResultContext(completed));
+    assert.equal(gateResult(completed.stdout).runner, HOST);
+  } finally {
+    for (const lease of [initialBrowser, localBrowser, localCpu, secondBrowser]) lease?.release();
+    writeFileSync(releaseRemote, 'cleanup-release\n');
+    if (secondBrowserPromise && !secondBrowser) {
+      try { secondBrowser = await secondBrowserPromise; secondBrowser.release(); secondBrowser = null; } catch {}
+    }
+    if (remoteRun) {
+      await remoteRun.closed;
+    }
+    if (previousHome === undefined) delete process.env.PULLBOARD_HOME;
+    else process.env.PULLBOARD_HOME = previousHome;
+    if (previousMachineHome === undefined) delete process.env.PULLBOARD_MACHINE_HOME;
+    else process.env.PULLBOARD_MACHINE_HOME = previousMachineHome;
+  }
+});
+
+test('a queued run executes on a registered runner and its result comes back [C7] (parent death drains a detached worker descendant before releasing its lease)', async (t) => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-runner-parent-death-')));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const home = join(dir, 'home');
+  const machineHome = join(home, '.pullboard');
+  const remoteHome = join(dir, 'worker-home');
+  const remoteMachineHome = join(remoteHome, '.pullboard');
+  const remoteDatabase = join(remoteMachineHome, 'resources.sqlite');
+  const repo = join(dir, 'repo');
+  const worker = join(dir, 'second-machine');
+  const bin = join(dir, 'bin');
+  const requests = join(dir, 'ssh-requests.jsonl');
+  const childReady = join(dir, 'detached-child-ready');
+  const childPidFile = join(dir, 'detached-child-pid');
+  const childTerm = join(dir, 'detached-child-term');
+  const releaseChild = join(dir, 'release-detached-child');
+  const childGone = join(dir, 'detached-child-gone');
+  for (const folder of [repo, worker, bin, home, machineHome, remoteHome, remoteMachineHome]) {
+    mkdirSync(folder, { recursive: true });
+  }
+  writeFileSync(join(machineHome, 'settings.json'), JSON.stringify({ gateSlots: 1 }));
+  const env = {
+    ...process.env, HOME: home, PULLBOARD_HOME: home, PULLBOARD_MACHINE_HOME: machineHome,
+    PATH: `${bin}:${process.env.PATH}`, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
+    GIT_AUTHOR_NAME: 'Parent Death Fixture', GIT_AUTHOR_EMAIL: 'parent-death@example.invalid',
+    GIT_COMMITTER_NAME: 'Parent Death Fixture', GIT_COMMITTER_EMAIL: 'parent-death@example.invalid',
+  };
+  const initialized = runFixtureChild('git', ['init', '-q', '-b', 'main'], { cwd: repo, env, encoding: 'utf8' });
+  assert.equal(initialized.status, 0, initialized.context);
+  writeFileSync(join(repo, 'pullboard.json'), JSON.stringify({ gate: 'true' }));
+  writeFileSync(join(repo, 'tracked.txt'), 'parent-death runner fixture\n');
+  writeFileSync(join(repo, 'remote-parent-death-launcher.js'), `const { spawn } = require('node:child_process');
+const child = spawn(process.execPath, [require.resolve('./remote-detached-child.js'), ...process.argv.slice(2)], {
+  detached: true, stdio: 'ignore', env: process.env,
+});
+child.unref();
+setInterval(() => {}, 1_000);
+`);
+  writeFileSync(join(repo, 'remote-detached-child.js'), `const { existsSync, writeFileSync } = require('node:fs');
+const [ready, pidFile, term, release, gone] = process.argv.slice(2);
+let handlingTerm = false;
+process.on('SIGTERM', () => {
+  if (handlingTerm) return;
+  handlingTerm = true;
+  writeFileSync(term, 'term\\n');
+  const wait = setInterval(() => {
+    if (!existsSync(release)) return;
+    clearInterval(wait);
+    writeFileSync(gone, 'gone\\n');
+    process.exit(0);
+  }, 5);
+});
+writeFileSync(pidFile, String(process.pid));
+writeFileSync(ready, 'ready\\n');
+setInterval(() => {}, 1_000);
+`);
+  git(repo, env, 'add', 'pullboard.json', 'tracked.txt', 'remote-parent-death-launcher.js', 'remote-detached-child.js');
+  git(repo, env, 'commit', '-q', '-m', 'test: prepare committed detached-child launchers');
+  installSshStandIn({ bin, worker, home: remoteHome, machineHome: remoteMachineHome, requests });
+  const added = cli(repo, env, 'runner', 'add', HOST, '--slots', '1', '--browser', '1', '--json');
+  assert.equal(added.status, 0, added.context);
+
+  const previousHome = process.env.PULLBOARD_HOME;
+  const previousMachineHome = process.env.PULLBOARD_MACHINE_HOME;
+  process.env.PULLBOARD_HOME = home;
+  process.env.PULLBOARD_MACHINE_HOME = machineHome;
+  let localHold;
+  let remoteRun;
+  let detachedPid;
+  let remoteAgent;
+  try {
+    localHold = await takeResource({ name: 'gate', capacity: 1, scope: 'machine', root: repo,
+      agent: 'parent-death-local-holder', item: 'parent-death-local-holder', kind: 'fixture-hold', browser: true });
+    const command = ['node remote-parent-death-launcher.js', ...[childReady, childPidFile, childTerm, releaseChild, childGone].map(shellQuote)].join(' ');
+    remoteRun = observe(startQueueController(repo, env, command,
+      { item: 'parent-death-remote-holder', queueMarker: null, firstItem: null }));
+    await waitForMarker(childReady);
+    detachedPid = Number(readFileSync(childPidFile, 'utf8').trim());
+    assert.ok(Number.isSafeInteger(detachedPid) && detachedPid > 0);
+    assert.notEqual(detachedPid, remoteRun.child.pid, 'the committed launcher owns a separate detached child');
+    assert.equal(processIsAlive(detachedPid), true);
+    const held = readRemoteGateHolders(remoteDatabase);
+    assert.equal(held.length, 1, 'the remote worker keeps its physical gate holder while the launcher is live');
+    remoteAgent = held[0].agent;
+    assert.match(remoteAgent, /^pullboard-ssh-/u);
+
+    remoteRun.child.kill('SIGTERM');
+    await waitForMarker(childTerm);
+    assert.equal(processIsAlive(detachedPid), true, 'the detached child remains alive in its controlled TERM handler');
+    const duringDrain = readRemoteGateHolders(remoteDatabase);
+    assert.equal(duringDrain.length, 1);
+    assert.equal(duringDrain[0].agent, remoteAgent, 'the physical runner lease remains held during descendant cleanup');
+
+    writeFileSync(releaseChild, 'release\n');
+    await waitForMarker(childGone);
+    await waitForCondition(() => !processIsAlive(detachedPid), 'the detached child PID exits');
+    await waitForCondition(() => readRemoteGateHolders(remoteDatabase).every(holder => holder.agent !== remoteAgent),
+      'the remote physical gate holder is released after child exit');
+    const controller = await remoteRun.closed;
+    remoteRun = null;
+    assert.equal(controller.signal, 'SIGTERM', 'the owned API controller alone received SIGTERM');
+  } finally {
+    if (localHold) localHold.release();
+    writeFileSync(releaseChild, 'cleanup-release\n');
+    if (remoteRun && remoteRun.child.exitCode === null && remoteRun.child.signalCode === null) {
+      remoteRun.child.kill('SIGTERM');
+    }
+    if (detachedPid && processIsAlive(detachedPid)) {
+      try { process.kill(detachedPid, 'SIGTERM'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+    }
+    if (remoteRun) await remoteRun.closed;
+    if (detachedPid) await waitForCondition(() => !processIsAlive(detachedPid), 'fixture detached child cleanup');
     if (previousHome === undefined) delete process.env.PULLBOARD_HOME;
     else process.env.PULLBOARD_HOME = previousHome;
     if (previousMachineHome === undefined) delete process.env.PULLBOARD_MACHINE_HOME;

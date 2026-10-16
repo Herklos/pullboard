@@ -20,8 +20,12 @@ export const GATE_SLOT_POOL_ENV = 'PULLBOARD_GATE_SLOT_POOL';
 export const GATE_SLOT_TOKEN_ENV = 'PULLBOARD_GATE_SLOT_TOKEN';
 export const BROWSER_SLOT_HELD_ENV = 'PULLBOARD_BROWSER_SLOT_HELD';
 
+/** Reserve a distinct resource row for each configured remote host. */
+function runnerResourceName(host) { return `runner:${host}`; }
+
 /** Build child markers that identify the exact machine queue lease and its browser capacity. */
 export function gateSlotEnvironment(lease) {
+  if (lease?.runner) throw new Refused('REMOTE_GATE_SLOT_NOT_INHERITABLE', 'remote runner leases cannot be inherited through local gate markers');
   if (!lease || lease.name !== 'gate' || lease.scope !== 'machine' || typeof lease.pool !== 'string' || typeof lease.token !== 'string') {
     throw new Refused('GATE_SLOT_LEASE_REQUIRED', 'pass the live machine gate lease when starting a child test process');
   }
@@ -90,6 +94,13 @@ function open(file) {
       if (table === 'holder' && !columns.includes('runner')) db.exec("ALTER TABLE holder ADD COLUMN runner TEXT NOT NULL DEFAULT ''");
       if (table === 'waiter' && !columns.includes('remote')) db.exec('ALTER TABLE waiter ADD COLUMN remote INTEGER NOT NULL DEFAULT 0');
     }
+    // Older runner-aware builds stored remote leases as ordinary gate holders. Move them
+    // into their host namespace so old readers of name='gate' continue to see local use only.
+    db.exec(`INSERT INTO resource(name, capacity)
+      SELECT 'runner:' || runner, MAX(1, COUNT(*)) FROM holder
+      WHERE name = 'gate' AND runner <> '' GROUP BY runner
+      ON CONFLICT(name) DO NOTHING;
+      UPDATE holder SET name = 'runner:' || runner WHERE name = 'gate' AND runner <> '';`);
     db.exec('COMMIT');
     transaction = false;
   } catch (error) {
@@ -184,7 +195,10 @@ function snapshot(db, name) {
   // Browser is an additional capability on a gate lease, not a second partially held row.
   const where = name === 'browser' ? 'name = ? AND browser = 1' : 'name = ?';
   const sourceName = name === 'browser' ? 'gate' : name;
-  const holders = db.prepare(`SELECT agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, runner, item, kind FROM holder WHERE ${where} ORDER BY since, token`).all(sourceName).map(project);
+  const runnerHost = name.startsWith('runner:') ? name.slice('runner:'.length) : '';
+  const holderWhere = runnerHost ? 'name = ?' : where;
+  const holderValues = [sourceName];
+  const holders = db.prepare(`SELECT agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, runner, item, kind FROM holder WHERE ${holderWhere} ORDER BY since, token`).all(...holderValues).map(project);
   const line = db.prepare(`SELECT agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, remote, item, kind FROM waiter WHERE ${where} ORDER BY landing DESC, ticket`).all(sourceName).map(project);
   return { holders, line };
 }
@@ -235,13 +249,18 @@ function validatedRunners(value) {
 /** Find the earliest compatible free executor while allowing CPU waiters past browser-only blocks. */
 function gateAdmission(db, ticket, capacity, runners) {
   const waiters = db.prepare("SELECT ticket, pid, landing, browser, remote FROM waiter WHERE name = 'gate' ORDER BY landing DESC, ticket").all();
-  const holders = db.prepare("SELECT pid, landing, browser, runner FROM holder WHERE name = 'gate'").all();
-  const localUsed = holders.filter(holder => !holder.runner).length;
-  const localBrowsers = holders.filter(holder => !holder.runner && holder.browser === 1).length;
-  const usage = new Map(runners.map(runner => [runner.host, {
-    slots: holders.filter(holder => holder.runner === runner.host).length,
-    browsers: holders.filter(holder => holder.runner === runner.host && holder.browser === 1).length,
-  }]));
+  const holders = db.prepare("SELECT pid, landing, browser FROM holder WHERE name = 'gate'").all();
+  const localUsed = holders.length;
+  const localBrowsers = holders.filter(holder => holder.browser === 1).length;
+  const usage = new Map(runners.map(runner => {
+    // The reserved namespace is authoritative even for an older generic holder that
+    // predates the name guard and has no runner column value.
+    const remoteHolders = db.prepare('SELECT browser FROM holder WHERE name = ?').all(runnerResourceName(runner.host));
+    return [runner.host, {
+      slots: remoteHolders.length,
+      browsers: remoteHolders.filter(holder => holder.browser === 1).length,
+    }];
+  }));
   const unavailable = new Set(db.prepare('SELECT host FROM runner_unavailable').all().map(row => row.host));
   /** Keep an already holding process from taking another slot ahead of a different landing. */
   const blockedByLanding = waiter => holders.some(holder => holder.pid === waiter.pid)
@@ -262,6 +281,16 @@ function gateAdmission(db, ticket, capacity, runners) {
     }
     return null;
   }
+  for (const runner of runners) {
+    const resourceName = runnerResourceName(runner.host);
+    const row = db.prepare('SELECT capacity FROM resource WHERE name = ?').get(resourceName);
+    const held = usage.get(runner.host).slots;
+    if (!row) db.prepare('INSERT INTO resource(name, capacity) VALUES (?, ?)').run(resourceName, runner.slots);
+    else if (row.capacity !== runner.slots) {
+      if (held > runner.slots) throw new Refused('RUNNER_CAPACITY_MISMATCH', `runner ${runner.host} has ${held} active slot(s), more than configured capacity ${runner.slots}`);
+      db.prepare('UPDATE resource SET capacity = ? WHERE name = ?').run(runner.slots, resourceName);
+    }
+  }
   for (const waiter of waiters) {
     const executor = available(waiter);
     if (executor) return waiter.ticket === ticket ? executor : null;
@@ -275,7 +304,8 @@ export function runnerResourceStatus(runners) {
   const db = open(machineResourceFile());
   try {
     return update(db, () => configured.map(runner => {
-      const holders = db.prepare("SELECT agent, repo, since, browser, item, kind FROM holder WHERE name = 'gate' AND runner = ? ORDER BY since, token").all(runner.host);
+      const holders = db.prepare('SELECT agent, repo, since, browser, item, kind, runner FROM holder WHERE name = ? ORDER BY since, token')
+        .all(runnerResourceName(runner.host));
       const unavailable = db.prepare('SELECT since, detail FROM runner_unavailable WHERE host = ?').get(runner.host);
       return { ...runner, inUse: holders.length, browserInUse: holders.filter(holder => holder.browser === 1).length,
         unavailable: Boolean(unavailable), ...(unavailable ? { unavailableSince: unavailable.since, unavailableReason: unavailable.detail } : {}), holders };
@@ -291,9 +321,14 @@ export function updateRunnerSettings(host, persist) {
   const db = open(machineResourceFile());
   try {
     return update(db, () => {
-      const held = db.prepare("SELECT COUNT(*) AS count FROM holder WHERE name = 'gate' AND runner = ?").get(host).count;
+      const resourceName = runnerResourceName(host);
+      const held = db.prepare('SELECT COUNT(*) AS count FROM holder WHERE name = ?').get(resourceName).count;
       if (held) throw new Refused('RUNNER_BUSY', `runner ${host} has ${held} active slot(s); wait for them to finish before changing its settings`);
       const result = persist();
+      if (Number.isSafeInteger(result?.slots) && result.slots > 0) {
+        db.prepare('INSERT INTO resource(name, capacity) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET capacity = excluded.capacity')
+          .run(resourceName, result.slots);
+      }
       db.prepare('DELETE FROM runner_unavailable WHERE host = ?').run(host);
       return result;
     });
@@ -312,12 +347,15 @@ function pause(ms) { return new Promise((resolvePromise) => setTimeout(resolvePr
 export async function takeResource(options) {
   const { name, capacity, scope = 'machine', root = process.cwd(), allowIdleCapacityUpdate = false } = options;
   if (typeof name !== 'string' || !name.trim() || name.trim() !== name) throw new Refused('BAD_RESOURCE_NAME', 'resource name must be nonempty trimmed text');
+  if (name.startsWith('runner:')) throw new Refused('RESERVED_RUNNER_RESOURCE', 'runner resource rows are managed by the machine gate; request name "gate"');
   if (!Number.isSafeInteger(capacity) || capacity < 1) throw new Refused('BAD_RESOURCE_CAPACITY', 'resource capacity must be a positive integer');
   const landing = options.landing === true;
   const itemCheck = options.itemCheck === true;
   const diagnostic = options.diagnostic === true;
   const browser = options.browser === true;
   const remote = options.remote === true;
+  // This synchronous provider is used inside the admission transaction; callers must
+  // limit it to a bounded local configuration read, never Git, process inspection or network work.
   const runnerProvider = options.runnerProvider;
   const item = options.item ?? '';
   const kind = options.kind ?? '';
@@ -370,8 +408,11 @@ export async function takeResource(options) {
       }
     });
     while (true) {
-      const runners = runnerProvider ? validatedRunners(runnerProvider()) : [];
       const acquired = update(db, () => {
+        // The machine-settings provider performs a bounded local JSON read. Read it
+        // after taking the same SQLite write lock used by updateRunnerSettings so an
+        // older pre-lock snapshot cannot overwrite a newer configured capacity.
+        const runners = runnerProvider ? validatedRunners(runnerProvider()) : [];
         const waiter = db.prepare('SELECT ticket FROM waiter WHERE token = ?').get(token);
         if (!waiter) {
           if (resume && initialTicket) {
@@ -393,7 +434,8 @@ export async function takeResource(options) {
         if (executor) {
           db.prepare('DELETE FROM waiter WHERE token = ?').run(token);
           const acquiredAt = new Date().toISOString();
-          db.prepare('INSERT INTO holder(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, runner) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, acquiredAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, executor.host);
+          const holderName = executor.host ? runnerResourceName(executor.host) : name;
+          db.prepare('INSERT INTO holder(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, runner) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, holderName, pid, started, agent, repo, acquiredAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, executor.host);
           return { acquired: true, state: { ...spot, position: 0 }, ticket: waiter.ticket, runner: executor.host ? executor : undefined };
         }
         return { acquired: false, state: { ...spot, position: reportPosition } };
@@ -447,7 +489,8 @@ export async function takeResource(options) {
             update(db, () => {
               db.prepare('INSERT INTO runner_unavailable(host, since, detail) VALUES (?, ?, ?) ON CONFLICT(host) DO UPDATE SET since = excluded.since, detail = excluded.detail')
                 .run(acquired.runner.host, new Date().toISOString(), 'TRANSPORT_LOST');
-              const holder = db.prepare('SELECT token FROM holder WHERE token = ?').get(token);
+              const holderName = runnerResourceName(acquired.runner.host);
+              const holder = db.prepare('SELECT token FROM holder WHERE token = ? AND name = ? AND runner = ?').get(token, holderName, acquired.runner.host);
               if (!holder) throw new Refused('RESOURCE_LEASE_LOST', `remote lease for "${name}" is no longer held`);
               const minimumTicket = db.prepare("SELECT MIN(ticket) AS ticket FROM waiter WHERE name = 'gate' AND landing = ?").get(Number(landing)).ticket;
               requeueTicket = Math.min(0, minimumTicket ?? 0) - 1;
@@ -507,6 +550,7 @@ export function inheritedGateSlot({ root = process.cwd(), browser = false } = {}
 /** Change a resource's capacity only while its queue is empty, persisting related settings under the same lock. */
 export function setResourceCapacity({ name, capacity, scope = 'machine', root = process.cwd(), persist = () => {} }) {
   if (typeof name !== 'string' || !name.trim() || name.trim() !== name) throw new Refused('BAD_RESOURCE_NAME', 'resource name must be nonempty trimmed text');
+  if (name.startsWith('runner:')) throw new Refused('RESERVED_RUNNER_RESOURCE', 'runner resource rows are managed by the machine gate; use runner settings');
   if (!Number.isSafeInteger(capacity) || capacity < 1) throw new Refused('BAD_RESOURCE_CAPACITY', 'resource capacity must be a positive integer');
   if (name === 'browser' && capacity !== 1) throw new Refused('BAD_RESOURCE_CAPACITY', 'browser resource capacity is fixed at 1');
   const db = open(databaseFile(scope, root));

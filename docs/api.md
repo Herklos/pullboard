@@ -319,4 +319,6 @@ The view's own page retains its person channel. The standalone API refuses `POST
 
 `runner add` registers machine-local SSH capacity. Optional `--node` and `--root` select absolute remote paths when Node is outside the SSH login path or runner storage needs a specific location. The default storage root is `~/.pullboard-runner`; runner work shares the remote machine resource pool.
 
-Runner storage keeps one repository object cache and creates an isolated checkout per run. A locked inventory handshake transfers only missing committed objects after scanning their blobs, paths and commit metadata, including ancestors. Credential-free HTTPS origins may seed the cache anonymously; caller credentials are never forwarded.
+Runner storage keeps one repository object cache and creates an isolated checkout with complete history per run. A locked inventory handshake transfers only missing committed objects after scanning their blobs, paths and commit metadata, including ancestors. Historical protected paths are checked before connecting. A credential-free HTTPS origin may seed the cache at a locally known published ancestor; caller credentials are never forwarded. Cached object contents are not rescanned on every run.
+
+Each checkout with a committed npm lockfile runs `npm ci`, including lifecycle scripts. Only npm's content cache is shared; installed dependencies and generated files stay in the fresh checkout. Other lock managers are refused. Combined command output and transport diagnostics are bounded at 64 MiB; exceeding that limit refuses the run.

@@ -1,7 +1,7 @@
 /** Standalone SSH runner worker source; intentionally imports only Node built-ins. */
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, cpSync, createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { delimiter, dirname, isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -18,6 +18,7 @@ let transportDrop = () => {};
 let heartbeatTimer = null;
 let workerId = 'starting';
 let rejectPendingFrame = null;
+let activeDescendantTracker = null;
 
 /** Parse and strictly validate the controller's one-shot work specification. */
 async function readSpec() {
@@ -78,6 +79,9 @@ async function readSpec() {
       throw new Error('invalid work specification');
     }
   }
+  if (value.originBase !== undefined
+    && (typeof value.originBase !== 'string' || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value.originBase)
+      || value.originBase.length !== value.commit.length || !value.origin)) throw new Error('invalid work specification');
   const runtimeNames = ['resources.js', 'git.js', 'machine-home.js', 'refused.js'];
   if (Object.keys(value.runtime.files).length !== runtimeNames.length
     || runtimeNames.some(name => typeof value.runtime.files[name] !== 'string')) throw new Error('invalid work specification');
@@ -101,7 +105,7 @@ async function readSpec() {
 }
 
 /** Construct a minimal environment from runner-owned values, excluding caller credentials and markers. */
-function childEnvironment(home, temporary, machineHomePath = '') {
+function childEnvironment(home, temporary, machineHomePath = '', nodeOptions = '') {
   return {
     PATH: safePath,
     HOME: home,
@@ -118,14 +122,15 @@ function childEnvironment(home, temporary, machineHomePath = '') {
     GIT_OPTIONAL_LOCKS: '0',
     NPM_CONFIG_USERCONFIG: join(home, 'npm-userconfig'),
     NPM_CONFIG_GLOBALCONFIG: join(home, 'npm-globalconfig'),
+    ...(nodeOptions ? { NODE_OPTIONS: nodeOptions } : {}),
     ...(machineHomePath ? { PULLBOARD_MACHINE_HOME: machineHomePath } : {}),
   };
 }
 
 /** Add this worker's remote gate lease so nested test runners reuse the remote slot instead of deadlocking. */
-function scopedEnvironment(home, temporary, machineHomePath, gateLease, resourcesApi) {
+function scopedEnvironment(home, temporary, machineHomePath, gateLease, resourcesApi, nodeOptions = '') {
   return {
-    ...childEnvironment(home, temporary, machineHomePath),
+    ...childEnvironment(home, temporary, machineHomePath, nodeOptions),
     ...resourcesApi.gateSlotEnvironment(gateLease),
   };
 }
@@ -163,19 +168,440 @@ function spawnOwned(command, args, options = {}) {
   const closed = new Promise(resolveClose => { settle = resolveClose; });
   const record = { child, pid: child.pid, closed, drainPromise: null };
   ownedChildren.set(child, record);
+  activeDescendantTracker?.registerRoot(child.pid);
   child.once('error', error => settle({ error }));
   child.once('close', (code, signal) => settle({ code, signal }));
   return record;
 }
 
+/** Read one all-process POSIX census; a failed or malformed census is never interpreted as an empty machine. */
+function processCensus() {
+  const result = spawnSync('/bin/ps', ['-axo', 'pid=,ppid=,pgid=,lstart=,stat=,comm='], {
+    encoding: 'utf8', timeout: 2_000, maxBuffer: 8 * 1024 * 1024,
+    env: { PATH: safePath, LANG: 'C', LC_ALL: 'C', TZ: 'UTC' },
+  });
+  if (result.error || result.status !== 0 || typeof result.stdout !== 'string') return null;
+  const rows = new Map();
+  for (const line of result.stdout.split(/\r?\n/u)) {
+    if (!line.trim()) continue;
+    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+([A-Z][a-z]{2})\s+([A-Z][a-z]{2})\s+(\d{1,2})\s+(\d{2}:\d{2}:\d{2})\s+(\d{4})\s+(\S+)\s+(.+?)\s*$/u.exec(line);
+    if (!match) return null;
+    const pid = Number(match[1]);
+    const ppid = Number(match[2]);
+    const pgid = Number(match[3]);
+    if (![pid, ppid, pgid].every(Number.isSafeInteger) || pid < 1 || ppid < 0 || pgid < 1 || rows.has(pid)) return null;
+    const started = `${match[4]} ${match[5]} ${match[6]} ${match[7]} ${match[8]}`;
+    const processSha256 = createHash('sha256').update(match[10]).digest('hex');
+    rows.set(pid, { pid, ppid, pgid, started, state: match[9], processSha256 });
+  }
+  return rows.size ? rows : null;
+}
+
+/** Add a kernel start-time identity when procfs is available; otherwise retain a conservative census tuple. */
+function processIdentity(row) {
+  let birth = '';
+  let exact = false;
+  try {
+    const stat = readFileSync(`/proc/${row.pid}/stat`, 'utf8');
+    const close = stat.lastIndexOf(')');
+    const fields = stat.slice(close + 2).trim().split(/\s+/u);
+    if (close > 0 && Number(fields[1]) === row.ppid && Number(fields[2]) === row.pgid && /^\d+$/u.test(fields[19] ?? '')) {
+      birth = `proc:${fields[19]}`;
+      exact = true;
+    }
+  } catch { /* macOS and other POSIX hosts use the validated census tuple below. */ }
+  if (!birth) birth = `ps:${row.started}`;
+  return { ...row, birth, exact };
+}
+
+/** Make a private Node preload that records only child identity and a one-way command digest. */
+function writeChildJournalPreload(directory) {
+  const journalDirectory = join(directory, 'child-journal');
+  mkdirSync(journalDirectory, { mode: 0o700 });
+  const overflowPath = join(journalDirectory, 'overflow');
+  const source = `
+import diagnostics from 'node:diagnostics_channel';
+import { closeSync, openSync, statSync, writeSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
+const directory = ${JSON.stringify(journalDirectory)};
+const overflowPath = ${JSON.stringify(overflowPath)};
+const instance = randomUUID();
+process.env.PULLBOARD_RUNNER_INSTANCE = instance;
+const file = join(directory, 'children-' + process.pid + '.jsonl');
+const fd = openSync(file, 'a', 0o600);
+let bytes = statSync(file).size;
+let overflow = false;
+const limit = 131072;
+function record(value) {
+  if (overflow) return;
+  try {
+    const line = JSON.stringify(value) + '\\n';
+    const size = Buffer.byteLength(line);
+    if (bytes + size > limit) {
+      overflow = true;
+      try { writeFileSync(overflowPath, 'journal limit reached\\n', { flag: 'wx', mode: 0o600 }); } catch {}
+      return;
+    }
+    writeSync(fd, line);
+    bytes += size;
+  } catch {
+    try { writeFileSync(overflowPath, 'journal write failed\\n', { flag: 'wx', mode: 0o600 }); } catch {}
+    overflow = true;
+  }
+}
+record({ type: 'boot', pid: process.pid, ppid: process.ppid, instance });
+const channel = diagnostics.channel('child_process');
+const seen = new WeakSet();
+channel.subscribe(message => {
+  try {
+    const child = message?.process;
+    if (!child || typeof child.once !== 'function' || seen.has(child)) return;
+    seen.add(child);
+    const writeReceipt = () => {
+      if (!Number.isSafeInteger(child.pid) || child.pid < 1) return;
+      const commandSha256 = createHash('sha256').update(JSON.stringify({ command: child.spawnfile ?? '', args: child.spawnargs ?? [] })).digest('hex');
+      record({ type: 'spawn', pid: child.pid, ppid: process.pid, instance, commandSha256 });
+    };
+    if (Number.isSafeInteger(child.pid)) writeReceipt();
+    else child.once('spawn', writeReceipt);
+  } catch {
+    try { writeFileSync(overflowPath, 'child receipt could not be recorded\\n', { flag: 'wx', mode: 0o600 }); } catch {}
+  }
+});
+process.once('exit', () => { try { closeSync(fd); } catch {} });
+`;
+  const preload = join(directory, 'child-spawn-preload.mjs');
+  writeFileSync(preload, source, { mode: 0o600, flag: 'wx' });
+  return { preload, journalDirectory, overflowPath, nodeOptions: `--import=${pathToFileURL(preload).href}` };
+}
+
+/** Track job descendants by PID plus OS start identity, joining spawn receipts with fresh census rows. */
+function createDescendantTracker(directory) {
+  const initial = processCensus();
+  if (!initial) throw new Error('initial process identity census failed');
+  const baseline = new Map([...initial].map(([pid, row]) => [pid, processIdentity(row)]));
+  const journal = writeChildJournalPreload(directory);
+  const roots = new Set();
+  const rootLaunchIdentities = new Map();
+  const known = new Map();
+  const retired = new Set();
+  const eventsByChild = new Map();
+  let eventCount = 0;
+  const detachedGroups = new Map();
+  const offsets = new Map();
+  const partial = new Map();
+  const instancePids = new Map();
+  const overflowPath = journal.overflowPath;
+  let current = baseline;
+  let uncertain = false;
+  let censusFailure = false;
+  let reason = '';
+  let busy = false;
+  let warned = false;
+  let timer = null;
+  let stoppingPromise = null;
+
+  function readJournal() {
+    if (existsSync(overflowPath)) { uncertain = true; reason ||= 'child spawn journal overflow or write failure'; }
+    let total = 0;
+    const files = readdirSync(journal.journalDirectory).filter(name => /^children-\d+\.jsonl$/u.test(name)).sort();
+    if (files.length > 10_000) { uncertain = true; reason ||= 'child spawn journal file limit exceeded'; return; }
+    for (const name of files) {
+      const file = join(journal.journalDirectory, name);
+      let size;
+      try { size = statSync(file).size; } catch { uncertain = true; reason ||= 'child spawn journal could not be inspected'; continue; }
+      total += size;
+      if (!Number.isSafeInteger(size) || size > 131_072 || total > 8 * 1024 * 1024) {
+        uncertain = true; reason ||= 'child spawn journal size limit exceeded'; continue;
+      }
+      const offset = offsets.get(name) ?? 0;
+      if (size < offset) { uncertain = true; reason ||= 'child spawn journal changed unexpectedly'; continue; }
+      if (size === offset) continue;
+      const length = size - offset;
+      const fd = openSync(file, 'r');
+      let text;
+      try {
+        const bytes = Buffer.alloc(length);
+        const read = readSync(fd, bytes, 0, length, offset);
+        if (read !== length) { uncertain = true; reason ||= 'child spawn journal read was incomplete'; continue; }
+        text = (partial.get(name) ?? '') + bytes.toString('utf8');
+      } finally { closeSync(fd); }
+      offsets.set(name, size);
+      const lines = text.split('\n');
+      partial.set(name, lines.pop() ?? '');
+      for (const line of lines) {
+        if (!line) continue;
+        if (line.length > 4_096) { uncertain = true; reason ||= 'child spawn journal record is oversized'; continue; }
+        let record;
+        try { record = JSON.parse(line); } catch { uncertain = true; reason ||= 'child spawn journal record is invalid'; continue; }
+        if (record.type === 'boot' && Number.isSafeInteger(record.pid) && record.pid > 0 && typeof record.instance === 'string') {
+          instancePids.set(record.instance, record.pid);
+        } else if (record.type === 'spawn' && Number.isSafeInteger(record.pid) && record.pid > 0
+          && Number.isSafeInteger(record.ppid) && record.ppid > 0
+          && typeof record.instance === 'string' && /^[a-f0-9]{64}$/u.test(record.commandSha256)) {
+          const childEvents = eventsByChild.get(record.pid) ?? [];
+          childEvents.push(record);
+          eventsByChild.set(record.pid, childEvents);
+          eventCount += 1;
+          if (eventCount > 100_000) { uncertain = true; reason ||= 'child spawn journal event limit exceeded'; return; }
+        } else { uncertain = true; reason ||= 'child spawn journal identity is invalid'; }
+      }
+    }
+  }
+
+  function observe() {
+    if (busy) return current;
+    busy = true;
+    try {
+      readJournal();
+      const rawCensus = processCensus();
+      if (!rawCensus) { censusFailure = true; return null; }
+      censusFailure = false;
+      const census = new Map([...rawCensus].map(([pid, row]) => [pid, processIdentity(row)]));
+      current = census;
+      for (const [pid, identity] of known) {
+        const row = current.get(pid);
+        if (!row || row.birth !== identity.birth) retired.add(`${pid}:${identity.birth}`);
+        else if (retired.has(`${pid}:${identity.birth}`)) {
+          uncertain = true; reason ||= 'a previously observed process identity reappeared';
+        }
+      }
+      const ownedPids = new Set();
+      for (const pid of roots) {
+        const row = current.get(pid);
+        if (!row) continue;
+        const prior = known.get(pid);
+        const launched = rootLaunchIdentities.get(pid);
+        if (prior && prior.birth !== row.birth) continue;
+        if (launched && launched.birth !== row.birth) continue;
+        if (!launched && row.ppid !== process.pid) continue;
+        if (!launched && row.pgid !== pid) continue;
+        if (retired.has(`${pid}:${row.birth}`)) { uncertain = true; reason ||= 'a retired process identity reappeared'; continue; }
+        if (!launched) rootLaunchIdentities.set(pid, row);
+        known.set(pid, { ...row, commandSha256: prior?.commandSha256 ?? '', root: true, group: pid });
+        ownedPids.add(pid);
+      }
+
+      for (const row of current.values()) {
+        for (const event of eventsByChild.get(row.pid) ?? []) {
+          const parentPid = instancePids.get(event.instance);
+          // A preload instance exists only in the private job environment. The receipt
+          // binds its child to that exact process instance even after the parent exits.
+          if (!parentPid || parentPid !== event.ppid) continue;
+          const prior = known.get(row.pid);
+          if (retired.has(`${row.pid}:${row.birth}`)) { uncertain = true; reason ||= 'a retired process identity reappeared'; continue; }
+          if (prior && prior.birth === row.birth) { ownedPids.add(row.pid); continue; }
+          if (!prior && baseline.get(row.pid)?.birth === row.birth) continue;
+          // A spawn receipt must be observed while its exact parent instance still owns it.
+          // A same-numbered PID first seen after reparenting is ambiguous and never adopted.
+          if (!prior && row.ppid !== event.ppid) { uncertain = true; reason ||= 'spawned process was first observed after reparenting'; continue; }
+          const parent = known.get(event.ppid);
+          const inheritedGroup = parent?.group ?? [...roots].find(rootPid => known.get(rootPid)?.group === row.pgid);
+          const group = row.pgid === row.pid ? row.pid : inheritedGroup;
+          if (group === undefined) { uncertain = true; reason ||= 'spawned process group has no owned parent'; continue; }
+          if (row.pgid === row.pid) detachedGroups.set(row.pid, row.birth);
+          known.set(row.pid, { ...row, commandSha256: event.commandSha256, root: false, group });
+          ownedPids.add(row.pid);
+        }
+      }
+
+      // Process ancestry captures non-Node children; journal receipts retain ownership after reparenting.
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const row of current.values()) {
+          if (!ownedPids.has(row.ppid)) continue;
+          const prior = known.get(row.pid);
+          if (retired.has(`${row.pid}:${row.birth}`)) { uncertain = true; reason ||= 'a retired process identity reappeared'; continue; }
+          if (prior && prior.birth === row.birth) { ownedPids.add(row.pid); continue; }
+          if (!prior && baseline.get(row.pid)?.birth === row.birth) continue;
+          const parent = known.get(row.ppid);
+          const group = row.pgid === row.pid ? row.pid : parent?.group;
+          if (group === undefined) { uncertain = true; reason ||= 'descendant process group has no owned parent'; continue; }
+          if (row.pgid === row.pid) detachedGroups.set(row.pid, row.birth);
+          known.set(row.pid, { ...row, commandSha256: '', root: false, group });
+          ownedPids.add(row.pid); changed = true;
+        }
+      }
+      // Detached children establish a private process group; census every member even
+      // after the original launcher is reparented or exits.
+      for (const row of current.values()) {
+        const leaderStarted = detachedGroups.get(row.pgid);
+        if (!leaderStarted) continue;
+        const leader = current.get(row.pgid);
+        if (leader && leader.birth !== leaderStarted) {
+          uncertain = true; reason ||= 'detached process group identity was reused';
+          continue;
+        }
+        const prior = known.get(row.pid);
+        if (retired.has(`${row.pid}:${row.birth}`)) { uncertain = true; reason ||= 'a retired process identity reappeared'; continue; }
+        if (prior && prior.birth === row.birth) { ownedPids.add(row.pid); continue; }
+        if (!prior && baseline.get(row.pid)?.birth === row.birth) continue;
+        known.set(row.pid, { ...row, commandSha256: '', root: false, group: row.pgid });
+        ownedPids.add(row.pid);
+      }
+      // A recorded PGID does not prove an unseen member belongs to this job. Keep
+      // the lease fail-closed when a root group contains a process lacking identity evidence.
+      for (const rootPid of roots) {
+        for (const row of current.values()) {
+          if (row.pgid !== rootPid) continue;
+          const identity = known.get(row.pid);
+          if (identity?.birth === row.birth) continue;
+          if (baseline.get(row.pid)?.birth === row.birth) continue;
+          uncertain = true;
+          reason ||= 'owned process group contains an unidentified member';
+        }
+      }
+      if (known.size > 100_000) { uncertain = true; reason ||= 'owned process identity limit exceeded'; }
+      // Refresh live PGID/start data only when the PID still has the same start identity.
+      for (const pid of ownedPids) {
+        const row = current.get(pid);
+        const prior = known.get(pid);
+        if (row && prior?.birth === row.birth) Object.assign(prior, row);
+      }
+      return current;
+    } catch {
+      censusFailure = true; return null;
+    } finally { busy = false; }
+  }
+
+  function registerRoot(pid) {
+    if (!Number.isSafeInteger(pid) || pid < 1) return;
+    roots.add(pid);
+    // Bind the spawned leader while its actual parent is still this worker; later
+    // group membership alone is never sufficient to adopt an unknown process.
+    const census = processCensus();
+    const row = census?.get(pid);
+    if (row && row.ppid === process.pid && row.pgid === pid) rootLaunchIdentities.set(pid, processIdentity(row));
+  }
+
+  function liveDescendants() {
+    const active = [];
+    for (const [pid, identity] of known) {
+      if (identity.root) continue;
+      const row = current.get(pid);
+      if (row && row.birth === identity.birth && !retired.has(`${pid}:${identity.birth}`) && !/^Z/u.test(row.state)) active.push({ ...identity });
+    }
+    return active;
+  }
+
+  function signalOwnedGroup(pgid, signal) {
+    const census = observe();
+    if (!census || uncertain || censusFailure) return null;
+    const ownedMember = [...known].some(([pid, identity]) => {
+      const row = current.get(pid);
+      return row && row.pgid === pgid && row.birth === identity.birth && !/^Z/u.test(row.state);
+    });
+    if (!ownedMember) return false;
+    try { process.kill(-pgid, signal); }
+    catch (error) { if (error.code === 'ESRCH') return false; throw error; }
+    return true;
+  }
+
+  async function stopDescendantsLoop() {
+    // Retry through ambiguous censuses rather than releasing the host lease on an unproven drain.
+    for (;;) {
+      const census = observe();
+      if (!census) {
+        if (!warned) { process.stderr.write(`PULLBOARD_RUNNER_CLEANUP_UNVERIFIED ${workerId} ${reason}\n`); warned = true; }
+        await new Promise(resolvePause => setTimeout(resolvePause, 1_000));
+        continue;
+      }
+      if (uncertain) {
+        if (!warned) { process.stderr.write(`PULLBOARD_RUNNER_CLEANUP_UNVERIFIED ${workerId} ${reason}\n`); warned = true; }
+        await new Promise(resolvePause => setTimeout(resolvePause, 1_000));
+        continue;
+      }
+      if (censusFailure) { await new Promise(resolvePause => setTimeout(resolvePause, 250)); continue; }
+      const live = liveDescendants();
+      if (!live.length) return;
+      // Signal each confirmed owned process group once; use PID signals only with exact kernel identity.
+      const signaledGroups = new Set();
+      for (const identity of live) {
+        const row = current.get(identity.pid);
+        if (!row || row.birth !== identity.birth || retired.has(`${identity.pid}:${identity.birth}`) || /^Z/u.test(row.state)) continue;
+        const ownedGroup = identity.group;
+        if (Number.isSafeInteger(ownedGroup) && row.pgid === ownedGroup && !signaledGroups.has(ownedGroup)) {
+          const result = signalOwnedGroup(ownedGroup, 'SIGTERM');
+          if (result === null) { censusFailure = true; break; }
+          if (result) signaledGroups.add(ownedGroup);
+          continue;
+        }
+        if (!identity.exact) { uncertain = true; reason ||= 'descendant lacks a safe process-group identity'; break; }
+        try { process.kill(identity.pid, 'SIGTERM'); }
+        catch (error) { if (error.code !== 'ESRCH') { uncertain = true; reason ||= 'owned descendant could not be stopped safely'; } }
+      }
+      const deadline = Date.now() + 2_000;
+      while (Date.now() < deadline) {
+        await new Promise(resolvePause => setTimeout(resolvePause, 50));
+        if (!observe()) break;
+        if (!liveDescendants().length) break;
+      }
+      if (!current || !liveDescendants().length) continue;
+      const killedGroups = new Set();
+      for (const identity of liveDescendants()) {
+        const row = current.get(identity.pid);
+        if (!row || row.birth !== identity.birth || retired.has(`${identity.pid}:${identity.birth}`) || /^Z/u.test(row.state)) continue;
+        const ownedGroup = identity.group;
+        if (Number.isSafeInteger(ownedGroup) && row.pgid === ownedGroup && !killedGroups.has(ownedGroup)) {
+          const result = signalOwnedGroup(ownedGroup, 'SIGKILL');
+          if (result === null) { censusFailure = true; break; }
+          if (result) killedGroups.add(ownedGroup);
+          continue;
+        }
+        if (!identity.exact) { uncertain = true; reason ||= 'descendant lacks a safe process-group identity'; break; }
+        try { process.kill(identity.pid, 'SIGKILL'); }
+        catch (error) { if (error.code !== 'ESRCH') { uncertain = true; reason ||= 'owned descendant could not be killed safely'; } }
+      }
+      await new Promise(resolvePause => setTimeout(resolvePause, 100));
+    }
+  }
+
+  function stopDescendants() {
+    if (!stoppingPromise) {
+      stoppingPromise = stopDescendantsLoop().finally(() => { stoppingPromise = null; });
+    }
+    return stoppingPromise;
+  }
+
+  async function verifyAfterGroups() {
+    for (;;) {
+      const census = observe();
+      if (census && !uncertain && !censusFailure) {
+        const liveRoots = [...roots].some(pid => {
+          const row = current.get(pid);
+          const knownRoot = known.get(pid);
+          return row && knownRoot?.birth === row.birth && !/^Z/u.test(row.state);
+        });
+        if (!liveRoots && !liveDescendants().length) return;
+      }
+      if (!warned) { process.stderr.write(`PULLBOARD_RUNNER_CLEANUP_UNVERIFIED ${workerId} ${reason || 'owned process identity remains live'}\n`); warned = true; }
+      await new Promise(resolvePause => setTimeout(resolvePause, 1_000));
+    }
+  }
+
+  timer = setInterval(() => { if (!busy) observe(); }, 250);
+  timer.unref();
+  return {
+    nodeOptions: journal.nodeOptions,
+    registerRoot,
+    stopDescendants,
+    /** Revalidate a process group immediately before signaling; null means census ambiguity. */
+    signalOwnedGroup,
+    verifyAfterGroups,
+    stopMonitoring() { clearInterval(timer); },
+  };
+}
+
 /** Stop and fully drain one owned process group before its gate lease can be released. */
-function drainOwned(record, terminate = false) {
+function drainOwned(record, terminate = false, tracker = activeDescendantTracker) {
   if (!record) return Promise.resolve();
   record.drainPromise ??= (async () => {
-    if (terminate) await stopOwnedGroup(record.pid, record.closed);
+    if (terminate) await stopOwnedGroup(record.pid, record.closed, tracker);
     else {
       await record.closed;
-      await stopOwnedGroup(record.pid, record.closed);
+      await stopOwnedGroup(record.pid, record.closed, tracker);
     }
     ownedChildren.delete(record.child);
   })();
@@ -192,7 +618,11 @@ function installSignalCustody() {
     rejectPendingFrame?.(new Error('runner transport was lost'));
     clearInterval(heartbeatTimer);
     const active = [...ownedChildren.values()];
-    transportDrain = Promise.all(active.map(record => drainOwned(record, true)));
+    transportDrain = (async () => {
+      await activeDescendantTracker?.stopDescendants();
+      await Promise.all(active.map(record => drainOwned(record, true)));
+      await activeDescendantTracker?.verifyAfterGroups();
+    })();
     transportDrain.catch(() => {});
   };
   transportDrop = disconnected;
@@ -274,31 +704,33 @@ async function checkoutHistory(api, runnerRoot, root, packFile, spec, env) {
       const build = mkdtempSync(join(repositories, `.repo-${spec.repoId}-`));
       const staged = join(build, 'cache.git');
       try {
-        let cloned = false;
-        if (spec.origin) {
-          const clone = spawnOwned('git', ['clone', '--bare', '--no-hardlinks', '--origin=origin', spec.origin, staged], {
-            cwd: build, env, stdio: ['ignore', 'ignore', 'ignore'],
-          });
-          const result = await clone.closed;
-          await drainOwned(clone);
-          cloned = !result.error && result.code === 0 && !result.signal;
-          if (cloned) {
-            try {
-              cloned = await git(staged, ['rev-parse', '--is-bare-repository'], env) === 'true'
-                && await git(staged, ['rev-parse', '--show-object-format'], env) === (spec.commit.length === 64 ? 'sha256' : 'sha1')
-                && !existsSync(join(staged, 'shallow'))
-                && !existsSync(join(staged, 'objects', 'info', 'alternates'));
-            } catch { cloned = false; }
-          }
-          if (!cloned) rmSync(staged, { recursive: true, force: true });
-        }
-        if (!cloned) {
+        const initialize = async () => {
           const initialized = spawnOwned('git', ['init', '--bare', `--object-format=${spec.commit.length === 64 ? 'sha256' : 'sha1'}`, staged], {
             cwd: build, env, stdio: ['ignore', 'ignore', 'ignore'],
           });
           const result = await initialized.closed;
           await drainOwned(initialized);
           if (result.error || result.code !== 0 || result.signal) throw new Error('source history cache could not be initialized');
+        };
+        await initialize();
+        if (spec.origin && spec.originBase) {
+          let seeded = false;
+          try {
+            const fetch = spawnOwned('git', ['-c', 'protocol.version=2', 'fetch', '--no-tags', '--no-recurse-submodules', spec.origin, spec.originBase], {
+              cwd: staged, env, stdio: ['ignore', 'ignore', 'ignore'],
+            });
+            const result = await fetch.closed;
+            await drainOwned(fetch);
+            seeded = !result.error && result.code === 0 && !result.signal
+              && await git(staged, ['cat-file', '-t', spec.originBase], env) === 'commit'
+              && Number(await git(staged, ['rev-list', '--count', spec.originBase], env)) > 0
+              && !existsSync(join(staged, 'shallow'));
+            if (seeded) await git(staged, ['update-ref', `refs/pullboard/published/${spec.originBase}`, spec.originBase], env);
+          } catch { seeded = false; }
+          if (!seeded) {
+            rmSync(staged, { recursive: true, force: true });
+            await initialize();
+          }
         }
         renameSync(staged, cache);
       } finally { rmSync(build, { recursive: true, force: true }); }
@@ -308,15 +740,14 @@ async function checkoutHistory(api, runnerRoot, root, packFile, spec, env) {
       || existsSync(join(cache, 'shallow')) || existsSync(join(cache, 'objects', 'info', 'alternates'))) {
       throw new Error('source history cache has an incompatible format');
     }
-    const refLines = await git(cache, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads', 'refs/pullboard/candidates'], env);
+    const refLines = await git(cache, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/pullboard/candidates', 'refs/pullboard/published'], env);
     const tips = [];
     if (refLines) for (const line of refLines.split(/\r?\n/u)) {
-      const split = /^(refs\/(?:heads|pullboard\/candidates)\/.+) ([a-f0-9]{40,64})$/u.exec(line);
+      const split = /^(refs\/pullboard\/(?:candidates|published)\/.+) ([a-f0-9]{40,64})$/u.exec(line);
       if (!split || split[2].length !== spec.commit.length) {
         throw new Error('source history cache contains an invalid candidate ref');
       }
-      if (split[1].startsWith('refs/pullboard/candidates/')
-        && split[1].slice('refs/pullboard/candidates/'.length) !== split[2]) {
+      if (split[1].slice(split[1].lastIndexOf('/') + 1) !== split[2]) {
         throw new Error('source history cache contains an invalid candidate ref');
       }
       if (await git(cache, ['cat-file', '-t', split[2]], env) !== 'commit') {
@@ -348,6 +779,7 @@ async function checkoutHistory(api, runnerRoot, root, packFile, spec, env) {
     }
     const historyCount = Number(await git(cache, ['rev-list', '--count', spec.commit], env));
     if (!Number.isSafeInteger(historyCount) || historyCount < 1) throw new Error('source history is incomplete');
+    if (spec.originBase) await git(cache, ['merge-base', '--is-ancestor', spec.originBase, spec.commit], env);
     const closure = new Set((await git(cache, ['rev-list', '--objects', spec.commit], env)).split(/\r?\n/u)
       .map(line => line.match(/^([a-f0-9]{40,64})(?:\s|$)/u)?.[1]).filter(Boolean));
     closure.add(spec.commit);
@@ -380,7 +812,7 @@ async function checkoutHistory(api, runnerRoot, root, packFile, spec, env) {
 }
 
 /** Install committed npm dependencies through an isolated content-addressed cache, refusing unknown lock managers. */
-async function installDependencies(api, root, runnerRoot, privateHome, env, commitTree) {
+async function installDependencies(root, runnerRoot, env, tracker) {
   const packageFile = join(root, 'package.json');
   if (!existsSync(packageFile)) return;
   const packageText = readFileSync(packageFile, 'utf8');
@@ -395,52 +827,20 @@ async function installDependencies(api, root, runnerRoot, privateHome, env, comm
     }
     return;
   }
-  const lockText = readFileSync(lockFile, 'utf8');
-  const key = createHash('sha256').update(packageText).update('\0').update(lockText).update('\0')
-    .update(process.versions.modules).update('\0').update(process.platform).update('\0').update(process.arch).update('\0').update(commitTree).digest('hex');
   const cacheRoot = join(runnerRoot, 'cache', 'npm');
-  const installCache = join(cacheRoot, 'installed');
   const contentCache = join(cacheRoot, 'content');
-  const cache = join(installCache, key);
-  mkdirSync(installCache, { recursive: true, mode: 0o700 });
   mkdirSync(contentCache, { recursive: true, mode: 0o700 });
-  chmodSync(cacheRoot, 0o700); chmodSync(installCache, 0o700); chmodSync(contentCache, 0o700);
-  const previousMachineHome = process.env.PULLBOARD_MACHINE_HOME;
-  const cachePool = join(runnerRoot, 'cache', 'resource-pool');
-  let releaseCache = null;
-  try {
-    if (!existsSync(cache)) {
-      const lease = await acquireResourceApi(api, {
-        name: `npm-cache-${key}`, capacity: 1, scope: 'machine', root: runnerRoot,
-        repo: runnerRoot, agent: 'pullboard-runner-cache', kind: 'npm-cache',
-        onWait: () => assertTransportLive(),
-      }, cachePool);
-      releaseCache = lease.release;
-    }
-    if (!existsSync(cache)) {
-      const build = mkdtempSync(join(installCache, `${key}.build-`));
-      try {
-        rmSync(join(root, 'node_modules'), { recursive: true, force: true });
-        const npm = spawnOwned('npm', ['ci', '--cache', contentCache], {
-          cwd: root, env, stdio: ['ignore', 'ignore', 'ignore'],
-        });
-        const result = await npm.closed;
-        await drainOwned(npm);
-        if (result.error || result.code !== 0 || result.signal) throw new Error('committed npm dependencies could not be installed');
-        mkdirSync(join(root, 'node_modules'), { recursive: true, mode: 0o700 });
-        cpSync(join(root, 'node_modules'), join(build, 'node_modules'), { recursive: true, errorOnExist: true, verbatimSymlinks: true });
-        renameSync(build, cache);
-      } finally { rmSync(build, { recursive: true, force: true }); }
-    }
-    const from = join(cache, 'node_modules');
-    if (!existsSync(join(root, 'node_modules'))) cpSync(from, join(root, 'node_modules'), { recursive: true, errorOnExist: true, verbatimSymlinks: true });
-  } finally {
-    try { releaseCache?.(); }
-    finally {
-      if (previousMachineHome === undefined) delete process.env.PULLBOARD_MACHINE_HOME;
-      else process.env.PULLBOARD_MACHINE_HOME = previousMachineHome;
-    }
-  }
+  chmodSync(cacheRoot, 0o700); chmodSync(contentCache, 0o700);
+  // node_modules is job-local because package lifecycle scripts may create sibling artifacts.
+  // Reuse only npm's content-addressed download cache, never a prior job's installed tree.
+  rmSync(join(root, 'node_modules'), { recursive: true, force: true });
+  const npm = spawnOwned('npm', ['ci', '--cache', contentCache], {
+    cwd: root, env, stdio: ['ignore', 'ignore', 'ignore'],
+  });
+  const result = await npm.closed;
+  await tracker.stopDescendants();
+  await drainOwned(npm);
+  if (result.error || result.code !== 0 || result.signal) throw new Error('committed npm dependencies could not be installed');
 }
 
 /** Wait until all bytes written to stdout have passed through the stream before publishing a receipt. */
@@ -464,30 +864,33 @@ function outputSink() {
 }
 
 /** Stop only the detached command process group owned by this worker, then await its close event. */
-async function stopOwnedGroup(pid, closed) {
+async function stopOwnedGroup(pid, closed, tracker) {
   if (!pid) return;
-  try { process.kill(-pid, 'SIGTERM'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+  const signal = async type => {
+    for (;;) {
+      const sent = tracker?.signalOwnedGroup(pid, type) ?? false;
+      if (sent === true || sent === false) return sent;
+      await new Promise(resolvePause => setTimeout(resolvePause, 250));
+    }
+  };
+  await signal('SIGTERM');
   // Give the whole owned group two seconds to handle TERM, even if its leader exits first.
   const graceUntil = Date.now() + 2_000;
-  let alive = true;
-  while (alive && Date.now() < graceUntil) {
-    try { process.kill(-pid, 0); }
-    catch (error) { if (error.code === 'ESRCH') { alive = false; break; } throw error; }
+  while (Date.now() < graceUntil) {
+    const sent = await signal('SIGTERM');
+    if (!sent) break;
     await new Promise(resolvePause => setTimeout(resolvePause, 25));
   }
-  if (alive) {
-    try { process.kill(-pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
-  }
   for (;;) {
-    try { process.kill(-pid, 0); }
-    catch (error) { if (error.code === 'ESRCH') break; throw error; }
+    const sent = await signal('SIGKILL');
+    if (!sent) break;
     await new Promise(resolvePause => setTimeout(resolvePause, 50));
   }
   await closed;
 }
 
 /** Run the exact requested command in its isolated checkout, retaining raw output and real test exit status. */
-async function runCommand(spec, root, env, sink) {
+async function runCommand(spec, root, env, sink, tracker) {
   let shell = '/bin/sh';
   let args = ['-c', spec.command];
   if (spec.pipefail) {
@@ -509,6 +912,7 @@ async function runCommand(spec, root, env, sink) {
   forward(child.stdout); forward(child.stderr);
   const result = await closed;
   await writes;
+  await tracker.stopDescendants();
   await drainOwned(owned);
   if (transportDrain) await transportDrain;
   if (outputError) throw outputError;
@@ -543,6 +947,7 @@ async function main() {
   const sink = outputSink();
   let api;
   let lease = null;
+  let tracker = null;
   let runDirectory;
   let final = { code: 1, signal: null, root: '' };
   try {
@@ -584,16 +989,24 @@ async function main() {
       onWait: () => assertTransportLive(),
     }, machineHomePath);
     const canonicalMachineHome = machineHomePath;
-    const env = scopedEnvironment(privateHome, temporary, canonicalMachineHome, lease, api);
+    tracker = createDescendantTracker(runDirectory);
+    activeDescendantTracker = tracker;
+    const env = scopedEnvironment(privateHome, temporary, canonicalMachineHome, lease, api, tracker.nodeOptions);
     await checkoutHistory(api, runnerRoot, root, packFile, spec, env);
-    await installDependencies(api, root, runnerRoot, privateHome, env, spec.tree);
-    final = { ...(await runCommand(spec, root, env, sink)), root };
+    await installDependencies(root, runnerRoot, env, tracker);
+    final = { ...(await runCommand(spec, root, env, sink, tracker)), root };
   } catch (error) {
     const message = safeSetupMessage(error);
     if (!transportLost) await sink.write(`${message}\n`);
     final = { code: 1, signal: transportLost ? 'SIGHUP' : null, error: message, root: '' };
   } finally {
+    if (tracker) await tracker.stopDescendants();
     await drainAllOwned();
+    if (tracker) {
+      await tracker.verifyAfterGroups();
+      tracker.stopMonitoring();
+      activeDescendantTracker = null;
+    }
     if (lease) {
       try { lease.release(); } catch { /* Retaining a lease on cleanup error is safer than speculative deletion. */ }
     }

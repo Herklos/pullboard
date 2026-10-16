@@ -11,7 +11,8 @@ import { blockedPaths, secretsIn } from './hooks.js';
 import { cleanGitEnvironment, headCommit, headTree, isClean, repoInfo, untracked } from './git.js';
 import { Refused } from './refused.js';
 
-const MAX_OUTPUT_BYTES = 1024 ** 3;
+// Budget: 64 MiB bounds worst-case JSON bridge escaping below Node string limits.
+const MAX_OUTPUT_BYTES = 64 * 1024 ** 2;
 const MAX_BLOB_BYTES = 8 * 1024 ** 2;
 const TOOL_ROOT = fileURLToPath(new URL('../', import.meta.url));
 const RUNTIME_NAMES = ['resources.js', 'git.js', 'machine-home.js', 'refused.js'];
@@ -85,12 +86,33 @@ function sourceObjects(root, source) {
   if (secretsIn(commit.split('\n').map((text, index) => ({ path: 'commit', line: index + 1, text }))).length) {
     throw new Refused('RUNNER_SECRET', 'the commit metadata contains a possible secret; keep this run local and correct the metadata');
   }
-
+  return config.protect;
 }
 
 /** Reject blocked historical paths as well as current ones before an object pack crosses SSH. */
 function protectedHistoryPath(path, protect) {
   return blockedPaths([path], protect).length || /(?:^|\/)board\.sqlite(?:-(?:wal|shm))?$/u.test(path);
+}
+
+/** Apply current protection rules to all selected historical names before any anonymous cache seed. */
+function protectHistory(root, source, protect) {
+  const paths = [...new Set(sourceGit(root, ['log', '--format=', '--name-only', '-z', '--no-renames', '--root', '-m', '--full-history', source.commit])
+    .split('\0').filter(Boolean))];
+  if (paths.some(path => protectedHistoryPath(path, protect))) {
+    throw new Refused('RUNNER_SECRET', 'selected history includes a blocked private path; keep this run local or remove that private history');
+  }
+}
+
+/** Select a locally known published ancestor, never an anonymous origin's unchecked latest tip. */
+function originAncestor(root, source) {
+  const tip = sourceGit(root, ['for-each-ref', '--format=%(objectname)', 'refs/remotes/origin']).split('\n')
+    .find(value => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value));
+  if (!tip) return undefined;
+  const result = spawnSync('git', ['--no-replace-objects', 'merge-base', source.commit, tip], {
+    cwd: root, env: cleanGitEnvironment(), encoding: 'utf8', maxBuffer: 4096,
+  });
+  const base = result.stdout?.trim();
+  return result.status === 0 && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(base) ? base : undefined;
 }
 
 /** Read one exact cat-file record without loading a repository's history into memory. */
@@ -253,12 +275,15 @@ function requestFor(root, command, { runner, source, browser = false, pipefail =
   if (secretsIn(command.split('\n').map((text, index) => ({ path: 'run command', line: index + 1, text }))).length) {
     throw new Refused('RUNNER_SECRET', 'the run command contains a possible secret; use a command that does not transfer credentials');
   }
-  sourceObjects(root, current);
+  const protect = sourceObjects(root, current);
+  protectHistory(root, current, protect);
+  const origin = anonymousOrigin(root);
+  const originBase = origin ? originAncestor(root, current) : undefined;
   const repoId = createHash('sha256').update(realpathSync(repoInfo(root).commonDir)).digest('hex');
   const directory = mkdtempSync(join(tmpdir(), 'pullboard-runner-send-'));
   try {
     const { worker, tooling, runtime } = trustedTooling();
-    const spec = { version: 1, id: randomUUID(), repoId, origin: anonymousOrigin(root), runtime, tooling, ...current, command, pipefail, slots: runner.slots,
+    const spec = { version: 1, id: randomUUID(), repoId, ...(originBase ? { origin, originBase } : {}), runtime, tooling, ...current, command, pipefail, slots: runner.slots,
       browser: runner.browser, browserRequired: browser, landing: metadata.landing === true,
       itemCheck: metadata.itemCheck === true, diagnostic: metadata.diagnostic === true,
       item: String(metadata.item ?? ''), kind: String(metadata.kind ?? ''), ...(runner.root ? { root: runner.root } : {}) };
@@ -304,10 +329,17 @@ export function runOnRunner(root, command, options) {
   const script = `import { runOnRunnerAsync } from ${JSON.stringify(import.meta.url)};
 let input=''; for await (const chunk of process.stdin) input+=chunk;
 const request=JSON.parse(input);
-try { process.stdout.write(JSON.stringify({result:await runOnRunnerAsync(request.root,request.command,request.options)})); }
-catch(error) { process.stdout.write(JSON.stringify({error:{name:error.name,code:error.code,message:error.message,host:error.host}})); process.exitCode=1; }`;
+const canceled=new AbortController();
+const abort=()=>canceled.abort();
+process.on('SIGTERM',abort); process.on('SIGHUP',abort); process.stdout.on('error',abort);
+// Budget: check actual parent identity every second while the negotiated SSH transport is active.
+const parentWatch=setInterval(()=>{if(process.ppid!==request.parentPid)abort();},1000);
+if(process.ppid!==request.parentPid)abort();
+try { process.stdout.write(JSON.stringify({result:await runOnRunnerAsync(request.root,request.command,{...request.options,signal:canceled.signal})})); }
+catch(error) { process.stdout.write(JSON.stringify({error:{name:error.name,code:error.code,message:error.message,host:error.host}})); process.exitCode=1; }
+finally {clearInterval(parentWatch);}`;
   const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
-    cwd: root, input: JSON.stringify({ root, command, options }), encoding: 'utf8', maxBuffer: MAX_OUTPUT_BYTES * 2,
+    cwd: root, input: JSON.stringify({ root, command, options, parentPid: process.pid }), encoding: 'utf8', maxBuffer: MAX_OUTPUT_BYTES * 6 + 1024 ** 2,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   let reply;
@@ -322,15 +354,21 @@ catch(error) { process.stdout.write(JSON.stringify({error:{name:error.name,code:
 
 /** Negotiate missing history objects while the remote cache lease stays held in one SSH session. */
 export async function runOnRunnerAsync(root, command, options) {
+  if (options.signal?.aborted) throw new RunnerDropped(options.runner.host);
   const request = requestFor(root, command, options);
+  let removeAbort = () => {};
   try {
     const child = spawn('ssh', request.args, { env: request.env, stdio: ['pipe', 'pipe', 'pipe'] });
     const output = [], diagnostics = [];
     let bytes = 0, error, control = '', requested = false, transfer = null;
+    const abort = () => { error ??= new Error('runner transport canceled'); child.stdin.destroy(); child.kill('SIGTERM'); };
+    options.signal?.addEventListener('abort', abort, { once: true });
+    removeAbort = () => options.signal?.removeEventListener('abort', abort);
+    if (options.signal?.aborted) abort();
     /** Bound both protocol streams before retaining a complete result. */
     const capture = (target, chunk) => {
       bytes += chunk.length;
-      if (bytes > MAX_OUTPUT_BYTES) { error = new Error('runner output exceeded limit'); child.kill(); }
+      if (bytes > MAX_OUTPUT_BYTES) { error = new Refused('RUNNER_OUTPUT_LIMIT', 'runner output exceeded 64 MiB; reduce command output or keep this run local'); child.kill(); }
       else target.push(chunk);
     };
     child.stdout.on('data', chunk => capture(output, chunk));
@@ -363,5 +401,5 @@ export async function runOnRunnerAsync(root, command, options) {
     if (transfer) await transfer;
     if (error instanceof Refused) throw error;
     return resultFrom(request, { status, error, stdout: Buffer.concat(output), stderr: Buffer.concat(diagnostics) });
-  } finally { request.cleanup(); }
+  } finally { removeAbort(); request.cleanup(); }
 }
