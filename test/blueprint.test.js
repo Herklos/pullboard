@@ -179,15 +179,11 @@ test('blueprint add files a blueprint as drafts or nothing at all [S1,I1]', () =
   assert.equal(added.items.length, 3);
 });
 
-/**
- * Each pullboard.dev/blueprints card's title and rules, word for word, and how many things it asks the
- * person. web-app's own file is #677's; its card's second rule now ends "before it ships", which
- * the published detail page does not say yet, so only its first rule is pinned here.
- */
+/** Each pullboard.dev/blueprints card's title and rules, word for word, and how many things it asks the person. */
 const GALLERY = {
   pullboard: { title: 'Pullboard, built on Pullboard', rules: ['A builder never verifies their own work.', "Every item's check fails before the change and passes after it.", 'Main only moves when the whole test suite passes.'], asks: 0 },
   website: { title: 'Website', rules: ['Every page reads in full with JavaScript turned off.', 'No change leaves a link pointing at a missing page.'], asks: 2 },
-  'web-app': { title: 'Web app', rules: ['Every change ships with a test that fails without it.'], asks: 3 },
+  'web-app': { title: 'Web app', rules: ['Every change ships with a test that fails without it.', 'Every page works at phone width before it ships.'], asks: 3 },
   library: { title: 'Open-source library', rules: ['A breaking change bumps the major version.', 'Every public function has a working example in the docs.'], asks: 2 },
   'ios-app': { title: 'iOS app', rules: ['Every screen has a light and a dark screenshot test.', 'No change removes a VoiceOver label from a screen.'], asks: 2 },
   serverless: { title: 'Serverless', rules: ['Every function has an alarm before it ships.', "No function runs past its platform's time limit."], asks: 3 },

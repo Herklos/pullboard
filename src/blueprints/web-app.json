@@ -11,7 +11,7 @@
   "rules": [
     { "key": "W1", "text": "Every change ships with a test that fails without it.", "why": "a test that passes either way proves nothing." },
     { "key": "W2", "text": "Main only moves when the whole test suite passes.", "why": "two changes can each pass alone and still break each other." },
-    { "key": "W3", "text": "Every page works at phone width.", "why": "a page that only works on a laptop is a bug nobody reports." },
+    { "key": "W3", "text": "Every page works at phone width before it ships.", "why": "a page that only works on a laptop is a bug nobody reports." },
     { "key": "W4", "text": "Secrets never appear in code, logs or commits.", "why": "a key pushed once stays public, even after you delete it." },
     { "key": "W5", "text": "A new dependency comes with a one-line reason.", "why": "every package you add is code you now maintain." },
     { "key": "W6", "text": "An error a person sees says what to do next.", "why": "\"something went wrong\" is a support ticket waiting to happen." }
