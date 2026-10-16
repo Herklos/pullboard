@@ -1,6 +1,7 @@
 /** An accept names the exact landing step for its repo, and a dry run refuses a push the real land would refuse [I1,B3]. */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
 import { createE2eHelpers } from './e2e-helpers.js';
@@ -13,7 +14,7 @@ const { project, commitFile } = e2e;
 const literal = (text) => text.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 
 /** File, build, submit and accept one web item through the real CLI and hooks, returning the accept output. */
-function acceptedItem(box, file) {
+function acceptedItem(box, file, { beforeVerify = () => {} } = {}) {
   const added = box.run(box.repo, 'add', 'web', `Write ${file}`, '--specs', 'G1', '--criterion', `${file} exists`, '--check', `test -f ${file}`, '--json');
   assert.equal(added.code, 0, added.err);
   const id = JSON.parse(added.out).item.item_id;
@@ -25,6 +26,7 @@ function acceptedItem(box, file) {
   const submitted = box.run(box.web, 'submit', String(id));
   assert.equal(submitted.code, 0, submitted.err);
   box.git(box.review, 'switch', '-q', '--detach', commit);
+  beforeVerify();
   const verdict = box.run(box.review, 'verify', String(id), 'accept', '--note', 'the file exists at the submitted commit');
   assert.equal(verdict.code, 0, verdict.err);
   return { id, commit, out: verdict.out };
@@ -78,4 +80,26 @@ test('an accept says how to land, and a dry run catches a missing origin [I1,B3]
   const preview = box.run(box.repo, 'land', '--dry-run', '--json');
   assert.equal(preview.code, 0, preview.out);
   assert.deepEqual(JSON.parse(preview.out).items, [second.id]);
+});
+
+test('an accept names the primary checkout when Git metadata is stored separately [I1,B3]', () => {
+  const box = withReviewer(project(undefined, undefined, { separateGitDir: true }));
+  const accepted = acceptedItem(box, 'web/separate.txt');
+  const merge = new RegExp(`^next: this repo has no remote for pullboard land to push to, so the coordinator merges it on main: (cd ${literal(box.repo)} && git merge --no-ff ${accepted.commit} -m 'chore\\(merge\\): write web/separate\\.txt \\[G1\\]' && pullboard merged ${accepted.id} HEAD)$`, 'mu');
+  const printed = merge.exec(accepted.out);
+  assert.ok(printed, `the accept names the actual primary checkout for separate Git metadata:\n${accepted.out}`);
+
+  const ran = spawnSync('/bin/sh', ['-c', printed[1]], { cwd: box.dir, env: box.env, encoding: 'utf8' });
+  assert.equal(ran.status, 0, `${ran.stdout}${ran.stderr}`);
+  assert.equal(box.tryGit(box.repo, 'merge-base', '--is-ancestor', accepted.commit, 'main').status, 0, 'the exact printed command lands the accepted commit');
+
+  const unregistered = withReviewer(project(undefined, undefined, { separateGitDir: true }));
+  const fallback = acceptedItem(unregistered, 'web/fallback.txt', {
+    beforeVerify: () => rmSync(join(unregistered.env.PULLBOARD_HOME, 'projects.json'), { force: true }),
+  });
+  const mergeCommand = `git merge --no-ff ${fallback.commit} -m 'chore(merge): write web/fallback.txt [G1]' && pullboard merged ${fallback.id} HEAD`;
+  assert.ok(fallback.out.includes(`next: could not safely locate the primary checkout; run from the main checkout: ${mergeCommand}`), fallback.out);
+  assert.doesNotMatch(fallback.out, /\bcd\s/u, 'an unvalidated path is never guessed');
+  const ranFallback = spawnSync('/bin/sh', ['-c', mergeCommand], { cwd: unregistered.repo, env: unregistered.env, encoding: 'utf8' });
+  assert.equal(ranFallback.status, 0, `${ranFallback.stdout}${ranFallback.stderr}`);
 });
