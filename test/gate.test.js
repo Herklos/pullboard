@@ -4,7 +4,7 @@
  */
 import assert from 'node:assert/strict';
 import { runFixtureExecFile as execFileSync, runFixtureChild as spawnSync, runFixtureChild, runFixtureGit } from './fixture-child.js';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
@@ -121,6 +121,52 @@ test('record real file ${id} [C7]', async () => {
   }
   writeFileSync(config, JSON.stringify({ testConcurrency: { browser: 3 } }));
   assert.throws(() => testConcurrency(root, 7), /browser must be 1 or 2/);
+});
+
+test('the gate stops before the suite on a missing clock-budget comment [C7]', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-gate-clock-budget-')));
+  dirs.push(root);
+  mkdirSync(join(root, 'bin'));
+  mkdirSync(join(root, 'test'));
+
+  const actualPackage = JSON.parse(readFileSync(resolve(import.meta.dirname, '../package.json'), 'utf8'));
+  const gateScript = actualPackage.scripts.gate;
+  const fixturePackage = { ...actualPackage, scripts: { ...actualPackage.scripts, test: 'node test/suite-sentinel.js' } };
+  assert.equal(fixturePackage.scripts.gate, gateScript, 'the real package gate command is preserved verbatim');
+  writeFileSync(join(root, 'package.json'), JSON.stringify(fixturePackage, null, 2) + '\n');
+  copyFileSync(resolve(import.meta.dirname, 'wall-clock-budgets.js'), join(root, 'test/wall-clock-budgets.js'));
+  writeFileSync(join(root, 'bin/pullboard.js'), `if (process.argv.slice(2).join(' ') !== 'spec check') process.exit(2);
+process.stdout.write('fixture spec check reached\\n');
+`);
+  const suiteMarker = join(root, 'suite-ran');
+  writeFileSync(join(root, 'test/suite-sentinel.js'), `import { writeFileSync } from 'node:fs';
+writeFileSync(${JSON.stringify(suiteMarker)}, 'ran');
+`);
+  const missingBudget = join(root, 'test/missing-budget.test.js');
+  writeFileSync(missingBudget, `import assert from 'node:assert/strict';
+const started = Date.now();
+assert.ok(Date.now() - started < 500, 'planted assertion without a budget comment');
+`);
+
+  const env = { ...process.env, npm_config_update_notifier: 'false', npm_config_audit: 'false', npm_config_fund: 'false' };
+  runFixtureGit(['init', '-q', '-b', 'main'], { cwd: root, env });
+  runFixtureGit(['add', '-A'], { cwd: root, env });
+
+  const refused = runFixtureChild('npm', ['run', 'gate'], { cwd: root, env, encoding: 'utf8' });
+  const refusalOutput = `${refused.stdout ?? ''}\n${refused.stderr ?? ''}`;
+  assert.notEqual(refused.status, 0, `${refused.context}\n${refusalOutput}`);
+  assert.match(refusalOutput, /test\/missing-budget\.test\.js:3: literal elapsed-time margin/u,
+    'the real scanner reports the tracked file and exact line');
+  assert.match(refusalOutput, /elapsed-time margin|clock budget|wall-clock/u,
+    'the refusal explains that the failure is a clock-budget violation');
+  assert.ok(refused.elapsedMs < 5000, `${refused.elapsedMs}ms; scanner must refuse before the suite.`); // budget: declared #653 static-refusal ceiling is 5000ms.
+  assert.equal(existsSync(suiteMarker), false, 'the suite sentinel did not run after the scanner refused');
+
+  rmSync(missingBudget);
+  runFixtureGit(['add', '-u'], { cwd: root, env });
+  const clean = runFixtureChild('npm', ['run', 'gate'], { cwd: root, env, encoding: 'utf8' });
+  assert.equal(clean.status, 0, `${clean.context}\n${clean.stdout ?? ''}\n${clean.stderr ?? ''}`);
+  assert.equal(existsSync(suiteMarker), true, 'a clean scanner result continues into the suite');
 });
 
 /**
