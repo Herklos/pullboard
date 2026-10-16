@@ -144,6 +144,17 @@ function notices(document, io) {
   }
 }
 
+/**
+ * Name how a relay request failed before any response, from the error's own fields only.
+ * Why: a bare "did not answer" hid whether a request timed out, was refused or lost its socket,
+ * so load-dependent relay failures could not be attributed (#512).
+ */
+function transportFailure(error) {
+  if (error?.name === 'TimeoutError' || error?.name === 'AbortError') return 'timed out';
+  const code = error?.cause?.code ?? error?.code;
+  return typeof code === 'string' && /^[A-Z][A-Z0-9_]{1,40}$/u.test(code) ? code : 'no connection';
+}
+
 /** The sole outbound transport in the CLI: explicit sign-in or a saved, opted-in board link. */
 async function request(state, path, { method = 'GET', body, allowMissing = false, initialBaseline = false, signal } = {}, io) {
   const supplied = io?.ignoreRelayEnvironmentToken ? undefined : process.env.PULLBOARD_RELAY_TOKEN;
@@ -151,15 +162,20 @@ async function request(state, path, { method = 'GET', body, allowMissing = false
   if (readToken !== undefined && !/^pa_[A-Za-z0-9_-]{43}$/.test(readToken)) throw new Refused('AUTH_REQUIRED', 'supply a current scoped board token without including it in command arguments');
   const token = readToken ?? state.token;
   let response;
+  // Validate first: a refusal below repeats this address, so it must already be credential-free.
+  const origin = relayOrigin(state.url);
+  const startedAt = Date.now();
   try {
-    response = await fetch(relayOrigin(state.url) + path, {
+    response = await fetch(origin + path, {
       method, redirect: 'error', signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10000)]) : AbortSignal.timeout(10000),
       headers: { 'x-pullboard-engine': String(ENGINE_VERSION), ...(token ? { authorization: 'Bearer ' + token } : {}), ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...(initialBaseline ? { 'if-none-match': '*' } : {}) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
-  } catch {
+  } catch (error) {
     if (signal?.aborted) throw new Refused('OAUTH_CANCELLED', 'GitHub device sign-in was cancelled; no board was linked');
-    throw new Refused('RELAY_UNAVAILABLE', `the relay ${state.url} did not answer; read the local board offline, then retry this move when the relay is reachable`);
+    const refusal = new Refused('RELAY_UNAVAILABLE', `the relay ${state.url} did not answer (${transportFailure(error)} after ${Date.now() - startedAt} ms on ${method} ${path.split('?')[0]}); read the local board offline, then retry this move when the relay is reachable`);
+    refusal.transportFailure = transportFailure(error);
+    throw refusal;
   }
   let document;
   try { document = await response.json(); }
@@ -716,6 +732,31 @@ async function restoreCheckpoint(root, state, io, key) {
   localRecords(root, (board) => restoreRelaySnapshot(board, native, snapshot.sequence));
 }
 
+/**
+ * Keep why a move's reply was lost on its durable send record, then return the original refusal.
+ * Why: the command that gave up exits here, so only the saved cause lets whichever later command
+ * recovers the move say what the earlier request failed with (#642). It holds the cause name only.
+ */
+function rememberLostReply(file, state, id, error) {
+  const held = [state.pending, state.recovered].find((record) => record?.move?.id === id);
+  if (held) {
+    held.lostReply = error.transportFailure ?? error.code;
+    saveLink(file, state);
+  }
+  return error;
+}
+
+/**
+ * Say once that catch-up recovered a move whose earlier reply was lost, with that request's cause.
+ * Why: any later command, a read included, may be the one that recovers it; the saved cause is
+ * cleared here so the repeated command does not say it again (#642).
+ */
+function reportRecoveredReply(record, io) {
+  if (!record?.lostReply) return;
+  io?.err?.(`pullboard: recovered move ${record.sequence} (${record.move.operation}) whose earlier reply was lost: ${record.lostReply}`);
+  delete record.lostReply;
+}
+
 /** Apply a validated relay prefix with durable, transaction-bound receipts on this replica. */
 async function catchUp(root, file, state, io) {
   const key = readBoardKey(state.board);
@@ -741,12 +782,14 @@ async function catchUp(root, file, state, io) {
         && record.sealed === state.pending.sealed && outcome?.error
         && !localRecords(root, board => engineReceipt(board, state.pending.move.id))) {
       pendingRefusal = outcome.error;
+      reportRecoveredReply(state.pending, io);
       delete state.pending;
       delete state.recovered;
     }
   }
   state.sequence = localRecords(root, appliedSequence);
   if (state.pending?.move && localRecords(root, (board) => engineReceipt(board, state.pending.move.id))) {
+    reportRecoveredReply(state.pending, io);
     state.recovered = state.pending;
     delete state.pending;
   }
@@ -929,8 +972,8 @@ export async function relayOperation(root, operation, args, io, command, applyLo
         catch (error) {
           if (!['RELAY_UNAVAILABLE', 'RELAY_RESPONSE'].includes(error.code)) throw error;
           // A lost acknowledgement can be recovered now without asking the caller to retry side effects.
-          try { await catchUp(root, file, state, io); } catch { throw error; }
-          if (!localRecords(root, (board) => engineReceipt(board, move.id))) throw error;
+          try { await catchUp(root, file, state, io); } catch { throw rememberLostReply(file, state, move.id, error); }
+          if (!localRecords(root, (board) => engineReceipt(board, move.id))) throw rememberLostReply(file, state, move.id, error);
         }
       }
       const receipt = localRecords(root, (board) => engineReceipt(board, move.id));

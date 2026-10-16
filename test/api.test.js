@@ -623,6 +623,8 @@ test('[A1] command results match the catalog across roots and subcommands', () =
   json(box, repo, 'spec', ['show', 'G1'], 'show');
   json(box, repo, 'spec', ['unmet'], 'unmet');
   assert.equal(json(box, repo, 'spec', ['draft', 'A draft API catalogue row'], 'draft').id, 'G2');
+  writeFileSync(join(box.dir, 'catalog-blueprint.json'), `${JSON.stringify({ blueprint: 1, name: 'catalog', title: 'Catalog', version: 1, rules: [{ key: 'R1', text: 'A catalog rule.', why: 'the API lists it.' }] })}\n`);
+  assert.equal(json(box, repo, 'blueprint', ['add', join(box.dir, 'catalog-blueprint.json')], 'add').rows[0].status, 'draft');
   mkdirSync(join(repo, 'test'));
   writeFileSync(join(repo, 'test', 'proof.test.js'), "import { test } from 'node:test';\ntest('proof [G1]', () => {});\n");
   box.git(repo, 'add', 'SPEC.md', 'test/proof.test.js');
@@ -981,6 +983,8 @@ test('[A1] every catalog command and subcommand has a real CLI exercise', () => 
   /** Exercise the agent-only takeover with a private explicit session, leaving later terminal calls markerless. */
   const sessionSource = { ...source, run: (cwd, ...args) => runFixtureChild(process.execPath, [BIN, ...args], { cwd, env: { ...source.env, CODEX_SESSION_ID: 'api-catalog-session' }, encoding: 'utf8' }) };
   json(sessionSource, source.repo, 'takeover');
+  const runner = json(source, source.repo, 'runner', ['add', 'fixture-runner', '--slots', '2', '--browser', '1']);
+  assert.deepEqual(runner.runner, { host: 'fixture-runner', slots: 2, browser: 1 });
   const missing = Object.keys(JSON_SHAPES.commands).filter((key) => !covered.has(key));
   assert.deepEqual(missing, [], `add real-repo invocations for undocumented coverage gaps: ${missing.join(', ')}`);
   assert.deepEqual([...coveredRoots].sort(), resultCommands(), 'every actual root/factory command has an invocation');
