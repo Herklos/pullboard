@@ -267,3 +267,89 @@ test('a landing gate split into shards reports one result [C7,V4]', { timeout: 3
     assert.equal(Object.keys(mergedFiles(landing.output)).length, 6);
   }
 });
+
+/**
+ * Run a sharded landing in a child process where the SSH round trip is replaced by one that answers
+ * every runner call with `answer` (a refusal code, or DROPPED for a lost transport).
+ */
+async function landingWithRunnerAnswer(box, answer, count, deadlineMs) {
+  const url = name => JSON.stringify(pathToFileURL(join(SOURCE, 'src', name)).href);
+  const files = NAMES.map(name => `./test/${name}.test.js`);
+  const script = `const { runLandingShards, landingShardProfile } = await import(${url('landing-shards.js')});
+const { Refused } = await import(${url('refused.js')});
+const { RunnerDropped } = await import(${url('runners.js')});
+const answer = ${JSON.stringify(answer)};
+const calls = [];
+const remoteRun = async (_root, _command, options) => {
+  calls.push(options.runner.host);
+  if (answer === 'DROPPED') throw new RunnerDropped(options.runner.host);
+  throw new Refused(answer, 'runner ' + options.runner.host + ' answered ' + answer + '; inspect job fixture-job under its runner namespace before another run');
+};
+const chunks = [];
+const result = await runLandingShards({ root: ${JSON.stringify(box.repo)}, runner: ${JSON.stringify(join(box.repo, 'bin', 'run-tests.js'))},
+  files: ${JSON.stringify(files)}, count: ${count}, remoteRun, write: text => chunks.push(text) });
+const output = chunks.join('');
+process.stdout.write(JSON.stringify({ isGreen: result.isGreen, output, calls, profile: landingShardProfile(output) }));`;
+  const env = { ...box.env };
+  delete env.NODE_TEST_CONTEXT;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script], { cwd: box.repo, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8').on('data', part => { stdout += part; });
+  child.stderr.setEncoding('utf8').on('data', part => { stderr += part; });
+  const closed = new Promise(resolveClose => child.once('close', status => resolveClose({ status })));
+  let timer;
+  const ended = await Promise.race([closed, new Promise(resolveDeadline => { timer = setTimeout(() => resolveDeadline(null), deadlineMs); })]);
+  clearTimeout(timer);
+  if (!ended) {
+    for (const signal of ['SIGTERM', 'SIGKILL']) { try { process.kill(-child.pid, signal); } catch { /* already gone */ } }
+    await closed;
+    throw new Error(`runner answer "${answer}" passed its ${deadlineMs} ms deadline\n${stderr.slice(-4_000)}`);
+  }
+  assert.equal(ended.status, 0, `runner answer "${answer}": the landing process failed\n${stderr.slice(-4_000)}`);
+  return JSON.parse(stdout);
+}
+
+test('a runner refusal in a sharded landing is handled by its class [C7,V4]', { timeout: 300_000 }, async (t) => { // budget: five bounded landings on one fixture.
+  const box = fixture();
+  t.after(() => rmSync(box.dir, { recursive: true, force: true }));
+  scenario(box, 'green');
+  const rerunLine = /^landing shard (\d\/\d): runner fixture-host failed mid-shard; rerunning shard \1 locally$/mu;
+
+  // 1. A lost host or transport reruns the shard locally, named.
+  const dropped = await landingWithRunnerAnswer(box, 'DROPPED', 3, 120_000);
+  assert.equal(dropped.isGreen, true, dropped.output);
+  assert.match(dropped.output, rerunLine);
+  assert.match(dropped.output, /attempt 1 on fixture-host: infrastructure \(runner transport lost\)/u);
+
+  // 2. Changed source: the code under test drifted, so the landing fails by name with no retry.
+  const drifted = await landingWithRunnerAnswer(box, 'RUNNER_SOURCE_CHANGED', 3, 120_000);
+  assert.equal(drifted.isGreen, false, drifted.output);
+  assert.match(drifted.output, /attempt 1 on fixture-host: refused \(runner refused: RUNNER_SOURCE_CHANGED\) in \d+ ms$/mu);
+  assert.match(drifted.output, /^landing shard \d\/3: runner fixture-host refused it: \[RUNNER_SOURCE_CHANGED\] runner fixture-host answered/mu);
+  assert.doesNotMatch(drifted.output, rerunLine, 'changed source is never retried');
+  assert.equal(drifted.calls.length, 1);
+  assert.equal(drifted.profile.shards.filter(shard => shard.status === 'stopped').length, 2, 'the other shards stop');
+
+  // 3. Unverified cleanup reruns locally but takes the host out of this landing: no more shards go to it.
+  const unverified = await landingWithRunnerAnswer(box, 'RUNNER_CLEANUP_TIMEOUT', 4, 150_000);
+  assert.equal(unverified.isGreen, true, unverified.output);
+  assert.match(unverified.output, rerunLine);
+  assert.match(unverified.output, /^landing runner fixture-host quarantined for the rest of this landing: \[RUNNER_CLEANUP_TIMEOUT\] .*inspect job fixture-job under its runner namespace before another run$/mu);
+  assert.deepEqual(unverified.calls, ['fixture-host'], 'the quarantined host gets no second shard');
+  assert.deepEqual(unverified.profile.quarantined.map(entry => entry.host), ['fixture-host']);
+  assert.ok(unverified.profile.shards.filter(shard => shard.status === 'green').every(shard => shard.host === 'local'));
+
+  // 4. A setup the runner's own pool refused (#690) reruns locally, with the code and host in the log.
+  const setup = await landingWithRunnerAnswer(box, 'RUNNER_SETUP_REFUSED', 3, 120_000);
+  assert.equal(setup.isGreen, true, setup.output);
+  assert.match(setup.output, rerunLine);
+  assert.match(setup.output, /attempt 1 on fixture-host: infrastructure \(runner refused: RUNNER_SETUP_REFUSED\)/u);
+  assert.match(setup.output, /^landing shard \d\/3: runner fixture-host refused it: \[RUNNER_SETUP_REFUSED\]/mu);
+
+  // 5. A refusal this landing does not know fails closed: red, named, and never silently retried.
+  const unknown = await landingWithRunnerAnswer(box, 'RUNNER_SOMETHING_NEW', 3, 120_000);
+  assert.equal(unknown.isGreen, false, unknown.output);
+  assert.match(unknown.output, /attempt 1 on fixture-host: refused \(runner refused: RUNNER_SOMETHING_NEW\)/u);
+  assert.doesNotMatch(unknown.output, rerunLine);
+});

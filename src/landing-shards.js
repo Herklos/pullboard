@@ -162,6 +162,27 @@ async function runLocalShard({ root, runner, files, label, lease, stop }) {
   return { isGreen: status === 0 && !signal, output: chunks.join('') };
 }
 
+/** Runner refusals that mean the host could not run the shard right now, so a local rerun is sound. */
+const RERUN_REFUSALS = new Set(['RUNNER_SETUP_REFUSED', 'RESOURCE_LEASE_LOST']);
+
+/**
+ * How a sharded landing answers a runner that gave no test result. A lost host or transport, or a
+ * setup the runner's own pool refused (#690), reruns the shard locally. An unverified cleanup also
+ * reruns locally, but takes that host out of this landing. Changed source means the code under test
+ * drifted, so the landing fails; so does any refusal this does not know, with no silent retry.
+ *
+ * @param {unknown} error
+ * @param {{ RunnerDropped: Function, Refused: Function }} kinds
+ * @returns {{ action: 'rerun'|'quarantine'|'fail', reason: string, code: string|null }|null} null when it is not a runner answer at all.
+ */
+export function runnerFailureClass(error, { RunnerDropped, Refused }) {
+  if (error instanceof RunnerDropped) return { action: 'rerun', reason: 'runner transport lost', code: null };
+  if (!(error instanceof Refused)) return null;
+  if (RERUN_REFUSALS.has(error.code)) return { action: 'rerun', reason: `runner refused: ${error.code}`, code: error.code };
+  if (error.code === 'RUNNER_CLEANUP_TIMEOUT') return { action: 'quarantine', reason: `runner refused: ${error.code}`, code: error.code };
+  return { action: 'fail', reason: `runner refused: ${error.code}`, code: error.code };
+}
+
 /** A shard's acquisition stopped waiting because the shard ran elsewhere or the landing stopped. */
 class NotNeeded extends Error {}
 
@@ -183,9 +204,13 @@ class NotNeeded extends Error {}
  *   holds; `write` receives the merged log.
  * @returns {Promise<{ isGreen: boolean, balance: string, shards: object[], files: object[] }>}
  */
-export async function runLandingShards({ root, runner, files, count, inherited = null, needsBrowser = async () => true, write = text => process.stdout.write(text) }) {
+export async function runLandingShards({ root, runner, files, count, inherited = null, needsBrowser = async () => true, write = text => process.stdout.write(text), remoteRun }) {
   const { withGateSlot } = await import('./gate.js');
-  const { RunnerDropped, runOnRunnerAsync } = await import('./runners.js');
+  const runners = await import('./runners.js');
+  const { RunnerDropped } = runners;
+  // A test may stand in for the SSH round trip to make a runner answer with a given refusal.
+  const runOnRunnerAsync = remoteRun ?? runners.runOnRunnerAsync;
+  const quarantined = new Map();
   const { Refused } = await import('./refused.js');
   const history = readFileTimes(root);
   const plan = planLandingShards(files, count, history);
@@ -225,12 +250,18 @@ export async function runLandingShards({ root, runner, files, count, inherited =
     } catch (error) {
       // A stop ends the runner's transport on purpose; that shard was stopped, not dropped.
       if (stop.aborted) return { attempt: number, host: lease.runner.host, outcome: 'stopped', output: '', wallMs: Date.now() - started };
-      // Infrastructure, not a test result: the runner could not give this shard a complete answer.
-      if (error instanceof RunnerDropped || error instanceof Refused) {
-        const reason = error instanceof RunnerDropped ? 'runner transport lost' : `runner refused: ${error.code}`;
-        return { attempt: number, host: lease.runner.host, outcome: 'infrastructure', reason, output: '', wallMs: Date.now() - started };
+      const failure = runnerFailureClass(error, { RunnerDropped, Refused });
+      if (!failure) throw error;
+      const host = lease.runner.host;
+      const message = error instanceof Refused ? error.message : '';
+      if (message) write(`landing shard ${entry.label}: runner ${host} refused it: ${message}\n`);
+      if (failure.action === 'quarantine' && !quarantined.has(host)) {
+        quarantined.set(host, message);
+        write(`landing runner ${host} quarantined for the rest of this landing: ${message}\n`);
       }
-      throw error;
+      // Infrastructure, not a test result: the runner could not give this shard a complete answer.
+      return { attempt: number, host, outcome: failure.action === 'fail' ? 'refused' : 'infrastructure', reason: failure.reason,
+        output: '', wallMs: Date.now() - started };
     }
   };
 
@@ -249,7 +280,7 @@ export async function runLandingShards({ root, runner, files, count, inherited =
     } else {
       entry.done = true;
       entry.status = status;
-      if (status === 'red') {
+      if (status === 'red' || status === 'refused') {
         firstFailure = entry.label;
         stopper.abort();
       }
@@ -279,10 +310,17 @@ export async function runLandingShards({ root, runner, files, count, inherited =
     const localOnly = entry.localOnly;
     const running = withGateSlot(root, async lease => {
       if (entry.claimed || entry.done) return;
+      // A host quarantined in this landing gets no more shards; queue again for a local slot.
+      if (lease.runner && quarantined.has(lease.runner.host)) return 'divert';
       entry.claimed = true;
       await runOnLease(entry, lease);
     }, { landing: true, browser: entry.browser, remote: !localOnly, kind: 'landing', item: `shard ${entry.label}`,
       onWait: () => { if (entry.claimed || entry.done || stop.aborted) throw new NotNeeded(); } });
+    running.then(result => {
+      if (result !== 'divert' || entry.claimed || entry.done) return;
+      entry.localOnly = true;
+      acquire(entry);
+    }, () => {});
     running.catch(error => {
       if (error instanceof NotNeeded) {
         // A stopped shard that was only waiting for a slot is recorded as stopped here.
@@ -344,17 +382,20 @@ export function landingShardProfile(output) {
   const files = [];
   let balance = null;
   let floor = null;
+  const quarantined = [];
   for (const line of String(output).split(/\r?\n/u)) {
     const plan = /^# landing shards: \d+ balanced by (history|history and average|file count) \(/u.exec(line);
     if (plan) balance = plan[1];
+    const held = /^landing runner (\S+) quarantined for the rest of this landing: (.*)$/u.exec(line);
+    if (held) quarantined.push({ host: held[1], message: held[2] });
     const slowest = /^# landing floor: (\d+) ms (.+)$/u.exec(line);
     if (slowest) floor = { path: slowest[2], ms: Number(slowest[1]) };
-    const shard = /^# landing shard (\d+\/\d+) attempt (\d+) on (\S+): (green|red|stopped|infrastructure)(?: \(([^)]*)\))? in (\d+) ms$/u.exec(line);
+    const shard = /^# landing shard (\d+\/\d+) attempt (\d+) on (\S+): (green|red|stopped|infrastructure|refused)(?: \(([^)]*)\))? in (\d+) ms$/u.exec(line);
     if (shard) shards.push({ shard: shard[1], attempt: Number(shard[2]), host: shard[3], status: shard[4], reason: shard[5] ?? null, wallMs: Number(shard[6]) });
     const file = /^# landing file (\d+\/\d+) (\S+) (\d+|-) (.+)$/u.exec(line);
     if (file) files.push({ path: file[4], shard: file[1], host: file[2], durationMs: file[3] === '-' ? null : Number(file[3]) });
   }
-  return shards.length ? { balance, floor, shards, files } : null;
+  return shards.length ? { balance, floor, quarantined, shards, files } : null;
 }
 
 /** Print this shard's per-file wall times for its orchestrator; a missing record prints nothing. */

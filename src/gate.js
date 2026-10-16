@@ -310,6 +310,8 @@ export function writeTimingProfile(path, profile) {
     ...(profile.executionRunner ? { executionRunner: sanitize(profile.executionRunner, 'execution runner') } : {}),
     ...(profile.landingShards ? { landingShards: {
       balance: sanitize(String(profile.landingShards.balance ?? 'unknown'), 'landing balance'),
+      quarantined: (profile.landingShards.quarantined ?? []).map(entry => ({ host: sanitize(String(entry.host), 'landing quarantine host'),
+        message: sanitize(String(entry.message), 'landing quarantine message') })),
       floor: profile.landingShards.floor && validDuration(profile.landingShards.floor.ms)
         ? { path: sanitize(String(profile.landingShards.floor.path), 'landing floor path'), ms: profile.landingShards.floor.ms } : null,
       // One entry per attempt, so a failed runner attempt stays beside its local rerun.
