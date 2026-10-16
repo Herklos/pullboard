@@ -1,0 +1,19 @@
+{
+  "blueprint": 1,
+  "name": "serverless",
+  "title": "Serverless",
+  "version": 1,
+  "kind": "infrastructure",
+  "by": "Pullboard",
+  "summary": "Pick your cloud once, and your agents never drift from it.",
+  "prefix": "SV",
+  "rules": [
+    { "key": "SV1", "text": "Every function has an alarm before it ships.", "why": "a function that fails quietly is found by your users first." },
+    { "key": "SV2", "text": "No function runs past its platform's time limit.", "why": "the platform stops a function at its limit, so longer work has to be split before it fails in production." }
+  ],
+  "questions": [
+    { "key": "Q1", "ask": "It runs on", "choices": ["AWS", "Google Cloud", "Azure", "Cloudflare"], "default": "AWS" },
+    { "key": "Q2", "ask": "Its region is", "choices": ["The one nearest my users", "A US region", "An EU region", "Another region"], "default": "The one nearest my users" },
+    { "key": "Q3", "ask": "Its database is", "choices": ["A managed key-value store", "A managed SQL database", "None yet"], "default": "A managed key-value store" }
+  ]
+}
