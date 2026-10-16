@@ -72,9 +72,9 @@ function pageWait(chrome, step, expression, timeoutMs) {
   return chrome.waitFor(expression, timeoutMs, step);
 }
 
-/** Label a set-up-once page evaluation without changing its expression or deadline. */
-function pageEvaluate(chrome, step, expression) {
-  return chrome.evaluate(expression, step);
+/** Label a set-up-once page evaluation and optionally set its per-command deadline. */
+function pageEvaluate(chrome, step, expression, timeoutMs) {
+  return chrome.evaluate(expression, step, timeoutMs);
 }
 
 test('the set-up-once wait names the step it is on [H5,C7]', {
@@ -105,7 +105,6 @@ test('the set-up-once wait names the step it is on [H5,C7]', {
   const address = server.address();
   chrome = await startChrome({
     url: `http://127.0.0.1:${address.port}/stand-in`,
-    commandTimeoutMs: 1_000,
     diagnosticTimeoutMs: 200,
     capturePageSteps: true,
   });
@@ -163,7 +162,7 @@ test('the set-up-once wait names the step it is on [H5,C7]', {
   await assert.rejects(pageWait(chrome, 'stand-in forced condition step', 'false', 80), error => assertPageCapture( // budget: 80 ms hang ceiling for forced stand-in timeout capture
     error, 'stand-in forced condition step', null,
   ));
-  await assert.rejects(pageEvaluate(chrome, 'stand-in forced evaluate step', 'new Promise(() => {})'), error => {
+  await assert.rejects(pageEvaluate(chrome, 'stand-in forced evaluate step', 'new Promise(() => {})', 1_000), error => {
     assert.equal(error.code, 'CDP_TIMEOUT');
     return assertPageCapture(error, 'stand-in forced evaluate step', null);
   });
