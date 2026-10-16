@@ -60,8 +60,11 @@ const PINNED_PROBLEMS = {
     ['test/land.test.js', 760], ['test/land.test.js', 762], ['test/land.test.js', 906], ['test/runners.test.js', 1250],
   ].map(([path, line]) => `${path}:${line}: ${BARE}`),
   'test-inputs': [
-    ['test/blueprint.test.js', 13], ['test/cockpit/layout.test.js', 146], ['test/cockpit/relay.test.js', 131],
-    ['test/doctrine.test.js', 28], ['test/seal.test.js', 90],
+    ['test/api-http.test.js', 428], ['test/blueprint.test.js', 13], ['test/cockpit/layout.test.js', 146],
+    ['test/cockpit/relay.test.js', 131], ['test/doctrine.test.js', 28], ['test/e2e-private-checks.test.js', 113],
+    ['test/gate-profile.test.js', 16], ['test/gate.test.js', 13], ['test/help.test.js', 33], ['test/resources.test.js', 131],
+    ['test/resume-flow.test.js', 27], ['test/run-tests.test.js', 119], ['test/seal.test.js', 90], ['test/settings.test.js', 11],
+    ['test/test-resources.test.js', 86], ['test/test-runner.test.js', 108],
   ].map(([path, line]) => `${path}:${line}: ${UNDECLARED}`),
 };
 
@@ -139,7 +142,7 @@ test('Pullboard\'s four checks count what main has [D1, C7]', async (t) => {
       assert.deepEqual(runCheck(name, { cwd: dir, root: pinned }).lines, expected[name], `${name} scans its argument the same`);
     }
     assert.deepEqual(Object.fromEntries(CHECKS.map((name) => [name, expected[name].length])),
-      { 'file-size': 70, 'test-names': 15, 'empty-catch': 13, 'test-inputs': 5 }, 'today\'s counts');
+      { 'file-size': 70, 'test-names': 15, 'empty-catch': 13, 'test-inputs': 16 }, 'today\'s counts');
   });
 
   await t.test('on this checkout each check prints sorted path:line: text lines, exits 0 or 1, in under 10s [D1, C7]', () => {
@@ -249,17 +252,48 @@ test('Pullboard\'s four checks count what main has [D1, C7]', async (t) => {
       "test('reads the seal source [S1]', () => readFileSync(new URL('../src/seal.js', import.meta.url), 'utf8'));",
       '',
     ].join('\n');
+    const splitVariable = [
+      "import { readFileSync } from 'node:fs';",
+      "const source = new URL('../src/x.js', import.meta.url);",
+      'export const text = readFileSync(source, \'utf8\');',
+      '',
+    ].join('\n');
+    const queuedWalk = [
+      "import { readFileSync } from 'node:fs';",
+      "import { resolve } from 'node:path';",
+      "const ROOT = resolve(import.meta.dirname, '..');",
+      "const pending = [[resolve(ROOT, 'src/help.js')]];",
+      'for (const file of pending.pop()) readFileSync(file, \'utf8\');',
+      '',
+    ].join('\n');
     put(root, 'test/declared.test.js', `/** @pullboard-test-input test-tree */\n/** @pullboard-test-input source-tree */\n${reader}`);
     put(root, 'test/fixture-copy.test.js', "import { readFileSync } from 'node:fs';\nconst copy = (lane) => readFileSync(join(lane, 'src/board.js'), 'utf8');\n");
     put(root, 'test/imports.test.js', "import { seal } from '../src/seal.js';\nconst note = \"readFileSync(new URL('../src/a.js', import.meta.url))\";\n");
+    put(root, 'test/module-url.test.js', [
+      "import { readFileSync } from 'node:fs';",
+      "const board = new URL('../src/board.js', import.meta.url).href;",
+      "const cli = pathToFileURL(resolve(import.meta.dirname, '../src/cli.js')).href;",
+      "const api = await import(new URL('../src/api.js', import.meta.url));",
+      "export const config = readFileSync('pullboard.json', 'utf8');",
+      '',
+    ].join('\n'));
+    put(root, 'test/no-read.test.js', "export const worker = resolve(import.meta.dirname, '../src/worker.js');\n");
     const clean = runCheck('test-inputs', { root });
-    assert.deepEqual([clean.status, clean.lines], [0, []], 'a declared reader, a fixture copy and an import print nothing');
+    assert.deepEqual([clean.status, clean.lines], [0, []], 'a declared reader, a fixture copy, an import, module URLs and a path never read print nothing');
     put(root, 'test/undeclared.test.js', reader);
     const undeclared = runCheck('test-inputs', { root });
     assert.deepEqual(undeclared.lines, [`test/undeclared.test.js:3: ${UNDECLARED}`], 'one undeclared reader is one line');
     assert.equal(undeclared.status, 1);
+    rmSync(join(root, 'test/undeclared.test.js'));
+    put(root, 'test/split-variable.test.js', splitVariable);
+    assert.deepEqual(runCheck('test-inputs', { root }).lines, [`test/split-variable.test.js:2: ${UNDECLARED}`],
+      'a source path built on one line and read on the next is one line');
+    rmSync(join(root, 'test/split-variable.test.js'));
+    put(root, 'test/queued-walk.test.js', queuedWalk);
+    assert.deepEqual(runCheck('test-inputs', { root }).lines, [`test/queued-walk.test.js:4: ${UNDECLARED}`],
+      'a ROOT-anchored path queued and read later, as help.test.js does, is one line');
     put(root, 'test/late.test.js', `import { readFileSync } from 'node:fs';\n/** @pullboard-test-input source-tree */\n${reader.split('\n').slice(1).join('\n')}`);
     assert.deepEqual(runCheck('test-inputs', { root }).lines.map((line) => line.slice(0, line.indexOf(':'))),
-      ['test/late.test.js', 'test/undeclared.test.js'], 'a declaration below the first code line is not read, as the selection reads it');
+      ['test/late.test.js', 'test/queued-walk.test.js'], 'a declaration below the first code line is not read, as the selection reads it');
   });
 });
