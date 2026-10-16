@@ -190,7 +190,8 @@ function waiterPosition(db, name, ticket, { eligibleOnly = false } = {}) {
   const queueName = name === 'browser' ? 'gate' : name;
   const waiters = db.prepare('SELECT ticket, pid, agent, repo, landing, item_check AS itemCheck, browser FROM waiter WHERE name = ? ORDER BY ticket').all(queueName);
   const holders = db.prepare('SELECT pid, agent, repo FROM holder WHERE name = ?').all(queueName);
-  const browserBusy = db.prepare("SELECT COUNT(*) AS count FROM holder WHERE name = 'gate' AND browser = 1").get().count > 0;
+  const browserCapacity = db.prepare("SELECT capacity FROM resource WHERE name = 'browser'").get()?.capacity ?? 1;
+  const browserBusy = db.prepare("SELECT COUNT(*) AS count FROM holder WHERE name = 'gate' AND browser = 1").get().count >= browserCapacity;
   /** A live process owns its leases even if it changes descriptive agent or repository labels. */
   const holdsSlot = (waiter) => holders.some((holder) => holder.pid === waiter.pid);
   /** Leave a waiting independent landing a slot before a holder takes another lease. */
