@@ -65,7 +65,7 @@ import { tour } from './tour.js';
 import { commandOutput, refusalDocument } from './json.js';
 import { forgetProject, listApiProjects, registerProjectAndLink } from './projects.js';
 import { milestoneRoadmap } from './roadmap.js';
-import { listResources } from './resources.js';
+import { listResources, memoryVerdict, readMachineMemory } from './resources.js';
 import { citedTestFiles, rowEvidence, rowStage } from './evidence.js';
 import { exportView, serveView } from './serve.js';
 import { forgetView, rememberView, runningView } from './view-session.js';
@@ -78,7 +78,7 @@ import { flowLines, flowAlertLine } from './stats-flow.js';
 import { releaseHeadlinesBetween } from './changelog.js';
 import { exportBoard, importBoard } from './exchange.js';
 import { addSigner, assertRequiredSigners, defaultPrincipal, hasSignerFile } from './signature.js';
-import { browserFreeChecksEnabled, loadMachineSettings, setBrowserSlots, setGateSlots } from './settings.js';
+import { browserFreeChecksEnabled, loadMachineSettings, memoryFloorMB, setBrowserSlots, setGateSlots } from './settings.js';
 import { formatSnapshotLimit, pendingSnapshotSize, pendingCheckpointProblem, relayCommandReceipt, relayCommandReceiptReported, relayLinked, relayOff, relayOn, relayOperation, relayRecover, relayRecovered, relayRevoke, relayStatus, relayTokens, syncRelay } from './relay.js';
 import { autoLinkProject, relayOnAll, revokeRelayDevice, unlinkedRelayProjects } from './relay-setup.js';
 import { readRelayMachine } from './relay-machine.js';
@@ -1809,16 +1809,18 @@ function readCommands(io, { first, second, rest, values }) {
       io.say(`imported version ${document.version} board tables: ${imported.tables.join(', ')}`);
       return 0;
     },
-    resources: () => {
+    resources: async () => {
       const ctx = context(io);
       const agents = withBoard(ctx, (board) => store.listAgents(board));
       const browserSlots = loadMachineSettings().browserSlots;
+      const memory = memoryVerdict(await readMachineMemory({ processes: true }), memoryFloorMB() * 1024 ** 2);
       const resources = [
         ...listResources({ scope: 'machine' }).map((resource) => ({ ...resource, scope: 'machine' })),
         ...listResources({ scope: 'repo', root: ctx.info.root }).map((resource) => ({ ...resource, scope: 'repo' })),
       ];
-      io.result?.({ resources, browserSlots });
+      io.result?.({ resources, browserSlots, memory });
       io.say(`browserSlots (machine setting): ${browserSlots}`);
+      io.say(memory.line);
       if (!resources.length) io.say('no resources have been used');
       for (const resource of resources) {
         io.say(`${resource.name} (${resource.scope}, capacity ${resource.capacity})`);
@@ -2835,10 +2837,25 @@ function browserAdmissionReporter(io, jsonMode = false) {
   };
 }
 
-/** Build a de-duplicated queue message for a gate waiting on machine capacity. */
-function gateWaitReporter(io) {
+/** Build de-duplicated queue messages for a gate waiting on machine capacity or memory; exported so tests can read what a person sees. */
+export function gateWaitReporter(io) {
   let last = '';
-  return ({ holders, position }) => {
+  let warned = false;
+  let held = false;
+  return ({ holders, position, memory }) => {
+    // Memory speaks once per state: one warning where it cannot be read, one line per hold.
+    if (memory && !memory.checked) {
+      if (!warned) io.say(memory.warning);
+      warned = true;
+      if (!position) return;
+    }
+    if (memory?.held) {
+      if (!held) io.say(memory.line);
+      held = true;
+      last = '';
+      return;
+    }
+    held = false;
     const repos = holders.map(({ repo }) => repo).filter(Boolean);
     const message = `gate waiting: ${holders.length} running${repos.length ? ` in ${repos.join(', ')}` : ''}; place ${position}`;
     if (message !== last) {
@@ -2852,9 +2869,10 @@ function gateWaitReporter(io) {
 function settingsCommand(io, { first, second, rest }) {
   if (!first && !second && !rest.length) {
     const settings = loadMachineSettings();
-    io.result?.({ settings });
+    io.result?.({ settings, memoryFloorMB: memoryFloorMB() });
     io.say(`gateSlots: ${settings.gateSlots}`);
     io.say(`browserSlots: ${settings.browserSlots}`);
+    io.say(`gate.memoryFloorMB: ${memoryFloorMB()}`);
     return 0;
   }
   if (!['gateSlots', 'browserSlots'].includes(first) || !second || rest.length) {

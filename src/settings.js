@@ -8,6 +8,8 @@ import { Refused } from './refused.js';
 
 const DEFAULT_GATE_SLOTS = 2;
 const DEFAULT_BROWSER_SLOTS = 1;
+/** Free memory under which the machine gate queue waits; about one test run's worth of headroom. */
+export const DEFAULT_MEMORY_FLOOR_MB = 1024;
 
 /** Resolve the separate machine settings file. */
 export function machineSettingsFile() {
@@ -30,6 +32,9 @@ export function loadMachineSettings() {
   if (value.gate?.browserFreeChecks !== undefined && typeof value.gate.browserFreeChecks !== 'boolean') {
     throw new Refused('BAD_MACHINE_SETTINGS', `gate.browserFreeChecks in ${file} must be true or false`);
   }
+  if (value.gate?.memoryFloorMB !== undefined && (!Number.isSafeInteger(value.gate.memoryFloorMB) || value.gate.memoryFloorMB < 0)) {
+    throw new Refused('BAD_MACHINE_SETTINGS', `gate.memoryFloorMB in ${file} must be a whole number of megabytes, 0 or more; fix it before running Pullboard`);
+  }
   const gateSlots = value.gateSlots ?? DEFAULT_GATE_SLOTS;
   if (!Number.isSafeInteger(gateSlots) || gateSlots < 1) {
     throw new Refused('BAD_GATE_SLOTS', `gateSlots in ${file} must be a positive integer; run pullboard settings gateSlots <n>`);
@@ -44,6 +49,11 @@ export function loadMachineSettings() {
 /** Browser-free check admission is deliberately opt-in per machine. */
 export function browserFreeChecksEnabled() {
   return loadMachineSettings().gate?.browserFreeChecks === true;
+}
+
+/** The free-memory floor, in megabytes, below which the machine gate pool holds its queue. */
+export function memoryFloorMB() {
+  return loadMachineSettings().gate?.memoryFloorMB ?? DEFAULT_MEMORY_FLOOR_MB;
 }
 
 /** Atomically replace machine settings without exposing a partial JSON file. */

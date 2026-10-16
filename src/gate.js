@@ -12,8 +12,8 @@ import { availableParallelism } from 'node:os';
 import { gitChildEnv, gitPath, headTree, invalidateGitFacts, isClean, untracked } from './git.js';
 import { secretsIn } from './hooks.js';
 import { Refused } from './refused.js';
-import { GATE_SLOT_HELD_ENV, gateSlotEnvironment, inheritedGateSlot, takeResource } from './resources.js';
-import { browserFreeChecksEnabled, loadMachineSettings } from './settings.js';
+import { GATE_SLOT_HELD_ENV, gateSlotEnvironment, inheritedGateSlot, memoryAdmission, readMachineMemory, takeResource } from './resources.js';
+import { browserFreeChecksEnabled, loadMachineSettings, memoryFloorMB } from './settings.js';
 import { selectAffectedTests } from './affected-tests.js';
 import { checkNeedsBrowser, testsNeedBrowser } from './browser-admission.js';
 import { timingFromOutput, timingRunner } from './timing.js';
@@ -269,13 +269,14 @@ function hasPipeline(command) {
 }
 
 /** Run work under the machine queue: landings first, then every other eligible waiter in arrival order.
+ * The whole queue waits while the machine is out of memory, so a run never starts into swap.
  *
  * @param {string} root - Checkout used to locate the machine resource database.
  * @param {(lease: { waitMs: number, token?: string, pool?: string, browser?: boolean, release: () => void }) => any | Promise<any>} action - Work to perform while holding a slot.
- * @param {{ landing?: boolean, itemCheck?: boolean, diagnostic?: boolean, browser?: boolean, agent?: string, item?: string|number, kind?: string, onWait?: (state: object) => void }} [options] - Queue class and progress reporter.
+ * @param {{ landing?: boolean, itemCheck?: boolean, diagnostic?: boolean, browser?: boolean, agent?: string, item?: string|number, kind?: string, onWait?: (state: object) => void, readMemory?: typeof readMachineMemory }} [options] - Queue class, progress reporter and, for tests, the machine memory reader.
  * @returns {Promise<any>} The action's result after releasing its lease.
  */
-export async function withGateSlot(root, action, { landing = false, itemCheck = false, diagnostic = false, browser = false, agent, item = '', kind = '', onWait } = {}) {
+export async function withGateSlot(root, action, { landing = false, itemCheck = false, diagnostic = false, browser = false, agent, item = '', kind = '', onWait, readMemory = readMachineMemory } = {}) {
   const inherited = inheritedGateSlot({ root, browser });
   if (inherited) {
     try { return await action(inherited); }
@@ -299,6 +300,7 @@ export async function withGateSlot(root, action, { landing = false, itemCheck = 
     diagnostic,
     browser,
     allowIdleCapacityUpdate: true,
+    memory: memoryAdmission({ floorBytes: () => memoryFloorMB() * 1024 ** 2, read: readMemory }),
     onWait,
   });
   try {
