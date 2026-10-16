@@ -9,7 +9,8 @@ import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { fixtureChildMessage, runFixtureChild, runFixtureGit, startFixtureChild } from './fixture-child.js';
 import { AGENT_SHELL_MARKERS, SSH_SHELL_MARKERS } from '../src/person.js';
-import { projectState } from '../src/serve.js';
+import { personNeeds } from '../src/needs.js';
+import { personNeedsState } from '../src/needs-state.js';
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
 const SPEC = `# MCP fixture
@@ -234,13 +235,10 @@ test('[A9,P5] an MCP client reads the board and shouts as its agent', async (t) 
   assert.equal(status.structuredContent.version, 1);
   assert.equal(status.structuredContent.me.id, box.agent, 'status reads as the seat\'s agent');
   assert.ok(status.structuredContent.items.some((item) => item.item_id === itemId && item.item_status === 'open'), 'status lists the open item');
-  assert.deepEqual(status.structuredContent.needsYou.decisions.map((ask) => ask.shout_id), [decisionId], 'Needs-you carries the person\'s open decision');
-  // One builder: needsYou is the view's own projection, unshaped, never a query of the tool's own.
-  // Spec rows that need the person come with #702, so needsYou carries decisions and holds only.
-  assert.deepEqual(Object.keys(status.structuredContent.needsYou).sort(), ['decisions', 'holds'], 'needsYou carries no spec rows until #702');
-  const projection = JSON.parse(JSON.stringify(projectState(box.web)));
-  assert.deepEqual(status.structuredContent.needsYou, { decisions: projection.decisions, holds: projection.holds },
-    'needsYou is projectState\'s decisions and holds for the same board');
+  assert.deepEqual(status.structuredContent.needsYou.filter(need => need.kind === 'decision').map(need => need.id), [decisionId],
+    'Needs-you carries the person\'s open decision');
+  assert.deepEqual(status.structuredContent.needsYou, personNeeds(personNeedsState(box.web)),
+    'MCP uses the same person needs builder with current row decisions');
   assert.deepEqual(JSON.parse(status.content[0].text), status.structuredContent, 'the text content is the same document');
 
   const shown = await client.call('show_item', { id: itemId });

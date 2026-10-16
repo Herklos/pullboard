@@ -10,7 +10,8 @@ import { COORDINATOR } from './config.js';
 import { VERSION } from './help.js';
 import { refusalDocument } from './json.js';
 import { Refused } from './refused.js';
-import { projectState } from './serve.js';
+import { personNeeds } from './needs.js';
+import { personNeedsState } from './needs-state.js';
 
 /** MCP revisions this server speaks; the first is offered when a client asks for one it does not know. */
 export const MCP_PROTOCOL_VERSIONS = Object.freeze(['2025-06-18', '2025-03-26', '2024-11-05']);
@@ -28,7 +29,7 @@ const PERSON_MOVE = /approv|declin|answer|sign_?off|decide|decision/u;
 export const MCP_TOOLS = Object.freeze([
   {
     name: 'board_status',
-    description: 'The board at a glance for this seat\'s agent: who you are, the open and active items, the review queue, unread shouts, and needsYou: the decisions and holds fields of the view\'s own board projection, as the view\'s Needs-you reads them; spec rows that need the person come with #702. Mirrors pullboard status and pullboard list. It builds the full board projection, so it is slower on large boards.',
+    description: 'The board at a glance for this seat\'s agent: who you are, the open and active items, the review queue, unread shouts, and needsYou: the shared list of open person decisions, undecided pending and draft spec rows, and lane holds. Mirrors pullboard status and pullboard list. It builds the full board projection, so it is slower on large boards.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
@@ -150,14 +151,14 @@ async function callTool(runCommand, cwd, name, args) {
     if (status.status) return toolResult(status.document, true);
     const list = await runCli(runCommand, cwd, ['list', '--json']);
     if (list.status) return toolResult(list.document, true);
-    // Needs-you comes from the view's own projection, unshaped and read-only: one builder, no second query.
-    const { decisions, holds } = projectState(cwd);
+    // Shared projection retains unapplied row decisions, so settled questions never return as needs.
+    const needsYou = personNeeds(personNeedsState(cwd));
     const { version, ...summary } = status.document;
     return toolResult({
       version,
       ...summary,
       items: list.document.items,
-      needsYou: { decisions, holds },
+      needsYou,
     }, false);
   }
   if (name === 'show_item') {
