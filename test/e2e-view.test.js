@@ -346,9 +346,18 @@ test('the view keeps the board layout people know: switcher, tabs, a list and it
   }
 });
 
-test('the view rebuilds the page only when the board changed, so a refresh cannot swallow a click [N26]', () => {
+test('the view rebuilds only changed boards and refreshes deferred item detail [N26,A2]', () => {
   const page = cockpitSource();
-  assert.match(page, /if \(text !== seen\) \{\s*seen = text;\s*data = next;\s*render\(\);\s*\}/);
+  const start = page.indexOf('async function refresh(');
+  const end = page.indexOf('\n// The local view follows', start);
+  const refresh = page.slice(start, end);
+  assert.match(refresh, /if \(text !== seen\) \{\s*seen = text;\s*data = next;(?:\s*itemSearches\.clear\(\);\s*const reading = detailRead;)?\s*render\(\);(?:\s*if \(detailRead !== reading\) await detailRead;)?\s*\}/);
+  // Full-state APIs need no detail follow-up; summary-state APIs must invalidate search results and
+  // finish any item detail request started by the render before refresh completes.
+  if (page.includes('const itemSearches = new Map();')) {
+    assert.match(refresh, /itemSearches\.clear\(\);/);
+    assert.match(refresh, /const reading = detailRead;\s*render\(\);\s*if \(detailRead !== reading\) await detailRead;/);
+  }
 });
 
 test('doctrine init preserves legacy rules and outside guidance, refreshes labels and refuses empty declines [D1,D2,D3,D4,S8]', () => {

@@ -1036,6 +1036,40 @@ async function tabBar(chrome) {
   return { client: await chrome.stable('document.documentElement.clientWidth'), layouts };
 }
 
+/**
+ * Let a test hold the view's own live updates while it observes one capture (#622). Since #545 the page re-reads the
+ * board on its own three ways: the event-stream catch-up, the fallback read while the stream is down, and the relay's
+ * timed read. Held, the catch-up and every timed read that calls refresh() wait; a refresh() the test calls, or an
+ * action makes, still reads the board, and every response stays real. Call before the page loads.
+ */
+async function allowLiveHold(chrome) {
+  await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+    const nativeInterval = window.setInterval.bind(window);
+    window.__liveHold = { held: false, skipped: 0 };
+    /** A timed read of the board waits while the hold is on; any other interval runs as it would. */
+    window.setInterval = (callback, delay, ...args) => typeof callback === 'function' && /\\brefresh\\(/.test(String(callback))
+      ? nativeInterval(() => { if (window.__liveHold.held) window.__liveHold.skipped += 1; else callback(); }, delay, ...args)
+      : nativeInterval(callback, delay, ...args);
+    /** Hold now, but only while no read is out, so no read already started lands after the hold. */
+    window.__holdLive = () => {
+      if (window.__liveHold.held) return true;
+      if (catching || refreshStarted !== refreshDrawn.generation) return false;
+      const live = catchUp;
+      catchUp = () => { if (window.__liveHold.held) window.__liveHold.skipped += 1; else live(); };
+      window.__liveHold.held = true;
+      return true;
+    };
+  })()` });
+}
+
+/**
+ * Wait until the page shows what ready says and no read is out, and hold its live updates in that same evaluation,
+ * so no refresh lands between "ready" and the hold. The page must have been loaded after allowLiveHold.
+ */
+async function holdLive(chrome, ready, timeoutMs) {
+  await chrome.waitFor(`(${ready}) && window.__holdLive()`, timeoutMs);
+}
+
 /** Serve a folder under a path prefix, as a static host does, recording each request and its status. */
 async function serveFolder(folder, prefix) {
   const requests = [];
@@ -1089,4 +1123,4 @@ async function searchFor(chrome, words, timeoutMs) {
   }
 }
 
-export { BIN, scratch, chooseFilter, tapTarget, SPEC, machine, project, build, sendBack, fetchReason, fetchView, fetchLive, startView, styleOf, element, ageNodes, target, settle, storage, daysOn, openPage, projectRows, productEntries, timelineRows, agentEntries, drawing, textBoxes, meet, accept, needEntries, itemRow, boardId, boardOf, assertObservationAges, withoutObservationAges, assertObservationsEqual, shoutNameText, chromeExecutable, browserPause, startSnapshotChrome, openSnapshotChrome, stopOwnedChrome, closeSnapshotChrome, watchSpecDecisionWait, earlier, shoutsAt, press, tapTouch, pickProject, travel, pressedInto, settled, roadmapRow, showing, readRoadmap, openRoadmapParts, tabBar, serveFolder, proofShot, searchFor };
+export { BIN, scratch, chooseFilter, tapTarget, SPEC, machine, project, build, sendBack, fetchReason, fetchView, fetchLive, startView, styleOf, element, ageNodes, target, settle, storage, daysOn, openPage, projectRows, productEntries, timelineRows, agentEntries, drawing, textBoxes, meet, accept, needEntries, itemRow, boardId, boardOf, assertObservationAges, withoutObservationAges, assertObservationsEqual, shoutNameText, chromeExecutable, browserPause, startSnapshotChrome, openSnapshotChrome, stopOwnedChrome, closeSnapshotChrome, watchSpecDecisionWait, earlier, shoutsAt, press, tapTouch, pickProject, travel, pressedInto, settled, roadmapRow, showing, readRoadmap, openRoadmapParts, tabBar, serveFolder, proofShot, searchFor, allowLiveHold, holdLive };

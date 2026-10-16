@@ -4,11 +4,11 @@
  */
 import assert from 'node:assert/strict';
 import { runFixtureExecFile as execFileSync, runFixtureChild as spawnSync, runFixtureChild, runFixtureGit } from './fixture-child.js';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
-import { digestOf } from '../src/gate.js';
+import { digestOf, testConcurrency } from '../src/gate.js';
 
 const PRIVATE_WORKER = resolve(import.meta.dirname, '../src/private-check-worker.js');
 
@@ -16,6 +16,86 @@ const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
 const dirs = [];
 after(() => {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+});
+
+/** Read the real file bodies' start/finish records to measure overlap without sampling process names. */
+function fileOverlap(file) {
+  const active = new Map();
+  const starts = [];
+  let files = 0, browser = 0;
+  for (const line of readFileSync(file, 'utf8').trim().split('\n')) {
+    const event = JSON.parse(line);
+    if (event.start) {
+      assert.equal(active.has(event.id), false, 'a file begins once');
+      active.set(event.id, event.browser);
+      starts.push(event.id);
+      files = Math.max(files, active.size);
+      browser = Math.max(browser, [...active.values()].filter(Boolean).length);
+    } else {
+      assert.equal(active.delete(event.id), true, 'every finish has a start');
+    }
+  }
+  assert.equal(active.size, 0, 'every selected file finishes');
+  return { files, browser, starts };
+}
+
+test('the landing gate bounds its own concurrency [C7]', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-file-caps-')));
+  dirs.push(root);
+  cpSync(resolve(import.meta.dirname, '../src'), join(root, 'src'), { recursive: true });
+  mkdirSync(join(root, 'bin'));
+  cpSync(resolve(import.meta.dirname, '../bin/run-tests.js'), join(root, 'bin/run-tests.js'));
+  writeFileSync(join(root, 'package.json'), '{"type":"module"}\n');
+  const config = join(root, 'pullboard.json');
+  assert.deepEqual(testConcurrency(root, 7), { files: 7, browser: 2 }, 'the default file budget is the detected core budget');
+  const selected = [];
+  for (let id = 0; id < 9; id += 1) {
+    const browser = id < 4;
+    const folder = join(root, 'test', browser ? 'cockpit' : 'ordinary');
+    mkdirSync(folder, { recursive: true });
+    const file = join(folder, `overlap-${id}.test.js`);
+    selected.push(file);
+    writeFileSync(file, `import {appendFileSync} from 'node:fs';
+import {test} from 'node:test';
+/** Keep controlled work alive briefly so concurrent file bodies leave overlapping records. */
+test('record real file ${id} [C7]', async () => {
+  appendFileSync(process.env.PULLBOARD_CAP_CAPTURE, JSON.stringify({start:true,id:${id},browser:${browser}})+'\\n');
+  await new Promise(resolve => setTimeout(resolve, 200)); // budget: controlled fixture work, not a readiness deadline or production wait.
+  appendFileSync(process.env.PULLBOARD_CAP_CAPTURE, JSON.stringify({start:false,id:${id}})+'\\n');
+});\n`);
+  }
+  for (const setting of [{ files: 3, browser: 2 }, { files: 2, browser: 1 }]) {
+    writeFileSync(config, JSON.stringify({ testConcurrency: setting }));
+    assert.deepEqual(testConcurrency(root, 7), setting, 'pullboard.json overrides the shared policy');
+    const capture = join(root, `overlap-${setting.files}.jsonl`);
+    const result = runFixtureChild(process.execPath, [join(root, 'bin/run-tests.js'), '--test-concurrency=9', ...selected], {
+      cwd: root, env: { ...process.env, PULLBOARD_CAP_CAPTURE: capture,
+        PULLBOARD_MACHINE_HOME: join(root, `machine-${setting.files}`) }, encoding: 'utf8',
+    });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const peak = fileOverlap(capture);
+    assert.ok(peak.files <= setting.files, `actual file-body overlap ${peak.files} exceeds ${setting.files}`);
+    assert.ok(peak.browser <= setting.browser, `actual browser-file overlap ${peak.browser} exceeds ${setting.browser}`);
+    assert.deepEqual(peak.starts.sort((a, b) => a - b), Array.from({ length: 9 }, (_, id) => id), 'every selected file runs once');
+    assert.match(result.stdout, /# tests 9\b/);
+    assert.match(result.stdout, /# fail 0\b/);
+  }
+  let isolationCase = 0;
+  for (const flag of ['--test-isolation', '--test_isolation', '--experimental-test-isolation',
+    '--experimental_test_isolation', '--experimental_test-isolation', '--experimental-test_isolation']) {
+    for (const args of [[`${flag}=none`], [flag, 'none']]) {
+      const capture = join(root, `isolation-${isolationCase++}.jsonl`);
+      const result = runFixtureChild(process.execPath, [join(root, 'bin/run-tests.js'), ...args, selected.at(-1)], {
+        cwd: root, env: { ...process.env, PULLBOARD_CAP_CAPTURE: capture,
+          PULLBOARD_MACHINE_HOME: join(root, 'machine-isolation') }, encoding: 'utf8',
+      });
+      assert.notEqual(result.status, 0, `${args.join(' ')} must refuse non-isolated test files`);
+      assert.match(result.stderr, /bounded browser test files require process isolation/u);
+      assert.equal(existsSync(capture), false, 'a refused isolation mode never starts a test-file body');
+    }
+  }
+  writeFileSync(config, JSON.stringify({ testConcurrency: { browser: 3 } }));
+  assert.throws(() => testConcurrency(root, 7), /browser must be 1 or 2/);
 });
 
 /**
@@ -60,6 +140,46 @@ function repoWithGate(gate, check = '') {
   };
   return { dir, repo, env, git, run, runs };
 }
+
+test('gate before the first commit names the uncommitted config [I1,C7]', () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-first-commit-')));
+  dirs.push(dir);
+  const repo = join(dir, 'repo');
+  mkdirSync(repo);
+  const env = {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_AUTHOR_NAME: 'Test Agent',
+    GIT_AUTHOR_EMAIL: 'agent@example.com',
+    GIT_COMMITTER_NAME: 'Test Agent',
+    GIT_COMMITTER_EMAIL: 'agent@example.com',
+    PULLBOARD_HOME: join(dir, 'home'),
+    PULLBOARD_MACHINE_HOME: join(dir, 'home'),
+  };
+  const git = (...args) => runFixtureGit(args, { cwd: repo, env });
+  const run = (...args) => runFixtureChild(process.execPath, [BIN, ...args], { cwd: repo, env, encoding: 'utf8' });
+  git('init', '-q', '-b', 'main');
+  const initialized = run('init', '--model', 'Test Coordinator');
+  assert.equal(initialized.status, 0, `${initialized.stdout}${initialized.stderr}`);
+  assert.equal(existsSync(join(repo, 'pullboard.json')), true, 'init wrote the coordinator config');
+
+  const firstGate = run('gate', '--json');
+  assert.equal(firstGate.status, 1, 'the gate cannot read a policy before the initial commit');
+  const firstRefusal = JSON.parse(firstGate.stdout).error;
+  assert.equal(firstRefusal.code, 'NO_POLICY');
+  assert.match(firstRefusal.message, /pullboard\.json is not committed/u);
+  assert.match(firstRefusal.message, /git add pullboard\.json/u, 'the refusal gives the concrete staging command');
+
+  const committed = repoWithGate('true');
+  committed.git('switch', '--detach', 'HEAD');
+  const missingCoordinator = committed.run('gate', '--json');
+  assert.equal(missingCoordinator.status, 1);
+  const missingRefusal = JSON.parse(missingCoordinator.stdout).error;
+  assert.equal(missingRefusal.code, 'NO_POLICY');
+  assert.match(missingRefusal.message, /coordinator checkout is detached for review/u,
+    'other genuine NO_POLICY failures keep their specific message');
+});
 
 test('a digest keeps the failures and the end within its cap, however long one line is [V10]', () => {
   const digest = digestOf(`not ok 1 - ${'x'.repeat(3500)}\n${'ok\n'.repeat(50)}# fail 1\nsummary: 1 failed`);

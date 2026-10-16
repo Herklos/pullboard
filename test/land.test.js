@@ -536,6 +536,49 @@ test('land bisects a real red, skips named conflicts and refuses an unverified s
   assert.equal(calls(box).length, afterCalls, 'known unchanged red is not retried');
 });
 
+test('land diagnostics inherit their browser gate lease [C7]', () => {
+  const box = landProject();
+  const marker = join(box.dir, 'land-diagnostic-lease.json');
+  const inspector = join(box.dir, 'inspect-land-diagnostic-lease.mjs');
+  const resourcesUrl = new URL('../src/resources.js', import.meta.url).href;
+  writeFileSync(inspector, [
+    "import { writeFileSync } from 'node:fs';",
+    `import { inheritedGateSlot } from ${JSON.stringify(resourcesUrl)};`,
+    "const lease = inheritedGateSlot({ root: process.cwd(), browser: true });",
+    "if (!lease?.browser) throw new Error('focused diagnosis did not inherit its browser lease');",
+    `writeFileSync(${JSON.stringify(marker)}, JSON.stringify({ file: process.argv[2], held: process.env.PULLBOARD_GATE_SLOT_HELD ?? '', pool: process.env.PULLBOARD_GATE_SLOT_POOL ?? '', token: process.env.PULLBOARD_GATE_SLOT_TOKEN ?? '', browser: process.env.PULLBOARD_BROWSER_SLOT_HELD ?? '', inheritedBrowser: lease.browser }));`,
+  ].join('\n'));
+
+  const configPath = join(box.repo, 'pullboard.json');
+  const config = JSON.parse(readFileSync(configPath, 'utf8'));
+  config.affectedTests = `node ${JSON.stringify(inspector)}`;
+  writeFileSync(configPath, JSON.stringify(config, null, 2));
+  box.git(box.repo, 'add', 'pullboard.json');
+  const configCommit = box.tryGit(box.repo, 'commit', '-q', '-m', 'chore: inspect landing diagnostic lease');
+  assert.equal(configCommit.status, 0, configCommit.stderr);
+  const configPush = box.tryGit(box.repo, 'push', '-q', 'origin', 'main');
+  assert.equal(configPush.status, 0, configPush.stderr);
+
+  const entry = itemWorktree(box, 1, FILES[0]);
+  box.env.LAND_SUPPRESS_RED = '1';
+  try {
+    submitItem(box, entry, 'RED\n');
+    acceptItem(box, entry);
+  } finally {
+    delete box.env.LAND_SUPPRESS_RED;
+  }
+  const result = json(box, box.repo, 'land');
+  assert.equal(result.batch.state, 'flaky', 'the full gate is red while its isolated diagnosis passes');
+  assert.deepEqual(result.flakes.map(({ test: file }) => file), [FILES[0]]);
+  const inherited = JSON.parse(readFileSync(marker, 'utf8'));
+  assert.equal(inherited.file, FILES[0]);
+  assert.equal(inherited.held, '1');
+  assert.ok(inherited.pool, 'the child names the machine resource pool');
+  assert.ok(inherited.token, 'the child names the live gate lease token');
+  assert.equal(inherited.browser, '1');
+  assert.equal(inherited.inheritedBrowser, true);
+});
+
 test('land holds a flake without retries and person waivers cover every failure at the exact tree [B3,R3]', () => {
   const box = landProject();
   const entries = verifiedFour(box, { flaky: [0, 1] });

@@ -6,7 +6,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { displayAgentName } from './agent-names.js';
 import * as store from './board.js';
 import { CONFIG_FILE, COORDINATOR, loadConfig } from './config.js';
-import { codeIsFromMain, repoInfo, resolveCommit } from './git.js';
+import { codeIsFromMain, repoInfo, resolveCommit, withGitReadFacts } from './git.js';
 import { refusalDocument } from './json.js';
 import { relayLinked, relayOperation, relayRevoke, relayTokens } from './relay.js';
 import { laneNames } from './lanes.js';
@@ -72,15 +72,29 @@ function localRevisionInputs(board, now) {
   };
 }
 
+/** Hide foreign milestone references in revision tokens while preserving one unavailable obligation each. */
+function visibleMilestoneInputs(milestones, scoped) {
+  if (!scoped) return milestones;
+  let hidden = 0;
+  return milestones.map((milestone) => ({
+    ...milestone,
+    items: milestone.items.map((item) => typeof item === 'number' ? item : `external-${++hidden}`),
+  }));
+}
+
 /** Capture the inexpensive inputs that can invalidate a complete board-state snapshot. */
-function boardStateRevision(root, id, isMain) {
+function boardStateRevision(root, id, isMain, { projects = listApiProjects, scopeCommonDir = null } = {}) {
   const info = repoInfo(root);
   const config = loadConfig(info.root);
   const files = stateFileInputs(info.root, config).map(fileRevision);
   const local = withBoard(info.root, (board) => {
     const inputs = localRevisionInputs(board, board.clock.now().toISOString());
     const hasExternalMilestones = inputs.milestones.some((milestone) => milestone.items.some((item) => typeof item !== 'number'));
-    return { ...inputs, externalMilestones: hasExternalMilestones ? milestoneRoadmap(info.root, board) : null };
+    return { ...inputs, externalMilestones: hasExternalMilestones
+      ? scopeCommonDir === null
+        ? milestoneRoadmap(info.root, board)
+        : milestoneRoadmap(info.root, board, { projects, hideOutOfScope: true })
+      : null };
   }, isMain);
   const inputs = {
     identity: [info.commonDir, id],
@@ -90,7 +104,7 @@ function boardStateRevision(root, id, isMain) {
     agents: local.agents,
     leases: local.leases,
     requestReceipts: local.requestReceipts,
-    milestones: local.milestones,
+    milestones: visibleMilestoneInputs(local.milestones, scopeCommonDir !== null),
     externalRoadmap: local.externalMilestones,
     eventLogVersion: store.EVENT_LOG_VERSION,
   };
@@ -160,9 +174,13 @@ function registeredProjects() {
 }
 
 /** Open only boards named by this board's external milestone references. */
-function openRoadmapInputs(root, milestones, localDb) {
+function openRoadmapInputs(root, milestones, localDb, { scopeCommonDir = null } = {}) {
   const references = milestones.flatMap((milestone) => milestone.items.filter((item) => typeof item !== 'number'));
-  const registered = references.length ? registeredProjects() : [];
+  const registered = references.length ? registeredProjects().filter((project) => {
+    if (scopeCommonDir === null) return true;
+    try { return repoInfo(project.root).commonDir === scopeCommonDir; }
+    catch { return false; }
+  }) : [];
   const opened = new Map();
   const pathMarkers = new Map();
   const watchPath = (path) => {
@@ -170,25 +188,25 @@ function openRoadmapInputs(root, milestones, localDb) {
   };
   let inputs;
   try {
-    inputs = references.map((reference) => {
+    inputs = references.map((reference, index) => {
       const match = /^(.+)#([1-9]\d*)$/.exec(reference);
-      if (!match) return { reference, unavailable: true };
+      if (!match) return { reference, visibleReference: scopeCommonDir === null ? reference : `external-${index + 1}`, unavailable: true };
       const [, repo, number] = match;
       const candidates = registered.filter((project) => project.name === repo || basename(project.root) === repo);
       for (const candidate of candidates) {
         watchPath(candidate.root);
         watchPath(join(candidate.root, '.git'));
       }
-      if (candidates.length !== 1) return { reference, unavailable: true };
+      if (candidates.length !== 1) return { reference, visibleReference: scopeCommonDir === null ? reference : `external-${index + 1}`, unavailable: true };
       try {
         const info = repoInfo(candidates[0].root);
         const path = join(info.commonDir, 'pullboard', 'board.sqlite');
         watchPath(path);
         const db = resolve(candidates[0].root) === resolve(root) ? localDb : (opened.get(path) ?? store.openBoardReadOnly(path));
         if (db !== localDb) opened.set(path, db);
-        return { reference, id: Number(number), db, path };
+        return { reference, visibleReference: reference, id: Number(number), db, path };
       } catch {
-        return { reference, unavailable: true };
+        return { reference, visibleReference: scopeCommonDir === null ? reference : `external-${index + 1}`, unavailable: true };
       }
     });
   } catch (error) {
@@ -212,12 +230,12 @@ function openRoadmapInputs(root, milestones, localDb) {
       const values = [];
       let nextExpiry = null;
       for (const input of inputs) {
-        if (input.unavailable) { values.push([input.reference, 'unavailable']); continue; }
+        if (input.unavailable) { values.push([input.visibleReference ?? input.reference, 'unavailable']); continue; }
         const item = input.db.prepare('SELECT item_title, item_status, item_lease_until FROM item WHERE item_id = ?').get(input.id);
-        if (!item) { values.push([input.reference, 'missing']); continue; }
+        if (!item) { values.push([input.visibleReference ?? input.reference, 'missing']); continue; }
         const status = item.item_status === 'claimed' && (item.item_lease_until ?? '') <= now ? 'open' : item.item_status;
         if (item.item_status === 'claimed' && item.item_lease_until > now && (!nextExpiry || item.item_lease_until < nextExpiry)) nextExpiry = item.item_lease_until;
-        values.push([input.reference, item.item_title, status]);
+        values.push([input.visibleReference ?? input.reference, item.item_title, status]);
       }
       return { values, nextExpiry };
     },
@@ -225,7 +243,7 @@ function openRoadmapInputs(root, milestones, localDb) {
 }
 
 /** Watch the same named state inputs as the cache without rebuilding a board-state response. */
-function watchLocalStateRevision(board) {
+function watchLocalStateRevision(board, { scopeCommonDir = null } = {}) {
   const info = repoInfo(board.root);
   const config = loadConfig(info.root);
   let files = stateFileInputs(info.root, config);
@@ -263,7 +281,7 @@ function watchLocalStateRevision(board) {
     const registryChanged = registryMarker !== currentRegistryMarker;
     if (!external || JSON.stringify(externalReferences) !== JSON.stringify(references) || registryChanged || external.needsRefresh()) {
       external?.close();
-      external = openRoadmapInputs(info.root, milestoneDefinitions, db);
+      external = openRoadmapInputs(info.root, milestoneDefinitions, db, { scopeCommonDir });
       externalVersion = new Map();
       externalValues = null;
       externalNextExpiry = null;
@@ -332,7 +350,7 @@ function watchLocalStateRevision(board) {
       agents: local.agents,
       leases: local.leases,
       requestReceipts: local.requestReceipts,
-      milestones: local.milestones,
+      milestones: visibleMilestoneInputs(local.milestones, scopeCommonDir !== null),
       externalRoadmap,
       eventLogVersion: store.EVENT_LOG_VERSION,
     });
@@ -349,7 +367,7 @@ function watchLocalStateRevision(board) {
 }
 
 /** Build the complete local API state, including fields that the shared project snapshot omits. */
-function buildLocalBoardState(root, boardId, board, codeIsMain, { previous = null, fullItemRebuild = true, afterSequence = 0, changedLeases = new Set(), onItemBuild } = {}) {
+function buildLocalBoardState(root, boardId, board, codeIsMain, { previous = null, fullItemRebuild = true, afterSequence = 0, changedLeases = new Set(), onItemBuild, projects = listApiProjects, scopeCommonDir = null } = {}) {
   board.db.exec('BEGIN');
   try {
     const sequence = board.db.prepare('SELECT COALESCE(MAX(event_id), 0) AS id FROM event').get().id;
@@ -390,7 +408,9 @@ function buildLocalBoardState(root, boardId, board, codeIsMain, { previous = nul
     const projectData = {
       requests: store.openRequests(board),
       personRequests: personRequestStatuses(board),
-      milestones: milestoneRoadmap(root, board),
+      milestones: scopeCommonDir === null
+        ? milestoneRoadmap(root, board)
+        : milestoneRoadmap(root, board, { projects, hideOutOfScope: true }),
       rowDecisions: store.rowDecisions(board),
       proofStats: proofStats(board),
     };
@@ -734,6 +754,27 @@ function findBoard(id, projects, isMain) {
   return board;
 }
 
+/** Restrict a local API to exactly one registered repository by its canonical Git common directory.
+ * @param {() => any[]} projects
+ * @param {{ projectRoot: string } | undefined} scope
+ * @returns {{ projects: () => any[], commonDir: string | null }}
+ */
+function apiProjectScope(projects, scope) {
+  if (scope === undefined) return { projects, commonDir: null };
+  if (!scope || typeof scope.projectRoot !== 'string' || !scope.projectRoot) {
+    throw new TypeError('createLocalApiHandler scope needs a registered projectRoot');
+  }
+  let commonDir;
+  try { commonDir = repoInfo(scope.projectRoot).commonDir; }
+  catch { throw new Refused('PROJECT_SCOPE', 'scope the API to a registered project repository or linked worktree'); }
+  const scoped = () => projects().filter((project) => {
+    try { return repoInfo(project.root).commonDir === commonDir; }
+    catch { return false; }
+  });
+  if (scoped().length !== 1) throw new Refused('PROJECT_SCOPE', 'scope the API to exactly one registered project repository or linked worktree');
+  return { projects: scoped, commonDir };
+}
+
 /** Read events in sequence, including changes made by other processes on the same board. */
 function afterEvents(root, after, isMain) {
   return withBoard(root, (board) => board.db.prepare('SELECT * FROM event WHERE event_id > ? ORDER BY event_id').all(after), isMain);
@@ -817,22 +858,34 @@ function requestCookie(header, name) {
   return found;
 }
 
+/** Require a canonical base64url cookie token with room for at least 128 random bits. */
+function hasCookieEntropyCapacity(value) {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]+$/u.test(value)) return false;
+  const bytes = Buffer.from(value, 'base64url');
+  return bytes.length >= 16 && bytes.toString('base64url') === value;
+}
+
 /** Compare two credential buffers without exposing their contents or comparing equal-length values ordinarily. */
 function credentialMatches(candidate, expected) {
   return candidate.length === expected.length && timingSafeEqual(candidate, expected);
 }
 
-/** Share the local router with the person's view and other local transports; the standalone API explicitly denies person authority. */
-export function createLocalApiHandler({ secret, getPort, runCommand, projects = listApiProjects, isMain, allowedOrigins = [], onStateBuild, onItemBuild, personChannel = 'view', stateDetail = 'full', sessionCookie } = {}) {
+/** Share the local router with the person's view and other local transports; the standalone API explicitly denies person authority.
+ * @param {{ secret: string | Buffer, getPort: () => number, runCommand: Function, projects?: () => any[], scope?: { projectRoot: string }, isMain?: boolean, allowedOrigins?: string[], onStateBuild?: Function, onItemBuild?: Function, personChannel?: string, stateDetail?: string, sessionCookie?: {name:string,value:string} }} [options]
+ */
+export function createLocalApiHandler({ secret, getPort, runCommand, projects = listApiProjects, scope, isMain, allowedOrigins = [], onStateBuild, onItemBuild, personChannel = 'view', stateDetail = 'full', sessionCookie } = {}) {
   if (typeof getPort !== 'function') throw new TypeError('createLocalApiHandler needs a bound-port getter');
   if (typeof runCommand !== 'function') throw new TypeError('createLocalApiHandler needs the actual CLI entry point as runCommand');
   // A page that still reads each item's detail from the state keeps full items until it opts in.
   if (!['full', 'summary'].includes(stateDetail)) throw new TypeError('createLocalApiHandler stateDetail is full or summary');
   if (sessionCookie !== undefined && (!sessionCookie || typeof sessionCookie.name !== 'string'
     || !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(sessionCookie.name)
-    || typeof sessionCookie.value !== 'string' || !/^[\x21\x23-\x2B\x2D-\x3A\x3C-\x5B\x5D-\x7E]+$/u.test(sessionCookie.value))) {
-    throw new TypeError('createLocalApiHandler sessionCookie needs a cookie name and value');
+    || !hasCookieEntropyCapacity(sessionCookie.value))) {
+    throw new TypeError('createLocalApiHandler sessionCookie needs a cookie name and a canonical base64url value with at least 128 bits of random capacity');
   }
+  const projectScope = apiProjectScope(projects, scope);
+  const apiProjects = projectScope.projects;
+  const scopeCommonDir = projectScope.commonDir;
   const codeIsMain = codeIsFromMain() && isMain !== false;
   const key = Buffer.from(secret);
   const cookieName = sessionCookie?.name;
@@ -869,11 +922,11 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
    * input revision holds before and after the read, and building it again when one moved.
    */
   function withSnapshot(board, read) {
-    const before = boardStateRevision(board.root, board.id, codeIsMain);
+    const before = boardStateRevision(board.root, board.id, codeIsMain, { projects: apiProjects, scopeCommonDir });
     const cached = stateCache.get(before.cacheId);
     if (before.cacheable && cached?.revision === before.revision) {
       const result = read(cached, true);
-      const after = boardStateRevision(board.root, board.id, codeIsMain);
+      const after = boardStateRevision(board.root, board.id, codeIsMain, { projects: apiProjects, scopeCommonDir });
       if (after.cacheable && after.revision === before.revision) {
         stateCache.delete(before.cacheId);
         stateCache.set(before.cacheId, cached);
@@ -891,6 +944,8 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
       afterSequence: cached?.sequence ?? 0,
       changedLeases,
       onItemBuild,
+      projects: apiProjects,
+      scopeCommonDir,
     }), codeIsMain);
     const state = { ...built.state, sequence: built.sequence };
     const entry = snapshotEntry(before.revision, state, prepareFlowHistory(built.history), {
@@ -899,7 +954,7 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
       itemMoveCounts: built.itemMoveCounts,
     });
     entry.cacheId = before.cacheId;
-    const after = boardStateRevision(board.root, board.id, codeIsMain);
+    const after = boardStateRevision(board.root, board.id, codeIsMain, { projects: apiProjects, scopeCommonDir });
     if (before.cacheable && after.cacheable && before.revision === after.revision) {
       stateCache.set(before.cacheId, entry);
       while (stateCache.size > 32) stateCache.delete(stateCache.keys().next().value);
@@ -1002,23 +1057,28 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
       const cookieValue = cookieKey ? requestCookie(req.headers.cookie, cookieName) : null;
       const givenCookie = Buffer.from(cookieValue ?? '');
       const validCookie = cookieKey !== null && cookieValue !== null && credentialMatches(givenCookie, cookieKey);
-      if (!ownHost || (!validKey && !validCookie)) throw new Refused('AUTH_REQUIRED', 'this API needs its session secret and own host; use the address pullboard serve printed');
+      const fetchSite = req.headers['sec-fetch-site'];
+      const cookieFetchSiteAllowed = fetchSite === undefined || fetchSite === 'same-origin';
+      if (!ownHost || (!validKey && (!validCookie || !cookieFetchSiteAllowed))) throw new Refused('AUTH_REQUIRED', 'this API needs its session secret and own host; use the address pullboard serve printed');
       if (req.headers.origin && req.headers.origin !== 'http://' + req.headers.host && !permittedOrigins.has(req.headers.origin)) throw new Refused('API_ORIGIN', 'use the API from its own origin');
       return { local: true };
     },
-    boards: () => apiBoardListing(projects, codeIsMain),
-    board: (id) => findBoard(id, projects, codeIsMain),
-    state: (board, who, seen, options) => localState(board, seen, options).state,
-    stateJson: (board, who, seen, options) => localState(board, seen, options).json,
-    watchRevision: (board) => watchLocalStateRevision(board),
-    delta: (board, who, seen, options) => localDelta(board, seen, options),
-    item: (board, id) => localItem(board, id),
-    search: (board, text) => localSearch(board, text),
-    shout: (board, id) => relayLinked(board.root)
+    boards: () => withGitReadFacts(() => apiBoardListing(apiProjects, codeIsMain)),
+    board: (id) => withGitReadFacts(() => findBoard(id, apiProjects, codeIsMain)),
+    state: (board, who, seen, options) => withGitReadFacts(() => localState(board, seen, options).state),
+    stateJson: (board, who, seen, options) => withGitReadFacts(() => localState(board, seen, options).json),
+    watchRevision: (board) => {
+      const watcher = withGitReadFacts(() => watchLocalStateRevision(board, { scopeCommonDir }));
+      return { ...watcher, revision: () => withGitReadFacts(() => watcher.revision()) };
+    },
+    delta: (board, who, seen, options) => withGitReadFacts(() => localDelta(board, seen, options)),
+    item: (board, id) => withGitReadFacts(() => localItem(board, id)),
+    search: (board, text) => withGitReadFacts(() => localSearch(board, text)),
+    shout: (board, id) => withGitReadFacts(() => relayLinked(board.root)
       ? relayPresentationShout(board.root, id)
-      : withBoard(board.root, (db) => store.shoutDetails(db, id), codeIsMain),
-    code: (board, ref) => codeAt(board.root, ref),
-    events: (board, after) => afterEvents(board.root, after, codeIsMain),
+      : withBoard(board.root, (db) => store.shoutDetails(db, id), codeIsMain)),
+    code: (board, ref) => withGitReadFacts(() => codeAt(board.root, ref)),
+    events: (board, after) => withGitReadFacts(() => afterEvents(board.root, after, codeIsMain)),
     eventLogVersion: () => store.EVENT_LOG_VERSION,
     move: (board, body) => executeMove(board.root, body, runCommand, codeIsMain, personChannel),
     request: (board, body) => createRequest(board.root, body, codeIsMain, personChannel),

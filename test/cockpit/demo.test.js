@@ -5,7 +5,7 @@ import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { tapTarget, SPEC, machine, project, startView, boardOf, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, press } from './fixture.js';
+import { tapTarget, SPEC, machine, project, startView, boardOf, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, press, allowLiveHold, holdLive } from './fixture.js';
 import { assertFirstStateDelay } from './stable.js';
 
 /** Stage real chip clones and retain their node identities to diagnose a redraw between browser evaluations. */
@@ -956,13 +956,10 @@ test('a finished lane hold does not scroll after the next press is aimed [N26,C7
   try {
     chrome = await openSnapshotChrome(executable, 'about:blank', profile);
     await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
-    await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: `
-      const nativeInterval = window.setInterval.bind(window);
-      /** Keep this one real refresh under test control; every HTTP response and render remains real. */
-      window.setInterval = (callback, delay, ...args) => delay === 3000 ? 0 : nativeInterval(callback, delay, ...args);
-    ` });
+    // Keep this one real refresh under test control; every HTTP response and render remains real (#622).
+    await allowLiveHold(chrome);
     await chrome.send('Page.navigate', { url: view.link.href });
-    await chrome.waitFor('data?.project?.items.some(item => item.title === "Hold control")');
+    await holdLive(chrome, 'data?.project?.items.some(item => item.title === "Hold control")');
     await press(chrome, 'document.querySelector("[data-tab=shouts]")');
     await chrome.stable(`(() => {
       const originalRefresh = refresh;

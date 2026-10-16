@@ -6,6 +6,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:f
 import { delimiter, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { after, afterEach, beforeEach } from 'node:test';
 import { Worker } from 'node:worker_threads';
@@ -182,7 +183,7 @@ function shellWord(value) {
  * @param {string} sandbox
  * @returns {NodeJS.ProcessEnv}
  */
-function testEnvironment(sandbox) {
+function testEnvironment(sandbox, gateMarkers = {}) {
   const home = join(sandbox, 'home');
   const shims = join(sandbox, 'bin');
   mkdirSync(home, { recursive: true });
@@ -223,6 +224,7 @@ function testEnvironment(sandbox) {
   delete env.PULLBOARD_RELAY_TOKEN; // Fixtures must supply their own scoped credentials, never an agent’s live bearer.
   delete env.NODE_TEST_CONTEXT;
   delete env.PULLBOARD_TEST_FILE;
+  Object.assign(env, gateMarkers);
   return env;
 }
 
@@ -233,15 +235,32 @@ function testEnvironment(sandbox) {
  * @param {NodeJS.ProcessEnv} env
  * @returns {import('node:child_process').SpawnSyncReturns<string>}
  */
-function runTests(args, env) {
+function runTests(args, env, concurrency) {
+  let files = concurrency.files;
+  const forwarded = [];
+  for (let at = 0; at < args.length; at += 1) {
+    const argument = args[at];
+    if (argument === '--') { forwarded.push(...args.slice(at)); break; }
+    if (/^--test[-_]concurrency(?:=|$)/u.test(argument)) {
+      const value = argument.includes('=') ? argument.slice(argument.indexOf('=') + 1) : args[++at];
+      if (!/^[1-9][0-9]*$/u.test(value ?? '') || !Number.isSafeInteger(Number(value))) {
+        throw new Error('--test-concurrency must be a positive integer');
+      }
+      files = Math.min(files, Number(value));
+    } else if (/^--(?:experimental[-_])?test[-_]isolation(?:=none|$)/u.test(argument) &&
+      (argument.endsWith('=none') || args[at + 1] === 'none')) {
+      throw new Error('bounded browser test files require process isolation; remove --test-isolation=none');
+    } else forwarded.push(argument);
+  }
   const reporter = args.some((argument) => argument === '--test-reporter' || argument.startsWith('--test-reporter='));
   const nodeArgs = [
     '--disable-warning=ExperimentalWarning',
     '--test',
+    `--test-concurrency=${files}`,
     ...(!reporter ? ['--test-reporter=tap'] : []),
     '--import',
     runner,
-    ...args,
+    ...forwarded,
   ];
   return spawnSync(process.execPath, nodeArgs, { env, stdio: 'inherit' });
 }
@@ -279,35 +298,28 @@ function hasTestFiles(args) {
   return false;
 }
 
-/** Match Node's default test-file patterns against a Git path for this runtime. */
-function isDefaultTestFile(path, includeTypeScript) {
-  const normalized = path.replaceAll('\\', '/');
-  const parts = normalized.split('/');
-  if (parts.some(part => part === 'node_modules' || part.startsWith('.'))) return false;
-  const basename = parts.at(-1);
-  const extension = includeTypeScript ? /\.(?:cjs|mjs|js|cts|mts|ts)$/u : /\.(?:cjs|mjs|js)$/u;
-  if (!extension.test(basename)) return false;
-  return parts.slice(0, -1).includes('test') ||
-    /^test(?:-|\.)/u.test(basename) ||
-    (includeTypeScript
-      ? /(?:\.test|-test|_test)\.(?:cjs|mjs|js|cts|mts|ts)$/u
-      : /(?:\.test|-test|_test)\.(?:cjs|mjs|js)$/u).test(basename);
+/** Extract explicit test paths while skipping option values, returning an empty list for discovery. */
+function explicitTestFiles(args) {
+  const files = [];
+  let takesValue = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (takesValue) { takesValue = false; continue; }
+    if (argument === '--') { files.push(...args.slice(index + 1)); break; }
+    if (argument.startsWith('-')) {
+      if (!argument.includes('=')) takesValue = optionTakesValue(argument);
+      continue;
+    }
+    files.push(argument);
+  }
+  return files;
 }
 
-/** Probe the effective TypeScript mode of the Node child that will execute tests. */
-function typeScriptTestDiscovery(args, env) {
-  const typeFlags = args.filter(argument => [
-    '--experimental-strip-types', '--strip-types', '--experimental-transform-types',
-    '--no-experimental-strip-types', '--no-strip-types',
-  ].includes(argument));
-  const result = spawnSync(process.execPath, [...typeFlags, '-p', 'String(process.features?.typescript ?? false)'], {
-    cwd: process.cwd(), encoding: 'utf8', env, timeout: 5_000,
-  });
-  if (result.error) throw result.error;
-  if (result.status !== 0) {
-    throw new Error(`Node could not report TypeScript test discovery mode (status ${result.status}, signal ${result.signal ?? 'none'}): ${result.stderr.trim()}`);
-  }
-  return !['false', 'undefined', ''].includes(result.stdout.trim());
+/** Select repository test entry files while keeping imported helpers out of direct discovery. */
+function isDefaultTestFile(path) {
+  const normalized = path.replaceAll('\\', '/');
+  if (normalized.split('/').some(part => part === 'node_modules' || part.startsWith('.'))) return false;
+  return /(?:^|\/)[^/]+\.test\.(?:js|mjs)$/u.test(normalized);
 }
 
 /** Preserve native discovery outside Git, but never hide a repository access failure. */
@@ -321,10 +333,10 @@ function isGitWorkTree(cwd, env) {
   throw new Error(result.stderr.trim() || `git rev-parse failed (status ${result.status})`);
 }
 
-/** List tracked files matching Node's runtime default patterns, excluding worktree copies. */
-function trackedDefaultTestFiles(cwd, includeTypeScript, env) {
+/** List tracked repository test entry files, excluding helpers and worktree-only copies. */
+function trackedDefaultTestFiles(cwd, env) {
   const output = execFileSync('git', ['ls-files', '-z'], { cwd, env, encoding: 'utf8' });
-  return output.split('\0').filter(path => path && isDefaultTestFile(path, includeTypeScript)).sort()
+  return output.split('\0').filter(path => path && isDefaultTestFile(path)).sort()
     .map(path => `./${path}`);
 }
 
@@ -357,15 +369,18 @@ function shardArguments(args) {
 }
 
 /** Run tests in the disposable environment, preserving a marker only when a parent holds the slot. */
-function executeTests(args, sandbox, gateSlotHeld, fullSuite) {
-  const env = testEnvironment(sandbox);
-  if (gateSlotHeld) env.PULLBOARD_GATE_SLOT_HELD = '1';
+function executeTests(args, sandbox, gateMarkers, fullSuite, concurrency) {
+  const env = testEnvironment(sandbox, gateMarkers);
+  // This is an inner file limit; the real machine gate/browser lease remains unchanged.
+  env.PULLBOARD_TEST_BROWSER_RESOURCE = 'test-browser-files:' + randomUUID();
+  env.PULLBOARD_TEST_BROWSER_CAPACITY = String(concurrency.browser);
+  delete env.PULLBOARD_TEST_BROWSER_OWNER_PID;
   let selectedArgs = args;
   if (fullSuite) {
     let files;
     try {
       files = isGitWorkTree(process.cwd(), env)
-        ? trackedDefaultTestFiles(process.cwd(), typeScriptTestDiscovery(args, env), env)
+        ? trackedDefaultTestFiles(process.cwd(), env)
         : null;
     }
     catch (error) {
@@ -380,7 +395,7 @@ function executeTests(args, sandbox, gateSlotHeld, fullSuite) {
     }
     if (files) selectedArgs = [...args, ...files];
   }
-  const result = runTests(selectedArgs, env);
+  const result = runTests(selectedArgs, env, concurrency);
   if (result.error) throw result.error;
   return result;
 }
@@ -392,8 +407,11 @@ function executeTests(args, sandbox, gateSlotHeld, fullSuite) {
  * @returns {Promise<void>}
  */
 async function main(args) {
+  let concurrency;
   try {
     testTimeoutMs();
+    const { testConcurrency } = await import('../src/gate.js');
+    concurrency = testConcurrency(process.cwd());
   } catch (error) {
     process.stderr.write(`${error.message}\n`);
     process.exitCode = 1;
@@ -407,32 +425,54 @@ async function main(args) {
   }
   args = sharding.args;
   const fullSuite = !hasTestFiles(args);
-  const inheritedSlot = process.env.PULLBOARD_GATE_SLOT_HELD === '1';
+  let browser = fullSuite;
+  if (!browser) {
+    const { testsNeedBrowser } = await import('../src/browser-admission.js');
+    browser = await testsNeedBrowser(process.cwd(), explicitTestFiles(args));
+  }
   let signal = null;
   /** Keep sandbox lifetime inside the held lease, including the complete child process. */
-  const run = (gateSlotHeld) => {
+  const run = (gateMarkers) => {
     const sandbox = mkdtempSync(join(tmpdir(), 'pullboard-test-run-'));
     try {
-      const result = executeTests(args, sandbox, gateSlotHeld, fullSuite);
+      const result = executeTests(args, sandbox, gateMarkers, fullSuite, concurrency);
       signal = result.signal;
       process.exitCode = result.status ?? 1;
     } finally { rmSync(sandbox, { recursive: true, force: true }); }
   };
-  if (inheritedSlot) run(true);
-  else {
-    // Direct runs, focused or full, use the public queue; preload-only imports never call main.
-    const [{ withGateSlot }, { loadMachineSettings }] = await Promise.all([
-      import('../src/gate.js'), import('../src/settings.js'),
-    ]);
-    const capacity = loadMachineSettings().gateSlots;
-    let announced = false;
-    await withGateSlot(process.cwd(), () => run(true), {
-      onWait: ({ holders }) => {
-        if (announced) return;
-        announced = true;
-        process.stderr.write(`waiting for a gate slot: ${holders.length} of ${capacity} in use\n`);
-      },
-    });
+  try {
+    const { GATE_SLOT_HELD_ENV, GATE_SLOT_POOL_ENV, GATE_SLOT_TOKEN_ENV, gateSlotEnvironment, inheritedGateSlot } = await import('../src/resources.js');
+    const scopedMarker = process.env[GATE_SLOT_POOL_ENV] || process.env[GATE_SLOT_TOKEN_ENV];
+    const legacyHeld = process.env[GATE_SLOT_HELD_ENV] === '1';
+    if (scopedMarker) {
+      const inherited = inheritedGateSlot({ root: process.cwd(), browser });
+      if (inherited) run(gateSlotEnvironment(inherited));
+      else await acquire();
+    } else if (legacyHeld) {
+      throw new Error('this legacy gate marker does not identify a live machine gate lease; restart the parent runner with a scoped gate lease');
+    } else await acquire();
+
+    /** Acquire all required capabilities before creating the sandbox or starting test processes. */
+    async function acquire() {
+      // Direct runs use the public queue, requesting gate and browser capacity atomically when needed.
+      const [{ withGateSlot }, { loadMachineSettings }] = await Promise.all([
+        import('../src/gate.js'), import('../src/settings.js'),
+      ]);
+      const capacity = loadMachineSettings().gateSlots;
+      let announced = false;
+      await withGateSlot(process.cwd(), (lease) => run(gateSlotEnvironment(lease)), {
+        browser, kind: fullSuite ? 'gate' : 'focused',
+        onWait: ({ holders }) => {
+          if (announced) return;
+          announced = true;
+          process.stderr.write(`waiting for a gate slot: ${holders.length} of ${capacity} in use\n`);
+        },
+      });
+    }
+  } catch (error) {
+    process.stderr.write(`run-tests: ${error.message}\n`);
+    process.exitCode = 1;
+    return;
   }
   if (signal) process.kill(process.pid, signal);
 }
@@ -441,5 +481,17 @@ if (process.argv[1] && resolve(process.argv[1]) === runner) {
   await main(process.argv.slice(2));
 } else if (process.argv[1]) {
   process.env.PULLBOARD_TEST_FILE = process.argv[1];
+  if (process.env.PULLBOARD_TEST_BROWSER_RESOURCE && process.env.NODE_TEST_CONTEXT === 'child-v8' && !process.env.PULLBOARD_TEST_BROWSER_OWNER_PID) {
+    // Each native worker inherits an empty owner; its own forks inherit this PID and must not queue behind it.
+    process.env.PULLBOARD_TEST_BROWSER_OWNER_PID = String(process.pid);
+    const { testsNeedBrowser } = await import('../src/browser-admission.js');
+    if (await testsNeedBrowser(process.cwd(), [process.argv[1]])) {
+      const { takeResource } = await import('../src/resources.js');
+      const lease = await takeResource({ name: process.env.PULLBOARD_TEST_BROWSER_RESOURCE,
+        capacity: Number(process.env.PULLBOARD_TEST_BROWSER_CAPACITY), kind: 'test-browser-file', root: process.cwd() });
+      // Hold through file cleanup and process exit, including the watchdog's forced-exit path.
+      process.once('exit', () => lease.release());
+    }
+  }
   installTestWatchdog();
 }

@@ -1,6 +1,6 @@
 /** Real HTTP calls against an isolated Git repo and the actual board engine (A2). */
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { runFixtureChild, runFixtureGit, startFixtureChild } from './fixture-child.js';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -12,7 +12,7 @@ import { createLocalApiHandler, serveApi } from '../src/api.js';
 import { serveView } from '../src/serve.js';
 import { main } from '../src/cli.js';
 import { applyStateDelta, createApiHandler } from '../src/api-http.js';
-import { registryFile, registerProject } from '../src/projects.js';
+import { registryFile, registerProject, forgetProject } from '../src/projects.js';
 import { Refused } from '../src/refused.js';
 import * as store from '../src/board.js';
 import { preparePersonRequest } from '../src/person-request.js';
@@ -20,6 +20,212 @@ import { receivePersonRequest } from '../src/relay-requests.js';
 import { fetchFresh } from './http-fixture.js';
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
+
+/** Run a private view in a child process with child-process accounting enabled only for warmed reads. */
+const REPEATED_READ_HARNESS = `
+import assert from 'node:assert/strict';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { basename, resolve } from 'node:path';
+import { performance } from 'node:perf_hooks';
+import { pathToFileURL } from 'node:url';
+
+const require = createRequire(import.meta.url);
+const childProcess = require('node:child_process');
+const gitIdentity = { ...process.env, GIT_AUTHOR_NAME: 'HTTP Agent', GIT_AUTHOR_EMAIL: 'agent@example.invalid',
+  GIT_COMMITTER_NAME: 'HTTP Agent', GIT_COMMITTER_EMAIL: 'agent@example.invalid' };
+const counters = { git: 0, node: 0, other: 0, methods: {} };
+let counting = false;
+const childMethods = ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork'];
+/** Count one child-process API call by its executable class while measurement is enabled. */
+function countChild(method, args) {
+  const raw = method === 'fork' ? process.execPath : String(args[0] ?? '');
+  const command = raw.trim().split(/\\s+/u)[0].replace(/^['"]|['"]$/gu, '');
+  const base = basename(command).replace(/\\.exe$/iu, '').toLowerCase();
+  const kind = base === 'git' ? 'git' : (command === process.execPath || base === 'node' ? 'node' : 'other');
+  counters[kind] += 1;
+  counters.methods[method] = (counters.methods[method] ?? 0) + 1;
+}
+for (const method of childMethods) {
+  const original = childProcess[method];
+  /** Count this built-in call when measured, then preserve its original behavior. */
+  childProcess[method] = function (...args) {
+    if (counting) countChild(method, args);
+    return Reflect.apply(original, this, args);
+  };
+}
+syncBuiltinESMExports();
+
+const [serveFile, projectJson] = process.argv.slice(1);
+const projects = JSON.parse(projectJson);
+const { serveView } = await import(pathToFileURL(serveFile).href);
+const view = await serveView({ port: 0 });
+const address = new URL(view.url);
+const key = address.searchParams.get('k');
+let pageReady = false;
+let pageUrl = view.url;
+let pageCookie = '';
+let requestCount = 0;
+/** Fetch one authenticated API response and reject failed fixture requests. */
+async function readApi(path) {
+  requestCount += 1;
+  const response = await fetch(address.origin + path, { headers: { ...(pageCookie ? { cookie: pageCookie } : { 'x-pullboard-key': key }), connection: 'close' } });
+  const document = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(document));
+  return document;
+}
+/** Fetch the actual local view page and require a successful response. */
+async function readPage() {
+  if (!pageReady) {
+    requestCount += 1;
+    const exchange = await fetch(view.url, { headers: { connection: 'close' }, redirect: 'manual' });
+    if (exchange.status === 200) {
+      assert.match(await exchange.text(), /<!doctype html>/iu);
+      pageReady = true;
+      return;
+    }
+    assert.equal(exchange.status, 303, 'the printed view link either serves the page or trades its key for a session cookie');
+    const location = exchange.headers.get('location');
+    assert.ok(location, 'the key exchange redirects to the clean page address');
+    let cleanAddress;
+    try { cleanAddress = new URL(location, address.origin); }
+    catch { assert.fail('the key exchange returns a valid clean page address'); }
+    assert.equal(cleanAddress.origin, address.origin, 'the key exchange stays on this view');
+    assert.equal(cleanAddress.searchParams.has('k'), false, 'the redirected page address drops the key');
+    const setCookie = exchange.headers.get('set-cookie');
+    assert.ok(setCookie, 'the key exchange sets a session cookie');
+    const cookieParts = setCookie.split(';');
+    const cookiePair = cookieParts.shift();
+    const cookieAttributes = new Set(cookieParts.map((part) => part.trim().toLowerCase()));
+    assert.equal(/^pullboard_view_[0-9a-f]{18}=[A-Za-z0-9_-]+$/u.test(cookiePair), true, 'the response sets a per-view session cookie');
+    assert.equal(cookieAttributes.has('path=/'), true, 'the session cookie covers the view routes');
+    assert.equal(cookieAttributes.has('httponly'), true, 'the session cookie is not readable by page scripts');
+    assert.equal(cookieAttributes.has('samesite=strict'), true, 'the session cookie is same-site only');
+    pageUrl = cleanAddress;
+    pageCookie = cookiePair;
+    pageReady = true;
+  }
+  requestCount += 1;
+  const response = await fetch(pageUrl, { headers: { connection: 'close', ...(pageCookie ? { cookie: pageCookie } : { 'x-pullboard-key': key }) } });
+  assert.equal(response.status, 200);
+  assert.match(await response.text(), /<!doctype html>/iu);
+}
+/** Read each selected board state and one known item detail. */
+async function readAllRoutes(boards) {
+  await readPage();
+  await readApi('/api/v1/boards');
+  for (const project of projects) {
+    const board = boards.find((entry) => resolve(entry.root) === resolve(project.root));
+    assert.ok(board, 'the private registry lists every fixture project');
+    const path = '/api/v1/boards/' + board.id;
+    await readApi(path + '/state');
+    await readApi(path + '/items/' + project.item);
+  }
+}
+
+try {
+  await readPage();
+  const initial = await readApi('/api/v1/boards');
+  assert.equal(initial.boards.length, 3);
+  const boards = initial.boards;
+  await readAllRoutes(boards);
+  const measuredRequests = requestCount;
+  counters.git = 0;
+  counters.node = 0;
+  counters.other = 0;
+  counters.methods = {};
+  requestCount = 0;
+  const started = performance.now();
+  counting = true;
+  try {
+    await readAllRoutes(boards);
+    await readAllRoutes(boards);
+  } finally { counting = false; }
+  const elapsedMs = performance.now() - started;
+  const measurement = { boards: boards.length, routes: 'GET /api/v1/boards; 3x GET state; 3x GET item detail; GET /',
+    warmupRequests: measuredRequests, requests: requestCount,
+    rounds: 2, elapsedMs: Number(elapsedMs.toFixed(2)), processes: { ...counters, methods: { ...counters.methods } } };
+  process.stdout.write(JSON.stringify({ measurement }) + '\\n');
+
+  const target = projects[0];
+  const board = boards.find((entry) => resolve(entry.root) === resolve(target.root));
+  const boardPath = '/api/v1/boards/' + board.id;
+  const specPath = resolve(target.root, 'SPEC.md');
+  const configPath = resolve(target.root, 'pullboard.json');
+  const doctrinePath = resolve(target.root, 'DOCTRINE.md');
+  /** Read the target state and return its payload. */
+  async function state() { return (await readApi(boardPath + '/state')).state; }
+  /** Change the target SPEC.md with a new approved goal row. */
+  function writeSpec(id) {
+    writeFileSync(specPath, '# HTTP fixture\\n\\n## Goals\\n- G1 [approved, must] Keep the board. | gate: true\\n- ' + id + ' [approved, must] Keep reads current. | gate: true\\n');
+  }
+  /** Advance the real fixture branch with Git plumbing; unrelated Pullboard commit hooks do not shape this cache probe. */
+  function commitFixture(root, message) {
+    const options = { cwd: root, env: gitIdentity, encoding: 'utf8' };
+    const tree = execFileSync('git', ['write-tree'], options).trim();
+    const parent = execFileSync('git', ['rev-parse', 'HEAD'], options).trim();
+    const commit = execFileSync('git', ['commit-tree', tree, '-p', parent], { ...options, input: message }).trim();
+    execFileSync('git', ['update-ref', 'HEAD', commit], options);
+  }
+  writeSpec('G2');
+  execFileSync('git', ['add', 'SPEC.md'], { cwd: target.root, env: process.env, stdio: 'ignore' });
+  commitFixture(target.root, 'docs: refresh fixture spec [G1]');
+  let current = await state();
+  let head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: target.root, env: process.env, encoding: 'utf8' }).trim();
+  assert.ok(current.spec.some((row) => row.id === 'G2'));
+  assert.equal(current.rowAgesAt['SPEC.md'], head, 'a new commit refreshes the file HEAD');
+
+  execFileSync('git', ['switch', '-q', '-c', 'freshness-branch'], { cwd: target.root, env: process.env, stdio: 'ignore' });
+  writeSpec('G3');
+  execFileSync('git', ['add', 'SPEC.md'], { cwd: target.root, env: process.env, stdio: 'ignore' });
+  commitFixture(target.root, 'docs: update branch fixture spec [G1]');
+  current = await state();
+  head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: target.root, env: process.env, encoding: 'utf8' }).trim();
+  assert.ok(current.spec.some((row) => row.id === 'G3'));
+  assert.equal(current.rowAgesAt['SPEC.md'], head, 'a branch switch refreshes the selected HEAD');
+
+  execFileSync('git', ['pack-refs', '--all', '--prune'], { cwd: target.root, env: process.env, stdio: 'ignore' });
+  assert.ok(readFileSync(resolve(target.root, '.git', 'packed-refs'), 'utf8').includes(' refs/heads/main\\n'),
+    'the private fixture has a packed main ref');
+  execFileSync('git', ['switch', '-q', 'main'], { cwd: target.root, env: process.env, stdio: 'ignore' });
+  current = await state();
+  assert.ok(current.spec.some((row) => row.id === 'G2'), 'switching back refreshes the original branch state');
+  execFileSync('git', ['pack-refs', '--all', '--prune'], { cwd: target.root, env: process.env, stdio: 'ignore' });
+  const packedRefs = readFileSync(resolve(target.root, '.git', 'packed-refs'), 'utf8');
+  assert.ok(packedRefs.includes(' refs/heads/freshness-branch\\n'), 'the alternate ref is packed while main is checked out');
+  execFileSync('git', ['switch', '-q', 'freshness-branch'], { cwd: target.root, env: process.env, stdio: 'ignore' });
+  current = await state();
+  assert.ok(current.spec.some((row) => row.id === 'G3'), 'switching to a packed ref refreshes the selected state');
+  execFileSync('git', ['switch', '-q', 'main'], { cwd: target.root, env: process.env, stdio: 'ignore' });
+
+  writeSpec('G4');
+  current = await state();
+  assert.ok(current.spec.some((row) => row.id === 'G4'), 'an uncommitted SPEC.md edit appears on the next read');
+  writeFileSync(doctrinePath, '# Local rules\\n\\n## Team Rules\\n\\n- LOCAL1 [approved, must] Keep the board readable. | gate: true\\n');
+  current = await state();
+  assert.ok(current.practice.some((row) => row.id === 'LOCAL1'), 'a DOCTRINE.md edit appears on the next read');
+  const config = JSON.parse(readFileSync(configPath, 'utf8'));
+  writeFileSync(configPath, JSON.stringify({ ...config, lanes: { ...config.lanes, ops: { owns: [] } } }));
+  current = await state();
+  assert.ok(current.lanes.includes('ops'), 'a pullboard.json edit appears on the next read');
+
+  const linked = projects[2];
+  const linkedBoard = boards.find((entry) => resolve(entry.root) === resolve(linked.root));
+  const linkedPath = '/api/v1/boards/' + linkedBoard.id + '/state';
+  execFileSync('git', ['switch', '-q', '-c', 'linked-refresh'], { cwd: linked.root, env: process.env, stdio: 'ignore' });
+  writeFileSync(resolve(linked.root, 'SPEC.md'), '# HTTP fixture\\n\\n## Goals\\n- G1 [approved, must] Keep the board. | gate: true\\n- G5 [approved, must] Keep the linked worktree current. | gate: true\\n');
+  execFileSync('git', ['add', 'SPEC.md'], { cwd: linked.root, env: process.env, stdio: 'ignore' });
+  commitFixture(linked.root, 'docs: refresh linked worktree [G1]');
+  const linkedState = (await readApi(linkedPath)).state;
+  const linkedHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: linked.root, env: process.env, encoding: 'utf8' }).trim();
+  assert.ok(linkedState.spec.some((row) => row.id === 'G5'));
+  assert.equal(linkedState.rowAgesAt['SPEC.md'], linkedHead, 'a linked worktree branch change refreshes its state');
+  process.stdout.write(JSON.stringify({ fresh: true }) + '\\n');
+} finally {
+  await view.close();
+}
+`;
 
 /** Quote an executable path literally for the fixture's source-bin hook shim. */
 function shellWord(value) {
@@ -136,6 +342,61 @@ async function viewHttpBox(t, existing = null) {
   const id = listed.document.boards[0].id;
   return { ...box, api: view, origin, key, id, call, path: '/api/v1/boards/' + id };
 }
+
+/** Prove warmed reads across three registered projects start no child processes and changes refresh state. */
+test('a repeated read through the view page spawns no process [A2,N26]', (t) => {
+  const box = fixture(t);
+  const roots = [box.root];
+  for (const number of [2, 3]) {
+    const root = join(box.dir, 'repo-' + number);
+    mkdirSync(root);
+    runFixtureGit(['init', '-q', '-b', 'main'], { cwd: root, env: box.env, stdio: 'pipe' });
+    box.cli(root, 'init');
+    const configPath = join(root, 'pullboard.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf8'));
+    writeFileSync(configPath, JSON.stringify({ ...config, gate: 'true', lanes: { app: { owns: ['app/'] }, review: { owns: [] } } }));
+    writeFileSync(join(root, 'SPEC.md'), '# HTTP fixture\n\n## Goals\n- G1 [approved, must] Keep the board. | gate: true\n');
+    writeFileSync(join(root, 'DOCTRINE.md'), '');
+    runFixtureGit(['add', '-A'], { cwd: root, env: box.env, stdio: 'pipe' });
+    runFixtureGit(['commit', '-q', '-m', 'chore: private HTTP fixture [G1]'], { cwd: root, env: box.env, stdio: 'pipe' });
+    if (number === 3) {
+      const linked = join(box.dir, 'repo-3-linked');
+      runFixtureGit(['worktree', 'add', '-q', '-b', 'view-feature', linked], { cwd: root, env: box.env, stdio: 'pipe' });
+      roots.push(linked);
+    } else roots.push(root);
+  }
+
+  const projects = roots.map((root, index) => {
+    // Write the shared board from its primary checkout; the linked checkout remains a read-only fixture.
+    const itemRoot = index === 2 ? join(box.dir, 'repo-3') : root;
+    const added = box.cli(itemRoot, 'add', 'app', 'Read fixture item ' + (index + 1), '--criterion', 'appears in item detail', '--specs', 'G1');
+    return { root, item: added.item.item_id };
+  });
+  const previousHome = process.env.PULLBOARD_HOME;
+  process.env.PULLBOARD_HOME = box.env.PULLBOARD_HOME;
+  try {
+    // CLI setup registers the primary; measure its linked checkout instead as the third board.
+    forgetProject(join(box.dir, 'repo-3'));
+    for (const root of roots) registerProject(root);
+  } finally {
+    if (previousHome === undefined) delete process.env.PULLBOARD_HOME;
+    else process.env.PULLBOARD_HOME = previousHome;
+  }
+  // Keep the fixture's ordinary private Git config and identity; run-tests removes inherited repo/object selectors.
+  const result = runFixtureChild(process.execPath, [
+    '--input-type=module', '-e', REPEATED_READ_HARNESS,
+    resolve(import.meta.dirname, '../src/serve.js'), JSON.stringify(projects),
+  ], { cwd: box.root, env: box.env, encoding: 'utf8' });
+  assert.ok(result.stdout.trim(), result.failure ?? result.stderr);
+  const lines = result.stdout.trim().split('\n');
+  const measurement = JSON.parse(lines[0]).measurement;
+  process.stderr.write(`a repeated read through the view page spawns no process: boards=${measurement.boards}, routes=${measurement.routes}, requests=${measurement.requests}, rounds=${measurement.rounds}, processes=${JSON.stringify(measurement.processes)}, elapsed=${measurement.elapsedMs}ms\n`);
+  assert.deepEqual({ git: measurement.processes.git, node: measurement.processes.node, other: measurement.processes.other },
+    { git: 0, node: 0, other: 0 }, 'repeated board-list, state, item-detail, and page reads start no child process after warm-up');
+  assert.equal(result.status, 0, result.failure ?? result.stderr);
+  const report = JSON.parse(lines.at(-1));
+  assert.equal(report.fresh, true, 'commit, packed refs, linked worktree, SPEC.md, DOCTRINE.md, and pullboard.json changes appear on the next read');
+});
 
 test('[A2] a stale registered folder does not hide another readable board', async (t) => {
   const box = await httpBox(t, { includeMissing: true });
@@ -1186,13 +1447,20 @@ test('[A2, N26] one event stream serves many boards', async (t) => {
   assert.match(repeated.document.error.message, new RegExp(box.id));
 });
 
-test('[A2,N39] the local API accepts the view session cookie', async (t) => {
+test('[A2,N39] the view cookie check catches a weakened compare', async (t) => {
   const box = fixture(t);
   const secret = randomUUID();
   const sessionCookie = {
     name: `pullboard_view_${randomUUID().replaceAll('-', '')}`,
-    value: randomUUID(),
+    value: randomBytes(24).toString('base64url'),
   };
+  assert.throws(() => createLocalApiHandler({
+    secret,
+    getPort: () => 1,
+    runCommand: main,
+    projects: () => [],
+    sessionCookie: { name: sessionCookie.name, value: randomBytes(8).toString('base64url') },
+  }), /at least 128 bits/u, 'session cookies need capacity for at least 128 random bits');
   let bound;
   const handler = createLocalApiHandler({
     secret,
@@ -1209,6 +1477,14 @@ test('[A2,N39] the local API accepts the view session cookie', async (t) => {
   });
   t.after(() => new Promise((closed) => server.close(closed)));
   const origin = `http://127.0.0.1:${bound}`;
+  const otherPortServer = createServer();
+  await new Promise((ready, fail) => {
+    otherPortServer.once('error', fail);
+    otherPortServer.listen(0, '127.0.0.1', ready);
+  });
+  const otherLocalOrigin = `http://127.0.0.1:${otherPortServer.address().port}`;
+  t.after(() => new Promise((closed) => otherPortServer.close(closed)));
+  assert.notEqual(otherLocalOrigin, origin, 'the hostile same-site page uses a different localhost port');
   const cookie = `${sessionCookie.name}=${sessionCookie.value}`;
   /** Send one real HTTP request to the private API handler. */
   const request = (path, headers = {}, init = {}) => fetchFresh(origin + path, {
@@ -1224,7 +1500,7 @@ test('[A2,N39] the local API accepts the view session cookie', async (t) => {
     assert.equal(document.error.code, code);
   }
 
-  const cookieListing = await request('/api/v1/boards', { cookie });
+  const cookieListing = await request('/api/v1/boards', { cookie, 'sec-fetch-site': 'same-origin' });
   assert.equal(cookieListing.status, 200, 'the current view cookie authenticates the actual local API');
   const listing = await cookieListing.json();
   assert.equal(listing.version, 1);
@@ -1233,14 +1509,27 @@ test('[A2,N39] the local API accepts the view session cookie', async (t) => {
   const state = await request(`/api/v1/boards/${board.id}/state`, { cookie });
   assert.equal(state.status, 200, 'cookie-authenticated state reads the fixture SQLite board');
 
+  const sameOriginFallback = await request('/api/v1/boards', { cookie });
+  assert.equal(sameOriginFallback.status, 200, 'without Fetch-Site, the existing own Host/Origin checks still allow the cookie');
   await refused(await request('/api/v1/boards'), 401, 'AUTH_REQUIRED');
-  await refused(await request('/api/v1/boards', { cookie: `${sessionCookie.name}=wrong-cookie-value` }), 401, 'AUTH_REQUIRED');
+  await refused(await request('/api/v1/boards', { cookie: `${sessionCookie.name}=${'x'.repeat(sessionCookie.value.length)}` }), 401, 'AUTH_REQUIRED');
+  const caseChangedName = `${sessionCookie.name[0].toUpperCase()}${sessionCookie.name.slice(1)}`;
+  assert.notEqual(caseChangedName, sessionCookie.name);
+  await refused(await request('/api/v1/boards', { cookie: `${caseChangedName}=${sessionCookie.value}` }), 401, 'AUTH_REQUIRED');
   await refused(await request('/api/v1/boards', { cookie: `${sessionCookie.name}=expired-session-value` }), 401, 'AUTH_REQUIRED');
   await refused(await request('/api/v1/boards', { cookie: `${cookie}; ${cookie}` }), 401, 'AUTH_REQUIRED');
   await refused(await request('/api/v1/boards', { cookie: `${sessionCookie.name}=wrong-cookie-value; ${cookie}` }), 401, 'AUTH_REQUIRED');
   await refused(await request('/api/v1/boards', { cookie: `${sessionCookie.name}; ${cookie}` }), 401, 'AUTH_REQUIRED');
   const staleName = `${sessionCookie.name}_old`;
   await refused(await request('/api/v1/boards', { cookie: `${staleName}=${sessionCookie.value}` }), 401, 'AUTH_REQUIRED');
+  await refused(await request('/api/v1/boards', { cookie, 'sec-fetch-site': 'same-site' }), 401, 'AUTH_REQUIRED');
+  await refused(await request('/api/v1/boards', { cookie, origin: otherLocalOrigin, 'sec-fetch-site': 'same-site' }), 401, 'AUTH_REQUIRED');
+  await refused(await request(`/api/v1/boards/${board.id}/moves`, {
+    cookie, 'sec-fetch-site': 'same-site',
+  }, { method: 'POST', body: { verb: 'next', args: {} } }), 401, 'AUTH_REQUIRED');
+  await refused(await request(`/api/v1/boards/${board.id}/moves`, {
+    cookie, origin: otherLocalOrigin, 'sec-fetch-site': 'same-site',
+  }, { method: 'POST', body: { verb: 'next', args: {} } }), 401, 'AUTH_REQUIRED');
 
   const foreignHost = await new Promise((done, reject) => {
     const outbound = httpRequest(origin + '/api/v1/boards', { headers: { host: 'foreign.invalid', cookie } }, (response) => {
@@ -1254,8 +1543,11 @@ test('[A2,N39] the local API accepts the view session cookie', async (t) => {
   assert.equal(foreignHost.status, 401, 'a valid cookie cannot cross the API host boundary');
   assert.equal(foreignHost.document.error.code, 'AUTH_REQUIRED');
   await refused(await request('/api/v1/boards', { cookie, origin: 'https://foreign.invalid' }), 403, 'API_ORIGIN');
+  await refused(await request(`/api/v1/boards/${board.id}/moves`, { cookie, origin: 'https://foreign.invalid' }, {
+    method: 'POST', body: { verb: 'next', args: {} },
+  }), 403, 'API_ORIGIN');
 
-  const keyHeader = await request('/api/v1/boards', { 'x-pullboard-key': secret });
+  const keyHeader = await request('/api/v1/boards', { 'x-pullboard-key': secret, 'sec-fetch-site': 'cross-site' });
   assert.equal(keyHeader.status, 200, 'the existing key header remains valid');
   const bearer = await request('/api/v1/boards', { authorization: `Bearer ${secret}` });
   assert.equal(bearer.status, 200, 'the existing Bearer key remains valid');
