@@ -336,6 +336,8 @@ async function requeuedRemoteRun(queue) {
     const { order, line } = gate();
     const listed = line.map(({ agent, queueClass: queueClassName }) => [agent, queueClassName]);
     const ticketDb = new DatabaseSync(join(box.home, 'resources.sqlite'));
+    // The pool's own processes write this file too; wait for their lock instead of failing.
+    ticketDb.exec('PRAGMA busy_timeout = 5000');
     let tickets;
     let lastIssued;
     try {
@@ -863,6 +865,8 @@ test('the pool admits reviews before submits before focused runs, and waiting ru
 
   // Waiting time is the only input to aging; backdating the queued time stands in for the clock.
   const db = new DatabaseSync(join(box.home, 'resources.sqlite'));
+  // The pool's own processes write this file too; wait for their lock instead of failing.
+  db.exec('PRAGMA busy_timeout = 5000');
   try {
     const backdate = db.prepare('UPDATE waiter SET since = ? WHERE agent = ?');
     backdate.run(new Date(Date.now() - 2 * AGE_MS - 60_000).toISOString(), 'focused-two');
@@ -945,6 +949,8 @@ test('queue order follows the machine settings [C7,O5]', async () => {
   const backdate = (box, agent, ms) => {
     const queuedAt = new Date(Date.now() - ms).toISOString();
     const db = new DatabaseSync(join(box.home, 'resources.sqlite'));
+    // The pool's own processes write this file too; wait for their lock instead of failing.
+    db.exec('PRAGMA busy_timeout = 5000');
     let changed;
     try { changed = db.prepare('UPDATE waiter SET since = ? WHERE agent = ?').run(queuedAt, agent).changes; }
     finally { db.close(); }
@@ -1060,6 +1066,8 @@ test('queue order follows the machine settings [C7,O5]', async () => {
   /** The raw waiter rows every process reads. */
   const rows = () => {
     const db = new DatabaseSync(join(agree.home, 'resources.sqlite'));
+    // The pool's own processes write this file too; wait for their lock instead of failing.
+    db.exec('PRAGMA busy_timeout = 5000');
     try { return db.prepare("SELECT ticket, agent, since, landing, item_check AS itemCheck, diagnostic, kind, classed FROM waiter WHERE name = 'gate'").all(); }
     finally { db.close(); }
   };
