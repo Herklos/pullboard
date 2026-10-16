@@ -325,7 +325,7 @@ test("a landing-gated submit runs the project's invariant tests [V4,C7]", (t) =>
   function project(invariants, failing = false) {
     let box = privateRepo(t);
     put(box.root, 'pullboard.json', JSON.stringify({ gate: 'node --test', affectedTests: 'node --test',
-      submitGate: 'landing', ...(invariants === undefined ? {} : { submitInvariants: invariants }) }));
+      submitGate: 'landing', shared: ['pullboard.json'], ...(invariants === undefined ? {} : { submitInvariants: invariants }) }));
     seedGraph(box);
     const marker = join(box.dir, 'invariants.log');
     box.env.INVARIANT_MARKER = marker;
