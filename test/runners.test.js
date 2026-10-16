@@ -496,6 +496,36 @@ test('a queued run executes on a registered runner and its result comes back [C7
   const callsAfterExit7 = readFileSync(requests, 'utf8').trim().split('\n').length;
   assert.equal(callsAfterExit7, 2, 'a complete exit-7 receipt is a test failure, not a dropped-run retry');
 
+  // A real full-suite runner produced more than ten thousand small process journals.
+  // Exercise that boundary in the worker without launching thousands of fixture processes.
+  writeFileSync(join(repo, 'runner-many-journals.js'), `import { readdirSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+const option = /(?:^|\\s)--import=(?:"([^"]+)"|'([^']+)'|(\\S+))/u.exec(process.env.NODE_OPTIONS || '');
+if (!option) throw new Error('runner preload path was not passed to the committed job');
+const journal = join(dirname(fileURLToPath(option[1] || option[2] || option[3])), 'child-journal');
+for (let index = 0; index < 10_001; index++) {
+  const pid = 2_000_000 + index;
+  writeFileSync(join(journal, 'children-' + pid + '.jsonl'), JSON.stringify({
+    type: 'boot', pid, ppid: process.pid, instance: 'bounded-journal-fixture-' + index,
+  }) + '\\n');
+}
+console.log('RUNNER_JOURNAL_FILES ' + readdirSync(journal).filter(name => /^children-\\d+\\.jsonl$/u.test(name)).length);
+`);
+  git(repo, env, 'add', 'runner-many-journals.js');
+  git(repo, env, 'commit', '-q', '-m', 'test: cover a bounded large runner journal');
+  const manyJournals = runThroughGate(repo, env, 'node runner-many-journals.js');
+  assert.equal(manyJournals.status, 0, fixtureResultContext(manyJournals));
+  const journalCount = Number(/RUNNER_JOURNAL_FILES (\d+)/u.exec(manyJournals.stdout)?.[1]);
+  assert.ok(journalCount > 10_000, 'the real worker saw more journal files than the old limit');
+  const manyResult = gateResult(manyJournals.stdout);
+  assert.equal(manyResult.isGreen, true, 'the bounded journal returns a complete successful receipt');
+  assert.equal(manyResult.runner, HOST);
+  assert.equal(readRemoteGateHolders(join(remoteMachineHome, 'resources.sqlite')).length, 0,
+    'the physical runner lease is released after successful cleanup');
+  const callsAfterManyJournals = readFileSync(requests, 'utf8').trim().split('\n').length;
+  assert.equal(callsAfterManyJournals, 3, 'the large-journal command ran remotely exactly once');
+
   // The secret is absent from HEAD but remains in a reachable commit; full-history scanning must
   // refuse before transferring those historical objects to the registered worker.
   git(repo, env, 'add', '-f', '.env');
@@ -508,7 +538,7 @@ test('a queued run executes on a registered runner and its result comes back [C7
   assert.equal(historicalRed.status, 1, fixtureResultContext(historicalRed));
   assert.match(historicalRed.stdout + historicalRed.stderr, /RUNNER_SECRET/u);
   assert.doesNotMatch(historicalRed.stdout + historicalRed.stderr, new RegExp(SECRET, 'u'));
-  assert.equal(readFileSync(requests, 'utf8').trim().split('\n').length, callsAfterExit7,
+  assert.equal(readFileSync(requests, 'utf8').trim().split('\n').length, callsAfterManyJournals,
     'historical secret scanning refuses before opening an SSH request');
 
   assert.equal(commit.length, 40);

@@ -332,26 +332,36 @@ function createDescendantTracker(directory) {
   let uncertain = false;
   let censusFailure = false;
   let reason = '';
+  let uncertainReason = '';
   let busy = false;
   let warned = false;
   let timer = null;
   let stoppingPromise = null;
 
+  /** Keep permanent custody failures distinct from earlier, potentially resolved pending observations. */
+  function markUncertain(message) {
+    uncertain = true;
+    uncertainReason ||= message;
+    reason ||= message;
+  }
+
   function readJournal() {
-    if (existsSync(overflowPath)) { uncertain = true; reason ||= 'child spawn journal overflow or write failure'; }
+    if (existsSync(overflowPath)) { markUncertain('child spawn journal overflow or write failure'); }
     let total = 0;
     const files = readdirSync(journal.journalDirectory).filter(name => /^children-\d+\.jsonl$/u.test(name)).sort();
-    if (files.length > 10_000) { uncertain = true; reason ||= 'child spawn journal file limit exceeded'; return; }
+    // A full suite creates one journal per Node process; align this count with
+    // the event and identity bounds while retaining the byte bounds below.
+    if (files.length > 100_000) { markUncertain('child spawn journal file limit exceeded'); return; }
     for (const name of files) {
       const file = join(journal.journalDirectory, name);
       let size;
-      try { size = statSync(file).size; } catch { uncertain = true; reason ||= 'child spawn journal could not be inspected'; continue; }
+      try { size = statSync(file).size; } catch { markUncertain('child spawn journal could not be inspected'); continue; }
       total += size;
       if (!Number.isSafeInteger(size) || size > 131_072 || total > 8 * 1024 * 1024) {
-        uncertain = true; reason ||= 'child spawn journal size limit exceeded'; continue;
+        markUncertain('child spawn journal size limit exceeded'); continue;
       }
       const offset = offsets.get(name) ?? 0;
-      if (size < offset) { uncertain = true; reason ||= 'child spawn journal changed unexpectedly'; continue; }
+      if (size < offset) { markUncertain('child spawn journal changed unexpectedly'); continue; }
       if (size === offset) continue;
       const length = size - offset;
       const fd = openSync(file, 'r');
@@ -359,7 +369,7 @@ function createDescendantTracker(directory) {
       try {
         const bytes = Buffer.alloc(length);
         const read = readSync(fd, bytes, 0, length, offset);
-        if (read !== length) { uncertain = true; reason ||= 'child spawn journal read was incomplete'; continue; }
+        if (read !== length) { markUncertain('child spawn journal read was incomplete'); continue; }
         text = (partial.get(name) ?? '') + bytes.toString('utf8');
       } finally { closeSync(fd); }
       offsets.set(name, size);
@@ -367,9 +377,9 @@ function createDescendantTracker(directory) {
       partial.set(name, lines.pop() ?? '');
       for (const line of lines) {
         if (!line) continue;
-        if (line.length > 4_096) { uncertain = true; reason ||= 'child spawn journal record is oversized'; continue; }
+        if (line.length > 4_096) { markUncertain('child spawn journal record is oversized'); continue; }
         let record;
-        try { record = JSON.parse(line); } catch { uncertain = true; reason ||= 'child spawn journal record is invalid'; continue; }
+        try { record = JSON.parse(line); } catch { markUncertain('child spawn journal record is invalid'); continue; }
         if (record.type === 'boot' && Number.isSafeInteger(record.pid) && record.pid > 0 && typeof record.instance === 'string') {
           instancePids.set(record.instance, record.pid);
         } else if (record.type === 'spawn' && Number.isSafeInteger(record.pid) && record.pid > 0
@@ -379,8 +389,8 @@ function createDescendantTracker(directory) {
           eventCount += 1;
           childEvents.push({ ...record, eventId: `${name}:${eventCount}` });
           eventsByChild.set(record.pid, childEvents);
-          if (eventCount > 100_000) { uncertain = true; reason ||= 'child spawn journal event limit exceeded'; return; }
-        } else { uncertain = true; reason ||= 'child spawn journal identity is invalid'; }
+          if (eventCount > 100_000) { markUncertain('child spawn journal event limit exceeded'); return; }
+        } else { markUncertain('child spawn journal identity is invalid'); }
       }
     }
   }
@@ -408,7 +418,7 @@ function createDescendantTracker(directory) {
         const row = current.get(pid);
         if (!row || row.birth !== identity.birth) retired.add(`${pid}:${identity.birth}`);
         else if (retired.has(`${pid}:${identity.birth}`)) {
-          uncertain = true; reason ||= 'a previously observed process identity reappeared';
+          markUncertain('a previously observed process identity reappeared');
         }
       }
       const ownedPids = new Set();
@@ -421,7 +431,7 @@ function createDescendantTracker(directory) {
         if (launched && launched.birth !== row.birth) continue;
         if (!launched && row.ppid !== process.pid) continue;
         if (!launched && row.pgid !== pid) continue;
-        if (retired.has(`${pid}:${row.birth}`)) { uncertain = true; reason ||= 'a retired process identity reappeared'; continue; }
+        if (retired.has(`${pid}:${row.birth}`)) { markUncertain('a retired process identity reappeared'); continue; }
         if (!launched) rootLaunchIdentities.set(pid, row);
         known.set(pid, { ...row, commandSha256: prior?.commandSha256 ?? '', root: true, group: pid });
         ownedPids.add(pid);
@@ -436,7 +446,7 @@ function createDescendantTracker(directory) {
           // binds its child to that exact process instance even after the parent exits.
           if (!parentPid || parentPid !== event.ppid) continue;
           const prior = known.get(row.pid);
-          if (retired.has(`${row.pid}:${row.birth}`)) { uncertain = true; reason ||= 'a retired process identity reappeared'; continue; }
+          if (retired.has(`${row.pid}:${row.birth}`)) { markUncertain('a retired process identity reappeared'); continue; }
           if (prior && prior.birth === row.birth) { consumedEvents.add(event.eventId); ownedPids.add(row.pid); continue; }
           if (!prior && baseline.get(row.pid)?.birth === row.birth) { consumedEvents.add(event.eventId); continue; }
           // A spawn receipt must be observed while its exact parent instance still owns it.
@@ -479,7 +489,7 @@ function createDescendantTracker(directory) {
         for (const row of current.values()) {
           if (!ownedPids.has(row.ppid)) continue;
           const prior = known.get(row.pid);
-          if (retired.has(`${row.pid}:${row.birth}`)) { uncertain = true; reason ||= 'a retired process identity reappeared'; continue; }
+          if (retired.has(`${row.pid}:${row.birth}`)) { markUncertain('a retired process identity reappeared'); continue; }
           if (prior && prior.birth === row.birth) { ownedPids.add(row.pid); continue; }
           if (!prior && baseline.get(row.pid)?.birth === row.birth) continue;
           const parent = known.get(row.ppid);
@@ -503,11 +513,11 @@ function createDescendantTracker(directory) {
         if (!leaderStarted) continue;
         const leader = current.get(row.pgid);
         if (leader && leader.birth !== leaderStarted) {
-          uncertain = true; reason ||= 'detached process group identity was reused';
+          markUncertain('detached process group identity was reused');
           continue;
         }
         const prior = known.get(row.pid);
-        if (retired.has(`${row.pid}:${row.birth}`)) { uncertain = true; reason ||= 'a retired process identity reappeared'; continue; }
+        if (retired.has(`${row.pid}:${row.birth}`)) { markUncertain('a retired process identity reappeared'); continue; }
         if (prior && prior.birth === row.birth) { ownedPids.add(row.pid); continue; }
         if (!prior && baseline.get(row.pid)?.birth === row.birth) continue;
         if ((!prior || prior.birth !== row.birth) && !ownedPids.has(row.ppid)) {
@@ -530,7 +540,7 @@ function createDescendantTracker(directory) {
           reason ||= 'owned process group contains an unidentified member';
         }
       }
-      if (known.size > 100_000) { uncertain = true; reason ||= 'owned process identity limit exceeded'; }
+      if (known.size > 100_000) { markUncertain('owned process identity limit exceeded'); }
       // Refresh live PGID/start data only when the PID still has the same start identity.
       for (const pid of ownedPids) {
         const row = current.get(pid);
@@ -613,9 +623,9 @@ function createDescendantTracker(directory) {
           if (result) signaledGroups.add(ownedGroup);
           continue;
         }
-        if (!identity.exact) { uncertain = true; reason ||= 'descendant lacks a safe process-group identity'; break; }
+        if (!identity.exact) { markUncertain('descendant lacks a safe process-group identity'); break; }
         try { process.kill(identity.pid, 'SIGTERM'); }
-        catch (error) { if (error.code !== 'ESRCH') { uncertain = true; reason ||= 'owned descendant could not be stopped safely'; } }
+        catch (error) { if (error.code !== 'ESRCH') { markUncertain('owned descendant could not be stopped safely'); } }
       }
       const deadline = Date.now() + 2_000;
       while (Date.now() < deadline) {
@@ -635,9 +645,9 @@ function createDescendantTracker(directory) {
           if (result) killedGroups.add(ownedGroup);
           continue;
         }
-        if (!identity.exact) { uncertain = true; reason ||= 'descendant lacks a safe process-group identity'; break; }
+        if (!identity.exact) { markUncertain('descendant lacks a safe process-group identity'); break; }
         try { process.kill(identity.pid, 'SIGKILL'); }
-        catch (error) { if (error.code !== 'ESRCH') { uncertain = true; reason ||= 'owned descendant could not be killed safely'; } }
+        catch (error) { if (error.code !== 'ESRCH') { markUncertain('owned descendant could not be killed safely'); } }
       }
       await new Promise(resolvePause => setTimeout(resolvePause, 100));
     }
@@ -673,7 +683,7 @@ function createDescendantTracker(directory) {
     nodeOptions: journal.nodeOptions,
     /** Describe the last observed cleanup state without treating it as a fresh ownership proof. */
     cleanupState() {
-      return { reason, uncertain, censusFailure, knownCount: known.size,
+      return { reason: uncertainReason || reason, uncertain, censusFailure, knownCount: known.size,
         pending: [...pendingIdentities].slice(0, 16).map(([pid, identity]) => ({ pid, birth: identity.birth })),
         live: liveDescendants().slice(0, 16).map(({ pid, birth, group }) => ({ pid, birth, group })) };
     },
