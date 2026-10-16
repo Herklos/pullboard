@@ -8,16 +8,16 @@
  *
  *   blueprint  1                       required, the format version
  *   name       "web-app"               required, lowercase letters, digits and dashes
- *   title      "Solo web app"          required, one line; the section heading
+ *   title      "Web app"               required, one line; the section heading
  *   version    1                       required, a positive integer, the blueprint's own version
- *   kind       "app"                   optional: app, infrastructure, practice or beyond-code
+ *   kind       "product"               optional: product, infrastructure, practice or beyond-code
  *   by         "Pullboard"             optional, who made it
  *   summary    "..."                   optional, one line
  *   prefix     "W"                     optional, the row id prefix it prefers; a free one is used if taken
  *   gate       "npm test"              optional, set in pullboard.json only when it has no gate
  *   rules      [{ key, text, why, tier?, gate? }]          tier must|aim (must), gate (review)
  *   questions  [{ key, ask, choices, default }]            default is one of choices
- *   items      [{ key, title, cites?, after?, lane?, route?, criterion?, brief? }]
+ *   items      [{ key, title, cites?, after?, lane?, route?, criterion?, brief? }]   route is strong
  *
  * Rule and question keys ("W1", "Q1") are unique within the file; an item cites them by key and
  * waits on other items by their keys. On a board they get real ids from the section's prefix.
@@ -32,13 +32,12 @@ import { insertSectionRows, nextRowId } from './spec.js';
 export const BLUEPRINT_FORMAT = 1;
 
 /** The kinds the gallery files blueprints under. */
-export const BLUEPRINT_KINDS = ['app', 'infrastructure', 'practice', 'beyond-code'];
+export const BLUEPRINT_KINDS = ['product', 'infrastructure', 'practice', 'beyond-code'];
 
 const BUNDLED_DIR = fileURLToPath(new URL('./blueprints/', import.meta.url));
 const NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
 const KEY_RE = /^[A-Za-z0-9]+$/u;
 const PREFIX_RE = /^[A-Z][A-Z0-9]*$/u;
-const ROUTES = ['light', 'mid', 'strong'];
 
 /**
  * The names of the blueprints shipped with Pullboard, sorted.
@@ -162,7 +161,8 @@ export function validateBlueprint(value, source = 'blueprint') {
       if (!itemKeys.has(before) || before === item.key) fail(`${at}.after`, `names ${JSON.stringify(before)}, which is no earlier item key`);
     }
     line(`${at}.lane`, item.lane, { required: false });
-    if (item.route !== undefined && !ROUTES.includes(item.route)) fail(`${at}.route`, `must be one of ${ROUTES.join(', ')}`);
+    // A light or mid item needs a coordinator's check and a cold brief, which a blueprint cannot carry.
+    if (item.route !== undefined && item.route !== 'strong') fail(`${at}.route`, 'must be strong or left out; add a light or mid item later with pullboard add and its check');
     line(`${at}.criterion`, item.criterion, { required: false });
     if (item.brief !== undefined && typeof item.brief !== 'string') fail(`${at}.brief`, 'must be text');
   });
@@ -178,8 +178,8 @@ export function validateBlueprint(value, source = 'blueprint') {
 }
 
 /**
- * The marker line a blueprint leaves under its section heading, so the same version adds nothing
- * twice even after the person rewords or declines its rows.
+ * The marker line a blueprint leaves after its rows once everything is added, so the same version
+ * adds nothing twice even after the person rewords or declines its rows.
  *
  * @param {{ name: string, version: number }} blueprint
  * @returns {string}
@@ -217,7 +217,7 @@ export function questionText(question) {
  * @param {{ source: string, spec: any, doctrine: any, itemTitles: Iterable<string>, gate: string }} board
  *   source is SPEC.md's text and spec its parse; doctrine is loadDoctrine's result; itemTitles are
  *   every item title on the board; gate is pullboard.json's gate now.
- * @returns {{ marked: boolean, section: { prefix: string, name: string, isNew: boolean }, rows: { key: string, id: string, status: string, text: string, line: string }[], specAfter: string, ids: Record<string, string>, items: { key: string, title: string, specIds: string[], after: string[], lane?: string, route: string, criterion: string, brief: string }[], gate: string | null }}
+ * @returns {{ marked: boolean, section: { prefix: string, name: string, isNew: boolean }, rows: { key: string, id: string, status: string, text: string, line: string }[], specRows: string, specAfter: string, ids: Record<string, string>, items: { key: string, title: string, specIds: string[], after: string[], lane?: string, route: string, criterion: string, brief: string }[], gate: string | null }}
  */
 export function planBlueprint(blueprint, { source, spec, doctrine, itemTitles, gate }) {
   const marker = blueprintMarker(blueprint);
@@ -233,8 +233,11 @@ export function planBlueprint(blueprint, { source, spec, doctrine, itemTitles, g
   ].filter(Boolean));
   const prefix = existing ? prefixOf(existing.name) : freePrefix(blueprint, taken);
   const name = existing ? existing.name : `${prefix} · ${blueprint.title.trim()}`;
-  const byText = new Map(spec.rows.map((row) => [row.text, row.id]));
-  const askedIds = new Map(spec.rows.map((row) => [row.text.split(': ')[0], row.id]));
+  // Only the blueprint's own section counts as already filed: a row elsewhere with the same words,
+  // approved or not, belongs to the person's own spec, and the blueprint still files its drafts.
+  const own = existing ? spec.rows.filter((row) => row.section === existing.name) : [];
+  const byText = new Map(own.map((row) => [row.text, row.id]));
+  const askedIds = new Map(own.map((row) => [row.text.split(': ')[0], row.id]));
   // The same rows spec draft numbers against: SPEC.md and the repo's own doctrine.
   const numberedRows = [...spec.rows, ...(doctrine?.repo?.rows ?? [])];
   const ids = {};
@@ -266,8 +269,12 @@ export function planBlueprint(blueprint, { source, spec, doctrine, itemTitles, g
     key: item.key, title: item.title.trim(), specIds: item.cites.map((cited) => ids[cited]).filter(Boolean), after: item.after,
     ...(item.lane ? { lane: item.lane } : {}), route: item.route, criterion: item.criterion, brief: item.brief,
   }));
-  const specAfter = marked || (!rows.length && existing) ? source : insertSection(source, spec, { existing, name, marker, rows: rows.map((row) => row.line) });
-  return { marked, section: { prefix, name, isNew: !existing }, rows, specAfter, ids, items, gate: !gate?.trim() && blueprint.gate ? blueprint.gate : null };
+  const rowLines = rows.map((row) => row.line);
+  // Rows first, marker last: the caller writes specRows, adds the items, then writes specAfter, so a
+  // failure part way leaves no marker and a retry adds what is missing.
+  const specRows = marked || !rows.length ? source : insertSection(source, spec, { existing, name, lines: rowLines });
+  const specAfter = marked ? source : insertSection(source, spec, { existing, name, lines: [...rowLines, marker] });
+  return { marked, section: { prefix, name, isNew: !existing }, rows, specRows, specAfter, ids, items, gate: !gate?.trim() && blueprint.gate ? blueprint.gate : null };
 }
 
 /**
@@ -288,19 +295,19 @@ function freePrefix(blueprint, taken) {
 }
 
 /**
- * Put the rows into SPEC.md text: into the blueprint's existing section the way spec draft does,
- * or as a new section at the end, each time after the blueprint's marker line.
+ * Put lines into SPEC.md text: into the blueprint's existing section the way spec draft does, or
+ * as a new section at the end.
  *
  * @param {string} source
  * @param {any} spec
- * @param {{ existing: any, name: string, marker: string, rows: string[] }} change
+ * @param {{ existing: any, name: string, lines: string[] }} change
  * @returns {string}
  */
-function insertSection(source, spec, { existing, name, marker, rows }) {
-  if (existing) return insertSectionRows(source, spec, existing, [marker, ...rows]);
+function insertSection(source, spec, { existing, name, lines: added }) {
+  if (existing) return insertSectionRows(source, spec, existing, added);
   const newline = source.includes('\r\n') ? '\r\n' : '\n';
   const lines = source.split(/\r?\n/u);
   while (lines.length && !lines.at(-1).trim()) lines.pop();
-  lines.push('', `## ${name}`, '', marker, ...rows, '');
+  lines.push('', `## ${name}`, '', ...added, '');
   return lines.join(newline);
 }

@@ -58,12 +58,12 @@ test('blueprint add files a blueprint as drafts [S1,I1]', () => {
   const box = freshBoard();
   const before = readFileSync(join(box.repo, 'SPEC.md'), 'utf8');
   const added = json(box, 'blueprint', 'add', 'web-app');
-  assert.deepEqual(added.blueprint, { name: 'web-app', title: 'Solo web app', version: 1 });
+  assert.deepEqual(added.blueprint, { name: 'web-app', title: 'Web app', version: 1 });
   const source = readFileSync(join(box.repo, 'SPEC.md'), 'utf8');
   assert.ok(source.startsWith(before.trimEnd()), 'the existing spec text is kept as it was');
   const spec = parseSpec(source);
   assert.deepEqual(spec.problems, []);
-  const section = spec.sections.filter((entry) => entry.name.endsWith('· Solo web app'));
+  const section = spec.sections.filter((entry) => entry.name.endsWith('· Web app'));
   assert.equal(section.length, 1, 'one section named after the blueprint');
   assert.equal(added.section, section[0].name);
   const rows = spec.rows.filter((row) => row.section === section[0].name);
@@ -85,6 +85,7 @@ test('blueprint add files a blueprint as drafts [S1,I1]', () => {
   for (const row of rows) assert.ok(!doctrine.rows.some((entry) => entry.id === row.id), `${row.id} is unique across SPEC.md and DOCTRINE.md`);
   const check = box.run('spec', 'check');
   assert.equal(check.status, 0, check.stdout + check.stderr);
+  assert.doesNotMatch(check.stdout + check.stderr, /words; rows stay under/u, 'a reason or the choices do not count toward the row length');
 
   // Starter items: open, citing the new rows, the third waiting on the first.
   const items = json(box, 'list', '--all').items.sort((a, b) => a.item_id - b.item_id);
@@ -127,4 +128,52 @@ test('blueprint add files a blueprint as drafts [S1,I1]', () => {
   const gated = freshBoard({ gate: 'node --test' });
   json(gated, 'blueprint', 'add', 'web-app');
   assert.equal(JSON.parse(readFileSync(join(gated.repo, 'pullboard.json'), 'utf8')).gate, 'node --test');
+});
+
+test('blueprint add files a blueprint as drafts even when approved rows say the same [S1,I1]', () => {
+  // Rows elsewhere in the spec, approved, with a rule's exact text and a question's prompt: the
+  // blueprint still files every rule as a draft and every question as a pending row of its own.
+  const box = freshBoard();
+  const file = join(box.repo, 'SPEC.md');
+  const rule = `${PUBLISHED.rules[0].text} Why: ${PUBLISHED.rules[0].why}`;
+  writeFileSync(file, readFileSync(file, 'utf8').replace('## G · Goals: what the client asked for\n',
+    `## G · Goals: what the client asked for\n- G1 [approved, must] ${rule} | gate: review\n- G2 [approved, must] ${PUBLISHED.questions[0].ask}: Rails. Choices: Rails. | gate: review\n`));
+  box.git('commit', '-q', '-am', 'chore: approve two rows first');
+  const added = json(box, 'blueprint', 'add', 'web-app');
+  assert.deepEqual(added.rows.map((row) => row.status), [...Array(6).fill('draft'), ...Array(4).fill('pending')]);
+  const spec = parseSpec(readFileSync(file, 'utf8'));
+  const own = spec.rows.filter((row) => row.section === added.section);
+  assert.equal(own.length, 10, 'the blueprint section holds all its own rows');
+  assert.deepEqual(spec.rows.filter((row) => row.status === 'approved').map((row) => row.id), ['G1', 'G2'], 'the approved rows are untouched');
+  const items = json(box, 'list', '--all').items.sort((a, b) => a.item_id - b.item_id);
+  assert.equal(items[0].item_spec_ids, `${added.rows[0].id},${added.rows[1].id}`, 'starter items cite the blueprint rows, not the approved ones');
+});
+
+test('blueprint add files a blueprint as drafts or nothing at all [S1,I1]', () => {
+  const box = freshBoard();
+  const spec = readFileSync(join(box.repo, 'SPEC.md'), 'utf8');
+  const config = readFileSync(join(box.repo, 'pullboard.json'), 'utf8');
+  /** Write a variant of the published blueprint and add it, returning the refusal. */
+  const refused = (name, items) => {
+    writeFileSync(join(box.repo, `${name}.json`), `${JSON.stringify({ ...PUBLISHED, name, items })}\n`);
+    const result = box.run('blueprint', 'add', `${name}.json`, '--json');
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.equal(readFileSync(join(box.repo, 'SPEC.md'), 'utf8'), spec, `${name}: nothing is written to the spec`);
+    assert.equal(readFileSync(join(box.repo, 'pullboard.json'), 'utf8'), config, `${name}: the gate is left alone`);
+    assert.equal(json(box, 'list', '--all').items.length, 0, `${name}: no item is added`);
+    return JSON.parse(result.stdout).error;
+  };
+  // A later starter the board refuses (here a brief over its limit) stops the add before any write.
+  const late = refused('late-refusal', [{ key: '1', title: 'First starter', cites: ['W1'] }, { key: '2', title: 'Second starter', brief: 'x'.repeat(8001) }]);
+  assert.equal(late.code, 'BRIEF_TOO_LONG');
+  // Light and mid starters need a coordinator's check and a cold brief, so a blueprint refuses them.
+  for (const route of ['light', 'mid']) {
+    const error = refused(`${route}-route`, [{ key: '1', title: 'First starter', cites: ['W1'] }, { key: '2', title: 'Second starter', route }]);
+    assert.equal(error.code, 'BAD_BLUEPRINT');
+    assert.match(error.message, new RegExp(`items\\[1\\]\\.route must be strong`, 'u'));
+  }
+  // After the refusals, the same blueprint fixed adds everything at once.
+  const added = json(box, 'blueprint', 'add', 'web-app');
+  assert.equal(added.rows.length, 10);
+  assert.equal(added.items.length, 3);
 });

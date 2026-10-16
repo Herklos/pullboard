@@ -1,11 +1,11 @@
 {
   "blueprint": 1,
   "name": "web-app",
-  "title": "Solo web app",
+  "title": "Web app",
   "version": 1,
-  "kind": "app",
+  "kind": "product",
   "by": "Pullboard",
-  "summary": "For one person building a web app with AI agents. One agent builds each change, a second checks it against your rules before it reaches main, and only your decisions reach you.",
+  "summary": "For building a web app with AI agents. One agent builds each change, a second checks it against your rules before it reaches main, and only your decisions reach you.",
   "prefix": "W",
   "gate": "npm test",
   "rules": [

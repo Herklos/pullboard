@@ -2225,8 +2225,13 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
   const configSource = readFileSync(configFile, 'utf8');
   const plan = planBlueprint(blueprint, { source, spec, doctrine: ctx.doctrine,
     itemTitles: store.listItems(board, { all: true }).map((item) => item.item_title), gate: String(JSON.parse(configSource).gate ?? '') });
+  // Every starter is checked before anything is written, so a refusal leaves the board as it was.
+  const starters = plan.items.map((entry) => ({ key: entry.key, afterKeys: entry.after, item: { by: me.id,
+    lane: entry.lane && entry.lane !== COORDINATOR && isLane(ctx.config, entry.lane) ? entry.lane : COORDINATOR,
+    title: entry.title, criterion: entry.criterion, specIds: entry.specIds, parentId: null, after: [], brief: entry.brief, route: entry.route } }));
+  for (const { item } of starters) store.validateItemAddition(board, item);
   const files = [];
-  if (plan.specAfter !== source) files.push({ file: ctx.config.spec, before: source, after: plan.specAfter });
+  if (plan.specRows !== source) files.push({ file: ctx.config.spec, before: source, after: plan.specRows });
   if (plan.gate) {
     const newline = configSource.includes('\r\n') ? '\r\n' : '\n';
     files.push({ file: CONFIG_FILE, before: configSource,
@@ -2237,20 +2242,22 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
   const added = [];
   try {
     const byKey = {};
-    for (const entry of plan.items) {
-      const lane = entry.lane && entry.lane !== COORDINATOR && isLane(ctx.config, entry.lane) ? entry.lane : COORDINATOR;
-      const item = { by: me.id, lane, title: entry.title, criterion: entry.criterion, specIds: entry.specIds,
-        parentId: null, after: entry.after.map((key) => byKey[key]).filter(Boolean), brief: entry.brief, route: entry.route };
-      store.validateItemAddition(board, item);
+    for (const { key, afterKeys, item } of starters) {
+      item.after = afterKeys.map((before) => byKey[before]).filter(Boolean);
       const id = await ordered(ctx, board, 'addItem', [item]);
-      byKey[entry.key] = id;
-      added.push({ id, key: entry.key, title: entry.title, lane, specIds: entry.specIds, after: item.after });
+      byKey[key] = id;
+      added.push({ id, key, title: item.title, lane: item.lane, specIds: item.specIds, after: item.after });
     }
   } catch (error) {
-    // Items already added are on the board for good; keep the rows they cite and say what landed.
+    // Items already added stay on the board; with no marker yet, a retry adds only what is missing.
     if (!added.length) restoreRowApply(ctx.info.root, write);
     throw error;
   }
+  // The marker goes in last, once every row and item is on the board.
+  if (plan.specAfter !== plan.specRows) {
+    writeRowApply(ctx.info.root, { records: [], files: [{ file: ctx.config.spec, before: plan.specRows, after: plan.specAfter }], signoffs: { before: null, receipts: [] } });
+  }
+  if (plan.specAfter !== source && !files.some((file) => file.file === ctx.config.spec)) files.unshift({ file: ctx.config.spec });
   const rows = plan.rows.map(({ key, id, status, text }) => ({ key, id, status, text }));
   const summary = { blueprint: { name: blueprint.name, title: blueprint.title, version: blueprint.version },
     section: plan.section.name, rows, items: added, gate: plan.gate, marked: plan.marked };
