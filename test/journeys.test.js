@@ -185,6 +185,8 @@ test('pullboard.dev shows every board, linked and local [N40]', {
   machineB.env.PULLBOARD_MACHINE_HOME = machineB.env.PULLBOARD_HOME;
   mkdirSync(machineB.env.HOME, { recursive: true, mode: 0o700 });
   const projectB = project(machineB, 'local-machine-b');
+  const linkBFile = join(projectB.repo, '.git/pullboard/relay.json');
+  assert.equal(existsSync(linkBFile), false, 'B starts without a persisted relay link');
   const titlesB = Array.from({ length: 40 }, (_, index) => `local B item ${String(index + 1).padStart(2, '0')}`);
   for (const title of titlesB) machineB.run(projectB.repo, 'add', 'web', title);
 
@@ -254,6 +256,9 @@ test('pullboard.dev shows every board, linked and local [N40]', {
     assert.equal(shown.secretInAddress, false, 'session and pairing fragments are removed from the hosted address');
     const idBResponse = await fetchLive(viewB.base + '/api/v1/boards', { headers: { 'x-pullboard-key': viewB.key } });
     const idB = (await idBResponse.json()).boards.find((board) => board.name === 'local-machine-b').id;
+    const keyBFile = join(machineB.env.PULLBOARD_HOME, 'relay-keys', idB + '.key');
+    assert.equal(existsSync(linkBFile), false, 'hosted discovery leaves B without a persisted relay link');
+    assert.equal(existsSync(keyBFile), false, 'B needs no persisted relay board key');
     const remoteProject = shown.projects.find((entry) => entry.id === boardAId);
     assert.equal(remoteProject?.source, 'relay', 'A uses the real relay transport');
     assert.equal(shown.projects.find((entry) => entry.id === idB)?.source, 'local', 'B remains a local project');
@@ -293,6 +298,8 @@ test('pullboard.dev shows every board, linked and local [N40]', {
     await chromeB.waitFor('Number.isFinite(window.__detailLatency)', 1_000);
     const detailMs = await chromeB.stable('window.__detailLatency');
     assert.ok(detailMs <= 250, `B opens one of 40 local items within 250 ms from trusted click dispatch (${Math.round(detailMs)} ms)`);
+    assert.equal(existsSync(linkBFile), false, 'B stays unlinked after the complete hosted journey');
+    assert.equal(existsSync(keyBFile), false, 'the complete journey creates no relay key for B');
     assert.deepEqual(chromeA.exceptions, [], 'A’s real view UI has no browser errors');
     assert.deepEqual(chromeB.exceptions, [], 'B’s hosted mixed-board page has no browser errors');
   } finally {
