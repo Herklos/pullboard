@@ -606,10 +606,14 @@ async function bindCheckoutSession(io, positionals, values) {
 }
 
 /** Choose an explicitly supplied model or the standard environment fallback, refusing an unknown identity. */
-function requiredModel(value, env = process.env) {
+function requiredModel(value, env = process.env, commandNext) {
   const model = (value ?? env.PULLBOARD_MODEL ?? '').trim();
   if (!model || /[\u0000-\u001f\u007f-\u009f]/u.test(model)) {
-    throw new Refused('MODEL_REQUIRED', 'give --model "<model name>" or set PULLBOARD_MODEL in this shell before joining');
+    const suffix = commandNext ? `; run pullboard ${commandNext} --model "<model name>"` : '';
+    const message = commandNext
+      ? `this session has not declared its model${suffix}`
+      : 'give --model "<model name>" or set PULLBOARD_MODEL in this shell before joining';
+    throw new Refused('MODEL_REQUIRED', message);
   }
   return model;
 }
@@ -851,6 +855,7 @@ function agentRefusalText(message, code, name) {
 
 /** Read current display settings for text refusals; the structured error retains its stable identifiers. */
 function displayedRefusal(io, error) {
+  if (error.code === 'MODEL_REQUIRED') return error.message.replace(/; run pullboard .+$/u, '');
   if (!['ALREADY_JOINED', 'HELD', 'ITEM_HELD', 'LANE_HELD', 'REVIEW_HELD', 'NOT_YOURS', 'NOT_YOUR_DECISION', 'NO_AGENT', 'NOT_YOUR_CHECKOUT', 'FACT_JUDGEMENT', 'RELAY_PERSON_ONLY', 'RELAY_SENDER_MISMATCH', 'SELF_SHOUT', 'NO_READER'].includes(error.code)) return error.message;
   try {
     const ctx = context(io);
@@ -1624,7 +1629,7 @@ function setupCommands(io, { first, values }) {
       if (ctx.info.isMain) {
         if (first !== COORDINATOR) throw new Refused('MAIN_IS_COORDINATOR', 'the main checkout is the coordinator; join from a worktree: git worktree add ../<dir>');
         const route = values.route ?? 'strong';
-        const model = requiredModel(values.model);
+        const model = requiredModel(values.model, process.env, `join ${shellWord(COORDINATOR)}${values.route ? ` --route ${shellWord(values.route)}` : ''}${values.family ? ` --family ${shellWord(values.family)}` : ''}`);
         if (relayLinked(ctx.info.root)) refuseRemoteCoordinatorModel(ctx, 'join coordinator');
         const id = await withBoard(ctx, async (board) => await ordered(ctx, board, 'register', [
           { lane: COORDINATOR, path: ctx.info.root, route, family: values.family, model },
@@ -1638,7 +1643,7 @@ function setupCommands(io, { first, values }) {
         throw new Refused('NO_LANE', `no lane "${first ?? ''}"; lanes: ${laneNames(ctx.config).slice(1).join(', ') || 'none yet, declare them in pullboard.json'}`);
       }
       const route = values.route ?? 'strong';
-      const model = requiredModel(values.model);
+      const model = requiredModel(values.model, process.env, `join ${shellWord(first)}${values.route ? ` --route ${shellWord(values.route)}` : ''}${values.family ? ` --family ${shellWord(values.family)}` : ''}`);
       const id = await withBoard(ctx, async (board) => await ordered(ctx, board, 'register', [{ lane: first, path: ctx.info.root, route, family: values.family, model }]));
       const displayName = displayAgentName({ agent_id: id, agent_model: model }, ctx.config.agents.names);
       io.result?.({ agent: id, lane: first, route, path: ctx.info.root, model, displayName });
@@ -1675,7 +1680,7 @@ async function worktreeFor(io, lane, route, family = null, model) {
   if (!store.ROUTES.includes(route)) {
     throw new Refused('BAD_ROUTE', `route "${route}" is strong (needs a frontier model) or light (any model can build it from the brief)`);
   }
-  model = requiredModel(model);
+  model = requiredModel(model, process.env, `worktree ${shellWord(lane)}${route === 'strong' ? '' : ` --route ${shellWord(route)}`}${family ? ` --family ${shellWord(family)}` : ''}`);
   const mainRoot = resolve(ctx.info.commonDir, '..');
   refuseUncommittedSetup(mainRoot, ctx.config);
   const pathFor = (n) => join(dirname(mainRoot), `${basename(mainRoot)}-${lane}-${n}`);
