@@ -37,6 +37,7 @@ test("the README's worktree command works in a fresh repo [I1,I2]", () => {
   assert.equal(missingWorktreeModel.status, 1);
   assert.equal(missingWorktreeModel.stderr,
     'pullboard: [MODEL_REQUIRED] this session has not declared its model\nnext: run pullboard worktree api --model "<model name>"\n');
+  assert.doesNotMatch(missingWorktreeModel.stderr, /pullboard help/u, 'no generic help footer follows the --model next step');
   const missingWorktreeJson = box.run(repo, 'worktree', 'api', '--json');
   assert.equal(missingWorktreeJson.code, 1);
   assert.equal(JSON.parse(missingWorktreeJson.out).error.next,
@@ -62,6 +63,7 @@ test("the README's worktree command works in a fresh repo [I1,I2]", () => {
   assert.equal(missingJoinModel.status, 1);
   assert.equal(missingJoinModel.stderr,
     'pullboard: [MODEL_REQUIRED] this session has not declared its model\nnext: run pullboard join api --model "<model name>"\n');
+  assert.doesNotMatch(missingJoinModel.stderr, /pullboard help/u, 'no generic help footer follows the --model next step');
   const missingJoinJson = box.run(missingJoin, 'join', 'api', '--json');
   assert.equal(missingJoinJson.code, 1);
   assert.equal(JSON.parse(missingJoinJson.out).error.next,
