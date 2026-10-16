@@ -351,12 +351,30 @@ async function release(child) {
   assert.equal(code, 0, child.errors);
 }
 
-test('a non-browser check does not wait for the browser slot [C7]', async () => {
+test('single-quoted named-test checks skip the browser slot [C7]', async () => {
   const box = fixture();
   const { repo, base } = checkProject(box);
   const itemCheck = 'node bin/run-tests.js --test-name-pattern "item check marker" test/cpu-check.test.js';
   const submitCheck = 'node bin/run-tests.js --test-name-pattern "submit check marker" test/cpu-check.test.js';
   assert.equal(await checkNeedsBrowser(repo, itemCheck), false, 'an explicit CPU-only test file is classifiable');
+  const outputPattern = '^[[:space:]]*ok [0-9]+ - item check marker';
+  const newlinePrint = ([quote, backslashes]) => `printf ${quote}%s${'\\'.repeat(backslashes)}n${quote} "$out"`;
+  const capturedCheck = (formats, patternQuotes) => `out=$(${itemCheck} 2>&1); ${newlinePrint(formats[0])}; ${newlinePrint(formats[1])} | grep -Eq ${patternQuotes[0]}${outputPattern}${patternQuotes[0]} && ${newlinePrint(formats[2])} | grep -Eq ${patternQuotes[1]}^# fail 0$${patternQuotes[1]}`;
+  const capturedVariants = [
+    [[['\'', 1], ['\'', 1], ['\'', 1]], ['\'', '\'']],
+    [[['\'', 2], ['"', 1], ['"', 2]], ['\'', '"']],
+    [[['"', 1], ['\'', 2], ['\'', 1]], ['"', '\'']],
+    [[['"', 2], ['"', 1], ['\'', 2]], ['"', '"']],
+  ];
+  for (const [formats, patternQuotes] of capturedVariants) {
+    assert.equal(await checkNeedsBrowser(repo, capturedCheck(formats, patternQuotes)), false,
+      `the exact frozen output-capture wrapper accepts its literal quote/newline variant: ${JSON.stringify({ formats, patternQuotes })}`);
+  }
+  assert.equal(await checkNeedsBrowser(repo, `${capturedCheck(capturedVariants[1][0], capturedVariants[1][1])}; :`), true,
+    'an arbitrary suffix remains outside the exact capture wrapper');
+  const substituted = capturedCheck(capturedVariants[1][0], capturedVariants[1][1])
+    .replace('printf \'%s\\\\n\' "$out"', 'printf \'%s\\\\n\' "$(printf %s "$out")"');
+  assert.equal(await checkNeedsBrowser(repo, substituted), true, 'a command substitution remains outside the exact printf wrapper');
   assert.equal(await checkNeedsBrowser(repo, 'node bin/run-tests.js test/cockpit/brief.test.js'), true,
     'known browser suites remain browser-gated');
   const added = runFixtureChild(process.execPath, [BIN, 'add', 'coordinator', 'CPU check item', '--check', itemCheck, '--wait', '--json'], {

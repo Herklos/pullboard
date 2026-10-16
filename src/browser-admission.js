@@ -103,17 +103,30 @@ function capturedRunner(command) {
   const bodyEnd = command.indexOf(ending, opening[0].length);
   if (bodyEnd < 0) return null;
   const inner = command.slice(opening[0].length, bodyEnd);
-  let suffix = command.slice(bodyEnd + ending.length);
-  const first = `; printf "%s\\n" "$${variable}"; printf "%s\\n" "$${variable}" | grep -Eq "`;
-  const second = `" && printf "%s\\n" "$${variable}" | grep -Eq "`;
-  if (!suffix.startsWith(first)) return null;
-  suffix = suffix.slice(first.length);
-  const split = suffix.indexOf(second);
-  if (split < 0 || !suffix.endsWith('"')) return null;
-  const patterns = [suffix.slice(0, split), suffix.slice(split + second.length, -1)];
-  if (!patterns[0].startsWith('^[[:space:]]*ok [0-9]+ - ') || patterns[0].includes('$')
-    || patterns[1] !== '^# fail 0$' || patterns.some(pattern => /["\\`]/u.test(pattern))) return null;
-  return inner;
+  const suffix = command.slice(bodyEnd + ending.length);
+  const quotes = ['"', "'"];
+  // These are the two literal printf newline encodings used by current frozen checks. Keep
+  // the surrounding command exact: only quote choice and one/two backslashes may vary.
+  const prints = quotes.flatMap(quote => [1, 2].map(count =>
+    `printf ${quote}%s${'\\'.repeat(count)}n${quote} "$${variable}"`));
+  for (const firstPrint of prints) for (const secondPrint of prints) {
+    const prefix = `; ${firstPrint}; ${secondPrint} | grep -Eq `;
+    if (!suffix.startsWith(prefix)) continue;
+    for (const firstQuote of quotes) {
+      const firstPatternStart = prefix + firstQuote;
+      if (!suffix.startsWith(firstPatternStart)) continue;
+      const remainder = suffix.slice(firstPatternStart.length);
+      for (const lastPrint of prints) for (const lastQuote of quotes) {
+        const separator = `${firstQuote} && ${lastPrint} | grep -Eq ${lastQuote}`;
+        const split = remainder.indexOf(separator);
+        if (split < 0 || !remainder.endsWith(lastQuote)) continue;
+        const patterns = [remainder.slice(0, split), remainder.slice(split + separator.length, -1)];
+        if (patterns[0].startsWith('^[[:space:]]*ok [0-9]+ - ') && !patterns[0].includes('$')
+          && patterns[1] === '^# fail 0$' && patterns.every(pattern => !/["'\\`]/u.test(pattern))) return inner;
+      }
+    }
+  }
+  return null;
 }
 
 /** Read a commit's regular-file map so verification classifies only the submitted source tree. */
