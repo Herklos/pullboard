@@ -1027,11 +1027,21 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
   local.run(localProject.repo, 'add', 'web', localTitle);
   const duplicateProject = project(local, 'local-machine-c');
   const duplicateTitle = 'local machine C keeps its own view board';
+  local.git(duplicateProject.repo, 'remote', 'add', 'origin', 'git@github.com:fixture/repository.git');
   local.run(duplicateProject.repo, 'add', 'web', duplicateTitle);
-  assert.equal((await linked.cliAt(duplicateProject.repo, 'relay', 'on', '--url', linked.origin)).code, 0,
+  const localRelayEnv = {
+    ...linked.env,
+    HOME: local.dir,
+    PULLBOARD_HOME: local.env.PULLBOARD_HOME,
+    PULLBOARD_MACHINE_HOME: local.env.PULLBOARD_MACHINE_HOME,
+    PATH: local.env.PATH,
+  };
+  const localRelayResult = await linked.cliAtWithEnv(duplicateProject.repo, localRelayEnv,
+    'relay', 'on', '--url', linked.origin);
+  assert.equal(localRelayResult.code, 0,
     'C links its actual local board to the relay as a second source for the same board identity');
   const localRelay = JSON.parse(readFileSync(join(duplicateProject.repo, '.git', 'pullboard', 'relay.json'), 'utf8'));
-  const localRelayKey = readFileSync(join(linked.env.PULLBOARD_HOME, 'relay-keys', localRelay.board + '.key'), 'utf8').trim();
+  const localRelayKey = readFileSync(join(local.env.PULLBOARD_HOME, 'relay-keys', localRelay.board + '.key'), 'utf8').trim();
   assert.notEqual(localRelay.board, linkedId, 'the linked C board is distinct from A');
   const profile = join(linked.root, 'mixed-board-chrome');
   let localView;

@@ -479,6 +479,10 @@ globalThis.fetch = function tracedFetch(input, init) {
   async function cliAt(cwd, ...args) {
     return childResult(cwd, env, [CLI, ...args, '--json']);
   }
+  /** Invoke the production CLI at another repository with an explicit private fixture environment. */
+  async function cliAtWithEnv(cwd, commandEnv, ...args) {
+    return childResult(cwd, commandEnv, [CLI, ...args, '--json']);
+  }
   /** Bound a CLI child using the exact snapshot count asserted by its fixture flow. */
   async function cliWithSnapshotUploads(snapshotUploads, ...args) {
     cliChildDeadlineMs(snapshotUploads);
@@ -587,7 +591,7 @@ globalThis.fetch = function tracedFetch(input, init) {
   }
   return {
     transit, providerState: provider.state, providerCalls: provider.calls, relayDirectory: join(scratch, 'relay'), authDatabase, auth, otherDeviceJoin,
-    root, env, origin, lane, before, linkFile, keyFile, calls, moveAcks, cli, cliAt, cliWithSnapshotUploads, cliWithSnapshotTrace, link, phoneSession, requireEngineThree, otherDeviceOff, additionalBoard, script, stopRelay, restartRelay,
+    root, env, origin, lane, before, linkFile, keyFile, calls, moveAcks, cli, cliAt, cliAtWithEnv, cliWithSnapshotUploads, cliWithSnapshotTrace, link, phoneSession, requireEngineThree, otherDeviceOff, additionalBoard, script, stopRelay, restartRelay,
     /** Assert the test consumed every declared child budget, with no hidden CLI calls. */
     assertCliChildrenComplete() {
       if (cliChildren) assert.equal(cliChildIndex, cliChildren.length, 'every planned private CLI child ran exactly once');
