@@ -3,13 +3,17 @@ import assert from 'node:assert/strict';
 import { startFixtureChild as spawn, reportFixtureChildFailure, safeFixtureDiagnostic } from './fixture-child.js';
 import { performance } from 'node:perf_hooks';
 import { createServer } from 'node:http';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, copyFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, copyFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
+import { releaseHeadlinesBetween } from '../src/changelog.js';
 import { ENGINE_VERSION } from '../src/machine.js';
 import { relayClientFixture } from './relay-client-fixture.js';
 import { githubFixture } from './relay-fixture.js';
+import { createRelayBrowserHandler } from '../relay/browser-page.js';
+import { encodeBoardKey, generateBoardKey, seal } from '../src/seal.js';
 
 const SMOKE = resolve(import.meta.dirname, '../relay/smoke.mjs');
 const SERVER = resolve(import.meta.dirname, '../relay/server.mjs');
@@ -46,6 +50,19 @@ function copiedImage(t, omitted = []) {
     for (const source of paths) copyDockerSource(source.replace(/\/$/u, ''), destinationPath, excluded);
   }
   return image;
+}
+
+/** Verify the copied image carries the exact shipped notes consumed by its runtime helper. */
+async function assertCopiedChangelog(image) {
+  const shipped = readFileSync(join(ROOT, 'CHANGELOG.md'));
+  const copied = readFileSync(join(image, 'CHANGELOG.md'));
+  assert.deepEqual(copied, shipped, 'the production image includes byte-identical shipped release notes');
+  const runtimeChangelog = await import(pathToFileURL(join(image, 'src/changelog.js')).href);
+  assert.deepEqual(
+    runtimeChangelog.releaseHeadlinesBetween('0.0.0', '99.99.99'),
+    releaseHeadlinesBetween('0.0.0', '99.99.99'),
+    'the copied runtime helper reads release headlines from the packaged notes',
+  );
 }
 
 /** Start the copied production entry point with private fixture storage and no inherited selectors. */
@@ -366,6 +383,7 @@ test('[H5,H18] the container entry point serves readiness and stays available', 
 test('[H5,H18] Docker COPY sources boot the relay and serve its browser page, while omitted runtime files refuse startup', async (t) => {
   const provider = await githubFixture(t);
   const image = copiedImage(t);
+  await assertCopiedChangelog(image);
   const port = await unusedPort();
   const origin = `http://127.0.0.1:${port}`;
   const running = copiedServer(t, image, port, provider);
@@ -429,4 +447,129 @@ test('a timer that fires a millisecond early still meets the damaged-copy budget
   const budgetMs = DAMAGED_SERVER_FAILURE_FLOOR_MS;
   assert.equal(damagedServerWaitMeetsBudget(budgetMs - 1, budgetMs), true, 'one millisecond early fits timer granularity');
   assert.equal(damagedServerWaitMeetsBudget(budgetMs - 2, budgetMs), false, 'two milliseconds early remains below budget');
+});
+
+/** Read one relay browser asset through the production handler, without a network listener. */
+async function servedAsset(handler, path) {
+  let status = 0;
+  let body = '';
+  const handled = await handler({ method: 'GET', url: path }, { writeHead(code) { status = code; }, end(content) { body = String(content); } });
+  assert.equal(handled, true, `the relay browser handler owns ${path}`);
+  assert.equal(status, 200, `the relay browser handler serves ${path}`);
+  return body;
+}
+
+/** Write the served relay client module graph to a private folder, so Node imports exactly what a browser loads. */
+async function servedRelayClient(t) {
+  const folder = mkdtempSync(join(tmpdir(), 'pullboard-relay-client-'));
+  t.after(() => rmSync(folder, { recursive: true, force: true }));
+  mkdirSync(join(folder, 'relay'));
+  const handler = createRelayBrowserHandler({ authenticate: async () => { throw new Error('relay assets need no session'); } });
+  const pending = ['client.js'];
+  const written = new Set();
+  while (pending.length > 0) {
+    const name = pending.pop();
+    if (written.has(name)) continue;
+    written.add(name);
+    const source = await servedAsset(handler, '/relay/' + name);
+    writeFileSync(join(folder, 'relay', name), source);
+    for (const match of source.matchAll(/from\s+['"]\.\/([\w.-]+\.js)['"]/gu)) pending.push(match[1]);
+  }
+  return import(pathToFileURL(join(folder, 'relay', 'client.js')).href);
+}
+
+/** Install a browser page whose storage refuses every write and whose relay serves one sealed board. */
+function refusingStoragePage(t, { hash, board, sealed }) {
+  const refused = [];
+  const unexpected = [];
+  const replaced = [];
+  let snapshotReads = 0;
+  /** Model storage that refuses writes, as a private window or a full quota does. */
+  const storage = () => ({
+    length: 0, key: () => null, getItem: () => null,
+    setItem(name) { refused.push(name); throw new DOMException('Storage refused this write.', 'QuotaExceededError'); },
+    removeItem(name) { refused.push(name); throw new DOMException('Storage refused this write.', 'QuotaExceededError'); },
+  });
+  const events = new EventTarget();
+  const location = { origin: 'https://relay.example', pathname: '/', search: '', hash, replace(path) { replaced.push(path); } };
+  /** Answer one JSON relay document. */
+  const reply = (document, status = 200, headers = {}) => new Response(JSON.stringify(document), { status, headers: { 'content-type': 'application/json', ...headers } });
+  /** Model an IndexedDB that holds no phone key, so only the pairing link can open the board. */
+  const indexedDB = {
+    open() {
+      const db = {
+        close() {},
+        transaction() {
+          const transaction = {
+            objectStore: () => ({ get() {
+              const request = {};
+              queueMicrotask(() => { request.onsuccess?.(); transaction.oncomplete?.(); });
+              return request;
+            } }),
+          };
+          return transaction;
+        },
+      };
+      const request = { result: db };
+      queueMicrotask(() => request.onsuccess?.());
+      return request;
+    },
+  };
+  const globals = {
+    location,
+    history: { replaceState(state, title, path) { const url = new URL(path, location.origin); location.pathname = url.pathname; location.search = url.search; location.hash = url.hash; } },
+    sessionStorage: storage(), localStorage: storage(), indexedDB,
+    document: { getElementById: () => null, querySelector: () => null },
+    addEventListener: (type, listener, options) => events.addEventListener(type, listener, options),
+    /** Serve only the listing, one sealed snapshot, an empty prefix and a live stream that waits until the page hides. */
+    fetch: async (input, init = {}) => {
+      const url = new URL(String(input), location.origin);
+      const accept = new Headers(init.headers).get('accept');
+      if (url.pathname === '/api/v1/boards') return reply({ version: 1, boards: [{ id: board, repository: 'acme/widgets' }] });
+      if (url.pathname === '/api/v1/boards/' + board + '/state') { snapshotReads += 1; return reply({ version: 1, state: { sequence: 0, sealed } }, 200, { etag: '"0"' }); }
+      if (url.pathname === '/api/v1/boards/' + board + '/events' && accept === 'text/event-stream') {
+        return new Promise((resolveStream, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true }));
+      }
+      if (url.pathname === '/api/v1/boards/' + board + '/events') return reply({ version: 1, events: [] });
+      unexpected.push(url.pathname);
+      return reply({ version: 1, error: { code: 'NOT_FOUND', message: 'This fixture relay has no such route.' } }, 404);
+    },
+  };
+  const saved = Object.keys(globals).map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]);
+  for (const [name, value] of Object.entries(globals)) Object.defineProperty(globalThis, name, { value, configurable: true, writable: true });
+  t.after(() => {
+    events.dispatchEvent(new Event('pagehide'));
+    for (const [name, descriptor] of saved) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+      else delete globalThis[name];
+    }
+  });
+  return { location, refused, unexpected, replaced, snapshotReads: () => snapshotReads };
+}
+
+test('[H5,H15] an early pairing survives until the transport takes it when storage refuses writes', async (t) => {
+  const board = '0123456789abcdef0123456789abcdef';
+  const key = await generateBoardKey();
+  const snapshot = { version: 1, tables: { board_meta: [{ meta_key: 'board_id', meta_value: board }], item: [], agent: [], event: [], shout: [], verdict: [] } };
+  const sealed = Buffer.from(await seal(key, new TextEncoder().encode(JSON.stringify(snapshot)), { boardId: board, kind: 'snapshot', sequence: 0 })).toString('base64url');
+  const page = refusingStoragePage(t, { hash: '#board=' + board + '&key=' + encodeBoardKey(key), board, sealed });
+  const { rememberPairing, createTransport } = await servedRelayClient(t);
+
+  assert.equal(rememberPairing()?.board, board, 'the page reads its pairing link at start, before any transport exists');
+  assert.equal(page.location.hash === '', true, 'reading the link strips its fragment from the address bar');
+  assert.equal(page.refused.includes('pullboard.relay.pair.v1'), true, 'the browser refused to keep the pairing in session storage');
+
+  const transport = await createTransport();
+  assert.deepEqual((await transport.request('/api/v1/boards')).boards.map(row => row.id), [board], 'the transport takes the early pairing from module memory and pairs the board');
+  assert.equal(page.snapshotReads(), 1, 'the board pairs once');
+
+  const later = await createTransport();
+  assert.deepEqual((await later.request('/api/v1/boards')).boards, [], 'a second take finds no pairing');
+  assert.equal(page.snapshotReads(), 1, 'a second transport does not pair the board again');
+  assert.equal(page.location.hash === '', true, 'the address bar still has no pairing fragment');
+
+  page.location.hash = '#device=' + 'A'.repeat(22) + '.' + 'B'.repeat(43);
+  assert.throws(() => rememberPairing(), error => error.code === 'DEVICE_STORAGE', 'device pairing still refuses storage that cannot keep its code');
+  assert.deepEqual(page.unexpected, [], 'the transport used only the fixture relay routes');
+  assert.deepEqual(page.replaced, [], 'the page never lost relay access');
 });
