@@ -27,10 +27,38 @@ const NOT_MOVES = {
   ALREADY_JOINED: 'registering who is asking, before any move',
   BAD_ROUTE: 'registering who is asking, before any move',
   ONE_COORDINATOR: 'registering who is asking, before any move',
+  MACHINE_HOME_NOT_WRITABLE: 'machine-wide storage must be writable before a command runs',
   BAD_MACHINE_SETTINGS: 'machine-wide settings checked before a command runs',
   BAD_GATE_SLOTS: 'machine-wide gate capacity checked before a command runs',
   BAD_BROWSER_SLOTS: 'machine-wide browser capacity checked before a command runs',
-  GATE_SLOT_LEASE_REQUIRED: 'a nested runner must receive its live machine gate lease before starting',
+  BAD_RESOURCE_NAME: 'machine resource names are validated before admission',
+  RESERVED_RUNNER_RESOURCE: 'runner resource rows are managed by machine admission rather than item moves',
+  BAD_RESOURCE_CAPACITY: 'machine resource capacity is validated before admission',
+  BAD_BROWSER_RESOURCE: 'browser capability must be acquired together with the machine gate',
+  BAD_REMOTE_RESOURCE: 'remote executor capability must be acquired together with the machine gate',
+  BAD_RUNNER_POOL: 'configured remote executors are validated before admission',
+  BAD_RESOURCE_METADATA: 'resource queue metadata is validated before admission',
+  BAD_RESOURCE_PRIORITY: 'resource queue priority classes must be mutually exclusive before admission',
+  RESOURCE_CAPACITY_MISMATCH: 'resource capacity cannot change underneath active machine leases',
+  RESOURCE_LEASE_LOST: 'a machine resource lease must remain live while its admitted command runs',
+  LOCAL_RUNNER_REQUEUE: 'only remote executor leases can return to the runner queue',
+  BOARD_SCOPE_UNAVAILABLE: 'board resource admission requires the relay before an item move',
+  BAD_RESOURCE_SCOPE: 'resource pool scope is validated before admission',
+  RUNNER_CAPACITY_MISMATCH: 'configured remote capacity cannot drop below active runner leases',
+  REMOTE_GATE_SLOT_NOT_INHERITABLE: 'a remote executor lease cannot become a local child gate capability',
+  BAD_RUNNER: 'machine-wide SSH runner settings checked before remote execution',
+  RUNNER_OUTPUT_LIMIT: 'remote execution output is bounded before accepting its result',
+  RUNNER_CLEANUP_TIMEOUT: 'remote cleanup must report a bounded failure before returning capacity',
+  RUNNER_SOURCE_CHANGED: 'remote execution requires the exact admitted committed source',
+  RUNNER_SECRET: 'source and command transfer is refused before private content leaves the machine',
+  RUNNER_REQUEST_LIMIT: 'remote tooling requests are bounded before transport starts',
+  RUNNER_SOURCE: 'the committed source is readable before remote transport starts',
+  RUNNER_SCAN_LIMIT: 'remote source objects must fit the transfer scan budget',
+  RUNNER_TOOLING_SECRET: 'runner tooling is scanned before transfer',
+  RUNNER_TOOLING_IDENTITY: 'runner tooling comes from an identified Pullboard installation',
+  RUNNER_TOOLING_CHANGED: 'runner tooling matches its selected committed revision',
+  NOT_A_REPO: 'the remote source root must be a Git repository before transport starts',
+  GATE_SLOT_LEASE_REQUIRED: 'a child process or nested runner must receive its live machine gate lease before starting',
   GATE_SLOT_MARKER_INVALID: 'an inherited machine gate capability is validated before nested work starts',
   GATE_SLOT_TOKEN_REQUIRED: 'an inherited machine gate capability needs its exact lease token',
   GATE_SLOT_LEASE_LOST: 'the exact machine gate lease must still be live before nested work starts',
@@ -61,7 +89,11 @@ const ENTRY_POINTS = [
 ];
 
 /** Setup refusals have no item move, but stay in the same reachability audit. */
-const NON_MOVE_ENTRY_POINTS = ['cli.js#refuseRemoteCoordinatorModel'];
+const NON_MOVE_ENTRY_POINTS = [
+  'cli.js#refuseRemoteCoordinatorModel',
+  // Child-process commands may be serialized into scripts, so audit this exported setup guard directly.
+  'resources.js#gateSlotEnvironment',
+];
 
 /** Board functions handed a function to call, and the one the CLI and the runner hand them. */
 const CALLBACKS = { 'board.js': { freeze: 'cli.js#freezer' } };
@@ -107,7 +139,8 @@ function functionsIn(source) {
     const start = START.exec(line);
     if (!start) continue;
     const end = line.trimEnd();
-    if (start[1]) open = { name: start[1], lines: [line], ends: (next) => next === '}' };
+    if (start[1] && end.endsWith('}')) bodies.set(start[1], line);
+    else if (start[1]) open = { name: start[1], lines: [line], ends: (next) => next === '}' };
     else if (end.endsWith(';')) bodies.set(start[2], line);
     else if (end.endsWith('{')) open = { name: start[2], lines: [line], ends: (next) => next === '};' };
     else open = { name: start[2], lines: [line], ends: (next) => next.trimEnd().endsWith(';') };
@@ -487,7 +520,10 @@ test('a broken copy of the code fails the check: a refusal added wherever a move
   ], 'reserve reaches the route check through the reviewer checks it shares with a verdict');
 
   const doubleQuoted = editedSource('cli.js', /^const cdTo = .*$/m, "const cdTo = (root) => { if (!root) throw new Refused(\"NO_ROOT\", 'no root'); return 'cd ' + root + ' &&'; };");
-  assert.deepEqual(codeProblems(MACHINE, doubleQuoted), ['NO_ROOT is raised by accept and reject but not declared there']);
+  assert.deepEqual(codeProblems(MACHINE, doubleQuoted), [
+    'NO_ROOT is raised by submit but not declared there',
+    'NO_ROOT is raised by accept and reject but not declared there',
+  ]);
 });
 
 const SHA_A = 'a'.repeat(40);
@@ -803,9 +839,9 @@ test('pullboard help lists each role\'s moves from the declaration, and pullboar
 /** Guards checked before the explicit transition: CLI facts and optional roadmap selection. */
 const PRECHECKED = {
   claim: ['joined'],
-  submit: ['joined', 'criterionUnchanged', 'treeClean', 'nothingUntracked', 'hasCommit', 'withinLane', 'trunkMergeClean', 'gateConfigured', 'gateGreen', 'treeStillDuringGate', 'noUnverifiedStack'],
+  submit: ['joined', 'criterionUnchanged', 'treeClean', 'nothingUntracked', 'hasCommit', 'withinLane', 'trunkMergeClean', 'gateConfigured', 'queuedItemLease', 'gateGreen', 'treeStillDuringGate', 'noUnverifiedStack'],
   reserve: ['coordinatorSaysAs', 'joined', 'roadmapReadable'],
-  accept: ['coordinatorSaysAs', 'joined', 'atSubmittedCommit', 'trunkMergeClean', 'itemCheckGreen', 'noUnverifiedStack'],
+  accept: ['coordinatorSaysAs', 'joined', 'atSubmittedCommit', 'trunkMergeClean', 'queuedItemLease', 'itemCheckGreen', 'noUnverifiedStack'],
   reject: ['coordinatorSaysAs', 'joined', 'atSubmittedCommit'],
 };
 
