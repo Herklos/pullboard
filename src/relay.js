@@ -571,6 +571,12 @@ async function flushMirror(root, file, state, io) {
 /** A saved link is the opt-in boundary; unlinked callers neither read keys nor contact the relay. */
 export function relayLinked(root) { return Boolean(loadLink(linkFile(root))); }
 
+/** Read validated View eligibility without decoding snapshots, opening a board or contacting the relay. */
+export function relayLinkAvailability(root) {
+  const state = loadLink(linkFile(root));
+  return { linked: Boolean(state && !state.unlinking), unlinking: Boolean(state?.unlinking) };
+}
+
 /** Authenticate and decode one opaque relay record on this device alone. */
 async function decoded(key, record, state, kind, sequence) {
   const bytes = Buffer.from(record.sealed, 'base64url');
@@ -1212,7 +1218,7 @@ export async function revokeRelayPersonSession(session, io) {
 }
 
 /** Sign in with the caller's cancellation signal; no board credential is persisted here. */
-async function deviceSignIn(url, io, { signal } = {}) {
+async function deviceSignIn(url, io, { signal, onSignIn } = {}) {
   cancellationOutcome(signal);
   const client = { url };
   const flow = await request(client, '/auth/device/start', { method: 'POST', body: {}, signal }, io);
@@ -1220,6 +1226,8 @@ async function deviceSignIn(url, io, { signal } = {}) {
     cancellationOutcome(signal);
     io.stderr.write(`Sign in with GitHub: open ${flow.verificationURL} and enter ${flow.userCode}\n`);
     const expires = Date.now() + flow.expiresIn * 1000;
+    // The view receives only the public device instructions. The ticket stays in this stack.
+    onSignIn?.({ verificationURL: flow.verificationURL, userCode: flow.userCode, expiresAt: expires, relayUrl: url });
     let signed;
     let wait = flow.interval;
     do {
@@ -1359,11 +1367,11 @@ export async function relayRequestDevice(root) {
 }
 
 /** Sign in once for machine setup; the saved account is the provider-authenticated identity. */
-export async function relayMachineSignIn(address, io, { signal } = {}) {
+export async function relayMachineSignIn(address, io, { signal, onSignIn } = {}) {
   requirePersonChannel(io.personChannel);
   const url = relayOrigin(address || DEFAULT_RELAY);
   let signed;
-  try { signed = await deviceSignIn(url, io, { signal }); }
+  try { signed = await deviceSignIn(url, io, { signal, onSignIn }); }
   catch (error) {
     if (error.code === 'OAUTH_CLEANUP') throw error;
     if (signal?.aborted || error.code === 'OAUTH_CANCELLED') return { outcome: 'cancelled' };
