@@ -434,6 +434,25 @@ function personMode(ctx, me, values) {
 }
 
 /**
+ * Refuse a build item in a lane that owns no files, such as review: whoever claims it there can
+ * commit nothing, so the item strands its builder. A review item, one that waits on the work it
+ * reviews with --after, still goes there. The refusal names the lanes that own files [I1].
+ * Until some lane owns files, as right after init, there is nowhere else to point, so the item is
+ * added as before.
+ *
+ * @param {any} config
+ * @param {string} lane
+ * @param {number[]} after
+ */
+function buildInFilelessLane(config, lane, after) {
+  const owns = (name) => (config.lanes[name]?.owns ?? []).length > 0;
+  if (lane === COORDINATOR || owns(lane) || after.length) return;
+  const owning = Object.keys(config.lanes).filter(owns);
+  if (!owning.length) return;
+  throw new Refused('NO_FILES_LANE', `the ${lane} lane owns no files, so a build item there strands its builder; file it in a lane that owns files (${owning.join(', ')}), or pass --after <id> if it reviews that item`);
+}
+
+/**
  * A brief whose Files section stays inside the item's lane (B14), so a builder working from it
  * never runs into the lane check: an item's files sit in its lane.
  *
@@ -2555,6 +2574,7 @@ function workCommands(io, args) {
         route: values.route ?? 'strong',
         check: values.check,
       };
+      buildInFilelessLane(ctx.config, first, after);
       const { command } = store.validateItemAddition(board, item);
       if (command) item.checkBaseline = values.wait ? checkBaseline(ctx.info.root, command) : prepareCheckBaseline(ctx.info.root, command);
       const id = await ordered(ctx, board, 'addItem', [item]);
