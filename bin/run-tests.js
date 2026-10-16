@@ -3,7 +3,7 @@
  * Run the test suite with a private home, no inherited Git identity or config, and a refusing CLI shim.
  */
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { basename, delimiter, dirname, join, relative, resolve } from 'node:path';
+import { basename, delimiter, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -564,8 +564,8 @@ function landingChildCommandMatchesSpawn(processInfo, receipt) {
   });
 }
 
-/** Keep the established healthy-worker path: snapshot only detached children at spawn time. */
-function watchLandingChildSpawns(startsPath, attempt) {
+/** Snapshot detached children at spawn time, retaining worker uncertainty when that snapshot fails. */
+function watchLandingChildSpawns(startsPath, attempt, file = null) {
   let recording = false;
   channel('child_process').subscribe(({ process: child }) => {
     if (recording || !child || typeof child.once !== 'function') return;
@@ -580,7 +580,18 @@ function watchLandingChildSpawns(startsPath, attempt) {
           appendFileSync(startsPath, `${JSON.stringify({ type: 'child', attempt, parentPid: process.pid,
             pid: spawned.pid, pgid: spawned.pgid, started: spawned.started })}\n`);
         }
-      } catch { /* The ancestry monitor remains the fallback if a receipt cannot be written. */ }
+      } catch (error) {
+        // A worker can exit before the next ancestry census; absence then cannot prove its children drained.
+        if (!file) return;
+        const code = String(error?.code ?? 'snapshot-error').replace(/[\u0000-\u001f\u007f]/gu, ' ').slice(0, 80);
+        const reason = String(error?.message ?? error).replace(/[\u0000-\u001f\u007f]/gu, ' ').slice(0, 256);
+        try {
+          appendFileSync(startsPath, `${JSON.stringify({ type: 'child-snapshot-unavailable', attempt,
+            file, parentPid: process.pid, pid: child.pid, code, reason })}\n`);
+        } catch {
+          process.stderr.write(`run-tests: cleanup for ${basename(file)} UNVERIFIED: ${code}: ${reason}; no unverified process was signaled\n`);
+        }
+      }
       finally { recording = false; }
     });
   });
@@ -931,7 +942,8 @@ async function runLandingTests(args, env, concurrency) {
     const workerByPid = new Map(workerRoots.map(root => [root.pid, root]));
     let unsettledChild = false;
     for (const receipt of receipts) {
-      if (receipt.type !== 'child-announcement-unavailable' || !selectedFileSet.has(receipt.file)) continue;
+      if (!['child-announcement-unavailable', 'child-snapshot-unavailable'].includes(receipt.type)
+          || !selectedFileSet.has(receipt.file)) continue;
       unsettledChild = true;
       cleanupUnverifiedFiles.add(receipt.file);
       lastCleanupSnapshotError = { code: receipt.code, message: receipt.reason };
@@ -1343,9 +1355,26 @@ async function main(args) {
       ]);
       const capacity = loadMachineSettings().gateSlots;
       let announced = false;
-      await withGateSlot(process.cwd(), (lease) => run(gateSlotEnvironment(lease)), {
+      const runnerPath = relative(process.cwd(), runner);
+      const canShipRunner = runnerPath && runnerPath !== '..' && !runnerPath.startsWith(`..${sep}`);
+      await withGateSlot(process.cwd(), async (lease) => {
+        if (!lease.runner) return run(gateSlotEnvironment(lease));
+        const { runOnRunner } = await import('../src/runners.js');
+        /** Quote the unchanged runner arguments for the remote command shell. */
+        const word = value => `'${String(value).replaceAll("'", "'\\''")}'`;
+        const command = ['node', `./${runnerPath}`, ...args].map(word).join(' ');
+        const result = runOnRunner(process.cwd(), command, { runner: lease.runner, source: lease.source,
+          browser, metadata: lease.runMetadata });
+        process.stdout.write(result.output);
+        process.exitCode = result.exitCode;
+      }, {
         browser, kind: fullSuite ? 'gate' : 'focused',
-        onWait: ({ holders }) => {
+        remote: Boolean(canShipRunner),
+        onWait: ({ holders, runnerUnavailable }) => {
+          if (runnerUnavailable) {
+            process.stderr.write(`runner ${runnerUnavailable.host} unavailable: ${runnerUnavailable.reason}; until ${runnerUnavailable.until}; requeueing the run\n`);
+            return;
+          }
           if (announced) return;
           announced = true;
           process.stderr.write(`waiting for a gate slot: ${holders.length} of ${capacity} in use\n`);
@@ -1388,7 +1417,7 @@ if (process.argv[1] && resolve(process.argv[1]) === runner) {
         pid: process.pid, parentPid: process.ppid, code, reason })}\n`);
       process.stderr.write(`run-tests: worker identity unavailable (${code}): ${reason}\n`);
     }
-    if (identityAvailable) watchLandingChildSpawns(startsPath, attempt);
+    if (identityAvailable) watchLandingChildSpawns(startsPath, attempt, file);
     else watchLandingChildCustody(startsPath, attempt);
   }
   if (process.env.PULLBOARD_TEST_BROWSER_RESOURCE && process.env.NODE_TEST_CONTEXT === 'child-v8'

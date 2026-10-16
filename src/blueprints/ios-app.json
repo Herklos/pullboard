@@ -1,0 +1,18 @@
+{
+  "blueprint": 1,
+  "name": "ios-app",
+  "title": "iOS app",
+  "version": 1,
+  "kind": "product",
+  "by": "Pullboard",
+  "summary": "Screens that look right in light, in dark and with VoiceOver.",
+  "prefix": "IOS",
+  "rules": [
+    { "key": "IOS1", "text": "Every screen has a light and a dark screenshot test.", "why": "a screen that reads well in one mode can be unreadable in the other." },
+    { "key": "IOS2", "text": "No change removes a VoiceOver label from a screen.", "why": "a missing label makes a control invisible to someone who cannot see the screen." }
+  ],
+  "questions": [
+    { "key": "Q1", "ask": "The oldest iOS it supports is", "choices": ["iOS 17", "iOS 16", "iOS 18", "Only the latest"], "default": "iOS 17" },
+    { "key": "Q2", "ask": "Its screens are built with", "choices": ["SwiftUI", "UIKit", "Both"], "default": "SwiftUI" }
+  ]
+}
