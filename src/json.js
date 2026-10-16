@@ -1,4 +1,5 @@
 /** Versioned command results and refusals for tools that drive the CLI (A1). */
+import { nextStepFor } from './next-steps.js';
 
 /** A shape's required top-level fields; optional fields may be added within this version. */
 function shape(fields) {
@@ -104,16 +105,11 @@ export const JSON_SHAPES = {
   errorFields: { code: 'string', message: 'string', next: 'string' },
 };
 
-/** Extract a concrete repair from existing refusals, retaining their original guidance. */
-function nextStep(message) {
-  const match = /(?:; |\. |: )((?:run|install|upgrade|fix|restore|commit|merge|test|check out|set|give|use|reject|ask your coordinator|answer from the main checkout|the coordinator|to keep looking|never work around)\b[\s\S]*)/i.exec(message);
-  return match?.[1] ?? 'Run pullboard help, correct the reported problem, and retry the command.';
-}
-
 /** A refusal shared by the CLI and API, retaining its rule and repair guidance (A1, A2). */
 export function refusalDocument(error) {
   const message = String(error.message).replace(/^\[[A-Z][A-Z0-9_]*\] /, '');
-  return { version: JSON_SHAPES.version, error: { code: error.code ?? 'INTERNAL', message, next: error.code === 'SPEC_BEHIND_MAIN' ? 'git merge main' : nextStep(message) } };
+  const code = error.code ?? 'INTERNAL';
+  return { version: JSON_SHAPES.version, error: { code, message, next: nextStepFor({ code, next: error.next }, message) } };
 }
 
 /**
@@ -140,7 +136,7 @@ export function commandOutput(argv, streams) {
       const text = refusal?.message ?? [...diagnostics, ...messages].join('\n');
       const match = /\[([A-Z][A-Z0-9_]*)\]\s*([\s\S]*)/.exec(text);
       const message = refusal ? text.replace(/^\[[A-Z][A-Z0-9_]*\] /, '') : match?.[2] ?? text;
-      document = refusalDocument({ code: refusal?.code ?? match?.[1] ?? (code === 2 ? 'USAGE' : 'COMMAND_FAILED'), message });
+      document = refusalDocument({ code: refusal?.code ?? match?.[1] ?? (code === 2 ? 'USAGE' : 'COMMAND_FAILED'), message, next: refusal?.next });
     } else if (result !== undefined) {
       document = { version: JSON_SHAPES.version, ...result, ...(diagnostics.length ? { diagnostics } : {}) };
     } else {
