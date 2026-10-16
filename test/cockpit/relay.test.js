@@ -6,13 +6,15 @@ import { createServer, request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { delimiter, join, relative, resolve, sep } from 'node:path';
 import { after, test } from 'node:test';
+import { performance } from 'node:perf_hooks';
 import { press, stableChrome } from './stable.js';
+import { createJourneyDeadline, drainJourneyTasks } from './journey-deadline.js';
 import { cockpitPage } from '../../src/cockpit.js';
 import { createRelayBrowserHandler } from '../../relay/browser-page.js';
 import { relayClientFixture } from '../relay-client-fixture.js';
 import { runFixtureChildAsync } from '../fixture-child.js';
 import { findChromeExecutable, relayWorkBudgetMs, startChrome } from '../relay-browser-fixture.js';
-import { BIN, scratch, SPEC, machine, project, fetchLive, startView, target, chromeExecutable, browserPause, openSnapshotChrome, stopOwnedChrome, closeSnapshotChrome, pickProject } from './fixture.js';
+import { BIN, scratch, SPEC, machine, project, fetchLive, startView, target, chromeExecutable, browserPause, startSnapshotChrome, openSnapshotChrome, stopOwnedChrome, closeSnapshotChrome, pickProject } from './fixture.js';
 
 test('a paired relay reference explains that committed source is available only in the local project view [B33]', {
   // Its relay work is the fixture's setup moves, the browser's pairing and the reference's request: three budgets,
@@ -933,7 +935,7 @@ async function journeyRelaySite(box, localOrigin) {
 }
 
 /** Route the hosted page and its fixed loopback discovery through owned fixture servers. */
-async function interceptJourneyOrigins(chrome, site, view) {
+async function interceptJourneyOrigins(chrome, site, view, { deadline: currentDeadline } = {}) {
   const failures = [];
   let failureCount = 0;
   const tasks = [];
@@ -1070,18 +1072,20 @@ async function interceptJourneyOrigins(chrome, site, view) {
     record.abortController?.abort();
     record.releaseHeldResponse?.();
   }
-  /** Await tasks added while earlier interception work was settling. */
+  /** Drain all dynamic batches against the caller's one absolute cleanup deadline. */
   async function drainTasks() {
-    let consumed = 0;
-    const errors = [];
-    while (consumed < tasks.length) {
-      const batch = tasks.slice(consumed);
-      consumed += batch.length;
-      for (const result of await Promise.allSettled(batch)) {
-        if (result.status === 'rejected') errors.push(result.reason);
-      }
+    return drainJourneyTasks(tasks, currentDeadline());
+  }
+  /** Abort only outbound reads and release holds owned by this private fixture after failure. */
+  function cancelOwned(reason) {
+    for (const held of heldResponses.splice(0)) held.cancel();
+    for (const release of releaseHeldResponses) release();
+    const reads = [];
+    for (const record of interceptions) {
+      record.abortController?.abort(reason);
+      if (record.reader) reads.push(record.reader.cancel());
     }
-    if (errors.length) throw new AggregateError(errors, 'journey interception tasks failed');
+    return Promise.allSettled(reads);
   }
   /** Retain cancellation and error details keyed only by the ephemeral CDP network id. */
   function onNetworkFailure(params) {
@@ -1221,9 +1225,14 @@ async function interceptJourneyOrigins(chrome, site, view) {
         let body;
         if (response.headers.get('content-type')?.startsWith('text/event-stream')) {
           const reader = response.body.getReader();
-          const first = await reader.read();
-          await reader.cancel();
-          body = Buffer.from(first.value || []);
+          record.reader = reader;
+          try {
+            const first = await reader.read();
+            body = Buffer.from(first.value || []);
+          } finally {
+            await reader.cancel();
+            record.reader = null;
+          }
         } else body = Buffer.from(await response.arrayBuffer());
         record.bodyBytes = Math.min(body.length, 1_000_000);
         record.bodyBytesCapped = body.length > record.bodyBytes;
@@ -1309,10 +1318,152 @@ async function interceptJourneyOrigins(chrome, site, view) {
     assert.equal(failureCount, 0, 'the hosted and loopback fixture requests complete; safe interception trace: ' + diagnostic);
     assert.equal(incomplete.length, 0, 'each paused request completes once or has its own confirmed browser cancellation; safe interception trace: ' + diagnostic);
   };
+  stop.cancelOwned = cancelOwned;
+  /** Observe terminal request outcomes after the caller releases or aborts its owned inputs. */
+  stop.settled = () => Promise.allSettled(tasks);
   stop.holdNextResponse = holdNextResponse;
   stop.waitForNetworkFailure = waitForNetworkFailure;
   stop.trace = safeTrace;
   return stop;
+}
+
+test('the hosted journey owns startup resources before readiness [N26,C7]', { timeout: 5_000 }, async () => {
+  const box = machine();
+  const neverReady = join(box.dir, 'never-ready.js');
+  writeFileSync(neverReady, 'setInterval(() => {}, 1000);\n');
+  const viewAbort = new AbortController();
+  const viewReason = new Error('stop the owned view before its URL');
+  let stopView;
+  const startingView = startView(box, { bin: neverReady, signal: viewAbort.signal, onOwned(stop) {
+    stopView = stop;
+    viewAbort.abort(viewReason);
+  } });
+  assert.equal(typeof stopView, 'function', 'the view is owned synchronously after spawn');
+  try { await assert.rejects(startingView, error => error === viewReason); }
+  finally { viewAbort.abort(viewReason); await stopView(); }
+  assert.strictEqual(stopView(), stopView(), 'repeated view cleanup shares the same completed stop');
+
+  const sleeper = join(box.dir, 'owned-browser-startup');
+  writeFileSync(sleeper, '#!/bin/sh\nexec sleep 30\n');
+  chmodSync(sleeper, 0o700);
+  const browserAbort = new AbortController();
+  const browserReason = new Error('stop the owned browser before its port');
+  const stops = [];
+  const startingBrowser = startSnapshotChrome(sleeper, join(box.dir, 'abort-browser-profile'), {
+    signal: browserAbort.signal, onOwned(stop) {
+      stops.push(stop);
+      browserAbort.abort(browserReason);
+    },
+  });
+  assert.equal(stops.length, 1, 'the browser group is owned synchronously after spawn');
+  try { await assert.rejects(startingBrowser, error => error === browserReason); }
+  finally { browserAbort.abort(browserReason); await Promise.allSettled(stops.map(stop => stop())); }
+  assert.equal(stops.length, 1, 'aborting startup never launches a retry');
+  assert.strictEqual(stops[0](), stops[0](), 'repeated browser cleanup shares one completed stop');
+});
+
+test('the hosted journey names its phase and stops within its own deadline [N26,H5,C7]', { timeout: 5_000 }, async (t) => {
+  const acknowledged = journeyDeferred();
+  let heldResponse;
+  const server = createServer((request, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+    response.flushHeaders();
+    heldResponse = response;
+    acknowledged.resolve();
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+
+  const site = { base: `http://127.0.0.1:${server.address().port}` };
+  const view = { base: 'http://127.0.0.1:1' };
+  const chrome = {
+    socket: new EventTarget(),
+    async send() { return {}; },
+    async waitFor() { return true; },
+  };
+  let deadline;
+  let stop;
+  let stopping;
+  let fallbackTimer;
+  const releaseSse = () => {
+    if (!heldResponse || heldResponse.destroyed || heldResponse.writableEnded) return;
+    heldResponse.write('data: release\n\n');
+    heldResponse.end();
+  };
+
+  try {
+    stop = await interceptJourneyOrigins(chrome, site, view, { deadline: () => deadline });
+    chrome.socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({
+      method: 'Fetch.requestPaused',
+      params: {
+        requestId: 'fixture-fetch-request',
+        networkId: 'fixture-network-request',
+        resourceType: 'EventSource',
+        request: {
+          url: `${JOURNEY_HOSTED}/api/v1/boards/${'a'.repeat(32)}/events`,
+          method: 'GET',
+          headers: {},
+        },
+      },
+    }) }));
+
+    // This handshake proves the real loopback server sent headers while withholding the first SSE body chunk.
+    await acknowledged.promise;
+    deadline = createJourneyDeadline({ timeoutMs: 50, onTimeout: () => stop.cancelOwned() });
+    deadline.setPhase('held interception');
+    deadline.setCleanupStage('stop-interception');
+
+    // Hang ceiling only: the pre-deadline implementation eventually drains when this exact response is released.
+    fallbackTimer = setTimeout(releaseSse, 250);
+    stopping = stop();
+    await assert.rejects(stopping, (error) => {
+      const pending = [error];
+      const seen = new Set();
+      while (pending.length) {
+        const current = pending.pop();
+        if (!current || seen.has(current)) continue;
+        seen.add(current);
+        if (current.name === 'JourneyDeadlineExceededError'
+            && current.phase === 'held interception'
+            && current.cleanupStage === 'stop-interception') {
+          assert.match(current.message, /phase held interception/u,
+            'the deadline names the phase in its actual failure text');
+          assert.match(current.message, /cleanup stage stop-interception/u,
+            'the deadline names the cleanup stage in its actual failure text');
+          return true;
+        }
+        if (Array.isArray(current.errors)) pending.push(...current.errors);
+        if (current.cause) pending.push(current.cause);
+      }
+      return false;
+    }, 'the held EventSource is attributed to its phase and the shared deadline');
+  } finally {
+    clearTimeout(fallbackTimer);
+    releaseSse();
+    if (stopping) await Promise.allSettled([stopping]);
+    if (stop?.settled) await stop.settled();
+    deadline?.dispose();
+    if (heldResponse && !heldResponse.destroyed) heldResponse.destroy();
+    server.closeAllConnections();
+    if (server.listening) await new Promise((resolve) => server.close(resolve));
+  }
+  const ordinary = new Error('the owned fixture rejected before its deadline');
+  const ordinaryDeadline = createJourneyDeadline({ timeoutMs: 1_000, onTimeout() {} });
+  try {
+    await assert.rejects(drainJourneyTasks([Promise.reject(ordinary)], ordinaryDeadline),
+      error => error instanceof AggregateError && error.errors.length === 1 && error.errors[0] === ordinary,
+      'an ordinary request failure retains its original error instead of becoming a timeout');
+  } finally { ordinaryDeadline.dispose(); }
+});
+
+/** A fixture handshake and release, independent of elapsed-time guesses. */
+function journeyDeferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
 }
 
 test('the hosted page lists linked and local boards together [N26,H5]', {
@@ -1321,13 +1472,67 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
 }, async (t) => {
   const executable = findChromeExecutable();
   if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME to run the hosted mixed-board proof.');
-  const linked = await relayClientFixture(t);
+  const journeyStartedAt = performance.now();
+  let journeyPhase = 'setup-linked-relay-board';
+  let journeyCleanupStage = 'test-body-cleanup-not-reached';
+  let journeySucceeded = false;
+  let journeyFailureDiagnosticEmitted = false;
+  let journeyAbortDiagnosticEmitted = false;
+  let journeyTrace = () => null;
+  /** Emit one bounded event without exposing error messages, request URLs, or credentials. */
+  const emitJourneyDiagnostic = (event, error = null, priorBodyError = null) => {
+    let interception = null;
+    try { interception = journeyTrace(); } catch { interception = { unavailable: true }; }
+    /** Keep only bounded error identifiers; messages may contain fixture secrets. */
+    const safeError = (value) => {
+      if (!value) return null;
+      const name = /^[A-Za-z][A-Za-z0-9_$.-]{0,79}$/u.test(String(value.name ?? '')) ? String(value.name) : null;
+      const code = /^[A-Z0-9_]{1,64}$/u.test(String(value.code ?? '')) ? String(value.code) : null;
+      return { name, code };
+    };
+    const record = { kind: 'hosted-local-journey-diagnostic', event, phase: journeyPhase,
+      elapsedMs: Math.round(performance.now() - journeyStartedAt), cleanupStage: journeyCleanupStage,
+      error: safeError(error), priorBodyError: safeError(priorBodyError), interception };
+    try { process.stderr.write('[hosted-local-journey] ' + JSON.stringify(record) + '\n'); } catch { /* Diagnostics must not replace the test failure. */ }
+  };
+  /** Report abort independently so a prior body-failure event cannot hide the cleanup stage. */
+  const onJourneyAbort = () => {
+    if (journeyAbortDiagnosticEmitted) return;
+    journeyAbortDiagnosticEmitted = true;
+    emitJourneyDiagnostic('test-signal-aborted', t.signal.reason, journeyBodyError ?? null);
+    void cancelJourneyOwned(t.signal.reason);
+  };
+  let journeyBodyError;
+  const journeyAbortController = new AbortController();
+  const ownedStartupStops = new Set();
+  /** Register a closer before resource startup yields; late startup cannot escape ownership. */
+  const registerOwnedStartup = (stop) => { ownedStartupStops.add(stop); };
+  let cancelJourneyOwned = (reason) => journeyAbortController.abort(reason);
+  const journeyDeadline = createJourneyDeadline({ timeoutMs: relayWorkBudgetMs() * 4, onTimeout: (error) => {
+    emitJourneyDiagnostic('own-deadline', error);
+    return cancelJourneyOwned(error);
+  } });
+  let activeJourneyDeadline = journeyDeadline;
+  journeyDeadline.setPhase(journeyPhase);
+  t.signal.addEventListener('abort', onJourneyAbort, { once: true });
+  t.after(() => {
+    t.signal.removeEventListener('abort', onJourneyAbort);
+    journeyDeadline.dispose();
+    activeJourneyDeadline.dispose();
+    if ((!journeySucceeded || journeyCleanupStage !== 'cleanup-complete') && !journeyFailureDiagnosticEmitted) {
+      journeyFailureDiagnosticEmitted = true;
+      emitJourneyDiagnostic('test-ended-before-success', journeyBodyError ?? null);
+    }
+  });
+  const linked = await journeyDeadline.wait('set up linked board', () => relayClientFixture(t));
   const linkedId = linked.before.tables.board_meta.find((row) => row.meta_key === 'board_id').meta_value;
   const remoteTitle = 'linked machine A keeps its relay board';
-  assert.equal((await linked.cli('add', linked.lane, remoteTitle)).code, 0, 'machine A creates a real relay fixture item');
-  await linked.link();
+  assert.equal((await journeyDeadline.wait('create linked item', () => linked.cli('add', linked.lane, remoteTitle))).code, 0, 'machine A creates a real relay fixture item');
+  await journeyDeadline.wait('link first board', () => linked.link());
   const linkedKey = readFileSync(linked.keyFile, 'utf8').trim();
 
+  journeyPhase = 'setup-local-project-fixtures';
+  journeyDeadline.setPhase(journeyPhase);
   const local = machine();
   const localProject = project(local, 'local-machine-b');
   const localTitle = 'local machine B keeps its own view board';
@@ -1336,6 +1541,8 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
   const duplicateTitle = 'local machine C keeps its own view board';
   local.git(duplicateProject.repo, 'remote', 'add', 'origin', 'git@github.com:fixture/repository.git');
   local.run(duplicateProject.repo, 'add', 'web', duplicateTitle);
+  journeyPhase = 'setup-local-relay-board';
+  journeyDeadline.setPhase(journeyPhase);
   const localRelayEnv = {
     ...linked.env,
     HOME: local.dir,
@@ -1343,31 +1550,64 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
     PULLBOARD_MACHINE_HOME: local.env.PULLBOARD_MACHINE_HOME,
     PATH: local.env.PATH,
   };
-  const localRelayResult = await runFixtureChildAsync(process.execPath,
+  const localRelayResult = await journeyDeadline.wait('link duplicate board', () => runFixtureChildAsync(process.execPath,
     [BIN, 'relay', 'on', '--url', linked.origin, '--json'],
-    { cwd: duplicateProject.repo, env: localRelayEnv, timeout: relayWorkBudgetMs() });
+    { cwd: duplicateProject.repo, env: localRelayEnv, timeout: relayWorkBudgetMs(), signal: journeyAbortController.signal }));
   assert.equal(localRelayResult.status, 0,
     'C links its actual local board to the relay as a second source for the same board identity');
   const localRelay = JSON.parse(readFileSync(join(duplicateProject.repo, '.git', 'pullboard', 'relay.json'), 'utf8'));
   const localRelayKey = readFileSync(join(local.env.PULLBOARD_HOME, 'relay-keys', localRelay.board + '.key'), 'utf8').trim();
   assert.notEqual(localRelay.board, linkedId, 'the linked C board is distinct from A');
+  journeyPhase = 'start-view-browser-and-interception';
+  journeyDeadline.setPhase(journeyPhase);
   const profile = join(linked.root, 'mixed-board-chrome');
   let localView;
   let site;
   let chrome;
+  let ownedChrome;
+  let closingChrome;
   let stopOrigins;
   const heldMoves = [];
-  let journeyBodyError;
+  /** Read only the fixture's existing bounded, redacted interception trace. */
+  journeyTrace = () => stopOrigins?.trace?.() ?? null;
+  /** Close only this fixture's browser and reads; racing a promise never claims cancellation. */
+  cancelJourneyOwned = (reason) => {
+    journeyAbortController.abort(reason);
+    const settling = [...ownedStartupStops].map((stop) => Promise.resolve().then(stop));
+    if (stopOrigins) settling.push(stopOrigins.cancelOwned(reason));
+    if (ownedChrome) {
+      closingChrome ??= closeSnapshotChrome(ownedChrome);
+      settling.push(closingChrome);
+    }
+    return Promise.allSettled(settling);
+  };
   const safeJourneyError = (error) => {
     const message = String(error?.message ?? error ?? 'unknown error');
     return /^[A-Za-z0-9 _.:/-]{1,180}$/u.test(message) ? message : '<redacted error>';
   };
   try {
-    localView = await startView(local);
-    site = await journeyRelaySite(linked, localView.base);
-    chrome = await openSnapshotChrome(executable, 'about:blank', profile);
-    stopOrigins = await interceptJourneyOrigins(chrome, site, localView);
-    const session = await linked.phoneSession();
+    localView = await journeyDeadline.wait('start local view', () => startView(local, { signal: journeyAbortController.signal, onOwned: registerOwnedStartup }));
+    site = await journeyDeadline.wait('start hosted fixture', async () => {
+      const started = await journeyRelaySite(linked, localView.base);
+      // Listening is asynchronous too: dispose a late handoff if the caller already timed out.
+      if (journeyAbortController.signal.aborted) {
+        started.server.closeAllConnections();
+        await new Promise((done) => started.server.close(done));
+        throw journeyAbortController.signal.reason;
+      }
+      return started;
+    });
+    ownedChrome = await journeyDeadline.wait('start owned browser', () => openSnapshotChrome(executable, 'about:blank', profile, { signal: journeyAbortController.signal, onOwned: registerOwnedStartup }));
+    chrome = new Proxy(ownedChrome, {
+      /** Bound each browser call while keeping its real implementation and arguments unchanged. */
+      get(target, key) {
+        const value = Reflect.get(target, key);
+        if (typeof value !== 'function') return value;
+        return (...args) => activeJourneyDeadline.wait(`browser ${String(key)}`, () => value.apply(target, args));
+      },
+    });
+    stopOrigins = await interceptJourneyOrigins(chrome, site, localView, { deadline: () => activeJourneyDeadline });
+    const session = await journeyDeadline.wait('authenticate private browser', () => linked.phoneSession());
     assert.equal((await chrome.send('Network.setCookie', {
       name: 'pb_session', value: session.token, url: JOURNEY_HOSTED, httpOnly: true, sameSite: 'Lax',
     })).success, true, 'the fixture person session is installed only in this private browser');
@@ -1375,11 +1615,15 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
       try { await chrome.send('Browser.grantPermissions', { origin: JOURNEY_HOSTED, permissions }); break; } catch { /* Chrome versions expose different local-network permission names. */ }
     }
 
+    journeyPhase = 'pair-linked-board-and-consume-key';
+    journeyDeadline.setPhase(journeyPhase);
     // Pair the real board key in the fragment; the relay client consumes it into device storage before local discovery.
     await chrome.send('Page.navigate', { url: JOURNEY_HOSTED + '/#board=' + linkedId + '&key=' + encodeURIComponent(linkedKey) });
     await chrome.waitFor("document.querySelector('#chain')?.textContent.includes(" + JSON.stringify(remoteTitle) + ')', 30_000);
     await chrome.waitFor('location.hash === ""', 10_000);
 
+    journeyPhase = 'pair-duplicate-board';
+    journeyDeadline.setPhase(journeyPhase);
     // C's real local board is also paired on the relay so this catches duplicate-ID source preference.
     // Start a fresh hosted document before pairing C, then wait for transport work rather than assuming C is selected.
     await chrome.send('Page.navigate', { url: 'about:blank' });
@@ -1389,6 +1633,8 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
       && call.path === '/api/v1/boards/' + localRelay.board + '/state' && call.browser),
     'C’s private pairing key was consumed and its real snapshot was read by the authenticated browser');
 
+    journeyPhase = 'discover-combined-board-list';
+    journeyDeadline.setPhase(journeyPhase);
     // The hosted page's real local-view handoff discovers B without a pasted key, URL or port.
     await chrome.send('Page.navigate', { url: 'about:blank' });
     await chrome.send('Page.navigate', { url: JOURNEY_HOSTED + '/' });
@@ -1408,6 +1654,8 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
     assert.equal(rows.secretInAddress, false, 'the hosted page removes pairing and local-session fragments');
     assert.equal(rows.projects.filter((row) => row.id === duplicateId).length, 1, 'the duplicate local/relay identity appears once in the composed list');
 
+    journeyPhase = 'exercise-local-and-relay-reads';
+    journeyDeadline.setPhase(journeyPhase);
     const localRow = "Array.from(document.querySelectorAll('#proj-list .proj.repo')).find(row => row.textContent.includes('local-machine-b'))";
     await pickProject(chrome, localRow);
     await chrome.waitFor("view.root === data.projects.find(row => row.name === 'local-machine-b').root && document.querySelector('#chain')?.textContent.includes(" + JSON.stringify(localTitle) + ") && !readOnly && !requests");
@@ -1471,6 +1719,8 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
     assert.equal(localReads.some((entry) => new URL(entry.url).pathname.includes(linkedId)), false,
       'the local view never receives A’s relay board id');
 
+    journeyPhase = 'hold-local-completion-across-board-switch';
+    journeyDeadline.setPhase(journeyPhase);
     // Hold only delivery of a real local API response after the write has completed. Switching to a relay board
     // while it is in flight must not reinterpret the local response as a sealed request or clear that board's form.
     await pickProject(chrome, localRow);
@@ -1492,6 +1742,8 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
     assert.equal(await chrome.stable('window.__actOutcome'), true, 'a local write response is parsed using the mode it started with after switching to relay');
     assert.equal(await chrome.stable("document.querySelector('#add-title').value"), 'relay draft survives local completion', 'the older local completion does not clear the current relay draft');
 
+    journeyPhase = 'hold-second-local-completion-across-reselection';
+    journeyDeadline.setPhase(journeyPhase);
     // Switching away and back can leave the same root selected. A successful old submit must still preserve a new
     // draft entered in that board's form while the response was held.
     await pickProject(chrome, localRow);
@@ -1514,22 +1766,48 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
     await chrome.waitFor('window.__actOutcome !== null');
     assert.equal(await chrome.stable("document.querySelector('#add-title').value"), 'replacement local draft', 'a completion after switching away and back preserves the replacement draft');
 
+    journeyPhase = 'assert-final-browser-state';
+    journeyDeadline.setPhase(journeyPhase);
     assert.deepEqual(chrome.exceptions, [], 'the hosted mixed-board page reports no uncaught browser exceptions');
+    journeySucceeded = true;
   } catch (error) {
     journeyBodyError = error;
+    if (!journeyFailureDiagnosticEmitted) {
+      journeyFailureDiagnosticEmitted = true;
+      emitJourneyDiagnostic('ordinary-failure', error);
+    }
     throw error;
   } finally {
+    journeyDeadline.dispose();
+    // Split the existing sixty-second outer reserve: half for explicit cleanup, half for registered after-hooks and scheduling.
+    activeJourneyDeadline = createJourneyDeadline({ timeoutMs: 60_000 / 2, onTimeout: (error) => {
+      emitJourneyDiagnostic('cleanup-deadline', error, journeyBodyError ?? null);
+      return cancelJourneyOwned(error);
+    } });
+    activeJourneyDeadline.setPhase(journeyPhase);
+    journeyCleanupStage = 'release-held-responses';
+    activeJourneyDeadline.setCleanupStage(journeyCleanupStage);
     for (const release of heldMoves) release();
     const journeyCleanupErrors = [];
+    journeyCleanupStage = 'stop-interception';
+    activeJourneyDeadline.setCleanupStage(journeyCleanupStage);
     try { if (stopOrigins) await stopOrigins(); } catch (error) { journeyCleanupErrors.push(error); }
-    try { if (chrome) await closeSnapshotChrome(chrome); } catch (error) { journeyCleanupErrors.push(error); }
+    journeyCleanupStage = 'close-browser';
+    activeJourneyDeadline.setCleanupStage(journeyCleanupStage);
+    try { if (ownedChrome) await (closingChrome ??= closeSnapshotChrome(ownedChrome)); } catch (error) { journeyCleanupErrors.push(error); }
+    journeyCleanupStage = 'stop-local-view';
+    activeJourneyDeadline.setCleanupStage(journeyCleanupStage);
     try { if (localView) await localView.stop(); } catch (error) { journeyCleanupErrors.push(error); }
+    journeyCleanupStage = 'close-hosted-fixture-server';
+    activeJourneyDeadline.setCleanupStage(journeyCleanupStage);
     try {
       if (site?.server) {
         site.server.closeAllConnections();
         if (site.server.listening) await new Promise((done, reject) => site.server.close((error) => error ? reject(error) : done()));
       }
     } catch (error) { journeyCleanupErrors.push(error); }
+    journeyCleanupStage = 'remove-browser-profile';
+    activeJourneyDeadline.setCleanupStage(journeyCleanupStage);
     try { rmSync(profile, { recursive: true, force: true }); } catch (error) { journeyCleanupErrors.push(error); }
     if (!journeyBodyError && !journeyCleanupErrors.length) {
       const trace = stopOrigins.trace();
@@ -1537,6 +1815,13 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
         incompleteCount: trace.incompleteCount, confirmedBrowserCancellationCount: trace.confirmedBrowserCancellationCount,
         probe: trace.requests.find((record) => record.fixtureCancelProbe) }));
     }
+    if (journeyCleanupErrors.length && !journeyFailureDiagnosticEmitted) {
+      journeyCleanupStage = 'cleanup-failed';
+    activeJourneyDeadline.setCleanupStage(journeyCleanupStage);
+      journeyFailureDiagnosticEmitted = true;
+      emitJourneyDiagnostic('cleanup-failure', journeyCleanupErrors[0]);
+    }
+    if (!journeyBodyError && !journeyCleanupErrors.length) journeyCleanupStage = 'cleanup-complete';
     if (journeyCleanupErrors.length) {
       t.diagnostic(JSON.stringify({
         testBodyCompletedSuccessfully: !journeyBodyError,
