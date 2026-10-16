@@ -329,6 +329,13 @@ test('browserSlots admits that many browser runs and no more [C7]', async () => 
   const configured = configureBrowserSlots(box, 2);
   assert.equal(configured.status, 0, configured.stderr);
   assert.equal(JSON.parse(configured.stdout).settings.browserSlots, 2);
+  const readBack = runFixtureChild(process.execPath, [BIN, 'settings', '--json'], {
+    cwd: box.first, env: box.env, encoding: 'utf8',
+  });
+  assert.equal(readBack.status, 0, readBack.stderr);
+  assert.equal(JSON.parse(readBack.stdout).settings.browserSlots, 2, 'the machine setting persists for other processes');
+  assert.equal(privateList(box).find(({ name }) => name === 'browser').capacity, 2,
+    'the shared browser resource row has the configured capacity before workers start');
   const invalid = configureBrowserSlots(box, 3);
   assert.equal(invalid.status, 1);
   assert.equal(JSON.parse(invalid.stdout).error.code, 'BAD_BROWSER_SLOTS');
@@ -337,7 +344,13 @@ test('browserSlots admits that many browser runs and no more [C7]', async () => 
   const first = poolWorker(box, { agent: 'browser-one', browser: true });
   assert.equal((await acquired(first)).acquired, 'browser-one');
   const second = poolWorker(box, { agent: 'browser-two', browser: true });
-  assert.equal((await acquired(second)).acquired, 'browser-two', 'the configured second browser lease starts while the first is held');
+  const secondStart = await event(second);
+  if (!secondStart.acquired) {
+    const gate = privateList(box).find(({ name }) => name === 'gate');
+    const browser = privateList(box).find(({ name }) => name === 'browser');
+    assert.fail(`the configured second browser lease queued: ${JSON.stringify({ state: secondStart.queued, gate, browser })}`);
+  }
+  assert.equal(secondStart.acquired, 'browser-two', 'the configured second browser lease starts while the first is held');
   const third = poolWorker(box, { agent: 'browser-three', browser: true });
   assert.equal((await event(third)).queued.position, 1, 'the next browser run waits for a configured slot');
   const browser = privateList(box).find(({ name }) => name === 'browser');
