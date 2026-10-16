@@ -493,7 +493,7 @@ function createDescendantTracker(directory) {
         if (retired.has(`${row.pid}:${row.birth}`)) { uncertain = true; reason ||= 'a retired process identity reappeared'; continue; }
         if (prior && prior.birth === row.birth) { ownedPids.add(row.pid); continue; }
         if (!prior && baseline.get(row.pid)?.birth === row.birth) continue;
-        if (!prior && !ownedPids.has(row.ppid)) {
+        if ((!prior || prior.birth !== row.birth) && !ownedPids.has(row.ppid)) {
           pendingIdentities.set(row.pid, { birth: row.birth, eventIds: new Set() });
           reason ||= 'detached process group contains an unidentified member';
           continue;
