@@ -168,21 +168,71 @@ function diagnosticPath(path) {
   }
 }
 
+/** Describe one OS permission message, resolving file targets against the command's worktree. */
+function permissionOperation(root, message) {
+  const network = /^(listen|bind) (EPERM|EACCES)\b/u.exec(message);
+  if (network) return { code: network[2], operation: `${network[1]} (${network[2]})` };
+  const file = /^(EPERM|EACCES): [^\n]*?, (open|mkdir|read|write|rename|unlink|scandir|access) (['"])([^\n]+?)\3(?= -> |$)/u.exec(message);
+  const python = /^PermissionError: \[Errno (?:1|13)\] [^\n]*?: ['"]([^'"\n]+)['"]/u.exec(message);
+  if (!file && !python) return null;
+  const path = diagnosticPath(resolve(root, file ? file[4] : python[1]));
+  const tree = diagnosticPath(root);
+  if (!path || !tree) return null;
+  const within = relative(tree, path);
+  if (within !== '..' && !within.startsWith('../') && !isAbsolute(within)) return null;
+  const code = file ? file[1] : 'EACCES';
+  return { code, operation: `${file ? file[2] : 'file access'} ${JSON.stringify(path)} (${code})` };
+}
+
+/** Decode the single-line quoted YAML scalars emitted by Node's TAP reporter. */
+function tapScalar(value) {
+  if (value.startsWith('"')) {
+    try { return JSON.parse(value); } catch { return null; }
+  }
+  if (value.startsWith("'") && value.endsWith("'")) return value.slice(1, -1).replace(/''/gu, "'");
+  return /^[A-Z_]+$/u.test(value) ? value : null;
+}
+
+/** Scan complete lines with bounded TAP state so assertion messages cannot impersonate OS codes. */
+export function sandboxBlockedScanner(root) {
+  let failureIndent = null;
+  let fieldIndent = null;
+  let permission = null;
+  let code = null;
+  /** Read one line, retaining only the current failed TAP record's permission and code fields. */
+  return (raw) => {
+    const line = raw.trim().replace(/^#\s*/u, '');
+    if (/^(?:Error: |PermissionError: )/u.test(line)) {
+      const direct = permissionOperation(root, line.replace(/^Error: /u, ''));
+      if (direct) return direct.operation;
+    }
+    const indent = raw.length - raw.trimStart().length;
+    if (/^(?:not )?ok \d+\b/u.test(line)) {
+      failureIndent = /^not ok /u.test(line) ? indent : null;
+      fieldIndent = null; permission = null; code = null;
+    } else if (line === '---' && failureIndent !== null && indent === failureIndent + 2) {
+      fieldIndent = indent;
+    } else if (line === '...' && indent === fieldIndent) {
+      failureIndent = null; fieldIndent = null; permission = null; code = null;
+    } else if (fieldIndent !== null && indent === fieldIndent) {
+      const field = /^(error|code): (.*)$/u.exec(line);
+      if (field) {
+        const value = tapScalar(field[2]);
+        if (field[1] === 'error') permission = typeof value === 'string' ? permissionOperation(root, value) : null;
+        else code = value;
+        if (permission && permission.code === code) return permission.operation;
+      }
+    }
+    return null;
+  };
+}
+
 /** Recognize concrete OS permission diagnostics, keeping ordinary assertion failures ordinary. */
 export function sandboxBlockedOperation(root, output) {
-  for (const raw of output.split('\n')) {
-    const line = raw.trim().replace(/^#\s*/u, '');
-    const network = /^Error: (listen|bind) (EPERM|EACCES)\b/u.exec(line);
-    if (network) return `${network[1]} (${network[2]})`;
-    const file = /^Error: (EPERM|EACCES): [^\n]*?, (open|mkdir|read|write|rename|unlink|scandir|access) ['"]([^'"\n]+)['"]/u.exec(line);
-    const python = /^PermissionError: \[Errno (?:1|13)\] [^\n]*?: ['"]([^'"\n]+)['"]/u.exec(line);
-    if (!file && !python) continue;
-    const path = diagnosticPath(resolve(root, file ? file[3] : python[1]));
-    const tree = diagnosticPath(root);
-    if (!path || !tree) continue;
-    const within = relative(tree, path);
-    if (within !== '..' && !within.startsWith('../') && !isAbsolute(within)) continue;
-    return `${file ? file[2] : 'file access'} ${JSON.stringify(path)} (${file ? file[1] : 'EACCES'})`;
+  const scan = sandboxBlockedScanner(root);
+  for (const line of output.split('\n')) {
+    const operation = scan(line);
+    if (operation) return operation;
   }
   return null;
 }

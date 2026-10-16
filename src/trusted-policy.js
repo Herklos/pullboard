@@ -1,7 +1,7 @@
 /** Coordinator policy and immutable submission checks cannot come from a builder's candidate [V4,V16,L3,M3]. */
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { digestOf, sandboxBlockedOperation, writeTimingProfile } from './gate.js';
+import { digestOf, sandboxBlockedScanner, writeTimingProfile } from './gate.js';
 import { timingFromOutput, timingFromLog, timingRunner } from './timing.js';
 import { closeSync, existsSync, mkdtempSync, mkdirSync, openSync, readFileSync, readSync, rmSync, writeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -402,11 +402,12 @@ function checkResult(state, stage, installCapture, checkCapture, { root = '', it
   /** Give a missing phase the same explicit placeholder used by the former complete-string path. */
   const writePhase = (title, path, capture, label, absentText) => {
     appendArtifact(`${title}:\n`);
+    const scan = sandboxBlockedScanner(commandRoot);
     const result = streamSanitizedLog(path, capture, label, artifactFd === null ? null : (buffer, offset) => {
       const written = writeSync(artifactFd, buffer, offset, buffer.length - offset);
       if (written <= 0) throw new Error('diagnostic artifact write made no progress');
       return written;
-    }, line => { if (state !== 'pass' && title === (stage.startsWith('install') ? 'install' : 'check')) sandboxBlocked ??= sandboxBlockedOperation(commandRoot, line); });
+    }, line => { if (state !== 'pass' && title === (stage.startsWith('install') ? 'install' : 'check')) sandboxBlocked ??= scan(line); });
     if (!result.sawOutput) appendArtifact(`${absentText}\n`);
     return result;
   };

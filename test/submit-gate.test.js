@@ -6,7 +6,7 @@
  */
 import assert from 'node:assert/strict';
 import { runFixtureExecFile as execFileSync, runFixtureChild as spawnSync, runFixtureChild, runFixtureGit } from './fixture-child.js';
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { after, test } from 'node:test';
@@ -797,6 +797,52 @@ test('a sandbox-blocked gate asks the person [I1,C7]', async (t) => {
     const green = box.run('gate');
     assert.equal(green.code, 0, green.err);
     assert.doesNotMatch(green.out + green.err, /SANDBOX_BLOCKED/u, 'a successful diagnostic is not a refusal');
+  });
+  await t.test('real outside-file TAP denials refuse while permission assertions stay ordinary [I1,C7]', () => {
+    let box = privateRepo(t);
+    const runner = `${JSON.stringify(process.execPath)} ${JSON.stringify(resolve(import.meta.dirname, '../bin/run-tests.js'))} test/permission.test.js`;
+    const directory = join(box.dir, 'readonly-outside-worktree');
+    mkdirSync(directory);
+    const outside = join(directory, "outside'quote.txt");
+    put(box.root, 'pullboard.json', JSON.stringify({ gate: runner }));
+    seedGraph(box);
+    const operation = `writeFileSync(${JSON.stringify(outside)}, 'blocked')`;
+    const prefix = "import { test } from 'node:test';\nimport { writeFileSync } from 'node:fs';\nimport assert from 'node:assert/strict';\n";
+    const denied = prefix + `test('actual outside write', () => ${operation});\n`;
+    put(box.root, 'test/permission.test.js', denied);
+    commitAll(box);
+    box = builderRepo(box);
+    assert.equal(box.coordinator('add', 'build', 'Real permission check', '--check', runner).code, 0);
+    assert.equal(box.run('claim', '1').code, 0);
+    put(box.root, 'src/a.js', 'export const value = 2;\n');
+    commitAll(box, 'feat(core): update selected source [G1]');
+    const item = { ...JSON.parse(box.coordinator('show', '1', '--json').out), item_commit: box.git('rev-parse', 'HEAD').trim() };
+    chmodSync(directory, 0o500);
+    try {
+      assert.throws(() => writeFileSync(outside, 'sentinel'), { code: 'EACCES' }, 'the operating system actually denies this write');
+      blocked(box.run('gate'), outside);
+      blocked(box.run('check', '1', '--yes'), outside);
+      blocked(box.run('submit', '1'), outside);
+      const privateResult = checkAtCommit(box.root, item);
+      assert.equal(privateResult.state, 'red');
+      assert.ok(privateResult.sandboxBlocked?.includes(outside), 'the real private checker scans the TAP record');
+      assert.throws(() => refuseSandboxBlocked(privateResult), { code: 'SANDBOX_BLOCKED' });
+      const raw = readFileSync(privateResult.outputPath, 'utf8');
+      assert.match(raw, /code: 'EACCES'/u);
+      assert.ok(raw.includes(outside));
+      assert.ok(existsSync(privateResult.profilePath));
+      put(box.root, 'test/permission.test.js', prefix + `test('ordinary assertion mentioning permission', () => { try { ${operation}; } catch (error) { assert.fail(error.message); } });\n`);
+      commitAll(box);
+      const ordinary = box.run('gate');
+      assert.equal(ordinary.code, 1);
+      assert.match(ordinary.out, /ERR_ASSERTION/u);
+      assert.doesNotMatch(ordinary.out + ordinary.err, /SANDBOX_BLOCKED/u);
+      put(box.root, 'test/permission.test.js', denied);
+      commitAll(box);
+    } finally { chmodSync(directory, 0o700); }
+    const allowed = box.run('gate');
+    assert.equal(allowed.code, 0, allowed.out + allowed.err);
+    assert.equal(readFileSync(outside, 'utf8'), 'blocked', 'the unchanged real write succeeds when access is restored');
   });
   await t.test('frozen checks retain outside-file refusal before submit proof [I1,C7]', () => {
     let box = privateRepo(t);
