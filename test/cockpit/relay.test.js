@@ -8,6 +8,7 @@ import { delimiter, join, relative, resolve, sep } from 'node:path';
 import { after, test } from 'node:test';
 import { press, stableChrome } from './stable.js';
 import { cockpitPage } from '../../src/cockpit.js';
+import { createRelayBrowserHandler } from '../../relay/browser-page.js';
 import { relayClientFixture } from '../relay-client-fixture.js';
 import { findChromeExecutable, relayWorkBudgetMs, startChrome } from '../relay-browser-fixture.js';
 import { BIN, scratch, SPEC, machine, project, fetchLive, startView, target, chromeExecutable, browserPause, openSnapshotChrome, stopOwnedChrome, closeSnapshotChrome } from './fixture.js';
@@ -890,5 +891,195 @@ test('a configured transport never falls back while loading or after import fail
     await live.stop();
     await new Promise((resolve) => server.close(resolve));
     rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+const JOURNEY_HOSTED = 'https://app.pullboard.dev';
+const JOURNEY_LOCAL = 'http://127.0.0.1:4890';
+
+/** Serve the relay's real browser page and proxy its API to the loopback relay fixture. */
+async function journeyRelaySite(box, localOrigin) {
+  const browser = createRelayBrowserHandler({
+    async authenticate(req) {
+      const token = /(?:^|;\s*)pb_session=([^;]+)/u.exec(req.headers.cookie || '')?.[1];
+      if (!token) return { kind: 'anonymous' };
+      try { return await box.auth.authenticate(token); } catch { return { kind: 'anonymous' }; }
+    },
+  });
+  const server = createServer((req, res) => {
+    const writeHead = res.writeHead.bind(res);
+    res.writeHead = (status, headers, ...rest) => {
+      if (headers && !Array.isArray(headers)) {
+        const csp = Object.keys(headers).find((name) => name.toLowerCase() === 'content-security-policy');
+        if (csp) headers[csp] = headers[csp].replace("connect-src 'self'", "connect-src 'self' " + localOrigin);
+      }
+      return writeHead(status, headers, ...rest);
+    };
+    void (async () => {
+      if (await browser(req, res)) return;
+      const headers = Object.fromEntries(Object.entries(req.headers).filter(([name]) => !['host', 'connection', 'content-length'].includes(name.toLowerCase())));
+      const upstream = request(new URL(req.url, box.origin), { method: req.method, headers, agent: false }, (reply) => {
+        const responseHeaders = Object.fromEntries(Object.entries(reply.headers).filter(([name]) => !['connection', 'transfer-encoding', 'keep-alive'].includes(name.toLowerCase())));
+        res.writeHead(reply.statusCode || 502, responseHeaders);
+        reply.pipe(res);
+      });
+      upstream.once('error', () => { if (!res.headersSent) res.writeHead(502); res.end(); });
+      req.pipe(upstream);
+    })().catch(() => { if (!res.headersSent) res.writeHead(500); res.end(); });
+  });
+  await new Promise((ready, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', ready); });
+  return { server, base: 'http://127.0.0.1:' + server.address().port };
+}
+
+/** Route the hosted page and its fixed loopback discovery through owned fixture servers. */
+async function interceptJourneyOrigins(chrome, site, view) {
+  const failures = [];
+  const tasks = [];
+  const listener = ({ data }) => {
+    const message = JSON.parse(String(data));
+    if (message.method !== 'Fetch.requestPaused') return;
+    tasks.push((async () => {
+      const { requestId, request: asked } = message.params;
+      const address = new URL(asked.url);
+      const base = address.origin === JOURNEY_HOSTED ? site.base
+        : [JOURNEY_LOCAL, view.base].includes(address.origin) ? view.base : null;
+      if (!base) return chrome.send('Fetch.failRequest', { requestId, errorReason: 'ConnectionRefused' });
+      const headers = Object.fromEntries(Object.entries(asked.headers).filter(([name]) => !['host', 'content-length'].includes(name.toLowerCase())));
+      const response = await fetchLive(base + address.pathname + address.search, {
+        method: asked.method, headers, redirect: 'manual',
+        ...(asked.postData === undefined ? {} : { body: asked.postData }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      let body;
+      if (response.headers.get('content-type')?.startsWith('text/event-stream')) {
+        const reader = response.body.getReader();
+        const first = await reader.read();
+        await reader.cancel();
+        body = Buffer.from(first.value || []);
+      } else body = Buffer.from(await response.arrayBuffer());
+      await chrome.send('Fetch.fulfillRequest', {
+        requestId, responseCode: response.status,
+        responseHeaders: [...response.headers].filter(([name]) => !['content-length', 'connection', 'transfer-encoding', 'keep-alive', 'date'].includes(name.toLowerCase())).map(([name, value]) => ({ name, value })),
+        body: body.toString('base64'),
+      });
+    })().catch((error) => failures.push(error.message)));
+  };
+  chrome.socket.addEventListener('message', listener);
+  await chrome.send('Fetch.enable', { patterns: [{ urlPattern: JOURNEY_HOSTED + '/*', requestStage: 'Request' }, { urlPattern: JOURNEY_LOCAL + '/*', requestStage: 'Request' }, { urlPattern: view.base + '/*', requestStage: 'Request' }] });
+  return async () => {
+    chrome.socket.removeEventListener('message', listener);
+    try { await Promise.all(tasks); } finally { await chrome.send('Fetch.disable'); }
+    assert.deepEqual(failures, [], 'the hosted and loopback fixture requests complete');
+  };
+}
+
+test('the hosted page lists linked and local boards together [N26,H5]', {
+  timeout: relayWorkBudgetMs() * 4 + 60_000,
+  skip: !findChromeExecutable() && 'Chrome is not installed',
+}, async (t) => {
+  const executable = findChromeExecutable();
+  if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME to run the hosted mixed-board proof.');
+  const linked = await relayClientFixture(t);
+  const linkedId = linked.before.tables.board_meta.find((row) => row.meta_key === 'board_id').meta_value;
+  const remoteTitle = 'linked machine A keeps its relay board';
+  assert.equal((await linked.cli('add', linked.lane, remoteTitle)).code, 0, 'machine A creates a real relay fixture item');
+  await linked.link();
+  const linkedKey = readFileSync(linked.keyFile, 'utf8').trim();
+
+  const local = machine();
+  const localProject = project(local, 'local-machine-b');
+  const localTitle = 'local machine B keeps its own view board';
+  local.run(localProject.repo, 'add', 'web', localTitle);
+  const duplicateProject = project(local, 'local-machine-c');
+  const duplicateTitle = 'local machine C keeps its own view board';
+  local.run(duplicateProject.repo, 'add', 'web', duplicateTitle);
+  assert.equal((await linked.cliAt(duplicateProject.repo, 'relay', 'on', '--url', linked.origin)).code, 0,
+    'C links its actual local board to the relay as a second source for the same board identity');
+  const localRelay = JSON.parse(readFileSync(join(duplicateProject.repo, '.git', 'pullboard', 'relay.json'), 'utf8'));
+  const localRelayKey = readFileSync(join(linked.env.PULLBOARD_HOME, 'relay-keys', localRelay.board + '.key'), 'utf8').trim();
+  assert.notEqual(localRelay.board, linkedId, 'the linked C board is distinct from A');
+  const profile = join(linked.root, 'mixed-board-chrome');
+  let localView;
+  let site;
+  let chrome;
+  let stopOrigins;
+  try {
+    localView = await startView(local);
+    site = await journeyRelaySite(linked, localView.base);
+    chrome = await openSnapshotChrome(executable, 'about:blank', profile);
+    stopOrigins = await interceptJourneyOrigins(chrome, site, localView);
+    const session = await linked.phoneSession();
+    assert.equal((await chrome.send('Network.setCookie', {
+      name: 'pb_session', value: session.token, url: JOURNEY_HOSTED, httpOnly: true, sameSite: 'Lax',
+    })).success, true, 'the fixture person session is installed only in this private browser');
+    for (const permissions of [['loopbackNetwork', 'localNetwork', 'localNetworkAccess'], ['localNetworkAccess']]) {
+      try { await chrome.send('Browser.grantPermissions', { origin: JOURNEY_HOSTED, permissions }); break; } catch { /* Chrome versions expose different local-network permission names. */ }
+    }
+
+    // Pair the real board key in the fragment; the relay client consumes it into device storage before local discovery.
+    await chrome.send('Page.navigate', { url: JOURNEY_HOSTED + '/#board=' + linkedId + '&key=' + encodeURIComponent(linkedKey) });
+    await chrome.waitFor("document.querySelector('#chain')?.textContent.includes(" + JSON.stringify(remoteTitle) + ')', 30_000);
+    await chrome.waitFor('location.hash === ""', 10_000);
+
+    // C's real local board is also paired on the relay so this catches duplicate-ID source preference.
+    await chrome.send('Page.navigate', { url: JOURNEY_HOSTED + '/#board=' + localRelay.board + '&key=' + encodeURIComponent(localRelayKey) });
+    await chrome.waitFor("document.querySelector('#chain')?.textContent.includes(" + JSON.stringify(duplicateTitle) + ')', 30_000);
+
+    // The hosted page's real local-view handoff discovers B without a pasted key, URL or port.
+    await chrome.send('Page.navigate', { url: JOURNEY_HOSTED + '/' });
+    await chrome.waitFor("[...document.querySelectorAll('#proj-list .proj.repo')].some(row => row.textContent.includes('fixture/repository')) && [...document.querySelectorAll('#proj-list .proj.repo')].some(row => row.textContent.includes('local-machine-b')) && [...document.querySelectorAll('#proj-list .proj.repo')].some(row => row.textContent.includes('local-machine-c'))");
+    const localList = await (await fetchLive(localView.base + '/api/v1/boards', { headers: { 'x-pullboard-key': localView.key } })).json();
+    const localId = localList.boards.find((board) => board.name === 'local-machine-b').id;
+    const duplicateId = localList.boards.find((board) => board.name === 'local-machine-c').id;
+    assert.equal(duplicateId, localRelay.board, 'C has one real board identity at both sources');
+    const localOrigin = await chrome.stable('localSession?.origin || null');
+    assert.equal(localOrigin, localView.base, 'the page keeps the ephemeral local origin from its real handoff');
+    const rows = JSON.parse(await chrome.stable('JSON.stringify({ projects: data.projects.map(({id,name,root,source}) => ({id,name,root: source === \"relay\" ? \"relay\" : \"local\",source})), labels: [...document.querySelectorAll(\"#proj-list .proj.repo .pname\")].map(node => node.textContent), secretInAddress: /key=|pullboard-local=/.test(location.href) })'));
+    assert.deepEqual(rows.labels.sort(), ['fixture/repository', 'local-machine-b', 'local-machine-c'], 'the page shows unlinked B and linked C locally beside A from the relay');
+    assert.deepEqual(rows.projects.map((row) => row.id).sort(), [linkedId, localId, duplicateId].sort(), 'the hosted view keeps A, B and C identities');
+    assert.equal(rows.projects.find((row) => row.id === linkedId).root, 'relay', 'a remote board uses an opaque root, not A’s filesystem path');
+    assert.equal(rows.projects.find((row) => row.id === localId).source, 'local', 'unlinked B remains a local board');
+    assert.equal(rows.projects.find((row) => row.id === duplicateId).source, 'local', 'C wins when its actual identity is present through both sources');
+    assert.equal(rows.secretInAddress, false, 'the hosted page removes pairing and local-session fragments');
+    assert.equal(rows.projects.filter((row) => row.id === duplicateId).length, 1, 'the duplicate local/relay identity appears once in the composed list');
+
+    const localRow = "Array.from(document.querySelectorAll('#proj-list .proj.repo')).find(row => row.textContent.includes('local-machine-b'))";
+    await press(chrome, localRow);
+    await chrome.waitFor("view.root === data.projects.find(row => row.name === 'local-machine-b').root && document.querySelector('#chain')?.textContent.includes(" + JSON.stringify(localTitle) + ") && !readOnly && !requests");
+    const duplicateRow = "Array.from(document.querySelectorAll('#proj-list .proj.repo')).find(row => row.textContent.includes('local-machine-c'))";
+    await press(chrome, duplicateRow);
+    await chrome.waitFor("view.root === data.projects.find(row => row.id === " + JSON.stringify(duplicateId) + ").root && document.querySelector('#chain')?.textContent.includes(" + JSON.stringify(duplicateTitle) + ") && !readOnly && !requests");
+    const remoteRow = "Array.from(document.querySelectorAll('#proj-list .proj.repo')).find(row => row.textContent.includes('fixture/repository'))";
+    await press(chrome, remoteRow);
+    await chrome.waitFor("view.root === data.projects.find(row => row.id === " + JSON.stringify(linkedId) + ").root && readOnly && requests");
+
+    assert.ok(linked.calls.some((call) => call.method === 'GET' && call.path === '/api/v1/boards/' + linkedId + '/state'),
+      'the relay board state is read through its relay transport');
+    assert.ok(linked.calls.some((call) => call.method === 'GET' && call.path.startsWith('/api/v1/boards/' + linkedId + '/events')),
+      'the relay board events use the relay client stream');
+    const localReads = chrome.requests.filter((entry) => entry.url.startsWith(localOrigin + '/api/v1/boards/'));
+    assert.ok(localReads.some((entry) => new URL(entry.url).pathname === '/api/v1/boards/' + localId + '/state'),
+      'B board state is read through B’s local view');
+    assert.ok(localReads.some((entry) => new URL(entry.url).pathname === '/api/v1/boards/' + localId + '/events'),
+      'B board events use B’s local view stream');
+    assert.ok(localReads.some((entry) => new URL(entry.url).pathname === '/api/v1/boards/' + duplicateId + '/state'),
+      'C board state uses C’s local view despite its paired relay copy');
+    assert.ok(localReads.some((entry) => new URL(entry.url).pathname === '/api/v1/boards/' + duplicateId + '/events'),
+      'C board events use C’s local view despite its paired relay copy');
+    assert.equal(localReads.some((entry) => new URL(entry.url).pathname.includes(linkedId)), false,
+      'the local view never receives A’s relay board id');
+    assert.deepEqual(chrome.exceptions, [], 'the hosted mixed-board page reports no uncaught browser exceptions');
+  } finally {
+    try { if (stopOrigins) await stopOrigins(); }
+    finally {
+      try { if (chrome) await closeSnapshotChrome(chrome); }
+      finally {
+        try { if (localView) await localView.stop(); }
+        finally {
+          try { if (site?.server) { site.server.closeAllConnections(); if (site.server.listening) await new Promise((done) => site.server.close(done)); } }
+          finally { rmSync(profile, { recursive: true, force: true }); }
+        }
+      }
+    }
   }
 });
