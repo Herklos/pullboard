@@ -151,8 +151,8 @@ Spec
                                         Defaults to must and gate review.
   pullboard blueprint add <name or file>  add a blueprint's rules and questions as drafts, and its starter items
                                         bundled: web-app; nothing is approved, and a repeat adds nothing
-  pullboard blueprint save [file]       write approved rules and answered questions as a blueprint
-                                        never items, notes, paths, emails or names; defaults to <project>.blueprint.json
+  pullboard blueprint save [file] [--name <name>] [--title "<title>"]  write approved rules and answered questions as a blueprint
+                                        never items, notes, paths, emails or names; file defaults to <project>.blueprint.json
   pullboard spec signers add [--key <path>] [--by <principal>]  opt into SSH-signed sign-offs
                                         principal defaults to Git user.email; --by overrides it
   pullboard spec approve <ids> | decline <ids> --reason "why"  the person's exact-row decision

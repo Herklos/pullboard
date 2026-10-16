@@ -272,6 +272,7 @@ const OPTIONS = {
   add: { type: 'string' },
   remove: { type: 'string' },
   name: { type: 'string' },
+  title: { type: 'string' },
   url: { type: 'string' },
   skip: { type: 'string' },
   wait: { type: 'string' },
@@ -3491,7 +3492,7 @@ async function runCommand(argv, io) {
       return 0;
     }
     if (command === 'blueprint' && first === 'save') {
-      if (rest.length) throw new Refused('USAGE', 'pullboard blueprint save [file]');
+      if (rest.length) throw new Refused('USAGE', 'pullboard blueprint save [file] [--name <name>] [--title "<title>"]');
       const ctx = context(io);
       const { root, commonDir } = ctx.info;
       const project = ctx.config.project || ctx.config.name || basename(dirname(resolve(root, commonDir)));
@@ -3499,7 +3500,7 @@ async function runCommand(argv, io) {
       if (existsSync(file)) throw new Refused('BLUEPRINT_EXISTS', `${file} already exists; name another file: pullboard blueprint save <file>`);
       const spec = loadSpec(root, ctx.config);
       const { names, parts } = withBoard(ctx, (board) => privateNames(root, board, spec));
-      const { blueprint, left } = saveBlueprint(spec, { name: project, title: project, gate: ctx.config.gate, names, parts });
+      const { blueprint, left } = saveBlueprint(spec, { name: values.name, title: values.title, gate: ctx.config.gate, names, parts });
       writeFileSync(file, `${JSON.stringify(blueprint, null, 2)}\n`, { flag: 'wx' });
       io.result?.({ file, name: blueprint.name, rules: blueprint.rules?.length ?? 0, questions: blueprint.questions?.length ?? 0, left });
       io.say(`saved ${blueprint.rules?.length ?? 0} rules and ${blueprint.questions?.length ?? 0} answered questions to ${file}`);

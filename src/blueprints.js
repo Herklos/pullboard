@@ -430,7 +430,7 @@ export function privateTextReason(text, names, parts = []) {
  * rule with no "Why:" reason to carry, is left out and named in `left`, never rewritten [S1].
  *
  * @param {{ rows: any[] }} spec - The parsed SPEC.md.
- * @param {{ name: string, title: string, gate?: string, names: string[], parts?: string[] }} board
+ * @param {{ name?: string, title?: string, gate?: string, names: string[], parts?: string[] }} board - name and title are the person's own choice, never the project's
  * @returns {{ blueprint: Blueprint, left: { id: string, reason: string }[] }}
  */
 export function saveBlueprint(spec, { name, title, gate, names, parts = [] }) {
@@ -455,17 +455,21 @@ export function saveBlueprint(spec, { name, title, gate, names, parts = [] }) {
     if (!rule.text.trim() || !rule.why.trim() || ruleText(rule) !== text) { left.push({ id: row.id, reason: 'its rule cannot be read back exactly' }); continue; }
     rules.push({ key: row.id, ...rule, tier: row.tier === 'aim' ? 'aim' : 'must', gate: 'review' });
   }
-  // The project's own name leaves only if no private name hides in it, in any case or spelling.
+  // The project's name never goes in (decision de849661): the person names the blueprint, or it
+  // gets a neutral default to edit. A chosen name still may not carry anything private.
+  const safeName = name ?? 'my-blueprint';
+  const safeTitle = title ?? 'My blueprint';
+  if (typeof safeName !== 'string' || !NAME_RE.test(safeName)) throw new Refused('USAGE', 'a blueprint name is lowercase letters, digits and dashes; run pullboard blueprint save --name my-rules');
+  if (typeof safeTitle !== 'string' || !safeTitle.trim() || /[\r\n|]/u.test(safeTitle)) throw new Refused('USAGE', 'a blueprint title is one line without a | character; run pullboard blueprint save --title "My rules"');
   const strict = [...names, ...parts];
-  const loose = (text) => privateTextReason(text, strict) || privateTextReason(text.replace(/[^\p{L}\p{N}]+/gu, ' '), strict);
-  const raw = String(name ?? '').trim();
-  const slug = raw.normalize('NFKD').toLowerCase().replace(/[\u0300-\u036f]/gu, '').replace(/[^a-z0-9]+/gu, '-').replace(/^-|-$/gu, '');
-  const safeName = slug && !loose(raw) && !loose(slug) ? slug : 'board';
-  const cleanTitle = String(title ?? '').trim();
+  for (const [flag, text] of [['--name', safeName.replaceAll('-', ' ')], ['--title', safeTitle]]) {
+    const privacy = privateTextReason(text, strict);
+    if (privacy) throw new Refused('PRIVATE_BLUEPRINT', `${flag} holds ${privacy}; choose a name that names no one: pullboard blueprint save ${flag} "..."`);
+  }
   const value = {
     blueprint: BLUEPRINT_FORMAT,
     name: safeName,
-    title: cleanTitle && !/[\r\n|]/u.test(cleanTitle) && !loose(cleanTitle) ? cleanTitle : safeName,
+    title: safeTitle.trim(),
     version: 1,
     ...(gate?.trim() && !/[\r\n|]/u.test(gate) && !privateTextReason(gate.trim(), names, parts) ? { gate: gate.trim() } : {}),
     ...(rules.length ? { rules } : {}),

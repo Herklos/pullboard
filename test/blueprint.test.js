@@ -263,7 +263,9 @@ test('a saved board adds back as the same rows [S1]', () => {
     assert.ok(!text.includes(secret), `the blueprint never carries ${JSON.stringify(secret)}`);
   }
   const blueprint = JSON.parse(text);
-  assert.deepEqual([blueprint.name, blueprint.title], ['board', 'board'], 'a project named after a person leaves as board');
+  assert.deepEqual([blueprint.name, blueprint.title], ['my-blueprint', 'My blueprint'], 'the project name never goes in; a neutral default does');
+  const named = box.run(box.repo, 'blueprint', 'save', 'named.json', '--name', 'dana-whitlock', '--json');
+  assert.equal(JSON.parse(named.out).error?.code, 'PRIVATE_BLUEPRINT', 'a chosen name that names someone is refused');
   assert.deepEqual(Object.keys(blueprint).sort(), ['blueprint', 'gate', 'name', 'questions', 'rules', 'title', 'version'], 'only allow-listed fields are written');
   assert.deepEqual(blueprint.rules.map((rule) => Object.keys(rule).sort()), [['gate', 'key', 'text', 'tier', 'why'], ['gate', 'key', 'text', 'tier', 'why']]);
   assert.deepEqual(blueprint.questions.map((question) => Object.keys(question).sort()), Array(3).fill(['ask', 'choices', 'default', 'key']));
