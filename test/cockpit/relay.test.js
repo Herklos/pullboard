@@ -11,7 +11,7 @@ import { cockpitPage } from '../../src/cockpit.js';
 import { createRelayBrowserHandler } from '../../relay/browser-page.js';
 import { relayClientFixture } from '../relay-client-fixture.js';
 import { findChromeExecutable, relayWorkBudgetMs, startChrome } from '../relay-browser-fixture.js';
-import { BIN, scratch, SPEC, machine, project, fetchLive, startView, target, chromeExecutable, browserPause, openSnapshotChrome, stopOwnedChrome, closeSnapshotChrome } from './fixture.js';
+import { BIN, scratch, SPEC, machine, project, fetchLive, startView, target, chromeExecutable, browserPause, openSnapshotChrome, stopOwnedChrome, closeSnapshotChrome, pickProject } from './fixture.js';
 
 test('a paired relay reference explains that committed source is available only in the local project view [B33]', {
   // Its relay work is the fixture's setup moves, the browser's pairing and the reference's request: three budgets,
@@ -1096,13 +1096,13 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
     assert.equal(rows.projects.filter((row) => row.id === duplicateId).length, 1, 'the duplicate local/relay identity appears once in the composed list');
 
     const localRow = "Array.from(document.querySelectorAll('#proj-list .proj.repo')).find(row => row.textContent.includes('local-machine-b'))";
-    await press(chrome, localRow);
+    await pickProject(chrome, localRow);
     await chrome.waitFor("view.root === data.projects.find(row => row.name === 'local-machine-b').root && document.querySelector('#chain')?.textContent.includes(" + JSON.stringify(localTitle) + ") && !readOnly && !requests");
     const duplicateRow = "Array.from(document.querySelectorAll('#proj-list .proj.repo')).find(row => row.textContent.includes('local-machine-c'))";
-    await press(chrome, duplicateRow);
+    await pickProject(chrome, duplicateRow);
     await chrome.waitFor("view.root === data.projects.find(row => row.id === " + JSON.stringify(duplicateId) + ").root && document.querySelector('#chain')?.textContent.includes(" + JSON.stringify(duplicateTitle) + ") && !readOnly && !requests");
     const remoteRow = "Array.from(document.querySelectorAll('#proj-list .proj.repo')).find(row => row.textContent.includes('fixture/repository'))";
-    await press(chrome, remoteRow);
+    await pickProject(chrome, remoteRow);
     await chrome.waitFor("view.root === data.projects.find(row => row.id === " + JSON.stringify(linkedId) + ").root && readOnly && requests");
 
     assert.ok(linked.calls.some((call) => call.method === 'GET' && call.path === '/api/v1/boards/' + linkedId + '/state'),
@@ -1123,7 +1123,7 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
 
     // Hold only delivery of a real local API response after the write has completed. Switching to a relay board
     // while it is in flight must not reinterpret the local response as a sealed request or clear that board's form.
-    await press(chrome, localRow);
+    await pickProject(chrome, localRow);
     await chrome.waitFor("view.root === data.projects.find(row => row.name === 'local-machine-b').root && !readOnly && !requests");
     await chrome.stable("window.__priorAct = act; window.__actOutcome = null; act = async (...args) => { const result = await window.__priorAct(...args); window.__actOutcome = result; return result; }; true");
     await chrome.stable("document.querySelector('#new-item').click(); document.querySelector('#add-title').value = 'held local action'; true");
@@ -1132,7 +1132,7 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
     const firstResponse = await firstHeld;
     heldMoves.push(firstResponse.release);
     assert.ok(firstResponse.status >= 200 && firstResponse.status < 300, 'the local board accepted the real move before response delivery was held');
-    await press(chrome, remoteRow);
+    await pickProject(chrome, remoteRow);
     await chrome.waitFor("view.root === data.projects.find(row => row.id === " + JSON.stringify(linkedId) + ").root && readOnly && requests");
     await chrome.stable("document.querySelector('#new-item').click(); document.querySelector('#add-title').value = 'relay draft survives local completion'; true");
     firstResponse.release();
@@ -1142,7 +1142,7 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
 
     // Switching away and back can leave the same root selected. A successful old submit must still preserve a new
     // draft entered in that board's form while the response was held.
-    await press(chrome, localRow);
+    await pickProject(chrome, localRow);
     await chrome.waitFor("view.root === data.projects.find(row => row.name === 'local-machine-b').root && !readOnly && !requests");
     await chrome.stable("document.querySelector('#new-item').click(); document.querySelector('#add-title').value = 'second held local action'; true");
     const secondHeld = stopOrigins.holdNextResponse(({ method, path }) => method === 'POST' && path === '/api/v1/boards/' + localId + '/moves');
@@ -1151,9 +1151,9 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
     const secondResponse = await secondHeld;
     heldMoves.push(secondResponse.release);
     assert.ok(secondResponse.status >= 200 && secondResponse.status < 300, 'the second real local write completes before delivery');
-    await press(chrome, remoteRow);
+    await pickProject(chrome, remoteRow);
     await chrome.waitFor("view.root === data.projects.find(row => row.id === " + JSON.stringify(linkedId) + ").root && readOnly && requests");
-    await press(chrome, localRow);
+    await pickProject(chrome, localRow);
     await chrome.waitFor("view.root === data.projects.find(row => row.name === 'local-machine-b').root && !readOnly && !requests");
     await chrome.stable("document.querySelector('#new-item').click(); document.querySelector('#add-title').value = 'replacement local draft'; true");
     secondResponse.release();
