@@ -15,6 +15,7 @@ import { forgetBoardKey, readBoardKey, storeBoardKey } from './relay-key.js';
 import { encodeBoardKey, generateBoardKey, seal, unseal } from './seal.js';
 import { terminalQr } from './qr.js';
 import { Refused } from './refused.js';
+import { refusalFromReceipt } from './recorded-refusal.js';
 import { relaySenderProblem } from './relay-sender.js';
 import { readRelayMachine, removeRecordedDevice, updateRelayMachine, wrapForRecordedDevice } from './relay-machine.js';
 import { receivePersonRequest, requestMoveProblem } from './relay-requests.js';
@@ -750,7 +751,7 @@ async function catchUp(root, file, state, io) {
     delete state.pending;
   }
   saveLink(file, state);
-  if (pendingRefusal) throw new Refused(pendingRefusal.code, pendingRefusal.message, pendingRefusal.next);
+  if (pendingRefusal) throw refusalFromReceipt(pendingRefusal);
 }
 
 /** Finish a durable executable send; a collision reseals its unchanged id after applying the winner. */
@@ -907,7 +908,7 @@ export async function relayOperation(root, operation, args, io, command, applyLo
           delete state.recovered;
           saveLink(file, state);
         }
-        if (previousReceipt.outcome.error) throw new Refused(previousReceipt.outcome.error.code, previousReceipt.outcome.error.message, previousReceipt.outcome.error.next);
+        if (previousReceipt.outcome.error) throw refusalFromReceipt(previousReceipt.outcome.error);
         for (const event of previousReceipt.outcome.events ?? []) io.onEvent?.(event);
         return previousReceipt.outcome.result;
       }
@@ -943,7 +944,7 @@ export async function relayOperation(root, operation, args, io, command, applyLo
         if (error.code === 'AUTH_REQUIRED') reportExpiredSignIn(state, io);
         else io.err(`pullboard: ${error.message}`);
       }
-      if (receipt.outcome.error) throw new Refused(receipt.outcome.error.code, receipt.outcome.error.message, receipt.outcome.error.next);
+      if (receipt.outcome.error) throw refusalFromReceipt(receipt.outcome.error);
       if (['register', 'ensureCoordinator'].includes(operation)) await actorTransport(root, file, state, receipt.outcome.result, io);
       for (const event of receipt.outcome.events ?? []) io.onEvent?.(event);
       return receipt.outcome.result;
@@ -1065,7 +1066,7 @@ export async function relayCommandReceipt(root, command) {
     if (receipt.outcome.error) {
       delete state.recovered;
       saveLink(file, state);
-      throw new Refused(receipt.outcome.error.code, receipt.outcome.error.message, receipt.outcome.error.next);
+      throw refusalFromReceipt(receipt.outcome.error);
     }
     return { result: receipt.outcome.result, events: receipt.outcome.events ?? [], move };
   });

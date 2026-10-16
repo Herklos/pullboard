@@ -4,6 +4,7 @@ import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'nod
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
 import { Refused } from '../src/refused.js';
+import { recordedRefusal, refusalFromReceipt, RECORDED_GENERIC_NEXT } from '../src/recorded-refusal.js';
 import { refusalDocument } from '../src/json.js';
 import { createE2eHelpers } from './e2e-helpers.js';
 
@@ -59,6 +60,19 @@ test('every refusal names a next step that works [P4,I1,I2]', async () => {
   assert.equal(refusalDocument(new Refused('GATE_RED',
     'the submission proof is red.', 'repair this fixture, commit, and submit again')).error.next,
   'repair this fixture, commit, and submit again', 'contextual recovery remains explicit without a message next line');
+  const oldReceipt = recordedRefusal(new Refused('NOT_SUBMITTED', 'item #12 is verified, not submitted'));
+  assert.equal(oldReceipt.next, RECORDED_GENERIC_NEXT, 'canonical receipts keep their original wire guidance');
+  assert.doesNotMatch(refusalDocument(refusalFromReceipt(oldReceipt)).error.next, /Run pullboard help, correct the reported problem/u,
+    'presenting an old receipt computes current guidance');
+  assert.equal(refusalDocument(new Refused(oldReceipt.code, oldReceipt.message, oldReceipt.next)).error.next,
+    refusalDocument(refusalFromReceipt(oldReceipt)).error.next, 'an old generic remote fallback is never displayed');
+  const oldDiagnostic = recordedRefusal(new Refused('GATE_RED', 'the proof is red; fix it, commit, submit again\nfailure: fixture output'));
+  assert.match(oldDiagnostic.next, /\nfailure: fixture output/u, 'the historical serializer retains its multiline value');
+  assert.equal(refusalDocument(refusalFromReceipt(oldDiagnostic)).error.next, 'fix it, commit, submit again',
+    'a derived historical diagnostic tail is not repeated in the current footer');
+  const remoteStep = { code: 'FUTURE_REMOTE_RULE', message: 'The service refused.', next: 'ask the service owner to restore this board' };
+  assert.equal(refusalDocument(refusalFromReceipt(remoteStep)).error.next, remoteStep.next,
+    'a remote explicit action distinct from historical derivation survives reconstruction');
 
   const box = e2e.sandbox();
   box.env.PULLBOARD_MODEL = 'Refusal Fixture Model';

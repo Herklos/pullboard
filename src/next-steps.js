@@ -7,6 +7,7 @@
  * step that leads straight back to the same refusal. test/refusal-next-steps.test.js checks that
  * every code raised in src/ has a row here.
  */
+import { RECORDED_GENERIC_NEXT } from './recorded-refusal.js';
 
 /** @type {Readonly<Record<string, string>>} */
 export const NEXT_STEPS = Object.freeze({
@@ -370,7 +371,7 @@ export function nextStepFor(error, message) {
   const code = typeof error?.code === 'string' ? error.code : '';
   const finalStep = /(?:^|\r?\n)next:[ \t]*([^\r\n]*\S)[ \t]*(?:\r?\n)*$/u.exec(String(message))?.[1];
   if (finalStep) return finalStep.trim();
-  if (typeof error?.next === 'string' && error.next.trim()) return error.next.trim();
+  if (typeof error?.next === 'string' && error.next.trim() && error.next.trim() !== RECORDED_GENERIC_NEXT) return error.next.trim();
   if (code === 'SPEC_BEHIND_MAIN') return NEXT_STEPS.SPEC_BEHIND_MAIN;
   return stepInMessage(message) ?? NEXT_STEPS[code]
     ?? `ask the service owner about refusal code ${code || '(unknown)'}, including the displayed refusal`;

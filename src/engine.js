@@ -1,7 +1,7 @@
 /** Versioned, deterministic replay through the CLI's existing board engine [H3,H16]. */
 import { createHash, randomUUID } from 'node:crypto';
 import * as store from './board.js';
-import { refusalDocument } from './json.js';
+import { recordedRefusal } from './recorded-refusal.js';
 import { ENGINE_VERSION } from './machine.js';
 import { Refused } from './refused.js';
 import { requestMoveProblem, recordRequestMove } from './relay-requests.js';
@@ -81,7 +81,7 @@ export function prepareEngineMove(board, operation, args, { id = randomUUID(), a
       try { frozen = options.freeze(item); }
       catch (cause) {
         if (!(cause instanceof Refused)) throw cause;
-        error = refusalDocument(cause).error;
+        error = recordedRefusal(cause);
       }
       delete options.freeze;
       options.frozen = frozen ?? null;
@@ -165,7 +165,7 @@ export function refuseRelayMove(board, move, { sequence, at, sender, kind, code,
     const candidateItemId = ITEM_ID_FIRST_ARGUMENT.has(move?.operation) ? move?.args?.[0] : null;
     const itemId = Number.isSafeInteger(candidateItemId) && candidateItemId > 0 && board.db.prepare('SELECT 1 FROM item WHERE item_id=?').get(candidateItemId) ? candidateItemId : null;
     const reason = refusal ?? new Refused(code, 'this relay record was refused and logged; run pullboard relay to continue with the next ordered record');
-    const outcome = { error: refusalDocument(reason).error };
+    const outcome = { error: recordedRefusal(reason) };
     const clock = board.clock;
     board.clock = { now: () => new Date(at) };
     try {
@@ -221,7 +221,7 @@ export function applyEngineMove(board, move, { sequence, at }) {
         outcome = { result: result ?? null, events: (board.emittedEvents?.slice(firstEvent) ?? []).map((event) => ({ ...event })) };
       } catch (error) {
         if (!(error instanceof Refused)) throw error;
-        outcome = { error: refusalDocument(error).error };
+        outcome = { error: recordedRefusal(error) };
       } finally {
         board.clock = clock;
         if (engineVersion === undefined) delete board.executionEngineVersion;
