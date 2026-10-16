@@ -260,7 +260,7 @@ export async function takeResource(options) {
         db.prepare('UPDATE resource SET capacity = ? WHERE name = ?').run(currentCapacity, name);
       }
       db.prepare('INSERT INTO resource(name, capacity) VALUES (?, ?) ON CONFLICT(name) DO NOTHING').run(name, currentCapacity);
-      if (name === 'gate' && scope === 'machine') {
+      if (name === 'gate' && scope === 'machine' && browser) {
         const browserCapacity = options.browserCapacityProvider?.() ?? 1;
         if (!Number.isSafeInteger(browserCapacity) || browserCapacity < 1 || browserCapacity > currentCapacity) {
           throw new Refused('BAD_BROWSER_SLOTS', `browser capacity must be a positive integer no greater than gate capacity (${currentCapacity}); run pullboard settings browserSlots <n>`);
