@@ -943,12 +943,12 @@ test('queue order follows the machine settings [C7,O5]', async () => {
   // An unusable value is refused by name, with the fix.
   setQueueOrder(aging, { reviewsFirst: 'yes' });
   const badFlag = settingsCli(aging, '--json');
-  assert.equal(badFlag.status, 1);
+  assert.equal(badFlag.status, 1, 'a non-boolean reviewsFirst is refused');
   assert.equal(JSON.parse(badFlag.stdout).error.code, 'BAD_MACHINE_SETTINGS');
   assert.match(JSON.parse(badFlag.stdout).error.message, /gate\.queue\.reviewsFirst .* must be true or false/u);
   setQueueOrder(aging, { reviewsFirst: true, agingMinutes: 0 });
   const badAging = settingsCli(aging, '--json');
-  assert.equal(badAging.status, 1);
+  assert.equal(badAging.status, 1, 'agingMinutes 0 is refused');
   assert.match(JSON.parse(badAging.stdout).error.message, /gate\.queue\.agingMinutes .* must be a positive whole number/u);
 });
 
