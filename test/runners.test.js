@@ -43,6 +43,7 @@ function committedToolingSnapshot(sourceRoot, env) {
   try {
     copyFileSync(join(key, 'package.json'), join(root, 'package.json'));
     cpSync(join(key, 'src'), join(root, 'src'), { recursive: true });
+    cpSync(join(key, 'bin'), join(root, 'bin'), { recursive: true });
     const gitEnv = { ...env, HOME: home, PULLBOARD_HOME: join(home, '.pullboard'),
       PULLBOARD_MACHINE_HOME: join(home, '.pullboard'), GIT_CONFIG_GLOBAL: '/dev/null',
       GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_COUNT: '0',
@@ -50,7 +51,7 @@ function committedToolingSnapshot(sourceRoot, env) {
       GIT_COMMITTER_NAME: 'Runner Tooling Fixture', GIT_COMMITTER_EMAIL: 'runner-tooling@example.invalid' };
     for (const key of ['GIT_CONFIG_PARAMETERS', 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR']) delete gitEnv[key];
     git(root, gitEnv, 'init', '-q', '-b', 'main');
-    git(root, gitEnv, 'add', 'package.json', 'src');
+    git(root, gitEnv, 'add', 'package.json', 'src', 'bin');
     git(root, gitEnv, 'commit', '-q', '-m', 'test: snapshot current runner tooling');
   } catch (error) {
     process.stderr.write(`retained incomplete runner tooling snapshot at ${directory}: ${error.message}\n`);
@@ -285,8 +286,35 @@ test('a cached workspace link resolves inside this fresh runner checkout', () =>
   writeFileSync(join(repo, 'runner-cache-probe.test.js'), probe);
 }
 
+/** Start the current CLI from the same clean committed tooling snapshot used by API fixtures. */
+function startToolingCli(repo, env, args, { toolingRoot = resolve(import.meta.dirname, '..'), ...options } = {}) {
+  const sourceRoot = realpathSync(toolingRoot);
+  const bin = join(committedToolingSnapshot(sourceRoot, env), 'bin', 'pullboard.js');
+  const snapshot = TOOLING_SNAPSHOTS.get(sourceRoot);
+  snapshot.active++;
+  try {
+    const child = startFixtureChild(process.execPath, [bin, ...args], {
+      cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'], ...options,
+    });
+    let settled = false;
+    const finish = (status, signal, failed) => {
+      if (settled) return;
+      settled = true;
+      snapshot.active--;
+      if (failed || status !== 0 || signal) snapshot.retained = true;
+    };
+    child.once('close', (status, signal) => finish(status, signal, false));
+    child.once('error', () => finish(null, null, true));
+    return child;
+  } catch (error) {
+    snapshot.active--;
+    snapshot.retained = true;
+    throw error;
+  }
+}
+
 /** Run a gate command through its real lease and return the profile/result emitted by the API child. */
-function runThroughGate(repo, env, command, { browser = true, item = '663', kind = 'check', landing = false, toolingRoot = resolve(import.meta.dirname, '..') } = {}) {
+function runThroughGate(repo, env, command, { browser = true, item = '663', kind = 'check', landing = false, toolingRoot = resolve(import.meta.dirname, '..'), timeout } = {}) {
   const sourceRoot = realpathSync(toolingRoot);
   const gateUrl = pathToFileURL(join(committedToolingSnapshot(sourceRoot, env), 'src', 'gate.js')).href;
   const snapshot = TOOLING_SNAPSHOTS.get(sourceRoot);
@@ -300,7 +328,7 @@ process.exitCode = result.isGreen ? 0 : 1;
 `;
   try {
     const result = runFixtureChild(process.execPath, ['--input-type=module', '-e', script], {
-      cwd: repo, env, encoding: 'utf8',
+      cwd: repo, env, encoding: 'utf8', ...(timeout === undefined ? {} : { timeout }),
     });
     if (result.status !== 0) snapshot.retained = true;
     return result;
@@ -469,8 +497,9 @@ test('a queued run executes on a registered runner and its result comes back (ho
   const suiteRoot = resolve(import.meta.dirname, '..');
   copyFileSync(join(suiteRoot, 'package.json'), join(toolingRoot, 'package.json'));
   cpSync(join(suiteRoot, 'src'), join(toolingRoot, 'src'), { recursive: true });
+  cpSync(join(suiteRoot, 'bin'), join(toolingRoot, 'bin'), { recursive: true });
   git(toolingRoot, env, 'init', '-q', '-b', 'main');
-  git(toolingRoot, env, 'add', 'package.json', 'src');
+  git(toolingRoot, env, 'add', 'package.json', 'src', 'bin');
   git(toolingRoot, env, 'commit', '-q', '-m', 'test: commit current tooling bytes');
   const ownedCommit = git(toolingRoot, env, 'rev-parse', 'HEAD');
   writeFileSync(join(toolingRoot, 'LOCAL-NOTE.txt'), 'unrelated local note\n');
@@ -489,7 +518,7 @@ test('a queued run executes on a registered runner and its result comes back (ho
   try {
     held = await takeResource({ name: 'gate', capacity: 1, scope: 'machine', root: repo,
       agent: 'tooling-isolation-local-holder', item: 'tooling-isolation-local-holder', kind: 'force-registered-runner' });
-    const run = runThroughGate(repo, env, command, { item: 'tooling-isolation', toolingRoot });
+    const run = runThroughGate(repo, env, command, { item: 'tooling-isolation', toolingRoot, timeout: 20_000 }); // budget: bound a broken fixture-only remote dispatch while its local holder is occupied.
     assert.equal(run.status, 0, fixtureResultContext(run));
     assert.match(run.stdout, /HOST_CHECKOUT_ISOLATED/u);
     const result = gateResult(run.stdout);
@@ -506,6 +535,13 @@ test('a queued run executes on a registered runner and its result comes back (ho
     assert.equal(requestsSeen[0].host, HOST);
     assert.equal(requestsSeen[0].workerStarted, true);
     assert.equal(requestsSeen[0].code, 0);
+    const cliRun = observe(startToolingCli(repo, env, ['gate', '--json'], { toolingRoot, timeout: 20_000 })); // budget: bound the real fixture CLI while forcing remote admission.
+    const cliResult = await cliRun.closed;
+    assert.equal(cliResult.status, 0, fixtureResultContext(cliResult));
+    assert.equal(JSON.parse(cliResult.stdout.trim()).green, true);
+    const allRequests = readFileSync(requests, 'utf8').trim().split(/\r?\n/u).filter(Boolean).map(line => JSON.parse(line));
+    assert.equal(allRequests.length, 2, 'both the API and actual CLI execute remotely from clean tooling snapshots');
+    assert.ok(allRequests.every(request => request.host === HOST && request.workerStarted && request.code === 0));
     assert.equal(git(toolingRoot, env, 'status', '--porcelain'), '?? LOCAL-NOTE.txt',
       'the owned source fixture remains dirty only by its unrelated note');
     completedCleanly = true;
@@ -1415,9 +1451,7 @@ console.log('RUNNER_CLEANUP_TIMEOUT_BODY_RAN');
       agent: 'cleanup-timeout-local-holder', item: 'cleanup-timeout-local-holder', kind: 'fixture-hold', browser: true });
     // The real CLI must refuse this one response as RUNNER_CLEANUP_TIMEOUT; a missing or
     // incomplete transport result would take the retry path and could incorrectly run locally.
-    commandChild = startFixtureChild(process.execPath, [BIN, 'gate', '--json'], {
-      cwd: repo, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    commandChild = startToolingCli(repo, env, ['gate', '--json'], { detached: true });
     const command = observe(commandChild);
     const completed = await command.closed;
     assert.equal(completed.status, 1, `${completed.stderr}\n${completed.stdout}`);
