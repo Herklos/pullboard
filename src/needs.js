@@ -1,0 +1,20 @@
+/** The person's outstanding calls, shared with the browser as standalone source [N26,A9]. */
+export function personNeeds(state) {
+  /** Keep visible agent names identical to the page without depending on its runtime. */
+  const name = (id) => {
+    const agent = state.agents?.find(entry => entry.agent_id === id);
+    return agent?.displayName || (agent ? `${id} (${agent.model || agent.agent_model || 'unknown'})` : id);
+  };
+  const rows = (state.spec ?? []).filter(row => !row.decision);
+  const drafts = rows.filter(row => row.status === 'draft').length;
+  return [
+    ...(state.decisions ?? []).map(ask => ({ kind: 'decision', id: ask.shout_id,
+      ref: name(ask.shout_from), text: ask.shout_text, what: 'decision', at: ask.shout_at })),
+    ...rows.filter(row => row.status === 'pending').map(row => ({ kind: 'pending', id: row.id,
+      ref: row.id, text: row.text, what: 'answer in SPEC.md' })),
+    ...(state.holds ?? []).map(hold => ({ kind: 'hold', id: hold.hold_lane,
+      ref: hold.hold_lane, text: hold.hold_reason, what: 'lane held by ' + name(hold.hold_by) })),
+    ...(drafts ? [{ kind: 'draft', id: 'drafts', count: drafts, ref: String(drafts),
+      text: 'draft spec rows to approve or drop', what: 'review in SPEC.md', target: 'tab:spec' }] : []),
+  ];
+}
