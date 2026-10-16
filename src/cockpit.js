@@ -189,7 +189,8 @@ let requests = ${JSON.stringify(requestMode)};
 const pageReadOnly = ${JSON.stringify(readOnly)};
 const pageRequests = ${JSON.stringify(requestMode)};
 const relayRequestsEnabled = requests;
-let transportModule = ${moduleOption};
+const configuredTransportModule = ${moduleOption};
+let transportModule = configuredTransportModule;
 const connection = ${connection};
 let transport = null;
 let transportLoadError = null;
@@ -965,9 +966,21 @@ async function listedBoards() {
     try {
       local = await jsonRequest('/api/v1/boards', undefined, localReadBase, localReadHeaders, 'no-store');
     } catch (error) {
+      if (!transport && hosted.relaySession && configuredTransportModule) {
+        try { await loadTransport(); } catch { /* Keep the local refusal when neither source can be read. */ }
+      }
       if (!transport) throw error;
       localNote(String(error.message || error), true);
     }
+  }
+  if (hosted.local && hasLocal && hosted.relaySession && configuredTransportModule && !transport) {
+    try {
+      // Metadata is a same-origin cookie-authenticated read, with none of this machine's local credential.
+      // Loading the decrypting client is needed only for a linked board absent from the local list.
+      const linked = await jsonRequest('/api/v1/boards', undefined, '', {}, 'no-store');
+      const localIds = new Set((local.boards || []).map(board => board.id));
+      if (linked.boards?.some(board => typeof board.id === 'string' && /^[0-9a-f]{32}$/.test(board.id) && typeof board.repository === 'string' && !localIds.has(board.id))) await loadTransport();
+    } catch (error) { localNote('Linked boards are unavailable: ' + String(error.message || error), true); }
   }
   if (!hasLocal && transportModule && !transport) throw transportLoadError || new Error('The browser transport is still loading.');
   if (transport) {
@@ -3391,10 +3404,26 @@ if (hosted.local) $('local-note-retry').addEventListener('click', () => {
   if (transport) { location.reload(); return; }
   connectLocal().then((local) => local === 'local' ? refresh() : null).catch((error) => localNote(error.message, true));
 });
-/** Load an explicitly configured transport before the first read; its updates refresh this page. */
+/** Load the configured decrypting transport once, only when relay reads or pairing need it. */
+let transportLoading = null;
+async function loadTransport() {
+  if (transport) return transport;
+  if (!transportLoading) transportLoading = (async () => {
+    const module = await import(configuredTransportModule);
+    if (typeof module.createTransport !== 'function') throw new Error('The browser transport must export createTransport({ onUpdate }).');
+    const configured = await module.createTransport({ onUpdate: () => transport ? refresh().catch((error) => { $('live').textContent = 'offline: ' + error.message; }) : Promise.resolve() });
+    if (!configured || typeof configured.request !== 'function') throw new Error('The browser transport must provide request(path, body).');
+    transportModule = configuredTransportModule;
+    transport = configured;
+    return transport;
+  })();
+  try { return await transportLoading; }
+  catch (error) { transportLoadError = error; throw error; }
+  finally { transportLoading = null; }
+}
+
+/** Read local boards first; relay-only pages and pairing still load their configured client directly. */
 async function startPage() {
-  // The hosted page reads this machine's view when it can. When it cannot, it is the relay page as before, for a
-  // person signed in to the relay; anyone else sees why, and the ways on.
   let local = 'unreachable';
   if (hosted.local && !relayPairing) {
     if (localProblem) localNote(localProblem, true);
@@ -3402,27 +3431,16 @@ async function startPage() {
     if (local === 'away') return;
     if (local === 'unreachable' && !hosted.relaySession) { hideRelayNotice(); return; }
   }
-  if (transportModule) {
-    try {
-      const module = await import(transportModule);
-      if (typeof module.createTransport !== 'function') throw new Error('The browser transport must export createTransport({ onUpdate }).');
-      const configured = await module.createTransport({ onUpdate: () => transport ? refresh().catch((error) => { $('live').textContent = 'offline: ' + error.message; }) : Promise.resolve() });
-      if (!configured || typeof configured.request !== 'function') throw new Error('The browser transport must provide request(path, body).');
-      transport = configured;
-    } catch (error) {
-      transportLoadError = error;
-      if (hosted.local && local === 'local') localNote('Linked boards are unavailable: ' + String(error.message || error), true);
-      else throw error;
-    }
-  }
+  if (hosted.local && local === 'local') transportModule = null;
+  else if (configuredTransportModule) await loadTransport();
   await refresh();
 }
 startPage().catch((error) => { document.body.classList.remove('loading'); $('live').textContent = 'cannot reach the view: ' + error.message; });
 // The relay transport keeps its own stream and timer. The local view reads on a timer only while it has no live
 // stream, and its live line says so (#545). Each timer asks which the page uses as it fires: the hosted page starts
 // out on the relay and turns to this machine's view once it reaches it (#513).
-if (!snapshot) setInterval(() => { if (!document.hidden && transportModule && transport) refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }); }, 3000);
-if (!snapshot) setInterval(() => { if (!document.hidden && !transportModule && !connected()) refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }); }, FALLBACK_MS);
+if (!snapshot) setInterval(() => { if (!document.hidden && (transport || (hosted.local && hosted.relaySession && configuredTransportModule))) refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }); }, 3000);
+if (!snapshot) setInterval(() => { if (!document.hidden && !transport && !(hosted.local && hosted.relaySession && configuredTransportModule) && !connected()) refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }); }, FALLBACK_MS);
 setInterval(tickAges, 60000);
 </script>
 </body>
