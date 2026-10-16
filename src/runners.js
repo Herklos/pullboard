@@ -124,6 +124,8 @@ function candidateTags(root, source) {
     .split('\n').filter(Boolean);
   if (rows.length > MAX_HISTORY_TAGS) throw new Refused('RUNNER_SCAN_LIMIT', 'too many local tags to transfer safely; keep this run local');
   const selected = [];
+  // Budget: annotation scanning shares the 8 MiB object ceiling across all selected tag visits.
+  let annotationBytes = 0;
   for (const row of rows) {
     const fields = row.split('\0');
     if (fields.length !== 3) throw new Refused('RUNNER_SOURCE', 'cannot read local tag refs safely; keep this run local');
@@ -156,7 +158,8 @@ function candidateTags(root, source) {
         }
         seen.add(current);
         const tagBody = sourceGit(root, ['cat-file', '-p', current]);
-        if (Buffer.byteLength(tagBody) > MAX_BLOB_BYTES) throw new Refused('RUNNER_SCAN_LIMIT', 'a tag annotation exceeds the safe transfer limit; keep this run local');
+        annotationBytes += Buffer.byteLength(tagBody);
+        if (annotationBytes > MAX_BLOB_BYTES) throw new Refused('RUNNER_SCAN_LIMIT', 'a tag annotation exceeds the safe transfer limit; keep this run local');
         if (secretsIn(tagBody.split(/\r?\n/u).map((text, line) => ({ path: name, line: line + 1, text }))).length) {
           throw new Refused('RUNNER_SECRET', 'an annotated tag failed the source privacy scan; keep this run local');
         }
