@@ -5,7 +5,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { loadavg } from 'node:os';
+import { hostname, loadavg } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -56,7 +56,7 @@ import {
   standings,
   unmetRows,
 } from './spec.js';
-import { bundledBlueprints, planBlueprint, readBlueprint } from './blueprints.js';
+import { bundledBlueprints, planBlueprint, readBlueprint, saveBlueprint } from './blueprints.js';
 import { briefFiles } from './brief.js';
 import { checkBaseline, prepareCheckBaseline, sayCheckBaseline } from './check-baseline.js';
 import { retryCheckBaselines, startCheckBaseline } from './check-baseline-worker.js';
@@ -2571,7 +2571,7 @@ function workCommands(io, args) {
   return {
     blueprint: () => act(async (ctx, board, me) => {
       if (first !== 'add' || !second || rest.length) {
-        throw new Refused('USAGE', `pullboard blueprint add <name or file>; bundled: ${bundledBlueprints().join(', ')}`);
+        throw new Refused('USAGE', `pullboard blueprint add <name or file> | save [file]; bundled: ${bundledBlueprints().join(', ')}`);
       }
       await addBlueprint(ctx, board, me, readBlueprint(second, io.cwd));
       return 0;
@@ -3488,6 +3488,22 @@ async function runCommand(argv, io) {
       io.say(result.linked ? `${result.link}\nrelay: sequence ${result.sequence}; ${result.behind} pending uploads${result.recovery?.pending ? `; recovery pending for sequence ${result.recovery.skip}; retry ${result.recovery.next}` : ''}` : (result.notice || 'relay off; the local board is complete'));
       return 0;
     }
+    if (command === 'blueprint' && first === 'save') {
+      if (rest.length) throw new Refused('USAGE', 'pullboard blueprint save [file]');
+      const ctx = context(io);
+      const { root, commonDir } = ctx.info;
+      const project = ctx.config.project || ctx.config.name || basename(dirname(resolve(root, commonDir)));
+      const file = resolve(io.cwd ?? process.cwd(), second ?? `${project}.blueprint.json`);
+      if (existsSync(file)) throw new Refused('BLUEPRINT_EXISTS', `${file} already exists; name another file: pullboard blueprint save <file>`);
+      const spec = loadSpec(root, ctx.config);
+      const names = withBoard(ctx, (board) => privateNames(root, board, spec));
+      const { blueprint, left } = saveBlueprint(spec, { name: project, title: project, gate: ctx.config.gate, names });
+      writeFileSync(file, `${JSON.stringify(blueprint, null, 2)}\n`, { flag: 'wx' });
+      io.result?.({ file, name: blueprint.name, rules: blueprint.rules?.length ?? 0, questions: blueprint.questions?.length ?? 0, left });
+      io.say(`saved ${blueprint.rules?.length ?? 0} rules and ${blueprint.questions?.length ?? 0} answered questions to ${file}`);
+      for (const entry of left) io.say(`  left out ${entry.id}: ${entry.reason}`);
+      return 0;
+    }
     if (command === 'gate') {
       const ctx = context(io);
       let config;
@@ -3517,6 +3533,34 @@ async function runCommand(argv, io) {
     }
     throw error;
   }
+}
+
+/**
+ * Every private name a saved blueprint must never carry: each agent's id, display name, model
+ * and family, the person's Git name, its parts and email, everyone who signed off or signs rows,
+ * and this machine's host name. Missing sources add nothing; they never stop the save [S1].
+ */
+function privateNames(root, board, spec) {
+  const names = new Set();
+  const add = (value) => {
+    const text = typeof value === 'string' ? value.trim() : '';
+    if (!text) return;
+    names.add(text);
+    for (const part of text.split(/[\s@.<>()]+/u)) if (part.length >= 3) names.add(part);
+  };
+  for (const agent of store.listAgents(board)) {
+    add(agent.agent_id); add(agent.agent_model); add(agent.agent_family); add(displayAgentName(agent)); add(displayAgentName(agent, 'prefix'));
+  }
+  for (const key of ['user.name', 'user.email']) add(tryGit(root, ['config', '--get', key]).stdout);
+  for (const ident of ['GIT_AUTHOR_IDENT', 'GIT_COMMITTER_IDENT']) {
+    const found = /^(.*?)\s*<([^>]*)>/u.exec(tryGit(root, ['var', ident]).stdout ?? '');
+    if (found) { add(found[1]); add(found[2]); }
+  }
+  try { for (const record of readSignoffs(root)) add(record.by); } catch { /* An unreadable sign-off file adds no names. */ }
+  for (const row of spec.rows) for (const signer of row.signers ?? []) add(signer);
+  add(hostname());
+  add(hostname().split('.')[0]);
+  return [...names];
 }
 
 /** Retain the primary branch on every command without creating a board for global help. */

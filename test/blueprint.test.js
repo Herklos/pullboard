@@ -1,11 +1,12 @@
 /** pullboard blueprint add: a blueprint lands on a board as drafts, once [S1,I1]. */
 import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
 import { runFixtureChild, runFixtureGit } from './fixture-child.js';
 import { parseSpec } from '../src/spec.js';
+import { createE2eHelpers } from './e2e-helpers.js';
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
 const PUBLISHED = JSON.parse(readFileSync(resolve(import.meta.dirname, '../src/blueprints/web-app.json'), 'utf8'));
@@ -214,4 +215,60 @@ test('blueprint add files a blueprint as drafts after an add stopped part way [S
   assert.deepEqual(retried.items.find((item) => item.key === '3').after, [first.item.item_id], 'the third starter still waits on the first');
   assert.equal(readFileSync(join(box.repo, 'SPEC.md'), 'utf8'), finished, 'the finished marker replaces the under-way one');
   assert.equal(json(box, 'blueprint', 'add', 'web-app').items.length, 0, 'and then a repeat adds nothing');
+
+const e2e = createE2eHelpers();
+after(e2e.cleanup);
+
+test('a saved board adds back as the same rows [S1]', () => {
+  const box = e2e.project();
+  const machine = hostname().split('.')[0];
+  box.git(box.repo, 'config', 'user.name', 'Dana Whitlock');
+  box.git(box.repo, 'config', 'user.email', 'dana.whitlock@example.org');
+  const kept = [
+    '- K1 [approved, must] Every change ships with a test that fails without it. Why: a test that passes either way proves nothing. | gate: web/page.test.js | signers: DW',
+    '- K2 [approved, aim] Every page works at phone width. Why: a page that only works on a laptop is a bug nobody reports. | gate: review',
+    '- K3 [approved, must] The app is built with: SvelteKit. Choices: Next.js, SvelteKit, Rails. | gate: review',
+  ];
+  const planted = [
+    '- K4 [approved, must] Logs live in web/logs/app.js. Why: one place to look. | gate: review',
+    '- K5 [approved, must] Escalations go to dana.whitlock@example.org first. Why: she owns releases. | gate: review',
+    '- K6 [approved, must] Agent web-1 owns the header. Why: it wrote it. | gate: review',
+    '- K7 [approved, must] Dana approves every release. Why: she carries the pager. | gate: review',
+    `- K8 [approved, must] Builds run on ${machine} only. Why: it holds the signing key. | gate: review`,
+    '- K9 [approved, must] The page renders without a reason. | gate: review',
+    '- K10 [draft, must] A draft never leaves. Why: nobody decided it. | gate: review',
+    '- K11 [pending, must] Deploys go to: Vercel. Choices: Vercel, Fly.io. | gate: review',
+  ];
+  writeFileSync(join(box.repo, 'SPEC.md'), `${readFileSync(join(box.repo, 'SPEC.md'), 'utf8')}\n## K · Kept\n\n<!-- pullboard-blueprint kept 1 -->\n<!-- pullboard-blueprint kept 2 adding K1=K1 K3=K3 -->\n${[...kept, ...planted].join('\n')}\n`);
+  box.git(box.repo, 'add', 'SPEC.md');
+  box.git(box.repo, 'commit', '-q', '-m', 'chore: plant private rows');
+  const item = box.run(box.repo, 'add', 'web', 'Private item title zebra', '--specs', 'G1', '--criterion', 'secret criterion walrus');
+  assert.equal(item.code, 0, item.err);
+  assert.equal(box.run(box.web, 'shout', 'all', 'private shout narwhal').code, 0);
+
+  const saved = box.run(box.repo, 'blueprint', 'save', '--json');
+  assert.equal(saved.code, 0, `${saved.err}\n${saved.out}`);
+  assert.deepEqual(JSON.parse(saved.out).left.map((entry) => entry.id).sort(), ['G1', 'G2', 'K4', 'K5', 'K6', 'K7', 'K8', 'K9'], 'only clean, reasoned approved rows leave');
+  const file = join(box.repo, 'repo.blueprint.json');
+  const text = readFileSync(file, 'utf8');
+  for (const secret of ['web/', '@', 'Dana', 'Whitlock', 'web-1', machine, 'zebra', 'walrus', 'narwhal', 'signers', 'DW', 'items', 'pullboard-blueprint', 'Logs live', 'draft never', 'Deploys go']) {
+    assert.ok(!text.includes(secret), `the blueprint never carries ${JSON.stringify(secret)}`);
+  }
+  const blueprint = JSON.parse(text);
+  assert.deepEqual(Object.keys(blueprint).sort(), ['blueprint', 'gate', 'name', 'questions', 'rules', 'title', 'version'], 'only allow-listed fields are written');
+  assert.deepEqual(blueprint.rules.map((rule) => Object.keys(rule).sort()), [['gate', 'key', 'text', 'tier', 'why'], ['gate', 'key', 'text', 'tier', 'why']]);
+  assert.deepEqual(blueprint.questions.map((question) => Object.keys(question).sort()), [['ask', 'choices', 'default', 'key']]);
+  assert.equal(box.run(box.repo, 'blueprint', 'save', '--json').code, 1, 'an existing file is never overwritten');
+
+  const fresh = e2e.project();
+  const before = parseSpec(readFileSync(join(fresh.repo, 'SPEC.md'), 'utf8')).rows.map((row) => row.id);
+  const added = fresh.run(fresh.repo, 'blueprint', 'add', file);
+  assert.equal(added.code, 0, `${added.err}\n${added.out}`);
+  const rows = parseSpec(readFileSync(join(fresh.repo, 'SPEC.md'), 'utf8')).rows.filter((row) => !before.includes(row.id));
+  assert.deepEqual(rows.map((row) => [row.status, row.tier, row.text]), [
+    ['draft', 'must', 'Every change ships with a test that fails without it. Why: a test that passes either way proves nothing.'],
+    ['draft', 'aim', 'Every page works at phone width. Why: a page that only works on a laptop is a bug nobody reports.'],
+    ['pending', 'must', 'The app is built with: SvelteKit. Choices: Next.js, SvelteKit, Rails.'],
+  ], 'the approved rows come back as drafts, the answered question with its answer as the default');
+  assert.deepEqual(JSON.parse(fresh.run(fresh.repo, 'list', '--json').out).items ?? [], [], 'a saved blueprint files no items');
 });

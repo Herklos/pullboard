@@ -151,6 +151,8 @@ Spec
                                         Defaults to must and gate review.
   pullboard blueprint add <name or file>  add a blueprint's rules and questions as drafts, and its starter items
                                         bundled: web-app; nothing is approved, and a repeat adds nothing
+  pullboard blueprint save [file]       write approved rules and answered questions as a blueprint
+                                        never items, notes, paths, emails or names; defaults to <project>.blueprint.json
   pullboard spec signers add [--key <path>] [--by <principal>]  opt into SSH-signed sign-offs
                                         principal defaults to Git user.email; --by overrides it
   pullboard spec approve <ids> | decline <ids> --reason "why"  the person's exact-row decision
@@ -176,7 +178,7 @@ const HELP_NAMES = [
   'sweep', 'merged', 'withdraw', 'refreeze', 'reopen', 'hold', 'stats', 'ledger', 'log', 'spec', 'spec check', 'spec view',
   'spec show', 'spec unmet', 'spec signoff', 'spec draft', 'spec signers', 'spec signers add', 'forget', 'prompt', 'gate', 'hook',
   'hook pre-commit', 'hook pre-merge-commit', 'hook commit-msg', 'hook pre-push', 'view export', 'version', 'lifecycle', 'help',
-  'roadmap', 'milestone', 'blueprint', 'blueprint add',
+  'roadmap', 'milestone', 'blueprint', 'blueprint add', 'blueprint save',
 ];
 
 const HELP_GROUPS = [
@@ -204,7 +206,7 @@ const HELP_EXAMPLES = {
   'spec check': 'pullboard spec check',
   'spec view': 'pullboard spec view', 'spec show': 'pullboard spec show G1',
   'spec draft': 'pullboard spec draft "Describe the first requirement"',
-  'blueprint add': 'pullboard blueprint add web-app',
+  'blueprint add': 'pullboard blueprint add web-app', 'blueprint save': 'pullboard blueprint save',
   'spec unmet': 'pullboard spec unmet', 'spec signoff': 'pullboard spec signoff G1',
   'spec signers add': 'pullboard spec signers add', help: 'pullboard help claim', version: 'pullboard --version',
 };

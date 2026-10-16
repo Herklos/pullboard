@@ -345,3 +345,84 @@ function insertSection(source, spec, { existing, name, lines: added }) {
   lines.push('', `## ${name}`, '', ...added, '');
   return lines.join(newline);
 }
+
+// A row naming a file or a place on disk: any token with a slash or backslash between characters,
+// or a home-relative path. Bare names such as Next.js are words, not paths.
+const PATH_RE = /(?:^|[\s(`'"[])(?:~\/|\.{1,2}\/|\/)?[^\s/\\`'"()[\]]+[/\\][^\s`'"()[\]]+|(?:^|[\s(`'"[])~\//u;
+const EMAIL_RE = /[^\s@<>()[\]`'"]+@[^\s@<>()[\]`'"]+\.[^\s@<>()[\]`'"]+/u;
+const QUESTION_RE = /^(.+?): (.+)\. Choices: (.+)\.$/u;
+const RULE_RE = /^(.+?) Why: (.+)$/u;
+
+/**
+ * Name why a piece of text may not leave this board, or return null when it may. Text that holds
+ * a path, an email or any private name (a person, an agent, a model label or a machine) stays.
+ *
+ * @param {string} text
+ * @param {string[]} names - Every private name known on this board and machine.
+ * @returns {string | null}
+ */
+export function privateTextReason(text, names) {
+  if (PATH_RE.test(text)) return 'a file path';
+  if (EMAIL_RE.test(text)) return 'an email address';
+  const lower = text.toLowerCase();
+  for (const name of names) {
+    const wanted = String(name ?? '').trim().toLowerCase();
+    if (wanted.length < 3) continue;
+    const escaped = wanted.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+    if (new RegExp(`(?:^|[^\\p{L}\\p{N}_-])${escaped}(?:$|[^\\p{L}\\p{N}_-])`, 'u').test(lower)) return 'a private name';
+  }
+  return null;
+}
+
+/**
+ * Turn a board's approved spec rows into a blueprint, writing only fields on an explicit
+ * allow-list: the format, a name and title, a version, the gate when it is clean, each approved
+ * rule's text, reason, tier and a review gate, and each answered question's ask, choices and
+ * answer. Items, shouts, notes, decisions, signers, row gates, files, emails and the names of
+ * people, agents and machines are never read into it. A row that would carry any of them, or a
+ * rule with no "Why:" reason to carry, is left out and named in `left`, never rewritten [S1].
+ *
+ * @param {{ rows: any[] }} spec - The parsed SPEC.md.
+ * @param {{ name: string, title: string, gate?: string, names: string[] }} board
+ * @returns {{ blueprint: Blueprint, left: { id: string, reason: string }[] }}
+ */
+export function saveBlueprint(spec, { name, title, gate, names }) {
+  const rules = [];
+  const questions = [];
+  const left = [];
+  for (const row of spec.rows) {
+    if (row.status !== 'approved') continue;
+    const text = String(row.text ?? '').trim();
+    const privacy = privateTextReason(text, names);
+    if (privacy) { left.push({ id: row.id, reason: `it holds ${privacy}` }); continue; }
+    const question = QUESTION_RE.exec(text);
+    if (question) {
+      const choices = question[3].split(', ').map((choice) => choice.trim()).filter(Boolean);
+      const answer = question[2].trim();
+      if (!choices.includes(answer)) choices.push(answer);
+      if (choices.length < 2) { left.push({ id: row.id, reason: 'its question has fewer than two choices' }); continue; }
+      questions.push({ key: row.id, ask: question[1].trim(), choices, default: answer });
+      continue;
+    }
+    const rule = RULE_RE.exec(text);
+    if (!rule) { left.push({ id: row.id, reason: 'it has no "Why:" reason to carry' }); continue; }
+    rules.push({ key: row.id, text: rule[1].trim(), why: rule[2].trim(), tier: row.tier === 'aim' ? 'aim' : 'must', gate: 'review' });
+  }
+  const slug = String(name ?? '').normalize('NFKD').toLowerCase().replace(/[̀-ͯ]/gu, '').replace(/[^a-z0-9]+/gu, '-').replace(/^-|-$/gu, '') || 'board';
+  const cleanTitle = String(title ?? '').trim();
+  const value = {
+    blueprint: BLUEPRINT_FORMAT,
+    name: slug,
+    title: cleanTitle && !/[\r\n|]/u.test(cleanTitle) && !privateTextReason(cleanTitle, names) ? cleanTitle : slug,
+    version: 1,
+    ...(gate?.trim() && !/[\r\n|]/u.test(gate) && !privateTextReason(gate.trim(), names) ? { gate: gate.trim() } : {}),
+    ...(rules.length ? { rules } : {}),
+    ...(questions.length ? { questions } : {}),
+  };
+  if (!rules.length && !questions.length) {
+    throw new Refused('EMPTY_BLUEPRINT', `no approved row can leave this board${left.length ? ` (${left.length} left out: ${left.slice(0, 3).map((entry) => `${entry.id}, ${entry.reason}`).join('; ')})` : ''}; approve rules written as "<rule> Why: <reason>", then run pullboard blueprint save again`);
+  }
+  // Checked against the format blueprint add reads, then written exactly as allow-listed above.
+  validateBlueprint(value, `${slug}.blueprint.json`);
+  return { blueprint: value, left };
+}
