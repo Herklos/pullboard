@@ -87,6 +87,10 @@ function open(file) {
       if (!columns.includes('item')) db.exec(`ALTER TABLE ${table} ADD COLUMN item TEXT NOT NULL DEFAULT ''`);
       if (!columns.includes('kind')) db.exec(`ALTER TABLE ${table} ADD COLUMN kind TEXT NOT NULL DEFAULT ''`);
     }
+    // Marks a waiter whose process admits by class; an older pullboard leaves it 0.
+    if (!db.prepare('PRAGMA table_info(waiter)').all().some(({ name }) => name === 'classed')) {
+      db.exec('ALTER TABLE waiter ADD COLUMN classed INTEGER NOT NULL DEFAULT 0');
+    }
     db.exec('COMMIT');
     transaction = false;
   } catch (error) {
@@ -196,9 +200,20 @@ export function queueClass(entry, now = Date.now()) {
   return { base, effective, name: QUEUE_CLASSES[effective], declared: QUEUE_CLASSES[base] };
 }
 
-/** Sort waiters by their current class, then by arrival ticket within a class. */
-function byAdmission(now) {
-  return (left, right) => queueClass(left, now).effective - queueClass(right, now).effective || left.ticket - right.ticket;
+/**
+ * The admission rank every process in this queue agrees on. Class order (with aging) applies only
+ * while every waiter was queued by a process that admits by class. Why: an older pullboard admits
+ * landings first and then by ticket, and two processes ranking the same line differently each
+ * wait for the other while a slot stays empty. With any older waiter queued, everyone falls back
+ * to that older order, so mixed versions on one machine never deadlock.
+ *
+ * @param {Array<{ classed?: number }>} waiters - The whole line for one resource.
+ * @param {number} now
+ * @returns {(waiter: object) => number}
+ */
+function admissionRank(waiters, now) {
+  const byClass = waiters.every((waiter) => waiter.classed === 1);
+  return byClass ? (waiter) => queueClass(waiter, now).effective : (waiter) => (waiter.landing === 1 ? 0 : 1);
 }
 
 /** Current holders and the waiting line in admission order, each waiter naming its class. */
@@ -211,19 +226,22 @@ function snapshot(db, name, now = Date.now()) {
   const where = name === 'browser' ? 'name = ? AND browser = 1' : 'name = ?';
   const sourceName = name === 'browser' ? 'gate' : name;
   const holders = db.prepare(`SELECT agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, item, kind FROM holder WHERE ${where} ORDER BY since, token`).all(sourceName).map(project);
-  const line = db.prepare(`SELECT ticket, agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, item, kind FROM waiter WHERE ${where}`).all(sourceName)
-    .sort(byAdmission(now))
-    .map(({ ticket, ...entry }) => {
-      const queued = queueClass(entry, now);
-      return { ...project(entry), queueClass: queued.name, ...(queued.effective < queued.base ? { agedFrom: queued.declared } : {}) };
+  const queued = db.prepare('SELECT classed FROM waiter WHERE name = ?').all(sourceName);
+  const rank = admissionRank(queued, now);
+  const line = db.prepare(`SELECT ticket, agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, item, kind, classed FROM waiter WHERE ${where}`).all(sourceName)
+    .sort((left, right) => rank(left) - rank(right) || left.ticket - right.ticket)
+    .map(({ ticket, classed, ...entry }) => {
+      const current = queueClass(entry, now);
+      return { ...project(entry), queueClass: current.name, ...(current.effective < current.base ? { agedFrom: current.declared } : {}) };
     });
-  return { holders, line };
+  // An older pullboard in the line means everyone admits in arrival order until it leaves.
+  return { holders, line, ...(queued.some((waiter) => waiter.classed !== 1) ? { order: 'arrival' } : {}) };
 }
 
 /** Count reported or admissible queue position separately so blocked work cannot distort the visible line. */
 function waiterPosition(db, name, ticket, { eligibleOnly = false, now = Date.now() } = {}) {
   const queueName = name === 'browser' ? 'gate' : name;
-  const waiters = db.prepare('SELECT ticket, pid, agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, kind FROM waiter WHERE name = ? ORDER BY ticket').all(queueName);
+  const waiters = db.prepare('SELECT ticket, pid, agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, kind, classed FROM waiter WHERE name = ? ORDER BY ticket').all(queueName);
   const holders = db.prepare('SELECT pid, agent, repo FROM holder WHERE name = ?').all(queueName);
   const browserBusy = db.prepare("SELECT COUNT(*) AS count FROM holder WHERE name = 'gate' AND browser = 1").get().count > 0;
   /** A live process owns its leases even if it changes descriptive agent or repository labels. */
@@ -231,8 +249,8 @@ function waiterPosition(db, name, ticket, { eligibleOnly = false, now = Date.now
   /** Leave a waiting independent landing a slot before a holder takes another lease. */
   const blockedByLanding = (waiter) => holdsSlot(waiter)
     && waiters.some((other) => other.landing === 1 && other.pid !== waiter.pid);
-  /** Map queue entries to their current admission class, aged by how long each has waited. */
-  const rank = (waiter) => queueClass(waiter, now).effective;
+  /** Map queue entries to the admission rank every process in this line agrees on. */
+  const rank = admissionRank(waiters, now);
   const line = name === 'browser' ? waiters.filter((waiter) => waiter.browser === 1) : waiters;
   const considered = line.filter((waiter) => !blockedByLanding(waiter)
     // Browser availability affects admission only; reported positions retain every browser waiter.
@@ -300,14 +318,14 @@ export async function takeResource(options) {
         db.prepare("INSERT INTO resource(name, capacity) VALUES ('browser', 1) ON CONFLICT(name) DO NOTHING").run();
       }
       // The kind and flags decide the admission class; the ticket keeps arrival order within it.
-      db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind);
+      db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, classed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind);
     });
     while (true) {
       const acquired = update(db, () => {
         const waiter = db.prepare('SELECT ticket FROM waiter WHERE token = ?').get(token);
         if (!waiter) {
           queuedAt = new Date().toISOString();
-          const rejoined = db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind);
+          const rejoined = db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, classed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind);
           return { acquired: false, state: { ...snapshot(db, name), position: waiterPosition(db, name, Number(rejoined.lastInsertRowid)), rejoined: true } };
         }
         db.prepare('UPDATE waiter SET heartbeat = ? WHERE token = ?').run(Date.now(), token);

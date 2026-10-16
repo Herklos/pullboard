@@ -1819,7 +1819,7 @@ function readCommands(io, { first, second, rest, values }) {
       io.result?.({ resources });
       if (!resources.length) io.say('no resources have been used');
       for (const resource of resources) {
-        io.say(`${resource.name} (${resource.scope}, capacity ${resource.capacity})`);
+        io.say(`${resource.name} (${resource.scope}, capacity ${resource.capacity})${resource.order === 'arrival' ? '; an older pullboard is waiting, so this line is in arrival order, landings first' : ''}`);
         for (const holder of resource.holders) io.say(`  held by ${agentDisplayName(agents, ctx.config, holder.agent)}${holder.repo ? ` in ${holder.repo}` : ''}${resourceRunLabel(holder)} since ${holder.since}`);
         resource.line.forEach((waiter, index) => io.say(`  ${index + 1}. waiting: ${agentDisplayName(agents, ctx.config, waiter.agent)}${waiter.repo ? ` in ${waiter.repo}` : ''}${resourceRunLabel(waiter)}; class ${waiter.queueClass}${waiter.agedFrom ? `, aged up from ${waiter.agedFrom}` : ''}`));
       }

@@ -668,6 +668,31 @@ test('the pool admits reviews before submits before focused runs, and waiting ru
   assert.deepEqual(order, ['landing-one', 'review-one', 'focused-two', 'diagnostic-one', 'submit-one', 'focused-one']);
 });
 
+test('a line holding an older pullboard waiter keeps arrival order, so mixed versions never deadlock [C7]', async () => {
+  const box = fixture();
+  const holders = [poolWorker(box, { agent: 'mixed-holder-one' }), poolWorker(box, { agent: 'mixed-holder-two' })];
+  for (const holder of holders) await acquired(holder);
+  const older = poolWorker(box, { agent: 'older-focused', kind: 'focused' });
+  await event(older);
+  // An older pullboard writes no class marker; it admits landings first and then by ticket.
+  const db = new DatabaseSync(join(box.home, 'resources.sqlite'));
+  try { db.prepare("UPDATE waiter SET classed = 0 WHERE agent = 'older-focused'").run(); }
+  finally { db.close(); }
+  const review = poolWorker(box, { agent: 'newer-review', kind: 'review', item: '651' });
+  assert.equal((await event(review)).queued.position, 2, 'the review waits behind the older waiter\'s earlier ticket');
+  const gate = () => privateList(box).find(({ name }) => name === 'gate');
+  assert.equal(gate().order, 'arrival');
+  assert.deepEqual(gate().line.map(({ agent }) => agent), ['older-focused', 'newer-review']);
+
+  await release(holders[0]);
+  assert.equal((await acquired(older)).acquired, 'older-focused', 'both versions agree the earlier ticket goes first');
+  assert.equal(gate().order, undefined, 'class order resumes once only marked waiters remain');
+  await release(holders[1]);
+  assert.equal((await acquired(review)).acquired, 'newer-review');
+  await release(older);
+  await release(review);
+});
+
 test('[Q1,Q2] a waiting landing keeps a current holder from taking the second slot [Q1,Q2]', async () => {
   const box = fixture();
   const firstHolder = worker(box, { capacity: 2, agent: 'same-run' });
