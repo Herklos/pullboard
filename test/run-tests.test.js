@@ -564,6 +564,70 @@ if (process.argv[1]?.endsWith('/worker-start.test.js')) {
   assert.ok(await waitForFixtureIdentityDrain(childIdentity), 'the owned child stopped before the fixture returned');
 });
 
+test('a later spawn-time ps failure names unverified cleanup [C7,V4]', t => {
+  const fixture = makeShardFixture(t);
+  const workerTest = join(fixture.root, 'test/spawn-snapshot.test.js');
+  const injected = join(fixture.root, 'spawn-snapshot-injected.json');
+  const journal = join(fixture.root, 'spawn-snapshot-journal.json');
+  const preload = join(fixture.root, 'spawn-snapshot-failure.mjs');
+  writeFileSync(workerTest, `import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { test } from 'node:test';
+test('a healthy worker completes after its spawn snapshot fails', async () => {
+  const starts = process.env.PULLBOARD_LANDING_WORKER_STARTS;
+  const before = readFileSync(starts, 'utf8').trim().split(/\\r?\\n/u).map(line => JSON.parse(line));
+  assert.ok(before.some(row => row.type === 'worker' && row.pid === process.pid), 'startup identity succeeded before the injected failure');
+  const child = spawn(process.execPath, ['-e', 'process.exit(0)'], { detached: true, stdio: 'ignore' });
+  const [code] = await once(child, 'exit');
+  assert.equal(code, 0, 'the fixture child drains itself without runner cleanup');
+  writeFileSync(${JSON.stringify(journal)}, JSON.stringify({ pid: process.pid, childPid: child.pid,
+    rows: readFileSync(starts, 'utf8').trim().split(/\\r?\\n/u).map(line => JSON.parse(line)) }));
+});
+`);
+  writeFileSync(preload, `import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import { writeFileSync } from 'node:fs';
+if (process.argv[1] === ${JSON.stringify(workerTest)}) {
+  const original = childProcess.execFileSync;
+  let injected = false;
+  childProcess.execFileSync = (command, args, options) => {
+    if (!injected && command === 'ps' && args?.[0] === '-axo') {
+      injected = true;
+      writeFileSync(${JSON.stringify(injected)}, JSON.stringify({ stack: new Error().stack }));
+      const error = new Error('injected later spawn snapshot failure');
+      error.code = 'EIO';
+      throw error;
+    }
+    return original(command, args, options);
+  };
+  syncBuiltinESMExports();
+}
+`);
+  const env = { ...process.env, PULLBOARD_LANDING_RUN: '1',
+    PULLBOARD_MACHINE_HOME: join(fixture.root, 'machine'),
+    NODE_OPTIONS: [process.env.NODE_OPTIONS, '--import=' + pathToFileURL(preload).href].filter(Boolean).join(' ') };
+  for (const key of ['PULLBOARD_GATE_SLOT_HELD', 'PULLBOARD_GATE_SLOT_POOL', 'PULLBOARD_GATE_SLOT_TOKEN', 'PULLBOARD_BROWSER_SLOT_HELD']) delete env[key];
+  const result = runFixtureChild(process.execPath, [fixture.runner, 'test/spawn-snapshot.test.js'], {
+    cwd: fixture.root, env, encoding: 'utf8', timeout: 25000,
+  });
+  const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+  assert.equal(result.status, 0, `${result.context}\n${output}`);
+  assert.match(output, /# fail 0/u, 'cleanup uncertainty does not change the passing test outcome');
+  assert.match(JSON.parse(readFileSync(injected, 'utf8')).stack, /landingProcessTable/u,
+    'the injected failure came from the synchronous spawn census after healthy startup');
+  const receipt = JSON.parse(readFileSync(journal, 'utf8'));
+  const unavailable = receipt.rows.find(row => row.type === 'child-snapshot-unavailable'
+    && row.parentPid === receipt.pid && row.pid === receipt.childPid && row.file === workerTest);
+  assert.ok(unavailable, 'the worker publishes cleanup uncertainty before it can exit');
+  assert.equal(unavailable.code, 'EIO');
+  assert.equal(unavailable.reason, 'injected later spawn snapshot failure');
+  assert.match(output, /cleanup for spawn-snapshot\.test\.js UNVERIFIED: EIO: injected later spawn snapshot failure; no unverified process was signaled/u,
+    'the parent retains the worker failure and names the affected file and reason');
+  assert.equal((output.match(/cleanup for .* UNVERIFIED/gu) ?? []).length, 1, 'cleanup uncertainty is reported once');
+});
+
 test('tests continue when worker and parent identity censuses stay unavailable [C7,V4]', async t => {
   const fixture = makeShardFixture(t);
   const workerTest = join(fixture.root, 'test/worker-unverified.test.js');
@@ -645,6 +709,76 @@ if (process.argv[1] === runner) {
   signalFixtureProcess(childIdentity, 'SIGTERM');
   await waitForFixtureMarker(childSignal, 'the fixture owner cleaned up its child after the run');
   assert.ok(await waitForFixtureProcessDrain(childIdentity.pid), 'the fixture child drained after explicit owner cleanup');
+});
+
+test('a failed test completion without a type still stops a landing run [C7,V4]', async t => {
+  const fixture = makeLandingStopFixture(t);
+  const preload = join(fixture.root, 'untyped-completion.mjs');
+  const delivered = join(fixture.root, 'untyped-completion-delivered');
+  writeFileSync(preload, `import { EventEmitter } from 'node:events';
+import { writeFileSync } from 'node:fs';
+// Prefix-only node:test exports are not updated by syncBuiltinESMExports.
+// Intercept the real listener's event while preserving the reporter stream's original object.
+if (process.argv[1] === ${JSON.stringify(fixture.runner)}) {
+  const originalEmit = EventEmitter.prototype.emit;
+  /** Deliver an untyped completion only for the intentional failure in this private fixture. */
+  EventEmitter.prototype.emit = function(type, ...args) {
+    const data = args[0];
+    if (type === 'test:complete' && data?.file === ${JSON.stringify(join(fixture.root, 'test/02-failing.test.js'))}
+      && data.details?.passed === false
+      && (data.details.type === undefined || data.details.type === 'test')) {
+      const details = { ...data.details };
+      delete details.type;
+      args[0] = { ...data, details };
+      const result = originalEmit.call(this, type, ...args);
+      writeFileSync(${JSON.stringify(delivered)}, 'delivered');
+      return result;
+    }
+    // Keep failure reporting, but isolate this regression from the newer file-summary fallback.
+    if (type === 'test:summary' && data?.file === ${JSON.stringify(join(fixture.root, 'test/02-failing.test.js'))}
+      && data.success === false) {
+      const summary = { ...data };
+      delete summary.file;
+      args[0] = summary;
+    }
+    return originalEmit.call(this, type, ...args);
+  };
+}
+`);
+  const env = {
+    ...process.env,
+    PULLBOARD_MACHINE_HOME: join(fixture.root, 'machine'),
+    PULLBOARD_LANDING_RUN: '1',
+    NODE_OPTIONS: [process.env.NODE_OPTIONS, '--import=' + pathToFileURL(preload).href].filter(Boolean).join(' '),
+    PULLBOARD_C7_SIBLING_STARTED: fixture.siblingStarted,
+    PULLBOARD_C7_SIBLING_FINISHED: fixture.siblingFinished,
+    PULLBOARD_C7_FAILURE: fixture.failure,
+    PULLBOARD_C7_RELEASE: fixture.release,
+    PULLBOARD_C7_QUEUED: fixture.queued,
+    PULLBOARD_C7_WORKER_MARKER: fixture.workerMarker,
+    PULLBOARD_C7_CHILD_READY: fixture.childReady,
+    PULLBOARD_C7_CHILD_PID: fixture.childPid,
+    PULLBOARD_C7_CHILD_DRAINED: fixture.childDrained,
+    PULLBOARD_C7_FAIL_CHILD_READY: fixture.failChildReady,
+    PULLBOARD_C7_FAIL_CHILD_PID: fixture.failChildPid,
+    PULLBOARD_C7_FAIL_CHILD_DRAINED: fixture.failChildDrained,
+  };
+  for (const key of ['PULLBOARD_GATE_SLOT_HELD', 'PULLBOARD_GATE_SLOT_POOL', 'PULLBOARD_GATE_SLOT_TOKEN', 'PULLBOARD_BROWSER_SLOT_HELD']) delete env[key];
+  const result = runFixtureChild(process.execPath, [fixture.runner, '--test-concurrency=2'], {
+    cwd: fixture.root, env, encoding: 'utf8', timeout: 15000,
+  });
+  assert.equal(result.status, 1, `${result.context}\n${result.stdout ?? ''}\n${result.stderr ?? ''}`);
+  assert.ok(existsSync(delivered), 'the actual failing completion reached the runner without a type');
+  assert.ok(existsSync(fixture.failure), 'the intentional failure completed');
+  assert.ok(existsSync(fixture.siblingStarted), 'the sibling was active before the failure');
+  assert.equal(existsSync(fixture.siblingFinished), false, 'the untyped completion interrupted the active sibling');
+  assert.equal(existsSync(fixture.queued), false, 'no queued sentinel started after the untyped failure');
+  assert.equal(existsSync(fixture.release), false, 'no queued sentinel released the active sibling');
+  for (const [pid, drained] of [[fixture.childPid, fixture.childDrained], [fixture.failChildPid, fixture.failChildDrained]]) {
+    assert.ok(existsSync(drained), 'the owned detached child acknowledged cleanup');
+    assert.ok(await waitForFixtureProcessDrain(readFileSync(pid, 'utf8').trim()), 'the owned detached child exited before return');
+  }
+  assert.match(`${result.stdout ?? ''}\n${result.stderr ?? ''}`, /Landing gate stopped early after .*02-failing\.test\.js/u);
 });
 
 test('a landing run stops at the first failing file [C7,V4]', async t => {

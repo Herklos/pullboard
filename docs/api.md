@@ -10,6 +10,8 @@ A successful command returns the fields listed below. `version` is always the nu
 
 `pullboard settings` reads machine-wide settings from the OS account's `~/.pullboard/settings.json`; the gate queue database is beside it. This location does not follow `HOME` or `PULLBOARD_HOME`, so agents with private board homes still share one machine gate limit. Set `PULLBOARD_MACHINE_HOME` to an explicit directory only when a separate private machine settings and gate pool is intended; tests use this override. `pullboard settings gateSlots <n>` changes the gate queue capacity, which defaults to `2`. Capacity changes are refused while a gate is running or waiting, so existing holders and FIFO order remain intact.
 
+Browser-free check admission is opt-in per machine with `"gate": { "browserFreeChecks": true }` in `~/.pullboard/settings.json`; it defaults to `false`. When enabled, the reviewed test classifier can let checks use a CPU-only gate slot. An absent or false setting keeps every check browser-gated, and uncertain or unsupported test commands remain browser-gated even when enabled. The same setting controls the wider frozen-check classification introduced in 0.8.26.
+
 When `add` or `edit` supplies a new nonempty check, it records the item before measuring that check in a background temporary checkout of the captured `main` commit. Use `--wait` to wait for the measurement before returning, or `args.wait: true` for an HTTP add/edit move. The item returned by `add`, `edit`, `show`, and `next --verify` may include `item_check_baseline`: `{command, main, result, request?, seconds?, reason?, warning?}`. `main` is the commit id or `null`, and `result` is `pending`, `green`, `red`, or `unavailable`. A background request carries an opaque `request` identity; an older completion cannot overwrite a newly edited or cleared check.
 
 An item's HTTP detail, and each item in the full board state, include `check` and, when recorded, `checkBaseline` with the same observation fields. A green result carries `warning: "CRITERION_PROVES_NOTHING"`; text output names that warning when showing or reserving the item for review, and when filing it with `--wait`. An exact match with the project gate configured at that main commit records green with `reason: "repo gate"` without running it again. A missing main records unavailable with `reason: "no main"` and still files the item. Changing the check replaces this observation; clearing it removes the observation. Captured observations and completions travel through ordered board moves, so replicas store results without executing commands. A completed result awaiting relay delivery stays on the measuring device and is retried by the next normal CLI command.
@@ -54,6 +56,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `lanes` | `version:number`, `lanes:object`, `shared:array`, `coordinator:string` |
 | `resources` | `version:number`, `resources:array` |
 | `settings` | `version:number`, `settings:object` |
+| `runner` | `version:number`, `runner:object` |
 | `relay` | `version:number`, `linked:boolean`, `board:string`, `url:string`, `link:string`, `sequence:number`, `behind:number`, `recovery:object` |
 | `list` | `version:number`, `items:array` |
 | `roadmap` | `version:number`, `milestones:array` |
@@ -108,6 +111,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `spec view` | `version:number`, `path:string` |
 | `spec show` | `version:number`, `row:object`, `standing:object` |
 | `spec draft` | `version:number`, `id:string`, `row:object` |
+| `blueprint add` | `version:number`, `blueprint:object`, `section:string`, `rows:array`, `items:array`, `gate:string\|null` |
 | `spec unmet` | `version:number`, `rows:array` |
 | `spec signoff` | `version:number`, `count:number`, `by:string`, `ids:array`, `evidence:array` |
 | `spec signers` | `version:number`, `added:boolean`, `by:string`, `path:string`, `initial:boolean` |
@@ -317,3 +321,11 @@ Only the person can run `pullboard land --waive <test> --until <date> --reason "
 A `pullboard serve` key grants access to a board; it does not identify the person. API moves always use a non-person channel, including when the server was started in an ordinary terminal. `spec-approve`, `spec-decline`, answering or verifying with `as: person`, and any other person-only move are refused with `B26_PERSON_CHANNEL` without recording an event. Token revocation through the standalone API is refused for the same reason. Spec signing off is not an offered API move. Use the person's terminal or the actual `pullboard view` page for person actions; ordinary agent moves remain available through the API.
 
 The view's own page retains its person channel. The standalone API refuses `POST /api/v1/boards/:board/requests` with `B26_PERSON_CHANNEL`; the view continues to record the person's coordinator request. Residual: an agent that starts `pullboard view` itself also holds that view's link; this change does not isolate that link from the agent. Signed person moves (#408) address that separate boundary.
+
+`runner add` registers machine-local SSH capacity. Optional `--node` and `--root` select absolute remote paths when Node is outside the SSH login path or runner storage needs a specific location. The default storage root is `~/.pullboard-runner`; runner work shares the remote machine resource pool.
+
+Runner storage keeps one repository object cache and creates an isolated checkout with complete history per run. A locked inventory handshake transfers only missing committed objects after scanning their blobs, paths and commit metadata, including ancestors. Historical protected paths are checked before connecting. A credential-free HTTPS origin may seed the cache at a locally known published ancestor; caller credentials are never forwarded. Cached object contents are not rescanned on every run.
+
+Each checkout with a committed npm lockfile runs `npm ci`, including lifecycle scripts. Only npm's content cache is shared; installed dependencies and generated files stay in the fresh checkout. Other lock managers are refused. Combined command output and transport diagnostics are bounded at 64 MiB; exceeding that limit refuses the run.
+
+Post-run cleanup reports `RUNNER_CLEANUP_TIMEOUT` after 30 seconds instead of leaving the controller waiting indefinitely. That failure does not retry the command. The physical runner slot is released after its known children have drained and no unresolved live process remains; an unresolved live process keeps the slot occupied until cleanup can be verified.

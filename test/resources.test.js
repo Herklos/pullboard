@@ -283,6 +283,14 @@ function configureBrowserSlots(box, slots) {
   });
 }
 
+/** Set or remove the opt-in browser-free-check policy in a fixture's machine settings. */
+function setBrowserFreeChecks(box, value) {
+  const file = join(box.home, 'settings.json');
+  if (value === undefined) { rmSync(file, { force: true }); return; }
+  mkdirSync(box.home, { recursive: true });
+  writeFileSync(file, `${JSON.stringify({ gate: { browserFreeChecks: value } }, null, 2)}\n`);
+}
+
 /** Read the next worker event, failing promptly with its stderr if it exits unexpectedly. */
 async function event(child, timeoutMs = 10_000) {
   if (child.pendingLines.length) return JSON.parse(child.pendingLines.shift());
@@ -361,13 +369,54 @@ async function release(child) {
   assert.equal(code, 0, child.errors);
 }
 
+test('single-quoted named-test checks skip the browser slot [C7]', async () => {
+  const box = fixture();
+  const { repo } = checkProject(box);
+  const itemCheck = 'node bin/run-tests.js --test-name-pattern "item check marker" test/cpu-check.test.js';
+  /** Keep assertions about the parser independent of worker custody inherited by the test process. */
+  const classify = command => checkNeedsBrowser(repo, command, { env: { ...process.env, NODE_OPTIONS: '' } });
+  assert.equal(await classify(itemCheck), false, 'an explicit CPU-only test file is classifiable');
+  const outputPattern = '^[[:space:]]*ok [0-9]+ - item check marker';
+  const newlinePrint = ([quote, backslashes]) => `printf ${quote}%s${'\\'.repeat(backslashes)}n${quote} "$out"`;
+  const capturedCheck = (formats, patternQuotes) => `out=$(${itemCheck} 2>&1); ${newlinePrint(formats[0])}; ${newlinePrint(formats[1])} | grep -Eq ${patternQuotes[0]}${outputPattern}${patternQuotes[0]} && ${newlinePrint(formats[2])} | grep -Eq ${patternQuotes[1]}^# fail 0$${patternQuotes[1]}`;
+  const oneBackslash = [1, 1, 1];
+  const accepted = [
+    { formats: oneBackslash.map(count => ['\'', count]), patternQuotes: ['\'', '\''] },
+    { formats: [['\'', 1], ['"', 1], ['\'', 1]], patternQuotes: ['"', '\''] },
+    { formats: [['"', 1], ['\'', 1], ['"', 1]], patternQuotes: ['\'', '"'] },
+    { formats: oneBackslash.map(count => ['"', count]), patternQuotes: ['"', '"'] },
+  ];
+  for (const variant of accepted) {
+    assert.equal(await classify(capturedCheck(variant.formats, variant.patternQuotes)), false,
+      `the exact capture wrapper accepts quote changes with one literal backslash: ${JSON.stringify(variant)}`);
+  }
+  for (let index = 0; index < 3; index += 1) {
+    const formats = oneBackslash.map(count => ['\'', count]);
+    formats[index] = ['\'', 2];
+    assert.equal(await classify(capturedCheck(formats, ['\'', '\''])), true,
+      `a two-backslash printf at position ${index + 1} stays browser-gated`);
+  }
+  assert.equal(await classify(`${capturedCheck(accepted[0].formats, accepted[0].patternQuotes)}; :`), true,
+    'an arbitrary suffix remains outside the exact capture wrapper');
+  const substituted = capturedCheck(accepted[0].formats, accepted[0].patternQuotes)
+    .replace('printf \'%s\\n\' "$out"', 'printf \'%s\\n\' "$(printf %s "$out")"');
+  assert.equal(await classify(substituted), true, 'a command substitution remains outside the exact printf wrapper');
+  assert.equal(await classify('node bin/run-tests.js test/cockpit/brief.test.js'), true,
+    'known browser suites remain browser-gated');
+  assert.equal(await checkNeedsBrowser(repo, itemCheck, {
+    env: { ...process.env, NODE_OPTIONS: '--import=unknown-preload.mjs' },
+  }), true, 'an unclassified preload keeps the check browser-gated');
+});
+
 test('a non-browser check does not wait for the browser slot [C7]', async () => {
   const box = fixture();
+  setBrowserFreeChecks(box, true);
   const { repo, base } = checkProject(box);
   const itemCheck = 'node bin/run-tests.js --test-name-pattern "item check marker" test/cpu-check.test.js';
   const submitCheck = 'node bin/run-tests.js --test-name-pattern "submit check marker" test/cpu-check.test.js';
-  assert.equal(await checkNeedsBrowser(repo, itemCheck), false, 'an explicit CPU-only test file is classifiable');
-  assert.equal(await checkNeedsBrowser(repo, 'node bin/run-tests.js test/cockpit/brief.test.js'), true,
+  const classifyEnv = { ...process.env, NODE_OPTIONS: '' };
+  assert.equal(await checkNeedsBrowser(repo, itemCheck, { env: classifyEnv }), false, 'an explicit CPU-only test file is classifiable');
+  assert.equal(await checkNeedsBrowser(repo, 'node bin/run-tests.js test/cockpit/brief.test.js', { env: classifyEnv }), true,
     'known browser suites remain browser-gated');
   const added = runFixtureChild(process.execPath, [BIN, 'add', 'coordinator', 'CPU check item', '--check', itemCheck, '--wait', '--json'], {
     cwd: repo, env: box.env, encoding: 'utf8',
@@ -414,6 +463,48 @@ test('a non-browser check does not wait for the browser slot [C7]', async () => 
   assert.deepEqual(JSON.parse(submitResult.stdout), {
     green: true, full: false, reason: '', files: ['test/cpu-check.test.js'], checkGreen: true,
   }, submitResult.stderr);
+});
+
+test('browser-free checks skip the slot only when the machine allows it [C7]', async () => {
+  const box = fixture();
+  const { repo } = checkProject(box);
+  const check = `out=$(node bin/run-tests.js --test-name-pattern "item check marker" test/cpu-check.test.js 2>&1); printf '%s\\n' "$out"; printf '%s\\n' "$out" | grep -Eq '^[[:space:]]*ok [0-9]+ - item check marker' && printf '%s\\n' "$out" | grep -Eq '^# fail 0$'`;
+  const added = runFixtureChild(process.execPath, [BIN, 'add', 'coordinator', 'Browser-free policy check', '--check', check, '--wait', '--json'], {
+    cwd: repo, env: box.env, encoding: 'utf8',
+  });
+  assert.equal(added.status, 0, added.stderr);
+  const item = JSON.parse(added.stdout).item.item_id;
+  const marker = join(repo, 'item-check-started');
+
+  async function checkWithPolicy(value, shouldStartWithBrowserHeld) {
+    setBrowserFreeChecks(box, value);
+    rmSync(marker, { force: true });
+    const browserHolder = poolWorker(box, { agent: `policy-browser-${String(value)}`, browser: true, item: '681', kind: 'gate' });
+    await acquired(browserHolder);
+    const started = waitForMarker(marker);
+    const resultPromise = runFixtureChildAsync(process.execPath, [BIN, 'check', String(item), '--yes'], { cwd: repo, env: box.env });
+    let result;
+    try {
+      if (shouldStartWithBrowserHeld) {
+        await started;
+        assert.ok(privateList(box).find(({ name }) => name === 'browser')?.holders.some(({ agent }) => agent === `policy-browser-${String(value)}`),
+          'the browser lease stays live while an opted-in browser-free check runs');
+      } else {
+        await waitUntil(() => privateList(box).find(({ name }) => name === 'gate')?.line.some(({ kind, item: waitingItem }) => kind === 'check' && waitingItem === String(item)),
+          'a browser-disabled check to wait in the gate queue');
+        assert.equal(existsSync(marker), false, 'the check does not start while browser-free checks are disabled or absent');
+      }
+    } finally {
+      await release(browserHolder);
+      result = await resultPromise;
+    }
+    assert.equal(result.status, 0, result.failure ?? result.stderr);
+    assert.equal(readFileSync(marker, 'utf8'), 'started');
+  }
+
+  await checkWithPolicy(false, false);
+  await checkWithPolicy(true, true);
+  await checkWithPolicy(undefined, false);
 });
 
 /** Kill and reap every fixture worker before deleting its private files. */
@@ -715,6 +806,57 @@ test('the pool admits reviews before submits before focused runs, and waiting ru
   }
   for (const child of releasing) await release(child);
   assert.deepEqual(order, ['landing-one', 'review-one', 'focused-two', 'diagnostic-one', 'submit-one', 'focused-one']);
+
+  // A remote run whose runner drops is requeued and keeps class order: it leads its own class,
+  // behind waiting reviews and submits, and the line stays in class order (no fallback to arrival).
+  const remoteBox = fixture();
+  const localHolders = [poolWorker(remoteBox, { agent: 'local-one' }), poolWorker(remoteBox, { agent: 'local-two' })];
+  for (const holder of localHolders) await acquired(holder);
+  const remoteWaiting = new Map();
+  for (const [agent, options] of [['focused-early', { kind: 'focused' }], ['submit-later', { kind: 'submit', item: '650' }], ['review-later', { kind: 'review', item: '651' }]]) {
+    const child = poolWorker(remoteBox, { agent, ...options });
+    remoteWaiting.set(agent, child);
+    await event(child);
+  }
+  const previousHome = process.env.PULLBOARD_HOME;
+  const previousMachineHome = process.env.PULLBOARD_MACHINE_HOME;
+  process.env.PULLBOARD_HOME = remoteBox.home;
+  process.env.PULLBOARD_MACHINE_HOME = remoteBox.home;
+  let requeued;
+  try {
+    const remoteLease = await takeResource({ name: 'gate', capacity: 2, scope: 'machine', root: remoteBox.first,
+      agent: 'remote-focused', kind: 'focused', remote: true, runnerProvider: () => [{ host: 'fixture-runner', slots: 1, browser: 0 }] });
+    assert.equal(remoteLease.runner?.host, 'fixture-runner', 'the only free slot is the runner, so the remote-capable run takes it');
+    const requeue = remoteLease.requeueRunner();
+    const remoteGate = () => privateList(remoteBox).find(({ name }) => name === 'gate');
+    while (!remoteGate().line.some(({ agent }) => agent === 'remote-focused')) await new Promise((resolveTick) => setTimeout(resolveTick, 20));
+    assert.equal(remoteGate().order, undefined, 'a requeued remote waiter is marked as class-ordered, so the pool keeps class order');
+    assert.deepEqual(remoteGate().line.map(({ agent, queueClass: listed }) => [agent, listed]), [
+      ['review-later', 'review'], ['submit-later', 'submit'], ['remote-focused', 'other'], ['focused-early', 'other'],
+    ], 'the requeued remote run leads its own class, behind later reviews and submits');
+    const remoteOrder = [];
+    /** Free one slot, then record which waiter the pool admits into it. */
+    const admitNext = async (freed, agent) => {
+      await release(freed);
+      if (agent === 'remote-focused') {
+        requeued = await requeue;
+        assert.equal(requeued.runner, undefined, 'the quarantined runner is not used again');
+      } else assert.equal((await acquired(remoteWaiting.get(agent))).acquired, agent, `${agent} is admitted next`);
+      remoteOrder.push(agent);
+    };
+    await admitNext(localHolders[0], 'review-later');
+    await admitNext(localHolders[1], 'submit-later');
+    await admitNext(remoteWaiting.get('review-later'), 'remote-focused');
+    await admitNext(remoteWaiting.get('submit-later'), 'focused-early');
+    assert.deepEqual(remoteOrder, ['review-later', 'submit-later', 'remote-focused', 'focused-early']);
+    await release(remoteWaiting.get('focused-early'));
+  } finally {
+    requeued?.release();
+    if (previousHome === undefined) delete process.env.PULLBOARD_HOME;
+    else process.env.PULLBOARD_HOME = previousHome;
+    if (previousMachineHome === undefined) delete process.env.PULLBOARD_MACHINE_HOME;
+    else process.env.PULLBOARD_MACHINE_HOME = previousMachineHome;
+  }
 
   // The class rule itself, against an injected clock rather than real waiting.
   const { QUEUE_AGE_MS, queueClass } = await import('../src/resources.js');

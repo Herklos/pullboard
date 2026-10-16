@@ -249,6 +249,19 @@ test('README has a manual workflow and shell examples without inline comments [I
   }
 });
 
+test("the README's worktree command names a model [I1]", () => {
+  const shellBlocks = [...README.matchAll(/```(?:sh|shell|bash)\n([\s\S]*?)```/gu)].map(([, body]) => body);
+  const commandPattern = /\bpullboard\s+(?:worktree|join)\s+[^\s;&|`]+[^\r\n`]*/gu;
+  const commands = [
+    ...shellBlocks.flatMap((body) => [...body.matchAll(commandPattern)].map(([command]) => command.trim())),
+    ...[...README.matchAll(/`([^`\r\n]+)`/gu)].flatMap(([, inline]) => [...inline.matchAll(commandPattern)].map(([command]) => command.trim())),
+  ];
+  assert.ok(commands.length > 0, 'the README includes a runnable worktree or join example');
+  for (const command of commands) {
+    assert.match(command, /(?:^|\s)--model(?:\s|$)/u, `${command} names the model explicitly`);
+  }
+});
+
 test('the README starts setup with your agent [I1]', () => {
   const start = README.indexOf('### Project setup\n');
   const end = README.indexOf('\n### Manual workflow\n', start);

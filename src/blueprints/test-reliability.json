@@ -1,0 +1,17 @@
+{
+  "blueprint": 1,
+  "name": "test-reliability",
+  "title": "Test reliability",
+  "version": 1,
+  "kind": "practice",
+  "by": "Pullboard",
+  "summary": "Rules we learned fixing flaky tests on our own board, ready for yours.",
+  "prefix": "TR",
+  "rules": [
+    { "key": "TR1", "text": "No test waits on the wall clock or a fixed sleep.", "why": "a test that sleeps is slow on an idle machine and flaky on a busy one." },
+    { "key": "TR2", "text": "A flake is pinned on a change only after a run without it.", "why": "a test that fails under load looks like a broken change until it fails without that change too." }
+  ],
+  "questions": [
+    { "key": "Q1", "ask": "Tests run with", "choices": ["Vitest", "Jest", "pytest", "Something else"], "default": "Vitest" }
+  ]
+}

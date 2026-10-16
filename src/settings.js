@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { machineHome } from './machine-home.js';
-import { setResourceCapacity } from './resources.js';
+import { setResourceCapacity, updateRunnerSettings } from './resources.js';
+import { validateRunner } from './runners.js';
 import { Refused } from './refused.js';
 
 const DEFAULT_GATE_SLOTS = 2;
@@ -24,6 +25,12 @@ export function loadMachineSettings() {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Refused('BAD_MACHINE_SETTINGS', `settings in ${file} must be a JSON object; fix it before running Pullboard`);
   }
+  if (value.gate !== undefined && (!value.gate || typeof value.gate !== 'object' || Array.isArray(value.gate))) {
+    throw new Refused('BAD_MACHINE_SETTINGS', `gate in ${file} must be an object; fix it before running Pullboard`);
+  }
+  if (value.gate?.browserFreeChecks !== undefined && typeof value.gate.browserFreeChecks !== 'boolean') {
+    throw new Refused('BAD_MACHINE_SETTINGS', `gate.browserFreeChecks in ${file} must be true or false`);
+  }
   const gateSlots = value.gateSlots ?? DEFAULT_GATE_SLOTS;
   if (!Number.isSafeInteger(gateSlots) || gateSlots < 1) {
     throw new Refused('BAD_GATE_SLOTS', `gateSlots in ${file} must be a positive integer; run pullboard settings gateSlots <n>`);
@@ -32,7 +39,20 @@ export function loadMachineSettings() {
   if (!Number.isSafeInteger(browserSlots) || browserSlots < 1 || browserSlots > gateSlots) {
     throw new Refused('BAD_BROWSER_SLOTS', `browserSlots in ${file} must be a positive integer no greater than gateSlots (${gateSlots}); run pullboard settings browserSlots <n>`);
   }
-  return { ...value, gateSlots, browserSlots };
+  const runners = value.runners ?? [];
+  if (!Array.isArray(runners)) throw new Refused('BAD_MACHINE_SETTINGS', 'runners must be an array; use pullboard runner add <ssh-host> --slots <n> --browser <n>');
+  const seen = new Set();
+  for (const runner of runners) {
+    validateRunner(runner);
+    if (seen.has(runner.host)) throw new Refused('BAD_MACHINE_SETTINGS', 'runner hosts must be unique; remove the duplicate machine setting');
+    seen.add(runner.host);
+  }
+  return { ...value, gateSlots, browserSlots, ...(runners.length ? { runners } : {}) };
+}
+
+/** Browser-free check admission is deliberately opt-in per machine. */
+export function browserFreeChecksEnabled() {
+  return loadMachineSettings().gate?.browserFreeChecks === true;
 }
 
 /** Atomically replace machine settings without exposing a partial JSON file. */
@@ -70,4 +90,18 @@ export function setBrowserSlots(capacity) {
     writeMachineSettings(next);
   } });
   return next;
+}
+
+/** Register plain SSH capacity without storing credentials, and serialize updates with active dispatches. */
+export function addRunner(value) {
+  const runner = validateRunner(value);
+  return updateRunnerSettings(runner.host, () => {
+    const current = loadMachineSettings();
+    const runners = [...(current.runners ?? [])];
+    const index = runners.findIndex(entry => entry.host === runner.host);
+    if (index < 0) runners.push(runner);
+    else runners[index] = runner;
+    writeMachineSettings({ ...current, runners });
+    return runner;
+  });
 }

@@ -20,6 +20,9 @@ Set up
   pullboard takeover                   rebind this checkout when the same agent starts a new session
   pullboard resources                  local resource holders and their FIFO queues
   pullboard settings [gateSlots <n> | browserSlots <n>]  view or set machine capacity (gate default 2; browser default 1)
+                                        browser-free check slots are opt-in: gate.browserFreeChecks in ~/.pullboard/settings.json (default false)
+  pullboard runner add <ssh-host> --slots <n> --browser <n> [--node <remote-path>] [--root <remote-path>]
+                                        register SSH test capacity; no runner sign-in; root defaults to ~/.pullboard-runner
   pullboard view [--project] [--port N] [--no-open]  every project on this machine in your browser; default http://127.0.0.1:${DEFAULT_VIEW_PORT}
                                         items, shouts, doctrine, agents and activity; --port 0 chooses a free port
                                         --project limits this view to the registered project for this repository
@@ -149,6 +152,10 @@ Spec
   pullboard spec draft <text> [--section <letter>] [--aim] [--gate "<gate>"]  any agent appends a draft row; never approves it
                                         --section chooses the section prefix; defaults to G
                                         Defaults to must and gate review.
+  pullboard blueprint add <name or file>  add a blueprint's rules and questions as drafts, and its starter items
+                                        bundled: web-app; nothing is approved, and a repeat adds nothing
+  pullboard blueprint save [file] [--name <name>] [--title "<title>"]  write approved rules and answered questions as a blueprint
+                                        never items, notes, paths, emails or names; file defaults to <project>.blueprint.json
   pullboard spec signers add [--key <path>] [--by <principal>]  opt into SSH-signed sign-offs
                                         principal defaults to Git user.email; --by overrides it
   pullboard spec approve <ids> | decline <ids> --reason "why"  the person's exact-row decision
@@ -174,7 +181,7 @@ const HELP_NAMES = [
   'sweep', 'merged', 'withdraw', 'refreeze', 'reopen', 'hold', 'stats', 'ledger', 'log', 'spec', 'spec check', 'spec view',
   'spec show', 'spec unmet', 'spec signoff', 'spec draft', 'spec signers', 'spec signers add', 'forget', 'prompt', 'gate', 'hook',
   'hook pre-commit', 'hook pre-merge-commit', 'hook commit-msg', 'hook pre-push', 'view export', 'version', 'lifecycle', 'help',
-  'roadmap', 'milestone',
+  'roadmap', 'milestone', 'runner', 'runner add', 'blueprint', 'blueprint add', 'blueprint save',
 ];
 
 const HELP_GROUPS = [
@@ -194,6 +201,7 @@ const HELP_EXAMPLES = {
   answer: 'pullboard answer 12 "done"', pass: 'pullboard pass 12 "please decide"',
   status: 'pullboard status', view: 'pullboard view', stats: 'pullboard stats --since 2026-10-08', log: 'pullboard log 12', ledger: 'pullboard ledger',
   roadmap: 'pullboard roadmap', milestone: 'pullboard milestone add "0.7.0" --items 12,13',
+  runner: 'pullboard runner add studio --slots 2 --browser 1', 'runner add': 'pullboard runner add studio --slots 2 --browser 1',
   edit: 'pullboard edit 12 --brief "Add the upload page"', release: 'pullboard release 12',
   land: 'pullboard land --max 4',
   reopen: 'pullboard reopen 12 --note "correct the frozen criterion"',
@@ -202,6 +210,7 @@ const HELP_EXAMPLES = {
   'spec check': 'pullboard spec check',
   'spec view': 'pullboard spec view', 'spec show': 'pullboard spec show G1',
   'spec draft': 'pullboard spec draft "Describe the first requirement"',
+  'blueprint add': 'pullboard blueprint add web-app', 'blueprint save': 'pullboard blueprint save',
   'spec unmet': 'pullboard spec unmet', 'spec signoff': 'pullboard spec signoff G1',
   'spec signers add': 'pullboard spec signers add', help: 'pullboard help claim', version: 'pullboard --version',
 };
@@ -215,6 +224,8 @@ const HELP_ALIASES = {
   lifecycle: { usage: 'pullboard lifecycle', source: null },
   escalate: { usage: 'pullboard escalate <id> --note "..." [--note-file <file>]', source: 'escalate <id> --note "what was tried and how it failed"', extraFlags: ['--note-file <file>'] },
   'view export': { usage: 'pullboard view --export <dir>', source: 'view' },
+  blueprint: { usage: 'pullboard blueprint add <name or file>', source: 'blueprint add' },
+  'blueprint add': { usage: 'pullboard blueprint add <name or file>', source: 'blueprint add' },
   'spec check': { usage: 'pullboard spec check', source: 'spec check' },
   'spec view': { usage: 'pullboard spec view [--out file]', source: 'spec view' },
   'spec show': { usage: 'pullboard spec show <id>', source: 'spec show', onlyFlags: [] },

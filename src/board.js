@@ -2584,9 +2584,13 @@ export function recordRowDecisions(board, { agentId, channel, decisions }) {
     const original = parseSpec(`## Decision\n${record.source}\n`).rows;
     const replacement = parseSpec(`## Decision\n${record.replacement}\n`).rows;
     const target = replacement[0];
+    const engineVersion = board.executionEngineVersion ?? ENGINE_VERSION;
+    const validDeclineText = record.decision !== 'decline' || (engineVersion >= 12
+      ? record.text === original[0]?.text
+      : target?.text === record.reason);
     if (original.length !== 1 || original[0].id !== record.id || replacement.length !== 1 || target.id !== record.id
       || target.status !== (record.decision === 'approve' ? 'approved' : 'wont') || target.text !== record.text
-      || (record.decision === 'decline' && target.text !== record.reason)) throw new Refused('ROW_DECISION', 'the exact row must match its recorded approval or decline; use pullboard spec approve or decline');
+      || !validDeclineText) throw new Refused('ROW_DECISION', 'the exact row must match its recorded approval or decline; use pullboard spec approve or decline');
     const key = `${record.kind}:${record.id}`;
     if (keys.has(key)) throw new Refused('ROW_DECISION', `${key} is named twice; use each row once`);
     keys.add(key);

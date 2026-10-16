@@ -219,9 +219,50 @@ globalThis.fetch = function tracedFetch(input, init) {
   let beforeMove;
   const calls = [];
   const transit = [];
+  const responseWaiters = [];
   const moveAcks = [];
   const privateKeys = new Set();
+  let nextConfirmationStatusHold = null;
+  const confirmationStatusHolds = new Set();
   let keyLeaked = false;
+  /** Wait until a named relay request has fully returned to its caller. */
+  function waitForResponse(path) {
+    const prior = transit.find(entry => entry.path.split('?')[0] === path);
+    if (prior) return Promise.resolve(prior);
+    return new Promise(resolveResponse => responseWaiters.push({ path, resolve: resolveResponse }));
+  }
+  /** Record one completed private HTTP exchange and wake matching deterministic fixture waiters. */
+  function recordResponse(entry) {
+    transit.push(entry);
+    for (let index = responseWaiters.length - 1; index >= 0; index -= 1) {
+      const waiter = responseWaiters[index];
+      if (entry.path.split('?')[0] === waiter.path) {
+        responseWaiters.splice(index, 1);
+        waiter.resolve(entry);
+      }
+    }
+  }
+  /** Hold one real confirmation-status request before the production auth handler for race tests. */
+  function holdNextConfirmationStatus() {
+    assert.equal(nextConfirmationStatusHold, null, 'only one confirmation-status hold is armed at a time');
+    let resolveStarted;
+    let resolveFinished;
+    let resolveGate;
+    const started = new Promise(resolve => { resolveStarted = resolve; });
+    const finished = new Promise(resolve => { resolveFinished = resolve; });
+    const gate = new Promise(resolve => { resolveGate = resolve; });
+    const control = { started, finished, gate, resolveStarted, resolveFinished, resolveGate, released: false };
+    confirmationStatusHolds.add(control);
+    /** Release the held request once so it can continue through the real auth handler. */
+    function release() {
+      if (control.released) return;
+      control.released = true;
+      control.resolveGate();
+    }
+    control.release = release;
+    nextConfirmationStatusHold = control;
+    return { started, finished, release };
+  }
   const server = createServer(async (req, res) => {
     const snapshotWrite = req.method === 'PUT' && /\/api\/v1\/boards\/[0-9a-f]{32}\/state$/.test(req.url ?? '');
     if (snapshotWrite) snapshotWriteCount += 1;
@@ -286,10 +327,22 @@ globalThis.fetch = function tracedFetch(input, init) {
       }
       return end(chunk, ...args);
     };
-    res.once('finish', () => transit.push({ method: req.method, path: req.url,
+    res.once('finish', () => recordResponse({ method: req.method, path: req.url,
       request: Buffer.concat(requestChunks), response: Buffer.concat(responseChunks) }));
     calls.push({ method: req.method, path: req.url, accept: req.headers.accept ?? '', engine: req.headers['x-pullboard-engine'],
       browser: String(req.headers.cookie ?? '').includes('pb_session=') });
+    if (req.method === 'POST' && req.url === '/auth/device/confirmation/status' && nextConfirmationStatusHold) {
+      const hold = nextConfirmationStatusHold;
+      nextConfirmationStatusHold = null;
+      hold.resolveStarted();
+      /** Mark completion after the held request returns from the real auth handler. */
+      function heldStatusFinished() {
+        hold.resolveFinished({ status: res.statusCode, response: Buffer.concat(responseChunks) });
+        confirmationStatusHolds.delete(hold);
+      }
+      res.once('finish', heldStatusFinished);
+      await hold.gate;
+    }
     if (revokeOnNextListing && req.method === 'GET' && req.url === '/api/v1/boards') {
       revokeOnNextListing = false;
       const session = await phoneSession();
@@ -392,6 +445,8 @@ globalThis.fetch = function tracedFetch(input, init) {
     return phone;
   }
   t.after(async () => {
+    nextConfirmationStatusHold = null;
+    for (const hold of confirmationStatusHolds) hold.release();
     api.close();
     server.closeAllConnections();
     if (server.listening) await new Promise(ready => server.close(ready));
@@ -488,6 +543,48 @@ globalThis.fetch = function tracedFetch(input, init) {
   async function cliWithSnapshotTrace(snapshotUploads, ...args) {
     cliChildDeadlineMs(snapshotUploads);
     return runCliChild(args, snapshotUploads, true);
+  }
+  /** Start the production CLI with live output so a browser confirmation can interleave with SSH sign-in. */
+  function startCli(args, extraEnv = {}) {
+    const child = spawn(process.execPath, [CLI, ...args, '--json'], { cwd: root, env: { ...env, ...extraEnv }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    const deadlineMs = cliChildDeadlineMs(DEFAULT_SNAPSHOT_UPLOADS);
+    /** Stop a private CLI process that exceeds the fixture's upload-derived ceiling. */
+    function stopOverdueChild() { child.kill('SIGKILL'); }
+    const watchdog = setTimeout(stopOverdueChild, deadlineMs);
+    watchdog.unref?.();
+    /** Retain streamed standard output for the final machine-readable result. */
+    function captureStdout(part) { stdout += part; }
+    /** Retain streamed standard error so the browser can follow the printed confirmation URL. */
+    function captureStderr(part) { stderr += part; }
+    child.stdout.setEncoding('utf8').on('data', captureStdout);
+    child.stderr.setEncoding('utf8').on('data', captureStderr);
+    /** Preserve a single terminal result for both output waiters and fixture cleanup. */
+    let resolveClosed;
+    const closed = new Promise(resolve => { resolveClosed = resolve; });
+    /** Capture child exit without losing stdout or stderr already delivered to this fixture. */
+    function onClose(code, signal) {
+      clearTimeout(watchdog);
+      resolveClosed({ code, signal, stdout, stderr });
+    }
+    child.once('close', onClose);
+    /** Reject prompt waits when the child closes before the expected text appears. */
+    function failClosed() { throw new Error('private CLI closed before its expected prompt'); }
+    /** Wait for a specific streamed prompt, or fail when the child exits before printing it. */
+    async function waitForOutput(marker) {
+      while (!stderr.includes(marker)) {
+        if (child.exitCode !== null || child.signalCode !== null) throw new Error('private CLI exited before its expected prompt');
+        await Promise.race([once(child.stderr, 'data'), closed.then(failClosed)]);
+      }
+      return stderr;
+    }
+    t.after(async () => {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      child.kill('SIGKILL');
+      await closed;
+    });
+    return { child, closed, deadlineMs, waitForOutput, get stdout() { return stdout; }, get stderr() { return stderr; } };
   }
   assert.equal(runFixtureChild('git', ['init', '-q', '-b', 'main'], { cwd: root, env, encoding: 'utf8' }).status, 0);
   writeFileSync(join(root, 'README.md'), 'private relay fixture project\n', { mode: 0o600 });
@@ -587,7 +684,7 @@ globalThis.fetch = function tracedFetch(input, init) {
   }
   return {
     transit, providerState: provider.state, providerCalls: provider.calls, relayDirectory: join(scratch, 'relay'), authDatabase, auth, otherDeviceJoin,
-    root, env, origin, lane, before, linkFile, keyFile, calls, moveAcks, cli, cliAt, cliWithSnapshotUploads, cliWithSnapshotTrace, link, phoneSession, requireEngineThree, otherDeviceOff, additionalBoard, script, stopRelay, restartRelay,
+    root, env, origin, lane, before, linkFile, keyFile, calls, moveAcks, cli, cliAt, cliWithSnapshotUploads, cliWithSnapshotTrace, startCli, waitForResponse, holdNextConfirmationStatus, link, phoneSession, requireEngineThree, otherDeviceOff, additionalBoard, script, stopRelay, restartRelay,
     /** Assert the test consumed every declared child budget, with no hidden CLI calls. */
     assertCliChildrenComplete() {
       if (cliChildren) assert.equal(cliChildIndex, cliChildren.length, 'every planned private CLI child ran exactly once');
