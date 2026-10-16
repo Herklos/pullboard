@@ -78,7 +78,7 @@ import { flowLines, flowAlertLine } from './stats-flow.js';
 import { releaseHeadlinesBetween } from './changelog.js';
 import { exportBoard, importBoard } from './exchange.js';
 import { addSigner, assertRequiredSigners, defaultPrincipal, hasSignerFile } from './signature.js';
-import { browserFreeChecksEnabled, loadMachineSettings, memoryFloorMB, setBrowserSlots, setGateSlots } from './settings.js';
+import { browserFreeChecksEnabled, gateQueueSettings, loadMachineSettings, memoryFloorMB, setBrowserSlots, setGateSlots } from './settings.js';
 import { formatSnapshotLimit, pendingSnapshotSize, pendingCheckpointProblem, relayCommandReceipt, relayCommandReceiptReported, relayLinked, relayOff, relayOn, relayOperation, relayRecover, relayRecovered, relayRevoke, relayStatus, relayTokens, syncRelay } from './relay.js';
 import { autoLinkProject, relayOnAll, revokeRelayDevice, unlinkedRelayProjects } from './relay-setup.js';
 import { readRelayMachine } from './relay-machine.js';
@@ -1819,14 +1819,16 @@ function readCommands(io, { first, second, rest, values }) {
         ...listResources({ scope: 'machine' }).map((resource) => ({ ...resource, scope: 'machine' })),
         ...listResources({ scope: 'repo', root: ctx.info.root }).map((resource) => ({ ...resource, scope: 'repo' })),
       ];
-      io.result?.({ resources, browserSlots, memory });
+      const queue = gateQueueSettings();
+      io.result?.({ resources, browserSlots, queue, memory });
       io.say(`browserSlots (machine setting): ${browserSlots}`);
+      io.say(`machine queue order (gate.queue.reviewsFirst ${queue.reviewsFirst}): ${queue.reviewsFirst ? `landing, review, submit, other; a waiting run moves up one class every ${queue.agingMinutes} minutes` : 'landings first, then arrival'}`);
       io.say(memory.line);
       if (!resources.length) io.say('no resources have been used');
       for (const resource of resources) {
-        io.say(`${resource.name} (${resource.scope}, capacity ${resource.capacity})`);
+        io.say(`${resource.name} (${resource.scope}, capacity ${resource.capacity})${resource.order === 'arrival' ? '; an older pullboard is waiting, so this line is in arrival order, landings first' : ''}`);
         for (const holder of resource.holders) io.say(`  held by ${agentDisplayName(agents, ctx.config, holder.agent)}${holder.repo ? ` in ${holder.repo}` : ''}${resourceRunLabel(holder)} since ${holder.since}`);
-        resource.line.forEach((waiter, index) => io.say(`  ${index + 1}. waiting: ${agentDisplayName(agents, ctx.config, waiter.agent)}${waiter.repo ? ` in ${waiter.repo}` : ''}${resourceRunLabel(waiter)}`));
+        resource.line.forEach((waiter, index) => io.say(`  ${index + 1}. waiting: ${agentDisplayName(agents, ctx.config, waiter.agent)}${waiter.repo ? ` in ${waiter.repo}` : ''}${resourceRunLabel(waiter)}; class ${waiter.queueClass}${waiter.agedFrom ? `, aged up from ${waiter.agedFrom}` : ''}`));
       }
       return 0;
     },
@@ -2870,9 +2872,13 @@ export function gateWaitReporter(io) {
 function settingsCommand(io, { first, second, rest }) {
   if (!first && !second && !rest.length) {
     const settings = loadMachineSettings();
-    io.result?.({ settings, memoryFloorMB: memoryFloorMB() });
+    const queue = gateQueueSettings();
+    // The result names the queue order in effect, defaults included; the file keeps only what was set.
+    io.result?.({ settings: { ...settings, gate: { ...settings.gate, queue: { ...settings.gate?.queue, ...queue } } }, memoryFloorMB: memoryFloorMB() });
     io.say(`gateSlots: ${settings.gateSlots}`);
     io.say(`browserSlots: ${settings.browserSlots}`);
+    io.say(`gate.queue.reviewsFirst: ${queue.reviewsFirst}${queue.reviewsFirst ? '' : ' (landings first, then arrival order)'}`);
+    io.say(`gate.queue.agingMinutes: ${queue.agingMinutes}${queue.reviewsFirst ? '' : ' (used only while reviewsFirst is true)'}`);
     io.say(`gate.memoryFloorMB: ${memoryFloorMB() ?? 'off (the gate queue does not wait for memory)'}`);
     return 0;
   }

@@ -8,6 +8,7 @@ import { Refused } from './refused.js';
 
 const DEFAULT_GATE_SLOTS = 2;
 const DEFAULT_BROWSER_SLOTS = 1;
+const DEFAULT_QUEUE_AGING_MINUTES = 30;
 
 /** Resolve the separate machine settings file. */
 export function machineSettingsFile() {
@@ -30,6 +31,16 @@ export function loadMachineSettings() {
   if (value.gate?.browserFreeChecks !== undefined && typeof value.gate.browserFreeChecks !== 'boolean') {
     throw new Refused('BAD_MACHINE_SETTINGS', `gate.browserFreeChecks in ${file} must be true or false`);
   }
+  const queue = value.gate?.queue;
+  if (queue !== undefined && (!queue || typeof queue !== 'object' || Array.isArray(queue))) {
+    throw new Refused('BAD_MACHINE_SETTINGS', `gate.queue in ${file} must be an object; fix it before running Pullboard`);
+  }
+  if (queue?.reviewsFirst !== undefined && typeof queue.reviewsFirst !== 'boolean') {
+    throw new Refused('BAD_MACHINE_SETTINGS', `gate.queue.reviewsFirst in ${file} must be true or false`);
+  }
+  if (queue?.agingMinutes !== undefined && (!Number.isSafeInteger(queue.agingMinutes) || queue.agingMinutes < 1)) {
+    throw new Refused('BAD_MACHINE_SETTINGS', `gate.queue.agingMinutes in ${file} must be a positive whole number of minutes; fix it or remove it for the default ${DEFAULT_QUEUE_AGING_MINUTES}`);
+  }
   if (value.gate?.memoryFloorMB !== undefined && (!Number.isSafeInteger(value.gate.memoryFloorMB) || value.gate.memoryFloorMB < 0)) {
     throw new Refused('BAD_MACHINE_SETTINGS', `gate.memoryFloorMB in ${file} must be a whole number of megabytes, 0 or more; fix it before running Pullboard`);
   }
@@ -47,6 +58,18 @@ export function loadMachineSettings() {
 /** Browser-free check admission is deliberately opt-in per machine. */
 export function browserFreeChecksEnabled() {
   return loadMachineSettings().gate?.browserFreeChecks === true;
+}
+
+/**
+ * The gate pool's admission order. Reviews-first class order is opt-in per machine because it
+ * changes who waits for whom on every board sharing the pool; absent or false keeps landings
+ * first, then arrival. agingMinutes only matters while class order is on.
+ *
+ * @returns {{ reviewsFirst: boolean, agingMinutes: number }}
+ */
+export function gateQueueSettings() {
+  const queue = loadMachineSettings().gate?.queue;
+  return { reviewsFirst: queue?.reviewsFirst === true, agingMinutes: queue?.agingMinutes ?? DEFAULT_QUEUE_AGING_MINUTES };
 }
 
 /**
