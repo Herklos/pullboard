@@ -10,21 +10,52 @@
  * It opens no outbound connection (P5).
  */
 import { spawnSync } from 'node:child_process';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  randomBytes,
+  timingSafeEqual,
+} from 'node:crypto';
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { createServer } from 'node:http';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+} from 'node:path';
 import * as store from './board.js';
 import { cockpitPage } from './cockpit.js';
 import { releaseHeadlinesBetween } from './changelog.js';
 import { VERSION } from './help.js';
 import { displayAgentName } from './agent-names.js';
-import { COORDINATOR, loadConfig } from './config.js';
-import { doctrineHistory, loadDoctrine, standardDoctrine } from './doctrine.js';
-import { codeIsFromMain, repoInfo, resolveCommit } from './git.js';
+import {
+  COORDINATOR,
+  loadConfig,
+} from './config.js';
+import {
+  doctrineHistory,
+  loadDoctrine,
+  standardDoctrine,
+} from './doctrine.js';
+import {
+  codeIsFromMain,
+  repoInfo,
+  resolveCommit,
+} from './git.js';
 import { committedIds } from './history.js';
 import { productSummaries } from './products.js';
-import { listApiProjects, registryFile } from './projects.js';
+import {
+  listApiProjects,
+  registryFile,
+} from './projects.js';
 import { fetchLocal } from './local-fetch.js';
 import { Refused } from './refused.js';
 import { loadSpec } from './spec.js';

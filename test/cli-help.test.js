@@ -123,3 +123,13 @@ test('next help exposes explicit build intent alongside review reservations [Q1,
   assert.match(all.stdout, /pullboard next \[--wait <minutes>\]\s+offer an eligible review when reviews pile up, otherwise claim work/u);
   assert.match(all.stdout, /pullboard next --build\s+claim a build explicitly, recording a skipped review offer/u);
 });
+
+test('init help names --blueprint [I1,N37]', () => {
+  const result = run('init', '--help');
+  assert.equal(result.status, 0, result.failure ?? result.stderr);
+  assert.ok(flagsFrom(result.stdout).some((line) => /^--blueprint <name or file> — \S/u.test(line)),
+    'init help explains the blueprint name or file flag');
+  assert.match(result.stdout, /^Example:\n  pullboard init --blueprint web-app$/mu);
+  assert.equal(run('help', 'init').stdout, result.stdout, 'both init help entry points share the declaration');
+  assert.match(run('help', '--all').stdout, /pullboard init \[--model <name>\] \[--blueprint <name or file>\]/u);
+});
