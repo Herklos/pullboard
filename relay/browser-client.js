@@ -19,6 +19,9 @@ function stored(storage, name, fallback) {
   try { return JSON.parse(storage.getItem(name)) ?? fallback; } catch { return fallback; }
 }
 
+/** The validated pairing this page read before its transport took it; module memory only, never a global or storage. */
+let earlyPairing = null;
+
 /** Keep an unauthenticated pairing fragment on the device through the GitHub redirect. */
 export function rememberPairing() {
   rememberDevicePairing();
@@ -31,6 +34,14 @@ export function rememberPairing() {
   const pair = { board, key };
   try { sessionStorage.setItem(PENDING, JSON.stringify(pair)); } catch { /* Current visit can still pair in memory. */ }
   history.replaceState(null, '', location.pathname + location.search);
+  earlyPairing = pair;
+  return pair;
+}
+
+/** Hand the transport the pairing this page already read, once, so an early read survives refused storage. */
+function takePairing() {
+  const pair = earlyPairing;
+  earlyPairing = null;
   return pair;
 }
 
@@ -92,7 +103,8 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
   let failure = '';
   let failureBoard = null;
   let accessLost = false;
-  let pair = rememberPairing() ?? stored(sessionStorage, PENDING, null);
+  rememberPairing();
+  let pair = takePairing() ?? stored(sessionStorage, PENDING, null);
   if (pair && (!BOARD.test(pair.board ?? '') || typeof pair.key !== 'string')) pair = null;
   try { if (pair) decodeBoardKey(pair.key); } catch { pair = null; }
 
@@ -476,7 +488,7 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
 
   /** Pair a link opened in this already-loaded page as well as one opened on a fresh visit. */
   async function pairingChanged() {
-    try { pair = rememberPairing() ?? pair; await enrollPhone((path, options) => documentAt(path, denied, options)); await listing(); onUpdate(); }
+    try { rememberPairing(); pair = takePairing() ?? pair; await enrollPhone((path, options) => documentAt(path, denied, options)); await listing(); onUpdate(); }
     catch { failure = 'The pairing link is invalid. Get a new link from a linked machine.'; failureBoard = null; notice(); }
   }
   addEventListener('hashchange', pairingChanged);
