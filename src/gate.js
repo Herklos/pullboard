@@ -281,11 +281,13 @@ export async function withGateSlot(root, action, { landing = false, itemCheck = 
     try { return await action(inherited); }
     finally { inherited.release(); }
   }
-  const capacityProvider = () => loadMachineSettings().gateSlots;
+  const settingsProvider = () => loadMachineSettings();
+  const capacityProvider = () => settingsProvider().gateSlots;
   const lease = await takeResource({
     name: 'gate',
     capacity: capacityProvider(),
     capacityProvider,
+    browserCapacityProvider: () => settingsProvider().browserSlots,
     scope: 'machine',
     root,
     repo: root,

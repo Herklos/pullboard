@@ -29,6 +29,7 @@ const NOT_MOVES = {
   ONE_COORDINATOR: 'registering who is asking, before any move',
   BAD_MACHINE_SETTINGS: 'machine-wide settings checked before a command runs',
   BAD_GATE_SLOTS: 'machine-wide gate capacity checked before a command runs',
+  BAD_BROWSER_SLOTS: 'machine-wide browser capacity checked before a command runs',
   GATE_SLOT_LEASE_REQUIRED: 'a nested runner must receive its live machine gate lease before starting',
   GATE_SLOT_MARKER_INVALID: 'an inherited machine gate capability is validated before nested work starts',
   GATE_SLOT_TOKEN_REQUIRED: 'an inherited machine gate capability needs its exact lease token',
