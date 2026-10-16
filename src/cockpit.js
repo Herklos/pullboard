@@ -927,7 +927,7 @@ async function api(path, body) {
   const source = boardId ? boardSources.get(boardId) : null;
   if (boardId && !source) throw new Error('This board is not available in the current view. Refresh the board list and retry.');
   if (boardId && source?.kind === 'relay') {
-    if (body !== undefined && body !== null) throw new Error('Relay boards are read-only in this view.');
+    if (body !== undefined && body !== null) throw new Error('This is a read-only view of relay boards.');
     if (!transport) throw transportLoadError || new Error('The relay transport is still loading.');
     const reply = await transport.request(path, body);
     if (path.includes('/state') && reply.state) return { ...reply, state: { ...reply.state, root: source.board.root } };

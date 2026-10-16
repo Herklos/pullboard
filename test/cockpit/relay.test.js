@@ -1439,8 +1439,21 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
     await pickProject(chrome, duplicateRow);
     await chrome.waitFor("view.root === data.projects.find(row => row.id === " + JSON.stringify(duplicateId) + ").root && document.querySelector('#chain')?.textContent.includes(" + JSON.stringify(duplicateTitle) + ") && !readOnly && !requests");
     const remoteRow = "Array.from(document.querySelectorAll('#proj-list .proj.repo')).find(row => row.textContent.includes('fixture/repository'))";
+    // Queue the call while a writable local board is selected, then release it only after the real
+    // relay mapping and selected board settle. The late call must take the relay-board refusal.
+    const lateMovePath = '/api/v1/boards/' + linkedId + '/moves';
+    const lateMoveBody = { verb: 'shout', args: { to: 'coordinator', text: 'late relay writes stay refused' } };
+    assert.equal(await chrome.stable(`(() => { window.__lateRelayMove = () => api(${JSON.stringify(lateMovePath)}, ${JSON.stringify(lateMoveBody)}); return !readOnly && !requests; })()`), true,
+      'the late relay call is queued while the local board is writable');
     await pickProject(chrome, remoteRow);
     await chrome.waitFor("view.root === data.projects.find(row => row.id === " + JSON.stringify(linkedId) + ").root && readOnly && requests");
+    assert.equal(await chrome.stable(`boardSources.get(${JSON.stringify(linkedId)})?.kind`), 'relay',
+      'the delayed call resolves to the actual linked relay board, without replacing its source');
+    const relayWritesBefore = linked.calls.filter(call => call.method === 'POST' && call.path === lateMovePath).length;
+    const lateRefusal = await chrome.stable(`(async () => { const release = window.__lateRelayMove; delete window.__lateRelayMove; try { await release(); return 'unexpected success'; } catch (error) { return error.message; } })()`);
+    assert.match(lateRefusal, /read-only view/i, 'the late relay-board branch keeps the established read-only refusal');
+    assert.equal(linked.calls.filter(call => call.method === 'POST' && call.path === lateMovePath).length, relayWritesBefore,
+      'the late refused write never reaches the actual relay server');
 
     assert.ok(linked.calls.some((call) => call.method === 'GET' && call.path === '/api/v1/boards/' + linkedId + '/state'),
       'the relay board state is read through its relay transport');
