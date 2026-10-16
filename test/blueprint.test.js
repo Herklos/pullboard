@@ -1,6 +1,6 @@
 /** pullboard blueprint add: a blueprint lands on a board as drafts, once [S1,I1]. */
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
@@ -214,4 +214,67 @@ test('blueprint add files a blueprint as drafts after an add stopped part way [S
   assert.deepEqual(retried.items.find((item) => item.key === '3').after, [first.item.item_id], 'the third starter still waits on the first');
   assert.equal(readFileSync(join(box.repo, 'SPEC.md'), 'utf8'), finished, 'the finished marker replaces the under-way one');
   assert.equal(json(box, 'blueprint', 'add', 'web-app').items.length, 0, 'and then a repeat adds nothing');
+});
+
+/** A Git repository with history but no Pullboard yet, using the same private homes as freshBoard. */
+function emptyRepo() {
+  const dir = mkdtempSync(join(tmpdir(), 'pullboard-blueprint-init-'));
+  DIRS.push(dir);
+  const bin = join(dir, 'bin');
+  mkdirSync(bin);
+  writeFileSync(join(bin, 'pullboard'), `#!/bin/sh\nexec '${process.execPath.replaceAll("'", "'\\''")}' '${BIN.replaceAll("'", "'\\''")}' "$@"\n`);
+  chmodSync(join(bin, 'pullboard'), 0o755);
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) if (key.startsWith('GIT_') || MARKERS.includes(key)) delete env[key];
+  Object.assign(env, {
+    PATH: `${bin}:${process.env.PATH}`,
+    PULLBOARD_HOME: join(dir, 'home'), PULLBOARD_MACHINE_HOME: join(dir, 'machine-home'),
+    GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
+    GIT_AUTHOR_NAME: 'Blueprint fixture', GIT_AUTHOR_EMAIL: 'blueprint@example.invalid',
+    GIT_COMMITTER_NAME: 'Blueprint fixture', GIT_COMMITTER_EMAIL: 'blueprint@example.invalid',
+  });
+  const repo = join(dir, 'repo');
+  mkdirSync(repo);
+  const run = (...args) => runFixtureChild(process.execPath, [BIN, ...args], { cwd: repo, env, encoding: 'utf8' });
+  runFixtureGit(['init', '-q', '-b', 'main'], { cwd: repo, env });
+  return { dir, repo, run };
+}
+
+test('init --blueprint starts a board from a blueprint [I1,S1]', () => {
+  const waiting = PUBLISHED.rules.length + PUBLISHED.questions.length;
+
+  // A known name: init as usual, then the blueprint, in one command, with one summary line.
+  const known = emptyRepo();
+  const started = known.run('init', '--blueprint', 'web-app');
+  assert.equal(started.status, 0, started.stdout + started.stderr);
+  const summary = started.stdout.split('\n').filter((line) => line.startsWith(`added the ${PUBLISHED.title} blueprint:`));
+  assert.equal(summary.length, 1, started.stdout);
+  assert.match(summary[0], new RegExp(`: ${waiting} rows wait for your approval in SPEC\\.md \\(.*${PUBLISHED.title}\\), ${PUBLISHED.items.length} starter items filed`, 'u'));
+  const spec = parseSpec(readFileSync(join(known.repo, 'SPEC.md'), 'utf8'));
+  const section = spec.sections.find((entry) => entry.name.includes(PUBLISHED.title));
+  assert.ok(section, 'the blueprint has its own SPEC.md section');
+  const rows = spec.rows.filter((row) => row.section === section.name);
+  assert.equal(rows.length, waiting);
+  assert.ok(rows.every((row) => row.status !== 'approved'), 'nothing is approved');
+  const items = JSON.parse(known.run('list', '--json').stdout).items ?? [];
+  assert.equal(items.length, PUBLISHED.items.length, 'each starter item is filed once');
+  assert.ok(existsSync(join(known.repo, 'pullboard.json')) && existsSync(join(known.repo, 'DOCTRINE.md')), 'init set the repository up as usual');
+
+  // An unknown name: refused before anything is written, naming the bundled blueprints.
+  const unknown = emptyRepo();
+  const refused = unknown.run('init', '--blueprint', 'no-such-blueprint', '--json');
+  assert.notEqual(refused.status, 0);
+  const refusal = JSON.parse(refused.stdout).error;
+  assert.equal(refusal.code, 'NO_BLUEPRINT');
+  assert.match(refusal.message, /web-app/u, 'the refusal lists the bundled blueprints');
+  assert.deepEqual(readdirSync(unknown.repo).filter((name) => name !== '.git'), [], 'nothing is written');
+  assert.equal(existsSync(join(unknown.repo, '.git', 'pullboard')), false, 'no board is created');
+
+  // Plain init is unchanged: no blueprint section, no items, no summary line.
+  const plain = emptyRepo();
+  const initialized = plain.run('init');
+  assert.equal(initialized.status, 0, initialized.stdout + initialized.stderr);
+  assert.doesNotMatch(initialized.stdout, /blueprint/u);
+  assert.doesNotMatch(readFileSync(join(plain.repo, 'SPEC.md'), 'utf8'), /pullboard-blueprint/u);
+  assert.deepEqual(JSON.parse(plain.run('list', '--json').stdout).items ?? [], []);
 });
