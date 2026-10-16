@@ -1486,3 +1486,135 @@ console.log('RUNNER_CLEANUP_TIMEOUT_BODY_RAN');
     else process.env.PULLBOARD_MACHINE_HOME = previousMachineHome;
   }
 });
+
+/** Read one machine pool's browser row through the public resource API, selecting that machine's home. */
+function browserPoolAt(machineHome, root) {
+  const previous = process.env.PULLBOARD_MACHINE_HOME;
+  process.env.PULLBOARD_MACHINE_HOME = machineHome;
+  try { return listResources({ scope: 'machine', root }).find(resource => resource.name === 'browser') ?? null; }
+  finally {
+    if (previous === undefined) delete process.env.PULLBOARD_MACHINE_HOME;
+    else process.env.PULLBOARD_MACHINE_HOME = previous;
+  }
+}
+
+/**
+ * Poll an observable fixture state, failing at once with the controller's output if a run exits first.
+ * Without the early exit a refused remote setup would only show up as an unexplained timeout.
+ */
+async function waitForRunState(runs, check, label) {
+  const deadline = Date.now() + 30_000; // budget: bound remote checkout plus admission for two real workers.
+  while (true) {
+    const state = check();
+    if (state) return state;
+    for (const run of runs) {
+      if (run.result) throw new Error(`${label}: run ${run.item} exited first\n${run.result.stdout.slice(-4_000)}\n${run.result.stderr.slice(-4_000)}`);
+    }
+    if (Date.now() >= deadline) throw new Error(`${label}: state did not arrive`);
+    await new Promise(resolve => setTimeout(resolve, 20)); // budget: polling interval for a public pool state.
+  }
+}
+
+test('a runner admits as many browser runs as its machine allows [C7,O5]', async (t) => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-runner-browser-slots-')));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const home = join(dir, 'home');
+  const machineHome = join(home, '.pullboard');
+  const remoteHome = join(dir, 'worker-home');
+  const remoteMachineHome = join(remoteHome, '.pullboard');
+  const repo = join(dir, 'repo');
+  const worker = join(dir, 'second-machine');
+  const bin = join(dir, 'bin');
+  const markers = join(dir, 'markers');
+  const requests = join(dir, 'ssh-requests.jsonl');
+  for (const folder of [repo, worker, bin, home, machineHome, remoteHome, remoteMachineHome, markers]) mkdirSync(folder, { recursive: true });
+  writeFileSync(join(machineHome, 'settings.json'), JSON.stringify({ gateSlots: 1 }));
+  const env = {
+    ...process.env, HOME: home, PULLBOARD_HOME: home, PULLBOARD_MACHINE_HOME: machineHome,
+    PATH: `${bin}:${process.env.PATH}`, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
+    GIT_AUTHOR_NAME: 'Runner Fixture', GIT_AUTHOR_EMAIL: 'runner-fixture@example.invalid',
+    GIT_COMMITTER_NAME: 'Runner Fixture', GIT_COMMITTER_EMAIL: 'runner-fixture@example.invalid',
+  };
+  const remoteEnv = { ...env, HOME: remoteHome, PULLBOARD_HOME: remoteHome, PULLBOARD_MACHINE_HOME: remoteMachineHome };
+  const initialized = runFixtureChild('git', ['init', '-q', '-b', 'main'], { cwd: repo, env, encoding: 'utf8' });
+  assert.equal(initialized.status, 0, initialized.context);
+  writeFileSync(join(repo, 'pullboard.json'), JSON.stringify({ gate: 'true' }));
+  writeFileSync(join(repo, 'tracked.txt'), 'committed runner source\n');
+  git(repo, env, 'add', 'pullboard.json', 'tracked.txt');
+  git(repo, env, 'commit', '-q', '-m', 'test: prepare runner browser capacity fixture');
+  installSshStandIn({ bin, worker, home: remoteHome, machineHome: remoteMachineHome, requests });
+  // The controller may send two browser runs at once, so only the runner's own pool can hold one back.
+  const added = cli(repo, env, 'runner', 'add', HOST, '--slots', '2', '--browser', '2', '--json');
+  assert.equal(added.status, 0, added.context);
+
+  const previousHome = process.env.PULLBOARD_HOME;
+  const previousMachineHome = process.env.PULLBOARD_MACHINE_HOME;
+  process.env.PULLBOARD_HOME = home;
+  process.env.PULLBOARD_MACHINE_HOME = machineHome;
+  const runs = [];
+  /** Start one browser run that holds its runner slot until the test writes its release marker. */
+  const startHeld = (item) => {
+    const started = join(markers, `${item}.started`);
+    const release = join(markers, `${item}.release`);
+    const code = `const fs=require('node:fs'); fs.writeFileSync(${JSON.stringify(started)}, 'started\\n');
+const timer=setInterval(()=>{ if (fs.existsSync(${JSON.stringify(release)})) clearInterval(timer); }, 5);`;
+    const observed = observe(startQueueController(repo, env, `node -e ${shellQuote(code)}`, { item, queueMarker: null, firstItem: null }));
+    const run = { item, started, release, ...observed, result: null };
+    observed.closed.then(result => { run.result = result; });
+    runs.push(run);
+    return run;
+  };
+  /** Release runs and check that each one came back green from the runner. */
+  const finish = async (pair) => {
+    for (const run of pair) writeFileSync(run.release, 'release\n');
+    for (const result of await Promise.all(pair.map(run => run.closed))) {
+      assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+      assert.equal(gateResult(result.stdout).runner, HOST, 'the run executed on the runner');
+    }
+  };
+  let held;
+  try {
+    // Fill the controller's own gate so every run below goes to the runner.
+    held = await takeResource({ name: 'gate', capacity: 1, scope: 'machine', root: repo,
+      agent: 'fixture-local-holder', item: 'local-holder', kind: 'force-registered-runner' });
+
+    // A runner machine that set nothing admits one browser run; the second waits in its pool.
+    const unset = [startHeld('unset-a'), startHeld('unset-b')];
+    const queued = await waitForRunState(unset, () => {
+      const browser = browserPoolAt(remoteMachineHome, repo);
+      return browser?.holders.length === 1 && browser.line.length === 1 ? browser : null;
+    }, 'unset runner: one browser holder and one browser waiter');
+    assert.equal(queued.capacity, 1, 'a runner with no browserSlots setting keeps one browser slot');
+    const [first, second] = queued.holders[0].item === 'unset-a' ? unset : [...unset].reverse();
+    assert.equal(queued.line[0].item, second.item);
+    await waitForRunState(unset, () => existsSync(first.started), 'unset runner: the admitted run starts');
+    assert.equal(existsSync(second.started), false, 'the second browser run has not started while the first holds the only slot');
+    writeFileSync(first.release, 'release\n');
+    await waitForRunState([second], () => existsSync(second.started), 'unset runner: the waiting run starts after the first ends');
+    await finish(unset);
+
+    // The runner machine sets browserSlots 2: both browser runs hold its slots at the same time.
+    const setting = cli(repo, remoteEnv, 'settings', 'browserSlots', '2', '--json');
+    assert.equal(setting.status, 0, setting.context);
+    const configured = [startHeld('two-a'), startHeld('two-b')];
+    await waitForRunState(configured, () => configured.every(run => existsSync(run.started)), 'runner set to 2: both browser runs start');
+    const both = browserPoolAt(remoteMachineHome, repo);
+    assert.equal(both.capacity, 2, 'the runner pool uses its machine browserSlots setting');
+    assert.deepEqual(both.holders.map(holder => holder.item).sort(), ['two-a', 'two-b']);
+    assert.equal(both.line.length, 0, 'no browser run waits on a runner set to 2');
+    await finish(configured);
+  } finally {
+    held?.release();
+    for (const run of runs) writeFileSync(run.release, 'cleanup-release\n');
+    // A remote setup that never answers must not hold the test file open: stop its controller.
+    const settled = Promise.all(runs.map(run => run.closed));
+    const ceiling = new Promise(resolve => { const timer = setTimeout(resolve, 20_000); timer.unref(); }); // budget: released runs finish well inside this.
+    await Promise.race([settled, ceiling]);
+    for (const run of runs) if (!run.result) run.child.kill('SIGTERM');
+    await settled;
+    if (previousHome === undefined) delete process.env.PULLBOARD_HOME;
+    else process.env.PULLBOARD_HOME = previousHome;
+    if (previousMachineHome === undefined) delete process.env.PULLBOARD_MACHINE_HOME;
+    else process.env.PULLBOARD_MACHINE_HOME = previousMachineHome;
+  }
+});

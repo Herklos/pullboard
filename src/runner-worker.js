@@ -1138,6 +1138,9 @@ async function main() {
       else process.env.PULLBOARD_MACHINE_HOME = previousMachineHome;
     }
     const gateCapacity = resources.find(resource => resource.name === 'gate')?.capacity ?? Math.min(spec.slots, 2);
+    // pullboard settings browserSlots writes this row and settings.json under one lock, so the row carries
+    // this machine's setting without reading settings.json; a machine that set nothing keeps one browser slot.
+    const browserCapacity = resources.find(resource => resource.name === 'browser')?.capacity ?? 1;
     const base = join(runnerRoot, 'jobs');
     mkdirSync(base, { recursive: true, mode: 0o700 });
     chmodSync(base, 0o700);
@@ -1155,6 +1158,7 @@ async function main() {
       repo: runnerRoot, agent: `pullboard-ssh-${spec.id}`,
       landing: spec.landing === true, itemCheck: spec.itemCheck === true,
       diagnostic: spec.diagnostic === true, browser: spec.browserRequired,
+      browserCapacityProvider: () => browserCapacity,
       item: spec.item ?? '', kind: spec.kind ?? 'remote-command',
       onWait: () => assertTransportLive(),
     }, machineHomePath);
