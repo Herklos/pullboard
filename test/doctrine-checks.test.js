@@ -95,14 +95,20 @@ test("a doctrine rule's check holds its count [D1,D3]", () => {
 
 test("a doctrine rule's check holds its count in watch mode and nightly [D1,D3]", () => {
   const box = checkedProject('count: 0 | mode: watch',
-    ['- Q2 [approved, must] Web pages stay TODO-free overnight. | gate: check grep -rn TODO web | count: 0 | runs: nightly']);
+    ['- Q2 [approved, must] Web pages stay TODO-free overnight. | gate: check grep -rn TODO web | count: 3 | runs: nightly']);
   commitWeb(box, { 'b.html': 'TODO three\n' }, 'feat(web): add a page [G1]');
   const watched = box.run(box.web, 'submit', '1');
   assert.equal(watched.code, 0, watched.err);
   assert.match(watched.out, /Q1 Web pages carry no TODO markers\. · 3, was 0 · watching/);
   assert.doesNotMatch(watched.out, /Q2/, 'a nightly rule does not run at submit');
   const report = box.run(box.web, 'doctrine', 'check');
-  assert.equal(report.code, 1, 'the nightly rule that rose fails doctrine check');
+  assert.equal(report.code, 0, 'a watched rule never fails doctrine check');
   assert.match(report.out, /^Q1 Web pages carry no TODO markers\. · 3, was 0 · watching$/m);
-  assert.match(report.out, /^Q2 Web pages stay TODO-free overnight\. · 3, was 0 · rose$/m);
+  assert.match(report.out, /^Q2 Web pages stay TODO-free overnight\. · 3, was 3 · holding$/m, 'doctrine check runs the nightly rule');
+
+  // doctrine check reports a rule that rose and exits 1, with no submit involved.
+  commitWeb(box, { 'c.html': 'TODO four\n' }, 'feat(web): add another page [G1]');
+  const rose = box.run(box.web, 'doctrine', 'check');
+  assert.equal(rose.code, 1, 'a rule that rose fails doctrine check');
+  assert.match(rose.out, /^Q2 Web pages stay TODO-free overnight\. · 4, was 3 · rose$/m);
 });
