@@ -3544,9 +3544,10 @@ function privateNames(root, board, spec) {
   const names = new Set();
   const add = (value) => {
     const text = typeof value === 'string' ? value.trim() : '';
-    if (!text) return;
+    // "unknown" is the label for an undeclared model, not anyone's name.
+    if (!text || text === 'unknown') return;
     names.add(text);
-    for (const part of text.split(/[\s@.<>()]+/u)) if (part.length >= 3) names.add(part);
+    for (const part of text.split(/[\s@.<>()]+/u)) if (part.length >= 3 && part !== 'unknown') names.add(part);
   };
   for (const agent of store.listAgents(board)) {
     add(agent.agent_id); add(agent.agent_model); add(agent.agent_family); add(displayAgentName(agent)); add(displayAgentName(agent, 'prefix'));
