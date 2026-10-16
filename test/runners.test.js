@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { after, test } from 'node:test';
 import { listResources, takeResource } from '../src/resources.js';
+import { parseProcessCensus } from '../src/process-census.js';
 import { listResources as listPreRunnerResources, takeResource as takePreRunnerResource } from './fixtures/resources-pre-runners.js';
 import { runFixtureChild, runFixtureChildAsync, startFixtureChild } from './fixture-child.js';
 
@@ -832,6 +833,19 @@ function processesUnder(dir) {
 }
 
 test('a queued runner run finishes or fails by name within its deadline [C7]', { timeout: 120_000 }, async (t) => { // budget: one real round trip plus three held phases, each stopped by its own deadline.
+  // Linux lists kernel threads with process group 0. A census holding them must still parse, or
+  // runner cleanup can never be verified on a real Linux host and every round trip waits forever.
+  const linuxCensus = [
+    '    1     0     1 Fri Oct 16 19:03:32 2026 Ss   systemd',
+    '    2     0     0 Fri Oct 16 19:03:32 2026 S    kthreadd',
+    '    3     2     0 Fri Oct 16 19:03:32 2026 I<   kworker/R-rcu_g',
+    '  812     1   812 Fri Oct 16 19:05:01 2026 Ss   node',
+  ].join('\n');
+  const parsed = parseProcessCensus(linuxCensus);
+  assert.ok(parsed, 'a census with kernel threads in process group 0 still parses');
+  assert.deepEqual([...parsed.keys()], [1, 812], 'kernel threads are skipped; real processes are kept');
+  assert.equal(parseProcessCensus('    5     1     5 Fri Oct 16 19:03:32 2026 S    node\nnot a census row'), null, 'a malformed row still voids the census');
+
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-runner-deadline-')));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const home = join(dir, 'home');
