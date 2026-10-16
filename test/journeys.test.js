@@ -242,6 +242,8 @@ test('pullboard.dev shows every board, linked and local [N40]', {
       catch { /* Chrome versions expose different local-network permission names. */ }
     }
     await chromeB.send('Page.navigate', { url: JOURNEY_HOSTED + '/#device=' + pending.locator + '.' + pending.secret });
+    await waitFor(() => setup.child.exitCode !== null || setup.child.signalCode !== null,
+      'A completes the actual phone enrollment within its relay work allowance', relayWorkBudgetMs());
     const linkedSetup = await setup.done;
     assert.equal(linkedSetup.code, 0, 'A completes the real relay on --all after phone pairing');
     assert.equal(linkedSetup.document.linked.length, 1, 'the one registered A board links through the CLI');
