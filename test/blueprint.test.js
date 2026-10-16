@@ -306,11 +306,13 @@ test('init --blueprint starts a board from a blueprint [I1,S1]', () => {
   const checkedRepo = emptyRepo();
   const checked = checkedRepo.run('init', '--blueprint', withCheck);
   assert.equal(checked.status, 0, checked.stdout + checked.stderr);
+  assert.match(checked.stdout, /checks stored, not run: #\d+; no check baseline ran/u, 'the summary says the check was not run');
   const filed = JSON.parse(checkedRepo.run('list', '--json').stdout).items ?? [];
   assert.equal(filed.length, PUBLISHED.items.length, 'every starter is filed, the checked one included');
   const starter = filed.find((item) => item.item_title === PUBLISHED.items[0].title);
   assert.ok(starter, 'the checked starter is on the board');
   assert.equal(starter.item_check, 'true', 'its check is stored as written');
+  assert.equal(starter.item_check_baseline ?? null, null, 'no check baseline was started');
   rmSync(outside, { recursive: true, force: true });
 
   // Plain init is unchanged: no blueprint section, no items, no summary line.
