@@ -44,9 +44,11 @@ import { promptFor, skillProblems, updateSkills } from './skills.js';
 import {
   frozenCriterion,
   idProblems,
+  insertSectionRows,
   lintSpec,
   loadSpec,
   legacyDoctrineRenameBase,
+  nextRowId,
   permanenceProblems,
   parseSpec,
   readSignoffs,
@@ -54,6 +56,7 @@ import {
   standings,
   unmetRows,
 } from './spec.js';
+import { bundledBlueprints, planBlueprint, readBlueprint } from './blueprints.js';
 import { briefFiles } from './brief.js';
 import { checkBaseline, prepareCheckBaseline, sayCheckBaseline } from './check-baseline.js';
 import { retryCheckBaselines, startCheckBaseline } from './check-baseline-worker.js';
@@ -2173,6 +2176,71 @@ function reportSubmission(ctx, id, commit, gate) {
 }
 
 /**
+ * Add a blueprint to this board in one step (I1): its rules and questions as draft and pending rows
+ * in a new SPEC.md section, its starter items as open items citing them, and its gate when
+ * pullboard.json has none. Rows are written the way spec draft writes them, so nothing is approved;
+ * a repeat of the same blueprint version adds nothing.
+ *
+ * @param {any} ctx
+ * @param {any} board
+ * @param {{ id: string }} me
+ * @param {import('./blueprints.js').Blueprint} blueprint
+ * @returns {Promise<number>}
+ */
+async function addBlueprint(ctx, board, me, blueprint) {
+  const { io } = ctx;
+  const spec = loadSpec(ctx.info.root, ctx.config);
+  if (!spec.exists) throw new Refused('NO_SPEC', `no ${ctx.config.spec}; run: pullboard init`);
+  const malformed = [[spec.file, spec.problems], [ctx.doctrine.repo.file, ctx.doctrine.repo.problems]].find(([, problems]) => problems.length);
+  if (malformed) throw new Refused('SPEC_INVALID', `fix the unparsed row in ${malformed[0]} before adding a blueprint; an existing id may be ambiguous`);
+  const source = readFileSync(spec.file, 'utf8');
+  const configFile = join(ctx.info.root, CONFIG_FILE);
+  const configSource = readFileSync(configFile, 'utf8');
+  const plan = planBlueprint(blueprint, { source, spec, doctrine: ctx.doctrine,
+    itemTitles: store.listItems(board, { all: true }).map((item) => item.item_title), gate: String(JSON.parse(configSource).gate ?? '') });
+  const files = [];
+  if (plan.specAfter !== source) files.push({ file: ctx.config.spec, before: source, after: plan.specAfter });
+  if (plan.gate) {
+    const newline = configSource.includes('\r\n') ? '\r\n' : '\n';
+    files.push({ file: CONFIG_FILE, before: configSource,
+      after: `${JSON.stringify({ ...JSON.parse(configSource), gate: plan.gate }, null, 2).replaceAll('\n', newline)}${newline}` });
+  }
+  const write = { records: [], files, signoffs: { before: null, receipts: [] } };
+  writeRowApply(ctx.info.root, write);
+  const added = [];
+  try {
+    const byKey = {};
+    for (const entry of plan.items) {
+      const lane = entry.lane && entry.lane !== COORDINATOR && isLane(ctx.config, entry.lane) ? entry.lane : COORDINATOR;
+      const item = { by: me.id, lane, title: entry.title, criterion: entry.criterion, specIds: entry.specIds,
+        parentId: null, after: entry.after.map((key) => byKey[key]).filter(Boolean), brief: entry.brief, route: entry.route };
+      store.validateItemAddition(board, item);
+      const id = await ordered(ctx, board, 'addItem', [item]);
+      byKey[entry.key] = id;
+      added.push({ id, key: entry.key, title: entry.title, lane, specIds: entry.specIds, after: item.after });
+    }
+  } catch (error) {
+    // Items already added are on the board for good; keep the rows they cite and say what landed.
+    if (!added.length) restoreRowApply(ctx.info.root, write);
+    throw error;
+  }
+  const rows = plan.rows.map(({ key, id, status, text }) => ({ key, id, status, text }));
+  io.result?.({ blueprint: { name: blueprint.name, title: blueprint.title, version: blueprint.version },
+    section: plan.section.name, rows, items: added, gate: plan.gate });
+  if (!rows.length && !added.length && !plan.gate) {
+    io.say(`${blueprint.title} (version ${blueprint.version}) is already on this board; nothing added`);
+    return 0;
+  }
+  io.say(`added ${blueprint.title} (version ${blueprint.version}) as drafts in ${ctx.config.spec}, section ${plan.section.name}`);
+  for (const row of rows) io.say(`  ${row.id} ${row.status}  ${row.text}`);
+  for (const item of added) io.say(`  #${item.id} open  ${item.title}${item.specIds.length ? `  cites ${item.specIds.join(', ')}` : ''}${item.after.length ? `  waits on #${item.after.join(', #')}` : ''}`);
+  if (plan.gate) io.say(`  gate set in ${CONFIG_FILE}: ${plan.gate}`);
+  const changed = files.map((file) => file.file);
+  io.say(`next: the person approves the rows in pullboard view or with pullboard spec approve <ids>${changed.length ? `; commit ${changed.join(' and ')}` : ''}`);
+  return 0;
+}
+
+/**
  * Verify from this checkout (V3, V7): the submitted commit must be here, at or under HEAD, and the
  * criterion is re-read from the spec, so a verdict is never given against a moved bar.
  *
@@ -2464,6 +2532,12 @@ function workCommands(io, args) {
     return withBoard(ctx, (board) => work(ctx, board, whoAmI(ctx, board)));
   };
   return {
+    blueprint: () => act(async (ctx, board, me) => {
+      if (first !== 'add' || !second || rest.length) {
+        throw new Refused('USAGE', `pullboard blueprint add <name or file>; bundled: ${bundledBlueprints().join(', ')}`);
+      }
+      return await addBlueprint(ctx, board, me, readBlueprint(second, io.cwd));
+    }),
     fact: () => act(async (ctx, board, me) => {
       if (!first || !second || rest.length !== 1) throw new Refused('USAGE', 'pullboard fact <id> <kind> <text> [--supersedes <fact-id>] [--ref path:lines@full-sha]');
       const id = idArg(first);

@@ -149,6 +149,8 @@ Spec
   pullboard spec draft <text> [--section <letter>] [--aim] [--gate "<gate>"]  any agent appends a draft row; never approves it
                                         --section chooses the section prefix; defaults to G
                                         Defaults to must and gate review.
+  pullboard blueprint add <name or file>  add a blueprint's rules and questions as drafts, and its starter items
+                                        bundled: web-app; nothing is approved, and a repeat adds nothing
   pullboard spec signers add [--key <path>] [--by <principal>]  opt into SSH-signed sign-offs
                                         principal defaults to Git user.email; --by overrides it
   pullboard spec approve <ids> | decline <ids> --reason "why"  the person's exact-row decision
@@ -174,7 +176,7 @@ const HELP_NAMES = [
   'sweep', 'merged', 'withdraw', 'refreeze', 'reopen', 'hold', 'stats', 'ledger', 'log', 'spec', 'spec check', 'spec view',
   'spec show', 'spec unmet', 'spec signoff', 'spec draft', 'spec signers', 'spec signers add', 'forget', 'prompt', 'gate', 'hook',
   'hook pre-commit', 'hook pre-merge-commit', 'hook commit-msg', 'hook pre-push', 'view export', 'version', 'lifecycle', 'help',
-  'roadmap', 'milestone',
+  'roadmap', 'milestone', 'blueprint', 'blueprint add',
 ];
 
 const HELP_GROUPS = [
@@ -202,6 +204,7 @@ const HELP_EXAMPLES = {
   'spec check': 'pullboard spec check',
   'spec view': 'pullboard spec view', 'spec show': 'pullboard spec show G1',
   'spec draft': 'pullboard spec draft "Describe the first requirement"',
+  'blueprint add': 'pullboard blueprint add web-app',
   'spec unmet': 'pullboard spec unmet', 'spec signoff': 'pullboard spec signoff G1',
   'spec signers add': 'pullboard spec signers add', help: 'pullboard help claim', version: 'pullboard --version',
 };
@@ -215,6 +218,8 @@ const HELP_ALIASES = {
   lifecycle: { usage: 'pullboard lifecycle', source: null },
   escalate: { usage: 'pullboard escalate <id> --note "..." [--note-file <file>]', source: 'escalate <id> --note "what was tried and how it failed"', extraFlags: ['--note-file <file>'] },
   'view export': { usage: 'pullboard view --export <dir>', source: 'view' },
+  blueprint: { usage: 'pullboard blueprint add <name or file>', source: 'blueprint add' },
+  'blueprint add': { usage: 'pullboard blueprint add <name or file>', source: 'blueprint add' },
   'spec check': { usage: 'pullboard spec check', source: 'spec check' },
   'spec view': { usage: 'pullboard spec view [--out file]', source: 'spec view' },
   'spec show': { usage: 'pullboard spec show <id>', source: 'spec show', onlyFlags: [] },
