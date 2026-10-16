@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { runFixtureChild, runFixtureGit, startFixtureChild } from './fixture-child.js';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { createServer, request as httpRequest } from 'node:http';
@@ -25,7 +25,7 @@ const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
 const REPEATED_READ_HARNESS = `
 import assert from 'node:assert/strict';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { basename, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -35,8 +35,9 @@ const require = createRequire(import.meta.url);
 const childProcess = require('node:child_process');
 const gitIdentity = { ...process.env, GIT_AUTHOR_NAME: 'HTTP Agent', GIT_AUTHOR_EMAIL: 'agent@example.invalid',
   GIT_COMMITTER_NAME: 'HTTP Agent', GIT_COMMITTER_EMAIL: 'agent@example.invalid' };
-const counters = { git: 0, node: 0, other: 0, methods: {} };
+const counters = { git: 0, node: 0, other: 0, methods: {}, gitCalls: [] };
 let counting = false;
+let currentRoute = 'setup';
 const childMethods = ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork'];
 /** Count one child-process API call by its executable class while measurement is enabled. */
 function countChild(method, args) {
@@ -46,6 +47,12 @@ function countChild(method, args) {
   const kind = base === 'git' ? 'git' : (command === process.execPath || base === 'node' ? 'node' : 'other');
   counters[kind] += 1;
   counters.methods[method] = (counters.methods[method] ?? 0) + 1;
+  if (kind === 'git' && counters.gitCalls.length < 32) {
+    const commandArgs = Array.isArray(args[1]) ? args[1].slice(0, 32).map(value => String(value).slice(0, 512)) : [];
+    const options = Array.isArray(args[1]) ? args[2] : args[1];
+    counters.gitCalls.push({ route: currentRoute, method, argv: [raw, ...commandArgs], cwd: options?.cwd ?? process.cwd(),
+      stack: String(new Error().stack ?? '').split('\\n').slice(2, 10).map(line => line.slice(0, 512)) });
+  }
 }
 for (const method of childMethods) {
   const original = childProcess[method];
@@ -57,7 +64,7 @@ for (const method of childMethods) {
 }
 syncBuiltinESMExports();
 
-const [serveFile, projectJson] = process.argv.slice(1);
+const [serveFile, projectJson, codeMetadataMarker] = process.argv.slice(1);
 const projects = JSON.parse(projectJson);
 const { serveView } = await import(pathToFileURL(serveFile).href);
 const view = await serveView({ port: 0 });
@@ -69,14 +76,16 @@ let pageCookie = '';
 let requestCount = 0;
 /** Fetch one authenticated API response and reject failed fixture requests. */
 async function readApi(path) {
+  currentRoute = 'GET ' + path;
   requestCount += 1;
   const response = await fetch(address.origin + path, { headers: { ...(pageCookie ? { cookie: pageCookie } : { 'x-pullboard-key': key }), connection: 'close' } });
   const document = await response.json();
-  assert.equal(response.status, 200, JSON.stringify(document));
+  assert.equal(response.status, 200, JSON.stringify({ route: currentRoute, document }));
   return document;
 }
 /** Fetch the actual local view page and require a successful response. */
 async function readPage() {
+  currentRoute = 'GET /';
   if (!pageReady) {
     requestCount += 1;
     const exchange = await fetch(view.url, { headers: { connection: 'close' }, redirect: 'manual' });
@@ -135,10 +144,20 @@ try {
   counters.node = 0;
   counters.other = 0;
   counters.methods = {};
+  counters.gitCalls = [];
   requestCount = 0;
+  if (codeMetadataMarker) {
+    const changed = new Date(0);
+    utimesSync(codeMetadataMarker, changed, changed);
+  }
   const started = performance.now();
   counting = true;
   try {
+    if (codeMetadataMarker) {
+      const first = projects[0];
+      const board = boards.find(entry => resolve(entry.root) === resolve(first.root));
+      await readApi('/api/v1/boards/' + board.id + '/items/' + first.item);
+    }
     await readAllRoutes(boards);
     await readAllRoutes(boards);
   } finally { counting = false; }
@@ -146,7 +165,28 @@ try {
   const measurement = { boards: boards.length, routes: 'GET /api/v1/boards; 3x GET state; 3x GET item detail; GET /',
     warmupRequests: measuredRequests, requests: requestCount,
     rounds: 2, elapsedMs: Number(elapsedMs.toFixed(2)), processes: { ...counters, methods: { ...counters.methods } } };
-  process.stdout.write(JSON.stringify({ measurement }) + '\\n');
+  const provenanceChecks = [];
+  if (codeMetadataMarker) {
+    const { apiBoards } = await import(new URL('./api.js', pathToFileURL(serveFile)));
+    const { withGitReadFacts } = await import(new URL('./git.js', pathToFileURL(serveFile)));
+    for (const status of [undefined, true]) {
+      counters.git = 0;
+      counters.node = 0;
+      counters.other = 0;
+      counters.methods = {};
+      counters.gitCalls = [];
+      currentRoute = status === undefined ? 'unknown main status' : 'true main status';
+      const changed = new Date(status === undefined ? 1000 : 2000);
+      utimesSync(codeMetadataMarker, changed, changed);
+      let listed;
+      counting = true;
+      try { listed = withGitReadFacts(() => apiBoards(() => projects, status)); }
+      finally { counting = false; }
+      assert.equal(listed.length, projects.length, 'authority controls read the actual private boards');
+      provenanceChecks.push({ status: currentRoute, processes: { ...counters, methods: { ...counters.methods } } });
+    }
+  }
+  process.stdout.write(JSON.stringify({ measurement, provenanceChecks }) + '\\n');
 
   const target = projects[0];
   const board = boards.find((entry) => resolve(entry.root) === resolve(target.root));
@@ -342,6 +382,94 @@ async function viewHttpBox(t, existing = null) {
   const id = listed.document.boards[0].id;
   return { ...box, api: view, origin, key, id, call, path: '/api/v1/boards/' + id };
 }
+
+/** A private linked code checkout keeps provenance false while a metadata touch invalidates only its private cache. */
+test('a detail read after a cache miss on a linked board spawns no git process [A2,N26]', (t) => {
+  const box = fixture(t);
+  const roots = [box.root];
+  for (const number of [2, 3]) {
+    const root = join(box.dir, 'repo-' + number);
+    mkdirSync(root);
+    runFixtureGit(['init', '-q', '-b', 'main'], { cwd: root, env: box.env, stdio: 'pipe' });
+    box.cli(root, 'init');
+    const configPath = join(root, 'pullboard.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf8'));
+    writeFileSync(configPath, JSON.stringify({ ...config, gate: 'true', lanes: { app: { owns: ['app/'] }, review: { owns: [] } } }));
+    writeFileSync(join(root, 'SPEC.md'), '# HTTP fixture\n\n## Goals\n- G1 [approved, must] Keep the board. | gate: true\n');
+    writeFileSync(join(root, 'DOCTRINE.md'), '');
+    runFixtureGit(['add', '-A'], { cwd: root, env: box.env, stdio: 'pipe' });
+    runFixtureGit(['commit', '-q', '-m', 'chore: private HTTP fixture [G1]'], { cwd: root, env: box.env, stdio: 'pipe' });
+    if (number === 3) {
+      const linked = join(box.dir, 'repo-3-linked');
+      runFixtureGit(['worktree', 'add', '-q', '-b', 'view-feature', linked], { cwd: root, env: box.env, stdio: 'pipe' });
+      roots.push(linked);
+    } else roots.push(root);
+  }
+  const projects = roots.map((root, index) => {
+    const itemRoot = index === 2 ? join(box.dir, 'repo-3') : root;
+    const added = box.cli(itemRoot, 'add', 'app', 'Read fixture item ' + (index + 1), '--criterion', 'appears in item detail', '--specs', 'G1');
+    return { root, item: added.item.item_id };
+  });
+  const previousHome = process.env.PULLBOARD_HOME;
+  process.env.PULLBOARD_HOME = box.env.PULLBOARD_HOME;
+  try {
+    forgetProject(join(box.dir, 'repo-3'));
+    for (const root of roots) registerProject(root);
+  } finally {
+    if (previousHome === undefined) delete process.env.PULLBOARD_HOME;
+    else process.env.PULLBOARD_HOME = previousHome;
+  }
+
+  // The copied source has no connection to the shared classic .git. Its linked worktree provides
+  // real, private `isMain === false` provenance for the code that serves these API requests.
+  const codePrimary = join(box.dir, 'code-primary');
+  const codeLinked = join(box.dir, 'code-linked');
+  mkdirSync(codePrimary);
+  cpSync(resolve(import.meta.dirname, '../src'), join(codePrimary, 'src'), { recursive: true });
+  cpSync(resolve(import.meta.dirname, '../package.json'), join(codePrimary, 'package.json'));
+  cpSync(resolve(import.meta.dirname, '../CHANGELOG.md'), join(codePrimary, 'CHANGELOG.md'));
+  runFixtureGit(['init', '-q', '-b', 'main'], { cwd: codePrimary, env: box.env, stdio: 'pipe' });
+  runFixtureGit(['add', 'src', 'package.json', 'CHANGELOG.md'], { cwd: codePrimary, env: box.env, stdio: 'pipe' });
+  runFixtureGit(['commit', '-q', '-m', 'chore: private copied product source'], { cwd: codePrimary, env: box.env, stdio: 'pipe' });
+  runFixtureGit(['worktree', 'add', '-q', '--detach', codeLinked], { cwd: codePrimary, env: box.env, stdio: 'pipe' });
+  const privateCommonDir = realpathSync.native(join(codePrimary, '.git'));
+  let assertionFailed = false;
+  try {
+    const result = runFixtureChild(process.execPath, [
+      '--input-type=module', '-e', REPEATED_READ_HARNESS,
+      join(codeLinked, 'src', 'serve.js'), JSON.stringify(projects), privateCommonDir,
+    ], { cwd: box.root, env: box.env, encoding: 'utf8' });
+    const initialContext = JSON.stringify({
+      route: 'GET /api/v1/boards; 3x state; 3x item detail; GET /',
+      argv: [process.execPath, '--input-type=module', '-e', 'REPEATED_READ_HARNESS', join(codeLinked, 'src', 'serve.js'), 'projects-json', privateCommonDir],
+      cwd: box.root, status: result.status, stderr: String(result.stderr ?? '').slice(-2_000), failure: String(result.failure ?? '').slice(-2_000),
+    });
+    assert.ok(result.stdout.trim(), initialContext);
+    const lines = result.stdout.trim().split('\n');
+    const measurement = JSON.parse(lines[0]).measurement;
+    const context = JSON.stringify({ route: measurement.routes, cwd: box.root, status: result.status,
+      gitCalls: measurement.processes.gitCalls, stderr: String(result.stderr ?? '').slice(-2_000), failure: String(result.failure ?? '').slice(-2_000) });
+    process.stderr.write(`private linked-code repeated view reads: processes=${JSON.stringify(measurement.processes)}, attribution=${context}\n`);
+    assert.deepEqual({ git: measurement.processes.git, node: measurement.processes.node, other: measurement.processes.other },
+      { git: 0, node: 0, other: 0 }, context);
+    const controls = JSON.parse(lines[0]).provenanceChecks;
+    assert.deepEqual(controls.map(control => control.status), ['unknown main status', 'true main status']);
+    for (const control of controls) {
+      assert.equal(control.processes.git, 2, JSON.stringify(control));
+      assert.ok(control.processes.gitCalls.some(call => call.stack.some(line => line.includes('readCodeIsFromMain'))),
+        'unknown and true main status still check actual code provenance');
+      assert.equal(control.processes.node + control.processes.other, 0, JSON.stringify(control));
+    }
+    assert.equal(result.status, 0, context);
+    assert.equal(JSON.parse(lines.at(-1)).fresh, true, context);
+  } catch (error) {
+    assertionFailed = true;
+    throw error;
+  } finally {
+    try { runFixtureGit(['worktree', 'remove', codeLinked], { cwd: codePrimary, env: box.env, stdio: 'pipe' }); }
+    catch (cleanupError) { if (!assertionFailed) throw cleanupError; }
+  }
+});
 
 /** Prove warmed reads across three registered projects start no child processes and changes refresh state. */
 test('a repeated read through the view page spawns no process [A2,N26]', (t) => {
