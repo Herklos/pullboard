@@ -251,6 +251,7 @@ const OPTIONS = {
   gate: { type: 'string' },
   aim: { type: 'boolean' },
   section: { type: 'string' },
+  blueprint: { type: 'string' },
   route: { type: 'string' },
   family: { type: 'string' },
   model: { type: 'string' },
@@ -1608,6 +1609,10 @@ function setupCommands(io, { first, values }) {
   return {
     init: async () => {
       const info = repoInfo(io.cwd);
+      // A named blueprint is read and checked before anything is written, so an unknown name
+      // or a broken file or a URL leaves the repository untouched (#678). Past that, init adds the
+      // blueprint exactly as pullboard blueprint add does, through the same function.
+      const blueprint = values.blueprint === undefined ? null : readBlueprint(values.blueprint, io.cwd);
       const model = optionalModel(values.model);
       const linked = relayLinked(info.root);
       const ctx = linked && model !== undefined ? context(io) : null;
@@ -1634,9 +1639,17 @@ function setupCommands(io, { first, values }) {
       if (linked && model !== undefined) await withBoard(ctx, (board) => ordered(ctx, board, 'register', [
         { lane: COORDINATOR, path: info.root, model },
       ]));
-      io.result?.({ root: info.root, notes });
+      // init --blueprint: the same add as pullboard blueprint add, in the same command (#678).
+      const added = blueprint ? await addBlueprintHere(io, values.blueprint, { report: false, blueprint }) : null;
+      io.result?.({ root: info.root, notes, ...(added ? { blueprint: { name: added.blueprint.name, title: added.blueprint.title,
+        section: added.section, waiting: added.rows.length, items: added.items.length, gate: added.gate, checksNotRun: added.checksNotRun } } : {}) });
       const staging = notes.at(-1)?.startsWith('git add -f -- ') ? notes.at(-1) : null;
       (staging ? notes.slice(0, -1) : notes).forEach((note) => io.say(note));
+      if (added) {
+        io.say(`added the ${added.blueprint.title} blueprint: ${added.rows.length} ${added.rows.length === 1 ? 'row waits' : 'rows wait'} for your approval in SPEC.md (${added.section}), `
+          + `${added.items.length} starter ${added.items.length === 1 ? 'item' : 'items'} filed${added.gate ? `, gate set to ${added.gate}` : ''}`);
+        if (added.checksNotRun.length) io.say(`  checks stored, not run: ${added.checksNotRun.map((id) => `#${id}`).join(', ')}; no check baseline ran, so read each check before work starts: pullboard show <id>`);
+      }
       if (await registerProjectAndLink(info.root, new Date(), loadConfig(info.root), io)) io.say('registered this project on this machine, so pullboard view lists it');
       io.say(agentSessionDigest()
         ? 'Next: run pullboard resume now to continue setup in this session; the new skills load next session, and setup does not need them.'
@@ -2231,15 +2244,16 @@ function reportSubmission(ctx, id, commit, gate) {
 /**
  * Add a blueprint to the board of the checkout io.cwd names, exactly as pullboard blueprint add
  * does; init --blueprint calls it after setting up the repo. With report false it prints nothing
- * and leaves the command's JSON result to the caller.
+ * and leaves the command's JSON result to the caller. A caller that already read the blueprint
+ * passes it, so the file is read once: init checks it before writing anything and must add the
+ * very blueprint it checked.
  *
  * @param {any} io
- * @param {string} reference - A bundled blueprint name or a path to a blueprint file.
- * @param {{ report?: boolean }} [options]
+ * @param {string} reference - A bundled blueprint name or a path to a blueprint file, relative to io.cwd.
+ * @param {{ report?: boolean, blueprint?: ReturnType<typeof readBlueprint> }} [options]
  * @returns {Promise<BlueprintAdded>}
  */
-export async function addBlueprintHere(io, reference, { report = true } = {}) {
-  const blueprint = readBlueprint(reference, io.cwd);
+export async function addBlueprintHere(io, reference, { report = true, blueprint = readBlueprint(reference, io.cwd) } = {}) {
   const ctx = context(io);
   return await withBoard(ctx, async (board) => await addBlueprint(ctx, board, whoAmI(ctx, board), blueprint, { report }));
 }
