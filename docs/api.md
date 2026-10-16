@@ -57,6 +57,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `lane add` | `version:number`, `lane:string`, `owns:array` |
 | `resources` | `version:number`, `resources:array` |
 | `settings` | `version:number`, `settings:object` |
+| `runner` | `version:number`, `runner:object` |
 | `relay` | `version:number`, `linked:boolean`, `board:string`, `url:string`, `link:string`, `sequence:number`, `behind:number`, `recovery:object` |
 | `list` | `version:number`, `items:array` |
 | `roadmap` | `version:number`, `milestones:array` |
@@ -111,6 +112,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `spec view` | `version:number`, `path:string` |
 | `spec show` | `version:number`, `row:object`, `standing:object` |
 | `spec draft` | `version:number`, `id:string`, `row:object` |
+| `blueprint add` | `version:number`, `blueprint:object`, `section:string`, `rows:array`, `items:array`, `gate:string\|null` |
 | `spec unmet` | `version:number`, `rows:array` |
 | `spec signoff` | `version:number`, `count:number`, `by:string`, `ids:array`, `evidence:array` |
 | `spec signers` | `version:number`, `added:boolean`, `by:string`, `path:string`, `initial:boolean` |
@@ -320,3 +322,11 @@ Only the person can run `pullboard land --waive <test> --until <date> --reason "
 A `pullboard serve` key grants access to a board; it does not identify the person. API moves always use a non-person channel, including when the server was started in an ordinary terminal. `spec-approve`, `spec-decline`, answering or verifying with `as: person`, and any other person-only move are refused with `B26_PERSON_CHANNEL` without recording an event. Token revocation through the standalone API is refused for the same reason. Spec signing off is not an offered API move. Use the person's terminal or the actual `pullboard view` page for person actions; ordinary agent moves remain available through the API.
 
 The view's own page retains its person channel. The standalone API refuses `POST /api/v1/boards/:board/requests` with `B26_PERSON_CHANNEL`; the view continues to record the person's coordinator request. Residual: an agent that starts `pullboard view` itself also holds that view's link; this change does not isolate that link from the agent. Signed person moves (#408) address that separate boundary.
+
+`runner add` registers machine-local SSH capacity. Optional `--node` and `--root` select absolute remote paths when Node is outside the SSH login path or runner storage needs a specific location. The default storage root is `~/.pullboard-runner`; runner work shares the remote machine resource pool.
+
+Runner storage keeps one repository object cache and creates an isolated checkout with complete history per run. A locked inventory handshake transfers only missing committed objects after scanning their blobs, paths and commit metadata, including ancestors. Historical protected paths are checked before connecting. A credential-free HTTPS origin may seed the cache at a locally known published ancestor; caller credentials are never forwarded. Cached object contents are not rescanned on every run.
+
+Each checkout with a committed npm lockfile runs `npm ci`, including lifecycle scripts. Only npm's content cache is shared; installed dependencies and generated files stay in the fresh checkout. Other lock managers are refused. Combined command output and transport diagnostics are bounded at 64 MiB; exceeding that limit refuses the run.
+
+Post-run cleanup reports `RUNNER_CLEANUP_TIMEOUT` after 30 seconds instead of leaving the controller waiting indefinitely. That failure does not retry the command. The physical runner slot is released after its known children have drained and no unresolved live process remains; an unresolved live process keeps the slot occupied until cleanup can be verified.
