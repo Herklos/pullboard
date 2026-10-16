@@ -1,6 +1,6 @@
 /** pullboard blueprint add: a blueprint lands on a board as drafts, once [S1,I1]. */
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
@@ -167,11 +167,11 @@ test('blueprint add files a blueprint as drafts or nothing at all [S1,I1]', () =
   // A later starter the board refuses (here a brief over its limit) stops the add before any write.
   const late = refused('late-refusal', [{ key: '1', title: 'First starter', cites: ['W1'] }, { key: '2', title: 'Second starter', brief: 'x'.repeat(8001) }]);
   assert.equal(late.code, 'BRIEF_TOO_LONG');
-  // Light and mid starters need a coordinator's check and a cold brief, so a blueprint refuses them.
+  // A light or mid starter without what pullboard add requires is refused with add's own refusal.
   for (const route of ['light', 'mid']) {
     const error = refused(`${route}-route`, [{ key: '1', title: 'First starter', cites: ['W1'] }, { key: '2', title: 'Second starter', route }]);
-    assert.equal(error.code, 'BAD_BLUEPRINT');
-    assert.match(error.message, new RegExp(`items\\[1\\]\\.route must be strong`, 'u'));
+    assert.equal(error.code, 'NO_BRIEF');
+    assert.match(error.message, new RegExp(`an item routed ${route} must be buildable cold`, 'u'));
   }
   // After the refusals, the same blueprint fixed adds everything at once.
   const added = json(box, 'blueprint', 'add', 'web-app');
@@ -204,5 +204,90 @@ test('every gallery blueprint is bundled and valid [S1]', () => {
     for (const rule of card.rules) assert.ok(texts.includes(rule), `${name} holds its card's rule word for word: ${rule}`);
     for (const rule of blueprint.rules) assert.ok(rule.why.trim().length > 10, `${name} ${rule.key} gives a reason`);
     assert.ok(blueprint.questions.length >= card.asks, `${name} asks at least what its card says it asks`);
+  }
+});
+
+test('blueprint add files a blueprint as drafts with light and mid starters add accepts [S1,I1]', () => {
+  // A light or mid starter carrying its brief, criterion and check is filed on that route, with
+  // all three passed to the item unchanged; a strong starter needs none of them.
+  const box = freshBoard({ gate: 'true' });
+  const brief = 'Files:\n- web/index.html\nTest:\n- test/home.test.js asserts the page fits 375 pixels';
+  const items = [
+    { key: '1', title: 'Light starter', cites: ['W3'], route: 'light', brief, criterion: 'The home page fits 375 pixels.', check: 'true' },
+    { key: '2', title: 'Mid starter', cites: ['W1'], route: 'mid', brief, criterion: 'A test fails without the change.', check: 'true', after: ['1'] },
+    { key: '3', title: 'Strong starter', cites: ['W2'] },
+  ];
+  writeFileSync(join(box.repo, 'routes.json'), `${JSON.stringify({ ...PUBLISHED, name: 'routes', items })}\n`);
+  const added = json(box, 'blueprint', 'add', 'routes.json');
+  assert.equal(added.items.length, 3);
+  const filed = json(box, 'list', '--all').items.sort((a, b) => a.item_id - b.item_id);
+  assert.deepEqual(filed.map((item) => [item.item_title, item.item_route, item.item_check, item.item_criterion, item.item_brief]), [
+    ['Light starter', 'light', 'true', items[0].criterion, brief],
+    ['Mid starter', 'mid', 'true', items[1].criterion, brief],
+    ['Strong starter', 'strong', '', '', ''],
+  ]);
+  assert.equal(filed[1].item_after, String(filed[0].item_id));
+});
+
+test('blueprint add files a blueprint as drafts beside approved rows in its own section [S1,I1]', () => {
+  // The person already wrote the blueprint's section, with one rule approved in the same words: a
+  // first add still files every rule as a draft and every question as a pending row.
+  const box = freshBoard();
+  const file = join(box.repo, 'SPEC.md');
+  const rule = `${PUBLISHED.rules[0].text} Why: ${PUBLISHED.rules[0].why}`;
+  writeFileSync(file, `${readFileSync(file, 'utf8').trimEnd()}\n\n## A · Web app\n\n- A1 [approved, must] ${rule} | gate: review\n- A2 [approved, must] ${PUBLISHED.questions[0].ask}: Rails. Choices: Rails, Next.js. | gate: review\n`);
+  box.git('commit', '-q', '-am', 'chore: approve rows in the blueprint section');
+  const added = json(box, 'blueprint', 'add', 'web-app');
+  assert.equal(added.section, 'A · Web app', 'the rows go in the existing section');
+  assert.deepEqual(added.rows.map((row) => [row.key, row.status]), [
+    ...PUBLISHED.rules.map((entry) => [entry.key, 'draft']), ...PUBLISHED.questions.map((entry) => [entry.key, 'pending'])]);
+  const spec = parseSpec(readFileSync(file, 'utf8'));
+  assert.deepEqual(spec.rows.filter((row) => row.status === 'approved').map((row) => row.id), ['A1', 'A2']);
+  assert.equal(spec.rows.filter((row) => row.section === 'A · Web app').length, 12);
+});
+
+test('blueprint add files a blueprint as drafts after an add stopped part way [S1,I1]', () => {
+  // A finished add on one board gives the exact rows; a second board is left where an add stops
+  // after its rows and first starter: the rows and the under-way marker written, item 1 added.
+  const reference = freshBoard();
+  const done = json(reference, 'blueprint', 'add', 'web-app');
+  const ids = Object.fromEntries(done.rows.map((row) => [row.key, row.id]));
+  const underWay = `<!-- pullboard-blueprint web-app 1 adding ${Object.entries(ids).map(([key, id]) => `${key}=${id}`).join(' ')} -->`;
+  const finished = readFileSync(join(reference.repo, 'SPEC.md'), 'utf8');
+  assert.ok(finished.includes('<!-- pullboard-blueprint web-app 1 -->'));
+  const box = freshBoard();
+  writeFileSync(join(box.repo, 'SPEC.md'), finished.replace('<!-- pullboard-blueprint web-app 1 -->', underWay));
+  box.git('commit', '-q', '-am', 'chore: leave an add part way');
+  const first = json(box, 'add', 'coordinator', PUBLISHED.items[0].title, '--specs', `${ids.W1},${ids.W2}`);
+  const retried = json(box, 'blueprint', 'add', 'web-app');
+  assert.deepEqual(retried.rows, [], 'no row is filed twice');
+  assert.deepEqual(retried.items.map((item) => item.key), ['2', '3'], 'only the missing starters are added');
+  assert.deepEqual(retried.items.find((item) => item.key === '3').after, [first.item.item_id], 'the third starter still waits on the first');
+  assert.equal(readFileSync(join(box.repo, 'SPEC.md'), 'utf8'), finished, 'the finished marker replaces the under-way one');
+  assert.equal(json(box, 'blueprint', 'add', 'web-app').items.length, 0, 'and then a repeat adds nothing');
+});
+
+test('blueprint add files a blueprint as drafts and runs nothing it supplies [S1,I1]', () => {
+  // A starter's check is stored on the item, but no check baseline starts: add executes nothing
+  // from a blueprint, and says so. A blueprint is never read from a URL.
+  const box = freshBoard({ gate: 'true' });
+  const marker = join(box.dir, 'check-ran');
+  const brief = 'Files:\n- web/index.html\nTest:\n- test/home.test.js asserts the page loads';
+  const check = `touch '${marker}'`;
+  writeFileSync(join(box.repo, 'checked.json'), `${JSON.stringify({ ...PUBLISHED, name: 'checked',
+    items: [{ key: '1', title: 'Checked starter', cites: ['W1'], route: 'light', brief, criterion: 'The page loads.', check }] })}\n`);
+  const added = json(box, 'blueprint', 'add', 'checked.json');
+  const id = added.items[0].id;
+  const item = json(box, 'show', String(id));
+  assert.equal(item.item_check, check, 'the check is stored unchanged');
+  assert.equal(item.item_check_baseline ?? null, null, 'no check baseline was started');
+  assert.equal(existsSync(marker), false, 'the check command never ran');
+  assert.deepEqual(added.checksNotRun, [id], 'the summary names the checks that were not run');
+  const text = box.run('blueprint', 'add', 'checked.json');
+  assert.match(text.stdout, /already on this board/u);
+  for (const url of ['https://pullboard.dev/blueprints/web-app.json', 'file:///tmp/web-app.json']) {
+    const refused = box.run('blueprint', 'add', url, '--json');
+    assert.equal(refused.status, 1, refused.stdout + refused.stderr);
+    assert.equal(JSON.parse(refused.stdout).error.code, 'BLUEPRINT_URL');
   }
 });
