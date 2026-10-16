@@ -361,14 +361,50 @@ async function release(child) {
   assert.equal(code, 0, child.errors);
 }
 
+test('single-quoted named-test checks skip the browser slot [C7]', async () => {
+  const box = fixture();
+  const { repo } = checkProject(box);
+  const itemCheck = 'node bin/run-tests.js --test-name-pattern "item check marker" test/cpu-check.test.js';
+  /** Keep assertions about the parser independent of worker custody inherited by the test process. */
+  const classify = command => checkNeedsBrowser(repo, command, { env: { ...process.env, NODE_OPTIONS: '' } });
+  assert.equal(await classify(itemCheck), false, 'an explicit CPU-only test file is classifiable');
+  const outputPattern = '^[[:space:]]*ok [0-9]+ - item check marker';
+  const newlinePrint = ([quote, backslashes]) => `printf ${quote}%s${'\\'.repeat(backslashes)}n${quote} "$out"`;
+  const capturedCheck = (formats, patternQuotes) => `out=$(${itemCheck} 2>&1); ${newlinePrint(formats[0])}; ${newlinePrint(formats[1])} | grep -Eq ${patternQuotes[0]}${outputPattern}${patternQuotes[0]} && ${newlinePrint(formats[2])} | grep -Eq ${patternQuotes[1]}^# fail 0$${patternQuotes[1]}`;
+  const oneBackslash = [1, 1, 1];
+  const accepted = [
+    { formats: oneBackslash.map(count => ['\'', count]), patternQuotes: ['\'', '\''] },
+    { formats: [['\'', 1], ['"', 1], ['\'', 1]], patternQuotes: ['"', '\''] },
+    { formats: [['"', 1], ['\'', 1], ['"', 1]], patternQuotes: ['\'', '"'] },
+    { formats: oneBackslash.map(count => ['"', count]), patternQuotes: ['"', '"'] },
+  ];
+  for (const variant of accepted) {
+    assert.equal(await classify(capturedCheck(variant.formats, variant.patternQuotes)), false,
+      `the exact capture wrapper accepts quote changes with one literal backslash: ${JSON.stringify(variant)}`);
+  }
+  for (let index = 0; index < 3; index += 1) {
+    const formats = oneBackslash.map(count => ['\'', count]);
+    formats[index] = ['\'', 2];
+    assert.equal(await classify(capturedCheck(formats, ['\'', '\''])), true,
+      `a two-backslash printf at position ${index + 1} stays browser-gated`);
+  }
+  assert.equal(await classify(`${capturedCheck(accepted[0].formats, accepted[0].patternQuotes)}; :`), true,
+    'an arbitrary suffix remains outside the exact capture wrapper');
+  const substituted = capturedCheck(accepted[0].formats, accepted[0].patternQuotes)
+    .replace('printf \'%s\\n\' "$out"', 'printf \'%s\\n\' "$(printf %s "$out")"');
+  assert.equal(await classify(substituted), true, 'a command substitution remains outside the exact printf wrapper');
+  assert.equal(await classify('node bin/run-tests.js test/cockpit/brief.test.js'), true,
+    'known browser suites remain browser-gated');
+  assert.equal(await checkNeedsBrowser(repo, itemCheck, {
+    env: { ...process.env, NODE_OPTIONS: '--import=unknown-preload.mjs' },
+  }), true, 'an unclassified preload keeps the check browser-gated');
+});
+
 test('a non-browser check does not wait for the browser slot [C7]', async () => {
   const box = fixture();
   const { repo, base } = checkProject(box);
   const itemCheck = 'node bin/run-tests.js --test-name-pattern "item check marker" test/cpu-check.test.js';
   const submitCheck = 'node bin/run-tests.js --test-name-pattern "submit check marker" test/cpu-check.test.js';
-  assert.equal(await checkNeedsBrowser(repo, itemCheck), false, 'an explicit CPU-only test file is classifiable');
-  assert.equal(await checkNeedsBrowser(repo, 'node bin/run-tests.js test/cockpit/brief.test.js'), true,
-    'known browser suites remain browser-gated');
   const added = runFixtureChild(process.execPath, [BIN, 'add', 'coordinator', 'CPU check item', '--check', itemCheck, '--wait', '--json'], {
     cwd: repo, env: box.env, encoding: 'utf8',
   });
