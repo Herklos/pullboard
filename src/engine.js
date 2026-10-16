@@ -220,7 +220,8 @@ export function applyRelayMove(board, move, { sequence, at, sender, kind, digest
   if (!problem) {
     // Engine-13 relay moves run under linked verifier standing; older recorded moves replay as they did.
     // The person is above every seat; their own moves act with the coordinator's standing.
-    const standing = move?.engine >= VERIFIER_STANDING_ENGINE ? { root: sender?.root === true || sender?.kind === 'person' } : null;
+    const standing = move?.engine >= VERIFIER_STANDING_ENGINE ? { root: sender?.root === true || sender?.kind === 'person',
+      person: sender?.kind === 'person', lineage: sender?.root === true && typeof sender.lineage === 'string' ? sender.lineage : null } : null;
     return applyEngineMove(board, move, { sequence, at, standing, enrollment: registration?.target ?? null });
   }
   return refuseRelayMove(board, move, { sequence, at, sender, kind, code: problem.code, digest, refusal: problem });

@@ -23,7 +23,8 @@ export function validRelaySender(sender) {
     (sender.kind !== 'agent' || (typeof sender.agent === 'string' && sender.agent.length > 0 && sender.agent.length <= 256)) &&
     (sender.kind !== 'machine' || (typeof sender.machine === 'string' && sender.machine.length > 0 && sender.machine.length <= 256)) &&
     (sender.policy === undefined || Number.isSafeInteger(sender.policy) && sender.policy > 0) &&
-    (sender.root === undefined || sender.root === true));
+    (sender.root === undefined || sender.root === true) &&
+    (sender.lineage === undefined || typeof sender.lineage === 'string' && sender.lineage.length > 0 && sender.lineage.length <= 64));
 }
 
 /** Make the same authorization decision on every device, without inspecting its shell or checkout. */

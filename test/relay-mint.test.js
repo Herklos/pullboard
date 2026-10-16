@@ -177,7 +177,11 @@ test('an agent in its worktree cannot mint a relay token [H2,V1,E3,E5,P6]', asyn
     const person = await box.phoneSession();
     await box.auth.revoke(person.token, reissued.document.id);
     const machineRenewal = await call(box.origin, state.token, 'POST', '/auth/tokens', { board: state.board, agent: grandchild.id });
-    assert.equal(machineRenewal.document.error?.code, 'TOKEN_EXISTS', 'the machine credential never renews a seat that held a token');
+    assert.equal(machineRenewal.document.error?.code, 'TOKEN_EXISTS', 'the machine credential never renews a registered seat that held a token');
+    // A machine-minted seat has no receipt to fall back on: its first-mint history alone refuses.
+    await box.auth.revoke(person.token, state.agentTokens[prelinked.document.agent].id);
+    const machineRemint = await call(box.origin, state.token, 'POST', '/auth/tokens', { board: state.board, agent: prelinked.document.agent });
+    assert.equal(machineRemint.document.error?.code, 'TOKEN_EXISTS', 'the machine credential never renews a seat that held a token');
     const manualRecover = await call(box.origin, state.agentTokens[manual].token, 'POST', '/auth/tokens', { board: state.board, agent: manual, recover: true });
     assert.equal(manualRecover.document.error?.code, 'TOKEN_AGENT', 'a machine-origin seat has no creator to reissue it');
     // Retrying the exact registration returns the same issuance, and no token.
@@ -205,14 +209,47 @@ test('an agent in its worktree cannot mint a relay token [H2,V1,E3,E5,P6]', asyn
     assert.equal(claimed.code, 0, claimed.failure ?? 'the build-only seat keeps acting under its own token');
   });
 
+  await t.test('a registration interrupted before enrollment still claims its seat from the machine', async () => {
+    // Causal control for the 5e76ff75 reject: fail after the journal append, before enrollment.
+    const enroll = box.auth.enrollSeat;
+    let injected = 0;
+    box.auth.enrollSeat = (...args) => {
+      if (injected++ === 0) throw new Error('injected failure between the journal append and enrollment');
+      return enroll.apply(box.auth, args);
+    };
+    const from = box.transit.length;
+    let interrupted;
+    try { interrupted = await box.cli('worktree', lane, '--model', 'Interrupted Seat'); }
+    finally { box.auth.enrollSeat = enroll; }
+    assert.notEqual(interrupted.code, 0, 'the creator sees the failed registration');
+    const failed = box.transit.slice(from).find((entry) => entry.method === 'POST' && entry.path.endsWith('/moves') && JSON.parse(entry.request.toString('utf8')).registration);
+    assert.ok(failed, 'the registration reached the relay');
+    const body = JSON.parse(failed.request.toString('utf8'));
+    const state = link(box);
+    const snapshot = await call(box.origin, state.token, 'GET', `/api/v1/boards/${state.board}/state`);
+    const events = await call(box.origin, state.token, 'GET', `/api/v1/boards/${state.board}/events?after=${snapshot.document.state.sequence}`);
+    assert.equal(events.status, 200, JSON.stringify(events.document.error ?? {}));
+    assert.ok(events.document.events.some((event) => event.registration?.target === body.registration.target), 'the move and its receipt were published');
+    assert.equal(box.auth.seatRecord(state.board, body.registration.target), null, 'no first-issuance history was written');
+    const race = await call(box.origin, state.token, 'POST', '/auth/tokens', { board: state.board, agent: body.registration.target });
+    assert.equal(race.document.error?.code, 'TOKEN_EXISTS', 'the machine credential cannot first-mint a name its published receipt claims');
+    const retry = await call(box.origin, state.agentTokens.coordinator.token, 'POST', failed.path, body);
+    assert.equal(retry.status, 200, 'the creator\'s exact retry is accepted');
+    assert.equal(retry.document.enrollment.agent, body.registration.target);
+    assert.match(retry.document.enrollment.token ?? '', TOKEN, 'the exact retry finishes the enrollment with the first token');
+    assert.equal(box.auth.seatRecord(state.board, body.registration.target).origin, 'registered');
+    const after = await call(box.origin, state.token, 'POST', '/auth/tokens', { board: state.board, agent: body.registration.target });
+    assert.equal(after.document.error?.code, 'TOKEN_EXISTS');
+  });
+
   await t.test('linked verify refuses the builder line and seats without standing, in one line', () => {
     const item = submitted(board, builder.id, lane);
     /** The accept arguments a seat sends for this item. */
     const verdict = (agentId) => [item.item_id, { agentId, decision: 'ACCEPT', reason: 'CRITERION_MET', note: 'checked the proof', head: 'd'.repeat(40), digest: item.item_frozen_digest }];
     let id = 0;
     /** Replay one stamped engine-13 relay move from an agent on the linked board copy. */
-    const move = (operation, args, sender) => applyRelayMove(board, { version: 1, engine: ENGINE_VERSION, id: `standing-${++id}`, operation, args }, {
-      sequence: appliedSequence(board) + 1, at: new Date().toISOString(), kind: 'move', sender: { kind: 'agent', userId: '1', policy: VERIFIER_STANDING_ENGINE, ...sender },
+    const move = (operation, args, sender, extra = {}) => applyRelayMove(board, { version: 1, engine: ENGINE_VERSION, id: `standing-${++id}`, operation, args }, {
+      sequence: appliedSequence(board) + 1, at: new Date().toISOString(), kind: 'move', sender: { kind: 'agent', userId: '1', policy: VERIFIER_STANDING_ENGINE, ...sender }, ...extra,
     });
     for (const seat of [child.id, grandchild.id, manual, prelinked.document.agent]) {
       const refused = move('verify', verdict(seat), { agent: seat });
@@ -234,6 +271,40 @@ test('an agent in its worktree cannot mint a relay token [H2,V1,E3,E5,P6]', asyn
     const ownVerdict = move('verify', [own.item_id, { ...verdict(reviewer.id)[1], digest: own.item_frozen_digest }], { agent: reviewer.id });
     assert.equal(ownVerdict.error?.code, 'VERIFIER_STANDING', 'a coordinator-made seat cannot verify the coordinator\'s own work');
     assert.match(ownVerdict.error.message, /another machine's registration lineage, or the person/u);
+
+    // The positive half of 11099: the coordinator on machine A builds; a seat from machine B's
+    // registration lineage, or the person, verifies it, while machine A's own seats still cannot.
+    const machineA = { agent: 'coordinator', root: true, lineage: '11111111-1111-4111-8111-111111111111' };
+    const machineB = { agent: 'coordinator', root: true, lineage: '22222222-2222-4222-8222-222222222222' };
+    /** Enroll one seat through a replayed, receipt-bound coordinator registration from one machine. */
+    const enrollFrom = (sender, n) => {
+      const target = `${lane}-${n}`;
+      const digest = String(n % 10).repeat(64);
+      const sequence = appliedSequence(board) + 1;
+      const made = move('register', [{ lane, path: `/lineage-seat-${n}`, model: 'Lineage Seat', createdBy: 'coordinator', id: target }], sender,
+        { registration: { target, creator: 'coordinator', sequence, digest }, digest });
+      assert.equal(made.result, target, `machine ${sender.lineage.slice(0, 1)} enrolls ${target}`);
+      return target;
+    };
+    const seatA = enrollFrom(machineA, 801);
+    const seatB = enrollFrom(machineB, 802);
+    /** Claim and submit one coordinator item through replayed moves from machine A. */
+    const builtOnA = () => {
+      const itemId = store.addItem(board, { by: 'coordinator', lane: 'coordinator', title: 'coordinator-built on machine A', criterion: 'another lineage accepts it' });
+      const frozen = freezer()();
+      assert.equal(move('claim', [itemId, { agentId: 'coordinator', lane: 'coordinator', leaseMs: 3_600_000, head: 'a'.repeat(40), frozen, freezeError: null }], machineA).error, undefined);
+      assert.equal(move('submit', [itemId, { agentId: 'coordinator', commit: 'b'.repeat(40), tree: 'c'.repeat(40) }], machineA).error, undefined);
+      return store.getItem(board, itemId);
+    };
+    const coordinatorItem = builtOnA();
+    const accept = (item) => [item.item_id, { agentId: seatB, decision: 'ACCEPT', reason: 'CRITERION_MET', note: 'checked the proof', head: 'd'.repeat(40), digest: item.item_frozen_digest }];
+    const sameLine = move('verify', [coordinatorItem.item_id, { ...accept(coordinatorItem)[1], agentId: seatA }], { agent: seatA });
+    assert.equal(sameLine.error?.code, 'VERIFIER_STANDING', 'a seat from the building machine\'s own lineage is refused');
+    const otherMachine = move('verify', accept(coordinatorItem), { agent: seatB });
+    assert.equal(otherMachine.result?.decision, 'ACCEPT', 'a seat from another machine\'s registration lineage verifies coordinator-built work');
+    const forPerson = builtOnA();
+    const person = move('verify', [forPerson.item_id, { ...accept(forPerson)[1], agentId: seatA }], { kind: 'person', agent: undefined });
+    assert.equal(person.result?.decision, 'ACCEPT', 'the person verifies coordinator-built work');
   });
 
   await t.test('an engine-11 journal replays as before', (t) => {

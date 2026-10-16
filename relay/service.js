@@ -103,7 +103,8 @@ function sender(who, personOnly = false) {
   if (personOnly && who.kind !== 'session' && !(personOnly === 'snapshot' && who.kind === 'machine')) throw new Refused('HUMAN_REQUIRED', 'approve this person action from the paired phone');
   return { kind: who.kind === 'session' ? 'person' : who.kind === 'machine' ? 'machine' : 'agent', userId: who.user.id,
     ...(who.kind === 'board' ? { agent: who.agent } : who.kind === 'machine' ? { machine: who.machine } : {}),
-    ...(personOnly === 'snapshot' ? {} : { policy: VERIFIER_STANDING_ENGINE, ...(who.root === true ? { root: true } : {}) }) };
+    ...(personOnly === 'snapshot' ? {} : { policy: VERIFIER_STANDING_ENGINE,
+      ...(who.root === true ? { root: true, ...(who.lineage ? { lineage: who.lineage } : {}) } : {}) }) };
 }
 
 /** Create a private relay handler; the caller owns sign-in lifecycle and service shutdown. */
@@ -200,6 +201,19 @@ export function createRelayHandler({ directory, auth, pollMs = 200, publicOrigin
     });
   }
 
+  /**
+   * Let token issuance see a published seat receipt under the same board lock that appends it, so
+   * a receipt claims its target before, and whether or not, its enrollment finishes (#579).
+   */
+  auth.setRegistrationClaims((id, target) => {
+    const file = join(root, identity(id) + '.journal.sqlite');
+    try { if (!lstatSync(file).isFile()) return null; } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+    return auth.withBoard(id, () => {
+      const journal = createRelayJournal({ directory: root, boardId: id, maxBytes: STORED_BYTES, now: () => new Date(now()) });
+      try { return journal.registrationFor(target); } finally { journal.close(); }
+    });
+  });
+
   /** Append ciphertext under its server-allocated sequence, with no engine or filesystem access. */
   async function append(board, body, who, kind = 'move') {
     const bytes = sealed(body, kind === 'move');
@@ -222,10 +236,11 @@ export function createRelayHandler({ directory, auth, pollMs = 200, publicOrigin
       let row;
       try { row = retry ? journal.recordAt(receipt.sequence) : journal.append(body.sequence, bytes, kind, principal, receipt); }
       catch (error) {
-        // The move committed but its seat did not: finish the enrollment for the exact same upload.
-        const saved = error.code === 'SEQUENCE_REPEAT' ? journal.recordAt(receipt.sequence) : null;
-        if (!saved || !saved.bytes.equals(bytes) || JSON.stringify(saved.registration) !== JSON.stringify(receipt) || saved.sender.agent !== receipt.creator) throw error;
-        row = saved;
+        // The move and its receipt committed but the seat did not (any failure before enrollment):
+        // the creator's exact retry rolls the enrollment forward, even after compaction.
+        if (!['SEQUENCE_REPEAT', 'SEAT_TAKEN'].includes(error.code) || JSON.stringify(journal.registrationFor(receipt.target)) !== JSON.stringify(receipt)) throw error;
+        row = journal.recordAt(receipt.sequence);
+        if (row && !row.bytes.equals(bytes)) throw error;
       }
       const enrollment = auth.enrollSeat(who.credential, board.id, receipt);
       const committed = row ? event(row) : { event_id: receipt.sequence, kind, sender: principal, registration: receipt, sealed: body.sealed };

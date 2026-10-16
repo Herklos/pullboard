@@ -57,6 +57,10 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
     if (!db.prepare('PRAGMA table_info(relay_credentials)').all().some((column) => column.name === 'root')) {
       db.exec('ALTER TABLE relay_credentials ADD COLUMN root INTEGER NOT NULL DEFAULT 0');
     }
+    // Which machine's person-set coordinator line a root token belongs to; renewals keep it (#579).
+    if (!db.prepare('PRAGMA table_info(relay_credentials)').all().some((column) => column.name === 'lineage')) {
+      db.exec('ALTER TABLE relay_credentials ADD COLUMN lineage TEXT');
+    }
     // Every seat that already held a token got it from the machine or a person mint: machine origin for good (#579).
     db.exec(`INSERT OR IGNORE INTO relay_seats (board, agent, origin) SELECT DISTINCT board, agent, 'machine'
       FROM relay_credentials WHERE kind = 'board' AND board IS NOT NULL AND agent IS NOT NULL`);
@@ -78,6 +82,8 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
   const deviceSessionReceipts = new Map();
   let closed = false;
   let locked = false;
+  // The relay journal's published seat receipts, read under the board lock (#579); none until wired.
+  let registrationClaim = () => null;
 
   /** Refuse operation after closing instead of surfacing a raw SQLite error. */
   function open() { if (closed) throw new Refused('RELAY_CLOSED', 'start the relay before signing in or using a credential'); }
@@ -115,13 +121,13 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
   }
 
   /** Mint one independently expiring/revocable credential and persist only its hash. */
-  function issue(user, kind, board, agent, ttl, root = false) {
+  function issue(user, kind, board, agent, ttl, root = false, lineage = null) {
     open();
     const token = random(kind === 'session' ? 'ps_' : kind === 'machine' ? 'pm_' : 'pa_');
     const id = randomUUID();
     const created = now();
     const expires = created + ttl;
-    db.prepare('INSERT INTO relay_credentials (id,hash,kind,user_id,board,agent,created,expires,root) VALUES (?,?,?,?,?,?,?,?,?)').run(id, hash(token), kind, user.id, board ?? null, agent ?? null, created, expires, root ? 1 : 0);
+    db.prepare('INSERT INTO relay_credentials (id,hash,kind,user_id,board,agent,created,expires,root,lineage) VALUES (?,?,?,?,?,?,?,?,?,?)').run(id, hash(token), kind, user.id, board ?? null, agent ?? null, created, expires, root ? 1 : 0, root ? lineage : null);
     return { token, id, created, expires };
   }
 
@@ -131,8 +137,8 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
   }
 
   /** Record a seat's first issuance; the seat row exists before its token is ever returned. */
-  function firstMint(user, board, agent, ttl, { origin, creator = null, sequence = null, digest = null, root = false }) {
-    const issued = issue(user, 'board', board, agent, ttl, root);
+  function firstMint(user, board, agent, ttl, { origin, creator = null, sequence = null, digest = null, root = false, lineage = null }) {
+    const issued = issue(user, 'board', board, agent, ttl, root, lineage);
     db.prepare(`INSERT INTO relay_seats (board,agent,origin,creator,sequence,digest,first_id,first_created,first_expires) VALUES (?,?,?,?,?,?,?,?,?)
       ON CONFLICT(board, agent) DO UPDATE SET origin=excluded.origin, creator=excluded.creator, sequence=excluded.sequence, digest=excluded.digest,
         first_id=excluded.first_id, first_created=excluded.first_created, first_expires=excluded.first_expires`)
@@ -465,7 +471,7 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
         if (board !== null && board !== undefined && !db.prepare('SELECT 1 FROM relay_boards WHERE id=?').get(board)) throw new Refused('BOARD_NOT_LINKED', 'link this board again before using it');
         credential(token); // A revocation or expiry during the awaited provider call must take effect.
       }
-      return { id: row.id, kind: row.kind, user: { id: row.user_id, login: row.login }, ...(row.board ? { board: row.board, ...(row.kind === 'machine' ? { machine: row.agent } : { agent: row.agent }) } : {}), ...(row.root ? { root: true } : {}), ...(repository ? { permission: repository.permission, public: repository.public } : {}), expires: row.expires };
+      return { id: row.id, kind: row.kind, user: { id: row.user_id, login: row.login }, ...(row.board ? { board: row.board, ...(row.kind === 'machine' ? { machine: row.agent } : { agent: row.agent }) } : {}), ...(row.root ? { root: true, ...(row.lineage ? { lineage: row.lineage } : {}) } : {}), ...(repository ? { permission: repository.permission, public: repository.public } : {}), expires: row.expires };
     },
     /** Accept a link only from a signed-in human with current repository write access. */
     async linkBoard(token, board, repository, deadline = Infinity) {
@@ -571,9 +577,15 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
         const existing = seat(board, agent);
         if (principal.kind === 'board') {
           if (!recover && principal.agent === agent) {
-            const renewed = issue(principal.user, 'board', board, agent, expiresIn, Boolean(current.root));
+            const renewed = issue(principal.user, 'board', board, agent, expiresIn, Boolean(current.root), current.lineage ?? null);
             db.prepare('UPDATE relay_credentials SET revoked=1 WHERE id=?').run(current.id);
             return { ...renewed, board, agent };
+          }
+          const claim = !existing && recover ? registrationClaim(board, agent) : null;
+          if (recover && claim?.creator === principal.agent && agent !== principal.agent) {
+            // A receipt published without its enrollment: the creator rolls the first mint forward.
+            return firstMint({ id: current.user_id }, board, agent, tokenTTL,
+              { origin: 'registered', creator: claim.creator, sequence: claim.sequence, digest: claim.digest });
           }
           if (recover && existing?.origin === 'registered' && existing.creator === principal.agent && agent !== principal.agent) {
             db.prepare("UPDATE relay_credentials SET revoked=1 WHERE board=? AND kind='board' AND agent=?").run(board, agent);
@@ -589,8 +601,17 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
             ? 'the coordinator already has a token; it renews with its own, or the person reissues it with pullboard relay on'
             : 'this seat already had a token; it renews only with its own current token, or its creator reissues it');
         }
+        // A published receipt claims its target even before enrollment finishes: no machine race.
+        if (registrationClaim(board, agent)) {
+          throw new Refused('TOKEN_EXISTS', 'a creator registered this seat; its first token comes only through that registration or its creator');
+        }
         return firstMint(principal.user, board, agent, expiresIn, { origin: 'machine' });
       });
+    },
+    /** Wire the relay journal's receipt lookup; token issuance then honors every published claim. */
+    setRegistrationClaims(reader) {
+      if (typeof reader !== 'function') throw new Refused('RELAY_CONFIG', 'configure a seat receipt reader');
+      registrationClaim = reader;
     },
     /**
      * Give a registration move's target its first token, inside the board lock that appended the
@@ -645,10 +666,13 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
         // replaces, so each of the person's linked machines keeps its own coordinator token.
         const revoked = db.prepare("SELECT id FROM relay_credentials WHERE board=? AND kind='board' AND agent='coordinator' AND revoked=0 AND expires>?").all(board, now())
           .map((row) => row.id).filter((id) => reason === 'reset' || id === replaces);
+        // A replacement keeps its machine's lineage; a token for another machine starts a new one.
+        const replaced = replaces === undefined ? null : db.prepare("SELECT lineage FROM relay_credentials WHERE id=? AND board=? AND kind='board' AND agent='coordinator' AND root=1").get(replaces, board);
+        const lineage = reason !== 'reset' && replaced?.lineage ? replaced.lineage : randomUUID();
         for (const id of revoked) db.prepare('UPDATE relay_credentials SET revoked=1 WHERE id=?').run(id);
         const issued = reason === 'reissue'
-          ? { ...issue(principal.user, 'board', board, 'coordinator', expiresIn, true), board, agent: 'coordinator' }
-          : firstMint(principal.user, board, 'coordinator', expiresIn, { origin: 'root', root: true });
+          ? { ...issue(principal.user, 'board', board, 'coordinator', expiresIn, true, lineage), board, agent: 'coordinator' }
+          : firstMint(principal.user, board, 'coordinator', expiresIn, { origin: 'root', root: true, lineage });
         db.prepare('INSERT INTO relay_coordinator_events (id,board,reason,session_id,revoked,issued_id,at) VALUES (?,?,?,?,?,?,?)')
           .run(randomUUID(), board, reason, current.id, JSON.stringify(revoked), issued.id, issued.created);
         return { ...issued, root: true, reason };
