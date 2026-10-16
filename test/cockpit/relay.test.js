@@ -990,23 +990,31 @@ async function interceptJourneyOrigins(chrome, site, view) {
       completion: record.completion ?? null,
       networkFailure: record.networkFailure ?? null,
       completed: record.completed,
+      browserCanceled: record.browserCanceled === true,
+      terminalCancellation: record.terminalCancellation === true,
+      cancellationCorrelationExpired: record.cancellationCorrelationExpired === true,
     };
   }
   /** Bound diagnostics to failed/incomplete requests and a short recent tail. */
   function safeTrace() {
-    const incomplete = interceptions.filter((record) => !record.completed || record.completionAttempts !== 1);
+    const incomplete = interceptions.filter((record) => !isAccountedRequest(record));
+    const canceledCount = interceptions.filter((record) => isConfirmedBrowserCancellation(record)).length;
     const failed = interceptions.filter((record) => record.failure).slice(0, 20);
-    const relevant = new Set([...failed, ...incomplete.slice(0, 20), ...interceptions.slice(-8)]);
+    const canceled = interceptions.filter(isConfirmedBrowserCancellation).slice(0, 20);
+    const relevant = new Set([...failed, ...incomplete.slice(0, 20), ...canceled, ...interceptions.slice(-8)]);
     return {
       requestCount: interceptions.length,
       failureCount,
       incompleteCount: incomplete.length,
+      confirmedBrowserCancellationCount: canceledCount,
       requests: [...relevant].map(safeInterception),
       failures: failures.slice(0, 20),
     };
   }
   /** Send exactly one Fetch completion for a paused request and retain its protocol outcome. */
   async function completePausedRequest(record, method, params) {
+    assert.equal(String(params.requestId), record.fetchRequestId, 'Fetch completion belongs to this exact paused request');
+    if (record.completionAttempts === 0 && isConfirmedBrowserCancellation(record)) return;
     record.completionAttempts += 1;
     if (record.completionAttempts !== 1) {
       record.stage = 'duplicate-completion-refused';
@@ -1026,6 +1034,41 @@ async function interceptJourneyOrigins(chrome, site, view) {
       record.stage = 'completion-command-rejected';
       throw error;
     }
+  }
+  /** Consider only one rejected fulfill for this exact owned request for bounded cancellation correlation. */
+  function isAbortCompletionCandidate(record) {
+    const error = record.completion?.error;
+    return record.networkId !== null && record.address.origin !== 'other'
+      && record.completion?.method === 'Fetch.fulfillRequest'
+      && record.completionAttempts === 1
+      && record.completion?.status === 'rejected'
+      && error?.code === -32602
+      && (error.message === 'Invalid InterceptionId.' || error.message === 'Invalid InterceptionId');
+  }
+  /** Recognize the candidate only after this request's own matching-phase browser cancellation arrives. */
+  function isObservedAbortCompletionRace(record) {
+    return isAbortCompletionCandidate(record) && record.browserCanceled === true
+      && record.networkFailure?.canceled === true
+      && record.networkFailureTiming === record.completionTiming;
+  }
+  /** Count only a completion or the exactly correlated browser-abort terminal outcome. */
+  function isConfirmedBrowserCancellation(record) {
+    if (!record.terminalCancellation || !record.browserCanceled || !record.networkId || record.address.origin === 'other' || record.networkFailure?.canceled !== true) return false;
+    if (record.completionAttempts === 0) return true;
+    return isObservedAbortCompletionRace(record);
+  }
+  /** Require every paused request to finish once or meet the narrow cancellation rule. */
+  function isAccountedRequest(record) {
+    return (record.completed && record.completionAttempts === 1) || isConfirmedBrowserCancellation(record);
+  }
+  /** Mark a request terminally cancelled only when its own network event confirms the abort. */
+  function markObservedAbort(record) {
+    record.browserCanceled = true;
+    if (record.completed) return;
+    record.terminalCancellation = true;
+    record.stage = 'browser-cancelled';
+    record.abortController?.abort();
+    record.releaseHeldResponse?.();
   }
   /** Await tasks added while earlier interception work was settling. */
   async function drainTasks() {
@@ -1060,6 +1103,7 @@ async function interceptJourneyOrigins(chrome, site, view) {
     for (const record of records) {
       record.networkFailure = details;
       record.networkFailureTiming = details.timing;
+      if (details.canceled) markObservedAbort(record);
     }
     for (const check of networkFailureWaiters) check();
   }
@@ -1151,6 +1195,7 @@ async function interceptJourneyOrigins(chrome, site, view) {
           if (earlier?.length) {
             record.networkFailure = earlier.at(-1);
             record.networkFailureTiming = record.networkFailure.timing;
+            if (record.networkFailure.canceled) markObservedAbort(record);
             for (const check of networkFailureWaiters) check();
           }
         }
@@ -1163,11 +1208,13 @@ async function interceptJourneyOrigins(chrome, site, view) {
           return;
         }
         record.stage = 'fetching-owned-fixture';
+        record.abortController = new AbortController();
+        if (record.terminalCancellation) return;
         const headers = Object.fromEntries(Object.entries(asked.headers).filter(([name]) => !['host', 'content-length'].includes(name.toLowerCase())));
         const response = await fetchLive(base + address.pathname + address.search, {
           method: asked.method, headers, redirect: 'manual',
           ...(asked.postData === undefined ? {} : { body: asked.postData }),
-          signal: AbortSignal.timeout(10_000),
+          signal: AbortSignal.any([record.abortController.signal, AbortSignal.timeout(10_000)]),
         });
         record.responseStatus = response.status;
         record.stage = 'reading-owned-response';
@@ -1190,15 +1237,34 @@ async function interceptJourneyOrigins(chrome, site, view) {
             release = () => { releaseHeldResponses.delete(release); resume(); };
             releaseHeldResponses.add(release);
           });
+          record.releaseHeldResponse = release;
           held.resolve({ status: response.status, release });
+          if (record.terminalCancellation) release();
           await released;
+          record.releaseHeldResponse = null;
         }
+        if (record.terminalCancellation) return;
         await completePausedRequest(record, 'Fetch.fulfillRequest', {
           requestId, responseCode: response.status,
           responseHeaders: [...response.headers].filter(([name]) => !['content-length', 'connection', 'transfer-encoding', 'keep-alive', 'date'].includes(name.toLowerCase())).map(([name, value]) => ({ name, value })),
           body: body.toString('base64'),
         });
       } catch (error) {
+        if (record && isConfirmedBrowserCancellation(record) && record.completionAttempts === 0
+          && record.abortController?.signal.aborted && error.name === 'AbortError') {
+          record.stage = 'browser-cancelled';
+          return;
+        }
+        // CDP may deliver the canceled network event after the command rejection. Only this exact
+        // owned single-fulfill error may wait for correlation; expiry or any other outcome remains fatal.
+        if (record && isAbortCompletionCandidate(record) && !record.networkFailure) {
+          try { await waitForNetworkFailure((entry) => entry === record); }
+          catch { record.cancellationCorrelationExpired = true; }
+        }
+        if (record?.terminalCancellation && isObservedAbortCompletionRace(record)) {
+          record.stage = 'browser-cancelled-after-completion-race';
+          return;
+        }
         if (record) {
           record.stage = record.stage === 'completion-command-rejected' ? record.stage : 'interception-handler-failed';
           record.failure = safeProtocolError(error);
@@ -1216,27 +1282,32 @@ async function interceptJourneyOrigins(chrome, site, view) {
     for (const record of interceptions) record.stopObserved = true;
     for (const held of heldResponses.splice(0)) held.cancel();
     for (const release of releaseHeldResponses) release();
-    let drainError;
-    let disableError;
-    try { await drainTasks(); } catch (error) { drainError = error; }
-    try { await chrome.send('Fetch.disable'); } catch (error) { disableError = error; }
-    try { await drainTasks(); } catch (error) { drainError ??= error; }
+    const errors = [];
+    // Settle active completions before quiescing the owned page; requests arriving during shutdown
+    // then receive an explicit matching browser cancellation instead of escaping to a real origin.
+    try { await drainTasks(); } catch (error) { errors.push(error); }
+    try {
+      await chrome.send('Page.navigate', { url: 'about:blank' });
+      await chrome.waitFor('location.href === "about:blank"');
+    } catch (error) { errors.push(error); }
+    try { await drainTasks(); } catch (error) { errors.push(error); }
+    try { await chrome.send('Fetch.disable'); } catch (error) { errors.push(error); }
+    try { await drainTasks(); } catch (error) { errors.push(error); }
     finally {
       chrome.socket.removeEventListener('message', listener);
       chrome.socket.removeEventListener('message', networkListener);
     }
-    if (drainError || disableError) {
-      const errors = [drainError, disableError].filter(Boolean);
+    if (errors.length) {
       const summaries = errors.map((error) => {
         const safe = safeProtocolError(error);
         return (typeof safe === 'string' ? safe : safe.message).slice(0, 180);
       });
       throw new AggregateError(errors, 'journey interception cleanup failed: ' + summaries.join(' | '));
     }
-    const incomplete = interceptions.filter((record) => !record.completed || record.completionAttempts !== 1);
+    const incomplete = interceptions.filter((record) => !isAccountedRequest(record));
     const diagnostic = JSON.stringify(safeTrace());
     assert.equal(failureCount, 0, 'the hosted and loopback fixture requests complete; safe interception trace: ' + diagnostic);
-    assert.equal(incomplete.length, 0, 'each paused request receives exactly one successful Fetch completion; safe interception trace: ' + diagnostic);
+    assert.equal(incomplete.length, 0, 'each paused request completes once or has its own confirmed browser cancellation; safe interception trace: ' + diagnostic);
   };
   stop.holdNextResponse = holdNextResponse;
   stop.waitForNetworkFailure = waitForNetworkFailure;
@@ -1443,6 +1514,12 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
       }
     } catch (error) { journeyCleanupErrors.push(error); }
     try { rmSync(profile, { recursive: true, force: true }); } catch (error) { journeyCleanupErrors.push(error); }
+    if (!journeyBodyError && !journeyCleanupErrors.length) {
+      const trace = stopOrigins.trace();
+      t.diagnostic(JSON.stringify({ kind: 'owned-browser-cancellation-proof', failureCount: trace.failureCount,
+        incompleteCount: trace.incompleteCount, confirmedBrowserCancellationCount: trace.confirmedBrowserCancellationCount,
+        probe: trace.requests.find((record) => record.fixtureCancelProbe) }));
+    }
     if (journeyCleanupErrors.length) {
       t.diagnostic(JSON.stringify({
         testBodyCompletedSuccessfully: !journeyBodyError,
