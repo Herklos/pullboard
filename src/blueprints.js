@@ -356,3 +356,140 @@ function insertSection(source, spec, { existing, name, lines: added }) {
   lines.push('', `## ${name}`, '', ...added, '');
   return lines.join(newline);
 }
+
+// A row naming a file or a place on disk: any token with a slash or backslash between characters,
+// or a home-relative path. Bare names such as Next.js are words, not paths.
+const PATH_RE = /(?:^|[\s(`'"[])(?:~\/|\.{1,2}\/|\/)?[^\s/\\`'"()[\]]+[/\\][^\s`'"()[\]]+|(?:^|[\s(`'"[])~\//u;
+const EMAIL_RE = /[^\s@<>()[\]`'"]+@[^\s@<>()[\]`'"]+\.[^\s@<>()[\]`'"]+/u;
+const CHOICES = '. Choices: ';
+const WHY = ' Why: ';
+const MOST_CHOICE_PARTS = 12;
+
+/** Every index where a separator starts in the text. */
+function positions(text, separator) {
+  const found = [];
+  for (let at = text.indexOf(separator); at !== -1; at = text.indexOf(separator, at + 1)) found.push(at);
+  return found;
+}
+
+/**
+ * Read an approved question row back into its ask, choices and answer, or say why it cannot be.
+ * The ask and the choices may hold ": " and ", ", so every split is tried: a reading counts only if
+ * its answer is one of two or more choices and questionText gives back the exact row text. One
+ * reading is kept; none or several leave the row out, so a save never changes a question [S1].
+ *
+ * @param {string} text
+ * @returns {{ question?: { ask: string, choices: string[], default: string }, reason?: string } | null} null when the row is no question
+ */
+function readQuestion(text) {
+  if (!text.endsWith('.') || !text.includes(CHOICES)) return null;
+  const readings = new Map();
+  for (const at of positions(text, CHOICES)) {
+    const head = text.slice(0, at);
+    const tokens = text.slice(at + CHOICES.length, -1).split(', ');
+    if (tokens.length > MOST_CHOICE_PARTS) return { reason: 'its choices are too many to read back exactly' };
+    for (const colon of positions(head, ': ')) {
+      const ask = head.slice(0, colon);
+      const answer = head.slice(colon + 2);
+      for (let mask = 0; mask < 2 ** (tokens.length - 1); mask += 1) {
+        const choices = [tokens[0]];
+        for (let index = 1; index < tokens.length; index += 1) {
+          if (mask & (2 ** (index - 1))) choices[choices.length - 1] += `, ${tokens[index]}`;
+          else choices.push(tokens[index]);
+        }
+        const question = { ask, choices, default: answer };
+        if (choices.length < 2 || !choices.includes(answer) || [ask, ...choices].some((part) => !part.trim() || part !== part.trim())) continue;
+        if (questionText(question) === text) readings.set(JSON.stringify(question), question);
+      }
+    }
+  }
+  if (readings.size === 1) return { question: [...readings.values()][0] };
+  return { reason: readings.size ? 'its question can be read more than one way' : 'its answer is not one of its choices, or its choices cannot be read back exactly' };
+}
+
+/**
+ * Name why a piece of text may not leave this board, or return null when it may. Text that holds
+ * a path, an email or any private name (a person, an agent, a model label or a machine) stays.
+ *
+ * @param {string} text
+ * @param {string[]} names - Every private name known on this board and machine, matched in any case.
+ * @param {string[]} [parts] - Parts of people's names, matched only as written.
+ * @returns {string | null}
+ */
+export function privateTextReason(text, names, parts = []) {
+  if (PATH_RE.test(text)) return 'a file path';
+  if (EMAIL_RE.test(text)) return 'an email address';
+  /** True when the name stands as its own word in the text, in either case or exactly as written. */
+  const holds = (name, cased) => {
+    const wanted = String(name ?? '').trim();
+    if (wanted.length < 3) return false;
+    const escaped = (cased ? wanted : wanted.toLowerCase()).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+    return new RegExp(`(?:^|[^\\p{L}\\p{N}_-])${escaped}(?:$|[^\\p{L}\\p{N}_-])`, 'u').test(cased ? text : text.toLowerCase());
+  };
+  // A whole name matches in any case; a part of a person's name only as written, so the person
+  // "Test Agent" keeps "Test" out without losing every rule about a test.
+  if (names.some((name) => holds(name, false)) || parts.some((part) => holds(part, true))) return 'a private name';
+  return null;
+}
+
+/**
+ * Turn a board's approved spec rows into a blueprint, writing only fields on an explicit
+ * allow-list: the format, a name and title, a version, the gate when it is clean, each approved
+ * rule's text, reason, tier and a review gate, and each answered question's ask, choices and
+ * answer. Items, shouts, notes, decisions, signers, row gates, files, emails and the names of
+ * people, agents and machines are never read into it. A row that would carry any of them, or a
+ * rule with no "Why:" reason to carry, is left out and named in `left`, never rewritten [S1].
+ *
+ * @param {{ rows: any[] }} spec - The parsed SPEC.md.
+ * @param {{ name?: string, title?: string, gate?: string, names: string[], parts?: string[] }} board - name and title are the person's own choice, never the project's
+ * @returns {{ blueprint: Blueprint, left: { id: string, reason: string }[] }}
+ */
+export function saveBlueprint(spec, { name, title, gate, names, parts = [] }) {
+  const rules = [];
+  const questions = [];
+  const left = [];
+  for (const row of spec.rows) {
+    if (row.status !== 'approved') continue;
+    const text = String(row.text ?? '').trim();
+    const privacy = privateTextReason(text, names, parts);
+    if (privacy) { left.push({ id: row.id, reason: `it holds ${privacy}` }); continue; }
+    const asked = readQuestion(text);
+    if (asked) {
+      if (asked.reason) left.push({ id: row.id, reason: asked.reason });
+      else questions.push({ key: row.id, ...asked.question });
+      continue;
+    }
+    // A rule carries exactly one reason, so the split is never a guess.
+    const reasons = positions(text, WHY);
+    if (reasons.length !== 1) { left.push({ id: row.id, reason: reasons.length ? 'it has more than one "Why:", so its reason cannot be read back exactly' : 'it has no "Why:" reason to carry' }); continue; }
+    const rule = { text: text.slice(0, reasons[0]), why: text.slice(reasons[0] + WHY.length) };
+    if (!rule.text.trim() || !rule.why.trim() || ruleText(rule) !== text) { left.push({ id: row.id, reason: 'its rule cannot be read back exactly' }); continue; }
+    rules.push({ key: row.id, ...rule, tier: row.tier === 'aim' ? 'aim' : 'must', gate: 'review' });
+  }
+  // The project's name never goes in (decision de849661): the person names the blueprint, or it
+  // gets a neutral default to edit. A chosen name still may not carry anything private.
+  const safeName = name ?? 'my-blueprint';
+  const safeTitle = title ?? 'My blueprint';
+  if (typeof safeName !== 'string' || !NAME_RE.test(safeName)) throw new Refused('USAGE', 'a blueprint name is lowercase letters, digits and dashes; run pullboard blueprint save --name my-rules');
+  if (typeof safeTitle !== 'string' || !safeTitle.trim() || /[\r\n|]/u.test(safeTitle)) throw new Refused('USAGE', 'a blueprint title is one line without a | character; run pullboard blueprint save --title "My rules"');
+  const strict = [...names, ...parts];
+  for (const [flag, text] of [['--name', safeName.replaceAll('-', ' ')], ['--title', safeTitle]]) {
+    const privacy = privateTextReason(text, strict);
+    if (privacy) throw new Refused('PRIVATE_BLUEPRINT', `${flag} holds ${privacy}; choose a name that names no one: pullboard blueprint save ${flag} "..."`);
+  }
+  const value = {
+    blueprint: BLUEPRINT_FORMAT,
+    name: safeName,
+    title: safeTitle.trim(),
+    version: 1,
+    ...(gate?.trim() && !/[\r\n|]/u.test(gate) && !privateTextReason(gate.trim(), names, parts) ? { gate: gate.trim() } : {}),
+    ...(rules.length ? { rules } : {}),
+    ...(questions.length ? { questions } : {}),
+  };
+  if (!rules.length && !questions.length) {
+    throw new Refused('EMPTY_BLUEPRINT', `no approved row can leave this board${left.length ? ` (${left.length} left out: ${left.slice(0, 3).map((entry) => `${entry.id}, ${entry.reason}`).join('; ')})` : ''}; approve rules written as "<rule> Why: <reason>", then run pullboard blueprint save again`);
+  }
+  // Checked against the format blueprint add reads, then written exactly as allow-listed above.
+  validateBlueprint(value, `${safeName}.blueprint.json`);
+  return { blueprint: value, left };
+}
