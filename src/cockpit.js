@@ -919,10 +919,7 @@ async function api(path, body) {
   path = snapshot ? path.split('?')[0].slice(1) + '.json' : path;
   if (snapshot) {
     if (body !== undefined && body !== null) throw new Error('This is a read-only snapshot.');
-    const res = await fetch(path);
-    const json = await res.json();
-    if (!res.ok) throw new Error(json.error || res.status);
-    return json;
+    return jsonRequest(path, undefined, '', {});
   }
   if (path === '/api/v1/boards') return await listedBoards();
   const boardId = /^\\/api\\/v1\\/boards\\/([0-9a-f]{32})(?:\\/|$)/u.exec(path)?.[1];
@@ -938,10 +935,16 @@ async function api(path, body) {
   if (body && (hosted.local ? readOnly && source?.kind !== 'local' : pageReadOnly)) throw new Error('This is a read-only view.');
   const base = source?.kind === 'local' ? localReadBase : connection.base;
   const headers = source?.kind === 'local' ? localReadHeaders : connection.headers;
+  return jsonRequest(path, body, base, headers);
+}
+
+/** Use one JSON request primitive, capturing its local route and session before awaiting a reply. */
+async function jsonRequest(path, body, base, headers, cache) {
+  const session = localSession;
   path = base + path;
-  const res = await fetch(path, { method: body ? 'POST' : 'GET', headers: { ...headers, ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
+  const res = await fetch(path, { method: body ? 'POST' : 'GET', headers: { ...headers, ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined, cache });
   const json = await res.json();
-  if (localSession && base === localSession.origin) {
+  if (session && localSession === session && base === session.origin) {
     if (res.status === 401 || res.status === 403) localExpired();
     else if (res.ok && !localConfirmed) { localConfirmed = true; tabValue(LOCAL_TRIPS, null); }
   }
@@ -960,15 +963,7 @@ async function listedBoards() {
   const hasLocal = hosted.local ? Boolean(localReadBase) && Boolean(localSession) : transportModule === null;
   if (hasLocal) {
     try {
-      const response = await fetch(localReadBase + '/api/v1/boards', { headers: localReadHeaders, cache: 'no-store' });
-      const value = await response.json();
-      if ((response.status === 401 || response.status === 403) && localSession && localReadBase === localSession.origin) {
-        localExpired();
-        throw new Error('The local view session expired; reconnecting to this machine.');
-      }
-      if (!response.ok) throw new Error(value.error?.message || String(response.status));
-      if (localSession && localReadBase === localSession.origin && !localConfirmed) { localConfirmed = true; tabValue(LOCAL_TRIPS, null); }
-      local = value;
+      local = await jsonRequest('/api/v1/boards', undefined, localReadBase, localReadHeaders, 'no-store');
     } catch (error) {
       if (!transport) throw error;
       localNote(String(error.message || error), true);
