@@ -629,11 +629,11 @@ test('an exported roadmap has its own address under a folder, and Back and Forwa
     await openRoadmapParts(chrome);
     const seen = await readRoadmap(chrome);
     assert.deepEqual(seen.cards[0].rows.map(({ id, label, tone, button }) => ({ id, label, tone, button })), [
-      { id: '#1', label: 'verified', tone: 'ok', button: true },
       { id: '#2', label: 'unclaimed', tone: 'free', button: true },
       { id: 'beacon#1', label: 'unclaimed', tone: 'free', button: false },
+      { id: '#1', label: 'verified', tone: 'ok', button: true },
     ], "the snapshot's rows read as its Items tab does; another repo's item, not in the snapshot, opens nothing");
-    assert.equal(seen.cards[0].rows[2].tip, 'Billing webhook retries (not in this snapshot)', 'and says why');
+    assert.equal(seen.cards[0].rows.find((row) => row.id === 'beacon#1').tip, 'Billing webhook retries (not in this snapshot)', 'and says why');
     assert.deepEqual([seen.cards[1].name, seen.cards[1].empty], ['Later', 'No items yet.']);
 
     // The address survives a reload on a static host, and Back and Forward show the tab it names,

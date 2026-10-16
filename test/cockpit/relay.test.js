@@ -1114,7 +1114,7 @@ async function interceptJourneyOrigins(chrome, site, view, { deadline: currentDe
   /** Wait for a correlated network failure without retaining request credentials or bodies. */
   function waitForNetworkFailure(matches) {
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const timer = setTimeout(() => { // budget: 10s hang ceiling for the private request-failure handshake; journey deadline owns total runtime.
         networkFailureWaiters.delete(check);
         reject(new Error('the owned browser request did not report its expected network failure within 10 seconds'));
       }, 10_000);
@@ -1132,7 +1132,7 @@ async function interceptJourneyOrigins(chrome, site, view, { deadline: currentDe
   const holdNextResponse = (matches) => {
     let entry;
     const pending = new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const timer = setTimeout(() => { // budget: 10s hang ceiling for the fixture to observe one held response; journey deadline owns total runtime.
         const index = heldResponses.indexOf(entry);
         if (index !== -1) heldResponses.splice(index, 1);
         reject(new Error('The real API response did not reach the fixture hold within 10 seconds.'));
@@ -1619,8 +1619,8 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
     journeyDeadline.setPhase(journeyPhase);
     // Pair the real board key in the fragment; the relay client consumes it into device storage before local discovery.
     await chrome.send('Page.navigate', { url: JOURNEY_HOSTED + '/#board=' + linkedId + '&key=' + encodeURIComponent(linkedKey) });
-    await chrome.waitFor("document.querySelector('#chain')?.textContent.includes(" + JSON.stringify(remoteTitle) + ')', 30_000);
-    await chrome.waitFor('location.hash === ""', 10_000);
+    await chrome.waitFor("document.querySelector('#chain')?.textContent.includes(" + JSON.stringify(remoteTitle) + ')', 30_000); // budget: 30s hang ceiling for the real linked-board read under load.
+    await chrome.waitFor('location.hash === ""', 10_000); // budget: 10s hang ceiling for relay-fragment consumption after the board renders.
 
     journeyPhase = 'pair-duplicate-board';
     journeyDeadline.setPhase(journeyPhase);
@@ -1628,7 +1628,7 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
     // Start a fresh hosted document before pairing C, then wait for transport work rather than assuming C is selected.
     await chrome.send('Page.navigate', { url: 'about:blank' });
     await chrome.send('Page.navigate', { url: JOURNEY_HOSTED + '/#board=' + localRelay.board + '&key=' + encodeURIComponent(localRelayKey) });
-    await chrome.waitFor('location.hash === "" && !!JSON.parse(localStorage.getItem("pullboard.relay.keys.v1") || "{}")[' + JSON.stringify(localRelay.board) + ']', 30_000);
+    await chrome.waitFor('location.hash === "" && !!JSON.parse(localStorage.getItem("pullboard.relay.keys.v1") || "{}")[' + JSON.stringify(localRelay.board) + ']', 30_000); // budget: 30s hang ceiling for paired-key storage to settle.
     assert.ok(linked.calls.some(call => call.method === 'GET'
       && call.path === '/api/v1/boards/' + localRelay.board + '/state' && call.browser),
     'C’s private pairing key was consumed and its real snapshot was read by the authenticated browser');

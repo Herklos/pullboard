@@ -195,8 +195,10 @@ pullboard add web "Checkout" --specs G1 --criterion "card payment takes one step
 
 File the work. Its bar freezes when an agent claims it.
 
+Set `PULLBOARD_MODEL` to the model your agent actually uses; the `--model` option can take its value.
+
 ```sh
-pullboard worktree web
+pullboard worktree web --model "$PULLBOARD_MODEL"
 cd ../myapp-web-1
 pullboard next
 pullboard submit 1
@@ -204,8 +206,10 @@ pullboard submit 1
 
 A **builder** claims it, commits citing the row as `feat(web): pay by card [G1]`, and submits green.
 
+Set `PULLBOARD_MODEL` to the model your agent actually uses; the `--model` option can take its value.
+
 ```sh
-pullboard worktree review
+pullboard worktree review --model "$PULLBOARD_MODEL"
 cd ../myapp-review-1
 pullboard next --verify
 pullboard verify 1 accept --note "paid in one step; without the fix the test fails"
