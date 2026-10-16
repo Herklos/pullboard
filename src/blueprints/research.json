@@ -1,0 +1,18 @@
+{
+  "blueprint": 1,
+  "name": "research",
+  "title": "Research board",
+  "version": 1,
+  "kind": "beyond-code",
+  "by": "Pullboard",
+  "summary": "Research you can cite: every claim traced back to its source.",
+  "prefix": "RS",
+  "rules": [
+    { "key": "RS1", "text": "Every claim in a finding links to its source.", "why": "a claim without a source cannot be checked." },
+    { "key": "RS2", "text": "A finding counts only after a second agent rechecks its source.", "why": "the first reader rarely catches its own misreading." }
+  ],
+  "questions": [
+    { "key": "Q1", "ask": "The research is about", "choices": ["A technical question", "A market or product", "Academic literature", "Something else"], "default": "A technical question" },
+    { "key": "Q2", "ask": "Trusted sources are", "choices": ["Official documentation and papers", "Any public source I approve", "Only sources I list"], "default": "Official documentation and papers" }
+  ]
+}

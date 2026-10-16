@@ -125,10 +125,13 @@ test('frozen checks classify only explicit source-backed test commands [C7]', as
   writeFileSync(join(root, 'package.json'), '{"type":"module"}\n');
   writeFileSync(join(root, 'test/resources.test.js'), "import { test } from 'node:test'; test('a non-browser check does not wait for the browser slot', () => {});\n");
   const command = 'out=$(node bin/run-tests.js --test-name-pattern "a non-browser check does not wait for the browser slot" test/resources.test.js 2>&1); printf "%s\\n" "$out"; printf "%s\\n" "$out" | grep -Eq "^[[:space:]]*ok [0-9]+ - .*a non-browser check does not wait for the browser slot" && printf "%s\\n" "$out" | grep -Eq "^# fail 0$"';
-  const classifyEnv = { ...process.env, PATH: [dirname(process.execPath), '/usr/bin', '/bin'].join(delimiter) };
+  const classifyEnv = { ...process.env, NODE_OPTIONS: '', PATH: [dirname(process.execPath), '/usr/bin', '/bin'].join(delimiter) };
   assert.equal(await checkNeedsBrowser(root, command, { env: classifyEnv }), false);
   assert.equal(await checkNeedsBrowser(root, command, { env: classifyEnv }), false,
     'the supported captured runner form remains statically classifiable');
+  assert.equal(await checkNeedsBrowser(root, command, {
+    env: { ...classifyEnv, NODE_OPTIONS: '--import=unclassified-loader.mjs' },
+  }), true, 'an unknown Node preload still fails closed to browser admission');
 
   const runnerPath = join(root, 'bin/run-tests.js');
   rmSync(runnerPath);

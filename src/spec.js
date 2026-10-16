@@ -174,7 +174,9 @@ function rowFindings(row, maxWords) {
   }
   for (const signer of row.signers ?? []) if (!SIGNER_RE.test(signer)) add('error', `signer "${signer}" must be one SSH principal (no spaces or commas)`);
   if (new Set(row.signers ?? []).size !== (row.signers ?? []).length) add('error', 'signers are unique on a row');
-  const words = row.text.split(/\s+/).filter(Boolean).length;
+  // A rule's reason (" Why: ...") and a question's choices (" Choices: ...") ride on the row and
+  // are not counted: the limit keeps the requirement itself short (blueprint rows carry both).
+  const words = row.text.split(/ (?:Why|Choices): /u)[0].split(/\s+/).filter(Boolean).length;
   if (words > maxWords) add('warning', `${words} words; rows stay under ${maxWords}, the why goes elsewhere`);
   for (const part of row.unknown) add('error', `unknown field "${part}"; fields are gate, serves and signers`);
   return findings;
@@ -239,6 +241,43 @@ export function lintSpec(spec, { maxWords = 20 } = {}) {
     findings.push({ level: 'error', line: row?.line ?? 0, id: cycle[0], message: `serves links cycle: ${cycle.join(' -> ')}` });
   }
   return findings.sort((first, second) => first.line - second.line);
+}
+
+/**
+ * The next free row id under a section prefix: one past the highest number the prefix uses, skipping
+ * any id already taken. Callers pass the rows of SPEC.md and the doctrine, so ids stay unique across
+ * both files (spec draft, blueprint add).
+ *
+ * @param {string} prefix
+ * @param {{ id: string }[]} rows
+ * @returns {string}
+ */
+export function nextRowId(prefix, rows) {
+  const used = new Set(rows.map((row) => row.id));
+  const numbered = rows.map((row) => new RegExp(`^${prefix}(\\d+)$`, 'u').exec(row.id)?.[1]).filter(Boolean).map(Number);
+  let next = Math.max(0, ...numbered) + 1;
+  while (used.has(`${prefix}${next}`)) next += 1;
+  return `${prefix}${next}`;
+}
+
+/**
+ * Insert row lines into spec text under one section: after its last line of content, before the
+ * next heading (spec draft, blueprint add).
+ *
+ * @param {string} source
+ * @param {{ sections: { line: number }[] }} spec - The parse of source.
+ * @param {{ line: number }} section
+ * @param {string[]} rows
+ * @returns {string}
+ */
+export function insertSectionRows(source, spec, section, rows) {
+  const newline = source.includes('\r\n') ? '\r\n' : '\n';
+  const lines = source.split(/\r?\n/u);
+  const following = spec.sections.find((entry) => entry.line > section.line);
+  let insertion = following ? following.line - 1 : lines.length;
+  while (insertion > section.line && !lines[insertion - 1].trim()) insertion -= 1;
+  lines.splice(insertion, 0, ...rows);
+  return lines.join(newline);
 }
 
 /**

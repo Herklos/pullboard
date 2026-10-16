@@ -1,0 +1,18 @@
+{
+  "blueprint": 1,
+  "name": "website",
+  "title": "Website",
+  "version": 1,
+  "kind": "product",
+  "by": "Pullboard",
+  "summary": "Pages that load fast, read well on a phone and never break a link.",
+  "prefix": "WEB",
+  "rules": [
+    { "key": "WEB1", "text": "Every page reads in full with JavaScript turned off.", "why": "search engines, slow phones and screen readers often meet a page before its scripts run." },
+    { "key": "WEB2", "text": "No change leaves a link pointing at a missing page.", "why": "a broken link is a dead end for every reader who follows it." }
+  ],
+  "questions": [
+    { "key": "Q1", "ask": "The site is built with", "choices": ["Astro", "Hugo", "Next.js", "Something else"], "default": "Astro" },
+    { "key": "Q2", "ask": "It is hosted on", "choices": ["Netlify", "Vercel", "GitHub Pages", "My own server"], "default": "Netlify" }
+  ]
+}
