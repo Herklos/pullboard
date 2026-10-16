@@ -6,8 +6,8 @@ import { openApproval, restoreLinkReply } from './relay-approval.js';
 import { requirePersonChannel } from './person.js';
 import { codeIsFromMain, repoInfo } from './git.js';
 import { listApiProjects } from './projects.js';
-import { acceptDeviceEnrollment, beginDeviceEnrollment, readRelayMachine, updateRelayMachine } from './relay-machine.js';
-import { deliverDeviceWraps, relayDeviceRequest, relayMachineSignIn, relayMachineContext, relayRevokeDevice, relayOn, relayStatus, originRepository } from './relay.js';
+import { acceptDeviceEnrollment, beginDeviceEnrollment, readRelayMachine, relayMachineOwner, updateRelayMachine } from './relay-machine.js';
+import { deliverDeviceWraps, relayDeviceRequest, relayMachineSignIn, relayMachineContext, relayRevokeDevice, relayOn, relayStatus, originRepository, revokeRelayPersonSession } from './relay.js';
 import { terminalQr } from './qr.js';
 import { Refused } from './refused.js';
 
@@ -160,14 +160,29 @@ async function pairFirstDevice(session, board, linked, io) {
 }
 
 /** Explicit foreground sign-in repairs links; only board machine credentials survive this command. */
-export async function relayOnAll(address, io) {
+export async function relayOnAll(address, io, { signal } = {}) {
   requirePersonChannel(io.personChannel);
-  const prior = readRelayMachine();
-  // Scrub every registered legacy link before asking for or using fresh person authority.
-  for (const project of listApiProjects()) { try { relayMachineContext(project.root); } catch { /* linkProjects reports invalid projects. */ } }
-  const session = await relayMachineSignIn(address || prior.owner?.url, io);
+  // A cancelled or declined sign-in must not migrate machine state or scrub existing board links.
+  const owner = relayMachineOwner();
+  const session = await relayMachineSignIn(address || owner?.url, io, { signal });
+  if (session.outcome) return session;
+  if (signal?.aborted) {
+    await revokeRelayPersonSession(session, io);
+    return { outcome: 'cancelled' };
+  }
+  try { await flushRevocations(session, io); }
+  catch (error) {
+    if (!signal?.aborted) throw error;
+    await revokeRelayPersonSession(session, io);
+    return { outcome: 'cancelled' };
+  }
+  if (signal?.aborted) {
+    await revokeRelayPersonSession(session, io);
+    return { outcome: 'cancelled' };
+  }
+  // From this synchronous commit point onward the first board-link attempt is underway; later
+  // cancellation must not claim that already-started link writes were rolled back.
   updateRelayMachine(state => { state.autoLink = true; state.owner = { account: session.account, url: session.url }; state.approvals = []; });
-  await flushRevocations(session, io);
   const result = await linkProjects(session, io);
   const devices = readRelayMachine().devices.filter(device => device.account === session.account && device.url === session.url);
   const pairing = devices.length || !result.linked.length ? { paired: devices.length > 0 }
