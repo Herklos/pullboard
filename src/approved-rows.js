@@ -1,13 +1,32 @@
 /** Person approval guards staged approved-row rewrites and exposes stale frozen items [S19,V3]. */
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { parseSpec, SIGNOFFS_FILE } from './spec.js';
-import { boardBusyError, openBoardReadOnly, rowDecisions } from './board.js';
-import { hasSignerFile, verifySignedRecords } from './signature.js';
+import {
+  parseSpec,
+  SIGNOFFS_FILE,
+} from './spec.js';
+import {
+  boardBusyError,
+  openBoardReadOnly,
+  rowDecisions,
+} from './board.js';
+import {
+  hasSignerFile,
+  verifySignedRecords,
+} from './signature.js';
 import { Refused } from './refused.js';
-import { CONFIG_FILE, configFromSource } from './config.js';
+import {
+  CONFIG_FILE,
+  configFromSource,
+} from './config.js';
 
 const TRUST_FILES = ['.pullboard/signers', '.pullboard/first-commit', '.pullboard/signers.initial', SIGNOFFS_FILE];
 

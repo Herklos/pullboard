@@ -6,13 +6,31 @@
  * every move lands in an append-only event log (R2). The caller supplies what only git and the
  * spec know: the commit, the verifier's checkout, the frozen criterion.
  */
-import { randomBytes, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync } from 'node:fs';
+import {
+  randomBytes,
+  randomUUID,
+} from 'node:crypto';
+import {
+  existsSync,
+  mkdirSync,
+} from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { briefFiles, briefSections } from './brief.js';
+import {
+  briefFiles,
+  briefSections,
+} from './brief.js';
 import { COORDINATOR } from './config.js';
-import { ENGINE_VERSION, GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, effectiveGuards, storeTriggers } from './machine.js';
+import {
+  ENGINE_VERSION,
+  GUARDS,
+  IN_STATE,
+  MOVES,
+  STATES,
+  UNKNOWN_MOVE,
+  effectiveGuards,
+  storeTriggers,
+} from './machine.js';
 import { Refused } from './refused.js';
 import { parseSpec } from './spec.js';
 

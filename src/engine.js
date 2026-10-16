@@ -1,11 +1,21 @@
 /** Versioned, deterministic replay through the CLI's existing board engine [H3,H16]. */
-import { createHash, randomUUID } from 'node:crypto';
+import {
+  createHash,
+  randomUUID,
+} from 'node:crypto';
 import * as store from './board.js';
 import { refusalDocument } from './json.js';
 import { ENGINE_VERSION } from './machine.js';
 import { Refused } from './refused.js';
-import { requestMoveProblem, recordRequestMove } from './relay-requests.js';
-import { relayMoveActor, relaySenderProblem, validRelaySender } from './relay-sender.js';
+import {
+  requestMoveProblem,
+  recordRequestMove,
+} from './relay-requests.js';
+import {
+  relayMoveActor,
+  relaySenderProblem,
+  validRelaySender,
+} from './relay-sender.js';
 
 const ITEM_ID_FIRST_ARGUMENT = new Set(['editItem', 'escalate', 'recordAttempt', 'claim', 'release', 'submit', 'reserveReview', 'verify', 'merged', 'withdraw', 'refreeze', 'reopen', 'appendFact']);
 

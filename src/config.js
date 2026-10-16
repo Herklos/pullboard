@@ -2,7 +2,10 @@
  * `pullboard.json`: the gate, the spec file, the lanes and the commit rules. Read once per command,
  * merged over defaults, and checked, so a typo refuses with its field name instead of misbehaving.
  */
-import { existsSync, readFileSync } from 'node:fs';
+import {
+  existsSync,
+  readFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { Refused } from './refused.js';
 

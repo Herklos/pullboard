@@ -2,13 +2,39 @@
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import * as store from './board.js';
-import { phoneProposal, publishPhoneApproval, warnPhoneApproval } from './relay-phone.js';
-import { openApproval, restoreLinkReply } from './relay-approval.js';
+import {
+  phoneProposal,
+  publishPhoneApproval,
+  warnPhoneApproval,
+} from './relay-phone.js';
+import {
+  openApproval,
+  restoreLinkReply,
+} from './relay-approval.js';
 import { requirePersonChannel } from './person.js';
-import { codeIsFromMain, repoInfo } from './git.js';
+import {
+  codeIsFromMain,
+  repoInfo,
+} from './git.js';
 import { listApiProjects } from './projects.js';
-import { acceptDeviceEnrollment, beginDeviceEnrollment, readRelayMachine, relayMachineOwner, updateRelayMachine } from './relay-machine.js';
-import { deliverDeviceWraps, relayDeviceRequest, relayMachineSignIn, relayMachineContext, relayRevokeDevice, relayOn, relayStatus, originRepository, revokeRelayPersonSession } from './relay.js';
+import {
+  acceptDeviceEnrollment,
+  beginDeviceEnrollment,
+  readRelayMachine,
+  relayMachineOwner,
+  updateRelayMachine,
+} from './relay-machine.js';
+import {
+  deliverDeviceWraps,
+  relayDeviceRequest,
+  relayMachineSignIn,
+  relayMachineContext,
+  relayRevokeDevice,
+  relayOn,
+  relayStatus,
+  originRepository,
+  revokeRelayPersonSession,
+} from './relay.js';
 import { terminalQr } from './qr.js';
 import { Refused } from './refused.js';
 

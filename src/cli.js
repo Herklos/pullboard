@@ -2,24 +2,96 @@
  * The pullboard command line: every command, bound to who is asking (B3, R3). The main checkout is the
  * coordinator; every other worktree is the agent that joined from it.
  */
-import { createHash, randomUUID } from 'node:crypto';
-import { spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import {
+  createHash,
+  randomUUID,
+} from 'node:crypto';
+import {
+  spawn,
+  spawnSync,
+} from 'node:child_process';
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs';
 import { loadavg } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+} from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import {
+  fileURLToPath,
+  pathToFileURL,
+} from 'node:url';
 import { parseArgs } from 'node:util';
 import * as store from './board.js';
-import { CONFIG_FILE, COORDINATOR, DOCTRINE_FILE, LEGACY_DOCTRINE_FILE, loadConfig } from './config.js';
+import {
+  CONFIG_FILE,
+  COORDINATOR,
+  DOCTRINE_FILE,
+  LEGACY_DOCTRINE_FILE,
+  loadConfig,
+} from './config.js';
 import { displayAgentName } from './agent-names.js';
-import { doctrineHistory, loadDoctrine } from './doctrine.js';
-import { agentSessionDigest, requirePersonChannel } from './person.js';
-import { bindLocalSession, localSessionMatches } from './agent-session.js';
-import { decisionProjection, planRowApply, prepareRowDecisions, restoreRowApply, writeRowApply } from './row-decisions.js';
-import { digestOf, gateReport, runGate, runProfiledShell, runSubmitGate, submitGateReport, timingDigest, withGateSlot } from './gate.js';
+import {
+  doctrineHistory,
+  loadDoctrine,
+} from './doctrine.js';
+import {
+  agentSessionDigest,
+  requirePersonChannel,
+} from './person.js';
+import {
+  bindLocalSession,
+  localSessionMatches,
+} from './agent-session.js';
+import {
+  decisionProjection,
+  planRowApply,
+  prepareRowDecisions,
+  restoreRowApply,
+  writeRowApply,
+} from './row-decisions.js';
+import {
+  digestOf,
+  gateReport,
+  runGate,
+  runProfiledShell,
+  runSubmitGate,
+  submitGateReport,
+  timingDigest,
+  withGateSlot,
+} from './gate.js';
 import { checkNeedsBrowser } from './browser-admission.js';
-import { bareWorktreeFinding, codeIsFromMain, contains, differFromHead, git, gitChildEnv, headCommit, headTree, invalidateGitFacts, isClean, mainCheckout, patchId, repoInfo, resolveCommit, tryGit, untracked, withGitFacts } from './git.js';
+import {
+  bareWorktreeFinding,
+  codeIsFromMain,
+  contains,
+  differFromHead,
+  git,
+  gitChildEnv,
+  headCommit,
+  headTree,
+  invalidateGitFacts,
+  isClean,
+  mainCheckout,
+  patchId,
+  repoInfo,
+  resolveCommit,
+  tryGit,
+  untracked,
+  withGitFacts,
+} from './git.js';
 import {
   FIX_NOTE,
   applyFixers,
@@ -31,16 +103,38 @@ import {
   pushesTrunk,
   unwiredHookProblems,
 } from './hooks.js';
-import { detectGate, initRepo } from './init.js';
+import {
+  detectGate,
+  initRepo,
+} from './init.js';
 import { lifecycleMarkdown } from './machine.js';
-import { HELP, VERSION } from './help.js';
+import {
+  buildHelp,
+  VERSION,
+} from './help.js';
 import { defaultViewPort } from './view-port.js';
-export { HELP, VERSION };
-import { productLine, productProblems, productSummaries } from './products.js';
-import { isLane, laneNames, laneOf, outOfLane } from './lanes.js';
+export { VERSION };
+import {
+  productLine,
+  productProblems,
+  productSummaries,
+} from './products.js';
+import {
+  isLane,
+  laneNames,
+  laneOf,
+  outOfLane,
+} from './lanes.js';
 import { Refused } from './refused.js';
-import { commitCitations, committedIds } from './history.js';
-import { promptFor, skillProblems, updateSkills } from './skills.js';
+import {
+  commitCitations,
+  committedIds,
+} from './history.js';
+import {
+  promptFor,
+  skillProblems,
+  updateSkills,
+} from './skills.js';
 import {
   frozenCriterion,
   idProblems,
@@ -55,34 +149,122 @@ import {
   unmetRows,
 } from './spec.js';
 import { briefFiles } from './brief.js';
-import { checkBaseline, prepareCheckBaseline, sayCheckBaseline } from './check-baseline.js';
-import { retryCheckBaselines, startCheckBaseline } from './check-baseline-worker.js';
-import { compareMainFailures, mainRedMessage, mainRedReworkItems } from './main-red.js';
+import {
+  checkBaseline,
+  prepareCheckBaseline,
+  sayCheckBaseline,
+} from './check-baseline.js';
+import {
+  retryCheckBaselines,
+  startCheckBaseline,
+} from './check-baseline-worker.js';
+import {
+  compareMainFailures,
+  mainRedMessage,
+  mainRedReworkItems,
+} from './main-red.js';
 import { runItems } from './run.js';
-import { parseProblems, sweepItems } from './sweep.js';
+import {
+  parseProblems,
+  sweepItems,
+} from './sweep.js';
 import { renderSpecView } from './view.js';
 import { tour } from './tour.js';
-import { commandOutput, refusalDocument } from './json.js';
-import { forgetProject, listApiProjects, registerProjectAndLink } from './projects.js';
+import {
+  commandOutput,
+  refusalDocument,
+} from './json.js';
+import {
+  forgetProject,
+  listApiProjects,
+  registerProjectAndLink,
+} from './projects.js';
 import { milestoneRoadmap } from './roadmap.js';
 import { listResources } from './resources.js';
-import { citedTestFiles, rowEvidence, rowStage } from './evidence.js';
-import { exportView, serveView } from './serve.js';
-import { forgetView, rememberView, runningView } from './view-session.js';
+import {
+  citedTestFiles,
+  rowEvidence,
+  rowStage,
+} from './evidence.js';
+import {
+  exportView,
+  serveView,
+} from './serve.js';
+import {
+  forgetView,
+  rememberView,
+  runningView,
+} from './view-session.js';
 import { serveApi } from './api.js';
-import { doctorProblems, doctrineProblems } from './doctor.js';
-import { staleFrozenItems, staleItemFinding } from './approved-rows.js';
-import { mainPolicy, policyAt, itemPolicy, submissionPaths, frozenCheck, checkAtCommit, dependencySnapshots, requireTrunkMerge, trunkRef } from './trusted-policy.js';
+import {
+  doctorProblems,
+  doctrineProblems,
+} from './doctor.js';
+import {
+  staleFrozenItems,
+  staleItemFinding,
+} from './approved-rows.js';
+import {
+  mainPolicy,
+  policyAt,
+  itemPolicy,
+  submissionPaths,
+  frozenCheck,
+  checkAtCommit,
+  dependencySnapshots,
+  requireTrunkMerge,
+  trunkRef,
+} from './trusted-policy.js';
 import { proofStats } from './stats.js';
-import { flowLines, flowAlertLine } from './stats-flow.js';
+import {
+  flowLines,
+  flowAlertLine,
+} from './stats-flow.js';
 import { releaseHeadlinesBetween } from './changelog.js';
-import { exportBoard, importBoard } from './exchange.js';
-import { addSigner, assertRequiredSigners, defaultPrincipal, hasSignerFile } from './signature.js';
-import { browserFreeChecksEnabled, loadMachineSettings, setBrowserSlots, setGateSlots } from './settings.js';
-import { formatSnapshotLimit, pendingSnapshotSize, pendingCheckpointProblem, relayCommandReceipt, relayCommandReceiptReported, relayLinked, relayOff, relayOn, relayOperation, relayRecover, relayRecovered, relayRevoke, relayStatus, relayTokens, syncRelay } from './relay.js';
-import { autoLinkProject, relayOnAll, revokeRelayDevice, unlinkedRelayProjects } from './relay-setup.js';
+import {
+  exportBoard,
+  importBoard,
+} from './exchange.js';
+import {
+  addSigner,
+  assertRequiredSigners,
+  defaultPrincipal,
+  hasSignerFile,
+} from './signature.js';
+import {
+  browserFreeChecksEnabled,
+  loadMachineSettings,
+  setBrowserSlots,
+  setGateSlots,
+} from './settings.js';
+import {
+  formatSnapshotLimit,
+  pendingSnapshotSize,
+  pendingCheckpointProblem,
+  relayCommandReceipt,
+  relayCommandReceiptReported,
+  relayLinked,
+  relayOff,
+  relayOn,
+  relayOperation,
+  relayRecover,
+  relayRecovered,
+  relayRevoke,
+  relayStatus,
+  relayTokens,
+  syncRelay,
+} from './relay.js';
+import {
+  autoLinkProject,
+  relayOnAll,
+  revokeRelayDevice,
+  unlinkedRelayProjects,
+} from './relay-setup.js';
 import { readRelayMachine } from './relay-machine.js';
-import { relayJoin, relayPair } from './relay-pairing-client.js';
+import {
+  relayJoin,
+  relayPair,
+} from './relay-pairing-client.js';
 import { executePersonRequests } from './relay-request-execution.js';
 import { engineReceipt } from './engine.js';
 import { land } from './land.js';
@@ -3532,6 +3714,9 @@ export function resultCommands() {
     'help', 'version', 'tour', 'lifecycle', 'view', 'serve', 'forget', 'spec', 'prompt', 'hook', 'gate', 'settings', 'relay',
   ])].sort();
 }
+
+/** The actual command maps supply help names, so adding a handler needs no parallel help-name edit. */
+export const HELP = buildHelp(resultCommands());
 
 // This marker is emitted once when the actual CLI entrypoint finishes evaluating.
 if (process.env.PULLBOARD_STARTUP_TRACE_ENTRY

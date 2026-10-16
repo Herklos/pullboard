@@ -168,16 +168,6 @@ ${lifecycleHelp()}
 Reject reasons: TEST_FAILURE, BEHAVIOR_MISMATCH, INSUFFICIENT_EVIDENCE, STALE_HEAD, OTHER.
 --json prints one versioned document for every command; refusals include their code and next step.`;
 
-const HELP_NAMES = [
-  'tour', 'init', 'worktree', 'join', 'takeover', 'whoami', 'lanes', 'status', 'resources', 'settings', 'view', 'view export',
-  'serve', 'relay', 'relay recover', 'resume', 'hooks', 'add', 'edit', 'escalate', 'run', 'list', 'doctor', 'skills', 'show', 'next', 'land',
-  'check', 'claim', 'release', 'submit', 'done', 'verify', 'fact', 'shout', 'answer', 'pass', 'decisions', 'inbox', 'export', 'import',
-  'sweep', 'merged', 'withdraw', 'refreeze', 'reopen', 'hold', 'stats', 'ledger', 'log', 'spec', 'spec check', 'spec view',
-  'spec show', 'spec unmet', 'spec signoff', 'spec draft', 'spec signers', 'spec signers add', 'forget', 'prompt', 'gate', 'hook',
-  'hook pre-commit', 'hook pre-merge-commit', 'hook commit-msg', 'hook pre-push', 'view export', 'version', 'lifecycle', 'help',
-  'roadmap', 'milestone',
-];
-
 const HELP_GROUPS = [
   ['Start', ['tour', 'init', 'worktree']],
   ['Work', ['add', 'list', 'claim']],
@@ -244,7 +234,7 @@ const HELP_FLAG_EXPLANATIONS = {
 };
 
 /** Build command-specific help rows from the preserved full list so its syntax stays authoritative. */
-function commandHelpRows(fullHelp) {
+function commandHelpRows(fullHelp, commandNames) {
   const lines = fullHelp.split('\n');
   const rows = [];
   for (let index = 0; index < lines.length; index += 1) {
@@ -253,7 +243,10 @@ function commandHelpRows(fullHelp) {
     for (let next = index + 1; next < lines.length && lines[next].startsWith(' ') && lines[next].trim() && !lines[next].startsWith('  pullboard '); next += 1) details.push(lines[next].trim());
     rows.push({ usage: lines[index].trim().slice('pullboard '.length).split(/\s{2,}/, 1)[0].trim(), details });
   }
-  return Object.fromEntries(HELP_NAMES.map((name) => {
+  const phrases = rows.flatMap((row) => usagePhrases(row.usage));
+  const names = [...new Set([...commandNames, ...Object.keys(HELP_ALIASES),
+    ...phrases.flatMap((name) => [name.split(' ')[0], name])])];
+  return Object.fromEntries(names.map((name) => {
     const parts = name.split(' ');
     const alias = HELP_ALIASES[name];
     const matches = alias?.source ? rows.filter((row) => row.usage === alias.source || row.usage.startsWith(`${alias.source} `)) : alias ? [] : rows.filter((row) => {
@@ -292,14 +285,19 @@ function overviewHelp(groups, firstRun = false) {
   return lines.join('\n');
 }
 
-/** The one help declaration feeds the overview, command detail, JSON result and unchanged full list. */
-export const HELP = Object.freeze({
-  overview: overviewHelp(HELP_GROUPS),
-  firstRun: overviewHelp(HELP_GROUPS, true),
-  all: ALL_HELP,
-  groups: HELP_GROUPS,
-  commands: Object.freeze(commandHelpRows(ALL_HELP)),
-});
+/** Derive help names from live command declarations and the existing usage and alias declarations. */
+export function buildHelp(commandNames = []) {
+  return Object.freeze({
+    overview: overviewHelp(HELP_GROUPS),
+    firstRun: overviewHelp(HELP_GROUPS, true),
+    all: ALL_HELP,
+    groups: HELP_GROUPS,
+    commands: Object.freeze(commandHelpRows(ALL_HELP, commandNames)),
+  });
+}
+
+/** Browser command phrases use the same pure declarations without initializing the CLI or server. */
+export const HELP = buildHelp();
 
 /** Replace help placeholders with ordinary values so every command receives a usable example. */
 function exampleFor(name, usage) {

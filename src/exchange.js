@@ -4,7 +4,10 @@
  */
 import { createHash } from 'node:crypto';
 import { Refused } from './refused.js';
-import { ENGINE_VERSION, storeTriggers } from './machine.js';
+import {
+  ENGINE_VERSION,
+  storeTriggers,
+} from './machine.js';
 import { EVENT_LOG_VERSION } from './board.js';
 
 const VERSION = 1;

@@ -1,5 +1,9 @@
 /** Read durations already printed by a caller's test runner, without changing its command [C7,V10]. */
-import { closeSync, openSync, readSync } from 'node:fs';
+import {
+  closeSync,
+  openSync,
+  readSync,
+} from 'node:fs';
 import { StringDecoder } from 'node:string_decoder';
 
 const MAX_LINE = 64 * 1024;

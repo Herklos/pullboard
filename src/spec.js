@@ -9,12 +9,28 @@
  */
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { DOCTRINE_FILE, LEGACY_DOCTRINE_FILE } from './config.js';
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+} from 'node:fs';
+import {
+  dirname,
+  join,
+} from 'node:path';
+import {
+  DOCTRINE_FILE,
+  LEGACY_DOCTRINE_FILE,
+} from './config.js';
 import { cleanGitEnvironment } from './git.js';
 import { Refused } from './refused.js';
-import { hasSignerFile, isVerifiedSignoff, signRows, verifySignedRecords } from './signature.js';
+import {
+  hasSignerFile,
+  isVerifiedSignoff,
+  signRows,
+  verifySignedRecords,
+} from './signature.js';
 
 export const STATUSES = ['approved', 'draft', 'pending', 'fact', 'wont', 'retired'];
 export const TIERS = ['must', 'aim'];

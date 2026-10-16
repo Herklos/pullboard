@@ -1,16 +1,42 @@
 /** Coordinator policy and immutable submission checks cannot come from a builder's candidate [V4,V16,L3,M3]. */
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { digestOf, writeTimingProfile } from './gate.js';
-import { timingFromOutput, timingFromLog, timingRunner } from './timing.js';
-import { closeSync, existsSync, mkdtempSync, mkdirSync, openSync, readFileSync, readSync, rmSync, writeSync } from 'node:fs';
+import {
+  digestOf,
+  writeTimingProfile,
+} from './gate.js';
+import {
+  timingFromOutput,
+  timingFromLog,
+  timingRunner,
+} from './timing.js';
+import {
+  closeSync,
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  rmSync,
+  writeSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
-import { GATE_SLOT_HELD_ENV, gateSlotEnvironment } from './resources.js';
+import {
+  GATE_SLOT_HELD_ENV,
+  gateSlotEnvironment,
+} from './resources.js';
 import { configFromSource } from './config.js';
-import { cleanGitEnvironment, gitConfig, invalidateGitFacts, mainCheckout, refuseGrafts } from './git.js';
+import {
+  cleanGitEnvironment,
+  gitConfig,
+  invalidateGitFacts,
+  mainCheckout,
+  refuseGrafts,
+} from './git.js';
 import { secretsIn } from './hooks.js';
 import { outOfLane } from './lanes.js';
 import { Refused } from './refused.js';

@@ -9,16 +9,48 @@
  * Pullboard never calls a model itself (E4): the agent command is whatever the person runs, such as
  * OpenCode on a local model or Claude Code headless on a smaller one.
  */
-import { spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  spawn,
+  spawnSync,
+} from 'node:child_process';
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import * as store from './board.js';
 import { briefFiles } from './brief.js';
-import { CONFIG_FILE, COORDINATOR, loadConfig } from './config.js';
-import { doctrineText, loadDoctrine } from './doctrine.js';
-import { digestOf, runGate } from './gate.js';
-import { contains, git, headCommit, invalidateGitFacts, isClean, tryGit, untracked } from './git.js';
-import { laneNames, outOfLane } from './lanes.js';
+import {
+  CONFIG_FILE,
+  COORDINATOR,
+  loadConfig,
+} from './config.js';
+import {
+  doctrineText,
+  loadDoctrine,
+} from './doctrine.js';
+import {
+  digestOf,
+  runGate,
+} from './gate.js';
+import {
+  contains,
+  git,
+  headCommit,
+  invalidateGitFacts,
+  isClean,
+  tryGit,
+  untracked,
+} from './git.js';
+import {
+  laneNames,
+  outOfLane,
+} from './lanes.js';
 import { Refused } from './refused.js';
 
 /** Report changing machine queue state while an unattended item waits for a gate slot. */

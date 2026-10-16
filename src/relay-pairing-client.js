@@ -1,15 +1,46 @@
 /** CLI pairing flow: the relay stores only a one-use client-encrypted package [H15,H17]. */
 import { randomUUID } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import {
+  dirname,
+  join,
+} from 'node:path';
 import * as store from './board.js';
-import { exportBoard, importBoard } from './exchange.js';
-import { codeIsFromMain, repoInfo } from './git.js';
-import { forgetBoardKey, readBoardKey, storeBoardKey } from './relay-key.js';
+import {
+  exportBoard,
+  importBoard,
+} from './exchange.js';
+import {
+  codeIsFromMain,
+  repoInfo,
+} from './git.js';
+import {
+  forgetBoardKey,
+  readBoardKey,
+  storeBoardKey,
+} from './relay-key.js';
 import { encodeBoardKey } from './seal.js';
-import { createPairingCode, openPairingBundle, parsePairingCode, sealPairingBundle } from './pairing.js';
+import {
+  createPairingCode,
+  openPairingBundle,
+  parsePairingCode,
+  sealPairingBundle,
+} from './pairing.js';
 import { terminalQr } from './qr.js';
-import { DEFAULT_RELAY, originRepository, relayStatus, syncRelay } from './relay.js';
+import {
+  DEFAULT_RELAY,
+  originRepository,
+  relayStatus,
+  syncRelay,
+} from './relay.js';
 import { ENGINE_VERSION } from './machine.js';
 import { Refused } from './refused.js';
 import { requirePersonChannel } from './person.js';

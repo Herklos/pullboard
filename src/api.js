@@ -1,23 +1,59 @@
 /** The local API v1: the CLI's moves, persistent board identities and live events (A2). */
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import {
+  createHash,
+  randomBytes,
+  timingSafeEqual,
+} from 'node:crypto';
 import { createServer } from 'node:http';
-import { basename, join, resolve } from 'node:path';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import {
+  basename,
+  join,
+  resolve,
+} from 'node:path';
+import {
+  existsSync,
+  readFileSync,
+  statSync,
+} from 'node:fs';
 import { displayAgentName } from './agent-names.js';
 import * as store from './board.js';
-import { CONFIG_FILE, COORDINATOR, loadConfig } from './config.js';
-import { codeIsFromMain, repoInfo, resolveCommit, withGitReadFacts } from './git.js';
+import {
+  CONFIG_FILE,
+  COORDINATOR,
+  loadConfig,
+} from './config.js';
+import {
+  codeIsFromMain,
+  repoInfo,
+  resolveCommit,
+  withGitReadFacts,
+} from './git.js';
 import { refusalDocument } from './json.js';
-import { relayLinked, relayOperation, relayRevoke, relayTokens } from './relay.js';
+import {
+  relayLinked,
+  relayOperation,
+  relayRevoke,
+  relayTokens,
+} from './relay.js';
 import { laneNames } from './lanes.js';
 import { MACHINE } from './machine.js';
-import { listApiProjects, registryFile } from './projects.js';
+import {
+  listApiProjects,
+  registryFile,
+} from './projects.js';
 import { milestoneRoadmap } from './roadmap.js';
 import { proofStats } from './stats.js';
-import { prepareFlowHistory, projectFlowStats } from './stats-flow.js';
+import {
+  prepareFlowHistory,
+  projectFlowStats,
+} from './stats-flow.js';
 import { projectRowDecisions } from './row-decisions.js';
 import { Refused } from './refused.js';
-import { codeAt, projectItemState, projectState } from './serve.js';
+import {
+  codeAt,
+  projectItemState,
+  projectState,
+} from './serve.js';
 import { relayPresentationShout } from './relay-presentation.js';
 import { createApiHandler } from './api-http.js';
 import { moveArgs } from './api-moves.js';

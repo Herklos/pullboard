@@ -1,6 +1,12 @@
 /** Native approval requests never retain a person grant or its reply key [H5,H16,H17,B26]. */
 import { randomUUID } from 'node:crypto';
-import { approvalContext, createApprovalReply, openApproval, sealApproval, signApprovalIntent } from './relay-approval.js';
+import {
+  approvalContext,
+  createApprovalReply,
+  openApproval,
+  sealApproval,
+  signApprovalIntent,
+} from './relay-approval.js';
 import { readBoardKey } from './relay-key.js';
 import { readRelayMachine } from './relay-machine.js';
 import { requirePersonChannel } from './person.js';

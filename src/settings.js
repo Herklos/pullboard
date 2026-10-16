@@ -1,6 +1,16 @@
 /** Machine-wide settings shared by every Pullboard checkout on this machine. */
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import {
+  dirname,
+  join,
+} from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { machineHome } from './machine-home.js';
 import { setResourceCapacity } from './resources.js';

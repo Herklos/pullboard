@@ -4,14 +4,35 @@
  * the main checkout as the coordinator. It runs again safely and never overwrites a file it did not
  * write.
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { basename, join } from 'node:path';
-import { CONFIG_FILE, COORDINATOR, doctrineFile, loadConfig } from './config.js';
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
+import {
+  basename,
+  join,
+} from 'node:path';
+import {
+  CONFIG_FILE,
+  COORDINATOR,
+  doctrineFile,
+  loadConfig,
+} from './config.js';
 import { loadDoctrine } from './doctrine.js';
 import { installHooks } from './hooks.js';
 import { Refused } from './refused.js';
 import { installSkills } from './skills.js';
-import { AGENTS_END, AGENTS_START, agentsBlock, configTemplate, practiceTemplate, specTemplate } from './templates.js';
+import {
+  AGENTS_END,
+  AGENTS_START,
+  agentsBlock,
+  configTemplate,
+  practiceTemplate,
+  specTemplate,
+} from './templates.js';
 
 const NPM_DEFAULT_TEST = 'echo "Error: no test specified" && exit 1';
 

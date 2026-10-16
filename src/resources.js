@@ -1,7 +1,15 @@
 /** Machine and repository queues persist leases; landings go first, then eligible waiters in arrival order [Q1,Q2,Q3]. */
-import { mkdirSync, realpathSync } from 'node:fs';
+import {
+  mkdirSync,
+  realpathSync,
+} from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { basename, dirname, join, resolve } from 'node:path';
+import {
+  basename,
+  dirname,
+  join,
+  resolve,
+} from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { repoInfo } from './git.js';

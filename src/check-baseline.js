@@ -1,10 +1,17 @@
 /** Observe a proposed check on an isolated copy of main before recording its move [V2,H16]. */
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import {
+  mkdtempSync,
+  rmSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { gitChildEnv, mainCheckout, tryGit } from './git.js';
+import {
+  gitChildEnv,
+  mainCheckout,
+  tryGit,
+} from './git.js';
 import { runShell } from './gate.js';
 import { CONFIG_FILE } from './config.js';
 

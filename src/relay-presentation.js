@@ -3,7 +3,10 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import * as store from './board.js';
 import { exportBoard } from './exchange.js';
-import { codeIsFromMain, repoInfo } from './git.js';
+import {
+  codeIsFromMain,
+  repoInfo,
+} from './git.js';
 import { Refused } from './refused.js';
 import { loadConfig } from './config.js';
 import { projectState } from './serve.js';
