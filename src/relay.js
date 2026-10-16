@@ -1,7 +1,8 @@
 /** Opt-in, sealed relay ordering, with crash-safe migration from the older mirror [H1,H3,H5,H16,H17,P5]. */
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { hostname } from 'node:os';
+import { basename, dirname, join } from 'node:path';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import * as store from './board.js';
 import { exportBoard, importBoard, restoreRelaySnapshot, semanticBoardDigest } from './exchange.js';
@@ -18,7 +19,7 @@ import { relaySenderProblem } from './relay-sender.js';
 import { readRelayMachine, removeRecordedDevice, updateRelayMachine, wrapForRecordedDevice } from './relay-machine.js';
 import { receivePersonRequest, requestMoveProblem } from './relay-requests.js';
 import { nativePhoneAction, phoneProposal, publishPhoneApproval, warnPhoneApproval } from './relay-phone.js';
-import { requirePersonChannel } from './person.js';
+import { requirePersonChannel, requireRelayOnChannel } from './person.js';
 import { listApiProjects } from './projects.js';
 
 export const DEFAULT_RELAY = 'https://app.pullboard.dev';
@@ -143,22 +144,26 @@ function notices(document, io) {
 }
 
 /** The sole outbound transport in the CLI: explicit sign-in or a saved, opted-in board link. */
-async function request(state, path, { method = 'GET', body, allowMissing = false, initialBaseline = false } = {}, io) {
-  const supplied = process.env.PULLBOARD_RELAY_TOKEN;
+async function request(state, path, { method = 'GET', body, allowMissing = false, initialBaseline = false, signal } = {}, io) {
+  const supplied = io?.ignoreRelayEnvironmentToken ? undefined : process.env.PULLBOARD_RELAY_TOKEN;
   const readToken = method === 'GET' && path.startsWith('/api/v1/boards/') ? supplied : undefined;
   if (readToken !== undefined && !/^pa_[A-Za-z0-9_-]{43}$/.test(readToken)) throw new Refused('AUTH_REQUIRED', 'supply a current scoped board token without including it in command arguments');
   const token = readToken ?? state.token;
   let response;
   try {
     response = await fetch(relayOrigin(state.url) + path, {
-      method, redirect: 'error', signal: AbortSignal.timeout(10000),
+      method, redirect: 'error', signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10000)]) : AbortSignal.timeout(10000),
       headers: { 'x-pullboard-engine': String(ENGINE_VERSION), ...(token ? { authorization: 'Bearer ' + token } : {}), ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...(initialBaseline ? { 'if-none-match': '*' } : {}) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
-  } catch { throw new Refused('RELAY_UNAVAILABLE', `the relay ${state.url} did not answer; read the local board offline, then retry this move when the relay is reachable`); }
+  } catch {
+    if (signal?.aborted) throw new Refused('OAUTH_CANCELLED', 'GitHub device sign-in was cancelled; no board was linked');
+    throw new Refused('RELAY_UNAVAILABLE', `the relay ${state.url} did not answer; read the local board offline, then retry this move when the relay is reachable`);
+  }
   let document;
   try { document = await response.json(); }
   catch {
+    if (signal?.aborted) throw new Refused('OAUTH_CANCELLED', 'GitHub device sign-in was cancelled; no board was linked');
     const error = new Refused('RELAY_RESPONSE', 'the relay returned an invalid response; retry with the configured relay address');
     error.httpStatus = response.status;
     throw error;
@@ -567,6 +572,12 @@ async function flushMirror(root, file, state, io) {
 /** A saved link is the opt-in boundary; unlinked callers neither read keys nor contact the relay. */
 export function relayLinked(root) { return Boolean(loadLink(linkFile(root))); }
 
+/** Read validated View eligibility without decoding snapshots, opening a board or contacting the relay. */
+export function relayLinkAvailability(root) {
+  const state = loadLink(linkFile(root));
+  return { linked: Boolean(state && !state.unlinking), unlinking: Boolean(state?.unlinking) };
+}
+
 /** Authenticate and decode one opaque relay record on this device alone. */
 async function decoded(key, record, state, kind, sequence) {
   const bytes = Buffer.from(record.sealed, 'base64url');
@@ -797,7 +808,7 @@ async function actorTransport(root, file, state, actor, io) {
     if (!state.token?.startsWith('pm_')) throw new Refused('HUMAN_REQUIRED', 'run pullboard relay on --all to authorize this board’s machine credential');
     return state;
   }
-  const supplied = process.env.PULLBOARD_RELAY_TOKEN;
+  const supplied = io?.ignoreRelayEnvironmentToken ? undefined : process.env.PULLBOARD_RELAY_TOKEN;
   if (supplied !== undefined) {
     if (!/^pa_[A-Za-z0-9_-]{43}$/.test(supplied)) throw new Refused('AUTH_REQUIRED', 'supply a current scoped board token, without including it in command arguments');
     const transport = { ...state, token: supplied, agent: actor };
@@ -1167,28 +1178,95 @@ export async function relayRecover(root, skip, io) {
 /** Read the local link and lag without opening a network connection or revealing its relay token. */
 export function relayStatus(root) { return summary(root, loadLink(linkFile(root))); }
 
-/** Renew a person session through the relay without changing this device's board key or cursors. */
-async function deviceSignIn(url, io) {
+/** Throw a named refusal when the caller has cancelled the in-progress device sign-in. */
+function cancellationOutcome(signal) {
+  if (signal?.aborted) throw new Refused('OAUTH_CANCELLED', 'GitHub device sign-in was cancelled; no board was linked');
+}
+
+/** Wait for one bounded device-flow poll interval and wake promptly on caller cancellation. */
+function waitForDevicePoll(seconds, signal) {
+  cancellationOutcome(signal);
+  return new Promise((resolve, reject) => {
+    const finish = (error) => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', cancel);
+      if (error) reject(error); else resolve();
+    };
+    const cancel = () => finish(new Refused('OAUTH_CANCELLED', 'GitHub device sign-in was cancelled; no board was linked'));
+    const timer = setTimeout(() => finish(), Math.max(1, seconds) * 1000);
+    signal?.addEventListener('abort', cancel, { once: true });
+    if (signal?.aborted) cancel();
+  });
+}
+
+/** Cancel one device ticket without the already-aborted caller signal. */
+async function cancelDeviceFlow(url, ticket, io) {
+  let result;
+  try { result = await request({ url }, '/auth/device/cancel', { method: 'POST', body: { ticket } }, io); }
+  catch {
+    throw new Refused('OAUTH_CLEANUP', 'the relay could not confirm cleanup of the cancelled sign-in; retry before linking boards');
+  }
+  if (result.cancelled !== true) throw new Refused('OAUTH_CLEANUP', 'the relay did not confirm cleanup of the cancelled sign-in; retry before linking boards');
+}
+
+/** Revoke only the fresh person session created by this explicit device sign-in. */
+export async function revokeRelayPersonSession(session, io) {
+  if (!session || typeof session.token !== 'string' || !/^ps_[A-Za-z0-9_-]{43}$/.test(session.token) || typeof session.id !== 'string') {
+    throw new Refused('OAUTH_CLEANUP', 'the relay session could not be identified for cancellation cleanup');
+  }
+  const result = await request({ url: session.url, token: session.token }, '/auth/tokens/revoke', { method: 'POST', body: { id: session.id } }, io);
+  if (result.id !== session.id || result.revoked !== true) throw new Refused('OAUTH_CLEANUP', 'the relay did not confirm cleanup of the cancelled sign-in; retry before linking boards');
+}
+
+/** Sign in with the caller's cancellation signal; no board credential is persisted here. */
+async function deviceSignIn(url, io, { signal, intent, onSignIn } = {}) {
+  cancellationOutcome(signal);
   const client = { url };
-  const flow = await request(client, '/auth/device/start', { method: 'POST', body: {} }, io);
-  io.stderr.write(`Sign in with GitHub: open ${flow.verificationURL} and enter ${flow.userCode}\n`);
-  const expires = Date.now() + flow.expiresIn * 1000;
-  let signed;
-  let wait = flow.interval;
-  do {
-    await new Promise((resolve) => setTimeout(resolve, Math.max(1, wait) * 1000));
-    if (Date.now() >= expires) throw new Refused('OAUTH_EXPIRED', 'GitHub device sign-in expired; run pullboard relay on again');
-    signed = await request(client, '/auth/device/poll', { method: 'POST', body: { ticket: flow.ticket } }, io);
-    wait = signed.retryAfter ?? flow.interval;
-  } while (signed.pending);
-  const token = signed.token;
-  if (!/^ps_[A-Za-z0-9_-]{43}$/.test(token)) throw new Refused('RELAY_RESPONSE', 'the relay did not issue a person session; sign in again');
-  return signed;
+  const flow = await request(client, '/auth/device/start', { method: 'POST', body: intent ? { intent } : {}, signal }, io);
+  try {
+    cancellationOutcome(signal);
+    io.stderr.write(intent
+      ? `Sign in with GitHub for board ${intent.boardName} from ${intent.host}: open ${flow.verificationURL} and enter ${flow.userCode}. After sign-in, confirm the link in your browser: ${flow.confirmationURL}\n`
+      : `Sign in with GitHub: open ${flow.verificationURL} and enter ${flow.userCode}\n`);
+    if (intent && typeof flow.confirmationURL !== 'string') throw new Refused('RELAY_RESPONSE', 'the relay did not provide a board confirmation page; sign in again');
+    let expires = Date.now() + flow.expiresIn * 1000;
+    // The view receives only the public device instructions. The ticket stays in this stack.
+    onSignIn?.({ verificationURL: flow.verificationURL, userCode: flow.userCode, expiresAt: expires, relayUrl: url });
+    let confirmationPending = false;
+    let signed;
+    let wait = flow.interval;
+    do {
+      await waitForDevicePoll(wait, signal);
+      if (!confirmationPending && Date.now() >= expires) throw new Refused('OAUTH_EXPIRED', 'GitHub device sign-in expired; run pullboard relay on again');
+      signed = await request(client, '/auth/device/poll', { method: 'POST', body: { ticket: flow.ticket }, signal }, io);
+      cancellationOutcome(signal);
+      if (signed.pendingConfirmation && Number.isSafeInteger(signed.confirmationExpiresIn)) {
+        confirmationPending = true;
+        expires = Date.now() + signed.confirmationExpiresIn * 1000;
+      }
+      wait = signed.retryAfter ?? flow.interval;
+    } while (signed.pending);
+    const token = signed.token;
+    if (!/^ps_[A-Za-z0-9_-]{43}$/.test(token)) throw new Refused('RELAY_RESPONSE', 'the relay did not issue a person session; sign in again');
+    return signed;
+  } catch (error) {
+    if (signal?.aborted || error.code === 'OAUTH_CANCELLED') {
+      await cancelDeviceFlow(url, flow.ticket, io);
+      throw new Refused('OAUTH_CANCELLED', 'GitHub device sign-in was cancelled; no board was linked');
+    }
+    throw error;
+  }
 }
 
 /** Explicitly sign in through the relay and persist a sealed initial snapshot before uploading it. */
 export async function relayOn(root, address, io, { session, credential, quiet = false, strict = false } = {}) {
-  if (!credential) requirePersonChannel(io.personChannel);
+  const remoteShell = io.personChannel !== 'view' && Boolean(process.env.SSH_CONNECTION || process.env.SSH_TTY);
+  const reusableSession = remoteShell ? undefined : session;
+  const reusableCredential = remoteShell ? undefined : credential;
+  if (remoteShell) {
+    requireRelayOnChannel(io.personChannel);
+    io.ignoreRelayEnvironmentToken = true;
+  } else if (!reusableCredential) requirePersonChannel(io.personChannel);
   readRelayMachine();
   for (const project of listApiProjects()) { try { loadLink(linkFile(project.root)); } catch { /* Report this command's own link below. */ } }
   const repository = originRepository(root);
@@ -1200,8 +1278,10 @@ export async function relayOn(root, address, io, { session, credential, quiet = 
     const url = relayOrigin(address || state?.url || DEFAULT_RELAY);
     if (state && (state.url !== url || state.repository !== repository)) throw new Refused('RELAY_LINKED', 'this board is linked to another relay or repository; run relay off before changing its link');
     const key = state ? readBoardKey(state.board) : await generateBoardKey();
-    const signed = credential ?? session ?? await deviceSignIn(url, io);
-    if (session && session.url !== url) throw new Refused('RELAY_SESSION', 'Sign in again to this relay with pullboard relay on --all.');
+    const intent = remoteShell ? { board: state?.board ?? localRecords(root, store.boardId), repository,
+      host: hostname(), boardName: basename(root) } : undefined;
+    const signed = remoteShell ? await deviceSignIn(url, io, { intent }) : reusableCredential ?? reusableSession ?? await deviceSignIn(url, io);
+    if (reusableSession && reusableSession.url !== url) throw new Refused('RELAY_SESSION', 'Sign in again to this relay with pullboard relay on --all.');
     if (!state) {
       const snapshot = localRecords(root, (board) => {
         startRelayEpoch(board);
@@ -1220,12 +1300,13 @@ export async function relayOn(root, address, io, { session, credential, quiet = 
     // Persist the exact sealed snapshot and a recoverable link intent before making the remote link.
     saveLink(file, state);
     if (state.linkPending) {
-      if (!credential) await request({ ...state, token: signed.token }, '/auth/boards/link', { method: 'POST', body: { board: state.board, repository } }, io);
+      if (signed.linkConfirmed && signed.linkedBoard !== state.board) throw new Refused('RELAY_RESPONSE', 'the relay confirmed a different board; sign in again');
+      if (!reusableCredential && !signed.linkConfirmed) await request({ ...state, token: signed.token }, '/auth/boards/link', { method: 'POST', body: { board: state.board, repository } }, io);
       delete state.linkPending;
       saveLink(file, state);
     }
     const machine = updateRelayMachine(settings => settings.machine);
-    const issued = credential ?? await request({ ...state, token: signed.token }, '/auth/machines', { method: 'POST', body: { board: state.board, machine } }, io);
+    const issued = reusableCredential ?? await request({ ...state, token: signed.token }, '/auth/machines', { method: 'POST', body: { board: state.board, machine } }, io);
     if (!/^pm_[A-Za-z0-9_-]{43}$/u.test(issued.token ?? '') || issued.board !== state.board || issued.machine !== machine) throw new Refused('RELAY_RESPONSE', 'the relay did not issue this board’s machine credential; sign in again');
     // Cached agent credentials belong to the account that minted them.
     if (state.account !== account) delete state.agentTokens;
@@ -1304,10 +1385,22 @@ export async function relayRequestDevice(root) {
 }
 
 /** Sign in once for machine setup; the saved account is the provider-authenticated identity. */
-export async function relayMachineSignIn(address, io) {
+export async function relayMachineSignIn(address, io, { signal, onSignIn } = {}) {
   requirePersonChannel(io.personChannel);
   const url = relayOrigin(address || DEFAULT_RELAY);
-  const signed = await deviceSignIn(url, io);
+  let signed;
+  try { signed = await deviceSignIn(url, io, { signal, onSignIn }); }
+  catch (error) {
+    if (error.code === 'OAUTH_CLEANUP') throw error;
+    if (signal?.aborted || error.code === 'OAUTH_CANCELLED') return { outcome: 'cancelled' };
+    if (error.code === 'OAUTH_DENIED') return { outcome: 'declined' };
+    if (error.code === 'OAUTH_EXPIRED') return { outcome: 'expired' };
+    throw error;
+  }
+  if (signal?.aborted) {
+    await revokeRelayPersonSession({ ...signed, url }, io);
+    return { outcome: 'cancelled' };
+  }
   if (typeof signed.user?.id !== 'string') throw new Refused('RELAY_RESPONSE', 'Sign in again to receive an authenticated account identity.');
   return { token: signed.token, id: signed.id, account: signed.user.id, url };
 }

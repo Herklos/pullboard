@@ -1,27 +1,33 @@
 /** Real-process resource queue and lease coverage [Q1,Q2,Q3]. */
 import assert from 'node:assert/strict';
-import { startFixtureChild as spawn, runFixtureChild as spawnSync, reportFixtureChildFailure, runFixtureChild } from './fixture-child.js';
+import { startFixtureChild as spawn, runFixtureChild as spawnSync, reportFixtureChildFailure, runFixtureChild, runFixtureChildAsync, runFixtureGit } from './fixture-child.js';
 import { performance } from 'node:perf_hooks';
 import { once } from 'node:events';
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, watch, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createInterface } from 'node:readline';
 import { after, test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { listResources, setResourceCapacity, takeResource } from '../src/resources.js';
+import { checkNeedsBrowser } from '../src/browser-admission.js';
 
 const TEMP = [];
 const CHILDREN = new Set();
 const MODULE = pathToFileURL(resolve(import.meta.dirname, '../src/resources.js')).href;
 const GATE_MODULE = pathToFileURL(resolve(import.meta.dirname, '../src/gate.js')).href;
+const SETTINGS_MODULE = pathToFileURL(resolve(import.meta.dirname, '../src/settings.js')).href;
+const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
+const TEST_RUNNER = resolve(import.meta.dirname, '../bin/run-tests.js');
 const POOL_MODULE_WORKER = `
 import { takeResource } from ${JSON.stringify(MODULE)};
+import { loadMachineSettings } from ${JSON.stringify(SETTINGS_MODULE)};
 let announced = false;
 const [root, agent, browserText, item, kind, landingText] = process.argv.slice(1);
 const lease = await takeResource({
   name: 'gate', capacity: 2, scope: 'machine', root, agent,
+  browserCapacityProvider: () => loadMachineSettings().browserSlots,
   browser: browserText === 'true', item, kind, itemCheck: kind === 'review',
   diagnostic: kind === 'diagnostic', landing: landingText === 'true',
   onWait: (state) => {
@@ -34,6 +40,14 @@ try {
     if (String(line).trim() === 'release') break;
   }
 } finally { lease.release(); }
+`;
+const SUBMIT_CHECK = `
+import { runSubmitGate } from ${JSON.stringify(GATE_MODULE)};
+const [root, base, check] = process.argv.slice(1);
+const result = await runSubmitGate(root, { gate: 'true', affectedTests: 'node bin/run-tests.js test/cpu-check.test.js' }, {
+  base, changed: ['test/cpu-check.test.js'], check, agent: 'submit-check', item: '636',
+});
+process.stdout.write(JSON.stringify({ green: result.isGreen, full: result.full, reason: result.reason, files: result.files, checkGreen: result.check.green }) + '\\n');
 `;
 const PROCESS_INFO_POLICY = '(version 1)(allow default)(deny process-info*)';
 const SANDBOX_EXEC = process.platform === 'darwin' && existsSync('/usr/bin/sandbox-exec');
@@ -81,6 +95,50 @@ function fixture() {
     assert.equal(result.status, 0, result.failure);
   }
   return { dir, home, first, second, env: { ...process.env, PULLBOARD_HOME: home, PULLBOARD_MACHINE_HOME: home } };
+}
+
+/** Wait for a fixture command to create a marker file, with a hang ceiling only for failure. */
+function waitForMarker(path, timeoutMs = 10_000) {
+  if (existsSync(path)) return Promise.resolve();
+  const watcher = watch(dirname(path), { persistent: false });
+  return new Promise((resolveMarker, rejectMarker) => {
+    const timer = setTimeout(() => rejectMarker(new Error(`timed out waiting for ${path}`)), timeoutMs);
+    const check = () => {
+      if (!existsSync(path)) return;
+      clearTimeout(timer);
+      watcher.close();
+      resolveMarker();
+    };
+    watcher.on('error', error => { clearTimeout(timer); rejectMarker(error); });
+    watcher.on('change', check);
+    watcher.on('rename', check);
+    check();
+  }).finally(() => watcher.close());
+}
+
+/** Create a minimal real board whose CPU check and affected tests share the private gate pool. */
+function checkProject(box) {
+  const repo = box.first;
+  runFixtureGit(['branch', '-M', 'main'], { cwd: repo, env: box.env });
+  const initialized = runFixtureChild(process.execPath, [BIN, 'init'], { cwd: repo, env: box.env, encoding: 'utf8' });
+  assert.equal(initialized.status, 0, initialized.stderr);
+  const configPath = join(repo, 'pullboard.json');
+  const config = JSON.parse(readFileSync(configPath, 'utf8'));
+  writeFileSync(configPath, `${JSON.stringify({ ...config, gate: 'true', spec: 'SPEC.md', affectedTests: 'node bin/run-tests.js', lanes: { web: { owns: ['web/'], specs: ['G1'] } }, shared: [] }, null, 2)}\n`);
+  writeFileSync(join(repo, 'SPEC.md'), '# CPU check fixture\n\n## G · Goals\n- G1 [approved, must] The fixture keeps its board. | gate: true\n');
+  writeFileSync(join(repo, 'package.json'), '{"type":"module"}\n');
+  mkdirSync(join(repo, 'bin'), { recursive: true });
+  cpSync(resolve(import.meta.dirname, '../src'), join(repo, 'src'), { recursive: true });
+  copyFileSync(TEST_RUNNER, join(repo, 'bin/run-tests.js'));
+  mkdirSync(join(repo, 'test'), { recursive: true });
+  writeFileSync(join(repo, 'test/unrelated.test.js'), "import { test } from 'node:test'; test('unrelated test', () => {});\n");
+  runFixtureGit(['add', '-A'], { cwd: repo, env: box.env });
+  runFixtureGit(['-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Resource fixture', '-c', 'user.email=resource@example.invalid', 'commit', '-q', '-m', 'fixture: initialize board'], { cwd: repo, env: box.env });
+  const base = runFixtureGit(['rev-parse', 'HEAD'], { cwd: repo, env: box.env });
+  writeFileSync(join(repo, 'test/cpu-check.test.js'), `import { writeFileSync } from 'node:fs';\nimport { test } from 'node:test';\ntest('item check marker', () => writeFileSync('item-check-started', 'started'));\ntest('submit check marker', () => writeFileSync('submit-check-started', 'started'));\n`);
+  runFixtureGit(['add', 'test/cpu-check.test.js'], { cwd: repo, env: box.env });
+  runFixtureGit(['-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Resource fixture', '-c', 'user.email=resource@example.invalid', 'commit', '-q', '-m', 'test: add CPU check'], { cwd: repo, env: box.env });
+  return { repo, base };
 }
 
 /** Create the previous private queue schema so simultaneous openers exercise its migration. */
@@ -218,6 +276,21 @@ function poolWorker(box, { agent, browser = false, item = '', kind = '', landing
   return child;
 }
 
+/** Configure browser slots through the public CLI in this fixture's private machine home. */
+function configureBrowserSlots(box, slots) {
+  return runFixtureChild(process.execPath, [BIN, 'settings', 'browserSlots', String(slots), '--json'], {
+    cwd: box.first, env: box.env, encoding: 'utf8',
+  });
+}
+
+/** Set or remove the opt-in browser-free-check policy in a fixture's machine settings. */
+function setBrowserFreeChecks(box, value) {
+  const file = join(box.home, 'settings.json');
+  if (value === undefined) { rmSync(file, { force: true }); return; }
+  mkdirSync(box.home, { recursive: true });
+  writeFileSync(file, `${JSON.stringify({ gate: { browserFreeChecks: value } }, null, 2)}\n`);
+}
+
 /** Read the next worker event, failing promptly with its stderr if it exits unexpectedly. */
 async function event(child, timeoutMs = 10_000) {
   if (child.pendingLines.length) return JSON.parse(child.pendingLines.shift());
@@ -296,6 +369,140 @@ async function release(child) {
   assert.equal(code, 0, child.errors);
 }
 
+test('single-quoted named-test checks skip the browser slot [C7]', async () => {
+  const box = fixture();
+  const { repo } = checkProject(box);
+  const itemCheck = 'node bin/run-tests.js --test-name-pattern "item check marker" test/cpu-check.test.js';
+  /** Keep assertions about the parser independent of worker custody inherited by the test process. */
+  const classify = command => checkNeedsBrowser(repo, command, { env: { ...process.env, NODE_OPTIONS: '' } });
+  assert.equal(await classify(itemCheck), false, 'an explicit CPU-only test file is classifiable');
+  const outputPattern = '^[[:space:]]*ok [0-9]+ - item check marker';
+  const newlinePrint = ([quote, backslashes]) => `printf ${quote}%s${'\\'.repeat(backslashes)}n${quote} "$out"`;
+  const capturedCheck = (formats, patternQuotes) => `out=$(${itemCheck} 2>&1); ${newlinePrint(formats[0])}; ${newlinePrint(formats[1])} | grep -Eq ${patternQuotes[0]}${outputPattern}${patternQuotes[0]} && ${newlinePrint(formats[2])} | grep -Eq ${patternQuotes[1]}^# fail 0$${patternQuotes[1]}`;
+  const oneBackslash = [1, 1, 1];
+  const accepted = [
+    { formats: oneBackslash.map(count => ['\'', count]), patternQuotes: ['\'', '\''] },
+    { formats: [['\'', 1], ['"', 1], ['\'', 1]], patternQuotes: ['"', '\''] },
+    { formats: [['"', 1], ['\'', 1], ['"', 1]], patternQuotes: ['\'', '"'] },
+    { formats: oneBackslash.map(count => ['"', count]), patternQuotes: ['"', '"'] },
+  ];
+  for (const variant of accepted) {
+    assert.equal(await classify(capturedCheck(variant.formats, variant.patternQuotes)), false,
+      `the exact capture wrapper accepts quote changes with one literal backslash: ${JSON.stringify(variant)}`);
+  }
+  for (let index = 0; index < 3; index += 1) {
+    const formats = oneBackslash.map(count => ['\'', count]);
+    formats[index] = ['\'', 2];
+    assert.equal(await classify(capturedCheck(formats, ['\'', '\''])), true,
+      `a two-backslash printf at position ${index + 1} stays browser-gated`);
+  }
+  assert.equal(await classify(`${capturedCheck(accepted[0].formats, accepted[0].patternQuotes)}; :`), true,
+    'an arbitrary suffix remains outside the exact capture wrapper');
+  const substituted = capturedCheck(accepted[0].formats, accepted[0].patternQuotes)
+    .replace('printf \'%s\\n\' "$out"', 'printf \'%s\\n\' "$(printf %s "$out")"');
+  assert.equal(await classify(substituted), true, 'a command substitution remains outside the exact printf wrapper');
+  assert.equal(await classify('node bin/run-tests.js test/cockpit/brief.test.js'), true,
+    'known browser suites remain browser-gated');
+  assert.equal(await checkNeedsBrowser(repo, itemCheck, {
+    env: { ...process.env, NODE_OPTIONS: '--import=unknown-preload.mjs' },
+  }), true, 'an unclassified preload keeps the check browser-gated');
+});
+
+test('a non-browser check does not wait for the browser slot [C7]', async () => {
+  const box = fixture();
+  setBrowserFreeChecks(box, true);
+  const { repo, base } = checkProject(box);
+  const itemCheck = 'node bin/run-tests.js --test-name-pattern "item check marker" test/cpu-check.test.js';
+  const submitCheck = 'node bin/run-tests.js --test-name-pattern "submit check marker" test/cpu-check.test.js';
+  const added = runFixtureChild(process.execPath, [BIN, 'add', 'coordinator', 'CPU check item', '--check', itemCheck, '--wait', '--json'], {
+    cwd: repo, env: box.env, encoding: 'utf8',
+  });
+  assert.equal(added.status, 0, added.stderr);
+  const item = JSON.parse(added.stdout).item.item_id;
+  assert.equal(existsSync(join(repo, 'item-check-started')), false, 'the setup baseline ran in its private clone');
+
+  const browserHolder = poolWorker(box, { agent: 'check-browser-holder', browser: true, item: '636', kind: 'gate' });
+  await acquired(browserHolder);
+  const itemMarker = join(repo, 'item-check-started');
+  const itemStarted = waitForMarker(itemMarker);
+  const itemRun = runFixtureChildAsync(process.execPath, [BIN, 'check', String(item), '--yes'], { cwd: repo, env: box.env });
+  let itemResult;
+  try {
+    await itemStarted;
+    assert.ok(privateList(box).find(({ name }) => name === 'browser')?.holders.some(({ agent }) => agent === 'check-browser-holder'),
+      'the item check starts while the unrelated browser lease remains held');
+  } finally {
+    await release(browserHolder);
+    itemResult = await itemRun;
+  }
+  assert.equal(itemResult.status, 0, itemResult.failure ?? itemResult.stderr);
+  assert.equal(readFileSync(itemMarker, 'utf8'), 'started');
+
+  const nextBrowserHolder = poolWorker(box, { agent: 'submit-browser-holder', browser: true, item: '636', kind: 'gate' });
+  await acquired(nextBrowserHolder);
+  const submitMarker = join(repo, 'submit-check-started');
+  const submitStarted = waitForMarker(submitMarker);
+  const submitRun = runFixtureChildAsync(process.execPath, ['--input-type=module', '-e', SUBMIT_CHECK, repo, base, submitCheck], { cwd: repo, env: box.env });
+  let submitResult;
+  let submitStartFailure = null;
+  try {
+    try { await submitStarted; }
+    catch (error) { submitStartFailure = error; }
+    assert.ok(privateList(box).find(({ name }) => name === 'browser')?.holders.some(({ agent }) => agent === 'submit-browser-holder'),
+      'the submission check starts while the unrelated browser lease remains held');
+  } finally {
+    await release(nextBrowserHolder);
+    submitResult = await submitRun;
+  }
+  assert.equal(submitStartFailure, null, `${submitStartFailure?.message ?? ''}\n${submitResult.stdout}\n${submitResult.stderr}`);
+  assert.equal(submitResult.status, 0, submitResult.failure ?? submitResult.stderr);
+  assert.deepEqual(JSON.parse(submitResult.stdout), {
+    green: true, full: false, reason: '', files: ['test/cpu-check.test.js'], checkGreen: true,
+  }, submitResult.stderr);
+});
+
+test('browser-free checks skip the slot only when the machine allows it [C7]', async () => {
+  const box = fixture();
+  const { repo } = checkProject(box);
+  const check = `out=$(node bin/run-tests.js --test-name-pattern "item check marker" test/cpu-check.test.js 2>&1); printf '%s\\n' "$out"; printf '%s\\n' "$out" | grep -Eq '^[[:space:]]*ok [0-9]+ - item check marker' && printf '%s\\n' "$out" | grep -Eq '^# fail 0$'`;
+  const added = runFixtureChild(process.execPath, [BIN, 'add', 'coordinator', 'Browser-free policy check', '--check', check, '--wait', '--json'], {
+    cwd: repo, env: box.env, encoding: 'utf8',
+  });
+  assert.equal(added.status, 0, added.stderr);
+  const item = JSON.parse(added.stdout).item.item_id;
+  const marker = join(repo, 'item-check-started');
+
+  async function checkWithPolicy(value, shouldStartWithBrowserHeld) {
+    setBrowserFreeChecks(box, value);
+    rmSync(marker, { force: true });
+    const browserHolder = poolWorker(box, { agent: `policy-browser-${String(value)}`, browser: true, item: '681', kind: 'gate' });
+    await acquired(browserHolder);
+    const started = waitForMarker(marker);
+    const resultPromise = runFixtureChildAsync(process.execPath, [BIN, 'check', String(item), '--yes'], { cwd: repo, env: box.env });
+    let result;
+    try {
+      if (shouldStartWithBrowserHeld) {
+        await started;
+        assert.ok(privateList(box).find(({ name }) => name === 'browser')?.holders.some(({ agent }) => agent === `policy-browser-${String(value)}`),
+          'the browser lease stays live while an opted-in browser-free check runs');
+      } else {
+        await waitUntil(() => privateList(box).find(({ name }) => name === 'gate')?.line.some(({ kind, item: waitingItem }) => kind === 'check' && waitingItem === String(item)),
+          'a browser-disabled check to wait in the gate queue');
+        assert.equal(existsSync(marker), false, 'the check does not start while browser-free checks are disabled or absent');
+      }
+    } finally {
+      await release(browserHolder);
+      result = await resultPromise;
+    }
+    assert.equal(result.status, 0, result.failure ?? result.stderr);
+    assert.equal(readFileSync(marker, 'utf8'), 'started');
+  }
+
+  await checkWithPolicy(false, false);
+  await checkWithPolicy(true, true);
+  await checkWithPolicy(undefined, false);
+});
+
 /** Kill and reap every fixture worker before deleting its private files. */
 after(async () => {
   const running = [...CHILDREN];
@@ -303,6 +510,55 @@ after(async () => {
   await Promise.all(running.map((child) => child.finished));
   for (const child of running) child.lines.close();
   TEMP.forEach((dir) => rmSync(dir, { recursive: true, force: true }));
+});
+
+/** Prove the machine setting changes real browser admission while retaining the single-slot default [C7]. */
+test('browserSlots admits that many browser runs and no more [C7]', async () => {
+  const defaults = fixture();
+  const defaultSettings = runFixtureChild(process.execPath, [BIN, 'settings', '--json'], {
+    cwd: defaults.first, env: defaults.env, encoding: 'utf8',
+  });
+  assert.equal(defaultSettings.status, 0, defaultSettings.stderr);
+  assert.equal(JSON.parse(defaultSettings.stdout).settings.browserSlots, 1, 'an unset machine keeps the existing single browser slot');
+
+  const box = fixture();
+  const configured = configureBrowserSlots(box, 2);
+  assert.equal(configured.status, 0, configured.stderr);
+  assert.equal(JSON.parse(configured.stdout).settings.browserSlots, 2);
+  const readBack = runFixtureChild(process.execPath, [BIN, 'settings', '--json'], {
+    cwd: box.first, env: box.env, encoding: 'utf8',
+  });
+  assert.equal(readBack.status, 0, readBack.stderr);
+  assert.equal(JSON.parse(readBack.stdout).settings.browserSlots, 2, 'the machine setting persists for other processes');
+  assert.equal(privateList(box).find(({ name }) => name === 'browser').capacity, 2,
+    'the shared browser resource row has the configured capacity before workers start');
+  const invalid = configureBrowserSlots(box, 3);
+  assert.equal(invalid.status, 1);
+  assert.equal(JSON.parse(invalid.stdout).error.code, 'BAD_BROWSER_SLOTS');
+  assert.match(JSON.parse(invalid.stdout).error.message, /pullboard settings gateSlots/u);
+
+  const first = poolWorker(box, { agent: 'browser-one', browser: true });
+  assert.equal((await acquired(first)).acquired, 'browser-one');
+  const second = poolWorker(box, { agent: 'browser-two', browser: true });
+  const secondStart = await event(second);
+  if (!secondStart.acquired) {
+    const gate = privateList(box).find(({ name }) => name === 'gate');
+    const browser = privateList(box).find(({ name }) => name === 'browser');
+    assert.fail(`the configured second browser lease queued: ${JSON.stringify({ state: secondStart.queued, gate, browser })}`);
+  }
+  assert.equal(secondStart.acquired, 'browser-two', 'the configured second browser lease starts while the first is held');
+  const third = poolWorker(box, { agent: 'browser-three', browser: true });
+  assert.equal((await event(third)).queued.position, 1, 'the next browser run waits for a configured slot');
+  const browser = privateList(box).find(({ name }) => name === 'browser');
+  assert.equal(browser.capacity, 2, 'resource listing reflects the machine browserSlots setting');
+  assert.equal(browser.holders.length, 2);
+  assert.deepEqual(browser.holders.map(({ agent }) => agent).sort(), ['browser-one', 'browser-two']);
+  assert.deepEqual(browser.line.map(({ agent }) => agent), ['browser-three']);
+
+  await release(first);
+  assert.equal((await acquired(third)).acquired, 'browser-three', 'a released browser lease admits the oldest waiting browser run');
+  await release(second);
+  await release(third);
 });
 
 test('[Q1,Q2] capacity-one takers acquire in strict FIFO arrival order', async () => {

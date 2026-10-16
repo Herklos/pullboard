@@ -18,6 +18,7 @@ import { agentSessionDigest, requirePersonChannel } from './person.js';
 import { bindLocalSession, localSessionMatches } from './agent-session.js';
 import { decisionProjection, planRowApply, prepareRowDecisions, restoreRowApply, writeRowApply } from './row-decisions.js';
 import { digestOf, gateReport, runGate, runProfiledShell, runSubmitGate, submitGateReport, timingDigest, withGateSlot } from './gate.js';
+import { checkNeedsBrowser } from './browser-admission.js';
 import { bareWorktreeFinding, codeIsFromMain, contains, differFromHead, git, gitChildEnv, headCommit, headTree, invalidateGitFacts, isClean, mainCheckout, patchId, repoInfo, resolveCommit, tryGit, untracked, withGitFacts } from './git.js';
 import {
   FIX_NOTE,
@@ -62,7 +63,7 @@ import { parseProblems, sweepItems } from './sweep.js';
 import { renderSpecView } from './view.js';
 import { tour } from './tour.js';
 import { commandOutput, refusalDocument } from './json.js';
-import { forgetProject, registerProjectAndLink } from './projects.js';
+import { forgetProject, listApiProjects, registerProjectAndLink } from './projects.js';
 import { milestoneRoadmap } from './roadmap.js';
 import { listResources } from './resources.js';
 import { citedTestFiles, rowEvidence, rowStage } from './evidence.js';
@@ -77,7 +78,7 @@ import { flowLines, flowAlertLine } from './stats-flow.js';
 import { releaseHeadlinesBetween } from './changelog.js';
 import { exportBoard, importBoard } from './exchange.js';
 import { addSigner, assertRequiredSigners, defaultPrincipal, hasSignerFile } from './signature.js';
-import { loadMachineSettings, setGateSlots } from './settings.js';
+import { browserFreeChecksEnabled, loadMachineSettings, setBrowserSlots, setGateSlots } from './settings.js';
 import { formatSnapshotLimit, pendingSnapshotSize, pendingCheckpointProblem, relayCommandReceipt, relayCommandReceiptReported, relayLinked, relayOff, relayOn, relayOperation, relayRecover, relayRecovered, relayRevoke, relayStatus, relayTokens, syncRelay } from './relay.js';
 import { autoLinkProject, relayOnAll, revokeRelayDevice, unlinkedRelayProjects } from './relay-setup.js';
 import { readRelayMachine } from './relay-machine.js';
@@ -228,6 +229,7 @@ const OPTIONS = {
   reason: { type: 'string' },
   off: { type: 'boolean' },
   port: { type: 'string' },
+  project: { type: 'boolean' },
   export: { type: 'string' },
   'no-open': { type: 'boolean' },
   note: { type: 'string' },
@@ -1380,24 +1382,43 @@ function resumeHere(io) {
  */
 async function viewHere(io, values) {
   if (values.export !== undefined) {
+    if (values.project) throw new Refused('USAGE', 'choose either --project for a live scoped view or --export for a static snapshot');
     const exported = await exportView(io.cwd, resolve(io.cwd, values.export));
     io.result?.(exported);
     io.say(`wrote snapshot ${exported.path}`);
     return 0;
   }
-  const port = values.port === undefined ? defaultViewPort() : Number(values.port);
+  const projectRequested = Boolean(values.project);
+  const port = values.port === undefined ? (projectRequested ? 0 : defaultViewPort()) : Number(values.port);
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Refused('USAGE', '--port is a number from 0 to 65535; 0 picks a free one');
+  let projectRoot;
+  let scopeCommonDir;
   let info;
   try {
     info = repoInfo(io.cwd);
-    if (info.isMain && existsSync(join(info.root, CONFIG_FILE))) await registerProjectAndLink(info.root, new Date(), loadConfig(info.root), io);
+    if (projectRequested) {
+      const projects = listApiProjects();
+      const matches = projects.filter((project) => {
+        try { return repoInfo(project.root).commonDir === info.commonDir; }
+        catch { return false; }
+      });
+      if (matches.length !== 1) throw new Refused('PROJECT_NOT_REGISTERED', 'run pullboard view --project inside a registered project repository or linked worktree, or use plain pullboard view for every project');
+      projectRoot = matches[0].root;
+      scopeCommonDir = info.commonDir;
+    } else if (info.isMain && existsSync(join(info.root, CONFIG_FILE))) {
+      await registerProjectAndLink(info.root, new Date(), loadConfig(info.root), io);
+    }
   } catch (error) {
+    if (projectRequested && error instanceof Refused && error.code !== 'PROJECT_NOT_REGISTERED') {
+      throw new Refused('PROJECT_NOT_REGISTERED', 'run pullboard view --project inside a registered project repository or linked worktree, or use plain pullboard view for every project');
+    }
     if (!(error instanceof Refused)) throw error;
+    if (projectRequested) throw error;
   }
   const internalForeground = process.env.PULLBOARD_VIEW_BACKGROUND_CHILD === '1'
     || process.env.PULLBOARD_VIEW_FOREGROUND === '1';
   if (!internalForeground) {
-    const existing = port ? await runningView(port) : null;
+    const existing = port ? await runningView(port, scopeCommonDir) : null;
     if (existing) {
       if (info && existsSync(join(info.root, CONFIG_FILE))) {
         const ctx = context(io);
@@ -1406,11 +1427,12 @@ async function viewHere(io, values) {
       reportView(io, { ...existing, reused: true });
       return 0;
     }
-    if (process.env.AI_AGENT !== undefined || !io.physicalStdoutIsTTY) return await launchBackgroundView(io, port);
+    if (process.env.AI_AGENT !== undefined || !io.physicalStdoutIsTTY) return await launchBackgroundView(io, port, projectRoot);
   }
   let view;
   try {
-    view = await serveView({ port, isMain: codeIsFromMain() });
+    // The adapter override is carried only by the in-process command streams, for private CLI fixtures.
+    view = await (io.serveView ?? serveView)({ port, isMain: codeIsFromMain(), ...(projectRoot ? { projectRoot } : {}) });
     const boundAt = new Date().toISOString();
     const closeServer = view.close;
     view = {
@@ -1420,7 +1442,8 @@ async function viewHere(io, values) {
       close: async () => { forgetView(view.port); await closeServer(); },
     };
     try {
-      rememberView({ port: view.port, secret: new URL(view.url).searchParams.get('k'), pid: process.pid, boundAt }, { rememberPort: port === 0 });
+      rememberView({ port: view.port, secret: new URL(view.url).searchParams.get('k'), pid: process.pid, boundAt,
+        ...(scopeCommonDir ? { scopeCommonDir } : {}) }, { rememberPort: port === 0 && !scopeCommonDir });
     } catch (error) {
       throw new Refused('VIEW_STATE', `could not save the private view session: ${error.message}`);
     }
@@ -1467,11 +1490,12 @@ function reportView(io, view) {
 }
 
 /** Start the view in a detached CLI child, forwarding only its bound address over IPC. */
-async function launchBackgroundView(io, port) {
+async function launchBackgroundView(io, port, projectRoot) {
   const args = [fileURLToPath(new URL('../bin/pullboard.js', import.meta.url)), 'view', '--no-open'];
+  if (projectRoot) args.push('--project');
   args.push('--port', String(port));
   const child = spawn(process.execPath, args, {
-    cwd: io.cwd,
+    cwd: projectRoot ?? io.cwd,
     env: { ...process.env, PULLBOARD_VIEW_BACKGROUND_CHILD: '1' },
     detached: true,
     stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
@@ -1807,11 +1831,13 @@ function readCommands(io, { first, second, rest, values }) {
     resources: () => {
       const ctx = context(io);
       const agents = withBoard(ctx, (board) => store.listAgents(board));
+      const browserSlots = loadMachineSettings().browserSlots;
       const resources = [
         ...listResources({ scope: 'machine' }).map((resource) => ({ ...resource, scope: 'machine' })),
         ...listResources({ scope: 'repo', root: ctx.info.root }).map((resource) => ({ ...resource, scope: 'repo' })),
       ];
-      io.result?.({ resources });
+      io.result?.({ resources, browserSlots });
+      io.say(`browserSlots (machine setting): ${browserSlots}`);
       if (!resources.length) io.say('no resources have been used');
       for (const resource of resources) {
         io.say(`${resource.name} (${resource.scope}, capacity ${resource.capacity})`);
@@ -1925,7 +1951,7 @@ function readCommands(io, { first, second, rest, values }) {
           if (entry.ref) io.say(`    ref: ${entry.ref.path}:${entry.ref.start}${entry.ref.end === entry.ref.start ? '' : '-' + entry.ref.end}@${entry.ref.commit}`);
         } else {
           const detail = entry.detail;
-          io.say(`${stamp}${entry.kind}${detail.commit ? ' at ' + detail.commit : ''}${detail.reason ? ': ' + detail.reason : ''}`);
+          io.say(`${stamp}${entry.kind}${detail.commit ? ' at ' + detail.commit : ''}${detail.reason ? ': ' + detail.reason : ''}${detail.note ? `: ${detail.note}` : ''}`);
         }
       }
       return 0;
@@ -2129,7 +2155,8 @@ async function submitHere(ctx, id) {
   withBoard(ctx, (board) => refuseUnverifiedStack(root, board, held, commit, trunk));
   // Every submit proves its frozen check and reachable tests anew on this exact commit (V4,V16).
   // A full-gate stamp never substitutes for either proof; only an actual full fallback may stamp.
-  const gate = await runSubmitGate(root, ctx.config, { base: claimHead, trunk: acceptedMain.commit, check: frozenCheck(held), agent: me.id, item: String(id), onWait: gateWaitReporter(ctx.io) });
+  const submitConfig = { ...ctx.config, submitGate: acceptedMain.config.submitGate };
+  const gate = await runSubmitGate(root, submitConfig, { base: claimHead, trunk: acceptedMain.commit, check: frozenCheck(held), agent: me.id, item: String(id), onWait: gateWaitReporter(ctx.io), onBrowserFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
   if (!gate.isGreen) {
     const message = `the submission proof is red at ${commit.slice(0, 12)}; fix it, commit, submit again. ${submitGateReport(gate)}`;
     // No submission can follow this verdict. Read-only main comparisons must not retain the seat's write lease.
@@ -2149,9 +2176,10 @@ async function submitHere(ctx, id) {
   const currentTrunk = requireTrunkMerge(root, commit); // The trunk may have moved while the gate ran.
   await withBoard(ctx, async (board) => {
     refuseUnverifiedStack(root, board, store.getItem(board, id), commit, currentTrunk);
-    return await ordered(ctx, board, 'submit', [id, { agentId: me.id, commit, tree: headTree(root) ?? '', files: filesSince(root, id, claimHead, commit), policyCommit: acceptedMain.commit }]);
+    return await ordered(ctx, board, 'submit', [id, { agentId: me.id, commit, tree: headTree(root) ?? '', files: filesSince(root, id, claimHead, commit), policyCommit: acceptedMain.commit,
+      ...(gate.deferred ? { note: 'full suite deferred to the landing gate' } : {}) }]);
   });
-  return reportSubmission(ctx, id, commit, { green: gate.isGreen, report: submitGateReport(gate), files: gate.files, full: gate.full, reason: gate.reason, check: gate.check,
+  return reportSubmission(ctx, id, commit, { green: gate.isGreen, report: submitGateReport(gate), files: gate.files, full: gate.full, deferred: gate.deferred, deferFullFallback: gate.deferFullFallback, reason: gate.reason, check: gate.check,
     log: gate.log, profile: gate.profile, profilePath: gate.profilePath, proofLog: gate.proofLog, proofProfilePath: gate.proofProfilePath });
 }
 
@@ -2220,7 +2248,8 @@ async function verifyHere(ctx, id, { second, values }) {
       if (digest !== item.item_frozen_digest) throw new Refused('CRITERIA_CHANGED', 'the criterion changed; ask the coordinator to refreeze this item before checking it');
       const trunk = requireTrunkMerge(root, commit);
       refuseUnverifiedStack(root, board, item, commit, trunk);
-      check = await withGateSlot(root, (lease) => checkAtCommit(root, item, { waitMs: lease.waitMs, gateLease: lease }), { browser: true, agent: me.id, item: String(id), kind: 'review', itemCheck: true, onWait: gateWaitReporter(ctx.io) });
+      const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(root, frozenCheck(item), { commit, onFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
+      check = await withGateSlot(root, (lease) => checkAtCommit(root, item, { waitMs: lease.waitMs, gateLease: lease }), { browser, agent: me.id, item: String(id), kind: 'review', itemCheck: true, onWait: gateWaitReporter(ctx.io) });
       verificationProfile = check.profile ?? null;
       const evidence = check.checked
         ? `\nlast output lines (up to 40):\n${(check.outputTail ?? '(no output)').split('\n').map((line) => `  ${line}`).join('\n')}\nfull output file: ${check.outputPath ?? `(unavailable${check.outputError ? `: ${check.outputError}` : ''})`}`
@@ -2623,7 +2652,8 @@ function workCommands(io, args) {
           throw new Refused('CHECK_CONFIRM', `the check set by ${authorName} was not run: ${check}; run pullboard check ${item.item_id} --yes after reading the command, or answer yes at the prompt`);
         }
       }
-      const run = await withGateSlot(ctx.info.root, (lease) => runProfiledShell(ctx.info.root, check, { waitMs: lease.waitMs, artifactPrefix: `pullboard-check-${item.item_id}`, persistLog: true, gateLease: lease }), { browser: true, agent: caller, item: String(item.item_id), kind: 'check', itemCheck: true, onWait: gateWaitReporter(io) });
+      const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(ctx.info.root, check, { onFallback: browserAdmissionReporter(io, values.json) });
+      const run = await withGateSlot(ctx.info.root, (lease) => runProfiledShell(ctx.info.root, check, { waitMs: lease.waitMs, artifactPrefix: `pullboard-check-${item.item_id}`, persistLog: true, gateLease: lease }), { browser, agent: caller, item: String(item.item_id), kind: 'check', itemCheck: true, onWait: gateWaitReporter(io) });
       io.result?.({ id: item.item_id, green: run.isGreen, seconds: run.seconds, check, by, report: run.isGreen ? '' : digestOf(run.output) });
       const timings = timingDigest(run.profile);
       const compact = timings && !run.profile.files.length
@@ -2813,6 +2843,17 @@ function resourceAgent(ctx) {
   return ctx.info.isMain ? COORDINATOR : withBoard(ctx, board => store.agentAt(board, ctx.info.root)?.agent_id);
 }
 
+/** Print the file and reason when conservative uncertainty reserves browser capacity.
+ * @param {any} io
+ * @param {boolean} jsonMode
+ * @returns {(decision:{file:string,reason:string})=>void}
+ */
+function browserAdmissionReporter(io, jsonMode = false) {
+  return ({ file, reason }) => {
+    if (!jsonMode) io.stderr.write(`browser admission fallback: ${file}: ${reason}\n`);
+  };
+}
+
 /** Build a de-duplicated queue message for a gate waiting on machine capacity. */
 function gateWaitReporter(io) {
   let last = '';
@@ -2832,14 +2873,19 @@ function settingsCommand(io, { first, second, rest }) {
     const settings = loadMachineSettings();
     io.result?.({ settings });
     io.say(`gateSlots: ${settings.gateSlots}`);
+    io.say(`browserSlots: ${settings.browserSlots}`);
     return 0;
   }
-  if (first !== 'gateSlots' || !second || rest.length || !/^[1-9]\d*$/u.test(second) || !Number.isSafeInteger(Number(second))) {
-    throw new Refused('USAGE', 'pullboard settings gateSlots <positive integer>');
+  if (!['gateSlots', 'browserSlots'].includes(first) || !second || rest.length) {
+    throw new Refused('USAGE', 'pullboard settings gateSlots <n> | browserSlots <n>');
   }
-  const settings = setGateSlots(Number(second));
+  if (!/^[1-9]\d*$/u.test(second) || !Number.isSafeInteger(Number(second))) {
+    if (first === 'gateSlots') throw new Refused('USAGE', 'pullboard settings gateSlots <positive integer>');
+    throw new Refused(first === 'browserSlots' ? 'BAD_BROWSER_SLOTS' : 'BAD_GATE_SLOTS', `${first} must be a positive integer; run pullboard settings ${first} <n>`);
+  }
+  const settings = first === 'browserSlots' ? setBrowserSlots(Number(second)) : setGateSlots(Number(second));
   io.result?.({ settings });
-  io.say(`gateSlots set to ${settings.gateSlots}`);
+  io.say(`${first} set to ${settings[first]}`);
   return 0;
 }
 
@@ -3319,8 +3365,21 @@ async function runCommand(argv, io) {
       }
       if (values.all) {
         if (first !== 'on' || second || rest.length) throw new Refused('USAGE', 'pullboard relay on --all [--url <address>]');
-        const result = await relayOnAll(values.url, io);
-        io.result?.(result); return result.failed.length ? 1 : 0;
+        const controller = new AbortController();
+        const cancelSignIn = () => controller.abort();
+        process.once('SIGINT', cancelSignIn);
+        process.once('SIGTERM', cancelSignIn);
+        let result;
+        try { result = await relayOnAll(values.url, io, { signal: controller.signal }); }
+        finally { process.off('SIGINT', cancelSignIn); process.off('SIGTERM', cancelSignIn); }
+        io.result?.(result);
+        if (result.outcome) {
+          io.say(result.outcome === 'declined' ? 'GitHub sign-in was declined; no boards were linked.'
+            : result.outcome === 'expired' ? 'GitHub device sign-in expired; no boards were linked.'
+              : 'GitHub device sign-in was cancelled; no boards were linked.');
+          return 1;
+        }
+        return result.failed.length ? 1 : 0;
       }
       if (['tokens', 'revoke'].includes(first)) {
         if (rest.length || values.url || (first === 'tokens' && second) || (first === 'revoke' && !second)) {
@@ -3443,8 +3502,9 @@ async function runMain(argv, streams) {
   if (parsed) {
     try {
       const [command, verb] = parsed.positionals;
+      const remoteRelayOn = command === 'relay' && verb === 'on' && !parsed.values.all;
       if (!parsed.values.help && !parsed.values.version &&
-          (parsed.values.as === 'person' && command !== 'decisions' || command === 'relay' && ['on', 'join', 'revoke'].includes(verb))) requirePersonChannel(io.personChannel);
+          (parsed.values.as === 'person' && command !== 'decisions' || command === 'relay' && ['on', 'join', 'revoke'].includes(verb) && !remoteRelayOn)) requirePersonChannel(io.personChannel);
       checkoutSession = await bindCheckoutSession(io, parsed.positionals, parsed.values);
       if (checkoutSession?.lease) CHECKOUT_LEASES.set(io, checkoutSession.lease);
     } catch (error) {

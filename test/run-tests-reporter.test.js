@@ -78,7 +78,9 @@ test('run-tests never injects timing reporters beside caller reporter options [C
   ]) {
     const run = runReporterFixture(t, reporterArgs, { PULLBOARD_TEST_TIMING_PROFILE: join(tmpdir(), 'must-not-inject') });
     assert.equal(run.result.status, 0, run.output);
-    assert.deepEqual(run.childArgs.slice(4, -1), reporterArgs, 'only the exact caller reporter flags reach Node');
+    const preload = run.childArgs.indexOf('--import');
+    assert.equal(run.childArgs[preload + 1], runner, 'the production watchdog preload reaches Node');
+    assert.deepEqual(run.childArgs.slice(preload + 2, -1), reporterArgs, 'only the exact caller reporter flags reach Node');
     assert.match(run.output, /ℹ tests 1/u);
     assert.doesNotMatch(run.output, /gate-profile-reporter|"files":/u);
   }

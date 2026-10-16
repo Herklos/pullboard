@@ -4,6 +4,52 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.8.27] - 2026-10-16
+
+### A faster gate, and 0.8.26 reaches npm
+
+0.8.26 was tagged but never reached npm (its publish check refused a Node 22.13 test failure, fixed here). Everything in [0.8.26](https://github.com/pullboard-dev/pullboard/releases/tag/v0.8.26) ships in this release too.
+
+### Added
+
+- `"submitGate": "landing"` in `pullboard.json`: `pullboard submit` runs the item's check and the tests for the files you changed, and the whole suite runs once, at `pullboard gate --landing`. Off unless you set it.
+- `pullboard settings browserSlots <n>` runs up to that many real-browser test runs at once (default 1, at most `gateSlots`).
+- The machine setting `gate.browserFreeChecks`: a check Pullboard can prove needs no browser skips the browser queue. Off unless you set it.
+- `pullboard relay on` works from an SSH shell; you confirm the link in your browser.
+
+### Fixed
+
+- `pullboard view --project` keeps the local server to that project too: no page or API answer names another project.
+- Opening an item's detail after a cache miss starts no git process.
+- For contributors: the landing gate's early stop works on Node 22.13, and the one-project view test waits for its project before reading the page.
+
+## [0.8.26] - 2026-10-15
+
+### One-project views, and linking you can cancel
+
+### Added
+
+- `pullboard view --project`, run inside a registered project's repository or one of its worktrees, opens a view of that project only: the boards list, each board and the roadmap show nothing from your other projects.
+- `pullboard gate --landing` now sets `PULLBOARD_LANDING_RUN=1` for your gate command, so your test runner can stop at its first failing file. See docs/api.md.
+
+### Fixed
+
+- Linking every board on this machine (`pullboard relay on --all`) can be cancelled. Declining or closing the sign-in links nothing and leaves nothing behind; a cancel during pairing keeps the boards already linked and stops pairing cleanly.
+- A browser that refuses storage keeps an early board pairing in memory until the page uses it.
+- For contributors: a red landing gate stops at its first failing test file (on Node 22.13 it still runs every file, as before; fixed in the next release); a check that needs no browser never waits for the browser slot; and a stress board with a harness times every view action, outside the suite.
+
+## [0.8.25] - 2026-10-15
+
+### Project switches you can trust, and a 98-second explainer
+
+New on [pullboard.dev](https://pullboard.dev): a 98-second explainer video on the home page, showing some of the problems Pullboard addresses.
+
+### Fixed
+
+- Switching projects in the view never shows the previous project's numbers under the new project's name. The project list appears at once, and the new project's counts read as loading until they arrive.
+- `pullboard spec draft` never reuses an id that SPEC.md already has, including ids that DOCTRINE.md uses.
+- For contributors: the landing gate bounds its own concurrency (at most two real-Chrome test files at once, and no more test files at once than the machine has performance cores), so it no longer fails from its own load; the test runner runs only files named `*.test.js` or `*.test.mjs`, so fixtures and the view's performance harness no longer start as test files; the README capture follows the view's cookie redirect and is ready from what the page shows; and the repeated-read test goes through the view cookie.
+
 ## [0.8.24] - 2026-10-15
 
 ### A first board without surprises
