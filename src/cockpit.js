@@ -1,4 +1,8 @@
-import { effectiveGuards, IN_STATE, MACHINE } from './machine.js';
+import {
+  effectiveGuards,
+  IN_STATE,
+  MACHINE,
+} from './machine.js';
 import { commandPhrases } from './help.js';
 
 /** The CLI's default phrases, ordered by depth for the existing prose inventory guard. */
