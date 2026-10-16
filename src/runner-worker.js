@@ -6,6 +6,7 @@ import { userInfo } from 'node:os';
 import { delimiter, dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as resourceApi from './resources.js';
+import { parseProcessCensus } from './process-census.js';
 import { once } from 'node:events';
 import { pipeline } from 'node:stream/promises';
 
@@ -130,7 +131,7 @@ async function readSpec() {
     tagNames.add(tag.name);
     if (tag.chain.length ? tag.chain[0] !== tag.object : tag.object !== tag.peeledCommit) throw new Error('invalid tag manifest');
   }
-  const runtimeNames = ['resources.js', 'git.js', 'machine-home.js', 'refused.js'];
+  const runtimeNames = ['resources.js', 'git.js', 'machine-home.js', 'refused.js', 'process-census.js'];
   if (Object.keys(value.runtime.files).length !== runtimeNames.length
     || runtimeNames.some(name => typeof value.runtime.files[name] !== 'string')) throw new Error('invalid work specification');
   if (createHash('sha256').update(JSON.stringify(value.runtime.files)).digest('hex') !== value.runtime.sha256) throw new Error('invalid trusted runtime');
@@ -212,20 +213,7 @@ function processCensus() {
     env: { PATH: safePath, LANG: 'C', LC_ALL: 'C', TZ: 'UTC' },
   });
   if (result.error || result.status !== 0 || typeof result.stdout !== 'string') return null;
-  const rows = new Map();
-  for (const line of result.stdout.split(/\r?\n/u)) {
-    if (!line.trim()) continue;
-    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+([A-Z][a-z]{2})\s+([A-Z][a-z]{2})\s+(\d{1,2})\s+(\d{2}:\d{2}:\d{2})\s+(\d{4})\s+(\S+)\s+(.+?)\s*$/u.exec(line);
-    if (!match) return null;
-    const pid = Number(match[1]);
-    const ppid = Number(match[2]);
-    const pgid = Number(match[3]);
-    if (![pid, ppid, pgid].every(Number.isSafeInteger) || pid < 1 || ppid < 0 || pgid < 1 || rows.has(pid)) return null;
-    const started = `${match[4]} ${match[5]} ${match[6]} ${match[7]} ${match[8]}`;
-    const processSha256 = createHash('sha256').update(match[10]).digest('hex');
-    rows.set(pid, { pid, ppid, pgid, started, state: match[9], processSha256 });
-  }
-  return rows.size ? rows : null;
+  return parseProcessCensus(result.stdout);
 }
 
 /** Add a kernel start-time identity when procfs is available; otherwise retain a conservative census tuple. */
