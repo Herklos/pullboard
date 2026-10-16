@@ -1,0 +1,269 @@
+/** The landing gate splits its test files into shards across local slots and runners [C7,V4]. */
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { test } from 'node:test';
+import { configProblems, defaults } from '../src/config.js';
+import { landingShardCount } from '../src/gate.js';
+import { landingBalance, landingFloor, planLandingShards, shardFileTimes } from '../src/landing-shards.js';
+import { runFixtureChild } from './fixture-child.js';
+
+const SOURCE = resolve(import.meta.dirname, '..');
+const BIN = join(SOURCE, 'bin', 'pullboard.js');
+const HOST = 'fixture-host';
+const NAMES = ['a', 'b', 'c', 'd', 'e', 'f'];
+
+/** Run Git in a fixture repository and fail with its context. */
+function git(cwd, env, ...args) {
+  const result = runFixtureChild('git', args, { cwd, env, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.context);
+  return result.stdout.trim();
+}
+
+/**
+ * Make a local ssh stand-in that runs the worker command in a second private machine home.
+ * With `dropOnce`, its first session kills the worker as soon as a test file starts on the runner,
+ * the way a runner that loses power mid-shard looks to the controller.
+ */
+function installSshStandIn({ bin, worker, home, machineHome, markers, dropOnce }) {
+  const source = `#!/usr/bin/env node
+import { existsSync, readdirSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+const argv = process.argv.slice(2);
+const divider = argv.indexOf('--');
+const host = argv[divider + 1];
+const remoteCommand = argv[divider + 2];
+if (host !== ${JSON.stringify(HOST)}) process.exit(255);
+const dropFlag = ${JSON.stringify(dropOnce ?? '')};
+const drop = dropFlag && !existsSync(dropFlag);
+if (drop) writeFileSync(dropFlag, 'dropped\\n');
+const env = { PATH: process.env.PATH, HOME: ${JSON.stringify(home)}, TMPDIR: process.env.TMPDIR,
+  PULLBOARD_HOME: ${JSON.stringify(home)}, PULLBOARD_MACHINE_HOME: ${JSON.stringify(machineHome)}, LANG: 'C', LC_ALL: 'C', TZ: 'UTC' };
+const child = spawn('/bin/sh', ['-c', remoteCommand], { cwd: ${JSON.stringify(worker)}, env, stdio: ['pipe', 'pipe', 'pipe'] });
+child.stdout.pipe(process.stdout);
+child.stderr.pipe(process.stderr);
+process.stdin.pipe(child.stdin);
+if (drop) {
+  const timer = setInterval(() => {
+    if (!readdirSync(${JSON.stringify(markers)}).some(name => name.endsWith('.runner.started'))) return;
+    clearInterval(timer);
+    process.kill(child.pid, 'SIGHUP');
+    process.exit(255);
+  }, 20);
+}
+child.once('close', (code, signal) => { process.exitCode = signal ? 128 : (code ?? 255); });
+`;
+  const ssh = join(bin, 'ssh');
+  writeFileSync(ssh, source, { mode: 0o700 });
+  chmodSync(ssh, 0o700);
+}
+
+/** A fixture test file: it marks where it ran and behaves as the current mode file says. */
+function fixtureTestFile(name, { markers, mode }) {
+  return `import { test } from 'node:test';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+const name = ${JSON.stringify(name)};
+const host = process.cwd().includes('worker-home') ? 'runner' : 'local';
+const mode = existsSync(${JSON.stringify(mode)}) ? readFileSync(${JSON.stringify(mode)}, 'utf8').trim() : 'green';
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+test('fixture file ' + name, async () => {
+  writeFileSync(${JSON.stringify(markers)} + '/' + name + '.' + host + '.started', '');
+  if (mode === 'fail' && name === 'a') throw new Error('fixture failure in file a');
+  if (mode === 'late-fail' && name === 'a') { await sleep(6_000); throw new Error('late fixture failure in file a'); }
+  // Long enough that only a stop can end the other files before the scenario's deadline.
+  await sleep(mode === 'fail' || (mode === 'drop' && host === 'runner') ? 40_000 : 1_500);
+  writeFileSync(${JSON.stringify(markers)} + '/' + name + '.' + host + '.finished', '');
+});
+`;
+}
+
+/** Build a committed fixture project holding this Pullboard's runner and six test files. */
+function fixture({ runner = true, repoNames = ['repo'] } = {}) {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-landing-shards-')));
+  const home = join(dir, 'home');
+  const machineHome = join(home, '.pullboard');
+  const remoteHome = join(dir, 'worker-home');
+  const remoteMachineHome = join(remoteHome, '.pullboard');
+  const repos = repoNames.map(name => join(dir, name));
+  const repo = repos[0];
+  const worker = join(dir, 'second-machine');
+  const bin = join(dir, 'bin');
+  const markers = join(dir, 'markers');
+  const mode = join(dir, 'mode');
+  for (const folder of [home, machineHome, remoteHome, remoteMachineHome, worker, bin, markers, ...repos.map(path => join(path, 'test'))]) mkdirSync(folder, { recursive: true });
+  writeFileSync(join(machineHome, 'settings.json'), JSON.stringify({ gateSlots: 2, browserSlots: 2 }));
+  const env = {
+    ...process.env, HOME: home, PULLBOARD_HOME: home, PULLBOARD_MACHINE_HOME: machineHome,
+    PATH: `${bin}:${process.env.PATH}`, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
+    GIT_AUTHOR_NAME: 'Landing Shards Fixture', GIT_AUTHOR_EMAIL: 'landing-shards@example.invalid',
+    GIT_COMMITTER_NAME: 'Landing Shards Fixture', GIT_COMMITTER_EMAIL: 'landing-shards@example.invalid',
+  };
+  for (const key of Object.keys(env)) {
+    if (/^PULLBOARD_(GATE_SLOT|BROWSER_SLOT|LANDING)/u.test(key) || ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE'].includes(key)) delete env[key];
+  }
+  for (const path of repos) {
+    copyFileSync(join(SOURCE, 'package.json'), join(path, 'package.json'));
+    cpSync(join(SOURCE, 'src'), join(path, 'src'), { recursive: true });
+    cpSync(join(SOURCE, 'bin'), join(path, 'bin'), { recursive: true });
+    for (const name of NAMES) writeFileSync(join(path, 'test', `${name}.test.js`), fixtureTestFile(name, { markers, mode }));
+    writeFileSync(join(path, 'pullboard.json'), JSON.stringify({ gate: 'node bin/run-tests.js', landingShards: 3 }));
+    git(path, env, 'init', '-q', '-b', 'main');
+    git(path, env, 'add', '.');
+    git(path, env, 'commit', '-q', '-m', 'test: landing shards fixture');
+  }
+  if (runner) {
+    const added = runFixtureChild(process.execPath, [BIN, 'runner', 'add', HOST, '--slots', '1', '--browser', '1', '--json'], { cwd: repo, env, encoding: 'utf8' });
+    assert.equal(added.status, 0, added.context);
+  }
+  return { dir, repo, repos, env, bin, worker, remoteHome, remoteMachineHome, markers, mode };
+}
+
+/** Clear a scenario's markers and pick its mode. */
+function scenario(box, mode, { dropOnce } = {}) {
+  rmSync(box.markers, { recursive: true, force: true });
+  mkdirSync(box.markers);
+  writeFileSync(box.mode, `${mode}\n`);
+  installSshStandIn({ bin: box.bin, worker: box.worker, home: box.remoteHome, machineHome: box.remoteMachineHome,
+    markers: box.markers, dropOnce: dropOnce ? join(box.dir, `dropped-${mode}`) : '' });
+}
+
+/**
+ * Run the fixture's landing gate (the same runGate call `gate --landing` makes) in its own process
+ * group. Past its deadline the whole group is stopped and the scenario fails naming itself.
+ */
+async function landingGate(box, label, deadlineMs, repo = box.repo) {
+  const gateUrl = pathToFileURL(join(repo, 'src', 'gate.js')).href;
+  const configUrl = pathToFileURL(join(repo, 'src', 'config.js')).href;
+  const script = `const { runGate } = await import(${JSON.stringify(gateUrl)});
+const { loadConfig } = await import(${JSON.stringify(configUrl)});
+const root = ${JSON.stringify(repo)};
+const gate = await runGate(root, loadConfig(root), { landing: true, trustStamp: false, agent: 'landing-shards-fixture' });
+process.stdout.write(JSON.stringify({ isGreen: gate.isGreen, output: gate.output, profile: gate.profile }));`;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script], { cwd: repo, env: box.env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8').on('data', part => { stdout += part; });
+  child.stderr.setEncoding('utf8').on('data', part => { stderr += part; });
+  const closed = new Promise(resolveClose => child.once('close', (status, signal) => resolveClose({ status, signal })));
+  let timer;
+  const deadline = new Promise(resolveDeadline => { timer = setTimeout(() => resolveDeadline(null), deadlineMs); });
+  const ended = await Promise.race([closed, deadline]);
+  clearTimeout(timer);
+  if (!ended) {
+    for (const signal of ['SIGTERM', 'SIGKILL']) { try { process.kill(-child.pid, signal); } catch { /* already gone */ } }
+    await closed;
+    throw new Error(`landing gate scenario "${label}" passed its ${deadlineMs} ms deadline\n${stdout.slice(-4_000)}\n${stderr.slice(-4_000)}`);
+  }
+  assert.equal(ended.status, 0, `scenario "${label}": the gate process failed\n${stderr.slice(-4_000)}`);
+  return { ...JSON.parse(stdout), stderr };
+}
+
+/** The merged log's per-file lines as {file: {shard, host}}. */
+function mergedFiles(output) {
+  const files = {};
+  for (const match of output.matchAll(/^# landing file (\d+\/\d+) (\S+) (\d+|-) (.+)$/gmu)) {
+    assert.equal(files[match[4]], undefined, `${match[4]} is listed once`);
+    files[match[4]] = { shard: match[1], host: match[2] };
+  }
+  return files;
+}
+
+/** Markers left by the fixture files, as a sorted list. */
+function marks(box, suffix) {
+  return readdirSync(box.markers).filter(name => name.endsWith(suffix)).sort();
+}
+
+test('a landing gate split into shards reports one result [C7,V4]', { timeout: 300_000 }, async (t) => { // budget: three bounded landing scenarios on one fixture.
+  // The planner: no times balances by count; known times put the heavy files on their own shards.
+  const six = NAMES.map(name => `./test/${name}.test.js`);
+  assert.deepEqual(planLandingShards(six, 3).map(shard => shard.files.length), [2, 2, 2]);
+  const weighted = planLandingShards(six, 3, { 'test/a.test.js': 900, 'test/b.test.js': 800, 'test/c.test.js': 100, 'test/d.test.js': 100, 'test/e.test.js': 100, 'test/f.test.js': 100 });
+  assert.deepEqual(weighted.map(shard => shard.files), [['./test/a.test.js'], ['./test/b.test.js'], ['./test/c.test.js', './test/d.test.js', './test/e.test.js', './test/f.test.js']]);
+  assert.equal(landingBalance(six), 'file count', 'with no history the plan names its file-count fallback');
+  assert.equal(landingBalance(six, { 'test/a.test.js': 900 }), 'history and average');
+  assert.equal(landingBalance(six, Object.fromEntries(NAMES.map(name => [`test/${name}.test.js`, 10]))), 'history');
+  assert.deepEqual(landingFloor(six, { 'test/a.test.js': 900, 'test/b.test.js': 50 }), { path: 'test/a.test.js', ms: 900 });
+  assert.equal(landingFloor(six), null);
+  assert.deepEqual(shardFileTimes('# landing-file-ms 42 test/a.test.js\nnoise\n'), { 'test/a.test.js': 42 });
+  assert.equal(configProblems({ ...defaults(), landingShards: 0 }).some(problem => problem.includes('"landingShards"')), true);
+  assert.deepEqual(configProblems({ ...defaults(), landingShards: 3 }), []);
+
+  const box = fixture();
+  t.after(() => rmSync(box.dir, { recursive: true, force: true }));
+  assert.equal(landingShardCount(box.repo), 3);
+
+  // Green: three shards, one of them on the runner, every file once, one green result.
+  scenario(box, 'green');
+  const green = await landingGate(box, 'green', 120_000);
+  assert.equal(green.isGreen, true, green.output);
+  const files = mergedFiles(green.output);
+  assert.deepEqual(Object.keys(files).sort(), NAMES.map(name => `test/${name}.test.js`));
+  assert.deepEqual([...new Set(Object.values(files).map(file => file.shard))].sort(), ['1/3', '2/3', '3/3']);
+  assert.ok(Object.values(files).some(file => file.host === HOST), `one shard runs on the registered runner\n${green.output}`);
+  assert.ok(Object.values(files).some(file => file.host === 'local'), 'the others run on local slots');
+  assert.match(green.output, /^# landing result: green$/mu);
+  assert.match(green.output, /^# landing shards: 3 balanced by file count \(/mu, 'the first landing has no history');
+  assert.equal(green.profile.landingShards.balance, 'file count');
+  assert.equal(green.profile.landingShards.files.length, 6, 'the profile names every file once');
+  assert.ok(green.profile.landingShards.files.every(file => file.shard && file.host));
+  assert.equal(green.profile.landingShards.shards.filter(shard => shard.status === 'green').length, 3);
+  assert.equal(marks(box, '.finished').length, 6);
+  // Every file's measured wall time is kept, so the next landing balances by real history.
+  const history = JSON.parse(readFileSync(join(box.repo, '.git', 'pullboard', 'landing-file-times.json'), 'utf8'));
+  assert.deepEqual(Object.keys(history.files).sort(), NAMES.map(name => `test/${name}.test.js`));
+  assert.ok(Object.values(history.files).every(ms => Number.isFinite(ms) && ms > 0), 'each file has a measured wall time');
+  assert.ok(green.profile.landingShards.files.every(file => Number.isFinite(file.durationMs) && file.durationMs > 0));
+
+  // One failing file: the gate goes red and the other shards are stopped, long before their files end.
+  scenario(box, 'fail');
+  const red = await landingGate(box, 'failing shard', 60_000);
+  assert.equal(red.isGreen, false, red.output);
+  assert.match(red.output, /^# landing shard \d\/3 attempt 1 on \S+: red in \d+ ms$/mu);
+  assert.equal([...red.output.matchAll(/^# landing shard \d\/3 attempt \d+ on \S+: stopped in \d+ ms$/gmu)].length, 2, red.output);
+  // A test failure is not infrastructure: nothing reruns and nothing falls back.
+  assert.doesNotMatch(red.output, /rerunning shard|infrastructure/u);
+  assert.equal(red.profile.landingShards.shards.length, 3, 'one attempt per shard');
+  assert.match(red.output, /^# landing result: red, first failure in shard \d\/3$/mu);
+  assert.match(red.output, /^# landing shards: 3 balanced by history \(/mu, 'the second landing balances by the first one\'s wall times');
+  assert.match(red.output, /^# landing floor: \d+ ms test\/[a-f]\.test\.js$/mu, 'the slowest recorded file is named as the floor');
+  assert.equal(green.profile.landingShards.floor, null, 'with no history there is no floor yet');
+  assert.ok(red.profile.landingShards.floor.ms > 0);
+  // Every other file sleeps far past this scenario's deadline, so none finishing means each was stopped.
+  assert.deepEqual(marks(box, '.finished'), [], 'no stopped file ran to its end');
+
+  // A shard that fails after the others went green still makes the whole landing red.
+  scenario(box, 'late-fail');
+  const late = await landingGate(box, 'late failing shard', 60_000);
+  assert.equal(late.isGreen, false, late.output);
+  assert.ok(late.profile.landingShards.shards.some(shard => shard.status === 'green'), `another shard was green first\n${late.output}`);
+  assert.equal(late.profile.landingShards.shards.filter(shard => shard.status === 'red').length, 1);
+
+  // A runner killed mid-shard: its shard reruns locally with a named line and the gate stays green.
+  scenario(box, 'drop', { dropOnce: true });
+  const dropped = await landingGate(box, 'killed runner', 150_000);
+  assert.equal(dropped.isGreen, true, dropped.output);
+  const rerun = /^landing shard (\d\/3): runner fixture-host failed mid-shard; rerunning shard \1 locally$/mu.exec(dropped.output);
+  assert.ok(rerun, `the rerun is named\n${dropped.output}`);
+  const label = rerun[1].replace('/', '\\/');
+  // Both attempts stay in the log and the profile: the failed runner attempt first, then the local rerun.
+  assert.match(dropped.output, new RegExp(`^# landing shard ${label} attempt 1 on ${HOST}: infrastructure \\(runner transport lost\\) in \\d+ ms$`, 'mu'));
+  assert.match(dropped.output, new RegExp(`^# landing shard ${label} attempt 2 on local: green in \\d+ ms$`, 'mu'));
+  const attempts = dropped.profile.landingShards.shards.filter(shard => shard.shard === rerun[1]);
+  assert.deepEqual(attempts.map(shard => [shard.attempt, shard.host, shard.status]), [[1, HOST, 'infrastructure'], [2, 'local', 'green']]);
+  assert.ok(marks(box, '.runner.started').length > 0, 'the shard had started on the runner');
+  assert.deepEqual(marks(box, '.finished').filter(name => name.endsWith('.local.finished')).length, 6, 'every file finished locally');
+
+  // Two sharded landings at once on a machine with only two slots and no runner: each parent holds
+  // one slot and runs its own shards on it, so neither waits forever on the other's.
+  const pair = fixture({ runner: false, repoNames: ['first', 'second'] });
+  t.after(() => rmSync(pair.dir, { recursive: true, force: true }));
+  scenario(pair, 'green');
+  const both = await Promise.all(pair.repos.map((repo, index) => landingGate(pair, `concurrent landing ${index + 1}`, 120_000, repo)));
+  for (const landing of both) {
+    assert.equal(landing.isGreen, true, landing.output);
+    assert.equal(Object.keys(mergedFiles(landing.output)).length, 6);
+  }
+});

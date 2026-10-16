@@ -1,0 +1,371 @@
+/**
+ * The landing gate in shards [C7,V4]: split the tracked test files into balanced shards, run each on
+ * a free local gate slot or a registered runner, and report one result. One red shard stops the rest,
+ * and a shard whose runner fails mid-run reruns locally.
+ */
+import { spawn } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { repoInfo } from './git.js';
+import {
+  BROWSER_SLOT_HELD_ENV,
+  GATE_SLOT_HELD_ENV,
+  GATE_SLOT_POOL_ENV,
+  GATE_SLOT_TOKEN_ENV,
+  gateSlotEnvironment,
+} from './resources.js';
+
+/** Environment variable naming the shard a nested run-tests process runs, as `<i>/<n>`. */
+export const LANDING_SHARD_ENV = 'PULLBOARD_LANDING_SHARD';
+/** Environment variable naming the file where each test file process appends its wall time. */
+export const LANDING_FILE_TIMES_ENV = 'PULLBOARD_LANDING_FILE_TIMES';
+/** Prefix of the per-file wall-time lines a shard prints for its orchestrator. */
+export const FILE_TIME_LINE = '# landing-file-ms ';
+
+const GATE_MARKERS = [GATE_SLOT_HELD_ENV, GATE_SLOT_POOL_ENV, GATE_SLOT_TOKEN_ENV, BROWSER_SLOT_HELD_ENV];
+// Budget: a stopped local shard gets this long to drain after TERM before its group is killed.
+const STOP_GRACE_MS = 10_000;
+
+/** Where the last landing's per-file wall times live, shared by every worktree of the repository. */
+export function fileTimesPath(root) {
+  return join(repoInfo(root).commonDir, 'pullboard', 'landing-file-times.json');
+}
+
+/** Read the last per-file wall times; a missing or unreadable record means none are known. */
+export function readFileTimes(root) {
+  try {
+    const value = JSON.parse(readFileSync(fileTimesPath(root), 'utf8'));
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+    return Object.fromEntries(Object.entries(value.files ?? {}).filter(([, ms]) => Number.isFinite(ms) && ms >= 0));
+  } catch { return {}; }
+}
+
+/** Keep the newest wall time for every file this landing measured, beside the older ones. */
+function writeFileTimes(root, measured) {
+  const path = fileTimesPath(root);
+  const files = { ...readFileTimes(root), ...measured };
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify({ version: 1, files }, null, 2)}\n`, { mode: 0o600 });
+  renameSync(temporary, path);
+}
+
+/** Normalize a test file path to its repository-relative form, without a leading `./`. */
+export function fileKey(file) {
+  return String(file).replace(/^\.\//u, '');
+}
+
+/**
+ * Split files into at most `count` shards by weight, heaviest first onto the lightest shard.
+ * A file with a known wall time weighs that time; with no times at all every file weighs one, so the
+ * split falls back to file count. A new file weighs the average known time. Empty shards are dropped.
+ *
+ * @param {string[]} files
+ * @param {number} count
+ * @param {Record<string, number>} [times] - Last wall time in ms by repository-relative path.
+ * @returns {{ files: string[], weight: number }[]}
+ */
+export function planLandingShards(files, count, times = {}) {
+  const known = files.map(file => times[fileKey(file)]).filter(ms => Number.isFinite(ms));
+  const average = known.length ? known.reduce((sum, ms) => sum + ms, 0) / known.length : 1;
+  const weight = file => known.length ? (Number.isFinite(times[fileKey(file)]) ? times[fileKey(file)] : average) : 1;
+  const ordered = [...files].sort((a, b) => weight(b) - weight(a) || a.localeCompare(b));
+  const shards = Array.from({ length: Math.max(1, count) }, () => ({ files: [], weight: 0 }));
+  for (const file of ordered) {
+    const lightest = shards.reduce((best, shard) => shard.weight < best.weight
+      || (shard.weight === best.weight && shard.files.length < best.files.length) ? shard : best);
+    lightest.files.push(file);
+    lightest.weight += weight(file);
+  }
+  for (const shard of shards) shard.files.sort((a, b) => a.localeCompare(b));
+  return shards.filter(shard => shard.files.length);
+}
+
+/**
+ * Name how a plan was balanced: by the last measured per-file wall times when every file has one,
+ * by those times with new files at their average when some do, and by file count when none do.
+ *
+ * @param {string[]} files
+ * @param {Record<string, number>} [times]
+ * @returns {'history'|'history and average'|'file count'}
+ */
+export function landingBalance(files, times = {}) {
+  const known = files.filter(file => Number.isFinite(times[fileKey(file)])).length;
+  return known === files.length && known ? 'history' : known ? 'history and average' : 'file count';
+}
+
+/** The slowest file with a recorded wall time, which no shard count can beat; null with no history. */
+export function landingFloor(files, times = {}) {
+  let floor = null;
+  for (const file of files) {
+    const ms = times[fileKey(file)];
+    if (Number.isFinite(ms) && (!floor || ms > floor.ms)) floor = { path: fileKey(file), ms: Math.round(ms) };
+  }
+  return floor;
+}
+
+/** Read the per-file wall-time lines a shard printed, keeping the longest report for each file. */
+export function shardFileTimes(output) {
+  const times = {};
+  for (const line of String(output).split(/\r?\n/u)) {
+    if (!line.startsWith(FILE_TIME_LINE)) continue;
+    const rest = line.slice(FILE_TIME_LINE.length);
+    const space = rest.indexOf(' ');
+    const ms = Number(rest.slice(0, space));
+    const file = fileKey(rest.slice(space + 1));
+    if (space > 0 && Number.isFinite(ms) && ms >= 0 && file) times[file] = Math.max(times[file] ?? 0, ms);
+  }
+  return times;
+}
+
+/** The process environment without this process's own gate markers, so a shard never reuses them. */
+function withoutGateMarkers(env) {
+  const copy = { ...env };
+  for (const key of GATE_MARKERS) delete copy[key];
+  return copy;
+}
+
+/** Quote one word for the runner's POSIX shell. */
+function word(value) {
+  return `'${String(value).replaceAll("'", "'\\''")}'`;
+}
+
+/** Stop a detached shard's whole process group: TERM, then KILL after its grace. */
+async function stopGroup(child, closed) {
+  const signal = name => { try { process.kill(-child.pid, name); } catch (error) { if (error.code !== 'ESRCH') throw error; } };
+  signal('SIGTERM');
+  const timer = setTimeout(() => signal('SIGKILL'), STOP_GRACE_MS);
+  await closed;
+  clearTimeout(timer);
+  signal('SIGKILL');
+}
+
+/** Run one shard's files in a local child run-tests that inherits the shard's own gate lease. */
+async function runLocalShard({ root, runner, files, label, lease, stop }) {
+  const env = { ...withoutGateMarkers(process.env), ...gateSlotEnvironment(lease),
+    PULLBOARD_LANDING_RUN: '1', [LANDING_SHARD_ENV]: label };
+  // Its own process group, so a stop reaches the shard's test files and their children together.
+  const child = spawn(process.execPath, [runner, ...files], { cwd: root, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const chunks = [];
+  child.stdout.setEncoding('utf8').on('data', part => chunks.push(part));
+  child.stderr.setEncoding('utf8').on('data', part => chunks.push(part));
+  const closed = new Promise(resolveClose => {
+    child.once('error', error => { chunks.push(`\n${error.message}\n`); resolveClose({ status: 1, signal: null }); });
+    child.once('close', (status, signal) => resolveClose({ status, signal }));
+  });
+  const onStop = () => { stopGroup(child, closed).catch(() => {}); };
+  if (stop.aborted) onStop();
+  else stop.addEventListener('abort', onStop, { once: true });
+  const { status, signal } = await closed;
+  stop.removeEventListener('abort', onStop);
+  return { isGreen: status === 0 && !signal, output: chunks.join('') };
+}
+
+/** A shard's acquisition stopped waiting because the shard ran elsewhere or the landing stopped. */
+class NotNeeded extends Error {}
+
+/**
+ * Run the landing gate's test files as `count` shards and return one result.
+ *
+ * The slot this process already holds is a lane of its own: it runs the first shard, then any shard
+ * no other slot has taken yet. Every other shard also queues for a slot of its own, locally or on a
+ * runner, and whichever slot reaches it first runs it. So a landing always finishes on its own slot,
+ * and two landings that hold the only two slots cannot wait on each other.
+ *
+ * A red shard is a test failure: it stops the others and the landing is red, with no retry. Only an
+ * infrastructure failure of a runner (a dropped transport or a runner refusal) reruns that shard,
+ * locally, after a named line; both attempts stay in the merged log and profile.
+ *
+ * @param {{ root: string, runner: string, files: string[], count: number, inherited?: object|null,
+ *   needsBrowser?: (files: string[]) => Promise<boolean>, write?: (text: string) => void }} options
+ *   `runner` is this repository's bin/run-tests.js; `inherited` is the gate lease this process already
+ *   holds; `write` receives the merged log.
+ * @returns {Promise<{ isGreen: boolean, balance: string, shards: object[], files: object[] }>}
+ */
+export async function runLandingShards({ root, runner, files, count, inherited = null, needsBrowser = async () => true, write = text => process.stdout.write(text) }) {
+  const { withGateSlot } = await import('./gate.js');
+  const { RunnerDropped, runOnRunnerAsync } = await import('./runners.js');
+  const { Refused } = await import('./refused.js');
+  const history = readFileTimes(root);
+  const plan = planLandingShards(files, count, history);
+  const balance = landingBalance(files, history);
+  const total = plan.length;
+  const stopper = new AbortController();
+  const stop = stopper.signal;
+  let firstFailure = null;
+  // The parent's own markers would make every shard reuse its one lease; each lane passes its own.
+  const saved = Object.fromEntries(GATE_MARKERS.map(key => [key, process.env[key]]));
+  for (const key of GATE_MARKERS) delete process.env[key];
+  write(`# landing shards: ${total} balanced by ${balance} (${plan.map((shard, index) => `${index + 1}/${total} ${shard.files.length} files`).join(', ')})\n`);
+  const floor = landingFloor(files, history);
+  // The slowest single file bounds the gate however many shards there are.
+  if (floor) write(`# landing floor: ${floor.ms} ms ${floor.path}\n`);
+
+  let wake = () => {};
+  let changed = new Promise(resolveChange => { wake = resolveChange; });
+  /** Tell the parent's lane that a shard became free to take or finished. */
+  const signalChange = () => { const resolveChange = wake; changed = new Promise(next => { wake = next; }); resolveChange(); };
+  const entries = await Promise.all(plan.map(async (shard, index) => ({ shard, label: `${index + 1}/${total}`,
+    browser: await needsBrowser(shard.files), claimed: false, localOnly: false, done: false, attempts: [], status: null })));
+
+  /** Run one attempt of a shard on a lease: a local child, or the runner it names. */
+  const attempt = async (entry, lease) => {
+    const started = Date.now();
+    const number = entry.attempts.length + 1;
+    if (!lease.runner) {
+      const run = await runLocalShard({ root, runner, files: entry.shard.files, label: entry.label, lease, stop });
+      return { attempt: number, host: 'local', outcome: run.isGreen ? 'green' : 'red', output: run.output, wallMs: Date.now() - started };
+    }
+    const command = `${LANDING_SHARD_ENV}=${word(entry.label)} ${['node', './bin/run-tests.js', ...entry.shard.files].map(word).join(' ')}`;
+    try {
+      const run = await runOnRunnerAsync(root, command, { runner: lease.runner, source: lease.source, browser: lease.browser,
+        metadata: { ...(lease.runMetadata ?? {}), landing: true }, signal: stop });
+      return { attempt: number, host: lease.runner.host, outcome: run.isGreen ? 'green' : 'red', output: run.output, wallMs: Date.now() - started };
+    } catch (error) {
+      // A stop ends the runner's transport on purpose; that shard was stopped, not dropped.
+      if (stop.aborted) return { attempt: number, host: lease.runner.host, outcome: 'stopped', output: '', wallMs: Date.now() - started };
+      // Infrastructure, not a test result: the runner could not give this shard a complete answer.
+      if (error instanceof RunnerDropped || error instanceof Refused) {
+        const reason = error instanceof RunnerDropped ? 'runner transport lost' : `runner refused: ${error.code}`;
+        return { attempt: number, host: lease.runner.host, outcome: 'infrastructure', reason, output: '', wallMs: Date.now() - started };
+      }
+      throw error;
+    }
+  };
+
+  /** Record an attempt's outcome, stopping the landing at the first test failure. */
+  const settle = (entry, record) => {
+    const stopped = record.outcome !== 'green' && (stop.aborted || firstFailure !== null);
+    const status = record.outcome === 'infrastructure' && !stopped ? 'infrastructure' : stopped ? 'stopped' : record.outcome;
+    entry.attempts.push({ ...record, status });
+    write(`# landing shard ${entry.label} attempt ${record.attempt} on ${record.host}: ${status}${record.reason ? ` (${record.reason})` : ''} in ${record.wallMs} ms\n`);
+    if (record.output) write(record.output.endsWith('\n') ? record.output : `${record.output}\n`);
+    if (status === 'infrastructure') {
+      write(`landing shard ${entry.label}: runner ${record.host} failed mid-shard; rerunning shard ${entry.label} locally\n`);
+      entry.claimed = false;
+      entry.localOnly = true;
+      acquire(entry);
+    } else {
+      entry.done = true;
+      entry.status = status;
+      if (status === 'red') {
+        firstFailure = entry.label;
+        stopper.abort();
+      }
+    }
+    signalChange();
+  };
+
+  /** Run a claimed shard on a lease, unless the landing already stopped. */
+  const runOnLease = async (entry, lease) => {
+    if (entry.done) return;
+    if (stop.aborted) {
+      entry.done = true;
+      entry.status = 'stopped';
+      entry.attempts.push({ attempt: entry.attempts.length + 1, host: 'none', outcome: 'stopped', status: 'stopped', wallMs: 0, output: '' });
+      write(`# landing shard ${entry.label} attempt ${entry.attempts.length} on none: stopped in 0 ms\n`);
+      signalChange();
+      return;
+    }
+    entry.running = true;
+    try { settle(entry, await attempt(entry, lease)); }
+    finally { entry.running = false; }
+  };
+
+  const failures = [];
+  /** Queue this shard for a slot of its own; the parent's lane may take it first. */
+  const acquire = (entry) => {
+    const localOnly = entry.localOnly;
+    const running = withGateSlot(root, async lease => {
+      if (entry.claimed || entry.done) return;
+      entry.claimed = true;
+      await runOnLease(entry, lease);
+    }, { landing: true, browser: entry.browser, remote: !localOnly, kind: 'landing', item: `shard ${entry.label}`,
+      onWait: () => { if (entry.claimed || entry.done || stop.aborted) throw new NotNeeded(); } });
+    running.catch(error => {
+      if (error instanceof NotNeeded) {
+        // A stopped shard that was only waiting for a slot is recorded as stopped here.
+        if (stop.aborted && !entry.done && !entry.running) runOnLease(entry, {}).catch(() => {});
+        return;
+      }
+      failures.push(error);
+      stopper.abort();
+      signalChange();
+    });
+  };
+
+  /** The parent's own slot: run free shards one after another until every shard is done. */
+  const lane = async () => {
+    while (!entries.every(entry => entry.done) && !failures.length) {
+      const next = entries.find(entry => !entry.claimed && !entry.done);
+      if (!next) { await changed; continue; }
+      next.claimed = true;
+      await runOnLease(next, inherited);
+    }
+  };
+
+  let shards;
+  try {
+    for (const entry of entries) if (!inherited || entry !== entries[0]) acquire(entry);
+    if (inherited) await lane();
+    while (!entries.every(entry => entry.done) && !failures.length) await changed;
+    if (failures.length) throw failures[0];
+    shards = entries;
+  } finally {
+    for (const [key, value] of Object.entries(saved)) if (value !== undefined) process.env[key] = value;
+  }
+  const merged = [];
+  const measured = {};
+  for (const entry of shards) {
+    const last = entry.attempts.at(-1);
+    const times = shardFileTimes(last?.output ?? '');
+    for (const file of entry.shard.files.map(fileKey)) {
+      const ms = times[file];
+      if (Number.isFinite(ms)) measured[file] = ms;
+      merged.push({ path: file, shard: entry.label, host: last?.host ?? 'none', durationMs: Number.isFinite(ms) ? ms : null });
+    }
+  }
+  for (const file of merged.sort((a, b) => a.path.localeCompare(b.path))) {
+    write(`# landing file ${file.shard} ${file.host} ${file.durationMs ?? '-'} ${file.path}\n`);
+  }
+  const isGreen = shards.every(entry => entry.status === 'green');
+  write(`# landing result: ${isGreen ? 'green' : `red, first failure in shard ${firstFailure ?? shards.find(entry => entry.status !== 'green')?.label}`}\n`);
+  if (Object.keys(measured).length) writeFileTimes(root, measured);
+  return { isGreen, balance,
+    shards: shards.map(entry => ({ shard: entry.label, status: entry.status,
+      attempts: entry.attempts.map(({ output, ...record }) => record) })),
+    files: merged };
+}
+
+/** Read the merged shard lines from a gate log into profile fields, or null for an unsharded run. */
+export function landingShardProfile(output) {
+  const shards = [];
+  const files = [];
+  let balance = null;
+  let floor = null;
+  for (const line of String(output).split(/\r?\n/u)) {
+    const plan = /^# landing shards: \d+ balanced by (history|history and average|file count) \(/u.exec(line);
+    if (plan) balance = plan[1];
+    const slowest = /^# landing floor: (\d+) ms (.+)$/u.exec(line);
+    if (slowest) floor = { path: slowest[2], ms: Number(slowest[1]) };
+    const shard = /^# landing shard (\d+\/\d+) attempt (\d+) on (\S+): (green|red|stopped|infrastructure)(?: \(([^)]*)\))? in (\d+) ms$/u.exec(line);
+    if (shard) shards.push({ shard: shard[1], attempt: Number(shard[2]), host: shard[3], status: shard[4], reason: shard[5] ?? null, wallMs: Number(shard[6]) });
+    const file = /^# landing file (\d+\/\d+) (\S+) (\d+|-) (.+)$/u.exec(line);
+    if (file) files.push({ path: file[4], shard: file[1], host: file[2], durationMs: file[3] === '-' ? null : Number(file[3]) });
+  }
+  return shards.length ? { balance, floor, shards, files } : null;
+}
+
+/** Print this shard's per-file wall times for its orchestrator; a missing record prints nothing. */
+export function printShardFileTimes(path, write = text => process.stdout.write(text)) {
+  if (!path || !existsSync(path)) return;
+  const times = {};
+  for (const line of readFileSync(path, 'utf8').split('\n')) {
+    try {
+      const { file, ms } = JSON.parse(line);
+      if (typeof file === 'string' && Number.isFinite(ms)) times[fileKey(file)] = Math.max(times[fileKey(file)] ?? 0, ms);
+    } catch { /* A torn last line from a killed file process carries no time. */ }
+  }
+  for (const [file, ms] of Object.entries(times)) write(`${FILE_TIME_LINE}${Math.round(ms)} ${file}\n`);
+}
