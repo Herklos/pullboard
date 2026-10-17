@@ -1,11 +1,14 @@
+/** @pullboard-test-input test-tree */
+/** @pullboard-test-input source-tree */
 /** Browser admission follows current test dependencies without executing them [C7]. */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { test } from 'node:test';
-import { checkNeedsBrowser, testsNeedBrowser } from '../src/browser-admission.js';
+import { browserBoundFiles, checkNeedsBrowser, testsNeedBrowser } from '../src/browser-admission.js';
+import { browserInCall } from '../src/browser-slot-guard.js';
 
 const TEST_RUNNER = resolve(import.meta.dirname, '../bin/run-tests.js');
 
@@ -132,6 +135,12 @@ test('frozen checks classify only explicit source-backed test commands [C7]', as
   assert.equal(await checkNeedsBrowser(root, command, {
     env: { ...classifyEnv, NODE_OPTIONS: '--import=unclassified-loader.mjs' },
   }), true, 'an unknown Node preload still fails closed to browser admission');
+  assert.equal(await checkNeedsBrowser(root, command, {
+    env: { ...classifyEnv, NODE_OPTIONS: `--import=${new URL('../src/browser-slot-guard.js', import.meta.url).href}` },
+  }), false, "the runner's own launch guard preload, inherited from a browser-free test file, is not an unknown preload [C7,O5]");
+  assert.equal(await checkNeedsBrowser(root, command, {
+    env: { ...classifyEnv, NODE_OPTIONS: `--import=${new URL('../src/browser-slot-guard.js', import.meta.url).href} --import=x.mjs` },
+  }), true, 'the guard preload does not excuse another preload beside it');
 
   const runnerPath = join(root, 'bin/run-tests.js');
   rmSync(runnerPath);
@@ -227,4 +236,219 @@ test('Unicode ranges do not turn ordinary tests into browser files [C7]', async 
   assert.equal(await testsNeedBrowser(root, ['test/escaped-loader.test.js']), true,
     'an escaped loader identifier still requires conservative browser admission');
   assert.equal(await testsNeedBrowser(root, ['test/escaped-braced-loader.test.js']), true);
+});
+
+/** The 42 files that launched Chrome in core-197's full census run on main 8b8dc50e (shout 11748). */
+const CENSUS_LAUNCHED = [
+  'test/chrome-fixture.test.js', 'test/cockpit/activity.test.js', 'test/cockpit/addresses.test.js', 'test/cockpit/agents.test.js',
+  'test/cockpit/demo.test.js', 'test/cockpit/doctrine.test.js', 'test/cockpit/fixture.test.js', 'test/cockpit/item-waits.test.js',
+  'test/cockpit/items.test.js', 'test/cockpit/layout.test.js', 'test/cockpit/live.test.js', 'test/cockpit/local-origin.test.js',
+  'test/cockpit/needs.test.js', 'test/cockpit/newcomer.test.js', 'test/cockpit/perf.test.js', 'test/cockpit/projects.test.js',
+  'test/cockpit/prose.test.js', 'test/cockpit/references.test.js', 'test/cockpit/relay.test.js', 'test/cockpit/roadmap.test.js',
+  'test/cockpit/scope.test.js', 'test/cockpit/search.test.js', 'test/cockpit/shared-wait.test.js', 'test/cockpit/shout-overlap.test.js',
+  'test/cockpit/shouts.test.js', 'test/cockpit/snapshot.test.js', 'test/cockpit/spec.test.js', 'test/cockpit/stats.test.js',
+  'test/relay-agent.test.js', 'test/relay-approval-delivery.test.js', 'test/relay-browser-fixture.test.js', 'test/relay-browser.test.js',
+  'test/relay-device-confirmation.test.js', 'test/relay-person-actions.test.js', 'test/relay-person-credential.test.js',
+  'test/relay-person-outbox.test.js', 'test/relay-person-page.test.js', 'test/relay-person-requests.test.js',
+  'test/relay-setup-once.test.js', 'test/relay-snapshot-recovery.test.js', 'test/relay-snapshot-size.test.js', 'test/seal.test.js',
+];
+
+/** Git's environment without hook or outer-repository variables, so fixture git commands see only their own repo. */
+function plainGitEnvironment() {
+  return Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
+}
+
+/**
+ * A private runner checkout with the real runner, src/ and Chrome fixture, a private machine home whose
+ * settings file says whether gate.browserByLaunch is on, and a stand-in Chrome that only logs its arguments.
+ */
+function runnerFixture(t, tests) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-browser-by-launch-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, 'bin'));
+  mkdirSync(join(root, 'test'));
+  mkdirSync(join(root, 'machine'));
+  writeFileSync(join(root, 'package.json'), '{"type":"module"}\n');
+  copyFileSync(TEST_RUNNER, join(root, 'bin/run-tests.js'));
+  cpSync(resolve(import.meta.dirname, '../src'), join(root, 'src'), { recursive: true });
+  for (const helper of ['chrome-fixture.js', 'fixture-child.js']) copyFileSync(resolve(import.meta.dirname, helper), join(root, 'test', helper));
+  for (const [path, source] of Object.entries(tests)) writeFileSync(join(root, path), source);
+  const chrome = join(root, 'stand-in-browser');
+  writeFileSync(chrome, '#!/bin/sh\nprintf "%s\\n" "$1" >> "$PULLBOARD_FIXTURE_LAUNCHES"\n');
+  chmodSync(chrome, 0o755);
+  const init = spawnSync('git', ['init', '-q'], { cwd: root, env: plainGitEnvironment(), encoding: 'utf8' });
+  assert.equal(init.status, 0, init.stderr);
+  /**
+   * Run the copied runner on named files with gate.browserByLaunch set as given; return its output and records.
+   * PULLBOARD_CHROME names the stand-in only when asked, so a run can show which guard layer refused.
+   */
+  function run(byLaunch, files, { chromeSetting = false } = {}) {
+    writeFileSync(join(root, 'machine/settings.json'), `${JSON.stringify({ gate: { browserByLaunch: byLaunch } })}\n`);
+    for (const record of ['markers', 'launches']) rmSync(join(root, record), { force: true });
+    const env = plainGitEnvironment();
+    for (const key of Object.keys(env)) {
+      if (key.startsWith('PULLBOARD_GATE_SLOT_') || key.startsWith('PULLBOARD_TEST_BROWSER_')) delete env[key];
+    }
+    for (const key of ['NODE_TEST_CONTEXT', 'NODE_OPTIONS', 'PULLBOARD_BROWSER_SLOT_HELD', 'PULLBOARD_TEST_FILE', 'PULLBOARD_CHROME']) delete env[key];
+    if (chromeSetting) env.PULLBOARD_CHROME = chrome;
+    Object.assign(env, { PULLBOARD_MACHINE_HOME: join(root, 'machine'), PULLBOARD_FIXTURE_MARKERS: join(root, 'markers'),
+      PULLBOARD_FIXTURE_LAUNCHES: join(root, 'launches'), FIXTURE_BROWSER: chrome });
+    const result = spawnSync(process.execPath, ['bin/run-tests.js', ...files], { cwd: root, env, encoding: 'utf8' });
+    /** Read one record file the fixture tests append to, empty when nothing wrote it. */
+    const lines = name => existsSync(join(root, name)) ? readFileSync(join(root, name), 'utf8').split('\n').filter(Boolean) : [];
+    return { status: result.status, output: `${result.stdout}\n${result.stderr}`, markers: lines('markers').sort(), launches: lines('launches').sort() };
+  }
+  return { root, run };
+}
+
+/** A fixture test body that records which browser slot marker its worker set: held, none, or unset. */
+const RECORD_MARKER = name => `import { appendFileSync } from 'node:fs';
+import { test } from 'node:test';
+test('${name} records its browser slot marker', () => {
+  appendFileSync(process.env.PULLBOARD_FIXTURE_MARKERS, \`${name}=\${process.env.PULLBOARD_TEST_BROWSER_SLOT ?? 'unset'}\\n\`);
+});
+`;
+
+test('only a file that reaches a browser launch takes a browser slot [C7,O5]', async t => {
+  const root = sourceFixture(t, {
+    'test/chrome-fixture.js': "throw new Error('admission must never launch or evaluate Chrome');",
+    'test/helpers.test.js': "import { spawnSync } from 'node:child_process';\nimport { createWaiter, createEvaluator } from './chrome-fixture.js';\nvoid spawnSync; void createWaiter; void createEvaluator;",
+    'test/finder.test.js': "import { findChromeExecutable } from './chrome-fixture.js';\nvoid findChromeExecutable;",
+    'test/launch.test.js': "import { startChrome } from './chrome-fixture.js';\nvoid startChrome;",
+    'test/renamed.test.js': "import { launchChromeProcess as begin } from './chrome-fixture.js';\nvoid begin;",
+    'test/wrapped.test.js': "import { open } from '../wrapper.js';\nvoid open;",
+    'wrapper.js': "import { startChrome as launch } from './test/chrome-fixture.js';\nexport const open = () => launch();",
+    'test/everything.test.js': "import * as chrome from './chrome-fixture.js';\nvoid chrome;",
+    'test/direct.test.js': "import { spawnSync } from 'node:child_process';\nspawnSync(process.env.PULLBOARD_CHROME, ['--version']);",
+    'test/spawner.test.js': "import { spawnSync } from 'node:child_process';\nspawnSync('git', ['status']);",
+  });
+  const byLaunch = file => testsNeedBrowser(root, [file], { byLaunch: true });
+  assert.equal(await byLaunch('test/helpers.test.js'), false,
+    'importing launch-free Chrome fixture helpers and child_process takes no browser slot by launch');
+  assert.equal(await byLaunch('test/spawner.test.js'), false, 'a process starter with no Chrome reference takes no browser slot by launch');
+  for (const file of ['launch', 'renamed', 'wrapped', 'everything', 'finder', 'direct']) {
+    assert.equal(await byLaunch(`test/${file}.test.js`), true, `${file}: a graph that reaches a Chrome launch takes the browser slot`);
+  }
+  assert.equal(await byLaunch('test/cockpit/items.test.js'), true,
+    'cockpit files keep the browser slot until test/cockpit/fixture.js carries the launch guard (#741)');
+  for (const file of ['helpers', 'spawner']) {
+    assert.equal(await testsNeedBrowser(root, [`test/${file}.test.js`], { byLaunch: false }), true,
+      `${file}: with gate.browserByLaunch off, classification is exactly today's`);
+  }
+
+  const repository = resolve(import.meta.dirname, '..');
+  const listed = spawnSync('git', ['ls-files', '-z', 'test'], { cwd: repository, env: plainGitEnvironment(), encoding: 'utf8' });
+  assert.equal(listed.status, 0, listed.stderr);
+  const tracked = listed.stdout.split('\0').filter(path => /\.test\.(?:js|mjs)$/u.test(path)).sort();
+  const bound = await browserBoundFiles(repository, tracked, { byLaunch: true });
+  const missed = CENSUS_LAUNCHED.filter(file => tracked.includes(file) && !bound.includes(file));
+  assert.deepEqual(missed, [], 'every file that launched Chrome in the census is classified browser-bound');
+  // Cockpit and journey files stay bound by rule until #741 guards the view fixture; the rest must reach a launch.
+  const reached = bound.filter(file => !file.startsWith('test/cockpit/') && file !== 'test/journeys.test.js');
+  assert.ok(reached.length <= 20,
+    `about 42 of ${tracked.length} test files are browser-bound by launch (the census's 15 non-cockpit launchers, plus cockpit and journey files until #741); got ${bound.length}, ${reached.length} outside cockpit: ${reached.join(', ')}`);
+
+  const runner = runnerFixture(t, {
+    'test/plain.test.js': `import { spawnSync } from 'node:child_process';\nvoid spawnSync;\n${RECORD_MARKER('plain')}`,
+    'test/launcher.test.js': `import { launchChromeProcess } from './chrome-fixture.js';\n${RECORD_MARKER('launcher')}
+test('launcher starts the stand-in browser inside its slot', async () => {
+  const browser = launchChromeProcess({ executable: process.env.FIXTURE_BROWSER, args: ['launcher'] });
+  await browser.stopped;
+  await browser.close();
+});
+`,
+  });
+  const on = runner.run(true, ['test/plain.test.js', 'test/launcher.test.js']);
+  assert.equal(on.status, 0, on.output);
+  assert.deepEqual(on.markers, ['launcher=held', 'plain=none'],
+    'by launch, only the launching file takes a browser slot; the child_process file runs without one');
+  assert.deepEqual(on.launches, ['launcher'], 'a file holding the slot launches as before');
+  const off = runner.run(false, ['test/plain.test.js', 'test/launcher.test.js']);
+  assert.equal(off.status, 0, off.output);
+  assert.deepEqual(off.markers, ['launcher=unset', 'plain=unset'], 'with the setting off the runner sets no marker, as today');
+});
+
+test('a file that launches Chrome unclassified fails by name [C7,O5]', async t => {
+  const hidden = `import { test } from 'node:test';
+test('hidden launches through a computed import', async () => {
+  const chrome = await import(['.', 'chrome-fixture.js'].join('/'));
+  const browser = chrome.launchChromeProcess({ executable: process.env.FIXTURE_BROWSER, args: ['hidden'] });
+  await browser.stopped;
+  await browser.close();
+});
+`;
+  const runner = runnerFixture(t, {
+    'test/hidden.test.js': hidden,
+    'test/child.test.js': `import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { test } from 'node:test';
+test('child launches from a process the test starts', () => {
+  const result = spawnSync(process.execPath, ['test/launch-helper.mjs'], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+});
+`,
+    'test/launch-helper.mjs': "import { launchChromeProcess } from './chrome-fixture.js';\nconst browser = launchChromeProcess({ executable: process.env.FIXTURE_BROWSER, args: ['child'] });\nawait browser.stopped;\nawait browser.close();\n",
+  });
+  assert.equal(await testsNeedBrowser(runner.root, ['test/hidden.test.js'], { byLaunch: true }), false,
+    'the fixture really is misclassified: a computed import hides the launch from the static walk');
+  assert.equal(await testsNeedBrowser(runner.root, ['test/child.test.js'], { byLaunch: true }), false,
+    'the fixture really is misclassified: the launch is in a child process outside the import graph');
+  const on = runner.run(true, ['test/hidden.test.js', 'test/child.test.js']);
+  assert.notEqual(on.status, 0, on.output);
+  assert.match(on.output, /\[BROWSER_SLOT_REQUIRED\] test\/hidden\.test\.js launched Chrome/u, 'the in-process launch fails by file name');
+  assert.match(on.output, /\[BROWSER_SLOT_REQUIRED\] test\/child\.test\.js launched Chrome/u, 'a launch from the file\'s child process fails by file name');
+  assert.deepEqual(on.launches, [], 'the refused launches never started a browser outside the slot');
+  const off = runner.run(false, ['test/hidden.test.js']);
+  assert.equal(off.status, 0, off.output);
+  assert.deepEqual(off.launches, ['hidden'], 'with gate.browserByLaunch off the guard is inert and the file launches as today');
+
+  // tests-42's counterexample (shout 11929): browser starts that never pass through test/chrome-fixture.js.
+  const direct = runnerFixture(t, {
+    'test/direct.test.js': `import { spawnSync } from 'node:child_process';
+import { test } from 'node:test';
+test('direct starts the configured browser path itself', () => { spawnSync(process.env.FIXTURE_BROWSER, ['direct']); });
+`,
+    'test/finder.test.js': `import { spawnSync } from 'node:child_process';
+import { test } from 'node:test';
+test('finder starts the path the normal browser finder returns', async () => {
+  const { findChromeExecutable } = await import(['.', 'chrome-fixture.js'].join('/'));
+  spawnSync(findChromeExecutable(), ['finder']);
+});
+`,
+    'test/shell.test.js': `import { execSync, spawnSync } from 'node:child_process';
+import { test } from 'node:test';
+test('shell starts the browser from an sh -c string', () => { spawnSync('sh', ['-c', \`'\${process.env.FIXTURE_BROWSER}' shell\`]); });
+test('shell starts the browser through exec', () => { execSync(\`'\${process.env.FIXTURE_BROWSER}' exec\`); });
+`,
+    'test/spawned.test.js': `import { spawnSync } from 'node:child_process';
+import { test } from 'node:test';
+test('spawned starts a Node child that starts the browser', () => {
+  const result = spawnSync(process.execPath, ['test/direct-helper.mjs'], { encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(result.stderr);
+});
+`,
+    'test/direct-helper.mjs': "import { spawnSync } from 'node:child_process';\nspawnSync(process.env.FIXTURE_BROWSER, ['grandchild']);\n",
+    'test/static-finder.test.js': "import { findChromeExecutable } from './chrome-fixture.js';\nvoid findChromeExecutable;\n",
+  });
+  const directFiles = ['test/direct.test.js', 'test/finder.test.js', 'test/shell.test.js', 'test/spawned.test.js'];
+  for (const file of directFiles) {
+    assert.equal(await testsNeedBrowser(direct.root, [file], { byLaunch: true }), false, `${file}: the fixture really is classified browser-free`);
+  }
+  assert.equal(await testsNeedBrowser(direct.root, ['test/static-finder.test.js'], { byLaunch: true }), true,
+    'importing findChromeExecutable yields a browser path, so it counts as a launch');
+  const spawned = direct.run(true, directFiles, { chromeSetting: true });
+  assert.notEqual(spawned.status, 0, spawned.output);
+  for (const file of directFiles) {
+    assert.match(spawned.output, new RegExp(`\\[BROWSER_SLOT_REQUIRED\\] test/${file.slice(5).replaceAll('.', '\\.')} launched Chrome`, 'u'),
+      `${file}: a direct browser spawn fails by file name`);
+  }
+  assert.deepEqual(spawned.launches, [], 'no direct, finder, shell, exec or child spawn started the browser outside the slot');
+  for (const [method, input] of [
+    ['spawn', ['google-chrome', ['--headless']]], ['execFileSync', ['/opt/x/chromium', []]], ['spawnSync', ['headless_shell']],
+    ['spawn', ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', []]], ['execSync', ['cd /tmp && google-chrome-stable --version']],
+    ['spawnSync', ['bash', ['-lc', 'exec chromium-browser']]], ['spawn', ['echo chrome', [], { shell: true }]], ['fork', ['x.js', [], { execPath: '/usr/bin/chromium' }]],
+  ]) assert.ok(browserInCall(method, input), `${method} ${JSON.stringify(input)} names a browser by basename`);
+  for (const [method, input] of [['spawnSync', ['git', ['status']]], ['execSync', ['printf chrome-fixture.js']], ['spawn', [process.execPath, ['-e', 'google-chrome']]]]) {
+    assert.equal(browserInCall(method, input), null, `${method} ${JSON.stringify(input)} is not a browser`);
+  }
 });
