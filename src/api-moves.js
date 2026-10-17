@@ -5,8 +5,9 @@ import { Refused } from './refused.js';
 const MOVES = {
   'spec-approve': { prefix: ['spec', 'approve'], positions: ['ids'], flags: ['by', 'text'] },
   'spec-decline': { prefix: ['spec', 'decline'], positions: ['ids'], flags: ['reason'] },
+  'spec-answer': { prefix: ['spec', 'answer'], positions: ['row', 'answer'] },
   add: { positions: ['lane', 'title'], flags: ['criterion', 'specs', 'parent', 'after', 'brief', 'route', 'check'], booleans: ['wait'], booleans: ['wait'] },
-  edit: { item: true, flags: ['criterion', 'brief', 'route', 'check'], booleans: ['wait'], booleans: ['wait'] },
+  edit: { item: true, flags: ['criterion', 'brief', 'route', 'check', 'reason'], booleans: ['wait'], booleans: ['wait'] },
   fact: { item: true, positions: ['kind', 'text'], flags: ['supersedes', 'ref'] },
   claim: { item: true },
   release: { item: true, flags: ['note'] },
@@ -41,7 +42,8 @@ export function moveArgs({ verb, item, args = {} }) {
   const positional = [];
   for (const key of form.positions ?? []) {
     if (args[key] === undefined && form.optional?.includes(key)) continue;
-    if (typeof args[key] !== 'string' || !args[key].trim()) throw new Refused('BAD_REQUEST', `${verb} needs args.${key} as nonempty text; supply the CLI move's argument`);
+    const cliRefusesBlank = verb === 'shout' && key === 'text';
+    if (typeof args[key] !== 'string' || (!args[key].trim() && !cliRefusesBlank)) throw new Refused('BAD_REQUEST', `${verb} needs args.${key} as nonempty text; supply the CLI move's argument`);
     positional.push(args[key]);
   }
   for (const key of form.flags ?? []) if (args[key] !== undefined) {

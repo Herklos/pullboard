@@ -2,9 +2,15 @@
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createServer } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import * as store from '../src/board.js';
+import { createLocalApiHandler } from '../src/api.js';
+import { main } from '../src/cli.js';
+import { createE2eHelpers } from './e2e-helpers.js';
+import { fetchFresh } from './http-fixture.js';
 
 /** Make a real throwaway SQLite board with a coordinator and one lane agent. */
 function boardFor(t) {
@@ -101,4 +107,83 @@ test('[A2] successful shouts and answers each append their corresponding event',
   });
   assert.deepEqual(afterAnswer.slice(-2).map((event) => event.event_id), [requestEvent.event_id, answerEvent.event_id]);
   assert.equal(store.getShout(board, answer).shout_answers, request);
+});
+
+
+test("the API passes blank shout text to the CLI's own refusal [A2,A9]", async (t) => {
+  const e2e = createE2eHelpers();
+  let handler;
+  let server;
+  t.after(async () => {
+    handler?.close();
+    if (server) {
+      server.closeAllConnections();
+      await new Promise(resolveClosed => server.close(resolveClosed));
+    }
+    e2e.cleanup();
+  });
+  const box = e2e.project('true');
+  const secret = randomUUID();
+  let port = 0;
+  handler = createLocalApiHandler({
+    secret, getPort: () => port, runCommand: main,
+    projects: () => [{ root: box.repo, name: 'Shout fixture', project: '', added: '2026-01-01T00:00:00.000Z' }],
+  });
+  server = createServer(handler);
+  await new Promise((resolveReady, rejectReady) => {
+    server.once('error', rejectReady);
+    server.listen(0, '127.0.0.1', () => {
+      port = server.address().port;
+      resolveReady();
+    });
+  });
+  const origin = `http://127.0.0.1:${port}`;
+  const headers = { 'x-pullboard-key': secret, 'content-type': 'application/json' };
+  const boardsResponse = await fetchFresh(`${origin}/api/v1/boards`, { headers });
+  assert.equal(boardsResponse.status, 200);
+  const boards = await boardsResponse.json();
+  const board = boards.boards.find(entry => entry.root === box.repo);
+  assert.ok(board);
+  /** Send the actual authenticated HTTP move, retaining status and the public refusal document. */
+  async function move(body) {
+    const response = await fetchFresh(`${origin}/api/v1/boards/${board.id}/moves`, {
+      method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(10_000),
+    });
+    return { status: response.status, document: await response.json() };
+  }
+  for (const text of ['', '  \t\n ']) {
+    const cli = box.run(box.repo, 'shout', 'web', text, '--json');
+    assert.notEqual(cli.code, 0);
+    const expected = JSON.parse(cli.out).error;
+    assert.equal(expected.code, 'EMPTY_SHOUT');
+    assert.ok(expected.next);
+    for (const args of [{ to: 'web', text }, { text }]) {
+      const api = await move({ verb: 'shout', args });
+      assert.equal(api.document.error?.code, 'EMPTY_SHOUT', `blank ${JSON.stringify(args)} reaches the CLI refusal`);
+      assert.equal(api.status, 409);
+      assert.deepEqual(api.document.error, expected, 'the API preserves the CLI message and next step');
+    }
+  }
+  for (const body of [
+    { verb: 'shout', args: { to: 'web' } },
+    ...[null, 42, [], {}].map(text => ({ verb: 'shout', args: { to: 'web', text } })),
+    { verb: 'shout', args: { to: '', text: 'Hello' } },
+    { verb: 'shout', args: { to: 42, text: 'Hello' } },
+    { verb: 'shout', args: null },
+    { verb: 'shout', args: [] },
+    { verb: 'shout', args: { to: 'web', text: 'Hello', extra: true } },
+    { verb: 'shout', item: 1, args: { to: 'web', text: 'Hello' } },
+    { verb: 'shout', args: { to: 'web', text: 'Hello' }, extra: true },
+  ]) {
+    const api = await move(body);
+    assert.equal(api.status, 400, JSON.stringify(body));
+    assert.equal(api.document.error.code, 'BAD_REQUEST', JSON.stringify(body));
+    assert.ok(api.document.error.next);
+  }
+  const success = await move({ verb: 'shout', args: { to: 'web', text: 'Keep this valid message.' } });
+  assert.equal(success.status, 200);
+  assert.equal(success.document.event.event_kind, 'shout');
+  const inbox = box.run(box.web, 'inbox', '--json');
+  assert.equal(inbox.code, 0, inbox.err || inbox.out);
+  assert.deepEqual(JSON.parse(inbox.out).shouts.map(row => row.shout_text), ['Keep this valid message.']);
 });

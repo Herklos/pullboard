@@ -218,14 +218,14 @@ test('agent model display names follow the API on phone and desktop [O8,N26]', {
         assert.equal(await text('#chain [data-item="1"] .chip'), expected.builder, `${at}: item row holder`);
         assert.equal(await text('#chain [data-item="3"] .chip'), expected.unknown, `${at}: unknown model row`);
         await press(chrome, 'document.querySelector("#chain [data-item=\\"1\\"]")');
-        await settled(chrome, 'view.item === 1');
+        await settled(chrome, 'view.item === 1 && !!document.querySelector("#detail h2")');
         assert.ok((await text('#detail')).includes(expected.builder), `${at}: held item detail`);
         assert.equal(await text('#needs .row[data-go^="decide:"] .meta'), 'NEEDS YOU a decision, asked by ' + expected.reviewer, `${at}: Needs-you decision author`);
         assert.ok((await text('#needs .row[data-go="tab:shouts"] .meta')).includes('lane held by ' + expected.reviewer), `${at}: Needs-you lane holder`);
         await chooseFilter(chrome, 'state:verified');
         await settled(chrome, '!!document.querySelector("#chain [data-item=\\"2\\"]")');
         await press(chrome, 'document.querySelector("#chain [data-item=\\"2\\"]")');
-        await settled(chrome, 'view.item === 2');
+        await settled(chrome, 'view.item === 2 && !!document.querySelector("#detail h2")');
         const detail = await text('#detail');
         assert.ok(detail.includes(expected.builder) && detail.includes(expected.reviewer), `${at}: builder and verifier detail`);
         assert.ok((await text('#detail .verdict .by')).startsWith(expected.reviewer), `${at}: verdict identity`);
@@ -274,7 +274,7 @@ test('agent model display names follow the API on phone and desktop [O8,N26]', {
         await tab('roadmap');
         assert.doesNotMatch(await text('#roadmap'), /web-[12]|coordinator/, `${at}: roadmap rows name no agents`);
         await press(chrome, 'document.querySelector("#roadmap [data-go=\\"item:1\\"]")');
-        await settled(chrome, 'view.tab === "items" && view.item === 1');
+        await settled(chrome, 'view.tab === "items" && view.item === 1 && !!document.querySelector("#detail h2")');
         assert.ok((await text('#detail')).includes(expected.builder), `${at}: roadmap item opens with the API identity`);
         assert.ok(await chrome.stable('document.documentElement.scrollWidth <= innerWidth'), `${at}: no sideways overflow`);
       }

@@ -18,6 +18,9 @@ const LANDING_RUN_ENV = 'PULLBOARD_LANDING_RUN';
 const LANDING_WORKER_STARTS_ENV = 'PULLBOARD_LANDING_WORKER_STARTS';
 const LANDING_ATTEMPT_ENV = 'PULLBOARD_LANDING_ATTEMPT';
 const LANDING_WAIVERS_ENV = 'PULLBOARD_LANDING_WAIVERS';
+// Mirrors src/landing-shards.js; this preload stays free of that module until a landing needs it.
+const LANDING_SHARD_ENV = 'PULLBOARD_LANDING_SHARD';
+const LANDING_FILE_TIMES_ENV = 'PULLBOARD_LANDING_FILE_TIMES';
 export const DEFAULT_TEST_TIMEOUT_MS = 660_000;
 export const DEFAULT_TEST_FILE_TIMEOUT_MS = 30_000;
 // Worker identity startup retries stay below the ordinary per-file ceiling even if ps is unavailable.
@@ -211,6 +214,8 @@ function testEnvironment(sandbox, gateMarkers = {}) {
   // Model a plain user terminal; person-boundary tests inject agent markers explicitly.
   for (const key of AGENT_SHELL_MARKERS) delete env[key];
   for (const key of SSH_SHELL_MARKERS) delete env[key];
+  // A test that starts its own run-tests is never a shard of this landing.
+  delete env[LANDING_SHARD_ENV];
   env.HOME = home;
   env.USERPROFILE = home;
   env.PULLBOARD_HOME = home;
@@ -1054,6 +1059,11 @@ async function runLandingTests(args, env, concurrency) {
     })().then(resolveAbort, error => { reporterError ??= error; resolveAbort(); });
     return abortPromise;
   };
+  // A shard the landing stops gets TERM: stop through the same custody as a first failure, so every
+  // owned descendant, detached ones included, is drained or named before this process exits.
+  let stoppedByLanding = false;
+  const stopShard = () => { stoppedByLanding = true; abortLandingRun(); };
+  if (process.env[LANDING_SHARD_ENV]) process.on('SIGTERM', stopShard);
   const originalEnv = { ...process.env };
   for (const key of Object.keys(process.env)) delete process.env[key];
   Object.assign(process.env, testEnv, { [LANDING_RUN_ENV]: '0' });
@@ -1135,8 +1145,14 @@ async function runLandingTests(args, env, concurrency) {
     endReporters();
     for (const key of Object.keys(process.env)) delete process.env[key];
     Object.assign(process.env, originalEnv);
+    process.off('SIGTERM', stopShard);
   }
   if (reporterError) throw reporterError;
+  if (stoppedByLanding && !firstFailure) {
+    process.stderr.write(`\nLanding shard ${process.env[LANDING_SHARD_ENV]} stopped by the landing after another shard failed; its owned processes were drained\n`);
+    process.exitCode = 1;
+    return { status: 1, signal: null };
+  }
   if (firstFailure) {
     const diagnostic = failureDiagnostics.get(firstFailure.file);
     if (diagnostic) firstFailure = { file: firstFailure.file, name: diagnostic.name, error: diagnostic.details.error };
@@ -1327,18 +1343,39 @@ async function main(args) {
   }
   let signal = null;
   /** Keep sandbox lifetime inside the held lease, including the complete child process. */
+  const shardLabel = process.env[LANDING_SHARD_ENV];
   const run = async (gateMarkers) => {
     const sandbox = mkdtempSync(join(tmpdir(), 'pullboard-test-run-'));
+    // A shard of a sharded landing reports each file's wall time back to its orchestrator.
+    const fileTimes = shardLabel ? join(sandbox, 'landing-file-times.jsonl') : '';
+    if (fileTimes) process.env[LANDING_FILE_TIMES_ENV] = fileTimes;
     try {
       const result = await executeTests(args, sandbox, gateMarkers, fullSuite, concurrency);
       signal = result.signal;
       process.exitCode = result.status ?? 1;
+      if (fileTimes) (await import('../src/landing-shards.js')).printShardFileTimes(fileTimes);
     } finally { rmSync(sandbox, { recursive: true, force: true }); }
   };
   try {
     const { GATE_SLOT_HELD_ENV, GATE_SLOT_POOL_ENV, GATE_SLOT_TOKEN_ENV, gateSlotEnvironment, inheritedGateSlot } = await import('../src/resources.js');
     const scopedMarker = process.env[GATE_SLOT_POOL_ENV] || process.env[GATE_SLOT_TOKEN_ENV];
     const legacyHeld = process.env[GATE_SLOT_HELD_ENV] === '1';
+    // A full landing run with landingShards above 1 fans its files out instead of running them here.
+    if (fullSuite && process.env[LANDING_RUN_ENV] === '1' && !shardLabel) {
+      const { landingShardCount } = await import('../src/gate.js');
+      const count = landingShardCount(process.cwd());
+      if (count > 1) {
+        const files = isGitWorkTree(process.cwd(), process.env) ? trackedDefaultTestFiles(process.cwd(), process.env) : [];
+        if (!files.length) throw new Error('a sharded landing gate needs tracked Node test files; commit them or set landingShards to 1');
+        const inherited = scopedMarker ? inheritedGateSlot({ root: process.cwd(), browser }) : null;
+        const { runLandingShards } = await import('../src/landing-shards.js');
+        const { testsNeedBrowser } = await import('../src/browser-admission.js');
+        const result = await runLandingShards({ root: process.cwd(), runner, files, count, inherited,
+          needsBrowser: shardFiles => testsNeedBrowser(process.cwd(), shardFiles) });
+        process.exitCode = result.isGreen ? 0 : 1;
+        return;
+      }
+    }
     if (scopedMarker) {
       const inherited = inheritedGateSlot({ root: process.cwd(), browser });
       if (inherited) await run(gateSlotEnvironment(inherited));
@@ -1393,6 +1430,17 @@ if (process.argv[1] && resolve(process.argv[1]) === runner) {
   await main(process.argv.slice(2));
 } else if (process.argv[1]) {
   process.env.PULLBOARD_TEST_FILE = process.argv[1];
+  const fileTimes = process.env[LANDING_FILE_TIMES_ENV];
+  // Only this test file reports; anything it starts is not one of the shard's files.
+  delete process.env[LANDING_FILE_TIMES_ENV];
+  if (fileTimes && process.env.NODE_TEST_CONTEXT === 'child-v8') {
+    // One line per test file process: its wall time from start to exit, for the next shard plan.
+    const timedFile = relative(process.cwd(), resolve(process.argv[1]));
+    process.once('exit', () => {
+      try { appendFileSync(fileTimes, `${JSON.stringify({ file: timedFile, ms: Math.round(process.uptime() * 1000) })}\n`); }
+      catch { /* A missing time only weakens the next shard plan. */ }
+    });
+  }
   const startsPath = process.env[LANDING_WORKER_STARTS_ENV];
   const attempt = process.env[LANDING_ATTEMPT_ENV];
   const landingWorker = Boolean(startsPath && attempt);

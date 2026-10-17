@@ -6,6 +6,7 @@ import { userInfo } from 'node:os';
 import { delimiter, dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as resourceApi from './resources.js';
+import { parseProcessCensus } from './process-census.js';
 import { once } from 'node:events';
 import { pipeline } from 'node:stream/promises';
 
@@ -130,7 +131,7 @@ async function readSpec() {
     tagNames.add(tag.name);
     if (tag.chain.length ? tag.chain[0] !== tag.object : tag.object !== tag.peeledCommit) throw new Error('invalid tag manifest');
   }
-  const runtimeNames = ['resources.js', 'git.js', 'machine-home.js', 'refused.js'];
+  const runtimeNames = ['resources.js', 'git.js', 'machine-home.js', 'refused.js', 'process-census.js', 'queue-settings.js', 'queue-order.js'];
   if (Object.keys(value.runtime.files).length !== runtimeNames.length
     || runtimeNames.some(name => typeof value.runtime.files[name] !== 'string')) throw new Error('invalid work specification');
   if (createHash('sha256').update(JSON.stringify(value.runtime.files)).digest('hex') !== value.runtime.sha256) throw new Error('invalid trusted runtime');
@@ -212,20 +213,7 @@ function processCensus() {
     env: { PATH: safePath, LANG: 'C', LC_ALL: 'C', TZ: 'UTC' },
   });
   if (result.error || result.status !== 0 || typeof result.stdout !== 'string') return null;
-  const rows = new Map();
-  for (const line of result.stdout.split(/\r?\n/u)) {
-    if (!line.trim()) continue;
-    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+([A-Z][a-z]{2})\s+([A-Z][a-z]{2})\s+(\d{1,2})\s+(\d{2}:\d{2}:\d{2})\s+(\d{4})\s+(\S+)\s+(.+?)\s*$/u.exec(line);
-    if (!match) return null;
-    const pid = Number(match[1]);
-    const ppid = Number(match[2]);
-    const pgid = Number(match[3]);
-    if (![pid, ppid, pgid].every(Number.isSafeInteger) || pid < 1 || ppid < 0 || pgid < 1 || rows.has(pid)) return null;
-    const started = `${match[4]} ${match[5]} ${match[6]} ${match[7]} ${match[8]}`;
-    const processSha256 = createHash('sha256').update(match[10]).digest('hex');
-    rows.set(pid, { pid, ppid, pgid, started, state: match[9], processSha256 });
-  }
-  return rows.size ? rows : null;
+  return parseProcessCensus(result.stdout);
 }
 
 /** Add a kernel start-time identity when procfs is available; otherwise retain a conservative census tuple. */
@@ -1094,9 +1082,27 @@ async function runCommand(spec, root, env, sink, tracker) {
 async function receipt(spec, fields, sink) {
   await flushStdout();
   const body = { id: spec.id, commit: spec.commit, tree: spec.tree, code: fields.code, signal: fields.signal,
-    runtimeSha256: spec.runtime.sha256, toolingSha256: spec.tooling.sha256, root: fields.root ?? '', outputSha256: sink.hash.digest('hex'), wallMs: Math.max(0, Date.now() - sink.wallStart) };
+    runtimeSha256: spec.runtime.sha256, toolingSha256: spec.tooling.sha256, root: fields.root ?? '', outputSha256: sink.hash.digest('hex'), wallMs: Math.max(0, Date.now() - sink.wallStart),
+    ...(fields.refused ? { refused: fields.refused } : {}) };
   const encoded = Buffer.from(JSON.stringify(body)).toString('base64');
   await new Promise((resolveWrite, rejectWrite) => process.stderr.write(`${RECEIPT} ${spec.id} ${encoded}\n`, error => error ? rejectWrite(error) : resolveWrite()));
+}
+
+/**
+ * Name the rule when the runner's own resource API refused setup. The code is a fixed identifier,
+ * so it can travel to the controller where paths and runner state cannot.
+ */
+function setupRefusalCode(error) {
+  return error?.name === 'Refused' && /^[A-Z][A-Z0-9_]{0,63}$/u.test(String(error.code ?? '')) ? error.code : '';
+}
+
+/**
+ * End this worker's read of the controller's stream once nothing more will be read from it.
+ * Only the history pack drains stdin to its end; a run that stops before the pack would otherwise
+ * keep the worker, and so the SSH session and the run, alive after its receipt.
+ */
+function stopReading() {
+  process.stdin.destroy();
 }
 
 /** Turn an internal setup failure into a fixed safe line rather than disclosing paths or runner state. */
@@ -1138,6 +1144,9 @@ async function main() {
       else process.env.PULLBOARD_MACHINE_HOME = previousMachineHome;
     }
     const gateCapacity = resources.find(resource => resource.name === 'gate')?.capacity ?? Math.min(spec.slots, 2);
+    // pullboard settings browserSlots writes this row and settings.json under one lock, so the row carries
+    // this machine's setting without reading settings.json; a machine that set nothing keeps one browser slot.
+    const browserCapacity = resources.find(resource => resource.name === 'browser')?.capacity ?? 1;
     const base = join(runnerRoot, 'jobs');
     mkdirSync(base, { recursive: true, mode: 0o700 });
     chmodSync(base, 0o700);
@@ -1155,6 +1164,7 @@ async function main() {
       repo: runnerRoot, agent: `pullboard-ssh-${spec.id}`,
       landing: spec.landing === true, itemCheck: spec.itemCheck === true,
       diagnostic: spec.diagnostic === true, browser: spec.browserRequired,
+      browserCapacityProvider: () => browserCapacity,
       item: spec.item ?? '', kind: spec.kind ?? 'remote-command',
       onWait: () => assertTransportLive(),
     }, machineHomePath);
@@ -1167,9 +1177,10 @@ async function main() {
     await installDependencies(root, runnerRoot, env, tracker);
     final = { ...(await runCommand(spec, root, { ...env, PULLBOARD_LANDING_RUN: spec.landing === true ? '1' : '0' }, sink, tracker)), root };
   } catch (error) {
-    const message = safeSetupMessage(error);
+    const refused = setupRefusalCode(error);
+    const message = refused ? `${safeSetupMessage(error)} [${refused}]` : safeSetupMessage(error);
     if (!transportLost) await sink.write(`${message}\n`);
-    final = { code: 1, signal: transportLost ? 'SIGHUP' : null, error: message, root: '' };
+    final = { code: 1, signal: transportLost ? 'SIGHUP' : null, error: message, root: '', ...(refused ? { refused } : {}) };
   } finally {
     beginCleanup();
     cleanupStage = 'final descendants';
@@ -1189,11 +1200,12 @@ async function main() {
     cleanupStage = 'job files';
     if (runDirectory && !cleanupTimedOut) { try { rmSync(runDirectory, { recursive: true, force: true }); } catch {} }
   }
-  if (transportLost || cleanupTimedOut) { clearTimeout(cleanupTimer); process.exitCode = 1; return; }
+  if (transportLost || cleanupTimedOut) { clearTimeout(cleanupTimer); process.exitCode = 1; stopReading(); return; }
   cleanupStage = 'result receipt';
   await receipt(spec, final, sink);
   clearTimeout(cleanupTimer);
   process.exitCode = 0;
+  stopReading();
 }
 
 main().catch(() => { process.exitCode = 1; });
