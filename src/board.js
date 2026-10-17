@@ -16,7 +16,7 @@ import { COORDINATOR } from './config.js';
 import { ENGINE_VERSION, GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, effectiveGuards, storeTriggers } from './machine.js';
 import { Refused } from './refused.js';
 import { barCorrectionFields } from './bar-corrections.js';
-import { conflictNote, conflictProblem } from './trunk-conflict.js';
+import { conflictDetail, conflictNote, conflictProblem } from './trunk-conflict.js';
 import { factFromEvent, requestAnswerRefusal, tellAnswerImplications, tellFactImplications, tellVerdictImplications } from './implies.js';
 import { parseSpec } from './spec.js';
 
@@ -1596,7 +1596,7 @@ export function reopen(board, id, { agentId, note = '', conflict }) {
         };
       },
     });
-    const returned = forMerge ? { supersedes, conflict: { files: conflict.files, trunk: conflict.trunk } } : supersedes ? { supersedes, landingFailure } : {};
+    const returned = forMerge ? { supersedes, ...conflictDetail(conflict) } : supersedes ? { supersedes, landingFailure } : {};
     logEvent(board, agentId, 'reopen', id, { commit: submittedCommit, note: note.trim() || conflictNote(conflict), judgment: null, ...returned });
     return { id: item.item_id, commit: submittedCommit, ...returned };
   });

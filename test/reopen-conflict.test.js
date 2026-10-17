@@ -127,6 +127,31 @@ test('a conflicting accepted item reopens for a main merge [B3,D1]', () => {
   assert.doesNotMatch(box.run(box.repo, 'show', String(item.id)).out, /needs main merge/u, 'the new accept clears the label');
 });
 
+test('a trunk conflict is not counted as a test cause [D1,B3]', () => {
+  const box = project();
+  const red = submitItem(box, 'Red landing item', 'export const status = "RED";\n');
+  accept(box, red.id, red.commit);
+  const landing = box.run(box.repo, 'reopen', String(red.id), '--note', `web/landing.test.js: keeps the landed behavior; merge commit ${'c'.repeat(40)}`, '--json');
+  assert.equal(landing.code, 0, landing.out);
+  box.git(box.web, 'reset', '-q', '--hard', 'main');
+  const item = submitItem(box, 'Conflict item', 'export const status = "ITEM";\n');
+  accept(box, item.id, item.commit);
+  const trunk = moveTrunk(box);
+  const reopened = box.run(box.repo, 'reopen', String(item.id), '--conflict', 'web/feature.js', '--note', 'two accepted items changed web/feature.js', '--json');
+  assert.equal(reopened.code, 0, reopened.out);
+
+  const reopenOf = (id) => readItem(box, id).thread.findLast((entry) => entry.type === 'move' && entry.kind === 'reopen').detail;
+  assert.deepEqual(reopenOf(red.id).landingFailure.tests, [{ file: 'web/landing.test.js', name: 'keeps the landed behavior' }], 'a red landing names its failing test');
+  assert.equal(reopenOf(red.id).cause, undefined);
+  const conflict = reopenOf(item.id);
+  assert.equal(conflict.landingFailure, undefined, 'a trunk conflict names no failing test');
+  assert.equal(conflict.cause, 'refusal:MERGE_CONFLICT', 'its cause key is the merge-conflict refusal, which rigor never counts');
+  assert.deepEqual(conflict.conflict, { files: ['web/feature.js'], trunk });
+  assert.equal(conflict.note, 'two accepted items changed web/feature.js', 'a note the coordinator gives is kept');
+  assert.ok(!Object.keys(conflict).some((key) => /test/iu.test(key)), 'no field records a test');
+  assert.deepEqual(readItem(box, item.id).verdicts.map((verdict) => verdict.verdict_reason), ['CRITERION_MET'], 'no TEST_FAILURE verdict is recorded');
+});
+
 test('an older engine refuses a trunk conflict reopen before changing anything [B3,H16]', (t) => {
   const box = project();
   const item = submitItem(box, 'Engine item', 'export const status = "ITEM";\n');

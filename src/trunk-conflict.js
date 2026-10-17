@@ -98,6 +98,23 @@ export function conflictProblem(board, item, conflict, found) {
   return null;
 }
 
+/**
+ * The cause key a trunk conflict records: the refusal Pullboard gives work that no longer merges.
+ * Rigor (#713) reads cause keys and never counts a merge conflict, so a conflict reopen is never a
+ * failing test, nor an uncaused reopen; two branches touching the same lines is no rule to learn.
+ */
+export const TRUNK_CONFLICT_CAUSE = 'refusal:MERGE_CONFLICT';
+
+/**
+ * The event fields a conflict reopen records: the conflict itself and its cause key.
+ *
+ * @param {{ files: string[], trunk: string }} conflict
+ * @returns {{ conflict: { files: string[], trunk: string }, cause: string }}
+ */
+export function conflictDetail({ files, trunk }) {
+  return { conflict: { files, trunk }, cause: TRUNK_CONFLICT_CAUSE };
+}
+
 /** The note a conflict reopen records when the coordinator gives none. */
 export function conflictNote({ files, trunk }) {
   return `conflicts with the trunk at ${trunk.slice(0, 12)} in ${files.join(', ')}; merge main and resubmit`;
