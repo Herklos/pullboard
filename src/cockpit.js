@@ -1,7 +1,6 @@
 import {
-  HOSTED_RELEASE,
   hostedReleaseDistance,
-  shippedReleaseVersions,
+  hostedReleaseInfo,
 } from './view/hosted-release.js';
 import {
   effectiveGuards,
@@ -56,7 +55,7 @@ function lifecycle() {
  * @param {{snapshot?: boolean, readOnly?: boolean, requests?: boolean, transportModule?: string|null, apiBase?: string, apiHeaders?: Record<string, string>, stylesheet?: string, paths?: boolean, hostedLocal?: boolean, relaySession?: boolean, signIn?: string|null, hostedReleaseVersion?: string, hostedReleaseVersions?: string[]|null}} [options] - Served connection and assets, optional person requests over a read-only transport, host routes, a static page with event replay, or the hosted page that reads this machine's view first.
  * @returns {string}
  */
-export function cockpitPage(key = '', { snapshot = false, readOnly = false, requests = false, transportModule = null, apiBase = '', apiHeaders = { 'x-pullboard-key': key }, stylesheet = null, paths = false, hostedLocal = false, relaySession = false, signIn = null, hostedReleaseVersion = HOSTED_RELEASE, hostedReleaseVersions: suppliedReleaseVersions = null } = {}) {
+export function cockpitPage(key = '', { snapshot = false, readOnly = false, requests = false, transportModule = null, apiBase = '', apiHeaders = { 'x-pullboard-key': key }, stylesheet = null, paths = false, hostedLocal = false, relaySession = false, signIn = null, hostedReleaseVersion, hostedReleaseVersions = null } = {}) {
   // Derive the current CLI inventory for every served, relay or exported page.
   const COMMAND_SOURCE = 'pullboard (?:' + commandPhrases().join('|') + ')(?![\\w-])(?: (?:--?[\\w-]+|\\d+|#\\d+|"[^"\\n]*"|[A-Z][A-Z0-9_]*|[\\w-]*[\\/.:@][^\\s"]*|[a-z]+-\\d+)(?![\\w-]))*';
 
@@ -66,8 +65,7 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
   const requestMode = Boolean(readOnly && requests && !snapshot && transportModule);
   if (signIn !== null && (typeof signIn !== 'string' || !signIn.startsWith('/') || signIn.startsWith('//'))) throw new TypeError('signIn must be a path on the hosting site, or null');
   const hostedOptions = JSON.stringify({ local: Boolean(hostedLocal) && !snapshot, relaySession: Boolean(relaySession), signIn }).replace(/</g, '\\u003c');
-  const releaseVersions = suppliedReleaseVersions ?? (hostedLocal && !snapshot ? shippedReleaseVersions() : []);
-  const releaseInfo = JSON.stringify({ version: hostedReleaseVersion, versions: releaseVersions }).replace(/</g, '\\u003c');
+  const releaseInfo = hostedReleaseInfo(hostedReleaseVersion, hostedReleaseVersions, Boolean(hostedLocal) && !snapshot);
   const css = stylesheet ?? (snapshot ? 'view.css' : transportModule ? '/view.css' : '/view.css?k=' + encodeURIComponent(key));
   const cssAttribute = css.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
   return `<!doctype html>

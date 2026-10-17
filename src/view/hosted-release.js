@@ -66,3 +66,17 @@ export function hostedReleaseDistance(installed, current, releases) {
   const installedAt = releases.indexOf(installed), currentAt = releases.indexOf(current);
   return installedAt >= 0 && currentAt > installedAt ? currentAt - installedAt : 0;
 }
+
+/**
+ * The page's embedded release facts, as script-safe JSON: the release it was built from and the
+ * shipped releases to count against. Only the hosted page reads the changelog; others count nothing.
+ *
+ * @param {string} [version] - The page's release; defaults to the package's own.
+ * @param {string[]|null} [versions] - Shipped releases to use instead of the packaged changelog.
+ * @param {boolean} [hostedPage] - Whether this is the hosted page that reads this machine's view.
+ * @returns {string}
+ */
+export function hostedReleaseInfo(version = HOSTED_RELEASE, versions = null, hostedPage = false) {
+  const releases = versions ?? (hostedPage ? shippedReleaseVersions() : []);
+  return JSON.stringify({ version, versions: releases }).replace(/</g, '\\u003c');
+}
