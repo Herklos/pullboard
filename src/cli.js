@@ -1925,7 +1925,8 @@ function readCommands(io, { first, second, rest, values }) {
       const agents = withBoard(ctx, (board) => store.listAgents(board));
       const browserSlots = loadMachineSettings().browserSlots;
       const floorMB = memoryFloorMB();
-      const memory = memoryVerdict(await readMachineMemory({ processes: true }), floorMB === null ? null : floorMB * 1024 ** 2);
+      // The memory hold is opt-in: with no floor set, nothing reads the machine's memory.
+      const memory = floorMB === null ? null : memoryVerdict(await readMachineMemory({ processes: true }), floorMB * 1024 ** 2);
       const resources = [
         ...listResources({ scope: 'machine' }).map((resource) => ({ ...resource, scope: 'machine' })),
         ...listResources({ scope: 'repo', root: ctx.info.root }).map((resource) => ({ ...resource, scope: 'repo' })),
@@ -1935,7 +1936,7 @@ function readCommands(io, { first, second, rest, values }) {
       io.result?.({ resources, runners, browserSlots, queue, memory });
       io.say(`browserSlots (machine setting): ${browserSlots}`);
       io.say(`machine queue order (gate.queue.reviewsFirst ${queue.reviewsFirst}): ${queue.reviewsFirst ? `landing, review, submit, other; a waiting run moves up one class every ${queue.agingMinutes} minutes` : 'landings first, then arrival'}`);
-      io.say(memory.line);
+      if (memory) io.say(memory.line);
       if (!resources.length) io.say('no resources have been used');
       for (const resource of resources) {
         io.say(`${resource.name} (${resource.scope}, capacity ${resource.capacity})${resource.order === 'arrival' ? '; an older pullboard is waiting, so this line is in arrival order, landings first' : ''}`);

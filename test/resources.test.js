@@ -1498,8 +1498,9 @@ const [root, agent, source] = process.argv.slice(1);
 const ps = ['  6161   512000 /bin/zsh', '  4242 25165824 /usr/bin/python3', '    77     1024 /sbin/launchd',
   '  5151  2097152 /usr/local/bin/node', '  4343 24117248 /opt/homebrew/bin/python3.12'].join('\\n');
 const cwds = { '/proc/4242/cwd': '/work/journal-reader', '/proc/4343/cwd': '/work/other-reader', '/proc/5151/cwd': '/work/pullboard' };
-/** Read the fixture's current machine state as Linux would present it. */
-const readMemory = (options) => source === 'win32' ? readMachineMemory({ ...options, platform: 'win32' }) : readMachineMemory({
+let reads = 0;
+/** Read the fixture's current machine state as Linux would present it, counting every reading. */
+const readMemory = (options) => (reads += 1, source === 'win32') ? readMachineMemory({ ...options, platform: 'win32' }) : readMachineMemory({
   ...options, platform: 'linux',
   readText: async (file) => {
     const reading = JSON.parse(readFileSync(source, 'utf8'));
@@ -1512,7 +1513,7 @@ const readMemory = (options) => source === 'win32' ? readMachineMemory({ ...opti
 });
 let last = '';
 await withGateSlot(root, async () => {
-  console.log(JSON.stringify({ acquired: agent }));
+  console.log(JSON.stringify({ acquired: agent, reads }));
   for await (const line of process.stdin) if (String(line).trim() === 'release') break;
 }, { agent, kind: 'gate', readMemory, onWait: ({ position, memory }) => {
   const state = JSON.stringify({ waiting: position, memory: memory ?? null });
@@ -1534,9 +1535,18 @@ function memoryWorker(box, agent, source) {
 
 test('the pool holds work while the machine is out of memory and names the biggest process [C7]', async () => {
   const box = fixture();
+  const reading = join(box.dir, 'memory.json');
+  writeMemoryReading(reading, { availableMB: 100, fullAvg10: 99, someAvg10: 99 });
+  // Off by default: with no floor set, even a critical machine is never read or held.
+  const unset = memoryWorker(box, 'no-floor-run', reading);
+  const unsetStart = await event(unset);
+  assert.equal(unsetStart.acquired, 'no-floor-run', `with no floor set the pool admits by slots alone: ${JSON.stringify(unsetStart)}`);
+  assert.equal(unsetStart.reads, 0, 'with no floor set the pool reads no memory');
+  assert.equal(unsetStart.memory, undefined, 'with no floor set nothing is held or reported');
+  await release(unset);
+
   mkdirSync(box.home, { recursive: true });
   writeFileSync(join(box.home, 'settings.json'), `${JSON.stringify({ gate: { memoryFloorMB: 512 } })}\n`);
-  const reading = join(box.dir, 'memory.json');
   const biggest = 'biggest: pid 4242 python3 24.0 GB in /work/journal-reader; pid 4343 python3.12 23.0 GB in /work/other-reader; pid 5151 node 2.0 GB in /work/pullboard';
   writeMemoryReading(reading, { availableMB: 8192, fullAvg10: 42, someAvg10: 80 });
   const run = memoryWorker(box, 'held-run', reading);
@@ -1617,6 +1627,14 @@ test('the memory hold is off until a floor is set, an unread machine warns once,
   }
 
   checkProject(box);
+  writeFileSync(join(box.home, 'settings.json'), `${JSON.stringify({ gate: {} })}\n`);
+  const off = runFixtureChild(process.execPath, [BIN, 'resources', '--json'], { cwd: box.first, env: box.env, encoding: 'utf8' });
+  assert.equal(off.status, 0, off.stderr);
+  assert.equal(JSON.parse(off.stdout).memory, null, 'with no floor set pullboard resources reads no memory');
+  const offHuman = runFixtureChild(process.execPath, [BIN, 'resources'], { cwd: box.first, env: box.env, encoding: 'utf8' });
+  assert.equal(offHuman.status, 0, offHuman.stderr);
+  assert.doesNotMatch(offHuman.stdout, /^memory: /mu, 'with no floor set pullboard resources prints no memory line');
+  writeFileSync(join(box.home, 'settings.json'), `${JSON.stringify({ gate: { memoryFloorMB: 1024 } })}\n`);
   const human = runFixtureChild(process.execPath, [BIN, 'resources'], { cwd: box.first, env: box.env, encoding: 'utf8' });
   assert.equal(human.status, 0, human.stderr);
   const printed = human.stdout.split('\n').filter((line) => line.startsWith('memory: '));
