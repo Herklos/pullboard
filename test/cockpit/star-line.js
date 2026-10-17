@@ -13,7 +13,8 @@ import { press } from './stable.js';
 export { STAR_TEXT, starRepository } from '../../src/view/star.js';
 
 /**
- * Start the fixture. `state.account` is the account's linked list as the relay serves it; `state.relay` says whether
+ * Start the fixture. `state.account` is the account's linked list as the relay serves it, or a 401 while `state.refused`
+ * holds, as for a session the relay no longer accepts; `state.relay` says whether
  * the relay transport lists the board; `requests` counts each path asked for.
  *
  * @returns {Promise<{origin: string, live: object, board: object, state: {account: object[], relay: boolean}, requests: Map<string, number>, script: string, close: () => Promise<void>}>}
@@ -23,7 +24,7 @@ export async function starLineFixture() {
   project(box, 'star-line');
   const live = await startView(box);
   const board = (await (await fetchLive(live.base + '/api/v1/boards', { headers: { 'x-pullboard-key': live.key } })).json()).boards[0];
-  const state = { account: [], relay: false };
+  const state = { account: [], relay: false, refused: false };
   const requests = new Map();
   /** The hosted page as the relay serves it, signed in or not. */
   const page = (relaySession) => cockpitPage('', { readOnly: true, requests: relaySession, transportModule: '/star-transport.js', apiHeaders: {}, stylesheet: '/view.css', hostedLocal: true, relaySession, signIn: '/auth/github/start' });
@@ -37,6 +38,7 @@ export async function starLineFixture() {
     if (url.pathname === '/star-transport.js') return send('text/javascript', "export async function createTransport() { return { async request(path) { return (await fetch('/relay' + path)).json(); } }; }");
     if (url.pathname === '/view.css') return send('text/css', readFileSync(new URL('../../src/view.css', import.meta.url), 'utf8'));
     // The account's linked list: metadata only, read by the page on its own origin.
+    if (url.pathname === '/api/v1/boards' && state.refused) return send('application/json', JSON.stringify({ error: { code: 'AUTH_REQUIRED', message: 'Sign in.' } }), 401);
     if (url.pathname === '/api/v1/boards') return send('application/json', JSON.stringify({ version: 1, boards: state.account }));
     if (url.pathname === '/lv/local/protocol') return send('application/json', JSON.stringify({ version: 1, apiVersion: 1, hostedOrigin: origin }));
     // This machine's view answers reads and streams through the fixture, with its key.
