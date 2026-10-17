@@ -408,6 +408,50 @@ test('the hosted page says how far behind this machine\'s Pullboard is [N26,A2]'
     local.versionOverride = '0.8.23';
     await open('0.8.21');
     assert.equal(await bannerHidden(), true, 'a local version newer than this hosted page does not get a false warning');
+
+    // A mixed list (#632 review): a relay board from another machine beside this machine's own. The selected board's
+    // source decides: this machine's board keeps its note while the relay transport is loaded, a relay board shows none.
+    const remoteBox = machine();
+    const remoteBoard = project(remoteBox, 'remote-a');
+    remoteBox.run(remoteBoard.repo, 'add', 'web', 'A board on another machine', '--specs', 'G1');
+    const remoteView = await startView(remoteBox);
+    try {
+      const remoteKey = { headers: { 'x-pullboard-key': remoteView.key } };
+      const remoteList = JSON.parse((await call(remoteView, '/api/v1/boards', remoteKey)).body);
+      const remote = remoteList.boards[0];
+      const remoteState = JSON.parse((await call(remoteView, '/api/v1/boards/' + remote.id + '/state', remoteKey)).body);
+      // The relay client stands in with the other machine's real list and state; the page only ever calls request().
+      local.client = `export function rememberPairing() { return null; }
+export async function createTransport() { return { async request(path) {
+  if (path === '/api/v1/boards') return ${JSON.stringify({ ...remoteList, boards: [{ ...remote, name: 'acme/remote-a' }] })};
+  if (path.startsWith('/api/v1/boards/${remote.id}/state')) return ${JSON.stringify(remoteState)};
+  throw new Error('not in this stand-in: ' + path);
+} }; }`;
+      local.linked = [{ id: remote.id, repository: 'acme/remote-a', linkedAt: 0 }];
+      local.versionOverride = '0.8.20';
+      await open(VERSION, true);
+      await chrome.waitFor("Boolean(transport) && [...boardSources.values()].map((source) => source.kind).sort().join() === 'local,relay' && document.querySelectorAll('#proj-list .proj.repo').length === 2", 25_000); // budget: hang ceiling for the relay module and its board list after the local read; no throughput claim.
+      const roots = JSON.parse(await chrome.stable("JSON.stringify(Object.fromEntries([...boardSources.values()].map((source) => [source.kind, source.board.root])))"));
+      const selected = (root) => chrome.waitFor(`data?.project?.root === ${JSON.stringify(root)} && document.querySelector('#chain')?.textContent.length > 0`, 25_000); // budget: hang ceiling for one board switch and its state read; no throughput claim.
+      const mixedNote = `Pullboard 0.8.20 is installed; ${VERSION} is current, ${releasesBehind} ${releasesBehind === 1 ? 'release' : 'releases'} behind. Update with`;
+      await chrome.stable(`(switchTo(${JSON.stringify(roots.local)}), true)`);
+      await selected(roots.local);
+      assert.equal(await bannerHidden(), false, 'this machine\'s older board shows its note on a list that also reads relay boards');
+      assert.equal(await bannerText(), mixedNote);
+      assert.equal(await chrome.stable("document.querySelector('#hosted-release-note code')?.textContent"), 'npm i -g pullboard@latest');
+      await chrome.stable(`(switchTo(${JSON.stringify(roots.relay)}), true)`);
+      await selected(roots.relay);
+      assert.match(await chrome.stable("document.querySelector('#chain')?.textContent"), /A board on another machine/u, 'the relay board is the one on screen');
+      assert.equal(await bannerHidden(), true, 'a selected relay board shows no note about this machine\'s install');
+      await chrome.stable(`(switchTo(${JSON.stringify(roots.local)}), true)`);
+      await selected(roots.local);
+      assert.equal(await bannerHidden(), false, 'back on this machine\'s board, the note returns');
+      assert.equal(await bannerText(), mixedNote);
+    } finally {
+      local.client = null;
+      local.linked = null;
+      await remoteView.stop();
+    }
     assert.deepEqual(chrome.exceptions, [], 'Chrome reports no uncaught page exceptions');
   } finally {
     try { if (stopStandIn) await stopStandIn(); }

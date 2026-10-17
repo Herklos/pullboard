@@ -318,7 +318,13 @@ const $ = (id) => document.getElementById(id);
 // The update note from src/view/hosted-release.js (#632): only a confirmed read of this machine's view says how far behind it is.
 // Only the hosted page builds it; every other page draws nothing and never touches the DOM for it.
 const renderHostedReleaseNote = ${releaseHosted ? `(${hostedReleaseNote.toString()})(${releaseInfo}, { $, keep, distance: (${hostedReleaseDistance.toString()}),
-  readable: () => hosted.local && localConfirmed && Boolean(localSession) && connection.base === localSession.origin && !transportModule && !transport,
+  // The selected board's own source decides (#632 review): a confirmed local board keeps its note on a mixed list that
+  // also reads relay boards, and a selected relay board never shows one; with no board selected, only an all-local page.
+  readable: () => {
+    if (!hosted.local || !localConfirmed || !localSession || connection.base !== localSession.origin) return false;
+    const board = data?.projects?.find((entry) => entry.root === view.root && entry.ok);
+    return board ? boardSources.get(board.id)?.kind === 'local' : !transportModule && !transport;
+  },
   project: (project = data?.project) => project?.releaseNotes ? project : data?.projects?.find((entry) => entry.ok && entry.releaseNotes) })` : '() => {}'};
 
 const hostedState = (${hostedState.toString()});
