@@ -138,6 +138,50 @@ function childListenerTestSource() {
   ].join('\n');
 }
 
+/** Produce a child-process test whose stderr models a Python traceback without requiring Python. */
+function childPythonTestSource() {
+  const childProgram = [
+    'console.error("Traceback (most recent call last):")',
+    'console.error("  File " + JSON.stringify("child.py") + ", line 1, in <module>")',
+    'console.error("PermissionError: [Errno 13] Permission denied: " + JSON.stringify(process.env.CHILD_PERMISSION_PATH))',
+    'process.exit(1)',
+  ].join('\n');
+  return [
+    "import { test } from 'node:test';",
+    "import assert from 'node:assert/strict';",
+    "import { spawnSync } from 'node:child_process';",
+    "import '../src/listener-probe.js';",
+    "test('the child reports a Python-style denial', () => {",
+    `  const child = spawnSync(process.execPath, ['-e', ${JSON.stringify(childProgram)}], { encoding: 'utf8' });`,
+    "  assert.equal(child.status, 0, `Child process exited with code ${child.status}:\\n${child.stderr}`);",
+    '});',
+  ].join('\n');
+}
+
+/** Format a standalone Python denial already recognized by the gate scanner. */
+function pythonPermissionError(path, errno = 13) {
+  return `PermissionError: [Errno ${errno}] Permission denied: '${path}'`;
+}
+
+/** Wrap scanner input in a failed child TAP record with or without a fatal traceback. */
+function pythonChildTap(path, { traceback = true, frame = true, prefixMarker = false, errno = 13, wrapper = true, exitCode = 1, trailingError = false } = {}) {
+  const diagnostic = pythonPermissionError(path, errno);
+  const marker = prefixMarker ? 'not a traceback marker: Traceback (most recent call last):' : 'Traceback (most recent call last):';
+  const tracebackDetail = `${marker}\n${frame ? '  File "child.py", line 1, in <module>\n' : ''}${diagnostic}${trailingError ? '\nValueError: later unrelated failure' : ''}`;
+  const detail = traceback ? tracebackDetail : `AssertionError: expected ordinary output\n${diagnostic}`;
+  return [
+    'TAP version 13',
+    'not ok 1 - child reads a file',
+    '  ---',
+    "  failureType: 'testCodeFailure'",
+    '  error: |-',
+    ...(wrapper ? [`    Child process exited with code ${exitCode}:`] : []),
+    ...detail.split('\n').map((line) => `    ${line}`),
+    "  code: 'ERR_ASSERTION'",
+    '  ...',
+  ].join('\n');
+}
+
 test('a child process listen denial reads as sandbox blocked [C7,B26]', (t) => {
   const box = childFailureSubmitBox(t, childListenerTestSource());
   const result = box.run('submit', '1');
@@ -146,6 +190,16 @@ test('a child process listen denial reads as sandbox blocked [C7,B26]', (t) => {
   assert.match(output, /SANDBOX_BLOCKED/u, 'submit names the denied child-process listen');
   assert.match(output, /listen \(EPERM\)/u);
   assert.doesNotMatch(output, /GATE_RED/u);
+
+  const pythonBox = childFailureSubmitBox(t, childPythonTestSource());
+  pythonBox.env.CHILD_PERMISSION_PATH = join(pythonBox.dir, 'outside-python-denial.txt');
+  const python = pythonBox.run('submit', '1');
+  const pythonOutput = `${python.out}\n${python.err}`;
+  assert.equal(python.code, 1, pythonOutput);
+  assert.match(python.err, /SANDBOX_BLOCKED/u, 'submit names a scanner-known denial from a child traceback');
+  assert.match(python.err, /file access .*\(EACCES\)/u);
+  assert.match(python.err, /Ask the person to allow this operation/u);
+  assert.doesNotMatch(python.err, /GATE_RED/u);
 });
 
 test('an ordinary failure stays gate red [C7,B26]', (t) => {
@@ -156,6 +210,29 @@ test('an ordinary failure stays gate red [C7,B26]', (t) => {
     "test('ordinary failure', () => assert.fail('ordinary assertion failure'));",
   ].join('\n');
   const box = childFailureSubmitBox(t, source);
+  const outside = join(box.dir, 'outside-python-denial.txt');
+  const direct = sandboxBlockedOperation(box.root, pythonPermissionError(outside));
+  assert.equal(direct, `file access "${outside}" (EACCES)`, 'the standalone known denial remains recognized');
+  assert.equal(sandboxBlockedOperation(box.root, pythonPermissionError(outside, 1)), `file access "${outside}" (EACCES)`,
+    'the standalone EPERM-style Python errno remains recognized');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { traceback: false })), null,
+    'permission-looking text without a fatal traceback stays ordinary');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(join(box.root, 'inside.txt'))), null,
+    'an inside-root path stays ordinary');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside), { includeFilePaths: false }), null,
+    'the no-file-paths option stays respected');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { frame: false })), null,
+    'a traceback without a standard file frame stays ordinary');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { prefixMarker: true })), null,
+    'traceback marker text inside a line is not a traceback');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { wrapper: false })), null,
+    'a traceback without a failed child wrapper stays ordinary');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { exitCode: 0 })), null,
+    'a zero-exit child is not a blocked failure');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { trailingError: true })), null,
+    'a different terminal exception after PermissionError stays ordinary');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { errno: 1 })), `file access "${outside}" (EACCES)`,
+    'a nested EPERM-style Python errno remains recognized');
   const result = box.run('submit', '1');
   const output = `${result.out}\n${result.err}`;
   assert.equal(result.code, 1, output);

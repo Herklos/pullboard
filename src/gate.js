@@ -225,28 +225,39 @@ function nestedChildPermission(root, lines, { includeFilePaths = true } = {}) {
   if (!childExit || !Number.isSafeInteger(Number(childExit[1]))) return null;
 
   const errorLine = /^\s*Error: (.+)$/mu.exec(detail);
-  if (!errorLine) return null;
-  const operation = permissionOperation(root, errorLine[1], { includeFilePaths });
-  if (!operation?.syscall) return null;
-
-  const objectStart = detail.indexOf('{', errorLine.index + errorLine[0].length);
-  if (objectStart < 0) return null;
-  const objectEnd = detail.indexOf('}', objectStart + 1);
-  if (objectEnd < 0 || objectEnd - objectStart > 2048) return null;
-  const fields = detail.slice(objectStart, objectEnd + 1);
-  /** Read one exact structured field, removing only TAP's optional delimiter comma. */
-  const fieldValue = (name) => {
-    const match = new RegExp(`(?:^|\\n)\\s*${name}:\\s*(.*?)\\s*(?=\\n|$)`, 'u').exec(fields);
-    return match ? tapScalar(match[1].replace(/,$/u, '')) : null;
-  };
-  const code = fieldValue('code');
-  const syscall = fieldValue('syscall');
-  if (code !== operation.code || syscall !== operation.syscall) return null;
-  if (operation.path) {
-    const childPath = fieldValue('path');
-    if (typeof childPath !== 'string' || diagnosticPath(resolve(root, childPath)) !== operation.path) return null;
+  if (errorLine) {
+    const operation = permissionOperation(root, errorLine[1], { includeFilePaths });
+    if (operation?.syscall) {
+      const objectStart = detail.indexOf('{', errorLine.index + errorLine[0].length);
+      if (objectStart < 0) return null;
+      const objectEnd = detail.indexOf('}', objectStart + 1);
+      if (objectEnd < 0 || objectEnd - objectStart > 2048) return null;
+      const fields = detail.slice(objectStart, objectEnd + 1);
+      /** Read one exact structured field, removing only TAP's optional delimiter comma. */
+      const fieldValue = (name) => {
+        const match = new RegExp(`(?:^|\\n)\\s*${name}:\\s*(.*?)\\s*(?=\\n|$)`, 'u').exec(fields);
+        return match ? tapScalar(match[1].replace(/,$/u, '')) : null;
+      };
+      const code = fieldValue('code');
+      const syscall = fieldValue('syscall');
+      if (code !== operation.code || syscall !== operation.syscall) return null;
+      if (operation.path) {
+        const childPath = fieldValue('path');
+        if (typeof childPath !== 'string' || diagnosticPath(resolve(root, childPath)) !== operation.path) return null;
+      }
+      return operation;
+    }
   }
-  return operation;
+
+  // Python child failures have a standard traceback frame and terminal PermissionError,
+  // rather than Node's structured `Error` code/syscall/path object.
+  const tracebackMarker = /(?:^|\n)Traceback \(most recent call last\):\n/u.exec(detail);
+  const tracebackError = /(?:^|\n)(PermissionError: \[Errno (?:1|13)\] [^\n]+)\s*$/u.exec(detail);
+  if (!tracebackMarker || !tracebackError || tracebackError.index <= tracebackMarker.index) return null;
+  const tracebackBody = detail.slice(tracebackMarker.index + tracebackMarker[0].length, tracebackError.index);
+  if (!/(?:^|\n)File (?:'[^'\n]+'|"[^"\n]+"), line \d+(?:, in [^\n]+)?(?:\n|$)/u.test(tracebackBody)) return null;
+  const operation = permissionOperation(root, tracebackError[1], { includeFilePaths });
+  return operation && operation.syscall === null ? operation : null;
 }
 
 /** Scan complete lines with bounded TAP state so assertion messages cannot impersonate OS codes. */
