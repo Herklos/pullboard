@@ -57,7 +57,7 @@ test('machine credentials mint and list same-board agents but cannot link, revok
   assert.equal(tokens.some(value => Object.hasOwn(value, 'token') || Object.hasOwn(value, 'hash')), false);
   await assert.rejects(auth.listTokens(machine.token, beta), { code: 'TOKEN_BOARD' });
   await assert.rejects(auth.issueToken(machine.token, { board: beta, agent: 'cross-board' }), { code: 'TOKEN_BOARD' });
-  assert.equal(auth.minimumEngineVersion(alpha), 13, 'machine and agent credentials require engine 13 (#579)');
+  assert.equal(auth.minimumEngineVersion(alpha), 20, 'machine and agent credentials require engine 20 (#579)');
   await assert.rejects(auth.listTokens(agent.token, alpha), { code: 'HUMAN_REQUIRED' });
   await assert.rejects(auth.revoke(machine.token, agent.id), { code: 'TOKEN_NOT_OWNED' });
 

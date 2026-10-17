@@ -1,6 +1,6 @@
 /**
  * Seats (B3, H2, V1): who each registered agent is on the board, read from the agent table and the
- * metadata kept beside it: its model, its route, and from engine 13 the seat that created it, whether
+ * metadata kept beside it: its model, its route, and from engine 20 the seat that created it, whether
  * the relay enrolled it, and its machine lineage. Verifier standing on a linked board (#579) is
  * decided here from that line of creators. board.js registers seats and re-exports the readers.
  */
@@ -62,7 +62,7 @@ export function routeOf(board, agentId) {
 }
 
 /**
- * The id an engine-13 registration gives a new seat: the named one when it is the lane's form and
+ * The id an engine-20 registration gives a new seat: the named one when it is the lane's form and
  * free, otherwise the lane's first free number from its count. Skipping taken numbers keeps a named
  * seat from colliding with the next unnamed one.
  *
@@ -96,8 +96,8 @@ function firstFreeSeatId(board, lane, total) {
 }
 
 /**
- * The seat that created this one, as its engine-13 registration recorded it: an agent id,
- * `machine` for a join no seat made, or null for a seat registered before engine 13.
+ * The seat that created this one, as its engine-20 registration recorded it: an agent id,
+ * `machine` for a join no seat made, or null for a seat registered before engine 20.
  *
  * @param {any} board
  * @param {string} id
@@ -145,7 +145,7 @@ export function nextSeatId(board, lane) {
 
 /**
  * Run board work under linked-board verifier standing (#579): a relay replica replaying an
- * engine-13 move, or a linked CLI previewing one. `root` says whether the acting coordinator's
+ * engine-20 move, or a linked CLI previewing one. `root` says whether the acting coordinator's
  * relay credential was set up by the person. Unlinked boards never enter this, so who may verify
  * there is unchanged.
  *
@@ -169,7 +169,7 @@ export function withVerifierStanding(board, standing, work) {
 /**
  * Why this seat may not verify the builder's item on a linked board, or null when it may. The
  * seat's creators are walked up to the coordinator: the builder, a join no seat made (`machine`),
- * or a seat registered before engine 13 anywhere on the way means no standing. The coordinator
+ * or a seat registered before engine 20 anywhere on the way means no standing. The coordinator
  * stands only on a credential the person set up.
  *
  * @param {any} board

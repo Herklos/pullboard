@@ -291,7 +291,7 @@ test('[H5,H18] the Railway checklist matches the container and relay runtime set
 test('[H5,H18] the Railway smoke links, reads one unsealed move and unlinks locally', async (t) => {
   const box = await relayClientFixture(t);
   await box.link();
-  assert.equal(await box.requireEngineThree(), 13, 'a machine-linked board requires the engine-13 seat-provenance replay engine');
+  assert.equal(await box.requireEngineThree(), 20, 'a machine-linked board requires the engine-20 seat-provenance replay engine');
   const previous = JSON.parse(readFileSync(box.linkFile, 'utf8'));
   const legacy = await fetch(`${previous.url}/api/v1/boards/${previous.board}/state`, {
     headers: { authorization: `Bearer ${previous.token}`, 'x-pullboard-engine': '2' },

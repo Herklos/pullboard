@@ -247,7 +247,7 @@ test('an agent in its worktree cannot mint a relay token [H2,V1,E3,E5,P6]', asyn
     /** The accept arguments a seat sends for this item. */
     const verdict = (agentId) => [item.item_id, { agentId, decision: 'ACCEPT', reason: 'CRITERION_MET', note: 'checked the proof', head: 'd'.repeat(40), digest: item.item_frozen_digest }];
     let id = 0;
-    /** Replay one stamped engine-13 relay move from an agent on the linked board copy. */
+    /** Replay one stamped engine-20 relay move from an agent on the linked board copy. */
     const move = (operation, args, sender, extra = {}) => applyRelayMove(board, { version: 1, engine: ENGINE_VERSION, id: `standing-${++id}`, operation, args }, {
       sequence: appliedSequence(board) + 1, at: new Date().toISOString(), kind: 'move', sender: { kind: 'agent', userId: '1', policy: VERIFIER_STANDING_ENGINE, ...sender }, ...extra,
     });
@@ -307,7 +307,8 @@ test('an agent in its worktree cannot mint a relay token [H2,V1,E3,E5,P6]', asyn
     assert.equal(person.result?.decision, 'ACCEPT', 'the person verifies coordinator-built work');
   });
 
-  for (const engine of [11, 12]) await t.test(`an engine-${engine} journal replays as before`, (t) => {
+  // 19 is main's engine before #579 (bar corrections, #470); its journals replay as they did too.
+  for (const engine of [11, 12, 19]) await t.test(`an engine-${engine} journal replays as before`, (t) => {
     const directory = mkdtempSync(join(tmpdir(), `pullboard-mint-engine${engine}-`));
     t.after(() => rmSync(directory, { recursive: true, force: true }));
     const historical = store.openBoard(':memory:');

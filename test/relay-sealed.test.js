@@ -1198,7 +1198,7 @@ test('checkpoint restore checks native digest after BEGIN IMMEDIATE against a se
 
 test('relay stores engine-4 sealed background completions opaquely [V2,H16]', async t => {
   const box = await fixture(t, { machineCredentials: false });
-  // A board with agent tokens requires an engine-13 client (#579); the sealed move keeps engine 4.
+  // A board with agent tokens requires an engine-20 client (#579); the sealed move keeps engine 4.
   const headers = { 'x-pullboard-engine': String(ENGINE_VERSION) };
   assert.ok(ENGINE_VERSION >= 4, 'engine-4 background completions remain supported');
   const snapshot = await box.call(box.path + '/state', {

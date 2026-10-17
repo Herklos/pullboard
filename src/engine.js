@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import * as store from './board.js';
 import { COORDINATOR } from './config.js';
 import { recordedRefusal } from './recorded-refusal.js';
+import { BAR_ENGINE, carriesBarReason } from './bar-corrections.js';
 import { ENGINE_VERSION, VERIFIER_STANDING_ENGINE } from './machine.js';
 import { Refused } from './refused.js';
 import { requestMoveProblem, recordRequestMove } from './relay-requests.js';
@@ -23,9 +24,10 @@ export const ENGINE_OPERATIONS = Object.freeze([
 /** Engine version at which each ordered operation first has stable replay semantics. */
 const OPERATION_ENGINE = Object.freeze({ reopen: 8, recordLandingBatch: 8, recordLandingWaiver: 8, recordLandingFlake: 8, finishLandingBatch: 8 });
 
-/** Dependency edits add engine-10 meaning without changing ordinary historical edit envelopes. */
+/** Dependency edits add engine-10 meaning, and edit reasons engine-19 meaning, without changing ordinary historical edit envelopes. */
 function minimumOperationEngine(operation, args) {
   const options = args[1];
+  if (carriesBarReason(operation, args)) return BAR_ENGINE;
   return operation === 'editItem' && options && Object.hasOwn(options, 'after') && options.after !== undefined
     ? 10 : OPERATION_ENGINE[operation] ?? 1;
 }
@@ -181,7 +183,7 @@ export function refuseRelayMove(board, move, { sequence, at, sender, kind, code,
 }
 
 /**
- * Bind an engine-13 registration to the relay's receipt (#579). A seat made by another seat names
+ * Bind an engine-20 registration to the relay's receipt (#579). A seat made by another seat names
  * itself in the move (`id`) and arrives with the receipt the relay issued its first token under:
  * same target, the authenticated creator, this position and these exact sealed bytes. A join no
  * seat made is machine-sent and carries no receipt; a receipt on any other move is refused.
@@ -218,7 +220,7 @@ export function applyRelayMove(board, move, { sequence, at, sender, kind, digest
   const phoneReceipt = sender?.kind === 'machine' && move?.engine >= 6 && Boolean(move.personRequest) && !requestMoveProblem(board, move, { checkExecutorLease: false });
   const problem = relaySenderProblem(move, sender, kind, { phoneReceipt }) ?? (kind === 'move' ? registrationProblem(board, move, { sender, registration, sequence, digest }) : null);
   if (!problem) {
-    // Engine-13 relay moves run under linked verifier standing; older recorded moves replay as they did.
+    // Engine-20 relay moves run under linked verifier standing; older recorded moves replay as they did.
     // The person is above every seat; their own moves act with the coordinator's standing.
     const standing = move?.engine >= VERIFIER_STANDING_ENGINE ? { root: sender?.root === true || sender?.kind === 'person',
       person: sender?.kind === 'person', lineage: sender?.root === true && typeof sender.lineage === 'string' ? sender.lineage : null } : null;

@@ -71,7 +71,7 @@ export function createRelayJournal({ directory, boardId, maxBytes = DEFAULT_BYTE
         DROP TABLE journal_snapshot_v2;
         UPDATE journal_meta SET value='3' WHERE key='format';`);
     }
-    // Engine-13 attribution (#579): the relay's policy stamp, the person-set coordinator flag and a
+    // Engine-20 attribution (#579): the relay's policy stamp, the person-set coordinator flag and a
     // seat receipt. Older records keep these empty, so they replay exactly as they did.
     for (const [column, type] of [['sender_policy', 'INTEGER'], ['sender_root', 'INTEGER'], ['sender_lineage', 'TEXT'], ['registration', 'TEXT']]) {
       if (!db.prepare('PRAGMA table_info(journal_record)').all().some((saved) => saved.name === column)) db.exec(`ALTER TABLE journal_record ADD COLUMN ${column} ${type}`);
