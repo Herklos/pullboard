@@ -683,6 +683,111 @@ test('starter items land in a build lane, never the coordinator lane [S1,I1]', (
   assert.match(said.stdout, /to accept, run: pullboard lane add app --owns app\//u, 'blueprint add prints the command that accepts it');
 });
 
+/** The bundled blueprint of this name, as its file says. */
+function bundled(name) {
+  return JSON.parse(readFileSync(resolve(import.meta.dirname, `../src/blueprints/${name}.json`), 'utf8'));
+}
+
+/** Every row text a blueprint drafts, rules then questions, as SPEC.md carries them. */
+function draftedTexts(blueprint) {
+  return [...blueprint.rules.map((rule) => `${rule.text} Why: ${rule.why}`),
+    ...(blueprint.questions ?? []).map((question) => `${question.ask}: ${question.default ?? '(choose one)'}. Choices: ${question.choices.join(', ')}.`)];
+}
+
+test('init takes a product and an architecture blueprint together [S1,I1]', () => {
+  const product = bundled('web-app');
+  const architecture = bundled('serverless');
+  // A practice blueprint that shares one rule with web-app and one question with serverless.
+  const practice = { blueprint: 1, name: 'house-rules', title: 'House rules', version: 1, kind: 'practice', prefix: 'HR',
+    rules: [product.rules[0], { key: 'HR1', text: 'Every change names the row it serves.', why: 'a reviewer reads the bar before the code.' }],
+    questions: [architecture.questions[0]],
+    items: [{ key: '1', title: 'Every commit cites a row', cites: [product.rules[0].key, 'HR1', architecture.questions[0].key], route: 'mid',
+      criterion: 'Every commit names the spec row it serves; test/cites.test.js fails on one that does not.', brief: 'Files:\n- test/cites.test.js\nTest:\n- test/cites.test.js fails on a commit that cites no row', check: 'npm test -- test/cites.test.js' }] };
+  const box = emptyRepo();
+  const practiceFile = join(box.dir, 'house-rules.json');
+  writeFileSync(practiceFile, `${JSON.stringify(practice)}\n`);
+
+  const started = box.run('init', '--blueprint', 'web-app', '--blueprint', 'serverless', '--blueprint', practiceFile, '--json');
+  assert.equal(started.status, 0, started.stdout + started.stderr);
+  const result = JSON.parse(started.stdout);
+  assert.deepEqual(result.blueprints.map((entry) => entry.name), ['web-app', 'serverless', 'house-rules'], 'every blueprint lands, in the order given');
+  assert.equal(result.blueprint.name, 'web-app', 'the first blueprint keeps the single-blueprint field');
+
+  // Rules from every blueprint are drafted in the order given, each in its own section.
+  const source = readFileSync(join(box.repo, 'SPEC.md'), 'utf8');
+  const spec = parseSpec(source);
+  const sectionOf = (title) => spec.sections.findIndex((entry) => entry.name.endsWith(`· ${title}`));
+  const order = [product, architecture, practice].map((blueprint) => sectionOf(blueprint.title));
+  assert.ok(order.every((index) => index >= 0), `each blueprint has its own section: ${spec.sections.map((entry) => entry.name).join(', ')}`);
+  assert.deepEqual([...order].sort((a, b) => a - b), order, 'the sections follow the order the blueprints were given');
+  const rowsIn = (blueprint) => spec.rows.filter((row) => row.section === spec.sections[sectionOf(blueprint.title)].name);
+  assert.deepEqual(rowsIn(product).map((row) => row.text), draftedTexts(product), 'the product blueprint drafts all its rows, in its order');
+  assert.deepEqual(rowsIn(architecture).map((row) => row.text), draftedTexts(architecture), 'the architecture blueprint drafts all its rows, in its order');
+
+  // A rule text two blueprints share is drafted once: the practice blueprint drafts only its own rule.
+  assert.deepEqual(rowsIn(practice).map((row) => row.text), [`${practice.rules[1].text} Why: ${practice.rules[1].why}`], 'shared rows are not drafted again');
+  for (const text of new Set([...draftedTexts(product), ...draftedTexts(architecture), ...draftedTexts(practice)])) {
+    assert.equal(spec.rows.filter((row) => row.text === text).length, 1, `drafted once: ${text}`);
+  }
+  assert.ok(spec.rows.every((row) => row.status !== 'approved'), 'nothing is approved for the person');
+  const sharedRule = rowsIn(product)[0].id;
+  const sharedQuestion = rowsIn(architecture)[architecture.rules.length].id;
+  assert.deepEqual(result.blueprints[2].shared.map((row) => row.id), [sharedRule, sharedQuestion], 'the result names the rows it shares');
+
+  // Starter items keep their blueprint name, and the shared starter cites the row already drafted.
+  const items = JSON.parse(box.run('list', '--json').stdout).items ?? [];
+  assert.equal(items.length, product.items.length + architecture.items.length + practice.items.length, 'every starter is filed once');
+  const owner = (item) => {
+    const note = JSON.parse(box.run('show', String(item.item_id), '--json').stdout).thread
+      .find((entry) => entry.kind === 'note' && entry.text?.startsWith('blueprint starter: '));
+    return note ? JSON.parse(note.text.slice('blueprint starter: '.length)).blueprint : null;
+  };
+  const byTitle = (title) => items.find((item) => item.item_title === title);
+  for (const blueprint of [product, architecture, practice]) {
+    for (const starter of blueprint.items) assert.equal(owner(byTitle(starter.title)), blueprint.name, `${starter.title} keeps its blueprint name`);
+  }
+  const own = rowsIn(practice)[0].id;
+  assert.equal(byTitle(practice.items[0].title).item_spec_ids, [sharedRule, own, sharedQuestion].join(','), 'the shared starter cites the rows already drafted');
+
+  // blueprint add takes --blueprint more than once too, and each starter it files names its blueprint.
+  const board = freshBoard();
+  const added = json(board, 'blueprint', 'add', 'web-app', '--blueprint', 'serverless');
+  assert.deepEqual(added.blueprints.map((entry) => entry.blueprint.name), ['web-app', 'serverless']);
+  assert.deepEqual(added.items.map((item) => item.blueprint), [...product.items.map(() => 'web-app'), ...architecture.items.map(() => 'serverless')]);
+  assert.equal(added.rows.length, draftedTexts(product).length + draftedTexts(architecture).length);
+  assert.ok(added.rows.every((row) => ['draft', 'pending'].includes(row.status)), 'rows wait as drafts or pending');
+});
+
+test('a second blueprint of the same kind is refused [S1,I1]', () => {
+  // A second product blueprint: refused before anything is written, naming both.
+  for (const [first, second, kind] of [['web-app', 'ios-app', 'product'], ['serverless', 'data-pipeline', 'architecture']]) {
+    const box = emptyRepo();
+    const refused = box.run('init', '--blueprint', first, '--blueprint', second, '--json');
+    assert.notEqual(refused.status, 0, refused.stdout);
+    const { error } = JSON.parse(refused.stdout);
+    assert.equal(error.code, 'BLUEPRINT_KIND_TAKEN');
+    assert.match(error.message, new RegExp(`${first} and ${second} are both ${kind} blueprints`, 'u'), 'the refusal names both');
+    assert.deepEqual(readdirSync(box.repo).filter((name) => name !== '.git'), [], 'nothing is written');
+    assert.equal(existsSync(join(box.repo, '.git', 'pullboard')), false, 'no board is created');
+  }
+
+  // blueprint add refuses the same way and leaves SPEC.md as it was.
+  const board = freshBoard();
+  const before = readFileSync(join(board.repo, 'SPEC.md'), 'utf8');
+  const refused = board.run('blueprint', 'add', 'web-app', '--blueprint', 'website', '--json');
+  assert.notEqual(refused.status, 0, refused.stdout);
+  assert.equal(JSON.parse(refused.stdout).error.code, 'BLUEPRINT_KIND_TAKEN');
+  assert.match(JSON.parse(refused.stdout).error.message, /web-app and website are both product blueprints/u);
+  assert.equal(readFileSync(join(board.repo, 'SPEC.md'), 'utf8'), before, 'SPEC.md is unchanged');
+
+  // Any number of practice and beyond-code blueprints sit beside one product and one architecture.
+  const many = emptyRepo();
+  const names = ['web-app', 'serverless', 'test-reliability', 'research', 'writing'];
+  const landed = many.run('init', ...names.flatMap((name) => ['--blueprint', name]), '--json');
+  assert.equal(landed.status, 0, landed.stdout + landed.stderr);
+  assert.deepEqual(JSON.parse(landed.stdout).blueprints.map((entry) => entry.name), names);
+});
+
 const e2e = createE2eHelpers();
 after(e2e.cleanup);
 

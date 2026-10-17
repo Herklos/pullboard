@@ -358,18 +358,20 @@ export function landBlueprint(blueprint, answers) {
  * the blueprint's section (found by title, or new), and plans every starter item. A retry after a
  * failure part way (the under-way marker is there) files no rows and plans only the starters not
  * yet on the board, found by title and the row ids they cite. A finished add (the marker is there)
- * plans nothing.
+ * plans nothing. A rule or question whose row text is in drafted, drafted by a blueprint added
+ * before it in the same command, files no row: its key takes that row's id, and it is listed in
+ * shared, so a text two blueprints share is drafted once (#720).
  *
  * @param {Blueprint} blueprint
- * @param {{ source: string, spec: any, doctrine: any, existingItems: { id: number, title: string, specIds: string[] }[], gate: string }} board
+ * @param {{ source: string, spec: any, doctrine: any, existingItems: { id: number, title: string, specIds: string[] }[], gate: string, drafted?: Map<string, string> }} board
  *   source is SPEC.md's text and spec its parse; doctrine is loadDoctrine's result; existingItems
- *   are the items on the board; gate is pullboard.json's gate now.
- * @returns {{ marked: boolean, resumed: boolean, section: { prefix: string, name: string, isNew: boolean }, rows: { key: string, id: string, status: string, text: string, line: string }[], specRows: string, specAfter: string, ids: Record<string, string>, items: { key: string, title: string, specIds: string[], after: string[], lane?: string, route: string, criterion: string, brief: string }[], existing: Record<string, number>, gate: string | null }}
+ *   are the items on the board; gate is pullboard.json's gate now; drafted maps row text to row id.
+ * @returns {{ marked: boolean, resumed: boolean, section: { prefix: string, name: string, isNew: boolean }, rows: { key: string, id: string, status: string, text: string, line: string }[], shared: { key: string, id: string }[], specRows: string, specAfter: string, ids: Record<string, string>, items: { key: string, title: string, specIds: string[], after: string[], lane?: string, route: string, criterion: string, brief: string }[], existing: Record<string, number>, gate: string | null }}
  *   specRows is the text to write before the items (rows and the under-way marker), specAfter the
  *   text once they are all added (the finished marker); existing maps starter keys already on the
  *   board to their item ids.
  */
-export function planBlueprint(blueprint, { source, spec, doctrine, existingItems = [], gate }) {
+export function planBlueprint(blueprint, { source, spec, doctrine, existingItems = [], gate, drafted = new Map() }) {
   const marker = blueprintMarker(blueprint);
   const lines = source.split(/\r?\n/u);
   const marked = lines.some((text) => text.trim() === marker);
@@ -387,8 +389,9 @@ export function planBlueprint(blueprint, { source, spec, doctrine, existingItems
   const name = existingSection ? existingSection.name : `${prefix} · ${blueprint.title.trim()}`;
   const section = { prefix, name, isNew: !existingSection };
   const gateToSet = !gate?.trim() && blueprint.gate ? blueprint.gate : null;
-  if (marked) return { marked, resumed: false, section, rows: [], specRows: source, specAfter: source, ids: {}, items: [], existing: {}, gate: null };
+  if (marked) return { marked, resumed: false, section, rows: [], shared: [], specRows: source, specAfter: source, ids: {}, items: [], existing: {}, gate: null };
   const rows = [];
+  const shared = [];
   let ids;
   let specRows = source;
   if (resumed) ids = addingIds(addingLine, blueprint);
@@ -401,15 +404,24 @@ export function planBlueprint(blueprint, { source, spec, doctrine, existingItems
       return id;
     };
     ids = {};
+    /** True when an earlier blueprint in this command drafted the same text: the key cites its row. */
+    const reuse = (key, text) => {
+      if (!drafted.has(text)) return false;
+      ids[key] = drafted.get(text);
+      shared.push({ key, id: ids[key] });
+      return true;
+    };
     for (const rule of blueprint.rules) {
-      const id = allocate();
       const text = ruleText(rule);
+      if (reuse(rule.key, text)) continue;
+      const id = allocate();
       ids[rule.key] = id;
       rows.push({ key: rule.key, id, status: 'draft', text, line: `- ${id} [draft, ${rule.tier}] ${text} | gate: ${rule.gate}` });
     }
     for (const question of blueprint.questions) {
-      const id = allocate();
       const text = questionText(question);
+      if (reuse(question.key, text)) continue;
+      const id = allocate();
       ids[question.key] = id;
       rows.push({ key: question.key, id, status: 'pending', text, line: `- ${id} [pending, must] ${text} | gate: review` });
     }
@@ -426,7 +438,7 @@ export function planBlueprint(blueprint, { source, spec, doctrine, existingItems
     items.push({ key: item.key, title: item.title.trim(), specIds, after: item.after,
       ...(item.lane ? { lane: item.lane } : {}), ...(item.check ? { check: item.check } : {}), route: item.route, criterion: item.criterion, brief: item.brief });
   }
-  return { marked, resumed, section, rows, specRows, specAfter, ids, items, existing, gate: gateToSet };
+  return { marked, resumed, section, rows, shared, specRows, specAfter, ids, items, existing, gate: gateToSet };
 }
 
 /**

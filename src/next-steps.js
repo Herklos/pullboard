@@ -68,6 +68,7 @@ export const NEXT_STEPS = Object.freeze({
   BLOCKED: 'take another item with pullboard next, or shout the lane it waits on: pullboard shout <lane> "<text>"',
   BLUEPRINT_EXISTS: 'choose a file that does not exist: pullboard blueprint save <new-file>',
   BLUEPRINT_ITEM_UNCHECKED: 'give the starter item named in the message a criterion and a check command, then run pullboard blueprint add <file> again',
+  BLUEPRINT_KIND_TAKEN: 'keep at most one product and one architecture blueprint, then run the same command again',
   BLUEPRINT_URL: 'download and read the blueprint yourself, then run pullboard blueprint add <local-file>',
   BOARD_BUSY: 'wait for the other pullboard process to finish, then retry',
   BOARD_NOT_WRITABLE: 'give the agent write access to the repo\'s .git/pullboard folder, or run the command outside the sandbox',

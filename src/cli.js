@@ -62,6 +62,7 @@ import {
   unmetRows,
 } from './spec.js';
 import { answerQuestion, bundledBlueprints, landBlueprint, planBlueprint, readBlueprint, repoAnswers, saveBlueprint } from './blueprints.js';
+import { blueprintStarterNote, combinedSummary, initBlueprintResult, readBlueprints, sharedRowLines } from './blueprint-set.js';
 import { briefFiles } from './brief.js';
 import { commitFirst, commitOwnerLines, commitOwners, coordinatorInbox, coordinatorInboxLines, inboxFirst } from './resume.js';
 import { checkBaseline, prepareCheckBaseline, sayCheckBaseline, refuseCheckSyntax } from './check-baseline.js';
@@ -260,7 +261,7 @@ const OPTIONS = {
   gate: { type: 'string' },
   aim: { type: 'boolean' },
   section: { type: 'string' },
-  blueprint: { type: 'string' },
+  blueprint: { type: 'string', multiple: true },
   route: { type: 'string' },
   family: { type: 'string' },
   model: { type: 'string' },
@@ -1660,10 +1661,10 @@ function setupCommands(io, { first, second, rest = [], values }) {
   return {
     init: async () => {
       const info = repoInfo(io.cwd);
-      // A named blueprint is read and checked before anything is written, so an unknown name
-      // or a broken file or a URL leaves the repository untouched (#678). Past that, init adds the
-      // blueprint exactly as pullboard blueprint add does, through the same function.
-      const blueprint = values.blueprint === undefined ? null : readBlueprint(values.blueprint, io.cwd);
+      // Every named blueprint is read and checked before anything is written, so an unknown name,
+      // a broken file, a URL or a second product blueprint leaves the repository untouched (#678,
+      // #720). Past that, init adds each blueprint exactly as pullboard blueprint add does.
+      const blueprints = readBlueprints(values.blueprint ?? [], io.cwd, 'init');
       const model = optionalModel(values.model);
       const linked = relayLinked(info.root);
       const ctx = linked && model !== undefined ? context(io) : null;
@@ -1691,17 +1692,19 @@ function setupCommands(io, { first, second, rest = [], values }) {
         { lane: COORDINATOR, path: info.root, model },
       ]));
       // Keep blueprint initialization and the person's unwritten lane proposals in the same result.
-      const added = blueprint ? await addBlueprintHere(io, values.blueprint, { report: false, blueprint }) : null;
+      const drafted = new Map();
+      const landed = [];
+      for (const { reference, blueprint } of blueprints) landed.push(await addBlueprintHere(io, reference, { report: false, blueprint, drafted }));
       io.result?.({ root: info.root, notes, proposedLanes: proposeLanes(info.root),
-        ...(added ? { blueprint: { name: added.blueprint.name, title: added.blueprint.title,
-          section: added.section, waiting: added.rows.length, items: added.items.length, gate: added.gate, checksNotRun: added.checksNotRun } } : {}) });
+        ...(landed.length ? { blueprint: initBlueprintResult(landed[0]), blueprints: landed.map(initBlueprintResult) } : {}) });
       const staging = notes.at(-1)?.startsWith('git add -f -- ') ? notes.at(-1) : null;
       (staging ? notes.slice(0, -1) : notes).forEach((note) => io.say(note));
-      if (added) {
+      for (const added of landed) {
         io.say(`added the ${added.blueprint.title} blueprint: ${added.rows.length} ${added.rows.length === 1 ? 'row waits' : 'rows wait'} for your approval in SPEC.md (${added.section}), `
           + `${added.items.length} starter ${added.items.length === 1 ? 'item' : 'items'} filed${added.proposedLanes.length ? ` in the ${added.proposedLanes.map((lane) => lane.name).join(' and ')} lane, proposed above and not written until the person accepts` : ''}${added.gate ? `, gate set to ${added.gate}` : ''}`);
         for (const note of askedLaneNotes(added.items, loadConfig(info.root))) io.say(`  ${note}`);
         if (added.checksNotRun.length) io.say(`  checks stored, not run: ${added.checksNotRun.map((id) => `#${id}`).join(', ')}; no check baseline ran, so read each check before work starts: pullboard show <id>`);
+        for (const line of sharedRowLines(added)) io.say(`  ${line}`);
       }
       if (await registerProjectAndLink(info.root, new Date(), loadConfig(info.root), io)) io.say('registered this project on this machine, so pullboard view lists it');
       io.say(agentSessionDigest()
@@ -2372,12 +2375,13 @@ function reportSubmission(ctx, id, commit, gate, doctrine = []) {
  *
  * @param {any} io
  * @param {string} reference - A bundled blueprint name or a path to a blueprint file, relative to io.cwd.
- * @param {{ report?: boolean, blueprint?: ReturnType<typeof readBlueprint> }} [options]
+ * @param {{ report?: boolean, blueprint?: ReturnType<typeof readBlueprint>, drafted?: Map<string, string> }} [options]
+ *   drafted is the row text to id map shared by the blueprints of one command (see addBlueprint).
  * @returns {Promise<BlueprintAdded>}
  */
-export async function addBlueprintHere(io, reference, { report = true, blueprint = readBlueprint(reference, io.cwd) } = {}) {
+export async function addBlueprintHere(io, reference, { report = true, blueprint = readBlueprint(reference, io.cwd), drafted } = {}) {
   const ctx = context(io);
-  return await withBoard(ctx, async (board) => await addBlueprint(ctx, board, whoAmI(ctx, board), blueprint, { report }));
+  return await withBoard(ctx, async (board) => await addBlueprint(ctx, board, whoAmI(ctx, board), blueprint, { report, drafted }));
 }
 
 /**
@@ -2390,6 +2394,7 @@ export async function addBlueprintHere(io, reference, { report = true, blueprint
  * @property {boolean} marked - This blueprint version was already on the board, so nothing was added.
  * @property {number[]} checksNotRun - New items that carry a check; no check baseline ran for them.
  * @property {{ name: string, owns: string[] }[]} proposedLanes - Proposed, unwritten lanes new starters were filed in.
+ * @property {{ key: string, id: string }[]} shared - Keys that cite a row an earlier blueprint in the same command drafted.
  */
 
 /**
@@ -2402,11 +2407,14 @@ export async function addBlueprintHere(io, reference, { report = true, blueprint
  * @param {any} board
  * @param {{ id: string }} me
  * @param {import('./blueprints.js').Blueprint} blueprint
- * @param {{ report?: boolean }} [options] - With report false, print nothing and set no JSON result.
+ * @param {{ report?: boolean, result?: boolean, drafted?: Map<string, string> }} [options] - With report false,
+ *   print nothing and set no JSON result; with result false, print but set no JSON result. drafted
+ *   holds the rows earlier blueprints of this command drafted, by text; this add files no row
+ *   twice and adds its own (#720).
  * @returns {Promise<BlueprintAdded>}
  */
-async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
-  const io = report ? ctx.io : { say: () => {} };
+async function addBlueprint(ctx, board, me, blueprint, { report = true, result = report, drafted = new Map() } = {}) {
+  const io = report ? (result ? ctx.io : { say: (text) => ctx.io.say(text) }) : { say: () => {} };
   const spec = loadSpec(ctx.info.root, ctx.config);
   if (!spec.exists) throw new Refused('NO_SPEC', `no ${ctx.config.spec}; run: pullboard init`);
   const malformed = [[spec.file, spec.problems], [ctx.doctrine.repo.file, ctx.doctrine.repo.problems]].find(([, problems]) => problems.length);
@@ -2418,7 +2426,8 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
   // only: nothing runs and nothing is fetched (#725).
   const plan = planBlueprint(landBlueprint(blueprint, repoAnswers(ctx.info.root)), { source, spec, doctrine: ctx.doctrine,
     existingItems: store.listItems(board, { all: true }).map((item) => ({ id: item.item_id, title: item.item_title, specIds: item.item_spec_ids ? item.item_spec_ids.split(',') : [] })),
-    gate: String(JSON.parse(configSource).gate ?? '') });
+    gate: String(JSON.parse(configSource).gate ?? ''), drafted });
+  for (const row of plan.rows) drafted.set(row.text, row.id);
   // Every starter is checked before anything is written, so a refusal leaves the board as it was.
   // Starters go to a build lane, never the coordinator's; a proposed lane is named, not written (#732).
   const proposals = proposeLanes(ctx.info.root, ctx.config);
@@ -2453,6 +2462,8 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
       item.after = afterKeys.map((before) => byKey[before]).filter(Boolean);
       const id = await ordered(ctx, board, 'addItem', [item]);
       byKey[key] = id;
+      // The starter keeps its blueprint's name, in the link #734 reads back (#720).
+      await ordered(ctx, board, 'appendFact', [id, { agentId: me.id, kind: 'note', text: blueprintStarterNote(blueprint, key) }]);
       added.push({ id, key, title: item.title, lane: item.lane, ...(asked ? { askedLane: asked } : {}), specIds: item.specIds, after: item.after, ...(item.check ? { check: item.check } : {}) });
     }
   } catch (error) {
@@ -2467,7 +2478,7 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
   if (plan.specAfter !== source && !files.some((file) => file.file === ctx.config.spec)) files.unshift({ file: ctx.config.spec });
   const rows = plan.rows.map(({ key, id, status, text }) => ({ key, id, status, text }));
   const summary = { blueprint: { name: blueprint.name, title: blueprint.title, version: blueprint.version },
-    section: plan.section.name, rows, items: added, gate: plan.gate, marked: plan.marked, proposedLanes: added.length ? proposedLanes : [],
+    section: plan.section.name, rows, items: added.map((item) => ({ ...item, blueprint: blueprint.name })), gate: plan.gate, shared: plan.shared, marked: plan.marked, proposedLanes: added.length ? proposedLanes : [],
     // Item checks are stored and never run during add; the caller tells the reader so.
     checksNotRun: added.filter((item) => item.check).map((item) => item.id) };
   io.result?.(summary);
@@ -2482,6 +2493,7 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
   if (checked.length) io.say(`  checks stored, not run: ${checked.map((item) => `#${item.id}`).join(', ')}; no check baseline ran during add, so read each check before work starts: pullboard show <id>`);
   for (const note of [...askedLaneNotes(added, ctx.config), ...starterLaneNotes(summary.proposedLanes)]) io.say(`  ${note}`);
   if (plan.gate) io.say(`  gate set in ${CONFIG_FILE}: ${plan.gate}`);
+  for (const line of sharedRowLines(summary)) io.say(`  ${line}`);
   const changed = files.map((file) => file.file);
   io.say(`next: the person approves the rows in pullboard view or with pullboard spec approve <ids>${changed.length ? `; commit ${changed.join(' and ')}` : ''}`);
   return summary;
@@ -2860,10 +2872,16 @@ function workCommands(io, args) {
   };
   return {
     blueprint: () => act(async (ctx, board, me) => {
-      if (first !== 'add' || !second || rest.length) {
-        throw new Refused('USAGE', `pullboard blueprint add <name or file> | save [file]; bundled: ${bundledBlueprints().join(', ')}`);
+      const references = [...(second ? [second] : []), ...(values.blueprint ?? [])];
+      if (first !== 'add' || !references.length || rest.length) {
+        throw new Refused('USAGE', `pullboard blueprint add <name or file> [--blueprint <name or file>]... | save [file]; bundled: ${bundledBlueprints().join(', ')}`);
       }
-      await addBlueprint(ctx, board, me, readBlueprint(second, io.cwd));
+      // Several blueprints land in the order given, as one result; one lands exactly as before (#720).
+      const listed = readBlueprints(references, io.cwd, 'blueprint add');
+      const drafted = new Map();
+      const landed = [];
+      for (const { blueprint } of listed) landed.push(await addBlueprint(ctx, board, me, blueprint, { result: listed.length === 1, drafted }));
+      if (listed.length > 1) io.result?.(combinedSummary(landed));
       return 0;
     }),
     fact: () => act(async (ctx, board, me) => {
