@@ -626,6 +626,8 @@ async function bindCheckoutSession(io, positionals, values) {
     return;
   }
   if (command === 'check') {
+    // Acceptance follows its person-channel path; it does not renew a build claim.
+    if (first === 'accept') return;
     const ctx = context(io);
     const renewsOwnClaim = withBoard(ctx, (board) => {
       const agentId = ctx.info.isMain ? COORDINATOR : store.agentAt(board, ctx.info.root)?.agent_id;
