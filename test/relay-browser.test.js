@@ -563,20 +563,23 @@ async function enrolledBrowser(box, t) {
   return { chrome, device: state.devices[0].deviceId };
 }
 
-/** Revoke the enrolled browser with the real CLI and one actual phone approval tap. */
-async function revokeBrowser(box, chrome, device) {
-  const before = box.transit.length;
-  const revoke = box.startCli(['relay', 'revoke', device]);
-  const posted = await browserDeviceTransition(() => box.transit.slice(before).find(record =>
-    record.method === 'POST' && record.path === '/api/v1/devices/approvals'), 'the native revocation requests phone approval');
-  const context = JSON.parse(posted.request.toString('utf8')).context;
-  assert.equal(context.target, device);
-  assert.equal(context.action, 'revoke-device');
-  await chrome.waitFor(`document.querySelector('#phone-approve-${context.id}') !== null`);
-  await chrome.evaluate(`document.querySelector('#phone-approve-${context.id}').click()`);
-  const result = await revoke.closed;
-  assert.equal(result.code, 0, 'one actual phone tap completes native revocation');
-  assert.equal(JSON.parse(result.stdout).revoked, true);
+/** Revoke the only enrolled browser through main's fresh provider sign-in, without its own approval. */
+async function revokeBrowser(box, _chrome, device) {
+  const before = box.calls.length;
+  const authorized = box.providerState.deviceAuthorized;
+  box.providerState.deviceAuthorized = false;
+  try {
+    const revoke = box.startCli(['relay', 'revoke', device]);
+    await revoke.waitForOutput('Sign in with GitHub: open ');
+    assert.ok(box.calls.slice(before).some(record => record.path === '/auth/device/start'),
+      'the only phone is removed through a fresh provider sign-in');
+    assert.equal(box.calls.slice(before).some(record => record.path === '/api/v1/devices/approvals'), false,
+      'the target browser never approves its own removal');
+    box.providerState.deviceAuthorized = true;
+    const result = await revoke.closed;
+    assert.equal(result.code, 0, 'a genuine fresh sign-in completes native revocation');
+    assert.equal(JSON.parse(result.stdout).revoked, true);
+  } finally { box.providerState.deviceAuthorized = authorized; }
 }
 
 test('a revoked device read is refused as revoked [H5,E16]', {
@@ -650,4 +653,88 @@ test('revocation clears an already open browser and its cached board request sta
   assert.equal(await chrome.evaluate("Object.keys(localStorage).some(key => key.startsWith('pullboard.relay.requests.v1.') || key.startsWith('pullboard.relay.owned-requests.v1.'))"), false, 'non-empty opaque board request caches are erased');
   assert.equal(await chrome.evaluate("document.querySelector('#phone-approvals') === null"), true, 'removed browser releases its approval panel and polling loop');
   assert.equal(await chrome.evaluate("document.querySelector('#relay-removed a')?.getAttribute('href')"), '/auth/github/start');
+});
+
+/** Independently probe real public auth delegation after a genuinely enrolled browser is revoked. */
+test('reviewer: a revoked bound session cannot regain ciphertext through auth machine minting [H5,E16]', {
+ skip: !findChromeExecutable() && 'Chrome is not installed',
+}, async t => {
+ const box = await relayClientFixture(t);
+ const {chrome, device} = await enrolledBrowser(box, t);
+ const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));
+ const oldSession = await box.phoneSession();
+ const retainedKey = await chrome.evaluate(`JSON.parse(localStorage.getItem('pullboard.relay.keys.v1'))[${JSON.stringify(link.board)}]`);
+ assert.equal(typeof retainedKey, 'string', 'the genuinely enrolled browser already received this board key');
+ const endpoint = box.origin + '/api/v1/boards/' + link.board + '/state';
+ const oldHeaders = {authorization:'Bearer '+oldSession.token,'x-pullboard-engine':String(ENGINE_VERSION)};
+ assert.equal((await fetch(endpoint,{headers:oldHeaders})).status,200,'the bound session has original read access');
+ await revokeBrowser(box, chrome, device);
+ const refused = await fetch(endpoint,{headers:oldHeaders});
+ assert.equal(refused.status,403,'the direct bound-session read is refused');
+ assert.equal((await refused.json()).error.code,'DEVICE_REVOKED','revocation is real, not an expired or foreign session');
+ // A genuinely fresh unbound GitHub sign-in must remain eligible for lost-phone recovery (#755).
+ const start = await fetch(box.origin+'/auth/github/start',{redirect:'manual'});
+ const binding=start.headers.getSetCookie().find(value=>value.startsWith('pb_oauth_binding=')).split(';')[0];
+ const approved=await fetch(start.headers.get('location'),{redirect:'manual'});
+ const callback=await fetch(approved.headers.get('location'),{redirect:'manual',headers:{cookie:binding}});
+ assert.equal(callback.status,303,'a fresh independent OAuth sign-in completes');
+ const fresh=callback.headers.getSetCookie().find(value=>value.startsWith('pb_session=')).split(';')[0].slice('pb_session='.length);
+ assert.notEqual(fresh,oldSession.token,'the positive control really uses a different fresh session');
+ const freshRead=await fetch(endpoint,{headers:{authorization:'Bearer '+fresh,'x-pullboard-engine':String(ENGINE_VERSION)}});
+ assert.equal(freshRead.status,200,'fresh unbound person recovery remains eligible');
+ const minted=await fetch(box.origin+'/auth/machines',{method:'POST',headers:{...oldHeaders,'content-type':'application/json'},body:JSON.stringify({board:link.board,machine:'revoked-browser-redelegation'})});
+ const document=await minted.json();
+ let delegatedStatus=null,decryptedOriginal=false;
+ if(minted.status===201){
+   assert.match(document.token,/^pm_[A-Za-z0-9_-]{43}$/u,'the actual auth endpoint issued a machine delegate');
+   const delegated=await fetch(endpoint,{headers:{authorization:'Bearer '+document.token,'x-pullboard-engine':String(ENGINE_VERSION)}});
+   delegatedStatus=delegated.status;
+   if(delegated.status===200){
+     const {state}=await delegated.json();
+     assert.equal(typeof state.sealed,'string','the relay served actual ciphertext, not merely a board name');
+     const plain=await unseal(decodeBoardKey(retainedKey),Buffer.from(state.sealed,'base64url'),{boardId:link.board,kind:'snapshot',sequence:state.sequence});
+     const snapshot=snapshotDocument(plain);
+     decryptedOriginal=JSON.stringify(snapshot).includes('private cleanup fixture item');
+     assert.equal(decryptedOriginal,true,'the previously received browser key decrypts the regained board');
+   }
+ }
+ t.diagnostic(JSON.stringify({oldBoundRead:refused.status,freshUnboundRead:freshRead.status,machineMint:minted.status,delegatedRead:delegatedStatus,decryptedOriginal}));
+ assert.equal(minted.status,403,'a revoked bound browser session must not mint a fresh machine credential that bypasses its revoked read');
+ assert.equal(document.error?.code,'DEVICE_REVOKED');
+});
+/** The revoked session cannot exchange its refusal for another credential through the auth router. */
+test('a revoked browser cannot mint or list relay credentials [H5,E16]', {
+  skip: !findChromeExecutable() && 'Chrome is not installed',
+}, async t => {
+  const box = await relayClientFixture(t);
+  const { chrome, device } = await enrolledBrowser(box, t);
+  const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));
+  const session = await box.phoneSession();
+  const old = { authorization: 'Bearer ' + session.token };
+  const paths = ['/auth/session', '/auth/boards', '/auth/tokens?board=' + link.board];
+  for (const path of paths) {
+    const response = await fetch(box.origin + path, { headers: old });
+    assert.equal(response.status, 200, 'the active enrolled session can read ' + path);
+    await response.body?.cancel();
+  }
+  await revokeBrowser(box, chrome, device);
+  await box.restartRelay();
+  for (const headers of [old, { cookie: 'pb_session=' + session.token, origin: box.origin }]) {
+    for (const path of paths) {
+      const response = await fetch(box.origin + path, { headers });
+      assert.equal(response.status, 403, 'the revoked session cannot read ' + path);
+      assert.equal((await response.json()).error.code, 'DEVICE_REVOKED');
+    }
+    for (const [path, input] of [
+      ['/auth/tokens', { board: link.board, agent: 'revoked-auth-route-probe' }],
+      ['/auth/machines', { board: link.board, machine: 'revoked-auth-route-probe' }],
+    ]) {
+      const response = await fetch(box.origin + path, { method: 'POST',
+        headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify(input) });
+      const document = await response.json();
+      assert.equal(response.status, 403, 'the revoked session cannot mint through ' + path);
+      assert.equal(document.error?.code, 'DEVICE_REVOKED');
+      assert.equal(Object.hasOwn(document, 'token'), false, 'a refusal contains no delegated credential');
+    }
+  }
 });

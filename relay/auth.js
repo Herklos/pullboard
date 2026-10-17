@@ -63,6 +63,7 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
   const deviceConfirmations = new Map();
   // A hashed ticket may revoke only its minted session, retained until that session expires.
   const deviceSessionReceipts = new Map();
+  const sessionGuards = new Set();
   let closed = false;
   let locked = false;
 
@@ -98,6 +99,9 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
     if (typeof token !== 'string' || !/^(ps_|pa_|pm_)[A-Za-z0-9_-]{43}$/.test(token)) throw new Refused('AUTH_REQUIRED', 'sign in to the relay or supply a current board token');
     const row = db.prepare('SELECT c.*, u.login FROM relay_credentials c JOIN relay_users u ON u.id=c.user_id WHERE c.hash=?').get(hash(token));
     if (!row || row.revoked || row.expires <= now()) throw new Refused('AUTH_REQUIRED', 'this credential is expired or revoked; sign in or obtain a new board token');
+    if (row.kind === 'session') {
+      for (const guard of sessionGuards) guard({ id: row.id, kind: row.kind, user: { id: row.user_id }, expires: row.expires });
+    }
     return row;
   }
 
@@ -486,6 +490,13 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
     pendingCleanup() { open(); return db.prepare('SELECT board FROM relay_cleanup ORDER BY board').all().map((row) => row.board); },
     /** Remove an unlink intent only after its journal, sidecars and managed backups are gone. */
     finishCleanup(board) { identifier(board, 'BAD_BOARD'); lifecycle(() => db.prepare('DELETE FROM relay_cleanup WHERE board=?').run(board)); },
+    /** Register a synchronous device-session boundary shared by every credential use, including auth routes. */
+    addSessionGuard(guard) {
+      open();
+      if (typeof guard !== 'function') throw new Refused('RELAY_CONFIG', 'configure a synchronous session guard before serving relay authentication');
+      sessionGuards.add(guard);
+      return () => sessionGuards.delete(guard);
+    },
     /** List only linked boards the current credential and GitHub account may read. */
     async boardsFor(token) {
       const row = credential(token);
@@ -584,7 +595,7 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
     close() {
       if (closed) return;
       closed = true;
-      webFlows.clear(); deviceFlows.clear(); deviceConfirmations.clear(); deviceSessionReceipts.clear(); permissions.clear(); db.close();
+      webFlows.clear(); deviceFlows.clear(); deviceConfirmations.clear(); deviceSessionReceipts.clear(); sessionGuards.clear(); permissions.clear(); db.close();
     },
   };
   return auth;

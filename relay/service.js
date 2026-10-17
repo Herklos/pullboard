@@ -107,6 +107,8 @@ export function createRelayHandler({ directory, auth, pollMs = 200, publicOrigin
   }
 
   const deviceStore = createDeviceStore({ directory: root, now });
+  // Auth handlers share this same auth object, so revoked sessions cannot mint a new reader elsewhere.
+  const releaseSessionGuard = auth.addSessionGuard?.(principal => deviceStore.authorizeSession(principal));
   const deviceHandler = createDeviceHandler({
     authenticate: async (req, write) => deviceStore.authorizeSession(await auth.authenticate(credential(req, origin, write))),
     authorizeBoard: (req, id) => authorizedRequest(req, id, true),
@@ -266,7 +268,7 @@ export function createRelayHandler({ directory, auth, pollMs = 200, publicOrigin
   handle.maintenance = maintain;
   handle.backup = retention.backup;
   handle.maintenanceStatus = () => ({ error: maintenanceError });
-  handle.close = () => { clearInterval(timer); common.close(); deviceStore.close(); };
+  handle.close = () => { clearInterval(timer); common.close(); releaseSessionGuard?.(); deviceStore.close(); };
   return handle;
 }
 
