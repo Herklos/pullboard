@@ -14,6 +14,7 @@ import { selectAffectedTests } from '../src/affected-tests.js';
 import { configFromSource } from '../src/config.js';
 import { checkAtCommit } from '../src/trusted-policy.js';
 import { refuseSandboxBlocked, sandboxBlockedOperation } from '../src/gate.js';
+import { fileDenialWatcher } from '../src/sandbox-denial.js';
 
 const BIN = resolveBin();
 const dirs = [];
@@ -260,6 +261,16 @@ test('an ordinary failure stays gate red [C7,B26]', (t) => {
   assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { errno: 1 })), `file access "${outside}" (EACCES)`,
     'a nested EPERM-style Python errno remains recognized');
   const recognized = `file access "${outside}" (EACCES)`;
+  const streamed = fileDenialWatcher(box.root);
+  const childTap = pythonChildTap(outside, { wrapper: false, assertionFooter: '1 !== 0' });
+  const boundary = childTap.indexOf('PermissionError') + 5;
+  streamed.push(Buffer.from(childTap.slice(0, boundary)));
+  streamed.push(Buffer.from(childTap.slice(boundary)));
+  assert.deepEqual(streamed.end(), { operation: 'file access', outside: true, errno: 'EACCES' },
+    'the shared runner watcher retains structured evidence for a nested child denial across chunks');
+  const ordinaryStream = fileDenialWatcher(box.root);
+  ordinaryStream.push(Buffer.from(pythonChildTap(outside, { traceback: false, assertionFooter: '1 !== 0' })));
+  assert.equal(ordinaryStream.end(), null, 'the runner watcher keeps ordinary permission-looking assertions ordinary');
   assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { assertionFooter: '1 !== 0' })), recognized,
     'the matching Node assertion footer does not hide the terminal child denial');
   assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { assertionFooter: '2 !== 0' })), null,
