@@ -205,7 +205,7 @@ A machine publishes an opaque approval with `POST /api/v1/devices/approvals {con
 
 The result and refusal tables are checked against `JSON_SHAPES` in `src/json.js` by `docs/api.test.js`.
 
-When `verify <id> accept` runs a frozen check and refuses with `CHECK_RED` or `CHECK_UNVERIFIED`, `error.message` includes its output digest, up to 40 sanitized tail lines, and `full output file: <path>`. The file is written with owner-only permissions. If diagnostic storage fails, the message says `full output file: (unavailable: CODE)` while retaining the bounded sanitized lines; the JSON error object remains `{ code, message, next }`. An item with no frozen check produces no check-output section.
+When `verify <id> accept` runs a frozen check and refuses with `CHECK_RED` or `CHECK_UNVERIFIED`, `error.message` includes its output digest, up to 40 sanitized tail lines, and `full output file: <path>`. The file is written with owner-only permissions. If diagnostic storage fails, the message says `full output file: (unavailable: CODE)` while retaining the bounded sanitized lines; the JSON error object remains `{ code, message, next }`. An item with no frozen check produces no check-output section and records `check: "none"` without requesting a native test or browser slot. Its submitted-commit, frozen-digest, trunk, dependency, review-reservation, and verdict guards still apply.
 
 ## MCP server
 
