@@ -84,6 +84,7 @@ export const JSON_SHAPES = {
     'spec signers': shape({ added: 'boolean', by: 'string', path: 'string', initial: 'boolean' }),
     'spec approve': shape({ decisions: 'array' }),
     'spec decline': shape({ decisions: 'array' }),
+    'spec answer': shape({ decisions: 'array' }),
     'spec apply': shape({ applied: 'array', files: 'array' }),
     'doctrine check': shape({ rules: 'array' }),
     'hook pre-commit': shape({ messages: 'array' }),

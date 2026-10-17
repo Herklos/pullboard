@@ -122,6 +122,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `spec signers` | `version:number`, `added:boolean`, `by:string`, `path:string`, `initial:boolean` |
 | `spec approve` | `version:number`, `decisions:array` |
 | `spec decline` | `version:number`, `decisions:array` |
+| `spec answer` | `version:number`, `decisions:array` |
 | `spec apply` | `version:number`, `applied:array`, `files:array` |
 | `doctrine check` | `version:number`, `rules:array` |
 | `hook pre-commit` | `version:number`, `messages:array` |
@@ -278,6 +279,8 @@ Decision moves keep the CLI's routing: `shout` with `args.decision: true` may om
 `spec approve <ids>` and `spec decline <ids> --reason "why"` record the person's exact row decision without writing repo files. Bare ids name SPEC.md rows; `doctrine:<id>` names a repo doctrine row. These commands refuse agent shells and agent worktrees. The authenticated local view uses moves `spec-approve` with `args: {ids: "G1 G2", by: "<optional SSH principal>"}` or `spec-decline` with `args: {ids: "G1", reason: "why"}`, acting through the main checkout. Pending rows keep their source `status` and add `decision` and `stage` (`approved, pending apply` or `declined, pending apply`) in `spec show` and the shared view/API state.
 
 Only the coordinator runs `spec apply`. It preflights every pending row against the exact source text, refusing stale decisions before writing any file. Approval changes the status to `approved`; decline changes it to `wont` with the person's reason as the row text, preserving trailing fields. SSH-enabled approvals carry one signed `row-decision` receipt binding the file, source, replacement, decision, reason and row text. Apply copies that same receipt into `.pullboard/signoffs.jsonl`; it remains a current exact-text sign-off. Commit the changed files and receipts together.
+
+To answer a pending question row (`<ask>: <default>. Choices: a, b.`, as `blueprint add` writes it), the person runs `spec answer <id> "<choice or text>"`, or the local view sends `spec-answer` with `args: {row: "B1", answer: "Postgres"}`. A listed choice matches in any case and keeps its listed spelling; other text joins the choices last. It refuses agent shells, agent worktrees and the API channel, records the same exact-row approval receipt, whose JSON `decisions` carry an `answer` read back from the signed text (never stored on its own), and the row leaves pending when the coordinator runs `spec apply`. `spec check` errors on a question that was pending at the trunk tip and now differs with no matching person decision.
 
 To approve new wording, the person uses `spec approve <one-id> --text "exact proposed text"`, or `spec-approve` with `args: {ids: "G1", text: "exact proposed text"}`. This records the same exact-row receipt; files wait for coordinator apply. Text must be one nonempty line without a field separator. Pre-commit checks the staged row against that person decision or a verified staged SSH sign-off; unstaged receipts cannot authorize a commit.
 

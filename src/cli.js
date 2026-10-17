@@ -17,7 +17,7 @@ import { doctrineHistory, loadDoctrine } from './doctrine.js';
 import { checkRulesAt, doctrineReport, hasSubmitRules, holdDoctrine, ruleLine } from './doctrine-checks.js';
 import { agentSessionDigest, requirePersonChannel } from './person.js';
 import { bindLocalSession, localSessionMatches } from './agent-session.js';
-import { decisionProjection, planRowApply, prepareRowDecisions, restoreRowApply, writeRowApply } from './row-decisions.js';
+import { decisionAnswer, decisionProjection, handAnsweredQuestions, planRowApply, prepareRowDecisions, restoreRowApply, writeRowApply } from './row-decisions.js';
 import { digestOf, gateReport, refuseSandboxBlocked, runGate, runProfiledShell, runSubmitGate, submitGateReport, timingDigest, withGateSlot } from './gate.js';
 import { checkNeedsBrowser } from './browser-admission.js';
 import { bareWorktreeFinding, codeIsFromMain, contains, differFromHead, git, gitChildEnv, headCommit, headTree, invalidateGitFacts, isClean, mainCheckout, patchId, repoInfo, resolveCommit, tryGit, untracked, withGitFacts } from './git.js';
@@ -59,7 +59,7 @@ import {
   standings,
   unmetRows,
 } from './spec.js';
-import { bundledBlueprints, planBlueprint, readBlueprint, saveBlueprint } from './blueprints.js';
+import { answerQuestion, bundledBlueprints, planBlueprint, readBlueprint, saveBlueprint } from './blueprints.js';
 import { briefFiles } from './brief.js';
 import { checkBaseline, prepareCheckBaseline, sayCheckBaseline } from './check-baseline.js';
 import { retryCheckBaselines, startCheckBaseline } from './check-baseline-worker.js';
@@ -189,6 +189,7 @@ function commandHelp(name) {
       '  pullboard spec signers add — person: register an SSH signing key',
       '  pullboard spec approve <ids> — person: decide from their own terminal or Pullboard View',
       '  pullboard spec decline <ids> — person: decide from their own terminal or Pullboard View',
+      '  pullboard spec answer <id> "<choice or text>" — person: answer a pending question from their own terminal or Pullboard View',
       '  pullboard spec apply — coordinator: apply recorded row decisions to the files',
     ] : []),
     'Example:',
@@ -3312,9 +3313,10 @@ async function specCommand(io, { first, second, rest, values }) {
     draft: ['aim', 'gate', 'section'],
     approve: ['by', 'text'],
     decline: ['reason'],
+    answer: [],
     apply: [],
   }[first ?? '--json'];
-  if (!commandFlags) throw new Refused('USAGE', 'use pullboard spec --json | check | view | show <id> | unmet [--must] | draft "<text>" | signoff <ids> | approve <ids> | decline <ids> --reason "why" | apply');
+  if (!commandFlags) throw new Refused('USAGE', 'use pullboard spec --json | check | view | show <id> | unmet [--must] | draft "<text>" | signoff <ids> | approve <ids> | decline <ids> --reason "why" | answer <id> "<choice or text>" | apply');
   const allowedFlags = [...new Set([...commandFlags, 'json'])];
   for (const flag of Object.keys(values)) {
     if (!allowedFlags.includes(flag)) {
@@ -3371,6 +3373,26 @@ async function specCommand(io, { first, second, rest, values }) {
       return 0;
     });
   }
+  if (first === 'answer') {
+    requirePersonChannel(io.personChannel);
+    return withBoard(ctx, async (board) => {
+      const me = whoAmI(ctx, board);
+      if (!ctx.info.isMain || me.id !== COORDINATOR) throw new Refused('B26_PERSON_APPROVAL', 'only the person answers a pending question, from the main checkout or the view', 'ask the person to answer it in pullboard view, or in their own terminal at the main checkout');
+      const given = rest.join(' ').trim();
+      if (!second || !given || /[\r\n|]/u.test(given)) throw new Refused('USAGE', 'give one row and a one-line answer without a field separator: pullboard spec answer <id> "<choice or text>"');
+      const row = spec.rows.find((entry) => entry.id === second);
+      if (!row) throw new Refused('NO_ROW', `${second} is not a row in ${ctx.config.spec}`, 'list the pending questions with pullboard spec --json, then answer one of them');
+      if (row.status !== 'pending') throw new Refused('SPEC_ANSWER', `${second} is ${row.status}, not a pending question`, `read it with pullboard spec show ${second}; only a pending row takes an answer`);
+      const { text } = answerQuestion(row.text, given, second);
+      const records = prepareRowDecisions(ctx.info.root, ctx.config, { ids: [second], decision: 'approve', text, on: new Date().toISOString(), commit: headCommit(ctx.info.root) ?? '' });
+      const decisions = await ordered(ctx, board, 'recordRowDecisions', [{ agentId: store.PERSON, channel: io.personChannel ?? 'terminal', decisions: records }]);
+      // The answer reported is read back from the signed text, never carried as a field of its own.
+      const answered = decisions.map((record) => ({ ...record, answer: decisionAnswer(record) }));
+      io.result?.({ decisions: answered });
+      answered.forEach((record) => io.say(`${record.id}: answered ${record.answer}, pending apply`));
+      return 0;
+    });
+  }
   if (first === 'apply') {
     if (second || rest.length) throw new Refused('USAGE', 'pullboard spec apply takes no ids; it applies current person decisions');
     return withBoard(ctx, async (board) => {
@@ -3396,6 +3418,7 @@ async function specCommand(io, { first, second, rest, values }) {
       ? legacyDoctrineRenameBase(ctx.info.root, DOCTRINE_FILE)
       : null;
     const baselineNotes = new Set();
+    const previousSources = new Map();
     const previousCounts = new Map(collisionFiles.map(([name]) => {
       const baselineName = renameBase && name === DOCTRINE_FILE ? LEGACY_DOCTRINE_FILE : name;
       const previous = name === DOCTRINE_FILE && !renameBase
@@ -3403,6 +3426,7 @@ async function specCommand(io, { first, second, rest, values }) {
         : coordinatorFile(ctx.info.root, baselineName, renameBase ?? undefined);
       if (previous.baseline) baselineNotes.add(previous.baseline);
       const rows = previous.status === 0 ? parseSpec(previous.stdout, { strictGrammarVersion: false }).rows : [];
+      previousSources.set(name, rows);
       const counts = new Map();
       for (const row of rows) counts.set(row.id, (counts.get(row.id) ?? 0) + 1);
       return [name, counts];
@@ -3441,6 +3465,10 @@ async function specCommand(io, { first, second, rest, values }) {
       const history = parsed === practice ? doctrineHistory(ctx.info.root, name) : committedIds(ctx.info.root, name);
       const cited = name === ctx.config.spec ? citations(ctx, history) : new Map();
       const lost = permanenceProblems(parsed === practice ? practice.repo : parsed, { committed: history.ids, cited });
+      if (name === ctx.config.spec) {
+        const answered = handAnsweredQuestions(previousSources.get(name) ?? [], parsed.rows, () => hookRead(ctx, (board) => store.rowDecisions(board)) ?? []);
+        lost.push(...answered.map((id) => ({ id, message: `pending question answered by hand; ask the person to run pullboard spec answer ${id} "<choice or text>" and restore the pending row` })));
+      }
       lost.forEach((problem) => messages.push(`${name}: ${problem.id} error: ${problem.message}`));
       const fileErrors = findings.filter((finding) => finding.level === 'error').length + lost.length;
       errors += fileErrors;
@@ -3538,7 +3566,7 @@ async function specCommand(io, { first, second, rest, values }) {
     io.say(`signed ${count} rows as ${by}; commit .pullboard/signoffs.jsonl`);
     return 0;
   }
-  throw new Refused('USAGE', 'pullboard spec --json | check | view | show <id> | unmet [--must] | draft "<text>" | signoff <ids> | signers add | approve <ids> | decline <ids> --reason "why" | apply');
+  throw new Refused('USAGE', 'pullboard spec --json | check | view | show <id> | unmet [--must] | draft "<text>" | signoff <ids> | signers add | approve <ids> | decline <ids> --reason "why" | answer <id> "<choice or text>" | apply');
 }
 
 /** Read one consent line without waiting for EOF in an interactive terminal [V2]. */
