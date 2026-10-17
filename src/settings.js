@@ -22,6 +22,9 @@ export function loadMachineSettings() {
   if (value.gate?.browserFreeChecks !== undefined && typeof value.gate.browserFreeChecks !== 'boolean') {
     throw new Refused('BAD_MACHINE_SETTINGS', `gate.browserFreeChecks in ${file} must be true or false`);
   }
+  if (value.gate?.browserByLaunch !== undefined && typeof value.gate.browserByLaunch !== 'boolean') {
+    throw new Refused('BAD_MACHINE_SETTINGS', `gate.browserByLaunch in ${file} must be true or false`);
+  }
   validateGateQueue(value, file);
   if (value.gate?.memoryFloorMB !== undefined && (!Number.isSafeInteger(value.gate.memoryFloorMB) || value.gate.memoryFloorMB < 0)) {
     throw new Refused('BAD_MACHINE_SETTINGS', `gate.memoryFloorMB in ${file} must be a whole number of megabytes, 0 or more; fix it before running Pullboard`);
@@ -52,6 +55,14 @@ export function loadMachineSettings() {
 /** Browser-free check admission is deliberately opt-in per machine. */
 export function browserFreeChecksEnabled() {
   return loadMachineSettings().gate?.browserFreeChecks === true;
+}
+
+/**
+ * Classifying a test file as browser-bound only when it reaches a real Chrome launch is opt-in per
+ * machine; off, any path to the Chrome fixture or an unfollowed process starter takes a browser slot.
+ */
+export function browserByLaunchEnabled() {
+  return loadMachineSettings().gate?.browserByLaunch === true;
 }
 
 /**
