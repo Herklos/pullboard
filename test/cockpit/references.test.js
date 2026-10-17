@@ -196,7 +196,7 @@ test('committed shout and fact references stay local, expand safely at phone and
   let chrome;
   try {
     chrome = await openSnapshotChrome(executable, view.link.href, join(box.dir, 'local-code-chrome'));
-    await chrome.waitFor('typeof data === "object" && data?.project?.shouts?.length >= 3 && data?.project?.items?.[0]?.thread?.some((entry) => entry.type === "fact" && entry.ref)');
+    await chrome.waitFor('typeof data === "object" && data?.project?.shouts?.length >= 3 && !!document.querySelector("#detail .fact-code button[data-code]")');
     for (const width of [375, 1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 1000, deviceScaleFactor: 1, mobile: false });
       await chrome.waitFor(`innerWidth === ${width}`);
