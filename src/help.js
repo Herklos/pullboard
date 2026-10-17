@@ -162,6 +162,8 @@ Spec
                                         principal defaults to Git user.email; --by overrides it
   pullboard spec approve <ids> | decline <ids> --reason "why"  the person's exact-row decision
                                         approve <id> --text "new wording" approves an exact rewrite
+  pullboard spec answer <id> "<choice or text>"  the person's answer to a pending question
+                                        a listed choice, or their own words added as the last choice
   pullboard spec apply                  coordinator applies recorded row decisions to the files
 
 Role guides

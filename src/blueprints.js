@@ -408,9 +408,12 @@ function readQuestion(text) {
 }
 
 /**
- * A question row's text once the person answers it: "<ask>: <answer>. Choices: <choices>.". A
- * listed choice matches in any case and keeps its listed spelling; any other answer joins the
- * choices last, so blueprint save still reads the answered row back as a question [S1].
+ * A question row's text once the person answers it: "<ask>: <answer>. Choices: <choices>.". The
+ * choices stay exactly as written. A listed choice (any run of the comma-separated parts, so a
+ * choice holding ", " counts) matches in any case and keeps its listed spelling; any other answer
+ * joins the choices last. The ask ends at the one ": " whose remainder is a listed choice, or at
+ * the last ": " when the default is none of them; readQuestion's single reading is not required,
+ * because three or more choices always read more than one way there [S1].
  *
  * @param {string} text - The pending row's text, as questionText wrote it.
  * @param {string} given - The person's answer: one of the choices, or their own one-line text.
@@ -418,22 +421,22 @@ function readQuestion(text) {
  * @returns {{ text: string, answer: string, listed: boolean }}
  */
 export function answerQuestion(text, given, id) {
-  const read = readQuestion(text);
-  if (!read?.question) {
-    throw new Refused('SPEC_ANSWER', `${id} does not read as one question with its choices (${read?.reason ?? 'it has no ". Choices: " list'})`,
-      `the person approves its exact new text instead: pullboard spec approve ${id} --text "<the answered row>"`);
-  }
-  const { ask, choices } = read.question;
+  const at = text.lastIndexOf(CHOICES);
+  const approve = `the person approves its exact new text instead: pullboard spec approve ${id} --text "<the answered row>"`;
+  if (at < 0 || !text.endsWith('.')) throw new Refused('SPEC_ANSWER', `${id} does not read as a question with its choices: it has no ". Choices: " list`, approve);
+  const head = text.slice(0, at);
+  const choicesText = text.slice(at + CHOICES.length, -1);
+  const parts = choicesText.split(', ');
+  const runs = parts.flatMap((_, from) => parts.slice(from).map((__, length) => parts.slice(from, from + length + 1).join(', ')));
+  const colons = positions(head, ': ');
+  const listedSplits = colons.filter((colon) => runs.includes(head.slice(colon + 2)));
+  if (!colons.length || listedSplits.length > 1) throw new Refused('SPEC_ANSWER', `${id}'s question and its current answer cannot be told apart`, approve);
+  const ask = head.slice(0, listedSplits[0] ?? colons.at(-1));
   const answer = given.trim();
-  const listed = choices.find((choice) => choice.toLowerCase() === answer.toLowerCase());
-  const question = listed ? { ask, choices, default: listed } : { ask, choices: [...choices, answer], default: answer };
-  const answered = questionText(question);
-  const back = readQuestion(answered)?.question;
-  if (!back || back.default !== question.default || back.choices.join('\n') !== question.choices.join('\n')) {
-    throw new Refused('SPEC_ANSWER', `"${answer}" cannot be read back as ${id}'s one answer`,
-      `give the answer without ", " or ": ": pullboard spec answer ${id} "<answer>"`);
-  }
-  return { text: answered, answer: question.default, listed: Boolean(listed) };
+  if (answer.includes(CHOICES.trim())) throw new Refused('SPEC_ANSWER', `the answer to ${id} cannot hold "Choices:"`, `give the answer alone: pullboard spec answer ${id} "<answer>"`);
+  const listed = runs.find((choice) => choice.toLowerCase() === answer.toLowerCase());
+  const chosen = listed ?? answer;
+  return { text: `${ask}: ${chosen}${CHOICES}${listed ? choicesText : `${choicesText}, ${answer}`}.`, answer: chosen, listed: Boolean(listed) };
 }
 
 /**

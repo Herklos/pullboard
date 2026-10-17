@@ -564,7 +564,7 @@ test("spec answer records the person's choice [S1,E3,P6]", (t) => {
   assert.equal(line('B1'), '- B1 [approved, must] Which store holds the data: Postgres. Choices: SQLite, Postgres. | gate: review',
     'the row leaves pending with the chosen answer');
   assert.equal(line('B2'), '- B2 [approved, must] Which store holds the cache: Redis on the host. Choices: SQLite, Postgres, Redis on the host. | gate: review',
-    'an answer outside the choices joins them, so blueprint save still reads the row back');
+    'an answer outside the choices is kept and joins them as the last choice');
 
   const view = viewMove(box, { verb: 'spec-answer', args: { row: 'B3', answer: 'SQLite' } }, 'view', { ...box.env, CLAUDECODE: '1' });
   assert.equal(view.status, 200, JSON.stringify(view));
@@ -608,7 +608,7 @@ test('an agent cannot answer a pending row [P6,B26,E3]', (t) => {
   }
   const flagged = runIn(box, box.root, ['spec', 'answer', 'B1', 'Postgres', '--as', 'person', '--json'], { ...box.env, CLAUDECODE: '1' });
   assert.equal(flagged.status, 1);
-  assert.equal(JSON.parse(flagged.stdout).error.code, 'FLAG_NOT_ALLOWED', 'no flag makes an agent the person');
+  assert.equal(JSON.parse(flagged.stdout).error.code, 'B26_PERSON_CHANNEL', 'no flag makes an agent the person: --as person is refused first');
 
   const api = viewMove(box, { verb: 'spec-answer', args: { row: 'B1', answer: 'Postgres' } }, 'api', box.env);
   assert.equal(api.status, 409, JSON.stringify(api));
