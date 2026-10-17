@@ -1547,7 +1547,7 @@ export async function relayOff(root, io) {
     // Local unlink always completes, including agent shells, outages and a fenced remote baseline.
 
     let proposal;
-    try { proposal = await phoneProposal(state, 'delete-board', state.board); }
+    try { proposal = await phoneProposal(state, 'delete-board', state.board, { root }); }
     catch { /* Missing key or pairing cannot stop local unlinking. */ }
     rmSync(file, { force: true });
     try { forgetBoardKey(state.board, state.keyStorage); }
