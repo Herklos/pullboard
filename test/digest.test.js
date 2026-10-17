@@ -18,7 +18,7 @@ const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
  * A real repository with its own board in a private temporary folder, so the developer's registry
  * and board are never read or touched.
  */
-function fixture(t, name) {
+function fixture(t, name, extra = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'pullboard-digest-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const repo = join(dir, 'repo');
@@ -30,7 +30,7 @@ function fixture(t, name) {
   for (const marker of [...AGENT_SHELL_MARKERS, ...SSH_SHELL_MARKERS]) delete env[marker];
   delete env.PULLBOARD_RELAY_TOKEN;
   runFixtureGit(['init', '-q', '-b', 'main'], { cwd: repo, env });
-  writeFileSync(join(repo, 'pullboard.json'), JSON.stringify({ name, spec: 'SPEC.md', gate: 'true', lanes: { web: { owns: ['web/'] } } }));
+  writeFileSync(join(repo, 'pullboard.json'), JSON.stringify({ name, spec: 'SPEC.md', gate: 'true', lanes: { web: { owns: ['web/'] } }, ...extra }));
   writeFileSync(join(repo, 'SPEC.md'), '# Fixture\n\n## G · Goals\n- G1 [approved, must] Keep the board. | gate: true\n');
   runFixtureGit(['add', '-A'], { cwd: repo, env });
   runFixtureGit(['commit', '-q', '-m', 'chore: start the digest fixture'], { cwd: repo, env });
@@ -78,7 +78,8 @@ function sectionOf(markdown, title) {
 }
 
 test('the digest is a readable briefing of one board [A2,N26]', (t) => {
-  const box = fixture(t, 'Briefing project');
+  // A zero stuck threshold makes pullboard health's findings appear on a board made seconds ago.
+  const box = fixture(t, 'Briefing project', { health: { stuck: '0m', holds: '0m', release: '1d' } });
   const other = fixture(t, 'Other private project');
   add(other.board, 'Other board private item');
   store.shout(other.board, { from: 'web-1', to: 'coordinator', text: 'Other board shout to its coordinator', lanes: ['web'] });
@@ -127,7 +128,8 @@ test('the digest is a readable briefing of one board [A2,N26]', (t) => {
   assert.match(shouts, /web-2, .*: The upload review is next in my queue/u);
   assert.ok(shouts.indexOf('upload review') < shouts.indexOf('[redacted secret]'), 'the latest shout comes first');
   assert.match(sectionOf(markdown, 'Milestones'), /First release: planned; 2 items, 0 landed, 0 accepted, 0 in review, 2 open\.\n {2}Uploads that work/u);
-  assert.match(sectionOf(markdown, 'At a glance'), /1 questions wait on you/u);
+  assert.match(sectionOf(markdown, 'At a glance'), /1 questions wait on you, and [1-9]\d* things are stuck/u);
+  assert.match(sectionOf(markdown, 'Stuck and who moves it'), /- decision #\d+: .*\n {2}Next, you: /u);
 
   assert.equal(markdown.includes(planted), false, 'a secret never reaches the briefing');
   assert.equal(markdown.includes('ghp_'), false, 'no part of the secret survives');
@@ -143,7 +145,7 @@ test('the digest is a readable briefing of one board [A2,N26]', (t) => {
   /** The briefing from its first section on; the header carries the time it was read. */
   const body = (text) => text.slice(text.indexOf('## At a glance')).trimEnd();
   assert.equal(body(json.markdown), body(markdown), 'the JSON result carries the same briefing');
-  assert.deepEqual(json.sections.map((entry) => entry.title), ['Open work', 'Blocked work', 'In review', 'Recent decisions and answers',
+  assert.deepEqual(json.sections.map((entry) => entry.title), ['Stuck and who moves it', 'Open work', 'Blocked work', 'In review', 'Recent decisions and answers',
     'Recent verdicts', 'Questions waiting on you', 'Latest shouts to the coordinator', 'Milestones']);
 
   const out = join(box.dir, 'briefing.md');

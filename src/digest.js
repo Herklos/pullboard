@@ -10,6 +10,7 @@ import { closeSync, existsSync, fsyncSync, openSync, readSync, realpathSync, ren
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { setTimeout as pause } from 'node:timers/promises';
 import { milestones, openBoardReadOnly } from './board.js';
+import { healthReport } from './health.js';
 import { secretsIn } from './hooks.js';
 import { Refused } from './refused.js';
 
@@ -75,15 +76,16 @@ function section(title, entries, total, budget, empty) {
  * Read one consistent snapshot of the board at `file` and render the briefing.
  *
  * @param {string} file the board's SQLite file
- * @param {{ name?: string, now?: Date }} [options]
+ * @param {{ name?: string, now?: Date, root?: string, config?: any }} [options] root and config let
+ *   pullboard health's stuck findings join the briefing
  * @returns {{ markdown: string, sequence: number, sections: { title: string, shown: number, total: number }[], bytes: number }}
  */
-export function readDigest(file, { name = 'this project', now = new Date() } = {}) {
+export function readDigest(file, { name = 'this project', now = new Date(), root, config } = {}) {
   if (!existsSync(file)) throw new Refused('NO_BOARD', 'this repository has no board yet; run pullboard init in the main checkout first');
   const db = openBoardReadOnly(file);
   try {
     db.exec('BEGIN DEFERRED');
-    const result = render(db, { name, now });
+    const result = render(db, { name, now, root, config });
     db.exec('COMMIT');
     return result;
   } finally { db.close(); }
@@ -93,9 +95,9 @@ export function readDigest(file, { name = 'this project', now = new Date() } = {
  * Render the briefing from an open read-only connection inside one read transaction.
  *
  * @param {any} db
- * @param {{ name: string, now: Date }} options
+ * @param {{ name: string, now: Date, root?: string, config?: any }} options
  */
-function render(db, { name, now }) {
+function render(db, { name, now, root, config }) {
   const cut = { count: 0 };
   const at = now.toISOString();
   /** One field of board text, bounded. */
@@ -178,8 +180,14 @@ function render(db, { name, now }) {
     // Releases still in progress come first, in roadmap order; then the most recently finished.
     .sort((a, b) => (a.finished - b.finished) || (a.finished ? b.order - a.order : a.order - b.order)).map((row) => row.entry);
 
+  // The same findings as pullboard health, read in this transaction: what is stuck and who moves it.
+  const health = root ? healthReport({ db, root, config, now }) : { stuck: [] };
+  /** Who moves a stuck finding next, in plain words. */
+  const owner = ({ role, who }) => (role === 'person' ? 'you' : role === 'coordinator' ? 'the coordinator' : who ? `${text(who, 80)} (${role})` : `a ${role}`);
+  const stuck = health.stuck.map((entry) => `- ${entry.item ? label(entry.item) : text(entry.subject, 60)}: ${text(entry.title, 240)}, since ${text(entry.since, 40)}: ${text(entry.why, 400)}\n  Next, ${owner(entry.owner)}: ${text(entry.next, 300)}`);
   const sections = [
-    section('Open work', open.slice(0, ROW_LIMIT).map(work), open.length, 10_000, 'Nothing is open.'),
+    section('Stuck and who moves it', stuck, stuck.length, 4_000, 'Nothing is stuck.'),
+    section('Open work', open.slice(0, ROW_LIMIT).map(work), open.length, 8_000, 'Nothing is open.'),
     section('Blocked work', blocked.slice(0, ROW_LIMIT).map(work), blocked.length, 6_000, 'Nothing is blocked.'),
     section('In review', review.slice(0, ROW_LIMIT).map((item) => `- ${label(item.item_id)}, built by ${text(item.item_built_by ?? item.item_owner, 80)}: waits for a second agent to verify it.`), review.length, 3_000, 'Nothing waits for review.'),
     section('Recent decisions and answers', decisions.map((row) => row.entry), decisionTotal, 7_000, 'No decisions are recorded yet.'),
@@ -192,7 +200,7 @@ function render(db, { name, now }) {
   const glance = [
     `- ${landed} items landed and ${accepted} are accepted and wait to land.`,
     `- ${review.length} wait for review, ${open.length} are open and ${blocked.length} are blocked.`,
-    `- ${sections[5].total} questions wait on you.`,
+    `- ${sections[6].total} questions wait on you, and ${health.stuck.length} things are stuck.`,
   ].join('\n');
   const left = [
     ...sections.filter((entry) => entry.shown < entry.total).map((entry) => `- ${entry.title}: ${entry.shown} of ${entry.total} shown.`),
@@ -274,9 +282,9 @@ export function writeDigest(path, markdown, commonDir) {
  *
  * @param {string} file
  * @param {string} path
- * @param {{ name: string, commonDir: string, signal: AbortSignal, interval?: number, onWrite?: (result: any) => void }} options
+ * @param {{ name: string, root?: string, config?: any, commonDir: string, signal: AbortSignal, interval?: number, onWrite?: (result: any) => void }} options
  */
-export async function watchDigest(file, path, { name, commonDir, signal, interval = 250, onWrite = () => {} }) {
+export async function watchDigest(file, path, { name, root, config, commonDir, signal, interval = 250, onWrite = () => {} }) {
   let db;
   let identity;
   let seen = -1;
@@ -293,7 +301,7 @@ export async function watchDigest(file, path, { name, commonDir, signal, interva
       }
       const version = db.prepare('PRAGMA data_version').get().data_version;
       if (version !== seen) {
-        const result = readDigest(file, { name });
+        const result = readDigest(file, { name, root, config });
         onWrite({ ...result, path: writeDigest(path, result.markdown, commonDir) });
         seen = version;
       }
@@ -308,7 +316,7 @@ export async function watchDigest(file, path, { name, commonDir, signal, interva
  *
  * @param {any} io
  * @param {{ first?: string, second?: string, rest: string[], values: Record<string, any> }} args
- * @param {{ info: { commonDir: string }, config: { name?: string }, file: string }} ctx
+ * @param {{ info: { root: string, commonDir: string }, config: { name?: string }, file: string }} ctx
  * @returns {Promise<number>}
  */
 export async function digestCommand(io, { first, second, rest, values }, ctx) {
@@ -324,12 +332,12 @@ export async function digestCommand(io, { first, second, rest, values }, ctx) {
     process.once('SIGINT', stop);
     process.once('SIGTERM', stop);
     try {
-      await watchDigest(ctx.file, out, { name, commonDir: ctx.info.commonDir, signal: controller.signal,
+      await watchDigest(ctx.file, out, { name, root: ctx.info.root, config: ctx.config, commonDir: ctx.info.commonDir, signal: controller.signal,
         onWrite: (result) => io.say(`wrote the briefing to ${result.path} (board move ${result.sequence}); Ctrl-C stops watching`) });
     } finally { process.off('SIGINT', stop); process.off('SIGTERM', stop); }
     return 0;
   }
-  const result = readDigest(ctx.file, { name });
+  const result = readDigest(ctx.file, { name, root: ctx.info.root, config: ctx.config });
   const path = out === undefined ? undefined : writeDigest(out, result.markdown, ctx.info.commonDir);
   io.result?.({ markdown: result.markdown, bytes: result.bytes, sequence: result.sequence, sections: result.sections, ...(path ? { path } : {}) });
   io.say(path ? `wrote the briefing to ${path}; share that file with any chat assistant` : result.markdown.trimEnd());
