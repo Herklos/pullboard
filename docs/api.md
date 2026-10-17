@@ -431,6 +431,8 @@ With `landingShards: N` in `pullboard.json` (a whole number from 1 to 64; absent
 
 Only the person can run `pullboard land --waive <test> --until <date> --reason "why"`. A waiver retains every test in the full gate. The batch records its exact tree and each failing test with its covering live waiver; pre-push validates that distinct proof and creates no ordinary green stamp. Expired waivers cannot authorize a push. Existing gate-stamped pushes and `pullboard merged` remain available.
 
+The same live person waivers also cover the submit gate and `pullboard gate --landing`. Every failure must be accounted for and covered by its exact test name or file; an unwaived failure, expired waiver, or separate failing setup stage still refuses the run. The item's frozen check must pass independently. Each waived failure prints its waiver, reason and expiry. A waived run succeeds as **waived, not green**, writes no ordinary green stamp, and a waived submission records that distinction on its item thread. `gate --landing --json` reports `green: false` with `waived` entries containing `file`, `name`, `waiver`, `reason` and `until`.
+
 
 ### Person authority stays outside the standalone API
 

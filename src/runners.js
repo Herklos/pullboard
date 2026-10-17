@@ -11,6 +11,7 @@ import { configFromSource, defaults } from './config.js';
 import { blockedPaths, secretsIn } from './hooks.js';
 import { cleanGitEnvironment, headCommit, headTree, isClean, repoInfo, untracked } from './git.js';
 import { Refused } from './refused.js';
+import { gateStages, readStages } from './gate-stages.js';
 import { remoteFileDenial } from './sandbox-denial.js';
 
 // Budget: 64 MiB bounds worst-case JSON bridge escaping below Node string limits.
@@ -19,7 +20,7 @@ const MAX_BLOB_BYTES = 8 * 1024 ** 2;
 const MAX_HISTORY_TAGS = 1_024;
 const MAX_TAG_CHAIN = 8;
 const TOOL_ROOT = fileURLToPath(new URL('../', import.meta.url));
-const RUNTIME_NAMES = ['resources.js', 'git.js', 'machine-home.js', 'refused.js', 'process-census.js', 'queue-settings.js', 'queue-order.js', 'sandbox-denial.js'];
+const RUNTIME_NAMES = ['resources.js', 'git.js', 'machine-home.js', 'refused.js', 'process-census.js', 'queue-settings.js', 'queue-order.js', 'sandbox-denial.js', 'gate-stages.js'];
 
 /** Validate an SSH destination as one argument, never a command or an SSH option. */
 export function validateRunner(value) {
@@ -377,7 +378,7 @@ function anonymousOrigin(root) {
 }
 
 /** Prepare the pinned request before negotiating history; cleanup owns only its scratch directory. */
-function requestFor(root, command, { runner, source, browser = false, pipefail = false, metadata = {} }) {
+function requestFor(root, command, { runner, source, browser = false, pipefail = false, stages = false, waivers = [], metadata = {} }) {
   runner = validateRunner(runner);
   const current = runnerSource(root);
   if (!current || (source && (current.commit !== source.commit || current.tree !== source.tree))) {
@@ -395,8 +396,11 @@ function requestFor(root, command, { runner, source, browser = false, pipefail =
   const directory = mkdtempSync(join(tmpdir(), 'pullboard-runner-send-'));
   try {
     const { worker, tooling, runtime } = trustedTooling();
+    const projection = metadata.landing === true && Array.isArray(waivers) ? waivers.filter(entry => ['file', 'name'].includes(entry?.kind) && typeof entry.test === 'string' && entry.test).map(({ kind, test }) => ({ kind, test })) : [];
+    if (secretsIn([{ path: 'runner continuation', line: 1, text: JSON.stringify(projection) }]).length) throw new Refused('RUNNER_SECRET', 'the continuation projection contains a possible secret; keep this run local');
     const spec = { version: 1, id: randomUUID(), repoId, ...(originBase ? { origin, originBase } : {}), runtime, tooling, tags, ...current, command, pipefail, slots: runner.slots,
       browser: runner.browser, browserRequired: browser, landing: metadata.landing === true,
+      ...(stages ? { stageMarker: `PULLBOARD_STAGE_${randomUUID().replaceAll('-', '')}` } : {}), waivers: projection,
       itemCheck: metadata.itemCheck === true, diagnostic: metadata.diagnostic === true,
       item: String(metadata.item ?? ''), kind: String(metadata.kind ?? ''), ...(runner.root ? { root: runner.root } : {}) };
     const encodedSpec = Buffer.from(JSON.stringify(spec));
@@ -438,7 +442,20 @@ function resultFrom(request, result) {
   // The runner classified any file denial against its own checkout; only its evidence is trusted here.
   const sandboxBlocked = receipt.denial === undefined ? null : remoteFileDenial(receipt.denial, request.runner.host);
   if (receipt.denial !== undefined && (!sandboxBlocked || receipt.code === 0)) throw new RunnerDropped(request.runner.host);
-  return { isGreen: receipt.code === 0 && !receipt.signal, output: output.toString('utf8'), sandboxBlocked,
+  let staged = null;
+  if (request.spec.stageMarker && !receipt.signal) {
+    const split = gateStages(request.spec.command);
+    if (split) {
+      const parsed = readStages(output.toString('utf8'), request.spec.stageMarker, split.length);
+      const pipes = receipt.pipeStatuses;
+      staged = { ...parsed, stages: parsed.stages.map((stage, index) => split[index].pipeline.length > 1
+        ? { ...stage, pipeline: Array.isArray(pipes) && pipes.length === split.length && Array.isArray(pipes[index])
+          && pipes[index].length === split[index].pipeline.length && pipes[index].every(entry => entry && (entry.status === null || Number.isInteger(entry.status) && entry.status >= 0 && entry.status <= 255) && (entry.output === null || typeof entry.output === 'string'))
+          ? pipes[index] : null } : stage) };
+    }
+  }
+  return { isGreen: receipt.code === 0 && !receipt.signal, output: staged?.output ?? output.toString('utf8'), sandboxBlocked,
+    ...(request.spec.stageMarker ? { stages: staged?.stages ?? null } : {}),
     seconds: Math.round(receipt.wallMs / 1000), exitCode: receipt.code,
     executionRunner: request.runner.host, executionRoot: receipt.root, remoteWallMs: receipt.wallMs,
     executionSource: { commit: receipt.commit, tree: receipt.tree, tooling: request.spec.tooling } };
@@ -495,7 +512,8 @@ export async function runOnRunnerAsync(root, command, options) {
     child.stderr.on('data', chunk => {
       capture(diagnostics, chunk);
       control += chunk.toString('utf8');
-      if (control.length > 256 * 1024) { error = new Error('runner control frame exceeded limit'); child.kill(); return; }
+      // Budget: eight MiB of component receipts plus base64/JSON framing, inside the total 64-MiB bound.
+      if (control.length > 16 * 1024 ** 2) { error = new Error('runner control frame exceeded limit'); child.kill(); return; }
       let newline;
       while ((newline = control.indexOf('\n')) >= 0) {
         const line = control.slice(0, newline); control = control.slice(newline + 1);
