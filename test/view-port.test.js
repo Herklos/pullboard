@@ -1,12 +1,13 @@
 /** Keep the view's exact named-port refusal covered in a core-owned file [N26]. */
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { runFixtureChild, startFixtureChild } from './fixture-child.js';
 import { createServer } from 'node:net';
 import { createServer as createHttpServer } from 'node:http';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import { chooseViewPort, takeDefaultViewPort } from './view-port-fixture.js';
@@ -164,14 +165,30 @@ test("a named port that is busy is refused with the way out, not a stack trace [
 
 test('a busy view port names a fix the hosted page can still find [N26,I1]', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'pullboard-view-busy-default-'));
+  const fixtureRoot = realpathSync(dir);
+  const ownedViews = [];
+  let freePort;
+  t.after(async () => {
+    await cleanupFixtureViews(join(dir, 'home', '.pullboard'), fixtureRoot, ownedViews);
+    if (freePort !== undefined) await waitForPortToClose(freePort);
+  });
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   // A leased stand-in for 4890: the person's real view on the shipped port is never touched.
   const lease = await takeDefaultViewPort(dir, { agent: `view-port-busy-${process.pid}` });
   t.after(() => lease.release());
   const port = lease.port;
   const held = createServer();
+  const heldSockets = new Set();
+  held.on('connection', (socket) => {
+    heldSockets.add(socket);
+    socket.once('close', () => heldSockets.delete(socket));
+  });
   await new Promise((done, fail) => { held.once('error', fail); held.listen(port, '127.0.0.1', done); });
-  t.after(() => new Promise((done) => held.close(done)));
+  t.after(async () => {
+    const closed = new Promise((done) => held.close(done));
+    for (const socket of heldSockets) socket.destroy();
+    await closed;
+  });
   const env = {
     ...process.env,
     HOME: join(dir, 'home'),
@@ -211,8 +228,10 @@ test('a busy view port names a fix the hosted page can still find [N26,I1]', asy
   rmSync(join(env.PULLBOARD_HOME, `view-${port}.json`), { force: true });
   const free = runFixtureChild(process.execPath, [BIN, 'view', '--no-open', '--port', '0', '--json'], { cwd: dir, env, encoding: 'utf8', timeout: 40_000 });
   assert.equal(free.status, 0, free.failure ?? free.stderr);
-  t.after(() => cleanupFixtureViews(env.PULLBOARD_HOME));
-  assert.notEqual(JSON.parse(free.stdout).port, port, '--port 0 still takes a free port when asked for');
+  const freeView = JSON.parse(free.stdout);
+  freePort = freeView.port;
+  ownedViews.push(await captureAuthenticatedFixtureView(env.PULLBOARD_HOME, freePort, fixtureRoot, freeView.pid, '0'));
+  assert.notEqual(freePort, port, '--port 0 still takes a free port when asked for');
 });
 
 /** Wait until the owned default listener has closed after its process stops. */
@@ -331,12 +350,100 @@ test('view tests with separate private homes serialize the fixed loopback port [
   }
 });
 
-/** Stop only listeners authenticated by session records in this test's private Pullboard home. */
-async function cleanupFixtureViews(home) {
+/** Capture the authenticated view's process identity before teardown can remove its private home. */
+async function captureAuthenticatedFixtureView(home, port, fixtureRoot, expectedPid, requestedPort) {
+  const record = JSON.parse(readFileSync(join(home, `view-${port}.json`), 'utf8'));
+  assert.equal(record.port, port, 'the private session belongs to the launched view port');
+  assert.equal(record.pid, expectedPid, 'the private session PID matches the CLI result');
+  const response = await fetchFresh(`http://127.0.0.1:${port}/api/v1/boards`, {
+    headers: { 'x-pullboard-key': record.secret }, redirect: 'manual', signal: AbortSignal.timeout(1_000),
+  });
+  assert.equal(response.ok, true, 'the view process is authenticated before its identity is captured');
+  await response.body?.cancel();
+  const identity = readFixtureViewIdentity(record.pid);
+  assert.ok(identity, 'the authenticated view process is running');
+  assert.ok(isWithinFixture(identity.cwd, fixtureRoot), 'the authenticated view process cwd is inside its fixture directory');
+  assert.equal(identity.executable, realpathSync(process.execPath), 'the view uses this Node executable');
+  assert.ok(isFixtureViewCommand(identity.command, requestedPort), 'the captured process has the expected fixture view argv');
+  return { ...identity, port, requestedPort, authenticated: true };
+}
+
+/** Read process fields without printing command arguments, which can contain private data. */
+function readFixtureViewIdentity(pid) {
+  let base;
+  try {
+    const output = runFixturePs(['-p', String(pid), '-o', 'pid=,pgid=,stat=,lstart=']).trim();
+    const match = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.+)$/u.exec(output);
+    if (!match) {
+      const current = readFixtureProcessLiveness(pid);
+      if (!current || current.state.startsWith('Z')) return null;
+      throw new Error(`process ${pid} identity is malformed while the process remains live`);
+    }
+    base = { pid: Number(match[1]), pgid: Number(match[2]), state: match[3], started: match[4] };
+  } catch (error) {
+    if (error.status === 1) return null;
+    throw error;
+  }
+  if (base.state.startsWith('Z')) return null;
+  try {
+    const command = runFixturePs(['-p', String(pid), '-o', 'command=']).trim();
+    let cwd;
+    let executable;
+    if (process.platform === 'linux') {
+      cwd = readlinkSync(`/proc/${pid}/cwd`);
+      executable = readlinkSync(`/proc/${pid}/exe`);
+    } else if (process.platform === 'darwin') {
+      const cwdOutput = runFixtureProcessTool('/usr/sbin/lsof', ['-a', '-d', 'cwd', '-p', String(pid), '-Fn']);
+      const executableOutput = runFixtureProcessTool('/usr/sbin/lsof', ['-a', '-d', 'txt', '-p', String(pid), '-Fn']);
+      cwd = /^n(.*)$/mu.exec(cwdOutput)?.[1];
+      const expectedExecutable = realpathSync(process.execPath);
+      executable = executableOutput.split(/\r?\n/u).filter((line) => line.startsWith('n'))
+        .map((line) => line.slice(1)).find((path) => {
+          try { return realpathSync(path) === expectedExecutable; } catch { return false; }
+        });
+    } else {
+      throw new Error(`cannot safely inspect fixture view processes on ${process.platform}`);
+    }
+    assert.ok(cwd && executable, `process ${pid} identity is unreadable; refusing to infer ownership`);
+    let physicalCwd = cwd.replace(/ \(deleted\)$/u, '');
+    try { physicalCwd = realpathSync(physicalCwd); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    return { ...base, cwd: physicalCwd, executable: realpathSync(executable), command,
+      commandSha256: createHash('sha256').update(command).digest('hex') };
+  } catch (error) {
+    const current = readFixtureProcessLiveness(pid);
+    if (!current || current.state.startsWith('Z') || current.started !== base.started || current.pgid !== base.pgid) return null;
+    throw error;
+  }
+}
+
+/** Run one bounded process inspection while suppressing stderr and never dumping command output. */
+function runFixtureProcessTool(command, args) {
+  return execFileSync(command, args, { encoding: 'utf8', timeout: 1_500, stdio: ['ignore', 'pipe', 'ignore'] });
+}
+
+/** Run a bounded ps query for the test's own process identity checks. */
+function runFixturePs(args) {
+  return runFixtureProcessTool('/bin/ps', args);
+}
+
+/** Confirm whether the captured PID is absent, zombie, or still the same live process. */
+function readFixtureProcessLiveness(pid) {
+  let output;
+  try { output = runFixturePs(['-p', String(pid), '-o', 'pid=,pgid=,stat=,lstart=']).trim(); }
+  catch (error) { if (error.status === 1) return null; throw error; }
+  const match = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.+)$/u.exec(output);
+  if (!match) throw new Error(`process ${pid} liveness is unreadable; refusing to treat it as stopped`);
+  return { pid: Number(match[1]), pgid: Number(match[2]), state: match[3], started: match[4] };
+}
+
+/** Stop only authenticated fixture views, prove their exact processes exited, then verify the directory is clear. */
+async function cleanupFixtureViews(home, fixtureRoot, captured = []) {
   let names;
+  let homeRemovedFirst = false;
   try { names = readdirSync(home); }
-  catch (error) { if (error.code === 'ENOENT') return; throw error; }
+  catch (error) { if (error.code === 'ENOENT') { names = []; homeRemovedFirst = captured.length > 0; } else throw error; }
   const failures = [];
+  const owned = new Map(captured.map((identity) => [identity.port, identity]));
   for (const name of names.filter((entry) => /^view-\d+\.json$/u.test(entry))) {
     const port = Number(/^view-(\d+)\.json$/u.exec(name)[1]);
     try {
@@ -361,18 +468,104 @@ async function cleanupFixtureViews(home) {
         failures.push(new Error(`private fixture session on port ${port} did not authenticate; listener left untouched`));
         continue;
       }
-      try { process.kill(record.pid, 'SIGTERM'); }
-      catch (error) { if (error.code !== 'ESRCH') throw error; }
+      let identity = owned.get(port);
+      if (!identity) {
+        identity = readFixtureViewIdentity(record.pid);
+        if (!identity || identity.executable !== realpathSync(process.execPath)
+          || !isWithinFixture(identity.cwd, fixtureRoot)
+          || !isFixtureViewCommand(identity.command, String(port), '0')) {
+          failures.push(new Error(`private fixture session on port ${port} does not identify its owned view process; process left untouched`));
+          continue;
+        }
+        identity = { ...identity, port, requestedPort: identity.command.includes(`--port ${port}`) ? String(port) : '0', authenticated: true };
+        owned.set(port, identity);
+      }
+      if (!identity.authenticated || identity.pid !== record.pid) {
+        failures.push(new Error(`private fixture session on port ${port} does not match its captured authenticated process`));
+        continue;
+      }
+      const current = readFixtureViewIdentity(identity.pid);
+      if (current && !sameFixtureViewIdentity(identity, current)) {
+        failures.push(new Error(`private fixture PID on port ${port} changed identity; replacement process left untouched`));
+        continue;
+      }
+      signalFixtureView(identity, current);
+      await waitForFixtureViewExit(identity);
       await waitForPortToClose(port);
     } catch (error) {
       failures.push(new Error(`could not clean up the fixture view on port ${port}: ${error.message}`));
     }
   }
+  for (const identity of owned.values()) {
+    try {
+      const current = readFixtureViewIdentity(identity.pid);
+      signalFixtureView(identity, current);
+      await waitForFixtureViewExit(identity);
+      await waitForPortToClose(identity.port);
+    } catch (error) { failures.push(new Error(`could not confirm fixture view process ${identity.pid} exited: ${error.message}`)); }
+  }
+  try { assertNoFixtureViewProcesses(fixtureRoot); }
+  catch (error) { failures.push(error); }
+  if (homeRemovedFirst) failures.push(new Error('the private fixture home was removed before its authenticated view process was stopped'));
   if (failures.length) throw new AggregateError(failures, 'one or more fixture views could not be stopped safely');
+}
+
+/** Compare immutable OS identity fields while allowing the process to be reparented. */
+function sameFixtureViewIdentity(left, right) {
+  return left.pid === right.pid && left.pgid === right.pgid && left.started === right.started
+    && left.cwd === right.cwd && left.executable === right.executable && left.commandSha256 === right.commandSha256;
+}
+
+/** Send TERM only to the same captured view; accept ESRCH only after confirming it exited. */
+function signalFixtureView(identity, current) {
+  if (!current || current.state.startsWith('Z')) return;
+  if (!sameFixtureViewIdentity(identity, current)) throw new Error(`fixture view PID ${identity.pid} changed before signaling`);
+  try { process.kill(identity.pid, 'SIGTERM'); }
+  catch (error) {
+    if (error.code !== 'ESRCH') throw error;
+    const after = readFixtureViewIdentity(identity.pid);
+    if (after && sameFixtureViewIdentity(identity, after) && !after.state.startsWith('Z')) throw error;
+  }
+}
+
+/** Check physical fixture containment while tolerating the /var symlink on macOS. */
+function isWithinFixture(cwd, fixtureRoot) {
+  return cwd === fixtureRoot || cwd.startsWith(`${fixtureRoot}${sep}`);
+}
+
+/** Match only the exact pullboard CLI path and its explicit view port argument. */
+function isFixtureViewCommand(command, ...ports) {
+  const escapedBin = BIN.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  const portPattern = ports.includes('any') ? '\\d+' : ports.map((port) => port.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')).join('|');
+  return new RegExp(`(?:^|\\s)${escapedBin} view --no-open --port (?:${portPattern})(?:\\s|$)`, 'u').test(command);
+}
+
+/** Wait a bounded interval for the captured process identity to disappear or be replaced. */
+async function waitForFixtureViewExit(identity, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const current = readFixtureViewIdentity(identity.pid);
+    if (!current || !sameFixtureViewIdentity(identity, current) || current.state.startsWith('Z')) return;
+    await new Promise((done) => setTimeout(done, 25));
+  }
+  throw new Error(`owned view process ${identity.pid} is still running`);
+}
+
+/** Fail closed if a Node view command still has a working directory inside the fixture. */
+function assertNoFixtureViewProcesses(fixtureRoot) {
+  const output = runFixturePs(['-axo', 'pid=,command=']);
+  for (const line of output.split(/\r?\n/u)) {
+    const match = /^\s*(\d+)\s+(.+)$/u.exec(line);
+    if (!match || !isFixtureViewCommand(match[2], 'any')) continue;
+    const identity = readFixtureViewIdentity(Number(match[1]));
+    assert.ok(!identity || !isWithinFixture(identity.cwd, fixtureRoot),
+      `fixture view process ${match[1]} remains under the private fixture directory`);
+  }
 }
 
 test('pullboard view uses its fixed default port and reuses its authenticated listener [N26]', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'pullboard-view-default-'));
+  const fixtureRoot = realpathSync(dir);
   let preserveFixture = false;
   t.after(() => { if (!preserveFixture) rmSync(dir, { recursive: true, force: true }); });
   const lease = await takeDefaultViewPort(dir, { agent: `view-port-${process.pid}` });
@@ -454,7 +647,7 @@ test('pullboard view uses its fixed default port and reuses its authenticated li
     assert.equal(JSON.parse(namedResult.stdout).port, requestedPort, 'an explicit nonzero port overrides the default');
   } catch (error) { primaryError = error; }
   let cleanupError;
-  try { await cleanupFixtureViews(env.PULLBOARD_HOME); }
+  try { await cleanupFixtureViews(env.PULLBOARD_HOME, fixtureRoot); }
   catch (error) {
     preserveFixture = true;
     cleanupError = error;
