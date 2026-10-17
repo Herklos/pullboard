@@ -14,7 +14,7 @@ import { applyEngineMove, applyRelayMove, appliedSequence, prepareEngineMove } f
 import { executeMove } from '../src/api.js';
 import { main } from '../src/cli.js';
 import { refusePersonMove } from '../src/mcp.js';
-import { CAUSE_ENGINE } from '../src/machine.js';
+import { CAUSE_ENGINE, ENGINE_VERSION } from '../src/machine.js';
 import { rigorReport } from '../src/rigor.js';
 import { unpackRelease } from './release-archive.js';
 
@@ -206,7 +206,8 @@ test('a cause key is checked, recorded on reject and reopen, and the person alon
   const second = board.add('Sealed');
   board.submit(second);
   const move = prepareEngineMove(board.board, 'verify', [second, { agentId: 'app-2', decision: 'REJECT', reason: 'TEST_FAILURE', note: 'red', cause: 'row:G1', head: store.getItem(board.board, second).item_commit, digest: 'digest:Sealed', policy: 'any' }]);
-  assert.equal(move.engine, CAUSE_ENGINE);
+  assert.equal(CAUSE_ENGINE, 30, 'cause moves keep their stable minimum engine');
+  assert.equal(move.engine, ENGINE_VERSION, 'new envelopes declare the current engine independently of the feature minimum');
   for (const older of [19, CAUSE_ENGINE - 1]) {
     assert.throws(() => applyEngineMove(board.board, { ...move, engine: older }, { sequence: 1, at: new Date().toISOString() }),
       (error) => error.code === 'RELAY_MOVE', `an engine-${older} move cannot carry a cause key`);
