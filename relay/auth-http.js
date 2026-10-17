@@ -67,7 +67,7 @@ export function createAuthHandler({ auth, publicOrigin }) {
   const secure = origin.protocol === 'https:' ? '; Secure' : '';
   const routes = new Set(['GET /auth/github/start', 'GET /auth/github/callback', 'POST /auth/device/start', 'POST /auth/device/poll', 'POST /auth/device/cancel',
     'GET /auth/device/confirm', 'POST /auth/device/confirmation/open', 'POST /auth/device/confirmation/status', 'POST /auth/device/confirmation',
-    'GET /auth/session', 'GET /auth/boards', 'POST /auth/boards/link', 'POST /auth/machines', 'GET /auth/tokens', 'POST /auth/tokens', 'POST /auth/tokens/revoke']);
+    'GET /auth/session', 'GET /auth/boards', 'POST /auth/boards/link', 'POST /auth/machines', 'GET /auth/machines', 'GET /auth/tokens', 'POST /auth/tokens', 'POST /auth/tokens/revoke']);
 
   /** Resolve a bearer or cookie credential; cookie writes require an exact trusted Origin. */
   function token(req, write = false) {
@@ -140,6 +140,8 @@ export function createAuthHandler({ auth, publicOrigin }) {
         const bearer = token(req, true);
         const input = await body(req);
         json(res, 200, { board: await auth.linkBoard(bearer, input.board, input.repository) });
+      } else if (route === 'GET /auth/machines') {
+        json(res, 200, { machines: await auth.listMachines(token(req), url.searchParams.get('board')) });
       } else if (route === 'POST /auth/machines') {
         const bearer = token(req, true);
         json(res, 201, await auth.issueMachine(bearer, await body(req)));
@@ -157,7 +159,7 @@ export function createAuthHandler({ auth, publicOrigin }) {
     } catch (error) {
       const code = error instanceof Refused ? error.code : 'INTERNAL_ERROR';
       const message = error instanceof Refused ? error.message.replace(/^\[[^\]]+\] /, '') : 'the relay could not complete this request; retry or contact its coordinator';
-      const status = code === 'BOARD_NOT_LINKED' ? 404 : code === 'AUTH_REQUIRED' ? 401 : ['DEVICE_REVOKED', 'NO_REPO_ACCESS', 'TOKEN_BOARD', 'TOKEN_NOT_OWNED', 'HUMAN_REQUIRED', 'BAD_ORIGIN', 'WRITE_REQUIRED'].includes(code) ? 403 : code === 'GITHUB_UNAVAILABLE' ? 503 : code === 'INTERNAL_ERROR' ? 500 : 400;
+      const status = code === 'RELAY_BOARD_DELETED' ? 410 : code === 'BOARD_NOT_LINKED' ? 404 : code === 'AUTH_REQUIRED' ? 401 : ['DEVICE_REVOKED', 'NO_REPO_ACCESS', 'TOKEN_BOARD', 'TOKEN_NOT_OWNED', 'HUMAN_REQUIRED', 'BAD_ORIGIN', 'WRITE_REQUIRED'].includes(code) ? 403 : code === 'GITHUB_UNAVAILABLE' ? 503 : code === 'INTERNAL_ERROR' ? 500 : 400;
       json(res, status, { error: { code, message, next: message } });
     }
     return true;
