@@ -10,7 +10,16 @@ const CHROME_FIXTURE = 'test/chrome-fixture.js';
 const FIXTURE_CHILD = 'test/fixture-child.js';
 const JOURNEYS_TEST = 'test/journeys.test.js';
 const TEST_RUNNER = 'bin/run-tests.js';
+/** Chrome fixture exports that never start a browser; any other binding, a new export included, counts as a launch. */
+const LAUNCH_FREE_CHROME_EXPORTS = new Set(['findChromeExecutable', 'requireBrowserSlot', 'waitForTargetAbsent', 'createWaiter', 'createSender',
+  'createEvaluator', 'createPageStepEvaluator']);
+/** Imports that let a module start another process or module, which by launch counts only with a Chrome reference. */
+const PROCESS_STARTERS = new Set(['node:child_process', 'node:worker_threads', 'node:cluster', 'node:module', 'node:vm']);
+/** A Chrome executable named in source: the paths and variable a direct launcher uses outside the guarded fixture. */
+const CHROME_EXECUTABLE = /PULLBOARD_CHROME|google-chrome|Google Chrome|chromium|puppeteer|playwright/iu;
 const VALUE_OPTIONS = new Set(['--test-concurrency', '--test-name-pattern', '--test-shard', '--test-skip-pattern', '--test-timeout']);
+/** What module-imports reports for a dynamic import whose target is not one plain string. */
+const COMPUTED_IMPORT = '(computed)';
 const FLAG_OPTIONS = new Set(['--test-only']);
 /** Path-scoped child-process exceptions with a short reason for each reviewed non-Chrome helper. */
 const SAFE_CHILD_PROCESS_MODULES = new Map([
@@ -189,6 +198,28 @@ function safeFixtureChildImport(source, request) {
   try { return !importsIn([remaining])[0].includes(request); } catch { return false; }
 }
 
+/** By launch, a Chrome fixture import is launch-free only as single-line named imports of launch-free exports.
+ * Anything else (a launch export, a namespace, default or dynamic import, a re-export of everything) is a launch.
+ * @param {string} source
+ * @param {string} request
+ * @returns {boolean}
+ */
+function launchFreeChromeImport(source, request) {
+  const escaped = request.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  const named = new RegExp(`^[ \\t]*(?:import|export)[ \\t]*\\{([^}\\r\\n]*)\\}[ \\t]*from[ \\t]*(['"])${escaped}\\2[ \\t]*;?[ \\t]*$`, 'u');
+  let removed = false;
+  const remaining = source.split(/\r?\n/u).filter(line => {
+    const match = named.exec(line);
+    if (!match) return true;
+    const names = match[1].split(',').map(part => part.trim()).filter(Boolean).map(part => part.split(/\s+as\s+/u)[0].trim());
+    if (!names.length || !names.every(name => LAUNCH_FREE_CHROME_EXPORTS.has(name))) return true;
+    removed = true;
+    return false;
+  }).join('\n');
+  if (!removed) return false;
+  try { return !importsIn([remaining])[0].includes(request); } catch { return false; }
+}
+
 /** Detect direct literal Chrome launchers without treating help text or refusal messages as launches. */
 function namesChromeLauncher(source) {
   return /\b(?:spawn|spawnSync|exec|execSync|execFile|execFileSync|fork)\s*\(\s*(['"`])[^'"`\r\n]*\b(?:chrome|chromium|playwright|puppeteer)\b/iu.test(source);
@@ -208,6 +239,14 @@ function usesDynamicBuiltinLoader(source) {
     const computedAlias = new RegExp(`\\b${escapedAlias}\\s*(?:\\?\\.)?\\[\\s*(?!(['"])env\\1\\s*\\])`, 'u');
     return computedAlias.test(source);
   });
+}
+
+/**
+ * Read gate.browserByLaunch; an unreadable settings file keeps today's broad classification, the safe side.
+ * Loaded on demand: callers that pass byLaunch (the runner's per-file admission) never open settings.
+ */
+async function browserByLaunchSetting() {
+  try { return (await import('./settings.js')).browserByLaunchEnabled(); } catch { return false; }
 }
 
 /** Report a one-line explanation when uncertainty reserves browser capacity.
@@ -295,8 +334,47 @@ async function localTarget(root, importer, request) {
   return found.length === 1 ? found[0] : null;
 }
 
-/** Classify test imports from either the current checkout or one immutable committed tree. */
-async function testsNeedBrowserInTree(root, files, committed = null, onFallback) {
+/**
+ * Parse each source's CommonJS use and imports once, in one child per batch, reusing earlier parses.
+ * A source that loads CommonJS is never import-parsed, since the caller refuses it first.
+ *
+ * @param {string[]} sources
+ * @param {Map<string, {commonJs:boolean, imports:string[]}>} memo
+ * @returns {{commonJs:boolean, imports:string[]}[]}
+ */
+function parsedSources(sources, memo) {
+  const fresh = [...new Set(sources.filter(source => !memo.has(source)))];
+  if (fresh.length) {
+    const commonJs = commonJsIn(fresh);
+    const plain = fresh.filter((_, index) => !commonJs[index]);
+    const imports = plain.length ? importsIn(plain) : [];
+    fresh.forEach((source, index) => memo.set(source, { commonJs: commonJs[index], imports: [] }));
+    plain.forEach((source, index) => { memo.get(source).imports = imports[index]; });
+  }
+  return sources.map(source => memo.get(source));
+}
+
+/**
+ * Classify test imports from either the current checkout or one immutable committed tree.
+ *
+ * By default any path to the Chrome fixture, or any process or module starter the walk cannot follow,
+ * reserves the browser. With byLaunch (machine setting gate.browserByLaunch) a file is browser-bound
+ * only when its graph reaches a real launch: a Chrome fixture binding that starts Chrome, or a process
+ * starter beside a Chrome executable reference. Cockpit files keep the browser until their own
+ * fixture carries the BROWSER_SLOT_REQUIRED guard, and the guard at test/chrome-fixture.js's launch
+ * point fails any launch the narrower walk misses.
+ *
+ * @param {string} root
+ * @param {string[]} files
+ * @param {Map<string, {mode:string,type:string,object:string}> | null} committed
+ * @param {((decision:{file:string,reason:string})=>void) | undefined} onFallback
+ * @param {boolean} [byLaunch] - unset reads gate.browserByLaunch from this machine's settings
+ * @param {Map<string, {commonJs:boolean, imports:string[]}>} [memo] - parses shared across one census of many files
+ * @param {Map<string, boolean>} [launchFree] - Chrome fixture import verdicts shared the same way
+ * @returns {Promise<boolean>}
+ */
+async function testsNeedBrowserInTree(root, files, committed = null, onFallback, byLaunch = undefined, memo = new Map(), launchFree = new Map()) {
+  byLaunch ??= await browserByLaunchSetting();
   if (!Array.isArray(files) || files.length === 0) return browserFallback(onFallback, '<test selection>', 'selection is empty or unavailable');
   const normalized = files.map((file) => repositoryPath(root, file));
   if (normalized.some((file) => file === null)) return browserFallback(onFallback, '<test selection>', 'a selected path is outside the repository');
@@ -311,7 +389,7 @@ async function testsNeedBrowserInTree(root, files, committed = null, onFallback)
       for (const path of frontier) {
         if (seen.has(path)) continue;
         seen.add(path);
-        if (path === CHROME_FIXTURE) return true;
+        if (path === CHROME_FIXTURE && !byLaunch) return true;
         if (path.endsWith('.json')) continue;
         if (/\.(?:cjs|cts)$/u.test(path)) return browserFallback(onFallback, path, 'CommonJS loader behavior is not statically classified');
         paths.push(path);
@@ -328,14 +406,17 @@ async function testsNeedBrowserInTree(root, files, committed = null, onFallback)
       if (!sources.length) break;
       if (paths.some((path, index) => (path.startsWith('test/') || SAFE_CHILD_PROCESS_MODULES.has(path))
         && namesChromeLauncher(sources[index]))) return true;
-      const dynamicLoaderIndex = sources.findIndex(usesDynamicBuiltinLoader);
+      // By launch, a process or module starter launches a browser only beside a Chrome executable reference.
+      const starts = sources.map(source => byLaunch && usesDynamicBuiltinLoader(source));
+      const dynamicLoaderIndex = byLaunch ? -1 : sources.findIndex(usesDynamicBuiltinLoader);
       if (dynamicLoaderIndex >= 0) return browserFallback(onFallback, paths[dynamicLoaderIndex], 'dynamic process builtin loading can load an unclassified module');
-      const commonJsIndex = commonJsIn(sources).findIndex(Boolean);
+      const commonJsIndex = parsedSources(sources, memo).findIndex(parsed => parsed.commonJs);
       if (commonJsIndex >= 0) return browserFallback(onFallback, paths[commonJsIndex], 'CommonJS loading is not statically classified');
-      const imports = importsIn(sources);
+      const imports = parsedSources(sources, memo).map(parsed => parsed.imports);
       const next = new Set();
       for (let index = 0; index < imports.length; index += 1) {
         for (const request of imports[index]) {
+          if (byLaunch && PROCESS_STARTERS.has(request)) { starts[index] = true; continue; }
           if (request === 'node:child_process') {
             const policy = SAFE_CHILD_PROCESS_MODULES.get(paths[index]);
             if (!policy) return browserFallback(onFallback, paths[index], 'child_process use has no reviewed path-and-reason exception');
@@ -349,17 +430,26 @@ async function testsNeedBrowserInTree(root, files, committed = null, onFallback)
             return browserFallback(onFallback, paths[index], 'node:vm can evaluate an unclassified module');
           }
           if (request.startsWith('node:')) continue;
+          if (byLaunch && request === COMPUTED_IMPORT) { starts[index] = true; continue; }
           if (!request.startsWith('.')) return browserFallback(onFallback, paths[index], `non-local import ${request} is not classified`);
           const target = committed
             ? committedTarget(committed, paths[index], request)
             : await localTarget(root, paths[index], request);
           if (!target) return browserFallback(onFallback, paths[index], `import ${request} is missing or ambiguous`);
           if (target === FIXTURE_CHILD && !safeFixtureChildImport(sources[index], request)) {
-            return browserFallback(onFallback, paths[index], 'fixture-child import exposes a generic caller-selected process target');
+            if (byLaunch) starts[index] = true;
+            else return browserFallback(onFallback, paths[index], 'fixture-child import exposes a generic caller-selected process target');
           }
-          if (target === CHROME_FIXTURE) return true;
+          if (target === CHROME_FIXTURE) {
+            if (!byLaunch) return true;
+            const key = `${request}\0${sources[index]}`;
+            if (!launchFree.has(key)) launchFree.set(key, launchFreeChromeImport(sources[index], request));
+            if (!launchFree.get(key)) return true;
+            continue;
+          }
           if (!target.endsWith('.json') && !seen.has(target)) next.add(target);
         }
+        if (starts[index] && CHROME_EXECUTABLE.test(sources[index])) return true;
       }
       frontier = [...next];
     }
@@ -369,7 +459,35 @@ async function testsNeedBrowserInTree(root, files, committed = null, onFallback)
   }
 }
 
-/** Return true for full or uncertain selections, cockpit tests, or imports reaching the Chrome fixture. */
-export async function testsNeedBrowser(root, files, { onFallback } = {}) {
-  return testsNeedBrowserInTree(root, files, null, onFallback);
+/**
+ * Return true for full or uncertain selections, cockpit tests, or imports reaching the Chrome fixture;
+ * with byLaunch, only for cockpit tests, uncertain graphs and graphs that reach a real Chrome launch.
+ *
+ * @param {string} root
+ * @param {string[]} files
+ * @param {{onFallback?:(decision:{file:string,reason:string})=>void, byLaunch?:boolean}} [options] - unset byLaunch reads gate.browserByLaunch
+ * @returns {Promise<boolean>}
+ */
+export async function testsNeedBrowser(root, files, { onFallback, byLaunch } = {}) {
+  return testsNeedBrowserInTree(root, files, null, onFallback, byLaunch);
+}
+
+/**
+ * Classify each file on its own, as the runner admits each test file, sharing parses across the set.
+ * This is the census behind gate.browserByLaunch: the files it returns are the ones that take a slot.
+ *
+ * @param {string} root
+ * @param {string[]} files
+ * @param {{byLaunch?:boolean}} [options] - unset reads gate.browserByLaunch
+ * @returns {Promise<string[]>}
+ */
+export async function browserBoundFiles(root, files, { byLaunch } = {}) {
+  byLaunch ??= await browserByLaunchSetting();
+  const memo = new Map();
+  const launchFree = new Map();
+  const bound = [];
+  for (const file of files) {
+    if (await testsNeedBrowserInTree(root, [file], null, undefined, byLaunch, memo, launchFree)) bound.push(file);
+  }
+  return bound;
 }

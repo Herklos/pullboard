@@ -1239,7 +1239,10 @@ async function executeTests(args, sandbox, gateMarkers, fullSuite, concurrency) 
   // This is an inner file limit; the real machine gate/browser lease remains unchanged.
   env.PULLBOARD_TEST_BROWSER_RESOURCE = 'test-browser-files:' + randomUUID();
   env.PULLBOARD_TEST_BROWSER_CAPACITY = String(concurrency.browser);
+  // Each file's worker classifies itself; the machine setting reaches it here, since tests get a private machine home.
+  env.PULLBOARD_TEST_BROWSER_BY_LAUNCH = concurrency.byLaunch ? '1' : '';
   delete env.PULLBOARD_TEST_BROWSER_OWNER_PID;
+  delete env.PULLBOARD_TEST_BROWSER_SLOT;
   let selectedArgs = args;
   if (fullSuite) {
     let files;
@@ -1278,7 +1281,8 @@ async function main(args) {
   try {
     testTimeoutMs();
     const { testConcurrency } = await import('../src/gate.js');
-    concurrency = testConcurrency(process.cwd());
+    const { browserByLaunchEnabled } = await import('../src/settings.js');
+    concurrency = { ...testConcurrency(process.cwd()), byLaunch: browserByLaunchEnabled() };
   } catch (error) {
     process.stderr.write(`${error.message}\n`);
     process.exitCode = 1;
@@ -1396,13 +1400,20 @@ if (process.argv[1] && resolve(process.argv[1]) === runner) {
       && !process.env.PULLBOARD_TEST_BROWSER_OWNER_PID) {
     // The worker is announced to #589 before it can wait here; admission remains before file import/body.
     process.env.PULLBOARD_TEST_BROWSER_OWNER_PID = String(process.pid);
+    // The test body never sees the setting itself: its own fixtures classify with their own machine settings.
+    const byLaunch = process.env.PULLBOARD_TEST_BROWSER_BY_LAUNCH === '1';
+    delete process.env.PULLBOARD_TEST_BROWSER_BY_LAUNCH;
     const { testsNeedBrowser } = await import('../src/browser-admission.js');
-    if (await testsNeedBrowser(process.cwd(), [process.argv[1]])) {
+    if (await testsNeedBrowser(process.cwd(), [process.argv[1]], { byLaunch })) {
       const { takeResource } = await import('../src/resources.js');
       const lease = await takeResource({ name: process.env.PULLBOARD_TEST_BROWSER_RESOURCE,
         capacity: Number(process.env.PULLBOARD_TEST_BROWSER_CAPACITY), kind: 'test-browser-file', root: process.cwd() });
       // Hold through file cleanup and process exit, including abort/watchdog paths.
       process.once('exit', () => lease.release());
+      if (byLaunch) process.env.PULLBOARD_TEST_BROWSER_SLOT = 'held';
+    } else if (byLaunch) {
+      // test/chrome-fixture.js refuses a launch from this file and its children by name (BROWSER_SLOT_REQUIRED).
+      process.env.PULLBOARD_TEST_BROWSER_SLOT = 'none';
     }
   }
   if (!landingWorker) installTestWatchdog();
