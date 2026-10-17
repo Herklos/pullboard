@@ -482,6 +482,153 @@ test('an unauthenticated pairing link stays device-only through sign-in and a wr
   assert.equal(box.keyInRequest(), false);
 });
 
+/** Make this browser a 390-wide touch phone, so the page sees a coarse pointer and no hover. */
+async function asPhone(chrome) {
+  await chrome.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+  await chrome.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+}
+
+/** Install the person's real stand-in session cookie without reading any board link. */
+async function personCookie(chrome, box) {
+  const result = await chrome.send('Network.setCookie', {
+    name: 'pb_session', value: (await box.phoneSession()).token, url: box.origin, httpOnly: true, sameSite: 'Lax',
+  });
+  assert.equal(result.success, true, 'the real person session is installed in this private browser');
+}
+
+/** What a person can read and press on the page now: visible text, actions, sizes and colours. */
+const SCREEN_FACTS = `(() => {
+  const shown = node => node.getClientRects().length > 0 && getComputedStyle(node).visibility !== 'hidden';
+  const box = selector => { const node = document.querySelector(selector); return node && shown(node) ? Math.round(node.getBoundingClientRect().height) : null; };
+  const github = document.querySelector('#relay-screen .relay-github');
+  const rgb = github && shown(github) ? getComputedStyle(github).backgroundColor.match(/[0-9.]+/g).slice(0, 3).map(Number) : null;
+  return {
+    screen: document.documentElement.dataset.relayScreen ?? null,
+    text: document.body.innerText,
+    actions: [...document.querySelectorAll('a[href], button')].filter(shown).map(node => node.textContent.trim()),
+    cards: [...document.querySelectorAll('.card-panel')].filter(shown).length,
+    footer: shown(document.querySelector('footer.status')),
+    github: box('#relay-screen .relay-github'), githubLight: rgb && (0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]) / 255,
+    command: box('#relay-screen .relay-command'), agent: box('#relay-screen .relay-agent'),
+    commandFont: document.querySelector('#relay-screen .relay-command code') ? getComputedStyle(document.querySelector('#relay-screen .relay-command code')).fontFamily : null,
+  };
+})()`;
+
+/** Press a screen's Copy button and return what it put on the clipboard. */
+async function copied(chrome, selector) {
+  return chrome.evaluate(`(async () => {
+    const written = new Promise(resolveCopy => {
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async value => resolveCopy(value) } });
+    });
+    document.querySelector(${JSON.stringify(selector)}).click();
+    return written;
+  })()`);
+}
+
+const THIS_COMPUTER = /this computer|this machine|pullboard view|local view|try again/iu;
+
+test('a phone not signed in sees one GitHub button and nothing about this computer [H17,H5]', {
+  skip: !findChromeExecutable() && 'Chrome is not installed',
+}, async t => {
+  const box = await relayClientFixture(t);
+  const marker = 'PHONE_FIRST_SCREEN_BOARD_757';
+  assert.equal((await box.cli('add', box.lane, marker)).code, 0);
+  await box.link();
+  const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));
+  const encoded = readFileSync(box.keyFile, 'utf8').trim();
+  const computer = await startChrome();
+  t.after(() => computer.close());
+  await computer.navigate(box.origin);
+  await computer.waitFor("document.readyState === 'complete' && document.querySelector('#relay-screen') !== null");
+  assert.equal(await computer.evaluate('document.documentElement.dataset.relayScreen ?? null'), null, 'a computer keeps the page its own states draw');
+
+  const chrome = await startChrome();
+  t.after(() => chrome.close());
+  await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: "Object.defineProperty(navigator.storage, 'persist', { value: async () => false });" });
+  await asPhone(chrome);
+  const opened = [['directly', box.origin + '/'], ['after a pairing QR', box.origin + '/#device=' + 'A'.repeat(22) + '.' + 'B'.repeat(43)]];
+  for (const [how, url] of opened) {
+    await chrome.navigate('about:blank'); // A scanned QR opens a new page, never a fragment change in this one.
+    await chrome.navigate(url);
+    await chrome.waitFor("document.documentElement.dataset.relayScreen === 'sign-in' && location.hash === ''");
+    const facts = await chrome.evaluate(SCREEN_FACTS);
+    for (const words of ['Your boards, on your phone', 'Sign in with GitHub', 'Nothing to install on your phone.', 'Stuck? On your computer, ask your agent', 'Help me see my boards on my phone.']) {
+      assert.equal(facts.text.includes(words), true, how + ': the first screen says ' + words);
+    }
+    assert.deepEqual(facts.actions, ['Sign in with GitHub', 'Copy'], how + ': one GitHub button, and Copy for the sentence to the agent');
+    assert.doesNotMatch(facts.text, THIS_COMPUTER, how + ': nothing about this computer or pullboard view');
+    assert.doesNotMatch(facts.text, /\brelay\b|\blinked\b/iu, how + ': no relay or linked words');
+    assert.equal(facts.cards, 0, how + ': no empty cards');
+    assert.equal(facts.footer, false, how + ': no error footer');
+    assert.equal(facts.github, 60, how + ': the GitHub button is 60 px tall');
+    assert.ok(facts.githubLight < 0.2, how + ': the GitHub button is dark');
+    assert.equal(facts.text.trim().endsWith('Copy'), true, how + ': the screen ends with the Stuck line and its Copy');
+  }
+  assert.equal(await chrome.evaluate("sessionStorage.getItem('pullboard.relay.device-pair.v1') !== null"), true, 'the scanned pairing waits on this phone through sign-in');
+  assert.equal(await copied(chrome, '#relay-screen [data-copy]'), 'Help me see my boards on my phone.');
+  await chrome.evaluate('sessionStorage.clear()'); // The stand-in code above was never a real pairing.
+
+  await chrome.navigate('about:blank');
+  await chrome.navigate(box.origin + '/#board=' + link.board + '&key=' + encoded);
+  await chrome.waitFor("document.documentElement.dataset.relayScreen === 'sign-in' && location.hash === ''");
+  await chrome.evaluate("document.querySelector('#relay-screen .relay-github').click()");
+  await chrome.waitFor("document.querySelector('#chain')?.textContent.includes(" + JSON.stringify(marker) + ") && document.querySelector('#pairing-storage-notice') !== null");
+  const board = await chrome.evaluate(`({ text: document.body.innerText, screen: document.documentElement.dataset.relayScreen ?? null,
+    after: Boolean(document.querySelector('#chain').compareDocumentPosition(document.querySelector('#pairing-storage-notice')) & Node.DOCUMENT_POSITION_FOLLOWING),
+    line: (() => { const range = document.createRange(); range.selectNodeContents(document.querySelector('#pairing-storage-notice span')); return range.getClientRects().length; })(),
+    lineText: document.querySelector('#pairing-storage-notice').innerText })`);
+  assert.equal(board.screen, null, 'the GitHub button leads straight to the board');
+  assert.doesNotMatch(board.text, THIS_COMPUTER, 'the paired phone says nothing about this computer or pullboard view');
+  assert.equal(board.after, true, 'the board shows before the Home Screen line');
+  assert.equal(board.line, 1, 'the Home Screen notice is one line');
+  assert.match(board.lineText, /Home Screen/u);
+  await chrome.evaluate("document.querySelector('#pairing-storage-notice button').click()");
+  assert.equal(await chrome.evaluate("document.querySelector('#pairing-storage-notice') === null"), true, 'the Home Screen line dismisses');
+  await chrome.navigate(box.origin + '/');
+  await chrome.waitFor("document.querySelector('#chain')?.textContent.includes(" + JSON.stringify(marker) + ')');
+  assert.equal(await chrome.evaluate("document.querySelector('#pairing-storage-notice') === null"), true, 'a dismissed line stays dismissed');
+});
+
+test('signed in with nothing shared shows one command and waits [H5,H17]', {
+  skip: !findChromeExecutable() && 'Chrome is not installed',
+}, async t => {
+  const box = await relayClientFixture(t);
+  const marker = 'SHARED_WHILE_WAITING_757';
+  assert.equal((await box.cli('add', box.lane, marker)).code, 0);
+  for (const device of ['a phone', 'another computer']) {
+    const chrome = await startChrome();
+    t.after(() => chrome.close());
+    if (device === 'a phone') await asPhone(chrome);
+    await personCookie(chrome, box);
+    await chrome.navigate(box.origin);
+    await chrome.waitFor("document.documentElement.dataset.relayScreen === 'share'");
+    const facts = await chrome.evaluate(SCREEN_FACTS);
+    for (const words of ['One step on your computer', 'pullboard relay on --all', 'Ask your agent', 'Help me share my boards with my phone.', 'Waiting for your boards']) {
+      assert.equal(facts.text.includes(words), true, device + ': the screen says ' + words);
+    }
+    assert.deepEqual(facts.actions, ['Copy', 'Copy'], device + ': Copy for the command and Copy for the agent sentence, and nothing to retry');
+    assert.doesNotMatch(facts.text.replace('pullboard relay on --all', ''), /\brelay\b|\blinked\b|local view|try again/iu, device + ': relay only inside the command');
+    assert.equal(facts.command, 60, device + ': the command box is 60 px tall');
+    assert.equal(facts.agent, 60, device + ': the agent box is the same height');
+    assert.match(facts.commandFont, /mono|Menlo|Consolas/iu, device + ': the command is in a mono box');
+    if (device === 'a phone') {
+      assert.doesNotMatch(facts.text, THIS_COMPUTER, 'the phone says nothing about this computer or pullboard view');
+      assert.equal(await copied(chrome, '#relay-screen .relay-command button'), 'pullboard relay on --all');
+      assert.equal(await copied(chrome, '#relay-screen .relay-agent button'), 'Help me share my boards with my phone.');
+      await chrome.evaluate('window.samePage757 = true');
+      await box.link();
+      const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));
+      const encoded = readFileSync(box.keyFile, 'utf8').trim();
+      // The person scans the QR into a second tab of the same phone browser; this tab is never touched.
+      const tab = await chrome.send('Target.createTarget', { url: box.origin + '/#board=' + link.board + '&key=' + encoded });
+      assert.equal(typeof tab.targetId, 'string');
+      await chrome.waitFor("document.querySelector('#chain')?.textContent.includes(" + JSON.stringify(marker) + ')');
+      assert.equal(await chrome.evaluate("window.samePage757 === true && (document.documentElement.dataset.relayScreen ?? null) === null"), true,
+        'the waiting page fills in by itself, with no click and no reload');
+    }
+  }
+});
+
 /** A pre-ordered mirror's durable local outbox keeps its final browser projection recoverable. */
 test('legacy queued presentations never disclose later unacknowledged moves [H5,H15]', async t => {
   const box = await relayClientFixture(t);
