@@ -259,3 +259,48 @@ test('a landing escape is proposed as a submit invariant only when modern submit
     {id:'producer-missing-selection',actor:'web-1'}), {code:'SUBMISSION_PROOF'},
   'the current producer refuses a missing receipt before sealing a move');
 });
+
+
+// Controlled version-33 envelopes must not erase evidence already recorded under version 34.
+for (const operation of ['recordLandingBatch', 'finishLandingBatch']) {
+  test(`a landing escape is proposed as a submit invariant: retained landing receipts require their original engine for ${operation} [C7,V4,H16]`, t => {
+    const box = e2e.sandbox();
+    const current = store.openBoard(join(box.dir, 'retained-current.sqlite'));
+    const legacy = store.openBoard(join(box.dir, 'retained-legacy33.sqlite'));
+    t.after(() => { store.closeBoard(current); store.closeBoard(legacy); });
+    for (const board of [current, legacy]) store.register(board, { lane: 'coordinator', path: '/fixture/main' });
+    const batch = { version: 1, id: 'retained-receipt', base: 'a'.repeat(40), tip: 'b'.repeat(40),
+      root: '/fixture/landing', branch: 'refs/heads/main', owner: 'fixture', state: 'pushed',
+      logPath: '/fixture/landing.log', items: [] };
+    // This synthetic normalized receipt exercises custody, not a claim of gate execution.
+    const evidence = { version: 1, gates: [{ commit: batch.tip, isGreen: false, submissions: [],
+      failures: ['test/escaped.test.js'], fileTimes: [{ path: 'test/escaped.test.js', durationMs: 10 }] }], diagnostics: [] };
+    const previous = store.recordLandingBatch(current, { agentId: 'coordinator', batch: { ...batch, invariantEvidence: evidence } });
+    const args = operation === 'recordLandingBatch'
+      ? [{ agentId: 'coordinator', batch: { ...batch, state: 'blocked' }, revision: previous.revision }]
+      : [{ agentId: 'coordinator', id: batch.id, tip: batch.tip }];
+    const move = { ...prepareEngineMove(current, operation, args, { id: `older-retained-${operation}` }), engine: 33 };
+    // A reached legacy control starts without modern evidence, rather than deleting real history.
+    const seeded = applyEngineMove(legacy, { version: 1, engine: 33, id: 'legacy-only-batch',
+      operation: 'recordLandingBatch', args: [{ agentId: 'coordinator', batch }] },
+    { sequence: 1, at: '2026-10-17T00:00:00.000Z' });
+    assert.equal(seeded.error, undefined, 'a controlled engine-33 batch still replays without invented evidence');
+    const legacyResult = applyEngineMove(legacy, { ...move, id: `legacy-only-${operation}` },
+      { sequence: 2, at: '2026-10-17T00:00:01.000Z' });
+    assert.equal(legacyResult.error, undefined, 'the older operation still works on its own legacy batch');
+    assert.equal(Object.hasOwn(store.landingBatches(legacy)[0], 'invariantEvidence'), false);
+    const eventCount = store.events(current).length;
+    let result;
+    let thrown;
+    try { result = applyEngineMove(current, move, { sequence: 1, at: '2026-10-17T00:00:02.000Z' }); }
+    catch (error) { thrown = error; }
+    const code = thrown?.code ?? result?.error?.code ?? null;
+    const after = store.landingBatches(current)[0];
+    console.log('review696 retained receipt boundary ' + JSON.stringify({ operation, engine: 33, code,
+      beforeEvidence: true, afterEvidence: Object.hasOwn(after, 'invariantEvidence'),
+      newEvents: store.events(current).length - eventCount, legacyReached: true }));
+    assert.equal(code, 'RELAY_MOVE', 'an older writer cannot adopt or finish a snapshot carrying a modern receipt');
+    assert.deepEqual(after, previous, 'the retained receipt and batch revision remain byte-equivalent');
+    assert.equal(store.events(current).length, eventCount, 'the refused old writer adds no board event');
+  });
+}
