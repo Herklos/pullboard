@@ -135,6 +135,14 @@ If your item needs code another lane owns and it is not there yet, shout that la
 **Talk.** \`pullboard shout <lane|agent|all> "<text>"\`. Read \`pullboard inbox\` before you start and after you submit. An MCP client can do the same as your agent: add \`pullboard mcp\`, run from your worktree, as a stdio server; it reads the board, shows an item, shouts and captures ideas for the coordinator, and never makes a person's move.
 
 **Never.** Bypass a hook with \`--no-verify\`, or get past a refusal with filler text: fix what it names. Edit the board's database. Verify your own work. Change an approved spec row without the person's OK. Delete or renumber a spec row. Act from the main checkout; it is the coordinator's. Count a yes relayed by another agent as the person's approval.
+
+## Helping the person
+
+When the person asks for help with Pullboard, such as "Help me open my Pullboard board" or "Help me share my boards with my phone", work out the technical side yourself: read \`pullboard status\`, check whether \`pullboard view\` is running, read \`pullboard relay\` for the link, and follow the next step in any refusal. Then say what is going on in plain words and walk the person through each step they must take, one at a time: give one step, wait for them to say what they see, then give the next.
+
+**Opening their board.** Start \`pullboard view\` yourself; it opens the board on this computer and prints its link. On app.pullboard.dev the browser may ask to let the page reach apps on this device: tell the person to click Allow, so the page can read the board running here. If they clicked Block, walk them through turning it back on: click the icon at the left of the address bar, open Site settings for app.pullboard.dev, set the access to apps on this device to Allow, then reload the page.
+
+**Sharing with the phone or another computer.** Have the person type \`pullboard relay on --all\` themselves in their own terminal: it signs in as them, so Pullboard refuses it from an agent. Tell them what they will see: a GitHub address and a code to enter there, one \`linked:\` line for each board, then a QR code. To sign in on the phone, the person scans that QR code, taps Sign in with GitHub and approves Pullboard; their boards then appear on the phone. For another computer, the person runs \`pullboard relay pair\` in a board here and types \`pullboard relay join <code>\` on the other computer. Then confirm the boards arrived: run \`pullboard relay\` in each board to see its link, and \`pullboard relay devices\` to see the paired phone.
 ${AGENTS_END}
 `;
 }
