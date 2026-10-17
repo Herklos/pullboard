@@ -63,8 +63,10 @@ test('only an authenticated person sender records a never-again over the relay [
   };
   tokens['coordinator-cause-only'] = tokens.coordinator;
   let sequence = (await relay(box, `/api/v1/boards/${link.board}/state`, link.token)).body.state.sequence;
+  const sent = [];
   for (const [label, move] of moves) {
     sequence += 1;
+    sent.push([label, sequence]);
     const sealed = Buffer.from(await seal(key, new TextEncoder().encode(JSON.stringify(move)), { boardId: link.board, kind: 'move', sequence })).toString('base64url');
     const stored = await relay(box, `/api/v1/boards/${link.board}/moves`, tokens[label], { method: 'POST', body: { sequence, sealed } });
     assert.equal(stored.status, 200, `the relay stores the ${label} envelope: ${JSON.stringify(stored.body)}`);
@@ -79,9 +81,12 @@ test('only an authenticated person sender records a never-again over the relay [
   // The native replica replays the journal and records each refusal by its sealed sender.
   assert.equal((await box.cli('status')).code, 0, 'native replay records the refusals and the person fact');
   const exported = (await box.cli('export')).document;
-  const refusals = exported.tables.event.filter((row) => row.event_kind === 'relay_refused').map((row) => [row.event_by, JSON.parse(row.event_detail).code]);
-  assert.deepEqual(refusals.slice(-4), [['rigor-relay-agent', 'RELAY_PERSON_ONLY'], [refusals.at(-3)[0], 'RELAY_PERSON_ONLY'], ['coordinator', 'RELAY_PERSON_ONLY'], ['coordinator', 'RELAY_PERSON_ONLY']],
-    'an agent, the machine credential and the coordinator seat are refused RELAY_PERSON_ONLY');
+  const refused = new Map(exported.tables.event.filter((row) => row.event_kind === 'relay_refused')
+    .map((row) => JSON.parse(row.event_detail)).map((detail) => [detail.sequence, detail.code]));
+  for (const [label, at] of sent) {
+    assert.equal(refused.get(at), label === 'person' ? undefined : 'RELAY_PERSON_ONLY',
+      label === 'person' ? 'the person sender is accepted' : `the ${label} sender is refused RELAY_PERSON_ONLY`);
+  }
   const facts = exported.tables.event.filter((row) => row.event_kind === 'fact');
   assert.deepEqual(facts.map((row) => [row.event_by, JSON.parse(row.event_detail).text]), [[PERSON, 'never again from person']],
     'only the person sender recorded a fact; nothing was recorded for the refused senders');
