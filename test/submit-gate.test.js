@@ -13,7 +13,7 @@ import { after, test } from 'node:test';
 import { selectAffectedTests } from '../src/affected-tests.js';
 import { configFromSource } from '../src/config.js';
 import { checkAtCommit } from '../src/trusted-policy.js';
-import { refuseSandboxBlocked } from '../src/gate.js';
+import { refuseSandboxBlocked, sandboxBlockedOperation } from '../src/gate.js';
 
 const BIN = resolveBin();
 const dirs = [];
@@ -97,6 +97,71 @@ function commitAll(box, message = 'chore: fixture state') {
   box.git('commit', '-q', '-m', message);
   return box.git('rev-parse', 'HEAD');
 }
+
+/** Build a claimed submit fixture whose changed source selects a nested child-process test. */
+function childFailureSubmitBox(t, testSource) {
+  let box = privateRepo(t);
+  put(box.root, 'pullboard.json', JSON.stringify({ gate: 'node --test', affectedTests: 'node --test', spec: 'SPEC.md' }));
+  put(box.root, 'SPEC.md', SPEC);
+  put(box.root, 'src/listener-probe.js', 'export const listenerProbe = 1;\n');
+  put(box.root, 'test/listen-denial.js', [
+    "import net from 'node:net';",
+    "net.Server.prototype.listen = function deniedListen() {",
+    "  const error = new Error('listen EPERM: operation not permitted 127.0.0.1:0');",
+    "  Object.assign(error, { code: 'EPERM', syscall: 'listen', address: '127.0.0.1', port: 0 });",
+    '  throw error;',
+    '};',
+  ].join('\n'));
+  box.env.LISTEN_DENIAL_SHIM = join(box.root, 'test/listen-denial.js');
+  put(box.root, 'test/child-listener.test.js', testSource);
+  commitAll(box);
+  box = builderRepo(box);
+  const added = box.coordinator('add', 'build', 'Child-process gate fixture', '--check', 'true');
+  assert.equal(added.code, 0, added.err);
+  assert.equal(box.run('claim', '1').code, 0);
+  put(box.root, 'src/listener-probe.js', 'export const listenerProbe = 2;\n');
+  commitAll(box, 'feat(core): change listener probe [G1]');
+  return box;
+}
+
+/** Produce a real TAP failure containing a nested child's EPERM without relying on host sandbox support. */
+function childListenerTestSource() {
+  return [
+    "import { test } from 'node:test';",
+    "import assert from 'node:assert/strict';",
+    "import { spawnSync } from 'node:child_process';",
+    "import '../src/listener-probe.js';",
+    "test('the server child binds', () => {",
+    "  const child = spawnSync(process.execPath, ['--import', process.env.LISTEN_DENIAL_SHIM, '--input-type=module', '-e', \"import { createServer } from 'node:net'; createServer().listen(0, '127.0.0.1');\"], { encoding: 'utf8' });",
+    "  assert.equal(child.status, 0, `App exited before listening (code ${child.status}, signal ${child.signal}):\\n${child.stderr}`);",
+    '});',
+  ].join('\n');
+}
+
+test('a child process listen denial reads as sandbox blocked [C7,B26]', (t) => {
+  const box = childFailureSubmitBox(t, childListenerTestSource());
+  const result = box.run('submit', '1');
+  const output = `${result.out}\n${result.err}`;
+  assert.equal(result.code, 1, output);
+  assert.match(output, /SANDBOX_BLOCKED/u, 'submit names the denied child-process listen');
+  assert.match(output, /listen \(EPERM\)/u);
+  assert.doesNotMatch(output, /GATE_RED/u);
+});
+
+test('an ordinary failure stays gate red [C7,B26]', (t) => {
+  const source = [
+    "import { test } from 'node:test';",
+    "import assert from 'node:assert/strict';",
+    "import '../src/listener-probe.js';",
+    "test('ordinary failure', () => assert.fail('ordinary assertion failure'));",
+  ].join('\n');
+  const box = childFailureSubmitBox(t, source);
+  const result = box.run('submit', '1');
+  const output = `${result.out}\n${result.err}`;
+  assert.equal(result.code, 1, output);
+  assert.match(output, /GATE_RED/u);
+  assert.doesNotMatch(output, /SANDBOX_BLOCKED/u);
+});
 
 /** Seed a small import graph with three independently discoverable test files. */
 function seedGraph(box) {
@@ -1059,4 +1124,40 @@ test('a sandbox-blocked gate asks the person [I1,C7]', async (t) => {
     assert.equal(inside.sandboxBlocked, null, 'a private-clone file stays inside that check worktree');
     assert.equal(JSON.parse(box.coordinator('show', '1', '--json').out).item_status, 'submitted', 'checks alone record no verdict');
   });
+});
+
+test('nested TAP child denials require bounded matching fatal details [C7,B26]', (t) => {
+  const box = privateRepo(t);
+  const outside = join(box.dir, 'outside-denied.txt');
+  /** Build a failed child TAP record with configurable structured error fields. */
+  function tapChildError({ code = 'EACCES', messageCode = 'EACCES', syscall = 'open', path = outside, extra = '' } = {}) {
+    return [
+      'TAP version 13',
+      'not ok 1 - child opens a denied file',
+      '  ---',
+      "  failureType: 'testCodeFailure'",
+      '  error: |-',
+      '    App exited before opening the file (code 1, signal null):',
+      `    Error: ${messageCode}: permission denied, ${syscall} '${outside}'`,
+      '    {',
+      `      code: '${code}',`,
+      `      syscall: '${syscall}',`,
+      `      path: '${path}'`,
+      '    }',
+      ...extra.split('\n').filter(Boolean).map((line) => `    ${line}`),
+      "  code: 'ERR_ASSERTION'",
+      '  ...',
+    ].join('\n');
+  }
+  const blocked = sandboxBlockedOperation(box.root, tapChildError());
+  assert.equal(blocked, `open "${outside}" (EACCES)`);
+
+  assert.equal(sandboxBlockedOperation(box.root, tapChildError({ code: 'EPERM_FAKE', messageCode: 'EACCES' })), null,
+    'the structured code must exactly match the child error');
+  assert.equal(sandboxBlockedOperation(box.root, tapChildError({ path: join(box.root, 'inside.txt') })), null,
+    'the structured child path must match the resolved denied target');
+  assert.equal(sandboxBlockedOperation(box.root, tapChildError({ extra: Array(65).fill('bounded continuation').join('\n') })), null,
+    'an oversized error block is not classified');
+  assert.equal(sandboxBlockedOperation(box.root, tapChildError(), { includeFilePaths: false }), null,
+    'file-path classification remains disabled when requested');
 });

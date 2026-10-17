@@ -218,6 +218,37 @@ function tapScalar(value) {
   return /^[A-Z_]+$/u.test(value) ? value : null;
 }
 
+/** Recognize a bounded child fatal denial carried inside one failed TAP error block. */
+function nestedChildPermission(root, lines, { includeFilePaths = true } = {}) {
+  const detail = lines.join('\n');
+  const childExit = /\b(?:child|app|server|process)\b[^\n]{0,120}\bexited\b[^\n]{0,100}\bcode\s*[(:=]?\s*([1-9]\d*)/iu.exec(detail);
+  if (!childExit || !Number.isSafeInteger(Number(childExit[1]))) return null;
+
+  const errorLine = /^\s*Error: (.+)$/mu.exec(detail);
+  if (!errorLine) return null;
+  const operation = permissionOperation(root, errorLine[1], { includeFilePaths });
+  if (!operation?.syscall) return null;
+
+  const objectStart = detail.indexOf('{', errorLine.index + errorLine[0].length);
+  if (objectStart < 0) return null;
+  const objectEnd = detail.indexOf('}', objectStart + 1);
+  if (objectEnd < 0 || objectEnd - objectStart > 2048) return null;
+  const fields = detail.slice(objectStart, objectEnd + 1);
+  /** Read one exact structured field, removing only TAP's optional delimiter comma. */
+  const fieldValue = (name) => {
+    const match = new RegExp(`(?:^|\\n)\\s*${name}:\\s*(.*?)\\s*(?=\\n|$)`, 'u').exec(fields);
+    return match ? tapScalar(match[1].replace(/,$/u, '')) : null;
+  };
+  const code = fieldValue('code');
+  const syscall = fieldValue('syscall');
+  if (code !== operation.code || syscall !== operation.syscall) return null;
+  if (operation.path) {
+    const childPath = fieldValue('path');
+    if (typeof childPath !== 'string' || diagnosticPath(resolve(root, childPath)) !== operation.path) return null;
+  }
+  return operation;
+}
+
 /** Scan complete lines with bounded TAP state so assertion messages cannot impersonate OS codes. */
 export function sandboxBlockedScanner(root, { includeFilePaths = true } = {}) {
   let failureIndent = null;
@@ -229,6 +260,12 @@ export function sandboxBlockedScanner(root, { includeFilePaths = true } = {}) {
   let failureMessage = null;
   let failureType = false;
   let exitCode = null;
+  let nestedError = null;
+  let nestedErrorBytes = 0;
+  let nestedErrorLines = 0;
+  let nestedErrorOverflow = false;
+  const maxNestedErrorBytes = 16 * 1024;
+  const maxNestedErrorLines = 64;
   /** Retain one pending fatal diagnostic and the current failed TAP record. */
   return (raw) => {
     const line = raw.trim().replace(/^#\s*/u, '');
@@ -244,6 +281,7 @@ export function sandboxBlockedScanner(root, { includeFilePaths = true } = {}) {
       comment = null; startup = null;
       failureIndent = null; fieldIndent = null; permission = null; code = null;
       failureMessage = null; failureType = false; exitCode = null;
+      nestedError = null; nestedErrorBytes = 0; nestedErrorLines = 0; nestedErrorOverflow = false;
     }
     // Uncaught module-load errors are comments too. Keep their complete Node fatal
     // diagnostic pending; it is evidence only if the following file record failed
@@ -271,24 +309,38 @@ export function sandboxBlockedScanner(root, { includeFilePaths = true } = {}) {
       comment = null;
       fieldIndent = null; permission = null; code = null;
       failureMessage = null; failureType = false; exitCode = null;
+      nestedError = null; nestedErrorBytes = 0; nestedErrorLines = 0; nestedErrorOverflow = false;
     } else if (line === '---' && failureIndent !== null && indent === failureIndent + 2) {
       fieldIndent = indent;
     } else if (line === '...' && indent === fieldIndent) {
       failureIndent = null; fieldIndent = null; permission = null; code = null;
       startup = null; comment = null;
       failureMessage = null; failureType = false; exitCode = null;
+      nestedError = null; nestedErrorBytes = 0; nestedErrorLines = 0; nestedErrorOverflow = false;
+    } else if (nestedError !== null && (indent > fieldIndent || line === '')) {
+      const nestedLine = line;
+      nestedErrorBytes += Buffer.byteLength(nestedLine, 'utf8') + 1;
+      nestedErrorLines += 1;
+      if (nestedErrorBytes > maxNestedErrorBytes || nestedErrorLines > maxNestedErrorLines) nestedErrorOverflow = true;
+      else nestedError.push(nestedLine);
     } else if (fieldIndent !== null && indent === fieldIndent) {
       const field = /^(error|code|failureType|exitCode): (.*)$/u.exec(line);
       if (field) {
         const value = tapScalar(field[2]);
         if (field[1] === 'error') {
           failureMessage = value;
+          nestedError = field[2] === '|-' || field[2] === '|' ? [] : null;
+          nestedErrorBytes = 0; nestedErrorLines = 0; nestedErrorOverflow = false;
           permission = typeof value === 'string' ? permissionOperation(root, value, { includeFilePaths }) : null;
         } else if (field[1] === 'code') {
           code = value;
           if (code !== 'ERR_TEST_FAILURE') startup = null;
         } else if (field[1] === 'failureType') failureType = value === 'testCodeFailure' || field[2] === 'testCodeFailure';
         else exitCode = /^[1-9]\d*$/u.test(field[2]) && Number.isSafeInteger(Number(field[2])) ? Number(field[2]) : null;
+        const nestedPermission = field[1] === 'code'
+          && failureType && nestedError && !nestedErrorOverflow
+          ? nestedChildPermission(root, nestedError, { includeFilePaths }) : null;
+        if (nestedPermission) return nestedPermission.operation;
         if (permission && permission.code === code) return permission.operation;
         if (startup && code === 'ERR_TEST_FAILURE' && failureMessage === 'test failed'
           && failureType && exitCode !== null) return startup.operation;
