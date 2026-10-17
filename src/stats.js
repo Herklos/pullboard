@@ -2,6 +2,7 @@
 import { events } from './board.js';
 import { Refused } from './refused.js';
 import { flowStats } from './stats-flow.js';
+import { barStats } from './bar-corrections.js';
 
 /** Parse an inclusive UTC date boundary, refusing malformed or impossible dates. */
 export function sinceDate(value) {
@@ -98,5 +99,6 @@ export function proofStats(board, { since, now = Date.now() } = {}) {
   const boundary = sinceDate(since);
   const history = events(board);
   const counts = countsFrom(history, boundary);
-  return { ...counts, ...actorsFrom(history, boundary), flow: flowStats(history, boundary, now, counts) };
+  const verdicts = board.db.prepare('SELECT * FROM verdict ORDER BY verdict_id').all();
+  return { ...counts, ...actorsFrom(history, boundary), bars: barStats(history, verdicts, boundary), flow: flowStats(history, boundary, now, counts) };
 }

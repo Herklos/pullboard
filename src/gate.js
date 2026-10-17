@@ -14,7 +14,7 @@ import { gitChildEnv, gitPath, headTree, invalidateGitFacts, isClean, untracked 
 import { secretsIn } from './hooks.js';
 import { Refused } from './refused.js';
 import { GATE_SLOT_HELD_ENV, gateSlotEnvironment, inheritedGateSlot, memoryAdmission, readMachineMemory, takeResource } from './resources.js';
-import { browserFreeChecksEnabled, loadMachineSettings, memoryFloorMB } from './settings.js';
+import { browserFreeChecksEnabled, gateQueueSettings, loadMachineSettings, memoryFloorMB } from './settings.js';
 import { selectAffectedTests } from './affected-tests.js';
 import { checkNeedsBrowser, testsNeedBrowser } from './browser-admission.js';
 import { timingFromOutput, timingRunner } from './timing.js';
@@ -513,6 +513,9 @@ export async function withGateSlot(root, action, { landing = false, itemCheck = 
   const floorMB = memoryFloorMB();
   const capacityProvider = () => settingsProvider().gateSlots;
   const source = runnerSource(root);
+  // Read the board once before queueing, never inside the machine admission transaction.
+  const releaseContext = gateQueueSettings().currentReleaseFirst
+    ? (await import('./release-queue.js')).captureReleaseQueue(root, item) : undefined;
   let lease = await takeResource({
     name: 'gate',
     capacity: capacityProvider(),
@@ -531,6 +534,7 @@ export async function withGateSlot(root, action, { landing = false, itemCheck = 
     allowIdleCapacityUpdate: true,
     remote: remote && Boolean(source),
     runnerProvider: () => loadMachineSettings().runners ?? [],
+    releaseContext,
     memory: floorMB === null ? undefined : memoryAdmission({ floorBytes: () => (memoryFloorMB() ?? floorMB) * 1024 ** 2, read: readMemory }),
     onWait,
   });

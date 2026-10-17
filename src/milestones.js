@@ -12,7 +12,7 @@ import { Refused } from './refused.js';
 import { atomic, itemById, listItems, logEvent, milestones } from './board.js';
 
 /** The engine at which a milestone carries a target and ships; older moves replay as they did. */
-export const MILESTONE_SHIP_ENGINE = 14;
+export const MILESTONE_SHIP_ENGINE = 21;
 
 /** The engine a move runs under: its recorded one during replay, else this client's. */
 function engineOf(board) {
@@ -163,7 +163,7 @@ export function addMilestone(board, { agentId, name, note = null, items = [] }) 
 }
 
 /**
- * Add or remove item references while preserving the remaining order. From engine 14 a shipped
+ * Add or remove item references while preserving the remaining order. From engine 21 a shipped
  * milestone takes no new items; removing one is still allowed.
  */
 export function editMilestoneItems(board, name, { agentId, add = [], remove = [] }) {
@@ -214,7 +214,7 @@ export function moveMilestone(board, name, { agentId, before }) {
 
 /**
  * Rename a milestone, update its note, or set its target without touching its items. A target is
- * an engine-14 meaning, so an older engine's edit replays exactly as it did.
+ * an engine-21 meaning, so an older engine's edit replays exactly as it did.
  */
 export function editMilestone(board, name, { agentId, newName, note, target }) {
   requireCoordinator(agentId);

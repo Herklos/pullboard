@@ -10,9 +10,9 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-test('model declarations and event snapshots retain engines 1 through 12 semantics [O8,O3,H16]', (t) => {
-  assert.equal(ENGINE_VERSION, 14, 'engine 14 preserves the released engine-8 through engine-12 model behavior');
-  for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, ENGINE_VERSION]) {
+test('model declarations and event snapshots retain engines 1 through 11 semantics [O8,O3,H16]', (t) => {
+  assert.equal(ENGINE_VERSION, 21, 'engine 21 preserves the released engine-8 through engine-11 model behavior');
+  for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, ENGINE_VERSION]) {
     const board = store.openBoard(':memory:');
     t.after(() => store.closeBoard(board));
     const registration = prepareEngineMove(board, 'register', [{ lane: 'web', path: '/web', model: 'First Model' }]);

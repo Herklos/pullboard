@@ -144,7 +144,7 @@ test('captured person decisions and coordinator apply replay identically without
 });
 
 test('engine 12 records preserved decline text and replays a separate reason [S18,S19,H16]', (t) => {
-  assert.ok(ENGINE_VERSION >= 12, 'engine 12 and later keep the preserved-text decline');
+  assert.ok(ENGINE_VERSION >= 12, 'engine 12 decline semantics hold in every later engine');
   const { source, copies: [one, two] } = decisionCopies(t);
   const preserved = {
     kind: 'spec', file: 'SPEC.md', id: 'G2',

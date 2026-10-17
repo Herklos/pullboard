@@ -2,6 +2,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import * as store from './board.js';
 import { recordedRefusal } from './recorded-refusal.js';
+import { BAR_ENGINE, carriesBarReason } from './bar-corrections.js';
 import { ENGINE_VERSION } from './machine.js';
 import { MILESTONE_SHIP_ENGINE, canonicalMilestoneTarget } from './milestones.js';
 import { Refused } from './refused.js';
@@ -24,16 +25,13 @@ export const ENGINE_OPERATIONS = Object.freeze([
 const OPERATION_ENGINE = Object.freeze({ reopen: 8, recordLandingBatch: 8, recordLandingWaiver: 8, recordLandingFlake: 8, finishLandingBatch: 8,
   shipMilestone: MILESTONE_SHIP_ENGINE });
 
-/**
- * Dependency edits add engine-10 meaning, and a milestone target engine-14 meaning, without
- * changing ordinary historical edit envelopes.
- */
+/** Dependency edits add engine-10 meaning, edit reasons engine-19 and a milestone target engine-21, without changing ordinary historical edit envelopes. */
 function minimumOperationEngine(operation, args) {
   const options = args[1];
-  const given = (key) => Boolean(options) && Object.hasOwn(options, key) && options[key] !== undefined;
-  if (operation === 'editItem' && given('after')) return 10;
-  if (operation === 'editMilestone' && given('target')) return MILESTONE_SHIP_ENGINE;
-  return OPERATION_ENGINE[operation] ?? 1;
+  if (carriesBarReason(operation, args)) return BAR_ENGINE;
+  if (operation === 'editMilestone' && options && Object.hasOwn(options, 'target') && options.target !== undefined) return MILESTONE_SHIP_ENGINE;
+  return operation === 'editItem' && options && Object.hasOwn(options, 'after') && options.after !== undefined
+    ? 10 : OPERATION_ENGINE[operation] ?? 1;
 }
 
 /** Read a replica's committed prefix without trusting an independently saved transport cursor. */
