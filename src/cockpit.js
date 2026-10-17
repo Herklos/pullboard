@@ -4,6 +4,7 @@ import {
   MACHINE,
 } from './machine.js';
 import { commandPhrases } from './help.js';
+import { personNeeds } from './needs.js';
 
 /** The CLI's default phrases, ordered by depth for the existing prose inventory guard. */
 export const PULLBOARD_COMMANDS = Object.freeze(commandPhrases().sort((left, right) => right.split(' ').length - left.split(' ').length));
@@ -296,6 +297,10 @@ let seen = '';
 let addressReady = false;
 let heldClickPointer = null;
 let deferredClickRender = false;
+// Detail replies stay with an unchanged summary, while search results are keyed by board and words.
+const itemDetails = new Map();
+const itemSearches = new Map();
+let detailRead = null;
 const addressedShouts = new Map();
 const $ = (id) => document.getElementById(id);
 
@@ -610,14 +615,11 @@ const count = (n, one, many = one) => n + ' ' + (n === 1 ? one : many);
 // and the line under the project says so without counting it.
 const needCount = (x) => x.ok && !x.loading ? x.decisions + x.pending + x.drafts + x.holds : 0;
 const doing = (x) => [x.decisions && count(x.decisions, 'decision', 'decisions'), x.pending && count(x.pending, 'question', 'questions'), x.drafts && count(x.drafts, 'draft row', 'draft rows'), x.holds && count(x.holds, 'lane held', 'lanes held'), x.sentBack && count(x.sentBack, 'sent back'), x.awaiting && count(x.awaiting, 'to verify'), x.building && count(x.building, 'building')].filter(Boolean).join(' · ') || (x.open ? count(x.open, 'item open', 'items open') : 'nothing open');
-/** The person's calls in one repo, as its Needs-you panel shows them, reused by a combined project view. */
+// Embed the standalone shared builder for live, exported and relay pages.
+const personNeeds = (${personNeeds.toString()});
+/** The person's calls in one repo, reused by a combined project view. */
 function projectNeeds(p) {
-  return [
-    ...p.decisions.map((d) => ({ ref: agentName(d.shout_from, p), text: d.shout_text, what: 'decision', at: d.shout_at })),
-    ...p.spec.filter((row) => row.status === 'pending' && !row.decision).map((row) => ({ ref: row.id, text: row.text, what: 'answer in SPEC.md' })),
-    ...p.holds.map((hold) => ({ ref: hold.hold_lane, text: hold.hold_reason, what: 'lane held by ' + agentName(hold.hold_by, p) })),
-    ...(p.spec.some((row) => row.status === 'draft' && !row.decision) ? [{ ref: String(p.spec.filter((row) => row.status === 'draft' && !row.decision).length), text: 'draft spec rows to approve or drop', what: 'review in SPEC.md', target: 'tab:spec' }] : []),
-  ];
+  return personNeeds(p);
 }
 // The item lifecycle as pullboard declares it in src/machine.js, embedded when the page is served.
 const FLOW = ${JSON.stringify(lifecycle()).replaceAll('<', '\\u003c')};
@@ -652,12 +654,14 @@ function replay(item) {
 
 /** A recorded merge, rather than an accept, is the end of the shipping pipeline. */
 function pipelineStage(item) {
+  if (item.stage !== undefined) return item.stage;
   if (item.merged) return 'merged';
   return item.status === 'verified' ? 'accepted' : item.status;
 }
 
 /** The last arrival in this stage; edits, review reservations and renewals do not restart its age. */
 function pipelineSince(item) {
+  if (item.since !== undefined) return item.since;
   if (item.merged) return item.history.findLast((event) => event.kind === 'merged')?.at || item.updatedAt;
   const arrival = replay(item).findLast((step) => step.move && step.from !== step.move.to);
   // Lapses are inferred, but the native claim receipt records the deadline that caused them.
@@ -668,14 +672,28 @@ function pipelineSince(item) {
   return arrival ? arrival.at || item.updatedAt : item.history.find((event) => event.kind === 'add')?.at || item.updatedAt;
 }
 
+/** Add the list and pipeline fields omitted from full snapshots, while leaving API summaries intact. */
+function listFields(item, fresh = false) {
+  if (!fresh && item.stage !== undefined) return item;
+  const claim = item.status === 'claimed' && item.owner ? { by: item.owner, until: null }
+    : item.status === 'submitted' && item.reviewer ? { by: item.reviewer, until: item.reviewUntil ?? null } : null;
+  return { ...item, stage: pipelineStage(item), since: pipelineSince(item), claim,
+    counts: { verdicts: item.verdicts.length, facts: (item.thread || []).filter((entry) => entry.type === 'fact').length } };
+}
+
+/** Resolve a builder from the full item's owner or the live claim in an API summary. */
+const holderOf = (item) => item.status === 'claimed' ? item.claim?.by ?? item.owner ?? null : null;
+/** Resolve a reviewer from the full item or the live claim in an API summary. */
+const reviewerOf = (item) => item.status === 'submitted' ? item.claim?.by ?? item.reviewer ?? null : null;
+
 /** Render the same board's items in lifecycle order, retaining every item as a detail link. */
 function pipelineCard(items) {
   const stages = [['open', 'Not started'], ['claimed', 'Building'], ['submitted', 'Waiting for review'], ['accepted', 'Accepted, waiting to merge'], ['merged', 'Merged']];
   return stages.map(([stage, label]) => {
-    const rows = items.filter((item) => pipelineStage(item) === stage).sort((a, b) => pipelineSince(a).localeCompare(pipelineSince(b)) || a.id - b.id);
+    const rows = items.map((item) => listFields(item)).filter((item) => item.stage === stage).sort((a, b) => a.since.localeCompare(b.since) || a.id - b.id);
     const oldest = rows[0];
     return '<li class="card-panel pipeline-stage" data-pipeline-stage="' + stage + '"><header><h2>' + label + '</h2><b data-stage-count="' + stage + '">' + rows.length + '</b></header>'
-      + (oldest ? '<p class="pipeline-oldest">Oldest <a class="ref" href="' + esc(itemAddress(oldest.id)) + '" data-go="item:' + oldest.id + '">#' + oldest.id + '</a> · ' + age(pipelineSince(oldest)) + ' in this stage</p>' : '<p class="pipeline-oldest">No items</p>')
+      + (oldest ? '<p class="pipeline-oldest">Oldest <a class="ref" href="' + esc(itemAddress(oldest.id)) + '" data-go="item:' + oldest.id + '">#' + oldest.id + '</a> · ' + age(oldest.since) + ' in this stage</p>' : '<p class="pipeline-oldest">No items</p>')
       + '<ul>' + rows.map((item) => '<li><button class="pipeline-item' + (view.item === item.id ? ' on' : '') + '" type="button" data-item="' + item.id + '"><span>#' + item.id + '</span><span>' + esc(item.title) + '</span></button></li>').join('') + '</ul></li>';
   }).join('');
 }
@@ -764,7 +782,8 @@ function timeline(item) {
  * none was. Words are wrapped and placed by a generous estimate of their width, so none overlaps.
  */
 function flowSvg(p) {
-  const counts = moveCounts(p.items);
+  // Summary states include board-wide tallies, so the lifecycle drawing needs no per-item histories.
+  const counts = p.moveCounts ? new Map(Object.entries(p.moveCounts)) : moveCounts(p.items);
   const finals = FLOW.states.filter((s) => s.final).map((s) => s.id);
   const leads = (s) => FLOW.moves.filter((m) => m.from.includes(s) && m.to !== s).map((m) => m.to);
   let row = [];
@@ -1090,6 +1109,9 @@ function renderPersonRequests(project) {
 
 /** A board's sidebar counts, derived from the same API state the page displays. */
 function boardSummary(board, state) {
+  const needs = personNeeds(state);
+  /** Count the calls, with draft rows retaining their individual count in the sidebar. */
+  const calls = (kind) => needs.filter((row) => row.kind === kind).reduce((total, row) => total + (row.count ?? 1), 0);
   /** Count one item state for the sidebar. */
   const count = (test) => state.items.filter(test).length;
   return {
@@ -1099,13 +1121,13 @@ function boardSummary(board, state) {
     sentBack: count((item) => item.status === 'open' && item.verdict && item.verdict.decision === 'REJECT'),
     open: count((item) => item.status === 'open'),
     verified: count((item) => item.status === 'verified'),
-    pending: state.spec.filter((row) => row.status === 'pending' && !row.decision).length,
-    drafts: state.spec.filter((row) => row.status === 'draft' && !row.decision).length,
-    holds: state.holds.length,
-    decisions: state.decisions.length,
+    pending: calls('pending'),
+    drafts: calls('draft'),
+    holds: calls('hold'),
+    decisions: calls('decision'),
     // What each item's state reads from, so another repo's roadmap can show it as this board's
     // Items tab does, sent back included, and open it here.
-    items: state.items.map((item) => ({ id: item.id, title: item.title, status: item.status, merged: Boolean(item.merged), verdict: item.verdict && { decision: item.verdict.decision } })),
+    items: state.items.map((item) => ({ id: item.id, title: item.title, status: item.status, stage: item.stage ?? pipelineStage(item), verdict: item.verdict && { decision: item.verdict.decision } })),
   };
 }
 
@@ -1241,6 +1263,63 @@ async function boardState(root, mark, fresh = null) {
   };
 }
 
+/** Whether a board state already carries every item's detail, as exports and event replays do. */
+const fullItems = (project) => project.items.every((item) => Array.isArray(item.history));
+
+/** Text available locally for an item before the API searches criteria omitted from summaries. */
+const searchedText = (item) => ('#' + item.id + ' ' + item.title + ' ' + item.lane + ' ' + item.specs.join(' ') + ' ' + (item.criterion || '')).toLowerCase();
+
+/** Whether the board has a gap in its retained events or an item event newer than a detail read. */
+function movedSince(project, id, cursor) {
+  const events = project.events || [];
+  if (!events.length || events[0].event_id <= cursor) return false;
+  if (events.at(-1).event_id > cursor + 1) return true;
+  return events.some((event) => event.event_id > cursor && event.item_id === id);
+}
+
+/** Load one opened item's omitted fields, retaining them only while its summary and event cursor stay current. */
+function detailOf(project, item, ask) {
+  if (Array.isArray(item.history)) return { item };
+  const root = view.root, key = root + '\\n' + item.id, summary = JSON.stringify(item);
+  const kept = itemDetails.get(key);
+  /** Keep the prior detail visible during a refresh, or return the short initial loading state. */
+  const waiting = (entry) => (entry?.shown ? { item: { ...item, ...entry.shown } } : { loading: true });
+  if (kept?.loading) return waiting(kept);
+  if (kept && kept.summary === summary && !movedSince(project, item.id, kept.cursor)) {
+    return kept.error ? { error: kept.error } : { item: { ...item, ...kept.detail } };
+  }
+  if (!ask) return waiting(kept && { shown: kept.detail });
+  const entry = { loading: true, summary, cursor: project.events?.[0]?.event_id ?? 0, detail: null, error: null, shown: kept?.detail ?? null };
+  itemDetails.set(key, entry);
+  detailRead = api(boardPath(root) + '/items/' + encodeURIComponent(String(item.id))).then((reply) => { entry.detail = reply.item; },
+    (error) => { entry.error = String(error.message || error); }).finally(() => {
+    entry.loading = false;
+    if (view.root === root && view.item === item.id) render();
+  });
+  return waiting(entry);
+}
+
+/** Search full snapshots locally and summary states through the API, once per query and board. */
+function searchIds(project, words) {
+  const query = words.trim().toLowerCase();
+  const local = new Set(project.items.filter((item) => searchedText(item).includes(query)).map((item) => item.id));
+  if (!query || fullItems(project) || data.root !== view.root) return local;
+  const root = view.root, key = root + '\\n' + query;
+  const kept = itemSearches.get(key);
+  if (kept) return kept.ids || local;
+  const entry = { ids: null };
+  itemSearches.set(key, entry);
+  api(boardPath(root) + '/items?q=' + encodeURIComponent(query)).then((reply) => {
+    entry.ids = new Set(reply.ids);
+    if (view.root !== root || $('q').value.trim().toLowerCase() !== query) return;
+    render();
+    if (!$('find-results').hidden) showFound();
+  }, () => {
+    if (itemSearches.get(key) === entry) itemSearches.delete(key);
+  });
+  return local;
+}
+
 // Keep credential metadata apart from board snapshots and scoped to the selected project (H2,H9).
 const credentials = new Map();
 
@@ -1336,7 +1415,10 @@ async function refresh(fresh = null) {
     seen = text;
     data = next;
     syncBoardMode(view.root);
+    itemSearches.clear();
+    const reading = detailRead;
     render();
+    if (detailRead !== reading) await detailRead;
   }
   if (changed) {
     address(false);
@@ -2096,12 +2178,13 @@ function render() {
   // What needs the person, first, and only the person's calls (B26): the decisions passed up to them,
   // questions in the spec, held lanes, then draft rows. Work waiting for a verdict or sent back shows
   // on the board with who holds it; it is the agents' to move.
-  const needs = [
-    ...p.decisions.map((d) => ['decide:' + d.shout_id, agentName(d.shout_from, p), d.shout_text, 'decide', d.shout_at]),
-    ...p.spec.filter((r) => r.status === 'pending' && !r.decision).map((r) => ['spec:' + r.id, r.id, r.text, 'answer in SPEC.md']),
-    ...p.holds.map((h) => ['tab:shouts', h.hold_lane, h.hold_reason, 'lane held by ' + agentName(h.hold_by), h.hold_at]),
-  ];
-  const drafts = p.spec.filter((r) => r.status === 'draft' && !r.decision).length;
+  const personalNeeds = personNeeds(p);
+  // Adapt display targets and the existing hold age without reimplementing which calls belong here.
+  const needs = personalNeeds.filter((row) => row.kind !== 'draft').map((row) => row.kind === 'decision'
+    ? ['decide:' + row.id, row.ref, row.text, 'decide', row.at]
+    : row.kind === 'pending' ? ['spec:' + row.id, row.ref, row.text, row.what]
+      : ['tab:shouts', row.ref, row.text, row.what, p.holds.find((hold) => hold.hold_lane === row.id)?.hold_at]);
+  const drafts = personalNeeds.find((row) => row.kind === 'draft')?.count ?? 0;
   // Each of the person's calls is a row at the head of Active, shaped like an item: what it is first, then NEEDS YOU and
   // its kind where an item has its lane, and what to do at the right. Every call is a row; the draft rows are one row
   // with their count. Read-only, a row is its words, opening nothing.
@@ -2132,8 +2215,8 @@ function render() {
   $('pipeline').hidden = !pipeline;
   // Each Show choice counts what it would show under the lane and the search. A search looks through every
   // state, withdrawn items included; browsing leaves those out.
-  const matching = (q ? p.items : items)
-    .filter((i) => !q || ('#' + i.id + ' ' + i.title + ' ' + i.lane + ' ' + i.specs.join(' ') + ' ' + (i.criterion || '')).toLowerCase().includes(q));
+  const found = searchIds(p, q);
+  const matching = (q ? p.items : items).filter((item) => !q || found.has(item.id));
   // Gated is one test, shared by the rows, the Gated filter and the status bar: open and waiting on an item or a held lane.
   const heldLanes = new Map(p.holds.map((h) => [h.hold_lane, h]));
   const gatedOf = (i) => stateOf(i) === 'open' && (i.blockedBy.length > 0 || heldLanes.has(i.lane));
@@ -2188,8 +2271,9 @@ function render() {
     const waits = s === 'open' && i.blockedBy.length ? i.blockedBy : [];
     const gated = gatedOf(i);
     const pills = (waits.length ? '<span class="gate">' + waits.map((id, index) => '<span class="wait-unit">' + (index ? '' : 'waits on ') + '<a class="ref" href="' + esc(itemAddress(id)) + '" data-go="item:' + id + '">#' + id + '</a></span>').join(', ') + '</span>' : '') + (hold ? '<span class="gate">lane held: ' + linked(hold.hold_reason, titles) + '</span>' : '');
-    const tag = s === 'building' && i.owner ? '<span class="chip busy" title="building, held by ' + esc(agentName(i.owner)) + '">' + esc(agentName(i.owner)) + '</span>'
-      : s === 'verify' && i.reviewer ? '<span class="chip warn" title="reviewing until ' + esc(when(i.reviewUntil)) + '">' + esc(agentName(i.reviewer)) + ' reviewing</span>'
+    const holder = holderOf(i), reviewer = reviewerOf(i);
+    const tag = s === 'building' && holder ? '<span class="chip busy" title="building, held by ' + esc(agentName(holder)) + '">' + esc(agentName(holder)) + '</span>'
+      : s === 'verify' && reviewer ? '<span class="chip warn" title="reviewing until ' + esc(when(i.claim?.until ?? i.reviewUntil)) + '">' + esc(agentName(reviewer)) + ' reviewing</span>'
       : s === 'open' ? openChip(i) : chip(s);
     return recordRow({ classes: (view.item === i.id ? 'on ' : '') + (gated ? 'gated ' : ''), attributes: 'data-item="' + i.id + '"', title: i.title, state: s,
       primary: '<span>#' + i.id + '</span>' + rich(i.title, titles), rightTop: age(i.updatedAt), rightBottom: tag,
@@ -2198,14 +2282,18 @@ function render() {
         : '<span>' + esc(i.lane) + '</span>' + (i.specs.length ? '<span class="specs" title="' + esc(i.specs.join(', ')) + '">' + esc(i.specs.slice(0, 3).join(', ') + (i.specs.length > 3 ? ' +' + (i.specs.length - 3) : '')) + '</span>' : '')) + pills });
   }).join('') : '<li class="empty">' + (items.length ? 'No items match.' : snapshot ? 'No items at this event.' : 'No items yet. Add the first one with New item.') + '</li>';
 
-  const item = p.items.find((i) => i.id === view.item);
+  const selected = p.items.find((i) => i.id === view.item);
   // The form shows when asked for, or when the project has no item at all, withdrawn ones included.
   const adding = view.adding || (!p.items.length && !(view.tab === 'items' && view.addressDetail !== null && view.addressDetail !== 'pipeline'));
   $('add-form').hidden = !adding;
   $('add-cancel').hidden = !p.items.length;
   $('detail').hidden = adding;
-  if (!item) $('detail').innerHTML = '<div class="empty">' + (view.tab === 'items' && view.addressDetail !== null && view.addressDetail !== 'pipeline' ? 'No item #' + esc(view.addressDetail) + ' exists here.' : 'Pick an item to see its criterion, verdicts and history.') + '</div>';
-  if (item && !view.adding) {
+  if (!selected) $('detail').innerHTML = '<div class="empty">' + (view.tab === 'items' && view.addressDetail !== null && view.addressDetail !== 'pipeline' ? 'No item #' + esc(view.addressDetail) + ' exists here.' : 'Pick an item to see its criterion, verdicts and history.') + '</div>';
+  const opened = selected && !view.adding ? detailOf(p, selected, view.tab === 'items' && data.root === view.root) : null;
+  if (opened && !opened.item) $('detail').innerHTML = '<div class="stack"><p class="detail-wait muted" role="status">'
+    + (opened.error ? 'Could not load #' + selected.id + ': ' + esc(opened.error) : 'Loading #' + selected.id + '…') + '</p></div>';
+  const item = opened?.item;
+  if (item) {
     const s = stateOf(item);
     const cited = item.specs.map((id) => p.spec.find((r) => r.id === id) || { id, status: 'missing', text: '(not in SPEC.md)' });
     const baseline = item.checkBaseline;
@@ -2309,11 +2397,11 @@ function render() {
   // Each agent with what it holds: its claim, then its work sent back, then its work waiting for a
   // verdict. The worktree path is there on hover; what the person reads is who is doing what.
   // A review an agent holds (V15) comes right after its claim.
-  const rank = (a, i) => i.status === 'claimed' ? 0 : i.reviewer === a.agent_id ? 1 : stateOf(i) === 'back' ? 2 : 3;
-  const holding = (a) => items.filter((i) => i.status === 'claimed' ? i.owner === a.agent_id : i.reviewer === a.agent_id || (i.builtBy === a.agent_id && ['back', 'verify'].includes(stateOf(i)))).sort((x, y) => rank(a, x) - rank(a, y));
+  const rank = (a, i) => i.status === 'claimed' ? 0 : reviewerOf(i) === a.agent_id ? 1 : stateOf(i) === 'back' ? 2 : 3;
+  const holding = (a) => items.filter((i) => i.status === 'claimed' ? holderOf(i) === a.agent_id : reviewerOf(i) === a.agent_id || (i.builtBy === a.agent_id && ['back', 'verify'].includes(stateOf(i)))).sort((x, y) => rank(a, x) - rank(a, y));
   // The agents at work: holding a claim or a review now, or moved in the last hour. Every agent is one click away;
   // work an idle agent left sent back or waiting stays on the Items tab.
-  const recent = (a) => p.items.some((i) => (i.status === 'claimed' && i.owner === a.agent_id) || (i.status === 'submitted' && i.reviewer === a.agent_id))
+  const recent = (a) => p.items.some((i) => (i.status === 'claimed' && holderOf(i) === a.agent_id) || (i.status === 'submitted' && reviewerOf(i) === a.agent_id))
     || (a.lastMoveAt && Date.now() - Date.parse(a.lastMoveAt) < 36e5);
   const listed = view.allAgents ? p.agents : p.agents.filter(recent);
   // As little room as the panel can take: an agent holding work is one row, with its avatar and colour from the feed,
@@ -2322,7 +2410,7 @@ function render() {
   const busy = listed.filter((a) => holding(a).length), idle = listed.filter((a) => !holding(a).length);
   const face = (a) => lead(a.agent_id) ? '<span class="avatar">' + LEAD + '</span>' : '<span class="avatar' + (initials(a.agent_id).length > 3 ? ' wide' : '') + '" aria-hidden="true">' + esc(initials(a.agent_id)) + '</span>';
   const tip = (a) => 'Shouts with ' + agentName(a.agent_id) + ' · ' + a.agent_lane + ' · ' + a.agent_route + ' (' + a.agent_path + ')';
-  const state = (a, i) => i.reviewer === a.agent_id ? '<span class="chip warn">reviewing</span>' : chip(stateOf(i));
+  const state = (a, i) => reviewerOf(i) === a.agent_id ? '<span class="chip warn">reviewing</span>' : chip(stateOf(i));
   const marks = (a) => ' h' + hue(a.agent_id) + (lead(a.agent_id) ? ' lead' : '') + (view.agent === a.agent_id ? ' on' : '');
   const row = (a) => {
     const mine = holding(a), first = mine[0];
@@ -2692,8 +2780,9 @@ function findAll(words) {
   const p = data?.project, q = words.trim().toLowerCase();
   if (!p || !q) return [];
   const has = (...parts) => parts.join(' ').toLowerCase().includes(q);
-  const items = p.items.filter((i) => has('#' + i.id, i.title, i.lane, i.specs.join(' '), i.criterion || ''))
-    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map((i) => ({ go: 'item:' + i.id, id: '#' + i.id, text: i.title, note: stateLabel(i) }));
+  const ids = searchIds(p, q);
+  const items = p.items.filter((item) => ids.has(item.id))
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map((item) => ({ go: 'item:' + item.id, id: '#' + item.id, text: item.title, note: stateLabel(item) }));
   // A Spec row or Doctrine rule is as new as the commit that added it (0 not yet committed; a standard rule, never added
   // here, last); rows one commit added together read newest first by their place in the file.
   const rows = (kind, list) => list.map((r, at) => ({ r, at })).filter(({ r }) => has(r.id, r.text))
@@ -2734,6 +2823,7 @@ function openFound(target) {
 function pick(id, root = view.root) {
   view.adding = false;
   if (root !== view.root) return switchTo(root, id);
+  if (itemDetails.get(root + '\\n' + id)?.error) itemDetails.delete(root + '\\n' + id);
   view.tab = 'items';
   keep('pb.tab', view.tab);
   view.item = id;
