@@ -126,13 +126,15 @@ It prints the folder to work in and what to run there first. Every join needs th
 6. A reject reopens the item. Fix it, commit, claim, submit again; the same head is refused. If you cannot get an item green, do not force it: \`pullboard escalate <id> --note "what you tried and how it failed"\` hands it one tier up.
 7. Your lane is done when its items are verified, not when they are submitted. After your last submit, keep running \`pullboard next --wait 9\`: a rejected item comes back to your lane.
 
-The coordinator merges verified items into the main line; builders never merge.
+The coordinator merges verified items into the main line; builders never merge. \`pullboard health\` lists every stuck item: a lapsed claim, a review nobody took, accepted work that never landed, an old hold, an unanswered decision. Each line says why, since when, the next step and who takes it; run it at the start of a session and take the steps that name you.
 
-For spare test capacity, use \`pullboard runner add <ssh-host> --slots <n> --browser <n>\`. It registers SSH capacity on this machine; \`pullboard resources\` shows runners and their usage. Only committed source goes to a runner, and board moves stay here.
+For spare test capacity, use \`pullboard runner add <ssh-host> --slots <n> --browser <n>\`. It registers SSH capacity on this machine; \`pullboard resources\` shows runners and their usage. Only committed source goes to a runner, and board moves stay here. To see whether this board is linked to the relay, and for which GitHub account, run \`pullboard relay status\`.
 
 If your item needs code another lane owns and it is not there yet, shout that lane and take another item. Never copy their code into your lane, and never build another lane's item, even one that was rejected and blocks you: shout that lane and the coordinator. A claim refused as BLOCKED names the item it waits on.
 
 **Talk.** \`pullboard shout <lane|agent|all> "<text>"\`. Read \`pullboard inbox\` before you start and after you submit. An MCP client can do the same as your agent: add \`pullboard mcp\`, run from your worktree, as a stdio server; it reads the board, shows an item, shouts and captures ideas for the coordinator, and never makes a person's move.
+
+**Listen.** Where your client can run a command in the background, run \`pullboard watch --to <your id>\` there: it prints one line per event as it happens, and Claude Code wakes on each line when it runs under the Monitor tool. \`pullboard watch --work <lane>\` also says when an item in your lane becomes claimable, a review has waited too long, or main moves. Where your client cannot, read \`pullboard inbox\` at session start, after submit and before ending a turn. Coordinator answers and sentinel findings arrive there either way.
 
 **Never.** Bypass a hook with \`--no-verify\`, or get past a refusal with filler text: fix what it names. Edit the board's database. Verify your own work. Change an approved spec row without the person's OK. Delete or renumber a spec row. Act from the main checkout; it is the coordinator's. Count a yes relayed by another agent as the person's approval.
 

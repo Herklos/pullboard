@@ -338,6 +338,12 @@ input:disabled { background: var(--surface-2); color: var(--ink-muted); }
 .chip.busy { background: var(--blue-soft); color: var(--blue); }
 .chip.free { background: var(--violet-soft); color: var(--violet); }
 .chip.gate { background: none; color: var(--ink-muted); outline: 1px dashed var(--line-strong); outline-offset: -1px; }
+/* A stale verdict (#726) is a quiet word with a small dot beside the verified chip; its title says what main moved. */
+.chip.stale { background: none; color: var(--ink-muted); padding-inline: 0; }
+.chip.stale::before { content: ''; display: inline-block; width: 6px; height: 6px; margin-right: 4px; border-radius: 50%; background: var(--warn); vertical-align: 1px; }
+.row .meta > .stale { margin-left: auto; }
+.milestone-item:has(> .stale) { grid-template-columns: 12px minmax(0, 1fr) auto auto; }
+.agent-work:has(> .stale) { grid-template-columns: minmax(0, 1fr) auto auto; }
 .meta .gate { color: var(--ink-muted); }
 .meta .gate .wait-unit, .kv dd.waits-on .wait-unit { white-space: nowrap; }
 .meta .gate button.ref, .meta .gate a.ref { min-height: 0; }
