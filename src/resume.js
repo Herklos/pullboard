@@ -66,3 +66,70 @@ export function inboxFirst(inbox, next) {
   if (!inbox.unread) return next;
   return `read your ${inbox.unread === 1 ? 'unread shout' : `${inbox.unread} unread shouts`} first: ${inbox.read}; then ${next}`;
 }
+
+/** The commit message resume hands the coordinator for the row files `spec apply` changed. */
+const APPLY_MESSAGE = 'docs(spec): apply row decisions';
+
+/**
+ * Quote one word for a POSIX shell only when it needs it, as the CLI's own commands do.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function shellWord(text) {
+  return /^[\w@%+=:,./-]+$/u.test(text) ? text : `'${text.replaceAll("'", "'\\''")}'`;
+}
+
+/**
+ * Who commits which of the main checkout's uncommitted Pullboard files [I1,L3].
+ *
+ * `spec apply` is the coordinator's move, so a row file (the spec or the practice file) that is
+ * committed and now changed is the coordinator's to commit. Every other setup file that differs
+ * from HEAD, including a row file init wrote and nobody committed yet, is the person's. Only the
+ * setup files are ever named, so an unrelated dirty file never reaches either command. The
+ * blueprint trial found resume blaming the person for the coordinator's own applied SPEC.md.
+ *
+ * @param {{ path: string, how: string, ignored: boolean }[]} differ setup files that differ from HEAD
+ * @param {string[]} rowFiles the files `spec apply` writes
+ * @param {string} root the main checkout
+ * @returns {{ coordinator: { files: string[], command: string } | null, person: { files: string[], command: string } | null }}
+ */
+export function commitOwners(differ, rowFiles, root) {
+  const applied = differ.filter(({ path, how }) => how === 'changed' && rowFiles.includes(path));
+  const setup = differ.filter((entry) => !applied.includes(entry));
+  const cd = `cd ${shellWord(root)} &&`;
+  /** One `git add` for these files, forced only when git ignores one of them. */
+  const add = (entries) => `${cd} git add${entries.some(({ ignored }) => ignored) ? ' -f' : ''} -- ${entries.map(({ path }) => shellWord(path)).join(' ')}`;
+  const words = applied.map(({ path }) => shellWord(path)).join(' ');
+  return {
+    coordinator: applied.length ? { files: applied.map(({ path }) => path), command: `${add(applied)} && git commit -q -m "${APPLY_MESSAGE}" -- ${words}` } : null,
+    person: setup.length ? { files: setup.map(({ path }) => path), command: add(setup) } : null,
+  };
+}
+
+/**
+ * The resume lines naming who commits what: the coordinator's applied row files, then the person's
+ * setup files, each only when it has files.
+ *
+ * @param {ReturnType<typeof commitOwners>} owners
+ * @returns {string[]}
+ */
+export function commitOwnerLines(owners) {
+  return [
+    ...(owners.coordinator ? [`The coordinator must commit the row file spec apply changed: ${owners.coordinator.command}`] : []),
+    ...(owners.person ? [`The person must commit Pullboard's setup files before agents can use worktrees: ${owners.person.command}`] : []),
+  ];
+}
+
+/**
+ * The coordinator's next step with an applied row file still uncommitted, so it commits first:
+ * a worktree started before that commit would work from the old rows.
+ *
+ * @param {ReturnType<typeof commitOwners>} owners
+ * @param {string} next the step the board names otherwise
+ * @returns {string}
+ */
+export function commitFirst(owners, next) {
+  if (!owners.coordinator) return next;
+  return `commit the applied row file first: ${owners.coordinator.command}; then ${next}`;
+}

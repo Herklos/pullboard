@@ -78,6 +78,80 @@ test('a worktree names its main checkout\'s uncommitted init files [I1,I2]', (t)
   for (const path of ['pullboard.json', 'SPEC.md', 'DOCTRINE.md']) assert.ok(fromMain.stdout.includes(path), fromMain.stdout);
 });
 
+/**
+ * Prove resume gives each uncommitted file its right owner: the row file `spec apply` changed goes
+ * to the coordinator, the setup files init wrote go to the person, and nothing else is named [I1,L3].
+ * The blueprint trial found resume blaming the person for the coordinator's own applied SPEC.md
+ * and handing them a commit of every setup file.
+ */
+test('resume asks the coordinator to commit an applied row file [I1,L3]', t => {
+  const PERSON_LINE = "The person must commit Pullboard's setup files before agents can use worktrees: ";
+  const ROW_LINE = 'The coordinator must commit the row file spec apply changed: ';
+  /** Resume's text and JSON from the main checkout, both passing, and neither naming an unrelated dirty file. */
+  const resume = (box) => {
+    const text = box.run(box.repo, 'resume');
+    assert.equal(text.status, 0, text.failure || text.stderr || text.stdout);
+    const json = box.run(box.repo, 'resume', '--json');
+    assert.equal(json.status, 0, json.failure || json.stderr || json.stdout);
+    const lines = text.stdout.split('\n');
+    const card = JSON.parse(json.stdout);
+    for (const named of [...lines.filter((line) => line.startsWith(PERSON_LINE) || line.startsWith(ROW_LINE)), JSON.stringify(card.commits ?? null)]) {
+      assert.doesNotMatch(named, /README\.md|notes\.txt/u, `an unrelated dirty file is never named: ${named}`);
+    }
+    return { lines, card };
+  };
+  /** The exact commands resume should print for one owner's files. */
+  const add = (box, files) => `cd ${box.repo} && git add -- ${files.join(' ')}`;
+  const commit = (box, files) => `${add(box, files)} && git commit -q -m "docs(spec): apply row decisions" -- ${files.join(' ')}`;
+  /** A board whose init files are committed, with a drafted row the person approved and the coordinator applied. */
+  const applied = () => {
+    const box = releaseFixture(t, { freshSetup: true, historyBeforeInit: true });
+    const drafted = box.run(box.repo, 'spec', 'draft', 'The person can name the project.');
+    assert.equal(drafted.status, 0, drafted.failure || drafted.stderr || drafted.stdout);
+    box.git(box.repo, 'add', '-A');
+    box.git(box.repo, 'commit', '-q', '-m', 'chore: set up pullboard');
+    for (const args of [['spec', 'approve', 'G1'], ['spec', 'apply']]) {
+      const ran = box.run(box.repo, ...args);
+      assert.equal(ran.status, 0, ran.failure || ran.stderr || ran.stdout);
+    }
+    writeFileSync(join(box.repo, 'README.md'), '# Existing repository\n\nAn unrelated edit.\n');
+    writeFileSync(join(box.repo, 'notes.txt'), 'an unrelated new file\n');
+    return box;
+  };
+
+  // Committed setup plus an applied SPEC.md: the coordinator commits it; the person is not asked.
+  const clean = applied();
+  const after = resume(clean);
+  assert.ok(after.lines.includes(`${ROW_LINE}${commit(clean, ['SPEC.md'])}`), after.lines.join('\n'));
+  assert.equal(after.lines.some((line) => line.startsWith(PERSON_LINE)), false, `the person commits nothing:\n${after.lines.join('\n')}`);
+  assert.match(after.card.next, /^commit the applied row file first: cd .+ && git add -- SPEC\.md && git commit .+; then /u);
+  assert.deepEqual(after.card.commits, { coordinator: { files: ['SPEC.md'], command: commit(clean, ['SPEC.md']) }, person: null });
+  const committed = runFixtureChild('sh', ['-c', after.card.commits.coordinator.command], { cwd: clean.repo, env: clean.env, encoding: 'utf8' });
+  assert.equal(committed.status, 0, committed.failure || committed.stderr || committed.stdout);
+  assert.deepEqual(resume(clean).card.commits, { coordinator: null, person: null }, 'the command resume names commits the row file, and only it');
+
+  // Uncommitted setup files: the person commits exactly those, and the coordinator is not asked.
+  const fresh = releaseFixture(t, { freshSetup: true, historyBeforeInit: true });
+  writeFileSync(join(fresh.repo, 'notes.txt'), 'an unrelated new file\n');
+  const setup = resume(fresh);
+  const initFiles = ['.githooks/commit-msg', '.githooks/pre-commit', '.githooks/pre-merge-commit', '.githooks/pre-push', 'AGENTS.md', 'DOCTRINE.md', 'SPEC.md', 'pullboard.json'];
+  assert.ok(setup.lines.includes(`${PERSON_LINE}${add(fresh, initFiles)}`), setup.lines.join('\n'));
+  assert.equal(setup.lines.some((line) => line.startsWith(ROW_LINE)), false, `the coordinator commits nothing:\n${setup.lines.join('\n')}`);
+  assert.deepEqual(setup.card.commits, { coordinator: null, person: { files: initFiles, command: add(fresh, initFiles) } });
+
+  // Both at once: each owner gets exactly its own files, and an unrelated dirty file is never setup.
+  const mixed = applied();
+  const config = JSON.parse(readFileSync(join(mixed.repo, 'pullboard.json'), 'utf8'));
+  writeFileSync(join(mixed.repo, 'pullboard.json'), JSON.stringify({ ...config, gate: 'pullboard spec check' }, null, 2) + '\n');
+  const both = resume(mixed);
+  assert.ok(both.lines.includes(`${ROW_LINE}${commit(mixed, ['SPEC.md'])}`), both.lines.join('\n'));
+  assert.ok(both.lines.includes(`${PERSON_LINE}${add(mixed, ['pullboard.json'])}`), both.lines.join('\n'));
+  assert.deepEqual(both.card.commits, {
+    coordinator: { files: ['SPEC.md'], command: commit(mixed, ['SPEC.md']) },
+    person: { files: ['pullboard.json'], command: add(mixed, ['pullboard.json']) },
+  });
+});
+
 test('resume says what is new once after an upgrade [N19]', t => {
   const box = releaseFixture(t, { previous: '0.8.5' });
   const otherCheckout = join(box.root, 'other-checkout');
