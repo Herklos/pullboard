@@ -1,6 +1,6 @@
 /** Documentation input selection remains conservative across committed trees [V4,C7]. */
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
@@ -175,4 +175,39 @@ test('a test that spawns the CLI is selected by what the CLI imports [C7]', (t) 
   box.put('src/cli.js', 'export const uncommitted = true;\n');
   const committedGraph = selectAffectedTests(box.root, { base, commit });
   assert.deepEqual(committedGraph.files, changedCockpit.files, 'selection ignores uncommitted source bytes');
+});
+
+test('the browser launch guard keeps affected selection exact [C7,O5]', (t) => {
+  const box = graph(t);
+  const guard = readFileSync(new URL('../src/browser-slot-guard.js', import.meta.url), 'utf8');
+  box.put('src/browser-slot-guard.js', guard);
+  box.put('src/refused.js', readFileSync(new URL('../src/refused.js', import.meta.url), 'utf8'));
+  box.put('test/browser-guard.test.js', "import '../src/browser-slot-guard.js';\n");
+  box.put('test/guard-consumer.test.js', "import './browser-guard.test.js';\n");
+  const base = box.commit();
+  box.put('src/browser-slot-guard.js', guard + '\n// A committed change to the actual guard.\n');
+  const commit = box.commit();
+  const selected = selectAffectedTests(box.root, { base, commit });
+  assert.equal(selected.full, false, selected.reason);
+  assert.deepEqual(selected.files, ['test/browser-guard.test.js', 'test/guard-consumer.test.js'],
+    'the real guard retains its direct and transitive readers without selecting unrelated tests');
+
+  const unknown = [
+    "import { createRequire } from 'node:module';\n",
+    "import module from 'node:module';\n",
+    "import * as module from 'node:module';\n",
+    "import { register } from 'node:module';\n",
+    "import { syncBuiltinESMExports, createRequire } from 'node:module';\n",
+    "export { syncBuiltinESMExports } from 'node:module';\n",
+    "import { syncBuiltinESMExports } from 'node:module'; export const later = () => import('node:module');\n",
+    "import { syncBuiltinESMExports } from 'node:module'; const loader = process.getBuiltinModule('node:util');\n",
+    "import * as module from 'node:module'; const fake = \"import { syncBuiltinESMExports } from 'node:module';\";\n",
+  ];
+  for (const source of unknown) {
+    box.put('src/browser-slot-guard.js', source);
+    const unsafe = box.commit();
+    const fallback = selectAffectedTests(box.root, { base: commit, commit: unsafe });
+    assert.equal(fallback.full, true, source + ' must keep the conservative full-suite fallback');
+    assert.match(fallback.reason, /CommonJS/u, 'the fallback names the unresolved module-loader boundary');
+  }
 });
