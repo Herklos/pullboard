@@ -31,6 +31,80 @@ git merge --no-edit <commit> && pullboard gate && pullboard merged 3 $(git rev-p
 pullboard status
 ```
 
+## Listen
+
+Keep one listener running for the whole session under your agent client's background monitor, so a shout or a stuck item wakes you between cycles. The listener built for this is `pullboard watch --to coordinator`, which arrives with item #544. On main today `pullboard watch` answers `no command "watch"`, so run this loop under the monitor instead:
+
+```
+while :; do pullboard inbox | grep -v '^no new shouts$'; pullboard health | grep -v '^nothing is stuck$'; sleep 300; done
+```
+
+Every line it prints is something to act on. `pullboard inbox` marks what it prints as read, so act on each shout when it arrives. A monitor ends with its session or its time limit: re-arm it at the start of every session, and again as soon as it reports that it stopped.
+
+## Keep the board moving
+
+`pullboard health` lists every stuck item: why, since when, the next step and who takes it. It changes nothing, and it exits 1 while something is stuck. A clear board prints `nothing is stuck`. Each finding is one line that ends in its next step:
+
+```
+#12 claim lapsed, since 2026-10-17 09:14 (2h): web-3's lease ran out and nobody is building it. Next, web-3 (builder): renew it with pullboard claim 12.
+```
+
+Close each finding with its next step in the same cycle. When the step belongs to someone else, shout it to them with the line itself. The thresholds live in pullboard.json under `health`: `stuck` (default 1h), `holds` (1d) and `release` (1d). Item #772 adds a sentinel that posts each new finding to the feed once; until it lands, the listener's loop is where findings arrive.
+
+## Route by roadmap order
+
+`pullboard roadmap` lists the milestones in order. Work the current release's open items first. Within it, take repairs before new work: rework a verifier sent back, and anything health reports, comes ahead of a new build. Reviews come before new builds, so a submission never waits while a builder starts something else. `pullboard health` sets rework planned for a later release apart under `waiting for a later release`.
+
+## Write a ruling into the bar
+
+When you or the person rule on something that changes what an item must do, write it into the criterion in the same step, so the next builder and verifier read the ruling from the item itself. Once an item has been claimed, the change needs a reason:
+
+```
+pullboard edit 12 --criterion "..." --reason "the person ruled the page shows both totals"
+```
+
+Without `--reason` it refuses with `BAR_REASON`. A submitted item refuses the edit with `HELD`, `item #12 is submitted; change its route, criterion or check only while it is open`, so return it first with `pullboard reopen 12 --note "the bar must name both totals"`, then edit. A builder holding a claim on a corrected item is refused at submit with `PENDING_REFREEZE` and runs `pullboard refreeze 12`.
+
+## Keep reviews independent
+
+Start every reviewer outside the builder's root: a fresh session, or a subagent of a different session from the one that started the builder. A reviewer that shares the builder's context shares its blind spots. Pullboard itself refuses only the builder (`SELF_VERIFY`), so the rest is yours to keep.
+
+## Close every decision
+
+A decision stays open until someone answers it. Answer each one addressed to you with `pullboard answer <id> "<the decision>"`, and add `--implies <ids>` when it settles items. Pass one that belongs to the person with `pullboard pass <id> "<note>"`. `pullboard decisions` lists what is still open, and `pullboard health` reports one left over an hour as `unanswered`.
+
+## Turn a Rigor notice into a draft
+
+When the same cause fails work twice, turn it into a draft row in the same session, with its proof: the item ids and the failure each one hit. Rigor drafts rows and only the person approves them. `pullboard rigor draft <key>` does this from a Rigor notice once items #713 and #714 land. On main today, write the draft with `pullboard spec draft "<the rule>" --section D` and put the proof in the shout that asks the person to review it.
+
+## Land in batches
+
+Land verified work in batches with `pullboard land`: preview with `pullboard land --dry-run`, then land with `pullboard land --max N`. Land takes accepted items in the order they were accepted. It sets aside one that carries an unverified commit (`STACKED_UNVERIFIED`) or a red it already proved (`LAND_KNOWN_RED`). Put every other reason an item waits on the board with `pullboard hold <id> "reason"`, so health and the view show it, and lift it with `pullboard hold <id> --off` when the reason is gone.
+
+When a batch goes red, land runs each failing test file alone. A file that passes alone is a flake and holds the batch with `LAND_FLAKE` until the test is fixed or the person records an expiring waiver. A real red is split in halves until one item reproduces it alone; land returns only that item, with a fact naming the tests it fails, and lands the green rest. When green items fail only together, it stops with `LAND_INTERACTION` and lands nothing.
+
+## Release every day
+
+Publish a release at least once a day while landed work waits. `pullboard health` reports `release <tag> overdue` when landed items have waited longer than `health.release` since the newest version tag.
+
+## What can go wrong, and what watches it
+
+| What goes wrong | What catches it | Where its finding arrives |
+| --- | --- | --- |
+| A dead claim | `pullboard health`: `claim lapsed` | the listener's loop |
+| An accepted item that no longer merges | `pullboard health`: `accepted, conflicts with the trunk`, naming the files and the builder; `pullboard land --dry-run` | the listener's loop |
+| A hold that outlived its reason | `pullboard health`: `hold left on` after `health.holds`, and `conflict hold now clears` as soon as the held commit merges cleanly | the listener's loop |
+| A review nobody took | `pullboard health`: `no reviewer` after `health.stuck`, `review lapsed` when a reservation runs out; the `flow:` line names review wait as the bottleneck | the listener's loop and `pullboard resume` |
+| A decision left open | `pullboard health`: `unanswered`; `pullboard decisions` | the listener's loop |
+| A red or flaky gate | `pullboard submit` refuses a red gate and names a test that also fails on main; `pullboard land` runs each failing test alone and holds a flake with `LAND_FLAKE` | the builder's shout, and land's output |
+| The train stopped | `pullboard health`: `accepted, not landed`; `pullboard land` names an interrupted batch with `LAND_ADOPT` | the listener's loop and `pullboard resume` |
+| A site or relay down | `pullboard relay` prints the relay link's state; open the site's front page | you, at the start of each cycle |
+| npm and the site disagreeing | `npm view <package> version` beside `pullboard version` and the version the site shows | you, after each release |
+| Main CI red | the CI's latest run on the trunk (on GitHub, `gh run list --branch main --limit 3`); `pullboard submit` names a test that fails on main too | you, at the start of each cycle, and the builder's shout |
+| A release past its day | `pullboard health`: `release <tag> overdue` | the listener's loop |
+
+A row you check by hand is a check waiting to be built. When one catches something twice, add it to the board as an item, the way #772 grew out of a coordinator's private board monitor.
+
 ## Done
 
 Every approved row is cited by an item that is verified and merged, or the person has decided it needs none. `pullboard status` shows nothing open, claimed or awaiting a verdict.
