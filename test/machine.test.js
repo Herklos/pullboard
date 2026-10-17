@@ -68,6 +68,7 @@ const NOT_MOVES = {
   REMOTE_COORDINATOR_MODEL: 'a linked replica cannot redeclare the coordinator model; use the coordinator checkout',
   EVENT_LOG_VERSION: 'the local board format is checked before opening it for an item move',
   BOARD_BUSY: 'the board connection is opened or read before an item move can begin',
+  BOARD_NOT_WRITABLE: 'the board folder must be writable before a command opens it for an item move',
   NOT_YOUR_CHECKOUT: 'the caller owns the checkout session, checked before any item move',
   CHECKOUT_SESSION: 'the checkout-local session binding is readable before any item move',
   UNMERGED_SCHEMA: 'shared-board schema compatibility checked before a command opens the database',

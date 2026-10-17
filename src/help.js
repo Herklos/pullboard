@@ -12,6 +12,7 @@ Set up
   pullboard tour                        see it work: a reject and its rework, scripted, in thirty seconds
   pullboard init [--model <name>] [--blueprint <name or file>]  config, SPEC.md, agent instructions, git hooks, board; optional coordinator model
   pullboard worktree <lane> --model <name> [--route light] [--family <name>]   make and join a worktree for a new agent
+                                        pullboard.json worktrees: inside or beside; init defaults to inside
   pullboard join <lane> --model <name> [--route light] [--family <name>]       register this worktree as an agent
                                         A model is required (or set PULLBOARD_MODEL); family is a separate declaration
   pullboard join coordinator --model <name>                                 declare the main checkout's coordinator model
@@ -25,6 +26,7 @@ Set up
                                         browser-free check slots are opt-in: gate.browserFreeChecks in ~/.pullboard/settings.json (default false)
                                         reviews-first queue order is opt-in: gate.queue.reviewsFirst (default false), gate.queue.agingMinutes (default 30)
                                         release priority is opt-in: gate.queue.currentReleaseFirst (default false), within each board's otherwise-tied positions
+                                        memory hold is opt-in: gate.memoryFloorMB in ~/.pullboard/settings.json holds the queue under that many MB free or critical pressure (default off)
   pullboard runner add <ssh-host> --slots <n> --browser <n> [--node <remote-path>] [--root <remote-path>]
                                         register SSH test capacity; no runner sign-in; root defaults to ~/.pullboard-runner
   pullboard view [--project] [--port N] [--no-open]  every project on this machine in your browser; default http://127.0.0.1:${DEFAULT_VIEW_PORT}
@@ -166,6 +168,8 @@ Spec
                                         principal defaults to Git user.email; --by overrides it
   pullboard spec approve <ids> | decline <ids> --reason "why"  the person's exact-row decision
                                         approve <id> --text "new wording" approves an exact rewrite
+  pullboard spec answer <id> "<choice or text>"  the person's answer to a pending question
+                                        a listed choice, or their own words added as the last choice
   pullboard spec apply                  coordinator applies recorded row decisions to the files
   pullboard doctrine check              each doctrine rule's check: its count, its committed count, whether it holds
                                         a rule row adds | gate: check <command> | count: N, and | files: <paths> to narrow it
