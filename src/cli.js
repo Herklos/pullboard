@@ -2751,6 +2751,22 @@ function sayReviewOffer(ctx, found) {
 }
 
 /**
+ * A review search that found nothing while another agent is still building: say so, with the wait,
+ * so a reviewer who starts first is not told NOTHING_FREE as if the board were idle [C7,P4].
+ *
+ * @param {any} ctx
+ */
+function refuseWhileBuilding(ctx) {
+  const building = withBoard(ctx, (board) => {
+    const me = whoAmI(ctx, board).id;
+    const items = store.listItems(board);
+    if (items.some((item) => item.item_status === 'submitted' && item.item_built_by !== me)) return [];
+    return items.filter((item) => item.item_status === 'claimed' && item.item_owner !== me).map((item) => `#${item.item_id}`).reverse();
+  });
+  if (building.length) throw new Refused('REVIEW_NOT_READY', `nothing to review yet; the builder is still working on ${building.join(', ')}`);
+}
+
+/**
  * `pullboard next` (N2): the whole start of an agent's loop in one command. With --wait, it keeps
  * looking until something is free, so an agent blocked on other work needs no polling of its own.
  *
@@ -2804,6 +2820,7 @@ async function nextHere(io, values) {
       return 0;
     }
     if (!found.retry && Date.now() >= deadline) {
+      if (values.verify) refuseWhileBuilding(ctx);
       const waited = minutes ? ` after ${minutes} minutes` : '';
       const agents = withBoard(ctx, (board) => store.listAgents(board));
       const repair = `${waited}. To keep looking: pullboard next --wait 9${values.verify ? ' --verify' : ''} (minutes; give the command a ten-minute timeout)`;
