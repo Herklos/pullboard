@@ -121,6 +121,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `spec approve` | `version:number`, `decisions:array` |
 | `spec decline` | `version:number`, `decisions:array` |
 | `spec apply` | `version:number`, `applied:array`, `files:array` |
+| `doctrine check` | `version:number`, `rules:array` |
 | `hook pre-commit` | `version:number`, `messages:array` |
 | `hook pre-merge-commit` | `version:number`, `messages:array` |
 | `hook commit-msg` | `version:number`, `messages:array` |

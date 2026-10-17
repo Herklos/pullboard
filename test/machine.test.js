@@ -102,10 +102,11 @@ const CALLBACKS = { 'board.js': { freeze: 'cli.js#freezer' } };
 /**
  * Calls whose refusals an entry point catches and reports as another: submit and verify read a
  * cited row taken out of force as a changed criterion, CRITERIA_CHANGED. Submit also keeps its
- * original gate refusal when a best-effort main comparison or its attribution cannot be read.
+ * original gate refusal when a best-effort main comparison or its attribution cannot be read, and
+ * reads committed doctrine rules leniently: a doctrine it cannot parse carries no check [D1].
  */
 const CAUGHT = {
-  'cli.js#submitHere': ['cli.js#freezer', 'main-red.js#compareMainFailures', 'main-red.js#matchingReworks'],
+  'cli.js#submitHere': ['cli.js#freezer', 'main-red.js#compareMainFailures', 'main-red.js#matchingReworks', 'doctrine-checks.js#checkRulesAt'],
   'cli.js#verifyHere': ['cli.js#freezer'],
 };
 
@@ -837,7 +838,7 @@ test('pullboard help lists each role\'s moves from the declaration, and pullboar
 /** Guards checked before the explicit transition: CLI facts and optional roadmap selection. */
 const PRECHECKED = {
   claim: ['joined'],
-  submit: ['joined', 'criterionUnchanged', 'treeClean', 'nothingUntracked', 'hasCommit', 'withinLane', 'trunkMergeClean', 'gateConfigured', 'gateGreen', 'treeStillDuringGate', 'noUnverifiedStack'],
+  submit: ['joined', 'criterionUnchanged', 'treeClean', 'nothingUntracked', 'hasCommit', 'withinLane', 'trunkMergeClean', 'doctrineHolds', 'gateConfigured', 'gateGreen', 'treeStillDuringGate', 'noUnverifiedStack'],
   reserve: ['coordinatorSaysAs', 'joined', 'roadmapReadable'],
   accept: ['coordinatorSaysAs', 'joined', 'atSubmittedCommit', 'trunkMergeClean', 'itemCheckGreen', 'noUnverifiedStack'],
   reject: ['coordinatorSaysAs', 'joined', 'atSubmittedCommit'],
