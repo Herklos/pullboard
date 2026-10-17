@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import * as store from '../src/board.js';
 import { applyEngineMove, applyRelayMove, prepareEngineMove } from '../src/engine.js';
 import { ENGINE_VERSION } from '../src/machine.js';
+import { exportBoard, importBoard } from '../src/exchange.js';
 import { createE2eHelpers } from './e2e-helpers.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -263,6 +264,7 @@ test('an unranked item follows the ranked ones [N2,B13]', (t) => {
   assert.equal(store.nextFor(board, { agentId: builder, lane: 'core' }).item.item_id, oldest, 'a never-ranked board retains its old oldest-first tie-break');
   store.orderMilestoneItems(board, 'release', { agentId: 'coordinator', items: [ranked] });
   assert.equal(store.nextFor(board, { agentId: builder, lane: 'core' }).item.item_id, ranked);
+  assert.equal(store.nextFor(board, { agentId: builder, lane: 'core', priority: [oldest] }).item.item_id, ranked, 'an automatic rework tie-break does not overtake an explicit coordinator rank');
   const ordered = [oldest, middle, ranked].map(id => store.getItem(board, id)).sort(store.buildOrder(board));
   assert.deepEqual(ordered.map(item => item.item_id), [ranked, oldest, middle], 'unranked items retain age order after explicit ranks');
   store.editMilestoneItems(board, 'release', { agentId: 'coordinator', remove: [ranked] });
@@ -272,13 +274,16 @@ test('an unranked item follows the ranked ones [N2,B13]', (t) => {
 
 test('milestone rank moves replay identically and preserve historical next selection [N2,B13,H16]', (t) => {
   for (const version of [8, 24, 31, 32]) {
-    const fixtures = [boardFixture(), boardFixture()];
+    const source = boardFixture();
+    const replica = store.openBoard(':memory:');
+    const fixtures = [source, { ...source, board: replica }];
     t.after(() => fixtures.forEach(({ board }) => store.closeBoard(board)));
-    for (const { board, builder } of fixtures) {
+    for (const { board, builder } of [source]) {
       submitted(board, builder, 'oldest submitted work', 'strong', 1);
       submitted(board, builder, 'newer ranked work', 'strong', 2);
       store.addMilestone(board, { agentId: 'coordinator', name: 'release', items: [1, 2] });
     }
+    importBoard(replica, exportBoard(source.board));
     const move = prepareEngineMove(fixtures[0].board, 'orderMilestoneItems', ['release', { agentId: fixtures[0].builder, items: [2, 1] }]);
     assert.equal(move.engine, 32, 'the coordinator allocated engine32 to the sealed order move');
     const outcomes = fixtures.map(({ board }) => applyRelayMove(board, move, {
