@@ -496,6 +496,57 @@ test('blueprint add files a blueprint as drafts and runs nothing it supplies [S1
   }
 });
 
+test('starter items land in a build lane, never the coordinator lane [S1,I1]', () => {
+  const lanesOf = (box) => (JSON.parse(box.run('list', '--all', '--json').stdout).items ?? []).map((item) => item.item_lane);
+  const configLanes = (box) => JSON.parse(readFileSync(join(box.repo, 'pullboard.json'), 'utf8')).lanes ?? {};
+
+  // A fresh init with a blueprint: init proposes the app lane and the starters are filed in it.
+  // The proposal stays unwritten until the person runs the command init prints.
+  const fresh = emptyRepo();
+  const started = fresh.run('init', '--blueprint', 'web-app');
+  assert.equal(started.status, 0, started.stdout + started.stderr);
+  assert.deepEqual(lanesOf(fresh), Array(PUBLISHED.items.length).fill('app'), 'init files every starter in the lane it proposes');
+  assert.match(started.stdout, /starter items filed in the app lane, proposed above and not written until the person accepts/u, 'init says the lane is a proposal');
+  assert.match(started.stdout, /to accept, run: pullboard lane add app --owns app\//u, 'init prints the command that accepts it');
+  assert.deepEqual(Object.keys(configLanes(fresh)).filter((name) => name === 'app'), [], 'the proposed lane is not written');
+  const accepted = fresh.run('lane', 'add', 'app', '--owns', 'app/');
+  assert.equal(accepted.status, 0, accepted.stdout + accepted.stderr);
+  assert.equal((JSON.parse(fresh.run('list', 'app', '--json').stdout).items ?? []).length, PUBLISHED.items.length, 'once accepted, the lane lists its starters');
+
+  // A board with a lane pullboard lane add made: starters go to it, and a starter's own lane is
+  // kept when that lane exists. A coordinator or missing lane in the blueprint is never used.
+  const laned = freshBoard();
+  for (const [name, owns] of [['web', 'web/'], ['docs', 'docs/']]) {
+    const made = laned.run('lane', 'add', name, '--owns', owns);
+    assert.equal(made.status, 0, made.stdout + made.stderr);
+  }
+  const own = ['docs', 'no-such-lane', 'coordinator'];
+  writeFileSync(join(laned.repo, 'own-lanes.json'), `${JSON.stringify({ ...PUBLISHED, name: 'own-lanes',
+    items: PUBLISHED.items.map((item, index) => ({ ...item, lane: own[index] })) })}\n`);
+  const placed = json(laned, 'blueprint', 'add', 'own-lanes.json');
+  const placedLanes = placed.items.map((item) => item.lane);
+  assert.equal(placedLanes[0], 'docs', 'a starter keeps its own lane when that lane exists');
+  assert.equal(placedLanes[1], 'web', 'a starter naming a missing lane goes to the first lane pullboard lane add made');
+  assert.equal(placedLanes[2], 'web', 'a blueprint\'s coordinator lane is never used');
+  assert.deepEqual(placed.proposedLanes, [], 'nothing is proposed when a build lane exists');
+  assert.deepEqual(lanesOf(laned).filter((lane) => lane === 'coordinator'), [], 'no starter lands in the coordinator lane');
+
+  // A board with no build lane, only a verifier lane that owns no folders: blueprint add proposes
+  // one, files the starters in it and says so.
+  const bare = freshBoard({ lanes: { tests: { owns: [] } } });
+  const before = readFileSync(join(bare.repo, 'pullboard.json'), 'utf8');
+  const proposed = json(bare, 'blueprint', 'add', 'web-app');
+  assert.deepEqual(proposed.items.map((item) => item.lane), Array(PUBLISHED.items.length).fill('app'), 'starters go to the proposed lane');
+  assert.deepEqual(proposed.proposedLanes, [{ name: 'app', owns: ['app/'] }], 'the result names the proposal');
+  assert.equal(JSON.parse(readFileSync(join(bare.repo, 'pullboard.json'), 'utf8')).lanes?.app, undefined, 'the proposal is not written');
+  assert.equal(JSON.stringify(JSON.parse(readFileSync(join(bare.repo, 'pullboard.json'), 'utf8')).lanes), JSON.stringify(JSON.parse(before).lanes), 'pullboard.json keeps its lanes');
+  const again = freshBoard();
+  const said = again.run('blueprint', 'add', 'web-app');
+  assert.equal(said.status, 0, said.stdout + said.stderr);
+  assert.match(said.stdout, /starter items filed in the app lane, proposed, not written until the person accepts/u, 'blueprint add says the lane is a proposal');
+  assert.match(said.stdout, /to accept, run: pullboard lane add app --owns app\//u, 'blueprint add prints the command that accepts it');
+});
+
 const e2e = createE2eHelpers();
 after(e2e.cleanup);
 

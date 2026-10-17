@@ -97,6 +97,44 @@ export function proposeLanes(root, config = loadConfig(root)) {
 }
 
 /**
+ * The lane a blueprint starter is filed in (I1, S1). A starter is built in a build lane, never the
+ * coordinator lane: the coordinator verifies and merges, and nothing moves an item between lanes,
+ * so a starter filed there had to be withdrawn and filed again (blueprint trial, finding 3). In
+ * order: the starter's own lane when it exists or is proposed, else the first declared lane that
+ * owns folders, else the first lane init proposes. A proposed lane is used by name and never
+ * written: the person accepts it with its `pullboard lane add` command, and the starters are
+ * waiting in it from then on.
+ *
+ * @param {string | undefined} wanted - The lane the blueprint names for this starter, if any.
+ * @param {any} config - The repo's config.
+ * @param {{ name: string, owns: string[] }[]} proposals - The lanes init proposes, from proposeLanes.
+ * @returns {{ lane: string, proposal: { name: string, owns: string[] } | null }}
+ */
+export function starterLane(wanted, config, proposals) {
+  const proposalFor = (name) => proposals.find((lane) => lane.name === name) ?? null;
+  if (wanted && wanted !== COORDINATOR && (Object.hasOwn(config.lanes, wanted) || proposalFor(wanted))) {
+    return { lane: wanted, proposal: Object.hasOwn(config.lanes, wanted) ? null : proposalFor(wanted) };
+  }
+  const built = Object.entries(config.lanes).find(([name, lane]) => name !== COORDINATOR && lane.owns.length);
+  if (built) return { lane: built[0], proposal: null };
+  // proposeLanes always proposes one lane when no lane owns a folder, so this is never empty.
+  return { lane: proposals[0].name, proposal: proposals[0] };
+}
+
+/**
+ * The lines blueprint add prints when its starters went into a proposed lane: where they are,
+ * and the one command that accepts the lane.
+ *
+ * @param {{ name: string, owns: string[] }[]} proposed - The proposed lanes starters were filed in.
+ * @returns {string[]}
+ */
+export function starterLaneNotes(proposed) {
+  if (!proposed.length) return [];
+  const [, accept] = laneProposalNotes(proposed);
+  return [`starter items filed in the ${proposed.map((lane) => lane.name).join(' and ')} lane, proposed, not written until the person accepts`, accept];
+}
+
+/**
  * Quote one word for a POSIX shell when it needs quoting.
  *
  * @param {string} word

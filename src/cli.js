@@ -32,7 +32,7 @@ import {
   pushesTrunk,
   unwiredHookProblems,
 } from './hooks.js';
-import { detectGate, initRepo, proposeLanes } from './init.js';
+import { detectGate, initRepo, proposeLanes, starterLane, starterLaneNotes } from './init.js';
 import { lifecycleMarkdown } from './machine.js';
 import { HELP, VERSION } from './help.js';
 import { defaultViewPort } from './view-port.js';
@@ -1671,7 +1671,7 @@ function setupCommands(io, { first, second, rest = [], values }) {
       (staging ? notes.slice(0, -1) : notes).forEach((note) => io.say(note));
       if (added) {
         io.say(`added the ${added.blueprint.title} blueprint: ${added.rows.length} ${added.rows.length === 1 ? 'row waits' : 'rows wait'} for your approval in SPEC.md (${added.section}), `
-          + `${added.items.length} starter ${added.items.length === 1 ? 'item' : 'items'} filed${added.gate ? `, gate set to ${added.gate}` : ''}`);
+          + `${added.items.length} starter ${added.items.length === 1 ? 'item' : 'items'} filed${added.proposedLanes.length ? ` in the ${added.proposedLanes.map((lane) => lane.name).join(' and ')} lane, proposed above and not written until the person accepts` : ''}${added.gate ? `, gate set to ${added.gate}` : ''}`);
         if (added.checksNotRun.length) io.say(`  checks stored, not run: ${added.checksNotRun.map((id) => `#${id}`).join(', ')}; no check baseline ran, so read each check before work starts: pullboard show <id>`);
       }
       if (await registerProjectAndLink(info.root, new Date(), loadConfig(info.root), io)) io.say('registered this project on this machine, so pullboard view lists it');
@@ -2326,6 +2326,7 @@ export async function addBlueprintHere(io, reference, { report = true, blueprint
  * @property {string | null} gate - The gate set in pullboard.json, or null when it was left alone.
  * @property {boolean} marked - This blueprint version was already on the board, so nothing was added.
  * @property {number[]} checksNotRun - New items that carry a check; no check baseline ran for them.
+ * @property {{ name: string, owns: string[] }[]} proposedLanes - Proposed, unwritten lanes new starters were filed in.
  */
 
 /**
@@ -2354,8 +2355,11 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
     existingItems: store.listItems(board, { all: true }).map((item) => ({ id: item.item_id, title: item.item_title, specIds: item.item_spec_ids ? item.item_spec_ids.split(',') : [] })),
     gate: String(JSON.parse(configSource).gate ?? '') });
   // Every starter is checked before anything is written, so a refusal leaves the board as it was.
-  const starters = plan.items.map((entry) => ({ key: entry.key, afterKeys: entry.after, item: { by: me.id,
-    lane: entry.lane && entry.lane !== COORDINATOR && isLane(ctx.config, entry.lane) ? entry.lane : COORDINATOR,
+  // Starters go to a build lane, never the coordinator's; a proposed lane is named, not written (#732).
+  const proposals = proposeLanes(ctx.info.root, ctx.config);
+  const lanes = plan.items.map((entry) => starterLane(entry.lane, ctx.config, proposals));
+  const proposedLanes = proposals.filter((lane) => lanes.some((placed) => placed.proposal === lane));
+  const starters = plan.items.map((entry, index) => ({ key: entry.key, afterKeys: entry.after, item: { by: me.id, lane: lanes[index].lane,
     title: entry.title, criterion: entry.criterion, specIds: entry.specIds, parentId: null, after: [], brief: entry.brief, route: entry.route,
     ...(entry.check === undefined ? {} : { check: entry.check }) } }));
   // The same checks pullboard add uses, before anything is written. A blueprint's item check is
@@ -2398,7 +2402,7 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
   if (plan.specAfter !== source && !files.some((file) => file.file === ctx.config.spec)) files.unshift({ file: ctx.config.spec });
   const rows = plan.rows.map(({ key, id, status, text }) => ({ key, id, status, text }));
   const summary = { blueprint: { name: blueprint.name, title: blueprint.title, version: blueprint.version },
-    section: plan.section.name, rows, items: added, gate: plan.gate, marked: plan.marked,
+    section: plan.section.name, rows, items: added, gate: plan.gate, marked: plan.marked, proposedLanes: added.length ? proposedLanes : [],
     // Item checks are stored and never run during add; the caller tells the reader so.
     checksNotRun: added.filter((item) => item.check).map((item) => item.id) };
   io.result?.(summary);
@@ -2411,6 +2415,7 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
   for (const item of added) io.say(`  #${item.id} open  ${item.title}${item.specIds.length ? `  cites ${item.specIds.join(', ')}` : ''}${item.after.length ? `  waits on #${item.after.join(', #')}` : ''}`);
   const checked = added.filter((item) => item.check);
   if (checked.length) io.say(`  checks stored, not run: ${checked.map((item) => `#${item.id}`).join(', ')}; no check baseline ran during add, so read each check before work starts: pullboard show <id>`);
+  for (const note of starterLaneNotes(summary.proposedLanes)) io.say(`  ${note}`);
   if (plan.gate) io.say(`  gate set in ${CONFIG_FILE}: ${plan.gate}`);
   const changed = files.map((file) => file.file);
   io.say(`next: the person approves the rows in pullboard view or with pullboard spec approve <ids>${changed.length ? `; commit ${changed.join(' and ')}` : ''}`);
