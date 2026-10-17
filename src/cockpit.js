@@ -117,7 +117,7 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
     <label>Speed <select id="replay-speed"><option value="1">1×</option><option value="4">4×</option><option value="16">16×</option></select></label>
     <output id="replay-progress" aria-live="polite">Loading events…</output>
   </section>
-  <section class="card-panel" id="hosted-release-note" role="status" aria-label="Pullboard update" hidden>
+  <section class="release-note" id="hosted-release-note" role="status" aria-label="Pullboard update" hidden>
     <p><span id="hosted-release-text"></span> <code>npm i -g pullboard@latest</code> <a id="hosted-release-link" target="_blank" rel="noopener noreferrer">What changed</a> <button class="ghost" id="hosted-release-dismiss" type="button">Dismiss</button></p>
   </section>
   <section id="group-view" class="group-view" hidden>

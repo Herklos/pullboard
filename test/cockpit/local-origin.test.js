@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import { cockpitPage } from '../../src/cockpit.js';
 import { VERSION } from '../../src/help.js';
 import { createRelayBrowserHandler } from '../../relay/browser-page.js';
-import { BIN, machine, project, startView, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, styleOf } from './fixture.js';
+import { BIN, machine, project, startView, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, styleOf, proofShot } from './fixture.js';
 
 const HOSTED = 'https://app.pullboard.dev';
 const LOCAL = 'http://127.0.0.1:4890';
@@ -330,8 +330,13 @@ test('the hosted page says how far behind this machine\'s Pullboard is [N26,A2]'
     const bannerHidden = () => chrome.stable("document.querySelector('#hosted-release-note')?.hidden ?? true");
     let visit = 0;
     let visitPreload;
+    let requestsAt = 0;
+    /** The addresses one visit reached, as origin plus path for the hosted page and as origin for the local view. */
+    const reached = () => [...new Set(chrome.requests.slice(requestsAt).map((asked) => new URL(asked.url)).filter((address) => address.protocol.startsWith('http'))
+      .map((address) => (address.origin === HOSTED ? address.origin + address.pathname : address.origin)))].sort();
     const open = async (version, production = false) => {
       activePage = production ? productionPage : pageFor(version);
+      requestsAt = chrome.requests.length;
       if (visitPreload) await chrome.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: visitPreload });
       const marker = ++visit;
       const installed = await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: `window.__releaseVisit = ${marker};` });
@@ -345,6 +350,8 @@ test('the hosted page says how far behind this machine\'s Pullboard is [N26,A2]'
     assert.match(await bannerText(), /Pullboard 0\.8\.20 is installed; 0\.8\.21 is current, 1 release behind/u);
     assert.equal(await chrome.stable("document.querySelector('#hosted-release-note code')?.textContent"), 'npm i -g pullboard@latest');
     assert.equal(await chrome.stable("document.querySelector('#hosted-release-link')?.href"), 'https://github.com/pullboard-dev/pullboard/blob/main/CHANGELOG.md');
+    await proofShot(chrome, 'hosted-release-note', 1280);
+    await proofShot(chrome, 'hosted-release-note', 390);
     await chrome.click("document.querySelector('#hosted-release-dismiss')");
     assert.equal(await bannerHidden(), true, 'dismiss hides the note for its current target release');
     await open('0.8.21');
@@ -356,6 +363,7 @@ test('the hosted page says how far behind this machine\'s Pullboard is [N26,A2]'
     assert.ok(releasesBehind > 0, 'the hosted package has shipped releases after the simulated older install');
     assert.equal(await bannerText(), `Pullboard 0.8.20 is installed; ${VERSION} is current, ${releasesBehind} ${releasesBehind === 1 ? 'release' : 'releases'} behind. Update with`);
     assert.equal(await bannerHidden(), false, 'a new target release brings the note back');
+    const behindReached = reached();
 
     // The production-generated page counts every numeric release heading, including 0.8.4's section with no headline.
     local.versionOverride = '0.8.4';
@@ -367,6 +375,9 @@ test('the hosted page says how far behind this machine\'s Pullboard is [N26,A2]'
     local.versionOverride = VERSION;
     await open(VERSION, true);
     assert.equal(await bannerHidden(), true, 'matching local and hosted releases show no note');
+    assert.deepEqual(behindReached, reached(), 'the note costs no request: a visit that shows it reaches what a matched visit reaches');
+    assert.deepEqual(behindReached.filter((address) => !address.startsWith(HOSTED + '/') && address !== LOCAL && address !== view.base), [],
+      'the page learns both versions without asking any other address');
 
     local.versionOverride = '0.8.22-rc.1';
     await open(VERSION);
