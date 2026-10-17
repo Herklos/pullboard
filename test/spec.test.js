@@ -604,6 +604,48 @@ test("spec answer records the person's choice [S1,E3,P6]", (t) => {
   assert.notEqual(error.next, RECORDED_GENERIC_NEXT);
 });
 
+test('approving an answered row keeps the answer [S1,E3]', (t) => {
+  const box = specBox(t, { specSource: QUESTION_SPEC });
+  const line = (id) => readFileSync(join(box.root, box.specName), 'utf8').split('\n').find((text) => text.startsWith(`- ${id} `));
+  assert.equal(box.run('answer', 'B1', 'Postgres').status, 0);
+  assert.equal(box.run('answer', 'B2', 'Redis on the host').status, 0);
+  const agent = runIn(box, box.root, ['spec', 'approve', 'B1', '--json'], { ...box.env, CLAUDECODE: '1' });
+  assert.equal(JSON.parse(agent.stdout).error.code, 'B26_PERSON_CHANNEL', 'an agent still cannot approve an answered row');
+  const approved = box.run('approve', 'B1', 'B2', 'B3');
+  assert.equal(approved.status, 0, approved.stdout + approved.stderr);
+  const shown = box.run('show', 'B1').stdout;
+  const applied = box.run('apply');
+  assert.equal(applied.status, 0, applied.stdout + applied.stderr);
+  assert.equal(line('B1'), '- B1 [approved, must] Which store holds the data: Postgres. Choices: SQLite, Postgres. | gate: review',
+    'apply writes the answered choice');
+  assert.doesNotMatch(line('B1'), /data: SQLite\./u, 'the original default is gone');
+  assert.equal(line('B2'), '- B2 [approved, must] Which store holds the cache: Redis on the host. Choices: SQLite, Postgres, Redis on the host. | gate: review');
+  assert.equal(line('B3'), '- B3 [approved, must] Which store holds the logs: SQLite. Choices: SQLite, Postgres. | gate: review');
+  assert.match(shown, /answered Postgres, pending apply/u, 'spec show still names the pending answer');
+  assert.match(approved.stdout, /^B1: approved with the answer Postgres, pending apply$/mu, 'the approve names the answer it keeps');
+  assert.match(approved.stdout, /^B2: approved with the answer Redis on the host, pending apply$/mu);
+  assert.match(approved.stdout, /^B3: approved, pending apply$/mu, 'a row with no answer approves as it reads');
+});
+
+test('approve --text names the answer it replaces [S1,E3]', (t) => {
+  const box = specBox(t, { specSource: QUESTION_SPEC });
+  const line = (id) => readFileSync(join(box.root, box.specName), 'utf8').split('\n').find((text) => text.startsWith(`- ${id} `));
+  assert.equal(box.run('answer', 'B1', 'Postgres').status, 0);
+  assert.equal(box.run('answer', 'B2', 'Postgres').status, 0);
+  const choice = box.run('approve', 'B1', '--text', 'Which store holds the data: SQLite. Choices: SQLite, Postgres.');
+  assert.equal(choice.status, 0, choice.stdout + choice.stderr);
+  assert.match(choice.stdout, /^B1: this text replaces the pending answer Postgres with the answer SQLite$/mu, 'both answers are named');
+  const free = box.run('approve', 'B2', '--text', 'The cache lives in memory.');
+  assert.equal(free.status, 0, free.stdout + free.stderr);
+  assert.match(free.stdout, /^B2: this text replaces the pending answer Postgres with "The cache lives in memory\."$/mu, 'a text that is no answer is named whole');
+  assert.equal(box.run('answer', 'B3', 'Postgres').status, 0);
+  const same = box.run('approve', 'B3', '--text', 'Which store holds the logs: Postgres. Choices: SQLite, Postgres.');
+  assert.doesNotMatch(same.stdout, /replaces/u, 'the same text as the answer replaces nothing');
+  assert.equal(box.run('apply').status, 0);
+  assert.equal(line('B1'), '- B1 [approved, must] Which store holds the data: SQLite. Choices: SQLite, Postgres. | gate: review', 'the --text wins');
+  assert.equal(line('B2'), '- B2 [approved, must] The cache lives in memory. | gate: review');
+});
+
 test('an agent cannot answer a pending row [P6,B26,E3]', (t) => {
   const box = specBox(t, { specSource: QUESTION_SPEC });
   const file = join(box.root, box.specName);

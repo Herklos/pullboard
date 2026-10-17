@@ -73,7 +73,7 @@ export async function autoLinkProject(root, io) {
       if (!candidate) throw new Refused('RELAY_SESSION', 'Run pullboard relay on --all to link this project and pair the phone.');
       source = candidate.state;
       const proposal = await phoneProposal(source, 'link', originRepository(project),
-        { board: projectBoard(project), command: 'Link ' + name + '? (pullboard init)', link: true });
+        { board: projectBoard(project), command: 'Link ' + name + '? (pullboard init)', link: true, root: project });
       const value = { root: project, publisherRoot: candidate.root, context: proposal.context, sealed: proposal.sealed, replyKey: proposal.reply.storedKey, published: false };
       pending = updateRelayMachine(state => {
         const existing = state.approvals.find(entry => entry.root === project);
@@ -167,23 +167,26 @@ async function linkProjects(session, io, { onBoardOutcome } = {}) {
   const machine = readRelayMachine();
   const linked = [];
   const failed = [];
-  for (const project of listApiProjects()) {
+  const projects = listApiProjects();
+  for (const project of projects) {
     if (machine.excluded.includes(project.root)) {
       onBoardOutcome?.({ root: project.root, name: project.name, outcome: 'skipped', reason: 'Excluded from automatic linking on this machine.' });
+      io.say(`Did not link ${project.name}: it is excluded from automatic linking on this machine.`);
       continue;
     }
     try {
       const result = await relayOn(project.root, session.url, io, { session, quiet: true, strict: true });
       linked.push({ project: project.name, root: project.root, board: result.board });
       onBoardOutcome?.({ root: project.root, name: project.name, outcome: 'linked', reason: '' });
-      io.say(`linked: ${project.name}`);
+      io.say(`Linked ${project.name}.`);
     } catch (error) {
       const reason = error instanceof Refused ? error.message : 'Restore this registered project and retry.';
       failed.push({ project: project.name, root: project.root, reason });
       onBoardOutcome?.({ root: project.root, name: project.name, outcome: 'failed', reason });
-      io.err(`not linked: ${project.name}; ${reason}`);
+      io.err(`Did not link ${project.name}: ${reason}`);
     }
   }
+  io.say(`Linked ${linked.length} of ${projects.length} registered ${projects.length === 1 ? 'board' : 'boards'}.`);
   return { linked, failed };
 }
 
@@ -229,9 +232,12 @@ async function pairFirstDevice(session, board, linked, io, { signal, onPairingUR
     if (signal?.aborted || interrupted) pairingOutcome = 'cancelled';
     else if (onPairingURL) onPairingURL({ url: link, expires: pending.expires });
     else {
+      io.say('Now waiting for a phone to pair. On your phone, scan the code below or open this link.');
       io.say('Pair your phone once: ' + link);
       try { io.say(terminalQr(link)); }
       catch (error) { if (error.code !== 'PAIR_LINK_LONG') throw error; io.say('Open the pairing link above.'); }
+      // Ctrl-C reaches the stop handler above, which keeps every linked board and exits cleanly.
+      io.say(`To skip pairing, press Ctrl-C. The linked boards stay linked, and pullboard relay on --all gives a fresh code later. This code works until ${new Date(pending.expires).toISOString()}.`);
     }
     while (!signal?.aborted && !interrupted && Date.now() < pending.expires) {
       let result;
@@ -290,6 +296,7 @@ export async function relayOnAll(address, io, { signal, onPairingURL, onSignIn, 
     await revokeRelayPersonSession(session, io);
     return { outcome: 'cancelled' };
   }
+  io.say(`Signed in to GitHub as ${session.login || `account ${session.account}`}.`);
   try { await flushRevocations(session, io); }
   catch (error) {
     if (!signal?.aborted) throw error;
@@ -306,6 +313,7 @@ export async function relayOnAll(address, io, { signal, onPairingURL, onSignIn, 
   updateRelayMachine(state => { state.autoLink = true; state.owner = { account: session.account, url: session.url }; state.approvals = []; });
   const result = await linkProjects(session, io, { onBoardOutcome });
   const devices = readRelayMachine().devices.filter(device => device.account === session.account && device.url === session.url);
+  if (devices.length) io.say('Your phone is already paired; the linked boards appear there.');
   const pairing = devices.length || !result.linked.length ? { paired: devices.length > 0 }
     : await pairFirstDevice(session, result.linked[0].board, result.linked, io, { signal, onPairingURL });
   return { ...result, ...pairing, autoLink: true };
