@@ -1,7 +1,9 @@
 /** Rigor: a repeated failure cause is noticed from structured fields, never from notes [D1,V1]. */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, watch, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
+import { once } from 'node:events';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -434,12 +436,26 @@ test('a timed-out proof drains only its captured process group before removing i
   const { parseProcessCensus } = await import('../src/process-census.js');
   const box = freshBoard();
   const helper = join(box.repo, 'hold-proof.mjs');
-  const identities = join(box.dir, 'owned-processes.json');
   const parserUrl = new URL('../src/process-census.js', import.meta.url).href;
+  let resolveMarker;
+  let rejectMarker;
+  const marker = new Promise((resolve, reject) => { resolveMarker = resolve; rejectMarker = reject; });
+  const ready = createServer(socket => {
+    let value = '';
+    socket.setEncoding('utf8');
+    socket.on('data', chunk => { value += chunk; });
+    socket.once('end', () => {
+      try { resolveMarker(JSON.parse(value)); } catch (error) { rejectMarker(error); }
+    });
+    socket.once('error', rejectMarker);
+  });
+  ready.listen(0, '127.0.0.1');
+  await once(ready, 'listening');
+  const port = ready.address().port;
   const timeoutMs = 1000;
   writeFileSync(helper, `
     import { spawn, spawnSync } from 'node:child_process';
-    import { renameSync, writeFileSync } from 'node:fs';
+    import { createConnection } from 'node:net';
     import { parseProcessCensus } from ${JSON.stringify(parserUrl)};
     const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)']);
     await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
@@ -447,68 +463,60 @@ test('a timed-out proof drains only its captured process group before removing i
     const rows = ps.status === 0 ? parseProcessCensus(ps.stdout) : null;
     const owned = rows && [process.pid, child.pid].map(pid => rows.get(pid));
     if (!owned?.every(Boolean) || owned[0].pgid !== owned[1].pgid) process.exit(32);
-    writeFileSync(${JSON.stringify(identities + '.writing')}, JSON.stringify({ capturedAt: Date.now(), rows: owned }));
-    renameSync(${JSON.stringify(identities + '.writing')}, ${JSON.stringify(identities)});
+    const socket = createConnection({ host: '127.0.0.1', port: ${port} });
+    socket.on('error', () => process.exit(33));
+    socket.end(JSON.stringify({ capturedAt: Date.now(), rows: owned }));
     setInterval(() => {}, 1000);
   `);
-  box.git('add', 'hold-proof.mjs');
-  box.git('commit', '-q', '-m', 'test: add bounded proof process fixture');
-  const before = box.git('worktree', 'list', '--porcelain').split(/\n\n/u).filter(Boolean).length;
-  const startedAt = Date.now();
-  let watcher;
-  let watchdog;
-  const marker = new Promise((resolveMarker, rejectMarker) => {
-    watcher = watch(box.dir, (_event, name) => {
-      if (name?.toString() === 'owned-processes.json' && existsSync(identities)) resolveMarker();
-    });
-    watcher.once('error', rejectMarker);
-    watchdog = setTimeout(() => rejectMarker(new Error('timed-out process fixture did not record its identities')), 5000);
-    if (existsSync(identities)) resolveMarker();
-  });
-  const runOutcome = runCheckAt(box.repo, box.git('rev-parse', 'HEAD'), 'unused', {
-    executable: process.execPath, args: ['hold-proof.mjs', identities],
-  }, { timeoutMs }).then(value => ({ value }), error => ({ error }));
-  let result;
+  let runOutcome;
   let failure;
+  let watchdog;
   try {
-    await marker;
-    const recorded = JSON.parse(readFileSync(identities, 'utf8'));
+    box.git('add', 'hold-proof.mjs');
+    box.git('commit', '-q', '-m', 'test: add bounded proof process fixture');
+    const before = box.git('worktree', 'list', '--porcelain').split(/\n\n/u).filter(Boolean).length;
+    const startedAt = Date.now();
+    watchdog = setTimeout(() => rejectMarker(new Error('proof fixture did not send its live process identities')), 5000);
+    runOutcome = runCheckAt(box.repo, box.git('rev-parse', 'HEAD'), 'unused', {
+      executable: process.execPath, args: ['hold-proof.mjs'],
+    }, { timeoutMs }).then(value => ({ value }), error => ({ error }));
+    const recorded = await marker;
     assert.ok(recorded.capturedAt - startedAt < timeoutMs, 'the fixture recorded identities before the configured timeout');
-    const preTimeoutResult = spawnSync('/bin/ps', ['-axo', 'pid=,ppid=,pgid=,lstart=,stat=,comm='], { encoding: 'utf8', timeout: 2000, env: { ...process.env, LC_ALL: 'C' } });
-    assert.equal(preTimeoutResult.status, 0, 'the pre-timeout census completed');
-    const preTimeout = parseProcessCensus(preTimeoutResult.stdout);
-    assert.ok(preTimeout, 'the pre-timeout census is parseable');
+    const pre = spawnSync('/bin/ps', ['-axo', 'pid=,ppid=,pgid=,lstart=,stat=,comm='], { encoding: 'utf8', timeout: 2000, env: { ...process.env, LC_ALL: 'C' } });
+    assert.equal(pre.status, 0, 'the pre-timeout census completed');
+    const live = parseProcessCensus(pre.stdout);
+    assert.ok(live, 'the pre-timeout census is parseable');
     assert.equal(recorded.rows[0].pgid, recorded.rows[1].pgid, 'both captured processes belong to one group');
     for (const identity of recorded.rows) {
-      const current = preTimeout.get(identity.pid);
+      const current = live.get(identity.pid);
       assert.ok(current && current.pgid === identity.pgid && current.started === identity.started
         && current.processSha256 === identity.processSha256 && !current.state.startsWith('Z'),
       'each real process identity is still present before timeout');
     }
     const outcome = await runOutcome;
     if (outcome.error) throw outcome.error;
-    result = outcome.value;
-    assert.equal(result.timedOut, true, 'the owned proof reports its configured timeout');
-    const postTimeoutResult = spawnSync('/bin/ps', ['-axo', 'pid=,ppid=,pgid=,lstart=,stat=,comm='], { encoding: 'utf8', timeout: 2000, env: { ...process.env, LC_ALL: 'C' } });
-    assert.equal(postTimeoutResult.status, 0, 'the post-timeout process census completed');
-    const postTimeout = parseProcessCensus(postTimeoutResult.stdout);
-    assert.ok(postTimeout, 'the post-timeout process census is parseable');
+    assert.equal(outcome.value.timedOut, true, 'the owned proof reports its configured timeout');
+    const post = spawnSync('/bin/ps', ['-axo', 'pid=,ppid=,pgid=,lstart=,stat=,comm='], { encoding: 'utf8', timeout: 2000, env: { ...process.env, LC_ALL: 'C' } });
+    assert.equal(post.status, 0, 'the post-timeout census completed');
+    const drained = parseProcessCensus(post.stdout);
+    assert.ok(drained, 'the post-timeout census is parseable');
     for (const identity of recorded.rows) {
-      const current = postTimeout.get(identity.pid);
+      const current = drained.get(identity.pid);
       assert.ok(!current || current.state.startsWith('Z') || current.pgid !== identity.pgid
         || current.started !== identity.started || current.processSha256 !== identity.processSha256,
       'each captured process is absent, a zombie, or a different process');
     }
-    const after = box.git('worktree', 'list', '--porcelain').split(/\n\n/u).filter(Boolean).length;
-    assert.equal(after, before, 'the temporary proof worktree was removed after its group drained');
-  } catch (error) {
-    failure = error;
-  } finally {
+    assert.equal(box.git('worktree', 'list', '--porcelain').split(/\n\n/u).filter(Boolean).length, before,
+      'the temporary proof worktree was removed after its group drained');
+  } catch (error) { failure = error; }
+  finally {
     clearTimeout(watchdog);
-    watcher?.close();
-    // Do not let fixture teardown remove files until the proof runner has completed cleanup.
     const outcome = await runOutcome;
-    if (!failure && outcome.error) failure = outcome.error;
+    if (!failure && outcome?.error) failure = outcome.error;
+    if (failure && outcome) failure.message += '; bounded proof outcome: ' + JSON.stringify(outcome.error
+      ? { refusal: outcome.error.code, message: outcome.error.message }
+      : { exit: outcome.value.exit, timedOut: outcome.value.timedOut, stderr: outcome.value.stderr });
+    await new Promise(resolve => ready.close(resolve));
   }
   if (failure) throw failure;
 });
