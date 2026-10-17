@@ -192,6 +192,8 @@ Spec
   pullboard blueprint add <name or file> [--blueprint <name or file>]...  add a blueprint's rules and questions as drafts, and its starter items
                                         bundled: web-app; nothing is approved, and a repeat adds nothing
                                         several land in order: one product, one architecture, any practice; a shared rule is drafted once
+  pullboard blueprint fit <name or file> <row id or #item> keep|adapt|drop|answer [--text "..."] [--reason "why"]  propose this repo's fit; nothing applies yet
+  pullboard spec fit [approve <batch>] | fit edit <row id or #item> keep|adapt|drop|answer [--text "..."] [--reason "why"]  the person's fit batch
   pullboard blueprint save [file] [--name <name>] [--title "<title>"]  write approved rules and answered questions as a blueprint
                                         never items, notes, paths, emails or names; file defaults to <project>.blueprint.json
   pullboard spec signers add [--key <path>] [--by <principal>]  opt into SSH-signed sign-offs
@@ -225,7 +227,7 @@ const HELP_NAMES = [
   'sweep', 'merged', 'withdraw', 'refreeze', 'reopen', 'hold', 'stats', 'ledger', 'log', 'rigor', 'spec', 'spec check', 'spec view',
   'spec show', 'spec unmet', 'spec signoff', 'spec draft', 'spec signers', 'spec signers add', 'doctrine', 'doctrine check', 'forget', 'prompt', 'gate', 'hook',
   'hook pre-commit', 'hook pre-merge-commit', 'hook commit-msg', 'hook pre-push', 'view export', 'version', 'lifecycle', 'help',
-  'roadmap', 'milestone', 'milestone order', 'runner', 'runner add', 'blueprint', 'blueprint add', 'blueprint save',
+  'roadmap', 'milestone', 'milestone order', 'runner', 'runner add', 'blueprint', 'blueprint add', 'blueprint fit', 'blueprint save', 'spec fit',
 ];
 
 const HELP_GROUPS = [
@@ -265,6 +267,8 @@ const HELP_EXAMPLES = {
   'spec view': 'pullboard spec view', 'spec show': 'pullboard spec show G1',
   'spec draft': 'pullboard spec draft "Describe the first requirement"',
   'blueprint add': 'pullboard blueprint add web-app', 'blueprint save': 'pullboard blueprint save',
+  'blueprint fit': 'pullboard blueprint fit web-app G1 keep --reason "the repository already meets this row"',
+  'spec fit': 'pullboard spec fit',
   'spec unmet': 'pullboard spec unmet', 'spec signoff': 'pullboard spec signoff G1',
   'spec signers add': 'pullboard spec signers add', help: 'pullboard help claim', version: 'pullboard --version',
 };
@@ -280,8 +284,10 @@ const HELP_ALIASES = {
   lifecycle: { usage: 'pullboard lifecycle', source: null },
   escalate: { usage: 'pullboard escalate <id> --note "..." [--note-file <file>]', source: 'escalate <id> --note "what was tried and how it failed"', extraFlags: ['--note-file <file>'] },
   'view export': { usage: 'pullboard view --export <dir>', source: 'view' },
-  blueprint: { usage: 'pullboard blueprint add <name or file> [--blueprint <name or file>]...', source: 'blueprint add' },
+  blueprint: { usage: 'pullboard blueprint add <name or file>, then a seat runs pullboard blueprint fit <name or file> <row id or #item> keep|adapt|drop|answer, then the person runs pullboard spec fit approve <batch>', source: 'blueprint add' },
   'blueprint add': { usage: 'pullboard blueprint add <name or file> [--blueprint <name or file>]...', source: 'blueprint add' },
+  'blueprint fit': { usage: 'pullboard blueprint fit <name or file> <row id or #item> keep|adapt|drop|answer [--text "..."] [--reason "why"]', source: null, onlyFlags: ['--text', '--reason'] },
+  'spec fit': { usage: 'pullboard spec fit [approve <batch>] | fit edit <row id or #item> keep|adapt|drop|answer [--text "..."] [--reason "why"]', source: null, onlyFlags: ['--text', '--reason'] },
   'spec check': { usage: 'pullboard spec check', source: 'spec check' },
   'spec view': { usage: 'pullboard spec view [--out file]', source: 'spec view' },
   'spec show': { usage: 'pullboard spec show <id>', source: 'spec show', onlyFlags: [] },

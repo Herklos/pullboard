@@ -1,3 +1,4 @@
+import { hostedReleaseDistance, hostedReleaseInfo, hostedReleaseNote } from './view/hosted-release.js';
 import {
   effectiveGuards,
   IN_STATE,
@@ -58,10 +59,10 @@ function lifecycle() {
  * connect or sign in.
  *
  * @param {string} [key] - The session's secret.
- * @param {{snapshot?: boolean, readOnly?: boolean, requests?: boolean, transportModule?: string|null, apiBase?: string, apiHeaders?: Record<string, string>, stylesheet?: string, paths?: boolean, hostedLocal?: boolean, relaySession?: boolean, signIn?: string|null}} [options] - Served connection and assets, optional person requests over a read-only transport, host routes, a static page with event replay, or the hosted page that reads this machine's view first.
+ * @param {{snapshot?: boolean, readOnly?: boolean, requests?: boolean, transportModule?: string|null, apiBase?: string, apiHeaders?: Record<string, string>, stylesheet?: string, paths?: boolean, hostedLocal?: boolean, relaySession?: boolean, signIn?: string|null, hostedReleaseVersion?: string, hostedReleaseVersions?: string[]|null}} [options] - Served connection and assets, optional person requests over a read-only transport, host routes, a static page with event replay, or the hosted page that reads this machine's view first.
  * @returns {string}
  */
-export function cockpitPage(key = '', { snapshot = false, readOnly = false, requests = false, transportModule = null, apiBase = '', apiHeaders = { 'x-pullboard-key': key }, stylesheet = null, paths = false, hostedLocal = false, relaySession = false, signIn = null } = {}) {
+export function cockpitPage(key = '', { snapshot = false, readOnly = false, requests = false, transportModule = null, apiBase = '', apiHeaders = { 'x-pullboard-key': key }, stylesheet = null, paths = false, hostedLocal = false, relaySession = false, signIn = null, hostedReleaseVersion, hostedReleaseVersions = null } = {}) {
   // Derive the current CLI inventory for every served, relay or exported page.
   const COMMAND_SOURCE = 'pullboard (?:' + commandPhrases().join('|') + ')(?![\\w-])(?: (?:--?[\\w-]+|\\d+|#\\d+|"[^"\\n]*"|[A-Z][A-Z0-9_]*|[\\w-]*[\\/.:@][^\\s"]*|[a-z]+-\\d+)(?![\\w-]))*';
 
@@ -71,6 +72,8 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
   const requestMode = Boolean(readOnly && requests && !snapshot && transportModule);
   if (signIn !== null && (typeof signIn !== 'string' || !signIn.startsWith('/') || signIn.startsWith('//'))) throw new TypeError('signIn must be a path on the hosting site, or null');
   const hostedOptions = JSON.stringify({ local: Boolean(hostedLocal) && !snapshot, relaySession: Boolean(relaySession), signIn }).replace(/</g, '\\u003c');
+  const releaseHosted = Boolean(hostedLocal) && !snapshot;
+  const releaseInfo = hostedReleaseInfo(hostedReleaseVersion, hostedReleaseVersions, releaseHosted);
   const css = stylesheet ?? (snapshot ? 'view.css' : transportModule ? '/view.css' : '/view.css?k=' + encodeURIComponent(key));
   const cssAttribute = css.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
   return `<!doctype html>
@@ -115,6 +118,12 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
   </section>
   <p class="empty" id="project-loading" role="status" hidden>Loading project…</p>
   ${hostedMarkup('http://127.0.0.1:4890')}
+  <p class="side-hint" id="share-note" hidden>See these boards from any device: link them to pullboard.dev <button class="ghost" id="share-start" type="button">Sign in with GitHub</button></p>
+  <section class="card-panel" id="share-panel" aria-label="Link these boards" hidden>
+    <p id="share-status" role="status" aria-live="polite"></p>
+    <button class="ghost" id="share-pair" type="button" hidden>Pair a device</button>
+    <button class="ghost" id="share-close" type="button">Cancel sign-in</button>
+  </section>
   <section class="card-panel snapshot-controls" id="snapshot-controls" ${snapshot ? '' : 'hidden'} aria-label="Snapshot replay">
     <span>Read-only snapshot</span>
     <button class="ghost" id="replay-play" type="button">Play from first event</button>
@@ -312,6 +321,17 @@ const itemSearches = new Map();
 let detailRead = null;
 const addressedShouts = new Map();
 const $ = (id) => document.getElementById(id);
+// The update note from src/view/hosted-release.js (#632): only a confirmed read of this machine's view says how far behind it is.
+// Only the hosted page builds it; every other page draws nothing and never touches the DOM for it.
+const renderHostedReleaseNote = ${releaseHosted ? `(${hostedReleaseNote.toString()})(${releaseInfo}, { $, keep, distance: (${hostedReleaseDistance.toString()}),
+  // The selected board's own source decides (#632 review): a confirmed local board keeps its note on a mixed list that
+  // also reads relay boards, and a selected relay board never shows one; with no board selected, only an all-local page.
+  readable: () => {
+    if (!hosted.local || !localConfirmed || !localSession || connection.base !== localSession.origin) return false;
+    const board = data?.projects?.find((entry) => entry.root === view.root && entry.ok);
+    return board ? boardSources.get(board.id)?.kind === 'local' : !transportModule && !transport;
+  },
+  project: (project = data?.project) => project?.releaseNotes ? project : data?.projects?.find((entry) => entry.ok && entry.releaseNotes) })` : '() => {}'};
 
 const hostedState = (${hostedState.toString()});
 const hostedBrowser = (${hostedBrowser.toString()});
@@ -333,17 +353,29 @@ function starLine(list) {
   const line = $('star-line');
   if (!line) return list;
   const show = () => { line.hidden = !(hosted.relaySession && starLinked.linked && keep(${JSON.stringify(STAR_KEY)}) !== 'dismissed'); };
-  if (hosted.relaySession && !starLinked.linked && !starLinked.reading && Date.now() - starLinked.at > 2500) {
-    starLinked = { at: Date.now(), linked: false, reading: true };
-    linkedList().then((reply) => reply?.boards?.some((board) => typeof board?.id === 'string'), () => false)
-      .then((linked) => { starLinked = { at: Date.now(), linked, reading: false }; line.dataset.linked = linked ? 'yes' : 'no'; show(); });
+  const learn = (reply) => {
+    const linked = Boolean(reply?.boards?.some((board) => typeof board?.id === 'string'));
+    starLinked = { at: Date.now(), linked, reading: false };
+    line.dataset.linked = linked ? 'yes' : 'no';
+    show();
+  };
+  if (hosted.relaySession && !starLinked.linked && !starLinked.reading) {
+    // The page's own read of the account, when it made one since the line last looked, answers the line, refused
+    // or not: the line reads the account itself only when the page made no such read, so a listing never brings a
+    // second one (#817).
+    if (linkedSeen && linkedSeen.at > starLinked.at) learn(linkedSeen.reply);
+    else if (Date.now() - starLinked.at > 2500) {
+      starLinked = { at: Date.now(), linked: false, reading: true };
+      linkedList().then(learn, () => learn(null));
+    }
   }
   show();
   return list;
 }
 $('star-dismiss')?.addEventListener('click', () => { keep(${JSON.stringify(STAR_KEY)}, 'dismissed'); starLine(null); });
-// The first look waits for the whole script, so the engine the read declares (linkedList) is set up by then.
-Promise.resolve().then(() => starLine(null)); // a microtask, as queueMicrotask would schedule, but present in every page context
+// No first look of its own (#817): every signed-in page lists its boards, and api() hands that list here, so the
+// account is read only after a listing succeeds, never beside it. A session that its first listing revokes therefore
+// sees exactly one listing, and the line, hidden in its markup, stays hidden until a listing shows it.
 
 /** Hide the relay's own banner, which speaks for the relay, on a page the relay does not serve this time. */
 function hideRelayNotice() {
@@ -488,13 +520,15 @@ const dayName = (iso) => {
   today.setDate(today.getDate() - 1);
   return then === today.toDateString() ? 'Yesterday' : new Date(iso).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
 };
+// When the page last named days, so tickDays can rename them in place once the clock passes midnight (#644).
+let daysNamedAt = new Date();
 // A feed's rows, newest first, with the day named above each run of rows from the same day.
-const byDay = (rows, at, row) => rows.map((x, i) => (i && new Date(at(x)).toDateString() === new Date(at(rows[i - 1])).toDateString() ? '' : '<h4 class="day">' + dayName(at(x)) + '</h4>') + row(x)).join('');
+const byDay = (rows, at, row) => { daysNamedAt = new Date(); return rows.map((x, i) => (i && new Date(at(x)).toDateString() === new Date(at(rows[i - 1])).toDateString() ? '' : '<h4 class="day">' + dayName(at(x)) + '</h4>') + row(x)).join(''); };
 // Where the shouts cross into an earlier day, a rule names it in the middle; today needs no label at the top.
-const dayRules = (rows, at, row) => rows.map((x, i) => {
+const dayRules = (rows, at, row) => { daysNamedAt = new Date(); return rows.map((x, i) => {
   const day = new Date(at(x)).toDateString(), before = i ? new Date(at(rows[i - 1])).toDateString() : new Date().toDateString();
   return (day === before ? '' : '<div class="day-rule" role="separator"><span>' + dayName(at(x)) + '</span></div>') + row(x);
-}).join('');
+}).join(''); };
 const firstLine = (text) => String(text ?? '').split('\\n').map((line) => line.trim()).find(Boolean) || '';
 /** Omit a duplicated leading verdict code from rendered copy while preserving the recorded note. */
 function visibleVerdictNote(reason, note) {
@@ -1000,11 +1034,11 @@ async function api(path, body) {
 }
 
 /** Use one JSON request primitive, capturing its local route and session before awaiting a reply. */
-async function jsonRequest(path, body, base, headers, cache) {
+async function jsonRequest(path, body, base, headers, cache, format = 'json') {
   const session = localSession;
   path = base + path;
   const res = await fetch(path, { method: body ? 'POST' : 'GET', headers: { ...headers, ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined, cache });
-  const json = await res.json();
+  const json = format === 'html' && res.ok ? await res.text() : await res.json();
   if (session && session === localSession && base === session.origin) {
     if (res.status === 401 || res.status === 403) localExpired();
     else if (res.ok && !localConfirmed) { localConfirmed = true; tabValue(LOCAL_TRIPS, null); }
@@ -1012,16 +1046,146 @@ async function jsonRequest(path, body, base, headers, cache) {
   if (!res.ok) {
     const refusal = json.error;
     const message = refusal && typeof refusal === 'object' ? '[' + refusal.code + '] ' + refusal.message : refusal || res.status;
-    throw new Error(message);
+    const error = new Error(message);
+    if (refusal && typeof refusal === 'object') error.code = refusal.code;
+    throw error;
   }
   return json;
 }
 
+/** Read only this machine's authenticated view, including when its page is hosted elsewhere. */
+function sharingApi(body) {
+  return jsonRequest('/api/v1/view-link', body, hosted.local ? localReadBase : connection.base,
+    hosted.local ? localReadHeaders : connection.headers);
+}
+
+let sharingReady = null;
+let sharingTask = Promise.resolve();
+let sharing = { state: 'idle', intentId: null, popup: null, timer: null, closing: false, boards: [] };
+
+/** Show the opt-in once after a real local read; quiet boards do not acquire another polling loop. */
+async function sharingInvitation() {
+  if (!$('share-note') || snapshot || (hosted.local ? !localSession : pageReadOnly || configuredTransportModule)) return;
+  try { $('share-note').hidden = !(await sharingApi()).available; }
+  catch { $('share-note').hidden = true; }
+}
+
+/** Render names and reasons as text, without exposing machine paths or private sign-in material. */
+function sharingProgress(status) {
+  sharing.state = status.state;
+  sharing.boards = status.boards || [];
+  const linked = sharing.boards.filter(board => board.outcome === 'linked');
+  if (linked.length) $('share-note').hidden = true;
+  const lines = sharing.boards.map(board => board.outcome === 'linked' ? 'Linked ' + board.name + '.'
+    : 'Did not link ' + board.name + ': ' + board.reason);
+  if (status.error) lines.push(status.error.message);
+  else if (['cancelled', 'declined', 'expired'].includes(status.state)) lines.push('No boards were linked. You can sign in again whenever you want.');
+  else if (status.state === 'pairing') lines.push('Your boards are linked. Pair a device to open them there, or close this step; the links stay in place.');
+  else if (status.state === 'pairing-stopped') lines.push('Phone pairing stopped. Your boards remain linked.');
+  else if (status.state === 'linking') lines.push('Linking every registered board…');
+  else if (status.state === 'done' && !linked.length && !lines.length) lines.push('No boards were linked.');
+  if (lines.length) $('share-status').textContent = lines.join('\\n');
+  $('share-pair').hidden = status.state !== 'pairing';
+  $('share-close').textContent = linked.length ? 'Close' : 'Cancel sign-in';
+  if (status.state !== 'waiting') { sharing.popup?.close(); sharing.popup = null; }
+}
+
+/** Stop the one operation and await core cleanup; a linking batch is never described as rolled back. */
+async function closeSharing() {
+  clearTimeout(sharing.timer);
+  sharing.closing = true;
+  if (!sharing.intentId) return;
+  try {
+    const status = await sharingApi({ action: 'cancel', intentId: sharing.intentId });
+    sharingProgress(status);
+    sharing.popup?.close(); sharing.popup = null;
+    $('share-start').disabled = false;
+    sharingReady = sharingInvitation();
+  } catch (error) {
+    $('share-status').textContent = error.message;
+    if (error.code === 'VIEW_SIGN_IN_LINKING') {
+      sharing.closing = false;
+      sharing.timer = setTimeout(() => { sharingTask = pollSharing(); }, 250);
+    } else { sharing.popup?.close(); sharing.popup = null; $('share-start').disabled = false; }
+  }
+}
+
+/** Poll public progress only while the person has an active sign-in or pairing step. */
+async function pollSharing() {
+  if (sharing.closing) return;
+  if (sharing.state === 'waiting' && sharing.popup?.closed) { sharingTask = closeSharing(); return sharingTask; }
+  try {
+    const status = await sharingApi({ action: 'status', intentId: sharing.intentId });
+    sharingProgress(status);
+    if (['waiting', 'linking', 'pairing'].includes(status.state)) sharing.timer = setTimeout(() => { sharingTask = pollSharing(); }, 250);
+    else { $('share-start').disabled = false; sharingReady = sharingInvitation(); }
+  } catch (error) {
+    $('share-status').textContent = error.message;
+    $('share-start').disabled = false;
+  }
+}
+
+/** Begin one existing all-board sign-in; open its browser window in the native click before awaiting the server. */
+async function beginSharing(popup) {
+  sharing = { state: 'waiting', intentId: null, popup, timer: null, closing: false, boards: [] };
+  $('share-panel').hidden = false;
+  $('share-start').disabled = true;
+  $('share-status').textContent = 'Starting GitHub sign-in…';
+  try {
+    const instructions = await sharingApi({ action: 'start' });
+    sharing.intentId = instructions.intentId;
+    if (sharing.closing || popup?.closed) return await closeSharing();
+    $('share-status').textContent = 'Enter ' + instructions.userCode + ' in the GitHub window. Closing this sign-in before linking leaves every board local.';
+    popup.location.replace(instructions.verificationURL);
+    sharing.timer = setTimeout(() => { sharingTask = pollSharing(); }, 250);
+  } catch (error) {
+    popup?.close();
+    $('share-status').textContent = error.message;
+    $('share-start').disabled = false;
+  }
+}
+
+/** Open only core's transient device navigation in a separately authenticated HTML response, never a JSON URL. */
+async function pairSharing(popup) {
+  const base = hosted.local ? localReadBase : connection.base;
+  const headers = hosted.local ? localReadHeaders : connection.headers;
+  try {
+    const html = await jsonRequest('/api/v1/view-link', { action: 'pairing', intentId: sharing.intentId }, base, headers, undefined, 'html');
+    const destination = new DOMParser().parseFromString(html, 'text/html').querySelector('a')?.getAttribute('href');
+    if (!destination) throw new Error('Phone pairing is no longer waiting. Read the sign-in status and start again if needed.');
+    popup.location.replace(destination);
+  } catch (error) { popup?.close(); $('share-status').textContent = error.message; }
+}
+
+$('share-start')?.addEventListener('click', () => {
+  const popup = window.open('about:blank', '_blank');
+  if (!popup) { $('share-panel').hidden = false; $('share-status').textContent = 'Allow this view to open the GitHub sign-in window, then try again.'; return; }
+  popup.opener = null;
+  sharingTask = beginSharing(popup);
+});
+$('share-close')?.addEventListener('click', () => { sharingTask = closeSharing(); });
+$('share-pair')?.addEventListener('click', () => {
+  const popup = window.open('about:blank', '_blank');
+  if (!popup) { $('share-status').textContent = 'Allow this view to open the device-pairing window, then try again.'; return; }
+  popup.opener = null;
+  sharingTask = pairSharing(popup);
+});
+
 let relayEngine = null;
 /** The account's linked boards: a same-origin read that declares the relay's engine, as every relay request does. */
+// The account's last read and when it ended, answered or refused, for the star line, which reuses it rather than
+// asking again (#817): a refusal is an answer too, "not linked", and is not asked again straight away.
+let linkedSeen = null;
 async function linkedList() {
   relayEngine ??= await import('/relay/engine.js').then((engine) => String(engine.ENGINE_VERSION), () => '');
-  return jsonRequest('/api/v1/boards', undefined, '', relayEngine ? { 'x-pullboard-engine': relayEngine } : {}, 'no-store');
+  try {
+    const reply = await jsonRequest('/api/v1/boards', undefined, '', relayEngine ? { 'x-pullboard-engine': relayEngine } : {}, 'no-store');
+    linkedSeen = { at: Date.now(), reply };
+    return reply;
+  } catch (error) {
+    linkedSeen = { at: Date.now(), reply: null };
+    throw error;
+  }
 }
 
 /**
@@ -1181,6 +1345,7 @@ function boardSummary(board, state) {
   const count = (test) => state.items.filter(test).length;
   return {
     ...board, ok: true,
+    releaseNotes: state.releaseNotes,
     building: count((item) => item.status === 'claimed'),
     awaiting: count((item) => item.status === 'submitted'),
     sentBack: count((item) => item.status === 'open' && item.verdict && item.verdict.decision === 'REJECT'),
@@ -1206,6 +1371,11 @@ function flowMinutes(value) {
   return Math.floor(hours / 24) + ' d ' + hours % 24 + ' h';
 }
 
+/** A queue's oldest item and how long it has waited, as the flow card reads it. */
+function oldestLine(oldest) {
+  return 'Oldest: ' + (oldest ? '#' + oldest.id + ' · ' + flowMinutes(oldest.ageMinutes) : 'none');
+}
+
 /** Render the four stages, live queues and single recommendation supplied by stats [N26]. */
 function proofFlowCard(flow) {
   if (!flow) return '';
@@ -1219,7 +1389,7 @@ function proofFlowCard(flow) {
     const queue = flow.queues[key];
     const oldest = queue.oldest;
     return '<div><span>' + label + ' queue</span><b data-queue="' + key + '" data-value="' + esc(queue.size) + '">' + esc(queue.size) + '</b>'
-      + '<small data-oldest="' + key + '" data-value="' + esc(oldest?.ageMinutes ?? '') + '">Oldest: ' + (oldest ? '#' + esc(oldest.id) + ' · ' + esc(flowMinutes(oldest.ageMinutes)) : 'none') + '</small></div>';
+      + '<small data-oldest="' + key + '" data-value="' + esc(oldest?.ageMinutes ?? '') + '">' + esc(oldestLine(oldest)) + '</small></div>';
   }).join('');
   const bottleneck = flow.bottleneck;
   return '<div class="proof-stats-flow"><div class="proof-stats-grid">' + averages + waiting + '</div>'
@@ -1437,6 +1607,26 @@ async function revokeCredential(id) {
   if (root === view.root) renderCredentials();
 }
 
+/**
+ * A board read as text with its clock readings blanked: the flow's observation time (asOf) and each queue's oldest age
+ * (ageMinutes) are stamped afresh on every read, so two reads that differ only there show the same board (#644).
+ * Matching whole JSON keys is safe: a quote inside any string value is escaped, so no title can look like one.
+ */
+function boardText(state) {
+  return JSON.stringify(state).replace(/"(asOf|ageMinutes)":(?:"[^"]*"|[-+.0-9eE]+|null)/g, '"$1":null');
+}
+
+/** Show each queue's oldest age from the board on hand in place: the one thing on the page that moves with the clock alone. */
+function showFlowAges() {
+  const flow = data?.project?.proofStats?.flow;
+  if (!flow) return;
+  for (const node of document.querySelectorAll('#proof-stats [data-oldest]')) {
+    const oldest = flow.queues[node.dataset.oldest]?.oldest;
+    node.dataset.value = oldest?.ageMinutes ?? '';
+    node.textContent = oldestLine(oldest);
+  }
+}
+
 /** Refresh from API v1, every board or only those in fresh, and discard a response for a project the person left. */
 async function refresh(fresh = null) {
   const generation = ++refreshStarted;
@@ -1474,7 +1664,7 @@ async function refresh(fresh = null) {
     if (place) applyPlace(place, globalThis.history?.state);
     addressReady = true;
   }
-  const text = JSON.stringify(next);
+  const text = boardText(next);
   const changed = text !== seen;
   if (text !== seen) {
     seen = text;
@@ -1484,6 +1674,11 @@ async function refresh(fresh = null) {
     const reading = detailRead;
     render();
     if (detailRead !== reading) await detailRead;
+  } else if (data !== next) {
+    // The same board read again: keep its newest clock readings and show them in place, with no redraw (#644).
+    data = next;
+    showFlowAges();
+    tickAges();
   }
   if (changed) {
     address(false);
@@ -1497,6 +1692,7 @@ async function refresh(fresh = null) {
   }
   if (!snapshot) follow();
   $('live').textContent = snapshot ? 'read-only snapshot' : liveLine();
+  sharingReady ??= sharingInvitation();
 }
 
 // The local view follows the shown boards' events instead of a timer (#545): it reads the board once, waits on its
@@ -2214,6 +2410,7 @@ function render() {
   document.querySelectorAll('[data-pane]').forEach((pane) => { pane.hidden = Boolean(group) || pane.dataset.pane !== view.tab; });
   $('products').hidden = !p || !p.products.length;
   renderReleaseNotes(group ? null : p);
+  renderHostedReleaseNote(p);
   renderPersonRequests(p);
   renderCredentials();
   if (group) { renderGroup(group); return; }
@@ -3253,6 +3450,24 @@ function foldShouts() {
 
 function tickAges() {
   document.querySelectorAll('[data-ago]').forEach((node) => { node.textContent = node.classList.contains('long') ? agoLong(node.dataset.ago) : ago(node.dataset.ago); });
+  tickDays();
+}
+
+/**
+ * Once the clock has passed midnight since the page named its days, rename them in place with no redraw (#644): the
+ * day that was Today and the one that was Yesterday get their names for now, and the shouts, which carry no rule above
+ * today's, get one above what is no longer today. Every other day was named by its date and stays true.
+ */
+function tickDays() {
+  const then = daysNamedAt, now = new Date();
+  if (then.toDateString() === now.toDateString()) return;
+  const before = new Date(then);
+  before.setDate(then.getDate() - 1);
+  const names = { Today: dayName(then.toISOString()), Yesterday: dayName(before.toISOString()) };
+  document.querySelectorAll('.feed .day, #feed > .day-rule span').forEach((node) => { if (names[node.textContent]) node.textContent = names[node.textContent]; });
+  const first = $('feed')?.querySelector?.('.shout');
+  if (first && !first.previousElementSibling?.classList?.contains('day-rule')) first.insertAdjacentHTML('beforebegin', '<div class="day-rule" role="separator"><span>' + names.Today + '</span></div>');
+  daysNamedAt = now;
 }
 
 /** Open or close the project list where the sidebar is folded into a top bar (under 900px). */
