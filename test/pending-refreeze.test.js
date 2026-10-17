@@ -252,7 +252,7 @@ async function checkDependencyLegacyClients(cleanup, directory, snapshot, target
         const oldSnapshot = legacyExchange.exportBoard(old);
         const currentSnapshot = exportBoard(current);
         assert.equal(oldSnapshot.tables.board_meta.find((row) => row.meta_key === 'relay_engine_version').meta_value, '10');
-        assert.equal(currentSnapshot.tables.board_meta.find((row) => row.meta_key === 'relay_engine_version').meta_value, '12');
+        assert.equal(currentSnapshot.tables.board_meta.find((row) => row.meta_key === 'relay_engine_version').meta_value, String(ENGINE_VERSION));
         assert.deepEqual(withoutEngineMarker(currentSnapshot), withoutEngineMarker(oldSnapshot),
           'the sole snapshot difference is the intentionally newer writer-version marker');
       }
@@ -261,7 +261,7 @@ async function checkDependencyLegacyClients(cleanup, directory, snapshot, target
 }
 
 test('dependency edits replay the same on every engine [B3,V2,H16]', async (t) => {
-  assert.equal(ENGINE_VERSION, 12);
+  assert.equal(ENGINE_VERSION, 24);
   const directory = mkdtempSync(join(tmpdir(), 'pullboard-dependency-engines-'));
   const cleanup = [];
   t.after(() => {

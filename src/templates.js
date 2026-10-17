@@ -9,7 +9,8 @@ export const AGENTS_START = '<!-- pullboard:start -->';
 export const AGENTS_END = '<!-- pullboard:end -->';
 
 /**
- * The starting pullboard.json: the gate and the fixers init detected, the spec, and no lanes yet.
+ * The starting pullboard.json: the gate and the fixers init detected, the spec, no lanes yet, and
+ * checks.provesNothing at "hold", so a new board holds an item whose check already passes on main.
  *
  * @param {string} gate
  * @param {{ run: string, files: string[] }[]} [fix]
@@ -28,6 +29,7 @@ export function configTemplate(gate, fix = []) {
     lanes: { review: { owns: [], starts: 'any time: verifiers check submitted work and own no folders' } },
     shared: [],
     commits: { requireIds: ['feat', 'fix'] },
+    checks: { provesNothing: 'hold' },
   };
   return `${JSON.stringify(config, null, 2)}\n`;
 }
@@ -119,7 +121,7 @@ It prints the folder to work in and what to run there first. Every join needs th
 
 **The loop.**
 1. \`pullboard resume\` at the start of every session and after your context is compacted: your claim, what came back, unread shouts and the next step. Then \`pullboard inbox\`.
-2. \`pullboard next\` claims the next item in your lane that is free to start. When everything is waiting on other work, \`pullboard next --wait 9\` keeps looking for up to 9 minutes, which fits one tool call with a ten-minute timeout; run it again to keep waiting. A claim is a 2-hour lease; claim again to renew. The criterion freezes now: \`pullboard show <id>\` is the bar your work is judged against, and its brief says how to start.
+2. \`pullboard next\` claims the next item in your lane that is free to start. When everything is waiting on other work, \`pullboard next --wait 9\` keeps looking for up to 9 minutes, which fits one tool call with a ten-minute timeout; run it again to keep waiting. A claim is a 2-hour lease; claim again to renew. The criterion freezes now: \`pullboard show <id>\` is the bar your work is judged against, and its brief says how to start. A claim or submit refused as CRITERION_PROVES_NOTHING names a check that already passes on main, so it proves nothing: shout the coordinator for a check that fails before the work. Only the person accepts a check as it stands, with \`pullboard check accept <id>\` from the main checkout or the view.
 3. Build inside your lane's folders (\`pullboard lanes\`). Pre-commit refuses anything else; shout the owner instead.
 4. Commit, then \`pullboard submit <id>\`. It needs a clean tree and the gate green at HEAD.
 5. A different agent verifies: \`pullboard next --verify\` names the next item to check. It checks out the submitted commit and runs \`pullboard verify <id> accept --note "how it proved it"\`, or \`pullboard verify <id> reject --reason TEST_FAILURE --note "what failed"\`.

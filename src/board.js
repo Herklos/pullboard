@@ -16,6 +16,7 @@ import { COORDINATOR } from './config.js';
 import { ENGINE_VERSION, GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, effectiveGuards, storeTriggers } from './machine.js';
 import { Refused } from './refused.js';
 import { parseSpec } from './spec.js';
+export { acceptCheck } from './check-accept.js';
 
 export const ACCEPT_REASON = 'CRITERION_MET';
 export const PERSON = 'person';
@@ -425,15 +426,13 @@ export function atomic(board, work) {
  * @param {number | null} itemId
  * @param {object} [detail]
  */
-function logEvent(board, by, kind, itemId, detail = {}) {
+export function logEvent(board, by, kind, itemId, detail = {}) {
   const model = agentModel(board, by);
   const isAgent = Boolean(board.db.prepare('SELECT 1 FROM agent WHERE agent_id = ?').get(by));
   const recorded = (board.executionEngineVersion ?? ENGINE_VERSION) >= 8 && isAgent
     ? { ...detail, model: model ?? 'unknown' } : detail;
   const inserted = board.db
-    .prepare(
-      'INSERT INTO event (event_at, event_by, event_kind, item_id, event_detail) VALUES (?, ?, ?, ?, ?)',
-    )
+    .prepare('INSERT INTO event (event_at, event_by, event_kind, item_id, event_detail) VALUES (?, ?, ?, ?, ?)')
     .run(now(board), by, kind, itemId, JSON.stringify(recorded));
   board.lastEvent = board.db.prepare('SELECT * FROM event WHERE event_id = ?').get(inserted.lastInsertRowid);
   (board.emittedEvents ??= []).push(board.lastEvent);
@@ -1053,7 +1052,7 @@ export function claim(board, id, { agentId, lane, leaseMs, freeze, head = null, 
     let frozen = null;
     const item = moveItem(board, id, 'claim', {
       checks: {
-        joined: null,
+        joined: null, checkProvesSomething: null,
         [IN_STATE]: (found) => new Refused('NOT_CLAIMABLE', `item #${id} is ${found.item_status}`),
         inLane: (found) => {
           if (found.item_lane === lane) return null;
@@ -1191,7 +1190,7 @@ export function submit(board, id, { agentId, commit, tree, files = [], policyCom
     const notYours = () => new Refused('NOT_YOURS', `item #${id} is not claimed by you; claim it first`);
     moveItem(board, id, 'submit', {
       checks: {
-        joined: null,
+        joined: null, checkProvesSomething: null,
         [IN_STATE]: notYours,
         isHolder: (found) => (found.item_owner === agentId ? null : notYours()),
         correctionRefrozen: () => pendingRefreezeProblem(board, id),

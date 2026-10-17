@@ -62,6 +62,7 @@ import {
 import { answerQuestion, bundledBlueprints, planBlueprint, readBlueprint, saveBlueprint } from './blueprints.js';
 import { briefFiles } from './brief.js';
 import { checkBaseline, prepareCheckBaseline, refuseCheckSyntax, sayCheckBaseline } from './check-baseline.js';
+import { checkDigest, refuseProvesNothing } from './check-accept.js';
 import { retryCheckBaselines, startCheckBaseline } from './check-baseline-worker.js';
 import { compareMainFailures, mainRedMessage, mainRedReworkItems } from './main-red.js';
 import { runItems } from './run.js';
@@ -2244,6 +2245,7 @@ async function submitHere(ctx, id) {
   const policy = itemPolicy(root, held);
   const acceptedMain = mainPolicy(root);
   ctx = { ...ctx, config: policy.config };
+  withBoard(ctx, (board) => refuseProvesNothing(() => acceptedMain.config, board, store.getItem(board, id)));
   const dependencies = withBoard(ctx, board => dependencySnapshots(board.db, held));
   submissionPaths(root, held, headCommit(root), { mainCommit: acceptedMain.commit, dependencies });
   const { me, claimHead } = withBoard(ctx, (board) => {
@@ -2316,6 +2318,27 @@ async function submitHere(ctx, id) {
   });
   return reportSubmission(ctx, id, commit, { green: gate.isGreen, report: submitGateReport(gate), files: gate.files, full: gate.full, deferred: gate.deferred, deferFullFallback: gate.deferFullFallback, reason: gate.reason, check: gate.check,
     log: gate.log, profile: gate.profile, profilePath: gate.profilePath, proofLog: gate.proofLog, proofProfilePath: gate.proofProfilePath }, doctrine);
+}
+
+/**
+ * The person accepts an item's check as it reads now, which lifts a hold on a check already green
+ * on main. A person-only move (P6): an agent shell, a remote shell, a worktree, the API and MCP are
+ * refused, and the move carries the check's digest so a changed check needs a new acceptance.
+ */
+async function checkAccept(io, first, rest) {
+  requirePersonChannel(io.personChannel);
+  if (!/^#?\d+$/u.test(first ?? '') || rest.length) throw new Refused('USAGE', 'pullboard check accept <id>');
+  const ctx = context(io);
+  return withBoard(ctx, async (board) => {
+    if (!ctx.info.isMain || whoAmI(ctx, board).id !== COORDINATOR) throw new Refused('B26_PERSON_APPROVAL', 'only the person accepts a check, from the main checkout or the view', 'ask the person to accept it in pullboard view, or in their own terminal at the main checkout');
+    const item = store.getItem(board, idArg(first));
+    if (!item.item_check) throw new Refused('NO_CHECK', `#${item.item_id} has no check command to accept; its proof is the project gate: pullboard gate`);
+    const accepted = await ordered(ctx, board, 'acceptCheck', [item.item_id, { agentId: store.PERSON, channel: io.personChannel ?? 'terminal', digest: checkDigest(item.item_check) }]);
+    io.result?.({ id: accepted.id, digest: accepted.digest, check: accepted.check });
+    io.say(`accepted #${accepted.id}'s check as it reads now: ${accepted.check}`);
+    io.say('a changed check needs the person to accept it again');
+    return 0;
+  });
 }
 
 /** Report and pin the original submitted commit, including a recovered acknowledged outcome. */
@@ -2961,6 +2984,7 @@ function workCommands(io, args) {
     sweep: () => act((ctx, board, me) => sweepHere(ctx, board, me, values)),
     next: () => nextHere(io, { ...values, verifyId: first }),
     check: async () => {
+      if (first === 'accept') return checkAccept(io, second, rest);
       const ctx = context(io);
       const { item, author, caller, agents } = withBoard(ctx, (board) => {
         const me = first ? (ctx.info.isMain ? { id: COORDINATOR } : { id: store.agentAt(board, ctx.info.root)?.agent_id }) : whoAmI(ctx, board);
@@ -3003,6 +3027,8 @@ function workCommands(io, args) {
     },
     claim: () => act(async (ctx, board, me) => {
       const id = idArg(first);
+      const claimable = store.getItem(board, id);
+      if (['open', 'claimed'].includes(claimable.item_status)) refuseProvesNothing(() => mainPolicy(ctx.info.root).config, board, claimable);
       let result;
       for (;;) {
         try {
