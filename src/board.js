@@ -6,6 +6,8 @@
  * every move lands in an append-only event log (R2). The caller supplies what only git and the
  * spec know: the commit, the verifier's checkout, the frozen criterion.
  */
+import { verdictReviewProblem, verdictsFor, acceptedVerdict, checkedLandingCommit } from './verdict-reviews.js';
+export { verdictReviewProblem, verdictsFor, acceptedVerdict, checkedLandingCommit };
 import { randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -13,7 +15,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { boardNotWritable } from './board-access.js';
 import { briefFiles, briefSections } from './brief.js';
 import { COORDINATOR } from './config.js';
-import { ENGINE_VERSION, GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, VERIFIER_STANDING_ENGINE, effectiveGuards, storeTriggers } from './machine.js';
+import { ENGINE_VERSION, VERDICT_REVIEW_ENGINE, GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, VERIFIER_STANDING_ENGINE, effectiveGuards, storeTriggers } from './machine.js';
 import { Refused } from './refused.js';
 import { agentAt, agentModel, newSeatId, routeOf, saveAgentModel, seatLineage, standingProblem } from './seats.js';
 import { causeProblem, requireNeverAgain } from './rigor.js';
@@ -1448,7 +1450,8 @@ function reserveWithin(board, id, { agentId, leaseMs, policy, familyPolicy = 'of
 }
 
 /**
- * Record a verdict on a submitted item (V1, V3, V5, V6, V8): an accept verifies it, a reject
+ * Record a verdict on submitted work, or a sealed re-review of unlanded work (E8,V1,V3,V8).
+ * An accept verifies it; a reject
  * reopens it for rework.
  *
  * The verdict binds the submitted commit and the digest frozen at claim. If the criterion's text
@@ -1460,21 +1463,32 @@ function reserveWithin(board, id, { agentId, leaseMs, policy, familyPolicy = 'of
  *
  * @param {any} board
  * @param {number} id
- * @param {{ agentId: string, decision: string, reason?: string, note?: string, cause?: string, head: string, digest: string, policy: string, familyPolicy?: string, check?: 'none' | 'green', implies?: number[], impliesId?: string }} verdict - implies: items this verdict changes (B29)
+ * @param {{ agentId: string, decision: string, reason?: string, note?: string, cause?: string, head: string, digest: string, policy: string, familyPolicy?: string, check?: 'none' | 'green', review?: {commit: string, head?: string, trunk: string, paths: string[]}, implies?: number[], impliesId?: string }} verdict - implies: items this verdict changes (B29)
  * @returns {{ decision: string, reason: string, check?: 'none' | 'green' }}
  */
-export function verify(board, id, { agentId, decision, reason, note = '', cause, head, digest, policy, familyPolicy = 'off', check, implies, impliesId }) {
+export function verify(board, id, { agentId, decision, reason, note = '', cause, head, digest, policy, familyPolicy = 'off', check, review, implies, impliesId }) {
   const verb = { ACCEPT: 'accept', REJECT: 'reject' }[decision];
   if (!verb) throw new Refused('BAD_DECISION', 'the decision is accept or reject');
   const isAccept = verb === 'accept';
   const code = isAccept ? ACCEPT_REASON : reason;
+  const engine = board.executionEngineVersion ?? ENGINE_VERSION;
+  const declaration = MOVES.find(move => move.verb === verb);
+  const newReview = engine >= VERDICT_REVIEW_ENGINE && review !== undefined;
+  // Without the new sealed metadata, old moves keep their exact submitted-only semantics.
+  const transition = newReview ? declaration : { ...declaration, from: ['submitted'],
+    guards: declaration.guards.filter(guard => !['notMerged', 'verdictReviewRecorded', 'reviewTreeCurrent'].includes(guard)) };
   return atomic(board, () => {
     const item = moveItem(board, id, verb, {
+      transition,
       checks: {
         coordinatorSaysAs: null,
         joined: null,
         [IN_STATE]: (found) => new Refused('NOT_SUBMITTED', `item #${id} is ${current(board, found).item_status}, not submitted`),
         atSubmittedCommit: null,
+        notMerged: found => !found.item_merged_commit ? null
+          : new Refused('ALREADY_MERGED', `item #${id} already landed; only unlanded acceptances can be re-reviewed`),
+        verdictReviewRecorded: found => verdictReviewProblem(review, found.item_commit, { checked: engine >= VERDICT_REVIEW_ENGINE }),
+        reviewTreeCurrent: null,
         ...reviewerChecks(board, { agentId, policy, familyPolicy }),
         criterionUnchanged: (found) =>
           digest === found.item_frozen_digest
@@ -1506,6 +1520,7 @@ export function verify(board, id, { agentId, decision, reason, note = '', cause,
     });
     const detail = { reason: code, commit: item.item_commit, ...(!isAccept && cause !== undefined && cause !== null ? { cause } : {}) };
     if (isAccept && check !== undefined) detail.check = check;
+    if (newReview) detail.review = { commit: review.commit, ...(Object.hasOwn(review, 'head') ? { head: review.head } : {}), trunk: review.trunk, paths: [...review.paths] };
     logEvent(board, agentId, verb, id, implies?.length ? { ...detail, implies } : detail);
     tellVerdictImplications(board, (by, itemId, fact) => logEvent(board, by, 'fact', itemId, fact), id, { seed: impliesId, implies });
     return { decision, reason: code, ...(isAccept && check !== undefined ? { check } : {}) };
@@ -1767,23 +1782,6 @@ export function getItem(board, id) {
   const item = current(board, itemById(board, id));
   const baseline = itemCheckBaseline(board, item);
   return baseline ? { ...item, item_check_baseline: baseline } : item;
-}
-
-/**
- * Every verdict on an item, oldest first.
- *
- * @param {any} board
- * @param {number} id
- * @returns {any[]}
- */
-export function verdictsFor(board, id) {
-  const verdicts = board.db.prepare('SELECT * FROM verdict WHERE item_id = ? ORDER BY verdict_id').all(id);
-  const receipts = board.db.prepare("SELECT event_kind, event_detail FROM event WHERE item_id = ? AND event_kind IN ('accept', 'reject') ORDER BY event_id").all(id);
-  return verdicts.map((verdict, index) => {
-    let detail = {};
-    try { detail = JSON.parse(receipts[index]?.event_detail ?? '{}'); } catch { /* Malformed legacy details remain unknown. */ }
-    return { ...verdict, check: detail.check ?? 'unknown' };
-  });
 }
 
 /**
@@ -2669,7 +2667,8 @@ export function recordLandingBatch(board, { agentId, batch, revision = 0 }) {
     || !['merging', 'gating', 'bisecting', 'flaky', 'blocked', 'ready', 'pushed', 'landed'].includes(batch.state)
     || !/^[a-f0-9]{40,64}$/u.test(batch.base ?? '') || !/^[a-f0-9]{40,64}$/u.test(batch.tip ?? '')
     || typeof batch.root !== 'string' || !batch.root || typeof batch.branch !== 'string' || !batch.branch.startsWith('refs/heads/')
-    || !Array.isArray(batch.items) || batch.items.some((entry) => !Number.isSafeInteger(entry?.id) || entry.id < 1 || !/^[a-f0-9]{40,64}$/u.test(entry.commit ?? ''))
+    || !Array.isArray(batch.items) || batch.items.some((entry) => !Number.isSafeInteger(entry?.id) || entry.id < 1 || !/^[a-f0-9]{40,64}$/u.test(entry.commit ?? '')
+      || ((board.executionEngineVersion ?? ENGINE_VERSION) >= VERDICT_REVIEW_ENGINE && Object.hasOwn(entry, 'reviewedCommit') && !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(entry.reviewedCommit ?? '')))
     || typeof batch.owner !== 'string' || !batch.owner || typeof batch.logPath !== 'string' || !batch.logPath
     || !Number.isSafeInteger(revision) || revision < 0) {
     throw new Refused('LAND_BATCH', 'a landing batch needs its exact base, tip, items, state, owner and log path; run pullboard land');
@@ -2768,8 +2767,22 @@ export function finishLandingBatch(board, { agentId, id, tip }) {
       if (item.item_commit !== entry.commit || item.item_status !== 'verified') {
         throw new Refused('LAND_ITEM_MOVED', `item #${entry.id} changed after the batch was gated; rebuild its landing`);
       }
+      if ((board.executionEngineVersion ?? ENGINE_VERSION) >= VERDICT_REVIEW_ENGINE
+        && (entry.reviewedCommit ?? entry.commit) !== checkedLandingCommit(board, item)) {
+        throw new Refused('LAND_ITEM_MOVED', `item #${entry.id} was re-reviewed after the batch was gated; rebuild its landing`);
+      }
       if (item.item_merged_commit && item.item_merged_commit !== entry.merge) {
         throw new Refused('LAND_ITEM_MOVED', `item #${entry.id} already has another landing receipt; read pullboard show ${entry.id}`);
+      }
+      const accepted = acceptedVerdict(board, item);
+      if ((board.executionEngineVersion ?? ENGINE_VERSION) < VERDICT_REVIEW_ENGINE
+        && accepted?.review?.head && accepted.review.head !== (entry.reviewedCommit ?? entry.commit)) {
+        // An old client may already have pushed B before a newer client checked C.
+        // Record physical history without lending C's proof to B or wedging replay.
+        logEvent(board, agentId, 'landing-review-moved', entry.id, {
+          code: 'LAND_ITEM_MOVED', batch: id, verdict: accepted.verdict_id,
+          checked: accepted.review.head, landed: entry.merge,
+        });
       }
       if (!item.item_merged_commit) merged(board, entry.id, { agentId, commit: entry.merge });
     }

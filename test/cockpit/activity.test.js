@@ -215,6 +215,7 @@ test('the activity tab draws the lifecycle from the declaration, as the README d
       open: '↻ escalate · refreeze (none yet)',
       claimed: '↻ claim 1',
       submitted: '↻ reserve (none yet)',
+      verified: '↻ accept (none yet)',
     });
     assert.deepEqual(boxes.filter((entry) => entry.keeps).map((entry) => entry.state), keeping, 'each state a move keeps');
 
@@ -235,7 +236,7 @@ test('the activity tab draws the lifecycle from the declaration, as the README d
       'open>withdrawn': verifiedIsFinal ? 'withdraw 4' : 'withdraw 1',
       'claimed>withdrawn': verifiedIsFinal ? null : 'withdraw 2',
       'submitted>withdrawn': verifiedIsFinal ? null : 'withdraw 1',
-      ...(!verifiedIsFinal ? { 'verified>open': 'reopen (none yet)' } : {}),
+      ...(!verifiedIsFinal ? { 'verified>open': 'reject · reopen (none yet)' } : {}),
     });
 
     // Every route is square, and the ones back to an earlier state are dashed, each at its own height.
@@ -254,7 +255,7 @@ test('the activity tab draws the lifecycle from the declaration, as the README d
     if (!verifiedIsFinal) {
       const verifiedReturn = routes.find((route) => route.pair === 'verified>open');
       assert.ok(verifiedReturn, 'the non-final verified state has a route back to open');
-      assert.equal(verifiedReturn.label, 'reopen (none yet)', 'the verified return route carries its label');
+      assert.equal(verifiedReturn.label, 'reject · reopen (none yet)', 'the verified return route carries its label');
       assert.equal(verifiedReturn.back, false, 'the lower-lane return is not an above-row back route');
       assert.equal(verifiedReturn.points[1][1], verifiedReturn.points[2][1], 'the verified return runs through a horizontal lower lane');
       assert.ok(verifiedReturn.points[1][1] > Math.max(...rects.map((rect) => rect.bottom)), 'the lower lane clears every state box');
