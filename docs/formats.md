@@ -330,7 +330,7 @@ The `event` table is a SQLite schema object governed by `SCHEMA_VERSION`; its ap
 | `claim` | builder | `leaseUntil`, `digest` |
 | `renew` | builder | `leaseUntil`, `digest` |
 | `release` | builder | — |
-| `submit` | builder | `commit`, `tree`, `policyCommit`, engine-9 `criterionDigest` |
+| `submit` | builder | `commit`, `tree`, `policyCommit`, engine-9 `criterionDigest`, engine-34 `submissionProof` |
 | `reserve` | reviewer | `until` |
 | `accept` | reviewer | `reason`, `commit`, engine-20 `implies` |
 | `reject` | reviewer | `reason`, `commit`, engine-20 `implies` |

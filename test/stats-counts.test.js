@@ -1,7 +1,8 @@
 /** Event-derived submission, rejection and merge counts preserve historical acceptance proof [R1,R2]. */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { addItem, claim, closeBoard, getItem, merged, openBoard, register, submit, verify } from '../src/board.js';
+import { submitFixture } from './board-submit-fixture.js';
+import { addItem, claim, closeBoard, getItem, merged, openBoard, register, verify } from '../src/board.js';
 import { exportBoard, importBoard } from '../src/exchange.js';
 import { eventCounts } from '../src/stats.js';
 
@@ -44,7 +45,7 @@ function addAndClaim(f, title) {
 /** Submit one immutable commit after the builder holds its claim. */
 function submitAt(f, id, commit, tree, at) {
   f.setTime(at);
-  submit(f.board, id, { agentId: 'web-1', commit, tree });
+  submitFixture(f.board, id, { agentId: 'web-1', commit, tree });
 }
 
 /** Record an accept or reject from a different registered reviewer. */
