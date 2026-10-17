@@ -888,6 +888,38 @@ test("a person's waiver lets a submit and a landing gate through only the waived
   assert.match(healthyPipeSubmit.out, line, 'a healthy producer leaves only the waived test at submit');
   assert.match(healthyPipeSubmit.out, /waived, not green/u);
 
+  // A failing component is credited only with the failures in its own output: a setup step that fails beside
+  // a consumer forwarding the waived TAP is unexplained, and a TAP producer piped through cat explains itself.
+  const forwarder = join(box.dir, 'pipeline-forwarder.cjs');
+  writeFileSync(forwarder, `process.stdin.resume(); process.stdin.on('end', () => { const child = require('node:child_process').spawnSync(${JSON.stringify(gateCommand)}, { shell: true, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8' }); process.stdout.write(child.stdout || ''); process.stderr.write(child.stderr || ''); process.exitCode = 0; });\n`);
+  setGate(`node ${JSON.stringify(setup)} | node ${JSON.stringify(forwarder)}`, 'chore: forward the waived tests behind a setup producer');
+  writeFileSync(broken, 'on\n');
+  const forwardRuns = readFileSync(runs, 'utf8').length;
+  const forwarded = box.run(box.repo, 'gate', '--landing', '--json');
+  assert.equal(readFileSync(runs, 'utf8').length, forwardRuns + 1, 'the failing setup producer really ran');
+  assert.match(gateLog(), /Error: separate setup stage failed/u, 'the setup producer failed on its own');
+  assert.match(gateLog(), /^# fail 1$/mu, 'the forwarded waived TAP is complete');
+  assert.equal(forwarded.code, 1, 'a failing setup producer is not explained by a consumer forwarding the waived tests');
+  assert.equal(JSON.parse(forwarded.out).waived, undefined, 'a forwarded account names no waived failures');
+  const forwardItem = itemWorktree(box, 5, FILES[3]);
+  assert.equal(commitFile(box, forwardItem.path, forwardItem.file, 'PASS\n', `feat(web): build land fixture ${forwardItem.item} [G1]`).status, 0);
+  const forwardedSubmit = box.run(forwardItem.path, 'submit', String(forwardItem.item), '--json');
+  assert.equal(JSON.parse(forwardedSubmit.out).error?.code, 'GATE_RED', 'a forwarded account refuses the submission');
+  assert.equal(readFileSync(runs, 'utf8').length, forwardRuns + 2, 'the submission ran the failing setup producer');
+  assert.ok(!events(box).some((event) => event.event_kind === 'fact' && event.item_id === forwardItem.item), 'a refused forwarded submission records nothing as waived');
+  rmSync(broken);
+  setGate(`${gateCommand} | cat`, 'chore: pipe the waived tests through cat');
+  const throughCat = box.run(box.repo, 'gate', '--landing', '--json');
+  assert.equal(throughCat.code, 0, `${throughCat.err}\n${throughCat.out}`);
+  assert.equal(JSON.parse(throughCat.out).green, false, 'a waived pipeline is never reported green');
+  assert.deepEqual(JSON.parse(throughCat.out).waived.map((entry) => [entry.file, entry.waiver]), [[FILES[0], waiver.id]], 'the TAP producer explains its own failure');
+  const catItem = itemWorktree(box, 6, FILES[3]);
+  assert.equal(commitFile(box, catItem.path, catItem.file, 'PASS\n', `feat(web): build land fixture ${catItem.item} [G1]`).status, 0);
+  const catSubmit = box.run(catItem.path, 'submit', String(catItem.item));
+  assert.equal(catSubmit.code, 0, `${catSubmit.err}\n${catSubmit.out}`);
+  assert.match(catSubmit.out, line, 'a TAP producer piped through cat is waived at submit');
+  assert.match(catSubmit.out, /waived, not green/u);
+
   // A real landing run does not stop early on a waived failure: every other file still runs, then the waiver subtracts it.
   const laterRan = join(box.dir, 'later-file-ran');
   const waivedFile = 'test/landing-waived.test.cjs';

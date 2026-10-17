@@ -217,14 +217,16 @@ export function gateStages(command) {
  * Wrap each stage so the shell prints its start and its exit status between private marker lines.
  * Control flow is unchanged: each wrapper exits with its stage's status, and an `exit` inside a
  * stage still ends the run, which leaves that stage without an end marker and so unaccounted.
- * A pipeline's components each append their own exit status to a private file instead of the
- * output, since a marker written into a pipe would land in the next component's input [B3,R3].
+ * A pipeline's components each keep their own exit status and their own standard output in
+ * private files instead of the run's output, since a marker written into a pipe would land in the
+ * next component's input. A failure is then credited only to the component that printed it [B3,R3].
  */
 function stagedScript(stages, marker, pipes) {
-  const quoted = `'${String(pipes).replaceAll("'", "'\\''")}'`;
-  /** One component that records its own status, then exits with it so the pipeline is unchanged. */
-  const component = (text, index, at) => `{ {\n${text}\n}; pullboard_pipe_status=$?; `
-    + `printf '%s %s %s\\n' ${index} ${at} "$pullboard_pipe_status" >> ${quoted}; (exit "$pullboard_pipe_status"); }`;
+  /** Quote one private file of a component for the shell. */
+  const file = (index, at, kind) => `'${join(String(pipes), `${index}-${at}.${kind}`).replaceAll("'", "'\\''")}'`;
+  /** One component that records its own status and output, then exits with that status. */
+  const component = (text, index, at) => `{ { {\n${text}\n}; printf '%s\\n' "$?" >> ${file(index, at, 'status')}; } | tee ${file(index, at, 'out')}; `
+    + `pullboard_pipe_status=$(tail -n 1 ${file(index, at, 'status')} 2>/dev/null); (exit "\${pullboard_pipe_status:-125}"); }`;
   return stages.map((stage, index) => {
     const body = stage.pipeline.length > 1 ? stage.pipeline.map((text, at) => component(text, index, at)).join(' | ') : stage.text;
     return `{ printf '\\n${marker} begin ${index}\\n'; {\n${body}\n}; pullboard_stage_status=$?; `
@@ -233,19 +235,21 @@ function stagedScript(stages, marker, pipes) {
 }
 
 /**
- * Read each pipeline component's recorded status. A component that recorded none, or more than one,
- * stays null, so a line forged into the private file can only make its stage unaccounted [B3,R3].
+ * Read each pipeline component's own status and, when it failed, its own output. A component that
+ * recorded no status, or more than one, has a null status, so a line forged into its private file
+ * can only make its stage unaccounted [B3,R3].
  */
 function readPipes(split, pipes) {
-  const records = new Map();
-  const text = existsSync(pipes) ? readFileSync(pipes, 'utf8') : '';
-  for (const line of text.split('\n')) {
-    const found = /^(\d+) (\d+) (\d+)$/u.exec(line);
-    if (found) records.set(`${found[1]} ${found[2]}`, [...(records.get(`${found[1]} ${found[2]}`) ?? []), Number(found[3])]);
-  }
-  return split.map((stage, index) => (stage.pipeline.length > 1
-    ? stage.pipeline.map((_, at) => { const seen = records.get(`${index} ${at}`) ?? []; return seen.length === 1 ? seen[0] : null; })
-    : null));
+  /** Read one private component file, or null when the component never wrote it. */
+  const read = (index, at, kind) => {
+    const path = join(pipes, `${index}-${at}.${kind}`);
+    return existsSync(path) ? readFileSync(path, 'utf8') : null;
+  };
+  return split.map((stage, index) => (stage.pipeline.length > 1 ? stage.pipeline.map((_, at) => {
+    const lines = (read(index, at, 'status') ?? '').split('\n').filter(Boolean);
+    const status = lines.length === 1 && /^\d+$/u.test(lines[0]) ? Number(lines[0]) : null;
+    return { status, output: status ? read(index, at, 'out') : null };
+  }) : null));
 }
 
 /** Cut a staged run's output back to the command's own lines and each stage's lines and status. */
@@ -278,7 +282,7 @@ function readStages(output, marker, count) {
  * @param {string} root
  * @param {string} command
  * @param {{ pipefail?: boolean, env?: NodeJS.ProcessEnv, stages?: boolean }} [options] - Gate-only pipefail, additional child environment values and per-stage accounting.
- * @returns {{ isGreen: boolean, output: string, seconds: number, sandboxBlocked: string|null, stages?: Array<{ status: number|null, output: string, pipeline?: Array<number|null> }> | null }}
+ * @returns {{ isGreen: boolean, output: string, seconds: number, sandboxBlocked: string|null, stages?: Array<{ status: number|null, output: string, pipeline?: Array<{ status: number|null, output: string|null }> }> | null }}
  */
 export function runShell(root, command, { pipefail = false, env = {}, stages = false } = {}) {
   const started = Date.now();
@@ -294,13 +298,12 @@ export function runShell(root, command, { pipefail = false, env = {}, stages = f
   }
   const split = stages ? gateStages(command) : null;
   const marker = `PULLBOARD_STAGE_${randomUUID().replaceAll('-', '')}`;
-  const pipeDirectory = split?.some((stage) => stage.pipeline.length > 1) ? mkdtempSync(join(tmpdir(), 'pullboard-pipes-')) : null;
-  const pipes = pipeDirectory ? join(pipeDirectory, 'status') : null;
+  const pipes = split?.some((stage) => stage.pipeline.length > 1) ? mkdtempSync(join(tmpdir(), 'pullboard-pipes-')) : null;
   // Newlines, not spaces, around the command, so a trailing comment in it cannot swallow the `)`.
   const result = spawnSync(`${prefix}(\n${split ? stagedScript(split, marker, pipes) : command}\n) 2>&1`, options);
   invalidateGitFacts();
   const pipeStatuses = pipes ? readPipes(split, pipes) : null;
-  if (pipeDirectory) rmSync(pipeDirectory, { recursive: true, force: true });
+  if (pipes) rmSync(pipes, { recursive: true, force: true });
   const raw = `${result.stdout ?? ''}${result.stderr ?? ''}`;
   const seconds = Math.round((Date.now() - started) / 1000);
   const blocked = (output) => (result.status === 0 ? null : sandboxBlockedOperation(root, output));

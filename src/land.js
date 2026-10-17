@@ -278,15 +278,21 @@ export function tapFailures(output, root) {
  * The failures that explain a red run, or null when anything else may have failed: the command
  * could not be split into stages, a stage did not finish, a stage exited other than 0 without
  * exactly 1 and a complete TAP account of its failures, or a pipeline in a stage had a component
- * that left no status or a second failing component. Waivers only ever subtract these [B3,R3].
+ * that left no status or failed without its own complete TAP account. Waivers only ever subtract
+ * these [B3,R3].
  */
 export function accountedFailures(gate, root) {
   if (gate.isGreen || !Array.isArray(gate.stages) || !gate.stages.length) return null;
   const failures = [];
   for (const stage of gate.stages) {
     if (!Number.isInteger(stage.status)) return null;
-    // In a pipeline every component's own status counts: at most one may fail, and only with exit 1 [B3,R3].
-    if (stage.pipeline !== undefined && !pipelineAccounted(stage.pipeline)) return null;
+    if (stage.pipeline !== undefined) {
+      // In a pipeline each failing component must explain itself; a forwarded account credits no one else [B3,R3].
+      const own = pipelineFailures(stage.pipeline, root);
+      if (!own || (stage.status === 0) !== (own.length === 0)) return null;
+      failures.push(...own);
+      continue;
+    }
     if (stage.status === 0) continue;
     const own = stage.status === 1 ? tapFailures(stage.output ?? '', root) : null;
     if (!own) return null;
@@ -296,13 +302,20 @@ export function accountedFailures(gate, root) {
 }
 
 /**
- * True when a stage's pipeline statuses leave one place a failure can come from. A producer that
- * fails beside a failing TAP consumer is an independent red no waiver names, so it voids the run.
+ * The failures a pipeline's components account for themselves, or null. Every component must have
+ * recorded its status, and every failing one must exit exactly 1 with a complete TAP account in its
+ * own output. A setup step that fails beside a consumer printing a waived test's TAP has no account
+ * of its own, so it is an independent red no waiver names, and it voids the run.
  */
-function pipelineAccounted(statuses) {
-  if (!Array.isArray(statuses) || statuses.some((status) => !Number.isInteger(status))) return false;
-  const failed = statuses.filter((status) => status !== 0);
-  return failed.length === 0 || (failed.length === 1 && failed[0] === 1);
+function pipelineFailures(components, root) {
+  if (!Array.isArray(components) || components.some((entry) => !Number.isInteger(entry?.status))) return null;
+  const failures = [];
+  for (const { status, output } of components.filter((entry) => entry.status !== 0)) {
+    const own = status === 1 ? tapFailures(output ?? '', root) : null;
+    if (!own) return null;
+    failures.push(...own);
+  }
+  return failures;
 }
 
 /**
