@@ -43,6 +43,7 @@ export const JSON_SHAPES = {
     decisions: shape({ decisions: 'array' }),
     ledger: shape({ items: 'array', stats: 'object' }),
     log: shape({ events: 'array' }),
+    rigor: shape({ causes: 'array', uncaused: 'number' }),
     add: shape({ item: 'object' }),
     edit: shape({ item: 'object' }),
     fact: shape({ item: 'number', fact: 'object' }),
