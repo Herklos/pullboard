@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { after, test } from 'node:test';
 import { standardDoctrine } from '../../src/doctrine.js';
 import { loadConfig } from '../../src/config.js';
+import { AGENT_SHELL_MARKERS, SSH_SHELL_MARKERS } from '../../src/person.js';
 import { tapTarget, SPEC, machine, project, build, startView, styleOf, openPage, boardOf, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, watchSpecDecisionWait, press } from './fixture.js';
 
 /** Observe a real Spec control's native pointer sequence and any replacement inside its detail card. */
@@ -146,6 +147,68 @@ test('spec rows read across a phone [N26,D1]', async () => {
       }
     }
   } finally {
+    await view.stop();
+  }
+});
+
+/** Show a declined Spec row's reason separately while preserving its text and escaping markup. */
+test('a declined spec row shows its reason in the view [N26,S9]', { timeout: 120_000 }, async (t) => {
+  const executable = chromeExecutable();
+  if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME to check Spec decision reasons.');
+
+  const reason = 'Needs <script>alert("x")</script> & a clearer outcome';
+  const spec = '# Decision reasons\n\n## G · Goals\n'
+    + '- G1 [draft, must] Keep the original requirement text. | gate: review\n'
+    + '- G2 [approved, must] This row was approved. | gate: review\n';
+  const box = machine();
+  const demo = project(box, 'declined-spec-reason', spec);
+  const personEnv = { ...box.env };
+  for (const name of [...AGENT_SHELL_MARKERS, ...SSH_SHELL_MARKERS]) delete personEnv[name];
+  box.runWithEnv(demo.repo, personEnv, 'spec', 'decline', 'G1', '--reason', reason);
+  box.runWithEnv(demo.repo, personEnv, 'spec', 'apply');
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-spec-reason-chrome-'));
+  let chrome;
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.waitFor(`data?.project?.spec?.some(row => row.id === 'G1' && row.status === 'wont' && row.reason === ${JSON.stringify(reason)})`);
+    await chrome.click("document.querySelector('[data-tab=spec]')");
+    await chrome.click("document.querySelector('#spec-chips [data-rows=\"spec:all\"]')");
+    await chrome.waitFor("!!document.querySelector('#spec-list [data-row=\"spec:G1\"]') && !!document.querySelector('#spec-list [data-row=\"spec:G2\"]')");
+    await chrome.click("document.querySelector('#spec-list [data-row=\"spec:G1\"]')");
+    await chrome.waitFor("document.querySelector('#spec-detail h2 span')?.textContent === 'G1'");
+
+    const declined = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+      const list = document.querySelector('#spec-list [data-row="spec:G1"]');
+      const detail = document.querySelector('#spec-detail');
+      const reasonNode = [...detail.querySelectorAll('dt')].find(entry => entry.textContent.trim() === 'reason')?.nextElementSibling;
+      const listReason = list.querySelector('.rule-reason');
+      return { id:list.querySelector('.row-id')?.textContent.trim(), text:list.querySelector('.srow-text').textContent.replace('G1', '').trim(),
+        listReason:listReason?.textContent.trim() ?? null, listMarkup:listReason?.innerHTML ?? null,
+        detailId:detail.querySelector('h2 span')?.textContent.trim(), detailText:detail.querySelector('h2')?.textContent.replace('G1', '').trim(),
+        detailReason:reasonNode?.textContent.trim() ?? null, detailMarkup:reasonNode?.innerHTML ?? null,
+        injectedScript:!!document.querySelector('#spec-list .rule-reason script,#spec-detail dd script') };
+    })())`));
+    assert.deepEqual([declined.id, declined.text], ['G1', 'Keep the original requirement text.'], 'the Spec list keeps the declined row text unchanged');
+    assert.equal(declined.listReason, `Reason: ${reason}`, 'the Spec list shows the decline reason beside the row text');
+    assert.ok(declined.listMarkup.includes('&lt;script&gt;'), 'the list escapes HTML-like reason text');
+    assert.deepEqual([declined.detailId, declined.detailText, declined.detailReason], ['G1', 'Keep the original requirement text.', reason], 'the selected Spec detail shows the unchanged text and separate reason');
+    assert.ok(declined.detailMarkup.includes('&lt;script&gt;'), 'the detail escapes HTML-like reason text');
+    assert.equal(declined.injectedScript, false, 'reason text cannot inject an element into either view');
+
+    await chrome.click("document.querySelector('#spec-list [data-row=\"spec:G2\"]')");
+    await chrome.waitFor("document.querySelector('#spec-detail h2 span')?.textContent === 'G2'");
+    const approved = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+      const list = document.querySelector('#spec-list [data-row="spec:G2"]');
+      const detail = document.querySelector('#spec-detail');
+      return { listReason:list.querySelector('.rule-reason')?.textContent.trim() ?? null,
+        detailReason:[...detail.querySelectorAll('dt')].some(entry => entry.textContent.trim() === 'reason') };
+    })())`));
+    assert.deepEqual(approved, { listReason:null, detailReason:false }, 'an approved row with no reason shows none in the list or detail');
+    assert.deepEqual(chrome.exceptions, [], 'the real view raises no uncaught exception');
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    rmSync(profile, { recursive:true, force:true });
     await view.stop();
   }
 });

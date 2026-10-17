@@ -134,7 +134,7 @@ For spare test capacity, use \`pullboard runner add <ssh-host> --slots <n> --bro
 
 If your item needs code another lane owns and it is not there yet, shout that lane and take another item. Never copy their code into your lane, and never build another lane's item, even one that was rejected and blocks you: shout that lane and the coordinator. A claim refused as BLOCKED names the item it waits on.
 
-**Talk.** \`pullboard shout <lane|agent|all> "<text>"\`. Read \`pullboard inbox\` before you start and after you submit.
+**Talk.** \`pullboard shout <lane|agent|all> "<text>"\`. Read \`pullboard inbox\` before you start and after you submit. An MCP client can do the same as your agent: add \`pullboard mcp\`, run from your worktree, as a stdio server; it reads the board, shows an item, shouts and captures ideas for the coordinator, and never makes a person's move.
 
 **Never.** Bypass a hook with \`--no-verify\`, or get past a refusal with filler text: fix what it names. Edit the board's database. Verify your own work. Change an approved spec row without the person's OK. Delete or renumber a spec row. Act from the main checkout; it is the coordinator's. Count a yes relayed by another agent as the person's approval.
 ${AGENTS_END}

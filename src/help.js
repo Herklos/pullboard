@@ -10,7 +10,7 @@ Nothing ships until a second agent verifies it.
 
 Set up
   pullboard tour                        see it work: a reject and its rework, scripted, in thirty seconds
-  pullboard init [--model <name>]        config, SPEC.md, agent instructions, git hooks, board; optional coordinator model
+  pullboard init [--model <name>] [--blueprint <name or file>]  config, SPEC.md, agent instructions, git hooks, board; optional coordinator model
   pullboard worktree <lane> --model <name> [--route light] [--family <name>]   make and join a worktree for a new agent
   pullboard join <lane> --model <name> [--route light] [--family <name>]       register this worktree as an agent
                                         A model is required (or set PULLBOARD_MODEL); family is a separate declaration
@@ -30,6 +30,8 @@ Set up
   pullboard view --export <dir>         a read-only snapshot with event replay, for any static host
   pullboard serve [--port N]           local API v1: boards, state, moves, requests and live events,
                                         behind the session secret in its printed address
+  pullboard mcp                        MCP tools over stdio for this worktree's agent, started by its MCP client:
+                                        board status, show, shout and capture an idea; a person's move is refused
   pullboard relay [on|off|pair|join <code>] [--url <address>]  link, inspect or unlink this board's sealed relay
                                         on signs in through GitHub; the address defaults to https://app.pullboard.dev
                                         pair prints a one-use machine code; join stores it in another clone
@@ -182,14 +184,14 @@ const HELP_GROUPS = [
 ];
 
 const HELP_EXAMPLES = {
-  tour: 'pullboard tour', init: 'pullboard init', worktree: 'pullboard worktree web --model "my-model"',
+  tour: 'pullboard tour', init: 'pullboard init --blueprint web-app', worktree: 'pullboard worktree web --model "my-model"',
   join: 'pullboard join web --model "my-model"', resume: 'pullboard resume',
   add: 'pullboard add web "Upload page" --specs G1', list: 'pullboard list web', show: 'pullboard show 12',
   claim: 'pullboard claim 12', submit: 'pullboard submit 12', 'next --verify': 'pullboard next --verify',
   fact: 'pullboard fact 12 measurement "The check passes in 8 seconds"',
   verify: 'pullboard verify 12 accept --note "removed the fix; the test failed"',
   answer: 'pullboard answer 12 "done"', pass: 'pullboard pass 12 "please decide"',
-  status: 'pullboard status', view: 'pullboard view', stats: 'pullboard stats --since 2026-10-08', log: 'pullboard log 12', ledger: 'pullboard ledger',
+  status: 'pullboard status', view: 'pullboard view', mcp: 'pullboard mcp', stats: 'pullboard stats --since 2026-10-08', log: 'pullboard log 12', ledger: 'pullboard ledger',
   roadmap: 'pullboard roadmap', milestone: 'pullboard milestone add "0.7.0" --items 12,13',
   runner: 'pullboard runner add studio --slots 2 --browser 1', 'runner add': 'pullboard runner add studio --slots 2 --browser 1',
   edit: 'pullboard edit 12 --brief "Add the upload page"', release: 'pullboard release 12',
@@ -232,6 +234,7 @@ const HELP_ALIASES = {
 
 const HELP_FLAG_EXPLANATIONS = {
   '--after': 'claiming waits until those items are verified',
+  '--blueprint': 'start from a bundled blueprint or a JSON file',
   '--brief': 'what a cold agent needs',
   '--check': 'the command that proves it',
   '--family': 'records the family name',

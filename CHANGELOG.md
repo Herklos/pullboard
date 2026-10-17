@@ -4,6 +4,38 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.8.29] - 2026-10-16
+
+### Blueprints, MCP, and refusals that tell you what to do next
+
+0.8.28 never reached npm: one runner test hung on Linux CI, and that's fixed here. Everything listed under 0.8.28 in the changelog ships in this release too.
+
+### Added
+
+- Blueprints.
+  - `pullboard blueprint add <name>` files a blueprint's rules as draft spec rows for your approval, with its starter items.
+  - `pullboard init --blueprint <name>` starts a new board from one.
+  - `pullboard blueprint save` turns your board's approved rules into a blueprint you can reuse.
+  - The ten blueprints from the gallery are bundled.
+- `pullboard mcp`: an MCP server over stdio. An agent's own client can read the board and coordinate on it: board status, show an item, shout, capture an idea. It uses the same moves and refusals as the CLI, and it can never act as the person.
+- `pullboard runner add <host> --slots <n> --browser <n>`: a test run waiting in the gate pool can run on another machine over SSH. A runner uses its own machine's browser slots. Nothing changes unless you add a runner.
+- `submitInvariants` in `pullboard.json`: with `"submitGate": "landing"`, `pullboard submit` still runs these test files on every submit.
+- The machine setting `gate.memoryFloorMB`: the gate pool holds new work while free memory is under the floor, and says so. Off unless you set it.
+- The gate checks its clock budgets before running the suite.
+- The Roadmap shows the work to ship first, with shipped work below it.
+
+### Fixed
+
+- Every refusal ends with a next step that works.
+- `pullboard init` says when the gate command it found can't run on this machine. In an existing repo, the first gate after `init` says to commit the files `init` wrote. `pullboard init --help` lists `--blueprint`.
+- `pullboard worktree <lane>` from the main checkout creates and joins the worktree for the session that owns the checkout. Another session is still refused. Without a model, it names the `--model` flag to add.
+- `pullboard add` refuses a build item in a lane that owns no files and names the lanes that do. A review item that names the work it reviews (`--after <id>`) is still accepted.
+- When `~/.pullboard` can't be written, for example inside an agent's sandbox, commands refuse with `MACHINE_HOME_NOT_WRITABLE`, name the folder and say how to fix it.
+- A declined spec row keeps its text, and the view shows the reason it was declined.
+- A relay connection failure names its cause.
+- The API refuses blank shout text the same way the CLI does.
+- The README's worktree command includes `--model`.
+
 ## [0.8.28] - 2026-10-16
 
 ### Blueprints, and a first run that tells you what to do

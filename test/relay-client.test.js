@@ -810,6 +810,7 @@ async function competingReplicaClaims(fixture, timing) {
 
   const eventRows = replicaFiles.map((file) => localEvents(file));
   const receiptRows = replicaFiles.map(receipts);
+  const canonicalRefusals = new Map();
   for (let id = 1; id <= 20; id += 1) {
     for (const events of eventRows) {
       assert.equal(events.filter((event) => event.item_id === id && event.event_kind === 'claim').length, 1,
@@ -821,9 +822,16 @@ async function competingReplicaClaims(fixture, timing) {
       assert.equal(claims.length, 2, `both ordered claim descriptors for #${id} have durable receipts`);
       const denied = claims.filter(({ receipt }) => receipt.outcome.error);
       assert.equal(denied.length, 1, `exactly one durable claim receipt for #${id} is a refusal`);
-      assert.deepEqual(denied[0].receipt.outcome.error, {
-        code: refusals.get(id).code, message: refusals.get(id).message, next: refusals.get(id).next,
-      }, `the durable refusal for #${id} matches the losing CLI result exactly`);
+      const error = denied[0].receipt.outcome.error;
+      const displayed = refusals.get(id);
+      assert.deepEqual({ code: error.code, message: error.message },
+        { code: displayed.code, message: displayed.message }, `the durable refusal for #${id} retains the CLI rule and reason`);
+      assert.equal(error.next, 'Run pullboard help, correct the reported problem, and retry the command.',
+        'current display guidance does not rewrite the historical receipt envelope');
+      assert.equal(displayed.next, 'take another item: pullboard next', 'the CLI names the current recovery action');
+      if (canonicalRefusals.has(id)) assert.deepEqual(error, canonicalRefusals.get(id),
+        `all replicas retain the exact canonical refusal for #${id}`);
+      else canonicalRefusals.set(id, error);
     }
   }
   assert.equal(receiptRows[0].length, receiptRows[1].length, 'both cloned boards retain the same number of applied operation receipts');
@@ -949,9 +957,14 @@ async function recoverReplicaReplies(fixture, timing) {
   const pendingState = JSON.parse(readFileSync(join(commonDir(clones[1], envs[1]), 'pullboard', 'relay.json'), 'utf8'));
   const recordedDenial = receipts(replicaFiles[1]).find((receipt) => JSON.parse(receipt.move).id === pendingState.recovered.move.id);
   assert.equal(recordedDenial.outcome.error.code, 'HELD');
+  const originalReceipt = JSON.stringify(recordedDenial);
   const retriedDenial = await timing.wait('retry the claim that already has a durable refusal', () => cliResult(worktrees[1], envs[1], 'claim', '1'));
   assert.equal(retriedDenial.status, 1);
-  assert.deepEqual(retriedDenial.document.error, recordedDenial.outcome.error, 'retry reports the original canonical refusal');
+  assert.deepEqual(retriedDenial.document.error, { code: recordedDenial.outcome.error.code,
+    message: recordedDenial.outcome.error.message, next: 'take another item: pullboard next' },
+  'retry reports the original rule and reason with current recovery guidance');
+  const afterRetry = receipts(replicaFiles[1]).find((receipt) => JSON.parse(receipt.move).id === pendingState.recovered.move.id);
+  assert.equal(JSON.stringify(afterRetry), originalReceipt, 'presenting a retry does not rewrite any canonical receipt field');
   assert.equal(relay.uploads.length, beforeDenied + 1, 'a refused move also keeps its original relay position');
   await timing.wait('release item 1 after its durable refusal is checked', () => cli(worktrees[0], envs[0], 'release', '1'));
   await timing.wait('claim item 2 before its lost submission reply', () => cli(worktrees[0], envs[0], 'claim', '2'));

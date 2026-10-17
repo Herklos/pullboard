@@ -129,6 +129,8 @@ import {
   outOfLane,
 } from './lanes.js';
 import { Refused } from './refused.js';
+import { personNeeds } from './needs.js';
+import { personNeedsState } from './needs-state.js';
 import {
   commitCitations,
   committedIds,
@@ -210,6 +212,7 @@ import {
   runningView,
 } from './view-session.js';
 import { serveApi } from './api.js';
+import { serveMcp } from './mcp.js';
 import {
   doctorProblems,
   doctrineProblems,
@@ -615,7 +618,8 @@ function checkMainVerifier(ctx, board, values) {
   const detached = tryGit(ctx.info.root, ['symbolic-ref', '-q', 'HEAD']).status !== 0 ? ' The main checkout is not on its branch; whoever switched it puts it back.' : '';
   throw new Refused(
     'MAIN_IS_COORDINATOR',
-    `this is the main checkout, so this verdict would be the coordinator's. An agent verifies from its own worktree, starting every command with cd <worktree> &&.${listed}${detached} The coordinator adds --as coordinator`,
+    `this is the main checkout, so this verdict would be the coordinator's.${listed}${detached}`,
+    'create a new reviewer worktree with git worktree add --detach .claude/worktrees/<reviewer-name> HEAD, using an unused folder; then cd there and run pullboard join <lane> --model "<model name>" and pullboard next --verify <id>. The reviewer must not be the builder. The coordinator instead adds --as coordinator',
   );
 }
 
@@ -1075,15 +1079,16 @@ function agentRefusalText(message, code, name) {
   return patterns[code] ? message.replace(patterns[code], (_, before, id, after) => `${before}${name(id)}${after}`) : message;
 }
 
-/** Read current display settings for text refusals; the structured error retains its stable identifiers. */
+/** Render the refusal body without its existing final footer; structured errors retain the message. */
 function displayedRefusal(io, error) {
-  if (error.code === 'MODEL_REQUIRED') return error.message.replace(/; run pullboard .+$/u, '');
-  if (!['ALREADY_JOINED', 'HELD', 'ITEM_HELD', 'LANE_HELD', 'REVIEW_HELD', 'NOT_YOURS', 'NOT_YOUR_DECISION', 'NO_AGENT', 'NOT_YOUR_CHECKOUT', 'FACT_JUDGEMENT', 'RELAY_PERSON_ONLY', 'RELAY_SENDER_MISMATCH', 'SELF_SHOUT', 'NO_READER'].includes(error.code)) return error.message;
+  const message = error.message.replace(/\r?\nnext:[ \t]*[^\r\n]*\S[ \t]*(?:\r?\n)*$/u, '');
+  if (error.code === 'MODEL_REQUIRED') return message.replace(/; run pullboard .+$/u, '');
+  if (!['ALREADY_JOINED', 'HELD', 'ITEM_HELD', 'LANE_HELD', 'REVIEW_HELD', 'NOT_YOURS', 'NOT_YOUR_DECISION', 'NO_AGENT', 'NOT_YOUR_CHECKOUT', 'FACT_JUDGEMENT', 'RELAY_PERSON_ONLY', 'RELAY_SENDER_MISMATCH', 'SELF_SHOUT', 'NO_READER'].includes(error.code)) return message;
   try {
     const ctx = context(io);
     const agents = withBoard(ctx, (board) => store.listAgents(board));
-    return agentRefusalText(error.message, error.code, (id) => agentDisplayName(agents, ctx.config, id));
-  } catch { return error.message; }
+    return agentRefusalText(message, error.code, (id) => agentDisplayName(agents, ctx.config, id));
+  } catch { return message; }
 }
 
 /** Label the holder at the start of a generated wait reason without rewriting its quoted reason. */
@@ -1470,6 +1475,7 @@ function resumeHere(io) {
     return {
       me,
       all,
+      needsYou: personNeeds(personNeedsState(root, { board })),
       ...(decisionSections ? { ...decisions, ...verifiedMergeGroups(root, toMerge, shouts, ctx.clock.now().getTime()),
         flow: proofStats(board, { now: ctx.clock.now().getTime() }).flow } : {}),
       requests: me.id === COORDINATOR ? store.openRequests(board) : [],
@@ -1567,7 +1573,9 @@ function resumeHere(io) {
       say(`verified, not merged — conflicts: ${listed(groups.conflicts, ({ item, files }) => `#${item.item_id} ${firstLine(item.item_title)} (${files.join(', ') || 'files unavailable'})`)}`);
       say(`verified, not merged — claimed for integration: ${listed(groups.integrating, ({ item, by, at, commit }) => `#${item.item_id} by ${name(by)} at ${at} (${commit.slice(0, 12)})`)}`);
     }
-    section(card.personQuestions, (ask) => `waiting on the person: #${ask.id} from ${name(ask.asker)} (${ask.age}): ${firstLine(ask.question)}`);
+    section(card.needsYou, (need) => need.kind === 'decision'
+      ? `waiting on the person: #${need.id} from ${need.ref} (${span(ctx, need.at)}): ${firstLine(need.text)}`
+      : `needs the person: ${need.ref}: ${firstLine(need.text)} (${need.what})`);
     if (card.toVerify.length) say('review queue:');
     section(card.toVerify, (item) => `  to verify: #${item.item_id} ${item.item_lane} (${span(ctx, item.item_updated_at)})`);
     if (card.toMerge.length) say('merge verified work, run the gate, then record each with pullboard merged <id> <commit>');
@@ -1763,6 +1771,18 @@ async function launchBackgroundView(io, port, projectRoot) {
     child.kill('SIGTERM');
     throw error;
   }
+}
+
+/**
+ * Serve MCP over stdio as this checkout's agent (A9). Stdout carries only the protocol, so the command
+ * takes no --json; each tool call runs its own CLI command, with its own relay sync, through main.
+ * A person's move never comes through it (P6).
+ */
+async function mcpHere(io, { first, values }) {
+  if (first) throw new Refused('USAGE', 'pullboard mcp takes no arguments; run pullboard mcp from the agent\'s worktree');
+  if (values.json) throw new Refused('USAGE', 'pullboard mcp speaks MCP on stdout; run pullboard mcp without --json');
+  context(io);
+  return serveMcp({ cwd: io.cwd, input: io.stdin, output: io.stdout, log: io.stderr, runCommand: main });
 }
 
 /** Serve API v1 until a shutdown signal, printing its address before waiting (A2). */
@@ -2409,7 +2429,7 @@ async function submitHere(ctx, id) {
     let comparison = { main: null, files: [], unavailable: 'main comparison could not be completed' };
     try { comparison = await compareMainFailures(root, gate.profile, gateWaitReporter(ctx.io), gate.output); } catch { /* Keep the original gate refusal if main evidence is unavailable. */ }
     const mainNote = withBoard(ctx, board => mainRedMessage(root, board, gate.profile, comparison));
-    throw new Refused('GATE_RED', `${message}${mainNote ? `\n${mainNote}` : ''}`);
+    throw new Refused('GATE_RED', `${message}${mainNote ? `\n${mainNote}` : ''}`, 'fix the reported test or gate, commit the change, and run pullboard submit <id> again');
   }
   if (headCommit(root) !== commit || !isClean(root)) {
     throw new Refused(
@@ -3685,6 +3705,7 @@ async function runCommand(argv, io) {
     }
     if (command === 'view') return await viewHere(io, values);
     if (command === 'serve') return await serveHere(io, values);
+    if (command === 'mcp') return await mcpHere(io, args);
     if (command === 'forget') {
       if (!first || second) throw new Refused('USAGE', 'pullboard forget <path>');
       const root = resolve(io.cwd, first);
@@ -3912,7 +3933,7 @@ async function runMain(argv, streams) {
       positionals: parsed.positionals.slice(1),
       values: Object.fromEntries(Object.keys(parsed.values).filter(key => key !== 'json').sort().map(key => [key, parsed.values[key]])) };
     sync = Boolean(command) && !parsed.values.help && !parsed.values.version
-      && !['help', 'version', 'hook', 'init', 'relay', 'tour'].includes(command)
+      && !['help', 'version', 'hook', 'init', 'relay', 'tour', 'mcp'].includes(command)
       // A coordinator declaration on a linked clone must refuse before auto-link or relay sync.
       && !(command === 'join' && parsed.positionals[1] === COORDINATOR);
     needsRepo = !(parsed.values.help || parsed.values.version || command === 'help' || command === 'version');

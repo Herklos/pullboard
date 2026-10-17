@@ -104,7 +104,7 @@ async function relayRequest(url, token, path, body) {
   } catch { throw new Refused('RELAY_UNAVAILABLE', 'the relay did not answer; retry pairing with the same code before it expires'); }
   let document;
   try { document = await response.json(); } catch { throw new Refused('RELAY_RESPONSE', 'the relay returned an invalid pairing response; ask for a fresh code'); }
-  if (!response.ok) throw new Refused(document.error?.code || 'RELAY_UNAVAILABLE', document.error?.message || 'the relay refused pairing; ask the linked device for a fresh code');
+  if (!response.ok) throw new Refused(document.error?.code || 'RELAY_UNAVAILABLE', document.error?.message || 'the relay refused pairing; ask the linked device for a fresh code', document.error?.next);
   if (document.version !== 1) throw new Refused('RELAY_VERSION', 'the relay pairing API version is unsupported; upgrade Pullboard before pairing');
   return document;
 }

@@ -182,3 +182,13 @@ test('help names come from the command declarations [C7,N37]', async (t) => {
   assert.equal(privateCli.HELP.overview, HELP.overview);
   assert.equal(privateCli.HELP.all, HELP.all);
 });
+
+test('init help names --blueprint [I1,N37]', () => {
+  const result = run('init', '--help');
+  assert.equal(result.status, 0, result.failure ?? result.stderr);
+  assert.ok(flagsFrom(result.stdout).some((line) => /^--blueprint <name or file> — \S/u.test(line)),
+    'init help explains the blueprint name or file flag');
+  assert.match(result.stdout, /^Example:\n  pullboard init --blueprint web-app$/mu);
+  assert.equal(run('help', 'init').stdout, result.stdout, 'both init help entry points share the declaration');
+  assert.match(run('help', '--all').stdout, /pullboard init \[--model <name>\] \[--blueprint <name or file>\]/u);
+});
