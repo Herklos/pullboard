@@ -47,7 +47,7 @@ export async function autoLinkProject(root, io) {
       if (!candidate) throw new Refused('RELAY_SESSION', 'Run pullboard relay on --all to link this project and pair the phone.');
       source = candidate.state;
       const proposal = await phoneProposal(source, 'link', originRepository(project),
-        { board: projectBoard(project), command: 'Link ' + name + '? (pullboard init)', link: true });
+        { board: projectBoard(project), command: 'Link ' + name + '? (pullboard init)', link: true, root: project });
       const value = { root: project, publisherRoot: candidate.root, context: proposal.context, sealed: proposal.sealed, replyKey: proposal.reply.storedKey, published: false };
       pending = updateRelayMachine(state => {
         const existing = state.approvals.find(entry => entry.root === project);

@@ -244,9 +244,10 @@ test('set up once links three registered boards, later registration and a persis
   await pageWait(chrome, `link approval card ${linkProposal.context.id}`, `document.querySelector(${JSON.stringify(approveLinkButton)}) !== null`);
   const linkCard = await pageEvaluate(chrome, `read link approval card ${linkProposal.context.id}`, `({text: document.querySelector('.phone-approval[data-request="${linkProposal.context.id}"]').innerText,
     action: document.querySelector(${JSON.stringify(approveLinkButton)}).innerText})`);
-  assert.match(linkCard.text, /Link fourth-project\?/u);
+  assert.match(linkCard.text, /Link fourth-project from /u, 'the link card names the board and the computer asking');
   assert.match(linkCard.text, /fixture\/repository/u);
-  assert.match(linkCard.text, new RegExp(new Date(linkProposal.context.expires).toISOString().replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')));
+  assert.match(linkCard.text, /expires /u, 'the proposal shows its expiry');
+  assert.equal(linkCard.text.includes(new Date(linkProposal.context.expires).toISOString()), false, 'the expiry is in the phone\'s local time');
   assert.equal(linkCard.action, 'Link project', 'the paired phone presents an explicit one-tap link action');
   const approvalsBeforeLinkTap = box.calls.filter(call => call.path.endsWith('/authorize')).length;
   await pageEvaluate(chrome, `tap link approval ${linkProposal.context.id}`, `document.querySelector(${JSON.stringify(approveLinkButton)}).click()`);
@@ -296,7 +297,7 @@ test('set up once links three registered boards, later registration and a persis
   await pageWait(chrome, `delete approval card ${deleteApproval.id}`, `document.querySelector('.phone-approval[data-request="${deleteApproval.id}"]') !== null`);
   const deleteCard = await pageEvaluate(chrome, `read delete approval card ${deleteApproval.id}`, `({text: document.querySelector('.phone-approval[data-request="${deleteApproval.id}"]').innerText,
     action: document.querySelector('.phone-approval[data-request="${deleteApproval.id}"] button').innerText})`);
-  assert.match(deleteCard.text, new RegExp(deleteApproval.target));
+  assert.match(deleteCard.text, /Delete fourth-project from the relay\?/u, 'the delete card names the board');
   assert.equal(deleteCard.action, 'Delete relay copy');
   const phone = await box.phoneSession();
   const boardsBeforeDeleteTap = await fetch(box.origin + '/auth/boards', { headers: { cookie: 'pb_session=' + phone.token } });
@@ -463,7 +464,7 @@ test('a set-up-once run stretched past 30 seconds still gets its approval card [
   assert.equal(proposal.published, true, 'the relay accepts the native approval after the elapsed delay');
   const card = await pageEvaluate(chrome, `read delayed project approval card ${proposal.context.id}`, `({text: document.querySelector('.phone-approval[data-request="${proposal.context.id}"]').innerText,
     action: document.querySelector(${JSON.stringify(button)}).innerText})`);
-  assert.match(card.text, /Link delayed-approval-project\?/u);
+  assert.match(card.text, /Link delayed-approval-project from /u);
   assert.equal(card.action, 'Link project');
   await pageEvaluate(chrome, `tap delayed project approval ${proposal.context.id}`, `document.querySelector(${JSON.stringify(button)}).click()`);
   await pageWait(chrome, `delayed project approval completes ${proposal.context.id}`, `document.querySelector(${JSON.stringify(button)}) === null`);
