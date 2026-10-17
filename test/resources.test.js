@@ -17,6 +17,7 @@ const TEMP = [];
 const CHILDREN = new Set();
 const MODULE = pathToFileURL(resolve(import.meta.dirname, '../src/resources.js')).href;
 const GATE_MODULE = pathToFileURL(resolve(import.meta.dirname, '../src/gate.js')).href;
+const PRE_RUNNER_MODULE = pathToFileURL(resolve(import.meta.dirname, './fixtures/resources-pre-runners.js')).href;
 const SETTINGS_MODULE = pathToFileURL(resolve(import.meta.dirname, '../src/settings.js')).href;
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
 const TEST_RUNNER = resolve(import.meta.dirname, '../bin/run-tests.js');
@@ -235,8 +236,9 @@ function worker(box, { name = 'gate', capacity = 1, scope = 'machine', root = bo
 }
 
 /** Launch a dedicated gate-pool worker carrying browser and queue-priority metadata. */
-function poolWorker(box, { agent, browser = false, item = '', kind = '', landing = false }) {
-  const workerArgs = ['--input-type=module', '-e', POOL_MODULE_WORKER, box.first, agent, String(browser), item, kind, String(landing)];
+function poolWorker(box, { agent, browser = false, item = '', kind = '', landing = false, module = MODULE }) {
+  // module swaps in another resources implementation, such as an older pullboard's, for mixed-version tests.
+  const workerArgs = ['--input-type=module', '-e', POOL_MODULE_WORKER.replace(JSON.stringify(MODULE), JSON.stringify(module)), box.first, agent, String(browser), item, kind, String(landing)];
   const startedAt = performance.now();
   const child = spawn(process.execPath, workerArgs, {
     env: box.env, stdio: ['pipe', 'pipe', 'pipe'],
@@ -289,6 +291,88 @@ function setBrowserFreeChecks(box, value) {
   if (value === undefined) { rmSync(file, { force: true }); return; }
   mkdirSync(box.home, { recursive: true });
   writeFileSync(file, `${JSON.stringify({ gate: { browserFreeChecks: value } }, null, 2)}\n`);
+}
+
+/** Write a fixture's machine queue-order settings (gate.queue); undefined removes the settings file. */
+function setQueueOrder(box, queue) {
+  const file = join(box.home, 'settings.json');
+  if (queue === undefined) { rmSync(file, { force: true }); return; }
+  mkdirSync(box.home, { recursive: true });
+  writeFileSync(file, `${JSON.stringify({ gate: { queue } }, null, 2)}\n`);
+}
+
+/**
+ * Requeue a remote run whose runner dropped, and report the line and real admission order.
+ * Two local slots are held; a focused run, then a submit, then a review wait for them; a
+ * remote-capable focused run takes the only free runner, which then drops, so its ticket returns
+ * to the pool. Shared by the class-order test (#651) and the settings test (#697).
+ *
+ * @param {object|undefined} queue - The fixture's gate.queue settings, or undefined for none.
+ * @returns {Promise<{ order: string|undefined, line: Array<[string, string]>, admitted: string[], tickets: Record<string, number>, lastIssued: number }>}
+ */
+async function requeuedRemoteRun(queue) {
+  const box = fixture();
+  setQueueOrder(box, queue);
+  const localHolders = [poolWorker(box, { agent: 'local-one' }), poolWorker(box, { agent: 'local-two' })];
+  for (const holder of localHolders) await acquired(holder);
+  const waiting = new Map();
+  for (const [agent, options] of [['focused-early', { kind: 'focused' }], ['submit-later', { kind: 'submit', item: '650' }], ['review-later', { kind: 'review', item: '651' }]]) {
+    const child = poolWorker(box, { agent, ...options });
+    waiting.set(agent, child);
+    await event(child);
+  }
+  const previousHome = process.env.PULLBOARD_HOME;
+  const previousMachineHome = process.env.PULLBOARD_MACHINE_HOME;
+  process.env.PULLBOARD_HOME = box.home;
+  process.env.PULLBOARD_MACHINE_HOME = box.home;
+  let requeued;
+  try {
+    const remoteLease = await takeResource({ name: 'gate', capacity: 2, scope: 'machine', root: box.first,
+      agent: 'remote-focused', kind: 'focused', remote: true, runnerProvider: () => [{ host: 'fixture-runner', slots: 1, browser: 0 }] });
+    assert.equal(remoteLease.runner?.host, 'fixture-runner', 'the only free slot is the runner, so the remote-capable run takes it');
+    const requeue = remoteLease.requeueRunner();
+    const gate = () => privateList(box).find(({ name }) => name === 'gate');
+    while (!gate().line.some(({ agent }) => agent === 'remote-focused')) await new Promise((resolveTick) => setTimeout(resolveTick, 20));
+    const { order, line } = gate();
+    const listed = line.map(({ agent, queueClass: queueClassName }) => [agent, queueClassName]);
+    const ticketDb = new DatabaseSync(join(box.home, 'resources.sqlite'));
+    // The pool's own processes write this file too; wait for their lock instead of failing.
+    ticketDb.exec('PRAGMA busy_timeout = 5000');
+    let tickets;
+    let lastIssued;
+    try {
+      tickets = Object.fromEntries(ticketDb.prepare("SELECT agent, ticket FROM waiter WHERE name = 'gate'").all().map(({ agent, ticket }) => [agent, ticket]));
+      lastIssued = ticketDb.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'waiter'").get().seq;
+    } finally { ticketDb.close(); }
+    const admitted = [];
+    // Free the oldest held slot, watch which waiter the pool admits into it, and repeat.
+    const holding = [() => release(localHolders[0]), () => release(localHolders[1])];
+    while (admitted.length < 4) {
+      await holding.shift()();
+      const holderAgents = () => gate().holders.map(({ agent }) => agent);
+      let next;
+      while (!(next = [...waiting.keys(), 'remote-focused'].find((agent) => !admitted.includes(agent) && holderAgents().includes(agent)))) {
+        await new Promise((resolveTick) => setTimeout(resolveTick, 20));
+      }
+      admitted.push(next);
+      if (next === 'remote-focused') {
+        requeued = await requeue;
+        assert.equal(requeued.runner, undefined, 'the quarantined runner is not used again');
+        holding.push(() => { requeued.release(); requeued = null; });
+      } else {
+        assert.equal((await acquired(waiting.get(next))).acquired, next);
+        holding.push(() => release(waiting.get(next)));
+      }
+    }
+    for (const releaseSlot of holding) await releaseSlot();
+    return { order, line: listed, admitted, tickets, lastIssued };
+  } finally {
+    requeued?.release();
+    if (previousHome === undefined) delete process.env.PULLBOARD_HOME;
+    else process.env.PULLBOARD_HOME = previousHome;
+    if (previousMachineHome === undefined) delete process.env.PULLBOARD_MACHINE_HOME;
+    else process.env.PULLBOARD_MACHINE_HOME = previousMachineHome;
+  }
 }
 
 /** Read the next worker event, failing promptly with its stderr if it exits unexpectedly. */
@@ -744,6 +828,283 @@ test('the pool alone orders submits, reviews and browser runs [C7]', async () =>
   assert.ok(gate.holders.some(({ agent, browser: ownsBrowser, itemCheck, item, kind }) =>
     agent === 'review-two' && ownsBrowser && itemCheck && item === '619' && kind === 'review'));
   await release(secondReview);
+});
+
+test('the pool admits reviews before submits before focused runs, and waiting runs age up [C7,V4]', async () => {
+  const AGE_MS = 30 * 60_000;
+  const box = fixture();
+  setQueueOrder(box, { reviewsFirst: true }); // #697: class order is a machine opt-in.
+  const holders = [poolWorker(box, { agent: 'holder-one' }), poolWorker(box, { agent: 'holder-two' })];
+  for (const holder of holders) await acquired(holder);
+  const waiting = new Map();
+  const positions = {};
+  for (const [agent, options] of [
+    ['focused-one', { kind: 'focused' }],
+    ['diagnostic-one', { kind: 'diagnostic' }],
+    ['submit-one', { kind: 'submit', item: '650' }],
+    ['review-one', { kind: 'review', item: '651' }],
+    ['landing-one', { landing: true }],
+    ['focused-two', { kind: 'focused' }],
+  ]) {
+    const child = poolWorker(box, { agent, ...options });
+    waiting.set(agent, child);
+    positions[agent] = (await event(child)).queued.position;
+  }
+  assert.deepEqual(positions, { 'focused-one': 1, 'diagnostic-one': 2, 'submit-one': 1, 'review-one': 1, 'landing-one': 1, 'focused-two': 6 },
+    'each arrival takes its place by class, behind earlier runs of its own class');
+  const line = () => privateList(box).find(({ name }) => name === 'gate').line
+    .map(({ agent, queueClass: listed, agedFrom }) => [agent, listed, agedFrom ?? '']);
+  assert.deepEqual(line(), [
+    ['landing-one', 'landing', ''],
+    ['review-one', 'review', ''],
+    ['submit-one', 'submit', ''],
+    ['focused-one', 'other', ''],
+    ['diagnostic-one', 'other', ''],
+    ['focused-two', 'other', ''],
+  ], 'landing, then reviews, then submits, then focused and other runs, first come first served within each');
+
+  // Waiting time is the only input to aging; backdating the queued time stands in for the clock.
+  const db = new DatabaseSync(join(box.home, 'resources.sqlite'));
+  // The pool's own processes write this file too; wait for their lock instead of failing.
+  db.exec('PRAGMA busy_timeout = 5000');
+  try {
+    const backdate = db.prepare('UPDATE waiter SET since = ? WHERE agent = ?');
+    backdate.run(new Date(Date.now() - 2 * AGE_MS - 60_000).toISOString(), 'focused-two');
+    backdate.run(new Date(Date.now() - AGE_MS - 60_000).toISOString(), 'diagnostic-one');
+  } finally { db.close(); }
+  assert.deepEqual(line(), [
+    ['landing-one', 'landing', ''],
+    ['review-one', 'review', ''],
+    ['focused-two', 'review', 'other'],
+    ['diagnostic-one', 'submit', 'other'],
+    ['submit-one', 'submit', ''],
+    ['focused-one', 'other', ''],
+  ], 'a run waiting an hour ranks with reviews and one waiting half an hour with submits, keeping its arrival place there');
+
+  const order = [];
+  let releasing = [...holders];
+  for (const agent of ['landing-one', 'review-one', 'focused-two', 'diagnostic-one', 'submit-one', 'focused-one']) {
+    await release(releasing.shift());
+    const child = waiting.get(agent);
+    assert.equal((await acquired(child)).acquired, agent, `${agent} is admitted next`);
+    order.push(agent);
+    releasing.push(child);
+  }
+  for (const child of releasing) await release(child);
+  assert.deepEqual(order, ['landing-one', 'review-one', 'focused-two', 'diagnostic-one', 'submit-one', 'focused-one']);
+
+  // A remote run whose runner drops is requeued with its original arrival ticket: it sits behind
+  // earlier runs of its own class and behind waiting reviews and submits, and the line stays in
+  // class order (the requeue is marked classed, so it never forces arrival).
+  const requeued = await requeuedRemoteRun({ reviewsFirst: true });
+  assert.equal(requeued.order, undefined, 'a requeued remote waiter is marked as class-ordered, so the pool keeps class order');
+  assert.deepEqual(requeued.line, [
+    ['review-later', 'review'], ['submit-later', 'submit'], ['focused-early', 'other'], ['remote-focused', 'other'],
+  ], 'the requeued remote run keeps first come, first served in its class, behind the earlier focused run');
+  assert.equal(requeued.tickets['remote-focused'], requeued.lastIssued, 'the requeued runner waiter keeps its original ticket, the last one issued');
+  assert.ok(requeued.tickets['focused-early'] < requeued.tickets['remote-focused'], 'an earlier same-class waiter keeps its earlier ticket');
+  assert.deepEqual(requeued.admitted, ['review-later', 'submit-later', 'focused-early', 'remote-focused']);
+
+  // The class rule itself, against an injected clock rather than real waiting.
+  const { QUEUE_AGE_MS, queueClass } = await import('../src/resources.js');
+  const queuedAt = Date.parse('2026-10-15T19:37:00.000Z');
+  const at = (minutes) => queuedAt + minutes * 60_000;
+  const since = new Date(queuedAt).toISOString();
+  assert.equal(QUEUE_AGE_MS, 30 * 60_000, 'a waiter moves up one class every 30 minutes');
+  assert.deepEqual([0, 29, 30, 60, 90, 300].map((minutes) => queueClass({ kind: 'focused', since }, at(minutes)).name),
+    ['other', 'other', 'submit', 'review', 'landing', 'landing'], 'a focused run ages up one class per 30 minutes waited');
+  assert.equal(queueClass({ kind: 'review', since }, at(30)).name, 'landing');
+  assert.equal(queueClass({ kind: 'main-red', diagnostic: 1, itemCheck: 1, since }, at(0)).name, 'other', 'a diagnostic is optional work');
+  assert.equal(queueClass({ kind: 'check', itemCheck: 1, since }, at(0)).name, 'submit', 'an item check ranks with submits');
+  assert.equal(queueClass({ landing: 1, since }, at(0)).name, 'landing');
+});
+
+test('a line holding an older pullboard waiter keeps arrival order, so mixed versions never deadlock [C7]', async () => {
+  const box = fixture();
+  setQueueOrder(box, { reviewsFirst: true }); // #697: class order is a machine opt-in.
+  const holders = [poolWorker(box, { agent: 'mixed-holder-one' }), poolWorker(box, { agent: 'mixed-holder-two' })];
+  for (const holder of holders) await acquired(holder);
+  // A real older pullboard (before #651) writes no class marker; it admits landings first and then by ticket.
+  const older = poolWorker(box, { agent: 'older-focused', kind: 'focused', module: PRE_RUNNER_MODULE });
+  await event(older);
+  const review = poolWorker(box, { agent: 'newer-review', kind: 'review', item: '651' });
+  assert.equal((await event(review)).queued.position, 2, 'the review waits behind the older waiter\'s earlier ticket');
+  const gate = () => privateList(box).find(({ name }) => name === 'gate');
+  assert.equal(gate().order, 'arrival');
+  assert.deepEqual(gate().line.map(({ agent }) => agent), ['older-focused', 'newer-review']);
+
+  await release(holders[0]);
+  assert.equal((await acquired(older)).acquired, 'older-focused', 'both versions agree the earlier ticket goes first');
+  assert.equal(gate().order, undefined, 'class order resumes once only marked waiters remain');
+  await release(holders[1]);
+  assert.equal((await acquired(review)).acquired, 'newer-review');
+  await release(older);
+  await release(review);
+});
+
+test('queue order follows the machine settings [C7,O5]', async () => {
+  const gate = (box) => privateList(box).find(({ name }) => name === 'gate');
+  const line = (box) => gate(box).line.map(({ agent, queueClass: listed, agedFrom }) => [agent, listed, agedFrom ?? '']);
+  /** Backdate a waiter's queued time: the test clock that stands in for real waiting. */
+  const backdate = (box, agent, ms) => {
+    const queuedAt = new Date(Date.now() - ms).toISOString();
+    const db = new DatabaseSync(join(box.home, 'resources.sqlite'));
+    // The pool's own processes write this file too; wait for their lock instead of failing.
+    db.exec('PRAGMA busy_timeout = 5000');
+    let changed;
+    try { changed = db.prepare('UPDATE waiter SET since = ? WHERE agent = ?').run(queuedAt, agent).changes; }
+    finally { db.close(); }
+    assert.equal(changed, 1, `${agent} has a private waiter row`);
+  };
+  /** Run pullboard settings against the fixture's private machine home. */
+  const settingsCli = (box, ...flags) => runFixtureChild(process.execPath, [BIN, 'settings', ...flags], { cwd: box.first, env: box.env, encoding: 'utf8' });
+
+  // No settings: landings first, then arrival, so a review waits behind an earlier focused run.
+  const plain = fixture();
+  const plainHolders = [poolWorker(plain, { agent: 'plain-holder-one' }), poolWorker(plain, { agent: 'plain-holder-two' })];
+  for (const holder of plainHolders) await acquired(holder);
+  const plainFocused = poolWorker(plain, { agent: 'plain-focused', kind: 'focused' });
+  assert.equal((await event(plainFocused)).queued.position, 1);
+  const plainReview = poolWorker(plain, { agent: 'plain-review', kind: 'review', item: '697' });
+  assert.equal((await event(plainReview)).queued.position, 2, 'with no settings a review waits its arrival turn');
+  assert.deepEqual(gate(plain).line.map(({ agent }) => agent), ['plain-focused', 'plain-review'], 'with no settings the line is in arrival order');
+  // agingMinutes alone does nothing: aging is used only while a class order is on.
+  setQueueOrder(plain, { agingMinutes: 1 });
+  backdate(plain, 'plain-review', 5 * 60_000);
+  assert.deepEqual(line(plain), [['plain-focused', 'other', ''], ['plain-review', 'review', '']],
+    'with reviewsFirst off no waiter ages up, even with a short agingMinutes');
+  setQueueOrder(plain, undefined);
+  const plainPrinted = settingsCli(plain);
+  assert.equal(plainPrinted.status, 0, plainPrinted.stderr);
+  assert.match(plainPrinted.stdout, /^gate\.queue\.reviewsFirst: false\b/mu, 'pullboard settings prints reviewsFirst, default false');
+  assert.match(plainPrinted.stdout, /^gate\.queue\.agingMinutes: 30\b/mu, 'pullboard settings prints agingMinutes, default 30');
+  await release(plainHolders[0]);
+  assert.equal((await acquired(plainFocused)).acquired, 'plain-focused', 'with no settings the earlier focused run is admitted first');
+  await release(plainHolders[1]);
+  assert.equal((await acquired(plainReview)).acquired, 'plain-review');
+  await release(plainFocused);
+  await release(plainReview);
+
+  // reviewsFirst true: the same review is admitted ahead of the earlier focused run.
+  const classed = fixture();
+  setQueueOrder(classed, { reviewsFirst: true });
+  const classedHolders = [poolWorker(classed, { agent: 'classed-holder-one' }), poolWorker(classed, { agent: 'classed-holder-two' })];
+  for (const holder of classedHolders) await acquired(holder);
+  const classedFocused = poolWorker(classed, { agent: 'classed-focused', kind: 'focused' });
+  assert.equal((await event(classedFocused)).queued.position, 1);
+  const classedReview = poolWorker(classed, { agent: 'classed-review', kind: 'review', item: '697' });
+  assert.equal((await event(classedReview)).queued.position, 1, 'with reviewsFirst true a review joins ahead of focused runs');
+  assert.deepEqual(gate(classed).line.map(({ agent }) => agent), ['classed-review', 'classed-focused'], 'with reviewsFirst true the line is in class order');
+  await release(classedHolders[0]);
+  assert.equal((await acquired(classedReview)).acquired, 'classed-review', 'with reviewsFirst true the review is admitted first');
+  await release(classedHolders[1]);
+  assert.equal((await acquired(classedFocused)).acquired, 'classed-focused');
+  await release(classedReview);
+  await release(classedFocused);
+
+  // agingMinutes 1: a focused run waiting just over a minute moves up one class, ahead of a later submit.
+  const aging = fixture();
+  setQueueOrder(aging, { reviewsFirst: true, agingMinutes: 1 });
+  const agingHolders = [poolWorker(aging, { agent: 'aging-holder-one' }), poolWorker(aging, { agent: 'aging-holder-two' })];
+  for (const holder of agingHolders) await acquired(holder);
+  const agingFocused = poolWorker(aging, { agent: 'aging-focused', kind: 'focused' });
+  await event(agingFocused);
+  const agingSubmit = poolWorker(aging, { agent: 'aging-submit', kind: 'submit', item: '697' });
+  assert.equal((await event(agingSubmit)).queued.position, 1, 'a fresh submit goes ahead of a fresh focused run');
+  assert.deepEqual(line(aging), [['aging-submit', 'submit', ''], ['aging-focused', 'other', '']]);
+  backdate(aging, 'aging-focused', 61_000);
+  assert.deepEqual(line(aging), [['aging-focused', 'submit', 'other'], ['aging-submit', 'submit', '']],
+    'after agingMinutes 1 the focused run ranks with submits and keeps its earlier ticket there');
+  const agingPrinted = settingsCli(aging);
+  assert.equal(agingPrinted.status, 0, agingPrinted.stderr);
+  assert.match(agingPrinted.stdout, /^gate\.queue\.reviewsFirst: true$/mu, 'pullboard settings prints the reviewsFirst set on this machine');
+  assert.match(agingPrinted.stdout, /^gate\.queue\.agingMinutes: 1$/mu, 'pullboard settings prints the agingMinutes set on this machine');
+  assert.deepEqual(JSON.parse(settingsCli(aging, '--json').stdout).settings.gate.queue, { reviewsFirst: true, agingMinutes: 1 });
+  await release(agingHolders[0]);
+  assert.equal((await acquired(agingFocused)).acquired, 'aging-focused', 'the aged focused run is admitted before the later submit');
+  await release(agingHolders[1]);
+  assert.equal((await acquired(agingSubmit)).acquired, 'aging-submit');
+  await release(agingFocused);
+  await release(agingSubmit);
+  // The class rule against an injected clock: one class per agingMinutes waited.
+  const { queueClass } = await import('../src/resources.js');
+  const queuedAt = Date.parse('2026-10-16T16:00:00.000Z');
+  const since = new Date(queuedAt).toISOString();
+  assert.deepEqual([0, 0.99, 1, 2, 3].map((minutes) => queueClass({ kind: 'focused', since }, queuedAt + minutes * 60_000, 60_000).name),
+    ['other', 'other', 'submit', 'review', 'landing'], 'a one-minute aging moves a waiting run up one class per minute');
+
+  // A remote run whose runner drops is requeued: with no settings it takes #663's front ticket,
+  // ahead of every other non-landing waiter, as before; with reviewsFirst true it keeps its original
+  // ticket, so it waits behind an earlier run of its own class, and the pool stays in class order
+  // (the requeue is marked classed, so it never forces arrival).
+  const requeuedOff = await requeuedRemoteRun(undefined);
+  assert.equal(requeuedOff.order, undefined);
+  assert.deepEqual(requeuedOff.line, [
+    ['remote-focused', 'other'], ['focused-early', 'other'], ['submit-later', 'submit'], ['review-later', 'review'],
+  ], 'with no settings the requeued remote run goes first and the rest keep arrival order');
+  assert.ok(requeuedOff.tickets['remote-focused'] < 0, 'with no settings the requeued run takes the front ticket, as on main');
+  assert.deepEqual(requeuedOff.admitted, ['remote-focused', 'focused-early', 'submit-later', 'review-later']);
+  const requeuedOn = await requeuedRemoteRun({ reviewsFirst: true });
+  assert.equal(requeuedOn.order, undefined, 'with reviewsFirst true a requeued remote run keeps the pool in class order');
+  assert.deepEqual(requeuedOn.line, [
+    ['review-later', 'review'], ['submit-later', 'submit'], ['focused-early', 'other'], ['remote-focused', 'other'],
+  ], 'with reviewsFirst true the requeued remote run keeps its arrival place in its class');
+  assert.equal(requeuedOn.tickets['remote-focused'], requeuedOn.lastIssued, 'with reviewsFirst true the requeued run keeps its original ticket');
+  assert.deepEqual(requeuedOn.admitted, ['review-later', 'submit-later', 'focused-early', 'remote-focused']);
+
+  // Mixed versions agree on the next waiter. A #651-only process ranks by class only when every
+  // waiter is marked classed=1, and otherwise landings first, then ticket; a #697 process follows
+  // its setting and marks its waiters to match, so both rankers pick the same waiter off and on.
+  const { queueClass: classOf } = await import('../src/resources.js');
+  const agree = fixture();
+  const agreeHolders = [poolWorker(agree, { agent: 'agree-holder-one' }), poolWorker(agree, { agent: 'agree-holder-two' })];
+  for (const holder of agreeHolders) await acquired(holder);
+  const agreeFocused = poolWorker(agree, { agent: 'agree-focused', kind: 'focused' });
+  await event(agreeFocused);
+  const agreeReview = poolWorker(agree, { agent: 'agree-review', kind: 'review', item: '697' });
+  await event(agreeReview);
+  /** The raw waiter rows every process reads. */
+  const rows = () => {
+    const db = new DatabaseSync(join(agree.home, 'resources.sqlite'));
+    // The pool's own processes write this file too; wait for their lock instead of failing.
+    db.exec('PRAGMA busy_timeout = 5000');
+    try { return db.prepare("SELECT ticket, agent, since, landing, item_check AS itemCheck, diagnostic, kind, classed FROM waiter WHERE name = 'gate'").all(); }
+    finally { db.close(); }
+  };
+  /** The next waiter as a #651-only process ranks the same rows. */
+  const next651 = (waiters) => {
+    const byClass = waiters.every((waiter) => waiter.classed === 1);
+    const rank = (waiter) => (byClass ? classOf(waiter).effective : waiter.landing === 1 ? 0 : 1);
+    return [...waiters].sort((left, right) => rank(left) - rank(right) || left.ticket - right.ticket)[0].agent;
+  };
+  assert.deepEqual(rows().map(({ classed }) => classed), [0, 0], 'with reviewsFirst off a waiter is marked as not admitting by class');
+  assert.equal(next651(rows()), gate(agree).line[0].agent, 'off: a #651-only process and this one pick the same next waiter');
+  assert.equal(gate(agree).line[0].agent, 'agree-focused', 'off: both pick by arrival');
+  setQueueOrder(agree, { reviewsFirst: true });
+  // Each waiter re-marks itself on its next poll, so a setting change reaches every ranking.
+  for (let tries = 0; rows().some(({ classed }) => classed !== 1); tries += 1) {
+    assert.ok(tries < 250, 'waiters re-mark themselves after the setting turns on');
+    await new Promise((resolveTick) => setTimeout(resolveTick, 20));
+  }
+  assert.equal(next651(rows()), gate(agree).line[0].agent, 'on: a #651-only process and this one pick the same next waiter');
+  assert.equal(gate(agree).line[0].agent, 'agree-review', 'on: both pick by class');
+  await release(agreeHolders[0]);
+  assert.equal((await acquired(agreeReview)).acquired, 'agree-review');
+  await release(agreeHolders[1]);
+  assert.equal((await acquired(agreeFocused)).acquired, 'agree-focused');
+  await release(agreeReview);
+  await release(agreeFocused);
+
+  // An unusable value is refused by name, with the fix.
+  setQueueOrder(aging, { reviewsFirst: 'yes' });
+  const badFlag = settingsCli(aging, '--json');
+  assert.equal(badFlag.status, 1, 'a non-boolean reviewsFirst is refused');
+  assert.equal(JSON.parse(badFlag.stdout).error.code, 'BAD_MACHINE_SETTINGS');
+  assert.match(JSON.parse(badFlag.stdout).error.message, /gate\.queue\.reviewsFirst .* must be true or false/u);
+  setQueueOrder(aging, { reviewsFirst: true, agingMinutes: 0 });
+  const badAging = settingsCli(aging, '--json');
+  assert.equal(badAging.status, 1, 'agingMinutes 0 is refused');
+  assert.match(JSON.parse(badAging.stdout).error.message, /gate\.queue\.agingMinutes .* must be a positive whole number/u);
 });
 
 test('[Q1,Q2] a waiting landing keeps a current holder from taking the second slot [Q1,Q2]', async () => {
