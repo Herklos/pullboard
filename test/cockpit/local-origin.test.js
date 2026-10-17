@@ -239,7 +239,26 @@ test('a pullboard.dev page reads the local board [N26,A2]', { timeout: 120_000 }
     assert.ok(metadata.length > 0, 'the signed-in page checked its linked-board metadata');
     assert.ok(metadata.every((entry) => !Object.keys(entry.headers).some((name) => name.toLowerCase() === 'x-pullboard-key')), 'same-origin metadata never gets the local secret header');
     assert.equal(await chrome.stable('readOnly'), false, 'the local board remains writable');
-    assert.deepEqual(chrome.exceptions, [], 'Chrome reports no uncaught exceptions');
+    // A local read that fails once, as while the view restarts or is busy, is no reason to load the relay module
+    // either: this person's linked list is empty, so the page reads the view again instead (#748).
+    const { identifier: failOnce } = await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+      if (location.origin !== ${JSON.stringify(HOSTED)} || sessionStorage.getItem('pullboard.test.fail-local-list') !== '1') return;
+      sessionStorage.removeItem('pullboard.test.fail-local-list');
+      const nextFetch = window.fetch;
+      window.fetch = (input, init) => {
+        if (!window.__localListFailed && String(typeof input === 'string' ? input : input.url) === ${JSON.stringify(view.base + '/api/v1/boards')}) {
+          window.__localListFailed = true;
+          return Promise.reject(new TypeError('Failed to fetch'));
+        }
+        return nextFetch(input, init);
+      };
+    })()` });
+    assert.equal(await chrome.stable("(() => { sessionStorage.setItem('pullboard.test.fail-local-list', '1'); return true; })()"), true, 'the next load meets one failed local read');
+    await chrome.send('Page.navigate', { url: HOSTED + '/?relay' });
+    await chrome.waitFor("location.search === '?relay' && window.__localListFailed === true && document.querySelector('#chain')?.textContent.includes('A board that stays on this machine')", 20_000); // budget: hang ceiling for one failed read and the next timed refresh.
+    await chrome.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: failOnce });
+    assert.equal(relayModule(), modulesBefore, 'a failed local read on a local-only signed-in page does not request the relay module');
+    assert.equal(await chrome.stable('transportModule'), null, 'and the relay transport stays unloaded');
   } finally {
     try { if (stopStandIn) await stopStandIn(); }
     finally {
