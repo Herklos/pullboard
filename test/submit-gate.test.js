@@ -213,6 +213,18 @@ test('a child process listen denial reads as sandbox blocked [C7,B26]', (t) => {
   assert.match(python.err, /file access .*\(EACCES\)/u);
   assert.match(python.err, /Ask the person to allow this operation/u);
   assert.doesNotMatch(python.err, /GATE_RED/u);
+
+  const pythonSource = childPythonTestSource();
+  const pythonExplanation = "  assert.equal(child.status, 0, `Child process exited with code ${child.status}:\\n${child.stderr}`);";
+  assert.equal(pythonSource.split(pythonExplanation).length - 1, 1, 'the bare Python counter changes exactly one parent message');
+  const barePythonBox = childFailureSubmitBox(t, pythonSource.replace(pythonExplanation, '  assert.equal(child.status, 0, child.stderr);'));
+  barePythonBox.env.CHILD_PERMISSION_PATH = join(barePythonBox.dir, 'outside-bare-python-denial.txt');
+  const barePython = barePythonBox.run('submit', '1');
+  const barePythonOutput = `${barePython.out}\n${barePython.err}`;
+  assert.equal(barePython.code, 1, barePythonOutput);
+  assert.match(barePython.err, /SANDBOX_BLOCKED/u, 'complete bare Python stderr still names the known denial');
+  assert.match(barePython.err, /file access .*\(EACCES\)/u);
+  assert.doesNotMatch(barePythonOutput, /GATE_RED/u);
 });
 
 test('an ordinary failure stays gate red [C7,B26]', (t) => {
@@ -265,6 +277,30 @@ test('an ordinary failure stays gate red [C7,B26]', (t) => {
     'a comparison without a blank-line boundary stays ordinary');
   assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { traceback: false, assertionFooter: '1 !== 0' })), null,
     'an assertion footer does not turn non-traceback text into a Python denial');
+  for (const errno of [1, 13]) {
+    assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { wrapper: false, errno, assertionFooter: '1 !== 0' })), recognized,
+      'a complete bare traceback and positive assertion exit prove a known child denial');
+  }
+  for (const [label, options] of [
+    ['missing traceback', { traceback: false }],
+    ['missing frame', { frame: false }],
+    ['prefixed traceback marker', { prefixMarker: true }],
+    ['later exception', { trailingError: true }],
+    ['unknown errno', { errno: 2 }],
+    ['zero exit', { assertionFooter: '0 !== 0' }],
+    ['nonzero expected status', { assertionFooter: '1 !== 1' }],
+    ['unsafe exit integer', { assertionFooter: '9007199254740992 !== 0' }],
+    ['missing footer separation', { footerSeparator: '\n' }],
+    ['text after footer', { assertionFooter: '1 !== 0\nextra text' }],
+    ['non-assertion parent', { parentCode: 'ERR_TEST_FAILURE' }],
+  ]) {
+    assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { wrapper: false, assertionFooter: '1 !== 0', ...options })), null,
+      `bare Python ${label} stays unclassified`);
+  }
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(join(box.root, 'inside.txt'), { wrapper: false, assertionFooter: '1 !== 0' })), null,
+    'bare Python in-repo access stays an ordinary failure');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { wrapper: false, assertionFooter: '1 !== 0' }), { includeFilePaths: false }), null,
+    'bare Python does not bypass the file-path classification switch');
   const result = box.run('submit', '1');
   const output = `${result.out}\n${result.err}`;
   assert.equal(result.code, 1, output);

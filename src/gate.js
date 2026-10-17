@@ -225,8 +225,8 @@ function nestedChildPermission(root, lines, { includeFilePaths = true, parentCod
   // A malformed or zero child-exit statement is evidence against using the footer fallback.
   const childExitMention = /\b(?:child|app|server|process)\b[^\n]{0,120}\bexited\b[^\n]{0,100}\bcode\b/iu.test(detail);
   // Some TAP reporters preserve only stderr as the assertion message. Accept that
-  // shape only with an ERR_ASSERTION nonzero-vs-zero footer and a complete Node fatal
-  // signature; the structured Error fields below remain mandatory. Scanner lines are
+  // shape only with an ERR_ASSERTION nonzero-vs-zero footer and a complete fatal
+  // signature for the child runtime. Its diagnostic fields below remain mandatory. Scanner lines are
   // trimmed before collection, so stack frames start with `at`, without indentation.
   const bareAssertionExit = !childExit && !childExitMention && parentCode === 'ERR_ASSERTION'
     ? /\n{2,}([1-9]\d*) !== 0\s*$/u.exec(detail) : null;
@@ -235,10 +235,11 @@ function nestedChildPermission(root, lines, { includeFilePaths = true, parentCod
     && /(?:^|\n)Node\.js v\d+\.\d+\.\d+\s*$/u.test(bareFatalDetail)
     && /(?:^|\n)at [^\n]+/u.test(bareFatalDetail);
   const childExitCode = childExit ? Number(childExit[1]) : bareAssertionExit ? Number(bareAssertionExit[1]) : null;
-  if (!Number.isSafeInteger(childExitCode) || childExitCode <= 0 || (!childExit && !completeNodeFatal)) return null;
+  if (!Number.isSafeInteger(childExitCode) || childExitCode <= 0) return null;
 
   const errorLine = /^\s*Error: (.+)$/mu.exec(detail);
   if (errorLine) {
+    if (!childExit && !completeNodeFatal) return null;
     const operation = permissionOperation(root, errorLine[1], { includeFilePaths });
     if (operation?.syscall) {
       const objectStart = detail.indexOf('{', errorLine.index + errorLine[0].length);
@@ -266,8 +267,8 @@ function nestedChildPermission(root, lines, { includeFilePaths = true, parentCod
   // rather than Node's structured `Error` code/syscall/path object.
   // Node appends this exact assertion comparison to TAP's error scalar after the child stderr.
   // Strip it only for an AssertionError whose nonzero child exit matches `actual !== 0`.
-  const assertionFooter = childExit && parentCode === 'ERR_ASSERTION'
-    ? new RegExp(`\\n{2,}${childExit[1]} !== 0\\s*$`, 'u') : null;
+  const assertionFooter = parentCode === 'ERR_ASSERTION'
+    ? new RegExp(`\\n{2,}${childExitCode} !== 0\\s*$`, 'u') : null;
   const tracebackDetail = assertionFooter?.test(detail) ? detail.replace(assertionFooter, '') : detail;
   const tracebackMarker = /(?:^|\n)Traceback \(most recent call last\):\n/u.exec(tracebackDetail);
   const tracebackError = /(?:^|\n)(PermissionError: \[Errno (?:1|13)\] [^\n]+)\s*$/u.exec(tracebackDetail);
