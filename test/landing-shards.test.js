@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import { configProblems, defaults } from '../src/config.js';
 import { landingShardCount } from '../src/gate.js';
-import { landingBalance, landingFloor, planLandingShards, shardFileTimes } from '../src/landing-shards.js';
+import { landingBalance, landingFloor, landingSource, planLandingShards, shardFileTimes } from '../src/landing-shards.js';
 import { runFixtureChild } from './fixture-child.js';
 
 const SOURCE = resolve(import.meta.dirname, '..');
@@ -320,6 +320,13 @@ test('a runner refusal in a sharded landing is handled by its class [C7,V4]', { 
   const box = fixture();
   t.after(() => rmSync(box.dir, { recursive: true, force: true }));
   scenario(box, 'green');
+  // The pin covers untracked contents, not only their names: a same-name replacement changes it.
+  const loose = join(box.repo, 'loose.txt');
+  writeFileSync(loose, 'first\n');
+  const before = landingSource(box.repo);
+  writeFileSync(loose, 'second\n');
+  assert.notEqual(landingSource(box.repo).fingerprint, before.fingerprint, 'an untracked file with new content changes the pin');
+  rmSync(loose);
   const rerunLine = /^landing shard (\d\/\d): runner fixture-host failed mid-shard; rerunning shard \1 locally$/mu;
 
   // 1. A lost host or transport reruns the shard locally, named.

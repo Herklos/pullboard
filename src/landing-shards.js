@@ -4,7 +4,7 @@
  * and a shard whose runner fails mid-run reruns locally.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { gitChildEnv, repoInfo } from './git.js';
@@ -234,7 +234,8 @@ async function runLocalShard({ root, runner, files, label, lease, stop }) {
 
 /**
  * A fingerprint of exactly what a local shard would run: HEAD, every tracked change against it and
- * the untracked files Git does not ignore. A landing pins it before its first shard.
+ * the names and contents of the untracked files Git does not ignore. A landing pins it before its
+ * first shard; a same-name replacement of an untracked file changes it too.
  *
  * @param {string} root
  * @returns {{ commit: string, fingerprint: string }}
@@ -247,8 +248,16 @@ export function landingSource(root) {
   };
   const commit = git(['rev-parse', 'HEAD']).toString('utf8').trim();
   const hash = createHash('sha256').update(commit).update('\0')
-    .update(git(['diff', 'HEAD', '--binary', '--no-ext-diff'])).update('\0')
-    .update(git(['ls-files', '--others', '--exclude-standard', '-z']));
+    .update(git(['diff', 'HEAD', '--binary', '--no-ext-diff'])).update('\0');
+  for (const path of git(['ls-files', '--others', '--exclude-standard', '-z']).toString('utf8').split('\0').filter(Boolean)) {
+    const full = join(root, path);
+    let content;
+    try {
+      const stat = lstatSync(full);
+      content = stat.isSymbolicLink() ? `link:${readlinkSync(full)}` : stat.isFile() ? readFileSync(full) : `kind:${stat.mode}`;
+    } catch { content = 'missing'; }
+    hash.update(path).update('\0').update(content).update('\0');
+  }
   return { commit, fingerprint: hash.digest('hex') };
 }
 
