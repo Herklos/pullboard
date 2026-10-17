@@ -203,6 +203,7 @@ test('watch --work announces a claimable item and a review left waiting [A2,N26]
   const box = project();
   const builder = box.cli(box.root, 'worktree', 'app', '--model', 'watch-builder');
   const waiting = box.cli(box.root, 'add', 'app', 'Waits on another item', '--criterion', 'waits', '--specs', 'G1', '--check', 'true').item;
+  box.cli(box.root, 'check', 'accept', String(waiting.item_id)); // #728 holds a check already green on main until the person accepts it.
   const before = events(box).length;
   const watch = startWatch(box, ['--json', '--work', 'app', '--review-wait', '0.02']);
   t.after(() => watch.stop('SIGKILL'));
@@ -225,6 +226,7 @@ test('watch --work announces a claimable item and a review left waiting [A2,N26]
   assert.equal(released.detail, 'app: Waits on another item');
 
   // A submission nobody reserves is announced once it has waited past --review-wait (1.2 s here).
+  box.cli(box.root, 'check', 'accept', String(added.item_id)); // #728 holds a check already green on main until the person accepts it.
   box.cli(builder.path, 'claim', String(added.item_id));
   mkdirSync(join(builder.path, 'app'), { recursive: true });
   writeFileSync(join(builder.path, 'app', 'work.txt'), 'built\n');
@@ -274,7 +276,7 @@ test('watch --work announces a claimable item and a review left waiting [A2,N26]
     'a waiting review is announced once');
   assert.ok(kinds.includes('accept') && kinds.includes('reject'), 'the verdicts print as events too');
   const moves = events(box).slice(before).map((event) => event.event_kind);
-  assert.deepEqual(moves, ['add', 'add', 'claim', 'release', 'claim', 'submit', 'join', 'reserve', 'accept', 'claim', 'submit', 'reserve', 'reject'],
+  assert.deepEqual(moves, ['add', 'add', 'claim', 'release', 'check_accept', 'claim', 'submit', 'join', 'reserve', 'accept', 'claim', 'submit', 'reserve', 'reject'],
     'watch wrote no event: the new ones are exactly the moves this test made');
 });
 
