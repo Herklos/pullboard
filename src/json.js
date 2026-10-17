@@ -17,7 +17,7 @@ export const JSON_SHAPES = {
     join: shape({ agent: 'string', lane: 'string', route: 'string', path: 'string', model: 'string', displayName: 'string' }),
     takeover: shape({ agent: 'string', path: 'string' }),
     worktree: shape({ agent: 'string', lane: 'string', route: 'string', path: 'string', branch: 'string', prompt: 'string', model: 'string', displayName: 'string' }),
-    resume: shape({ me: 'object', all: 'array', requests: 'array', holding: 'array', sentBack: 'array', awaiting: 'array', toVerify: 'array', toMerge: 'array', open: 'array', stale: 'array', holds: 'array', unread: 'number', newest: 'array', root: 'string', newWorktreeLocation: 'string', dirty: 'number', next: 'string' }),
+    resume: shape({ me: 'object', all: 'array', requests: 'array', holding: 'array', sentBack: 'array', awaiting: 'array', toVerify: 'array', toMerge: 'array', open: 'array', stale: 'array', doctrineNotes: 'array', holds: 'array', unread: 'number', newest: 'array', root: 'string', newWorktreeLocation: 'string', dirty: 'number', next: 'string' }),
     whoami: shape({ id: 'string', lane: 'string', path: 'string', model: 'string', displayName: 'string' }),
     lanes: shape({ lanes: 'object', shared: 'array', coordinator: 'string' }),
     'lane add': shape({ lane: 'string', owns: 'array' }),
@@ -70,6 +70,8 @@ export const JSON_SHAPES = {
     view: shape({ url: 'string', port: 'number' }),
     'view export': shape({ path: 'string' }),
     serve: shape({ url: 'string', port: 'number' }),
+    // watch --json prints one of these per line, for each event or work notice, and no end-of-command document.
+    watch: shape({ sequence: 'number', kind: 'string', item: 'number|null', actor: 'string|null', detail: 'string' }),
     forget: shape({ root: 'string' }),
     prompt: shape({ role: 'string', text: 'string' }),
     gate: shape({ green: 'boolean', report: 'string' }),
