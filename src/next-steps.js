@@ -70,6 +70,7 @@ export const NEXT_STEPS = Object.freeze({
   BLUEPRINT_ITEM_UNCHECKED: 'give the starter item named in the message a criterion and a check command, then run pullboard blueprint add <file> again',
   BLUEPRINT_URL: 'download and read the blueprint yourself, then run pullboard blueprint add <local-file>',
   BOARD_BUSY: 'wait for the other pullboard process to finish, then retry',
+  BOARD_NOT_WRITABLE: 'give the agent write access to the repo\'s .git/pullboard folder, or run the command outside the sandbox',
   BOARD_SCOPE_UNAVAILABLE: 'link the board: pullboard relay on',
   BOARD_UNAVAILABLE: 'restore the repo, or drop it: pullboard forget <path>',
   BRIEF_LANE: 'split the item by lane, or add the other lane\'s part as its own item and wait on it with --after',
