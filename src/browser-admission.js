@@ -257,6 +257,49 @@ export async function checkNeedsBrowser(root, command, { commit, env = process.e
   return testsNeedBrowser(root, files, { onFallback });
 }
 
+/**
+ * Name the test files a check runs when it is a literal bin/run-tests.js call over regular in-repository
+ * test files, or return null. Only such a check may take a short gate slot (gate.shortSlots); anything
+ * uncertain, a directory or discovery included, stays an ordinary run. Kept apart from checkNeedsBrowser
+ * so short-slot admission never changes how a check is classified for the browser.
+ *
+ * @param {string} root
+ * @param {string} command
+ * @param {{ commit?: string, env?: NodeJS.ProcessEnv }} [options] - commit reads the files from that tree
+ * @returns {Promise<string[] | null>}
+ */
+export async function explicitCheckFiles(root, command, { commit, env = process.env } = {}) {
+  if (env.NODE_OPTIONS) return null;
+  let words = literalShellWords(command);
+  if (!words) {
+    const inner = capturedRunner(command);
+    const grep = inner ? resolveExecutable('grep', env.PATH) : null;
+    if (!grep || !['/usr/bin/grep', '/bin/grep'].includes(await realpath(grep).catch(() => ''))) return null;
+    words = literalShellWords(inner);
+  }
+  if (!words || words.length < 3) return null;
+  const node = resolveExecutable(words[0], env.PATH);
+  if (!node || await realpath(node).catch(() => '') !== await realpath(process.execPath).catch(() => '')) return null;
+  if (resolve(root, words[1]) !== resolve(root, TEST_RUNNER)) return null;
+  const files = explicitRunnerFiles(words.slice(2));
+  if (!files) return null;
+  if (commit) {
+    const committed = committedFiles(root, commit);
+    const regular = path => {
+      const entry = committed?.get(path);
+      return Boolean(entry) && entry.type === 'blob' && ['100644', '100755'].includes(entry.mode);
+    };
+    return [TEST_RUNNER, ...files].every(regular) ? files : null;
+  }
+  for (const path of [TEST_RUNNER, ...files]) {
+    const absolute = resolve(root, path);
+    const info = await lstat(absolute).catch(() => null);
+    const inside = await staysInside(root, absolute).catch(() => false);
+    if (!info?.isFile() || info.isSymbolicLink() || !inside) return null;
+  }
+  return files;
+}
+
 /** Convert an in-root absolute or relative selection to a normalized repository-relative path. */
 function repositoryPath(root, file) {
   if (typeof file !== 'string' || !file) return null;

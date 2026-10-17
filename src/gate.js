@@ -14,7 +14,7 @@ import { gitChildEnv, gitPath, headTree, invalidateGitFacts, isClean, untracked 
 import { secretsIn } from './hooks.js';
 import { Refused } from './refused.js';
 import { GATE_SLOT_HELD_ENV, gateSlotEnvironment, inheritedGateSlot, memoryAdmission, readMachineMemory, takeResource } from './resources.js';
-import { browserFreeChecksEnabled, gateQueueSettings, loadMachineSettings, memoryFloorMB } from './settings.js';
+import { browserFreeChecksEnabled, gateQueueSettings, gateShortSlots, loadMachineSettings, memoryFloorMB } from './settings.js';
 import { selectAffectedTests } from './affected-tests.js';
 import { checkNeedsBrowser, testsNeedBrowser } from './browser-admission.js';
 import { timingFromOutput, timingRunner } from './timing.js';
@@ -370,12 +370,16 @@ function hasPipeline(command) {
  * The whole queue waits while the machine is out of memory, so a run never starts into swap.
  *
  * @param {string} root - Checkout used to locate the machine resource database.
- * @param {(lease: { waitMs: number, token?: string, pool?: string, browser?: boolean, release: () => void }) => any | Promise<any>} action - Work to perform while holding a slot.
- * @param {{ landing?: boolean, itemCheck?: boolean, diagnostic?: boolean, browser?: boolean, remote?: boolean, agent?: string, item?: string|number, kind?: string, onWait?: (state: object) => void, readMemory?: typeof readMachineMemory }} [options] - Queue class, remote eligibility, progress reporter and, for tests, the machine memory reader.
+ * shortEligible marks a run that names its test files: with gate.shortSlots above 0 it may take a
+ * short slot when every ordinary slot is held, and a full suite can never inherit that slot. A memory
+ * hold (gate.memoryFloorMB) holds short slots too, since a short run uses the same machine memory.
+ *
+ * @param {(lease: { waitMs: number, token?: string, pool?: string, browser?: boolean, slotClass?: 'gate'|'short', release: () => void }) => any | Promise<any>} action - Work to perform while holding a slot.
+ * @param {{ landing?: boolean, itemCheck?: boolean, shortEligible?: boolean, diagnostic?: boolean, browser?: boolean, remote?: boolean, agent?: string, item?: string|number, kind?: string, onWait?: (state: object) => void, readMemory?: typeof readMachineMemory }} [options] - Queue class, short-slot eligibility, remote eligibility, progress reporter and, for tests, the machine memory reader.
  * @returns {Promise<any>} The action's result after releasing its lease.
  */
-export async function withGateSlot(root, action, { landing = false, itemCheck = false, diagnostic = false, browser = false, remote = true, agent, item = '', kind = '', onWait, readMemory = readMachineMemory } = {}) {
-  const inherited = inheritedGateSlot({ root, browser });
+export async function withGateSlot(root, action, { landing = false, itemCheck = false, shortEligible = false, diagnostic = false, browser = false, remote = true, agent, item = '', kind = '', onWait, readMemory = readMachineMemory } = {}) {
+  const inherited = inheritedGateSlot({ root, browser, namedFiles: shortEligible });
   if (inherited) {
     try { return await action(inherited); }
     finally { inherited.release(); }
@@ -391,6 +395,8 @@ export async function withGateSlot(root, action, { landing = false, itemCheck = 
     name: 'gate',
     capacity: capacityProvider(),
     capacityProvider,
+    shortCapacityProvider: () => gateShortSlots(),
+    shortEligible,
     browserCapacityProvider: () => settingsProvider().browserSlots,
     scope: 'machine',
     root,
