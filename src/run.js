@@ -299,7 +299,8 @@ async function tryItem(ctx, item, { command, attempts, minutes, deps, me, start,
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     const { fresh, related } = await deps.withBoard(ctx, async (board) => {
       const options = { agentId: me.id, lane: me.lane, leaseMs: ctx.config.leaseMs, freeze: deps.freezer(ctx) };
-      if (deps.ordered) await deps.ordered(ctx, board, 'claim', [id, options]);
+      if (deps.claim) await deps.claim(ctx, board, [id, options]);
+      else if (deps.ordered) await deps.ordered(ctx, board, 'claim', [id, options]);
       else store.claim(board, id, options);
       const claimed = store.getItem(board, id);
       return { fresh: claimed, related: store.relatedItems(board, claimed) };
@@ -391,7 +392,7 @@ async function buildItem(ctx, item, { agents, attempts, minutes, deps, me }) {
  *
  * @param {any} io
  * @param {any} values
- * @param {{ context: Function, withBoard: Function, whoAmI: Function, nextOnce: Function, submitHere: Function, freezer: Function }} deps
+ * @param {{ context: Function, withBoard: Function, whoAmI: Function, nextOnce: Function, submitHere: Function, freezer: Function, ordered?: Function, claim?: Function }} deps - claim orders a claim through the CLI's one claim route, held checks included
  * @returns {Promise<number>}
  */
 export async function runItems(io, values, deps) {

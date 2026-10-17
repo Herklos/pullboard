@@ -161,7 +161,8 @@ function project() {
   const initialized = json(box, repo, 'init');
   if (inheritedModel !== undefined) box.env.PULLBOARD_MODEL = inheritedModel;
   const configFile = join(repo, 'pullboard.json');
-  const config = JSON.parse(readFileSync(configFile, 'utf8'));
+  // These fixtures prove API shapes with "true" checks, so they keep a board with no hold setting.
+  const { checks: _hold, ...config } = JSON.parse(readFileSync(configFile, 'utf8'));
   writeFileSync(configFile, `${JSON.stringify({
     ...config,
     gate: 'true',
@@ -268,7 +269,7 @@ function json(box, cwd, command, args = [], subcommand) {
   const result = box.run(cwd, command, ...args, '--json');
   assert.equal(result.status, 0, `${command} ${args.join(' ')}: ${result.stderr}${result.stdout}`);
   const document = JSON.parse(result.stdout);
-  if (command === 'check') {
+  if (command === 'check' && subcommand !== 'accept') {
     assert.equal(result.stderr, `check #${document.id} set by ${document.by} (unknown): ${document.check}\n`, 'check attribution is visible before execution while stdout remains one JSON document');
   } else assert.equal(result.stderr, '', `${command} --json must keep stderr empty`);
   assert.equal(document.version, 1, `${command} --json has a version 1 envelope`);
@@ -1010,6 +1011,7 @@ test('[A1] every catalog command and subcommand has a real CLI exercise', () => 
   json(source, source.repo, 'milestone', ['remove', 'Later'], 'remove');
   json(source, source.repo, 'milestone', ['remove', 'Release'], 'remove');
   const reopenItem = json(source, source.repo, 'add', ['coordinator', 'Reopen catalog item', '--criterion', 'Exercise the versioned reopen result.', '--check', 'true'], 'add').item;
+  assert.equal(json(source, source.repo, 'check', ['accept', String(reopenItem.item_id)], 'accept').check, 'true', 'the person accepts the check as it reads');
   json(source, source.repo, 'claim', [String(reopenItem.item_id)]);
   json(source, source.repo, 'submit', [String(reopenItem.item_id)]);
   json(source, source.repo, 'reopen', [String(reopenItem.item_id), '--note', 'exercise the versioned reopen result']);

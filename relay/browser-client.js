@@ -1,5 +1,5 @@
 /** Device-only relay transport: cookie authorization, local keys and authenticated ciphertext [H5,H15,H16,H17]. */
-import { rememberDevicePairing, enrollPhone, deviceBoardKeys, installPhoneApprovals } from './browser-devices.js';
+import { rememberDevicePairing, enrollPhone, deviceBoardKeys, installPhoneApprovals, forgetDevice } from './browser-devices.js';
 import { decodeBoardKey, encodeBoardKey, seal, unseal } from './seal.js';
 import { preparePersonRequest, validatePersonRequest } from './person-request.js';
 import { snapshotState, presentationState } from './model.js';
@@ -71,7 +71,8 @@ async function snapshotDocument(plain) {
 }
 
 /** Confirm session authorization before treating a board-local refusal as global access loss. */
-async function checkAuthorization(path, status, onDenied) {
+async function checkAuthorization(path, status, onDenied, error) {
+  if (error?.code === 'DEVICE_REVOKED' && onDenied) { await onDenied(error); return; }
   if (![401, 403].includes(status) || !onDenied) return;
   if (['/api/v1/boards', '/api/v1/devices/session'].includes(new URL(path, location.origin).pathname)) onDenied();
   else await documentAt('/api/v1/devices/session', onDenied);
@@ -85,7 +86,7 @@ async function documentAt(path, onDenied, options = {}) {
   const document = await response.json();
   if (!response.ok) {
     const error = document.error;
-    await checkAuthorization(path, response.status, onDenied);
+    await checkAuthorization(path, response.status, onDenied, error);
     if (error) throw new Refused(error.code, error.message);
     throw new Refused('RELAY_UNAVAILABLE', 'The relay did not answer. Sign in again or retry.');
   }
@@ -105,6 +106,8 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
   let failure = '';
   let failureBoard = null;
   let accessLost = false;
+  let accessError = null;
+  const access = new AbortController();
   let persistenceRequest = null;
   rememberPairing();
   let pair = takePairing() ?? stored(sessionStorage, PENDING, null);
@@ -112,17 +115,49 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
   try { if (pair) decodeBoardKey(pair.key); } catch { pair = null; }
 
   /** Discard decrypted memory and this document when relay authorization is lost. */
-  function denied() {
+  async function denied(error) {
     if (accessLost) return;
     accessLost = true;
-    for (const entry of paired.values()) { entry.stream?.close(); entry.state = null; entry.shouts = null; }
+    accessError = error ?? new Refused('AUTH_REQUIRED', 'Sign in again to read this board.');
+    access.abort();
+    for (const entry of paired.values()) {
+      entry.stream?.close();
+      // The cockpit holds this same projection. Clear its arrays before releasing our reference.
+      if (entry.state) for (const [field, value] of Object.entries(entry.state)) {
+        if (Array.isArray(value)) value.length = 0;
+        else delete entry.state[field];
+      }
+      if (Array.isArray(entry.shouts)) entry.shouts.length = 0;
+      entry.state = null; entry.shouts = null; entry.outbox = null;
+      if (entry.key instanceof Uint8Array) entry.key.fill(0);
+      entry.key = null;
+    }
     paired.clear();
+    available = []; waitingBoards.clear(); warnings = []; pair = null;
+    for (const id of Object.keys(keys)) delete keys[id];
     document.querySelector('main')?.replaceChildren();
-    location.replace('/');
+    if (error?.code !== 'DEVICE_REVOKED') { location.replace('/'); return; }
+    let cleanupFailed = false;
+    try {
+      localStorage.removeItem(KEYS);
+      for (const key of Object.keys(localStorage)) if (key.startsWith(OUTBOX) || key.startsWith(OWNED)) localStorage.removeItem(key);
+      sessionStorage.removeItem(PENDING);
+      sessionStorage.removeItem('pullboard.relay.device-pair.v1');
+    } catch { cleanupFailed = true; }
+    try { await forgetDevice(); } catch { cleanupFailed = true; }
+    const panel = document.createElement('section');
+    panel.id = 'relay-removed'; panel.className = 'card-panel'; panel.setAttribute('role', 'status');
+    panel.textContent = 'This browser was removed from the board. ' + (cleanupFailed
+      ? 'Clear this browser’s site data, then sign in again and get a fresh pairing link from a linked Mac.'
+      : 'Sign in again and get a fresh pairing link from a linked Mac.');
+    const signIn = document.createElement('a'); signIn.href = '/auth/github/start'; signIn.textContent = 'Sign in with GitHub';
+    panel.append(document.createElement('br'), signIn);
+    document.querySelector('main')?.replaceChildren(panel);
   }
 
   /** Render only authorized board names, safe warnings and pairing guidance into the generic page. */
   function notice() {
+    if (accessLost) return;
     const element = document.getElementById('relay-notice');
     if (!element) return;
     element.replaceChildren();
@@ -184,7 +219,7 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
     if (response.status === 304 && entry.state) return;
     const document = await response.json();
     if (!response.ok) {
-      await checkAuthorization('/api/v1/boards/' + entry.id + '/state', response.status, denied);
+      await checkAuthorization('/api/v1/boards/' + entry.id + '/state', response.status, denied, document.error);
       if (document.error?.code === 'NO_BOARD' || document.error?.code === 'NO_SNAPSHOT') waitForFirstSnapshot(entry);
       throw new Error(document.error ? '[' + document.error.code + '] ' + document.error.message : 'The relay snapshot is unavailable. Retry.');
     }
@@ -287,6 +322,7 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
     if (message.event === 'error') {
       stream.close();
       const error = document.error;
+      if (error?.code === 'DEVICE_REVOKED') { await denied(error); return; }
       if (error?.code === 'SNAPSHOT_REQUIRED') {
         await snapshot(entry);
         await catchUp(entry);
@@ -332,7 +368,7 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
         if (!response.ok) {
           let document;
           try { document = await response.json(); } catch { document = null; }
-          await checkAuthorization(url, response.status, denied);
+          await checkAuthorization(url, response.status, denied, document?.error);
           if (document?.error?.code === 'NO_BOARD' || document?.error?.code === 'NO_SNAPSHOT') waitForFirstSnapshot(entry);
           const refusal = new Refused(document?.error?.code ?? 'RELAY_UNAVAILABLE', document?.error?.message ?? 'The relay stream ended. Refresh this board.');
           if (refusal.code === 'ENGINE_VERSION') refusal.fatal = true;
@@ -355,8 +391,10 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
   /** Reauthorize the listing, pair only visible boards, and close streams for lost access. */
   async function listing() {
     const document = await documentAt('/api/v1/boards', denied);
-    Object.assign(keys, stored(localStorage, KEYS, {}));
-    Object.assign(keys, await deviceBoardKeys((path, options) => documentAt(path, denied, options)));
+    if (accessLost) throw accessError;
+    const receivedKeys = await deviceBoardKeys((path, options) => documentAt(path, denied, options));
+    if (accessLost) throw accessError;
+    Object.assign(keys, stored(localStorage, KEYS, {}), receivedKeys);
     available = document.boards.filter(board => BOARD.test(board.id) && typeof board.repository === 'string');
     waitingBoards = new Map();
     warnings = document.warnings ?? [];
@@ -521,10 +559,11 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
   addEventListener('pagehide', () => { for (const entry of paired.values()) entry.stream?.close(); });
   if (await enrollPhone((path, options) => documentAt(path, denied, options))) keepPairingStorage();
   await listing();
-  await installPhoneApprovals((path, options) => documentAt(path, denied, options), keys, async () => { await listing(); onUpdate(); });
+  await installPhoneApprovals((path, options) => documentAt(path, denied, options), keys, async () => { await listing(); onUpdate(); }, access.signal);
   return {
     /** Return decoded API state or seal narrow person intent; no board key or plaintext leaves the device. */
     async request(path, body) {
+      if (accessLost) throw accessError;
       const url = new URL(path, location.origin);
       if (url.origin !== location.origin) throw new Error('Use this relay origin to read a board.');
       if (url.pathname === '/api/v1/boards') { if (body !== undefined && body !== null) throw new Refused('BAD_REQUEST', 'Send person intent to a paired board.'); return listing(); }
