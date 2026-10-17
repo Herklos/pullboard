@@ -1657,9 +1657,13 @@ test('[Q4] machine capacity decreases atomically refuse an occupied or queued re
   process.env.PULLBOARD_HOME = box.home;
   process.env.PULLBOARD_MACHINE_HOME = box.home;
   const holder = worker(box, { capacity: 2, agent: 'capacity-holder' });
+  let secondHolder;
+  let waiter;
   try {
     assert.equal((await event(holder)).acquired, 'capacity-holder');
-    const waiter = worker(box, { capacity: 2, agent: 'capacity-waiter' });
+    secondHolder = worker(box, { capacity: 2, agent: 'capacity-second-holder' });
+    assert.equal((await event(secondHolder)).acquired, 'capacity-second-holder');
+    waiter = worker(box, { capacity: 2, agent: 'capacity-waiter' });
     assert.equal((await event(waiter)).waiting, 1);
     let persisted = false;
     assert.throws(() => setResourceCapacity({ name: 'gate', capacity: 1, persist: () => { persisted = true; } }), (error) => error.code === 'RESOURCE_BUSY');
@@ -1668,6 +1672,7 @@ test('[Q4] machine capacity decreases atomically refuse an occupied or queued re
     assert.equal((await event(waiter)).acquired, 'capacity-waiter');
     assert.throws(() => setResourceCapacity({ name: 'gate', capacity: 1, persist: () => { persisted = true; } }), (error) => error.code === 'RESOURCE_BUSY');
     await release(waiter);
+    await release(secondHolder);
     const changed = setResourceCapacity({ name: 'gate', capacity: 3, persist: () => { persisted = true; } });
     assert.deepEqual(changed, { name: 'gate', capacity: 3 });
     assert.equal(persisted, true, 'settings persist under the same queue lock as the capacity');
@@ -1677,6 +1682,8 @@ test('[Q4] machine capacity decreases atomically refuse an occupied or queued re
     lease.release();
   } finally {
     if (!holder.exitResult) await release(holder);
+    if (secondHolder && !secondHolder.exitResult) await release(secondHolder);
+    if (waiter && !waiter.exitResult) await release(waiter);
     if (oldHome === undefined) delete process.env.PULLBOARD_HOME;
     else process.env.PULLBOARD_HOME = oldHome;
     if (oldMachineHome === undefined) delete process.env.PULLBOARD_MACHINE_HOME;
