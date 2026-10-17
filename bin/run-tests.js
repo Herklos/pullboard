@@ -17,6 +17,7 @@ const runner = fileURLToPath(import.meta.url);
 const LANDING_RUN_ENV = 'PULLBOARD_LANDING_RUN';
 const LANDING_WORKER_STARTS_ENV = 'PULLBOARD_LANDING_WORKER_STARTS';
 const LANDING_ATTEMPT_ENV = 'PULLBOARD_LANDING_ATTEMPT';
+const LANDING_WAIVERS_ENV = 'PULLBOARD_LANDING_WAIVERS';
 // Mirrors src/landing-shards.js; this preload stays free of that module until a landing needs it.
 const LANDING_SHARD_ENV = 'PULLBOARD_LANDING_SHARD';
 const LANDING_FILE_TIMES_ENV = 'PULLBOARD_LANDING_FILE_TIMES';
@@ -792,13 +793,35 @@ async function drainLandingWorkerDescendants(ownedDescendants, refreshOwnedDesce
   if (firstError) throw new Error(`owned descendants drained after cleanup error: ${firstError.message}`, { cause: firstError });
 }
 
+/**
+ * Read the live person waivers Pullboard projects into a landing run, as `{kind, test}` pairs.
+ * The projection only decides whether the run keeps going past a failure; whether the run is
+ * waived is decided afterwards by Pullboard against the board, so a forged list only makes a run
+ * longer, never greener. Anything unreadable projects nothing, and the run stops as before [B3].
+ */
+function landingWaiverProjection(text) {
+  try {
+    const parsed = JSON.parse(text ?? '[]');
+    return Array.isArray(parsed) ? parsed.filter(entry => ['file', 'name'].includes(entry?.kind) && typeof entry.test === 'string' && entry.test) : [];
+  } catch { return []; }
+}
+
+/** True when a projected waiver covers this failing test by its file or by its exact name. */
+function landingFailureWaived(waivers, file, name) {
+  const path = typeof file === 'string' ? relative(process.cwd(), file.startsWith('file:') ? fileURLToPath(file) : file) : null;
+  return waivers.some(waiver => waiver.kind === 'file' ? waiver.test === path : waiver.test === name);
+}
+
 /** Run a landing check with execution-ordered failure detection and native runner reporters. */
 async function runLandingTests(args, env, concurrency) {
+  const waivers = landingWaiverProjection(process.env[LANDING_WAIVERS_ENV]);
+  const waivedFiles = new Map();
   const { run } = await import('node:test');
   const { PassThrough } = await import('node:stream');
   const { createWriteStream } = await import('node:fs');
   const { pathToFileURL } = await import('node:url');
   const { options, env: testEnv } = await landingTestOptions(args, env, concurrency);
+  delete testEnv[LANDING_WAIVERS_ENV];
   if (options.isolation !== 'process') {
     throw new Error('landing gate early-stop requires --test-isolation=process so started files and owned children can be tracked safely');
   }
@@ -1053,6 +1076,11 @@ async function runLandingTests(args, env, concurrency) {
           const { file, name, details } = data;
           // Node 22.13 leaves ordinary/file completions untyped; newer versions label them as tests.
           if (file && details?.passed === false && (details.type === undefined || details.type === 'test') && !firstFailure) {
+            // A failure a live person waiver covers does not stop the run; every other file still runs.
+            if (landingFailureWaived(waivers, file, name)) { waivedFiles.set(file, waivedFiles.get(file) ?? true); return; }
+            // A file or suite failing only through its tests was decided by those tests already.
+            if (waivers.length && details.error?.failureType === 'subtestsFailed' && waivedFiles.get(file) === true) return;
+            waivedFiles.set(file, false);
             firstFailure = { file, name, error: details.error };
             abortLandingRun();
           }
@@ -1062,7 +1090,7 @@ async function runLandingTests(args, env, concurrency) {
           if (data.file) {
             startedFiles.add(data.file);
             completedFiles.add(data.file);
-            if (data.success === false && !firstFailure) {
+            if (data.success === false && !firstFailure && waivedFiles.get(data.file) !== true) {
               firstFailure = { file: data.file, name: 'test file failed before a test completed' };
               abortLandingRun();
             }

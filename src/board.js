@@ -21,7 +21,9 @@ import { causeProblem, requireNeverAgain } from './rigor.js';
 import { barCorrectionFields } from './bar-corrections.js';
 import { factReference } from './fact-reference.js';
 import { factFromEvent, requestAnswerRefusal, tellAnswerImplications, tellFactImplications, tellVerdictImplications } from './implies.js';
+import { landingFlakes, landingWaiverCovers, landingWaiverKind } from './landing-exceptions.js';
 import { parseSpec } from './spec.js';
+export { landingFlakes, landingWaiverCovers, landingWaiverKind };
 export { acceptCheck } from './check-accept.js';
 
 export const ACCEPT_REASON = 'CRITERION_MET';
@@ -2718,6 +2720,8 @@ export function recordLandingWaiver(board, { agentId, channel, id, test, until, 
     throw new Refused('LAND_WAIVER', 'name a test, a future --until date and a nonempty --reason; run pullboard land --waive <test> --until <date> --reason "why"');
   }
   return atomic(board, () => {
+    // This ordered result and event retain their released shape on every replay engine.
+    // File/name classification belongs to a derived read, never immutable waiver history.
     const waiver = { id, test, until: new Date(until).toISOString(), reason: reason.trim(), by: PERSON, channel };
     logEvent(board, PERSON, 'landing_waiver', null, { waiver });
     return waiver;
@@ -2731,10 +2735,11 @@ export function landingWaivers(board) {
     .map((row) => JSON.parse(row.event_detail).waiver);
 }
 
-/** Find a live person's waiver covering the exact failing file or test name [B3,R3]. */
+/** Find a live person's waiver and derive its match kind without rewriting history [B3,R3,H16]. */
 export function landingWaiverFor(board, failure) {
-  return landingWaivers(board).findLast((waiver) => Date.parse(waiver.until) > board.clock.now().getTime()
-    && (waiver.test === failure.file || waiver.test === failure.name)) ?? null;
+  const waiver = landingWaivers(board).findLast((entry) => Date.parse(entry.until) > board.clock.now().getTime()
+    && landingWaiverCovers(entry, failure));
+  return waiver ? { ...waiver, kind: waiver.kind ?? landingWaiverKind(waiver.test) } : null;
 }
 
 /** File one durable defect per flaky test and retain its source digest [B3,R3]. */
@@ -2754,16 +2759,6 @@ export function recordLandingFlake(board, { agentId, test, hash, names, lane, ba
   });
 }
 
-/** Read the latest observation of each named flaky test [B3,R3]. */
-export function landingFlakes(board) {
-  const flakes = new Map();
-  for (const row of board.db.prepare("SELECT event_detail FROM event WHERE event_kind = 'landing_flake' ORDER BY event_id").all()) {
-    const { flake } = JSON.parse(row.event_detail);
-    flakes.set(flake.test, flake);
-  }
-  return [...flakes.values()];
-}
-
 /** Validate a distinct waived landing proof without creating an ordinary gate stamp [B3,R3]. */
 export function waivedLandingProof(board, tree) {
   return landingBatches(board).findLast((batch) => ['ready', 'pushed', 'landed'].includes(batch.state)
@@ -2771,7 +2766,7 @@ export function waivedLandingProof(board, tree) {
     && batch.proof.failures.every((failure) => {
       const waiver = landingWaivers(board).find((entry) => entry.id === failure.waiver);
       return waiver && Date.parse(waiver.until) > board.clock.now().getTime()
-        && (waiver.test === failure.file || waiver.test === failure.name);
+        && landingWaiverCovers(waiver, failure);
     })) ?? null;
 }
 
