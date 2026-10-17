@@ -11,6 +11,7 @@ import {
   hostedMarkup,
   hostedState,
 } from './view/hosted.js';
+import { staleChip } from './view/stale.js';
 
 /** The CLI's default phrases, ordered by depth for the existing prose inventory guard. */
 export const PULLBOARD_COMMANDS = Object.freeze(commandPhrases().sort((left, right) => right.split(' ').length - left.split(' ').length));
@@ -496,6 +497,8 @@ const verdictHtml = (v, titles) => '<div class="verdict ' + (v.decision === 'ACC
 const stateOf = (i) => i.status === 'claimed' ? 'building' : i.status === 'submitted' ? 'verify' : i.status === 'verified' ? 'verified' : i.status === 'withdrawn' ? 'withdrawn' : i.verdict && i.verdict.decision === 'REJECT' ? 'back' : 'open';
 const STATES = { building: ['building', 'busy'], verify: ['to verify', 'warn'], back: ['sent back', 'no'], verified: ['verified', 'ok'], open: ['unclaimed', 'free'], withdrawn: ['withdrawn', ''] };
 const chip = (s) => '<span class="chip ' + STATES[s][1] + '">' + STATES[s][0] + '</span>';
+// A verified item's stale mark from src/view/stale.js (#726): Core publishes verdictState and the page only draws it.
+const staleChip = (${staleChip.toString()});
 /** Parse the bounded reference syntax before requesting additional committed line windows. */
 function codeReferenceParts(ref) {
   const match = /^(.+):(\\d+)(?:-(\\d+))?@([0-9a-f]{7,40})$/.exec(String(ref));
@@ -1948,6 +1951,7 @@ function milestoneItem(entry, p) {
     root,
     titles: new Map((root === view.root ? p.items : root ? named[0].items : []).map((i) => [String(i.id), i.title])),
     state: read ? stateOf(read) : null,
+    stale: item ? staleChip(item) : '',
     stage: item ? pipelineStage(item) : entry.status,
     word: entry.status,
     open: item ? { root, id } : null,
@@ -2000,7 +2004,7 @@ function jumpToRoadmap(key) {
  */
 function milestoneRow(row, titles) {
   const title = row.title ? inline(String(row.title).replace(/\\s+/g, ' '), row.titles || titles, true, row.root) : '<span class="muted">' + esc(row.why) + '</span>';
-  const inner = '<span class="dot' + (row.state ? ' ' + row.state : '') + '"></span><span class="t"><span class="id">' + esc(row.label) + '</span>' + title + '</span>' + (row.state ? chip(row.state) : '<span class="chip">' + esc(row.word) + '</span>');
+  const inner = '<span class="dot' + (row.state ? ' ' + row.state : '') + '"></span><span class="t"><span class="id">' + esc(row.label) + '</span>' + title + '</span>' + (row.stale || '') + (row.state ? chip(row.state) : '<span class="chip">' + esc(row.word) + '</span>');
   if (!row.open) return '<li><div class="milestone-item" title="' + esc(row.title ? row.title + ' (' + row.why + ')' : row.why) + '">' + inner + '</div></li>';
   const attributes = 'class="milestone-item" data-go="item:' + row.open.id + '"' + (row.open.root === view.root ? '' : ' data-board="' + esc(row.open.root) + '"') + ' title="' + esc(row.title) + '"';
   // A title with its own links needs a separate containing control, never a nested button.
@@ -2312,7 +2316,7 @@ function render() {
       primary: '<span>#' + i.id + '</span>' + rich(i.title, titles), rightTop: age(i.updatedAt), rightBottom: tag,
       // A rejected row's second line is its verdict; any other row's is its lane and the spec ids it serves.
       secondary: (rejected(i) ? '<span class="why"><b>' + esc(i.verdict.reason) + '</b> ' + linked(firstLine(visibleVerdictNote(i.verdict.reason, i.verdict.note)), titles) + '</span>'
-        : '<span>' + esc(i.lane) + '</span>' + (i.specs.length ? '<span class="specs" title="' + esc(i.specs.join(', ')) + '">' + esc(i.specs.slice(0, 3).join(', ') + (i.specs.length > 3 ? ' +' + (i.specs.length - 3) : '')) + '</span>' : '')) + pills });
+        : '<span>' + esc(i.lane) + '</span>' + (i.specs.length ? '<span class="specs" title="' + esc(i.specs.join(', ')) + '">' + esc(i.specs.slice(0, 3).join(', ') + (i.specs.length > 3 ? ' +' + (i.specs.length - 3) : '')) + '</span>' : '')) + pills + staleChip(i) });
   }).join('') : '<li class="empty">' + (items.length ? 'No items match.' : snapshot ? 'No items at this event.' : 'No items yet. Add the first one with New item.') + '</li>';
 
   const selected = p.items.find((i) => i.id === view.item);
@@ -2351,7 +2355,7 @@ function render() {
     // Why it came back is the first thing the person reads; the verdicts before it stay below.
     const back = rejected(item);
     const earlier = back ? item.verdicts.slice(0, -1) : item.verdicts;
-    $('detail').innerHTML = '<div class="stack"><div><h2><span>#' + item.id + '</span>' + rich(item.title, titles) + '</h2><div class="meta spaced">' + (s === 'open' ? openChip(item) : chip(s)) + '<span class="chip">' + esc(item.lane) + '</span><span class="chip">' + esc(item.route) + '</span></div></div>'
+    $('detail').innerHTML = '<div class="stack"><div><h2><span>#' + item.id + '</span>' + rich(item.title, titles) + '</h2><div class="meta spaced">' + (s === 'open' ? openChip(item) : chip(s)) + staleChip(item) + '<span class="chip">' + esc(item.lane) + '</span><span class="chip">' + esc(item.route) + '</span></div></div>'
       + (back ? '<div class="sentback"><h3>Sent back' + (s === 'building' ? ', being reworked' : s === 'verify' ? ', resubmitted' : s === 'withdrawn' ? ', then withdrawn' : '') + '</h3>' + verdictHtml(item.verdict, titles) + '</div>' : '')
       + (item.criterion ? '<div><h3>Criterion</h3><div class="text">' + rich(item.criterion, titles) + '</div></div>' : '')
       + (item.check ? '<div><h3>Check</h3><dl class="kv"><dt>command</dt><dd><code>' + esc(item.check) + '</code></dd><dt>baseline</dt><dd><span class="chip ' + baselineClass + '">' + esc(baseline?.result ?? 'not recorded') + '</span></dd></dl>'
@@ -2427,11 +2431,11 @@ function render() {
     // Asks waiting on someone else are not the person's to answer: they show only once the composer's toggle opens them.
     + (p.asked.length && view.open.waiting ? p.asked.map((d) => card(d, '', false)).join('') : '');
   foldShouts();
-  // Each agent with what it holds: its claim, then its work sent back, then its work waiting for a
-  // verdict. The worktree path is there on hover; what the person reads is who is doing what.
+  // Each agent with what it holds: its claim, then its work sent back or with a stale verdict to redo, then its work waiting
+  // for a verdict. The worktree path is there on hover; what the person reads is who is doing what.
   // A review an agent holds (V15) comes right after its claim.
-  const rank = (a, i) => i.status === 'claimed' ? 0 : reviewerOf(i) === a.agent_id ? 1 : stateOf(i) === 'back' ? 2 : 3;
-  const holding = (a) => items.filter((i) => i.status === 'claimed' ? holderOf(i) === a.agent_id : reviewerOf(i) === a.agent_id || (i.builtBy === a.agent_id && ['back', 'verify'].includes(stateOf(i)))).sort((x, y) => rank(a, x) - rank(a, y));
+  const rank = (a, i) => i.status === 'claimed' ? 0 : reviewerOf(i) === a.agent_id ? 1 : stateOf(i) === 'back' || staleChip(i) ? 2 : 3;
+  const holding = (a) => items.filter((i) => i.status === 'claimed' ? holderOf(i) === a.agent_id : reviewerOf(i) === a.agent_id || (i.builtBy === a.agent_id && (['back', 'verify'].includes(stateOf(i)) || staleChip(i)))).sort((x, y) => rank(a, x) - rank(a, y));
   // The agents at work: holding a claim or a review now, or moved in the last hour. Every agent is one click away;
   // work an idle agent left sent back or waiting stays on the Items tab.
   const recent = (a) => p.items.some((i) => (i.status === 'claimed' && holderOf(i) === a.agent_id) || (i.status === 'submitted' && reviewerOf(i) === a.agent_id))
@@ -2443,12 +2447,13 @@ function render() {
   const busy = listed.filter((a) => holding(a).length), idle = listed.filter((a) => !holding(a).length);
   const face = (a) => lead(a.agent_id) ? '<span class="avatar">' + LEAD + '</span>' : '<span class="avatar' + (initials(a.agent_id).length > 3 ? ' wide' : '') + '" aria-hidden="true">' + esc(initials(a.agent_id)) + '</span>';
   const tip = (a) => 'Shouts with ' + agentName(a.agent_id) + ' · ' + a.agent_lane + ' · ' + a.agent_route + ' (' + a.agent_path + ')';
-  const state = (a, i) => reviewerOf(i) === a.agent_id ? '<span class="chip warn">reviewing</span>' : chip(stateOf(i));
+  // Beside the name there is room for one word, so a stale verdict says stale there; the opened rows say verified and stale.
+  const state = (a, i, brief = false) => reviewerOf(i) === a.agent_id ? '<span class="chip warn">reviewing</span>' : (brief && staleChip(i)) || chip(stateOf(i)) + staleChip(i);
   const marks = (a) => ' h' + hue(a.agent_id) + (lead(a.agent_id) ? ' lead' : '') + (view.agent === a.agent_id ? ' on' : '');
   const row = (a) => {
     const mine = holding(a), first = mine[0];
     return '<div class="agent-card' + marks(a) + '"><button class="agent-row" data-agent="' + esc(a.agent_id) + '" title="' + esc(tip(a)) + '" type="button">' + face(a)
-      + '<span class="agent-who"><b>' + esc(agentName(a.agent_id)) + '</b>' + state(a, first) + (mine.length > 1 ? '<span class="agent-more">+' + (mine.length - 1) + '</span>' : '') + (a.lastMoveAt ? '<time data-ago="' + esc(a.lastMoveAt) + '">' + ago(a.lastMoveAt) + '</time>' : '') + '</span>'
+      + '<span class="agent-who"><b>' + esc(agentName(a.agent_id)) + '</b>' + state(a, first, true) + (mine.length > 1 ? '<span class="agent-more">+' + (mine.length - 1) + '</span>' : '') + (a.lastMoveAt ? '<time data-ago="' + esc(a.lastMoveAt) + '">' + ago(a.lastMoveAt) + '</time>' : '') + '</span>'
       + '<span class="agent-doing"><span class="agent-what"><i>#' + first.id + '</i> ' + esc(first.title) + '</span></span></button>'
       + (view.agent === a.agent_id ? mine.map((i) => '<div class="agent-work" data-item="' + i.id + '" data-go="item:' + i.id + '"><span>#' + i.id + ' ' + rich(i.title, titles) + '</span>' + state(a, i) + '</div>').join('') : '') + '</div>';
   };
