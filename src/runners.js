@@ -429,6 +429,11 @@ function resultFrom(request, result) {
     || receipt.outputSha256 !== createHash('sha256').update(output).digest('hex')) {
     throw new RunnerDropped(request.runner.host);
   }
+  if (receipt.refused !== undefined) {
+    if (typeof receipt.refused !== 'string' || !/^[A-Z][A-Z0-9_]{0,63}$/u.test(receipt.refused) || receipt.code === 0) throw new RunnerDropped(request.runner.host);
+    // The runner answered, so this is a named failure, not a dropped transport to requeue.
+    throw new Refused('RUNNER_SETUP_REFUSED', `runner ${request.runner.host} refused this run before it started: [${receipt.refused}] from its own resource pool; run pullboard resources and pullboard settings on ${request.runner.host} to fix that pool, then run again`);
+  }
   return { isGreen: receipt.code === 0 && !receipt.signal, output: output.toString('utf8'),
     seconds: Math.round(receipt.wallMs / 1000), exitCode: receipt.code,
     executionRunner: request.runner.host, executionRoot: receipt.root, remoteWallMs: receipt.wallMs,
