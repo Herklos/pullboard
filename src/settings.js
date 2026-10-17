@@ -26,6 +26,9 @@ export function loadMachineSettings() {
     throw new Refused('BAD_MACHINE_SETTINGS', `gate.browserByLaunch in ${file} must be true or false`);
   }
   validateGateQueue(value, file);
+  if (value.relay?.offerAtInit !== undefined && typeof value.relay.offerAtInit !== 'boolean') {
+    throw new Refused('BAD_MACHINE_SETTINGS', `relay.offerAtInit in ${file} must be true or false`);
+  }
   if (value.gate?.memoryFloorMB !== undefined && (!Number.isSafeInteger(value.gate.memoryFloorMB) || value.gate.memoryFloorMB < 0)) {
     throw new Refused('BAD_MACHINE_SETTINGS', `gate.memoryFloorMB in ${file} must be a whole number of megabytes, 0 or more; fix it before running Pullboard`);
   }
@@ -74,6 +77,15 @@ export function memoryFloorMB() {
   return loadMachineSettings().gate?.memoryFloorMB ?? null;
 }
 
+/**
+ * Whether init asks the person once to share this computer's boards with their phone [H5,H17].
+ * On unless the machine settings set relay.offerAtInit to false: the person asked for sharing to
+ * be one Enter for new people, and a person who never wants the question turns it off here.
+ */
+export function relayOfferEnabled() {
+  return loadMachineSettings().relay?.offerAtInit !== false;
+}
+
 /** Atomically replace machine settings without exposing a partial JSON file. */
 function writeMachineSettings(settings) {
   const file = machineSettingsFile();
@@ -85,7 +97,7 @@ function writeMachineSettings(settings) {
   } finally { rmSync(temporary, { force: true }); }
 }
 
-/** Set machine gate capacity only when its durable holder and waiter lists are empty. */
+/** Raise machine gate capacity immediately; decreases require an empty durable queue. */
 export function setGateSlots(capacity) {
   if (!Number.isSafeInteger(capacity) || capacity < 1) throw new Refused('BAD_GATE_SLOTS', 'gateSlots must be a positive integer; run pullboard settings gateSlots <n>');
   let next;
@@ -123,7 +135,7 @@ export function setGateShortSlots(count) {
   return next;
 }
 
-/** Set machine browser capacity only when its browser holders and waiters are empty. */
+/** Raise machine browser capacity immediately; decreases require an empty browser queue. */
 export function setBrowserSlots(capacity) {
   if (!Number.isSafeInteger(capacity) || capacity < 1) throw new Refused('BAD_BROWSER_SLOTS', 'browserSlots must be a positive integer; run pullboard settings browserSlots <n>');
   let next;
