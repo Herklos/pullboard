@@ -16,7 +16,7 @@ import * as store from './board.js';
 import { briefFiles } from './brief.js';
 import { CONFIG_FILE, COORDINATOR, loadConfig } from './config.js';
 import { doctrineText, loadDoctrine } from './doctrine.js';
-import { digestOf, runGate } from './gate.js';
+import { digestOf, refuseSandboxBlocked, sandboxBlockedOperation, runGate } from './gate.js';
 import { contains, git, headCommit, invalidateGitFacts, isClean, tryGit, untracked } from './git.js';
 import { laneNames, outOfLane } from './lanes.js';
 import { Refused } from './refused.js';
@@ -315,6 +315,7 @@ async function tryItem(ctx, item, { command, attempts, minutes, deps, me, start,
     const late = built.timedOut ? `The agent ran out of time after ${minutes} minutes.\n` : '';
     const checked = await runCommand(item.item_check, { cwd: root, timeoutMs: minutes * 60_000 });
     seconds += built.seconds + checked.seconds;
+    if (checked.status !== 0) refuseSandboxBlocked({ sandboxBlocked: sandboxBlockedOperation(root, checked.output) });
     let result = 'green';
     if (checked.status !== 0) {
       result = 'red';

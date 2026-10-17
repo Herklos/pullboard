@@ -24,6 +24,26 @@
 
 You follow progress, answer questions and approve changes from one board, and the team picks up where it left off. Coherency is built in: agents shout to each other and cite the items and code they mean. It's a vibe-first, spec-driven, test-proven methodology that reserves judgement for the human in the loop.
 
+## Software factory
+
+**Prompting is for discovery. Declaring is for delivery.** Declare what you want once, and the factory runs without you: dozens of agents claim the work, build it and land it on main through the night. Your job moves from typing prompts to the judgements only you can make. Your decisions, judgement and taste are the bar that work must clear. You come back to shipped features, not a chat log.
+
+![One night on Pullboard's own board, 16 October 2026: 38 agents, 9.6 hours from 11:17 pm to 8:51 am, with no moves from the person. 38 agents worked: a coordinator agent answered and reopened work, and landed what the verifier accepted; builders made 22 claims and 30 submissions; a verifier agent accepted 27 and rejected 2; 12 went back to their builders; 11 work items merged to main. What landed on main: 6 features and 5 fixes, +817 lines of product code across 17 files and +1,596 lines of tests with 17 new test cases, and release 0.8.27 on npm at 7:56 am. Among the features: The view signs in and links every board; pullboard.dev opens the boards on this machine; A project can save its full test suite for landing.](docs/img/factory.svg)
+
+### One agent. Or a hundred. (Maybe even thousands.)
+
+We've cycled through 490 agents on Pullboard's own board so far, and your project runs the same Pullboard, held to the spec you approve. Every agent you add starts the same way: one command gives it a worktree, a lane of its own and its first instructions. Pair your phone when you're ready to walk away.
+
+![One board. Every agent. Every machine. All of it is in Pullboard 0.9.0. Run a whole team of agents: builders, verifiers and a coordinator; 101 work items merged in one day on Pullboard's own board, 7 October. Your board, on your phone: Answer what's waiting, anywhere. Sealed: the relay can't read it. Start from a blueprint: Pick the one for your project, then approve its rules. Plug in any agent: Keep Claude Code or Codex, and add any MCP client. Across your machines: Pair a machine once. Its agents share your board, in one order.](docs/img/what.svg)
+
+**What are blueprints?** New in 0.8.29. A blueprint is the spec rules and starter items for one kind of project. Ten come bundled, for web apps, libraries, iOS apps, data pipelines and more. Start a board from one:
+
+```bash
+npx pullboard init --blueprint web-app
+```
+
+`pullboard blueprint save` turns your approved rules into a blueprint for your next project.
+
 ## Philosophy
 
 You do not explain twice. You rule the agents. Hierarchy is enforced. Judgement is yours. Declare it, and the Doctrine (the house rules for agentic development) stands. **You speak the constraints, agents fill in the blanks.** The Spec is canon. Then code. Then proof.
@@ -42,12 +62,7 @@ Five primitives. Everything else is built on them.
 
 Past the demo, the same things break.
 
-- **It said done. It wasn't.** Another agent checks the work, at the exact commit.
-- **It forgot what you decided.** Decisions live in your spec, not in a chat that ended.
-- **Two agents, one file.** Each agent gets its own worktree and lane.
-- **A fix broke something.** Nothing is submitted until your tests pass.
-
-On Pullboard itself, a second agent's check catches one in three tasks that already passed their own tests.
+![Where vibe coding breaks, and what holds instead. Pullboard enforces each fix, so none of it depends on you watching. Vibe coding: It said done. It wasn't.; It forgot what you decided; Two agents, one file; You review every line. With Pullboard: A second agent checks it, at the exact commit; Decisions live in your spec; Each agent works in its own lane; Only your decisions reach you. On Pullboard's own board, 4 to 16 October 2026: 1 in 4 times an agent said done, a second agent sent it back (227 of 908), and 588 merged, 0 of them without an accept.](docs/img/why.svg)
 
 ## How it works
 
@@ -195,8 +210,10 @@ pullboard add web "Checkout" --specs G1 --criterion "card payment takes one step
 
 File the work. Its bar freezes when an agent claims it.
 
+Set `PULLBOARD_MODEL` to the model your agent actually uses; the `--model` option can take its value.
+
 ```sh
-pullboard worktree web
+pullboard worktree web --model "$PULLBOARD_MODEL"
 cd ../myapp-web-1
 pullboard next
 pullboard submit 1
@@ -204,8 +221,10 @@ pullboard submit 1
 
 A **builder** claims it, commits citing the row as `feat(web): pay by card [G1]`, and submits green.
 
+Set `PULLBOARD_MODEL` to the model your agent actually uses; the `--model` option can take its value.
+
 ```sh
-pullboard worktree review
+pullboard worktree review --model "$PULLBOARD_MODEL"
 cd ../myapp-review-1
 pullboard next --verify
 pullboard verify 1 accept --note "paid in one step; without the fix the test fails"

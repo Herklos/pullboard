@@ -142,9 +142,9 @@ function readItem(box, id) {
 /** Accepted engine-9 source before verified-item reopening; the 0.8.8 tag is not yet published. */
 const engine9Source = '314ef28751c44c96186b337cc4ace0fd8bf33d42';
 
-/** Assert both older sealed engines preserve their submitted-only verified-item refusal. */
+/** Compare verified-item reopen behavior across engines 8 through 10 and the current receiver. */
 async function assertLegacyVerifiedReopen(t, box, item, note) {
-  for (const [version, reference] of [[8, 'v0.8.6'], [9, engine9Source]]) {
+  for (const [version, reference] of [[8, 'v0.8.6'], [9, engine9Source], [10, 'v0.8.23']]) {
     const directory = mkdtempSync(join(tmpdir(), `pullboard-engine-${version}-verified-reopen-`));
     t.after(() => rmSync(directory, { recursive: true, force: true }));
     const source = store.openBoard(join(box.repo, '.git', 'pullboard', 'board.sqlite'));
@@ -160,9 +160,14 @@ async function assertLegacyVerifiedReopen(t, box, item, note) {
     importBoard(currentReceiver, snapshot);
     const before = store.getItem(currentReceiver, item.id);
     const currentResult = applyRelayMove(currentReceiver, move, receipt);
-    assert.equal(currentResult.error?.code, 'NOT_SUBMITTED');
-    assert.deepEqual(store.getItem(currentReceiver, item.id), before, `engine-${version} replay leaves the verified item row unchanged`);
-    assert.equal(currentResult.error?.message, `item #${item.id} is verified, not submitted`, `the current engine preserves engine-${version} refusal ordering and message`);
+    if (version < 10) {
+      assert.equal(currentResult.error?.code, 'NOT_SUBMITTED');
+      assert.deepEqual(store.getItem(currentReceiver, item.id), before, `engine-${version} replay leaves the verified item row unchanged`);
+      assert.equal(currentResult.error?.message, `item #${item.id} is verified, not submitted`, `the current engine preserves engine-${version} refusal ordering and message`);
+    } else {
+      assert.equal(currentResult.error, undefined, JSON.stringify(currentResult));
+      assert.equal(store.getItem(currentReceiver, item.id).item_status, 'open', 'engine 10 introduces verified-item landing reopens');
+    }
 
     const oldDirectory = join(directory, 'old-client');
     mkdirSync(oldDirectory);
@@ -176,21 +181,33 @@ async function assertLegacyVerifiedReopen(t, box, item, note) {
     assert.equal((await import(pathToFileURL(join(oldDirectory, 'src/machine.js')).href)).ENGINE_VERSION, version);
     const legacyBefore = legacyStore.getItem(legacyReceiver, item.id);
     const legacyResult = legacyEngine.applyRelayMove(legacyReceiver, move, receipt);
-    assert.equal(legacyResult.error?.code, 'NOT_SUBMITTED');
-    assert.deepEqual(currentResult.error, legacyResult.error, `engine-${version} preserves the older refusal envelope`);
-    assert.deepEqual(store.events(currentReceiver), legacyStore.events(legacyReceiver), `engine-${version} preserves the older refusal event history`);
-    assert.deepEqual(legacyStore.getItem(legacyReceiver, item.id), legacyBefore, `the engine-${version} client keeps its submitted-only rule`);
+    if (version < 10) {
+      assert.equal(legacyResult.error?.code, 'NOT_SUBMITTED');
+      assert.deepEqual(currentResult.error, legacyResult.error, `engine-${version} preserves the older refusal envelope`);
+      assert.deepEqual(store.events(currentReceiver), legacyStore.events(legacyReceiver), `engine-${version} preserves the older refusal event history`);
+      assert.deepEqual(legacyStore.getItem(legacyReceiver, item.id), legacyBefore, `the engine-${version} client keeps its submitted-only rule`);
+    } else {
+      assert.equal(legacyResult.error, undefined, JSON.stringify(legacyResult));
+      assert.deepEqual(legacyStore.getItem(legacyReceiver, item.id), store.getItem(currentReceiver, item.id));
+      assert.deepEqual(legacyStore.events(legacyReceiver), store.events(currentReceiver), 'the actual engine-10 client and engine-11 source replay identical landing reopens');
+    }
 
     const nextMove = prepareEngineMove(currentReceiver, 'reopen', [item.id, { agentId: 'coordinator', note }],
       { id: `engine10-verified-reopen-after-${version}`, actor: 'coordinator' });
-    assert.equal(nextMove.engine, 10);
+    assert.equal(nextMove.engine, ENGINE_VERSION);
     const beforeFuture = legacyExchange.exportBoard(legacyReceiver);
     assert.throws(() => legacyEngine.applyRelayMove(legacyReceiver, nextMove, { ...receipt, sequence: 2 }),
       (error) => error.code === 'ENGINE_VERSION');
     assert.deepEqual(legacyExchange.exportBoard(legacyReceiver), beforeFuture, `engine ${version} refuses before applying the engine-10 return`);
-    const nextResult = applyRelayMove(currentReceiver, nextMove, { ...receipt, sequence: 2 });
+    let nextTarget = currentReceiver;
+    if (version === 10) {
+      nextTarget = store.openBoard(join(directory, 'current-after-engine-10.sqlite'));
+      t.after(() => store.closeBoard(nextTarget));
+      importBoard(nextTarget, snapshot);
+    }
+    const nextResult = applyRelayMove(nextTarget, nextMove, { ...receipt, sequence: version === 10 ? 1 : 2 });
     assert.equal(nextResult.error, undefined, JSON.stringify(nextResult));
-    assert.equal(store.getItem(currentReceiver, item.id).item_status, 'open');
+    assert.equal(store.getItem(nextTarget, item.id).item_status, 'open');
     assert.equal(nextResult.result.landingFailure.mergeCommit, note.match(/merge commit ([a-f0-9]{40})/u)[1]);
   }
 }
@@ -237,7 +254,7 @@ test('the coordinator reopens a submitted item without a verdict [V2,V6,O8]', (t
   });
   assert.equal(store.events(board).some((event) => event.event_kind === 'release' && JSON.parse(event.event_detail).review), false);
 
-  const edited = box.run(box.repo, 'edit', '1', '--criterion', 'The page renders a heading.');
+  const edited = box.run(box.repo, 'edit', '1', '--criterion', 'The page renders a heading.', '--reason', 'the fixture corrects its bar');
   assert.equal(edited.code, 0, edited.err);
   assert.equal(store.getItem(board, 1).item_criterion, 'The page renders a heading.');
 });
@@ -276,6 +293,9 @@ test('a red landing gate returns a verified item to its builder [B3,V4]', async 
 
   const firstClaim = box.run(item.cwd, 'claim', String(item.id));
   assert.equal(firstClaim.code, 0, firstClaim.err);
+  const unchangedLandingHead = box.run(item.cwd, 'submit', String(item.id), '--json');
+  assert.equal(unchangedLandingHead.code, 1);
+  assert.equal(JSON.parse(unchangedLandingHead.out).error.code, 'HEAD_NOT_NEW', 'a verified-item red-landing reopen still requires new work');
   assert.equal(box.tryGit(item.cwd, 'merge-base', '--is-ancestor', item.commit, 'HEAD').status, 0,
     'the builder reclaims on top of the accepted commit');
   const firstFix = commitFile(box, item.cwd, 'web/feature.js', 'export const status = "PASS";\n', 'fix(web): restore landing behavior [G1]');
@@ -492,7 +512,7 @@ test('manual reopen records a timestamp-prefixed failing test after an unrecorde
     'the append-only accept remains in history');
 });
 
-test('a reopened item resubmits at a new head after a criterion edit [V2,V6,H16]', async (t) => {
+test('a reopened bar takes the same commit again [V2,V6,H16]', async (t) => {
   const box = project();
   const submitted = submitFixture(box);
   const reviewPath = reserveFixtureReview(box);
@@ -525,7 +545,7 @@ test('a reopened item resubmits at a new head after a criterion edit [V2,V6,H16]
   }), (error) => error.code === 'RELAY_MOVE');
   assert.deepEqual(exportBoard(oldReceiver), beforeOldReceiver, 'the current receiver rejects an impossible pre-introduction tag without mutation');
 
-  for (const [version, reference] of [[8, 'v0.8.6'], [9, engine9Source]]) {
+  for (const [version, reference] of [[8, 'v0.8.6'], [9, engine9Source], [10, 'v0.8.23']]) {
     const legacyDirectory = mkdtempSync(join(tmpdir(), `pullboard-engine-${version}-reopen-`));
     t.after(() => rmSync(legacyDirectory, { recursive: true, force: true }));
     unpackRelease(reference, legacyDirectory);
@@ -585,24 +605,63 @@ test('a reopened item resubmits at a new head after a criterion edit [V2,V6,H16]
 
   const reopened = box.run(box.repo, 'reopen', '1', '--note', 'correct the frozen criterion');
   assert.equal(reopened.code, 0, reopened.err);
-  const edited = box.run(box.repo, 'edit', '1', '--criterion', 'The page renders a heading.');
+  const claimedBeforeCorrection = box.run(box.web, 'claim', '1');
+  assert.equal(claimedBeforeCorrection.code, 0, claimedBeforeCorrection.err);
+  const unchangedBar = box.run(box.web, 'submit', '1', '--json');
+  assert.equal(unchangedBar.code, 1);
+  assert.equal(JSON.parse(unchangedBar.out).error.code, 'HEAD_NOT_NEW', 'a no-verdict reopen alone does not make the old bar a new submission');
+  const released = box.run(box.web, 'release', '1');
+  assert.equal(released.code, 0, released.err);
+  const explicitRefreeze = box.run(box.repo, 'refreeze', '1');
+  assert.equal(explicitRefreeze.code, 0, explicitRefreeze.err);
+  const claimedAfterRefreeze = box.run(box.web, 'claim', '1');
+  assert.equal(claimedAfterRefreeze.code, 0, claimedAfterRefreeze.err);
+  const sameContentResubmission = box.run(box.web, 'submit', '1', '--json');
+  assert.equal(sameContentResubmission.code, 0, sameContentResubmission.err);
+  assert.equal(JSON.parse(sameContentResubmission.out).commit, submitted.commit,
+    'an explicit coordinator refreeze is a new frozen bar even when its text is unchanged');
+
+  const secondReopen = box.run(box.repo, 'reopen', '1', '--note', 'correct the frozen criterion to match the implemented heading');
+  assert.equal(secondReopen.code, 0, secondReopen.err);
+  const edited = box.run(box.repo, 'edit', '1', '--criterion', 'The page renders a heading.', '--reason', 'the fixture corrects its bar');
   assert.equal(edited.code, 0, edited.err);
 
   const claimed = box.run(box.web, 'claim', '1');
   assert.equal(claimed.code, 0, claimed.err);
-  const sameHead = box.run(box.web, 'submit', '1', '--json');
-  assert.equal(sameHead.code, 1);
-  assert.equal(JSON.parse(sameHead.out).error.code, 'HEAD_NOT_NEW');
-  const treeBefore = box.git(box.web, 'rev-parse', 'HEAD^{tree}');
-  box.git(box.web, 'commit', '--allow-empty', '-m', 'chore(web): resend corrected criterion at a new head [G1]');
-  const newHead = box.git(box.web, 'rev-parse', 'HEAD');
-  assert.notEqual(newHead, submitted.commit);
-  assert.equal(box.git(box.web, 'rev-parse', 'HEAD^{tree}'), treeBefore, 'an empty commit keeps the measured tree unchanged');
+  const claimedBoard = store.openBoard(join(box.repo, '.git', 'pullboard', 'board.sqlite'));
+  let claimedBoardOpen = true;
+  t.after(() => { if (claimedBoardOpen) store.closeBoard(claimedBoard); });
+  const engine11Move = prepareEngineMove(claimedBoard, 'submit', [1, {
+    agentId: 'web-1', commit: submitted.commit, tree: submitted.tree,
+    policyCommit: box.git(box.repo, 'rev-parse', 'HEAD'),
+  }], { id: 'same-commit-engine-11', actor: 'web-1' });
+  const builderSender = { kind: 'agent', userId: 'fixture-user', agent: 'web-1' };
+  const engine10Replica = store.openBoard(join(box.dir, 'engine-10-same-commit.sqlite'));
+  t.after(() => store.closeBoard(engine10Replica));
+  importBoard(engine10Replica, exportBoard(claimedBoard));
+  const engine10Move = { ...engine11Move, id: 'same-commit-engine-10', engine: 10 };
+  const oldBehavior = applyRelayMove(engine10Replica, engine10Move, {
+    sequence: 1, at: '2026-10-10T12:00:02.000Z', kind: 'move', sender: builderSender,
+  });
+  assert.equal(oldBehavior.error?.code, 'HEAD_NOT_NEW', 'engine 10 replay keeps the previous no-verdict reopen refusal');
+  store.closeBoard(claimedBoard);
+  claimedBoardOpen = false;
+
   const resubmission = box.run(box.web, 'submit', '1', '--json');
   assert.equal(resubmission.code, 0, resubmission.err);
-  assert.equal(JSON.parse(resubmission.out).commit, newHead);
+  assert.equal(JSON.parse(resubmission.out).commit, submitted.commit, 'the corrected bar accepts the original commit without inventing an empty commit');
   const board = openFixtureBoard(t, box);
-  assert.equal(store.getItem(board, 1).item_commit, newHead);
-  const freshReview = box.run(reviewPath, 'next', '--verify', '1');
-  assert.equal(freshReview.code, 0, `reopen starts no reviewer cooldown: ${freshReview.err}`);
+  assert.equal(store.getItem(board, 1).item_commit, submitted.commit);
+  const review = box.run(reviewPath, 'next', '--verify', '1');
+  assert.equal(review.code, 0, review.err);
+  box.git(reviewPath, 'merge', '--ff-only', submitted.commit);
+  const rejected = box.run(reviewPath, 'verify', '1', 'reject', '--reason', 'BEHAVIOR_MISMATCH', '--note', 'the corrected criterion still fails');
+  assert.equal(rejected.code, 0, rejected.err);
+  const reclaimed = box.run(box.web, 'claim', '1');
+  assert.equal(reclaimed.code, 0, reclaimed.err);
+  const sameRejectedHead = box.run(box.web, 'submit', '1', '--json');
+  assert.equal(sameRejectedHead.code, 1);
+  assert.equal(JSON.parse(sameRejectedHead.out).error.code, 'HEAD_NOT_NEW', 'a rejection at the current corrected digest still blocks the same commit');
+  assert.equal(store.getItem(board, 1).item_status, 'claimed');
+  assert.equal(store.getItem(board, 1).item_verdict, 'REJECT');
 });

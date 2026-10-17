@@ -6,12 +6,14 @@
  */
 import assert from 'node:assert/strict';
 import { runFixtureExecFile as execFileSync, runFixtureChild as spawnSync, runFixtureChild, runFixtureGit } from './fixture-child.js';
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { after, test } from 'node:test';
 import { selectAffectedTests } from '../src/affected-tests.js';
 import { configFromSource } from '../src/config.js';
+import { checkAtCommit } from '../src/trusted-policy.js';
+import { refuseSandboxBlocked } from '../src/gate.js';
 
 const BIN = resolveBin();
 const dirs = [];
@@ -224,6 +226,206 @@ test('submit runs the frozen check and affected test only; landing and explicit 
   assert.equal(existsSync(stamp), false, 'neither subset nor red full gate leaves a green full-gate stamp');
 });
 
+test('a landing-gated project defers the full suite from submit to landing [V4,C7]', (t) => {
+  /** Build a small project whose global-source edit selects the full gate.
+   * @param {string} [initialSubmitGate]
+   * @returns {{box: any, fullMarker: string, checkMarker: string}}
+   */
+  function project(initialSubmitGate) {
+    let box = privateRepo(t);
+    put(box.root, 'pullboard.json', JSON.stringify({
+      gate: 'node --test', affectedTests: 'node --test', shared: ['pullboard.json'],
+      ...(initialSubmitGate ? { submitGate: initialSubmitGate } : {}),
+    }));
+    seedGraph(box);
+    const fullMarker = join(box.dir, 'full-suite.log');
+    const checkMarker = join(box.dir, 'item-check.log');
+    box.env.FULL_SUITE_MARKER = fullMarker;
+    box.env.ITEM_CHECK_MARKER = checkMarker;
+    for (const [file, name] of [['a', 'first'], ['b', 'second'], ['c', 'third']]) {
+      put(box.root, `test/${file}.test.js`, [
+        "import { appendFileSync } from 'node:fs';",
+        ...(file === 'a' ? ["import '../src/entry.js';"] : []),
+        `appendFileSync(process.env.FULL_SUITE_MARKER, '${name}\\n');`,
+      ].join('\n') + '\n');
+    }
+    put(box.root, 'src/cli.js', 'export const version = 1;\n');
+    commitAll(box, 'chore(core): prepare landing-gate fixture');
+    box = builderRepo(box);
+    const check = `node -e "require('node:fs').appendFileSync(process.env.ITEM_CHECK_MARKER, 'check\\n')"`;
+    assert.equal(box.coordinator('add', 'build', 'Landing gate fixture', '--check', check).code, 0);
+    assert.equal(box.run('claim', '1').code, 0);
+    rmSync(fullMarker, { force: true });
+    rmSync(checkMarker, { force: true });
+    return { box, fullMarker, checkMarker };
+  }
+
+  const optedIn = project();
+  const mainRoot = join(optedIn.box.dir, 'repo');
+  const mainConfig = JSON.parse(readFileSync(join(mainRoot, 'pullboard.json'), 'utf8'));
+  mainConfig.submitGate = 'landing';
+  put(mainRoot, 'pullboard.json', JSON.stringify(mainConfig));
+  runFixtureGit(['add', 'pullboard.json'], { cwd: mainRoot, env: optedIn.box.env });
+  runFixtureGit(['commit', '-q', '-m', 'feat(config): defer full suite to landing [G1]'], { cwd: mainRoot, env: optedIn.box.env });
+  optedIn.box.git('merge', '--no-edit', 'main');
+  put(optedIn.box.root, 'src/cli.js', 'export const version = 2;\n');
+  commitAll(optedIn.box, 'feat(core): change global source [G1]');
+
+  const deferred = optedIn.box.run('submit', '1', '--json');
+  assert.equal(deferred.code, 0, deferred.err);
+  const receipt = JSON.parse(deferred.out);
+  assert.equal(receipt.gate.full, true, 'the selector still reports that it fell back to the whole suite');
+  assert.equal(receipt.gate.deferred, true);
+  assert.match(receipt.gate.report, /full suite deferred to the landing gate/u);
+  assert.ok(existsSync(optedIn.checkMarker), 'the item check still runs');
+  assert.equal(existsSync(optedIn.fullMarker), false, 'the submit did not run the deferred suite');
+  const shown = optedIn.box.run('show', '1', '--json');
+  assert.equal(shown.code, 0, shown.err);
+  const submitEvent = JSON.parse(shown.out).thread.findLast((event) => event.kind === 'submit');
+  assert.equal(submitEvent.detail.note, 'full suite deferred to the landing gate', 'the reviewer can see the durable submission note');
+  const stamp = resolve(optedIn.box.root, optedIn.box.git('rev-parse', '--git-path', 'pullboard-gate-green'));
+  assert.equal(existsSync(stamp), false, 'deferral never creates a full-gate stamp');
+
+  const landing = optedIn.box.run('gate', '--landing');
+  assert.equal(landing.code, 0, landing.err);
+  assert.deepEqual(readFileSync(optedIn.fullMarker, 'utf8').trim().split('\n').sort(), ['first', 'second', 'third'],
+    'the landing gate runs the full configured suite');
+  assert.ok(existsSync(stamp), 'only the actual full-suite pass stamps the tree');
+
+  const candidateOnly = project();
+  const candidateConfig = JSON.parse(readFileSync(join(candidateOnly.box.root, 'pullboard.json'), 'utf8'));
+  candidateConfig.submitGate = 'landing';
+  put(candidateOnly.box.root, 'pullboard.json', JSON.stringify(candidateConfig));
+  put(candidateOnly.box.root, 'src/cli.js', 'export const version = 2;\n');
+  commitAll(candidateOnly.box, 'feat(core): try candidate-only deferral [G1]');
+  const ordinary = candidateOnly.box.run('submit', '1', '--json');
+  assert.equal(ordinary.code, 0, ordinary.err);
+  const ordinaryReceipt = JSON.parse(ordinary.out);
+  assert.equal(ordinaryReceipt.gate.deferred, false, 'a candidate-only setting is not trusted');
+  assert.ok(existsSync(candidateOnly.fullMarker), 'without current-main opt-in the full suite still runs at submit');
+  const ordinaryEvent = JSON.parse(candidateOnly.box.run('show', '1', '--json').out).thread.findLast((event) => event.kind === 'submit');
+  assert.equal(ordinaryEvent.detail.note, undefined, 'ordinary submissions do not claim the suite was deferred');
+
+  const named = project('landing');
+  put(named.box.root, 'src/a.js', 'export const value = 2;\n');
+  commitAll(named.box, 'feat(core): change one selected source [G1]');
+  const selected = named.box.run('submit', '1', '--json');
+  assert.equal(selected.code, 0, selected.err);
+  const selectedReceipt = JSON.parse(selected.out);
+  assert.equal(selectedReceipt.gate.full, false);
+  assert.equal(selectedReceipt.gate.deferred, true);
+  assert.deepEqual(selectedReceipt.gate.files, ['test/a.test.js']);
+  assert.match(selectedReceipt.gate.report, /affected tests: test\/a\.test\.js; full suite deferred to the landing gate/u);
+  assert.ok(existsSync(named.checkMarker), 'the item check runs for a named selection');
+  assert.equal(readFileSync(named.fullMarker, 'utf8'), 'first\n', 'the named affected test runs without unrelated tests');
+  const namedEvent = JSON.parse(named.box.run('show', '1', '--json').out).thread.findLast((event) => event.kind === 'submit');
+  assert.equal(namedEvent.detail.note, 'full suite deferred to the landing gate', 'the reviewer sees deferral for named affected tests too');
+});
+
+test("a landing-gated submit runs the project's invariant tests [V4,C7]", (t) => {
+  /** Prepare accepted policy, then claim in a real separate builder checkout. */
+  function project(invariants, failing = false) {
+    let box = privateRepo(t);
+    put(box.root, 'pullboard.json', JSON.stringify({ gate: 'node --test', affectedTests: 'node --test',
+      submitGate: 'landing', shared: ['pullboard.json'], ...(invariants === undefined ? {} : { submitInvariants: invariants }) }));
+    seedGraph(box);
+    const marker = join(box.dir, 'invariants.log');
+    box.env.INVARIANT_MARKER = marker;
+    put(box.root, 'test/invariant.test.js', [
+      "import assert from 'node:assert/strict';",
+      "import { appendFileSync } from 'node:fs';",
+      "import { value } from '../src/a.js';",
+      "appendFileSync(process.env.INVARIANT_MARKER, 'invariant\\n');",
+      failing ? 'assert.equal(value, 1, "the project invariant stays enforced");' : 'assert.ok(value < 3);',
+    ].join('\n') + '\n');
+    put(box.root, 'test/a.test.js', "import '../src/entry.js';\nimport { appendFileSync } from 'node:fs';\nappendFileSync(process.env.INVARIANT_MARKER, 'selected\\n');\n");
+    put(box.root, 'test/c.test.js', "throw new Error('unrelated test must stay deferred');\n");
+    put(box.root, 'src/cli.js', 'export const version = 1;\n');
+    commitAll(box);
+    box = builderRepo(box);
+    assert.equal(box.coordinator('add', 'build', 'Invariant fixture', '--check', 'node -e "process.exit(0)"').code, 0);
+    assert.equal(box.run('claim', '1').code, 0);
+    return { box, marker };
+  }
+  /** A global edit exercises the uncertain-selector path without running a full suite. */
+  function change(box, global = true) {
+    put(box.root, 'src/a.js', 'export const value = 2;\n');
+    if (global) put(box.root, 'src/cli.js', 'export const version = 2;\n');
+    commitAll(box, 'feat(core): change invariant input [G1]');
+  }
+  /** A submit subset must never leave a full-gate stamp. */
+  function unstamped(box) {
+    const stamp = resolve(box.root, box.git('rev-parse', '--git-path', 'pullboard-gate-green'));
+    assert.equal(existsSync(stamp), false);
+  }
+
+  const empty = project();
+  change(empty.box);
+  const unchanged = empty.box.run('submit', '1', '--json');
+  assert.equal(unchanged.code, 0, unchanged.err);
+  assert.equal(existsSync(empty.marker), false, 'the empty default adds no tests');
+  unstamped(empty.box);
+
+  const mandatory = project(['test/invariant.test.js']);
+  change(mandatory.box);
+  const guarded = mandatory.box.run('submit', '1', '--json');
+  assert.equal(guarded.code, 0, guarded.err);
+  const guardedReceipt = JSON.parse(guarded.out);
+  assert.equal(guardedReceipt.gate.full, true, 'the selector still reports an uncertain full fallback');
+  assert.equal(guardedReceipt.gate.deferred, true);
+  assert.deepEqual(guardedReceipt.gate.files, ['test/invariant.test.js'], 'receipt names only the executed invariant subset');
+  assert.equal(readFileSync(mandatory.marker, 'utf8'), 'invariant\n', 'global fallback does not run unrelated selected/full tests');
+  assert.match(guardedReceipt.gate.report, /submit invariants: test\/invariant\.test\.js; full suite deferred/u);
+  unstamped(mandatory.box);
+
+  const red = project(['test/invariant.test.js'], true);
+  change(red.box);
+  const refused = red.box.run('submit', '1', '--json');
+  assert.notEqual(refused.code, 0, 'a failing configured invariant must refuse the submit');
+  assert.match(refused.err + refused.out, /GATE_RED/u);
+  assert.ok(existsSync(red.marker), 'the listed invariant actually ran');
+  unstamped(red.box);
+
+  const trusted = project([], true);
+  const acceptedRoot = join(trusted.box.dir, 'repo');
+  const policy = JSON.parse(readFileSync(join(acceptedRoot, 'pullboard.json'), 'utf8'));
+  policy.submitInvariants = ['test/invariant.test.js'];
+  put(acceptedRoot, 'pullboard.json', JSON.stringify(policy));
+  runFixtureGit(['add', 'pullboard.json'], { cwd: acceptedRoot, env: trusted.box.env });
+  runFixtureGit(['commit', '-q', '-m', 'chore: require project invariant'], { cwd: acceptedRoot, env: trusted.box.env });
+  trusted.box.git('merge', '--no-edit', 'main');
+  const candidate = JSON.parse(readFileSync(join(trusted.box.root, 'pullboard.json'), 'utf8'));
+  candidate.submitInvariants = ['test/c.test.js'];
+  put(trusted.box.root, 'pullboard.json', JSON.stringify(candidate));
+  change(trusted.box);
+  const ignored = trusted.box.run('submit', '1', '--json');
+  assert.notEqual(ignored.code, 0, 'accepted main policy overrides both the claim-time list and candidate edit');
+  assert.match(ignored.err + ignored.out, /GATE_RED/u);
+  assert.ok(existsSync(trusted.marker), 'the accepted-main invariant still ran');
+  assert.doesNotMatch(ignored.err + ignored.out, /unrelated test must stay deferred/u);
+  unstamped(trusted.box);
+
+  const missing = project(['test/invariant.test.js']);
+  rmSync(join(missing.box.root, 'test/invariant.test.js'));
+  change(missing.box);
+  const absent = missing.box.run('submit', '1', '--json');
+  assert.notEqual(absent.code, 0, 'deleting a mandatory file cannot make the guard disappear');
+  assert.match(absent.err + absent.out, /submitInvariants file test\/invariant\.test\.js is missing or unreadable/u);
+  unstamped(missing.box);
+
+  const named = project(['test/invariant.test.js', 'test/invariant.test.js']);
+  change(named.box, false);
+  const selected = named.box.run('submit', '1', '--json');
+  assert.equal(selected.code, 0, selected.err);
+  const receipt = JSON.parse(selected.out);
+  assert.equal(receipt.gate.full, false);
+  assert.equal(receipt.gate.deferred, true);
+  assert.deepEqual(receipt.gate.files, ['test/a.test.js', 'test/invariant.test.js']);
+  assert.deepEqual(readFileSync(named.marker, 'utf8').trim().split('\n').sort(), ['invariant', 'selected'], 'selected and mandatory overlap runs once');
+  assert.match(receipt.gate.report, /full suite deferred to the landing gate/u);
+  unstamped(named.box);
+});
+
 test('a jest project submits with its own gate [V4,C7]', (t) => {
   for (const optedIn of [false, true]) {
     let box = privateRepo(t);
@@ -305,6 +507,19 @@ test('affectedTests accepts only a nonempty command prefix [V4,C7]', () => {
     });
   }
   assert.equal(configFromSource(JSON.stringify({ affectedTests: 'node test/runner.js' })).affectedTests, 'node test/runner.js');
+  assert.equal(configFromSource(JSON.stringify({ submitGate: 'landing' })).submitGate, 'landing');
+  assert.throws(() => configFromSource(JSON.stringify({ submitGate: 'submit' })), {
+    code: 'BAD_CONFIG', message: /submitGate.*landing/u,
+  });
+});
+
+test('submitInvariants names literal project files and requires its explicit runner [V4,C7]', () => {
+  assert.deepEqual(configFromSource('{}').submitInvariants, []);
+  for (const submitInvariants of [null, 'test/a.test.js', [false], [''], ['../outside.test.js'], ['/outside.test.js'], ['C:/outside.test.js'], ['test/../a.test.js'], ['test/a.test.js\n'], ['test//a.test.js']]) {
+    assert.throws(() => configFromSource(JSON.stringify({ affectedTests: 'pytest', submitInvariants })), { code: 'BAD_CONFIG', message: /submitInvariants/u });
+  }
+  assert.throws(() => configFromSource(JSON.stringify({ submitInvariants: ['tests/guard.py'] })), { code: 'BAD_CONFIG', message: /requires.*affectedTests/u });
+  assert.deepEqual(configFromSource(JSON.stringify({ affectedTests: 'pytest', submitInvariants: ['tests/guard.py'] })).submitInvariants, ['tests/guard.py']);
 });
 
 test('submit without a frozen check reports no item check and still runs affected tests [V4,C7,V16]', (t) => {
@@ -345,7 +560,7 @@ test('a red frozen item check refuses submit before affected tests run [V4,C7,V1
   box.env.CHECK_REFUSE = '1';
   const refused = box.run('submit', '1');
   assert.equal(refused.code, 1, refused.out);
-  assert.match(refused.err, /GATE_RED/u);
+  assert.match(refused.err + refused.out, /GATE_RED/u);
   assert.match(refused.err, /item check red/u);
 });
 
@@ -420,7 +635,7 @@ for (const mode of ['topic parent', 'merge commit']) {
     rmSync(marker);
     const refused = box.run('submit', '1');
     assert.equal(refused.code, 1, refused.out || refused.err);
-    assert.match(refused.err, /GATE_RED/u);
+    assert.match(refused.err + refused.out, /GATE_RED/u);
     assert.match(refused.err, /affected tests:.*test\/a\.test\.js/u);
     assert.match(refused.err, /ERR_ASSERTION/u);
     assert.equal(readFileSync(marker, 'utf8'), 'ran\nran\n', 'submit executes the transitive importer against the candidate and exact main');
@@ -593,7 +808,7 @@ test('affected submit includes branch changes made before the item claim [V4,C7,
   commitAll(box, 'feat(core): source after claim [G1]');
   const refused = box.run('submit', '1');
   assert.equal(refused.code, 1, refused.out || refused.err);
-  assert.match(refused.err, /GATE_RED/u);
+  assert.match(refused.err + refused.out, /GATE_RED/u);
   assert.match(refused.err, /affected tests:.*test\/a\.test\.js/u);
   assert.match(refused.err, /ERR_ASSERTION/u);
 });
@@ -642,9 +857,206 @@ for (const mode of ['deleted source', 'topic parent', 'merge commit']) {
     rmSync(marker, { force: true });
     const refused = box.run('submit', '1');
     assert.equal(refused.code, 1, refused.out || refused.err);
-    assert.match(refused.err, /GATE_RED/u);
+    assert.match(refused.err + refused.out, /GATE_RED/u);
     assert.match(refused.err, /affected tests:.*test\/a\.test\.js/u);
     assert.match(refused.err, mode === 'deleted source' ? /ERR_MODULE_NOT_FOUND/u : /ERR_ASSERTION/u);
     if (mode !== 'deleted source') assert.equal(readFileSync(marker, 'utf8'), 'ran\nran\n', 'submit executes the unchanged transitive importer against the candidate and exact main');
   });
 }
+
+test('a sandbox-blocked gate asks the person [I1,C7]', async (t) => {
+  const command = 'node -e "console.error(process.env.BLOCKED_DIAGNOSTIC); process.exit(Number(process.env.BLOCKED_EXIT || 1))"';
+  /** Assert the actual CLI names the refused operation and directs the person to restore access. */
+  function blocked(result, operation) {
+    assert.equal(result.code, 1, result.out + result.err);
+    assert.match(result.err, /SANDBOX_BLOCKED/u);
+    assert.ok(result.err.includes(operation), result.err);
+    assert.match(result.err, /Ask the person to allow this operation/u);
+    assert.match(result.err, /run the gate outside the sandbox/u);
+    assert.match(result.err, /keep the tests unchanged/u);
+  }
+  await t.test('full gates distinguish listener denial from ordinary failures [I1,C7]', () => {
+    const box = privateRepo(t);
+    put(box.root, 'pullboard.json', JSON.stringify({ gate: command }));
+    seedGraph(box);
+    box.env.BLOCKED_DIAGNOSTIC = 'Error: listen EPERM: operation not permitted 127.0.0.1:0';
+    blocked(box.run('gate'), 'listen');
+    const log = resolve(box.root, box.git('rev-parse', '--git-path', 'pullboard-gate.log'));
+    assert.match(readFileSync(log, 'utf8'), /Error: listen EPERM/u, 'the original diagnostic is retained');
+    assert.ok(existsSync(log + '.profile.json'), 'ordinary timings are retained');
+    box.env.BLOCKED_DIAGNOSTIC = 'Error: bind EACCES: permission denied 127.0.0.1:0';
+    blocked(box.run('gate'), 'bind');
+    for (const diagnostic of [
+      'AssertionError [ERR_ASSERTION]: expected EPERM when listen was called',
+      'Error: listen EADDRINUSE: address already in use',
+      `Error: EACCES: permission denied, open '${join(box.root, 'inside.txt')}'`,
+    ]) {
+      box.env.BLOCKED_DIAGNOSTIC = diagnostic;
+      const ordinary = box.run('gate');
+      assert.equal(ordinary.code, 1, ordinary.out + ordinary.err);
+      assert.doesNotMatch(ordinary.out + ordinary.err, /SANDBOX_BLOCKED/u);
+      assert.match(ordinary.out, /gate red/u);
+    }
+    put(box.root, 'pullboard.json', JSON.stringify({ gate: 'node -e "require(\'node:assert/strict\').fail(\'ordinary assertion\')"' }));
+    commitAll(box);
+    const assertion = box.run('gate');
+    assert.equal(assertion.code, 1);
+    assert.match(assertion.out, /AssertionError/u);
+    assert.doesNotMatch(assertion.out + assertion.err, /SANDBOX_BLOCKED/u);
+    put(box.root, 'pullboard.json', JSON.stringify({ gate: command }));
+    commitAll(box);
+    box.env.BLOCKED_DIAGNOSTIC = 'Error: listen EPERM: operation not permitted';
+    box.env.BLOCKED_EXIT = '0';
+    const green = box.run('gate');
+    assert.equal(green.code, 0, green.err);
+    assert.doesNotMatch(green.out + green.err, /SANDBOX_BLOCKED/u, 'a successful diagnostic is not a refusal');
+  });
+  await t.test('real outside-file TAP denials refuse while permission assertions stay ordinary [I1,C7]', () => {
+    let box = privateRepo(t);
+    const runner = `${JSON.stringify(process.execPath)} ${JSON.stringify(resolve(import.meta.dirname, '../bin/run-tests.js'))} test/permission.test.js`;
+    const directory = join(box.dir, 'readonly-outside-worktree');
+    mkdirSync(directory);
+    const outside = join(directory, "outside'quote.txt");
+    put(box.root, 'pullboard.json', JSON.stringify({ gate: runner }));
+    seedGraph(box);
+    const operation = `writeFileSync(${JSON.stringify(outside)}, 'blocked')`;
+    const prefix = "import { test } from 'node:test';\nimport { writeFileSync } from 'node:fs';\nimport assert from 'node:assert/strict';\n";
+    const denied = prefix + `test('actual outside write', () => ${operation});\n`;
+    put(box.root, 'test/permission.test.js', denied);
+    commitAll(box);
+    box = builderRepo(box);
+    assert.equal(box.coordinator('add', 'build', 'Real permission check', '--check', runner).code, 0);
+    assert.equal(box.run('claim', '1').code, 0);
+    put(box.root, 'src/a.js', 'export const value = 2;\n');
+    commitAll(box, 'feat(core): update selected source [G1]');
+    const item = { ...JSON.parse(box.coordinator('show', '1', '--json').out), item_commit: box.git('rev-parse', 'HEAD').trim() };
+    chmodSync(directory, 0o500);
+    try {
+      assert.throws(() => writeFileSync(outside, 'sentinel'), { code: 'EACCES' }, 'the operating system actually denies this write');
+      blocked(box.run('gate'), outside);
+      blocked(box.run('check', '1', '--yes'), outside);
+      blocked(box.run('submit', '1'), outside);
+      const privateResult = checkAtCommit(box.root, item);
+      assert.equal(privateResult.state, 'red');
+      assert.ok(privateResult.sandboxBlocked?.includes(outside), 'the real private checker scans the TAP record');
+      assert.throws(() => refuseSandboxBlocked(privateResult), { code: 'SANDBOX_BLOCKED' });
+      const raw = readFileSync(privateResult.outputPath, 'utf8');
+      assert.match(raw, /code: 'EACCES'/u);
+      assert.ok(raw.includes(outside));
+      assert.ok(existsSync(privateResult.profilePath));
+      put(box.root, 'test/permission.test.js', prefix + `test('ordinary assertion mentioning permission', () => { try { ${operation}; } catch (error) { assert.fail(error.message); } });\n`);
+      commitAll(box);
+      const ordinary = box.run('gate');
+      assert.equal(ordinary.code, 1);
+      assert.match(ordinary.out, /ERR_ASSERTION/u);
+      assert.doesNotMatch(ordinary.out + ordinary.err, /SANDBOX_BLOCKED/u);
+      const printedDiagnostic = `Error: EACCES: permission denied, open '${outside}'`;
+      put(box.root, 'test/permission.test.js', prefix + `test('ordinary assertion prints a permission-looking diagnostic', () => { console.error(${JSON.stringify(printedDiagnostic)}); assert.equal(1, 2); });\n`);
+      commitAll(box);
+      const printedAssertion = box.run('gate');
+      assert.equal(printedAssertion.code, 1);
+      assert.doesNotMatch(printedAssertion.out + printedAssertion.err, /SANDBOX_BLOCKED/u);
+      assert.match(printedAssertion.out, /ERR_ASSERTION/u);
+      assert.match(printedAssertion.out, /# Error: EACCES: permission denied/u, 'TAP retains the test diagnostic as a comment');
+      const multilineDiagnostic = `ordinary assertion detail\nError: EACCES: permission denied, open '${outside}'`;
+      put(box.root, 'test/permission.test.js', prefix + `test('multiline assertion detail contains a permission-looking line', () => { assert.fail(${JSON.stringify(multilineDiagnostic)}); });\n`);
+      commitAll(box);
+      const multilineAssertion = box.run('gate');
+      assert.equal(multilineAssertion.code, 1);
+      assert.doesNotMatch(multilineAssertion.out + multilineAssertion.err, /SANDBOX_BLOCKED/u);
+      assert.match(multilineAssertion.out, /ERR_ASSERTION/u);
+      assert.match(multilineAssertion.out, /Error: EACCES: permission denied/u);
+      put(box.root, 'test/permission.test.js', prefix + `test('ordinary assertion logs a caught OS error', () => { try { ${operation}; } catch (error) { console.error(error); } assert.equal(1, 2); });\n`);
+      commitAll(box);
+      const caughtAssertion = box.run('gate');
+      assert.equal(caughtAssertion.code, 1);
+      assert.doesNotMatch(caughtAssertion.out + caughtAssertion.err, /SANDBOX_BLOCKED/u);
+      assert.match(caughtAssertion.out, /ERR_ASSERTION/u);
+      put(box.root, 'test/permission.test.js', denied);
+      commitAll(box);
+    } finally { chmodSync(directory, 0o700); }
+    const allowed = box.run('gate');
+    assert.equal(allowed.code, 0, allowed.out + allowed.err);
+    assert.equal(readFileSync(outside, 'utf8'), 'blocked', 'the unchanged real write succeeds when access is restored');
+  });
+  await t.test('module-startup outside-file denials preserve fatal TAP evidence [I1,C7]', (t) => {
+    const box = privateRepo(t);
+    const runner = `${JSON.stringify(process.execPath)} ${JSON.stringify(resolve(import.meta.dirname, '../bin/run-tests.js'))} test/permission.test.js`;
+    put(box.root, 'pullboard.json', JSON.stringify({ gate: runner }));
+    const directory = join(box.dir, 'readonly-module-startup');
+    mkdirSync(directory);
+    const outside = join(directory, 'outside.txt');
+    const testSource = `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(outside)}, 'blocked during module evaluation');\n`;
+    put(box.root, 'test/permission.test.js', testSource);
+    commitAll(box);
+    chmodSync(directory, 0o500);
+    try {
+      assert.throws(() => writeFileSync(outside, 'sentinel'), { code: 'EACCES' }, 'the OS blocks the exact outside path');
+      const result = box.run('gate');
+      const rawPath = resolve(box.root, box.git('rev-parse', '--git-path', 'pullboard-gate.log'));
+      const innerGateLog = readFileSync(rawPath, 'utf8');
+      t.diagnostic(JSON.stringify({ actualPermissionSentinel: 'EACCES', command: 'pullboard gate', code: result.code, stdout: result.out, stderr: result.err, innerGateLog }));
+      assert.equal(result.code, 1, result.out + result.err);
+      assert.match(result.err, /SANDBOX_BLOCKED/u, 'a real module-startup denial is named for the person');
+      assert.ok(result.err.includes(outside), 'the refusal identifies the outside path');
+      assert.match(innerGateLog, /# Error: EACCES: permission denied, open /u);
+      assert.ok(innerGateLog.includes(`path: '${outside}'`), 'the fatal stack keeps Node’s exact denied path');
+      assert.ok(innerGateLog.includes("code: 'ERR_TEST_FAILURE'"), 'Node frames the module-load denial as a test-file failure');
+      assert.match(innerGateLog, /failureType: '?testCodeFailure'?(?:\r?\n|$)/u);
+      assert.match(innerGateLog, /not ok \d+ - (?:.*\/)?test\/permission\.test\.js/u);
+    } finally { chmodSync(directory, 0o700); }
+    const allowed = box.run('gate');
+    assert.equal(allowed.code, 0, allowed.out + allowed.err);
+    assert.equal(readFileSync(outside, 'utf8'), 'blocked during module evaluation');
+  });
+  await t.test('frozen checks retain outside-file refusal before submit proof [I1,C7]', () => {
+    let box = privateRepo(t);
+    put(box.root, 'pullboard.json', JSON.stringify({ gate: 'node --test', affectedTests: 'node --test' }));
+    seedGraph(box);
+    box = builderRepo(box);
+    const added = box.coordinator('add', 'build', 'Sandbox check', '--check', command);
+    assert.equal(added.code, 0, added.err);
+    assert.equal(box.run('claim', '1').code, 0);
+    put(box.root, 'src/a.js', 'export const value = 2;\n');
+    commitAll(box, 'feat(core): update selected source [G1]');
+    const outside = join(box.dir, 'outside.txt');
+    box.env.BLOCKED_DIAGNOSTIC = `Error: EACCES: permission denied, open '${outside}'`;
+    blocked(box.run('check', '1', '--yes'), 'open');
+    blocked(box.run('submit', '1'), 'open');
+    const log = resolve(box.root, box.git('rev-parse', '--git-path', 'pullboard-submit.log.check.log'));
+    assert.ok(readFileSync(log, 'utf8').includes(outside), 'the exact refused path remains in the raw log');
+    box.env.BLOCKED_DIAGNOSTIC = 'AssertionError [ERR_ASSERTION]: ordinary assertion';
+    const ordinary = box.run('submit', '1');
+    assert.equal(ordinary.code, 1);
+    assert.match(ordinary.err, /GATE_RED/u);
+    assert.doesNotMatch(ordinary.err, /SANDBOX_BLOCKED/u);
+    box.env.BLOCKED_EXIT = '0';
+    assert.equal(box.run('submit', '1').code, 0, 'the unchanged check can pass when the operation is allowed');
+    const item = JSON.parse(box.coordinator('show', '1', '--json').out);
+    /** Run the actual private checker with only these fixture diagnostics in its child environment. */
+    function privateCheck(diagnostic) {
+      const savedDiagnostic = process.env.BLOCKED_DIAGNOSTIC;
+      const savedExit = process.env.BLOCKED_EXIT;
+      process.env.BLOCKED_DIAGNOSTIC = diagnostic;
+      process.env.BLOCKED_EXIT = '1';
+      try { return checkAtCommit(box.root, item); }
+      finally {
+        if (savedDiagnostic === undefined) delete process.env.BLOCKED_DIAGNOSTIC;
+        else process.env.BLOCKED_DIAGNOSTIC = savedDiagnostic;
+        if (savedExit === undefined) delete process.env.BLOCKED_EXIT;
+        else process.env.BLOCKED_EXIT = savedExit;
+      }
+    }
+    const privateResult = privateCheck('Error: listen EPERM: operation not permitted\n' + 'ordinary trailing output\n'.repeat(80));
+    assert.equal(privateResult.state, 'red');
+    assert.equal(privateResult.sandboxBlocked, 'listen (EPERM)', 'classification scans before the bounded tail');
+    assert.doesNotMatch(privateResult.outputTail, /EPERM/u);
+    assert.throws(() => refuseSandboxBlocked(privateResult), { code: 'SANDBOX_BLOCKED' });
+    assert.match(readFileSync(privateResult.outputPath, 'utf8'), /Error: listen EPERM/u);
+    assert.ok(existsSync(privateResult.profilePath));
+    const inside = privateCheck("Error: EACCES: permission denied, open './inside.txt'");
+    assert.equal(inside.state, 'red');
+    assert.equal(inside.sandboxBlocked, null, 'a private-clone file stays inside that check worktree');
+    assert.equal(JSON.parse(box.coordinator('show', '1', '--json').out).item_status, 'submitted', 'checks alone record no verdict');
+  });
+});

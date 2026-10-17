@@ -7,7 +7,7 @@ import { once } from 'node:events';
 /** Start a provider with real signed JWT verification and one-use browser/device grants. */
 export async function githubFixture(t) {
   const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
-  const state = { access: true, permission: 'write', public: false, installed: true, repositoryID: 100, accountID: 7, permissionAccountID: 7, deviceAuthorized: false, slow: false, redirect: null };
+  const state = { access: true, permission: 'write', public: false, installed: true, repositoryID: 100, accountID: 7, permissionAccountID: 7, deviceAuthorized: false, deviceDeclined: false, deviceExpired: false, slow: false, redirect: null, beforeDevicePoll: null, beforeUser: null };
   const calls = [];
   const codes = new Map();
   const userTokens = new Set();
@@ -77,8 +77,11 @@ export async function githubFixture(t) {
         assert.equal(form.get('client_secret'), null);
         assert.equal(form.get('grant_type'), 'urn:ietf:params:oauth:grant-type:device_code');
         assert.equal(form.get('device_code'), deviceCode);
+        if (state.beforeDevicePoll) await state.beforeDevicePoll();
         if (state.slow) { state.slow = false; return reply(res, 200, { error: 'slow_down' }); }
-        return reply(res, 200, state.deviceAuthorized ? userCredential() : { error: 'authorization_pending' });
+        return reply(res, 200, state.deviceDeclined ? { error: 'access_denied' }
+          : state.deviceExpired ? { error: 'expired_token' }
+            : state.deviceAuthorized ? userCredential() : { error: 'authorization_pending' });
       }
       assert.ok(form.get('client_secret') === clientSecret, 'browser exchange uses configured App secret');
       const challenge = codes.get(form.get('code'));
@@ -88,6 +91,7 @@ export async function githubFixture(t) {
     }
     if (url.pathname === '/user') {
       if (state.redirect) { res.writeHead(302, { location: state.redirect }); return res.end(); }
+      if (state.beforeUser) await state.beforeUser();
       return reply(res, isUser ? 200 : 401, { id: state.accountID, login: 'fixture-user' });
     }
     if (url.pathname === '/repos/fixture/repository/installation') return reply(res, isApp && state.installed ? 200 : 404, { id: 42 });

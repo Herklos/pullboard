@@ -1,0 +1,23 @@
+{
+  "blueprint": 1,
+  "name": "ios-app",
+  "title": "iOS app",
+  "version": 1,
+  "kind": "product",
+  "by": "Pullboard",
+  "summary": "Screens that look right in light, in dark and with VoiceOver.",
+  "prefix": "IOS",
+  "rules": [
+    { "key": "IOS1", "text": "Every screen has a light and a dark screenshot test.", "why": "a screen that reads well in one mode can be unreadable in the other." },
+    { "key": "IOS2", "text": "No change removes a VoiceOver label from a screen.", "why": "a missing label makes a control invisible to someone who cannot see the screen." }
+  ],
+  "questions": [
+    { "key": "Q1", "ask": "The oldest iOS it supports is", "choices": ["iOS 17", "iOS 16", "iOS 18", "Only the latest"], "default": "iOS 17" },
+    { "key": "Q2", "ask": "Its screens are built with", "choices": ["SwiftUI", "UIKit", "Both"], "default": "SwiftUI" }
+  ],
+  "items": [
+    { "key": "1", "title": "One command runs the app's tests on a simulator", "cites": ["Q1", "Q2"], "criterion": "scripts/test.sh builds the app, runs its tests on an iOS simulator for the oldest iOS it supports, and exits with an error when a test fails. Before this item the script does not exist, so the check fails.", "brief": "Files:\n- scripts/test.sh\nTest:\n- sh scripts/test.sh runs every test; sh scripts/test.sh <TestCase> runs one test case through xcodebuild -only-testing", "check": "sh scripts/test.sh" },
+    { "key": "2", "title": "Every screen has a light and a dark screenshot test", "cites": ["IOS1"], "after": ["1"], "criterion": "Each screen is drawn in light mode and in dark mode and compared with a recorded screenshot of each. The ScreenModeTests test case holds these tests and fails before the change.", "brief": "Files:\n- the app's test target\nTest:\n- ScreenModeTests draws each screen in both modes and compares it with its recorded screenshot", "check": "sh scripts/test.sh ScreenModeTests" },
+    { "key": "3", "title": "Every control keeps its VoiceOver label", "cites": ["IOS2"], "after": ["1"], "criterion": "Every control a person can tap on each screen has a VoiceOver label. The AccessibilityLabelTests test case checks each screen and fails before the change.", "brief": "Files:\n- the app's test target\nTest:\n- AccessibilityLabelTests opens each screen and fails on a tappable control without a label", "check": "sh scripts/test.sh AccessibilityLabelTests" }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "blueprint": 1,
+  "name": "library",
+  "title": "Open-source library",
+  "version": 1,
+  "kind": "product",
+  "by": "Pullboard",
+  "summary": "Your users get a changelog line and the right version bump, every release.",
+  "prefix": "LIB",
+  "rules": [
+    { "key": "LIB1", "text": "A breaking change bumps the major version.", "why": "people pin a major version, so a breaking change must never arrive inside one; before 1.0 people pin the minor version, so there a breaking change bumps the minor.", "tier": "must", "gate": "test/public-api.test.js" },
+    { "key": "LIB2", "text": "Every public function has a working example in the docs.", "why": "an example that runs teaches a function fastest and breaks loudly when the function changes.", "tier": "must", "gate": "test/docs-examples.test.js" },
+    { "key": "LIB3", "text": "Every release adds a changelog line for each change its users can see.", "why": "the changelog is where users learn what an upgrade changes, so a change left out of it surprises them.", "tier": "must", "gate": "review" }
+  ],
+  "questions": [
+    { "key": "Q1", "ask": "The library is written in", "choices": ["JavaScript or TypeScript", "Python", "Rust", "Something else"], "default": "JavaScript or TypeScript" },
+    { "key": "Q2", "ask": "It is published to", "choices": ["npm", "PyPI", "crates.io", "Somewhere else"], "default": "npm" }
+  ],
+  "items": [
+    { "key": "1", "title": "Every docs example runs as a test", "cites": ["LIB2"], "criterion": "Every example in the docs runs as part of the test suite, so a change that breaks an example fails the tests. test/docs-examples.test.js runs each example and fails before the change.", "brief": "Files:\n- test/docs-examples.test.js\nTest:\n- test/docs-examples.test.js reads each example from the docs, runs it, and fails when one throws", "check": "npm test -- test/docs-examples.test.js" },
+    { "key": "2", "title": "Removing a public name fails until the major version goes up", "cites": ["LIB1"], "criterion": "A recorded list of the library's public names is compared with what it exports, and a removed or renamed name fails the tests unless the major version went up. test/public-api.test.js holds that comparison and fails before the change.", "brief": "Files:\n- test/public-api.json (the recorded public names)\n- test/public-api.test.js\nTest:\n- test/public-api.test.js compares the exports with the recorded names and the version in package.json", "check": "npm test -- test/public-api.test.js" }
+  ]
+}

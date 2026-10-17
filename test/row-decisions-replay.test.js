@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import * as store from '../src/board.js';
 import { exportBoard, importBoard } from '../src/exchange.js';
 import { appliedSequence, applyEngineMove, engineReceipt, prepareEngineMove } from '../src/engine.js';
+import { ENGINE_VERSION } from '../src/machine.js';
 import { AGENT_SHELL_MARKERS } from '../src/person.js';
 
 const RECORDED_AT = '2026-10-08T18:00:00.000Z';
@@ -84,22 +85,48 @@ test('captured person decisions and coordinator apply replay identically without
   assert.throws(() => store.recordRowDecisions(source, {
     agentId: 'person', channel: 'view', decisions: [{ ...DECISIONS[0], replacement: DECISIONS[0].source }],
   }), { code: 'ROW_DECISION' });
+  assert.throws(() => store.recordRowDecisions(source, {
+    agentId: 'person', channel: 'view', decisions: [{
+      ...DECISIONS[1], text: 'Unrelated replacement text.',
+      replacement: DECISIONS[1].replacement.replace('The person declined.', 'Unrelated replacement text.'),
+    }],
+  }), { code: 'ROW_DECISION' }, 'a decline cannot replace the source row with an unrelated phrase');
+  const oldEngineExport = exportBoard(source);
+  source.executionEngineVersion = 11;
+  try {
+    assert.throws(() => store.recordRowDecisions(source, {
+      agentId: 'person', channel: 'view', decisions: [{
+        ...DECISIONS[1], text: 'Decline this rule.',
+        replacement: '- L1 [wont] Decline this rule.',
+      }],
+    }), { code: 'ROW_DECISION' }, 'engine 11 refuses the new preserved-text decline shape');
+    assert.throws(() => store.recordRowDecisions(source, {
+      agentId: 'person', channel: 'view', decisions: [{
+        ...DECISIONS[1], replacement: 'not a row',
+      }],
+    }), { code: 'ROW_DECISION' }, 'engine 11 still refuses a malformed legacy replacement without throwing');
+  } finally {
+    delete source.executionEngineVersion;
+  }
+  assert.deepEqual(exportBoard(source), oldEngineExport, 'engine-version-specific refusals leave the board unchanged');
   assert.deepEqual(exportBoard(source), baseline, 'actor and source/replacement refusals leave tables and metadata unchanged');
 
-  const recordMove = prepareEngineMove(one, 'recordRowDecisions', [{
+  const recordMove = { ...prepareEngineMove(one, 'recordRowDecisions', [{
     agentId: 'person', channel: 'view', decisions: DECISIONS,
-  }], { id: 'person-row-decisions' });
+  }], { id: 'person-row-decisions' }), engine: 11 };
   const recorded = replayWithDifferentShells(one, two, recordMove, 1, RECORDED_AT);
   assert.equal(recorded.events.length, 2);
   assert.ok(recorded.events.every((event) => event.event_kind === 'row_decision' && event.event_by === 'person'));
   assert.ok(recorded.events.every((event) => event.event_at === RECORDED_AT));
+  assert.deepEqual(JSON.parse(recorded.events[1].event_detail).record, DECISIONS[1], 'engine 11 retains the original decline receipt fields');
+  assert.equal(store.rowDecisions(one)[1].text, DECISIONS[1].reason, 'engine 11 keeps its historical reason-as-text record');
   assert.deepEqual(store.rowDecisions(one).map(({ id, decision, applied }) => ({ id, decision, applied })), [
     { id: 'G1', decision: 'approve', applied: false },
     { id: 'L1', decision: 'decline', applied: false },
   ]);
 
   const eventIds = store.rowDecisions(one).map((record) => record.event);
-  const applyMove = prepareEngineMove(one, 'applyRowDecisions', [{ agentId: 'coordinator', events: eventIds }], { id: 'apply-row-decisions' });
+  const applyMove = { ...prepareEngineMove(one, 'applyRowDecisions', [{ agentId: 'coordinator', events: eventIds }], { id: 'apply-row-decisions' }), engine: 11 };
   const applied = replayWithDifferentShells(one, two, applyMove, 2, APPLIED_AT);
   assert.equal(applied.events.length, 1);
   assert.equal(applied.events[0].event_kind, 'row_apply');
@@ -114,4 +141,38 @@ test('captured person decisions and coordinator apply replay identically without
   assert.deepEqual(applyEngineMove(one, applyMove, { sequence: 2, at: APPLIED_AT }), applied);
   assert.deepEqual(exportBoard(one), complete, 'an acknowledged apply retry appends no duplicate events');
   assert.equal(readFileSync(sentinel, 'utf8'), sentinelBefore, 'board-only engine operations never rewrite SPEC.md');
+});
+
+test('engine 12 records preserved decline text and replays a separate reason [S18,S19,H16]', (t) => {
+  assert.ok(ENGINE_VERSION >= 12, 'engine 12 decline semantics hold in every later engine');
+  const { source, copies: [one, two] } = decisionCopies(t);
+  const preserved = {
+    kind: 'spec', file: 'SPEC.md', id: 'G2',
+    source: '- G2 [draft] Preserve this declined row.',
+    replacement: '- G2 [wont] Preserve this declined row.',
+    text: 'Preserve this declined row.', decision: 'decline', reason: 'No longer needed.',
+  };
+  const legacy = {
+    ...preserved,
+    replacement: '- G2 [wont] No longer needed.',
+    text: 'No longer needed.',
+  };
+  assert.throws(() => store.recordRowDecisions(source, {
+    agentId: 'person', channel: 'view', decisions: [legacy],
+  }), { code: 'ROW_DECISION' }, 'engine 12 refuses a new legacy-shaped decline');
+
+  const move = prepareEngineMove(one, 'recordRowDecisions', [{
+    agentId: 'person', channel: 'view', decisions: [preserved],
+  }], { id: 'engine-12-preserved-decline' });
+  assert.equal(move.engine, ENGINE_VERSION);
+  const first = applyEngineMove(one, move, { sequence: 1, at: RECORDED_AT });
+  const second = applyEngineMove(two, move, { sequence: 1, at: RECORDED_AT });
+  assert.deepEqual(first, second);
+  assert.equal(first.error, undefined);
+  assert.equal(JSON.parse(first.events[0].event_detail).record.text, preserved.text);
+  assert.equal(JSON.parse(first.events[0].event_detail).record.reason, preserved.reason);
+  assert.equal(store.rowDecisions(one)[0].replacement, preserved.replacement);
+  assert.equal(store.rowDecisions(one)[0].text, preserved.text);
+  assert.equal(store.rowDecisions(one)[0].reason, preserved.reason);
+  assert.deepEqual(exportBoard(one), exportBoard(two));
 });

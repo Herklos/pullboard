@@ -227,13 +227,11 @@ test('README pins its approved Philosophy, Key concepts and Why structure [I10,I
   assert.equal(README.split(approvedOpening).length - 1, 1, 'the approved opening appears exactly once');
   assert.doesNotMatch(`${approvedOpening} ${FIGURES.holds()}`, /\b(?:memory|remember)\b/iu, 'the opening and its figure avoid those terms');
   const section = README.slice(philosophy, nextTopLevel);
-  assert.ok(section.includes("On Pullboard itself, a second agent's check catches one in three tasks that already passed their own tests."), 'Why pins the approved proof line');
+  assert.ok(section.includes('### Why\n\nPast the demo, the same things break.\n\n![Where vibe coding breaks, and what holds instead.'), 'Why opens with the approved line, then the figure of what breaks and what holds');
   for (const text of [
     'You do not explain twice. You rule the agents. Hierarchy is enforced. Judgement is yours. Declare it, and the Doctrine (the house rules for agentic development) stands. **You speak the constraints, agents fill in the blanks.** The Spec is canon. Then code. Then proof.',
     'Five primitives. Everything else is built on them.',
     '**Items.**', '**Shouts.**', '**Spec.**', '**Doctrine.**', '**Activity.**',
-    "**It said done. It wasn't.**", '**It forgot what you decided.**',
-    '**Two agents, one file.**', '**A fix broke something.**',
   ]) assert.ok(section.includes(text), `Philosophy keeps ${text}`);
 });
 
@@ -246,6 +244,19 @@ test('README has a manual workflow and shell examples without inline comments [I
   }
   for (const command of ['pullboard tour', 'pullboard init', 'pullboard add web', 'pullboard worktree web', 'pullboard next --verify', 'pullboard verify 1 accept']) {
     assert.ok(README.includes(command), `the working workflow still shows ${command}`);
+  }
+});
+
+test("the README's worktree command names a model [I1]", () => {
+  const shellBlocks = [...README.matchAll(/```(?:sh|shell|bash)\n([\s\S]*?)```/gu)].map(([, body]) => body);
+  const commandPattern = /\bpullboard\s+(?:worktree|join)\s+[^\s;&|`]+[^\r\n`]*/gu;
+  const commands = [
+    ...shellBlocks.flatMap((body) => [...body.matchAll(commandPattern)].map(([command]) => command.trim())),
+    ...[...README.matchAll(/`([^`\r\n]+)`/gu)].flatMap(([, inline]) => [...inline.matchAll(commandPattern)].map(([command]) => command.trim())),
+  ];
+  assert.ok(commands.length > 0, 'the README includes a runnable worktree or join example');
+  for (const command of commands) {
+    assert.match(command, /(?:^|\s)--model(?:\s|$)/u, `${command} names the model explicitly`);
   }
 });
 

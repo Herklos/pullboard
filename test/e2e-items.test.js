@@ -210,7 +210,7 @@ test('a hook git ignores is committed by force before a worktree; a deleted conf
   assert.ok(box.run(box.web, 'next').err.includes(`restore it: cd ${box.web} && git checkout HEAD -- pullboard.json`), 'a linked worktree restores its own');
 });
 
-test('a worktree whose commit has no pullboard.json is sent to the main checkout, never told to run init [C4]', () => {
+test('a worktree without config names uncommitted init files and committed main guidance [I1,I2]', () => {
   const box = sandbox();
   const repo = join(box.dir, 'repo');
   mkdirSync(repo);
@@ -224,10 +224,18 @@ test('a worktree whose commit has no pullboard.json is sent to the main checkout
   for (const command of [['next'], ['status'], ['join', 'web']]) {
     const said = box.run(old, ...command);
     assert.equal(said.code, 1, said.out);
-    assert.match(said.err, /\[NO_CONFIG\] this worktree's commit has no pullboard\.json, though the main checkout has one: /);
-    assert.ok(said.err.includes(`which says what to commit first: cd ${repo} && pullboard worktree <lane>`), said.err);
+    assert.match(said.err, /\[NO_CONFIG\] this worktree has no pullboard\.json, and the main checkout has uncommitted Pullboard setup files:/);
+    assert.ok(said.err.includes(`Commit them in the main checkout first: cd ${repo} && git add --`), said.err);
+    for (const path of ['pullboard.json', 'SPEC.md', 'DOCTRINE.md']) assert.ok(said.err.includes(path), said.err);
+    assert.ok(!said.err.includes('pullboard worktree <lane>'), said.err);
     assert.ok(!said.err.includes('pullboard init'), `${command[0]} never says to run init`);
   }
+  box.git(repo, 'add', '-A');
+  box.git(repo, 'commit', '-q', '-m', 'chore: commit pullboard init files');
+  const committedMain = box.run(old, 'next');
+  assert.equal(committedMain.code, 1, committedMain.out);
+  assert.match(committedMain.err, /\[NO_CONFIG\] this worktree's commit has no pullboard\.json, though the main checkout has one: /);
+  assert.ok(committedMain.err.includes(`which says what to commit first: cd ${repo} && pullboard worktree <lane>`), committedMain.err);
   const plain = join(box.dir, 'plain');
   mkdirSync(plain);
   box.git(plain, 'init', '-q');

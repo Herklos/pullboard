@@ -186,5 +186,6 @@ test('[R1,R2] an empty board reports no agents or family buckets', (t) => {
     familyCount: 0,
     agents: [],
     families: [],
-  });
+    bars: {},
+  }, 'an empty board has no bar corrections either');
 });

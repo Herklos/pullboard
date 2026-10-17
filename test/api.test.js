@@ -619,10 +619,13 @@ test('[A1] command results match the catalog across roots and subcommands', () =
 
   json(box, repo, 'spec', ['--json']);
   json(box, repo, 'spec', ['check'], 'check');
+  assert.deepEqual(json(box, repo, 'doctrine', ['check'], 'check').rules, [], 'a repo with no check rows reports no rules [D1]');
   json(box, repo, 'spec', ['view', '--out', join(box.dir, 'spec.html')], 'view');
   json(box, repo, 'spec', ['show', 'G1'], 'show');
   json(box, repo, 'spec', ['unmet'], 'unmet');
   assert.equal(json(box, repo, 'spec', ['draft', 'A draft API catalogue row'], 'draft').id, 'G2');
+  writeFileSync(join(box.dir, 'catalog-blueprint.json'), `${JSON.stringify({ blueprint: 1, name: 'catalog', title: 'Catalog', version: 1, rules: [{ key: 'R1', text: 'A catalog rule.', why: 'the API lists it.' }] })}\n`);
+  assert.equal(json(box, repo, 'blueprint', ['add', join(box.dir, 'catalog-blueprint.json')], 'add').rows[0].status, 'draft');
   mkdirSync(join(repo, 'test'));
   writeFileSync(join(repo, 'test', 'proof.test.js'), "import { test } from 'node:test';\ntest('proof [G1]', () => {});\n");
   box.git(repo, 'add', 'SPEC.md', 'test/proof.test.js');
@@ -653,6 +656,8 @@ test('[A1] command results match the catalog across roots and subcommands', () =
   const added = json(box, repo, 'add', ['coordinator', 'API item', '--specs', 'G1', '--criterion', 'the API item is verified', '--check', 'true']);
   assert.equal(added.item.item_id, 1);
   json(box, repo, 'fact', ['1', 'note', 'API fact']);
+  json(box, repo, 'fact', ['1', 'decision', 'API decision', '--implies', '1']);
+  assert.equal(json(box, repo, 'why', ['1']).decisions[0].line, 'API decision', 'why lists the decision that implies the item [N29]');
   json(box, repo, 'edit', ['1', '--criterion', 'the edited API item is verified', '--check', 'true']);
   json(box, repo, 'show', ['1']);
   json(box, repo, 'list', ['--all']);
@@ -779,7 +784,7 @@ test('[A1,B21,B27] decisions shows an agent its direct and lane asks only', () =
     status: 1,
     code: 'NOT_YOUR_DECISION',
     message: `shout #${app2Ask} is addressed to app-2, not your app lane (agent app-1)`,
-    next: 'Run pullboard help, correct the reported problem, and retry the command.',
+    next: 'answer only decisions addressed to you; see pullboard inbox',
   });
   const coordinatorText = box.run(box.repo, 'decisions');
   assert.equal(coordinatorText.status, 0, coordinatorText.stderr);
@@ -801,7 +806,7 @@ test('[A1] refusals are one JSON document with exact public error fields', () =>
     status: 1,
     code: 'NO_ROW',
     message: 'no row G99 in SPEC.md',
-    next: 'Run pullboard help, correct the reported problem, and retry the command.',
+    next: 'list the rows with pullboard spec --json, then name one of them',
   }, 'show');
   assert.equal(noRow.error.code, 'NO_ROW');
 
@@ -856,7 +861,7 @@ test('[A1] refusals are one JSON document with exact public error fields', () =>
   shapeFor('spec', 'check');
   assert.equal(invalidDocument.error.code, 'COMMAND_FAILED');
   assert.equal(invalidDocument.error.message, textCheck.stdout.trim());
-  assert.equal(invalidDocument.error.next, 'Run pullboard help, correct the reported problem, and retry the command.');
+  assert.equal(invalidDocument.error.next, 'read the reported output above, fix what it names, and run the command again');
   rmSync(box.dir, { recursive: true, force: true });
 });
 
@@ -976,11 +981,18 @@ test('[A1] every catalog command and subcommand has a real CLI exercise', () => 
   json(source, source.repo, 'reopen', [String(reopenItem.item_id), '--note', 'exercise the versioned reopen result']);
   json(source, source.repo, 'spec', ['approve', 'G1'], 'approve');
   json(source, source.repo, 'spec', ['decline', 'G1', '--reason', 'Catalog decline'], 'decline');
+  writeFileSync(join(source.repo, 'SPEC.md'), `${readFileSync(join(source.repo, 'SPEC.md'), 'utf8')}- G2 [pending, must] Which store holds the catalog: SQLite. Choices: SQLite, Postgres. | gate: review\n`);
+  json(source, source.repo, 'spec', ['answer', 'G2', 'Postgres'], 'answer');
   json(source, source.repo, 'spec', ['apply'], 'apply');
 
   /** Exercise the agent-only takeover with a private explicit session, leaving later terminal calls markerless. */
   const sessionSource = { ...source, run: (cwd, ...args) => runFixtureChild(process.execPath, [BIN, ...args], { cwd, env: { ...source.env, CODEX_SESSION_ID: 'api-catalog-session' }, encoding: 'utf8' }) };
   json(sessionSource, source.repo, 'takeover');
+  const lane = json(source, source.repo, 'lane', ['add', 'catalog', '--owns', 'catalog/'], 'add');
+  assert.deepEqual([lane.lane, lane.owns], ['catalog', ['catalog/']]);
+  assert.deepEqual(json(source, source.repo, 'lanes').lanes.catalog, { owns: ['catalog/'] });
+  const runner = json(source, source.repo, 'runner', ['add', 'fixture-runner', '--slots', '2', '--browser', '1']);
+  assert.deepEqual(runner.runner, { host: 'fixture-runner', slots: 2, browser: 1 });
   const missing = Object.keys(JSON_SHAPES.commands).filter((key) => !covered.has(key));
   assert.deepEqual(missing, [], `add real-repo invocations for undocumented coverage gaps: ${missing.join(', ')}`);
   assert.deepEqual([...coveredRoots].sort(), resultCommands(), 'every actual root/factory command has an invocation');

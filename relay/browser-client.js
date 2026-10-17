@@ -7,6 +7,7 @@ import { ENGINE_VERSION } from './engine.js';
 import { Refused } from './refused.js';
 import { enqueueStream, followStream } from './browser-stream.js';
 import { noticeLines, rememberOwnedRequestId, storedOwnedRequestState } from './browser-notice.js';
+import { registerApp, requestPairingPersistence } from './install.js';
 
 const KEYS = 'pullboard.relay.keys.v1';
 const PENDING = 'pullboard.relay.pair.v1';
@@ -18,6 +19,9 @@ const BOARD = /^[0-9a-f]{32}$/;
 function stored(storage, name, fallback) {
   try { return JSON.parse(storage.getItem(name)) ?? fallback; } catch { return fallback; }
 }
+
+/** The validated pairing this page read before its transport took it; module memory only, never a global or storage. */
+let earlyPairing = null;
 
 /** Keep an unauthenticated pairing fragment on the device through the GitHub redirect. */
 export function rememberPairing() {
@@ -31,6 +35,14 @@ export function rememberPairing() {
   const pair = { board, key };
   try { sessionStorage.setItem(PENDING, JSON.stringify(pair)); } catch { /* Current visit can still pair in memory. */ }
   history.replaceState(null, '', location.pathname + location.search);
+  earlyPairing = pair;
+  return pair;
+}
+
+/** Hand the transport the pairing this page already read, once, so an early read survives refused storage. */
+function takePairing() {
+  const pair = earlyPairing;
+  earlyPairing = null;
   return pair;
 }
 
@@ -83,6 +95,7 @@ async function documentAt(path, onDenied, options = {}) {
 
 /** Build the API adapter the existing cockpit consumes; no board key enters an HTTP request. */
 export async function createTransport({ onUpdate = () => {} } = {}) {
+  void registerApp();
   const savedKeys = stored(localStorage, KEYS, {});
   const keys = savedKeys && typeof savedKeys === 'object' && !Array.isArray(savedKeys) ? savedKeys : {};
   const paired = new Map();
@@ -92,7 +105,9 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
   let failure = '';
   let failureBoard = null;
   let accessLost = false;
-  let pair = rememberPairing() ?? stored(sessionStorage, PENDING, null);
+  let persistenceRequest = null;
+  rememberPairing();
+  let pair = takePairing() ?? stored(sessionStorage, PENDING, null);
   if (pair && (!BOARD.test(pair.board ?? '') || typeof pair.key !== 'string')) pair = null;
   try { if (pair) decodeBoardKey(pair.key); } catch { pair = null; }
 
@@ -123,6 +138,22 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
       paragraph.textContent = text;
       element.append(paragraph);
     }
+  }
+
+  /** Ask once after pairing, retaining one refusal line through later board refreshes. */
+  function keepPairingStorage() {
+    persistenceRequest ??= requestPairingPersistence().then(kept => {
+      const current = document.getElementById('pairing-storage-notice');
+      if (kept) { current?.remove(); return; }
+      const target = document.getElementById('relay-notice');
+      if (!target || accessLost) return;
+      const paragraph = current ?? document.createElement('p');
+      paragraph.id = 'pairing-storage-notice';
+      paragraph.className = 'card-panel';
+      paragraph.setAttribute('role', 'status');
+      paragraph.textContent = 'This browser may remove your pairing. Add Pullboard to your Home Screen to help keep it.';
+      if (!current) target.insertAdjacentElement('afterend', paragraph);
+    });
   }
 
   /** Keep one missing-snapshot board visible as waiting without clearing other authorized boards. */
@@ -344,7 +375,10 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
         paired.set(board.id, entry);
         waitingBoards.delete(board.id);
         keys[board.id] = encoded;
-        try { localStorage.setItem(KEYS, JSON.stringify({ ...stored(localStorage, KEYS, {}), [board.id]: encoded })); } catch { failure = 'This browser cannot save pairing. Use the pairing link again on your next visit.'; failureBoard = null; }
+        try {
+          localStorage.setItem(KEYS, JSON.stringify({ ...stored(localStorage, KEYS, {}), [board.id]: encoded }));
+          keepPairingStorage();
+        } catch { failure = 'This browser cannot save pairing. Use the pairing link again on your next visit.'; failureBoard = null; }
         if (pair?.board === board.id) {
           pair = null;
           try { sessionStorage.removeItem(PENDING); } catch { /* Device storage can be unavailable. */ }
@@ -476,12 +510,16 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
 
   /** Pair a link opened in this already-loaded page as well as one opened on a fresh visit. */
   async function pairingChanged() {
-    try { pair = rememberPairing() ?? pair; await enrollPhone((path, options) => documentAt(path, denied, options)); await listing(); onUpdate(); }
+    try {
+      rememberPairing(); pair = takePairing() ?? pair;
+      if (await enrollPhone((path, options) => documentAt(path, denied, options))) keepPairingStorage();
+      await listing(); onUpdate();
+    }
     catch { failure = 'The pairing link is invalid. Get a new link from a linked machine.'; failureBoard = null; notice(); }
   }
   addEventListener('hashchange', pairingChanged);
   addEventListener('pagehide', () => { for (const entry of paired.values()) entry.stream?.close(); });
-  await enrollPhone((path, options) => documentAt(path, denied, options));
+  if (await enrollPhone((path, options) => documentAt(path, denied, options))) keepPairingStorage();
   await listing();
   await installPhoneApprovals((path, options) => documentAt(path, denied, options), keys, async () => { await listing(); onUpdate(); });
   return {

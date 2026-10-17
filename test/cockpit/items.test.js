@@ -55,7 +55,7 @@ test('a review in progress names its reviewer [N26]', async () => {
     assert.deepEqual(holds('web-2'), ['#1 Greeting: reviewing'], 'the reviewer holds it');
     assert.deepEqual(holds('web-1'), ['#1 Greeting: to verify'], 'the builder waits on it');
     // A name is board text, so it is escaped: give the board on hand a reviewer with markup and redraw.
-    page.run('data.project.items.find((i) => i.id === 1).reviewer = "web<b>"; render();');
+    page.run('data.project.items.find((i) => i.id === 1).claim.by = "web<b>"; render();');
     assert.match(itemRow(page.show('chain'), 1), />web&lt;b&gt; reviewing<\/span><\/li>$/);
     await page.run('refresh()');
 
@@ -799,7 +799,7 @@ test("item detail merges API facts and moves in one responsive timeline [B33,B29
       ['note', 'capture', 'measurement', 'diff', 'decision', 'rejection', 'supersession', 'root-cause'],
       'the API provides every fact in append order');
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
-    await chrome.waitFor('typeof data !== "undefined" && data?.project?.items?.find((item) => item.id === 1)?.thread?.length === ' + expected.length);
+    await chrome.waitFor('typeof data !== "undefined" && !!data?.project?.items?.find((item) => item.id === 1)');
     await chrome.waitFor('document.querySelectorAll("#detail .tl [data-event-id]").length === ' + expected.length);
     const expectedIds = expected.map((entry) => entry.eventId);
     for (const width of [375, 1280]) {
@@ -936,7 +936,7 @@ test('in-text item references stay inline and open their target at phone and des
       for (const section of ['agents', 'spec', 'doctrine']) {
         if (section === 'agents') {
           await chrome.click(`document.querySelector('[data-tab="shouts"]')`);
-          const agent = await chrome.stable("(() => { const item=data.project.items.find(i => i.id===2); return item.owner || item.reviewer || item.builtBy; })()");
+          const agent = await chrome.stable("(() => { const item=data.project.items.find(i => i.id===2); return item.claim?.by || item.builtBy; })()");
           if (!await chrome.stable(`!!document.querySelector('#agents .agent-card.on [data-agent="${agent}"]')`)) await chrome.click(`document.querySelector('#agents [data-agent="${agent}"]')`);
           await chrome.waitFor('document.querySelector("#agents [data-item=\\"2\\"]")');
         } else {
@@ -1114,7 +1114,7 @@ async function installPipelinePressDiagnostics(chrome) {
   const setup = await chrome.stable(`(() => {
     const pipeline = document.querySelector('#pipeline');
     if (!pipeline) throw new Error('Pipeline container is missing');
-    const state = { armed: false, redraws: 0, redrawsAtPress: 0, expected: null, down: null, up: null, click: null };
+    const state = { armed: false, redraws: 0, redrawsAtArm: 0, expected: null, down: null, up: null, click: null };
     const observer = new MutationObserver(records => { state.redraws += records.filter(record => record.target === pipeline && record.type === 'childList').length; });
     observer.observe(pipeline, { childList: true });
     const flush = () => { state.redraws += observer.takeRecords().filter(record => record.target === pipeline && record.type === 'childList').length; return state.redraws; };
@@ -1131,7 +1131,7 @@ async function installPipelinePressDiagnostics(chrome) {
     document.addEventListener('mouseup', listen('up'), true);
     document.addEventListener('click', listen('click'), true);
     state.arm = card => { flush(); state.expected = { dataItem: card?.dataset.item ?? null, connected: Boolean(card?.isConnected), disabled: card?.disabled ?? null };
-      state.expectedNode = card; state.down = state.up = state.click = null; state.redrawsAtPress = state.redraws; state.armed = true; return state.expected; };
+      state.expectedNode = card; state.down = state.up = state.click = null; state.redrawsAtArm = state.redraws; state.armed = true; return state.expected; };
     state.snapshot = () => {
       const redraws = flush();
       const clean = event => event && ({ target: event.target, dataItem: event.dataItem, connected: event.connected, connectedAtUp: event.connectedAtUp,
@@ -1139,7 +1139,9 @@ async function installPipelinePressDiagnostics(chrome) {
         sameNodeAsDown: event.sameNodeAsDown });
       return { expected: state.expected, down: clean(state.down), up: clean(state.up), click: clean(state.click), refresh: state.refresh ?? null, expectedNodeConnected: Boolean(state.expectedNode?.isConnected),
         downNodeConnectedNow: Boolean(state.down?.node?.isConnected), viewItem: view.item, pathname: location.pathname, innerWidth,
-        pipelineRedrawsSincePress: redraws - state.redrawsAtPress,
+        // press() scrolls and settles the target after arm(); those redraws precede the native press.
+        pipelineRedrawsBeforeDown: state.down ? state.down.redraws - state.redrawsAtArm : null,
+        pipelineRedrawsSinceDown: state.down ? redraws - state.down.redraws : null,
         pipelineRedrawsBetweenDownAndUp: state.down && state.up ? state.up.redraws - state.down.redraws : null };
     };
     globalThis.__pipelinePressDiagnostic = state;
@@ -1312,9 +1314,10 @@ test('a refresh between pointer down and up does not lose the click [N26,N38,C7]
         refreshObservation = JSON.parse(await chrome.stable(`(async () => {
           await refresh();
           const old = globalThis.__pipelinePressDiagnostic.down?.node;
+          const press = globalThis.__pipelinePressDiagnostic.snapshot();
           const observation = { fetchedNewItem: data.project.items.some(item => item.title === ${JSON.stringify(title)}),
             originalCardConnectedWhileHeld: Boolean(old?.isConnected), selected: view.item, pathname: location.pathname, innerWidth,
-            pipelineRedrawsBeforeRelease: globalThis.__pipelinePressDiagnostic.snapshot().pipelineRedrawsSincePress };
+            pipelineRedrawsBeforeRelease: press.pipelineRedrawsSinceDown, pipelineRedrawsBeforeDown: press.pipelineRedrawsBeforeDown };
           globalThis.__pipelinePressDiagnostic.refresh = observation;
           return JSON.stringify(observation);
         })()`));

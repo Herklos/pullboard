@@ -1,27 +1,36 @@
+/** @pullboard-test-input source-tree */
 /** Real-process resource queue and lease coverage [Q1,Q2,Q3]. */
 import assert from 'node:assert/strict';
-import { startFixtureChild as spawn, runFixtureChild as spawnSync, reportFixtureChildFailure, runFixtureChild } from './fixture-child.js';
+import { startFixtureChild as spawn, runFixtureChild as spawnSync, reportFixtureChildFailure, runFixtureChild, runFixtureChildAsync, runFixtureGit } from './fixture-child.js';
 import { performance } from 'node:perf_hooks';
 import { once } from 'node:events';
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, watch, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createInterface } from 'node:readline';
 import { after, test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { listResources, setResourceCapacity, takeResource } from '../src/resources.js';
+import { checkNeedsBrowser } from '../src/browser-admission.js';
+import { releaseQueueProof } from './resources-release-fixture.js';
 
 const TEMP = [];
 const CHILDREN = new Set();
 const MODULE = pathToFileURL(resolve(import.meta.dirname, '../src/resources.js')).href;
 const GATE_MODULE = pathToFileURL(resolve(import.meta.dirname, '../src/gate.js')).href;
+const PRE_RUNNER_MODULE = pathToFileURL(resolve(import.meta.dirname, './fixtures/resources-pre-runners.js')).href;
+const SETTINGS_MODULE = pathToFileURL(resolve(import.meta.dirname, '../src/settings.js')).href;
+const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
+const TEST_RUNNER = resolve(import.meta.dirname, '../bin/run-tests.js');
 const POOL_MODULE_WORKER = `
 import { takeResource } from ${JSON.stringify(MODULE)};
+import { loadMachineSettings } from ${JSON.stringify(SETTINGS_MODULE)};
 let announced = false;
 const [root, agent, browserText, item, kind, landingText] = process.argv.slice(1);
 const lease = await takeResource({
   name: 'gate', capacity: 2, scope: 'machine', root, agent,
+  browserCapacityProvider: () => loadMachineSettings().browserSlots,
   browser: browserText === 'true', item, kind, itemCheck: kind === 'review',
   diagnostic: kind === 'diagnostic', landing: landingText === 'true',
   onWait: (state) => {
@@ -34,6 +43,14 @@ try {
     if (String(line).trim() === 'release') break;
   }
 } finally { lease.release(); }
+`;
+const SUBMIT_CHECK = `
+import { runSubmitGate } from ${JSON.stringify(GATE_MODULE)};
+const [root, base, check] = process.argv.slice(1);
+const result = await runSubmitGate(root, { gate: 'true', affectedTests: 'node bin/run-tests.js test/cpu-check.test.js' }, {
+  base, changed: ['test/cpu-check.test.js'], check, agent: 'submit-check', item: '636',
+});
+process.stdout.write(JSON.stringify({ green: result.isGreen, full: result.full, reason: result.reason, files: result.files, checkGreen: result.check.green }) + '\\n');
 `;
 const PROCESS_INFO_POLICY = '(version 1)(allow default)(deny process-info*)';
 const SANDBOX_EXEC = process.platform === 'darwin' && existsSync('/usr/bin/sandbox-exec');
@@ -81,6 +98,50 @@ function fixture() {
     assert.equal(result.status, 0, result.failure);
   }
   return { dir, home, first, second, env: { ...process.env, PULLBOARD_HOME: home, PULLBOARD_MACHINE_HOME: home } };
+}
+
+/** Wait for a fixture command to create a marker file, with a hang ceiling only for failure. */
+function waitForMarker(path, timeoutMs = 10_000) {
+  if (existsSync(path)) return Promise.resolve();
+  const watcher = watch(dirname(path), { persistent: false });
+  return new Promise((resolveMarker, rejectMarker) => {
+    const timer = setTimeout(() => rejectMarker(new Error(`timed out waiting for ${path}`)), timeoutMs);
+    const check = () => {
+      if (!existsSync(path)) return;
+      clearTimeout(timer);
+      watcher.close();
+      resolveMarker();
+    };
+    watcher.on('error', error => { clearTimeout(timer); rejectMarker(error); });
+    watcher.on('change', check);
+    watcher.on('rename', check);
+    check();
+  }).finally(() => watcher.close());
+}
+
+/** Create a minimal real board whose CPU check and affected tests share the private gate pool. */
+function checkProject(box) {
+  const repo = box.first;
+  runFixtureGit(['branch', '-M', 'main'], { cwd: repo, env: box.env });
+  const initialized = runFixtureChild(process.execPath, [BIN, 'init'], { cwd: repo, env: box.env, encoding: 'utf8' });
+  assert.equal(initialized.status, 0, initialized.stderr);
+  const configPath = join(repo, 'pullboard.json');
+  const config = JSON.parse(readFileSync(configPath, 'utf8'));
+  writeFileSync(configPath, `${JSON.stringify({ ...config, gate: 'true', spec: 'SPEC.md', affectedTests: 'node bin/run-tests.js', lanes: { web: { owns: ['web/'], specs: ['G1'] } }, shared: [] }, null, 2)}\n`);
+  writeFileSync(join(repo, 'SPEC.md'), '# CPU check fixture\n\n## G · Goals\n- G1 [approved, must] The fixture keeps its board. | gate: true\n');
+  writeFileSync(join(repo, 'package.json'), '{"type":"module"}\n');
+  mkdirSync(join(repo, 'bin'), { recursive: true });
+  cpSync(resolve(import.meta.dirname, '../src'), join(repo, 'src'), { recursive: true });
+  copyFileSync(TEST_RUNNER, join(repo, 'bin/run-tests.js'));
+  mkdirSync(join(repo, 'test'), { recursive: true });
+  writeFileSync(join(repo, 'test/unrelated.test.js'), "import { test } from 'node:test'; test('unrelated test', () => {});\n");
+  runFixtureGit(['add', '-A'], { cwd: repo, env: box.env });
+  runFixtureGit(['-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Resource fixture', '-c', 'user.email=resource@example.invalid', 'commit', '-q', '-m', 'fixture: initialize board'], { cwd: repo, env: box.env });
+  const base = runFixtureGit(['rev-parse', 'HEAD'], { cwd: repo, env: box.env });
+  writeFileSync(join(repo, 'test/cpu-check.test.js'), `import { writeFileSync } from 'node:fs';\nimport { test } from 'node:test';\ntest('item check marker', () => writeFileSync('item-check-started', 'started'));\ntest('submit check marker', () => writeFileSync('submit-check-started', 'started'));\n`);
+  runFixtureGit(['add', 'test/cpu-check.test.js'], { cwd: repo, env: box.env });
+  runFixtureGit(['-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Resource fixture', '-c', 'user.email=resource@example.invalid', 'commit', '-q', '-m', 'test: add CPU check'], { cwd: repo, env: box.env });
+  return { repo, base };
 }
 
 /** Create the previous private queue schema so simultaneous openers exercise its migration. */
@@ -176,9 +237,10 @@ function worker(box, { name = 'gate', capacity = 1, scope = 'machine', root = bo
   return child;
 }
 
-/** Launch a dedicated gate-pool worker carrying browser and queue-priority metadata. */
-function poolWorker(box, { agent, browser = false, item = '', kind = '', landing = false }) {
-  const workerArgs = ['--input-type=module', '-e', POOL_MODULE_WORKER, box.first, agent, String(browser), item, kind, String(landing)];
+/** Launch a dedicated gate-pool worker carrying browser and queue-priority metadata, or another pool script. */
+function poolWorker(box, { agent, browser = false, item = '', kind = '', landing = false, module = MODULE, script = POOL_MODULE_WORKER, args }) {
+  // module swaps in another resources implementation, such as an older pullboard's, for mixed-version tests.
+  const workerArgs = ['--input-type=module', '-e', script.replace(JSON.stringify(MODULE), JSON.stringify(module)), ...(args ?? [box.first, agent, String(browser), item, kind, String(landing)])];
   const startedAt = performance.now();
   const child = spawn(process.execPath, workerArgs, {
     env: box.env, stdio: ['pipe', 'pipe', 'pipe'],
@@ -216,6 +278,103 @@ function poolWorker(box, { agent, browser = false, item = '', kind = '', landing
   });
   CHILDREN.add(child);
   return child;
+}
+
+/** Configure browser slots through the public CLI in this fixture's private machine home. */
+function configureBrowserSlots(box, slots) {
+  return runFixtureChild(process.execPath, [BIN, 'settings', 'browserSlots', String(slots), '--json'], {
+    cwd: box.first, env: box.env, encoding: 'utf8',
+  });
+}
+
+/** Set or remove the opt-in browser-free-check policy in a fixture's machine settings. */
+function setBrowserFreeChecks(box, value) {
+  const file = join(box.home, 'settings.json');
+  if (value === undefined) { rmSync(file, { force: true }); return; }
+  mkdirSync(box.home, { recursive: true });
+  writeFileSync(file, `${JSON.stringify({ gate: { browserFreeChecks: value } }, null, 2)}\n`);
+}
+
+/** Write a fixture's machine queue-order settings (gate.queue); undefined removes the settings file. */
+function setQueueOrder(box, queue) {
+  const file = join(box.home, 'settings.json');
+  if (queue === undefined) { rmSync(file, { force: true }); return; }
+  mkdirSync(box.home, { recursive: true });
+  writeFileSync(file, `${JSON.stringify({ gate: { queue } }, null, 2)}\n`);
+}
+
+/**
+ * Requeue a remote run whose runner dropped, and report the line and real admission order.
+ * Two local slots are held; a focused run, then a submit, then a review wait for them; a
+ * remote-capable focused run takes the only free runner, which then drops, so its ticket returns
+ * to the pool. Shared by the class-order test (#651) and the settings test (#697).
+ *
+ * @param {object|undefined} queue - The fixture's gate.queue settings, or undefined for none.
+ * @returns {Promise<{ order: string|undefined, line: Array<[string, string]>, admitted: string[], tickets: Record<string, number>, lastIssued: number }>}
+ */
+async function requeuedRemoteRun(queue) {
+  const box = fixture();
+  setQueueOrder(box, queue);
+  const localHolders = [poolWorker(box, { agent: 'local-one' }), poolWorker(box, { agent: 'local-two' })];
+  for (const holder of localHolders) await acquired(holder);
+  const waiting = new Map();
+  for (const [agent, options] of [['focused-early', { kind: 'focused' }], ['submit-later', { kind: 'submit', item: '650' }], ['review-later', { kind: 'review', item: '651' }]]) {
+    const child = poolWorker(box, { agent, ...options });
+    waiting.set(agent, child);
+    await event(child);
+  }
+  const previousHome = process.env.PULLBOARD_HOME;
+  const previousMachineHome = process.env.PULLBOARD_MACHINE_HOME;
+  process.env.PULLBOARD_HOME = box.home;
+  process.env.PULLBOARD_MACHINE_HOME = box.home;
+  let requeued;
+  try {
+    const remoteLease = await takeResource({ name: 'gate', capacity: 2, scope: 'machine', root: box.first,
+      agent: 'remote-focused', kind: 'focused', remote: true, runnerProvider: () => [{ host: 'fixture-runner', slots: 1, browser: 0 }] });
+    assert.equal(remoteLease.runner?.host, 'fixture-runner', 'the only free slot is the runner, so the remote-capable run takes it');
+    const requeue = remoteLease.requeueRunner();
+    const gate = () => privateList(box).find(({ name }) => name === 'gate');
+    while (!gate().line.some(({ agent }) => agent === 'remote-focused')) await new Promise((resolveTick) => setTimeout(resolveTick, 20));
+    const { order, line } = gate();
+    const listed = line.map(({ agent, queueClass: queueClassName }) => [agent, queueClassName]);
+    const ticketDb = new DatabaseSync(join(box.home, 'resources.sqlite'));
+    // The pool's own processes write this file too; wait for their lock instead of failing.
+    ticketDb.exec('PRAGMA busy_timeout = 5000');
+    let tickets;
+    let lastIssued;
+    try {
+      tickets = Object.fromEntries(ticketDb.prepare("SELECT agent, ticket FROM waiter WHERE name = 'gate'").all().map(({ agent, ticket }) => [agent, ticket]));
+      lastIssued = ticketDb.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'waiter'").get().seq;
+    } finally { ticketDb.close(); }
+    const admitted = [];
+    // Free the oldest held slot, watch which waiter the pool admits into it, and repeat.
+    const holding = [() => release(localHolders[0]), () => release(localHolders[1])];
+    while (admitted.length < 4) {
+      await holding.shift()();
+      const holderAgents = () => gate().holders.map(({ agent }) => agent);
+      let next;
+      while (!(next = [...waiting.keys(), 'remote-focused'].find((agent) => !admitted.includes(agent) && holderAgents().includes(agent)))) {
+        await new Promise((resolveTick) => setTimeout(resolveTick, 20));
+      }
+      admitted.push(next);
+      if (next === 'remote-focused') {
+        requeued = await requeue;
+        assert.equal(requeued.runner, undefined, 'the quarantined runner is not used again');
+        holding.push(() => { requeued.release(); requeued = null; });
+      } else {
+        assert.equal((await acquired(waiting.get(next))).acquired, next);
+        holding.push(() => release(waiting.get(next)));
+      }
+    }
+    for (const releaseSlot of holding) await releaseSlot();
+    return { order, line: listed, admitted, tickets, lastIssued };
+  } finally {
+    requeued?.release();
+    if (previousHome === undefined) delete process.env.PULLBOARD_HOME;
+    else process.env.PULLBOARD_HOME = previousHome;
+    if (previousMachineHome === undefined) delete process.env.PULLBOARD_MACHINE_HOME;
+    else process.env.PULLBOARD_MACHINE_HOME = previousMachineHome;
+  }
 }
 
 /** Read the next worker event, failing promptly with its stderr if it exits unexpectedly. */
@@ -296,6 +455,144 @@ async function release(child) {
   assert.equal(code, 0, child.errors);
 }
 
+test('single-quoted named-test checks skip the browser slot [C7]', async () => {
+  const box = fixture();
+  const { repo } = checkProject(box);
+  const itemCheck = 'node bin/run-tests.js --test-name-pattern "item check marker" test/cpu-check.test.js';
+  /** Keep assertions about the parser independent of worker custody inherited by the test process. */
+  const classify = command => checkNeedsBrowser(repo, command, { env: { ...process.env, NODE_OPTIONS: '' } });
+  assert.equal(await classify(itemCheck), false, 'an explicit CPU-only test file is classifiable');
+  const outputPattern = '^[[:space:]]*ok [0-9]+ - item check marker';
+  const newlinePrint = ([quote, backslashes]) => `printf ${quote}%s${'\\'.repeat(backslashes)}n${quote} "$out"`;
+  const capturedCheck = (formats, patternQuotes) => `out=$(${itemCheck} 2>&1); ${newlinePrint(formats[0])}; ${newlinePrint(formats[1])} | grep -Eq ${patternQuotes[0]}${outputPattern}${patternQuotes[0]} && ${newlinePrint(formats[2])} | grep -Eq ${patternQuotes[1]}^# fail 0$${patternQuotes[1]}`;
+  const oneBackslash = [1, 1, 1];
+  const accepted = [
+    { formats: oneBackslash.map(count => ['\'', count]), patternQuotes: ['\'', '\''] },
+    { formats: [['\'', 1], ['"', 1], ['\'', 1]], patternQuotes: ['"', '\''] },
+    { formats: [['"', 1], ['\'', 1], ['"', 1]], patternQuotes: ['\'', '"'] },
+    { formats: oneBackslash.map(count => ['"', count]), patternQuotes: ['"', '"'] },
+  ];
+  for (const variant of accepted) {
+    assert.equal(await classify(capturedCheck(variant.formats, variant.patternQuotes)), false,
+      `the exact capture wrapper accepts quote changes with one literal backslash: ${JSON.stringify(variant)}`);
+  }
+  for (let index = 0; index < 3; index += 1) {
+    const formats = oneBackslash.map(count => ['\'', count]);
+    formats[index] = ['\'', 2];
+    assert.equal(await classify(capturedCheck(formats, ['\'', '\''])), true,
+      `a two-backslash printf at position ${index + 1} stays browser-gated`);
+  }
+  assert.equal(await classify(`${capturedCheck(accepted[0].formats, accepted[0].patternQuotes)}; :`), true,
+    'an arbitrary suffix remains outside the exact capture wrapper');
+  const substituted = capturedCheck(accepted[0].formats, accepted[0].patternQuotes)
+    .replace('printf \'%s\\n\' "$out"', 'printf \'%s\\n\' "$(printf %s "$out")"');
+  assert.equal(await classify(substituted), true, 'a command substitution remains outside the exact printf wrapper');
+  assert.equal(await classify('node bin/run-tests.js test/cockpit/brief.test.js'), true,
+    'known browser suites remain browser-gated');
+  assert.equal(await checkNeedsBrowser(repo, itemCheck, {
+    env: { ...process.env, NODE_OPTIONS: '--import=unknown-preload.mjs' },
+  }), true, 'an unclassified preload keeps the check browser-gated');
+});
+
+test('a non-browser check does not wait for the browser slot [C7]', async () => {
+  const box = fixture();
+  setBrowserFreeChecks(box, true);
+  const { repo, base } = checkProject(box);
+  const itemCheck = 'node bin/run-tests.js --test-name-pattern "item check marker" test/cpu-check.test.js';
+  const submitCheck = 'node bin/run-tests.js --test-name-pattern "submit check marker" test/cpu-check.test.js';
+  const classifyEnv = { ...process.env, NODE_OPTIONS: '' };
+  assert.equal(await checkNeedsBrowser(repo, itemCheck, { env: classifyEnv }), false, 'an explicit CPU-only test file is classifiable');
+  assert.equal(await checkNeedsBrowser(repo, 'node bin/run-tests.js test/cockpit/brief.test.js', { env: classifyEnv }), true,
+    'known browser suites remain browser-gated');
+  const added = runFixtureChild(process.execPath, [BIN, 'add', 'coordinator', 'CPU check item', '--check', itemCheck, '--wait', '--json'], {
+    cwd: repo, env: box.env, encoding: 'utf8',
+  });
+  assert.equal(added.status, 0, added.stderr);
+  const item = JSON.parse(added.stdout).item.item_id;
+  assert.equal(existsSync(join(repo, 'item-check-started')), false, 'the setup baseline ran in its private clone');
+
+  const browserHolder = poolWorker(box, { agent: 'check-browser-holder', browser: true, item: '636', kind: 'gate' });
+  await acquired(browserHolder);
+  const itemMarker = join(repo, 'item-check-started');
+  const itemStarted = waitForMarker(itemMarker);
+  const itemRun = runFixtureChildAsync(process.execPath, [BIN, 'check', String(item), '--yes'], { cwd: repo, env: box.env });
+  let itemResult;
+  try {
+    await itemStarted;
+    assert.ok(privateList(box).find(({ name }) => name === 'browser')?.holders.some(({ agent }) => agent === 'check-browser-holder'),
+      'the item check starts while the unrelated browser lease remains held');
+  } finally {
+    await release(browserHolder);
+    itemResult = await itemRun;
+  }
+  assert.equal(itemResult.status, 0, itemResult.failure ?? itemResult.stderr);
+  assert.equal(readFileSync(itemMarker, 'utf8'), 'started');
+
+  const nextBrowserHolder = poolWorker(box, { agent: 'submit-browser-holder', browser: true, item: '636', kind: 'gate' });
+  await acquired(nextBrowserHolder);
+  const submitMarker = join(repo, 'submit-check-started');
+  const submitStarted = waitForMarker(submitMarker);
+  const submitRun = runFixtureChildAsync(process.execPath, ['--input-type=module', '-e', SUBMIT_CHECK, repo, base, submitCheck], { cwd: repo, env: box.env });
+  let submitResult;
+  let submitStartFailure = null;
+  try {
+    try { await submitStarted; }
+    catch (error) { submitStartFailure = error; }
+    assert.ok(privateList(box).find(({ name }) => name === 'browser')?.holders.some(({ agent }) => agent === 'submit-browser-holder'),
+      'the submission check starts while the unrelated browser lease remains held');
+  } finally {
+    await release(nextBrowserHolder);
+    submitResult = await submitRun;
+  }
+  assert.equal(submitStartFailure, null, `${submitStartFailure?.message ?? ''}\n${submitResult.stdout}\n${submitResult.stderr}`);
+  assert.equal(submitResult.status, 0, submitResult.failure ?? submitResult.stderr);
+  assert.deepEqual(JSON.parse(submitResult.stdout), {
+    green: true, full: false, reason: '', files: ['test/cpu-check.test.js'], checkGreen: true,
+  }, submitResult.stderr);
+});
+
+test('browser-free checks skip the slot only when the machine allows it [C7]', async () => {
+  const box = fixture();
+  const { repo } = checkProject(box);
+  const check = `out=$(node bin/run-tests.js --test-name-pattern "item check marker" test/cpu-check.test.js 2>&1); printf '%s\\n' "$out"; printf '%s\\n' "$out" | grep -Eq '^[[:space:]]*ok [0-9]+ - item check marker' && printf '%s\\n' "$out" | grep -Eq '^# fail 0$'`;
+  const added = runFixtureChild(process.execPath, [BIN, 'add', 'coordinator', 'Browser-free policy check', '--check', check, '--wait', '--json'], {
+    cwd: repo, env: box.env, encoding: 'utf8',
+  });
+  assert.equal(added.status, 0, added.stderr);
+  const item = JSON.parse(added.stdout).item.item_id;
+  const marker = join(repo, 'item-check-started');
+
+  async function checkWithPolicy(value, shouldStartWithBrowserHeld) {
+    setBrowserFreeChecks(box, value);
+    rmSync(marker, { force: true });
+    const browserHolder = poolWorker(box, { agent: `policy-browser-${String(value)}`, browser: true, item: '681', kind: 'gate' });
+    await acquired(browserHolder);
+    const started = waitForMarker(marker);
+    const resultPromise = runFixtureChildAsync(process.execPath, [BIN, 'check', String(item), '--yes'], { cwd: repo, env: box.env });
+    let result;
+    try {
+      if (shouldStartWithBrowserHeld) {
+        await started;
+        assert.ok(privateList(box).find(({ name }) => name === 'browser')?.holders.some(({ agent }) => agent === `policy-browser-${String(value)}`),
+          'the browser lease stays live while an opted-in browser-free check runs');
+      } else {
+        await waitUntil(() => privateList(box).find(({ name }) => name === 'gate')?.line.some(({ kind, item: waitingItem }) => kind === 'check' && waitingItem === String(item)),
+          'a browser-disabled check to wait in the gate queue');
+        assert.equal(existsSync(marker), false, 'the check does not start while browser-free checks are disabled or absent');
+      }
+    } finally {
+      await release(browserHolder);
+      result = await resultPromise;
+    }
+    assert.equal(result.status, 0, result.failure ?? result.stderr);
+    assert.equal(readFileSync(marker, 'utf8'), 'started');
+  }
+
+  await checkWithPolicy(false, false);
+  await checkWithPolicy(true, true);
+  await checkWithPolicy(undefined, false);
+});
+
 /** Kill and reap every fixture worker before deleting its private files. */
 after(async () => {
   const running = [...CHILDREN];
@@ -303,6 +600,55 @@ after(async () => {
   await Promise.all(running.map((child) => child.finished));
   for (const child of running) child.lines.close();
   TEMP.forEach((dir) => rmSync(dir, { recursive: true, force: true }));
+});
+
+/** Prove the machine setting changes real browser admission while retaining the single-slot default [C7]. */
+test('browserSlots admits that many browser runs and no more [C7]', async () => {
+  const defaults = fixture();
+  const defaultSettings = runFixtureChild(process.execPath, [BIN, 'settings', '--json'], {
+    cwd: defaults.first, env: defaults.env, encoding: 'utf8',
+  });
+  assert.equal(defaultSettings.status, 0, defaultSettings.stderr);
+  assert.equal(JSON.parse(defaultSettings.stdout).settings.browserSlots, 1, 'an unset machine keeps the existing single browser slot');
+
+  const box = fixture();
+  const configured = configureBrowserSlots(box, 2);
+  assert.equal(configured.status, 0, configured.stderr);
+  assert.equal(JSON.parse(configured.stdout).settings.browserSlots, 2);
+  const readBack = runFixtureChild(process.execPath, [BIN, 'settings', '--json'], {
+    cwd: box.first, env: box.env, encoding: 'utf8',
+  });
+  assert.equal(readBack.status, 0, readBack.stderr);
+  assert.equal(JSON.parse(readBack.stdout).settings.browserSlots, 2, 'the machine setting persists for other processes');
+  assert.equal(privateList(box).find(({ name }) => name === 'browser').capacity, 2,
+    'the shared browser resource row has the configured capacity before workers start');
+  const invalid = configureBrowserSlots(box, 3);
+  assert.equal(invalid.status, 1);
+  assert.equal(JSON.parse(invalid.stdout).error.code, 'BAD_BROWSER_SLOTS');
+  assert.match(JSON.parse(invalid.stdout).error.message, /pullboard settings gateSlots/u);
+
+  const first = poolWorker(box, { agent: 'browser-one', browser: true });
+  assert.equal((await acquired(first)).acquired, 'browser-one');
+  const second = poolWorker(box, { agent: 'browser-two', browser: true });
+  const secondStart = await event(second);
+  if (!secondStart.acquired) {
+    const gate = privateList(box).find(({ name }) => name === 'gate');
+    const browser = privateList(box).find(({ name }) => name === 'browser');
+    assert.fail(`the configured second browser lease queued: ${JSON.stringify({ state: secondStart.queued, gate, browser })}`);
+  }
+  assert.equal(secondStart.acquired, 'browser-two', 'the configured second browser lease starts while the first is held');
+  const third = poolWorker(box, { agent: 'browser-three', browser: true });
+  assert.equal((await event(third)).queued.position, 1, 'the next browser run waits for a configured slot');
+  const browser = privateList(box).find(({ name }) => name === 'browser');
+  assert.equal(browser.capacity, 2, 'resource listing reflects the machine browserSlots setting');
+  assert.equal(browser.holders.length, 2);
+  assert.deepEqual(browser.holders.map(({ agent }) => agent).sort(), ['browser-one', 'browser-two']);
+  assert.deepEqual(browser.line.map(({ agent }) => agent), ['browser-three']);
+
+  await release(first);
+  assert.equal((await acquired(third)).acquired, 'browser-three', 'a released browser lease admits the oldest waiting browser run');
+  await release(second);
+  await release(third);
 });
 
 test('[Q1,Q2] capacity-one takers acquire in strict FIFO arrival order', async () => {
@@ -484,6 +830,285 @@ test('the pool alone orders submits, reviews and browser runs [C7]', async () =>
   assert.ok(gate.holders.some(({ agent, browser: ownsBrowser, itemCheck, item, kind }) =>
     agent === 'review-two' && ownsBrowser && itemCheck && item === '619' && kind === 'review'));
   await release(secondReview);
+});
+
+test('the pool admits reviews before submits before focused runs, and waiting runs age up [C7,V4]', async () => {
+  const AGE_MS = 30 * 60_000;
+  const box = fixture();
+  setQueueOrder(box, { reviewsFirst: true }); // #697: class order is a machine opt-in.
+  const holders = [poolWorker(box, { agent: 'holder-one' }), poolWorker(box, { agent: 'holder-two' })];
+  for (const holder of holders) await acquired(holder);
+  const waiting = new Map();
+  const positions = {};
+  for (const [agent, options] of [
+    ['focused-one', { kind: 'focused' }],
+    ['diagnostic-one', { kind: 'diagnostic' }],
+    ['submit-one', { kind: 'submit', item: '650' }],
+    ['review-one', { kind: 'review', item: '651' }],
+    ['landing-one', { landing: true }],
+    ['focused-two', { kind: 'focused' }],
+  ]) {
+    const child = poolWorker(box, { agent, ...options });
+    waiting.set(agent, child);
+    positions[agent] = (await event(child)).queued.position;
+  }
+  assert.deepEqual(positions, { 'focused-one': 1, 'diagnostic-one': 2, 'submit-one': 1, 'review-one': 1, 'landing-one': 1, 'focused-two': 6 },
+    'each arrival takes its place by class, behind earlier runs of its own class');
+  const line = () => privateList(box).find(({ name }) => name === 'gate').line
+    .map(({ agent, queueClass: listed, agedFrom }) => [agent, listed, agedFrom ?? '']);
+  assert.deepEqual(line(), [
+    ['landing-one', 'landing', ''],
+    ['review-one', 'review', ''],
+    ['submit-one', 'submit', ''],
+    ['focused-one', 'other', ''],
+    ['diagnostic-one', 'other', ''],
+    ['focused-two', 'other', ''],
+  ], 'landing, then reviews, then submits, then focused and other runs, first come first served within each');
+
+  // Waiting time is the only input to aging; backdating the queued time stands in for the clock.
+  const db = new DatabaseSync(join(box.home, 'resources.sqlite'));
+  // The pool's own processes write this file too; wait for their lock instead of failing.
+  db.exec('PRAGMA busy_timeout = 5000');
+  try {
+    const backdate = db.prepare('UPDATE waiter SET since = ? WHERE agent = ?');
+    backdate.run(new Date(Date.now() - 2 * AGE_MS - 60_000).toISOString(), 'focused-two');
+    backdate.run(new Date(Date.now() - AGE_MS - 60_000).toISOString(), 'diagnostic-one');
+  } finally { db.close(); }
+  assert.deepEqual(line(), [
+    ['landing-one', 'landing', ''],
+    ['review-one', 'review', ''],
+    ['focused-two', 'review', 'other'],
+    ['diagnostic-one', 'submit', 'other'],
+    ['submit-one', 'submit', ''],
+    ['focused-one', 'other', ''],
+  ], 'a run waiting an hour ranks with reviews and one waiting half an hour with submits, keeping its arrival place there');
+
+  const order = [];
+  let releasing = [...holders];
+  for (const agent of ['landing-one', 'review-one', 'focused-two', 'diagnostic-one', 'submit-one', 'focused-one']) {
+    await release(releasing.shift());
+    const child = waiting.get(agent);
+    assert.equal((await acquired(child)).acquired, agent, `${agent} is admitted next`);
+    order.push(agent);
+    releasing.push(child);
+  }
+  for (const child of releasing) await release(child);
+  assert.deepEqual(order, ['landing-one', 'review-one', 'focused-two', 'diagnostic-one', 'submit-one', 'focused-one']);
+
+  // A remote run whose runner drops is requeued with its original arrival ticket: it sits behind
+  // earlier runs of its own class and behind waiting reviews and submits, and the line stays in
+  // class order (the requeue is marked classed, so it never forces arrival).
+  const requeued = await requeuedRemoteRun({ reviewsFirst: true });
+  assert.equal(requeued.order, undefined, 'a requeued remote waiter is marked as class-ordered, so the pool keeps class order');
+  assert.deepEqual(requeued.line, [
+    ['review-later', 'review'], ['submit-later', 'submit'], ['focused-early', 'other'], ['remote-focused', 'other'],
+  ], 'the requeued remote run keeps first come, first served in its class, behind the earlier focused run');
+  assert.equal(requeued.tickets['remote-focused'], requeued.lastIssued, 'the requeued runner waiter keeps its original ticket, the last one issued');
+  assert.ok(requeued.tickets['focused-early'] < requeued.tickets['remote-focused'], 'an earlier same-class waiter keeps its earlier ticket');
+  assert.deepEqual(requeued.admitted, ['review-later', 'submit-later', 'focused-early', 'remote-focused']);
+
+  // The class rule itself, against an injected clock rather than real waiting.
+  const { QUEUE_AGE_MS, queueClass } = await import('../src/resources.js');
+  const queuedAt = Date.parse('2026-10-15T19:37:00.000Z');
+  const at = (minutes) => queuedAt + minutes * 60_000;
+  const since = new Date(queuedAt).toISOString();
+  assert.equal(QUEUE_AGE_MS, 30 * 60_000, 'a waiter moves up one class every 30 minutes');
+  assert.deepEqual([0, 29, 30, 60, 90, 300].map((minutes) => queueClass({ kind: 'focused', since }, at(minutes)).name),
+    ['other', 'other', 'submit', 'review', 'landing', 'landing'], 'a focused run ages up one class per 30 minutes waited');
+  assert.equal(queueClass({ kind: 'review', since }, at(30)).name, 'landing');
+  assert.equal(queueClass({ kind: 'main-red', diagnostic: 1, itemCheck: 1, since }, at(0)).name, 'other', 'a diagnostic is optional work');
+  assert.equal(queueClass({ kind: 'check', itemCheck: 1, since }, at(0)).name, 'submit', 'an item check ranks with submits');
+  assert.equal(queueClass({ landing: 1, since }, at(0)).name, 'landing');
+});
+
+test('a line holding an older pullboard waiter keeps arrival order, so mixed versions never deadlock [C7]', async () => {
+  const box = fixture();
+  setQueueOrder(box, { reviewsFirst: true }); // #697: class order is a machine opt-in.
+  const holders = [poolWorker(box, { agent: 'mixed-holder-one' }), poolWorker(box, { agent: 'mixed-holder-two' })];
+  for (const holder of holders) await acquired(holder);
+  // A real older pullboard (before #651) writes no class marker; it admits landings first and then by ticket.
+  const older = poolWorker(box, { agent: 'older-focused', kind: 'focused', module: PRE_RUNNER_MODULE });
+  await event(older);
+  const review = poolWorker(box, { agent: 'newer-review', kind: 'review', item: '651' });
+  assert.equal((await event(review)).queued.position, 2, 'the review waits behind the older waiter\'s earlier ticket');
+  const gate = () => privateList(box).find(({ name }) => name === 'gate');
+  assert.equal(gate().order, 'arrival');
+  assert.deepEqual(gate().line.map(({ agent }) => agent), ['older-focused', 'newer-review']);
+
+  await release(holders[0]);
+  assert.equal((await acquired(older)).acquired, 'older-focused', 'both versions agree the earlier ticket goes first');
+  assert.equal(gate().order, undefined, 'class order resumes once only marked waiters remain');
+  await release(holders[1]);
+  assert.equal((await acquired(review)).acquired, 'newer-review');
+  await release(older);
+  await release(review);
+});
+
+test('the gate pool serves the current release first [C7,V4]', () => releaseQueueProof({ fixture, poolWorker, privateList, event, acquired, release, legacyModule: PRE_RUNNER_MODULE }));
+
+test('queue order follows the machine settings [C7,O5]', async () => {
+  const gate = (box) => privateList(box).find(({ name }) => name === 'gate');
+  const line = (box) => gate(box).line.map(({ agent, queueClass: listed, agedFrom }) => [agent, listed, agedFrom ?? '']);
+  /** Backdate a waiter's queued time: the test clock that stands in for real waiting. */
+  const backdate = (box, agent, ms) => {
+    const queuedAt = new Date(Date.now() - ms).toISOString();
+    const db = new DatabaseSync(join(box.home, 'resources.sqlite'));
+    // The pool's own processes write this file too; wait for their lock instead of failing.
+    db.exec('PRAGMA busy_timeout = 5000');
+    let changed;
+    try { changed = db.prepare('UPDATE waiter SET since = ? WHERE agent = ?').run(queuedAt, agent).changes; }
+    finally { db.close(); }
+    assert.equal(changed, 1, `${agent} has a private waiter row`);
+  };
+  /** Run pullboard settings against the fixture's private machine home. */
+  const settingsCli = (box, ...flags) => runFixtureChild(process.execPath, [BIN, 'settings', ...flags], { cwd: box.first, env: box.env, encoding: 'utf8' });
+
+  // No settings: landings first, then arrival, so a review waits behind an earlier focused run.
+  const plain = fixture();
+  const plainHolders = [poolWorker(plain, { agent: 'plain-holder-one' }), poolWorker(plain, { agent: 'plain-holder-two' })];
+  for (const holder of plainHolders) await acquired(holder);
+  const plainFocused = poolWorker(plain, { agent: 'plain-focused', kind: 'focused' });
+  assert.equal((await event(plainFocused)).queued.position, 1);
+  const plainReview = poolWorker(plain, { agent: 'plain-review', kind: 'review', item: '697' });
+  assert.equal((await event(plainReview)).queued.position, 2, 'with no settings a review waits its arrival turn');
+  assert.deepEqual(gate(plain).line.map(({ agent }) => agent), ['plain-focused', 'plain-review'], 'with no settings the line is in arrival order');
+  // agingMinutes alone does nothing: aging is used only while a class order is on.
+  setQueueOrder(plain, { agingMinutes: 1 });
+  backdate(plain, 'plain-review', 5 * 60_000);
+  assert.deepEqual(line(plain), [['plain-focused', 'other', ''], ['plain-review', 'review', '']],
+    'with reviewsFirst off no waiter ages up, even with a short agingMinutes');
+  setQueueOrder(plain, undefined);
+  const plainPrinted = settingsCli(plain);
+  assert.equal(plainPrinted.status, 0, plainPrinted.stderr);
+  assert.match(plainPrinted.stdout, /^gate\.queue\.reviewsFirst: false\b/mu, 'pullboard settings prints reviewsFirst, default false');
+  assert.match(plainPrinted.stdout, /^gate\.queue\.agingMinutes: 30\b/mu, 'pullboard settings prints agingMinutes, default 30');
+  await release(plainHolders[0]);
+  assert.equal((await acquired(plainFocused)).acquired, 'plain-focused', 'with no settings the earlier focused run is admitted first');
+  await release(plainHolders[1]);
+  assert.equal((await acquired(plainReview)).acquired, 'plain-review');
+  await release(plainFocused);
+  await release(plainReview);
+
+  // reviewsFirst true: the same review is admitted ahead of the earlier focused run.
+  const classed = fixture();
+  setQueueOrder(classed, { reviewsFirst: true });
+  const classedHolders = [poolWorker(classed, { agent: 'classed-holder-one' }), poolWorker(classed, { agent: 'classed-holder-two' })];
+  for (const holder of classedHolders) await acquired(holder);
+  const classedFocused = poolWorker(classed, { agent: 'classed-focused', kind: 'focused' });
+  assert.equal((await event(classedFocused)).queued.position, 1);
+  const classedReview = poolWorker(classed, { agent: 'classed-review', kind: 'review', item: '697' });
+  assert.equal((await event(classedReview)).queued.position, 1, 'with reviewsFirst true a review joins ahead of focused runs');
+  assert.deepEqual(gate(classed).line.map(({ agent }) => agent), ['classed-review', 'classed-focused'], 'with reviewsFirst true the line is in class order');
+  await release(classedHolders[0]);
+  assert.equal((await acquired(classedReview)).acquired, 'classed-review', 'with reviewsFirst true the review is admitted first');
+  await release(classedHolders[1]);
+  assert.equal((await acquired(classedFocused)).acquired, 'classed-focused');
+  await release(classedReview);
+  await release(classedFocused);
+
+  // agingMinutes 1: a focused run waiting just over a minute moves up one class, ahead of a later submit.
+  const aging = fixture();
+  setQueueOrder(aging, { reviewsFirst: true, agingMinutes: 1 });
+  const agingHolders = [poolWorker(aging, { agent: 'aging-holder-one' }), poolWorker(aging, { agent: 'aging-holder-two' })];
+  for (const holder of agingHolders) await acquired(holder);
+  const agingFocused = poolWorker(aging, { agent: 'aging-focused', kind: 'focused' });
+  await event(agingFocused);
+  const agingSubmit = poolWorker(aging, { agent: 'aging-submit', kind: 'submit', item: '697' });
+  assert.equal((await event(agingSubmit)).queued.position, 1, 'a fresh submit goes ahead of a fresh focused run');
+  assert.deepEqual(line(aging), [['aging-submit', 'submit', ''], ['aging-focused', 'other', '']]);
+  backdate(aging, 'aging-focused', 61_000);
+  assert.deepEqual(line(aging), [['aging-focused', 'submit', 'other'], ['aging-submit', 'submit', '']],
+    'after agingMinutes 1 the focused run ranks with submits and keeps its earlier ticket there');
+  const agingPrinted = settingsCli(aging);
+  assert.equal(agingPrinted.status, 0, agingPrinted.stderr);
+  assert.match(agingPrinted.stdout, /^gate\.queue\.reviewsFirst: true$/mu, 'pullboard settings prints the reviewsFirst set on this machine');
+  assert.match(agingPrinted.stdout, /^gate\.queue\.agingMinutes: 1$/mu, 'pullboard settings prints the agingMinutes set on this machine');
+  assert.deepEqual(JSON.parse(settingsCli(aging, '--json').stdout).settings.gate.queue, { reviewsFirst: true, currentReleaseFirst: false, agingMinutes: 1 });
+  await release(agingHolders[0]);
+  assert.equal((await acquired(agingFocused)).acquired, 'aging-focused', 'the aged focused run is admitted before the later submit');
+  await release(agingHolders[1]);
+  assert.equal((await acquired(agingSubmit)).acquired, 'aging-submit');
+  await release(agingFocused);
+  await release(agingSubmit);
+  // The class rule against an injected clock: one class per agingMinutes waited.
+  const { queueClass } = await import('../src/resources.js');
+  const queuedAt = Date.parse('2026-10-16T16:00:00.000Z');
+  const since = new Date(queuedAt).toISOString();
+  assert.deepEqual([0, 0.99, 1, 2, 3].map((minutes) => queueClass({ kind: 'focused', since }, queuedAt + minutes * 60_000, 60_000).name),
+    ['other', 'other', 'submit', 'review', 'landing'], 'a one-minute aging moves a waiting run up one class per minute');
+
+  // A remote run whose runner drops is requeued: with no settings it takes #663's front ticket,
+  // ahead of every other non-landing waiter, as before; with reviewsFirst true it keeps its original
+  // ticket, so it waits behind an earlier run of its own class, and the pool stays in class order
+  // (the requeue is marked classed, so it never forces arrival).
+  const requeuedOff = await requeuedRemoteRun(undefined);
+  assert.equal(requeuedOff.order, undefined);
+  assert.deepEqual(requeuedOff.line, [
+    ['remote-focused', 'other'], ['focused-early', 'other'], ['submit-later', 'submit'], ['review-later', 'review'],
+  ], 'with no settings the requeued remote run goes first and the rest keep arrival order');
+  assert.ok(requeuedOff.tickets['remote-focused'] < 0, 'with no settings the requeued run takes the front ticket, as on main');
+  assert.deepEqual(requeuedOff.admitted, ['remote-focused', 'focused-early', 'submit-later', 'review-later']);
+  const requeuedOn = await requeuedRemoteRun({ reviewsFirst: true });
+  assert.equal(requeuedOn.order, undefined, 'with reviewsFirst true a requeued remote run keeps the pool in class order');
+  assert.deepEqual(requeuedOn.line, [
+    ['review-later', 'review'], ['submit-later', 'submit'], ['focused-early', 'other'], ['remote-focused', 'other'],
+  ], 'with reviewsFirst true the requeued remote run keeps its arrival place in its class');
+  assert.equal(requeuedOn.tickets['remote-focused'], requeuedOn.lastIssued, 'with reviewsFirst true the requeued run keeps its original ticket');
+  assert.deepEqual(requeuedOn.admitted, ['review-later', 'submit-later', 'focused-early', 'remote-focused']);
+
+  // Mixed versions agree on the next waiter. A #651-only process ranks by class only when every
+  // waiter is marked classed=1, and otherwise landings first, then ticket; a #697 process follows
+  // its setting and marks its waiters to match, so both rankers pick the same waiter off and on.
+  const { queueClass: classOf } = await import('../src/resources.js');
+  const agree = fixture();
+  const agreeHolders = [poolWorker(agree, { agent: 'agree-holder-one' }), poolWorker(agree, { agent: 'agree-holder-two' })];
+  for (const holder of agreeHolders) await acquired(holder);
+  const agreeFocused = poolWorker(agree, { agent: 'agree-focused', kind: 'focused' });
+  await event(agreeFocused);
+  const agreeReview = poolWorker(agree, { agent: 'agree-review', kind: 'review', item: '697' });
+  await event(agreeReview);
+  /** The raw waiter rows every process reads. */
+  const rows = () => {
+    const db = new DatabaseSync(join(agree.home, 'resources.sqlite'));
+    // The pool's own processes write this file too; wait for their lock instead of failing.
+    db.exec('PRAGMA busy_timeout = 5000');
+    try { return db.prepare("SELECT ticket, agent, since, landing, item_check AS itemCheck, diagnostic, kind, classed FROM waiter WHERE name = 'gate'").all(); }
+    finally { db.close(); }
+  };
+  /** The next waiter as a #651-only process ranks the same rows. */
+  const next651 = (waiters) => {
+    const byClass = waiters.every((waiter) => waiter.classed === 1);
+    const rank = (waiter) => (byClass ? classOf(waiter).effective : waiter.landing === 1 ? 0 : 1);
+    return [...waiters].sort((left, right) => rank(left) - rank(right) || left.ticket - right.ticket)[0].agent;
+  };
+  assert.deepEqual(rows().map(({ classed }) => classed), [0, 0], 'with reviewsFirst off a waiter is marked as not admitting by class');
+  assert.equal(next651(rows()), gate(agree).line[0].agent, 'off: a #651-only process and this one pick the same next waiter');
+  assert.equal(gate(agree).line[0].agent, 'agree-focused', 'off: both pick by arrival');
+  setQueueOrder(agree, { reviewsFirst: true });
+  // Each waiter re-marks itself on its next poll, so a setting change reaches every ranking.
+  for (let tries = 0; rows().some(({ classed }) => classed !== 1); tries += 1) {
+    assert.ok(tries < 250, 'waiters re-mark themselves after the setting turns on');
+    await new Promise((resolveTick) => setTimeout(resolveTick, 20));
+  }
+  assert.equal(next651(rows()), gate(agree).line[0].agent, 'on: a #651-only process and this one pick the same next waiter');
+  assert.equal(gate(agree).line[0].agent, 'agree-review', 'on: both pick by class');
+  await release(agreeHolders[0]);
+  assert.equal((await acquired(agreeReview)).acquired, 'agree-review');
+  await release(agreeHolders[1]);
+  assert.equal((await acquired(agreeFocused)).acquired, 'agree-focused');
+  await release(agreeReview);
+  await release(agreeFocused);
+
+  // An unusable value is refused by name, with the fix.
+  setQueueOrder(aging, { reviewsFirst: 'yes' });
+  const badFlag = settingsCli(aging, '--json');
+  assert.equal(badFlag.status, 1, 'a non-boolean reviewsFirst is refused');
+  assert.equal(JSON.parse(badFlag.stdout).error.code, 'BAD_MACHINE_SETTINGS');
+  assert.match(JSON.parse(badFlag.stdout).error.message, /gate\.queue\.reviewsFirst .* must be true or false/u);
+  setQueueOrder(aging, { reviewsFirst: true, agingMinutes: 0 });
+  const badAging = settingsCli(aging, '--json');
+  assert.equal(badAging.status, 1, 'agingMinutes 0 is refused');
+  assert.match(JSON.parse(badAging.stdout).error.message, /gate\.queue\.agingMinutes .* must be a positive whole number/u);
 });
 
 test('[Q1,Q2] a waiting landing keeps a current holder from taking the second slot [Q1,Q2]', async () => {
@@ -865,6 +1490,163 @@ test('[Q2,Q3] a SIGKILLed waiter is skipped while the next live waiter advances'
   await release(holder);
   assert.equal((await event(live)).acquired, 'live-waiter');
   await release(live);
+});
+
+const CLI_MODULE = pathToFileURL(resolve(import.meta.dirname, '../src/cli.js')).href;
+/** A gate run whose memory reading comes from a fixture file through the Linux reader's own parsing. */
+const MEMORY_WORKER = `
+import { readFileSync } from 'node:fs';
+import { withGateSlot } from ${JSON.stringify(GATE_MODULE)};
+import { readMachineMemory } from ${JSON.stringify(MODULE)};
+const [root, agent, source] = process.argv.slice(1);
+const ps = ['  6161   512000 /bin/zsh', '  4242 25165824 /usr/bin/python3', '    77     1024 /sbin/launchd',
+  '  5151  2097152 /usr/local/bin/node', '  4343 24117248 /opt/homebrew/bin/python3.12'].join('\\n');
+const cwds = { '/proc/4242/cwd': '/work/journal-reader', '/proc/4343/cwd': '/work/other-reader', '/proc/5151/cwd': '/work/pullboard' };
+let reads = 0;
+/** Read the fixture's current machine state as Linux would present it, counting every reading. */
+const readMemory = (options) => (reads += 1, source === 'win32') ? readMachineMemory({ ...options, platform: 'win32' }) : readMachineMemory({
+  ...options, platform: 'linux',
+  readText: async (file) => {
+    const reading = JSON.parse(readFileSync(source, 'utf8'));
+    if (file === '/proc/meminfo') return reading.meminfo;
+    if (file === '/proc/pressure/memory') return reading.psi;
+    throw new Error('unexpected file ' + file);
+  },
+  run: async (file) => { if (file === '/bin/ps') return ps; throw new Error('unexpected command ' + file); },
+  readLink: async (path) => { if (cwds[path]) return cwds[path]; throw new Error('EACCES'); },
+});
+let last = '';
+await withGateSlot(root, async () => {
+  console.log(JSON.stringify({ acquired: agent, reads }));
+  for await (const line of process.stdin) if (String(line).trim() === 'release') break;
+}, { agent, kind: 'gate', readMemory, onWait: ({ position, memory }) => {
+  const state = JSON.stringify({ waiting: position, memory: memory ?? null });
+  if (state !== last) { last = state; console.log(state); }
+} });
+`;
+
+/** Write what /proc would say: total and available memory, and the pressure stall averages. */
+function writeMemoryReading(file, { availableMB, fullAvg10 = 0, someAvg10 = 0, broken = false }) {
+  const meminfo = broken ? 'MemTotal: 37748736 kB\n' : `MemTotal:       37748736 kB\nMemFree:          102400 kB\nMemAvailable:   ${availableMB * 1024} kB\n`;
+  const psi = `some avg10=${someAvg10.toFixed(2)} avg60=0.00 avg300=0.00 total=1\nfull avg10=${fullAvg10.toFixed(2)} avg60=0.00 avg300=0.00 total=1\n`;
+  writeFileSync(file, JSON.stringify({ meminfo, psi }));
+}
+
+/** Launch one gate run through withGateSlot with an injected memory source. */
+function memoryWorker(box, agent, source) {
+  return poolWorker(box, { agent, script: MEMORY_WORKER, args: [box.first, agent, source] });
+}
+
+test('the pool holds work while the machine is out of memory and names the biggest process [C7]', async () => {
+  const box = fixture();
+  const reading = join(box.dir, 'memory.json');
+  writeMemoryReading(reading, { availableMB: 100, fullAvg10: 99, someAvg10: 99 });
+  // Off by default: with no floor set, even a critical machine is never read or held.
+  const unset = memoryWorker(box, 'no-floor-run', reading);
+  const unsetStart = await event(unset);
+  assert.equal(unsetStart.acquired, 'no-floor-run', `with no floor set the pool admits by slots alone: ${JSON.stringify(unsetStart)}`);
+  assert.equal(unsetStart.reads, 0, 'with no floor set the pool reads no memory');
+  assert.equal(unsetStart.memory, undefined, 'with no floor set nothing is held or reported');
+  await release(unset);
+
+  mkdirSync(box.home, { recursive: true });
+  writeFileSync(join(box.home, 'settings.json'), `${JSON.stringify({ gate: { memoryFloorMB: 512 } })}\n`);
+  const biggest = 'biggest: pid 4242 python3 24.0 GB in /work/journal-reader; pid 4343 python3.12 23.0 GB in /work/other-reader; pid 5151 node 2.0 GB in /work/pullboard';
+  writeMemoryReading(reading, { availableMB: 8192, fullAvg10: 42, someAvg10: 80 });
+  const run = memoryWorker(box, 'held-run', reading);
+
+  const critical = await event(run);
+  assert.equal(critical.acquired, undefined, 'a critical reading must not admit the run');
+  assert.equal(critical.waiting, 1, 'the held run keeps its place at the head of the line');
+  assert.equal(critical.memory?.held, true, `the run is held for memory: ${JSON.stringify(critical)}`);
+  assert.equal(critical.memory.line,
+    `memory: holding the gate queue because pressure is critical: pressure critical, 8.0 GB free of 36.0 GB (floor 512 MB); ${biggest}`,
+    'one line says why and names the three biggest processes with pid, size and working directory');
+  assert.doesNotMatch(critical.memory.line, /\n/u, 'the hold is one line');
+  const gate = privateList(box).find(({ name }) => name === 'gate');
+  assert.equal(gate.holders.length, 0, 'no run holds a slot while memory is critical, though both slots are free');
+  assert.deepEqual(gate.line.map(({ agent }) => agent), ['held-run'], 'the held run waits in the queue');
+  await delay(300);
+  assert.ok(!run.pendingLines.some((line) => JSON.parse(line).acquired), 'the run stays held while the reading stays critical');
+
+  writeMemoryReading(reading, { availableMB: 400 });
+  const low = await event(run);
+  assert.equal(low.memory?.held, true, `free memory under the settings floor still holds: ${JSON.stringify(low)}`);
+  assert.equal(low.memory.line,
+    `memory: holding the gate queue because free memory is under the floor: pressure normal, 400 MB free of 36.0 GB (floor 512 MB); ${biggest}`,
+    'the floor comes from gate.memoryFloorMB in pullboard settings');
+
+  writeMemoryReading(reading, { availableMB: 8192 });
+  const recovered = await acquired(run).catch((error) => assert.fail(`the held run is admitted once memory recovers: ${error.message.split('\n')[0]}`));
+  assert.equal(recovered.acquired, 'held-run', 'the held run is admitted once memory recovers');
+  await release(run);
+});
+
+test('the memory hold is off until a floor is set, an unread machine warns once, and resources prints the memory line [C7]', async () => {
+  const { gateWaitReporter } = await import(CLI_MODULE);
+  const said = [];
+  const report = gateWaitReporter({ say: (line) => said.push(line) });
+  report({ holders: [], position: 1, memory: { checked: true, held: true, line: 'memory: holding the gate queue because pressure is critical: first' } });
+  report({ holders: [], position: 1, memory: { checked: true, held: true, line: 'memory: holding the gate queue because pressure is critical: sizes moved' } });
+  report({ holders: [], position: 1 });
+  assert.deepEqual(said, ['memory: holding the gate queue because pressure is critical: first', 'gate waiting: 0 running; place 1'],
+    'a held run prints its line once per hold, then the ordinary queue line');
+  const warned = [];
+  const warn = gateWaitReporter({ say: (line) => warned.push(line) });
+  const unchecked = { checked: false, held: false, line: 'memory: not checked on win32', warning: 'memory: not checked on win32' };
+  warn({ holders: [], line: [], position: 0, memory: unchecked });
+  warn({ holders: [], line: [], position: 0, memory: unchecked });
+  assert.deepEqual(warned, ['memory: not checked on win32'], 'an unread machine prints one warning');
+
+  const box = fixture();
+  const critical = join(box.dir, 'critical.json');
+  writeMemoryReading(critical, { availableMB: 100, fullAvg10: 99 });
+  const unset = memoryWorker(box, 'unset-run', critical);
+  const unsetStart = await event(unset);
+  assert.equal(unsetStart.acquired, 'unset-run', `with gate.memoryFloorMB absent the pool admits by slots alone, as before: ${JSON.stringify(unsetStart)}`);
+  await release(unset);
+  const defaults = runFixtureChild(process.execPath, [BIN, 'settings', '--json'], { cwd: box.first, env: box.env, encoding: 'utf8' });
+  assert.equal(defaults.status, 0, defaults.stderr);
+  assert.equal(JSON.parse(defaults.stdout).memoryFloorMB, null, 'pullboard settings reports the hold as off when the floor is absent');
+  mkdirSync(box.home, { recursive: true });
+  writeFileSync(join(box.home, 'settings.json'), `${JSON.stringify({ gate: { memoryFloorMB: -1 } })}\n`);
+  const refused = runFixtureChild(process.execPath, [BIN, 'settings', '--json'], { cwd: box.first, env: box.env, encoding: 'utf8' });
+  assert.equal(refused.status, 1);
+  assert.equal(JSON.parse(refused.stdout).error.code, 'BAD_MACHINE_SETTINGS');
+  assert.match(JSON.parse(refused.stdout).error.message, /gate\.memoryFloorMB/u);
+  writeFileSync(join(box.home, 'settings.json'), `${JSON.stringify({ gate: { memoryFloorMB: 1024 } })}\n`);
+  const set = runFixtureChild(process.execPath, [BIN, 'settings'], { cwd: box.first, env: box.env, encoding: 'utf8' });
+  assert.equal(set.status, 0, set.stderr);
+  assert.match(set.stdout, /^gate\.memoryFloorMB: 1024$/mu, 'pullboard settings shows the floor once it is set');
+
+  for (const source of ['win32', 'broken']) {
+    const file = join(box.dir, `${source}.json`);
+    writeMemoryReading(file, { availableMB: 100, fullAvg10: 99, broken: true });
+    const run = memoryWorker(box, `${source}-run`, source === 'win32' ? 'win32' : file);
+    const first = await event(run);
+    assert.equal(first.memory?.checked, false, `${source}: the run hears that memory is not checked: ${JSON.stringify(first)}`);
+    assert.match(first.memory.warning, /^memory: not checked on (win32|linux) \(.+\); the gate pool admits by slots alone$/u);
+    assert.equal((await event(run)).acquired, `${source}-run`, `${source}: an unread machine admits as today, after exactly one warning`);
+    await release(run);
+  }
+
+  checkProject(box);
+  writeFileSync(join(box.home, 'settings.json'), `${JSON.stringify({ gate: {} })}\n`);
+  const off = runFixtureChild(process.execPath, [BIN, 'resources', '--json'], { cwd: box.first, env: box.env, encoding: 'utf8' });
+  assert.equal(off.status, 0, off.stderr);
+  assert.equal(JSON.parse(off.stdout).memory, null, 'with no floor set pullboard resources reads no memory');
+  const offHuman = runFixtureChild(process.execPath, [BIN, 'resources'], { cwd: box.first, env: box.env, encoding: 'utf8' });
+  assert.equal(offHuman.status, 0, offHuman.stderr);
+  assert.doesNotMatch(offHuman.stdout, /^memory: /mu, 'with no floor set pullboard resources prints no memory line');
+  writeFileSync(join(box.home, 'settings.json'), `${JSON.stringify({ gate: { memoryFloorMB: 1024 } })}\n`);
+  const human = runFixtureChild(process.execPath, [BIN, 'resources'], { cwd: box.first, env: box.env, encoding: 'utf8' });
+  assert.equal(human.status, 0, human.stderr);
+  const printed = human.stdout.split('\n').filter((line) => line.startsWith('memory: '));
+  assert.equal(printed.length, 1, `pullboard resources prints one machine memory line: ${human.stdout}`);
+  assert.match(printed[0], /^memory: (admitting: |holding the gate queue because |not checked on )/u);
+  const json = runFixtureChild(process.execPath, [BIN, 'resources', '--json'], { cwd: box.first, env: box.env, encoding: 'utf8' });
+  assert.equal(json.status, 0, json.stderr);
+  assert.match(JSON.parse(json.stdout).memory.line, /^memory: /u, 'the JSON result carries the same machine line');
 });
 
 test('[Q4] machine capacity changes atomically refuse an occupied or queued resource', async () => {

@@ -10,23 +10,56 @@
  * It opens no outbound connection (P5).
  */
 import { spawnSync } from 'node:child_process';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  randomBytes,
+  timingSafeEqual,
+} from 'node:crypto';
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { createServer } from 'node:http';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+} from 'node:path';
 import * as store from './board.js';
 import { cockpitPage } from './cockpit.js';
 import { releaseHeadlinesBetween } from './changelog.js';
 import { VERSION } from './help.js';
 import { displayAgentName } from './agent-names.js';
-import { COORDINATOR, loadConfig } from './config.js';
-import { doctrineHistory, loadDoctrine, standardDoctrine } from './doctrine.js';
-import { codeIsFromMain, repoInfo, resolveCommit } from './git.js';
+import {
+  COORDINATOR,
+  loadConfig,
+} from './config.js';
+import {
+  doctrineHistory,
+  loadDoctrine,
+  standardDoctrine,
+} from './doctrine.js';
+import {
+  codeIsFromMain,
+  repoInfo,
+  resolveCommit,
+} from './git.js';
 import { committedIds } from './history.js';
 import { productSummaries } from './products.js';
-import { listApiProjects, registryFile } from './projects.js';
+import {
+  listApiProjects,
+  registryFile,
+} from './projects.js';
 import { fetchLocal } from './local-fetch.js';
 import { Refused } from './refused.js';
+import { personNeeds } from './needs.js';
+import { projectRowDecisions } from './row-decisions.js';
 import { loadSpec } from './spec.js';
 
 /** The page's styles (N26), read once: the page links them, so it needs no inline style. */
@@ -303,7 +336,7 @@ export function projectState(root, { seen = null, board: providedBoard = null, i
     const log = store.events(board);
     // When each agent last moved on the board: the log is in order, so the last write wins.
     const lastMove = new Map(log.map((event) => [event.event_by, event.event_at]));
-    return {
+    const state = projectRowDecisions(store.rowDecisions(board), {
       root: info.root,
       releaseNotes: viewReleaseNotes(),
       rowAgesAt: { [config.spec]: head, [doctrine.name]: head },
@@ -331,7 +364,9 @@ export function projectState(root, { seen = null, board: providedBoard = null, i
       unseen: seen === null ? null : { since: seen, count: board.db.prepare('SELECT COUNT(*) AS n FROM shout WHERE shout_id > ?').get(seen).n },
       // Each product's progress, counted as pullboard status counts it (N28).
       products: productSummaries(config, loadSpec(info.root, config), all),
-    };
+    });
+    // Pending person decisions govern the calls on the API, sealed relay and exported page alike.
+    return { ...state, needs: personNeeds(state) };
   }, providedBoard);
 }
 
@@ -377,19 +412,20 @@ export function codeAt(root, { path, from, to, commit, before = '' }) {
 }
 
 /**
- * Serve the view until stopped.
+ * Serve the view until stopped, optionally giving its API access to only one registered project.
  *
- * @param {{ port?: number, secret?: string }} [options]
+ * @param {{ port?: number, secret?: string, projectRoot?: string }} [options]
  * @returns {Promise<{ url: string, port: number, close: () => Promise<void> }>}
  */
-export async function serveView({ port = 0, secret = randomBytes(18).toString('base64url') } = {}) {
+export async function serveView({ port = 0, secret = randomBytes(18).toString('base64url'), projectRoot } = {}) {
   const key = Buffer.from(secret);
   let bound = 0;
   // The API reads projectState and codeAt from this module. Load its factory after our exports
   // initialize, and use the real CLI entry point without adding a second move implementation.
   const { createLocalApiHandler } = await import('./api.js');
   const { main } = await import('./cli.js');
-  const apiHandler = createLocalApiHandler({ secret, getPort: () => bound, runCommand: main, allowedOrigins: [HOSTED_ORIGIN] });
+  const apiHandler = createLocalApiHandler({ secret, getPort: () => bound, runCommand: main, stateDetail: 'summary',
+    allowedOrigins: [HOSTED_ORIGIN], ...(projectRoot === undefined ? {} : { scope: { projectRoot } }) });
   const reply = (res, code, type, body) => {
     res.writeHead(code, {
       'content-type': type,
@@ -488,7 +524,7 @@ export async function serveView({ port = 0, secret = randomBytes(18).toString('b
       server.listen(port, LOOPBACK, () => {
         server.off('error', failed);
         bound = /** @type {any} */ (server.address()).port;
-        if (asked === 0) rememberPort(bound);
+        if (asked === 0 && projectRoot === undefined) rememberPort(bound);
         ready({
           url: `http://${LOOPBACK}:${bound}/?k=${secret}`,
           port: bound,

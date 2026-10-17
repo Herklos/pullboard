@@ -1,13 +1,14 @@
 /** Set up a machine once, enroll its phone in the foreground and link later registrations [H5,H17]. */
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import * as store from './board.js';
 import { phoneProposal, publishPhoneApproval, warnPhoneApproval } from './relay-phone.js';
 import { openApproval, restoreLinkReply } from './relay-approval.js';
 import { requirePersonChannel } from './person.js';
 import { codeIsFromMain, repoInfo } from './git.js';
 import { listApiProjects } from './projects.js';
-import { acceptDeviceEnrollment, beginDeviceEnrollment, readRelayMachine, updateRelayMachine } from './relay-machine.js';
-import { deliverDeviceWraps, relayDeviceRequest, relayMachineSignIn, relayMachineContext, relayRevokeDevice, relayOn, relayStatus, originRepository } from './relay.js';
+import { acceptDeviceEnrollment, beginDeviceEnrollment, readRelayMachine, relayMachineOwner, updateRelayMachine } from './relay-machine.js';
+import { deliverDeviceWraps, relayDeviceRequest, relayMachineSignIn, relayMachineContext, relayRevokeDevice, relayOn, relayStatus, originRepository, revokeRelayPersonSession } from './relay.js';
 import { terminalQr } from './qr.js';
 import { Refused } from './refused.js';
 
@@ -87,90 +88,348 @@ async function flushRevocations(session, io) {
   }
 }
 
-/** The native device revocation uses the same one-tap grant path as token revocation. */
-export async function revokeRelayDevice(deviceId, io) {
-  requirePersonChannel(io.personChannel);
-  const device = readRelayMachine().devices.find(entry => entry.deviceId === deviceId);
-  if (!device) throw new Refused('DEVICE_NOT_ENROLLED', 'Name a paired device from pullboard relay devices.');
-  const roots = [io.cwd, ...listApiProjects().map(entry => entry.root)];
-  for (const root of roots) {
-    let state;
-    try { state = relayMachineContext(root); } catch { continue; }
-    if (state?.token?.startsWith('pm_') && state.account === device.account && state.url === device.url) return relayRevokeDevice(root, deviceId, io);
+/** Recover an unavailable phone using a new provider proof kept only for this foreground action. */
+async function revokeDeviceWithSignIn(device, io) {
+  const controller = new AbortController();
+  /** Cancel the new device flow without retaining a person credential. */
+  const stop = () => controller.abort();
+  process.once('SIGINT', stop); process.once('SIGTERM', stop);
+  let session;
+  try {
+    io.say('Sign in again with GitHub to revoke this device; approval on that device is not needed.');
+    session = await relayMachineSignIn(device.url, io, { signal: controller.signal });
+    if (session.outcome) throw new Refused('DEVICE_REVOKE_CANCELLED',
+      'GitHub sign-in ' + session.outcome + '; no device was revoked. Run pullboard relay revoke ' + device.deviceId + ' when ready.');
+    if (session.account !== device.account || session.url !== device.url) throw new Refused('DEVICE_ACCOUNT',
+      'Sign in to the GitHub account that paired this device, then run pullboard relay revoke ' + device.deviceId + ' again.');
+    const reply = await relayDeviceRequest(session, '/api/v1/devices/' + device.deviceId,
+      { method: 'DELETE', signal: controller.signal }, io);
+    if (reply.recorded !== true) throw new Refused('RELAY_RESPONSE',
+      'The relay did not confirm device revocation; check pullboard relay devices and retry the same revoke command.');
+    updateRelayMachine(state => {
+      state.devices = state.devices.filter(entry => entry.deviceId !== device.deviceId);
+      state.revocations = state.revocations.filter(entry => entry.deviceId !== device.deviceId);
+    });
+    return { deviceId: device.deviceId, revoked: true,
+      notice: 'Revoked device; keys it already received remain known. Board key rotation is separate.' };
+  } finally {
+    process.off('SIGINT', stop); process.off('SIGTERM', stop);
+    if (session?.token) await revokeRelayPersonSession(session, io);
   }
-  throw new Refused('RELAY_NOT_LINKED', 'Link a board and pair the phone with pullboard relay on --all.');
 }
 
-/** Link every non-excluded registry entry, collecting project-specific partial failures. */
-async function linkProjects(session, io) {
+/** Use another paired phone when available; the device being revoked never approves itself. */
+export async function revokeRelayDevice(deviceId, io) {
+  requirePersonChannel(io.personChannel);
+  const machine = readRelayMachine();
+  const device = machine.devices.find(entry => entry.deviceId === deviceId);
+  if (!device) throw new Refused('DEVICE_NOT_ENROLLED', 'Name a paired device from pullboard relay devices.');
+  const otherPhone = machine.devices.some(entry => entry.deviceId !== deviceId && entry.account === device.account && entry.url === device.url);
+  if (otherPhone) {
+    const roots = [io.cwd, ...listApiProjects().map(entry => entry.root)];
+    for (const root of roots) {
+      let state;
+      try { state = relayMachineContext(root); } catch { continue; }
+      if (state?.token?.startsWith('pm_') && state.account === device.account && state.url === device.url) return relayRevokeDevice(root, deviceId, io);
+    }
+  }
+  return revokeDeviceWithSignIn(device, io);
+}
+
+/** Link non-excluded registry entries and report an explicit outcome for every registered project. */
+async function linkProjects(session, io, { onBoardOutcome } = {}) {
   const machine = readRelayMachine();
   const linked = [];
   const failed = [];
   for (const project of listApiProjects()) {
-    if (machine.excluded.includes(project.root)) continue;
+    if (machine.excluded.includes(project.root)) {
+      onBoardOutcome?.({ root: project.root, name: project.name, outcome: 'skipped', reason: 'Excluded from automatic linking on this machine.' });
+      continue;
+    }
     try {
       const result = await relayOn(project.root, session.url, io, { session, quiet: true, strict: true });
       linked.push({ project: project.name, root: project.root, board: result.board });
+      onBoardOutcome?.({ root: project.root, name: project.name, outcome: 'linked', reason: '' });
       io.say(`linked: ${project.name}`);
     } catch (error) {
       const reason = error instanceof Refused ? error.message : 'Restore this registered project and retry.';
       failed.push({ project: project.name, root: project.root, reason });
+      onBoardOutcome?.({ root: project.root, name: project.name, outcome: 'failed', reason });
       io.err(`not linked: ${project.name}; ${reason}`);
     }
   }
   return { linked, failed };
 }
 
-/** Publish a one-use public locator and wait in this command; no service or unattended daemon is added. */
-async function pairFirstDevice(session, board, linked, io) {
+/** Wait for the next pairing poll or an abort without leaving an abort listener behind. */
+function waitForPairingPoll(signal) {
+  return new Promise(resolve => {
+    if (signal?.aborted) { resolve(); return; }
+    const finish = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, 500);
+    signal?.addEventListener('abort', finish, { once: true });
+  });
+}
+
+/** Publish a one-use locator and wait in this command; cancellation never undoes linked boards. */
+async function pairFirstDevice(session, board, linked, io, { signal, onPairingURL } = {}) {
+  if (signal?.aborted) {
+    io.say('Boards linked; phone pairing cancelled. Run pullboard relay on --all for a fresh code.');
+    return { paired: false, interrupted: false, pairingOutcome: 'cancelled', pairingCleanup: 'not-published' };
+  }
   const pending = beginDeviceEnrollment(board, session);
   const path = '/api/v1/devices/enrollments/' + pending.locator;
-  await relayDeviceRequest(session, path, { method: 'POST', body: {} }, io);
   const link = session.url + '/#device=' + pending.locator + '.' + pending.secret;
-  io.say('Pair your phone once: ' + link);
-  try { io.say(terminalQr(link)); }
-  catch (error) { if (error.code !== 'PAIR_LINK_LONG') throw error; io.say('Open the pairing link above.'); }
   let interrupted = false;
-  /** End foreground pairing without discarding successful board links or saving a partial device. */
+  let pairingOutcome = 'expired';
+  let pairingCleanup = 'not-published';
+  let locatorMayExist = false;
+  let deviceId;
+  /** Stop foreground polling without discarding successful board links or saving a partial device. */
   const stop = () => { interrupted = true; };
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
   try {
-    while (!interrupted && Date.now() < pending.expires) {
-      const result = await relayDeviceRequest(session, path, {}, io);
-      if (interrupted) break;
+    locatorMayExist = true;
+    try { await relayDeviceRequest(session, path, { method: 'POST', body: {}, signal }, io); }
+    catch (error) {
+      if (signal?.aborted && error.code === 'OAUTH_CANCELLED') pairingOutcome = 'cancelled';
+      else throw error;
+    }
+    if (signal?.aborted || interrupted) pairingOutcome = 'cancelled';
+    else if (onPairingURL) onPairingURL({ url: link, expires: pending.expires });
+    else {
+      io.say('Pair your phone once: ' + link);
+      try { io.say(terminalQr(link)); }
+      catch (error) { if (error.code !== 'PAIR_LINK_LONG') throw error; io.say('Open the pairing link above.'); }
+    }
+    while (!signal?.aborted && !interrupted && Date.now() < pending.expires) {
+      let result;
+      try { result = await relayDeviceRequest(session, path, { signal }, io); }
+      catch (error) {
+        if (signal?.aborted && error.code === 'OAUTH_CANCELLED') { pairingOutcome = 'cancelled'; break; }
+        throw error;
+      }
+      if (signal?.aborted || interrupted) { pairingOutcome = 'cancelled'; break; }
       if (result.enrollment) {
+        // Cancellation may prevent acceptance only before its asynchronous authentication starts.
+        if (signal?.aborted) { pairingOutcome = 'cancelled'; break; }
         const device = await acceptDeviceEnrollment(result.enrollment);
         await relayDeviceRequest(session, '/api/v1/devices/' + device.deviceId, { method: 'POST', body: {} }, io);
         await relayDeviceRequest(session, path, { method: 'DELETE' }, io);
+        locatorMayExist = false;
+        pairingCleanup = 'confirmed';
         for (const project of linked) await deliverDeviceWraps(project.root, io);
         io.say('Phone paired; current and future linked boards will appear here.');
-        return { paired: true, deviceId: device.deviceId };
+        deviceId = device.deviceId;
+        pairingOutcome = 'paired';
+        break;
       }
-      await new Promise(resolve => { setTimeout(resolve, 500); });
+      await waitForPairingPoll(signal);
     }
-    io.say('Boards linked; phone pairing stopped. Run pullboard relay on --all for a fresh code.');
-    return { paired: false, interrupted };
+    if (pairingOutcome !== 'paired' && (signal?.aborted || interrupted)) pairingOutcome = 'cancelled';
   } finally {
     process.off('SIGINT', stop); process.off('SIGTERM', stop);
-    updateRelayMachine(state => { if (state.pending?.locator === pending.locator) state.pending = null; });
-    // Best-effort remove the public locator. Its relay lifetime remains ten minutes on an outage.
-    try { await relayDeviceRequest(session, path, { method: 'DELETE' }, io); } catch { /* Never undo completed links after a pairing timeout. */ }
+    try { updateRelayMachine(state => { if (state.pending?.locator === pending.locator) state.pending = null; }); }
+    finally {
+      if (locatorMayExist) {
+        // Cleanup is independent of the caller's aborted signal; never claim deletion if unconfirmed.
+        try {
+          await relayDeviceRequest(session, path, { method: 'DELETE' }, io);
+          pairingCleanup = 'confirmed';
+        } catch { pairingCleanup = 'unconfirmed'; }
+      }
+    }
   }
+  if (pairingOutcome === 'paired') return { paired: true, deviceId, pairingOutcome, pairingCleanup };
+  io.say((onPairingURL
+    ? `Boards linked; phone pairing ${pairingOutcome}. Run pullboard relay on --all for a fresh code.`
+    : 'Boards linked; phone pairing stopped. Run pullboard relay on --all for a fresh code.')
+    + (pairingCleanup === 'unconfirmed' ? ' The relay may retain this request until it expires.' : ''));
+  return { paired: false, interrupted: interrupted || Boolean(signal?.aborted), pairingOutcome, pairingCleanup };
 }
 
 /** Explicit foreground sign-in repairs links; only board machine credentials survive this command. */
-export async function relayOnAll(address, io) {
+export async function relayOnAll(address, io, { signal, onPairingURL, onSignIn, onLinking, onBoardOutcome } = {}) {
   requirePersonChannel(io.personChannel);
-  const prior = readRelayMachine();
-  // Scrub every registered legacy link before asking for or using fresh person authority.
-  for (const project of listApiProjects()) { try { relayMachineContext(project.root); } catch { /* linkProjects reports invalid projects. */ } }
-  const session = await relayMachineSignIn(address || prior.owner?.url, io);
+  // A cancelled or declined sign-in must not migrate machine state or scrub existing board links.
+  const owner = relayMachineOwner();
+  const session = await relayMachineSignIn(address || owner?.url, io, { signal, onSignIn });
+  if (session.outcome) return session;
+  if (signal?.aborted) {
+    await revokeRelayPersonSession(session, io);
+    return { outcome: 'cancelled' };
+  }
+  try { await flushRevocations(session, io); }
+  catch (error) {
+    if (!signal?.aborted) throw error;
+    await revokeRelayPersonSession(session, io);
+    return { outcome: 'cancelled' };
+  }
+  if (signal?.aborted) {
+    await revokeRelayPersonSession(session, io);
+    return { outcome: 'cancelled' };
+  }
+  // From this synchronous commit point onward the first board-link attempt is underway; later
+  // cancellation must not claim that already-started link writes were rolled back.
+  onLinking?.();
   updateRelayMachine(state => { state.autoLink = true; state.owner = { account: session.account, url: session.url }; state.approvals = []; });
-  await flushRevocations(session, io);
-  const result = await linkProjects(session, io);
+  const result = await linkProjects(session, io, { onBoardOutcome });
   const devices = readRelayMachine().devices.filter(device => device.account === session.account && device.url === session.url);
   const pairing = devices.length || !result.linked.length ? { paired: devices.length > 0 }
-    : await pairFirstDevice(session, result.linked[0].board, result.linked, io);
+    : await pairFirstDevice(session, result.linked[0].board, result.linked, io, { signal, onPairingURL });
   return { ...result, ...pairing, autoLink: true };
+}
+
+// These operations belong to this view process. No ticket, person session, or pairing URL is
+// serialized into the machine record or returned as part of an operation's public status.
+const viewSignIns = new Map();
+const VIEW_INTENT_LIMIT = 32;
+const VIEW_RESULT_LIFETIME_MS = 10 * 60_000;
+const VIEW_TERMINAL_STATES = new Set(['done', 'declined', 'expired', 'cancelled', 'pairing-stopped']);
+
+/** Forget finished operations after a bounded retention period without disturbing live cleanup. */
+function pruneViewSignIns() {
+  const now = Date.now();
+  for (const [id, operation] of viewSignIns) {
+    if (operation.finishedAt && now - operation.finishedAt >= VIEW_RESULT_LIFETIME_MS) viewSignIns.delete(id);
+  }
+  while (viewSignIns.size >= VIEW_INTENT_LIMIT) {
+    const finished = [...viewSignIns].find(([, operation]) => operation.finishedAt);
+    if (!finished) break;
+    viewSignIns.delete(finished[0]);
+  }
+}
+
+/** Read a process-local operation without accepting an arbitrary relay ticket or person credential. */
+function viewSignInIntent(intentId) {
+  pruneViewSignIns();
+  const operation = typeof intentId === 'string' && viewSignIns.get(intentId);
+  if (!operation) throw new Refused('VIEW_SIGN_IN_UNKNOWN', 'this view sign-in is no longer available; start sign-in again');
+  return operation;
+}
+
+/** Return only public outcomes, never the private controller, ticket, or pairing capability. */
+function viewSignInPublic(operation) {
+  return {
+    state: operation.state,
+    boards: operation.boards.map(board => ({ ...board })),
+    ...(operation.error ? { error: { ...operation.error } } : {}),
+    ...(operation.pairingCleanup ? { pairingCleanup: operation.pairingCleanup } : {}),
+  };
+}
+
+/** Keep upstream diagnostics useful without reflecting a bearer accidentally included in an error. */
+function viewSignInReason(message) {
+  return String(message).replace(/\b(?:ps_|pa_|pm_|pd_|pg_|ghu_|ghs_)[A-Za-z0-9_-]{20,}\b/gu, '[redacted credential]');
+}
+
+/** Validate the provider's public device instructions before the view opens a browser address. */
+function viewDeviceInstructions(flow) {
+  let verification;
+  let relay;
+  try { verification = new URL(flow.verificationURL); relay = new URL(flow.relayUrl); } catch { /* Refuse below. */ }
+  const loopback = hostname => ['127.0.0.1', 'localhost', '[::1]'].includes(hostname);
+  if (!verification || !relay || verification.username || verification.password || verification.hash
+    || !((verification.protocol === 'https:' && verification.hostname === 'github.com'
+      && verification.port === '' && verification.pathname === '/login/device' && !verification.search)
+      || (verification.protocol === 'http:' && loopback(verification.hostname)
+        && relay.protocol === 'http:' && loopback(relay.hostname) && verification.pathname === '/login/device' && !verification.search))
+    || typeof flow.userCode !== 'string' || !/^[\x21-\x7e]{1,128}$/u.test(flow.userCode)
+    || !Number.isSafeInteger(flow.expiresAt) || flow.expiresAt <= Date.now()) {
+    throw new Refused('VIEW_SIGN_IN_RESPONSE', 'the relay returned invalid sign-in instructions; check its address and start again');
+  }
+  return { verificationURL: verification.href, userCode: flow.userCode, expiresAt: flow.expiresAt };
+}
+
+/** Start the existing device flow in RAM; the view receives only its public link, code and id. */
+export async function startViewSignIn({ relayUrl, signal } = {}) {
+  if (signal?.aborted) throw new Refused('OAUTH_CANCELLED', 'sign-in was cancelled before it started; no board was linked');
+  pruneViewSignIns();
+  if ([...viewSignIns.values()].some(operation => !operation.finishedAt)) {
+    throw new Refused('VIEW_SIGN_IN_BUSY', 'this view is already signing in; finish or cancel that sign-in first');
+  }
+  const intentId = randomUUID();
+  const operation = { state: 'waiting', boards: [], controller: new AbortController(), pairing: null, finishedAt: null };
+  const abortStarting = () => operation.controller.abort();
+  signal?.addEventListener('abort', abortStarting, { once: true });
+  viewSignIns.set(intentId, operation);
+  let resolveReady;
+  let rejectReady;
+  let published = false;
+  const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+  // The established linking path still owns authorization and pairing. Its terminal IO is a
+  // sink; progress enters this operation only through typed callbacks, never parsed text.
+  const io = { personChannel: 'view', say() {}, err() {}, stderr: { write() {} } };
+  operation.finished = Promise.resolve().then(() => relayOnAll(relayUrl, io, {
+    signal: operation.controller.signal,
+    onSignIn(flow) {
+      let instructions;
+      try { instructions = viewDeviceInstructions(flow); }
+      catch (error) { operation.controller.abort(); rejectReady(error); throw error; }
+      published = true;
+      resolveReady({ intentId, ...instructions });
+    },
+    onLinking() { operation.state = 'linking'; },
+    onBoardOutcome(board) {
+      operation.boards = operation.boards.filter(prior => prior.root !== board.root);
+      operation.boards.push({ ...board, reason: viewSignInReason(board.reason) });
+    },
+    onPairingURL(pairing) { operation.state = 'pairing'; operation.pairing = { ...pairing }; },
+  })).then(result => {
+    operation.state = result.outcome ?? (result.pairingOutcome && result.pairingOutcome !== 'paired' ? 'pairing-stopped' : 'done');
+    if (result.pairingCleanup) operation.pairingCleanup = result.pairingCleanup;
+    if (result.pairingCleanup === 'unconfirmed') operation.error = { code: 'VIEW_PAIRING_CLEANUP',
+      message: 'boards remain linked; the relay could not confirm phone-pairing cleanup and may retain the request until it expires' };
+    if (!published) rejectReady(new Refused(result.outcome === 'cancelled' ? 'OAUTH_CANCELLED' : 'VIEW_SIGN_IN_STOPPED',
+      'sign-in stopped before instructions were available; no board was linked'));
+  }, error => {
+    operation.state = 'done';
+    operation.error = { code: error instanceof Refused ? error.code : 'VIEW_SIGN_IN_FAILED',
+      message: error instanceof Refused ? viewSignInReason(error.message) : 'sign-in could not finish; check the relay and try again' };
+    if (!published) rejectReady(error);
+  }).finally(() => {
+    operation.pairing = null;
+    operation.finishedAt = Date.now();
+  });
+  try { return await ready; }
+  catch (error) {
+    // A rejected instruction response must not hide a later failure to cancel its real ticket.
+    await operation.finished;
+    if (operation.error?.code === 'OAUTH_CLEANUP') throw new Refused(operation.error.code, operation.error.message);
+    throw error;
+  } finally { signal?.removeEventListener('abort', abortStarting); }
+}
+
+/** Poll only public operation progress; core, not the browser, polls the private relay ticket. */
+export function viewSignInStatus(intentId) {
+  return viewSignInPublic(viewSignInIntent(intentId));
+}
+
+/** Give the authenticated view server a transient pairing redirect, never a JSON status field. */
+export function viewSignInPairingNavigation(intentId) {
+  const operation = viewSignInIntent(intentId);
+  if (operation.controller.signal.aborted || operation.state !== 'pairing' || !operation.pairing || operation.pairing.expires <= Date.now()) {
+    throw new Refused('VIEW_PAIRING_NOT_READY', 'phone pairing is not waiting; read this sign-in’s current status');
+  }
+  return { ...operation.pairing };
+}
+
+/** Cancel and await actual cleanup, preserving linked boards if linking already began. */
+export async function cancelViewSignIn(intentId) {
+  const operation = viewSignInIntent(intentId);
+  if (operation.state === 'linking') {
+    throw new Refused('VIEW_SIGN_IN_LINKING', 'board linking has started and will finish as one batch; stop phone pairing when it begins');
+  }
+  if (!VIEW_TERMINAL_STATES.has(operation.state)) {
+    // Stop publishing the capability synchronously; remote deletion may still be pending.
+    operation.pairing = null;
+    operation.controller.abort();
+  }
+  await operation.finished;
+  return viewSignInPublic(operation);
 }

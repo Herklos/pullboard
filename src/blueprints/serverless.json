@@ -1,0 +1,23 @@
+{
+  "blueprint": 1,
+  "name": "serverless",
+  "title": "Serverless",
+  "version": 1,
+  "kind": "infrastructure",
+  "by": "Pullboard",
+  "summary": "Pick your cloud once, and your agents never drift from it.",
+  "prefix": "SV",
+  "rules": [
+    { "key": "SV1", "text": "Every function has an alarm before it ships.", "why": "a function that fails quietly is found by your users first." },
+    { "key": "SV2", "text": "No function runs past its platform's time limit.", "why": "the platform stops a function at its limit, so longer work has to be split before it fails in production." }
+  ],
+  "questions": [
+    { "key": "Q1", "ask": "It runs on", "choices": ["AWS", "Google Cloud", "Azure", "Cloudflare"], "default": "AWS" },
+    { "key": "Q2", "ask": "Its region is", "choices": ["The one nearest my users", "A US region", "An EU region", "Another region"], "default": "The one nearest my users" },
+    { "key": "Q3", "ask": "Its database is", "choices": ["A managed key-value store", "A managed SQL database", "None yet"], "default": "A managed key-value store" }
+  ],
+  "items": [
+    { "key": "1", "title": "Every function has an alarm", "cites": ["SV1", "Q1"], "criterion": "The infrastructure code defines an error alarm for every function it deploys. test/alarms.test.js reads the infrastructure definition, fails on a function without an alarm, and fails before the change.", "brief": "Files:\n- the infrastructure definition\n- test/alarms.test.js\nTest:\n- test/alarms.test.js lists every function in the infrastructure definition and fails on one without an error alarm", "check": "npm test -- test/alarms.test.js" },
+    { "key": "2", "title": "Every function stops before its platform's time limit", "cites": ["SV2", "Q1"], "criterion": "Every function sets a timeout below the time limit of the platform it runs on. test/timeouts.test.js reads each function's timeout and fails before the change.", "brief": "Files:\n- the infrastructure definition\n- test/timeouts.test.js\nTest:\n- test/timeouts.test.js compares each function's timeout with its platform's limit", "check": "npm test -- test/timeouts.test.js" }
+  ]
+}

@@ -8,8 +8,16 @@ export const AGENT_SHELL_MARKERS = Object.freeze([
   'CODEX_THREAD_ID', 'CODEX_SESSION_ID', 'CODEX_CI', 'CODEX_SHELL',
 ]);
 
-/** SSH transport markers removed from test child environments that act as the person. */
+/** SSH transport markers: any one names a remote shell, and test children acting as the person drop them all. */
 export const SSH_SHELL_MARKERS = Object.freeze(['SSH_CONNECTION', 'SSH_CLIENT', 'SSH_TTY']);
+
+/**
+ * Tell whether this shell arrived over SSH by any of its markers [B26].
+ * One list serves the person check and relay on's SSH path, so a marker one honours the other honours too.
+ */
+export function remoteShell(environment = process.env) {
+  return SSH_SHELL_MARKERS.some((name) => Boolean(environment[name]));
+}
 
 /** Session identifiers belong beside the shell markers; only their digest reaches the local checkout binding. */
 export const AGENT_SESSION_IDS = Object.freeze(['CLAUDE_CODE_SESSION_ID', 'CODEX_THREAD_ID', 'CODEX_SESSION_ID']);
@@ -30,8 +38,19 @@ export function requirePersonChannel(channel = 'terminal', environment = process
   if (channel === 'terminal' && AGENT_SHELL_MARKERS.some((name) => Boolean(environment[name]))) {
     throw new Refused('B26_PERSON_CHANNEL', 'this terminal belongs to an agent; run pullboard view, the person’s channel, and let the person act there');
   }
-  if (channel === 'terminal' && (environment.SSH_CONNECTION || environment.SSH_TTY)) {
+  if (channel === 'terminal' && remoteShell(environment)) {
     throw new Refused('B26_PERSON_CHANNEL', 'this is a remote SSH shell, not the person’s terminal; run pullboard view, the person’s channel, and let the person act there');
+  }
+  return channel;
+}
+
+/** Permit only relay-on's SSH device flow for a person; agent terminals stay refused. */
+export function requireRelayOnChannel(channel = 'terminal', environment = process.env) {
+  if (!['terminal', 'view'].includes(channel)) {
+    throw new Refused('B26_PERSON_CHANNEL', 'person actions use the terminal or the view; run pullboard view, the person’s channel');
+  }
+  if (channel === 'terminal' && AGENT_SHELL_MARKERS.some((name) => Boolean(environment[name]))) {
+    throw new Refused('B26_PERSON_CHANNEL', 'this terminal belongs to an agent; run pullboard view, the person’s channel, and let the person act there');
   }
   return channel;
 }

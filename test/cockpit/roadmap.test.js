@@ -115,14 +115,13 @@ test('the roadmap reads every item as the Items tab does, opens each one, anothe
   box.run(alpha.repo, 'milestone', 'add', 'Later', '--note', 'Ideas not filed yet.');
   // What the person reads on each row: the Items tab's word for the item's state, and its colour's class.
   const words = [
-    { id: '#1', label: 'verified', tone: 'ok' },
-    { id: '#2', label: 'verified', tone: 'ok' },
     { id: '#3', label: 'sent back', tone: 'no' },
     { id: '#4', label: 'to verify', tone: 'warn' },
     { id: 'beacon#1', label: 'sent back', tone: 'no' },
+    { id: '#1', label: 'verified', tone: 'ok' },
+    { id: '#2', label: 'verified', tone: 'ok' },
     { id: '#5', label: 'building', tone: 'busy' },
     { id: '#6', label: 'unclaimed', tone: 'free' },
-    { id: '#7', label: 'withdrawn', tone: '' },
   ];
   const view = await startView(box);
   const roadmapPath = '/roadmap-demo/roadmap';
@@ -154,12 +153,12 @@ test('the roadmap reads every item as the Items tab does, opens each one, anothe
       assert.ok(seen.document <= seen.client && seen.body <= seen.client, `${width}: no sideways scroll: ${JSON.stringify(seen)}`);
       assert.deepEqual(seen.cards.map((card) => card.name), ['Launch', 'Next', 'Later'], `${width}: a card for each milestone, in order`);
       assert.deepEqual(seen.cards.map((card) => card.note), ['Ships when the review lands; your call on the name.', 'Queued behind Launch.', 'Ideas not filed yet.'], `${width}: each card's note`);
-      assert.deepEqual(seen.cards.map((card) => [card.count, card.progress, card.filled]), [['2/5 done', [2, 5], 0.4], ['0/3 done', [0, 3], 0], [null, null, null]], `${width}: counts and bars say how many items are verified`);
+      assert.deepEqual(seen.cards.map((card) => [card.count, card.progress, card.filled]), [['2/5 done', [2, 5], 0.4], ['0/2 done', [0, 2], 0], [null, null, null]], `${width}: counts and bars say how many visible items are verified`);
       assert.deepEqual([seen.cards[2].empty, seen.cards[2].rows.length], ['No items yet.', 0], `${width}: an empty milestone says so, with no bar or count`);
       const rows = seen.cards.flatMap((card) => card.rows);
       assert.deepEqual(rows.map(({ id, label, tone }) => ({ id, label, tone })), words, `${width}: each chip shows the word and colour the Items tab gives its item's state`);
       assert.ok(rows.every((row) => row.seen), `${width}: every chip is on screen`);
-      assert.deepEqual(rows.map((row) => row.title), [...titles.slice(0, 4), 'Billing webhook retries', ...titles.slice(4)], `${width}: each row names its item`);
+      assert.deepEqual(rows.map((row) => row.title), [titles[2], titles[3], 'Billing webhook retries', titles[0], titles[1], titles[4], titles[5]], `${width}: unfinished work precedes verified items in each milestone`);
       assert.deepEqual(rows.map((row) => row.tip), rows.map((row) => row.title), `${width}: each row's tooltip is its whole title`);
       assert.ok(rows.every((row) => row.lines === 1 && row.ellipsis), `${width}: every title holds one line, set to end in an ellipsis: ${JSON.stringify(rows)}`);
       assert.ok(rows.find((row) => row.id === '#6').cut, `${width}: the long title is cut, so its ellipsis shows`);
@@ -247,6 +246,70 @@ test('the roadmap reads every item as the Items tab does, opens each one, anothe
   }
 });
 
+test('a milestone lists work to ship first, shipped below, and no withdrawn items [N26]', { timeout: 90_000 }, async (t) => {
+  const executable = chromeExecutable();
+  assert.ok(executable, 'Chrome is required for shipping-order checks.');
+  const box = machine();
+  const alpha = project(box, 'shipping-rows');
+  for (const title of ['First verified', 'First open', 'Second verified', 'Dropped idea', 'Second open']) {
+    box.run(alpha.repo, 'add', 'web', title, '--specs', 'G1', '--criterion', 'renders');
+  }
+  for (const id of [1, 3]) { build(box, alpha, id, `page-${id}.html`); accept(box, alpha, id); }
+  box.run(alpha.repo, 'withdraw', '4', 'not needed');
+  box.run(alpha.repo, 'milestone', 'add', 'Next', '--items', '3,2,4,1,5');
+  box.run(alpha.repo, 'milestone', 'add', 'Shipped', '--items', '1,4,3');
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-shipping-rows-chrome-'));
+  let chrome;
+  /** Read the actual row order and every visible-count consumer, including folded history. */
+  const read = async () => JSON.parse(await chrome.stable(`JSON.stringify((() => {
+    const next = document.querySelector('#roadmap-list > [data-key="m:Next"]');
+    const progress = next.querySelector('[role=progressbar]');
+    const shipped = document.querySelector('#roadmap .shipped-one[data-key="m:Shipped"]');
+    return {
+      rows: [...next.querySelectorAll(':scope > .milestone-body > ul .milestone-item .id')].map(id => id.textContent),
+      count: next.querySelector('.milestone-count').textContent,
+      progress: [progress.getAttribute('aria-valuenow'), progress.getAttribute('aria-valuemax')],
+      index: document.querySelector('#roadmap-panel [data-roadmap-jump="m:Next"] b').textContent,
+      status: document.querySelector('[data-status=release]').textContent.replace(/\\s+/g, ' ').trim(),
+      openCounts: [...document.querySelectorAll('[data-shipping-stage=open] dd')].map(count => count.textContent),
+      shippedCount: shipped.querySelector('.milestone-count').textContent,
+      shippedRows: [...shipped.querySelectorAll(':scope > .milestone-body > ul .milestone-item .id')].map(id => id.textContent),
+      allIds: [...document.querySelectorAll('#roadmap .milestone-item .id')].map(id => id.textContent),
+    };
+  })())`));
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.waitFor('data?.project?.milestones?.length === 2');
+    await press(chrome, "document.querySelector('[data-tab=roadmap]')");
+    await chrome.waitFor("!document.querySelector('[data-pane=roadmap]').hidden && document.querySelector('#roadmap-list > [data-key=\"m:Next\"]')");
+    for (const width of [375, 1280]) {
+      await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
+      await chrome.waitFor(`innerWidth === ${width}`);
+      const seen = await read();
+      assert.deepEqual(seen.rows, ['#2', '#5', '#3', '#1'], `${width}: each group keeps milestone order, with work to ship before verified items`);
+      assert.equal(seen.count, '2/4 done', `${width}: withdrawn work is absent from the card count`);
+      assert.deepEqual(seen.progress, ['2', '4'], `${width}: progress counts only retained items`);
+      assert.equal(seen.index, '2/4', `${width}: the release index uses the same count`);
+      assert.equal(seen.status, 'Next 2/4', `${width}: the status bar names the same next release and count`);
+      assert.deepEqual(seen.openCounts, ['2', '2'], `${width}: desktop and mobile shipping counts include both open items`);
+      assert.equal(seen.shippedCount, '2 items', `${width}: folded history excludes withdrawn work from its total`);
+      assert.equal(seen.allIds.includes('#4'), false, `${width}: no withdrawn row is rendered, including folded history`);
+      await press(chrome, "document.querySelector('#roadmap-list > [data-key=shipped] > .milestone-head')");
+      await press(chrome, "document.querySelector('#roadmap .shipped-one[data-key=\"m:Shipped\"] > .milestone-head')");
+      await chrome.waitFor("document.querySelector('#roadmap .shipped-one[data-key=\"m:Shipped\"] > .milestone-head').getAttribute('aria-expanded') === 'true'");
+      assert.deepEqual((await read()).shippedRows, ['#1', '#3'], `${width}: verified history remains available below the work to ship`);
+      await press(chrome, "document.querySelector('#roadmap .shipped-one[data-key=\"m:Shipped\"] > .milestone-head')");
+      await press(chrome, "document.querySelector('#roadmap-list > [data-key=shipped] > .milestone-head')");
+    }
+    assert.deepEqual(chrome.exceptions, [], 'the shipping roadmap raises no uncaught page exception');
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    rmSync(profile, { recursive: true, force: true });
+    await view.stop();
+  }
+});
+
 test('the roadmap leads with the next release and folds shipped ones [N26]', { timeout: 150_000 }, async (t) => {
   const executable = chromeExecutable();
   if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME for roadmap browser checks.');
@@ -323,13 +386,13 @@ test('the roadmap leads with the next release and folds shipped ones [N26]', { t
         const expanded = await read();
         const history = expanded.parts.find((part) => part.key === 'shipped');
         assert.deepEqual(history.shipped.map((one) => [one.key, one.open, one.summary]), [
-          ['m:0.2', false, '0.2 | Shipped on Tuesday. | 2 items'],
+          ['m:0.2', false, '0.2 | Shipped on Tuesday. | 1 item'],
           ['m:0.1', false, '0.1 | The first page. | 1 item'],
         ], at + ': shipped names, first note line and counts in reverse roadmap order');
         assert.ok(history.shipped.every((one) => one.height >= 44), at + ': shipped targets are at least 44px');
         assert.ok(expanded.page.scroll <= expanded.page.width && expanded.page.body <= expanded.page.width, at + ': expanded history has no sideways scroll');
         await click('#roadmap .shipped-one[data-key="m:0.2"] > .milestone-head');
-        assert.deepEqual((await read()).parts.find((part) => part.key === 'shipped').shipped[0].rows, ['#2', '#6'], at + ': verified and withdrawn items remain readable');
+        assert.deepEqual((await read()).parts.find((part) => part.key === 'shipped').shipped[0].rows, ['#2'], at + ': verified items remain readable and withdrawn work is absent');
         await proofShot(chrome, 'releases', width);
         await click('#roadmap .shipped-one[data-key="m:0.2"] > .milestone-head');
         await click('#roadmap-list > [data-key="shipped"] > .milestone-head');
@@ -348,13 +411,13 @@ test('the roadmap leads with the next release and folds shipped ones [N26]', { t
     let r = await read();
     const shipped = r.parts.find((part) => part.key === 'shipped');
     assert.deepEqual(shipped.shipped.map((one) => [one.key, one.open, one.summary]), [
-      ['m:0.2', false, '0.2 | Shipped on Tuesday. | 2 items'],
+      ['m:0.2', false, '0.2 | Shipped on Tuesday. | 1 item'],
       ['m:0.1', false, '0.1 | The first page. | 1 item'],
     ], 'newest first, each one line, closed');
     assert.ok(shipped.shipped.every((one) => one.height >= 44), 'each a 44px target');
     await click('#roadmap .shipped-one[data-key="m:0.2"] > .milestone-head');
     r = await read();
-    assert.deepEqual(r.parts.find((part) => part.key === 'shipped').shipped.find((one) => one.key === 'm:0.2').rows, ['#2', '#6'], 'a shipped release opens to its items');
+    assert.deepEqual(r.parts.find((part) => part.key === 'shipped').shipped.find((one) => one.key === 'm:0.2').rows, ['#2'], 'a shipped release opens to its verified items');
     await click('#roadmap .shipped-one[data-key="m:0.2"] .milestone-item[data-go="item:2"]');
     await chrome.waitFor("view.tab === 'items' && document.querySelector('#detail h2')?.textContent.includes('Second page')");
 
@@ -442,6 +505,51 @@ test('the roadmap keeps every upcoming release open [N26]', {
     await view.stop();
   }
 });
+
+/** Record target identity, geometry and native events without changing the Roadmap's input path. */
+async function watchRoadmapPress(chrome, key) {
+  await chrome.stable(`(() => {
+    const selector = '#roadmap-panel [data-roadmap-jump=' + CSS.escape(${JSON.stringify(key)}) + ']';
+    let original = document.querySelector(selector);
+    const originalRender = window.render;
+    const nodeIds = new WeakMap(); let nextNodeId = 0;
+    const nodeId = node => { if (!node) return null; if (!nodeIds.has(node)) nodeIds.set(node, ++nextNodeId); return nodeIds.get(node); };
+    const trace = window.__roadmapPress = { original, originalRender, samples:[], events:[] };
+    /** Keep bounded observations of the live target and its original node. */
+    const record = phase => {
+      const current = document.querySelector(selector), box = current?.getBoundingClientRect();
+      const panel = document.querySelector('#roadmap-panel'), list = document.querySelector('#roadmap-list');
+      trace.samples.push({ phase, at:performance.now(), connected:original.isConnected, same:current === original,
+        box:box ? [box.x,box.y,box.width,box.height] : null, scroll:[scrollX,scrollY],
+        panelId:nodeId(panel), panelCount:panel?.querySelectorAll('[data-roadmap-jump]').length,
+        listId:nodeId(list), listCount:list?.querySelectorAll(':scope > [data-key]').length,
+        panelScroll:panel?.scrollTop, count:current?.querySelector('b')?.textContent, deferred:deferredClickRender });
+      if (trace.samples.length > 8) trace.samples.shift();
+    };
+    trace.record = record;
+    window.render = function(...args) { record('before render'); const result = originalRender.apply(this,args); record('after render'); return result; };
+    trace.listeners = ['pointermove','pointerdown','pointerup','click'].map(type => {
+      const listener = event => {
+        const button = event.target.closest?.('[data-roadmap-jump]');
+        if (type === 'pointerdown' && button?.dataset.roadmapJump === ${JSON.stringify(key)}) { original = button; trace.original = button; }
+        record(type); trace.events.push({ type, key:button?.dataset.roadmapJump || null });
+        if(trace.events.length > 8) trace.events.shift();
+      };
+      document.addEventListener(type, listener, true); return [type,listener];
+    });
+    record('watch');
+  })()`);
+  return {
+    /** Read only bounded samples and event keys, never retain DOM objects in the host. */
+    async snapshot() {
+      return JSON.parse(await chrome.stable(`JSON.stringify((() => { const t=window.__roadmapPress; t.record('snapshot'); return {samples:t.samples,events:t.events}; })())`));
+    },
+    /** Restore the actual renderer and remove only this observer's event listeners. */
+    async dispose() {
+      await chrome.stable(`(() => { const t=window.__roadmapPress; if(!t)return; window.render=t.originalRender; for(const [type,listener] of t.listeners)document.removeEventListener(type,listener,true); delete window.__roadmapPress; })()`);
+    },
+  };
+}
 
 test('the roadmap panel jumps to each release [N26]', {
   timeout: 150_000, //budget: hang ceiling for real Chrome startup, fourteen jumps at two widths, and panel scrolling.
@@ -563,6 +671,61 @@ test('the roadmap panel jumps to each release [N26]', {
     if (chrome) await closeSnapshotChrome(chrome);
     rmSync(profile, { recursive: true, force: true });
     await view.stop();
+  }
+});
+
+test('a refresh between pointer down and up preserves a roadmap release click [N26,C7]', {
+  timeout: 90_000, // budget: hang ceiling for real board setup, Chrome and two pointer-held board refreshes.
+}, async (t) => {
+  const executable = chromeExecutable();
+  assert.ok(executable, 'Chrome is required for the Roadmap refresh control.');
+  const box = machine(), demo = project(box, 'roadmap-refresh-press');
+  for (const name of ['0.8.7','0.8.8','0.8.9','0.8.10','0.8.11','0.8.12','0.8.13','0.8.14']) {
+    box.run(demo.repo, 'milestone', 'add', name, '--note', 'Release navigation control.');
+  }
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-roadmap-refresh-press-'));
+  let chrome, trace;
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.waitFor('data?.project?.milestones?.length === 8');
+    for (const width of [375,1280]) {
+      await chrome.send('Emulation.setDeviceMetricsOverride', { width, height:900, deviceScaleFactor:1, mobile:false });
+      await press(chrome, "document.querySelector('[data-tab=roadmap]')");
+      const key = 'm:0.8.7';
+      trace = await watchRoadmapPress(chrome, key);
+      const message = `roadmap refresh while pointer held ${width}`;
+      let held;
+      await press(chrome, `document.querySelector('#roadmap-panel [data-roadmap-jump="${key}"]')`, {
+        afterMouseDown: async () => {
+          box.run(demo.repo, 'shout', 'person', message);
+          await chrome.waitFor(`data.project.shouts.some(shout => shout.shout_text === ${JSON.stringify(message)})`);
+          held = await trace.snapshot();
+          t.diagnostic(`${width}: held refresh: ${JSON.stringify(held)}`);
+        },
+      });
+      await chrome.waitFor(`document.querySelector('#feed')?.textContent.includes(${JSON.stringify(message)})`);
+      const released = await trace.snapshot();
+      t.diagnostic(`${width}: released: ${JSON.stringify(released)}`);
+      assert.ok(held.samples.some(sample => sample.phase === 'after render'), `${width}: the real board refresh attempted a render while held`);
+      assert.ok(held.samples.at(-1).connected && held.samples.at(-1).same, `${width}: the pressed button survives the refresh`);
+      assert.ok(held.samples.at(-1).deferred, `${width}: the render waits until the pointer release`);
+      assert.ok(released.events.some(event => event.type === 'click' && event.key === key), `${width}: the release produces the intended native click`);
+      const reached = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+        const target=document.querySelector('#roadmap-list [data-key="${key}"]'), r=target.getBoundingClientRect();
+        return {top:r.top,bottom:r.bottom,bar:document.querySelector('.top').getBoundingClientRect().bottom,
+          current:document.querySelector('#roadmap-panel [data-roadmap-jump="${key}"]').getAttribute('aria-current')};
+      })())`));
+      assert.ok(reached.bottom > reached.bar && reached.top < 900, `${width}: the selected release is visible: ${JSON.stringify(reached)}`);
+      assert.equal(reached.current, 'location', `${width}: the panel marks the selected release`);
+      await trace.dispose(); trace = null;
+    }
+  } finally {
+    try { if (trace) await trace.dispose(); }
+    finally {
+      try { if(chrome) await closeSnapshotChrome(chrome); }
+      finally { try { await view.stop(); } finally { rmSync(profile,{recursive:true,force:true}); } }
+    }
   }
 });
 

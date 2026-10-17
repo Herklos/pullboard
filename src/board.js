@@ -10,10 +10,13 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { boardNotWritable } from './board-access.js';
 import { briefFiles, briefSections } from './brief.js';
 import { COORDINATOR } from './config.js';
 import { ENGINE_VERSION, GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, effectiveGuards, storeTriggers } from './machine.js';
 import { Refused } from './refused.js';
+import { barCorrectionFields } from './bar-corrections.js';
+import { factFromEvent, requestAnswerRefusal, tellAnswerImplications, tellFactImplications, tellVerdictImplications } from './implies.js';
 import { parseSpec } from './spec.js';
 
 export const ACCEPT_REASON = 'CRITERION_MET';
@@ -191,7 +194,7 @@ export function openBoard(file, clock = systemClock, { isMain } = {}) {
         boardVersion = current.prepare('PRAGMA user_version').get().user_version;
         logVersion = readEventLogVersion(current);
       } catch (error) {
-        throw boardBusyError(file, startedAt, error);
+        throw boardNotWritable(file, boardBusyError(file, startedAt, error));
       } finally {
         current?.close();
       }
@@ -222,7 +225,7 @@ export function openBoard(file, clock = systemClock, { isMain } = {}) {
     return board;
   } catch (error) {
     try { db?.close(); } catch {}
-    throw boardBusyError(file, startedAt, error);
+    throw boardNotWritable(file, boardBusyError(file, startedAt, error));
   }
 }
 
@@ -736,11 +739,11 @@ export function validateItemAddition(board, { by, lane, title, criterion = '', p
  * @param {number} id
  * @param {{ agentId: string, brief?: string, route?: string, criterion?: string, check?: string, after?: number[] }} change
  */
-export function editItem(board, id, { agentId, brief, route, criterion, check, after, checkBaseline }) {
+export function editItem(board, id, { agentId, brief, route, criterion, check, after, checkBaseline, reason }) {
   atomic(board, () => {
     const stored = itemById(board, id);
     const expiredHolder = stored.item_status === 'claimed' && !isHeld(board, stored) ? stored.item_owner : null;
-    const { item, next, command, unfreeze } = validateItemEdit(board, id, { agentId, brief, route, criterion, check, after });
+    const { item, next, command, unfreeze, bar } = validateItemEdit(board, id, { agentId, brief, route, criterion, check, after, reason });
     const baseline = normalizeCheckBaseline(agentId, command, checkBaseline);
     const pendingFields = [
       ...(next.item_criterion !== item.item_criterion ? ['criterion'] : []),
@@ -765,6 +768,7 @@ export function editItem(board, id, { agentId, brief, route, criterion, check, a
       ...(pendingRefreeze ? { pendingRefreeze: pendingFields } : {}),
       ...(clearFrozen && item.item_frozen_digest ? { unfrozen: item.item_frozen_digest } : {}),
       ...(expiredHolder ? { expiredHolder } : {}),
+      ...bar,
     });
     if (pendingRefreeze) {
       insertShout(board, {
@@ -777,8 +781,8 @@ export function editItem(board, id, { agentId, brief, route, criterion, check, a
   });
 }
 
-/** Validate an edit without side effects, so a refused change never starts a shell baseline. */
-export function validateItemEdit(board, id, { agentId, brief, route, criterion, check, after }) {
+/** Validate an edit without side effects, so a refused change never starts a shell baseline; a bar correction needs a reason [B31]. */
+export function validateItemEdit(board, id, { agentId, brief, route, criterion, check, after, reason }) {
   const engine = board.executionEngineVersion ?? ENGINE_VERSION;
   if (after !== undefined && engine < 10) {
     throw new Refused('ENGINE_VERSION', `editing item dependencies requires engine 10; this board uses engine ${engine}; upgrade Pullboard before using --after`);
@@ -822,7 +826,7 @@ export function validateItemEdit(board, id, { agentId, brief, route, criterion, 
   }
   checkRouted({ brief: next.item_brief, route: next.item_route, criterion: next.item_criterion, check: next.item_check });
   const unfreeze = next.item_criterion !== item.item_criterion || next.item_check !== item.item_check;
-  return { item, next, command, unfreeze };
+  return { item, next, command, unfreeze, bar: barCorrectionFields(board, item, next, { reason }) };
 }
 
 /** Normalize an explicitly supplied check only when its author is the coordinator [V2]. */
@@ -1179,10 +1183,13 @@ export function release(board, id, agentId, note = '') {
  *
  * @param {any} board
  * @param {number} id
- * @param {{ agentId: string, commit: string, tree: string, files?: string[], policyCommit?: string }} at - `files`: what the
+ * @param {{ agentId: string, commit: string, tree: string, files?: string[], policyCommit?: string, note?: string }} at - `files`: what the
  *   item's own commits changed since its claim; a rework adds to what the first attempt changed.
  */
-export function submit(board, id, { agentId, commit, tree, files = [], policyCommit = null }) {
+export function submit(board, id, { agentId, commit, tree, files = [], policyCommit = null, note }) {
+  if (note !== undefined && (typeof note !== 'string' || !note.trim() || /[\r\n\u2028\u2029]/u.test(note))) {
+    throw new Refused('USAGE', 'a submission note, when present, is one nonempty line');
+  }
   atomic(board, () => {
     const notYours = () => new Refused('NOT_YOURS', `item #${id} is not claimed by you; claim it first`);
     moveItem(board, id, 'submit', {
@@ -1198,6 +1205,7 @@ export function submit(board, id, { agentId, commit, tree, files = [], policyCom
         withinLane: null,
         trunkMergeClean: null,
         noUnverifiedStack: null,
+        doctrineHolds: null,
         gateConfigured: null,
         gateGreen: null,
         treeStillDuringGate: null,
@@ -1212,7 +1220,8 @@ export function submit(board, id, { agentId, commit, tree, files = [], policyCom
           const rejectedHead = board.db.prepare(
             "SELECT 1 FROM verdict WHERE item_id = ? AND verdict_decision = 'REJECT' AND verdict_commit = ? AND (? < 9 OR verdict_digest = ?) LIMIT 1",
           ).get(id, commit, engineVersion, found.item_frozen_digest);
-          const sameReopenedHead = found.item_verdict === null && found.item_commit === commit;
+          const sameReopenedHead = found.item_verdict === null && found.item_commit === commit
+            && !(engineVersion >= 11 && correctedNoVerdictReopen(board, id, commit));
           return rejectedHead || sameReopenedHead
             ? new Refused('HEAD_NOT_NEW', `#${id} already has a submission at ${commit.slice(0, 12)}; commit the rework first`)
             : null;
@@ -1236,8 +1245,42 @@ export function submit(board, id, { agentId, commit, tree, files = [], policyCom
       tree,
       ...(policyCommit ? { policyCommit } : {}),
       ...(criterionDigest ? { criterionDigest } : {}),
+      ...(note === undefined ? {} : { note: note.trim() }),
     });
   });
+}
+
+/**
+ * True only after a no-verdict reopen followed by an explicit refreeze, or an edit that clears the
+ * old frozen bar followed by a new claim. Reopening a verified landing failure is excluded.
+ *
+ * @param {any} board
+ * @param {number} id
+ * @param {string} commit
+ * @returns {boolean}
+ */
+function correctedNoVerdictReopen(board, id, commit) {
+  const history = board.db.prepare(
+    "SELECT event_id, event_kind, event_detail FROM event WHERE item_id = ? AND event_kind IN ('submit', 'reopen', 'edit', 'refreeze', 'claim') ORDER BY event_id DESC",
+  ).all(id);
+  const boundary = history.findIndex((entry) => entry.event_kind === 'submit' || entry.event_kind === 'reopen');
+  if (boundary < 0 || history[boundary].event_kind !== 'reopen') return false;
+  const reopened = JSON.parse(history[boundary].event_detail);
+  if (reopened.judgment !== null || reopened.supersedes !== undefined) return false;
+
+  const previousSubmission = history.slice(boundary + 1).find((entry) => {
+    if (entry.event_kind !== 'submit') return false;
+    const detail = JSON.parse(entry.event_detail);
+    return detail.commit === commit;
+  });
+  if (!previousSubmission) return false;
+  const afterReopen = history.slice(0, boundary);
+  const latestBarChange = afterReopen.find((entry) => entry.event_kind === 'refreeze'
+    || (entry.event_kind === 'edit' && Object.hasOwn(JSON.parse(entry.event_detail), 'unfrozen')));
+  if (!latestBarChange) return false;
+  if (latestBarChange.event_kind === 'refreeze') return true;
+  return afterReopen.some((entry) => entry.event_kind === 'claim' && entry.event_id > latestBarChange.event_id
+    && Boolean(JSON.parse(entry.event_detail).digest));
 }
 
 /**
@@ -1440,10 +1483,10 @@ function reserveWithin(board, id, { agentId, leaseMs, policy, familyPolicy = 'of
  *
  * @param {any} board
  * @param {number} id
- * @param {{ agentId: string, decision: string, reason?: string, note?: string, head: string, digest: string, policy: string, familyPolicy?: string, check?: 'none' | 'green' }} verdict
+ * @param {{ agentId: string, decision: string, reason?: string, note?: string, head: string, digest: string, policy: string, familyPolicy?: string, check?: 'none' | 'green', implies?: number[], impliesId?: string }} verdict - implies: items this verdict changes (B29)
  * @returns {{ decision: string, reason: string, check?: 'none' | 'green' }}
  */
-export function verify(board, id, { agentId, decision, reason, note = '', head, digest, policy, familyPolicy = 'off', check }) {
+export function verify(board, id, { agentId, decision, reason, note = '', head, digest, policy, familyPolicy = 'off', check, implies, impliesId }) {
   const verb = { ACCEPT: 'accept', REJECT: 'reject' }[decision];
   if (!verb) throw new Refused('BAD_DECISION', 'the decision is accept or reject');
   const isAccept = verb === 'accept';
@@ -1485,7 +1528,8 @@ export function verify(board, id, { agentId, decision, reason, note = '', head, 
     });
     const detail = { reason: code, commit: item.item_commit };
     if (isAccept && check !== undefined) detail.check = check;
-    logEvent(board, agentId, verb, id, detail);
+    logEvent(board, agentId, verb, id, implies?.length ? { ...detail, implies } : detail);
+    tellVerdictImplications(board, (by, itemId, fact) => logEvent(board, by, 'fact', itemId, fact), id, { seed: impliesId, implies });
     return { decision, reason: code, ...(isAccept && check !== undefined ? { check } : {}) };
   });
 }
@@ -1767,10 +1811,10 @@ export function verdictsFor(board, id) {
  * Insert a shout within the caller's transaction.
  *
  * @param {any} board
- * @param {{ from: string, to: string, text: string, lanes: string[], decision?: boolean, answers?: number | null, evidence?: any, request?: boolean, channel?: 'terminal' | 'view' }} message
+ * @param {{ from: string, to: string, text: string, lanes: string[], decision?: boolean, answers?: number | null, evidence?: any, request?: boolean, channel?: 'terminal' | 'view', detail?: object }} message - detail: extra event fields
  * @returns {number}
  */
-function insertShout(board, { from, to, text, lanes, decision = false, answers = null, evidence = null, request = false, channel = 'terminal' }) {
+function insertShout(board, { from, to, text, lanes, decision = false, answers = null, evidence = null, request = false, channel = 'terminal', detail = {} }) {
   if (!text.trim()) throw new Refused('EMPTY_SHOUT', 'a shout needs text');
   if (to === from) throw new Refused('SELF_SHOUT', `a shout cannot be addressed to its sender ${from}; name another agent, a lane or all`);
   if (request && (from !== 'person' || to !== COORDINATOR || decision || answers !== null)) {
@@ -1813,7 +1857,7 @@ function insertShout(board, { from, to, text, lanes, decision = false, answers =
     )
     .run(from, to, text.trim(), now(board), decision ? 1 : 0, answers, evidence?.kind ?? null, evidence ? evidence.outcome.trim() : null, evidence?.item ?? null, evidence?.commit ?? null, request ? 1 : 0, outcome);
   const id = Number(result.lastInsertRowid);
-  logEvent(board, from, answers === null ? 'shout' : decision ? 'pass' : 'answer', null, { shout: id, to, decision: Boolean(decision), request: Boolean(request), answers, ...(outcome ? { outcome } : {}), ...(personAnswer ? { channel } : {}) });
+  logEvent(board, from, answers === null ? 'shout' : decision ? 'pass' : 'answer', null, { shout: id, to, decision: Boolean(decision), request: Boolean(request), answers, ...(outcome ? { outcome } : {}), ...(personAnswer ? { channel } : {}), ...detail });
   return id;
 }
 
@@ -1853,14 +1897,14 @@ export function passDecision(board, id, { agentId, note, lanes }) {
  *
  * @param {any} board
  * @param {number} id
- * @param {{ agentId: string, text: string, lanes: string[], asPerson?: boolean, channel?: 'terminal' | 'view' }} options
+ * @param {{ agentId: string, text: string, lanes: string[], asPerson?: boolean, channel?: 'terminal' | 'view', implies?: number[], supersedes?: number | null, impliesId?: string }} options - implies and supersedes tell items (B29,B31)
  * @returns {number}
  */
-export function answerDecision(board, id, { agentId, text, lanes, asPerson = false, channel = 'terminal' }) {
+export function answerDecision(board, id, { agentId, text, lanes, asPerson = false, channel = 'terminal', implies, supersedes = null, impliesId }) {
   return atomic(board, () => {
     const ask = getShout(board, id);
     if (ask.shout_request) {
-      if (asPerson) throw new Refused('B26_PERSON_ANSWER', `requests are answered by the coordinator; run pullboard answer ${id} done or declined <reason>`);
+      if (asPerson || implies?.length || supersedes !== null) throw requestAnswerRefusal(id, { asPerson });
       return insertShout(board, { from: agentId, to: ask.shout_from, text, lanes, answers: id });
     }
     if (!ask.shout_decision) throw new Refused('NOT_A_DECISION', `shout #${id} asked for no decision`);
@@ -1876,7 +1920,7 @@ export function answerDecision(board, id, { agentId, text, lanes, asPerson = fal
       throw new Refused('NOT_YOUR_DECISION', `shout #${id} is addressed to ${ask.shout_to}, not ${lane} (agent ${agentId})`);
     }
     const from = personAnswer ? PERSON : agentId;
-    const answerId = insertShout(board, { from, to: ask.shout_from, text, lanes, answers: id, channel });
+    const answerId = tellAnswerImplications(board, (by, itemId, fact) => logEvent(board, by, 'fact', itemId, fact), insertShout(board, { from, to: ask.shout_from, text, lanes, answers: id, channel, detail: { ...(implies?.length ? { implies } : {}), ...(supersedes !== null ? { supersedes } : {}) } }), { seed: impliesId, implies, supersedes, from, person: PERSON });
     if (personAnswer && ask.shout_answers !== null) {
       const original = getShout(board, ask.shout_answers);
       insertShout(board, { from: PERSON, to: original.shout_from, text: `Person answered #${id}: ${String(text).trim()}`, lanes, answers: original.shout_id, channel });
@@ -2036,13 +2080,6 @@ export function factReference(ref) {
   return { path, start, end, commit: commit.toLowerCase() };
 }
 
-/** Give facts the same stamped identity on CLI, API, export and replica reads [B29,B31]. */
-function factFromEvent(event) {
-  const detail = JSON.parse(event.event_detail);
-  return { id: detail.id, eventId: event.event_id, kind: detail.kind, text: detail.text,
-    by: event.event_by, at: event.event_at, ref: detail.ref ?? null, supersedes: detail.supersedes ?? null };
-}
-
 /** Read every move and fact in append order, including superseded facts and full original text [B31,B32]. */
 export function itemThread(board, id) {
   itemById(board, id);
@@ -2060,7 +2097,7 @@ export function projectItemThreads(board, state) {
 /** Append a typed fact atomically; a correction never edits the original event [B29,B30,B31,B32].
  * The internal factId is set from a sealed move's identity during replay, rather than replica-local sequence ids.
  */
-export function appendFact(board, id, { agentId, kind, text, ref = null, supersedes = null, factId = randomUUID() }) {
+export function appendFact(board, id, { agentId, kind, text, ref = null, supersedes = null, factId = randomUUID(), implies }) {
   return atomic(board, () => {
     const item = current(board, itemById(board, id));
     if (!board.db.prepare('SELECT 1 FROM agent WHERE agent_id = ?').get(agentId)) throw new Refused('NO_AGENT', `no registered agent ${agentId}; join a worktree before appending a fact`);
@@ -2075,8 +2112,8 @@ export function appendFact(board, id, { agentId, kind, text, ref = null, superse
       throw new Refused('NO_FACT', `no fact ${String(supersedes)} on item #${id}; use a fact id from pullboard show ${id} --json`);
     }
     const binding = factReference(ref);
-    logEvent(board, agentId, 'fact', id, { id: factId, kind, text, ref: binding, supersedes });
-    return factFromEvent(board.lastEvent);
+    logEvent(board, agentId, 'fact', id, { id: factId, kind, text, ref: binding, supersedes, ...(implies?.length ? { implies } : {}) });
+    return tellFactImplications(board, (by, itemId, fact) => logEvent(board, by, 'fact', itemId, fact), factFromEvent(board.lastEvent), { id, implies, supersedes });
   });
 }
 
@@ -2546,9 +2583,13 @@ export function recordRowDecisions(board, { agentId, channel, decisions }) {
     const original = parseSpec(`## Decision\n${record.source}\n`).rows;
     const replacement = parseSpec(`## Decision\n${record.replacement}\n`).rows;
     const target = replacement[0];
+    const engineVersion = board.executionEngineVersion ?? ENGINE_VERSION;
+    const validDeclineText = record.decision !== 'decline' || (engineVersion >= 12
+      ? record.text === original[0]?.text
+      : target?.text === record.reason);
     if (original.length !== 1 || original[0].id !== record.id || replacement.length !== 1 || target.id !== record.id
       || target.status !== (record.decision === 'approve' ? 'approved' : 'wont') || target.text !== record.text
-      || (record.decision === 'decline' && target.text !== record.reason)) throw new Refused('ROW_DECISION', 'the exact row must match its recorded approval or decline; use pullboard spec approve or decline');
+      || !validDeclineText) throw new Refused('ROW_DECISION', 'the exact row must match its recorded approval or decline; use pullboard spec approve or decline');
     const key = `${record.kind}:${record.id}`;
     if (keys.has(key)) throw new Refused('ROW_DECISION', `${key} is named twice; use each row once`);
     keys.add(key);

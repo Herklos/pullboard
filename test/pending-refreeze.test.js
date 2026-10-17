@@ -6,13 +6,24 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import * as store from '../src/board.js';
-import { appliedSequence, applyRelayMove, prepareEngineMove } from '../src/engine.js';
+import { appliedSequence, applyRelayMove, engineReceipt, prepareEngineMove } from '../src/engine.js';
 import { exportBoard, importBoard } from '../src/exchange.js';
 import { ENGINE_VERSION } from '../src/machine.js';
 import { createE2eHelpers } from './e2e-helpers.js';
 import { unpackRelease } from './release-archive.js';
 
 const e2e = createE2eHelpers();
+
+/** Remove only the writer's engine marker before comparing otherwise identical replay exports. */
+function withoutEngineMarker(snapshot) {
+  return {
+    ...snapshot,
+    tables: {
+      ...snapshot.tables,
+      board_meta: snapshot.tables.board_meta.filter((row) => row.meta_key !== 'relay_engine_version'),
+    },
+  };
+}
 
 /** Parse one private CLI refusal and require its exact next-step suffix. */
 function refusal(result, code, itemId, pendingFields) {
@@ -46,7 +57,7 @@ test("the coordinator corrects a claimed item's criterion without release [V2]",
   const agentEdit = box.run(box.web, 'edit', String(id), '--criterion', 'an agent cannot change the frozen bar', '--json');
   assert.match(refusal(agentEdit, 'HELD', id).message, /only the coordinator may edit it while held/u);
 
-  const corrected = box.run(box.repo, 'edit', String(id), '--criterion', 'the corrected criterion', '--check', 'true && true', '--json');
+  const corrected = box.run(box.repo, 'edit', String(id), '--criterion', 'the corrected criterion', '--check', 'true && true', '--reason', 'the fixture corrects its bar', '--json');
   assert.equal(corrected.code, 0, corrected.err || corrected.out);
   const pending = store.getItem(board, id);
   assert.equal(pending.item_criterion, 'the corrected criterion');
@@ -98,7 +109,7 @@ test("the coordinator corrects a claimed item's criterion without release [V2]",
   const checkClaim = box.run(box.web, 'claim', String(checkId), '--json');
   assert.equal(checkClaim.code, 0, checkClaim.err || checkClaim.out);
   const checkBefore = store.getItem(board, checkId);
-  const checkEdit = box.run(box.repo, 'edit', String(checkId), '--check', 'true && true', '--json');
+  const checkEdit = box.run(box.repo, 'edit', String(checkId), '--check', 'true && true', '--reason', 'the fixture corrects its bar', '--json');
   assert.equal(checkEdit.code, 0, checkEdit.err || checkEdit.out);
   const checkPending = store.getItem(board, checkId);
   assert.equal(checkPending.item_criterion, checkBefore.item_criterion);
@@ -193,7 +204,7 @@ test("edit adds and clears an item's dependencies [B3,V2]", (t) => {
 
 /** Exercise real older executables, rather than treating a retagged current move as an old client. */
 async function checkDependencyLegacyClients(cleanup, directory, snapshot, target, add, clear) {
-  for (const [version, reference] of [[7, 'v0.8.4'], [8, 'v0.8.6'], [9, '314ef28751c44c96186b337cc4ace0fd8bf33d42']]) {
+  for (const [version, reference] of [[7, 'v0.8.4'], [8, 'v0.8.6'], [9, '314ef28751c44c96186b337cc4ace0fd8bf33d42'], [10, 'v0.8.23']]) {
     const source = join(directory, `client-${version}`);
     mkdirSync(source);
     unpackRelease(reference, source);
@@ -225,11 +236,32 @@ async function checkDependencyLegacyClients(cleanup, directory, snapshot, target
       assert.deepEqual(legacyExchange.exportBoard(old), before, 'future refusal changes no board rows or replay metadata');
       assert.equal(legacyEngine.appliedSequence(old), 1, 'future refusal leaves the committed prefix unchanged');
     }
+    if (version === 10) {
+      for (const [index, move] of [add, clear].entries()) {
+        const engine10Move = { ...move, id: `${move.id}-engine-10`, engine: 10 };
+        const engine10Receipt = { ...receipt, sequence: index + 2 };
+        const oldFeature = legacyEngine.applyRelayMove(old, engine10Move, engine10Receipt);
+        const currentFeature = applyRelayMove(current, engine10Move, engine10Receipt);
+        assert.equal(oldFeature.error, undefined, JSON.stringify(oldFeature));
+        assert.deepEqual(currentFeature, oldFeature, 'engine 12 reproduces engine 10 dependency additions and clears');
+        assert.deepEqual(store.getItem(current, target), legacyStore.getItem(old, target));
+        assert.deepEqual(store.events(current), legacyStore.events(old), 'engine 10 and engine 12 replay identical events');
+        assert.equal(appliedSequence(current), legacyEngine.appliedSequence(old));
+        assert.deepEqual(engineReceipt(current, engine10Move.id), legacyEngine.engineReceipt(old, engine10Move.id),
+          'engine 10 and engine 12 retain the same dependency-move receipts');
+        const oldSnapshot = legacyExchange.exportBoard(old);
+        const currentSnapshot = exportBoard(current);
+        assert.equal(oldSnapshot.tables.board_meta.find((row) => row.meta_key === 'relay_engine_version').meta_value, '10');
+        assert.equal(currentSnapshot.tables.board_meta.find((row) => row.meta_key === 'relay_engine_version').meta_value, String(ENGINE_VERSION));
+        assert.deepEqual(withoutEngineMarker(currentSnapshot), withoutEngineMarker(oldSnapshot),
+          'the sole snapshot difference is the intentionally newer writer-version marker');
+      }
+    }
   }
 }
 
 test('dependency edits replay the same on every engine [B3,V2,H16]', async (t) => {
-  assert.equal(ENGINE_VERSION, 10);
+  assert.equal(ENGINE_VERSION, 20);
   const directory = mkdtempSync(join(tmpdir(), 'pullboard-dependency-engines-'));
   const cleanup = [];
   t.after(() => {
@@ -258,8 +290,8 @@ test('dependency edits replay the same on every engine [B3,V2,H16]', async (t) =
     { id: 'dependency-add', actor: 'coordinator' });
   const clear = prepareEngineMove(seed, 'editItem', [target, { agentId: 'coordinator', after: [] }],
     { id: 'dependency-clear', actor: 'coordinator' });
-  assert.equal(add.engine, 10);
-  assert.equal(clear.engine, 10);
+  assert.equal(add.engine, ENGINE_VERSION);
+  assert.equal(clear.engine, ENGINE_VERSION);
   const copies = [open('one', snapshot), open('two', snapshot)];
   for (const [index, move] of [add, clear].entries()) {
     const receipt = { sequence: index + 1, at: `2026-10-13T12:00:0${index + 1}.000Z`, sender, kind: 'move' };
@@ -409,7 +441,7 @@ test('ordered refreeze corrections retain engine-7 history and engine-8 live cla
   }]);
   applyCurrentBoth(currentClaim, 1, sender);
   const correction = prepareEngineMove(current, 'editItem', [currentId, {
-    agentId: 'coordinator', criterion: 'corrected by an ordered coordinator move',
+    agentId: 'coordinator', criterion: 'corrected by an ordered coordinator move', reason: 'the fixture corrects its bar',
   }]);
   applyCurrentBoth(correction, 2, coordinatorSender);
   for (const replica of [current, currentReplica]) {
