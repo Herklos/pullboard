@@ -210,6 +210,8 @@ test('a cause key is checked, recorded on reject and reopen, and the person alon
 
   // The coordinator's reopen records --cause through the CLI.
   const reopenItem = json(box, 'add', 'coordinator', 'Reopen with a cause', '--criterion', 'Reopen records its cause.', '--check', 'true').item;
+  // The private person's acceptance permits this intentionally pre-green fixture check.
+  json(box, 'check', 'accept', String(reopenItem.item_id));
   json(box, 'claim', String(reopenItem.item_id));
   json(box, 'submit', String(reopenItem.item_id));
   refused(box.run('reopen', String(reopenItem.item_id), '--note', 'wrong bar', '--cause', 'wrong bar', '--json'), 'BAD_CAUSE', 'a reopen refuses a malformed cause');
