@@ -204,10 +204,11 @@ test('no-session shells are one session and markerless terminals retain their wr
   assert.deepEqual(boardSnapshot(box.boardFile), beforeSelf, 'self-addressed decision is refused without a write');
 });
 
-test('the actual view adapter writes without taking over an agent session [B3,B7]', () => {
+test('a shout from the local view as the person is recorded as the person [N26,B26,B3,B7]', () => {
   const box = project();
   const owner = box.run(box.repo, ['shout', 'web', 'agent owns this checkout', '--json'], { session: 'view-owner-session-273' });
   assert.equal(owner.status, 0, owner.stdout + owner.stderr);
+  assert.equal(boardSnapshot(box.boardFile).shout.at(-1).shout_from, 'coordinator', 'an agent-shell shout keeps the coordinator as author');
   const file = resolve(box.repo, box.git(box.repo, 'rev-parse', '--git-dir'), 'pullboard-checkout-session.json');
   const before = readFileSync(file);
   const apiModule = pathToFileURL(resolve(import.meta.dirname, '../src/api.js')).href;
@@ -216,7 +217,8 @@ test('the actual view adapter writes without taking over an agent session [B3,B7
     const { executeMove } = await import(${JSON.stringify(apiModule)});
     const { main } = await import(${JSON.stringify(cliModule)});
     const response = await executeMove(process.cwd(), { verb: 'shout', args: { to: 'web', text: 'actual view action' } }, main);
-    process.stdout.write(JSON.stringify(response));
+    const asAgent = await executeMove(process.cwd(), { verb: 'shout', agent: 'web-1', args: { to: 'coordinator', text: 'view acting as web-1' } }, main);
+    process.stdout.write(JSON.stringify({ ...response, asAgent }));
   `;
   const response = runFixtureChild(process.execPath, ['--input-type=module', '-e', source], {
     cwd: box.repo, env: { ...box.base, CODEX_THREAD_ID: 'other-process-view-session-273' }, encoding: 'utf8',
@@ -225,8 +227,12 @@ test('the actual view adapter writes without taking over an agent session [B3,B7
   const document = JSON.parse(response.stdout);
   assert.equal(document.status, 200, response.stdout);
   assert.equal(document.body.event.event_kind, 'shout');
-  assert.equal(document.body.event.event_by, 'coordinator');
-  assert.equal(boardSnapshot(box.boardFile).shout.at(-1).shout_text, 'actual view action');
+  assert.equal(document.body.event.event_by, 'person');
+  const shouts = boardSnapshot(box.boardFile).shout;
+  assert.equal(shouts.at(-2).shout_text, 'actual view action');
+  assert.equal(shouts.at(-2).shout_from, 'person', 'the view as the coordinator records the person');
+  assert.equal(document.asAgent.status, 200, response.stdout);
+  assert.equal(shouts.at(-1).shout_from, 'web-1', 'the view acting as a named agent still records that agent');
   assert.deepEqual(readFileSync(file), before, 'the authenticated view does not alter the local agent-session binding');
 });
 
