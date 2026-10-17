@@ -83,6 +83,14 @@ function journeySidebarReady(rows, expected = JOURNEY_BOARD_NAMES) {
   return expected.every(name => rows.some(row => row.includes(name)));
 }
 
+/** Select only a completed, successfully captured list answer that actually contains this fixture board. */
+function journeyExpectedListAnswer(answers, source, boardName) {
+  return answers.find(answer => answer?.source === source && answer.pathKind === '/api/v1/boards'
+    && answer.status === 200 && answer.bodyCapture === 'captured' && answer.boardNames.includes(boardName)
+    && Number.isFinite(answer.requestAtMs) && Number.isFinite(answer.responseAtMs) && Number.isFinite(answer.completedAtMs)
+    && answer.responseAtMs >= answer.requestAtMs && answer.completedAtMs >= answer.responseAtMs) || null;
+}
+
 /** Bound a failure-only browser snapshot so a closed browser cannot extend the original row wait materially. */
 async function boundedJourneyRead(read, budgetMs = 500) {
   let timer;
@@ -138,6 +146,7 @@ async function journeyFailureReport(readPage, readAnswers) {
         ? journeyApiPathKind(answer.pathKind.split(/[?#]/u, 1)[0]).replace(/\/$/u, '') || '/' : 'unknown',
       status: Number.isInteger(answer?.status) && answer.status >= 100 && answer.status <= 599 ? answer.status : null,
       boardNames: journeyFixtureBoardNames(answer?.boardNames),
+      bodyCapture: ['pending', 'captured', 'unavailable', 'invalid'].includes(answer?.bodyCapture) ? answer.bodyCapture : null,
       requestAtMs: Number.isFinite(answer?.requestAtMs) && answer.requestAtMs >= 0 ? Math.round(answer.requestAtMs) : null,
       responseAtMs: Number.isFinite(answer?.responseAtMs) && answer.responseAtMs >= 0 ? Math.round(answer.responseAtMs) : null,
       completedAtMs: Number.isFinite(answer?.completedAtMs) && answer.completedAtMs >= 0 ? Math.round(answer.completedAtMs) : null,
@@ -183,9 +192,11 @@ test('the hosted journey names what it saw when a board row never arrives [N40]'
     pairedFragmentPresent: false,
   };
   const pageAnswers = [
-    { source: 'linked', pathKind: '/api/v1/boards', status: 200, boardNames: ['fixture/repository'], requestAtMs: 0, responseAtMs: 18, completedAtMs: 19 },
-    { source: 'local', pathKind: '/api/v1/boards', status: 200, boardNames: ['local-machine-b'], requestAtMs: 2, responseAtMs: 7, completedAtMs: 8 },
-    { source: 'linked', pathKind: '/api/v1/boards/opaque-id/events?query=query-sentinel#fragment-sentinel', status: 200, boardNames: ['fixture/repository'], requestAtMs: 3, responseAtMs: 21, completedAtMs: null, streamOpen: true,
+    { source: 'linked', pathKind: '/api/v1/boards', status: 200, boardNames: [], bodyCapture: 'captured', requestAtMs: 0, responseAtMs: 4, completedAtMs: 5 },
+    { source: 'linked', pathKind: '/api/v1/boards', status: 200, boardNames: [], bodyCapture: 'unavailable', requestAtMs: 1, responseAtMs: 6, completedAtMs: 7 },
+    { source: 'linked', pathKind: '/api/v1/boards', status: 200, boardNames: ['fixture/repository'], bodyCapture: 'captured', requestAtMs: 8, responseAtMs: 18, completedAtMs: 19 },
+    { source: 'local', pathKind: '/api/v1/boards', status: 200, boardNames: ['local-machine-b'], bodyCapture: 'captured', requestAtMs: 2, responseAtMs: 7, completedAtMs: 8 },
+    { source: 'linked', pathKind: '/api/v1/boards/opaque-id/events?query=query-sentinel#fragment-sentinel', status: 200, boardNames: ['fixture/repository'], bodyCapture: null, requestAtMs: 3, responseAtMs: 21, completedAtMs: null, streamOpen: true,
       headers: { authorization: 'header-sentinel' }, body: 'body-sentinel' },
   ];
   const observed = await observeJourneyRows(
@@ -200,11 +211,17 @@ test('the hosted journey names what it saw when a board row never arrives [N40]'
   assert.ok(observed.report, 'a failed row wait reports its visible rows and page-used API answers');
   assert.deepEqual(observed.report.rows, ['fixture/repository · linked · 1 item'], 'actual rendered text for the owned fixture row is preserved');
   assert.equal(observed.report.unknownRowsPresent, true);
-  assert.deepEqual(observed.report.apiAnswers.map(({ source, pathKind, status, boardNames, responseAtMs, streamOpen }) => ({ source, pathKind, status, boardNames, responseAtMs, streamOpen })), [
-    { source: 'linked', pathKind: '/api/v1/boards', status: 200, boardNames: ['fixture/repository'], responseAtMs: 18, streamOpen: false },
-    { source: 'local', pathKind: '/api/v1/boards', status: 200, boardNames: ['local-machine-b'], responseAtMs: 7, streamOpen: false },
-    { source: 'linked', pathKind: '/api/v1/boards/:id/events', status: 200, boardNames: ['fixture/repository'], responseAtMs: 21, streamOpen: true },
+  assert.deepEqual(observed.report.apiAnswers.map(({ source, pathKind, status, boardNames, bodyCapture, responseAtMs, streamOpen }) => ({ source, pathKind, status, boardNames, bodyCapture, responseAtMs, streamOpen })), [
+    { source: 'linked', pathKind: '/api/v1/boards', status: 200, boardNames: [], bodyCapture: 'captured', responseAtMs: 4, streamOpen: false },
+    { source: 'linked', pathKind: '/api/v1/boards', status: 200, boardNames: [], bodyCapture: 'unavailable', responseAtMs: 6, streamOpen: false },
+    { source: 'linked', pathKind: '/api/v1/boards', status: 200, boardNames: ['fixture/repository'], bodyCapture: 'captured', responseAtMs: 18, streamOpen: false },
+    { source: 'local', pathKind: '/api/v1/boards', status: 200, boardNames: ['local-machine-b'], bodyCapture: 'captured', responseAtMs: 7, streamOpen: false },
+    { source: 'linked', pathKind: '/api/v1/boards/:id/events', status: 200, boardNames: ['fixture/repository'], bodyCapture: null, responseAtMs: 21, streamOpen: true },
   ]);
+  assert.equal(journeyExpectedListAnswer(observed.report.apiAnswers, 'linked', 'fixture/repository')?.responseAtMs, 18,
+    'a captured populated answer is selected after earlier empty and unavailable answers');
+  assert.equal(journeyExpectedListAnswer(observed.report.apiAnswers.slice(0, 2), 'linked', 'fixture/repository'), null,
+    'captured empty and unavailable answers never masquerade as the expected fixture response');
   assert.doesNotMatch(JSON.stringify(observed.report), /unlisted-board-sentinel|query-sentinel|fragment-sentinel|header-sentinel|body-sentinel/u, 'diagnostics never expose arbitrary row names, URL parts, headers or bodies');
 
   let pageRead = false;
@@ -235,7 +252,7 @@ function journeyPageAnswers(chrome, viewBase) {
   const answers = [];
   const pending = new Map();
   const boardIds = new Map();
-  const bodyReads = new Set();
+  const snapshotWaiters = new Set();
   let generation = 0;
   let windowStartedAt = performance.now();
   let active = false;
@@ -245,6 +262,8 @@ function journeyPageAnswers(chrome, viewBase) {
   const listBoardNames = (body, source) => {
     try {
       const value = JSON.parse(body);
+      if (!value || typeof value !== 'object' || Array.isArray(value)
+        || (!Array.isArray(value.boards) && !Array.isArray(value.warnings))) return { bodyCapture: 'invalid', boardNames: [] };
       const boards = [...(Array.isArray(value?.boards) ? value.boards : []), ...(Array.isArray(value?.warnings) ? value.warnings : [])];
       const names = [];
       for (const board of boards) {
@@ -253,9 +272,12 @@ function journeyPageAnswers(chrome, viewBase) {
         boardIds.set(`${source}\0${board.id}`, name);
         if (JOURNEY_BOARD_NAMES.includes(name)) names.push(name);
       }
-      return journeyFixtureBoardNames(names);
-    } catch { return []; }
+      return { bodyCapture: 'captured', boardNames: journeyFixtureBoardNames(names) };
+    } catch { return { bodyCapture: 'invalid', boardNames: [] }; }
   };
+  const hasPendingFiniteListBody = () => answers.some(answer => answer.pathKind === '/api/v1/boards' && answer.bodyCapture === 'pending')
+    || [...pending.values()].some(entry => entry.pathKind === '/api/v1/boards');
+  const notifySnapshotWaiters = () => { for (const wake of [...snapshotWaiters]) wake(); };
   const listener = ({ data }) => {
     let message;
     try { message = JSON.parse(String(data)); } catch { return; }
@@ -292,6 +314,7 @@ function journeyPageAnswers(chrome, viewBase) {
         boardId: entry.boardId,
         boardNames: entry.boardId
           ? journeyFixtureBoardNames([boardIds.get(`${entry.source}\0${entry.boardId}`)]) : [],
+        bodyCapture: entry.pathKind === '/api/v1/boards' ? 'pending' : null,
         requestAtMs: entry.requestAtMs, responseAtMs: clock(), completedAtMs: null, streamOpen,
       };
       if (answers.length < 128) answers.push(entry.record);
@@ -304,14 +327,14 @@ function journeyPageAnswers(chrome, viewBase) {
       if (!entry.record) return;
       entry.record.completedAtMs = clock();
       entry.record.streamOpen = false;
-      if (entry.pathKind !== '/api/v1/boards') return;
-      const bodyRead = chrome.send('Network.getResponseBody', { requestId: message.params.requestId }).then(result => {
+      if (entry.pathKind !== '/api/v1/boards') { notifySnapshotWaiters(); return; }
+      void chrome.send('Network.getResponseBody', { requestId: message.params.requestId }).then(result => {
         if (entry.generation !== generation) return;
         const body = result.base64Encoded ? Buffer.from(result.body, 'base64').toString('utf8') : result.body;
-        entry.record.boardNames = listBoardNames(body, entry.source);
-      }).catch(() => {});
-      bodyReads.add(bodyRead);
-      void bodyRead.finally(() => bodyReads.delete(bodyRead));
+        Object.assign(entry.record, listBoardNames(body, entry.source));
+      }).catch(() => {
+        if (entry.generation === generation) entry.record.bodyCapture = 'unavailable';
+      }).finally(() => notifySnapshotWaiters());
       return;
     }
     if (message.method === 'Network.loadingFailed') {
@@ -321,30 +344,47 @@ function journeyPageAnswers(chrome, viewBase) {
       if (entry.record) {
         entry.record.completedAtMs = clock();
         entry.record.streamOpen = false;
+        if (entry.pathKind === '/api/v1/boards') entry.record.bodyCapture = 'unavailable';
       }
       if (!entry.record && answers.length < 128) answers.push({ source: entry.source, pathKind: entry.pathKind, status: null,
         boardNames: entry.boardId ? journeyFixtureBoardNames([boardIds.get(`${entry.source}\0${entry.boardId}`)]) : [],
+        bodyCapture: entry.pathKind === '/api/v1/boards' ? 'unavailable' : null,
         requestAtMs: entry.requestAtMs, responseAtMs: null, completedAtMs: clock(), streamOpen: false });
+      notifySnapshotWaiters();
     }
   };
   chrome.socket.addEventListener('message', listener);
   return {
     begin() {
       generation += 1;
-      pending.clear(); answers.length = 0; boardIds.clear(); bodyReads.clear();
+      pending.clear(); answers.length = 0; boardIds.clear();
+      notifySnapshotWaiters();
       windowStartedAt = performance.now(); active = true;
     },
     async snapshot() {
-      await Promise.race([Promise.all([...bodyReads]), new Promise(resolveWait => setTimeout(resolveWait, 250))]);
+      if (hasPendingFiniteListBody()) {
+        let wake;
+        let timer;
+        const drained = new Promise(resolveWait => {
+          wake = () => { if (!hasPendingFiniteListBody()) resolveWait(); };
+          snapshotWaiters.add(wake);
+          wake();
+        });
+        try { await Promise.race([drained, new Promise(resolveWait => { timer = setTimeout(resolveWait, 250); })]); }
+        finally { clearTimeout(timer); snapshotWaiters.delete(wake); }
+      }
       for (const answer of answers) {
-        if (!answer.boardNames.length && answer.boardId) answer.boardNames = journeyFixtureBoardNames([boardIds.get(`${answer.source}\0${answer.boardId}`)]);
+        if (answer.pathKind !== '/api/v1/boards' && !answer.boardNames.length && answer.boardId) {
+          answer.boardNames = journeyFixtureBoardNames([boardIds.get(`${answer.source}\0${answer.boardId}`)]);
+        }
       }
       const unfinished = [...pending.values()].filter(entry => !entry.record).map(entry => ({ source: entry.source,
         pathKind: entry.pathKind, status: null,
         boardNames: entry.boardId ? journeyFixtureBoardNames([boardIds.get(`${entry.source}\0${entry.boardId}`)]) : [],
+        bodyCapture: entry.pathKind === '/api/v1/boards' ? 'pending' : null,
         requestAtMs: entry.requestAtMs, responseAtMs: null, completedAtMs: null, streamOpen: false }));
-      return [...answers, ...unfinished].map(({ source, pathKind, status, boardNames, requestAtMs, responseAtMs, completedAtMs, streamOpen }) => ({
-        source, pathKind, status, boardNames, requestAtMs, responseAtMs, completedAtMs, streamOpen,
+      return [...answers, ...unfinished].map(({ source, pathKind, status, boardNames, bodyCapture, requestAtMs, responseAtMs, completedAtMs, streamOpen }) => ({
+        source, pathKind, status, boardNames, bodyCapture, requestAtMs, responseAtMs, completedAtMs, streamOpen,
       })).sort((left, right) => (left.responseAtMs ?? left.requestAtMs) - (right.responseAtMs ?? right.requestAtMs));
     },
     close() { active = false; chrome.socket.removeEventListener('message', listener); },
@@ -609,13 +649,30 @@ test('pullboard.dev shows every board, linked and local [N40]', {
       throw rowObservation.error;
     }
     const pageAnswers = await journeyTrace.snapshot();
-    for (const [source, boardName] of [['linked', 'fixture/repository'], ['local', 'local-machine-b']]) {
-      const answer = pageAnswers.find(entry => entry.source === source && entry.pathKind === '/api/v1/boards');
-      assert.ok(answer, `the page-used ${source} board-list answer was observed`);
-      assert.equal(answer.status, 200, `the page-used ${source} board-list answer succeeded`);
-      assert.deepEqual(answer.boardNames, [boardName], `the page-used ${source} answer names its fixture board`);
-      assert.ok(Number.isFinite(answer.requestAtMs) && Number.isFinite(answer.responseAtMs) && answer.responseAtMs >= answer.requestAtMs,
-        `the page-used ${source} answer has request and arrival times`);
+    try {
+      for (const [source, boardName] of [['linked', 'fixture/repository'], ['local', 'local-machine-b']]) {
+        const sourceAnswers = pageAnswers.filter(entry => entry.source === source && entry.pathKind === '/api/v1/boards');
+        assert.ok(sourceAnswers.length > 0, `the page-used ${source} board-list answer was observed`);
+        for (const answer of sourceAnswers) {
+          assert.ok(answer.status === null || (Number.isInteger(answer.status) && answer.status >= 100 && answer.status <= 599),
+            `the page-used ${source} answer has a valid status`);
+          assert.ok(Number.isFinite(answer.requestAtMs) && answer.requestAtMs >= 0,
+            `the page-used ${source} answer has a request time`);
+          assert.ok(answer.responseAtMs === null || (Number.isFinite(answer.responseAtMs) && answer.responseAtMs >= answer.requestAtMs),
+            `the page-used ${source} answer has a valid response time`);
+          assert.ok(answer.completedAtMs === null || (Number.isFinite(answer.completedAtMs)
+            && (answer.responseAtMs === null || answer.completedAtMs >= answer.responseAtMs)),
+          `the page-used ${source} answer has a valid completion time`);
+          assert.ok(['pending', 'captured', 'unavailable', 'invalid'].includes(answer.bodyCapture),
+            `the page-used ${source} answer reports its body capture state`);
+        }
+        const answer = journeyExpectedListAnswer(sourceAnswers, source, boardName);
+        assert.ok(answer, `a completed captured page-used ${source} answer names its fixture board`);
+        assert.deepEqual(answer.boardNames, [boardName], `the page-used ${source} answer names its fixture board`);
+      }
+    } catch (error) {
+      try { t.diagnostic(JSON.stringify({ pageAnswers })); } catch { /* Keep the original assertion failure. */ }
+      throw error;
     }
     const localOrigin = await chromeB.stable('localSession?.origin || null');
     assert.ok(localOrigin === viewB.base, 'B discovers its own real view without a typed key, URL, tunnel or port');
