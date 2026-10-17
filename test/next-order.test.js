@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import * as store from '../src/board.js';
 import { applyEngineMove, applyRelayMove, prepareEngineMove } from '../src/engine.js';
-import { ENGINE_VERSION } from '../src/machine.js';
+import { ENGINE_VERSION, MILESTONE_RANK_ENGINE } from '../src/machine.js';
 import { exportBoard, importBoard } from '../src/exchange.js';
 import { createE2eHelpers } from './e2e-helpers.js';
 import { existsSync, readFileSync } from 'node:fs';
@@ -277,7 +277,8 @@ test('an unranked item follows the ranked ones [N2,B13]', (t) => {
 });
 
 test('milestone rank moves replay identically and preserve historical next selection [N2,B13,H16]', (t) => {
-  for (const version of new Set([8, 24, 31, 32, ENGINE_VERSION])) {
+  assert.equal(MILESTONE_RANK_ENGINE, 34, 'milestone ranking retains its allocated minimum after later writer upgrades');
+  for (const version of new Set([8, 24, 31, 32, 33, MILESTONE_RANK_ENGINE, ENGINE_VERSION])) {
     const source = boardFixture();
     const replica = store.openBoard(':memory:');
     const fixtures = [source, { ...source, board: replica }];
@@ -289,7 +290,7 @@ test('milestone rank moves replay identically and preserve historical next selec
     }
     importBoard(replica, exportBoard(source.board));
     const move = prepareEngineMove(fixtures[0].board, 'orderMilestoneItems', ['release', { agentId: fixtures[0].builder, items: [2, 1] }]);
-    assert.equal(move.engine, ENGINE_VERSION, 'the envelope carries the current engine; milestone order starts at32');
+    assert.equal(move.engine, ENGINE_VERSION, 'the envelope carries the current engine; milestone order starts at34');
     const outcomes = fixtures.map(({ board }) => applyRelayMove(board, move, {
       sequence: 1, at: '2026-10-18T01:00:00Z', kind: 'move', sender: { kind: 'agent', userId: 'fixture', agent: fixtures[0].builder },
     }));
@@ -299,8 +300,8 @@ test('milestone rank moves replay identically and preserve historical next selec
     const reserve = prepareEngineMove(fixtures[0].board, 'reserveNextReview', [{ agentId: fixtures[0].reviewer, lane: 'review', leaseMs: HOUR, policy: 'any' }]);
     const results = fixtures.map(({ board }) => applyEngineMove(board, { ...reserve, engine: version }, { sequence: 2, at: '2026-10-18T01:01:00Z' }));
     assert.deepEqual(results[0], results[1]);
-    assert.equal(results[0].result.item.item_id, version < 32 ? 1 : 2, `engine${version} preserves its recorded selection`);
-    assert.throws(() => applyEngineMove(fixtures[0].board, { ...move, id: 'old-order', engine: 31 }, { sequence: 3, at: '2026-10-18T01:02:00Z' }), { code: 'RELAY_MOVE' });
+    assert.equal(results[0].result.item.item_id, version < MILESTONE_RANK_ENGINE ? 1 : 2, `engine${version} preserves its recorded selection`);
+    assert.throws(() => applyEngineMove(fixtures[0].board, { ...move, id: 'old-order', engine: MILESTONE_RANK_ENGINE - 1 }, { sequence: 3, at: '2026-10-18T01:02:00Z' }), { code: 'RELAY_MOVE' });
     assert.equal(fixtures[0].board.db.prepare("SELECT meta_value FROM board_meta WHERE meta_key='relay_applied_sequence'").get().meta_value, '2');
   }
 });

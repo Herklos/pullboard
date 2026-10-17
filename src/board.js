@@ -15,7 +15,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { boardNotWritable } from './board-access.js';
 import { briefFiles, briefSections } from './brief.js';
 import { COORDINATOR } from './config.js';
-import { ENGINE_VERSION, VERDICT_REVIEW_ENGINE, GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, effectiveGuards, storeTriggers } from './machine.js';
+import { ENGINE_VERSION, VERDICT_REVIEW_ENGINE, MILESTONE_RANK_ENGINE, GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, effectiveGuards, storeTriggers } from './machine.js';
 import { Refused } from './refused.js';
 import { causeProblem, requireNeverAgain } from './rigor.js';
 import { barCorrectionFields } from './bar-corrections.js';
@@ -2129,7 +2129,7 @@ function milestonePriorities(board) {
 
 /** Explicit item ranks belong to the same first unfinished milestone as its priority [N2,B13]. */
 function milestoneRanks(board, priority) {
-  if ((board.executionEngineVersion ?? ENGINE_VERSION) < 32) return () => 0;
+  if ((board.executionEngineVersion ?? ENGINE_VERSION) < MILESTONE_RANK_ENGINE) return () => 0;
   const ranks = new Map();
   for (const [index, milestone] of milestones(board).entries()) {
     for (const [rank, id] of (milestone.order ?? []).entries()) {
@@ -2228,7 +2228,7 @@ export function nextFor(board, { agentId, lane, verify = false, policy = 'any', 
     const firstTierItem = mine.findIndex(({ entry }) => tier(entry) === routeTier);
     if (selected > firstTierItem && firstTierItem >= 0) {
       // Explicit coordinator order leads automatic rework; never-ranked boards retain their old path.
-      if ((board.executionEngineVersion ?? ENGINE_VERSION) >= 32 && milestones(board).some(entry => entry.order?.length)) {
+      if ((board.executionEngineVersion ?? ENGINE_VERSION) >= MILESTONE_RANK_ENGINE && milestones(board).some(entry => entry.order?.length)) {
         const position = milestonePriorities(board);
         const rank = milestoneRanks(board, position);
         const first = mine[firstTierItem].entry;
@@ -2532,7 +2532,7 @@ export function editMilestoneItems(board, name, { agentId, add = [], remove = []
       throw new Refused('MILESTONE_ITEMS', 'one or more ids are not in this milestone; read pullboard roadmap and retry');
     }
     entries[index] = { ...current, items: nextItems,
-      ...((board.executionEngineVersion ?? ENGINE_VERSION) >= 32 && current.order
+      ...((board.executionEngineVersion ?? ENGINE_VERSION) >= MILESTONE_RANK_ENGINE && current.order
         ? { order: current.order.filter(id => nextItems.includes(id)) } : {}) };
     saveMilestones(board, entries);
     logEvent(board, agentId, 'milestone_items', null, { name, add: additions, remove: removals });
@@ -2542,7 +2542,7 @@ export function editMilestoneItems(board, name, { agentId, add = [], remove = []
 
 /** Replace this milestone's explicit ranks; omitted items retain the ordinary queue order [N2,B13]. */
 export function orderMilestoneItems(board, name, { agentId, items }) {
-  if ((board.executionEngineVersion ?? ENGINE_VERSION) < 32) throw new Refused('ENGINE_VERSION', 'milestone order requires engine 32; upgrade Pullboard before ranking work');
+  if ((board.executionEngineVersion ?? ENGINE_VERSION) < MILESTONE_RANK_ENGINE) throw new Refused('ENGINE_VERSION', 'milestone order requires engine 34; upgrade Pullboard before ranking work');
   if (agentId !== COORDINATOR && (agentId === PERSON || !board.db.prepare('SELECT 1 FROM agent WHERE agent_id = ?').get(agentId))) {
     throw new Refused('NO_AGENT', 'milestone order is an agent or coordinator move; join an agent worktree or ask the coordinator');
   }
