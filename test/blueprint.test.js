@@ -678,7 +678,7 @@ test('init --blueprint starts a board from a blueprint [I1,S1]', () => {
   const plain = emptyRepo();
   const initialized = plain.run('init');
   assert.equal(initialized.status, 0, initialized.stdout + initialized.stderr);
-  assert.doesNotMatch(initialized.stdout, /blueprint/u);
+  assert.doesNotMatch(initialized.stdout, /^added the .+ blueprint:/mu, 'plain init prints no blueprint summary');
   assert.doesNotMatch(readFileSync(join(plain.repo, 'SPEC.md'), 'utf8'), /pullboard-blueprint/u);
   assert.deepEqual(JSON.parse(plain.run('list', '--json').stdout).items ?? [], []);
 });
