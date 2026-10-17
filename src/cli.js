@@ -2551,8 +2551,10 @@ async function verifyHere(ctx, id, { second, values }) {
       refuseUnverifiedStack(root, board, item, commit, trunk);
       if (frozenCheck(item)) {
         const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(root, frozenCheck(item), { commit, onFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
+        // The private check runs here, in a private clone, under this machine's gate markers; a runner
+        // lease cannot carry those markers, so the review queues for a local slot only [C7,V4].
         const shortEligible = Boolean(await explicitCheckFiles(root, frozenCheck(item), { commit }));
-        check = await withGateSlot(root, (lease) => checkAtCommit(root, item, { waitMs: lease.waitMs, gateLease: lease }), { browser, agent: me.id, item: String(id), kind: 'review', itemCheck: true, shortEligible, onWait: queuedItemLease(ctx, item, me.id, 'review') });
+        check = await withGateSlot(root, (lease) => checkAtCommit(root, item, { waitMs: lease.waitMs, gateLease: lease }), { browser, remote: false, agent: me.id, item: String(id), kind: 'review', itemCheck: true, shortEligible, onWait: queuedItemLease(ctx, item, me.id, 'review') });
       } else {
         check = checkAtCommit(root, item);
       }
