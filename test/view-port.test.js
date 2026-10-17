@@ -1,9 +1,10 @@
 /** Keep the view's exact named-port refusal covered in a core-owned file [N26]. */
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { runFixtureChild, startFixtureChild } from './fixture-child.js';
 import { createServer } from 'node:net';
 import { createServer as createHttpServer } from 'node:http';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -105,6 +106,59 @@ test("a named port that is busy is refused with the way out, not a stack trace [
   const refusal = JSON.parse(json.stdout).error;
   assert.equal(refusal.code, 'PORT_BUSY');
   assert.equal(result.stderr.trim(), `pullboard: [PORT_BUSY] port ${port} is in use: name another with --port N, or use --port 0 to take a free one\nnext: ${refusal.next}`);
+});
+
+test('a busy view port names a fix the hosted page can still find [N26,I1]', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'pullboard-view-busy-default-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  // A leased stand-in for 4890: the person's real view on the shipped port is never touched.
+  const lease = await takeDefaultViewPort(dir, { agent: `view-port-busy-${process.pid}` });
+  t.after(() => lease.release());
+  const port = lease.port;
+  const held = createServer();
+  await new Promise((done, fail) => { held.once('error', fail); held.listen(port, '127.0.0.1', done); });
+  t.after(() => new Promise((done) => held.close(done)));
+  const env = {
+    ...process.env,
+    HOME: join(dir, 'home'),
+    PULLBOARD_HOME: join(dir, 'home', '.pullboard'),
+    PULLBOARD_MACHINE_HOME: join(dir, 'machine-home'),
+    PULLBOARD_VIEW_PORT: String(port),
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+  };
+  delete env.AI_AGENT;
+  delete env.PULLBOARD_VIEW_FOREGROUND;
+  // A stale view record whose pid is alive in an unrelated process must never be named as the holder.
+  const unrelated = startFixtureChild(process.execPath, ['-e', 'setTimeout(() => {}, 60_000)'], { stdio: 'ignore' }); // budget: idle lifetime for the unrelated pid; killed when the test ends.
+  t.after(() => { unrelated.kill('SIGKILL'); });
+  mkdirSync(env.PULLBOARD_HOME, { recursive: true });
+  writeFileSync(join(env.PULLBOARD_HOME, `view-${port}.json`),
+    `${JSON.stringify({ port, secret: randomUUID(), pid: unrelated.pid, boundAt: new Date().toISOString() })}\n`, { mode: 0o600 });
+  const plain = runFixtureChild(process.execPath, [BIN, 'view', '--no-open'], { cwd: dir, env, encoding: 'utf8', timeout: 40_000 });
+  assert.equal(plain.status, 1, plain.failure ?? plain.stderr);
+  const json = runFixtureChild(process.execPath, [BIN, 'view', '--no-open', '--json'], { cwd: dir, env, encoding: 'utf8', timeout: 40_000 });
+  assert.equal(json.status, 1, json.failure ?? json.stderr);
+  const refusal = JSON.parse(json.stdout).error;
+  assert.equal(refusal.code, 'PORT_BUSY');
+  for (const text of [refusal.message, refusal.next, plain.stderr]) {
+    assert.ok(!text.includes('--port 0'), `no step the hosted page can never find: ${text}`);
+  }
+  assert.match(refusal.message, new RegExp(`^port ${port} is in use`, 'u'));
+  assert.match(refusal.message, /pullboard\.dev looks for your view on that port: stop .+, then run pullboard view again$/u,
+    'the refusal says the one fix that keeps the hosted page working');
+  if (['/usr/sbin/lsof', '/usr/bin/lsof'].some((file) => existsSync(file)) && process.platform !== 'win32') {
+    assert.ok(refusal.message.includes(`in use by node (pid ${process.pid}),`) && refusal.message.includes(`stop it with kill ${process.pid},`),
+      `the refusal names the process holding the port: ${refusal.message}`);
+  }
+  assert.ok(!refusal.message.includes(String(unrelated.pid)), `a live pid in a stale view record is not the holder: ${refusal.message}`);
+  assert.equal(refusal.next, 'stop the other view on that port, then run pullboard view again');
+  assert.equal(plain.stderr.trim(), `pullboard: [PORT_BUSY] ${refusal.message}\nnext: ${refusal.next}`);
+  rmSync(join(env.PULLBOARD_HOME, `view-${port}.json`), { force: true });
+  const free = runFixtureChild(process.execPath, [BIN, 'view', '--no-open', '--port', '0', '--json'], { cwd: dir, env, encoding: 'utf8', timeout: 40_000 });
+  assert.equal(free.status, 0, free.failure ?? free.stderr);
+  t.after(() => cleanupFixtureViews(env.PULLBOARD_HOME));
+  assert.notEqual(JSON.parse(free.stdout).port, port, '--port 0 still takes a free port when asked for');
 });
 
 /** Wait until the owned default listener has closed after its process stops. */
@@ -296,7 +350,7 @@ test('pullboard view uses its fixed default port and reuses its authenticated li
       const refusal = JSON.parse(busy.stdout).error;
       assert.equal(refusal.code, 'PORT_BUSY');
       assert.ok(refusal.message.includes(String(port)));
-      assert.match(refusal.message, /--port/u);
+      assert.match(refusal.message, /: stop .+, then run pullboard view again$/u);
       assert.equal(await (await fetchFresh(`http://127.0.0.1:${port}/`)).text(), 'unrelated listener', 'the refusal leaves another listener untouched');
     } finally {
       if (unrelated.listening) await new Promise((done) => unrelated.close(done));

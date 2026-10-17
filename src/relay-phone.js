@@ -11,8 +11,8 @@ import { listApiProjects } from './projects.js';
 import { Refused } from './refused.js';
 
 /** Select only a phone whose public key was MAC-authenticated into this native machine's roster. */
-export function approvalPhone(state) {
-  const device = readRelayMachine().devices.find(entry => entry.account === state.account && entry.url === state.url);
+export function approvalPhone(state, { exclude } = {}) {
+  const device = readRelayMachine().devices.find(entry => entry.account === state.account && entry.url === state.url && entry.deviceId !== exclude);
   if (!device) throw new Refused('PHONE_NOT_PAIRED', 'Pair the phone with pullboard relay on --all before requesting this action.');
   return device;
 }
@@ -30,7 +30,7 @@ export function proposalNames(root) {
 /** Build a sealed immutable proposal; only new-board link replies can have a durable private key. */
 export async function phoneProposal(state, action, target, { board = state.board, command, link = false, root } = {}) {
   if (!/^pm_[A-Za-z0-9_-]{43}$/u.test(state.token ?? '')) throw new Refused('RELAY_SESSION', 'Run pullboard relay on --all to replace the old person session with board machine credentials.');
-  const phone = approvalPhone(state);
+  const phone = approvalPhone(state, { exclude: action === 'revoke-device' ? target : undefined });
   const reply = await createApprovalReply({ link });
   const context = approvalContext({ id: randomUUID(), account: state.account, publisher: state.board, board,
     device: phone.deviceId, action, target, machine: state.machine,
