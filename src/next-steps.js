@@ -138,6 +138,7 @@ export const NEXT_STEPS = Object.freeze({
   IMPORT_NOT_EMPTY: 'import into a fresh repo whose board is empty: git init <dir> && cd <dir> && pullboard init',
   IMPORT_SCHEMA: 'export and import with the same Pullboard version',
   IMPORT_VERSION: 'export the board again with this Pullboard version: pullboard export > board.json',
+  INLINE_GATE: 'use the gate as its own flag: pullboard spec draft "<text>" --gate "<check>"',
   INTERNAL: 'run the command again; if it repeats, report it with pullboard shout coordinator "<command and output>"',
   ITEM_HELD: 'take another item with pullboard next while the coordinator holds this one',
   ITEM_NOT_AVAILABLE: 'read the item from this API\'s board state',
