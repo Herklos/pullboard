@@ -618,13 +618,27 @@ async function bindCheckoutSession(io, positionals, values) {
     throw new Refused('USAGE', 'pullboard takeover takes no arguments; run pullboard takeover [--json]');
   }
   const writes = ['init', 'join', 'worktree', 'hooks', 'hook', 'skills', 'add', 'edit', 'fact', 'escalate', 'run', 'sweep',
-    'next', 'claim', 'hold', 'release', 'submit', 'done', 'verify', 'merged', 'land', 'withdraw', 'refreeze', 'reopen', 'shout', 'answer', 'pass', 'import', 'milestone', 'takeover', 'forget'];
+    'next', 'claim', 'hold', 'release', 'submit', 'done', 'verify', 'check', 'merged', 'land', 'withdraw', 'refreeze', 'reopen', 'shout', 'answer', 'pass', 'import', 'milestone', 'takeover', 'forget'];
   if (!writes.includes(command) && !(command === 'lane' && first === 'add') && !(command === 'settings' && first) && !(command === 'spec' && first === 'apply') && !(command === 'relay' && ['on', 'off'].includes(first))) return;
   if (command === 'answer' && values.as === 'person') return;
   const digest = agentSessionDigest();
   if (!digest) {
     if (command === 'takeover') throw new Refused('AGENT_SESSION', 'takeover belongs to an agent session; run pullboard takeover from the agent’s shell');
     return;
+  }
+  if (command === 'check') {
+    // Acceptance follows its person-channel path; it does not renew a build claim.
+    if (first === 'accept') return;
+    const ctx = context(io);
+    const renewsOwnClaim = withBoard(ctx, (board) => {
+      const agentId = ctx.info.isMain ? COORDINATOR : store.agentAt(board, ctx.info.root)?.agent_id;
+      const item = first ? store.getItem(board, idArg(first)) : store.listItems(board)
+        .find((entry) => entry.item_status === 'claimed' && entry.item_owner === agentId && entry.item_parent_id === null);
+      return Boolean(agentId && item?.item_status === 'claimed' && item.item_owner === agentId);
+    });
+    // A named peer's check remains read-only. An owned check can renew, so acquire checkout
+    // authority before joining the gate queue, in the same order as submit and verify.
+    if (!renewsOwnClaim) return;
   }
   const info = repoInfo(io.cwd);
   let agent = info.isMain ? COORDINATOR : null;
@@ -2305,7 +2319,7 @@ async function submitHere(ctx, id) {
   // Doctrine counts only fall: accepted main's rules, at this exact commit (D1). No rule, no change.
   const doctrine = hasSubmitRules(root, acceptedMain.commit, acceptedMain.config.practice)
     ? await withGateSlot(root, () => holdDoctrine(root, { mainCommit: acceptedMain.commit, commit, practice: acceptedMain.config.practice, timeoutMs: acceptedMain.config.check?.timeoutMs }),
-      { itemCheck: true, agent: me.id, item: String(id), kind: 'doctrine', onWait: gateWaitReporter(ctx.io) })
+      { itemCheck: true, agent: me.id, item: String(id), kind: 'doctrine', onWait: queuedItemLease(ctx, held, me.id, 'build') })
     : [];
   for (const rule of doctrine) ctx.io.say(`doctrine: ${ruleLine(rule)}`);
   // Every submit proves its frozen check and reachable tests anew on this exact commit (V4,V16).
@@ -2314,7 +2328,7 @@ async function submitHere(ctx, id) {
     submitInvariants: acceptedMain.config.submitInvariants,
     // The accepted project runner interprets its current invariant files; candidate config cannot replace it.
     ...(acceptedMain.config.submitInvariants.length ? { affectedTests: acceptedMain.config.affectedTests } : {}) };
-  const gate = await runSubmitGate(root, submitConfig, { base: claimHead, trunk: acceptedMain.commit, check: frozenCheck(held), agent: me.id, item: String(id), onWait: gateWaitReporter(ctx.io), onBrowserFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
+  const gate = await runSubmitGate(root, submitConfig, { base: claimHead, trunk: acceptedMain.commit, check: frozenCheck(held), agent: me.id, item: String(id), onWait: queuedItemLease(ctx, held, me.id, 'build'), onBrowserFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
   if (!gate.isGreen) {
     const message = `the submission proof is red at ${commit.slice(0, 12)}; fix it, commit, submit again. ${submitGateReport(gate)}`;
     // No submission can follow this verdict. Read-only main comparisons must not retain the seat's write lease.
@@ -2540,7 +2554,7 @@ async function verifyHere(ctx, id, { second, values }) {
         // The private check runs here, in a private clone, under this machine's gate markers; a runner
         // lease cannot carry those markers, so the review queues for a local slot only [C7,V4].
         const shortEligible = Boolean(await explicitCheckFiles(root, frozenCheck(item), { commit }));
-        check = await withGateSlot(root, (lease) => checkAtCommit(root, item, { waitMs: lease.waitMs, gateLease: lease }), { browser, remote: false, agent: me.id, item: String(id), kind: 'review', itemCheck: true, shortEligible, onWait: gateWaitReporter(ctx.io) });
+        check = await withGateSlot(root, (lease) => checkAtCommit(root, item, { waitMs: lease.waitMs, gateLease: lease }), { browser, remote: false, agent: me.id, item: String(id), kind: 'review', itemCheck: true, shortEligible, onWait: queuedItemLease(ctx, item, me.id, 'review') });
       } else {
         check = checkAtCommit(root, item);
       }
@@ -3103,7 +3117,7 @@ function workCommands(io, args) {
       }
       const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(ctx.info.root, check, { onFallback: browserAdmissionReporter(io, values.json) });
       const shortEligible = Boolean(await explicitCheckFiles(ctx.info.root, check));
-      const run = await withGateSlot(ctx.info.root, (lease) => runProfiledShell(ctx.info.root, check, { waitMs: lease.waitMs, artifactPrefix: `pullboard-check-${item.item_id}`, persistLog: true, gateLease: lease }), { browser, agent: caller, item: String(item.item_id), kind: 'check', itemCheck: true, shortEligible, onWait: gateWaitReporter(io) });
+      const run = await withGateSlot(ctx.info.root, (lease) => runProfiledShell(ctx.info.root, check, { waitMs: lease.waitMs, artifactPrefix: `pullboard-check-${item.item_id}`, persistLog: true, gateLease: lease }), { browser, agent: caller, item: String(item.item_id), kind: 'check', itemCheck: true, shortEligible, onWait: queuedItemLease(ctx, item, caller, 'build') });
       refuseSandboxBlocked(run);
       io.result?.({ id: item.item_id, green: run.isGreen, seconds: run.seconds, check, by, report: run.isGreen ? '' : digestOf(run.output) });
       const timings = timingDigest(run.profile);
@@ -3291,13 +3305,55 @@ function workCommands(io, args) {
 function resourceRunLabel(entry, shortSlots = 0) {
   const priority = entry.landing ? 'landing' : entry.itemCheck ? 'item check' : entry.diagnostic ? 'diagnostic' : '';
   const slot = !shortSlots ? '' : entry.slot ? `${entry.slot} slot` : entry.requestedSlot === 'short-eligible' ? 'may use a short slot' : '';
-  const details = [slot, entry.kind !== priority ? entry.kind : '', entry.item ? `#${entry.item}` : '', entry.browser ? 'browser' : ''].filter(Boolean);
+  const details = [slot, entry.kind !== priority ? entry.kind : '', entry.item ? `#${entry.item}` : '', entry.leaseUntil ? `lease until ${entry.leaseUntil}` : '', entry.browser ? 'browser' : ''].filter(Boolean);
   return `${priority ? ` (${priority})` : ''}${details.length ? ` (${details.join(', ')})` : ''}`;
 }
 
 /** Name a known board seat for queue diagnostics without requiring an unjoined checkout to join. */
 function resourceAgent(ctx) {
   return ctx.info.isMain ? COORDINATOR : withBoard(ctx, board => store.agentAt(board, ctx.info.root)?.agent_id);
+}
+
+/** Keep only this queued command's live item lease, using ordinary ordered board moves. */
+function queuedItemLease(ctx, initial, agentId, kind) {
+  const report = gateWaitReporter(ctx.io);
+  // Naming somebody else's check remains read-only; it never extends their build claim.
+  if (kind === 'build' && (initial.item_status !== 'claimed' || initial.item_owner !== agentId)) return report;
+  const review = kind === 'review';
+  if (review && initial.item_review_by !== agentId) return report;
+  const field = review ? 'item_review_until' : 'item_lease_until';
+  const owner = review ? 'item_review_by' : 'item_owner';
+  const status = review ? 'submitted' : 'claimed';
+  const leaseMs = review ? ctx.config.reviewLeaseMs : ctx.config.leaseMs;
+  const expected = { digest: initial.item_frozen_digest, commit: initial.item_commit };
+  let confirmedLeaseUntil = '';
+  return async (state) => {
+    if (!state.admitted) report(state);
+    const now = ctx.clock.now().getTime();
+    // Queue polling is frequent; reopen the board only when renewal is due or admission starts.
+    if (!state.admitted && Date.parse(confirmedLeaseUntil) - now > leaseMs / 2) {
+      return { leaseUntil: confirmedLeaseUntil };
+    }
+    return await withBoard(ctx, async (board) => {
+      const current = store.getItem(board, initial.item_id);
+      const expires = Date.parse(current[field]);
+      if (current.item_status !== status || current[owner] !== agentId || !Number.isFinite(expires) || expires <= now
+        || current.item_frozen_digest !== expected.digest || current.item_commit !== expected.commit) {
+        throw new Refused('ITEM_LEASE_LOST', `the queued ${review ? 'review' : 'build'} lease for #${initial.item_id} changed or expired; claim or reserve the item again before retrying`);
+      }
+      if (state.admitted || expires - now <= leaseMs / 2) {
+        const result = await ordered(ctx, board, review ? 'reserveReview' : 'claim', [initial.item_id, {
+          agentId, leaseMs,
+          ...(review ? { policy: ctx.config.verify.policy, familyPolicy: ctx.config.verify.family }
+            : { lane: current.item_lane, freeze: claimFreezer(ctx), head: headCommit(ctx.info.root) }),
+        }]);
+        confirmedLeaseUntil = review ? result.item_review_until : result.leaseUntil;
+        return { leaseUntil: confirmedLeaseUntil };
+      }
+      confirmedLeaseUntil = current[field];
+      return { leaseUntil: confirmedLeaseUntil };
+    });
+  };
 }
 
 /** Print the file and reason when conservative uncertainty reserves browser capacity.
@@ -3990,6 +4046,11 @@ async function runCommand(argv, io) {
       return 0;
     }
     if (command === 'gate') {
+      if (first !== undefined || second !== undefined || rest.length > 0) {
+        const words = [first, second, ...rest].filter((word) => word !== undefined);
+        const next = 'use pullboard resources for status, or pullboard gate with no extra words to run the gate';
+        throw new Refused('GATE_ARGUMENT', `pullboard gate does not accept extra words: ${words.join(' ')}. Use pullboard resources for status, or pullboard gate with no extra words to run the gate.`, next);
+      }
       const ctx = context(io);
       let config;
       try { config = mainPolicy(ctx.info.root).config; }
