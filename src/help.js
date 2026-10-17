@@ -111,6 +111,8 @@ Work
   pullboard pass <shout-id> <note>                coordinator passes a decision to the person
   pullboard decisions [--as person]               shouts waiting for you; main checkout defaults to coordinator
   pullboard export                              print the whole board as versioned JSON
+  pullboard digest [--out <file>] [--watch]     a short Markdown briefing of this board for a person or a chat assistant;
+                                        secrets redacted; --out replaces a file, --watch rewrites it after every move
   pullboard import <file>                       restore a versioned export into an empty board
 
 Coordinator
@@ -200,7 +202,7 @@ Reject reasons: TEST_FAILURE, BEHAVIOR_MISMATCH, INSUFFICIENT_EVIDENCE, STALE_HE
 const HELP_NAMES = [
   'tour', 'init', 'worktree', 'join', 'takeover', 'whoami', 'lanes', 'lane', 'lane add', 'status', 'resources', 'settings', 'view', 'view export',
   'serve', 'mcp', 'relay', 'relay recover', 'resume', 'hooks', 'add', 'edit', 'escalate', 'run', 'list', 'doctor', 'skills', 'show', 'next', 'land',
-  'check', 'claim', 'release', 'submit', 'done', 'verify', 'fact', 'why', 'shout', 'answer', 'pass', 'decisions', 'inbox', 'export', 'import',
+  'check', 'claim', 'release', 'submit', 'done', 'verify', 'fact', 'why', 'shout', 'answer', 'pass', 'decisions', 'inbox', 'export', 'digest', 'import',
   'sweep', 'merged', 'withdraw', 'refreeze', 'reopen', 'hold', 'stats', 'ledger', 'log', 'spec', 'spec check', 'spec view',
   'spec show', 'spec unmet', 'spec signoff', 'spec draft', 'spec signers', 'spec signers add', 'doctrine', 'doctrine check', 'forget', 'prompt', 'gate', 'hook',
   'hook pre-commit', 'hook pre-merge-commit', 'hook commit-msg', 'hook pre-push', 'view export', 'version', 'lifecycle', 'help',
@@ -223,7 +225,7 @@ const HELP_EXAMPLES = {
   why: 'pullboard why 12',
   verify: 'pullboard verify 12 accept --note "removed the fix; the test failed"',
   answer: 'pullboard answer 12 "done"', pass: 'pullboard pass 12 "please decide"',
-  status: 'pullboard status', view: 'pullboard view', mcp: 'pullboard mcp', stats: 'pullboard stats --since 2026-10-08', log: 'pullboard log 12', ledger: 'pullboard ledger',
+  status: 'pullboard status', view: 'pullboard view', digest: 'pullboard digest --out briefing.md', mcp: 'pullboard mcp', stats: 'pullboard stats --since 2026-10-08', log: 'pullboard log 12', ledger: 'pullboard ledger',
   'lane add': 'pullboard lane add web --owns apps/web/', lane: 'pullboard lane add web --owns apps/web/',
   roadmap: 'pullboard roadmap', milestone: 'pullboard milestone add "0.7.0" --items 12,13',
   runner: 'pullboard runner add studio --slots 2 --browser 1', 'runner add': 'pullboard runner add studio --slots 2 --browser 1',

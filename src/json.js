@@ -73,6 +73,7 @@ export const JSON_SHAPES = {
     prompt: shape({ role: 'string', text: 'string' }),
     gate: shape({ green: 'boolean', report: 'string' }),
     export: shape({ tables: 'object' }),
+    digest: shape({ markdown: 'string', bytes: 'number', sequence: 'number', sections: 'array' }),
     import: shape({ tables: 'array' }),
     spec: shape({ rows: 'array' }),
     'spec check': shape({ rows: 'array' }),
