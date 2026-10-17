@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve, join } from 'node:path';
 import { test } from 'node:test';
 import { relayClientFixture } from './relay-client-fixture.js';
+import { enrollProtocolPhone } from './relay-device-enrollment-fixture.js';
 import { findChromeExecutable, startChrome } from './relay-browser-fixture.js';
 import { ENGINE_VERSION } from '../src/machine.js';
 
@@ -370,7 +371,8 @@ test('an approval delivered while the page is busy still becomes a card [H15,H12
     'the card is not asserted before actual decryption finishes');
   assert.ok((await chrome.evaluate('window.__approvalObservations')).some(poll => poll.ids.includes(render.context.id)),
     'the browser received this row before its rendering work completed');
-  const renderLater = await startRevocation(box, native, deviceId);
+  const revokedDeviceId = await enrollProtocolPhone(box);
+  const renderLater = await startRevocation(box, native, revokedDeviceId);
   assert.equal(await chrome.evaluate(`document.querySelector('#phone-approve-${renderLater.context.id}') === null`), true,
     'the second row arrives while the first genuine decrypt is held');
   await chrome.evaluate('window.__approvalDecrypt.release()');
@@ -387,7 +389,7 @@ test('an approval delivered while the page is busy still becomes a card [H15,H12
     const box = await relayClientFixture(t);
     const { chrome, native } = await pairPhone(box, t);
     await observeApprovals(chrome);
-    const deviceId = JSON.parse(readFileSync(join(box.env.PULLBOARD_HOME, 'relay-machine/state.json'), 'utf8')).devices[0].deviceId;
+    const deviceId = await enrollProtocolPhone(box);
     // While one real approval click waits on its authorize response, publish a different action.
     const thirdToken = await issueToken(box, 'approval-earlier-action');
     const earlier = await startRevocation(box, native, thirdToken.id);

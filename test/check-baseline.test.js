@@ -430,3 +430,41 @@ test('[H3,H16] captured add and edit baselines replay identically without runnin
   assert.deepEqual(snapshotFile(fileA), snapshotFile(fileB), 'replayed edits preserve equal baseline and event metadata');
   assert.deepEqual(snapshotFile(senderFile), snapshotFile(fileA), 'sender and both receiving databases share the same add/edit history');
 });
+
+/** Read the shell's own parse message for a command, as the refusal must quote it. */
+function shellParseMessage(command) {
+  const parsed = spawnSync('/bin/sh', ['-n', '-c', command], { encoding: 'utf8' });
+  assert.notEqual(parsed.status, 0, 'the fixture command is a real syntax error');
+  return parsed.stderr.trim().split('\n')[0].trim();
+}
+
+test('[C7,V4] a check that is not valid shell is refused when set', () => {
+  const box = project();
+  const unbalanced = "grep -q 'it's done' web/result.txt";
+  const said = shellParseMessage(unbalanced);
+  const before = box.run(box.repo, ['list', '--json']).stdout;
+
+  const added = box.run(box.repo, ['add', 'web', 'Unbalanced add', '--specs', 'G1', '--check', unbalanced, '--json']);
+  assert.notEqual(added.status, 0, 'an unbalanced quote on add is refused');
+  const addError = JSON.parse(added.stdout).error;
+  assert.equal(addError.code, 'CHECK_SYNTAX', 'add refuses with CHECK_SYNTAX');
+  assert.ok(addError.message.includes(said), `add quotes the shell's message: ${addError.message}`);
+  assert.match(addError.next, /sh -n/u, 'the refusal names its specific next step');
+  assert.equal(box.run(box.repo, ['list', '--json']).stdout, before, 'a refused add files no item');
+
+  const valid = "grep -q 'green' web/result.txt";
+  const { item } = addChecked(box, 'Valid check', valid);
+  assert.equal(item.item_check, valid, 'a valid check is accepted on add');
+
+  const edited = box.run(box.repo, ['edit', String(item.item_id), '--check', unbalanced, '--json']);
+  assert.notEqual(edited.status, 0, 'an unbalanced quote on edit is refused');
+  const editError = JSON.parse(edited.stdout).error;
+  assert.equal(editError.code, 'CHECK_SYNTAX', 'edit refuses with CHECK_SYNTAX');
+  assert.ok(editError.message.includes(said), `edit quotes the shell's message: ${editError.message}`);
+  assert.equal(showItem(box, item.item_id).item.item_check, valid, 'a refused edit keeps the old check');
+
+  const revised = "grep -q 'gr''een' web/result.txt";
+  const accepted = box.run(box.repo, ['edit', String(item.item_id), '--check', revised, '--wait', '--json']);
+  assert.equal(accepted.status, 0, `a valid check is accepted on edit: ${accepted.stdout}${accepted.stderr}`);
+  assert.equal(showItem(box, item.item_id).item.item_check, revised);
+});
