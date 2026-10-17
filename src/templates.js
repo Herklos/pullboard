@@ -9,7 +9,8 @@ export const AGENTS_START = '<!-- pullboard:start -->';
 export const AGENTS_END = '<!-- pullboard:end -->';
 
 /**
- * The starting pullboard.json: the gate and the fixers init detected, the spec, and no lanes yet.
+ * The starting pullboard.json: the gate and the fixers init detected, the spec, no lanes yet, and
+ * checks.provesNothing at "hold", so a new board holds an item whose check already passes on main.
  *
  * @param {string} gate
  * @param {{ run: string, files: string[] }[]} [fix]
@@ -28,6 +29,7 @@ export function configTemplate(gate, fix = []) {
     lanes: { review: { owns: [], starts: 'any time: verifiers check submitted work and own no folders' } },
     shared: [],
     commits: { requireIds: ['feat', 'fix'] },
+    checks: { provesNothing: 'hold' },
   };
   return `${JSON.stringify(config, null, 2)}\n`;
 }
@@ -105,9 +107,13 @@ This repo runs on pullboard: a work board, lanes and a spec that live in git. No
 
 **Doctrine.** Our house rules for agentic development. This repo inherits Pullboard standard doctrine version 1. ${doctrine.repo ? doctrine.name : DOCTRINE_FILE} adds the repo's own rows, overrides a standard rule by its PB id, or declines it with a wont row and its reason as the row text: - PB7 [wont] <why>. Approved rows are in force; follow them as you would the spec. A rule with \`gate: check <command>\` and \`count: N\` holds a count that only falls: run pullboard doctrine check to see each count, and submit refuses RATCHET_ROSE when a touched rule rises or a changed file gains a problem. Lower \`count:\` in a commit when you fix problems; only the person raises it. Run pullboard spec --json to read the current merged rules. Re-run pullboard init after changing the doctrine to refresh this managed guidance.
 
+**Fit a blueprint.** After \`blueprint add\`, a seat can propose how each drafted row, question and starter item fits this repository with \`pullboard blueprint fit <name or file> <row id or #item> keep|adapt|drop|answer\`. Include \`--text\` for adapted wording or an answer, and \`--reason\` for why. The proposals remain drafts until the person reads \`pullboard spec fit\`, optionally edits one with \`pullboard spec fit edit <row id or #item> keep|adapt|drop|answer\`, and approves the batch with its printed code using \`pullboard spec fit approve <batch>\`. The proposer cannot run the person-only edit or approval commands.
+
 ### Current doctrine
 
 ${doctrineText(doctrine)}
+
+**Several blueprints.** \`pullboard init\` and \`pullboard blueprint add\` take \`--blueprint\` more than once, such as \`pullboard init --blueprint web-app --blueprint serverless\`: at most one product and one architecture blueprint, and any number of practice and beyond-code ones. They land in the order given, a rule two of them share is drafted once, and each starter item keeps the name of its blueprint.
 
 **Role guides.** \`pullboard prompt run\`, \`decompose\`, \`plan\`, \`signoff\`, \`review\` and \`verify\` print the guide for each role. Claude Code also has them as skills. The agent in the main checkout runs the whole team by the run guide (the pullboard-run skill).
 
@@ -119,10 +125,11 @@ It prints the folder to work in and what to run there first. Every join needs th
 
 **The loop.**
 1. \`pullboard resume\` at the start of every session and after your context is compacted: your claim, what came back, unread shouts and the next step. Then \`pullboard inbox\`.
-2. \`pullboard next\` claims the next item in your lane that is free to start. When everything is waiting on other work, \`pullboard next --wait 9\` keeps looking for up to 9 minutes, which fits one tool call with a ten-minute timeout; run it again to keep waiting. A claim is a 2-hour lease; claim again to renew. The criterion freezes now: \`pullboard show <id>\` is the bar your work is judged against, and its brief says how to start. \`pullboard why <id>\` lists the decisions that changed it, newest first. When your own answer, verdict or fact changes other items, name them with \`--implies <ids>\` so each one carries it.
+2. \`pullboard next\` claims the next free item your session can take across the lanes, by release and queue rank. It names the lane worktree to use and opens one when your session has none there; begin subsequent commands in that folder. Each worktree still owns only its lane’s files. Joining associates the seat with the invoking agent session automatically; no person setup is needed. When everything is waiting on other work, \`pullboard next --wait 9\` keeps looking for up to 9 minutes, which fits one tool call with a ten-minute timeout; run it again to keep waiting. A claim is a 2-hour lease; claim again to renew. The criterion freezes now: \`pullboard show <id>\` is the bar your work is judged against, and its brief says how to start. \`pullboard why <id>\` lists the decisions that changed it, newest first. When your own answer, verdict or fact changes other items, name them with \`--implies <ids>\` so each one carries it. A claim or submit refused as CRITERION_PROVES_NOTHING names a check that already passes on main, so it proves nothing: shout the coordinator for a check that fails before the work. Only the person accepts a check as it stands, with \`pullboard check accept <id>\` from the main checkout or the view.
 3. Build inside your lane's folders (\`pullboard lanes\`). Pre-commit refuses anything else; shout the owner instead.
 4. Commit, then \`pullboard submit <id>\`. It needs a clean tree and the gate green at HEAD.
 5. A different agent verifies: \`pullboard next --verify\` names the next item to check. It checks out the submitted commit and runs \`pullboard verify <id> accept --note "how it proved it"\`, or \`pullboard verify <id> reject --reason TEST_FAILURE --note "what failed"\`.
+When a reject names a structured cause, add \`--cause <key>\` (\`test:<file>::<title>\`, \`refusal:<CODE>\`, \`row:<id>\` or \`doctrine:<id>\`) so \`pullboard rigor\` can notice when the same cause repeats.
 6. A reject reopens the item. Fix it, commit, claim, submit again; the same head is refused. If you cannot get an item green, do not force it: \`pullboard escalate <id> --note "what you tried and how it failed"\` hands it one tier up.
 7. Your lane is done when its items are verified, not when they are submitted. After your last submit, keep running \`pullboard next --wait 9\`: a rejected item comes back to your lane.
 
@@ -147,4 +154,50 @@ When the person asks for help with Pullboard, such as "Help me open my Pullboard
 **Sharing with the phone or another computer.** Have the person type \`pullboard relay on --all\` themselves in their own terminal: it signs in as them, so Pullboard refuses it from an agent. Tell them what they will see: a GitHub address and a code to enter there, one \`linked:\` line for each board, then a QR code. To sign in on the phone, the person scans that QR code, taps Sign in with GitHub and approves Pullboard; their boards then appear on the phone. For another computer, the person runs \`pullboard relay pair\` in a board here and types \`pullboard relay join <code>\` on the other computer. Then confirm the boards arrived: run \`pullboard relay\` in each board to see its link, and \`pullboard relay devices\` to see the paired phone.
 ${AGENTS_END}
 `;
+}
+
+/** Git subcommands used directly by Pullboard's documented agent loop, never all Git commands. */
+export const PULLBOARD_LOOP_GIT_COMMANDS = Object.freeze([
+  'status', 'diff', 'log', 'add', 'commit', 'merge', 'rebase', 'switch', 'checkout', 'worktree',
+]);
+
+/**
+ * Return gate argv only when the configured command is plain words; shell syntax is never widened
+ * into an allow rule that could hide other commands.
+ *
+ * @param {string} gate
+ * @returns {string[] | null}
+ */
+export function plainGateWords(gate) {
+  const text = String(gate ?? '').trim();
+  return /^[A-Za-z0-9_./:=@+-]+(?: [A-Za-z0-9_./:=@+-]+)*$/u.test(text) ? text.split(' ') : null;
+}
+
+/**
+ * Rules Claude Code can add to this project without changing the person's home or session settings.
+ *
+ * @param {{ gate?: string }} options
+ * @returns {string[]}
+ */
+export function claudeLoopRules({ gate = '' }) {
+  const rules = ['Bash(pullboard:*)', ...PULLBOARD_LOOP_GIT_COMMANDS.map(command => `Bash(git ${command}:*)`)];
+  const words = plainGateWords(gate);
+  if (words) rules.push(`Bash(${words.join(' ')})`);
+  // Project-relative rules follow each linked worktree's primary working directory.
+  rules.push('Edit(/**)');
+  return rules;
+}
+
+/**
+ * Codex project-local rules use argv prefixes and apply only after the project is trusted. Each
+ * pattern is intentionally scoped to one product command or one listed Git verb.
+ *
+ * @param {string} gate
+ * @returns {string[]}
+ */
+export function codexLoopRules(gate = '') {
+  const patterns = [['pullboard'], ...PULLBOARD_LOOP_GIT_COMMANDS.map(command => ['git', command])];
+  const words = plainGateWords(gate);
+  if (words) patterns.push(words);
+  return patterns.map(pattern => `prefix_rule(pattern=${JSON.stringify(pattern)}, decision="allow", justification="Run the Pullboard project loop.")`);
 }

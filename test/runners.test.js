@@ -1,23 +1,27 @@
 /** Registered SSH runner execution stays inside a committed, secret-free worker checkout [C7]. */
 import assert from 'node:assert/strict';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
-import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, watch, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { after, test } from 'node:test';
-import { listResources, setResourceCapacity, takeResource } from '../src/resources.js';
+import { gateSlotEnvironment, listResources, setResourceCapacity, takeResource } from '../src/resources.js';
 import { parseProcessCensus } from '../src/process-census.js';
 import { listResources as listPreRunnerResources, takeResource as takePreRunnerResource } from './fixtures/resources-pre-runners.js';
 import { runFixtureChild, runFixtureChildAsync, startFixtureChild } from './fixture-child.js';
+import { createE2eHelpers } from './e2e-helpers.js';
+import { refuseSandboxBlocked } from '../src/gate.js';
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
 const TEMP = [];
 const SECRET = ['fixture', 'runner', 'secret', 'must', 'stay', 'local'].join('-');
 const HOST = 'fixture-host';
 const TOOLING_SNAPSHOTS = new Map();
+const e2e = createE2eHelpers();
+after(e2e.cleanup);
 
 /** Quote one literal value for the fixture's POSIX shell command. */
 function shellQuote(value) {
@@ -87,10 +91,9 @@ function cli(repo, env, ...args) {
 function installSshStandIn({ bin, worker, home, machineHome, requests, starts, nodeCommand = 'node', dropFirst = false, dropAfterMarker, hold = '', stderrLog }) {
   const ssh = join(bin, 'ssh');
   const source = `#!/usr/bin/env node
-import { appendFileSync, existsSync, readFileSync, watch, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { basename, dirname, join } from 'node:path';
 const argv = process.argv.slice(2);
 const divider = argv.indexOf('--');
 const host = divider >= 0 ? argv[divider + 1] : '';
@@ -114,26 +117,23 @@ const record = extra => appendFileSync(requests, JSON.stringify({ call, host,
   remoteHasLocalPath: remoteCommand.includes(${JSON.stringify(worker)}),
   remoteHasSourceHome: remoteCommand.includes(${JSON.stringify(home)}),
   remoteHasSourceMachineHome: remoteCommand.includes(${JSON.stringify(machineHome)}), ...extra }) + '\\n');
+/** Wait for the concrete setup marker and allow a finished worker to cancel its wait. */
 const waitForMarker = path => {
   let cancel = () => {};
   const promise = new Promise((resolve, reject) => {
     if (existsSync(path)) return resolve(true);
-    const watcher = watch(dirname(path), { persistent: false });
-    let timer;
+    let poll, timer;
     let settled = false;
     const finish = (error, found = true) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer); watcher.close(); error ? reject(error) : resolve(found);
+      clearInterval(poll); clearTimeout(timer); error ? reject(error) : resolve(found);
     };
     cancel = () => finish(null, false);
-    const check = (_event, filename) => {
-      if ((filename === null || String(filename) === basename(path)) && existsSync(path)) finish();
-    };
-    watcher.on('change', check);
-    watcher.once('error', finish);
-    timer = setTimeout(() => finish(new Error('setup marker hang ceiling exceeded')), 20_000); // budget: bound the SSH-to-setup disconnect handshake.
-    check('rename', basename(path));
+    const check = () => { if (existsSync(path)) finish(); };
+    poll = setInterval(check, 20); // budget: observe actual setup readiness without relying on notifications.
+    timer = setTimeout(() => finish(new Error('setup marker hang ceiling exceeded')), 20_000); // budget: unchanged SSH-to-setup handshake ceiling.
+    check();
   });
   return { promise, cancel: () => cancel() };
 };
@@ -392,7 +392,7 @@ async function runThroughGate(repo, env, command, { browser = true, item = '663'
 const result = await withGateSlot(${JSON.stringify(repo)}, lease => runProfiledShell(${JSON.stringify(repo)}, ${JSON.stringify(command)}, { gateLease: lease, landing: ${landing} }),
   { browser: ${browser}, item: ${JSON.stringify(item)}, kind: ${JSON.stringify(kind)}, landing: ${landing}, agent: 'runner-fixture' });
 process.stdout.write(result.output);
-process.stdout.write('PULLBOARD_RUN_RESULT ' + JSON.stringify({ isGreen: result.isGreen, runner: result.profile.executionRunner, profile: result.profile }) + '\\n');
+process.stdout.write('PULLBOARD_RUN_RESULT ' + JSON.stringify({ isGreen: result.isGreen, runner: result.profile.executionRunner, sandboxBlocked: result.sandboxBlocked, profile: result.profile }) + '\\n');
 process.exitCode = result.isGreen ? 0 : 1;
 `;
   try {
@@ -431,25 +431,13 @@ function readRemoteGateHolders(file) {
   } finally { db.close(); }
 }
 
-/** Wait for a marker from an external queue observer, with a ceiling for a broken fixture. */
+/** Wait for the marker itself: a missed file notification must not hide observable readiness. */
 async function waitForMarker(path) {
-  if (existsSync(path)) return;
-  const watcher = watch(dirname(path), { persistent: false });
-  let timer;
-  try {
-    const changed = new Promise((resolve, reject) => {
-      const check = (_event, filename) => {
-        if ((filename === null || String(filename) === basename(path)) && existsSync(path)) resolve();
-      };
-      watcher.on('change', check);
-      watcher.once('error', reject);
-      check('rename', basename(path));
-    });
-    if (existsSync(path)) return;
-    await Promise.race([changed, new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`fixture marker did not arrive: ${path}`)), 20_000); // budget: hang ceiling for the queue-to-parent handoff.
-    })]);
-  } finally { clearTimeout(timer); watcher.close(); }
+  const deadline = Date.now() + 20_000; // budget: unchanged hang ceiling for the queue-to-parent handoff.
+  while (!existsSync(path)) {
+    if (Date.now() >= deadline) throw new Error(`fixture marker did not arrive: ${path}`);
+    await new Promise(resolve => setTimeout(resolve, 20)); // budget: polling interval for the actual readiness marker.
+  }
 }
 
 /** Poll a concrete process/resource state; the deadline only bounds a broken cleanup handshake. */
@@ -641,6 +629,88 @@ test('a queued run executes on a registered runner and its result comes back (ho
     completedCleanly = true;
   } finally {
     if (held) held.release();
+    if (previousHome === undefined) delete process.env.PULLBOARD_HOME;
+    else process.env.PULLBOARD_HOME = previousHome;
+    if (previousMachineHome === undefined) delete process.env.PULLBOARD_MACHINE_HOME;
+    else process.env.PULLBOARD_MACHINE_HOME = previousMachineHome;
+  }
+});
+
+test('a private check never refuses its own remote lease [C7,V4]', async (t) => {
+  // The frozen check records the local gate marker it ran under, so a verdict proves the check itself ran.
+  const box = e2e.privateCheckSubmission({ check: `printf 'held=%s pool=%s' "$PULLBOARD_GATE_SLOT_HELD" "$PULLBOARD_GATE_SLOT_POOL" > "$RUNNER_FIXTURE_CHECK_MARKER"` });
+  const home = join(box.dir, 'home');
+  const remoteHome = join(box.dir, 'worker-home');
+  const remoteMachineHome = join(remoteHome, '.pullboard');
+  const worker = join(box.dir, 'second-machine');
+  const bin = join(box.dir, 'ssh-bin');
+  const requests = join(box.dir, 'ssh-requests.jsonl');
+  const marker = join(box.dir, 'check-ran');
+  for (const folder of [home, remoteHome, remoteMachineHome, join(remoteHome, '.pullboard-runner'), worker, bin, box.env.PULLBOARD_MACHINE_HOME]) {
+    mkdirSync(folder, { recursive: true });
+  }
+  const env = { ...box.env, HOME: home, PATH: bin + ':' + box.env.PATH, RUNNER_FIXTURE_CHECK_MARKER: marker };
+  // The suite runs under its own gate lease; the review must take and mark a lease of its own.
+  for (const key of ['PULLBOARD_GATE_SLOT_HELD', 'PULLBOARD_GATE_SLOT_POOL', 'PULLBOARD_GATE_SLOT_TOKEN', 'PULLBOARD_BROWSER_SLOT_HELD']) delete env[key];
+  const machineHome = env.PULLBOARD_MACHINE_HOME;
+  const settingsFile = join(machineHome, 'settings.json');
+  const settings = existsSync(settingsFile) ? JSON.parse(readFileSync(settingsFile, 'utf8')) : {};
+  writeFileSync(settingsFile, JSON.stringify({ ...settings, gateSlots: 1 }));
+  installSshStandIn({ bin, worker, home: remoteHome, machineHome: remoteMachineHome, requests });
+  const added = cli(box.repo, env, 'runner', 'add', HOST, '--slots', '1', '--browser', '1', '--json');
+  assert.equal(added.status, 0, added.context);
+
+  const previousHome = process.env.PULLBOARD_HOME;
+  const previousMachineHome = process.env.PULLBOARD_MACHINE_HOME;
+  process.env.PULLBOARD_HOME = env.PULLBOARD_HOME;
+  process.env.PULLBOARD_MACHINE_HOME = machineHome;
+  let held;
+  let review;
+  try {
+    // Filling the only local slot is what sends a remote-capable waiter to the runner.
+    held = await takeResource({ name: 'gate', capacity: 1, scope: 'machine', root: box.repo,
+      agent: 'private-check-local-holder', item: 'private-check-local-holder', kind: 'force-registered-runner' });
+    review = observe(startFixtureChild(process.execPath, [BIN, 'verify', '1', 'accept', '--note', 'the frozen check ran to a verdict', '--json'], {
+      cwd: box.review, env, stdio: ['ignore', 'pipe', 'pipe'] }));
+    let exited = null;
+    review.closed.then(result => { exited = result; });
+    /** Read the review's ticket in this machine's gate line, if it is waiting there. */
+    const reviewTicket = () => listResources({ scope: 'machine', root: box.repo })
+      .find(resource => resource.name === 'gate')?.line.find(entry => entry.item === '1' && entry.kind === 'review');
+    const deadline = Date.now() + 20_000; // budget: hang ceiling for the review to reach the gate line.
+    while (!exited && !reviewTicket()) {
+      if (Date.now() >= deadline) throw new Error('the review neither queued nor finished');
+      await new Promise(resolve => setTimeout(resolve, 40)); // budget: polling interval for the observable queue state.
+    }
+    const early = exited ? `${exited.stdout}\n${exited.stderr}` : '';
+    assert.doesNotMatch(early, /REMOTE_GATE_SLOT_NOT_INHERITABLE/, 'the review refused its own runner lease before its frozen check ran');
+    assert.equal(exited, null, `the review finished while the only local slot was held: ${early}`);
+    assert.equal(reviewTicket().remote, undefined, 'the private check queues for a local slot only, never the runner');
+
+    const command = `node -e ${shellQuote('process.stdout.write("GATE_ON_RUNNER\\n")')}`;
+    // The round trip's phase deadlines bound a broken fixture-only remote dispatch.
+    const gate = await runThroughGate(box.repo, env, command, { item: 'private-check-gate', requests });
+    assert.equal(gate.status, 0, `a gate run still dispatches to the runner while the review waits: ${fixtureResultContext(gate)}`);
+    assert.match(gate.stdout, /GATE_ON_RUNNER/u);
+    assert.equal(gateResult(gate.stdout).runner, HOST, 'the gate run executed on the registered runner');
+    assert.equal(exited, null, 'the review still waits for its local slot after the runner run');
+
+    held.release();
+    held = undefined;
+    const finished = await review.closed;
+    assert.doesNotMatch(`${finished.stdout}\n${finished.stderr}`, /REMOTE_GATE_SLOT_NOT_INHERITABLE/);
+    assert.equal(finished.status, 0, `the review reached a verdict: ${finished.stdout}\n${finished.stderr}`);
+    assert.equal(readFileSync(marker, 'utf8'), `held=1 pool=${realpathSync(join(machineHome, 'resources.sqlite'))}`, 'the frozen check ran locally under the review\'s own local gate lease');
+    assert.equal(JSON.parse(box.run(box.repo, 'show', '1', '--json').out).item_status, 'verified');
+    const requestsSeen = readFileSync(requests, 'utf8').trim().split(/\r?\n/u).filter(Boolean).map(line => JSON.parse(line));
+    assert.deepEqual(requestsSeen.map(request => request.host), [HOST], 'only the gate run reached the runner');
+
+    // The refusal still guards its real case: a runner lease never becomes local child markers.
+    assert.throws(() => gateSlotEnvironment({ name: 'gate', scope: 'machine', pool: 'fixture-pool', token: 'fixture-token', runner: { host: HOST } }),
+      error => error.code === 'REMOTE_GATE_SLOT_NOT_INHERITABLE');
+  } finally {
+    if (held) held.release();
+    if (review && review.child.exitCode === null && review.child.signalCode === null) review.child.kill('SIGKILL');
     if (previousHome === undefined) delete process.env.PULLBOARD_HOME;
     else process.env.PULLBOARD_HOME = previousHome;
     if (previousMachineHome === undefined) delete process.env.PULLBOARD_MACHINE_HOME;
@@ -1071,8 +1141,7 @@ test('a queued run executes on a registered runner and its result comes back [C7
     name: 'setup-fixture-dep', version: '1.0.0', scripts: { postinstall: 'node postinstall.js' },
   }, null, 2) + '\n');
   writeFileSync(join(packageDirectory, 'witness.txt'), 'setup fixture package source\n');
-  writeFileSync(join(packageDirectory, 'postinstall.js'), `import { existsSync, watch, writeFileSync } from 'node:fs';
-import { basename, dirname } from 'node:path';
+  writeFileSync(join(packageDirectory, 'postinstall.js'), `import { existsSync, writeFileSync } from 'node:fs';
 const ready = ${JSON.stringify(setupReady)};
 const pidFile = ${JSON.stringify(setupPid)};
 const term = ${JSON.stringify(setupTerm)};
@@ -1080,16 +1149,17 @@ const release = ${JSON.stringify(releaseSetup)};
 const gone = ${JSON.stringify(setupGone)};
 const waitForRelease = new Promise((resolve, reject) => {
   if (existsSync(release)) return resolve();
-  const watcher = watch(dirname(release), { persistent: false });
-  let timer;
-  const finish = error => { clearTimeout(timer); watcher.close(); error ? reject(error) : resolve(); };
-  const check = (_event, filename) => {
-    if ((filename === null || String(filename) === basename(release)) && existsSync(release)) finish();
+  let poll, timer;
+  let settled = false;
+  const finish = error => {
+    if (settled) return;
+    settled = true;
+    clearInterval(poll); clearTimeout(timer); error ? reject(error) : resolve();
   };
-  watcher.on('change', check);
-  watcher.once('error', finish);
-  timer = setTimeout(() => finish(new Error('postinstall release hang ceiling exceeded')), 20_000); // budget: bound a broken fixture handshake.
-  check('rename', basename(release));
+  const check = () => { if (existsSync(release)) finish(); };
+  poll = setInterval(check, 20); // budget: observe the actual release handshake.
+  timer = setTimeout(() => finish(new Error('postinstall release hang ceiling exceeded')), 20_000); // budget: unchanged broken-fixture ceiling.
+  check();
 });
 let stopping = false;
 process.on('SIGTERM', () => {
@@ -1543,6 +1613,74 @@ test('a refused remote setup fails the run by name [C7]', async (t) => {
   }
 });
 
+test('a remote file denial is classified on the runner [I1,C7]', { skip: process.getuid?.() === 0 && 'root reads any file' }, async (t) => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-runner-denial-')));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const [home, remoteHome, repo, worker, bin] = ['home', 'worker-home', 'repo', 'second-machine', 'bin'].map(name => join(dir, name));
+  const machineHome = join(home, '.pullboard');
+  const remoteMachineHome = join(remoteHome, '.pullboard');
+  const requests = join(dir, 'ssh-requests.jsonl');
+  const realpaths = join(dir, 'controller-realpaths.log');
+  const preload = join(dir, 'realpath-witness.mjs');
+  for (const folder of [repo, worker, bin, machineHome, remoteMachineHome]) mkdirSync(folder, { recursive: true });
+  writeFileSync(join(machineHome, 'settings.json'), JSON.stringify({ gateSlots: 1 }));
+  // The controller logs every path it realpaths that lies on the runner, so resolving one is caught.
+  writeFileSync(preload, `import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module';
+const real = fs.realpathSync; const native = real.native;
+const log = path => { if (String(path).includes(${JSON.stringify(remoteHome)})) fs.appendFileSync(${JSON.stringify(realpaths)}, String(path) + '\\n'); };
+fs.realpathSync = Object.assign((path, ...rest) => { log(path); return real(path, ...rest); }, { native: (path, ...rest) => { log(path); return native(path, ...rest); } });
+syncBuiltinESMExports();\n`);
+  const env = {
+    ...process.env, HOME: home, PULLBOARD_HOME: home, PULLBOARD_MACHINE_HOME: machineHome,
+    PATH: `${bin}:${process.env.PATH}`, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
+    GIT_AUTHOR_NAME: 'Runner Fixture', GIT_AUTHOR_EMAIL: 'runner-fixture@example.invalid',
+    GIT_COMMITTER_NAME: 'Runner Fixture', GIT_COMMITTER_EMAIL: 'runner-fixture@example.invalid',
+  };
+  git(repo, env, 'init', '-q', '-b', 'main');
+  writeFileSync(join(repo, 'pullboard.json'), JSON.stringify({ gate: 'true' }));
+  git(repo, env, 'add', 'pullboard.json');
+  git(repo, env, 'commit', '-q', '-m', 'test: prepare remote denial fixture');
+  installSshStandIn({ bin, worker, home: remoteHome, machineHome: remoteMachineHome, requests });
+  const added = cli(repo, env, 'runner', 'add', HOST, '--slots', '1', '--browser', '1', '--json');
+  assert.equal(added.status, 0, added.context);
+  const controllerEnv = { ...env, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --import=${pathToFileURL(preload).href}`.trim() };
+  // The unreadable file sits beside the runner's checkout, outside its worktree, on the runner only.
+  const denied = "mkdir ../denied && echo kept > ../denied/secret && chmod 000 ../denied/secret && node -e \"require('node:fs').readFileSync('../denied/secret')\"";
+  const ordinary = "node -e \"require('node:assert').strictEqual('open ../denied/secret (EACCES)', 'an ordinary assertion')\"";
+  const previous = [process.env.PULLBOARD_HOME, process.env.PULLBOARD_MACHINE_HOME];
+  process.env.PULLBOARD_HOME = home;
+  process.env.PULLBOARD_MACHINE_HOME = machineHome;
+  let held;
+  try {
+    // Fill the controller's own gate so each run goes to the runner.
+    held = await takeResource({ name: 'gate', capacity: 1, scope: 'machine', root: repo,
+      agent: 'fixture-local-holder', item: 'local-holder', kind: 'force-registered-runner' });
+    const blocked = await runThroughGate(repo, controllerEnv, denied, { item: '706', requests });
+    const blockedResult = gateResult(blocked.stdout);
+    assert.equal(blockedResult.runner, HOST, fixtureResultContext(blocked));
+    assert.equal(blockedResult.isGreen, false);
+    assert.match(blocked.stdout, /EACCES: permission denied, open '\.\.\/denied\/secret'/u, 'the raw denial still comes back unchanged');
+    assert.equal(blockedResult.sandboxBlocked, `open outside its worktree (EACCES) on runner ${HOST}`,
+      `the controller names the operation and the runner host from the runner's evidence\n${fixtureResultContext(blocked)}`);
+    assert.throws(() => refuseSandboxBlocked(blockedResult), error => error.code === 'SANDBOX_BLOCKED'
+      && error.message.includes(`refused open outside its worktree (EACCES) on runner ${HOST}`), 'a remote denial asks the person');
+    const failed = await runThroughGate(repo, controllerEnv, ordinary, { item: '706', requests });
+    const failedResult = gateResult(failed.stdout);
+    assert.equal(failedResult.runner, HOST, fixtureResultContext(failed));
+    assert.equal(failedResult.isGreen, false);
+    assert.match(failed.stdout, /AssertionError/u);
+    assert.equal(failedResult.sandboxBlocked, null, 'an ordinary remote assertion failure stays ordinary');
+    assert.doesNotThrow(() => refuseSandboxBlocked(failedResult));
+    assert.equal(existsSync(realpaths) ? readFileSync(realpaths, 'utf8') : '', '', 'the controller never realpaths a runner path');
+  } finally {
+    held?.release();
+    for (const [key, value] of [['PULLBOARD_HOME', previous[0]], ['PULLBOARD_MACHINE_HOME', previous[1]]]) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
 test('a queued run executes on a registered runner and its result comes back [C7] (parent death drains a detached worker descendant before releasing its lease)', async (t) => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-runner-parent-death-')));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -1900,5 +2038,109 @@ const timer=setInterval(()=>{ if (fs.existsSync(${JSON.stringify(release)})) cle
     else process.env.PULLBOARD_HOME = previousHome;
     if (previousMachineHome === undefined) delete process.env.PULLBOARD_MACHINE_HOME;
     else process.env.PULLBOARD_MACHINE_HOME = previousMachineHome;
+  }
+});
+
+
+test('review655 a registered runner honors the same live person waiver at landing [B3,R3,C7]', { timeout: 120_000 }, async (t) => {
+  const { createE2eHelpers } = await import('./e2e-helpers.js');
+  const helper = createE2eHelpers();
+  t.after(helper.cleanup);
+  const box = helper.project('true');
+  const repo = box.repo;
+  const fixtureBin = join(box.dir, 'runner-bin');
+  const remoteHome = join(box.dir, 'runner-home');
+  const remoteMachineHome = join(remoteHome, '.pullboard');
+  const worker = join(box.dir, 'second-machine');
+  const requests = join(box.dir, 'runner-requests.jsonl');
+  for (const folder of [fixtureBin, remoteHome, remoteMachineHome, worker, join(repo, 'bin'), join(repo, 'test')]) mkdirSync(folder, { recursive: true });
+  const env = { ...box.env, PATH: fixtureBin + ':' + box.env.PATH };
+  writeFileSync(join(repo, 'package.json'), JSON.stringify({ private: true, type: 'module' }) + '\n');
+  cpSync(resolve(import.meta.dirname, '../src'), join(repo, 'src'), { recursive: true });
+  cpSync(resolve(import.meta.dirname, '../bin'), join(repo, 'bin'), { recursive: true });
+  const failing = 'test/review655-waived-red.test.js';
+  writeFileSync(join(repo, failing), "import { test } from 'node:test'; test('review655 known waived runner flake', () => { throw new Error('known private flaky failure'); });\n");
+  const configPath = join(repo, 'pullboard.json');
+  const config = JSON.parse(readFileSync(configPath, 'utf8'));
+  writeFileSync(configPath, JSON.stringify({ ...config, gate: 'node bin/run-tests.js --test-concurrency=1 ' + failing }) + '\n');
+  box.git(repo, 'add', 'package.json', 'pullboard.json', 'src', 'bin', failing);
+  box.git(repo, 'commit', '-q', '-m', 'test: commit private registered-runner waiver fixture');
+  const store = await import('../src/board.js');
+  const board = store.openBoard(join(repo, '.git', 'pullboard', 'board.sqlite'));
+  let waiver;
+  try { waiver = store.recordLandingWaiver(board, { agentId: 'person', channel: 'terminal', id: 'review655-remote-person-waiver', test: failing, until: '2099-01-01', reason: 'same live person exception on either execution machine' }); }
+  finally { store.closeBoard(board); }
+  const capacity = cli(repo, env, 'settings', 'gateSlots', '1', '--json');
+  assert.equal(capacity.status, 0, fixtureResultContext(capacity));
+  const local = cli(repo, env, 'gate', '--landing', '--json');
+  assert.equal(local.status, 0, fixtureResultContext(local));
+  const localDocument = JSON.parse(local.stdout);
+  assert.equal(localDocument.green, false);
+  assert.equal(localDocument.waived[0].waiver, waiver.id, 'the same exact committed source is waived locally');
+  installSshStandIn({ bin: fixtureBin, worker, home: remoteHome, machineHome: remoteMachineHome, requests });
+  const registered = cli(repo, env, 'runner', 'add', HOST, '--slots', '1', '--browser', '1', '--json');
+  assert.equal(registered.status, 0, fixtureResultContext(registered));
+  const priorHome = process.env.PULLBOARD_HOME, priorMachine = process.env.PULLBOARD_MACHINE_HOME;
+  process.env.PULLBOARD_HOME = env.PULLBOARD_HOME;
+  process.env.PULLBOARD_MACHINE_HOME = env.PULLBOARD_MACHINE_HOME;
+  let held;
+  try {
+    held = await takeResource({ name: 'gate', capacity: 1, scope: 'machine', root: repo, agent: 'review655-local-holder', item: 'review655-local-holder', kind: 'force-registered-runner' });
+    const phases = requests + '.phases';
+    const before = phaseCounts(phases);
+    const remote = observe(startToolingCli(repo, env, ['gate', '--landing', '--json'], { detached: true }));
+    const result = await awaitRoundTrip(remote.child, remote.closed, phases, before);
+    const profile = JSON.parse(readFileSync(join(repo, '.git', 'pullboard-gate.log.profile.json'), 'utf8'));
+    const raw = readFileSync(join(repo, '.git', 'pullboard-gate.log'), 'utf8');
+    assert.equal(profile.executionRunner, HOST, 'the real registered runner executed the frozen source');
+    assert.equal(profile.executionSource?.commit, box.git(repo, 'rev-parse', 'HEAD'), 'local and remote execute the same committed failing test');
+    assert.match(raw, /review655 known waived runner flake/u, 'the actual remote test is named in its result');
+    assert.match(raw, /known private flaky failure/u, 'the actual committed test threw its known error');
+    assert.match(raw, /^# tests 1$/mu, 'there is only this one committed test');
+    const document = JSON.parse(result.stdout);
+    console.log('review655 actual registered-runner waiver outcome ' + JSON.stringify({ localStatus: local.status, localWaiver: localDocument.waived[0].waiver, remoteStatus: result.status, executionRunner: profile.executionRunner, executionCommit: profile.executionSource?.commit, earlyStopped: raw.includes('Landing gate stopped early'), cancelled: /^# cancelled (\d+)$/mu.exec(raw)?.[1], raw, document }));
+    assert.equal(result.status, 0, 'the same live person waiver must cover this named landing failure on the registered runner');
+    assert.equal(document.green, false, 'a waived remote failure is never an ordinary green');
+    assert.equal(document.waived[0].waiver, waiver.id);
+    assert.equal(document.waived[0].file, failing, 'failure identities stay relative to the committed source');
+    assert.equal(document.waived[0].reason, waiver.reason);
+    assert.equal(document.waived[0].until, waiver.until);
+    assert.equal(existsSync(join(repo, '.git', 'pullboard-gate-green')), false, 'a waived remote run writes no ordinary green stamp');
+    assert.doesNotMatch(raw, /Landing gate stopped early/u);
+    assert.match(raw, /^# cancelled 0$/mu);
+
+    /** Change only the private gate, then require the real registered worker's complete response. */
+    const remoteGate = async (command, message) => {
+      writeFileSync(configPath, JSON.stringify({ ...config, gate: command }) + '\n');
+      box.git(repo, 'add', 'pullboard.json');
+      box.git(repo, 'commit', '-q', '-m', message);
+      const prior = phaseCounts(phases);
+      const run = observe(startToolingCli(repo, env, ['gate', '--landing', '--json'], { detached: true }));
+      const finished = await awaitRoundTrip(run.child, run.closed, phases, prior);
+      const measured = JSON.parse(readFileSync(join(repo, '.git', 'pullboard-gate.log.profile.json'), 'utf8'));
+      assert.equal(measured.executionRunner, HOST, 'each accounting counter actually executes on the registered worker');
+      assert.equal(measured.executionSource.commit, box.git(repo, 'rev-parse', 'HEAD'));
+      assert.equal(existsSync(join(repo, '.git', 'pullboard-gate-green')), false);
+      return { ...finished, document: JSON.parse(finished.stdout), raw: readFileSync(join(repo, '.git', 'pullboard-gate.log'), 'utf8') };
+    };
+    const tests = 'node bin/run-tests.js --test-concurrency=1 ' + failing;
+    const throughCat = await remoteGate(tests + ' | cat', 'test: retain a remote TAP producer account');
+    assert.equal(throughCat.status, 0, fixtureResultContext(throughCat));
+    assert.equal(throughCat.document.green, false);
+    assert.equal(throughCat.document.waived[0].waiver, waiver.id, 'the failing producer accounts for its own test');
+
+    const independent = await remoteGate('node -e "process.exitCode=1" | ' + tests, 'test: retain an independent remote pipeline failure');
+    assert.equal(independent.status, 1, 'an unattributed producer failure is not covered by the consumer test waiver');
+    assert.match(independent.raw, /^# fail 1$/mu, 'the consumer still returns its complete waived TAP');
+    assert.equal(independent.document.waived, undefined);
+
+    const staged = await remoteGate(tests + '; node -e "process.exitCode=2"', 'test: retain a separate remote stage failure');
+    assert.equal(staged.status, 1, 'a separate failing stage is not a test waiver');
+    assert.equal(staged.document.waived, undefined);
+
+  } finally {
+    held?.release();
+    if (priorHome === undefined) delete process.env.PULLBOARD_HOME; else process.env.PULLBOARD_HOME = priorHome;
+    if (priorMachine === undefined) delete process.env.PULLBOARD_MACHINE_HOME; else process.env.PULLBOARD_MACHINE_HOME = priorMachine;
   }
 });

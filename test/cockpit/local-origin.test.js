@@ -2,12 +2,15 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer, request } from 'node:http';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { cockpitPage } from '../../src/cockpit.js';
-import { BIN, machine, project, startView, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, styleOf } from './fixture.js';
+import { VERSION } from '../../src/help.js';
+import { Refused } from '../../src/refused.js';
+import { createRelayBrowserHandler } from '../../relay/browser-page.js';
+import { BIN, machine, project, startView, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, styleOf, proofShot } from './fixture.js';
 
 const HOSTED = 'https://app.pullboard.dev';
 const LOCAL = 'http://127.0.0.1:4890';
@@ -58,11 +61,21 @@ function onwardOf(page) {
 }
 
 /**
+ * The relay's own asset at a path, as its production handler serves it, or null when it serves none there. Why: the
+ * relay page loads its own scripts (such as /relay/screens.js), and answering those with the view's styles throws in Chrome.
+ */
+async function relayAsset(pathname) {
+  let body = null;
+  const handled = await createRelayBrowserHandler({ authenticate: async () => ({ kind: 'session' }) })({ method: 'GET', url: pathname, headers: {} }, { writeHead() {}, end(content) { body = content ?? ''; } });
+  return handled ? body : null;
+}
+
+/**
  * Stand in for the hosted page at its real origin, and for this machine's default view address. Chrome answers every
  * request for https://app.pullboard.dev with the cockpit the relay would serve there and the view's styles. A request
- * for http://127.0.0.1:4890 goes to the view the test runs on its own port, as if that view held the default one, or
- * meets a closed port when the test names none: the suite never binds the machine's 4890, where a person's own view
- * may run. Every other request, to the view's own port, is untouched and meets Chrome's own cross-origin rules.
+ * for http://127.0.0.1:4890 goes to the test view, as if it held the default address, or meets a closed port when the
+ * test names none: the suite never binds the machine's 4890, where a person's own view may run. The view's own state
+ * endpoint is also intercepted for the old-version simulation; its event stream and other requests remain direct.
  */
 async function hostedStandIn(chrome, pages, styles, local) {
   const failures = [];
@@ -70,43 +83,60 @@ async function hostedStandIn(chrome, pages, styles, local) {
   const listener = ({ data }) => {
     const message = JSON.parse(String(data));
     if (message.method !== 'Fetch.requestPaused') return;
+    const { requestId, resourceType, request: asked } = message.params;
     tasks.push((async () => {
-      const { requestId, resourceType, request: asked } = message.params;
       const address = new URL(asked.url);
-      if (address.origin === LOCAL) {
-        if (!local.target) return chrome.send('Fetch.failRequest', { requestId, errorReason: 'ConnectionRefused' });
+      const ownState = address.origin === local.own && address.pathname.startsWith('/api/v1/boards/') && address.pathname.endsWith('/state');
+      if (address.origin === LOCAL || ownState) {
+        const target = address.origin === LOCAL ? local.target : (local.relayTarget || local.target);
+        if (!target) return chrome.send('Fetch.failRequest', { requestId, errorReason: 'ConnectionRefused' });
         const headers = Object.fromEntries(Object.entries(asked.headers).filter(([name]) => name.toLowerCase() !== 'host'));
-        const reply = await call({ base: local.target }, address.pathname + address.search, { method: asked.method, headers, body: asked.postData ?? '' });
+        const reply = await call({ base: target }, address.pathname + address.search, { method: asked.method, headers, body: asked.postData ?? '' });
+        let responseBody = reply.body;
+        if (asked.method === 'GET' && reply.status === 200 && local.versionOverride && address.pathname.startsWith('/api/v1/boards/') && address.pathname.endsWith('/state')) {
+          const document = JSON.parse(responseBody);
+          document.state.releaseNotes.version = local.versionOverride;
+          responseBody = JSON.stringify(document);
+        }
         return chrome.send('Fetch.fulfillRequest', {
           requestId, responseCode: reply.status,
           responseHeaders: Object.entries(reply.headers).filter(([name]) => !['content-length', 'transfer-encoding', 'connection', 'keep-alive', 'date'].includes(name)).map(([name, value]) => ({ name, value: String(value) })),
-          body: Buffer.from(reply.body).toString('base64'),
+          body: Buffer.from(responseBody).toString('base64'),
+        });
+      }
+      if (address.pathname === '/relay/client.js' && local.client) {
+        return chrome.send('Fetch.fulfillRequest', {
+          requestId, responseCode: 200,
+          responseHeaders: [{ name: 'Content-Type', value: 'text/javascript' }, { name: 'Cache-Control', value: 'no-store' }],
+          body: Buffer.from(local.client).toString('base64'),
         });
       }
       if (address.pathname === '/api/v1/boards') {
         return chrome.send('Fetch.fulfillRequest', {
           requestId, responseCode: 200,
           responseHeaders: [{ name: 'Content-Type', value: 'application/json' }, { name: 'Cache-Control', value: 'no-store' }],
-          body: Buffer.from(JSON.stringify({ version: 1, boards: [], warnings: [] })).toString('base64'),
+          body: Buffer.from(JSON.stringify({ version: 1, boards: local.linked ?? [], warnings: [] })).toString('base64'),
         });
       }
       const document = resourceType === 'Document';
-      const page = address.search === '?relay' ? pages.relay : pages.anonymous;
+      const page = pages[address.search.slice(1)] ?? (address.search === '?relay' ? pages.relay : pages.anonymous);
+      // The transport stays each test's own: one that names none means the relay module never loads.
+      const asset = pages.assets?.[address.pathname] ?? (document || address.pathname === '/relay/client.js' ? null : await relayAsset(address.pathname));
       await chrome.send('Fetch.fulfillRequest', {
         requestId, responseCode: 200,
         responseHeaders: [
-          { name: 'Content-Type', value: document ? 'text/html; charset=utf-8' : 'text/css; charset=utf-8' },
+          { name: 'Content-Type', value: document ? 'text/html; charset=utf-8' : address.pathname.endsWith('.js') ? 'text/javascript; charset=utf-8' : 'text/css; charset=utf-8' },
           { name: 'Cache-Control', value: 'no-store' },
           // The connections #533's relay page allows, its own origin and the local view's default address, and here the
           // test view's own port, which the round trip names.
           ...(document ? [{ name: 'Content-Security-Policy', value: `connect-src 'self' ${LOCAL} http://localhost:4890 ${local.own}; frame-ancestors 'none'` }] : []),
         ],
-        body: Buffer.from(document ? page : styles).toString('base64'),
+        body: Buffer.from(document ? page : asset ?? styles).toString('base64'),
       });
-    })().catch((error) => failures.push(error.message)));
+    })().catch((error) => failures.push(`${asked.url} (${resourceType}, ${requestId}): ${error.message}`)));
   };
   chrome.socket.addEventListener('message', listener);
-  await chrome.send('Fetch.enable', { patterns: [{ urlPattern: HOSTED + '/*', requestStage: 'Request' }, { urlPattern: LOCAL + '/*', requestStage: 'Request' }] });
+  await chrome.send('Fetch.enable', { patterns: [{ urlPattern: HOSTED + '/*', requestStage: 'Request' }, { urlPattern: LOCAL + '/*', requestStage: 'Request' }, { urlPattern: local.own + '/api/v1/boards/*/state*', requestStage: 'Request' }] });
   return async () => {
     chrome.socket.removeEventListener('message', listener);
     try { await Promise.all(tasks); } finally { await chrome.send('Fetch.disable'); }
@@ -276,6 +306,293 @@ test('a pullboard.dev page reads the local board [N26,A2]', { timeout: 120_000 }
   }
 });
 
+test('the hosted page says how far behind this machine\'s Pullboard is [N26,A2]', { timeout: 120_000 }, async (t) => {
+  const executable = chromeExecutable();
+  assert.ok(executable, 'the hosted version notice needs real Chrome');
+  const box = machine();
+  const board = project(box, 'hosted-release');
+  box.run(board.repo, 'add', 'web', 'A board on an older Pullboard release', '--specs', 'G1');
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-release-lag-'));
+  let view, chrome, stopStandIn;
+  try {
+    view = await startView(box);
+    const local = { own: view.base, target: view.base, versionOverride: '0.8.20' };
+    chrome = await openSnapshotChrome(executable, 'about:blank', profile);
+    for (const permissions of [['loopbackNetwork', 'localNetwork', 'localNetworkAccess'], ['localNetworkAccess']]) {
+      try { await chrome.send('Browser.grantPermissions', { origin: HOSTED, permissions }); break; } catch { /* Chrome versions expose different permission names */ }
+    }
+    const changelog = readFileSync(new URL('../../CHANGELOG.md', import.meta.url), 'utf8');
+    const versionOrder = (version) => version.split('.').map(Number);
+    const compareVersions = (left, right) => {
+      const a = versionOrder(left), b = versionOrder(right);
+      return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+    };
+    const releaseVersions = [...new Set([...changelog.matchAll(/^## \[(\d+\.\d+\.\d+)\](?:\s|$)/gmu)].map((match) => match[1]))]
+      .filter((version) => compareVersions(version, VERSION) <= 0)
+      .sort(compareVersions);
+    /** Ask the production authenticated relay route to render its default hosted release page. */
+    const handler = createRelayBrowserHandler({ authenticate: async () => ({ kind: 'session' }) });
+    let productionPage = '';
+    let productionHeaders = {};
+    const response = { writeHead(_status, headers) { productionHeaders = headers; }, end(content) { productionPage = String(content); } };
+    assert.equal(await handler({ method: 'GET', url: '/', headers: {} }, response), true, 'the production relay route serves its authenticated page');
+    assert.match(productionHeaders['content-security-policy'], /connect-src[^;]*http:\/\/127\.0\.0\.1:4890[^;]*http:\/\/localhost:4890/u,
+      'the production hosted page policy permits its local-view read');
+    /** Render the production hosted page for one release target, using only release entries shipped in this package. */
+    const pageFor = (version) => cockpitPage('', {
+      readOnly: true, requests: true, transportModule: '/relay/client.js', apiHeaders: {}, stylesheet: '/view.css',
+      hostedLocal: true, relaySession: true, signIn: '/auth/github/start', hostedReleaseVersion: version, hostedReleaseVersions: releaseVersions,
+    }).replace('<main>', '<main><section class="card-panel" id="relay-notice" role="status"><p>Pairing this browser…</p></section>');
+    let activePage = pageFor('0.8.21');
+    stopStandIn = await hostedStandIn(chrome, { get anonymous() { return activePage; }, get relay() { return activePage; } }, await styleOf(view), local);
+    const bannerText = () => chrome.stable("document.querySelector('#hosted-release-text')?.textContent || ''");
+    const bannerHidden = () => chrome.stable("document.querySelector('#hosted-release-note')?.hidden ?? true");
+    let visit = 0;
+    let visitPreload;
+    let requestsAt = 0;
+    /** Every address one visit asked for, as origin plus path on the hosted page and as origin elsewhere. The page's own
+     * record of its fetch calls counts asks a page policy blocks before Chrome's network sees them. */
+    const reached = async () => {
+      const asked = [...chrome.requests.slice(requestsAt).map((request) => request.url), ...JSON.parse(await chrome.stable('JSON.stringify(window.__releaseFetches || [])'))];
+      return [...new Set(asked.map((url) => new URL(url, HOSTED + '/')).filter((address) => address.protocol.startsWith('http'))
+        .map((address) => (address.origin === HOSTED ? address.origin + address.pathname : address.origin)))].sort();
+    };
+    const open = async (version, production = false) => {
+      activePage = production ? productionPage : pageFor(version);
+      requestsAt = chrome.requests.length;
+      if (visitPreload) await chrome.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: visitPreload });
+      const marker = ++visit;
+      const installed = await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: `window.__releaseVisit = ${marker}; window.__releaseFetches = []; const pageFetch = window.fetch; window.fetch = function (input, init) { window.__releaseFetches.push(String(input?.url ?? input)); return pageFetch.call(this, input, init); };` });
+      visitPreload = installed.identifier;
+      await chrome.send('Page.navigate', { url: HOSTED + '/' });
+      await chrome.waitFor(`window.__releaseVisit === ${marker} && document.readyState === 'complete' && data?.project?.releaseNotes?.version === ${JSON.stringify(local.versionOverride)} && document.querySelector('#chain')?.textContent.includes('A board on an older Pullboard release')`, 25_000); // budget: hang ceiling for this navigation to finish the local state read before the next visit; no throughput claim.
+    };
+
+    // 0.8.21 is a shipped release in CHANGELOG.md, one actual release after the local 0.8.20 install.
+    await open('0.8.21');
+    assert.match(await bannerText(), /Pullboard 0\.8\.20 is installed; 0\.8\.21 is current, 1 release behind/u);
+    assert.equal(await chrome.stable("document.querySelector('#hosted-release-note code')?.textContent"), 'npm i -g pullboard@latest');
+    assert.equal(await chrome.stable("document.querySelector('#hosted-release-link')?.href"), 'https://github.com/pullboard-dev/pullboard/blob/main/CHANGELOG.md');
+    await proofShot(chrome, 'hosted-release-note', 1280);
+    await proofShot(chrome, 'hosted-release-note', 390);
+    await chrome.click("document.querySelector('#hosted-release-dismiss')");
+    assert.equal(await bannerHidden(), true, 'dismiss hides the note for its current target release');
+    await open('0.8.21');
+    assert.equal(await bannerHidden(), true, 'the same target release stays dismissed after reload');
+
+    // The next shipped version gets its own dismissal key and its release count comes from actual release entries.
+    await open(VERSION, true);
+    const releasesBehind = releaseVersions.indexOf(VERSION) - releaseVersions.indexOf('0.8.20');
+    assert.ok(releasesBehind > 0, 'the hosted package has shipped releases after the simulated older install');
+    assert.equal(await bannerText(), `Pullboard 0.8.20 is installed; ${VERSION} is current, ${releasesBehind} ${releasesBehind === 1 ? 'release' : 'releases'} behind. Update with`);
+    assert.equal(await bannerHidden(), false, 'a new target release brings the note back');
+    const behindReached = await reached();
+
+    // The production-generated page counts every numeric release heading, including 0.8.4's section with no headline.
+    local.versionOverride = '0.8.4';
+    await open(VERSION, true);
+    const legacyReleasesBehind = releaseVersions.indexOf(VERSION) - releaseVersions.indexOf('0.8.4');
+    assert.ok(legacyReleasesBehind > releasesBehind, 'the full shipped heading list includes releases without headlines');
+    assert.equal(await bannerText(), `Pullboard 0.8.4 is installed; ${VERSION} is current, ${legacyReleasesBehind} releases behind. Update with`);
+
+    local.versionOverride = VERSION;
+    await open(VERSION, true);
+    assert.equal(await bannerHidden(), true, 'matching local and hosted releases show no note');
+    assert.deepEqual(behindReached, await reached(), 'the note costs no request: a visit that shows it reaches what a matched visit reaches');
+    assert.deepEqual(behindReached.filter((address) => !address.startsWith(HOSTED + '/') && address !== LOCAL && address !== view.base), [],
+      'the page learns both versions without asking any other address');
+
+    local.versionOverride = '0.8.22-rc.1';
+    await open(VERSION);
+    assert.equal(await bannerHidden(), true, 'an unlisted prerelease does not get a guessed release count');
+    local.versionOverride = '0.8.23';
+    await open('0.8.21');
+    assert.equal(await bannerHidden(), true, 'a local version newer than this hosted page does not get a false warning');
+
+    // A mixed list (#632 review): a relay board from another machine beside this machine's own. The selected board's
+    // source decides: this machine's board keeps its note while the relay transport is loaded, a relay board shows none.
+    const remoteBox = machine();
+    const remoteBoard = project(remoteBox, 'remote-a');
+    remoteBox.run(remoteBoard.repo, 'add', 'web', 'A board on another machine', '--specs', 'G1');
+    const remoteView = await startView(remoteBox);
+    try {
+      const remoteKey = { headers: { 'x-pullboard-key': remoteView.key } };
+      const remoteList = JSON.parse((await call(remoteView, '/api/v1/boards', remoteKey)).body);
+      const remote = remoteList.boards[0];
+      const remoteState = JSON.parse((await call(remoteView, '/api/v1/boards/' + remote.id + '/state', remoteKey)).body);
+      // The relay client stands in with the other machine's real list and state; the page only ever calls request().
+      local.client = `export function rememberPairing() { return null; }
+export async function createTransport() { return { async request(path) {
+  if (path === '/api/v1/boards') return ${JSON.stringify({ ...remoteList, boards: [{ ...remote, name: 'acme/remote-a' }] })};
+  if (path.startsWith('/api/v1/boards/${remote.id}/state')) return ${JSON.stringify(remoteState)};
+  throw new Error('not in this stand-in: ' + path);
+} }; }`;
+      local.linked = [{ id: remote.id, repository: 'acme/remote-a', linkedAt: 0 }];
+      local.versionOverride = '0.8.20';
+      await open(VERSION, true);
+      await chrome.waitFor("Boolean(transport) && [...boardSources.values()].map((source) => source.kind).sort().join() === 'local,relay' && document.querySelectorAll('#proj-list .proj.repo').length === 2", 25_000); // budget: hang ceiling for the relay module and its board list after the local read; no throughput claim.
+      const roots = JSON.parse(await chrome.stable("JSON.stringify(Object.fromEntries([...boardSources.values()].map((source) => [source.kind, source.board.root])))"));
+      const selected = (root) => chrome.waitFor(`data?.project?.root === ${JSON.stringify(root)} && document.querySelector('#chain')?.textContent.length > 0`, 25_000); // budget: hang ceiling for one board switch and its state read; no throughput claim.
+      const mixedNote = `Pullboard 0.8.20 is installed; ${VERSION} is current, ${releasesBehind} ${releasesBehind === 1 ? 'release' : 'releases'} behind. Update with`;
+      await chrome.stable(`(switchTo(${JSON.stringify(roots.local)}), true)`);
+      await selected(roots.local);
+      assert.equal(await bannerHidden(), false, 'this machine\'s older board shows its note on a list that also reads relay boards');
+      assert.equal(await bannerText(), mixedNote);
+      assert.equal(await chrome.stable("document.querySelector('#hosted-release-note code')?.textContent"), 'npm i -g pullboard@latest');
+      await chrome.stable(`(switchTo(${JSON.stringify(roots.relay)}), true)`);
+      await selected(roots.relay);
+      assert.match(await chrome.stable("document.querySelector('#chain')?.textContent"), /A board on another machine/u, 'the relay board is the one on screen');
+      assert.equal(await bannerHidden(), true, 'a selected relay board shows no note about this machine\'s install');
+      await chrome.stable(`(switchTo(${JSON.stringify(roots.local)}), true)`);
+      await selected(roots.local);
+      assert.equal(await bannerHidden(), false, 'back on this machine\'s board, the note returns');
+      assert.equal(await bannerText(), mixedNote);
+    } finally {
+      local.client = null;
+      local.linked = null;
+      await remoteView.stop();
+    }
+    assert.deepEqual(chrome.exceptions, [], 'Chrome reports no uncaught page exceptions');
+  } finally {
+    try { if (stopStandIn) await stopStandIn(); }
+    finally {
+      try { if (chrome) await closeSnapshotChrome(chrome); }
+      finally {
+        try { if (view) await view.stop(); }
+        finally { rmSync(profile, { recursive: true, force: true }); }
+      }
+    }
+  }
+});
+
+test('the hosted relay never treats a remote board version as this machine\'s version [N26,A2]', { timeout: 120_000 }, async (t) => {
+  const executable = chromeExecutable();
+  assert.ok(executable, 'the relay fallback version guard needs real Chrome');
+  const box = machine();
+  const board = project(box, 'hosted-relay-release');
+  box.run(board.repo, 'add', 'web', 'A board read through the relay transport', '--specs', 'G1');
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-relay-release-'));
+  let view, chrome, stopStandIn;
+  try {
+    view = await startView(box);
+    chrome = await openSnapshotChrome(executable, 'about:blank', profile);
+    for (const permissions of [['loopbackNetwork', 'localNetwork', 'localNetworkAccess'], ['localNetworkAccess']]) {
+      try { await chrome.send('Browser.grantPermissions', { origin: HOSTED, permissions }); break; } catch { /* Chrome versions expose different permission names */ }
+    }
+    /** The relay page uses an authorized read-only transport backed by this real view's public API. */
+    const transportSource = `export async function createTransport() {
+      return { async request(path) {
+        const response = await fetch(${JSON.stringify(view.base)} + path, { headers: { 'x-pullboard-key': ${JSON.stringify(view.key)} } });
+        const document = await response.json();
+        if (!response.ok) throw new Error(document.error?.message || String(response.status));
+        return document;
+      } };
+    }`;
+    const handler = createRelayBrowserHandler({ authenticate: async () => ({ kind: 'session' }) });
+    let relayPage = '';
+    const response = { writeHead() {}, end(content) { relayPage = String(content); } };
+    assert.equal(await handler({ method: 'GET', url: '/', headers: {} }, response), true, 'the production relay handler supplies the fallback page');
+    stopStandIn = await hostedStandIn(chrome, {
+      anonymous: relayPage, relay: relayPage, assets: { '/relay/client.js': transportSource },
+    }, await styleOf(view), { own: view.base, target: null, relayTarget: view.base, versionOverride: '0.8.20' });
+    const relayVisit = '?relay-release-visit=1';
+    await chrome.send('Page.navigate', { url: HOSTED + '/' + relayVisit });
+    await chrome.waitFor(`location.search === ${JSON.stringify(relayVisit)} && document.readyState === 'complete' && data?.project?.releaseNotes?.version === '0.8.20' && document.querySelector('#chain')?.textContent.includes('A board read through the relay transport')`, 25_000); // budget: hang ceiling for this navigation to finish the relayed state read; no throughput claim.
+    assert.equal(await chrome.stable("data.project.releaseNotes.version"), '0.8.20', 'the relayed API state carries its simulated remote install version');
+    assert.equal(await chrome.stable("hosted.local && !localSession && connection.base === '' && !!transport && transportModule === '/relay/client.js' && localConfirmed === false"), true,
+      'local discovery failed, so the board remains on the relay transport without a confirmed local session');
+    assert.equal(await chrome.stable("document.querySelector('#hosted-release-note').hidden"), true,
+      'remote board metadata does not describe this machine’s installed version');
+    assert.deepEqual(chrome.exceptions, [], 'Chrome reports no uncaught relay fallback exceptions');
+  } finally {
+    try { if (stopStandIn) await stopStandIn(); }
+    finally {
+      try { if (chrome) await closeSnapshotChrome(chrome); }
+      finally {
+        try { if (view) await view.stop(); }
+        finally { rmSync(profile, { recursive: true, force: true }); }
+      }
+    }
+  }
+});
+
+test('a signed-in local view with linked metadata and no paired transport says how to pair [N26,H5]', { timeout: 60_000 }, async () => { // budget: one real local-view discovery/round trip and the resulting hosted list read.
+  const executable = chromeExecutable();
+  assert.ok(executable, 'the mixed local and relay state check needs real Chrome');
+  const box = machine();
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-local-unpaired-'));
+  const linked = [{ id: 'a'.repeat(32), repository: 'acme/web', linkedAt: 0 }];
+  const client = 'export function rememberPairing() { return null; }\nexport async function createTransport() { return { async request(path) { if (path === "/api/v1/boards") { globalThis.__749transportListCalls = (globalThis.__749transportListCalls || 0) + 1; return { version: 1, boards: [], warnings: [] }; } throw new Error("no paired board"); } }; }\n';
+  let view, chrome, stopStandIn;
+  try {
+    view = await startView(box);
+    const direct = await call(view, '/api/v1/boards', { headers: { 'x-pullboard-key': view.key } });
+    assert.equal(direct.status, 200, 'the real private view answers with its valid session key');
+    assert.deepEqual(JSON.parse(direct.body).boards, [], 'the private view genuinely has no boards');
+    chrome = await openSnapshotChrome(executable, 'about:blank', profile);
+    await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+      if (location.origin !== ${JSON.stringify(HOSTED)}) return;
+      const nativeFetch = window.fetch.bind(window);
+      window.__749fetches = [];
+      window.fetch = async (input, init) => {
+        const response = await nativeFetch(input, init);
+        const address = new URL(String(typeof input === 'string' ? input : input.url), location.href);
+        if (address.origin === ${JSON.stringify(HOSTED)} || ['127.0.0.1', 'localhost'].includes(address.hostname)) window.__749fetches.push({ origin: address.origin, path: address.pathname, status: response.status });
+        return response;
+      };
+    })()` });
+    const page = cockpitPage('', { readOnly: true, requests: true, transportModule: '/relay/client.js', apiHeaders: {}, stylesheet: '/view.css', hostedLocal: true, relaySession: true, signIn: '/auth/github/start' })
+      .replace('<main>', '<main><section class="card-panel" id="relay-notice" role="status"><p>Relay status</p></section>');
+    stopStandIn = await hostedStandIn(chrome, { anonymous: page, relay: page }, await styleOf(view), {
+      own: view.base, target: view.base, linked,
+      client,
+    });
+    for (const permissions of [['loopbackNetwork', 'localNetwork', 'localNetworkAccess'], ['localNetworkAccess']]) {
+      try { await chrome.send('Browser.grantPermissions', { origin: HOSTED, permissions }); break; } catch { /* a name this Chrome does not have */ }
+    }
+    await chrome.send('Page.navigate', { url: HOSTED + '/' });
+    // Wait for all independent authorities to finish, then make the state assertion directly. The condition does not
+    // wait for an unpaired label; loading must finish before the semantic assertion, including the final metadata read.
+    await chrome.waitFor(`location.origin === 'https://app.pullboard.dev' && sessionStorage.getItem('pullboard.local.session') && (window.__749fetches || []).some((x) => x.origin === ${JSON.stringify(view.base)} && x.path === '/api/v1/boards' && x.status === 200) && (window.__749fetches || []).some((x) => x.origin === 'https://app.pullboard.dev' && x.path === '/api/v1/boards' && x.status === 200) && window.__749transportListCalls >= 1 && !document.body.classList.contains('loading')`, 30_000); // budget: hang ceiling for local discovery, the round trip, the local list, linked metadata and the empty paired list.
+    const seen = JSON.parse(await chrome.stable(`JSON.stringify({
+      state: document.querySelector('#local-note')?.dataset.state ?? null,
+      hidden: document.querySelector('#local-note')?.hidden ?? true,
+      heading: document.querySelector('#local-note-title')?.textContent.trim() ?? null,
+      text: document.querySelector('#local-note-text')?.textContent.trim() ?? null,
+      command: document.querySelector('#local-note-code')?.textContent.trim() ?? null,
+      hasSession: Boolean(sessionStorage.getItem('pullboard.local.session')),
+      sessionOrigin: JSON.parse(sessionStorage.getItem('pullboard.local.session'))?.origin ?? null,
+      localSessionMatches: (() => { const saved = JSON.parse(sessionStorage.getItem('pullboard.local.session')); return saved?.version === 1 && saved.origin === ${JSON.stringify(view.base)} && saved.key === ${JSON.stringify(view.key)}; })(),
+      fetches: window.__749fetches,
+      transportLists: window.__749transportListCalls,
+      cards: document.querySelectorAll('#proj-list .proj').length,
+    })`));
+    assert.equal(seen.hasSession, true, 'the browser holds a tab-scoped local-view session');
+    assert.equal(seen.sessionOrigin, view.base, 'the session names this private view');
+    assert.equal(seen.localSessionMatches, true, 'the browser uses the private view session without returning its secret');
+    assert.ok(seen.transportLists >= 1, 'the relay transport confirmed its real empty paired-board list');
+    assert.ok(seen.fetches.some((x) => x.origin === view.base && x.path === '/api/v1/boards' && x.status === 200), 'the hosted page read the reachable private view');
+    assert.ok(seen.fetches.some((x) => x.origin === 'https://app.pullboard.dev' && x.path === '/api/v1/boards' && x.status === 200), 'the hosted page read the signed-in account metadata');
+    assert.equal(seen.state, 'unpaired', `linked account metadata with no paired transport must show pairing guidance, not the generic local empty state: ${JSON.stringify(seen)}`);
+    assert.equal(seen.hidden, false);
+    assert.equal(seen.heading, 'Pair this browser');
+    assert.match(seen.text, /acme\/web/);
+    assert.equal(seen.command, 'pullboard relay on --all');
+    assert.match(seen.text, /scan its QR/, 'the pairing guidance tells the person to use the QR printed by relay on --all');
+    assert.equal(seen.cards, 0, 'no local or paired board is falsely shown');
+    assert.deepEqual(chrome.exceptions, [], 'Chrome reports no uncaught exceptions');
+  } finally {
+    try { if (stopStandIn) await stopStandIn(); }
+    finally {
+      try { if (chrome) await closeSnapshotChrome(chrome); }
+      finally {
+        try { if (view) await view.stop(); }
+        finally { rmSync(profile, { recursive: true, force: true }); }
+      }
+    }
+  }
+});
+
 test('a foreign origin or wrong Host is refused by the local view [N26,A2]', { timeout: 60_000 }, async () => { // budget: hang ceiling for one real view and a few local requests.
   const box = machine();
   project(box, 'local-origin-refusals');
@@ -341,6 +658,213 @@ test('a foreign origin or wrong Host is refused by the local view [N26,A2]', { t
   } finally {
     await view.stop();
   }
+});
+
+test('every hosted page state says what it is and what to do next [N26,H5]', { timeout: 120_000 }, async () => { // budget: hang ceiling for six hosted page loads in Chrome, one with a real round trip.
+  const executable = chromeExecutable();
+  assert.ok(executable, 'the hosted page check needs real Chrome');
+  const box = machine();
+  const board = project(box, 'hosted-states');
+  box.run(board.repo, 'add', 'web', 'A board the hosted page lists', '--specs', 'G1');
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-hosted-states-'));
+  const relay = createRelayBrowserHandler({ authenticate: async () => { if (stand.signedIn) return { kind: 'session' }; throw new Refused('AUTH_REQUIRED', 'Sign in.'); } });
+  // What the stand-in answers: the relay's real page and assets, a relay client that has paired no board, the
+  // account's linked boards, and this machine's default view address, closed unless the test names a view.
+  const stand = { signedIn: false, linked: [], local: null };
+  const client = 'export function rememberPairing() { return null; }\nexport async function createTransport() { return { async request(path) { if (path === "/api/v1/boards") return { version: 1, boards: [], warnings: [] }; throw new Error("no paired board"); } }; }\n';
+  let view, chrome, listener, old;
+  const failures = [];
+  try {
+    view = await startView(box);
+    chrome = await openSnapshotChrome(executable, 'about:blank', profile);
+    listener = ({ data }) => {
+      const message = JSON.parse(String(data));
+      if (message.method !== 'Fetch.requestPaused') return;
+      const { requestId, request: asked } = message.params;
+      const address = new URL(asked.url);
+      const fulfil = (type, body, headers = []) => chrome.send('Fetch.fulfillRequest', { requestId, responseCode: 200, responseHeaders: [{ name: 'Content-Type', value: type }, { name: 'Cache-Control', value: 'no-store' }, ...headers], body: Buffer.from(body).toString('base64') });
+      (async () => {
+        if (address.origin === LOCAL) {
+          if (!stand.local) return chrome.send('Fetch.failRequest', { requestId, errorReason: 'ConnectionRefused' });
+          const reply = await call({ base: stand.local }, address.pathname + address.search, { method: asked.method, headers: Object.fromEntries(Object.entries(asked.headers).filter(([name]) => name.toLowerCase() !== 'host')) });
+          return chrome.send('Fetch.fulfillRequest', { requestId, responseCode: reply.status, responseHeaders: Object.entries(reply.headers).filter(([name]) => !['content-length', 'transfer-encoding', 'connection', 'keep-alive', 'date'].includes(name)).map(([name, value]) => ({ name, value: String(value) })), body: Buffer.from(reply.body).toString('base64') });
+        }
+        if (address.pathname === '/relay/client.js') return fulfil('text/javascript', client);
+        if (address.pathname === '/api/v1/boards') return fulfil('application/json', JSON.stringify({ version: 1, boards: stand.linked, warnings: [] }));
+        let head = {}, body = '';
+        const handled = await relay({ method: 'GET', url: address.pathname, headers: {} }, { writeHead: (status, headers) => { head = headers; }, end: (content) => { body = content ?? ''; } });
+        if (!handled) return chrome.send('Fetch.failRequest', { requestId, errorReason: 'Failed' });
+        // The relay's own policy, which also lets the page reach the test view's own port the round trip names.
+        const policy = head['content-security-policy'].replace("connect-src 'self'", "connect-src 'self' " + view.base);
+        return fulfil(head['content-type'], body, [{ name: 'Content-Security-Policy', value: policy }]);
+      })().catch((error) => failures.push(error.message));
+    };
+    chrome.socket.addEventListener('message', listener);
+    await chrome.send('Fetch.enable', { patterns: [{ urlPattern: HOSTED + '/*', requestStage: 'Request' }, { urlPattern: LOCAL + '/*', requestStage: 'Request' }] });
+    // A browser that has refused this page its local network permission, as Chrome reports it.
+    await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+      if (location.origin !== ${JSON.stringify(HOSTED)} || location.search !== '?blocked') return;
+      const query = navigator.permissions.query.bind(navigator.permissions);
+      navigator.permissions.query = (asked) => ['loopback-network', 'local-network-access'].includes(asked?.name) ? Promise.resolve({ state: 'denied' }) : query(asked);
+    })()` });
+    const shown = `JSON.stringify((() => {
+      const on = (element) => Boolean(element) && !element.hidden && element.getClientRects().length > 0;
+      const text = (id) => on(document.getElementById(id)) ? document.getElementById(id).textContent.trim() : null;
+      const probe = document.body.appendChild(document.createElement('span'));
+      const tokens = ['--accent-strong', '--ink', '--ink-muted', '--surface'].map((token) => { probe.style.color = 'var(' + token + ')'; return getComputedStyle(probe).color; });
+      probe.remove();
+      return {
+        state: document.getElementById('local-note').dataset.state, heading: text('local-note-title'), text: text('local-note-text'), hint: text('local-note-hint'), command: text('local-note-code'),
+        steps: [...document.querySelectorAll('#local-note-links a, #local-note-links button')].filter(on).map((step) => [step.textContent.trim(), step.getAttribute('href')]),
+        ways: on(document.getElementById('ways-in')) ? [...document.querySelectorAll('#ways-in dt')].map((title) => title.textContent) : null,
+        waysText: text('ways-in'), side: document.getElementById('side-hint').hidden ? null : document.getElementById('side-hint').textContent, banner: on(document.getElementById('relay-notice')), browser: hostedBrowser(navigator),
+        defaults: [...document.querySelectorAll('*')].filter((element) => ['rgb(0, 0, 238)', 'rgb(85, 26, 139)'].includes(getComputedStyle(element).color)).map((element) => element.outerHTML.slice(0, 80)),
+        bare: [...document.querySelectorAll('a')].filter((link) => on(link) && !link.className && !tokens.includes(getComputedStyle(link).color)).map((link) => link.outerHTML.slice(0, 80)),
+      };
+    })())`;
+    /** Open the hosted page at this address and read the state it settles in. */
+    // Every visible control beside a reference of its own kind that sees only the browser's own styles: a control that
+    // matches it on appearance, background, border and radius is a native default the view never styled.
+    const native = `JSON.stringify((() => {
+      const host = document.body.appendChild(document.createElement('div'));
+      const root = host.attachShadow({ mode: 'open' });
+      const signature = (element) => { const style = getComputedStyle(element); return [style.appearance, style.backgroundColor, style.borderTopStyle, style.borderTopWidth, style.borderRadius].join(' | '); };
+      const found = [...document.querySelectorAll('button, input, select, textarea')].filter((element) => element.type !== 'hidden' && element.getClientRects().length > 0).filter((element) => {
+        const probe = root.appendChild(document.createElement(element.tagName));
+        if (element.type) probe.type = element.type;
+        return signature(element) === signature(probe);
+      }).map((element) => element.outerHTML.slice(0, 90));
+      host.remove();
+      return found;
+    })())`;
+    /** Check every visible control at phone and desktop width, in light and in dark. */
+    const styledControls = async (state) => {
+      for (const width of [390, 1280]) {
+        await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
+        for (const theme of ['light', 'dark']) {
+          await chrome.stable(`document.documentElement.dataset.theme = '${theme}'`);
+          assert.deepEqual(JSON.parse(await chrome.stable(native)), [], `${state}: no visible control keeps the browser's native look at ${width}px in ${theme}`);
+        }
+      }
+      await chrome.stable('delete document.documentElement.dataset.theme');
+      await chrome.send('Emulation.clearDeviceMetricsOverride');
+    };
+    const open = async (address, state) => {
+      await chrome.send('Page.navigate', { url: HOSTED + '/' + address });
+      await chrome.waitFor(`location.search === ${JSON.stringify(address.split('#')[0])} && document.querySelector('#local-note')?.dataset.state === ${JSON.stringify(state)} && !document.querySelector('#local-note').hidden`, 20_000); // budget: hang ceiling for one refused loopback request and an empty relay list.
+      const seen = JSON.parse(await chrome.stable(shown));
+      await proofShot(chrome, 'hosted-' + state + '-phone', 390);
+      await proofShot(chrome, 'hosted-' + state, 1280);
+      assert.deepEqual(seen.defaults, [], `${state}: no element keeps the browser's default link colours`);
+      assert.deepEqual(seen.bare, [], `${state}: every link has a class or the view's colours`);
+      assert.deepEqual(seen.ways, ['The local view', 'This computer through pullboard.dev', 'Your phone and other devices', 'A second computer'], `${state}: the Ways in panel lists every route`);
+      for (const command of ['pullboard view', 'pullboard relay on --all', 'pullboard relay pair', 'pullboard relay join <code>']) assert.ok(seen.waysText.includes(command), `${state}: Ways in names ${command}`);
+      assert.ok(seen.side, `${state}: the empty sidebar says what fills it`);
+      await styledControls(state);
+      return seen;
+    };
+    const retry = [['Try again', null]];
+
+    const blocked = await open('?blocked', 'blocked');
+    assert.equal(blocked.heading, 'Let this page reach Pullboard');
+    assert.match(blocked.text, new RegExp('^' + blocked.browser + ' has refused this page access to apps on this device'), 'the line names the browser and what it refused');
+    assert.equal(blocked.browser, 'Chrome', 'the fixture Chrome is named as Chrome');
+    assert.match(blocked.hint ?? '', /^In Chrome, click the icon at the left of the address bar, turn on Local network access, then try again\.$/, 'the step is the one for this browser');
+    assert.deepEqual(blocked.steps, retry, 'and its button tries again');
+
+    const absent = await open('?absent', 'not-running');
+    assert.equal(absent.heading, 'Start Pullboard on this computer');
+    assert.match(absent.text, /cannot reach a local view on this computer/);
+    assert.equal(absent.command, 'pullboard view', 'the next step is the command that starts the local view');
+    assert.deepEqual(absent.steps, retry);
+    assert.equal(await chrome.stable("document.querySelector('#local-note-copy').textContent"), 'Copy', 'the command has a copy button');
+    assert.equal(absent.banner, false, 'the relay\'s banner stays out of it');
+
+    const out = await open('?out#board=' + 'b'.repeat(32) + '&key=k1', 'signed-out');
+    assert.equal(out.heading, 'Sign in to pair this browser');
+    assert.deepEqual(out.steps, [['Sign in with GitHub', '/auth/github/start']], 'the next step is signing in');
+    assert.equal(out.banner, false, 'the state speaks for the relay\'s banner');
+
+    stand.signedIn = true;
+    const none = await open('?in', 'no-linked');
+    assert.equal(none.heading, 'No linked boards yet');
+    assert.equal(none.command, 'pullboard relay on --all', 'the next step links the boards');
+    assert.equal(none.banner, false);
+    assert.equal(await chrome.stable("document.querySelector('#local-note-sign-in').hidden"), true, 'a signed-in person is not asked to sign in');
+
+    stand.linked = [{ id: 'a'.repeat(32), repository: 'acme/web', linkedAt: 0 }];
+    const unpaired = await open('?linked', 'unpaired');
+    assert.equal(unpaired.heading, 'Pair this browser');
+    assert.match(unpaired.text, /^You are signed in, .*acme\/web\. Each browser pairs once before it can read it\..*scan its QR:$/, 'the line says the person is signed in, names the board, that each browser pairs once, and the QR');
+    assert.equal(unpaired.command, 'pullboard relay on --all', 'the next step prints the QR');
+
+    // This machine's view: the normal list, with no state over it.
+    stand.signedIn = false;
+    stand.linked = [];
+    stand.local = view.base;
+    // The person allowed this page to reach this device, under whichever permission names this Chrome knows.
+    for (const permissions of [['loopbackNetwork', 'localNetwork', 'localNetworkAccess'], ['localNetworkAccess']]) {
+      try { await chrome.send('Browser.grantPermissions', { origin: HOSTED, permissions }); break; } catch { /* a name this Chrome does not have */ }
+    }
+    // A view from before 0.8.29 refuses the hosted page without the header that would let it read the refusal. The page
+    // makes one discovery request of this device (P5), so it reads as no view, and the state's hint names the update.
+    old = createServer((req, res) => { res.writeHead(403, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'this view needs its own address and secret: open the link pullboard view printed' })); });
+    await new Promise((ready) => old.listen(0, '127.0.0.1', ready));
+    stand.local = 'http://127.0.0.1:' + old.address().port;
+    const outdated = await open('?old', 'not-running');
+    assert.equal(outdated.heading, 'Start Pullboard on this computer');
+    assert.equal(outdated.hint, 'A Pullboard older than 0.8.29 cannot answer this page, so update it first with npm i -g pullboard.', 'the state names the update an old view needs');
+    assert.deepEqual(outdated.steps, retry);
+    stand.local = view.base;
+    await chrome.send('Page.navigate', { url: HOSTED + '/?list' });
+    await chrome.waitFor("location.origin === 'https://app.pullboard.dev' && document.querySelector('#chain')?.textContent.includes('A board the hosted page lists')", 30_000); // budget: hang ceiling for the discovery, one round trip and the first board read.
+    const list = JSON.parse(await chrome.stable(`JSON.stringify({ note: document.querySelector('#local-note').hidden, ways: document.querySelector('#ways-in').hidden, heading: document.querySelector('#proj-list .proj.on .pname')?.textContent, source: document.querySelector('#proj-list .proj.on .src')?.textContent, tab: document.querySelector('.tab.on')?.textContent, step: document.querySelector('#new-item').getClientRects().length > 0, side: document.querySelector('#side-hint').hidden, state: JSON.parse(${shown}) })`));
+    // Normal-list next actions use the view styles at both sizes and in both themes (outside review 950).
+    for (const width of [390, 1280]) {
+      await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
+      for (const theme of ['light', 'dark']) {
+        await chrome.stable(`document.documentElement.dataset.theme = '${theme}'`);
+        const controls = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+          const probe = document.createElement('button'); probe.textContent = 'UA reference'; document.body.append(probe);
+          const signature = (element) => { const style = getComputedStyle(element); return {
+            appearance: style.appearance, background: style.backgroundColor, radius: style.borderRadius,
+            border: style.borderTopStyle, width: style.borderTopWidth, padding: style.padding,
+          }; };
+          const baseline = signature(probe);
+          const actions = [...document.querySelectorAll('#detail button[data-shout], #detail button[data-new]')]
+            .filter((element) => element.getClientRects().length).map((element) => ({ text: element.textContent,
+              style: signature(element), height: element.getBoundingClientRect().height }));
+          probe.remove(); return { baseline, actions };
+        })())`));
+        assert.equal(controls.actions.length, 2, `both next actions appear at ${width}px in ${theme}`);
+        for (const action of controls.actions) {
+          assert.notDeepEqual(action.style, controls.baseline, `${action.text} uses the view styles at ${width}px in ${theme}`);
+          if (width === 390) assert.ok(action.height >= 44, `${action.text} retains a phone touch target in ${theme}`);
+        }
+      }
+      await proofShot(chrome, width === 390 ? 'hosted-list-phone' : 'hosted-list', width);
+    }
+    await chrome.stable('delete document.documentElement.dataset.theme');
+    await styledControls('list');
+    assert.deepEqual({ note: list.note, ways: list.ways, side: list.side }, { note: true, ways: true, side: true }, 'the list shows with no state, panel or hint over it');
+    assert.equal(list.heading, 'hosted-states', 'the sidebar names the board shown');
+    assert.equal(list.source, 'this computer', 'with a quiet label for where it comes from');
+    assert.equal(list.tab, 'Items', 'its items are open');
+    assert.equal(list.step, true, 'and the next step is a new item');
+    assert.deepEqual(list.state.defaults, [], 'no element keeps the browser\'s default link colours');
+    assert.deepEqual(list.state.bare, [], 'every link has a class or the view\'s colours');
+    assert.deepEqual(chrome.exceptions, [], 'Chrome reports no uncaught exceptions');
+  } finally {
+    try { if (chrome) { if (listener) chrome.socket.removeEventListener('message', listener); await closeSnapshotChrome(chrome); } }
+    finally {
+      try { if (old) await new Promise((closed) => { old.close(closed); old.closeAllConnections(); }); }
+      finally {
+        try { if (view) await view.stop(); }
+        finally { rmSync(profile, { recursive: true, force: true }); }
+      }
+    }
+  }
+  assert.deepEqual(failures, [], 'the stand-in hosted page was served');
 });
 
 test('the local view hands its secret only to the hosted page [N26,A2]', { timeout: 60_000 }, async () => { // budget: hang ceiling for one real view and a few local requests.

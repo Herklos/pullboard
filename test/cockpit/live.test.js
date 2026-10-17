@@ -323,6 +323,41 @@ test('a catch-up whose base the server does not keep loads a fresh snapshot [N26
   }
 });
 
+/** Prove a reset response loads exactly one fresh snapshot and establishes the next delta base. */
+async function resetDeltaBase(label, corrupt) {
+  const box = machine();
+  const alpha = project(box, label);
+  box.run(alpha.repo, 'add', 'web', 'Before reset', '--specs', 'G1', '--criterion', 'renders');
+  const view = await startView(box);
+  try {
+    const page = await openPage(view);
+    page.run(corrupt);
+    const since = page.run('[...sentStates.values()][0].sequence');
+    box.run(alpha.repo, 'add', 'web', 'After reset', '--specs', 'G1', '--criterion', 'renders');
+    const mark = page.requests.length;
+    await page.run(`refresh(new Set([${JSON.stringify(alpha.repo)}]))`);
+    const reads = page.requests.slice(mark).map((request) => request.path).filter((path) => /\/state(?:\?|$)/.test(path))
+      .map((path) => new URL(path, 'http://page').searchParams.get('since'));
+    assert.deepEqual(reads, [String(since), null], 'a reset is followed by exactly one full snapshot');
+    assert.deepEqual(JSON.parse(page.run('JSON.stringify(data.project.items.map((item) => item.title).sort())')),
+      ['After reset', 'Before reset'], 'the recovered snapshot shows the real move');
+    assert.equal(page.run('[...sentStates.values()][0].sequence'), page.run('data.project.sequence'),
+      'the recovered snapshot replaces the obsolete delta base');
+  } finally {
+    await view.stop();
+  }
+}
+
+// A reset/restored board can have fewer events than the page holds; the corrected #555 bar includes BASE_AHEAD.
+test('a catch-up ahead of the server loads a fresh snapshot [N26,A2]', async () => {
+  await resetDeltaBase('reset-ahead', '[...sentStates.values()].forEach((held) => { held.sequence += 1000000; })');
+});
+
+// Event-log formats are versioned independently of a board's sequence.
+test('a catch-up with a different event format loads a fresh snapshot [N26,A2]', async () => {
+  await resetDeltaBase('reset-format', '[...sentStates.values()].forEach((held) => { held.version = "different-format"; })');
+});
+
 /**
  * A project group of `count` real repos, opened in real Chrome as the group, where a claim on `mover`'s item must
  * show within two seconds while the page follows every repo on one stream.
