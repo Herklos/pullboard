@@ -5,11 +5,21 @@ import { cockpitPage } from '../src/cockpit.js';
 import { ENGINE_VERSION } from '../src/machine.js';
 import { Refused } from '../src/refused.js';
 import { APPROVAL_CARD_STYLES } from './browser-approval-card.js';
+import { relayScreenMarkup } from './browser-notice.js';
 
 const STYLES = readFileSync(new URL('../src/view.css', import.meta.url), 'utf8') + APPROVAL_CARD_STYLES;
 
 /** Refuse relay startup locally while the public shell has no relay session; keep its sign-in link and never reload. */
 const SIGN_IN_TRANSPORT = '/** Preserve device-only pairing before sign-in without starting relay reads. */\nimport { rememberPairing } from "./client.js";\nimport { registerApp } from "./install.js";\nexport function createTransport() {\n  void registerApp();\n  rememberPairing();\n  throw new Error("Sign in with GitHub to open your linked boards.");\n}\n';
+
+/**
+ * Name the device before first paint: a phone or tablet (a coarse pointer and no hover) never runs Pullboard, so
+ * signed out it shows the sign-in screen and nothing about this computer. A computer keeps the page's own states.
+ */
+function deviceScript(relaySession) {
+  return "(() => { const root = document.documentElement; if (!matchMedia('(pointer: coarse)').matches || !matchMedia('(hover: none)').matches) return;"
+    + " root.dataset.relayDevice = 'phone';" + (relaySession ? '' : " root.dataset.relayScreen = 'sign-in';") + ' })();';
+}
 
 /** Serve a fixed asset with cache and browser isolation boundaries, never a filesystem-derived URL. */
 function respond(res, type, content, scriptHashes = []) {
@@ -26,6 +36,8 @@ function respond(res, type, content, scriptHashes = []) {
 export function createRelayBrowserHandler({ authenticate }) {
   const assets = new Map([
     ['/view.css', ['text/css', STYLES]],
+    ['/relay/screens.css', ['text/css', readFileSync(new URL('./browser-screens.css', import.meta.url), 'utf8')]],
+    ['/relay/screens.js', ['text/javascript', '/** Wire the first screens\' Copy buttons [H17]. */\nimport { wireRelayScreens } from \'./browser-notice.js\';\nwireRelayScreens(document);\n']],
     ['/manifest.webmanifest', ['application/manifest+json', readFileSync(new URL('./app.webmanifest', import.meta.url), 'utf8')]],
     ['/service-worker.js', ['text/javascript', readFileSync(new URL('./service-worker.js', import.meta.url), 'utf8')]],
     ['/icons/pullboard.svg', ['image/svg+xml', readFileSync(new URL('./icons/pullboard.svg', import.meta.url), 'utf8')]],
@@ -71,7 +83,10 @@ export function createRelayBrowserHandler({ authenticate }) {
       : '<p>Connecting to this machine. Sign in to see your linked boards.</p><a href="/auth/github/start">Sign in with GitHub</a>';
     const page = cockpitPage('', { readOnly: true, requests: relaySession, transportModule: relaySession || removedSession ? '/relay/client.js' : '/relay/sign-in.js', apiHeaders: {}, stylesheet: '/view.css', hostedLocal: true, relaySession: relaySession || removedSession, signIn: '/auth/github/start' })
       .replace('<link rel="icon" href="data:,">', '<link rel="icon" href="/icons/pullboard.svg" type="image/svg+xml">\n<link rel="manifest" href="/manifest.webmanifest">\n<link rel="apple-touch-icon" href="/icons/pullboard-192.png">\n<meta name="theme-color" content="#f6faf7">')
-      .replace('<main>', '<main><section class="card-panel" id="relay-notice" role="status">' + notice + '</section>');
+      .replace('</head>', '<link rel="stylesheet" href="/relay/screens.css">\n<script>' + deviceScript(relaySession) + '</script>\n</head>')
+      .replace('<div class="shell">', relayScreenMarkup(relaySession ? 'share' : 'sign-in', '/auth/github/start') + '\n<div class="shell">')
+      .replace('<main>', '<main><section class="card-panel" id="relay-notice" role="status">' + notice + '</section>')
+      .replace('</body>', '<script type="module" src="/relay/screens.js"></script>\n</body>');
     const scripts = [...page.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(match => createHash('sha256').update(match[1]).digest('base64'));
     respond(res, 'text/html', page, scripts);
     return true;
