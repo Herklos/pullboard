@@ -1,9 +1,10 @@
 /** Keep the view's exact named-port refusal covered in a core-owned file [N26]. */
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { runFixtureChild, startFixtureChild } from './fixture-child.js';
 import { createServer } from 'node:net';
 import { createServer as createHttpServer } from 'node:http';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -128,6 +129,12 @@ test('a busy view port names a fix the hosted page can still find [N26,I1]', asy
   };
   delete env.AI_AGENT;
   delete env.PULLBOARD_VIEW_FOREGROUND;
+  // A stale view record whose pid is alive in an unrelated process must never be named as the holder.
+  const unrelated = startFixtureChild(process.execPath, ['-e', 'setTimeout(() => {}, 60_000)'], { stdio: 'ignore' }); // budget: idle lifetime for the unrelated pid; killed when the test ends.
+  t.after(() => { unrelated.kill('SIGKILL'); });
+  mkdirSync(env.PULLBOARD_HOME, { recursive: true });
+  writeFileSync(join(env.PULLBOARD_HOME, `view-${port}.json`),
+    `${JSON.stringify({ port, secret: randomUUID(), pid: unrelated.pid, boundAt: new Date().toISOString() })}\n`, { mode: 0o600 });
   const plain = runFixtureChild(process.execPath, [BIN, 'view', '--no-open'], { cwd: dir, env, encoding: 'utf8', timeout: 40_000 });
   assert.equal(plain.status, 1, plain.failure ?? plain.stderr);
   const json = runFixtureChild(process.execPath, [BIN, 'view', '--no-open', '--json'], { cwd: dir, env, encoding: 'utf8', timeout: 40_000 });
@@ -144,8 +151,10 @@ test('a busy view port names a fix the hosted page can still find [N26,I1]', asy
     assert.ok(refusal.message.includes(`in use by node (pid ${process.pid}),`) && refusal.message.includes(`stop it with kill ${process.pid},`),
       `the refusal names the process holding the port: ${refusal.message}`);
   }
+  assert.ok(!refusal.message.includes(String(unrelated.pid)), `a live pid in a stale view record is not the holder: ${refusal.message}`);
   assert.equal(refusal.next, 'stop the other view on that port, then run pullboard view again');
   assert.equal(plain.stderr.trim(), `pullboard: [PORT_BUSY] ${refusal.message}\nnext: ${refusal.next}`);
+  rmSync(join(env.PULLBOARD_HOME, `view-${port}.json`), { force: true });
   const free = runFixtureChild(process.execPath, [BIN, 'view', '--no-open', '--port', '0', '--json'], { cwd: dir, env, encoding: 'utf8', timeout: 40_000 });
   assert.equal(free.status, 0, free.failure ?? free.stderr);
   t.after(() => cleanupFixtureViews(env.PULLBOARD_HOME));
