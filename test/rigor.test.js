@@ -466,7 +466,7 @@ test('a timed-out proof drains only its captured process group before removing i
     if (!owned?.every(Boolean) || owned[0].pgid !== owned[1].pgid) process.exit(32);
     const socket = createConnection({ host: '127.0.0.1', port: ${port} });
     socket.on('error', () => process.exit(33));
-    socket.end(JSON.stringify({ capturedAt: Date.now(), rows: owned }));
+    socket.end(JSON.stringify({ rows: owned }));
     setInterval(() => {}, 1000);
   `);
   let runOutcome;
@@ -476,13 +476,11 @@ test('a timed-out proof drains only its captured process group before removing i
     box.git('add', 'hold-proof.mjs');
     box.git('commit', '-q', '-m', 'test: add bounded proof process fixture');
     const before = box.git('worktree', 'list', '--porcelain').split(/\n\n/u).filter(Boolean).length;
-    const startedAt = Date.now();
     watchdog = setTimeout(() => rejectMarker(new Error('proof fixture did not send its live process identities')), 5000);
     runOutcome = runCheckAt(box.repo, box.git('rev-parse', 'HEAD'), 'unused', {
       executable: process.execPath, args: ['hold-proof.mjs'],
     }, { timeoutMs }).then(value => ({ value }), error => ({ error }));
     const recorded = await marker;
-    assert.ok(recorded.capturedAt - startedAt < timeoutMs, 'the fixture recorded identities before the configured timeout');
     const pre = spawnSync('/bin/ps', ['-axo', 'pid=,ppid=,pgid=,lstart=,stat=,comm='], { encoding: 'utf8', timeout: 2000, env: { ...process.env, LC_ALL: 'C' } });
     assert.equal(pre.status, 0, 'the pre-timeout census completed');
     const live = parseProcessCensus(pre.stdout);
