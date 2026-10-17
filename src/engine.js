@@ -35,6 +35,7 @@ function minimumOperationEngine(operation, args, board) {
   if (board && ['recordLandingBatch', 'finishLandingBatch'].includes(operation)) {
     const id = operation === 'recordLandingBatch' ? args[0]?.batch?.id : args[0]?.id;
     const prior = id && store.landingBatches(board).find(batch => batch.id === id);
+    if (prior?.invariantEvidence) return SUBMISSION_PROOF_ENGINE;
     if (prior && ['items', 'candidates'].some(key => Array.isArray(prior[key]) && prior[key].some(entry => entry && Object.hasOwn(entry, 'reviewedCommit')))) return VERDICT_REVIEW_ENGINE;
   }
   if (operation === 'verify' && options && Object.hasOwn(options, 'review')) return VERDICT_REVIEW_ENGINE;

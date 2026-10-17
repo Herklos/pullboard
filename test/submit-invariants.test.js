@@ -221,7 +221,7 @@ test('a landing escape is proposed as a submit invariant only when modern submit
   const box = e2e.sandbox();
   const source = store.openBoard(join(box.dir, 'modern-source.sqlite'));
   const target = store.openBoard(join(box.dir, 'modern-replica.sqlite'));
-  const legacyTarget = store.openBoard(join(box.dir, 'legacy33-replica.sqlite'));
+  const legacyTarget = store.openBoard(join(box.dir, 'legacy37-replica.sqlite'));
   t.after(() => {store.closeBoard(source);store.closeBoard(target);store.closeBoard(legacyTarget);});
   store.register(source, {lane:'coordinator',path:'/fixture/main'});
   store.register(source, {lane:'web',path:'/fixture/web'});
@@ -236,16 +236,16 @@ test('a landing escape is proposed as a submit invariant only when modern submit
     {id:'modern-missing-selection',actor:'web-1'});
   // Forge the missing wire field after valid preparation so the receiver assertion remains independent.
   delete move.args[1].submissionProof;
-  assert.equal(SUBMISSION_PROOF_ENGINE,34,'submission receipts keep their stable first engine');
+  assert.equal(SUBMISSION_PROOF_ENGINE,38,'submission receipts keep their stable first engine');
   assert.equal(move.engine,ENGINE_VERSION,'the new envelope uses the current engine, separately from the minimum');
   assert.equal(Object.hasOwn(move.args[1],'submissionProof'),false);
-  const legacyMove = {...move,engine:33,id:'legacy33-missing-selection'};
+  const legacyMove = {...move,engine:SUBMISSION_PROOF_ENGINE - 1,id:'legacy37-missing-selection'};
   const legacyResult = applyRelayMove(legacyTarget,legacyMove,{sequence:1,at:'2026-10-17T00:00:00.000Z',kind:'move',sender:{kind:'agent',userId:'fixture',agent:'web-1'}});
-  assert.equal(legacyResult.error,undefined,'authentic engine33 proofless legacy still replays');
+  assert.equal(legacyResult.error,undefined,'controlled engine37 proofless legacy still replays');
   assert.equal(store.getItem(legacyTarget,id).item_status,'submitted');
   const legacyEvent = store.events(legacyTarget).findLast(e=>e.event_kind==='submit');
-  assert.equal(Object.hasOwn(JSON.parse(legacyEvent.event_detail),'submissionProof'),false,'legacy33 stays unknown without invented coverage');
-  console.log('review696 legacy33 control '+JSON.stringify({engine:33,status:store.getItem(legacyTarget,id).item_status,recordedSelection:false}));
+  assert.equal(Object.hasOwn(JSON.parse(legacyEvent.event_detail),'submissionProof'),false,'legacy37 stays unknown without invented coverage');
+  console.log('review696 legacy37 control '+JSON.stringify({engine:SUBMISSION_PROOF_ENGINE - 1,status:store.getItem(legacyTarget,id).item_status,recordedSelection:false}));
   const result=applyRelayMove(target,move,{sequence:1,at:'2026-10-17T00:00:00.000Z',kind:'move',sender:{kind:'agent',userId:'fixture',agent:'web-1'}});
   const event=store.events(target).findLast(e=>e.event_kind==='submit');
   const detail=event ? JSON.parse(event.event_detail) : null;
@@ -261,12 +261,12 @@ test('a landing escape is proposed as a submit invariant only when modern submit
 });
 
 
-// Controlled version-33 envelopes must not erase evidence already recorded under version 34.
+// Controlled version-37 envelopes must not erase evidence already recorded under version 38.
 for (const operation of ['recordLandingBatch', 'finishLandingBatch']) {
   test(`a landing escape is proposed as a submit invariant: retained landing receipts require their original engine for ${operation} [C7,V4,H16]`, t => {
     const box = e2e.sandbox();
     const current = store.openBoard(join(box.dir, 'retained-current.sqlite'));
-    const legacy = store.openBoard(join(box.dir, 'retained-legacy33.sqlite'));
+    const legacy = store.openBoard(join(box.dir, 'retained-legacy37.sqlite'));
     t.after(() => { store.closeBoard(current); store.closeBoard(legacy); });
     for (const board of [current, legacy]) store.register(board, { lane: 'coordinator', path: '/fixture/main' });
     const batch = { version: 1, id: 'retained-receipt', base: 'a'.repeat(40), tip: 'b'.repeat(40),
@@ -279,12 +279,12 @@ for (const operation of ['recordLandingBatch', 'finishLandingBatch']) {
     const args = operation === 'recordLandingBatch'
       ? [{ agentId: 'coordinator', batch: { ...batch, state: 'blocked' }, revision: previous.revision }]
       : [{ agentId: 'coordinator', id: batch.id, tip: batch.tip }];
-    const move = { ...prepareEngineMove(current, operation, args, { id: `older-retained-${operation}` }), engine: 33 };
+    const move = { ...prepareEngineMove(current, operation, args, { id: `older-retained-${operation}` }), engine: SUBMISSION_PROOF_ENGINE - 1 };
     // A reached legacy control starts without modern evidence, rather than deleting real history.
-    const seeded = applyEngineMove(legacy, { version: 1, engine: 33, id: 'legacy-only-batch',
+    const seeded = applyEngineMove(legacy, { version: 1, engine: SUBMISSION_PROOF_ENGINE - 1, id: 'legacy-only-batch',
       operation: 'recordLandingBatch', args: [{ agentId: 'coordinator', batch }] },
     { sequence: 1, at: '2026-10-17T00:00:00.000Z' });
-    assert.equal(seeded.error, undefined, 'a controlled engine-33 batch still replays without invented evidence');
+    assert.equal(seeded.error, undefined, 'a controlled engine-37 batch still replays without invented evidence');
     const legacyResult = applyEngineMove(legacy, { ...move, id: `legacy-only-${operation}` },
       { sequence: 2, at: '2026-10-17T00:00:01.000Z' });
     assert.equal(legacyResult.error, undefined, 'the older operation still works on its own legacy batch');
@@ -296,7 +296,7 @@ for (const operation of ['recordLandingBatch', 'finishLandingBatch']) {
     catch (error) { thrown = error; }
     const code = thrown?.code ?? result?.error?.code ?? null;
     const after = store.landingBatches(current)[0];
-    console.log('review696 retained receipt boundary ' + JSON.stringify({ operation, engine: 33, code,
+    console.log('review696 retained receipt boundary ' + JSON.stringify({ operation, engine: SUBMISSION_PROOF_ENGINE - 1, code,
       beforeEvidence: true, afterEvidence: Object.hasOwn(after, 'invariantEvidence'),
       newEvents: store.events(current).length - eventCount, legacyReached: true }));
     assert.equal(code, 'RELAY_MOVE', 'an older writer cannot adopt or finish a snapshot carrying a modern receipt');
