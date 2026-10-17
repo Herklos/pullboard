@@ -231,18 +231,26 @@ test('every bundled starter item carries a criterion and a check [S1,I1]', () =>
     'test-reliability files one: find a flaky test by repeated runs, then make it deterministic');
 
   // blueprint add files every bundled starter with its criterion and check, stored and never run.
-  const box = freshBoard({ gate: 'true' });
-  const expected = [];
+  // A board takes one product and one architecture blueprint (#720), so each goes to the first
+  // board that has room for its kind.
+  const boards = [];
   for (const name of bundledBlueprints()) {
-    const added = json(box, 'blueprint', 'add', name);
+    const kind = readBlueprint(name, process.cwd()).kind;
+    const single = ['product', 'architecture'].includes(kind);
+    let board = boards.find((entry) => !single || !entry.kinds.has(kind));
+    if (!board) boards.push(board = { box: freshBoard({ gate: 'true' }), kinds: new Set(), expected: [] });
+    if (single) board.kinds.add(kind);
+    const added = json(board.box, 'blueprint', 'add', name);
     const items = readBlueprint(name, process.cwd()).items;
     assert.equal(added.items.length, items.length, `${name} files every starter`);
     assert.deepEqual(added.checksNotRun, added.items.map((item) => item.id), `${name}: every check is stored, none run`);
-    expected.push(...items.map((item) => [item.title, item.criterion, item.check]));
+    board.expected.push(...items.map((item) => [item.title, item.criterion, item.check]));
   }
-  const filed = json(box, 'list', '--all').items.sort((a, b) => a.item_id - b.item_id);
-  assert.deepEqual(filed.map((item) => [item.item_title, item.item_criterion, item.item_check]), expected);
-  assert.ok(filed.every((item) => (item.item_check_baseline ?? null) === null), 'no check baseline ran');
+  for (const { box, expected } of boards) {
+    const filed = json(box, 'list', '--all').items.sort((a, b) => a.item_id - b.item_id);
+    assert.deepEqual(filed.map((item) => [item.item_title, item.item_criterion, item.item_check]), expected);
+    assert.ok(filed.every((item) => (item.item_check_baseline ?? null) === null), 'no check baseline ran');
+  }
 
   // init --blueprint files them with both and prints that the checks are stored, not run.
   const web = readBlueprint('web-app', process.cwd());
@@ -368,8 +376,9 @@ test('a drafted row records its rule source [S1,I1]', () => {
   assert.match(empty.stdout, /source names where the row came from/u);
   writeFileSync(join(box.repo, 'SPEC.md'), source);
 
-  // A bundled architecture blueprint drafts its rows with the source it names.
-  const serverless = json(box, 'blueprint', 'add', 'serverless');
+  // A bundled architecture blueprint drafts its rows with the source it names, on a board of its
+  // own, since this one already has an architecture blueprint (#720).
+  const serverless = json(freshBoard({ gate: 'true' }), 'blueprint', 'add', 'serverless');
   for (const rule of readBlueprint('serverless', process.cwd()).rules) {
     const drafted = serverless.rows.find((entry) => entry.key === rule.key);
     assert.equal(drafted.source, `${rule.source.name} ${rule.source.id} ${rule.source.url}`, `serverless ${rule.key} keeps its source`);
@@ -757,7 +766,7 @@ test('a question with nothing to read has no default [S1,I1]', () => {
   json(plain, 'blueprint', 'add', 'web-app');
   assert.equal(pendingQuestion(plain.repo, 'The app is built with'), `The app is built with: (choose one). ${FRAMEWORKS}`, 'no known framework leaves the question unanswered');
   // A blueprint without a default for a question it cannot detect is valid and files the same way.
-  const own = { ...PUBLISHED, name: 'own', title: 'Own', prefix: 'OWN', items: [], questions: [{ key: 'Q1', ask: 'Its colour is', choices: ['Red', 'Blue'] }] };
+  const own = { ...PUBLISHED, name: 'own', title: 'Own', kind: 'practice', prefix: 'OWN', items: [], questions: [{ key: 'Q1', ask: 'Its colour is', choices: ['Red', 'Blue'] }] };
   writeFileSync(join(plain.repo, 'own.json'), `${JSON.stringify(own)}\n`);
   json(plain, 'blueprint', 'add', 'own.json');
   assert.equal(pendingQuestion(plain.repo, 'Its colour is'), 'Its colour is: (choose one). Choices: Red, Blue.');

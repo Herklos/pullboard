@@ -62,7 +62,7 @@ import {
   unmetRows,
 } from './spec.js';
 import { answerQuestion, bundledBlueprints, landBlueprint, planBlueprint, readBlueprint, repoAnswers, saveBlueprint } from './blueprints.js';
-import { blueprintStarterNote, combinedSummary, initBlueprintResult, installedBlueprints, readBlueprints, sharedRowLines } from './blueprint-set.js';
+import { blueprintStarterNote, combinedSummary, initBlueprintLines, initBlueprintResult, installedBlueprints, landEach, readBlueprints, sharedRowLines } from './blueprint-set.js';
 import { briefFiles } from './brief.js';
 import { commitFirst, commitOwnerLines, commitOwners, coordinatorInbox, coordinatorInboxLines, inboxFirst } from './resume.js';
 import { checkBaseline, prepareCheckBaseline, sayCheckBaseline, refuseCheckSyntax } from './check-baseline.js';
@@ -1662,9 +1662,8 @@ function setupCommands(io, { first, second, rest = [], values }) {
   return {
     init: async () => {
       const info = repoInfo(io.cwd);
-      // Every named blueprint is read and checked before anything is written, so an unknown name,
-      // a broken file, a URL or a second product blueprint leaves the repository untouched (#678,
-      // #720). Past that, init adds each blueprint exactly as pullboard blueprint add does.
+      // Every blueprint is read and checked before anything is written: an unknown name, a broken file, a URL
+      // or a second product leaves the repo untouched (#678, #720). Then each is added as blueprint add does.
       const blueprints = readBlueprints(values.blueprint ?? [], io.cwd, 'init', installedBlueprints(info.root));
       const model = optionalModel(values.model);
       const linked = relayLinked(info.root);
@@ -1693,20 +1692,12 @@ function setupCommands(io, { first, second, rest = [], values }) {
         { lane: COORDINATOR, path: info.root, model },
       ]));
       // Keep blueprint initialization and the person's unwritten lane proposals in the same result.
-      const drafted = new Map();
-      const landed = [];
-      for (const { reference, blueprint } of blueprints) landed.push(await addBlueprintHere(io, reference, { report: false, blueprint, drafted }));
+      const landed = await landEach(blueprints, ({ reference, blueprint }, drafted) => addBlueprintHere(io, reference, { report: false, blueprint, drafted }));
       io.result?.({ root: info.root, notes, proposedLanes: proposeLanes(info.root),
         ...(landed.length ? { blueprint: initBlueprintResult(landed[0]), blueprints: landed.map(initBlueprintResult) } : {}) });
       const staging = notes.at(-1)?.startsWith('git add -f -- ') ? notes.at(-1) : null;
       (staging ? notes.slice(0, -1) : notes).forEach((note) => io.say(note));
-      for (const added of landed) {
-        io.say(`added the ${added.blueprint.title} blueprint: ${added.rows.length} ${added.rows.length === 1 ? 'row waits' : 'rows wait'} for your approval in SPEC.md (${added.section}), `
-          + `${added.items.length} starter ${added.items.length === 1 ? 'item' : 'items'} filed${added.proposedLanes.length ? ` in the ${added.proposedLanes.map((lane) => lane.name).join(' and ')} lane, proposed above and not written until the person accepts` : ''}${added.gate ? `, gate set to ${added.gate}` : ''}`);
-        for (const note of askedLaneNotes(added.items, loadConfig(info.root))) io.say(`  ${note}`);
-        if (added.checksNotRun.length) io.say(`  checks stored, not run: ${added.checksNotRun.map((id) => `#${id}`).join(', ')}; no check baseline ran, so read each check before work starts: pullboard show <id>`);
-        for (const line of sharedRowLines(added)) io.say(`  ${line}`);
-      }
+      for (const added of landed) initBlueprintLines(added, askedLaneNotes(added.items, loadConfig(info.root))).forEach((line) => io.say(line));
       if (await registerProjectAndLink(info.root, new Date(), loadConfig(info.root), io)) io.say('registered this project on this machine, so pullboard view lists it');
       io.say(agentSessionDigest()
         ? 'Next: run pullboard resume now to continue setup in this session; the new skills load next session, and setup does not need them.'
@@ -2383,8 +2374,7 @@ function reportSubmission(ctx, id, commit, gate, doctrine = []) {
  *
  * @param {any} io
  * @param {string} reference - A bundled blueprint name or a path to a blueprint file, relative to io.cwd.
- * @param {{ report?: boolean, blueprint?: ReturnType<typeof readBlueprint>, drafted?: Map<string, string> }} [options]
- *   drafted is the row text to id map shared by the blueprints of one command (see addBlueprint).
+ * @param {{ report?: boolean, blueprint?: ReturnType<typeof readBlueprint>, drafted?: Map<string, string> }} [options] - drafted: see addBlueprint.
  * @returns {Promise<BlueprintAdded>}
  */
 export async function addBlueprintHere(io, reference, { report = true, blueprint = readBlueprint(reference, io.cwd), drafted } = {}) {
@@ -2415,10 +2405,8 @@ export async function addBlueprintHere(io, reference, { report = true, blueprint
  * @param {any} board
  * @param {{ id: string }} me
  * @param {import('./blueprints.js').Blueprint} blueprint
- * @param {{ report?: boolean, result?: boolean, drafted?: Map<string, string> }} [options] - With report false,
- *   print nothing and set no JSON result; with result false, print but set no JSON result. drafted
- *   holds the rows earlier blueprints of this command drafted, by text; this add files no row
- *   twice and adds its own (#720).
+ * @param {{ report?: boolean, result?: boolean, drafted?: Map<string, string> }} [options] - report false prints nothing and sets no
+ *   JSON result; result false prints but sets none. drafted: rows earlier blueprints of this command drafted, by text (#720).
  * @returns {Promise<BlueprintAdded>}
  */
 async function addBlueprint(ctx, board, me, blueprint, { report = true, result = report, drafted = new Map() } = {}) {
@@ -2881,14 +2869,10 @@ function workCommands(io, args) {
   return {
     blueprint: () => act(async (ctx, board, me) => {
       const references = [...(second ? [second] : []), ...(values.blueprint ?? [])];
-      if (first !== 'add' || !references.length || rest.length) {
-        throw new Refused('USAGE', `pullboard blueprint add <name or file> [--blueprint <name or file>]... | save [file]; bundled: ${bundledBlueprints().join(', ')}`);
-      }
+      if (first !== 'add' || !references.length || rest.length) throw new Refused('USAGE', `pullboard blueprint add <name or file> [--blueprint <name or file>]... | save [file]; bundled: ${bundledBlueprints().join(', ')}`);
       // Several blueprints land in the order given, as one result; one lands exactly as before (#720).
       const listed = readBlueprints(references, io.cwd, 'blueprint add', installedBlueprints(ctx.info.root));
-      const drafted = new Map();
-      const landed = [];
-      for (const { blueprint } of listed) landed.push(await addBlueprint(ctx, board, me, blueprint, { result: listed.length === 1, drafted }));
+      const landed = await landEach(listed, ({ blueprint }, drafted) => addBlueprint(ctx, board, me, blueprint, { result: listed.length === 1, drafted }));
       if (listed.length > 1) io.result?.(combinedSummary(landed));
       return 0;
     }),

@@ -146,3 +146,36 @@ export function sharedRowLines(added) {
 export function blueprintStarterNote(blueprint, key) {
   return `blueprint starter: ${JSON.stringify({ blueprint: blueprint.name, version: blueprint.version, key })}`;
 }
+
+/**
+ * Add each blueprint in turn with one shared map of the rows drafted so far, by text, so a text
+ * two of them share is drafted once, by the first.
+ *
+ * @template T
+ * @param {T[]} list - The blueprints to add, in order.
+ * @param {(entry: T, drafted: Map<string, string>) => Promise<any>} add - Adds one and returns its summary.
+ * @returns {Promise<any[]>} Each blueprint's summary, in order.
+ */
+export async function landEach(list, add) {
+  const drafted = new Map();
+  const landed = [];
+  for (const entry of list) landed.push(await add(entry, drafted));
+  return landed;
+}
+
+/**
+ * The lines init prints for one blueprint it added: the summary, the starters that could not go to
+ * the lane they asked for, the checks stored and not run, and the rows it shares with one before it.
+ *
+ * @param {any} added - The blueprint's summary from its add.
+ * @param {string[]} laneNotes - askedLaneNotes for its starters.
+ * @returns {string[]}
+ */
+export function initBlueprintLines(added, laneNotes) {
+  const proposed = added.proposedLanes.length ? ` in the ${added.proposedLanes.map((lane) => lane.name).join(' and ')} lane, proposed above and not written until the person accepts` : '';
+  return [`added the ${added.blueprint.title} blueprint: ${added.rows.length} ${added.rows.length === 1 ? 'row waits' : 'rows wait'} for your approval in SPEC.md (${added.section}), `
+    + `${added.items.length} starter ${added.items.length === 1 ? 'item' : 'items'} filed${proposed}${added.gate ? `, gate set to ${added.gate}` : ''}`,
+  ...laneNotes.map((note) => `  ${note}`),
+  ...(added.checksNotRun.length ? [`  checks stored, not run: ${added.checksNotRun.map((id) => `#${id}`).join(', ')}; no check baseline ran, so read each check before work starts: pullboard show <id>`] : []),
+  ...sharedRowLines(added).map((line) => `  ${line}`)];
+}
