@@ -22,6 +22,16 @@ export function validRelaySender(sender) {
     (sender.kind !== 'machine' || (typeof sender.machine === 'string' && sender.machine.length > 0 && sender.machine.length <= 256)));
 }
 
+/**
+ * True for a fact move that claims the person's authority: a never-again, a cause key, or person
+ * mode (#713). Only an authenticated person sender may make it, whatever channel it names, so no
+ * agent, coordinator seat or machine credential can make rigor list a cause as the person's.
+ */
+function personFact(move) {
+  const options = move?.operation === 'appendFact' ? move.args?.[1] : null;
+  return Boolean(options && typeof options === 'object' && (options.asPerson || options.neverAgain || (options.cause !== undefined && options.cause !== null)));
+}
+
 /** Make the same authorization decision on every device, without inspecting its shell or checkout. */
 export function relaySenderProblem(move, sender, kind, { phoneReceipt = false } = {}) {
   if (!validRelaySender(sender)) {
@@ -31,6 +41,9 @@ export function relaySenderProblem(move, sender, kind, { phoneReceipt = false } 
     return new Refused('RELAY_ANSWER', 'a sealed shout cannot answer or pass a decision; use pullboard answer <id> "<answer>" or pullboard pass <id> --note "<reason>" so the decision rules are checked');
   }
   if (sender.kind === 'person') return null;
+  if (personFact(move)) {
+    return new Refused('RELAY_PERSON_ONLY', `${sender.kind === 'agent' ? `agent ${sender.agent}` : 'a machine'} cannot record the person's never-again; the person marks it from their own session`);
+  }
   if (sender.kind === 'machine') {
     if (kind === 'snapshot') return null;
     if (kind === 'move' && move?.engine >= 6 && (phoneReceipt ||
