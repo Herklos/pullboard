@@ -20,6 +20,7 @@ import { tmpdir } from 'node:os';
 import { request } from 'node:http';
 import { connect } from 'node:net';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { after, test } from 'node:test';
 import { parseSpec } from '../src/spec.js';
 import { checkAtCommit } from '../src/trusted-policy.js';
@@ -174,6 +175,47 @@ test('stream scanning handles UTF-8 and a secret split across read chunks [V18,V
   assert.match(saved, /redacted OpenAI key/);
   assert.doesNotMatch(saved, new RegExp(planted));
   assert.match(saved, /TAIL-CHUNK/);
+});
+
+test('a check output survives the browser launch guard [V18,V2]', () => {
+  const probe = sandbox();
+  const observed = join(probe.dir, 'guard-stdio.json');
+  const preload = join(probe.dir, 'observe-guard.mjs');
+  const guard = pathToFileURL(resolve(import.meta.dirname, '../src/browser-slot-guard.js')).href;
+  // Observe only the node -e check writer. Other CLI processes legitimately use their own stdio.
+  writeFileSync(preload, `
+const fs = process.getBuiltinModule('node:fs');
+const accessed = [];
+if (process.argv.length === 1) {
+  for (const name of ['stdin', 'stdout', 'stderr']) {
+    const descriptor = Object.getOwnPropertyDescriptor(process, name);
+    Object.defineProperty(process, name, { ...descriptor, get() {
+      accessed.push(name);
+      return descriptor.get.call(process);
+    } });
+  }
+}
+await import(${JSON.stringify(guard)});
+if (process.argv.length === 1) fs.writeFileSync(${JSON.stringify(observed)}, JSON.stringify(accessed));
+`);
+  const planted = 'sk-proj-' + 'b'.repeat(40);
+  const box = privateCheckSubmission({ check: `node -e 'const fs=require("node:fs"); fs.writeSync(1,"x".repeat(32766)+"😀\\n"); fs.writeSync(1,"x".repeat(32762)+"${planted}\\nTAIL-CHUNK\\n"); process.exitCode=1'` });
+  box.env.NODE_OPTIONS = `--import=${pathToFileURL(preload).href}`;
+  box.env.PULLBOARD_TEST_BROWSER_SLOT = 'none';
+  const refused = box.run(box.review, 'verify', '1', 'accept', '--note', 'the guard preserves the private check writer', '--json');
+  assert.equal(refused.code, 1, refused.err);
+  const error = JSON.parse(refused.out).error;
+  assert.equal(error.code, 'CHECK_RED');
+  assert.deepEqual(JSON.parse(readFileSync(observed, 'utf8')), [], 'loading the guard must not initialize a check writer’s stdio');
+  assert.match(error.message, /redacted OpenAI key/);
+  assert.match(error.message, /TAIL-CHUNK/);
+  const artifact = /full output file: ([^\n]+)/.exec(error.message)?.[1];
+  assert.ok(artifact && existsSync(artifact));
+  const saved = readFileSync(artifact, 'utf8');
+  assert.match(saved, /😀/);
+  assert.match(saved, /redacted OpenAI key/);
+  assert.match(saved, /TAIL-CHUNK/);
+  assert.doesNotMatch(saved, new RegExp(planted));
 });
 
 test('accept reports failed install as CHECK_UNVERIFIED with an output digest [V18,V2]', () => {
