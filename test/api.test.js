@@ -985,6 +985,7 @@ test('[A1] every catalog command and subcommand has a real CLI exercise', () => 
   const source = project();
   const target = project();
   const document = json(source, source.repo, 'export');
+  assert.match(json(source, source.repo, 'digest').markdown, /^# Board briefing: /u);
   const file = join(source.dir, 'board.json');
   writeFileSync(file, JSON.stringify(document));
   json(source, target.repo, 'import', [file]);

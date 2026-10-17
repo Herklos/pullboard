@@ -92,6 +92,7 @@ import { proofStats } from './stats.js';
 import { flowLines, flowAlertLine } from './stats-flow.js';
 import { releaseHeadlinesBetween } from './changelog.js';
 import { exportBoard, importBoard } from './exchange.js';
+import { digestCommand } from './digest.js';
 import { addSigner, assertRequiredSigners, defaultPrincipal, hasSignerFile } from './signature.js';
 import { addRunner, browserFreeChecksEnabled, gateQueueSettings, gateShortSlots, loadMachineSettings, memoryFloorMB, relayOfferEnabled, setBrowserSlots, setGateShortSlots, setGateSlots } from './settings.js';
 import { formatSnapshotLimit, pendingSnapshotSize, pendingCheckpointProblem, relayCommandReceipt, relayCommandReceiptReported, relayLinked, relayOff, relayOn, relayOperation, relayRecover, relayRecovered, relayRevoke, relayStatus, relayTokens, syncRelay } from './relay.js';
@@ -259,6 +260,7 @@ const OPTIONS = {
   by: { type: 'string' },
   key: { type: 'string' },
   out: { type: 'string' },
+  watch: { type: 'boolean' },
   after: { type: 'string' },
   brief: { type: 'string' },
   'brief-file': { type: 'string' },
@@ -1928,6 +1930,7 @@ function readCommands(io, { first, second, rest, values }) {
       io.say(JSON.stringify(withBoard(ctx, (board) => exportBoard(board)), null, 2));
       return 0;
     },
+    digest: () => digestCommand(io, { first, second, rest, values }, context(io)),
     import: () => {
       if (!first || second || rest.length) throw new Refused('USAGE', 'pullboard import <file>');
       const file = resolve(io.cwd, first);
@@ -4058,7 +4061,7 @@ async function runMain(argv, streams) {
       positionals: parsed.positionals.slice(1),
       values: Object.fromEntries(Object.keys(parsed.values).filter(key => key !== 'json').sort().map(key => [key, parsed.values[key]])) };
     sync = Boolean(command) && !parsed.values.help && !parsed.values.version
-      && !['help', 'version', 'hook', 'init', 'relay', 'tour', 'mcp', 'health', 'watch'].includes(command)
+      && !['help', 'version', 'hook', 'init', 'relay', 'tour', 'mcp', 'health', 'watch', 'digest'].includes(command)
       // A coordinator declaration on a linked clone must refuse before auto-link or relay sync.
       && !(command === 'join' && parsed.positionals[1] === COORDINATOR);
     needsRepo = !(parsed.values.help || parsed.values.version || command === 'help' || command === 'version');
