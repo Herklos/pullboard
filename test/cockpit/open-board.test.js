@@ -95,7 +95,22 @@ async function openBoardStand(chrome, view) {
   })()` });
   // Chrome itself lets the page reach the view's own port, where the round trip sends it; what the page hears of the
   // permission is the override above. Its names differ between Chrome versions, so the widest set this one knows is used.
-  for (const permissions of [['loopbackNetwork', 'localNetwork', 'localNetworkAccess'], ['localNetworkAccess']]) {
+  // Copy writes with navigator.clipboard, which Chrome answers only for a focused page with clipboard permission. A test
+  // Chrome on a busy machine is neither by default: its write can be refused or left waiting past the press, and the
+  // button then never reads Copied (tests-63, #764). So the page counts as focused, clipboard access is granted in the
+  // same grant, which replaces every earlier one, and each write is recorded with its outcome and how long it took.
+  await chrome.send('Emulation.setFocusEmulationEnabled', { enabled: true });
+  await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+    if (location.origin !== ${JSON.stringify(HOSTED)} || !navigator.clipboard) return;
+    const write = navigator.clipboard.writeText.bind(navigator.clipboard);
+    window.__clipboard = [];
+    navigator.clipboard.writeText = (text) => {
+      const entry = { text, outcome: 'waiting', started: performance.now() };
+      window.__clipboard.push(entry);
+      return write(text).then(() => { entry.outcome = 'written'; entry.ms = Math.round(performance.now() - entry.started); }, (error) => { entry.outcome = 'refused: ' + error.message; entry.ms = Math.round(performance.now() - entry.started); throw error; });
+    };
+  })()` });
+  for (const permissions of [['loopbackNetwork', 'localNetwork', 'localNetworkAccess', 'clipboardReadWrite', 'clipboardSanitizedWrite'], ['localNetworkAccess', 'clipboardReadWrite', 'clipboardSanitizedWrite']]) {
     try { await chrome.send('Browser.grantPermissions', { origin: HOSTED, permissions }); break; } catch { /* a name this Chrome does not have */ }
   }
   /** Let every held request through, as the person clicking Allow does. */
@@ -141,6 +156,21 @@ const SHOWN = `JSON.stringify((() => {
     controls: all('button, a').map((control) => control.textContent.trim()),
   };
 })())`;
+
+/**
+ * Press one Copy button as a person does, then see it say Copied and the clipboard hold its words. If it never says
+ * Copied, the failure names what the button says and what each clipboard write did, so a slow or refused write shows.
+ */
+async function pressCopy(chrome, button, words) {
+  await press(chrome, `document.querySelector(${JSON.stringify(button)})`);
+  try {
+    await chrome.waitFor(`document.querySelector(${JSON.stringify(button)}).textContent === 'Copied'`, 5_000); // budget: hang ceiling for one granted clipboard write.
+  } catch (error) {
+    const seen = await chrome.stable(`JSON.stringify({ label: document.querySelector(${JSON.stringify(button)})?.textContent, writes: window.__clipboard ?? null, focused: document.hasFocus() })`);
+    throw new Error(`${error.message}; the button and clipboard show ${seen}`, { cause: error });
+  }
+  assert.equal(await chrome.stable('navigator.clipboard.readText()'), words, `${button}: the clipboard holds the words the button copies`);
+}
 
 /** Open the stand-in page at this address, wait for the open-board state it should settle in, and read it. */
 async function openState(chrome, address, state, shot) {
@@ -196,8 +226,7 @@ test('each open-board state shows alone with its words [N26,H5]', { timeout: 150
     assert.deepEqual(asking.live, ['Waiting for you to click Allow'], 'a live line says the page waits');
     assert.deepEqual(asking.help, [{ text: 'Something not working? Ask your agent“Help me allow Pullboard in my browser.”', copy: 'Help me allow Pullboard in my browser.', border: 'dashed' }], 'a dashed help strip ends the screen with a sentence to copy');
     assert.deepEqual(asking.helpFit, [{ button: 40, oneLine: true }], 'its Copy is the 40 px button the mockup draws, and on a computer the sentence keeps to one line');
-    await press(chrome, "document.querySelector('#local-note .ob-help button')");
-    await chrome.waitFor("document.querySelector('#local-note .ob-help button').textContent === 'Copied'", 5_000); // budget: hang ceiling for one clipboard write.
+    await pressCopy(chrome, '#local-note .ob-help button', 'Help me allow Pullboard in my browser.');
     // The theme toggle in the header turns the page to the other scheme.
     const before = await chrome.stable('document.documentElement.dataset.scheme');
     await press(chrome, "document.getElementById('ob-theme')");
@@ -228,8 +257,7 @@ test('each open-board state shows alone with its words [N26,H5]', { timeout: 150
     assert.deepEqual(absent.agents, [{ text: 'Ask your agent“Help me open my Pullboard board.”', copy: 'Help me open my Pullboard board.', height: 60 }], 'its "or" box asks the agent, at the same height');
     assert.deepEqual(absent.github, [{ text: 'Sign in with GitHub', href: '/auth/github/start', height: 60, background: 'rgb(31, 35, 40)' }], 'one dark 60 px GitHub button');
     assert.deepEqual(absent.live, ['Still looking on this computer'], 'a live line says the page keeps looking');
-    await press(chrome, "document.querySelector('#local-note .ob-cmd button')");
-    await chrome.waitFor("document.querySelector('#local-note .ob-cmd button').textContent === 'Copied'", 5_000); // budget: hang ceiling for one clipboard write.
+    await pressCopy(chrome, '#local-note .ob-cmd button', 'pullboard view');
 
     // Pullboard on this computer speaks another version of the page's protocol: one command updates it, and a dashed
     // strip ends the screen, as on every screen where something can go wrong.
@@ -245,8 +273,7 @@ test('each open-board state shows alone with its words [N26,H5]', { timeout: 150
     assert.deepEqual(update.agents.map((agent) => [agent.text, agent.copy, agent.height]), [['Ask your agent“Help me update Pullboard.”', 'Help me update Pullboard.', 60]], 'its "or" box asks the agent to help update');
     assert.deepEqual(update.help, [{ text: 'Something not working? Ask your agent“Help me update Pullboard.”', copy: 'Help me update Pullboard.', border: 'dashed' }], 'a dashed help strip with a sentence to copy ends the screen');
     assert.deepEqual(update.helpFit, [{ button: 40, oneLine: true }]);
-    await press(chrome, "document.querySelector('#local-note .ob-help button')");
-    await chrome.waitFor("document.querySelector('#local-note .ob-help button').textContent === 'Copied'", 5_000); // budget: hang ceiling for one clipboard write.
+    await pressCopy(chrome, '#local-note .ob-help button', 'Help me update Pullboard.');
     stand.local = null;
 
     // A pairing link on a computer, not signed in: the one way that opens boards from any device.
@@ -255,8 +282,7 @@ test('each open-board state shows alone with its words [N26,H5]', { timeout: 150
     assert.deepEqual(out.github.map((button) => [button.text, button.href, button.height]), [['Sign in with GitHub', '/auth/github/start', 60]]);
     assert.deepEqual(out.help, [{ text: 'Something not working? Ask your agent“Help me open my Pullboard board.”', copy: 'Help me open my Pullboard board.', border: 'dashed' }], 'a dashed help strip with a sentence to copy ends the screen');
     assert.deepEqual(out.helpFit, [{ button: 40, oneLine: true }]);
-    await press(chrome, "document.querySelector('#local-note .ob-help button')");
-    await chrome.waitFor("document.querySelector('#local-note .ob-help button').textContent === 'Copied'", 5_000); // budget: hang ceiling for one clipboard write.
+    await pressCopy(chrome, '#local-note .ob-help button', 'Help me open my Pullboard board.');
 
     // The phone's first screen, drawn by the view from the state #757 provides: one GitHub button, nothing about this computer.
     const phone = await openState(chrome, '?plain-phone#board=' + 'b'.repeat(32) + '&key=k1', 'signed-out', 'open-board-phone');
