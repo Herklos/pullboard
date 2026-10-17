@@ -314,6 +314,149 @@ test('a starter item without a check is refused [S1,I1]', () => {
   assert.deepEqual(readdirSync(empty.repo).filter((entry) => entry !== '.git'), [], 'init writes nothing');
 });
 
+/** An architecture blueprint whose rules name the reference each paraphrases; a fixture, never fetched. */
+const SOURCED = {
+  blueprint: 1, name: 'edge-api', title: 'Edge API', version: 1, kind: 'architecture', by: 'Fixture', prefix: 'EA',
+  rules: [
+    { key: 'EA1', text: 'Every function has an error alarm.', why: 'a quiet failure is found by users first.',
+      source: { name: 'Example Framework', id: 'OPS 8', url: 'https://example.com/framework/ops-8' } },
+    { key: 'EA2', text: 'No function runs past its time limit.', why: 'the platform stops it there.', source: { name: 'Example Lens' } },
+  ],
+  questions: [{ key: 'Q1', ask: 'It runs on', choices: ['AWS', 'Cloudflare'], default: 'AWS' }],
+  items: [{ key: '1', title: 'Every function has an alarm', cites: ['EA1'], criterion: 'A test fails on a function without an alarm.', check: 'true' }],
+};
+
+test('a drafted row records its rule source [S1,I1]', () => {
+  // blueprint add copies each rule's source onto its drafted row as a source field; the row's text
+  // stays the rule and its reason, so the person approves the rule and reads where it came from.
+  const box = freshBoard({ gate: 'true' });
+  writeFileSync(join(box.repo, 'edge-api.json'), `${JSON.stringify(SOURCED)}\n`);
+  const added = json(box, 'blueprint', 'add', 'edge-api.json');
+  const drafted = added.rows.filter((row) => row.status === 'draft');
+  assert.deepEqual(drafted.map((row) => [row.key, row.source]), [['EA1', 'Example Framework OPS 8 https://example.com/framework/ops-8'], ['EA2', 'Example Lens']]);
+  assert.equal(added.rows.find((row) => row.key === 'Q1').source, undefined, 'a question names no source');
+  const source = readFileSync(join(box.repo, 'SPEC.md'), 'utf8');
+  const ea1 = drafted[0].id;
+  assert.ok(source.split('\n').includes(`- ${ea1} [draft, must] Every function has an error alarm. Why: a quiet failure is found by users first. | gate: review | source: Example Framework OPS 8 https://example.com/framework/ops-8`), source);
+  const spec = parseSpec(source);
+  assert.deepEqual(spec.problems, []);
+  const row = spec.rows.find((entry) => entry.id === ea1);
+  assert.equal(row.text, 'Every function has an error alarm. Why: a quiet failure is found by users first.', 'the source is a field, not part of the text');
+  assert.equal(row.source, 'Example Framework OPS 8 https://example.com/framework/ops-8');
+
+  // pullboard spec shows where the row came from: spec check passes, its JSON rows carry the
+  // source, and spec show prints it.
+  const check = box.run('spec', 'check');
+  assert.equal(check.status, 0, check.stdout + check.stderr);
+  const rows = json(box, 'spec', '--json').rows;
+  assert.equal(rows.find((entry) => entry.id === ea1).source, 'Example Framework OPS 8 https://example.com/framework/ops-8');
+  const shown = box.run('spec', 'show', ea1);
+  assert.equal(shown.status, 0, shown.stdout + shown.stderr);
+  assert.match(shown.stdout, /^source: Example Framework OPS 8 https:\/\/example\.com\/framework\/ops-8$/mu);
+  assert.equal(json(box, 'spec', 'show', ea1).row.source, 'Example Framework OPS 8 https://example.com/framework/ops-8');
+
+  // A row with no source parses exactly as before: no source key, and spec show prints none. An
+  // empty source field is an error spec check names.
+  const plain = rows.find((entry) => entry.status === 'pending');
+  assert.equal(Object.hasOwn(plain, 'source'), false, 'a row without a source carries no source key');
+  assert.deepEqual(Object.keys(parseSpec('# S\n\n## G · Goals\n\n- G1 [draft, must] A row. | gate: review\n').rows[0]),
+    ['id', 'status', 'tier', 'text', 'gate', 'serves', 'signers', 'unknown', 'section', 'line'], 'an older row parses unchanged');
+  assert.doesNotMatch(box.run('spec', 'show', plain.id).stdout, /^source:/mu);
+  writeFileSync(join(box.repo, 'SPEC.md'), source.replace(' | source: Example Lens', ' | source: '));
+  const empty = box.run('spec', 'check');
+  assert.equal(empty.status, 1, empty.stdout + empty.stderr);
+  assert.match(empty.stdout, /source names where the row came from/u);
+  writeFileSync(join(box.repo, 'SPEC.md'), source);
+
+  // A bundled architecture blueprint drafts its rows with the source it names.
+  const serverless = json(box, 'blueprint', 'add', 'serverless');
+  for (const rule of readBlueprint('serverless', process.cwd()).rules) {
+    const drafted = serverless.rows.find((entry) => entry.key === rule.key);
+    assert.equal(drafted.source, `${rule.source.name} ${rule.source.id} ${rule.source.url}`, `serverless ${rule.key} keeps its source`);
+  }
+
+  // init --blueprint drafts the same rows with the same sources.
+  const fresh = emptyRepo();
+  writeFileSync(join(box.dir, 'edge-api.json'), `${JSON.stringify(SOURCED)}\n`);
+  const started = fresh.run('init', '--blueprint', join(box.dir, 'edge-api.json'));
+  assert.equal(started.status, 0, started.stdout + started.stderr);
+  const initRows = parseSpec(readFileSync(join(fresh.repo, 'SPEC.md'), 'utf8')).rows.filter((entry) => entry.status === 'draft');
+  assert.deepEqual(initRows.map((entry) => entry.source), ['Example Framework OPS 8 https://example.com/framework/ops-8', 'Example Lens']);
+});
+
+test('an architecture rule without a source is refused [S1,I1]', () => {
+  // Loaded from a file or checked before a save writes one: an architecture blueprint with a rule
+  // that names no source is refused by name, the blueprint's and the rule's.
+  const unsourced = { ...SOURCED, rules: [SOURCED.rules[0], { key: 'EA2', text: 'No function runs past its time limit.', why: 'the platform stops it there.' }] };
+  for (const kind of ['architecture', 'infrastructure']) {
+    assert.throws(() => validateBlueprint({ ...unsourced, kind }, 'edge-api.json'), (error) => {
+      assert.equal(error.code, 'BLUEPRINT_NO_SOURCE');
+      assert.match(error.message, /architecture blueprint edge-api rule EA2 \("No function runs past its time limit\."\) names no source/u);
+      return true;
+    }, `a ${kind} rule without a source is refused`);
+  }
+  // A product, practice or beyond-code rule may still leave its source out.
+  for (const kind of ['product', 'practice', 'beyond-code', undefined]) {
+    assert.equal(validateBlueprint({ ...unsourced, kind }, 'edge-api.json').rules.length, 2, `a ${kind} blueprint needs no source`);
+  }
+  // A source that is not { name, id?, url? } with a web address is refused as a bad blueprint.
+  for (const source of ['Example Framework', { id: 'OPS 8' }, { name: 'Example', url: 'ftp://example.com/x' }, { name: 'Example | Lens' }]) {
+    const value = { ...SOURCED, rules: [{ ...SOURCED.rules[0], source }] };
+    assert.throws(() => validateBlueprint(value, 'edge-api.json'), (error) => error.code === 'BAD_BLUEPRINT' && /rules\[0\]\.source/u.test(error.message), JSON.stringify(source));
+  }
+
+  // blueprint add refuses it with its next step and writes nothing.
+  const box = freshBoard({ gate: 'true' });
+  const spec = readFileSync(join(box.repo, 'SPEC.md'), 'utf8');
+  writeFileSync(join(box.repo, 'unsourced.json'), `${JSON.stringify(unsourced)}\n`);
+  const refused = box.run('blueprint', 'add', 'unsourced.json', '--json');
+  assert.equal(refused.status, 1, refused.stdout + refused.stderr);
+  const error = JSON.parse(refused.stdout).error;
+  assert.equal(error.code, 'BLUEPRINT_NO_SOURCE');
+  assert.match(error.message, /architecture blueprint edge-api rule EA2/u);
+  assert.match(error.next, /source \{ name, id, url \}/u);
+  assert.equal(readFileSync(join(box.repo, 'SPEC.md'), 'utf8'), spec, 'a refused blueprint writes nothing');
+  assert.equal(json(box, 'list', '--all').items.length, 0, 'and files no item');
+
+  // init --blueprint refuses it before writing anything.
+  const empty = emptyRepo();
+  writeFileSync(join(box.dir, 'unsourced.json'), `${JSON.stringify(unsourced)}\n`);
+  const init = empty.run('init', '--blueprint', join(box.dir, 'unsourced.json'), '--json');
+  assert.notEqual(init.status, 0);
+  assert.equal(JSON.parse(init.stdout).error.code, 'BLUEPRINT_NO_SOURCE');
+  assert.deepEqual(readdirSync(empty.repo).filter((entry) => entry !== '.git'), [], 'init writes nothing');
+
+  // Every bundled architecture blueprint names a source for every rule.
+  for (const name of bundledBlueprints()) {
+    const blueprint = readBlueprint(name, process.cwd());
+    if (blueprint.kind !== 'architecture') continue;
+    for (const rule of blueprint.rules) assert.ok(rule.source?.name && rule.source.url, `${name} ${rule.key} names its source`);
+  }
+});
+
+test('infrastructure loads as architecture [S1]', async () => {
+  const { BLUEPRINT_KINDS } = await import('../src/blueprints.js');
+  // The kind is architecture now; the old name is no kind a blueprint is filed under.
+  assert.ok(BLUEPRINT_KINDS.includes('architecture'));
+  assert.equal(BLUEPRINT_KINDS.includes('infrastructure'), false);
+  assert.equal(validateBlueprint({ ...SOURCED, kind: 'infrastructure' }, 'edge-api.json').kind, 'architecture');
+  assert.equal(validateBlueprint({ ...SOURCED, kind: 'architecture' }, 'edge-api.json').kind, 'architecture');
+  assert.throws(() => validateBlueprint({ ...SOURCED, kind: 'cloud' }, 'edge-api.json'), (error) => error.code === 'BAD_BLUEPRINT' && /kind must be one of product, architecture, practice, beyond-code/u.test(error.message));
+
+  // A file that says infrastructure reads, and adds, as architecture.
+  const box = freshBoard({ gate: 'true' });
+  writeFileSync(join(box.repo, 'old.json'), `${JSON.stringify({ ...SOURCED, name: 'old-edge', kind: 'infrastructure' })}\n`);
+  assert.equal(readBlueprint('old.json', box.repo).kind, 'architecture');
+  assert.equal(json(box, 'blueprint', 'add', 'old.json').rows.length, 3);
+
+  // The bundled files that said infrastructure now say architecture, and none says the old name.
+  for (const name of bundledBlueprints()) {
+    const raw = JSON.parse(readFileSync(resolve(import.meta.dirname, `../src/blueprints/${name}.json`), 'utf8'));
+    assert.notEqual(raw.kind, 'infrastructure', `${name} uses the new name`);
+  }
+  assert.deepEqual(['serverless', 'data-pipeline'].map((name) => readBlueprint(name, process.cwd()).kind), ['architecture', 'architecture']);
+});
+
 test('blueprint add files a blueprint as drafts with light and mid starters add accepts [S1,I1]', () => {
   // A light or mid starter carrying its brief, criterion and check is filed on that route, with
   // all three passed to the item unchanged; a strong starter needs no brief.

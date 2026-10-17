@@ -10,18 +10,23 @@
  *   name       "web-app"               required, lowercase letters, digits and dashes
  *   title      "Web app"               required, one line; the section heading
  *   version    1                       required, a positive integer, the blueprint's own version
- *   kind       "product"               optional: product, infrastructure, practice or beyond-code
+ *   kind       "product"               optional: product, architecture, practice or beyond-code;
+ *                                      a file that says infrastructure (the old name) loads as architecture
  *   by         "Pullboard"             optional, who made it
  *   summary    "..."                   optional, one line
  *   prefix     "W"                     optional, the row id prefix it prefers; a free one is used if taken
  *   gate       "npm test"              optional, set in pullboard.json only when it has no gate
- *   rules      [{ key, text, why, tier?, gate? }]          tier must|aim (must), gate (review)
+ *   rules      [{ key, text, why, tier?, gate?, source? }]  tier must|aim (must), gate (review)
+ *              source { name, id?, url? }: the reference the rule paraphrases, such as a standard
+ *              and its numbered practice; the drafted row keeps it as | source: <name> <id> <url>
  *   questions  [{ key, ask, choices, default }]            default is one of choices
  *   items      [{ key, title, cites?, after?, lane?, route?, criterion, brief?, check }]
  *
  * Every starter item carries a criterion and a check, or the blueprint is refused with
  * BLUEPRINT_ITEM_UNCHECKED when it is read or saved: a starter that cannot be verified cannot be
- * accepted. An item's route is light, mid or strong (strong when left out), as pullboard add takes
+ * accepted. Every rule of an architecture blueprint names its source, or the blueprint is refused
+ * with BLUEPRINT_NO_SOURCE when it is read or saved: an architecture rule paraphrases a known-good
+ * reference, so the row it drafts must say which one. An item's route is light, mid or strong (strong when left out), as pullboard add takes
  * it. Its brief, criterion and check pass through to add unchanged, so a light or mid item is filed when it
  * carries what add requires for that route and refused with add's own refusal when it does not.
  * A check is stored on the item and never run during add: no check baseline starts, so nothing a
@@ -40,7 +45,10 @@ import { insertSectionRows, nextRowId } from './spec.js';
 export const BLUEPRINT_FORMAT = 1;
 
 /** The kinds the gallery files blueprints under. */
-export const BLUEPRINT_KINDS = ['product', 'infrastructure', 'practice', 'beyond-code'];
+export const BLUEPRINT_KINDS = ['product', 'architecture', 'practice', 'beyond-code'];
+
+/** Old kind names a blueprint file may still carry, by the kind each loads as. */
+const LEGACY_KINDS = { infrastructure: 'architecture' };
 
 const BUNDLED_DIR = fileURLToPath(new URL('./blueprints/', import.meta.url));
 const NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
@@ -99,7 +107,7 @@ export function readBlueprint(reference, cwd) {
  * @property {string} [summary]
  * @property {string} [prefix]
  * @property {string} [gate]
- * @property {{ key: string, text: string, why: string, tier: string, gate: string }[]} rules
+ * @property {{ key: string, text: string, why: string, tier: string, gate: string, source?: { name: string, id?: string, url?: string } }[]} rules
  * @property {{ key: string, ask: string, choices: string[], default: string }[]} questions
  * @property {{ key: string, title: string, cites: string[], after: string[], lane?: string, route: string, criterion: string, brief: string, check: string }[]} items
  */
@@ -127,7 +135,8 @@ export function validateBlueprint(value, source = 'blueprint') {
   if (typeof value.name !== 'string' || !NAME_RE.test(value.name)) fail('name', 'must be lowercase letters, digits and dashes, such as web-app');
   line('title', value.title);
   if (!Number.isInteger(value.version) || value.version < 1) fail('version', 'must be a positive integer');
-  if (value.kind !== undefined && !BLUEPRINT_KINDS.includes(value.kind)) fail('kind', `must be one of ${BLUEPRINT_KINDS.join(', ')}`);
+  const kind = Object.hasOwn(LEGACY_KINDS, value.kind ?? '') ? LEGACY_KINDS[value.kind] : value.kind;
+  if (kind !== undefined && !BLUEPRINT_KINDS.includes(kind)) fail('kind', `must be one of ${BLUEPRINT_KINDS.join(', ')}`);
   line('by', value.by, { required: false });
   line('summary', value.summary, { required: false });
   line('gate', value.gate, { required: false });
@@ -150,6 +159,16 @@ export function validateBlueprint(value, source = 'blueprint') {
     line(`${at}.why`, rule.why);
     if (rule.tier !== undefined && !['must', 'aim'].includes(rule.tier)) fail(`${at}.tier`, 'must be must or aim');
     line(`${at}.gate`, rule.gate, { required: false });
+    if (rule.source !== undefined) {
+      const source = rule.source;
+      if (!source || typeof source !== 'object' || Array.isArray(source)) fail(`${at}.source`, 'must be an object: { name, id, url }');
+      else {
+        line(`${at}.source.name`, source.name);
+        line(`${at}.source.id`, source.id, { required: false });
+        line(`${at}.source.url`, source.url, { required: false });
+        if (typeof source.url === 'string' && !/^https?:\/\/\S+$/u.test(source.url)) fail(`${at}.source.url`, 'must be one http or https address without spaces');
+      }
+    }
   });
   questions.forEach((question, index) => {
     const at = `questions[${index}]`;
@@ -189,13 +208,43 @@ export function validateBlueprint(value, source = 'blueprint') {
   if (problems.length) {
     throw new Refused('BAD_BLUEPRINT', `${source} is not a valid blueprint: ${problems.slice(0, 5).join('; ')}${problems.length > 5 ? `; and ${problems.length - 5} more` : ''}; fix the file and run pullboard blueprint add again`);
   }
+  refuseUnsourcedRules(value.name, kind, rules);
   refuseUncheckedItems(value.name, items);
   return {
     ...value,
+    ...(kind === undefined ? {} : { kind }),
     rules: rules.map((rule) => ({ ...rule, tier: rule.tier ?? 'must', gate: rule.gate ?? 'review' })),
     questions,
     items: items.map((item) => ({ ...item, cites: item.cites ?? [], after: item.after ?? [], route: item.route ?? 'strong', criterion: item.criterion ?? '', brief: item.brief ?? '' })),
   };
+}
+
+/**
+ * Refuse an architecture blueprint with a rule that names no source, naming the blueprint and the
+ * rule. An architecture rule paraphrases a known-good reference (a standard, a vendor's framework),
+ * so its drafted row must say which one; a rule with no reference has no place in one (#719).
+ *
+ * @param {string} name - The blueprint's name, already checked.
+ * @param {string | undefined} kind - The blueprint's kind, with old names already mapped.
+ * @param {{ key: string, text: string, source?: object }[]} rules
+ * @returns {void}
+ */
+function refuseUnsourcedRules(name, kind, rules) {
+  if (kind !== 'architecture') return;
+  const rule = rules.find((entry) => entry.source === undefined);
+  if (!rule) return;
+  throw new Refused('BLUEPRINT_NO_SOURCE', `architecture blueprint ${name} rule ${rule.key} (${JSON.stringify(rule.text)}) names no source; give every rule of an architecture blueprint the reference it paraphrases as source { name, id, url }, then run pullboard blueprint add again`);
+}
+
+/**
+ * Where a rule came from, as its drafted row's source field carries it: the name, then the id and
+ * the address when the rule gives them, one line.
+ *
+ * @param {{ name: string, id?: string, url?: string }} source
+ * @returns {string}
+ */
+export function sourceText(source) {
+  return [source.name, source.id, source.url].filter((part) => typeof part === 'string' && part.trim()).map((part) => part.trim()).join(' ');
 }
 
 /**
@@ -364,7 +413,7 @@ export function landBlueprint(blueprint, answers) {
  * @param {{ source: string, spec: any, doctrine: any, existingItems: { id: number, title: string, specIds: string[] }[], gate: string }} board
  *   source is SPEC.md's text and spec its parse; doctrine is loadDoctrine's result; existingItems
  *   are the items on the board; gate is pullboard.json's gate now.
- * @returns {{ marked: boolean, resumed: boolean, section: { prefix: string, name: string, isNew: boolean }, rows: { key: string, id: string, status: string, text: string, line: string }[], specRows: string, specAfter: string, ids: Record<string, string>, items: { key: string, title: string, specIds: string[], after: string[], lane?: string, route: string, criterion: string, brief: string }[], existing: Record<string, number>, gate: string | null }}
+ * @returns {{ marked: boolean, resumed: boolean, section: { prefix: string, name: string, isNew: boolean }, rows: { key: string, id: string, status: string, text: string, source?: string, line: string }[], specRows: string, specAfter: string, ids: Record<string, string>, items: { key: string, title: string, specIds: string[], after: string[], lane?: string, route: string, criterion: string, brief: string }[], existing: Record<string, number>, gate: string | null }}
  *   specRows is the text to write before the items (rows and the under-way marker), specAfter the
  *   text once they are all added (the finished marker); existing maps starter keys already on the
  *   board to their item ids.
@@ -405,7 +454,10 @@ export function planBlueprint(blueprint, { source, spec, doctrine, existingItems
       const id = allocate();
       const text = ruleText(rule);
       ids[rule.key] = id;
-      rows.push({ key: rule.key, id, status: 'draft', text, line: `- ${id} [draft, ${rule.tier}] ${text} | gate: ${rule.gate}` });
+      // The rule's source rides on its row as a field, so the text the person approves stays the rule.
+      const source = rule.source ? sourceText(rule.source) : '';
+      rows.push({ key: rule.key, id, status: 'draft', text, ...(source ? { source } : {}),
+        line: `- ${id} [draft, ${rule.tier}] ${text} | gate: ${rule.gate}${source ? ` | source: ${source}` : ''}` });
     }
     for (const question of blueprint.questions) {
       const id = allocate();
