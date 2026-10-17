@@ -1,3 +1,4 @@
+/** @pullboard-test-input source-tree */
 /** Real-process resource queue and lease coverage [Q1,Q2,Q3]. */
 import assert from 'node:assert/strict';
 import { startFixtureChild as spawn, runFixtureChild as spawnSync, reportFixtureChildFailure, runFixtureChild, runFixtureChildAsync, runFixtureGit } from './fixture-child.js';
@@ -12,6 +13,7 @@ import { after, test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { listResources, setResourceCapacity, takeResource } from '../src/resources.js';
 import { checkNeedsBrowser } from '../src/browser-admission.js';
+import { releaseQueueProof } from './resources-release-fixture.js';
 
 const TEMP = [];
 const CHILDREN = new Set();
@@ -236,9 +238,9 @@ function worker(box, { name = 'gate', capacity = 1, scope = 'machine', root = bo
 }
 
 /** Launch a dedicated gate-pool worker carrying browser and queue-priority metadata. */
-function poolWorker(box, { agent, browser = false, item = '', kind = '', landing = false, module = MODULE }) {
+function poolWorker(box, { agent, browser = false, item = '', kind = '', landing = false, module = MODULE, script = POOL_MODULE_WORKER, args }) {
   // module swaps in another resources implementation, such as an older pullboard's, for mixed-version tests.
-  const workerArgs = ['--input-type=module', '-e', POOL_MODULE_WORKER.replace(JSON.stringify(MODULE), JSON.stringify(module)), box.first, agent, String(browser), item, kind, String(landing)];
+  const workerArgs = ['--input-type=module', '-e', script.replace(JSON.stringify(MODULE), JSON.stringify(module)), ...(args ?? [box.first, agent, String(browser), item, kind, String(landing)])];
   const startedAt = performance.now();
   const child = spawn(process.execPath, workerArgs, {
     env: box.env, stdio: ['pipe', 'pipe', 'pipe'],
@@ -942,6 +944,8 @@ test('a line holding an older pullboard waiter keeps arrival order, so mixed ver
   await release(review);
 });
 
+test('the gate pool serves the current release first [C7,V4]', () => releaseQueueProof({ fixture, poolWorker, privateList, event, acquired, release, legacyModule: PRE_RUNNER_MODULE }));
+
 test('queue order follows the machine settings [C7,O5]', async () => {
   const gate = (box) => privateList(box).find(({ name }) => name === 'gate');
   const line = (box) => gate(box).line.map(({ agent, queueClass: listed, agedFrom }) => [agent, listed, agedFrom ?? '']);
@@ -1019,7 +1023,7 @@ test('queue order follows the machine settings [C7,O5]', async () => {
   assert.equal(agingPrinted.status, 0, agingPrinted.stderr);
   assert.match(agingPrinted.stdout, /^gate\.queue\.reviewsFirst: true$/mu, 'pullboard settings prints the reviewsFirst set on this machine');
   assert.match(agingPrinted.stdout, /^gate\.queue\.agingMinutes: 1$/mu, 'pullboard settings prints the agingMinutes set on this machine');
-  assert.deepEqual(JSON.parse(settingsCli(aging, '--json').stdout).settings.gate.queue, { reviewsFirst: true, agingMinutes: 1 });
+  assert.deepEqual(JSON.parse(settingsCli(aging, '--json').stdout).settings.gate.queue, { reviewsFirst: true, currentReleaseFirst: false, agingMinutes: 1 });
   await release(agingHolders[0]);
   assert.equal((await acquired(agingFocused)).acquired, 'aging-focused', 'the aged focused run is admitted before the later submit');
   await release(agingHolders[1]);
