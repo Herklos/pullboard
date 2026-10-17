@@ -1,9 +1,12 @@
 /**
  * The runtime half of gate.browserByLaunch [C7]: a test file the runner admitted without a browser slot
- * (PULLBOARD_TEST_BROWSER_SLOT=none) cannot start a browser, whatever path it takes to one.
+ * (PULLBOARD_TEST_BROWSER_SLOT=none) fails by name when it launches Chrome through the repository's
+ * launch helper (test/chrome-fixture.js), which checks the slot itself; cockpit files always hold one.
  *
- * The runner imports this module in each browser-free test file's process before the test body, and
- * puts it in NODE_OPTIONS so every Node child the file starts installs it too. Installed, it wraps
+ * This module is a best-effort second guard for direct launches. The runner imports it in each
+ * browser-free test file's process before the test body, and puts it in NODE_OPTIONS so Node children
+ * that inherit that environment install it too. A child that strips its environment, a non-Node child,
+ * or a shell running a script file is out of scope and not caught (docs/api.md). Installed, it wraps
  * node:child_process's spawn, spawnSync, exec, execSync, execFile, execFileSync and fork: a call whose
  * executable is a browser (Chrome's known install paths, PULLBOARD_CHROME's value, or a browser basename,
  * directly, through PATH or inside a shell command string) throws BROWSER_SLOT_REQUIRED naming the file,

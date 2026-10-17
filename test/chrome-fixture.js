@@ -142,7 +142,7 @@ async function stopProcessGroup(child, stopped, timeoutMs = CLEANUP_TIMEOUT_MS) 
  * Refuse a Chrome launch from a test file the runner admitted without a browser slot [C7].
  * With gate.browserByLaunch on, the runner marks each file's worker held or none; a launch under none
  * means the classifier missed a launch path, so the file fails here by name before Chrome starts.
- * This is the second layer: src/browser-slot-guard.js refuses any browser spawn under none as well.
+ * src/browser-slot-guard.js also refuses direct browser spawns it can see under none, best effort.
  * Without a marker this is inert.
  */
 export function requireBrowserSlot() {
