@@ -8,6 +8,8 @@
  * read, so a session that starts and stops never swallows a message nobody read.
  */
 import * as store from './board.js';
+import { differFromHead } from './git.js';
+import { SIGNOFFS_FILE } from './spec.js';
 
 /** How many of the newest unread shouts resume names; the rest are a count and a command. */
 export const INBOX_NEWEST = 3;
@@ -87,7 +89,9 @@ function shellWord(text) {
  * committed and now changed is the coordinator's to commit. Every other setup file that differs
  * from HEAD, including a row file init wrote and nobody committed yet, is the person's. Only the
  * setup files are ever named, so an unrelated dirty file never reaches either command. The
- * blueprint trial found resume blaming the person for the coordinator's own applied SPEC.md.
+ * blueprint trial found resume blaming the person for the coordinator's own applied SPEC.md. Any
+ * sign-off receipt spec apply appended (.pullboard/signoffs.jsonl) goes in the coordinator's commit
+ * too, or a signed apply's receipt would never reach the next worktree or clone.
  *
  * @param {{ path: string, how: string, ignored: boolean }[]} differ setup files that differ from HEAD
  * @param {string[]} rowFiles the files `spec apply` writes
@@ -95,8 +99,10 @@ function shellWord(text) {
  * @returns {{ coordinator: { files: string[], command: string } | null, person: { files: string[], command: string } | null }}
  */
 export function commitOwners(differ, rowFiles, root) {
-  const applied = differ.filter(({ path, how }) => how === 'changed' && rowFiles.includes(path));
-  const setup = differ.filter((entry) => !applied.includes(entry));
+  const rows = differ.filter(({ path, how }) => how === 'changed' && rowFiles.includes(path));
+  const setup = differ.filter((entry) => !rows.includes(entry));
+  // A signed apply also appends its receipt; it ships with the rows it signs.
+  const applied = rows.length ? [...rows, ...differFromHead(root, [SIGNOFFS_FILE])] : rows;
   const cd = `cd ${shellWord(root)} &&`;
   /** One `git add` for these files, forced only when git ignores one of them. */
   const add = (entries) => `${cd} git add${entries.some(({ ignored }) => ignored) ? ' -f' : ''} -- ${entries.map(({ path }) => shellWord(path)).join(' ')}`;
@@ -116,7 +122,7 @@ export function commitOwners(differ, rowFiles, root) {
  */
 export function commitOwnerLines(owners) {
   return [
-    ...(owners.coordinator ? [`The coordinator must commit the row file spec apply changed: ${owners.coordinator.command}`] : []),
+    ...(owners.coordinator ? [`The coordinator must commit the row file spec apply changed${owners.coordinator.files.includes(SIGNOFFS_FILE) ? ' and its sign-off receipt' : ''}: ${owners.coordinator.command}`] : []),
     ...(owners.person ? [`The person must commit Pullboard's setup files before agents can use worktrees: ${owners.person.command}`] : []),
   ];
 }

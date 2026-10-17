@@ -1,6 +1,6 @@
 /** Coordinator flow alerts reuse the real Git/SQLite statistics and documented thresholds [N32,R1,R2]. */
 import assert from 'node:assert/strict';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -150,6 +150,30 @@ test('resume asks the coordinator to commit an applied row file [I1,L3]', t => {
     coordinator: { files: ['SPEC.md'], command: commit(mixed, ['SPEC.md']) },
     person: { files: ['pullboard.json'], command: add(mixed, ['pullboard.json']) },
   });
+
+  // A signed apply: the receipt spec apply appended goes in the coordinator's commit with the row.
+  const signed = releaseFixture(t, { freshSetup: true, historyBeforeInit: true });
+  const keyPath = join(signed.root, 'co-signing-key');
+  const keyed = runFixtureChild('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'resume@example.invalid', '-f', keyPath], { encoding: 'utf8' });
+  assert.equal(keyed.status, 0, keyed.failure || keyed.stderr);
+  signed.git(signed.repo, 'config', 'user.signingkey', keyPath);
+  const signer = signed.run(signed.repo, 'spec', 'signers', 'add', '--key', `${keyPath}.pub`, '--by', 'CO');
+  assert.equal(signer.status, 0, signer.failure || signer.stderr || signer.stdout);
+  writeFileSync(join(signed.repo, 'SPEC.md'), `${readFileSync(join(signed.repo, 'SPEC.md'), 'utf8').trimEnd()}\n\n## G · Goals\n- G1 [draft, must] The person signs this row. | gate: true | signers: CO\n`);
+  signed.git(signed.repo, 'add', '-A');
+  signed.git(signed.repo, 'add', '-f', '--', ...['.pullboard/signers', '.pullboard/signers.initial', '.pullboard/first-commit'].filter((file) => existsSync(join(signed.repo, file))));
+  signed.git(signed.repo, 'commit', '-q', '-m', 'chore: set up pullboard');
+  for (const args of [['spec', 'approve', 'G1', '--by', 'CO'], ['spec', 'apply']]) {
+    const ran = signed.run(signed.repo, ...args);
+    assert.equal(ran.status, 0, ran.failure || ran.stderr || ran.stdout);
+  }
+  const receipted = resume(signed);
+  assert.deepEqual(receipted.card.commits.coordinator?.files, ['SPEC.md', '.pullboard/signoffs.jsonl'], 'the receipt spec apply appended is the coordinator\'s to commit with the row');
+  assert.ok(receipted.lines.some((line) => line.startsWith('The coordinator must commit the row file spec apply changed and its sign-off receipt: ')), receipted.lines.join('\n'));
+  const landed = runFixtureChild('sh', ['-c', receipted.card.commits.coordinator.command], { cwd: signed.repo, env: signed.env, encoding: 'utf8' });
+  assert.equal(landed.status, 0, landed.failure || landed.stderr || landed.stdout);
+  assert.equal(signed.git(signed.repo, 'cat-file', '-t', 'HEAD:.pullboard/signoffs.jsonl').trim(), 'blob', 'the printed command commits the receipt, so the next worktree or clone has it');
+  assert.deepEqual(resume(signed).card.commits, { coordinator: null, person: null }, 'nothing is left for either owner');
 });
 
 test('resume says what is new once after an upgrade [N19]', t => {
