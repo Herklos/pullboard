@@ -561,8 +561,32 @@ test('every hosted page state says what it is and what to do next [N26,H5]', { t
     await chrome.send('Page.navigate', { url: HOSTED + '/?list' });
     await chrome.waitFor("location.origin === 'https://app.pullboard.dev' && document.querySelector('#chain')?.textContent.includes('A board the hosted page lists')", 30_000); // budget: hang ceiling for the discovery, one round trip and the first board read.
     const list = JSON.parse(await chrome.stable(`JSON.stringify({ note: document.querySelector('#local-note').hidden, ways: document.querySelector('#ways-in').hidden, heading: document.querySelector('#proj-list .proj.on .pname')?.textContent, source: document.querySelector('#proj-list .proj.on .src')?.textContent, tab: document.querySelector('.tab.on')?.textContent, step: document.querySelector('#new-item').getClientRects().length > 0, side: document.querySelector('#side-hint').hidden, state: JSON.parse(${shown}) })`));
-    await proofShot(chrome, 'hosted-list-phone', 390);
-    await proofShot(chrome, 'hosted-list', 1280);
+    // Normal-list next actions use the view styles at both sizes and in both themes (outside review 950).
+    for (const width of [390, 1280]) {
+      await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
+      for (const theme of ['light', 'dark']) {
+        await chrome.stable(`document.documentElement.dataset.theme = '${theme}'`);
+        const controls = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+          const probe = document.createElement('button'); probe.textContent = 'UA reference'; document.body.append(probe);
+          const signature = (element) => { const style = getComputedStyle(element); return {
+            appearance: style.appearance, background: style.backgroundColor, radius: style.borderRadius,
+            border: style.borderTopStyle, width: style.borderTopWidth, padding: style.padding,
+          }; };
+          const baseline = signature(probe);
+          const actions = [...document.querySelectorAll('#detail button[data-shout], #detail button[data-new]')]
+            .filter((element) => element.getClientRects().length).map((element) => ({ text: element.textContent,
+              style: signature(element), height: element.getBoundingClientRect().height }));
+          probe.remove(); return { baseline, actions };
+        })())`));
+        assert.equal(controls.actions.length, 2, `both next actions appear at ${width}px in ${theme}`);
+        for (const action of controls.actions) {
+          assert.notDeepEqual(action.style, controls.baseline, `${action.text} uses the view styles at ${width}px in ${theme}`);
+          if (width === 390) assert.ok(action.height >= 44, `${action.text} retains a phone touch target in ${theme}`);
+        }
+      }
+      await proofShot(chrome, width === 390 ? 'hosted-list-phone' : 'hosted-list', width);
+    }
+    await chrome.stable('delete document.documentElement.dataset.theme');
     assert.deepEqual({ note: list.note, ways: list.ways, side: list.side }, { note: true, ways: true, side: true }, 'the list shows with no state, panel or hint over it');
     assert.equal(list.heading, 'hosted-states', 'the sidebar names the board shown');
     assert.equal(list.source, 'this computer', 'with a quiet label for where it comes from');

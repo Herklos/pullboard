@@ -431,6 +431,7 @@ input:disabled { background: var(--surface-2); color: var(--ink-muted); }
 .rowref { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; font-size: 13px; padding: 3px 0; }
 .rowref code { font-weight: 600; }
 .links { display: flex; flex-wrap: wrap; gap: 6px; }
+.links > button { min-height: var(--tap); }
 .links-item { border: 1px solid var(--line); background: var(--surface-2); border-radius: 6px; padding: 3px 9px; cursor: pointer; font-size: 12.5px; min-height: var(--tap); display: flex; align-items: center; }
 
 .panel-form { display: grid; gap: 10px; }

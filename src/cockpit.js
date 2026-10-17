@@ -2356,7 +2356,7 @@ function render() {
       + '<div><h3>People and commits</h3><dl class="kv">' + (item.owner && s === 'building' ? '<dt>holding</dt><dd>' + esc(agentName(item.owner)) + '</dd>' : '') + (item.builtBy ? '<dt>built by</dt><dd>' + esc(agentName(item.builtBy)) + '</dd>' : '') + (item.verifiedBy ? '<dt>verified by</dt><dd>' + esc(agentName(item.verifiedBy)) + '</dd>' : '') + (item.commit ? '<dt>commit</dt><dd><code>' + esc(item.commit.slice(0, 12)) + '</code></dd>' : '') + (item.merged ? '<dt>merged</dt><dd><code>' + esc(item.merged.slice(0, 12)) + '</code></dd>' : '') + (item.blockedBy.length ? '<dt>waits on</dt><dd class="waits-on">' + item.blockedBy.map((id) => '<span class="wait-unit"><a class="ref" href="' + esc(itemAddress(id)) + '" data-go="item:' + id + '">#' + id + '</a></span>').join(', ') + '</dd>' : '') + '</dl></div>'
       + (back && !earlier.length ? '' : '<div><h3>' + (back ? 'Earlier verdicts' : 'Verdicts') + '</h3>' + (earlier.length ? earlier.map((v) => verdictHtml(v, titles)).join('') : '<div class="muted">None yet.</div>') + '</div>')
       + '<div><h3>History</h3>' + timeline(item) + '</div>'
-      + '<div class="links"><button data-shout="' + esc(item.lane) + '" data-about="' + item.id + '" type="button">Shout the ' + esc(item.lane) + ' lane about #' + item.id + '</button><button data-new type="button">New item</button></div></div>';
+      + '<div class="links"><button class="ghost" data-shout="' + esc(item.lane) + '" data-about="' + item.id + '" type="button">Shout the ' + esc(item.lane) + ' lane about #' + item.id + '</button><button class="go" data-new type="button">New item</button></div></div>';
   }
 
   // Every #id in a shout that names an item opens it, whatever stands next to it. The ids are found in

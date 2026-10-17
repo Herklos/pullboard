@@ -278,6 +278,12 @@ function recordEventContract() {
   editItem(board, first, { agentId: coordinator, brief: 'Files: docs/formats.md\nTest: docs/formats.test.js', route: 'mid', criterion: 'Changed', check: 'node test' });
   const dependency = addItem(board, { by: coordinator, lane: 'docs', title: 'Dependency example' });
   editItem(board, first, { agentId: coordinator, after: [dependency] });
+  const implying = appendFact(board, first, { agentId: coordinator, kind: 'decision', text: 'Dependency changes', implies: [dependency] });
+  appendFact(board, first, { agentId: coordinator, kind: 'supersession', text: 'Dependency changes again', supersedes: implying.id });
+  const asked = shout(board, { from: builder, to: coordinator, text: 'implying decision', lanes: ['docs', 'tests'], decision: true });
+  const implyingAnswer = answerDecision(board, asked, { agentId: coordinator, text: 'yes', lanes: ['docs', 'tests'], implies: [dependency] });
+  const askedAgain = shout(board, { from: builder, to: coordinator, text: 'superseding decision', lanes: ['docs', 'tests'], decision: true });
+  answerDecision(board, askedAgain, { agentId: coordinator, text: 'no', lanes: ['docs', 'tests'], supersedes: implyingAnswer });
   editItem(board, first, { agentId: coordinator, after: [] });
   holdItem(board, first, { agentId: coordinator, reason: 'fixture item hold' });
   releaseItemHold(board, first, { agentId: coordinator });
@@ -293,7 +299,7 @@ function recordEventContract() {
   const acceptedCommit = 'a'.repeat(40);
   submit(board, first, { agentId: builder, commit: acceptedCommit, tree: 'b'.repeat(40), files: ['docs/formats.md'], policyCommit: 'a'.repeat(40) });
   reserveReview(board, first, { agentId: reviewer, leaseMs: 60_000, policy: 'agents' });
-  verify(board, first, { agentId: reviewer, decision: 'ACCEPT', reason: ACCEPT_REASON, note: 'checked the example', head: acceptedCommit, digest: 'second', policy: 'agents' });
+  verify(board, first, { agentId: reviewer, decision: 'ACCEPT', reason: ACCEPT_REASON, note: 'checked the example', head: acceptedCommit, digest: 'second', policy: 'agents', implies: [dependency] });
   merged(board, first, { agentId: coordinator, commit: 'c'.repeat(40) });
   const batch = recordLandingBatch(board, { agentId: coordinator, batch: { version: 1, id: 'format-example', base: 'a'.repeat(40), tip: 'c'.repeat(40),
     root: '/landing', branch: 'refs/heads/main', state: 'pushed', owner: 'format-example', logPath: '/landing.log', items: [{ id: first, commit: acceptedCommit, merge: 'c'.repeat(40) }] } });
@@ -305,7 +311,7 @@ function recordEventContract() {
   claim(board, rejected, { agentId: builder, lane: 'docs', leaseMs: 60_000, freeze: freeze('rejected') });
   const rejectedCommit = 'd'.repeat(40);
   submit(board, rejected, { agentId: builder, commit: rejectedCommit, tree: 'e'.repeat(40) });
-  verify(board, rejected, { agentId: reviewer, decision: 'REJECT', reason: 'TEST_FAILURE', note: 'the fixture failed', head: rejectedCommit, digest: 'rejected', policy: 'agents' });
+  verify(board, rejected, { agentId: reviewer, decision: 'REJECT', reason: 'TEST_FAILURE', note: 'the fixture failed', head: rejectedCommit, digest: 'rejected', policy: 'agents', implies: [dependency] });
 
   const corrected = addItem(board, { by: coordinator, lane: 'docs', title: 'Corrected live claim' });
   claim(board, corrected, { agentId: builder, lane: 'docs', leaseMs: 60_000, freeze: freeze('before-correction') });
