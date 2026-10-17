@@ -13,5 +13,8 @@
   ],
   "questions": [
     { "key": "Q1", "ask": "Tests run with", "choices": ["Vitest", "Jest", "pytest", "Something else"], "default": "Vitest" }
+  ],
+  "items": [
+    { "key": "1", "title": "Find a flaky test and make it deterministic", "cites": ["TR1", "TR2"], "criterion": "A test that failed in repeated runs of the unchanged suite is found, named in the submit note, and fixed so the suite passes ten runs in a row with no sleep or wall-clock wait. Before the fix, ten repeated runs of npm test fail at least once.", "brief": "Files:\n- the flaky test and the code it waits on\nTest:\n- run npm test twenty times with nothing changed to find a test that fails some of the time (TR2)\n- replace its sleep or wall-clock wait with a fake clock or an awaited event (TR1), then run the check", "check": "set -e; for run in 1 2 3 4 5 6 7 8 9 10; do npm test; done" }
   ]
 }

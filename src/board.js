@@ -10,6 +10,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { boardNotWritable } from './board-access.js';
 import { briefFiles, briefSections } from './brief.js';
 import { COORDINATOR } from './config.js';
 import { ENGINE_VERSION, GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, effectiveGuards, storeTriggers } from './machine.js';
@@ -192,7 +193,7 @@ export function openBoard(file, clock = systemClock, { isMain } = {}) {
         boardVersion = current.prepare('PRAGMA user_version').get().user_version;
         logVersion = readEventLogVersion(current);
       } catch (error) {
-        throw boardBusyError(file, startedAt, error);
+        throw boardNotWritable(file, boardBusyError(file, startedAt, error));
       } finally {
         current?.close();
       }
@@ -223,7 +224,7 @@ export function openBoard(file, clock = systemClock, { isMain } = {}) {
     return board;
   } catch (error) {
     try { db?.close(); } catch {}
-    throw boardBusyError(file, startedAt, error);
+    throw boardNotWritable(file, boardBusyError(file, startedAt, error));
   }
 }
 
