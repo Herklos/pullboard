@@ -251,6 +251,7 @@ export function tellVerdictImplications(board, log, id, { seed, implies }) {
  * @param {(by: string, itemId: number, detail: object) => void} log appends one fact event
  * @param {number} answerId the new answer's shout id
  * @param {{ seed?: string, implies?: number[], supersedes?: number | null, from: string, person: string }} options
+ * @returns {number} the answer's id, so the caller records and tells in one step
  */
 export function tellAnswerImplications(board, log, answerId, { seed, implies, supersedes, from, person }) {
   const named = checkImplies(board, implies);
@@ -259,6 +260,7 @@ export function tellAnswerImplications(board, log, answerId, { seed, implies, su
   const ids = impliesSeed(seed);
   writeImplied(log, { seed: ids, decision, implies: named });
   if (replaced) writeSuperseded(log, { seed: ids, old: answerDecisionRef(replaced), next: decision, implies: impliedItems(board, answerDecisionRef(replaced)) });
+  return answerId;
 }
 
 /**

@@ -88,7 +88,9 @@ function fulfilsIntent(record, move) {
     && (args.evidence === undefined ? value.evidence == null : value.evidence?.kind === args.evidence
       && value.evidence.outcome === (args.outcome ?? '') && value.evidence.item === Number(args.item)
       && /^[0-9a-f]{40,64}$/u.test(args.commit ?? '') && value.evidence.commit === args.commit);
-  if (intent.verb === 'answer') return value === intent.item && options?.asPerson === true && options.channel === 'view' && options.text === args.text;
+  // Every effect an answer can carry is bound to the request: no implied items or superseded answer the phone did not name.
+  if (intent.verb === 'answer') return value === intent.item && options?.asPerson === true && options.channel === 'view' && options.text === args.text
+    && JSON.stringify(options.implies ?? []) === JSON.stringify(args.implies ?? []) && (options.supersedes ?? null) === (args.supersedes ?? null);
   if (intent.verb === 'hold') return value === args.lane && options?.asPerson === true && options.channel === 'view'
     && (args.off || options.reason === (args.reason ?? ''));
   const rows = value?.decisions;
