@@ -60,6 +60,8 @@ Work
                                         with --criterion and a brief, --check is needed below strong
   pullboard edit <id> [--brief "..." | --brief-file <file>] [--route light|mid|strong] [--criterion "..."] [--check "..."]
                 [--wait]                wait for a new check's baseline; otherwise it runs in the background
+                [--reason "what the old bar got wrong"]   needed to change the criterion or check of an item
+                                        that was ever claimed; show and stats list each correction
   pullboard escalate <id> --note "what was tried and how it failed"   hand it one tier up
   pullboard run --agent "<command>" [--attempts 3] [--minutes 15] [--items N] [--wait M]
                                         build routed items unattended in this worktree: the agent command reads

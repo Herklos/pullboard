@@ -22,6 +22,8 @@ An item's HTTP detail, and each item in the full board state, include `check` an
 
 `pullboard stats [--since <date>] --json` returns `{version: 1, stats: {...}}` from the append-only event log. `submissions` and `rejections` count moves, including repeated attempts; `rejectionShare` is rejections divided by submissions (zero when the window has no submissions). `merged` counts distinct items with a merge move; `mergedWithoutAccept` counts those whose merge lacks an earlier acceptance of the latest submitted commit. That audit uses earlier history even when the acceptance falls before the selected window. Current item and verdict rows do not replace event evidence.
 
+`stats.bars` counts bar corrections, keyed by agent: `{corrections, barRejects, buildRejects}`. A correction is an `edit --criterion` or `--check` on an item that was ever claimed. It must carry `--reason "what the old bar got wrong"` (HTTP `args.reason`); without one it is refused with `BAR_REASON`. A correction that follows the item's newest, unexplained reject marks that reject as caused by the bar, counted to the correcting agent; every other reject counts to the build, under the agent who added the item. Text `stats` prints one `bars:` line per agent, and text `show` prints each correction with its reason.
+
 `stats.flow` adds the flow through the board:
 
 - `asOf` is the ISO UTC timestamp of this observation, shared by every queue age.
