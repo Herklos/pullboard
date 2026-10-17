@@ -1,3 +1,4 @@
+/** @pullboard-test-input source-tree */
 /** Cockpit needs checks, using the shared real-board fixtures [N26]. */
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -8,6 +9,54 @@ import { test } from 'node:test';
 import { SPEC, machine, project, build, sendBack, startView, styleOf, element, openPage, projectRows, agentEntries, needEntries, itemRow, shoutNameText, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, chooseFilter, boardId, boardOf, fetchLive, serveFolder } from './fixture.js';
 import { cockpitPage } from '../../src/cockpit.js';
 import { personNeeds } from '../../src/needs.js';
+
+test('every Needs-you surface follows the shared builder [N26,A9]', async () => {
+  const box = machine();
+  const alpha = project(box, 'builder substitution', `${SPEC}- G3 [pending] Raw board question. | gate: review\n- G4 [draft, aim] Raw board draft. | gate: review\n`);
+  box.run(alpha.repo, 'shout', 'person', 'Raw board decision?', '--decision');
+  box.run(alpha.repo, 'hold', 'web', '--reason', 'Raw board hold');
+  const view = await startView(box);
+  try {
+    const page = await openPage(view);
+    const calls = [
+      { kind: 'decision', id: 701, ref: 'reviewer', text: 'Builder decision one?', what: 'decision' },
+      { kind: 'decision', id: 702, ref: 'reviewer', text: 'Builder decision two?', what: 'decision' },
+      { kind: 'pending', id: 'S701', ref: 'S701', text: 'Builder question one.', what: 'answer in SPEC.md' },
+      { kind: 'pending', id: 'S702', ref: 'S702', text: 'Builder question two.', what: 'answer in SPEC.md' },
+      { kind: 'hold', id: 'builder-lane', ref: 'builder-lane', text: 'Builder hold.', what: 'lane held by builder' },
+      { kind: 'draft', id: 'drafts', count: 7, ref: '7', text: 'draft spec rows to approve or drop', what: 'review in SPEC.md', target: 'tab:spec' },
+    ];
+    assert.deepEqual(JSON.parse(page.run('JSON.stringify(personNeeds(data.project).map(row => row.kind))')),
+      ['decision', 'pending', 'hold', 'draft'], 'the real raw board disagrees with the substituted list and counts');
+    await page.run(`globalThis.builderCalls = ${JSON.stringify(calls)}; personNeeds = () => builderCalls; refresh();`);
+    assert.deepEqual(JSON.parse(page.run('JSON.stringify(projectNeeds(data.project))')), calls,
+      'the combined-project list follows exactly the substituted builder');
+    assert.deepEqual(needEntries(page.show('needs')), [
+      ['decide:701', null, 'Builder decision one?', 'a decision, asked by reviewer', 'decide'],
+      ['decide:702', null, 'Builder decision two?', 'a decision, asked by reviewer', 'decide'],
+      ['spec:S701', 'S701', 'Builder question one.', 'an open question in SPEC.md', 'answer'],
+      ['spec:S702', 'S702', 'Builder question two.', 'an open question in SPEC.md', 'answer'],
+      ['tab:shouts', 'builder-lane', 'Builder hold.', 'lane held by builder', 'release'],
+      ['tab:spec', '7', 'draft spec rows to approve or drop', 'Spec rows waiting on you', 'review'],
+    ], 'the actual panel follows all returned calls, their order and draft multiplicity');
+    assert.equal(page.element('needs').hidden, false);
+    assert.deepEqual(JSON.parse(page.run('JSON.stringify((({decisions,pending,holds,drafts}) => ({decisions,pending,holds,drafts}))(boardSummary({},data.project)))')),
+      { decisions: 2, pending: 2, holds: 1, drafts: 7 }, 'summary counts come from the substituted builder');
+    assert.equal(projectRows(page.show('proj-list')).find(row => row.root === alpha.repo)?.needs, '12',
+      'the refreshed sidebar counts the same calls, including all seven draft rows');
+    assert.equal(page.run('document.title'), '(12) builder substitution · Pullboard');
+    await page.run('builderCalls = []; refresh();');
+    assert.deepEqual(JSON.parse(page.run('JSON.stringify(projectNeeds(data.project))')), []);
+    assert.deepEqual(needEntries(page.show('needs')), [], 'the panel clears when the shared builder returns no calls');
+    assert.equal(page.element('needs').hidden, true);
+    assert.deepEqual(JSON.parse(page.run('JSON.stringify((({decisions,pending,holds,drafts}) => ({decisions,pending,holds,drafts}))(boardSummary({},data.project)))')),
+      { decisions: 0, pending: 0, holds: 0, drafts: 0 });
+    assert.equal(projectRows(page.show('proj-list')).find(row => row.root === alpha.repo)?.needs, '');
+    assert.equal(page.run('document.title'), 'builder substitution · Pullboard');
+  } finally {
+    await view.stop();
+  }
+});
 
 test("the page's Needs-you comes from the shared builder [N26]", { timeout: 180_000 }, async (t) => { // budget: hang ceiling for private board/API setup and the two real browser modes, not a throughput claim.
   const box = machine();
