@@ -91,6 +91,7 @@ Work
                                         append an observation or a holder/coordinator judgement to its thread
                                         --implies 12,13: each named item gets a fact citing this decision,
                                         and is told again when the decision is superseded
+                                        the person adds --cause <key> --never-again --as person: rigor lists it at once
   pullboard why <id>                    the decisions that imply an item, newest first, and what superseded them
   pullboard next [--wait <minutes>]     offer an eligible review when reviews pile up, otherwise claim work
   pullboard next --build                claim a build explicitly, recording a skipped review offer
@@ -105,7 +106,8 @@ Work
   pullboard release <id> [--note "why"]  hand it back; a review release needs a one-line reason
   pullboard submit <id>                 needs a clean tree, item check and affected tests green at HEAD (alias: done)
   pullboard verify <id> accept --note "what you broke or which edge you tried, and what happened"
-  pullboard verify <id> reject --reason TEST_FAILURE --note "what failed"
+  pullboard verify <id> reject --reason TEST_FAILURE --note "what failed" [--cause <key>]
+                                        a cause is test:<file>::<title>, refusal:<CODE>, row:<id> or doctrine:<id>
                                         a verdict takes --implies <ids>; a later verdict on the item supersedes it
                                         any --note can be --note-file <file>, which keeps quotes, $ and backticks intact
   pullboard shout <lane|agent|person|all> <text>  pullboard inbox
@@ -135,7 +137,7 @@ Coordinator
   pullboard merged <id> <commit>        record where verified work landed
   pullboard withdraw <id> <reason>      drop an item nobody should build
   pullboard refreeze <id>               adopt a corrected criterion or changed spec rows
-  pullboard reopen <id> --note "why"    return a submission for criterion correction without a verdict
+  pullboard reopen <id> --note "why" [--cause <key>]   return a submission for criterion correction without a verdict
   pullboard hold <lane> --reason "..."   pause a lane: next there claims nothing and names the reason
   pullboard hold <id> "reason"          hold one item so next skips it
   pullboard hold <lane|id> --off        lift a lane or item hold
@@ -172,6 +174,8 @@ Receipts
                                         when that queue is empty, the action says none waiting or waits for open work
   pullboard ledger                      markdown: what was built, by whom, verified by whom
   pullboard log [id]                    every move, in order
+  pullboard rigor                       failure causes that repeated: on 2 items, or 1 item at 2 commits;
+                                        each with its items and whether it reads as work, product or both
 
 Spec
   pullboard spec --json                 parsed SPEC.md and doctrine rows as JSON
@@ -236,7 +240,7 @@ const HELP_EXAMPLES = {
   status: 'pullboard status', view: 'pullboard view', digest: 'pullboard digest --out briefing.md', mcp: 'pullboard mcp', stats: 'pullboard stats --since 2026-10-08', log: 'pullboard log 12', ledger: 'pullboard ledger',
   relay: 'pullboard relay on --all', 'relay recover': 'pullboard relay recover --skip 12',
   'lane add': 'pullboard lane add web --owns apps/web/', lane: 'pullboard lane add web --owns apps/web/',
-  roadmap: 'pullboard roadmap', milestone: 'pullboard milestone add "0.7.0" --items 12,13',
+  roadmap: 'pullboard roadmap', rigor: 'pullboard rigor', milestone: 'pullboard milestone add "0.7.0" --items 12,13',
   'milestone items': 'pullboard milestone items "0.7.0" --add 14',
   runner: 'pullboard runner add studio --slots 2 --browser 1', 'runner add': 'pullboard runner add studio --slots 2 --browser 1',
   edit: 'pullboard edit 12 --brief "Add the upload page"', release: 'pullboard release 12',

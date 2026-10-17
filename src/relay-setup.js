@@ -71,6 +71,20 @@ function projectBoard(root) {
   try { return store.boardId(board); } finally { store.closeBoard(board); }
 }
 
+/**
+ * Open the credential the phone sealed to this machine's reply key and link with it. relayOn
+ * uploads the sealed snapshot, then wraps the board key to each paired phone, so the key leaves
+ * this machine only sealed to the phone the person approved from.
+ */
+async function finishApprovedLink(project, pending, source, approval, io) {
+  const privateKey = await restoreLinkReply(pending.replyKey);
+  const result = await openApproval(privateKey, JSON.parse(Buffer.from(approval.response, 'base64url').toString('utf8')), pending.context, 'reply');
+  const credential = { ...result.credential, account: pending.context.account, url: source.url };
+  const linked = await relayOn(project, source.url, io, { credential, quiet: true, strict: true });
+  updateRelayMachine(state => { state.approvals = state.approvals.filter(entry => entry.context.id !== pending.context.id); });
+  return linked;
+}
+
 /** Link a new project only after the paired phone explicitly approves its one durable proposal. */
 export async function autoLinkProject(root, io) {
   const machine = readRelayMachine();
@@ -111,11 +125,8 @@ export async function autoLinkProject(root, io) {
       if (announce) io.err(approvalWait(name, pending, machine.devices) + '; local work continues.');
       return;
     }
-    const privateKey = await restoreLinkReply(pending.replyKey);
-    const result = await openApproval(privateKey, JSON.parse(Buffer.from(document.approval.response, 'base64url').toString('utf8')), pending.context, 'reply');
-    const credential = { ...result.credential, account: pending.context.account, url: source.url };
-    await relayOn(project, source.url, io, { credential, quiet: true, strict: true });
-    updateRelayMachine(state => { state.approvals = state.approvals.filter(entry => entry.context.id !== pending.context.id); });
+    await finishApprovedLink(project, pending, source, document.approval, io);
+    io.err('linked: ' + name);
   } catch (error) {
     if (pending) {
       warnPhoneApproval(pending, error, io, 'Local registration is complete; run pullboard relay on --all explicitly to link this project.');
@@ -183,7 +194,7 @@ export async function revokeRelayDevice(deviceId, io) {
 }
 
 /** Link non-excluded registry entries and report an explicit outcome for every registered project. */
-async function linkProjects(session, io, { onBoardOutcome } = {}) {
+async function linkProjects(session, io, { onBoardOutcome, waiting = new Set() } = {}) {
   const machine = readRelayMachine();
   const linked = [];
   const failed = [];
@@ -194,6 +205,8 @@ async function linkProjects(session, io, { onBoardOutcome } = {}) {
       io.say(`Did not link ${project.name}: it is excluded from automatic linking on this machine.`);
       continue;
     }
+    // A board whose link card is on the phone waits for that tap; see waitForLinkApprovals.
+    if (waiting.has(project.root)) continue;
     try {
       const result = await relayOn(project.root, session.url, io, { session, quiet: true, strict: true });
       linked.push({ project: project.name, root: project.root, board: result.board });
@@ -207,6 +220,67 @@ async function linkProjects(session, io, { onBoardOutcome } = {}) {
     }
   }
   io.say(`Linked ${linked.length} of ${projects.length} registered ${projects.length === 1 ? 'board' : 'boards'}.`);
+  return { linked, failed };
+}
+
+/** Name the published, unexpired phone link cards this run can wait for on a phone already paired. */
+function waitingLinkApprovals(session) {
+  const machine = readRelayMachine();
+  if (!machine.devices.some(device => device.account === session.account && device.url === session.url)) return [];
+  const registered = new Set(listApiProjects().map(project => project.root));
+  return machine.approvals.filter(entry => {
+    if (!entry.published || Date.now() >= entry.context.expires || entry.context.account !== session.account) return false;
+    if (machine.excluded.includes(entry.root) || !registered.has(entry.root)) return false;
+    let source;
+    try { source = relayMachineContext(entry.publisherRoot); } catch { return false; }
+    return Boolean(source?.token?.startsWith('pm_')) && source.url === session.url;
+  });
+}
+
+/**
+ * Keep this foreground run open until the phone answers each waiting link card, then link that
+ * board in the same run. Without this wait the phone that just approved sees a board it cannot
+ * read until the computer happens to run another command (walkthrough-090 issue 15).
+ */
+async function waitForLinkApprovals(waiting, io, { signal } = {}) {
+  const linked = [];
+  const failed = [];
+  const name = root => listApiProjects().find(project => project.root === root)?.name ?? root;
+  let open = [...waiting];
+  for (const pending of open) {
+    io.say('waiting for phone approval: ' + name(pending.root) + '; tap Link project on your phone before ' + new Date(pending.context.expires).toISOString() + '.');
+  }
+  let interrupted = false;
+  /** Stop waiting without undoing a link; the next command still finishes an approved card. */
+  const stop = () => { interrupted = true; };
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
+  try {
+    while (open.length && !signal?.aborted && !interrupted) {
+      for (const pending of [...open]) {
+        if (signal?.aborted || interrupted) break;
+        const project = name(pending.root);
+        try {
+          if (Date.now() >= pending.context.expires) throw new Refused('PHONE_APPROVAL_EXPIRED', 'Link approval expired; run pullboard relay on --all to link this board.');
+          const source = relayMachineContext(pending.publisherRoot);
+          const document = await relayDeviceRequest(source, '/api/v1/devices/approvals/' + pending.context.id, { signal }, io);
+          if (document.approval.state === 'expired') throw new Refused('PHONE_APPROVAL_EXPIRED', 'Link approval expired; run pullboard relay on --all to link this board.');
+          if (document.approval.state !== 'approved') continue;
+          const result = await finishApprovedLink(pending.root, pending, source, document.approval, io);
+          linked.push({ project, root: pending.root, board: result.board });
+          io.say('linked: ' + project);
+        } catch (error) {
+          if (signal?.aborted && error.code === 'OAUTH_CANCELLED') break;
+          const reason = error instanceof Refused ? error.message.replace(/^\[[A-Z][A-Z0-9_]*\] /u, '') : 'Restore this registered project and retry.';
+          failed.push({ project, root: pending.root, reason });
+          io.err(`not linked: ${project}; ${reason}`);
+        }
+        open = open.filter(entry => entry !== pending);
+      }
+      if (open.length) await waitForPairingPoll(signal);
+    }
+  } finally { process.off('SIGINT', stop); process.off('SIGTERM', stop); }
+  for (const pending of open) io.say('stopped waiting for phone approval: ' + name(pending.root) + '; after you tap Link project, the next pullboard command on this computer finishes the link.');
   return { linked, failed };
 }
 
@@ -330,12 +404,18 @@ export async function relayOnAll(address, io, { signal, onPairingURL, onSignIn, 
   // From this synchronous commit point onward the first board-link attempt is underway; later
   // cancellation must not claim that already-started link writes were rolled back.
   onLinking?.();
-  updateRelayMachine(state => { state.autoLink = true; state.owner = { account: session.account, url: session.url }; state.approvals = []; });
-  const result = await linkProjects(session, io, { onBoardOutcome });
+  // The view's sign-in links every board itself; a terminal run waits for cards already on the phone.
+  const waiting = onPairingURL ? [] : waitingLinkApprovals(session);
+  const waitingIds = new Set(waiting.map(entry => entry.context.id));
+  updateRelayMachine(state => { state.autoLink = true; state.owner = { account: session.account, url: session.url }; state.approvals = state.approvals.filter(entry => waitingIds.has(entry.context.id)); });
+  const result = await linkProjects(session, io, { onBoardOutcome, waiting: new Set(waiting.map(entry => entry.root)) });
   const devices = readRelayMachine().devices.filter(device => device.account === session.account && device.url === session.url);
   if (devices.length) io.say('Your phone is already paired; the linked boards appear there.');
   const pairing = devices.length || !result.linked.length ? { paired: devices.length > 0 }
     : await pairFirstDevice(session, result.linked[0].board, result.linked, io, { signal, onPairingURL });
+  const approved = await waitForLinkApprovals(waiting, io, { signal });
+  result.linked.push(...approved.linked);
+  result.failed.push(...approved.failed);
   return { ...result, ...pairing, autoLink: true };
 }
 

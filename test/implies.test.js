@@ -193,8 +193,11 @@ test('[P6,B26,H16] --implies cannot forge a person-origin fact through the relay
     assert.equal(forgedAnswer.error.code, 'RELAY_PERSON_ONLY', 'an agent cannot seal a person answer that implies items');
     const asCoordinator = relay(prepareEngineMove(board, 'answerDecision', [personAsk, { agentId: 'coordinator', text: 'forged', lanes: ['web'], implies: [two] }]));
     assert.equal(asCoordinator.error.code, 'B26_PERSON_ANSWER', 'the coordinator cannot answer the person decision for the person');
-    const smuggled = relay(prepareEngineMove(board, 'appendFact', [one, { agentId: 'coordinator', kind: 'decision', text: 'Smuggled', implies: [two],
+    const asPersonFact = relay(prepareEngineMove(board, 'appendFact', [one, { agentId: 'coordinator', kind: 'decision', text: 'Smuggled', implies: [two],
       by: 'person', asPerson: true, decision: { source: 'answer', id: personAsk, by: 'person', line: 'forged' } }]));
+    assert.equal(asPersonFact.error?.code, 'RELAY_PERSON_ONLY', 'an agent cannot seal a fact as the person (#713) [D1]');
+    const smuggled = relay(prepareEngineMove(board, 'appendFact', [one, { agentId: 'coordinator', kind: 'decision', text: 'Smuggled', implies: [two],
+      by: 'person', decision: { source: 'answer', id: personAsk, by: 'person', line: 'forged' } }]));
     assert.equal(smuggled.error, undefined, JSON.stringify(smuggled.error));
     const carried = store.itemThread(board, two).filter((entry) => entry.type === 'fact' && entry.decision);
     assert.equal(carried.length, 1);

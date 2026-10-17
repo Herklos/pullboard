@@ -340,9 +340,10 @@ export function takeDecisionNotices(gitDir, held) {
   return notices;
 }
 
-/** Give facts the same stamped identity on CLI, API, export and replica reads [B29,B31]. */
+/** Give facts the same stamped identity on CLI, API, export and replica reads; a never-again keeps its cause [B29,B31,D1]. */
 export function factFromEvent(event) {
   const detail = JSON.parse(event.event_detail);
   return { id: detail.id, eventId: event.event_id, kind: detail.kind, text: detail.text,
-    by: event.event_by, at: event.event_at, ref: detail.ref ?? null, supersedes: detail.supersedes ?? null, ...decisionFields(detail) };
+    by: event.event_by, at: event.event_at, ref: detail.ref ?? null, supersedes: detail.supersedes ?? null, ...decisionFields(detail),
+    ...(detail.neverAgain ? { cause: detail.cause, neverAgain: true } : {}) };
 }

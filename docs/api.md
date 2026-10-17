@@ -94,6 +94,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `decisions` | `version:number`, `decisions:array` |
 | `ledger` | `version:number`, `items:array`, `stats:object` |
 | `log` | `version:number`, `events:array` |
+| `rigor` | `version:number`, `causes:array`, `uncaused:number` |
 | `add` | `version:number`, `item:object` |
 | `edit` | `version:number`, `item:object` |
 | `fact` | `version:number`, `item:number`, `fact:object` |
@@ -220,6 +221,14 @@ A decision names the items it changes with `--implies 12,13` on `fact`, `verify`
 
 The HTTP move is `{verb: "fact", item: 12, agent: "web-1", args: {kind: "measurement", text: "The check takes 8 seconds", ref: "src/file.js:12-30@<full-sha>"}}`. Omit `agent` to act as the coordinator; `args.supersedes` supplies a correction's earlier fact identity. The response carries the committed `fact` event and the CLI result. The event-log format stays at version 1 because facts use its existing immutable event rows; exports and imports preserve those rows. The sealed move engine advances to version 3 for this release so older engines refuse the new operation before replay.
 
+## Rigor
+
+Rigor is how errors become doctrine or specs. It starts by noticing a failure cause that repeats. A cause key comes only from structured fields: `test:<file>::<title>`, `refusal:<CODE>`, `row:<id>` or `doctrine:<id>`. A reject (`verify <id> reject ... --cause <key>`) and a `reopen <id> --note "..." --cause <key>` record the key they name as `cause` in their event detail. A reopen after a red landing also gives one `test:` key per failing test in its `landingFailure.tests`, including reopens recorded before cause keys existed. Notes are never parsed, so an older reject with no cause counts as uncaused. A malformed key is refused with `BAD_CAUSE` before the move. Merge conflicts never count: a landing test whose name starts with `conflicts with`, and `refusal:MERGE_CONFLICT`.
+
+`pullboard rigor` is read-only. It lists each cause that repeated: on 2 items, or on 1 item at 2 different commits. Each line shows the key, how it reads (`work` for `doctrine:` and `refusal:`, `product` for `row:`, `both` for `test:`), its failure count and its items. Its JSON result is `{version, causes: [{key, reads, occurrences, neverAgain, items: [{id, commits}]}], uncaused}`; `uncaused` counts rejects and reopens with no cause key.
+
+The person can mark a cause never-again from the main checkout's terminal: `pullboard fact <id> root-cause "<why>" --cause <key> --never-again --as person`. The fact is recorded as the person's, carries `cause` and `neverAgain: true`, and `rigor` lists its cause at once. An agent or a fact without `--as person` is refused with `RIGOR_PERSON_ONLY`. Over the relay, a fact move with person mode, a never-again or a cause key is accepted only from an authenticated person sender; an agent, a coordinator seat or the machine credential is refused with `RELAY_PERSON_ONLY` whatever channel the move names, and nothing is recorded. A move that carries a cause key needs move engine 30; moves without one replay as before.
+
 ## Refusals
 
 A refusal keeps the command's existing exit status and prints exactly one versioned document to stdout. In JSON mode stderr stays empty except for sign-in instructions and check consent notices. The command-specific `code` identifies the rule; `message` explains what happened; `next` gives the next step.
@@ -337,7 +346,7 @@ The coordinator maintains the roadmap with `milestone add <name> [--note ...] [-
 | `stream` | `version:number`, `event:object` |
 <!-- api-http-shapes:end -->
 
-A move body is `{verb, item, args, agent}`. `item` is the positive integer id when the move needs one. `args` names its CLI positional arguments and flags; text values stay literal, including leading dashes. Omit `agent` to act as the coordinator, or name a registered agent to run in its worktree. Coordinator verification takes `args.as: "coordinator"`, matching the CLI's explicit identity check. The local session secret may act as any agent on that board. `result` is the CLI's JSON result. `next` claims work atomically; when a claim is already held it renews it and returns the renewal event. With no work available it returns the CLI's `NOTHING_FREE` refusal. Waiting remains a CLI option. `reopen` is coordinator-only: `args.note` is required, and it returns a submitted item to open without adding a verdict or replacing its last submitted commit.
+A move body is `{verb, item, args, agent}`. `item` is the positive integer id when the move needs one. `args` names its CLI positional arguments and flags; text values stay literal, including leading dashes. Omit `agent` to act as the coordinator, or name a registered agent to run in its worktree. Coordinator verification takes `args.as: "coordinator"`, matching the CLI's explicit identity check. The local session secret may act as any agent on that board. `result` is the CLI's JSON result. `next` claims work atomically; when a claim is already held it renews it and returns the renewal event. With no work available it returns the CLI's `NOTHING_FREE` refusal. Waiting remains a CLI option. `reopen` is coordinator-only: `args.note` is required, and it returns a submitted item to open without adding a verdict or replacing its last submitted commit. A reject (`verify` with `decision: "reject"`) and a `reopen` may name `args.cause`, the failure's cause key for `pullboard rigor`.
 
 Decision moves keep the CLI's routing: `shout` with `args.decision: true` may omit `args.to`; agents ask their coordinator, and the coordinator asks the person. `pass` takes the decision's id as `item` and `args.note`. Answering a decision addressed to the person requires `answer` with `args.as: "person"` from the coordinator's main checkout. Other callers receive the CLI's refusal.
 

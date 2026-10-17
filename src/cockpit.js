@@ -3,6 +3,10 @@ import {
   IN_STATE,
   MACHINE,
 } from './machine.js';
+import {
+  STAR_KEY,
+  starMarkup,
+} from './view/star.js';
 import { commandPhrases } from './help.js';
 import { personNeeds } from './needs.js';
 import {
@@ -172,6 +176,7 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
     <div class="card-panel feed" id="activity"></div>
   </section>
   <section data-pane="roadmap" class="roadmap-layout" id="roadmap" aria-label="Roadmap"></section>
+  ${hostedLocal && !snapshot ? starMarkup() : ''}
 </main>
 </div>
 </div>
@@ -315,6 +320,30 @@ const drawHosted = (${drawHosted.toString()});
 function localNote(state, facts = {}) {
   drawHosted(document, hostedState(state, { browser: hostedBrowser(navigator), ...facts }), { view: localSession?.origin || LOCAL_VIEW, signIn: hosted.signIn, session: hosted.relaySession });
 }
+
+let starLinked = { at: 0, linked: false, reading: false };
+/**
+ * Show the hosted page's star line (src/view/star.js) to a signed-in person whose account lists a linked board, until
+ * dismissed here; pass a board list through. Why the account's list: it is the linked-board metadata the relay serves
+ * this page, whichever source then draws a board, so a linked board this machine reads locally still counts, and no
+ * relay client loads to decide it. It is read until it lists one, at most every few seconds, and
+ * declares the relay's engine as every relay request does.
+ */
+function starLine(list) {
+  const line = $('star-line');
+  if (!line) return list;
+  const show = () => { line.hidden = !(hosted.relaySession && starLinked.linked && keep(${JSON.stringify(STAR_KEY)}) !== 'dismissed'); };
+  if (hosted.relaySession && !starLinked.linked && !starLinked.reading && Date.now() - starLinked.at > 2500) {
+    starLinked = { at: Date.now(), linked: false, reading: true };
+    linkedList().then((reply) => reply?.boards?.some((board) => typeof board?.id === 'string'), () => false)
+      .then((linked) => { starLinked = { at: Date.now(), linked, reading: false }; line.dataset.linked = linked ? 'yes' : 'no'; show(); });
+  }
+  show();
+  return list;
+}
+$('star-dismiss')?.addEventListener('click', () => { keep(${JSON.stringify(STAR_KEY)}, 'dismissed'); starLine(null); });
+// The first look waits for the whole script, so the engine the read declares (linkedList) is set up by then.
+Promise.resolve().then(() => starLine(null)); // a microtask, as queueMicrotask would schedule, but present in every page context
 
 /** Hide the relay's own banner, which speaks for the relay, on a page the relay does not serve this time. */
 function hideRelayNotice() {
@@ -951,7 +980,7 @@ async function api(path, body) {
     if (body !== undefined && body !== null) throw new Error('This is a read-only snapshot.');
     return jsonRequest(path, undefined, '', {});
   }
-  if (path === '/api/v1/boards') return await listedBoards();
+  if (path === '/api/v1/boards') return starLine(await listedBoards());
   const boardId = /^\\/api\\/v1\\/boards\\/([0-9a-f]{32})(?:\\/|$)/u.exec(path)?.[1];
   const source = boardId ? boardSources.get(boardId) : null;
   if (boardId && !source) throw new Error(transport
@@ -2295,6 +2324,8 @@ function render() {
   $('filter-toggle').title = filterLabel;
   if (view.filterOpen && activeChoice) [...menu.querySelectorAll('[data-filter-choice]')].find((option) => option.dataset.filterChoice === activeChoice)?.focus({ preventScroll: true });
   const shown = inView.filter(inLane(view.lane)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  const finishedUnderAll = !shown.length && p.items.length > 0 && p.items.every((item) => stateOf(item) === 'verified')
+    && view.tab === 'items' && view.itemsView === 'list' && view.state === 'active' && !view.lane && !q && !snapshot;
   $('pipeline').innerHTML = pipeline ? pipelineCard(shown) : '';
   // With nothing picked, the detail shows the first row, and keeps it when a refresh reorders the list.
   // While another project loads, the item picked there waits for its own board.
@@ -2317,7 +2348,9 @@ function render() {
       // A rejected row's second line is its verdict; any other row's is its lane and the spec ids it serves.
       secondary: (rejected(i) ? '<span class="why"><b>' + esc(i.verdict.reason) + '</b> ' + linked(firstLine(visibleVerdictNote(i.verdict.reason, i.verdict.note)), titles) + '</span>'
         : '<span>' + esc(i.lane) + '</span>' + (i.specs.length ? '<span class="specs" title="' + esc(i.specs.join(', ')) + '">' + esc(i.specs.slice(0, 3).join(', ') + (i.specs.length > 3 ? ' +' + (i.specs.length - 3) : '')) + '</span>' : '')) + pills + staleChip(i) });
-  }).join('') : '<li class="empty">' + (items.length ? 'No items match.' : snapshot ? 'No items at this event.' : 'No items yet. Add the first one with New item.') + '</li>';
+  }).join('') : '<li class="empty">' + (finishedUnderAll
+    ? 'Finished work is under All. <button class="link" data-filter-choice="state:all" data-filter-kind="state" data-filter-value="all" type="button">Show all</button>'
+    : items.length ? 'No items match.' : snapshot ? 'No items at this event.' : 'No items yet. Add the first one with New item.') + '</li>';
 
   const selected = p.items.find((i) => i.id === view.item);
   // The form shows when asked for, or when the project has no item at all, withdrawn ones included.
