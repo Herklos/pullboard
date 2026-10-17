@@ -1201,6 +1201,7 @@ export function submit(board, id, { agentId, commit, tree, files = [], policyCom
         withinLane: null,
         trunkMergeClean: null,
         noUnverifiedStack: null,
+        doctrineHolds: null,
         gateConfigured: null,
         gateGreen: null,
         treeStillDuringGate: null,

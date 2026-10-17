@@ -43,6 +43,7 @@ export const ENGINE_VERSION = 12;
  * @property {Role[]} by - Who may make it.
  * @property {string[]} guards - Checked in this order. IN_STATE marks where the item's state is checked.
  * @property {string} [refuse] - The code raised when the item is in none of `from`.
+ * @property {{ code: string, rule: string, next: string }[]} [alsoRefuses] - Other typed refusals from the command result path.
  * @property {string[]} [sets] - The fields it sets.
  * @property {string} [command] - The command that makes it.
  * @property {string} [when] - For the clock's move: when it happens.
@@ -120,6 +121,7 @@ export const GUARDS = [
   { id: 'withinLane', refuse: 'OUTSIDE_LANE', alsoRefuses: [{ code: 'NO_POLICY', next: 'restore the claim base or ask the coordinator to refreeze' }, { code: 'BAD_CONFIG', next: 'restore the committed coordinator configuration' }, { code: 'GIT_GRAFTS', next: 'ask the coordinator to remove the Git graft file before retrying' }], rule: 'the full claimed diff respects committed coordinator ownership', next: 'restore foreign paths or shout their owner', source: 'cli' },
   { id: 'trunkMergeClean', refuse: 'MERGE_CONFLICT', alsoRefuses: [{ code: 'MERGE_CHECK_FAILED', next: 'use Git 2.38 or newer, restore its objects and retry' }, { code: 'NO_POLICY', next: 'restore the primary repository metadata' }, { code: 'NO_TRUNK', next: 'check out the trunk branch in the main checkout once and run pullboard inbox' }], rule: 'the candidate merges cleanly into the current primary branch without changing an index or worktree', next: 'merge the trunk into your branch, resolve conflicts, commit and resubmit', source: 'cli' },
   { id: 'noUnverifiedStack', refuse: 'STACKED_ON_UNVERIFIED', rule: "the candidate range contains no other item's unverified submitted commit", next: 'wait for that item to be accepted, or rebuild without its commits', source: 'cli' },
+  { id: 'doctrineHolds', refuse: 'RATCHET_ROSE', alsoRefuses: [{ code: 'RATCHET_UNCOUNTED', next: 'fix the check so it exits 0 or 1 within its timeout, then submit again' }], rule: "every touched doctrine check counts (exit 0 or 1), none rises above its committed count and no changed file gains a problem; watch-mode rules only count", next: "fix the new problems, commit, submit again; only the person's signature raises count:", source: 'cli', when: 'only when accepted main has an approved doctrine rule with gate: check' },
   { id: 'itemCheckGreen', refuse: 'CHECK_RED', alsoRefuses: [{ code: 'CHECK_UNVERIFIED', next: 'restore the frozen install or check environment and retry' }], rule: 'the frozen item check passes at the exact submitted commit', next: 'reject the failing behavior; the builder fixes and resubmits', source: 'cli' },
 
   { id: 'gateGreen', refuse: 'GATE_RED', alsoRefuses: [{ code: 'PIPEFAIL_UNAVAILABLE', next: 'rewrite the gate without a pipe' }], rule: 'the gate, which submit runs itself every time, is green at HEAD', next: 'fix what the digest names, commit, submit again', source: 'cli' },
@@ -155,7 +157,7 @@ export const MOVES = [
   { verb: 'lapse', from: ['claimed'], to: 'open', by: ['clock'], guards: [], when: 'its lease runs out' },
   {
     verb: 'submit', from: ['claimed'], to: 'submitted', by: ['agent', 'coordinator'], refuse: 'NOT_YOURS',
-    guards: ['joined', 'itemExists', IN_STATE, 'isHolder', 'correctionRefrozen', 'criterionUnchanged', 'treeClean', 'nothingUntracked', 'hasCommit', 'withinLane', 'trunkMergeClean', 'noUnverifiedStack', 'gateConfigured', 'gateGreen', 'treeStillDuringGate', 'childrenDone', 'headIsNew'],
+    guards: ['joined', 'itemExists', IN_STATE, 'isHolder', 'correctionRefrozen', 'criterionUnchanged', 'treeClean', 'nothingUntracked', 'hasCommit', 'withinLane', 'trunkMergeClean', 'noUnverifiedStack', 'doctrineHolds', 'gateConfigured', 'gateGreen', 'treeStillDuringGate', 'childrenDone', 'headIsNew'],
     sets: ['item_built_by', 'item_commit'], command: 'pullboard submit <id>',
   },
   {
@@ -166,11 +168,13 @@ export const MOVES = [
   {
     verb: 'accept', from: ['submitted'], to: 'verified', by: ['agent', 'coordinator'], refuse: 'NOT_SUBMITTED',
     guards: ['coordinatorSaysAs', 'joined', 'itemExists', IN_STATE, 'atSubmittedCommit', 'notBuilder', 'routeAllows', 'policyAllows', 'familyAllows', 'reviewFree', 'criterionUnchanged', 'reasonIsMet', 'trunkMergeClean', 'noUnverifiedStack', 'itemCheckGreen', 'proofNoted'],
+    alsoRefuses: [{ code: 'LAND_HEADER', rule: 'a displayed merge command fits the commit-header limit', next: 'shorten the item title or cited rows so the merge header fits' }],
     sets: ['item_verified_by'], command: 'pullboard verify <id> accept --note "..."',
   },
   {
     verb: 'reject', from: ['submitted'], to: 'open', by: ['agent', 'coordinator'], refuse: 'NOT_SUBMITTED',
     guards: ['coordinatorSaysAs', 'joined', 'itemExists', IN_STATE, 'atSubmittedCommit', 'notBuilder', 'routeAllows', 'policyAllows', 'familyAllows', 'reviewFree', 'criterionUnchanged', 'reasonCoded', 'noteGiven'],
+    alsoRefuses: [{ code: 'LAND_HEADER', rule: 'a displayed merge command fits the commit-header limit', next: 'shorten the item title or cited rows so the merge header fits' }],
     command: 'pullboard verify <id> reject --reason CODE --note "..."',
   },
   {
@@ -348,6 +352,11 @@ function unnamedRefusals(machine) {
     const checks = move.guards.filter((id) => id === IN_STATE).length;
     if (checks !== 1) problems.push(`${move.verb} checks the item's state ${checks} times, not once`);
     if (!/^[A-Z][A-Z0-9_]*$/.test(move.refuse ?? '')) problems.push(`${move.verb} names no code for an item in the wrong state`);
+    for (const refusal of move.alsoRefuses ?? []) {
+      if (!/^[A-Z][A-Z0-9_]*$/.test(refusal.code ?? '') || !refusal.rule?.trim() || !refusal.next?.trim()) {
+        problems.push(`${move.verb} supplemental refusal has no code, rule or next step`);
+      }
+    }
   }
   if (!/^[A-Z][A-Z0-9_]*$/.test(machine.unknownMove.refuse) || !machine.unknownMove.next.trim()) problems.push('the unknown-move refusal has no code or no next step');
   return problems;
@@ -513,14 +522,17 @@ export function lifecycleMarkdown(machine = MACHINE) {
   const edges = machine.moves.flatMap((move) => move.from.map((from) => `  ${from} --> ${move.to}: ${move.verb}${move.by.includes('clock') ? ' (clock)' : ''}`));
   const moves = machine.moves.map((move) => {
     const who = move.when ? `${move.by.join(', ')}, when ${move.when}` : move.by.join(', ');
-    const guards = effectiveGuards(move, machine).map((id) => guardLabel(machine, move, id)).join(', ') || 'none';
-    return `| ${move.verb} | ${move.from.join(', ')} | ${move.to} | ${cell(who)} | ${cell(guards)} |`;
+    const guards = effectiveGuards(move, machine).map((id) => guardLabel(machine, move, id));
+    const resultRefusals = (move.alsoRefuses ?? []).map(({ code }) => `result (${code})`);
+    const checks = [...guards, ...resultRefusals].join(', ') || 'none';
+    return `| ${move.verb} | ${move.from.join(', ')} | ${move.to} | ${cell(who)} | ${cell(checks)} |`;
   });
   const wrongState = machine.moves.filter((move) => move.refuse).map((move) => `| ${move.refuse} | ${move.verb}: the item is in ${move.from.join(', ')} | pullboard show <id> |`);
   const refusals = machine.guards.filter((guard) => guard.id !== IN_STATE).flatMap((guard) => [
     { code: guard.refuse, next: guard.next },
     ...(guard.alsoRefuses ?? []),
   ].map(({ code, next }) => `| ${code} | ${cell(guard.when ? `${guard.rule}, ${guard.when}` : guard.rule)} | ${cell(next)} |`));
+  const resultRefusals = machine.moves.flatMap((move) => (move.alsoRefuses ?? []).map(({ code, rule, next }) => `| ${code} | ${cell(rule)} (${move.verb} result) | ${cell(next)} |`));
   const unknown = `| ${machine.unknownMove.refuse} | ${cell(machine.unknownMove.rule)} | ${cell(machine.unknownMove.next)} |`;
   return [
     '# The item lifecycle',
@@ -550,9 +562,9 @@ export function lifecycleMarkdown(machine = MACHINE) {
     '',
     '## Moves',
     '',
-    'Each move checks its guards in this order and refuses with the first one that does not hold.',
+    'Each move checks its guards in this order and refuses with the first one that does not hold; result-path refusals are listed separately.',
     '',
-    '| Move | From | To | Who | Guards, in order |',
+    '| Move | From | To | Who | Guards, in order; result refusals |',
     '| --- | --- | --- | --- | --- |',
     ...moves,
     '',
@@ -566,7 +578,7 @@ export function lifecycleMarkdown(machine = MACHINE) {
     '',
     '| Code | Raised when this does not hold | Next step |',
     '| --- | --- | --- |',
-    ...[...new Set([...wrongState, ...refusals, unknown])],
+    ...[...new Set([...wrongState, ...refusals, ...resultRefusals, unknown])],
     '',
     'For check diagnostics, a refusal from a failed or unverifiable check includes an output digest, sanitized tail, and a private full-output path in the CLI message (also `error.message` in JSON). The artifact is owner-readable only. If it cannot be saved, the tail remains available and the message names the storage error instead of claiming a path.',
     '',
