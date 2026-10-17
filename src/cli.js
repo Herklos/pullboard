@@ -581,7 +581,7 @@ function withBoard(ctx, work) {
 async function ordered(ctx, board, operation, args) {
   const command = ['add', 'edit', 'merged'].includes(ctx.io.relayCommand?.cliOperation) ? ctx.io.relayCommand : undefined;
   /** Dispatch while this session holds the checkout, including long-running next/run loops. */
-  const execute = () => relayLinked(ctx.info.root)
+  const execute = () => relayLinked(ctx.info.root) || relayRecovered(ctx.info.root)
     ? relayOperation(ctx.info.root, operation, args, ctx.io, command, () => store[operation](board, ...args)) : store[operation](board, ...args);
   const digest = agentSessionDigest();
   const boardOnly = CHECKOUT_BOARD_ONLY.get(ctx.io);
