@@ -2324,6 +2324,8 @@ function render() {
   $('filter-toggle').title = filterLabel;
   if (view.filterOpen && activeChoice) [...menu.querySelectorAll('[data-filter-choice]')].find((option) => option.dataset.filterChoice === activeChoice)?.focus({ preventScroll: true });
   const shown = inView.filter(inLane(view.lane)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  const finishedUnderAll = !shown.length && p.items.length > 0 && p.items.every((item) => stateOf(item) === 'verified')
+    && view.tab === 'items' && view.itemsView === 'list' && view.state === 'active' && !view.lane && !q && !snapshot;
   $('pipeline').innerHTML = pipeline ? pipelineCard(shown) : '';
   // With nothing picked, the detail shows the first row, and keeps it when a refresh reorders the list.
   // While another project loads, the item picked there waits for its own board.
@@ -2346,7 +2348,9 @@ function render() {
       // A rejected row's second line is its verdict; any other row's is its lane and the spec ids it serves.
       secondary: (rejected(i) ? '<span class="why"><b>' + esc(i.verdict.reason) + '</b> ' + linked(firstLine(visibleVerdictNote(i.verdict.reason, i.verdict.note)), titles) + '</span>'
         : '<span>' + esc(i.lane) + '</span>' + (i.specs.length ? '<span class="specs" title="' + esc(i.specs.join(', ')) + '">' + esc(i.specs.slice(0, 3).join(', ') + (i.specs.length > 3 ? ' +' + (i.specs.length - 3) : '')) + '</span>' : '')) + pills + staleChip(i) });
-  }).join('') : '<li class="empty">' + (items.length ? 'No items match.' : snapshot ? 'No items at this event.' : 'No items yet. Add the first one with New item.') + '</li>';
+  }).join('') : '<li class="empty">' + (finishedUnderAll
+    ? 'Finished work is under All. <button class="link" data-filter-choice="state:all" data-filter-kind="state" data-filter-value="all" type="button">Show all</button>'
+    : items.length ? 'No items match.' : snapshot ? 'No items at this event.' : 'No items yet. Add the first one with New item.') + '</li>';
 
   const selected = p.items.find((i) => i.id === view.item);
   // The form shows when asked for, or when the project has no item at all, withdrawn ones included.
