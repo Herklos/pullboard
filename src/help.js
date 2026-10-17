@@ -113,6 +113,11 @@ Work
                                         supersedes the person's answer
   pullboard pass <shout-id> <note>                coordinator passes a decision to the person
   pullboard decisions [--as person]               shouts waiting for you; main checkout defaults to coordinator
+  pullboard watch [--to <agent|lane|all>] [--kinds <kinds>] [--item <id>] [--since <sequence>] [--json]
+                [--work <lane>] [--review-wait <minutes>]
+                                        follow the board's live events, one line each as it happens, with or without the view
+                                        --work also says when an item there becomes claimable, a review waits longer than
+                                        --review-wait minutes (default 20), or main moves; Ctrl-C stops it
   pullboard export                              print the whole board as versioned JSON
   pullboard digest [--out <file>] [--watch]     a short Markdown briefing of this board for a person or a chat assistant;
                                         secrets redacted; --out replaces a file, --watch rewrites it after every move
@@ -201,12 +206,12 @@ Gate and hooks
 ${lifecycleHelp()}
 
 Reject reasons: TEST_FAILURE, BEHAVIOR_MISMATCH, INSUFFICIENT_EVIDENCE, STALE_HEAD, OTHER.
---json prints one versioned document for every command; refusals include their code and next step.`;
+--json prints one versioned document for every command, and one per line for watch; refusals include their code and next step.`;
 
 const HELP_NAMES = [
   'tour', 'init', 'worktree', 'join', 'takeover', 'whoami', 'lanes', 'lane', 'lane add', 'status', 'resources', 'settings', 'view', 'view export',
   'serve', 'mcp', 'relay', 'relay recover', 'resume', 'hooks', 'add', 'edit', 'escalate', 'run', 'list', 'doctor', 'health', 'skills', 'show', 'next', 'land',
-  'check', 'claim', 'release', 'submit', 'done', 'verify', 'fact', 'why', 'shout', 'answer', 'pass', 'decisions', 'inbox', 'export', 'digest', 'import',
+  'check', 'claim', 'release', 'submit', 'done', 'verify', 'fact', 'why', 'shout', 'answer', 'pass', 'decisions', 'inbox', 'watch', 'export', 'digest', 'import',
   'sweep', 'merged', 'withdraw', 'refreeze', 'reopen', 'hold', 'stats', 'ledger', 'log', 'spec', 'spec check', 'spec view',
   'spec show', 'spec unmet', 'spec signoff', 'spec draft', 'spec signers', 'spec signers add', 'doctrine', 'doctrine check', 'forget', 'prompt', 'gate', 'hook',
   'hook pre-commit', 'hook pre-merge-commit', 'hook commit-msg', 'hook pre-push', 'view export', 'version', 'lifecycle', 'help',
@@ -228,7 +233,7 @@ const HELP_EXAMPLES = {
   fact: 'pullboard fact 12 measurement "The check passes in 8 seconds"',
   why: 'pullboard why 12',
   verify: 'pullboard verify 12 accept --note "removed the fix; the test failed"',
-  answer: 'pullboard answer 12 "done"', pass: 'pullboard pass 12 "please decide"',
+  watch: 'pullboard watch --to web', answer: 'pullboard answer 12 "done"', pass: 'pullboard pass 12 "please decide"',
   status: 'pullboard status', view: 'pullboard view', digest: 'pullboard digest --out briefing.md', mcp: 'pullboard mcp', stats: 'pullboard stats --since 2026-10-08', log: 'pullboard log 12', ledger: 'pullboard ledger',
   'lane add': 'pullboard lane add web --owns apps/web/', lane: 'pullboard lane add web --owns apps/web/',
   roadmap: 'pullboard roadmap', milestone: 'pullboard milestone add "0.7.0" --items 12,13',
@@ -292,6 +297,14 @@ const HELP_FLAG_EXPLANATIONS = {
   '--source': 'where the person gave the ruling; required with --doctrine',
 };
 
+/** Lines a command's own help adds after its example. */
+const HELP_NOTES = {
+  watch: [
+    'Claude Code: run pullboard watch --to <your id> under the Monitor tool, and each event line wakes the seat.',
+    'Any other harness: run it as a long-running command and treat each stdout line as an event.',
+  ],
+};
+
 /** Build command-specific help rows from the preserved full list so its syntax stays authoritative. */
 function commandHelpRows(fullHelp) {
   const lines = fullHelp.split('\n');
@@ -324,7 +337,7 @@ function commandHelpRows(fullHelp) {
       return explanation ? `${flag} — ${explanation}` : flag;
     });
     const example = exampleFor(name, usages[0]);
-    return [name, Object.freeze({ usages, flags, example })];
+    return [name, Object.freeze({ usages, flags, example, notes: HELP_NOTES[name] ?? [] })];
   }));
 }
 
