@@ -126,7 +126,7 @@ test('[H18] ninety-day expiry unlinks data and credentials while preserving the 
   const expired = await box.call(A);
   assert.equal(expired.status, 404);
   for (const suffix of ['', '-wal', '-shm']) assert.equal(existsSync(join(box.data, A + '.journal.sqlite' + suffix)), false);
-  assert.equal((await box.call(A, { token: box.agent.token })).status, 401);
+  assert.equal((await box.call(A, { token: box.agent.token })).status, 410, 'the former live credential receives a deleted-copy refusal, never data');
   assert.equal((await box.call(B, { token: box.other.token })).status, 200);
   assert.equal((await box.auth.authenticate(box.signed.token)).kind, 'session');
   assert.deepEqual(box.auth.linkedBoards().map((row) => row.id), [B]);
@@ -153,7 +153,7 @@ test('[H18] explicit unlink removes managed backups immediately and a durable cr
   box.auth.forgetBoard(B);
   assert.ok(existsSync(join(box.data, B + '.journal.sqlite')));
   assert.deepEqual(box.auth.pendingCleanup(), [B]);
-  await assert.rejects(box.auth.authenticate(box.other.token, { board: B }), { code: 'AUTH_REQUIRED' });
+  await assert.rejects(box.auth.authenticate(box.other.token, { board: B }), { code: 'RELAY_BOARD_DELETED' });
   await assert.rejects(box.auth.linkBoard(box.signed.token, B, 'fixture/repository'), { code: 'RELAY_CLEANUP' });
   const freshAuth = createRelayAuth({ database: join(box.root, 'auth.sqlite'), github: {} });
   try {

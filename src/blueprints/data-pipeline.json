@@ -3,13 +3,13 @@
   "name": "data-pipeline",
   "title": "Data pipeline",
   "version": 1,
-  "kind": "infrastructure",
+  "kind": "architecture",
   "by": "Pullboard",
   "summary": "Every table has an owner, a schema check and a freshness check.",
   "prefix": "DP",
   "rules": [
-    { "key": "DP1", "text": "A schema change ships with its migration.", "why": "a schema that changes without its migration breaks every job that reads the old shape." },
-    { "key": "DP2", "text": "A failed job names the rows and the reason.", "why": "a failure that names no rows means rerunning everything to find what broke." }
+    { "key": "DP1", "text": "A schema change ships with its migration.", "why": "a schema that changes without its migration breaks every job that reads the old shape.", "source": { "name": "Pullboard data pipeline blueprint", "id": "DP1", "url": "https://github.com/pullboard-dev/pullboard/blob/main/src/blueprints/data-pipeline.json" } },
+    { "key": "DP2", "text": "A failed job names the rows and the reason.", "why": "a failure that names no rows means rerunning everything to find what broke.", "source": { "name": "Pullboard data pipeline blueprint", "id": "DP2", "url": "https://github.com/pullboard-dev/pullboard/blob/main/src/blueprints/data-pipeline.json" } }
   ],
   "questions": [
     { "key": "Q1", "ask": "The warehouse is", "choices": ["Snowflake", "BigQuery", "Postgres", "Something else"], "default": "Snowflake" },
