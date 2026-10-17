@@ -14,5 +14,8 @@
   "questions": [
     { "key": "Q1", "ask": "The research is about", "choices": ["A technical question", "A market or product", "Academic literature", "Something else"], "default": "A technical question" },
     { "key": "Q2", "ask": "Trusted sources are", "choices": ["Official documentation and papers", "Any public source I approve", "Only sources I list"], "default": "Official documentation and papers" }
+  ],
+  "items": [
+    { "key": "1", "title": "Every claim in a finding links to its source", "cites": ["RS1", "Q2"], "criterion": "Every claim in the findings folder carries a link to its source. test/finding-sources.test.js reads each finding, fails on a claim without a link, and fails before the change.", "brief": "Files:\n- findings/ (one claim per bullet)\n- test/finding-sources.test.js\nTest:\n- test/finding-sources.test.js reads every finding and fails on a claim bullet without a link", "check": "node --test test/finding-sources.test.js" }
   ]
 }

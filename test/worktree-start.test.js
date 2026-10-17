@@ -1,10 +1,11 @@
 /** A fresh main checkout uses its declared model for an agent worktree [I1,I2]. */
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { after, test } from 'node:test';
 import { createE2eHelpers } from './e2e-helpers.js';
 import { runFixtureChild } from './fixture-child.js';
+import { configProblems, defaults } from '../src/config.js';
 import { installStep } from '../src/worktree.js';
 
 const e2e = createE2eHelpers();
@@ -70,6 +71,128 @@ test("the README's worktree command works in a fresh repo [I1,I2]", () => {
   assert.equal(missingJoinJson.code, 1);
   assert.equal(JSON.parse(missingJoinJson.out).error.next,
     'run pullboard join api --model "<model name>"');
+});
+
+test('a new worktree is created inside the repository [I1,I2]', () => {
+  for (const mode of ['inside', 'beside', undefined]) {
+    const box = sandbox();
+    const { repo, web } = project('true', box);
+    const configPath = join(repo, 'pullboard.json');
+    const originalConfigText = readFileSync(configPath, 'utf8');
+    const config = JSON.parse(originalConfigText);
+    if (mode === undefined) delete config.worktrees;
+    else config.worktrees = mode;
+    const configText = `${JSON.stringify(config, null, 2)}\n`;
+    if (configText !== originalConfigText) {
+      writeFileSync(configPath, configText);
+      box.git(repo, 'add', 'pullboard.json');
+      box.git(repo, 'commit', '-q', '-m', 'chore: configure agent worktree location');
+    }
+
+    // Leave the sibling on its older config to prove placement follows the current main checkout.
+    box.env.PULLBOARD_MODEL = 'Worktree Location Model';
+    const made = box.run(web, 'worktree', 'api', '--json');
+    assert.equal(made.code, 0, made.err || made.out);
+    const result = JSON.parse(made.out);
+    const expected = mode === 'inside'
+      ? join(repo, '.claude', 'worktrees', 'api-1')
+      : join(dirname(repo), `${basename(repo)}-api-1`);
+    assert.equal(resolve(result.path), resolve(expected), `${mode ?? 'omitted'} keeps its specified location`);
+    assert.equal(box.git(repo, 'status', '--porcelain'), '', 'the nested worktree stays ignored by the main checkout');
+    assert.equal(box.run(web, 'whoami', '--json').code, 0, 'the existing sibling remains usable');
+    const newIdentity = box.run(result.path, 'whoami', '--json');
+    assert.equal(newIdentity.code, 0, newIdentity.err || newIdentity.out);
+    assert.equal(JSON.parse(newIdentity.out).lane, 'api');
+    assert.ok(existsSync(join(result.path, '.githooks', 'pre-commit')), 'the new worktree has its commit hook');
+    const resumed = box.run(web, 'resume');
+    assert.equal(resumed.code, 0, resumed.err);
+    assert.match(resumed.out, mode === 'inside'
+      ? /New agent worktrees: .*\.claude\/worktrees\/<lane>-N/u
+      : /New agent worktrees: .*repo-<lane>-N/u);
+    const resumedJson = box.run(web, 'resume', '--json');
+    assert.equal(JSON.parse(resumedJson.out).newWorktreeLocation, mode === 'inside'
+      ? join(repo, '.claude', 'worktrees', '<lane>-N')
+      : join(dirname(repo), `${basename(repo)}-<lane>-N`));
+    assert.match(box.run(web, 'help', 'worktree').out, mode === 'inside'
+      ? /Active worktree location: .*\.claude\/worktrees\/<lane>-N/u
+      : /Active worktree location: .*repo-<lane>-N/u);
+  }
+
+  assert.deepEqual(configProblems({ ...defaults(), worktrees: 'inside' }), []);
+  assert.deepEqual(configProblems({ ...defaults(), worktrees: 'beside' }), []);
+  assert.ok(configProblems({ ...defaults(), worktrees: 'somewhere' }).some(problem => problem.includes('"worktrees"')));
+
+  const box = sandbox();
+  const repo = join(box.dir, 'separate-main');
+  const gitDir = join(box.dir, 'separate-git-dir');
+  mkdirSync(repo);
+  box.git(repo, 'init', '-q', '-b', 'main', '--separate-git-dir', gitDir);
+  assert.equal(box.run(repo, 'init').code, 0);
+  const configPath = join(repo, 'pullboard.json');
+  const config = JSON.parse(readFileSync(configPath, 'utf8'));
+  config.lanes = { web: { owns: ['web/'], specs: [] }, api: { owns: ['api/'], specs: [] } };
+  config.worktrees = 'inside';
+  writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+  box.git(repo, 'add', '-A');
+  box.git(repo, 'commit', '-q', '-m', 'chore: configure separate git dir fixture');
+  box.env.PULLBOARD_MODEL = 'Separate Git Dir Model';
+  const made = box.run(repo, 'worktree', 'web', '--json');
+  assert.equal(made.code, 0, made.err || made.out);
+  const linkedPath = JSON.parse(made.out).path;
+  assert.equal(resolve(linkedPath), resolve(repo, '.claude', 'worktrees', 'web-1'));
+  const nestedMade = box.run(linkedPath, 'worktree', 'api', '--json');
+  assert.equal(nestedMade.code, 0, nestedMade.err || nestedMade.out);
+  assert.equal(resolve(JSON.parse(nestedMade.out).path), resolve(repo, '.claude', 'worktrees', 'api-1'),
+    'a linked checkout with a separate git dir resolves its registered main root');
+  const registryPath = join(box.env.PULLBOARD_HOME, 'projects.json');
+  const registryBytes = readFileSync(registryPath);
+  const linkedResume = box.run(linkedPath, 'resume');
+  assert.match(linkedResume.out, /New agent worktrees: .*\.claude\/worktrees\/<lane>-N/u);
+  assert.deepEqual(readFileSync(registryPath), registryBytes, 'resume reads the registry without refreshing it');
+  const linkedHelp = box.run(linkedPath, 'help', 'worktree');
+  assert.match(linkedHelp.out, /Active worktree location: .*\.claude\/worktrees\/<lane>-N/u);
+  assert.deepEqual(readFileSync(registryPath), registryBytes, 'help reads the registry without refreshing it');
+
+  rmSync(registryPath);
+  const missingRegistry = box.run(linkedPath, 'worktree', 'api', '--json');
+  assert.notEqual(missingRegistry.code, 0);
+  assert.equal(JSON.parse(missingRegistry.out).error.code, 'NO_POLICY', 'an unprovable primary root fails closed');
+  assert.equal(existsSync(join(repo, '.claude', 'worktrees', 'api-2')), false, 'missing registry creates no worktree');
+  assert.notEqual(box.tryGit(repo, 'show-ref', '--verify', '--quiet', 'refs/heads/api/2').status, 0,
+    'missing registry creates no branch');
+  const missingResume = box.run(linkedPath, 'resume', '--json');
+  assert.equal(missingResume.code, 0, missingResume.err || missingResume.out);
+  assert.match(JSON.parse(missingResume.out).newWorktreeLocation, /^unavailable; run pullboard resume from the main checkout/u);
+  assert.match(box.run(linkedPath, 'help', 'worktree').out,
+    /Active worktree location: unavailable; run pullboard resume from the main checkout/u,
+    'help remains usable when the primary root is unprovable');
+  assert.equal(existsSync(registryPath), false, 'read-only help and resume do not recreate a missing registry');
+
+  writeFileSync(registryPath, registryBytes);
+  writeFileSync(registryPath, '{not valid JSON');
+  const malformedRegistry = box.run(linkedPath, 'worktree', 'web', '--json');
+  assert.notEqual(malformedRegistry.code, 0);
+  assert.equal(JSON.parse(malformedRegistry.out).error.code, 'NO_POLICY', 'a malformed registry cannot authorize a guessed sibling');
+  assert.equal(existsSync(join(repo, '.claude', 'worktrees', 'web-2')), false, 'malformed registry creates no worktree');
+  assert.notEqual(box.tryGit(repo, 'show-ref', '--verify', '--quiet', 'refs/heads/web/2').status, 0,
+    'malformed registry creates no branch');
+  const malformedBytes = readFileSync(registryPath);
+  const malformedResume = box.run(linkedPath, 'resume', '--json');
+  assert.equal(malformedResume.code, 0, malformedResume.err || malformedResume.out);
+  assert.match(JSON.parse(malformedResume.out).newWorktreeLocation, /^unavailable; run pullboard resume from the main checkout/u);
+  assert.match(box.run(linkedPath, 'help', 'worktree').out,
+    /Active worktree location: unavailable; run pullboard resume from the main checkout/u,
+    'help remains usable with a malformed registry');
+  assert.deepEqual(readFileSync(registryPath), malformedBytes, 'read-only help and resume preserve malformed registry bytes');
+
+  writeFileSync(registryPath, `${JSON.stringify({ projects: [] }, null, 2)}\n`);
+  const emptyRegistry = box.run(linkedPath, 'worktree', 'api', '--json');
+  assert.notEqual(emptyRegistry.code, 0);
+  assert.equal(JSON.parse(emptyRegistry.out).error.code, 'NO_POLICY', 'a valid but unrelated registry is unprovable');
+  assert.equal(existsSync(join(repo, '.claude', 'worktrees', 'api-2')), false, 'unrelated registry creates no worktree');
+  assert.notEqual(box.tryGit(repo, 'show-ref', '--verify', '--quiet', 'refs/heads/api/2').status, 0,
+    'unrelated registry creates no branch');
+  assert.equal(box.git(repo, 'status', '--porcelain'), '');
 });
 
 test('worktree suggests no install for a zero-dependency project [I1,L3]', () => {

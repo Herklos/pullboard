@@ -139,7 +139,10 @@ test('the view shows a move as it happens [N26,A2]', { timeout: 120_000 }, async
     t.diagnostic(`the claim appeared ${latency} ms after the board recorded it`);
     assert.ok(latency <= 2_000, `the claim appears ${latency} ms after the board recorded it`); // budget: declared by #545's frozen criterion: a move appears within 2000 ms.
     // What the page read for it came after the move, and the stream it follows stayed open.
-    assert.ok(sent(chrome, before).length > 0 && sent(chrome, before).every((line) => /^GET \/api\/v1\/boards(?:\/[^/]+\/(?:state|shouts\/\d+))?$/.test(line)), `the page read the board for the move: ${JSON.stringify(sent(chrome, before))}`);
+    // The move is on the open item, so the page also reads that item's detail again (#548).
+    const moveReads = sent(chrome, before);
+    assert.ok(moveReads.some((line) => /^GET \/api\/v1\/boards\/[^/]+\/state$/.test(line)), `the page reread public state for the move: ${JSON.stringify(moveReads)}`);
+    assert.ok(moveReads.every((line) => /^GET \/api\/v1\/boards(?:\/[^/]+\/(?:state|shouts\/\d+|items\/\d+))?$/.test(line)), `the page read the board for the move: ${JSON.stringify(moveReads)}`);
     assert.equal(streamReads(chrome).length, 1, 'the page kept the one stream it opened');
     assert.equal(await chrome.stable("document.querySelector('#live').textContent"), '', 'the live line says the page is live');
     assert.deepEqual(chrome.exceptions, [], 'the page raises no uncaught exception');
