@@ -249,7 +249,7 @@ function summary(root, state, { pairing = false } = {}) {
   if (state.unlinking) return { linked: false, board: state.board, url: state.url, link: '', sequence: state.sequence, behind: 0, cleanup: true, recovery: recoverySummary(state) };
   const fragment = pairing ? '&key=' + encodeBoardKey(readBoardKey(state.board)) : '';
   const oversizedSnapshot = snapshotSize(state);
-  return { linked: true, board: state.board, url: state.url,
+  return { linked: true, board: state.board, url: state.url, account: state.account ?? '', login: state.login ?? '',
     link: 'https://app.pullboard.dev/#board=' + state.board + fragment,
     sequence: state.sequence, behind: (state.baselinePause ? behind(root, state) : state.mode === 'ordered' ? Number(Boolean(state.pending)) : behind(root, state)) + Number(Boolean(state.snapshot || state.checkpoint)),
     recovery: recoverySummary(state),
@@ -1354,8 +1354,11 @@ export async function relayOn(root, address, io, { session, credential, quiet = 
     const issued = reusableCredential ?? await request({ ...state, token: signed.token }, '/auth/machines', { method: 'POST', body: { board: state.board, machine } }, io);
     if (!/^pm_[A-Za-z0-9_-]{43}$/u.test(issued.token ?? '') || issued.board !== state.board || issued.machine !== machine) throw new Refused('RELAY_RESPONSE', 'the relay did not issue this board’s machine credential; sign in again');
     // Cached agent credentials belong to the account that minted them.
-    if (state.account !== account) delete state.agentTokens;
+    if (state.account !== account) { delete state.agentTokens; delete state.login; }
     state.account = account;
+    // Kept so relay status can name who linked the board; a phone-approved credential carries none.
+    const login = signed.login ?? signed.user?.login;
+    if (typeof login === 'string' && login) state.login = login;
     state.token = issued.token;
     state.tokenId = issued.id;
     state.machine = machine;
@@ -1447,7 +1450,8 @@ export async function relayMachineSignIn(address, io, { signal, onSignIn } = {})
     return { outcome: 'cancelled' };
   }
   if (typeof signed.user?.id !== 'string') throw new Refused('RELAY_RESPONSE', 'Sign in again to receive an authenticated account identity.');
-  return { token: signed.token, id: signed.id, account: signed.user.id, url };
+  // The login is display text only: the account id stays the identity every check compares.
+  return { token: signed.token, id: signed.id, account: signed.user.id, login: typeof signed.user.login === 'string' ? signed.user.login : '', url };
 }
 
 /** Share the existing bounded transport only with fixed account/device endpoints. */
