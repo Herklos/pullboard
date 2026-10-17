@@ -385,3 +385,5 @@ Device-sealed presentations carry the same derived `verdictState`, including Git
 Cold freshness reads query first-parent history limited to the item’s literal paths, then inspect matching commits. Unrelated main revisions do not each start a file-diff process; merge and revert changes still count.
 
 Unavailable Git-object verdict projections are retried on the next read, so fetching the sealed reviewed commit clears that uncertainty without a board event or trunk move. Known freshness projections remain cached.
+
+When the runner's own resource pool refuses the run's setup, the run fails at once with `RUNNER_SETUP_REFUSED`, naming the runner host and the pool's refusal code. It is not retried, and it leaves no holder or waiter on either machine.
