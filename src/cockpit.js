@@ -78,7 +78,7 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
 <link rel="stylesheet" href="${cssAttribute}">
 <link rel="icon" href="data:,">
 </head>
-<body class="loading${snapshot ? ' snapshot' : ''}${readOnly ? ' read-only' : ''}${requestMode ? ' requests' : ''}">
+<body class="loading${hostedLocal && !snapshot ? ' hosted-page open-board' : ''}${snapshot ? ' snapshot' : ''}${readOnly ? ' read-only' : ''}${requestMode ? ' requests' : ''}">
 <div class="shell">
 <aside class="side" id="side" aria-label="Projects">
   <div class="side-top">
@@ -88,7 +88,7 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
   </div>
   <div class="side-body" id="side-body">
     <div class="label">Projects</div>
-    <nav id="proj-list" aria-label="Projects on this machine"></nav><p class="side-hint" id="side-hint" hidden></p>
+    <nav id="proj-list" aria-label="Projects on this machine"></nav>
     <section class="products" id="products" aria-label="Products" hidden><div class="label">Products</div><div id="prod-list"></div></section>
   </div>
 </aside>
@@ -110,7 +110,7 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
     <p>Run <code>pullboard init</code> in a git repo, or ask an agent to. Its board shows up here by itself.</p>
   </section>
   <p class="empty" id="project-loading" role="status" hidden>Loading project…</p>
-  ${hostedMarkup('http://127.0.0.1:4890')}
+  ${hostedMarkup('http://127.0.0.1:4890', { looking: Boolean(hostedLocal) && !snapshot, signIn })}
   <section class="card-panel snapshot-controls" id="snapshot-controls" ${snapshot ? '' : 'hidden'} aria-label="Snapshot replay">
     <span>Read-only snapshot</span>
     <button class="ghost" id="replay-play" type="button">Play from first event</button>
@@ -251,9 +251,9 @@ if (hosted.local && !relayPairing) {
     catch { removed = false; }
     let returnedSession = null;
     try { returnedSession = JSON.parse(returned); } catch { /* refused below */ }
-    if (!removed) localProblem = 'This browser kept the connection secret in the address, so this page will not use it. Close this tab, then open the local view.';
+    if (!removed) localProblem = 'This browser kept the connection secret in the address, so this page will not use it. Close this tab, then open your board below.';
     else if (validLocalSession(returnedSession)) localSession = { version: 1, origin: returnedSession.origin, key: returnedSession.key };
-    else localProblem = 'The local view sent back a connection this page cannot read. Try again, or open the local view.';
+    else localProblem = 'Pullboard on this computer sent back a connection this page cannot read.';
   } else {
     try { const kept = JSON.parse(tabValue(LOCAL_TAB) ?? 'null'); if (validLocalSession(kept)) localSession = kept; } catch { /* nothing kept for this tab */ }
   }
@@ -311,9 +311,12 @@ const $ = (id) => document.getElementById(id);
 const hostedState = (${hostedState.toString()});
 const hostedBrowser = (${hostedBrowser.toString()});
 const drawHosted = (${drawHosted.toString()});
-/** Show the hosted state the page is in (src/view/hosted.js), with its next step, or none with null. */
+/**
+ * Show the open-board screen the page is in (src/view/hosted.js), or none with null. A phone is the one the relay's
+ * page names before first paint (#757), and it hears nothing about this computer.
+ */
 function localNote(state, facts = {}) {
-  drawHosted(document, hostedState(state, { browser: hostedBrowser(navigator), ...facts }), { view: localSession?.origin || LOCAL_VIEW, signIn: hosted.signIn, session: hosted.relaySession });
+  drawHosted(document, hostedState(state, { browser: hostedBrowser(navigator), phone: document.documentElement.dataset.relayDevice === 'phone', ...facts }), { view: localSession?.origin || LOCAL_VIEW, signIn: hosted.signIn, session: hosted.relaySession });
 }
 
 /** Hide the relay's own banner, which speaks for the relay, on a page the relay does not serve this time. */
@@ -327,7 +330,7 @@ function localTrip(base) {
   const trips = Number(tabValue(LOCAL_TRIPS) || 0);
   if (trips >= 2) {
     tabValue(LOCAL_TRIPS, null);
-    localNote('problem', { detail: 'The local view did not give this page a session it accepts. Open the local view to see its boards.' });
+    localNote('problem', { detail: 'Pullboard on this computer did not give this page a session it accepts.' });
     return false;
   }
   tabValue(LOCAL_TRIPS, String(trips + 1));
@@ -344,39 +347,62 @@ function localExpired() {
   localTrip(base);
 }
 
+// The screens that wait on this computer: the page looks again by itself while one shows, with no Try again (#764).
+const LOCAL_STATES = ['looking', 'asking', 'blocked', 'not-running', 'mismatch'];
+let localChecking = false;
+let localReached = false;
+
 /**
- * Reach this machine's view: say first why the browser may ask about local network access, then read the view's
- * public protocol, which holds no secret and no board, and take the session the round trip brought back. It is
- * 'local' when the page now reads the local view, 'away' when the browser is on the round trip, and 'unreachable'
- * when the page cannot read it, with what it knows of why on the page.
+ * Reach this machine's view: read the view's public protocol, which holds no secret and no board, and take the session
+ * the round trip brought back. While the browser asks the person, which it does before the request goes anywhere, the
+ * page draws the prompt and says it waits. It is 'local' when the page now reads the local view, 'away' when the
+ * browser is on the round trip, 'unreachable' when the page cannot read it, with the screen that says why, and 'busy'
+ * while another look is still on its way. A look again by itself (again) redraws only a screen that waits on this
+ * computer, so a later screen, such as signing in, stays.
  */
-async function connectLocal() {
+async function connectLocal(again = false) {
+  if (localChecking) return 'busy';
+  localChecking = true;
+  try { return await lookLocal(again); }
+  finally { localChecking = false; }
+}
+
+/** One look for this machine's view, for connectLocal, which keeps two from running at once. */
+async function lookLocal(again) {
   const base = localSession?.origin || LOCAL_VIEW;
+  /** Draw this screen, unless the page has moved past the ones that wait on this computer. */
+  const show = (state) => {
+    const shown = $('local-note').dataset.state || '';
+    if (shown !== state && (!again || LOCAL_STATES.includes(shown))) localNote(state);
+  };
   let permission = null;
   for (const name of ['loopback-network', 'local-network-access']) {
     try { permission = (await navigator.permissions.query({ name })).state; break; } catch { /* this browser has no such permission */ }
   }
   if (permission === 'denied') {
-    localNote('blocked');
+    show('blocked');
     return 'unreachable';
   }
-  if (permission !== 'granted') {
-    localNote('asking');
-    // The line is on screen before the request that can raise the browser's prompt.
+  // A browser that says it will ask gets Click Allow on screen before the request that raises its prompt; one that
+  // says nothing gets it only once the request is slow to come back, as it is while a prompt waits.
+  let slow = null;
+  if (permission === 'prompt' && !again) {
+    show('asking');
     await new Promise((painted) => requestAnimationFrame(() => requestAnimationFrame(painted)));
-  }
+  } else if (permission !== 'granted' && !again) slow = setTimeout(() => show('asking'), 800);
   let reply;
   try { reply = await fetch(base + '/local/protocol', { signal: AbortSignal.timeout(3000), credentials: 'omit', redirect: 'error' }); }
-  catch {
-    // One discovery request is all this page makes of this device (P5), so a view too old to answer it reads as none,
-    // and the state names that case in its hint.
-    localNote('not-running');
+  catch (error) {
+    // A request that ran out of time while the browser may still be asking is the prompt waiting for the person;
+    // one refused at once means nothing runs here. One discovery request at a time is all this page makes of this
+    // device, so a view too old to answer it reads as none.
+    show(error?.name === 'TimeoutError' && permission !== 'granted' ? 'asking' : 'not-running');
     return 'unreachable';
-  }
+  } finally { clearTimeout(slow); }
   let protocol = null;
   try { protocol = await reply.json(); } catch { /* not this protocol */ }
   if (!reply.ok || protocol?.version !== 1 || protocol?.apiVersion !== 1 || protocol?.hostedOrigin !== location.origin) {
-    localNote('mismatch');
+    show('mismatch');
     return 'unreachable';
   }
   if (!localSession) return localTrip(base) ? 'away' : 'unreachable';
@@ -386,9 +412,11 @@ async function connectLocal() {
   localReadHeaders = { ...connection.headers };
   readOnly = false;
   requests = false;
+  localReached = true;
   document.body.classList.remove('read-only', 'requests');
   hideRelayNotice();
-  localNote(null);
+  // Finding your boards stays until the list arrives, so the page never shows an empty board on its way to one.
+  if (LOCAL_STATES.includes($('local-note').dataset.state || '')) localNote('looking');
   return 'local';
 }
 
@@ -423,8 +451,11 @@ function theme(pick) {
   else delete document.documentElement.dataset.theme;
   const now = document.documentElement.dataset.theme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
   document.documentElement.dataset.scheme = now;
-  $('theme').title = now === 'dark' ? 'Dark theme: switch to light' : 'Light theme: switch to dark';
-  $('theme').setAttribute('aria-label', $('theme').title);
+  // The open-board screens carry the same toggle in their own header (#764), as the sidebar is hidden there.
+  for (const button of [$('theme'), $('ob-theme')]) {
+    button.title = now === 'dark' ? 'Dark theme: switch to light' : 'Light theme: switch to dark';
+    button.setAttribute('aria-label', button.title);
+  }
 }
 theme(keep('pb.theme'));
 matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', () => theme(keep('pb.theme')));
@@ -1061,9 +1092,11 @@ async function listedBoards() {
 /** After a hosted board list: a list clears a state it stood in for, and a signed-in empty one says why it is empty. */
 async function hostedListed(boards) {
   const shown = $('local-note').dataset.state || '';
-  if (boards.length) { if (['not-running', 'no-linked', 'unpaired', 'signed-out'].includes(shown)) localNote(null); return; }
+  if (boards.length) { if (['looking', 'not-running', 'no-linked', 'unpaired', 'signed-out'].includes(shown)) localNote(null); return; }
+  // Nobody signed in and no board on this computer yet: the page says how to make one, as the local view does.
+  if (!hosted.relaySession) { if (shown === 'looking') localNote(null); return; }
   // An empty local view can still leave linked boards on another computer waiting for this browser to pair.
-  if (!hosted.relaySession || !['', 'not-running', 'no-linked', 'unpaired'].includes(shown)) return;
+  if (!['', 'looking', 'not-running', 'no-linked', 'unpaired'].includes(shown)) return;
   let linked;
   try { linked = await linkedList(); } catch { return; /* the relay's banner says why */ }
   const names = (linked.boards || []).filter((board) => typeof board.repository === 'string').map((board) => board.repository);
@@ -1788,7 +1821,7 @@ function renderSide() {
     const on = x.root === view.root;
     const parts = doing(x).split(' · '), asks = [x.decisions, x.pending, x.drafts, x.holds].filter(Boolean).length;
     const line = x.loading ? 'Loading…' : (asks ? '<span class="asks">' + esc(parts.slice(0, asks).join(' · ')) + '</span>' + (parts.length > asks ? ' · ' : '') : '') + esc(parts.slice(asks).join(' · '));
-    return '<button class="proj repo' + (on ? ' on' : '') + '"' + (on ? ' aria-current="true"' : '') + ' data-root="' + esc(x.root) + '" title="' + esc(x.root) + '" type="button"><span class="pname">' + (x.owner ? '<span class="owner">' + esc(x.owner) + '/</span>' : '') + esc(x.name) + '</span><small>' + (hosted.local && x.source ? '<span class="src">' + (x.source === 'relay' ? 'linked' : 'this computer') + '</span> · ' : '') + line + '</small></button>';
+    return '<button class="proj repo' + (on ? ' on' : '') + '"' + (on ? ' aria-current="true"' : '') + ' data-root="' + esc(x.root) + '" title="' + esc(x.root) + '" type="button"><span class="pname">' + (x.owner ? '<span class="owner">' + esc(x.owner) + '/</span>' : '') + esc(x.name) + '</span><small>' + (hosted.local && x.source ? '<span class="src">' + (x.source === 'relay' ? 'shared' : 'this computer') + '</span> · ' : '') + line + '</small></button>';
   };
   const groupedRoots = new Set(data.groups.flatMap((group) => group.repos.map((repo) => repo.root)));
   const grouped = data.groups.map((group) => {
@@ -3283,6 +3316,8 @@ $('shouts-pane').addEventListener('click', (event) => {
 // Enter shouts; Shift+Enter starts a new line.
 $('shout-text').addEventListener('keydown', (event) => { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); $('shout-form').requestSubmit(); } });
 document.addEventListener('click', (event) => {
+  // The open-board screens name their state in data-state and handle their own presses (#764).
+  if (event.target.closest('#local-note')) return;
   if (view.filterOpen && !event.target.closest('.filter-control')) { view.filterOpen = false; render(); }
   const t = event.target.closest('[data-filter-toggle],[data-filter-choice],[data-status],[data-roadmap-jump],[data-shout-id],[data-roadmap-key],[data-roadmap-all],[data-root],[data-tab],[data-go],[data-item],[data-items-view],[data-state],[data-rows],[data-row],[data-row-decision],[data-section-approve],[data-release],[data-shout],[data-new],[data-code],[data-code-all],[data-code-less],[data-stats-toggle],#proj-switch,#console');
   if (!event.target.closest('.side')) fold(false);
@@ -3440,11 +3475,14 @@ $('side-toggle').addEventListener('click', () => {
   fold(false);
   keep('pb.side', collapsed ? 'collapsed' : 'open');
 });
-$('theme').addEventListener('click', () => {
+/** Pick the scheme the page does not show now, and keep it. */
+function flipTheme() {
   const next = document.documentElement.dataset.scheme === 'dark' ? 'light' : 'dark';
   keep('pb.theme', next);
   theme(next);
-});
+}
+$('theme').addEventListener('click', flipTheme);
+$('ob-theme').addEventListener('click', flipTheme);
 $('q').addEventListener('input', () => { search(); view.foundAt = 0; showFound(); });
 // Leaving the field closes the results a moment later, so a press on a result lands first; coming back to the field
 // before then keeps them, or a search begun straight after Esc would lose its new results to the old close.
@@ -3538,13 +3576,42 @@ if (snapshot) {
     if (snapshotReplay.playing) { clearTimeout(snapshotReplay.timer); snapshotReplay.timer = setTimeout(advanceReplay, 1000 / Number($('replay-speed').value)); }
   });
 }
-if (hosted.local) $('local-note-retry').addEventListener('click', () => {
-  localProblem = null;
-  tabValue(LOCAL_TRIPS, null);
-  // Reload both source-scoped connections together when relay streams are already active.
-  if (transport) { location.reload(); return; }
-  connectLocal().then((local) => local === 'local' ? refresh() : null).catch((error) => localNote('problem', { detail: error.message }));
+/** Copy a screen's command or sentence; a browser without the clipboard API copies from a selected field. */
+async function copyWords(text) {
+  try { await navigator.clipboard.writeText(text); return true; }
+  catch { /* Older and embedded browsers refuse the clipboard API: copy from a selected field below. */ }
+  const field = document.createElement('textarea');
+  field.value = text;
+  field.setAttribute('readonly', '');
+  field.style.position = 'fixed';
+  field.style.opacity = '0';
+  document.body.append(field);
+  field.select();
+  const copied = document.execCommand('copy');
+  field.remove();
+  return copied;
+}
+$('local-note').addEventListener('click', async (event) => {
+  const button = event.target instanceof Element ? event.target.closest('button[data-copy]') : null;
+  if (!button || !button.dataset.copy) return;
+  button.textContent = await copyWords(button.dataset.copy) ? 'Copied' : 'Select and copy';
 });
+/**
+ * Look for this machine's view again, by itself, while a screen waits on it or a signed-in person waits for a board:
+ * the moment the view answers, the page opens the board, with no Try again (#764). Over a relay stream, a reload
+ * starts both sources together.
+ */
+function lookAgain() {
+  if (!hosted.local || relayPairing || localReached || localProblem || document.hidden) return;
+  if (![...LOCAL_STATES, 'no-linked', 'unpaired'].includes($('local-note').dataset.state || '') || $('local-note').dataset.state === 'looking') return;
+  connectLocal(true).then((local) => {
+    if (local !== 'local') return;
+    if (transport) { location.reload(); return; }
+    transportModule = null;
+    return refresh();
+  }).catch((error) => localNote('problem', { detail: error.message }));
+}
+if (hosted.local && !snapshot) setInterval(lookAgain, 2000);
 /** Load the configured decrypting transport once, only when relay reads or pairing need it. */
 let transportLoading = null;
 async function loadTransport() {
@@ -3579,7 +3646,12 @@ async function startPage() {
   }
   await refresh();
 }
-startPage().catch((error) => { document.body.classList.remove('loading'); $('live').textContent = 'cannot reach the view: ' + error.message; });
+startPage().catch((error) => {
+  document.body.classList.remove('loading');
+  $('live').textContent = 'cannot reach the view: ' + error.message;
+  // Finding your boards never stays on a page that has stopped looking.
+  if (hosted.local && $('local-note').dataset.state === 'looking') localNote('problem', { detail: 'Pullboard on this computer did not answer: ' + error.message });
+});
 // The relay transport keeps its own stream and timer. The local view reads on a timer only while it has no live
 // stream, and its live line says so (#545). Each timer asks which the page uses as it fires: the hosted page starts
 // out on the relay and turns to this machine's view once it reaches it (#513).

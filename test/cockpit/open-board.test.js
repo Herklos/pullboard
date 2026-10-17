@@ -1,0 +1,315 @@
+/** Opening your board from pullboard.dev: one clear screen at a time, in the approved words, moving on by itself [N26,H5]. */
+import assert from 'node:assert/strict';
+import { request } from 'node:http';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { test } from 'node:test';
+import { cockpitPage } from '../../src/cockpit.js';
+import { Refused } from '../../src/refused.js';
+import { createRelayBrowserHandler } from '../../relay/browser-page.js';
+import { RELAY_SCREEN_WORDS } from '../../relay/browser-notice.js';
+import { machine, project, startView, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, proofShot, press } from './fixture.js';
+
+const HOSTED = 'https://app.pullboard.dev';
+const LOCAL = 'http://127.0.0.1:4890';
+const NO_JARGON = /local view|relay|linked|try again/i;
+
+/** One plain HTTP request to a view, with exactly these headers, following nothing. */
+function call(base, path, { method = 'GET', headers = {} } = {}) {
+  return new Promise((done, fail) => {
+    const outgoing = request(new URL(path, base), { method, headers, agent: false }, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => done({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
+    });
+    outgoing.on('error', fail);
+    outgoing.end();
+  });
+}
+
+/**
+ * Stand in for app.pullboard.dev and this computer's default view address inside one Chrome. Documents come from the
+ * relay's real page handler, or, for an address with ?plain, the view's own page without the relay's screens. A
+ * request to 127.0.0.1:4890 is refused while no view runs, held while the browser is asking (as Chrome holds it until
+ * the person answers), and otherwise passed to the view the test started on its own port.
+ */
+async function openBoardStand(chrome, view) {
+  const stand = { signedIn: false, linked: [], local: null, hold: false, held: [], failures: [] };
+  const client = 'export function rememberPairing() { return null; }\nexport async function createTransport() { return { async request(path) { if (path === "/api/v1/boards") return { version: 1, boards: [], warnings: [] }; throw new Error("no paired board"); } }; }\n';
+  const relay = createRelayBrowserHandler({ authenticate: async () => { if (stand.signedIn) return { kind: 'session' }; throw new Refused('AUTH_REQUIRED', 'Sign in.'); } });
+  const send = (requestId, status, headers, body) => chrome.send('Fetch.fulfillRequest', { requestId, responseCode: status, responseHeaders: headers, body: Buffer.from(body).toString('base64') });
+  const fulfil = (requestId, type, body, extra = []) => send(requestId, 200, [{ name: 'Content-Type', value: type }, { name: 'Cache-Control', value: 'no-store' }, ...extra], body);
+  /** Answer one request to this computer's default view address from the view the test runs. */
+  const toView = async ({ requestId, asked, address }) => {
+    if (!stand.local) return chrome.send('Fetch.failRequest', { requestId, errorReason: 'ConnectionRefused' });
+    const reply = await call(stand.local, address.pathname + address.search, { method: asked.method, headers: Object.fromEntries(Object.entries(asked.headers).filter(([name]) => name.toLowerCase() !== 'host')) });
+    return send(requestId, reply.status, Object.entries(reply.headers).filter(([name]) => !['content-length', 'transfer-encoding', 'connection', 'keep-alive', 'date'].includes(name)).map(([name, value]) => ({ name, value: String(value) })), reply.body);
+  };
+  const listener = ({ data }) => {
+    const message = JSON.parse(String(data));
+    if (message.method !== 'Fetch.requestPaused') return;
+    const { requestId, request: asked } = message.params;
+    const address = new URL(asked.url);
+    (async () => {
+      if (address.origin === LOCAL) {
+        if (stand.hold) { stand.held.push({ requestId, asked, address }); return; }
+        return toView({ requestId, asked, address });
+      }
+      if (address.pathname === '/relay/client.js') return fulfil(requestId, 'text/javascript', client);
+      if (address.pathname === '/api/v1/boards') return fulfil(requestId, 'application/json', JSON.stringify({ version: 1, boards: stand.linked, warnings: [] }));
+      const connect = "connect-src 'self' " + LOCAL + ' http://localhost:4890 ' + view.base;
+      if (address.pathname === '/' && address.search.startsWith('?plain')) {
+        // A phone, as the relay's page names it before first paint (#757), for the view's own drawing of its screens.
+        const page = cockpitPage('', { readOnly: true, requests: stand.signedIn, transportModule: stand.signedIn ? '/relay/client.js' : '/relay/sign-in.js', apiHeaders: {}, stylesheet: '/view.css', hostedLocal: true, relaySession: stand.signedIn, signIn: '/auth/github/start' })
+          .replace('</head>', address.search.includes('phone') ? "<script>document.documentElement.dataset.relayDevice = 'phone';</script>\n</head>" : '</head>');
+        return fulfil(requestId, 'text/html; charset=utf-8', page, [{ name: 'Content-Security-Policy', value: connect + "; frame-ancestors 'none'" }]);
+      }
+      let head = {}, body = '';
+      const handled = await relay({ method: 'GET', url: address.pathname, headers: {} }, { writeHead: (status, headers) => { head = headers; }, end: (content) => { body = content ?? ''; } });
+      if (!handled) return chrome.send('Fetch.failRequest', { requestId, errorReason: 'Failed' });
+      return fulfil(requestId, head['content-type'], body, [{ name: 'Content-Security-Policy', value: head['content-security-policy'].replace("connect-src 'self'", "connect-src 'self' " + view.base) }]);
+    })().catch((error) => stand.failures.push(error.message));
+  };
+  chrome.socket.addEventListener('message', listener);
+  await chrome.send('Fetch.enable', { patterns: [{ urlPattern: HOSTED + '/*', requestStage: 'Request' }, { urlPattern: LOCAL + '/*', requestStage: 'Request' }] });
+  // The browser's answer about local network access, per load: ?asking asks, ?blocked has said no, anything else allows.
+  // window.__access changes the answer on an open page, as the person does in the browser's settings. While the browser
+  // asks, the discovery request waits as long as the person does, so its timeout never fires on those loads.
+  await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+    if (location.origin !== ${JSON.stringify(HOSTED)}) return;
+    const search = location.search;
+    window.__access = search.startsWith('?asking') ? 'prompt' : search.startsWith('?blocked') ? 'denied' : 'granted';
+    const query = navigator.permissions.query.bind(navigator.permissions);
+    navigator.permissions.query = (asked) => ['loopback-network', 'local-network-access'].includes(asked?.name) ? Promise.resolve({ state: window.__access }) : query(asked);
+    if (search.startsWith('?asking') || search.startsWith('?looking')) AbortSignal.timeout = () => new AbortController().signal;
+  })()` });
+  // Chrome itself lets the page reach the view's own port, where the round trip sends it; what the page hears of the
+  // permission is the override above. Its names differ between Chrome versions, so the widest set this one knows is used.
+  for (const permissions of [['loopbackNetwork', 'localNetwork', 'localNetworkAccess'], ['localNetworkAccess']]) {
+    try { await chrome.send('Browser.grantPermissions', { origin: HOSTED, permissions }); break; } catch { /* a name this Chrome does not have */ }
+  }
+  /** Let every held request through, as the person clicking Allow does. */
+  stand.release = async () => {
+    stand.hold = false;
+    const held = stand.held.splice(0);
+    for (const entry of held) await toView(entry);
+  };
+  /** Stop serving the stand-in. */
+  stand.stop = async () => {
+    chrome.socket.removeEventListener('message', listener);
+    await chrome.send('Fetch.disable');
+  };
+  return stand;
+}
+
+// What one open-board screen shows: its state, every visible heading, the words a person reads, what stands around it,
+// and the parts the approved screens are made of, with their sizes and colours.
+const SHOWN = `JSON.stringify((() => {
+  const on = (element) => Boolean(element) && element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden';
+  const all = (selector) => [...document.querySelectorAll(selector)].filter(on);
+  const height = (element) => Math.round(element.getBoundingClientRect().height);
+  const note = document.getElementById('local-note');
+  const copy = (element) => element.querySelector('button')?.dataset.copy ?? null;
+  return {
+    state: note.dataset.state, shown: on(note),
+    headings: all('h1, h2, h3').map((heading) => heading.textContent.trim()),
+    say: on(document.getElementById('local-note-text')) ? document.getElementById('local-note-text').textContent.trim() : null,
+    text: document.body.innerText,
+    around: ['.side', '.top', '.status', '#relay-notice', '.first', '#relay-screen', '#proj-switch', '[data-pane]'].filter((selector) => all(selector).length),
+    cards: all('#local-note .ob-card').map((card) => ({ kind: card.querySelector('.ob-k').textContent, title: card.querySelector('h2').textContent, text: card.textContent, width: Math.round(card.getBoundingClientRect().width), height: height(card) })),
+    commands: all('#local-note .ob-cmd').map((box) => ({ code: box.querySelector('code').textContent.trim(), copy: copy(box), mono: /mono|Menlo|Consolas/i.test(getComputedStyle(box.querySelector('code')).fontFamily), height: height(box) })),
+    agents: all('#local-note .ob-agent').map((box) => ({ text: box.textContent.replace(/Copy$/, '').trim(), copy: copy(box), height: height(box) })),
+    help: all('#local-note .ob-help').map((strip) => ({ text: strip.textContent.replace(/Copy$/, '').trim(), copy: copy(strip), border: getComputedStyle(strip).borderTopStyle })),
+    github: all('#local-note .ob-gh').map((button) => ({ text: button.textContent.trim(), href: button.getAttribute('href'), height: height(button), background: getComputedStyle(button).backgroundColor })),
+    live: all('#local-note .ob-live').map((line) => line.textContent.trim()),
+    ask: all('#local-note .ob-ask').map((bubble) => bubble.textContent.replace(/\\s+/g, ' ').trim()),
+    steps: all('#local-note .ob-steps li').map((step) => step.textContent.trim()),
+    small: all('#local-note .ob-small').map((line) => line.textContent.trim()),
+    spin: all('#local-note .ob-spin').length,
+    theme: on(document.getElementById('ob-theme')) && Boolean(document.getElementById('ob-theme').closest('header')),
+    controls: all('button, a').map((control) => control.textContent.trim()),
+  };
+})())`;
+
+/** Open the stand-in page at this address, wait for the open-board state it should settle in, and read it. */
+async function openState(chrome, address, state, shot) {
+  await chrome.send('Page.navigate', { url: HOSTED + '/' + address });
+  await chrome.waitFor(`location.search === ${JSON.stringify(address.split('#')[0])} && document.querySelector('#local-note')?.dataset.state === ${JSON.stringify(state)} && !document.querySelector('#local-note').hidden`, 20_000); // budget: hang ceiling for one page load and one refused or held loopback request.
+  const seen = JSON.parse(await chrome.stable(SHOWN));
+  if (shot) {
+    await proofShot(chrome, shot + '-phone', 390);
+    await proofShot(chrome, shot, 1280);
+  }
+  return seen;
+}
+
+/** The checks every open-board screen passes: shown alone, one heading, no Try again and none of the old jargon. */
+function alone(seen, heading, { allow = '' } = {}) {
+  assert.equal(seen.shown, true, `${seen.state}: the screen shows`);
+  assert.deepEqual(seen.headings.filter((text) => !seen.cards.some((card) => card.title === text)), [heading], `${seen.state}: one heading, never stacked with another`);
+  assert.deepEqual(seen.around, [], `${seen.state}: no sidebar, Projects header, tabs, status line, banner or board stands beside it`);
+  assert.doesNotMatch(allow ? seen.text.split(allow).join('') : seen.text, NO_JARGON, `${seen.state}: no Try again, local view, relay or linked in the words a person reads`);
+  assert.ok(!seen.controls.includes('Try again'), `${seen.state}: no Try again button`);
+  assert.equal(seen.theme, true, `${seen.state}: the theme toggle sits in the header`);
+}
+
+test('each open-board state shows alone with its words [N26,H5]', { timeout: 120_000 }, async () => { // budget: hang ceiling for seven hosted page loads in Chrome with screenshots at two widths.
+  const executable = chromeExecutable();
+  assert.ok(executable, 'the open-board check needs real Chrome');
+  const box = machine();
+  project(box, 'open-board-states');
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-open-board-'));
+  let view, chrome, stand;
+  try {
+    view = await startView(box);
+    chrome = await openSnapshotChrome(executable, 'about:blank', profile);
+    stand = await openBoardStand(chrome, view);
+    // A computer's window, wide enough for the two cards to stand side by side.
+    await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+
+    // Finding your boards: the page looks on this computer, and the answer has not come yet.
+    stand.hold = true;
+    const looking = await openState(chrome, '?looking', 'looking', 'open-board-looking');
+    alone(looking, 'Finding your boards…');
+    assert.equal(looking.spin, 1, 'a spinner turns while it looks');
+    assert.deepEqual([looking.say, looking.commands, looking.github, looking.help], [null, [], [], []], 'and there is nothing to do yet');
+    await stand.release();
+
+    // Click Allow: the browser asks, the page draws its prompt and waits for the person.
+    stand.hold = true;
+    const asking = await openState(chrome, '?asking', 'asking', 'open-board-asking');
+    alone(asking, 'Click Allow');
+    assert.equal(asking.say, 'Your browser is asking if this page may open the boards on this computer. Your boards stay on this computer.');
+    assert.equal(asking.ask.length, 1, 'the browser\'s prompt is drawn');
+    assert.match(asking.ask[0], /^app\.pullboard\.dev wants to Access other apps and services on this device Block Allow ↑ click this$/, 'with its words and the button to click');
+    assert.deepEqual(asking.live, ['Waiting for you to click Allow'], 'a live line says the page waits');
+    assert.deepEqual(asking.help, [{ text: 'Something not working? Ask your agent“Help me allow Pullboard in my browser.”', copy: 'Help me allow Pullboard in my browser.', border: 'dashed' }], 'a dashed help strip ends the screen with a sentence to copy');
+    await press(chrome, "document.querySelector('#local-note .ob-help button')");
+    await chrome.waitFor("document.querySelector('#local-note .ob-help button').textContent === 'Copied'", 5_000); // budget: hang ceiling for one clipboard write.
+    // The theme toggle in the header turns the page to the other scheme.
+    const before = await chrome.stable('document.documentElement.dataset.scheme');
+    await press(chrome, "document.getElementById('ob-theme')");
+    assert.equal(await chrome.stable('document.documentElement.dataset.scheme'), before === 'dark' ? 'light' : 'dark', 'the header\'s toggle changes the theme');
+    await chrome.stable("(() => { localStorage.removeItem('pb.theme'); return true; })()");
+    stand.held.splice(0);
+    stand.hold = false;
+
+    // Your browser said no: three steps, then the page carries on by itself.
+    const blocked = await openState(chrome, '?blocked', 'blocked', 'open-board-blocked');
+    alone(blocked, 'Your browser said no');
+    assert.equal(blocked.say, 'That\'s fine. Turn it back on in three clicks:');
+    assert.deepEqual(blocked.steps, ['Click the icon left of the address, at the top of this window.', 'Find Local network access, or Apps on this device.', 'Set it to Allow.'], 'three steps');
+    assert.deepEqual(blocked.live, ['Your boards open as soon as it\'s on']);
+    assert.deepEqual(blocked.help, [{ text: 'Something not working? Ask your agent“My browser blocked Pullboard. Help me fix it.”', copy: 'My browser blocked Pullboard. Help me fix it.', border: 'dashed' }]);
+
+    // Where are your projects: nothing runs here and nobody is signed in, so two equal cards say how the paths differ.
+    const absent = await openState(chrome, '?absent', 'not-running', 'open-board-where');
+    alone(absent, 'Where are your projects?');
+    assert.deepEqual(absent.cards.map((card) => [card.kind, card.title]), [['Local only', 'Open them on this computer'], ['Everywhere', 'Open them from any device']], 'the two cards, local only first');
+    assert.match(absent.cards[0].text, /Your boards stay on this computer, and only this computer sees them\. Open a terminal and run:/);
+    assert.match(absent.cards[0].text, /Either way, this page opens your boards by itself\./);
+    assert.match(absent.cards[1].text, /Your boards on your phone and every computer, from the GitHub account you shared them with\./);
+    assert.match(absent.cards[1].text, /Not shared yet\? After you sign in, it shows the one step\./);
+    assert.ok(Math.abs(absent.cards[0].width - absent.cards[1].width) <= 1 && Math.abs(absent.cards[0].height - absent.cards[1].height) <= 1, `the cards are equal: ${JSON.stringify(absent.cards.map((card) => [card.width, card.height]))}`);
+    assert.deepEqual(absent.commands, [{ code: '$pullboard view', copy: 'pullboard view', mono: true, height: 60 }], 'pullboard view in a mono box with a Copy button');
+    assert.deepEqual(absent.agents, [{ text: 'Ask your agent“Help me open my Pullboard board.”', copy: 'Help me open my Pullboard board.', height: 60 }], 'its "or" box asks the agent, at the same height');
+    assert.deepEqual(absent.github, [{ text: 'Sign in with GitHub', href: '/auth/github/start', height: 60, background: 'rgb(31, 35, 40)' }], 'one dark 60 px GitHub button');
+    assert.deepEqual(absent.live, ['Still looking on this computer'], 'a live line says the page keeps looking');
+    await press(chrome, "document.querySelector('#local-note .ob-cmd button')");
+    await chrome.waitFor("document.querySelector('#local-note .ob-cmd button').textContent === 'Copied'", 5_000); // budget: hang ceiling for one clipboard write.
+
+    // A pairing link on a computer, not signed in: the one way that opens boards from any device.
+    const out = await openState(chrome, '?out#board=' + 'b'.repeat(32) + '&key=k1', 'signed-out', 'open-board-sign-in');
+    alone(out, 'Open them from any device');
+    assert.deepEqual(out.github.map((button) => [button.text, button.href, button.height]), [['Sign in with GitHub', '/auth/github/start', 60]]);
+
+    // The phone's first screen, drawn by the view from the state #757 provides: one GitHub button, nothing about this computer.
+    const phone = await openState(chrome, '?plain-phone#board=' + 'b'.repeat(32) + '&key=k1', 'signed-out', 'open-board-phone');
+    const words = RELAY_SCREEN_WORDS;
+    alone(phone, words.signIn.title);
+    assert.equal(phone.say, words.signIn.say);
+    assert.deepEqual(phone.github.map((button) => [button.text, button.height, button.background]), [[words.signIn.action, 60, 'rgb(31, 35, 40)']], 'one dark GitHub button');
+    assert.deepEqual(phone.small, [words.signIn.small]);
+    assert.deepEqual(phone.help.map((strip) => [strip.text, strip.copy, strip.border]), [[words.signIn.help + '“' + words.signIn.ask + '”', words.signIn.ask, 'dashed']]);
+    assert.doesNotMatch(phone.text, /this computer|pullboard view/i, 'a phone hears nothing about this computer or pullboard view');
+
+    // Signed in with nothing shared: the one step on the computer with the projects, and a live waiting line.
+    stand.signedIn = true;
+    const share = await openState(chrome, '?in', 'no-linked', 'open-board-share');
+    alone(share, words.share.title, { allow: words.share.command });
+    assert.equal(share.say, words.share.say);
+    assert.deepEqual(share.commands.map((command) => [command.code, command.copy, command.height]), [['$' + words.share.command, words.share.command, 60]]);
+    assert.deepEqual(share.agents.map((agent) => [agent.text, agent.copy, agent.height]), [[words.share.agent + '“' + words.share.ask + '”', words.share.ask, 60]]);
+    assert.deepEqual(share.small, [words.share.small]);
+    assert.deepEqual(share.live, [words.share.waiting]);
+    assert.deepEqual(chrome.exceptions, [], 'Chrome reports no uncaught exceptions');
+    assert.deepEqual(stand.failures, [], 'the stand-in hosted page was served');
+  } finally {
+    try { if (stand) await stand.stop(); }
+    finally {
+      try { if (chrome) await closeSnapshotChrome(chrome); }
+      finally {
+        try { if (view) await view.stop(); }
+        finally { rmSync(profile, { recursive: true, force: true }); }
+      }
+    }
+  }
+});
+
+test('the page moves on by itself when the view starts [N26,H5]', { timeout: 120_000 }, async () => { // budget: hang ceiling for two hosted loads, a view start, a round trip and the first board reads.
+  const executable = chromeExecutable();
+  assert.ok(executable, 'the open-board check needs real Chrome');
+  const box = machine();
+  const board = project(box, 'open-board-moves');
+  box.run(board.repo, 'add', 'web', 'A board that opens by itself', '--specs', 'G1');
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-open-board-moves-'));
+  let view, chrome, stand;
+  try {
+    // A view runs only to give the stand-in its address; the page cannot reach it until the test says so.
+    view = await startView(box);
+    chrome = await openSnapshotChrome(executable, 'about:blank', profile);
+    stand = await openBoardStand(chrome, view);
+    // Count every press and click, so the move is shown to need none.
+    await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: "(() => { window.__clicks = 0; addEventListener('pointerdown', () => { window.__clicks += 1; }, true); addEventListener('click', () => { window.__clicks += 1; }, true); })()" });
+    const opened = "location.origin === 'https://app.pullboard.dev' && document.querySelector('#chain')?.textContent.includes('A board that opens by itself')";
+
+    // Nothing runs here: Where are your projects?, with its live line. Then the view starts, and the board opens.
+    const absent = await openState(chrome, '?absent', 'not-running');
+    assert.deepEqual(absent.live, ['Still looking on this computer']);
+    assert.ok(!absent.controls.includes('Try again'), 'there is no Try again to press');
+    stand.local = view.base;
+    await chrome.waitFor(opened, 30_000); // budget: hang ceiling for the next re-check, one round trip and the first board read.
+    const shown = JSON.parse(await chrome.stable("JSON.stringify({ note: document.getElementById('local-note').hidden, side: document.querySelector('.side').getClientRects().length > 0, clicks: window.__clicks })"));
+    assert.deepEqual(shown, { note: true, side: true, clicks: 0 }, 'the board shows with its sidebar, the open-board screen gone, and nobody clicked');
+
+    // The browser asks: the discovery waits, as Chrome holds it, and the page says so. The person allows it, and the
+    // board opens with no click on the page.
+    stand.hold = true;
+    await chrome.stable("(() => { sessionStorage.clear(); return true; })()");
+    const asking = await openState(chrome, '?asking', 'asking');
+    assert.deepEqual(asking.live, ['Waiting for you to click Allow']);
+    await chrome.stable("(() => { window.__access = 'granted'; return true; })()");
+    await stand.release();
+    await chrome.waitFor(opened, 30_000); // budget: hang ceiling for the released discovery and the first board read.
+    assert.equal(await chrome.stable('window.__clicks'), 0, 'nobody clicked on the page');
+
+    // The browser said no: once the person turns access back on, the page carries on by itself.
+    await chrome.stable("(() => { sessionStorage.clear(); return true; })()");
+    await openState(chrome, '?blocked', 'blocked');
+    await chrome.stable("(() => { window.__access = 'granted'; return true; })()");
+    await chrome.waitFor(opened, 30_000); // budget: hang ceiling for the next re-check and the first board read.
+    assert.equal(await chrome.stable('window.__clicks'), 0, 'nobody clicked on the page');
+    assert.deepEqual(chrome.exceptions, [], 'Chrome reports no uncaught exceptions');
+    assert.deepEqual(stand.failures, [], 'the stand-in hosted page was served');
+  } finally {
+    try { if (stand) await stand.stop(); }
+    finally {
+      try { if (chrome) await closeSnapshotChrome(chrome); }
+      finally {
+        try { if (view) await view.stop(); }
+        finally { rmSync(profile, { recursive: true, force: true }); }
+      }
+    }
+  }
+});
