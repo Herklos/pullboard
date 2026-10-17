@@ -192,6 +192,18 @@ test('a child process listen denial reads as sandbox blocked [C7,B26]', (t) => {
   assert.match(output, /listen \(EPERM\)/u);
   assert.doesNotMatch(output, /GATE_RED/u);
 
+  const explanatory = "  assert.equal(child.status, 0, `App exited before listening (code ${child.status}, signal ${child.signal}):\\n${child.stderr}`);";
+  const original = childListenerTestSource();
+  assert.equal(original.split(explanatory).length, 2, 'replace exactly one explanatory message');
+  const bareSource = original.replace(explanatory, '  assert.equal(child.status, 0, child.stderr);');
+  const bareBox = childFailureSubmitBox(t, bareSource);
+  const bare = bareBox.run('submit', '1');
+  const bareOutput = `${bare.out}\n${bare.err}`;
+  assert.equal(bare.code, 1, bareOutput);
+  assert.match(bareOutput, /SANDBOX_BLOCKED/u, 'bare stderr with structured fatal fields still names the denial');
+  assert.match(bareOutput, /listen \(EPERM\)/u);
+  assert.doesNotMatch(bareOutput, /GATE_RED/u);
+
   const pythonBox = childFailureSubmitBox(t, childPythonTestSource());
   pythonBox.env.CHILD_PERMISSION_PATH = join(pythonBox.dir, 'outside-python-denial.txt');
   const python = pythonBox.run('submit', '1');
@@ -1257,4 +1269,43 @@ test('nested TAP child denials require bounded matching fatal details [C7,B26]',
     'an oversized error block is not classified');
   assert.equal(sandboxBlockedOperation(box.root, tapChildError(), { includeFilePaths: false }), null,
     'file-path classification remains disabled when requested');
+
+  /** Build stderr-only Node fatal TAP while varying its proof fields. */
+  function tapBareNodeError({ code = 'EPERM', syscall = 'listen', version = true, stack = true,
+    footer = '1 !== 0', parentCode = 'ERR_ASSERTION', trailing = '', object = true, closeObject = true, exitProse = '' } = {}) {
+    return [
+      'TAP version 13',
+      'not ok 1 - child listens',
+      '  ---',
+      "  failureType: 'testCodeFailure'",
+      '  error: |-',
+      ...(exitProse ? [`    ${exitProse}`] : []),
+      '    Error: listen EPERM: operation not permitted 127.0.0.1:0',
+      ...(stack ? ['        at Server.listen (node:net:2000:7)'] : []),
+      ...(object ? ['        {', `          code: '${code}',`, `          syscall: '${syscall}',`,"          address: '127.0.0.1',",'          port: 0', ...(closeObject ? ['        }'] : [])] : []),
+      ...(version ? ['    Node.js v22.22.2'] : []),
+      ...(trailing ? [`    ${trailing}`] : []),
+      '',
+      `    ${footer}`,
+      `  code: '${parentCode}'`,
+      '  ...',
+    ].join('\n');
+  }
+  assert.equal(sandboxBlockedOperation(box.root, tapBareNodeError()), 'listen (EPERM)',
+    'bare stderr remains recognizable when the Node fatal fields and assertion prove nonzero exit');
+  for (const [label, options] of [
+    ['missing stack', { stack: false }],
+    ['missing Node version', { version: false }],
+    ['missing structured error fields', { object: false }],
+    ['truncated structured object', { closeObject: false }],
+    ['mismatched structured code', { code: 'EACCES' }],
+    ['mismatched structured syscall', { syscall: 'open' }],
+    ['non-assertion parent', { parentCode: 'ERR_TEST_FAILURE' }],
+    ['zero exit footer', { footer: '0 !== 0' }],
+    ['zero child-exit prose cannot fall back to footer', { exitProse: 'App exited before listening (code 0, signal null):' }],
+    ['invalid child-exit prose cannot fall back to footer', { exitProse: 'App exited before listening (code unknown, signal null):' }],
+    ['unrelated trailing error', { trailing: 'Error: later ordinary failure' }],
+  ]) {
+    assert.equal(sandboxBlockedOperation(box.root, tapBareNodeError(options)), null, `${label} stays unclassified`);
+  }
 });
