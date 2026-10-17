@@ -4046,6 +4046,11 @@ async function runCommand(argv, io) {
       return 0;
     }
     if (command === 'gate') {
+      if (first !== undefined || second !== undefined || rest.length > 0) {
+        const words = [first, second, ...rest].filter((word) => word !== undefined);
+        const next = 'use pullboard resources for status, or pullboard gate with no extra words to run the gate';
+        throw new Refused('GATE_ARGUMENT', `pullboard gate does not accept extra words: ${words.join(' ')}. Use pullboard resources for status, or pullboard gate with no extra words to run the gate.`, next);
+      }
       const ctx = context(io);
       let config;
       try { config = mainPolicy(ctx.info.root).config; }
