@@ -11,6 +11,7 @@ import { configFromSource, defaults } from './config.js';
 import { blockedPaths, secretsIn } from './hooks.js';
 import { cleanGitEnvironment, headCommit, headTree, isClean, repoInfo, untracked } from './git.js';
 import { Refused } from './refused.js';
+import { remoteFileDenial } from './sandbox-denial.js';
 
 // Budget: 64 MiB bounds worst-case JSON bridge escaping below Node string limits.
 const MAX_OUTPUT_BYTES = 64 * 1024 ** 2;
@@ -18,7 +19,7 @@ const MAX_BLOB_BYTES = 8 * 1024 ** 2;
 const MAX_HISTORY_TAGS = 1_024;
 const MAX_TAG_CHAIN = 8;
 const TOOL_ROOT = fileURLToPath(new URL('../', import.meta.url));
-const RUNTIME_NAMES = ['resources.js', 'git.js', 'machine-home.js', 'refused.js', 'process-census.js', 'queue-settings.js', 'queue-order.js'];
+const RUNTIME_NAMES = ['resources.js', 'git.js', 'machine-home.js', 'refused.js', 'process-census.js', 'queue-settings.js', 'queue-order.js', 'sandbox-denial.js'];
 
 /** Validate an SSH destination as one argument, never a command or an SSH option. */
 export function validateRunner(value) {
@@ -434,7 +435,10 @@ function resultFrom(request, result) {
     // The runner answered, so this is a named failure, not a dropped transport to requeue.
     throw new Refused('RUNNER_SETUP_REFUSED', `runner ${request.runner.host} refused this run before it started: [${receipt.refused}] from its own resource pool; run pullboard resources and pullboard settings on ${request.runner.host} to fix that pool, then run again`);
   }
-  return { isGreen: receipt.code === 0 && !receipt.signal, output: output.toString('utf8'),
+  // The runner classified any file denial against its own checkout; only its evidence is trusted here.
+  const sandboxBlocked = receipt.denial === undefined ? null : remoteFileDenial(receipt.denial, request.runner.host);
+  if (receipt.denial !== undefined && (!sandboxBlocked || receipt.code === 0)) throw new RunnerDropped(request.runner.host);
+  return { isGreen: receipt.code === 0 && !receipt.signal, output: output.toString('utf8'), sandboxBlocked,
     seconds: Math.round(receipt.wallMs / 1000), exitCode: receipt.code,
     executionRunner: request.runner.host, executionRoot: receipt.root, remoteWallMs: receipt.wallMs,
     executionSource: { commit: receipt.commit, tree: receipt.tree, tooling: request.spec.tooling } };

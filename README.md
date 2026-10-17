@@ -322,6 +322,7 @@ The reference docs, in reading order.
 - [Lifecycle](docs/lifecycle.md): how an item moves, state by state.
 - [CLI JSON API](docs/api.md): every command's output, for scripts and tools.
 - [Stored formats](docs/formats.md): the board's files, exports and their versions.
+- [Relay architecture](docs/architecture.md): who is who on the relay, what it stores and what it can read.
 - [RFCs](docs/rfcs/README.md): the design decisions, and why.
 
 ### License

@@ -2,7 +2,7 @@
 /**
  * Run the test suite with a private home, no inherited Git identity or config, and a refusing CLI shim.
  */
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, lstatSync, realpathSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, delimiter, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile, execFileSync, spawnSync } from 'node:child_process';
@@ -220,6 +220,8 @@ function testEnvironment(sandbox, gateMarkers = {}) {
   env.PULLBOARD_HOME = home;
   env.PULLBOARD_MODEL = 'Test Model';
   env.PULLBOARD_MACHINE_HOME = join(sandbox, 'machine');
+  // init and resume start a background view by default; a test opts back in by deleting this.
+  env.PULLBOARD_VIEW_BACKGROUND = '0';
   env.TMPDIR = sandbox;
   env.TMP = sandbox;
   env.TEMP = sandbox;
@@ -1147,16 +1149,21 @@ async function runLandingTests(args, env, concurrency) {
 }
 
 let nodeOptionsWithValues;
+let knownNodeOptions;
 
 /** Read Node option arity from this runtime so supported option values cannot bypass the machine pool. */
 function optionTakesValue(argument) {
   if (!nodeOptionsWithValues) {
     nodeOptionsWithValues = new Set();
+    knownNodeOptions = new Set();
     const help = execFileSync(process.execPath, ['--help'], { encoding: 'utf8' });
     for (const line of help.split(/\r?\n/u)) {
       const signature = line.match(/^  (-\S.*?)(?: {2,}|$)/u)?.[1];
-      if (!signature || !signature.includes('=') || signature.includes('[=')) continue;
-      for (const option of signature.matchAll(/--?[A-Za-z][A-Za-z0-9-]*/gu)) nodeOptionsWithValues.add(option[0]);
+      if (!signature) continue;
+      for (const option of signature.matchAll(/--?[A-Za-z][A-Za-z0-9-]*/gu)) {
+        knownNodeOptions.add(option[0]);
+        if (signature.includes('=') && !signature.includes('[=')) nodeOptionsWithValues.add(option[0]);
+      }
     }
 
   }
@@ -1194,6 +1201,30 @@ function explicitTestFiles(args) {
     files.push(argument);
   }
   return files;
+}
+
+/** Admit only explicit regular in-root files; directories and uncertain options remain ordinary. */
+function namesOnlyTestFiles(args) {
+  let takesValue = false;
+  for (const argument of args) {
+    if (takesValue) { takesValue = false; continue; }
+    if (argument === '--') break;
+    if (!argument.startsWith('-')) continue;
+    const option = argument.split('=', 1)[0].replaceAll('_', '-');
+    const requiresValue = optionTakesValue(option);
+    if (!knownNodeOptions.has(option)) return false;
+    if (!argument.includes('=')) takesValue = requiresValue;
+  }
+  if (takesValue || process.env.NODE_OPTIONS) return false;
+  const files = explicitTestFiles(args);
+  if (!files.length) return false;
+  try {
+    const root = realpathSync(process.cwd());
+    return files.every(file => {
+      const path = resolve(root, file);
+      return lstatSync(path).isFile() && realpathSync(path).startsWith(root + sep);
+    });
+  } catch { return false; }
 }
 
 /** Select repository test entry files while keeping imported helpers out of direct discovery. */
@@ -1255,7 +1286,10 @@ async function executeTests(args, sandbox, gateMarkers, fullSuite, concurrency) 
   // This is an inner file limit; the real machine gate/browser lease remains unchanged.
   env.PULLBOARD_TEST_BROWSER_RESOURCE = 'test-browser-files:' + randomUUID();
   env.PULLBOARD_TEST_BROWSER_CAPACITY = String(concurrency.browser);
+  // Each file's worker classifies itself; the machine setting reaches it here, since tests get a private machine home.
+  env.PULLBOARD_TEST_BROWSER_BY_LAUNCH = concurrency.byLaunch ? '1' : '';
   delete env.PULLBOARD_TEST_BROWSER_OWNER_PID;
+  delete env.PULLBOARD_TEST_BROWSER_SLOT;
   let selectedArgs = args;
   if (fullSuite) {
     let files;
@@ -1294,7 +1328,8 @@ async function main(args) {
   try {
     testTimeoutMs();
     const { testConcurrency } = await import('../src/gate.js');
-    concurrency = testConcurrency(process.cwd());
+    const { browserByLaunchEnabled } = await import('../src/settings.js');
+    concurrency = { ...testConcurrency(process.cwd()), byLaunch: browserByLaunchEnabled() };
   } catch (error) {
     process.stderr.write(`${error.message}\n`);
     process.exitCode = 1;
@@ -1308,6 +1343,7 @@ async function main(args) {
   }
   args = sharding.args;
   const fullSuite = !hasTestFiles(args);
+  const shortEligible = namesOnlyTestFiles(args);
   let browser = fullSuite;
   if (!browser) {
     const { testsNeedBrowser } = await import('../src/browser-admission.js');
@@ -1349,7 +1385,7 @@ async function main(args) {
       }
     }
     if (scopedMarker) {
-      const inherited = inheritedGateSlot({ root: process.cwd(), browser });
+      const inherited = inheritedGateSlot({ root: process.cwd(), browser, namedFiles: shortEligible });
       if (inherited) await run(gateSlotEnvironment(inherited));
       else await acquire();
     } else if (legacyHeld) {
@@ -1377,7 +1413,7 @@ async function main(args) {
         process.stdout.write(result.output);
         process.exitCode = result.exitCode;
       }, {
-        browser, kind: fullSuite ? 'gate' : 'focused',
+        browser, kind: fullSuite ? 'gate' : 'focused', shortEligible,
         remote: Boolean(canShipRunner),
         onWait: ({ holders, runnerUnavailable }) => {
           if (runnerUnavailable) {
@@ -1444,13 +1480,23 @@ if (process.argv[1] && resolve(process.argv[1]) === runner) {
       && !process.env.PULLBOARD_TEST_BROWSER_OWNER_PID) {
     // The worker is announced to #589 before it can wait here; admission remains before file import/body.
     process.env.PULLBOARD_TEST_BROWSER_OWNER_PID = String(process.pid);
+    // The test body never sees the setting itself: its own fixtures classify with their own machine settings.
+    const byLaunch = process.env.PULLBOARD_TEST_BROWSER_BY_LAUNCH === '1';
+    delete process.env.PULLBOARD_TEST_BROWSER_BY_LAUNCH;
     const { testsNeedBrowser } = await import('../src/browser-admission.js');
-    if (await testsNeedBrowser(process.cwd(), [process.argv[1]])) {
+    if (await testsNeedBrowser(process.cwd(), [process.argv[1]], { byLaunch })) {
       const { takeResource } = await import('../src/resources.js');
       const lease = await takeResource({ name: process.env.PULLBOARD_TEST_BROWSER_RESOURCE,
         capacity: Number(process.env.PULLBOARD_TEST_BROWSER_CAPACITY), kind: 'test-browser-file', root: process.cwd() });
       // Hold through file cleanup and process exit, including abort/watchdog paths.
       process.once('exit', () => lease.release());
+      if (byLaunch) process.env.PULLBOARD_TEST_BROWSER_SLOT = 'held';
+    } else if (byLaunch) {
+      // Any browser spawn from this file or a Node child it starts is refused by name (BROWSER_SLOT_REQUIRED).
+      process.env.PULLBOARD_TEST_BROWSER_SLOT = 'none';
+      const guard = new URL('../src/browser-slot-guard.js', import.meta.url);
+      await import(guard.href);
+      process.env.NODE_OPTIONS = [process.env.NODE_OPTIONS, `--import=${guard.href}`].filter(Boolean).join(' ');
     }
   }
   if (!landingWorker) installTestWatchdog();

@@ -161,7 +161,8 @@ function project() {
   const initialized = json(box, repo, 'init');
   if (inheritedModel !== undefined) box.env.PULLBOARD_MODEL = inheritedModel;
   const configFile = join(repo, 'pullboard.json');
-  const config = JSON.parse(readFileSync(configFile, 'utf8'));
+  // These fixtures prove API shapes with "true" checks, so they keep a board with no hold setting.
+  const { checks: _hold, ...config } = JSON.parse(readFileSync(configFile, 'utf8'));
   writeFileSync(configFile, `${JSON.stringify({
     ...config,
     gate: 'true',
@@ -268,7 +269,7 @@ function json(box, cwd, command, args = [], subcommand) {
   const result = box.run(cwd, command, ...args, '--json');
   assert.equal(result.status, 0, `${command} ${args.join(' ')}: ${result.stderr}${result.stdout}`);
   const document = JSON.parse(result.stdout);
-  if (command === 'check') {
+  if (command === 'check' && subcommand !== 'accept') {
     assert.equal(result.stderr, `check #${document.id} set by ${document.by} (unknown): ${document.check}\n`, 'check attribution is visible before execution while stdout remains one JSON document');
   } else assert.equal(result.stderr, '', `${command} --json must keep stderr empty`);
   assert.equal(document.version, 1, `${command} --json has a version 1 envelope`);
@@ -625,8 +626,8 @@ test('[A1] command results match the catalog across roots and subcommands', () =
   json(box, repo, 'spec', ['show', 'G1'], 'show');
   json(box, repo, 'spec', ['unmet'], 'unmet');
   assert.equal(json(box, repo, 'spec', ['draft', 'A draft API catalogue row'], 'draft').id, 'G2');
-  writeFileSync(join(box.dir, 'catalog-blueprint.json'), `${JSON.stringify({ blueprint: 1, name: 'catalog', title: 'Catalog', version: 1, rules: [{ key: 'R1', text: 'A catalog rule.', why: 'the API lists it.' }] })}\n`);
-  assert.equal(json(box, repo, 'blueprint', ['add', join(box.dir, 'catalog-blueprint.json')], 'add').rows[0].status, 'draft');
+  for (const [name, kind, rules] of [['catalog', undefined, [['R1', 'A catalog rule.']]], ['catalog-practice', 'practice', [['R1', 'A catalog rule.'], ['R2', 'A practice catalog rule.']]]]) writeFileSync(join(box.dir, `${name}-blueprint.json`), `${JSON.stringify({ blueprint: 1, name, title: name, version: 1, kind, rules: rules.map(([key, text]) => ({ key, text, why: 'the API lists it.' })) })}\n`);
+  assert.deepEqual((({ rows, blueprints }) => [rows[0].status, rows.length, blueprints.length, blueprints[1].shared.length])(json(box, repo, 'blueprint', ['add', join(box.dir, 'catalog-blueprint.json'), '--blueprint', join(box.dir, 'catalog-practice-blueprint.json')], 'add')), ['draft', 2, 2, 1], 'two blueprints in one add land as one result, a shared rule drafted once (#720)');
   mkdirSync(join(repo, 'test'));
   writeFileSync(join(repo, 'test', 'proof.test.js'), "import { test } from 'node:test';\ntest('proof [G1]', () => {});\n");
   box.git(repo, 'add', 'SPEC.md', 'test/proof.test.js');
@@ -984,6 +985,7 @@ test('[A1] every catalog command and subcommand has a real CLI exercise', () => 
   const source = project();
   const target = project();
   const document = json(source, source.repo, 'export');
+  assert.match(json(source, source.repo, 'digest').markdown, /^# Board briefing: /u);
   const file = join(source.dir, 'board.json');
   writeFileSync(file, JSON.stringify(document));
   json(source, target.repo, 'import', [file]);
@@ -1010,6 +1012,7 @@ test('[A1] every catalog command and subcommand has a real CLI exercise', () => 
   json(source, source.repo, 'milestone', ['remove', 'Later'], 'remove');
   json(source, source.repo, 'milestone', ['remove', 'Release'], 'remove');
   const reopenItem = json(source, source.repo, 'add', ['coordinator', 'Reopen catalog item', '--criterion', 'Exercise the versioned reopen result.', '--check', 'true'], 'add').item;
+  assert.equal(json(source, source.repo, 'check', ['accept', String(reopenItem.item_id)], 'accept').check, 'true', 'the person accepts the check as it reads');
   json(source, source.repo, 'claim', [String(reopenItem.item_id)]);
   json(source, source.repo, 'submit', [String(reopenItem.item_id)]);
   json(source, source.repo, 'reopen', [String(reopenItem.item_id), '--note', 'exercise the versioned reopen result']);
