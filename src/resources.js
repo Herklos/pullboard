@@ -1,12 +1,14 @@
-/** Machine and repository queues persist leases; landings go first, then eligible waiters in arrival order [Q1,Q2,Q3]. */
+/** Machine and repository queues persist leases; landings first, then arrival order, or by class (landing, review, submit, other) aging up over time where the machine opts in [Q1,Q2,Q3]. */
 import { mkdirSync, realpathSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { readFile, readlink } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { repoInfo } from './git.js';
 import { machineHome, withMachineHomeWrite } from './machine-home.js';
 import { Refused } from './refused.js';
+import { gateQueueSettings } from './queue-settings.js';
 
 const LEASE_MS = 20_000;
 const HEARTBEAT_MS = 3_000;
@@ -99,6 +101,10 @@ function openQueue(file) {
       if (table === 'holder' && !columns.includes('runner')) db.exec("ALTER TABLE holder ADD COLUMN runner TEXT NOT NULL DEFAULT ''");
       if (table === 'waiter' && !columns.includes('remote')) db.exec('ALTER TABLE waiter ADD COLUMN remote INTEGER NOT NULL DEFAULT 0');
     }
+    // Marks a waiter whose process admits by class; an older pullboard leaves it 0.
+    if (!db.prepare('PRAGMA table_info(waiter)').all().some(({ name }) => name === 'classed')) {
+      db.exec('ALTER TABLE waiter ADD COLUMN classed INTEGER NOT NULL DEFAULT 0');
+    }
     // Older runner-aware builds stored remote leases as ordinary gate holders. Move them
     // into their host namespace so old readers of name='gate' continue to see local use only.
     db.exec(`INSERT INTO resource(name, capacity)
@@ -190,8 +196,93 @@ function update(db, action) {
   }
 }
 
-/** Current holders and the landing-first line, then every other kind in arrival order. */
-function snapshot(db, name) {
+/** Admission classes, most urgent first. */
+export const QUEUE_CLASSES = ['landing', 'review', 'submit', 'other'];
+/** By default a waiter moves up one class for every this long it has waited, so no class starves. */
+export const QUEUE_AGE_MS = 30 * 60_000;
+/** Landings first, then arrival: the order every pool keeps unless the machine opts in to reviews first. */
+const ARRIVAL_ORDER = Object.freeze({ reviewsFirst: false, ageMs: QUEUE_AGE_MS });
+
+/**
+ * The admission order a pool uses now. Only the machine pool follows the machine settings
+ * (gate.queue.reviewsFirst and gate.queue.agingMinutes); it is read on every poll so each process
+ * sharing the pool ranks the line the same way, even right after the setting changes.
+ *
+ * @param {'machine'|'repo'|'board'} scope
+ * @returns {{ reviewsFirst: boolean, ageMs: number }}
+ */
+function queueOrder(scope) {
+  if (scope !== 'machine') return ARRIVAL_ORDER;
+  const { reviewsFirst, agingMinutes } = gateQueueSettings();
+  return { reviewsFirst, ageMs: agingMinutes * 60_000 };
+}
+
+/**
+ * A waiter's admission class: its declared class from the run it names, and the class it holds now
+ * after aging up one class per ageMs waited (QUEUE_AGE_MS unless the machine sets agingMinutes). Landings come first, then reviews (they unblock
+ * landing), then submits and item checks, then focused, diagnostic and every other run.
+ *
+ * @param {{ landing?: number|boolean, itemCheck?: number|boolean, diagnostic?: number|boolean, kind?: string, since?: string }} entry
+ * @param {number} [now] - The clock reading to age against; injectable so tests need not wait.
+ * @param {number} [ageMs] - How long a waiter waits before it moves up one class.
+ * @returns {{ base: number, effective: number, name: string, declared: string }}
+ */
+export function queueClass(entry, now = Date.now(), ageMs = QUEUE_AGE_MS) {
+  const kind = entry.kind ?? '';
+  const base = entry.landing === true || entry.landing === 1 ? 0
+    : kind === 'review' ? 1
+      : !(entry.diagnostic === true || entry.diagnostic === 1) && (entry.itemCheck === true || entry.itemCheck === 1 || kind === 'submit' || kind === 'check') ? 2
+        : 3;
+  const waited = Math.max(0, now - (Date.parse(entry.since ?? '') || now));
+  const effective = Math.max(0, base - Math.floor(waited / ageMs));
+  return { base, effective, name: QUEUE_CLASSES[effective], declared: QUEUE_CLASSES[base] };
+}
+
+/**
+ * Whether a line admits by class: only while the machine opts in to reviews first and every
+ * waiter in it was queued by a process that admits by class (see admissionRank for why).
+ *
+ * @param {Array<{ classed?: number }>} waiters - The whole line for one resource.
+ * @param {{ reviewsFirst: boolean }} order - The pool's admission order setting.
+ * @returns {boolean}
+ */
+function classOrderInEffect(waiters, order) {
+  return order.reviewsFirst && waiters.every((waiter) => waiter.classed === 1);
+}
+
+/**
+ * The classed marker this process writes on its waiter: 1 only while it admits by class order.
+ * Why not always 1: a #651-only process reads classed=1 on every waiter as "everyone admits by
+ * class" and ranks by class, while a process with reviewsFirst off ranks by arrival; the two would
+ * disagree and a free slot could stay empty. Writing 0 with the setting off makes every process,
+ * old or new, fall back to arrival order together.
+ *
+ * @param {{ reviewsFirst: boolean }} order - This process's admission order setting, read this poll.
+ * @returns {0|1}
+ */
+function classedMarker(order) {
+  return order.reviewsFirst ? 1 : 0;
+}
+
+/**
+ * The admission rank every process in this queue agrees on. Class order (with aging) applies only
+ * while the machine opts in to reviews first and every waiter was queued by a process that admits
+ * by class; otherwise landings come first and then arrival. Why: an older pullboard admits
+ * landings first and then by ticket, and two processes ranking the same line differently each
+ * wait for the other while a slot stays empty. With any older waiter queued, everyone falls back
+ * to that older order, so mixed versions on one machine never deadlock.
+ *
+ * @param {Array<{ classed?: number }>} waiters - The whole line for one resource.
+ * @param {number} now
+ * @param {{ reviewsFirst: boolean, ageMs: number }} order - The pool's admission order setting.
+ * @returns {(waiter: object) => number}
+ */
+function admissionRank(waiters, now, order) {
+  return classOrderInEffect(waiters, order) ? (waiter) => queueClass(waiter, now, order.ageMs).effective : (waiter) => (waiter.landing === 1 ? 0 : 1);
+}
+
+/** Current holders and the waiting line in admission order, each waiter naming its class (aged only while class order is on). */
+function snapshot(db, name, order = ARRIVAL_ORDER, now = Date.now()) {
   /** Preserve older public entries while naming diagnostics as a distinct queue class. */
   const project = ({ diagnostic, browser, remote, runner, item, kind, ...entry }) => ({ ...entry, landing: entry.landing === 1,
     itemCheck: entry.itemCheck === 1 && diagnostic !== 1, ...(diagnostic === 1 ? { diagnostic: true } : {}),
@@ -204,14 +295,23 @@ function snapshot(db, name) {
   const holderWhere = runnerHost ? 'name = ?' : where;
   const holderValues = [sourceName];
   const holders = db.prepare(`SELECT agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, runner, item, kind FROM holder WHERE ${holderWhere} ORDER BY since, token`).all(...holderValues).map(project);
-  const line = db.prepare(`SELECT agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, remote, item, kind FROM waiter WHERE ${where} ORDER BY landing DESC, ticket`).all(sourceName).map(project);
-  return { holders, line };
+  const queued = db.prepare('SELECT classed FROM waiter WHERE name = ?').all(sourceName);
+  const rank = admissionRank(queued, now, order);
+  const ageMs = order.reviewsFirst ? order.ageMs : Infinity;
+  const line = db.prepare(`SELECT ticket, agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, remote, item, kind, classed FROM waiter WHERE ${where}`).all(sourceName)
+    .sort((left, right) => rank(left) - rank(right) || left.ticket - right.ticket)
+    .map(({ ticket, classed, ...entry }) => {
+      const current = queueClass(entry, now, ageMs);
+      return { ...project(entry), queueClass: current.name, ...(current.effective < current.base ? { agedFrom: current.declared } : {}) };
+    });
+  // With reviews first on, an older pullboard in the line means everyone admits in arrival order until it leaves.
+  return { holders, line, ...(order.reviewsFirst && queued.some((waiter) => waiter.classed !== 1) ? { order: 'arrival' } : {}) };
 }
 
 /** Count reported or admissible queue position separately so blocked work cannot distort the visible line. */
-function waiterPosition(db, name, ticket, { eligibleOnly = false } = {}) {
+function waiterPosition(db, name, ticket, { eligibleOnly = false, now = Date.now(), order = ARRIVAL_ORDER } = {}) {
   const queueName = name === 'browser' ? 'gate' : name;
-  const waiters = db.prepare('SELECT ticket, pid, agent, repo, landing, item_check AS itemCheck, browser FROM waiter WHERE name = ? ORDER BY ticket').all(queueName);
+  const waiters = db.prepare('SELECT ticket, pid, agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, kind, classed FROM waiter WHERE name = ? ORDER BY ticket').all(queueName);
   const holders = db.prepare('SELECT pid, agent, repo FROM holder WHERE name = ?').all(queueName);
   const browserCapacity = db.prepare("SELECT capacity FROM resource WHERE name = 'browser'").get()?.capacity ?? 1;
   const browserBusy = db.prepare("SELECT COUNT(*) AS count FROM holder WHERE name = 'gate' AND browser = 1").get().count >= browserCapacity;
@@ -220,8 +320,8 @@ function waiterPosition(db, name, ticket, { eligibleOnly = false } = {}) {
   /** Leave a waiting independent landing a slot before a holder takes another lease. */
   const blockedByLanding = (waiter) => holdsSlot(waiter)
     && waiters.some((other) => other.landing === 1 && other.pid !== waiter.pid);
-  /** Map queue entries to their declared precedence class. */
-  const rank = (waiter) => waiter.landing === 1 ? 0 : 1;
+  /** Map queue entries to the admission rank every process in this line agrees on. */
+  const rank = admissionRank(waiters, now, order);
   const line = name === 'browser' ? waiters.filter((waiter) => waiter.browser === 1) : waiters;
   const considered = line.filter((waiter) => !blockedByLanding(waiter)
     // Browser availability affects admission only; reported positions retain every browser waiter.
@@ -252,9 +352,27 @@ function validatedRunners(value) {
   });
 }
 
-/** Find the earliest compatible free executor while allowing CPU waiters past browser-only blocks. */
-function gateAdmission(db, ticket, capacity, runners) {
-  const waiters = db.prepare("SELECT ticket, pid, landing, browser, remote FROM waiter WHERE name = 'gate' ORDER BY landing DESC, ticket").all();
+/**
+ * Find the earliest compatible free executor while allowing CPU waiters past browser-only blocks.
+ * Local and remote slots are offered in one admission order, the rank that snapshot and
+ * waiterPosition report: landings first and then arrival by default, or, where the machine sets
+ * gate.queue.reviewsFirst, the class rank (landing, review, submit, other, aging up) FIFO by ticket
+ * within a class, back to arrival while an older pullboard waits in the line. Why one order: a
+ * second order for runners would let a focused run take a remote slot ahead of a review that
+ * could also run there.
+ *
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @param {number} ticket - The waiter asking for admission.
+ * @param {number} capacity - Local gate slots.
+ * @param {Array<{host:string,slots:number,browser:number}>} runners - Validated remote executors.
+ * @param {{ reviewsFirst: boolean, ageMs: number }} [order] - The pool's admission order setting.
+ * @param {number} [now] - The clock reading to age against.
+ * @returns {{host:string,slots:number,browser:number}|null}
+ */
+function gateAdmission(db, ticket, capacity, runners, order = ARRIVAL_ORDER, now = Date.now()) {
+  const queued = db.prepare("SELECT ticket, pid, since, landing, item_check AS itemCheck, diagnostic, browser, remote, kind, classed FROM waiter WHERE name = 'gate'").all();
+  const rank = admissionRank(queued, now, order);
+  const waiters = queued.sort((left, right) => rank(left) - rank(right) || left.ticket - right.ticket);
   const holders = db.prepare("SELECT pid, landing, browser FROM holder WHERE name = 'gate'").all();
   const localUsed = holders.length;
   const localBrowsers = holders.filter(holder => holder.browser === 1).length;
@@ -342,13 +460,148 @@ export function updateRunnerSettings(host, persist) {
   } finally { db.close(); }
 }
 
+const MEMORY_CACHE_MS = 2_000;
+const MEMORY_COMMAND_TIMEOUT_MS = 2_000;
+const LINUX_CRITICAL_FULL_AVG10 = 10;
+const LINUX_WARN_SOME_AVG10 = 10;
+const memoryCache = new Map();
+
+/** Run a small OS utility asynchronously; a slow or missing tool rejects instead of blocking a run. */
+function readCommand(file, args) {
+  return new Promise((resolveOutput, rejectOutput) => {
+    execFile(file, args, { encoding: 'utf8', timeout: MEMORY_COMMAND_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024, env: { ...process.env, LC_ALL: 'C', LANG: 'C' } },
+      (error, stdout) => (error ? rejectOutput(error) : resolveOutput(stdout)));
+  });
+}
+
+/** Read macOS pressure level, free percentage and size from one sysctl call. */
+async function readDarwinMemory(run) {
+  const [level, freePercent, total] = (await run('/usr/sbin/sysctl', ['-n', 'kern.memorystatus_vm_pressure_level', 'kern.memorystatus_level', 'hw.memsize'])).trim().split(/\s+/u).map(Number);
+  if (![level, freePercent, total].every(Number.isFinite) || total <= 0) throw new Error('sysctl did not report memory pressure');
+  // The kernel's levels are 1 normal, 2 warn and 4 critical; the free percentage is the one Activity Monitor uses.
+  const pressure = level >= 4 ? 'critical' : level >= 2 ? 'warn' : 'normal';
+  return { pressure, availableBytes: Math.round(total * freePercent / 100), totalBytes: total };
+}
+
+/** Read Linux MemAvailable and, where the kernel has it, pressure stall information. */
+async function readLinuxMemory(readText) {
+  const meminfo = await readText('/proc/meminfo');
+  const field = (name) => Number(new RegExp(`^${name}:\\s+(\\d+) kB`, 'mu').exec(meminfo)?.[1]) * 1024;
+  const availableBytes = field('MemAvailable');
+  const totalBytes = field('MemTotal');
+  if (!Number.isFinite(availableBytes) || !Number.isFinite(totalBytes)) throw new Error('/proc/meminfo has no MemAvailable');
+  let pressure = 'unknown';
+  try {
+    const psi = await readText('/proc/pressure/memory');
+    const avg10 = (kind) => Number(new RegExp(`^${kind} avg10=([\\d.]+)`, 'mu').exec(psi)?.[1]);
+    const full = avg10('full');
+    const some = avg10('some');
+    if (Number.isFinite(full) || Number.isFinite(some)) {
+      pressure = full >= LINUX_CRITICAL_FULL_AVG10 ? 'critical' : some >= LINUX_WARN_SOME_AVG10 ? 'warn' : 'normal';
+    }
+  } catch { /* Kernels without PSI still report MemAvailable, which the floor checks. */ }
+  return { pressure, availableBytes, totalBytes };
+}
+
+/** Name the biggest processes by resident memory, with their working directories where the OS allows. */
+async function readBiggestProcesses(platform, run, readLink, count = 3) {
+  const listed = (await run('/bin/ps', ['-e', '-o', 'pid=', '-o', 'rss=', '-o', 'comm='])).split('\n').map((line) => {
+    const match = /^\s*(\d+)\s+(\d+)\s+(.*)$/u.exec(line);
+    // Only the executable's own name is kept: arguments can carry secrets.
+    return match ? { pid: Number(match[1]), bytes: Number(match[2]) * 1024, name: basename(match[3].trim()) } : null;
+  }).filter(Boolean).sort((left, right) => right.bytes - left.bytes).slice(0, count);
+  return Promise.all(listed.map(async (entry) => {
+    let cwd = '';
+    try {
+      if (platform === 'linux') cwd = await readLink(`/proc/${entry.pid}/cwd`);
+      else cwd = /^n(.*)$/mu.exec(await run('/usr/sbin/lsof', ['-a', '-d', 'cwd', '-p', String(entry.pid), '-Fn']))?.[1] ?? '';
+    } catch { /* Another user's process hides its directory; the pid and size still name it. */ }
+    return { ...entry, cwd };
+  }));
+}
+
+/**
+ * Take one reading of the machine's memory: pressure, free bytes and, when asked, the biggest
+ * processes. A platform or tool that cannot answer returns checked: false rather than throwing,
+ * so the pool falls back to counting slots.
+ *
+ * @param {{ platform?: string, processes?: boolean, run?: (file: string, args: string[]) => Promise<string>, readText?: (file: string) => Promise<string>, readLink?: (file: string) => Promise<string> }} [options]
+ * @returns {Promise<{ checked: true, pressure: string, availableBytes: number, totalBytes: number, processes?: object[] } | { checked: false, platform: string, reason: string }>}
+ */
+export async function readMachineMemory({ platform = process.platform, processes = false, run = readCommand, readText = (file) => readFile(file, 'utf8'), readLink = readlink } = {}) {
+  try {
+    let reading;
+    if (platform === 'darwin') reading = await readDarwinMemory(run);
+    else if (platform === 'linux') reading = await readLinuxMemory(readText);
+    else return { checked: false, platform, reason: 'no memory reader for this platform' };
+    if (!processes) return { checked: true, ...reading };
+    let biggest = [];
+    try { biggest = await readBiggestProcesses(platform, run, readLink); } catch { /* The hold still stands without names. */ }
+    return { checked: true, ...reading, processes: biggest };
+  } catch (error) {
+    return { checked: false, platform, reason: String(error?.message ?? error).split('\n')[0] };
+  }
+}
+
+/** Format a byte count the way a person reads memory: MB under a gigabyte, GB above. */
+function memorySize(bytes) {
+  return bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(1)} GB` : `${Math.round(bytes / 1024 ** 2)} MB`;
+}
+
+/**
+ * Decide whether a reading holds the queue and say so in one line. The same line serves a held
+ * run and pullboard resources, so a person sees one description of the machine.
+ *
+ * @param {object} reading - A readMachineMemory result.
+ * @param {number|null} floorBytes - Free memory under which the queue is held; null when the hold is off.
+ * @returns {{ checked: boolean, held: boolean, line: string, warning?: string }}
+ */
+export function memoryVerdict(reading, floorBytes) {
+  if (!reading?.checked) {
+    const warning = `memory: not checked on ${reading?.platform ?? process.platform} (${reading?.reason ?? 'no reading'}); the gate pool admits by slots alone`;
+    return { checked: false, held: false, line: warning, warning };
+  }
+  const off = floorBytes === null;
+  const critical = !off && reading.pressure === 'critical';
+  const low = !off && reading.availableBytes < floorBytes;
+  const held = critical || low;
+  const why = [critical ? 'pressure is critical' : '', low ? 'free memory is under the floor' : ''].filter(Boolean).join(' and ');
+  const pressure = reading.pressure === 'unknown' ? 'pressure not reported' : `pressure ${reading.pressure}`;
+  const state = `${pressure}, ${memorySize(reading.availableBytes)} free of ${memorySize(reading.totalBytes)}${off ? '' : ` (floor ${memorySize(floorBytes)})`}`;
+  const biggest = (reading.processes ?? []).map(({ pid, name, bytes, cwd }) => `pid ${pid} ${name} ${memorySize(bytes)} in ${cwd || 'an unreadable directory'}`).join('; ');
+  const verdict = off ? 'hold off (set gate.memoryFloorMB to turn it on)' : held ? `holding the gate queue because ${why}` : 'admitting';
+  return { checked: true, held, line: `memory: ${verdict}: ${state}${biggest ? `; biggest: ${biggest}` : ''}` };
+}
+
+/**
+ * Build the gate pool's memory check: a cached reading, then the biggest processes only while the
+ * queue is held, so polling stays at one cheap call every couple of seconds.
+ *
+ * @param {{ floorBytes: () => number, read?: typeof readMachineMemory, cacheMs?: number }} options
+ * @returns {() => Promise<{ checked: boolean, held: boolean, line: string, warning?: string }>}
+ */
+export function memoryAdmission({ floorBytes, read = readMachineMemory, cacheMs = MEMORY_CACHE_MS }) {
+  return async () => {
+    const cached = memoryCache.get(read);
+    if (cached && Date.now() - cached.at < cacheMs) return cached.verdict;
+    const floor = floorBytes();
+    let verdict = memoryVerdict(await read({ processes: false }), floor);
+    if (verdict.held) verdict = memoryVerdict(await read({ processes: true }), floor);
+    memoryCache.set(read, { at: Date.now(), verdict });
+    return verdict;
+  };
+}
+
 /** Pause briefly between durable queue checks. */
 function pause(ms) { return new Promise((resolvePromise) => setTimeout(resolvePromise, ms)); }
 
 /**
- * Join the landing-first queue; every other kind keeps its original FIFO ticket.
+ * Join the queue in its admission class (landing, review, submit, other), aging up over time; FIFO by ticket within a class.
  *
- * @param {{ name: string, capacity: number, capacityProvider?: () => number, browserCapacityProvider?: () => number, scope?: 'machine'|'repo'|'board', root?: string, agent?: string, repo?: string, landing?: boolean, itemCheck?: boolean, diagnostic?: boolean, browser?: boolean, remote?: boolean, runnerProvider?: () => Array<{host:string,slots:number,browser:number}>, item?: string, kind?: string, onWait?: (state: object) => void, allowIdleCapacityUpdate?: boolean, _resume?: object }} options - Resource identity, queue class and optional remote executor pool.
+ * @param {{ name: string, capacity: number, capacityProvider?: () => number, browserCapacityProvider?: () => number, scope?: 'machine'|'repo'|'board', root?: string, agent?: string, repo?: string, landing?: boolean, itemCheck?: boolean, diagnostic?: boolean, browser?: boolean, remote?: boolean, runnerProvider?: () => Array<{host:string,slots:number,browser:number}>, item?: string, kind?: string, onWait?: (state: object) => void, allowIdleCapacityUpdate?: boolean, memory?: () => Promise<{ checked: boolean, held: boolean, line: string, warning?: string }>, _resume?: object }} options - Resource identity, queue class, optional remote executor pool and memory check.
+ *   memory, when given, is read before each admission: a held verdict keeps the whole queue
+ *   waiting in place, local and remote slots alike, and an unchecked one is passed to onWait once
+ *   so the caller can warn.
  * @returns {Promise<{ name: string, scope: string, token: string, pool: string, browser: boolean, runner?: {host:string,slots:number,browser:number}, waitMs: number, release: () => void, renew: () => void, requeueRunner?: () => Promise<object> }>}
  */
 export async function takeResource(options) {
@@ -419,12 +672,20 @@ export async function takeResource(options) {
         db.prepare("INSERT INTO resource(name, capacity) VALUES ('browser', ?) ON CONFLICT(name) DO NOTHING").run(browserCapacity);
       }
       if (!resume) {
-        // Remote eligibility is metadata on this same ticket, preserving one landing/FIFO queue.
-        const inserted = db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, remote) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, Number(remote));
+        // Remote eligibility is metadata on this same ticket; the kind and flags decide the
+        // admission class, and the ticket keeps arrival order within it.
+        const inserted = db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, remote, classed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, Number(remote), classedMarker(queueOrder(scope)));
         initialTicket = Number(inserted.lastInsertRowid);
       }
     });
+    let memoryWarned = false;
     while (true) {
+      const memory = options.memory ? await options.memory() : null;
+      if (memory && !memory.checked && !memoryWarned) {
+        memoryWarned = true;
+        options.onWait?.({ holders: [], line: [], position: 0, memory });
+      }
+      const order = queueOrder(scope);
       const acquired = update(db, () => {
         // The machine-settings provider performs a bounded local JSON read. Read it
         // after taking the same SQLite write lock used by updateRunnerSettings so an
@@ -433,21 +694,24 @@ export async function takeResource(options) {
         const waiter = db.prepare('SELECT ticket FROM waiter WHERE token = ?').get(token);
         if (!waiter) {
           if (resume && initialTicket) {
-            db.prepare('INSERT OR IGNORE INTO waiter(ticket, token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, remote) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(initialTicket, token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, Number(remote));
-            return { acquired: false, state: { ...snapshot(db, name), position: waiterPosition(db, name, initialTicket), rejoined: true } };
+            db.prepare('INSERT OR IGNORE INTO waiter(ticket, token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, remote, classed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(initialTicket, token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, Number(remote), classedMarker(order));
+            return { acquired: false, state: { ...snapshot(db, name, order), position: waiterPosition(db, name, initialTicket, { order }), rejoined: true } };
           }
           queuedAt = new Date().toISOString();
-          const rejoined = db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, remote) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, Number(remote));
+          const rejoined = db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, remote, classed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, Number(remote), classedMarker(order));
           initialTicket = Number(rejoined.lastInsertRowid);
-          return { acquired: false, state: { ...snapshot(db, name), position: waiterPosition(db, name, initialTicket), rejoined: true } };
+          return { acquired: false, state: { ...snapshot(db, name, order), position: waiterPosition(db, name, initialTicket, { order }), rejoined: true } };
         }
-        db.prepare('UPDATE waiter SET heartbeat = ? WHERE token = ?').run(Date.now(), token);
-        const spot = snapshot(db, name);
-        const reportPosition = waiterPosition(db, name, waiter.ticket);
+        // The marker follows this poll's setting, so a change mid-wait reaches every process's ranking.
+        db.prepare('UPDATE waiter SET heartbeat = ?, classed = ? WHERE token = ?').run(Date.now(), classedMarker(order), token);
+        const spot = snapshot(db, name, order);
+        const reportPosition = waiterPosition(db, name, waiter.ticket, { order });
         const limit = db.prepare('SELECT capacity FROM resource WHERE name = ?').get(name).capacity;
+        // A machine short of memory holds the whole line in place; recovery admits it in order.
+        if (memory?.held) return { acquired: false, state: { ...spot, position: reportPosition, memory } };
         const executor = name === 'gate'
-          ? gateAdmission(db, waiter.ticket, limit, runners)
-          : (waiterPosition(db, name, waiter.ticket, { eligibleOnly: true }) === 1 && spot.holders.length < limit ? { host: '' } : null);
+          ? gateAdmission(db, waiter.ticket, limit, runners, order)
+          : (waiterPosition(db, name, waiter.ticket, { eligibleOnly: true, order }) === 1 && spot.holders.length < limit ? { host: '' } : null);
         if (executor) {
           db.prepare('DELETE FROM waiter WHERE token = ?').run(token);
           const acquiredAt = new Date().toISOString();
@@ -509,11 +773,20 @@ export async function takeResource(options) {
               const holderName = runnerResourceName(acquired.runner.host);
               const holder = db.prepare('SELECT token FROM holder WHERE token = ? AND name = ? AND runner = ?').get(token, holderName, acquired.runner.host);
               if (!holder) throw new Refused('RESOURCE_LEASE_LOST', `remote lease for "${name}" is no longer held`);
-              const minimumTicket = db.prepare("SELECT MIN(ticket) AS ticket FROM waiter WHERE name = 'gate' AND landing = ?").get(Number(landing)).ticket;
-              requeueTicket = Math.min(0, minimumTicket ?? 0) - 1;
+              // Under the class order the run keeps its original arrival ticket, so first come, first
+              // served holds within each class (and its queuedAt, so its aging). Under arrival order
+              // (reviewsFirst off, or an older pullboard waiting in the line) it takes #663's front
+              // ticket ahead of its landing tier, as on main.
+              const requeueOrder = queueOrder(scope);
+              const marker = classedMarker(requeueOrder);
+              if (classOrderInEffect([...db.prepare("SELECT classed FROM waiter WHERE name = 'gate'").all(), { classed: marker }], requeueOrder)) requeueTicket = acquired.ticket;
+              else {
+                const minimumTicket = db.prepare("SELECT MIN(ticket) AS ticket FROM waiter WHERE name = 'gate' AND landing = ?").get(Number(landing)).ticket;
+                requeueTicket = Math.min(0, minimumTicket ?? 0) - 1;
+              }
               db.prepare('DELETE FROM holder WHERE token = ?').run(token);
-              db.prepare('INSERT INTO waiter(ticket, token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, remote) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-                .run(requeueTicket, token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, Number(remote));
+              db.prepare('INSERT INTO waiter(ticket, token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, remote, classed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+                .run(requeueTicket, token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, Number(remote), marker);
             });
           } catch (error) {
             transferred = false;
@@ -585,8 +858,9 @@ export function setResourceCapacity({ name, capacity, scope = 'machine', root = 
 
 /** List resources and prune leases whose process died or lease expired. */
 export function listResources({ scope = 'machine', root = process.cwd() } = {}) {
+  const order = queueOrder(scope);
   const db = open(databaseFile(scope, root), scope === 'machine');
   try {
-    return update(db, () => db.prepare('SELECT name, capacity FROM resource ORDER BY name').all().map(({ name, capacity }) => ({ name, capacity, ...snapshot(db, name) })));
+    return update(db, () => db.prepare('SELECT name, capacity FROM resource ORDER BY name').all().map(({ name, capacity }) => ({ name, capacity, ...snapshot(db, name, order) })));
   } finally { db.close(); }
 }

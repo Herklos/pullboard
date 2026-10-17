@@ -4,7 +4,10 @@
  * the main checkout as the coordinator. It runs again safely and never overwrites a file it did not
  * write.
  */
-import { accessSync, appendFileSync, constants as fsConstants, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  accessSync, appendFileSync, constants as fsConstants, existsSync, mkdirSync,
+  readdirSync, readFileSync, statSync, writeFileSync,
+} from 'node:fs';
 import { delimiter, basename, join, resolve } from 'node:path';
 import { CONFIG_FILE, COORDINATOR, doctrineFile, loadConfig } from './config.js';
 import { loadDoctrine } from './doctrine.js';
@@ -36,6 +39,83 @@ export function detectGate(root) {
     if (existsSync(join(root, name)) && readFileSync(join(root, name), 'utf8').includes(`[${section}]`)) return 'pytest';
   }
   return '';
+}
+
+/** Folders a lane proposal never hands out: dependencies and build output. */
+const NOT_LANE_FOLDERS = new Set(['node_modules', 'dist', 'build', 'out', 'target', 'vendor', 'coverage']);
+
+/**
+ * The visible folders directly inside `dir`, sorted, without dependencies or build output.
+ *
+ * @param {string} dir
+ * @returns {string[]}
+ */
+function visibleFolders(dir) {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.') && !NOT_LANE_FOLDERS.has(entry.name))
+    .map((entry) => entry.name).sort();
+}
+
+/**
+ * A lane name made from a folder name: lowercase letters, digits and dashes, starting with a letter.
+ *
+ * @param {string} folder
+ * @returns {string}
+ */
+function laneNameFor(folder) {
+  const name = folder.toLowerCase().replace(/[^a-z0-9-]+/gu, '-').replace(/^[^a-z]+/u, '').replace(/-+$/u, '').slice(0, 31).replace(/-+$/u, '');
+  return name || 'lane';
+}
+
+/**
+ * The lanes init proposes from the repo's layout (I1, I2): one lane per top-level package for a
+ * packages/* or apps/* layout, and one app lane owning the top-level folders otherwise. Nothing is
+ * proposed once any lane owns a folder. Proposals are never written: the person accepts each one
+ * by running its `pullboard lane add` command.
+ *
+ * @param {string} root
+ * @param {any} [config] - The repo's config; read from root when omitted.
+ * @returns {{ name: string, owns: string[] }[]}
+ */
+export function proposeLanes(root, config = loadConfig(root)) {
+  if (Object.values(config.lanes).some((lane) => lane.owns.length)) return [];
+  const taken = new Set([COORDINATOR, 'all', ...Object.keys(config.lanes)]);
+  const proposals = [];
+  for (const parent of ['packages', 'apps']) {
+    for (const folder of visibleFolders(join(root, parent))) {
+      let name = laneNameFor(folder);
+      if (taken.has(name)) name = laneNameFor(`${parent}-${folder}`);
+      for (let n = 2; taken.has(name); n += 1) name = `${laneNameFor(`${parent}-${folder}`).slice(0, 28)}-${n}`;
+      taken.add(name);
+      proposals.push({ name, owns: [`${parent}/${folder}/`] });
+    }
+  }
+  if (proposals.length) return proposals;
+  const folders = visibleFolders(root);
+  return [{ name: taken.has('app') ? 'app-1' : 'app', owns: folders.length ? folders.map((folder) => `${folder}/`) : ['app/'] }];
+}
+
+/**
+ * Quote one word for a POSIX shell when it needs quoting.
+ *
+ * @param {string} word
+ * @returns {string}
+ */
+const shellWord = (word) => (/^[A-Za-z0-9_./,@%+=:-]+$/u.test(word) ? word : `'${word.replaceAll("'", "'\\''")}'`);
+
+/**
+ * The init lines that show proposed lanes and the one command that accepts them.
+ *
+ * @param {{ name: string, owns: string[] }[]} proposals
+ * @returns {string[]}
+ */
+export function laneProposalNotes(proposals) {
+  if (!proposals.length) return [];
+  return [
+    `proposed lanes, not written until the person accepts: ${proposals.map((lane) => `${lane.name} owns ${lane.owns.join(' ')}`).join('; ')}`,
+    `ask the person; to accept, run: ${proposals.map((lane) => `pullboard lane add ${shellWord(lane.name)} --owns ${shellWord(lane.owns.join(','))}`).join(' && ')}`,
+  ];
 }
 
 /** Check whether a command can be found on PATH or in a named project environment without running it. */
@@ -257,6 +337,7 @@ export function initRepo({ info, openBoardHere, register, closeBoard, model }) {
     throw new Refused('NOT_MAIN', 'run init in the main checkout; worktrees join a lane instead');
   }
   const { root } = info;
+  const worktreeMode = existsSync(join(root, CONFIG_FILE)) ? loadConfig(root).worktrees : 'inside';
   const doctrine = existsSync(join(root, CONFIG_FILE)) ? loadConfig(root).practice : doctrineFile(root);
   const gate = detectGate(root);
   const configured = configuredGate(root);
@@ -268,6 +349,9 @@ export function initRepo({ info, openBoardHere, register, closeBoard, model }) {
     writeNew(join(root, 'SPEC.md'), specTemplate(basename(root), gate), 'SPEC.md', onWrite),
     writeNew(join(root, doctrine), practiceTemplate(), doctrine, onWrite),
     ignoreAgentWorktrees(root, onWrite),
+    worktreeMode === 'inside'
+      ? 'new agent worktrees go in .claude/worktrees; dot-scanner tools such as eslint . should ignore .claude/worktrees; set "worktrees": "beside" in pullboard.json to use sibling folders'
+      : 'new agent worktrees go beside this repository as <repo>-<lane>-N; set "worktrees": "inside" in pullboard.json to nest them under .claude/worktrees (dot-scanner tools such as eslint . should ignore that path)',
     ...writeAgentDocs(root, onWrite),
     ...installHooks(root, onWrite),
     ...installSkills(root, onWrite),
@@ -284,6 +368,7 @@ export function initRepo({ info, openBoardHere, register, closeBoard, model }) {
     closeBoard(board);
   }
   notes.push('opened the board in the git dir; this checkout is the coordinator');
+  notes.push(...laneProposalNotes(proposeLanes(root)));
   if (!configuredGate(root)) {
     notes.push(gate
       ? 'no gate yet: set "gate" in pullboard.json to the command that proves the build'

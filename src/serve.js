@@ -58,6 +58,8 @@ import {
 } from './projects.js';
 import { fetchLocal } from './local-fetch.js';
 import { Refused } from './refused.js';
+import { personNeeds } from './needs.js';
+import { projectRowDecisions } from './row-decisions.js';
 import { loadSpec } from './spec.js';
 
 /** The page's styles (N26), read once: the page links them, so it needs no inline style. */
@@ -334,7 +336,7 @@ export function projectState(root, { seen = null, board: providedBoard = null, i
     const log = store.events(board);
     // When each agent last moved on the board: the log is in order, so the last write wins.
     const lastMove = new Map(log.map((event) => [event.event_by, event.event_at]));
-    return {
+    const state = projectRowDecisions(store.rowDecisions(board), {
       root: info.root,
       releaseNotes: viewReleaseNotes(),
       rowAgesAt: { [config.spec]: head, [doctrine.name]: head },
@@ -362,7 +364,9 @@ export function projectState(root, { seen = null, board: providedBoard = null, i
       unseen: seen === null ? null : { since: seen, count: board.db.prepare('SELECT COUNT(*) AS n FROM shout WHERE shout_id > ?').get(seen).n },
       // Each product's progress, counted as pullboard status counts it (N28).
       products: productSummaries(config, loadSpec(info.root, config), all),
-    };
+    });
+    // Pending person decisions govern the calls on the API, sealed relay and exported page alike.
+    return { ...state, needs: personNeeds(state) };
   }, providedBoard);
 }
 
@@ -420,7 +424,7 @@ export async function serveView({ port = 0, secret = randomBytes(18).toString('b
   // initialize, and use the real CLI entry point without adding a second move implementation.
   const { createLocalApiHandler } = await import('./api.js');
   const { main } = await import('./cli.js');
-  const apiHandler = createLocalApiHandler({ secret, getPort: () => bound, runCommand: main,
+  const apiHandler = createLocalApiHandler({ secret, getPort: () => bound, runCommand: main, stateDetail: 'summary',
     allowedOrigins: [HOSTED_ORIGIN], ...(projectRoot === undefined ? {} : { scope: { projectRoot } }) });
   const reply = (res, code, type, body) => {
     res.writeHead(code, {

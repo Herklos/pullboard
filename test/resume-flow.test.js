@@ -601,6 +601,31 @@ test('resume walks a new board through setup one step at a time [N32,N19]', asyn
   assert.equal(JSON.parse(result.stdout).setup, null, 'actual successful view bind completes the board setup');
 });
 
+test('resume names lane add to make a lane [I1,N32]', t => {
+  const box = releaseFixture(t, { freshSetup: true });
+  mkdirSync(join(box.repo, 'app'));
+  const drafted = box.run(box.repo, 'spec', 'draft', 'Describe the first thing the person wants.', '--json');
+  assert.equal(drafted.status, 0, drafted.failure || drafted.stderr || drafted.stdout);
+  for (const args of [['spec', 'approve', JSON.parse(drafted.stdout).id], ['spec', 'apply']]) {
+    const result = box.run(box.repo, ...args);
+    assert.equal(result.status, 0, result.failure || result.stderr || result.stdout);
+  }
+  const text = box.run(box.repo, 'resume');
+  assert.equal(text.status, 0, text.failure || text.stderr);
+  const setup = JSON.parse(box.run(box.repo, 'resume', '--json').stdout).setup;
+  assert.equal(setup.step, 2);
+  assert.equal(setup.command, 'pullboard lane add app --owns app/');
+  assert.ok(text.stdout.includes(setup.command), text.stdout);
+  assert.doesNotMatch(text.stdout, /node -e/u);
+
+  // The printed command, run exactly as written, declares the lane and moves setup on.
+  recordSetupAnswer(box, setup.command);
+  const lanes = box.run(box.repo, 'lanes');
+  assert.equal(lanes.status, 0, lanes.failure || lanes.stderr);
+  assert.match(lanes.stdout, /^app\s+app\/(?:\s|$)/mu);
+  assert.equal(JSON.parse(box.run(box.repo, 'resume', '--json').stdout).setup?.step, 3);
+});
+
 test("a set-up board's resume prints no setup steps [N32,N19]", async t => {
   const box = releaseFixture(t, { freshSetup: true });
   await finishSetup(box);

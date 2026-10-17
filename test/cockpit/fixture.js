@@ -149,25 +149,74 @@ function fetchLive(url, init = {}) {
   return fetchFresh(url, init);
 }
 
+/** Make the caller's abort reason usable by fetch, event handlers, and owned cleanup. */
+function fixtureAbortError(signal, message = 'fixture startup was aborted') {
+  if (signal?.reason instanceof Error) return signal.reason;
+  const error = new Error(message);
+  error.name = 'AbortError';
+  return error;
+}
+
+/** Reject promptly on an optional fixture signal while keeping its reason intact. */
+function throwIfFixtureAborted(signal) {
+  if (signal?.aborted) throw fixtureAbortError(signal);
+}
+
 /** Start the real view and wait for a complete HTTP answer, rather than just its printed link. */
-async function startView(box, { bin = BIN } = {}) {
+async function startView(box, { bin = BIN, signal, onOwned } = {}) {
+  throwIfFixtureAborted(signal);
   const child = spawn(process.execPath, [bin, 'view', '--no-open', '--port', '0'], { cwd: box.dir, env: { ...box.env, PULLBOARD_VIEW_FOREGROUND: '1' } });
-  const link = await new Promise((found, fail) => {
-    let out = '';
-    child.stdout.on('data', (chunk) => {
-      out += chunk;
-      const match = /Pullboard view: (http:\/\/127\.0\.0\.1:\d+\/\?k=\S+)/.exec(out);
-      if (match) found(new URL(match[1]));
+  let stopPromise;
+  let rejectStartup;
+  const abortStartup = () => {
+    void stop();
+    rejectStartup?.(fixtureAbortError(signal));
+  };
+  /** Stop only this fixture's already-owned view child, at most once. */
+  const stop = () => {
+    if (stopPromise) return stopPromise;
+    signal?.removeEventListener('abort', abortStartup);
+    stopPromise = new Promise((done) => {
+      if (child.exitCode !== null || child.signalCode !== null) return done();
+      child.once('exit', done);
+      child.kill('SIGTERM');
     });
-    child.on('exit', (code) => fail(new Error(`view exited ${code}: ${out}`)));
-  });
-  const stop = () => new Promise((done) => {
-    if (child.exitCode !== null || child.signalCode !== null) return done();
-    child.once('exit', done);
-    child.kill('SIGTERM');
-  });
+    return stopPromise;
+  };
+  try { onOwned?.(stop); }
+  catch (error) { await stop(); throw error; }
+  signal?.addEventListener('abort', abortStartup, { once: true });
+  let link;
   try {
-    const ready = await fetchLive(link, { signal: AbortSignal.timeout(30_000) });
+    link = await new Promise((found, fail) => {
+      let out = '';
+      rejectStartup = fail;
+      const cleanup = () => {
+        child.stdout.off('data', onData);
+        child.off('exit', onExit);
+        signal?.removeEventListener('abort', onAbort);
+        rejectStartup = null;
+      };
+      const onData = (chunk) => {
+        out += chunk;
+        const match = /Pullboard view: (http:\/\/127\.0\.0\.1:\d+\/\?k=\S+)/.exec(out);
+        if (match) { cleanup(); found(new URL(match[1])); }
+      };
+      const onExit = (code) => { cleanup(); fail(new Error(`view exited ${code}: ${out}`)); };
+      const onAbort = () => {
+        const error = fixtureAbortError(signal);
+        cleanup();
+        void stop();
+        fail(error);
+      };
+      child.stdout.on('data', onData);
+      child.on('exit', onExit);
+      if (signal?.aborted) onAbort();
+      else signal?.addEventListener('abort', onAbort, { once: true });
+    });
+    throwIfFixtureAborted(signal);
+    const ready = await fetchLive(link, { signal: signal
+      ? AbortSignal.any([AbortSignal.timeout(30_000), signal]) : AbortSignal.timeout(30_000) });
     assert.equal(ready.status, 200, 'the view answers before the test fetches its page');
     await ready.arrayBuffer();
   } catch (error) {
@@ -525,7 +574,7 @@ async function boardId(view, root) {
 /** The board as the shared API serves it for one project. */
 async function boardOf(view, root) {
   const id = await boardId(view, root);
-  const res = await fetchLive(`${view.base}/api/v1/boards/${id}/state`, { headers: { 'x-pullboard-key': view.key } });
+  const res = await fetchLive(`${view.base}/api/v1/boards/${id}/state?detail=full`, { headers: { 'x-pullboard-key': view.key } });
   assert.equal(res.status, 200);
   return (await res.json()).state;
 }
@@ -586,7 +635,8 @@ function browserPause(ms) {
 }
 
 /** Start Chrome, retry once, and wait for its DevTools port before giving up. */
-async function startSnapshotChrome(executable, profile, { timeoutMs = 30_000 } = {}) {
+async function startSnapshotChrome(executable, profile, { timeoutMs = 30_000, signal, onOwned } = {}) {
+  throwIfFixtureAborted(signal);
   const args = ['--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
     '--disable-background-networking', '--disable-sync', '--disable-extensions', '--no-proxy-server',
     '--use-mock-keychain', '--password-store=basic', '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'];
@@ -595,6 +645,7 @@ async function startSnapshotChrome(executable, profile, { timeoutMs = 30_000 } =
   const firstLaunchStartedAt = Date.now();
   const launchAttempts = [];
   for (let attempt = 1; attempt <= 2; attempt += 1) {
+    throwIfFixtureAborted(signal);
     if (attempt > 1) {
       process.stderr.write(`${JSON.stringify({ event: 'chrome-relaunch', attempt, elapsedMs: Date.now() - firstLaunchStartedAt,
         previousFailure: lastFailureKind })}\n`);
@@ -603,6 +654,23 @@ async function startSnapshotChrome(executable, profile, { timeoutMs = 30_000 } =
     const startedAt = Date.now();
     const child = spawn(executable, args, { detached: true, stdio: ['ignore', 'ignore', 'pipe'] });
     const stopped = new Promise((resolve) => child.once('close', (code, signal) => resolve({ code, signal })));
+    let stopPromise;
+    let onAbort;
+    /** Stop only this launch's owned Chrome group, at most once. */
+    const stop = () => {
+      if (stopPromise) return stopPromise;
+      signal?.removeEventListener('abort', onAbort);
+      stopPromise = stopOwnedChrome(child, stopped);
+      return stopPromise;
+    };
+    onAbort = () => { void stop().catch(() => {}); };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    try { onOwned?.(stop); }
+    catch (error) { await stop(); throw error; }
+    if (signal?.aborted) {
+      await stop();
+      throw fixtureAbortError(signal);
+    }
     let stderr = '';
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk) => { stderr = `${stderr}${chunk}`.slice(-8_192); });
@@ -610,6 +678,7 @@ async function startSnapshotChrome(executable, profile, { timeoutMs = 30_000 } =
     const deadline = Date.now() + timeoutMs;
     let port;
     while (Date.now() < deadline) {
+      if (signal?.aborted) break;
       try {
         const candidate = readFileSync(join(profile, 'DevToolsActivePort'), 'utf8').split('\n')[0].trim();
         if (/^\d+$/.test(candidate) && child.exitCode === null && child.signalCode === null) {
@@ -625,8 +694,12 @@ async function startSnapshotChrome(executable, profile, { timeoutMs = 30_000 } =
       if (exit) break;
     }
     if (port) {
+      if (signal?.aborted) {
+        await stop();
+        throw fixtureAbortError(signal);
+      }
       launchAttempts.push({ attempt, elapsedMs: Date.now() - startedAt, portPublished: true });
-      return { child, stopped, port, startedAt, launchAttempts, stderr: () => stderr };
+      return { child, stopped, port, startedAt, launchAttempts, stderr: () => stderr, stop };
     }
     const details = [stderr.trim(), exit?.status?.signal && `signal ${exit.status.signal}`,
       exit?.status && exit.status.code !== null && `exit ${exit.status.code}`].filter(Boolean).join('; ') || 'no stderr';
@@ -636,7 +709,8 @@ async function startSnapshotChrome(executable, profile, { timeoutMs = 30_000 } =
     lastFailureKind = exit ? 'process-exited-before-devtools-port' : 'devtools-port-timeout';
     launchAttempts.push({ attempt, elapsedMs: Date.now() - startedAt, portPublished: false,
       failure: lastFailureKind, exitCode: exit?.status?.code ?? null, signal: exit?.status?.signal ?? null });
-    await stopOwnedChrome(child, stopped);
+    await stop();
+    if (signal?.aborted) throw fixtureAbortError(signal);
   }
   throw new Error(`Chrome failed to start after 2 launches; attempts: ${JSON.stringify(launchAttempts)}; final stderr: ${lastFailure}`);
 }
@@ -664,27 +738,65 @@ async function snapshotDevToolsTargets(port) {
 }
 
 /** Start one isolated headless Chrome and expose its page through a small CDP client. */
-async function openSnapshotChrome(executable, url, profile) {
-  const launched = await startSnapshotChrome(executable, profile);
+async function openSnapshotChrome(executable, url, profile, { signal, onOwned } = {}) {
+  throwIfFixtureAborted(signal);
+  let socket;
+  let childStop;
+  let closePromise;
+  let removeAbortListener = () => {};
+  /** Close this launch's socket and process group once, even across startup failure and caller cleanup. */
+  const closeOwned = () => {
+    if (closePromise) return closePromise;
+    removeAbortListener();
+    closePromise = (async () => {
+      socket?.close();
+      if (childStop) await childStop();
+    })();
+    return closePromise;
+  };
+  const onAbort = () => { void closeOwned().catch(() => {}); };
+  const launched = await startSnapshotChrome(executable, profile, {
+    signal,
+    onOwned(stop) {
+      childStop = stop;
+      signal?.addEventListener('abort', onAbort, { once: true });
+      removeAbortListener = () => signal?.removeEventListener('abort', onAbort);
+      try { onOwned?.(closeOwned); }
+      catch (error) { void closeOwned().catch(() => {}); throw error; }
+    },
+  });
   const { child, stopped, port } = launched;
   let pageTargetEverAppearedBeforeTimeout = false;
   let pageTargetAppearedAtElapsedMs = null;
-  let socket;
   let id = 0;
   const pending = new Map();
   const requests = [];
   const exceptions = [];
   try {
-    const target = await (await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: 'PUT', signal: AbortSignal.timeout(10_000) })).json();
+    throwIfFixtureAborted(signal);
+    const startupFetchSignal = signal
+      ? AbortSignal.any([AbortSignal.timeout(10_000), signal]) : AbortSignal.timeout(10_000);
+    const target = await (await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: 'PUT', signal: startupFetchSignal })).json();
     if (target.type === 'page') {
       pageTargetEverAppearedBeforeTimeout = true;
       pageTargetAppearedAtElapsedMs = Date.now() - launched.startedAt;
     }
     socket = new WebSocket(target.webSocketDebuggerUrl);
     await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('DevTools socket did not open')), 10_000); // budget: hang ceiling for the local DevTools socket-open handshake; no throughput claim.
-      socket.addEventListener('open', () => { clearTimeout(timer); resolve(); }, { once: true });
-      socket.addEventListener('error', () => { clearTimeout(timer); reject(new Error('DevTools socket failed')); }, { once: true });
+      const cleanup = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
+        socket.removeEventListener('open', onOpen);
+        socket.removeEventListener('error', onError);
+      };
+      const onOpen = () => { cleanup(); resolve(); };
+      const onError = () => { cleanup(); reject(new Error('DevTools socket failed')); };
+      const abort = () => { cleanup(); reject(fixtureAbortError(signal)); };
+      const timer = setTimeout(() => { cleanup(); reject(new Error('DevTools socket did not open')); }, 10_000); // budget: hang ceiling for the local DevTools socket-open handshake; no throughput claim.
+      socket.addEventListener('open', onOpen, { once: true });
+      socket.addEventListener('error', onError, { once: true });
+      if (signal?.aborted) abort();
+      else signal?.addEventListener('abort', abort, { once: true });
     });
     socket.addEventListener('message', ({ data }) => {
       const message = JSON.parse(String(data));
@@ -702,10 +814,19 @@ async function openSnapshotChrome(executable, url, profile) {
     });
     /** Send one CDP command and clear its timeout on either response or failure. */
     const send = (method, params = {}) => new Promise((resolve, reject) => {
+      if (signal?.aborted) { reject(fixtureAbortError(signal)); return; }
       const key = ++id;
-      const timer = setTimeout(() => { pending.delete(key); reject(new Error(`DevTools timed out: ${method}`)); }, 45_000); // budget: hang ceiling for one unanswered DevTools command; no throughput claim.
-      pending.set(key, { resolve, reject, timer });
-      socket.send(JSON.stringify({ id: key, method, params }));
+      const cleanup = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
+        pending.delete(key);
+      };
+      const abort = () => { cleanup(); reject(fixtureAbortError(signal)); };
+      const timer = setTimeout(() => { cleanup(); reject(new Error(`DevTools timed out: ${method}`)); }, 45_000); // budget: hang ceiling for one unanswered DevTools command; no throughput claim.
+      pending.set(key, { resolve: (value) => { cleanup(); resolve(value); }, reject: (error) => { cleanup(); reject(error); }, timer });
+      signal?.addEventListener('abort', abort, { once: true });
+      try { socket.send(JSON.stringify({ id: key, method, params })); }
+      catch (error) { cleanup(); reject(error); }
     });
     await send('Page.enable');
     await send('Runtime.enable');
@@ -732,6 +853,7 @@ async function openSnapshotChrome(executable, url, profile) {
     const chrome = await stableChrome({ child, stopped, socket, send, requests, exceptions });
     chrome.launchAttempts = launched.launchAttempts;
     chrome.startedAt = launched.startedAt;
+    chrome.close = closeOwned;
     await chrome.send('Page.navigate', { url });
     await chrome.waitFor("matchMedia('(prefers-reduced-motion: reduce)').matches");
     return chrome;
@@ -762,8 +884,7 @@ async function openSnapshotChrome(executable, url, profile) {
       }
       message = `${message}; ROOT-CAUSE STATUS: NOT PROVEN; Chrome timeout capture ${JSON.stringify(capture)}`;
     }
-    socket?.close();
-    await stopOwnedChrome(child, stopped);
+    await closeOwned();
     const chromeStderr = launched.stderr().trim();
     throw new Error(chromeStderr ? `${message}; Chrome stderr: ${chromeStderr}` : message, { cause: error });
   }
@@ -827,6 +948,7 @@ async function stopOwnedChrome(child, stopped, { timeoutMs = 5_000, signal = pro
 
 /** Close the CDP socket and stop only this test's isolated Chrome process group. */
 async function closeSnapshotChrome(chrome) {
+  if (typeof chrome.close === 'function') return chrome.close();
   chrome.socket.close();
   await stopOwnedChrome(chrome.child, chrome.stopped);
 }

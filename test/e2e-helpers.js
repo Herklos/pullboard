@@ -78,10 +78,10 @@ const SPEC = `# Demo spec
  * worktree joined to the web lane. The coordinator stays deliberately undeclared; later agents
  * retain the runner's model, while initialization model coverage invokes init directly.
  */
-function project(gate = CONFIG.gate, box = sandbox()) {
+function project(gate = CONFIG.gate, box = sandbox(), { separateGitDir = false } = {}) {
   const repo = join(box.dir, 'repo');
   mkdirSync(repo);
-  box.git(repo, 'init', '-q', '-b', 'main');
+  box.git(repo, 'init', '-q', '-b', 'main', ...(separateGitDir ? ['--separate-git-dir', join(box.dir, 'separate-git')] : []));
   const inheritedModel = box.env.PULLBOARD_MODEL;
   delete box.env.PULLBOARD_MODEL;
   assert.equal(box.run(repo, 'init').code, 0);

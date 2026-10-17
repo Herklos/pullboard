@@ -6,18 +6,19 @@
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { availableParallelism } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { gitChildEnv, gitPath, headTree, invalidateGitFacts, isClean, untracked } from './git.js';
 import { secretsIn } from './hooks.js';
 import { Refused } from './refused.js';
-import { GATE_SLOT_HELD_ENV, gateSlotEnvironment, inheritedGateSlot, takeResource } from './resources.js';
-import { browserFreeChecksEnabled, loadMachineSettings } from './settings.js';
+import { GATE_SLOT_HELD_ENV, gateSlotEnvironment, inheritedGateSlot, memoryAdmission, readMachineMemory, takeResource } from './resources.js';
+import { browserFreeChecksEnabled, loadMachineSettings, memoryFloorMB } from './settings.js';
 import { selectAffectedTests } from './affected-tests.js';
 import { checkNeedsBrowser, testsNeedBrowser } from './browser-admission.js';
 import { timingFromOutput, timingRunner } from './timing.js';
+import { landingShardProfile } from './landing-shards.js';
 import { RunnerDropped, runOnRunner, runOnRunnerAsync, runnerSource } from './runners.js';
 
 const STAMP = 'pullboard-gate-green';
@@ -60,6 +61,26 @@ export function testConcurrency(root, cores = performanceCores()) {
     throw new Refused('BAD_CONFIG', 'testConcurrency.files must be positive; testConcurrency.browser must be 1 or 2');
   }
   return { files, browser: Math.min(files, browser) };
+}
+
+/**
+ * How many shards the landing gate's test files split into: `landingShards` in pullboard.json,
+ * 1 when absent, which keeps today's single run.
+ *
+ * @param {string} root
+ * @returns {number}
+ */
+export function landingShardCount(root) {
+  const file = join(root, 'pullboard.json');
+  if (!existsSync(file)) return 1;
+  let config;
+  try { config = JSON.parse(readFileSync(file, 'utf8')); }
+  catch { throw new Refused('BAD_CONFIG', 'pullboard.json must be valid JSON before running tests'); }
+  const count = config?.landingShards ?? 1;
+  if (!Number.isSafeInteger(count) || count < 1 || count > 64) {
+    throw new Refused('BAD_CONFIG', 'landingShards must be a whole number from 1 to 64; set it in pullboard.json, or remove it for one landing run');
+  }
+  return count;
 }
 
 /**
@@ -149,7 +170,148 @@ export function runShell(root, command, { pipefail = false, env = {} } = {}) {
   // Newlines, not spaces, around the command, so a trailing comment in it cannot swallow the `)`.
   const result = spawnSync(`${prefix}(\n${command}\n) 2>&1`, options);
   invalidateGitFacts();
-  return { isGreen: result.status === 0, output: `${result.stdout ?? ''}${result.stderr ?? ''}`, seconds: Math.round((Date.now() - started) / 1000) };
+  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+  return { isGreen: result.status === 0, output, seconds: Math.round((Date.now() - started) / 1000),
+    sandboxBlocked: result.status === 0 ? null : sandboxBlockedOperation(root, output) };
+}
+
+/** Resolve existing path prefixes so a symlink cannot hide an outside-worktree operation. */
+function diagnosticPath(path) {
+  let current = resolve(path);
+  const missing = [];
+  for (;;) {
+    try { return resolve(realpathSync(current), ...missing); }
+    catch (error) {
+      if (!['ENOENT', 'ENOTDIR'].includes(error.code)) return null;
+      const parent = dirname(current);
+      if (parent === current) return null;
+      missing.unshift(relative(parent, current));
+      current = parent;
+    }
+  }
+}
+
+/** Describe one OS permission message, resolving file targets against the command's worktree. */
+function permissionOperation(root, message, { includeFilePaths = true } = {}) {
+  const network = /^(listen|bind) (EPERM|EACCES)\b/u.exec(message);
+  if (network) return { code: network[2], syscall: network[1], operation: `${network[1]} (${network[2]})` };
+  if (!includeFilePaths) return null;
+  const file = /^(EPERM|EACCES): [^\n]*?, (open|mkdir|read|write|rename|unlink|scandir|access) (['"])([^\n]+?)\3(?= -> |$)/u.exec(message);
+  const python = /^PermissionError: \[Errno (?:1|13)\] [^\n]*?: ['"]([^'"\n]+)['"]/u.exec(message);
+  if (!file && !python) return null;
+  const path = diagnosticPath(resolve(root, file ? file[4] : python[1]));
+  const tree = diagnosticPath(root);
+  if (!path || !tree) return null;
+  const within = relative(tree, path);
+  if (within !== '..' && !within.startsWith('../') && !isAbsolute(within)) return null;
+  const code = file ? file[1] : 'EACCES';
+  return { code, path, syscall: file ? file[2] : null,
+    operation: `${file ? file[2] : 'file access'} ${JSON.stringify(path)} (${code})` };
+}
+
+/** Decode the single-line quoted YAML scalars emitted by Node's TAP reporter. */
+function tapScalar(value) {
+  if (value.startsWith('"')) {
+    try { return JSON.parse(value); } catch { return null; }
+  }
+  if (value.startsWith("'") && value.endsWith("'")) return value.slice(1, -1).replace(/''/gu, "'");
+  return /^[A-Z_]+$/u.test(value) ? value : null;
+}
+
+/** Scan complete lines with bounded TAP state so assertion messages cannot impersonate OS codes. */
+export function sandboxBlockedScanner(root, { includeFilePaths = true } = {}) {
+  let failureIndent = null;
+  let fieldIndent = null;
+  let permission = null;
+  let code = null;
+  let comment = null;
+  let startup = null;
+  let failureMessage = null;
+  let failureType = false;
+  let exitCode = null;
+  /** Retain one pending fatal diagnostic and the current failed TAP record. */
+  return (raw) => {
+    const line = raw.trim().replace(/^#\s*/u, '');
+    const indent = raw.length - raw.trimStart().length;
+    // Node's TAP reporter prints test-console output as comments and assertion details
+    // as indented YAML. Neither is a standalone gate diagnostic, even when it contains
+    // text that looks exactly like an operating-system denial.
+    if (indent === 0 && !raw.startsWith('#') && /^(?:Error: |PermissionError: )/u.test(line)) {
+      const direct = permissionOperation(root, line.replace(/^Error: /u, ''), { includeFilePaths });
+      if (direct) return direct.operation;
+    }
+    if (/^TAP version \d+$/u.test(raw)) {
+      comment = null; startup = null;
+      failureIndent = null; fieldIndent = null; permission = null; code = null;
+      failureMessage = null; failureType = false; exitCode = null;
+    }
+    // Uncaught module-load errors are comments too. Keep their complete Node fatal
+    // diagnostic pending; it is evidence only if the following file record failed
+    // to start. A test logging a caught error and then asserting is not that record.
+    if (indent === 0 && raw.startsWith('#')) {
+      if (line.startsWith('Error: ')) {
+        const operation = permissionOperation(root, line.slice('Error: '.length), { includeFilePaths });
+        comment = operation ? { operation, code: null, syscall: null, path: null, closed: false, fatal: false } : null;
+      } else if (comment) {
+        const field = /^(code|syscall|path): (.*)$/u.exec(line);
+        if (field) comment[field[1]] = tapScalar(field[2].replace(/,$/u, ''));
+        else if (line === '}') comment.closed = true;
+        else if (/^Node\.js v\d+\./u.test(line)) comment.fatal = true;
+        else if (line && !/^at |^errno: |^address: |^port: /u.test(line)
+          && !(comment.closed && comment.fatal && line.startsWith('Subtest: '))) comment = null;
+      }
+    }
+    if (/^(?:not )?ok \d+\b/u.test(line)) {
+      failureIndent = /^not ok /u.test(line) ? indent : null;
+      const operation = comment?.operation;
+      startup = failureIndent !== null && comment?.closed && comment.fatal
+        && comment.code === operation.code && comment.syscall === operation.syscall
+        && (!operation.path || (typeof comment.path === 'string'
+          && diagnosticPath(resolve(root, comment.path)) === operation.path)) ? operation : null;
+      comment = null;
+      fieldIndent = null; permission = null; code = null;
+      failureMessage = null; failureType = false; exitCode = null;
+    } else if (line === '---' && failureIndent !== null && indent === failureIndent + 2) {
+      fieldIndent = indent;
+    } else if (line === '...' && indent === fieldIndent) {
+      failureIndent = null; fieldIndent = null; permission = null; code = null;
+      startup = null; comment = null;
+      failureMessage = null; failureType = false; exitCode = null;
+    } else if (fieldIndent !== null && indent === fieldIndent) {
+      const field = /^(error|code|failureType|exitCode): (.*)$/u.exec(line);
+      if (field) {
+        const value = tapScalar(field[2]);
+        if (field[1] === 'error') {
+          failureMessage = value;
+          permission = typeof value === 'string' ? permissionOperation(root, value, { includeFilePaths }) : null;
+        } else if (field[1] === 'code') {
+          code = value;
+          if (code !== 'ERR_TEST_FAILURE') startup = null;
+        } else if (field[1] === 'failureType') failureType = value === 'testCodeFailure' || field[2] === 'testCodeFailure';
+        else exitCode = /^[1-9]\d*$/u.test(field[2]) && Number.isSafeInteger(Number(field[2])) ? Number(field[2]) : null;
+        if (permission && permission.code === code) return permission.operation;
+        if (startup && code === 'ERR_TEST_FAILURE' && failureMessage === 'test failed'
+          && failureType && exitCode !== null) return startup.operation;
+      }
+    }
+    return null;
+  };
+}
+
+/** Recognize concrete OS permission diagnostics, keeping ordinary assertion failures ordinary. */
+export function sandboxBlockedOperation(root, output, options) {
+  const scan = sandboxBlockedScanner(root, options);
+  for (const line of output.split('\n')) {
+    const operation = scan(line);
+    if (operation) return operation;
+  }
+  return null;
+}
+
+/** Refuse an environment-blocked proof after its ordinary raw logs and timings are persisted. */
+export function refuseSandboxBlocked(run) {
+  if (run.sandboxBlocked) throw new Refused('SANDBOX_BLOCKED',
+    `The environment refused ${run.sandboxBlocked}. Ask the person to allow this operation, or run the gate outside the sandbox; keep the tests unchanged.`);
 }
 
 /** Replace a possible secret-bearing line before persisting a direct item-check log. */
@@ -179,12 +341,17 @@ export function runProfiledShell(root, command, { waitMs = 0, artifactDirectory,
   };
   const run = gateLease?.runner ? runOnRunner(root, command, { runner: gateLease.runner, source: gateLease.source,
     browser: gateLease.browser, pipefail, metadata: { ...(gateLease.runMetadata ?? {}), landing } }) : runShell(root, command, { pipefail, env: inherited });
+  const sandboxBlocked = run.isGreen ? null : run.sandboxBlocked ?? (run.executionRunner
+    // The controller cannot realpath remote files; retain the network denial signal without treating remote paths as local paths.
+    ? sandboxBlockedOperation(root, run.output, { includeFilePaths: false })
+    : sandboxBlockedOperation(root, run.output));
+  const profiledRun = { ...run, sandboxBlocked };
   const profile = writeTimingProfile(profilePath, {
-    ...runTiming(run, command),
+    ...runTiming(profiledRun, command),
     waitMs: Math.max(0, Math.round(waitMs)), wallMs: Math.max(0, Date.now() - started),
   });
   if (logPath) writeFileSync(logPath, safeLog(run.output), { mode: 0o600 });
-  return { ...run, profile, profilePath, logPath };
+  return { ...profiledRun, profile, profilePath, logPath };
 }
 
 /** Run an independent focused comparison without blocking other holders of the machine pool.
@@ -200,8 +367,10 @@ export async function runProfiledShellAsync(root, command, { waitMs = 0, gateSlo
       browser: gateLease.browser, metadata: { ...(gateLease.runMetadata ?? {}), landing } });
     const wallMs = Math.max(0, Date.now() - started);
     const profilePath = join(dirname(gitPath(root, LOG)), `pullboard-gate-${randomUUID()}.profile.json`);
+    const sandboxBlocked = run.isGreen ? null : run.sandboxBlocked
+      ?? sandboxBlockedOperation(root, run.output, { includeFilePaths: false });
     const profile = writeTimingProfile(profilePath, { ...runTiming(run, command), waitMs, wallMs });
-    return { ...run, seconds: Math.round(wallMs / 1000), profile, profilePath, logPath: null };
+    return { ...run, sandboxBlocked, seconds: Math.round(wallMs / 1000), profile, profilePath, logPath: null };
   }
   const inherited = {
     ...(gateLease ? gateSlotEnvironment(gateLease) : gateSlotHeld ? { [GATE_SLOT_HELD_ENV]: '1' } : {}),
@@ -230,12 +399,13 @@ export async function runProfiledShellAsync(root, command, { waitMs = 0, gateSlo
   const profilePath = join(dirname(gitPath(root, LOG)), `pullboard-gate-${randomUUID()}.profile.json`);
   const profile = writeTimingProfile(profilePath, { ...timingFromOutput(output, timingRunner(command)),
     waitMs: Math.max(0, Math.round(waitMs)), wallMs });
-  return { isGreen: status === 0 && !overflow && !failure, output, seconds: Math.round(wallMs / 1000), profile, profilePath, logPath: null };
+  return { isGreen: status === 0 && !overflow && !failure, sandboxBlocked: status === 0 ? null : sandboxBlockedOperation(root, output), output, seconds: Math.round(wallMs / 1000), profile, profilePath, logPath: null };
 }
 
 /** Keep raw remote TAP intact while resolving its measured filenames against the local source. */
 function runTiming(run, command) {
-  const profile = timingFromOutput(run.output, timingRunner(command));
+  const shards = landingShardProfile(run.output);
+  const profile = { ...timingFromOutput(run.output, timingRunner(command)), ...(shards ? { landingShards: shards } : {}) };
   if (!run.executionRunner) return profile;
   /** Relocate only paths inside the actual remote checkout, never a foreign absolute path. */
   const localPath = path => {
@@ -286,6 +456,24 @@ export function writeTimingProfile(path, profile) {
     format: sanitize(profile.format ?? 'none', 'format'),
     unavailable: sanitize(profile.unavailable ?? null, 'availability'),
     ...(profile.executionRunner ? { executionRunner: sanitize(profile.executionRunner, 'execution runner') } : {}),
+    ...(profile.landingShards ? { landingShards: {
+      balance: sanitize(String(profile.landingShards.balance ?? 'unknown'), 'landing balance'),
+      unverified: (profile.landingShards.unverified ?? []).map(entry => ({ shard: sanitize(String(entry.shard), 'landing unverified shard'),
+        processes: sanitize(String(entry.processes), 'landing unverified processes') })),
+      quarantined: (profile.landingShards.quarantined ?? []).map(entry => ({ host: sanitize(String(entry.host), 'landing quarantine host'),
+        message: sanitize(String(entry.message), 'landing quarantine message') })),
+      floor: profile.landingShards.floor && validDuration(profile.landingShards.floor.ms)
+        ? { path: sanitize(String(profile.landingShards.floor.path), 'landing floor path'), ms: profile.landingShards.floor.ms } : null,
+      // One entry per attempt, so a failed runner attempt stays beside its local rerun.
+      shards: (profile.landingShards.shards ?? []).map(shard => ({ shard: sanitize(String(shard.shard), 'landing shard'),
+        attempt: Number.isSafeInteger(shard.attempt) ? shard.attempt : 1,
+        host: sanitize(String(shard.host), 'landing shard host'), status: sanitize(String(shard.status), 'landing shard status'),
+        reason: shard.reason ? sanitize(String(shard.reason), 'landing shard reason') : null,
+        wallMs: validDuration(shard.wallMs) ? shard.wallMs : null })),
+      files: (profile.landingShards.files ?? []).filter(file => typeof file?.path === 'string').map(file => ({
+        path: sanitize(file.path, 'landing file path'), shard: sanitize(String(file.shard), 'landing file shard'),
+        host: sanitize(String(file.host), 'landing file host'), durationMs: validDuration(file.durationMs) ? file.durationMs : null })),
+    } } : {}),
     ...(profile.executionSource ? { executionSource: {
       commit: sanitize(profile.executionSource.commit, 'execution commit'),
       tree: sanitize(profile.executionSource.tree, 'execution tree'),
@@ -308,19 +496,21 @@ function hasPipeline(command) {
 }
 
 /** Run work under the machine queue: landings first, then every other eligible waiter in arrival order.
+ * The whole queue waits while the machine is out of memory, so a run never starts into swap.
  *
  * @param {string} root - Checkout used to locate the machine resource database.
  * @param {(lease: { waitMs: number, token?: string, pool?: string, browser?: boolean, release: () => void }) => any | Promise<any>} action - Work to perform while holding a slot.
- * @param {{ landing?: boolean, itemCheck?: boolean, diagnostic?: boolean, browser?: boolean, agent?: string, item?: string|number, kind?: string, onWait?: (state: object) => void }} [options] - Queue class and progress reporter.
+ * @param {{ landing?: boolean, itemCheck?: boolean, diagnostic?: boolean, browser?: boolean, remote?: boolean, agent?: string, item?: string|number, kind?: string, onWait?: (state: object) => void, readMemory?: typeof readMachineMemory }} [options] - Queue class, remote eligibility, progress reporter and, for tests, the machine memory reader.
  * @returns {Promise<any>} The action's result after releasing its lease.
  */
-export async function withGateSlot(root, action, { landing = false, itemCheck = false, diagnostic = false, browser = false, remote = true, agent, item = '', kind = '', onWait } = {}) {
+export async function withGateSlot(root, action, { landing = false, itemCheck = false, diagnostic = false, browser = false, remote = true, agent, item = '', kind = '', onWait, readMemory = readMachineMemory } = {}) {
   const inherited = inheritedGateSlot({ root, browser });
   if (inherited) {
     try { return await action(inherited); }
     finally { inherited.release(); }
   }
   const settingsProvider = () => loadMachineSettings();
+  const floorMB = memoryFloorMB();
   const capacityProvider = () => settingsProvider().gateSlots;
   const source = runnerSource(root);
   let lease = await takeResource({
@@ -341,6 +531,7 @@ export async function withGateSlot(root, action, { landing = false, itemCheck = 
     allowIdleCapacityUpdate: true,
     remote: remote && Boolean(source),
     runnerProvider: () => loadMachineSettings().runners ?? [],
+    memory: floorMB === null ? undefined : memoryAdmission({ floorBytes: () => (memoryFloorMB() ?? floorMB) * 1024 ** 2, read: readMemory }),
     onWait,
   });
   try {
@@ -388,8 +579,10 @@ export async function runGate(root, config, { trustStamp = true, onWait, landing
 function fullGateRun(root, config, trustStamp = false, { waitMs = 0, log = gitPath(root, LOG), gateLease, landing = false } = {}) {
   if (trustStamp && isStampedGreen(root)) return { isGreen: true, isCached: true, output: '', seconds: 0, log: '' };
   const before = committedTree(root);
-  const { isGreen, output, seconds, profile, profilePath } = runProfiledShell(root, config.gate, { waitMs, pipefail: true, profileFile: `${log}.profile.json`, gateLease, landing });
+  const run = runProfiledShell(root, config.gate, { waitMs, pipefail: true, profileFile: `${log}.profile.json`, gateLease, landing });
+  const { isGreen, output, seconds, profile, profilePath } = run;
   writeFileSync(log, output);
+  refuseSandboxBlocked(run);
   if (isGreen && before !== null && committedTree(root) === before) writeFileSync(gitPath(root, STAMP), `${before}\n`);
   return { isGreen, isCached: false, output, seconds, log, profile, profilePath };
 }
@@ -455,12 +648,13 @@ export async function runSubmitGate(root, config, { base, trunk, changed, check,
         ...(lease.runner ? { executionRunner: lease.runner.host,
           executionSource: profiles.find(value => value.executionSource)?.executionSource } : {}),
       });
+      refuseSandboxBlocked(proof);
       return { ...proof, log, seconds: criterion.seconds + proof.seconds, ...selection, ...(deferred ? { files: proofFiles, submitInvariants: invariants } : {}), deferred, deferFullFallback, check: receipt,
         profile, profilePath, proofProfilePath: proof.profilePath, proofLog: proof.log };
     };
     if (!criterion.isGreen) {
       writeFileSync(log, criterion.output);
-      return finish({ isGreen: false, isCached: false, output: criterion.output, seconds: 0, log: '' });
+      return finish({ isGreen: false, sandboxBlocked: criterion.sandboxBlocked, isCached: false, output: criterion.output, seconds: 0, log: '' });
     }
     // The proof already owns this lease: its phase profile has no additional queue wait.
     const proofWait = check ? 0 : lease.waitMs;
