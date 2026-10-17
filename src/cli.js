@@ -31,13 +31,13 @@ import {
   pushesTrunk,
   unwiredHookProblems,
 } from './hooks.js';
-import { detectGate, initRepo } from './init.js';
+import { detectGate, initRepo, proposeLanes } from './init.js';
 import { lifecycleMarkdown } from './machine.js';
 import { HELP, VERSION } from './help.js';
 import { defaultViewPort } from './view-port.js';
 export { HELP, VERSION };
 import { productLine, productProblems, productSummaries } from './products.js';
-import { isLane, laneNames, laneOf, outOfLane } from './lanes.js';
+import { addLane, isLane, laneNames, laneOf, outOfLane } from './lanes.js';
 import { Refused } from './refused.js';
 import { personNeeds } from './needs.js';
 import { personNeedsState } from './needs-state.js';
@@ -298,6 +298,7 @@ const OPTIONS = {
   commit: { type: 'string' },
   ref: { type: 'string' },
   supersedes: { type: 'string' },
+  owns: { type: 'string' },
   help: { type: 'boolean', short: 'h' },
   version: { type: 'boolean', short: 'v' },
 };
@@ -596,7 +597,7 @@ async function bindCheckoutSession(io, positionals, values) {
   }
   const writes = ['init', 'join', 'worktree', 'hooks', 'hook', 'skills', 'add', 'edit', 'fact', 'escalate', 'run', 'sweep',
     'next', 'claim', 'hold', 'release', 'submit', 'done', 'verify', 'merged', 'land', 'withdraw', 'refreeze', 'reopen', 'shout', 'answer', 'pass', 'import', 'milestone', 'takeover', 'forget'];
-  if (!writes.includes(command) && !(command === 'settings' && first) && !(command === 'spec' && first === 'apply') && !(command === 'relay' && ['on', 'off'].includes(first))) return;
+  if (!writes.includes(command) && !(command === 'lane' && first === 'add') && !(command === 'settings' && first) && !(command === 'spec' && first === 'apply') && !(command === 'relay' && ['on', 'off'].includes(first))) return;
   if (command === 'answer' && values.as === 'person') return;
   const digest = agentSessionDigest();
   if (!digest) {
@@ -1626,7 +1627,7 @@ async function serveHere(io, values) {
  * @param {{ first?: string }} args
  * @returns {Record<string, () => number | Promise<number>>}
  */
-function setupCommands(io, { first, values }) {
+function setupCommands(io, { first, second, rest = [], values }) {
   return {
     init: async () => {
       const info = repoInfo(io.cwd);
@@ -1660,10 +1661,11 @@ function setupCommands(io, { first, values }) {
       if (linked && model !== undefined) await withBoard(ctx, (board) => ordered(ctx, board, 'register', [
         { lane: COORDINATOR, path: info.root, model },
       ]));
-      // init --blueprint: the same add as pullboard blueprint add, in the same command (#678).
+      // Keep blueprint initialization and the person's unwritten lane proposals in the same result.
       const added = blueprint ? await addBlueprintHere(io, values.blueprint, { report: false, blueprint }) : null;
-      io.result?.({ root: info.root, notes, ...(added ? { blueprint: { name: added.blueprint.name, title: added.blueprint.title,
-        section: added.section, waiting: added.rows.length, items: added.items.length, gate: added.gate, checksNotRun: added.checksNotRun } } : {}) });
+      io.result?.({ root: info.root, notes, proposedLanes: proposeLanes(info.root),
+        ...(added ? { blueprint: { name: added.blueprint.name, title: added.blueprint.title,
+          section: added.section, waiting: added.rows.length, items: added.items.length, gate: added.gate, checksNotRun: added.checksNotRun } } : {}) });
       const staging = notes.at(-1)?.startsWith('git add -f -- ') ? notes.at(-1) : null;
       (staging ? notes.slice(0, -1) : notes).forEach((note) => io.say(note));
       if (added) {
@@ -1676,6 +1678,18 @@ function setupCommands(io, { first, values }) {
         ? 'Next: run pullboard resume now to continue setup in this session; the new skills load next session, and setup does not need them.'
         : 'Next: ask your agent to set up Pullboard here; in Claude Code, start a new session first so it loads the Pullboard skills.');
       if (staging) io.say(`To commit Pullboard's files: ${staging}`);
+      return 0;
+    },
+    lane: () => {
+      if (first !== 'add' || !second || rest.length || values.owns === undefined) {
+        throw new Refused('USAGE', 'add a lane with: pullboard lane add <name> --owns <path>[,<path>]');
+      }
+      const info = repoInfo(io.cwd);
+      if (!info.isMain) throw new Refused('NOT_MAIN', 'lanes are the coordinator\'s to declare; run pullboard lane add in the main checkout, or shout the coordinator to add it');
+      const added = addLane(info.root, second, values.owns.split(','));
+      io.result?.(added);
+      io.say(`added lane ${added.lane}: owns ${added.owns.join(' ')}`);
+      io.say(`Next: commit ${CONFIG_FILE} so new worktrees can join it, then: pullboard worktree ${added.lane} --model "<model name>"`);
       return 0;
     },
     hooks: () => {

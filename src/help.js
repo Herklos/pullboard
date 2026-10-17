@@ -17,6 +17,8 @@ Set up
   pullboard join coordinator --model <name>                                 declare the main checkout's coordinator model
                                         pullboard.json agents.names: suffix (default) or prefix
   pullboard whoami | lanes | status     who you are, the lanes, the board at a glance
+  pullboard lane add <name> --owns <path>[,<path>]   add a lane that owns those folders to pullboard.json
+                                        refuses a lane name or a path that is already owned, naming the owner
   pullboard takeover                   rebind this checkout when the same agent starts a new session
   pullboard resources                  local resource holders and their FIFO queues
   pullboard settings [gateSlots <n> | browserSlots <n>]  view or set machine capacity (gate default 2; browser default 1)
@@ -177,7 +179,7 @@ Reject reasons: TEST_FAILURE, BEHAVIOR_MISMATCH, INSUFFICIENT_EVIDENCE, STALE_HE
 --json prints one versioned document for every command; refusals include their code and next step.`;
 
 const HELP_NAMES = [
-  'tour', 'init', 'worktree', 'join', 'takeover', 'whoami', 'lanes', 'status', 'resources', 'settings', 'view', 'view export',
+  'tour', 'init', 'worktree', 'join', 'takeover', 'whoami', 'lanes', 'lane', 'lane add', 'status', 'resources', 'settings', 'view', 'view export',
   'serve', 'mcp', 'relay', 'relay recover', 'resume', 'hooks', 'add', 'edit', 'escalate', 'run', 'list', 'doctor', 'skills', 'show', 'next', 'land',
   'check', 'claim', 'release', 'submit', 'done', 'verify', 'fact', 'shout', 'answer', 'pass', 'decisions', 'inbox', 'export', 'import',
   'sweep', 'merged', 'withdraw', 'refreeze', 'reopen', 'hold', 'stats', 'ledger', 'log', 'spec', 'spec check', 'spec view',
@@ -202,6 +204,7 @@ const HELP_EXAMPLES = {
   verify: 'pullboard verify 12 accept --note "removed the fix; the test failed"',
   answer: 'pullboard answer 12 "done"', pass: 'pullboard pass 12 "please decide"',
   status: 'pullboard status', view: 'pullboard view', mcp: 'pullboard mcp', stats: 'pullboard stats --since 2026-10-08', log: 'pullboard log 12', ledger: 'pullboard ledger',
+  'lane add': 'pullboard lane add web --owns apps/web/', lane: 'pullboard lane add web --owns apps/web/',
   roadmap: 'pullboard roadmap', milestone: 'pullboard milestone add "0.7.0" --items 12,13',
   runner: 'pullboard runner add studio --slots 2 --browser 1', 'runner add': 'pullboard runner add studio --slots 2 --browser 1',
   edit: 'pullboard edit 12 --brief "Add the upload page"', release: 'pullboard release 12',
@@ -220,6 +223,7 @@ const HELP_EXAMPLES = {
 const HELP_ALIASES = {
   whoami: { usage: 'pullboard whoami', source: 'whoami' },
   lanes: { usage: 'pullboard lanes', source: 'whoami' },
+  lane: { usage: 'pullboard lane add <name> --owns <path>[,<path>]', source: 'lane add' },
   status: { usage: 'pullboard status', source: 'whoami' },
   done: { usage: 'pullboard done <id>', source: 'submit <id>' },
   inbox: { usage: 'pullboard inbox', source: null },

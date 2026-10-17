@@ -46,7 +46,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | --- | --- |
 | `help` | `version:number`, `help:string` |
 | `version` | `version:number`, `release:string` |
-| `init` | `version:number`, `root:string`, `notes:array` |
+| `init` | `version:number`, `root:string`, `notes:array`, `proposedLanes:array` |
 | `hooks` | `version:number`, `notes:array` |
 | `join` | `version:number`, `agent:string`, `lane:string`, `route:string`, `path:string`, `model:string`, `displayName:string` |
 | `takeover` | `version:number`, `agent:string`, `path:string` |
@@ -54,6 +54,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `resume` | `version:number`, `me:object`, `all:array`, `requests:array`, `holding:array`, `sentBack:array`, `awaiting:array`, `toVerify:array`, `toMerge:array`, `open:array`, `stale:array`, `holds:array`, `unread:number`, `newest:array`, `root:string`, `dirty:number`, `next:string` |
 | `whoami` | `version:number`, `id:string`, `lane:string`, `path:string`, `model:string`, `displayName:string` |
 | `lanes` | `version:number`, `lanes:object`, `shared:array`, `coordinator:string` |
+| `lane add` | `version:number`, `lane:string`, `owns:array` |
 | `resources` | `version:number`, `resources:array` |
 | `settings` | `version:number`, `settings:object` |
 | `runner` | `version:number`, `runner:object` |
@@ -124,7 +125,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `hook pre-push` | `version:number`, `messages:array` |
 <!-- api-command-shapes:end -->
 
-`hook pre-merge-commit` runs the same staged checks as `hook pre-commit` before Git creates an automatic merge commit. `init` and `hooks` install it; `doctor` names it when absent at Git's effective hook path. Lane ownership comes from `HEAD:pullboard.json`, so an unstaged configuration edit cannot grant a lane new folders. Lane-sensitive checks refuse a repository with `info/grafts` in its Git common directory because grafts alter ancestry even when replacement objects are disabled.
+`hook pre-merge-commit` runs the same staged checks as `hook pre-commit` before Git creates an automatic merge commit. `init` and `hooks` install it; `doctor` names it when absent at Git's effective hook path. Lane ownership comes from `HEAD:pullboard.json`, so an unstaged configuration edit cannot grant a lane new folders. `lane add` writes the new lane to the working `pullboard.json` and returns `{ lane, owns }`; commit the file before the lane's ownership takes effect. `init` returns the lanes it proposes as `proposedLanes`, each `{ name, owns }`, and writes none of them. Lane-sensitive checks refuse a repository with `info/grafts` in its Git common directory because grafts alter ancestry even when replacement objects are disabled.
 
 `join` and `worktree` require a free-text `--model` label or `PULLBOARD_MODEL` environment value; labels are not inferred from a provider or family. Rejoining the same worktree preserves its agent id; the model label is required on every join, and omitting the optional `--family` preserves its prior declaration. `pullboard.json` may set `agents.names` to `suffix` (the default, `web-1 (Claude)`) or `prefix` (`claude-web-1`). CLI `agent` fields remain stable ids; `displayName` shows the chosen style. `resume.me` and API state `agents[]` carry `model` and `displayName`; older agents with no model display `unknown`. Each event records the actor model in `event_detail.model` for a registered agent, with `unknown` for legacy agents without a declaration. `show` includes `item_builder_family` and each verdict's `verdict_verifier_family`. These family fields are `null` when the agent did not declare a family, and later declarations do not rewrite prior submissions or verdicts.
 
