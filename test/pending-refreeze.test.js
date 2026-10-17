@@ -243,12 +243,12 @@ async function checkDependencyLegacyClients(cleanup, directory, snapshot, target
         const oldFeature = legacyEngine.applyRelayMove(old, engine10Move, engine10Receipt);
         const currentFeature = applyRelayMove(current, engine10Move, engine10Receipt);
         assert.equal(oldFeature.error, undefined, JSON.stringify(oldFeature));
-        assert.deepEqual(currentFeature, oldFeature, 'engine 12 reproduces engine 10 dependency additions and clears');
+        assert.deepEqual(currentFeature, oldFeature, 'the current writer reproduces engine 10 dependency additions and clears');
         assert.deepEqual(store.getItem(current, target), legacyStore.getItem(old, target));
-        assert.deepEqual(store.events(current), legacyStore.events(old), 'engine 10 and engine 12 replay identical events');
+        assert.deepEqual(store.events(current), legacyStore.events(old), 'engine 10 and the current writer replay identical events');
         assert.equal(appliedSequence(current), legacyEngine.appliedSequence(old));
         assert.deepEqual(engineReceipt(current, engine10Move.id), legacyEngine.engineReceipt(old, engine10Move.id),
-          'engine 10 and engine 12 retain the same dependency-move receipts');
+          'engine 10 and the current writer retain the same dependency-move receipts');
         const oldSnapshot = legacyExchange.exportBoard(old);
         const currentSnapshot = exportBoard(current);
         assert.equal(oldSnapshot.tables.board_meta.find((row) => row.meta_key === 'relay_engine_version').meta_value, '10');
@@ -261,7 +261,7 @@ async function checkDependencyLegacyClients(cleanup, directory, snapshot, target
 }
 
 test('dependency edits replay the same on every engine [B3,V2,H16]', async (t) => {
-  assert.equal(ENGINE_VERSION, 32);
+  assert.equal(ENGINE_VERSION, 33, 'the next writer retains all recorded dependency-edit behavior');
   const directory = mkdtempSync(join(tmpdir(), 'pullboard-dependency-engines-'));
   const cleanup = [];
   t.after(() => {
