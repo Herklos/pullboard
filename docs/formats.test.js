@@ -293,7 +293,7 @@ function recordEventContract() {
   escalate(board, first, { agentId: builder, note: 'attempted once', attempt: '1' });
   claim(board, first, { agentId: builder, lane: 'docs', leaseMs: 60_000, freeze: freeze('unused') });
   release(board, first, builder);
-  editItem(board, first, { agentId: coordinator, criterion: 'Updated after claim' });
+  editItem(board, first, { agentId: coordinator, criterion: 'Updated after claim', reason: 'the claimed bar named the wrong field' });
   refreeze(board, first, { agentId: coordinator, freeze: freeze('second') });
   claim(board, first, { agentId: builder, lane: 'docs', leaseMs: 60_000, freeze: freeze('unused') });
   const acceptedCommit = 'a'.repeat(40);
@@ -315,7 +315,7 @@ function recordEventContract() {
 
   const corrected = addItem(board, { by: coordinator, lane: 'docs', title: 'Corrected live claim' });
   claim(board, corrected, { agentId: builder, lane: 'docs', leaseMs: 60_000, freeze: freeze('before-correction') });
-  editItem(board, corrected, { agentId: coordinator, criterion: 'Corrected criterion' });
+  editItem(board, corrected, { agentId: coordinator, criterion: 'Corrected criterion', reason: 'the fixture corrects its bar' });
   assert.deepEqual(JSON.parse(events(board).filter((row) => row.event_kind === 'edit').at(-1).event_detail).pendingRefreeze, ['criterion']);
   refreeze(board, corrected, { agentId: builder, freeze: freeze('adopted-correction') });
 

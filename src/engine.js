@@ -2,6 +2,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import * as store from './board.js';
 import { recordedRefusal } from './recorded-refusal.js';
+import { BAR_ENGINE, carriesBarReason } from './bar-corrections.js';
 import { carriesImplies, IMPLIES_ENGINE } from './implies.js';
 import { ENGINE_VERSION } from './machine.js';
 import { Refused } from './refused.js';
@@ -23,10 +24,11 @@ export const ENGINE_OPERATIONS = Object.freeze([
 /** Engine version at which each ordered operation first has stable replay semantics. */
 const OPERATION_ENGINE = Object.freeze({ reopen: 8, recordLandingBatch: 8, recordLandingWaiver: 8, recordLandingFlake: 8, finishLandingBatch: 8 });
 
-/** Dependency edits add engine-10 meaning, and implied items engine-18 meaning, without changing ordinary historical envelopes. */
+/** Dependency edits add engine-10 meaning, edit reasons engine-19 and implied items engine-20, without changing ordinary historical envelopes. */
 function minimumOperationEngine(operation, args) {
   const options = args[1];
   if (carriesImplies(operation, args)) return IMPLIES_ENGINE;
+  if (carriesBarReason(operation, args)) return BAR_ENGINE;
   return operation === 'editItem' && options && Object.hasOwn(options, 'after') && options.after !== undefined
     ? 10 : OPERATION_ENGINE[operation] ?? 1;
 }

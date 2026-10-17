@@ -18,7 +18,7 @@ import { ENGINE_VERSION } from './machine.js';
 import { Refused } from './refused.js';
 
 /** The engine whose moves may carry `implies`, or supersede an answer; older replays never do. */
-export const IMPLIES_ENGINE = 18;
+export const IMPLIES_ENGINE = 20;
 
 /** The operations whose sealed options may carry `implies`. */
 export const IMPLYING_OPERATIONS = Object.freeze(['appendFact', 'answerDecision', 'verify']);
@@ -293,7 +293,7 @@ export function requestAnswerRefusal(id, { asPerson }) {
     : new Refused('NOT_A_DECISION', `request #${id} is not a decision, so it implies and supersedes nothing; answer it with pullboard answer ${id} done or declined <reason>`);
 }
 
-/** The optional engine-18 fields of a fact, present only when its event set them. */
+/** The optional engine-20 fields of a fact, present only when its event set them. */
 export function decisionFields(detail) {
   return { ...(detail.implies ? { implies: detail.implies } : {}), ...(detail.decision ? { decision: detail.decision } : {}),
     ...(detail.supersededBy ? { supersededBy: detail.supersededBy } : {}) };
@@ -327,4 +327,11 @@ export function takeDecisionNotices(gitDir, held) {
   writeFileSync(temporary, `${JSON.stringify({ version: 1, seen: next })}\n`);
   renameSync(temporary, record);
   return notices;
+}
+
+/** Give facts the same stamped identity on CLI, API, export and replica reads [B29,B31]. */
+export function factFromEvent(event) {
+  const detail = JSON.parse(event.event_detail);
+  return { id: detail.id, eventId: event.event_id, kind: detail.kind, text: detail.text,
+    by: event.event_by, at: event.event_at, ref: detail.ref ?? null, supersedes: detail.supersedes ?? null, ...decisionFields(detail) };
 }

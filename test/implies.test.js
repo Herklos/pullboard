@@ -162,7 +162,7 @@ test('[B29,B31] verdicts and facts carry --implies; a later verdict or a superse
   assert.equal(told[0].supersededBy.source, 'verdict');
   assert.equal(told[0].supersededBy.line, 'accept CRITERION_MET: ran the fixture check');
 
-  const decision = box.json(box.repo, 'fact', '3', 'decision', 'Item 2 waits for engine 18', '--implies', '2').fact;
+  const decision = box.json(box.repo, 'fact', '3', 'decision', 'Item 2 waits for engine 20', '--implies', '2').fact;
   box.json(box.repo, 'fact', '3', 'supersession', 'Item 2 waits for engine 19', '--supersedes', decision.id);
   const corrected = facts(box, 2).filter((fact) => fact.supersededBy?.source === 'fact');
   assert.equal(corrected.length, 1, 'superseding a fact that implied items tells each of them');
@@ -204,10 +204,10 @@ test('[P6,B26,H16] --implies cannot forge a person-origin fact through the relay
     assert.deepEqual(person, [], 'no person-origin fact exists after agent relays');
 
     const old = prepareEngineMove(board, 'appendFact', [one, { agentId: 'coordinator', kind: 'note', text: 'old engine', implies: [two] }]);
-    old.engine = 12;
+    old.engine = 19;
     const before = store.events(board).length;
     assert.throws(() => applyEngineMove(board, old, { sequence: sequence + 1, at: new Date(at).toISOString() }), { code: 'RELAY_MOVE' },
-      'an implies move below engine 18 is refused before it is interpreted');
+      'an implies move below engine 20 is refused before it is interpreted');
     assert.equal(store.events(board).length, before, 'the refused older move changes nothing');
 
     const personAnswer = store.answerDecision(board, personAsk, { agentId: 'coordinator', asPerson: true, text: 'The person decides', lanes: ['web'], implies: [two] });
