@@ -2136,6 +2136,16 @@ function milestonePriorities(board) {
   return (entry) => priorities.get(entry.item_id) ?? ordered.length;
 }
 
+/** Make the shared build-queue comparator once: milestone, route, recent files, then oldest. */
+export function buildOrder(board, { warm = [] } = {}) {
+  const milestonePriority = milestonePriorities(board);
+  const recent = new Set(warm);
+  const shared = (entry) => itemFiles(entry).filter((path) => recent.has(path)).length;
+  return (first, second) => milestonePriority(first) - milestonePriority(second)
+    || ROUTES.indexOf(second.item_route) - ROUTES.indexOf(first.item_route)
+    || shared(second) - shared(first) || first.item_id - second.item_id;
+}
+
 /**
  * The next item an agent can take (N2): for a builder, the oldest open item in its lane whose
  * dependencies are verified; for a verifier, the oldest submitted item it did not build. An agent
@@ -2149,10 +2159,10 @@ function milestonePriorities(board) {
  * and `shared` names them (N20). A held lane offers nothing new (N22).
  *
  * @param {any} board
- * @param {{ agentId: string, lane: string, verify?: boolean, policy?: string, familyPolicy?: string, runnable?: boolean, routes?: string[], warm?: string[], priority?: number[] }} who
+ * @param {{ agentId: string, lane: string, verify?: boolean, policy?: string, familyPolicy?: string, runnable?: boolean, routes?: string[], warm?: string[], priority?: number[], lanes?: string[] }} who
  * @returns {{ item: any | null, reasons: string[], shared?: string[] }}
  */
-export function nextFor(board, { agentId, lane, verify = false, policy = 'any', familyPolicy = 'off', runnable = false, routes = ROUTES, warm = [], priority = [] }) {
+export function nextFor(board, { agentId, lane, verify = false, policy = 'any', familyPolicy = 'off', runnable = false, routes = ROUTES, warm = [], priority = [], lanes }) {
   const route = routeOf(board, agentId);
   const tier = (entry) => ROUTES.indexOf(entry.item_route);
   const allItems = listItems(board).reverse();
@@ -2187,20 +2197,23 @@ export function nextFor(board, { agentId, lane, verify = false, policy = 'any', 
   }
   const held = items.find((entry) => entry.item_status === 'claimed' && entry.item_owner === agentId && entry.item_parent_id === null);
   if (held) return { item: held, reasons: [] };
-  const reasons = allItems.filter((entry) => entry.item_status === 'open' && entry.item_lane === lane && entry.item_hold_reason)
+  const selectedLanes = new Set(lanes ?? [lane]);
+  const reasons = allItems.filter((entry) => entry.item_status === 'open' && selectedLanes.has(entry.item_lane) && entry.item_hold_reason)
     .map((entry) => `#${entry.item_id} is held by coordinator: ${entry.item_hold_reason}`);
   const paused = laneHold(board, lane);
-  if (paused) return { item: null, reasons: [`${paused.hold_by} holds the ${lane} lane: ${paused.hold_reason}`, ...reasons] };
-  const milestonePriority = milestonePriorities(board);
+  if (!lanes && paused) return { item: null, reasons: [`${paused.hold_by} holds the ${lane} lane: ${paused.hold_reason}`, ...reasons] };
+  if (lanes) for (const name of selectedLanes) {
+    const hold = laneHold(board, name);
+    if (hold) { selectedLanes.delete(name); reasons.push(`${hold.hold_by} holds the ${name} lane: ${hold.hold_reason}`); }
+  }
+  const compare = buildOrder(board, { warm });
   const recent = new Set(warm);
   const mainRed = new Set(priority);
-  const laneItems = items.filter((entry) => entry.item_status === 'open' && entry.item_lane === lane);
+  const laneItems = items.filter((entry) => entry.item_status === 'open' && selectedLanes.has(entry.item_lane));
   const mine = laneItems
     .filter((entry) => !itemHold(board, entry.item_id))
     .map((entry, order) => ({ entry, order, shared: itemFiles(entry).filter((path) => recent.has(path)) }))
-    .sort((first, second) => milestonePriority(first.entry) - milestonePriority(second.entry)
-      || tier(second.entry) - tier(first.entry)
-      || second.shared.length - first.shared.length || first.order - second.order);
+    .sort((first, second) => compare(first.entry, second.entry));
   // Move only evidenced reworks ahead of their own tier; with no evidence, normal order is exact.
   for (const route of ROUTES) {
     const routeTier = ROUTES.indexOf(route);

@@ -17,8 +17,11 @@ import childProcess from 'node:child_process';
 import { statSync, realpathSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { basename, delimiter, isAbsolute, relative, resolve } from 'node:path';
-import { promisify } from 'node:util';
 import { Refused } from './refused.js';
+
+// The util ESM facade evaluates lazy exports, including diff, which opens stderr on Node 24.
+// A child may share that descriptor with stdout; keep its pipe mode unchanged when preloading us.
+const { promisify } = process.getBuiltinModule('node:util');
 
 /** The marker the runner sets in a test file's process: held, none, or unset when the setting is off. */
 export const BROWSER_SLOT_ENV = 'PULLBOARD_TEST_BROWSER_SLOT';
