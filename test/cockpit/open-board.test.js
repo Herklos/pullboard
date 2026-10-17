@@ -1,6 +1,6 @@
 /** Opening your board from pullboard.dev: one clear screen at a time, in the approved words, moving on by itself [N26,H5]. */
 import assert from 'node:assert/strict';
-import { request } from 'node:http';
+import { createServer, request } from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -121,6 +121,7 @@ const SHOWN = `JSON.stringify((() => {
     commands: all('#local-note .ob-cmd').map((box) => ({ code: box.querySelector('code').textContent.trim(), copy: copy(box), mono: /mono|Menlo|Consolas/i.test(getComputedStyle(box.querySelector('code')).fontFamily), height: height(box) })),
     agents: all('#local-note .ob-agent').map((box) => ({ text: box.textContent.replace(/Copy$/, '').trim(), copy: copy(box), height: height(box) })),
     help: all('#local-note .ob-help').map((strip) => ({ text: strip.textContent.replace(/Copy$/, '').trim(), copy: copy(strip), border: getComputedStyle(strip).borderTopStyle })),
+    helpFit: all('#local-note .ob-help').map((strip) => { const said = strip.querySelector('small'); return { button: height(strip.querySelector('button')), oneLine: said.getBoundingClientRect().height < parseFloat(getComputedStyle(said).fontSize) * 1.8 }; }),
     github: all('#local-note .ob-gh').map((button) => ({ text: button.textContent.trim(), href: button.getAttribute('href'), height: height(button), background: getComputedStyle(button).backgroundColor })),
     live: all('#local-note .ob-live').map((line) => line.textContent.trim()),
     ask: all('#local-note .ob-ask').map((bubble) => bubble.textContent.replace(/\\s+/g, ' ').trim()),
@@ -154,13 +155,13 @@ function alone(seen, heading, { allow = '' } = {}) {
   assert.equal(seen.theme, true, `${seen.state}: the theme toggle sits in the header`);
 }
 
-test('each open-board state shows alone with its words [N26,H5]', { timeout: 120_000 }, async () => { // budget: hang ceiling for seven hosted page loads in Chrome with screenshots at two widths.
+test('each open-board state shows alone with its words [N26,H5]', { timeout: 150_000 }, async () => { // budget: hang ceiling for nine hosted page loads in Chrome with screenshots at two widths.
   const executable = chromeExecutable();
   assert.ok(executable, 'the open-board check needs real Chrome');
   const box = machine();
   project(box, 'open-board-states');
   const profile = mkdtempSync(join(tmpdir(), 'pullboard-open-board-'));
-  let view, chrome, stand;
+  let view, chrome, stand, other;
   try {
     view = await startView(box);
     chrome = await openSnapshotChrome(executable, 'about:blank', profile);
@@ -185,6 +186,7 @@ test('each open-board state shows alone with its words [N26,H5]', { timeout: 120
     assert.match(asking.ask[0], /^app\.pullboard\.dev wants to Access other apps and services on this device Block Allow ↑ click this$/, 'with its words and the button to click');
     assert.deepEqual(asking.live, ['Waiting for you to click Allow'], 'a live line says the page waits');
     assert.deepEqual(asking.help, [{ text: 'Something not working? Ask your agent“Help me allow Pullboard in my browser.”', copy: 'Help me allow Pullboard in my browser.', border: 'dashed' }], 'a dashed help strip ends the screen with a sentence to copy');
+    assert.deepEqual(asking.helpFit, [{ button: 40, oneLine: true }], 'its Copy is the 40 px button the mockup draws, and on a computer the sentence keeps to one line');
     await press(chrome, "document.querySelector('#local-note .ob-help button')");
     await chrome.waitFor("document.querySelector('#local-note .ob-help button').textContent === 'Copied'", 5_000); // budget: hang ceiling for one clipboard write.
     // The theme toggle in the header turns the page to the other scheme.
@@ -202,6 +204,7 @@ test('each open-board state shows alone with its words [N26,H5]', { timeout: 120
     assert.deepEqual(blocked.steps, ['Click the icon left of the address, at the top of this window.', 'Find Local network access, or Apps on this device.', 'Set it to Allow.'], 'three steps');
     assert.deepEqual(blocked.live, ['Your boards open as soon as it\'s on']);
     assert.deepEqual(blocked.help, [{ text: 'Something not working? Ask your agent“My browser blocked Pullboard. Help me fix it.”', copy: 'My browser blocked Pullboard. Help me fix it.', border: 'dashed' }]);
+    assert.deepEqual(blocked.helpFit, [{ button: 40, oneLine: true }], 'the sentence keeps to one line');
 
     // Where are your projects: nothing runs here and nobody is signed in, so two equal cards say how the paths differ.
     const absent = await openState(chrome, '?absent', 'not-running', 'open-board-where');
@@ -219,10 +222,32 @@ test('each open-board state shows alone with its words [N26,H5]', { timeout: 120
     await press(chrome, "document.querySelector('#local-note .ob-cmd button')");
     await chrome.waitFor("document.querySelector('#local-note .ob-cmd button').textContent === 'Copied'", 5_000); // budget: hang ceiling for one clipboard write.
 
+    // Pullboard on this computer speaks another version of the page's protocol: one command updates it, and a dashed
+    // strip ends the screen, as on every screen where something can go wrong.
+    other = createServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': HOSTED });
+      res.end(JSON.stringify({ version: 2, apiVersion: 2, hostedOrigin: HOSTED }));
+    });
+    await new Promise((ready) => other.listen(0, '127.0.0.1', ready));
+    stand.local = 'http://127.0.0.1:' + other.address().port;
+    const update = await openState(chrome, '?mismatch', 'mismatch', 'open-board-update');
+    alone(update, 'Update Pullboard on this computer');
+    assert.deepEqual(update.commands.map((command) => [command.code, command.copy, command.height]), [['$npm i -g pullboard', 'npm i -g pullboard', 60]], 'the update command in a mono box with Copy');
+    assert.deepEqual(update.agents.map((agent) => [agent.text, agent.copy, agent.height]), [['Ask your agent“Help me update Pullboard.”', 'Help me update Pullboard.', 60]], 'its "or" box asks the agent to help update');
+    assert.deepEqual(update.help, [{ text: 'Something not working? Ask your agent“Help me update Pullboard.”', copy: 'Help me update Pullboard.', border: 'dashed' }], 'a dashed help strip with a sentence to copy ends the screen');
+    assert.deepEqual(update.helpFit, [{ button: 40, oneLine: true }]);
+    await press(chrome, "document.querySelector('#local-note .ob-help button')");
+    await chrome.waitFor("document.querySelector('#local-note .ob-help button').textContent === 'Copied'", 5_000); // budget: hang ceiling for one clipboard write.
+    stand.local = null;
+
     // A pairing link on a computer, not signed in: the one way that opens boards from any device.
     const out = await openState(chrome, '?out#board=' + 'b'.repeat(32) + '&key=k1', 'signed-out', 'open-board-sign-in');
     alone(out, 'Open them from any device');
     assert.deepEqual(out.github.map((button) => [button.text, button.href, button.height]), [['Sign in with GitHub', '/auth/github/start', 60]]);
+    assert.deepEqual(out.help, [{ text: 'Something not working? Ask your agent“Help me open my Pullboard board.”', copy: 'Help me open my Pullboard board.', border: 'dashed' }], 'a dashed help strip with a sentence to copy ends the screen');
+    assert.deepEqual(out.helpFit, [{ button: 40, oneLine: true }]);
+    await press(chrome, "document.querySelector('#local-note .ob-help button')");
+    await chrome.waitFor("document.querySelector('#local-note .ob-help button').textContent === 'Copied'", 5_000); // budget: hang ceiling for one clipboard write.
 
     // The phone's first screen, drawn by the view from the state #757 provides: one GitHub button, nothing about this computer.
     const phone = await openState(chrome, '?plain-phone#board=' + 'b'.repeat(32) + '&key=k1', 'signed-out', 'open-board-phone');
@@ -243,6 +268,19 @@ test('each open-board state shows alone with its words [N26,H5]', { timeout: 120
     assert.deepEqual(share.agents.map((agent) => [agent.text, agent.copy, agent.height]), [[words.share.agent + '“' + words.share.ask + '”', words.share.ask, 60]]);
     assert.deepEqual(share.small, [words.share.small]);
     assert.deepEqual(share.live, [words.share.waiting]);
+
+    // Signed in, and the account shares a board this browser holds no key for. Running the command alone never opens
+    // it here: a browser enrolls only from the pairing link the command prints, so the screen says to open that link
+    // or scan its QR, and never that the boards show up by themselves. Nobody waits forever.
+    stand.linked = [{ id: 'a'.repeat(32), repository: 'acme/web', linkedAt: 0 }];
+    const unpaired = await openState(chrome, '?linked', 'unpaired', 'open-board-unpaired');
+    alone(unpaired, words.share.title, { allow: words.share.command });
+    assert.equal(unpaired.say, 'On the computer with your projects, open a terminal and run this, then open the link it prints here or scan its QR:', 'the step names the link and the QR');
+    assert.deepEqual(unpaired.commands.map((command) => [command.code, command.copy]), [['$' + words.share.command, words.share.command]]);
+    assert.deepEqual(unpaired.small, ['Your account shares acme/web. This browser opens it from that link.'], 'it names the shared board and how this browser opens it');
+    assert.doesNotMatch(unpaired.text, /by themselves/, 'and never says the boards arrive by themselves');
+    assert.deepEqual(unpaired.live, [words.share.waiting]);
+    stand.linked = [];
     assert.deepEqual(chrome.exceptions, [], 'Chrome reports no uncaught exceptions');
     assert.deepEqual(stand.failures, [], 'the stand-in hosted page was served');
   } finally {
@@ -250,8 +288,11 @@ test('each open-board state shows alone with its words [N26,H5]', { timeout: 120
     finally {
       try { if (chrome) await closeSnapshotChrome(chrome); }
       finally {
-        try { if (view) await view.stop(); }
-        finally { rmSync(profile, { recursive: true, force: true }); }
+        try { if (other) await new Promise((closed) => { other.close(closed); other.closeAllConnections(); }); }
+        finally {
+          try { if (view) await view.stop(); }
+          finally { rmSync(profile, { recursive: true, force: true }); }
+        }
       }
     }
   }

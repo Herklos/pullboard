@@ -96,12 +96,14 @@ export function hostedBrowser(agent) {
  * and One step on your computer, for a phone and for a person signed in with nothing shared.
  *
  * @param {string|null} state - looking, asking, blocked, not-running, mismatch, problem, signed-out, no-linked, unpaired, linked-failed or local-failed.
- * @param {{phone?: boolean, detail?: string}} [facts] - Whether the page runs on a phone, and a refusal's own words.
+ * @param {{phone?: boolean, detail?: string, linked?: string[]}} [facts] - Whether the page runs on a phone, a refusal's own words, and the boards the account shares that this browser cannot open yet.
  * @returns {null|{state: string, kind: string, heading: string, text?: string, parts: string[], command?: string, ask?: string, small?: string, live?: string, lead?: string, help?: string, detail?: string}}
  */
 export function hostedState(state, facts = {}) {
   const agent = 'Something not working? Ask your agent';
   const opening = 'Help me open my Pullboard board.';
+  const updating = 'Help me update Pullboard.';
+  const shared = facts.linked || [];
   const share = { kind: 'state', heading: 'One step on your computer', text: 'On the computer with your projects, open a terminal and run this once:', parts: ['command'], command: 'pullboard relay on --all', ask: 'Help me share my boards with my phone.',
     small: 'It shares every project with your account. Your boards show up here by themselves.', live: 'Waiting for your boards' };
   const models = {
@@ -112,14 +114,19 @@ export function hostedState(state, facts = {}) {
       live: 'Your boards open as soon as it\'s on', lead: agent, help: 'My browser blocked Pullboard. Help me fix it.' },
     'not-running': { kind: 'state', heading: 'Where are your projects?', parts: ['two'], live: 'Still looking on this computer', wide: true },
     'mismatch': { kind: 'state', heading: 'Update Pullboard on this computer', text: 'The Pullboard on this computer does not match this page. Update it, and this page opens your boards by itself.', parts: ['command'],
-      command: 'npm i -g pullboard', ask: opening, live: 'Still looking on this computer' },
+      command: 'npm i -g pullboard', ask: updating, live: 'Still looking on this computer', lead: agent, help: updating },
     'problem': { kind: 'state', heading: 'Open your board', text: facts.detail || 'This page could not take the connection Pullboard on this computer sent back.', parts: ['open'], lead: agent, help: opening },
     'signed-out': facts.phone
       ? { kind: 'state', heading: 'Your boards, on your phone', text: 'Sign in with the GitHub account you use on your computer.', parts: ['github'], small: 'Nothing to install on your phone.',
         lead: 'Stuck? On your computer, ask your agent', help: 'Help me see my boards on my phone.' }
-      : { kind: 'state', heading: 'Open them from any device', text: 'Your boards on your phone and every computer, from the GitHub account you shared them with.', parts: ['github'], small: 'Not shared yet? After you sign in, it shows the one step.' },
+      : { kind: 'state', heading: 'Open them from any device', text: 'Your boards on your phone and every computer, from the GitHub account you shared them with.', parts: ['github'], small: 'Not shared yet? After you sign in, it shows the one step.',
+        lead: agent, help: opening },
     'no-linked': share,
-    'unpaired': share,
+    // The account shares boards this browser holds no key for. Running the command alone never opens them here: a
+    // browser enrolls only from the pairing link the command prints (relay/browser-devices.js enrollPhone), so the
+    // screen says to open that link or scan its QR, as the screen before it did.
+    'unpaired': { ...share, text: 'On the computer with your projects, open a terminal and run this, then open the link it prints here or scan its QR:', ask: opening,
+      small: 'Your account shares ' + (shared.join(', ') || 'your boards') + '. This browser opens ' + (shared.length === 1 ? 'it' : 'them') + ' from that link.' },
     'linked-failed': { kind: 'note', heading: 'Shared boards did not load', text: 'They show here by themselves once they answer.', parts: [], detail: facts.detail },
     'local-failed': { kind: 'note', heading: 'This computer\'s boards did not load', text: 'They show here by themselves once Pullboard answers.', parts: [], detail: facts.detail },
   };

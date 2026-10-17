@@ -181,9 +181,11 @@ a.ghost { color: var(--ink); }
 .ob-spin::after { content: ""; position: absolute; top: -5.5px; left: 50%; width: 8px; height: 8px; margin-left: -4px; border-radius: 50%; background: var(--accent); }
 @keyframes ob-turn { to { transform: rotate(1turn); } }
 @media (prefers-reduced-motion: reduce) { .ob-live i, .ob-spin { animation: none; } }
-.ob-help { display: flex; align-items: center; gap: 12px; max-width: 420px; margin: 26px auto 0; padding: 10px 10px 10px 14px; border: 1px dashed var(--line-strong); border-radius: 14px; text-align: left; color: var(--ink-muted); font-size: 14.5px; }
+.ob-help { display: flex; align-items: center; gap: 12px; max-width: 500px; margin: 26px auto 0; padding: 10px 10px 10px 14px; border: 1px dashed var(--line-strong); border-radius: 14px; text-align: left; color: var(--ink-muted); font-size: 14.5px; }
 .ob-help > span { flex: 1; min-width: 0; }
 .ob-help small { display: block; color: var(--ink); font-size: 15px; font-weight: 600; }
+/* The help strip's Copy is the mockup's 40 px button, so on a computer its sentence keeps to one line. */
+.ob-help button { height: 40px; padding: 0 14px; border-radius: 10px; font-size: 14.5px; }
 /* The browser's own permission prompt, drawn so people know what to click. */
 .ob-ask { position: relative; margin: 28px auto 0; max-width: 380px; padding: 16px 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow); text-align: left; }
 .ob-ask .t { font-weight: 600; }
