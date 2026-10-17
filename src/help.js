@@ -25,6 +25,7 @@ Set up
   pullboard settings [gateSlots <n> | browserSlots <n>]  view or set machine capacity (gate default 2; browser default 1)
                                         browser-free check slots are opt-in: gate.browserFreeChecks in ~/.pullboard/settings.json (default false)
                                         reviews-first queue order is opt-in: gate.queue.reviewsFirst (default false), gate.queue.agingMinutes (default 30)
+                                        release priority is opt-in: gate.queue.currentReleaseFirst (default false), within each board's otherwise-tied positions
                                         memory hold is opt-in: gate.memoryFloorMB in ~/.pullboard/settings.json holds the queue under that many MB free or critical pressure (default off)
                                         short slots for runs that name their test files are opt-in: pullboard settings gate.shortSlots <n> (default 0)
   pullboard runner add <ssh-host> --slots <n> --browser <n> [--node <remote-path>] [--root <remote-path>]
@@ -61,6 +62,8 @@ Work
                                         with --criterion and a brief, --check is needed below strong
   pullboard edit <id> [--brief "..." | --brief-file <file>] [--route light|mid|strong] [--criterion "..."] [--check "..."]
                 [--wait]                wait for a new check's baseline; otherwise it runs in the background
+                [--reason "what the old bar got wrong"]   needed to change the criterion or check of an item
+                                        that was ever claimed; show and stats list each correction
   pullboard escalate <id> --note "what was tried and how it failed"   hand it one tier up
   pullboard run --agent "<command>" [--attempts 3] [--minutes 15] [--items N] [--wait M]
                                         build routed items unattended in this worktree: the agent command reads

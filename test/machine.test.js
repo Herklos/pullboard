@@ -945,7 +945,7 @@ test('submit, accept and reject refuse in the declared order, one failure peeled
     const submits = [submitAs(999, 'web-1', SHA_A), submitAs(piece, 'web-1', SHA_A)];
     store.claim(board, piece, { agentId: 'web-1', lane: 'web', leaseMs: 7_200_000, freeze });
     submits.push(submitAs(piece, 'web-2', SHA_A));
-    store.editItem(board, piece, { agentId: 'coordinator', criterion: 'A correction before submission.' });
+    store.editItem(board, piece, { agentId: 'coordinator', criterion: 'A correction before submission.', reason: 'the fixture corrects its bar' });
     submits.push(submitAs(piece, 'web-1', SHA_A));
     assert.equal(submits.at(-1), 'PENDING_REFREEZE', 'a pending correction stops the board submission before later guards');
     store.refreeze(board, piece, { agentId: 'web-1', freeze });
@@ -1250,7 +1250,7 @@ test('the two conditional guards behave as declared: a renewal passes a held lan
     assert.equal(claimAs(mine, 'web-1', retiredFreeze), 'ok', 'a reclaim keeps the frozen bar too');
     assert.equal(claimAs(theirs, 'web-2', retiredFreeze), 'UNKNOWN_SPEC', 'a first claim freezes, so it checks the rows');
     store.release(board, mine, 'web-1');
-    store.editItem(board, mine, { agentId: 'coordinator', criterion: 'A changed bar.' });
+    store.editItem(board, mine, { agentId: 'coordinator', criterion: 'A changed bar.', reason: 'the fixture corrects its bar' });
     assert.equal(claimAs(mine, 'web-1', retiredFreeze), 'UNKNOWN_SPEC', 'after an edit drops the bar, the next claim freezes and checks');
     assert.equal(outcome(() => store.refreeze(board, mine, { agentId: 'coordinator', freeze: retiredFreeze })), 'UNKNOWN_SPEC', 'refreeze freezes, so it checks');
   } finally {

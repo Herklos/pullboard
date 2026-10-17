@@ -48,6 +48,9 @@ export function validateGateQueue(value, file) {
   if (queue?.reviewsFirst !== undefined && typeof queue.reviewsFirst !== 'boolean') {
     throw new Refused('BAD_MACHINE_SETTINGS', `gate.queue.reviewsFirst in ${file} must be true or false`);
   }
+  if (queue?.currentReleaseFirst !== undefined && typeof queue.currentReleaseFirst !== 'boolean') {
+    throw new Refused('BAD_MACHINE_SETTINGS', `gate.queue.currentReleaseFirst in ${file} must be true or false`);
+  }
   if (queue?.agingMinutes !== undefined && (!Number.isSafeInteger(queue.agingMinutes) || queue.agingMinutes < 1)) {
     throw new Refused('BAD_MACHINE_SETTINGS', `gate.queue.agingMinutes in ${file} must be a positive whole number of minutes; fix it or remove it for the default ${DEFAULT_QUEUE_AGING_MINUTES}`);
   }
@@ -58,12 +61,12 @@ export function validateGateQueue(value, file) {
  * changes who waits for whom on every board sharing the pool; absent or false keeps landings
  * first, then arrival. agingMinutes only matters while class order is on.
  *
- * @returns {{ reviewsFirst: boolean, agingMinutes: number }}
+ * @returns {{ reviewsFirst: boolean, currentReleaseFirst: boolean, agingMinutes: number }}
  */
 export function gateQueueSettings() {
   const file = machineSettingsFile();
   const value = readMachineSettingsFile(file) ?? {};
   validateGateQueue(value, file);
   const queue = value.gate?.queue;
-  return { reviewsFirst: queue?.reviewsFirst === true, agingMinutes: queue?.agingMinutes ?? DEFAULT_QUEUE_AGING_MINUTES };
+  return { reviewsFirst: queue?.reviewsFirst === true, currentReleaseFirst: queue?.currentReleaseFirst === true, agingMinutes: queue?.agingMinutes ?? DEFAULT_QUEUE_AGING_MINUTES };
 }
