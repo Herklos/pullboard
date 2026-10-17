@@ -66,7 +66,7 @@ import { briefFiles } from './brief.js';
 import { commitFirst, commitOwnerLines, commitOwners, coordinatorInbox, coordinatorInboxLines, inboxFirst } from './resume.js';
 import { checkBaseline, prepareCheckBaseline, sayCheckBaseline, refuseCheckSyntax } from './check-baseline.js';
 import { retryCheckBaselines, startCheckBaseline } from './check-baseline-worker.js';
-import { blueprintRowIds, starterLines, starterLink, starterLinkText, starterStates, waitingRowLines, waitingRows } from './blueprint-report.js';
+import { alreadyAddedLine, initWaitingRows, startersCommand, starterLinkText, waitingRowLines } from './blueprint-report.js';
 import { compareMainFailures, mainRedMessage, mainRedReworkItems } from './main-red.js';
 import { runItems } from './run.js';
 import { parseProblems, sweepItems } from './sweep.js';
@@ -1694,21 +1694,18 @@ function setupCommands(io, { first, second, rest = [], values }) {
       ]));
       // Keep blueprint initialization and the person's unwritten lane proposals in the same result.
       const added = blueprint ? await addBlueprintHere(io, values.blueprint, { report: false, blueprint }) : null;
-      // Every row that waits for the person, doctrine rows included, so none is missed (#734).
-      const waiting = added ? waitingRows(added.rows, loadDoctrine(info.root, loadConfig(info.root)), loadConfig(info.root).spec) : [];
       io.result?.({ root: info.root, notes, proposedLanes: proposeLanes(info.root),
-        ...(added ? { blueprint: { name: added.blueprint.name, title: added.blueprint.title, marked: added.marked, waitingRows: waiting,
+        ...(added ? { blueprint: { name: added.blueprint.name, title: added.blueprint.title, marked: added.marked, waitingRows: initWaitingRows(info.root, added),
           section: added.section, waiting: added.rows.length, items: added.items.length, gate: added.gate, checksNotRun: added.checksNotRun } } : {}) });
       const staging = notes.at(-1)?.startsWith('git add -f -- ') ? notes.at(-1) : null;
       (staging ? notes.slice(0, -1) : notes).forEach((note) => io.say(note));
-      if (added?.marked) io.say(`the ${added.blueprint.title} blueprint (version ${added.blueprint.version}) is already on this board; nothing added; see its starters with pullboard blueprint starters ${added.blueprint.name}`);
       if (added && !added.marked) {
         io.say(`added the ${added.blueprint.title} blueprint: ${added.rows.length} ${added.rows.length === 1 ? 'row waits' : 'rows wait'} for your approval in SPEC.md (${added.section}), `
           + `${added.items.length} starter ${added.items.length === 1 ? 'item' : 'items'} filed${added.proposedLanes.length ? ` in the ${added.proposedLanes.map((lane) => lane.name).join(' and ')} lane, proposed above and not written until the person accepts` : ''}${added.gate ? `, gate set to ${added.gate}` : ''}`);
         for (const note of askedLaneNotes(added.items, loadConfig(info.root))) io.say(`  ${note}`);
         if (added.checksNotRun.length) io.say(`  checks stored, not run: ${added.checksNotRun.map((id) => `#${id}`).join(', ')}; no check baseline ran, so read each check before work starts: pullboard show <id>`);
-        waitingRowLines(waiting).forEach((line) => io.say(line));
       }
+      if (added) (added.marked ? [alreadyAddedLine(added.blueprint)] : waitingRowLines(initWaitingRows(info.root, added))).forEach((line) => io.say(line));
       if (await registerProjectAndLink(info.root, new Date(), loadConfig(info.root), io)) io.say('registered this project on this machine, so pullboard view lists it');
       io.say(agentSessionDigest()
         ? 'Next: run pullboard resume now to continue setup in this session; the new skills load next session, and setup does not need them.'
@@ -2464,9 +2461,7 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
     const byKey = { ...plan.existing };
     for (const { key, afterKeys, asked, item } of starters) {
       item.after = afterKeys.map((before) => byKey[before]).filter(Boolean);
-      const id = await ordered(ctx, board, 'addItem', [item]);
-      byKey[key] = id;
-      // The link blueprint starters reads back: this blueprint, this version, this starter (#734).
+      const id = byKey[key] = await ordered(ctx, board, 'addItem', [item]);
       await ordered(ctx, board, 'appendFact', [id, { agentId: me.id, kind: 'note', text: starterLinkText(blueprint, key) }]);
       added.push({ id, key, title: item.title, lane: item.lane, ...(asked ? { askedLane: asked } : {}), specIds: item.specIds, after: item.after, ...(item.check ? { check: item.check } : {}) });
     }
@@ -3918,19 +3913,7 @@ async function runCommand(argv, io) {
       for (const entry of left) io.say(`  left out ${entry.id}: ${entry.reason}`);
       return 0;
     }
-    if (command === 'blueprint' && first === 'starters') {
-      if (!second || rest.length) throw new Refused('USAGE', `pullboard blueprint starters <name or file>; bundled: ${bundledBlueprints().join(', ')}`);
-      const blueprint = readBlueprint(second, io.cwd);
-      const ctx = context(io);
-      const rowIds = blueprintRowIds(blueprint, loadSpec(ctx.info.root, ctx.config));
-      const starters = withBoard(ctx, (board) => {
-        const items = store.listItems(board, { all: true });
-        return starterStates(blueprint, items, rowIds, new Map(items.map((item) => [item.item_id, starterLink(store.itemThread(board, item.item_id))])));
-      });
-      io.result?.({ blueprint: { name: blueprint.name, title: blueprint.title, version: blueprint.version }, starters });
-      starterLines(blueprint, starters).forEach((line) => io.say(line));
-      return 0;
-    }
+    if (command === 'blueprint' && first === 'starters') return startersCommand(io, { second, rest, context, withBoard });
     if (command === 'gate') {
       const ctx = context(io);
       let config;

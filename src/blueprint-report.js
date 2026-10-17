@@ -1,4 +1,10 @@
 /** What blueprint commands report back: a blueprint's starters on this board and the rows that wait [S1,I1]. */
+import * as store from './board.js';
+import { bundledBlueprints, readBlueprint } from './blueprints.js';
+import { loadConfig } from './config.js';
+import { loadDoctrine } from './doctrine.js';
+import { Refused } from './refused.js';
+import { loadSpec } from './spec.js';
 
 /**
  * @typedef {object} StarterState
@@ -149,4 +155,49 @@ export function waitingRowLines(waiting) {
   if (!waiting.length) return [];
   return [`  ${waiting.length} ${waiting.length === 1 ? 'row waits' : 'rows wait'} for the person:`,
     ...waiting.map((row) => `    ${row.id} ${row.status}  ${row.text}  (${row.file})`)];
+}
+
+/**
+ * The rows that wait for the person after init added a blueprint, read from the repo init set up.
+ *
+ * @param {string} root - The repository root.
+ * @param {{ rows: { id: string, status: string, text: string }[] }} added - What the add returned.
+ * @returns {{ id: string, status: string, text: string, file: string }[]}
+ */
+export function initWaitingRows(root, added) {
+  const config = loadConfig(root);
+  return waitingRows(added.rows, loadDoctrine(root, config), config.spec);
+}
+
+/**
+ * The line a repeat add prints: the blueprint is already here, and where its starters are listed.
+ *
+ * @param {{ name: string, title: string, version: number }} blueprint
+ * @returns {string}
+ */
+export function alreadyAddedLine(blueprint) {
+  return `the ${blueprint.title} blueprint (version ${blueprint.version}) is already on this board; nothing added; see its starters with pullboard blueprint starters ${blueprint.name}`;
+}
+
+/**
+ * pullboard blueprint starters <name or file>: list a blueprint's starters and the item each one's
+ * add filed. It reads the spec and the board and writes nothing. The caller passes its own context
+ * and board opener, so this command reads the board exactly as every other command does.
+ *
+ * @param {any} io
+ * @param {{ second?: string, rest: string[], context: (io: any) => any, withBoard: (ctx: any, work: (board: any) => any) => any }} args
+ * @returns {number}
+ */
+export function startersCommand(io, { second, rest, context, withBoard }) {
+  if (!second || rest.length) throw new Refused('USAGE', `pullboard blueprint starters <name or file>; bundled: ${bundledBlueprints().join(', ')}`);
+  const blueprint = readBlueprint(second, io.cwd);
+  const ctx = context(io);
+  const rowIds = blueprintRowIds(blueprint, loadSpec(ctx.info.root, ctx.config));
+  const starters = withBoard(ctx, (board) => {
+    const items = store.listItems(board, { all: true });
+    return starterStates(blueprint, items, rowIds, new Map(items.map((item) => [item.item_id, starterLink(store.itemThread(board, item.item_id))])));
+  });
+  io.result?.({ blueprint: { name: blueprint.name, title: blueprint.title, version: blueprint.version }, starters });
+  starterLines(blueprint, starters).forEach((line) => io.say(line));
+  return 0;
 }
