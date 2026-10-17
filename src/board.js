@@ -1202,6 +1202,7 @@ export function submit(board, id, { agentId, commit, tree, files = [], policyCom
         withinLane: null,
         trunkMergeClean: null,
         noUnverifiedStack: null,
+        doctrineHolds: null,
         gateConfigured: null,
         gateGreen: null,
         treeStillDuringGate: null,
@@ -2099,8 +2100,7 @@ export function projectItemThreads(board, state) {
 }
 
 /** Append a typed fact atomically; a correction never edits the original event [B29,B30,B31,B32].
- * The internal factId is set from a sealed move's identity during replay, rather than replica-local sequence ids.
- * A never-again with its cause is the person's alone, and rigor lists it at once (#713) [D1]. */
+ * The internal factId is set from a sealed move's identity during replay, rather than replica-local sequence ids; a never-again with its cause is the person's alone, and rigor lists it at once (#713) [D1]. */
 export function appendFact(board, id, { agentId, kind, text, ref = null, supersedes = null, factId = randomUUID(), cause = null, neverAgain = false, asPerson = false, channel = 'terminal' }) {
   return atomic(board, () => {
     const item = current(board, itemById(board, id));
