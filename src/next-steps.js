@@ -76,6 +76,7 @@ export const NEXT_STEPS = Object.freeze({
   BROWSER_SLOT_REQUIRED: 'release the gate lease and take it again with browser: true',
   CANNOT_SIGN: 'sign only approved rows: pullboard spec signoff <approved ids>',
   CHECKOUT_SESSION: 'run pullboard takeover from the agent session that owns this checkout',
+  CHECK_SYNTAX: 'close the quote the shell names, then set the check again: inside single quotes write an apostrophe as \'\\\'\' or match it with ., and test with sh -n -c "<command>"',
   CHECK_CANNOT_FAIL: 'write a check that exits nonzero on the problem, then add the item again',
   CHECK_CONFIRM: 'read the check command, then run pullboard check <id> --yes',
   CHECK_RED: 'reject with what failed: pullboard verify <id> reject --reason TEST_FAILURE --note "<what failed>"',
