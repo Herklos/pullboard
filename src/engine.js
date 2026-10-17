@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import * as store from './board.js';
 import { recordedRefusal } from './recorded-refusal.js';
 import { BAR_ENGINE, carriesBarReason } from './bar-corrections.js';
+import { carriesImplies, IMPLIES_ENGINE } from './implies.js';
 import { ENGINE_VERSION } from './machine.js';
 import { MILESTONE_SHIP_ENGINE, canonicalMilestoneTarget } from './milestones.js';
 import { Refused } from './refused.js';
@@ -25,9 +26,10 @@ export const ENGINE_OPERATIONS = Object.freeze([
 const OPERATION_ENGINE = Object.freeze({ reopen: 8, recordLandingBatch: 8, recordLandingWaiver: 8, recordLandingFlake: 8, finishLandingBatch: 8,
   shipMilestone: MILESTONE_SHIP_ENGINE });
 
-/** Dependency edits add engine-10 meaning, edit reasons engine-19 and a milestone target engine-21, without changing ordinary historical edit envelopes. */
+/** Dependency edits add engine-10 meaning, edit reasons engine-19, implied items engine-20 and a milestone target engine-21, without changing ordinary historical envelopes. */
 function minimumOperationEngine(operation, args) {
   const options = args[1];
+  if (carriesImplies(operation, args)) return IMPLIES_ENGINE;
   if (carriesBarReason(operation, args)) return BAR_ENGINE;
   if (operation === 'editMilestone' && options && Object.hasOwn(options, 'target') && options.target !== undefined) return MILESTONE_SHIP_ENGINE;
   return operation === 'editItem' && options && Object.hasOwn(options, 'after') && options.after !== undefined
@@ -121,6 +123,8 @@ function executableArgs(move, board) {
     if (!args[1] || typeof args[1] !== 'object' || Array.isArray(args[1])) throw new Refused('RELAY_MOVE', 'a fact needs its typed arguments; use the current Pullboard engine');
     args[1].factId = move.id;
   }
+  // Implied facts take their ids from the sealed move, so every replica writes the same ones.
+  if (['answerDecision', 'verify'].includes(move.operation) && args[1] && typeof args[1] === 'object' && !Array.isArray(args[1])) args[1].impliesId = move.id;
   if (['claim', 'refreeze'].includes(move.operation)) {
     const options = args[1];
     if (!options || !Object.hasOwn(options, 'frozen')) throw new Refused('RELAY_MOVE', 'the claim has no frozen criterion; send it with the current pullboard engine');
@@ -143,7 +147,7 @@ function executableArgs(move, board) {
         !['any', 'coordinator'].includes(captured?.policy) || !['off', 'prefer', 'require'].includes(captured?.family)) {
       throw new Refused('NO_POLICY', 'the frozen verify policy is missing or invalid; ask the coordinator to refreeze this item before verifying it');
     }
-    args[1] = { ...options, policy: captured.policy, familyPolicy: captured.family };
+    args[1] = { ...options, policy: captured.policy, familyPolicy: captured.family, impliesId: move.id };
   }
   return args;
 }

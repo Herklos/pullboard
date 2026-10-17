@@ -40,7 +40,7 @@ The identifier expression, statuses and tiers below come from the parser:
 | `aim` | An aim; no gate is required. |
 <!-- tiers:end -->
 
-After the requirement text, `gate:` names the check, `serves:` names comma-separated ids, and `signers:` names comma-separated SSH principals; each field may be omitted. Each signer is one unique principal with no spaces, commas or leading `#`; the list names the exact principals required for signed sign-offs. An approved row is met only when every listed principal has a verified SSH receipt for its current text; missing, stale or unverified receipts leave it unmet. Other trailing keys are recorded as unknown and rejected by `spec check`. A malformed row-like line is an error, and rows inside fenced code blocks are examples rather than input. IDs are permanent: mark a cut row `wont` or `retired` instead of deleting it.
+After the requirement text, `gate:` names the check, `serves:` names comma-separated ids, and `signers:` names comma-separated SSH principals; each field may be omitted. Each signer is one unique principal with no spaces, commas or leading `#`; the list names the exact principals required for signed sign-offs. An approved row is met only when every listed principal has a verified SSH receipt for its current text; missing, stale or unverified receipts leave it unmet. A row may also carry `source:`, the reference a blueprint rule came from, written as its name, then its id and address when it has them (`| source: Example Framework OPS 8 https://example.com/ops-8`). The parsed row gains a `source` string only when the field is written, so a row without one parses exactly as before; an empty `source:` is an error. `spec show` prints the source and `spec --json` rows carry it. Other trailing keys are recorded as unknown and rejected by `spec check`. A malformed row-like line is an error, and rows inside fenced code blocks are examples rather than input. IDs are permanent: mark a cut row `wont` or `retired` instead of deleting it.
 
 The row object returned by `parseSpec` has these fields:
 
@@ -64,6 +64,17 @@ A bare id names a row in `SPEC.md`. A doctrine row is cited as `doctrine:<id>` i
 | `section` | Containing ## heading. |
 | `line` | 1-based source line. |
 <!-- parser-fields:end -->
+
+### Blueprint rule sources
+
+A blueprint is one JSON file (format 1, described at the top of `src/blueprints.js`). Its `kind` is `product`, `architecture`, `practice` or `beyond-code`; a file that says `infrastructure`, the old name, loads as `architecture`. A rule may carry `source: { name, id, url }`: `name` is required, `id` and `url` are optional, each is one line without `|`, and `url` is an `http` or `https` address. `pullboard blueprint add` and `init --blueprint` copy it onto the drafted row's `source:` field; the row's text stays the rule and its reason. Every rule of an architecture blueprint names its source, since it paraphrases a known-good reference: a rule without one refuses the blueprint with `BLUEPRINT_NO_SOURCE`, naming the blueprint and the rule, when it is loaded or saved.
+## Proposed rulings and resume doctrine notes
+
+The coordinator proposes a standing ruling with `pullboard spec draft "<rule>" --doctrine --source "chat, 2026-10-16"` (or a shout reference such as `"shout 42"`). A source is required. The draft lives in the configured doctrine file, with `Source: ...` in its text, and the returned id is qualified as `doctrine:DR1`. The person approves or declines that id through the existing `spec approve` or `spec decline` commands; the coordinator runs `spec apply`.
+
+`resume --json` includes `doctrineNotes`, an array of newly seen approved repo rules, each with `id`, `text` and `gate`. Drafts and pending applications are excluded. Text resume prints the same rules. Each checkout records its own displayed rule text under its Git directory, so a second checkout receives its own notice. Repeated resumes return an empty array until an approved rule changes.
+
+Resume and criterion freezing use the primary branch's committed doctrine together with the person's applied exact-row decisions. An older agent checkout can therefore read an approved ruling and detect that a frozen citation is stale without changing its branch or local doctrine file. Proposed or unapplied changes do not replace the in-force rule.
 
 ## Resume release notes
 
@@ -115,7 +126,9 @@ Engine 12 records declined person row decisions without replacing the exact sour
 
 Engine 19 makes a corrected bar record why the old one was wrong. Once an item has ever been claimed, an `editItem` that changes its criterion or check must carry `reason`, the text of what the old bar got wrong; without one it is refused with `BAR_REASON`, naming `--reason`. The edit event then records `reason` and `barCorrection: {fields, reject}`: `fields` lists `criterion` and/or `check`, and `reject` is `{verdict, by, reason, at}` when the item's newest verdict is a reject no earlier correction already explained, or `null`. That reject is counted as caused by the bar. The board derives `barCorrection` from its own rows; a move supplies only `reason`. An edit before any claim needs no reason and records one only if given. `pullboard stats` JSON adds `bars`, keyed by agent: `{corrections, barRejects, buildRejects}`. Corrections and the rejects they explain count to the agent who corrected the bar; any other reject counts as the build's, to the agent who added the item. An `editItem` move carrying `reason` requires engine 19, and older engines refuse it with `RELAY_MOVE` before changing their board or cursor. Moves recorded under engines 18 and earlier replay without the reason rule. Engine numbers 13 to 18 are allocated to other changes; whichever lands later renumbers, keeping every earlier engine's replay unchanged.
 
-Engine 21 gives a milestone a target and a shipment. An `editMilestone` move may carry `target`, an ISO date or date-time with an explicit zone (the CLI and `prepareEngineMove` turn a typed local time into UTC before the move is sealed, so every replica stores the same instant; a bare local time in an envelope is refused with `MILESTONE_TARGET`), or `none` to clear it. A `shipMilestone` move records the milestone as shipped at main's commit and moves every local item that has not landed into the next unshipped milestone, or `--next`, writing a `milestone_moved` event on each moved item; a shipped milestone refuses new items with `MILESTONE_SHIPPED`. Either makes the move an engine-21 move, and an older engine refuses it with `RELAY_MOVE` before changing its board or cursor. Engine numbers 13 to 18 and 20 are allocated to other changes; whichever lands later renumbers, keeping every earlier engine's replay unchanged.
+Engine 20 lets a decision name the items it changes. An `appendFact`, `answerDecision` or `verify` move may carry `implies`, a list of existing item ids, and an `answerDecision` move may carry `supersedes`, the shout id of an earlier answer. Either makes the move an engine-20 move: an older engine refuses it with `RELAY_MOVE` before changing its board or cursor, and a board replaying an older engine refuses `implies` with `ENGINE_VERSION`. Engine 20 also tells implied items when a decision is superseded: by a fact's `supersedes`, by an answer's `supersedes`, or by the next verdict on the same item. Moves recorded under engines 19 and earlier replay without these notices. Engine numbers 13 to 18 are allocated to other changes; whichever lands later renumbers, keeping every earlier engine's replay unchanged.
+
+Engine 21 gives a milestone a target and a shipment. An `editMilestone` move may carry `target`, an ISO date or date-time with an explicit zone (the CLI and `prepareEngineMove` turn a typed local time into UTC before the move is sealed, so every replica stores the same instant; a bare local time in an envelope is refused with `MILESTONE_TARGET`), or `none` to clear it. A `shipMilestone` move records the milestone as shipped at main's commit and moves every local item that has not landed and is not withdrawn into the next unshipped milestone, or `--next`, writing a `milestone_moved` event on each moved item; a shipped milestone refuses new items with `MILESTONE_SHIPPED`. Either makes the move an engine-21 move, and an older engine refuses it with `RELAY_MOVE` before changing its board or cursor. Engine numbers 13 to 18 are allocated to other changes; whichever lands later renumbers, keeping every earlier engine's replay unchanged.
 
 The CLI declares its engine in every relay request's `X-Pullboard-Engine` header.
 A linked board requires at least engine 3 after issuing any agent token, including
@@ -309,14 +322,14 @@ The `event` table is a SQLite schema object governed by `SCHEMA_VERSION`; its ap
 | `edit` | editor | `brief`, `route`, `criterion`, `check`, `unfrozen`, optional `after`, optional `pendingRefreeze`, engine-19 `reason`, `barCorrection` |
 | `escalate` | builder | `from`, `to`, `note`, `attempt` |
 | `attempt` | reporting agent | `n`, `seconds`, `result` |
-| `fact` | author | `id`, `kind`, `text`, `ref`, `supersedes` |
+| `fact` | author | `id`, `kind`, `text`, `ref`, `supersedes`, engine-20 `implies`, `decision`, `supersededBy` |
 | `claim` | builder | `leaseUntil`, `digest` |
 | `renew` | builder | `leaseUntil`, `digest` |
 | `release` | builder | — |
 | `submit` | builder | `commit`, `tree`, `policyCommit`, engine-9 `criterionDigest` |
 | `reserve` | reviewer | `until` |
-| `accept` | reviewer | `reason`, `commit` |
-| `reject` | reviewer | `reason`, `commit` |
+| `accept` | reviewer | `reason`, `commit`, engine-20 `implies` |
+| `reject` | reviewer | `reason`, `commit`, engine-20 `implies` |
 | `reopen` | coordinator | `commit`, `note`, `judgment`, engine-10 `supersedes`, `landingFailure` |
 | `merged` | coordinator | `commit` |
 | `landing_batch` | coordinator | `batch` |
@@ -332,7 +345,7 @@ The `event` table is a SQLite schema object governed by `SCHEMA_VERSION`; its ap
 | `guards` | board | `missing`, `changed`, `stale` |
 | `shout` | sender | `shout`, `to`, `decision`, `request`, `answers` |
 | `pass` | coordinator | `shout`, `to`, `decision`, `request`, `answers` |
-| `answer` | answerer | `shout`, `to`, `decision`, `request`, `answers`, `outcome`, `channel` |
+| `answer` | answerer | `shout`, `to`, `decision`, `request`, `answers`, `outcome`, `channel`, engine-20 `implies`, `supersedes` |
 | `row_decision` | person | `record`, `channel` |
 | `row_apply` | coordinator | `events` |
 <!-- events:end -->
@@ -345,7 +358,9 @@ Item facts use the existing append-only `event` table and event-log version 1. A
 
 A binding is `{path, start, end, commit}`: a relative repository path, a positive ascending inclusive line range and a full 40-character hexadecimal commit id. It identifies code without storing source or requiring Git on a replica. Fact ids are generated UUIDs locally. A sealed `appendFact` operation uses its executable move id as its fact id, so replicas keep corrections bound to the same fact even when local event sequence ids differ. Native export/import retains these event rows without a separate fact table or schema upgrade.
 
-The derived `thread` in CLI `show` JSON and API v1 item state is an array in ascending event order. Move entries are `{type: "move", eventId, kind, by, at, detail}`. Fact entries are `{type: "fact", id, eventId, kind, text, by, at, ref, supersedes}`. `eventId` is the board's numeric event sequence; `id` is the stable fact identity used by corrections. `by` and `at` come from the immutable event author and UTC timestamp. `detail` retains a move's original structured payload. Nullable `ref` and `supersedes` preserve omitted fields as `null`. Superseded facts remain in the array beside their corrections.
+The derived `thread` in CLI `show` JSON and API v1 item state is an array in ascending event order. Move entries are `{type: "move", eventId, kind, by, at, detail}`. Fact entries are `{type: "fact", id, eventId, kind, text, by, at, ref, supersedes}`. `eventId` is the board's numeric event sequence; `id` is the stable fact identity used by corrections. `by` and `at` come from the immutable event author and UTC timestamp. `detail` retains a move's original structured payload. Nullable `ref` and `supersedes` preserve omitted fields as `null`. Superseded facts remain in the array beside their corrections. Engine-18 facts add three optional fields, present only when set: `implies`, `decision` and `supersededBy`.
+
+A decision that names the items it changes writes one `fact` event of kind `note` on each named item; the decision's own `fact`, `accept`, `reject` or `answer` event records the requested ids as `implies`, and an answer event records the answer it supersedes as `supersedes`. The implied fact's `decision` cites the decision as `{source, id, item, by, line}`. `source` is `answer`, `verdict` or `fact`. `id` is the answer's shout id, the verdict id, or the fact id. `item` is the item the verdict or fact belongs to, and `null` for an answer. `by` is who decided, and `line` is the decision's first nonempty line; a verdict's line is `accept CRITERION_MET: <note>` or `reject <REASON>: <note>`. The fact's text reads `implied by <decision> by <who>: <line>`. When the decision is superseded, each item it implied gets a second `note` fact with the same `decision` and a `supersededBy` citation of the new decision; its text reads `<old decision> by <who> is superseded by <new decision> by <who>: <line>`. Each fact's author is the decider who caused it: for an implied fact, the old decision's decider; for a supersession notice, the new one's. The citation is built from the board's own record of the decision (the answer's sender, the verdict's reviewer, the fact's author), never from the move's arguments, so only the person's own answer yields a `by: "person"` citation. Only the person supersedes the person's answer. Implied-fact ids are `<seed>-i<item>` and supersession-notice ids are `<seed>-s<item>`. The seed is the decision's fact id for a fact, and for an answer or verdict it is the sealed move id, or a fresh UUID for a local move. Every replica therefore writes the same ids. `pullboard why <id>` reads these facts and lists the decisions that imply an item, newest first. `pullboard resume` shows each implied fact on an item the agent holds once per checkout, recording the shown fact ids in `.git/pullboard-checkout/decisions-seen.json` (or the worktree's own git directory) as `{version: 1, seen: [<fact id>...]}`.
 
 Engine version 3 adds the sealed `appendFact` operation. It is the single engine increment reserved for the release after 0.7.0; other changes in that release reuse version 3. Older supported operations remain replayable; an older client refuses a version-3 move before applying it. The sealed envelope, CLI/API envelope, schema and event-log layout versions are unchanged.
 

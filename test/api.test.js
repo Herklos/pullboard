@@ -604,6 +604,7 @@ test('[A1] command results match the catalog across roots and subcommands', () =
   json(box, repo, 'status');
   json(box, repo, 'stats');
   json(box, repo, 'doctor');
+  assert.deepEqual(json(box, repo, 'health').stuck, [], 'a new board has nothing stuck [A6]');
   json(box, repo, 'skills', ['--update']);
   const plainStatus = box.run(repo, 'status');
   assert.equal(plainStatus.status, 0, plainStatus.stderr);
@@ -656,6 +657,8 @@ test('[A1] command results match the catalog across roots and subcommands', () =
   const added = json(box, repo, 'add', ['coordinator', 'API item', '--specs', 'G1', '--criterion', 'the API item is verified', '--check', 'true']);
   assert.equal(added.item.item_id, 1);
   json(box, repo, 'fact', ['1', 'note', 'API fact']);
+  json(box, repo, 'fact', ['1', 'decision', 'API decision', '--implies', '1']);
+  assert.equal(json(box, repo, 'why', ['1']).decisions[0].line, 'API decision', 'why lists the decision that implies the item [N29]');
   json(box, repo, 'edit', ['1', '--criterion', 'the edited API item is verified', '--check', 'true']);
   json(box, repo, 'show', ['1']);
   json(box, repo, 'list', ['--all']);
@@ -918,6 +921,38 @@ test('[A1] long-running servers flush one JSON document before shutdown', async 
     assert.deepEqual(parseOneDocument(stdout), document, `${command} does not flush a second document on shutdown`);
   }
 });
+test('[A1,A2] watch --json prints one catalog document per event line', async (t) => {
+  const box = project();
+  t.after(() => rmSync(box.dir, { recursive: true, force: true }));
+  const child = spawn(process.execPath, [BIN, 'watch', '--json', '--kinds', 'shout'], { cwd: box.repo, env: box.env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const closed = once(child, 'close');
+  t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  let changed = () => {};
+  child.stdout.on('data', (part) => { stdout += part; changed(); });
+  child.stderr.on('data', (part) => { stderr += part; changed(); });
+  /** Resolve once `read()` holds what the step waits for, or fail at the hang ceiling. */
+  const until = (read, label) => new Promise((resolveWait, rejectWait) => {
+    const timer = setTimeout(() => rejectWait(new Error(`watch printed no ${label}\nstdout: ${stdout}\nstderr: ${stderr}`)), 10_000); // budget: hang ceiling for private CLI startup and one line, not a latency claim.
+    changed = () => { if (read()) { clearTimeout(timer); changed = () => {}; resolveWait(); } };
+    changed();
+  });
+  await until(() => /following/u.test(stderr), 'start note');
+  json(box, box.repo, 'shout', ['app', 'catalog watch line']);
+  await until(() => stdout.includes('\n'), 'event line');
+  const document = JSON.parse(stdout.split('\n')[0]);
+  assert.equal(document.version, 1);
+  assertRequiredShape(document, shapeFor('watch').required, 'watch');
+  assert.equal(document.detail, 'to app: catalog watch line');
+  child.kill('SIGTERM');
+  const [code] = await closed;
+  assert.equal(code, 0);
+  assert.equal(stdout, `${JSON.stringify(document)}\n`, 'watch prints no end-of-command document');
+});
+
 test('[A1,A10] view exports a static folder through its JSON variant', () => {
   const box = project();
   const item = json(box, box.repo, 'add', ['app', 'Snapshot item', '--specs', 'G1']).item;
@@ -958,6 +993,7 @@ test('[A1] every catalog command and subcommand has a real CLI exercise', () => 
   assert.match(humanImport.stdout, /imported version 1 board tables/);
 
   json(source, source.repo, 'relay');
+  assert.deepEqual(json(source, source.repo, 'relay', ['status']), json(source, source.repo, 'relay'), 'relay status reports what plain relay reports');
   json(source, source.repo, 'relay', ['off']);
   const catalog = json(source, source.repo, 'add', ['app', 'Catalog item', '--criterion', 'catalog coverage'], 'add').item;
   const landing = json(source, source.repo, 'land', ['--dry-run']);
