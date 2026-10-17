@@ -204,10 +204,11 @@ test('no-session shells are one session and markerless terminals retain their wr
   assert.deepEqual(boardSnapshot(box.boardFile), beforeSelf, 'self-addressed decision is refused without a write');
 });
 
-test('the actual view adapter writes without taking over an agent session [B3,B7]', () => {
+test('a shout from the local view as the person is recorded as the person [N26,B26]', () => {
   const box = project();
   const owner = box.run(box.repo, ['shout', 'web', 'agent owns this checkout', '--json'], { session: 'view-owner-session-273' });
   assert.equal(owner.status, 0, owner.stdout + owner.stderr);
+  assert.equal(boardSnapshot(box.boardFile).shout.at(-1).shout_from, 'coordinator', 'an agent-shell shout keeps the coordinator as author');
   const file = resolve(box.repo, box.git(box.repo, 'rev-parse', '--git-dir'), 'pullboard-checkout-session.json');
   const before = readFileSync(file);
   const apiModule = pathToFileURL(resolve(import.meta.dirname, '../src/api.js')).href;
@@ -225,8 +226,9 @@ test('the actual view adapter writes without taking over an agent session [B3,B7
   const document = JSON.parse(response.stdout);
   assert.equal(document.status, 200, response.stdout);
   assert.equal(document.body.event.event_kind, 'shout');
-  assert.equal(document.body.event.event_by, 'coordinator');
+  assert.equal(document.body.event.event_by, 'person');
   assert.equal(boardSnapshot(box.boardFile).shout.at(-1).shout_text, 'actual view action');
+  assert.equal(boardSnapshot(box.boardFile).shout.at(-1).shout_from, 'person');
   assert.deepEqual(readFileSync(file), before, 'the authenticated view does not alter the local agent-session binding');
 });
 

@@ -260,7 +260,8 @@ test('from the view the person adds items, shouts and holds lanes, through the C
     const shouted = await view.act(box.repo, { verb: 'shout', args: { to: 'web', text: 'from the person' } });
     assert.equal(shouted.status, 200);
     assert.equal(shouted.document.event.event_kind, 'shout');
-    assert.match(box.run(box.web, 'inbox').out, /coordinator \(unknown\) -> web: from the person/);
+    assert.equal(shouted.document.event.event_by, 'person');
+    assert.match(box.run(box.web, 'inbox').out, /person \(unknown\) -> web: from the person/);
     const held = await view.act(box.repo, { verb: 'hold', args: { lane: 'web', reason: 'G1 is changing' } });
     assert.equal(held.status, 200);
     assert.equal(held.document.event.event_kind, 'hold');

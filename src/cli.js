@@ -3204,7 +3204,7 @@ function workCommands(io, args) {
       const hasRecipient = first && recipients.includes(first);
       const to = hasRecipient ? first : values.decision ? (me.id === COORDINATOR ? 'person' : COORDINATOR) : first ?? '';
       const text = [hasRecipient ? second : first, ...(hasRecipient ? rest : [second, ...rest])].filter(Boolean).join(' ');
-      const id = await ordered(ctx, board, 'shout', [{ from: io.personRequest?.phase === 'execute' ? store.PERSON : me.id, to, text, lanes: laneNames(ctx.config), decision: Boolean(values.decision), evidence }]);
+      const id = await ordered(ctx, board, 'shout', [{ from: (io.personChannel === 'view' || io.personRequest?.phase === 'execute') ? store.PERSON : me.id, to, text, lanes: laneNames(ctx.config), decision: Boolean(values.decision), evidence }]);
       io.result?.({ id, decision: Boolean(values.decision) });
       const agents = store.listAgents(board);
       const recipient = agents.some((agent) => agent.agent_id === to) ? agentDisplayName(agents, ctx.config, to) : to;
