@@ -34,6 +34,41 @@ function run(box, root, ...args) {
   return result.out;
 }
 
+/** Occupy this fixture's actual gate until its stale re-review enters the ordinary queue. */
+async function holdForReviewQueue(box) {
+  const ready = join(box.dir, 'review-gate-held');
+  const observed = join(box.dir, 'review-was-queued');
+  const source = `
+import {writeFileSync} from 'node:fs';
+import {setTimeout as pause} from 'node:timers/promises';
+import {takeResource,listResources} from ${JSON.stringify(new URL('../src/resources.js', import.meta.url).href)};
+import {loadMachineSettings} from ${JSON.stringify(new URL('../src/settings.js', import.meta.url).href)};
+const [root,ready,observed]=process.argv.slice(1);
+const capacity=loadMachineSettings().gateSlots;
+const leases=[];
+let stopping=false;
+process.once('SIGTERM',()=>{stopping=true;});
+try {
+  for(let i=0;i<capacity;i++) leases.push(await takeResource({name:'gate',capacity,scope:'machine',root,agent:'stale-review-fixture-holder',browser:false}));
+  writeFileSync(ready,'all ordinary slots really held');
+  const deadline=Date.now()+30_000;
+  while(!stopping) {
+    const gate=listResources({root}).find(entry=>entry.name==='gate');
+    if(gate?.line.some(entry=>entry.item==='1'&&entry.kind==='review')) {writeFileSync(observed,'the real review waiter was observed');break;}
+    if(Date.now()>=deadline) throw Error('the stale review never entered the actual private gate queue');
+    await pause(20);
+  }
+} finally {for(const lease of leases.reverse()) lease.release();}
+`;
+  const holder = helpers.launch(box, box.repo, process.execPath, ['--input-type=module', '-e', source, box.repo, ready, observed]);
+  const deadline = Date.now() + 10_000;
+  while (!existsSync(ready)) {
+    assert.ok(Date.now() < deadline, 'the real private gate holder becomes ready');
+    await new Promise(resolveWait => setTimeout(resolveWait, 20));
+  }
+  return { holder, observed };
+}
+
 test('a verdict reads stale when main moves under its files [E8]', { timeout: 120_000 }, async t => { // budget: hang ceiling for two real replicas, CLI checks and Git history; not a speed target.
   const box = helpers.project();
   assert.equal(helpers.commitFile(box, box.repo, 'web/feature.js', 'feature = 0\nmain = 0\n', 'feat(web): baseline [G1]').status, 0);
@@ -194,7 +229,16 @@ test('a verdict reads stale when main moves under its files [E8]', { timeout: 12
   box.git(reviewer, 'merge', '-q', '--no-edit', 'main');
   const composed = box.git(reviewer, 'rev-parse', 'HEAD');
   assert.notEqual(composed, submitted);
-  const landingGuidance = run(box, reviewer, 'verify', '1', 'accept', '--note', 'Re-reviewed the feature with the latest main caller and its reverted history.');
+  const { holder, observed } = await holdForReviewQueue(box);
+  let landingGuidance;
+  try {
+    landingGuidance = run(box, reviewer, 'verify', '1', 'accept', '--note', 'Re-reviewed the feature with the latest main caller and its reverted history.');
+    assert.ok(existsSync(observed), 'the same prior reviewer really waited behind occupied fixture gate capacity');
+  } finally {
+    if (holder.exitCode === null && holder.signalCode === null) holder.kill('SIGTERM');
+    const result = await holder.closed;
+    assert.equal(result.code, 0, holder.failure ?? holder.stderrText);
+  }
   assert.ok(landingGuidance.includes('git merge --no-ff ' + composed), 'the new-main manual landing hint names the checked composition, not the original submission');
   assert.equal(readFileSync(checkedHeads, 'utf8').trim().split('\n').at(-1), composed, 'the frozen check ran on the reviewed composition');
   const reviewed = withBoard(box.repo, board => store.verdictsFor(board, 1));
