@@ -168,3 +168,28 @@ export function mainMergeLines(item, merge, name = (id) => id) {
   if (item.item_status === 'submitted') return [head, `re-review: main merge only; run the frozen check at ${item.item_commit.slice(0, 12)}; the accept above stands for the rest`];
   return [head, `next: pullboard claim ${item.item_id} (the bar is unchanged), merge main, resolve ${shownPaths(merge.files)}, commit, pullboard submit ${item.item_id}`];
 }
+
+/**
+ * The items among `items` that still need a main merge, each with its conflict, for resume.
+ *
+ * @param {any} board
+ * @param {any[]} items
+ * @returns {{ item: any, merge: NonNullable<ReturnType<typeof mainMergeFor>> }[]}
+ */
+export function mainMergesFor(board, items) {
+  return items.map((item) => ({ item, merge: mainMergeFor(board, item.item_id) })).filter(({ merge }) => merge);
+}
+
+/**
+ * The line `pullboard reopen` prints: for a main merge, after a landing failure, or without a verdict.
+ *
+ * @param {string} id
+ * @param {{ commit: string, conflict?: { files: string[], trunk: string }, landingFailure?: object }} result
+ * @returns {string}
+ */
+export function reopenedLine(id, result) {
+  if (result.conflict) return `reopened #${id} for a main merge: conflicts with the trunk at ${result.conflict.trunk.slice(0, 12)} in ${shownPaths(result.conflict.files)}; the accept at ${result.commit.slice(0, 12)} stays recorded`;
+  return result.landingFailure
+    ? `reopened #${id} after landing failure; previous accept remains recorded at ${result.commit.slice(0, 12)}`
+    : `reopened #${id} without a verdict; previous commit ${result.commit.slice(0, 12)} remains recorded`;
+}

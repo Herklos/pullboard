@@ -36,7 +36,7 @@ import { askedLaneNotes, detectGate, initRepo, proposeLanes, starterLane, starte
 import { lifecycleMarkdown } from './machine.js';
 import { HELP, VERSION } from './help.js';
 import { barCorrectionLine, barCorrections, barStatsLines } from './bar-corrections.js';
-import { MAIN_MERGE_LABEL, mainMergeFor, mainMergeLines, reopenConflict, shownPath } from './trunk-conflict.js';
+import { MAIN_MERGE_LABEL, mainMergeFor, mainMergeLines, mainMergesFor, reopenConflict, reopenedLine } from './trunk-conflict.js';
 import { checkImplies, decisionsImplying, parseImplies, takeDecisionNotices, whyLine } from './implies.js';
 import { defaultViewPort } from './view-port.js';
 export { HELP, VERSION };
@@ -1306,8 +1306,7 @@ function resumeHere(io) {
       sentBack: all
         .filter((item) => item.item_status === 'open' && item.item_verdict === 'REJECT' && item.item_built_by === me.id)
         .map((item) => ({ item, verdict: store.verdictsFor(board, item.item_id).at(-1) })),
-      mainMerges: all.filter((item) => item.item_status === 'open' && item.item_built_by === me.id)
-        .map((item) => ({ item, merge: mainMergeFor(board, item.item_id) })).filter(({ merge }) => merge),
+      mainMerges: mainMergesFor(board, all.filter((item) => item.item_status === 'open' && item.item_built_by === me.id)),
       awaiting: all.filter((item) => item.item_status === 'submitted' && item.item_built_by === me.id),
       toVerify: all.filter((item) => item.item_status === 'submitted' && item.item_built_by !== me.id),
       toMerge,
@@ -1426,7 +1425,6 @@ function resumeHere(io) {
   if (isMain) next = coordinatorNext(card, loadSpec(root, ctx.config).rows);
   else if (card.holding.length) next = buildNext(card);
   else if (card.sentBack.length) next = reworkNext(card);
-  else if (card.mainMerges.length) next = `pullboard claim ${card.mainMerges[0].item.item_id}, merge main, resolve the conflicts, commit and submit again`;
   else if (card.hold) next = 'wait for the hold to lift: pullboard next --wait 9 (minutes)';
   else if (ready) next = `pullboard next (${ready} ready in your lane)`;
   else if (inLane.length) next = `pullboard next --wait 9 (minutes); ${inLane.length} in your lane ${inLane.length === 1 ? 'waits' : 'wait'} on other work`;
@@ -2024,8 +2022,7 @@ function readCommands(io, { first, second, rest, values }) {
       const ctx = context(io);
       const { items, agents, merging } = withBoard(ctx, (board) => ({
         items: store.listItems(board, { lane: first, all: values.all }),
-        agents: store.listAgents(board),
-        merging: new Set(store.listItems(board, { lane: first }).filter((item) => mainMergeFor(board, item.item_id)).map((item) => item.item_id)),
+        agents: store.listAgents(board), merging: new Set(store.listItems(board, { lane: first }).filter((item) => mainMergeFor(board, item.item_id)).map((item) => item.item_id)),
       }));
       const filtered = items.filter((item) => !values.route || item.item_route === values.route);
       if (values.json) io.result({ items: filtered });
@@ -2069,8 +2066,7 @@ function readCommands(io, { first, second, rest, values }) {
         thread: store.itemThread(board, id),
         related: store.relatedItems(board, store.getItem(board, id)),
         reviewer: store.reviewHolder(board, store.getItem(board, id)),
-        agents: store.listAgents(board),
-        mainMerge: mainMergeFor(board, id),
+        agents: store.listAgents(board), mainMerge: mainMergeFor(board, id),
       }));
       const agentName = (id) => displayAgentName(agents.find((agent) => agent.agent_id === id) ?? { agent_id: id }, ctx.config.agents.names);
       if (values.json) {
@@ -3190,14 +3186,9 @@ function workCommands(io, args) {
       return 0;
     }),
     reopen: () => act(async (ctx, board, me) => {
-      const conflict = values.conflict === undefined ? undefined : reopenConflict({ item: store.getItem(board, idArg(first)), coordinator: me.id === COORDINATOR, values: values.conflict, trunkMerge: (commit) => trunkMerge(ctx.info.root, commit) });
-      const result = await ordered(ctx, board, 'reopen', [idArg(first), { agentId: me.id, note: textArg(io, values, 'note') ?? '', ...(conflict ? { conflict } : {}) }]);
+      const result = await ordered(ctx, board, 'reopen', [idArg(first), { agentId: me.id, note: textArg(io, values, 'note') ?? '', ...(values.conflict === undefined ? {} : { conflict: reopenConflict({ item: store.getItem(board, idArg(first)), coordinator: me.id === COORDINATOR, values: values.conflict, trunkMerge: (commit) => trunkMerge(ctx.info.root, commit) }) }) }]);
       io.result?.(result);
-      io.say(result.conflict
-        ? `reopened #${first} for a main merge: conflicts with the trunk at ${result.conflict.trunk.slice(0, 12)} in ${result.conflict.files.map(shownPath).join(', ')}; the accept at ${result.commit.slice(0, 12)} stays recorded`
-        : result.landingFailure
-          ? `reopened #${first} after landing failure; previous accept remains recorded at ${result.commit.slice(0, 12)}`
-          : `reopened #${first} without a verdict; previous commit ${result.commit.slice(0, 12)} remains recorded`);
+      io.say(reopenedLine(first, result));
       return 0;
     }),
     shout: () => act(async (ctx, board, me) => {
