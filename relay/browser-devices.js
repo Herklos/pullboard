@@ -5,6 +5,7 @@ import { ENGINE_VERSION } from './engine.js';
 import { Refused } from './refused.js';
 import { approvalContext, openApproval, sealApproval, verifyApprovalIntent } from './relay-approval.js';
 import { devicePublicKey } from './device-keys.js';
+import { approvalCardText, approvalNames, deletedText } from './browser-approval-card.js';
 
 const PENDING = 'pullboard.relay.device-pair.v1';
 
@@ -127,7 +128,7 @@ export async function installPhoneApprovals(documentAt, boardKeys, onApproved) {
     try {
       const response = await documentAt('/api/v1/devices/' + device.deviceId + '/approvals');
       const ids = new Set(response.approvals.map(value => value.context.id));
-      for (const child of [...panel.children]) if (!ids.has(child.dataset.request) && !active.has(child.dataset.request)) child.remove();
+      for (const child of [...panel.children]) if (child.dataset.request && !ids.has(child.dataset.request) && !active.has(child.dataset.request)) child.remove();
       for (const row of response.approvals) {
         const context = approvalContext(row.context);
         if (context.device !== device.deviceId || context.account !== device.account || Date.now() >= context.expires ||
@@ -140,8 +141,10 @@ export async function installPhoneApprovals(documentAt, boardKeys, onApproved) {
         if (JSON.stringify(approvalContext(intent.context)) !== JSON.stringify(context)) throw new Refused('PHONE_APPROVAL_AUTH', 'The displayed request differs from its sealed action.');
         const replyKey = devicePublicKey(intent.replyKey);
         const card = document.createElement('div'); card.className = 'phone-approval'; card.dataset.request = context.id;
-        const text = document.createElement('p');
-        text.textContent = context.command + ' · board ' + context.board + ' · target ' + context.target + ' · machine ' + context.machine + ' · expires ' + new Date(context.expires).toISOString();
+        const names = approvalNames(intent, context);
+        const words = approvalCardText(context, names);
+        const text = document.createElement('p'); text.className = 'phone-approval-title'; text.textContent = words.title;
+        const detail = document.createElement('p'); detail.className = 'phone-approval-detail'; detail.textContent = words.detail;
         const button = document.createElement('button'); button.type = 'button'; button.id = 'phone-approve-' + context.id;
         button.textContent = context.action === 'link' ? 'Link project' : context.action === 'delete-board' ? 'Delete relay copy' : 'Approve revocation';
         /** Issue once on this tap, then encrypt the result to the native command's private RAM reply key. */
@@ -157,11 +160,15 @@ export async function installPhoneApprovals(documentAt, boardKeys, onApproved) {
             await documentAt('/api/v1/devices/approvals/' + context.id + '/complete', {
               method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ response }),
             });
-            card.remove(); await onApproved();
+            if (context.action === 'delete-board' && authorized.result?.deleted === context.board) {
+              const done = document.createElement('p'); done.setAttribute('role', 'status'); done.textContent = deletedText(names);
+              delete card.dataset.request; card.className = 'phone-approval phone-approval-done'; card.replaceChildren(done);
+            } else card.remove();
+            await onApproved();
           } catch (error) { text.textContent = 'Approval failed: ' + (error instanceof Refused ? error.message : 'Request the action again from the Mac.'); }
           finally { active.delete(context.id); }
         };
-        card.append(text, button); panel.append(card);
+        card.append(text, detail, button); panel.append(card);
       }
     } catch (error) {
       if (error?.code !== 'DEVICE_NOT_ENROLLED') panel.setAttribute('data-error', 'Approval requests are unavailable. Retry from the Mac.');
