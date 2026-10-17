@@ -19,6 +19,9 @@ after(e2e.cleanup);
 async function backgroundBox(t, name) {
   const box = e2e.sandbox();
   const lease = await takeDefaultViewPort(box.dir, { agent: `background-view-${name}-${process.pid}` });
+  // After-hooks run in order: stop any view this home's record names first, even one a failing
+  // assertion never reached, then free the port.
+  t.after(() => stopRecordedView(box, lease.port));
   t.after(() => lease.release());
   box.env.PULLBOARD_VIEW_PORT = String(lease.port);
   delete box.env.PULLBOARD_VIEW_BACKGROUND;
@@ -52,6 +55,14 @@ function viewProcesses(port) {
   return listed.stdout.split('\n')
     .filter((line) => line.includes('pullboard.js view --no-open') && line.includes(`--port ${port}`))
     .map((line) => Number(line.trim().split(/\s+/u)[0]));
+}
+
+/** Stop the view this private home's session record names, by that pid, when there is one. */
+async function stopRecordedView(box, port) {
+  let record;
+  try { record = sessionRecord(box, port); }
+  catch (error) { if (error.code === 'ENOENT') return; throw error; }
+  if (Number.isInteger(record.pid) && record.pid > 1 && record.pid !== process.pid) await stopView(record.pid);
 }
 
 /** The private session record a background view left for this port. */
