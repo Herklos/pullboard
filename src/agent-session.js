@@ -1,7 +1,7 @@
 /** A checkout belongs to one local agent session; bindings never enter the shared board [B3,B7]. */
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { takeResource } from './resources.js';
 import { Refused } from './refused.js';
 
@@ -54,4 +54,33 @@ export async function bindLocalSession(info, { agent, digest, takeover = false, 
       return { release: lease.release, updateAgent: persist };
     }
   } finally { if (!retained) lease.release(); }
+}
+
+/** Find this session's registered seats from local Git bindings, never from shared board credentials. */
+export function localSessionSeats(info, { agents, digest }) {
+  const directory = join(info.commonDir, 'worktrees');
+  if (!existsSync(directory)) return [];
+  const registered = new Map(agents.map((agent) => [agent.agent_id, agent]));
+  const seats = [];
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const gitDir = join(directory, entry.name);
+    try {
+      const binding = readBinding(join(gitDir, 'pullboard-checkout-session.json'), false);
+      if (!binding || binding.digest !== digest) continue;
+      const agent = registered.get(binding.agent);
+      if (!agent || agent.agent_lane === 'coordinator') continue;
+      const gitFile = readFileSync(join(gitDir, 'gitdir'), 'utf8').trim();
+      const root = realpathSync(dirname(gitFile));
+      if (root !== agent.agent_path) continue;
+      const pointer = readFileSync(gitFile, 'utf8').trim();
+      if (!pointer.startsWith('gitdir: ') || resolve(root, pointer.slice(8)) !== resolve(gitDir)) continue;
+      seats.push(agent);
+    } catch (error) {
+      // Gone or damaged peers are not authority to borrow a checkout. The invoking seat was
+      // already checked by bindCheckoutSession, so its own damaged binding still refuses.
+      if (!['ENOENT', 'ENOTDIR'].includes(error.code) && !(error instanceof Refused)) throw error;
+    }
+  }
+  return seats;
 }
