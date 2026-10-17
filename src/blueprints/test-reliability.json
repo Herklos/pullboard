@@ -12,6 +12,6 @@
     { "key": "TR2", "text": "A flake is pinned on a change only after a run without it.", "why": "a test that fails under load looks like a broken change until it fails without that change too." }
   ],
   "questions": [
-    { "key": "Q1", "ask": "Tests run with", "choices": ["Vitest", "Jest", "pytest", "Something else"], "default": "Vitest" }
+    { "key": "Q1", "ask": "Tests run with", "choices": ["node:test", "Vitest", "Jest", "Mocha", "pytest", "Something else"], "detect": "test-runner" }
   ]
 }
