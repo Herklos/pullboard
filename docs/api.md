@@ -55,7 +55,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `join` | `version:number`, `agent:string`, `lane:string`, `route:string`, `path:string`, `model:string`, `displayName:string` |
 | `takeover` | `version:number`, `agent:string`, `path:string` |
 | `worktree` | `version:number`, `agent:string`, `lane:string`, `route:string`, `path:string`, `branch:string`, `prompt:string`, `model:string`, `displayName:string` |
-| `resume` | `version:number`, `me:object`, `all:array`, `requests:array`, `holding:array`, `sentBack:array`, `awaiting:array`, `toVerify:array`, `toMerge:array`, `open:array`, `stale:array`, `holds:array`, `unread:number`, `newest:array`, `root:string`, `dirty:number`, `next:string` |
+| `resume` | `version:number`, `me:object`, `all:array`, `requests:array`, `holding:array`, `sentBack:array`, `awaiting:array`, `toVerify:array`, `toMerge:array`, `open:array`, `stale:array`, `holds:array`, `unread:number`, `newest:array`, `root:string`, `newWorktreeLocation:string`, `dirty:number`, `next:string` |
 | `whoami` | `version:number`, `id:string`, `lane:string`, `path:string`, `model:string`, `displayName:string` |
 | `lanes` | `version:number`, `lanes:object`, `shared:array`, `coordinator:string` |
 | `lane add` | `version:number`, `lane:string`, `owns:array` |

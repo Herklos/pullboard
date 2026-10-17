@@ -337,6 +337,7 @@ export function initRepo({ info, openBoardHere, register, closeBoard, model }) {
     throw new Refused('NOT_MAIN', 'run init in the main checkout; worktrees join a lane instead');
   }
   const { root } = info;
+  const worktreeMode = existsSync(join(root, CONFIG_FILE)) ? loadConfig(root).worktrees : 'inside';
   const doctrine = existsSync(join(root, CONFIG_FILE)) ? loadConfig(root).practice : doctrineFile(root);
   const gate = detectGate(root);
   const configured = configuredGate(root);
@@ -348,6 +349,9 @@ export function initRepo({ info, openBoardHere, register, closeBoard, model }) {
     writeNew(join(root, 'SPEC.md'), specTemplate(basename(root), gate), 'SPEC.md', onWrite),
     writeNew(join(root, doctrine), practiceTemplate(), doctrine, onWrite),
     ignoreAgentWorktrees(root, onWrite),
+    worktreeMode === 'inside'
+      ? 'new agent worktrees go in .claude/worktrees; dot-scanner tools such as eslint . should ignore .claude/worktrees; set "worktrees": "beside" in pullboard.json to use sibling folders'
+      : 'new agent worktrees go beside this repository as <repo>-<lane>-N; set "worktrees": "inside" in pullboard.json to nest them under .claude/worktrees (dot-scanner tools such as eslint . should ignore that path)',
     ...writeAgentDocs(root, onWrite),
     ...installHooks(root, onWrite),
     ...installSkills(root, onWrite),

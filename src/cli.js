@@ -1274,6 +1274,8 @@ function boardSetup(ctx, card, identity) {
 function resumeHere(io) {
   const ctx = context(io);
   const { root, isMain } = ctx.info;
+  const mainRoot = primaryCheckoutRoot(ctx.info);
+  const worktreeConfig = mainRoot ? (isMain ? ctx.config : loadConfig(mainRoot)) : null;
   let setupScope;
   const card = withBoard(ctx, (board) => {
     setupScope = setupIdentity(board);
@@ -1308,6 +1310,9 @@ function resumeHere(io) {
   });
   card.relayProblems = unlinkedRelayProjects();
   card.hookProblems = unwiredHookProblems(root);
+  card.newWorktreeLocation = mainRoot
+    ? worktreeLocation(mainRoot, worktreeConfig)
+    : unavailableWorktreeLocation();
   const { me } = card;
   const name = (id) => agentDisplayName(card.agents, ctx.config, id);
   card.stale = staleFrozenItems(card.all, loadSpec(root, ctx.config).rows, ctx.doctrine.rows).map((item) => ({ ...item, ...staleItemFinding(item) }));
@@ -1328,6 +1333,7 @@ function resumeHere(io) {
   for (const problem of card.hookProblems) say(`${problem.message}; ${problem.next}`);
   const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
   say(`resume: ${me.displayName}${me.family ? ` [family ${me.family}]` : ''}, ${me.lane} lane${isMain ? ', the main checkout' : ''}, at ${root}`);
+  say(`New agent worktrees: ${card.newWorktreeLocation}`);
   card.setup = boardSetup(ctx, card, setupScope);
   if (card.setup) {
     say(`Setting up: step ${card.setup.step} of 5`);
@@ -1758,12 +1764,17 @@ async function worktreeFor(io, lane, route, family = null, model) {
     throw new Refused('BAD_ROUTE', `route "${route}" is strong (needs a frontier model) or light (any model can build it from the brief)`);
   }
   model = requiredModel(model, process.env, `worktree ${shellWord(lane)}${route === 'strong' ? '' : ` --route ${shellWord(route)}`}${family ? ` --family ${shellWord(family)}` : ''}`);
-  const mainRoot = resolve(ctx.info.commonDir, '..');
-  refuseUncommittedSetup(mainRoot, ctx.config);
-  const pathFor = (n) => join(dirname(mainRoot), `${basename(mainRoot)}-${lane}-${n}`);
+  const mainRoot = primaryCheckoutRoot(ctx.info);
+  if (!mainRoot) throw new Refused('NO_POLICY', 'the primary checkout cannot be proven from Git metadata or the read-only project registry; restore the registry and retry');
+  const mainConfig = loadConfig(mainRoot);
+  refuseUncommittedSetup(mainRoot, mainConfig);
+  const pathFor = (n) => mainConfig.worktrees === 'inside'
+    ? join(mainRoot, '.claude', 'worktrees', `${lane}-${n}`)
+    : join(dirname(mainRoot), `${basename(mainRoot)}-${lane}-${n}`);
   const isTaken = (n) => existsSync(pathFor(n)) || tryGit(mainRoot, ['rev-parse', '--verify', '--quiet', `refs/heads/${lane}/${n}`]).status === 0;
   let n = 1;
   while (isTaken(n)) n += 1;
+  mkdirSync(dirname(pathFor(n)), { recursive: true });
   git(mainRoot, ['worktree', 'add', '-q', '-b', `${lane}/${n}`, pathFor(n), git(mainRoot, ['rev-parse', 'HEAD'])]);
   const root = git(pathFor(n), ['rev-parse', '--show-toplevel']);
   let id;
@@ -1795,6 +1806,18 @@ async function worktreeFor(io, lane, route, family = null, model) {
   io.say(`  Model: ${model}. When joining or making another agent worktree, pass that agent's exact model with --model or set PULLBOARD_MODEL.`);
   io.say(`  Read ${shellWord(join(root, 'AGENTS.md'))} first. Its rules govern this work, over any other repo's instructions you were given.`);
   return 0;
+}
+
+/** Describe the active configured location for new agent worktrees. */
+function worktreeLocation(mainRoot, config) {
+  return config.worktrees === 'inside'
+    ? join(mainRoot, '.claude', 'worktrees', '<lane>-N')
+    : join(dirname(mainRoot), `${basename(mainRoot)}-<lane>-N`);
+}
+
+/** Explain how to recover the configured location when the primary checkout cannot be proven. */
+function unavailableWorktreeLocation() {
+  return 'unavailable; run pullboard resume from the main checkout to see the configured location';
 }
 
 /**
@@ -3629,7 +3652,22 @@ async function runCommand(argv, io) {
   }
   const help = selectedHelp(command, first, second, rest, values);
   if (help) {
-    if (help.text) return printHelp(io, help.text);
+    if (help.text) {
+      let text = help.text;
+      if (help.name === 'worktree') {
+        try {
+          const ctx = context(io);
+          const mainRoot = primaryCheckoutRoot(ctx.info);
+          const worktreeConfig = mainRoot ? (ctx.info.isMain ? ctx.config : loadConfig(mainRoot)) : null;
+          text += `\nActive worktree location: ${mainRoot
+            ? worktreeLocation(mainRoot, worktreeConfig)
+            : unavailableWorktreeLocation()}.`;
+        } catch (error) {
+          if (!(error instanceof Refused)) throw error;
+        }
+      }
+      return printHelp(io, text);
+    }
     return unknownCommand(io, help.name);
   }
   const args = { first, second, rest, values };
