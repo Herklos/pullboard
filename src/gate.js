@@ -310,6 +310,8 @@ export function writeTimingProfile(path, profile) {
     ...(profile.executionRunner ? { executionRunner: sanitize(profile.executionRunner, 'execution runner') } : {}),
     ...(profile.landingShards ? { landingShards: {
       balance: sanitize(String(profile.landingShards.balance ?? 'unknown'), 'landing balance'),
+      unverified: (profile.landingShards.unverified ?? []).map(entry => ({ shard: sanitize(String(entry.shard), 'landing unverified shard'),
+        processes: sanitize(String(entry.processes), 'landing unverified processes') })),
       quarantined: (profile.landingShards.quarantined ?? []).map(entry => ({ host: sanitize(String(entry.host), 'landing quarantine host'),
         message: sanitize(String(entry.message), 'landing quarantine message') })),
       floor: profile.landingShards.floor && validDuration(profile.landingShards.floor.ms)

@@ -374,3 +374,63 @@ test('a runner refusal in a sharded landing is handled by its class [C7,V4]', { 
     assert.doesNotMatch(moved.output, /attempt 2 on local: green/u, 'no green result comes from the changed checkout');
   } finally { writeFileSync(edited, original); }
 });
+
+/** Whether a pid still names a live process; a permission error still means it exists. */
+function alive(pid) {
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return error.code === 'EPERM'; }
+}
+
+test('a stopped landing shard drains its detached descendant [C7,V4]', { timeout: 120_000 }, async (t) => { // budget: one stopped two-shard landing plus its owned-process sweep.
+  const box = fixture({ runner: false });
+  t.after(() => rmSync(box.dir, { recursive: true, force: true }));
+  scenario(box, 'green');
+  const ready = join(box.dir, 'detached-child-ready.json');
+  const survived = join(box.dir, 'detached-child-survived');
+  // The grandchild leaves the shard's process group and session, then writes its marker later.
+  const childCode = [
+    "import { writeFileSync } from 'node:fs';",
+    'const writeAt = Date.now() + 3000;',
+    `writeFileSync(${JSON.stringify(ready)}, JSON.stringify({ pid: process.pid, writeAt }));`,
+    `setTimeout(() => writeFileSync(${JSON.stringify(survived)}, 'survived'), writeAt - Date.now());`,
+    'setInterval(() => {}, 1000);',
+  ].join('\n');
+  const failing = `import { test } from 'node:test';
+import { existsSync } from 'node:fs';
+test('fail once the other shard owns its detached child', async () => {
+  while (!existsSync(${JSON.stringify(ready)})) await new Promise(resolve => setTimeout(resolve, 25));
+  throw new Error('deliberate first shard failure');
+});
+`;
+  const owner = `import { test } from 'node:test';
+import { spawn } from 'node:child_process';
+test('own a detached child', async () => {
+  const child = spawn(process.execPath, ['--input-type=module', '-e', ${JSON.stringify(childCode)}], { detached: true, stdio: 'ignore' });
+  child.unref();
+  await new Promise(resolve => setTimeout(resolve, 60_000));
+});
+`;
+  // Two shards: a.test.js alone fails, b.test.js owns the detached grandchild.
+  for (const name of NAMES.slice(2)) rmSync(join(box.repo, 'test', `${name}.test.js`));
+  writeFileSync(join(box.repo, 'test', 'a.test.js'), failing);
+  writeFileSync(join(box.repo, 'test', 'b.test.js'), owner);
+  writeFileSync(join(box.repo, 'pullboard.json'), JSON.stringify({ gate: 'node bin/run-tests.js', landingShards: 2 }));
+  git(box.repo, box.env, 'add', '-A');
+  git(box.repo, box.env, 'commit', '-q', '-m', 'test: a shard owns a detached descendant');
+  let pid = null;
+  try {
+    const result = await landingGate(box, 'stopped shard with a detached descendant', 90_000);
+    assert.equal(result.isGreen, false, result.output);
+    assert.ok(existsSync(ready), 'the detached grandchild started before the stop');
+    ({ pid } = JSON.parse(readFileSync(ready, 'utf8')));
+    assert.equal(alive(pid), false, `no process from the stopped shard survives the landing\n${result.output}`);
+    assert.doesNotMatch(result.output, /LANDING_SHARD_CLEANUP_UNVERIFIED/u, 'its cleanup was verified');
+    const { writeAt } = JSON.parse(readFileSync(ready, 'utf8'));
+    // budget: wait past the grandchild's own write time, read from its marker, before judging the file.
+    while (Date.now() <= writeAt + 500) await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(existsSync(survived), false, 'the stopped grandchild never wrote its marker');
+  } finally {
+    // Only the fixture's own recorded grandchild is ever signalled here.
+    if (pid && alive(pid)) process.kill(pid, 'SIGKILL');
+  }
+});

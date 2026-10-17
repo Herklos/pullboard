@@ -1036,6 +1036,11 @@ async function runLandingTests(args, env, concurrency) {
     })().then(resolveAbort, error => { reporterError ??= error; resolveAbort(); });
     return abortPromise;
   };
+  // A shard the landing stops gets TERM: stop through the same custody as a first failure, so every
+  // owned descendant, detached ones included, is drained or named before this process exits.
+  let stoppedByLanding = false;
+  const stopShard = () => { stoppedByLanding = true; abortLandingRun(); };
+  if (process.env[LANDING_SHARD_ENV]) process.on('SIGTERM', stopShard);
   const originalEnv = { ...process.env };
   for (const key of Object.keys(process.env)) delete process.env[key];
   Object.assign(process.env, testEnv, { [LANDING_RUN_ENV]: '0' });
@@ -1112,8 +1117,14 @@ async function runLandingTests(args, env, concurrency) {
     endReporters();
     for (const key of Object.keys(process.env)) delete process.env[key];
     Object.assign(process.env, originalEnv);
+    process.off('SIGTERM', stopShard);
   }
   if (reporterError) throw reporterError;
+  if (stoppedByLanding && !firstFailure) {
+    process.stderr.write(`\nLanding shard ${process.env[LANDING_SHARD_ENV]} stopped by the landing after another shard failed; its owned processes were drained\n`);
+    process.exitCode = 1;
+    return { status: 1, signal: null };
+  }
   if (firstFailure) {
     const diagnostic = failureDiagnostics.get(firstFailure.file);
     if (diagnostic) firstFailure = { file: firstFailure.file, name: diagnostic.name, error: diagnostic.details.error };

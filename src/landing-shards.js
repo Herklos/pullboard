@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { gitChildEnv, repoInfo } from './git.js';
+import { parseProcessCensus } from './process-census.js';
 import {
   BROWSER_SLOT_HELD_ENV,
   GATE_SLOT_HELD_ENV,
@@ -24,8 +25,11 @@ export const LANDING_FILE_TIMES_ENV = 'PULLBOARD_LANDING_FILE_TIMES';
 export const FILE_TIME_LINE = '# landing-file-ms ';
 
 const GATE_MARKERS = [GATE_SLOT_HELD_ENV, GATE_SLOT_POOL_ENV, GATE_SLOT_TOKEN_ENV, BROWSER_SLOT_HELD_ENV];
-// Budget: a stopped local shard gets this long to drain after TERM before its group is killed.
-const STOP_GRACE_MS = 10_000;
+// Budget: a stopped shard's run-tests drains its owned processes within its 12 s custody limit; past
+// this its group is killed.
+const STOP_GRACE_MS = 20_000;
+// Budget: each signal round of the final sweep waits this long for a process to go.
+const SWEEP_WAIT_MS = 1_000;
 
 /** Where the last landing's per-file wall times live, shared by every worktree of the repository. */
 export function fileTimesPath(root) {
@@ -131,14 +135,78 @@ function word(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`;
 }
 
-/** Stop a detached shard's whole process group: TERM, then KILL after its grace. */
-async function stopGroup(child, closed) {
-  const signal = name => { try { process.kill(-child.pid, name); } catch (error) { if (error.code !== 'ESRCH') throw error; } };
-  signal('SIGTERM');
-  const timer = setTimeout(() => signal('SIGKILL'), STOP_GRACE_MS);
-  await closed;
+/** One process census, or null when it cannot be taken; a missing census is never an empty machine. */
+function census() {
+  const result = spawnSync('/bin/ps', ['-axo', 'pid=,ppid=,pgid=,lstart=,stat=,comm='], {
+    encoding: 'utf8', timeout: 5_000, maxBuffer: 16 * 1024 * 1024, env: { PATH: '/bin:/usr/bin', LANG: 'C', LC_ALL: 'C', TZ: 'UTC' } }); // budget: one bounded ps call.
+  if (result.error || result.status !== 0 || typeof result.stdout !== 'string') return null;
+  return parseProcessCensus(result.stdout);
+}
+
+/**
+ * Every process a shard owns: its parent-tree descendants, including detached ones that started
+ * their own group or session, plus every member of their groups. Taken before any signal, while the
+ * tree still links them, since an orphaned process loses its parent link.
+ */
+export function shardProcesses(rootPid, rows = census()) {
+  if (!rows) return null;
+  const owned = new Map();
+  const children = new Map();
+  for (const row of rows.values()) {
+    if (!children.has(row.ppid)) children.set(row.ppid, []);
+    children.get(row.ppid).push(row);
+  }
+  const queue = rows.has(rootPid) ? [rows.get(rootPid)] : [];
+  while (queue.length) {
+    const row = queue.shift();
+    if (owned.has(row.pid)) continue;
+    owned.set(row.pid, row);
+    queue.push(...(children.get(row.pid) ?? []));
+  }
+  const ownGroup = rows.get(process.pid)?.pgid;
+  const groups = new Set([...owned.values()].map(row => row.pgid).filter(pgid => pgid !== ownGroup));
+  for (const row of rows.values()) if (groups.has(row.pgid) && row.pid !== process.pid) owned.set(row.pid, row);
+  return owned;
+}
+
+/** The owned processes still alive with the same identity, or null when no census can tell. */
+function survivors(owned) {
+  const rows = census();
+  if (!rows) return null;
+  return [...owned.values()].filter(row => rows.get(row.pid)?.started === row.started);
+}
+
+/** Signal one process only while it is still the one the shard owned. */
+function signalOwned(row, name) {
+  try { process.kill(row.pid, name); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+}
+
+/**
+ * Stop a shard and prove its processes are gone. TERM asks its run-tests to stop through its own
+ * custody, which drains every descendant it tracked; whatever the census still finds is signalled
+ * here. Returns the processes that could not be shown gone, named by pid and command hash.
+ */
+async function stopShard(child, closed) {
+  const owned = shardProcesses(child.pid);
+  signalOwned({ pid: child.pid }, 'SIGTERM');
+  let timer;
+  const drained = await Promise.race([closed.then(() => true), new Promise(resolveWait => { timer = setTimeout(() => resolveWait(false), STOP_GRACE_MS); })]);
   clearTimeout(timer);
-  signal('SIGKILL');
+  if (!drained) {
+    try { process.kill(-child.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+    await closed;
+  }
+  if (!owned) return ['process census unavailable'];
+  for (const name of ['SIGTERM', 'SIGKILL']) {
+    const left = survivors(owned);
+    if (!left) return ['process census unavailable'];
+    if (!left.length) return [];
+    for (const row of left) signalOwned(row, name);
+    await new Promise(resolveWait => setTimeout(resolveWait, SWEEP_WAIT_MS));
+  }
+  const left = survivors(owned);
+  if (!left) return ['process census unavailable'];
+  return left.map(row => `pid ${row.pid} (${row.processSha256.slice(0, 12)})`);
 }
 
 /** Run one shard's files in a local child run-tests that inherits the shard's own gate lease. */
@@ -154,12 +222,14 @@ async function runLocalShard({ root, runner, files, label, lease, stop }) {
     child.once('error', error => { chunks.push(`\n${error.message}\n`); resolveClose({ status: 1, signal: null }); });
     child.once('close', (status, signal) => resolveClose({ status, signal }));
   });
-  const onStop = () => { stopGroup(child, closed).catch(() => {}); };
+  let stopping = null;
+  const onStop = () => { stopping = stopShard(child, closed).catch(error => [`stop failed: ${error.message}`]); };
   if (stop.aborted) onStop();
   else stop.addEventListener('abort', onStop, { once: true });
   const { status, signal } = await closed;
   stop.removeEventListener('abort', onStop);
-  return { isGreen: status === 0 && !signal, output: chunks.join('') };
+  const unverified = stopping ? await stopping : [];
+  return { isGreen: status === 0 && !signal && !stopping, output: chunks.join(''), unverified };
 }
 
 /**
@@ -269,6 +339,10 @@ export async function runLandingShards({ root, runner, files, count, inherited =
       };
       if (drifted()) return sourceChanged('before');
       const run = await runLocalShard({ root, runner, files: entry.shard.files, label: entry.label, lease, stop });
+      if (run.unverified.length) {
+        // Fail closed: name what may still run, as a runner's unverified cleanup does.
+        write(`landing shard ${entry.label}: [LANDING_SHARD_CLEANUP_UNVERIFIED] the stopped shard's processes could not be shown gone: ${run.unverified.join(', ')}; inspect and stop them before another run\n`);
+      }
       if (!stop.aborted && drifted()) return sourceChanged('while');
       return { attempt: number, host: 'local', outcome: run.isGreen ? 'green' : 'red', output: run.output, wallMs: Date.now() - started };
     }
@@ -413,9 +487,12 @@ export function landingShardProfile(output) {
   let balance = null;
   let floor = null;
   const quarantined = [];
+  const unverified = [];
   for (const line of String(output).split(/\r?\n/u)) {
     const plan = /^# landing shards: \d+ balanced by (history|history and average|file count) \(/u.exec(line);
     if (plan) balance = plan[1];
+    const leftover = /^landing shard (\d+\/\d+): \[LANDING_SHARD_CLEANUP_UNVERIFIED\] the stopped shard's processes could not be shown gone: (.*); inspect/u.exec(line);
+    if (leftover) unverified.push({ shard: leftover[1], processes: leftover[2] });
     const held = /^landing runner (\S+) quarantined for the rest of this landing: (.*)$/u.exec(line);
     if (held) quarantined.push({ host: held[1], message: held[2] });
     const slowest = /^# landing floor: (\d+) ms (.+)$/u.exec(line);
@@ -425,7 +502,7 @@ export function landingShardProfile(output) {
     const file = /^# landing file (\d+\/\d+) (\S+) (\d+|-) (.+)$/u.exec(line);
     if (file) files.push({ path: file[4], shard: file[1], host: file[2], durationMs: file[3] === '-' ? null : Number(file[3]) });
   }
-  return shards.length ? { balance, floor, quarantined, shards, files } : null;
+  return shards.length ? { balance, floor, quarantined, unverified, shards, files } : null;
 }
 
 /** Print this shard's per-file wall times for its orchestrator; a missing record prints nothing. */
