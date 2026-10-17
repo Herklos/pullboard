@@ -920,12 +920,28 @@ async function journeyRelaySite(box, localOrigin) {
     };
     void (async () => {
       if (await browser(req, res)) return;
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204, {
+          'access-control-allow-origin': JOURNEY_HOSTED,
+          'access-control-allow-credentials': 'true',
+          'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS',
+          'access-control-allow-headers': req.headers['access-control-request-headers'] || 'content-type',
+          'access-control-allow-private-network': 'true', vary: 'Origin',
+        });
+        return res.end();
+      }
       const headers = Object.fromEntries(Object.entries(req.headers).filter(([name]) => !['host', 'connection', 'content-length'].includes(name.toLowerCase())));
+      // As in the real exit journey, translate only the private upstream's configured origin.
+      headers.origin = box.origin;
       const upstream = request(new URL(req.url, box.origin), { method: req.method, headers, agent: false }, (reply) => {
-        const responseHeaders = Object.fromEntries(Object.entries(reply.headers).filter(([name]) => !['connection', 'transfer-encoding', 'keep-alive'].includes(name.toLowerCase())));
+        const responseHeaders = Object.fromEntries(Object.entries(reply.headers).filter(([name]) => !['connection', 'transfer-encoding', 'keep-alive', 'access-control-allow-origin', 'access-control-allow-credentials'].includes(name.toLowerCase())));
+        responseHeaders['access-control-allow-origin'] = JOURNEY_HOSTED;
+        responseHeaders['access-control-allow-credentials'] = 'true';
+        responseHeaders.vary = 'Origin';
         res.writeHead(reply.statusCode || 502, responseHeaders);
         reply.pipe(res);
       });
+      res.once('close', () => upstream.destroy());
       upstream.once('error', () => { if (!res.headersSent) res.writeHead(502); res.end(); });
       req.pipe(upstream);
     })().catch(() => { if (!res.headersSent) res.writeHead(500); res.end(); });
@@ -935,7 +951,7 @@ async function journeyRelaySite(box, localOrigin) {
 }
 
 /** Route the hosted page and its fixed loopback discovery through owned fixture servers. */
-async function interceptJourneyOrigins(chrome, site, view, { deadline: currentDeadline } = {}) {
+async function interceptJourneyOrigins(chrome, site, view, { deadline: currentDeadline, liveStreams = false } = {}) {
   const failures = [];
   let failureCount = 0;
   const tasks = [];
@@ -985,6 +1001,7 @@ async function interceptJourneyOrigins(chrome, site, view, { deadline: currentDe
       completionTiming: record.completionTiming ?? null,
       networkFailureTiming: record.networkFailureTiming ?? null,
       responseStatus: record.responseStatus ?? null,
+      liveStream: record.liveStream === true,
       bodyCompleted: record.bodyCompleted,
       bodyBytes: record.bodyBytes,
       bodyBytesCapped: record.bodyBytesCapped,
@@ -1006,6 +1023,7 @@ async function interceptJourneyOrigins(chrome, site, view, { deadline: currentDe
     const relevant = new Set([...failed, ...incomplete.slice(0, 20), ...canceled, ...interceptions.slice(-8)]);
     return {
       requestCount: interceptions.length,
+      liveStreamCount: interceptions.filter((record) => record.liveStream === true).length,
       failureCount,
       incompleteCount: incomplete.length,
       confirmedBrowserCancellationCount: canceledCount,
@@ -1209,6 +1227,19 @@ async function interceptJourneyOrigins(chrome, site, view, { deadline: currentDe
         if (!base) {
           record.stage = 'reject-foreign-origin';
           await completePausedRequest(record, 'Fetch.failRequest', { requestId, errorReason: 'ConnectionRefused' });
+          return;
+        }
+        const accept = Object.entries(asked.headers).find(([name]) => name.toLowerCase() === 'accept')?.[1] || '';
+        if (liveStreams && asked.method === 'GET' && address.pathname.startsWith('/api/')
+          && (address.pathname.endsWith('/events') || String(accept).includes('text/event-stream'))) {
+          // A finite fulfilled first chunk is EOF, not a live stream: it creates artificial reconnect traffic.
+          // Keep the real stream open through the owned HTTP proxy, as the accepted exit journey does.
+          record.liveStream = true;
+          await completePausedRequest(record, 'Fetch.continueRequest', {
+            requestId, url: base + address.pathname + address.search,
+            headers: Object.entries(asked.headers).filter(([name]) => !['host', 'content-length'].includes(name.toLowerCase()))
+              .map(([name, value]) => ({ name, value })),
+          });
           return;
         }
         record.stage = 'fetching-owned-fixture';
@@ -1607,7 +1638,7 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
         return (...args) => activeJourneyDeadline.wait(`browser ${String(key)}`, () => value.apply(target, args));
       },
     });
-    stopOrigins = await interceptJourneyOrigins(chrome, site, localView, { deadline: () => activeJourneyDeadline });
+    stopOrigins = await interceptJourneyOrigins(chrome, site, localView, { deadline: () => activeJourneyDeadline, liveStreams: true });
     // Observe only fixed action-stage labels; no page values, request bodies or credentials enter diagnostics.
     const actionStages = new Set(['api-started', 'api-parsed', 'api-rejected', 'act-started', 'act-completed', 'act-rejected']);
     const actionListener = ({ data }) => {
@@ -1854,7 +1885,7 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
     try { rmSync(profile, { recursive: true, force: true }); } catch (error) { journeyCleanupErrors.push(error); }
     if (!journeyBodyError && !journeyCleanupErrors.length) {
       const trace = stopOrigins.trace();
-      t.diagnostic(JSON.stringify({ kind: 'owned-browser-cancellation-proof', actionTrace: journeyActionTrace, failureCount: trace.failureCount,
+      t.diagnostic(JSON.stringify({ kind: 'owned-browser-cancellation-proof', actionTrace: journeyActionTrace, requestCount: trace.requestCount, liveStreamCount: trace.liveStreamCount, failureCount: trace.failureCount,
         incompleteCount: trace.incompleteCount, confirmedBrowserCancellationCount: trace.confirmedBrowserCancellationCount,
         probe: trace.requests.find((record) => record.fixtureCancelProbe) }));
     }
