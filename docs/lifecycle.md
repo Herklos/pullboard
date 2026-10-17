@@ -159,7 +159,7 @@ Each move checks its guards in this order and refuses with the first one that do
 | NOTE_REQUIRED | the move carries a note: what failed, what was tried, or why | --note "..." or --note-file <file> |
 | BAD_CAUSE | a cause, when given, is test:<file>::<title>, refusal:<CODE>, row:<id> or doctrine:<id> | fix --cause, or leave it out |
 | ALREADY_MERGED | the item has no recorded merge receipt | a merged item cannot be reopened |
-| SUBMISSION_PROOF | recorded test selection names literal project files and its full-fallback policy, engine 34 or later; absent legacy selection remains unknown | rerun submit with the current CLI |
+| SUBMISSION_PROOF | recorded test selection names literal project files and its full-fallback policy, engine 38 or later; absent legacy selection remains unknown | rerun submit with the current CLI |
 | LANDING_FAILURE_REQUIRED | a verified item note names the failing test and landing merge commit | cite the recorded batch, or name the test and merge commit in a manual note |
 | LAND_HEADER | a displayed merge command fits the commit-header limit (accept result) | shorten the item title or cited rows so the merge header fits |
 | ENGINE_VERSION | a verdict that implies items replays only under engine 20 or later (accept result) | upgrade Pullboard on every linked device before using --implies |
