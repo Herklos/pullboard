@@ -95,7 +95,7 @@ async function documentAt(path, onDenied, options = {}) {
 }
 
 /** Build the API adapter the existing cockpit consumes; no board key enters an HTTP request. */
-export async function createTransport({ onUpdate = () => {} } = {}) {
+export async function createTransport({ onUpdate = () => {}, onOpenBoard = () => {} } = {}) {
   void registerApp();
   const savedKeys = stored(localStorage, KEYS, {});
   const keys = savedKeys && typeof savedKeys === 'object' && !Array.isArray(savedKeys) ? savedKeys : {};
@@ -555,7 +555,10 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
     try {
       while (!accessLost && Date.now() < context.expires) {
         await listing(); onUpdate();
-        if (paired.has(context.board)) return;
+        if (paired.has(context.board)) {
+          await onOpenBoard(context.board);
+          return;
+        }
         await new Promise(resolveWait => setTimeout(resolveWait, 500));
       }
     } finally { approvedBoards.delete(context.board); notice(); }
