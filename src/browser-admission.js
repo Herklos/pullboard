@@ -10,8 +10,12 @@ const CHROME_FIXTURE = 'test/chrome-fixture.js';
 const FIXTURE_CHILD = 'test/fixture-child.js';
 const JOURNEYS_TEST = 'test/journeys.test.js';
 const TEST_RUNNER = 'bin/run-tests.js';
-/** Chrome fixture exports that never start a browser; any other binding, a new export included, counts as a launch. */
-const LAUNCH_FREE_CHROME_EXPORTS = new Set(['findChromeExecutable', 'requireBrowserSlot', 'waitForTargetAbsent', 'createWaiter', 'createSender',
+/**
+ * Chrome fixture exports that neither start a browser nor yield a browser path or launch arguments; any
+ * other binding, findChromeExecutable and a new export included, counts as a launch. These six only work
+ * over an existing DevTools connection, or refuse.
+ */
+const LAUNCH_FREE_CHROME_EXPORTS = new Set(['requireBrowserSlot', 'waitForTargetAbsent', 'createWaiter', 'createSender',
   'createEvaluator', 'createPageStepEvaluator']);
 /** Imports that let a module start another process or module, which by launch counts only with a Chrome reference. */
 const PROCESS_STARTERS = new Set(['node:child_process', 'node:worker_threads', 'node:cluster', 'node:module', 'node:vm']);
@@ -263,9 +267,23 @@ function browserFallback(onFallback, file, reason) {
   return true;
 }
 
+/** The runner's launch guard preload for browser-free test files (gate.browserByLaunch): it loads only src/browser-slot-guard.js. */
+const SLOT_GUARD_IMPORT = `--import=${new URL('./browser-slot-guard.js', import.meta.url).href}`;
+
+/**
+ * Whether NODE_OPTIONS may load a module the classifier has not seen. The one exception is this checkout's
+ * own launch guard, which a browser-free test file passes to its children; anything else is unclassified.
+ *
+ * @param {string | undefined} value
+ * @returns {boolean}
+ */
+function unclassifiedNodeOptions(value) {
+  return String(value ?? '').split(/\s+/u).filter(Boolean).some(token => token !== SLOT_GUARD_IMPORT);
+}
+
 /** Parse the frozen check and classify its explicit test files, failing closed on unknown shell. */
 export async function checkNeedsBrowser(root, command, { commit, env = process.env, onFallback } = {}) {
-  if (env.NODE_OPTIONS) return browserFallback(onFallback, '<frozen check>', 'NODE_OPTIONS may load an unclassified module');
+  if (unclassifiedNodeOptions(env.NODE_OPTIONS)) return browserFallback(onFallback, '<frozen check>', 'NODE_OPTIONS may load an unclassified module');
   let words = literalShellWords(command);
   if (!words) {
     const inner = capturedRunner(command);

@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { browserBoundFiles, checkNeedsBrowser, testsNeedBrowser } from '../src/browser-admission.js';
+import { browserInCall } from '../src/browser-slot-guard.js';
 
 const TEST_RUNNER = resolve(import.meta.dirname, '../bin/run-tests.js');
 
@@ -134,6 +135,12 @@ test('frozen checks classify only explicit source-backed test commands [C7]', as
   assert.equal(await checkNeedsBrowser(root, command, {
     env: { ...classifyEnv, NODE_OPTIONS: '--import=unclassified-loader.mjs' },
   }), true, 'an unknown Node preload still fails closed to browser admission');
+  assert.equal(await checkNeedsBrowser(root, command, {
+    env: { ...classifyEnv, NODE_OPTIONS: `--import=${new URL('../src/browser-slot-guard.js', import.meta.url).href}` },
+  }), false, "the runner's own launch guard preload, inherited from a browser-free test file, is not an unknown preload [C7,O5]");
+  assert.equal(await checkNeedsBrowser(root, command, {
+    env: { ...classifyEnv, NODE_OPTIONS: `--import=${new URL('../src/browser-slot-guard.js', import.meta.url).href} --import=x.mjs` },
+  }), true, 'the guard preload does not excuse another preload beside it');
 
   const runnerPath = join(root, 'bin/run-tests.js');
   rmSync(runnerPath);
@@ -271,15 +278,19 @@ function runnerFixture(t, tests) {
   chmodSync(chrome, 0o755);
   const init = spawnSync('git', ['init', '-q'], { cwd: root, env: plainGitEnvironment(), encoding: 'utf8' });
   assert.equal(init.status, 0, init.stderr);
-  /** Run the copied runner on named files with gate.browserByLaunch set as given; return its output and records. */
-  function run(byLaunch, files) {
+  /**
+   * Run the copied runner on named files with gate.browserByLaunch set as given; return its output and records.
+   * PULLBOARD_CHROME names the stand-in only when asked, so a run can show which guard layer refused.
+   */
+  function run(byLaunch, files, { chromeSetting = false } = {}) {
     writeFileSync(join(root, 'machine/settings.json'), `${JSON.stringify({ gate: { browserByLaunch: byLaunch } })}\n`);
     for (const record of ['markers', 'launches']) rmSync(join(root, record), { force: true });
     const env = plainGitEnvironment();
     for (const key of Object.keys(env)) {
       if (key.startsWith('PULLBOARD_GATE_SLOT_') || key.startsWith('PULLBOARD_TEST_BROWSER_')) delete env[key];
     }
-    for (const key of ['NODE_TEST_CONTEXT', 'NODE_OPTIONS', 'PULLBOARD_BROWSER_SLOT_HELD', 'PULLBOARD_TEST_FILE']) delete env[key];
+    for (const key of ['NODE_TEST_CONTEXT', 'NODE_OPTIONS', 'PULLBOARD_BROWSER_SLOT_HELD', 'PULLBOARD_TEST_FILE', 'PULLBOARD_CHROME']) delete env[key];
+    if (chromeSetting) env.PULLBOARD_CHROME = chrome;
     Object.assign(env, { PULLBOARD_MACHINE_HOME: join(root, 'machine'), PULLBOARD_FIXTURE_MARKERS: join(root, 'markers'),
       PULLBOARD_FIXTURE_LAUNCHES: join(root, 'launches'), FIXTURE_BROWSER: chrome });
     const result = spawnSync(process.execPath, ['bin/run-tests.js', ...files], { cwd: root, env, encoding: 'utf8' });
@@ -301,7 +312,8 @@ test('${name} records its browser slot marker', () => {
 test('only a file that reaches a browser launch takes a browser slot [C7,O5]', async t => {
   const root = sourceFixture(t, {
     'test/chrome-fixture.js': "throw new Error('admission must never launch or evaluate Chrome');",
-    'test/helpers.test.js': "import { spawnSync } from 'node:child_process';\nimport { createWaiter, findChromeExecutable } from './chrome-fixture.js';\nvoid spawnSync; void createWaiter; void findChromeExecutable;",
+    'test/helpers.test.js': "import { spawnSync } from 'node:child_process';\nimport { createWaiter, createEvaluator } from './chrome-fixture.js';\nvoid spawnSync; void createWaiter; void createEvaluator;",
+    'test/finder.test.js': "import { findChromeExecutable } from './chrome-fixture.js';\nvoid findChromeExecutable;",
     'test/launch.test.js': "import { startChrome } from './chrome-fixture.js';\nvoid startChrome;",
     'test/renamed.test.js': "import { launchChromeProcess as begin } from './chrome-fixture.js';\nvoid begin;",
     'test/wrapped.test.js': "import { open } from '../wrapper.js';\nvoid open;",
@@ -314,7 +326,7 @@ test('only a file that reaches a browser launch takes a browser slot [C7,O5]', a
   assert.equal(await byLaunch('test/helpers.test.js'), false,
     'importing launch-free Chrome fixture helpers and child_process takes no browser slot by launch');
   assert.equal(await byLaunch('test/spawner.test.js'), false, 'a process starter with no Chrome reference takes no browser slot by launch');
-  for (const file of ['launch', 'renamed', 'wrapped', 'everything', 'direct']) {
+  for (const file of ['launch', 'renamed', 'wrapped', 'everything', 'finder', 'direct']) {
     assert.equal(await byLaunch(`test/${file}.test.js`), true, `${file}: a graph that reaches a Chrome launch takes the browser slot`);
   }
   assert.equal(await byLaunch('test/cockpit/items.test.js'), true,
@@ -387,4 +399,54 @@ test('child launches from a process the test starts', () => {
   const off = runner.run(false, ['test/hidden.test.js']);
   assert.equal(off.status, 0, off.output);
   assert.deepEqual(off.launches, ['hidden'], 'with gate.browserByLaunch off the guard is inert and the file launches as today');
+
+  // tests-42's counterexample (shout 11929): browser starts that never pass through test/chrome-fixture.js.
+  const direct = runnerFixture(t, {
+    'test/direct.test.js': `import { spawnSync } from 'node:child_process';
+import { test } from 'node:test';
+test('direct starts the configured browser path itself', () => { spawnSync(process.env.FIXTURE_BROWSER, ['direct']); });
+`,
+    'test/finder.test.js': `import { spawnSync } from 'node:child_process';
+import { test } from 'node:test';
+test('finder starts the path the normal browser finder returns', async () => {
+  const { findChromeExecutable } = await import(['.', 'chrome-fixture.js'].join('/'));
+  spawnSync(findChromeExecutable(), ['finder']);
+});
+`,
+    'test/shell.test.js': `import { execSync, spawnSync } from 'node:child_process';
+import { test } from 'node:test';
+test('shell starts the browser from an sh -c string', () => { spawnSync('sh', ['-c', \`'\${process.env.FIXTURE_BROWSER}' shell\`]); });
+test('shell starts the browser through exec', () => { execSync(\`'\${process.env.FIXTURE_BROWSER}' exec\`); });
+`,
+    'test/spawned.test.js': `import { spawnSync } from 'node:child_process';
+import { test } from 'node:test';
+test('spawned starts a Node child that starts the browser', () => {
+  const result = spawnSync(process.execPath, ['test/direct-helper.mjs'], { encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(result.stderr);
+});
+`,
+    'test/direct-helper.mjs': "import { spawnSync } from 'node:child_process';\nspawnSync(process.env.FIXTURE_BROWSER, ['grandchild']);\n",
+    'test/static-finder.test.js': "import { findChromeExecutable } from './chrome-fixture.js';\nvoid findChromeExecutable;\n",
+  });
+  const directFiles = ['test/direct.test.js', 'test/finder.test.js', 'test/shell.test.js', 'test/spawned.test.js'];
+  for (const file of directFiles) {
+    assert.equal(await testsNeedBrowser(direct.root, [file], { byLaunch: true }), false, `${file}: the fixture really is classified browser-free`);
+  }
+  assert.equal(await testsNeedBrowser(direct.root, ['test/static-finder.test.js'], { byLaunch: true }), true,
+    'importing findChromeExecutable yields a browser path, so it counts as a launch');
+  const spawned = direct.run(true, directFiles, { chromeSetting: true });
+  assert.notEqual(spawned.status, 0, spawned.output);
+  for (const file of directFiles) {
+    assert.match(spawned.output, new RegExp(`\\[BROWSER_SLOT_REQUIRED\\] test/${file.slice(5).replaceAll('.', '\\.')} launched Chrome`, 'u'),
+      `${file}: a direct browser spawn fails by file name`);
+  }
+  assert.deepEqual(spawned.launches, [], 'no direct, finder, shell, exec or child spawn started the browser outside the slot');
+  for (const [method, input] of [
+    ['spawn', ['google-chrome', ['--headless']]], ['execFileSync', ['/opt/x/chromium', []]], ['spawnSync', ['headless_shell']],
+    ['spawn', ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', []]], ['execSync', ['cd /tmp && google-chrome-stable --version']],
+    ['spawnSync', ['bash', ['-lc', 'exec chromium-browser']]], ['spawn', ['echo chrome', [], { shell: true }]], ['fork', ['x.js', [], { execPath: '/usr/bin/chromium' }]],
+  ]) assert.ok(browserInCall(method, input), `${method} ${JSON.stringify(input)} names a browser by basename`);
+  for (const [method, input] of [['spawnSync', ['git', ['status']]], ['execSync', ['printf chrome-fixture.js']], ['spawn', [process.execPath, ['-e', 'google-chrome']]]]) {
+    assert.equal(browserInCall(method, input), null, `${method} ${JSON.stringify(input)} is not a browser`);
+  }
 });

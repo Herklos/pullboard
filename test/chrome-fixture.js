@@ -3,8 +3,8 @@ import { startFixtureChild as spawn } from './fixture-child.js';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { loadavg, tmpdir } from 'node:os';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
-import { isAbsolute, join, relative, resolve } from 'node:path';
-import { Refused } from '../src/refused.js';
+import { join, resolve } from 'node:path';
+import { browserSlotRefusal } from '../src/browser-slot-guard.js';
 
 const STARTUP_TIMEOUT_MS = 30_000;
 const COMMAND_TIMEOUT_MS = 15_000;
@@ -141,16 +141,12 @@ async function stopProcessGroup(child, stopped, timeoutMs = CLEANUP_TIMEOUT_MS) 
 /**
  * Refuse a Chrome launch from a test file the runner admitted without a browser slot [C7].
  * With gate.browserByLaunch on, the runner marks each file's worker held or none; a launch under none
- * means the classifier missed a launch path, so the file fails here by name before Chrome starts,
- * and a wrong classification can never run Chrome outside the slot. Without a marker this is inert.
+ * means the classifier missed a launch path, so the file fails here by name before Chrome starts.
+ * This is the second layer: src/browser-slot-guard.js refuses any browser spawn under none as well.
+ * Without a marker this is inert.
  */
 export function requireBrowserSlot() {
-  if (process.env.PULLBOARD_TEST_BROWSER_SLOT !== 'none') return;
-  const absolute = process.env.PULLBOARD_TEST_FILE ? resolve(process.env.PULLBOARD_TEST_FILE) : '';
-  const local = absolute ? relative(process.cwd(), absolute) : '';
-  const file = !absolute ? 'this test file' : (local && !local.startsWith('..') && !isAbsolute(local) ? local : absolute).split('\\').join('/');
-  throw new Refused('BROWSER_SLOT_REQUIRED', `${file} launched Chrome, but the gate classified it browser-free, so it holds no browser slot; import startChrome or launchChromeProcess from test/chrome-fixture.js in that file's own import graph so the gate admits it with a browser slot`,
-    `import startChrome or launchChromeProcess from test/chrome-fixture.js in ${file}'s import graph, then run it again`);
+  if (process.env.PULLBOARD_TEST_BROWSER_SLOT === 'none') throw browserSlotRefusal('through test/chrome-fixture.js');
 }
 
 /** Launch an executable as a detached process group and retain its stderr and launch timing. */

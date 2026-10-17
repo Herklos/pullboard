@@ -1412,8 +1412,11 @@ if (process.argv[1] && resolve(process.argv[1]) === runner) {
       process.once('exit', () => lease.release());
       if (byLaunch) process.env.PULLBOARD_TEST_BROWSER_SLOT = 'held';
     } else if (byLaunch) {
-      // test/chrome-fixture.js refuses a launch from this file and its children by name (BROWSER_SLOT_REQUIRED).
+      // Any browser spawn from this file or a Node child it starts is refused by name (BROWSER_SLOT_REQUIRED).
       process.env.PULLBOARD_TEST_BROWSER_SLOT = 'none';
+      const guard = new URL('../src/browser-slot-guard.js', import.meta.url);
+      await import(guard.href);
+      process.env.NODE_OPTIONS = [process.env.NODE_OPTIONS, `--import=${guard.href}`].filter(Boolean).join(' ');
     }
   }
   if (!landingWorker) installTestWatchdog();
