@@ -1,4 +1,4 @@
-/** Machine and repository queues persist leases; landings go first, then eligible waiters in arrival order [Q1,Q2,Q3]. */
+/** Machine and repository queues persist leases; waiters are admitted by class (landing, review, submit, other), aging up over time, then in arrival order [Q1,Q2,Q3]. */
 import { mkdirSync, realpathSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -99,6 +99,10 @@ function openQueue(file) {
       if (table === 'holder' && !columns.includes('runner')) db.exec("ALTER TABLE holder ADD COLUMN runner TEXT NOT NULL DEFAULT ''");
       if (table === 'waiter' && !columns.includes('remote')) db.exec('ALTER TABLE waiter ADD COLUMN remote INTEGER NOT NULL DEFAULT 0');
     }
+    // Marks a waiter whose process admits by class; an older pullboard leaves it 0.
+    if (!db.prepare('PRAGMA table_info(waiter)').all().some(({ name }) => name === 'classed')) {
+      db.exec('ALTER TABLE waiter ADD COLUMN classed INTEGER NOT NULL DEFAULT 0');
+    }
     // Older runner-aware builds stored remote leases as ordinary gate holders. Move them
     // into their host namespace so old readers of name='gate' continue to see local use only.
     db.exec(`INSERT INTO resource(name, capacity)
@@ -190,8 +194,59 @@ function update(db, action) {
   }
 }
 
-/** Current holders and the landing-first line, then every other kind in arrival order. */
-function snapshot(db, name) {
+/** Admission classes, most urgent first. */
+export const QUEUE_CLASSES = ['landing', 'review', 'submit', 'other'];
+/** A waiter moves up one class for every this long it has waited, so no class starves. */
+export const QUEUE_AGE_MS = 30 * 60_000;
+
+/**
+ * A waiter's admission class: its declared class from the run it names, and the class it holds now
+ * after aging up one class per QUEUE_AGE_MS waited. Landings come first, then reviews (they unblock
+ * landing), then submits and item checks, then focused, diagnostic and every other run.
+ *
+ * @param {{ landing?: number|boolean, itemCheck?: number|boolean, diagnostic?: number|boolean, kind?: string, since?: string }} entry
+ * @param {number} [now] - The clock reading to age against; injectable so tests need not wait.
+ * @returns {{ base: number, effective: number, name: string, declared: string }}
+ */
+export function queueClass(entry, now = Date.now()) {
+  const kind = entry.kind ?? '';
+  const base = entry.landing === true || entry.landing === 1 ? 0
+    : kind === 'review' ? 1
+      : !(entry.diagnostic === true || entry.diagnostic === 1) && (entry.itemCheck === true || entry.itemCheck === 1 || kind === 'submit' || kind === 'check') ? 2
+        : 3;
+  const waited = Math.max(0, now - (Date.parse(entry.since ?? '') || now));
+  const effective = Math.max(0, base - Math.floor(waited / QUEUE_AGE_MS));
+  return { base, effective, name: QUEUE_CLASSES[effective], declared: QUEUE_CLASSES[base] };
+}
+
+/**
+ * Whether a line admits by class: only while every waiter in it was queued by a process that
+ * admits by class (see admissionRank for why).
+ *
+ * @param {Array<{ classed?: number }>} waiters - The whole line for one resource.
+ * @returns {boolean}
+ */
+function classOrderInEffect(waiters) {
+  return waiters.every((waiter) => waiter.classed === 1);
+}
+
+/**
+ * The admission rank every process in this queue agrees on. Class order (with aging) applies only
+ * while every waiter was queued by a process that admits by class. Why: an older pullboard admits
+ * landings first and then by ticket, and two processes ranking the same line differently each
+ * wait for the other while a slot stays empty. With any older waiter queued, everyone falls back
+ * to that older order, so mixed versions on one machine never deadlock.
+ *
+ * @param {Array<{ classed?: number }>} waiters - The whole line for one resource.
+ * @param {number} now
+ * @returns {(waiter: object) => number}
+ */
+function admissionRank(waiters, now) {
+  return classOrderInEffect(waiters) ? (waiter) => queueClass(waiter, now).effective : (waiter) => (waiter.landing === 1 ? 0 : 1);
+}
+
+/** Current holders and the waiting line in admission order, each waiter naming its class. */
+function snapshot(db, name, now = Date.now()) {
   /** Preserve older public entries while naming diagnostics as a distinct queue class. */
   const project = ({ diagnostic, browser, remote, runner, item, kind, ...entry }) => ({ ...entry, landing: entry.landing === 1,
     itemCheck: entry.itemCheck === 1 && diagnostic !== 1, ...(diagnostic === 1 ? { diagnostic: true } : {}),
@@ -204,14 +259,22 @@ function snapshot(db, name) {
   const holderWhere = runnerHost ? 'name = ?' : where;
   const holderValues = [sourceName];
   const holders = db.prepare(`SELECT agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, runner, item, kind FROM holder WHERE ${holderWhere} ORDER BY since, token`).all(...holderValues).map(project);
-  const line = db.prepare(`SELECT agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, remote, item, kind FROM waiter WHERE ${where} ORDER BY landing DESC, ticket`).all(sourceName).map(project);
-  return { holders, line };
+  const queued = db.prepare('SELECT classed FROM waiter WHERE name = ?').all(sourceName);
+  const rank = admissionRank(queued, now);
+  const line = db.prepare(`SELECT ticket, agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, remote, item, kind, classed FROM waiter WHERE ${where}`).all(sourceName)
+    .sort((left, right) => rank(left) - rank(right) || left.ticket - right.ticket)
+    .map(({ ticket, classed, ...entry }) => {
+      const current = queueClass(entry, now);
+      return { ...project(entry), queueClass: current.name, ...(current.effective < current.base ? { agedFrom: current.declared } : {}) };
+    });
+  // An older pullboard in the line means everyone admits in arrival order until it leaves.
+  return { holders, line, ...(queued.some((waiter) => waiter.classed !== 1) ? { order: 'arrival' } : {}) };
 }
 
 /** Count reported or admissible queue position separately so blocked work cannot distort the visible line. */
-function waiterPosition(db, name, ticket, { eligibleOnly = false } = {}) {
+function waiterPosition(db, name, ticket, { eligibleOnly = false, now = Date.now() } = {}) {
   const queueName = name === 'browser' ? 'gate' : name;
-  const waiters = db.prepare('SELECT ticket, pid, agent, repo, landing, item_check AS itemCheck, browser FROM waiter WHERE name = ? ORDER BY ticket').all(queueName);
+  const waiters = db.prepare('SELECT ticket, pid, agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, kind, classed FROM waiter WHERE name = ? ORDER BY ticket').all(queueName);
   const holders = db.prepare('SELECT pid, agent, repo FROM holder WHERE name = ?').all(queueName);
   const browserCapacity = db.prepare("SELECT capacity FROM resource WHERE name = 'browser'").get()?.capacity ?? 1;
   const browserBusy = db.prepare("SELECT COUNT(*) AS count FROM holder WHERE name = 'gate' AND browser = 1").get().count >= browserCapacity;
@@ -220,8 +283,8 @@ function waiterPosition(db, name, ticket, { eligibleOnly = false } = {}) {
   /** Leave a waiting independent landing a slot before a holder takes another lease. */
   const blockedByLanding = (waiter) => holdsSlot(waiter)
     && waiters.some((other) => other.landing === 1 && other.pid !== waiter.pid);
-  /** Map queue entries to their declared precedence class. */
-  const rank = (waiter) => waiter.landing === 1 ? 0 : 1;
+  /** Map queue entries to the admission rank every process in this line agrees on. */
+  const rank = admissionRank(waiters, now);
   const line = name === 'browser' ? waiters.filter((waiter) => waiter.browser === 1) : waiters;
   const considered = line.filter((waiter) => !blockedByLanding(waiter)
     // Browser availability affects admission only; reported positions retain every browser waiter.
@@ -252,9 +315,25 @@ function validatedRunners(value) {
   });
 }
 
-/** Find the earliest compatible free executor while allowing CPU waiters past browser-only blocks. */
-function gateAdmission(db, ticket, capacity, runners) {
-  const waiters = db.prepare("SELECT ticket, pid, landing, browser, remote FROM waiter WHERE name = 'gate' ORDER BY landing DESC, ticket").all();
+/**
+ * Find the earliest compatible free executor while allowing CPU waiters past browser-only blocks.
+ * Local and remote slots are offered in one admission order: the class rank that snapshot and
+ * waiterPosition report (landing, review, submit, other, aging up), FIFO by ticket within a class,
+ * or landing-first arrival order while an older pullboard waits in the line. Why one order: a
+ * second order for runners would let a focused run take a remote slot ahead of a review that
+ * could also run there.
+ *
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @param {number} ticket - The waiter asking for admission.
+ * @param {number} capacity - Local gate slots.
+ * @param {Array<{host:string,slots:number,browser:number}>} runners - Validated remote executors.
+ * @param {number} [now] - The clock reading to age against.
+ * @returns {{host:string,slots:number,browser:number}|null}
+ */
+function gateAdmission(db, ticket, capacity, runners, now = Date.now()) {
+  const queued = db.prepare("SELECT ticket, pid, since, landing, item_check AS itemCheck, diagnostic, browser, remote, kind, classed FROM waiter WHERE name = 'gate'").all();
+  const rank = admissionRank(queued, now);
+  const waiters = queued.sort((left, right) => rank(left) - rank(right) || left.ticket - right.ticket);
   const holders = db.prepare("SELECT pid, landing, browser FROM holder WHERE name = 'gate'").all();
   const localUsed = holders.length;
   const localBrowsers = holders.filter(holder => holder.browser === 1).length;
@@ -346,7 +425,7 @@ export function updateRunnerSettings(host, persist) {
 function pause(ms) { return new Promise((resolvePromise) => setTimeout(resolvePromise, ms)); }
 
 /**
- * Join the landing-first queue; every other kind keeps its original FIFO ticket.
+ * Join the queue in its admission class (landing, review, submit, other), aging up over time; FIFO by ticket within a class.
  *
  * @param {{ name: string, capacity: number, capacityProvider?: () => number, browserCapacityProvider?: () => number, scope?: 'machine'|'repo'|'board', root?: string, agent?: string, repo?: string, landing?: boolean, itemCheck?: boolean, diagnostic?: boolean, browser?: boolean, remote?: boolean, runnerProvider?: () => Array<{host:string,slots:number,browser:number}>, item?: string, kind?: string, onWait?: (state: object) => void, allowIdleCapacityUpdate?: boolean, _resume?: object }} options - Resource identity, queue class and optional remote executor pool.
  * @returns {Promise<{ name: string, scope: string, token: string, pool: string, browser: boolean, runner?: {host:string,slots:number,browser:number}, waitMs: number, release: () => void, renew: () => void, requeueRunner?: () => Promise<object> }>}
@@ -419,8 +498,9 @@ export async function takeResource(options) {
         db.prepare("INSERT INTO resource(name, capacity) VALUES ('browser', ?) ON CONFLICT(name) DO NOTHING").run(browserCapacity);
       }
       if (!resume) {
-        // Remote eligibility is metadata on this same ticket, preserving one landing/FIFO queue.
-        const inserted = db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, remote) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, Number(remote));
+        // Remote eligibility is metadata on this same ticket; the kind and flags decide the
+        // admission class, and the ticket keeps arrival order within it.
+        const inserted = db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, remote, classed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, Number(remote));
         initialTicket = Number(inserted.lastInsertRowid);
       }
     });
@@ -433,11 +513,11 @@ export async function takeResource(options) {
         const waiter = db.prepare('SELECT ticket FROM waiter WHERE token = ?').get(token);
         if (!waiter) {
           if (resume && initialTicket) {
-            db.prepare('INSERT OR IGNORE INTO waiter(ticket, token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, remote) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(initialTicket, token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, Number(remote));
+            db.prepare('INSERT OR IGNORE INTO waiter(ticket, token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, remote, classed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)').run(initialTicket, token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, Number(remote));
             return { acquired: false, state: { ...snapshot(db, name), position: waiterPosition(db, name, initialTicket), rejoined: true } };
           }
           queuedAt = new Date().toISOString();
-          const rejoined = db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, remote) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, Number(remote));
+          const rejoined = db.prepare('INSERT INTO waiter(token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, remote, classed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)').run(token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, Number(remote));
           initialTicket = Number(rejoined.lastInsertRowid);
           return { acquired: false, state: { ...snapshot(db, name), position: waiterPosition(db, name, initialTicket), rejoined: true } };
         }
@@ -509,10 +589,17 @@ export async function takeResource(options) {
               const holderName = runnerResourceName(acquired.runner.host);
               const holder = db.prepare('SELECT token FROM holder WHERE token = ? AND name = ? AND runner = ?').get(token, holderName, acquired.runner.host);
               if (!holder) throw new Refused('RESOURCE_LEASE_LOST', `remote lease for "${name}" is no longer held`);
-              const minimumTicket = db.prepare("SELECT MIN(ticket) AS ticket FROM waiter WHERE name = 'gate' AND landing = ?").get(Number(landing)).ticket;
-              requeueTicket = Math.min(0, minimumTicket ?? 0) - 1;
+              // Under the class order the run keeps its original arrival ticket, so first come, first
+              // served holds within each class (and its queuedAt, so its aging). Under arrival order,
+              // which an older pullboard waiting in the line forces, it takes #663's front ticket ahead
+              // of its landing tier, as that older pullboard expects.
+              if (classOrderInEffect(db.prepare("SELECT classed FROM waiter WHERE name = 'gate'").all())) requeueTicket = acquired.ticket;
+              else {
+                const minimumTicket = db.prepare("SELECT MIN(ticket) AS ticket FROM waiter WHERE name = 'gate' AND landing = ?").get(Number(landing)).ticket;
+                requeueTicket = Math.min(0, minimumTicket ?? 0) - 1;
+              }
               db.prepare('DELETE FROM holder WHERE token = ?').run(token);
-              db.prepare('INSERT INTO waiter(ticket, token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, remote) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+              db.prepare('INSERT INTO waiter(ticket, token, name, pid, started, agent, repo, since, heartbeat, landing, item_check, diagnostic, browser, item, kind, remote, classed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)')
                 .run(requeueTicket, token, name, pid, started, agent, repo, queuedAt, Date.now(), Number(landing), Number(itemCheck || diagnostic), Number(diagnostic), Number(browser), item, kind, Number(remote));
             });
           } catch (error) {
