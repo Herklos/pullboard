@@ -4,7 +4,7 @@
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { hostname, loadavg } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -68,7 +68,7 @@ import { parseProblems, sweepItems } from './sweep.js';
 import { renderSpecView } from './view.js';
 import { tour } from './tour.js';
 import { commandOutput, refusalDocument } from './json.js';
-import { forgetProject, listApiProjects, registerProjectAndLink } from './projects.js';
+import { forgetProject, listApiProjects, registerProjectAndLink, registeredProjectRootsSnapshot } from './projects.js';
 import { milestoneRoadmap } from './roadmap.js';
 import { listResources, runnerResourceStatus } from './resources.js';
 import { citedTestFiles, rowEvidence, rowStage } from './evidence.js';
@@ -91,7 +91,7 @@ import { readRelayMachine } from './relay-machine.js';
 import { relayJoin, relayPair } from './relay-pairing-client.js';
 import { executePersonRequests } from './relay-request-execution.js';
 import { engineReceipt } from './engine.js';
-import { land } from './land.js';
+import { land, landingRemote, landingSubject } from './land.js';
 
 const CHECKOUT_LEASES = new WeakMap();
 const CHECKOUT_BOARD_ONLY = new WeakMap();
@@ -2404,7 +2404,9 @@ async function verifyHere(ctx, id, { second, values }) {
   if (!decision) throw new Refused('USAGE', 'pullboard verify <id> accept, or reject --reason CODE --note "..."');
   const { root } = ctx.info;
   let verificationProfile = null;
-  const result = await withBoard(ctx, async (board) => {
+  let accepted = null;
+  /** Record one verdict on the open board. */
+  const decide = async (board) => {
     checkMainVerifier(ctx, board, values);
     const me = whoAmI(ctx, board);
     const recovered = relayRecovered(root);
@@ -2469,6 +2471,11 @@ async function verifyHere(ctx, id, { second, values }) {
       familyPolicy: ctx.config.verify.family,
       ...(decision === 'ACCEPT' ? { check: check.checked ? 'green' : 'none' } : {}),
     }]);
+  };
+  const result = await withBoard(ctx, async (board) => {
+    const verdict = await decide(board);
+    if (verdict.decision === 'ACCEPT') accepted = store.getItem(board, id);
+    return verdict;
   });
   ctx.io.result?.({ id, ...result });
   const verifiedSummary = timingDigest(verificationProfile);
@@ -2476,7 +2483,71 @@ async function verifyHere(ctx, id, { second, values }) {
   ctx.io.say(result.decision === 'ACCEPT'
     ? `verified #${id}: ${result.reason}${result.check === 'none' ? '; no frozen check ran' : ''}${verifiedTiming}`
     : `rejected #${id}: ${result.reason}; it is open again for rework`);
+  if (accepted) ctx.io.say(landNext(ctx.info, accepted));
   return 0;
+}
+
+/**
+ * Say the exact command that lands an accepted item in this repo [B3].
+ * A repo with a push remote lands through pullboard land; one without merges by hand,
+ * because pullboard land would refuse LAND_PUSH there.
+ *
+ * @param {any} info
+ * @param {any} item
+ * @returns {string}
+ */
+function landNext(info, item) {
+  const mainRoot = primaryCheckoutRoot(info);
+  const branch = mainCheckout(info.root)?.branch ?? '';
+  const remote = landingRemote(info.root, branch);
+  const command = remote
+    ? 'pullboard land'
+    : `git merge --no-ff ${item.item_commit} -m ${shellWord(landingSubject(item))} && pullboard merged ${item.item_id} HEAD`;
+  if (!mainRoot) return `next: could not safely locate the primary checkout; run from the main checkout: ${command}`;
+  if (remote) return `next: the coordinator lands it: ${cdTo(mainRoot)} ${command}`;
+  return `next: this repo has no remote for pullboard land to push to, so the coordinator merges it on ${branch.replace(/^refs\/heads\//u, '') || 'the trunk'}: ${cdTo(mainRoot)} ${command}`;
+}
+
+/** Resolve a usable primary checkout without trusting the Git metadata directory as a path. */
+function primaryCheckoutRoot(info) {
+  if (info.isMain) return info.root;
+  let commonDir;
+  try { commonDir = realpathSync.native(info.commonDir); }
+  catch { return null; }
+  /** Return unique validated primary checkouts among candidate repository paths.
+   *
+   * @param {string[]} candidates
+   * @returns {string[]}
+   */
+  const matches = (candidates) => {
+    const roots = new Map();
+    for (const candidate of candidates) {
+      if (typeof candidate !== 'string' || !isAbsolute(candidate)) continue;
+      try {
+        const result = tryGit(candidate, ['rev-parse', '--path-format=absolute', '--show-toplevel', '--git-dir', '--git-common-dir']);
+        const fields = result.stdout.split('\n');
+        if (result.status !== 0 || fields.length !== 3 || fields.some((field) => !field)) continue;
+        const [root, gitDir, candidateCommonDir] = fields;
+        if (!existsSync(join(root, '.git'))
+          || realpathSync.native(candidateCommonDir) !== commonDir
+          || realpathSync.native(gitDir) !== realpathSync.native(candidateCommonDir)) continue;
+        roots.set(realpathSync.native(root), root);
+      } catch { /* A stale registry entry or Git metadata directory is not a usable checkout. */ }
+    }
+    return [...roots.values()];
+  };
+  const worktrees = tryGit(info.root, ['worktree', 'list', '--porcelain', '-z']);
+  if (worktrees.status === 0) {
+    const candidates = worktrees.stdout.split('\0')
+      .filter((field) => field.startsWith('worktree '))
+      .map((field) => field.slice('worktree '.length));
+    const found = matches(candidates);
+    if (found.length === 1) return found[0];
+  }
+  const registered = registeredProjectRootsSnapshot();
+  if (registered === null) return null;
+  const found = matches(registered);
+  return found.length === 1 ? found[0] : null;
 }
 
 /**
