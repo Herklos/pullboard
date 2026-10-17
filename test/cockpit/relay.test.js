@@ -14,7 +14,8 @@ import { createRelayBrowserHandler } from '../../relay/browser-page.js';
 import { relayClientFixture } from '../relay-client-fixture.js';
 import { runFixtureChildAsync } from '../fixture-child.js';
 import { findChromeExecutable, relayWorkBudgetMs, startChrome } from '../relay-browser-fixture.js';
-import { BIN, scratch, SPEC, machine, project, fetchLive, startView, target, chromeExecutable, browserPause, startSnapshotChrome, openSnapshotChrome, stopOwnedChrome, closeSnapshotChrome, pickProject } from './fixture.js';
+import { BIN, scratch, SPEC, machine, project, fetchLive, startView, target, chromeExecutable, browserPause, startSnapshotChrome, openSnapshotChrome, stopOwnedChrome, closeSnapshotChrome, pickProject, proofShot } from './fixture.js';
+import { STAR_TEXT, starRepository } from '../../src/view/star.js';
 
 test('a paired relay reference explains that committed source is available only in the local project view [B33]', {
   // Its relay work is the fixture's setup moves, the browser's pairing and the reference's request: three budgets,
@@ -2041,5 +2042,50 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
       const failures = journeyBodyError ? [journeyBodyError, ...journeyCleanupErrors] : journeyCleanupErrors;
       throw new AggregateError(failures, 'hosted mixed-board test and/or cleanup failed: ' + failures.slice(0, 8).map(safeJourneyError).join(' | '));
     }
+  }
+});
+
+test('the star line shows once to a signed-in person and stays dismissed [N26]', { timeout: 90_000 }, async (t) => { // budget: hang-only ceiling for real Chrome startup and five page loads.
+  const executable = chromeExecutable();
+  if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME for the star line proof.');
+  const box = machine();
+  project(box, 'star-line');
+  const live = await startView(box);
+  let linked = false, chrome;
+  const page = (relaySession) => cockpitPage('', { readOnly: true, requests: relaySession, transportModule: '/star-transport.js', apiHeaders: {}, stylesheet: '/view.css', hostedLocal: true, relaySession, signIn: '/auth/github/start' });
+  const server = createServer(async (request, response) => {
+    const url = new URL(request.url, 'http://127.0.0.1');
+    const send = (type, body, status = 200) => response.writeHead(status, { 'content-type': type, 'cache-control': 'no-store' }).end(body);
+    if (url.pathname === '/in' || url.pathname === '/out') return send('text/html; charset=utf-8', page(url.pathname === '/in'));
+    if (url.pathname === '/star-transport.js') return send('text/javascript', "export async function createTransport() { return { async request(path) { return (await fetch('/relay' + path)).json(); } }; }");
+    if (url.pathname === '/view.css') return send('text/css', readFileSync(new URL('../../src/view.css', import.meta.url), 'utf8'));
+    if (!url.pathname.startsWith('/relay/') || (!linked && url.pathname === '/relay/api/v1/boards')) return send('application/json', JSON.stringify({ version: 1, boards: [] }));
+    const reply = await fetchLive(live.base + url.pathname.slice('/relay'.length) + url.search, { headers: { 'x-pullboard-key': live.key } }).catch(() => null);
+    return send('application/json', reply ? await reply.text() : '{}', reply?.status ?? 502);
+  });
+  const origin = await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(`http://127.0.0.1:${server.address().port}`)));
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-star-line-chrome-'));
+  const line = "(() => { const p = document.querySelector('#star-line'); return p && !p.hidden && getComputedStyle(p).display !== 'none' ? { text: p.textContent, href: p.querySelector('a').href, lines: p.querySelector('a').getClientRects().length, parts: p.children.length, count: document.querySelectorAll('.star-line').length } : null; })()";
+  try {
+    chrome = await openSnapshotChrome(executable, 'about:blank', profile);
+    await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: "{ const f = window.fetch; window.fetch = (input, init) => String(input?.url ?? input).startsWith('http://127.0.0.1:4890') ? Promise.reject(new TypeError('no local view in this proof')) : f(input, init); }" }); // Never this machine's real view.
+    await chrome.send('Page.navigate', { url: origin + '/out' }).then(() => chrome.waitFor("location.pathname === '/out' && !document.querySelector('#local-note').hidden"));
+    assert.equal(await chrome.stable(line), null, 'a signed-out page shows no star line');
+    await chrome.send('Page.navigate', { url: live.link.href }).then(() => chrome.waitFor('!!data?.project'));
+    assert.equal(await chrome.stable("document.querySelector('#star-line') === null && !document.body.textContent.includes('GitHub star')"), true, 'the local view never carries the star line');
+    for (const file of ['src/cli.js', 'src/mcp.js', 'src/help.js']) assert.ok(!readFileSync(new URL('../../' + file, import.meta.url), 'utf8').includes('GitHub star'), file + ' never prints the star line');
+    await chrome.send('Page.navigate', { url: origin + '/in' }).then(() => chrome.waitFor("location.pathname === '/in' && data !== null && !document.body.classList.contains('loading')"));
+    assert.equal(await chrome.stable(line), null, 'a signed-in person with no linked board sees no star line');
+    linked = true; // The person links a board: the page's next read of the relay lists it.
+    await chrome.waitFor(`${line} !== null`);
+    assert.deepEqual(await chrome.stable(line), { text: STAR_TEXT + '×', href: starRepository(), lines: 1, parts: 2, count: 1 }, 'one line, one plain sentence, linking to the repository');
+    for (const width of [1280, 390]) await proofShot(chrome, 'star-line', width);
+    await press(chrome, "document.querySelector('#star-dismiss')");
+    await chrome.waitFor(`${line} === null && localStorage.getItem('pb.star') === 'dismissed'`);
+    await chrome.send('Page.reload', {}).then(() => chrome.waitFor("!!data?.project && document.querySelector('#star-line') !== null"));
+    assert.equal(await chrome.stable(line), null, 'a dismissed star line stays dismissed across a reload, with the linked board listed');
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    await Promise.all([live.stop(), new Promise((resolve) => server.close(resolve))]).finally(() => rmSync(profile, { recursive: true, force: true }));
   }
 });
