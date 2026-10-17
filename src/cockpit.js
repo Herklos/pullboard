@@ -353,17 +353,29 @@ function starLine(list) {
   const line = $('star-line');
   if (!line) return list;
   const show = () => { line.hidden = !(hosted.relaySession && starLinked.linked && keep(${JSON.stringify(STAR_KEY)}) !== 'dismissed'); };
-  if (hosted.relaySession && !starLinked.linked && !starLinked.reading && Date.now() - starLinked.at > 2500) {
-    starLinked = { at: Date.now(), linked: false, reading: true };
-    linkedList().then((reply) => reply?.boards?.some((board) => typeof board?.id === 'string'), () => false)
-      .then((linked) => { starLinked = { at: Date.now(), linked, reading: false }; line.dataset.linked = linked ? 'yes' : 'no'; show(); });
+  const learn = (reply) => {
+    const linked = Boolean(reply?.boards?.some((board) => typeof board?.id === 'string'));
+    starLinked = { at: Date.now(), linked, reading: false };
+    line.dataset.linked = linked ? 'yes' : 'no';
+    show();
+  };
+  if (hosted.relaySession && !starLinked.linked && !starLinked.reading) {
+    // The page's own read of the account, when it made one since the line last looked, answers the line, refused
+    // or not: the line reads the account itself only when the page made no such read, so a listing never brings a
+    // second one (#817).
+    if (linkedSeen && linkedSeen.at > starLinked.at) learn(linkedSeen.reply);
+    else if (Date.now() - starLinked.at > 2500) {
+      starLinked = { at: Date.now(), linked: false, reading: true };
+      linkedList().then(learn, () => learn(null));
+    }
   }
   show();
   return list;
 }
 $('star-dismiss')?.addEventListener('click', () => { keep(${JSON.stringify(STAR_KEY)}, 'dismissed'); starLine(null); });
-// The first look waits for the whole script, so the engine the read declares (linkedList) is set up by then.
-Promise.resolve().then(() => starLine(null)); // a microtask, as queueMicrotask would schedule, but present in every page context
+// No first look of its own (#817): every signed-in page lists its boards, and api() hands that list here, so the
+// account is read only after a listing succeeds, never beside it. A session that its first listing revokes therefore
+// sees exactly one listing, and the line, hidden in its markup, stays hidden until a listing shows it.
 
 /** Hide the relay's own banner, which speaks for the relay, on a page the relay does not serve this time. */
 function hideRelayNotice() {
@@ -1161,9 +1173,19 @@ $('share-pair')?.addEventListener('click', () => {
 
 let relayEngine = null;
 /** The account's linked boards: a same-origin read that declares the relay's engine, as every relay request does. */
+// The account's last read and when it ended, answered or refused, for the star line, which reuses it rather than
+// asking again (#817): a refusal is an answer too, "not linked", and is not asked again straight away.
+let linkedSeen = null;
 async function linkedList() {
   relayEngine ??= await import('/relay/engine.js').then((engine) => String(engine.ENGINE_VERSION), () => '');
-  return jsonRequest('/api/v1/boards', undefined, '', relayEngine ? { 'x-pullboard-engine': relayEngine } : {}, 'no-store');
+  try {
+    const reply = await jsonRequest('/api/v1/boards', undefined, '', relayEngine ? { 'x-pullboard-engine': relayEngine } : {}, 'no-store');
+    linkedSeen = { at: Date.now(), reply };
+    return reply;
+  } catch (error) {
+    linkedSeen = { at: Date.now(), reply: null };
+    throw error;
+  }
 }
 
 /**
