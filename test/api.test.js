@@ -619,6 +619,7 @@ test('[A1] command results match the catalog across roots and subcommands', () =
 
   json(box, repo, 'spec', ['--json']);
   json(box, repo, 'spec', ['check'], 'check');
+  assert.deepEqual(json(box, repo, 'doctrine', ['check'], 'check').rules, [], 'a repo with no check rows reports no rules [D1]');
   json(box, repo, 'spec', ['view', '--out', join(box.dir, 'spec.html')], 'view');
   json(box, repo, 'spec', ['show', 'G1'], 'show');
   json(box, repo, 'spec', ['unmet'], 'unmet');
@@ -978,11 +979,16 @@ test('[A1] every catalog command and subcommand has a real CLI exercise', () => 
   json(source, source.repo, 'reopen', [String(reopenItem.item_id), '--note', 'exercise the versioned reopen result']);
   json(source, source.repo, 'spec', ['approve', 'G1'], 'approve');
   json(source, source.repo, 'spec', ['decline', 'G1', '--reason', 'Catalog decline'], 'decline');
+  writeFileSync(join(source.repo, 'SPEC.md'), `${readFileSync(join(source.repo, 'SPEC.md'), 'utf8')}- G2 [pending, must] Which store holds the catalog: SQLite. Choices: SQLite, Postgres. | gate: review\n`);
+  json(source, source.repo, 'spec', ['answer', 'G2', 'Postgres'], 'answer');
   json(source, source.repo, 'spec', ['apply'], 'apply');
 
   /** Exercise the agent-only takeover with a private explicit session, leaving later terminal calls markerless. */
   const sessionSource = { ...source, run: (cwd, ...args) => runFixtureChild(process.execPath, [BIN, ...args], { cwd, env: { ...source.env, CODEX_SESSION_ID: 'api-catalog-session' }, encoding: 'utf8' }) };
   json(sessionSource, source.repo, 'takeover');
+  const lane = json(source, source.repo, 'lane', ['add', 'catalog', '--owns', 'catalog/'], 'add');
+  assert.deepEqual([lane.lane, lane.owns], ['catalog', ['catalog/']]);
+  assert.deepEqual(json(source, source.repo, 'lanes').lanes.catalog, { owns: ['catalog/'] });
   const runner = json(source, source.repo, 'runner', ['add', 'fixture-runner', '--slots', '2', '--browser', '1']);
   assert.deepEqual(runner.runner, { host: 'fixture-runner', slots: 2, browser: 1 });
   const missing = Object.keys(JSON_SHAPES.commands).filter((key) => !covered.has(key));

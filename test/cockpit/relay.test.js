@@ -6,11 +6,15 @@ import { createServer, request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { delimiter, join, relative, resolve, sep } from 'node:path';
 import { after, test } from 'node:test';
+import { performance } from 'node:perf_hooks';
 import { press, stableChrome } from './stable.js';
+import { createJourneyDeadline, drainJourneyTasks } from './journey-deadline.js';
 import { cockpitPage } from '../../src/cockpit.js';
+import { createRelayBrowserHandler } from '../../relay/browser-page.js';
 import { relayClientFixture } from '../relay-client-fixture.js';
+import { runFixtureChildAsync } from '../fixture-child.js';
 import { findChromeExecutable, relayWorkBudgetMs, startChrome } from '../relay-browser-fixture.js';
-import { BIN, scratch, SPEC, machine, project, fetchLive, startView, target, chromeExecutable, browserPause, openSnapshotChrome, stopOwnedChrome, closeSnapshotChrome } from './fixture.js';
+import { BIN, scratch, SPEC, machine, project, fetchLive, startView, target, chromeExecutable, browserPause, startSnapshotChrome, openSnapshotChrome, stopOwnedChrome, closeSnapshotChrome, pickProject } from './fixture.js';
 
 test('a paired relay reference explains that committed source is available only in the local project view [B33]', {
   // Its relay work is the fixture's setup moves, the browser's pairing and the reference's request: three budgets,
@@ -890,5 +894,1061 @@ test('a configured transport never falls back while loading or after import fail
     await live.stop();
     await new Promise((resolve) => server.close(resolve));
     rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+const JOURNEY_HOSTED = 'https://app.pullboard.dev';
+const JOURNEY_LOCAL = 'http://127.0.0.1:4890';
+
+/** Serve the relay's real browser page and proxy its API to the loopback relay fixture. */
+async function journeyRelaySite(box, localOrigin) {
+  const browser = createRelayBrowserHandler({
+    async authenticate(req) {
+      const token = /(?:^|;\s*)pb_session=([^;]+)/u.exec(req.headers.cookie || '')?.[1];
+      if (!token) return { kind: 'anonymous' };
+      try { return await box.auth.authenticate(token); } catch { return { kind: 'anonymous' }; }
+    },
+  });
+  const server = createServer((req, res) => {
+    const writeHead = res.writeHead.bind(res);
+    res.writeHead = (status, headers, ...rest) => {
+      if (headers && !Array.isArray(headers)) {
+        const csp = Object.keys(headers).find((name) => name.toLowerCase() === 'content-security-policy');
+        if (csp) headers[csp] = headers[csp].replace("connect-src 'self'", "connect-src 'self' " + localOrigin);
+      }
+      return writeHead(status, headers, ...rest);
+    };
+    void (async () => {
+      if (await browser(req, res)) return;
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204, {
+          'access-control-allow-origin': JOURNEY_HOSTED,
+          'access-control-allow-credentials': 'true',
+          'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS',
+          'access-control-allow-headers': req.headers['access-control-request-headers'] || 'content-type',
+          'access-control-allow-private-network': 'true', vary: 'Origin',
+        });
+        return res.end();
+      }
+      const headers = Object.fromEntries(Object.entries(req.headers).filter(([name]) => !['host', 'connection', 'content-length'].includes(name.toLowerCase())));
+      // As in the real exit journey, translate only the private upstream's configured origin.
+      headers.origin = box.origin;
+      const upstream = request(new URL(req.url, box.origin), { method: req.method, headers, agent: false }, (reply) => {
+        const responseHeaders = Object.fromEntries(Object.entries(reply.headers).filter(([name]) => !['connection', 'transfer-encoding', 'keep-alive', 'access-control-allow-origin', 'access-control-allow-credentials'].includes(name.toLowerCase())));
+        responseHeaders['access-control-allow-origin'] = JOURNEY_HOSTED;
+        responseHeaders['access-control-allow-credentials'] = 'true';
+        responseHeaders.vary = 'Origin';
+        res.writeHead(reply.statusCode || 502, responseHeaders);
+        reply.pipe(res);
+      });
+      res.once('close', () => upstream.destroy());
+      upstream.once('error', () => { if (!res.headersSent) res.writeHead(502); res.end(); });
+      req.pipe(upstream);
+    })().catch(() => { if (!res.headersSent) res.writeHead(500); res.end(); });
+  });
+  await new Promise((ready, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', ready); });
+  return { server, base: 'http://127.0.0.1:' + server.address().port };
+}
+
+/** Route the hosted page and its fixed loopback discovery through owned fixture servers. */
+async function interceptJourneyOrigins(chrome, site, view, { deadline: currentDeadline, liveStreams = false } = {}) {
+  const failures = [];
+  let failureCount = 0;
+  const tasks = [];
+  const interceptions = [];
+  let stopping = false;
+  const byNetworkRequest = new Map();
+  const earlyNetworkFailures = new Map();
+  const networkFailureWaiters = new Set();
+  const heldResponses = [];
+  const releaseHeldResponses = new Set();
+  /** Keep bounded CDP code/message detail without retaining unrelated protocol payloads. */
+  function safeProtocolError(error) {
+    let detail = error?.message ?? error;
+    if (typeof detail === 'string') {
+      try { detail = JSON.parse(detail); } catch { /* Keep ordinary Error messages below. */ }
+    }
+    if (detail && typeof detail === 'object') {
+      const message = String(detail.message ?? 'unknown CDP error');
+      return {
+        ...(Number.isInteger(detail.code) ? { code: detail.code } : {}),
+        message: /^[A-Za-z0-9 _.:/-]{1,180}$/u.test(message) ? message : '<redacted protocol error>',
+      };
+    }
+    const message = String(detail ?? 'unknown error');
+    return /^[A-Za-z0-9 _.:/-]{1,180}$/u.test(message) ? message : '<redacted protocol error>';
+  }
+  /** Describe only an owned fixture origin and a query-free path with board identities redacted. */
+  function safeRequestAddress(url) {
+    const address = new URL(url);
+    const origin = address.origin === JOURNEY_HOSTED ? 'hosted'
+      : address.origin === JOURNEY_LOCAL ? 'loopback-discovery'
+        : address.origin === view.base ? 'local-view' : 'other';
+    const path = address.pathname.replace(/\/api\/v1\/boards\/[0-9a-f]{32}(?=\/|$)/gu, '/api/v1/boards/<board>');
+    return { origin, path };
+  }
+  /** Return request evidence without URL queries, headers, cookies, bodies or pairing values. */
+  function safeInterception(record) {
+    return {
+      fetchRequestId: record.fetchRequestId,
+      networkId: record.networkId ?? null,
+      resourceType: record.resourceType ?? null,
+      ...record.address,
+      method: record.method,
+      stage: record.stage,
+      timing: record.timing,
+      stopObserved: record.stopObserved,
+      completionTiming: record.completionTiming ?? null,
+      networkFailureTiming: record.networkFailureTiming ?? null,
+      responseStatus: record.responseStatus ?? null,
+      liveStream: record.liveStream === true,
+      bodyCompleted: record.bodyCompleted,
+      bodyBytes: record.bodyBytes,
+      bodyBytesCapped: record.bodyBytesCapped,
+      completionAttempts: record.completionAttempts,
+      completion: record.completion ?? null,
+      networkFailure: record.networkFailure ?? null,
+      completed: record.completed,
+      browserCanceled: record.browserCanceled === true,
+      terminalCancellation: record.terminalCancellation === true,
+      cancellationCorrelationExpired: record.cancellationCorrelationExpired === true,
+    };
+  }
+  /** Bound diagnostics to failed/incomplete requests and a short recent tail. */
+  function safeTrace() {
+    const incomplete = interceptions.filter((record) => !isAccountedRequest(record));
+    const canceledCount = interceptions.filter((record) => isConfirmedBrowserCancellation(record)).length;
+    const failed = interceptions.filter((record) => record.failure).slice(0, 20);
+    const canceled = interceptions.filter(isConfirmedBrowserCancellation).slice(0, 20);
+    const relevant = new Set([...failed, ...incomplete.slice(0, 20), ...canceled, ...interceptions.slice(-8)]);
+    return {
+      requestCount: interceptions.length,
+      liveStreamCount: interceptions.filter((record) => record.liveStream === true).length,
+      failureCount,
+      incompleteCount: incomplete.length,
+      confirmedBrowserCancellationCount: canceledCount,
+      requests: [...relevant].map(safeInterception),
+      failures: failures.slice(0, 20),
+    };
+  }
+  /** Send exactly one Fetch completion for a paused request and retain its protocol outcome. */
+  async function completePausedRequest(record, method, params) {
+    assert.equal(String(params.requestId), record.fetchRequestId, 'Fetch completion belongs to this exact paused request');
+    if (record.completionAttempts === 0 && isConfirmedBrowserCancellation(record)) return;
+    record.completionAttempts += 1;
+    if (record.completionAttempts !== 1) {
+      record.stage = 'duplicate-completion-refused';
+      throw new Error('a paused request received more than one Fetch completion command');
+    }
+    record.completionTiming = stopping ? 'during-stop' : 'active';
+    record.completion = { method, commandSent: true, status: 'pending', timing: record.completionTiming };
+    record.stage = 'completion-command-sent';
+    try {
+      await chrome.send(method, params);
+      record.completion.status = 'resolved';
+      record.completed = true;
+      record.stage = 'completed';
+    } catch (error) {
+      record.completion.status = 'rejected';
+      record.completion.error = safeProtocolError(error);
+      record.stage = 'completion-command-rejected';
+      throw error;
+    }
+  }
+  /** Consider only one rejected fulfill for this exact owned request for bounded cancellation correlation. */
+  function isAbortCompletionCandidate(record) {
+    const error = record.completion?.error;
+    return record.networkId !== null && record.address.origin !== 'other'
+      && record.completion?.method === 'Fetch.fulfillRequest'
+      && record.completionAttempts === 1
+      && record.completion?.status === 'rejected'
+      && error?.code === -32602
+      && (error.message === 'Invalid InterceptionId.' || error.message === 'Invalid InterceptionId');
+  }
+  /** Recognize the candidate only after this request's own matching-phase browser cancellation arrives. */
+  function isObservedAbortCompletionRace(record) {
+    return isAbortCompletionCandidate(record) && record.browserCanceled === true
+      && record.networkFailure?.canceled === true
+      && record.networkFailureTiming === record.completionTiming;
+  }
+  /** Count only a completion or the exactly correlated browser-abort terminal outcome. */
+  function isConfirmedBrowserCancellation(record) {
+    if (!record.terminalCancellation || !record.browserCanceled || !record.networkId || record.address.origin === 'other' || record.networkFailure?.canceled !== true) return false;
+    if (record.completionAttempts === 0) return true;
+    return isObservedAbortCompletionRace(record);
+  }
+  /** Require every paused request to finish once or meet the narrow cancellation rule. */
+  function isAccountedRequest(record) {
+    return (record.completed && record.completionAttempts === 1) || isConfirmedBrowserCancellation(record);
+  }
+  /** Mark a request terminally cancelled only when its own network event confirms the abort. */
+  function markObservedAbort(record) {
+    record.browserCanceled = true;
+    if (record.completed) return;
+    record.terminalCancellation = true;
+    record.stage = 'browser-cancelled';
+    record.abortController?.abort();
+    record.releaseHeldResponse?.();
+  }
+  /** Drain all dynamic batches against the caller's one absolute cleanup deadline. */
+  async function drainTasks() {
+    return drainJourneyTasks(tasks, currentDeadline());
+  }
+  /** Abort only outbound reads and release holds owned by this private fixture after failure. */
+  function cancelOwned(reason) {
+    for (const held of heldResponses.splice(0)) held.cancel();
+    for (const release of releaseHeldResponses) release();
+    const reads = [];
+    for (const record of interceptions) {
+      record.abortController?.abort(reason);
+      if (record.reader) reads.push(record.reader.cancel());
+    }
+    return Promise.allSettled(reads);
+  }
+  /** Retain cancellation and error details keyed only by the ephemeral CDP network id. */
+  function onNetworkFailure(params) {
+    const details = {
+      type: String(params.type ?? '').slice(0, 40),
+      errorText: /^[A-Za-z0-9_:.-]{1,100}$/u.test(params.errorText ?? '') ? params.errorText : '<redacted>',
+      canceled: Boolean(params.canceled),
+      timing: stopping ? 'during-stop' : 'active',
+      ...(params.blockedReason ? { blockedReason: String(params.blockedReason).slice(0, 60) } : {}),
+    };
+    const id = String(params.requestId ?? '');
+    const records = byNetworkRequest.get(id);
+    if (!records?.length) {
+      const prior = earlyNetworkFailures.get(id) ?? [];
+      prior.push(details);
+      earlyNetworkFailures.set(id, prior);
+      return;
+    }
+    for (const record of records) {
+      record.networkFailure = details;
+      record.networkFailureTiming = details.timing;
+      if (details.canceled) markObservedAbort(record);
+    }
+    for (const check of networkFailureWaiters) check();
+  }
+  /** Wait for a correlated network failure without retaining request credentials or bodies. */
+  function waitForNetworkFailure(matches) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { // budget: 10s hang ceiling for the private request-failure handshake; journey deadline owns total runtime.
+        networkFailureWaiters.delete(check);
+        reject(new Error('the owned browser request did not report its expected network failure within 10 seconds'));
+      }, 10_000);
+      function check() {
+        const record = interceptions.find((entry) => matches(entry) && entry.networkFailure);
+        if (!record) return;
+        clearTimeout(timer);
+        networkFailureWaiters.delete(check);
+        resolve(safeInterception(record));
+      }
+      networkFailureWaiters.add(check);
+      check();
+    });
+  }
+  const holdNextResponse = (matches) => {
+    let entry;
+    const pending = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { // budget: 10s hang ceiling for the fixture to observe one held response; journey deadline owns total runtime.
+        const index = heldResponses.indexOf(entry);
+        if (index !== -1) heldResponses.splice(index, 1);
+        reject(new Error('The real API response did not reach the fixture hold within 10 seconds.'));
+      }, 10_000);
+      entry = {
+        matches,
+        resolve(value) { clearTimeout(timer); resolve(value); },
+        cancel() { clearTimeout(timer); reject(new Error('The fixture closed before the held API response arrived.')); },
+      };
+      heldResponses.push(entry);
+    });
+    void pending.catch(() => {});
+    return pending;
+  };
+  const networkListener = ({ data }) => {
+    try {
+      const message = JSON.parse(String(data));
+      if (message.method === 'Network.loadingFailed') onNetworkFailure(message.params);
+    } catch (error) {
+      failureCount += 1;
+      if (failures.length < 20) failures.push({ error: safeProtocolError(error), request: null });
+    }
+  };
+  const listener = ({ data }) => {
+    let message;
+    try { message = JSON.parse(String(data)); }
+    catch (error) {
+      failureCount += 1;
+      if (failures.length < 20) failures.push({ error: safeProtocolError(error), request: null });
+      return;
+    }
+    if (message.method !== 'Fetch.requestPaused') return;
+    tasks.push((async () => {
+      let record;
+      try {
+        const { requestId, networkId, resourceType, request: asked } = message.params;
+        record = {
+          fetchRequestId: String(requestId),
+          networkId: networkId ? String(networkId) : null,
+          resourceType: String(resourceType ?? '').slice(0, 40),
+          address: {
+            ...safeRequestAddress(asked.url),
+            fixtureCancelProbe: new URL(asked.url).search === '?fixture_cancel=1',
+          },
+          method: String(asked.method ?? '').slice(0, 16),
+          stage: 'paused',
+          completionAttempts: 0,
+          completion: null,
+          completed: false,
+          responseStatus: null,
+          bodyCompleted: false,
+          bodyBytes: 0,
+          bodyBytesCapped: false,
+          timing: stopping ? 'during-stop' : 'active',
+          stopObserved: false,
+          networkFailure: null,
+        };
+        interceptions.push(record);
+        if (record.networkId) {
+          const attached = byNetworkRequest.get(record.networkId) ?? [];
+          attached.push(record);
+          byNetworkRequest.set(record.networkId, attached);
+          const earlier = earlyNetworkFailures.get(record.networkId);
+          if (earlier?.length) {
+            record.networkFailure = earlier.at(-1);
+            record.networkFailureTiming = record.networkFailure.timing;
+            if (record.networkFailure.canceled) markObservedAbort(record);
+            for (const check of networkFailureWaiters) check();
+          }
+        }
+        const address = new URL(asked.url);
+        const base = address.origin === JOURNEY_HOSTED ? site.base
+          : [JOURNEY_LOCAL, view.base].includes(address.origin) ? view.base : null;
+        if (!base) {
+          record.stage = 'reject-foreign-origin';
+          await completePausedRequest(record, 'Fetch.failRequest', { requestId, errorReason: 'ConnectionRefused' });
+          return;
+        }
+        const accept = Object.entries(asked.headers).find(([name]) => name.toLowerCase() === 'accept')?.[1] || '';
+        if (liveStreams && asked.method === 'GET' && address.pathname.startsWith('/api/')
+          && (address.pathname.endsWith('/events') || String(accept).includes('text/event-stream'))) {
+          // A finite fulfilled first chunk is EOF, not a live stream: it creates artificial reconnect traffic.
+          // Keep the real stream open through the owned HTTP proxy, as the accepted exit journey does.
+          record.liveStream = true;
+          await completePausedRequest(record, 'Fetch.continueRequest', {
+            requestId, url: base + address.pathname + address.search,
+            headers: Object.entries(asked.headers).filter(([name]) => !['host', 'content-length'].includes(name.toLowerCase()))
+              .map(([name, value]) => ({ name, value })),
+          });
+          return;
+        }
+        record.stage = 'fetching-owned-fixture';
+        record.abortController = new AbortController();
+        if (record.terminalCancellation) return;
+        const headers = Object.fromEntries(Object.entries(asked.headers).filter(([name]) => !['host', 'content-length'].includes(name.toLowerCase())));
+        const response = await fetchLive(base + address.pathname + address.search, {
+          method: asked.method, headers, redirect: 'manual',
+          ...(asked.postData === undefined ? {} : { body: asked.postData }),
+          signal: AbortSignal.any([record.abortController.signal, AbortSignal.timeout(10_000)]),
+        });
+        record.responseStatus = response.status;
+        record.stage = 'reading-owned-response';
+        let body;
+        if (response.headers.get('content-type')?.startsWith('text/event-stream')) {
+          const reader = response.body.getReader();
+          record.reader = reader;
+          try {
+            const first = await reader.read();
+            body = Buffer.from(first.value || []);
+          } finally {
+            await reader.cancel();
+            record.reader = null;
+          }
+        } else body = Buffer.from(await response.arrayBuffer());
+        record.bodyBytes = Math.min(body.length, 1_000_000);
+        record.bodyBytesCapped = body.length > record.bodyBytes;
+        record.bodyCompleted = true;
+        const heldIndex = heldResponses.findIndex((entry) => entry.matches({ method: asked.method, path: address.pathname, search: address.search, status: response.status }));
+        if (heldIndex !== -1) {
+          record.stage = 'holding-owned-response';
+          const [held] = heldResponses.splice(heldIndex, 1);
+          let release;
+          const released = new Promise((resume) => {
+            release = () => { releaseHeldResponses.delete(release); resume(); };
+            releaseHeldResponses.add(release);
+          });
+          record.releaseHeldResponse = release;
+          held.resolve({ status: response.status, release });
+          if (record.terminalCancellation) release();
+          await released;
+          record.releaseHeldResponse = null;
+        }
+        if (record.terminalCancellation) return;
+        await completePausedRequest(record, 'Fetch.fulfillRequest', {
+          requestId, responseCode: response.status,
+          responseHeaders: [...response.headers].filter(([name]) => !['content-length', 'connection', 'transfer-encoding', 'keep-alive', 'date'].includes(name.toLowerCase())).map(([name, value]) => ({ name, value })),
+          body: body.toString('base64'),
+        });
+      } catch (error) {
+        if (record && isConfirmedBrowserCancellation(record) && record.completionAttempts === 0
+          && record.abortController?.signal.aborted && error.name === 'AbortError') {
+          record.stage = 'browser-cancelled';
+          return;
+        }
+        // CDP may deliver the canceled network event after the command rejection. Only this exact
+        // owned single-fulfill error may wait for correlation; expiry or any other outcome remains fatal.
+        if (record && isAbortCompletionCandidate(record) && !record.networkFailure) {
+          try { await waitForNetworkFailure((entry) => entry === record); }
+          catch { record.cancellationCorrelationExpired = true; }
+        }
+        if (record?.terminalCancellation && isObservedAbortCompletionRace(record)) {
+          record.stage = 'browser-cancelled-after-completion-race';
+          return;
+        }
+        if (record) {
+          record.stage = record.stage === 'completion-command-rejected' ? record.stage : 'interception-handler-failed';
+          record.failure = safeProtocolError(error);
+        }
+        failureCount += 1;
+        if (failures.length < 20) failures.push({ error: safeProtocolError(error), request: record ? safeInterception(record) : null });
+      }
+    })());
+  };
+  chrome.socket.addEventListener('message', listener);
+  chrome.socket.addEventListener('message', networkListener);
+  // Chrome drops a paused request when its document is replaced, and reports no Network.loadingFailed for it (#748),
+  // so a read still in flight as the fixture navigates away would be stranded unaccounted. Each hosted document
+  // counts its own finite reads and can close to new ones; live streams are continued at once and stay open.
+  const { identifier: fetchGate } = await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+    if (location.origin !== ${JSON.stringify(JOURNEY_HOSTED)}) return;
+    const nativeFetch = window.fetch.bind(window);
+    const gate = { closed: false, open: 0 };
+    Object.defineProperty(window, '__journeyFetchGate', { value: gate });
+    window.fetch = (input, init) => {
+      const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+      const accept = new Headers(init?.headers ?? (typeof input === 'string' ? undefined : input.headers)).get('accept') || '';
+      if (url.pathname.endsWith('/events') || accept.includes('text/event-stream')) return gate.closed ? new Promise(() => {}) : nativeFetch(input, init);
+      if (gate.closed) return new Promise(() => {});
+      gate.open += 1;
+      return nativeFetch(input, init).finally(() => { gate.open -= 1; });
+    };
+  })()` });
+  await chrome.send('Fetch.enable', { patterns: [{ urlPattern: JOURNEY_HOSTED + '/*', requestStage: 'Request' }, { urlPattern: JOURNEY_LOCAL + '/*', requestStage: 'Request' }, { urlPattern: view.base + '/*', requestStage: 'Request' }] });
+  /** Close the hosted document to new reads and wait until every read it started has its answer from this fixture. */
+  async function quiescePage() {
+    if (!(await chrome.stable('(() => { const gate = window.__journeyFetchGate; if (gate) gate.closed = true; return Boolean(gate); })()'))) return;
+    await chrome.waitFor('window.__journeyFetchGate.open === 0');
+    await drainTasks();
+  }
+  /** Leave the hosted page for a blank one only once nothing it started is still paused here. */
+  async function leavePage() {
+    await quiescePage();
+    await chrome.send('Page.navigate', { url: 'about:blank' });
+    await chrome.waitFor('location.href === "about:blank"');
+  }
+  const stop = async () => {
+    stopping = true;
+    for (const record of interceptions) record.stopObserved = true;
+    for (const held of heldResponses.splice(0)) held.cancel();
+    for (const release of releaseHeldResponses) release();
+    const errors = [];
+    // Close the page to new reads and settle the ones it started before leaving it, so no read is stranded by the
+    // navigation; anything still arriving during shutdown is drained instead of escaping to a real origin.
+    try { await quiescePage(); } catch (error) { errors.push(error); }
+    try { await drainTasks(); } catch (error) { errors.push(error); }
+    try {
+      await chrome.send('Page.navigate', { url: 'about:blank' });
+      await chrome.waitFor('location.href === "about:blank"');
+    } catch (error) { errors.push(error); }
+    try { await drainTasks(); } catch (error) { errors.push(error); }
+    try { await chrome.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: fetchGate }); } catch (error) { errors.push(error); }
+    try { await chrome.send('Fetch.disable'); } catch (error) { errors.push(error); }
+    try { await drainTasks(); } catch (error) { errors.push(error); }
+    finally {
+      chrome.socket.removeEventListener('message', listener);
+      chrome.socket.removeEventListener('message', networkListener);
+    }
+    if (errors.length) {
+      const summaries = errors.map((error) => {
+        const safe = safeProtocolError(error);
+        return (typeof safe === 'string' ? safe : safe.message).slice(0, 180);
+      });
+      throw new AggregateError(errors, 'journey interception cleanup failed: ' + summaries.join(' | '));
+    }
+    const incomplete = interceptions.filter((record) => !isAccountedRequest(record));
+    const diagnostic = JSON.stringify(safeTrace());
+    assert.equal(failureCount, 0, 'the hosted and loopback fixture requests complete; safe interception trace: ' + diagnostic);
+    assert.equal(incomplete.length, 0, 'each paused request completes once or has its own confirmed browser cancellation; safe interception trace: ' + diagnostic);
+  };
+  stop.cancelOwned = cancelOwned;
+  stop.leavePage = leavePage;
+  /** Observe terminal request outcomes after the caller releases or aborts its owned inputs. */
+  stop.settled = () => Promise.allSettled(tasks);
+  stop.holdNextResponse = holdNextResponse;
+  stop.waitForNetworkFailure = waitForNetworkFailure;
+  stop.trace = safeTrace;
+  return stop;
+}
+
+test('the hosted journey owns startup resources before readiness [N26,C7]', { timeout: 5_000 }, async () => {
+  const box = machine();
+  const neverReady = join(box.dir, 'never-ready.js');
+  writeFileSync(neverReady, 'setInterval(() => {}, 1000);\n');
+  const viewAbort = new AbortController();
+  const viewReason = new Error('stop the owned view before its URL');
+  let stopView;
+  const startingView = startView(box, { bin: neverReady, signal: viewAbort.signal, onOwned(stop) {
+    stopView = stop;
+    viewAbort.abort(viewReason);
+  } });
+  assert.equal(typeof stopView, 'function', 'the view is owned synchronously after spawn');
+  try { await assert.rejects(startingView, error => error === viewReason); }
+  finally { viewAbort.abort(viewReason); await stopView(); }
+  assert.strictEqual(stopView(), stopView(), 'repeated view cleanup shares the same completed stop');
+
+  const sleeper = join(box.dir, 'owned-browser-startup');
+  writeFileSync(sleeper, '#!/bin/sh\nexec sleep 30\n');
+  chmodSync(sleeper, 0o700);
+  const browserAbort = new AbortController();
+  const browserReason = new Error('stop the owned browser before its port');
+  const stops = [];
+  const startingBrowser = startSnapshotChrome(sleeper, join(box.dir, 'abort-browser-profile'), {
+    signal: browserAbort.signal, onOwned(stop) {
+      stops.push(stop);
+      browserAbort.abort(browserReason);
+    },
+  });
+  assert.equal(stops.length, 1, 'the browser group is owned synchronously after spawn');
+  try { await assert.rejects(startingBrowser, error => error === browserReason); }
+  finally { browserAbort.abort(browserReason); await Promise.allSettled(stops.map(stop => stop())); }
+  assert.equal(stops.length, 1, 'aborting startup never launches a retry');
+  assert.strictEqual(stops[0](), stops[0](), 'repeated browser cleanup shares one completed stop');
+});
+
+test('the hosted journey names its phase and stops within its own deadline [N26,H5,C7]', { timeout: 5_000 }, async (t) => {
+  const acknowledged = journeyDeferred();
+  let heldResponse;
+  const server = createServer((request, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+    response.flushHeaders();
+    heldResponse = response;
+    acknowledged.resolve();
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+
+  const site = { base: `http://127.0.0.1:${server.address().port}` };
+  const view = { base: 'http://127.0.0.1:1' };
+  const chrome = {
+    socket: new EventTarget(),
+    async send() { return {}; },
+    async stable() { return false; },
+    async waitFor() { return true; },
+  };
+  let deadline;
+  let stop;
+  let stopping;
+  let fallbackTimer;
+  const releaseSse = () => {
+    if (!heldResponse || heldResponse.destroyed || heldResponse.writableEnded) return;
+    heldResponse.write('data: release\n\n');
+    heldResponse.end();
+  };
+
+  try {
+    stop = await interceptJourneyOrigins(chrome, site, view, { deadline: () => deadline });
+    chrome.socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({
+      method: 'Fetch.requestPaused',
+      params: {
+        requestId: 'fixture-fetch-request',
+        networkId: 'fixture-network-request',
+        resourceType: 'EventSource',
+        request: {
+          url: `${JOURNEY_HOSTED}/api/v1/boards/${'a'.repeat(32)}/events`,
+          method: 'GET',
+          headers: {},
+        },
+      },
+    }) }));
+
+    // This handshake proves the real loopback server sent headers while withholding the first SSE body chunk.
+    await acknowledged.promise;
+    deadline = createJourneyDeadline({ timeoutMs: 50, onTimeout: () => stop.cancelOwned() });
+    deadline.setPhase('held interception');
+    deadline.setCleanupStage('stop-interception');
+
+    // Hang ceiling only: the pre-deadline implementation eventually drains when this exact response is released.
+    fallbackTimer = setTimeout(releaseSse, 250);
+    stopping = stop();
+    await assert.rejects(stopping, (error) => {
+      const pending = [error];
+      const seen = new Set();
+      while (pending.length) {
+        const current = pending.pop();
+        if (!current || seen.has(current)) continue;
+        seen.add(current);
+        if (current.name === 'JourneyDeadlineExceededError'
+            && current.phase === 'held interception'
+            && current.cleanupStage === 'stop-interception') {
+          assert.match(current.message, /phase held interception/u,
+            'the deadline names the phase in its actual failure text');
+          assert.match(current.message, /cleanup stage stop-interception/u,
+            'the deadline names the cleanup stage in its actual failure text');
+          return true;
+        }
+        if (Array.isArray(current.errors)) pending.push(...current.errors);
+        if (current.cause) pending.push(current.cause);
+      }
+      return false;
+    }, 'the held EventSource is attributed to its phase and the shared deadline');
+  } finally {
+    clearTimeout(fallbackTimer);
+    releaseSse();
+    if (stopping) await Promise.allSettled([stopping]);
+    if (stop?.settled) await stop.settled();
+    deadline?.dispose();
+    if (heldResponse && !heldResponse.destroyed) heldResponse.destroy();
+    server.closeAllConnections();
+    if (server.listening) await new Promise((resolve) => server.close(resolve));
+  }
+  const ordinary = new Error('the owned fixture rejected before its deadline');
+  const ordinaryDeadline = createJourneyDeadline({ timeoutMs: 1_000, onTimeout() {} });
+  try {
+    await assert.rejects(drainJourneyTasks([Promise.reject(ordinary)], ordinaryDeadline),
+      error => error instanceof AggregateError && error.errors.length === 1 && error.errors[0] === ordinary,
+      'an ordinary request failure retains its original error instead of becoming a timeout');
+  } finally { ordinaryDeadline.dispose(); }
+});
+
+/** A fixture handshake and release, independent of elapsed-time guesses. */
+function journeyDeferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+test('the hosted page lists linked and local boards together [N26,H5]', {
+  timeout: relayWorkBudgetMs() * 4 + 60_000,
+  skip: !findChromeExecutable() && 'Chrome is not installed',
+}, async (t) => {
+  const executable = findChromeExecutable();
+  if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME to run the hosted mixed-board proof.');
+  const journeyStartedAt = performance.now();
+  let journeyPhase = 'setup-linked-relay-board';
+  let journeyCleanupStage = 'test-body-cleanup-not-reached';
+  let journeySucceeded = false;
+  let journeyFailureDiagnosticEmitted = false;
+  let journeyAbortDiagnosticEmitted = false;
+  let journeyTrace = () => null;
+  const journeyActionTrace = [];
+  /** Emit one bounded event without exposing error messages, request URLs, or credentials. */
+  const emitJourneyDiagnostic = (event, error = null, priorBodyError = null) => {
+    let interception = null;
+    try { interception = journeyTrace(); } catch { interception = { unavailable: true }; }
+    /** Keep only bounded error identifiers; messages may contain fixture secrets. */
+    const safeError = (value) => {
+      if (!value) return null;
+      const name = /^[A-Za-z][A-Za-z0-9_$.-]{0,79}$/u.test(String(value.name ?? '')) ? String(value.name) : null;
+      const code = /^[A-Z0-9_]{1,64}$/u.test(String(value.code ?? '')) ? String(value.code) : null;
+      return { name, code };
+    };
+    const record = { kind: 'hosted-local-journey-diagnostic', event, phase: journeyPhase,
+      elapsedMs: Math.round(performance.now() - journeyStartedAt), cleanupStage: journeyCleanupStage,
+      error: safeError(error), priorBodyError: safeError(priorBodyError), actionTrace: journeyActionTrace, interception };
+    try { process.stderr.write('[hosted-local-journey] ' + JSON.stringify(record) + '\n'); } catch { /* Diagnostics must not replace the test failure. */ }
+  };
+  /** Report abort independently so a prior body-failure event cannot hide the cleanup stage. */
+  const onJourneyAbort = () => {
+    if (journeyAbortDiagnosticEmitted) return;
+    journeyAbortDiagnosticEmitted = true;
+    emitJourneyDiagnostic('test-signal-aborted', t.signal.reason, journeyBodyError ?? null);
+    void cancelJourneyOwned(t.signal.reason);
+  };
+  let journeyBodyError;
+  const journeyAbortController = new AbortController();
+  const ownedStartupStops = new Set();
+  /** Register a closer before resource startup yields; late startup cannot escape ownership. */
+  const registerOwnedStartup = (stop) => { ownedStartupStops.add(stop); };
+  let cancelJourneyOwned = (reason) => journeyAbortController.abort(reason);
+  const journeyDeadline = createJourneyDeadline({ timeoutMs: relayWorkBudgetMs() * 4, onTimeout: (error) => {
+    emitJourneyDiagnostic('own-deadline', error);
+    return cancelJourneyOwned(error);
+  } });
+  let activeJourneyDeadline = journeyDeadline;
+  journeyDeadline.setPhase(journeyPhase);
+  t.signal.addEventListener('abort', onJourneyAbort, { once: true });
+  t.after(() => {
+    t.signal.removeEventListener('abort', onJourneyAbort);
+    journeyDeadline.dispose();
+    activeJourneyDeadline.dispose();
+    if ((!journeySucceeded || journeyCleanupStage !== 'cleanup-complete') && !journeyFailureDiagnosticEmitted) {
+      journeyFailureDiagnosticEmitted = true;
+      emitJourneyDiagnostic('test-ended-before-success', journeyBodyError ?? null);
+    }
+  });
+  const linked = await journeyDeadline.wait('set up linked board', () => relayClientFixture(t));
+  const linkedId = linked.before.tables.board_meta.find((row) => row.meta_key === 'board_id').meta_value;
+  const remoteTitle = 'linked machine A keeps its relay board';
+  assert.equal((await journeyDeadline.wait('create linked item', () => linked.cli('add', linked.lane, remoteTitle))).code, 0, 'machine A creates a real relay fixture item');
+  await journeyDeadline.wait('link first board', () => linked.link());
+  const linkedKey = readFileSync(linked.keyFile, 'utf8').trim();
+
+  journeyPhase = 'setup-local-project-fixtures';
+  journeyDeadline.setPhase(journeyPhase);
+  const local = machine();
+  const localProject = project(local, 'local-machine-b');
+  const localTitle = 'local machine B keeps its own view board';
+  local.run(localProject.repo, 'add', 'web', localTitle);
+  const duplicateProject = project(local, 'local-machine-c');
+  const duplicateTitle = 'local machine C keeps its own view board';
+  local.git(duplicateProject.repo, 'remote', 'add', 'origin', 'git@github.com:fixture/repository.git');
+  local.run(duplicateProject.repo, 'add', 'web', duplicateTitle);
+  journeyPhase = 'setup-local-relay-board';
+  journeyDeadline.setPhase(journeyPhase);
+  const localRelayEnv = {
+    ...linked.env,
+    HOME: local.dir,
+    PULLBOARD_HOME: local.env.PULLBOARD_HOME,
+    PULLBOARD_MACHINE_HOME: local.env.PULLBOARD_MACHINE_HOME,
+    PATH: local.env.PATH,
+  };
+  const localRelayResult = await journeyDeadline.wait('link duplicate board', () => runFixtureChildAsync(process.execPath,
+    [BIN, 'relay', 'on', '--url', linked.origin, '--json'],
+    { cwd: duplicateProject.repo, env: localRelayEnv, timeout: relayWorkBudgetMs(), signal: journeyAbortController.signal }));
+  assert.equal(localRelayResult.status, 0,
+    'C links its actual local board to the relay as a second source for the same board identity');
+  const localRelay = JSON.parse(readFileSync(join(duplicateProject.repo, '.git', 'pullboard', 'relay.json'), 'utf8'));
+  const localRelayKey = readFileSync(join(local.env.PULLBOARD_HOME, 'relay-keys', localRelay.board + '.key'), 'utf8').trim();
+  assert.notEqual(localRelay.board, linkedId, 'the linked C board is distinct from A');
+  journeyPhase = 'start-view-browser-and-interception';
+  journeyDeadline.setPhase(journeyPhase);
+  const profile = join(linked.root, 'mixed-board-chrome');
+  let localView;
+  let site;
+  let chrome;
+  let ownedChrome;
+  let closingChrome;
+  let stopOrigins;
+  const heldMoves = [];
+  // The move's own reply is the act's outcome (#748): every relay read the following refresh makes waits here, so an
+  // act that still waited on that whole-page refresh would never complete while they are held.
+  const holdRelayReads = "(() => { const read = transport.request; window.__relayReadsHeld = []; window.__releaseRelayReads = () => { transport.request = read; for (const go of window.__relayReadsHeld.splice(0)) go(); }; transport.request = (path, body) => new Promise((resolve, reject) => window.__relayReadsHeld.push(() => read.call(transport, path, body).then(resolve, reject))); return true; })()";
+  const releaseRelayReads = '(() => { window.__releaseRelayReads(); return true; })()';
+  /** Read only the fixture's existing bounded, redacted interception trace. */
+  journeyTrace = () => stopOrigins?.trace?.() ?? null;
+  /** Close only this fixture's browser and reads; racing a promise never claims cancellation. */
+  cancelJourneyOwned = (reason) => {
+    journeyAbortController.abort(reason);
+    const settling = [...ownedStartupStops].map((stop) => Promise.resolve().then(stop));
+    if (stopOrigins) settling.push(stopOrigins.cancelOwned(reason));
+    if (ownedChrome) {
+      closingChrome ??= closeSnapshotChrome(ownedChrome);
+      settling.push(closingChrome);
+    }
+    return Promise.allSettled(settling);
+  };
+  const safeJourneyError = (error) => {
+    const message = String(error?.message ?? error ?? 'unknown error');
+    return /^[A-Za-z0-9 _.:/-]{1,180}$/u.test(message) ? message : '<redacted error>';
+  };
+  try {
+    localView = await journeyDeadline.wait('start local view', () => startView(local, { signal: journeyAbortController.signal, onOwned: registerOwnedStartup }));
+    site = await journeyDeadline.wait('start hosted fixture', async () => {
+      const started = await journeyRelaySite(linked, localView.base);
+      // Listening is asynchronous too: dispose a late handoff if the caller already timed out.
+      if (journeyAbortController.signal.aborted) {
+        started.server.closeAllConnections();
+        await new Promise((done) => started.server.close(done));
+        throw journeyAbortController.signal.reason;
+      }
+      return started;
+    });
+    ownedChrome = await journeyDeadline.wait('start owned browser', () => openSnapshotChrome(executable, 'about:blank', profile, { signal: journeyAbortController.signal, onOwned: registerOwnedStartup }));
+    chrome = new Proxy(ownedChrome, {
+      /** Bound each browser call while keeping its real implementation and arguments unchanged. */
+      get(target, key) {
+        const value = Reflect.get(target, key);
+        if (typeof value !== 'function') return value;
+        return (...args) => activeJourneyDeadline.wait(`browser ${String(key)}`, () => value.apply(target, args));
+      },
+    });
+    stopOrigins = await interceptJourneyOrigins(chrome, site, localView, { deadline: () => activeJourneyDeadline, liveStreams: true });
+    // Observe only fixed action-stage labels; no page values, request bodies or credentials enter diagnostics.
+    const actionStages = new Set(['api-started', 'api-parsed', 'api-rejected', 'act-started', 'act-completed', 'act-rejected']);
+    const actionListener = ({ data }) => {
+      let message;
+      try { message = JSON.parse(String(data)); } catch { return; }
+      if (message.method !== 'Runtime.consoleAPICalled') return;
+      const value = message.params?.args?.[0]?.value;
+      if (typeof value !== 'string' || !value.startsWith('[held-local-action] ')) return;
+      const stage = value.slice('[held-local-action] '.length);
+      if (!actionStages.has(stage)) return;
+      journeyActionTrace.push({ stage, phase: journeyPhase });
+      if (journeyActionTrace.length > 16) journeyActionTrace.shift();
+    };
+    chrome.socket.addEventListener('message', actionListener);
+    t.after(() => chrome.socket.removeEventListener('message', actionListener));
+    const session = await journeyDeadline.wait('authenticate private browser', () => linked.phoneSession());
+    assert.equal((await chrome.send('Network.setCookie', {
+      name: 'pb_session', value: session.token, url: JOURNEY_HOSTED, httpOnly: true, sameSite: 'Lax',
+    })).success, true, 'the fixture person session is installed only in this private browser');
+    for (const permissions of [['loopbackNetwork', 'localNetwork', 'localNetworkAccess'], ['localNetworkAccess']]) {
+      try { await chrome.send('Browser.grantPermissions', { origin: JOURNEY_HOSTED, permissions }); break; } catch { /* Chrome versions expose different local-network permission names. */ }
+    }
+
+    journeyPhase = 'pair-linked-board-and-consume-key';
+    journeyDeadline.setPhase(journeyPhase);
+    // Pair the real board key in the fragment; the relay client consumes it into device storage before local discovery.
+    await chrome.send('Page.navigate', { url: JOURNEY_HOSTED + '/#board=' + linkedId + '&key=' + encodeURIComponent(linkedKey) });
+    await chrome.waitFor("document.querySelector('#chain')?.textContent.includes(" + JSON.stringify(remoteTitle) + ')', 30_000); // budget: 30s hang ceiling for the real linked-board read under load.
+    await chrome.waitFor('location.hash === ""', 10_000); // budget: 10s hang ceiling for relay-fragment consumption after the board renders.
+
+    journeyPhase = 'pair-duplicate-board';
+    journeyDeadline.setPhase(journeyPhase);
+    // C's real local board is also paired on the relay so this catches duplicate-ID source preference.
+    // Start a fresh hosted document before pairing C, then wait for transport work rather than assuming C is selected.
+    await stopOrigins.leavePage();
+    await chrome.send('Page.navigate', { url: JOURNEY_HOSTED + '/#board=' + localRelay.board + '&key=' + encodeURIComponent(localRelayKey) });
+    await chrome.waitFor('location.hash === "" && !!JSON.parse(localStorage.getItem("pullboard.relay.keys.v1") || "{}")[' + JSON.stringify(localRelay.board) + ']', 30_000); // budget: 30s hang ceiling for paired-key storage to settle.
+    assert.ok(linked.calls.some(call => call.method === 'GET'
+      && call.path === '/api/v1/boards/' + localRelay.board + '/state' && call.browser),
+    'C’s private pairing key was consumed and its real snapshot was read by the authenticated browser');
+
+    journeyPhase = 'discover-combined-board-list';
+    journeyDeadline.setPhase(journeyPhase);
+    // The hosted page's real local-view handoff discovers B without a pasted key, URL or port.
+    await stopOrigins.leavePage();
+    await chrome.send('Page.navigate', { url: JOURNEY_HOSTED + '/' });
+    await chrome.waitFor("[...document.querySelectorAll('#proj-list .proj.repo')].some(row => row.textContent.includes('fixture/repository')) && [...document.querySelectorAll('#proj-list .proj.repo')].some(row => row.textContent.includes('local-machine-b')) && [...document.querySelectorAll('#proj-list .proj.repo')].some(row => row.textContent.includes('local-machine-c'))");
+    const localList = await (await fetchLive(localView.base + '/api/v1/boards', { headers: { 'x-pullboard-key': localView.key } })).json();
+    const localId = localList.boards.find((board) => board.name === 'local-machine-b').id;
+    const duplicateId = localList.boards.find((board) => board.name === 'local-machine-c').id;
+    assert.equal(duplicateId, localRelay.board, 'C has one real board identity at both sources');
+    const localOrigin = await chrome.stable('localSession?.origin || null');
+    assert.equal(localOrigin, localView.base, 'the page keeps the ephemeral local origin from its real handoff');
+    const rows = JSON.parse(await chrome.stable('JSON.stringify({ projects: data.projects.map(({id,name,root,source}) => ({id,name,root: source === \"relay\" ? \"relay\" : \"local\",source})), labels: [...document.querySelectorAll(\"#proj-list .proj.repo .pname\")].map(node => node.textContent), secretInAddress: /key=|pullboard-local=/.test(location.href) })'));
+    assert.deepEqual(rows.labels.sort(), ['fixture/repository', 'local-machine-b', 'local-machine-c'], 'the page shows unlinked B and linked C locally beside A from the relay');
+    assert.deepEqual(rows.projects.map((row) => row.id).sort(), [linkedId, localId, duplicateId].sort(), 'the hosted view keeps A, B and C identities');
+    assert.equal(rows.projects.find((row) => row.id === linkedId).root, 'relay', 'a remote board uses an opaque root, not A’s filesystem path');
+    assert.equal(rows.projects.find((row) => row.id === localId).source, 'local', 'unlinked B remains a local board');
+    assert.equal(rows.projects.find((row) => row.id === duplicateId).source, 'local', 'C wins when its actual identity is present through both sources');
+    assert.equal(rows.secretInAddress, false, 'the hosted page removes pairing and local-session fragments');
+    assert.equal(rows.projects.filter((row) => row.id === duplicateId).length, 1, 'the duplicate local/relay identity appears once in the composed list');
+
+    journeyPhase = 'exercise-local-and-relay-reads';
+    journeyDeadline.setPhase(journeyPhase);
+    const localRow = "Array.from(document.querySelectorAll('#proj-list .proj.repo')).find(row => row.textContent.includes('local-machine-b'))";
+    await pickProject(chrome, localRow);
+    await chrome.waitFor("view.root === data.projects.find(row => row.name === 'local-machine-b').root && document.querySelector('#chain')?.textContent.includes(" + JSON.stringify(localTitle) + ") && !readOnly && !requests");
+    const abortedPath = '/api/v1/boards/' + localId + '/state';
+    const heldAbort = stopOrigins.holdNextResponse(({ method, path, search }) =>
+      method === 'GET' && path === abortedPath && search === '?fixture_cancel=1');
+    assert.equal(await chrome.stable(`(async () => {
+      window.__journeyAbortController = new AbortController();
+      window.__journeyAbortResult = null;
+      window.__journeyAbortPromise = fetch(localReadBase + ${JSON.stringify(abortedPath + '?fixture_cancel=1')}, {
+        headers: localReadHeaders, cache: 'no-store', signal: window.__journeyAbortController.signal,
+      }).then(response => { window.__journeyAbortResult = { status: response.status }; return response.status; })
+        .catch(error => { window.__journeyAbortResult = { name: error.name }; return error.name; });
+      return 'started';
+    })()`), 'started');
+    const heldAbortResponse = await heldAbort;
+    assert.equal(heldAbortResponse.status, 200, 'the real local API completed before its browser response was held');
+    assert.deepEqual(await chrome.stable(`(async () => {
+      window.__journeyAbortController.abort();
+      await window.__journeyAbortPromise;
+      return window.__journeyAbortResult;
+    })()`), { name: 'AbortError' }, 'the page reports the actual browser fetch abort');
+    const canceledInterception = await stopOrigins.waitForNetworkFailure((record) =>
+      record.method === 'GET' && record.address.fixtureCancelProbe && record.networkFailure?.canceled === true);
+    assert.equal(canceledInterception.networkFailure.canceled, true,
+      'browser cancellation is correlated to this exact paused local-state request');
+    heldAbortResponse.release();
+    const duplicateRow = "Array.from(document.querySelectorAll('#proj-list .proj.repo')).find(row => row.textContent.includes('local-machine-c'))";
+    await pickProject(chrome, duplicateRow);
+    await chrome.waitFor("view.root === data.projects.find(row => row.id === " + JSON.stringify(duplicateId) + ").root && document.querySelector('#chain')?.textContent.includes(" + JSON.stringify(duplicateTitle) + ") && !readOnly && !requests");
+    const remoteRow = "Array.from(document.querySelectorAll('#proj-list .proj.repo')).find(row => row.textContent.includes('fixture/repository'))";
+    // Queue the call while a writable local board is selected, then release it only after the real
+    // relay mapping and selected board settle. The late call must take the relay-board refusal.
+    const lateMovePath = '/api/v1/boards/' + linkedId + '/moves';
+    const lateMoveBody = { verb: 'shout', args: { to: 'coordinator', text: 'late relay writes stay refused' } };
+    assert.equal(await chrome.stable(`(() => { window.__lateRelayMove = () => api(${JSON.stringify(lateMovePath)}, ${JSON.stringify(lateMoveBody)}); return !readOnly && !requests; })()`), true,
+      'the late relay call is queued while the local board is writable');
+    await pickProject(chrome, remoteRow);
+    await chrome.waitFor("view.root === data.projects.find(row => row.id === " + JSON.stringify(linkedId) + ").root && readOnly && requests");
+    assert.equal(await chrome.stable(`boardSources.get(${JSON.stringify(linkedId)})?.kind`), 'relay',
+      'the delayed call resolves to the actual linked relay board, without replacing its source');
+    const relayWritesBefore = linked.calls.filter(call => call.method === 'POST' && call.path === lateMovePath).length;
+    const lateRefusal = await chrome.stable(`(async () => { const release = window.__lateRelayMove; delete window.__lateRelayMove; try { await release(); return 'unexpected success'; } catch (error) { return error.message; } })()`);
+    assert.match(lateRefusal, /read-only view/i, 'the late relay-board branch keeps the established read-only refusal');
+    assert.equal(linked.calls.filter(call => call.method === 'POST' && call.path === lateMovePath).length, relayWritesBefore,
+      'the late refused write never reaches the actual relay server');
+
+    assert.ok(linked.calls.some((call) => call.method === 'GET' && call.path === '/api/v1/boards/' + linkedId + '/state'),
+      'the relay board state is read through its relay transport');
+    assert.ok(linked.calls.some((call) => call.method === 'GET' && call.path.startsWith('/api/v1/boards/' + linkedId + '/events')),
+      'the relay board events use the relay client stream');
+    const localReads = chrome.requests.filter((entry) => entry.url.startsWith(localOrigin + '/api/v1/boards/'));
+    assert.ok(localReads.some((entry) => new URL(entry.url).pathname === '/api/v1/boards/' + localId + '/state'),
+      'B board state is read through B’s local view');
+    assert.ok(localReads.some((entry) => new URL(entry.url).pathname === '/api/v1/boards/' + localId + '/events'),
+      'B board events use B’s local view stream');
+    assert.ok(localReads.some((entry) => new URL(entry.url).pathname === '/api/v1/boards/' + duplicateId + '/state'),
+      'C board state uses C’s local view despite its paired relay copy');
+    assert.ok(localReads.some((entry) => new URL(entry.url).pathname === '/api/v1/boards/' + duplicateId + '/events'),
+      'C board events use C’s local view despite its paired relay copy');
+    assert.equal(localReads.some((entry) => new URL(entry.url).pathname.includes(linkedId)), false,
+      'the local view never receives A’s relay board id');
+
+    journeyPhase = 'hold-local-completion-across-board-switch';
+    journeyDeadline.setPhase(journeyPhase);
+    // Hold only delivery of a real local API response after the write has completed. Switching to a relay board
+    // while it is in flight must not reinterpret the local response as a sealed request or clear that board's form.
+    await pickProject(chrome, localRow);
+    await chrome.waitFor("view.root === data.projects.find(row => row.name === 'local-machine-b').root && !readOnly && !requests");
+    await chrome.stable(`(() => {
+      const stage = value => console.info('[held-local-action] ' + value);
+      const priorApi = api;
+      api = async (path, body) => {
+        const tracked = body && path === ${JSON.stringify('/api/v1/boards/' + localId + '/moves')};
+        if (tracked) stage('api-started');
+        try {
+          const result = await priorApi(path, body);
+          if (tracked) stage('api-parsed');
+          return result;
+        } catch (error) {
+          if (tracked) stage('api-rejected');
+          throw error;
+        }
+      };
+      window.__priorAct = act;
+      window.__actOutcome = null;
+      act = async (...args) => {
+        stage('act-started');
+        try {
+          const result = await window.__priorAct(...args);
+          window.__actOutcome = result;
+          stage('act-completed');
+          return result;
+        } catch (error) { stage('act-rejected'); throw error; }
+      };
+      return true;
+    })()`);
+    await chrome.click("document.querySelector('#new-item')");
+    await chrome.stable("document.querySelector('#add-title').value = 'held local action'; true");
+    const firstHeld = stopOrigins.holdNextResponse(({ method, path }) => method === 'POST' && path === '/api/v1/boards/' + localId + '/moves');
+    await chrome.stable("document.querySelector('#add-title').value = 'held local action'; document.querySelector('#add-form').requestSubmit(); true");
+    const firstResponse = await firstHeld;
+    heldMoves.push(firstResponse.release);
+    assert.ok(firstResponse.status >= 200 && firstResponse.status < 300, 'the local board accepted the real move before response delivery was held');
+    await pickProject(chrome, remoteRow);
+    await chrome.waitFor("view.root === data.projects.find(row => row.id === " + JSON.stringify(linkedId) + ").root && readOnly && requests");
+    await chrome.click("document.querySelector('#new-item')");
+    await chrome.stable("document.querySelector('#add-title').value = 'relay draft survives local completion'; true");
+    assert.equal(await chrome.stable(holdRelayReads), true, 'relay reads wait for the fixture');
+    firstResponse.release();
+    await chrome.waitFor('window.__actOutcome !== null');
+    assert.equal(await chrome.stable('window.__actOutcome'), true, 'a local write response is parsed using the mode it started with after switching to relay');
+    assert.equal(await chrome.stable("document.querySelector('#add-title').value"), 'relay draft survives local completion', 'the older local completion does not clear the current relay draft');
+    assert.equal(await chrome.stable(releaseRelayReads), true, 'the held relay reads go on');
+
+    journeyPhase = 'hold-second-local-completion-across-reselection';
+    journeyDeadline.setPhase(journeyPhase);
+    // Switching away and back can leave the same root selected. A successful old submit must still preserve a new
+    // draft entered in that board's form while the response was held.
+    await pickProject(chrome, localRow);
+    await chrome.waitFor("view.root === data.projects.find(row => row.name === 'local-machine-b').root && !readOnly && !requests");
+    await chrome.click("document.querySelector('#new-item')");
+    await chrome.stable("document.querySelector('#add-title').value = 'second held local action'; true");
+    const secondHeld = stopOrigins.holdNextResponse(({ method, path }) => method === 'POST' && path === '/api/v1/boards/' + localId + '/moves');
+    await chrome.stable('window.__actOutcome = null; true');
+    await chrome.stable("document.querySelector('#add-form').requestSubmit(); true");
+    const secondResponse = await secondHeld;
+    heldMoves.push(secondResponse.release);
+    assert.ok(secondResponse.status >= 200 && secondResponse.status < 300, 'the second real local write completes before delivery');
+    await pickProject(chrome, remoteRow);
+    await chrome.waitFor("view.root === data.projects.find(row => row.id === " + JSON.stringify(linkedId) + ").root && readOnly && requests");
+    await pickProject(chrome, localRow);
+    await chrome.waitFor("view.root === data.projects.find(row => row.name === 'local-machine-b').root && !readOnly && !requests");
+    await chrome.click("document.querySelector('#new-item')");
+    await chrome.stable("document.querySelector('#add-title').value = 'replacement local draft'; true");
+    assert.equal(await chrome.stable(holdRelayReads), true, 'relay reads wait for the fixture');
+    secondResponse.release();
+    await chrome.waitFor('window.__actOutcome !== null');
+    assert.equal(await chrome.stable('window.__actOutcome'), true, 'the second local write completes on its own reply');
+    assert.equal(await chrome.stable("document.querySelector('#add-title').value"), 'replacement local draft', 'a completion after switching away and back preserves the replacement draft');
+    assert.equal(await chrome.stable(releaseRelayReads), true, 'the held relay reads go on');
+
+    journeyPhase = 'assert-final-browser-state';
+    journeyDeadline.setPhase(journeyPhase);
+    assert.deepEqual(chrome.exceptions, [], 'the hosted mixed-board page reports no uncaught browser exceptions');
+    journeySucceeded = true;
+  } catch (error) {
+    journeyBodyError = error;
+    if (!journeyFailureDiagnosticEmitted) {
+      journeyFailureDiagnosticEmitted = true;
+      emitJourneyDiagnostic('ordinary-failure', error);
+    }
+    throw error;
+  } finally {
+    journeyDeadline.dispose();
+    // Split the existing sixty-second outer reserve: half for explicit cleanup, half for registered after-hooks and scheduling.
+    activeJourneyDeadline = createJourneyDeadline({ timeoutMs: 60_000 / 2, onTimeout: (error) => {
+      emitJourneyDiagnostic('cleanup-deadline', error, journeyBodyError ?? null);
+      return cancelJourneyOwned(error);
+    } });
+    activeJourneyDeadline.setPhase(journeyPhase);
+    journeyCleanupStage = 'release-held-responses';
+    activeJourneyDeadline.setCleanupStage(journeyCleanupStage);
+    for (const release of heldMoves) release();
+    const journeyCleanupErrors = [];
+    journeyCleanupStage = 'stop-interception';
+    activeJourneyDeadline.setCleanupStage(journeyCleanupStage);
+    try { if (stopOrigins) await stopOrigins(); } catch (error) { journeyCleanupErrors.push(error); }
+    journeyCleanupStage = 'close-browser';
+    activeJourneyDeadline.setCleanupStage(journeyCleanupStage);
+    try { if (ownedChrome) await (closingChrome ??= closeSnapshotChrome(ownedChrome)); } catch (error) { journeyCleanupErrors.push(error); }
+    journeyCleanupStage = 'stop-local-view';
+    activeJourneyDeadline.setCleanupStage(journeyCleanupStage);
+    try { if (localView) await localView.stop(); } catch (error) { journeyCleanupErrors.push(error); }
+    journeyCleanupStage = 'close-hosted-fixture-server';
+    activeJourneyDeadline.setCleanupStage(journeyCleanupStage);
+    try {
+      if (site?.server) {
+        site.server.closeAllConnections();
+        if (site.server.listening) await new Promise((done, reject) => site.server.close((error) => error ? reject(error) : done()));
+      }
+    } catch (error) { journeyCleanupErrors.push(error); }
+    journeyCleanupStage = 'remove-browser-profile';
+    activeJourneyDeadline.setCleanupStage(journeyCleanupStage);
+    try { rmSync(profile, { recursive: true, force: true }); } catch (error) { journeyCleanupErrors.push(error); }
+    if (!journeyBodyError && !journeyCleanupErrors.length) {
+      const trace = stopOrigins.trace();
+      t.diagnostic(JSON.stringify({ kind: 'owned-browser-cancellation-proof', actionTrace: journeyActionTrace, requestCount: trace.requestCount, liveStreamCount: trace.liveStreamCount, failureCount: trace.failureCount,
+        incompleteCount: trace.incompleteCount, confirmedBrowserCancellationCount: trace.confirmedBrowserCancellationCount,
+        probe: trace.requests.find((record) => record.fixtureCancelProbe) }));
+    }
+    if (journeyCleanupErrors.length && !journeyFailureDiagnosticEmitted) {
+      journeyCleanupStage = 'cleanup-failed';
+    activeJourneyDeadline.setCleanupStage(journeyCleanupStage);
+      journeyFailureDiagnosticEmitted = true;
+      emitJourneyDiagnostic('cleanup-failure', journeyCleanupErrors[0]);
+    }
+    if (!journeyBodyError && !journeyCleanupErrors.length) journeyCleanupStage = 'cleanup-complete';
+    if (journeyCleanupErrors.length) {
+      t.diagnostic(JSON.stringify({
+        testBodyCompletedSuccessfully: !journeyBodyError,
+        testBodyFailure: journeyBodyError ? { name: journeyBodyError.name, code: journeyBodyError.code ?? null,
+          stackFrames: String(journeyBodyError.stack ?? '').split('\n').filter((line) => /^\s+at\s/u.test(line)).slice(0, 6) } : null,
+        cleanupFailureCount: journeyCleanupErrors.length,
+        cleanupFailures: journeyCleanupErrors.slice(0, 8).map(safeJourneyError),
+        interception: stopOrigins?.trace?.() ?? null,
+      }));
+      const failures = journeyBodyError ? [journeyBodyError, ...journeyCleanupErrors] : journeyCleanupErrors;
+      throw new AggregateError(failures, 'hosted mixed-board test and/or cleanup failed: ' + failures.slice(0, 8).map(safeJourneyError).join(' | '));
+    }
   }
 });

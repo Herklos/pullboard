@@ -28,6 +28,7 @@ const NOT_MOVES = {
   BAD_ROUTE: 'registering who is asking, before any move',
   ONE_COORDINATOR: 'registering who is asking, before any move',
   MACHINE_HOME_NOT_WRITABLE: 'machine-wide storage must be writable before a command runs',
+  SANDBOX_BLOCKED: 'the command environment must allow the gate or check operation',
   BAD_MACHINE_SETTINGS: 'machine-wide settings checked before a command runs',
   BAD_GATE_SLOTS: 'machine-wide gate capacity checked before a command runs',
   BAD_BROWSER_SLOTS: 'machine-wide browser capacity checked before a command runs',
@@ -49,6 +50,7 @@ const NOT_MOVES = {
   BAD_RUNNER: 'machine-wide SSH runner settings checked before remote execution',
   RUNNER_OUTPUT_LIMIT: 'remote execution output is bounded before accepting its result',
   RUNNER_CLEANUP_TIMEOUT: 'remote cleanup must report a bounded failure before returning capacity',
+  RUNNER_SETUP_REFUSED: 'a runner whose own resource pool refuses setup fails the run by name instead of hanging',
   RUNNER_SOURCE_CHANGED: 'remote execution requires the exact admitted committed source',
   RUNNER_SECRET: 'source and command transfer is refused before private content leaves the machine',
   RUNNER_REQUEST_LIMIT: 'remote tooling requests are bounded before transport starts',
@@ -67,6 +69,7 @@ const NOT_MOVES = {
   REMOTE_COORDINATOR_MODEL: 'a linked replica cannot redeclare the coordinator model; use the coordinator checkout',
   EVENT_LOG_VERSION: 'the local board format is checked before opening it for an item move',
   BOARD_BUSY: 'the board connection is opened or read before an item move can begin',
+  BOARD_NOT_WRITABLE: 'the board folder must be writable before a command opens it for an item move',
   NOT_YOUR_CHECKOUT: 'the caller owns the checkout session, checked before any item move',
   CHECKOUT_SESSION: 'the checkout-local session binding is readable before any item move',
   UNMERGED_SCHEMA: 'shared-board schema compatibility checked before a command opens the database',
@@ -101,10 +104,11 @@ const CALLBACKS = { 'board.js': { freeze: 'cli.js#freezer' } };
 /**
  * Calls whose refusals an entry point catches and reports as another: submit and verify read a
  * cited row taken out of force as a changed criterion, CRITERIA_CHANGED. Submit also keeps its
- * original gate refusal when a best-effort main comparison or its attribution cannot be read.
+ * original gate refusal when a best-effort main comparison or its attribution cannot be read, and
+ * reads committed doctrine rules leniently: a doctrine it cannot parse carries no check [D1].
  */
 const CAUGHT = {
-  'cli.js#submitHere': ['cli.js#freezer', 'main-red.js#compareMainFailures', 'main-red.js#matchingReworks'],
+  'cli.js#submitHere': ['cli.js#freezer', 'main-red.js#compareMainFailures', 'main-red.js#matchingReworks', 'doctrine-checks.js#checkRulesAt'],
   'cli.js#verifyHere': ['cli.js#freezer'],
 };
 
@@ -210,7 +214,7 @@ function declaredCodes(machine, verbs) {
   const used = new Set(moves.flatMap((move) => effectiveGuards(move, machine)));
   return new Set([
     ...machine.guards.filter((guard) => !verbs || used.has(guard.id)).flatMap((guard) => [guard.refuse, ...(guard.alsoRefuses ?? []).map((entry) => entry.code)]),
-    ...moves.map((move) => move.refuse),
+    ...moves.flatMap((move) => [move.refuse, ...(move.alsoRefuses ?? []).map((entry) => entry.code)]),
     machine.unknownMove.refuse,
   ].filter(Boolean));
 }
@@ -799,7 +803,7 @@ test('docs/lifecycle.md is the page the declaration generates, so a stale copy f
     for (const id of effectiveGuards(move)) assert.ok(page.includes(id), `${move.verb}'s guard ${id} is listed`);
   }
   for (const [state, guards] of Object.entries(MACHINE.exitGuards)) assert.ok(page.includes(`| ${state} | ${guards.join(', ')} |`), `${state}'s exit guards are listed`);
-  const codes = new Set([...MACHINE.guards.flatMap((guard) => [guard.refuse, ...(guard.alsoRefuses ?? []).map((entry) => entry.code)]), ...MACHINE.moves.map((move) => move.refuse), MACHINE.unknownMove.refuse].filter(Boolean));
+  const codes = new Set([...MACHINE.guards.flatMap((guard) => [guard.refuse, ...(guard.alsoRefuses ?? []).map((entry) => entry.code)]), ...MACHINE.moves.flatMap((move) => [move.refuse, ...(move.alsoRefuses ?? []).map((entry) => entry.code)]), MACHINE.unknownMove.refuse].filter(Boolean));
   for (const code of codes) assert.match(page, new RegExp(`^\\| ${code} \\|`, 'm'), `${code} is in the refusal table`);
 });
 
@@ -839,7 +843,7 @@ test('pullboard help lists each role\'s moves from the declaration, and pullboar
 /** Guards checked before the explicit transition: CLI facts and optional roadmap selection. */
 const PRECHECKED = {
   claim: ['joined'],
-  submit: ['joined', 'criterionUnchanged', 'treeClean', 'nothingUntracked', 'hasCommit', 'withinLane', 'trunkMergeClean', 'gateConfigured', 'queuedItemLease', 'gateGreen', 'treeStillDuringGate', 'noUnverifiedStack'],
+  submit: ['joined', 'criterionUnchanged', 'treeClean', 'nothingUntracked', 'hasCommit', 'withinLane', 'trunkMergeClean', 'doctrineHolds', 'gateConfigured', 'queuedItemLease', 'gateGreen', 'treeStillDuringGate', 'noUnverifiedStack'],
   reserve: ['coordinatorSaysAs', 'joined', 'roadmapReadable'],
   accept: ['coordinatorSaysAs', 'joined', 'atSubmittedCommit', 'trunkMergeClean', 'queuedItemLease', 'itemCheckGreen', 'noUnverifiedStack'],
   reject: ['coordinatorSaysAs', 'joined', 'atSubmittedCommit'],
@@ -942,7 +946,7 @@ test('submit, accept and reject refuse in the declared order, one failure peeled
     const submits = [submitAs(999, 'web-1', SHA_A), submitAs(piece, 'web-1', SHA_A)];
     store.claim(board, piece, { agentId: 'web-1', lane: 'web', leaseMs: 7_200_000, freeze });
     submits.push(submitAs(piece, 'web-2', SHA_A));
-    store.editItem(board, piece, { agentId: 'coordinator', criterion: 'A correction before submission.' });
+    store.editItem(board, piece, { agentId: 'coordinator', criterion: 'A correction before submission.', reason: 'the fixture corrects its bar' });
     submits.push(submitAs(piece, 'web-1', SHA_A));
     assert.equal(submits.at(-1), 'PENDING_REFREEZE', 'a pending correction stops the board submission before later guards');
     store.refreeze(board, piece, { agentId: 'web-1', freeze });
@@ -1247,7 +1251,7 @@ test('the two conditional guards behave as declared: a renewal passes a held lan
     assert.equal(claimAs(mine, 'web-1', retiredFreeze), 'ok', 'a reclaim keeps the frozen bar too');
     assert.equal(claimAs(theirs, 'web-2', retiredFreeze), 'UNKNOWN_SPEC', 'a first claim freezes, so it checks the rows');
     store.release(board, mine, 'web-1');
-    store.editItem(board, mine, { agentId: 'coordinator', criterion: 'A changed bar.' });
+    store.editItem(board, mine, { agentId: 'coordinator', criterion: 'A changed bar.', reason: 'the fixture corrects its bar' });
     assert.equal(claimAs(mine, 'web-1', retiredFreeze), 'UNKNOWN_SPEC', 'after an edit drops the bar, the next claim freezes and checks');
     assert.equal(outcome(() => store.refreeze(board, mine, { agentId: 'coordinator', freeze: retiredFreeze })), 'UNKNOWN_SPEC', 'refreeze freezes, so it checks');
   } finally {

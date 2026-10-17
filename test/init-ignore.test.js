@@ -47,6 +47,10 @@ test('a fresh init tells the person and the agent how to start [I9,I1]', t => {
   rmSync(join(box.root, 'pullboard.json'));
   const initialized = box.output('init');
   assert.equal(initialized.code, 0, initialized.stderr);
+  assert.equal(JSON.parse(readFileSync(join(box.root, 'pullboard.json'), 'utf8')).worktrees, 'inside',
+    'fresh init opts into worktrees inside the repository');
+  assert.match(initialized.stdout, /new agent worktrees go in \.claude\/worktrees; dot-scanner tools such as eslint \. should ignore \.claude\/worktrees; set "worktrees": "beside" in pullboard\.json to use sibling folders/u,
+    'init prints one-line location, scanner-ignore and switch guidance');
   assert.match(initialized.stdout, /^Next: ask your agent to set up Pullboard here; in Claude Code, start a new session first so it loads the Pullboard skills\.$/mu, 'init gives one setup instruction and preserves Claude Code skill loading');
   assert.match(initialized.stdout, /git add -f --/u, 'the init output keeps its staging instruction');
 

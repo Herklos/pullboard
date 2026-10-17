@@ -14,5 +14,9 @@
   "questions": [
     { "key": "Q1", "ask": "The warehouse is", "choices": ["Snowflake", "BigQuery", "Postgres", "Something else"], "default": "Snowflake" },
     { "key": "Q2", "ask": "Jobs run", "choices": ["Daily", "Hourly", "Weekly", "On demand"], "default": "Daily" }
+  ],
+  "items": [
+    { "key": "1", "title": "Every schema change has its migration", "cites": ["DP1", "Q1"], "criterion": "Every table's schema in the code is produced by its migrations, so a schema change without a migration fails the tests. tests/test_migrations.py checks each table against its migrations without touching the warehouse and fails before the change.", "brief": "Files:\n- the migrations folder\n- tests/test_migrations.py\nTest:\n- tests/test_migrations.py compares each declared table schema with the one its migrations produce, offline", "check": "python3 -m pytest tests/test_migrations.py" },
+    { "key": "2", "title": "A failed job names the rows and the reason", "cites": ["DP2"], "criterion": "When a job fails on bad input, its error names the rows that failed and why. tests/test_job_errors.py feeds a job one bad row from a local fixture and fails before the change.", "brief": "Files:\n- the job code\n- tests/test_job_errors.py\nTest:\n- tests/test_job_errors.py runs a job on a local fixture with one bad row and checks the error names that row and the reason", "check": "python3 -m pytest tests/test_job_errors.py" }
   ]
 }
