@@ -188,7 +188,7 @@ export async function installPhoneApprovals(documentAt, boardKeys, onApproved, s
               const done = document.createElement('p'); done.setAttribute('role', 'status'); done.textContent = deletedText(names);
               delete card.dataset.request; card.className = 'phone-approval phone-approval-done'; card.replaceChildren(done);
             } else card.remove();
-            await onApproved();
+            await onApproved(context);
           } catch (error) { text.textContent = 'Approval failed: ' + (error instanceof Refused ? error.message : 'Request the action again from the Mac.'); }
           finally { active.delete(context.id); }
         };
