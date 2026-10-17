@@ -331,7 +331,8 @@ import {
 } from './relay.js';
 import {
   autoLinkProject,
-  relayOnAll,
+  offerRelayAtInit,
+  relayOnAllCommand,
   revokeRelayDevice,
   unlinkedRelayProjects,
 } from './relay-setup.js';
@@ -1810,8 +1811,10 @@ function setupCommands(io, { first, second, rest = [], values }) {
       io.say(agentSessionDigest()
         ? 'Next: run pullboard resume now to continue setup in this session; the new skills load next session, and setup does not need them.'
         : 'Next: ask your agent to set up Pullboard here; in Claude Code, start a new session first so it loads the Pullboard skills.');
+      // The offer comes before the staging line, which stays init's last line [I1,I2].
+      const code = await offerRelayAtInit(info.root, io);
       if (staging) io.say(`To commit Pullboard's files: ${staging}`);
-      return 0;
+      return code;
     },
     lane: () => {
       if (first !== 'add' || !second || rest.length || values.owns === undefined) {
@@ -2822,6 +2825,19 @@ function sayReviewOffer(ctx, found) {
 }
 
 /**
+ * Whether a shout is the person's own: a relay person request, or the local view acting as the
+ * coordinator (N26, B26). The view acting as a named agent, or an agent shell as the coordinator,
+ * still speaks as that agent.
+ *
+ * @param {any} io
+ * @param {{ id: string }} me
+ * @returns {boolean}
+ */
+function personShout(io, me) {
+  return io.personRequest?.phase === 'execute' || (io.personChannel === 'view' && me.id === COORDINATOR);
+}
+
+/**
  * A review search that found nothing while another agent is still building: say so, with the wait,
  * so a reviewer who starts first is not told NOTHING_FREE as if the board were idle [C7,P4].
  *
@@ -3307,7 +3323,7 @@ function workCommands(io, args) {
       const hasRecipient = first && recipients.includes(first);
       const to = hasRecipient ? first : values.decision ? (me.id === COORDINATOR ? 'person' : COORDINATOR) : first ?? '';
       const text = [hasRecipient ? second : first, ...(hasRecipient ? rest : [second, ...rest])].filter(Boolean).join(' ');
-      const id = await ordered(ctx, board, 'shout', [{ from: io.personRequest?.phase === 'execute' ? store.PERSON : me.id, to, text, lanes: laneNames(ctx.config), decision: Boolean(values.decision), evidence }]);
+      const id = await ordered(ctx, board, 'shout', [{ from: personShout(io, me) ? store.PERSON : me.id, to, text, lanes: laneNames(ctx.config), decision: Boolean(values.decision), evidence }]);
       io.result?.({ id, decision: Boolean(values.decision) });
       const agents = store.listAgents(board);
       const recipient = agents.some((agent) => agent.agent_id === to) ? agentDisplayName(agents, ctx.config, to) : to;
@@ -3935,21 +3951,7 @@ async function runCommand(argv, io) {
       }
       if (values.all) {
         if (first !== 'on' || second || rest.length) throw new Refused('USAGE', 'pullboard relay on --all [--url <address>]');
-        const controller = new AbortController();
-        const cancelSignIn = () => controller.abort();
-        process.once('SIGINT', cancelSignIn);
-        process.once('SIGTERM', cancelSignIn);
-        let result;
-        try { result = await relayOnAll(values.url, io, { signal: controller.signal }); }
-        finally { process.off('SIGINT', cancelSignIn); process.off('SIGTERM', cancelSignIn); }
-        io.result?.(result);
-        if (result.outcome) {
-          io.say(result.outcome === 'declined' ? 'GitHub sign-in was declined; no boards were linked.'
-            : result.outcome === 'expired' ? 'GitHub device sign-in expired; no boards were linked.'
-              : 'GitHub device sign-in was cancelled; no boards were linked.');
-          return 1;
-        }
-        return result.failed.length ? 1 : 0;
+        return await relayOnAllCommand(values.url, io);
       }
       if (['tokens', 'revoke'].includes(first)) {
         if (rest.length || values.url || (first === 'tokens' && second) || (first === 'revoke' && !second)) {

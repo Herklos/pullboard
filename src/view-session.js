@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import {
+  basename,
   dirname,
   join,
 } from 'node:path';
@@ -94,6 +95,23 @@ export async function runningView(port = 0, expectedScopeCommonDir = null) {
   }
 }
 
+/** Resolve a thread label to its program without exposing script paths or command arguments. */
+function listenerProgram(pid, listedName) {
+  if (!/^(?:node-)?MainThread$/u.test(listedName)) return listedName;
+  try {
+    let command;
+    if (process.platform === 'linux') {
+      command = readFileSync(`/proc/${pid}/cmdline`).toString('utf8').split('\0', 1)[0];
+    } else {
+      // macOS comm is the executable path, so spaces in that path are not mistaken for arguments.
+      const result = spawnSync('/bin/ps', ['-p', String(pid), '-o', 'comm='], { encoding: 'utf8', timeout: 2_000 });
+      if (result.status !== 0) return 'a program';
+      command = result.stdout;
+    }
+    return basename(String(command).trim()).replace(/[\u0000-\u001f\u007f]/gu, '').trim() || 'a program';
+  } catch { return 'a program'; }
+}
+
 /**
  * Name the process listening on a loopback port, when this machine can tell. Only the system's
  * listener table (lsof) can say who owns a port: a recorded view pid that is still alive may be a
@@ -113,5 +131,6 @@ export function portHolder(port) {
   if (listed.status !== 0 || pids.length !== 1 || !Number.isInteger(pids[0]) || pids[0] < 1) return null;
   const pid = pids[0];
   if (readSession(port)?.pid === pid) return { pid, name: 'pullboard view' };
-  return { pid, name: /^c(.+)$/mu.exec(listed.stdout)?.[1]?.trim() || 'a program' };
+  const listedName = /^c(.+)$/mu.exec(listed.stdout)?.[1]?.trim() || 'a program';
+  return { pid, name: listenerProgram(pid, listedName) };
 }

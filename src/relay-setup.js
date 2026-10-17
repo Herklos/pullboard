@@ -1,6 +1,7 @@
 /** Set up a machine once, enroll its phone in the foreground and link later registrations [H5,H17]. */
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { createInterface } from 'node:readline';
 import * as store from './board.js';
 import {
   phoneProposal,
@@ -27,6 +28,7 @@ import {
 import {
   deliverDeviceWraps,
   relayDeviceRequest,
+  relayLinked,
   relayMachineSignIn,
   relayMachineContext,
   relayRevokeDevice,
@@ -36,6 +38,13 @@ import {
   revokeRelayPersonSession,
 } from './relay.js';
 import { terminalQr } from './qr.js';
+import {
+  RELAY_LATER,
+  RELAY_OFFER_QUESTION,
+  acceptsRelayOffer,
+  relayOfferAtInit,
+} from './init.js';
+import { relayOfferEnabled } from './settings.js';
 import { Refused } from './refused.js';
 
 /** Say which paired phone must approve a new board's link, and when the request ends in this computer's time. */
@@ -328,6 +337,70 @@ export async function relayOnAll(address, io, { signal, onPairingURL, onSignIn, 
   const pairing = devices.length || !result.linked.length ? { paired: devices.length > 0 }
     : await pairFirstDevice(session, result.linked[0].board, result.linked, io, { signal, onPairingURL });
   return { ...result, ...pairing, autoLink: true };
+}
+
+/**
+ * Run pullboard relay on --all in the foreground and return its exit code [H5,H17]. Ctrl-C or
+ * SIGTERM cancels the sign-in cleanly. Init's offer calls this same function, so a yes at init
+ * signs in, links and pairs exactly as the command does, with the same words.
+ *
+ * @param {string | undefined} address - The relay to use; the machine's saved relay when omitted.
+ * @param {any} io
+ * @returns {Promise<number>}
+ */
+export async function relayOnAllCommand(address, io) {
+  const controller = new AbortController();
+  const cancelSignIn = () => controller.abort();
+  process.once('SIGINT', cancelSignIn);
+  process.once('SIGTERM', cancelSignIn);
+  let result;
+  try { result = await relayOnAll(address, io, { signal: controller.signal }); }
+  finally { process.off('SIGINT', cancelSignIn); process.off('SIGTERM', cancelSignIn); }
+  io.result?.(result);
+  if (result.outcome) {
+    io.say(result.outcome === 'declined' ? 'GitHub sign-in was declined; no boards were linked.'
+      : result.outcome === 'expired' ? 'GitHub device sign-in expired; no boards were linked.'
+        : 'GitHub device sign-in was cancelled; no boards were linked.');
+    return 1;
+  }
+  return result.failed.length ? 1 : 0;
+}
+
+/**
+ * Read one line from the person's terminal, or null when the terminal closes first. Readline runs
+ * without its own terminal handling, so the terminal echoes the answer and Ctrl-C stays a signal.
+ *
+ * @param {any} io
+ * @param {string} question
+ * @returns {Promise<string | null>}
+ */
+function askLine(io, question) {
+  return new Promise((resolve) => {
+    const reader = createInterface({ input: io.stdin, output: io.stdout, terminal: false });
+    let answer = null;
+    reader.once('line', (line) => { answer = line; reader.close(); });
+    reader.once('close', () => { io.stdin.pause?.(); resolve(answer); });
+    io.stdout.write(question);
+  });
+}
+
+/**
+ * End init with the offer to share with the phone [H5,H17,B26]: ask a person at their own
+ * terminal once, and on Enter or y run pullboard relay on --all through the same function the
+ * command uses. An agent shell, CI or a run without a terminal is never asked and gets the
+ * command for later; relayOfferAtInit in init.js decides which. Returns init's exit code.
+ *
+ * @param {string} root - The repository init just set up.
+ * @param {any} io
+ * @returns {Promise<number>}
+ */
+export async function offerRelayAtInit(root, io) {
+  const shared = relayLinked(root) || readRelayMachine().autoLink;
+  const offer = relayOfferAtInit({ enabled: relayOfferEnabled(), shared, stdin: io.stdin, stdout: io.stdout });
+  if (offer === 'none') return 0;
+  if (offer === 'ask' && acceptsRelayOffer(await askLine(io, RELAY_OFFER_QUESTION))) return await relayOnAllCommand(undefined, io);
+  io.say(RELAY_LATER);
+  return 0;
 }
 
 // These operations belong to this view process. No ticket, person session, or pairing URL is
