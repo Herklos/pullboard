@@ -239,6 +239,7 @@ test('a pullboard.dev page reads the local board [N26,A2]', { timeout: 120_000 }
     assert.ok(metadata.length > 0, 'the signed-in page checked its linked-board metadata');
     assert.ok(metadata.every((entry) => !Object.keys(entry.headers).some((name) => name.toLowerCase() === 'x-pullboard-key')), 'same-origin metadata never gets the local secret header');
     assert.equal(await chrome.stable('readOnly'), false, 'the local board remains writable');
+    assert.deepEqual(chrome.exceptions, [], 'Chrome reports no uncaught exceptions');
     // A local read that fails once, as while the view restarts or is busy, is no reason to load the relay module
     // either: this person's linked list is empty, so the page reads the view again instead (#748).
     const { identifier: failOnce } = await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
@@ -259,6 +260,7 @@ test('a pullboard.dev page reads the local board [N26,A2]', { timeout: 120_000 }
     await chrome.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: failOnce });
     assert.equal(relayModule(), modulesBefore, 'a failed local read on a local-only signed-in page does not request the relay module');
     assert.equal(await chrome.stable('transportModule'), null, 'and the relay transport stays unloaded');
+    assert.deepEqual(chrome.exceptions, [], 'the failed read is handled: Chrome reports no uncaught exceptions');
   } finally {
     try { if (stopStandIn) await stopStandIn(); }
     finally {
