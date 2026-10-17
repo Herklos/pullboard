@@ -964,6 +964,7 @@ test('[A1] every catalog command and subcommand has a real CLI exercise', () => 
   assert.deepEqual(landing.landed, []);
   assert.deepEqual(landing.items, []);
   json(source, source.repo, 'roadmap');
+  json(source, source.repo, 'rigor');
   json(source, source.repo, 'milestone', ['add', 'Catalog', '--items', String(catalog.item_id)], 'add');
   json(source, source.repo, 'milestone', ['items', 'Catalog', '--remove', String(catalog.item_id)], 'items');
   json(source, source.repo, 'milestone', ['items', 'Catalog', '--add', String(catalog.item_id)], 'items');

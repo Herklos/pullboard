@@ -14,6 +14,7 @@ import { briefFiles, briefSections } from './brief.js';
 import { COORDINATOR } from './config.js';
 import { ENGINE_VERSION, GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, effectiveGuards, storeTriggers } from './machine.js';
 import { Refused } from './refused.js';
+import { causeProblem, requireNeverAgain } from './rigor.js';
 import { parseSpec } from './spec.js';
 
 export const ACCEPT_REASON = 'CRITERION_MET';
@@ -1474,14 +1475,14 @@ function reserveWithin(board, id, { agentId, leaseMs, policy, familyPolicy = 'of
  * claimed again. The builder never verifies; under `verify: "coordinator"`, lane work is the
  * coordinator's to verify; an agent verifies items at its tier or below, and not while another
  * agent holds the review (V15). An accept means CRITERION_MET and says how it was proved; a reject
- * names one of the reject reasons and says what failed.
+ * names one of the reject reasons and says what failed, and may name its cause key for rigor (#713).
  *
  * @param {any} board
  * @param {number} id
- * @param {{ agentId: string, decision: string, reason?: string, note?: string, head: string, digest: string, policy: string, familyPolicy?: string, check?: 'none' | 'green' }} verdict
+ * @param {{ agentId: string, decision: string, reason?: string, note?: string, cause?: string, head: string, digest: string, policy: string, familyPolicy?: string, check?: 'none' | 'green' }} verdict
  * @returns {{ decision: string, reason: string, check?: 'none' | 'green' }}
  */
-export function verify(board, id, { agentId, decision, reason, note = '', head, digest, policy, familyPolicy = 'off', check }) {
+export function verify(board, id, { agentId, decision, reason, note = '', cause, head, digest, policy, familyPolicy = 'off', check }) {
   const verb = { ACCEPT: 'accept', REJECT: 'reject' }[decision];
   if (!verb) throw new Refused('BAD_DECISION', 'the decision is accept or reject');
   const isAccept = verb === 'accept';
@@ -1508,6 +1509,7 @@ export function verify(board, id, { agentId, decision, reason, note = '', head, 
             : new Refused('PROOF_REQUIRED', 'an accept says how you proved it: --note "what you broke or which edge you tried, and what happened"; passing tests alone are not proof'),
         reasonCoded: () => (reason && REJECT_REASONS.includes(reason) ? null : new Refused('BAD_REASON', `a reject names one of: ${REJECT_REASONS.join(', ')}`)),
         noteGiven: () => (note.trim() ? null : new Refused('NOTE_REQUIRED', 'a reject says what failed: --note "..."')),
+        causeWellFormed: () => causeProblem(cause),
       },
       before: (found) => {
         const family = board.db.prepare('SELECT agent_family FROM agent WHERE agent_id = ?').get(agentId)?.agent_family ?? null;
@@ -1521,7 +1523,7 @@ export function verify(board, id, { agentId, decision, reason, note = '', head, 
       },
       set: (found) => ({ item_verdict: decision, item_verified_by: isAccept ? agentId : null, item_owner: isAccept ? found.item_owner : null }),
     });
-    const detail = { reason: code, commit: item.item_commit };
+    const detail = { reason: code, commit: item.item_commit, ...(!isAccept && cause !== undefined && cause !== null ? { cause } : {}) };
     if (isAccept && check !== undefined) detail.check = check;
     logEvent(board, agentId, verb, id, detail);
     return { decision, reason: code, ...(isAccept && check !== undefined ? { check } : {}) };
@@ -1533,10 +1535,10 @@ export function verify(board, id, { agentId, decision, reason, note = '', head, 
  *
  * @param {any} board
  * @param {number} id
- * @param {{ agentId: string, note: string }} request
+ * @param {{ agentId: string, note: string, cause?: string }} request
  * @returns {{ id: number, commit: string, supersedes?: number, landingFailure?: object }}
  */
-export function reopen(board, id, { agentId, note }) {
+export function reopen(board, id, { agentId, note, cause }) {
   return atomic(board, () => {
     let submittedCommit = null;
     let supersedes;
@@ -1551,6 +1553,7 @@ export function reopen(board, id, { agentId, note }) {
         [IN_STATE]: (found) => new Refused('NOT_SUBMITTED', `item #${id} is ${current(board, found).item_status}, not submitted`),
         coordinatorOnly: () => onlyCoordinator(agentId, 'reopens submissions'),
         noteGiven: () => (note.trim() ? null : new Refused('NOTE_REQUIRED', 'say why the criterion needs correction: --note "why"')),
+        causeWellFormed: () => causeProblem(cause),
         notMerged: (found) => found.item_status !== 'verified' || !found.item_merged_commit
           ? null
           : new Refused('ALREADY_MERGED', `item #${id} was merged as ${found.item_merged_commit}; merged items cannot be reopened`),
@@ -1587,7 +1590,7 @@ export function reopen(board, id, { agentId, note }) {
       },
     });
     logEvent(board, agentId, 'reopen', id, { commit: submittedCommit, note: note.trim(), judgment: null,
-      ...(supersedes ? { supersedes, landingFailure } : {}) });
+      ...(supersedes ? { supersedes, landingFailure } : {}), ...(cause !== undefined && cause !== null ? { cause } : {}) });
     return { id: item.item_id, commit: submittedCommit, ...(supersedes ? { supersedes, landingFailure } : {}) };
   });
 }
@@ -2074,11 +2077,11 @@ export function factReference(ref) {
   return { path, start, end, commit: commit.toLowerCase() };
 }
 
-/** Give facts the same stamped identity on CLI, API, export and replica reads [B29,B31]. */
+/** Give facts the same stamped identity on CLI, API, export and replica reads; a never-again keeps its cause [B29,B31,D1]. */
 function factFromEvent(event) {
   const detail = JSON.parse(event.event_detail);
   return { id: detail.id, eventId: event.event_id, kind: detail.kind, text: detail.text,
-    by: event.event_by, at: event.event_at, ref: detail.ref ?? null, supersedes: detail.supersedes ?? null };
+    by: event.event_by, at: event.event_at, ref: detail.ref ?? null, supersedes: detail.supersedes ?? null, ...(detail.neverAgain ? { cause: detail.cause, neverAgain: true } : {}) };
 }
 
 /** Read every move and fact in append order, including superseded facts and full original text [B31,B32]. */
@@ -2097,8 +2100,8 @@ export function projectItemThreads(board, state) {
 
 /** Append a typed fact atomically; a correction never edits the original event [B29,B30,B31,B32].
  * The internal factId is set from a sealed move's identity during replay, rather than replica-local sequence ids.
- */
-export function appendFact(board, id, { agentId, kind, text, ref = null, supersedes = null, factId = randomUUID() }) {
+ * A never-again with its cause is the person's alone, and rigor lists it at once (#713) [D1]. */
+export function appendFact(board, id, { agentId, kind, text, ref = null, supersedes = null, factId = randomUUID(), cause = null, neverAgain = false, asPerson = false, channel = 'terminal' }) {
   return atomic(board, () => {
     const item = current(board, itemById(board, id));
     if (!board.db.prepare('SELECT 1 FROM agent WHERE agent_id = ?').get(agentId)) throw new Refused('NO_AGENT', `no registered agent ${agentId}; join a worktree before appending a fact`);
@@ -2113,7 +2116,8 @@ export function appendFact(board, id, { agentId, kind, text, ref = null, superse
       throw new Refused('NO_FACT', `no fact ${String(supersedes)} on item #${id}; use a fact id from pullboard show ${id} --json`);
     }
     const binding = factReference(ref);
-    logEvent(board, agentId, 'fact', id, { id: factId, kind, text, ref: binding, supersedes });
+    if (neverAgain || asPerson || cause !== null) requireNeverAgain(id, { agentId, cause, neverAgain, asPerson, channel });
+    logEvent(board, neverAgain ? PERSON : agentId, 'fact', id, { id: factId, kind, text, ref: binding, supersedes, ...(neverAgain ? { cause, neverAgain: true, channel } : {}) });
     return factFromEvent(board.lastEvent);
   });
 }
