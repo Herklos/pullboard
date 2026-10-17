@@ -118,6 +118,12 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
   </section>
   <p class="empty" id="project-loading" role="status" hidden>Loading project…</p>
   ${hostedMarkup('http://127.0.0.1:4890', { looking: Boolean(hostedLocal) && !snapshot, signIn })}
+  <p class="side-hint" id="share-note" hidden>See these boards from any device: link them to pullboard.dev <button class="ghost" id="share-start" type="button">Sign in with GitHub</button></p>
+  <section class="card-panel" id="share-panel" aria-label="Link these boards" hidden>
+    <p id="share-status" role="status" aria-live="polite"></p>
+    <button class="ghost" id="share-pair" type="button" hidden>Pair a device</button>
+    <button class="ghost" id="share-close" type="button">Cancel sign-in</button>
+  </section>
   <section class="card-panel snapshot-controls" id="snapshot-controls" ${snapshot ? '' : 'hidden'} aria-label="Snapshot replay">
     <span>Read-only snapshot</span>
     <button class="ghost" id="replay-play" type="button">Play from first event</button>
@@ -1059,11 +1065,11 @@ async function api(path, body) {
 }
 
 /** Use one JSON request primitive, capturing its local route and session before awaiting a reply. */
-async function jsonRequest(path, body, base, headers, cache) {
+async function jsonRequest(path, body, base, headers, cache, format = 'json') {
   const session = localSession;
   path = base + path;
   const res = await fetch(path, { method: body ? 'POST' : 'GET', headers: { ...headers, ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined, cache });
-  const json = await res.json();
+  const json = format === 'html' && res.ok ? await res.text() : await res.json();
   if (session && session === localSession && base === session.origin) {
     if (res.status === 401 || res.status === 403) localExpired();
     else if (res.ok && !localConfirmed) { localConfirmed = true; tabValue(LOCAL_TRIPS, null); }
@@ -1071,10 +1077,130 @@ async function jsonRequest(path, body, base, headers, cache) {
   if (!res.ok) {
     const refusal = json.error;
     const message = refusal && typeof refusal === 'object' ? '[' + refusal.code + '] ' + refusal.message : refusal || res.status;
-    throw new Error(message);
+    const error = new Error(message);
+    if (refusal && typeof refusal === 'object') error.code = refusal.code;
+    throw error;
   }
   return json;
 }
+
+/** Read only this machine's authenticated view, including when its page is hosted elsewhere. */
+function sharingApi(body) {
+  return jsonRequest('/api/v1/view-link', body, hosted.local ? localReadBase : connection.base,
+    hosted.local ? localReadHeaders : connection.headers);
+}
+
+let sharingReady = null;
+let sharingTask = Promise.resolve();
+let sharing = { state: 'idle', intentId: null, popup: null, timer: null, closing: false, boards: [] };
+
+/** Show the opt-in once after a real local read; quiet boards do not acquire another polling loop. */
+async function sharingInvitation() {
+  if (!$('share-note') || snapshot || (hosted.local ? !localSession : pageReadOnly || configuredTransportModule)) return;
+  try { $('share-note').hidden = !(await sharingApi()).available; }
+  catch { $('share-note').hidden = true; }
+}
+
+/** Render names and reasons as text, without exposing machine paths or private sign-in material. */
+function sharingProgress(status) {
+  sharing.state = status.state;
+  sharing.boards = status.boards || [];
+  const linked = sharing.boards.filter(board => board.outcome === 'linked');
+  if (linked.length) $('share-note').hidden = true;
+  const lines = sharing.boards.map(board => board.outcome === 'linked' ? 'Linked ' + board.name + '.'
+    : 'Did not link ' + board.name + ': ' + board.reason);
+  if (status.error) lines.push(status.error.message);
+  else if (['cancelled', 'declined', 'expired'].includes(status.state)) lines.push('No boards were linked. You can sign in again whenever you want.');
+  else if (status.state === 'pairing') lines.push('Your boards are linked. Pair a device to open them there, or close this step; the links stay in place.');
+  else if (status.state === 'pairing-stopped') lines.push('Phone pairing stopped. Your boards remain linked.');
+  else if (status.state === 'linking') lines.push('Linking every registered board…');
+  else if (status.state === 'done' && !linked.length && !lines.length) lines.push('No boards were linked.');
+  if (lines.length) $('share-status').textContent = lines.join('\\n');
+  $('share-pair').hidden = status.state !== 'pairing';
+  $('share-close').textContent = linked.length ? 'Close' : 'Cancel sign-in';
+  if (status.state !== 'waiting') { sharing.popup?.close(); sharing.popup = null; }
+}
+
+/** Stop the one operation and await core cleanup; a linking batch is never described as rolled back. */
+async function closeSharing() {
+  clearTimeout(sharing.timer);
+  sharing.closing = true;
+  if (!sharing.intentId) return;
+  try {
+    const status = await sharingApi({ action: 'cancel', intentId: sharing.intentId });
+    sharingProgress(status);
+    sharing.popup?.close(); sharing.popup = null;
+    $('share-start').disabled = false;
+    sharingReady = sharingInvitation();
+  } catch (error) {
+    $('share-status').textContent = error.message;
+    if (error.code === 'VIEW_SIGN_IN_LINKING') {
+      sharing.closing = false;
+      sharing.timer = setTimeout(() => { sharingTask = pollSharing(); }, 250);
+    } else { sharing.popup?.close(); sharing.popup = null; $('share-start').disabled = false; }
+  }
+}
+
+/** Poll public progress only while the person has an active sign-in or pairing step. */
+async function pollSharing() {
+  if (sharing.closing) return;
+  if (sharing.state === 'waiting' && sharing.popup?.closed) { sharingTask = closeSharing(); return sharingTask; }
+  try {
+    const status = await sharingApi({ action: 'status', intentId: sharing.intentId });
+    sharingProgress(status);
+    if (['waiting', 'linking', 'pairing'].includes(status.state)) sharing.timer = setTimeout(() => { sharingTask = pollSharing(); }, 250);
+    else { $('share-start').disabled = false; sharingReady = sharingInvitation(); }
+  } catch (error) {
+    $('share-status').textContent = error.message;
+    $('share-start').disabled = false;
+  }
+}
+
+/** Begin one existing all-board sign-in; open its browser window in the native click before awaiting the server. */
+async function beginSharing(popup) {
+  sharing = { state: 'waiting', intentId: null, popup, timer: null, closing: false, boards: [] };
+  $('share-panel').hidden = false;
+  $('share-start').disabled = true;
+  $('share-status').textContent = 'Starting GitHub sign-in…';
+  try {
+    const instructions = await sharingApi({ action: 'start' });
+    sharing.intentId = instructions.intentId;
+    if (sharing.closing || popup?.closed) return await closeSharing();
+    $('share-status').textContent = 'Enter ' + instructions.userCode + ' in the GitHub window. Closing this sign-in before linking leaves every board local.';
+    popup.location.replace(instructions.verificationURL);
+    sharing.timer = setTimeout(() => { sharingTask = pollSharing(); }, 250);
+  } catch (error) {
+    popup?.close();
+    $('share-status').textContent = error.message;
+    $('share-start').disabled = false;
+  }
+}
+
+/** Open only core's transient device navigation in a separately authenticated HTML response, never a JSON URL. */
+async function pairSharing(popup) {
+  const base = hosted.local ? localReadBase : connection.base;
+  const headers = hosted.local ? localReadHeaders : connection.headers;
+  try {
+    const html = await jsonRequest('/api/v1/view-link', { action: 'pairing', intentId: sharing.intentId }, base, headers, undefined, 'html');
+    const destination = new DOMParser().parseFromString(html, 'text/html').querySelector('a')?.getAttribute('href');
+    if (!destination) throw new Error('Phone pairing is no longer waiting. Read the sign-in status and start again if needed.');
+    popup.location.replace(destination);
+  } catch (error) { popup?.close(); $('share-status').textContent = error.message; }
+}
+
+$('share-start')?.addEventListener('click', () => {
+  const popup = window.open('about:blank', '_blank');
+  if (!popup) { $('share-panel').hidden = false; $('share-status').textContent = 'Allow this view to open the GitHub sign-in window, then try again.'; return; }
+  popup.opener = null;
+  sharingTask = beginSharing(popup);
+});
+$('share-close')?.addEventListener('click', () => { sharingTask = closeSharing(); });
+$('share-pair')?.addEventListener('click', () => {
+  const popup = window.open('about:blank', '_blank');
+  if (!popup) { $('share-status').textContent = 'Allow this view to open the device-pairing window, then try again.'; return; }
+  popup.opener = null;
+  sharingTask = pairSharing(popup);
+});
 
 let relayEngine = null;
 /** The account's linked boards: a same-origin read that declares the relay's engine, as every relay request does. */
@@ -1602,6 +1728,7 @@ async function refresh(fresh = null) {
   }
   if (!snapshot) follow();
   $('live').textContent = snapshot ? 'read-only snapshot' : liveLine();
+  sharingReady ??= sharingInvitation();
 }
 
 // The local view follows the shown boards' events instead of a timer (#545): it reads the board once, waits on its
