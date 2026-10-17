@@ -119,12 +119,12 @@ async function linkProjects(session, io, { onBoardOutcome, waiting = new Set() }
   const linked = [];
   const failed = [];
   for (const project of listApiProjects()) {
-    // A board whose link card is on the phone waits for that tap; see waitForLinkApprovals.
-    if (waiting.has(project.root)) continue;
     if (machine.excluded.includes(project.root)) {
       onBoardOutcome?.({ root: project.root, name: project.name, outcome: 'skipped', reason: 'Excluded from automatic linking on this machine.' });
       continue;
     }
+    // A board whose link card is on the phone waits for that tap; see waitForLinkApprovals.
+    if (waiting.has(project.root)) continue;
     try {
       const result = await relayOn(project.root, session.url, io, { session, quiet: true, strict: true });
       linked.push({ project: project.name, root: project.root, board: result.board });
