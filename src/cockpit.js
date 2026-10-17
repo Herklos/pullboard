@@ -615,8 +615,8 @@ const count = (n, one, many = one) => n + ' ' + (n === 1 ? one : many);
 // and the line under the project says so without counting it.
 const needCount = (x) => x.ok && !x.loading ? x.decisions + x.pending + x.drafts + x.holds : 0;
 const doing = (x) => [x.decisions && count(x.decisions, 'decision', 'decisions'), x.pending && count(x.pending, 'question', 'questions'), x.drafts && count(x.drafts, 'draft row', 'draft rows'), x.holds && count(x.holds, 'lane held', 'lanes held'), x.sentBack && count(x.sentBack, 'sent back'), x.awaiting && count(x.awaiting, 'to verify'), x.building && count(x.building, 'building')].filter(Boolean).join(' · ') || (x.open ? count(x.open, 'item open', 'items open') : 'nothing open');
-// Embed the standalone shared builder for live, exported and relay pages.
-const personNeeds = (${personNeeds.toString()});
+// Embed the standalone shared builder for every page; the binding also lets the page fixture substitute its output.
+let personNeeds = (${personNeeds.toString()});
 /** The person's calls in one repo, reused by a combined project view. */
 function projectNeeds(p) {
   return personNeeds(p);
@@ -982,6 +982,16 @@ async function jsonRequest(path, body, base, headers, cache) {
   return json;
 }
 
+/**
+ * Whether the signed-in person's linked boards name one this machine's list lacks: only then does the page need the
+ * decrypting relay client. The metadata is a same-origin cookie-authenticated read, with none of this machine's local
+ * credential.
+ */
+async function linkedBoardMissing(localIds) {
+  const linked = await jsonRequest('/api/v1/boards', undefined, '', {}, 'no-store');
+  return Boolean(linked.boards?.some(board => typeof board.id === 'string' && /^[0-9a-f]{32}$/.test(board.id) && typeof board.repository === 'string' && !localIds.has(board.id)));
+}
+
 /** Read this machine's API list and the signed-in relay list, preferring a local registration with the same id. */
 async function listedBoards() {
   let local = { boards: [], warnings: [] };
@@ -991,8 +1001,10 @@ async function listedBoards() {
     try {
       local = await jsonRequest('/api/v1/boards', undefined, localReadBase, localReadHeaders, 'no-store');
     } catch (error) {
+      // A local read that fails once, as while the view restarts, is no reason to load the relay client for a
+      // person whose linked boards are all on this machine or who has none (#748).
       if (!transport && hosted.relaySession && configuredTransportModule) {
-        try { await loadTransport(); } catch { /* Keep the local refusal when neither source can be read. */ }
+        try { if (await linkedBoardMissing(new Set())) await loadTransport(); } catch { /* Keep the local refusal when neither source can be read. */ }
       }
       if (!transport) throw error;
       localNote(String(error.message || error), true);
@@ -1000,11 +1012,7 @@ async function listedBoards() {
   }
   if (hosted.local && hasLocal && hosted.relaySession && configuredTransportModule && !transport) {
     try {
-      // Metadata is a same-origin cookie-authenticated read, with none of this machine's local credential.
-      // Loading the decrypting client is needed only for a linked board absent from the local list.
-      const linked = await jsonRequest('/api/v1/boards', undefined, '', {}, 'no-store');
-      const localIds = new Set((local.boards || []).map(board => board.id));
-      if (linked.boards?.some(board => typeof board.id === 'string' && /^[0-9a-f]{32}$/.test(board.id) && typeof board.repository === 'string' && !localIds.has(board.id))) await loadTransport();
+      if (await linkedBoardMissing(new Set((local.boards || []).map(board => board.id)))) await loadTransport();
     } catch (error) { localNote('Linked boards are unavailable: ' + String(error.message || error), true); }
   }
   if (!hasLocal && transportModule && !transport) throw transportLoadError || new Error('The browser transport is still loading.');
@@ -3107,7 +3115,11 @@ async function decideRow(kind, command, args, anchor) {
   return requestMode ? Boolean(feedback.requestId) && feedback.status !== 'refused' : feedback.tone === 'ok';
 }
 
-/** Run a public API move beside its action and let only the latest one own the console and timer. */
+/**
+ * Run a public API move beside its action and let only the latest one own the console and timer. The move's own
+ * reply is its outcome (#748): the board is read again afterwards, but that read covers every source on a hosted
+ * page, and a slow or failing read of another board must neither hold back nor undo a move that went through.
+ */
 async function act(command, args, anchor) {
   const out = $('console');
   if (snapshot || (readOnly && !requests)) { out.hidden = false; out.className = 'console no'; out.textContent = snapshot ? 'This is a read-only snapshot.' : 'This is a read-only view.'; return false; }
@@ -3145,8 +3157,8 @@ async function act(command, args, anchor) {
       // What went through says so and then steps aside; a refusal stays until the person closes it.
       if (!requestMode || request.status === 'done') view.closing = setTimeout(() => { if (latest()) out.hidden = true; }, 6000);
     }
-    await refresh();
     // The result was already revealed. A late refresh must not scroll after the person aims at the next action.
+    refresh().catch((error) => { $('live').textContent = 'offline: ' + String(error.message || error); });
     return !requestMode || request.status !== 'refused';
   } catch (error) {
     if (latest()) {
