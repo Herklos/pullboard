@@ -3867,13 +3867,15 @@ async function runCommand(argv, io) {
         const ctx = context(io);
         return await relayJoin(ctx.info.root, second, values.url, io);
       }
-      if (second || rest.length || (first && !['on', 'off'].includes(first)) || (values.url && first !== 'on')) throw new Refused('USAGE', 'pullboard relay [on|off] [--url <address>]');
+      if (second || rest.length || (first && !['on', 'off', 'status'].includes(first)) || (values.url && first !== 'on')) throw new Refused('USAGE', 'pullboard relay [status|on|off] [--url <address>]');
       const ctx = context(io);
-      if (!first) { await syncRelay(ctx.info.root, io); await executePersonRequests(ctx.info.root, io, main); }
+      // pullboard relay status is the named form of plain pullboard relay: the same sync and report.
+      if (!first || first === 'status') { await syncRelay(ctx.info.root, io); await executePersonRequests(ctx.info.root, io, main); }
       const result = first === 'on' ? await relayOn(ctx.info.root, values.url, io)
         : first === 'off' ? await relayOff(ctx.info.root, io) : relayStatus(ctx.info.root);
       io.result?.(result);
-      io.say(result.linked ? `${result.link}\nrelay: sequence ${result.sequence}; ${result.behind} pending uploads${result.recovery?.pending ? `; recovery pending for sequence ${result.recovery.skip}; retry ${result.recovery.next}` : ''}` : (result.notice || 'relay off; the local board is complete'));
+      const boardName = listApiProjects().find((project) => project.root === ctx.info.root)?.name ?? basename(ctx.info.root);
+      io.say(result.linked ? `${result.link}\nrelay: ${boardName} (board ${result.board}) is linked for GitHub ${result.login || `account ${result.account}`}; sequence ${result.sequence}; ${result.behind} pending uploads${result.recovery?.pending ? `; recovery pending for sequence ${result.recovery.skip}; retry ${result.recovery.next}` : ''}` : (result.notice || 'relay off; the local board is complete'));
       return 0;
     }
     if (command === 'blueprint' && first === 'save') {

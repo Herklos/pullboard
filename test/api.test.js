@@ -960,6 +960,7 @@ test('[A1] every catalog command and subcommand has a real CLI exercise', () => 
   assert.match(humanImport.stdout, /imported version 1 board tables/);
 
   json(source, source.repo, 'relay');
+  assert.deepEqual(json(source, source.repo, 'relay', ['status']), json(source, source.repo, 'relay'), 'relay status reports what plain relay reports');
   json(source, source.repo, 'relay', ['off']);
   const catalog = json(source, source.repo, 'add', ['app', 'Catalog item', '--criterion', 'catalog coverage'], 'add').item;
   const landing = json(source, source.repo, 'land', ['--dry-run']);
