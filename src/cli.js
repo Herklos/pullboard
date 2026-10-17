@@ -16,8 +16,8 @@ import { displayAgentName } from './agent-names.js';
 import { doctrineHistory, loadDoctrine } from './doctrine.js';
 import { agentDoctrine, proposeDoctrine, resumeDoctrineNotes, staleDoctrineRows } from './doctrine-rulings.js';
 import { checkRulesAt, doctrineReport, hasSubmitRules, holdDoctrine, ruleLine } from './doctrine-checks.js';
-import { agentSessionDigest, requirePersonChannel } from './person.js';
-import { bindLocalSession, localSessionMatches } from './agent-session.js';
+import { AGENT_SESSION_IDS, agentSessionDigest, requirePersonChannel } from './person.js';
+import { bindLocalSession, localSessionMatches, localSessionSeats } from './agent-session.js';
 import { decisionAnswer, decisionProjection, handAnsweredQuestions, pendingAnswers, planRowApply, prepareRowDecisions, restoreRowApply, writeRowApply } from './row-decisions.js';
 import { digestOf, gateReport, refuseSandboxBlocked, runGate, runProfiledShell, runSubmitGate, submitGateReport, timingDigest, withGateSlot } from './gate.js';
 import { checkNeedsBrowser, explicitCheckFiles } from './browser-admission.js';
@@ -2647,6 +2647,34 @@ function primaryCheckoutRoot(info) {
   return found.length === 1 ? found[0] : null;
 }
 
+/** A real runtime session may route across its own local seats; marker-only shells stay isolated. */
+function nextSessionSeats(ctx, board) {
+  if (ctx.info.isMain || ctx.io.personChannel === 'view' || ctx.io.personRequest
+    || !AGENT_SESSION_IDS.some((name) => Boolean(process.env[name]))) return null;
+  const digest = agentSessionDigest();
+  return digest ? localSessionSeats(ctx.info, { agents: store.listAgents(board), digest }) : null;
+}
+
+/** Choose or open the matching lane seat, retaining ordinary checkout ownership and lane guards. */
+async function nextSeatContext(ctx, board, me, item, seats) {
+  const available = seats.filter((agent) => agent.agent_lane === item.item_lane
+    && store.ROUTES.indexOf(agent.agent_route) >= store.ROUTES.indexOf(item.item_route));
+  const held = item.item_status === 'claimed';
+  let agent = held ? available.find((seat) => seat.agent_id === item.item_owner)
+    : available.find((seat) => seat.agent_id === me.id) ?? available[0];
+  let created = false;
+  if (!agent) {
+    let opened;
+    await worktreeFor({ ...ctx.io, say: () => {}, result: (value) => { opened = value; } }, item.item_lane, me.route, me.family, me.model);
+    agent = store.agentAt(board, opened.path);
+    created = true;
+  }
+  const target = agent.agent_path === ctx.info.root ? ctx : context({ ...ctx.io, cwd: agent.agent_path });
+  if (target.info.commonDir !== ctx.info.commonDir) throw new Refused('NOT_YOUR_CHECKOUT', 'the selected lane seat no longer belongs to this board; run pullboard next again');
+  await bindLocalSession(target.info, { agent: agent.agent_id, digest: agentSessionDigest() });
+  return { context: target, seat: { agent: agent.agent_id, lane: agent.agent_lane, path: target.info.root, created } };
+}
+
 /**
  * One loop of `next`: claim the next free item, or reserve the next review (V15). A claim that loses
  * a race to another agent is not an error; the caller looks again. A review is looked for and
@@ -2668,8 +2696,16 @@ async function nextOnce(ctx, values) {
       return await ordered(ctx, board, 'reserveNextReview', [{ agentId: me.id, lane: me.lane, leaseMs: ctx.config.reviewLeaseMs, policy: ctx.config.verify.policy, familyPolicy: ctx.config.verify.family, runnable: values.runnable, routes: values.routes }]);
     }
     const warm = warmFiles(ctx, board, me);
-    const { item, reasons, shared } = store.nextFor(board, { agentId: me.id, lane: me.lane, runnable: values.runnable, routes: values.routes, warm,
-      priority: mainRedReworkItems(ctx.info.root, board) });
+    const seats = nextSessionSeats(ctx, board);
+    const owners = new Set(seats?.map((seat) => seat.agent_id));
+    const heldItems = seats ? store.listItems(board).filter((item) => item.item_status === 'claimed'
+      && item.item_parent_id === null && owners.has(item.item_owner)
+      && store.ROUTES.indexOf(item.item_route) <= store.ROUTES.indexOf(me.route)) : [];
+    const heldItem = heldItems.find((item) => item.item_owner === me.id) ?? heldItems[0];
+    const { item, reasons, shared } = heldItem ? { item: heldItem, reasons: [], shared: [] }
+      : store.nextFor(board, { agentId: me.id, lane: me.lane, runnable: values.runnable, routes: values.routes, warm,
+        ...(seats ? { lanes: laneNames(ctx.config).filter((lane) => lane !== COORDINATOR) } : {}),
+        priority: mainRedReworkItems(ctx.info.root, board) });
     const held = item?.item_status === 'claimed';
     const offer = held ? null : store.reviewOffer(board, { agentId: me.id, lane: me.lane, policy: ctx.config.verify.policy,
       familyPolicy: ctx.config.verify.family, ratio: ctx.config.verify.reviewRatio, runnable: values.runnable, routes: values.routes });
@@ -2677,14 +2713,17 @@ async function nextOnce(ctx, values) {
     if (!item) return { reasons };
     const reviewSkipped = values.build && !held
       ? { offeredItem: offer?.item.item_id ?? null, ratio: ctx.config.verify.reviewRatio, ...store.reviewQueue(board) } : null;
+    const routed = seats ? await nextSeatContext(ctx, board, me, item, seats) : { context: ctx };
+    const target = routed.context;
+    const holder = whoAmI(target, board);
     try {
-      await claimOrdered(ctx, board, [item.item_id, { agentId: me.id, lane: me.lane, leaseMs: ctx.config.leaseMs, freeze: claimFreezer(ctx, board), head: headCommit(ctx.info.root), reviewSkipped }]);
+      await claimOrdered(target, board, [item.item_id, { agentId: holder.id, lane: holder.lane, leaseMs: target.config.leaseMs, freeze: claimFreezer(target, board), head: headCommit(target.info.root), reviewSkipped }]);
     } catch (error) {
-      if (error instanceof MainSpecMerged) return { retry: true, specMerged: { item: item.item_id, rows: error.rows } };
+      if (error instanceof MainSpecMerged) return { retry: true, ...routed, specMerged: { item: item.item_id, rows: error.rows } };
       if (error instanceof Refused && ['HELD', 'ITEM_HELD', 'BLOCKED', 'ONE_CLAIM'].includes(error.code)) return { retry: true };
       throw error;
     }
-    return { item: store.getItem(board, item.item_id), shared, held, reviewSkipped, reasons };
+    return { item: store.getItem(board, item.item_id), shared, held, reviewSkipped, reasons, ...routed };
   });
 }
 
@@ -2761,6 +2800,7 @@ async function nextHere(io, values) {
   const deadline = Date.now() + minutes * 60_000;
   for (;;) {
     const found = await nextOnce(ctx, values);
+    if (found.context) ctx = found.context;
     if (found.specMerged) {
       io.say(`merged main before claiming #${found.specMerged.item}: added spec rows ${found.specMerged.rows.join(', ')}`);
       ctx = context(io);
@@ -2770,7 +2810,7 @@ async function nextHere(io, values) {
       if (found.offer) { sayReviewOffer(ctx, found); return 0; }
       const item = found.item;
       const agents = withBoard(ctx, (board) => store.listAgents(board));
-      io.result?.({ item, review: Boolean(values.verify), held: Boolean(found.held), shared: found.shared ?? [], reasons: found.reasons ?? [] });
+      io.result?.({ item, review: Boolean(values.verify), held: Boolean(found.held), shared: found.shared ?? [], reasons: found.reasons ?? [], ...(found.seat ? { seat: found.seat } : {}) });
       for (const reason of found.reasons ?? []) io.say(displayedWait(reason, agents, ctx.config));
       const here = cdTo(ctx.info.root);
       const as = ctx.info.isMain ? ' --as coordinator' : '';
@@ -2783,6 +2823,7 @@ async function nextHere(io, values) {
       } else {
         if (found.reviewSkipped) io.say(`${reviewQueueLine(ctx, found.reviewSkipped)}; explicit build intent recorded with this claim`);
         io.say(`${found.held ? 'you hold' : 'claimed'} #${item.item_id}: ${item.item_title}`);
+        if (found.seat) io.say(`${found.seat.created ? 'opened' : 'work in'} ${found.seat.agent}, ${found.seat.lane} lane: ${here}`);
         if (found.shared?.length) io.say(`it touches ${found.shared.length === 1 ? 'a file' : `${found.shared.length} files`} you worked in recently: ${found.shared.slice(0, 4).join(', ')}`);
         if (item.item_criterion) io.say(`criterion: ${item.item_criterion}`);
         if (item.item_check) io.say(`check: ${item.item_check}   (run it before you submit)`);
