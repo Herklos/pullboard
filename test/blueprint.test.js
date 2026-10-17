@@ -5,7 +5,7 @@ import { hostname, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
 import { runFixtureChild, runFixtureGit } from './fixture-child.js';
-import { bundledBlueprints, readBlueprint } from '../src/blueprints.js';
+import { bundledBlueprints, readBlueprint, validateBlueprint } from '../src/blueprints.js';
 import { parseSpec } from '../src/spec.js';
 import { createE2eHelpers } from './e2e-helpers.js';
 
@@ -37,7 +37,8 @@ function freshBoard(config = {}) {
   const repo = join(dir, 'repo');
   mkdirSync(repo);
   const git = (...args) => runFixtureGit(args, { cwd: repo, env });
-  const run = (...args) => runFixtureChild(process.execPath, [BIN, ...args], { cwd: repo, env, encoding: 'utf8' });
+  const runIn = (cwd, ...args) => runFixtureChild(process.execPath, [BIN, ...args], { cwd, env, encoding: 'utf8' });
+  const run = (...args) => runIn(repo, ...args);
   git('init', '-q', '-b', 'main');
   const init = run('init');
   assert.equal(init.status, 0, init.stdout + init.stderr);
@@ -45,7 +46,7 @@ function freshBoard(config = {}) {
   writeFileSync(file, `${JSON.stringify({ ...JSON.parse(readFileSync(file, 'utf8')), ...config }, null, 2)}\n`);
   git('add', '-A');
   git('commit', '-q', '-m', 'chore: set up blueprint fixture');
-  return { dir, repo, run, git };
+  return { dir, repo, run, runIn, git };
 }
 
 /** Run one command with --json and return its document, failing with its output. */
@@ -165,12 +166,14 @@ test('blueprint add files a blueprint as drafts or nothing at all [S1,I1]', () =
     assert.equal(json(box, 'list', '--all').items.length, 0, `${name}: no item is added`);
     return JSON.parse(result.stdout).error;
   };
+  // Every starter carries a criterion and a check, so each refusal below is the board's own.
+  const bar = { criterion: 'A test fails without the change.', check: 'true' };
   // A later starter the board refuses (here a brief over its limit) stops the add before any write.
-  const late = refused('late-refusal', [{ key: '1', title: 'First starter', cites: ['W1'] }, { key: '2', title: 'Second starter', brief: 'x'.repeat(8001) }]);
+  const late = refused('late-refusal', [{ key: '1', title: 'First starter', cites: ['W1'], ...bar }, { key: '2', title: 'Second starter', brief: 'x'.repeat(8001), ...bar }]);
   assert.equal(late.code, 'BRIEF_TOO_LONG');
   // A light or mid starter without what pullboard add requires is refused with add's own refusal.
   for (const route of ['light', 'mid']) {
-    const error = refused(`${route}-route`, [{ key: '1', title: 'First starter', cites: ['W1'] }, { key: '2', title: 'Second starter', route }]);
+    const error = refused(`${route}-route`, [{ key: '1', title: 'First starter', cites: ['W1'], ...bar }, { key: '2', title: 'Second starter', route, ...bar }]);
     assert.equal(error.code, 'NO_BRIEF');
     assert.match(error.message, new RegExp(`an item routed ${route} must be buildable cold`, 'u'));
   }
@@ -208,15 +211,118 @@ test('every gallery blueprint is bundled and valid [S1]', () => {
   }
 });
 
+// A starter check ships to someone else's repo: it only runs the project's own tests, so it holds
+// no deletion, download, install, remote shell, publish, redirect or command substitution.
+const UNSAFE_CHECK = /\b(?:rm|curl|wget|sudo|ssh|scp|install|publish|push|deploy)\b|[>`]|\$\(/u;
+
+test('every bundled starter item carries a criterion and a check [S1,I1]', () => {
+  // Every bundled blueprint files at least one starter, and each carries a criterion and a check.
+  for (const name of bundledBlueprints()) {
+    const blueprint = readBlueprint(name, process.cwd());
+    assert.ok(blueprint.items.length >= 1, `${name} files at least one starter item`);
+    for (const item of blueprint.items) {
+      assert.ok(item.criterion.trim(), `${name} starter ${item.key} carries a criterion`);
+      assert.ok(String(item.check ?? '').trim(), `${name} starter ${item.key} carries a check`);
+      assert.doesNotMatch(item.check, UNSAFE_CHECK, `${name} starter ${item.key} only runs the project's own tests`);
+    }
+  }
+  const flaky = readBlueprint('test-reliability', process.cwd()).items;
+  assert.ok(flaky.some((item) => /flaky/u.test(item.title) && /repeated runs/u.test(item.criterion) && /deterministic/u.test(item.title)),
+    'test-reliability files one: find a flaky test by repeated runs, then make it deterministic');
+
+  // blueprint add files every bundled starter with its criterion and check, stored and never run.
+  const box = freshBoard({ gate: 'true' });
+  const expected = [];
+  for (const name of bundledBlueprints()) {
+    const added = json(box, 'blueprint', 'add', name);
+    const items = readBlueprint(name, process.cwd()).items;
+    assert.equal(added.items.length, items.length, `${name} files every starter`);
+    assert.deepEqual(added.checksNotRun, added.items.map((item) => item.id), `${name}: every check is stored, none run`);
+    expected.push(...items.map((item) => [item.title, item.criterion, item.check]));
+  }
+  const filed = json(box, 'list', '--all').items.sort((a, b) => a.item_id - b.item_id);
+  assert.deepEqual(filed.map((item) => [item.item_title, item.item_criterion, item.item_check]), expected);
+  assert.ok(filed.every((item) => (item.item_check_baseline ?? null) === null), 'no check baseline ran');
+
+  // init --blueprint files them with both and prints that the checks are stored, not run.
+  const web = readBlueprint('web-app', process.cwd());
+  const fresh = emptyRepo();
+  const started = fresh.run('init', '--blueprint', 'web-app');
+  assert.equal(started.status, 0, started.stdout + started.stderr);
+  const startedItems = (JSON.parse(fresh.run('list', '--json').stdout).items ?? []).sort((a, b) => a.item_id - b.item_id);
+  assert.deepEqual(startedItems.map((item) => [item.item_title, item.item_criterion, item.item_check]), web.items.map((item) => [item.title, item.criterion, item.check]));
+  assert.match(started.stdout, new RegExp(`checks stored, not run: ${startedItems.map((item) => `#${item.item_id}`).join(', ')}; no check baseline ran`, 'u'));
+});
+
+test('blueprint add files a blueprint as drafts only from the coordinator, who sets checks [S1,I1]', () => {
+  // A bundled starter carries a check and only the coordinator sets one: an agent in a lane is
+  // refused before anything is written and told to add it from the main checkout.
+  const box = freshBoard({ lanes: { web: { owns: ['web/'] } } });
+  const spec = readFileSync(join(box.repo, 'SPEC.md'), 'utf8');
+  const worktree = join(box.dir, 'web');
+  box.git('worktree', 'add', '-q', worktree, '-b', 'web/starter');
+  const joined = box.runIn(worktree, 'join', 'web', '--model', 'fixture-model');
+  assert.equal(joined.status, 0, joined.stdout + joined.stderr);
+  const refused = box.runIn(worktree, 'blueprint', 'add', 'web-app', '--json');
+  assert.equal(refused.status, 1, refused.stdout + refused.stderr);
+  const error = JSON.parse(refused.stdout).error;
+  assert.equal(error.code, 'COORDINATOR_CHECK');
+  assert.match(error.message, /web-app blueprint's starter items carry checks/u);
+  assert.match(error.next, /from the main checkout/u);
+  assert.equal(readFileSync(join(box.repo, 'SPEC.md'), 'utf8'), spec, 'nothing is written');
+  assert.equal(json(box, 'list', '--all').items.length, 0, 'no item is filed');
+  assert.equal(json(box, 'blueprint', 'add', 'web-app').items.length, 3, 'the coordinator adds it');
+});
+
+test('a starter item without a check is refused [S1,I1]', () => {
+  // Loaded from a file or checked before a save writes one: a starter without a criterion or a
+  // check is refused by name, the blueprint's and the item's.
+  const starter = { key: '2', title: 'Second starter', cites: ['W1'], criterion: 'A test fails without it.', check: 'npm test' };
+  const cases = [
+    ['no-check', { ...starter, check: undefined }, /no check/u],
+    ['blank-check', { ...starter, check: '   ' }, /no check/u],
+    ['no-criterion', { ...starter, criterion: undefined }, /no criterion/u],
+  ];
+  const box = freshBoard();
+  const spec = readFileSync(join(box.repo, 'SPEC.md'), 'utf8');
+  for (const [name, item, why] of cases) {
+    const value = { ...PUBLISHED, name, items: [PUBLISHED.items[0], item] };
+    assert.throws(() => validateBlueprint(value, `${name}.json`), (error) => {
+      assert.equal(error.code, 'BLUEPRINT_ITEM_UNCHECKED');
+      assert.match(error.message, new RegExp(`blueprint ${name} starter item 2 \\("Second starter"\\)`, 'u'));
+      assert.match(error.message, why);
+      return true;
+    });
+    writeFileSync(join(box.repo, `${name}.json`), `${JSON.stringify(value)}\n`);
+    const refused = box.run('blueprint', 'add', `${name}.json`, '--json');
+    assert.equal(refused.status, 1, refused.stdout + refused.stderr);
+    const error = JSON.parse(refused.stdout).error;
+    assert.equal(error.code, 'BLUEPRINT_ITEM_UNCHECKED');
+    assert.match(error.message, new RegExp(`blueprint ${name} starter item 2`, 'u'));
+  }
+  assert.equal(readFileSync(join(box.repo, 'SPEC.md'), 'utf8'), spec, 'a refused blueprint writes nothing');
+  assert.equal(json(box, 'list', '--all').items.length, 0, 'and files no item');
+
+  // init --blueprint refuses it before writing anything.
+  const outside = mkdtempSync(join(tmpdir(), 'pullboard-blueprint-unchecked-'));
+  DIRS.push(outside);
+  writeFileSync(join(outside, 'unchecked.json'), JSON.stringify({ ...PUBLISHED, name: 'unchecked', items: [{ ...starter, check: undefined }] }));
+  const empty = emptyRepo();
+  const init = empty.run('init', '--blueprint', join(outside, 'unchecked.json'), '--json');
+  assert.notEqual(init.status, 0);
+  assert.equal(JSON.parse(init.stdout).error.code, 'BLUEPRINT_ITEM_UNCHECKED');
+  assert.deepEqual(readdirSync(empty.repo).filter((entry) => entry !== '.git'), [], 'init writes nothing');
+});
+
 test('blueprint add files a blueprint as drafts with light and mid starters add accepts [S1,I1]', () => {
   // A light or mid starter carrying its brief, criterion and check is filed on that route, with
-  // all three passed to the item unchanged; a strong starter needs none of them.
+  // all three passed to the item unchanged; a strong starter needs no brief.
   const box = freshBoard({ gate: 'true' });
   const brief = 'Files:\n- web/index.html\nTest:\n- test/home.test.js asserts the page fits 375 pixels';
   const items = [
     { key: '1', title: 'Light starter', cites: ['W3'], route: 'light', brief, criterion: 'The home page fits 375 pixels.', check: 'true' },
     { key: '2', title: 'Mid starter', cites: ['W1'], route: 'mid', brief, criterion: 'A test fails without the change.', check: 'true', after: ['1'] },
-    { key: '3', title: 'Strong starter', cites: ['W2'] },
+    { key: '3', title: 'Strong starter', cites: ['W2'], criterion: 'The suite passes on main.', check: 'true' },
   ];
   writeFileSync(join(box.repo, 'routes.json'), `${JSON.stringify({ ...PUBLISHED, name: 'routes', items })}\n`);
   const added = json(box, 'blueprint', 'add', 'routes.json');
@@ -225,7 +331,7 @@ test('blueprint add files a blueprint as drafts with light and mid starters add 
   assert.deepEqual(filed.map((item) => [item.item_title, item.item_route, item.item_check, item.item_criterion, item.item_brief]), [
     ['Light starter', 'light', 'true', items[0].criterion, brief],
     ['Mid starter', 'mid', 'true', items[1].criterion, brief],
-    ['Strong starter', 'strong', '', '', ''],
+    ['Strong starter', 'strong', 'true', items[2].criterion, ''],
   ]);
   assert.equal(filed[1].item_after, String(filed[0].item_id));
 });
@@ -337,7 +443,7 @@ test('init --blueprint starts a board from a blueprint [I1,S1]', () => {
   const checkedRepo = emptyRepo();
   const checked = checkedRepo.run('init', '--blueprint', withCheck);
   assert.equal(checked.status, 0, checked.stdout + checked.stderr);
-  assert.match(checked.stdout, /checks stored, not run: #\d+; no check baseline ran/u, 'the summary says the check was not run');
+  assert.match(checked.stdout, /checks stored, not run: #\d+(?:, #\d+)*; no check baseline ran/u, 'the summary says the checks were not run');
   const filed = JSON.parse(checkedRepo.run('list', '--json').stdout).items ?? [];
   assert.equal(filed.length, PUBLISHED.items.length, 'every starter is filed, the checked one included');
   const starter = filed.find((item) => item.item_title === PUBLISHED.items[0].title);
