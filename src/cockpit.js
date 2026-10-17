@@ -1,7 +1,4 @@
-import {
-  hostedReleaseDistance,
-  hostedReleaseInfo,
-} from './view/hosted-release.js';
+import { hostedReleaseDistance, hostedReleaseInfo, hostedReleaseNote } from './view/hosted-release.js';
 import {
   effectiveGuards,
   IN_STATE,
@@ -123,9 +120,6 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
     <label>Speed <select id="replay-speed"><option value="1">1×</option><option value="4">4×</option><option value="16">16×</option></select></label>
     <output id="replay-progress" aria-live="polite">Loading events…</output>
   </section>
-  <section class="release-note" id="hosted-release-note" role="status" aria-label="Pullboard update" hidden>
-    <p><span id="hosted-release-text"></span> <code>npm i -g pullboard@latest</code> <a id="hosted-release-link" target="_blank" rel="noopener noreferrer">What changed</a> <button class="ghost" id="hosted-release-dismiss" type="button">Dismiss</button></p>
-  </section>
   <section id="group-view" class="group-view" hidden>
     <section class="card-panel group-panel"><h2>Needs you</h2><div id="group-needs"></div></section>
     <section class="card-panel group-panel"><h2>Activity</h2><div class="feed" id="group-activity"></div></section>
@@ -223,8 +217,6 @@ let localReadHeaders = { ...connection.headers };
 // with the secret in the address's fragment, which no request carries; the page takes it out of the address before
 // anything else reads the address, and keeps it for this tab only. Every request then sends it in x-pullboard-key.
 const hosted = ${hostedOptions};
-const hostedRelease = ${releaseInfo};
-const hostedReleaseDistance = (${hostedReleaseDistance.toString()});
 const LOCAL_VIEW = 'http://127.0.0.1:4890';
 const LOCAL_TAB = 'pullboard.local.session';
 const LOCAL_TRIPS = 'pullboard.local.trips';
@@ -271,7 +263,6 @@ if (hosted.local && !relayPairing) {
 }
 const snapshotReplay = { final: null, events: [], index: 0, playing: false, timer: null };
 const keep = (name, value) => { name = snapshot ? 'snapshot.' + name : name; try { if (value === undefined) return localStorage.getItem(name); localStorage.setItem(name, value); } catch { return null; } return value; };
-const dismissedHostedReleases = new Set();
 // Whether the host serves this page at /roadmap as well as at /, so the Roadmap's address is a path;
 // anywhere else it is a #roadmap fragment on the page's own address (N38).
 const routed = ${JSON.stringify(Boolean(paths) && !snapshot)};
@@ -318,6 +309,10 @@ const itemSearches = new Map();
 let detailRead = null;
 const addressedShouts = new Map();
 const $ = (id) => document.getElementById(id);
+// The update note from src/view/hosted-release.js (#632): only a confirmed read of this machine's view says how far behind it is.
+const renderHostedReleaseNote = (${hostedReleaseNote.toString()})(${releaseInfo}, { $, keep, distance: (${hostedReleaseDistance.toString()}),
+  readable: () => hosted.local && localConfirmed && Boolean(localSession) && connection.base === localSession.origin && !transportModule && !transport,
+  project: (project = data?.project) => project?.releaseNotes ? project : data?.projects?.find((entry) => entry.ok && entry.releaseNotes) });
 
 const hostedState = (${hostedState.toString()});
 const hostedBrowser = (${hostedBrowser.toString()});
@@ -325,23 +320,6 @@ const drawHosted = (${drawHosted.toString()});
 /** Show the hosted state the page is in (src/view/hosted.js), with its next step, or none with null. */
 function localNote(state, facts = {}) {
   drawHosted(document, hostedState(state, { browser: hostedBrowser(navigator), ...facts }), { view: localSession?.origin || LOCAL_VIEW, signIn: hosted.signIn, session: hosted.relaySession });
-}
-
-/** Show one dismissable update line only after this hosted page has read a known older local release. */
-function renderHostedReleaseNote(project) {
-  const region = $('hosted-release-note');
-  region.hidden = true;
-  const source = project?.releaseNotes ? project : data?.projects?.find((entry) => entry.ok && entry.releaseNotes);
-  if (!hosted.local || !localConfirmed || !localSession || connection.base !== localSession.origin
-      || transportModule || transport || !source?.releaseNotes) return;
-  const installed = source.releaseNotes.version;
-  const distance = hostedReleaseDistance(installed, hostedRelease.version, hostedRelease.versions);
-  if (!distance) return;
-  const dismissedKey = 'pb.hosted-release-dismissed.' + hostedRelease.version;
-  if (dismissedHostedReleases.has(hostedRelease.version) || keep(dismissedKey) === '1') return;
-  $('hosted-release-text').textContent = 'Pullboard ' + installed + ' is installed; ' + hostedRelease.version + ' is current, ' + distance + ' ' + (distance === 1 ? 'release' : 'releases') + ' behind. Update with';
-  $('hosted-release-link').href = 'https://github.com/pullboard-dev/pullboard/blob/main/CHANGELOG.md';
-  region.hidden = false;
 }
 
 /** Hide the relay's own banner, which speaks for the relay, on a page the relay does not serve this time. */
@@ -3433,11 +3411,6 @@ $('upgrade-note').addEventListener('click', (event) => {
   const notice = releaseNotices.get(data.project?.root);
   if (notice) notice.releases = [];
   renderReleaseNotes(data.project);
-});
-$('hosted-release-dismiss').addEventListener('click', () => {
-  dismissedHostedReleases.add(hostedRelease.version);
-  keep('pb.hosted-release-dismissed.' + hostedRelease.version, '1');
-  renderHostedReleaseNote(data.project);
 });
 $('add-cancel').addEventListener('click', () => { view.adding = false; render(); });
 $('spec-decline-cancel').addEventListener('click', () => { closeDecline(); });

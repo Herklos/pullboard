@@ -80,3 +80,41 @@ export function hostedReleaseInfo(version = HOSTED_RELEASE, versions = null, hos
   const releases = versions ?? (hostedPage ? shippedReleaseVersions() : []);
   return JSON.stringify({ version, versions: releases }).replace(/</g, '\\u003c');
 }
+
+/**
+ * Put the hosted page's one-line update note before the board and return the function that draws it.
+ * Why here: src/cockpit.js stays inside its line budget, and the page embeds this source, so the
+ * function reads nothing outside itself; the page hands in what it knows through `page`.
+ *
+ * @param {{version: string, versions: string[]}} release - The page's release and the shipped releases.
+ * @param {{$: (id: string) => HTMLElement, keep: (name: string, value?: string) => string|null,
+ *   distance: (installed: unknown, current: unknown, releases: unknown) => number,
+ *   readable: () => boolean, project: (project?: object) => {releaseNotes?: {version?: string}}|undefined}} page
+ * @returns {(project?: object) => void} Shows the note for an older local install, or hides it.
+ */
+export function hostedReleaseNote(release, page) {
+  const region = document.createElement('section');
+  Object.assign(region, { className: 'release-note', id: 'hosted-release-note', hidden: true });
+  region.setAttribute('role', 'status');
+  region.setAttribute('aria-label', 'Pullboard update');
+  region.innerHTML = '<p><span id="hosted-release-text"></span> <code>npm i -g pullboard@latest</code> <a id="hosted-release-link" target="_blank" rel="noopener noreferrer">What changed</a> <button class="ghost" id="hosted-release-dismiss" type="button">Dismiss</button></p>';
+  page.$('group-view').before(region);
+  const dismissed = 'pb.hosted-release-dismissed.' + release.version;
+  let gone = false;
+  /** Show the line only after this hosted page has read a known older release from this machine's view. */
+  const draw = (project) => {
+    region.hidden = true;
+    const source = page.project(project);
+    if (!page.readable() || !source?.releaseNotes) return;
+    const installed = source.releaseNotes.version;
+    const distance = page.distance(installed, release.version, release.versions);
+    if (!distance || gone || page.keep(dismissed) === '1') return;
+    region.querySelector('#hosted-release-text').textContent = 'Pullboard ' + installed + ' is installed; ' + release.version + ' is current, '
+      + distance + ' ' + (distance === 1 ? 'release' : 'releases') + ' behind. Update with';
+    region.querySelector('#hosted-release-link').href = 'https://github.com/pullboard-dev/pullboard/blob/main/CHANGELOG.md';
+    region.hidden = false;
+  };
+  // Dismissed for this release only: the next release has its own key, so its note comes back.
+  region.querySelector('#hosted-release-dismiss').addEventListener('click', () => { gone = true; page.keep(dismissed, '1'); draw(); });
+  return draw;
+}
