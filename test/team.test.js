@@ -188,7 +188,8 @@ test('a verdict reads stale when main moves under its files [E8]', { timeout: 12
   box.git(reviewer, 'merge', '-q', '--no-edit', 'main');
   const composed = box.git(reviewer, 'rev-parse', 'HEAD');
   assert.notEqual(composed, submitted);
-  run(box, reviewer, 'verify', '1', 'accept', '--note', 'Re-reviewed the feature with the latest main caller and its reverted history.');
+  const landingGuidance = run(box, reviewer, 'verify', '1', 'accept', '--note', 'Re-reviewed the feature with the latest main caller and its reverted history.');
+  assert.ok(landingGuidance.includes('git merge --no-ff ' + composed), 'the new-main manual landing hint names the checked composition, not the original submission');
   assert.equal(readFileSync(checkedHeads, 'utf8').trim().split('\n').at(-1), composed, 'the frozen check ran on the reviewed composition');
   const reviewed = withBoard(box.repo, board => store.verdictsFor(board, 1));
   assert.deepEqual(reviewed.slice(0, original.length), original);
