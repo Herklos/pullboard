@@ -10,7 +10,7 @@ export function relayMoveActor(move) {
   if (['holdLane', 'releaseLane'].includes(move.operation) && args[1]?.asPerson) return 'person';
   if (move.operation === 'release') return args[1] ?? null;
   if (['reserveNextReview', 'addMilestone', 'recordRowDecisions', 'applyRowDecisions', 'recordLandingBatch', 'recordLandingWaiver', 'recordLandingFlake', 'finishLandingBatch'].includes(move.operation)) return args[0]?.agentId ?? null;
-  if (['completeCheckBaseline', 'appendFact', 'editItem', 'escalate', 'recordAttempt', 'claim', 'submit', 'reserveReview', 'verify', 'merged', 'withdraw', 'refreeze',
+  if (['acceptCheck', 'completeCheckBaseline', 'appendFact', 'editItem', 'escalate', 'recordAttempt', 'claim', 'submit', 'reserveReview', 'verify', 'merged', 'withdraw', 'refreeze',
     'passDecision', 'answerDecision', 'holdLane', 'releaseLane', 'holdItem', 'releaseItemHold', 'reopen', 'editMilestoneItems', 'moveMilestone', 'editMilestone', 'removeMilestone', 'shipMilestone'].includes(move.operation)) return args[1]?.agentId ?? null;
   return null;
 }

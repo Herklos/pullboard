@@ -4,13 +4,14 @@ import * as store from './board.js';
 import { recordedRefusal } from './recorded-refusal.js';
 import { BAR_ENGINE, carriesBarReason } from './bar-corrections.js';
 import { carriesImplies, IMPLIES_ENGINE } from './implies.js';
+import { CHECK_ACCEPT_ENGINE } from './check-accept.js';
 import { ENGINE_VERSION } from './machine.js';
 import { MILESTONE_SHIP_ENGINE, canonicalMilestoneTarget } from './milestones.js';
 import { Refused } from './refused.js';
 import { requestMoveProblem, recordRequestMove } from './relay-requests.js';
 import { relayMoveActor, relaySenderProblem, validRelaySender } from './relay-sender.js';
 
-const ITEM_ID_FIRST_ARGUMENT = new Set(['editItem', 'escalate', 'recordAttempt', 'claim', 'release', 'submit', 'reserveReview', 'verify', 'merged', 'withdraw', 'refreeze', 'reopen', 'appendFact']);
+const ITEM_ID_FIRST_ARGUMENT = new Set(['acceptCheck', 'editItem', 'escalate', 'recordAttempt', 'claim', 'release', 'submit', 'reserveReview', 'verify', 'merged', 'withdraw', 'refreeze', 'reopen', 'appendFact']);
 
 /** Only these public board operations may be requested by an encrypted move. */
 export const ENGINE_OPERATIONS = Object.freeze([
@@ -19,14 +20,14 @@ export const ENGINE_OPERATIONS = Object.freeze([
   'withdraw', 'refreeze', 'reopen', 'shout', 'passDecision', 'answerDecision', 'holdLane', 'releaseLane', 'holdItem', 'releaseItemHold',
   'addMilestone', 'editMilestoneItems', 'moveMilestone', 'editMilestone', 'removeMilestone', 'shipMilestone',
   'recordRowDecisions', 'applyRowDecisions', 'appendFact',
-  'recordLandingBatch', 'recordLandingWaiver', 'recordLandingFlake', 'finishLandingBatch',
+  'recordLandingBatch', 'recordLandingWaiver', 'recordLandingFlake', 'finishLandingBatch', 'acceptCheck',
 ]);
 
 /** Engine version at which each ordered operation first has stable replay semantics. */
-const OPERATION_ENGINE = Object.freeze({ reopen: 8, recordLandingBatch: 8, recordLandingWaiver: 8, recordLandingFlake: 8, finishLandingBatch: 8,
+const OPERATION_ENGINE = Object.freeze({ reopen: 8, recordLandingBatch: 8, recordLandingWaiver: 8, recordLandingFlake: 8, finishLandingBatch: 8, acceptCheck: CHECK_ACCEPT_ENGINE,
   shipMilestone: MILESTONE_SHIP_ENGINE });
 
-/** Dependency edits add engine-10 meaning, edit reasons engine-19, implied items engine-20 and a milestone target engine-21, without changing ordinary historical envelopes. */
+/** Dependency edits add engine-10 meaning, edit reasons engine-19, implied items engine-20 and a milestone target engine-25, without changing ordinary historical envelopes. */
 function minimumOperationEngine(operation, args) {
   const options = args[1];
   if (carriesImplies(operation, args)) return IMPLIES_ENGINE;

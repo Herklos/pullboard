@@ -64,7 +64,8 @@ function privateProject(box, name) {
   const init = box.run(repo, 'init', '--json');
   assert.equal(init.status, 0, init.failure ?? init.stderr);
   const configPath = join(repo, 'pullboard.json');
-  const config = JSON.parse(readFileSync(configPath, 'utf8'));
+  // View fixtures file "true" checks to show items, so they keep a board with no hold setting.
+  const { checks: _hold, ...config } = JSON.parse(readFileSync(configPath, 'utf8'));
   writeFileSync(configPath, `${JSON.stringify({ ...config, name, gate: 'true', spec: 'SPEC.md', practice: 'DOCTRINE.md',
     lanes: { app: { owns: ['app/'], specs: ['G1'] }, review: { owns: [] } }, shared: [] }, null, 2)}\n`);
   writeFileSync(join(repo, 'SPEC.md'), API_SPEC);

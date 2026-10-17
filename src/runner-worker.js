@@ -7,6 +7,7 @@ import { delimiter, dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as resourceApi from './resources.js';
 import { parseProcessCensus } from './process-census.js';
+import { fileDenialWatcher } from './sandbox-denial.js';
 import { once } from 'node:events';
 import { pipeline } from 'node:stream/promises';
 
@@ -131,7 +132,7 @@ async function readSpec() {
     tagNames.add(tag.name);
     if (tag.chain.length ? tag.chain[0] !== tag.object : tag.object !== tag.peeledCommit) throw new Error('invalid tag manifest');
   }
-  const runtimeNames = ['resources.js', 'git.js', 'machine-home.js', 'refused.js', 'process-census.js', 'queue-settings.js', 'queue-order.js'];
+  const runtimeNames = ['resources.js', 'git.js', 'machine-home.js', 'refused.js', 'process-census.js', 'queue-settings.js', 'queue-order.js', 'sandbox-denial.js'];
   if (Object.keys(value.runtime.files).length !== runtimeNames.length
     || runtimeNames.some(name => typeof value.runtime.files[name] !== 'string')) throw new Error('invalid work specification');
   if (createHash('sha256').update(JSON.stringify(value.runtime.files)).digest('hex') !== value.runtime.sha256) throw new Error('invalid trusted runtime');
@@ -1039,7 +1040,10 @@ async function stopOwnedGroup(pid, closed, tracker) {
   await closed;
 }
 
-/** Run the exact requested command in its isolated checkout, retaining raw output and real test exit status. */
+/**
+ * Run the exact requested command in its isolated checkout, retaining raw output and real test exit status.
+ * A failed command also carries any file denial's evidence, classified here against this checkout (#706).
+ */
 async function runCommand(spec, root, env, sink, tracker) {
   let shell = '/bin/sh';
   let args = ['-c', spec.command];
@@ -1058,9 +1062,10 @@ async function runCommand(spec, root, env, sink, tracker) {
   let writes = Promise.resolve();
   const closed = owned.closed;
   const onDrop = () => { sink.pipeFailed = true; transportDrop(); };
+  const denials = fileDenialWatcher(root);
   const forward = stream => stream.on('data', part => {
     stream.pause();
-    if (!outputError) writes = writes.then(() => sink.write(part)).then(() => stream.resume()).catch(error => { outputError = error; onDrop(); });
+    if (!outputError) writes = writes.then(() => { denials.push(part); return sink.write(part); }).then(() => stream.resume()).catch(error => { outputError = error; onDrop(); });
   });
   forward(child.stdout); forward(child.stderr);
   const result = await closed;
@@ -1075,7 +1080,9 @@ async function runCommand(spec, root, env, sink, tracker) {
   if (outputError) throw outputError;
   if (sink.pipeFailed) return { code: 1, signal: result.signal ?? 'SIGHUP' };
   if (result.error) throw result.error;
-  return { code: Number.isInteger(result.code) ? result.code : 1, signal: result.signal ?? null };
+  const code = Number.isInteger(result.code) ? result.code : 1;
+  const denial = code === 0 && !result.signal ? null : denials.end();
+  return { code, signal: result.signal ?? null, ...(denial ? { denial } : {}) };
 }
 
 /** Send the single nonce-bound result line after the complete merged output has drained. */
@@ -1083,7 +1090,7 @@ async function receipt(spec, fields, sink) {
   await flushStdout();
   const body = { id: spec.id, commit: spec.commit, tree: spec.tree, code: fields.code, signal: fields.signal,
     runtimeSha256: spec.runtime.sha256, toolingSha256: spec.tooling.sha256, root: fields.root ?? '', outputSha256: sink.hash.digest('hex'), wallMs: Math.max(0, Date.now() - sink.wallStart),
-    ...(fields.refused ? { refused: fields.refused } : {}) };
+    ...(fields.refused ? { refused: fields.refused } : {}), ...(fields.denial ? { denial: fields.denial } : {}) };
   const encoded = Buffer.from(JSON.stringify(body)).toString('base64');
   await new Promise((resolveWrite, rejectWrite) => process.stderr.write(`${RECEIPT} ${spec.id} ${encoded}\n`, error => error ? rejectWrite(error) : resolveWrite()));
 }
