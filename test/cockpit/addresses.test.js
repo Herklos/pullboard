@@ -2,13 +2,17 @@
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import { stableChrome } from './stable.js';
 import { relayClientFixture } from '../relay-client-fixture.js';
 import { startChrome, relayWorkBudgetMs } from '../relay-browser-fixture.js';
+import { runFixtureChild } from '../fixture-child.js';
+import { chooseViewPort } from '../view-port-fixture.js';
 import { SPEC, machine, project, build, startView, boardOf, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, press, travel, settled, serveFolder } from './fixture.js';
 
+const BIN = resolve(import.meta.dirname, '../../bin/pullboard.js');
 const SCRIPT = "typeof view === 'object' && typeof data === 'object' && !!data?.project && data.root === view.root && !document.body.classList.contains('loading')";
 /** Read the actual rendered place without waiting for the expected answer. */
 async function observed(chrome) {
@@ -26,6 +30,8 @@ async function openAddress(chrome, server, address) {
   target.search = server.link.search;
   await chrome.send('Page.navigate', { url: target.href });
   await settled(chrome, SCRIPT);
+  // An item address opens its item; the view reads its detail then, and its heading arrives with it.
+  if (/\/items\/\d+$/.test(target.pathname)) await settled(chrome, "!!document.querySelector('#detail h2, #detail .empty')");
 }
 /** Assert the detail itself, so suppressing row rendering produces an assertion failure. */
 async function assertHeading(chrome, selector, id, text) {
@@ -548,6 +554,77 @@ test('an older relay shout keeps its address and explains retained history [N38,
       const before = await chrome.stable('performance.timeOrigin');
       await chrome.send('Page.reload');
       await settled(chrome, `performance.timeOrigin !== ${before} && ${SCRIPT}`);
+    }
+  }
+});
+
+/** Write a preload that makes every listen fail as a sandbox does, so no real port is touched. */
+function sandboxListenStub(dir, code) {
+  const file = join(dir, `listen-${code}.mjs`);
+  writeFileSync(file, `import { Server } from 'node:net';
+Server.prototype.listen = function (port, host) {
+  const error = Object.assign(new Error(\`listen ${code}: operation not permitted \${host}:\${port}\`), { code: '${code}', errno: -1, syscall: 'listen', address: host, port });
+  process.nextTick(() => this.emit('error', error));
+  return this;
+};
+`);
+  return file;
+}
+
+test('a sandbox-blocked view port names the fix [I1,L3,P4]', { timeout: 120_000 }, async (t) => { // budget: hang ceiling for six short CLI refusals.
+  const dir = mkdtempSync(join(tmpdir(), 'pullboard-view-sandbox-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const port = await chooseViewPort();
+  const terminal = 'or start pullboard view from a normal terminal';
+  const harnesses = [
+    { name: 'Claude Code', env: { CLAUDECODE: '1' },
+      next: `allow local network for Claude Code: set sandbox.network.allowLocalBinding to true in .claude/settings.json, ${terminal}` },
+    { name: 'Codex', env: { CODEX_SANDBOX: 'seatbelt' },
+      next: `allow local network for Codex in its sandbox settings in ~/.codex/config.toml, ${terminal}` },
+    { name: 'another agent tool', env: {},
+      next: `allow local network in your agent tool's sandbox settings, ${terminal}` },
+  ];
+  // The view's own refusal, in process: the stub replaces listen only for this call.
+  const { serveView } = await import('../../src/serve.js');
+  const { Server } = await import('node:net');
+  const listen = Server.prototype.listen;
+  const saved = { CLAUDECODE: process.env.CLAUDECODE, CODEX_SANDBOX: process.env.CODEX_SANDBOX, CODEX_SANDBOX_NETWORK_DISABLED: process.env.CODEX_SANDBOX_NETWORK_DISABLED };
+  t.after(() => { Server.prototype.listen = listen; for (const [name, value] of Object.entries(saved)) value === undefined ? delete process.env[name] : process.env[name] = value; });
+  for (const code of ['EPERM', 'EACCES']) {
+    Server.prototype.listen = function (asked, host) {
+      process.nextTick(() => this.emit('error', Object.assign(new Error(`listen ${code}: operation not permitted ${host}:${asked}`), { code, syscall: 'listen' })));
+      return this;
+    };
+    for (const name of Object.keys(saved)) delete process.env[name];
+    process.env.CLAUDECODE = '1';
+    await assert.rejects(serveView({ port }), (error) => {
+      assert.equal(error.code, 'SANDBOX_BLOCKED');
+      assert.equal(error.message, `[SANDBOX_BLOCKED] the sandbox around this command refused to let pullboard view listen on 127.0.0.1:${port} (${code})\nnext: ${harnesses[0].next}`);
+      return true;
+    });
+  }
+  Server.prototype.listen = listen;
+
+  // The CLI, in the background launch an agent gets and in the foreground, plain and --json.
+  const stub = sandboxListenStub(dir, 'EPERM');
+  for (const harness of harnesses) {
+    for (const foreground of [false, true]) {
+      const env = { ...process.env, HOME: join(dir, 'home'), PULLBOARD_HOME: join(dir, 'home', '.pullboard'),
+        PULLBOARD_MACHINE_HOME: join(dir, 'machine-home'), PULLBOARD_VIEW_PORT: String(port),
+        GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', NODE_OPTIONS: `--import=${pathToFileURL(stub).href}`, ...harness.env };
+      for (const name of ['CLAUDECODE', 'CODEX_SANDBOX', 'CODEX_SANDBOX_NETWORK_DISABLED', 'AI_AGENT', 'PULLBOARD_VIEW_FOREGROUND']) if (!(name in harness.env)) delete env[name];
+      if (foreground) env.PULLBOARD_VIEW_FOREGROUND = '1';
+      const run = (...extra) => runFixtureChild(process.execPath, [BIN, 'view', '--no-open', ...extra], { cwd: dir, env, encoding: 'utf8', timeout: 40_000 });
+      const where = `${harness.name}, ${foreground ? 'foreground' : 'background'}`;
+      const plain = run();
+      assert.equal(plain.status, 1, `${where}: ${plain.failure ?? plain.stderr}`);
+      const json = run('--json');
+      assert.equal(json.status, 1, `${where}: ${json.failure ?? json.stderr}`);
+      const refusal = JSON.parse(json.stdout).error;
+      assert.equal(refusal.code, 'SANDBOX_BLOCKED', where);
+      assert.equal(refusal.next, harness.next, `${where}: the step names the fix for this harness`);
+      assert.equal(plain.stderr.trim(), `pullboard: [SANDBOX_BLOCKED] the sandbox around this command refused to let pullboard view listen on 127.0.0.1:${port} (EPERM)\nnext: ${harness.next}`, where);
+      for (const text of [plain.stderr, json.stdout]) assert.doesNotMatch(text, /service owner/iu, `${where}: the step points somewhere real`);
     }
   }
 });

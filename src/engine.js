@@ -1,7 +1,9 @@
 /** Versioned, deterministic replay through the CLI's existing board engine [H3,H16]. */
 import { createHash, randomUUID } from 'node:crypto';
 import * as store from './board.js';
-import { refusalDocument } from './json.js';
+import { recordedRefusal } from './recorded-refusal.js';
+import { BAR_ENGINE, carriesBarReason } from './bar-corrections.js';
+import { carriesImplies, IMPLIES_ENGINE } from './implies.js';
 import { ENGINE_VERSION } from './machine.js';
 import { Refused } from './refused.js';
 import { requestMoveProblem, recordRequestMove } from './relay-requests.js';
@@ -22,9 +24,11 @@ export const ENGINE_OPERATIONS = Object.freeze([
 /** Engine version at which each ordered operation first has stable replay semantics. */
 const OPERATION_ENGINE = Object.freeze({ reopen: 8, recordLandingBatch: 8, recordLandingWaiver: 8, recordLandingFlake: 8, finishLandingBatch: 8 });
 
-/** Dependency edits add engine-10 meaning without changing ordinary historical edit envelopes. */
+/** Dependency edits add engine-10 meaning, edit reasons engine-19 and implied items engine-20, without changing ordinary historical envelopes. */
 function minimumOperationEngine(operation, args) {
   const options = args[1];
+  if (carriesImplies(operation, args)) return IMPLIES_ENGINE;
+  if (carriesBarReason(operation, args)) return BAR_ENGINE;
   return operation === 'editItem' && options && Object.hasOwn(options, 'after') && options.after !== undefined
     ? 10 : OPERATION_ENGINE[operation] ?? 1;
 }
@@ -81,7 +85,7 @@ export function prepareEngineMove(board, operation, args, { id = randomUUID(), a
       try { frozen = options.freeze(item); }
       catch (cause) {
         if (!(cause instanceof Refused)) throw cause;
-        error = refusalDocument(cause).error;
+        error = recordedRefusal(cause);
       }
       delete options.freeze;
       options.frozen = frozen ?? null;
@@ -114,6 +118,8 @@ function executableArgs(move, board) {
     if (!args[1] || typeof args[1] !== 'object' || Array.isArray(args[1])) throw new Refused('RELAY_MOVE', 'a fact needs its typed arguments; use the current Pullboard engine');
     args[1].factId = move.id;
   }
+  // Implied facts take their ids from the sealed move, so every replica writes the same ones.
+  if (['answerDecision', 'verify'].includes(move.operation) && args[1] && typeof args[1] === 'object' && !Array.isArray(args[1])) args[1].impliesId = move.id;
   if (['claim', 'refreeze'].includes(move.operation)) {
     const options = args[1];
     if (!options || !Object.hasOwn(options, 'frozen')) throw new Refused('RELAY_MOVE', 'the claim has no frozen criterion; send it with the current pullboard engine');
@@ -136,7 +142,7 @@ function executableArgs(move, board) {
         !['any', 'coordinator'].includes(captured?.policy) || !['off', 'prefer', 'require'].includes(captured?.family)) {
       throw new Refused('NO_POLICY', 'the frozen verify policy is missing or invalid; ask the coordinator to refreeze this item before verifying it');
     }
-    args[1] = { ...options, policy: captured.policy, familyPolicy: captured.family };
+    args[1] = { ...options, policy: captured.policy, familyPolicy: captured.family, impliesId: move.id };
   }
   return args;
 }
@@ -165,7 +171,7 @@ export function refuseRelayMove(board, move, { sequence, at, sender, kind, code,
     const candidateItemId = ITEM_ID_FIRST_ARGUMENT.has(move?.operation) ? move?.args?.[0] : null;
     const itemId = Number.isSafeInteger(candidateItemId) && candidateItemId > 0 && board.db.prepare('SELECT 1 FROM item WHERE item_id=?').get(candidateItemId) ? candidateItemId : null;
     const reason = refusal ?? new Refused(code, 'this relay record was refused and logged; run pullboard relay to continue with the next ordered record');
-    const outcome = { error: refusalDocument(reason).error };
+    const outcome = { error: recordedRefusal(reason) };
     const clock = board.clock;
     board.clock = { now: () => new Date(at) };
     try {
@@ -221,7 +227,12 @@ export function applyEngineMove(board, move, { sequence, at }) {
         outcome = { result: result ?? null, events: (board.emittedEvents?.slice(firstEvent) ?? []).map((event) => ({ ...event })) };
       } catch (error) {
         if (!(error instanceof Refused)) throw error;
-        outcome = { error: refusalDocument(error).error };
+        const refusal = recordedRefusal(error);
+        // Engine 8 stored generic merge-refusal guidance before the serializer recognized "merge".
+        if (move.engine === 8 && move.operation === 'merged' && error.code === 'NOT_VERIFIED') {
+          refusal.next = 'Run pullboard help, correct the reported problem, and retry the command.';
+        }
+        outcome = { error: refusal };
       } finally {
         board.clock = clock;
         if (engineVersion === undefined) delete board.executionEngineVersion;

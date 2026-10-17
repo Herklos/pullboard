@@ -47,6 +47,10 @@ test('a fresh init tells the person and the agent how to start [I9,I1]', t => {
   rmSync(join(box.root, 'pullboard.json'));
   const initialized = box.output('init');
   assert.equal(initialized.code, 0, initialized.stderr);
+  assert.equal(JSON.parse(readFileSync(join(box.root, 'pullboard.json'), 'utf8')).worktrees, 'inside',
+    'fresh init opts into worktrees inside the repository');
+  assert.match(initialized.stdout, /new agent worktrees go in \.claude\/worktrees; dot-scanner tools such as eslint \. should ignore \.claude\/worktrees; set "worktrees": "beside" in pullboard\.json to use sibling folders/u,
+    'init prints one-line location, scanner-ignore and switch guidance');
   assert.match(initialized.stdout, /^Next: ask your agent to set up Pullboard here; in Claude Code, start a new session first so it loads the Pullboard skills\.$/mu, 'init gives one setup instruction and preserves Claude Code skill loading');
   assert.match(initialized.stdout, /git add -f --/u, 'the init output keeps its staging instruction');
 
@@ -54,6 +58,45 @@ test('a fresh init tells the person and the agent how to start [I9,I1]', t => {
   const section = agents.slice(agents.indexOf('## A new board'), agents.indexOf('## Working here: pullboard'));
   assert.equal(section, '## A new board\n\nOn a board that is not set up, run `pullboard resume` first. Walk the person through its setup steps before anything else.\n\n', 'AGENTS.md includes the new-board setup section');
   assert.doesNotMatch(section, /\b(?:spec|lanes|gates)\b/iu, 'the first setup guidance uses plain words');
+});
+
+/** Run init on a fresh repo and return the "Helping the person" section of the AGENTS.md it wrote. */
+function helpSection(t) {
+  const box = fixture(t);
+  rmSync(join(box.root, 'pullboard.json'));
+  const initialized = box.output('init');
+  assert.equal(initialized.code, 0, initialized.stderr);
+  const agents = readFileSync(join(box.root, 'AGENTS.md'), 'utf8');
+  const start = agents.indexOf('## Helping the person\n');
+  assert.ok(start >= 0, 'AGENTS.md has a "Helping the person" section after init');
+  const end = agents.indexOf('\n## ', start + 1);
+  return agents.slice(start, end < 0 ? agents.indexOf('<!-- pullboard:end -->') : end);
+}
+
+test('init tells agents how to help the person open their board [H5,H17]', t => {
+  const section = helpSection(t);
+  assert.match(section, /work out the technical side yourself: read `pullboard status`, check whether `pullboard view` is running, read `pullboard relay` for the link, and follow the next step in any refusal/u,
+    'the agent reads status, the view, the relay and the refusal itself');
+  assert.match(section, /say what is going on in plain words and walk the person through each step they must take, one at a time/u, 'the agent explains plainly, one step at a time');
+  assert.match(section, /Start `pullboard view` yourself/u, 'the agent starts the view itself');
+  assert.match(section, /tell the person to click Allow/u, 'the agent explains the browser Allow prompt');
+  assert.match(section, /If they clicked Block, walk them through turning it back on: .*Site settings for app\.pullboard\.dev, set the access to apps on this device to Allow, then reload the page/u,
+    'the agent knows how to turn access back on after Block');
+  assert.match(section, /To sign in on the phone, the person scans that QR code, taps Sign in with GitHub and approves Pullboard/u, 'the agent helps with the phone sign-in');
+  assert.match(section, /Have the person type `pullboard relay on --all` themselves in their own terminal: it signs in as them, so Pullboard refuses it from an agent/u,
+    'the person types relay on, because agents are refused it');
+  assert.match(section, /Then confirm the boards arrived: run `pullboard relay` in each board .* and `pullboard relay devices` to see the paired phone/u, 'the agent confirms the boards arrived');
+});
+
+test('the help section never tells an agent to run relay on itself [H5,H17,P6]', t => {
+  const section = helpSection(t);
+  const sentences = section.split(/(?<=[.:;])\s+/u).filter(sentence => /pullboard relay (?:on|join)\b/u.test(sentence));
+  assert.ok(sentences.length >= 2, 'the section names relay on and relay join');
+  for (const sentence of sentences) {
+    assert.match(sentence, /\bthe person (?:type|types|runs)\b/u, `the person is the one who types it: ${sentence}`);
+    assert.doesNotMatch(sentence, /(?:^|\byou\s+|\*\*\s*)(?:run|start|type)\s+`pullboard relay (?:on|join)/iu, `the agent is never told to run it: ${sentence}`);
+  }
+  assert.doesNotMatch(section, /(?:^|[.:;]\s+)(?:Run|Start|Type)\s+`pullboard relay (?:on|join)/mu, 'no imperative sends the agent to relay on or join');
 });
 
 test('init appends only the agent-worktree ignore rule and the second init writes nothing [I1,I2,I16]', t => {

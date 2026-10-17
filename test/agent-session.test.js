@@ -9,6 +9,7 @@ import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { listResources } from '../src/resources.js';
+import { SSH_SHELL_MARKERS } from '../src/person.js';
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
 const DIRS = [];
@@ -40,8 +41,8 @@ function sandbox() {
     return runFixtureGit(args, { cwd, env: base });
   }
   /** Run the actual CLI with an explicit agent session or markerless terminal. */
-  function run(cwd, args, { session, sessionKey = 'CLAUDE_CODE_SESSION_ID', agent = true } = {}) {
-    const env = { ...base };
+  function run(cwd, args, { session, sessionKey = 'CLAUDE_CODE_SESSION_ID', agent = true, extra = {} } = {}) {
+    const env = { ...base, ...extra };
     if (agent) {
       env.CLAUDECODE = '1';
       if (session !== undefined) env[sessionKey] = session;
@@ -122,8 +123,8 @@ test('a second session cannot write in the main checkout until takeover [B3,B7]'
   const error = JSON.parse(refused.stdout).error;
   assert.equal(error.code, 'NOT_YOUR_CHECKOUT');
   assert.match(error.message, /coordinator/u);
-  assert.match(error.next, /pullboard worktree/u);
-  assert.match(error.message, /pullboard takeover/u);
+  assert.match(error.next, /git worktree add --detach/u);
+  assert.match(error.next, /pullboard takeover/u);
   assert.deepEqual(boardSnapshot(box.boardFile), before, 'refusal leaves all board counts unchanged');
   const worktrees = box.git(box.repo, 'worktree', 'list', '--porcelain');
   for (const args of [['init'], ['worktree', 'web'], ['hooks'], ['spec', 'apply'], ['hook', 'pre-commit'], ['submit', '1']]) {
@@ -163,7 +164,7 @@ test('lane ownership is session-scoped and takeover preserves the joined agent [
   assert.notEqual(refused.status, 0);
   assert.equal(JSON.parse(refused.stdout).error.code, 'NOT_YOUR_CHECKOUT');
   assert.match(JSON.parse(refused.stdout).error.message, /web-1/u);
-  assert.match(JSON.parse(refused.stdout).error.next, /pullboard worktree/u);
+  assert.match(JSON.parse(refused.stdout).error.next, /git worktree add --detach/u);
   assert.deepEqual(boardSnapshot(box.boardFile), before, 'refused lane write leaves event and item counts unchanged');
 
   const takeover = box.run(box.web, ['takeover', '--json'], { session: second, sessionKey: 'CODEX_THREAD_ID' });
@@ -306,4 +307,37 @@ test('takeover waits for an active write and then refuses the old session [B3,B7
     await submission.closed;
     if (takeover) await takeover.closed;
   }
+});
+
+test('a remote shell is recognized by any SSH marker [B26,E22]', () => {
+  const box = project();
+  for (const key of SSH_SHELL_MARKERS) delete box.base[key];
+  writeFileSync(join(box.repo, 'SPEC.md'), `${SPEC}- G2 [draft, must] A probe row for person moves. | gate: true\n`);
+  box.git(box.repo, 'commit', '-qam', 'docs: draft a probe row');
+  const markers = {
+    SSH_CONNECTION: '192.0.2.10 12345 192.0.2.20 22',
+    SSH_CLIENT: '192.0.2.10 12345 22',
+    SSH_TTY: '/dev/pts/7',
+  };
+  const shells = [...Object.entries(markers).map(([key, value]) => ({ [key]: value })), markers];
+  const before = boardSnapshot(box.boardFile);
+  for (const extra of shells) {
+    const label = Object.keys(extra).join('+');
+    const refused = box.run(box.repo, ['spec', 'approve', 'G2', '--json'], { agent: false, extra });
+    assert.equal(refused.status, 1, `${label}: ${refused.stdout}${refused.stderr}`);
+    const error = JSON.parse(refused.stdout).error;
+    assert.equal(error.code, 'B26_PERSON_CHANNEL', `${label} gives the person-channel refusal`);
+    assert.match(error.message, /remote SSH shell/u, `${label} is named as a remote shell`);
+    assert.match(error.next, /pullboard view/u, `${label} points the person at the view`);
+    assert.deepEqual(boardSnapshot(box.boardFile), before, `${label} records no person decision`);
+  }
+  const local = box.run(box.repo, ['spec', 'approve', 'G2', '--json'], { agent: false });
+  assert.equal(local.status, 0, `no SSH marker allows the person move: ${local.stdout}${local.stderr}`);
+
+  box.git(box.repo, 'remote', 'add', 'origin', 'https://github.com/example/session-fixture.git');
+  const relay = box.run(box.repo, ['relay', 'on', '--url', 'http://127.0.0.1:9', '--json'], { agent: false, extra: { SSH_CLIENT: markers.SSH_CLIENT } });
+  const relayError = JSON.parse(relay.stdout || '{}').error;
+  assert.notEqual(relayError?.code, 'B26_PERSON_CHANNEL', `relay on over SSH keeps its own channel: ${relay.stdout}${relay.stderr}`);
+  assert.equal(relayError?.code, 'RELAY_UNAVAILABLE', 'relay on over SSH reaches the relay');
+  assert.match(relayError.message, /\/auth\/device\/start/u, 'relay on over SSH starts its device sign-in (#615)');
 });

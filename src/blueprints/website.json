@@ -14,5 +14,9 @@
   "questions": [
     { "key": "Q1", "ask": "The site is built with", "choices": ["Astro", "Hugo", "Next.js", "Something else"], "default": "Astro" },
     { "key": "Q2", "ask": "It is hosted on", "choices": ["Netlify", "Vercel", "GitHub Pages", "My own server"], "default": "Netlify" }
+  ],
+  "items": [
+    { "key": "1", "title": "Every internal link points at a real page", "cites": ["WEB2"], "criterion": "Every link from one page of the site to another points at a page that exists in the built site. test/links.test.js builds the site, follows every internal link, and fails before the change.", "brief": "Files:\n- test/links.test.js\nTest:\n- test/links.test.js builds the site locally, follows every internal link, and fails on a link to a missing page", "check": "npm test -- test/links.test.js" },
+    { "key": "2", "title": "Every page reads in full with JavaScript turned off", "cites": ["WEB1"], "criterion": "The main text of every page is in the HTML the site serves, before any script runs. test/no-javascript.test.js reads every built page without running its scripts and fails before the change.", "brief": "Files:\n- test/no-javascript.test.js\nTest:\n- test/no-javascript.test.js reads each built page as plain HTML and fails when its main text is missing", "check": "npm test -- test/no-javascript.test.js" }
   ]
 }

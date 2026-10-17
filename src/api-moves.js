@@ -5,14 +5,15 @@ import { Refused } from './refused.js';
 const MOVES = {
   'spec-approve': { prefix: ['spec', 'approve'], positions: ['ids'], flags: ['by', 'text'] },
   'spec-decline': { prefix: ['spec', 'decline'], positions: ['ids'], flags: ['reason'] },
+  'spec-answer': { prefix: ['spec', 'answer'], positions: ['row', 'answer'] },
   add: { positions: ['lane', 'title'], flags: ['criterion', 'specs', 'parent', 'after', 'brief', 'route', 'check'], booleans: ['wait'], booleans: ['wait'] },
-  edit: { item: true, flags: ['criterion', 'brief', 'route', 'check'], booleans: ['wait'], booleans: ['wait'] },
-  fact: { item: true, positions: ['kind', 'text'], flags: ['supersedes', 'ref'] },
+  edit: { item: true, flags: ['criterion', 'brief', 'route', 'check', 'reason'], booleans: ['wait'], booleans: ['wait'] },
+  fact: { item: true, positions: ['kind', 'text'], flags: ['supersedes', 'ref', 'implies'] },
   claim: { item: true },
   release: { item: true, flags: ['note'] },
   submit: { item: true },
   done: { item: true },
-  verify: { item: true, positions: ['decision'], flags: ['reason', 'note', 'as'] },
+  verify: { item: true, positions: ['decision'], flags: ['reason', 'note', 'as', 'implies'] },
   merged: { item: true, positions: ['commit'] },
   withdraw: { item: true, positions: ['reason'] },
   refreeze: { item: true },
@@ -20,7 +21,7 @@ const MOVES = {
   escalate: { item: true, flags: ['note'] },
   hold: { positions: ['lane'], flags: ['reason'], booleans: ['off'] },
   shout: { positions: ['to', 'text'], optional: ['to'], booleans: ['decision'], flags: ['evidence', 'outcome', 'item', 'commit'] },
-  answer: { item: true, positions: ['text'], flags: ['as'] },
+  answer: { item: true, positions: ['text'], flags: ['as', 'implies', 'supersedes'] },
   pass: { item: true, positions: ['note'] },
   next: { flags: ['as'], booleans: ['verify', 'build'] },
 };
@@ -41,7 +42,8 @@ export function moveArgs({ verb, item, args = {} }) {
   const positional = [];
   for (const key of form.positions ?? []) {
     if (args[key] === undefined && form.optional?.includes(key)) continue;
-    if (typeof args[key] !== 'string' || !args[key].trim()) throw new Refused('BAD_REQUEST', `${verb} needs args.${key} as nonempty text; supply the CLI move's argument`);
+    const cliRefusesBlank = verb === 'shout' && key === 'text';
+    if (typeof args[key] !== 'string' || (!args[key].trim() && !cliRefusesBlank)) throw new Refused('BAD_REQUEST', `${verb} needs args.${key} as nonempty text; supply the CLI move's argument`);
     positional.push(args[key]);
   }
   for (const key of form.flags ?? []) if (args[key] !== undefined) {

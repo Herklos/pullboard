@@ -73,7 +73,7 @@ async function relayRequest(url, token, path, body) {
   } catch { throw new Refused('RELAY_UNAVAILABLE', 'the relay did not answer; retry pairing with the same code before it expires'); }
   let document;
   try { document = await response.json(); } catch { throw new Refused('RELAY_RESPONSE', 'the relay returned an invalid pairing response; ask for a fresh code'); }
-  if (!response.ok) throw new Refused(document.error?.code || 'RELAY_UNAVAILABLE', document.error?.message || 'the relay refused pairing; ask the linked device for a fresh code');
+  if (!response.ok) throw new Refused(document.error?.code || 'RELAY_UNAVAILABLE', document.error?.message || 'the relay refused pairing; ask the linked device for a fresh code', document.error?.next);
   if (document.version !== 1) throw new Refused('RELAY_VERSION', 'the relay pairing API version is unsupported; upgrade Pullboard before pairing');
   return document;
 }
@@ -106,22 +106,26 @@ function localSnapshot(root) {
 
 /** Create a one-use code and publish only an encrypted board package to the relay. */
 export async function relayPair(root, io) {
-  await syncRelay(root, io);
   const file = linkFile(root);
+  loadState(file);
+  // Freeze the native event boundary before asynchronous sync; retry if it changes during pairing.
+  const initialCursor = localSnapshot(root).snapshot.tables.event.at(-1)?.event_id ?? 0;
+  await syncRelay(root, io);
   const state = loadState(file);
   if (state.unlinking) throw new Refused('RELAY_UNLINK_PENDING', 'finish unlinking this board before creating a pairing code');
   if (originRepository(root) !== state.repository) throw new Refused('RELAY_ORIGIN', 'the origin repository no longer matches this relay link; restore the linked GitHub origin first');
   const local = localSnapshot(root);
   if (local.board !== state.board) throw new Refused('RELAY_STORAGE', 'the local board identity differs from its relay link; restore the matching board before pairing');
   const cursor = local.snapshot.tables.event.at(-1)?.event_id ?? 0;
-  if (cursor !== state.cursor) throw new Refused('PAIR_BUSY', 'a local move changed during pairing; run pullboard relay pair again after sync completes');
-  if (state.pending || state.pendingMove || state.snapshot || state.linkPending) {
-    throw new Refused('PAIR_PENDING', 'finish the pending relay acknowledgement or snapshot before creating a pairing code; retry relay sync first');
-  }
   const metadata = new Map(local.snapshot.tables.board_meta.map((row) => [row.meta_key, row.meta_value]));
   const applied = metadata.get('relay_applied_sequence');
   const engine = metadata.get('relay_engine_version');
   const ordered = state.mode === 'ordered' || (applied !== undefined && engine !== undefined);
+  // Mirror cursors count native events; ordered packages are guarded by their acknowledged relay prefix below.
+  if (cursor !== initialCursor || (!ordered && cursor !== state.cursor)) throw new Refused('PAIR_BUSY', 'a local move changed during pairing; run pullboard relay pair again after sync completes');
+  if (state.pending || state.pendingMove || state.snapshot || state.linkPending) {
+    throw new Refused('PAIR_PENDING', 'finish the pending relay acknowledgement or snapshot before creating a pairing code; retry relay sync first');
+  }
   let sequence = state.sequence;
   if (ordered) {
     const value = Number(applied);
@@ -135,10 +139,22 @@ export async function relayPair(root, io) {
     version: 1, board: state.board, url: state.url, repository: state.repository,
     mode: ordered ? 'ordered' : 'mirror', sequence, cursor, key: encodeBoardKey(key), snapshot: local.snapshot,
   };
+  const changed = () => {
+    const current = localSnapshot(root);
+    return current.board !== local.board || (current.snapshot.tables.event.at(-1)?.event_id ?? 0) !== cursor;
+  };
+  const busy = () => new Refused('PAIR_BUSY', 'a local move changed during pairing; run pullboard relay pair again after sync completes');
   const code = createPairingCode(state.board);
   const sealed = await sealPairingBundle(code.code, bundle);
-  const response = await relayRequest(state.url, state.token,
-    `/api/v1/pairings/${code.board}/${code.locator}`, { sealed });
+  if (changed()) throw busy();
+  const path = `/api/v1/pairings/${code.board}/${code.locator}`;
+  const response = await relayRequest(state.url, state.token, path, { sealed });
+  if (changed()) {
+    // This code has never left this process. Discard its opaque package without exposing its secret.
+    try { await relayRequest(state.url, state.token, path + '/consume', {}); }
+    catch { io.err?.('pullboard: the unused pairing package could not be discarded; it expires within 10 minutes'); }
+    throw busy();
+  }
   const viewLink = relayStatus(root).link;
   io.result?.({ code: code.code, link: viewLink, expiresIn: response.expiresIn });
   io.say(`One-time code (10 minutes, one use): ${code.code}`);

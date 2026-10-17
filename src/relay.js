@@ -6,7 +6,7 @@ import { basename, dirname, join } from 'node:path';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import * as store from './board.js';
 import { exportBoard, importBoard, restoreRelaySnapshot, semanticBoardDigest } from './exchange.js';
-import { appliedSequence, applyRelayMove, checkpointSequence, engineReceipt, prepareEngineMove, refuseRelayMove, requireSupportedEngine, startRelayEpoch } from './engine.js';
+import { appliedSequence, applyEngineMove, applyRelayMove, checkpointSequence, engineReceipt, prepareEngineMove, refuseRelayMove, requireSupportedEngine, startRelayEpoch } from './engine.js';
 import { relayMoveActor } from './relay-sender.js';
 import { ENGINE_VERSION } from './machine.js';
 import { presentationDigest, relayPresentation, relaySnapshot } from './relay-presentation.js';
@@ -15,11 +15,12 @@ import { forgetBoardKey, readBoardKey, storeBoardKey } from './relay-key.js';
 import { encodeBoardKey, generateBoardKey, seal, unseal } from './seal.js';
 import { terminalQr } from './qr.js';
 import { Refused } from './refused.js';
+import { refusalFromReceipt } from './recorded-refusal.js';
 import { relaySenderProblem } from './relay-sender.js';
 import { readRelayMachine, removeRecordedDevice, updateRelayMachine, wrapForRecordedDevice } from './relay-machine.js';
 import { receivePersonRequest, requestMoveProblem } from './relay-requests.js';
 import { nativePhoneAction, phoneProposal, publishPhoneApproval, warnPhoneApproval } from './relay-phone.js';
-import { requirePersonChannel, requireRelayOnChannel } from './person.js';
+import { remoteShell as isRemoteShell, requirePersonChannel, requireRelayOnChannel } from './person.js';
 import { listApiProjects } from './projects.js';
 
 export const DEFAULT_RELAY = 'https://app.pullboard.dev';
@@ -34,6 +35,7 @@ const CHECKPOINT_MOVES = new WeakMap();
 const BASELINE_LOCAL_MOVES = new WeakSet();
 const BASELINE_FAILURES = new WeakMap();
 const AUTH_NOTICES = new WeakSet();
+const DELETION_NOTICES = new WeakSet();
 const ORDERED_MOVE_COMMANDS = new Set(['add', 'edit', 'fact', 'escalate', 'run', 'sweep', 'next', 'claim', 'hold', 'release',
   'submit', 'done', 'verify', 'merged', 'land', 'withdraw', 'refreeze', 'shout', 'answer', 'pass', 'import', 'milestone', 'takeover', 'forget', 'join', 'worktree']);
 
@@ -71,6 +73,118 @@ export function originRepository(root) {
 
 /** Find the shared local link metadata without opening a board or connecting for an unlinked repo. */
 function linkFile(root) { return join(repoInfo(root).commonDir, 'pullboard', 'relay.json'); }
+
+/** Locate the credential-free reason an independently deleted copy no longer syncs. */
+function deletedLinkFile(root) { return join(repoInfo(root).commonDir, 'pullboard', 'relay-deleted.json'); }
+
+/** Read only a private, bounded deletion marker; it never supplies credentials or an outbound destination. */
+function deletedLink(root) {
+  const file = deletedLinkFile(root);
+  if (!existsSync(file)) return null;
+  const stat = lstatSync(file);
+  if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) || stat.size > 4096) throw new Refused('RELAY_STORAGE', 'restore the private deleted-copy notice before reading relay status');
+  let value;
+  try { value = JSON.parse(readFileSync(file, 'utf8')); } catch { throw new Refused('RELAY_STORAGE', 'restore the private deleted-copy notice before reading relay status'); }
+  if (value?.version !== 1 || !/^[0-9a-f]{32}$/u.test(value.board ?? '') || typeof value.url !== 'string') throw new Refused('RELAY_STORAGE', 'restore the supported deleted-copy notice before reading relay status');
+  relayOrigin(value.url);
+  const recovered = value.recovered;
+  if (recovered !== undefined && (!recovered || !/^[A-Za-z0-9_-]{1,80}$/u.test(recovered.id ?? '')
+      || !/^[0-9a-f]{64}$/u.test(recovered.intent ?? '')
+      || (recovered.commandIntent !== undefined && !/^[0-9a-f]{64}$/u.test(recovered.commandIntent)))) {
+    throw new Refused('RELAY_STORAGE', 'restore the private interrupted-move receipt pointer before retrying');
+  }
+  return value;
+}
+
+/** Accept deletion only from the configured versioned relay for this credential's own board. */
+function confirmedDeletion(state, error) {
+  return error instanceof Refused && error.httpStatus === 410 && error.relayVersion === 1
+    && error.relayCode === 'RELAY_BOARD_DELETED' && error.relayMessage?.startsWith(`relay copy ${state.board} was deleted;`);
+}
+
+/** Atomically persist a private notice and its optional key-free native receipt pointer. */
+function saveDeletedLink(root, value) {
+  const marker = deletedLinkFile(root);
+  const temporary = marker + '.' + randomUUID() + '.tmp';
+  const encoded = JSON.stringify(value) + '\n';
+  if (Buffer.byteLength(encoded) > 4096) throw new Refused('RELAY_STORAGE', 'restore a bounded deleted-copy notice before retrying');
+  try {
+    writeFileSync(temporary, encoded, { flag: 'wx', mode: 0o600 });
+    renameSync(temporary, marker);
+  } finally { rmSync(temporary, { force: true }); }
+}
+
+/** Compare an interrupted intent without retaining command arguments or credentials in the notice. */
+function intentDigest(intent) { return createHash('sha256').update(intent).digest('hex'); }
+
+/** Commit the sender's pending native obligation before any link metadata or key can be removed. */
+function retainDeletedMove(root, state) {
+  const recovered = state.pending ?? state.recovered;
+  if (!recovered) return null;
+  const move = recovered.move;
+  if (!move || typeof move.id !== 'string') throw new Refused('RELAY_STORAGE', 'restore the interrupted move before forgetting the deleted copy');
+  const intent = recovered.intent ?? operationIntent(move.operation, move.args);
+  if (typeof intent !== 'string' || recovered.commandIntent !== undefined
+      && recovered.commandIntent !== operationIntent('cli:' + recovered.command?.cliOperation, recovered.command)) {
+    throw new Refused('RELAY_STORAGE', 'restore the interrupted command metadata before retrying');
+  }
+  localRecords(root, board => {
+    const receipt = engineReceipt(board, move.id);
+    if (receipt) {
+      if (receipt.move !== JSON.stringify(move)) throw new Refused('RELAY_MOVE', 'restore the interrupted move that matches its durable receipt before retrying');
+      return; // A crash after the receipt must not advance the native cursor again.
+    }
+    applyEngineMove(board, move, { sequence: appliedSequence(board) + 1, at: board.clock.now().toISOString() });
+  });
+  return { id: move.id, intent: intentDigest(intent),
+    ...(recovered.commandIntent === undefined ? {} : { commandIntent: intentDigest(recovered.commandIntent) }) };
+}
+
+/** Resolve the private pointer only through the exact durable native receipt, never a remote key. */
+function deletedRecovery(root) {
+  const marker = deletedLink(root);
+  if (!marker?.recovered) return null;
+  const receipt = localRecords(root, board => engineReceipt(board, marker.recovered.id));
+  let move;
+  try { move = receipt && JSON.parse(receipt.move); } catch { /* Refuse a corrupt receipt below. */ }
+  if (!move || move.id !== marker.recovered.id || !receipt.outcome) {
+    throw new Refused('RELAY_STORAGE', 'restore the interrupted native receipt before retrying its command');
+  }
+  return { marker, receipt, move };
+}
+
+/** Consume only the reported receipt, preserving the truthful deleted-copy notice. */
+function clearDeletedRecovery(root, marker) {
+  delete marker.recovered;
+  saveDeletedLink(root, marker);
+}
+
+/** Return an exact interrupted result once; a different command can continue beside the saved move. */
+function deletedMoveResult(root, operation, args, command, io, applyLocally) {
+  const recovered = deletedRecovery(root);
+  const pointer = recovered?.marker.recovered;
+  const matches = pointer && (pointer.commandIntent === undefined
+    ? pointer.intent === intentDigest(operationIntent(operation, args))
+    : recovered.move.operation === operation && pointer.commandIntent === intentDigest(operationIntent('cli:' + command?.cliOperation, command)));
+  if (!matches) return applyLocally();
+  clearDeletedRecovery(root, recovered.marker);
+  if (recovered.receipt.outcome.error) throw refusalFromReceipt(recovered.receipt.outcome.error);
+  for (const event of recovered.receipt.outcome.events ?? []) io.onEvent?.(event);
+  return recovered.receipt.outcome.result;
+}
+
+/** Preserve the pending native move and a truthful notice before removing the inert link. */
+function forgetDeletedCopy(root, file, state, io) {
+  const recovered = retainDeletedMove(root, state);
+  saveDeletedLink(root, { version: 1, board: state.board, url: state.url, ...(recovered ? { recovered } : {}) });
+  updateRelayMachine(machine => { const project = repoInfo(root).root; if (!machine.excluded.includes(project)) machine.excluded.push(project); });
+  rmSync(file, { force: true });
+  try { forgetBoardKey(state.board, state.keyStorage); } catch { /* An unavailable key store cannot block completed local opt-out. */ }
+  if (!DELETION_NOTICES.has(io)) {
+    DELETION_NOTICES.add(io);
+    io.err(`pullboard: [RELAY_BOARD_DELETED] relay copy ${state.board} was deleted; local work continues; run pullboard relay on only to link it again`);
+  }
+}
 
 /** Validate private link metadata before trusting its destination or acknowledgement cursor. */
 function loadLink(file) {
@@ -188,7 +302,8 @@ async function request(state, path, { method = 'GET', body, allowMissing = false
   // Only off can forget a link after a supported API reports that the board is gone.
   if (allowMissing && method === 'DELETE' && response.status === 404 && document.version === 1) return { alreadyDeleted: true };
   if (!response.ok) {
-    const error = new Refused(document.error?.code || 'RELAY_UNAVAILABLE', (document.error?.code === 'AUTH_REQUIRED' ? ((state.agent || token?.startsWith('pa_')) ? 'this agent token is expired or revoked; use a new token issued by the person for this agent, then retry with PULLBOARD_RELAY_TOKEN' : 'the relay sign-in expired or was revoked; run pullboard relay on to sign in again without changing the board key') : (document.error?.message ? `the relay ${state.url}: ${document.error.message}` : null)) || 'the relay refused this send; retry this command explicitly when reachable');
+    const error = new Refused(document.error?.code || 'RELAY_UNAVAILABLE', (document.error?.code === 'AUTH_REQUIRED' ? ((state.agent || token?.startsWith('pa_')) ? 'this agent token is expired or revoked; use a new token issued by the person for this agent, then retry with PULLBOARD_RELAY_TOKEN' : 'the relay sign-in expired or was revoked; run pullboard relay on to sign in again without changing the board key') : (document.error?.message ? `the relay ${state.url}: ${document.error.message}` : null)) || 'the relay refused this send; retry this command explicitly when reachable',
+      document.error?.code === 'AUTH_REQUIRED' ? undefined : document.error?.next);
     error.httpStatus = response.status;
     error.relayVersion = document.version;
     error.relayCode = document.error?.code;
@@ -243,11 +358,15 @@ function recoverySummary(state) {
 
 /** Expose key-free link status; only an explicit link operation includes its pairing carrier. */
 function summary(root, state, { pairing = false } = {}) {
-  if (!state) return { linked: false, board: '', url: '', link: '', sequence: 0, behind: 0, recovery: recoverySummary(null) };
+  if (!state) {
+    const deleted = deletedLink(root);
+    return { linked: false, board: deleted?.board ?? '', url: deleted?.url ?? '', link: '', sequence: 0, behind: 0, recovery: recoverySummary(null),
+      ...(deleted ? { deleted: true, notice: 'The relay copy was deleted; your local board is complete. Keep working locally, or run pullboard relay on to link it again.' } : {}) };
+  }
   if (state.unlinking) return { linked: false, board: state.board, url: state.url, link: '', sequence: state.sequence, behind: 0, cleanup: true, recovery: recoverySummary(state) };
   const fragment = pairing ? '&key=' + encodeBoardKey(readBoardKey(state.board)) : '';
   const oversizedSnapshot = snapshotSize(state);
-  return { linked: true, board: state.board, url: state.url,
+  return { linked: true, board: state.board, url: state.url, account: state.account ?? '', login: state.login ?? '',
     link: 'https://app.pullboard.dev/#board=' + state.board + fragment,
     sequence: state.sequence, behind: (state.baselinePause ? behind(root, state) : state.mode === 'ordered' ? Number(Boolean(state.pending)) : behind(root, state)) + Number(Boolean(state.snapshot || state.checkpoint)),
     recovery: recoverySummary(state),
@@ -792,7 +911,7 @@ async function catchUp(root, file, state, io) {
     delete state.pending;
   }
   saveLink(file, state);
-  if (pendingRefusal) throw new Refused(pendingRefusal.code, pendingRefusal.message);
+  if (pendingRefusal) throw refusalFromReceipt(pendingRefusal);
 }
 
 /** Finish a durable executable send; a collision reseals its unchanged id after applying the winner. */
@@ -917,6 +1036,11 @@ export async function relayOperation(root, operation, args, io, command, applyLo
   const file = linkFile(root);
   return locked(file, async () => {
     const state = loadLink(file);
+    /** Apply through the CLI's existing board handle so local events and guards remain unchanged. */
+    const applyPausedMoveLocally = () => typeof applyLocally === 'function'
+      ? applyLocally()
+      : localRecords(root, (board) => store[operation](board, ...args));
+    if (!state && deletedRecovery(root)) return deletedMoveResult(root, operation, args, command, io, applyPausedMoveLocally);
     if (!state || state.unlinking) throw new Refused('RELAY_UNLINK_PENDING', 'finish unlinking this device with pullboard relay off before sending a move');
     if (state.recovery) throw new Refused('RELAY_RECOVERY_PENDING', `finish the saved recovery for sequence ${state.recovery.skip} before sending a linked move`);
     if (credentialActor({ operation, args, personRequest: io?.personRequest }) === 'person') {
@@ -926,10 +1050,6 @@ export async function relayOperation(root, operation, args, io, command, applyLo
     if (!moves) { moves = new Set(); CHECKPOINT_MOVES.set(io, moves); }
     if (moves.has(state.board)) CHECKPOINT_NOTICES.get(io)?.delete(state.board);
     moves.add(state.board);
-    /** Apply through the CLI's existing board handle so local events and guards remain unchanged. */
-    const applyPausedMoveLocally = () => typeof applyLocally === 'function'
-      ? applyLocally()
-      : localRecords(root, (board) => store[operation](board, ...args));
     try {
       if (!await ensureOrdered(root, file, state, io)) {
         // Preflight's notice covers the first move; long-running commands still name every later move.
@@ -949,7 +1069,7 @@ export async function relayOperation(root, operation, args, io, command, applyLo
           delete state.recovered;
           saveLink(file, state);
         }
-        if (previousReceipt.outcome.error) throw new Refused(previousReceipt.outcome.error.code, previousReceipt.outcome.error.message);
+        if (previousReceipt.outcome.error) throw refusalFromReceipt(previousReceipt.outcome.error);
         for (const event of previousReceipt.outcome.events ?? []) io.onEvent?.(event);
         return previousReceipt.outcome.result;
       }
@@ -982,14 +1102,19 @@ export async function relayOperation(root, operation, args, io, command, applyLo
       try { await publishCheckpoint(root, file, state, io); }
       catch (error) {
         if (!(error instanceof Refused)) throw error;
-        if (error.code === 'AUTH_REQUIRED') reportExpiredSignIn(state, io);
+        if (confirmedDeletion(state, error)) forgetDeletedCopy(root, file, state, io);
+        else if (error.code === 'AUTH_REQUIRED') reportExpiredSignIn(state, io);
         else io.err(`pullboard: ${error.message}`);
       }
-      if (receipt.outcome.error) throw new Refused(receipt.outcome.error.code, receipt.outcome.error.message);
-      if (['register', 'ensureCoordinator'].includes(operation)) await actorTransport(root, file, state, receipt.outcome.result, io);
+      if (receipt.outcome.error) throw refusalFromReceipt(receipt.outcome.error);
+      if (existsSync(file) && ['register', 'ensureCoordinator'].includes(operation)) await actorTransport(root, file, state, receipt.outcome.result, io);
       for (const event of receipt.outcome.events ?? []) io.onEvent?.(event);
       return receipt.outcome.result;
     } catch (error) {
+      if (confirmedDeletion(state, error)) {
+        forgetDeletedCopy(root, file, state, io);
+        return deletedMoveResult(root, operation, args, command, io, applyPausedMoveLocally);
+      }
       if (error instanceof Refused && error.code === 'AUTH_REQUIRED') throw expiredSignInMoveRefusal(state, error);
       throw error;
     }
@@ -1024,6 +1149,7 @@ export async function syncRelay(root, io) {
     }
     catch (error) {
       if (!(error instanceof Refused)) throw error;
+      if (confirmedDeletion(state, error)) { forgetDeletedCopy(root, file, state, io); return summary(root, null); }
       if (error.code === 'RELAY_KEY_MISSING') {
         if (!KEY_WARNED_COMMANDS.has(io)) {
           KEY_WARNED_COMMANDS.add(io);
@@ -1094,7 +1220,18 @@ export async function relayCommandReceipt(root, command) {
   const file = linkFile(root);
   return locked(file, async () => {
     const state = loadLink(file);
-    if (!state || state.unlinking) return null;
+    if (!state) {
+      const recovered = deletedRecovery(root);
+      if (!recovered || recovered.marker.recovered.commandIntent !== intentDigest(operationIntent('cli:' + command.cliOperation, command))) return null;
+      const expected = { add: 'addItem', edit: 'editItem', merged: 'merged' }[command.cliOperation];
+      if (recovered.move.operation !== expected) throw new Refused('RELAY_STORAGE', 'restore the interrupted command receipt before retrying');
+      if (recovered.receipt.outcome.error) {
+        clearDeletedRecovery(root, recovered.marker);
+        throw refusalFromReceipt(recovered.receipt.outcome.error);
+      }
+      return { result: recovered.receipt.outcome.result, events: recovered.receipt.outcome.events ?? [], move: recovered.move };
+    }
+    if (state.unlinking) return null;
     const recovered = state.recovered;
     if (!recovered || recovered.commandIntent !== operationIntent('cli:' + command.cliOperation, command)) return null;
     if (recovered.commandIntent !== operationIntent('cli:' + recovered.command?.cliOperation, recovered.command)) {
@@ -1107,7 +1244,7 @@ export async function relayCommandReceipt(root, command) {
     if (receipt.outcome.error) {
       delete state.recovered;
       saveLink(file, state);
-      throw new Refused(receipt.outcome.error.code, receipt.outcome.error.message);
+      throw refusalFromReceipt(receipt.outcome.error);
     }
     return { result: receipt.outcome.result, events: receipt.outcome.events ?? [], move };
   });
@@ -1121,13 +1258,17 @@ export async function relayCommandReceiptReported(root, moveId) {
     if (state?.recovered?.move?.id === moveId) {
       delete state.recovered;
       saveLink(file, state);
+    } else if (!state) {
+      const recovered = deletedRecovery(root);
+      if (recovered?.move.id === moveId) clearDeletedRecovery(root, recovered.marker);
     }
   });
 }
 
 /** Expose only an unreported operation descriptor so CLI preconditions cannot strand its outcome. */
 export function relayRecovered(root) {
-  return loadLink(linkFile(root))?.recovered?.move ?? null;
+  const state = loadLink(linkFile(root));
+  return state ? state.recovered?.move ?? null : deletedRecovery(root)?.move ?? null;
 }
 
 /** Explicitly refuse one blocked position, replay its valid tail on a private copy, then publish it. */
@@ -1303,7 +1444,7 @@ async function deviceSignIn(url, io, { signal, intent, onSignIn } = {}) {
 
 /** Explicitly sign in through the relay and persist a sealed initial snapshot before uploading it. */
 export async function relayOn(root, address, io, { session, credential, quiet = false, strict = false } = {}) {
-  const remoteShell = io.personChannel !== 'view' && Boolean(process.env.SSH_CONNECTION || process.env.SSH_TTY);
+  const remoteShell = io.personChannel !== 'view' && isRemoteShell();
   const reusableSession = remoteShell ? undefined : session;
   const reusableCredential = remoteShell ? undefined : credential;
   if (remoteShell) {
@@ -1352,8 +1493,11 @@ export async function relayOn(root, address, io, { session, credential, quiet = 
     const issued = reusableCredential ?? await request({ ...state, token: signed.token }, '/auth/machines', { method: 'POST', body: { board: state.board, machine } }, io);
     if (!/^pm_[A-Za-z0-9_-]{43}$/u.test(issued.token ?? '') || issued.board !== state.board || issued.machine !== machine) throw new Refused('RELAY_RESPONSE', 'the relay did not issue this board’s machine credential; sign in again');
     // Cached agent credentials belong to the account that minted them.
-    if (state.account !== account) delete state.agentTokens;
+    if (state.account !== account) { delete state.agentTokens; delete state.login; }
     state.account = account;
+    // Kept so relay status can name who linked the board; a phone-approved credential carries none.
+    const login = signed.login ?? signed.user?.login;
+    if (typeof login === 'string' && login) state.login = login;
     state.token = issued.token;
     state.tokenId = issued.id;
     state.machine = machine;
@@ -1373,6 +1517,7 @@ export async function relayOn(root, address, io, { session, credential, quiet = 
       }
       if (ready) ready = await ensureOrdered(root, file, state, io);
       if (ready) {
+        rmSync(deletedLinkFile(root), { force: true });
         await catchUp(root, file, state, io);
         await deliverDeviceWraps(root, io);
         updateRelayMachine(machine => { machine.excluded = machine.excluded.filter(entry => entry !== repoInfo(root).root); });
@@ -1392,9 +1537,17 @@ export async function relayOff(root, io) {
   return locked(file, async () => {
     const state = loadLink(file);
     if (!state) return summary(root, null);
+    let joined = [];
+    try {
+      const roster = await request(state, '/auth/machines?board=' + state.board, {}, io);
+      if (Array.isArray(roster.machines)) joined = roster.machines.filter(entry => typeof entry.machine === 'string' && /^[A-Za-z0-9_.-]{1,128}$/u.test(entry.machine) && entry.machine !== state.machine).map(entry => entry.machine);
+    } catch { /* Local unlink still completes when the relay cannot inventory joined computers. */ }
+    const warning = joined.length ? ' If you approve deletion, joined computers ' + joined.map(machine => machine.slice(-8)).join(', ') + ' lose the shared copy; their local boards keep working.' : '';
+    if (warning) io.err(warning.trim());
     // Local unlink always completes, including agent shells, outages and a fenced remote baseline.
+
     let proposal;
-    try { proposal = await phoneProposal(state, 'delete-board', state.board); }
+    try { proposal = await phoneProposal(state, 'delete-board', state.board, { root }); }
     catch { /* Missing key or pairing cannot stop local unlinking. */ }
     rmSync(file, { force: true });
     try { forgetBoardKey(state.board, state.keyStorage); }
@@ -1410,7 +1563,8 @@ export async function relayOff(root, io) {
     }
     return { linked: false, board: state.board, url: state.url, link: '', sequence: state.sequence, behind: 0, recovery: recoverySummary(null),
       ...(remote ? { remote } : {}),
-      notice: 'Local link removed. The relay copy stays until you approve deleting it on your phone.' + (requested ? '' : ' Open the phone to manage the relay copy.') };
+      ...(joined.length ? { affectedMachines: joined } : {}),
+      notice: 'Local link removed. The relay copy stays until you approve deleting it on your phone.' + warning + (requested ? '' : ' Open the phone to manage the relay copy.') };
   });
 }
 
@@ -1445,7 +1599,8 @@ export async function relayMachineSignIn(address, io, { signal, onSignIn } = {})
     return { outcome: 'cancelled' };
   }
   if (typeof signed.user?.id !== 'string') throw new Refused('RELAY_RESPONSE', 'Sign in again to receive an authenticated account identity.');
-  return { token: signed.token, id: signed.id, account: signed.user.id, url };
+  // The login is display text only: the account id stays the identity every check compares.
+  return { token: signed.token, id: signed.id, account: signed.user.id, login: typeof signed.user.login === 'string' ? signed.user.login : '', url };
 }
 
 /** Share the existing bounded transport only with fixed account/device endpoints. */

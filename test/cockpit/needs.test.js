@@ -1,10 +1,135 @@
+/** @pullboard-test-input source-tree */
 /** Cockpit needs checks, using the shared real-board fixtures [N26]. */
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { SPEC, machine, project, build, sendBack, startView, styleOf, element, openPage, projectRows, agentEntries, needEntries, itemRow, shoutNameText, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, chooseFilter } from './fixture.js';
+import { SPEC, machine, project, build, sendBack, startView, styleOf, element, openPage, projectRows, agentEntries, needEntries, itemRow, shoutNameText, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, chooseFilter, boardId, boardOf, fetchLive, serveFolder } from './fixture.js';
+import { cockpitPage } from '../../src/cockpit.js';
+import { personNeeds } from '../../src/needs.js';
+
+test('every Needs-you surface follows the shared builder [N26,A9]', async () => {
+  const box = machine();
+  const alpha = project(box, 'builder substitution', `${SPEC}- G3 [pending] Raw board question. | gate: review\n- G4 [draft, aim] Raw board draft. | gate: review\n`);
+  box.run(alpha.repo, 'shout', 'person', 'Raw board decision?', '--decision');
+  box.run(alpha.repo, 'hold', 'web', '--reason', 'Raw board hold');
+  const view = await startView(box);
+  try {
+    const page = await openPage(view);
+    const calls = [
+      { kind: 'decision', id: 701, ref: 'reviewer', text: 'Builder decision one?', what: 'decision' },
+      { kind: 'decision', id: 702, ref: 'reviewer', text: 'Builder decision two?', what: 'decision' },
+      { kind: 'pending', id: 'S701', ref: 'S701', text: 'Builder question one.', what: 'answer in SPEC.md' },
+      { kind: 'pending', id: 'S702', ref: 'S702', text: 'Builder question two.', what: 'answer in SPEC.md' },
+      { kind: 'hold', id: 'builder-lane', ref: 'builder-lane', text: 'Builder hold.', what: 'lane held by builder' },
+      { kind: 'draft', id: 'drafts', count: 7, ref: '7', text: 'draft spec rows to approve or drop', what: 'review in SPEC.md', target: 'tab:spec' },
+    ];
+    assert.deepEqual(JSON.parse(page.run('JSON.stringify(personNeeds(data.project).map(row => row.kind))')),
+      ['decision', 'pending', 'hold', 'draft'], 'the real raw board disagrees with the substituted list and counts');
+    await page.run(`globalThis.builderCalls = ${JSON.stringify(calls)}; personNeeds = () => builderCalls; refresh();`);
+    assert.deepEqual(JSON.parse(page.run('JSON.stringify(projectNeeds(data.project))')), calls,
+      'the combined-project list follows exactly the substituted builder');
+    assert.deepEqual(needEntries(page.show('needs')), [
+      ['decide:701', null, 'Builder decision one?', 'a decision, asked by reviewer', 'decide'],
+      ['decide:702', null, 'Builder decision two?', 'a decision, asked by reviewer', 'decide'],
+      ['spec:S701', 'S701', 'Builder question one.', 'an open question in SPEC.md', 'answer'],
+      ['spec:S702', 'S702', 'Builder question two.', 'an open question in SPEC.md', 'answer'],
+      ['tab:shouts', 'builder-lane', 'Builder hold.', 'lane held by builder', 'release'],
+      ['tab:spec', '7', 'draft spec rows to approve or drop', 'Spec rows waiting on you', 'review'],
+    ], 'the actual panel follows all returned calls, their order and draft multiplicity');
+    assert.equal(page.element('needs').hidden, false);
+    assert.deepEqual(JSON.parse(page.run('JSON.stringify((({decisions,pending,holds,drafts}) => ({decisions,pending,holds,drafts}))(boardSummary({},data.project)))')),
+      { decisions: 2, pending: 2, holds: 1, drafts: 7 }, 'summary counts come from the substituted builder');
+    assert.equal(projectRows(page.show('proj-list')).find(row => row.root === alpha.repo)?.needs, '12',
+      'the refreshed sidebar counts the same calls, including all seven draft rows');
+    assert.equal(page.run('document.title'), '(12) builder substitution · Pullboard');
+    await page.run('builderCalls = []; refresh();');
+    assert.deepEqual(JSON.parse(page.run('JSON.stringify(projectNeeds(data.project))')), []);
+    assert.deepEqual(needEntries(page.show('needs')), [], 'the panel clears when the shared builder returns no calls');
+    assert.equal(page.element('needs').hidden, true);
+    assert.deepEqual(JSON.parse(page.run('JSON.stringify((({decisions,pending,holds,drafts}) => ({decisions,pending,holds,drafts}))(boardSummary({},data.project)))')),
+      { decisions: 0, pending: 0, holds: 0, drafts: 0 });
+    assert.equal(projectRows(page.show('proj-list')).find(row => row.root === alpha.repo)?.needs, '');
+    assert.equal(page.run('document.title'), 'builder substitution · Pullboard');
+  } finally {
+    await view.stop();
+  }
+});
+
+test("the page's Needs-you comes from the shared builder [N26]", { timeout: 180_000 }, async (t) => { // budget: hang ceiling for private board/API setup and the two real browser modes, not a throughput claim.
+  const box = machine();
+  const alpha = project(box, 'shared needs', `${SPEC}- G3 [pending] Choose the greeting. | gate: review\n- G4 [draft, must] Keep the footer. | gate: review\n- G5 [draft, aim] Keep the header. | gate: review\n`);
+  box.run(alpha.repo, 'shout', 'person', 'Ship the greeting?', '--decision');
+  box.run(alpha.web, 'shout', 'coordinator', 'An agent-only question?', '--decision');
+  box.run(alpha.repo, 'hold', 'web', '--reason', 'Wait for the greeting decision');
+  const view = await startView(box);
+  let snapshotHost, relayServer, chrome;
+  const profiles = [];
+  try {
+    const id = await boardId(view, alpha.repo);
+    const approved = await fetchLive(view.base + '/api/v1/boards/' + id + '/moves', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-pullboard-key': view.key },
+      body: JSON.stringify({ verb: 'spec-approve', args: { ids: 'G5' } }),
+    });
+    assert.equal(approved.status, 200, 'the real private view records the person approval');
+    const state = await boardOf(view, alpha.repo);
+    const expected = personNeeds(state);
+    assert.deepEqual(state.needs, expected, 'the actual API carries the shared builder output after pending person decisions');
+    assert.deepEqual(expected.map(row => [row.kind, row.id, row.count ?? null]), [
+      ['decision', 1, null], ['pending', 'G3', null], ['hold', 'web', null], ['draft', 'drafts', 1],
+    ], 'agent questions and already-approved rows are excluded; the remaining draft count is exact');
+    const page = await openPage(view);
+    assert.deepEqual(JSON.parse(page.run('JSON.stringify(projectNeeds(data.project))')), expected, 'the live page uses the same builder');
+    assert.equal(needEntries(page.show('needs')).length, expected.length, 'the panel has one row per shared entry');
+    assert.deepEqual(JSON.parse(page.run('JSON.stringify((({decisions,pending,holds,drafts}) => ({decisions,pending,holds,drafts}))(boardSummary({},data.project)))')),
+      { decisions: 1, pending: 1, holds: 1, drafts: 1 }, 'summary counts describe those same entries');
+    assert.equal(page.run('document.title'), '(4) shared needs · Pullboard');
+    assert.ok(needEntries(page.show('needs')).some(row => row[3] === 'lane held by coordinator (unknown)'), 'the hold retains its human-readable attribution');
+
+    const output = join(box.dir, 'needs-export');
+    box.run(alpha.repo, 'view', '--export', output);
+    const listing = JSON.parse(readFileSync(join(output, 'api/v1/boards.json'), 'utf8'));
+    const exported = JSON.parse(readFileSync(join(output, 'api/v1/boards', listing.boards[0].id, 'state.json'), 'utf8')).state;
+    assert.deepEqual(exported.needs, expected, 'the real export carries the same calls');
+    const executable = chromeExecutable();
+    if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME for exported and relay page parity.');
+    snapshotHost = await serveFolder(output, '/snapshot/');
+    // This transport reads the real isolated API; no board state or Needs-you result is mocked.
+    const transport = `export async function createTransport() { return { async request(path) { const reply = await fetch('/upstream' + path); if (!reply.ok) throw new Error('private board read failed'); return reply.json(); } }; }`;
+    relayServer = createServer(async (request, response) => {
+      const url = new URL(request.url, 'http://127.0.0.1');
+      try {
+        if (url.pathname === '/') return response.writeHead(200, { 'content-type': 'text/html' }).end(cockpitPage('', { readOnly: true, transportModule: '/transport.js', stylesheet: '/view.css' }));
+        if (url.pathname === '/transport.js') return response.writeHead(200, { 'content-type': 'text/javascript' }).end(transport);
+        if (url.pathname === '/view.css') return response.writeHead(200, { 'content-type': 'text/css' }).end(readFileSync(new URL('../../src/view.css', import.meta.url)));
+        if (url.pathname.startsWith('/upstream/')) {
+          const reply = await fetchLive(view.base + url.pathname.slice('/upstream'.length) + url.search, { headers: { 'x-pullboard-key': view.key } });
+          return response.writeHead(reply.status, { 'content-type': 'application/json' }).end(await reply.text());
+        }
+        response.writeHead(404).end();
+      } catch { response.writeHead(500).end('private API unavailable'); }
+    });
+    await new Promise(resolve => relayServer.listen(0, '127.0.0.1', resolve));
+    for (const [mode, address] of [['export', snapshotHost.base + '/snapshot/'], ['relay page', 'http://127.0.0.1:' + relayServer.address().port + '/']]) {
+      const profile = mkdtempSync(join(tmpdir(), 'pullboard-shared-needs-')); profiles.push(profile);
+      chrome = await openSnapshotChrome(executable, address, profile);
+      await chrome.waitFor("data?.project?.needs?.length === 4 && document.querySelectorAll('#needs > .row').length === 4");
+      assert.deepEqual(JSON.parse(await chrome.stable('JSON.stringify(projectNeeds(data.project))')), expected, mode + ' computes identical entries');
+      assert.deepEqual(JSON.parse(await chrome.stable('JSON.stringify([...document.querySelectorAll("#needs > .row .t")].map(row => row.textContent))')),
+        ['Ship the greeting?', 'G3Choose the greeting.', 'webWait for the greeting decision', '1draft spec rows to approve or drop'], mode + ' renders the same calls');
+      assert.deepEqual(chrome.exceptions, [], mode + ' has no uncaught exception');
+      await closeSnapshotChrome(chrome); chrome = null;
+    }
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    if (relayServer) await new Promise(resolve => relayServer.close(resolve));
+    if (snapshotHost) await snapshotHost.close();
+    for (const profile of profiles) rmSync(profile, { recursive: true, force: true });
+    await view.stop();
+  }
+});
 
 
 test('a decision waits in needs-you until the view answers it [B21, B26, N27]', async () => {

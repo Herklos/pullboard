@@ -88,7 +88,7 @@ function boardCursors(value) {
 /** Name the board a many-board stream refused, unless the refusal already does (A2). */
 function namedRefusal(id, error) {
   if (!(error instanceof Refused) || error.message.includes(id)) return error;
-  return new Refused(error.code, `board ${id}: ${error.message.replace(/^\[[A-Z0-9_]+\] /u, '')}`);
+  return new Refused(error.code, `board ${id}: ${error.message.replace(/^\[[A-Z0-9_]+\] /u, '')}`, error.next);
 }
 
 /** Whether a request asks for a live text/event-stream response rather than JSON. */
@@ -352,7 +352,7 @@ export function applyStateDelta(state, delta) {
 
 /** Choose the same HTTP refusal class for local and sealed relay adapters. */
 export function apiStatus(error) {
-  return { AUTH_REQUIRED: 401, TOKEN_BOARD: 403, API_ORIGIN: 403, BAD_ORIGIN: 403, WRITE_REQUIRED: 403, HUMAN_REQUIRED: 403, NO_REPO_ACCESS: 403, NO_BOARD: 404, NO_SHOUT: 404, BOARD_NOT_LINKED: 404, NO_SNAPSHOT: 404, BASELINE_EXISTS: 412, SNAPSHOT_REQUIRED: 409, SEQUENCE_REPEAT: 409, SEQUENCE_GAP: 409 }[error.code] ?? (error instanceof Refused ? 400 : 500);
+  return { RELAY_BOARD_DELETED: 410, AUTH_REQUIRED: 401, TOKEN_BOARD: 403, API_ORIGIN: 403, BAD_ORIGIN: 403, WRITE_REQUIRED: 403, HUMAN_REQUIRED: 403, NO_REPO_ACCESS: 403, NO_BOARD: 404, NO_SHOUT: 404, BOARD_NOT_LINKED: 404, NO_SNAPSHOT: 404, BASELINE_EXISTS: 412, SNAPSHOT_REQUIRED: 409, SEQUENCE_REPEAT: 409, SEQUENCE_GAP: 409 }[error.code] ?? (error instanceof Refused ? 400 : 500);
 }
 
 // Relay-only snapshot/delete routes reuse the exact shared bounded-body and refusal boundary.

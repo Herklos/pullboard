@@ -10,23 +10,56 @@
  * It opens no outbound connection (P5).
  */
 import { spawnSync } from 'node:child_process';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  randomBytes,
+  timingSafeEqual,
+} from 'node:crypto';
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { createServer } from 'node:http';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+} from 'node:path';
 import * as store from './board.js';
 import { cockpitPage } from './cockpit.js';
 import { releaseHeadlinesBetween } from './changelog.js';
 import { VERSION } from './help.js';
 import { displayAgentName } from './agent-names.js';
-import { COORDINATOR, loadConfig } from './config.js';
-import { doctrineHistory, loadDoctrine, standardDoctrine } from './doctrine.js';
-import { codeIsFromMain, repoInfo, resolveCommit } from './git.js';
+import {
+  COORDINATOR,
+  loadConfig,
+} from './config.js';
+import {
+  doctrineHistory,
+  loadDoctrine,
+  standardDoctrine,
+} from './doctrine.js';
+import {
+  codeIsFromMain,
+  repoInfo,
+  resolveCommit,
+} from './git.js';
 import { committedIds } from './history.js';
 import { productSummaries } from './products.js';
-import { listApiProjects, registryFile } from './projects.js';
+import {
+  listApiProjects,
+  registryFile,
+} from './projects.js';
 import { fetchLocal } from './local-fetch.js';
 import { Refused } from './refused.js';
+import { personNeeds } from './needs.js';
+import { projectRowDecisions } from './row-decisions.js';
 import { loadSpec } from './spec.js';
 
 /** The page's styles (N26), read once: the page links them, so it needs no inline style. */
@@ -303,7 +336,7 @@ export function projectState(root, { seen = null, board: providedBoard = null, i
     const log = store.events(board);
     // When each agent last moved on the board: the log is in order, so the last write wins.
     const lastMove = new Map(log.map((event) => [event.event_by, event.event_at]));
-    return {
+    const state = projectRowDecisions(store.rowDecisions(board), {
       root: info.root,
       releaseNotes: viewReleaseNotes(),
       rowAgesAt: { [config.spec]: head, [doctrine.name]: head },
@@ -331,7 +364,9 @@ export function projectState(root, { seen = null, board: providedBoard = null, i
       unseen: seen === null ? null : { since: seen, count: board.db.prepare('SELECT COUNT(*) AS n FROM shout WHERE shout_id > ?').get(seen).n },
       // Each product's progress, counted as pullboard status counts it (N28).
       products: productSummaries(config, loadSpec(info.root, config), all),
-    };
+    });
+    // Pending person decisions govern the calls on the API, sealed relay and exported page alike.
+    return { ...state, needs: personNeeds(state) };
   }, providedBoard);
 }
 
@@ -377,6 +412,27 @@ export function codeAt(root, { path, from, to, commit, before = '' }) {
 }
 
 /**
+ * True when the OS refused the view's listen as an agent sandbox does: EPERM, or EACCES on a port
+ * anyone may open. EACCES on a port below 1024 is the ordinary privileged-port rule, so it stays as it is.
+ */
+function sandboxRefusedListen(error, port) {
+  return error.code === 'EPERM' || (error.code === 'EACCES' && (port === 0 || port >= 1024));
+}
+
+/**
+ * The step that lets a sandboxed view listen, for the agent tool this command runs under. Each
+ * named step is one that tool documents; any other tool gets the general step and the terminal.
+ */
+function sandboxListenStep(env = process.env) {
+  const terminal = 'or start pullboard view from a normal terminal';
+  if (env.CLAUDECODE) return `allow local network for Claude Code: set sandbox.network.allowLocalBinding to true in .claude/settings.json, ${terminal}`;
+  if (env.CODEX_SANDBOX !== undefined || env.CODEX_SANDBOX_NETWORK_DISABLED !== undefined) {
+    return `allow local network for Codex in its sandbox settings in ~/.codex/config.toml, ${terminal}`;
+  }
+  return `allow local network in your agent tool's sandbox settings, ${terminal}`;
+}
+
+/**
  * Serve the view until stopped, optionally giving its API access to only one registered project.
  *
  * @param {{ port?: number, secret?: string, projectRoot?: string }} [options]
@@ -389,7 +445,7 @@ export async function serveView({ port = 0, secret = randomBytes(18).toString('b
   // initialize, and use the real CLI entry point without adding a second move implementation.
   const { createLocalApiHandler } = await import('./api.js');
   const { main } = await import('./cli.js');
-  const apiHandler = createLocalApiHandler({ secret, getPort: () => bound, runCommand: main,
+  const apiHandler = createLocalApiHandler({ secret, getPort: () => bound, runCommand: main, stateDetail: 'summary',
     allowedOrigins: [HOSTED_ORIGIN], ...(projectRoot === undefined ? {} : { scope: { projectRoot } }) });
   const reply = (res, code, type, body) => {
     res.writeHead(code, {
@@ -481,6 +537,9 @@ export async function serveView({ port = 0, secret = randomBytes(18).toString('b
   return new Promise((ready, fail) => {
     const listen = (port) => {
       const failed = (error) => {
+        if (sandboxRefusedListen(error, port)) {
+          return fail(new Refused('SANDBOX_BLOCKED', `the sandbox around this command refused to let pullboard view listen on ${port ? `${LOOPBACK}:${port}` : LOOPBACK} (${error.code})\nnext: ${sandboxListenStep()}`));
+        }
         if (error.code !== 'EADDRINUSE') return fail(error);
         if (port !== 0 && port === last) return listen(0);
         return fail(asked === 0 ? error : new Refused('PORT_BUSY', `port ${asked} is in use: name another with --port, or leave --port out to take any free one`));
