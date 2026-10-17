@@ -125,7 +125,7 @@ It prints the folder to work in and what to run there first. Every join needs th
 6. A reject reopens the item. Fix it, commit, claim, submit again; the same head is refused. If you cannot get an item green, do not force it: \`pullboard escalate <id> --note "what you tried and how it failed"\` hands it one tier up.
 7. Your lane is done when its items are verified, not when they are submitted. After your last submit, keep running \`pullboard next --wait 9\`: a rejected item comes back to your lane.
 
-The coordinator merges verified items into the main line; builders never merge.
+The coordinator merges verified items into the main line; builders never merge. When a release ships, the coordinator runs \`pullboard milestone ship <name>\`: it records main's commit and moves the items that have not landed into the next milestone.
 
 For spare test capacity, use \`pullboard runner add <ssh-host> --slots <n> --browser <n>\`. It registers SSH capacity on this machine; \`pullboard resources\` shows runners and their usage. Only committed source goes to a runner, and board moves stay here.
 

@@ -971,6 +971,9 @@ test('[A1] every catalog command and subcommand has a real CLI exercise', () => 
   json(source, source.repo, 'milestone', ['add', 'Later'], 'add');
   json(source, source.repo, 'milestone', ['move', 'Later', '--before', 'Catalog'], 'move');
   json(source, source.repo, 'milestone', ['edit', 'Catalog', '--name', 'Release', '--note', 'Catalog coverage'], 'edit');
+  json(source, source.repo, 'milestone', ['edit', 'Release', '--target', '2026-10-20T18:00Z'], 'edit');
+  const shippedLater = json(source, source.repo, 'milestone', ['ship', 'Later'], 'ship');
+  assert.deepEqual([shippedLater.into, shippedLater.moved], [null, []], 'an empty milestone ships with nothing to move');
   json(source, source.repo, 'milestone', ['remove', 'Later'], 'remove');
   json(source, source.repo, 'milestone', ['remove', 'Release'], 'remove');
   const reopenItem = json(source, source.repo, 'add', ['coordinator', 'Reopen catalog item', '--criterion', 'Exercise the versioned reopen result.', '--check', 'true'], 'add').item;
@@ -1040,7 +1043,8 @@ test('[N26,A2] roadmap text, JSON and API state follow live local and registered
 
   const textRoadmap = box.run(box.repo, 'roadmap');
   assert.equal(textRoadmap.status, 0, textRoadmap.stderr);
-  assert.ok(textRoadmap.stdout.indexOf('Aftercare: 0/0 done') < textRoadmap.stdout.indexOf('Delivery: 0/2 done'));
+  assert.ok(textRoadmap.stdout.includes('Aftercare: 0/0 landed') && textRoadmap.stdout.indexOf('Aftercare: 0/0 landed') < textRoadmap.stdout.indexOf('Delivery: 0/2 landed'),
+    'the roadmap counts landed items, in milestone order');
   assert.match(textRoadmap.stdout, /Ship the release/);
   assert.match(textRoadmap.stdout, new RegExp(`#${localItem.item_id} Local release — claimed`));
   assert.match(textRoadmap.stdout, new RegExp(`foreign#${externalItem.item_id} External follow-up — open`));

@@ -196,7 +196,10 @@ test('[N26,A2] milestones stay ordered and only the coordinator can edit them', 
     agentId: 'web-2', decision: 'ACCEPT', reason: 'CRITERION_MET', note: 'checked the expected result',
     head: SHA_A, digest: 'digest:Publish', policy: 'any',
   });
-  assert.equal(store.roadmap(board)[0].done, 1, 'done counts follow verified item state');
+  assert.equal(store.roadmap(board)[0].done, 0, 'done counts only landed work, so a verified item is not done yet');
+  assert.equal(store.roadmap(board)[0].items[0].state, 'accepted', 'a verified item that has not landed reads as accepted');
+  store.merged(board, second, { agentId: 'coordinator', commit: SHA_A });
+  assert.equal(store.roadmap(board)[0].done, 1, 'done counts the item once its merge onto main is recorded');
   store.removeMilestone(board, 'Maintenance', { agentId: 'coordinator' });
   assert.deepEqual(store.milestones(board).map(({ name }) => name), ['Release']);
   assert.equal(store.getItem(board, second).item_status, 'verified', 'removing a milestone leaves its item untouched');
