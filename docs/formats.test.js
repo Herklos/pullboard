@@ -11,6 +11,7 @@ import { COORDINATOR } from '../src/config.js';
 import { JSON_SHAPES } from '../src/json.js';
 import { exportView } from '../src/serve.js';
 import { ENGINE_VERSION } from '../src/machine.js';
+import { applyEngineMove, prepareEngineMove } from '../src/engine.js';
 import {
   ACCEPT_REASON,
   answerDecision,
@@ -29,7 +30,6 @@ import {
   recordLandingBatch,
   recordLandingWaiver,
   recordLandingFlake,
-  finishLandingBatch,
   openBoard,
   passDecision,
   PERSON,
@@ -300,18 +300,25 @@ function recordEventContract() {
   submitFixture(board, first, { agentId: builder, commit: acceptedCommit, tree: 'b'.repeat(40), files: ['docs/formats.md'], policyCommit: 'a'.repeat(40) });
   reserveReview(board, first, { agentId: reviewer, leaseMs: 60_000, policy: 'agents' });
   verify(board, first, { agentId: reviewer, decision: 'ACCEPT', reason: ACCEPT_REASON, note: 'checked the example', head: acceptedCommit, digest: 'second', policy: 'agents', implies: [dependency] });
+  verify(board, first, { agentId: reviewer, decision: 'ACCEPT', note: 'checked a newer composition',
+    head: 'd'.repeat(40), digest: 'second', policy: 'agents',
+    review: { commit: acceptedCommit, head: 'd'.repeat(40), trunk: 'b'.repeat(40), paths: ['docs/formats.md'] } });
   merged(board, first, { agentId: coordinator, commit: 'c'.repeat(40) });
   const batch = recordLandingBatch(board, { agentId: coordinator, batch: { version: 1, id: 'format-example', base: 'a'.repeat(40), tip: 'c'.repeat(40),
     root: '/landing', branch: 'refs/heads/main', state: 'pushed', owner: 'format-example', logPath: '/landing.log', items: [{ id: first, commit: acceptedCommit, merge: 'c'.repeat(40) }] } });
   recordLandingWaiver(board, { agentId: PERSON, channel: 'terminal', id: 'format-waiver', test: 'test/flaky.test.js', until: '2099-01-01', reason: 'format example' });
   recordLandingFlake(board, { agentId: coordinator, test: 'test/flaky.test.js', hash: 'd'.repeat(64), names: ['flaky example'], lane: 'docs', batchId: batch.id });
-  finishLandingBatch(board, { agentId: coordinator, id: batch.id, tip: batch.tip });
+  // Exercise the new event's historical-engine semantics here; team-engine.test.js
+  // separately prepares and compares this path with the actual released engine 12.
+  const olderFinish = { ...prepareEngineMove(board, 'finishLandingBatch', [{ agentId: coordinator, id: batch.id, tip: batch.tip }]), engine: 12 };
+  assert.equal(applyEngineMove(board, olderFinish, { sequence: 1, at: '2026-10-17T20:00:00.000Z' }).error, undefined);
 
   const rejected = addItem(board, { by: coordinator, lane: 'docs', title: 'Rejected example' });
   claim(board, rejected, { agentId: builder, lane: 'docs', leaseMs: 60_000, freeze: freeze('rejected') });
   const rejectedCommit = 'd'.repeat(40);
   submitFixture(board, rejected, { agentId: builder, commit: rejectedCommit, tree: 'e'.repeat(40) });
-  verify(board, rejected, { agentId: reviewer, decision: 'REJECT', reason: 'TEST_FAILURE', note: 'the fixture failed', head: rejectedCommit, digest: 'rejected', policy: 'agents', implies: [dependency] });
+  verify(board, rejected, { agentId: reviewer, decision: 'REJECT', reason: 'TEST_FAILURE', note: 'the fixture failed', head: rejectedCommit, digest: 'rejected', policy: 'agents', implies: [dependency],
+    review: { commit: rejectedCommit, head: rejectedCommit, trunk: 'a'.repeat(40), paths: ['docs/formats.md'] } });
 
   const corrected = addItem(board, { by: coordinator, lane: 'docs', title: 'Corrected live claim' });
   claim(board, corrected, { agentId: builder, lane: 'docs', leaseMs: 60_000, freeze: freeze('before-correction') });

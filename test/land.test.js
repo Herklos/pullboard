@@ -365,6 +365,7 @@ function submitItem(box, entry, contents = 'PASS\n') {
 
 /** Verify only private fixture items at their actual submitted commits. */
 function acceptItem(box, entry) {
+  entry.reviewedTrunk = box.git(box.repo, 'rev-parse', 'main');
   box.git(box.repo, 'switch', '-q', '--detach', entry.commit);
   try {
     const verdict = box.run(box.repo, 'verify', String(entry.item), 'accept', '--as', 'coordinator', '--note', 'private landing fixture check passed');
@@ -493,7 +494,7 @@ test('land pushes one exact batch in verdict order and records each first-contai
   assert.equal(JSON.parse(lane.out).error?.code, 'COORDINATOR_ONLY');
 });
 
-test('land bisects a real red, skips named conflicts and refuses an unverified stack [B3,R3]', () => {
+test('land bisects a real red, blocks stale proof and refuses an unverified stack [B3,R3,E8]', () => {
   const box = landProject();
   box.env.LAND_SUPPRESS_RED = '1';
   const entries = FILES.map((file, index) => itemWorktree(box, index + 1, file));
@@ -511,8 +512,12 @@ test('land bisects a real red, skips named conflicts and refuses an unverified s
   const beforeEvents = events(box).length;
   const beforeCalls = calls(box).length;
   const dry = json(box, box.repo, 'land', '--max', '4', '--dry-run');
-  assert.deepEqual(dry.conflicts, [{ id: entries[1].item, files: [FILES[1]] }], JSON.stringify(dry));
-  assert.deepEqual(dry.blocked, [{ id: entries[3].item, code: 'STACKED_UNVERIFIED', stacked: hidden.item }]);
+  assert.deepEqual(dry.conflicts, [], 'main changed the reviewed path, so stale proof is blocked before attempting its merge');
+  assert.deepEqual(dry.blocked, [
+    { id: entries[1].item, code: 'STALE_VERDICT', file: FILES[1], commit: base,
+      reviewedTrunk: entries[1].reviewedTrunk, main: base },
+    { id: entries[3].item, code: 'STACKED_UNVERIFIED', stacked: hidden.item },
+  ]);
   assert.equal(events(box).length, beforeEvents, 'dry run creates no board batch');
   assert.equal(calls(box).length, beforeCalls, 'dry run runs no gate');
   const result = json(box, box.repo, 'land', '--max', '4');
@@ -540,11 +545,26 @@ test('land bisects a real red, skips named conflicts and refuses an unverified s
   assert.equal(box.git(box.remote, 'rev-parse', 'main'), result.batch.tip);
   assert.notEqual(result.batch.tip, base);
   const afterCalls = calls(box).length;
-  const again = json(box, box.repo, 'land');
-  assert.deepEqual(again.landed, []);
-  assert.equal(json(box, box.repo, 'show', String(entries[2].item)).item_status, 'open', 'the known red is returned to its builder');
-  assert.ok(!again.blocked.some((entry) => entry.id === entries[2].item), 'returned work is not offered as a verified landing candidate');
+  const again = box.run(box.repo, 'land', '--json');
+  assert.equal(again.code, 1, again.out + again.err);
+  assert.equal(JSON.parse(again.out).error.code, 'STALE_VERDICT', 'an all-blocked queue refuses instead of suggesting an empty successful land');
+  assert.equal(json(box, box.repo, 'show', String(entries[2].item)).item_status, 'open', 'the known red is returned to its builder and is no longer a verified landing candidate');
   assert.equal(calls(box).length, afterCalls, 'known unchanged red is not retried');
+});
+
+test('land names sibling conflicts whose reviews share the unchanged main [B3,R3,E8]', () => {
+  const box = landProject();
+  const entries = [1, 2].map(number => itemWorktree(box, number, FILES[0]));
+  submitItem(box, entries[0], 'PASS\nfirst sibling\n');
+  submitItem(box, entries[1], 'PASS\nsecond sibling\n');
+  for (const entry of entries) acceptItem(box, entry);
+  const dry = json(box, box.repo, 'land', '--dry-run');
+  assert.deepEqual(dry.blocked, [], 'neither acceptance is stale against unchanged main');
+  assert.deepEqual(dry.conflicts, [], 'each sibling merges with the current main considered individually');
+  assert.deepEqual(dry.items, entries.map(entry => entry.item));
+  const result = json(box, box.repo, 'land');
+  assert.deepEqual(result.landed, [entries[0].item]);
+  assert.deepEqual(result.conflicts, [{ id: entries[1].item, files: [FILES[0]] }], 'the actual batch names the collision between the two fresh siblings');
 });
 
 test('land diagnostics inherit their browser gate lease [C7]', () => {

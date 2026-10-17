@@ -849,8 +849,8 @@ const PRECHECKED = {
   claim: ['joined', 'checkProvesSomething'],
   submit: ['joined', 'checkProvesSomething', 'criterionUnchanged', 'treeClean', 'nothingUntracked', 'hasCommit', 'withinLane', 'trunkMergeClean', 'doctrineHolds', 'gateConfigured', 'queuedItemLease', 'gateGreen', 'treeStillDuringGate', 'noUnverifiedStack'],
   reserve: ['coordinatorSaysAs', 'joined', 'roadmapReadable'],
-  accept: ['coordinatorSaysAs', 'joined', 'atSubmittedCommit', 'trunkMergeClean', 'queuedItemLease', 'itemCheckGreen', 'noUnverifiedStack'],
-  reject: ['coordinatorSaysAs', 'joined', 'atSubmittedCommit'],
+  accept: ['coordinatorSaysAs', 'joined', 'atSubmittedCommit', 'reviewTreeCurrent', 'trunkMergeClean', 'queuedItemLease', 'itemCheckGreen', 'noUnverifiedStack'],
+  reject: ['coordinatorSaysAs', 'joined', 'atSubmittedCommit', 'reviewTreeCurrent'],
 };
 
 /**
@@ -969,15 +969,20 @@ test('submit, accept and reject refuse in the declared order, one failure peeled
     for (const verb of ['accept', 'reject']) {
       const decision = verb === 'accept' ? 'ACCEPT' : 'REJECT';
       const built = submittedItem(board);
+      const landed = submittedItem(board);
+      verdictOn(board, landed, 'web-2', 'ACCEPT');
+      store.merged(board, landed, { agentId: 'coordinator', commit: SHA_A });
       const open = store.addItem(board, { by: 'coordinator', lane: 'web', title: 'Page' });
       store.reserveReview(board, built, { agentId: 'web-2', leaseMs: 3_600_000, policy: 'any' });
       const judge = (id, agentId, fields) =>
-        outcome(() => store.verify(board, id, { agentId, decision, head: SHA_A, digest: 'wrong', policy: 'coordinator', note: '', ...fields }));
+        outcome(() => store.verify(board, id, { agentId, decision, head: SHA_A, digest: 'wrong', policy: 'coordinator', note: '', review: { commit: SHA_A, head: SHA_A, trunk: SHA_B, paths: ['web/page.js'] }, ...fields }));
       const bad = verb === 'accept' ? 'TEST_FAILURE' : 'NOPE';
       const good = verb === 'accept' ? undefined : 'TEST_FAILURE';
       const fired = [
         judge(999, 'web-2', { reason: bad }),
         judge(open, 'web-2', { reason: bad }),
+        judge(landed, 'web-2', { reason: bad }),
+        judge(built, 'web-2', { reason: bad, review: null }),
         judge(built, 'web-1', { reason: bad }),
         judge(built, light, { reason: bad }),
         judge(built, 'web-2', { reason: bad }),
@@ -1232,7 +1237,7 @@ test('the review lease is reviewLease in pullboard.json, 30 minutes unless the r
 test('the lifecycle page and the help show the reservation: reserve, and reviewFree on every verdict [V15, M1]', () => {
   const page = lifecycleMarkdown();
   assert.match(page, /^\| reserve \| submitted \| submitted \| agent, coordinator \| .*reviewFree \(REVIEW_HELD\) \|$/m);
-  for (const verb of ['accept', 'reject']) assert.match(page, new RegExp(`^\\| ${verb} \\| submitted \\| .*policyAllows \\(COORDINATOR_VERIFIES\\), familyAllows \\(O2_FAMILY_MATCH\\), reviewFree \\(REVIEW_HELD\\), criterionUnchanged`, 'm'));
+  for (const verb of ['accept', 'reject']) assert.match(page, new RegExp(`^\\| ${verb} \\| submitted, verified \\| .*policyAllows \\(COORDINATOR_VERIFIES\\), familyAllows \\(O2_FAMILY_MATCH\\), reviewFree \\(REVIEW_HELD\\), criterionUnchanged`, 'm'));
   assert.match(page, /^\| REVIEW_HELD \| no other agent holds its review under a live lease \| pullboard next --verify/m);
   assert.match(HELP.all, /^ {2}agent +claim, release, submit, reserve, accept, reject, escalate, refreeze \(when a live claim has a pending coordinator correction\)$/m);
   assert.match(HELP.all, /pullboard next --verify +reserve the next submitted item you can check/);
