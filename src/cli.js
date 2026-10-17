@@ -1707,8 +1707,10 @@ function setupCommands(io, { first, second, rest = [], values }) {
       io.say(agentSessionDigest()
         ? 'Next: run pullboard resume now to continue setup in this session; the new skills load next session, and setup does not need them.'
         : 'Next: ask your agent to set up Pullboard here; in Claude Code, start a new session first so it loads the Pullboard skills.');
+      // The offer comes before the staging line, which stays init's last line [I1,I2].
+      const code = await offerRelayAtInit(info.root, io);
       if (staging) io.say(`To commit Pullboard's files: ${staging}`);
-      return await offerRelayAtInit(info.root, io);
+      return code;
     },
     lane: () => {
       if (first !== 'add' || !second || rest.length || values.owns === undefined) {

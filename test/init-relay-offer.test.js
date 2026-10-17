@@ -113,6 +113,12 @@ updateRelayMachine((state) => { state.owner = { account: 'fixture-owner', url: $
 /** Count the sign-ins the loopback relay has started. */
 const signIns = (box) => box.calls.filter((call) => call.path.startsWith('/auth/device/start')).length;
 
+/** The last line init printed before the shell's exit mark; init ends with its staging line [I1,I2]. */
+function lastInitLine(output) {
+  const lines = output.split(EXIT_MARK)[0].replace(/\r/gu, '').split('\n').map((line) => line.trim()).filter(Boolean);
+  return lines.at(-1) ?? '';
+}
+
 /** Whether a repository's board is linked to the relay. */
 const linked = (root) => existsSync(join(root, '.git', 'pullboard', 'relay.json'));
 
@@ -147,6 +153,7 @@ test('a person at init shares with one Enter [H5,H17,B26]', { timeout: 240_000 }
     assert.equal(run.asked, true, 'a person at a terminal is asked');
     assert.equal(run.output.split(QUESTION).length - 1, 1, 'the question is asked once');
     assert.ok(run.output.split(QUESTION)[1].includes(RELAY_LATER), 'n prints the command for later');
+    assert.ok(lastInitLine(run.output).startsWith("To commit Pullboard's files: git add -f -- "), 'the staging line stays last');
     assert.equal(signIns(box), before, 'n starts no sign-in');
     assert.equal(linked(root), false, 'n links nothing');
   });
@@ -167,6 +174,7 @@ test('a person at init shares with one Enter [H5,H17,B26]', { timeout: 240_000 }
     assert.match(after, /Pair your phone once: \S+#device=/u, 'the pairing link is printed');
     assert.ok(after.includes('\x1b[30;47m') && after.includes('█'), 'the QR is printed');
     assert.equal(after.includes(RELAY_LATER), false, 'a yes is not told to run the command later');
+    assert.ok(lastInitLine(run.output).startsWith("To commit Pullboard's files: git add -f -- "), 'the staging line stays last');
     assert.deepEqual(['', 'y', 'Y', 'yes', ' y '].map(acceptsRelayOffer), [true, true, true, true, true], 'Enter or y is yes');
     assert.deepEqual(['n', 'no', 'later', null].map(acceptsRelayOffer), [false, false, false, false], 'anything else, or a closed terminal, is no');
   });
