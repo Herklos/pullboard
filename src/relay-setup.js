@@ -12,6 +12,13 @@ import { deliverDeviceWraps, relayDeviceRequest, relayMachineSignIn, relayMachin
 import { terminalQr } from './qr.js';
 import { Refused } from './refused.js';
 
+/** Say which paired phone must approve a new board's link, and when the request ends in this computer's time. */
+function approvalWait(name, pending, devices) {
+  const phone = devices.find(entry => entry.deviceId === pending.context.device)?.label ?? 'your paired phone';
+  const expires = new Date(pending.context.expires).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZoneName: 'short' });
+  return 'waiting for phone approval: approve linking ' + name + ' on ' + phone + ' by ' + expires;
+}
+
 /** Return local opt-in gaps without contacting the relay or renewing a person session. */
 export function unlinkedRelayProjects() {
   const machine = readRelayMachine();
@@ -19,7 +26,7 @@ export function unlinkedRelayProjects() {
   return listApiProjects().filter(project => !machine.excluded.includes(project.root)).flatMap(project => {
     try { if (relayStatus(project.root).linked) return []; } catch { /* Preserve the registered project as a named finding. */ }
     const pending = machine.approvals.find(entry => entry.root === project.root);
-    return [{ code: pending ? 'PHONE_APPROVAL_PENDING' : 'RELAY_NOT_LINKED', message: pending ? 'waiting for phone approval: ' + project.name + '; expires ' + new Date(pending.context.expires).toISOString() : 'not linked: ' + project.name + '; run pullboard relay on --all', next: pending && Date.now() < pending.context.expires ? 'Approve the named link on your paired phone.' : 'pullboard relay on --all' }];
+    return [{ code: pending ? 'PHONE_APPROVAL_PENDING' : 'RELAY_NOT_LINKED', message: pending ? approvalWait(project.name, pending, machine.devices) : 'not linked: ' + project.name + '; run pullboard relay on --all', next: pending && Date.now() < pending.context.expires ? 'Approve the named link on your paired phone.' : 'pullboard relay on --all' }];
   });
 }
 
@@ -37,6 +44,8 @@ export async function autoLinkProject(root, io) {
   if (machine.excluded.includes(project) || relayStatus(project).linked) return;
   const name = listApiProjects().find(entry => entry.root === project)?.name ?? project;
   let pending = machine.approvals.find(entry => entry.root === project);
+  // Only the command that publishes the request prints the wait; later commands poll quietly.
+  let announce = false;
   try {
     if (pending && Date.now() >= pending.context.expires) throw new Refused('PHONE_APPROVAL_EXPIRED', 'Link approval expired; run pullboard relay on --all explicitly to link this project.');
     let source;
@@ -59,11 +68,13 @@ export async function autoLinkProject(root, io) {
     if (!source?.token?.startsWith('pm_')) throw new Refused('RELAY_SESSION', 'Restore the publishing board link or run pullboard relay on --all.');
     if (!pending.published) {
       await publishPhoneApproval(source, pending, io, relayDeviceRequest);
+      announce = true;
       updateRelayMachine(state => { const entry = state.approvals.find(value => value.context.id === pending.context.id); if (entry) entry.published = true; });
     }
     const document = await relayDeviceRequest(source, '/api/v1/devices/approvals/' + pending.context.id, {}, io);
     if (document.approval.state !== 'approved') {
-      io.err('waiting for phone approval: ' + name + '; expires ' + new Date(pending.context.expires).toISOString() + '; local work continues.'); return;
+      if (announce) io.err(approvalWait(name, pending, machine.devices) + '; local work continues.');
+      return;
     }
     const privateKey = await restoreLinkReply(pending.replyKey);
     const result = await openApproval(privateKey, JSON.parse(Buffer.from(document.approval.response, 'base64url').toString('utf8')), pending.context, 'reply');
