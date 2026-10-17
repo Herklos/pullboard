@@ -7,6 +7,7 @@ import { git, headCommit, headTree, isClean, mainCheckout, repoInfo, tryGit, unt
 import { runGate, runProfiledShell, withGateSlot } from './gate.js';
 import { laneOf } from './lanes.js';
 import { Refused } from './refused.js';
+import { staleVerdictRefusal, verdictProjector } from './verdict-freshness.js';
 
 /** Quote a command argument without allowing shell interpolation. */
 function quote(value) { return `'${String(value).replaceAll("'", "'\\''")}'`; }
@@ -56,9 +57,16 @@ export function landingSubject(item) {
   return `${prefix}${subject.replace(/\.$/u, '')}${suffix}`;
 }
 
+/** Keep the submitted identity and, when different, its sealed checked composition. */
+function landingEntry(item) {
+  return { id: item.item_id, commit: item.item_commit,
+    ...(item.item_landing_commit !== item.item_commit ? { reviewedCommit: item.item_landing_commit } : {}) };
+}
+
 /** Select verified, unmerged candidates in verdict order, retaining dependency order [B3,R3]. */
 function candidates(board, root, base, maximum) {
   const all = store.listItems(board, { all: true });
+  const projector = verdictProjector(root, board, { main: base });
   const pending = all.filter((item) => item.item_status === 'verified' && !item.item_merged_commit);
   const order = new Map();
   for (const event of store.events(board)) if (event.event_kind === 'accept') order.set(event.item_id, event.event_id);
@@ -66,8 +74,12 @@ function candidates(board, root, base, maximum) {
   const ready = [];
   const blocked = [];
   const knownReds = store.landingBatches(board).flatMap((batch) => batch.culprits ?? []);
-  for (const item of pending) {
-    const known = knownReds.find((entry) => entry.id === item.item_id && entry.commit === item.item_commit);
+  for (const original of pending) {
+    const item = { ...original, item_landing_commit: store.checkedLandingCommit(board, original) };
+    const stale = projector.state(item);
+    if (stale) { blocked.push({ id: item.item_id, ...stale }); continue; }
+    const known = knownReds.find((entry) => entry.id === item.item_id && entry.commit === item.item_commit
+      && (entry.reviewedCommit ?? entry.commit) === item.item_landing_commit);
     if (known && !known.tests.every((failure) => store.landingWaiverFor(board, failure))) {
       blocked.push({ id: item.item_id, code: 'LAND_KNOWN_RED', tests: known.tests });
       continue;
@@ -75,7 +87,7 @@ function candidates(board, root, base, maximum) {
     const dependencies = (item.item_after || '').split(',').filter(Boolean).map(Number);
     if (dependencies.some((id) => !all.find((other) => other.item_id === id)?.item_merged_commit && !ready.some((other) => other.item_id === id))) continue;
     const stacked = store.unverifiedSubmissions(board).find((other) => other.item_id !== item.item_id
-      && tryGit(root, ['merge-base', '--is-ancestor', other.item_commit, item.item_commit]).status === 0
+      && tryGit(root, ['merge-base', '--is-ancestor', other.item_commit, item.item_landing_commit]).status === 0
       && tryGit(root, ['merge-base', '--is-ancestor', other.item_commit, base]).status !== 0);
     if (stacked) {
       blocked.push({ id: item.item_id, code: 'STACKED_UNVERIFIED', stacked: stacked.item_id });
@@ -103,7 +115,11 @@ async function mergeGroup(state, items) {
   for (const entry of items) {
     const item = store.getItem(state.board, entry.id ?? entry.item_id);
     if (item.item_status !== 'verified' || item.item_commit !== (entry.commit ?? item.item_commit)) throw new Refused('LAND_ITEM_MOVED', `item #${item.item_id} changed; rebuild the batch from current verified work`);
-    const result = tryGit(batch.root, ['merge', '--no-ff', item.item_commit, '-m', landingSubject(item)]);
+    const checked = store.checkedLandingCommit(state.board, item);
+    if (checked !== (entry.reviewedCommit ?? entry.commit ?? item.item_commit)) throw new Refused('LAND_ITEM_MOVED', `item #${item.item_id} was re-reviewed; rebuild its landing from the checked commit`);
+    const stale = verdictProjector(state.root, state.board, { main: batch.base }).state(item);
+    if (stale) throw staleVerdictRefusal(item, stale);
+    const result = tryGit(batch.root, ['merge', '--no-ff', checked, '-m', landingSubject(item)]);
     if (result.status !== 0) {
       const files = tryGit(batch.root, ['diff', '--name-only', '--diff-filter=U']).stdout.split('\n').filter(Boolean);
       if (!files.length) throw new Refused('LAND_MERGE', `merge of #${item.item_id} failed outside a conflict: ${result.stderr || result.stdout}; inspect ${batch.root} and its hooks before adopting`);
@@ -113,8 +129,8 @@ async function mergeGroup(state, items) {
       continue;
     }
     const first = git(batch.root, ['rev-list', '--first-parent', '--reverse', 'HEAD']).split('\n')
-      .find((commit) => tryGit(batch.root, ['merge-base', '--is-ancestor', item.item_commit, commit]).status === 0);
-    merged.push({ id: item.item_id, commit: item.item_commit, merge: first });
+      .find((commit) => tryGit(batch.root, ['merge-base', '--is-ancestor', checked, commit]).status === 0);
+    merged.push({ id: item.item_id, commit: item.item_commit, ...(checked !== item.item_commit ? { reviewedCommit: checked } : {}), merge: first });
   }
   return { items: merged, conflicts, tip: headCommit(batch.root) };
 }
@@ -197,14 +213,14 @@ async function gateGroup(state, label) {
   mkdirSync(directory, { recursive: true });
   const logPath = join(directory, `${label}-${state.batch.revision}.log`);
   await save(state, { state: 'gating', tip: headCommit(state.batch.root), logPath });
-  const gate = await runGate(state.batch.root, state.config, { trustStamp: false, landing: true, agent: 'coordinator', onWait: state.onWait });
+  const gate = await runGate(state.batch.root, state.config, { trustStamp: false, landing: true, agent: 'coordinator', onWait: state.onWait, stages: true, waivers: liveWaiverProjection(state.board) });
   copyFileSync(gate.log, logPath);
   if (gate.profilePath) copyFileSync(gate.profilePath, `${logPath}.profile.json`);
-  const result = { ...gate, failures: landingFailures(gate.output, state.batch.root), complete: completeGate(gate),
+  const result = { ...gate, failures: landingFailures(gate.output, state.batch.root), accounted: accountedFailures(gate, state.batch.root), complete: completeGate(gate),
     requiresGreen: Boolean(cached && !completeGate(cached)), tree, logPath };
   state.gates.set(tree, result);
-  await save(state, { gateResults: [...state.gates.values()].map(({ tree: testedTree, isGreen, failures, complete, requiresGreen, logPath: log }) =>
-    ({ tree: testedTree, isGreen, failures, complete: complete ?? null, requiresGreen: Boolean(requiresGreen), logPath: log })) });
+  await save(state, { gateResults: [...state.gates.values()].map(({ tree: testedTree, isGreen, failures, accounted, complete, requiresGreen, logPath: log }) =>
+    ({ tree: testedTree, isGreen, failures, accounted: accounted ?? null, complete: complete ?? null, requiresGreen: Boolean(requiresGreen), logPath: log })) });
   return result;
 }
 
@@ -227,12 +243,127 @@ async function diagnose(state, failures) {
   return flakes;
 }
 
+/**
+ * Read one stage's TAP strictly: test lines outside YAML blocks, each failure's file from its own
+ * block, and a final `# fail N` that equals the failures read. Anything after that summary other
+ * than summary counts or the package manager's own failure report means something else failed,
+ * so the stage is unaccounted and null is returned [B3,R3].
+ */
+export function tapFailures(output, root) {
+  const lines = output.split('\n');
+  const failures = [];
+  let yaml = null;
+  let active = null;
+  let version = false;
+  let summary = null;
+  let summaryAt = -1;
+  let cancelled = 0;
+  for (const [index, line] of lines.entries()) {
+    if (yaml !== null) {
+      if (line === `${yaml}...`) { yaml = null; continue; }
+      const location = /^\s*location:\s*['"]?(.+?):\d+(?::\d+)?['"]?\s*$/u.exec(line);
+      if (active && location) {
+        const path = location[1];
+        const file = isAbsolute(path) ? relative(root, path) : path.replace(/^\.\//u, '');
+        if (file && !file.startsWith('../') && !file.includes('\\')) active.file = file;
+      }
+      continue;
+    }
+    const block = /^(\s*)---\s*$/u.exec(line);
+    if (block) { yaml = block[1]; continue; }
+    if (/^TAP version \d+\s*$/u.test(line)) version = true;
+    const failed = /^\s*not ok\s+\d+\s+-\s+(.*)$/u.exec(line);
+    if (failed) {
+      active = { name: failed[1].replace(/\s+#.*$/u, ''), file: null };
+      if (/^(?:\.\/)?(?:test|tests)\/[^\r\n]+\.(?:[cm]?js|ts|py)$/u.test(active.name)) active.file = active.name.replace(/^\.\//u, '');
+      failures.push(active);
+      continue;
+    }
+    if (/^\s*ok\s+\d+/u.test(line)) { active = null; continue; }
+    const count = /^# fail (\d+)\s*$/u.exec(line);
+    if (count) { summary = Number(count[1]); summaryAt = index; }
+    const stopped = /^# cancelled (\d+)\s*$/u.exec(line);
+    if (stopped) cancelled = Number(stopped[1]);
+  }
+  if (yaml !== null || !version || summary === null || summary < 1 || summary !== failures.length || cancelled !== 0) return null;
+  const trailer = lines.slice(summaryAt + 1).every((line) => !line.trim() || /^# [a-z_]+ \d+(?:\.\d+)?\s*$/u.test(line) || /^npm (?:ERR!|error|warn|notice)\b/u.test(line));
+  return trailer ? failures : null;
+}
+
+/**
+ * The failures that explain a red run, or null when anything else may have failed: the command
+ * could not be split into stages, a stage did not finish, a stage exited other than 0 without
+ * exactly 1 and a complete TAP account of its failures, or a pipeline in a stage had a component
+ * that left no status or failed without its own complete TAP account. Waivers only ever subtract
+ * these [B3,R3].
+ */
+export function accountedFailures(gate, root) {
+  if (gate.isGreen || !Array.isArray(gate.stages) || !gate.stages.length) return null;
+  // Only the authenticated worker checkout may relocate remote failure locations.
+  const executionRoot = gate.executionRoot ?? root;
+  const failures = [];
+  for (const stage of gate.stages) {
+    if (!Number.isInteger(stage.status)) return null;
+    if (stage.pipeline !== undefined) {
+      // In a pipeline each failing component must explain itself; a forwarded account credits no one else [B3,R3].
+      const own = pipelineFailures(stage.pipeline, executionRoot);
+      if (!own || (stage.status === 0) !== (own.length === 0)) return null;
+      failures.push(...own);
+      continue;
+    }
+    if (stage.status === 0) continue;
+    const own = stage.status === 1 ? tapFailures(stage.output ?? '', executionRoot) : null;
+    if (!own) return null;
+    failures.push(...own);
+  }
+  return failures.length ? failures : null;
+}
+
+/**
+ * The failures a pipeline's components account for themselves, or null. Every component must have
+ * recorded its status, and every failing one must exit exactly 1 with a complete TAP account in its
+ * own output. A setup step that fails beside a consumer printing a waived test's TAP has no account
+ * of its own, so it is an independent red no waiver names, and it voids the run.
+ */
+function pipelineFailures(components, root) {
+  if (!Array.isArray(components) || components.some((entry) => !Number.isInteger(entry?.status))) return null;
+  const failures = [];
+  for (const { status, output } of components.filter((entry) => entry.status !== 0)) {
+    const own = status === 1 ? tapFailures(output ?? '', root) : null;
+    if (!own) return null;
+    failures.push(...own);
+  }
+  return failures;
+}
+
+/**
+ * Pair every named failure of a red run with the live person waiver covering it, or return null.
+ * One unnamed, unfiled or unwaived failure voids the whole run, so a waiver never hides another red [B3,R3].
+ */
+export function waivedFailures(board, failures) {
+  if (!Array.isArray(failures) || !failures.length || failures.some((entry) => !entry.file)) return null;
+  const covered = failures.map((failure) => ({ ...failure, waiver: store.landingWaiverFor(board, failure) }));
+  return covered.every((entry) => entry.waiver) ? covered : null;
+}
+
+/** Project the live person waivers a landing run may read, so it does not stop early on one [B3]. */
+export function liveWaiverProjection(board) {
+  const now = board.clock.now().getTime();
+  return store.landingWaivers(board).filter((waiver) => Date.parse(waiver.until) > now)
+    .map((waiver) => ({ kind: waiver.kind ?? store.landingWaiverKind(waiver.test), test: waiver.test }));
+}
+
+/** Name one waived failure with the person's waiver, its reason and its expiry [B3]. */
+export function waiverLine(failure) {
+  const { waiver } = failure;
+  return `waived: ${failure.name} (${failure.file}) by person waiver ${waiver.id} for ${waiver.kind ?? store.landingWaiverKind(waiver.test)} ${waiver.test}: ${waiver.reason}; expires ${waiver.until}`;
+}
+
 /** Record every failure's exact live waiver rather than changing which tests the gate runs. */
 function waivedProof(state, gate) {
   if (!completeGate(gate) || gate.requiresGreen) return null;
-  if (!gate.failures.length || gate.failures.some((entry) => !entry.file)) return null;
-  const failures = gate.failures.map((failure) => ({ ...failure, waiver: store.landingWaiverFor(state.board, failure)?.id }));
-  return failures.every((entry) => entry.waiver) ? { tree: gate.tree, failures, logPath: gate.logPath } : null;
+  const failures = waivedFailures(state.board, gate.accounted);
+  return failures ? { tree: gate.tree, failures: failures.map((entry) => ({ ...entry, waiver: entry.waiver.id })), logPath: gate.logPath } : null;
 }
 
 /** Bisect a reproducible red without retrying any previously tested group. */
@@ -244,7 +375,7 @@ async function bisect(state, items, failures, label = 'split') {
       await state.write('appendFact', [item.id, { agentId: 'coordinator', kind: 'measurement', text }]);
     }
     const mergeCommit = state.batch.tip;
-    if (!state.culprits.some((entry) => entry.id === item.id)) state.culprits.push({ id: item.id, commit: item.commit, mergeCommit, tests: failures });
+    if (!state.culprits.some((entry) => entry.id === item.id)) state.culprits.push({ id: item.id, commit: item.commit, ...(item.reviewedCommit ? { reviewedCommit: item.reviewedCommit } : {}), mergeCommit, tests: failures });
     await save(state, { culprits: state.culprits });
     await returnCulprits(state);
     state.say(`culprit #${item.id}: ${failures.map((failure) => failure.name).join(', ')}`);
@@ -275,6 +406,7 @@ async function returnCulprits(state) {
   for (const culprit of state.culprits) {
     const item = store.getItem(state.board, culprit.id);
     if (item.item_status !== 'verified' || item.item_merged_commit || item.item_commit !== culprit.commit
+      || (culprit.reviewedCommit ?? culprit.commit) !== store.checkedLandingCommit(state.board, item)
       || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(culprit.mergeCommit ?? '')) continue;
     const note = `Landing batch ${state.batch.id} failed ${culprit.tests.map((failure) => `${failure.file}: ${failure.name}`).join('; ')}; merge commit ${culprit.mergeCommit}`;
     await state.write('reopen', [culprit.id, { agentId: 'coordinator', note }]);
@@ -328,6 +460,13 @@ function requirePushTarget(root, branch) {
 /** Push the exact gated tip before recording receipts, then fast-forward only a clean unchanged main. */
 async function publish(state) {
   let batch = state.batch;
+  for (const entry of batch.items) {
+    const item = store.getItem(state.board, entry.id);
+    if (item.item_status !== 'verified' || item.item_commit !== entry.commit
+      || store.checkedLandingCommit(state.board, item) !== (entry.reviewedCommit ?? entry.commit)) {
+      throw new Refused('LAND_ITEM_MOVED', `item #${entry.id} changed its checked composition; rebuild the landing before publishing`);
+    }
+  }
   const remote = requirePushTarget(state.root, batch.branch);
   if (batch.proof?.failures?.length && batch.state !== 'pushed') {
     const failures = batch.proof.failures.map((failure) => ({ ...failure, waiver: store.landingWaiverFor(state.board, failure)?.id }));
@@ -366,11 +505,13 @@ export async function land({ root, board, config, write, say, owner, maximum = I
   if (!trunk?.commit) throw new Refused('LAND_TRUNK', 'landing needs the coordinator’s primary branch; return its checkout to the trunk');
   const unfinished = store.landingBatches(board).findLast((batch) => batch.state !== 'landed' && batch.state !== 'blocked');
   const selected = candidates(board, root, trunk.commit, maximum);
+  const stale = selected.blocked.find(item => item.code === 'STALE_VERDICT');
+  if (!selected.ready.length && stale) throw staleVerdictRefusal({ item_id: stale.id }, stale);
   if (dryRun) {
     if (selected.ready.length) requirePushTarget(root, trunk.branch);
     const conflicts = [];
     for (const item of selected.ready) {
-      const merge = tryGit(root, ['merge-tree', '--write-tree', '--name-only', '-z', trunk.commit, item.item_commit]);
+      const merge = tryGit(root, ['merge-tree', '--write-tree', '--name-only', '-z', trunk.commit, item.item_landing_commit]);
       if (merge.status === 1) {
         const parts = merge.stdout.split('\0').slice(1);
         const end = parts.indexOf('');
@@ -403,8 +544,8 @@ export async function land({ root, board, config, write, say, owner, maximum = I
     const id = randomUUID();
     const directory = join(repoInfo(root).commonDir, 'pullboard', 'landings', id);
     batch = { version: 1, id, base: trunk.commit, tip: trunk.commit, branch: trunk.branch, root: join(directory, 'worktree'),
-      candidates: selected.ready.map((item) => ({ id: item.item_id, commit: item.item_commit })),
-      items: selected.ready.map((item) => ({ id: item.item_id, commit: item.item_commit })), conflicts: [], blocked: selected.blocked,
+      candidates: selected.ready.map(landingEntry),
+      items: selected.ready.map(landingEntry), conflicts: [], blocked: selected.blocked,
       state: 'merging', owner, logPath: join(directory, 'logs', 'batch.log'), revision: 0 };
     batch = await write('recordLandingBatch', [{ agentId: 'coordinator', batch }]);
     mkdirSync(directory, { recursive: true });
