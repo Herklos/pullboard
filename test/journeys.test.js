@@ -12,6 +12,7 @@ import { machine, project, startView, fetchLive, openSnapshotChrome, closeSnapsh
 
 const JOURNEY_HOSTED = 'https://app.pullboard.dev';
 const JOURNEY_LOCAL = 'http://127.0.0.1:4890';
+const JOURNEY_BOARD_NAMES = ['fixture/repository', 'local-machine-b'];
 const CLI = resolve(import.meta.dirname, '../bin/pullboard.js');
 
 /** Wait for an owned fixture state transition without sleeping for a guessed duration. */
@@ -63,6 +64,291 @@ async function stopRelayAll(run) {
 function journeyApiPathKind(pathname) {
   const names = new Set(['api', 'v1', 'boards', 'state', 'events', 'moves', 'items', 'shouts', 'answers', 'devices', 'session', 'enrollments', 'approvals', 'requests', 'keys']);
   return pathname.split('/').map(part => !part || names.has(part) ? part : ':id').join('/');
+}
+
+/** Keep only the two fixture board names this journey owns; never report arbitrary client names. */
+function journeyFixtureBoardNames(names) {
+  const allowed = new Set(JOURNEY_BOARD_NAMES);
+  return [...new Set((Array.isArray(names) ? names : []).filter(name => allowed.has(name)))].sort();
+}
+
+/** Keep rendered text only for the two boards this owned fixture created. */
+function journeyFixtureRows(rows) {
+  return [...new Set((Array.isArray(rows) ? rows : []).filter(row => row && JOURNEY_BOARD_NAMES.includes(row.label)
+    && typeof row.text === 'string').map(row => row.text))].slice(0, 16);
+}
+
+/** Share the real hosted sidebar's all-expected-rows condition with its bounded failure regression. */
+function journeySidebarReady(rows, expected = JOURNEY_BOARD_NAMES) {
+  return expected.every(name => rows.some(row => row.includes(name)));
+}
+
+/** Bound a failure-only browser snapshot so a closed browser cannot extend the original row wait materially. */
+async function boundedJourneyRead(read, budgetMs = 500) {
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(read),
+      new Promise(resolve => { timer = setTimeout(() => resolve(null), budgetMs); }),
+    ]);
+  } finally { clearTimeout(timer); }
+}
+
+/** Capture only safe page-visible facts after the hosted journey's real row wait fails. */
+async function journeyFailureReport(readPage, readAnswers) {
+  let page = null;
+  let pageCaptureAvailable = false;
+  try {
+    const captured = JSON.parse(await readPage());
+    if (captured && typeof captured === 'object') { page = captured; pageCaptureAvailable = true; }
+  } catch { /* The original row failure remains the useful error. */ }
+  let answers = [];
+  let apiCaptureAvailable = false;
+  try {
+    const captured = await readAnswers();
+    if (Array.isArray(captured)) { answers = captured; apiCaptureAvailable = true; }
+  } catch { /* Missing observations never replace the row failure. */ }
+  const projects = Array.isArray(page?.projects) ? page.projects : [];
+  return {
+    pageCaptureAvailable,
+    apiCaptureAvailable,
+    rows: pageCaptureAvailable ? journeyFixtureRows(page?.rows) : [],
+    unknownRowsPresent: pageCaptureAvailable ? Boolean(page?.unknownRowsPresent) : null,
+    projects: pageCaptureAvailable ? projects.filter(project => JOURNEY_BOARD_NAMES.includes(project?.name)).map(({ name, source, ok, errorPresent }) => ({
+      name, source: source === 'relay' ? 'relay' : source === 'local' ? 'local' : 'other',
+      ok: Boolean(ok), errorPresent: Boolean(errorPresent),
+    })) : null,
+    unknownProjectsPresent: pageCaptureAvailable ? Boolean(page?.unknownProjectsPresent) : null,
+    pageFacts: {
+      localSessionPresent: pageCaptureAvailable ? Boolean(page?.localSessionPresent) : null,
+      localReadPresent: pageCaptureAvailable ? Boolean(page?.localReadPresent) : null,
+      localOriginIsFixture: pageCaptureAvailable ? Boolean(page?.localOriginIsFixture) : null,
+      transportPresent: pageCaptureAvailable ? Boolean(page?.transportPresent) : null,
+      transportLoading: pageCaptureAvailable ? Boolean(page?.transportLoading) : null,
+      transportLoadErrorPresent: pageCaptureAvailable ? Boolean(page?.transportLoadErrorPresent) : null,
+      relaySessionPresent: pageCaptureAvailable ? Boolean(page?.relaySessionPresent) : null,
+      localNoteState: !pageCaptureAvailable ? null : ['problem', 'blocked', 'asking', 'not-running', 'mismatch', 'local-failed', 'linked-failed', 'unpaired', 'no-linked', 'signed-out'].includes(page?.localNoteState)
+        ? page.localNoteState : '',
+      atHostedRoot: pageCaptureAvailable ? Boolean(page?.atHostedRoot) : null,
+      pairedFragmentPresent: pageCaptureAvailable ? Boolean(page?.pairedFragmentPresent) : null,
+    },
+    apiAnswers: apiCaptureAvailable ? answers.slice(0, 128).map(answer => ({
+      source: answer?.source === 'linked' ? 'linked' : 'local',
+      pathKind: typeof answer?.pathKind === 'string'
+        ? journeyApiPathKind(answer.pathKind.split(/[?#]/u, 1)[0]).replace(/\/$/u, '') || '/' : 'unknown',
+      status: Number.isInteger(answer?.status) && answer.status >= 100 && answer.status <= 599 ? answer.status : null,
+      boardNames: journeyFixtureBoardNames(answer?.boardNames),
+      requestAtMs: Number.isFinite(answer?.requestAtMs) && answer.requestAtMs >= 0 ? Math.round(answer.requestAtMs) : null,
+      responseAtMs: Number.isFinite(answer?.responseAtMs) && answer.responseAtMs >= 0 ? Math.round(answer.responseAtMs) : null,
+      completedAtMs: Number.isFinite(answer?.completedAtMs) && answer.completedAtMs >= 0 ? Math.round(answer.completedAtMs) : null,
+      streamOpen: Boolean(answer?.streamOpen),
+    })) : null,
+  };
+}
+
+/** Share the real row wait and failure reporter with a bounded regression fixture. */
+async function observeJourneyRows(wait, readPage, readAnswers) {
+  try {
+    await wait();
+    return { ready: true };
+  } catch (error) {
+    let report = { pageCaptureAvailable: false, apiCaptureAvailable: false };
+    try { report = await journeyFailureReport(readPage, readAnswers); } catch { /* Keep the original row failure if reporting itself fails. */ }
+    return { ready: false, error, report };
+  }
+}
+
+test('the hosted journey names what it saw when a board row never arrives [N40]', async () => {
+  const seen = {
+    rows: [
+      { label: 'fixture/repository', text: 'fixture/repository · linked · 1 item' },
+      { label: 'unlisted-board-sentinel', text: 'unlisted-board-sentinel · local · 1 item' },
+    ],
+    unknownRowsPresent: true,
+    projects: [
+      { name: 'fixture/repository', source: 'relay', ok: true, errorPresent: false },
+      { name: 'local-machine-b', source: 'local', ok: true, errorPresent: false },
+      { name: 'unlisted-board-sentinel', source: 'local', ok: false, errorPresent: true },
+    ],
+    unknownProjectsPresent: true,
+    localSessionPresent: true,
+    localReadPresent: true,
+    localOriginIsFixture: true,
+    transportPresent: true,
+    transportLoading: false,
+    transportLoadErrorPresent: false,
+    relaySessionPresent: true,
+    localNoteState: '',
+    atHostedRoot: true,
+    pairedFragmentPresent: false,
+  };
+  const pageAnswers = [
+    { source: 'linked', pathKind: '/api/v1/boards', status: 200, boardNames: ['fixture/repository'], requestAtMs: 0, responseAtMs: 18, completedAtMs: 19 },
+    { source: 'local', pathKind: '/api/v1/boards', status: 200, boardNames: ['local-machine-b'], requestAtMs: 2, responseAtMs: 7, completedAtMs: 8 },
+    { source: 'linked', pathKind: '/api/v1/boards/opaque-id/events?query=query-sentinel#fragment-sentinel', status: 200, boardNames: ['fixture/repository'], requestAtMs: 3, responseAtMs: 21, completedAtMs: null, streamOpen: true,
+      headers: { authorization: 'header-sentinel' }, body: 'body-sentinel' },
+  ];
+  const observed = await observeJourneyRows(
+    () => waitFor(() => journeySidebarReady(['fixture/repository']), 'Browser condition did not arrive', 25),
+    async () => JSON.stringify(seen),
+    async () => pageAnswers,
+  );
+  assert.equal(observed.ready, false);
+  assert.equal(observed.error.message, 'Browser condition did not arrive', 'diagnostics retain the original bounded row-wait failure');
+  assert.equal(observed.report.pageCaptureAvailable, true);
+  assert.equal(observed.report.apiCaptureAvailable, true);
+  assert.ok(observed.report, 'a failed row wait reports its visible rows and page-used API answers');
+  assert.deepEqual(observed.report.rows, ['fixture/repository · linked · 1 item'], 'actual rendered text for the owned fixture row is preserved');
+  assert.equal(observed.report.unknownRowsPresent, true);
+  assert.deepEqual(observed.report.apiAnswers.map(({ source, pathKind, status, boardNames, responseAtMs, streamOpen }) => ({ source, pathKind, status, boardNames, responseAtMs, streamOpen })), [
+    { source: 'linked', pathKind: '/api/v1/boards', status: 200, boardNames: ['fixture/repository'], responseAtMs: 18, streamOpen: false },
+    { source: 'local', pathKind: '/api/v1/boards', status: 200, boardNames: ['local-machine-b'], responseAtMs: 7, streamOpen: false },
+    { source: 'linked', pathKind: '/api/v1/boards/:id/events', status: 200, boardNames: ['fixture/repository'], responseAtMs: 21, streamOpen: true },
+  ]);
+  assert.doesNotMatch(JSON.stringify(observed.report), /unlisted-board-sentinel|query-sentinel|fragment-sentinel|header-sentinel|body-sentinel/u, 'diagnostics never expose arbitrary row names, URL parts, headers or bodies');
+
+  let pageRead = false;
+  let answersRead = false;
+  const passing = await observeJourneyRows(
+    async () => true,
+    async () => { pageRead = true; return ''; },
+    async () => { answersRead = true; return []; },
+  );
+  assert.equal(passing.ready, true);
+  assert.equal(pageRead || answersRead, false, 'a passing journey emits no additional diagnostic reads');
+
+  const originalError = new Error('original row wait failure');
+  const unavailable = await observeJourneyRows(
+    async () => { throw originalError; },
+    async () => { throw new Error('page capture unavailable'); },
+    async () => { throw new Error('API trace unavailable'); },
+  );
+  assert.equal(unavailable.error, originalError, 'capture failure never replaces the original row wait error');
+  assert.equal(unavailable.report.pageCaptureAvailable, false);
+  assert.equal(unavailable.report.apiCaptureAvailable, false);
+  assert.equal(unavailable.report.unknownRowsPresent, null, 'unavailable page facts are not presented as observed false values');
+  assert.equal(unavailable.report.apiAnswers, null, 'unavailable trace data is not presented as an empty observed trace');
+});
+
+/** Capture page-used API answers and response arrival times without retaining identifiers or waiting for streams. */
+function journeyPageAnswers(chrome, viewBase) {
+  const answers = [];
+  const pending = new Map();
+  const boardIds = new Map();
+  const bodyReads = new Set();
+  let generation = 0;
+  let windowStartedAt = performance.now();
+  let active = false;
+  const clock = () => Math.max(0, performance.now() - windowStartedAt);
+  const authority = origin => origin === JOURNEY_HOSTED ? 'linked'
+    : origin === JOURNEY_LOCAL || origin === viewBase ? 'local' : null;
+  const listBoardNames = (body, source) => {
+    try {
+      const value = JSON.parse(body);
+      const boards = [...(Array.isArray(value?.boards) ? value.boards : []), ...(Array.isArray(value?.warnings) ? value.warnings : [])];
+      const names = [];
+      for (const board of boards) {
+        const name = typeof board?.name === 'string' ? board.name : board?.repository;
+        if (typeof board?.id !== 'string' || typeof name !== 'string') continue;
+        boardIds.set(`${source}\0${board.id}`, name);
+        if (JOURNEY_BOARD_NAMES.includes(name)) names.push(name);
+      }
+      return journeyFixtureBoardNames(names);
+    } catch { return []; }
+  };
+  const listener = ({ data }) => {
+    let message;
+    try { message = JSON.parse(String(data)); } catch { return; }
+    if (!active) return;
+    if (message.method === 'Network.requestWillBeSent') {
+      const request = message.params.request;
+      if (request.method !== 'GET') return;
+      let address;
+      try { address = new URL(request.url); } catch { return; }
+      const source = authority(address.origin);
+      if (!source || !address.pathname.startsWith('/api/')) return;
+      if (pending.size >= 128) return;
+      const segments = address.pathname.split('/').filter(Boolean);
+      let boardId = null;
+      try { if (segments[0] === 'api' && segments[1] === 'v1' && segments[2] === 'boards' && segments[3]) boardId = decodeURIComponent(segments[3]); }
+      catch { boardId = null; }
+      pending.set(message.params.requestId, {
+        generation,
+        source,
+        pathKind: journeyApiPathKind(address.pathname),
+        boardId,
+        requestAtMs: clock(),
+        record: null,
+      });
+      return;
+    }
+    if (message.method === 'Network.responseReceived') {
+      const entry = pending.get(message.params.requestId);
+      if (!entry || entry.generation !== generation || entry.record) return;
+      const streamOpen = entry.pathKind.endsWith('/events');
+      entry.record = {
+        source: entry.source, pathKind: entry.pathKind,
+        status: Number.isInteger(message.params.response.status) ? message.params.response.status : null,
+        boardId: entry.boardId,
+        boardNames: entry.boardId
+          ? journeyFixtureBoardNames([boardIds.get(`${entry.source}\0${entry.boardId}`)]) : [],
+        requestAtMs: entry.requestAtMs, responseAtMs: clock(), completedAtMs: null, streamOpen,
+      };
+      if (answers.length < 128) answers.push(entry.record);
+      return;
+    }
+    if (message.method === 'Network.loadingFinished') {
+      const entry = pending.get(message.params.requestId);
+      if (!entry || entry.generation !== generation) return;
+      pending.delete(message.params.requestId);
+      if (!entry.record) return;
+      entry.record.completedAtMs = clock();
+      entry.record.streamOpen = false;
+      if (entry.pathKind !== '/api/v1/boards') return;
+      const bodyRead = chrome.send('Network.getResponseBody', { requestId: message.params.requestId }).then(result => {
+        if (entry.generation !== generation) return;
+        const body = result.base64Encoded ? Buffer.from(result.body, 'base64').toString('utf8') : result.body;
+        entry.record.boardNames = listBoardNames(body, entry.source);
+      }).catch(() => {});
+      bodyReads.add(bodyRead);
+      void bodyRead.finally(() => bodyReads.delete(bodyRead));
+      return;
+    }
+    if (message.method === 'Network.loadingFailed') {
+      const entry = pending.get(message.params.requestId);
+      if (!entry || entry.generation !== generation) return;
+      pending.delete(message.params.requestId);
+      if (entry.record) {
+        entry.record.completedAtMs = clock();
+        entry.record.streamOpen = false;
+      }
+      if (!entry.record && answers.length < 128) answers.push({ source: entry.source, pathKind: entry.pathKind, status: null,
+        boardNames: entry.boardId ? journeyFixtureBoardNames([boardIds.get(`${entry.source}\0${entry.boardId}`)]) : [],
+        requestAtMs: entry.requestAtMs, responseAtMs: null, completedAtMs: clock(), streamOpen: false });
+    }
+  };
+  chrome.socket.addEventListener('message', listener);
+  return {
+    begin() {
+      generation += 1;
+      pending.clear(); answers.length = 0; boardIds.clear(); bodyReads.clear();
+      windowStartedAt = performance.now(); active = true;
+    },
+    async snapshot() {
+      await Promise.race([Promise.all([...bodyReads]), new Promise(resolveWait => setTimeout(resolveWait, 250))]);
+      for (const answer of answers) {
+        if (!answer.boardNames.length && answer.boardId) answer.boardNames = journeyFixtureBoardNames([boardIds.get(`${answer.source}\0${answer.boardId}`)]);
+      }
+      const unfinished = [...pending.values()].filter(entry => !entry.record).map(entry => ({ source: entry.source,
+        pathKind: entry.pathKind, status: null,
+        boardNames: entry.boardId ? journeyFixtureBoardNames([boardIds.get(`${entry.source}\0${entry.boardId}`)]) : [],
+        requestAtMs: entry.requestAtMs, responseAtMs: null, completedAtMs: null, streamOpen: false }));
+      return [...answers, ...unfinished].map(({ source, pathKind, status, boardNames, requestAtMs, responseAtMs, completedAtMs, streamOpen }) => ({
+        source, pathKind, status, boardNames, requestAtMs, responseAtMs, completedAtMs, streamOpen,
+      })).sort((left, right) => (left.responseAtMs ?? left.requestAtMs) - (right.responseAtMs ?? right.requestAtMs));
+    },
+    close() { active = false; chrome.socket.removeEventListener('message', listener); },
+  };
 }
 
 /** Serve the real relay shell and proxy every API byte, including long-lived event streams. */
@@ -237,6 +523,7 @@ test('pullboard.dev shows every board, linked and local [N40]', {
   let viewB;
   let chromeA;
   let chromeB;
+  let journeyTrace;
   let site;
   let stopRoutes;
   let setup;
@@ -273,6 +560,7 @@ test('pullboard.dev shows every board, linked and local [N40]', {
     // A real foreground browser at the hosted relay completes the CLI's one-use device enrollment.
     site = await journeyRelaySite(machineA, viewB.base);
     chromeB = await openSnapshotChrome(executable, 'about:blank', profileB);
+    journeyTrace = journeyPageAnswers(chromeB, viewB.base);
     stopRoutes = await routeJourneyOrigins(chromeB, site, viewB);
     const person = await machineA.phoneSession();
     assert.equal((await chromeB.send('Network.setCookie', {
@@ -296,8 +584,39 @@ test('pullboard.dev shows every board, linked and local [N40]', {
     assert.equal(linkedSetup.document.paired, true, 'the fixture phone completes the actual device enrollment');
     await chromeB.waitFor("location.hash === '' && document.querySelector('#chain')?.textContent.includes('linked machine A board')", 45_000); // budget: bounded setup wait within this journey test’s declared outer timeout (5x relay-work budget plus 180 seconds).
     await chromeB.send('Page.navigate', { url: 'about:blank' });
+    journeyTrace.begin();
     await chromeB.send('Page.navigate', { url: JOURNEY_HOSTED + '/' });
-    await chromeB.waitFor("[...document.querySelectorAll('#proj-list .proj.repo')].some(row => row.textContent.includes('fixture/repository')) && [...document.querySelectorAll('#proj-list .proj.repo')].some(row => row.textContent.includes('local-machine-b'))", 45_000); // budget: bounded setup wait within this journey test’s declared outer timeout (5x relay-work budget plus 180 seconds).
+    const rowPredicate = `(${journeySidebarReady.toString()})([...document.querySelectorAll('#proj-list .proj.repo .pname')].map(node => node.textContent.trim()), ${JSON.stringify(JOURNEY_BOARD_NAMES)})`;
+    const rowObservation = await observeJourneyRows(
+      () => chromeB.waitFor(rowPredicate, 45_000), // budget: bounded setup wait within this journey test’s declared outer timeout (5x relay-work budget plus 180 seconds).
+      () => boundedJourneyRead(() => chromeB.stable(`JSON.stringify({
+        rows: [...document.querySelectorAll('#proj-list .proj.repo')].map(row => ({ label: row.querySelector('.pname')?.textContent.trim() || '', text: row.textContent.trim() })),
+        unknownRowsPresent: [...document.querySelectorAll('#proj-list .proj.repo .pname')].some(node => !${JSON.stringify(JOURNEY_BOARD_NAMES)}.includes(node.textContent.trim())),
+        projects: (data?.projects || []).map(({name, source, ok, error}) => ({name, source, ok, errorPresent: Boolean(error)})),
+        unknownProjectsPresent: (data?.projects || []).some(project => !${JSON.stringify(JOURNEY_BOARD_NAMES)}.includes(project.name)),
+        localSessionPresent: Boolean(localSession), localReadPresent: Boolean(localReadBase),
+        localOriginIsFixture: localSession?.origin === ${JSON.stringify(viewB.base)},
+        transportPresent: Boolean(transport), transportLoading: Boolean(transportModule && !transport && !transportLoadError),
+        transportLoadErrorPresent: Boolean(transportLoadError), relaySessionPresent: Boolean(hosted.relaySession),
+        localNoteState: document.querySelector('#local-note')?.dataset.state || '',
+        atHostedRoot: location.origin === ${JSON.stringify(JOURNEY_HOSTED)} && location.pathname === '/',
+        pairedFragmentPresent: /(?:^|[&#])(?:device|pullboard-local|key)=/i.test(location.hash)
+      })`)),
+      () => journeyTrace.snapshot(),
+    );
+    if (!rowObservation.ready) {
+      try { t.diagnostic(JSON.stringify(rowObservation.report)); } catch { /* The original row failure remains the test result. */ }
+      throw rowObservation.error;
+    }
+    const pageAnswers = await journeyTrace.snapshot();
+    for (const [source, boardName] of [['linked', 'fixture/repository'], ['local', 'local-machine-b']]) {
+      const answer = pageAnswers.find(entry => entry.source === source && entry.pathKind === '/api/v1/boards');
+      assert.ok(answer, `the page-used ${source} board-list answer was observed`);
+      assert.equal(answer.status, 200, `the page-used ${source} board-list answer succeeded`);
+      assert.deepEqual(answer.boardNames, [boardName], `the page-used ${source} answer names its fixture board`);
+      assert.ok(Number.isFinite(answer.requestAtMs) && Number.isFinite(answer.responseAtMs) && answer.responseAtMs >= answer.requestAtMs,
+        `the page-used ${source} answer has request and arrival times`);
+    }
     const localOrigin = await chromeB.stable('localSession?.origin || null');
     assert.ok(localOrigin === viewB.base, 'B discovers its own real view without a typed key, URL, tunnel or port');
     const shown = JSON.parse(await chromeB.stable(`JSON.stringify({ labels: [...document.querySelectorAll('#proj-list .proj.repo .pname')].map(node => node.textContent).sort(), secretInAddress: /key=|pullboard-local=|device=/.test(location.href), projects: data.projects.map(({id,name,source}) => ({id,name,source})) })`));
@@ -354,7 +673,7 @@ test('pullboard.dev shows every board, linked and local [N40]', {
   } finally {
     try { await stopRelayAll(setup); }
     finally {
-      try { if (stopRoutes && chromeB) await stopRoutes(); }
+      try { if (journeyTrace) journeyTrace.close(); if (stopRoutes && chromeB) await stopRoutes(); }
       finally {
         try { if (chromeB) await closeSnapshotChrome(chromeB); }
         finally {
