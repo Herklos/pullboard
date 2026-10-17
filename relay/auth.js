@@ -43,6 +43,7 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
       CREATE TABLE IF NOT EXISTS relay_users (id TEXT PRIMARY KEY, login TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS relay_boards (id TEXT PRIMARY KEY, repository TEXT NOT NULL, repository_id TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS relay_cleanup (board TEXT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS relay_deleted_credentials (hash TEXT PRIMARY KEY, board TEXT NOT NULL, expires INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS relay_credentials (id TEXT PRIMARY KEY, hash TEXT UNIQUE NOT NULL, kind TEXT NOT NULL, user_id TEXT NOT NULL REFERENCES relay_users(id), board TEXT REFERENCES relay_boards(id), agent TEXT, expires INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS relay_action_grants (hash TEXT PRIMARY KEY, request TEXT UNIQUE NOT NULL,
         user_id TEXT NOT NULL, context TEXT NOT NULL, expires INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0);
@@ -55,6 +56,7 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
       db.exec('ALTER TABLE relay_boards ADD COLUMN linked_at INTEGER');
     }
     db.prepare('UPDATE relay_boards SET linked_at=? WHERE linked_at IS NULL').run(now());
+    db.prepare('DELETE FROM relay_deleted_credentials WHERE expires<=?').run(now());
     db.exec('COMMIT');
   } catch (error) { try { db.exec('ROLLBACK'); } finally { db.close(); } throw error; }
   const permissions = new Map();
@@ -96,7 +98,11 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
   function credential(token) {
     open();
     if (typeof token !== 'string' || !/^(ps_|pa_|pm_)[A-Za-z0-9_-]{43}$/.test(token)) throw new Refused('AUTH_REQUIRED', 'sign in to the relay or supply a current board token');
-    const row = db.prepare('SELECT c.*, u.login FROM relay_credentials c JOIN relay_users u ON u.id=c.user_id WHERE c.hash=?').get(hash(token));
+    db.prepare('DELETE FROM relay_deleted_credentials WHERE expires<=?').run(now());
+    const digest = hash(token);
+    const row = db.prepare('SELECT c.*, u.login FROM relay_credentials c JOIN relay_users u ON u.id=c.user_id WHERE c.hash=?').get(digest);
+    const deleted = !row && db.prepare('SELECT board FROM relay_deleted_credentials WHERE hash=? AND expires>?').get(digest, now());
+    if (deleted) throw new Refused('RELAY_BOARD_DELETED', `relay copy ${deleted.board} was deleted; keep working locally, or run pullboard relay on to link it again`);
     if (!row || row.revoked || row.expires <= now()) throw new Refused('AUTH_REQUIRED', 'this credential is expired or revoked; sign in or obtain a new board token');
     return row;
   }
@@ -472,6 +478,8 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
       identifier(board, 'BAD_BOARD');
       lifecycle(() => {
         db.prepare('INSERT OR IGNORE INTO relay_cleanup (board) VALUES (?)').run(board);
+        db.prepare('DELETE FROM relay_deleted_credentials WHERE expires<=?').run(now());
+        db.prepare('INSERT OR REPLACE INTO relay_deleted_credentials (hash,board,expires) SELECT hash,board,expires FROM relay_credentials WHERE board=? AND revoked=0 AND expires>?').run(board, now());
         db.prepare('DELETE FROM relay_credentials WHERE board=?').run(board);
         db.prepare('DELETE FROM relay_boards WHERE id=?').run(board);
       });
@@ -513,6 +521,14 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
       if (principal.kind !== 'session') throw new Refused('HUMAN_REQUIRED', 'approve this machine from the signed-in phone');
       credential(token);
       return { ...issue(principal.user, 'machine', board, machine, expiresIn), board, machine };
+    },
+    /** List live computer identities only for this board's machine or a freshly authorized person. */
+    async listMachines(token, board) {
+      identifier(board, 'BAD_BOARD');
+      const principal = await auth.authenticate(token, { board, write: true });
+      if (!['session', 'machine'].includes(principal.kind)) throw new Refused('HUMAN_REQUIRED', 'use this board’s machine credential or the signed-in phone to list joined computers');
+      credential(token);
+      return db.prepare("SELECT DISTINCT agent AS machine FROM relay_credentials WHERE board=? AND kind='machine' AND revoked=0 AND expires>? ORDER BY agent").all(board, now());
     },
     /** Mint an agent credential scoped to a single readable board and immutable human identity. */
     async issueToken(token, { board, agent, expiresIn = tokenTTL }) {

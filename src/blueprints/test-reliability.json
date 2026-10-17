@@ -13,7 +13,7 @@
     { "key": "TR3", "text": "A flake fix is proven by repeated runs.", "why": "a flaky test already passes some of the time, so one green run after a fix proves nothing; only a run of passes shows the flake is gone.", "tier": "must", "gate": "the whole test suite, run as many times in a row as the run count question says, every run passing" }
   ],
   "questions": [
-    { "key": "Q1", "ask": "Tests run with", "choices": ["Vitest", "Jest", "pytest", "Something else"], "default": "Vitest" },
+    { "key": "Q1", "ask": "Tests run with", "choices": ["node:test", "Vitest", "Jest", "Mocha", "pytest", "Something else"], "detect": "test-runner" },
     { "key": "Q2", "ask": "A flake fix passes this many runs in a row", "choices": ["5", "10", "20"], "default": "10" }
   ],
   "items": [
