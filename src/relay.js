@@ -8,7 +8,8 @@ import * as store from './board.js';
 import { exportBoard, importBoard, restoreRelaySnapshot, semanticBoardDigest } from './exchange.js';
 import { appliedSequence, applyEngineMove, applyRelayMove, checkpointSequence, engineReceipt, prepareEngineMove, refuseRelayMove, requireSupportedEngine, startRelayEpoch } from './engine.js';
 import { relayMoveActor } from './relay-sender.js';
-import { ENGINE_VERSION } from './machine.js';
+import { actorTransport, cacheSeatToken, ensurePersonCoordinator, nameNextSeat, seatReceipt, withSeatName } from './relay-seats.js';
+import { ENGINE_VERSION, VERIFIER_STANDING_ENGINE } from './machine.js';
 import { presentationDigest, relayPresentation, relaySnapshot } from './relay-presentation.js';
 import { codeIsFromMain, repoInfo, tryGit } from './git.js';
 import { forgetBoardKey, readBoardKey, storeBoardKey } from './relay-key.js';
@@ -208,7 +209,7 @@ function loadLink(file) {
 }
 
 /** Atomically persist acknowledgements and an exact sealed retry before attempting its send. */
-function saveLink(file, state) {
+export function saveLink(file, state) {
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
   const temporary = file + '.' + randomUUID() + '.tmp';
   try {
@@ -269,7 +270,7 @@ function transportFailure(error) {
 }
 
 /** The sole outbound transport in the CLI: explicit sign-in or a saved, opted-in board link. */
-async function request(state, path, { method = 'GET', body, allowMissing = false, initialBaseline = false, signal } = {}, io) {
+export async function request(state, path, { method = 'GET', body, allowMissing = false, initialBaseline = false, signal } = {}, io) {
   const supplied = io?.ignoreRelayEnvironmentToken ? undefined : process.env.PULLBOARD_RELAY_TOKEN;
   const readToken = method === 'GET' && path.startsWith('/api/v1/boards/') ? supplied : undefined;
   if (readToken !== undefined && !/^pa_[A-Za-z0-9_-]{43}$/.test(readToken)) throw new Refused('AUTH_REQUIRED', 'supply a current scoped board token without including it in command arguments');
@@ -740,7 +741,7 @@ async function replayRelayRecord(board, key, state, record) {
     requireSupportedEngine(move);
     if (record.kind === 'request') return receivePersonRequest(board, move, { sequence: record.event_id, at: record.event_at, sender: record.sender });
     return applyRelayMove(board, move, { sequence: record.event_id, at: record.event_at, sender: record.sender, kind: record.kind,
-      digest: createHash('sha256').update(record.sealed).digest('hex') });
+      digest: createHash('sha256').update(record.sealed).digest('hex'), registration: record.registration });
   } catch (error) {
     if (!(error instanceof Refused) || !['RELAY_MOVE', 'RELAY_RESPONSE', 'SEAL_FORMAT', 'SEAL_AUTH_FAILED'].includes(error.code)) throw error;
     return refuseRelayMove(board, move, { sequence: record.event_id, at: record.event_at, sender: record.sender, kind: record.kind,
@@ -919,26 +920,49 @@ async function sendPending(root, file, state, io) {
   let renewedAgentToken = false;
   for (let tries = 0; state.pending && tries < 100; tries += 1) {
     const pending = state.pending;
+    const actor = credentialActor(pending.move);
     try {
-      const transport = await actorTransport(root, file, state, credentialActor(pending.move), io);
-      const reply = await request(transport, '/api/v1/boards/' + state.board + '/moves', { method: 'POST', body: { sequence: pending.sequence, sealed: pending.sealed } }, io);
+      const transport = await actorTransport(root, file, state, actor, io);
+      const reply = await request(transport, '/api/v1/boards/' + state.board + '/moves', { method: 'POST',
+        body: { sequence: pending.sequence, sealed: pending.sealed, ...(pending.registration ? { registration: pending.registration } : {}) } }, io);
       if (reply.event?.event_id !== pending.sequence || reply.event.sealed !== pending.sealed) throw new Refused('RELAY_RESPONSE', 'the relay acknowledgement differs from this executable send; fetch the configured relay');
+      if (pending.registration) {
+        const enrollment = reply.enrollment;
+        if (!enrollment || enrollment.board !== state.board || enrollment.agent !== pending.registration.target || typeof enrollment.id !== 'string') {
+          throw new Refused('RELAY_RESPONSE', 'the relay registered the seat without its issuance; repeat this command to recover its token');
+        }
+        // A retried registration returns the same issuance without a token; its creator reissues it on first use.
+        if (enrollment.token !== undefined) cacheSeatToken(file, state, pending.registration.target, enrollment);
+      }
     } catch (error) {
-      const actor = credentialActor(pending.move);
       if (error.code === 'AUTH_REQUIRED' && !renewedAgentToken && actor !== 'machine' && actor !== 'person'
-          && process.env.PULLBOARD_RELAY_TOKEN === undefined && state.token?.startsWith('pm_') && state.agentTokens?.[actor]?.token) {
-        // A revoked/expired PA cache can be replaced once by this board's existing PM credential.
-        delete state.agentTokens[actor];
+          && process.env.PULLBOARD_RELAY_TOKEN === undefined && state.agentTokens?.[actor]?.token) {
+        // An expired cache renews only through the seat's creator; a live one the relay refused was revoked.
+        if (state.agentTokens[actor].expires > Date.now()) {
+          state.agentTokens[actor].revoked = true;
+          saveLink(file, state);
+          throw new Refused('TOKEN_REVOKED', `the relay token of ${actor} was revoked on this board; work from a seat with its own token, or ask the coordinator for a fresh worktree`);
+        }
+        delete state.agentTokens[actor].token;
         saveLink(file, state);
         renewedAgentToken = true;
-        await actorTransport(root, file, state, actor, io);
+        continue;
+      }
+      if (error.code === 'SEAT_TAKEN' && pending.registration) {
+        // The relay already gave this name a token (a machine first mint): take the next free name.
+        nameNextSeat(root, pending.move, Number(pending.move.args[0].id.slice(pending.move.args[0].lane.length + 1)) + 1);
+        pending.sealed = await sealedRecord(readBoardKey(state.board), pending.move, state, 'move', pending.sequence);
+        pending.registration = seatReceipt(pending.move, pending.sequence, pending.sealed);
+        saveLink(file, state);
         continue;
       }
       if (!['SEQUENCE_REPEAT', 'SEQUENCE_GAP'].includes(error.code)) throw error;
       await catchUp(root, file, state, io);
       if (state.pending) {
         state.pending.sequence = state.sequence + 1;
+        if (state.pending.registration) nameNextSeat(root, state.pending.move, 0);
         state.pending.sealed = await sealedRecord(readBoardKey(state.board), state.pending.move, state, 'move', state.pending.sequence);
+        state.pending.registration = seatReceipt(state.pending.move, state.pending.sequence, state.pending.sealed);
         saveLink(file, state);
       }
       continue;
@@ -951,6 +975,10 @@ async function sendPending(root, file, state, io) {
 /** Choose credentials only; main's relay sender policy remains the sole replay authorization. */
 function credentialActor(move) {
   const args = move.args;
+  if (move.operation === 'register' && move.engine >= VERIFIER_STANDING_ENGINE) {
+    const creator = args?.[0]?.createdBy;
+    return typeof creator === 'string' && creator !== 'machine' ? creator : 'machine';
+  }
   if (move.personRequest || ['register', 'ensureCoordinator'].includes(move.operation)) return 'machine';
   if (['recordRowDecisions', 'recordLandingWaiver'].includes(move.operation)
     || move.operation === 'answerDecision' && args[1]?.asPerson
@@ -958,45 +986,13 @@ function credentialActor(move) {
   return relayMoveActor(move);
 }
 
-/** Select a scoped credential; sendPending alone may renew a failed cached token once. */
-async function actorTransport(root, file, state, actor, io) {
-  if (typeof actor !== 'string' || !/^[A-Za-z0-9_.-]{1,128}$/.test(actor)) {
-    throw new Refused('RELAY_ACTOR', 'name the registered agent performing this move before sending it');
-  }
-  if (actor === 'person') {
-    throw new Refused('HUMAN_REQUIRED', 'send this person action from the paired phone');
-  }
-  if (actor === 'machine') {
-    if (!state.token?.startsWith('pm_')) throw new Refused('HUMAN_REQUIRED', 'run pullboard relay on --all to authorize this board’s machine credential');
-    return state;
-  }
-  const supplied = io?.ignoreRelayEnvironmentToken ? undefined : process.env.PULLBOARD_RELAY_TOKEN;
-  if (supplied !== undefined) {
-    if (!/^pa_[A-Za-z0-9_-]{43}$/.test(supplied)) throw new Refused('AUTH_REQUIRED', 'supply a current scoped board token, without including it in command arguments');
-    const transport = { ...state, token: supplied, agent: actor };
-    const identity = await request(transport, '/auth/session?board=' + state.board, {}, io);
-    if (identity.session?.kind !== 'board' || identity.session.agent !== actor) throw new Refused('RELAY_ACTOR', 'use the scoped token belonging to this move’s registered agent');
-    return transport;
-  }
-  if (state.token?.startsWith('pa_')) {
-    const identity = await request(state, '/auth/session?board=' + state.board, {}, io);
-    if (identity.session?.agent !== actor) throw new Refused('RELAY_ACTOR', 'use the scoped token belonging to this move’s registered agent');
-    return { ...state, agent: actor };
-  }
-  state.agentTokens ??= {};
-  if (!state.agentTokens[actor]) {
-    if (!localRecords(root, (board) => store.listAgents(board).some((agent) => agent.agent_id === actor))) {
-      throw new Refused('RELAY_ACTOR', 'register this agent in the ordered board before obtaining its scoped token');
-    }
-    const issued = await request(state, '/auth/tokens', { method: 'POST', body: { board: state.board, agent: actor } }, io);
-    if (!/^pa_[A-Za-z0-9_-]{43}$/.test(issued.token) || issued.board !== state.board || issued.agent !== actor ||
-        typeof issued.id !== 'string' || !Number.isSafeInteger(issued.expires)) {
-      throw new Refused('RELAY_RESPONSE', 'the relay did not issue this agent’s scoped credential; ask the person to retry enrollment');
-    }
-    state.agentTokens[actor] = { id: issued.id, token: issued.token, expires: issued.expires };
-    saveLink(file, state);
-  }
-  return { ...state, token: state.agentTokens[actor].token, agent: actor };
+/** Set up this machine's coordinator token inside a paired join's own person sign-in (#579). */
+export async function relayPersonCoordinator(root, session, io) {
+  const file = linkFile(root);
+  return locked(file, async () => {
+    const state = loadLink(file);
+    if (state && /^ps_[A-Za-z0-9_-]{43}$/u.test(session ?? '')) await ensurePersonCoordinator(file, state, session, io);
+  });
 }
 
 /** Compare caller intent without executing frozen callbacks or allocating another operation id. */
@@ -1075,16 +1071,19 @@ export async function relayOperation(root, operation, args, io, command, applyLo
       }
       let move = recoveredMove(root, state, operation, args, command);
       if (!move) {
-        move = localRecords(root, (board) => prepareEngineMove(board, operation, args, io.personRequestMoveId ? { id: io.personRequestMoveId } : {}));
+        const sent = withSeatName(root, operation, args);
+        move = localRecords(root, (board) => prepareEngineMove(board, operation, sent, io.personRequestMoveId ? { id: io.personRequestMoveId } : {}));
         if (io.personRequest) move.personRequest = structuredClone(io.personRequest);
         const problem = move.personRequest && localRecords(root, board => requestMoveProblem(board, move, { checkExecutorLease: false }));
         if (problem) throw problem;
         move.actor = relayMoveActor(move) ?? credentialActor(move);
         await actorTransport(root, file, state, credentialActor(move), io);
         const sequence = state.sequence + 1;
+        const sealed = await sealedRecord(readBoardKey(state.board), move, state, 'move', sequence);
+        const registration = seatReceipt(move, sequence, sealed);
         state.pending = { move, intent: operationIntent(operation, args),
           ...(command ? { command, commandIntent: operationIntent('cli:' + command.cliOperation, command) } : {}), sequence,
-          sealed: await sealedRecord(readBoardKey(state.board), move, state, 'move', sequence) };
+          sealed, ...(registration ? { registration } : {}) };
         saveLink(file, state);
         try { await sendPending(root, file, state, io); }
         catch (error) {
@@ -1189,7 +1188,15 @@ export async function relayTokens(root, io) {
         !Number.isSafeInteger(row.expires) || (row.created !== null && !Number.isSafeInteger(row.created)) ||
         typeof row.revoked !== 'boolean')) throw new Refused('RELAY_RESPONSE', 'the relay token inventory is invalid; retry its configured address');
     const tokens = listed.tokens.map(({ id, board, agent, created, expires, revoked }) => ({ id, board, agent, created, expires, revoked }));
-    return { ...tokenContext(state), tokens };
+    const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+    const events = listed.coordinatorEvents ?? [];
+    if (!Array.isArray(events) || events.some((row) => !row || !['bootstrap', 'reissue', 'reset'].includes(row.reason) || !uuid.test(row.id ?? '') ||
+        !uuid.test(row.session ?? '') || !uuid.test(row.issued ?? '') || !Number.isSafeInteger(row.at) ||
+        !Array.isArray(row.revoked) || row.revoked.some((id) => !uuid.test(id ?? '')))) {
+      throw new Refused('RELAY_RESPONSE', 'the relay coordinator audit is invalid; retry its configured address');
+    }
+    const coordinatorEvents = events.map(({ id, reason, session, revoked, issued, at }) => ({ id, reason, session, revoked, issued, at }));
+    return { ...tokenContext(state), tokens, coordinatorEvents };
   });
 }
 
@@ -1503,6 +1510,8 @@ export async function relayOn(root, address, io, { session, credential, quiet = 
     state.machine = machine;
     delete state.personReauth;
     saveLink(file, state);
+    // The person's own sign-in sets up the coordinator's token, so no agent can mint it (#579).
+    if (/^ps_[A-Za-z0-9_-]{43}$/u.test(signed.token ?? '')) await ensurePersonCoordinator(file, state, signed.token, io);
     let result;
     try {
       let ready = true;

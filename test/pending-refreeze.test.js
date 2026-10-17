@@ -261,7 +261,7 @@ async function checkDependencyLegacyClients(cleanup, directory, snapshot, target
 }
 
 test('dependency edits replay the same on every engine [B3,V2,H16]', async (t) => {
-  assert.equal(ENGINE_VERSION, 33, 'the next writer retains all recorded dependency-edit behavior');
+  assert.equal(ENGINE_VERSION, 35, 'the next writer retains all recorded dependency-edit behavior');
   const directory = mkdtempSync(join(tmpdir(), 'pullboard-dependency-engines-'));
   const cleanup = [];
   t.after(() => {

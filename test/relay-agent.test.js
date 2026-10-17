@@ -200,10 +200,6 @@ test('ordered agent joins mint scoped tokens and retain authenticated native act
       submitStoredItem(seed, row.item_id, { agentId: builder, commit: submittedHead, tree: submittedTree });
     }
   } finally { closeBoard(seed); }
-  const firstRoot = join(dirname(box.root), 'agent-one');
-  const secondRoot = join(dirname(box.root), 'agent-two');
-  git(box.root, box.env, ['worktree', 'add', '-q', '-b', 'core/private-agent-one', firstRoot, 'HEAD']);
-  git(box.root, box.env, ['worktree', 'add', '-q', '-b', 'core/private-agent-two', secondRoot, 'HEAD']);
 
   const personEnv = { ...box.env };
   for (const key of [...AGENT_SHELL_MARKERS, ...SSH_SHELL_MARKERS]) delete personEnv[key];
@@ -228,30 +224,32 @@ test('ordered agent joins mint scoped tokens and retain authenticated native act
     'the native link holds only a machine credential');
   assert.equal(Object.hasOwn(JSON.parse(readFileSync(machineFile, 'utf8')), 'session'), false,
     'the phone session is not persisted in the machine state');
-  const firstStart = box.calls.length;
-  const firstJoin = await runCli(firstRoot, box.env, cli, ['join', box.lane, '--family', 'codex-fixture']);
-  assert.equal(firstJoin.code, 0, firstJoin.failure ?? 'the first worktree joins through the real linked CLI');
-  const firstAgent = firstJoin.document.agent;
-  const firstCalls = box.calls.slice(firstStart);
-  const firstRegistration = firstCalls.findIndex((call) => call.method === 'POST' && call.path.endsWith('/moves'));
-  const firstMint = firstCalls.findIndex((call) => call.method === 'POST' && call.path === '/auth/tokens');
-  assert.ok(firstRegistration >= 0 && firstMint > firstRegistration, 'the first token is minted after ordered registration');
-
-  const secondStart = box.calls.length;
-  const secondJoin = await runCli(secondRoot, box.env, cli, ['join', box.lane, '--family', 'codex-fixture']);
-  assert.equal(secondJoin.code, 0, secondJoin.failure ?? 'the second worktree joins through the real linked CLI');
-  const secondAgent = secondJoin.document.agent;
-  const secondCalls = box.calls.slice(secondStart);
-  const secondRegistration = secondCalls.findIndex((call) => call.method === 'POST' && call.path.endsWith('/moves'));
-  const secondMint = secondCalls.findIndex((call) => call.method === 'POST' && call.path === '/auth/tokens');
-  assert.ok(secondRegistration >= 0 && secondMint > secondRegistration, 'the second token is minted after ordered registration');
+  // Verifiers on a linked board are seats the coordinator made (#579); each gets its first token
+  // in the coordinator's own registration request, with no separate mint and no phone tap.
+  /** Make one verifier seat from the coordinator checkout through the real linked CLI. */
+  const coordinatorSeat = async (label) => {
+    const start = box.calls.length;
+    const made = await runCli(box.root, box.env, cli, ['worktree', box.lane, '--family', 'codex-fixture']);
+    assert.equal(made.code, 0, made.failure ?? `the coordinator makes the ${label} worktree through the real linked CLI`);
+    const calls = box.calls.slice(start);
+    assert.ok(calls.some((call) => call.method === 'POST' && call.path.endsWith('/moves')), `the ${label} seat is registered in order`);
+    assert.equal(calls.some((call) => call.method === 'POST' && call.path === '/auth/tokens'), false, `the ${label} seat needs no separate mint`);
+    assert.equal(calls.some((call) => call.path.endsWith('/authorize')), false, `the ${label} seat needs no phone tap`);
+    return made.document;
+  };
+  const firstSeat = await coordinatorSeat('first');
+  const secondSeat = await coordinatorSeat('second');
+  const firstAgent = firstSeat.agent;
+  const secondAgent = secondSeat.agent;
+  const firstRoot = firstSeat.path;
+  const secondRoot = secondSeat.path;
   assert.notEqual(firstAgent, secondAgent);
 
   const firstToken = scopedToken(box.linkFile, firstAgent);
   const secondToken = scopedToken(box.linkFile, secondAgent);
   const list = await box.cli('relay', 'tokens');
   assert.equal(list.code, 0, list.failure ?? list.stderr);
-  assert.deepEqual(list.document.tokens.map((row) => row.agent).sort(), [firstAgent, secondAgent].sort());
+  assert.deepEqual(list.document.tokens.map((row) => row.agent).sort(), ['coordinator', firstAgent, secondAgent].sort());
   const personState = JSON.parse(readFileSync(box.linkFile, 'utf8'));
   const boardKey = readFileSync(box.keyFile, 'utf8').trim();
   assertMetadataOnly(list.document, [firstToken, secondToken, personState.token, boardKey], 'CLI inventory exposes only scoped token metadata');
@@ -273,7 +271,7 @@ test('ordered agent joins mint scoped tokens and retain authenticated native act
   const apiListResponse = await fetchFresh(tokenUrl, { headers: apiHeaders });
   assert.equal(apiListResponse.status, 200, 'local API reads the real relay token inventory');
   const apiList = await apiListResponse.json();
-  assert.deepEqual(apiList.tokens.map((row) => row.agent).sort(), [firstAgent, secondAgent].sort());
+  assert.deepEqual(apiList.tokens.map((row) => row.agent).sort(), ['coordinator', firstAgent, secondAgent].sort());
   assertMetadataOnly(apiList, [firstToken, secondToken, personState.token, boardKey], 'local API exposes only token metadata');
 
   const realGit = realpathSync(join(box.env.PATH, 'git'));
@@ -335,15 +333,15 @@ test('ordered agent joins mint scoped tokens and retain authenticated native act
   const cachedMintCount = box.calls.filter((call) => call.method === 'POST' && call.path === '/auth/tokens').length;
   const cachedMoveCount = box.calls.filter((call) => call.method === 'POST' && call.path.endsWith('/moves')).length;
   const beforeCachedRenewal = nativeEvents(boardFile);
-  const cachedRenewal = await runCli(firstRoot, box.env, cli, ['shout', 'all', 'renew the revoked agent cache once']);
-  assert.equal(cachedRenewal.code, 0, cachedRenewal.failure ?? 'the valid machine credential replaces one revoked cached agent token');
-  assert.equal(box.calls.filter((call) => call.method === 'POST' && call.path === '/auth/tokens').length, cachedMintCount + 1,
-    'one revoked cache causes exactly one replacement scoped token to be minted');
-  assert.equal(box.calls.filter((call) => call.method === 'POST' && call.path.endsWith('/moves')).length, cachedMoveCount + 2,
-    'the refused ordered send is retried exactly once with the replacement credential');
+  const cachedRenewal = await runCli(firstRoot, box.env, cli, ['shout', 'all', 'a revoked agent cache stays revoked']);
+  assert.equal(cachedRenewal.code, 1, 'the machine credential never replaces a revoked agent token (#579)');
+  assert.equal(cachedRenewal.document.error.code, 'TOKEN_REVOKED');
+  assert.equal(box.calls.filter((call) => call.method === 'POST' && call.path === '/auth/tokens').length, cachedMintCount,
+    'a revoked cache mints no replacement token');
+  assert.ok(box.calls.filter((call) => call.method === 'POST' && call.path.endsWith('/moves')).length <= cachedMoveCount + 1,
+    'the refused ordered send is not retried with another credential');
   const afterCachedRenewal = nativeEvents(boardFile);
-  assert.equal(afterCachedRenewal.length, beforeCachedRenewal.length + 1,
-    'the authenticated retry writes exactly one native board event');
+  assert.equal(afterCachedRenewal.length, beforeCachedRenewal.length, 'the refused send writes no native board event');
 
   const linkAfterRevoke = JSON.parse(readFileSync(box.linkFile, 'utf8'));
   const machineRevoked = await fetch(box.origin + '/auth/tokens/revoke', {
@@ -419,21 +417,17 @@ test('a token mint failure after registration preserves the agent for one clean 
   await box.link();
   box.failTokenMints(1);
 
+  // A manual join is the one path with a separate first mint after registration: the machine
+  // credential's build-only mint (#579). A coordinator-made seat gets its token inside registration.
+  const agentRoot = join(dirname(box.root), `${basename(box.root)}-manual-join`);
+  git(box.root, box.env, ['worktree', 'add', '-q', '-b', `${box.lane}/manual`, agentRoot, 'HEAD']);
   const firstStart = box.calls.length;
-  const failedCreate = await box.cli('worktree', box.lane, '--family', 'codex-fixture');
-  assert.equal(failedCreate.code, 1, 'the injected token service failure is reported after the real worktree registration');
+  const failedCreate = await runCli(agentRoot, box.env, cli, ['join', box.lane, '--family', 'codex-fixture']);
+  assert.equal(failedCreate.code, 1, 'the injected token service failure is reported after the real registration');
   const firstCalls = box.calls.slice(firstStart);
   assert.equal(firstCalls.filter((call) => call.method === 'POST' && call.path === '/auth/tokens').length, 1);
-  const worktreeMode = JSON.parse(readFileSync(join(box.root, 'pullboard.json'), 'utf8')).worktrees;
-  const agentRoot = worktreeMode === 'inside'
-    ? join(box.root, '.claude', 'worktrees', `${box.lane}-1`)
-    : join(dirname(box.root), `${basename(box.root)}-${box.lane}-1`);
   const agent = registeredAgent(boardFile, agentRoot);
   assert.ok(agent, 'successful ordered registration remains canonical after token mint failure');
-  assert.equal(existsSync(agentRoot), true, 'the registered worktree is retained for retry');
-  const worktrees = gitText(box.root, box.env, ['worktree', 'list', '--porcelain']);
-  assert.ok(worktrees.includes(agentRoot), 'Git still records the retained worktree');
-  assert.match(worktrees, new RegExp(`branch refs/heads/${box.lane}/1`), 'the registered branch is retained too');
   const joinRows = nativeEvents(boardFile).filter((row) => row.event_by === agent && row.event_kind === 'join');
   assert.equal(joinRows.length, 1, 'the failed mint does not undo or duplicate ordered registration');
 
@@ -445,11 +439,11 @@ test('a token mint failure after registration preserves the agent for one clean 
   assert.equal(nativeEvents(boardFile).filter((row) => row.event_by === agent && row.event_kind === 'join').length, 1);
 
   const linkState = JSON.parse(readFileSync(box.linkFile, 'utf8'));
-  assert.deepEqual(Object.keys(linkState.agentTokens), [agent], 'the private link cache holds one usable token for the registered agent');
+  assert.deepEqual(Object.keys(linkState.agentTokens).sort(), ['coordinator', agent].sort(), 'the private link cache holds one usable token for the registered agent beside the coordinator');
   const token = scopedToken(box.linkFile, agent);
   const listed = await box.cli('relay', 'tokens');
   assert.equal(listed.code, 0, listed.failure ?? listed.stderr);
-  assert.deepEqual(listed.document.tokens.map((row) => row.agent), [agent]);
+  assert.deepEqual(listed.document.tokens.map((row) => row.agent).sort(), ['coordinator', agent].sort());
   assertMetadataOnly(listed.document, [token, linkState.token], 'retry inventory exposes metadata only');
   const usable = await runCli(agentRoot, { ...box.env, PULLBOARD_RELAY_TOKEN: token }, cli,
     ['claim', String(item.document.item.item_id)]);

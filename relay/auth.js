@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { Refused } from '../src/refused.js';
 import { repositoryName } from './github.js';
 import { approvalContext } from '../src/relay-approval.js';
+import { VERIFIER_STANDING_ENGINE } from '../src/machine.js';
 
 export const ACCESS_WINDOW_MS = 10 * 60_000;
 const MAX_TTL = 30 * 24 * 3600_000;
@@ -47,7 +48,23 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
       CREATE TABLE IF NOT EXISTS relay_credentials (id TEXT PRIMARY KEY, hash TEXT UNIQUE NOT NULL, kind TEXT NOT NULL, user_id TEXT NOT NULL REFERENCES relay_users(id), board TEXT REFERENCES relay_boards(id), agent TEXT, expires INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS relay_action_grants (hash TEXT PRIMARY KEY, request TEXT UNIQUE NOT NULL,
         user_id TEXT NOT NULL, context TEXT NOT NULL, expires INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS relay_seats (board TEXT NOT NULL, agent TEXT NOT NULL,
+        origin TEXT NOT NULL CHECK(origin IN ('machine','registered','root')), creator TEXT, sequence INTEGER, digest TEXT,
+        first_id TEXT, first_created INTEGER, first_expires INTEGER, PRIMARY KEY (board, agent));
+      CREATE TABLE IF NOT EXISTS relay_coordinator_events (id TEXT PRIMARY KEY, board TEXT NOT NULL,
+        reason TEXT NOT NULL CHECK(reason IN ('bootstrap','reissue','reset')), session_id TEXT NOT NULL,
+        revoked TEXT NOT NULL, issued_id TEXT NOT NULL, at INTEGER NOT NULL);
     `);
+    if (!db.prepare('PRAGMA table_info(relay_credentials)').all().some((column) => column.name === 'root')) {
+      db.exec('ALTER TABLE relay_credentials ADD COLUMN root INTEGER NOT NULL DEFAULT 0');
+    }
+    // Which machine's person-set coordinator line a root token belongs to; renewals keep it (#579).
+    if (!db.prepare('PRAGMA table_info(relay_credentials)').all().some((column) => column.name === 'lineage')) {
+      db.exec('ALTER TABLE relay_credentials ADD COLUMN lineage TEXT');
+    }
+    // Every seat that already held a token got it from the machine or a person mint: machine origin for good (#579).
+    db.exec(`INSERT OR IGNORE INTO relay_seats (board, agent, origin) SELECT DISTINCT board, agent, 'machine'
+      FROM relay_credentials WHERE kind = 'board' AND board IS NOT NULL AND agent IS NOT NULL`);
     if (!db.prepare('PRAGMA table_info(relay_credentials)').all().some((column) => column.name === 'created')) {
       db.exec('ALTER TABLE relay_credentials ADD COLUMN created INTEGER');
     }
@@ -68,6 +85,8 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
   const sessionGuards = new Set();
   let closed = false;
   let locked = false;
+  // The relay journal's published seat receipts, read under the board lock (#579); none until wired.
+  let registrationClaim = () => null;
 
   /** Refuse operation after closing instead of surfacing a raw SQLite error. */
   function open() { if (closed) throw new Refused('RELAY_CLOSED', 'start the relay before signing in or using a credential'); }
@@ -112,14 +131,35 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
   }
 
   /** Mint one independently expiring/revocable credential and persist only its hash. */
-  function issue(user, kind, board, agent, ttl) {
+  function issue(user, kind, board, agent, ttl, root = false, lineage = null) {
     open();
     const token = random(kind === 'session' ? 'ps_' : kind === 'machine' ? 'pm_' : 'pa_');
     const id = randomUUID();
     const created = now();
     const expires = created + ttl;
-    db.prepare('INSERT INTO relay_credentials (id,hash,kind,user_id,board,agent,created,expires) VALUES (?,?,?,?,?,?,?,?)').run(id, hash(token), kind, user.id, board ?? null, agent ?? null, created, expires);
+    db.prepare('INSERT INTO relay_credentials (id,hash,kind,user_id,board,agent,created,expires,root,lineage) VALUES (?,?,?,?,?,?,?,?,?,?)').run(id, hash(token), kind, user.id, board ?? null, agent ?? null, created, expires, root ? 1 : 0, root ? lineage : null);
     return { token, id, created, expires };
+  }
+
+  /** The first-mint record of one seat on one board, which outlives every credential it names. */
+  function seat(board, agent) {
+    return db.prepare('SELECT * FROM relay_seats WHERE board=? AND agent=?').get(board, agent) ?? null;
+  }
+
+  /** Record a seat's first issuance; the seat row exists before its token is ever returned. */
+  function firstMint(user, board, agent, ttl, { origin, creator = null, sequence = null, digest = null, root = false, lineage = null }) {
+    const issued = issue(user, 'board', board, agent, ttl, root, lineage);
+    db.prepare(`INSERT INTO relay_seats (board,agent,origin,creator,sequence,digest,first_id,first_created,first_expires) VALUES (?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(board, agent) DO UPDATE SET origin=excluded.origin, creator=excluded.creator, sequence=excluded.sequence, digest=excluded.digest,
+        first_id=excluded.first_id, first_created=excluded.first_created, first_expires=excluded.first_expires`)
+      .run(board, agent, origin, creator, sequence, digest, issued.id, issued.created, issued.expires);
+    return { ...issued, board, agent };
+  }
+
+  /** Validate an expiry request against the relay's thirty-day ceiling. */
+  function expiry(value, what) {
+    if (!Number.isSafeInteger(value) || value <= 0 || value > MAX_TTL) throw new Refused('BAD_EXPIRY', `choose a ${what} expiry between one millisecond and thirty days`);
+    return value;
   }
 
   /** Learn the immutable GitHub identity, then drop the user access credential immediately. */
@@ -441,7 +481,7 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
         if (board !== null && board !== undefined && !db.prepare('SELECT 1 FROM relay_boards WHERE id=?').get(board)) throw new Refused('BOARD_NOT_LINKED', 'link this board again before using it');
         credential(token); // A revocation or expiry during the awaited provider call must take effect.
       }
-      return { id: row.id, kind: row.kind, user: { id: row.user_id, login: row.login }, ...(row.board ? { board: row.board, ...(row.kind === 'machine' ? { machine: row.agent } : { agent: row.agent }) } : {}), ...(repository ? { permission: repository.permission, public: repository.public } : {}), expires: row.expires };
+      return { id: row.id, kind: row.kind, user: { id: row.user_id, login: row.login }, ...(row.board ? { board: row.board, ...(row.kind === 'machine' ? { machine: row.agent } : { agent: row.agent }) } : {}), ...(row.root ? { root: true, ...(row.lineage ? { lineage: row.lineage } : {}) } : {}), ...(repository ? { permission: repository.permission, public: repository.public } : {}), expires: row.expires };
     },
     /** Accept a link only from a signed-in human with current repository write access. */
     async linkBoard(token, board, repository, deadline = Infinity) {
@@ -485,6 +525,9 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
         db.prepare('DELETE FROM relay_deleted_credentials WHERE expires<=?').run(now());
         db.prepare('INSERT OR REPLACE INTO relay_deleted_credentials (hash,board,expires) SELECT hash,board,expires FROM relay_credentials WHERE board=? AND revoked=0 AND expires>?').run(board, now());
         db.prepare('DELETE FROM relay_credentials WHERE board=?').run(board);
+        // A person unlinked the board; a later link starts its seats afresh with the new journal.
+        db.prepare('DELETE FROM relay_seats WHERE board=?').run(board);
+        db.prepare('DELETE FROM relay_coordinator_events WHERE board=?').run(board);
         db.prepare('DELETE FROM relay_boards WHERE id=?').run(board);
       });
       for (const key of permissions.keys()) if (key.endsWith(':' + board)) permissions.delete(key);
@@ -520,7 +563,8 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
     minimumEngineVersion(board) {
       open();
       identifier(board, 'BAD_BOARD');
-      if (db.prepare("SELECT 1 FROM relay_credentials WHERE board=? AND kind='machine' LIMIT 1").get(board)) return 6;
+      // Machine and agent credentials now carry engine-35 seat provenance; older clients would skip it.
+      if (db.prepare("SELECT 1 FROM relay_credentials WHERE board=? AND kind IN ('machine','board') LIMIT 1").get(board)) return VERIFIER_STANDING_ENGINE;
       return db.prepare("SELECT 1 FROM relay_credentials WHERE board=? AND kind='board' LIMIT 1").get(board) ? 3 : 1;
     },
     /** Give a foreground person one board-bound machine delegate, never another person credential. */
@@ -541,15 +585,125 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
       credential(token);
       return db.prepare("SELECT DISTINCT agent AS machine FROM relay_credentials WHERE board=? AND kind='machine' AND revoked=0 AND expires>? ORDER BY agent").all(board, now());
     },
-    /** Mint an agent credential scoped to a single readable board and immutable human identity. */
-    async issueToken(token, { board, agent, expiresIn = tokenTTL }) {
+    /**
+     * Mint an agent credential scoped to one board (#579). The machine credential, or a person,
+     * first-mints only a seat the relay never issued a token to, and that seat is machine-origin
+     * for good. A seat's own current token renews it, revoking itself. Its creator may reissue a
+     * lost token for a seat it registered, revoking the old ones. A seat's first token from a
+     * creator comes only with its registration move (`enrollSeat`), never from this route.
+     */
+    async issueToken(token, { board, agent, expiresIn = tokenTTL, recover = false, registration }) {
       identifier(board, 'BAD_BOARD');
       identifier(agent, 'BAD_AGENT');
-      if (!Number.isSafeInteger(expiresIn) || expiresIn <= 0 || expiresIn > MAX_TTL) throw new Refused('BAD_EXPIRY', 'choose a token expiry between one millisecond and thirty days');
+      expiry(expiresIn, 'token');
+      if (registration !== undefined) throw new Refused('REGISTRATION_IN_MOVE', 'a seat receipt counts only inside its registration move; post the move with its receipt from the creating seat');
+      if (typeof recover !== 'boolean') throw new Refused('BAD_REQUEST', 'send recover as true or false');
       const principal = await auth.authenticate(token, { board, write: true });
-      if (!['session', 'machine'].includes(principal.kind)) throw new Refused('HUMAN_REQUIRED', 'use this board’s machine credential to issue an agent token');
-      credential(token);
-      return { ...issue(principal.user, 'board', board, agent, expiresIn), board, agent };
+      return lifecycle(() => {
+        const current = credential(token);
+        const existing = seat(board, agent);
+        if (principal.kind === 'board') {
+          if (!recover && principal.agent === agent) {
+            const renewed = issue(principal.user, 'board', board, agent, expiresIn, Boolean(current.root), current.lineage ?? null);
+            db.prepare('UPDATE relay_credentials SET revoked=1 WHERE id=?').run(current.id);
+            return { ...renewed, board, agent };
+          }
+          const claim = !existing && recover ? registrationClaim(board, agent) : null;
+          if (recover && claim?.creator === principal.agent && agent !== principal.agent) {
+            // A receipt published without its enrollment: the creator rolls the first mint forward.
+            return firstMint({ id: current.user_id }, board, agent, tokenTTL,
+              { origin: 'registered', creator: claim.creator, sequence: claim.sequence, digest: claim.digest });
+          }
+          if (recover && existing?.origin === 'registered' && existing.creator === principal.agent && agent !== principal.agent) {
+            db.prepare("UPDATE relay_credentials SET revoked=1 WHERE board=? AND kind='board' AND agent=?").run(board, agent);
+            return { ...issue(principal.user, 'board', board, agent, expiresIn), board, agent };
+          }
+          throw new Refused('TOKEN_AGENT', recover
+            ? 'only the seat that registered this one reissues its token; ask its creator'
+            : 'an agent token renews only its own seat; a new seat gets its first token from its creator\'s registration');
+        }
+        if (recover) throw new Refused('TOKEN_AGENT', 'only the seat that registered this one reissues its token; ask its creator');
+        if (existing) {
+          throw new Refused('TOKEN_EXISTS', agent === 'coordinator'
+            ? 'the coordinator already has a token; it renews with its own, or the person reissues it with pullboard relay on'
+            : 'this seat already had a token; it renews only with its own current token, or its creator reissues it');
+        }
+        // A published receipt claims its target even before enrollment finishes: no machine race.
+        if (registrationClaim(board, agent)) {
+          throw new Refused('TOKEN_EXISTS', 'a creator registered this seat; its first token comes only through that registration or its creator');
+        }
+        return firstMint(principal.user, board, agent, expiresIn, { origin: 'machine' });
+      });
+    },
+    /** Wire the relay journal's receipt lookup; token issuance then honors every published claim. */
+    setRegistrationClaims(reader) {
+      if (typeof reader !== 'function') throw new Refused('RELAY_CONFIG', 'configure a seat receipt reader');
+      registrationClaim = reader;
+    },
+    /**
+     * Give a registration move's target its first token, inside the board lock that appended the
+     * move (#579). The creator is the authenticated agent token that sent the move; the target
+     * must be new to the relay. An exact retry returns the same issuance without a token.
+     */
+    enrollSeat(token, board, receipt) {
+      identifier(board, 'BAD_BOARD');
+      return lifecycle(() => {
+        const current = credential(token);
+        if (current.kind !== 'board' || current.agent !== receipt.creator || current.board !== board) {
+          throw new Refused('REGISTRATION_SENDER', 'register a seat with the creating seat\'s own token');
+        }
+        const existing = seat(board, receipt.target);
+        if (existing) {
+          if (existing.origin === 'registered' && existing.creator === receipt.creator && existing.sequence === receipt.sequence && existing.digest === receipt.digest) {
+            return { id: existing.first_id, created: existing.first_created, expires: existing.first_expires, board, agent: receipt.target, retried: true };
+          }
+          throw new Refused('SEAT_TAKEN', `the relay already issued ${receipt.target} a token, so it cannot be registered again; register the next free name`);
+        }
+        return firstMint({ id: current.user_id }, board, receipt.target, tokenTTL,
+          { origin: 'registered', creator: receipt.creator, sequence: receipt.sequence, digest: receipt.digest });
+      });
+    },
+    /** Read one seat's first-mint record for the registration check before a move is appended. */
+    seatRecord(board, agent) {
+      open();
+      identifier(board, 'BAD_BOARD');
+      identifier(agent, 'BAD_AGENT');
+      const row = seat(board, agent);
+      return row && { origin: row.origin, creator: row.creator, sequence: row.sequence, digest: row.digest };
+    },
+    /**
+     * Set up the coordinator's token from a person session only (#579): the first one on a board
+     * (bootstrap), a fresh one after loss, expiry or revocation, or for another of the person's
+     * machines (reissue), or the person's reset of a coordinator first minted by the machine
+     * (reset), which revokes every older coordinator token. A reissue revokes the token it names
+     * as replaced. Each issue leaves an audit row naming the session, the revoked ids and the new id.
+     */
+    async issueCoordinator(token, { board, expiresIn = tokenTTL, replaces }) {
+      identifier(board, 'BAD_BOARD');
+      expiry(expiresIn, 'coordinator');
+      const principal = await auth.authenticate(token, { board, write: true });
+      if (principal.kind !== 'session') throw new Refused('HUMAN_REQUIRED', 'only the person sets up the coordinator credential: run pullboard relay on in the main checkout');
+      return lifecycle(() => {
+        const current = credential(token);
+        const existing = seat(board, 'coordinator');
+        const reason = !existing ? 'bootstrap' : existing.origin === 'root' ? 'reissue' : existing.origin === 'machine' ? 'reset' : null;
+        if (!reason) throw new Refused('COORDINATOR_SEAT', 'the coordinator seat on this board was registered by another seat; unlink and link the board again');
+        if (replaces !== undefined && typeof replaces !== 'string') throw new Refused('BAD_REQUEST', 'name the coordinator token id this one replaces');
+        // A reset revokes every machine-minted coordinator token; a reissue revokes the one it
+        // replaces, so each of the person's linked machines keeps its own coordinator token.
+        const revoked = db.prepare("SELECT id FROM relay_credentials WHERE board=? AND kind='board' AND agent='coordinator' AND revoked=0 AND expires>?").all(board, now())
+          .map((row) => row.id).filter((id) => reason === 'reset' || id === replaces);
+        // A replacement keeps its machine's lineage; a token for another machine starts a new one.
+        const replaced = replaces === undefined ? null : db.prepare("SELECT lineage FROM relay_credentials WHERE id=? AND board=? AND kind='board' AND agent='coordinator' AND root=1").get(replaces, board);
+        const lineage = reason !== 'reset' && replaced?.lineage ? replaced.lineage : randomUUID();
+        for (const id of revoked) db.prepare('UPDATE relay_credentials SET revoked=1 WHERE id=?').run(id);
+        const issued = reason === 'reissue'
+          ? { ...issue(principal.user, 'board', board, 'coordinator', expiresIn, true, lineage), board, agent: 'coordinator' }
+          : firstMint(principal.user, board, 'coordinator', expiresIn, { origin: 'root', root: true, lineage });
+        db.prepare('INSERT INTO relay_coordinator_events (id,board,reason,session_id,revoked,issued_id,at) VALUES (?,?,?,?,?,?,?)')
+          .run(randomUUID(), board, reason, current.id, JSON.stringify(revoked), issued.id, issued.created);
+        return { ...issued, root: true, reason };
+      });
     },
     /** List only owned board-token metadata after a fresh repository write check, never bearer values or hashes. */
     async listTokens(token, board) {
@@ -559,6 +713,15 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
       credential(token);
       return db.prepare('SELECT id,board,agent,created,expires,revoked FROM relay_credentials WHERE user_id=? AND kind=? AND board=? ORDER BY agent,id')
         .all(principal.user.id, 'board', board).map((row) => ({ ...row, revoked: Boolean(row.revoked) }));
+    },
+    /** The person-made coordinator credential events on one board, with ids and times and no bearer values. */
+    async coordinatorEvents(token, board) {
+      identifier(board, 'BAD_BOARD');
+      const principal = await auth.authenticate(token, { board, write: true });
+      if (!['session', 'machine'].includes(principal.kind)) throw new Refused('HUMAN_REQUIRED', 'use this board’s machine credential to list agent token ids');
+      credential(token);
+      return db.prepare('SELECT id,reason,session_id,revoked,issued_id,at FROM relay_coordinator_events WHERE board=? ORDER BY at,rowid').all(board)
+        .map((row) => ({ id: row.id, reason: row.reason, session: row.session_id, revoked: JSON.parse(row.revoked), issued: row.issued_id, at: row.at }));
     },
     /** Mint a short-lived grant only after an authenticated phone approves an immutable action context. */
     async issueActionGrant(token, value) {
