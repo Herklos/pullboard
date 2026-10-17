@@ -679,8 +679,7 @@ function approvedLinkScenario(t) {
       await chrome.waitFor(`document.querySelectorAll('#proj-list .proj.repo').length === 2
         && Object.hasOwn(JSON.parse(localStorage.getItem('pullboard.relay.keys.v1') ?? '{}'), ${JSON.stringify(board)})`);
     } catch { opened = false; }
-    // budget: observe the same bounded navigation transition as the independent mobile counter, without retrying approval.
-    try { await chrome.waitFor(`data?.root === ${JSON.stringify(board)} && document.querySelector('#proj-name')?.textContent === 'notes'
+    try { /* budget: hang ceiling for the bounded navigation transition the mobile counter observes; no approval retry. */ await chrome.waitFor(`data?.root === ${JSON.stringify(board)} && document.querySelector('#proj-name')?.textContent === 'notes'
       && document.body.innerText.includes(${JSON.stringify(notesTitle)})`, 6_000); } catch { /* The assertion below names a missed selection directly. */ }
     const displayed = await chrome.evaluate(`({ root: data?.root, name: document.querySelector('#proj-name')?.textContent,
       text: document.body.innerText })`);
