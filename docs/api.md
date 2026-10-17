@@ -63,7 +63,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `join` | `version:number`, `agent:string`, `lane:string`, `route:string`, `path:string`, `model:string`, `displayName:string` |
 | `takeover` | `version:number`, `agent:string`, `path:string` |
 | `worktree` | `version:number`, `agent:string`, `lane:string`, `route:string`, `path:string`, `branch:string`, `prompt:string`, `model:string`, `displayName:string` |
-| `resume` | `version:number`, `me:object`, `all:array`, `requests:array`, `holding:array`, `sentBack:array`, `awaiting:array`, `toVerify:array`, `toMerge:array`, `open:array`, `stale:array`, `holds:array`, `unread:number`, `newest:array`, `root:string`, `newWorktreeLocation:string`, `dirty:number`, `next:string` |
+| `resume` | `version:number`, `me:object`, `all:array`, `requests:array`, `holding:array`, `sentBack:array`, `awaiting:array`, `toVerify:array`, `toMerge:array`, `open:array`, `stale:array`, `doctrineNotes:array`, `holds:array`, `unread:number`, `newest:array`, `root:string`, `newWorktreeLocation:string`, `dirty:number`, `next:string` |
 | `whoami` | `version:number`, `id:string`, `lane:string`, `path:string`, `model:string`, `displayName:string` |
 | `lanes` | `version:number`, `lanes:object`, `shared:array`, `coordinator:string` |
 | `lane add` | `version:number`, `lane:string`, `owns:array` |
@@ -82,6 +82,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `stats` | `version:number`, `stats:object` |
 | `status` | `version:number`, `me:object`, `mine:array`, `stats:object`, `reviewQueue:object`, `unread:number`, `relay:object` |
 | `doctor` | `version:number`, `problems:array` |
+| `health` | `version:number`, `asOf:string`, `thresholds:object`, `stuck:array`, `waiting:array` |
 | `skills` | `version:number`, `updated:array`, `current:array`, `customized:array` |
 | `inbox` | `version:number`, `shouts:array` |
 | `decisions` | `version:number`, `decisions:array` |
@@ -115,6 +116,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `view` | `version:number`, `url:string`, `port:number` |
 | `view export` | `version:number`, `path:string` |
 | `serve` | `version:number`, `url:string`, `port:number` |
+| `watch` | one document per line: `version:number`, `sequence:number`, `kind:string`, `item:number\|null`, `actor:string\|null`, `detail:string` |
 | `forget` | `version:number`, `root:string` |
 | `prompt` | `version:number`, `role:string`, `text:string` |
 | `gate` | `version:number`, `green:boolean`, `report:string` |
@@ -140,6 +142,8 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `hook pre-push` | `version:number`, `messages:array` |
 <!-- api-command-shapes:end -->
 
+`spec draft "<rule>" --doctrine --source "chat, 2026-10-16"` proposes a sourced doctrine row and returns a qualified `id`, such as `doctrine:DR1`, for the existing person approval commands. Resume adds `doctrineNotes`, an array of newly seen approved rules with `id`, `text` and `gate`; each checkout consumes its own notices. Drafts and pending applications are excluded. The shared approved doctrine also supplies frozen citations and stale-item comparisons in older checkouts.
+
 `hook pre-merge-commit` runs the same staged checks as `hook pre-commit` before Git creates an automatic merge commit. `init` and `hooks` install it; `doctor` names it when absent at Git's effective hook path. Lane ownership comes from `HEAD:pullboard.json`, so an unstaged configuration edit cannot grant a lane new folders. `lane add` writes the new lane to the working `pullboard.json` and returns `{ lane, owns }`; commit the file before the lane's ownership takes effect. `init` returns the lanes it proposes as `proposedLanes`, each `{ name, owns }`, and writes none of them. Lane-sensitive checks refuse a repository with `info/grafts` in its Git common directory because grafts alter ancestry even when replacement objects are disabled.
 
 `join` and `worktree` require a free-text `--model` label or `PULLBOARD_MODEL` environment value; labels are not inferred from a provider or family. Rejoining the same worktree preserves its agent id; the model label is required on every join, and omitting the optional `--family` preserves its prior declaration. `pullboard.json` may set `agents.names` to `suffix` (the default, `web-1 (Claude)`) or `prefix` (`claude-web-1`). CLI `agent` fields remain stable ids; `displayName` shows the chosen style. `resume.me` and API state `agents[]` carry `model` and `displayName`; older agents with no model display `unknown`. Each event records the actor model in `event_detail.model` for a registered agent, with `unknown` for legacy agents without a declaration. `show` includes `item_builder_family` and each verdict's `verdict_verifier_family`. These family fields are `null` when the agent did not declare a family, and later declarations do not rewrite prior submissions or verdicts.
@@ -153,6 +157,44 @@ Releasing a reserved review requires a nonempty one-line `--note` (or `--note-fi
 When outstanding reviews reach `verify.reviewRatio` times the active reviewers (default 3, with zero reviewers counting as one), `next` first offers a review the agent may take. This creates no claim or reservation. Its additive v1 `offer` has the review's `item` id, exact `command` to reserve it, `queue` and `ratio`; `build` previews the otherwise available build or is `null`. `next --verify <id>` reserves explicitly. `next --build` claims explicitly; a fresh claim's event detail records `reviewSkipped` with the offered id (or `null`), ratio and queue snapshot. Renewing an existing claim creates no new skip.
 
 For HTTP `next`, a review offer returns success with `event: null`, `offer` and the ordinary CLI `result`. Send `args.build: true` to claim as before and receive the actual claim event. The unattended `run` command always supplies explicit build intent, records it on fresh claims, and prints the review backlog each iteration.
+
+## Board health
+
+`pullboard health` scans the board read-only and lists every stuck item with its cause, since when, the one next step and who takes it. It opens the board through a read-only connection, records no event, skips relay sync and asks git only `merge-tree`, which never touches a HEAD, index or working tree. It exits 0 when nothing is stuck and 1 when something is; the text form then prints `nothing is stuck`, or one line per finding: `#12 claim lapsed, since 2026-10-17 10:00 (2h): web-3's lease ran out and nobody is building it. Next, web-3 (builder): renew it with pullboard claim 12.`
+
+`health --json` returns `{version: 1, asOf, thresholds: {stuck, holds, release}, stuck: [...], waiting: [...]}`. `asOf` is the board clock's ISO time. Each finding in `stuck` and `waiting` is `{key, cause, item, subject, title, since, ageMinutes, why, next, command, owner: {role, who}, detail}`:
+
+- `key` names the cause and what is stuck, like `CLAIM_LAPSED:item:12`, `HOLD_STALE:lane:docs`, `DECISION_UNANSWERED:shout:40` or `RELEASE_OVERDUE:release:v0.9.0`; it stays the same while the finding persists, so a watcher can post it once and notice when it clears.
+- `item` is the item id, or `null` for a lane hold, a decision or a release; `subject` is the same thing as text (`#12`, `lane docs`, `decision #40`, `release v0.9.0`).
+- `since` is when the wait began, in ISO time; `ageMinutes` counts whole minutes from it to `asOf`.
+- `why` and `next` are plain sentences; `command` is the exact command for the next step, or `null` when the step has none.
+- `owner.role` is `builder`, `reviewer`, `coordinator` or `person`; `owner.who` is the agent, lane, `coordinator` or `person`, and `null` when any reviewer may take it.
+- `detail` holds the cause's facts: `holder`, `reviewer`, `builder`, `commit`, `files` and `trunk` for a conflict, `parent` for a stacked item, `reason` and `by` for a hold, `withdrawn`, `after`, `move` and `milestone`, `shout`, `from` and `to`, or `release` and `landed`.
+
+The causes, each with its owner:
+
+| cause | stuck when | owner |
+|---|---|---|
+| `CLAIM_LAPSED` | a claim's lease ran out; `since` is when it ran out | the holder |
+| `REVIEW_LAPSED` | a review reservation's lease ran out with no verdict | a reviewer |
+| `NO_REVIEWER` | a submission has had no reviewer past `health.stuck` | a reviewer |
+| `UNLANDED_CONFLICT` | accepted past `health.stuck` and its commit conflicts with the trunk; `detail.files` names the files | its builder |
+| `UNLANDED_HELD` | accepted past `health.stuck` and held; `detail.reason` names the hold | who holds it |
+| `UNLANDED_STACKED` | accepted past `health.stuck` and carrying another item's commit that has no accept | a reviewer, or that item's builder |
+| `UNLANDED_WAITING` | accepted past `health.stuck` and waiting on an item it lands after | the coordinator |
+| `UNLANDED_READY` | accepted past `health.stuck`, merges cleanly and nobody landed it | the coordinator |
+| `HOLD_STALE` | an item or lane hold older than `health.holds` | who holds it |
+| `CONFLICT_HOLD_CLEARS` | a hold whose reason names a conflict, on an item whose commit now merges cleanly | who holds it |
+| `REWORK_UNCLAIMED` | rejected or reopened in the current release and unclaimed past `health.stuck` | its builder |
+| `REWORK_LATER` | the same in a later milestone; listed in `waiting` | its builder |
+| `AFTER_WITHDRAWN` | an unfinished item waits on a withdrawn item | the coordinator |
+| `DECISION_UNANSWERED` | a decision to the coordinator or the person is unanswered past `health.stuck` | the coordinator or the person |
+| `REQUEST_UNANSWERED` | a person's request is not done or declined past `health.stuck` | the coordinator |
+| `RELEASE_OVERDUE` | landed work waits and the newest version tag is older than `health.release` | the coordinator |
+
+The current release is the roadmap's first milestone with unverified local work; an unplanned item counts as current. A release is the newest tag named like `v1.2.3` or `1.2.3`, dated by its creation, and its landed work is every item first recorded merged after it. A repository with no such tag has no release deadline. The trunk is the primary checkout's branch, or the retained trunk when that checkout is detached.
+
+`pullboard.json` sets the thresholds under `health`, each a duration like `90m`, `2h` or `1d`: `stuck` (default `1h`), `holds` (default `1d`) and `release` (default `1d`). A value that is not a duration is refused as `BAD_CONFIG`.
 
 ## Item threads
 
@@ -211,6 +253,10 @@ A `pa_` token renews only its own seat: `POST /auth/tokens {board,agent}` naming
 On a linked board, an engine-27 verdict, review reservation or review offer needs verifier standing: the verifier was enrolled through the relay by its creator, each creator up the line was too, the line ends at the coordinator, and neither the builder nor a machine join is on it. The coordinator stands on the token the person set up. A seat without standing is refused with `VERIFIER_STANDING` in one line that names the fix, `pullboard worktree <lane> --model "<model name>"` run by the coordinator from the main checkout. Seats from before engine 27, or from before the board was linked, keep building; reviews need a fresh seat made that way. Each person-made coordinator token carries a machine lineage (a reissue that replaces a token keeps it; another machine's token starts its own), and a seat enrolled from it, or from a seat in its line, records that lineage. A coordinator claim records the lineage of the machine that builds it. When the coordinator built an item, a seat from another machine's registration lineage, or the person, verifies it; a seat from the building machine's own lineage is refused and told so. On an unlinked board who may verify is unchanged. The relay stamps each record it stores with `policy` (and `root` for the person-made coordinator token); a stamped record below engine 27 is refused, older unstamped records replay as they did, and a board with machine or agent credentials requires engine 27.
 
 Residual: tokens on disk, in the repository's shared `relay.json`, are readable by every process of the same operating-system user, so a process that reads another seat's current `pa_` can act as that seat and renew it; signed moves (#408) close that. An agent holding the machine credential can still make a seat of its own, by a manual join or by minting a never-issued name, which also makes a creator skip that name. That seat cannot verify that agent's work, nor any work on a linked board, and cannot act as any existing seat. A sealed snapshot uploaded with the machine credential remains a trusted checkpoint for replicas that restore from it.
+
+`GET /auth/machines?board=<id>` returns `{version, machines: [{machine}]}` for the live computer credentials on that board, with duplicate computer ids listed once. It requires that board's machine credential or a person session with current repository write access; agent tokens and credentials from another board are refused. `relay off` excludes its own computer from the list and warns which joined computers lose the shared copy if the phone approves deletion. JSON also returns those ids in `affectedMachines`. Local unlink still succeeds when the relay cannot supply the list.
+
+After phone-approved deletion, a previously live scoped credential receives HTTP 410 / `RELAY_BOARD_DELETED` for that deleted copy. The relay retains only its hash, board id and original expiry as a deletion receipt, prunes expired receipts, and grants no access through them. Unknown, already revoked and already expired credentials receive `AUTH_REQUIRED` as before. Only a versioned deletion response naming this link's own board turns a joined computer back into a local board. The CLI removes the inert link and its device key, excludes the project from automatic relinking, and retains a private credential-free notice that the relay copy was deleted; native board contents remain local. A successful explicit `relay on` starts a new link and clears that notice. A network outage or ordinary credential refusal does not authorize this transition. Before forgetting a deleted copy, the CLI commits any pending native move and its durable receipt locally. The notice keeps only the receipt id and intent digests, so interrupted cleanup or an explicit repeat can return the original outcome without applying that move twice; different local work can continue beside it.
 
 A machine publishes an opaque approval with `POST /api/v1/devices/approvals {context,sealed}`. The publishing machine may GET only its own requests. The paired phone reads `/api/v1/devices/:deviceId/approvals`, explicitly POSTs `/:requestId/authorize {}` and completes the encrypted reply through `/:requestId/complete {response}`. The publishing machine executes a native revocation through `/:requestId/execute {grant}`; the two-minute grant binds the entire context and is atomically consumed once. Native reply keys and grants never persist. A refused foreground approval fails immediately with the original refusal code and reason plus its request id. A refused remote approval makes local unlinking or registration exit nonzero while retaining the completed local work: one line names that completion, the refusal code and reason, the request id and the next action. The JSON result preserves the local outcome and includes `remote: {code, reason, requestId}`. New-board linking uses a durable non-person reply key and returns only a board-scoped machine credential. `relay off` immediately unlinks locally even offline or in an agent shell, reports that the relay copy remains, and queues a separate one-tap phone deletion request when possible.
 
@@ -314,6 +360,8 @@ A request body is `{text}`. It creates a request from the person to the coordina
 For live events, send `Accept: text/event-stream` to the events path. Ordinary messages have an `id` equal to their event sequence and `data` has the `stream` shape above. The local server also sends `event: changed` with `data: {"version":1,"event":{"event_kind":"changed"}}` when a view input changes without a board event; that notification has no `id` and does not move the reconnect cursor. Reconnect with `Last-Event-ID` to resume after the last ordinary event sequence; it takes precedence over `after`.
 
 To follow several boards on one connection, send `Accept: text/event-stream` to `GET /api/v1/events?boards=<id>,<id>`, naming each board once by its id from `GET /api/v1/boards`. A browser holds at most six connections per origin, so a project group's view follows all its repos through this one stream. Each frame's `data` also names its `board`: an event is `{"version":1,"board":"<id>","event":{...}}`, and the changed signal is `{"version":1,"board":"<id>","event":{"event_kind":"changed"}}`, sent on the same terms as a single board's. An ordinary event's `id` carries one cursor per board, `<id>:<sequence>` pairs joined by commas, so reconnecting with `Last-Event-ID`, or passing the same cursor as `after`, resumes each board where it left off. A followed board the cursor leaves out starts from its first event, and a pair for a board not followed is ignored. Every named board must be one the caller may read: otherwise the request is refused with that board's refusal, naming the board, and nothing is streamed. The path is live only; a request without `Accept: text/event-stream` is refused with `BAD_REQUEST`. The single-board events path is unchanged.
+
+`pullboard watch` follows this same stream from a terminal. It uses the running view's stream when the view serves the board, and otherwise serves API v1 for that one board on a private loopback port and follows that. It prints one line per event, or one JSON document per line with `--json`; it only reads the board. A dropped stream is followed again with `Last-Event-ID` set to the last sequence it handled, and `--since <sequence>` starts a new watch there. Work notices from `--work <lane>` (`claimable`, `review-wait` and `main`) carry `notice: true` and the sequence they follow.
 
 The local server uses a shared HTTP router. Streams recheck access before each poll and close with a versioned refusal if access ends. Slow readers pause delivery and resume from the last delivered sequence.
 
