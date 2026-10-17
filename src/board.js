@@ -2727,7 +2727,9 @@ export function recordLandingWaiver(board, { agentId, channel, id, test, until, 
     throw new Refused('LAND_WAIVER', 'name a test, a future --until date and a nonempty --reason; run pullboard land --waive <test> --until <date> --reason "why"');
   }
   return atomic(board, () => {
-    const waiver = { id, test, kind: landingWaiverKind(test), until: new Date(until).toISOString(), reason: reason.trim(), by: PERSON, channel };
+    // This ordered result and event retain their released shape on every replay engine.
+    // File/name classification belongs to a derived read, never immutable waiver history.
+    const waiver = { id, test, until: new Date(until).toISOString(), reason: reason.trim(), by: PERSON, channel };
     logEvent(board, PERSON, 'landing_waiver', null, { waiver });
     return waiver;
   });
@@ -2740,10 +2742,11 @@ export function landingWaivers(board) {
     .map((row) => JSON.parse(row.event_detail).waiver);
 }
 
-/** Find a live person's waiver covering the exact failing file or test name [B3,R3]. */
+/** Find a live person's waiver and derive its match kind without rewriting history [B3,R3,H16]. */
 export function landingWaiverFor(board, failure) {
-  return landingWaivers(board).findLast((waiver) => Date.parse(waiver.until) > board.clock.now().getTime()
-    && landingWaiverCovers(waiver, failure)) ?? null;
+  const waiver = landingWaivers(board).findLast((entry) => Date.parse(entry.until) > board.clock.now().getTime()
+    && landingWaiverCovers(entry, failure));
+  return waiver ? { ...waiver, kind: waiver.kind ?? landingWaiverKind(waiver.test) } : null;
 }
 
 /** File one durable defect per flaky test and retain its source digest [B3,R3]. */

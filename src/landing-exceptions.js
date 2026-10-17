@@ -7,7 +7,8 @@
 /**
  * Name what a waiver argument is: a test file path, or a test's name. A path is a directory and a
  * file with an extension (spaces and any language allowed), or one spaceless file name with an
- * extension; anything else is a name. Earlier waivers carry no kind and are read the same way.
+ * extension; anything else is a name. Waiver history retains the person's original argument;
+ * classification is a derived read, so released ordered receipts stay unchanged.
  * Guessing wrong only narrows a waiver, since each kind matches one field of a failure.
  */
 export function landingWaiverKind(test) {

@@ -3251,7 +3251,7 @@ function workCommands(io, args) {
         const waiver = await ordered(ctx, board, 'recordLandingWaiver', [{ agentId: store.PERSON, channel: io.personChannel ?? 'terminal',
           id: randomUUID(), test: values.waive, until: values.until, reason: values.reason }]);
         io.result?.({ batch: null, landed: [], conflicts: [], blocked: [], culprits: [], flakes: [], waiver });
-        io.say(`waived ${waiver.kind} ${waiver.test} until ${waiver.until}: ${waiver.reason}`);
+        io.say(`waived ${waiver.kind ?? store.landingWaiverKind(waiver.test)} ${waiver.test} until ${waiver.until}: ${waiver.reason}`);
         return 0;
       }
       if (values.until !== undefined || values.reason !== undefined || values.max !== undefined && (!/^[1-9][0-9]*$/u.test(values.max) || !Number.isSafeInteger(Number(values.max)))) throw new Refused('USAGE', 'use --max with a positive item count, or --waive with --until and --reason');
