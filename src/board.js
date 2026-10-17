@@ -16,7 +16,9 @@ import { COORDINATOR } from './config.js';
 import { ENGINE_VERSION, GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, effectiveGuards, storeTriggers } from './machine.js';
 import { Refused } from './refused.js';
 import { barCorrectionFields } from './bar-corrections.js';
+import { landingFlakes, landingWaiverCovers, landingWaiverKind } from './landing-exceptions.js';
 import { parseSpec } from './spec.js';
+export { landingFlakes, landingWaiverCovers, landingWaiverKind };
 
 export const ACCEPT_REASON = 'CRITERION_MET';
 export const PERSON = 'person';
@@ -2732,24 +2734,6 @@ export function landingWaivers(board) {
     .map((row) => JSON.parse(row.event_detail).waiver);
 }
 
-/**
- * Name what a waiver argument is: a test file path, or a test's name. A path is a directory and a
- * file with an extension (spaces and any language allowed), or one spaceless file name with an
- * extension; anything else is a name. Earlier waivers carry no kind and are read the same way.
- * Guessing wrong only narrows a waiver, since each kind matches one field of a failure.
- */
-export function landingWaiverKind(test) {
-  return /^[^\r\n]*\/[^/\r\n]*[^/\s.]\.[A-Za-z0-9]+$/u.test(test) || /^[^\s/]+\.[A-Za-z0-9]+$/u.test(test) ? 'file' : 'name';
-}
-
-/**
- * True when a waiver covers one failure: a file waiver only its file, a name waiver only its name.
- * Keeping the kinds apart stops a new test named like a waived file from riding that waiver [B3,R3].
- */
-export function landingWaiverCovers(waiver, failure) {
-  return (waiver.kind ?? landingWaiverKind(waiver.test)) === 'file' ? waiver.test === failure.file : waiver.test === failure.name;
-}
-
 /** Find a live person's waiver covering the exact failing file or test name [B3,R3]. */
 export function landingWaiverFor(board, failure) {
   return landingWaivers(board).findLast((waiver) => Date.parse(waiver.until) > board.clock.now().getTime()
@@ -2771,16 +2755,6 @@ export function recordLandingFlake(board, { agentId, test, hash, names, lane, ba
     logEvent(board, agentId, 'landing_flake', item, { flake });
     return flake;
   });
-}
-
-/** Read the latest observation of each named flaky test [B3,R3]. */
-export function landingFlakes(board) {
-  const flakes = new Map();
-  for (const row of board.db.prepare("SELECT event_detail FROM event WHERE event_kind = 'landing_flake' ORDER BY event_id").all()) {
-    const { flake } = JSON.parse(row.event_detail);
-    flakes.set(flake.test, flake);
-  }
-  return [...flakes.values()];
 }
 
 /** Validate a distinct waived landing proof without creating an ordinary gate stamp [B3,R3]. */
