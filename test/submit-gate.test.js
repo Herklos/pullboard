@@ -13,7 +13,7 @@ import { after, test } from 'node:test';
 import { selectAffectedTests } from '../src/affected-tests.js';
 import { configFromSource } from '../src/config.js';
 import { checkAtCommit } from '../src/trusted-policy.js';
-import { refuseSandboxBlocked } from '../src/gate.js';
+import { refuseSandboxBlocked, sandboxBlockedOperation } from '../src/gate.js';
 
 const BIN = resolveBin();
 const dirs = [];
@@ -97,6 +97,180 @@ function commitAll(box, message = 'chore: fixture state') {
   box.git('commit', '-q', '-m', message);
   return box.git('rev-parse', 'HEAD');
 }
+
+/** Build a claimed submit fixture whose changed source selects a nested child-process test. */
+function childFailureSubmitBox(t, testSource) {
+  let box = privateRepo(t);
+  put(box.root, 'pullboard.json', JSON.stringify({ gate: 'node --test', affectedTests: 'node --test', spec: 'SPEC.md' }));
+  put(box.root, 'SPEC.md', SPEC);
+  put(box.root, 'src/listener-probe.js', 'export const listenerProbe = 1;\n');
+  put(box.root, 'test/listen-denial.js', [
+    "import net from 'node:net';",
+    "net.Server.prototype.listen = function deniedListen() {",
+    "  const error = new Error('listen EPERM: operation not permitted 127.0.0.1:0');",
+    "  Object.assign(error, { code: 'EPERM', syscall: 'listen', address: '127.0.0.1', port: 0 });",
+    '  throw error;',
+    '};',
+  ].join('\n'));
+  box.env.LISTEN_DENIAL_SHIM = join(box.root, 'test/listen-denial.js');
+  put(box.root, 'test/child-listener.test.js', testSource);
+  commitAll(box);
+  box = builderRepo(box);
+  const added = box.coordinator('add', 'build', 'Child-process gate fixture', '--check', 'true');
+  assert.equal(added.code, 0, added.err);
+  assert.equal(box.run('claim', '1').code, 0);
+  put(box.root, 'src/listener-probe.js', 'export const listenerProbe = 2;\n');
+  commitAll(box, 'feat(core): change listener probe [G1]');
+  return box;
+}
+
+/** Produce a real TAP failure containing a nested child's EPERM without relying on host sandbox support. */
+function childListenerTestSource() {
+  return [
+    "import { test } from 'node:test';",
+    "import assert from 'node:assert/strict';",
+    "import { spawnSync } from 'node:child_process';",
+    "import '../src/listener-probe.js';",
+    "test('the server child binds', () => {",
+    "  const child = spawnSync(process.execPath, ['--import', process.env.LISTEN_DENIAL_SHIM, '--input-type=module', '-e', \"import { createServer } from 'node:net'; createServer().listen(0, '127.0.0.1');\"], { encoding: 'utf8' });",
+    "  assert.equal(child.status, 0, `App exited before listening (code ${child.status}, signal ${child.signal}):\\n${child.stderr}`);",
+    '});',
+  ].join('\n');
+}
+
+/** Produce a child-process test whose stderr models a Python traceback without requiring Python. */
+function childPythonTestSource() {
+  const childProgram = [
+    'console.error("Traceback (most recent call last):")',
+    'console.error("  File " + JSON.stringify("child.py") + ", line 1, in <module>")',
+    'console.error("PermissionError: [Errno 13] Permission denied: " + JSON.stringify(process.env.CHILD_PERMISSION_PATH))',
+    'process.exit(1)',
+  ].join('\n');
+  return [
+    "import { test } from 'node:test';",
+    "import assert from 'node:assert/strict';",
+    "import { spawnSync } from 'node:child_process';",
+    "import '../src/listener-probe.js';",
+    "test('the child reports a Python-style denial', () => {",
+    `  const child = spawnSync(process.execPath, ['-e', ${JSON.stringify(childProgram)}], { encoding: 'utf8' });`,
+    "  assert.equal(child.status, 0, `Child process exited with code ${child.status}:\\n${child.stderr}`);",
+    '});',
+  ].join('\n');
+}
+
+/** Format a standalone Python denial already recognized by the gate scanner. */
+function pythonPermissionError(path, errno = 13) {
+  return `PermissionError: [Errno ${errno}] Permission denied: '${path}'`;
+}
+
+/** Wrap scanner input in a failed child TAP record with or without a fatal traceback. */
+function pythonChildTap(path, { traceback = true, frame = true, prefixMarker = false, errno = 13, wrapper = true, exitCode = 1, trailingError = false, assertionFooter = null, footerSeparator = '\n\n\n', parentCode = 'ERR_ASSERTION' } = {}) {
+  const diagnostic = pythonPermissionError(path, errno);
+  const marker = prefixMarker ? 'not a traceback marker: Traceback (most recent call last):' : 'Traceback (most recent call last):';
+  const tracebackDetail = `${marker}\n${frame ? '  File "child.py", line 1, in <module>\n' : ''}${diagnostic}${trailingError ? '\nValueError: later unrelated failure' : ''}`;
+  const detail = traceback ? tracebackDetail : `AssertionError: expected ordinary output\n${diagnostic}`;
+  const renderedDetail = assertionFooter === null ? detail : `${detail}${footerSeparator}${assertionFooter}`;
+  return [
+    'TAP version 13',
+    'not ok 1 - child reads a file',
+    '  ---',
+    "  failureType: 'testCodeFailure'",
+    '  error: |-',
+    ...(wrapper ? [`    Child process exited with code ${exitCode}:`] : []),
+    ...renderedDetail.split('\n').map((line) => `    ${line}`),
+    `  code: '${parentCode}'`,
+    '  ...',
+  ].join('\n');
+}
+
+test('a child process listen denial reads as sandbox blocked [C7,B26]', (t) => {
+  const box = childFailureSubmitBox(t, childListenerTestSource());
+  const result = box.run('submit', '1');
+  const output = `${result.out}\n${result.err}`;
+  assert.equal(result.code, 1, output);
+  assert.match(output, /SANDBOX_BLOCKED/u, 'submit names the denied child-process listen');
+  assert.match(output, /listen \(EPERM\)/u);
+  assert.doesNotMatch(output, /GATE_RED/u);
+
+  const explanatory = "  assert.equal(child.status, 0, `App exited before listening (code ${child.status}, signal ${child.signal}):\\n${child.stderr}`);";
+  const original = childListenerTestSource();
+  assert.equal(original.split(explanatory).length, 2, 'replace exactly one explanatory message');
+  const bareSource = original.replace(explanatory, '  assert.equal(child.status, 0, child.stderr);');
+  const bareBox = childFailureSubmitBox(t, bareSource);
+  const bare = bareBox.run('submit', '1');
+  const bareOutput = `${bare.out}\n${bare.err}`;
+  assert.equal(bare.code, 1, bareOutput);
+  assert.match(bareOutput, /SANDBOX_BLOCKED/u, 'bare stderr with structured fatal fields still names the denial');
+  assert.match(bareOutput, /listen \(EPERM\)/u);
+  assert.doesNotMatch(bareOutput, /GATE_RED/u);
+
+  const pythonBox = childFailureSubmitBox(t, childPythonTestSource());
+  pythonBox.env.CHILD_PERMISSION_PATH = join(pythonBox.dir, 'outside-python-denial.txt');
+  const python = pythonBox.run('submit', '1');
+  const pythonOutput = `${python.out}\n${python.err}`;
+  assert.equal(python.code, 1, pythonOutput);
+  assert.match(python.err, /SANDBOX_BLOCKED/u, 'submit names a scanner-known denial from a child traceback');
+  assert.match(python.err, /file access .*\(EACCES\)/u);
+  assert.match(python.err, /Ask the person to allow this operation/u);
+  assert.doesNotMatch(python.err, /GATE_RED/u);
+});
+
+test('an ordinary failure stays gate red [C7,B26]', (t) => {
+  const source = [
+    "import { test } from 'node:test';",
+    "import assert from 'node:assert/strict';",
+    "import '../src/listener-probe.js';",
+    "test('ordinary failure', () => assert.fail('ordinary assertion failure'));",
+  ].join('\n');
+  const box = childFailureSubmitBox(t, source);
+  const outside = join(box.dir, 'outside-python-denial.txt');
+  const direct = sandboxBlockedOperation(box.root, pythonPermissionError(outside));
+  assert.equal(direct, `file access "${outside}" (EACCES)`, 'the standalone known denial remains recognized');
+  assert.equal(sandboxBlockedOperation(box.root, pythonPermissionError(outside, 1)), `file access "${outside}" (EACCES)`,
+    'the standalone EPERM-style Python errno remains recognized');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { traceback: false })), null,
+    'permission-looking text without a fatal traceback stays ordinary');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(join(box.root, 'inside.txt'))), null,
+    'an inside-root path stays ordinary');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside), { includeFilePaths: false }), null,
+    'the no-file-paths option stays respected');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { frame: false })), null,
+    'a traceback without a standard file frame stays ordinary');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { prefixMarker: true })), null,
+    'traceback marker text inside a line is not a traceback');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { wrapper: false })), null,
+    'a traceback without a failed child wrapper stays ordinary');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { exitCode: 0 })), null,
+    'a zero-exit child is not a blocked failure');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { trailingError: true })), null,
+    'a different terminal exception after PermissionError stays ordinary');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { errno: 1 })), `file access "${outside}" (EACCES)`,
+    'a nested EPERM-style Python errno remains recognized');
+  const recognized = `file access "${outside}" (EACCES)`;
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { assertionFooter: '1 !== 0' })), recognized,
+    'the matching Node assertion footer does not hide the terminal child denial');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { assertionFooter: '2 !== 0' })), null,
+    'a footer exit code different from the child wrapper stays ordinary');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { assertionFooter: '1 !== 1' })), null,
+    'a footer with a nonzero expected value stays ordinary');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { assertionFooter: '1 !== 0', footerSeparator: '\nnot blank\n' })), null,
+    'a comparison without the blank-line boundary stays ordinary');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { assertionFooter: '1 !== 0\nextra text' })), null,
+    'arbitrary text after the comparison stays ordinary');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { assertionFooter: '1 !== 0', parentCode: 'ERR_TEST_FAILURE' })), null,
+    'the footer is accepted only in an assertion failure record');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { trailingError: true, assertionFooter: '1 !== 0' })), null,
+    'a later Python exception stays ordinary even when the Node assertion footer follows');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { assertionFooter: '1 !== 0', footerSeparator: '\n' })), null,
+    'a comparison without a blank-line boundary stays ordinary');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { traceback: false, assertionFooter: '1 !== 0' })), null,
+    'an assertion footer does not turn non-traceback text into a Python denial');
+  const result = box.run('submit', '1');
+  const output = `${result.out}\n${result.err}`;
+  assert.equal(result.code, 1, output);
+  assert.match(output, /GATE_RED/u);
+  assert.doesNotMatch(output, /SANDBOX_BLOCKED/u);
+});
 
 /** Seed a small import graph with three independently discoverable test files. */
 function seedGraph(box) {
@@ -1059,4 +1233,79 @@ test('a sandbox-blocked gate asks the person [I1,C7]', async (t) => {
     assert.equal(inside.sandboxBlocked, null, 'a private-clone file stays inside that check worktree');
     assert.equal(JSON.parse(box.coordinator('show', '1', '--json').out).item_status, 'submitted', 'checks alone record no verdict');
   });
+});
+
+test('nested TAP child denials require bounded matching fatal details [C7,B26]', (t) => {
+  const box = privateRepo(t);
+  const outside = join(box.dir, 'outside-denied.txt');
+  /** Build a failed child TAP record with configurable structured error fields. */
+  function tapChildError({ code = 'EACCES', messageCode = 'EACCES', syscall = 'open', path = outside, extra = '' } = {}) {
+    return [
+      'TAP version 13',
+      'not ok 1 - child opens a denied file',
+      '  ---',
+      "  failureType: 'testCodeFailure'",
+      '  error: |-',
+      '    App exited before opening the file (code 1, signal null):',
+      `    Error: ${messageCode}: permission denied, ${syscall} '${outside}'`,
+      '    {',
+      `      code: '${code}',`,
+      `      syscall: '${syscall}',`,
+      `      path: '${path}'`,
+      '    }',
+      ...extra.split('\n').filter(Boolean).map((line) => `    ${line}`),
+      "  code: 'ERR_ASSERTION'",
+      '  ...',
+    ].join('\n');
+  }
+  const blocked = sandboxBlockedOperation(box.root, tapChildError());
+  assert.equal(blocked, `open "${outside}" (EACCES)`);
+
+  assert.equal(sandboxBlockedOperation(box.root, tapChildError({ code: 'EPERM_FAKE', messageCode: 'EACCES' })), null,
+    'the structured code must exactly match the child error');
+  assert.equal(sandboxBlockedOperation(box.root, tapChildError({ path: join(box.root, 'inside.txt') })), null,
+    'the structured child path must match the resolved denied target');
+  assert.equal(sandboxBlockedOperation(box.root, tapChildError({ extra: Array(65).fill('bounded continuation').join('\n') })), null,
+    'an oversized error block is not classified');
+  assert.equal(sandboxBlockedOperation(box.root, tapChildError(), { includeFilePaths: false }), null,
+    'file-path classification remains disabled when requested');
+
+  /** Build stderr-only Node fatal TAP while varying its proof fields. */
+  function tapBareNodeError({ code = 'EPERM', syscall = 'listen', version = true, stack = true,
+    footer = '1 !== 0', parentCode = 'ERR_ASSERTION', trailing = '', object = true, closeObject = true, exitProse = '' } = {}) {
+    return [
+      'TAP version 13',
+      'not ok 1 - child listens',
+      '  ---',
+      "  failureType: 'testCodeFailure'",
+      '  error: |-',
+      ...(exitProse ? [`    ${exitProse}`] : []),
+      '    Error: listen EPERM: operation not permitted 127.0.0.1:0',
+      ...(stack ? ['        at Server.listen (node:net:2000:7)'] : []),
+      ...(object ? ['        {', `          code: '${code}',`, `          syscall: '${syscall}',`,"          address: '127.0.0.1',",'          port: 0', ...(closeObject ? ['        }'] : [])] : []),
+      ...(version ? ['    Node.js v22.22.2'] : []),
+      ...(trailing ? [`    ${trailing}`] : []),
+      '',
+      `    ${footer}`,
+      `  code: '${parentCode}'`,
+      '  ...',
+    ].join('\n');
+  }
+  assert.equal(sandboxBlockedOperation(box.root, tapBareNodeError()), 'listen (EPERM)',
+    'bare stderr remains recognizable when the Node fatal fields and assertion prove nonzero exit');
+  for (const [label, options] of [
+    ['missing stack', { stack: false }],
+    ['missing Node version', { version: false }],
+    ['missing structured error fields', { object: false }],
+    ['truncated structured object', { closeObject: false }],
+    ['mismatched structured code', { code: 'EACCES' }],
+    ['mismatched structured syscall', { syscall: 'open' }],
+    ['non-assertion parent', { parentCode: 'ERR_TEST_FAILURE' }],
+    ['zero exit footer', { footer: '0 !== 0' }],
+    ['zero child-exit prose cannot fall back to footer', { exitProse: 'App exited before listening (code 0, signal null):' }],
+    ['invalid child-exit prose cannot fall back to footer', { exitProse: 'App exited before listening (code unknown, signal null):' }],
+    ['unrelated trailing error', { trailing: 'Error: later ordinary failure' }],
+  ]) {
+    assert.equal(sandboxBlockedOperation(box.root, tapBareNodeError(options)), null, `${label} stays unclassified`);
+  }
 });
