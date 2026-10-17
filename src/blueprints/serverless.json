@@ -3,13 +3,13 @@
   "name": "serverless",
   "title": "Serverless",
   "version": 1,
-  "kind": "infrastructure",
+  "kind": "architecture",
   "by": "Pullboard",
   "summary": "Pick your cloud once, and your agents never drift from it.",
   "prefix": "SV",
   "rules": [
-    { "key": "SV1", "text": "Every function has an alarm before it ships.", "why": "a function that fails quietly is found by your users first." },
-    { "key": "SV2", "text": "No function runs past its platform's time limit.", "why": "the platform stops a function at its limit, so longer work has to be split before it fails in production." }
+    { "key": "SV1", "text": "Every function has an alarm before it ships.", "why": "a function that fails quietly is found by your users first.", "source": { "name": "Pullboard serverless blueprint", "id": "SV1", "url": "https://github.com/pullboard-dev/pullboard/blob/main/src/blueprints/serverless.json" } },
+    { "key": "SV2", "text": "No function runs past its platform's time limit.", "why": "the platform stops a function at its limit, so longer work has to be split before it fails in production.", "source": { "name": "Pullboard serverless blueprint", "id": "SV2", "url": "https://github.com/pullboard-dev/pullboard/blob/main/src/blueprints/serverless.json" } }
   ],
   "questions": [
     { "key": "Q1", "ask": "It runs on", "choices": ["AWS", "Google Cloud", "Azure", "Cloudflare"], "default": "AWS" },
