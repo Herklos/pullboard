@@ -531,6 +531,18 @@ test('starter items land in a build lane, never the coordinator lane [S1,I1]', (
   assert.deepEqual(placed.proposedLanes, [], 'nothing is proposed when a build lane exists');
   assert.deepEqual(lanesOf(laned).filter((lane) => lane === 'coordinator'), [], 'no starter lands in the coordinator lane');
 
+  // A blueprint that names an existing lane owning no folders, a verifier lane: that lane builds
+  // nothing, so every starter goes to the first build lane, and add says so.
+  const verifier = freshBoard({ lanes: { tests: { owns: [] } } });
+  const web = verifier.run('lane', 'add', 'web', '--owns', 'web/');
+  assert.equal(web.status, 0, web.stdout + web.stderr);
+  writeFileSync(join(verifier.repo, 'verifier-lane.json'), `${JSON.stringify({ ...PUBLISHED, name: 'verifier-lane',
+    items: PUBLISHED.items.map((item) => ({ ...item, lane: 'tests' })) })}\n`);
+  const moved = verifier.run('blueprint', 'add', 'verifier-lane.json');
+  assert.equal(moved.status, 0, moved.stdout + moved.stderr);
+  assert.deepEqual(lanesOf(verifier), Array(PUBLISHED.items.length).fill('web'), 'a starter naming a lane that owns no folders goes to the first build lane');
+  assert.match(moved.stdout, /asked for the tests lane, which owns no folders, so (?:it is|they are) filed in the web lane/u, 'add says the named lane was not used');
+
   // A board with no build lane, only a verifier lane that owns no folders: blueprint add proposes
   // one, files the starters in it and says so.
   const bare = freshBoard({ lanes: { tests: { owns: [] } } });

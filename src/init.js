@@ -112,13 +112,38 @@ export function proposeLanes(root, config = loadConfig(root)) {
  */
 export function starterLane(wanted, config, proposals) {
   const proposalFor = (name) => proposals.find((lane) => lane.name === name) ?? null;
-  if (wanted && wanted !== COORDINATOR && (Object.hasOwn(config.lanes, wanted) || proposalFor(wanted))) {
-    return { lane: wanted, proposal: Object.hasOwn(config.lanes, wanted) ? null : proposalFor(wanted) };
+  // A lane that owns no folders, like a verifier lane, builds nothing, so it never takes a starter.
+  const builds = (name) => name !== COORDINATOR && Object.hasOwn(config.lanes, name) && config.lanes[name].owns.length > 0;
+  if (wanted && (builds(wanted) || (!Object.hasOwn(config.lanes, wanted) && proposalFor(wanted)))) {
+    return { lane: wanted, proposal: builds(wanted) ? null : proposalFor(wanted) };
   }
-  const built = Object.entries(config.lanes).find(([name, lane]) => name !== COORDINATOR && lane.owns.length);
-  if (built) return { lane: built[0], proposal: null };
+  const asked = wanted ? { asked: wanted } : {};
+  const built = Object.keys(config.lanes).find(builds);
+  if (built) return { lane: built, proposal: null, ...asked };
   // proposeLanes always proposes one lane when no lane owns a folder, so this is never empty.
-  return { lane: proposals[0].name, proposal: proposals[0] };
+  return { lane: proposals[0].name, proposal: proposals[0], ...asked };
+}
+
+/**
+ * The lines blueprint add prints for starters that named a lane they could not go to: which lane
+ * they asked for, why it was not used, and where they went instead, so a person reading the output
+ * knows the blueprint's lane was set aside.
+ *
+ * @param {{ lane: string, askedLane?: string }[]} placed - The starters filed, each with its lane.
+ * @param {any} config - The repo's config.
+ * @returns {string[]}
+ */
+export function askedLaneNotes(placed, config) {
+  const groups = new Map();
+  for (const { lane, askedLane: asked } of placed) {
+    if (!asked) continue;
+    const key = `${asked}\n${lane}`;
+    groups.set(key, { asked, lane, count: (groups.get(key)?.count ?? 0) + 1 });
+  }
+  return [...groups.values()].map(({ asked, lane, count }) => {
+    const why = asked === COORDINATOR ? 'which verifies and merges' : Object.hasOwn(config.lanes, asked) ? 'which owns no folders' : 'which does not exist';
+    return `${count} starter ${count === 1 ? 'item' : 'items'} asked for the ${asked} lane, ${why}, so ${count === 1 ? 'it is' : 'they are'} filed in the ${lane} lane`;
+  });
 }
 
 /**
