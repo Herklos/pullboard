@@ -42,6 +42,25 @@ async function deviceStorage(value) {
   } finally { db.close(); }
 }
 
+/** Erase this removed browser's non-extractable private key before its revoked board can be drawn again. */
+export async function forgetDevice() {
+  if (!globalThis.indexedDB) return;
+  const db = await new Promise((resolve, reject) => {
+    const request = indexedDB.open('pullboard-relay-device-v1', 1);
+    request.onupgradeneeded = () => request.result.createObjectStore('keys');
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(new Refused('DEVICE_STORAGE', 'Clear this removed browser’s site data before pairing again.'));
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      const transaction = db.transaction('keys', 'readwrite');
+      transaction.objectStore('keys').delete('device');
+      transaction.oncomplete = resolve;
+      transaction.onerror = transaction.onabort = () => reject(new Refused('DEVICE_STORAGE', 'Clear this removed browser’s site data before pairing again.'));
+    });
+  } finally { db.close(); }
+}
+
 /** Send a public enrollment without exposing private material; return true once new pairing delivers keys. */
 export async function enrollPhone(documentAt) {
   rememberDevicePairing();
@@ -111,10 +130,10 @@ function approvalDocument(value) {
 }
 
 /** Show exact paired native intent and approve only on one explicit phone tap. */
-export async function installPhoneApprovals(documentAt, boardKeys, onApproved) {
+export async function installPhoneApprovals(documentAt, boardKeys, onApproved, signal) {
   if (document.getElementById('phone-approvals')) return;
-  const device = await deviceStorage();
-  if (!device) return;
+  let device = await deviceStorage();
+  if (!device || signal?.aborted) return;
   const panel = document.createElement('section');
   panel.className = 'card-panel'; panel.id = 'phone-approvals';
   panel.setAttribute('aria-label', 'Requests from your Mac');
@@ -122,11 +141,15 @@ export async function installPhoneApprovals(documentAt, boardKeys, onApproved) {
   const active = new Set();
   let stopped = false;
   let timer;
+  /** Release the private device key and pending cards when this page loses relay access. */
+  function stop() { stopped = true; clearTimeout(timer); device = null; panel.replaceChildren(); panel.remove(); }
+  signal?.addEventListener('abort', stop, { once: true });
   /** Refresh pending metadata without approving it or replacing a button whose request is in flight. */
   async function refresh() {
     if (stopped) return;
     try {
       const response = await documentAt('/api/v1/devices/' + device.deviceId + '/approvals');
+      if (stopped) return;
       const ids = new Set(response.approvals.map(value => value.context.id));
       for (const child of [...panel.children]) if (child.dataset.request && !ids.has(child.dataset.request) && !active.has(child.dataset.request)) child.remove();
       for (const row of response.approvals) {
@@ -138,6 +161,7 @@ export async function installPhoneApprovals(documentAt, boardKeys, onApproved) {
         const key = Uint8Array.from(atob(raw.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - raw.length % 4) % 4)), char => char.charCodeAt(0));
         const envelope = await verifyApprovalIntent(key, approvalDocument(row.sealed));
         const intent = await openApproval(device.privateKey, envelope, context, 'intent');
+        if (stopped) return;
         if (JSON.stringify(approvalContext(intent.context)) !== JSON.stringify(context)) throw new Refused('PHONE_APPROVAL_AUTH', 'The displayed request differs from its sealed action.');
         const replyKey = devicePublicKey(intent.replyKey);
         const card = document.createElement('div'); card.className = 'phone-approval'; card.dataset.request = context.id;
@@ -149,7 +173,7 @@ export async function installPhoneApprovals(documentAt, boardKeys, onApproved) {
         button.textContent = context.action === 'link' ? 'Link project' : context.action === 'delete-board' ? 'Delete relay copy' : 'Approve revocation';
         /** Issue once on this tap, then encrypt the result to the native command's private RAM reply key. */
         button.onclick = async () => {
-          if (active.has(context.id)) return;
+          if (stopped || active.has(context.id)) return;
           active.add(context.id); button.disabled = true;
           try {
             const authorized = await documentAt('/api/v1/devices/approvals/' + context.id + '/authorize', {
@@ -174,6 +198,6 @@ export async function installPhoneApprovals(documentAt, boardKeys, onApproved) {
       if (error?.code !== 'DEVICE_NOT_ENROLLED') panel.setAttribute('data-error', 'Approval requests are unavailable. Retry from the Mac.');
     } finally { if (!stopped) timer = setTimeout(refresh, 1000); }
   }
-  addEventListener('pagehide', () => { stopped = true; clearTimeout(timer); }, { once: true });
+  addEventListener('pagehide', stop, { once: true });
   await refresh();
 }
