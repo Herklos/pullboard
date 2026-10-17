@@ -41,7 +41,7 @@ async function deviceStorage(value) {
   } finally { db.close(); }
 }
 
-/** Send a public authenticated enrollment while the private key and QR secret remain on the phone. */
+/** Send a public enrollment without exposing private material; return true once new pairing delivers keys. */
 export async function enrollPhone(documentAt) {
   rememberDevicePairing();
   let pending;
@@ -68,7 +68,7 @@ export async function enrollPhone(documentAt) {
   while (Date.now() < pending.expires) {
     try {
       const response = await documentAt('/api/v1/devices/' + device.deviceId + '/boards');
-      if (response.wraps.length) return;
+      if (response.wraps.length) return true;
     } catch (error) { if (error.code !== 'DEVICE_NOT_ENROLLED') throw error; }
     await new Promise(resolve => setTimeout(resolve, 250));
   }

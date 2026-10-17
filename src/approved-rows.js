@@ -8,6 +8,7 @@ import { boardBusyError, openBoardReadOnly, rowDecisions } from './board.js';
 import { hasSignerFile, verifySignedRecords } from './signature.js';
 import { Refused } from './refused.js';
 import { CONFIG_FILE, configFromSource } from './config.js';
+import { checkLoosening } from './doctrine-checks.js';
 
 const TRUST_FILES = ['.pullboard/signers', '.pullboard/first-commit', '.pullboard/signers.initial', SIGNOFFS_FILE];
 
@@ -80,8 +81,10 @@ export function approvedRowProblems(root, config, boardFile) {
     // Historical grammar declarations must not prevent a repair to the supported staged grammar.
     for (const old of parseSpec(before.text, { strictGrammarVersion: false }).rows.filter((row) => row.status === 'approved')) {
       const matches = rows.rows.filter((row) => row.id === old.id);
-      if (matches.length === 1 && matches[0].text === old.text) continue;
-      changes.push({ kind, file: staged.file, files: [before.file, staged.file], row: matches[0] ?? old, ambiguous: matches.length !== 1,
+      // A check that lets more problems through is as much the person's call as new wording [D1].
+      const loosened = matches.length === 1 ? checkLoosening(old, matches[0]) : '';
+      if (matches.length === 1 && matches[0].text === old.text && !loosened) continue;
+      changes.push({ kind, file: staged.file, files: [before.file, staged.file], row: matches[0] ?? old, ambiguous: matches.length !== 1, loosened,
         target: matches.length === 1 ? staged.text.split(/\r?\n/u)[matches[0].line - 1] : '' });
     }
   }
@@ -89,16 +92,19 @@ export function approvedRowProblems(root, config, boardFile) {
   try {
     const decisions = boardApprovals(boardFile);
     const trust = stagedApprovals(root, decisions);
-    return changes.filter(({ kind, files, row, target, ambiguous }) => {
+    return changes.filter(({ kind, files, row, target, ambiguous, loosened }) => {
       if (ambiguous) return true;
       const approved = decisions.some((record) => record.kind === kind && record.id === row.id && files.includes(record.file)
         && record.replacement === target && record.text === row.text && (!trust.signed || record.decision === 'decline' || record.signature));
+      // Unchanged text keeps old sign-offs valid, so a loosened check needs a receipt for its exact new row.
       const signed = trust.records.some((record) => record.id === row.id && record.text === row.text
-        && (record.type === 'row-decision' ? record.kind === kind && files.includes(record.file) : kind === 'spec'));
+        && (record.type === 'row-decision' ? record.kind === kind && files.includes(record.file) && (!loosened || record.replacement === target) : kind === 'spec' && !loosened));
       return !approved && !signed;
-    }).map(({ kind, file, row, ambiguous }) => ambiguous
+    }).map(({ kind, file, row, ambiguous, loosened }) => ambiguous
       ? `${file}: approved row ${row.id} is missing or duplicated; restore exactly one row with its permanent id before committing`
-      : `${file}: ${row.id} changes approved text without the person's exact approval; ask the person to approve ${kind === 'doctrine' ? 'doctrine:' : ''}${row.id} in pullboard view or sign its new text, then stage the signed receipt`);
+      : loosened
+        ? `${file}: ${row.id} ${loosened} without the person's signature; lowering count: is free, anything looser is theirs: ask the person to approve ${kind === 'doctrine' ? 'doctrine:' : ''}${row.id} in pullboard view or sign its new row, then stage the signed receipt`
+        : `${file}: ${row.id} changes approved text without the person's exact approval; ask the person to approve ${kind === 'doctrine' ? 'doctrine:' : ''}${row.id} in pullboard view or sign its new text, then stage the signed receipt`);
   } catch (error) {
     return [`approved-row authorization cannot be checked: ${error.message}; restore valid staged SSH trust files and signed receipts before committing`];
   }
