@@ -12,6 +12,7 @@ import { createInterface } from 'node:readline';
 import { after, test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { listResources, setResourceCapacity, takeResource } from '../src/resources.js';
+import { capacityChangeCases } from './resources-capacity-fixture.js';
 import { checkNeedsBrowser } from '../src/browser-admission.js';
 import { releaseQueueProof } from './resources-release-fixture.js';
 
@@ -1649,23 +1650,23 @@ test('the memory hold is off until a floor is set, an unread machine warns once,
   assert.match(JSON.parse(json.stdout).memory.line, /^memory: /u, 'the JSON result carries the same machine line');
 });
 
-test('[Q4] machine capacity changes atomically refuse an occupied or queued resource', async () => {
+test('[Q4] machine capacity decreases atomically refuse an occupied or queued resource', async () => {
   const box = fixture();
   const oldHome = process.env.PULLBOARD_HOME;
   const oldMachineHome = process.env.PULLBOARD_MACHINE_HOME;
   process.env.PULLBOARD_HOME = box.home;
   process.env.PULLBOARD_MACHINE_HOME = box.home;
-  const holder = worker(box, { agent: 'capacity-holder' });
+  const holder = worker(box, { capacity: 2, agent: 'capacity-holder' });
   try {
     assert.equal((await event(holder)).acquired, 'capacity-holder');
-    const waiter = worker(box, { agent: 'capacity-waiter' });
+    const waiter = worker(box, { capacity: 2, agent: 'capacity-waiter' });
     assert.equal((await event(waiter)).waiting, 1);
     let persisted = false;
-    assert.throws(() => setResourceCapacity({ name: 'gate', capacity: 3, persist: () => { persisted = true; } }), (error) => error.code === 'RESOURCE_BUSY');
+    assert.throws(() => setResourceCapacity({ name: 'gate', capacity: 1, persist: () => { persisted = true; } }), (error) => error.code === 'RESOURCE_BUSY');
     assert.equal(persisted, false, 'settings remain unchanged while a holder and waiter exist');
     await release(holder);
     assert.equal((await event(waiter)).acquired, 'capacity-waiter');
-    assert.throws(() => setResourceCapacity({ name: 'gate', capacity: 3, persist: () => { persisted = true; } }), (error) => error.code === 'RESOURCE_BUSY');
+    assert.throws(() => setResourceCapacity({ name: 'gate', capacity: 1, persist: () => { persisted = true; } }), (error) => error.code === 'RESOURCE_BUSY');
     await release(waiter);
     const changed = setResourceCapacity({ name: 'gate', capacity: 3, persist: () => { persisted = true; } });
     assert.deepEqual(changed, { name: 'gate', capacity: 3 });
@@ -1750,3 +1751,15 @@ test('[Q4] a red gate releases its lease before the same process starts another 
     if (child.exitCode === null && child.signalCode === null) await closed;
   }
 });
+
+
+const capacityCases = capacityChangeCases({ fixture, worker, event, acquired, release, privateList, poolWorker, POOL_MODULE_WORKER, configureBrowserSlots });
+
+/** Existing queued processes observe a raised limit without restarting their holders [Q1,Q2,Q4]. */
+test("raising a busy resource's capacity admits waiters at once [Q1,Q2,Q4]", capacityCases.raising);
+
+/** A refused decrease names the live holders and leaves their leases and settings intact [Q1,Q3,Q4]. */
+test("lowering capacity never stops a running holder [Q1,Q3,Q4]", capacityCases.lowering);
+
+/** Browser capacity can grow under the same live gate lease without exceeding either limit [Q1,Q2,Q4]. */
+test("raising busy browser capacity admits only the new browser slots [Q1,Q2,Q4]", capacityCases.browser);

@@ -798,7 +798,7 @@ export function inheritedGateSlot({ root = process.cwd(), browser = false } = {}
   };
 }
 
-/** Change a resource's capacity only while its queue is empty, persisting related settings under the same lock. */
+/** Raise live capacity atomically; a decrease waits for an empty queue without evicting holders. */
 export function setResourceCapacity({ name, capacity, scope = 'machine', root = process.cwd(), persist = () => {} }) {
   if (typeof name !== 'string' || !name.trim() || name.trim() !== name) throw new Refused('BAD_RESOURCE_NAME', 'resource name must be nonempty trimmed text');
   if (name.startsWith('runner:')) throw new Refused('RESERVED_RUNNER_RESOURCE', 'runner resource rows are managed by the machine gate; use runner settings');
@@ -807,8 +807,10 @@ export function setResourceCapacity({ name, capacity, scope = 'machine', root = 
   try {
     return update(db, () => {
       const state = snapshot(db, name);
-      if (state.holders.length || state.line.length) {
-        throw new Refused('RESOURCE_BUSY', `resource "${name}" has ${state.holders.length} holder(s) and ${state.line.length} waiter(s); wait for it to become idle, then retry pullboard settings ${name === 'browser' ? 'browserSlots' : 'gateSlots'} ${capacity}`);
+      const current = db.prepare('SELECT capacity FROM resource WHERE name = ?').get(name)?.capacity;
+      if ((state.holders.length || state.line.length) && (current === undefined || capacity < current)) {
+        const holders = state.holders.map(holder => `${holder.agent} (${holder.repo})`).join(', ') || 'none';
+        throw new Refused('RESOURCE_BUSY', `resource "${name}" has ${state.holders.length} holder(s) and ${state.line.length} waiter(s); running: ${holders}; wait for it to become idle, then retry pullboard settings ${name === 'browser' ? 'browserSlots' : 'gateSlots'} ${capacity}`);
       }
       persist();
       db.prepare('INSERT INTO resource(name, capacity) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET capacity = excluded.capacity').run(name, capacity);
