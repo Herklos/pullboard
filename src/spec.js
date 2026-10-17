@@ -30,7 +30,7 @@ const SECTION_RE = /^##\s+(.+)$/;
 const SIGNER_RE = /^(?!#)[^\s,]+$/u;
 const LEGACY_SIGNER_RE = /^[A-Z][A-Za-z]{1,11}$/;
 
-const FIELD_NAMES = ['gate', 'serves', 'signers', 'count', 'runs', 'mode', 'files'];
+const FIELD_NAMES = ['gate', 'serves', 'signers', 'count', 'runs', 'mode', 'files', 'source'];
 const CHECK_FIELDS = ['count', 'runs', 'mode', 'files'];
 
 /**
@@ -38,10 +38,12 @@ const CHECK_FIELDS = ['count', 'runs', 'mode', 'files'];
  * A doctrine rule may add `| count: N`, `| runs: nightly`, `| mode: watch` and `| files: <paths>`
  * to a `gate: check`;
  * those keys appear on the row only when written, so rows without them parse exactly as before.
+ * Any row may add `| source: <name> <id> <url>`, the reference a blueprint rule came from; it too
+ * appears only when written.
  * A check command may itself contain ` | `: a part that names no known field continues it.
  *
  * @param {string} rest
- * @returns {{ text: string, gate: string, serves: string[], signers: string[], unknown: string[], count?: string, runs?: string, mode?: string, files?: string }}
+ * @returns {{ text: string, gate: string, serves: string[], signers: string[], unknown: string[], count?: string, runs?: string, mode?: string, files?: string, source?: string }}
  */
 function splitFields(rest) {
   const [text = '', ...parts] = rest.split(' | ');
@@ -58,7 +60,7 @@ function splitFields(rest) {
     if (key.trim() === 'gate') {
       fields.gate = joined;
       inCheck = /^check(\s|$)/u.test(joined);
-    } else if (CHECK_FIELDS.includes(key.trim())) fields[key.trim()] = joined;
+    } else if (CHECK_FIELDS.includes(key.trim()) || key.trim() === 'source') fields[key.trim()] = joined;
     else if (key.trim() === 'serves') {
       fields.serves = joined.split(',').map((id) => id.trim()).filter(Boolean);
     } else if (key.trim() === 'signers') {
@@ -194,7 +196,8 @@ function rowFindings(row, maxWords) {
   // are not counted: the limit keeps the requirement itself short (blueprint rows carry both).
   const words = row.text.split(/ (?:Why|Choices): /u)[0].split(/\s+/).filter(Boolean).length;
   if (words > maxWords) add('warning', `${words} words; rows stay under ${maxWords}, the why goes elsewhere`);
-  for (const part of row.unknown) add('error', `unknown field "${part}"; fields are gate, serves, signers, count, runs, mode and files`);
+  for (const part of row.unknown) add('error', `unknown field "${part}"; fields are gate, serves, signers, count, runs, mode, files and source`);
+  if (row.source !== undefined && !row.source.trim()) add('error', 'source names where the row came from; leave it out when the row has none');
   findings.push(...checkFieldFindings(row).map((message) => ({ level: 'error', line: row.line, id: row.id, message })));
   return findings;
 }

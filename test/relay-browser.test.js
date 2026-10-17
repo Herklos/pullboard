@@ -14,6 +14,7 @@ import { ENGINE_VERSION } from '../src/machine.js';
 import { addItem, answerDecision, closeBoard, openBoard, shout } from '../src/board.js';
 import { relayClientFixture } from './relay-client-fixture.js';
 import { findChromeExecutable, relayWorkBudgetMs, startChrome } from './relay-browser-fixture.js';
+import { pairStudioPhone, phoneExpiry, readApprovalCard, studioCommand, studioProject } from './relay-studio-fixture.js';
 
 /** Read native gzip snapshots while retaining checks against historical uncompressed records. */
 function snapshotDocument(plain) {
@@ -679,4 +680,67 @@ test('legacy queued presentations never disclose later unacknowledged moves [H5,
   assert.equal(document.presentation.state.items.some(item => item.title === 'SECOND_QUEUED_108'), true);
   const compacted = await fetch(box.origin + '/api/v1/boards/' + link.board + '/events?after=0', { headers: { authorization: 'Bearer ' + link.token, 'x-pullboard-engine': String(ENGINE_VERSION) } });
   assert.equal(compacted.status, 409, 'the relay compacted the moves only after acknowledging their final checkpoint');
+});
+
+test('the link approval card names the computer and the board [H17,H5]', {
+  skip: !findChromeExecutable() && 'Chrome is not installed',
+}, async t => {
+  const box = await relayClientFixture(t);
+  const { chrome, machineFile } = await pairStudioPhone(t, box);
+  const notes = await studioProject(box, 'notes');
+  const proposal = JSON.parse(readFileSync(machineFile, 'utf8')).approvals.find(entry => entry.root === notes);
+  assert.ok(proposal?.published, 'registering notes on studio publishes one link request to the phone');
+  await chrome.navigate(box.origin);
+  await chrome.waitFor(`document.querySelector('.phone-approval[data-request="${proposal.context.id}"] button') !== null`);
+  const card = await readApprovalCard(chrome, proposal.context.id);
+  assert.match(card.text, /^Link notes from studio\?$/mu, 'the card asks in words which computer links which board');
+  assert.equal(card.text.includes('fixture/repository'), true, 'the card names the repository being linked');
+  assert.equal(card.text.includes('expires ' + phoneExpiry(proposal.context.expires)), true, 'the expiry is in the phone\'s local time');
+  assert.equal(card.text.includes(new Date(proposal.context.expires).toISOString()), false, 'no UTC timestamp on the card');
+  assert.doesNotMatch(card.text, /[0-9a-f]{32}/u, 'no raw 32-hex board id on the card');
+  assert.equal(card.text.includes(proposal.context.machine) || /machine-/u.test(card.text), false, 'no machine id on the card');
+  assert.ok(card.pad.every(value => value > 0), 'the card has padding on every side');
+  assert.equal(card.inside, true, 'every line of the card\'s text sits inside its padding');
+  assert.equal(card.action, 'Link project');
+});
+
+test('the delete card names the board and confirms the delete [H17,H5]', {
+  skip: !findChromeExecutable() && 'Chrome is not installed',
+}, async t => {
+  const box = await relayClientFixture(t);
+  const notes = await studioProject(box, 'notes');
+  const { chrome } = await pairStudioPhone(t, box);
+  await chrome.waitFor("document.querySelectorAll('#proj-list .proj.repo').length === 2");
+  const board = JSON.parse(readFileSync(join(notes, '.git/pullboard/relay.json'), 'utf8')).board;
+  const off = await studioCommand(box, notes, ['relay', 'off']).done;
+  assert.equal(off.code, 0, 'relay off on studio removes the local link and asks the phone');
+  const posted = box.transit.findLast(record => record.method === 'POST' && record.path === '/api/v1/devices/approvals');
+  const context = JSON.parse(posted.request.toString('utf8')).context;
+  assert.equal(context.action, 'delete-board');
+  assert.equal(context.board, board);
+  const selector = `.phone-approval[data-request="${context.id}"]`;
+  await chrome.waitFor(`document.querySelector('${selector} button') !== null`);
+  const card = await readApprovalCard(chrome, context.id);
+  assert.match(card.text, /^Delete notes from the relay\?$/mu, 'the delete card names the board');
+  assert.equal(card.text.includes('studio'), true, 'the delete card names the computer that asked');
+  assert.doesNotMatch(card.text, /[0-9a-f]{32}/u, 'no raw board id on the delete card');
+  assert.equal(card.inside, true, 'the delete card keeps its text inside its padding');
+  assert.equal(card.action, 'Delete relay copy');
+  await chrome.evaluate(`document.querySelector('${selector} button').click()`);
+  await chrome.waitFor("[...document.querySelectorAll('#phone-approvals [role=status]')].some(node => node.textContent === 'notes was deleted from the relay.')");
+  const phone = await box.phoneSession();
+  const boards = await (await fetch(box.origin + '/auth/boards', { headers: { cookie: 'pb_session=' + phone.token } })).json();
+  assert.equal(boards.boards.some(entry => entry.id === board), false, 'the confirmation follows the relay deleting the board');
+  await chrome.evaluate(`(() => {
+    const original = window.fetch.bind(window);
+    window.__approvalLists = 0;
+    window.fetch = async (input, init) => {
+      const response = await original(input, init);
+      if (new URL(typeof input === 'string' ? input : input.url, location.href).pathname.endsWith('/approvals')) window.__approvalLists += 1;
+      return response;
+    };
+  })()`);
+  await chrome.waitFor('window.__approvalLists >= 2');
+  assert.equal(await chrome.evaluate(`document.querySelector('${selector}') === null && [...document.querySelectorAll('#phone-approvals [role=status]')]
+    .some(node => node.textContent === 'notes was deleted from the relay.')`), true, 'the tapped card is gone and its confirmation stays after the next refresh');
 });
