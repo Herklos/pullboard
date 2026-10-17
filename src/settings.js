@@ -12,12 +12,13 @@ export { gateQueueSettings, machineSettingsFile };
 
 const DEFAULT_GATE_SLOTS = 2;
 const DEFAULT_BROWSER_SLOTS = 1;
+const DEFAULT_SHORT_SLOTS = 0;
 
 /** Read and validate machine settings, preserving any unrelated settings. */
 export function loadMachineSettings() {
   const file = machineSettingsFile();
   const value = readMachineSettingsFile(file);
-  if (!value) return { gateSlots: DEFAULT_GATE_SLOTS, browserSlots: DEFAULT_BROWSER_SLOTS };
+  if (!value) return { gateSlots: DEFAULT_GATE_SLOTS, browserSlots: DEFAULT_BROWSER_SLOTS, gate: { shortSlots: DEFAULT_SHORT_SLOTS } };
   if (value.gate?.browserFreeChecks !== undefined && typeof value.gate.browserFreeChecks !== 'boolean') {
     throw new Refused('BAD_MACHINE_SETTINGS', `gate.browserFreeChecks in ${file} must be true or false`);
   }
@@ -25,6 +26,10 @@ export function loadMachineSettings() {
   const gateSlots = value.gateSlots ?? DEFAULT_GATE_SLOTS;
   if (!Number.isSafeInteger(gateSlots) || gateSlots < 1) {
     throw new Refused('BAD_GATE_SLOTS', `gateSlots in ${file} must be a positive integer; run pullboard settings gateSlots <n>`);
+  }
+  const shortSlots = value.gate?.shortSlots ?? DEFAULT_SHORT_SLOTS;
+  if (!Number.isSafeInteger(shortSlots) || shortSlots < 0) {
+    throw new Refused('BAD_SHORT_SLOTS', `gate.shortSlots in ${file} must be a nonnegative integer; run pullboard settings gate.shortSlots <n>`);
   }
   const browserSlots = value.browserSlots ?? DEFAULT_BROWSER_SLOTS;
   if (!Number.isSafeInteger(browserSlots) || browserSlots < 1 || browserSlots > gateSlots) {
@@ -38,7 +43,7 @@ export function loadMachineSettings() {
     if (seen.has(runner.host)) throw new Refused('BAD_MACHINE_SETTINGS', 'runner hosts must be unique; remove the duplicate machine setting');
     seen.add(runner.host);
   }
-  return { ...value, gateSlots, browserSlots, ...(runners.length ? { runners } : {}) };
+  return { ...value, gateSlots, browserSlots, gate: { ...value.gate, shortSlots }, ...(runners.length ? { runners } : {}) };
 }
 
 /** Browser-free check admission is deliberately opt-in per machine. */
@@ -65,6 +70,19 @@ export function setGateSlots(capacity) {
     const current = loadMachineSettings();
     if (capacity < current.browserSlots) throw new Refused('BAD_GATE_SLOTS', `gateSlots cannot be lower than browserSlots (${current.browserSlots}); first run pullboard settings browserSlots <n>`);
     next = { ...current, gateSlots: capacity };
+    writeMachineSettings(next);
+  } });
+  return next;
+}
+
+/** Set short admission capacity only while the shared gate queue is idle. */
+export function setGateShortSlots(capacity) {
+  if (!Number.isSafeInteger(capacity) || capacity < 0) throw new Refused('BAD_SHORT_SLOTS', 'gate.shortSlots must be a nonnegative integer; run pullboard settings gate.shortSlots <n>');
+  let next;
+  const current = loadMachineSettings();
+  setResourceCapacity({ name: 'gate', capacity: current.gateSlots, scope: 'machine', persist: () => {
+    const latest = loadMachineSettings();
+    next = { ...latest, gate: { ...latest.gate, shortSlots: capacity } };
     writeMachineSettings(next);
   } });
   return next;

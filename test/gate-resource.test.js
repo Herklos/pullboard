@@ -6,11 +6,13 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
 import { pathToFileURL } from 'node:url';
-import { GATE_SLOT_HELD_ENV } from '../src/resources.js';
+import { BROWSER_SLOT_HELD_ENV, GATE_SLOT_CLASS_ENV, GATE_SLOT_HELD_ENV, GATE_SLOT_POOL_ENV, GATE_SLOT_TOKEN_ENV } from '../src/resources.js';
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
 const RUNNER = resolve(import.meta.dirname, '../bin/run-tests.js');
 const GATE_MODULE = pathToFileURL(resolve(import.meta.dirname, '../src/gate.js')).href;
+const RESOURCE_MODULE = pathToFileURL(resolve(import.meta.dirname, '../src/resources.js')).href;
+const BROWSER_ADMISSION_MODULE = pathToFileURL(resolve(import.meta.dirname, '../src/browser-admission.js')).href;
 const PROBE_NAME = 'machine gate slot runner probe [Q4]';
 const PROBE_PATTERN = '^machine gate slot runner probe \\[Q4\\]$';
 const PROBE_PATH_ENV = 'PULLBOARD_GATE_RESOURCE_PROBE_PATH';
@@ -72,12 +74,89 @@ function launchTestRunner(box, root, args, marker, release, extraEnv = {}) {
   return child;
 }
 
-/** Launch a real process that holds the production diagnostic resource class until released. */
+/** Launch a synthetic ordinary or short gate lease holder until released. */
+function launchLeaseFixture(box, root, name, started, release, waiting, shortEligible = false) {
+  const script = join(box.dir, `${name}.mjs`);
+  writeFileSync(script, `import { existsSync, renameSync, writeFileSync } from 'node:fs';
+import { withGateSlot } from ${JSON.stringify(GATE_MODULE)};
+/** Publish a complete fixture marker atomically. */
+function publish(file, value) { writeFileSync(file + '.tmp', value); renameSync(file + '.tmp', file); }
+await withGateSlot(process.cwd(), async lease => {
+  publish(${JSON.stringify(started)}, lease.slotClass);
+  while (!existsSync(${JSON.stringify(release)})) await new Promise(done => setTimeout(done, 10));
+}, { shortEligible: ${JSON.stringify(shortEligible)}, kind: 'fixture-lease', agent: ${JSON.stringify(name)}, onWait: state => publish(${JSON.stringify(waiting)}, String(state.position)) });
+`);
+  const child = spawn(process.execPath, [script], { cwd: root, env: box.env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  child.stdoutText = '';
+  child.stderrText = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', chunk => { child.stdoutText += chunk; });
+  child.stderr.on('data', chunk => { child.stderrText += chunk; });
+  CHILDREN.add(child);
+  child.closed = new Promise(resolveClose => child.once('close', (code, signal) => {
+    CHILDREN.delete(child);
+    resolveClose({ code, signal });
+  }));
+  return child;
+}
+
+/** Create one named-file probe that records the inherited gate class and can wait for release. */
+function shortProbeSuite(box, name) {
+  const root = join(box.dir, name);
+  const tests = join(root, 'test');
+  mkdirSync(tests, { recursive: true });
+  writeFileSync(join(tests, 'short-probe.test.js'), `import { existsSync, renameSync, writeFileSync } from 'node:fs';
+import { test } from 'node:test';
+test(${JSON.stringify(PROBE_NAME)}, async () => {
+  const marker = process.env.${PROBE_PATH_ENV};
+  if (marker) {
+    const temporary = marker + '.tmp';
+    writeFileSync(temporary, JSON.stringify({ slotClass: process.env[${JSON.stringify(GATE_SLOT_CLASS_ENV)}],
+      pool: process.env[${JSON.stringify(GATE_SLOT_POOL_ENV)}], token: process.env[${JSON.stringify(GATE_SLOT_TOKEN_ENV)}] }));
+    renameSync(temporary, marker);
+  }
+  const release = process.env.${PROBE_RELEASE_ENV};
+  while (release && !existsSync(release)) await new Promise(done => setTimeout(done, 10));
+});
+`);
+  return root;
+}
+
+/** Launch a child that proves a named-file lease refuses full-suite inheritance. */
+function fullSuiteInheritanceProbe(box, root, lease) {
+  const script = join(box.dir, 'full-suite-inheritance.mjs');
+  writeFileSync(script, `import { inheritedGateSlot } from ${JSON.stringify(RESOURCE_MODULE)};
+try {
+  inheritedGateSlot({ root: process.cwd(), fullSuite: true });
+  process.exitCode = 2;
+} catch (error) {
+  process.stdout.write(String(error.code ?? 'unknown'));
+  if (error.code !== 'SHORT_SLOT_FULL_SUITE') process.exitCode = 1;
+}
+`);
+  return spawnSync(process.execPath, [script], { cwd: root, env: {
+    ...box.env, [GATE_SLOT_HELD_ENV]: '1', [GATE_SLOT_POOL_ENV]: lease.pool,
+    [GATE_SLOT_TOKEN_ENV]: lease.token, [GATE_SLOT_CLASS_ENV]: lease.slotClass,
+    [BROWSER_SLOT_HELD_ENV]: '',
+  }, encoding: 'utf8' });
+}
+
+/** Set the fixture machine capacities through the public settings command. */
+function setShortSlots(box, root, gateSlots, shortSlots) {
+  const gate = spawnSync(process.execPath, [BIN, 'settings', 'gateSlots', String(gateSlots)], { cwd: root, env: box.env, encoding: 'utf8' });
+  assert.equal(gate.status, 0, gate.failure ?? gate.stderr);
+  const short = spawnSync(process.execPath, [BIN, 'settings', 'gate.shortSlots', String(shortSlots)], { cwd: root, env: box.env, encoding: 'utf8' });
+  assert.equal(short.status, 0, short.failure ?? short.stderr);
+}
+
+/** Launch a synthetic main-red diagnostic holder, which must stay in ordinary capacity. */
 function launchDiagnostic(box, root, name, started, release, waiting) {
   const script = join(box.dir, `${name}.mjs`);
   writeFileSync(script, `import { existsSync, renameSync, writeFileSync } from 'node:fs';
 import { withGateSlot } from ${JSON.stringify(GATE_MODULE)};
 /** Publish a complete handshake so its visible file always contains its value. */
+/** Publish a complete fixture marker atomically. */
 function publish(file, value) { writeFileSync(file + '.tmp', value); renameSync(file + '.tmp', file); }
 await withGateSlot(process.cwd(), async () => {
   publish(${JSON.stringify(started)}, 'started');
@@ -558,6 +637,128 @@ syncBuiltinESMExports();
   if (assertionError) throw assertionError;
   await waitFor(() => existsSync(marker), 'the atomically published probe marker');
   assert.equal(readFileSync(marker, 'utf8'), '1', 'the final marker contains the complete slot value');
+});
+
+test('short classification accepts only explicit parser-backed named runner commands [C7]', async () => {
+  const { explicitCheckFiles } = await import(BROWSER_ADMISSION_MODULE);
+  const root = process.cwd();
+  assert.deepEqual(await explicitCheckFiles(root, `${quote(process.execPath)} bin/run-tests.js test/gate-resource.test.js`), ['test/gate-resource.test.js']);
+  assert.equal(await explicitCheckFiles(root, 'npm test test/gate-resource.test.js'), null, 'opaque configured runners remain ordinary');
+  assert.equal(await explicitCheckFiles(root, 'node bin/run-tests.js $(printf test/gate-resource.test.js)'), null, 'shell expansion is not classified');
+  assert.equal(await explicitCheckFiles(root, 'node bin/run-tests.js --unknown test/gate-resource.test.js'), null, 'unknown options stay ordinary');
+  assert.equal(await explicitCheckFiles(root, 'node bin/run-tests.js test/gate-resource.test.js', { env: { ...process.env, NODE_OPTIONS: '--trace-warnings' } }), null, 'runtime injection stays ordinary');
+  assert.equal(await explicitCheckFiles(root, 'node bin/run-tests.js test/short-missing.test.js'), null, 'missing files stay ordinary');
+  const committed = runFixtureChild('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' });
+  assert.equal(committed.status, 0, committed.stderr);
+  assert.deepEqual(await explicitCheckFiles(root, `${quote(process.execPath)} bin/run-tests.js test/gate-resource.test.js`, { commit: committed.stdout.trim() }),
+    ['test/gate-resource.test.js'], 'frozen checks classify the submitted file map');
+});
+
+test('a short check never waits behind whole suites [C7]', async () => {
+  const enabled = fixture();
+  const holderRoots = [gateRepo(enabled, 'whole-one'), gateRepo(enabled, 'whole-two')];
+  const gateRoot = holderRoots[0];
+  const focusedRoot = shortProbeSuite(enabled, 'short-focused');
+  const defaultSettings = spawnSync(process.execPath, [BIN, 'settings', '--json'], { cwd: gateRoot, env: enabled.env, encoding: 'utf8' });
+  assert.equal(defaultSettings.status, 0, defaultSettings.failure ?? defaultSettings.stderr);
+  assert.equal(JSON.parse(defaultSettings.stdout).settings.gate.shortSlots, 0, 'short capacity defaults to off');
+  setShortSlots(enabled, gateRoot, 2, 1);
+  const settingsView = spawnSync(process.execPath, [BIN, 'settings', '--json'], { cwd: gateRoot, env: enabled.env, encoding: 'utf8' });
+  assert.equal(settingsView.status, 0, settingsView.failure ?? settingsView.stderr);
+  assert.equal(JSON.parse(settingsView.stdout).settings.gate.shortSlots, 1);
+  const invalidShortSlots = spawnSync(process.execPath, [BIN, 'settings', 'gate.shortSlots', '--json', '--', '-1'], { cwd: gateRoot, env: enabled.env, encoding: 'utf8' });
+  assert.notEqual(invalidShortSlots.status, 0, 'negative short capacity is refused');
+  assert.match(`${invalidShortSlots.stdout}${invalidShortSlots.stderr}`, /BAD_SHORT_SLOTS|nonnegative integer/u);
+  const releases = holderRoots.map((_, index) => join(enabled.dir, `release-whole-${index}`));
+  const started = holderRoots.map((_, index) => join(enabled.dir, `whole-${index}.started`));
+  const waiting = holderRoots.map((_, index) => join(enabled.dir, `whole-${index}.waiting`));
+  const holders = holderRoots.map((root, index) => launchLeaseFixture(enabled, root, `whole-${index}`, started[index], releases[index], waiting[index]));
+  let short;
+  let wholeWaiter;
+  let directoryRun;
+  const directoryStarted = join(enabled.dir, 'directory-request.started');
+  const directoryRelease = join(enabled.dir, 'release-directory-request');
+  const requestRelease = join(enabled.dir, 'release-short-request');
+  const requestStarted = join(enabled.dir, 'short-request.started');
+  const fullRelease = join(enabled.dir, 'release-full-request');
+  const fullStarted = join(enabled.dir, 'full-request.started');
+  const fullWaiting = join(enabled.dir, 'full-request.waiting');
+  try {
+    await waitFor(() => started.every(file => existsSync(file)), 'both synthetic ordinary gate leases to hold');
+    wholeWaiter = launchLeaseFixture(enabled, gateRoot, 'ordinary-request', fullStarted, fullRelease, fullWaiting, false);
+    await waitFor(() => existsSync(fullWaiting), 'an earlier ordinary-class request to queue behind the holders');
+    directoryRun = launchTestRunner(enabled, focusedRoot, ['test/'], directoryStarted, directoryRelease);
+    await waitFor(() => existsSync(directoryStarted) || directoryRun.stderrText.includes('waiting for a gate slot:') || directoryRun.exitCode !== null,
+      'the directory selection to report admission or its queued state');
+    assert.ok(directoryRun.stderrText.includes('waiting for a gate slot:'), 'a directory operand must queue in the ordinary pool');
+    assert.equal(existsSync(directoryStarted), false, 'a whole-directory selection cannot use a short slot');
+    short = launchTestRunner(enabled, focusedRoot, ['--disable-warning', 'ExperimentalWarning', '--title', 'short-focused-probe', 'test/short-probe.test.js'], requestStarted, requestRelease);
+    await waitFor(() => existsSync(requestStarted) || short.stderrText.includes('waiting for a gate slot:'),
+      'the named-file runner to publish admission or its queued state');
+    assert.ok(existsSync(requestStarted), 'a named-file run starts before the ordinary holders release');
+    const shortLease = JSON.parse(readFileSync(requestStarted, 'utf8'));
+    assert.equal(shortLease.slotClass, 'short', 'the named test inherits the assigned short slot class');
+    const fullInheritance = fullSuiteInheritanceProbe(enabled, gateRoot, shortLease);
+    assert.equal(fullInheritance.status, 0, fullInheritance.stderr);
+    assert.equal(fullInheritance.stdout, 'SHORT_SLOT_FULL_SUITE', 'a full-suite child cannot inherit a short lease');
+    assert.equal(existsSync(fullStarted), false, 'an ordinary-class request cannot use the available short slot');
+    const status = spawnSync(process.execPath, [BIN, 'resources', '--json'], { cwd: gateRoot, env: enabled.env, encoding: 'utf8' });
+    assert.equal(status.status, 0, status.failure ?? status.stderr);
+    const resourceOutput = JSON.parse(status.stdout);
+    assert.equal(resourceOutput.gate.shortSlots, 1, 'pool status reports configured short capacity');
+    const gateStatus = resourceOutput.resources.find(resource => resource.name === 'gate');
+    assert.equal(gateStatus.holders.filter(holder => holder.slot === 'short').length, 1, 'pool status labels the actual short holder');
+    assert.equal(gateStatus.capacity, 2, 'short capacity is not added to ordinary gateSlots');
+    assert.equal(gateStatus.holders.filter(holder => holder.slot === 'gate').length, 2, 'ordinary holders retain the gate slot class');
+  } finally {
+    for (const release of [...releases, requestRelease, fullRelease, directoryRelease]) writeFileSync(release, 'release\n');
+    await Promise.all([...holders, short, wholeWaiter, directoryRun].filter(Boolean).map(child => child.closed));
+  }
+  for (const child of [...holders, short, wholeWaiter, directoryRun].filter(Boolean)) {
+    const result = await child.closed;
+    if (child === directoryRun && result.code !== 0) {
+      assert.equal(result.code, 1, `${child.stderrText}${child.stdoutText}`);
+      assert.match(child.stdoutText, /ERR_UNSUPPORTED_DIR_IMPORT/u, 'this runtime may refuse directory operands after ordinary admission');
+    } else assert.equal(result.code, 0, `${child.stderrText}${child.stdoutText}`);
+    assert.equal(result.signal, null);
+  }
+
+  const disabled = fixture();
+  const disabledRoot = gateRepo(disabled, 'whole-disabled-one');
+  const disabledRoot2 = gateRepo(disabled, 'whole-disabled-two');
+  setShortSlots(disabled, disabledRoot, 2, 0);
+  const disabledReleases = [join(disabled.dir, 'release-disabled-1'), join(disabled.dir, 'release-disabled-2')];
+  const disabledStarts = [join(disabled.dir, 'disabled-one.started'), join(disabled.dir, 'disabled-two.started')];
+  const disabledWaits = [join(disabled.dir, 'disabled-one.waiting'), join(disabled.dir, 'disabled-two.waiting')];
+  const disabledHolders = [
+    launchLeaseFixture(disabled, disabledRoot, 'disabled-one', disabledStarts[0], disabledReleases[0], disabledWaits[0]),
+    launchLeaseFixture(disabled, disabledRoot2, 'disabled-two', disabledStarts[1], disabledReleases[1], disabledWaits[1]),
+  ];
+  let disabledRequest;
+  const disabledRequestRelease = join(disabled.dir, 'release-disabled-request');
+  const disabledRequestStarted = join(disabled.dir, 'disabled-request.started');
+  try {
+    await waitFor(() => disabledStarts.every(file => existsSync(file)), 'both disabled-pool ordinary leases to hold');
+    const disabledFocusedRoot = shortProbeSuite(disabled, 'disabled-focused');
+    disabledRequest = launchTestRunner(disabled, disabledFocusedRoot, ['--disable-warning', 'ExperimentalWarning', '--title', 'disabled-focused-probe', 'test/short-probe.test.js'], disabledRequestStarted, disabledRequestRelease);
+    await waitFor(() => disabledRequest.stderrText.includes('waiting for a gate slot:'), 'the named run-tests request to wait when shortSlots is zero');
+    assert.equal(existsSync(disabledRequestStarted), false, 'zero shortSlots preserves ordinary full-pool blocking');
+    const waitingStatus = spawnSync(process.execPath, [BIN, 'resources', '--json'], { cwd: disabledRoot, env: disabled.env, encoding: 'utf8' });
+    assert.equal(waitingStatus.status, 0, waitingStatus.failure ?? waitingStatus.stderr);
+    const waitingGate = JSON.parse(waitingStatus.stdout).resources.find(resource => resource.name === 'gate');
+    assert.ok(waitingGate.line.some(waiter => waiter.requestedSlot === 'short-eligible'), 'pool status identifies a queued short-eligible request');
+    for (const release of disabledReleases) writeFileSync(release, 'release\n');
+    await waitFor(() => existsSync(disabledRequestStarted), 'the named request to proceed after an ordinary slot is released');
+    assert.equal(JSON.parse(readFileSync(disabledRequestStarted, 'utf8')).slotClass, 'gate');
+  } finally {
+    for (const release of [...disabledReleases, disabledRequestRelease]) writeFileSync(release, 'release\n');
+    await Promise.all([...disabledHolders, disabledRequest].filter(Boolean).map(child => child.closed));
+  }
+  for (const child of [...disabledHolders, disabledRequest].filter(Boolean)) {
+    const result = await child.closed;
+    assert.equal(result.code, 0, `${child.stderrText}${child.stdoutText}`);
+    assert.equal(result.signal, null);
+  }
 });
 
 test('a focused run queues behind a held gate slot [Q4,C7]', async () => {

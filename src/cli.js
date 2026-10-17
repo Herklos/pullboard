@@ -19,7 +19,7 @@ import { agentSessionDigest, requirePersonChannel } from './person.js';
 import { bindLocalSession, localSessionMatches } from './agent-session.js';
 import { decisionProjection, planRowApply, prepareRowDecisions, restoreRowApply, writeRowApply } from './row-decisions.js';
 import { digestOf, gateReport, refuseSandboxBlocked, runGate, runProfiledShell, runSubmitGate, submitGateReport, timingDigest, withGateSlot } from './gate.js';
-import { checkNeedsBrowser } from './browser-admission.js';
+import { checkNeedsBrowser, explicitCheckFiles } from './browser-admission.js';
 import { bareWorktreeFinding, codeIsFromMain, contains, differFromHead, git, gitChildEnv, headCommit, headTree, invalidateGitFacts, isClean, mainCheckout, patchId, repoInfo, resolveCommit, tryGit, untracked, withGitFacts } from './git.js';
 import {
   FIX_NOTE,
@@ -85,7 +85,7 @@ import { flowLines, flowAlertLine } from './stats-flow.js';
 import { releaseHeadlinesBetween } from './changelog.js';
 import { exportBoard, importBoard } from './exchange.js';
 import { addSigner, assertRequiredSigners, defaultPrincipal, hasSignerFile } from './signature.js';
-import { addRunner, browserFreeChecksEnabled, gateQueueSettings, loadMachineSettings, setBrowserSlots, setGateSlots } from './settings.js';
+import { addRunner, browserFreeChecksEnabled, gateQueueSettings, loadMachineSettings, setBrowserSlots, setGateShortSlots, setGateSlots } from './settings.js';
 import { formatSnapshotLimit, pendingSnapshotSize, pendingCheckpointProblem, relayCommandReceipt, relayCommandReceiptReported, relayLinked, relayOff, relayOn, relayOperation, relayRecover, relayRecovered, relayRevoke, relayStatus, relayTokens, syncRelay } from './relay.js';
 import { autoLinkProject, relayOnAll, revokeRelayDevice, unlinkedRelayProjects } from './relay-setup.js';
 import { readRelayMachine } from './relay-machine.js';
@@ -1925,16 +1925,19 @@ function readCommands(io, { first, second, rest, values }) {
     resources: () => {
       const ctx = context(io);
       const agents = withBoard(ctx, (board) => store.listAgents(board));
-      const browserSlots = loadMachineSettings().browserSlots;
+      const machineSettings = loadMachineSettings();
+      const browserSlots = machineSettings.browserSlots;
+      const shortSlots = machineSettings.gate.shortSlots;
       const resources = [
         ...listResources({ scope: 'machine' }).map((resource) => ({ ...resource, scope: 'machine' })),
         ...listResources({ scope: 'repo', root: ctx.info.root }).map((resource) => ({ ...resource, scope: 'repo' })),
       ];
       const runners = runnerResourceStatus(loadMachineSettings().runners ?? []);
       const queue = gateQueueSettings();
-      io.result?.({ resources, runners, browserSlots, queue });
+      io.result?.({ resources, runners, browserSlots, queue, gate: { shortSlots } });
       io.say(`browserSlots (machine setting): ${browserSlots}`);
       io.say(`machine queue order (gate.queue.reviewsFirst ${queue.reviewsFirst}): ${queue.reviewsFirst ? `landing, review, submit, other; a waiting run moves up one class every ${queue.agingMinutes} minutes` : 'landings first, then arrival'}`);
+      io.say(`gate.shortSlots (machine setting): ${shortSlots}`);
       if (!resources.length) io.say('no resources have been used');
       for (const resource of resources) {
         io.say(`${resource.name} (${resource.scope}, capacity ${resource.capacity})${resource.order === 'arrival' ? '; an older pullboard is waiting, so this line is in arrival order, landings first' : ''}`);
@@ -2468,8 +2471,10 @@ async function verifyHere(ctx, id, { second, values }) {
       if (digest !== item.item_frozen_digest) throw new Refused('CRITERIA_CHANGED', 'the criterion changed; ask the coordinator to refreeze this item before checking it');
       const trunk = requireTrunkMerge(root, commit);
       refuseUnverifiedStack(root, board, item, commit, trunk);
-      const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(root, frozenCheck(item), { commit, onFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
-      check = await withGateSlot(root, (lease) => checkAtCommit(root, item, { waitMs: lease.waitMs, gateLease: lease }), { browser, agent: me.id, item: String(id), kind: 'review', itemCheck: true, onWait: gateWaitReporter(ctx.io) });
+      const frozenCommand = frozenCheck(item);
+      const shortEligible = Boolean(await explicitCheckFiles(root, frozenCommand, { commit }));
+      const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(root, frozenCommand, { commit, onFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
+      check = await withGateSlot(root, (lease) => checkAtCommit(root, item, { waitMs: lease.waitMs, gateLease: lease }), { browser, agent: me.id, item: String(id), kind: 'review', itemCheck: true, shortEligible, onWait: gateWaitReporter(ctx.io) });
       refuseSandboxBlocked(check);
       verificationProfile = check.profile ?? null;
       const evidence = check.checked
@@ -2950,8 +2955,9 @@ function workCommands(io, args) {
           throw new Refused('CHECK_CONFIRM', `the check set by ${authorName} was not run: ${check}; run pullboard check ${item.item_id} --yes after reading the command, or answer yes at the prompt`);
         }
       }
+      const shortEligible = Boolean(await explicitCheckFiles(ctx.info.root, check));
       const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(ctx.info.root, check, { onFallback: browserAdmissionReporter(io, values.json) });
-      const run = await withGateSlot(ctx.info.root, (lease) => runProfiledShell(ctx.info.root, check, { waitMs: lease.waitMs, artifactPrefix: `pullboard-check-${item.item_id}`, persistLog: true, gateLease: lease }), { browser, agent: caller, item: String(item.item_id), kind: 'check', itemCheck: true, onWait: gateWaitReporter(io) });
+      const run = await withGateSlot(ctx.info.root, (lease) => runProfiledShell(ctx.info.root, check, { waitMs: lease.waitMs, artifactPrefix: `pullboard-check-${item.item_id}`, persistLog: true, gateLease: lease }), { browser, agent: caller, item: String(item.item_id), kind: 'check', itemCheck: true, shortEligible, onWait: gateWaitReporter(io) });
       refuseSandboxBlocked(run);
       io.result?.({ id: item.item_id, green: run.isGreen, seconds: run.seconds, check, by, report: run.isGreen ? '' : digestOf(run.output) });
       const timings = timingDigest(run.profile);
@@ -3133,7 +3139,7 @@ function workCommands(io, args) {
 /** Label the kind and item of a queued run without hiding older queue-class labels. */
 function resourceRunLabel(entry) {
   const priority = entry.landing ? 'landing' : entry.itemCheck ? 'item check' : entry.diagnostic ? 'diagnostic' : '';
-  const details = [entry.kind !== priority ? entry.kind : '', entry.item ? `#${entry.item}` : '', entry.browser ? 'browser' : ''].filter(Boolean);
+  const details = [entry.slot === 'short' ? 'short slot' : '', entry.requestedSlot === 'short-eligible' ? 'short eligible' : '', entry.kind !== priority ? entry.kind : '', entry.item ? `#${entry.item}` : '', entry.browser ? 'browser' : ''].filter(Boolean);
   return `${priority ? ` (${priority})` : ''}${details.length ? ` (${details.join(', ')})` : ''}`;
 }
 
@@ -3181,18 +3187,22 @@ function settingsCommand(io, { first, second, rest }) {
     io.say(`browserSlots: ${settings.browserSlots}`);
     io.say(`gate.queue.reviewsFirst: ${queue.reviewsFirst}${queue.reviewsFirst ? '' : ' (landings first, then arrival order)'}`);
     io.say(`gate.queue.agingMinutes: ${queue.agingMinutes}${queue.reviewsFirst ? '' : ' (used only while reviewsFirst is true)'}`);
+    io.say(`gate.shortSlots: ${settings.gate.shortSlots}`);
     return 0;
   }
-  if (!['gateSlots', 'browserSlots'].includes(first) || !second || rest.length) {
-    throw new Refused('USAGE', 'pullboard settings gateSlots <n> | browserSlots <n>');
+  if (!['gateSlots', 'browserSlots', 'gate.shortSlots'].includes(first) || !second || rest.length) {
+    throw new Refused('USAGE', 'pullboard settings gateSlots <n> | browserSlots <n> | gate.shortSlots <n>');
   }
-  if (!/^[1-9]\d*$/u.test(second) || !Number.isSafeInteger(Number(second))) {
+  const pattern = first === 'gate.shortSlots' ? /^(?:0|[1-9]\d*)$/u : /^[1-9]\d*$/u;
+  if (!pattern.test(second) || !Number.isSafeInteger(Number(second))) {
+    if (first === 'gate.shortSlots') throw new Refused('BAD_SHORT_SLOTS', 'gate.shortSlots must be a nonnegative integer');
     if (first === 'gateSlots') throw new Refused('USAGE', 'pullboard settings gateSlots <positive integer>');
-    throw new Refused(first === 'browserSlots' ? 'BAD_BROWSER_SLOTS' : 'BAD_GATE_SLOTS', `${first} must be a positive integer; run pullboard settings ${first} <n>`);
+    throw new Refused('BAD_BROWSER_SLOTS', `browserSlots must be a positive integer; run pullboard settings browserSlots <n>`);
   }
-  const settings = first === 'browserSlots' ? setBrowserSlots(Number(second)) : setGateSlots(Number(second));
+  const settings = first === 'browserSlots' ? setBrowserSlots(Number(second))
+    : first === 'gate.shortSlots' ? setGateShortSlots(Number(second)) : setGateSlots(Number(second));
   io.result?.({ settings });
-  io.say(`${first} set to ${settings[first]}`);
+  io.say(`${first} set to ${first === 'gate.shortSlots' ? settings.gate.shortSlots : settings[first]}`);
   return 0;
 }
 

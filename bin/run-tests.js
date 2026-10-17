@@ -2,7 +2,7 @@
 /**
  * Run the test suite with a private home, no inherited Git identity or config, and a refusing CLI shim.
  */
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, lstatSync, realpathSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, delimiter, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile, execFileSync, spawnSync } from 'node:child_process';
@@ -1147,16 +1147,21 @@ async function runLandingTests(args, env, concurrency) {
 }
 
 let nodeOptionsWithValues;
+let knownNodeOptions;
 
 /** Read Node option arity from this runtime so supported option values cannot bypass the machine pool. */
 function optionTakesValue(argument) {
   if (!nodeOptionsWithValues) {
     nodeOptionsWithValues = new Set();
+    knownNodeOptions = new Set();
     const help = execFileSync(process.execPath, ['--help'], { encoding: 'utf8' });
     for (const line of help.split(/\r?\n/u)) {
       const signature = line.match(/^  (-\S.*?)(?: {2,}|$)/u)?.[1];
-      if (!signature || !signature.includes('=') || signature.includes('[=')) continue;
-      for (const option of signature.matchAll(/--?[A-Za-z][A-Za-z0-9-]*/gu)) nodeOptionsWithValues.add(option[0]);
+      if (!signature) continue;
+      for (const option of signature.matchAll(/--?[A-Za-z][A-Za-z0-9-]*/gu)) {
+        knownNodeOptions.add(option[0]);
+        if (signature.includes('=') && !signature.includes('[=')) nodeOptionsWithValues.add(option[0]);
+      }
     }
 
   }
@@ -1194,6 +1199,30 @@ function explicitTestFiles(args) {
     files.push(argument);
   }
   return files;
+}
+
+/** Admit only explicit regular in-root files; directories and uncertain options remain ordinary. */
+function namesOnlyTestFiles(args) {
+  let takesValue = false;
+  for (const argument of args) {
+    if (takesValue) { takesValue = false; continue; }
+    if (argument === '--') break;
+    if (!argument.startsWith('-')) continue;
+    const option = argument.split('=', 1)[0].replaceAll('_', '-');
+    const requiresValue = optionTakesValue(option);
+    if (!knownNodeOptions.has(option)) return false;
+    if (!argument.includes('=')) takesValue = requiresValue;
+  }
+  if (takesValue || process.env.NODE_OPTIONS) return false;
+  const files = explicitTestFiles(args);
+  if (!files.length) return false;
+  try {
+    const root = realpathSync(process.cwd());
+    return files.every(file => {
+      const path = resolve(root, file);
+      return lstatSync(path).isFile() && realpathSync(path).startsWith(root + sep);
+    });
+  } catch { return false; }
 }
 
 /** Select repository test entry files while keeping imported helpers out of direct discovery. */
@@ -1308,6 +1337,7 @@ async function main(args) {
   }
   args = sharding.args;
   const fullSuite = !hasTestFiles(args);
+  const shortEligible = namesOnlyTestFiles(args);
   let browser = fullSuite;
   if (!browser) {
     const { testsNeedBrowser } = await import('../src/browser-admission.js');
@@ -1349,7 +1379,7 @@ async function main(args) {
       }
     }
     if (scopedMarker) {
-      const inherited = inheritedGateSlot({ root: process.cwd(), browser });
+      const inherited = inheritedGateSlot({ root: process.cwd(), browser, fullSuite: !shortEligible });
       if (inherited) await run(gateSlotEnvironment(inherited));
       else await acquire();
     } else if (legacyHeld) {
@@ -1377,7 +1407,7 @@ async function main(args) {
         process.stdout.write(result.output);
         process.exitCode = result.exitCode;
       }, {
-        browser, kind: fullSuite ? 'gate' : 'focused',
+        browser, kind: fullSuite ? 'gate' : 'focused', shortEligible,
         remote: Boolean(canShipRunner),
         onWait: ({ holders, runnerUnavailable }) => {
           if (runnerUnavailable) {
