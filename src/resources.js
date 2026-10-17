@@ -100,6 +100,7 @@ function openQueue(file) {
       if (!columns.includes('browser')) db.exec(`ALTER TABLE ${table} ADD COLUMN browser INTEGER NOT NULL DEFAULT 0`);
       if (!columns.includes('item')) db.exec(`ALTER TABLE ${table} ADD COLUMN item TEXT NOT NULL DEFAULT ''`);
       if (!columns.includes('kind')) db.exec(`ALTER TABLE ${table} ADD COLUMN kind TEXT NOT NULL DEFAULT ''`);
+      if (!columns.includes('lease_until')) db.exec(`ALTER TABLE ${table} ADD COLUMN lease_until TEXT NOT NULL DEFAULT ''`);
       if (table === 'holder' && !columns.includes('runner')) db.exec("ALTER TABLE holder ADD COLUMN runner TEXT NOT NULL DEFAULT ''");
       if (table === 'holder' && !columns.includes('short_slot')) db.exec('ALTER TABLE holder ADD COLUMN short_slot INTEGER NOT NULL DEFAULT 0');
       if (table === 'waiter' && !columns.includes('remote')) db.exec('ALTER TABLE waiter ADD COLUMN remote INTEGER NOT NULL DEFAULT 0');
@@ -221,26 +222,26 @@ function queueOrder(scope) {
 
 /** Read the complete resource line with the metadata every admission view orders identically. */
 function queuedWaiters(db, name) {
-  return db.prepare('SELECT ticket, pid, agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, remote, item, kind, classed, release_aware, board_key, release_rank, queue_ticket, short_eligible AS shortEligible FROM waiter WHERE name = ?').all(name);
+  return db.prepare('SELECT ticket, pid, agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, remote, item, kind, lease_until AS leaseUntil, classed, release_aware, board_key, release_rank, queue_ticket, short_eligible AS shortEligible FROM waiter WHERE name = ?').all(name);
 }
 
 /** Current holders and the waiting line in admission order, each waiter naming its class (aged only while class order is on). */
 function snapshot(db, name, order = ARRIVAL_ORDER, now = Date.now()) {
   /** Preserve older public entries while naming diagnostics as a distinct queue class. */
-  const project = ({ diagnostic, browser, remote, runner, item, kind, shortSlot, shortEligible, ...entry }) => ({ ...entry, landing: entry.landing === 1,
+  const project = ({ diagnostic, browser, remote, runner, item, kind, leaseUntil, shortSlot, shortEligible, ...entry }) => ({ ...entry, landing: entry.landing === 1,
     itemCheck: entry.itemCheck === 1 && diagnostic !== 1, ...(diagnostic === 1 ? { diagnostic: true } : {}),
     ...(['gate', 'browser'].includes(name) && shortSlot === 1 ? { slot: 'short' } : {}),
     ...(['gate', 'browser'].includes(name) && shortSlot === 0 ? { slot: 'gate' } : {}),
     ...(['gate', 'browser'].includes(name) && shortEligible === 1 ? { requestedSlot: 'short-eligible' } : {}),
     ...(browser === 1 ? { browser: true } : {}), ...(remote === 1 ? { remote: true } : {}),
-    ...(runner ? { runner } : {}), ...(item ? { item } : {}), ...(kind ? { kind } : {}) });
+    ...(runner ? { runner } : {}), ...(item ? { item } : {}), ...(kind ? { kind } : {}), ...(leaseUntil ? { leaseUntil } : {}) });
   // Browser is an additional capability on a gate lease, not a second partially held row.
   const where = name === 'browser' ? 'name = ? AND browser = 1' : 'name = ?';
   const sourceName = name === 'browser' ? 'gate' : name;
   const runnerHost = name.startsWith('runner:') ? name.slice('runner:'.length) : '';
   const holderWhere = runnerHost ? 'name = ?' : where;
   const holderValues = [sourceName];
-  const holders = db.prepare(`SELECT agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, runner, item, kind, short_slot AS shortSlot FROM holder WHERE ${holderWhere} ORDER BY since, token`).all(...holderValues).map(project);
+  const holders = db.prepare(`SELECT agent, repo, since, landing, item_check AS itemCheck, diagnostic, browser, runner, item, kind, lease_until AS leaseUntil, short_slot AS shortSlot FROM holder WHERE ${holderWhere} ORDER BY since, token`).all(...holderValues).map(project);
   const queued = queuedWaiters(db, sourceName);
   const ageMs = order.reviewsFirst ? order.ageMs : Infinity;
   const line = orderedWaiters(queued, now, order)
@@ -567,7 +568,7 @@ function pause(ms) { return new Promise((resolvePromise) => setTimeout(resolvePr
 /**
  * Join the queue in its admission class (landing, review, submit, other), aging up over time; FIFO by ticket within a class.
  *
- * @param {{ name: string, capacity: number, capacityProvider?: () => number, shortCapacityProvider?: () => number, browserCapacityProvider?: () => number, scope?: 'machine'|'repo'|'board', root?: string, agent?: string, repo?: string, landing?: boolean, itemCheck?: boolean, shortEligible?: boolean, diagnostic?: boolean, browser?: boolean, remote?: boolean, runnerProvider?: () => Array<{host:string,slots:number,browser:number}>, item?: string, kind?: string, onWait?: (state: object) => void, allowIdleCapacityUpdate?: boolean, memory?: () => Promise<{ checked: boolean, held: boolean, line: string, warning?: string }>, _resume?: object }} options - Resource identity, queue class, short-slot eligibility, optional remote executor pool and memory check.
+ * @param {{ name: string, capacity: number, capacityProvider?: () => number, shortCapacityProvider?: () => number, browserCapacityProvider?: () => number, scope?: 'machine'|'repo'|'board', root?: string, agent?: string, repo?: string, landing?: boolean, itemCheck?: boolean, shortEligible?: boolean, diagnostic?: boolean, browser?: boolean, remote?: boolean, runnerProvider?: () => Array<{host:string,slots:number,browser:number}>, item?: string, kind?: string, onWait?: (state: object) => any | Promise<any>, allowIdleCapacityUpdate?: boolean, memory?: () => Promise<{ checked: boolean, held: boolean, line: string, warning?: string }>, _resume?: object }} options - Resource identity, queue class, short-slot eligibility, optional remote executor pool and memory check. An awaited wait callback may return {leaseUntil} and then receives a final {admitted:true} callback before work starts.
  *   memory, when given, is read before each admission: a held verdict keeps the whole queue
  *   waiting in place, local, remote and short slots alike, and an unchecked one is passed to onWait once
  *   so the caller can warn.
@@ -615,6 +616,20 @@ export async function takeResource(options) {
   const started = processStarted(pid);
   const repo = options.repo ?? repoRoot(root);
   let queuedAt = resume?.queuedAt ?? new Date().toISOString();
+  let leaseUntil = '';
+  /** Record an item's lease only after its awaited owner renewal succeeds. */
+  const keepItemLease = async (state, table) => {
+    const result = await options.onWait?.(state);
+    if (result?.leaseUntil !== undefined) {
+      if (typeof result.leaseUntil !== 'string' || !Number.isFinite(Date.parse(result.leaseUntil))) {
+        throw new Refused('BAD_RESOURCE_METADATA', 'the waiting item renewal must return a valid leaseUntil timestamp');
+      }
+      leaseUntil = result.leaseUntil;
+      const changed = update(db, () => db.prepare(`UPDATE ${table} SET lease_until = ? WHERE token = ? AND pid = ? AND started = ?`)
+        .run(leaseUntil, token, pid, started));
+      if (changed.changes !== 1) throw new Refused('RESOURCE_LEASE_LOST', 'the queued resource lease disappeared during item renewal; retry the command');
+    }
+  };
   try {
     let initialTicket = resume?.ticket;
     update(db, () => {
@@ -659,7 +674,8 @@ export async function takeResource(options) {
       const memory = options.memory ? await options.memory() : null;
       if (memory && !memory.checked && !memoryWarned) {
         memoryWarned = true;
-        options.onWait?.({ holders: [], line: [], position: 0, memory });
+        // Await it like every other wait report, so an item-lease callback never renews unobserved.
+        await keepItemLease({ holders: [], line: [], position: 0, memory }, 'waiter');
       }
       const order = queueOrder(scope);
       const acquired = update(db, () => {
@@ -700,6 +716,15 @@ export async function takeResource(options) {
         return { acquired: false, state: { ...spot, position: reportPosition } };
       });
       if (acquired.acquired) {
+        // Only item-lease callbacks opt into admission. Await them so no renewal remains in
+        // flight during the run, and restart the ordinary item expiry from this boundary.
+        if (leaseUntil) {
+          try { await keepItemLease({ ...acquired.state, admitted: true }, 'holder'); }
+          catch (error) {
+            update(db, () => db.prepare('DELETE FROM holder WHERE token = ?').run(token));
+            throw error;
+          }
+        }
         const acquiredWaitMs = priorWaitMs + Math.max(0, Date.now() - waitStartedAt);
         let released = false;
         let transferred = false;
@@ -784,7 +809,7 @@ export async function takeResource(options) {
           waitMs: acquiredWaitMs, release, renew,
           ...(acquired.runner ? { requeueRunner } : {}) };
       }
-      options.onWait?.(acquired.state);
+      await keepItemLease(acquired.state, 'waiter');
       await pause(POLL_MS);
     }
   } catch (error) {

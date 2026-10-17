@@ -147,6 +147,7 @@ export const NEXT_STEPS = Object.freeze({
   INLINE_GATE: 'use the gate as its own flag: pullboard spec draft "<text>" --gate "<check>"',
   INTERNAL: 'run the command again; if it repeats, report it with pullboard shout coordinator "<command and output>"',
   ITEM_HELD: 'take another item with pullboard next while the coordinator holds this one',
+  ITEM_LEASE_LOST: 'read pullboard show <id>; if the item is free, claim it again for a build or reserve it with pullboard next --verify <id> for a review, then retry',
   ITEM_NOT_AVAILABLE: 'read the item from this API\'s board state',
   ITEM_NOT_OPEN: 'hold only open or claimed items; see pullboard list',
   LANDING_FAILURE_REQUIRED: 'reopen with --note "<test file>: <test name>; merge commit <sha>"',
