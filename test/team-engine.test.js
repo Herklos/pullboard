@@ -184,3 +184,61 @@ test('an older landing refusal remains exact after its snapshot acquires checked
   assert.throws(() => applyEngineMove(board, { ...finish, id: 'new-legacy-attempt' }, { sequence: 4, at: AT }), { code: 'RELAY_MOVE' });
   assert.deepEqual(exportBoard(board), before);
 });
+
+test('an actual engine 12 finish records its landing without borrowing a newer checked review [E8,H16,R3]', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'pullboard-legacy-review-landing-'));
+  const archived = join(directory, 'engine12');
+  mkdirSync(archived);
+  unpackRelease('59a6e2b286ee852add0d68a659f1a1e6b3257c44', archived);
+  const oldStore = await import(pathToFileURL(join(archived, 'src/board.js')).href);
+  const oldEngine = await import(pathToFileURL(join(archived, 'src/engine.js')).href);
+  const oldExchange = await import(pathToFileURL(join(archived, 'src/exchange.js')).href);
+  const oldMachine = await import(pathToFileURL(join(archived, 'src/machine.js')).href);
+  assert.equal(oldMachine.ENGINE_VERSION, 12, 'prepare the in-flight move with the released executable');
+  const seed = submitted(t);
+  const old = oldStore.openBoard(join(directory, 'old.sqlite'));
+  t.after(() => { oldStore.closeBoard(old); rmSync(directory, { recursive: true, force: true }); });
+  oldExchange.importBoard(old, exportBoard(seed));
+  const accept = oldEngine.prepareEngineMove(old, 'verify', [1, verdict()], { id: 'legacy-landing-accept' });
+  assert.equal(oldEngine.applyEngineMove(old, accept, { sequence: 1, at: AT }).error, undefined);
+  const entry = { id: 1, commit: COMMIT, merge: COMMIT };
+  const batch = { version: 1, id: 'legacy-pushed', state: 'pushed', base: BASE, tip: COMMIT,
+    branch: 'refs/heads/main', root: '/fixture/landing', owner: 'fixture', logPath: '/fixture/log',
+    candidates: [entry], items: [entry], revision: 0 };
+  const record = oldEngine.prepareEngineMove(old, 'recordLandingBatch', [{ agentId: 'coordinator', batch }], { id: 'legacy-pushed-batch' });
+  assert.equal(oldEngine.applyEngineMove(old, record, { sequence: 2, at: AT }).error, undefined);
+  const finish = oldEngine.prepareEngineMove(old, 'finishLandingBatch', [{ agentId: 'coordinator', id: batch.id, tip: COMMIT }], { id: 'legacy-in-flight-finish' });
+  const one = store.openBoard(':memory:');
+  const two = store.openBoard(':memory:');
+  const historical = store.openBoard(':memory:');
+  t.after(() => { for (const board of [one, two, historical]) store.closeBoard(board); });
+  for (const board of [one, two, historical]) importBoard(board, oldExchange.exportBoard(old));
+
+  const historicalResult = oldEngine.applyEngineMove(old, finish, { sequence: 3, at: AT });
+  assert.deepEqual(applyEngineMove(historical, finish, { sequence: 3, at: AT }), historicalResult);
+  assert.deepEqual(withoutWriterMarker(exportBoard(historical)), withoutWriterMarker(oldExchange.exportBoard(old)),
+    'a finish ordered before any new review retains every historical row and receipt');
+
+  const review = { commit: COMMIT, head: TRUNK, trunk: BASE, paths: ['web/feature.js'] };
+  const reReview = prepareEngineMove(one, 'verify', [1, { ...verdict(review), head: TRUNK }], { id: 'new-review-before-old-finish' });
+  for (const board of [one, two]) assert.equal(applyEngineMove(board, reReview, { sequence: 3, at: AT }).error, undefined);
+  const verdicts = store.verdictsFor(one, 1);
+  const landed = applyEngineMove(one, finish, { sequence: 4, at: AT });
+  assert.equal(landed.error, undefined, 'a physically pushed older landing must not wedge the ordered prefix');
+  assert.deepEqual(applyEngineMove(two, finish, { sequence: 4, at: AT }), landed);
+  for (const board of [one, two]) {
+    assert.equal(store.getItem(board, 1).item_merged_commit, COMMIT, 'record the actual older tree B');
+    assert.equal(store.checkedLandingCommit(board, store.getItem(board, 1)), TRUNK, 'retain the checked tree C');
+    assert.deepEqual(store.verdictsFor(board, 1), verdicts, 'neither the old acceptance nor the new review is rewritten');
+    const moved = store.events(board, { itemId: 1 }).filter(event => event.event_kind === 'landing-review-moved');
+    assert.equal(moved.length, 1);
+    assert.deepEqual(JSON.parse(moved[0].event_detail), { code: 'LAND_ITEM_MOVED', batch: batch.id,
+      verdict: verdicts.at(-1).verdict_id, checked: TRUNK, landed: COMMIT, model: 'unknown' });
+    const receipt = engineReceipt(board, finish.id);
+    assert.deepEqual(applyEngineMove(board, finish, { sequence: 4, at: AT }), landed);
+    assert.deepEqual(engineReceipt(board, finish.id), receipt, 'retrying the old move returns its original receipt');
+    assert.equal(store.events(board, { itemId: 1 }).filter(event => event.event_kind === 'landing-review-moved').length, 1);
+    assert.equal(appliedSequence(board), 4);
+  }
+  assert.deepEqual(exportBoard(one), exportBoard(two));
+});

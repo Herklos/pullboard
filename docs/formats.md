@@ -335,6 +335,7 @@ The `event` table is a SQLite schema object governed by `SCHEMA_VERSION`; its ap
 | `reopen` | coordinator | `commit`, `note`, `judgment`, engine-10 `supersedes`, `landingFailure` |
 | `merged` | coordinator | `commit` |
 | `landing_batch` | coordinator | `batch` |
+| `landing-review-moved` | coordinator | `code`, `batch`, `verdict`, `checked`, `landed` |
 | `landing_waiver` | person | `waiver` |
 | `landing_flake` | coordinator | `flake` |
 | `main-moved` | coordinator | `batch`, `items`, `sha` |
@@ -406,6 +407,6 @@ The schema, trigger and parser tables are checked against live `openBoard(':memo
 
 ### Landing records
 
-Engine 8 adds `recordLandingBatch`, `recordLandingWaiver`, `recordLandingFlake` and `finishLandingBatch`. Older engines stop before applying these operations. Their append-only events need no schema migration. A batch snapshot has version 1, identity, base and tip commits, trunk branch, landing worktree, items with their first-containing merge commits, state, owner, log path and revision. Additional owner-lease and environment fields can be added without changing version 1. A revision refuses stale updates. Successful push precedes the atomic merged receipts and single `main-moved` event.
+Engine 8 adds `recordLandingBatch`, `recordLandingWaiver`, `recordLandingFlake` and `finishLandingBatch`. Older engines stop before applying these operations. Their append-only events need no schema migration. A batch snapshot has version 1, identity, base and tip commits, trunk branch, landing worktree, items with their first-containing merge commits, state, owner, log path and revision. Additional owner-lease and environment fields can be added without changing version 1. A revision refuses stale updates. Successful push precedes the atomic merged receipts and single `main-moved` event. An engine-12 landing finish ordered after an engine-25 checked re-review still records the tree the older client actually pushed. If that legacy batch did not check the newer reviewed head, it also appends `landing-review-moved` with `code: "LAND_ITEM_MOVED"` and the exact verdict, checked head and landed merge. The newer review reads stale until its checked composition reaches the known trunk; the earlier landing receipt and verdicts remain immutable. Recovery creates a separate correction item rather than reopening or re-reviewing the already-landed original. Historical finishes ordered before the newer review retain their original receipts.
 
 A person waiver records its identity, named test, expiry, reason and person channel. A distinct landing proof records the exact batch tree and each failing test with its covering waiver identity. Pre-push checks every waiver against the current time; this proof never writes an ordinary green-gate stamp. Flake records retain a test path, source digest, failing names and one defect item, so a repeated observation does not create another defect.

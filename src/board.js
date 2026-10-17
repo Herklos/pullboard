@@ -2789,6 +2789,16 @@ export function finishLandingBatch(board, { agentId, id, tip }) {
       if (item.item_merged_commit && item.item_merged_commit !== entry.merge) {
         throw new Refused('LAND_ITEM_MOVED', `item #${entry.id} already has another landing receipt; read pullboard show ${entry.id}`);
       }
+      const accepted = acceptedVerdict(board, item);
+      if ((board.executionEngineVersion ?? ENGINE_VERSION) < VERDICT_REVIEW_ENGINE
+        && accepted?.review?.head && accepted.review.head !== (entry.reviewedCommit ?? entry.commit)) {
+        // An old client may already have pushed B before a newer client checked C.
+        // Record physical history without lending C's proof to B or wedging replay.
+        logEvent(board, agentId, 'landing-review-moved', entry.id, {
+          code: 'LAND_ITEM_MOVED', batch: id, verdict: accepted.verdict_id,
+          checked: accepted.review.head, landed: entry.merge,
+        });
+      }
       if (!item.item_merged_commit) merged(board, entry.id, { agentId, commit: entry.merge });
     }
     logEvent(board, agentId, 'main-moved', null, { sha: tip, batch: id, items: batch.items.map((entry) => entry.id) });
