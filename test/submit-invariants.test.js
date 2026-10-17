@@ -4,7 +4,7 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
 import * as store from '../src/board.js';
-import { applyEngineMove, applyRelayMove, prepareEngineMove } from '../src/engine.js';
+import { appliedSequence, applyEngineMove, applyRelayMove, prepareEngineMove } from '../src/engine.js';
 import { exportBoard, importBoard } from '../src/exchange.js';
 import { SUBMISSION_PROOF_ENGINE, landingFileTimes } from '../src/submit-invariants.js';
 import { landingFailures } from '../src/land.js';
@@ -136,7 +136,11 @@ test('a landing escape is proposed as a submit invariant [C7,V4]', async () => {
     const legacy = store.addItem(board, { by: 'coordinator', lane: 'web', title: 'legacy submit' });
     store.claim(board, legacy, { agentId: 'web-1', lane: 'web', leaseMs: 3600000,
       freeze: () => ({ text: '{"rows":[]}', digest: 'f'.repeat(64) }) });
-    store.submit(board, legacy, { agentId: 'web-1', commit: 'd'.repeat(40), tree: 'e'.repeat(40), note: 'full suite deferred to the landing gate' });
+    const legacyReceipt = applyEngineMove(board, { version: 1, engine: SUBMISSION_PROOF_ENGINE - 1,
+      id: 'legacy-unknown-selection', operation: 'submit', args: [legacy, { agentId: 'web-1',
+        commit: 'd'.repeat(40), tree: 'e'.repeat(40), note: 'full suite deferred to the landing gate' }] },
+    { sequence: appliedSequence(board) + 1, at: new Date().toISOString() });
+    assert.equal(legacyReceipt.error, undefined, 'a proofless previous-engine receipt remains legacy unknown');
     submit.legacy = legacy;
   });
   landing(box, 'legacy-unknown', { id: submit.legacy, commit: 'd'.repeat(40), policyCommit: submit.policyCommit }, third,
@@ -209,4 +213,45 @@ test('submission selection replays on two replicas and legacy history remains un
   assert.equal(landingFailures(cancelled, '/fixture').length, 3, 'the existing landing parser behavior stays available');
   assert.deepEqual(landingFailures(cancelled, '/fixture', { excludeCancelled: true }), [{ file: 'test/failed.test.js', name: 'actual failure' }],
     'cancellation fallout and aggregate wrappers do not become independent escaped-file suggestions');
+});
+
+// Maintains the independent public receiver control from outside rejection 1061.
+test('a landing escape is proposed as a submit invariant only when modern submits carry their receipt [C7,V4,H16]', t => {
+  const box = e2e.sandbox();
+  const source = store.openBoard(join(box.dir, 'modern-source.sqlite'));
+  const target = store.openBoard(join(box.dir, 'modern-replica.sqlite'));
+  const legacyTarget = store.openBoard(join(box.dir, 'legacy33-replica.sqlite'));
+  t.after(() => {store.closeBoard(source);store.closeBoard(target);store.closeBoard(legacyTarget);});
+  store.register(source, {lane:'coordinator',path:'/fixture/main'});
+  store.register(source, {lane:'web',path:'/fixture/web'});
+  const id=store.addItem(source,{by:'coordinator',lane:'web',title:'modern missing selection'});
+  store.claim(source,id,{agentId:'web-1',lane:'web',leaseMs:3600000,freeze:()=>({text:'{"rows":[]}',digest:'f'.repeat(64)})});
+  importBoard(target,exportBoard(source));
+  importBoard(legacyTarget,exportBoard(source));
+  const count=store.events(target).length;
+  const options = {agentId:'web-1',commit:'a'.repeat(40),tree:'b'.repeat(40)};
+  const move=prepareEngineMove(source,'submit',[id,{...options,submissionProof:{version:1,
+    files:[],full:false,deferred:true,reason:'controlled receiver envelope'}}],
+    {id:'modern-missing-selection',actor:'web-1'});
+  // Forge the missing wire field after valid preparation so the receiver assertion remains independent.
+  delete move.args[1].submissionProof;
+  assert.equal(move.engine,SUBMISSION_PROOF_ENGINE,'the envelope is the current allocated engine34');
+  assert.equal(Object.hasOwn(move.args[1],'submissionProof'),false);
+  const legacyMove = {...move,engine:33,id:'legacy33-missing-selection'};
+  const legacyResult = applyRelayMove(legacyTarget,legacyMove,{sequence:1,at:'2026-10-17T00:00:00.000Z',kind:'move',sender:{kind:'agent',userId:'fixture',agent:'web-1'}});
+  assert.equal(legacyResult.error,undefined,'authentic engine33 proofless legacy still replays');
+  assert.equal(store.getItem(legacyTarget,id).item_status,'submitted');
+  const legacyEvent = store.events(legacyTarget).findLast(e=>e.event_kind==='submit');
+  assert.equal(Object.hasOwn(JSON.parse(legacyEvent.event_detail),'submissionProof'),false,'legacy33 stays unknown without invented coverage');
+  console.log('review696 legacy33 control '+JSON.stringify({engine:33,status:store.getItem(legacyTarget,id).item_status,recordedSelection:false}));
+  const result=applyRelayMove(target,move,{sequence:1,at:'2026-10-17T00:00:00.000Z',kind:'move',sender:{kind:'agent',userId:'fixture',agent:'web-1'}});
+  const event=store.events(target).findLast(e=>e.event_kind==='submit');
+  const detail=event ? JSON.parse(event.event_detail) : null;
+  console.log('review696 modern missing proof '+JSON.stringify({engine:move.engine,error:result.error?.code??null,status:store.getItem(target,id).item_status,newEvents:store.events(target).length-count,submitEventPresent:!!event,recordedSelection:!!detail?.submissionProof}));
+  assert.equal(result.error?.code,'SUBMISSION_PROOF','a current engine submit must record a selection instead of silently becoming unknown history');
+  assert.equal(store.getItem(target,id).item_status,'claimed');
+  assert.equal(store.events(target).length,count);
+  assert.throws(() => prepareEngineMove(source,'submit',[id,options],
+    {id:'producer-missing-selection',actor:'web-1'}), {code:'SUBMISSION_PROOF'},
+  'the current producer refuses a missing receipt before sealing a move');
 });
