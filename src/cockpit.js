@@ -1,3 +1,4 @@
+import { hostedReleaseDistance, shippedReleaseVersions } from './view/hosted-release.js';
 import {
   effectiveGuards,
   IN_STATE,
@@ -5,7 +6,6 @@ import {
 } from './machine.js';
 import { commandPhrases, VERSION } from './help.js';
 import { personNeeds } from './needs.js';
-import { hostedReleaseDistance, shippedReleaseVersions } from './view/hosted-release.js';
 
 /** The CLI's default phrases, ordered by depth for the existing prose inventory guard. */
 export const PULLBOARD_COMMANDS = Object.freeze(commandPhrases().sort((left, right) => right.split(' ').length - left.split(' ').length));
@@ -110,15 +110,15 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
     <p id="local-note-text"></p>
     <p id="local-note-links" hidden><a id="local-note-view" href="http://127.0.0.1:4890/local/view">Open the local view</a> <a id="local-note-sign-in" hidden>Sign in to see linked boards</a> <button class="ghost" id="local-note-retry" type="button">Try again</button></p>
   </section>
-  <section class="card-panel" id="hosted-release-note" role="status" aria-label="Pullboard update" hidden>
-    <p><span id="hosted-release-text"></span> <code>npm i -g pullboard@latest</code> <a id="hosted-release-link" target="_blank" rel="noopener noreferrer">What changed</a> <button class="ghost" id="hosted-release-dismiss" type="button">Dismiss</button></p>
-  </section>
   <section class="card-panel snapshot-controls" id="snapshot-controls" ${snapshot ? '' : 'hidden'} aria-label="Snapshot replay">
     <span>Read-only snapshot</span>
     <button class="ghost" id="replay-play" type="button">Play from first event</button>
     <button class="ghost" id="replay-pause" type="button" disabled>Pause</button>
     <label>Speed <select id="replay-speed"><option value="1">1×</option><option value="4">4×</option><option value="16">16×</option></select></label>
     <output id="replay-progress" aria-live="polite">Loading events…</output>
+  </section>
+  <section class="card-panel" id="hosted-release-note" role="status" aria-label="Pullboard update" hidden>
+    <p><span id="hosted-release-text"></span> <code>npm i -g pullboard@latest</code> <a id="hosted-release-link" target="_blank" rel="noopener noreferrer">What changed</a> <button class="ghost" id="hosted-release-dismiss" type="button">Dismiss</button></p>
   </section>
   <section id="group-view" class="group-view" hidden>
     <section class="card-panel group-panel"><h2>Needs you</h2><div id="group-needs"></div></section>
