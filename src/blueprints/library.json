@@ -8,8 +8,9 @@
   "summary": "Your users get a changelog line and the right version bump, every release.",
   "prefix": "LIB",
   "rules": [
-    { "key": "LIB1", "text": "A breaking change bumps the major version.", "why": "people pin a major version, so a breaking change must never arrive inside one." },
-    { "key": "LIB2", "text": "Every public function has a working example in the docs.", "why": "an example that runs teaches a function fastest and breaks loudly when the function changes." }
+    { "key": "LIB1", "text": "A breaking change bumps the major version.", "why": "people pin a major version, so a breaking change must never arrive inside one; before 1.0 people pin the minor version, so there a breaking change bumps the minor.", "tier": "must", "gate": "test/public-api.test.js" },
+    { "key": "LIB2", "text": "Every public function has a working example in the docs.", "why": "an example that runs teaches a function fastest and breaks loudly when the function changes.", "tier": "must", "gate": "test/docs-examples.test.js" },
+    { "key": "LIB3", "text": "Every release adds a changelog line for each change its users can see.", "why": "the changelog is where users learn what an upgrade changes, so a change left out of it surprises them.", "tier": "must", "gate": "review" }
   ],
   "questions": [
     { "key": "Q1", "ask": "The library is written in", "choices": ["JavaScript or TypeScript", "Python", "Rust", "Something else"], "default": "JavaScript or TypeScript" },
