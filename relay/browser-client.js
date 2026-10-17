@@ -557,6 +557,11 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
   // A pairing link opened in another tab, as a scanned QR does, saves its key here: this page fills in by itself.
   addEventListener('storage', event => { if (event.key === KEYS && !accessLost) listing().then(onUpdate, notice); });
   addEventListener('pagehide', () => { for (const entry of paired.values()) entry.stream?.close(); });
+  // Signed in with no board key saved and no pairing on its way, the one-command screen shows at once, while the
+  // first listing is still on the network; the listing then fills the board in, or keeps this screen.
+  let devicePairing = /(?:^#|&)device=/u.test(location.hash);
+  try { devicePairing ||= sessionStorage.getItem('pullboard.relay.device-pair.v1') !== null; } catch { /* No storage: no saved pairing. */ }
+  if (!pair && !devicePairing && !Object.keys(keys).length) showRelayScreen(document.documentElement, 'share');
   if (await enrollPhone((path, options) => documentAt(path, denied, options))) keepPairingStorage();
   await listing();
   await installPhoneApprovals((path, options) => documentAt(path, denied, options), keys, async () => { await listing(); onUpdate(); }, access.signal);

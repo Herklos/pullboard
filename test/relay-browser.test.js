@@ -511,6 +511,7 @@ const SCREEN_FACTS = `(() => {
     footer: shown(document.querySelector('footer.status')),
     github: box('#relay-screen .relay-github'), githubLight: rgb && (0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]) / 255,
     command: box('#relay-screen .relay-command'), agent: box('#relay-screen .relay-agent'),
+    copies: [...document.querySelectorAll('#relay-screen button')].filter(shown).map(node => node.textContent.trim() + ' ' + Math.round(node.getBoundingClientRect().height)),
     commandFont: document.querySelector('#relay-screen .relay-command code') ? getComputedStyle(document.querySelector('#relay-screen .relay-command code')).fontFamily : null,
   };
 })()`;
@@ -562,6 +563,7 @@ test('a phone not signed in sees one GitHub button and nothing about this comput
     assert.equal(facts.cards, 0, how + ': no empty cards');
     assert.equal(facts.footer, false, how + ': no error footer');
     assert.equal(facts.github, 60, how + ': the GitHub button is 60 px tall');
+    assert.deepEqual(facts.copies, ['Copy 60'], how + ': the Stuck line\'s Copy is 60 px tall');
     assert.ok(facts.githubLight < 0.2, how + ': the GitHub button is dark');
     assert.equal(facts.text.trim().endsWith('Copy'), true, how + ': the screen ends with the Stuck line and its Copy');
   }
@@ -611,6 +613,7 @@ test('signed in with nothing shared shows one command and waits [H5,H17]', {
     assert.doesNotMatch(facts.text.replace('pullboard relay on --all', ''), /\brelay\b|\blinked\b|local view|try again/iu, device + ': relay only inside the command');
     assert.equal(facts.command, 60, device + ': the command box is 60 px tall');
     assert.equal(facts.agent, 60, device + ': the agent box is the same height');
+    assert.deepEqual(facts.copies, ['Copy 60', 'Copy 60'], device + ': the command\'s Copy and the agent\'s Copy are 60 px tall');
     assert.match(facts.commandFont, /mono|Menlo|Consolas/iu, device + ': the command is in a mono box');
     if (device === 'a phone') {
       assert.doesNotMatch(facts.text, THIS_COMPUTER, 'the phone says nothing about this computer or pullboard view');
@@ -628,6 +631,48 @@ test('signed in with nothing shared shows one command and waits [H5,H17]', {
         'the waiting page fills in by itself, with no click and no reload');
     }
   }
+});
+
+test('a signed-in phone shows the one-command screen while its first listing is on its way [H5,H17]', {
+  skip: !findChromeExecutable() && 'Chrome is not installed',
+}, async t => {
+  const box = await relayClientFixture(t);
+  const marker = 'SHARED_AFTER_SLOW_LISTING_757';
+  assert.equal((await box.cli('add', box.lane, marker)).code, 0);
+  const chrome = await startChrome();
+  t.after(() => chrome.close());
+  await asPhone(chrome);
+  // Hold every board listing on the network until the test lets it go, as a slow phone connection does.
+  await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+    const original = window.fetch.bind(window);
+    window.held757 = [];
+    window.fetch = (input, init) => {
+      const path = new URL(typeof input === 'string' ? input : input.url, location.href).pathname;
+      if (path !== '/api/v1/boards' || window.release757) return original(input, init);
+      return new Promise(resolve => { window.held757.push(() => resolve(original(input, init))); });
+    };
+    window.releaseListings757 = () => { window.release757 = true; for (const go of window.held757.splice(0)) go(); };
+  })();` });
+  await personCookie(chrome, box);
+  await chrome.navigate(box.origin);
+  await chrome.waitFor("window.held757?.length > 0 && document.documentElement.dataset.relayScreen === 'share'");
+  const facts = await chrome.evaluate(SCREEN_FACTS);
+  assert.equal(await chrome.evaluate('window.release757 === undefined && window.held757.length > 0'), true, 'the first listing is still on its way');
+  for (const words of ['One step on your computer', 'pullboard relay on --all', 'Waiting for your boards']) {
+    assert.equal(facts.text.includes(words), true, 'while the listing waits, the screen says ' + words);
+  }
+  assert.doesNotMatch(facts.text, /Pairing this browser|Projects/u, 'no pairing notice or project list while the listing waits');
+  assert.deepEqual(facts.copies, ['Copy 60', 'Copy 60'], 'both Copy buttons are 60 px tall while the listing waits');
+  await chrome.evaluate('window.samePage757 = true; window.releaseListings757()');
+  await chrome.waitFor("document.querySelector('#relay-notice') !== null && document.documentElement.dataset.relayScreen === 'share'");
+  await box.link();
+  const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));
+  const encoded = readFileSync(box.keyFile, 'utf8').trim();
+  const tab = await chrome.send('Target.createTarget', { url: box.origin + '/#board=' + link.board + '&key=' + encoded });
+  assert.equal(typeof tab.targetId, 'string');
+  await chrome.waitFor("document.querySelector('#chain')?.textContent.includes(" + JSON.stringify(marker) + ')');
+  assert.equal(await chrome.evaluate("window.samePage757 === true && (document.documentElement.dataset.relayScreen ?? null) === null"), true,
+    'once a board is shared the waiting page fills in by itself');
 });
 
 /** A pre-ordered mirror's durable local outbox keeps its final browser projection recoverable. */
