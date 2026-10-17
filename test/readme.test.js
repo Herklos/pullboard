@@ -227,13 +227,11 @@ test('README pins its approved Philosophy, Key concepts and Why structure [I10,I
   assert.equal(README.split(approvedOpening).length - 1, 1, 'the approved opening appears exactly once');
   assert.doesNotMatch(`${approvedOpening} ${FIGURES.holds()}`, /\b(?:memory|remember)\b/iu, 'the opening and its figure avoid those terms');
   const section = README.slice(philosophy, nextTopLevel);
-  assert.ok(section.includes("On Pullboard itself, a second agent's check catches one in three tasks that already passed their own tests."), 'Why pins the approved proof line');
+  assert.ok(section.includes('### Why\n\nPast the demo, the same things break.\n\n![Where vibe coding breaks, and what holds instead.'), 'Why opens with the approved line, then the figure of what breaks and what holds');
   for (const text of [
     'You do not explain twice. You rule the agents. Hierarchy is enforced. Judgement is yours. Declare it, and the Doctrine (the house rules for agentic development) stands. **You speak the constraints, agents fill in the blanks.** The Spec is canon. Then code. Then proof.',
     'Five primitives. Everything else is built on them.',
     '**Items.**', '**Shouts.**', '**Spec.**', '**Doctrine.**', '**Activity.**',
-    "**It said done. It wasn't.**", '**It forgot what you decided.**',
-    '**Two agents, one file.**', '**A fix broke something.**',
   ]) assert.ok(section.includes(text), `Philosophy keeps ${text}`);
 });
 

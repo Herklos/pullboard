@@ -57,7 +57,7 @@ test("the coordinator corrects a claimed item's criterion without release [V2]",
   const agentEdit = box.run(box.web, 'edit', String(id), '--criterion', 'an agent cannot change the frozen bar', '--json');
   assert.match(refusal(agentEdit, 'HELD', id).message, /only the coordinator may edit it while held/u);
 
-  const corrected = box.run(box.repo, 'edit', String(id), '--criterion', 'the corrected criterion', '--check', 'true && true', '--json');
+  const corrected = box.run(box.repo, 'edit', String(id), '--criterion', 'the corrected criterion', '--check', 'true && true', '--reason', 'the fixture corrects its bar', '--json');
   assert.equal(corrected.code, 0, corrected.err || corrected.out);
   const pending = store.getItem(board, id);
   assert.equal(pending.item_criterion, 'the corrected criterion');
@@ -109,7 +109,7 @@ test("the coordinator corrects a claimed item's criterion without release [V2]",
   const checkClaim = box.run(box.web, 'claim', String(checkId), '--json');
   assert.equal(checkClaim.code, 0, checkClaim.err || checkClaim.out);
   const checkBefore = store.getItem(board, checkId);
-  const checkEdit = box.run(box.repo, 'edit', String(checkId), '--check', 'true && true', '--json');
+  const checkEdit = box.run(box.repo, 'edit', String(checkId), '--check', 'true && true', '--reason', 'the fixture corrects its bar', '--json');
   assert.equal(checkEdit.code, 0, checkEdit.err || checkEdit.out);
   const checkPending = store.getItem(board, checkId);
   assert.equal(checkPending.item_criterion, checkBefore.item_criterion);
@@ -252,7 +252,7 @@ async function checkDependencyLegacyClients(cleanup, directory, snapshot, target
         const oldSnapshot = legacyExchange.exportBoard(old);
         const currentSnapshot = exportBoard(current);
         assert.equal(oldSnapshot.tables.board_meta.find((row) => row.meta_key === 'relay_engine_version').meta_value, '10');
-        assert.equal(currentSnapshot.tables.board_meta.find((row) => row.meta_key === 'relay_engine_version').meta_value, '12');
+        assert.equal(currentSnapshot.tables.board_meta.find((row) => row.meta_key === 'relay_engine_version').meta_value, String(ENGINE_VERSION));
         assert.deepEqual(withoutEngineMarker(currentSnapshot), withoutEngineMarker(oldSnapshot),
           'the sole snapshot difference is the intentionally newer writer-version marker');
       }
@@ -261,7 +261,7 @@ async function checkDependencyLegacyClients(cleanup, directory, snapshot, target
 }
 
 test('dependency edits replay the same on every engine [B3,V2,H16]', async (t) => {
-  assert.equal(ENGINE_VERSION, 12);
+  assert.equal(ENGINE_VERSION, 19);
   const directory = mkdtempSync(join(tmpdir(), 'pullboard-dependency-engines-'));
   const cleanup = [];
   t.after(() => {
@@ -441,7 +441,7 @@ test('ordered refreeze corrections retain engine-7 history and engine-8 live cla
   }]);
   applyCurrentBoth(currentClaim, 1, sender);
   const correction = prepareEngineMove(current, 'editItem', [currentId, {
-    agentId: 'coordinator', criterion: 'corrected by an ordered coordinator move',
+    agentId: 'coordinator', criterion: 'corrected by an ordered coordinator move', reason: 'the fixture corrects its bar',
   }]);
   applyCurrentBoth(correction, 2, coordinatorSender);
   for (const replica of [current, currentReplica]) {

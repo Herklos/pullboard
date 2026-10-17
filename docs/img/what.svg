@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 306" width="840" height="306" role="img" aria-labelledby="title desc">
+<title id="title">One board. Every agent. Every machine.</title><desc id="desc">One board. Every agent. Every machine. All of it is in Pullboard 0.9.0. Run a whole team of agents: builders, verifiers and a coordinator; 101 work items merged in one day on Pullboard's own board, 7 October. Your board, on your phone: Answer what’s waiting, anywhere. Sealed: the relay can’t read it. Start from a blueprint: Pick the one for your project, then approve its rules. Plug in any agent: Keep Claude Code or Codex, and add any MCP client. Across your machines: Pair a machine once. Its agents share your board, in one order.</desc>
+<style>
+text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif; fill: #1f2328; }
+.mono { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; }
+.card { fill: #ffffff; stroke: #d1d9e0; }
+.head { font-size: 14px; font-weight: 600; }
+.aside { font-size: 12px; fill: #59636e; }
+.t1 { font-size: 14px; font-weight: 600; }
+.t2 { font-size: 12px; fill: #59636e; }
+.label { font-size: 12px; fill: #59636e; }
+.code { font-size: 11.5px; fill: #59636e; }
+.edge { fill: none; stroke: #8c959f; stroke-width: 1.5; }
+.edge.back { stroke: #bc4c00; stroke-dasharray: 5 4; }
+.edge.leader { stroke-width: 1; stroke-dasharray: 2 3; }
+.tip { fill: #8c959f; }
+.tip.back { fill: #bc4c00; }
+.label.back { fill: #bc4c00; }
+.frame { fill: none; stroke: #d1d9e0; stroke-dasharray: 4 4; }
+.plain rect { fill: #f6f8fa; stroke: #d1d9e0; }
+.person rect { fill: #ddf4ff; stroke: #54aeff; }
+.person .t1 { fill: #0a3069; } .person .t2 { fill: #0550ae; }
+.agent rect { fill: #fbefff; stroke: #c297ff; }
+.agent .t1 { fill: #3e1f79; } .agent .t2 { fill: #6639ba; }
+.check rect { fill: #fff8c5; stroke: #d4a72c; }
+.check .t1 { fill: #4d2d00; } .check .t2 { fill: #7d4e00; }
+.done rect { fill: #dafbe1; stroke: #4ac26b; }
+.done .t1 { fill: #044f1e; } .done .t2 { fill: #116329; }
+@media (prefers-color-scheme: dark) {
+  text { fill: #f0f6fc; }
+  .card { fill: #0d1117; stroke: #3d444d; }
+  .aside, .t2, .label, .code { fill: #9198a1; }
+  .edge { stroke: #6e7681; }
+  .edge.back { stroke: #f0883e; }
+  .tip { fill: #6e7681; }
+  .tip.back, .label.back { fill: #f0883e; }
+  .frame { stroke: #3d444d; }
+  .plain rect { fill: #151b23; stroke: #3d444d; }
+  .person rect { fill: #0c2d6b; stroke: #1f6feb; }
+  .person .t1 { fill: #cae8ff; } .person .t2 { fill: #a5d6ff; }
+  .agent rect { fill: #271052; stroke: #8957e5; }
+  .agent .t1 { fill: #ecdeff; } .agent .t2 { fill: #d2a8ff; }
+  .check rect { fill: #272115; stroke: #9e6a03; }
+  .check .t1 { fill: #f8e3a1; } .check .t2 { fill: #e3b341; }
+  .done rect { fill: #04260f; stroke: #238636; }
+  .done .t1 { fill: #aff5b4; } .done .t2 { fill: #7ee787; }
+}
+</style>
+<defs>
+<marker id="tip" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path class="tip" d="M0 1 L9 5 L0 9 z"/></marker>
+<marker id="tip-back" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path class="tip back" d="M0 1 L9 5 L0 9 z"/></marker>
+</defs>
+<rect class="card" x="0.5" y="0.5" width="839" height="305" rx="12"/>
+<style>
+text{font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
+.card{fill:#fff;stroke:#dce5df}.title{font-size:16px;font-weight:650;fill:#101714}.sub{font-size:12px;fill:#4f5b55}
+.zone{fill:none;stroke:#c9d4cd;stroke-dasharray:4 4}.zl{font-size:10.5px;font-weight:650;letter-spacing:.08em;fill:#65746b}
+.h{font-size:13px;font-weight:650;fill:#101714}.m{font-size:11.5px;fill:#4f5b55}.n{font-size:18px;font-weight:650;fill:#101714;font-variant-numeric:tabular-nums}
+.nb{font-size:30px;font-weight:700;fill:#0b5d3a;font-variant-numeric:tabular-nums}.hl{font-weight:700;fill:#0b5d3a}.stamp{fill:none;stroke:#1f8a5a;stroke-width:2}.stamp.in{stroke-width:1;opacity:.55}.stw{font-size:24px;font-weight:800;letter-spacing:.14em;fill:#1f8a5a}.sts{font-size:10px;font-weight:800;letter-spacing:.24em;fill:#1f8a5a}
+.you{fill:#e8f0f8;stroke:#9bb7d4}.plain{fill:#fff;stroke:#c9d4cd}.rows{fill:#efe9ff;stroke:#b9a6f0}.ver{fill:#dff4e8;stroke:#9fd6b6}.bld{fill:#fdf6e3;stroke:#e2c98a}.lay{fill:#f6f8f7;stroke:#c9d4cd}
+.ln{stroke:#65746b;stroke-width:1.5;fill:none}.ln.d{stroke-dasharray:5 4}.hd{fill:#65746b}.dot{fill:#65746b}.ship{fill:#1f8a5a}
+.pill{fill:#fff;stroke:#dce5df}.pill.ok{fill:#dff4e8;stroke:#9fd6b6}.pt{font-size:11px;fill:#4f5b55}.pt.ok{fill:#0b5d3a;font-weight:600}
+.h.sm{font-size:12.5px}.okl{stroke:#1f8a5a}
+.ico{fill:none;stroke:#65746b;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+@media(prefers-color-scheme:dark){.card{fill:#111714;stroke:#34443a}.title,.h,.n{fill:#e9eeeb}.sub,.m,.pt{fill:#b6c3bc}.zone{stroke:#3a4a40}.zl{fill:#9cafa3}
+.you{fill:#14243a;stroke:#3f6a96}.plain{fill:#111714;stroke:#3a4a40}.rows{fill:#231d3a;stroke:#6b57b8}.ver{fill:#163829;stroke:#2f7a55}.bld{fill:#2e2614;stroke:#8a6f2c}.lay{fill:#18201c;stroke:#3a4a40}
+.ln{stroke:#9cafa3}.hd,.dot{fill:#9cafa3}.ship{fill:#4cc38a}.pill{fill:#111714;stroke:#34443a}.pill.ok{fill:#163829;stroke:#2f7a55}.pt.ok{fill:#8fe0b6}.nb,.hl{fill:#8fe0b6}.stamp{stroke:#4cc38a}.stw,.sts{fill:#4cc38a}.ico{stroke:#9cafa3}.okl{stroke:#4cc38a}}
+</style>
+<defs><marker id="tip-f" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto"><path class="hd" d="M0 1 L9 5 L0 9 z"/></marker></defs>
+<text class="title" x="24" y="34">One board. Every agent. Every machine.</text>
+<rect class="zone" x="24" y="54" width="792" height="228" rx="10"/>
+<text class="zl" x="38" y="76">IN PULLBOARD 0.9.0</text>
+<rect class="ver" x="40" y="92" width="502.6666666666667" height="84" rx="8"/>
+<g class="ico" transform="translate(52 105.26) scale(0.75)"><circle cx="9" cy="8.5" r="3"/><circle cx="17" cy="9.5" r="2.4"/><path d="M3.5 19c.8-3 3-4.6 5.5-4.6s4.7 1.6 5.5 4.6M15.5 14.6c2.2 0 4 1.3 4.8 3.9"/></g>
+<text class="h" x="80" y="119">Run a whole team of agents</text>
+<text class="m" x="80" y="138">Builders, verifiers and a coordinator.</text>
+<text class="m" x="80" y="153"><tspan class="hl">101</tspan> work items merged in one day · 7 Oct</text>
+<g transform="rotate(-6 446.66666666666674 134)"><rect class="stamp" x="382.66666666666674" y="107" width="128" height="54" rx="7"/><rect class="stamp in" x="387.66666666666674" y="112" width="118" height="44" rx="4"/><text class="stw" x="448.36666666666673" y="138" text-anchor="middle">LGTM</text><text class="sts" x="447.86666666666673" y="151" text-anchor="middle">SHIP IT</text></g>
+<rect class="you" x="554.6666666666667" y="92" width="245.33333333333334" height="84" rx="8"/><g class="ico" transform="translate(566.6666666666667 105.45) scale(0.75)"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/></g><text class="h" x="594.6666666666667" y="119">Your board, on your phone</text><text class="m" x="594.6666666666667" y="138">Answer what’s waiting, anywhere.</text><text class="m" x="594.6666666666667" y="153">Sealed: the relay can’t read it.</text>
+<rect class="rows" x="40" y="188" width="245.33333333333334" height="78" rx="8"/><g class="ico" transform="translate(52 201.45) scale(0.75)"><path d="M7 3h7l4 4v14H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"/><path d="M14 3v4h4M9 12h6M9 16h4"/></g><text class="h" x="80" y="215">Start from a blueprint</text><text class="m" x="80" y="234">Pick the one for your project,</text><text class="m" x="80" y="249">then approve its rules.</text>
+<rect class="bld" x="297.33333333333337" y="188" width="245.33333333333334" height="78" rx="8"/><g class="ico" transform="translate(309.33333333333337 201.45) scale(0.75)"><path d="M9 3v5M15 3v5M6.5 8h11v3.5a5.5 5.5 0 0 1-11 0Z"/><path d="M12 17v4"/></g><text class="h" x="337.33333333333337" y="215">Plug in any agent</text><text class="m" x="337.33333333333337" y="234">Keep Claude Code or Codex,</text><text class="m" x="337.33333333333337" y="249">and add any MCP client.</text>
+<rect class="lay" x="554.6666666666667" y="188" width="245.33333333333334" height="78" rx="8"/><g class="ico" transform="translate(566.6666666666667 201.82) scale(0.75)"><rect x="2.5" y="4" width="12" height="9" rx="1.5"/><path d="M6.5 16.5h4M8.5 13v3.5"/><rect x="15" y="8" width="6.5" height="11" rx="1.5"/><path d="M17.5 16.5h1.5"/></g><text class="h" x="594.6666666666667" y="215">Across your machines</text><text class="m" x="594.6666666666667" y="234">Pair a machine once. Its agents</text><text class="m" x="594.6666666666667" y="249">share your board, in one order.</text>
+</svg>
