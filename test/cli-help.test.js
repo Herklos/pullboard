@@ -175,7 +175,7 @@ test('help names come from the command declarations [C7,N37]', async (t) => {
   assert.equal(typeof helpDeclaration.buildHelp, 'function', 'help is built from declarations');
   const generated = helpDeclaration.buildHelp([...resultCommands(), 'future-command']);
   for (const name of resultCommands()) assert.ok(generated.commands[name], `${name} is derived`);
-  assert.deepEqual(generated.commands['future-command'].usages, ['pullboard future-command']);
+  assert.deepEqual(generated.commands['future-command']?.usages, ['pullboard future-command']);
   assert.equal(generated.overview, HELP.overview, 'a new declaration preserves the overview bytes');
   assert.equal(generated.all, HELP.all, 'a new declaration preserves the full-help bytes');
 
