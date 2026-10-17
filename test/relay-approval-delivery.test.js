@@ -599,3 +599,144 @@ test('elapsed fixture wall time never manufactures an approval expiry refusal [H
     'the live fixture clock accepts the actual native ten-minute expiry after elapsed work');
   await approve(chrome, request.context.id, request.command);
 });
+
+/** Register one more committed project; its real init publishes a sealed link card to the phone. */
+async function registerProject(box, name) {
+  const root = join(dirname(box.root), name);
+  mkdirSync(root);
+  for (const args of [['init', '-q', '-b', 'main'], ['-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-q', '-m', 'fixture base'],
+    ['remote', 'add', 'origin', `git@github.com:fixture/${name}.git`]]) {
+    assert.equal(spawnSync('git', args, { cwd: root, env: box.env }).status, 0);
+  }
+  const initialized = await cliCommand(root, box.env, ['init']).done;
+  assert.equal(initialized.code, 0, 'the new project registers through the actual init command');
+  return root;
+}
+
+let approvedLinkRun;
+
+/**
+ * Walkthrough-090 issue 15 once, shared by the two tests below: a paired phone, a new board
+ * "notes" whose link card waits on it, relay on --all running, one tap. The snapshot upload is
+ * held until the phone has rendered its notice, so the phone is observed before its key arrives.
+ */
+function approvedLinkScenario(t) {
+  approvedLinkRun ??= (async () => {
+    const box = await relayClientFixture(t);
+    const { chrome, native, machineFile } = await pairPhone(box, t);
+    box.providerState.repositories.push('notes');
+    const notes = await registerProject(box, 'notes');
+    const notesTitle = 'an item only on the newly approved notes board';
+    const note = cliCommand(notes, box.env, ['add', box.lane, notesTitle]);
+    native.push(note);
+    const added = await note.done;
+    assert.equal(added.code, 0, `the approved board has its own visible item: ${added.stderr}`);
+    const proposal = JSON.parse(readFileSync(machineFile, 'utf8')).approvals.find(entry => entry.root === notes);
+    assert.ok(proposal?.published, 'init publishes one sealed link card for notes');
+    const board = proposal.context.board;
+    const button = '#phone-approve-' + proposal.context.id;
+    await chrome.waitFor(`document.querySelector(${JSON.stringify(button)}) !== null`);
+
+    const run = cliCommand(box.root, box.env, ['relay', 'on', '--all', '--url', box.origin], 120_000, { json: false });
+    native.push(run);
+    let live = '';
+    run.child.stdout.on('data', chunk => { live += chunk; });
+    await waitFor(() => live.includes('waiting for phone approval: notes') || run.child.exitCode !== null,
+      'relay on --all reaches its wait for the phone or exits');
+    const waited = live.includes('waiting for phone approval: notes');
+    if (!waited) {
+      const early = await run.done;
+      return { waited, stdout: early.stdout, stderr: early.stderr, code: early.code };
+    }
+
+    await chrome.evaluate(`(() => {
+      const notice = document.querySelector('#relay-notice');
+      window.__noticeLog = [notice?.textContent ?? ''];
+      new MutationObserver(() => window.__noticeLog.push(notice.textContent))
+        .observe(notice, { childList: true, subtree: true, characterData: true });
+    })()`);
+    let held = false;
+    let release;
+    const released = new Promise(resolveRelease => { release = resolveRelease; });
+    box.beforeNextSnapshot(async () => { held = true; await released; });
+    await chrome.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await chrome.evaluate(`document.querySelector('[data-tab="shouts"]').click()`);
+    await chrome.waitFor(`view.tab === "shouts" && document.querySelector('[data-pane="items"]').hidden`);
+    const documentOrigin = await chrome.evaluate('performance.timeOrigin');
+    const authorizeBefore = box.calls.filter(call => call.path.endsWith('/authorize')).length;
+    await chrome.evaluate(`document.querySelector(${JSON.stringify(button)}).click()`);
+    await waitFor(() => held, 'the computer starts linking notes in the same run once the phone approves');
+    let noticeBeforeKey = null;
+    try {
+      await chrome.waitFor(`(document.querySelector('#relay-notice')?.textContent ?? '').includes(${JSON.stringify(board.slice(0, 8))})
+        || (document.querySelector('#relay-notice')?.textContent ?? '').includes('pair this browser')`);
+      noticeBeforeKey = await chrome.evaluate(`document.querySelector('#relay-notice').textContent`);
+    } finally { release(); }
+    const finished = await run.done;
+    const linkedAtExit = existsSync(join(notes, '.git/pullboard/relay.json'));
+    let opened = true;
+    try {
+      await chrome.waitFor(`document.querySelectorAll('#proj-list .proj.repo').length === 2
+        && Object.hasOwn(JSON.parse(localStorage.getItem('pullboard.relay.keys.v1') ?? '{}'), ${JSON.stringify(board)})`);
+    } catch { opened = false; }
+    // budget: observe the same bounded navigation transition as the independent mobile counter, without retrying approval.
+    try { await chrome.waitFor(`data?.root === ${JSON.stringify(board)} && document.querySelector('#proj-name')?.textContent === 'notes'
+      && document.body.innerText.includes(${JSON.stringify(notesTitle)})`, 6_000); } catch { /* The assertion below names a missed selection directly. */ }
+    const displayed = await chrome.evaluate(`({ root: data?.root, name: document.querySelector('#proj-name')?.textContent,
+      text: document.body.innerText })`);
+    const visibleItems = [];
+    for (const width of [390, 1280]) {
+      await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 844, deviceScaleFactor: 1, mobile: width === 390 });
+      visibleItems.push(await chrome.evaluate(`(() => {
+        const pane = document.querySelector('[data-pane="items"]');
+        const row = [...document.querySelectorAll('#chain [data-item]')].find(node => node.textContent.includes(${JSON.stringify(notesTitle)}));
+        const rect = row?.getBoundingClientRect();
+        return { width: innerWidth, tab: view.tab, visible: !pane.hidden && Boolean(rect && row.getClientRects().length && rect.height > 0 && rect.top < innerHeight && rect.bottom > 0) };
+      })()`));
+    }
+    const sameDocument = await chrome.evaluate('performance.timeOrigin') === documentOrigin;
+    const rawKey = readFileSync(join(box.env.PULLBOARD_HOME, 'relay-keys', board + '.key'), 'utf8').trim();
+    return {
+      waited, code: finished.code, stdout: finished.stdout, stderr: finished.stderr, linkedAtExit, opened, noticeBeforeKey,
+      noticeLog: await chrome.evaluate('window.__noticeLog'), rawKey, targetBoard: board, notesTitle, displayed, visibleItems, sameDocument,
+      taps: box.calls.filter(call => call.path.endsWith('/authorize')).length - authorizeBefore,
+    };
+  })();
+  return approvedLinkRun;
+}
+
+test('an approved link opens on the phone without another command [H17,E16]', {
+  skip: !findChromeExecutable() && 'Chrome is not installed',
+}, async t => {
+  const run = await approvedLinkScenario(t);
+  assert.equal(run.waited, true, `relay on --all waits for the phone's link card: ${run.stdout}`);
+  assert.equal(run.taps, 1, 'one phone tap authorizes the link');
+  assert.equal(run.code, 0, `the waiting run finishes cleanly: ${run.stderr}`);
+  assert.equal(run.linkedAtExit, true, 'the same run links notes; no later command is needed');
+  assert.equal(run.opened, true, 'the phone unwraps the notes key and lists the board with no other command');
+  assert.equal(run.displayed.root, run.targetBoard, 'the phone selects the newly approved board, rather than only listing it');
+  assert.equal(run.displayed.name, 'notes', 'the visible project heading names the approved notes board');
+  assert.ok(run.displayed.text.includes(run.notesTitle), "the approved board's own item is visible");
+  assert.equal(run.sameDocument, true, 'approval keeps the same browser document');
+  for (const result of run.visibleItems) {
+    assert.equal(result.tab, 'items', `${result.width}px approval opens Items after Shouts`);
+    assert.equal(result.visible, true, `${result.width}px approved item is visible on screen`);
+  }
+  assert.equal(run.displayed.text.includes('private cleanup fixture item'), false, "the previously open board's item is not left on screen");
+  assert.match(run.noticeBeforeKey, /approved; waiting for the computer to send this phone its key\./u,
+    'before the key arrives the phone says it is on the way');
+  assert.equal(run.noticeLog.some(text => text.includes('pair this browser')), false,
+    `the phone that approved is never told to pair again: ${JSON.stringify(run.noticeLog)}`);
+});
+
+test('the computer prints linked with the board name [H17,E16]', {
+  skip: !findChromeExecutable() && 'Chrome is not installed',
+}, async t => {
+  const run = await approvedLinkScenario(t);
+  const lines = run.stdout.split('\n');
+  const waiting = lines.findIndex(line => line.startsWith('waiting for phone approval: notes; '));
+  assert.ok(waiting >= 0, `the run says which board waits for the phone: ${run.stdout}`);
+  assert.equal(lines.filter(line => line === 'linked: notes').length, 1, `the run prints linked: notes once: ${run.stdout}`);
+  assert.ok(lines.indexOf('linked: notes') > waiting, 'linked: notes follows the phone tap in the same run');
+  assert.equal(run.stdout.includes(run.rawKey) || run.stderr.includes(run.rawKey), false, 'the board key is never printed');
+});
