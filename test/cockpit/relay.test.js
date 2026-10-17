@@ -2056,6 +2056,9 @@ test('the star line shows once to a signed-in person and stays dismissed [N26]',
   try {
     chrome = await openSnapshotChrome(executable, 'about:blank', profile);
     await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: star.script });
+    // Each account read the star line makes itself. Once the page has read the account, a read from the line reaches
+    // fetch inside the line's own call, so its stack names starLine (#817).
+    await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: "(() => { const fetchNow = window.fetch.bind(window); window.__starReads = 0; window.fetch = (input, init) => { const address = new URL(String(typeof input === 'string' ? input : input.url), location.href); if (address.origin === location.origin && address.pathname === '/api/v1/boards' && /starLine/.test(new Error().stack || '')) window.__starReads += 1; return fetchNow(input, init); }; })()" });
     const page = starSteps(chrome, star);
     star.state.account = [linkedBoard]; // Even a linked list that answered a signed-out page would show nothing there.
     await chrome.send('Page.navigate', { url: star.origin + '/out' }).then(() => chrome.waitFor("location.pathname === '/out' && !document.querySelector('#local-note').hidden"));
@@ -2070,6 +2073,7 @@ test('the star line shows once to a signed-in person and stays dismissed [N26]',
     assert.equal(await page.shown(), null, 'a signed-in person with an empty linked list sees no star line');
     await page.open('/in-local', 'yes', [linkedBoard]); // The person links this machine's board: the page reads it locally.
     assert.deepEqual(await page.shown(), expected, 'a linked board read locally shows one line, one plain sentence, linking to the repository');
+    assert.equal(await chrome.stable('window.__starReads'), 0, 'the line learns from the read of the account the page already made, and makes no extra read of its own');
     assert.equal(star.requests.get('/star-transport.js'), undefined, 'no relay client loads while every linked board is local');
     for (const width of [1280, 390]) await proofShot(chrome, 'star-line', width);
     await page.dismiss();
