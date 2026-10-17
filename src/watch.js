@@ -316,8 +316,10 @@ export async function followBoard({ file, mainRoot, commonDir, config, isMain, r
  * Run pullboard watch for one checkout until Ctrl-C (SIGINT or SIGTERM), or until `io.signal` aborts.
  * Each line is its own document, so --json never adds an end-of-command envelope.
  */
-export async function watchCommand({ io, values, positionals, info, config, file, mainRoot, isMain, runCommand }) {
-  if (positionals.length) throw new Refused('USAGE', 'pullboard watch takes flags only, such as pullboard watch --to core; run pullboard help watch');
+export async function watchCommand({ io, values, words, ctx, primaryCheckoutRoot, runCommand }) {
+  const { info, config, file, allowSchemaUpgrade: isMain } = ctx;
+  const mainRoot = primaryCheckoutRoot(info) ?? info.root;
+  if (words.some((word) => word !== undefined)) throw new Refused('USAGE', 'pullboard watch takes flags only, such as pullboard watch --to core; run pullboard help watch');
   const start = watchStart(file);
   const options = watchOptions(values, { config, agents: start.agents });
   const abort = new AbortController();

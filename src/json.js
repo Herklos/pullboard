@@ -36,6 +36,7 @@ export const JSON_SHAPES = {
     stats: shape({ stats: 'object' }),
     status: shape({ me: 'object', mine: 'array', stats: 'object', reviewQueue: 'object', unread: 'number', relay: 'object' }),
     doctor: shape({ problems: 'array' }),
+    health: shape({ asOf: 'string', thresholds: 'object', stuck: 'array', waiting: 'array' }),
     skills: shape({ updated: 'array', current: 'array', customized: 'array' }),
     inbox: shape({ shouts: 'array' }),
     decisions: shape({ decisions: 'array' }),
