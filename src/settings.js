@@ -26,6 +26,13 @@ export function loadMachineSettings() {
     throw new Refused('BAD_MACHINE_SETTINGS', `gate.browserByLaunch in ${file} must be true or false`);
   }
   validateGateQueue(value, file);
+  if (value.view !== undefined && (!value.view || typeof value.view !== 'object' || Array.isArray(value.view)
+    || (value.view.background !== undefined && typeof value.view.background !== 'boolean'))) {
+    throw new Refused('BAD_MACHINE_SETTINGS', `view in ${file} must be an object whose background is true or false; fix it before running Pullboard`);
+  }
+  if (value.relay?.offerAtInit !== undefined && typeof value.relay.offerAtInit !== 'boolean') {
+    throw new Refused('BAD_MACHINE_SETTINGS', `relay.offerAtInit in ${file} must be true or false`);
+  }
   if (value.gate?.memoryFloorMB !== undefined && (!Number.isSafeInteger(value.gate.memoryFloorMB) || value.gate.memoryFloorMB < 0)) {
     throw new Refused('BAD_MACHINE_SETTINGS', `gate.memoryFloorMB in ${file} must be a whole number of megabytes, 0 or more; fix it before running Pullboard`);
   }
@@ -66,12 +73,31 @@ export function browserByLaunchEnabled() {
 }
 
 /**
+ * Whether init and resume keep a view running in the background [H5,N26]. Unlike the gate's
+ * settings this is on by default: pullboard.dev can only open a computer's boards while its view
+ * runs, and a newcomer should never need a command for that. Only `"view": { "background": false }`
+ * turns it off.
+ */
+export function viewBackgroundEnabled() {
+  return loadMachineSettings().view?.background !== false;
+}
+
+/**
  * The free-memory floor, in megabytes, below which the machine gate pool holds its queue, or null
  * when the hold is off. Gate and queue behavior is off by default, the person's rule, so an absent
  * floor keeps today's admission by slots alone.
  */
 export function memoryFloorMB() {
   return loadMachineSettings().gate?.memoryFloorMB ?? null;
+}
+
+/**
+ * Whether init asks the person once to share this computer's boards with their phone [H5,H17].
+ * On unless the machine settings set relay.offerAtInit to false: the person asked for sharing to
+ * be one Enter for new people, and a person who never wants the question turns it off here.
+ */
+export function relayOfferEnabled() {
+  return loadMachineSettings().relay?.offerAtInit !== false;
 }
 
 /** Atomically replace machine settings without exposing a partial JSON file. */
