@@ -297,12 +297,12 @@ test('a repeated cause becomes a draft row with its proof [D1,D3,S1]', () => {
   writeFileSync(join(box.repo, 'src', 'page.js'), '// TODO: escape the title\nexport const page = 1;\n');
   box.git('add', 'src/page.js');
   box.git('commit', '-q', '-m', 'chore: add the page');
-  const bad = box.git('rev-parse', 'HEAD').stdout.trim();
+  const bad = box.git('rev-parse', 'HEAD');
   writeFileSync(join(box.repo, 'src', 'page.js'), 'export const page = 1;\n');
   writeFileSync(join(box.repo, 'fixed.txt'), 'fixed\n');
   box.git('add', 'src/page.js', 'fixed.txt');
   box.git('commit', '-q', '-m', 'chore: escape the title');
-  const fix = box.git('rev-parse', 'HEAD').stdout.trim();
+  const fix = box.git('rev-parse', 'HEAD');
 
   const board = history(box.file);
   const items = ['Work one', 'Work two', 'Product one', 'Product two', 'Both one', 'Both two', 'Lonely'].map(board.add);

@@ -1024,7 +1024,7 @@ test('[A1] every catalog command and subcommand has a real CLI exercise', () => 
     json(source, source.repo, 'submit', [String(caused.item_id)]);
     json(source, source.repo, 'reopen', [String(caused.item_id), '--note', 'the bar cites the wrong row', '--cause', 'row:G1']);
   }
-  const red = source.git(source.repo, 'rev-parse', 'HEAD').stdout.trim();
+  const red = source.git(source.repo, 'rev-parse', 'HEAD');
   mkdirSync(join(source.repo, 'app'), { recursive: true });
   writeFileSync(join(source.repo, 'app', 'fixed.txt'), 'fixed\n');
   source.git(source.repo, 'add', 'app/fixed.txt');
