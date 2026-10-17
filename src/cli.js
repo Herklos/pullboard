@@ -17,7 +17,7 @@ import { doctrineHistory, loadDoctrine } from './doctrine.js';
 import { checkRulesAt, doctrineReport, hasSubmitRules, holdDoctrine, ruleLine } from './doctrine-checks.js';
 import { agentSessionDigest, requirePersonChannel } from './person.js';
 import { bindLocalSession, localSessionMatches } from './agent-session.js';
-import { decisionProjection, handAnsweredQuestions, planRowApply, prepareRowDecisions, restoreRowApply, writeRowApply } from './row-decisions.js';
+import { decisionAnswer, decisionProjection, handAnsweredQuestions, planRowApply, prepareRowDecisions, restoreRowApply, writeRowApply } from './row-decisions.js';
 import { digestOf, gateReport, refuseSandboxBlocked, runGate, runProfiledShell, runSubmitGate, submitGateReport, timingDigest, withGateSlot } from './gate.js';
 import { checkNeedsBrowser } from './browser-admission.js';
 import { bareWorktreeFinding, codeIsFromMain, contains, differFromHead, git, gitChildEnv, headCommit, headTree, invalidateGitFacts, isClean, mainCheckout, patchId, repoInfo, resolveCommit, tryGit, untracked, withGitFacts } from './git.js';
@@ -3332,11 +3332,13 @@ async function specCommand(io, { first, second, rest, values }) {
       const row = spec.rows.find((entry) => entry.id === second);
       if (!row) throw new Refused('NO_ROW', `${second} is not a row in ${ctx.config.spec}`, 'list the pending questions with pullboard spec --json, then answer one of them');
       if (row.status !== 'pending') throw new Refused('SPEC_ANSWER', `${second} is ${row.status}, not a pending question`, `read it with pullboard spec show ${second}; only a pending row takes an answer`);
-      const { text, answer } = answerQuestion(row.text, given, second);
-      const records = prepareRowDecisions(ctx.info.root, ctx.config, { ids: [second], decision: 'approve', text, answer, on: new Date().toISOString(), commit: headCommit(ctx.info.root) ?? '' });
+      const { text } = answerQuestion(row.text, given, second);
+      const records = prepareRowDecisions(ctx.info.root, ctx.config, { ids: [second], decision: 'approve', text, on: new Date().toISOString(), commit: headCommit(ctx.info.root) ?? '' });
       const decisions = await ordered(ctx, board, 'recordRowDecisions', [{ agentId: store.PERSON, channel: io.personChannel ?? 'terminal', decisions: records }]);
-      io.result?.({ decisions });
-      decisions.forEach((record) => io.say(`${record.id}: answered ${record.answer}, pending apply`));
+      // The answer reported is read back from the signed text, never carried as a field of its own.
+      const answered = decisions.map((record) => ({ ...record, answer: decisionAnswer(record) }));
+      io.result?.({ decisions: answered });
+      answered.forEach((record) => io.say(`${record.id}: answered ${record.answer}, pending apply`));
       return 0;
     });
   }

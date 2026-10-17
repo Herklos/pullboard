@@ -2,7 +2,8 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { loadDoctrine } from './doctrine.js';
-import { loadSpec, SIGNOFFS_FILE } from './spec.js';
+import { answerFromText } from './blueprints.js';
+import { loadSpec, parseSpec, SIGNOFFS_FILE } from './spec.js';
 import { defaultPrincipal, hasSignerFile, signRowDecision, verifyRowDecision } from './signature.js';
 import { Refused } from './refused.js';
 
@@ -24,10 +25,10 @@ function decisionRows(root, config, ids) {
 
 /**
  * Capture all source text and signatures before recording any decision on the board. An answer to
- * a pending question is an approval of its answered text that also carries the answer, signed with
- * the rest of the record, so spec show and the view can say what the person chose.
+ * a pending question is an approval of its answered text and carries no separate answer field: the
+ * answer shown is read back from the signed source and text by decisionAnswer.
  */
-export function prepareRowDecisions(root, config, { ids, decision, reason = '', text: proposedText, answer, by, on, commit = '' }) {
+export function prepareRowDecisions(root, config, { ids, decision, reason = '', text: proposedText, by, on, commit = '' }) {
   if (!ids.length) throw new Refused('USAGE', 'name rows: pullboard spec approve <ids> or spec decline <ids> --reason "why"');
   if (!['approve', 'decline'].includes(decision)) throw new Refused('ROW_DECISION', 'use pullboard spec approve or decline');
   if (decision === 'decline' && (!reason.trim() || /[\r\n|]/u.test(reason))) throw new Refused('ROW_DECISION', 'a decline needs a one-line reason without a field separator; use --reason "why"');
@@ -39,8 +40,7 @@ export function prepareRowDecisions(root, config, { ids, decision, reason = '', 
     const text = decision === 'approve' ? proposedText?.trim() ?? row.text : row.text;
     const replacement = source.replace(/\[([a-z]+)(,\s*[a-z]+)?\]/u, (_, old, tier = '') => `[${status}${tier}]`)
       .replace(/(\]\s+)([^|]*)(?=\s*\||$)/u, (_, prefix, old) => `${prefix}${text}${old.match(/\s+$/u)?.[0] ?? ''}`);
-    const record = { version: 1, type: 'row-decision', kind, file, id: row.id, source, replacement, text, decision, reason: decision === 'decline' ? reason.trim() : '', by: principal, on, commit, note: '',
-      ...(answer !== undefined ? { answer } : {}) };
+    const record = { version: 1, type: 'row-decision', kind, file, id: row.id, source, replacement, text, decision, reason: decision === 'decline' ? reason.trim() : '', by: principal, on, commit, note: '' };
     return signed ? signRowDecision(root, record) : record;
   });
 }
@@ -51,13 +51,33 @@ export function pendingRowDecision(records, row, kind) {
     && (row.text === record.text || row.text === record.source.match(/\]\s+([^|]*)(?:\||$)/u)?.[1]?.trim()));
 }
 
+/**
+ * The answer a decision gives a pending question, read back from the signed source row and the
+ * signed text, or null for any other decision. A record's other fields, such as an unsigned
+ * "answer" written into the board by hand, are never read [S19,P6].
+ *
+ * @param {any} record
+ * @returns {string | null}
+ */
+export function decisionAnswer(record) {
+  if (record.decision !== 'approve' || record.kind !== 'spec') return null;
+  const [pending] = parseSpec(`## Decision\n${record.source}\n`).rows;
+  return pending?.status === 'pending' ? answerFromText(pending.text, record.text) : null;
+}
+
+/** Name a pending decision: the answer it gives, or approved or declined. */
+function decisionStage(record) {
+  const answer = decisionAnswer(record);
+  return answer !== null ? `answered ${answer}` : record.decision === 'approve' ? 'approved' : 'declined';
+}
+
 /** Add pending status to existing rows without replacing their current file-backed status. */
 export function decisionProjection(records, row, kind) {
   const decision = pendingRowDecision(records, row, kind);
   if (decision) return {
     ...row,
     decision,
-    stage: `${decision.answer !== undefined ? `answered ${decision.answer}` : decision.decision === 'approve' ? 'approved' : 'declined'}, pending apply`,
+    stage: `${decisionStage(decision)}, pending apply`,
     ...(decision.decision === 'decline' ? { reason: decision.reason } : {}),
   };
   const appliedDecline = records.find((record) => record.kind === kind && record.id === row.id && record.applied

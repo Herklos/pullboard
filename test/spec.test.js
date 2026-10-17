@@ -503,13 +503,14 @@ test('a drafted row reads as draft [S1,C7]', (t) => {
   ], 'both an existing pending question and a newly drafted row remain approvable');
 });
 
-/** Four blueprint questions as blueprint add writes them: the default answer, then every choice. */
+/** Blueprint questions as blueprint add writes them: the default answer, then every choice; B5 lists 13 parts. */
 const QUESTION_SPEC = `${SPEC}
 ## B · Blueprint
 - B1 [pending, must] Which store holds the data: SQLite. Choices: SQLite, Postgres. | gate: review
 - B2 [pending, must] Which store holds the cache: SQLite. Choices: SQLite, Postgres. | gate: review
 - B3 [pending, must] Which store holds the logs: SQLite. Choices: SQLite, Postgres. | gate: review
 - B4 [pending, must] Which store holds the files: SQLite. Choices: SQLite, Postgres. | gate: review
+- B5 [pending, must] Which region hosts it: r1. Choices: r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13. | gate: review
 `;
 
 /** Run one CLI command in a box with an environment of the test's choosing. */
@@ -554,6 +555,22 @@ test("spec answer records the person's choice [S1,E3,P6]", (t) => {
   assert.equal(record.by, 'person');
   assert.equal(readFileSync(file, 'utf8'), before, 'the answer waits for the coordinator apply, as an approval does');
   assert.match(box.run('show', 'B1').stdout, /answered Postgres, pending apply/u);
+  const board = new DatabaseSync(join(box.root, '.git', 'pullboard', 'board.sqlite'));
+  try {
+    const stored = JSON.parse(board.prepare("SELECT meta_value FROM board_meta WHERE meta_key='row_decisions'").get().meta_value);
+    board.prepare("UPDATE board_meta SET meta_value=? WHERE meta_key='row_decisions'")
+      .run(JSON.stringify(stored.map((entry) => (entry.id === 'B1' ? { ...entry, answer: 'Tampered' } : entry))));
+  } finally { board.close(); }
+  const tampered = box.run('show', 'B1');
+  assert.match(tampered.stdout, /answered Postgres, pending apply/u, 'the answer shown is read back from the signed text');
+  assert.doesNotMatch(tampered.stdout, /Tampered/u, 'an unsigned answer field never changes what is shown');
+
+  const oversized = box.run('answer', 'B5', 'r2', '--json');
+  assert.equal(oversized.status, 1, oversized.stdout + oversized.stderr);
+  const bound = JSON.parse(oversized.stdout).error;
+  assert.equal(bound.code, 'SPEC_ANSWER_CHOICES', 'more than 12 choice parts is refused by name');
+  assert.match(bound.message, /B5 lists 13 choice parts, more than the 12/u);
+  assert.match(bound.next, /pullboard spec approve B5 --text/u);
 
   const free = box.run('answer', 'B2', 'Redis on the host');
   assert.equal(free.status, 0, free.stdout + free.stderr);
