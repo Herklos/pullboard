@@ -65,6 +65,8 @@ import {
   unmetRows,
 } from './spec.js';
 import { answerQuestion, bundledBlueprints, landBlueprint, planBlueprint, readBlueprint, repoAnswers, saveBlueprint } from './blueprints.js';
+import { fitCommand } from './blueprint-fit-command.js';
+import { fitSummary, readFitBatch } from './blueprint-fit.js';
 import { blueprintStarterNote, combinedSummary, initBlueprintLines, initBlueprintResult, installedBlueprints, landEach, readBlueprints, sharedRowLines } from './blueprint-set.js';
 import { briefFiles } from './brief.js';
 import { commitFirst, commitOwnerLines, commitOwners, coordinatorInbox, coordinatorInboxLines, inboxFirst } from './resume.js';
@@ -3009,6 +3011,7 @@ function workCommands(io, args) {
   };
   return {
     blueprint: () => act(async (ctx, board, me) => {
+      if (first === 'fit') return await fitCommand(ctx, board, me, 'propose', [second, ...rest].filter((value) => value !== undefined), values, { ordered, whoAmI });
       const references = [...(second ? [second] : []), ...(values.blueprint ?? [])];
       if (first !== 'add' || !references.length || rest.length) throw new Refused('USAGE', `pullboard blueprint add <name or file> [--blueprint <name or file>]... | save [file]; bundled: ${bundledBlueprints().join(', ')}`);
       // Several blueprints land in the order given, as one result; one lands exactly as before (#720).
@@ -3558,6 +3561,7 @@ async function specCommand(io, { first, second, rest, values }) {
     decline: ['reason'],
     answer: [],
     apply: [],
+    fit: ['text', 'reason'],
   }[first ?? '--json'];
   if (!commandFlags) throw new Refused('USAGE', 'use pullboard spec --json | check | view | show <id> | unmet [--must] | draft "<text>" | signoff <ids> | approve <ids> | decline <ids> --reason "why" | answer <id> "<choice or text>" | apply');
   const allowedFlags = [...new Set([...commandFlags, 'json'])];
@@ -3566,6 +3570,9 @@ async function specCommand(io, { first, second, rest, values }) {
       const next = flag === 'must' ? 'use --must with spec unmet' : 'use a flag accepted by this spec command';
       throw new Refused('FLAG_NOT_ALLOWED', `spec ${first ?? '--json'} does not take --${flag}; ${next}`);
     }
+  }
+  if (first === 'fit') {
+    return await withBoard(ctx, async (board) => await fitCommand(ctx, board, null, second ?? 'list', rest, values, { ordered, whoAmI }));
   }
   const spec = loadSpec(ctx.info.root, ctx.config);
   if (!spec.exists) throw new Refused('NO_SPEC', `no ${ctx.config.spec}; run: pullboard init`);
@@ -3750,8 +3757,10 @@ async function specCommand(io, { first, second, rest, values }) {
         { id, status, tier, text, gate, serves, signers, section, line, file: source ?? file,
           ...(from === undefined ? {} : { source: from }), ...(origin ? { origin, version, reason } : {}) }
       )));
-      io.result({ rows });
+      const fit = readFitBatch(ctx.info.commonDir, { isMain: ctx.info.isMain, channel: io.personChannel });
+      io.result({ rows, ...(fit.proposals.length ? { fit: fit.proposals, fitBatch: fit.batch } : {}) });
     } else messages.forEach((message) => io.say(message));
+    if (!values.json) fitSummary(readFitBatch(ctx.info.commonDir, { isMain: ctx.info.isMain, channel: io.personChannel })).forEach((message) => io.say(message));
     return errors ? 1 : 0;
   }
   if (first === 'signers' && second === 'add') {

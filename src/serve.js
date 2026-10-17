@@ -7,7 +7,7 @@
  * It listens on the loopback address only and answers nothing without its own Host, and no board without the
  * session's secret, so another site in the browser cannot reach it. Besides its own page, it answers one other origin,
  * the hosted page at https://app.pullboard.dev, which gets the secret by a round trip that only ever returns there.
- * It opens no outbound connection (P5).
+ * Idle reads open no outbound connection (P5); an explicit person sign-in reuses the existing relay linking flow.
  */
 import { spawnSync } from 'node:child_process';
 import {
@@ -58,6 +58,8 @@ import {
 } from './projects.js';
 import { fetchLocal } from './local-fetch.js';
 import { Refused } from './refused.js';
+import { refusalDocument } from './json.js';
+import { relayLinkAvailability } from './relay.js';
 import { personNeeds } from './needs.js';
 import { projectRowDecisions } from './row-decisions.js';
 import { loadSpec } from './spec.js';
@@ -445,6 +447,9 @@ export async function serveView({ port = 0, secret = randomBytes(18).toString('b
   // initialize, and use the real CLI entry point without adding a second move implementation.
   const { createLocalApiHandler } = await import('./api.js');
   const { main } = await import('./cli.js');
+  const { startViewSignIn, viewSignInStatus, viewSignInPairingNavigation, cancelViewSignIn } = await import('./relay-setup.js');
+  const signIns = new Set();
+  const signInLifetime = new AbortController();
   const apiHandler = createLocalApiHandler({ secret, getPort: () => bound, runCommand: main, stateDetail: 'summary',
     allowedOrigins: [HOSTED_ORIGIN], ...(projectRoot === undefined ? {} : { scope: { projectRoot } }) });
   const reply = (res, code, type, body) => {
@@ -463,6 +468,66 @@ export async function serveView({ port = 0, secret = randomBytes(18).toString('b
     res.setHeader('x-frame-options', 'DENY');
     return reply(res, 200, 'text/html; charset=utf-8', '<!doctype html><meta charset="utf-8"><title>Opening Pullboard</title><script>if (window.top === window.self) location.replace(' + JSON.stringify(destination).replace(/</g, '\\u003c') + ');</script>');
   };
+  /** The invitation is a local read: it neither signs in nor opens a relay connection. */
+  function sharingAvailable() {
+    if (projectRoot !== undefined) return false;
+    const projects = listApiProjects();
+    return projects.length > 0 && projects.every(project => {
+      const state = relayLinkAvailability(project.root);
+      return !state.linked && !state.unlinking;
+    });
+  }
+
+  /** Read one bounded JSON object; no arbitrary CLI words or relay address enter this route. */
+  async function sharingBody(req) {
+    if (!/^application\/json(?:\s*;\s*charset=utf-8)?$/iu.test(String(req.headers['content-type'] ?? ''))) {
+      throw new Refused('VIEW_SIGN_IN_JSON', 'send a JSON object to this view');
+    }
+    let length = 0;
+    const chunks = [];
+    for await (const chunk of req) {
+      length += chunk.length;
+      if (length <= 4096) chunks.push(chunk);
+    }
+    if (length > 4096) throw new Refused('VIEW_SIGN_IN_JSON', 'send only the sign-in action and its intent id');
+    let body;
+    try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { /* Refuse below. */ }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Refused('VIEW_SIGN_IN_JSON', 'send a JSON object to this view');
+    return body;
+  }
+
+  /** Run only the existing person-channel adapter, with per-view intent ownership and header authentication. */
+  async function sharingRequest(req, res, url) {
+    const given = Buffer.from(String(req.headers['x-pullboard-key'] ?? ''));
+    if (given.length !== key.length || !timingSafeEqual(given, key) || url.search || req.headers.authorization !== undefined) {
+      return json(res, 403, refusalDocument(new Refused('VIEW_SIGN_IN_AUTH', 'open the view link and send its session key in the x-pullboard-key header only')));
+    }
+    try {
+      if (req.method === 'GET') return json(res, 200, { version: 1, available: sharingAvailable() });
+      if (req.method !== 'POST') return json(res, 405, refusalDocument(new Refused('VIEW_SIGN_IN_METHOD', 'use GET for the invitation or a JSON POST for sign-in')));
+      if (projectRoot !== undefined) throw new Refused('VIEW_SIGN_IN_SCOPE', 'open the full machine view to link every registered board');
+      const body = await sharingBody(req);
+      if (body.action === 'start' && Object.keys(body).length === 1) {
+        const instructions = await startViewSignIn({ signal: signInLifetime.signal });
+        signIns.add(instructions.intentId);
+        return json(res, 200, { version: 1, ...instructions });
+      }
+      if (!['status', 'cancel', 'pairing'].includes(body.action) || Object.keys(body).some(name => !['action', 'intentId'].includes(name))
+        || !signIns.has(body.intentId)) throw new Refused('VIEW_SIGN_IN_UNKNOWN', 'start sign-in in this view before reading or stopping it');
+      if (body.action === 'pairing') {
+        const destination = viewSignInPairingNavigation(body.intentId).url.replace(/[&<>"']/gu, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
+        return reply(res, 200, 'text/html; charset=utf-8', '<!doctype html><meta charset="utf-8"><a href="' + destination + '">Continue device pairing</a>');
+      }
+      const status = body.action === 'cancel' ? await cancelViewSignIn(body.intentId) : viewSignInStatus(body.intentId);
+      // Names and reasons are public progress; machine paths remain on this computer.
+      const boards = status.boards.map(({ root, ...board }) => board);
+      return json(res, 200, { version: 1, ...status, boards });
+    } catch (error) {
+      const refusal = error instanceof Refused ? error : new Refused('VIEW_SIGN_IN_FAILED', 'sign-in could not finish; check this view and try again');
+      return json(res, 400, refusalDocument(refusal));
+    }
+  }
+
   const server = createServer(async (req, res) => {
     // A request line no URL parser accepts cannot carry the secret, so it gets the same 403, and it
     // must not be able to stop the server.
@@ -476,7 +541,7 @@ export async function serveView({ port = 0, secret = randomBytes(18).toString('b
     // API refuses another Host in its own words.
     const isOwnHost = req.headers.host === `${LOOPBACK}:${bound}` || req.headers.host === `localhost:${bound}`;
     if (!isOwnHost) {
-      if (url.pathname.startsWith('/api/') && req.method !== 'OPTIONS') return apiHandler(req, res);
+      if (url.pathname.startsWith('/api/') && url.pathname !== '/api/v1/view-link' && req.method !== 'OPTIONS') return apiHandler(req, res);
       return json(res, 403, { error: 'this view answers only at 127.0.0.1 or localhost on its own port: open the link pullboard view printed' });
     }
     // A browser names the page a request comes from; the view answers its own page and the hosted one, nothing else.
@@ -515,6 +580,7 @@ export async function serveView({ port = 0, secret = randomBytes(18).toString('b
       if (hosted && (url.searchParams.has('k') || req.headers.authorization !== undefined || req.headers['x-pullboard-key'] === undefined)) {
         return json(res, 403, { error: 'from https://app.pullboard.dev, send the session secret in the x-pullboard-key header only' });
       }
+      if (url.pathname === '/api/v1/view-link') return sharingRequest(req, res, url);
       return apiHandler(req, res);
     }
     const given = Buffer.from(String(req.headers['x-pullboard-key'] ?? url.searchParams.get('k') ?? ''));
@@ -552,7 +618,17 @@ export async function serveView({ port = 0, secret = randomBytes(18).toString('b
         ready({
           url: `http://${LOOPBACK}:${bound}/?k=${secret}`,
           port: bound,
-          close: () => new Promise((closed) => { apiHandler.close(); server.close(() => closed()); server.closeIdleConnections(); }),
+          close: async () => {
+            signInLifetime.abort();
+            await Promise.all([...signIns].map(async intentId => {
+              // An in-flight linking batch cannot be rolled back. Wait until core can cleanly stop its pairing stage.
+              try {
+                while (viewSignInStatus(intentId).state === 'linking') await new Promise(done => setTimeout(done, 100));
+                await cancelViewSignIn(intentId);
+              } catch (error) { if (!(error instanceof Refused) || error.code !== 'VIEW_SIGN_IN_UNKNOWN') throw error; }
+            }));
+            await new Promise((closed) => { apiHandler.close(); server.close(() => closed()); server.closeIdleConnections(); });
+          },
         });
       });
     };
