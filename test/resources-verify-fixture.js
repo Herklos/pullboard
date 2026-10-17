@@ -27,7 +27,11 @@ export function checkProject(box) {
   runFixtureGit(['add', '-A'], { cwd: repo, env: box.env });
   runFixtureGit(['-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Resource fixture', '-c', 'user.email=resource@example.invalid', 'commit', '-q', '-m', 'fixture: initialize board'], { cwd: repo, env: box.env });
   const base = runFixtureGit(['rev-parse', 'HEAD'], { cwd: repo, env: box.env });
-  writeFileSync(join(repo, 'test/cpu-check.test.js'), `import { writeFileSync } from 'node:fs';\nimport { test } from 'node:test';\ntest('item check marker', () => writeFileSync('item-check-started', 'started'));\ntest('submit check marker', () => writeFileSync('submit-check-started', 'started'));\n`);
+  const markerDelayText = process.env.PULLBOARD_TEST_RESOURCE_MARKER_DELAY_MS ?? '0';
+  assert.ok(markerDelayText === '0' || markerDelayText === '15000',
+    'PULLBOARD_TEST_RESOURCE_MARKER_DELAY_MS must be 0 or 15000');
+  const markerDelayMs = Number(markerDelayText);
+  writeFileSync(join(repo, 'test/cpu-check.test.js'), `import { writeFileSync } from 'node:fs';\nimport { test } from 'node:test';\nconst delay = ${markerDelayMs};\nconst mark = async path => { if (delay) await new Promise(resolve => setTimeout(resolve, delay)); writeFileSync(path, 'started'); };\ntest('item check marker', () => mark('item-check-started'));\ntest('submit check marker', () => mark('submit-check-started'));\n`);
   runFixtureGit(['add', 'test/cpu-check.test.js'], { cwd: repo, env: box.env });
   runFixtureGit(['-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Resource fixture', '-c', 'user.email=resource@example.invalid', 'commit', '-q', '-m', 'test: add CPU check'], { cwd: repo, env: box.env });
   return { repo, base };

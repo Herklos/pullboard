@@ -227,10 +227,14 @@ const HELP_GROUPS = [
   ['See', ['status', 'view', 'log']],
 ];
 
+// The add example runs as pasted on a board init just made, which has no web lane and no G1 row (#721).
+const ADD_EXAMPLE = ['pullboard lane add web --owns src/web', 'pullboard spec draft "A person can upload a page"',
+  'pullboard add web "Upload page" --specs G1'].join('\n');
+
 const HELP_EXAMPLES = {
   tour: 'pullboard tour', init: 'pullboard init --blueprint web-app', worktree: 'pullboard worktree web --model "my-model"',
   join: 'pullboard join web --model "my-model"', resume: 'pullboard resume',
-  add: 'pullboard add web "Upload page" --specs G1', list: 'pullboard list web', show: 'pullboard show 12',
+  add: ADD_EXAMPLE, list: 'pullboard list web', show: 'pullboard show 12',
   claim: 'pullboard claim 12', submit: 'pullboard submit 12', 'next --verify': 'pullboard next --verify',
   fact: 'pullboard fact 12 measurement "The check passes in 8 seconds"',
   why: 'pullboard why 12',
