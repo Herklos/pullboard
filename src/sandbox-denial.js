@@ -50,9 +50,69 @@ function tapScalar(value) {
   return /^[A-Z_]+$/u.test(value) ? value : null;
 }
 
-/**
- * Scan complete lines with bounded TAP state so assertion messages cannot impersonate OS codes.
- * With `evidence`, a hit is the whole denial (code, syscall, path, operation) rather than its words.
+/** Recognize a bounded child fatal denial carried inside one failed TAP error block. */
+function nestedChildPermission(root, lines, { includeFilePaths = true, parentCode = null } = {}) {
+  const detail = lines.join('\n');
+  const childExit = /\b(?:child|app|server|process)\b[^\n]{0,120}\bexited\b[^\n]{0,100}\bcode\s*[(:=]?\s*([1-9]\d*)/iu.exec(detail);
+  // A malformed or zero child-exit statement is evidence against using the footer fallback.
+  const childExitMention = /\b(?:child|app|server|process)\b[^\n]{0,120}\bexited\b[^\n]{0,100}\bcode\b/iu.test(detail);
+  // Some TAP reporters preserve only stderr as the assertion message. Accept that
+  // shape only with an ERR_ASSERTION nonzero-vs-zero footer and a complete fatal
+  // signature for the child runtime. Its diagnostic fields below remain mandatory. Scanner lines are
+  // trimmed before collection, so stack frames start with `at`, without indentation.
+  const bareAssertionExit = !childExit && !childExitMention && parentCode === 'ERR_ASSERTION'
+    ? /\n{2,}([1-9]\d*) !== 0\s*$/u.exec(detail) : null;
+  const bareFatalDetail = bareAssertionExit ? detail.slice(0, bareAssertionExit.index) : '';
+  const completeNodeFatal = bareAssertionExit
+    && /(?:^|\n)Node\.js v\d+\.\d+\.\d+\s*$/u.test(bareFatalDetail)
+    && /(?:^|\n)at [^\n]+/u.test(bareFatalDetail);
+  const childExitCode = childExit ? Number(childExit[1]) : bareAssertionExit ? Number(bareAssertionExit[1]) : null;
+  if (!Number.isSafeInteger(childExitCode) || childExitCode <= 0) return null;
+
+  const errorLine = /^\s*Error: (.+)$/mu.exec(detail);
+  if (errorLine) {
+    if (!childExit && !completeNodeFatal) return null;
+    const operation = permissionOperation(root, errorLine[1], { includeFilePaths });
+    if (operation?.syscall) {
+      const objectStart = detail.indexOf('{', errorLine.index + errorLine[0].length);
+      if (objectStart < 0) return null;
+      const objectEnd = detail.indexOf('}', objectStart + 1);
+      if (objectEnd < 0 || objectEnd - objectStart > 2048) return null;
+      const fields = detail.slice(objectStart, objectEnd + 1);
+      /** Read one exact structured field, removing only TAP's optional delimiter comma. */
+      const fieldValue = (name) => {
+        const match = new RegExp(`(?:^|\\n)\\s*${name}:\\s*(.*?)\\s*(?=\\n|$)`, 'u').exec(fields);
+        return match ? tapScalar(match[1].replace(/,$/u, '')) : null;
+      };
+      const code = fieldValue('code');
+      const syscall = fieldValue('syscall');
+      if (code !== operation.code || syscall !== operation.syscall) return null;
+      if (operation.path) {
+        const childPath = fieldValue('path');
+        if (typeof childPath !== 'string' || diagnosticPath(resolve(root, childPath)) !== operation.path) return null;
+      }
+      return operation;
+    }
+  }
+
+  // Python child failures have a standard traceback frame and terminal PermissionError,
+  // rather than Node's structured `Error` code/syscall/path object.
+  // Node appends this exact assertion comparison to TAP's error scalar after the child stderr.
+  // Strip it only for an AssertionError whose nonzero child exit matches `actual !== 0`.
+  const assertionFooter = parentCode === 'ERR_ASSERTION'
+    ? new RegExp(`\\n{2,}${childExitCode} !== 0\\s*$`, 'u') : null;
+  const tracebackDetail = assertionFooter?.test(detail) ? detail.replace(assertionFooter, '') : detail;
+  const tracebackMarker = /(?:^|\n)Traceback \(most recent call last\):\n/u.exec(tracebackDetail);
+  const tracebackError = /(?:^|\n)(PermissionError: \[Errno (?:1|13)\] [^\n]+)\s*$/u.exec(tracebackDetail);
+  if (!tracebackMarker || !tracebackError || tracebackError.index <= tracebackMarker.index) return null;
+  const tracebackBody = tracebackDetail.slice(tracebackMarker.index + tracebackMarker[0].length, tracebackError.index);
+  if (!/(?:^|\n)File (?:'[^'\n]+'|"[^"\n]+"), line \d+(?:, in [^\n]+)?(?:\n|$)/u.test(tracebackBody)) return null;
+  const operation = permissionOperation(root, tracebackError[1], { includeFilePaths });
+  return operation && operation.syscall === null ? operation : null;
+}
+
+/** Scan complete lines with bounded TAP state so assertion messages cannot impersonate OS codes.
+ * With evidence, return the complete denial for the remote file watcher; otherwise keep the local operation string.
  */
 export function sandboxBlockedScanner(root, { includeFilePaths = true, evidence = false } = {}) {
   const hit = denial => evidence ? denial : denial.operation;
@@ -65,6 +125,12 @@ export function sandboxBlockedScanner(root, { includeFilePaths = true, evidence 
   let failureMessage = null;
   let failureType = false;
   let exitCode = null;
+  let nestedError = null;
+  let nestedErrorBytes = 0;
+  let nestedErrorLines = 0;
+  let nestedErrorOverflow = false;
+  const maxNestedErrorBytes = 16 * 1024;
+  const maxNestedErrorLines = 64;
   /** Retain one pending fatal diagnostic and the current failed TAP record. */
   return (raw) => {
     const line = raw.trim().replace(/^#\s*/u, '');
@@ -80,6 +146,7 @@ export function sandboxBlockedScanner(root, { includeFilePaths = true, evidence 
       comment = null; startup = null;
       failureIndent = null; fieldIndent = null; permission = null; code = null;
       failureMessage = null; failureType = false; exitCode = null;
+      nestedError = null; nestedErrorBytes = 0; nestedErrorLines = 0; nestedErrorOverflow = false;
     }
     // Uncaught module-load errors are comments too. Keep their complete Node fatal
     // diagnostic pending; it is evidence only if the following file record failed
@@ -107,24 +174,38 @@ export function sandboxBlockedScanner(root, { includeFilePaths = true, evidence 
       comment = null;
       fieldIndent = null; permission = null; code = null;
       failureMessage = null; failureType = false; exitCode = null;
+      nestedError = null; nestedErrorBytes = 0; nestedErrorLines = 0; nestedErrorOverflow = false;
     } else if (line === '---' && failureIndent !== null && indent === failureIndent + 2) {
       fieldIndent = indent;
     } else if (line === '...' && indent === fieldIndent) {
       failureIndent = null; fieldIndent = null; permission = null; code = null;
       startup = null; comment = null;
       failureMessage = null; failureType = false; exitCode = null;
+      nestedError = null; nestedErrorBytes = 0; nestedErrorLines = 0; nestedErrorOverflow = false;
+    } else if (nestedError !== null && (indent > fieldIndent || line === '')) {
+      const nestedLine = line;
+      nestedErrorBytes += Buffer.byteLength(nestedLine, 'utf8') + 1;
+      nestedErrorLines += 1;
+      if (nestedErrorBytes > maxNestedErrorBytes || nestedErrorLines > maxNestedErrorLines) nestedErrorOverflow = true;
+      else nestedError.push(nestedLine);
     } else if (fieldIndent !== null && indent === fieldIndent) {
       const field = /^(error|code|failureType|exitCode): (.*)$/u.exec(line);
       if (field) {
         const value = tapScalar(field[2]);
         if (field[1] === 'error') {
           failureMessage = value;
+          nestedError = field[2] === '|-' || field[2] === '|' ? [] : null;
+          nestedErrorBytes = 0; nestedErrorLines = 0; nestedErrorOverflow = false;
           permission = typeof value === 'string' ? permissionOperation(root, value, { includeFilePaths }) : null;
         } else if (field[1] === 'code') {
           code = value;
           if (code !== 'ERR_TEST_FAILURE') startup = null;
         } else if (field[1] === 'failureType') failureType = value === 'testCodeFailure' || field[2] === 'testCodeFailure';
         else exitCode = /^[1-9]\d*$/u.test(field[2]) && Number.isSafeInteger(Number(field[2])) ? Number(field[2]) : null;
+        const nestedPermission = field[1] === 'code'
+          && failureType && nestedError && !nestedErrorOverflow
+          ? nestedChildPermission(root, nestedError, { includeFilePaths, parentCode: code }) : null;
+        if (nestedPermission) return hit(nestedPermission);
         if (permission && permission.code === code) return hit(permission);
         if (startup && code === 'ERR_TEST_FAILURE' && failureMessage === 'test failed'
           && failureType && exitCode !== null) return hit(startup);
