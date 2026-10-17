@@ -114,14 +114,15 @@ export async function relayPair(root, io) {
   const local = localSnapshot(root);
   if (local.board !== state.board) throw new Refused('RELAY_STORAGE', 'the local board identity differs from its relay link; restore the matching board before pairing');
   const cursor = local.snapshot.tables.event.at(-1)?.event_id ?? 0;
-  if (cursor !== state.cursor) throw new Refused('PAIR_BUSY', 'a local move changed during pairing; run pullboard relay pair again after sync completes');
-  if (state.pending || state.pendingMove || state.snapshot || state.linkPending) {
-    throw new Refused('PAIR_PENDING', 'finish the pending relay acknowledgement or snapshot before creating a pairing code; retry relay sync first');
-  }
   const metadata = new Map(local.snapshot.tables.board_meta.map((row) => [row.meta_key, row.meta_value]));
   const applied = metadata.get('relay_applied_sequence');
   const engine = metadata.get('relay_engine_version');
   const ordered = state.mode === 'ordered' || (applied !== undefined && engine !== undefined);
+  // Mirror cursors count native events; ordered packages are guarded by their acknowledged relay prefix below.
+  if (!ordered && cursor !== state.cursor) throw new Refused('PAIR_BUSY', 'a local move changed during pairing; run pullboard relay pair again after sync completes');
+  if (state.pending || state.pendingMove || state.snapshot || state.linkPending) {
+    throw new Refused('PAIR_PENDING', 'finish the pending relay acknowledgement or snapshot before creating a pairing code; retry relay sync first');
+  }
   let sequence = state.sequence;
   if (ordered) {
     const value = Number(applied);

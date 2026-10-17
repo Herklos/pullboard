@@ -349,3 +349,41 @@ test('[H15,H17] a paired clone synchronizes without a key file from PULLBOARD_RE
   assert.equal(output.includes(encodedKey), false, 'the environment key is not echoed in the clone command result');
   assert.equal(output.includes(secretText), false, 'the pairing secret is not echoed in the clone command result');
 });
+
+test('an acknowledged ordinary move cannot leave relay pair permanently busy [H15,H17,H16]', async t => {
+  const box = await relayClientFixture(t);
+  await box.link();
+  const first = await box.cli('relay', 'pair');
+  assert.equal(first.code, 0, 'the unchanged linked board can issue a pairing package');
+  const joined = await box.otherDeviceJoin(first.document.code);
+  assert.equal(joined.joined.board, box.before.tables.board_meta.find(row => row.meta_key === 'board_id').meta_value,
+    'the baseline one-use package is consumed by a genuine second private native device');
+  const added = await box.cli('add', box.lane, 'An acknowledged move before pairing', '--criterion', 'The next device can join');
+  assert.equal(added.code, 0, JSON.stringify(added.document));
+  const snapshot = await box.cli('export');
+  assert.equal(snapshot.code, 0);
+  const state = JSON.parse(readFileSync(box.linkFile, 'utf8'));
+  const meta = new Map(snapshot.document.tables.board_meta.map(row => [row.meta_key, row.meta_value]));
+  assert.equal(state.mode, 'ordered');
+  assert.equal(state.sequence, Number(meta.get('relay_applied_sequence')), 'the real sync has acknowledged this native prefix');
+  const nativeCursor = snapshot.document.tables.event.at(-1)?.event_id ?? 0;
+  const second = await box.cli('relay', 'pair');
+  assert.equal(second.code, 0, 'an acknowledged board must pair after ordinary moves: ' + JSON.stringify({
+    error: second.document.error, savedNativeCursor: state.cursor, actualNativeCursor: nativeCursor,
+    relaySequence: state.sequence, appliedSequence: Number(meta.get('relay_applied_sequence')),
+  }));
+});
+
+test('a newly paired device imports the acknowledged moved board [H15,H17,H16]', async t => {
+  const box = await relayClientFixture(t);
+  await box.link();
+  const added = await box.cli('add', box.lane, 'The next computer sees this acknowledged move', '--criterion', 'The native checkpoint and move agree');
+  assert.equal(added.code, 0);
+  const current = await box.cli('export');
+  assert.equal(current.code, 0);
+  const printed = await box.cli('relay', 'pair');
+  assert.equal(printed.code, 0, JSON.stringify(printed.document.error));
+  const paired = await box.otherDeviceJoin(printed.document.code);
+  assert.deepEqual(paired.exported, current.document, 'a real independent native join imports the complete moved checkpoint');
+  assert.equal(paired.exported.tables.item.some(row => row.item_title === 'The next computer sees this acknowledged move'), true);
+});
