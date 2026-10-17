@@ -101,6 +101,7 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
   const paired = new Map();
   let available = [];
   let waitingBoards = new Map();
+  const approvedBoards = new Set();
   let warnings = [];
   let failure = '';
   let failureBoard = null;
@@ -133,7 +134,7 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
       try { state = storedOwnedRequestState(localStorage, key, entry.state?.personRequests); } catch { /* Missing device storage can only hide this device's own notice. */ }
       ownedRequestIds.set(id, state.owned);
     }
-    for (const text of noticeLines({ available, paired, ownedRequestIds, waitingBoards, warnings, failure })) {
+    for (const text of noticeLines({ available, paired, ownedRequestIds, waitingBoards, approvedBoards, warnings, failure })) {
       const paragraph = document.createElement('p');
       paragraph.textContent = text;
       element.append(paragraph);
@@ -508,6 +509,22 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
     throw new Refused('RELAY_BUSY', 'Other clients kept winning the relay order. Retry this saved request.');
   }
 
+  /**
+   * After this phone approves a link, list again until the computer's sealed key arrives, so the
+   * board opens here without another pairing. The wait ends at the approval's own expiry.
+   */
+  async function openApprovedBoard(context) {
+    if (context?.action !== 'link') { await listing(); onUpdate(); return; }
+    approvedBoards.add(context.board);
+    try {
+      while (!accessLost && Date.now() < context.expires) {
+        await listing(); onUpdate();
+        if (paired.has(context.board)) return;
+        await new Promise(resolveWait => setTimeout(resolveWait, 500));
+      }
+    } finally { approvedBoards.delete(context.board); notice(); }
+  }
+
   /** Pair a link opened in this already-loaded page as well as one opened on a fresh visit. */
   async function pairingChanged() {
     try {
@@ -521,7 +538,7 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
   addEventListener('pagehide', () => { for (const entry of paired.values()) entry.stream?.close(); });
   if (await enrollPhone((path, options) => documentAt(path, denied, options))) keepPairingStorage();
   await listing();
-  await installPhoneApprovals((path, options) => documentAt(path, denied, options), keys, async () => { await listing(); onUpdate(); });
+  await installPhoneApprovals((path, options) => documentAt(path, denied, options), keys, openApprovedBoard);
   return {
     /** Return decoded API state or seal narrow person intent; no board key or plaintext leaves the device. */
     async request(path, body) {

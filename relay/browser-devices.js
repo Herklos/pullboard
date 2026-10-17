@@ -157,7 +157,7 @@ export async function installPhoneApprovals(documentAt, boardKeys, onApproved) {
             await documentAt('/api/v1/devices/approvals/' + context.id + '/complete', {
               method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ response }),
             });
-            card.remove(); await onApproved();
+            card.remove(); await onApproved(context);
           } catch (error) { text.textContent = 'Approval failed: ' + (error instanceof Refused ? error.message : 'Request the action again from the Mac.'); }
           finally { active.delete(context.id); }
         };
