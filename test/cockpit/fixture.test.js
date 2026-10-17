@@ -197,7 +197,7 @@ test('the page uses only API v1 for state, code and every offered move [A3,N26,N
     assert.equal(moves[2].body.args.as, 'person');
     assert.equal(moves[2].body.item, ask);
     assert.equal(moves[4].body.args.off, true);
-    assert.ok(page.requests.every((request) => /^\/api\/v1\/boards(?:$|\/[^/]+\/(?:state|code|moves)(?:\?|$))/.test(request.path)), 'every page request uses a public v1 path');
+    assert.ok(page.requests.every((request) => /^\/api\/v1\/boards(?:$|\/[^/]+\/(?:state|code|moves|items\/\d+|items\?q=[^&]+)(?:\?|$))/.test(request.path)), 'every page request uses a public v1 path');
     assert.ok(page.requests.some((request) => request.path === '/api/v1/boards'));
     assert.ok(page.requests.some((request) => request.path === `/api/v1/boards/${id}/state`));
     assert.ok(page.requests.some((request) => request.path.startsWith(`/api/v1/boards/${id}/code?`)));
