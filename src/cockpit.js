@@ -1,10 +1,14 @@
-import { hostedReleaseDistance, shippedReleaseVersions } from './view/hosted-release.js';
+import {
+  HOSTED_RELEASE,
+  hostedReleaseDistance,
+  shippedReleaseVersions,
+} from './view/hosted-release.js';
 import {
   effectiveGuards,
   IN_STATE,
   MACHINE,
 } from './machine.js';
-import { commandPhrases, VERSION } from './help.js';
+import { commandPhrases } from './help.js';
 import { personNeeds } from './needs.js';
 
 /** The CLI's default phrases, ordered by depth for the existing prose inventory guard. */
@@ -51,7 +55,7 @@ function lifecycle() {
  * @param {{snapshot?: boolean, readOnly?: boolean, requests?: boolean, transportModule?: string|null, apiBase?: string, apiHeaders?: Record<string, string>, stylesheet?: string, paths?: boolean, hostedLocal?: boolean, relaySession?: boolean, signIn?: string|null, hostedReleaseVersion?: string, hostedReleaseVersions?: string[]|null}} [options] - Served connection and assets, optional person requests over a read-only transport, host routes, a static page with event replay, or the hosted page that reads this machine's view first.
  * @returns {string}
  */
-export function cockpitPage(key = '', { snapshot = false, readOnly = false, requests = false, transportModule = null, apiBase = '', apiHeaders = { 'x-pullboard-key': key }, stylesheet = null, paths = false, hostedLocal = false, relaySession = false, signIn = null, hostedReleaseVersion = VERSION, hostedReleaseVersions: suppliedReleaseVersions = null } = {}) {
+export function cockpitPage(key = '', { snapshot = false, readOnly = false, requests = false, transportModule = null, apiBase = '', apiHeaders = { 'x-pullboard-key': key }, stylesheet = null, paths = false, hostedLocal = false, relaySession = false, signIn = null, hostedReleaseVersion = HOSTED_RELEASE, hostedReleaseVersions: suppliedReleaseVersions = null } = {}) {
   // Derive the current CLI inventory for every served, relay or exported page.
   const COMMAND_SOURCE = 'pullboard (?:' + commandPhrases().join('|') + ')(?![\\w-])(?: (?:--?[\\w-]+|\\d+|#\\d+|"[^"\\n]*"|[A-Z][A-Z0-9_]*|[\\w-]*[\\/.:@][^\\s"]*|[a-z]+-\\d+)(?![\\w-]))*';
 

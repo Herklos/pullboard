@@ -6,6 +6,9 @@
 import { readFileSync } from 'node:fs';
 import { VERSION } from '../help.js';
 
+/** The release this hosted page was built from: the package's own version, so learning it fetches nothing. */
+export const HOSTED_RELEASE = VERSION;
+
 let shipped;
 
 /**
