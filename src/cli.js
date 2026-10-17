@@ -2753,6 +2753,19 @@ function sayReviewOffer(ctx, found) {
 }
 
 /**
+ * Whether a shout is the person's own: a relay person request, or the local view acting as the
+ * coordinator (N26, B26). The view acting as a named agent, or an agent shell as the coordinator,
+ * still speaks as that agent.
+ *
+ * @param {any} io
+ * @param {{ id: string }} me
+ * @returns {boolean}
+ */
+function personShout(io, me) {
+  return io.personRequest?.phase === 'execute' || (io.personChannel === 'view' && me.id === COORDINATOR);
+}
+
+/**
  * A review search that found nothing while another agent is still building: say so, with the wait,
  * so a reviewer who starts first is not told NOTHING_FREE as if the board were idle [C7,P4].
  *
@@ -3238,7 +3251,7 @@ function workCommands(io, args) {
       const hasRecipient = first && recipients.includes(first);
       const to = hasRecipient ? first : values.decision ? (me.id === COORDINATOR ? 'person' : COORDINATOR) : first ?? '';
       const text = [hasRecipient ? second : first, ...(hasRecipient ? rest : [second, ...rest])].filter(Boolean).join(' ');
-      const id = await ordered(ctx, board, 'shout', [{ from: io.personRequest?.phase === 'execute' ? store.PERSON : me.id, to, text, lanes: laneNames(ctx.config), decision: Boolean(values.decision), evidence }]);
+      const id = await ordered(ctx, board, 'shout', [{ from: personShout(io, me) ? store.PERSON : me.id, to, text, lanes: laneNames(ctx.config), decision: Boolean(values.decision), evidence }]);
       io.result?.({ id, decision: Boolean(values.decision) });
       const agents = store.listAgents(board);
       const recipient = agents.some((agent) => agent.agent_id === to) ? agentDisplayName(agents, ctx.config, to) : to;
