@@ -985,13 +985,20 @@ async function jsonRequest(path, body, base, headers, cache) {
   return json;
 }
 
+let relayEngine = null;
+/** The account's linked boards: a same-origin read that declares the relay's engine, as every relay request does. */
+async function linkedList() {
+  relayEngine ??= await import('/relay/engine.js').then((engine) => String(engine.ENGINE_VERSION), () => '');
+  return jsonRequest('/api/v1/boards', undefined, '', relayEngine ? { 'x-pullboard-engine': relayEngine } : {}, 'no-store');
+}
+
 /**
  * Whether the signed-in person's linked boards name one this machine's list lacks: only then does the page need the
  * decrypting relay client. The metadata is a same-origin cookie-authenticated read, with none of this machine's local
  * credential.
  */
 async function linkedBoardMissing(localIds) {
-  const linked = await jsonRequest('/api/v1/boards', undefined, '', {}, 'no-store');
+  const linked = await linkedList();
   return Boolean(linked.boards?.some(board => typeof board.id === 'string' && /^[0-9a-f]{32}$/.test(board.id) && typeof board.repository === 'string' && !localIds.has(board.id)));
 }
 
@@ -1055,7 +1062,7 @@ async function hostedListed(boards) {
   // An empty local view can still leave linked boards on another computer waiting for this browser to pair.
   if (!hosted.relaySession || !['', 'not-running', 'no-linked', 'unpaired'].includes(shown)) return;
   let linked;
-  try { linked = await jsonRequest('/api/v1/boards', undefined, '', {}, 'no-store'); } catch { return; /* the relay's banner says why */ }
+  try { linked = await linkedList(); } catch { return; /* the relay's banner says why */ }
   const names = (linked.boards || []).filter((board) => typeof board.repository === 'string').map((board) => board.repository);
   localNote(names.length ? 'unpaired' : 'no-linked', { linked: names });
 }
