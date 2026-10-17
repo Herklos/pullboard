@@ -333,6 +333,7 @@ export const NEXT_STEPS = Object.freeze({
   RESOURCE_CAPACITY_MISMATCH: 'check the configured capacity with pullboard settings, then retry using that capacity',
   RESOURCE_LEASE_LOST: 'take the resource again, then retry',
   REVIEW_COOLDOWN: 'take another review: pullboard next --verify',
+  REVIEW_NOT_READY: 'wait for the submit with pullboard watch, or check back: pullboard next --verify',
   REVIEW_HELD: 'take another review: pullboard next --verify',
   RUNNER_BUSY: 'wait for the named runner\'s active tests to finish, then retry its settings change',
   RUNNER_CAPACITY_MISMATCH: 'wait for active runner leases to fit the configured capacity, then retry the run',
