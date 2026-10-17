@@ -62,6 +62,7 @@ import {
 } from './spec.js';
 import { answerQuestion, bundledBlueprints, planBlueprint, readBlueprint, saveBlueprint } from './blueprints.js';
 import { briefFiles } from './brief.js';
+import { commitFirst, commitOwnerLines, commitOwners, coordinatorInbox, coordinatorInboxLines, inboxFirst } from './resume.js';
 import { checkBaseline, prepareCheckBaseline, sayCheckBaseline } from './check-baseline.js';
 import { retryCheckBaselines, startCheckBaseline } from './check-baseline-worker.js';
 import { compareMainFailures, mainRedMessage, mainRedReworkItems } from './main-red.js';
@@ -1306,6 +1307,7 @@ function resumeHere(io) {
       holds: store.laneHolds(board),
       unread: store.unreadCount(board, me.id),
       newest: store.peekShouts(board, me.id, 1),
+      ...(me.id === COORDINATOR ? { inbox: coordinatorInbox(board, me.id, decisions.openDecisions ?? store.openDecisions(board, COORDINATOR)) } : {}),
       agents: store.listAgents(board),
       viewOpened: viewSetupComplete(ctx, board),
     };
@@ -1335,6 +1337,7 @@ function resumeHere(io) {
   for (const problem of card.hookProblems) say(`${problem.message}; ${problem.next}`);
   const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
   say(`resume: ${me.displayName}${me.family ? ` [family ${me.family}]` : ''}, ${me.lane} lane${isMain ? ', the main checkout' : ''}, at ${root}`);
+  if (card.inbox) for (const line of coordinatorInboxLines(card.inbox, name, (at) => span(ctx, at), firstLine)) say(line);
   say(`New agent worktrees: ${card.newWorktreeLocation}`);
   card.setup = boardSetup(ctx, card, setupScope);
   if (card.setup) {
@@ -1356,10 +1359,8 @@ function resumeHere(io) {
     say(`${plural(dirty, 'file')} uncommitted in the main checkout`);
   }
   if (isMain) {
-    const setup = uncommittedSetup(root, ctx.config);
-    if (setup) {
-      say(`The person must commit Pullboard's setup files before agents can use worktrees: ${setup.stage}`);
-    }
+    card.commits = commitOwners(uncommittedSetup(root, ctx.config)?.differ ?? [], [ctx.config.spec, ctx.config.practice], root);
+    for (const line of commitOwnerLines(card.commits)) say(line);
   }
   for (const request of card.requests) say(`request #${request.shout_id}: ${request.shout_text}; answer with pullboard answer ${request.shout_id} done, or declined <reason>`);
   for (const item of card.holding) {
@@ -1403,7 +1404,7 @@ function resumeHere(io) {
   } else if (card.hold) {
     say(`the ${me.lane} lane is held by ${name(card.hold.hold_by)}: ${card.hold.hold_reason}`);
   }
-  if (card.unread) say(`${plural(card.unread, 'unread shout')}; newest from ${name(card.newest[0].shout_from)}: ${firstLine(card.newest[0].shout_text)} (pullboard inbox reads them)`);
+  if (card.unread && !card.inbox) say(`${plural(card.unread, 'unread shout')}; newest from ${name(card.newest[0].shout_from)}: ${firstLine(card.newest[0].shout_text)} (pullboard inbox reads them)`);
   const inLane = card.open.filter((item) => item.item_lane === me.lane);
   const isVerified = (id) => card.all.find((other) => other.item_id === Number(id))?.item_status === 'verified';
   const ready = inLane.filter((item) => !item.item_after || item.item_after.split(',').every(isVerified)).length;
@@ -1417,6 +1418,8 @@ function resumeHere(io) {
   else if (card.awaiting.length) next = 'pullboard next --wait 9 (minutes); a rejected item comes back to your lane';
   else next = 'nothing open in your lane; pullboard next --verify names work you can check';
   if (card.setup) next = card.setup.agentNext ?? card.setup.command;
+  if (card.commits) next = commitFirst(card.commits, next);
+  if (card.inbox) next = inboxFirst(card.inbox, next);
   io.result?.({ ...card, root, dirty, next });
   say(`next: ${next}`);
   const flowAlert = isMain ? flowAlertLine(card.flow) : null;
@@ -1846,7 +1849,7 @@ function uncommittedSetup(mainRoot, config) {
   const words = differ.map(({ path }) => shellWord(path)).join(' ');
   const force = differ.some(({ ignored }) => ignored) ? ' -f' : '';
   return {
-    files: differ.map(({ path }) => path),
+    files: differ.map(({ path }) => path), differ,
     stage: `${cdTo(mainRoot)} git add${force} -- ${words}`,
   };
 }
