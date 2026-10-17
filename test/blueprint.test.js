@@ -510,6 +510,7 @@ test('a saved board adds back as the same rows [S1]', () => {
     '- K3 [approved, must] The app is built with: SvelteKit. Choices: Next.js, SvelteKit, Rails. | gate: review',
     '- K12 [approved, must] Deploy: where it goes: Fly.io. Choices: Vercel, Fly.io. | gate: review',
     '- K13 [approved, must] People sign in with: Email, then a link. Choices: Email, then a link, Passwords. | gate: review',
+    '- K14 [approved, must] Pick one: x. Choices: x, y, z, w. | gate: review',
   ];
   const planted = [
     '- K4 [approved, must] Logs live in web/logs/app.js. Why: one place to look. | gate: review',
@@ -520,7 +521,6 @@ test('a saved board adds back as the same rows [S1]', () => {
     '- K9 [approved, must] The page renders without a reason. | gate: review',
     '- K10 [draft, must] A draft never leaves. Why: nobody decided it. | gate: review',
     '- K11 [pending, must] Deploys go to: Vercel. Choices: Vercel, Fly.io. | gate: review',
-    '- K14 [approved, must] Pick one: x. Choices: x, y, z, w. | gate: review',
     '- K15 [approved, must] Pick a host: Rails. Choices: Vercel, Fly.io. | gate: review',
     '- K16 [approved, must] A rule. Why: one. Why: two. | gate: review',
   ];
@@ -535,7 +535,7 @@ test('a saved board adds back as the same rows [S1]', () => {
 
   const saved = box.run(box.repo, 'blueprint', 'save', '--json');
   assert.equal(saved.code, 0, `${saved.err}\n${saved.out}`);
-  assert.deepEqual(JSON.parse(saved.out).left.map((entry) => entry.id).sort(), ['G1', 'G2', 'K14', 'K15', 'K16', 'K4', 'K5', 'K6', 'K7', 'K8', 'K9'], 'only clean, exactly readable approved rows leave');
+  assert.deepEqual(JSON.parse(saved.out).left.map((entry) => entry.id).sort(), ['G1', 'G2', 'K15', 'K16', 'K4', 'K5', 'K6', 'K7', 'K8', 'K9'], 'only clean, exactly readable approved rows leave');
   const file = join(box.repo, 'Dana Whitlock board.blueprint.json');
   const text = readFileSync(file, 'utf8');
   for (const secret of ['web/', '@', 'Dana', 'Whitlock', 'web-1', machine, 'zebra', 'walrus', 'narwhal', 'signers', 'DW', 'items', 'pullboard-blueprint', 'Logs live', 'draft never', 'Deploys go']) {
@@ -547,7 +547,7 @@ test('a saved board adds back as the same rows [S1]', () => {
   assert.equal(JSON.parse(named.out).error?.code, 'PRIVATE_BLUEPRINT', 'a chosen name that names someone is refused');
   assert.deepEqual(Object.keys(blueprint).sort(), ['blueprint', 'gate', 'name', 'questions', 'rules', 'title', 'version'], 'only allow-listed fields are written');
   assert.deepEqual(blueprint.rules.map((rule) => Object.keys(rule).sort()), [['gate', 'key', 'text', 'tier', 'why'], ['gate', 'key', 'text', 'tier', 'why']]);
-  assert.deepEqual(blueprint.questions.map((question) => Object.keys(question).sort()), Array(3).fill(['ask', 'choices', 'default', 'key']));
+  assert.deepEqual(blueprint.questions.map((question) => Object.keys(question).sort()), Array(4).fill(['ask', 'choices', 'default', 'key']));
   assert.equal(box.run(box.repo, 'blueprint', 'save', '--json').code, 1, 'an existing file is never overwritten');
 
   const fresh = e2e.project();
@@ -561,6 +561,36 @@ test('a saved board adds back as the same rows [S1]', () => {
     ['pending', 'must', 'The app is built with: SvelteKit. Choices: Next.js, SvelteKit, Rails.'],
     ['pending', 'must', 'Deploy: where it goes: Fly.io. Choices: Vercel, Fly.io.'],
     ['pending', 'must', 'People sign in with: Email, then a link. Choices: Email, then a link, Passwords.'],
+    ['pending', 'must', 'Pick one: x. Choices: x, y, z, w.'],
   ], 'the approved rows come back as drafts, each answered question exactly, its answer the default');
   assert.deepEqual(JSON.parse(fresh.run(fresh.repo, 'list', '--json').out).items ?? [], [], 'a saved blueprint files no items');
+});
+
+test('blueprint save reads back a question with three or more choices [S1]', () => {
+  const box = freshBoard();
+  const questions = [
+    'The app is built with: Next.js. Choices: Next.js, SvelteKit, Rails.',
+    'People sign in with: Magic links. Choices: Passwords, Passkeys, Single sign-on, Magic links.',
+    'Deploy: where it goes: Fly.io, then Vercel. Choices: Render, Fly.io, then Vercel, Railway.',
+  ];
+  const spec = join(box.repo, 'SPEC.md');
+  writeFileSync(spec, `${readFileSync(spec, 'utf8')}\n## Q · Questions\n\n${questions.map((text, index) => `- Q${index + 1} [approved, must] ${text} | gate: review`).join('\n')}\n`);
+  box.git('add', 'SPEC.md');
+  box.git('commit', '-q', '-m', 'chore: answer three questions');
+
+  const saved = json(box, 'blueprint', 'save', 'questions.json', '--name', 'stack-questions', '--title', 'Stack questions');
+  assert.deepEqual(saved.left.filter((entry) => entry.id.startsWith('Q')), [], 'no answered question is left out');
+  const blueprint = JSON.parse(readFileSync(join(box.repo, 'questions.json'), 'utf8'));
+  assert.deepEqual(blueprint.questions.map(({ key, ask, choices, default: answer }) => [key, ask, choices, answer]), [
+    ['Q1', 'The app is built with', ['Next.js', 'SvelteKit', 'Rails'], 'Next.js'],
+    ['Q2', 'People sign in with', ['Passwords', 'Passkeys', 'Single sign-on', 'Magic links'], 'Magic links'],
+    ['Q3', 'Deploy: where it goes', ['Render', 'Fly.io, then Vercel', 'Railway'], 'Fly.io, then Vercel'],
+  ], 'a three-choice and a four-choice question keep their listed choices and the chosen answer');
+
+  const fresh = freshBoard();
+  const before = parseSpec(readFileSync(join(fresh.repo, 'SPEC.md'), 'utf8')).rows.map((row) => row.id);
+  json(fresh, 'blueprint', 'add', join(box.repo, 'questions.json'));
+  const rows = parseSpec(readFileSync(join(fresh.repo, 'SPEC.md'), 'utf8')).rows.filter((row) => !before.includes(row.id));
+  assert.deepEqual(rows.map((row) => [row.status, row.text]), questions.map((text) => ['pending', text]),
+    'each question round-trips to its exact row text');
 });

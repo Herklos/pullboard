@@ -397,9 +397,12 @@ function positions(text, separator) {
 
 /**
  * Read an approved question row back into its ask, choices and answer, or say why it cannot be.
- * The ask and the choices may hold ": " and ", ", so every split is tried: a reading counts only if
- * its answer is one of two or more choices and questionText gives back the exact row text. One
- * reading is kept; none or several leave the row out, so a save never changes a question [S1].
+ * The ask and the choices may hold ": " and ", ", so every split of the ask is tried. The answer
+ * is the one run of comma-separated parts it equals; every other part is a choice of its own, so
+ * a question with three or more choices keeps its listed choices exactly as written instead of
+ * reading as every way its parts could join. A reading counts only if it has two or more choices
+ * and questionText gives back the exact row text. One reading is kept; none or several leave the
+ * row out, so a save never changes a question [S1].
  *
  * @param {string} text
  * @returns {{ question?: { ask: string, choices: string[], default: string }, reason?: string } | null} null when the row is no question
@@ -414,15 +417,14 @@ function readQuestion(text) {
     for (const colon of positions(head, ': ')) {
       const ask = head.slice(0, colon);
       const answer = head.slice(colon + 2);
-      for (let mask = 0; mask < 2 ** (tokens.length - 1); mask += 1) {
-        const choices = [tokens[0]];
-        for (let index = 1; index < tokens.length; index += 1) {
-          if (mask & (2 ** (index - 1))) choices[choices.length - 1] += `, ${tokens[index]}`;
-          else choices.push(tokens[index]);
+      for (let from = 0; from < tokens.length; from += 1) {
+        for (let to = from + 1; to <= tokens.length; to += 1) {
+          if (tokens.slice(from, to).join(', ') !== answer) continue;
+          const choices = [...tokens.slice(0, from), answer, ...tokens.slice(to)];
+          const question = { ask, choices, default: answer };
+          if (choices.length < 2 || [ask, ...choices].some((part) => !part.trim() || part !== part.trim())) continue;
+          if (questionText(question) === text) readings.set(JSON.stringify(question), question);
         }
-        const question = { ask, choices, default: answer };
-        if (choices.length < 2 || !choices.includes(answer) || [ask, ...choices].some((part) => !part.trim() || part !== part.trim())) continue;
-        if (questionText(question) === text) readings.set(JSON.stringify(question), question);
       }
     }
   }
