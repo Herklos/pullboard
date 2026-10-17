@@ -8,7 +8,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realp
 import { hostname, loadavg } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import * as store from './board.js';
 import { CONFIG_FILE, COORDINATOR, DOCTRINE_FILE, LEGACY_DOCTRINE_FILE, loadConfig } from './config.js';
@@ -16,11 +16,11 @@ import { displayAgentName } from './agent-names.js';
 import { doctrineHistory, loadDoctrine } from './doctrine.js';
 import { agentDoctrine, proposeDoctrine, resumeDoctrineNotes, staleDoctrineRows } from './doctrine-rulings.js';
 import { checkRulesAt, doctrineReport, hasSubmitRules, holdDoctrine, ruleLine } from './doctrine-checks.js';
-import { agentSessionDigest, requirePersonChannel } from './person.js';
-import { bindLocalSession, localSessionMatches } from './agent-session.js';
+import { AGENT_SESSION_IDS, agentSessionDigest, requirePersonChannel } from './person.js';
+import { bindLocalSession, localSessionMatches, localSessionSeats } from './agent-session.js';
 import { decisionAnswer, decisionProjection, handAnsweredQuestions, pendingAnswers, planRowApply, prepareRowDecisions, restoreRowApply, writeRowApply } from './row-decisions.js';
 import { digestOf, gateReport, refuseSandboxBlocked, runGate, runProfiledShell, runSubmitGate, submitGateReport, timingDigest, withGateSlot } from './gate.js';
-import { checkNeedsBrowser } from './browser-admission.js';
+import { checkNeedsBrowser, explicitCheckFiles } from './browser-admission.js';
 import { bareWorktreeFinding, codeIsFromMain, contains, differFromHead, git, gitChildEnv, headCommit, headTree, invalidateGitFacts, isClean, mainCheckout, patchId, repoInfo, resolveCommit, tryGit, untracked, withGitFacts } from './git.js';
 import {
   FIX_NOTE,
@@ -63,9 +63,11 @@ import {
   unmetRows,
 } from './spec.js';
 import { answerQuestion, bundledBlueprints, landBlueprint, planBlueprint, readBlueprint, repoAnswers, saveBlueprint } from './blueprints.js';
+import { blueprintStarterNote, combinedSummary, initBlueprintLines, initBlueprintResult, installedBlueprints, landEach, readBlueprints, sharedRowLines } from './blueprint-set.js';
 import { briefFiles } from './brief.js';
 import { commitFirst, commitOwnerLines, commitOwners, coordinatorInbox, coordinatorInboxLines, inboxFirst } from './resume.js';
-import { checkBaseline, prepareCheckBaseline, sayCheckBaseline, refuseCheckSyntax } from './check-baseline.js';
+import { checkBaseline, prepareCheckBaseline, refuseCheckSyntax, sayCheckBaseline } from './check-baseline.js';
+import { checkAcceptCommand, refuseClaimProvesNothing, refuseProvesNothing } from './check-accept.js';
 import { retryCheckBaselines, startCheckBaseline } from './check-baseline-worker.js';
 import { compareMainFailures, mainRedMessage, mainRedReworkItems } from './main-red.js';
 import { runItems } from './run.js';
@@ -75,10 +77,12 @@ import { tour } from './tour.js';
 import { commandOutput, refusalDocument } from './json.js';
 import { forgetProject, listApiProjects, registerProjectAndLink, registeredProjectRootsSnapshot } from './projects.js';
 import { milestoneRoadmap } from './roadmap.js';
+import { rigorLines, rigorReport } from './rigor.js';
 import { listResources, memoryVerdict, readMachineMemory, runnerResourceStatus } from './resources.js';
 import { citedTestFiles, rowEvidence, rowStage } from './evidence.js';
 import { exportView, serveView } from './serve.js';
 import { forgetView, portHolder, rememberView, runningView } from './view-session.js';
+import { backgroundViewLine, keepViewRunning, launchBackgroundView, reportView } from './background-view.js';
 import { serveApi } from './api.js';
 import { watchCommand } from './watch.js';
 import { serveMcp } from './mcp.js';
@@ -90,10 +94,11 @@ import { proofStats } from './stats.js';
 import { flowLines, flowAlertLine } from './stats-flow.js';
 import { releaseHeadlinesBetween } from './changelog.js';
 import { exportBoard, importBoard } from './exchange.js';
+import { digestCommand } from './digest.js';
 import { addSigner, assertRequiredSigners, defaultPrincipal, hasSignerFile } from './signature.js';
-import { addRunner, browserFreeChecksEnabled, gateQueueSettings, loadMachineSettings, memoryFloorMB, setBrowserSlots, setGateSlots } from './settings.js';
+import { addRunner, browserFreeChecksEnabled, gateQueueSettings, gateShortSlots, loadMachineSettings, memoryFloorMB, relayOfferEnabled, setBrowserSlots, setGateShortSlots, setGateSlots } from './settings.js';
 import { formatSnapshotLimit, pendingSnapshotSize, pendingCheckpointProblem, relayCommandReceipt, relayCommandReceiptReported, relayLinked, relayOff, relayOn, relayOperation, relayRecover, relayRecovered, relayRevoke, relayStatus, relayTokens, syncRelay } from './relay.js';
-import { autoLinkProject, relayOnAll, revokeRelayDevice, unlinkedRelayProjects } from './relay-setup.js';
+import { autoLinkProject, offerRelayAtInit, relayOnAllCommand, revokeRelayDevice, unlinkedRelayProjects } from './relay-setup.js';
 import { readRelayMachine } from './relay-machine.js';
 import { relayJoin, relayPair } from './relay-pairing-client.js';
 import { executePersonRequests } from './relay-request-execution.js';
@@ -200,7 +205,7 @@ function commandHelp(name) {
       '  pullboard spec apply — coordinator: apply recorded row decisions to the files',
     ] : []),
     'Example:',
-    `  ${entry.example}`, ...entry.notes,
+    ...entry.example.split('\n').map((line) => `  ${line}`), ...entry.notes,
   ].join('\n');
 }
 
@@ -251,11 +256,13 @@ const OPTIONS = {
   project: { type: 'boolean' },
   export: { type: 'string' },
   'no-open': { type: 'boolean' },
+  'no-permissions': { type: 'boolean' },
   note: { type: 'string' },
   'note-file': { type: 'string' },
   by: { type: 'string' },
   key: { type: 'string' },
   out: { type: 'string' },
+  watch: { type: 'boolean' },
   after: { type: 'string' },
   brief: { type: 'string' },
   'brief-file': { type: 'string' },
@@ -265,7 +272,7 @@ const OPTIONS = {
   doctrine: { type: 'boolean' },
   source: { type: 'string' },
   section: { type: 'string' },
-  blueprint: { type: 'string' },
+  blueprint: { type: 'string', multiple: true },
   route: { type: 'string' },
   family: { type: 'string' },
   model: { type: 'string' },
@@ -310,6 +317,8 @@ const OPTIONS = {
   commit: { type: 'string' },
   ref: { type: 'string' },
   supersedes: { type: 'string' },
+  cause: { type: 'string' },
+  'never-again': { type: 'boolean' },
   implies: { type: 'string' },
   owns: { type: 'string' },
   help: { type: 'boolean', short: 'h' },
@@ -453,7 +462,7 @@ function checkMainVerifier(ctx, board, values) {
  */
 function personMode(ctx, me, values) {
   if (values.as === undefined) return false;
-  if (values.as !== 'person') throw new Refused('USAGE', '--as person is supported for answer and decisions');
+  if (values.as !== 'person') throw new Refused('USAGE', '--as person is supported for answer, decisions and fact --never-again');
   if (!ctx.info.isMain || me.id !== COORDINATOR) {
     throw new Refused('B26_PERSON_ANSWER', 'only the main checkout can act as the person; ask your coordinator to answer or pass this decision');
   }
@@ -607,6 +616,12 @@ async function ordered(ctx, board, operation, args) {
   finally { lease.release(); }
 }
 
+/** Order a claim on every route (claim, next, run) only after a check green on main is not held [V4]. */
+async function claimOrdered(ctx, board, args) {
+  refuseClaimProvesNothing(ctx.info.root, board, args[0]);
+  return await ordered(ctx, board, 'claim', args);
+}
+
 /** Check ownership before sync or command side effects; reads and authenticated person channels keep their identity. */
 async function bindCheckoutSession(io, positionals, values) {
   if (values.help || values.version || io.personChannel === 'view' || io.personRequest) return;
@@ -615,13 +630,27 @@ async function bindCheckoutSession(io, positionals, values) {
     throw new Refused('USAGE', 'pullboard takeover takes no arguments; run pullboard takeover [--json]');
   }
   const writes = ['init', 'join', 'worktree', 'hooks', 'hook', 'skills', 'add', 'edit', 'fact', 'escalate', 'run', 'sweep',
-    'next', 'claim', 'hold', 'release', 'submit', 'done', 'verify', 'merged', 'land', 'withdraw', 'refreeze', 'reopen', 'shout', 'answer', 'pass', 'import', 'milestone', 'takeover', 'forget'];
+    'next', 'claim', 'hold', 'release', 'submit', 'done', 'verify', 'check', 'merged', 'land', 'withdraw', 'refreeze', 'reopen', 'shout', 'answer', 'pass', 'import', 'milestone', 'takeover', 'forget'];
   if (!writes.includes(command) && !(command === 'lane' && first === 'add') && !(command === 'settings' && first) && !(command === 'spec' && first === 'apply') && !(command === 'relay' && ['on', 'off'].includes(first))) return;
   if (command === 'answer' && values.as === 'person') return;
   const digest = agentSessionDigest();
   if (!digest) {
     if (command === 'takeover') throw new Refused('AGENT_SESSION', 'takeover belongs to an agent session; run pullboard takeover from the agent’s shell');
     return;
+  }
+  if (command === 'check') {
+    // Acceptance follows its person-channel path; it does not renew a build claim.
+    if (first === 'accept') return;
+    const ctx = context(io);
+    const renewsOwnClaim = withBoard(ctx, (board) => {
+      const agentId = ctx.info.isMain ? COORDINATOR : store.agentAt(board, ctx.info.root)?.agent_id;
+      const item = first ? store.getItem(board, idArg(first)) : store.listItems(board)
+        .find((entry) => entry.item_status === 'claimed' && entry.item_owner === agentId && entry.item_parent_id === null);
+      return Boolean(agentId && item?.item_status === 'claimed' && item.item_owner === agentId);
+    });
+    // A named peer's check remains read-only. An owned check can renew, so acquire checkout
+    // authority before joining the gate queue, in the same order as submit and verify.
+    if (!renewsOwnClaim) return;
   }
   const info = repoInfo(io.cwd);
   let agent = info.isMain ? COORDINATOR : null;
@@ -1288,9 +1317,10 @@ function boardSetup(ctx, card, identity) {
  * a restart or a compaction, from the board rather than from a summary.
  *
  * @param {any} io
+ * @param {Awaited<ReturnType<typeof keepViewRunning>>} view what keeping the background view running did
  * @returns {number}
  */
-function resumeHere(io) {
+function resumeHere(io, view) {
   const ctx = context(io);
   const { root, isMain } = ctx.info;
   const mainRoot = primaryCheckoutRoot(ctx.info);
@@ -1359,6 +1389,9 @@ function resumeHere(io) {
   for (const problem of card.hookProblems) say(`${problem.message}; ${problem.next}`);
   const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
   say(`resume: ${me.displayName}${me.family ? ` [family ${me.family}]` : ''}, ${me.lane} lane${isMain ? ', the main checkout' : ''}, at ${root}`);
+  card.view = view;
+  // A view left running needs no line at every session start; a start, a busy port or a failure does.
+  if (view.state !== 'running' && backgroundViewLine(view)) say(backgroundViewLine(view));
   if (card.inbox) for (const line of coordinatorInboxLines(card.inbox, name, (at) => span(ctx, at), firstLine)) say(line);
   say(`New agent worktrees: ${card.newWorktreeLocation}`);
   card.setup = boardSetup(ctx, card, setupScope);
@@ -1570,62 +1603,6 @@ async function viewHere(io, values) {
   return 0;
 }
 
-/** Print a live or reused view link and the exact stop action for its owning process. */
-function reportView(io, view) {
-  io.result?.({ url: view.url, port: view.port, pid: view.pid, boundAt: view.boundAt, reused: view.reused });
-  io.say(`Pullboard view: ${view.url}`);
-  io.say(`Only this machine can reach it, and only with that link. To stop it: ${process.platform === 'win32' ? `taskkill /PID ${view.pid} /T` : `kill ${view.pid}`}`);
-}
-
-/** Start the view in a detached CLI child, forwarding only its bound address over IPC. */
-async function launchBackgroundView(io, port, projectRoot) {
-  const args = [fileURLToPath(new URL('../bin/pullboard.js', import.meta.url)), 'view', '--no-open'];
-  if (projectRoot) args.push('--project');
-  args.push('--port', String(port));
-  const child = spawn(process.execPath, args, {
-    cwd: projectRoot ?? io.cwd,
-    env: { ...process.env, PULLBOARD_VIEW_BACKGROUND_CHILD: '1' },
-    detached: true,
-    stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
-  });
-  let stderr = '';
-  child.stderr.setEncoding('utf8').on('data', (part) => { stderr += part; });
-  const startup = new Promise((resolveStartup, rejectStartup) => {
-    let settled = false;
-    const finish = (error, result) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      error ? rejectStartup(error) : resolveStartup(result);
-    };
-    const timer = setTimeout(() => finish(new Refused('VIEW_START', 'the view did not bind in time; run pullboard view in the foreground for details')),
-      35_000); // budget: the 30s registry lock ceiling plus 5s for local bind and IPC delivery.
-    child.on('message', (message) => {
-      if (message?.type === 'ready') finish(null, message);
-      else if (message?.type === 'startup-error') {
-        const prefix = `[${message.code}] `;
-        finish(new Refused(message.code, message.message.startsWith(prefix) ? message.message.slice(prefix.length) : message.message));
-      }
-    });
-    child.once('error', (error) => finish(new Refused('VIEW_START', `could not start the view: ${error.message}`)));
-    child.once('exit', (code, signal) => {
-      finish(new Refused('VIEW_START', `the view stopped before binding (exit ${code ?? signal ?? 'unknown'}): ${stderr.trim() || 'no startup details'}`));
-    });
-  });
-  try {
-    const view = await startup;
-    child.stderr.destroy();
-    child.unref();
-    child.disconnect();
-    reportView(io, { ...view, reused: false });
-    io.flush?.(0);
-    return 0;
-  } catch (error) {
-    child.kill('SIGTERM');
-    throw error;
-  }
-}
-
 /**
  * Serve MCP over stdio as this checkout's agent (A9). Stdout carries only the protocol, so the command
  * takes no --json; each tool call runs its own CLI command, with its own relay sync, through main.
@@ -1677,10 +1654,9 @@ function setupCommands(io, { first, second, rest = [], values }) {
   return {
     init: async () => {
       const info = repoInfo(io.cwd);
-      // A named blueprint is read and checked before anything is written, so an unknown name
-      // or a broken file or a URL leaves the repository untouched (#678). Past that, init adds the
-      // blueprint exactly as pullboard blueprint add does, through the same function.
-      const blueprint = values.blueprint === undefined ? null : readBlueprint(values.blueprint, io.cwd);
+      // Every blueprint is read and checked before anything is written: an unknown name, a broken file, a URL
+      // or a second product leaves the repo untouched (#678, #720). Then each is added as blueprint add does.
+      const blueprints = readBlueprints(values.blueprint ?? [], io.cwd, 'init', installedBlueprints(info.root));
       const model = optionalModel(values.model);
       const linked = relayLinked(info.root);
       const ctx = linked && model !== undefined ? context(io) : null;
@@ -1688,6 +1664,7 @@ function setupCommands(io, { first, second, rest = [], values }) {
       const notes = initRepo({
         info,
         model,
+        permissions: !values['no-permissions'],
         openBoardHere: () => store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), io.clock, { isMain: codeIsFromMain() }),
         /** Keep a linked coordinator's canonical identity without writing a clone-local path. */
         register: (board, options) => {
@@ -1708,24 +1685,26 @@ function setupCommands(io, { first, second, rest = [], values }) {
         { lane: COORDINATOR, path: info.root, model },
       ]));
       // Keep blueprint initialization and the person's unwritten lane proposals in the same result.
-      const added = blueprint ? await addBlueprintHere(io, values.blueprint, { report: false, blueprint }) : null;
-      io.result?.({ root: info.root, notes, proposedLanes: proposeLanes(info.root),
-        ...(added ? { blueprint: { name: added.blueprint.name, title: added.blueprint.title,
-          section: added.section, waiting: added.rows.length, items: added.items.length, gate: added.gate, checksNotRun: added.checksNotRun } } : {}) });
+      const landed = await landEach(blueprints, ({ reference, blueprint }, drafted) => addBlueprintHere(io, reference, { report: false, blueprint, drafted }));
+      const result = { root: info.root, notes, proposedLanes: proposeLanes(info.root),
+        ...(landed.length ? { blueprint: initBlueprintResult(landed[0]), blueprints: landed.map(initBlueprintResult) } : {}) };
+      io.result?.(result);
       const staging = notes.at(-1)?.startsWith('git add -f -- ') ? notes.at(-1) : null;
       (staging ? notes.slice(0, -1) : notes).forEach((note) => io.say(note));
-      if (added) {
-        io.say(`added the ${added.blueprint.title} blueprint: ${added.rows.length} ${added.rows.length === 1 ? 'row waits' : 'rows wait'} for your approval in SPEC.md (${added.section}), `
-          + `${added.items.length} starter ${added.items.length === 1 ? 'item' : 'items'} filed${added.proposedLanes.length ? ` in the ${added.proposedLanes.map((lane) => lane.name).join(' and ')} lane, proposed above and not written until the person accepts` : ''}${added.gate ? `, gate set to ${added.gate}` : ''}`);
-        for (const note of askedLaneNotes(added.items, loadConfig(info.root))) io.say(`  ${note}`);
-        if (added.checksNotRun.length) io.say(`  checks stored, not run: ${added.checksNotRun.map((id) => `#${id}`).join(', ')}; no check baseline ran, so read each check before work starts: pullboard show <id>`);
-      }
+      for (const added of landed) initBlueprintLines(added, askedLaneNotes(added.items, loadConfig(info.root))).forEach((line) => io.say(line));
       if (await registerProjectAndLink(info.root, new Date(), loadConfig(info.root), io)) io.say('registered this project on this machine, so pullboard view lists it');
+      // Once registered, a background view lists this board for pullboard.dev [H5,N26].
+      const view = await keepViewRunning();
+      io.result?.({ ...result, view });
+      const viewLine = backgroundViewLine(view);
+      if (viewLine) io.say(viewLine);
       io.say(agentSessionDigest()
         ? 'Next: run pullboard resume now to continue setup in this session; the new skills load next session, and setup does not need them.'
         : 'Next: ask your agent to set up Pullboard here; in Claude Code, start a new session first so it loads the Pullboard skills.');
+      // The offer comes before the staging line, which stays init's last line [I1,I2].
+      const code = await offerRelayAtInit(info.root, io);
       if (staging) io.say(`To commit Pullboard's files: ${staging}`);
-      return 0;
+      return code;
     },
     lane: () => {
       if (first !== 'add' || !second || rest.length || values.owns === undefined) {
@@ -1968,6 +1947,7 @@ function readCommands(io, { first, second, rest, values }) {
       io.say(JSON.stringify(withBoard(ctx, (board) => exportBoard(board)), null, 2));
       return 0;
     },
+    digest: () => digestCommand(io, { first, second, rest, values }, context(io)),
     import: () => {
       if (!first || second || rest.length) throw new Refused('USAGE', 'pullboard import <file>');
       const file = resolve(io.cwd, first);
@@ -1997,20 +1977,25 @@ function readCommands(io, { first, second, rest, values }) {
       ];
       const runners = runnerResourceStatus(loadMachineSettings().runners ?? []);
       const queue = gateQueueSettings();
-      io.result?.({ resources, runners, browserSlots, queue, memory });
+      const shortSlots = gateShortSlots();
+      io.result?.({ resources, runners, browserSlots, queue, memory, shortSlots });
       io.say(`browserSlots (machine setting): ${browserSlots}`);
       io.say(`machine queue order (gate.queue.reviewsFirst ${queue.reviewsFirst}): ${queue.reviewsFirst ? `landing, review, submit, other; a waiting run moves up one class every ${queue.agingMinutes} minutes` : 'landings first, then arrival'}`);
+      if (shortSlots) io.say(`gate.shortSlots (machine setting): ${shortSlots}; runs that name their test files may use them while every gate slot is busy`);
       if (memory) io.say(memory.line);
       if (!resources.length) io.say('no resources have been used');
       for (const resource of resources) {
         io.say(`${resource.name} (${resource.scope}, capacity ${resource.capacity})${resource.order === 'arrival' ? '; an older pullboard is waiting, so this line is in arrival order, landings first' : ''}`);
-        for (const holder of resource.holders) io.say(`  held by ${agentDisplayName(agents, ctx.config, holder.agent)}${holder.repo ? ` in ${holder.repo}` : ''}${resourceRunLabel(holder)} since ${holder.since}`);
-        resource.line.forEach((waiter, index) => io.say(`  ${index + 1}. waiting: ${agentDisplayName(agents, ctx.config, waiter.agent)}${waiter.repo ? ` in ${waiter.repo}` : ''}${resourceRunLabel(waiter)}; class ${waiter.queueClass}${waiter.agedFrom ? `, aged up from ${waiter.agedFrom}` : ''}`));
+        for (const holder of resource.holders) io.say(`  held by ${agentDisplayName(agents, ctx.config, holder.agent)}${holder.repo ? ` in ${holder.repo}` : ''}${resourceRunLabel(holder, shortSlots)} since ${holder.since}`);
+        resource.line.forEach((waiter, index) => io.say(`  ${index + 1}. waiting: ${agentDisplayName(agents, ctx.config, waiter.agent)}${waiter.repo ? ` in ${waiter.repo}` : ''}${resourceRunLabel(waiter, shortSlots)}; class ${waiter.queueClass}${waiter.agedFrom ? `, aged up from ${waiter.agedFrom}` : ''}`));
       }
       for (const runner of runners) io.say(`runner ${runner.host}: ${runner.inUse}/${runner.slots} slots, ${runner.browserInUse}/${runner.browser} browser${runner.unavailable ? ' (unavailable; re-register after checking the host)' : ''}`);
       return 0;
     },
-    resume: () => resumeHere(io),
+    resume: async () => {
+      repoInfo(io.cwd);
+      return resumeHere(io, await keepViewRunning());
+    },
     whoami: () => {
       const ctx = context(io);
       const me = withBoard(ctx, (board) => whoAmI(ctx, board));
@@ -2251,6 +2236,14 @@ function readCommands(io, { first, second, rest, values }) {
       }
       return 0;
     },
+    rigor: () => {
+      if (first || second || rest.length) throw new Refused('USAGE', 'pullboard rigor takes no arguments');
+      const ctx = context(io);
+      const report = withBoard(ctx, (board) => rigorReport(store.events(board), { person: store.PERSON }));
+      io.result?.(report);
+      for (const line of rigorLines(report)) io.say(line);
+      return 0;
+    },
     log: () => {
       const ctx = context(io);
       const itemId = first ? idArg(first) : undefined;
@@ -2301,6 +2294,7 @@ async function submitHere(ctx, id) {
   const policy = itemPolicy(root, held);
   const acceptedMain = mainPolicy(root);
   ctx = { ...ctx, config: policy.config };
+  withBoard(ctx, (board) => refuseProvesNothing(() => acceptedMain.config, board, store.getItem(board, id)));
   const dependencies = withBoard(ctx, board => dependencySnapshots(board.db, held));
   submissionPaths(root, held, headCommit(root), { mainCommit: acceptedMain.commit, dependencies });
   const { me, claimHead } = withBoard(ctx, (board) => {
@@ -2339,7 +2333,7 @@ async function submitHere(ctx, id) {
   // Doctrine counts only fall: accepted main's rules, at this exact commit (D1). No rule, no change.
   const doctrine = hasSubmitRules(root, acceptedMain.commit, acceptedMain.config.practice)
     ? await withGateSlot(root, () => holdDoctrine(root, { mainCommit: acceptedMain.commit, commit, practice: acceptedMain.config.practice, timeoutMs: acceptedMain.config.check?.timeoutMs }),
-      { itemCheck: true, agent: me.id, item: String(id), kind: 'doctrine', onWait: gateWaitReporter(ctx.io) })
+      { itemCheck: true, agent: me.id, item: String(id), kind: 'doctrine', onWait: queuedItemLease(ctx, held, me.id, 'build') })
     : [];
   for (const rule of doctrine) ctx.io.say(`doctrine: ${ruleLine(rule)}`);
   // Every submit proves its frozen check and reachable tests anew on this exact commit (V4,V16).
@@ -2348,7 +2342,7 @@ async function submitHere(ctx, id) {
     submitInvariants: acceptedMain.config.submitInvariants,
     // The accepted project runner interprets its current invariant files; candidate config cannot replace it.
     ...(acceptedMain.config.submitInvariants.length ? { affectedTests: acceptedMain.config.affectedTests } : {}) };
-  const gate = await runSubmitGate(root, submitConfig, { base: claimHead, trunk: acceptedMain.commit, check: frozenCheck(held), agent: me.id, item: String(id), onWait: gateWaitReporter(ctx.io), onBrowserFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
+  const gate = await runSubmitGate(root, submitConfig, { base: claimHead, trunk: acceptedMain.commit, check: frozenCheck(held), agent: me.id, item: String(id), onWait: queuedItemLease(ctx, held, me.id, 'build'), onBrowserFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
   if (!gate.isGreen) {
     const message = `the submission proof is red at ${commit.slice(0, 12)}; fix it, commit, submit again. ${submitGateReport(gate)}`;
     // No submission can follow this verdict. Read-only main comparisons must not retain the seat's write lease.
@@ -2396,12 +2390,12 @@ function reportSubmission(ctx, id, commit, gate, doctrine = []) {
  *
  * @param {any} io
  * @param {string} reference - A bundled blueprint name or a path to a blueprint file, relative to io.cwd.
- * @param {{ report?: boolean, blueprint?: ReturnType<typeof readBlueprint> }} [options]
+ * @param {{ report?: boolean, blueprint?: ReturnType<typeof readBlueprint>, drafted?: Map<string, string> }} [options] - drafted: see addBlueprint.
  * @returns {Promise<BlueprintAdded>}
  */
-export async function addBlueprintHere(io, reference, { report = true, blueprint = readBlueprint(reference, io.cwd) } = {}) {
+export async function addBlueprintHere(io, reference, { report = true, blueprint = readBlueprint(reference, io.cwd), drafted } = {}) {
   const ctx = context(io);
-  return await withBoard(ctx, async (board) => await addBlueprint(ctx, board, whoAmI(ctx, board), blueprint, { report }));
+  return await withBoard(ctx, async (board) => await addBlueprint(ctx, board, whoAmI(ctx, board), blueprint, { report, drafted }));
 }
 
 /**
@@ -2414,6 +2408,7 @@ export async function addBlueprintHere(io, reference, { report = true, blueprint
  * @property {boolean} marked - This blueprint version was already on the board, so nothing was added.
  * @property {number[]} checksNotRun - New items that carry a check; no check baseline ran for them.
  * @property {{ name: string, owns: string[] }[]} proposedLanes - Proposed, unwritten lanes new starters were filed in.
+ * @property {{ key: string, id: string }[]} shared - Keys that cite a row an earlier blueprint in the same command drafted.
  */
 
 /**
@@ -2426,11 +2421,12 @@ export async function addBlueprintHere(io, reference, { report = true, blueprint
  * @param {any} board
  * @param {{ id: string }} me
  * @param {import('./blueprints.js').Blueprint} blueprint
- * @param {{ report?: boolean }} [options] - With report false, print nothing and set no JSON result.
+ * @param {{ report?: boolean, result?: boolean, drafted?: Map<string, string> }} [options] - report false prints nothing and sets no
+ *   JSON result; result false prints but sets none. drafted: rows earlier blueprints of this command drafted, by text (#720).
  * @returns {Promise<BlueprintAdded>}
  */
-async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
-  const io = report ? ctx.io : { say: () => {} };
+async function addBlueprint(ctx, board, me, blueprint, { report = true, result = report, drafted = new Map() } = {}) {
+  const io = report ? (result ? ctx.io : { say: (text) => ctx.io.say(text) }) : { say: () => {} };
   const spec = loadSpec(ctx.info.root, ctx.config);
   if (!spec.exists) throw new Refused('NO_SPEC', `no ${ctx.config.spec}; run: pullboard init`);
   const malformed = [[spec.file, spec.problems], [ctx.doctrine.repo.file, ctx.doctrine.repo.problems]].find(([, problems]) => problems.length);
@@ -2442,7 +2438,8 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
   // only: nothing runs and nothing is fetched (#725).
   const plan = planBlueprint(landBlueprint(blueprint, repoAnswers(ctx.info.root)), { source, spec, doctrine: ctx.doctrine,
     existingItems: store.listItems(board, { all: true }).map((item) => ({ id: item.item_id, title: item.item_title, specIds: item.item_spec_ids ? item.item_spec_ids.split(',') : [] })),
-    gate: String(JSON.parse(configSource).gate ?? '') });
+    gate: String(JSON.parse(configSource).gate ?? ''), drafted });
+  for (const row of plan.rows) drafted.set(row.text, row.id);
   // Every starter is checked before anything is written, so a refusal leaves the board as it was.
   // Starters go to a build lane, never the coordinator's; a proposed lane is named, not written (#732).
   const proposals = proposeLanes(ctx.info.root, ctx.config);
@@ -2477,6 +2474,8 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
       item.after = afterKeys.map((before) => byKey[before]).filter(Boolean);
       const id = await ordered(ctx, board, 'addItem', [item]);
       byKey[key] = id;
+      // The starter keeps its blueprint's name, in the link #734 reads back (#720).
+      await ordered(ctx, board, 'appendFact', [id, { agentId: me.id, kind: 'note', text: blueprintStarterNote(blueprint, key) }]);
       added.push({ id, key, title: item.title, lane: item.lane, ...(asked ? { askedLane: asked } : {}), specIds: item.specIds, after: item.after, ...(item.check ? { check: item.check } : {}) });
     }
   } catch (error) {
@@ -2491,12 +2490,14 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
   if (plan.specAfter !== source && !files.some((file) => file.file === ctx.config.spec)) files.unshift({ file: ctx.config.spec });
   const rows = plan.rows.map(({ key, id, status, text, source }) => ({ key, id, status, text, ...(source ? { source } : {}) }));
   const summary = { blueprint: { name: blueprint.name, title: blueprint.title, version: blueprint.version },
-    section: plan.section.name, rows, items: added, gate: plan.gate, marked: plan.marked, proposedLanes: added.length ? proposedLanes : [],
+    section: plan.section.name, rows, items: added.map((item) => ({ ...item, blueprint: blueprint.name })), gate: plan.gate, shared: plan.shared, marked: plan.marked, proposedLanes: added.length ? proposedLanes : [],
     // Item checks are stored and never run during add; the caller tells the reader so.
     checksNotRun: added.filter((item) => item.check).map((item) => item.id) };
   io.result?.(summary);
   if (plan.marked) {
     io.say(`${blueprint.title} (version ${blueprint.version}) is already on this board; nothing added`);
+    // A board an older Pullboard set up gets the blueprint's kind recorded beside its marker (#720).
+    if (plan.specRows !== source) io.say(`  recorded its kind (${blueprint.kind ?? 'none'}) in ${ctx.config.spec}; commit ${ctx.config.spec}`);
     return summary;
   }
   io.say(`added ${blueprint.title} (version ${blueprint.version}) as drafts in ${ctx.config.spec}, section ${plan.section.name}`);
@@ -2506,6 +2507,7 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
   if (checked.length) io.say(`  checks stored, not run: ${checked.map((item) => `#${item.id}`).join(', ')}; no check baseline ran during add, so read each check before work starts: pullboard show <id>`);
   for (const note of [...askedLaneNotes(added, ctx.config), ...starterLaneNotes(summary.proposedLanes)]) io.say(`  ${note}`);
   if (plan.gate) io.say(`  gate set in ${CONFIG_FILE}: ${plan.gate}`);
+  for (const line of sharedRowLines(summary)) io.say(`  ${line}`);
   const changed = files.map((file) => file.file);
   io.say(`next: the person approves the rows in pullboard view or with pullboard spec approve <ids>${changed.length ? `; commit ${changed.join(' and ')}` : ''}`);
   return summary;
@@ -2535,7 +2537,7 @@ async function verifyHere(ctx, id, { second, values }) {
     const previous = recovered?.args[1];
     if (recovered?.operation === 'verify' && recovered.args[0] === id && previous?.agentId === me.id &&
         previous.decision === decision && previous.reason === values.reason &&
-        previous.note === (textArg(ctx.io, values, 'note') ?? '')) {
+        previous.note === (textArg(ctx.io, values, 'note') ?? '') && previous.cause === (decision === 'REJECT' ? values.cause : undefined)) {
       if (decision === 'ACCEPT' && !recordedRecovery(board, recovered)) {
         const item = store.getItem(board, id);
         const commit = resolveCommit(root, item.item_commit);
@@ -2571,7 +2573,10 @@ async function verifyHere(ctx, id, { second, values }) {
       refuseUnverifiedStack(root, board, item, commit, trunk);
       if (frozenCheck(item)) {
         const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(root, frozenCheck(item), { commit, onFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
-        check = await withGateSlot(root, (lease) => checkAtCommit(root, item, { waitMs: lease.waitMs, gateLease: lease }), { browser, agent: me.id, item: String(id), kind: 'review', itemCheck: true, onWait: gateWaitReporter(ctx.io) });
+        // The private check runs here, in a private clone, under this machine's gate markers; a runner
+        // lease cannot carry those markers, so the review queues for a local slot only [C7,V4].
+        const shortEligible = Boolean(await explicitCheckFiles(root, frozenCheck(item), { commit }));
+        check = await withGateSlot(root, (lease) => checkAtCommit(root, item, { waitMs: lease.waitMs, gateLease: lease }), { browser, remote: false, agent: me.id, item: String(id), kind: 'review', itemCheck: true, shortEligible, onWait: queuedItemLease(ctx, item, me.id, 'review') });
       } else {
         check = checkAtCommit(root, item);
       }
@@ -2594,6 +2599,7 @@ async function verifyHere(ctx, id, { second, values }) {
       decision,
       reason: values.reason,
       note: textArg(ctx.io, values, 'note') ?? '',
+      ...(decision === 'REJECT' && values.cause !== undefined ? { cause: values.cause } : {}),
       head,
       digest,
       policy: ctx.config.verify.policy,
@@ -2680,6 +2686,34 @@ function primaryCheckoutRoot(info) {
   return found.length === 1 ? found[0] : null;
 }
 
+/** A real runtime session may route across its own local seats; marker-only shells stay isolated. */
+function nextSessionSeats(ctx, board) {
+  if (ctx.info.isMain || ctx.io.personChannel === 'view' || ctx.io.personRequest
+    || !AGENT_SESSION_IDS.some((name) => Boolean(process.env[name]))) return null;
+  const digest = agentSessionDigest();
+  return digest ? localSessionSeats(ctx.info, { agents: store.listAgents(board), digest }) : null;
+}
+
+/** Choose or open the matching lane seat, retaining ordinary checkout ownership and lane guards. */
+async function nextSeatContext(ctx, board, me, item, seats) {
+  const available = seats.filter((agent) => agent.agent_lane === item.item_lane
+    && store.ROUTES.indexOf(agent.agent_route) >= store.ROUTES.indexOf(item.item_route));
+  const held = item.item_status === 'claimed';
+  let agent = held ? available.find((seat) => seat.agent_id === item.item_owner)
+    : available.find((seat) => seat.agent_id === me.id) ?? available[0];
+  let created = false;
+  if (!agent) {
+    let opened;
+    await worktreeFor({ ...ctx.io, say: () => {}, result: (value) => { opened = value; } }, item.item_lane, me.route, me.family, me.model);
+    agent = store.agentAt(board, opened.path);
+    created = true;
+  }
+  const target = agent.agent_path === ctx.info.root ? ctx : context({ ...ctx.io, cwd: agent.agent_path });
+  if (target.info.commonDir !== ctx.info.commonDir) throw new Refused('NOT_YOUR_CHECKOUT', 'the selected lane seat no longer belongs to this board; run pullboard next again');
+  await bindLocalSession(target.info, { agent: agent.agent_id, digest: agentSessionDigest() });
+  return { context: target, seat: { agent: agent.agent_id, lane: agent.agent_lane, path: target.info.root, created } };
+}
+
 /**
  * One loop of `next`: claim the next free item, or reserve the next review (V15). A claim that loses
  * a race to another agent is not an error; the caller looks again. A review is looked for and
@@ -2701,8 +2735,16 @@ async function nextOnce(ctx, values) {
       return await ordered(ctx, board, 'reserveNextReview', [{ agentId: me.id, lane: me.lane, leaseMs: ctx.config.reviewLeaseMs, policy: ctx.config.verify.policy, familyPolicy: ctx.config.verify.family, runnable: values.runnable, routes: values.routes }]);
     }
     const warm = warmFiles(ctx, board, me);
-    const { item, reasons, shared } = store.nextFor(board, { agentId: me.id, lane: me.lane, runnable: values.runnable, routes: values.routes, warm,
-      priority: mainRedReworkItems(ctx.info.root, board) });
+    const seats = nextSessionSeats(ctx, board);
+    const owners = new Set(seats?.map((seat) => seat.agent_id));
+    const heldItems = seats ? store.listItems(board).filter((item) => item.item_status === 'claimed'
+      && item.item_parent_id === null && owners.has(item.item_owner)
+      && store.ROUTES.indexOf(item.item_route) <= store.ROUTES.indexOf(me.route)) : [];
+    const heldItem = heldItems.find((item) => item.item_owner === me.id) ?? heldItems[0];
+    const { item, reasons, shared } = heldItem ? { item: heldItem, reasons: [], shared: [] }
+      : store.nextFor(board, { agentId: me.id, lane: me.lane, runnable: values.runnable, routes: values.routes, warm,
+        ...(seats ? { lanes: laneNames(ctx.config).filter((lane) => lane !== COORDINATOR) } : {}),
+        priority: mainRedReworkItems(ctx.info.root, board) });
     const held = item?.item_status === 'claimed';
     /** Offer only reviews this seat may give; a linked board previews its engine-27 verifier standing (#579). */
     const findOffer = () => store.reviewOffer(board, { agentId: me.id, lane: me.lane, policy: ctx.config.verify.policy,
@@ -2712,14 +2754,17 @@ async function nextOnce(ctx, values) {
     if (!item) return { reasons };
     const reviewSkipped = values.build && !held
       ? { offeredItem: offer?.item.item_id ?? null, ratio: ctx.config.verify.reviewRatio, ...store.reviewQueue(board) } : null;
+    const routed = seats ? await nextSeatContext(ctx, board, me, item, seats) : { context: ctx };
+    const target = routed.context;
+    const holder = whoAmI(target, board);
     try {
-      await ordered(ctx, board, 'claim', [item.item_id, { agentId: me.id, lane: me.lane, leaseMs: ctx.config.leaseMs, freeze: claimFreezer(ctx, board), head: headCommit(ctx.info.root), reviewSkipped }]);
+      await claimOrdered(target, board, [item.item_id, { agentId: holder.id, lane: holder.lane, leaseMs: target.config.leaseMs, freeze: claimFreezer(target, board), head: headCommit(target.info.root), reviewSkipped }]);
     } catch (error) {
-      if (error instanceof MainSpecMerged) return { retry: true, specMerged: { item: item.item_id, rows: error.rows } };
+      if (error instanceof MainSpecMerged) return { retry: true, ...routed, specMerged: { item: item.item_id, rows: error.rows } };
       if (error instanceof Refused && ['HELD', 'ITEM_HELD', 'BLOCKED', 'ONE_CLAIM'].includes(error.code)) return { retry: true };
       throw error;
     }
-    return { item: store.getItem(board, item.item_id), shared, held, reviewSkipped, reasons };
+    return { item: store.getItem(board, item.item_id), shared, held, reviewSkipped, reasons, ...routed };
   });
 }
 
@@ -2746,6 +2791,35 @@ function sayReviewOffer(ctx, found) {
 }
 
 /**
+ * Whether a shout is the person's own: a relay person request, or the local view acting as the
+ * coordinator (N26, B26). The view acting as a named agent, or an agent shell as the coordinator,
+ * still speaks as that agent.
+ *
+ * @param {any} io
+ * @param {{ id: string }} me
+ * @returns {boolean}
+ */
+function personShout(io, me) {
+  return io.personRequest?.phase === 'execute' || (io.personChannel === 'view' && me.id === COORDINATOR);
+}
+
+/**
+ * A review search that found nothing while another agent is still building: say so, with the wait,
+ * so a reviewer who starts first is not told NOTHING_FREE as if the board were idle [C7,P4].
+ *
+ * @param {any} ctx
+ */
+function refuseWhileBuilding(ctx) {
+  const building = withBoard(ctx, (board) => {
+    const me = whoAmI(ctx, board).id;
+    const items = store.listItems(board);
+    if (items.some((item) => item.item_status === 'submitted' && item.item_built_by !== me)) return [];
+    return items.filter((item) => item.item_status === 'claimed' && item.item_owner !== me).map((item) => `#${item.item_id}`).reverse();
+  });
+  if (building.length) throw new Refused('REVIEW_NOT_READY', `nothing to review yet; the builder is still working on ${building.join(', ')}`);
+}
+
+/**
  * `pullboard next` (N2): the whole start of an agent's loop in one command. With --wait, it keeps
  * looking until something is free, so an agent blocked on other work needs no polling of its own.
  *
@@ -2767,6 +2841,7 @@ async function nextHere(io, values) {
   const deadline = Date.now() + minutes * 60_000;
   for (;;) {
     const found = await nextOnce(ctx, values);
+    if (found.context) ctx = found.context;
     if (found.specMerged) {
       io.say(`merged main before claiming #${found.specMerged.item}: added spec rows ${found.specMerged.rows.join(', ')}`);
       ctx = context(io);
@@ -2776,7 +2851,7 @@ async function nextHere(io, values) {
       if (found.offer) { sayReviewOffer(ctx, found); return 0; }
       const item = found.item;
       const agents = withBoard(ctx, (board) => store.listAgents(board));
-      io.result?.({ item, review: Boolean(values.verify), held: Boolean(found.held), shared: found.shared ?? [], reasons: found.reasons ?? [] });
+      io.result?.({ item, review: Boolean(values.verify), held: Boolean(found.held), shared: found.shared ?? [], reasons: found.reasons ?? [], ...(found.seat ? { seat: found.seat } : {}) });
       for (const reason of found.reasons ?? []) io.say(displayedWait(reason, agents, ctx.config));
       const here = cdTo(ctx.info.root);
       const as = ctx.info.isMain ? ' --as coordinator' : '';
@@ -2789,6 +2864,7 @@ async function nextHere(io, values) {
       } else {
         if (found.reviewSkipped) io.say(`${reviewQueueLine(ctx, found.reviewSkipped)}; explicit build intent recorded with this claim`);
         io.say(`${found.held ? 'you hold' : 'claimed'} #${item.item_id}: ${item.item_title}`);
+        if (found.seat) io.say(`${found.seat.created ? 'opened' : 'work in'} ${found.seat.agent}, ${found.seat.lane} lane: ${here}`);
         if (found.shared?.length) io.say(`it touches ${found.shared.length === 1 ? 'a file' : `${found.shared.length} files`} you worked in recently: ${found.shared.slice(0, 4).join(', ')}`);
         if (item.item_criterion) io.say(`criterion: ${item.item_criterion}`);
         if (item.item_check) io.say(`check: ${item.item_check}   (run it before you submit)`);
@@ -2799,6 +2875,7 @@ async function nextHere(io, values) {
       return 0;
     }
     if (!found.retry && Date.now() >= deadline) {
+      if (values.verify) refuseWhileBuilding(ctx);
       const waited = minutes ? ` after ${minutes} minutes` : '';
       const agents = withBoard(ctx, (board) => store.listAgents(board));
       const repair = `${waited}. To keep looking: pullboard next --wait 9${values.verify ? ' --verify' : ''} (minutes; give the command a ten-minute timeout)`;
@@ -2886,18 +2963,24 @@ function workCommands(io, args) {
   };
   return {
     blueprint: () => act(async (ctx, board, me) => {
-      if (first !== 'add' || !second || rest.length) {
-        throw new Refused('USAGE', `pullboard blueprint add <name or file> | save [file]; bundled: ${bundledBlueprints().join(', ')}`);
-      }
-      await addBlueprint(ctx, board, me, readBlueprint(second, io.cwd));
+      const references = [...(second ? [second] : []), ...(values.blueprint ?? [])];
+      if (first !== 'add' || !references.length || rest.length) throw new Refused('USAGE', `pullboard blueprint add <name or file> [--blueprint <name or file>]... | save [file]; bundled: ${bundledBlueprints().join(', ')}`);
+      // Several blueprints land in the order given, as one result; one lands exactly as before (#720).
+      const listed = readBlueprints(references, io.cwd, 'blueprint add', installedBlueprints(ctx.info.root));
+      const landed = await landEach(listed, ({ blueprint }, drafted) => addBlueprint(ctx, board, me, blueprint, { result: listed.length === 1, drafted }));
+      if (listed.length > 1) io.result?.(combinedSummary(landed));
       return 0;
     }),
     fact: () => act(async (ctx, board, me) => {
-      if (!first || !second || rest.length !== 1) throw new Refused('USAGE', 'pullboard fact <id> <kind> <text> [--supersedes <fact-id>] [--ref path:lines@full-sha] [--implies <ids>]');
+      if (!first || !second || rest.length !== 1) throw new Refused('USAGE', 'pullboard fact <id> <kind> <text> [--supersedes <fact-id>] [--ref path:lines@full-sha] [--implies <ids>] [--cause <key> --never-again --as person]');
       const id = idArg(first);
       const implies = parseImplies(values.implies);
+      const asPerson = values.as === 'person' && personMode(ctx, me, values);
+      if (asPerson) requirePersonChannel(ctx.io.personChannel);
+      const marked = asPerson || values['never-again'] || values.cause !== undefined
+        ? { cause: values.cause ?? null, neverAgain: Boolean(values['never-again']), asPerson, channel: ctx.io.personChannel ?? 'terminal' } : {};
       const fact = await ordered(ctx, board, 'appendFact', [id, { agentId: me.id, kind: second,
-        text: rest[0], supersedes: values.supersedes ?? null, ref: values.ref ?? null, ...(implies ? { implies } : {}) }]);
+        text: rest[0], supersedes: values.supersedes ?? null, ref: values.ref ?? null, ...(implies ? { implies } : {}), ...marked }]);
       io.result?.({ item: id, fact });
       io.say(`fact ${fact.id} appended to #${id} as ${fact.kind}`);
       return 0;
@@ -3033,10 +3116,11 @@ function workCommands(io, args) {
       io.say(`#${id} escalated ${moved.from} -> ${moved.to}; it is open for a ${moved.to} agent`);
       return 0;
     }),
-    run: () => runItems(io, values, { context, withBoard, whoAmI, nextOnce, submitHere, freezer, ordered }),
+    run: () => runItems(io, values, { context, withBoard, whoAmI, nextOnce, submitHere, freezer, ordered, claim: claimOrdered }),
     sweep: () => act((ctx, board, me) => sweepHere(ctx, board, me, values)),
     next: () => nextHere(io, { ...values, verifyId: first }),
     check: async () => {
+      if (first === 'accept') return checkAcceptCommand(io, second, rest, { context, withBoard, whoAmI, ordered, idArg });
       const ctx = context(io);
       const { item, author, caller, agents } = withBoard(ctx, (board) => {
         const me = first ? (ctx.info.isMain ? { id: COORDINATOR } : { id: store.agentAt(board, ctx.info.root)?.agent_id }) : whoAmI(ctx, board);
@@ -3063,7 +3147,8 @@ function workCommands(io, args) {
         }
       }
       const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(ctx.info.root, check, { onFallback: browserAdmissionReporter(io, values.json) });
-      const run = await withGateSlot(ctx.info.root, (lease) => runProfiledShell(ctx.info.root, check, { waitMs: lease.waitMs, artifactPrefix: `pullboard-check-${item.item_id}`, persistLog: true, gateLease: lease }), { browser, agent: caller, item: String(item.item_id), kind: 'check', itemCheck: true, onWait: gateWaitReporter(io) });
+      const shortEligible = Boolean(await explicitCheckFiles(ctx.info.root, check));
+      const run = await withGateSlot(ctx.info.root, (lease) => runProfiledShell(ctx.info.root, check, { waitMs: lease.waitMs, artifactPrefix: `pullboard-check-${item.item_id}`, persistLog: true, gateLease: lease }), { browser, agent: caller, item: String(item.item_id), kind: 'check', itemCheck: true, shortEligible, onWait: queuedItemLease(ctx, item, caller, 'build') });
       refuseSandboxBlocked(run);
       io.result?.({ id: item.item_id, green: run.isGreen, seconds: run.seconds, check, by, report: run.isGreen ? '' : digestOf(run.output) });
       const timings = timingDigest(run.profile);
@@ -3082,7 +3167,7 @@ function workCommands(io, args) {
       let result;
       for (;;) {
         try {
-          result = await ordered(ctx, board, 'claim', [id, { agentId: me.id, lane: me.lane, leaseMs: ctx.config.leaseMs, freeze: claimFreezer(ctx, board), head: headCommit(ctx.info.root) }]);
+          result = await claimOrdered(ctx, board, [id, { agentId: me.id, lane: me.lane, leaseMs: ctx.config.leaseMs, freeze: claimFreezer(ctx, board), head: headCommit(ctx.info.root) }]);
           break;
         } catch (error) {
           if (!(error instanceof MainSpecMerged)) throw error;
@@ -3199,7 +3284,8 @@ function workCommands(io, args) {
       return 0;
     }),
     reopen: () => act(async (ctx, board, me) => {
-      const result = await ordered(ctx, board, 'reopen', [idArg(first), { agentId: me.id, note: textArg(io, values, 'note') ?? '' }]);
+      const result = await ordered(ctx, board, 'reopen', [idArg(first), { agentId: me.id, note: textArg(io, values, 'note') ?? '',
+        ...(values.cause !== undefined ? { cause: values.cause } : {}) }]);
       io.result?.(result);
       io.say(result.landingFailure
         ? `reopened #${first} after landing failure; previous accept remains recorded at ${result.commit.slice(0, 12)}`
@@ -3212,7 +3298,7 @@ function workCommands(io, args) {
       const hasRecipient = first && recipients.includes(first);
       const to = hasRecipient ? first : values.decision ? (me.id === COORDINATOR ? 'person' : COORDINATOR) : first ?? '';
       const text = [hasRecipient ? second : first, ...(hasRecipient ? rest : [second, ...rest])].filter(Boolean).join(' ');
-      const id = await ordered(ctx, board, 'shout', [{ from: io.personRequest?.phase === 'execute' ? store.PERSON : me.id, to, text, lanes: laneNames(ctx.config), decision: Boolean(values.decision), evidence }]);
+      const id = await ordered(ctx, board, 'shout', [{ from: personShout(io, me) ? store.PERSON : me.id, to, text, lanes: laneNames(ctx.config), decision: Boolean(values.decision), evidence }]);
       io.result?.({ id, decision: Boolean(values.decision) });
       const agents = store.listAgents(board);
       const recipient = agents.some((agent) => agent.agent_id === to) ? agentDisplayName(agents, ctx.config, to) : to;
@@ -3245,16 +3331,61 @@ function workCommands(io, args) {
   };
 }
 
-/** Label the kind and item of a queued run without hiding older queue-class labels. */
-function resourceRunLabel(entry) {
+/** Label the kind and item of a queued run without hiding older queue-class labels.
+ * With short slots on, a holder also names the slot it holds and a waiter says it may take a short one.
+ */
+function resourceRunLabel(entry, shortSlots = 0) {
   const priority = entry.landing ? 'landing' : entry.itemCheck ? 'item check' : entry.diagnostic ? 'diagnostic' : '';
-  const details = [entry.kind !== priority ? entry.kind : '', entry.item ? `#${entry.item}` : '', entry.browser ? 'browser' : ''].filter(Boolean);
+  const slot = !shortSlots ? '' : entry.slot ? `${entry.slot} slot` : entry.requestedSlot === 'short-eligible' ? 'may use a short slot' : '';
+  const details = [slot, entry.kind !== priority ? entry.kind : '', entry.item ? `#${entry.item}` : '', entry.leaseUntil ? `lease until ${entry.leaseUntil}` : '', entry.browser ? 'browser' : ''].filter(Boolean);
   return `${priority ? ` (${priority})` : ''}${details.length ? ` (${details.join(', ')})` : ''}`;
 }
 
 /** Name a known board seat for queue diagnostics without requiring an unjoined checkout to join. */
 function resourceAgent(ctx) {
   return ctx.info.isMain ? COORDINATOR : withBoard(ctx, board => store.agentAt(board, ctx.info.root)?.agent_id);
+}
+
+/** Keep only this queued command's live item lease, using ordinary ordered board moves. */
+function queuedItemLease(ctx, initial, agentId, kind) {
+  const report = gateWaitReporter(ctx.io);
+  // Naming somebody else's check remains read-only; it never extends their build claim.
+  if (kind === 'build' && (initial.item_status !== 'claimed' || initial.item_owner !== agentId)) return report;
+  const review = kind === 'review';
+  if (review && initial.item_review_by !== agentId) return report;
+  const field = review ? 'item_review_until' : 'item_lease_until';
+  const owner = review ? 'item_review_by' : 'item_owner';
+  const status = review ? 'submitted' : 'claimed';
+  const leaseMs = review ? ctx.config.reviewLeaseMs : ctx.config.leaseMs;
+  const expected = { digest: initial.item_frozen_digest, commit: initial.item_commit };
+  let confirmedLeaseUntil = '';
+  return async (state) => {
+    if (!state.admitted) report(state);
+    const now = ctx.clock.now().getTime();
+    // Queue polling is frequent; reopen the board only when renewal is due or admission starts.
+    if (!state.admitted && Date.parse(confirmedLeaseUntil) - now > leaseMs / 2) {
+      return { leaseUntil: confirmedLeaseUntil };
+    }
+    return await withBoard(ctx, async (board) => {
+      const current = store.getItem(board, initial.item_id);
+      const expires = Date.parse(current[field]);
+      if (current.item_status !== status || current[owner] !== agentId || !Number.isFinite(expires) || expires <= now
+        || current.item_frozen_digest !== expected.digest || current.item_commit !== expected.commit) {
+        throw new Refused('ITEM_LEASE_LOST', `the queued ${review ? 'review' : 'build'} lease for #${initial.item_id} changed or expired; claim or reserve the item again before retrying`);
+      }
+      if (state.admitted || expires - now <= leaseMs / 2) {
+        const result = await ordered(ctx, board, review ? 'reserveReview' : 'claim', [initial.item_id, {
+          agentId, leaseMs,
+          ...(review ? { policy: ctx.config.verify.policy, familyPolicy: ctx.config.verify.family }
+            : { lane: current.item_lane, freeze: claimFreezer(ctx), head: headCommit(ctx.info.root) }),
+        }]);
+        confirmedLeaseUntil = review ? result.item_review_until : result.leaseUntil;
+        return { leaseUntil: confirmedLeaseUntil };
+      }
+      confirmedLeaseUntil = current[field];
+      return { leaseUntil: confirmedLeaseUntil };
+    });
+  };
 }
 
 /** Print the file and reason when conservative uncertainty reserves browser capacity.
@@ -3306,17 +3437,31 @@ function settingsCommand(io, { first, second, rest }) {
     const settings = loadMachineSettings();
     const queue = gateQueueSettings();
     // The result names the queue order in effect, defaults included; the file keeps only what was set.
-    io.result?.({ settings: { ...settings, gate: { ...settings.gate, queue: { ...settings.gate?.queue, ...queue } } }, memoryFloorMB: memoryFloorMB() });
+    const offerAtInit = relayOfferEnabled();
+    const shortSlots = gateShortSlots();
+    io.result?.({ settings: { ...settings, gate: { ...settings.gate, queue: { ...settings.gate?.queue, ...queue }, shortSlots }, relay: { ...settings.relay, offerAtInit } }, memoryFloorMB: memoryFloorMB() });
     io.say(`gateSlots: ${settings.gateSlots}`);
     io.say(`browserSlots: ${settings.browserSlots}`);
     io.say(`gate.queue.reviewsFirst: ${queue.reviewsFirst}${queue.reviewsFirst ? '' : ' (landings first, then arrival order)'}`);
     io.say(`gate.queue.currentReleaseFirst: ${queue.currentReleaseFirst}${queue.currentReleaseFirst ? '' : ' (release priority is off)'}`);
     io.say(`gate.queue.agingMinutes: ${queue.agingMinutes}${queue.reviewsFirst || queue.currentReleaseFirst ? '' : ' (used only while reviewsFirst or currentReleaseFirst is true)'}`);
     io.say(`gate.memoryFloorMB: ${memoryFloorMB() ?? 'off (the gate queue does not wait for memory)'}`);
+    io.say(`view.background: ${settings.view?.background !== false}${settings.view?.background === false ? ' (init and resume leave the view to you)' : ' (init and resume keep pullboard view running for pullboard.dev)'}`);
+    io.say(`relay.offerAtInit: ${offerAtInit}${offerAtInit ? ' (init asks once to share your boards with your phone)' : ' (init stays quiet about sharing)'}`);
+    io.say(`gate.shortSlots: ${shortSlots}${shortSlots ? '' : ' (off; runs that name their test files wait for a gate slot)'}`);
     return 0;
   }
-  if (!['gateSlots', 'browserSlots'].includes(first) || !second || rest.length) {
-    throw new Refused('USAGE', 'pullboard settings gateSlots <n> | browserSlots <n>');
+  if (!['gateSlots', 'browserSlots', 'gate.shortSlots'].includes(first) || !second || rest.length) {
+    throw new Refused('USAGE', 'pullboard settings gateSlots <n> | browserSlots <n> | gate.shortSlots <n>');
+  }
+  if (first === 'gate.shortSlots') {
+    if (!/^(?:0|[1-9]\d*)$/u.test(second) || !Number.isSafeInteger(Number(second))) {
+      throw new Refused('BAD_SHORT_SLOTS', 'gate.shortSlots must be a whole number, 0 or more; run pullboard settings gate.shortSlots <n>');
+    }
+    const settings = setGateShortSlots(Number(second));
+    io.result?.({ settings });
+    io.say(`gate.shortSlots set to ${settings.gate.shortSlots}`);
+    return 0;
   }
   if (!/^[1-9]\d*$/u.test(second) || !Number.isSafeInteger(Number(second))) {
     if (first === 'gateSlots') throw new Refused('USAGE', 'pullboard settings gateSlots <positive integer>');
@@ -3411,6 +3556,9 @@ async function specCommand(io, { first, second, rest, values }) {
   const practice = ctx.doctrine;
   const signoffs = readSignoffs(ctx.info.root);
   if (first === 'draft') {
+    if (second && /\|\s*gate\s*:/iu.test(second)) {
+      throw new Refused('INLINE_GATE', 'move the gate after the requirement as --gate "<check>"');
+    }
     if (!second?.trim() || rest.length || /[\r\n|]/u.test(second)) {
       throw new Refused('USAGE', 'give one nonempty, single-line requirement: pullboard spec draft "<text>"');
     }
@@ -3811,8 +3959,8 @@ async function runCommand(argv, io) {
   }
   const args = { first, second, rest, values };
   try {
-    if (values.as === 'person' && !['answer', 'decisions'].includes(command)) {
-      throw new Refused('USAGE', '--as person works only with pullboard answer or decisions');
+    if (values.as === 'person' && !['answer', 'decisions', 'fact'].includes(command)) {
+      throw new Refused('USAGE', '--as person works only with pullboard answer, decisions, or fact --never-again');
     }
     if (command === 'tour') return tour(io);
     if (command === 'lifecycle') {
@@ -3875,21 +4023,7 @@ async function runCommand(argv, io) {
       }
       if (values.all) {
         if (first !== 'on' || second || rest.length) throw new Refused('USAGE', 'pullboard relay on --all [--url <address>]');
-        const controller = new AbortController();
-        const cancelSignIn = () => controller.abort();
-        process.once('SIGINT', cancelSignIn);
-        process.once('SIGTERM', cancelSignIn);
-        let result;
-        try { result = await relayOnAll(values.url, io, { signal: controller.signal }); }
-        finally { process.off('SIGINT', cancelSignIn); process.off('SIGTERM', cancelSignIn); }
-        io.result?.(result);
-        if (result.outcome) {
-          io.say(result.outcome === 'declined' ? 'GitHub sign-in was declined; no boards were linked.'
-            : result.outcome === 'expired' ? 'GitHub device sign-in expired; no boards were linked.'
-              : 'GitHub device sign-in was cancelled; no boards were linked.');
-          return 1;
-        }
-        return result.failed.length ? 1 : 0;
+        return await relayOnAllCommand(values.url, io);
       }
       if (['tokens', 'revoke'].includes(first)) {
         if (rest.length || values.url || (first === 'tokens' && second) || (first === 'revoke' && !second)) {
@@ -3946,6 +4080,11 @@ async function runCommand(argv, io) {
       return 0;
     }
     if (command === 'gate') {
+      if (first !== undefined || second !== undefined || rest.length > 0) {
+        const words = [first, second, ...rest].filter((word) => word !== undefined);
+        const next = 'use pullboard resources for status, or pullboard gate with no extra words to run the gate';
+        throw new Refused('GATE_ARGUMENT', `pullboard gate does not accept extra words: ${words.join(' ')}. Use pullboard resources for status, or pullboard gate with no extra words to run the gate.`, next);
+      }
       const ctx = context(io);
       let config;
       try { config = mainPolicy(ctx.info.root).config; }
@@ -4055,7 +4194,7 @@ async function runMain(argv, streams) {
       positionals: parsed.positionals.slice(1),
       values: Object.fromEntries(Object.keys(parsed.values).filter(key => key !== 'json').sort().map(key => [key, parsed.values[key]])) };
     sync = Boolean(command) && !parsed.values.help && !parsed.values.version
-      && !['help', 'version', 'hook', 'init', 'relay', 'tour', 'mcp', 'health', 'watch'].includes(command)
+      && !['help', 'version', 'hook', 'init', 'relay', 'tour', 'mcp', 'health', 'watch', 'digest'].includes(command)
       // A coordinator declaration on a linked clone must refuse before auto-link or relay sync.
       && !(command === 'join' && parsed.positionals[1] === COORDINATOR);
     needsRepo = !(parsed.values.help || parsed.values.version || command === 'help' || command === 'version');

@@ -12,7 +12,7 @@ export function relayMoveActor(move) {
   if (['holdLane', 'releaseLane'].includes(move.operation) && args[1]?.asPerson) return 'person';
   if (move.operation === 'release') return args[1] ?? null;
   if (['reserveNextReview', 'addMilestone', 'recordRowDecisions', 'applyRowDecisions', 'recordLandingBatch', 'recordLandingWaiver', 'recordLandingFlake', 'finishLandingBatch'].includes(move.operation)) return args[0]?.agentId ?? null;
-  if (['completeCheckBaseline', 'appendFact', 'editItem', 'escalate', 'recordAttempt', 'claim', 'submit', 'reserveReview', 'verify', 'merged', 'withdraw', 'refreeze',
+  if (['acceptCheck', 'completeCheckBaseline', 'appendFact', 'editItem', 'escalate', 'recordAttempt', 'claim', 'submit', 'reserveReview', 'verify', 'merged', 'withdraw', 'refreeze',
     'passDecision', 'answerDecision', 'holdLane', 'releaseLane', 'holdItem', 'releaseItemHold', 'reopen', 'editMilestoneItems', 'moveMilestone', 'editMilestone', 'removeMilestone'].includes(move.operation)) return args[1]?.agentId ?? null;
   return null;
 }
@@ -25,6 +25,16 @@ export function validRelaySender(sender) {
     (sender.policy === undefined || Number.isSafeInteger(sender.policy) && sender.policy > 0) &&
     (sender.root === undefined || sender.root === true) &&
     (sender.lineage === undefined || typeof sender.lineage === 'string' && sender.lineage.length > 0 && sender.lineage.length <= 64));
+}
+
+/**
+ * True for a fact move that claims the person's authority: a never-again, a cause key, or person
+ * mode (#713). Only an authenticated person sender may make it, whatever channel it names, so no
+ * agent, coordinator seat or machine credential can make rigor list a cause as the person's.
+ */
+function personFact(move) {
+  const options = move?.operation === 'appendFact' ? move.args?.[1] : null;
+  return Boolean(options && typeof options === 'object' && (options.asPerson || options.neverAgain || (options.cause !== undefined && options.cause !== null)));
 }
 
 /** Make the same authorization decision on every device, without inspecting its shell or checkout. */
@@ -40,6 +50,9 @@ export function relaySenderProblem(move, sender, kind, { phoneReceipt = false } 
     return new Refused('RELAY_ANSWER', 'a sealed shout cannot answer or pass a decision; use pullboard answer <id> "<answer>" or pullboard pass <id> --note "<reason>" so the decision rules are checked');
   }
   if (sender.kind === 'person') return null;
+  if (personFact(move)) {
+    return new Refused('RELAY_PERSON_ONLY', `${sender.kind === 'agent' ? `agent ${sender.agent}` : 'a machine'} cannot record the person's never-again; the person marks it from their own session`);
+  }
   if (sender.kind === 'machine') {
     if (kind === 'snapshot') return null;
     if (kind === 'move' && move?.engine >= 6 && (phoneReceipt ||

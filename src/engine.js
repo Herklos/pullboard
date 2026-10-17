@@ -5,12 +5,13 @@ import { COORDINATOR } from './config.js';
 import { recordedRefusal } from './recorded-refusal.js';
 import { BAR_ENGINE, carriesBarReason } from './bar-corrections.js';
 import { carriesImplies, IMPLIES_ENGINE } from './implies.js';
-import { ENGINE_VERSION, VERIFIER_STANDING_ENGINE } from './machine.js';
+import { CHECK_ACCEPT_ENGINE } from './check-accept.js';
+import { CAUSE_ENGINE, ENGINE_VERSION, VERIFIER_STANDING_ENGINE } from './machine.js';
 import { Refused } from './refused.js';
 import { requestMoveProblem, recordRequestMove } from './relay-requests.js';
 import { relayMoveActor, relaySenderProblem, validRelaySender } from './relay-sender.js';
 
-const ITEM_ID_FIRST_ARGUMENT = new Set(['editItem', 'escalate', 'recordAttempt', 'claim', 'release', 'submit', 'reserveReview', 'verify', 'merged', 'withdraw', 'refreeze', 'reopen', 'appendFact']);
+const ITEM_ID_FIRST_ARGUMENT = new Set(['acceptCheck', 'editItem', 'escalate', 'recordAttempt', 'claim', 'release', 'submit', 'reserveReview', 'verify', 'merged', 'withdraw', 'refreeze', 'reopen', 'appendFact']);
 
 /** Only these public board operations may be requested by an encrypted move. */
 export const ENGINE_OPERATIONS = Object.freeze([
@@ -19,15 +20,19 @@ export const ENGINE_OPERATIONS = Object.freeze([
   'withdraw', 'refreeze', 'reopen', 'shout', 'passDecision', 'answerDecision', 'holdLane', 'releaseLane', 'holdItem', 'releaseItemHold',
   'addMilestone', 'editMilestoneItems', 'moveMilestone', 'editMilestone', 'removeMilestone',
   'recordRowDecisions', 'applyRowDecisions', 'appendFact',
-  'recordLandingBatch', 'recordLandingWaiver', 'recordLandingFlake', 'finishLandingBatch',
+  'recordLandingBatch', 'recordLandingWaiver', 'recordLandingFlake', 'finishLandingBatch', 'acceptCheck',
 ]);
 
 /** Engine version at which each ordered operation first has stable replay semantics. */
-const OPERATION_ENGINE = Object.freeze({ reopen: 8, recordLandingBatch: 8, recordLandingWaiver: 8, recordLandingFlake: 8, finishLandingBatch: 8 });
+const OPERATION_ENGINE = Object.freeze({ reopen: 8, recordLandingBatch: 8, recordLandingWaiver: 8, recordLandingFlake: 8, finishLandingBatch: 8, acceptCheck: CHECK_ACCEPT_ENGINE });
 
-/** Dependency edits add engine-10 meaning, edit reasons engine-19 and implied items engine-20, without changing ordinary historical envelopes. */
+/** Dependency edits add engine-10 meaning, edit reasons engine-19, implied items engine-20, and a
+ * cause key on a reject, reopen or person fact engine-30 (#713), without changing ordinary historical envelopes.
+ */
 function minimumOperationEngine(operation, args) {
   const options = args[1];
+  const given = (name) => Boolean(options && typeof options === 'object' && Object.hasOwn(options, name) && options[name] !== undefined && options[name] !== null && options[name] !== false);
+  if (['verify', 'reopen', 'appendFact'].includes(operation) && (given('cause') || given('neverAgain') || given('asPerson'))) return CAUSE_ENGINE;
   if (carriesImplies(operation, args)) return IMPLIES_ENGINE;
   if (carriesBarReason(operation, args)) return BAR_ENGINE;
   return operation === 'editItem' && options && Object.hasOwn(options, 'after') && options.after !== undefined
@@ -187,7 +192,7 @@ export function refuseRelayMove(board, move, { sequence, at, sender, kind, code,
 }
 
 /**
- * Bind an engine-27 registration to the relay's receipt (#579). A seat made by another seat names
+ * Bind an engine-35 registration to the relay's receipt (#579). A seat made by another seat names
  * itself in the move (`id`) and arrives with the receipt the relay issued its first token under:
  * same target, the authenticated creator, this position and these exact sealed bytes. A join no
  * seat made is machine-sent and carries no receipt; a receipt on any other move is refused.

@@ -1,6 +1,7 @@
 /** Set up a machine once, enroll its phone in the foreground and link later registrations [H5,H17]. */
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { createInterface } from 'node:readline';
 import * as store from './board.js';
 import { phoneProposal, publishPhoneApproval, warnPhoneApproval } from './relay-phone.js';
 import { openApproval, restoreLinkReply } from './relay-approval.js';
@@ -8,9 +9,18 @@ import { requirePersonChannel } from './person.js';
 import { codeIsFromMain, repoInfo } from './git.js';
 import { listApiProjects } from './projects.js';
 import { acceptDeviceEnrollment, beginDeviceEnrollment, readRelayMachine, relayMachineOwner, updateRelayMachine } from './relay-machine.js';
-import { deliverDeviceWraps, relayDeviceRequest, relayMachineSignIn, relayMachineContext, relayRevokeDevice, relayOn, relayStatus, originRepository, revokeRelayPersonSession } from './relay.js';
+import { deliverDeviceWraps, relayDeviceRequest, relayLinked, relayMachineSignIn, relayMachineContext, relayRevokeDevice, relayOn, relayStatus, originRepository, revokeRelayPersonSession } from './relay.js';
 import { terminalQr } from './qr.js';
+import { RELAY_LATER, RELAY_OFFER_QUESTION, acceptsRelayOffer, relayOfferAtInit } from './init.js';
+import { relayOfferEnabled } from './settings.js';
 import { Refused } from './refused.js';
+
+/** Say which paired phone must approve a new board's link, and when the request ends in this computer's time. */
+function approvalWait(name, pending, devices) {
+  const phone = devices.find(entry => entry.deviceId === pending.context.device)?.label ?? 'your paired phone';
+  const expires = new Date(pending.context.expires).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZoneName: 'short' });
+  return 'waiting for phone approval: approve linking ' + name + ' on ' + phone + ' by ' + expires;
+}
 
 /** Return local opt-in gaps without contacting the relay or renewing a person session. */
 export function unlinkedRelayProjects() {
@@ -19,7 +29,7 @@ export function unlinkedRelayProjects() {
   return listApiProjects().filter(project => !machine.excluded.includes(project.root)).flatMap(project => {
     try { if (relayStatus(project.root).linked) return []; } catch { /* Preserve the registered project as a named finding. */ }
     const pending = machine.approvals.find(entry => entry.root === project.root);
-    return [{ code: pending ? 'PHONE_APPROVAL_PENDING' : 'RELAY_NOT_LINKED', message: pending ? 'waiting for phone approval: ' + project.name + '; expires ' + new Date(pending.context.expires).toISOString() : 'not linked: ' + project.name + '; run pullboard relay on --all', next: pending && Date.now() < pending.context.expires ? 'Approve the named link on your paired phone.' : 'pullboard relay on --all' }];
+    return [{ code: pending ? 'PHONE_APPROVAL_PENDING' : 'RELAY_NOT_LINKED', message: pending ? approvalWait(project.name, pending, machine.devices) : 'not linked: ' + project.name + '; run pullboard relay on --all', next: pending && Date.now() < pending.context.expires ? 'Approve the named link on your paired phone.' : 'pullboard relay on --all' }];
   });
 }
 
@@ -27,6 +37,20 @@ export function unlinkedRelayProjects() {
 function projectBoard(root) {
   const board = store.openBoard(join(repoInfo(root).commonDir, 'pullboard', 'board.sqlite'), undefined, { isMain: codeIsFromMain() });
   try { return store.boardId(board); } finally { store.closeBoard(board); }
+}
+
+/**
+ * Open the credential the phone sealed to this machine's reply key and link with it. relayOn
+ * uploads the sealed snapshot, then wraps the board key to each paired phone, so the key leaves
+ * this machine only sealed to the phone the person approved from.
+ */
+async function finishApprovedLink(project, pending, source, approval, io) {
+  const privateKey = await restoreLinkReply(pending.replyKey);
+  const result = await openApproval(privateKey, JSON.parse(Buffer.from(approval.response, 'base64url').toString('utf8')), pending.context, 'reply');
+  const credential = { ...result.credential, account: pending.context.account, url: source.url };
+  const linked = await relayOn(project, source.url, io, { credential, quiet: true, strict: true });
+  updateRelayMachine(state => { state.approvals = state.approvals.filter(entry => entry.context.id !== pending.context.id); });
+  return linked;
 }
 
 /** Link a new project only after the paired phone explicitly approves its one durable proposal. */
@@ -37,6 +61,8 @@ export async function autoLinkProject(root, io) {
   if (machine.excluded.includes(project) || relayStatus(project).linked) return;
   const name = listApiProjects().find(entry => entry.root === project)?.name ?? project;
   let pending = machine.approvals.find(entry => entry.root === project);
+  // Only the command that publishes the request prints the wait; later commands poll quietly.
+  let announce = false;
   try {
     if (pending && Date.now() >= pending.context.expires) throw new Refused('PHONE_APPROVAL_EXPIRED', 'Link approval expired; run pullboard relay on --all explicitly to link this project.');
     let source;
@@ -59,17 +85,16 @@ export async function autoLinkProject(root, io) {
     if (!source?.token?.startsWith('pm_')) throw new Refused('RELAY_SESSION', 'Restore the publishing board link or run pullboard relay on --all.');
     if (!pending.published) {
       await publishPhoneApproval(source, pending, io, relayDeviceRequest);
+      announce = true;
       updateRelayMachine(state => { const entry = state.approvals.find(value => value.context.id === pending.context.id); if (entry) entry.published = true; });
     }
     const document = await relayDeviceRequest(source, '/api/v1/devices/approvals/' + pending.context.id, {}, io);
     if (document.approval.state !== 'approved') {
-      io.err('waiting for phone approval: ' + name + '; expires ' + new Date(pending.context.expires).toISOString() + '; local work continues.'); return;
+      if (announce) io.err(approvalWait(name, pending, machine.devices) + '; local work continues.');
+      return;
     }
-    const privateKey = await restoreLinkReply(pending.replyKey);
-    const result = await openApproval(privateKey, JSON.parse(Buffer.from(document.approval.response, 'base64url').toString('utf8')), pending.context, 'reply');
-    const credential = { ...result.credential, account: pending.context.account, url: source.url };
-    await relayOn(project, source.url, io, { credential, quiet: true, strict: true });
-    updateRelayMachine(state => { state.approvals = state.approvals.filter(entry => entry.context.id !== pending.context.id); });
+    await finishApprovedLink(project, pending, source, document.approval, io);
+    io.err('linked: ' + name);
   } catch (error) {
     if (pending) {
       warnPhoneApproval(pending, error, io, 'Local registration is complete; run pullboard relay on --all explicitly to link this project.');
@@ -137,7 +162,7 @@ export async function revokeRelayDevice(deviceId, io) {
 }
 
 /** Link non-excluded registry entries and report an explicit outcome for every registered project. */
-async function linkProjects(session, io, { onBoardOutcome } = {}) {
+async function linkProjects(session, io, { onBoardOutcome, waiting = new Set() } = {}) {
   const machine = readRelayMachine();
   const linked = [];
   const failed = [];
@@ -148,6 +173,8 @@ async function linkProjects(session, io, { onBoardOutcome } = {}) {
       io.say(`Did not link ${project.name}: it is excluded from automatic linking on this machine.`);
       continue;
     }
+    // A board whose link card is on the phone waits for that tap; see waitForLinkApprovals.
+    if (waiting.has(project.root)) continue;
     try {
       const result = await relayOn(project.root, session.url, io, { session, quiet: true, strict: true });
       linked.push({ project: project.name, root: project.root, board: result.board });
@@ -161,6 +188,67 @@ async function linkProjects(session, io, { onBoardOutcome } = {}) {
     }
   }
   io.say(`Linked ${linked.length} of ${projects.length} registered ${projects.length === 1 ? 'board' : 'boards'}.`);
+  return { linked, failed };
+}
+
+/** Name the published, unexpired phone link cards this run can wait for on a phone already paired. */
+function waitingLinkApprovals(session) {
+  const machine = readRelayMachine();
+  if (!machine.devices.some(device => device.account === session.account && device.url === session.url)) return [];
+  const registered = new Set(listApiProjects().map(project => project.root));
+  return machine.approvals.filter(entry => {
+    if (!entry.published || Date.now() >= entry.context.expires || entry.context.account !== session.account) return false;
+    if (machine.excluded.includes(entry.root) || !registered.has(entry.root)) return false;
+    let source;
+    try { source = relayMachineContext(entry.publisherRoot); } catch { return false; }
+    return Boolean(source?.token?.startsWith('pm_')) && source.url === session.url;
+  });
+}
+
+/**
+ * Keep this foreground run open until the phone answers each waiting link card, then link that
+ * board in the same run. Without this wait the phone that just approved sees a board it cannot
+ * read until the computer happens to run another command (walkthrough-090 issue 15).
+ */
+async function waitForLinkApprovals(waiting, io, { signal } = {}) {
+  const linked = [];
+  const failed = [];
+  const name = root => listApiProjects().find(project => project.root === root)?.name ?? root;
+  let open = [...waiting];
+  for (const pending of open) {
+    io.say('waiting for phone approval: ' + name(pending.root) + '; tap Link project on your phone before ' + new Date(pending.context.expires).toISOString() + '.');
+  }
+  let interrupted = false;
+  /** Stop waiting without undoing a link; the next command still finishes an approved card. */
+  const stop = () => { interrupted = true; };
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
+  try {
+    while (open.length && !signal?.aborted && !interrupted) {
+      for (const pending of [...open]) {
+        if (signal?.aborted || interrupted) break;
+        const project = name(pending.root);
+        try {
+          if (Date.now() >= pending.context.expires) throw new Refused('PHONE_APPROVAL_EXPIRED', 'Link approval expired; run pullboard relay on --all to link this board.');
+          const source = relayMachineContext(pending.publisherRoot);
+          const document = await relayDeviceRequest(source, '/api/v1/devices/approvals/' + pending.context.id, { signal }, io);
+          if (document.approval.state === 'expired') throw new Refused('PHONE_APPROVAL_EXPIRED', 'Link approval expired; run pullboard relay on --all to link this board.');
+          if (document.approval.state !== 'approved') continue;
+          const result = await finishApprovedLink(pending.root, pending, source, document.approval, io);
+          linked.push({ project, root: pending.root, board: result.board });
+          io.say('linked: ' + project);
+        } catch (error) {
+          if (signal?.aborted && error.code === 'OAUTH_CANCELLED') break;
+          const reason = error instanceof Refused ? error.message.replace(/^\[[A-Z][A-Z0-9_]*\] /u, '') : 'Restore this registered project and retry.';
+          failed.push({ project, root: pending.root, reason });
+          io.err(`not linked: ${project}; ${reason}`);
+        }
+        open = open.filter(entry => entry !== pending);
+      }
+      if (open.length) await waitForPairingPoll(signal);
+    }
+  } finally { process.off('SIGINT', stop); process.off('SIGTERM', stop); }
+  for (const pending of open) io.say('stopped waiting for phone approval: ' + name(pending.root) + '; after you tap Link project, the next pullboard command on this computer finishes the link.');
   return { linked, failed };
 }
 
@@ -284,13 +372,83 @@ export async function relayOnAll(address, io, { signal, onPairingURL, onSignIn, 
   // From this synchronous commit point onward the first board-link attempt is underway; later
   // cancellation must not claim that already-started link writes were rolled back.
   onLinking?.();
-  updateRelayMachine(state => { state.autoLink = true; state.owner = { account: session.account, url: session.url }; state.approvals = []; });
-  const result = await linkProjects(session, io, { onBoardOutcome });
+  // The view's sign-in links every board itself; a terminal run waits for cards already on the phone.
+  const waiting = onPairingURL ? [] : waitingLinkApprovals(session);
+  const waitingIds = new Set(waiting.map(entry => entry.context.id));
+  updateRelayMachine(state => { state.autoLink = true; state.owner = { account: session.account, url: session.url }; state.approvals = state.approvals.filter(entry => waitingIds.has(entry.context.id)); });
+  const result = await linkProjects(session, io, { onBoardOutcome, waiting: new Set(waiting.map(entry => entry.root)) });
   const devices = readRelayMachine().devices.filter(device => device.account === session.account && device.url === session.url);
   if (devices.length) io.say('Your phone is already paired; the linked boards appear there.');
   const pairing = devices.length || !result.linked.length ? { paired: devices.length > 0 }
     : await pairFirstDevice(session, result.linked[0].board, result.linked, io, { signal, onPairingURL });
+  const approved = await waitForLinkApprovals(waiting, io, { signal });
+  result.linked.push(...approved.linked);
+  result.failed.push(...approved.failed);
   return { ...result, ...pairing, autoLink: true };
+}
+
+/**
+ * Run pullboard relay on --all in the foreground and return its exit code [H5,H17]. Ctrl-C or
+ * SIGTERM cancels the sign-in cleanly. Init's offer calls this same function, so a yes at init
+ * signs in, links and pairs exactly as the command does, with the same words.
+ *
+ * @param {string | undefined} address - The relay to use; the machine's saved relay when omitted.
+ * @param {any} io
+ * @returns {Promise<number>}
+ */
+export async function relayOnAllCommand(address, io) {
+  const controller = new AbortController();
+  const cancelSignIn = () => controller.abort();
+  process.once('SIGINT', cancelSignIn);
+  process.once('SIGTERM', cancelSignIn);
+  let result;
+  try { result = await relayOnAll(address, io, { signal: controller.signal }); }
+  finally { process.off('SIGINT', cancelSignIn); process.off('SIGTERM', cancelSignIn); }
+  io.result?.(result);
+  if (result.outcome) {
+    io.say(result.outcome === 'declined' ? 'GitHub sign-in was declined; no boards were linked.'
+      : result.outcome === 'expired' ? 'GitHub device sign-in expired; no boards were linked.'
+        : 'GitHub device sign-in was cancelled; no boards were linked.');
+    return 1;
+  }
+  return result.failed.length ? 1 : 0;
+}
+
+/**
+ * Read one line from the person's terminal, or null when the terminal closes first. Readline runs
+ * without its own terminal handling, so the terminal echoes the answer and Ctrl-C stays a signal.
+ *
+ * @param {any} io
+ * @param {string} question
+ * @returns {Promise<string | null>}
+ */
+function askLine(io, question) {
+  return new Promise((resolve) => {
+    const reader = createInterface({ input: io.stdin, output: io.stdout, terminal: false });
+    let answer = null;
+    reader.once('line', (line) => { answer = line; reader.close(); });
+    reader.once('close', () => { io.stdin.pause?.(); resolve(answer); });
+    io.stdout.write(question);
+  });
+}
+
+/**
+ * End init with the offer to share with the phone [H5,H17,B26]: ask a person at their own
+ * terminal once, and on Enter or y run pullboard relay on --all through the same function the
+ * command uses. An agent shell, CI or a run without a terminal is never asked and gets the
+ * command for later; relayOfferAtInit in init.js decides which. Returns init's exit code.
+ *
+ * @param {string} root - The repository init just set up.
+ * @param {any} io
+ * @returns {Promise<number>}
+ */
+export async function offerRelayAtInit(root, io) {
+  const shared = relayLinked(root) || readRelayMachine().autoLink;
+  const offer = relayOfferAtInit({ enabled: relayOfferEnabled(), shared, stdin: io.stdin, stdout: io.stdout });
+  if (offer === 'none') return 0;
+  if (offer === 'ask' && acceptsRelayOffer(await askLine(io, RELAY_OFFER_QUESTION))) return await relayOnAllCommand(undefined, io);
+  io.say(RELAY_LATER);
+  return 0;
 }
 
 // These operations belong to this view process. No ticket, person session, or pairing URL is

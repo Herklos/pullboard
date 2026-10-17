@@ -33,6 +33,8 @@ const NOT_MOVES = {
   BAD_MACHINE_SETTINGS: 'machine-wide settings checked before a command runs',
   BAD_GATE_SLOTS: 'machine-wide gate capacity checked before a command runs',
   BAD_BROWSER_SLOTS: 'machine-wide browser capacity checked before a command runs',
+  BAD_SHORT_SLOTS: 'machine-wide short gate slot count checked before a command runs',
+  BAD_SHORT_SLOT_REQUEST: 'only a machine gate run that names its test files may ask for a short slot, checked before admission',
   BAD_RESOURCE_NAME: 'machine resource names are validated before admission',
   RESERVED_RUNNER_RESOURCE: 'runner resource rows are managed by machine admission rather than item moves',
   BAD_RESOURCE_CAPACITY: 'machine resource capacity is validated before admission',
@@ -65,6 +67,7 @@ const NOT_MOVES = {
   GATE_SLOT_MARKER_INVALID: 'an inherited machine gate capability is validated before nested work starts',
   GATE_SLOT_TOKEN_REQUIRED: 'an inherited machine gate capability needs its exact lease token',
   GATE_SLOT_LEASE_LOST: 'the exact machine gate lease must still be live before nested work starts',
+  SHORT_SLOT_FULL_SUITE: 'a short gate lease is reused only by nested work that names its test files',
   BROWSER_SLOT_REQUIRED: 'browser capacity must be held before a nested browser command can run',
   NO_AGENT: 'a linked coordinator must already be registered before an item move',
   REMOTE_COORDINATOR_MODEL: 'a linked replica cannot redeclare the coordinator model; use the coordinator checkout',
@@ -525,7 +528,10 @@ test('a broken copy of the code fails the check: a refusal added wherever a move
   ], 'reserve reaches the route check through the reviewer checks it shares with a verdict');
 
   const doubleQuoted = editedSource('cli.js', /^const cdTo = .*$/m, "const cdTo = (root) => { if (!root) throw new Refused(\"NO_ROOT\", 'no root'); return 'cd ' + root + ' &&'; };");
-  assert.deepEqual(codeProblems(MACHINE, doubleQuoted), ['NO_ROOT is raised by accept and reject but not declared there']);
+  assert.deepEqual(codeProblems(MACHINE, doubleQuoted), [
+    'NO_ROOT is raised by submit but not declared there',
+    'NO_ROOT is raised by accept and reject but not declared there',
+  ]);
 });
 
 const SHA_A = 'a'.repeat(40);
@@ -840,10 +846,10 @@ test('pullboard help lists each role\'s moves from the declaration, and pullboar
 
 /** Guards checked before the explicit transition: CLI facts and optional roadmap selection. */
 const PRECHECKED = {
-  claim: ['joined'],
-  submit: ['joined', 'criterionUnchanged', 'treeClean', 'nothingUntracked', 'hasCommit', 'withinLane', 'trunkMergeClean', 'doctrineHolds', 'gateConfigured', 'gateGreen', 'treeStillDuringGate', 'noUnverifiedStack'],
+  claim: ['joined', 'checkProvesSomething'],
+  submit: ['joined', 'checkProvesSomething', 'criterionUnchanged', 'treeClean', 'nothingUntracked', 'hasCommit', 'withinLane', 'trunkMergeClean', 'doctrineHolds', 'gateConfigured', 'queuedItemLease', 'gateGreen', 'treeStillDuringGate', 'noUnverifiedStack'],
   reserve: ['coordinatorSaysAs', 'joined', 'roadmapReadable'],
-  accept: ['coordinatorSaysAs', 'joined', 'atSubmittedCommit', 'trunkMergeClean', 'itemCheckGreen', 'noUnverifiedStack'],
+  accept: ['coordinatorSaysAs', 'joined', 'atSubmittedCommit', 'trunkMergeClean', 'queuedItemLease', 'itemCheckGreen', 'noUnverifiedStack'],
   reject: ['coordinatorSaysAs', 'joined', 'atSubmittedCommit'],
 };
 
@@ -978,6 +984,8 @@ test('submit, accept and reject refuse in the declared order, one failure peeled
         judge(built, 'web-2', { reason: bad, policy: 'any' }),
         judge(built, 'web-2', { reason: bad, policy: 'any', digest: 'digest:Page' }),
         judge(built, 'web-2', { reason: good, policy: 'any', digest: 'digest:Page' }),
+        // Only a reject reads a cause key, so only its order has the malformed-cause step (#713).
+        ...(verb === 'reject' ? [judge(built, 'web-2', { reason: good, policy: 'any', digest: 'digest:Page', note: 'reverted the fix; its test went red', cause: 'free text' })] : []),
         judge(built, 'web-2', { reason: good, policy: 'any', digest: 'digest:Page', note: 'reverted the fix; its test went red' }),
       ];
       assert.deepEqual(fired, [...declaredBoardOrder(verb), 'ok'], verb);

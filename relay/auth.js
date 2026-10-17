@@ -82,6 +82,7 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
   const deviceConfirmations = new Map();
   // A hashed ticket may revoke only its minted session, retained until that session expires.
   const deviceSessionReceipts = new Map();
+  const sessionGuards = new Set();
   let closed = false;
   let locked = false;
   // The relay journal's published seat receipts, read under the board lock (#579); none until wired.
@@ -123,6 +124,9 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
     const deleted = !row && db.prepare('SELECT board FROM relay_deleted_credentials WHERE hash=? AND expires>?').get(digest, now());
     if (deleted) throw new Refused('RELAY_BOARD_DELETED', `relay copy ${deleted.board} was deleted; keep working locally, or run pullboard relay on to link it again`);
     if (!row || row.revoked || row.expires <= now()) throw new Refused('AUTH_REQUIRED', 'this credential is expired or revoked; sign in or obtain a new board token');
+    if (row.kind === 'session') {
+      for (const guard of sessionGuards) guard({ id: row.id, kind: row.kind, user: { id: row.user_id }, expires: row.expires });
+    }
     return row;
   }
 
@@ -537,6 +541,13 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
     pendingCleanup() { open(); return db.prepare('SELECT board FROM relay_cleanup ORDER BY board').all().map((row) => row.board); },
     /** Remove an unlink intent only after its journal, sidecars and managed backups are gone. */
     finishCleanup(board) { identifier(board, 'BAD_BOARD'); lifecycle(() => db.prepare('DELETE FROM relay_cleanup WHERE board=?').run(board)); },
+    /** Register a synchronous device-session boundary shared by every credential use, including auth routes. */
+    addSessionGuard(guard) {
+      open();
+      if (typeof guard !== 'function') throw new Refused('RELAY_CONFIG', 'configure a synchronous session guard before serving relay authentication');
+      sessionGuards.add(guard);
+      return () => sessionGuards.delete(guard);
+    },
     /** List only linked boards the current credential and GitHub account may read. */
     async boardsFor(token) {
       const row = credential(token);
@@ -552,7 +563,7 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
     minimumEngineVersion(board) {
       open();
       identifier(board, 'BAD_BOARD');
-      // Machine and agent credentials now carry engine-27 seat provenance; older clients would skip it.
+      // Machine and agent credentials now carry engine-35 seat provenance; older clients would skip it.
       if (db.prepare("SELECT 1 FROM relay_credentials WHERE board=? AND kind IN ('machine','board') LIMIT 1").get(board)) return VERIFIER_STANDING_ENGINE;
       return db.prepare("SELECT 1 FROM relay_credentials WHERE board=? AND kind='board' LIMIT 1").get(board) ? 3 : 1;
     },
@@ -763,7 +774,7 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
     close() {
       if (closed) return;
       closed = true;
-      webFlows.clear(); deviceFlows.clear(); deviceConfirmations.clear(); deviceSessionReceipts.clear(); permissions.clear(); db.close();
+      webFlows.clear(); deviceFlows.clear(); deviceConfirmations.clear(); deviceSessionReceipts.clear(); sessionGuards.clear(); permissions.clear(); db.close();
     },
   };
   return auth;

@@ -16,9 +16,12 @@ import { COORDINATOR } from './config.js';
 import { ENGINE_VERSION, GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, VERIFIER_STANDING_ENGINE, effectiveGuards, storeTriggers } from './machine.js';
 import { Refused } from './refused.js';
 import { agentAt, agentModel, newSeatId, routeOf, saveAgentModel, seatLineage, standingProblem } from './seats.js';
+import { causeProblem, requireNeverAgain } from './rigor.js';
 import { barCorrectionFields } from './bar-corrections.js';
+import { factReference } from './fact-reference.js';
 import { factFromEvent, requestAnswerRefusal, tellAnswerImplications, tellFactImplications, tellVerdictImplications } from './implies.js';
 import { parseSpec } from './spec.js';
+export { acceptCheck } from './check-accept.js';
 
 /** The seat readers live in seats.js; the board re-exports them so `store.*` callers keep one import. */
 export { agentAt, agentCreator, listAgents, nextSeatId, seatEnrolled, seatLineage, withVerifierStanding } from './seats.js';
@@ -431,15 +434,13 @@ export function atomic(board, work) {
  * @param {number | null} itemId
  * @param {object} [detail]
  */
-function logEvent(board, by, kind, itemId, detail = {}) {
+export function logEvent(board, by, kind, itemId, detail = {}) {
   const model = agentModel(board, by);
   const isAgent = Boolean(board.db.prepare('SELECT 1 FROM agent WHERE agent_id = ?').get(by));
   const recorded = (board.executionEngineVersion ?? ENGINE_VERSION) >= 8 && isAgent
     ? { ...detail, model: model ?? 'unknown' } : detail;
   const inserted = board.db
-    .prepare(
-      'INSERT INTO event (event_at, event_by, event_kind, item_id, event_detail) VALUES (?, ?, ?, ?, ?)',
-    )
+    .prepare('INSERT INTO event (event_at, event_by, event_kind, item_id, event_detail) VALUES (?, ?, ?, ?, ?)')
     .run(now(board), by, kind, itemId, JSON.stringify(recorded));
   board.lastEvent = board.db.prepare('SELECT * FROM event WHERE event_id = ?').get(inserted.lastInsertRowid);
   (board.emittedEvents ??= []).push(board.lastEvent);
@@ -508,7 +509,7 @@ function current(board, item) {
  * by the agent; the board neither names nor infers it. Registering again preserves the agent id;
  * explicitly supplied family and model values update their declarations, while omission preserves them.
  *
- * From engine 27 a new seat records the seat that created it (`createdBy`: an agent id, or
+ * From engine 35 a new seat records the seat that created it (`createdBy`: an agent id, or
  * `machine` for a join no seat made), so a linked board can tell a builder's own seats from
  * independent verifiers (#579). A creator may name the new seat (`id`, the lane's next form) when
  * the relay already issued a token for the next name; ids then skip taken names.
@@ -1026,7 +1027,7 @@ export function claim(board, id, { agentId, lane, leaseMs, freeze, head = null, 
     let frozen = null;
     const item = moveItem(board, id, 'claim', {
       checks: {
-        joined: null,
+        joined: null, checkProvesSomething: null,
         [IN_STATE]: (found) => new Refused('NOT_CLAIMABLE', `item #${id} is ${found.item_status}`),
         inLane: (found) => {
           if (found.item_lane === lane) return null;
@@ -1169,7 +1170,7 @@ export function submit(board, id, { agentId, commit, tree, files = [], policyCom
     const notYours = () => new Refused('NOT_YOURS', `item #${id} is not claimed by you; claim it first`);
     moveItem(board, id, 'submit', {
       checks: {
-        joined: null,
+        joined: null, checkProvesSomething: null,
         [IN_STATE]: notYours,
         isHolder: (found) => (found.item_owner === agentId ? null : notYours()),
         correctionRefrozen: () => pendingRefreezeProblem(board, id),
@@ -1181,7 +1182,7 @@ export function submit(board, id, { agentId, commit, tree, files = [], policyCom
         trunkMergeClean: null,
         noUnverifiedStack: null,
         doctrineHolds: null,
-        gateConfigured: null,
+        gateConfigured: null, queuedItemLease: null,
         gateGreen: null,
         treeStillDuringGate: null,
         childrenDone: () => {
@@ -1455,14 +1456,14 @@ function reserveWithin(board, id, { agentId, leaseMs, policy, familyPolicy = 'of
  * claimed again. The builder never verifies; under `verify: "coordinator"`, lane work is the
  * coordinator's to verify; an agent verifies items at its tier or below, and not while another
  * agent holds the review (V15). An accept means CRITERION_MET and says how it was proved; a reject
- * names one of the reject reasons and says what failed.
+ * names one of the reject reasons and says what failed, and may name its cause key for rigor (#713).
  *
  * @param {any} board
  * @param {number} id
- * @param {{ agentId: string, decision: string, reason?: string, note?: string, head: string, digest: string, policy: string, familyPolicy?: string, check?: 'none' | 'green', implies?: number[], impliesId?: string }} verdict - implies: items this verdict changes (B29)
+ * @param {{ agentId: string, decision: string, reason?: string, note?: string, cause?: string, head: string, digest: string, policy: string, familyPolicy?: string, check?: 'none' | 'green', implies?: number[], impliesId?: string }} verdict - implies: items this verdict changes (B29)
  * @returns {{ decision: string, reason: string, check?: 'none' | 'green' }}
  */
-export function verify(board, id, { agentId, decision, reason, note = '', head, digest, policy, familyPolicy = 'off', check, implies, impliesId }) {
+export function verify(board, id, { agentId, decision, reason, note = '', cause, head, digest, policy, familyPolicy = 'off', check, implies, impliesId }) {
   const verb = { ACCEPT: 'accept', REJECT: 'reject' }[decision];
   if (!verb) throw new Refused('BAD_DECISION', 'the decision is accept or reject');
   const isAccept = verb === 'accept';
@@ -1481,7 +1482,7 @@ export function verify(board, id, { agentId, decision, reason, note = '', head, 
             : new Refused('CRITERIA_CHANGED', `the criterion for #${id} changed after it was claimed; the coordinator runs: pullboard refreeze ${id}`),
         reasonIsMet: () => (reason && reason !== ACCEPT_REASON ? new Refused('BAD_REASON', `accept means ${ACCEPT_REASON}; a failed criterion is a reject`) : null),
         trunkMergeClean: null,
-        noUnverifiedStack: null,
+        noUnverifiedStack: null, queuedItemLease: null,
         itemCheckGreen: null,
         proofNoted: () =>
           note.trim()
@@ -1489,6 +1490,7 @@ export function verify(board, id, { agentId, decision, reason, note = '', head, 
             : new Refused('PROOF_REQUIRED', 'an accept says how you proved it: --note "what you broke or which edge you tried, and what happened"; passing tests alone are not proof'),
         reasonCoded: () => (reason && REJECT_REASONS.includes(reason) ? null : new Refused('BAD_REASON', `a reject names one of: ${REJECT_REASONS.join(', ')}`)),
         noteGiven: () => (note.trim() ? null : new Refused('NOTE_REQUIRED', 'a reject says what failed: --note "..."')),
+        causeWellFormed: () => causeProblem(cause),
       },
       before: (found) => {
         const family = board.db.prepare('SELECT agent_family FROM agent WHERE agent_id = ?').get(agentId)?.agent_family ?? null;
@@ -1502,7 +1504,7 @@ export function verify(board, id, { agentId, decision, reason, note = '', head, 
       },
       set: (found) => ({ item_verdict: decision, item_verified_by: isAccept ? agentId : null, item_owner: isAccept ? found.item_owner : null }),
     });
-    const detail = { reason: code, commit: item.item_commit };
+    const detail = { reason: code, commit: item.item_commit, ...(!isAccept && cause !== undefined && cause !== null ? { cause } : {}) };
     if (isAccept && check !== undefined) detail.check = check;
     logEvent(board, agentId, verb, id, implies?.length ? { ...detail, implies } : detail);
     tellVerdictImplications(board, (by, itemId, fact) => logEvent(board, by, 'fact', itemId, fact), id, { seed: impliesId, implies });
@@ -1515,10 +1517,10 @@ export function verify(board, id, { agentId, decision, reason, note = '', head, 
  *
  * @param {any} board
  * @param {number} id
- * @param {{ agentId: string, note: string }} request
+ * @param {{ agentId: string, note: string, cause?: string }} request
  * @returns {{ id: number, commit: string, supersedes?: number, landingFailure?: object }}
  */
-export function reopen(board, id, { agentId, note }) {
+export function reopen(board, id, { agentId, note, cause }) {
   return atomic(board, () => {
     let submittedCommit = null;
     let supersedes;
@@ -1533,6 +1535,7 @@ export function reopen(board, id, { agentId, note }) {
         [IN_STATE]: (found) => new Refused('NOT_SUBMITTED', `item #${id} is ${current(board, found).item_status}, not submitted`),
         coordinatorOnly: () => onlyCoordinator(agentId, 'reopens submissions'),
         noteGiven: () => (note.trim() ? null : new Refused('NOTE_REQUIRED', 'say why the criterion needs correction: --note "why"')),
+        causeWellFormed: () => causeProblem(cause),
         notMerged: (found) => found.item_status !== 'verified' || !found.item_merged_commit
           ? null
           : new Refused('ALREADY_MERGED', `item #${id} was merged as ${found.item_merged_commit}; merged items cannot be reopened`),
@@ -1569,7 +1572,7 @@ export function reopen(board, id, { agentId, note }) {
       },
     });
     logEvent(board, agentId, 'reopen', id, { commit: submittedCommit, note: note.trim(), judgment: null,
-      ...(supersedes ? { supersedes, landingFailure } : {}) });
+      ...(supersedes ? { supersedes, landingFailure } : {}), ...(cause !== undefined && cause !== null ? { cause } : {}) });
     return { id: item.item_id, commit: submittedCommit, ...(supersedes ? { supersedes, landingFailure } : {}) };
   });
 }
@@ -2042,19 +2045,7 @@ export function events(board, { itemId } = {}) {
 /** Fact labels distinguish observations from judgements reserved to an item's live holder [B29,B30]. */
 export const FACT_KINDS = Object.freeze(['capture', 'measurement', 'note', 'diff', 'decision', 'rejection', 'supersession', 'root-cause']);
 const FACT_JUDGEMENTS = new Set(['decision', 'rejection', 'supersession', 'root-cause']);
-
-/** Validate a portable code binding without reading source on replicas that hold only board data [B32,H7]. */
-export function factReference(ref) {
-  if (ref === null || ref === undefined) return null;
-  const parts = typeof ref === 'string' && /^([^\r\n\0]+):(\d+)(?:-(\d+))?@([0-9a-f]{40})$/iu.exec(ref);
-  if (!parts) throw new Refused('BAD_FACT_REF', 'a fact reference needs path:line[-line]@full-sha with all 40 hexadecimal characters; use the full git commit id');
-  const [, path, first, last, commit] = parts;
-  const start = Number(first), end = Number(last ?? first);
-  if (path.startsWith('/') || path.includes('\\') || /^[A-Za-z]:/u.test(path) || path.split('/').some((part) => !part || part === '.' || part === '..') || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 1 || end < start) {
-    throw new Refused('BAD_FACT_REF', 'a fact reference needs a relative repo path and a positive ascending line range; use path:line[-line]@full-sha');
-  }
-  return { path, start, end, commit: commit.toLowerCase() };
-}
+export { factReference };
 
 /** Read every move and fact in append order, including superseded facts and full original text [B31,B32]. */
 export function itemThread(board, id) {
@@ -2071,9 +2062,9 @@ export function projectItemThreads(board, state) {
 }
 
 /** Append a typed fact atomically; a correction never edits the original event [B29,B30,B31,B32].
- * The internal factId is set from a sealed move's identity during replay, rather than replica-local sequence ids.
+ * The internal factId is set from a sealed move's identity during replay, rather than replica-local sequence ids; a never-again with its cause is the person's alone, and rigor lists it at once (#713) [D1].
  */
-export function appendFact(board, id, { agentId, kind, text, ref = null, supersedes = null, factId = randomUUID(), implies }) {
+export function appendFact(board, id, { agentId, kind, text, ref = null, supersedes = null, factId = randomUUID(), implies, cause = null, neverAgain = false, asPerson = false, channel = 'terminal' }) {
   return atomic(board, () => {
     const item = current(board, itemById(board, id));
     if (!board.db.prepare('SELECT 1 FROM agent WHERE agent_id = ?').get(agentId)) throw new Refused('NO_AGENT', `no registered agent ${agentId}; join a worktree before appending a fact`);
@@ -2088,7 +2079,8 @@ export function appendFact(board, id, { agentId, kind, text, ref = null, superse
       throw new Refused('NO_FACT', `no fact ${String(supersedes)} on item #${id}; use a fact id from pullboard show ${id} --json`);
     }
     const binding = factReference(ref);
-    logEvent(board, agentId, 'fact', id, { id: factId, kind, text, ref: binding, supersedes, ...(implies?.length ? { implies } : {}) });
+    if (neverAgain || asPerson || cause !== null) requireNeverAgain(id, { agentId, cause, neverAgain, asPerson, channel });
+    logEvent(board, neverAgain ? PERSON : agentId, 'fact', id, { id: factId, kind, text, ref: binding, supersedes, ...(neverAgain ? { cause, neverAgain: true, channel } : {}), ...(implies?.length ? { implies } : {}) });
     return tellFactImplications(board, (by, itemId, fact) => logEvent(board, by, 'fact', itemId, fact), factFromEvent(board.lastEvent), { id, implies, supersedes });
   });
 }
@@ -2113,6 +2105,16 @@ function milestonePriorities(board) {
   return (entry) => priorities.get(entry.item_id) ?? ordered.length;
 }
 
+/** Make the shared build-queue comparator once: milestone, route, recent files, then oldest. */
+export function buildOrder(board, { warm = [] } = {}) {
+  const milestonePriority = milestonePriorities(board);
+  const recent = new Set(warm);
+  const shared = (entry) => itemFiles(entry).filter((path) => recent.has(path)).length;
+  return (first, second) => milestonePriority(first) - milestonePriority(second)
+    || ROUTES.indexOf(second.item_route) - ROUTES.indexOf(first.item_route)
+    || shared(second) - shared(first) || first.item_id - second.item_id;
+}
+
 /**
  * The next item an agent can take (N2): for a builder, the oldest open item in its lane whose
  * dependencies are verified; for a verifier, the oldest submitted item it did not build. An agent
@@ -2126,10 +2128,10 @@ function milestonePriorities(board) {
  * and `shared` names them (N20). A held lane offers nothing new (N22).
  *
  * @param {any} board
- * @param {{ agentId: string, lane: string, verify?: boolean, policy?: string, familyPolicy?: string, runnable?: boolean, routes?: string[], warm?: string[], priority?: number[] }} who
+ * @param {{ agentId: string, lane: string, verify?: boolean, policy?: string, familyPolicy?: string, runnable?: boolean, routes?: string[], warm?: string[], priority?: number[], lanes?: string[] }} who
  * @returns {{ item: any | null, reasons: string[], shared?: string[] }}
  */
-export function nextFor(board, { agentId, lane, verify = false, policy = 'any', familyPolicy = 'off', runnable = false, routes = ROUTES, warm = [], priority = [] }) {
+export function nextFor(board, { agentId, lane, verify = false, policy = 'any', familyPolicy = 'off', runnable = false, routes = ROUTES, warm = [], priority = [], lanes }) {
   const route = routeOf(board, agentId);
   const tier = (entry) => ROUTES.indexOf(entry.item_route);
   const allItems = listItems(board).reverse();
@@ -2167,20 +2169,23 @@ export function nextFor(board, { agentId, lane, verify = false, policy = 'any', 
   }
   const held = items.find((entry) => entry.item_status === 'claimed' && entry.item_owner === agentId && entry.item_parent_id === null);
   if (held) return { item: held, reasons: [] };
-  const reasons = allItems.filter((entry) => entry.item_status === 'open' && entry.item_lane === lane && entry.item_hold_reason)
+  const selectedLanes = new Set(lanes ?? [lane]);
+  const reasons = allItems.filter((entry) => entry.item_status === 'open' && selectedLanes.has(entry.item_lane) && entry.item_hold_reason)
     .map((entry) => `#${entry.item_id} is held by coordinator: ${entry.item_hold_reason}`);
   const paused = laneHold(board, lane);
-  if (paused) return { item: null, reasons: [`${paused.hold_by} holds the ${lane} lane: ${paused.hold_reason}`, ...reasons] };
-  const milestonePriority = milestonePriorities(board);
+  if (!lanes && paused) return { item: null, reasons: [`${paused.hold_by} holds the ${lane} lane: ${paused.hold_reason}`, ...reasons] };
+  if (lanes) for (const name of selectedLanes) {
+    const hold = laneHold(board, name);
+    if (hold) { selectedLanes.delete(name); reasons.push(`${hold.hold_by} holds the ${name} lane: ${hold.hold_reason}`); }
+  }
+  const compare = buildOrder(board, { warm });
   const recent = new Set(warm);
   const mainRed = new Set(priority);
-  const laneItems = items.filter((entry) => entry.item_status === 'open' && entry.item_lane === lane);
+  const laneItems = items.filter((entry) => entry.item_status === 'open' && selectedLanes.has(entry.item_lane));
   const mine = laneItems
     .filter((entry) => !itemHold(board, entry.item_id))
     .map((entry, order) => ({ entry, order, shared: itemFiles(entry).filter((path) => recent.has(path)) }))
-    .sort((first, second) => milestonePriority(first.entry) - milestonePriority(second.entry)
-      || tier(second.entry) - tier(first.entry)
-      || second.shared.length - first.shared.length || first.order - second.order);
+    .sort((first, second) => compare(first.entry, second.entry));
   // Move only evidenced reworks ahead of their own tier; with no evidence, normal order is exact.
   for (const route of ROUTES) {
     const routeTier = ROUTES.indexOf(route);

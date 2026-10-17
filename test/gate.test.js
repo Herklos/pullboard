@@ -3,12 +3,14 @@
  * no stamp stands in for it, and the tree must hold still while it runs.
  */
 import assert from 'node:assert/strict';
-import { runFixtureExecFile as execFileSync, runFixtureChild as spawnSync, runFixtureChild, runFixtureGit } from './fixture-child.js';
+import { runFixtureExecFile as execFileSync, runFixtureChild as spawnSync, runFixtureChild, runFixtureGit, startFixtureChild as spawn } from './fixture-child.js';
 import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
+import { pathToFileURL } from 'node:url';
 import { digestOf, testConcurrency } from '../src/gate.js';
+import { BROWSER_SLOT_HELD_ENV, GATE_SLOT_HELD_ENV, GATE_SLOT_POOL_ENV, GATE_SLOT_TOKEN_ENV } from '../src/resources.js';
 
 const PRIVATE_WORKER = resolve(import.meta.dirname, '../src/private-check-worker.js');
 
@@ -211,6 +213,101 @@ function repoWithGate(gate, check = '') {
   };
   return { dir, repo, env, git, run, runs };
 }
+
+test('pullboard gate status refuses instead of running the gate [C7,P4]', async () => {
+  const box = repoWithGate('echo run >> ../runs.log');
+  for (const name of [BROWSER_SLOT_HELD_ENV, GATE_SLOT_HELD_ENV, GATE_SLOT_POOL_ENV, GATE_SLOT_TOKEN_ENV]) delete box.env[name];
+  assert.equal(box.run('settings', 'gateSlots', '1').status, 0, 'the fixture uses the holder pool\'s single gate slot');
+  const resourceModule = pathToFileURL(resolve(import.meta.dirname, '../src/resources.js')).href;
+  const holderSource = `import { takeResource } from ${JSON.stringify(resourceModule)};
+const lease = await takeResource({ name: 'gate', capacity: 1, scope: 'machine', root: process.cwd(), agent: 'gate-argument-holder' });
+try {
+  process.stdout.write('held\\n');
+  process.stdin.setEncoding('utf8');
+  for await (const line of process.stdin) if (line.trim() === 'release') break;
+} finally { lease.release(); }
+`;
+  let holderRun;
+  let holderClosed;
+  let commandRun;
+  let commandClosed;
+  let holderResult;
+  try {
+    holderRun = spawn(process.execPath, ['--input-type=module', '-e', holderSource], {
+      cwd: box.repo, env: box.env, stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let holderOutput = '';
+    holderRun.stdout.setEncoding('utf8');
+    holderClosed = new Promise((resolveClosed) => holderRun.once('close', (status, signal) =>
+      resolveClosed({ status, signal, stdout: holderOutput })));
+    const holderReady = new Promise((resolveReady) => {
+      holderRun.stdout.on('data', (part) => {
+        holderOutput += part;
+        if (holderOutput.includes('held\n')) resolveReady({ ready: true });
+      });
+      holderClosed.then((result) => resolveReady({ result }));
+    });
+    const ready = await holderReady;
+    assert.equal(ready.ready, true, `the private gate holder did not start: ${JSON.stringify(ready.result ?? holderOutput)}`);
+
+    for (const words of [['status'], ['run'], ['unexpected', 'word']]) {
+      commandRun = spawn(process.execPath, [BIN, 'gate', ...words], {
+        cwd: box.repo, env: box.env, stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let commandOutput = '';
+      let commandError = '';
+      commandRun.stdout.setEncoding('utf8');
+      commandRun.stderr.setEncoding('utf8');
+      commandRun.stdout.on('data', (part) => { commandOutput += part; });
+      commandRun.stderr.on('data', (part) => { commandError += part; });
+      commandClosed = new Promise((resolveClosed) => commandRun.once('close', (status, signal) =>
+        resolveClosed({ status, signal, stdout: commandOutput, stderr: commandError })));
+      const queued = new Promise((resolveQueued) => {
+        commandRun.stdout.on('data', () => {
+          if (commandOutput.includes('gate waiting:')) resolveQueued({ queued: true });
+        });
+      });
+      const outcome = await Promise.race([
+        queued,
+        commandClosed.then((result) => ({ result })),
+      ]);
+      if (outcome.queued) {
+        commandRun.kill('SIGTERM');
+        await commandClosed;
+        assert.fail(`the unexpected words ${words.join(' ')} entered the held gate queue: ${commandOutput}`);
+      }
+      assert.equal(outcome.result.status, 1, `${outcome.result.stderr}\n${outcome.result.stdout}`);
+      assert.match(outcome.result.stderr, /\[GATE_ARGUMENT\]/u);
+      assert.match(outcome.result.stderr, /pullboard resources for status/u);
+      assert.match(outcome.result.stderr, /pullboard gate with no extra words to run the gate/u);
+      assert.equal(box.runs(), 0, 'a refused extra word never starts the configured gate');
+      const gate = JSON.parse(box.run('resources', '--json').stdout).resources.find(({ name }) => name === 'gate');
+      assert.deepEqual(gate?.holders.map(({ agent }) => agent) ?? [], ['gate-argument-holder']);
+      assert.equal(gate?.line.length ?? 0, 0, 'the refused command never becomes a gate waiter');
+    }
+    for (const words of [['status'], ['run'], ['unexpected', 'word']]) {
+      const result = box.run('gate', ...words, '--json');
+      assert.equal(result.status, 1, `${result.stderr}\n${result.stdout}`);
+      const { error } = JSON.parse(result.stdout);
+      assert.equal(error.code, 'GATE_ARGUMENT');
+      assert.equal(error.next, 'use pullboard resources for status, or pullboard gate with no extra words to run the gate');
+      assert.equal(box.runs(), 0, 'JSON refusal never starts the configured gate');
+      const gate = JSON.parse(box.run('resources', '--json').stdout).resources.find(({ name }) => name === 'gate');
+      assert.deepEqual(gate?.holders.map(({ agent }) => agent) ?? [], ['gate-argument-holder']);
+      assert.equal(gate?.line.length ?? 0, 0, 'the refused JSON command never becomes a gate waiter');
+    }
+  } finally {
+    if (commandRun && commandRun.exitCode === null && commandRun.signalCode === null) {
+      commandRun.kill('SIGTERM');
+    }
+    if (commandClosed) await commandClosed;
+    if (holderRun) {
+      if (holderRun.exitCode === null && holderRun.signalCode === null) holderRun.stdin.end('release\n');
+      holderResult = await holderClosed;
+    }
+  }
+  assert.equal(holderResult?.status, 0, JSON.stringify(holderResult));
+});
 
 test('gate before the first commit names the uncommitted config [I1,C7]', () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-first-commit-')));
