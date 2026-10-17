@@ -1033,8 +1033,8 @@ test('[A1] every catalog command and subcommand has a real CLI exercise', () => 
   assert.equal(drafted.drafts.length, 1);
   json(source, source.repo, 'spec', ['approve', 'G1'], 'approve');
   json(source, source.repo, 'spec', ['decline', 'G1', '--reason', 'Catalog decline'], 'decline');
-  writeFileSync(join(source.repo, 'SPEC.md'), `${readFileSync(join(source.repo, 'SPEC.md'), 'utf8')}- G2 [pending, must] Which store holds the catalog: SQLite. Choices: SQLite, Postgres. | gate: review\n`);
-  json(source, source.repo, 'spec', ['answer', 'G2', 'Postgres'], 'answer');
+  writeFileSync(join(source.repo, 'SPEC.md'), `${readFileSync(join(source.repo, 'SPEC.md'), 'utf8')}- G3 [pending, must] Which store holds the catalog: SQLite. Choices: SQLite, Postgres. | gate: review\n`);
+  json(source, source.repo, 'spec', ['answer', 'G3', 'Postgres'], 'answer');
   json(source, source.repo, 'spec', ['apply'], 'apply');
 
   /** Exercise the agent-only takeover with a private explicit session, leaving later terminal calls markerless. */
