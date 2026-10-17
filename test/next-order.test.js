@@ -265,6 +265,10 @@ test('an unranked item follows the ranked ones [N2,B13]', (t) => {
   store.orderMilestoneItems(board, 'release', { agentId: 'coordinator', items: [ranked] });
   assert.equal(store.nextFor(board, { agentId: builder, lane: 'core' }).item.item_id, ranked);
   assert.equal(store.nextFor(board, { agentId: builder, lane: 'core', priority: [oldest] }).item.item_id, ranked, 'an automatic rework tie-break does not overtake an explicit coordinator rank');
+  const replica = store.openBoard(':memory:');
+  t.after(() => store.closeBoard(replica));
+  importBoard(replica, exportBoard(board));
+  assert.equal(store.nextFor(replica, { agentId: builder, lane: 'core' }).item.item_id, ranked, 'a board snapshot retains the explicit rank');
   const ordered = [oldest, middle, ranked].map(id => store.getItem(board, id)).sort(store.buildOrder(board));
   assert.deepEqual(ordered.map(item => item.item_id), [ranked, oldest, middle], 'unranked items retain age order after explicit ranks');
   store.editMilestoneItems(board, 'release', { agentId: 'coordinator', remove: [ranked] });
