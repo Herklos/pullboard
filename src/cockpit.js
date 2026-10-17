@@ -342,8 +342,9 @@ function starLine(list) {
   return list;
 }
 $('star-dismiss')?.addEventListener('click', () => { keep(${JSON.stringify(STAR_KEY)}, 'dismissed'); starLine(null); });
-// The first look waits for the whole script, so the engine the read declares (linkedList) is set up by then.
-Promise.resolve().then(() => starLine(null)); // a microtask, as queueMicrotask would schedule, but present in every page context
+// No first look of its own (#817): every signed-in page lists its boards, and api() hands that list here, so the
+// account is read only after a listing succeeds, never beside it. A session that its first listing revokes therefore
+// sees exactly one listing, and the line, hidden in its markup, stays hidden until a listing shows it.
 
 /** Hide the relay's own banner, which speaks for the relay, on a page the relay does not serve this time. */
 function hideRelayNotice() {
