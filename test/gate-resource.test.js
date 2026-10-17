@@ -302,9 +302,9 @@ test('[Q4] an exact-tree cached gate starts while another machine gate holds the
   const priorCount = events(box).filter((line) => line.startsWith('cached ')).length;
   const holder = launch(box, holderRoot);
   await waitFor(() => events(box).includes('holder start') && !events(box).includes('holder end'), 'uncached holder gate to remain active', 30_000); // budget: hang ceiling for the private holder-gate marker handshake; no throughput claim.
-  const refusedChange = spawnSync(process.execPath, [BIN, 'settings', 'gateSlots', '2', '--json'], { cwd: cachedRoot, env: box.env, encoding: 'utf8' });
-  assert.equal(refusedChange.status, 1);
-  assert.equal(JSON.parse(refusedChange.stdout).error.code, 'RESOURCE_BUSY');
+  // A busy equal-capacity write is a no-op; raising capacity is now allowed by #778.
+  const unchangedCapacity = spawnSync(process.execPath, [BIN, 'settings', 'gateSlots', '1', '--json'], { cwd: cachedRoot, env: box.env, encoding: 'utf8' });
+  assert.equal(unchangedCapacity.status, 0, unchangedCapacity.stderr);
   assert.equal(JSON.parse(readFileSync(join(box.env.PULLBOARD_MACHINE_HOME, 'settings.json'), 'utf8')).gateSlots, 1);
   const cached = runFixtureChild(process.execPath, [BIN, 'gate'], { cwd: cachedRoot, env: box.env, encoding: 'utf8' });
   assert.equal(cached.status, 0, cached.stderr);
