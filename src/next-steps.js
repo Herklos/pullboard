@@ -131,6 +131,7 @@ export const NEXT_STEPS = Object.freeze({
   FACT_JUDGEMENT: 'use a nonjudgement fact kind such as note, or ask the coordinator to record a judgement: pullboard fact <id> note "<what you observed>"',
   FLAG_NOT_ALLOWED: 'drop the flag; pullboard help spec lists what each spec command takes',
   GATE_RED: 'fix what the gate report names, commit, and submit again',
+  GATE_ARGUMENT: 'use pullboard resources for status, or pullboard gate with no extra words to run the gate',
   GATE_SLOT_LEASE_LOST: 'let the parent process take the gate slot again, then restart the child',
   GATE_SLOT_LEASE_REQUIRED: 'start the child test process with the live gate lease',
   GATE_SLOT_MARKER_INVALID: 'restart the child with gateSlotEnvironment(lease)',
