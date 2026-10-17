@@ -921,6 +921,38 @@ test('[A1] long-running servers flush one JSON document before shutdown', async 
     assert.deepEqual(parseOneDocument(stdout), document, `${command} does not flush a second document on shutdown`);
   }
 });
+test('[A1,A2] watch --json prints one catalog document per event line', async (t) => {
+  const box = project();
+  t.after(() => rmSync(box.dir, { recursive: true, force: true }));
+  const child = spawn(process.execPath, [BIN, 'watch', '--json', '--kinds', 'shout'], { cwd: box.repo, env: box.env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const closed = once(child, 'close');
+  t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  let changed = () => {};
+  child.stdout.on('data', (part) => { stdout += part; changed(); });
+  child.stderr.on('data', (part) => { stderr += part; changed(); });
+  /** Resolve once `read()` holds what the step waits for, or fail at the hang ceiling. */
+  const until = (read, label) => new Promise((resolveWait, rejectWait) => {
+    const timer = setTimeout(() => rejectWait(new Error(`watch printed no ${label}\nstdout: ${stdout}\nstderr: ${stderr}`)), 10_000); // budget: hang ceiling for private CLI startup and one line, not a latency claim.
+    changed = () => { if (read()) { clearTimeout(timer); changed = () => {}; resolveWait(); } };
+    changed();
+  });
+  await until(() => /following/u.test(stderr), 'start note');
+  json(box, box.repo, 'shout', ['app', 'catalog watch line']);
+  await until(() => stdout.includes('\n'), 'event line');
+  const document = JSON.parse(stdout.split('\n')[0]);
+  assert.equal(document.version, 1);
+  assertRequiredShape(document, shapeFor('watch').required, 'watch');
+  assert.equal(document.detail, 'to app: catalog watch line');
+  child.kill('SIGTERM');
+  const [code] = await closed;
+  assert.equal(code, 0);
+  assert.equal(stdout, `${JSON.stringify(document)}\n`, 'watch prints no end-of-command document');
+});
+
 test('[A1,A10] view exports a static folder through its JSON variant', () => {
   const box = project();
   const item = json(box, box.repo, 'add', ['app', 'Snapshot item', '--specs', 'G1']).item;

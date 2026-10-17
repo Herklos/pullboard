@@ -71,6 +71,8 @@ export const JSON_SHAPES = {
     view: shape({ url: 'string', port: 'number' }),
     'view export': shape({ path: 'string' }),
     serve: shape({ url: 'string', port: 'number' }),
+    // watch --json prints one of these per line, for each event or work notice, and no end-of-command document.
+    watch: shape({ sequence: 'number', kind: 'string', item: 'number|null', actor: 'string|null', detail: 'string' }),
     forget: shape({ root: 'string' }),
     prompt: shape({ role: 'string', text: 'string' }),
     gate: shape({ green: 'boolean', report: 'string' }),
