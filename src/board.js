@@ -16,6 +16,7 @@ import { COORDINATOR } from './config.js';
 import { ENGINE_VERSION, GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, effectiveGuards, storeTriggers } from './machine.js';
 import { Refused } from './refused.js';
 import { barCorrectionFields } from './bar-corrections.js';
+import { conflictNote, conflictProblem } from './trunk-conflict.js';
 import { factFromEvent, requestAnswerRefusal, tellAnswerImplications, tellFactImplications, tellVerdictImplications } from './implies.js';
 import { parseSpec } from './spec.js';
 
@@ -1542,9 +1543,10 @@ export function verify(board, id, { agentId, decision, reason, note = '', head, 
  * @param {{ agentId: string, note: string }} request
  * @returns {{ id: number, commit: string, supersedes?: number, landingFailure?: object }}
  */
-export function reopen(board, id, { agentId, note }) {
+export function reopen(board, id, { agentId, note = '', conflict }) {
   return atomic(board, () => {
     let submittedCommit = null;
+    const forMerge = conflict !== undefined && conflict !== null;
     let supersedes;
     let landingFailure;
     const currentEngine = board.executionEngineVersion ?? ENGINE_VERSION;
@@ -1556,12 +1558,12 @@ export function reopen(board, id, { agentId, note }) {
         joined: null,
         [IN_STATE]: (found) => new Refused('NOT_SUBMITTED', `item #${id} is ${current(board, found).item_status}, not submitted`),
         coordinatorOnly: () => onlyCoordinator(agentId, 'reopens submissions'),
-        noteGiven: () => (note.trim() ? null : new Refused('NOTE_REQUIRED', 'say why the criterion needs correction: --note "why"')),
+        noteGiven: () => (forMerge || note.trim() ? null : new Refused('NOTE_REQUIRED', 'say why the criterion needs correction: --note "why"')),
         notMerged: (found) => found.item_status !== 'verified' || !found.item_merged_commit
           ? null
           : new Refused('ALREADY_MERGED', `item #${id} was merged as ${found.item_merged_commit}; merged items cannot be reopened`),
         landingFailureRecorded: (found) => {
-          if (found.item_status !== 'verified') return null;
+          if (found.item_status !== 'verified' || forMerge) return null;
           const accepted = events(board, { itemId: id }).findLast((event) => {
             if (event.event_kind !== 'accept') return false;
             return JSON.parse(event.event_detail).commit === found.item_commit;
@@ -1579,6 +1581,8 @@ export function reopen(board, id, { agentId, note }) {
             : { batch: null, tests: manual.tests, mergeCommit: manual.mergeCommit };
           return null;
         },
+        trunkConflicts: null,
+        conflictAccepted: (found) => (forMerge ? conflictProblem(board, found, conflict, (accept) => { supersedes = accept; }) : null),
       },
       set: (found) => {
         submittedCommit = found.item_commit;
@@ -1592,9 +1596,9 @@ export function reopen(board, id, { agentId, note }) {
         };
       },
     });
-    logEvent(board, agentId, 'reopen', id, { commit: submittedCommit, note: note.trim(), judgment: null,
-      ...(supersedes ? { supersedes, landingFailure } : {}) });
-    return { id: item.item_id, commit: submittedCommit, ...(supersedes ? { supersedes, landingFailure } : {}) };
+    const returned = forMerge ? { supersedes, conflict: { files: conflict.files, trunk: conflict.trunk } } : supersedes ? { supersedes, landingFailure } : {};
+    logEvent(board, agentId, 'reopen', id, { commit: submittedCommit, note: note.trim() || conflictNote(conflict), judgment: null, ...returned });
+    return { id: item.item_id, commit: submittedCommit, ...returned };
   });
 }
 

@@ -36,6 +36,7 @@ import { askedLaneNotes, detectGate, initRepo, proposeLanes, starterLane, starte
 import { lifecycleMarkdown } from './machine.js';
 import { HELP, VERSION } from './help.js';
 import { barCorrectionLine, barCorrections, barStatsLines } from './bar-corrections.js';
+import { MAIN_MERGE_LABEL, mainMergeFor, mainMergeLines, reopenConflict } from './trunk-conflict.js';
 import { checkImplies, decisionsImplying, parseImplies, takeDecisionNotices, whyLine } from './implies.js';
 import { defaultViewPort } from './view-port.js';
 export { HELP, VERSION };
@@ -82,7 +83,7 @@ import { serveApi } from './api.js';
 import { serveMcp } from './mcp.js';
 import { doctorProblems, doctrineProblems } from './doctor.js';
 import { staleFrozenItems, staleItemFinding } from './approved-rows.js';
-import { mainPolicy, policyAt, itemPolicy, submissionPaths, frozenCheck, checkAtCommit, dependencySnapshots, requireTrunkMerge, trunkRef } from './trusted-policy.js';
+import { mainPolicy, policyAt, itemPolicy, submissionPaths, frozenCheck, checkAtCommit, dependencySnapshots, requireTrunkMerge, trunkMerge, trunkRef } from './trusted-policy.js';
 import { proofStats } from './stats.js';
 import { flowLines, flowAlertLine } from './stats-flow.js';
 import { releaseHeadlinesBetween } from './changelog.js';
@@ -304,6 +305,7 @@ const OPTIONS = {
   commit: { type: 'string' },
   ref: { type: 'string' },
   supersedes: { type: 'string' },
+  conflict: { type: 'string' },
   implies: { type: 'string' },
   owns: { type: 'string' },
   help: { type: 'boolean', short: 'h' },
@@ -845,13 +847,13 @@ function firstLineOf(note) {
  * @param {any} item
  * @returns {string}
  */
-function itemLine(item, name = (id) => id) {
+function itemLine(item, name = (id) => id, mainMerge = false) {
   const holder = item.item_status === 'claimed' ? ` ${name(item.item_owner)}` : '';
   const verifier = item.item_status === 'verified' ? ` by ${name(item.item_verified_by)}` : '';
   const specs = item.item_spec_ids ? `  [${item.item_spec_ids}]` : '';
   const parent = item.item_parent_id ? `  under #${item.item_parent_id}` : '';
   const after = item.item_after ? `  after ${item.item_after.split(',').map((id) => `#${id}`).join(',')}` : '';
-  const rejected = item.item_status === 'open' && item.item_verdict === 'REJECT' ? ' (rejected)' : '';
+  const rejected = item.item_status === 'open' && item.item_verdict === 'REJECT' ? ' (rejected)' : mainMerge ? ` (${MAIN_MERGE_LABEL})` : '';
   const light = item.item_route === 'strong' ? '' : `  ${item.item_route}`;
   const hold = item.item_hold_reason ? `  held by ${name(item.item_hold_by)}: ${item.item_hold_reason}` : '';
   return `#${item.item_id}  ${item.item_status}${holder}${verifier}${rejected}  ${item.item_lane}  ${item.item_title}${specs}${parent}${after}${light}${hold}`;
@@ -1303,6 +1305,8 @@ function resumeHere(io) {
       sentBack: all
         .filter((item) => item.item_status === 'open' && item.item_verdict === 'REJECT' && item.item_built_by === me.id)
         .map((item) => ({ item, verdict: store.verdictsFor(board, item.item_id).at(-1) })),
+      mainMerges: all.filter((item) => item.item_status === 'open' && item.item_built_by === me.id)
+        .map((item) => ({ item, merge: mainMergeFor(board, item.item_id) })).filter(({ merge }) => merge),
       awaiting: all.filter((item) => item.item_status === 'submitted' && item.item_built_by === me.id),
       toVerify: all.filter((item) => item.item_status === 'submitted' && item.item_built_by !== me.id),
       toMerge,
@@ -1379,6 +1383,7 @@ function resumeHere(io) {
   for (const { item, verdict } of card.sentBack) {
     say(`sent back: #${item.item_id} ${verdict ? `${verdict.verdict_reason} by ${name(verdict.verdict_by)}: ${firstLine(verdict.verdict_note)}` : 'rejected'}`);
   }
+  for (const { item, merge } of card.mainMerges) say(mainMergeLines(item, merge, name).join('; '));
   if (isMain && card.staleFollowUps.count) say(`${plural(card.staleFollowUps.count, 'stale follow-up')}; list them with ${card.staleFollowUps.list}`);
   else if (!isMain) for (const item of card.stale) say(`stale: ${item.message}; next: ${item.next}`);
   if (card.awaiting.length) say(`awaiting a verdict: ${card.awaiting.map((item) => `#${item.item_id} (${span(ctx, item.item_updated_at)})`).join(', ')}`);
@@ -1420,6 +1425,7 @@ function resumeHere(io) {
   if (isMain) next = coordinatorNext(card, loadSpec(root, ctx.config).rows);
   else if (card.holding.length) next = buildNext(card);
   else if (card.sentBack.length) next = reworkNext(card);
+  else if (card.mainMerges.length) next = `pullboard claim ${card.mainMerges[0].item.item_id}, merge main, resolve the conflicts, commit and submit again`;
   else if (card.hold) next = 'wait for the hold to lift: pullboard next --wait 9 (minutes)';
   else if (ready) next = `pullboard next (${ready} ready in your lane)`;
   else if (inLane.length) next = `pullboard next --wait 9 (minutes); ${inLane.length} in your lane ${inLane.length === 1 ? 'waits' : 'wait'} on other work`;
@@ -2015,14 +2021,15 @@ function readCommands(io, { first, second, rest, values }) {
     },
     list: () => {
       const ctx = context(io);
-      const { items, agents } = withBoard(ctx, (board) => ({
+      const { items, agents, merging } = withBoard(ctx, (board) => ({
         items: store.listItems(board, { lane: first, all: values.all }),
         agents: store.listAgents(board),
+        merging: new Set(store.listItems(board, { lane: first }).filter((item) => mainMergeFor(board, item.item_id)).map((item) => item.item_id)),
       }));
       const filtered = items.filter((item) => !values.route || item.item_route === values.route);
       if (values.json) io.result({ items: filtered });
       else if (!filtered.length) io.say(values.all ? 'no items yet' : 'nothing open; --all shows closed items');
-      else filtered.forEach((item) => io.say(itemLine(item, (id) => agentDisplayName(agents, ctx.config, id))));
+      else filtered.forEach((item) => io.say(itemLine(item, (id) => agentDisplayName(agents, ctx.config, id), merging.has(item.item_id))));
       return 0;
     },
     roadmap: () => {
@@ -2054,7 +2061,7 @@ function readCommands(io, { first, second, rest, values }) {
     show: () => {
       const ctx = context(io);
       const id = idArg(first);
-      const { item, verdicts, moves, thread, related, reviewer, agents } = withBoard(ctx, (board) => ({
+      const { item, verdicts, moves, thread, related, reviewer, agents, mainMerge } = withBoard(ctx, (board) => ({
         item: store.getItem(board, id),
         verdicts: store.verdictsFor(board, id),
         moves: store.events(board, { itemId: id }).filter((event) => ['attempt', 'escalate'].includes(event.event_kind)),
@@ -2062,13 +2069,14 @@ function readCommands(io, { first, second, rest, values }) {
         related: store.relatedItems(board, store.getItem(board, id)),
         reviewer: store.reviewHolder(board, store.getItem(board, id)),
         agents: store.listAgents(board),
+        mainMerge: mainMergeFor(board, id),
       }));
       const agentName = (id) => displayAgentName(agents.find((agent) => agent.agent_id === id) ?? { agent_id: id }, ctx.config.agents.names);
       if (values.json) {
         io.result({ ...item, verdicts, thread });
         return 0;
       }
-      io.say(itemLine(item, agentName));
+      io.say(itemLine(item, agentName, Boolean(mainMerge)));
       if (item.item_criterion) io.say(`criterion: ${item.item_criterion}`);
       if (item.item_check) io.say(`check: ${item.item_check}`);
       sayCheckBaseline(io, item);
@@ -2099,6 +2107,7 @@ function readCommands(io, { first, second, rest, values }) {
       });
       if (notes.some((note, index) => note !== verdicts[index].verdict_note)) io.say(`(earlier verdicts shortened; every note in full: pullboard show ${id} --history)`);
       for (const correction of barCorrections(thread)) io.say(barCorrectionLine(correction));
+      for (const line of mainMerge ? mainMergeLines(item, mainMerge, agentName) : []) io.say(line);
       if (item.item_merged_commit) io.say(`merged as ${item.item_merged_commit}`);
       if (item.item_withdrawn_reason) io.say(`withdrawn: ${item.item_withdrawn_reason}`);
       io.say('thread:');
@@ -3173,11 +3182,14 @@ function workCommands(io, args) {
       return 0;
     }),
     reopen: () => act(async (ctx, board, me) => {
-      const result = await ordered(ctx, board, 'reopen', [idArg(first), { agentId: me.id, note: textArg(io, values, 'note') ?? '' }]);
+      const conflict = values.conflict === undefined ? undefined : reopenConflict({ item: store.getItem(board, idArg(first)), coordinator: me.id === COORDINATOR, text: values.conflict, trunkMerge: (commit) => trunkMerge(ctx.info.root, commit) });
+      const result = await ordered(ctx, board, 'reopen', [idArg(first), { agentId: me.id, note: textArg(io, values, 'note') ?? '', ...(conflict ? { conflict } : {}) }]);
       io.result?.(result);
-      io.say(result.landingFailure
-        ? `reopened #${first} after landing failure; previous accept remains recorded at ${result.commit.slice(0, 12)}`
-        : `reopened #${first} without a verdict; previous commit ${result.commit.slice(0, 12)} remains recorded`);
+      io.say(result.conflict
+        ? `reopened #${first} for a main merge: conflicts with the trunk at ${result.conflict.trunk.slice(0, 12)} in ${result.conflict.files.join(', ')}; the accept at ${result.commit.slice(0, 12)} stays recorded`
+        : result.landingFailure
+          ? `reopened #${first} after landing failure; previous accept remains recorded at ${result.commit.slice(0, 12)}`
+          : `reopened #${first} without a verdict; previous commit ${result.commit.slice(0, 12)} remains recorded`);
       return 0;
     }),
     shout: () => act(async (ctx, board, me) => {
