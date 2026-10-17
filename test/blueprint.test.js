@@ -77,7 +77,7 @@ test('blueprint add files a blueprint as drafts [S1,I1]', () => {
   assert.equal(rules[0].text, 'Every change ships with a test that fails without it. Why: a test that passes either way proves nothing.');
   const questions = rows.filter((row) => row.status === 'pending');
   assert.deepEqual(questions.map((row) => row.text), [
-    'The app is built with: Next.js. Choices: Next.js, SvelteKit, Rails, Something else.',
+    'The app is built with: (choose one). Choices: Next.js, SvelteKit, Rails, Something else.',
     'It deploys to: Vercel. Choices: Vercel, Netlify, Fly.io, My own server.',
     'People sign in with: Email links. Choices: Email links, Passwords, Google, No sign-in yet.',
     'A change is done when: It runs on a preview link. Choices: It runs on a preview link, Its tests pass, I have looked at it.',
@@ -554,6 +554,70 @@ test('blueprint add files a blueprint as drafts and runs nothing it supplies [S1
     assert.equal(refused.status, 1, refused.stdout + refused.stderr);
     assert.equal(JSON.parse(refused.stdout).error.code, 'BLUEPRINT_URL');
   }
+});
+
+/** The text of the one pending row in the repo's SPEC.md whose question starts with the ask. */
+function pendingQuestion(repo, ask) {
+  const rows = parseSpec(readFileSync(join(repo, 'SPEC.md'), 'utf8')).rows.filter((row) => row.status === 'pending' && row.text.startsWith(`${ask}: `));
+  assert.equal(rows.length, 1, `one pending "${ask}" row`);
+  return rows[0].text;
+}
+
+const RUNNERS = 'Choices: node:test, Vitest, Jest, Mocha, pytest, Something else.';
+const FRAMEWORKS = 'Choices: Next.js, SvelteKit, Rails, Something else.';
+
+test('a question defaults from the repo it lands in [S1,I1]', () => {
+  const runners = readBlueprint('test-reliability', import.meta.dirname).questions[0].choices;
+  assert.ok(['node:test', 'Mocha', 'Vitest', 'Jest', 'pytest'].every((choice) => runners.includes(choice)), 'the test-runner question offers node:test and Mocha besides Vitest, Jest and pytest');
+
+  // init --blueprint in a node --test project: the test runner is read from scripts.test.
+  const node = emptyRepo();
+  writeFileSync(join(node.repo, 'package.json'), `${JSON.stringify({ name: 'app', scripts: { test: 'node --test test/' } })}\n`);
+  const started = node.run('init', '--blueprint', 'test-reliability');
+  assert.equal(started.status, 0, started.stdout + started.stderr);
+  assert.equal(pendingQuestion(node.repo, 'Tests run with'), `Tests run with: node:test. ${RUNNERS}`, 'a node --test project defaults to node:test');
+
+  // blueprint add in a Next.js project: the framework is read from dependencies.
+  const next = freshBoard();
+  writeFileSync(join(next.repo, 'package.json'), `${JSON.stringify({ name: 'web', dependencies: { next: '15.0.0', react: '19.0.0' } })}\n`);
+  next.git('add', '-A');
+  next.git('commit', '-q', '-m', 'chore: a Next.js app');
+  json(next, 'blueprint', 'add', 'web-app');
+  assert.equal(pendingQuestion(next.repo, 'The app is built with'), `The app is built with: Next.js. ${FRAMEWORKS}`, 'a Next.js project defaults to Next.js');
+
+  // No test script: one test runner among devDependencies is the answer.
+  const mocha = freshBoard();
+  writeFileSync(join(mocha.repo, 'package.json'), `${JSON.stringify({ name: 'lib', devDependencies: { mocha: '10.0.0' } })}\n`);
+  mocha.git('add', '-A');
+  mocha.git('commit', '-q', '-m', 'chore: a Mocha library');
+  json(mocha, 'blueprint', 'add', 'test-reliability');
+  assert.equal(pendingQuestion(mocha.repo, 'Tests run with'), `Tests run with: Mocha. ${RUNNERS}`, 'a devDependency names the test runner');
+
+  // A detected answer the question does not offer is never used: the blueprint's own default stands.
+  const narrow = { ...PUBLISHED, name: 'narrow', title: 'Narrow', prefix: 'NAR', items: [],
+    questions: [{ key: 'Q1', ask: 'Its runner is', choices: ['Vitest', 'Jest'], default: 'Jest', detect: 'test-runner' }] };
+  writeFileSync(join(mocha.repo, 'narrow.json'), `${JSON.stringify(narrow)}\n`);
+  json(mocha, 'blueprint', 'add', 'narrow.json');
+  assert.equal(pendingQuestion(mocha.repo, 'Its runner is'), 'Its runner is: Jest. Choices: Vitest, Jest.', 'an answer outside the choices is never used');
+});
+
+test('a question with nothing to read has no default [S1,I1]', () => {
+  // No package.json at all, and one that names nothing a question asks about.
+  const bare = emptyRepo();
+  const started = bare.run('init', '--blueprint', 'test-reliability');
+  assert.equal(started.status, 0, started.stdout + started.stderr);
+  assert.equal(pendingQuestion(bare.repo, 'Tests run with'), `Tests run with: (choose one). ${RUNNERS}`, 'no package.json leaves the test runner unanswered');
+  const plain = freshBoard();
+  writeFileSync(join(plain.repo, 'package.json'), `${JSON.stringify({ name: 'web', scripts: { test: 'make check' }, dependencies: { express: '5.0.0' } })}\n`);
+  plain.git('add', '-A');
+  plain.git('commit', '-q', '-m', 'chore: an app with nothing to read');
+  json(plain, 'blueprint', 'add', 'web-app');
+  assert.equal(pendingQuestion(plain.repo, 'The app is built with'), `The app is built with: (choose one). ${FRAMEWORKS}`, 'no known framework leaves the question unanswered');
+  // A blueprint without a default for a question it cannot detect is valid and files the same way.
+  const own = { ...PUBLISHED, name: 'own', title: 'Own', prefix: 'OWN', items: [], questions: [{ key: 'Q1', ask: 'Its colour is', choices: ['Red', 'Blue'] }] };
+  writeFileSync(join(plain.repo, 'own.json'), `${JSON.stringify(own)}\n`);
+  json(plain, 'blueprint', 'add', 'own.json');
+  assert.equal(pendingQuestion(plain.repo, 'Its colour is'), 'Its colour is: (choose one). Choices: Red, Blue.');
 });
 
 test('starter items land in a build lane, never the coordinator lane [S1,I1]', () => {
