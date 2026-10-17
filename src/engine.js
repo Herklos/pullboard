@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import * as store from './board.js';
 import { recordedRefusal } from './recorded-refusal.js';
 import { ENGINE_VERSION } from './machine.js';
-import { MILESTONE_SHIP_ENGINE } from './milestones.js';
+import { MILESTONE_SHIP_ENGINE, canonicalMilestoneTarget } from './milestones.js';
 import { Refused } from './refused.js';
 import { requestMoveProblem, recordRequestMove } from './relay-requests.js';
 import { relayMoveActor, relaySenderProblem, validRelaySender } from './relay-sender.js';
@@ -95,6 +95,8 @@ export function prepareEngineMove(board, operation, args, { id = randomUUID(), a
       options.freezeError = error ?? null;
     }
   }
+  // A target is fixed to one instant here, so replicas in other time zones read the same one.
+  if (operation === 'editMilestone' && values[1] && 'target' in values[1]) values[1].target = canonicalMilestoneTarget(values[1].target);
   const move = { version: 1, engine: ENGINE_VERSION, id, operation, args: values, ...(actor === undefined ? {} : { actor }) };
   // JSON is the wire format: optional undefined fields become absent on every replica alike.
   return JSON.parse(JSON.stringify(move));

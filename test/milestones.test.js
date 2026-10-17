@@ -85,7 +85,7 @@ function moves(box, id) {
   return box.json('show', String(id)).thread.filter((entry) => entry.kind === 'milestone_moved');
 }
 
-test('[N26] a milestone ships what landed and moves the rest', (t) => {
+test('[N26] a milestone ships what landed and moves the rest', async (t) => {
   const box = fixture(t);
   const landed = box.item('Landed work', 'landed');
   const accepted = box.item('Accepted work', 'accepted');
@@ -146,6 +146,37 @@ test('[N26] a milestone ships what landed and moves the rest', (t) => {
   assert.notEqual(refused.status, 0, refused.stdout + refused.stderr);
   assert.equal(JSON.parse(refused.stdout).error.code, 'MILESTONE_SHIPPED', 'adding to a shipped milestone is refused');
   assert.deepEqual(milestone(box.json('roadmap'), 'A').items.map(({ id }) => id), [landed], 'the refusal changes nothing');
+
+  // A target means one instant on every replica: the move carries UTC, and a bare local time
+  // in an ordered envelope is refused alike in every zone instead of read in each one's own.
+  const { prepareEngineMove, applyEngineMove } = await import('../src/engine.js');
+  const { exportBoard, importBoard } = await import('../src/exchange.js');
+  store.addMilestone(box.board, { agentId: 'coordinator', name: 'Z' });
+  const snapshot = exportBoard(box.board);
+  const prepared = prepareEngineMove(box.board, 'editMilestone', ['Z', { agentId: 'coordinator', target: '2026-10-20T18:00' }], { id: 'zone-target', actor: 'coordinator' });
+  assert.match(prepared.args[1].target, /Z$/u, 'the prepared move carries the instant in UTC');
+  const bare = { ...prepared, id: 'bare-target', args: ['Z', { agentId: 'coordinator', target: '2026-10-20T18:00' }] };
+  const zone = process.env.TZ;
+  const replicas = [];
+  try {
+    for (const name of ['UTC', 'America/Chicago']) {
+      const dir = mkdtempSync(join(tmpdir(), 'pullboard-target-zone-'));
+      TEMP_DIRS.push(dir);
+      const replica = store.openBoard(join(dir, 'board.sqlite'));
+      t.after(() => store.closeBoard(replica));
+      importBoard(replica, snapshot);
+      process.env.TZ = name;
+      const refused = applyEngineMove(replica, bare, { sequence: 1, at: '2026-10-17T04:00:00.000Z' });
+      assert.equal(refused.error?.code, 'MILESTONE_TARGET', `a bare local time is refused in ${name}: ${JSON.stringify(refused)}`);
+      const applied = applyEngineMove(replica, prepared, { sequence: 2, at: '2026-10-17T04:00:01.000Z' });
+      assert.equal(applied.error, undefined, JSON.stringify(applied));
+      replicas.push(store.milestones(replica).find((row) => row.name === 'Z').target);
+    }
+  } finally {
+    if (zone === undefined) delete process.env.TZ;
+    else process.env.TZ = zone;
+  }
+  assert.equal(replicas[0], replicas[1], `every replica stores the same target: ${JSON.stringify(replicas)}`);
 });
 
 test('[N26] milestone ship --next names where the unlanded items go', (t) => {

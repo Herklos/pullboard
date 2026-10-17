@@ -106,16 +106,33 @@ function normalizeMilestoneText(name, note = null) {
 }
 
 /**
- * A target as ISO text, or null for `none`, which clears it. Stored normalized so every replica
- * compares the same instant whatever form the coordinator typed.
+ * The instant a target the coordinator typed names, read in this machine's time zone, as UTC ISO
+ * text, or `none` unchanged. The move is prepared with this value, so the ordered envelope never
+ * carries a local time that another replica would read in its own zone.
+ *
+ * @param {unknown} target
+ * @returns {unknown}
+ */
+export function canonicalMilestoneTarget(target) {
+  if (target === 'none' || typeof target !== 'string' || !/\d/.test(target)) return target;
+  const at = Date.parse(target.trim());
+  return Number.isFinite(at) ? new Date(at).toISOString() : target;
+}
+
+/**
+ * A target as ISO text, or null for `none`, which clears it. Applying a move accepts only a date or
+ * a date and time with an explicit zone, so every replica reads the same instant: a bare local
+ * time would mean a different moment on a machine in another zone.
  *
  * @param {unknown} target
  * @returns {string | null}
  */
 function normalizeMilestoneTarget(target) {
   if (target === 'none') return null;
-  const at = typeof target === 'string' && /\d/.test(target) ? Date.parse(target.trim()) : NaN;
-  if (!Number.isFinite(at)) throw new Refused('MILESTONE_TARGET', 'a target needs a date and time, like 2026-10-20T18:00Z; use --target <date and time>, or --target none to clear it');
+  const text = typeof target === 'string' ? target.trim() : '';
+  const zoned = /^\d{4}-\d{2}-\d{2}$/.test(text) || /T.*(?:Z|[+-]\d{2}:?\d{2})$/i.test(text);
+  const at = zoned ? Date.parse(text) : NaN;
+  if (!Number.isFinite(at)) throw new Refused('MILESTONE_TARGET', 'a target needs a date, or a date and time with its zone, like 2026-10-20T18:00Z; use --target <date and time>, or --target none to clear it');
   return new Date(at).toISOString();
 }
 

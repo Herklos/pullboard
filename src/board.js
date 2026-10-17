@@ -2408,7 +2408,7 @@ export function milestones(board) {
 }
 
 // The roadmap's moves live in milestones.js; the board keeps exporting them so the engine replays them.
-export { addMilestone, editMilestone, editMilestoneItems, moveMilestone, removeMilestone, roadmap, shipMilestone } from './milestones.js';
+export { addMilestone, canonicalMilestoneTarget, editMilestone, editMilestoneItems, moveMilestone, removeMilestone, roadmap, shipMilestone } from './milestones.js';
 
 /** Current person decisions, including applied receipts, stored without checkout-dependent state. */
 export function rowDecisions(board) {
