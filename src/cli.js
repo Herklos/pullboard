@@ -65,7 +65,8 @@ import {
 import { answerQuestion, bundledBlueprints, landBlueprint, planBlueprint, readBlueprint, repoAnswers, saveBlueprint } from './blueprints.js';
 import { briefFiles } from './brief.js';
 import { commitFirst, commitOwnerLines, commitOwners, coordinatorInbox, coordinatorInboxLines, inboxFirst } from './resume.js';
-import { checkBaseline, prepareCheckBaseline, sayCheckBaseline, refuseCheckSyntax } from './check-baseline.js';
+import { checkBaseline, prepareCheckBaseline, refuseCheckSyntax, sayCheckBaseline } from './check-baseline.js';
+import { checkAcceptCommand, refuseClaimProvesNothing, refuseProvesNothing } from './check-accept.js';
 import { retryCheckBaselines, startCheckBaseline } from './check-baseline-worker.js';
 import { compareMainFailures, mainRedMessage, mainRedReworkItems } from './main-red.js';
 import { runItems } from './run.js';
@@ -600,6 +601,12 @@ async function ordered(ctx, board, operation, args) {
   const lease = await bindLocalSession(ctx.info, { agent, digest, keepLease: true });
   try { return await execute(); }
   finally { lease.release(); }
+}
+
+/** Order a claim on every route (claim, next, run) only after a check green on main is not held [V4]. */
+async function claimOrdered(ctx, board, args) {
+  refuseClaimProvesNothing(ctx.info.root, board, args[0]);
+  return await ordered(ctx, board, 'claim', args);
 }
 
 /** Check ownership before sync or command side effects; reads and authenticated person channels keep their identity. */
@@ -2299,6 +2306,7 @@ async function submitHere(ctx, id) {
   const policy = itemPolicy(root, held);
   const acceptedMain = mainPolicy(root);
   ctx = { ...ctx, config: policy.config };
+  withBoard(ctx, (board) => refuseProvesNothing(() => acceptedMain.config, board, store.getItem(board, id)));
   const dependencies = withBoard(ctx, board => dependencySnapshots(board.db, held));
   submissionPaths(root, held, headCommit(root), { mainCommit: acceptedMain.commit, dependencies });
   const { me, claimHead } = withBoard(ctx, (board) => {
@@ -2710,7 +2718,7 @@ async function nextOnce(ctx, values) {
     const reviewSkipped = values.build && !held
       ? { offeredItem: offer?.item.item_id ?? null, ratio: ctx.config.verify.reviewRatio, ...store.reviewQueue(board) } : null;
     try {
-      await ordered(ctx, board, 'claim', [item.item_id, { agentId: me.id, lane: me.lane, leaseMs: ctx.config.leaseMs, freeze: claimFreezer(ctx, board), head: headCommit(ctx.info.root), reviewSkipped }]);
+      await claimOrdered(ctx, board, [item.item_id, { agentId: me.id, lane: me.lane, leaseMs: ctx.config.leaseMs, freeze: claimFreezer(ctx, board), head: headCommit(ctx.info.root), reviewSkipped }]);
     } catch (error) {
       if (error instanceof MainSpecMerged) return { retry: true, specMerged: { item: item.item_id, rows: error.rows } };
       if (error instanceof Refused && ['HELD', 'ITEM_HELD', 'BLOCKED', 'ONE_CLAIM'].includes(error.code)) return { retry: true };
@@ -3030,10 +3038,11 @@ function workCommands(io, args) {
       io.say(`#${id} escalated ${moved.from} -> ${moved.to}; it is open for a ${moved.to} agent`);
       return 0;
     }),
-    run: () => runItems(io, values, { context, withBoard, whoAmI, nextOnce, submitHere, freezer, ordered }),
+    run: () => runItems(io, values, { context, withBoard, whoAmI, nextOnce, submitHere, freezer, ordered, claim: claimOrdered }),
     sweep: () => act((ctx, board, me) => sweepHere(ctx, board, me, values)),
     next: () => nextHere(io, { ...values, verifyId: first }),
     check: async () => {
+      if (first === 'accept') return checkAcceptCommand(io, second, rest, { context, withBoard, whoAmI, ordered, idArg });
       const ctx = context(io);
       const { item, author, caller, agents } = withBoard(ctx, (board) => {
         const me = first ? (ctx.info.isMain ? { id: COORDINATOR } : { id: store.agentAt(board, ctx.info.root)?.agent_id }) : whoAmI(ctx, board);
@@ -3080,7 +3089,7 @@ function workCommands(io, args) {
       let result;
       for (;;) {
         try {
-          result = await ordered(ctx, board, 'claim', [id, { agentId: me.id, lane: me.lane, leaseMs: ctx.config.leaseMs, freeze: claimFreezer(ctx, board), head: headCommit(ctx.info.root) }]);
+          result = await claimOrdered(ctx, board, [id, { agentId: me.id, lane: me.lane, leaseMs: ctx.config.leaseMs, freeze: claimFreezer(ctx, board), head: headCommit(ctx.info.root) }]);
           break;
         } catch (error) {
           if (!(error instanceof MainSpecMerged)) throw error;

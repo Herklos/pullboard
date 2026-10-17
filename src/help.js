@@ -98,6 +98,8 @@ Work
                                         in the main checkout, verifying needs --as coordinator
   pullboard check [id] [--yes]          show and run your item's check; --yes confirms a check set by someone else
                                         the command and its author print first; the project gate is pullboard gate
+  pullboard check accept <id>           the person accepts an item's check that already passes on main, as it reads now;
+                                        with checks.provesNothing "hold", claim and submit refuse that item until then
   pullboard claim <id>                  take or renew a lease; the first claim freezes the criterion
   pullboard release <id> [--note "why"]  hand it back; a review release needs a one-line reason
   pullboard submit <id>                 needs a clean tree, item check and affected tests green at HEAD (alias: done)
@@ -210,7 +212,7 @@ Reject reasons: TEST_FAILURE, BEHAVIOR_MISMATCH, INSUFFICIENT_EVIDENCE, STALE_HE
 const HELP_NAMES = [
   'tour', 'init', 'worktree', 'join', 'takeover', 'whoami', 'lanes', 'lane', 'lane add', 'status', 'resources', 'settings', 'view', 'view export',
   'serve', 'mcp', 'relay', 'relay recover', 'resume', 'hooks', 'add', 'edit', 'escalate', 'run', 'list', 'doctor', 'health', 'skills', 'show', 'next', 'land',
-  'check', 'claim', 'release', 'submit', 'done', 'verify', 'fact', 'why', 'shout', 'answer', 'pass', 'decisions', 'inbox', 'watch', 'export', 'import',
+  'check', 'check accept', 'claim', 'release', 'submit', 'done', 'verify', 'fact', 'why', 'shout', 'answer', 'pass', 'decisions', 'inbox', 'watch', 'export', 'import',
   'sweep', 'merged', 'withdraw', 'refreeze', 'reopen', 'hold', 'stats', 'ledger', 'log', 'spec', 'spec check', 'spec view',
   'spec show', 'spec unmet', 'spec signoff', 'spec draft', 'spec signers', 'spec signers add', 'doctrine', 'doctrine check', 'forget', 'prompt', 'gate', 'hook',
   'hook pre-commit', 'hook pre-merge-commit', 'hook commit-msg', 'hook pre-push', 'view export', 'version', 'lifecycle', 'help',
