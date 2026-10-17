@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import * as store from '../src/board.js';
-import { applyEngineMove, prepareEngineMove } from '../src/engine.js';
+import { applyEngineMove, applyRelayMove, prepareEngineMove } from '../src/engine.js';
 import { ENGINE_VERSION } from '../src/machine.js';
 import { createE2eHelpers } from './e2e-helpers.js';
 import { existsSync, readFileSync } from 'node:fs';
@@ -268,4 +268,50 @@ test('an unranked item follows the ranked ones [N2,B13]', (t) => {
   store.editMilestoneItems(board, 'release', { agentId: 'coordinator', remove: [ranked] });
   store.editMilestoneItems(board, 'release', { agentId: 'coordinator', add: [ranked] });
   assert.equal(store.nextFor(board, { agentId: builder, lane: 'core' }).item.item_id, oldest, 'removing and readding an item does not retain a ghost rank');
+});
+
+test('milestone rank moves replay identically and preserve historical next selection [N2,B13,H16]', (t) => {
+  for (const version of [8, 24, 31, 32]) {
+    const fixtures = [boardFixture(), boardFixture()];
+    t.after(() => fixtures.forEach(({ board }) => store.closeBoard(board)));
+    for (const { board, builder } of fixtures) {
+      submitted(board, builder, 'oldest submitted work', 'strong', 1);
+      submitted(board, builder, 'newer ranked work', 'strong', 2);
+      store.addMilestone(board, { agentId: 'coordinator', name: 'release', items: [1, 2] });
+    }
+    const move = prepareEngineMove(fixtures[0].board, 'orderMilestoneItems', ['release', { agentId: fixtures[0].builder, items: [2, 1] }]);
+    assert.equal(move.engine, 32, 'the coordinator allocated engine32 to the sealed order move');
+    const outcomes = fixtures.map(({ board }) => applyRelayMove(board, move, {
+      sequence: 1, at: '2026-10-18T01:00:00Z', kind: 'move', sender: { kind: 'agent', userId: 'fixture', agent: fixtures[0].builder },
+    }));
+    assert.equal(outcomes[0].error, undefined, JSON.stringify(outcomes[0]));
+    assert.deepEqual(outcomes[0], outcomes[1]);
+    assert.deepEqual(store.milestones(fixtures[0].board), store.milestones(fixtures[1].board));
+    const reserve = prepareEngineMove(fixtures[0].board, 'reserveNextReview', [{ agentId: fixtures[0].reviewer, lane: 'review', leaseMs: HOUR, policy: 'any' }]);
+    const results = fixtures.map(({ board }) => applyEngineMove(board, { ...reserve, engine: version }, { sequence: 2, at: '2026-10-18T01:01:00Z' }));
+    assert.deepEqual(results[0], results[1]);
+    assert.equal(results[0].result.item.item_id, version < 32 ? 1 : 2, `engine${version} preserves its recorded selection`);
+    assert.throws(() => applyEngineMove(fixtures[0].board, { ...move, id: 'old-order', engine: 31 }, { sequence: 3, at: '2026-10-18T01:02:00Z' }), { code: 'RELAY_MOVE' });
+    assert.equal(fixtures[0].board.db.prepare("SELECT meta_value FROM board_meta WHERE meta_key='relay_applied_sequence'").get().meta_value, '2');
+  }
+});
+
+test('milestone order refuses invalid membership and unauthenticated ranking [N2,B13,H16]', (t) => {
+  const { board, builder } = boardFixture();
+  t.after(() => store.closeBoard(board));
+  const one = store.addItem(board, { by: 'coordinator', lane: 'core', title: 'Listed', route: 'strong' });
+  const other = store.addItem(board, { by: 'coordinator', lane: 'core', title: 'Elsewhere', route: 'strong' });
+  store.addMilestone(board, { agentId: 'coordinator', name: 'release', items: [one] });
+  const original = JSON.stringify(store.milestones(board));
+  for (const items of [[], [one, one], [other], ['missing#1']]) {
+    assert.throws(() => store.orderMilestoneItems(board, 'release', { agentId: builder, items }), { code: 'MILESTONE_ITEMS' });
+    assert.equal(JSON.stringify(store.milestones(board)), original);
+  }
+  for (const agentId of ['person', 'unknown-seat']) {
+    assert.throws(() => store.orderMilestoneItems(board, 'release', { agentId, items: [one] }), { code: 'NO_AGENT' });
+  }
+  const forged = prepareEngineMove(board, 'orderMilestoneItems', ['release', { agentId: 'coordinator', items: [one] }]);
+  const refusal = applyRelayMove(board, forged, { sequence: 1, at: '2026-10-18T01:00:00Z', kind: 'move', sender: { kind: 'agent', userId: 'fixture', agent: builder } });
+  assert.equal(refusal.error.code, 'RELAY_SENDER_MISMATCH');
+  assert.equal(JSON.stringify(store.milestones(board)), original);
 });

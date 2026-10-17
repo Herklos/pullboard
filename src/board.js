@@ -2136,12 +2136,26 @@ function milestonePriorities(board) {
   return (entry) => priorities.get(entry.item_id) ?? ordered.length;
 }
 
-/** Make the shared build-queue comparator once: milestone, route, recent files, then oldest. */
+/** Explicit item ranks belong to the same first unfinished milestone as its priority [N2,B13]. */
+function milestoneRanks(board, priority) {
+  if ((board.executionEngineVersion ?? ENGINE_VERSION) < 32) return () => 0;
+  const ranks = new Map();
+  for (const [index, milestone] of milestones(board).entries()) {
+    for (const [rank, id] of (milestone.order ?? []).entries()) {
+      if (milestone.items.includes(id) && priority({ item_id: id }) === index && !ranks.has(id)) ranks.set(id, rank);
+    }
+  }
+  return entry => ranks.get(entry.item_id) ?? Number.MAX_SAFE_INTEGER;
+}
+
+/** Make the shared build-queue comparator once: milestone, explicit rank, route, recent files, then oldest. */
 export function buildOrder(board, { warm = [] } = {}) {
   const milestonePriority = milestonePriorities(board);
+  const rank = milestoneRanks(board, milestonePriority);
   const recent = new Set(warm);
   const shared = (entry) => itemFiles(entry).filter((path) => recent.has(path)).length;
   return (first, second) => milestonePriority(first) - milestonePriority(second)
+    || rank(first) - rank(second)
     || ROUTES.indexOf(second.item_route) - ROUTES.indexOf(first.item_route)
     || shared(second) - shared(first) || first.item_id - second.item_id;
 }
@@ -2186,7 +2200,9 @@ export function nextFor(board, { agentId, lane, verify = false, policy = 'any', 
     const heldByMe = candidates.find((candidate) => candidate.holder === agentId)?.entry;
     if (heldByMe) return { item: heldByMe, reasons: [] };
     const milestonePriority = milestonePriorities(board);
-    candidates.sort((first, second) => milestonePriority(first.entry) - milestonePriority(second.entry));
+    const rank = milestoneRanks(board, milestonePriority);
+    candidates.sort((first, second) => milestonePriority(first.entry) - milestonePriority(second.entry)
+      || rank(first.entry) - rank(second.entry));
     const item = candidates.find((candidate) => !candidate.holder && !candidate.cooldown)?.entry;
     if (item) return { item, reasons: [] };
     const held = candidates.filter((candidate) => candidate.holder && candidate.holder !== agentId)
@@ -2516,10 +2532,32 @@ export function editMilestoneItems(board, name, { agentId, add = [], remove = []
     if (removals.some((id) => current.items.every((present) => JSON.stringify(id) !== JSON.stringify(present)))) {
       throw new Refused('MILESTONE_ITEMS', 'one or more ids are not in this milestone; read pullboard roadmap and retry');
     }
-    entries[index] = { ...current, items: nextItems };
+    entries[index] = { ...current, items: nextItems,
+      ...((board.executionEngineVersion ?? ENGINE_VERSION) >= 32 && current.order
+        ? { order: current.order.filter(id => nextItems.includes(id)) } : {}) };
     saveMilestones(board, entries);
     logEvent(board, agentId, 'milestone_items', null, { name, add: additions, remove: removals });
     return nextItems;
+  });
+}
+
+/** Replace this milestone's explicit ranks; omitted items retain the ordinary queue order [N2,B13]. */
+export function orderMilestoneItems(board, name, { agentId, items }) {
+  if ((board.executionEngineVersion ?? ENGINE_VERSION) < 32) throw new Refused('ENGINE_VERSION', 'milestone order requires engine 32; upgrade Pullboard before ranking work');
+  if (agentId !== COORDINATOR && (agentId === PERSON || !board.db.prepare('SELECT 1 FROM agent WHERE agent_id = ?').get(agentId))) {
+    throw new Refused('NO_AGENT', 'milestone order is an agent or coordinator move; join an agent worktree or ask the coordinator');
+  }
+  const order = normalizeMilestoneItems(items);
+  if (!order.length) throw new Refused('MILESTONE_ITEMS', 'name the ranked item ids: pullboard milestone order <name> 1,2');
+  return atomic(board, () => {
+    const entries = milestones(board);
+    const index = entries.findIndex(entry => entry.name === name);
+    if (index < 0) throw new Refused('NO_MILESTONE', `no milestone named ${name}; list them with pullboard roadmap`);
+    if (order.some(id => !entries[index].items.includes(id))) throw new Refused('MILESTONE_ITEMS', 'rank only items in this milestone; read pullboard roadmap and retry');
+    entries[index] = { ...entries[index], order };
+    saveMilestones(board, entries);
+    logEvent(board, agentId, 'milestone_order', null, { name, items: order });
+    return order;
   });
 }
 

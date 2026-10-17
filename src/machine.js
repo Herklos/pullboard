@@ -10,7 +10,7 @@
  */
 
 /** Executable move semantics, carried by every sealed move and retained during replay [H16]. */
-export const ENGINE_VERSION = 24;
+export const ENGINE_VERSION = 32;
 
 /** @typedef {'agent' | 'coordinator' | 'clock'} Role */
 

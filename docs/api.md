@@ -81,6 +81,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `roadmap` | `version:number`, `milestones:array` |
 | `milestone add` | `version:number`, `milestone:object` |
 | `milestone items` | `version:number`, `milestone:object` |
+| `milestone order` | `version:number`, `milestone:object` |
 | `milestone move` | `version:number`, `milestone:object` |
 | `milestone edit` | `version:number`, `milestone:object` |
 | `milestone remove` | `version:number`, `milestone:object` |
@@ -432,3 +433,5 @@ Each checkout with a committed npm lockfile runs `npm ci`, including lifecycle s
 Post-run cleanup reports `RUNNER_CLEANUP_TIMEOUT` after 30 seconds instead of leaving the controller waiting indefinitely. That failure does not retry the command. The physical runner slot is released after its known children have drained and no unresolved live process remains; an unresolved live process keeps the slot occupied until cleanup can be verified.
 
 When the runner's own resource pool refuses the run's setup, the run fails at once with `RUNNER_SETUP_REFUSED`, naming the runner host and the pool's refusal code. It is not retried, and it leaves no holder or waiter on either machine.
+
+Agents and the coordinator can set explicit item ranks with `milestone order <name> <ids>` (comma-separated ids from that milestone). It replaces that milestone’s `order` list in board metadata; other items stay unranked. `next` compares milestone, explicit rank, then its existing route/recent-file/age tie-breaks. A never-ranked board keeps its existing order. Removing an item drops its rank; adding it again leaves it unranked. This does not change newcomer help or person flows.
