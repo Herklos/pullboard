@@ -14,9 +14,8 @@ function projectFile(value) {
     && value.split('/').every(part => part && part !== '.' && part !== '..');
 }
 
-/** Normalize a versioned selection receipt; absent legacy receipts remain unknown. */
+/** Normalize the receipt required by modern submits; legacy replay skips this guard. */
 export function submissionProof(value) {
-  if (value === undefined) return undefined;
   if (!value || value.version !== 1 || typeof value.full !== 'boolean'
     || typeof value.deferred !== 'boolean' || typeof value.reason !== 'string'
     || value.reason.length > 8192 || !Array.isArray(value.files) || value.files.some(file => !projectFile(file))) {

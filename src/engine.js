@@ -9,7 +9,7 @@ import { CAUSE_ENGINE, ENGINE_VERSION } from './machine.js';
 import { Refused } from './refused.js';
 import { requestMoveProblem, recordRequestMove } from './relay-requests.js';
 import { relayMoveActor, relaySenderProblem, validRelaySender } from './relay-sender.js';
-import { SUBMISSION_PROOF_ENGINE } from './submit-invariants.js';
+import { SUBMISSION_PROOF_ENGINE, submissionProof } from './submit-invariants.js';
 
 const ITEM_ID_FIRST_ARGUMENT = new Set(['acceptCheck', 'editItem', 'escalate', 'recordAttempt', 'claim', 'release', 'submit', 'reserveReview', 'verify', 'merged', 'withdraw', 'refreeze', 'reopen', 'appendFact']);
 
@@ -77,6 +77,7 @@ export function startRelayEpoch(board) {
 /** Turn caller-only callbacks into deterministic values before sealing an executable operation. */
 export function prepareEngineMove(board, operation, args, { id = randomUUID(), actor } = {}) {
   if (!ENGINE_OPERATIONS.includes(operation) || !Array.isArray(args)) throw new Refused('RELAY_MOVE', 'use a supported board-engine operation with its argument array');
+  if (operation === 'submit' && ENGINE_VERSION >= SUBMISSION_PROOF_ENGINE) submissionProof(args[1]?.submissionProof);
   const minimumEngine = minimumOperationEngine(operation, args);
   if (ENGINE_VERSION < minimumEngine) throw new Refused('ENGINE_VERSION', `${operation} requires engine version ${minimumEngine}; this pullboard uses engine ${ENGINE_VERSION}; upgrade before sending it`);
   const values = args.map((value) => value && typeof value === 'object' ? { ...value } : value);
