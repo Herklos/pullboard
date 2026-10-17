@@ -14,9 +14,18 @@
  * Without the marker, importing this module changes nothing.
  */
 import childProcess from 'node:child_process';
-import { statSync, realpathSync } from 'node:fs';
+import {
+  statSync,
+  realpathSync,
+} from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
-import { basename, delimiter, isAbsolute, relative, resolve } from 'node:path';
+import {
+  basename,
+  delimiter,
+  isAbsolute,
+  relative,
+  resolve,
+} from 'node:path';
 import { Refused } from './refused.js';
 
 // The util ESM facade evaluates lazy exports, including diff, which opens stderr on Node 24.

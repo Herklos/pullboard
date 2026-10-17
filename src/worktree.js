@@ -1,6 +1,12 @@
-import { existsSync, readFileSync } from 'node:fs';
+import {
+  existsSync,
+  readFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
-import { cleanGitEnvironment, tryGit } from './git.js';
+import {
+  cleanGitEnvironment,
+  tryGit,
+} from './git.js';
 
 /** The npm lockfiles `npm ci` installs from, in the order npm itself prefers them. */
 const NPM_LOCKFILES = ['npm-shrinkwrap.json', 'package-lock.json'];

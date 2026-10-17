@@ -5,7 +5,12 @@
  * it happened on, and only its evidence travels.
  */
 import { realpathSync } from 'node:fs';
-import { dirname, isAbsolute, relative, resolve } from 'node:path';
+import {
+  dirname,
+  isAbsolute,
+  relative,
+  resolve,
+} from 'node:path';
 
 /** Resolve existing path prefixes so a symlink cannot hide an outside-worktree operation. */
 function diagnosticPath(path) {

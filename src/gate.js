@@ -4,23 +4,72 @@
  * tree's id in the git dir, so the same tree is never checked twice. An agent sees a digest of the
  * run, not the run (V10): a passing suite's output costs tokens and says nothing.
  */
-import { spawn, spawnSync } from 'node:child_process';
+import {
+  spawn,
+  spawnSync,
+} from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, sep } from 'node:path';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import {
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  sep,
+} from 'node:path';
 import { availableParallelism } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { gitChildEnv, gitPath, headTree, invalidateGitFacts, isClean, untracked } from './git.js';
+import {
+  gitChildEnv,
+  gitPath,
+  headTree,
+  invalidateGitFacts,
+  isClean,
+  untracked,
+} from './git.js';
 import { secretsIn } from './hooks.js';
 import { Refused } from './refused.js';
-import { GATE_SLOT_HELD_ENV, gateSlotEnvironment, inheritedGateSlot, memoryAdmission, readMachineMemory, takeResource } from './resources.js';
-import { browserFreeChecksEnabled, gateQueueSettings, gateShortSlots, loadMachineSettings, memoryFloorMB } from './settings.js';
+import {
+  GATE_SLOT_HELD_ENV,
+  gateSlotEnvironment,
+  inheritedGateSlot,
+  memoryAdmission,
+  readMachineMemory,
+  takeResource,
+} from './resources.js';
+import {
+  browserFreeChecksEnabled,
+  gateQueueSettings,
+  gateShortSlots,
+  loadMachineSettings,
+  memoryFloorMB,
+} from './settings.js';
 import { selectAffectedTests } from './affected-tests.js';
-import { checkNeedsBrowser, testsNeedBrowser } from './browser-admission.js';
-import { timingFromOutput, timingRunner } from './timing.js';
+import {
+  checkNeedsBrowser,
+  testsNeedBrowser,
+} from './browser-admission.js';
+import {
+  timingFromOutput,
+  timingRunner,
+} from './timing.js';
 import { landingShardProfile } from './landing-shards.js';
-import { RunnerDropped, runOnRunner, runOnRunnerAsync, runnerSource } from './runners.js';
-import { sandboxBlockedOperation, sandboxBlockedScanner } from './sandbox-denial.js';
+import {
+  RunnerDropped,
+  runOnRunner,
+  runOnRunnerAsync,
+  runnerSource,
+} from './runners.js';
+import {
+  sandboxBlockedOperation,
+  sandboxBlockedScanner,
+} from './sandbox-denial.js';
 
 // Callers keep importing the classifier from the gate; the runner worker imports it directly.
 export { sandboxBlockedOperation, sandboxBlockedScanner };

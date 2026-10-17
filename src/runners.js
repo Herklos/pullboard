@@ -1,15 +1,55 @@
 /** Exact committed source and bounded, credential-free SSH execution for machine runners [C7]. */
-import { spawn, spawnSync } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
-import { chmodSync, closeSync, createReadStream, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  spawn,
+  spawnSync,
+} from 'node:child_process';
+import {
+  createHash,
+  randomUUID,
+} from 'node:crypto';
+import {
+  chmodSync,
+  closeSync,
+  createReadStream,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, isAbsolute, join } from 'node:path';
+import {
+  dirname,
+  isAbsolute,
+  join,
+} from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pipeline } from 'node:stream/promises';
-import { gunzipSync, gzipSync } from 'node:zlib';
-import { configFromSource, defaults } from './config.js';
-import { blockedPaths, secretsIn } from './hooks.js';
-import { cleanGitEnvironment, headCommit, headTree, isClean, repoInfo, untracked } from './git.js';
+import {
+  gunzipSync,
+  gzipSync,
+} from 'node:zlib';
+import {
+  configFromSource,
+  defaults,
+} from './config.js';
+import {
+  blockedPaths,
+  secretsIn,
+} from './hooks.js';
+import {
+  cleanGitEnvironment,
+  headCommit,
+  headTree,
+  isClean,
+  repoInfo,
+  untracked,
+} from './git.js';
 import { Refused } from './refused.js';
 import { remoteFileDenial } from './sandbox-denial.js';
 
@@ -350,7 +390,11 @@ function remoteWorkerCommand(runner, worker, tooling, runtime) {
   const files = { ...runtime.files, 'runner-worker.js': worker };
   const payload = gzipSync(Buffer.from(JSON.stringify(files))).toString('base64');
   const installer = `import { chmodSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, renameSync, rmSync } from 'node:fs';
-import { dirname, isAbsolute, join } from 'node:path';
+import {
+  dirname,
+  isAbsolute,
+  join,
+} from 'node:path';
 import { createHash } from 'node:crypto';
 import { gunzipSync } from 'node:zlib';
 ${installRuntime.toString()}

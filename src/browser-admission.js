@@ -1,9 +1,28 @@
 /** Classify whether selected tests may launch Chrome; uncertainty keeps browser coverage enabled. */
-import { accessSync, constants } from 'node:fs';
-import { lstat, readFile, realpath, stat } from 'node:fs/promises';
-import { posix, relative, resolve, sep } from 'node:path';
-import { commonJsIn, importsIn } from './module-imports.js';
-import { cleanGitEnvironment, git } from './git.js';
+import {
+  accessSync,
+  constants,
+} from 'node:fs';
+import {
+  lstat,
+  readFile,
+  realpath,
+  stat,
+} from 'node:fs/promises';
+import {
+  posix,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
+import {
+  commonJsIn,
+  importsIn,
+} from './module-imports.js';
+import {
+  cleanGitEnvironment,
+  git,
+} from './git.js';
 
 const MODULE_SUFFIXES = ['.js', '.mjs', '.cjs', '.cts', '.json'];
 const CHROME_FIXTURE = 'test/chrome-fixture.js';

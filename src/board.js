@@ -6,17 +6,41 @@
  * every move lands in an append-only event log (R2). The caller supplies what only git and the
  * spec know: the commit, the verifier's checkout, the frozen criterion.
  */
-import { randomBytes, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync } from 'node:fs';
+import {
+  randomBytes,
+  randomUUID,
+} from 'node:crypto';
+import {
+  existsSync,
+  mkdirSync,
+} from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { boardNotWritable } from './board-access.js';
-import { briefFiles, briefSections } from './brief.js';
+import {
+  briefFiles,
+  checkRouted,
+} from './brief.js';
 import { COORDINATOR } from './config.js';
-import { ENGINE_VERSION, GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, effectiveGuards, storeTriggers } from './machine.js';
+import {
+  ENGINE_VERSION,
+  GUARDS,
+  IN_STATE,
+  MOVES,
+  STATES,
+  UNKNOWN_MOVE,
+  effectiveGuards,
+  storeTriggers,
+} from './machine.js';
 import { Refused } from './refused.js';
 import { barCorrectionFields } from './bar-corrections.js';
-import { factFromEvent, requestAnswerRefusal, tellAnswerImplications, tellFactImplications, tellVerdictImplications } from './implies.js';
+import {
+  factFromEvent,
+  requestAnswerRefusal,
+  tellAnswerImplications,
+  tellFactImplications,
+  tellVerdictImplications,
+} from './implies.js';
 import { parseSpec } from './spec.js';
 export { acceptCheck } from './check-accept.js';
 
@@ -50,7 +74,6 @@ export function boardBusyError(file, startedAt, error) {
  * at its tier and below.
  */
 export const ROUTES = ['light', 'mid', 'strong'];
-const BRIEF_LIMIT = 8000;
 const REVIEW_RELEASE_COOLDOWN_MS = 60 * 60 * 1000;
 
 /**
@@ -620,30 +643,6 @@ export function listAgents(board) {
 function checkRoute(route) {
   if (!ROUTES.includes(route)) {
     throw new Refused('BAD_ROUTE', `route "${route}" is light (a small or local model can build it from the brief), mid (a capable model) or strong (a frontier model)`);
-  }
-}
-
-/**
- * Refuse an item a lighter model could not build cold (B10, B14). Any brief stays short enough to
- * read. Below the strong route the item needs all of it: a criterion, a check command that proves
- * it, and a brief naming the files and the test.
- *
- * @param {{ brief: string, route: string, criterion: string, check: string }} item
- */
-function checkRouted({ brief, route, criterion, check }) {
-  if (brief.length > BRIEF_LIMIT) {
-    throw new Refused('BRIEF_TOO_LONG', `the brief is ${brief.length} characters; keep it under ${BRIEF_LIMIT} and point to longer docs by path`);
-  }
-  if (route === 'strong') return;
-  const sections = briefSections(brief);
-  const missing = [
-    ...(briefFiles(brief).length ? [] : ['a brief with a Files: section naming the paths to touch']),
-    ...(sections.test?.length ? [] : ['a Test: section saying what the test asserts']),
-    ...(criterion.trim() ? [] : ['--criterion, saying when it is done']),
-    ...(check.trim() ? [] : ['--check, the command that proves it']),
-  ];
-  if (missing.length) {
-    throw new Refused('NO_BRIEF', `an item routed ${route} must be buildable cold; it needs ${missing.join(', ')}`);
   }
 }
 

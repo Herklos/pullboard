@@ -1,8 +1,23 @@
 /** Private runtime records that let an unattended CLI hand off its live view link. */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
-import { LOOPBACK, lastPort } from './serve.js';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import {
+  basename,
+  dirname,
+  join,
+} from 'node:path';
+import {
+  LOOPBACK,
+  lastPort,
+} from './serve.js';
 import { registryFile } from './projects.js';
 import { fetchLocal } from './local-fetch.js';
 

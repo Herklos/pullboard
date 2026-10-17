@@ -2,26 +2,117 @@
  * The pullboard command line: every command, bound to who is asking (B3, R3). The main checkout is the
  * coordinator; every other worktree is the agent that joined from it.
  */
-import { createHash, randomUUID } from 'node:crypto';
-import { spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
-import { hostname, loadavg } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import {
+  createHash,
+  randomUUID,
+} from 'node:crypto';
+import {
+  spawn,
+  spawnSync,
+} from 'node:child_process';
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs';
+import { loadavg } from 'node:os';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+} from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { pathToFileURL } from 'node:url';
+import {
+  fileURLToPath,
+  pathToFileURL,
+} from 'node:url';
 import { parseArgs } from 'node:util';
 import * as store from './board.js';
-import { CONFIG_FILE, COORDINATOR, DOCTRINE_FILE, LEGACY_DOCTRINE_FILE, loadConfig } from './config.js';
+import {
+  CONFIG_FILE,
+  COORDINATOR,
+  DOCTRINE_FILE,
+  LEGACY_DOCTRINE_FILE,
+  loadConfig,
+} from './config.js';
 import { displayAgentName } from './agent-names.js';
-import { doctrineHistory, loadDoctrine } from './doctrine.js';
-import { agentDoctrine, proposeDoctrine, resumeDoctrineNotes, staleDoctrineRows } from './doctrine-rulings.js';
-import { checkRulesAt, doctrineReport, hasSubmitRules, holdDoctrine, ruleLine } from './doctrine-checks.js';
-import { AGENT_SESSION_IDS, agentSessionDigest, requirePersonChannel } from './person.js';
-import { bindLocalSession, localSessionMatches, localSessionSeats } from './agent-session.js';
-import { decisionAnswer, decisionProjection, handAnsweredQuestions, pendingAnswers, planRowApply, prepareRowDecisions, restoreRowApply, writeRowApply } from './row-decisions.js';
-import { digestOf, gateReport, refuseSandboxBlocked, runGate, runProfiledShell, runSubmitGate, submitGateReport, timingDigest, withGateSlot } from './gate.js';
-import { checkNeedsBrowser, explicitCheckFiles } from './browser-admission.js';
-import { bareWorktreeFinding, codeIsFromMain, contains, differFromHead, git, gitChildEnv, headCommit, headTree, invalidateGitFacts, isClean, mainCheckout, patchId, repoInfo, resolveCommit, tryGit, untracked, withGitFacts } from './git.js';
+import {
+  doctrineHistory,
+  loadDoctrine,
+} from './doctrine.js';
+import {
+  agentDoctrine,
+  proposeDoctrine,
+  resumeDoctrineNotes,
+  staleDoctrineRows,
+} from './doctrine-rulings.js';
+import {
+  checkRulesAt,
+  doctrineReport,
+  hasSubmitRules,
+  holdDoctrine,
+  ruleLine,
+} from './doctrine-checks.js';
+import {
+  AGENT_SESSION_IDS,
+  agentSessionDigest,
+  requirePersonChannel,
+} from './person.js';
+import {
+  bindLocalSession,
+  localSessionMatches,
+  localSessionSeats,
+} from './agent-session.js';
+import {
+  decisionAnswer,
+  decisionProjection,
+  handAnsweredQuestions,
+  pendingAnswers,
+  planRowApply,
+  prepareRowDecisions,
+  restoreRowApply,
+  writeRowApply,
+} from './row-decisions.js';
+import {
+  digestOf,
+  gateReport,
+  refuseSandboxBlocked,
+  runGate,
+  runProfiledShell,
+  runSubmitGate,
+  submitGateReport,
+  timingDigest,
+  withGateSlot,
+} from './gate.js';
+import {
+  checkNeedsBrowser,
+  explicitCheckFiles,
+} from './browser-admission.js';
+import {
+  bareWorktreeFinding,
+  codeIsFromMain,
+  contains,
+  differFromHead,
+  git,
+  gitChildEnv,
+  headCommit,
+  headTree,
+  invalidateGitFacts,
+  isClean,
+  mainCheckout,
+  patchId,
+  repoInfo,
+  resolveCommit,
+  tryGit,
+  untracked,
+  withGitFacts,
+} from './git.js';
 import {
   FIX_NOTE,
   applyFixers,
@@ -33,20 +124,56 @@ import {
   pushesTrunk,
   unwiredHookProblems,
 } from './hooks.js';
-import { askedLaneNotes, detectGate, initRepo, proposeLanes, starterLane, starterLaneNotes } from './init.js';
+import {
+  askedLaneNotes,
+  initRepo,
+  proposeLanes,
+  starterLane,
+  starterLaneNotes,
+} from './init.js';
 import { lifecycleMarkdown } from './machine.js';
-import { HELP, VERSION } from './help.js';
-import { barCorrectionLine, barCorrections, barStatsLines } from './bar-corrections.js';
-import { checkImplies, decisionsImplying, parseImplies, takeDecisionNotices, whyLine } from './implies.js';
+import {
+  buildHelp,
+  VERSION,
+} from './help.js';
+import {
+  barCorrectionLine,
+  barCorrections,
+  barStatsLines,
+} from './bar-corrections.js';
+import {
+  checkImplies,
+  decisionsImplying,
+  parseImplies,
+  takeDecisionNotices,
+  whyLine,
+} from './implies.js';
 import { defaultViewPort } from './view-port.js';
-export { HELP, VERSION };
-import { productLine, productProblems, productSummaries } from './products.js';
-import { addLane, isLane, laneNames, laneOf, outOfLane } from './lanes.js';
+export { VERSION };
+import {
+  productLine,
+  productProblems,
+  productSummaries,
+} from './products.js';
+import {
+  addLane,
+  isLane,
+  laneNames,
+  laneOf,
+  outOfLane,
+} from './lanes.js';
 import { Refused } from './refused.js';
 import { personNeeds } from './needs.js';
 import { personNeedsState } from './needs-state.js';
-import { commitCitations, committedIds } from './history.js';
-import { promptFor, skillProblems, updateSkills } from './skills.js';
+import {
+  commitCitations,
+  committedIds,
+} from './history.js';
+import {
+  promptFor,
+  skillProblems,
+  updateSkills,
+} from './skills.js';
 import {
   frozenCriterion,
   idProblems,
@@ -62,45 +189,192 @@ import {
   standings,
   unmetRows,
 } from './spec.js';
-import { answerQuestion, bundledBlueprints, landBlueprint, planBlueprint, readBlueprint, repoAnswers, saveBlueprint } from './blueprints.js';
+import {
+  answerQuestion,
+  bundledBlueprints,
+  landBlueprint,
+  planBlueprint,
+  readBlueprint,
+  repoAnswers,
+  saveBlueprint,
+} from './blueprints.js';
 import { briefFiles } from './brief.js';
-import { commitFirst, commitOwnerLines, commitOwners, coordinatorInbox, coordinatorInboxLines, inboxFirst } from './resume.js';
-import { checkBaseline, prepareCheckBaseline, refuseCheckSyntax, sayCheckBaseline } from './check-baseline.js';
-import { checkAcceptCommand, refuseClaimProvesNothing, refuseProvesNothing } from './check-accept.js';
-import { retryCheckBaselines, startCheckBaseline } from './check-baseline-worker.js';
-import { compareMainFailures, mainRedMessage, mainRedReworkItems } from './main-red.js';
+import {
+  commitFirst,
+  commitOwnerLines,
+  commitOwners,
+  coordinatorInbox,
+  coordinatorInboxLines,
+  inboxFirst,
+} from './resume.js';
+import {
+  checkBaseline,
+  prepareCheckBaseline,
+  refuseCheckSyntax,
+  sayCheckBaseline,
+} from './check-baseline.js';
+import {
+  checkAcceptCommand,
+  refuseClaimProvesNothing,
+  refuseProvesNothing,
+} from './check-accept.js';
+import {
+  retryCheckBaselines,
+  startCheckBaseline,
+} from './check-baseline-worker.js';
+import {
+  compareMainFailures,
+  mainRedMessage,
+  mainRedReworkItems,
+} from './main-red.js';
 import { runItems } from './run.js';
-import { parseProblems, sweepItems } from './sweep.js';
+import {
+  parseProblems,
+  sweepItems,
+} from './sweep.js';
 import { renderSpecView } from './view.js';
 import { tour } from './tour.js';
-import { commandOutput, refusalDocument } from './json.js';
-import { forgetProject, listApiProjects, registerProjectAndLink, registeredProjectRootsSnapshot } from './projects.js';
+import {
+  commandOutput,
+  refusalDocument,
+} from './json.js';
+import {
+  forgetProject,
+  listApiProjects,
+  registerProjectAndLink,
+  registeredProjectRootsSnapshot,
+} from './projects.js';
 import { milestoneRoadmap } from './roadmap.js';
-import { listResources, memoryVerdict, readMachineMemory, runnerResourceStatus } from './resources.js';
-import { citedTestFiles, rowEvidence, rowStage } from './evidence.js';
-import { exportView, serveView } from './serve.js';
-import { forgetView, portHolder, rememberView, runningView } from './view-session.js';
-import { backgroundViewLine, keepViewRunning, launchBackgroundView, reportView } from './background-view.js';
+import {
+  listResources,
+  memoryVerdict,
+  readMachineMemory,
+  runnerResourceStatus,
+} from './resources.js';
+import {
+  citedTestFiles,
+  rowEvidence,
+  rowStage,
+} from './evidence.js';
+import {
+  exportView,
+  serveView,
+} from './serve.js';
+import {
+  forgetView,
+  portHolder,
+  rememberView,
+  runningView,
+} from './view-session.js';
+import {
+  backgroundViewLine,
+  keepViewRunning,
+  launchBackgroundView,
+  reportView,
+} from './background-view.js';
 import { serveApi } from './api.js';
 import { watchCommand } from './watch.js';
 import { serveMcp } from './mcp.js';
-import { doctorProblems, doctrineProblems } from './doctor.js';
-import { boardHealth, healthLines } from './health.js';
-import { staleFrozenItems, staleItemFinding } from './approved-rows.js';
-import { mainPolicy, policyAt, itemPolicy, submissionPaths, frozenCheck, checkAtCommit, dependencySnapshots, requireTrunkMerge, trunkRef } from './trusted-policy.js';
+import {
+  doctorProblems,
+  doctrineProblems,
+} from './doctor.js';
+import {
+  boardHealth,
+  healthLines,
+} from './health.js';
+import {
+  staleFrozenItems,
+  staleItemFinding,
+} from './approved-rows.js';
+import {
+  mainPolicy,
+  policyAt,
+  itemPolicy,
+  submissionPaths,
+  frozenCheck,
+  checkAtCommit,
+  dependencySnapshots,
+  requireTrunkMerge,
+  trunkRef,
+} from './trusted-policy.js';
 import { proofStats } from './stats.js';
-import { flowLines, flowAlertLine } from './stats-flow.js';
+import {
+  flowLines,
+  flowAlertLine,
+} from './stats-flow.js';
 import { releaseHeadlinesBetween } from './changelog.js';
-import { exportBoard, importBoard } from './exchange.js';
-import { addSigner, assertRequiredSigners, defaultPrincipal, hasSignerFile } from './signature.js';
-import { addRunner, browserFreeChecksEnabled, gateQueueSettings, gateShortSlots, loadMachineSettings, memoryFloorMB, relayOfferEnabled, setBrowserSlots, setGateShortSlots, setGateSlots } from './settings.js';
-import { formatSnapshotLimit, pendingSnapshotSize, pendingCheckpointProblem, relayCommandReceipt, relayCommandReceiptReported, relayLinked, relayOff, relayOn, relayOperation, relayRecover, relayRecovered, relayRevoke, relayStatus, relayTokens, syncRelay } from './relay.js';
-import { autoLinkProject, offerRelayAtInit, relayOnAllCommand, revokeRelayDevice, unlinkedRelayProjects } from './relay-setup.js';
+import {
+  exportBoard,
+  importBoard,
+} from './exchange.js';
+import {
+  addSigner,
+  assertRequiredSigners,
+  defaultPrincipal,
+  hasSignerFile,
+} from './signature.js';
+import {
+  browserFreeChecksEnabled,
+  gateQueueSettings,
+  gateShortSlots,
+  loadMachineSettings,
+  memoryFloorMB,
+} from './settings.js';
+import {
+  pendingSnapshotSize,
+  pendingCheckpointProblem,
+  relayCommandReceipt,
+  relayCommandReceiptReported,
+  relayLinked,
+  relayOff,
+  relayOn,
+  relayOperation,
+  relayRecover,
+  relayRecovered,
+  relayRevoke,
+  relayStatus,
+  relayTokens,
+  syncRelay,
+} from './relay.js';
+import {
+  autoLinkProject,
+  offerRelayAtInit,
+  relayOnAllCommand,
+  revokeRelayDevice,
+  unlinkedRelayProjects,
+} from './relay-setup.js';
 import { readRelayMachine } from './relay-machine.js';
-import { relayJoin, relayPair } from './relay-pairing-client.js';
+import {
+  relayJoin,
+  relayPair,
+} from './relay-pairing-client.js';
 import { executePersonRequests } from './relay-request-execution.js';
-import { engineReceipt } from './engine.js';
-import { land, landingRemote, landingSubject } from './land.js';
+import {
+  boardSetup,
+  recordSetupState,
+  recordViewBind,
+  recordViewReuse,
+  setupIdentity,
+  viewSetupComplete,
+} from './setup-card.js';
+import { formatSnapshotLimit } from './relay-messages.js';
+import { privateNames } from './private-names.js';
+import {
+  runnerCommand,
+  settingsCommand,
+} from './machine-commands.js';
+import {
+  filesSince,
+  recordedRecovery,
+  refuseUnverifiedStack,
+  reportSubmission,
+} from './submission.js';
+import {
+  land,
+  landingRemote,
+  landingSubject,
+} from './land.js';
 import { installStep } from './worktree.js';
 
 const CHECKOUT_LEASES = new WeakMap();
@@ -971,60 +1245,6 @@ function dirtyFiles(root) {
 }
 
 /**
- * The files an item's own commits changed since its claim (N21). First parents only, so main merged
- * into a lane branch is not counted as the item's work; and nothing another item submitted, such as
- * a verified dependency fast-forwarded in, which merges no commit to skip.
- *
- * @param {string} root
- * @param {number} id
- * @param {string | null} from
- * @param {string} to
- * @returns {string[]}
- */
-function filesSince(root, id, from, to) {
-  if (!from) return [];
-  const others = [`--exclude=refs/pullboard/items/${id}/*`, '--glob=refs/pullboard/items/*'];
-  const result = tryGit(root, ['log', '--first-parent', '--no-merges', '--no-renames', '--format=', '--name-only', to, '--not', from, ...others]);
-  return result.status === 0 ? [...new Set(result.stdout.split('\n').filter(Boolean))].sort() : [];
-}
-
-/** Refuse a candidate containing another item's unverified submitted commit [V1].
- *
- * Trunk-reachable commits are already landed, including when the candidate is trunk itself.
- * Inspect all remaining reachable commits, including merged topic parents.
- *
- * @param {string} root
- * @param {any} board
- * @param {any} item
- * @param {string} commit
- * @param {{ ref: string, commit: string } | null} trunk
- * @returns {void}
- */
-function refuseUnverifiedStack(root, board, item, commit, trunk) {
-  const trunkRange = trunk?.commit
-    ? tryGit(root, ['rev-list', `${trunk.commit}..${commit}`])
-    : { status: 1, stdout: '' };
-  if (trunkRange.status !== 0) {
-    throw new Refused('NO_POLICY', 'the current trunk range cannot be read; restore Git history and retry the submit or verification');
-  }
-  const commits = new Set(trunkRange.stdout.split('\n').filter(Boolean));
-  const stacked = store.unverifiedSubmissions(board)
-    .find((other) => other.item_id !== item.item_id && commits.has(other.item_commit));
-  if (stacked) {
-    throw new Refused(
-      'STACKED_ON_UNVERIFIED',
-      `#${item.item_id} includes unverified item #${stacked.item_id} at ${stacked.item_commit}; wait for #${stacked.item_id} to be accepted or rebuild without its commits before continuing`,
-    );
-  }
-}
-
-/** Return the durable outcome only when a recovered move exactly matches its original receipt. */
-function recordedRecovery(board, move) {
-  const receipt = engineReceipt(board, move.id);
-  return receipt?.move === JSON.stringify(move) ? receipt : null;
-}
-
-/**
  * How long ago an ISO time was, or how long until it, in the board's clock: 45m, 3h, 2d.
  *
  * @param {any} ctx
@@ -1169,135 +1389,6 @@ function resumeReleaseNotes(info) {
   mkdirSync(dirname(record), { recursive: true });
   writeFileSync(record, `${VERSION}\n`);
   return releases.length ? { releases: releases.slice(0, 3), omitted: Math.max(0, releases.length - 3), notes: 'CHANGELOG.md' } : null;
-}
-
-/** Identify setup from this board's coordinator enrollment, independently of agent flags. */
-function setupIdentity(board) {
-  return { boardId: store.boardId(board),
-    setupStartedAt: store.listAgents(board).find(agent => agent.agent_id === COORDINATOR)?.agent_created_at };
-}
-
-/** Read only the view's typed successful-bind receipt for this board and setup. */
-function viewBindComplete(ctx, board) {
-  let receipt;
-  try { receipt = JSON.parse(readFileSync(join(ctx.info.commonDir, 'pullboard', 'view-bind.json'), 'utf8')); }
-  catch (error) { if (error.code === 'ENOENT' || error instanceof SyntaxError) return false; throw error; }
-  const identity = setupIdentity(board);
-  return receipt?.type === 'pullboard.view.bound' && receipt.version === 1
-    && receipt.boardId === identity.boardId && receipt.setupStartedAt === identity.setupStartedAt
-    && Number.isFinite(Date.parse(receipt.boundAt))
-    && Date.parse(receipt.boundAt) >= Date.parse(identity.setupStartedAt);
-}
-
-/** A separately typed, authenticated reuse also proves that this board's view was opened. */
-function viewSetupComplete(ctx, board) {
-  if (viewBindComplete(ctx, board)) return true;
-  let receipt;
-  try { receipt = JSON.parse(readFileSync(join(ctx.info.commonDir, 'pullboard', 'view-reuse.json'), 'utf8')); }
-  catch (error) { if (error.code === 'ENOENT' || error instanceof SyntaxError) return false; throw error; }
-  const identity = setupIdentity(board);
-  return receipt?.type === 'pullboard.view.reused' && receipt.version === 1
-    && receipt.boardId === identity.boardId && receipt.setupStartedAt === identity.setupStartedAt
-    && Number.isFinite(Date.parse(receipt.openedAt))
-    && Date.parse(receipt.openedAt) >= Date.parse(identity.setupStartedAt);
-}
-
-/** Atomically record a successful real view bind, scoped to this board's current setup. */
-function recordViewBind(ctx, board, boundAt) {
-  const file = join(ctx.info.commonDir, 'pullboard', 'view-bind.json');
-  const temporary = file + '.' + randomUUID() + '.tmp';
-  const receipt = { type: 'pullboard.view.bound', version: 1, ...setupIdentity(board), boundAt };
-  mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(temporary, JSON.stringify(receipt) + '\n', { mode: 0o600 });
-  renameSync(temporary, file);
-}
-
-/** Record this board's authenticated reuse without claiming that its existing listener bound again. */
-function recordViewReuse(ctx, board, view) {
-  const file = join(ctx.info.commonDir, 'pullboard', 'view-reuse.json');
-  const temporary = file + '.' + randomUUID() + '.tmp';
-  const receipt = { type: 'pullboard.view.reused', version: 1, ...setupIdentity(board),
-    openedAt: new Date().toISOString(), boundAt: view.boundAt, port: view.port, pid: view.pid };
-  mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(temporary, JSON.stringify(receipt) + '\n', { mode: 0o600 });
-  renameSync(temporary, file);
-}
-
-/** Read a typed setup receipt only for this board's current coordinator enrollment. */
-function setupReceiptMatches(ctx, identity, state) {
-  let receipt;
-  try { receipt = JSON.parse(readFileSync(join(ctx.info.commonDir, 'pullboard', `setup-${state}.json`), 'utf8')); }
-  catch (error) { if (error.code === 'ENOENT' || error instanceof SyntaxError) return false; throw error; }
-  return receipt?.type === `pullboard.setup.${state === 'complete' ? 'completed' : state}` && receipt.version === 1
-    && receipt.boardId === identity.boardId && receipt.setupStartedAt === identity.setupStartedAt;
-}
-
-/** Atomically record a setup transition, scoped to this board enrollment. */
-function recordSetupState(ctx, identity, state) {
-  const file = join(ctx.info.commonDir, 'pullboard', `setup-${state}.json`);
-  const temporary = file + '.' + randomUUID() + '.tmp';
-  mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(temporary, JSON.stringify({ type: `pullboard.setup.${state === 'complete' ? 'completed' : state}`, version: 1, ...identity }) + '\n', { mode: 0o600 });
-  renameSync(temporary, file);
-}
-
-/** Derive the next setup question from the real requirements, config, items and view receipt. */
-function boardSetup(ctx, card, identity) {
-  const rows = loadSpec(ctx.info.root, ctx.config).rows;
-  const approved = rows.filter(row => row.status === 'approved');
-  const drafted = rows.filter(row => row.status === 'draft' || row.status === 'pending');
-  const recordedComplete = setupReceiptMatches(ctx, identity, 'complete');
-  const started = setupReceiptMatches(ctx, identity, 'started');
-  const lanes = laneNames(ctx.config).filter(lane => !['review', COORDINATOR].includes(lane));
-  const folders = readdirSync(ctx.info.root, { withFileTypes: true })
-    .filter(entry => entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules')
-    .map(entry => entry.name).sort();
-  const lane = lanes[0] ?? folders[0] ?? 'app';
-  // Older installations had no setup marker. Preserve their completed five-step state on upgrade.
-  const legacyUnmarked = !existsSync(join(ctx.info.commonDir, 'pullboard', 'setup-started.json'))
-    && !existsSync(join(ctx.info.commonDir, 'pullboard', 'setup-complete.json'));
-  const legacyComplete = legacyUnmarked && approved.length > 0 && lanes.length > 0
-    && Boolean(ctx.config.gate?.trim()) && card.all.length > 0 && card.viewOpened;
-  const completed = recordedComplete || legacyComplete;
-  const detectedGate = detectGate(ctx.info.root);
-  /** Quote the exact suggested command safely for a shell. */
-  const quote = value => "'" + String(value).replaceAll("'", "'\\''") + "'";
-  /** Quote one shell word only when it needs it, so a plain lane command reads as typed. */
-  const word = value => /^[A-Za-z0-9._/-]+$/u.test(String(value)) ? String(value) : quote(value);
-  /** Preserve all existing configuration when recording one setup answer. */
-  const configure = patch => `node -e ${quote(`const fs=require('node:fs');const p='pullboard.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));${patch};fs.writeFileSync(p,JSON.stringify(c,null,2)+${JSON.stringify('\n')})`)}`;
-  const steps = [
-    { number: 1, done: approved.length > 0 && (!drafted.length || completed), question: 'Ask the person: what are we building, and who will use it? Draft a few requirements, then ask the person to approve them.',
-      command: 'pullboard spec draft "<text>"',
-      afterAnswer: 'Record each answer with pullboard spec draft "<text>"; the person approves the returned ids in Pullboard View or runs pullboard spec approve <ids> in their own terminal; then the coordinator runs pullboard spec apply.' },
-    { number: 2, done: lanes.length > 0, question: `Ask the person: how should we divide the work? Suggested folders: ${folders.join(', ') || 'app/ (create it for the app)'}.`,
-      command: `pullboard lane add ${word(lane)} --owns ${word(lane + '/')}` },
-    { number: 3, done: Boolean(ctx.config.gate?.trim()),
-      question: detectedGate
-        ? `Ask the person: which command proves the build works? Suggested: ${detectedGate}.`
-        : 'Ask the person: if this board has no build, use `pullboard spec check` to check its spec and practice files; a second agent review checks the actual work. Or choose a custom gate command.',
-      command: configure(`c.gate=${JSON.stringify(detectedGate || 'pullboard spec check')}`) },
-    { number: 4, done: card.all.length > 0, question: 'Ask the person: what is the first small piece we should build?',
-      command: `pullboard add ${quote(lane)} 'First small piece' --specs ${quote(approved[0]?.id ?? 'G1')} --criterion 'Describe what the person will be able to do'` },
-    { number: 5, done: card.viewOpened,
-      question: 'Ask the person: shall we open the board so you can follow the work?', command: 'pullboard view',
-      afterAnswer: 'Run this in the person’s own terminal, or start it in the background as the agent so setup can continue. The view records its successful bind or authenticated reuse for this board.' },
-  ];
-  const current = steps.find(step => !step.done);
-  if (!current && !recordedComplete) recordSetupState(ctx, identity, 'complete');
-  else if (current && !completed && !started) recordSetupState(ctx, identity, 'started');
-  if (current?.number === 1 && drafted.length) {
-    const rowIds = drafted.map(row => row.id);
-    const names = rowIds.join(', ');
-    const command = `pullboard spec show ${rowIds[0]}`;
-    return { step: 1, total: 5, ...current, steps, waitingOn: 'person-approval', rowIds,
-      question: `Waiting for the person to approve ${names}.`, command,
-      personCommand: `pullboard spec approve ${rowIds.join(',')}`,
-      afterAnswer: 'The person approves these rows in Pullboard View or their own terminal; then the coordinator runs pullboard spec apply.',
-      meanwhile: 'While waiting, the agent may review independent approved work or prepare questions for the person.',
-      agentNext: `wait for the person to approve ${names}; meanwhile ${command}` };
-  }
-  return current ? { step: current.number, total: 5, ...current, steps } : null;
 }
 
 /**
@@ -2355,18 +2446,6 @@ async function submitHere(ctx, id) {
     log: gate.log, profile: gate.profile, profilePath: gate.profilePath, proofLog: gate.proofLog, proofProfilePath: gate.proofProfilePath }, doctrine);
 }
 
-/** Report and pin the original submitted commit, including a recovered acknowledged outcome. */
-function reportSubmission(ctx, id, commit, gate, doctrine = []) {
-  const { root } = ctx.info;
-  const pin = `refs/pullboard/items/${id}/${commit.slice(0, 12)}`;
-  git(root, ['update-ref', pin, commit]);
-  ctx.io.result?.({ id, commit, pin, gate, ...(doctrine.length ? { doctrine } : {}) });
-  ctx.io.say(`submitted #${id} at ${commit.slice(0, 12)}; ${gate.report}`);
-  ctx.io.say(`pinned as ${pin}, so this work can't be lost; keep your worktree until it is merged`);
-  ctx.io.say(`next: another agent checks out ${commit.slice(0, 12)} and runs: pullboard verify ${id} accept|reject`);
-  return 0;
-}
-
 /**
  * Add a blueprint to the board of the checkout io.cwd names, exactly as pullboard blueprint add
  * does; init --blueprint calls it after setting up the repo. With report false it prints nothing
@@ -3399,61 +3478,6 @@ export function gateWaitReporter(io) {
   };
 }
 
-/** Read or update machine-wide gate capacity. */
-function settingsCommand(io, { first, second, rest }) {
-  if (!first && !second && !rest.length) {
-    const settings = loadMachineSettings();
-    const queue = gateQueueSettings();
-    // The result names the queue order in effect, defaults included; the file keeps only what was set.
-    const offerAtInit = relayOfferEnabled();
-    const shortSlots = gateShortSlots();
-    io.result?.({ settings: { ...settings, gate: { ...settings.gate, queue: { ...settings.gate?.queue, ...queue }, shortSlots }, relay: { ...settings.relay, offerAtInit } }, memoryFloorMB: memoryFloorMB() });
-    io.say(`gateSlots: ${settings.gateSlots}`);
-    io.say(`browserSlots: ${settings.browserSlots}`);
-    io.say(`gate.queue.reviewsFirst: ${queue.reviewsFirst}${queue.reviewsFirst ? '' : ' (landings first, then arrival order)'}`);
-    io.say(`gate.queue.currentReleaseFirst: ${queue.currentReleaseFirst}${queue.currentReleaseFirst ? '' : ' (release priority is off)'}`);
-    io.say(`gate.queue.agingMinutes: ${queue.agingMinutes}${queue.reviewsFirst || queue.currentReleaseFirst ? '' : ' (used only while reviewsFirst or currentReleaseFirst is true)'}`);
-    io.say(`gate.memoryFloorMB: ${memoryFloorMB() ?? 'off (the gate queue does not wait for memory)'}`);
-    io.say(`view.background: ${settings.view?.background !== false}${settings.view?.background === false ? ' (init and resume leave the view to you)' : ' (init and resume keep pullboard view running for pullboard.dev)'}`);
-    io.say(`relay.offerAtInit: ${offerAtInit}${offerAtInit ? ' (init asks once to share your boards with your phone)' : ' (init stays quiet about sharing)'}`);
-    io.say(`gate.shortSlots: ${shortSlots}${shortSlots ? '' : ' (off; runs that name their test files wait for a gate slot)'}`);
-    return 0;
-  }
-  if (!['gateSlots', 'browserSlots', 'gate.shortSlots'].includes(first) || !second || rest.length) {
-    throw new Refused('USAGE', 'pullboard settings gateSlots <n> | browserSlots <n> | gate.shortSlots <n>');
-  }
-  if (first === 'gate.shortSlots') {
-    if (!/^(?:0|[1-9]\d*)$/u.test(second) || !Number.isSafeInteger(Number(second))) {
-      throw new Refused('BAD_SHORT_SLOTS', 'gate.shortSlots must be a whole number, 0 or more; run pullboard settings gate.shortSlots <n>');
-    }
-    const settings = setGateShortSlots(Number(second));
-    io.result?.({ settings });
-    io.say(`gate.shortSlots set to ${settings.gate.shortSlots}`);
-    return 0;
-  }
-  if (!/^[1-9]\d*$/u.test(second) || !Number.isSafeInteger(Number(second))) {
-    if (first === 'gateSlots') throw new Refused('USAGE', 'pullboard settings gateSlots <positive integer>');
-    throw new Refused(first === 'browserSlots' ? 'BAD_BROWSER_SLOTS' : 'BAD_GATE_SLOTS', `${first} must be a positive integer; run pullboard settings ${first} <n>`);
-  }
-  const settings = first === 'browserSlots' ? setBrowserSlots(Number(second)) : setGateSlots(Number(second));
-  io.result?.({ settings });
-  io.say(`${first} set to ${settings[first]}`);
-  return 0;
-}
-
-/** Register machine-level SSH capacity without requiring a board identity or a runner account. */
-function runnerCommand(io, { first, second, rest, values }) {
-  if (first !== 'add' || !second || rest.length || !/^[1-9]\d*$/u.test(values.slots ?? '')
-    || !/^(?:0|[1-9]\d*)$/u.test(values.browser ?? '')) {
-    throw new Refused('USAGE', 'pullboard runner add <ssh-host> --slots <positive integer> --browser <integer from zero through slots>');
-  }
-  const runner = addRunner({ host: second, slots: Number(values.slots), browser: Number(values.browser),
-    ...(values.node !== undefined ? { node: values.node } : {}), ...(values.root !== undefined ? { root: values.root } : {}) });
-  io.result?.({ runner });
-  io.say(`registered runner ${runner.host}: ${runner.slots} slots, ${runner.browser} browser`);
-  return 0;
-}
-
 /**
  * Every spec id something cites (S8): commit headers since the spec's first commit, and every item
  * on the board, open or closed. The connection is read-only: spec lint never migrates a shared board. Each must still be in the spec. The board is shared by every
@@ -4092,37 +4116,6 @@ async function runCommand(argv, io) {
   }
 }
 
-/**
- * Every private name a saved blueprint must never carry: each agent's id, display name, model
- * and family, the person's Git name and email, everyone who signed off or signs rows, and this
- * machine's host name, whole, plus the parts of each (a first name, an email's user) to match
- * only as written. Missing sources add nothing; they never stop the save [S1].
- */
-function privateNames(root, board, spec) {
-  const names = new Set();
-  const parts = new Set();
-  const add = (value) => {
-    const text = typeof value === 'string' ? value.trim() : '';
-    // "unknown" is the label for an undeclared model, not anyone's name.
-    if (!text || text === 'unknown') return;
-    names.add(text);
-    for (const part of text.split(/[\s@.<>()]+/u)) if (part.length >= 3 && part !== 'unknown' && part !== text) parts.add(part);
-  };
-  for (const agent of store.listAgents(board)) {
-    add(agent.agent_id); add(agent.agent_model); add(agent.agent_family); add(displayAgentName(agent)); add(displayAgentName(agent, 'prefix'));
-  }
-  for (const key of ['user.name', 'user.email']) add(tryGit(root, ['config', '--get', key]).stdout);
-  for (const ident of ['GIT_AUTHOR_IDENT', 'GIT_COMMITTER_IDENT']) {
-    const found = /^(.*?)\s*<([^>]*)>/u.exec(tryGit(root, ['var', ident]).stdout ?? '');
-    if (found) { add(found[1]); add(found[2]); }
-  }
-  try { for (const record of readSignoffs(root)) add(record.by); } catch { /* An unreadable sign-off file adds no names. */ }
-  for (const row of spec.rows) for (const signer of row.signers ?? []) add(signer);
-  add(hostname());
-  add(hostname().split('.')[0]);
-  return { names: [...names], parts: [...parts] };
-}
-
 /** Retain the primary branch on every command without creating a board for global help. */
 function rememberTrunk(io) {
   let info;
@@ -4228,6 +4221,9 @@ export function resultCommands() {
     'help', 'version', 'tour', 'lifecycle', 'view', 'serve', 'watch', 'forget', 'spec', 'prompt', 'hook', 'gate', 'settings', 'runner', 'relay',
   ])].sort();
 }
+
+/** The actual command maps supply help names, so adding a handler needs no parallel help-name edit. */
+export const HELP = buildHelp(resultCommands());
 
 // This marker is emitted once when the actual CLI entrypoint finishes evaluating.
 if (process.env.PULLBOARD_STARTUP_TRACE_ENTRY

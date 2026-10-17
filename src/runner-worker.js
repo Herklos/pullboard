@@ -1,10 +1,37 @@
 /** SSH runner entry point in a pinned capsule with a static trusted resource graph. */
-import { spawn, spawnSync } from 'node:child_process';
+import {
+  spawn,
+  spawnSync,
+} from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, closeSync, createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  closeSync,
+  createReadStream,
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  readSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { userInfo } from 'node:os';
-import { delimiter, dirname, isAbsolute, join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import {
+  delimiter,
+  dirname,
+  isAbsolute,
+  join,
+} from 'node:path';
+import {
+  fileURLToPath,
+  pathToFileURL,
+} from 'node:url';
 import * as resourceApi from './resources.js';
 import { parseProcessCensus } from './process-census.js';
 import { fileDenialWatcher } from './sandbox-denial.js';
@@ -241,9 +268,18 @@ function writeChildJournalPreload(directory) {
   const overflowPath = join(journalDirectory, 'overflow');
   const source = `
 import diagnostics from 'node:diagnostics_channel';
-import { closeSync, openSync, statSync, writeSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  openSync,
+  statSync,
+  writeSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
-import { createHash, randomUUID } from 'node:crypto';
+import {
+  createHash,
+  randomUUID,
+} from 'node:crypto';
 const directory = ${JSON.stringify(journalDirectory)};
 const overflowPath = ${JSON.stringify(overflowPath)};
 const instance = randomUUID();

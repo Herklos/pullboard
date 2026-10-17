@@ -4,7 +4,11 @@
  * row keeps its meaning however the spec changes.
  */
 import { spawnSync } from 'node:child_process';
-import { ID_RE, citedIds, parseSpec } from './spec.js';
+import {
+  ID_RE,
+  citedIds,
+  parseSpec,
+} from './spec.js';
 
 /**
  * Run git for output that can be large, or null when it fails.
