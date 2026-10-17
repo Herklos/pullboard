@@ -3432,6 +3432,9 @@ async function specCommand(io, { first, second, rest, values }) {
   const practice = ctx.doctrine;
   const signoffs = readSignoffs(ctx.info.root);
   if (first === 'draft') {
+    if (second && /\|\s*gate\s*:/iu.test(second)) {
+      throw new Refused('INLINE_GATE', 'move the gate after the requirement as --gate "<check>"');
+    }
     if (!second?.trim() || rest.length || /[\r\n|]/u.test(second)) {
       throw new Refused('USAGE', 'give one nonempty, single-line requirement: pullboard spec draft "<text>"');
     }
