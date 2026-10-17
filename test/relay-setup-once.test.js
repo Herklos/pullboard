@@ -7,6 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { createPageStepEvaluator } from './chrome-fixture.js';
 import { relayClientFixture } from './relay-client-fixture.js';
+import { enrollProtocolPhone } from './relay-device-enrollment-fixture.js';
 import { startChrome, findChromeExecutable } from './relay-browser-fixture.js';
 
 const CLI = resolve(import.meta.dirname, '../bin/pullboard.js');
@@ -342,8 +343,9 @@ test('set up once links three registered boards, later registration and a persis
     assert.equal(durableBytes.includes(Buffer.from(raw, 'base64url')), false, 'no raw board-key bytes in relay records');
   }
 
+  const revokedDeviceId = await enrollProtocolPhone(box);
   const approvalsBeforeRevoke = box.transit.filter(record => record.method === 'POST' && record.path === '/api/v1/devices/approvals').length;
-  const revokeCommand = command(box.root, box.env, ['relay', 'revoke', device.id]);
+  const revokeCommand = command(box.root, box.env, ['relay', 'revoke', revokedDeviceId]);
   t.after(async () => { if (revokeCommand.child.exitCode === null) revokeCommand.child.kill('SIGTERM'); await revokeCommand.done.catch(() => {}); });
   /** Read the request id for the newly published revocation without adding another wait. */
   const revokeRequestId = () => {
@@ -351,20 +353,20 @@ test('set up once links three registered boards, later registration and a persis
     const post = approvals.length > approvalsBeforeRevoke ? approvals.at(-1) : null;
     return post ? JSON.parse(post.request.toString('utf8')).context.id : 'request pending';
   };
-  await pageWait(chrome, () => `device revocation approval ${revokeRequestId()}`, `[...document.querySelectorAll('.phone-approval')].some(node => node.textContent.includes(${JSON.stringify(device.id)}))`);
+  await pageWait(chrome, () => `device revocation approval ${revokeRequestId()}`, `[...document.querySelectorAll('.phone-approval')].some(node => node.textContent.includes(${JSON.stringify(revokedDeviceId)}))`);
   const revokeId = revokeRequestId();
-  const revocationCard = await pageEvaluate(chrome, `read device revocation approval ${revokeId}`, `({text: [...document.querySelectorAll('.phone-approval')].find(node => node.textContent.includes(${JSON.stringify(device.id)})).innerText,
-    action: [...document.querySelectorAll('.phone-approval')].find(node => node.textContent.includes(${JSON.stringify(device.id)})).querySelector('button').innerText})`);
-  assert.match(revocationCard.text, new RegExp(device.id));
+  const revocationCard = await pageEvaluate(chrome, `read device revocation approval ${revokeId}`, `({text: [...document.querySelectorAll('.phone-approval')].find(node => node.textContent.includes(${JSON.stringify(revokedDeviceId)})).innerText,
+    action: [...document.querySelectorAll('.phone-approval')].find(node => node.textContent.includes(${JSON.stringify(revokedDeviceId)})).querySelector('button').innerText})`);
+  assert.match(revocationCard.text, new RegExp(revokedDeviceId));
   assert.equal(revocationCard.action, 'Approve revocation');
   const beforeRevokeTap = box.calls.filter(call => call.path.endsWith('/authorize')).length;
-  await pageEvaluate(chrome, `tap device revocation approval ${revokeId}`, `[...document.querySelectorAll('.phone-approval')].find(node => node.textContent.includes(${JSON.stringify(device.id)})).querySelector('button').click()`);
+  await pageEvaluate(chrome, `tap device revocation approval ${revokeId}`, `[...document.querySelectorAll('.phone-approval')].find(node => node.textContent.includes(${JSON.stringify(revokedDeviceId)})).querySelector('button').click()`);
   const revoked = await revokeCommand.done;
   assert.equal(revoked.code, 0);
   assert.match(revoked.document.notice, /already received remain known/u);
   assert.equal(box.calls.filter(call => call.path.endsWith('/authorize')).length, beforeRevokeTap + 1,
     'the named-device revocation uses exactly one explicit phone tap');
-  assert.equal(JSON.parse(readFileSync(machineFile, 'utf8')).devices.length, 0);
+  assert.deepEqual(JSON.parse(readFileSync(machineFile, 'utf8')).devices.map(entry => entry.deviceId), [device.id], 'the approving phone remains paired; only the other target is removed');
 });
 
 

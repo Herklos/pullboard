@@ -32,9 +32,11 @@ import {
   pushesTrunk,
   unwiredHookProblems,
 } from './hooks.js';
-import { detectGate, initRepo, proposeLanes } from './init.js';
+import { askedLaneNotes, detectGate, initRepo, proposeLanes, starterLane, starterLaneNotes } from './init.js';
 import { lifecycleMarkdown } from './machine.js';
 import { HELP, VERSION } from './help.js';
+import { barCorrectionLine, barCorrections, barStatsLines } from './bar-corrections.js';
+import { checkImplies, decisionsImplying, parseImplies, takeDecisionNotices, whyLine } from './implies.js';
 import { defaultViewPort } from './view-port.js';
 export { HELP, VERSION };
 import { productLine, productProblems, productSummaries } from './products.js';
@@ -59,9 +61,10 @@ import {
   standings,
   unmetRows,
 } from './spec.js';
-import { answerQuestion, bundledBlueprints, planBlueprint, readBlueprint, saveBlueprint } from './blueprints.js';
+import { answerQuestion, bundledBlueprints, landBlueprint, planBlueprint, readBlueprint, repoAnswers, saveBlueprint } from './blueprints.js';
 import { briefFiles } from './brief.js';
-import { checkBaseline, prepareCheckBaseline, sayCheckBaseline } from './check-baseline.js';
+import { commitFirst, commitOwnerLines, commitOwners, coordinatorInbox, coordinatorInboxLines, inboxFirst } from './resume.js';
+import { checkBaseline, prepareCheckBaseline, sayCheckBaseline, refuseCheckSyntax } from './check-baseline.js';
 import { retryCheckBaselines, startCheckBaseline } from './check-baseline-worker.js';
 import { compareMainFailures, mainRedMessage, mainRedReworkItems } from './main-red.js';
 import { runItems } from './run.js';
@@ -74,7 +77,7 @@ import { milestoneRoadmap } from './roadmap.js';
 import { listResources, memoryVerdict, readMachineMemory, runnerResourceStatus } from './resources.js';
 import { citedTestFiles, rowEvidence, rowStage } from './evidence.js';
 import { exportView, serveView } from './serve.js';
-import { forgetView, rememberView, runningView } from './view-session.js';
+import { forgetView, portHolder, rememberView, runningView } from './view-session.js';
 import { serveApi } from './api.js';
 import { serveMcp } from './mcp.js';
 import { doctorProblems, doctrineProblems } from './doctor.js';
@@ -93,6 +96,7 @@ import { relayJoin, relayPair } from './relay-pairing-client.js';
 import { executePersonRequests } from './relay-request-execution.js';
 import { engineReceipt } from './engine.js';
 import { land, landingRemote, landingSubject } from './land.js';
+import { installStep } from './worktree.js';
 
 const CHECKOUT_LEASES = new WeakMap();
 const CHECKOUT_BOARD_ONLY = new WeakMap();
@@ -300,6 +304,7 @@ const OPTIONS = {
   commit: { type: 'string' },
   ref: { type: 'string' },
   supersedes: { type: 'string' },
+  implies: { type: 'string' },
   owns: { type: 'string' },
   help: { type: 'boolean', short: 'h' },
   version: { type: 'boolean', short: 'v' },
@@ -1293,6 +1298,8 @@ function resumeHere(io) {
         flow: proofStats(board, { now: ctx.clock.now().getTime() }).flow } : {}),
       requests: me.id === COORDINATOR ? store.openRequests(board) : [],
       holding: all.filter((item) => item.item_status === 'claimed' && item.item_owner === me.id),
+      held: all.filter((item) => item.item_status === 'claimed' && item.item_owner === me.id)
+        .map((item) => ({ item: item.item_id, facts: store.itemThread(board, item.item_id) })),
       sentBack: all
         .filter((item) => item.item_status === 'open' && item.item_verdict === 'REJECT' && item.item_built_by === me.id)
         .map((item) => ({ item, verdict: store.verdictsFor(board, item.item_id).at(-1) })),
@@ -1305,6 +1312,7 @@ function resumeHere(io) {
       holds: store.laneHolds(board),
       unread: store.unreadCount(board, me.id),
       newest: store.peekShouts(board, me.id, 1),
+      ...(me.id === COORDINATOR ? { inbox: coordinatorInbox(board, me.id, decisions.openDecisions ?? store.openDecisions(board, COORDINATOR)) } : {}),
       agents: store.listAgents(board),
       viewOpened: viewSetupComplete(ctx, board),
     };
@@ -1334,6 +1342,7 @@ function resumeHere(io) {
   for (const problem of card.hookProblems) say(`${problem.message}; ${problem.next}`);
   const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
   say(`resume: ${me.displayName}${me.family ? ` [family ${me.family}]` : ''}, ${me.lane} lane${isMain ? ', the main checkout' : ''}, at ${root}`);
+  if (card.inbox) for (const line of coordinatorInboxLines(card.inbox, name, (at) => span(ctx, at), firstLine)) say(line);
   say(`New agent worktrees: ${card.newWorktreeLocation}`);
   card.setup = boardSetup(ctx, card, setupScope);
   if (card.setup) {
@@ -1355,12 +1364,13 @@ function resumeHere(io) {
     say(`${plural(dirty, 'file')} uncommitted in the main checkout`);
   }
   if (isMain) {
-    const setup = uncommittedSetup(root, ctx.config);
-    if (setup) {
-      say(`The person must commit Pullboard's setup files before agents can use worktrees: ${setup.stage}`);
-    }
+    card.commits = commitOwners(uncommittedSetup(root, ctx.config)?.differ ?? [], [ctx.config.spec, ctx.config.practice], root);
+    for (const line of commitOwnerLines(card.commits)) say(line);
   }
   for (const request of card.requests) say(`request #${request.shout_id}: ${request.shout_text}; answer with pullboard answer ${request.shout_id} done, or declined <reason>`);
+  card.decisions = takeDecisionNotices(ctx.info.gitDir, card.held);
+  delete card.held;
+  for (const notice of card.decisions) say(`decision for #${notice.item} ${notice.text}`);
   for (const item of card.holding) {
     say(`holding #${item.item_id} ${item.item_title}, lease ${span(ctx, item.item_lease_until)} left${item.item_check ? `; check: ${item.item_check}` : ''}`);
     const files = briefFiles(item.item_brief);
@@ -1402,7 +1412,7 @@ function resumeHere(io) {
   } else if (card.hold) {
     say(`the ${me.lane} lane is held by ${name(card.hold.hold_by)}: ${card.hold.hold_reason}`);
   }
-  if (card.unread) say(`${plural(card.unread, 'unread shout')}; newest from ${name(card.newest[0].shout_from)}: ${firstLine(card.newest[0].shout_text)} (pullboard inbox reads them)`);
+  if (card.unread && !card.inbox) say(`${plural(card.unread, 'unread shout')}; newest from ${name(card.newest[0].shout_from)}: ${firstLine(card.newest[0].shout_text)} (pullboard inbox reads them)`);
   const inLane = card.open.filter((item) => item.item_lane === me.lane);
   const isVerified = (id) => card.all.find((other) => other.item_id === Number(id))?.item_status === 'verified';
   const ready = inLane.filter((item) => !item.item_after || item.item_after.split(',').every(isVerified)).length;
@@ -1416,6 +1426,8 @@ function resumeHere(io) {
   else if (card.awaiting.length) next = 'pullboard next --wait 9 (minutes); a rejected item comes back to your lane';
   else next = 'nothing open in your lane; pullboard next --verify names work you can check';
   if (card.setup) next = card.setup.agentNext ?? card.setup.command;
+  if (card.commits) next = commitFirst(card.commits, next);
+  if (card.inbox) next = inboxFirst(card.inbox, next);
   io.result?.({ ...card, root, dirty, next });
   say(`next: ${next}`);
   const flowAlert = isMain ? flowAlertLine(card.flow) : null;
@@ -1510,7 +1522,14 @@ async function viewHere(io, values) {
   } catch (error) {
     if (view) await view.close();
     if (error instanceof Refused && error.code === 'PORT_BUSY') {
-      error = new Refused('PORT_BUSY', `port ${port} is in use: name another with --port N, or use --port 0 to take a free one`);
+      // pullboard.dev only looks on the default port, so a busy default names the holder to stop.
+      // The background child is handed --port explicitly, so the default is matched by number.
+      let hosted = false;
+      try { hosted = port !== 0 && port === defaultViewPort(); } catch { /* A malformed override names no default port. */ }
+      const holder = hosted ? portHolder(port) : null;
+      const stop = holder && (process.platform === 'win32' ? `taskkill /PID ${holder.pid} /T` : `kill ${holder.pid}`);
+      error = new Refused('PORT_BUSY', !hosted ? `port ${port} is in use: name another with --port N, or use --port 0 to take a free one`
+        : `port ${port} is in use${holder ? ` by ${holder.name} (pid ${holder.pid})` : ''}, and pullboard.dev looks for your view on that port: stop ${holder ? `it with ${stop}` : 'the other view there'}, then run pullboard view again`);
     }
     if (process.env.PULLBOARD_VIEW_BACKGROUND_CHILD === '1' && process.send) {
       process.send({ type: 'startup-error', code: error.code ?? 'VIEW_START', message: error.message });
@@ -1680,7 +1699,8 @@ function setupCommands(io, { first, second, rest = [], values }) {
       (staging ? notes.slice(0, -1) : notes).forEach((note) => io.say(note));
       if (added) {
         io.say(`added the ${added.blueprint.title} blueprint: ${added.rows.length} ${added.rows.length === 1 ? 'row waits' : 'rows wait'} for your approval in SPEC.md (${added.section}), `
-          + `${added.items.length} starter ${added.items.length === 1 ? 'item' : 'items'} filed${added.gate ? `, gate set to ${added.gate}` : ''}`);
+          + `${added.items.length} starter ${added.items.length === 1 ? 'item' : 'items'} filed${added.proposedLanes.length ? ` in the ${added.proposedLanes.map((lane) => lane.name).join(' and ')} lane, proposed above and not written until the person accepts` : ''}${added.gate ? `, gate set to ${added.gate}` : ''}`);
+        for (const note of askedLaneNotes(added.items, loadConfig(info.root))) io.say(`  ${note}`);
         if (added.checksNotRun.length) io.say(`  checks stored, not run: ${added.checksNotRun.map((id) => `#${id}`).join(', ')}; no check baseline ran, so read each check before work starts: pullboard show <id>`);
       }
       if (await registerProjectAndLink(info.root, new Date(), loadConfig(info.root), io)) io.say('registered this project on this machine, so pullboard view lists it');
@@ -1798,7 +1818,8 @@ async function worktreeFor(io, lane, route, family = null, model) {
   io.result?.({ agent: id, lane, route, path: root, branch: `${lane}/${n}`, model, displayName, prompt });
   io.say(`made ${root} on branch ${lane}/${n}, joined as ${displayName} in the ${lane} lane${route === 'light' ? ', on the light route' : ''}${family ? ` (family ${family})` : ''}`);
   io.say(`Work only in that folder. A shell that starts each command in the main checkout acts as the coordinator there, so start every command with: ${cdTo(root)}`);
-  if (existsSync(join(root, 'package.json'))) io.say(`  ${cdTo(root)} npm install    (its own install, so its tests run its own code)`);
+  const install = installStep(root);
+  if (install) io.say(`  ${cdTo(root)} ${install.command}    (${install.note})`);
   io.say(`  ${cdTo(root)} pullboard inbox`);
   io.say(`  ${cdTo(root)} pullboard next`);
   // A subagent inherits the instructions of the session that launched it, often another repo's (I7).
@@ -1844,7 +1865,7 @@ function uncommittedSetup(mainRoot, config) {
   const words = differ.map(({ path }) => shellWord(path)).join(' ');
   const force = differ.some(({ ignored }) => ignored) ? ' -f' : '';
   return {
-    files: differ.map(({ path }) => path),
+    files: differ.map(({ path }) => path), differ,
     stage: `${cdTo(mainRoot)} git add${force} -- ${words}`,
   };
 }
@@ -2020,6 +2041,16 @@ function readCommands(io, { first, second, rest, values }) {
       }
       return 0;
     },
+    why: () => {
+      if (!first || second || rest.length) throw new Refused('USAGE', 'pullboard why <id>: the decisions that imply an item, newest first');
+      const ctx = context(io);
+      const id = idArg(first);
+      const decisions = withBoard(ctx, (board) => decisionsImplying(store.itemThread(board, id)));
+      io.result?.({ id, decisions });
+      if (!decisions.length) io.say(`no decision implies #${id}`);
+      for (const entry of decisions) io.say(whyLine(entry));
+      return 0;
+    },
     show: () => {
       const ctx = context(io);
       const id = idArg(first);
@@ -2067,6 +2098,7 @@ function readCommands(io, { first, second, rest, values }) {
         io.say(`  check: ${verdict.check ?? 'unknown'}`);
       });
       if (notes.some((note, index) => note !== verdicts[index].verdict_note)) io.say(`(earlier verdicts shortened; every note in full: pullboard show ${id} --history)`);
+      for (const correction of barCorrections(thread)) io.say(barCorrectionLine(correction));
       if (item.item_merged_commit) io.say(`merged as ${item.item_merged_commit}`);
       if (item.item_withdrawn_reason) io.say(`withdrawn: ${item.item_withdrawn_reason}`);
       io.say('thread:');
@@ -2169,6 +2201,7 @@ function readCommands(io, { first, second, rest, values }) {
       io.say(`${stats.agentCount} agents · ${stats.familyCount} family buckets: ${stats.families.map((family) => `${family.name} (${family.agents} agents, ${family.moves} moves)`).join('; ') || 'none'}`);
       io.say(`agents: ${stats.agents.map((agent) => `${agentDisplayName(agents, ctx.config, agent.id)} (${agent.families.join('/')}; ${agent.moves} moves)`).join(', ') || 'none'}`);
       io.say(`events: ${stats.firstEventAt ?? 'none'} to ${stats.lastEventAt ?? 'none'}${stats.since ? ` (since ${stats.since})` : ''}`);
+      for (const line of barStatsLines(stats.bars)) io.say(line);
       for (const line of flowLines(stats.flow)) io.say(line);
       return 0;
     },
@@ -2352,10 +2385,11 @@ export async function addBlueprintHere(io, reference, { report = true, blueprint
  * @property {{ name: string, title: string, version: number }} blueprint
  * @property {string} section - The SPEC.md section heading the rows are in.
  * @property {{ key: string, id: string, status: string, text: string }[]} rows - New rows; each waits for the person.
- * @property {{ id: number, key: string, title: string, lane: string, specIds: string[], after: number[], check?: string }[]} items - New open items.
+ * @property {{ id: number, key: string, title: string, lane: string, askedLane?: string, specIds: string[], after: number[], check?: string }[]} items - New open items.
  * @property {string | null} gate - The gate set in pullboard.json, or null when it was left alone.
  * @property {boolean} marked - This blueprint version was already on the board, so nothing was added.
  * @property {number[]} checksNotRun - New items that carry a check; no check baseline ran for them.
+ * @property {{ name: string, owns: string[] }[]} proposedLanes - Proposed, unwritten lanes new starters were filed in.
  */
 
 /**
@@ -2380,12 +2414,17 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
   const source = readFileSync(spec.file, 'utf8');
   const configFile = join(ctx.info.root, CONFIG_FILE);
   const configSource = readFileSync(configFile, 'utf8');
-  const plan = planBlueprint(blueprint, { source, spec, doctrine: ctx.doctrine,
+  // A question takes the answer this repo already shows as its default, read from package.json
+  // only: nothing runs and nothing is fetched (#725).
+  const plan = planBlueprint(landBlueprint(blueprint, repoAnswers(ctx.info.root)), { source, spec, doctrine: ctx.doctrine,
     existingItems: store.listItems(board, { all: true }).map((item) => ({ id: item.item_id, title: item.item_title, specIds: item.item_spec_ids ? item.item_spec_ids.split(',') : [] })),
     gate: String(JSON.parse(configSource).gate ?? '') });
   // Every starter is checked before anything is written, so a refusal leaves the board as it was.
-  const starters = plan.items.map((entry) => ({ key: entry.key, afterKeys: entry.after, item: { by: me.id,
-    lane: entry.lane && entry.lane !== COORDINATOR && isLane(ctx.config, entry.lane) ? entry.lane : COORDINATOR,
+  // Starters go to a build lane, never the coordinator's; a proposed lane is named, not written (#732).
+  const proposals = proposeLanes(ctx.info.root, ctx.config);
+  const lanes = plan.items.map((entry) => starterLane(entry.lane, ctx.config, proposals));
+  const proposedLanes = proposals.filter((lane) => lanes.some((placed) => placed.proposal === lane));
+  const starters = plan.items.map((entry, index) => ({ key: entry.key, afterKeys: entry.after, asked: lanes[index].asked, item: { by: me.id, lane: lanes[index].lane,
     title: entry.title, criterion: entry.criterion, specIds: entry.specIds, parentId: null, after: [], brief: entry.brief, route: entry.route,
     ...(entry.check === undefined ? {} : { check: entry.check }) } }));
   // The same checks pullboard add uses, before anything is written. A blueprint's item check is
@@ -2410,11 +2449,11 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
   try {
     // A retry starts from the starters a failed add already put on the board.
     const byKey = { ...plan.existing };
-    for (const { key, afterKeys, item } of starters) {
+    for (const { key, afterKeys, asked, item } of starters) {
       item.after = afterKeys.map((before) => byKey[before]).filter(Boolean);
       const id = await ordered(ctx, board, 'addItem', [item]);
       byKey[key] = id;
-      added.push({ id, key, title: item.title, lane: item.lane, specIds: item.specIds, after: item.after, ...(item.check ? { check: item.check } : {}) });
+      added.push({ id, key, title: item.title, lane: item.lane, ...(asked ? { askedLane: asked } : {}), specIds: item.specIds, after: item.after, ...(item.check ? { check: item.check } : {}) });
     }
   } catch (error) {
     // Items already added stay on the board; with no marker yet, a retry adds only what is missing.
@@ -2428,7 +2467,7 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
   if (plan.specAfter !== source && !files.some((file) => file.file === ctx.config.spec)) files.unshift({ file: ctx.config.spec });
   const rows = plan.rows.map(({ key, id, status, text }) => ({ key, id, status, text }));
   const summary = { blueprint: { name: blueprint.name, title: blueprint.title, version: blueprint.version },
-    section: plan.section.name, rows, items: added, gate: plan.gate, marked: plan.marked,
+    section: plan.section.name, rows, items: added, gate: plan.gate, marked: plan.marked, proposedLanes: added.length ? proposedLanes : [],
     // Item checks are stored and never run during add; the caller tells the reader so.
     checksNotRun: added.filter((item) => item.check).map((item) => item.id) };
   io.result?.(summary);
@@ -2441,6 +2480,7 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
   for (const item of added) io.say(`  #${item.id} open  ${item.title}${item.specIds.length ? `  cites ${item.specIds.join(', ')}` : ''}${item.after.length ? `  waits on #${item.after.join(', #')}` : ''}`);
   const checked = added.filter((item) => item.check);
   if (checked.length) io.say(`  checks stored, not run: ${checked.map((item) => `#${item.id}`).join(', ')}; no check baseline ran during add, so read each check before work starts: pullboard show <id>`);
+  for (const note of [...askedLaneNotes(added, ctx.config), ...starterLaneNotes(summary.proposedLanes)]) io.say(`  ${note}`);
   if (plan.gate) io.say(`  gate set in ${CONFIG_FILE}: ${plan.gate}`);
   const changed = files.map((file) => file.file);
   io.say(`next: the person approves the rows in pullboard view or with pullboard spec approve <ids>${changed.length ? `; commit ${changed.join(' and ')}` : ''}`);
@@ -2459,6 +2499,7 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
 async function verifyHere(ctx, id, { second, values }) {
   const decision = { accept: 'ACCEPT', reject: 'REJECT' }[String(second ?? '').toLowerCase()];
   if (!decision) throw new Refused('USAGE', 'pullboard verify <id> accept, or reject --reason CODE --note "..."');
+  const implies = parseImplies(values.implies);
   const { root } = ctx.info;
   let verificationProfile = null;
   let accepted = null;
@@ -2484,6 +2525,8 @@ async function verifyHere(ctx, id, { second, values }) {
     if (item.item_status !== 'submitted') {
       throw new Refused('NOT_SUBMITTED', `item #${id} is ${item.item_status}, not submitted`);
     }
+    // Name an unknown implied item before the frozen check runs, not after it.
+    if (implies) checkImplies(board, implies);
     const policy = itemPolicy(root, item);
     ctx = { ...ctx, config: policy.config };
     const head = headCommit(root) ?? '';
@@ -2502,8 +2545,12 @@ async function verifyHere(ctx, id, { second, values }) {
       if (digest !== item.item_frozen_digest) throw new Refused('CRITERIA_CHANGED', 'the criterion changed; ask the coordinator to refreeze this item before checking it');
       const trunk = requireTrunkMerge(root, commit);
       refuseUnverifiedStack(root, board, item, commit, trunk);
-      const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(root, frozenCheck(item), { commit, onFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
-      check = await withGateSlot(root, (lease) => checkAtCommit(root, item, { waitMs: lease.waitMs, gateLease: lease }), { browser, agent: me.id, item: String(id), kind: 'review', itemCheck: true, onWait: gateWaitReporter(ctx.io) });
+      if (frozenCheck(item)) {
+        const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(root, frozenCheck(item), { commit, onFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
+        check = await withGateSlot(root, (lease) => checkAtCommit(root, item, { waitMs: lease.waitMs, gateLease: lease }), { browser, agent: me.id, item: String(id), kind: 'review', itemCheck: true, onWait: gateWaitReporter(ctx.io) });
+      } else {
+        check = checkAtCommit(root, item);
+      }
       refuseSandboxBlocked(check);
       verificationProfile = check.profile ?? null;
       const evidence = check.checked
@@ -2528,6 +2575,7 @@ async function verifyHere(ctx, id, { second, values }) {
       policy: ctx.config.verify.policy,
       familyPolicy: ctx.config.verify.family,
       ...(decision === 'ACCEPT' ? { check: check.checked ? 'green' : 'none' } : {}),
+      ...(implies ? { implies } : {}),
     }]);
   };
   const result = await withBoard(ctx, async (board) => {
@@ -2819,10 +2867,11 @@ function workCommands(io, args) {
       return 0;
     }),
     fact: () => act(async (ctx, board, me) => {
-      if (!first || !second || rest.length !== 1) throw new Refused('USAGE', 'pullboard fact <id> <kind> <text> [--supersedes <fact-id>] [--ref path:lines@full-sha]');
+      if (!first || !second || rest.length !== 1) throw new Refused('USAGE', 'pullboard fact <id> <kind> <text> [--supersedes <fact-id>] [--ref path:lines@full-sha] [--implies <ids>]');
       const id = idArg(first);
+      const implies = parseImplies(values.implies);
       const fact = await ordered(ctx, board, 'appendFact', [id, { agentId: me.id, kind: second,
-        text: rest[0], supersedes: values.supersedes ?? null, ref: values.ref ?? null }]);
+        text: rest[0], supersedes: values.supersedes ?? null, ref: values.ref ?? null, ...(implies ? { implies } : {}) }]);
       io.result?.({ item: id, fact });
       io.say(`fact ${fact.id} appended to #${id} as ${fact.kind}`);
       return 0;
@@ -2907,6 +2956,7 @@ function workCommands(io, args) {
       };
       buildInFilelessLane(ctx.config, first, after);
       const { command } = store.validateItemAddition(board, item);
+      if (command) refuseCheckSyntax(command);
       if (command) item.checkBaseline = values.wait ? checkBaseline(ctx.info.root, command) : prepareCheckBaseline(ctx.info.root, command);
       const id = await ordered(ctx, board, 'addItem', [item]);
       if (item.checkBaseline?.result === 'pending') await launchBaseline(ctx, board, id, item.checkBaseline);
@@ -2934,8 +2984,10 @@ function workCommands(io, args) {
         criterion: values.criterion,
         check: values.check,
         after: editAfter(values.after),
+        ...(values.reason !== undefined ? { reason: values.reason } : {}),
       };
       const { item, command } = store.validateItemEdit(board, id, change);
+      if (command && command !== item.item_check) refuseCheckSyntax(command);
       if (command && command !== item.item_check) change.checkBaseline = values.wait ? checkBaseline(ctx.info.root, command) : prepareCheckBaseline(ctx.info.root, command);
       await ordered(ctx, board, 'editItem', [id, change]);
       if (change.checkBaseline?.result === 'pending') await launchBaseline(ctx, board, id, change.checkBaseline);
@@ -3144,7 +3196,10 @@ function workCommands(io, args) {
     answer: () => act(async (ctx, board, me) => {
       const asPerson = personMode(ctx, me, values);
       if (asPerson) requirePersonChannel(ctx.io.personChannel);
-      const id = await ordered(ctx, board, 'answerDecision', [idArg(first), { agentId: me.id, text: [second, ...rest].filter(Boolean).join(' '), lanes: laneNames(ctx.config), asPerson, channel: ctx.io.personChannel ?? 'terminal' }]);
+      const implies = parseImplies(values.implies);
+      const supersedes = values.supersedes === undefined ? undefined : idArg(String(values.supersedes).replace(/^#/u, ''));
+      const id = await ordered(ctx, board, 'answerDecision', [idArg(first), { agentId: me.id, text: [second, ...rest].filter(Boolean).join(' '), lanes: laneNames(ctx.config), asPerson, channel: ctx.io.personChannel ?? 'terminal',
+        ...(implies ? { implies } : {}), ...(supersedes ? { supersedes } : {}) }]);
       const ask = store.getShout(board, idArg(first));
       io.result?.({ id, answers: ask.shout_id });
       if (asPerson) {
@@ -3229,7 +3284,8 @@ function settingsCommand(io, { first, second, rest }) {
     io.say(`gateSlots: ${settings.gateSlots}`);
     io.say(`browserSlots: ${settings.browserSlots}`);
     io.say(`gate.queue.reviewsFirst: ${queue.reviewsFirst}${queue.reviewsFirst ? '' : ' (landings first, then arrival order)'}`);
-    io.say(`gate.queue.agingMinutes: ${queue.agingMinutes}${queue.reviewsFirst ? '' : ' (used only while reviewsFirst is true)'}`);
+    io.say(`gate.queue.currentReleaseFirst: ${queue.currentReleaseFirst}${queue.currentReleaseFirst ? '' : ' (release priority is off)'}`);
+    io.say(`gate.queue.agingMinutes: ${queue.agingMinutes}${queue.reviewsFirst || queue.currentReleaseFirst ? '' : ' (used only while reviewsFirst or currentReleaseFirst is true)'}`);
     io.say(`gate.memoryFloorMB: ${memoryFloorMB() ?? 'off (the gate queue does not wait for memory)'}`);
     return 0;
   }

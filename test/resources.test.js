@@ -1,3 +1,4 @@
+/** @pullboard-test-input source-tree */
 /** Real-process resource queue and lease coverage [Q1,Q2,Q3]. */
 import assert from 'node:assert/strict';
 import { startFixtureChild as spawn, runFixtureChild as spawnSync, reportFixtureChildFailure, runFixtureChild, runFixtureChildAsync, runFixtureGit } from './fixture-child.js';
@@ -12,6 +13,8 @@ import { after, test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { listResources, setResourceCapacity, takeResource } from '../src/resources.js';
 import { checkNeedsBrowser } from '../src/browser-admission.js';
+import { releaseQueueProof } from './resources-release-fixture.js';
+import { checkProject, verificationProject } from './resources-verify-fixture.js';
 
 const TEMP = [];
 const CHILDREN = new Set();
@@ -115,31 +118,6 @@ function waitForMarker(path, timeoutMs = 10_000) {
     watcher.on('rename', check);
     check();
   }).finally(() => watcher.close());
-}
-
-/** Create a minimal real board whose CPU check and affected tests share the private gate pool. */
-function checkProject(box) {
-  const repo = box.first;
-  runFixtureGit(['branch', '-M', 'main'], { cwd: repo, env: box.env });
-  const initialized = runFixtureChild(process.execPath, [BIN, 'init'], { cwd: repo, env: box.env, encoding: 'utf8' });
-  assert.equal(initialized.status, 0, initialized.stderr);
-  const configPath = join(repo, 'pullboard.json');
-  const config = JSON.parse(readFileSync(configPath, 'utf8'));
-  writeFileSync(configPath, `${JSON.stringify({ ...config, gate: 'true', spec: 'SPEC.md', affectedTests: 'node bin/run-tests.js', lanes: { web: { owns: ['web/'], specs: ['G1'] } }, shared: [] }, null, 2)}\n`);
-  writeFileSync(join(repo, 'SPEC.md'), '# CPU check fixture\n\n## G · Goals\n- G1 [approved, must] The fixture keeps its board. | gate: true\n');
-  writeFileSync(join(repo, 'package.json'), '{"type":"module"}\n');
-  mkdirSync(join(repo, 'bin'), { recursive: true });
-  cpSync(resolve(import.meta.dirname, '../src'), join(repo, 'src'), { recursive: true });
-  copyFileSync(TEST_RUNNER, join(repo, 'bin/run-tests.js'));
-  mkdirSync(join(repo, 'test'), { recursive: true });
-  writeFileSync(join(repo, 'test/unrelated.test.js'), "import { test } from 'node:test'; test('unrelated test', () => {});\n");
-  runFixtureGit(['add', '-A'], { cwd: repo, env: box.env });
-  runFixtureGit(['-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Resource fixture', '-c', 'user.email=resource@example.invalid', 'commit', '-q', '-m', 'fixture: initialize board'], { cwd: repo, env: box.env });
-  const base = runFixtureGit(['rev-parse', 'HEAD'], { cwd: repo, env: box.env });
-  writeFileSync(join(repo, 'test/cpu-check.test.js'), `import { writeFileSync } from 'node:fs';\nimport { test } from 'node:test';\ntest('item check marker', () => writeFileSync('item-check-started', 'started'));\ntest('submit check marker', () => writeFileSync('submit-check-started', 'started'));\n`);
-  runFixtureGit(['add', 'test/cpu-check.test.js'], { cwd: repo, env: box.env });
-  runFixtureGit(['-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Resource fixture', '-c', 'user.email=resource@example.invalid', 'commit', '-q', '-m', 'test: add CPU check'], { cwd: repo, env: box.env });
-  return { repo, base };
 }
 
 /** Create the previous private queue schema so simultaneous openers exercise its migration. */
@@ -942,6 +920,8 @@ test('a line holding an older pullboard waiter keeps arrival order, so mixed ver
   await release(review);
 });
 
+test('the gate pool serves the current release first [C7,V4]', () => releaseQueueProof({ fixture, poolWorker, privateList, event, acquired, release, legacyModule: PRE_RUNNER_MODULE }));
+
 test('queue order follows the machine settings [C7,O5]', async () => {
   const gate = (box) => privateList(box).find(({ name }) => name === 'gate');
   const line = (box) => gate(box).line.map(({ agent, queueClass: listed, agedFrom }) => [agent, listed, agedFrom ?? '']);
@@ -1019,7 +999,7 @@ test('queue order follows the machine settings [C7,O5]', async () => {
   assert.equal(agingPrinted.status, 0, agingPrinted.stderr);
   assert.match(agingPrinted.stdout, /^gate\.queue\.reviewsFirst: true$/mu, 'pullboard settings prints the reviewsFirst set on this machine');
   assert.match(agingPrinted.stdout, /^gate\.queue\.agingMinutes: 1$/mu, 'pullboard settings prints the agingMinutes set on this machine');
-  assert.deepEqual(JSON.parse(settingsCli(aging, '--json').stdout).settings.gate.queue, { reviewsFirst: true, agingMinutes: 1 });
+  assert.deepEqual(JSON.parse(settingsCli(aging, '--json').stdout).settings.gate.queue, { reviewsFirst: true, currentReleaseFirst: false, agingMinutes: 1 });
   await release(agingHolders[0]);
   assert.equal((await acquired(agingFocused)).acquired, 'aging-focused', 'the aged focused run is admitted before the later submit');
   await release(agingHolders[1]);
@@ -1745,4 +1725,47 @@ test('[Q4] a red gate releases its lease before the same process starts another 
     if (child.exitCode === null && child.signalCode === null) process.kill(-child.pid, 'SIGKILL');
     if (child.exitCode === null && child.signalCode === null) await closed;
   }
+});
+
+
+test('a verification with no frozen check never enters the test queue [C7,V4]', async t => {
+  const { project, box, item, reviewer } = verificationProject(t);
+  const holder = worker(box, { agent: 'empty-check-holder' });
+  await acquired(holder);
+  let completed;
+  const verifying = runFixtureChildAsync(process.execPath, [BIN, 'verify', String(item), 'accept', '--note', 'The private bar holds.', '--json'],
+    { cwd: reviewer, env: project.env }).then(result => { completed = result; return result; });
+  try {
+    await waitUntil(() => completed || privateList(box).find(row => row.name === 'gate')?.line.some(row => row.item === String(item)),
+      'the verification to finish or enter its private queue');
+    const gate = privateList(box).find(row => row.name === 'gate');
+    assert.equal(gate.line.some(row => row.item === String(item)), false, 'an empty frozen check must not add a native waiter');
+    assert.ok(gate.holders.some(row => row.agent === 'empty-check-holder'), 'the unrelated holder remains occupied throughout verification');
+    assert.ok(completed, 'the verifier completed without waiting for that holder');
+    assert.equal(completed.status, 0, completed.failure ?? completed.stderr);
+    assert.equal(JSON.parse(completed.stdout).check, 'none');
+    assert.equal(privateList(box).find(row => row.name === 'browser')?.line.some(row => row.item === String(item)) ?? false, false,
+      'an empty frozen check adds no browser waiter either');
+  } finally { await release(holder); await verifying; }
+});
+
+test('a verification with a frozen check still waits for its slot [C7,V4]', async t => {
+  const { project, box, item, reviewer, marker } = verificationProject(t, { checked: true });
+  rmSync(marker, { force: true });
+  const holder = worker(box, { agent: 'real-check-holder' });
+  await acquired(holder);
+  let completed;
+  const verifying = runFixtureChildAsync(process.execPath, [BIN, 'verify', String(item), 'accept', '--note', 'The exact frozen command passed.', '--json'],
+    { cwd: reviewer, env: project.env }).then(result => { completed = result; return result; });
+  try {
+    await waitUntil(() => completed || privateList(box).find(row => row.name === 'gate')?.line.some(row => row.item === String(item)),
+      'the nonempty frozen check to enter its private queue');
+    assert.equal(privateList(box).find(row => row.name === 'gate').line.some(row => row.item === String(item)), true,
+      'a real frozen command keeps the normal native admission boundary');
+    assert.equal(completed, undefined, 'the check cannot finish while its slot remains occupied');
+    assert.equal(existsSync(marker), false, 'the frozen command has not run early');
+  } finally { await release(holder); await verifying; }
+  assert.equal(completed.status, 0, completed.failure ?? completed.stderr);
+  assert.equal(JSON.parse(completed.stdout).check, 'green');
+  assert.equal(readFileSync(marker, 'utf8'), 'check-ran', 'the unchanged frozen command ran after admission');
 });

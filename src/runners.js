@@ -18,7 +18,7 @@ const MAX_BLOB_BYTES = 8 * 1024 ** 2;
 const MAX_HISTORY_TAGS = 1_024;
 const MAX_TAG_CHAIN = 8;
 const TOOL_ROOT = fileURLToPath(new URL('../', import.meta.url));
-const RUNTIME_NAMES = ['resources.js', 'git.js', 'machine-home.js', 'refused.js', 'process-census.js', 'queue-settings.js'];
+const RUNTIME_NAMES = ['resources.js', 'git.js', 'machine-home.js', 'refused.js', 'process-census.js', 'queue-settings.js', 'queue-order.js'];
 
 /** Validate an SSH destination as one argument, never a command or an SSH option. */
 export function validateRunner(value) {
@@ -428,6 +428,11 @@ function resultFrom(request, result) {
     || typeof receipt.root !== 'string' || !Number.isFinite(receipt.wallMs) || receipt.wallMs < 0
     || receipt.outputSha256 !== createHash('sha256').update(output).digest('hex')) {
     throw new RunnerDropped(request.runner.host);
+  }
+  if (receipt.refused !== undefined) {
+    if (typeof receipt.refused !== 'string' || !/^[A-Z][A-Z0-9_]{0,63}$/u.test(receipt.refused) || receipt.code === 0) throw new RunnerDropped(request.runner.host);
+    // The runner answered, so this is a named failure, not a dropped transport to requeue.
+    throw new Refused('RUNNER_SETUP_REFUSED', `runner ${request.runner.host} refused this run before it started: [${receipt.refused}] from its own resource pool; run pullboard resources and pullboard settings on ${request.runner.host} to fix that pool, then run again`);
   }
   return { isGreen: receipt.code === 0 && !receipt.signal, output: output.toString('utf8'),
     seconds: Math.round(receipt.wallMs / 1000), exitCode: receipt.code,
