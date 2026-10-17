@@ -9,7 +9,7 @@ import * as store from '../src/board.js';
 import { submitFixture } from './board-submit-fixture.js';
 import { exportBoard, importBoard } from '../src/exchange.js';
 import { applyEngineMove, appliedSequence, engineReceipt, prepareEngineMove } from '../src/engine.js';
-import { VERDICT_REVIEW_ENGINE } from '../src/machine.js';
+import { ENGINE_VERSION, VERDICT_REVIEW_ENGINE } from '../src/machine.js';
 import { unpackRelease } from './release-archive.js';
 
 const BASE = 'a'.repeat(40);
@@ -154,7 +154,8 @@ test('a landing snapshot binds the checked composition through replay and final 
     branch: 'refs/heads/main', root: '/fixture/landing', owner: 'fixture', logPath: '/fixture/landing.log',
     candidates: [entry], items: [entry], revision: 0 };
   const record = prepareEngineMove(one, 'recordLandingBatch', [{ agentId: 'coordinator', batch }], { id: 'checked-landing-snapshot' });
-  assert.equal(record.engine, VERDICT_REVIEW_ENGINE);
+  assert.equal(VERDICT_REVIEW_ENGINE, 33, 'checked reviews retain their stable first engine');
+  assert.equal(record.engine, ENGINE_VERSION, 'a new envelope uses the current writer independently of that minimum');
   const before = exportBoard(one);
   assert.throws(() => applyEngineMove(one, { ...record, engine: 12 }, { sequence: 2, at: AT }), { code: 'RELAY_MOVE' });
   assert.deepEqual(exportBoard(one), before, 'a downgraded checked-head snapshot cannot mutate the prefix');
