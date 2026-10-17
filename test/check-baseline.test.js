@@ -9,6 +9,7 @@ import { openBoard, closeBoard, getItem } from '../src/board.js';
 import { checkBaseline, prepareCheckBaseline } from '../src/check-baseline.js';
 import { exportBoard, importBoard } from '../src/exchange.js';
 import { applyEngineMove, prepareEngineMove } from '../src/engine.js';
+import { ENGINE_VERSION } from '../src/machine.js';
 import { CHECK_ACCEPT_ENGINE, acceptCheck, checkDigest } from '../src/check-accept.js';
 import { refusePersonMove } from '../src/mcp.js';
 import { AGENT_SHELL_MARKERS, SSH_SHELL_MARKERS } from '../src/person.js';
@@ -542,7 +543,8 @@ test('[V2,V4,B26,P6] a check green on main holds the item until the person accep
   assert.throws(() => refusePersonMove('check_accept'), { code: 'HUMAN_REQUIRED' }, 'MCP refuses a check acceptance as a person move');
   const digest = checkDigest(green);
   const move = withBoard(file, (board) => prepareEngineMove(board, 'acceptCheck', [item.item_id, { agentId: 'person', channel: 'terminal', digest }], { id: 'agent-relay-accept' }));
-  assert.equal(move.engine, CHECK_ACCEPT_ENGINE);
+  assert.equal(CHECK_ACCEPT_ENGINE, 24, 'acceptCheck keeps its stable minimum engine');
+  assert.equal(move.engine, ENGINE_VERSION, 'new envelopes use the current engine');
   assert.equal(relaySenderProblem(move, { kind: 'agent', userId: 'user-1', agent: 'web-1' }, 'move')?.code, 'RELAY_PERSON_ONLY', 'the relay refuses an agent sending the person’s acceptance');
   withBoard(file, (board) => {
     assert.throws(() => acceptCheck(board, item.item_id, { agentId: 'web-1', channel: 'terminal', digest }), { code: 'CHECK_ACCEPT_PERSON_ONLY' });
