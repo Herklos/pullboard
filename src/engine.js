@@ -229,7 +229,7 @@ export function applyRelayMove(board, move, { sequence, at, sender, kind, digest
   const phoneReceipt = sender?.kind === 'machine' && move?.engine >= 6 && Boolean(move.personRequest) && !requestMoveProblem(board, move, { checkExecutorLease: false });
   const problem = relaySenderProblem(move, sender, kind, { phoneReceipt }) ?? (kind === 'move' ? registrationProblem(board, move, { sender, registration, sequence, digest }) : null);
   if (!problem) {
-    // Engine-27 relay moves run under linked verifier standing; older recorded moves replay as they did.
+    // Engine-35 relay moves run under linked verifier standing; older recorded moves replay as they did.
     // The person is above every seat; their own moves act with the coordinator's standing.
     const standing = move?.engine >= VERIFIER_STANDING_ENGINE ? { root: sender?.root === true || sender?.kind === 'person',
       person: sender?.kind === 'person', lineage: sender?.root === true && typeof sender.lineage === 'string' ? sender.lineage : null } : null;
