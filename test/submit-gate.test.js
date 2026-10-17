@@ -164,11 +164,12 @@ function pythonPermissionError(path, errno = 13) {
 }
 
 /** Wrap scanner input in a failed child TAP record with or without a fatal traceback. */
-function pythonChildTap(path, { traceback = true, frame = true, prefixMarker = false, errno = 13, wrapper = true, exitCode = 1, trailingError = false } = {}) {
+function pythonChildTap(path, { traceback = true, frame = true, prefixMarker = false, errno = 13, wrapper = true, exitCode = 1, trailingError = false, assertionFooter = null, footerSeparator = '\n\n\n', parentCode = 'ERR_ASSERTION' } = {}) {
   const diagnostic = pythonPermissionError(path, errno);
   const marker = prefixMarker ? 'not a traceback marker: Traceback (most recent call last):' : 'Traceback (most recent call last):';
   const tracebackDetail = `${marker}\n${frame ? '  File "child.py", line 1, in <module>\n' : ''}${diagnostic}${trailingError ? '\nValueError: later unrelated failure' : ''}`;
   const detail = traceback ? tracebackDetail : `AssertionError: expected ordinary output\n${diagnostic}`;
+  const renderedDetail = assertionFooter === null ? detail : `${detail}${footerSeparator}${assertionFooter}`;
   return [
     'TAP version 13',
     'not ok 1 - child reads a file',
@@ -176,8 +177,8 @@ function pythonChildTap(path, { traceback = true, frame = true, prefixMarker = f
     "  failureType: 'testCodeFailure'",
     '  error: |-',
     ...(wrapper ? [`    Child process exited with code ${exitCode}:`] : []),
-    ...detail.split('\n').map((line) => `    ${line}`),
-    "  code: 'ERR_ASSERTION'",
+    ...renderedDetail.split('\n').map((line) => `    ${line}`),
+    `  code: '${parentCode}'`,
     '  ...',
   ].join('\n');
 }
@@ -233,6 +234,25 @@ test('an ordinary failure stays gate red [C7,B26]', (t) => {
     'a different terminal exception after PermissionError stays ordinary');
   assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { errno: 1 })), `file access "${outside}" (EACCES)`,
     'a nested EPERM-style Python errno remains recognized');
+  const recognized = `file access "${outside}" (EACCES)`;
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { assertionFooter: '1 !== 0' })), recognized,
+    'the matching Node assertion footer does not hide the terminal child denial');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { assertionFooter: '2 !== 0' })), null,
+    'a footer exit code different from the child wrapper stays ordinary');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { assertionFooter: '1 !== 1' })), null,
+    'a footer with a nonzero expected value stays ordinary');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { assertionFooter: '1 !== 0', footerSeparator: '\nnot blank\n' })), null,
+    'a comparison without the blank-line boundary stays ordinary');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { assertionFooter: '1 !== 0\nextra text' })), null,
+    'arbitrary text after the comparison stays ordinary');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { assertionFooter: '1 !== 0', parentCode: 'ERR_TEST_FAILURE' })), null,
+    'the footer is accepted only in an assertion failure record');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { trailingError: true, assertionFooter: '1 !== 0' })), null,
+    'a later Python exception stays ordinary even when the Node assertion footer follows');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { assertionFooter: '1 !== 0', footerSeparator: '\n' })), null,
+    'a comparison without a blank-line boundary stays ordinary');
+  assert.equal(sandboxBlockedOperation(box.root, pythonChildTap(outside, { traceback: false, assertionFooter: '1 !== 0' })), null,
+    'an assertion footer does not turn non-traceback text into a Python denial');
   const result = box.run('submit', '1');
   const output = `${result.out}\n${result.err}`;
   assert.equal(result.code, 1, output);

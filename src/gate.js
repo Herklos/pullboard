@@ -219,7 +219,7 @@ function tapScalar(value) {
 }
 
 /** Recognize a bounded child fatal denial carried inside one failed TAP error block. */
-function nestedChildPermission(root, lines, { includeFilePaths = true } = {}) {
+function nestedChildPermission(root, lines, { includeFilePaths = true, parentCode = null } = {}) {
   const detail = lines.join('\n');
   const childExit = /\b(?:child|app|server|process)\b[^\n]{0,120}\bexited\b[^\n]{0,100}\bcode\s*[(:=]?\s*([1-9]\d*)/iu.exec(detail);
   if (!childExit || !Number.isSafeInteger(Number(childExit[1]))) return null;
@@ -251,10 +251,15 @@ function nestedChildPermission(root, lines, { includeFilePaths = true } = {}) {
 
   // Python child failures have a standard traceback frame and terminal PermissionError,
   // rather than Node's structured `Error` code/syscall/path object.
-  const tracebackMarker = /(?:^|\n)Traceback \(most recent call last\):\n/u.exec(detail);
-  const tracebackError = /(?:^|\n)(PermissionError: \[Errno (?:1|13)\] [^\n]+)\s*$/u.exec(detail);
+  // Node appends this exact assertion comparison to TAP's error scalar after the child stderr.
+  // Strip it only for an AssertionError whose nonzero child exit matches `actual !== 0`.
+  const assertionFooter = parentCode === 'ERR_ASSERTION'
+    ? new RegExp(`\\n{2,}${childExit[1]} !== 0\\s*$`, 'u') : null;
+  const tracebackDetail = assertionFooter?.test(detail) ? detail.replace(assertionFooter, '') : detail;
+  const tracebackMarker = /(?:^|\n)Traceback \(most recent call last\):\n/u.exec(tracebackDetail);
+  const tracebackError = /(?:^|\n)(PermissionError: \[Errno (?:1|13)\] [^\n]+)\s*$/u.exec(tracebackDetail);
   if (!tracebackMarker || !tracebackError || tracebackError.index <= tracebackMarker.index) return null;
-  const tracebackBody = detail.slice(tracebackMarker.index + tracebackMarker[0].length, tracebackError.index);
+  const tracebackBody = tracebackDetail.slice(tracebackMarker.index + tracebackMarker[0].length, tracebackError.index);
   if (!/(?:^|\n)File (?:'[^'\n]+'|"[^"\n]+"), line \d+(?:, in [^\n]+)?(?:\n|$)/u.test(tracebackBody)) return null;
   const operation = permissionOperation(root, tracebackError[1], { includeFilePaths });
   return operation && operation.syscall === null ? operation : null;
@@ -350,7 +355,7 @@ export function sandboxBlockedScanner(root, { includeFilePaths = true } = {}) {
         else exitCode = /^[1-9]\d*$/u.test(field[2]) && Number.isSafeInteger(Number(field[2])) ? Number(field[2]) : null;
         const nestedPermission = field[1] === 'code'
           && failureType && nestedError && !nestedErrorOverflow
-          ? nestedChildPermission(root, nestedError, { includeFilePaths }) : null;
+          ? nestedChildPermission(root, nestedError, { includeFilePaths, parentCode: code }) : null;
         if (nestedPermission) return nestedPermission.operation;
         if (permission && permission.code === code) return permission.operation;
         if (startup && code === 'ERR_TEST_FAILURE' && failureMessage === 'test failed'
