@@ -3,18 +3,33 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import * as store from './board.js';
 import { exportBoard } from './exchange.js';
-import { codeIsFromMain, repoInfo } from './git.js';
+import { codeIsFromMain, repoInfo, withGitReadFacts } from './git.js';
 import { Refused } from './refused.js';
 import { loadConfig } from './config.js';
 import { projectState } from './serve.js';
 import { personRequestStatuses } from './relay-requests.js';
+import { cachedVerdictStates, verdictProjector } from './verdict-freshness.js';
+import { trunkRevisionReader } from './trunk-revision.js';
 
 /** Capture spec, doctrine, config and board presentation without sending plaintext to a relay. */
 export function relayPresentation(root, { board: providedBoard = null } = {}) {
+  return withGitReadFacts(() => readRelayPresentation(root, providedBoard));
+}
+
+/** One presentation read, using the supplied staged board without sharing its derived cache. */
+function readRelayPresentation(root, providedBoard) {
   const info = repoInfo(root);
   const board = providedBoard ?? store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), undefined, { isMain: codeIsFromMain() });
   try {
     const state = projectState(root, { board });
+    const freshness = providedBoard
+      ? verdictProjector(root, board, { main: trunkRevisionReader(info)() }).state
+      : cachedVerdictStates(root, board, info);
+    const derived = new Map(store.listItems(board, { all: true }).map(item => [item.item_id, freshness(item)]));
+    state.items = state.items.map(item => {
+      const verdictState = derived.get(item.id);
+      return verdictState ? { ...item, verdictState } : item;
+    });
     return { version: 1, state: { ...store.projectItemThreads(board, state), personRequests: personRequestStatuses(board) }, config: loadConfig(root), shouts: store.allShouts(board) }; }
   finally { if (!providedBoard) store.closeBoard(board); }
 }
@@ -39,6 +54,11 @@ export function presentationDigest(presentation) {
 
 /** Capture importable native tables beside matching API presentation, retrying a concurrent local move. */
 export function relaySnapshot(root, { board: providedBoard = null } = {}) {
+  return withGitReadFacts(() => readRelaySnapshot(root, providedBoard));
+}
+
+/** Keep native tables and their device presentation at one observed board revision. */
+function readRelaySnapshot(root, providedBoard) {
   const info = repoInfo(root);
   for (let attempt = 0; attempt < 3; attempt++) {
     const before = providedBoard ? null : relayPresentation(info.root);
