@@ -118,6 +118,9 @@ test('a repeated failure cause is noticed [D1,V1]', () => {
   const secondSha = board.submit(third); board.reject(third, 'refusal:UNDECLARED_REFUSAL');
   // A single: one failure on one item at one commit never lists.
   board.submit(single); board.reject(single, 'row:G1');
+  // An uncaused reject: no structured cause and no --cause, so it records no key and is counted.
+  const uncausedItem = board.add('Uncaused');
+  board.submit(uncausedItem); board.reject(uncausedItem, undefined, `${catalog.slice('test:'.length).replace('::', ': ')} failed`);
   // Merge conflicts on two items never list, however often they recur.
   board.submit(conflictA); board.landReopen(conflictA, { file: 'src/help.js', name: 'conflicts with main 8b8dc50e (0.8.29), merge main and resubmit' });
   board.submit(conflictB); board.landReopen(conflictB, { file: 'src/help.js', name: 'conflicts with main 8b8dc50e (0.8.29), merge main and resubmit' });
@@ -134,6 +137,8 @@ test('a repeated failure cause is noticed [D1,V1]', () => {
   assert.equal(refusal.reads, 'work', 'a refusal is about how the work is done');
   assert.ok(!repeated.causes.some((cause) => cause.key === 'row:G1'), 'a single failure does not list');
   assert.ok(!repeated.causes.some((cause) => /conflicts with/u.test(cause.key)), 'a merge conflict never lists');
+  assert.equal(repeated.uncaused, 1, 'the uncaused reject is counted, and its note naming the catalog test is never read as a key');
+  assert.equal(test.items.length, 2, 'the uncaused reject does not join the catalog cause');
 
   // A person's never-again lists at once, from one fact and no failure at all.
   const marked = json(box, 'fact', String(single), 'root-cause', 'Every function keeps its JSDoc block', '--cause', 'doctrine:C3', '--never-again', '--as', 'person');
@@ -150,7 +155,9 @@ test('a repeated failure cause is noticed [D1,V1]', () => {
   assert.match(lines[0], /^doctrine:C3 {2}reads as work {2}never again \(the person\) {2}items #\d+$/u);
   assert.equal(lines[1], `${catalog}  reads as both  2 failures  items #${first}, #${second}`);
   assert.equal(lines[2], `refusal:UNDECLARED_REFUSAL  reads as work  2 failures  items #${third} (2 commits)`);
-  assert.equal(lines.length, 3, 'every reject and reopen here carries a cause, so no uncaused line');
+  assert.equal(lines[3], '1 rejects and reopens carry no cause key; name one with --cause <key> (test:<file>::<title>, refusal:<CODE>, row:<id>, doctrine:<id>)',
+    'rigor says how many rejects and reopens are uncaused');
+  assert.equal(lines.length, 4);
 });
 
 test('rigor reads old events by their structured fields only, never by their notes [D1,V1]', () => {

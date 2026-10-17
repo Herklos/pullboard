@@ -182,6 +182,7 @@ export function rigorLines({ causes, uncaused }) {
       return `${cause.key}  reads as ${cause.reads}  ${cause.neverAgain ? 'never again (the person)' : `${cause.occurrences} failures`}  items ${items || 'none'}`;
     })
     : ['no failure cause has repeated'];
-  if (uncaused) lines.push(`${uncaused} rejects and reopens carry no cause key; name one with --cause <key> (${CAUSE_FORMS.join(', ')})`);
+  // The uncaused count always prints, so a reader sees how much of the history rigor cannot read.
+  lines.push(`${uncaused} rejects and reopens carry no cause key; name one with --cause <key> (${CAUSE_FORMS.join(', ')})`);
   return lines;
 }
