@@ -551,12 +551,21 @@ test('[V2,V4,B26,P6] a check green on main holds the item until the person accep
     assert.equal(board.db.prepare("SELECT COUNT(*) AS n FROM event WHERE event_kind = 'check_accept'").get().n, 0, 'no refused path recorded an acceptance');
   });
   assert.equal(refusal(box.run(box.web, ['claim', id, '--json']), 'claim after refusals').code, 'CRITERION_PROVES_NOTHING');
+  for (const route of [['next'], ['next', '--build']]) {
+    const routed = refusal(box.run(box.web, [...route, '--json']), route.join(' '));
+    assert.equal(routed.code, 'CRITERION_PROVES_NOTHING', `${route.join(' ')} is refused like claim`);
+    assert.ok(routed.message.includes(green), `${route.join(' ')} names the check: ${routed.message}`);
+  }
+  const claims = () => withBoard(file, (board) => board.db.prepare("SELECT COUNT(*) AS n FROM event WHERE event_kind = 'claim' AND item_id = ?").get(item.item_id).n);
+  assert.equal(claims(), 0, 'no refused route recorded a claim');
+  assert.equal(showItem(box, id).item.item_status, 'open');
 
   const accepted = box.run(box.repo, ['check', 'accept', id, '--json'], undefined, { env });
   assert.equal(accepted.status, 0, `${accepted.stdout}${accepted.stderr}`);
   assert.deepEqual(JSON.parse(accepted.stdout).digest, digest, 'the acceptance binds to the exact check text');
-  const claimed = box.run(box.web, ['claim', id, '--json']);
-  assert.equal(claimed.status, 0, `the person's acceptance lifts the hold: ${claimed.stdout}${claimed.stderr}`);
+  const claimed = box.run(box.web, ['next', '--build', '--json']);
+  assert.equal(claimed.status, 0, `the person's acceptance lifts the hold for next --build: ${claimed.stdout}${claimed.stderr}`);
+  assert.equal(showItem(box, id).item.item_owner, 'web-1', 'next --build claimed the accepted item');
 
   const changed = fileCheck('green', 'changed-check-marker.txt');
   const edited = box.run(box.repo, ['edit', id, '--check', changed, '--reason', 'the fixture changes the check', '--wait', '--json'], undefined, { env });
@@ -575,6 +584,16 @@ test('[V2,V4,B26,P6] a check green on main holds the item until the person accep
   assert.equal(box.run(box.repo, ['refreeze', id]).status, 0);
   const submitted = box.run(box.web, ['submit', id, '--json']);
   assert.equal(submitted.status, 0, `a red new baseline lifts the hold: ${submitted.stdout}${submitted.stderr}`);
+
+  const second = addChecked(box, 'Second held green check', fileCheck('green', 'second-check-marker.txt')).item;
+  const nextHeld = refusal(box.run(box.web, ['next', '--json']), 'next on a second held item');
+  assert.equal(nextHeld.code, 'CRITERION_PROVES_NOTHING', 'next refuses the second held item');
+  const reset = box.run(box.repo, ['edit', String(second.item_id), '--check', fileCheck('done', 'second-red-marker.txt'), '--wait', '--json'], undefined, { env });
+  assert.equal(reset.status, 0, `${reset.stdout}${reset.stderr}`);
+  assert.equal(JSON.parse(reset.stdout).item.item_check_baseline.result, 'red');
+  const nextClaimed = box.run(box.web, ['next', '--json']);
+  assert.equal(nextClaimed.status, 0, `a changed check with a red baseline lifts the hold for next: ${nextClaimed.stdout}${nextClaimed.stderr}`);
+  assert.equal(showItem(box, second.item_id).item.item_status, 'claimed', 'next claimed the item once its check was red on main');
 
   const plain = project({ content: 'green', worktrees: true });
   const { result: warned, item: open } = addChecked(plain, 'Unheld green check', fileCheck('green', 'plain-check-marker.txt'));

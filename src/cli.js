@@ -65,7 +65,7 @@ import { answerQuestion, bundledBlueprints, landBlueprint, planBlueprint, readBl
 import { briefFiles } from './brief.js';
 import { commitFirst, commitOwnerLines, commitOwners, coordinatorInbox, coordinatorInboxLines, inboxFirst } from './resume.js';
 import { checkBaseline, prepareCheckBaseline, refuseCheckSyntax, sayCheckBaseline } from './check-baseline.js';
-import { checkAcceptCommand, refuseProvesNothing } from './check-accept.js';
+import { checkAcceptCommand, refuseClaimProvesNothing, refuseProvesNothing } from './check-accept.js';
 import { retryCheckBaselines, startCheckBaseline } from './check-baseline-worker.js';
 import { compareMainFailures, mainRedMessage, mainRedReworkItems } from './main-red.js';
 import { runItems } from './run.js';
@@ -594,6 +594,12 @@ async function ordered(ctx, board, operation, args) {
   const lease = await bindLocalSession(ctx.info, { agent, digest, keepLease: true });
   try { return await execute(); }
   finally { lease.release(); }
+}
+
+/** Order a claim on every route (claim, next, run) only after a check green on main is not held [V4]. */
+async function claimOrdered(ctx, board, args) {
+  refuseClaimProvesNothing(ctx.info.root, board, args[0]);
+  return await ordered(ctx, board, 'claim', args);
 }
 
 /** Check ownership before sync or command side effects; reads and authenticated person channels keep their identity. */
@@ -2689,7 +2695,7 @@ async function nextOnce(ctx, values) {
     const reviewSkipped = values.build && !held
       ? { offeredItem: offer?.item.item_id ?? null, ratio: ctx.config.verify.reviewRatio, ...store.reviewQueue(board) } : null;
     try {
-      await ordered(ctx, board, 'claim', [item.item_id, { agentId: me.id, lane: me.lane, leaseMs: ctx.config.leaseMs, freeze: claimFreezer(ctx), head: headCommit(ctx.info.root), reviewSkipped }]);
+      await claimOrdered(ctx, board, [item.item_id, { agentId: me.id, lane: me.lane, leaseMs: ctx.config.leaseMs, freeze: claimFreezer(ctx), head: headCommit(ctx.info.root), reviewSkipped }]);
     } catch (error) {
       if (error instanceof MainSpecMerged) return { retry: true, specMerged: { item: item.item_id, rows: error.rows } };
       if (error instanceof Refused && ['HELD', 'ITEM_HELD', 'BLOCKED', 'ONE_CLAIM'].includes(error.code)) return { retry: true };
@@ -3009,7 +3015,7 @@ function workCommands(io, args) {
       io.say(`#${id} escalated ${moved.from} -> ${moved.to}; it is open for a ${moved.to} agent`);
       return 0;
     }),
-    run: () => runItems(io, values, { context, withBoard, whoAmI, nextOnce, submitHere, freezer, ordered }),
+    run: () => runItems(io, values, { context, withBoard, whoAmI, nextOnce, submitHere, freezer, ordered, claim: claimOrdered }),
     sweep: () => act((ctx, board, me) => sweepHere(ctx, board, me, values)),
     next: () => nextHere(io, { ...values, verifyId: first }),
     check: async () => {
@@ -3056,12 +3062,10 @@ function workCommands(io, args) {
     },
     claim: () => act(async (ctx, board, me) => {
       const id = idArg(first);
-      const claimable = store.getItem(board, id);
-      if (['open', 'claimed'].includes(claimable.item_status)) refuseProvesNothing(() => mainPolicy(ctx.info.root).config, board, claimable);
       let result;
       for (;;) {
         try {
-          result = await ordered(ctx, board, 'claim', [id, { agentId: me.id, lane: me.lane, leaseMs: ctx.config.leaseMs, freeze: claimFreezer(ctx), head: headCommit(ctx.info.root) }]);
+          result = await claimOrdered(ctx, board, [id, { agentId: me.id, lane: me.lane, leaseMs: ctx.config.leaseMs, freeze: claimFreezer(ctx), head: headCommit(ctx.info.root) }]);
           break;
         } catch (error) {
           if (!(error instanceof MainSpecMerged)) throw error;

@@ -7,6 +7,7 @@ import { PERSON, atomic, getItem, itemById, logEvent } from './board.js';
 import { COORDINATOR } from './config.js';
 import { requirePersonChannel } from './person.js';
 import { Refused } from './refused.js';
+import { mainPolicy } from './trusted-policy.js';
 
 /** The engine that first replays a person's check acceptance; older engines refuse the move unread [H16]. */
 export const CHECK_ACCEPT_ENGINE = 24;
@@ -88,6 +89,20 @@ export function refuseProvesNothing(mainConfig, board, item) {
   throw new Refused('CRITERION_PROVES_NOTHING',
     `#${item.item_id} is held: its check already passes on main ${String(base.main).slice(0, 12)}, so it proves nothing: ${base.command}`,
     `the coordinator sets a check that fails before the work (pullboard edit ${item.item_id} --check "<command>"), or the person accepts this one: pullboard check accept ${item.item_id}`);
+}
+
+/**
+ * Refuse any claim of an open or claimed item whose check is held, reading accepted main's setting.
+ * Claim, next, next --build and pullboard run all order their claim through the CLI's one claim
+ * helper, which calls this first, so no route records a claim on a held item.
+ *
+ * @param {string} root
+ * @param {any} board
+ * @param {number} id
+ */
+export function refuseClaimProvesNothing(root, board, id) {
+  const item = getItem(board, id);
+  if (['open', 'claimed'].includes(item.item_status)) refuseProvesNothing(() => mainPolicy(root).config, board, item);
 }
 
 /**
