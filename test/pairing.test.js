@@ -302,7 +302,7 @@ test('[H15,H17] production CLI pairs a real second clone and reads the same boar
   assert.equal(printed.code, 0, 'the linked CLI publishes a one-use pairing envelope');
   assert.match(printed.document.code, /^[0-9a-f]{32}\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}$/);
   assert.equal(printed.document.expiresIn, 600);
-  assert.match(printed.document.link, /^https:\/\/app\.pullboard\.dev\/#board=/);
+  assert.ok(printed.document.link.startsWith(box.origin + '/#board='), 'the phone link uses the relay this board is linked to');
   const state = JSON.parse(readFileSync(box.linkFile, 'utf8'));
   const { locator } = parsePairingCode(printed.document.code);
   const staleClient = await fetch(box.origin + '/api/v1/pairings/' + state.board + '/' + locator + '/consume', {

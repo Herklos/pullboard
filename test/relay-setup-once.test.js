@@ -229,7 +229,8 @@ test('set up once links three registered boards, later registration and a persis
   assert.equal(linkProposal.published, true);
   const approvalPosts = () => box.calls.filter(call => call.method === 'POST' && call.path === '/api/v1/devices/approvals').length;
   assert.equal(approvalPosts(), 1, 'registration publishes one proposal');
-  const pendingMessage = 'waiting for phone approval: fourth-project; expires ' + new Date(linkProposal.context.expires).toISOString();
+  const pendingMessage = 'waiting for phone approval: approve linking fourth-project on Phone browser by '
+    + new Date(linkProposal.context.expires).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZoneName: 'short' });
   const statusPending = await command(fourth, box.env, ['status']).done;
   assert.equal(statusPending.code, 0, 'status remains available while a new board awaits phone approval');
   const doctor = await command(fourth, box.env, ['doctor']).done;

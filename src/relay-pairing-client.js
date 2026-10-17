@@ -9,7 +9,7 @@ import { forgetBoardKey, readBoardKey, storeBoardKey } from './relay-key.js';
 import { encodeBoardKey } from './seal.js';
 import { createPairingCode, openPairingBundle, parsePairingCode, sealPairingBundle } from './pairing.js';
 import { terminalQr } from './qr.js';
-import { DEFAULT_RELAY, originRepository, relayStatus, syncRelay } from './relay.js';
+import { DEFAULT_RELAY, originRepository, syncRelay } from './relay.js';
 import { ENGINE_VERSION } from './machine.js';
 import { Refused } from './refused.js';
 import { requirePersonChannel } from './person.js';
@@ -139,10 +139,12 @@ export async function relayPair(root, io) {
   const sealed = await sealPairingBundle(code.code, bundle);
   const response = await relayRequest(state.url, state.token,
     `/api/v1/pairings/${code.board}/${code.locator}`, { sealed });
-  const viewLink = relayStatus(root).link;
+  // The board page lives on the relay this board is linked to, which may differ from the hosted default.
+  const viewLink = state.url + '/#board=' + state.board;
   io.result?.({ code: code.code, link: viewLink, expiresIn: response.expiresIn });
-  io.say(`One-time code (10 minutes, one use): ${code.code}`);
-  io.say(`Phone link: ${viewLink}`);
+  const address = state.url === DEFAULT_RELAY ? '' : ' --url ' + state.url;
+  io.say(`For another computer: in its clone of this repository, run pullboard init, then pullboard relay join ${code.code}${address}. The code works once, for 10 minutes.`);
+  io.say(`For a phone: scan this QR code, or open ${viewLink}. Pair a new phone first with pullboard relay on --all.`);
   io.say(terminalQr(viewLink));
   return 0;
 }

@@ -1,5 +1,8 @@
 /** The view uses the actual device authorization and all-board linking path without a terminal [H5,N26]. */
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
@@ -230,4 +233,102 @@ test("the view's sign-in links every board without a terminal or a stored sessio
       assert.equal(after - before, mode === 'abort-start' ? 0 : ['invalid-url','cleanup-refused'].includes(mode) ? 2 : 1, 'one device sign-in serves each attempt, including explicit recovery after invalid instructions');
     });
   }
+});
+
+const CLI = resolve(import.meta.dirname, '../bin/pullboard.js');
+
+test('relay help lists every relay command, with a whole example [H17]', () => {
+  const printed = spawnSync(process.execPath, [CLI, 'relay', '--help'], { cwd: tmpdir(), encoding: 'utf8' });
+  assert.equal(printed.status, 0, printed.stderr);
+  const [usage, rest] = printed.stdout.split('\nFlags:\n');
+  for (const command of ['relay [on|off|pair|join <code>]', 'relay on --all', 'relay devices', 'relay revoke <device>',
+    'relay tokens', 'relay revoke <token-id>', 'relay recover --skip <sequence>']) {
+    assert.ok(usage.includes('pullboard ' + command), 'relay help lists pullboard ' + command);
+  }
+  const example = rest.split('\nExample:\n')[1].trim();
+  assert.equal(example, 'pullboard relay on --all', 'the example is one whole command a person can paste');
+  assert.ok(!/--all \[/u.test(rest), 'flags name --all alone');
+});
+
+test('relay pair labels the code for a computer and the QR for a phone [H17]', async (t) => {
+  const box = await relayClientFixture(t);
+  await box.link();
+  const cliModule = pathToFileURL(resolve(import.meta.dirname, '../src/cli.js')).href;
+  const result = await box.script(`
+import { main } from ${JSON.stringify(cliModule)};
+let output = '';
+const streams = { cwd: ${JSON.stringify(box.root)}, stdout: { write: part => { output += part; } }, stderr: { write() {} } };
+const code = await main(['relay', 'pair'], streams);
+process.stdout.write(JSON.stringify({ code, lines: output.split('\\n') }));
+`);
+  assert.equal(result.code, 0, 'the private pair script completes');
+  const { code, lines } = result.document;
+  assert.equal(code, 0, 'relay pair publishes a code');
+  const board = JSON.parse(readFileSync(box.linkFile, 'utf8')).board;
+  const computer = lines.findIndex(line => line.startsWith('For another computer: '));
+  assert.ok(computer >= 0, 'the one-time code is labelled for another computer');
+  assert.match(lines[computer], new RegExp('run pullboard init, then pullboard relay join ' + board + '\\.[A-Za-z0-9_.-]+ --url '
+    + box.origin.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&') + '\\. The code works once, for 10 minutes\\.$', 'u'),
+    'the computer line is the relay join command for this relay');
+  const phone = lines.findIndex(line => line.startsWith('For a phone: scan this QR code'));
+  assert.ok(phone > computer, 'the QR is labelled for a phone');
+  assert.ok(lines[phone].includes(box.origin + '/#board=' + board), 'the phone link uses the relay this board is linked to');
+  assert.ok((lines[phone + 1] ?? '').startsWith('\u001b[30;47m'), 'the QR follows its phone label');
+  assert.ok(!lines.join('\n').includes('app.pullboard.dev'), 'a board on another relay never points at the hosted default');
+});
+
+test('the approval wait names the phone in local time once [H17]', async (t) => {
+  const box = await relayClientFixture(t);
+  await box.link();
+  const module = name => JSON.stringify(pathToFileURL(resolve(import.meta.dirname, '../src/' + name)).href);
+  const fixtureModule = JSON.stringify(pathToFileURL(resolve(import.meta.dirname, 'fixture-child.js')).href);
+  const result = await box.script(`
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { mkdirSync } from 'node:fs';
+import { main } from ${module('cli.js')};
+import { readRelayMachine, updateRelayMachine } from ${module('relay-machine.js')};
+import { runFixtureGit } from ${fixtureModule};
+process.env.TZ = 'America/Chicago';
+const root = ${JSON.stringify(box.root)};
+const link = JSON.parse(readFileSync(${JSON.stringify(box.linkFile)}, 'utf8'));
+const pair = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+const { kty, crv, x, y } = await crypto.subtle.exportKey('jwk', pair.publicKey);
+updateRelayMachine(state => {
+  state.autoLink = true;
+  state.owner = { account: link.account, url: link.url };
+  state.devices.push({ deviceId: 'device-' + 'a'.repeat(32), account: link.account, url: link.url, fingerprint: 'b'.repeat(64),
+    label: 'Kitchen phone', createdAt: new Date().toISOString(), publicKey: { kty, crv, x, y } });
+});
+const originalFetch = globalThis.fetch;
+globalThis.fetch = async (input, options) => {
+  const address = new URL(input instanceof Request ? input.url : input);
+  // The stand-in phone never answers, so the link request stays pending.
+  if (address.pathname.startsWith('/api/v1/devices/')) {
+    const body = address.pathname === '/api/v1/devices/approvals' ? { version: 1 } : { version: 1, approval: { state: 'pending' } };
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+  }
+  return originalFetch(input, options);
+};
+const other = join(dirname(root), 'waiting-board');
+mkdirSync(other);
+for (const args of [['init','-q','-b','main'], ['-c','commit.gpgsign=false','commit','--allow-empty','-q','-m','chore: waiting board'],
+  ['remote','add','origin','git@github.com:fixture/repository.git']]) runFixtureGit(args, { cwd: other, env: process.env });
+let errors = '';
+const streams = { cwd: other, stdin: process.stdin, stdout: { isTTY: false, write() {} }, stderr: { write: part => { errors += part; } } };
+const codes = [];
+for (const argv of [['init'], ['status'], ['list']]) codes.push(await main(argv, streams));
+globalThis.fetch = originalFetch;
+const approval = readRelayMachine().approvals.find(entry => entry.root.endsWith('waiting-board'));
+const expected = new Date(approval.context.expires).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZoneName: 'short', timeZone: 'America/Chicago' });
+process.stdout.write(JSON.stringify({ codes, lines: errors.split('\\n').filter(line => line.includes('waiting for phone approval')),
+  expected, iso: new Date(approval.context.expires).toISOString() }));
+`);
+  assert.equal(result.code, 0, 'the private approval-wait script completes');
+  const { codes, lines, expected, iso } = result.document;
+  assert.deepEqual(codes, [0, 0, 0], 'init, status and list complete while the link waits');
+  assert.equal(lines.length, 1, 'three commands in a row print the wait once');
+  assert.equal(lines[0], 'waiting for phone approval: approve linking waiting-board on Kitchen phone by ' + expected + '; local work continues.',
+    'the wait names the phone and the expiry in local time');
+  assert.ok(!lines[0].includes(iso), 'the expiry is never printed in UTC');
 });
