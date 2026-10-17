@@ -2384,7 +2384,7 @@ export async function addBlueprintHere(io, reference, { report = true, blueprint
  * @typedef {object} BlueprintAdded
  * @property {{ name: string, title: string, version: number }} blueprint
  * @property {string} section - The SPEC.md section heading the rows are in.
- * @property {{ key: string, id: string, status: string, text: string }[]} rows - New rows; each waits for the person.
+ * @property {{ key: string, id: string, status: string, text: string, source?: string }[]} rows - New rows; each waits for the person, with the source its rule names.
  * @property {{ id: number, key: string, title: string, lane: string, askedLane?: string, specIds: string[], after: number[], check?: string }[]} items - New open items.
  * @property {string | null} gate - The gate set in pullboard.json, or null when it was left alone.
  * @property {boolean} marked - This blueprint version was already on the board, so nothing was added.
@@ -2465,7 +2465,7 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
     writeRowApply(ctx.info.root, { records: [], files: [{ file: ctx.config.spec, before: plan.specRows, after: plan.specAfter }], signoffs: { before: null, receipts: [] } });
   }
   if (plan.specAfter !== source && !files.some((file) => file.file === ctx.config.spec)) files.unshift({ file: ctx.config.spec });
-  const rows = plan.rows.map(({ key, id, status, text }) => ({ key, id, status, text }));
+  const rows = plan.rows.map(({ key, id, status, text, source }) => ({ key, id, status, text, ...(source ? { source } : {}) }));
   const summary = { blueprint: { name: blueprint.name, title: blueprint.title, version: blueprint.version },
     section: plan.section.name, rows, items: added, gate: plan.gate, marked: plan.marked, proposedLanes: added.length ? proposedLanes : [],
     // Item checks are stored and never run during add; the caller tells the reader so.
@@ -3534,9 +3534,9 @@ async function specCommand(io, { first, second, rest, values }) {
     unnamed.forEach((problem) => messages.push(`${ctx.config.spec}: error: ${problem}`));
     errors += unnamed.length;
     if (values.json && !errors) {
-      const rows = files.flatMap(([file, parsed]) => parsed.rows.map(({ id, status, tier, text, gate, serves, signers = [], section, line, origin, version, reason, file: source }) => (
+      const rows = files.flatMap(([file, parsed]) => parsed.rows.map(({ id, status, tier, text, gate, serves, signers = [], section, line, origin, version, reason, file: source, source: from }) => (
         { id, status, tier, text, gate, serves, signers, section, line, file: source ?? file,
-          ...(origin ? { origin, version, reason } : {}) }
+          ...(from === undefined ? {} : { source: from }), ...(origin ? { origin, version, reason } : {}) }
       )));
       io.result({ rows });
     } else messages.forEach((message) => io.say(message));
@@ -3584,6 +3584,7 @@ async function specCommand(io, { first, second, rest, values }) {
     if (row.reason) io.say(`reason: ${row.reason}`);
     if (row.gate) io.say(`gate: ${row.gate}`);
     if (row.serves.length) io.say(`serves: ${row.serves.join(', ')}`);
+    if (row.source) io.say(`source: ${row.source}`);
     io.say(`signed: ${standing.met.map((entry) => `${entry.by} ${entry.on}`).join(', ') || 'no'}${standing.stale.length ? `; stale: ${standing.stale.length}` : ''}`);
     for (const entry of [...standing.met, ...standing.stale]) if (entry.note) io.say(`note (${entry.by}): ${entry.note}`);
     return 0;
