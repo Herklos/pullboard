@@ -98,7 +98,7 @@ export function verdictProjector(root, board, { main } = {}) {
       return detail.verdict === accepted?.verdict_id && detail.landed === item.item_merged_commit;
     });
     if (item.item_merged_commit && !mismatch) return null;
-    let review;
+    let review = accepted?.review;
     try {
       if (!resolved) {
         resolved = true;
@@ -139,7 +139,9 @@ export function verdictProjector(root, board, { main } = {}) {
       return null;
     } catch {
       return { code: 'STALE_VERDICT', file: null, commit: null, reviewedTrunk: review?.trunk ?? null,
-        main: tip ?? null, reason: 'the reviewed Git history is unavailable; restore its objects and re-review' };
+        main: tip ?? null, ...(mismatch ? { landingCode: 'LAND_ITEM_MOVED', checked: review?.head,
+          reason: `the older landing recorded ${item.item_merged_commit}; checked composition ${review?.head} is unavailable on this replica` }
+          : { reason: 'the reviewed Git history is unavailable; restore its objects and re-review' }) };
     }
   };
   /** Decorate a public item read while preserving every stored proof field. */

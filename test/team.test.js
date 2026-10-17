@@ -386,7 +386,7 @@ test('an older pushed landing shows stale checked proof and a correction path ac
     assert.match(explanation, new RegExp(checked));
     assert.doesNotMatch(explanation, /then another agent runs pullboard verify 1 accept/u);
     assert.deepEqual(withBoard(box.repo, board => store.verdictsFor(board, 1)), verdicts, 'presentation does not rewrite proof');
-    const api = await serveApi(box.repo);
+    const api = await serveApi({ runCommand: main, projects: () => [{ root: box.repo, name: 'Older landing fixture' }] });
     t.after(() => api.close());
     const address = new URL(api.url);
     const detail = await fetchFresh(address.origin + '/api/v1/boards/' + withBoard(box.repo, store.boardId) + '/items/1',
@@ -394,6 +394,15 @@ test('an older pushed landing shows stale checked proof and a correction path ac
     assert.equal(detail.status, 200);
     assert.equal((await detail.json()).item.verdictState?.landingCode, 'LAND_ITEM_MOVED');
     assert.equal(snapshotState(relaySnapshot(box.repo), withBoard(box.repo, store.boardId)).items[0].verdictState?.landingCode, 'LAND_ITEM_MOVED');
+    const missing = join(box.dir, 'legacy-landing-missing-objects');
+    box.git(box.dir, 'clone', '-q', '--no-local', box.repo, missing);
+    assert.notEqual(box.tryGit(missing, 'cat-file', '-e', checked).status, 0, 'this independent clone has not fetched the checked composition');
+    withBoard(missing, board => importBoard(board, withBoard(box.repo, exportBoard)));
+    const unavailable = JSON.parse(run(box, missing, 'show', '1', '--json'));
+    assert.equal(unavailable.item_verdict_state?.landingCode, 'LAND_ITEM_MOVED');
+    assert.equal(unavailable.item_verdict_state?.checked, checked);
+    assert.match(run(box, missing, 'show', '1'), /create a correction item/u,
+      'missing reviewed objects must never suggest re-reviewing an immutable landing');
     const refused = box.run(reviewer, 'verify', '1', 'accept', '--note', 'Cannot rewrite the original landing.');
     assert.equal(refused.code, 1);
     assert.match(refused.err, /NOT_SUBMITTED|ALREADY_MERGED/u, 'the existing merged-receipt guards stay in force');
