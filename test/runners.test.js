@@ -2102,6 +2102,42 @@ test('review655 a registered runner honors the same live person waiver at landin
     assert.equal(result.status, 0, 'the same live person waiver must cover this named landing failure on the registered runner');
     assert.equal(document.green, false, 'a waived remote failure is never an ordinary green');
     assert.equal(document.waived[0].waiver, waiver.id);
+    assert.equal(document.waived[0].file, failing, 'failure identities stay relative to the committed source');
+    assert.equal(document.waived[0].reason, waiver.reason);
+    assert.equal(document.waived[0].until, waiver.until);
+    assert.equal(existsSync(join(repo, '.git', 'pullboard-gate-green')), false, 'a waived remote run writes no ordinary green stamp');
+    assert.doesNotMatch(raw, /Landing gate stopped early/u);
+    assert.match(raw, /^# cancelled 0$/mu);
+
+    /** Change only the private gate, then require the real registered worker's complete response. */
+    const remoteGate = async (command, message) => {
+      writeFileSync(configPath, JSON.stringify({ ...config, gate: command }) + '\n');
+      box.git(repo, 'add', 'pullboard.json');
+      box.git(repo, 'commit', '-q', '-m', message);
+      const prior = phaseCounts(phases);
+      const run = observe(startToolingCli(repo, env, ['gate', '--landing', '--json'], { detached: true }));
+      const finished = await awaitRoundTrip(run.child, run.closed, phases, prior);
+      const measured = JSON.parse(readFileSync(join(repo, '.git', 'pullboard-gate.log.profile.json'), 'utf8'));
+      assert.equal(measured.executionRunner, HOST, 'each accounting counter actually executes on the registered worker');
+      assert.equal(measured.executionSource.commit, box.git(repo, 'rev-parse', 'HEAD'));
+      assert.equal(existsSync(join(repo, '.git', 'pullboard-gate-green')), false);
+      return { ...finished, document: JSON.parse(finished.stdout), raw: readFileSync(join(repo, '.git', 'pullboard-gate.log'), 'utf8') };
+    };
+    const tests = 'node bin/run-tests.js --test-concurrency=1 ' + failing;
+    const throughCat = await remoteGate(tests + ' | cat', 'test: retain a remote TAP producer account');
+    assert.equal(throughCat.status, 0, fixtureResultContext(throughCat));
+    assert.equal(throughCat.document.green, false);
+    assert.equal(throughCat.document.waived[0].waiver, waiver.id, 'the failing producer accounts for its own test');
+
+    const independent = await remoteGate('node -e "process.exitCode=1" | ' + tests, 'test: retain an independent remote pipeline failure');
+    assert.equal(independent.status, 1, 'an unattributed producer failure is not covered by the consumer test waiver');
+    assert.match(independent.raw, /^# fail 1$/mu, 'the consumer still returns its complete waived TAP');
+    assert.equal(independent.document.waived, undefined);
+
+    const staged = await remoteGate(tests + '; node -e "process.exitCode=2"', 'test: retain a separate remote stage failure');
+    assert.equal(staged.status, 1, 'a separate failing stage is not a test waiver');
+    assert.equal(staged.document.waived, undefined);
+
   } finally {
     held?.release();
     if (priorHome === undefined) delete process.env.PULLBOARD_HOME; else process.env.PULLBOARD_HOME = priorHome;
