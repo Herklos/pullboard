@@ -5,41 +5,10 @@ import {
 } from './machine.js';
 import { commandPhrases, VERSION } from './help.js';
 import { personNeeds } from './needs.js';
-import { readFileSync } from 'node:fs';
+import { hostedReleaseDistance, shippedReleaseVersions } from './view/hosted-release.js';
 
 /** The CLI's default phrases, ordered by depth for the existing prose inventory guard. */
 export const PULLBOARD_COMMANDS = Object.freeze(commandPhrases().sort((left, right) => right.split(' ').length - left.split(' ').length));
-
-let hostedReleaseVersions;
-/** Return every shipped numeric release heading through the package version, including releases without headlines. */
-/**
- * @param {string} changelog - Shipped changelog contents.
- * @param {string} [currentVersion] - Highest package release to include.
- * @returns {string[]} Numeric release versions in ascending order, without duplicates.
- */
-export function releaseVersionsThrough(changelog, currentVersion = VERSION) {
-  const numeric = (version) => version.split('.').map(Number);
-  const compare = (left, right) => {
-    const a = numeric(left), b = numeric(right);
-    for (let index = 0; index < Math.max(a.length, b.length); index++) {
-      const difference = (a[index] ?? 0) - (b[index] ?? 0);
-      if (difference) return difference;
-    }
-    return 0;
-  };
-  return [...new Set([...changelog.matchAll(/^## \[(\d+\.\d+\.\d+)\](?:\s|$)/gmu)].map((match) => match[1]))]
-    .filter((version) => compare(version, currentVersion) <= 0)
-    .sort(compare);
-}
-
-/** Read and cache the shipped release ledger only when a hosted page needs its current version. */
-function shippedHostedReleaseVersions() {
-  if (!hostedReleaseVersions) {
-    const changelog = readFileSync(new URL('../CHANGELOG.md', import.meta.url), 'utf8');
-    hostedReleaseVersions = Object.freeze(releaseVersionsThrough(changelog));
-  }
-  return hostedReleaseVersions;
-}
 
 /**
  * The item lifecycle as the page draws it (M1): each state with what it means and, for a final
@@ -92,7 +61,7 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
   const requestMode = Boolean(readOnly && requests && !snapshot && transportModule);
   if (signIn !== null && (typeof signIn !== 'string' || !signIn.startsWith('/') || signIn.startsWith('//'))) throw new TypeError('signIn must be a path on the hosting site, or null');
   const hostedOptions = JSON.stringify({ local: Boolean(hostedLocal) && !snapshot, relaySession: Boolean(relaySession), signIn }).replace(/</g, '\\u003c');
-  const releaseVersions = suppliedReleaseVersions ?? (hostedLocal && !snapshot ? shippedHostedReleaseVersions() : []);
+  const releaseVersions = suppliedReleaseVersions ?? (hostedLocal && !snapshot ? shippedReleaseVersions() : []);
   const releaseInfo = JSON.stringify({ version: hostedReleaseVersion, versions: releaseVersions }).replace(/</g, '\\u003c');
   const css = stylesheet ?? (snapshot ? 'view.css' : transportModule ? '/view.css' : '/view.css?k=' + encodeURIComponent(key));
   const cssAttribute = css.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
@@ -249,6 +218,7 @@ let localReadHeaders = { ...connection.headers };
 // anything else reads the address, and keeps it for this tab only. Every request then sends it in x-pullboard-key.
 const hosted = ${hostedOptions};
 const hostedRelease = ${releaseInfo};
+const hostedReleaseDistance = (${hostedReleaseDistance.toString()});
 const LOCAL_VIEW = 'http://127.0.0.1:4890';
 const LOCAL_TAB = 'pullboard.local.session';
 const LOCAL_TRIPS = 'pullboard.local.trips';
@@ -351,13 +321,6 @@ function localNote(text, ways = false) {
   $('local-note-view').href = (localSession?.origin || LOCAL_VIEW) + '/local/view';
   $('local-note-sign-in').hidden = !hosted.signIn || hosted.relaySession;
   if (hosted.signIn) $('local-note-sign-in').href = hosted.signIn;
-}
-
-/** Count known, shipped release entries between the installed and hosted versions; unknown versions get no guessed count. */
-function hostedReleaseDistance(installed, current, releases) {
-  if (typeof installed !== 'string' || typeof current !== 'string' || !Array.isArray(releases)) return 0;
-  const installedAt = releases.indexOf(installed), currentAt = releases.indexOf(current);
-  return installedAt >= 0 && currentAt > installedAt ? currentAt - installedAt : 0;
 }
 
 /** Show one dismissable update line only after this hosted page has read a known older local release. */
