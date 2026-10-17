@@ -35,8 +35,21 @@ test('an actual engine12 person waiver keeps its exact receipt and history on bo
   const oldExchange = await import(pathToFileURL(join(archived, 'src/exchange.js')).href);
   const oldMachine = await import(pathToFileURL(join(archived, 'src/machine.js')).href);
   assert.equal(oldMachine.ENGINE_VERSION, 12, 'use the actual released executable, not a retagged current writer');
-  old = oldStore.openBoard(join(directory, 'old.sqlite'));
+  const at = '2026-10-17T20:00:00.000Z';
+  const base = 'a'.repeat(40);
+  const commit = 'b'.repeat(40);
+  const digest = 'd'.repeat(64);
+  old = oldStore.openBoard(join(directory, 'old.sqlite'), { now: () => new Date(at) });
   oldStore.ensureCoordinator(old, '/fixture');
+  oldStore.register(old, { lane: 'web', path: '/fixture/builder' });
+  oldStore.register(old, { lane: 'web', path: '/fixture/reviewer' });
+  const item = oldStore.addItem(old, { by: 'coordinator', lane: 'web', title: 'Historical waived landing' });
+  oldStore.claim(old, item, { agentId: 'web-1', lane: 'web', leaseMs: 3_600_000, head: base,
+    freeze: () => ({ text: JSON.stringify({ rows: [], policy: { version: 1, commit: base,
+      verify: { policy: 'any', family: 'off' } } }), digest }) });
+  oldStore.submit(old, item, { agentId: 'web-1', commit, tree: commit, files: ['web/feature.js'], policyCommit: base });
+  oldStore.verify(old, item, { agentId: 'web-2', decision: 'ACCEPT', note: 'Historical private proof',
+    head: commit, digest, policy: 'any', familyPolicy: 'off', check: 'green' });
   const seed = oldExchange.exportBoard(old);
   for (let index = 0; index < 2; index++) {
     const board = store.openBoard(':memory:');
@@ -47,7 +60,7 @@ test('an actual engine12 person waiver keeps its exact receipt and history on bo
     agentId: 'person', channel: 'terminal', id: 'legacy-waiver', test: 'test/flaky.test.js',
     until: '2099-01-01T00:00:00.000Z', reason: 'Synthetic private replay proof',
   }], { id: 'old-person-waiver' });
-  const order = { sequence: 1, at: '2026-10-17T20:00:00.000Z' };
+  const order = { sequence: 1, at };
   const original = oldEngine.applyEngineMove(old, move, order);
   assert.equal(original.error, undefined);
   assert.equal(Object.hasOwn(original.result, 'kind'), false, 'the released receipt did not store a match kind');
@@ -64,5 +77,34 @@ test('an actual engine12 person waiver keeps its exact receipt and history on bo
       'a file waiver cannot cover a test merely named like its file');
     assert.deepEqual(exportBoard(board), before, 'derived waiver classification never writes history');
     assert.deepEqual(applyEngineMove(board, move, order), original, 'retrying the old move preserves its released receipt');
+  }
+
+  // The old matcher accepted a name equal to a waived file. The current pre-push reader
+  // rejects that collision, but it must still replay the older already-pushed history exactly.
+  const entry = { id: item, commit, merge: commit };
+  const batch = { version: 1, id: 'historical-pushed-waiver', state: 'pushed', base, tip: commit,
+    root: '/fixture/landing', branch: 'refs/heads/main', owner: 'fixture', logPath: '/fixture/landing.log',
+    candidates: [entry], items: [entry], revision: 0,
+    proof: { tree: commit, failures: [{ file: 'test/different.test.js', name: 'test/flaky.test.js', waiver: 'legacy-waiver' }] } };
+  for (const [index, [operation, args]] of [
+    ['recordLandingBatch', [{ agentId: 'coordinator', batch }]],
+    ['finishLandingBatch', [{ agentId: 'coordinator', id: batch.id, tip: commit }]],
+  ].entries()) {
+    const ordered = { sequence: index + 2, at };
+    const legacy = oldEngine.prepareEngineMove(old, operation, args, { id: `historical-waiver-${operation}` });
+    const result = oldEngine.applyEngineMove(old, legacy, ordered);
+    assert.equal(result.error, undefined);
+    for (const board of replicas) {
+      assert.deepEqual(applyEngineMove(board, legacy, ordered), result, `${operation} preserves its actual released receipt`);
+      assert.deepEqual(engineReceipt(board, legacy.id), oldEngine.engineReceipt(old, legacy.id));
+      assert.deepEqual(withoutWriterMarker(exportBoard(board)), withoutWriterMarker(oldExchange.exportBoard(old)));
+    }
+  }
+  assert.ok(oldStore.waivedLandingProof(old, commit), 'the released reader allowed the old name/file collision');
+  for (const board of replicas) {
+    const before = exportBoard(board);
+    assert.equal(store.getItem(board, item).item_merged_commit, commit, 'the older pushed receipt remains recorded');
+    assert.equal(store.waivedLandingProof(board, commit), null, 'new pushes cannot reuse that unsafe old proof');
+    assert.deepEqual(exportBoard(board), before, 'stricter pre-push projection never rewrites ordered history');
   }
 });
