@@ -95,11 +95,11 @@ test('[B10,B31] a corrected bar records why the old one was wrong', () => {
   box.json(box.web, 'refreeze', '1');
   rejectOnce(box, 1, 'the WAL lock never appears');
   const unexplained = box.run(box.repo, 'edit', '1', '--check', 'true # wal', '--json');
-  assert.equal(JSON.parse(unexplained.out).error.code, 'BAR_REASON', 'a check correction on an item that was claimed needs a reason too');
+  assert.equal(JSON.parse(unexplained.out).error?.code, 'BAR_REASON', 'a check correction on an item that was claimed needs a reason too');
   box.json(box.repo, 'edit', '1', '--check', 'true # wal', '--reason', 'the old check never opened a WAL board');
   const marked = box.json(box.repo, 'show', '1').thread.filter((entry) => entry.type === 'move' && entry.kind === 'edit').at(-1);
-  assert.equal(marked.detail.barCorrection.reject.by, 'web-2', 'a reject followed by a correction is marked as caused by the bar');
-  assert.equal(marked.detail.barCorrection.reject.reason, 'TEST_FAILURE');
+  assert.equal(marked.detail.barCorrection.reject?.by, 'web-2', 'a reject followed by a correction is marked as caused by the bar');
+  assert.equal(marked.detail.barCorrection.reject?.reason, 'TEST_FAILURE');
 
   const shown = box.run(box.repo, 'show', '1');
   assert.equal(shown.code, 0, shown.err);
