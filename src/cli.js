@@ -19,6 +19,7 @@ import { agentSessionDigest, requirePersonChannel } from './person.js';
 import { bindLocalSession, localSessionMatches } from './agent-session.js';
 import { decisionAnswer, decisionProjection, handAnsweredQuestions, pendingAnswers, planRowApply, prepareRowDecisions, restoreRowApply, writeRowApply } from './row-decisions.js';
 import { digestOf, gateReport, refuseSandboxBlocked, runGate, runProfiledShell, runSubmitGate, submitGateReport, timingDigest, withGateSlot } from './gate.js';
+import { gateWaitReporter } from './gate-wait.js';
 import { checkNeedsBrowser } from './browser-admission.js';
 import { bareWorktreeFinding, codeIsFromMain, contains, differFromHead, git, gitChildEnv, headCommit, headTree, invalidateGitFacts, isClean, mainCheckout, patchId, repoInfo, resolveCommit, tryGit, untracked, withGitFacts } from './git.js';
 import {
@@ -99,6 +100,7 @@ import { engineReceipt } from './engine.js';
 import { accountedFailures, land, landingRemote, landingSubject, liveWaiverProjection, waivedFailures, waiverLine } from './land.js';
 import { installStep } from './worktree.js';
 
+export { gateWaitReporter };
 const CHECKOUT_LEASES = new WeakMap();
 const CHECKOUT_BOARD_ONLY = new WeakMap();
 let startupMainTraced = false;
@@ -3256,38 +3258,6 @@ function resourceAgent(ctx) {
 function browserAdmissionReporter(io, jsonMode = false) {
   return ({ file, reason }) => {
     if (!jsonMode) io.stderr.write(`browser admission fallback: ${file}: ${reason}\n`);
-  };
-}
-
-/** Build de-duplicated queue messages for a gate waiting on machine capacity or memory; exported so tests can read what a person sees. */
-export function gateWaitReporter(io) {
-  let last = '';
-  let warned = false;
-  let held = false;
-  return ({ holders, position, memory, runnerUnavailable }) => {
-    if (runnerUnavailable) {
-      io.say(`runner ${runnerUnavailable.host} unavailable: ${runnerUnavailable.reason}; until ${runnerUnavailable.until}; requeueing the run`);
-      return;
-    }
-    // Memory speaks once per state: one warning where it cannot be read, one line per hold.
-    if (memory && !memory.checked) {
-      if (!warned) io.say(memory.warning);
-      warned = true;
-      if (!position) return;
-    }
-    if (memory?.held) {
-      if (!held) io.say(memory.line);
-      held = true;
-      last = '';
-      return;
-    }
-    held = false;
-    const repos = holders.map(({ repo }) => repo).filter(Boolean);
-    const message = `gate waiting: ${holders.length} running${repos.length ? ` in ${repos.join(', ')}` : ''}; place ${position}`;
-    if (message !== last) {
-      io.say(message);
-      last = message;
-    }
   };
 }
 
