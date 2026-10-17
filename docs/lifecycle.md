@@ -151,7 +151,7 @@ Each move checks its guards in this order and refuses with the first one that do
 | REVIEW_COOLDOWN | the reviewer has not released this submission within the past hour, engine 5 or newer, only for the same reviewer and current submission | let another reviewer take it, or wait an hour or for a new submission |
 | NOTE_REQUIRED | the move carries a note: what failed, what was tried, or why | --note "..." or --note-file <file> |
 | ALREADY_MERGED | the item has no recorded merge receipt | a merged item cannot be reopened |
-| SUBMISSION_PROOF | recorded test selection names literal project files and its full-fallback policy, engine 22 or later; absent legacy selection remains unknown | rerun submit with the current CLI |
+| SUBMISSION_PROOF | recorded test selection names literal project files and its full-fallback policy, engine 34 or later; absent legacy selection remains unknown | rerun submit with the current CLI |
 | LANDING_FAILURE_REQUIRED | a verified item note names the failing test and landing merge commit | cite the recorded batch, or name the test and merge commit in a manual note |
 | LAND_HEADER | a displayed merge command fits the commit-header limit (accept result) | shorten the item title or cited rows so the merge header fits |
 | ENGINE_VERSION | a verdict that implies items replays only under engine 20 or later (accept result) | upgrade Pullboard on every linked device before using --implies |
