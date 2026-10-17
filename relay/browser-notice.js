@@ -32,7 +32,7 @@ export function storedOwnedRequestState(storage, key, requests) {
 }
 
 /** Build truthful device notices from authorized boards and their decrypted pending requests. */
-export function noticeLines({ available, paired, ownedRequestIds = new Map(), waitingBoards = new Map(), warnings = [], failure = '' }) {
+export function noticeLines({ available, paired, ownedRequestIds = new Map(), waitingBoards = new Map(), approvedBoards = new Set(), warnings = [], failure = '' }) {
   const lines = [];
   const waiting = [...paired.entries()].reduce((count, [id, entry]) => {
     const owned = ownedRequestIds.get(id) ?? new Set();
@@ -41,6 +41,11 @@ export function noticeLines({ available, paired, ownedRequestIds = new Map(), wa
   if (waiting) lines.push(`${waiting} request${waiting === 1 ? '' : 's'} from this device ${waiting === 1 ? 'is' : 'are'} waiting for a linked machine to run Pullboard.`);
   const pairedRepositories = new Set(available.filter(board => paired.has(board.id)).map(board => board.repository));
   for (const board of available.filter(value => !paired.has(value.id))) {
+    // This phone just approved the link: its key is on the way, so asking to pair would be wrong.
+    if (approvedBoards.has(board.id)) {
+      lines.push(`${board.repository} · board ${board.id.slice(0, 8)}: approved; waiting for the computer to send this phone its key.`);
+      continue;
+    }
     if (waitingBoards.has(board.id)) {
       lines.push(`${board.repository} · board ${board.id.slice(0, 8)}: waiting for its first snapshot from a linked machine.`);
       continue;

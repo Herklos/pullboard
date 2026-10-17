@@ -130,6 +130,8 @@ Engine 20 lets a decision name the items it changes. An `appendFact`, `answerDec
 
 Engine 24 adds the person's `acceptCheck`: an item's current check, named by its SHA-256 digest, accepted so a check already green on main no longer holds the item on a board whose `checks.provesNothing` is `"hold"`. Only the person may send it, from the terminal or the view; the relay refuses it from an agent or a machine. A move from an older engine is refused before it changes the board or replay cursor, and older clients refuse engine-24 moves before interpreting them. Engines 21 through 23 are allocated to other changes.
 
+Engine 30 lets a reject and a reopen carry a cause key (`cause`: `test:<file>::<title>`, `refusal:<CODE>`, `row:<id>` or `doctrine:<id>`) and lets the person record a never-again fact with `cause` and `neverAgain: true`, for `pullboard rigor`. Only a move that carries one of these needs engine 30; engine-29 and older moves replay unchanged, and clients on an older engine refuse an engine-30 move with `RELAY_MOVE` before changing their board or cursor. Engine 20 is the implied-items engine above; engine numbers 21 through 29 are allocated to other changes.
+
 The CLI declares its engine in every relay request's `X-Pullboard-Engine` header.
 A linked board requires at least engine 3 after issuing any agent token, including
 revoked or expired tokens. Issuing any machine credential raises that board’s minimum to engine 6, including after revocation or expiry. The minimum survives reopening the auth database;

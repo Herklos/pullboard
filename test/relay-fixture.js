@@ -7,7 +7,7 @@ import { once } from 'node:events';
 /** Start a provider with real signed JWT verification and one-use browser/device grants. */
 export async function githubFixture(t) {
   const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
-  const state = { access: true, permission: 'write', public: false, installed: true, repositoryID: 100, accountID: 7, permissionAccountID: 7, deviceAuthorized: false, deviceDeclined: false, deviceExpired: false, slow: false, redirect: null, beforeDevicePoll: null, beforeUser: null };
+  const state = { access: true, permission: 'write', public: false, installed: true, repositoryID: 100, repositories: ['repository'], accountID: 7, permissionAccountID: 7, deviceAuthorized: false, deviceDeclined: false, deviceExpired: false, slow: false, redirect: null, beforeDevicePoll: null, beforeUser: null };
   const calls = [];
   const codes = new Map();
   const userTokens = new Set();
@@ -94,16 +94,22 @@ export async function githubFixture(t) {
       if (state.beforeUser) await state.beforeUser();
       return reply(res, isUser ? 200 : 401, { id: state.accountID, login: 'fixture-user' });
     }
-    if (url.pathname === '/repos/fixture/repository/installation') return reply(res, isApp && state.installed ? 200 : 404, { id: 42 });
+    const repositoryPath = url.pathname.match(/^\/repos\/fixture\/([^/]+)(?:\/(.*))?$/u);
+    const repositoryName = repositoryPath?.[1];
+    const allowedRepository = state.repositories.includes(repositoryName);
+    if (allowedRepository && repositoryPath[2] === 'installation') return reply(res, isApp && state.installed ? 200 : 404, { id: 42 });
     if (url.pathname === '/app/installations/42/access_tokens') {
       assert.ok(isApp, 'installation request has a valid RSA App JWT');
-      assert.deepEqual(JSON.parse(raw), { repositories: ['repository'], permissions: { metadata: 'read' } });
+      const request = JSON.parse(raw);
+      assert.equal(request.repositories.length, 1, 'installation token is scoped to one allowed fixture repository');
+      assert.ok(state.repositories.includes(request.repositories[0]), 'installation token names an explicitly allowed fixture repository');
+      assert.deepEqual(request, { repositories: request.repositories, permissions: { metadata: 'read' } });
       const token = 'ghs_' + randomBytes(32).toString('base64url');
       installationTokens.add(token);
       return reply(res, 201, { token, expires_at: new Date(Date.now() + 3600_000).toISOString() });
     }
-    if (url.pathname === '/repos/fixture/repository') return reply(res, isInstallation || state.public ? 200 : 404, { id: state.repositoryID, full_name: 'fixture/repository', private: !state.public });
-    if (url.pathname === '/repos/fixture/repository/collaborators/fixture-user/permission') {
+    if (allowedRepository && !repositoryPath[2]) return reply(res, isInstallation || state.public ? 200 : 404, { id: state.repositoryID + state.repositories.indexOf(repositoryName), full_name: 'fixture/' + repositoryName, private: !state.public });
+    if (allowedRepository && repositoryPath[2] === 'collaborators/fixture-user/permission') {
       if (state.beforePermission) await state.beforePermission();
       const role = state.access ? state.permission : 'none';
       const permission = { triage: 'read', maintain: 'write' }[role] || role;
