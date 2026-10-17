@@ -5,7 +5,7 @@ import { hostname, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
 import { runFixtureChild, runFixtureGit } from './fixture-child.js';
-import { bundledBlueprints, readBlueprint } from '../src/blueprints.js';
+import { bundledBlueprints, readBlueprint, validateBlueprint } from '../src/blueprints.js';
 import { parseSpec } from '../src/spec.js';
 import { createE2eHelpers } from './e2e-helpers.js';
 
@@ -37,7 +37,8 @@ function freshBoard(config = {}) {
   const repo = join(dir, 'repo');
   mkdirSync(repo);
   const git = (...args) => runFixtureGit(args, { cwd: repo, env });
-  const run = (...args) => runFixtureChild(process.execPath, [BIN, ...args], { cwd: repo, env, encoding: 'utf8' });
+  const runIn = (cwd, ...args) => runFixtureChild(process.execPath, [BIN, ...args], { cwd, env, encoding: 'utf8' });
+  const run = (...args) => runIn(repo, ...args);
   git('init', '-q', '-b', 'main');
   const init = run('init');
   assert.equal(init.status, 0, init.stdout + init.stderr);
@@ -45,7 +46,7 @@ function freshBoard(config = {}) {
   writeFileSync(file, `${JSON.stringify({ ...JSON.parse(readFileSync(file, 'utf8')), ...config }, null, 2)}\n`);
   git('add', '-A');
   git('commit', '-q', '-m', 'chore: set up blueprint fixture');
-  return { dir, repo, run, git };
+  return { dir, repo, run, runIn, git };
 }
 
 /** Run one command with --json and return its document, failing with its output. */
@@ -69,14 +70,14 @@ test('blueprint add files a blueprint as drafts [S1,I1]', () => {
   assert.equal(section.length, 1, 'one section named after the blueprint');
   assert.equal(added.section, section[0].name);
   const rows = spec.rows.filter((row) => row.section === section[0].name);
-  assert.equal(rows.length, 10, '6 rules and 4 questions');
+  assert.equal(rows.length, 11, '7 rules and 4 questions');
   assert.equal(spec.rows.filter((row) => row.status === 'approved').length, 0, 'nothing is approved');
   const rules = rows.filter((row) => row.status === 'draft');
   assert.deepEqual(rules.map((row) => row.text), PUBLISHED.rules.map((rule) => `${rule.text} Why: ${rule.why}`));
   assert.equal(rules[0].text, 'Every change ships with a test that fails without it. Why: a test that passes either way proves nothing.');
   const questions = rows.filter((row) => row.status === 'pending');
   assert.deepEqual(questions.map((row) => row.text), [
-    'The app is built with: Next.js. Choices: Next.js, SvelteKit, Rails, Something else.',
+    'The app is built with: (choose one). Choices: Next.js, SvelteKit, Rails, Something else.',
     'It deploys to: Vercel. Choices: Vercel, Netlify, Fly.io, My own server.',
     'People sign in with: Email links. Choices: Email links, Passwords, Google, No sign-in yet.',
     'A change is done when: It runs on a preview link. Choices: It runs on a preview link, Its tests pass, I have looked at it.',
@@ -142,10 +143,10 @@ test('blueprint add files a blueprint as drafts even when approved rows say the 
     `## G · Goals: what the client asked for\n- G1 [approved, must] ${rule} | gate: review\n- G2 [approved, must] ${PUBLISHED.questions[0].ask}: Rails. Choices: Rails. | gate: review\n`));
   box.git('commit', '-q', '-am', 'chore: approve two rows first');
   const added = json(box, 'blueprint', 'add', 'web-app');
-  assert.deepEqual(added.rows.map((row) => row.status), [...Array(6).fill('draft'), ...Array(4).fill('pending')]);
+  assert.deepEqual(added.rows.map((row) => row.status), [...Array(7).fill('draft'), ...Array(4).fill('pending')]);
   const spec = parseSpec(readFileSync(file, 'utf8'));
   const own = spec.rows.filter((row) => row.section === added.section);
-  assert.equal(own.length, 10, 'the blueprint section holds all its own rows');
+  assert.equal(own.length, 11, 'the blueprint section holds all its own rows');
   assert.deepEqual(spec.rows.filter((row) => row.status === 'approved').map((row) => row.id), ['G1', 'G2'], 'the approved rows are untouched');
   const items = json(box, 'list', '--all').items.sort((a, b) => a.item_id - b.item_id);
   assert.equal(items[0].item_spec_ids, `${added.rows[0].id},${added.rows[1].id}`, 'starter items cite the blueprint rows, not the approved ones');
@@ -165,18 +166,20 @@ test('blueprint add files a blueprint as drafts or nothing at all [S1,I1]', () =
     assert.equal(json(box, 'list', '--all').items.length, 0, `${name}: no item is added`);
     return JSON.parse(result.stdout).error;
   };
+  // Every starter carries a criterion and a check, so each refusal below is the board's own.
+  const bar = { criterion: 'A test fails without the change.', check: 'true' };
   // A later starter the board refuses (here a brief over its limit) stops the add before any write.
-  const late = refused('late-refusal', [{ key: '1', title: 'First starter', cites: ['W1'] }, { key: '2', title: 'Second starter', brief: 'x'.repeat(8001) }]);
+  const late = refused('late-refusal', [{ key: '1', title: 'First starter', cites: ['W1'], ...bar }, { key: '2', title: 'Second starter', brief: 'x'.repeat(8001), ...bar }]);
   assert.equal(late.code, 'BRIEF_TOO_LONG');
   // A light or mid starter without what pullboard add requires is refused with add's own refusal.
   for (const route of ['light', 'mid']) {
-    const error = refused(`${route}-route`, [{ key: '1', title: 'First starter', cites: ['W1'] }, { key: '2', title: 'Second starter', route }]);
+    const error = refused(`${route}-route`, [{ key: '1', title: 'First starter', cites: ['W1'], ...bar }, { key: '2', title: 'Second starter', route, ...bar }]);
     assert.equal(error.code, 'NO_BRIEF');
     assert.match(error.message, new RegExp(`an item routed ${route} must be buildable cold`, 'u'));
   }
   // After the refusals, the same blueprint fixed adds everything at once.
   const added = json(box, 'blueprint', 'add', 'web-app');
-  assert.equal(added.rows.length, 10);
+  assert.equal(added.rows.length, 11);
   assert.equal(added.items.length, 3);
 });
 
@@ -208,15 +211,118 @@ test('every gallery blueprint is bundled and valid [S1]', () => {
   }
 });
 
+// A starter check ships to someone else's repo: it only runs the project's own tests, so it holds
+// no deletion, download, install, remote shell, publish, redirect or command substitution.
+const UNSAFE_CHECK = /\b(?:rm|curl|wget|sudo|ssh|scp|install|publish|push|deploy)\b|[>`]|\$\(/u;
+
+test('every bundled starter item carries a criterion and a check [S1,I1]', () => {
+  // Every bundled blueprint files at least one starter, and each carries a criterion and a check.
+  for (const name of bundledBlueprints()) {
+    const blueprint = readBlueprint(name, process.cwd());
+    assert.ok(blueprint.items.length >= 1, `${name} files at least one starter item`);
+    for (const item of blueprint.items) {
+      assert.ok(item.criterion.trim(), `${name} starter ${item.key} carries a criterion`);
+      assert.ok(String(item.check ?? '').trim(), `${name} starter ${item.key} carries a check`);
+      assert.doesNotMatch(item.check, UNSAFE_CHECK, `${name} starter ${item.key} only runs the project's own tests`);
+    }
+  }
+  const flaky = readBlueprint('test-reliability', process.cwd()).items;
+  assert.ok(flaky.some((item) => /flaky/u.test(item.title) && /repeated runs/u.test(item.criterion) && /deterministic/u.test(item.title)),
+    'test-reliability files one: find a flaky test by repeated runs, then make it deterministic');
+
+  // blueprint add files every bundled starter with its criterion and check, stored and never run.
+  const box = freshBoard({ gate: 'true' });
+  const expected = [];
+  for (const name of bundledBlueprints()) {
+    const added = json(box, 'blueprint', 'add', name);
+    const items = readBlueprint(name, process.cwd()).items;
+    assert.equal(added.items.length, items.length, `${name} files every starter`);
+    assert.deepEqual(added.checksNotRun, added.items.map((item) => item.id), `${name}: every check is stored, none run`);
+    expected.push(...items.map((item) => [item.title, item.criterion, item.check]));
+  }
+  const filed = json(box, 'list', '--all').items.sort((a, b) => a.item_id - b.item_id);
+  assert.deepEqual(filed.map((item) => [item.item_title, item.item_criterion, item.item_check]), expected);
+  assert.ok(filed.every((item) => (item.item_check_baseline ?? null) === null), 'no check baseline ran');
+
+  // init --blueprint files them with both and prints that the checks are stored, not run.
+  const web = readBlueprint('web-app', process.cwd());
+  const fresh = emptyRepo();
+  const started = fresh.run('init', '--blueprint', 'web-app');
+  assert.equal(started.status, 0, started.stdout + started.stderr);
+  const startedItems = (JSON.parse(fresh.run('list', '--json').stdout).items ?? []).sort((a, b) => a.item_id - b.item_id);
+  assert.deepEqual(startedItems.map((item) => [item.item_title, item.item_criterion, item.item_check]), web.items.map((item) => [item.title, item.criterion, item.check]));
+  assert.match(started.stdout, new RegExp(`checks stored, not run: ${startedItems.map((item) => `#${item.item_id}`).join(', ')}; no check baseline ran`, 'u'));
+});
+
+test('blueprint add files a blueprint as drafts only from the coordinator, who sets checks [S1,I1]', () => {
+  // A bundled starter carries a check and only the coordinator sets one: an agent in a lane is
+  // refused before anything is written and told to add it from the main checkout.
+  const box = freshBoard({ lanes: { web: { owns: ['web/'] } } });
+  const spec = readFileSync(join(box.repo, 'SPEC.md'), 'utf8');
+  const worktree = join(box.dir, 'web');
+  box.git('worktree', 'add', '-q', worktree, '-b', 'web/starter');
+  const joined = box.runIn(worktree, 'join', 'web', '--model', 'fixture-model');
+  assert.equal(joined.status, 0, joined.stdout + joined.stderr);
+  const refused = box.runIn(worktree, 'blueprint', 'add', 'web-app', '--json');
+  assert.equal(refused.status, 1, refused.stdout + refused.stderr);
+  const error = JSON.parse(refused.stdout).error;
+  assert.equal(error.code, 'COORDINATOR_CHECK');
+  assert.match(error.message, /web-app blueprint's starter items carry checks/u);
+  assert.match(error.next, /from the main checkout/u);
+  assert.equal(readFileSync(join(box.repo, 'SPEC.md'), 'utf8'), spec, 'nothing is written');
+  assert.equal(json(box, 'list', '--all').items.length, 0, 'no item is filed');
+  assert.equal(json(box, 'blueprint', 'add', 'web-app').items.length, 3, 'the coordinator adds it');
+});
+
+test('a starter item without a check is refused [S1,I1]', () => {
+  // Loaded from a file or checked before a save writes one: a starter without a criterion or a
+  // check is refused by name, the blueprint's and the item's.
+  const starter = { key: '2', title: 'Second starter', cites: ['W1'], criterion: 'A test fails without it.', check: 'npm test' };
+  const cases = [
+    ['no-check', { ...starter, check: undefined }, /no check/u],
+    ['blank-check', { ...starter, check: '   ' }, /no check/u],
+    ['no-criterion', { ...starter, criterion: undefined }, /no criterion/u],
+  ];
+  const box = freshBoard();
+  const spec = readFileSync(join(box.repo, 'SPEC.md'), 'utf8');
+  for (const [name, item, why] of cases) {
+    const value = { ...PUBLISHED, name, items: [PUBLISHED.items[0], item] };
+    assert.throws(() => validateBlueprint(value, `${name}.json`), (error) => {
+      assert.equal(error.code, 'BLUEPRINT_ITEM_UNCHECKED');
+      assert.match(error.message, new RegExp(`blueprint ${name} starter item 2 \\("Second starter"\\)`, 'u'));
+      assert.match(error.message, why);
+      return true;
+    });
+    writeFileSync(join(box.repo, `${name}.json`), `${JSON.stringify(value)}\n`);
+    const refused = box.run('blueprint', 'add', `${name}.json`, '--json');
+    assert.equal(refused.status, 1, refused.stdout + refused.stderr);
+    const error = JSON.parse(refused.stdout).error;
+    assert.equal(error.code, 'BLUEPRINT_ITEM_UNCHECKED');
+    assert.match(error.message, new RegExp(`blueprint ${name} starter item 2`, 'u'));
+  }
+  assert.equal(readFileSync(join(box.repo, 'SPEC.md'), 'utf8'), spec, 'a refused blueprint writes nothing');
+  assert.equal(json(box, 'list', '--all').items.length, 0, 'and files no item');
+
+  // init --blueprint refuses it before writing anything.
+  const outside = mkdtempSync(join(tmpdir(), 'pullboard-blueprint-unchecked-'));
+  DIRS.push(outside);
+  writeFileSync(join(outside, 'unchecked.json'), JSON.stringify({ ...PUBLISHED, name: 'unchecked', items: [{ ...starter, check: undefined }] }));
+  const empty = emptyRepo();
+  const init = empty.run('init', '--blueprint', join(outside, 'unchecked.json'), '--json');
+  assert.notEqual(init.status, 0);
+  assert.equal(JSON.parse(init.stdout).error.code, 'BLUEPRINT_ITEM_UNCHECKED');
+  assert.deepEqual(readdirSync(empty.repo).filter((entry) => entry !== '.git'), [], 'init writes nothing');
+});
+
 test('blueprint add files a blueprint as drafts with light and mid starters add accepts [S1,I1]', () => {
   // A light or mid starter carrying its brief, criterion and check is filed on that route, with
-  // all three passed to the item unchanged; a strong starter needs none of them.
+  // all three passed to the item unchanged; a strong starter needs no brief.
   const box = freshBoard({ gate: 'true' });
   const brief = 'Files:\n- web/index.html\nTest:\n- test/home.test.js asserts the page fits 375 pixels';
   const items = [
     { key: '1', title: 'Light starter', cites: ['W3'], route: 'light', brief, criterion: 'The home page fits 375 pixels.', check: 'true' },
     { key: '2', title: 'Mid starter', cites: ['W1'], route: 'mid', brief, criterion: 'A test fails without the change.', check: 'true', after: ['1'] },
-    { key: '3', title: 'Strong starter', cites: ['W2'] },
+    { key: '3', title: 'Strong starter', cites: ['W2'], criterion: 'The suite passes on main.', check: 'true' },
   ];
   writeFileSync(join(box.repo, 'routes.json'), `${JSON.stringify({ ...PUBLISHED, name: 'routes', items })}\n`);
   const added = json(box, 'blueprint', 'add', 'routes.json');
@@ -225,7 +331,7 @@ test('blueprint add files a blueprint as drafts with light and mid starters add 
   assert.deepEqual(filed.map((item) => [item.item_title, item.item_route, item.item_check, item.item_criterion, item.item_brief]), [
     ['Light starter', 'light', 'true', items[0].criterion, brief],
     ['Mid starter', 'mid', 'true', items[1].criterion, brief],
-    ['Strong starter', 'strong', '', '', ''],
+    ['Strong starter', 'strong', 'true', items[2].criterion, ''],
   ]);
   assert.equal(filed[1].item_after, String(filed[0].item_id));
 });
@@ -244,7 +350,67 @@ test('blueprint add files a blueprint as drafts beside approved rows in its own 
     ...PUBLISHED.rules.map((entry) => [entry.key, 'draft']), ...PUBLISHED.questions.map((entry) => [entry.key, 'pending'])]);
   const spec = parseSpec(readFileSync(file, 'utf8'));
   assert.deepEqual(spec.rows.filter((row) => row.status === 'approved').map((row) => row.id), ['A1', 'A2']);
-  assert.equal(spec.rows.filter((row) => row.section === 'A · Web app').length, 12);
+  assert.equal(spec.rows.filter((row) => row.section === 'A · Web app').length, 13);
+});
+
+test('bundled blueprint rows carry their checks [S1,I1]', async () => {
+  // Imported here so the file's import lines stay as they are for the items editing them now.
+  const { questionText, ruleText, saveBlueprint } = await import('../src/blueprints.js');
+  const rule = (blueprint, key) => blueprint.rules.find((entry) => entry.key === key);
+  const library = readBlueprint('library', process.cwd());
+  const reliability = readBlueprint('test-reliability', process.cwd());
+  const web = readBlueprint('web-app', process.cwd());
+
+  // library: a row for the changelog its summary promises, with a reason and a gate.
+  assert.match(library.summary, /changelog/u);
+  const changelog = library.rules.filter((entry) => /\bchangelog\b/u.test(entry.text));
+  assert.equal(changelog.length, 1, 'library files one rule for the changelog it promises');
+  assert.ok(changelog[0].why.trim() && changelog[0].gate.trim(), 'the changelog rule gives a reason and names a gate');
+
+  // LIB1 and LIB2 carry a machine check: a test file their own starter's check runs, not review.
+  for (const key of ['LIB1', 'LIB2']) {
+    const { gate } = rule(library, key);
+    assert.match(gate, /^test\/[\w.-]+\.test\.js$/u, `${key} names a test file as its gate, a machine check`);
+    assert.ok(library.items.some((item) => item.cites.includes(key) && item.check.includes(gate)), `${key}'s gate is a test its own starter's check runs`);
+  }
+  // LIB1 keeps its card text and says what holds before 1.0.
+  assert.equal(rule(library, 'LIB1').text, 'A breaking change bumps the major version.');
+  assert.match(ruleText(rule(library, 'LIB1')), /before 1\.0[^.]*\bminor\b/u, 'LIB1 says a breaking change bumps the minor version before 1.0');
+
+  // test-reliability: a flake fix is proven by repeated runs, with a question for the run count.
+  const proven = reliability.rules.find((entry) => entry.text === 'A flake fix is proven by repeated runs.');
+  assert.ok(proven, 'test-reliability carries "A flake fix is proven by repeated runs."');
+  assert.match(proven.gate, /\brun\b.*\bin a row\b/u, 'the flake-fix rule is gated on the repeated runs themselves');
+  const runs = reliability.questions.find((entry) => /\bruns in a row\b/u.test(entry.ask));
+  assert.ok(runs, 'test-reliability asks how many runs in a row prove a flake fix');
+  assert.ok(runs.choices.length <= 12 && runs.choices.every((choice) => /^\d+$/u.test(choice)), 'the run count choices are whole numbers, 12 or fewer');
+  assert.match(proven.gate, /run count question/u, 'the flake-fix gate points at the run count question');
+
+  // web-app: its tests bind a local port, so a sandboxed agent asks the person, never rewrites them.
+  const port = web.rules.filter((entry) => /\blocal port\b/u.test(entry.text));
+  assert.equal(port.length, 1, 'web-app says its tests bind a local port');
+  assert.match(port[0].text, /sandbox[^.]*asks the person instead of rewriting the tests/u, 'a sandboxed agent asks the person instead of rewriting the tests');
+
+  // Every row marked must names a gate, in every bundled file, so an approved row passes spec check.
+  for (const name of bundledBlueprints()) {
+    const raw = JSON.parse(readFileSync(resolve(import.meta.dirname, `../src/blueprints/${name}.json`), 'utf8'));
+    for (const entry of raw.rules ?? []) {
+      if (entry.tier !== 'must') continue;
+      assert.ok(typeof entry.gate === 'string' && entry.gate.trim(), `${name} ${entry.key} is marked must and names a gate`);
+      assert.doesNotMatch(entry.gate, UNSAFE_CHECK, `${name} ${entry.key}'s gate runs nothing unsafe`);
+    }
+  }
+
+  // The new and changed rows round-trip through blueprint save exactly as written. Save keeps a
+  // question only when its row reads back one way, so the run count's default sits between choices.
+  const rows = [
+    ...[rule(library, 'LIB1'), rule(library, 'LIB2'), changelog[0], proven, port[0]].map((entry, index) => `- R${index + 1} [approved, must] ${ruleText(entry)} | gate: review`),
+    `- R9 [approved, must] ${questionText(runs)} | gate: review`,
+  ];
+  const saved = saveBlueprint(parseSpec(`# Spec\n\n## R · Rows\n\n${rows.join('\n')}\n`), { names: [] });
+  assert.deepEqual(saved.left, [], 'no new or changed row is left out of a save');
+  assert.deepEqual(saved.blueprint.questions.map(({ ask, choices, default: answer }) => ({ ask, choices, default: answer })), [{ ask: runs.ask, choices: runs.choices, default: runs.default }]);
+  assert.equal(saved.blueprint.rules.length, 5);
 });
 
 test('blueprint add files a blueprint as drafts after an add stopped part way [S1,I1]', () => {
@@ -337,7 +503,7 @@ test('init --blueprint starts a board from a blueprint [I1,S1]', () => {
   const checkedRepo = emptyRepo();
   const checked = checkedRepo.run('init', '--blueprint', withCheck);
   assert.equal(checked.status, 0, checked.stdout + checked.stderr);
-  assert.match(checked.stdout, /checks stored, not run: #\d+; no check baseline ran/u, 'the summary says the check was not run');
+  assert.match(checked.stdout, /checks stored, not run: #\d+(?:, #\d+)*; no check baseline ran/u, 'the summary says the checks were not run');
   const filed = JSON.parse(checkedRepo.run('list', '--json').stdout).items ?? [];
   assert.equal(filed.length, PUBLISHED.items.length, 'every starter is filed, the checked one included');
   const starter = filed.find((item) => item.item_title === PUBLISHED.items[0].title);
@@ -390,6 +556,133 @@ test('blueprint add files a blueprint as drafts and runs nothing it supplies [S1
   }
 });
 
+/** The text of the one pending row in the repo's SPEC.md whose question starts with the ask. */
+function pendingQuestion(repo, ask) {
+  const rows = parseSpec(readFileSync(join(repo, 'SPEC.md'), 'utf8')).rows.filter((row) => row.status === 'pending' && row.text.startsWith(`${ask}: `));
+  assert.equal(rows.length, 1, `one pending "${ask}" row`);
+  return rows[0].text;
+}
+
+const RUNNERS = 'Choices: node:test, Vitest, Jest, Mocha, pytest, Something else.';
+const FRAMEWORKS = 'Choices: Next.js, SvelteKit, Rails, Something else.';
+
+test('a question defaults from the repo it lands in [S1,I1]', () => {
+  const runners = readBlueprint('test-reliability', import.meta.dirname).questions[0].choices;
+  assert.ok(['node:test', 'Mocha', 'Vitest', 'Jest', 'pytest'].every((choice) => runners.includes(choice)), 'the test-runner question offers node:test and Mocha besides Vitest, Jest and pytest');
+
+  // init --blueprint in a node --test project: the test runner is read from scripts.test.
+  const node = emptyRepo();
+  writeFileSync(join(node.repo, 'package.json'), `${JSON.stringify({ name: 'app', scripts: { test: 'node --test test/' } })}\n`);
+  const started = node.run('init', '--blueprint', 'test-reliability');
+  assert.equal(started.status, 0, started.stdout + started.stderr);
+  assert.equal(pendingQuestion(node.repo, 'Tests run with'), `Tests run with: node:test. ${RUNNERS}`, 'a node --test project defaults to node:test');
+
+  // blueprint add in a Next.js project: the framework is read from dependencies.
+  const next = freshBoard();
+  writeFileSync(join(next.repo, 'package.json'), `${JSON.stringify({ name: 'web', dependencies: { next: '15.0.0', react: '19.0.0' } })}\n`);
+  next.git('add', '-A');
+  next.git('commit', '-q', '-m', 'chore: a Next.js app');
+  json(next, 'blueprint', 'add', 'web-app');
+  assert.equal(pendingQuestion(next.repo, 'The app is built with'), `The app is built with: Next.js. ${FRAMEWORKS}`, 'a Next.js project defaults to Next.js');
+
+  // No test script: one test runner among devDependencies is the answer.
+  const mocha = freshBoard();
+  writeFileSync(join(mocha.repo, 'package.json'), `${JSON.stringify({ name: 'lib', devDependencies: { mocha: '10.0.0' } })}\n`);
+  mocha.git('add', '-A');
+  mocha.git('commit', '-q', '-m', 'chore: a Mocha library');
+  json(mocha, 'blueprint', 'add', 'test-reliability');
+  assert.equal(pendingQuestion(mocha.repo, 'Tests run with'), `Tests run with: Mocha. ${RUNNERS}`, 'a devDependency names the test runner');
+
+  // A detected answer the question does not offer is never used: the blueprint's own default stands.
+  const narrow = { ...PUBLISHED, name: 'narrow', title: 'Narrow', prefix: 'NAR', items: [],
+    questions: [{ key: 'Q1', ask: 'Its runner is', choices: ['Vitest', 'Jest'], default: 'Jest', detect: 'test-runner' }] };
+  writeFileSync(join(mocha.repo, 'narrow.json'), `${JSON.stringify(narrow)}\n`);
+  json(mocha, 'blueprint', 'add', 'narrow.json');
+  assert.equal(pendingQuestion(mocha.repo, 'Its runner is'), 'Its runner is: Jest. Choices: Vitest, Jest.', 'an answer outside the choices is never used');
+});
+
+test('a question with nothing to read has no default [S1,I1]', () => {
+  // No package.json at all, and one that names nothing a question asks about.
+  const bare = emptyRepo();
+  const started = bare.run('init', '--blueprint', 'test-reliability');
+  assert.equal(started.status, 0, started.stdout + started.stderr);
+  assert.equal(pendingQuestion(bare.repo, 'Tests run with'), `Tests run with: (choose one). ${RUNNERS}`, 'no package.json leaves the test runner unanswered');
+  const plain = freshBoard();
+  writeFileSync(join(plain.repo, 'package.json'), `${JSON.stringify({ name: 'web', scripts: { test: 'make check' }, dependencies: { express: '5.0.0' } })}\n`);
+  plain.git('add', '-A');
+  plain.git('commit', '-q', '-m', 'chore: an app with nothing to read');
+  json(plain, 'blueprint', 'add', 'web-app');
+  assert.equal(pendingQuestion(plain.repo, 'The app is built with'), `The app is built with: (choose one). ${FRAMEWORKS}`, 'no known framework leaves the question unanswered');
+  // A blueprint without a default for a question it cannot detect is valid and files the same way.
+  const own = { ...PUBLISHED, name: 'own', title: 'Own', prefix: 'OWN', items: [], questions: [{ key: 'Q1', ask: 'Its colour is', choices: ['Red', 'Blue'] }] };
+  writeFileSync(join(plain.repo, 'own.json'), `${JSON.stringify(own)}\n`);
+  json(plain, 'blueprint', 'add', 'own.json');
+  assert.equal(pendingQuestion(plain.repo, 'Its colour is'), 'Its colour is: (choose one). Choices: Red, Blue.');
+});
+
+test('starter items land in a build lane, never the coordinator lane [S1,I1]', () => {
+  const lanesOf = (box) => (JSON.parse(box.run('list', '--all', '--json').stdout).items ?? []).map((item) => item.item_lane);
+  const configLanes = (box) => JSON.parse(readFileSync(join(box.repo, 'pullboard.json'), 'utf8')).lanes ?? {};
+
+  // A fresh init with a blueprint: init proposes the app lane and the starters are filed in it.
+  // The proposal stays unwritten until the person runs the command init prints.
+  const fresh = emptyRepo();
+  const started = fresh.run('init', '--blueprint', 'web-app');
+  assert.equal(started.status, 0, started.stdout + started.stderr);
+  assert.deepEqual(lanesOf(fresh), Array(PUBLISHED.items.length).fill('app'), 'init files every starter in the lane it proposes');
+  assert.match(started.stdout, /starter items filed in the app lane, proposed above and not written until the person accepts/u, 'init says the lane is a proposal');
+  assert.match(started.stdout, /to accept, run: pullboard lane add app --owns app\//u, 'init prints the command that accepts it');
+  assert.deepEqual(Object.keys(configLanes(fresh)).filter((name) => name === 'app'), [], 'the proposed lane is not written');
+  const accepted = fresh.run('lane', 'add', 'app', '--owns', 'app/');
+  assert.equal(accepted.status, 0, accepted.stdout + accepted.stderr);
+  assert.equal((JSON.parse(fresh.run('list', 'app', '--json').stdout).items ?? []).length, PUBLISHED.items.length, 'once accepted, the lane lists its starters');
+
+  // A board with a lane pullboard lane add made: starters go to it, and a starter's own lane is
+  // kept when that lane exists. A coordinator or missing lane in the blueprint is never used.
+  const laned = freshBoard();
+  for (const [name, owns] of [['web', 'web/'], ['docs', 'docs/']]) {
+    const made = laned.run('lane', 'add', name, '--owns', owns);
+    assert.equal(made.status, 0, made.stdout + made.stderr);
+  }
+  const own = ['docs', 'no-such-lane', 'coordinator'];
+  writeFileSync(join(laned.repo, 'own-lanes.json'), `${JSON.stringify({ ...PUBLISHED, name: 'own-lanes',
+    items: PUBLISHED.items.map((item, index) => ({ ...item, lane: own[index] })) })}\n`);
+  const placed = json(laned, 'blueprint', 'add', 'own-lanes.json');
+  const placedLanes = placed.items.map((item) => item.lane);
+  assert.equal(placedLanes[0], 'docs', 'a starter keeps its own lane when that lane exists');
+  assert.equal(placedLanes[1], 'web', 'a starter naming a missing lane goes to the first lane pullboard lane add made');
+  assert.equal(placedLanes[2], 'web', 'a blueprint\'s coordinator lane is never used');
+  assert.deepEqual(placed.proposedLanes, [], 'nothing is proposed when a build lane exists');
+  assert.deepEqual(lanesOf(laned).filter((lane) => lane === 'coordinator'), [], 'no starter lands in the coordinator lane');
+
+  // A blueprint that names an existing lane owning no folders, a verifier lane: that lane builds
+  // nothing, so every starter goes to the first build lane, and add says so.
+  const verifier = freshBoard({ lanes: { tests: { owns: [] } } });
+  const web = verifier.run('lane', 'add', 'web', '--owns', 'web/');
+  assert.equal(web.status, 0, web.stdout + web.stderr);
+  writeFileSync(join(verifier.repo, 'verifier-lane.json'), `${JSON.stringify({ ...PUBLISHED, name: 'verifier-lane',
+    items: PUBLISHED.items.map((item) => ({ ...item, lane: 'tests' })) })}\n`);
+  const moved = verifier.run('blueprint', 'add', 'verifier-lane.json');
+  assert.equal(moved.status, 0, moved.stdout + moved.stderr);
+  assert.deepEqual(lanesOf(verifier), Array(PUBLISHED.items.length).fill('web'), 'a starter naming a lane that owns no folders goes to the first build lane');
+  assert.match(moved.stdout, /asked for the tests lane, which owns no folders, so (?:it is|they are) filed in the web lane/u, 'add says the named lane was not used');
+
+  // A board with no build lane, only a verifier lane that owns no folders: blueprint add proposes
+  // one, files the starters in it and says so.
+  const bare = freshBoard({ lanes: { tests: { owns: [] } } });
+  const before = readFileSync(join(bare.repo, 'pullboard.json'), 'utf8');
+  const proposed = json(bare, 'blueprint', 'add', 'web-app');
+  assert.deepEqual(proposed.items.map((item) => item.lane), Array(PUBLISHED.items.length).fill('app'), 'starters go to the proposed lane');
+  assert.deepEqual(proposed.proposedLanes, [{ name: 'app', owns: ['app/'] }], 'the result names the proposal');
+  assert.equal(JSON.parse(readFileSync(join(bare.repo, 'pullboard.json'), 'utf8')).lanes?.app, undefined, 'the proposal is not written');
+  assert.equal(JSON.stringify(JSON.parse(readFileSync(join(bare.repo, 'pullboard.json'), 'utf8')).lanes), JSON.stringify(JSON.parse(before).lanes), 'pullboard.json keeps its lanes');
+  const again = freshBoard();
+  const said = again.run('blueprint', 'add', 'web-app');
+  assert.equal(said.status, 0, said.stdout + said.stderr);
+  assert.match(said.stdout, /starter items filed in the app lane, proposed, not written until the person accepts/u, 'blueprint add says the lane is a proposal');
+  assert.match(said.stdout, /to accept, run: pullboard lane add app --owns app\//u, 'blueprint add prints the command that accepts it');
+});
+
 const e2e = createE2eHelpers();
 after(e2e.cleanup);
 
@@ -404,6 +697,7 @@ test('a saved board adds back as the same rows [S1]', () => {
     '- K3 [approved, must] The app is built with: SvelteKit. Choices: Next.js, SvelteKit, Rails. | gate: review',
     '- K12 [approved, must] Deploy: where it goes: Fly.io. Choices: Vercel, Fly.io. | gate: review',
     '- K13 [approved, must] People sign in with: Email, then a link. Choices: Email, then a link, Passwords. | gate: review',
+    '- K14 [approved, must] Pick one: x. Choices: x, y, z, w. | gate: review',
   ];
   const planted = [
     '- K4 [approved, must] Logs live in web/logs/app.js. Why: one place to look. | gate: review',
@@ -414,7 +708,6 @@ test('a saved board adds back as the same rows [S1]', () => {
     '- K9 [approved, must] The page renders without a reason. | gate: review',
     '- K10 [draft, must] A draft never leaves. Why: nobody decided it. | gate: review',
     '- K11 [pending, must] Deploys go to: Vercel. Choices: Vercel, Fly.io. | gate: review',
-    '- K14 [approved, must] Pick one: x. Choices: x, y, z, w. | gate: review',
     '- K15 [approved, must] Pick a host: Rails. Choices: Vercel, Fly.io. | gate: review',
     '- K16 [approved, must] A rule. Why: one. Why: two. | gate: review',
   ];
@@ -429,7 +722,7 @@ test('a saved board adds back as the same rows [S1]', () => {
 
   const saved = box.run(box.repo, 'blueprint', 'save', '--json');
   assert.equal(saved.code, 0, `${saved.err}\n${saved.out}`);
-  assert.deepEqual(JSON.parse(saved.out).left.map((entry) => entry.id).sort(), ['G1', 'G2', 'K14', 'K15', 'K16', 'K4', 'K5', 'K6', 'K7', 'K8', 'K9'], 'only clean, exactly readable approved rows leave');
+  assert.deepEqual(JSON.parse(saved.out).left.map((entry) => entry.id).sort(), ['G1', 'G2', 'K15', 'K16', 'K4', 'K5', 'K6', 'K7', 'K8', 'K9'], 'only clean, exactly readable approved rows leave');
   const file = join(box.repo, 'Dana Whitlock board.blueprint.json');
   const text = readFileSync(file, 'utf8');
   for (const secret of ['web/', '@', 'Dana', 'Whitlock', 'web-1', machine, 'zebra', 'walrus', 'narwhal', 'signers', 'DW', 'items', 'pullboard-blueprint', 'Logs live', 'draft never', 'Deploys go']) {
@@ -441,7 +734,7 @@ test('a saved board adds back as the same rows [S1]', () => {
   assert.equal(JSON.parse(named.out).error?.code, 'PRIVATE_BLUEPRINT', 'a chosen name that names someone is refused');
   assert.deepEqual(Object.keys(blueprint).sort(), ['blueprint', 'gate', 'name', 'questions', 'rules', 'title', 'version'], 'only allow-listed fields are written');
   assert.deepEqual(blueprint.rules.map((rule) => Object.keys(rule).sort()), [['gate', 'key', 'text', 'tier', 'why'], ['gate', 'key', 'text', 'tier', 'why']]);
-  assert.deepEqual(blueprint.questions.map((question) => Object.keys(question).sort()), Array(3).fill(['ask', 'choices', 'default', 'key']));
+  assert.deepEqual(blueprint.questions.map((question) => Object.keys(question).sort()), Array(4).fill(['ask', 'choices', 'default', 'key']));
   assert.equal(box.run(box.repo, 'blueprint', 'save', '--json').code, 1, 'an existing file is never overwritten');
 
   const fresh = e2e.project();
@@ -455,6 +748,36 @@ test('a saved board adds back as the same rows [S1]', () => {
     ['pending', 'must', 'The app is built with: SvelteKit. Choices: Next.js, SvelteKit, Rails.'],
     ['pending', 'must', 'Deploy: where it goes: Fly.io. Choices: Vercel, Fly.io.'],
     ['pending', 'must', 'People sign in with: Email, then a link. Choices: Email, then a link, Passwords.'],
+    ['pending', 'must', 'Pick one: x. Choices: x, y, z, w.'],
   ], 'the approved rows come back as drafts, each answered question exactly, its answer the default');
   assert.deepEqual(JSON.parse(fresh.run(fresh.repo, 'list', '--json').out).items ?? [], [], 'a saved blueprint files no items');
+});
+
+test('blueprint save reads back a question with three or more choices [S1]', () => {
+  const box = freshBoard();
+  const questions = [
+    'The app is built with: Next.js. Choices: Next.js, SvelteKit, Rails.',
+    'People sign in with: Magic links. Choices: Passwords, Passkeys, Single sign-on, Magic links.',
+    'Deploy: where it goes: Fly.io, then Vercel. Choices: Render, Fly.io, then Vercel, Railway.',
+  ];
+  const spec = join(box.repo, 'SPEC.md');
+  writeFileSync(spec, `${readFileSync(spec, 'utf8')}\n## Q · Questions\n\n${questions.map((text, index) => `- Q${index + 1} [approved, must] ${text} | gate: review`).join('\n')}\n`);
+  box.git('add', 'SPEC.md');
+  box.git('commit', '-q', '-m', 'chore: answer three questions');
+
+  const saved = json(box, 'blueprint', 'save', 'questions.json', '--name', 'stack-questions', '--title', 'Stack questions');
+  assert.deepEqual(saved.left.filter((entry) => entry.id.startsWith('Q')), [], 'no answered question is left out');
+  const blueprint = JSON.parse(readFileSync(join(box.repo, 'questions.json'), 'utf8'));
+  assert.deepEqual(blueprint.questions.map(({ key, ask, choices, default: answer }) => [key, ask, choices, answer]), [
+    ['Q1', 'The app is built with', ['Next.js', 'SvelteKit', 'Rails'], 'Next.js'],
+    ['Q2', 'People sign in with', ['Passwords', 'Passkeys', 'Single sign-on', 'Magic links'], 'Magic links'],
+    ['Q3', 'Deploy: where it goes', ['Render', 'Fly.io, then Vercel', 'Railway'], 'Fly.io, then Vercel'],
+  ], 'a three-choice and a four-choice question keep their listed choices and the chosen answer');
+
+  const fresh = freshBoard();
+  const before = parseSpec(readFileSync(join(fresh.repo, 'SPEC.md'), 'utf8')).rows.map((row) => row.id);
+  json(fresh, 'blueprint', 'add', join(box.repo, 'questions.json'));
+  const rows = parseSpec(readFileSync(join(fresh.repo, 'SPEC.md'), 'utf8')).rows.filter((row) => !before.includes(row.id));
+  assert.deepEqual(rows.map((row) => [row.status, row.text]), questions.map((text) => ['pending', text]),
+    'each question round-trips to its exact row text');
 });

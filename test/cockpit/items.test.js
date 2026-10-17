@@ -55,7 +55,7 @@ test('a review in progress names its reviewer [N26]', async () => {
     assert.deepEqual(holds('web-2'), ['#1 Greeting: reviewing'], 'the reviewer holds it');
     assert.deepEqual(holds('web-1'), ['#1 Greeting: to verify'], 'the builder waits on it');
     // A name is board text, so it is escaped: give the board on hand a reviewer with markup and redraw.
-    page.run('data.project.items.find((i) => i.id === 1).reviewer = "web<b>"; render();');
+    page.run('data.project.items.find((i) => i.id === 1).claim.by = "web<b>"; render();');
     assert.match(itemRow(page.show('chain'), 1), />web&lt;b&gt; reviewing<\/span><\/li>$/);
     await page.run('refresh()');
 
@@ -799,7 +799,7 @@ test("item detail merges API facts and moves in one responsive timeline [B33,B29
       ['note', 'capture', 'measurement', 'diff', 'decision', 'rejection', 'supersession', 'root-cause'],
       'the API provides every fact in append order');
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
-    await chrome.waitFor('typeof data !== "undefined" && data?.project?.items?.find((item) => item.id === 1)?.thread?.length === ' + expected.length);
+    await chrome.waitFor('typeof data !== "undefined" && !!data?.project?.items?.find((item) => item.id === 1)');
     await chrome.waitFor('document.querySelectorAll("#detail .tl [data-event-id]").length === ' + expected.length);
     const expectedIds = expected.map((entry) => entry.eventId);
     for (const width of [375, 1280]) {
@@ -936,7 +936,7 @@ test('in-text item references stay inline and open their target at phone and des
       for (const section of ['agents', 'spec', 'doctrine']) {
         if (section === 'agents') {
           await chrome.click(`document.querySelector('[data-tab="shouts"]')`);
-          const agent = await chrome.stable("(() => { const item=data.project.items.find(i => i.id===2); return item.owner || item.reviewer || item.builtBy; })()");
+          const agent = await chrome.stable("(() => { const item=data.project.items.find(i => i.id===2); return item.claim?.by || item.builtBy; })()");
           if (!await chrome.stable(`!!document.querySelector('#agents .agent-card.on [data-agent="${agent}"]')`)) await chrome.click(`document.querySelector('#agents [data-agent="${agent}"]')`);
           await chrome.waitFor('document.querySelector("#agents [data-item=\\"2\\"]")');
         } else {

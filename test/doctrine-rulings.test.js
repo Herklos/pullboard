@@ -4,10 +4,33 @@ import {
   readFileSync,
   writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { test } from 'node:test';
+import { pathToFileURL } from 'node:url';
 import { createE2eHelpers } from './e2e-helpers.js';
+import { runFixtureChild } from './fixture-child.js';
 import { parseSpec } from '../src/spec.js';
+
+/** Send one move through the agent API's executeMove, as an agent tool or the relay would. */
+function apiMove(box, cwd, move) {
+  const api = pathToFileURL(resolve(import.meta.dirname, '../src/api.js')).href;
+  const cli = pathToFileURL(resolve(import.meta.dirname, '../src/cli.js')).href;
+  const source = `
+    const { executeMove } = await import(${JSON.stringify(api)});
+    const { main } = await import(${JSON.stringify(cli)});
+    process.stdout.write(JSON.stringify(await executeMove(process.cwd(), ${JSON.stringify(move)}, main, undefined, 'api')));
+  `;
+  const child = runFixtureChild(process.execPath, ['--input-type=module', '-e', source], { cwd, env: box.env, encoding: 'utf8' });
+  assert.equal(child.status, 0, child.stdout + child.stderr);
+  return JSON.parse(child.stdout);
+}
+
+/** Run the real CLI with extra environment, such as an agent shell's marker. */
+function runWith(box, cwd, env, ...args) {
+  const result = runFixtureChild(process.execPath, [resolve(import.meta.dirname, '../bin/pullboard.js'), ...args],
+    { cwd, env: { ...box.env, ...env }, encoding: 'utf8' });
+  return { code: result.status, out: result.stdout, err: result.stderr };
+}
 
 test('a ruling the person approves reaches every agent once [D1,D3,B27]', (t) => {
   const e2e = createE2eHelpers();
@@ -44,6 +67,17 @@ test('a ruling the person approves reaches every agent once [D1,D3,B27]', (t) =>
   assert.notEqual(foreign.code, 0);
   assert.equal(JSON.parse(foreign.out).error.code, 'COORDINATOR_ONLY');
   for (const path of checkouts) assert.deepEqual(json(path, 'resume').doctrineNotes, [], 'draft rulings are not announced');
+  const unchanged = readFileSync(file, 'utf8');
+  const shell = runWith(box, box.repo, { CLAUDECODE: '1' }, 'spec', 'approve', drafted.id, '--json');
+  assert.notEqual(shell.code, 0, 'an agent shell cannot approve a ruling');
+  assert.equal(JSON.parse(shell.out).error.code, 'B26_PERSON_CHANNEL');
+  const builder = box.run(box.web, 'spec', 'approve', drafted.id, '--json');
+  assert.notEqual(builder.code, 0, 'a builder worktree cannot approve a ruling');
+  assert.match(JSON.parse(builder.out).error.code, /^B26_PERSON/u);
+  const viaApi = apiMove(box, box.repo, { verb: 'spec-approve', args: { ids: drafted.id } });
+  assert.equal(viaApi.status, 409, JSON.stringify(viaApi));
+  assert.equal(viaApi.body.error.code, 'B26_PERSON_CHANNEL', 'the agent API is not the person channel');
+  assert.equal(readFileSync(file, 'utf8'), unchanged, 'refused approvals leave the draft alone');
   box.git(box.repo, 'add', 'DOCTRINE.md');
   box.git(box.repo, 'commit', '-q', '-m', 'docs(doctrine): propose ruling');
   for (const path of checkouts) assert.deepEqual(json(path, 'resume').doctrineNotes, [], 'a committed draft is not in force either');

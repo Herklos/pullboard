@@ -1,35 +1,29 @@
 /** Machine-wide settings shared by every Pullboard checkout on this machine. */
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { machineHome } from './machine-home.js';
 import { setResourceCapacity, updateRunnerSettings } from './resources.js';
 import { validateRunner } from './runners.js';
 import { Refused } from './refused.js';
+import { gateQueueSettings, machineSettingsFile, readMachineSettingsFile, validateGateQueue } from './queue-settings.js';
+
+// The gate queue's settings live in queue-settings.js so the runner runtime can read them too.
+export { gateQueueSettings, machineSettingsFile };
 
 const DEFAULT_GATE_SLOTS = 2;
 const DEFAULT_BROWSER_SLOTS = 1;
 
-/** Resolve the separate machine settings file. */
-export function machineSettingsFile() {
-  return join(machineHome(), 'settings.json');
-}
-
 /** Read and validate machine settings, preserving any unrelated settings. */
 export function loadMachineSettings() {
   const file = machineSettingsFile();
-  if (!existsSync(file)) return { gateSlots: DEFAULT_GATE_SLOTS, browserSlots: DEFAULT_BROWSER_SLOTS };
-  let value;
-  try { value = JSON.parse(readFileSync(file, 'utf8')); }
-  catch { throw new Refused('BAD_MACHINE_SETTINGS', `cannot read ${file}; fix its JSON before running Pullboard`); }
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Refused('BAD_MACHINE_SETTINGS', `settings in ${file} must be a JSON object; fix it before running Pullboard`);
-  }
-  if (value.gate !== undefined && (!value.gate || typeof value.gate !== 'object' || Array.isArray(value.gate))) {
-    throw new Refused('BAD_MACHINE_SETTINGS', `gate in ${file} must be an object; fix it before running Pullboard`);
-  }
+  const value = readMachineSettingsFile(file);
+  if (!value) return { gateSlots: DEFAULT_GATE_SLOTS, browserSlots: DEFAULT_BROWSER_SLOTS };
   if (value.gate?.browserFreeChecks !== undefined && typeof value.gate.browserFreeChecks !== 'boolean') {
     throw new Refused('BAD_MACHINE_SETTINGS', `gate.browserFreeChecks in ${file} must be true or false`);
+  }
+  validateGateQueue(value, file);
+  if (value.gate?.memoryFloorMB !== undefined && (!Number.isSafeInteger(value.gate.memoryFloorMB) || value.gate.memoryFloorMB < 0)) {
+    throw new Refused('BAD_MACHINE_SETTINGS', `gate.memoryFloorMB in ${file} must be a whole number of megabytes, 0 or more; fix it before running Pullboard`);
   }
   const gateSlots = value.gateSlots ?? DEFAULT_GATE_SLOTS;
   if (!Number.isSafeInteger(gateSlots) || gateSlots < 1) {
@@ -53,6 +47,15 @@ export function loadMachineSettings() {
 /** Browser-free check admission is deliberately opt-in per machine. */
 export function browserFreeChecksEnabled() {
   return loadMachineSettings().gate?.browserFreeChecks === true;
+}
+
+/**
+ * The free-memory floor, in megabytes, below which the machine gate pool holds its queue, or null
+ * when the hold is off. Gate and queue behavior is off by default, the person's rule, so an absent
+ * floor keeps today's admission by slots alone.
+ */
+export function memoryFloorMB() {
+  return loadMachineSettings().gate?.memoryFloorMB ?? null;
 }
 
 /** Atomically replace machine settings without exposing a partial JSON file. */
