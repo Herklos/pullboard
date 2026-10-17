@@ -17,6 +17,7 @@ export function createDeviceStore({ directory, now = Date.now }) {
       chmodSync(file, 0o600);
       opened.exec(`PRAGMA busy_timeout=30000;
         CREATE TABLE IF NOT EXISTS device (account TEXT NOT NULL, id TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(account,id));
+        CREATE TABLE IF NOT EXISTS device_session (account TEXT NOT NULL, session TEXT NOT NULL, device TEXT NOT NULL, expires INTEGER NOT NULL, PRIMARY KEY(account,session,device));
         CREATE TABLE IF NOT EXISTS wrapped_key (account TEXT NOT NULL, device TEXT NOT NULL, board TEXT NOT NULL, engine INTEGER NOT NULL, wrapped TEXT NOT NULL, PRIMARY KEY(account,device,board));
         CREATE TABLE IF NOT EXISTS enrollment (account TEXT NOT NULL, locator TEXT NOT NULL, expires INTEGER NOT NULL, payload TEXT, PRIMARY KEY(account,locator));
         CREATE TABLE IF NOT EXISTS phone_approval (id TEXT PRIMARY KEY, account TEXT NOT NULL, publisher TEXT NOT NULL,
@@ -29,9 +30,9 @@ export function createDeviceStore({ directory, now = Date.now }) {
   }
   /** Require an active account device for reads and writes alike. */
   function active(account, id) {
-    if (!database().prepare('SELECT 1 FROM device WHERE account=? AND id=? AND revoked=0').get(account, id)) {
-      throw new Refused('DEVICE_NOT_ENROLLED', 'Pair this device from the linked Mac before receiving wrapped board keys.');
-    }
+    const row = database().prepare('SELECT revoked FROM device WHERE account=? AND id=?').get(account, id);
+    if (row?.revoked) throw new Refused('DEVICE_REVOKED', 'This browser was removed from the board. Sign in again and get a fresh pairing link from a linked Mac.');
+    if (!row) throw new Refused('DEVICE_NOT_ENROLLED', 'Pair this device from the linked Mac before receiving wrapped board keys.');
   }
   /** Require a live enrollment without renewing its lifetime through subsequent contacts. */
   function pending(account, locator) {
@@ -49,6 +50,22 @@ export function createDeviceStore({ directory, now = Date.now }) {
     return row ? { context: JSON.parse(row.context), sealed: row.sealed, state: row.state, response: row.response } : null;
   }
   return {
+    /** Bind the public session id that actually uploaded enrollment, never its bearer credential. */
+    bindSession(principal, device, { enrollment = false } = {}) {
+      if (principal.kind !== 'session') return;
+      if (!enrollment && !database().prepare('SELECT 1 FROM device WHERE account=? AND id=?').get(principal.user.id, device)) return;
+      database().prepare('DELETE FROM device_session WHERE expires<=?').run(now());
+      database().prepare('INSERT OR IGNORE INTO device_session VALUES(?,?,?,?)')
+        .run(principal.user.id, principal.id, device, principal.expires);
+    },
+    /** A revoked phone cannot reuse its original session to bypass device routes and fetch ciphertext. */
+    authorizeSession(principal) {
+      if (principal.kind !== 'session' || !db && !existsSync(file)) return principal;
+      const revoked = database().prepare(`SELECT 1 FROM device_session AS s JOIN device AS d ON d.account=s.account AND d.id=s.device
+        WHERE s.account=? AND s.session=? AND s.expires>? AND d.revoked=1`).get(principal.user.id, principal.id, now());
+      if (revoked) throw new Refused('DEVICE_REVOKED', 'This browser was removed from the board. Sign in again and get a fresh pairing link from a linked Mac.');
+      return principal;
+    },
     /** Enqueue one immutable action for this account's already enrolled phone; PM cannot approve it. */
     requestApproval(account, value, sealed) {
       const context = approvalContext(value);

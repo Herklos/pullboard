@@ -23,6 +23,7 @@ import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
 import { parseSpec } from '../src/spec.js';
 import { checkAtCommit } from '../src/trusted-policy.js';
+import { claudeLoopRules } from '../src/templates.js';
 import * as store from '../src/board.js';
 
 import { createE2eHelpers } from './e2e-helpers.js';
@@ -45,7 +46,12 @@ test('init adds a Claude Code session hook that runs resume, and keeps every oth
   assert.match(box.run(repo, 'init').out, /added a Claude Code session hook/);
   assert.match(box.run(repo, 'init').out, /kept the Claude Code session hook/);
   const settings = JSON.parse(readFileSync(join(repo, '.claude', 'settings.json'), 'utf8'));
-  assert.deepEqual(settings.permissions, mine.permissions);
+  // Init also grants the loop's allow rules and machine-home write (#670): the person's own rule stays first and
+  // nothing else in permissions changes. test/init-permissions.test.js owns the exact rule list.
+  assert.deepEqual(settings.permissions, { allow: [...mine.permissions.allow, ...claudeLoopRules({ gate: '' })] });
+  assert.deepEqual(settings.sandbox, { filesystem: { allowWrite: [box.env.PULLBOARD_MACHINE_HOME] } });
+  assert.deepEqual(Object.keys(settings).sort(), ['hooks', 'permissions', 'sandbox'], 'init adds no other top-level setting');
+  assert.deepEqual(Object.keys(settings.hooks).sort(), ['SessionStart', 'Stop'], 'init adds no other hook event');
   assert.deepEqual(settings.hooks.Stop, mine.hooks.Stop);
   assert.equal(settings.hooks.SessionStart.length, 1);
   const { command } = settings.hooks.SessionStart[0].hooks[0];

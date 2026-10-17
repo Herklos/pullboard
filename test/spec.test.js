@@ -443,6 +443,15 @@ test('spec draft files a row in the named section [S1,C7]', (t) => {
   assert.match(misplaced.stderr, /FLAG_NOT_ALLOWED.*section/u);
 });
 
+test('spec draft with an inline gate names the flag to use [S1,P4]', (t) => {
+  const box = specBox(t, { freshInit: true });
+  const result = box.run('draft', 'A requirement | gate: node --test test/example.test.js');
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /INLINE_GATE/u);
+  assert.match(result.stderr, /pullboard spec draft "<text>" --gate "<check>"/u);
+  assert.equal(readFileSync(join(box.root, box.specName), 'utf8').includes('A requirement'), false);
+});
+
 /** Exercise fresh-init examples, cross-file ID reservation, and fail-closed malformed rows. */
 test('spec draft never reuses an existing id [S1,C7]', (t) => {
   const fresh = specBox(t, { freshInit: true });

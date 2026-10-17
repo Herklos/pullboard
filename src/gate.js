@@ -13,7 +13,6 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
-  realpathSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -22,7 +21,6 @@ import {
   isAbsolute,
   join,
   relative,
-  resolve,
   sep,
 } from 'node:path';
 import { availableParallelism } from 'node:os';
@@ -48,6 +46,7 @@ import {
 import {
   browserFreeChecksEnabled,
   gateQueueSettings,
+  gateShortSlots,
   loadMachineSettings,
   memoryFloorMB,
 } from './settings.js';
@@ -67,6 +66,13 @@ import {
   runOnRunnerAsync,
   runnerSource,
 } from './runners.js';
+import {
+  sandboxBlockedOperation,
+  sandboxBlockedScanner,
+} from './sandbox-denial.js';
+
+// Callers keep importing the classifier from the gate; the runner worker imports it directly.
+export { sandboxBlockedOperation, sandboxBlockedScanner };
 
 const STAMP = 'pullboard-gate-green';
 const LOG = 'pullboard-gate.log';
@@ -220,139 +226,6 @@ export function runShell(root, command, { pipefail = false, env = {} } = {}) {
   const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
   return { isGreen: result.status === 0, output, seconds: Math.round((Date.now() - started) / 1000),
     sandboxBlocked: result.status === 0 ? null : sandboxBlockedOperation(root, output) };
-}
-
-/** Resolve existing path prefixes so a symlink cannot hide an outside-worktree operation. */
-function diagnosticPath(path) {
-  let current = resolve(path);
-  const missing = [];
-  for (;;) {
-    try { return resolve(realpathSync(current), ...missing); }
-    catch (error) {
-      if (!['ENOENT', 'ENOTDIR'].includes(error.code)) return null;
-      const parent = dirname(current);
-      if (parent === current) return null;
-      missing.unshift(relative(parent, current));
-      current = parent;
-    }
-  }
-}
-
-/** Describe one OS permission message, resolving file targets against the command's worktree. */
-function permissionOperation(root, message, { includeFilePaths = true } = {}) {
-  const network = /^(listen|bind) (EPERM|EACCES)\b/u.exec(message);
-  if (network) return { code: network[2], syscall: network[1], operation: `${network[1]} (${network[2]})` };
-  if (!includeFilePaths) return null;
-  const file = /^(EPERM|EACCES): [^\n]*?, (open|mkdir|read|write|rename|unlink|scandir|access) (['"])([^\n]+?)\3(?= -> |$)/u.exec(message);
-  const python = /^PermissionError: \[Errno (?:1|13)\] [^\n]*?: ['"]([^'"\n]+)['"]/u.exec(message);
-  if (!file && !python) return null;
-  const path = diagnosticPath(resolve(root, file ? file[4] : python[1]));
-  const tree = diagnosticPath(root);
-  if (!path || !tree) return null;
-  const within = relative(tree, path);
-  if (within !== '..' && !within.startsWith('../') && !isAbsolute(within)) return null;
-  const code = file ? file[1] : 'EACCES';
-  return { code, path, syscall: file ? file[2] : null,
-    operation: `${file ? file[2] : 'file access'} ${JSON.stringify(path)} (${code})` };
-}
-
-/** Decode the single-line quoted YAML scalars emitted by Node's TAP reporter. */
-function tapScalar(value) {
-  if (value.startsWith('"')) {
-    try { return JSON.parse(value); } catch { return null; }
-  }
-  if (value.startsWith("'") && value.endsWith("'")) return value.slice(1, -1).replace(/''/gu, "'");
-  return /^[A-Z_]+$/u.test(value) ? value : null;
-}
-
-/** Scan complete lines with bounded TAP state so assertion messages cannot impersonate OS codes. */
-export function sandboxBlockedScanner(root, { includeFilePaths = true } = {}) {
-  let failureIndent = null;
-  let fieldIndent = null;
-  let permission = null;
-  let code = null;
-  let comment = null;
-  let startup = null;
-  let failureMessage = null;
-  let failureType = false;
-  let exitCode = null;
-  /** Retain one pending fatal diagnostic and the current failed TAP record. */
-  return (raw) => {
-    const line = raw.trim().replace(/^#\s*/u, '');
-    const indent = raw.length - raw.trimStart().length;
-    // Node's TAP reporter prints test-console output as comments and assertion details
-    // as indented YAML. Neither is a standalone gate diagnostic, even when it contains
-    // text that looks exactly like an operating-system denial.
-    if (indent === 0 && !raw.startsWith('#') && /^(?:Error: |PermissionError: )/u.test(line)) {
-      const direct = permissionOperation(root, line.replace(/^Error: /u, ''), { includeFilePaths });
-      if (direct) return direct.operation;
-    }
-    if (/^TAP version \d+$/u.test(raw)) {
-      comment = null; startup = null;
-      failureIndent = null; fieldIndent = null; permission = null; code = null;
-      failureMessage = null; failureType = false; exitCode = null;
-    }
-    // Uncaught module-load errors are comments too. Keep their complete Node fatal
-    // diagnostic pending; it is evidence only if the following file record failed
-    // to start. A test logging a caught error and then asserting is not that record.
-    if (indent === 0 && raw.startsWith('#')) {
-      if (line.startsWith('Error: ')) {
-        const operation = permissionOperation(root, line.slice('Error: '.length), { includeFilePaths });
-        comment = operation ? { operation, code: null, syscall: null, path: null, closed: false, fatal: false } : null;
-      } else if (comment) {
-        const field = /^(code|syscall|path): (.*)$/u.exec(line);
-        if (field) comment[field[1]] = tapScalar(field[2].replace(/,$/u, ''));
-        else if (line === '}') comment.closed = true;
-        else if (/^Node\.js v\d+\./u.test(line)) comment.fatal = true;
-        else if (line && !/^at |^errno: |^address: |^port: /u.test(line)
-          && !(comment.closed && comment.fatal && line.startsWith('Subtest: '))) comment = null;
-      }
-    }
-    if (/^(?:not )?ok \d+\b/u.test(line)) {
-      failureIndent = /^not ok /u.test(line) ? indent : null;
-      const operation = comment?.operation;
-      startup = failureIndent !== null && comment?.closed && comment.fatal
-        && comment.code === operation.code && comment.syscall === operation.syscall
-        && (!operation.path || (typeof comment.path === 'string'
-          && diagnosticPath(resolve(root, comment.path)) === operation.path)) ? operation : null;
-      comment = null;
-      fieldIndent = null; permission = null; code = null;
-      failureMessage = null; failureType = false; exitCode = null;
-    } else if (line === '---' && failureIndent !== null && indent === failureIndent + 2) {
-      fieldIndent = indent;
-    } else if (line === '...' && indent === fieldIndent) {
-      failureIndent = null; fieldIndent = null; permission = null; code = null;
-      startup = null; comment = null;
-      failureMessage = null; failureType = false; exitCode = null;
-    } else if (fieldIndent !== null && indent === fieldIndent) {
-      const field = /^(error|code|failureType|exitCode): (.*)$/u.exec(line);
-      if (field) {
-        const value = tapScalar(field[2]);
-        if (field[1] === 'error') {
-          failureMessage = value;
-          permission = typeof value === 'string' ? permissionOperation(root, value, { includeFilePaths }) : null;
-        } else if (field[1] === 'code') {
-          code = value;
-          if (code !== 'ERR_TEST_FAILURE') startup = null;
-        } else if (field[1] === 'failureType') failureType = value === 'testCodeFailure' || field[2] === 'testCodeFailure';
-        else exitCode = /^[1-9]\d*$/u.test(field[2]) && Number.isSafeInteger(Number(field[2])) ? Number(field[2]) : null;
-        if (permission && permission.code === code) return permission.operation;
-        if (startup && code === 'ERR_TEST_FAILURE' && failureMessage === 'test failed'
-          && failureType && exitCode !== null) return startup.operation;
-      }
-    }
-    return null;
-  };
-}
-
-/** Recognize concrete OS permission diagnostics, keeping ordinary assertion failures ordinary. */
-export function sandboxBlockedOperation(root, output, options) {
-  const scan = sandboxBlockedScanner(root, options);
-  for (const line of output.split('\n')) {
-    const operation = scan(line);
-    if (operation) return operation;
-  }
-  return null;
 }
 
 /** Refuse an environment-blocked proof after its ordinary raw logs and timings are persisted. */
@@ -546,12 +419,16 @@ function hasPipeline(command) {
  * The whole queue waits while the machine is out of memory, so a run never starts into swap.
  *
  * @param {string} root - Checkout used to locate the machine resource database.
- * @param {(lease: { waitMs: number, token?: string, pool?: string, browser?: boolean, release: () => void }) => any | Promise<any>} action - Work to perform while holding a slot.
- * @param {{ landing?: boolean, itemCheck?: boolean, diagnostic?: boolean, browser?: boolean, remote?: boolean, agent?: string, item?: string|number, kind?: string, onWait?: (state: object) => void, readMemory?: typeof readMachineMemory }} [options] - Queue class, remote eligibility, progress reporter and, for tests, the machine memory reader.
+ * shortEligible marks a run that names its test files: with gate.shortSlots above 0 it may take a
+ * short slot when every ordinary slot is held, and a full suite can never inherit that slot. A memory
+ * hold (gate.memoryFloorMB) holds short slots too, since a short run uses the same machine memory.
+ *
+ * @param {(lease: { waitMs: number, token?: string, pool?: string, browser?: boolean, slotClass?: 'gate'|'short', release: () => void }) => any | Promise<any>} action - Work to perform while holding a slot.
+ * @param {{ landing?: boolean, itemCheck?: boolean, shortEligible?: boolean, diagnostic?: boolean, browser?: boolean, remote?: boolean, agent?: string, item?: string|number, kind?: string, onWait?: (state: object) => void, readMemory?: typeof readMachineMemory }} [options] - Queue class, short-slot eligibility, remote eligibility, progress reporter and, for tests, the machine memory reader.
  * @returns {Promise<any>} The action's result after releasing its lease.
  */
-export async function withGateSlot(root, action, { landing = false, itemCheck = false, diagnostic = false, browser = false, remote = true, agent, item = '', kind = '', onWait, readMemory = readMachineMemory } = {}) {
-  const inherited = inheritedGateSlot({ root, browser });
+export async function withGateSlot(root, action, { landing = false, itemCheck = false, shortEligible = false, diagnostic = false, browser = false, remote = true, agent, item = '', kind = '', onWait, readMemory = readMachineMemory } = {}) {
+  const inherited = inheritedGateSlot({ root, browser, namedFiles: shortEligible });
   if (inherited) {
     try { return await action(inherited); }
     finally { inherited.release(); }
@@ -567,6 +444,8 @@ export async function withGateSlot(root, action, { landing = false, itemCheck = 
     name: 'gate',
     capacity: capacityProvider(),
     capacityProvider,
+    shortCapacityProvider: () => gateShortSlots(),
+    shortEligible,
     browserCapacityProvider: () => settingsProvider().browserSlots,
     scope: 'machine',
     root,
