@@ -12,15 +12,18 @@ import { createInterface } from 'node:readline';
 import { after, test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { listResources, setResourceCapacity, takeResource } from '../src/resources.js';
+import { createE2eHelpers } from './e2e-helpers.js';
 import { capacityChangeCases } from './resources-capacity-fixture.js';
 import { checkNeedsBrowser } from '../src/browser-admission.js';
 import { releaseQueueProof } from './resources-release-fixture.js';
+import { queuedLeaseProof } from './resources-lease-fixture.js';
 import { checkProject, verificationProject } from './resources-verify-fixture.js';
 
 const TEMP = [];
 const CHILDREN = new Set();
 const MODULE = pathToFileURL(resolve(import.meta.dirname, '../src/resources.js')).href;
 const GATE_MODULE = pathToFileURL(resolve(import.meta.dirname, '../src/gate.js')).href;
+const LEASE_HELPERS = createE2eHelpers();
 const PRE_RUNNER_MODULE = pathToFileURL(resolve(import.meta.dirname, './fixtures/resources-pre-runners.js')).href;
 const SETTINGS_MODULE = pathToFileURL(resolve(import.meta.dirname, '../src/settings.js')).href;
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
@@ -182,6 +185,17 @@ function privateList(box, scope = 'machine', root = process.cwd()) {
     else process.env.PULLBOARD_HOME = previous;
     if (previousMachineHome === undefined) delete process.env.PULLBOARD_MACHINE_HOME;
     else process.env.PULLBOARD_MACHINE_HOME = previousMachineHome;
+  }
+}
+
+/** Open a real fixture pool before restoring the parent's unrelated machine-home environment. */
+function privateTake(box, options) {
+  const previous = process.env.PULLBOARD_MACHINE_HOME;
+  process.env.PULLBOARD_MACHINE_HOME = box.home;
+  try { return takeResource({ ...options, root: box.first }); }
+  finally {
+    if (previous === undefined) delete process.env.PULLBOARD_MACHINE_HOME;
+    else process.env.PULLBOARD_MACHINE_HOME = previous;
   }
 }
 
@@ -595,7 +609,12 @@ after(async () => {
   await Promise.all(running.map((child) => child.finished));
   for (const child of running) child.lines.close();
   TEMP.forEach((dir) => rmSync(dir, { recursive: true, force: true }));
+  LEASE_HELPERS.cleanup();
 });
+
+test('a review waiting in the pool keeps its lease [C7,V4]', {
+  timeout: 120_000, // budget: real private Git/CLI setup and causally controlled queue/run/death phases, never a production lease extension.
+}, (t) => queuedLeaseProof(t, { helpers: LEASE_HELPERS, children: CHILDREN, fixture, poolWorker, privateList, privateTake, acquired, release, waitUntil }));
 
 /** Prove the machine setting changes real browser admission while retaining the single-slot default [C7]. */
 test('browserSlots admits that many browser runs and no more [C7]', async () => {
