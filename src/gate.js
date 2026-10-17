@@ -18,6 +18,7 @@ import { browserFreeChecksEnabled, loadMachineSettings, memoryFloorMB } from './
 import { selectAffectedTests } from './affected-tests.js';
 import { checkNeedsBrowser, testsNeedBrowser } from './browser-admission.js';
 import { timingFromOutput, timingRunner } from './timing.js';
+import { landingShardProfile } from './landing-shards.js';
 import { RunnerDropped, runOnRunner, runOnRunnerAsync, runnerSource } from './runners.js';
 
 const STAMP = 'pullboard-gate-green';
@@ -60,6 +61,26 @@ export function testConcurrency(root, cores = performanceCores()) {
     throw new Refused('BAD_CONFIG', 'testConcurrency.files must be positive; testConcurrency.browser must be 1 or 2');
   }
   return { files, browser: Math.min(files, browser) };
+}
+
+/**
+ * How many shards the landing gate's test files split into: `landingShards` in pullboard.json,
+ * 1 when absent, which keeps today's single run.
+ *
+ * @param {string} root
+ * @returns {number}
+ */
+export function landingShardCount(root) {
+  const file = join(root, 'pullboard.json');
+  if (!existsSync(file)) return 1;
+  let config;
+  try { config = JSON.parse(readFileSync(file, 'utf8')); }
+  catch { throw new Refused('BAD_CONFIG', 'pullboard.json must be valid JSON before running tests'); }
+  const count = config?.landingShards ?? 1;
+  if (!Number.isSafeInteger(count) || count < 1 || count > 64) {
+    throw new Refused('BAD_CONFIG', 'landingShards must be a whole number from 1 to 64; set it in pullboard.json, or remove it for one landing run');
+  }
+  return count;
 }
 
 /**
@@ -383,7 +404,8 @@ export async function runProfiledShellAsync(root, command, { waitMs = 0, gateSlo
 
 /** Keep raw remote TAP intact while resolving its measured filenames against the local source. */
 function runTiming(run, command) {
-  const profile = timingFromOutput(run.output, timingRunner(command));
+  const shards = landingShardProfile(run.output);
+  const profile = { ...timingFromOutput(run.output, timingRunner(command)), ...(shards ? { landingShards: shards } : {}) };
   if (!run.executionRunner) return profile;
   /** Relocate only paths inside the actual remote checkout, never a foreign absolute path. */
   const localPath = path => {
@@ -434,6 +456,24 @@ export function writeTimingProfile(path, profile) {
     format: sanitize(profile.format ?? 'none', 'format'),
     unavailable: sanitize(profile.unavailable ?? null, 'availability'),
     ...(profile.executionRunner ? { executionRunner: sanitize(profile.executionRunner, 'execution runner') } : {}),
+    ...(profile.landingShards ? { landingShards: {
+      balance: sanitize(String(profile.landingShards.balance ?? 'unknown'), 'landing balance'),
+      unverified: (profile.landingShards.unverified ?? []).map(entry => ({ shard: sanitize(String(entry.shard), 'landing unverified shard'),
+        processes: sanitize(String(entry.processes), 'landing unverified processes') })),
+      quarantined: (profile.landingShards.quarantined ?? []).map(entry => ({ host: sanitize(String(entry.host), 'landing quarantine host'),
+        message: sanitize(String(entry.message), 'landing quarantine message') })),
+      floor: profile.landingShards.floor && validDuration(profile.landingShards.floor.ms)
+        ? { path: sanitize(String(profile.landingShards.floor.path), 'landing floor path'), ms: profile.landingShards.floor.ms } : null,
+      // One entry per attempt, so a failed runner attempt stays beside its local rerun.
+      shards: (profile.landingShards.shards ?? []).map(shard => ({ shard: sanitize(String(shard.shard), 'landing shard'),
+        attempt: Number.isSafeInteger(shard.attempt) ? shard.attempt : 1,
+        host: sanitize(String(shard.host), 'landing shard host'), status: sanitize(String(shard.status), 'landing shard status'),
+        reason: shard.reason ? sanitize(String(shard.reason), 'landing shard reason') : null,
+        wallMs: validDuration(shard.wallMs) ? shard.wallMs : null })),
+      files: (profile.landingShards.files ?? []).filter(file => typeof file?.path === 'string').map(file => ({
+        path: sanitize(file.path, 'landing file path'), shard: sanitize(String(file.shard), 'landing file shard'),
+        host: sanitize(String(file.host), 'landing file host'), durationMs: validDuration(file.durationMs) ? file.durationMs : null })),
+    } } : {}),
     ...(profile.executionSource ? { executionSource: {
       commit: sanitize(profile.executionSource.commit, 'execution commit'),
       tree: sanitize(profile.executionSource.tree, 'execution tree'),
