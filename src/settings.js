@@ -12,6 +12,7 @@ export { gateQueueSettings, machineSettingsFile };
 
 const DEFAULT_GATE_SLOTS = 2;
 const DEFAULT_BROWSER_SLOTS = 1;
+const DEFAULT_SHORT_SLOTS = 0;
 
 /** Read and validate machine settings, preserving any unrelated settings. */
 export function loadMachineSettings() {
@@ -20,6 +21,9 @@ export function loadMachineSettings() {
   if (!value) return { gateSlots: DEFAULT_GATE_SLOTS, browserSlots: DEFAULT_BROWSER_SLOTS };
   if (value.gate?.browserFreeChecks !== undefined && typeof value.gate.browserFreeChecks !== 'boolean') {
     throw new Refused('BAD_MACHINE_SETTINGS', `gate.browserFreeChecks in ${file} must be true or false`);
+  }
+  if (value.gate?.browserByLaunch !== undefined && typeof value.gate.browserByLaunch !== 'boolean') {
+    throw new Refused('BAD_MACHINE_SETTINGS', `gate.browserByLaunch in ${file} must be true or false`);
   }
   validateGateQueue(value, file);
   if (value.gate?.memoryFloorMB !== undefined && (!Number.isSafeInteger(value.gate.memoryFloorMB) || value.gate.memoryFloorMB < 0)) {
@@ -32,6 +36,10 @@ export function loadMachineSettings() {
   const browserSlots = value.browserSlots ?? DEFAULT_BROWSER_SLOTS;
   if (!Number.isSafeInteger(browserSlots) || browserSlots < 1 || browserSlots > gateSlots) {
     throw new Refused('BAD_BROWSER_SLOTS', `browserSlots in ${file} must be a positive integer no greater than gateSlots (${gateSlots}); run pullboard settings browserSlots <n>`);
+  }
+  const shortSlots = value.gate?.shortSlots;
+  if (shortSlots !== undefined && (!Number.isSafeInteger(shortSlots) || shortSlots < 0)) {
+    throw new Refused('BAD_SHORT_SLOTS', `gate.shortSlots in ${file} must be a whole number, 0 or more; run pullboard settings gate.shortSlots <n>`);
   }
   const runners = value.runners ?? [];
   if (!Array.isArray(runners)) throw new Refused('BAD_MACHINE_SETTINGS', 'runners must be an array; use pullboard runner add <ssh-host> --slots <n> --browser <n>');
@@ -47,6 +55,14 @@ export function loadMachineSettings() {
 /** Browser-free check admission is deliberately opt-in per machine. */
 export function browserFreeChecksEnabled() {
   return loadMachineSettings().gate?.browserFreeChecks === true;
+}
+
+/**
+ * Classifying a test file as browser-bound only when it reaches a real Chrome launch is opt-in per
+ * machine; off, any path to the Chrome fixture or an unfollowed process starter takes a browser slot.
+ */
+export function browserByLaunchEnabled() {
+  return loadMachineSettings().gate?.browserByLaunch === true;
 }
 
 /**
@@ -79,6 +95,31 @@ export function setGateSlots(capacity) {
     next = { ...current, gateSlots: capacity };
     writeMachineSettings(next);
   } });
+  return next;
+}
+
+/**
+ * Short gate slots admit runs that name their test files while every ordinary slot is busy.
+ * The default 0 keeps them off, so the pool behaves exactly as it did before the setting existed.
+ */
+export function gateShortSlots() {
+  return loadMachineSettings().gate?.shortSlots ?? DEFAULT_SHORT_SLOTS;
+}
+
+/** Set the short slot count only while the gate pool is idle, like gateSlots, so no holder changes class mid-run. */
+export function setGateShortSlots(count) {
+  if (!Number.isSafeInteger(count) || count < 0) throw new Refused('BAD_SHORT_SLOTS', 'gate.shortSlots must be a whole number, 0 or more; run pullboard settings gate.shortSlots <n>');
+  let next;
+  try {
+    setResourceCapacity({ name: 'gate', capacity: loadMachineSettings().gateSlots, scope: 'machine', persist: () => {
+      const current = loadMachineSettings();
+      next = { ...current, gate: { ...current.gate, shortSlots: count } };
+      writeMachineSettings(next);
+    } });
+  } catch (error) {
+    if (error?.code !== 'RESOURCE_BUSY') throw error;
+    throw new Refused('RESOURCE_BUSY', `the gate pool is in use; wait for it to become idle, then retry pullboard settings gate.shortSlots ${count}`);
+  }
   return next;
 }
 

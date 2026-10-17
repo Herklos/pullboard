@@ -4,6 +4,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { loadavg, tmpdir } from 'node:os';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { join, resolve } from 'node:path';
+import { browserSlotRefusal } from '../src/browser-slot-guard.js';
 
 const STARTUP_TIMEOUT_MS = 30_000;
 const COMMAND_TIMEOUT_MS = 15_000;
@@ -137,8 +138,20 @@ async function stopProcessGroup(child, stopped, timeoutMs = CLEANUP_TIMEOUT_MS) 
   if (!await waitForLeaderExit(stopped, timeoutMs)) throw new Error('Isolated Chrome did not close after its process group exited.');
 }
 
+/**
+ * Refuse a Chrome launch from a test file the runner admitted without a browser slot [C7].
+ * With gate.browserByLaunch on, the runner marks each file's worker held or none; a launch under none
+ * means the classifier missed a launch path, so the file fails here by name before Chrome starts.
+ * src/browser-slot-guard.js also refuses direct browser spawns it can see under none, best effort.
+ * Without a marker this is inert.
+ */
+export function requireBrowserSlot() {
+  if (process.env.PULLBOARD_TEST_BROWSER_SLOT === 'none') throw browserSlotRefusal('through test/chrome-fixture.js');
+}
+
 /** Launch an executable as a detached process group and retain its stderr and launch timing. */
 export function launchChromeProcess({ executable, args = [], env = process.env, cleanupTimeoutMs = CLEANUP_TIMEOUT_MS } = {}) {
+  requireBrowserSlot();
   if (!executable) throw new Error('Chrome was not found; install Chrome or set PULLBOARD_CHROME.');
   const launchedAt = Date.now();
   const child = spawn(executable, args, { detached: true, env, stdio: ['ignore', 'ignore', 'pipe'] });
@@ -177,6 +190,7 @@ export async function startChrome({
   diagnosticTimeoutMs = 750,
   env = process.env,
 } = {}) {
+  requireBrowserSlot();
   if (!executable) throw new Error('Chrome was not found; install Chrome or set PULLBOARD_CHROME.');
   const ownedProfile = !profileDirectory;
   const profile = resolve(profileDirectory ?? mkdtempSync(join(tmpdir(), 'pullboard-chrome-')));

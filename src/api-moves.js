@@ -6,6 +6,7 @@ const MOVES = {
   'spec-approve': { prefix: ['spec', 'approve'], positions: ['ids'], flags: ['by', 'text'] },
   'spec-decline': { prefix: ['spec', 'decline'], positions: ['ids'], flags: ['reason'] },
   'spec-answer': { prefix: ['spec', 'answer'], positions: ['row', 'answer'] },
+  'check-accept': { prefix: ['check', 'accept'], item: true },
   add: { positions: ['lane', 'title'], flags: ['criterion', 'specs', 'parent', 'after', 'brief', 'route', 'check'], booleans: ['wait'], booleans: ['wait'] },
   edit: { item: true, flags: ['criterion', 'brief', 'route', 'check', 'reason'], booleans: ['wait'], booleans: ['wait'] },
   fact: { item: true, positions: ['kind', 'text'], flags: ['supersedes', 'ref', 'implies'] },
