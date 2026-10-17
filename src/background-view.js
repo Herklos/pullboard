@@ -9,9 +9,9 @@
  */
 import { spawn } from 'node:child_process';
 import { closeSync, mkdirSync, openSync } from 'node:fs';
-import { connect } from 'node:net';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { fetchLocal } from './local-fetch.js';
 import { Refused } from './refused.js';
 import { registryFile } from './projects.js';
 import { LOOPBACK } from './serve.js';
@@ -106,15 +106,21 @@ export async function launchBackgroundView(io, port, projectRoot) {
   return 0;
 }
 
-/** Whether something already accepts connections on this loopback port. */
-function portAnswers(port) {
-  return new Promise((answer) => {
-    const socket = connect({ host: LOOPBACK, port });
-    const done = (open) => { socket.destroy(); answer(open); };
-    socket.setTimeout(1_000, () => done(true)); // budget: a loopback connect answers at once; a silent socket is taken as held.
-    socket.once('connect', () => done(true));
-    socket.once('error', () => done(false));
-  });
+/**
+ * Whether something already holds this loopback port. The probe goes through the loopback-only
+ * local fetch, so it can never reach past this machine. Only a refused connection means the port
+ * is free: any answer, a reset or a silent listener means something holds it.
+ */
+async function portAnswers(port) {
+  try {
+    const response = await fetchLocal(`http://${LOOPBACK}:${port}/`, {
+      redirect: 'manual', signal: AbortSignal.timeout(1_000), // budget: a loopback listener answers at once; a silent one is taken as held.
+    });
+    await response.body?.cancel();
+    return true;
+  } catch (error) {
+    return error?.cause?.code !== 'ECONNREFUSED';
+  }
 }
 
 /**
