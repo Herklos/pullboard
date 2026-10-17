@@ -1298,7 +1298,7 @@ function resumeHere(io) {
       me,
       all,
       needsYou: personNeeds(personNeedsState(root, { board })),
-      ...(decisionSections ? { ...decisions, ...verifiedMergeGroups(root, toMerge, shouts, ctx.clock.now().getTime()),
+      ...(decisionSections ? { ...decisions, ...verifiedMergeGroups(root, pendingMerges, shouts, ctx.clock.now().getTime()),
         flow: proofStats(board, { now: ctx.clock.now().getTime() }).flow } : {}),
       requests: me.id === COORDINATOR ? store.openRequests(board) : [],
       holding: all.filter((item) => item.item_status === 'claimed' && item.item_owner === me.id),
@@ -1392,14 +1392,16 @@ function resumeHere(io) {
     };
     section(card.openDecisions, (ask) => `open decision #${ask.id} from ${name(ask.asker)} (${ask.age}): ${firstLine(ask.question)}`);
     section(card.recentAnswers, (answer) => `recent decision #${answer.id}: ${name(answer.answeredBy)} answered ${name(answer.asker)} (${answer.age} ago): ${firstLine(answer.answer)}`);
-    if (card.toMerge.length) {
+    if (card.toMerge.length || card.staleVerdicts.length) {
       const groups = card.verifiedNotMerged;
+      // Conflicts remain useful diagnostics even when the acceptance must be re-reviewed.
+      const freshness = item => item.item_verdict_state ? ' [STALE_VERDICT]' : '';
       /** Keep merge groups on one line while retaining all entries in JSON. */
       const listed = (entries, line) => entries.slice(0, 3).map(line).join(', ')
         + (entries.length > 3 ? `, +${entries.length - 3} more (pullboard resume --json)` : '') || 'none';
-      say(`verified, not merged — merges cleanly: ${listed(groups.clean, (item) => `#${item.item_id} ${firstLine(item.item_title)}`)}`);
-      say(`verified, not merged — conflicts: ${listed(groups.conflicts, ({ item, files }) => `#${item.item_id} ${firstLine(item.item_title)} (${files.join(', ') || 'files unavailable'})`)}`);
-      say(`verified, not merged — claimed for integration: ${listed(groups.integrating, ({ item, by, at, commit }) => `#${item.item_id} by ${name(by)} at ${at} (${commit.slice(0, 12)})`)}`);
+      say(`verified, not merged — merges cleanly: ${listed(groups.clean, (item) => `#${item.item_id} ${firstLine(item.item_title)}${freshness(item)}`)}`);
+      say(`verified, not merged — conflicts: ${listed(groups.conflicts, ({ item, files }) => `#${item.item_id} ${firstLine(item.item_title)} (${files.join(', ') || 'files unavailable'})${freshness(item)}`)}`);
+      say(`verified, not merged — claimed for integration: ${listed(groups.integrating, ({ item, by, at, commit }) => `#${item.item_id} by ${name(by)} at ${at} (${commit.slice(0, 12)})${freshness(item)}`)}`);
     }
     section(card.needsYou, (need) => need.kind === 'decision'
       ? `waiting on the person: #${need.id} from ${need.ref} (${span(ctx, need.at)}): ${firstLine(need.text)}`
