@@ -350,7 +350,7 @@ test('[H15,H17] a paired clone synchronizes without a key file from PULLBOARD_RE
   assert.equal(output.includes(secretText), false, 'the pairing secret is not echoed in the clone command result');
 });
 
-test('an acknowledged ordinary move cannot leave relay pair permanently busy [H15,H17,H16]', async t => {
+test('pairing again after a device joined and a move was added succeeds [H15,H17,H16]', async t => {
   const box = await relayClientFixture(t);
   await box.link();
   const first = await box.cli('relay', 'pair');
@@ -386,4 +386,36 @@ test('a newly paired device imports the acknowledged moved board [H15,H17,H16]',
   const paired = await box.otherDeviceJoin(printed.document.code);
   assert.deepEqual(paired.exported, current.document, 'a real independent native join imports the complete moved checkpoint');
   assert.equal(paired.exported.tables.item.some(row => row.item_title === 'The next computer sees this acknowledged move'), true);
+});
+
+
+test('a move made during pairing is still refused as busy [H15,H17]', async t => {
+  const box = await relayClientFixture(t);
+  await box.link();
+  const result = await box.script(`
+    const store = await import(${JSON.stringify(new URL('../src/board.js', import.meta.url).href)});
+    const {relayPair} = await import(${JSON.stringify(new URL('../src/relay-pairing-client.js', import.meta.url).href)});
+    const root = process.cwd();
+    const originalFetch = globalThis.fetch;
+    let injected = false;
+    globalThis.fetch = async (...args) => {
+      if (!injected && String(args[0]).includes('/events?after=')) {
+        injected = true;
+        const board = store.openBoard(root + '/.git/pullboard/board.sqlite');
+        try { store.addItem(board, {by:'coordinator',lane:${JSON.stringify(box.lane)},title:'A real local move during pairing',criterion:'The pending pairing must refuse'}); }
+        finally { store.closeBoard(board); }
+      }
+      return originalFetch(...args);
+    };
+    const sink = {isTTY:false,write(){}};
+    let code = null, issued = false;
+    try { await relayPair(root,{cwd:root,stdout:sink,stderr:sink,say(){},err(){},result(){issued=true;}}); }
+    catch(error) { code=error.code; }
+    finally { globalThis.fetch=originalFetch; }
+    process.stdout.write(JSON.stringify({injected,code,issued}));
+  `);
+  assert.equal(result.code,0,result.stderr);
+  assert.equal(result.document.injected,true,'the real local store move occurred while the pairing sync awaited actual HTTP');
+  assert.equal(result.document.code,'PAIR_BUSY','pairing must refuse a native move during its async sync: '+JSON.stringify(result.document));
+  assert.equal(result.document.issued,false,'a changed native prefix never prints a usable pairing code');
 });

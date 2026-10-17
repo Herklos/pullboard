@@ -106,8 +106,11 @@ function localSnapshot(root) {
 
 /** Create a one-use code and publish only an encrypted board package to the relay. */
 export async function relayPair(root, io) {
-  await syncRelay(root, io);
   const file = linkFile(root);
+  loadState(file);
+  // Freeze the native event boundary before asynchronous sync; retry if it changes during pairing.
+  const initialCursor = localSnapshot(root).snapshot.tables.event.at(-1)?.event_id ?? 0;
+  await syncRelay(root, io);
   const state = loadState(file);
   if (state.unlinking) throw new Refused('RELAY_UNLINK_PENDING', 'finish unlinking this board before creating a pairing code');
   if (originRepository(root) !== state.repository) throw new Refused('RELAY_ORIGIN', 'the origin repository no longer matches this relay link; restore the linked GitHub origin first');
@@ -119,7 +122,7 @@ export async function relayPair(root, io) {
   const engine = metadata.get('relay_engine_version');
   const ordered = state.mode === 'ordered' || (applied !== undefined && engine !== undefined);
   // Mirror cursors count native events; ordered packages are guarded by their acknowledged relay prefix below.
-  if (!ordered && cursor !== state.cursor) throw new Refused('PAIR_BUSY', 'a local move changed during pairing; run pullboard relay pair again after sync completes');
+  if (cursor !== initialCursor || (!ordered && cursor !== state.cursor)) throw new Refused('PAIR_BUSY', 'a local move changed during pairing; run pullboard relay pair again after sync completes');
   if (state.pending || state.pendingMove || state.snapshot || state.linkPending) {
     throw new Refused('PAIR_PENDING', 'finish the pending relay acknowledgement or snapshot before creating a pairing code; retry relay sync first');
   }
