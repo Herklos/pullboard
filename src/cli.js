@@ -92,9 +92,9 @@ import { flowLines, flowAlertLine } from './stats-flow.js';
 import { releaseHeadlinesBetween } from './changelog.js';
 import { exportBoard, importBoard } from './exchange.js';
 import { addSigner, assertRequiredSigners, defaultPrincipal, hasSignerFile } from './signature.js';
-import { addRunner, browserFreeChecksEnabled, gateQueueSettings, gateShortSlots, loadMachineSettings, memoryFloorMB, setBrowserSlots, setGateShortSlots, setGateSlots } from './settings.js';
+import { addRunner, browserFreeChecksEnabled, gateQueueSettings, gateShortSlots, loadMachineSettings, memoryFloorMB, relayOfferEnabled, setBrowserSlots, setGateShortSlots, setGateSlots } from './settings.js';
 import { formatSnapshotLimit, pendingSnapshotSize, pendingCheckpointProblem, relayCommandReceipt, relayCommandReceiptReported, relayLinked, relayOff, relayOn, relayOperation, relayRecover, relayRecovered, relayRevoke, relayStatus, relayTokens, syncRelay } from './relay.js';
-import { autoLinkProject, relayOnAll, revokeRelayDevice, unlinkedRelayProjects } from './relay-setup.js';
+import { autoLinkProject, offerRelayAtInit, relayOnAllCommand, revokeRelayDevice, unlinkedRelayProjects } from './relay-setup.js';
 import { readRelayMachine } from './relay-machine.js';
 import { relayJoin, relayPair } from './relay-pairing-client.js';
 import { executePersonRequests } from './relay-request-execution.js';
@@ -201,7 +201,7 @@ function commandHelp(name) {
       '  pullboard spec apply — coordinator: apply recorded row decisions to the files',
     ] : []),
     'Example:',
-    `  ${entry.example}`, ...entry.notes,
+    ...entry.example.split('\n').map((line) => `  ${line}`), ...entry.notes,
   ].join('\n');
 }
 
@@ -1727,8 +1727,10 @@ function setupCommands(io, { first, second, rest = [], values }) {
       io.say(agentSessionDigest()
         ? 'Next: run pullboard resume now to continue setup in this session; the new skills load next session, and setup does not need them.'
         : 'Next: ask your agent to set up Pullboard here; in Claude Code, start a new session first so it loads the Pullboard skills.');
+      // The offer comes before the staging line, which stays init's last line [I1,I2].
+      const code = await offerRelayAtInit(info.root, io);
       if (staging) io.say(`To commit Pullboard's files: ${staging}`);
-      return 0;
+      return code;
     },
     lane: () => {
       if (first !== 'add' || !second || rest.length || values.owns === undefined) {
@@ -2751,6 +2753,19 @@ function sayReviewOffer(ctx, found) {
 }
 
 /**
+ * Whether a shout is the person's own: a relay person request, or the local view acting as the
+ * coordinator (N26, B26). The view acting as a named agent, or an agent shell as the coordinator,
+ * still speaks as that agent.
+ *
+ * @param {any} io
+ * @param {{ id: string }} me
+ * @returns {boolean}
+ */
+function personShout(io, me) {
+  return io.personRequest?.phase === 'execute' || (io.personChannel === 'view' && me.id === COORDINATOR);
+}
+
+/**
  * A review search that found nothing while another agent is still building: say so, with the wait,
  * so a reviewer who starts first is not told NOTHING_FREE as if the board were idle [C7,P4].
  *
@@ -3236,7 +3251,7 @@ function workCommands(io, args) {
       const hasRecipient = first && recipients.includes(first);
       const to = hasRecipient ? first : values.decision ? (me.id === COORDINATOR ? 'person' : COORDINATOR) : first ?? '';
       const text = [hasRecipient ? second : first, ...(hasRecipient ? rest : [second, ...rest])].filter(Boolean).join(' ');
-      const id = await ordered(ctx, board, 'shout', [{ from: io.personRequest?.phase === 'execute' ? store.PERSON : me.id, to, text, lanes: laneNames(ctx.config), decision: Boolean(values.decision), evidence }]);
+      const id = await ordered(ctx, board, 'shout', [{ from: personShout(io, me) ? store.PERSON : me.id, to, text, lanes: laneNames(ctx.config), decision: Boolean(values.decision), evidence }]);
       io.result?.({ id, decision: Boolean(values.decision) });
       const agents = store.listAgents(board);
       const recipient = agents.some((agent) => agent.agent_id === to) ? agentDisplayName(agents, ctx.config, to) : to;
@@ -3333,14 +3348,16 @@ function settingsCommand(io, { first, second, rest }) {
     const settings = loadMachineSettings();
     const queue = gateQueueSettings();
     // The result names the queue order in effect, defaults included; the file keeps only what was set.
+    const offerAtInit = relayOfferEnabled();
     const shortSlots = gateShortSlots();
-    io.result?.({ settings: { ...settings, gate: { ...settings.gate, queue: { ...settings.gate?.queue, ...queue }, shortSlots } }, memoryFloorMB: memoryFloorMB() });
+    io.result?.({ settings: { ...settings, gate: { ...settings.gate, queue: { ...settings.gate?.queue, ...queue }, shortSlots }, relay: { ...settings.relay, offerAtInit } }, memoryFloorMB: memoryFloorMB() });
     io.say(`gateSlots: ${settings.gateSlots}`);
     io.say(`browserSlots: ${settings.browserSlots}`);
     io.say(`gate.queue.reviewsFirst: ${queue.reviewsFirst}${queue.reviewsFirst ? '' : ' (landings first, then arrival order)'}`);
     io.say(`gate.queue.currentReleaseFirst: ${queue.currentReleaseFirst}${queue.currentReleaseFirst ? '' : ' (release priority is off)'}`);
     io.say(`gate.queue.agingMinutes: ${queue.agingMinutes}${queue.reviewsFirst || queue.currentReleaseFirst ? '' : ' (used only while reviewsFirst or currentReleaseFirst is true)'}`);
     io.say(`gate.memoryFloorMB: ${memoryFloorMB() ?? 'off (the gate queue does not wait for memory)'}`);
+    io.say(`relay.offerAtInit: ${offerAtInit}${offerAtInit ? ' (init asks once to share your boards with your phone)' : ' (init stays quiet about sharing)'}`);
     io.say(`gate.shortSlots: ${shortSlots}${shortSlots ? '' : ' (off; runs that name their test files wait for a gate slot)'}`);
     return 0;
   }
@@ -3916,21 +3933,7 @@ async function runCommand(argv, io) {
       }
       if (values.all) {
         if (first !== 'on' || second || rest.length) throw new Refused('USAGE', 'pullboard relay on --all [--url <address>]');
-        const controller = new AbortController();
-        const cancelSignIn = () => controller.abort();
-        process.once('SIGINT', cancelSignIn);
-        process.once('SIGTERM', cancelSignIn);
-        let result;
-        try { result = await relayOnAll(values.url, io, { signal: controller.signal }); }
-        finally { process.off('SIGINT', cancelSignIn); process.off('SIGTERM', cancelSignIn); }
-        io.result?.(result);
-        if (result.outcome) {
-          io.say(result.outcome === 'declined' ? 'GitHub sign-in was declined; no boards were linked.'
-            : result.outcome === 'expired' ? 'GitHub device sign-in expired; no boards were linked.'
-              : 'GitHub device sign-in was cancelled; no boards were linked.');
-          return 1;
-        }
-        return result.failed.length ? 1 : 0;
+        return await relayOnAllCommand(values.url, io);
       }
       if (['tokens', 'revoke'].includes(first)) {
         if (rest.length || values.url || (first === 'tokens' && second) || (first === 'revoke' && !second)) {
