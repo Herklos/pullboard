@@ -289,20 +289,24 @@ test('watch filters by kind, item and addressee, and refuses a flag it cannot fo
   await items.note((line) => /following/u.test(line), 10_000, 'start note'); // budget: hang ceiling for CLI startup, not a latency claim.
 
   box.cli(box.root, 'shout', 'docs', 'for docs only');
-  box.cli(box.root, 'add', 'app', 'App item', '--criterion', 'app', '--specs', 'G1');
+  const app = box.cli(box.root, 'add', 'app', 'App item', '--criterion', 'app', '--specs', 'G1').item;
   box.cli(box.root, 'shout', 'app', 'for app');
+  box.cli(box.root, 'edit', String(app.item_id), '--brief', 'App brief');
+  box.cli(box.root, 'fact', String(other.item_id), 'note', 'a fact on the docs item');
   box.cli(box.root, 'edit', String(other.item_id), '--brief', 'Docs brief');
   box.cli(box.root, 'shout', 'all', 'for everyone');
   const last = lastSequence(box);
   await watch.line((line) => JSON.parse(line).sequence === last, 5_000, 'shout to all'); // budget: hang ceiling for one line, not a latency claim.
-  const edit = events(box).find((event) => event.event_kind === 'edit');
+  const edit = events(box).filter((event) => event.event_kind === 'edit').at(-1);
   await items.line((line) => line.startsWith(`${edit.event_id} edit #${other.item_id} `), 5_000, 'edit line'); // budget: hang ceiling for one line, not a latency claim.
   assert.deepEqual(await watch.stop(), { code: 0, signal: null });
   assert.deepEqual(await items.stop(), { code: 0, signal: null });
   assert.deepEqual(watch.out.lines.map(({ line }) => JSON.parse(line).detail), ['to app: for app', 'to all: for everyone'],
     '--to app takes shouts to app and to all, and nothing else');
   assert.deepEqual(watch.out.lines.map(({ line }) => JSON.parse(line).to), ['app', 'all']);
-  assert.equal(items.out.lines.length, 1, '--kinds and --item keep only that item\'s edits');
+  assert.deepEqual(items.out.lines.map(({ line }) => line.split(' ').slice(0, 3).join(' ')), [`${edit.event_id} edit #${other.item_id}`],
+    '--kinds and --item keep only that item\'s edits: not its fact, and not the other item\'s edit');
+  assert.ok(events(box).some((event) => event.event_kind === 'fact' && event.item_id === other.item_id), 'the docs item has a fact to filter out');
 
   for (const [args, pattern] of [[['--to', 'nobody'], /--to needs an agent id, a lane or all/u], [['--work', 'nowhere'], /--work needs a lane/u],
     [['--review-wait', '5'], /--review-wait goes with --work/u], [['--since', 'later'], /--since needs the last sequence/u], [['extra'], /takes flags only/u]]) {
