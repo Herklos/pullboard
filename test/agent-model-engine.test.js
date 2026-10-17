@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 test('model declarations and event snapshots retain engines 1 through 19 semantics [O8,O3,H16]', (t) => {
-  assert.equal(ENGINE_VERSION, 20, 'the next writer preserves every historical model snapshot through main engine 19');
+  assert.equal(ENGINE_VERSION, 25, 'the next writer preserves every historical model snapshot through main engine 19');
   for (const version of Array.from({ length: ENGINE_VERSION }, (_, index) => index + 1)) {
     const board = store.openBoard(':memory:');
     t.after(() => store.closeBoard(board));

@@ -1044,7 +1044,7 @@ function coordinatorNext(card, rows) {
   if (card.toVerify.length) return 'pullboard next --verify --as coordinator, or a verifier that built nothing: pullboard worktree review --model "<model name>"';
   if (card.toMerge.length) {
     const [first] = card.toMerge;
-    return `merge #${first.item_id}: git merge --no-edit ${first.item_commit.slice(0, 12)}, run the gate, then pullboard merged ${first.item_id} <merge commit>`;
+    return `merge #${first.item_id}: git merge --no-edit ${(first.item_checked_commit ?? first.item_commit).slice(0, 12)}, run the gate, then pullboard merged ${first.item_id} <merge commit>`;
   }
   if (card.staleVerdicts?.length) {
     const item = card.staleVerdicts[0];
@@ -1069,7 +1069,7 @@ function integrationClaims(root, item, shouts, now) {
     if (shout.shout_evidence_item !== item.item_id) continue;
     if (shout.shout_evidence_kind === 'receipt') actors.delete(shout.shout_from);
     else if (shout.shout_evidence_kind === 'attempt' && shout.shout_evidence_outcome === 'integrating'
-      && contains(root, item.item_commit, shout.shout_evidence_commit)) {
+      && contains(root, item.item_checked_commit ?? item.item_commit, shout.shout_evidence_commit)) {
       actors.set(shout.shout_from, shout);
     }
   }
@@ -1094,7 +1094,7 @@ function verifiedMergeGroups(root, items, shouts, now) {
     }
     if (claimed.expired) staleIntegrations.push({ item, ...claimed.expired });
     try {
-      requireTrunkMerge(root, item.item_commit);
+      requireTrunkMerge(root, item.item_checked_commit ?? item.item_commit);
       groups.clean.push(item);
     } catch (error) {
       if (error.code !== 'MERGE_CONFLICT') throw error;
@@ -1291,7 +1291,8 @@ function resumeHere(io) {
     const me = whoAmI(ctx, board);
     const projector = verdictProjector(root, board);
     const all = store.listItems(board, { all: true }).map(projector.project);
-    const pendingMerges = all.filter((item) => item.item_status === 'verified' && !item.item_merged_commit);
+    const pendingMerges = all.filter((item) => item.item_status === 'verified' && !item.item_merged_commit)
+      .map(item => ({ ...item, item_checked_commit: store.checkedLandingCommit(board, item) }));
     const toMerge = pendingMerges.filter(item => !item.item_verdict_state);
     const staleVerdicts = pendingMerges.filter(item => item.item_verdict_state);
     const decisionSections = isMain ? coordinatorDecisionSections(board, ctx) : null;
