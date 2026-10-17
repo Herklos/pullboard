@@ -1205,7 +1205,7 @@ export function submit(board, id, { agentId, commit, tree, files = [], policyCom
         trunkMergeClean: null,
         noUnverifiedStack: null,
         doctrineHolds: null,
-        gateConfigured: null,
+        gateConfigured: null, queuedItemLease: null,
         gateGreen: null,
         treeStillDuringGate: null,
         childrenDone: () => {
@@ -1504,7 +1504,7 @@ export function verify(board, id, { agentId, decision, reason, note = '', head, 
             : new Refused('CRITERIA_CHANGED', `the criterion for #${id} changed after it was claimed; the coordinator runs: pullboard refreeze ${id}`),
         reasonIsMet: () => (reason && reason !== ACCEPT_REASON ? new Refused('BAD_REASON', `accept means ${ACCEPT_REASON}; a failed criterion is a reject`) : null),
         trunkMergeClean: null,
-        noUnverifiedStack: null,
+        noUnverifiedStack: null, queuedItemLease: null,
         itemCheckGreen: null,
         proofNoted: () =>
           note.trim()
