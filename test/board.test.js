@@ -432,7 +432,7 @@ test('a rejected commit resubmits after its bar is corrected [V4,B3]', async (t)
     (error) => error.code === 'HEAD_NOT_NEW',
     'the same rejected head is still refused while its criterion is unchanged',
   );
-  store.editItem(durable, id, { agentId: 'coordinator', criterion: 'the page renders an accessible heading' });
+  store.editItem(durable, id, { agentId: 'coordinator', criterion: 'the page renders an accessible heading', reason: 'the fixture corrects its bar' });
   const correction = store.refreeze(durable, id, { agentId: 'coordinator', freeze: criterionFreeze });
   assert.notEqual(correction.after, originalClaim.digest);
   assert.equal(store.getItem(durable, id).item_owner, builder, 'refreeze keeps the builder claim for the corrected bar');
@@ -782,10 +782,10 @@ test('changing a criterion or a check drops the frozen bar, in the open; the nex
   const id = store.addItem(board, { by: 'coordinator', lane: 'web', title: 'Page' });
   claimAs(id, 'web-1', 'web');
   store.release(board, id, 'web-1');
-  store.editItem(board, id, { agentId: 'coordinator', check: 'npm test', criterion: 'renders' });
+  store.editItem(board, id, { agentId: 'coordinator', check: 'npm test', criterion: 'renders', reason: 'the fixture corrects its bar' });
   assert.equal(store.getItem(board, id).item_frozen_digest, null);
   const edit = store.events(board, { itemId: id }).find((event) => event.event_kind === 'edit');
-  assert.deepEqual(JSON.parse(edit.event_detail), { criterion: 'renders', check: 'npm test', unfrozen: 'digest:Page', model: 'unknown' });
+  assert.deepEqual(JSON.parse(edit.event_detail), { criterion: 'renders', check: 'npm test', unfrozen: 'digest:Page', reason: 'the fixture corrects its bar', barCorrection: { fields: ['criterion', 'check'], reject: null }, model: 'unknown' });
   assert.equal(claimAs(id, 'web-1', 'web').digest, 'digest:Page');
 });
 
@@ -803,7 +803,7 @@ test('edit after an expired claim reopens it and names its holder [B13]', () => 
     claimAs(id, 'web-1', 'web');
     clock.advance(2 * HOUR + 1);
     assert.doesNotThrow(
-      () => store.editItem(board, id, { agentId: 'coordinator', ...change }),
+      () => store.editItem(board, id, { agentId: 'coordinator', ...change, reason: 'the fixture corrects its bar' }),
       `an expired ${title.toLowerCase()} edit must reopen the item before writing its fields`,
     );
     const stored = store.itemById(board, id);
