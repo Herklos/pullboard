@@ -1,4 +1,5 @@
 /** Roadmap position leads next's existing route order only across unfinished milestones [B16]. */
+import { submitFixture } from './board-submit-fixture.js';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import * as store from '../src/board.js';
@@ -35,7 +36,7 @@ function submitted(board, builder, title, route, number) {
   });
   store.claim(board, id, { agentId: builder, lane: 'core', leaseMs: HOUR, freeze: FREEZE });
   const hash = String(number).repeat(40);
-  store.submit(board, id, { agentId: builder, commit: hash, tree: hash });
+  submitFixture(board, id, { agentId: builder, commit: hash, tree: hash });
   return id;
 }
 

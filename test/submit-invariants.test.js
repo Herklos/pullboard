@@ -7,6 +7,7 @@ import * as store from '../src/board.js';
 import { appliedSequence, applyEngineMove, applyRelayMove, prepareEngineMove } from '../src/engine.js';
 import { exportBoard, importBoard } from '../src/exchange.js';
 import { SUBMISSION_PROOF_ENGINE, landingFileTimes } from '../src/submit-invariants.js';
+import { ENGINE_VERSION } from '../src/machine.js';
 import { landingFailures } from '../src/land.js';
 import { createE2eHelpers } from './e2e-helpers.js';
 
@@ -235,7 +236,8 @@ test('a landing escape is proposed as a submit invariant only when modern submit
     {id:'modern-missing-selection',actor:'web-1'});
   // Forge the missing wire field after valid preparation so the receiver assertion remains independent.
   delete move.args[1].submissionProof;
-  assert.equal(move.engine,SUBMISSION_PROOF_ENGINE,'the envelope is the current allocated engine34');
+  assert.equal(SUBMISSION_PROOF_ENGINE,34,'submission receipts keep their stable first engine');
+  assert.equal(move.engine,ENGINE_VERSION,'the new envelope uses the current engine, separately from the minimum');
   assert.equal(Object.hasOwn(move.args[1],'submissionProof'),false);
   const legacyMove = {...move,engine:33,id:'legacy33-missing-selection'};
   const legacyResult = applyRelayMove(legacyTarget,legacyMove,{sequence:1,at:'2026-10-17T00:00:00.000Z',kind:'move',sender:{kind:'agent',userId:'fixture',agent:'web-1'}});
@@ -251,6 +253,8 @@ test('a landing escape is proposed as a submit invariant only when modern submit
   assert.equal(result.error?.code,'SUBMISSION_PROOF','a current engine submit must record a selection instead of silently becoming unknown history');
   assert.equal(store.getItem(target,id).item_status,'claimed');
   assert.equal(store.events(target).length,count);
+  assert.throws(() => store.submit(source,id,options), {code:'SUBMISSION_PROOF'},
+    'a current local board submission also refuses missing selection');
   assert.throws(() => prepareEngineMove(source,'submit',[id,options],
     {id:'producer-missing-selection',actor:'web-1'}), {code:'SUBMISSION_PROOF'},
   'the current producer refuses a missing receipt before sealing a move');

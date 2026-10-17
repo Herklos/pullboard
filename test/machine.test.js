@@ -3,6 +3,7 @@
  * The item lifecycle's declaration (M1, M2, M4): sound on its own terms, each property shown
  * failing on a broken copy, and in step with the refusals the board, CLI and spec parser raise today.
  */
+import { submitFixture } from './board-submit-fixture.js';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -589,7 +590,7 @@ function boardOnDisk(clock) {
 function submittedItem(board) {
   const id = store.addItem(board, { by: 'coordinator', lane: 'web', title: 'Page' });
   store.claim(board, id, { agentId: 'web-1', lane: 'web', leaseMs: 7_200_000, freeze });
-  store.submit(board, id, { agentId: 'web-1', commit: SHA_A, tree: 'tree' });
+  submitFixture(board, id, { agentId: 'web-1', commit: SHA_A, tree: 'tree' });
   return id;
 }
 
@@ -914,7 +915,7 @@ test('claim refuses in the declared order, one failure peeled at a time, on a re
     holdByHand(raw, target, 'web-2');
     store.claim(board, spare, { agentId: strong, lane: 'web', leaseMs: 7_200_000, freeze });
     store.claim(board, dependency, { agentId: 'web-1', lane: 'web', leaseMs: 7_200_000, freeze });
-    store.submit(board, dependency, { agentId: 'web-1', commit: SHA_A, tree: 'tree' });
+    submitFixture(board, dependency, { agentId: 'web-1', commit: SHA_A, tree: 'tree' });
     store.holdLane(board, 'web', { agentId: 'coordinator', reason: 'pause' });
     store.holdItem(board, target, { agentId: 'coordinator', reason: 'item pause' });
     const fired = [claimAs(999, light, 'api'), claimAs(done, light, 'api'), claimAs(target, light, 'api')];
@@ -944,7 +945,7 @@ test('submit, accept and reject refuse in the declared order, one failure peeled
   try {
     const { board } = lab;
     const light = store.register(board, { lane: 'web', path: '/repo-web-light', route: 'light' });
-    const submitAs = (id, agentId, commit) => outcome(() => store.submit(board, id, { agentId, commit, tree: 'tree' }));
+    const submitAs = (id, agentId, commit) => outcome(() => submitFixture(board, id, { agentId, commit, tree: 'tree' }));
     const piece = store.addItem(board, { by: 'coordinator', lane: 'web', title: 'Page' });
     const submits = [submitAs(999, 'web-1', SHA_A), submitAs(piece, 'web-1', SHA_A)];
     store.claim(board, piece, { agentId: 'web-1', lane: 'web', leaseMs: 7_200_000, freeze });
@@ -953,9 +954,9 @@ test('submit, accept and reject refuse in the declared order, one failure peeled
     submits.push(submitAs(piece, 'web-1', SHA_A));
     assert.equal(submits.at(-1), 'PENDING_REFREEZE', 'a pending correction stops the board submission before later guards');
     store.refreeze(board, piece, { agentId: 'web-1', freeze });
-    submits.push(outcome(() => store.submit(board, piece, { agentId: 'web-1', commit: SHA_A, tree: 'tree',
+    submits.push(outcome(() => submitFixture(board, piece, { agentId: 'web-1', commit: SHA_A, tree: 'tree',
       submissionProof: { version: 99, files: [], full: false, deferred: true, reason: '' } })));
-    store.submit(board, piece, { agentId: 'web-1', commit: SHA_A, tree: 'tree' });
+    submitFixture(board, piece, { agentId: 'web-1', commit: SHA_A, tree: 'tree' });
     verdictOn(board, piece, 'web-2', 'REJECT');
     store.claim(board, piece, { agentId: 'web-1', lane: 'web', leaseMs: 7_200_000, freeze });
     const child = store.addItem(board, { by: 'web-1', lane: 'web', title: 'Part', parentId: piece });
@@ -1068,7 +1069,7 @@ test('a reserved review refuses every other verdict while its lease lives, and o
     assert.equal(holder(), null, 'but holds nothing once the item leaves submitted, though its lease lives until 13:21');
 
     store.claim(board, id, { agentId: 'web-1', lane: 'web', leaseMs: 7_200_000, freeze });
-    store.submit(board, id, { agentId: 'web-1', commit: SHA_B, tree: 'tree' });
+    submitFixture(board, id, { agentId: 'web-1', commit: SHA_B, tree: 'tree' });
     assert.equal(store.getItem(board, id).item_review_by, null, 'a new submission starts with no reservation');
     assert.equal(offered('web-2').item.item_id, id, 'though the last lease would live until 13:21');
 

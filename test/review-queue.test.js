@@ -1,4 +1,5 @@
 /** A review offer accounts for backlog, live reservations and reviewer eligibility [Q1,V15]. */
+import { submitFixture } from './board-submit-fixture.js';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
@@ -40,7 +41,7 @@ function submitted(board, { builder, lane = 'web', route = 'strong', title }) {
   store.claim(board, id, { agentId: builder, lane, leaseMs: HOUR, freeze });
   const commit = createHash('sha1').update(`commit:${title}`).digest('hex');
   const tree = createHash('sha1').update(`tree:${title}`).digest('hex');
-  store.submit(board, id, { agentId: builder, commit, tree });
+  submitFixture(board, id, { agentId: builder, commit, tree });
   return id;
 }
 
