@@ -20,7 +20,7 @@ import { relaySenderProblem } from './relay-sender.js';
 import { readRelayMachine, removeRecordedDevice, updateRelayMachine, wrapForRecordedDevice } from './relay-machine.js';
 import { receivePersonRequest, requestMoveProblem } from './relay-requests.js';
 import { nativePhoneAction, phoneProposal, publishPhoneApproval, warnPhoneApproval } from './relay-phone.js';
-import { requirePersonChannel, requireRelayOnChannel } from './person.js';
+import { remoteShell as isRemoteShell, requirePersonChannel, requireRelayOnChannel } from './person.js';
 import { listApiProjects } from './projects.js';
 
 export const DEFAULT_RELAY = 'https://app.pullboard.dev';
@@ -1305,7 +1305,7 @@ async function deviceSignIn(url, io, { signal, intent, onSignIn } = {}) {
 
 /** Explicitly sign in through the relay and persist a sealed initial snapshot before uploading it. */
 export async function relayOn(root, address, io, { session, credential, quiet = false, strict = false } = {}) {
-  const remoteShell = io.personChannel !== 'view' && Boolean(process.env.SSH_CONNECTION || process.env.SSH_TTY);
+  const remoteShell = io.personChannel !== 'view' && isRemoteShell();
   const reusableSession = remoteShell ? undefined : session;
   const reusableCredential = remoteShell ? undefined : credential;
   if (remoteShell) {
