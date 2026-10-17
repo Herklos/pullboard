@@ -9,6 +9,10 @@ import { openBoard, closeBoard, getItem } from '../src/board.js';
 import { checkBaseline, prepareCheckBaseline } from '../src/check-baseline.js';
 import { exportBoard, importBoard } from '../src/exchange.js';
 import { applyEngineMove, prepareEngineMove } from '../src/engine.js';
+import { CHECK_ACCEPT_ENGINE, acceptCheck, checkDigest } from '../src/check-accept.js';
+import { refusePersonMove } from '../src/mcp.js';
+import { AGENT_SHELL_MARKERS, SSH_SHELL_MARKERS } from '../src/person.js';
+import { relaySenderProblem } from '../src/relay-sender.js';
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
 const BOARD_FILE = '.git/pullboard/board.sqlite';
@@ -63,8 +67,12 @@ function sandbox() {
   return { dir, env, git, run };
 }
 
-/** Initialize an isolated repo and optional real web/review worktrees. */
-function project({ gate = 'true', content = 'green', commit = true, worktrees = false } = {}) {
+/**
+ * Initialize an isolated repo and optional real web/review worktrees. Fixtures keep init's
+ * checks.provesNothing hold only when asked: the other tests here prove today's warning, which a
+ * board with no setting keeps.
+ */
+function project({ gate = 'true', content = 'green', commit = true, worktrees = false, hold = false } = {}) {
   const box = sandbox();
   const repo = join(box.dir, 'repo');
   mkdirSync(repo);
@@ -74,9 +82,10 @@ function project({ gate = 'true', content = 'green', commit = true, worktrees = 
   const initialized = box.run(repo, ['init']);
   assert.equal(initialized.status, 0, initialized.stderr);
   const configFile = join(repo, 'pullboard.json');
-  const config = JSON.parse(readFileSync(configFile, 'utf8'));
+  const { checks, ...config } = JSON.parse(readFileSync(configFile, 'utf8'));
   writeFileSync(configFile, `${JSON.stringify({
     ...config,
+    ...(hold ? { checks } : {}),
     gate,
     spec: 'SPEC.md',
     lanes: {
@@ -90,7 +99,7 @@ function project({ gate = 'true', content = 'green', commit = true, worktrees = 
     box.git(repo, 'add', '-A');
     box.git(repo, 'commit', '-q', '-m', 'chore: set up check baseline fixture');
   }
-  const fixture = { ...box, repo, web: null, review: null };
+  const fixture = { ...box, repo, web: null, review: null, initChecks: checks };
   if (worktrees) {
     fixture.web = addWorktree(fixture, 'web', 'web/agent');
     fixture.review = addWorktree(fixture, 'review', 'review/agent');
@@ -467,4 +476,133 @@ test('[C7,V4] a check that is not valid shell is refused when set', () => {
   const accepted = box.run(box.repo, ['edit', String(item.item_id), '--check', revised, '--wait', '--json']);
   assert.equal(accepted.status, 0, `a valid check is accepted on edit: ${accepted.stdout}${accepted.stderr}`);
   assert.equal(showItem(box, item.item_id).item.item_check, revised);
+});
+
+/** The person's own terminal: the fixture environment with every agent and SSH marker dropped. */
+function personEnv(env) {
+  const clean = { ...env };
+  for (const marker of [...AGENT_SHELL_MARKERS, ...SSH_SHELL_MARKERS]) delete clean[marker];
+  return clean;
+}
+
+/** Read one refused CLI move's JSON error, asserting it exited 1. */
+function refusal(result, label) {
+  assert.equal(result.status, 1, `${label}: ${result.stdout}${result.stderr}`);
+  return JSON.parse(result.stdout).error;
+}
+
+/** Send one move through the local API handler on a chosen channel, as the view and agent API do. */
+function apiMove(box, move, channel, env) {
+  const apiModule = new URL('../src/api.js', import.meta.url).href;
+  const cliModule = new URL('../src/cli.js', import.meta.url).href;
+  const source = `
+    const { executeMove } = await import(${JSON.stringify(apiModule)});
+    const { main } = await import(${JSON.stringify(cliModule)});
+    const response = await executeMove(process.cwd(), ${JSON.stringify(move)}, main, undefined, ${JSON.stringify(channel)});
+    process.stdout.write(JSON.stringify(response));
+  `;
+  const child = runFixtureChild(process.execPath, ['--input-type=module', '-e', source], { cwd: box.repo, env, encoding: 'utf8' });
+  assert.equal(child.status, 0, child.stdout + child.stderr);
+  return JSON.parse(child.stdout);
+}
+
+/** Commit one tracked change in an agent worktree so submit has a clean head to prove. */
+function commitIn(box, cwd, content, message) {
+  writeFileSync(join(cwd, 'web', 'result.txt'), `${content}\n`);
+  box.git(cwd, 'add', 'web/result.txt');
+  box.git(cwd, 'commit', '-q', '-m', message);
+}
+
+test('[V2,V4,B26,P6] a check green on main holds the item until the person accepts it', () => {
+  const box = project({ content: 'green', worktrees: true, hold: true });
+  const env = personEnv(box.env);
+  const file = join(box.repo, BOARD_FILE);
+  assert.deepEqual(box.initChecks, { provesNothing: 'hold' }, 'pullboard init writes checks.provesNothing "hold" for a new board');
+  const main = box.git(box.repo, 'rev-parse', 'refs/heads/main');
+  const green = fileCheck('green', 'held-check-marker.txt');
+  const { item } = addChecked(box, 'Held green check', green);
+  const id = String(item.item_id);
+  assert.equal(item.item_check_baseline.result, 'green');
+
+  const held = refusal(box.run(box.web, ['claim', id, '--json']), 'claim');
+  assert.equal(held.code, 'CRITERION_PROVES_NOTHING', 'claiming an item whose check is green on main is refused');
+  assert.ok(held.message.includes(green), `the refusal names the check: ${held.message}`);
+  assert.ok(held.message.includes(`main ${main.slice(0, 12)}`), `the refusal names main: ${held.message}`);
+  assert.match(held.next, new RegExp(`pullboard check accept ${id}`, 'u'), 'the next step names the person’s move');
+
+  const shell = refusal(box.run(box.repo, ['check', 'accept', id, '--json'], undefined, { env: { ...env, CLAUDECODE: '1' } }), 'agent shell');
+  assert.equal(shell.code, 'B26_PERSON_CHANNEL', 'an agent shell in the main checkout cannot accept a check');
+  const remote = refusal(box.run(box.repo, ['check', 'accept', id, '--json'], undefined, { env: { ...env, SSH_CONNECTION: '10.0.0.1 22 10.0.0.2 22' } }), 'remote shell');
+  assert.equal(remote.code, 'B26_PERSON_CHANNEL', 'a remote shell cannot accept a check');
+  const worktree = refusal(box.run(box.web, ['check', 'accept', id, '--json'], undefined, { env }), 'worktree');
+  assert.equal(worktree.code, 'B26_PERSON_APPROVAL', 'an agent worktree cannot accept a check, even from a clean terminal');
+  const api = apiMove(box, { verb: 'check-accept', item: item.item_id }, 'api', env);
+  assert.equal(api.status, 409, JSON.stringify(api));
+  assert.equal(api.body.error.code, 'B26_PERSON_CHANNEL', 'the agent API is not the person channel');
+  assert.throws(() => refusePersonMove('check_accept'), { code: 'HUMAN_REQUIRED' }, 'MCP refuses a check acceptance as a person move');
+  const digest = checkDigest(green);
+  const move = withBoard(file, (board) => prepareEngineMove(board, 'acceptCheck', [item.item_id, { agentId: 'person', channel: 'terminal', digest }], { id: 'agent-relay-accept' }));
+  assert.equal(move.engine, CHECK_ACCEPT_ENGINE);
+  assert.equal(relaySenderProblem(move, { kind: 'agent', userId: 'user-1', agent: 'web-1' }, 'move')?.code, 'RELAY_PERSON_ONLY', 'the relay refuses an agent sending the person’s acceptance');
+  withBoard(file, (board) => {
+    assert.throws(() => acceptCheck(board, item.item_id, { agentId: 'web-1', channel: 'terminal', digest }), { code: 'CHECK_ACCEPT_PERSON_ONLY' });
+    assert.throws(() => applyEngineMove(board, { ...move, engine: CHECK_ACCEPT_ENGINE - 1 }, { sequence: 1, at: '2026-10-17T00:00:00.000Z' }), { code: 'RELAY_MOVE' },
+      'an engine older than the acceptance refuses the move before changing anything');
+    assert.equal(board.db.prepare("SELECT COUNT(*) AS n FROM event WHERE event_kind = 'check_accept'").get().n, 0, 'no refused path recorded an acceptance');
+  });
+  assert.equal(refusal(box.run(box.web, ['claim', id, '--json']), 'claim after refusals').code, 'CRITERION_PROVES_NOTHING');
+  for (const route of [['next'], ['next', '--build']]) {
+    const routed = refusal(box.run(box.web, [...route, '--json']), route.join(' '));
+    assert.equal(routed.code, 'CRITERION_PROVES_NOTHING', `${route.join(' ')} is refused like claim`);
+    assert.ok(routed.message.includes(green), `${route.join(' ')} names the check: ${routed.message}`);
+  }
+  const claims = () => withBoard(file, (board) => board.db.prepare("SELECT COUNT(*) AS n FROM event WHERE event_kind = 'claim' AND item_id = ?").get(item.item_id).n);
+  assert.equal(claims(), 0, 'no refused route recorded a claim');
+  assert.equal(showItem(box, id).item.item_status, 'open');
+
+  const accepted = box.run(box.repo, ['check', 'accept', id, '--json'], undefined, { env });
+  assert.equal(accepted.status, 0, `${accepted.stdout}${accepted.stderr}`);
+  assert.deepEqual(JSON.parse(accepted.stdout).digest, digest, 'the acceptance binds to the exact check text');
+  const claimed = box.run(box.web, ['next', '--build', '--json']);
+  assert.equal(claimed.status, 0, `the person's acceptance lifts the hold for next --build: ${claimed.stdout}${claimed.stderr}`);
+  assert.equal(showItem(box, id).item.item_owner, 'web-1', 'next --build claimed the accepted item');
+
+  const changed = fileCheck('green', 'changed-check-marker.txt');
+  const edited = box.run(box.repo, ['edit', id, '--check', changed, '--reason', 'the fixture changes the check', '--wait', '--json'], undefined, { env });
+  assert.equal(edited.status, 0, `${edited.stdout}${edited.stderr}`);
+  assert.equal(JSON.parse(edited.stdout).item.item_check_baseline.result, 'green', 'the changed check gets a new baseline');
+  assert.equal(box.run(box.repo, ['refreeze', id]).status, 0);
+  commitIn(box, box.web, 'done', 'test: change the held fixture');
+  const resubmitted = refusal(box.run(box.web, ['submit', id, '--json']), 'submit after a changed check');
+  assert.equal(resubmitted.code, 'CRITERION_PROVES_NOTHING', 'a changed check needs a new acceptance: submit is refused');
+  assert.ok(resubmitted.message.includes(changed), `the submit refusal names the changed check: ${resubmitted.message}`);
+
+  const red = fileCheck('done', 'red-check-marker.txt');
+  const corrected = box.run(box.repo, ['edit', id, '--check', red, '--reason', 'the old check already passed on main', '--wait', '--json'], undefined, { env });
+  assert.equal(corrected.status, 0, `${corrected.stdout}${corrected.stderr}`);
+  assert.equal(JSON.parse(corrected.stdout).item.item_check_baseline.result, 'red');
+  assert.equal(box.run(box.repo, ['refreeze', id]).status, 0);
+  const submitted = box.run(box.web, ['submit', id, '--json']);
+  assert.equal(submitted.status, 0, `a red new baseline lifts the hold: ${submitted.stdout}${submitted.stderr}`);
+
+  const second = addChecked(box, 'Second held green check', fileCheck('green', 'second-check-marker.txt')).item;
+  const nextHeld = refusal(box.run(box.web, ['next', '--json']), 'next on a second held item');
+  assert.equal(nextHeld.code, 'CRITERION_PROVES_NOTHING', 'next refuses the second held item');
+  const reset = box.run(box.repo, ['edit', String(second.item_id), '--check', fileCheck('done', 'second-red-marker.txt'), '--wait', '--json'], undefined, { env });
+  assert.equal(reset.status, 0, `${reset.stdout}${reset.stderr}`);
+  assert.equal(JSON.parse(reset.stdout).item.item_check_baseline.result, 'red');
+  const nextClaimed = box.run(box.web, ['next', '--json']);
+  assert.equal(nextClaimed.status, 0, `a changed check with a red baseline lifts the hold for next: ${nextClaimed.stdout}${nextClaimed.stderr}`);
+  assert.equal(showItem(box, second.item_id).item.item_status, 'claimed', 'next claimed the item once its check was red on main');
+
+  const plain = project({ content: 'green', worktrees: true });
+  const { result: warned, item: open } = addChecked(plain, 'Unheld green check', fileCheck('green', 'plain-check-marker.txt'));
+  assert.match(warned.stdout, /CRITERION_PROVES_NOTHING/u, 'a board with no setting keeps today’s warning');
+  const plainClaim = plain.run(plain.web, ['claim', String(open.item_id), '--json']);
+  assert.equal(plainClaim.status, 0, `a board with no setting claims the green check: ${plainClaim.stdout}${plainClaim.stderr}`);
+  writeFileSync(join(plain.web, 'web', 'proof.txt'), 'submitted\n');
+  plain.git(plain.web, 'add', 'web/proof.txt');
+  plain.git(plain.web, 'commit', '-q', '-m', 'test: submit the unheld fixture');
+  const plainSubmit = plain.run(plain.web, ['submit', String(open.item_id), '--json']);
+  assert.equal(plainSubmit.status, 0, `a board with no setting submits the green check: ${plainSubmit.stdout}${plainSubmit.stderr}`);
 });
