@@ -110,14 +110,28 @@ test("a named port that is busy is refused with the way out, not a stack trace [
 
 test('a busy view port names a fix the hosted page can still find [N26,I1]', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'pullboard-view-busy-default-'));
+  let freePort;
+  t.after(async () => {
+    await cleanupFixtureViews(join(dir, 'home', '.pullboard'));
+    if (freePort !== undefined) await waitForPortToClose(freePort);
+  });
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   // A leased stand-in for 4890: the person's real view on the shipped port is never touched.
   const lease = await takeDefaultViewPort(dir, { agent: `view-port-busy-${process.pid}` });
   t.after(() => lease.release());
   const port = lease.port;
   const held = createServer();
+  const heldSockets = new Set();
+  held.on('connection', (socket) => {
+    heldSockets.add(socket);
+    socket.once('close', () => heldSockets.delete(socket));
+  });
   await new Promise((done, fail) => { held.once('error', fail); held.listen(port, '127.0.0.1', done); });
-  t.after(() => new Promise((done) => held.close(done)));
+  t.after(async () => {
+    const closed = new Promise((done) => held.close(done));
+    for (const socket of heldSockets) socket.destroy();
+    await closed;
+  });
   const env = {
     ...process.env,
     HOME: join(dir, 'home'),
@@ -157,8 +171,8 @@ test('a busy view port names a fix the hosted page can still find [N26,I1]', asy
   rmSync(join(env.PULLBOARD_HOME, `view-${port}.json`), { force: true });
   const free = runFixtureChild(process.execPath, [BIN, 'view', '--no-open', '--port', '0', '--json'], { cwd: dir, env, encoding: 'utf8', timeout: 40_000 });
   assert.equal(free.status, 0, free.failure ?? free.stderr);
-  t.after(() => cleanupFixtureViews(env.PULLBOARD_HOME));
-  assert.notEqual(JSON.parse(free.stdout).port, port, '--port 0 still takes a free port when asked for');
+  freePort = JSON.parse(free.stdout).port;
+  assert.notEqual(freePort, port, '--port 0 still takes a free port when asked for');
 });
 
 /** Wait until the owned default listener has closed after its process stops. */
