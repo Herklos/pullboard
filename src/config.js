@@ -44,6 +44,7 @@ export function defaults() {
     submitInvariants: [],
     lease: '2h',
     reviewLease: '30m',
+    worktrees: 'beside',
     verify: { policy: 'any', family: 'off', reviewRatio: 3 },
     agents: { names: 'suffix' },
     check: { install: '', timeout: '5m' },
@@ -159,8 +160,12 @@ export function configProblems(config) {
   if (typeof config.spec !== 'string' || !config.spec) problems.push('"spec" names a file');
   if (typeof config.practice !== 'string' || !config.practice) problems.push('"practice" names the doctrine file');
   if (typeof config.gate !== 'string') problems.push('"gate" is a shell command, like "npm test"');
+  if (!['inside', 'beside'].includes(config.worktrees)) problems.push('"worktrees" is "inside" or "beside"');
   if (config.submitGate !== undefined && config.submitGate !== 'landing') {
     problems.push('"submitGate" is "landing" when the full suite should be deferred until landing');
+  }
+  if (config.landingShards !== undefined && (!Number.isSafeInteger(config.landingShards) || config.landingShards < 1 || config.landingShards > 64)) {
+    problems.push('"landingShards" is a whole number from 1 to 64: how many shards the landing gate splits its test files into');
   }
   if (config.affectedTests !== undefined && (typeof config.affectedTests !== 'string' || !config.affectedTests.trim())) {
     problems.push('"affectedTests" is a nonempty command prefix used to run selected test files');

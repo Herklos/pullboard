@@ -9,9 +9,14 @@
   "prefix": "TR",
   "rules": [
     { "key": "TR1", "text": "No test waits on the wall clock or a fixed sleep.", "why": "a test that sleeps is slow on an idle machine and flaky on a busy one." },
-    { "key": "TR2", "text": "A flake is pinned on a change only after a run without it.", "why": "a test that fails under load looks like a broken change until it fails without that change too." }
+    { "key": "TR2", "text": "A flake is pinned on a change only after a run without it.", "why": "a test that fails under load looks like a broken change until it fails without that change too." },
+    { "key": "TR3", "text": "A flake fix is proven by repeated runs.", "why": "a flaky test already passes some of the time, so one green run after a fix proves nothing; only a run of passes shows the flake is gone.", "tier": "must", "gate": "the whole test suite, run as many times in a row as the run count question says, every run passing" }
   ],
   "questions": [
-    { "key": "Q1", "ask": "Tests run with", "choices": ["node:test", "Vitest", "Jest", "Mocha", "pytest", "Something else"], "detect": "test-runner" }
+    { "key": "Q1", "ask": "Tests run with", "choices": ["node:test", "Vitest", "Jest", "Mocha", "pytest", "Something else"], "detect": "test-runner" },
+    { "key": "Q2", "ask": "A flake fix passes this many runs in a row", "choices": ["5", "10", "20"], "default": "10" }
+  ],
+  "items": [
+    { "key": "1", "title": "Find a flaky test and make it deterministic", "cites": ["TR1", "TR2"], "criterion": "A test that failed in repeated runs of the unchanged suite is found, named in the submit note, and fixed so the suite passes ten runs in a row with no sleep or wall-clock wait. Before the fix, ten repeated runs of npm test fail at least once.", "brief": "Files:\n- the flaky test and the code it waits on\nTest:\n- run npm test twenty times with nothing changed to find a test that fails some of the time (TR2)\n- replace its sleep or wall-clock wait with a fake clock or an awaited event (TR1), then run the check", "check": "set -e; for run in 1 2 3 4 5 6 7 8 9 10; do npm test; done" }
   ]
 }
