@@ -153,8 +153,11 @@ test('a landing snapshot binds the checked composition through replay and final 
     branch: 'refs/heads/main', root: '/fixture/landing', owner: 'fixture', logPath: '/fixture/landing.log',
     candidates: [entry], items: [entry], revision: 0 };
   const record = prepareEngineMove(one, 'recordLandingBatch', [{ agentId: 'coordinator', batch }], { id: 'checked-landing-snapshot' });
+  // A new move carries the writer's current engine; the checked-review feature only sets the minimum (17 Oct: pinning the
+  // current version to the feature number broke every later engine item).
   assert.equal(VERDICT_REVIEW_ENGINE, 33, 'checked compositions retain their stable introduction engine');
   assert.equal(record.engine, ENGINE_VERSION, 'new landing envelopes use the current writer independently of the feature minimum');
+  assert.ok(record.engine >= VERDICT_REVIEW_ENGINE, 'the checked-review snapshot is written at or above its feature engine');
   const before = exportBoard(one);
   for (const engine of [12, VERDICT_REVIEW_ENGINE - 1]) {
     assert.throws(() => applyEngineMove(one, { ...record, engine }, { sequence: 2, at: AT }), { code: 'RELAY_MOVE' });
