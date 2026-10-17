@@ -83,7 +83,7 @@ test('engine 12 acceptance receipts stay exact and sealed re-review needs a newe
   }
   const originalVerdicts = store.verdictsFor(one, 1);
   const reReview = { ...prepareEngineMove(one, 'verify', [1, verdict({ commit: COMMIT, head: COMMIT, trunk: TRUNK, paths: ['web/feature.js'] })], { id: 'sealed-new-review' }), engine: VERDICT_REVIEW_ENGINE };
-  assert.equal(reReview.engine, 13, 'the feature replays at its introduction version even after a later writer upgrade');
+  assert.equal(reReview.engine, 15, 'the feature replays at its introduction version even after a later writer upgrade');
   const oldBefore = oldExchange.exportBoard(old);
   assert.throws(() => oldEngine.applyEngineMove(old, reReview, { sequence: 3, at: AT }), { code: 'ENGINE_VERSION' });
   assert.deepEqual(oldExchange.exportBoard(old), oldBefore, 'an actual old client refuses the future envelope before changing its prefix');
