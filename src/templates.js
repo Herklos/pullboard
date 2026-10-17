@@ -107,6 +107,8 @@ This repo runs on pullboard: a work board, lanes and a spec that live in git. No
 
 **Doctrine.** Our house rules for agentic development. This repo inherits Pullboard standard doctrine version 1. ${doctrine.repo ? doctrine.name : DOCTRINE_FILE} adds the repo's own rows, overrides a standard rule by its PB id, or declines it with a wont row and its reason as the row text: - PB7 [wont] <why>. Approved rows are in force; follow them as you would the spec. A rule with \`gate: check <command>\` and \`count: N\` holds a count that only falls: run pullboard doctrine check to see each count, and submit refuses RATCHET_ROSE when a touched rule rises or a changed file gains a problem. Lower \`count:\` in a commit when you fix problems; only the person raises it. Run pullboard spec --json to read the current merged rules. Re-run pullboard init after changing the doctrine to refresh this managed guidance.
 
+**Fit a blueprint.** After \`blueprint add\`, a seat can propose how each drafted row, question and starter item fits this repository with \`pullboard blueprint fit <name or file> <row id or #item> keep|adapt|drop|answer\`. Include \`--text\` for adapted wording or an answer, and \`--reason\` for why. The proposals remain drafts until the person reads \`pullboard spec fit\` and approves that batch with its printed code; the proposer cannot approve their own batch.
+
 ### Current doctrine
 
 ${doctrineText(doctrine)}

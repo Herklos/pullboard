@@ -16,6 +16,7 @@ import { milestoneRoadmap } from './roadmap.js';
 import { proofStats } from './stats.js';
 import { prepareFlowHistory, projectFlowStats } from './stats-flow.js';
 import { projectRowDecisions } from './row-decisions.js';
+import { fitFile, pendingFit, projectFit } from './blueprint-fit.js';
 import { Refused } from './refused.js';
 import { codeAt, projectItemState, projectState } from './serve.js';
 import { relayPresentationShout } from './relay-presentation.js';
@@ -41,6 +42,7 @@ function stateFileInputs(root, config) {
     { name: `spec:${config.spec}`, path: join(root, config.spec) },
     { name: `practice:${config.practice}`, path: join(root, config.practice) },
     { name: 'builtin:standard-doctrine.md', path: new URL('./standard-doctrine.md', import.meta.url) },
+    { name: 'fit:blueprint-fit.json', path: fitFile(repoInfo(root).commonDir) },
   ];
 }
 
@@ -418,7 +420,7 @@ function buildLocalBoardState(root, boardId, board, codeIsMain, { previous = nul
     state.requests = projectData.requests;
     state.personRequests = projectData.personRequests;
     state.milestones = projectData.milestones;
-    const decorated = projectRowDecisions(projectData.rowDecisions, state);
+    const decorated = projectFit(pendingFit(repoInfo(root).commonDir), projectRowDecisions(projectData.rowDecisions, state));
     const bases = new Map(decorated.items.map((item) => [item.id, item]));
     for (const id of dirtyIds) {
       if (!currentById.has(id)) continue;
