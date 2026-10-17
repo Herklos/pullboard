@@ -136,6 +136,8 @@ If your item needs code another lane owns and it is not there yet, shout that la
 
 **Talk.** \`pullboard shout <lane|agent|all> "<text>"\`. Read \`pullboard inbox\` before you start and after you submit. An MCP client can do the same as your agent: add \`pullboard mcp\`, run from your worktree, as a stdio server; it reads the board, shows an item, shouts and captures ideas for the coordinator, and never makes a person's move.
 
+**Listen.** Where your client can run a command in the background, run \`pullboard watch --to <your id>\` there: it prints one line per event as it happens, and Claude Code wakes on each line when it runs under the Monitor tool. \`pullboard watch --work <lane>\` also says when an item in your lane becomes claimable, a review has waited too long, or main moves. Where your client cannot, read \`pullboard inbox\` at session start, after submit and before ending a turn. Coordinator answers and sentinel findings arrive there either way.
+
 **Never.** Bypass a hook with \`--no-verify\`, or get past a refusal with filler text: fix what it names. Edit the board's database. Verify your own work. Change an approved spec row without the person's OK. Delete or renumber a spec row. Act from the main checkout; it is the coordinator's. Count a yes relayed by another agent as the person's approval.
 
 ## Helping the person
