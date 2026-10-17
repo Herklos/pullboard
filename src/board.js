@@ -20,6 +20,7 @@ import { factFromEvent, requestAnswerRefusal, tellAnswerImplications, tellFactIm
 import { landingFlakes, landingWaiverCovers, landingWaiverKind } from './landing-exceptions.js';
 import { parseSpec } from './spec.js';
 export { landingFlakes, landingWaiverCovers, landingWaiverKind };
+export { acceptCheck } from './check-accept.js';
 
 export const ACCEPT_REASON = 'CRITERION_MET';
 export const PERSON = 'person';
@@ -429,15 +430,13 @@ export function atomic(board, work) {
  * @param {number | null} itemId
  * @param {object} [detail]
  */
-function logEvent(board, by, kind, itemId, detail = {}) {
+export function logEvent(board, by, kind, itemId, detail = {}) {
   const model = agentModel(board, by);
   const isAgent = Boolean(board.db.prepare('SELECT 1 FROM agent WHERE agent_id = ?').get(by));
   const recorded = (board.executionEngineVersion ?? ENGINE_VERSION) >= 8 && isAgent
     ? { ...detail, model: model ?? 'unknown' } : detail;
   const inserted = board.db
-    .prepare(
-      'INSERT INTO event (event_at, event_by, event_kind, item_id, event_detail) VALUES (?, ?, ?, ?, ?)',
-    )
+    .prepare('INSERT INTO event (event_at, event_by, event_kind, item_id, event_detail) VALUES (?, ?, ?, ?, ?)')
     .run(now(board), by, kind, itemId, JSON.stringify(recorded));
   board.lastEvent = board.db.prepare('SELECT * FROM event WHERE event_id = ?').get(inserted.lastInsertRowid);
   (board.emittedEvents ??= []).push(board.lastEvent);
@@ -1058,7 +1057,7 @@ export function claim(board, id, { agentId, lane, leaseMs, freeze, head = null, 
     let frozen = null;
     const item = moveItem(board, id, 'claim', {
       checks: {
-        joined: null,
+        joined: null, checkProvesSomething: null,
         [IN_STATE]: (found) => new Refused('NOT_CLAIMABLE', `item #${id} is ${found.item_status}`),
         inLane: (found) => {
           if (found.item_lane === lane) return null;
@@ -1196,7 +1195,7 @@ export function submit(board, id, { agentId, commit, tree, files = [], policyCom
     const notYours = () => new Refused('NOT_YOURS', `item #${id} is not claimed by you; claim it first`);
     moveItem(board, id, 'submit', {
       checks: {
-        joined: null,
+        joined: null, checkProvesSomething: null,
         [IN_STATE]: notYours,
         isHolder: (found) => (found.item_owner === agentId ? null : notYours()),
         correctionRefrozen: () => pendingRefreezeProblem(board, id),
@@ -1208,7 +1207,7 @@ export function submit(board, id, { agentId, commit, tree, files = [], policyCom
         trunkMergeClean: null,
         noUnverifiedStack: null,
         doctrineHolds: null,
-        gateConfigured: null,
+        gateConfigured: null, queuedItemLease: null,
         gateGreen: null,
         treeStillDuringGate: null,
         childrenDone: () => {
@@ -1507,7 +1506,7 @@ export function verify(board, id, { agentId, decision, reason, note = '', head, 
             : new Refused('CRITERIA_CHANGED', `the criterion for #${id} changed after it was claimed; the coordinator runs: pullboard refreeze ${id}`),
         reasonIsMet: () => (reason && reason !== ACCEPT_REASON ? new Refused('BAD_REASON', `accept means ${ACCEPT_REASON}; a failed criterion is a reject`) : null),
         trunkMergeClean: null,
-        noUnverifiedStack: null,
+        noUnverifiedStack: null, queuedItemLease: null,
         itemCheckGreen: null,
         proofNoted: () =>
           note.trim()
@@ -2139,6 +2138,16 @@ function milestonePriorities(board) {
   return (entry) => priorities.get(entry.item_id) ?? ordered.length;
 }
 
+/** Make the shared build-queue comparator once: milestone, route, recent files, then oldest. */
+export function buildOrder(board, { warm = [] } = {}) {
+  const milestonePriority = milestonePriorities(board);
+  const recent = new Set(warm);
+  const shared = (entry) => itemFiles(entry).filter((path) => recent.has(path)).length;
+  return (first, second) => milestonePriority(first) - milestonePriority(second)
+    || ROUTES.indexOf(second.item_route) - ROUTES.indexOf(first.item_route)
+    || shared(second) - shared(first) || first.item_id - second.item_id;
+}
+
 /**
  * The next item an agent can take (N2): for a builder, the oldest open item in its lane whose
  * dependencies are verified; for a verifier, the oldest submitted item it did not build. An agent
@@ -2152,10 +2161,10 @@ function milestonePriorities(board) {
  * and `shared` names them (N20). A held lane offers nothing new (N22).
  *
  * @param {any} board
- * @param {{ agentId: string, lane: string, verify?: boolean, policy?: string, familyPolicy?: string, runnable?: boolean, routes?: string[], warm?: string[], priority?: number[] }} who
+ * @param {{ agentId: string, lane: string, verify?: boolean, policy?: string, familyPolicy?: string, runnable?: boolean, routes?: string[], warm?: string[], priority?: number[], lanes?: string[] }} who
  * @returns {{ item: any | null, reasons: string[], shared?: string[] }}
  */
-export function nextFor(board, { agentId, lane, verify = false, policy = 'any', familyPolicy = 'off', runnable = false, routes = ROUTES, warm = [], priority = [] }) {
+export function nextFor(board, { agentId, lane, verify = false, policy = 'any', familyPolicy = 'off', runnable = false, routes = ROUTES, warm = [], priority = [], lanes }) {
   const route = routeOf(board, agentId);
   const tier = (entry) => ROUTES.indexOf(entry.item_route);
   const allItems = listItems(board).reverse();
@@ -2190,20 +2199,23 @@ export function nextFor(board, { agentId, lane, verify = false, policy = 'any', 
   }
   const held = items.find((entry) => entry.item_status === 'claimed' && entry.item_owner === agentId && entry.item_parent_id === null);
   if (held) return { item: held, reasons: [] };
-  const reasons = allItems.filter((entry) => entry.item_status === 'open' && entry.item_lane === lane && entry.item_hold_reason)
+  const selectedLanes = new Set(lanes ?? [lane]);
+  const reasons = allItems.filter((entry) => entry.item_status === 'open' && selectedLanes.has(entry.item_lane) && entry.item_hold_reason)
     .map((entry) => `#${entry.item_id} is held by coordinator: ${entry.item_hold_reason}`);
   const paused = laneHold(board, lane);
-  if (paused) return { item: null, reasons: [`${paused.hold_by} holds the ${lane} lane: ${paused.hold_reason}`, ...reasons] };
-  const milestonePriority = milestonePriorities(board);
+  if (!lanes && paused) return { item: null, reasons: [`${paused.hold_by} holds the ${lane} lane: ${paused.hold_reason}`, ...reasons] };
+  if (lanes) for (const name of selectedLanes) {
+    const hold = laneHold(board, name);
+    if (hold) { selectedLanes.delete(name); reasons.push(`${hold.hold_by} holds the ${name} lane: ${hold.hold_reason}`); }
+  }
+  const compare = buildOrder(board, { warm });
   const recent = new Set(warm);
   const mainRed = new Set(priority);
-  const laneItems = items.filter((entry) => entry.item_status === 'open' && entry.item_lane === lane);
+  const laneItems = items.filter((entry) => entry.item_status === 'open' && selectedLanes.has(entry.item_lane));
   const mine = laneItems
     .filter((entry) => !itemHold(board, entry.item_id))
     .map((entry, order) => ({ entry, order, shared: itemFiles(entry).filter((path) => recent.has(path)) }))
-    .sort((first, second) => milestonePriority(first.entry) - milestonePriority(second.entry)
-      || tier(second.entry) - tier(first.entry)
-      || second.shared.length - first.shared.length || first.order - second.order);
+    .sort((first, second) => compare(first.entry, second.entry));
   // Move only evidenced reworks ahead of their own tier; with no evidence, normal order is exact.
   for (const route of ROUTES) {
     const routeTier = ROUTES.indexOf(route);
