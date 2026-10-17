@@ -225,3 +225,47 @@ test('next names the seat to open for a lane the agent lacks [N2,B13]', (t) => {
   } finally { store.closeBoard(board); }
   assert.equal(readFileSync(join(box.repo, '.git', 'pullboard', 'board.sqlite')).includes(Buffer.from(box.session)), false, 'raw session ids stay out of shared SQLite');
 });
+
+test('next follows the rank the coordinator set inside a milestone [N2,B13]', (t) => {
+  const box = crossLaneFixture(t);
+  box.json(box.runAs(box.session, box.web, 'join', 'web', '--model', 'Rank test', '--json'));
+  const api = box.seat('rank-owned-api', 'api', box.session);
+  const peer = box.seat('rank-peer-api', 'api', 'rank-peer-session');
+  const oldest = box.add('web', 'Oldest unranked strong work');
+  const first = box.add('api', 'Ranked mid API work', 'mid');
+  const second = box.add('web', 'Second ranked strong work');
+  const later = box.add('api', 'Later release work');
+  box.json(box.run(box.repo, 'milestone', 'add', 'current', '--items', `${oldest},${first},${second}`, '--json'));
+  box.milestone('later', later);
+  const ordered = box.runAs(box.session, box.web, 'milestone', 'order', 'current', `${first},${second}`, '--json');
+  assert.equal(ordered.code, 0, `an agent can order the milestone through the real CLI\n${ordered.out}\n${ordered.err}`);
+  const next = box.json(box.runAs(box.session, box.web, 'next', '--build', '--json'));
+  assert.equal(next.item.item_id, first, 'explicit rank precedes route and age across the session’s lanes');
+  assert.equal(next.item.item_owner, api.agent);
+  box.json(box.runAs(box.session, api.root, 'release', String(first), '--json'));
+  box.json(box.runAs('rank-peer-session', peer.root, 'claim', String(first), '--json'));
+  const free = box.json(box.runAs(box.session, box.web, 'next', '--build', '--json'));
+  assert.equal(free.item.item_id, second, 'an occupied higher rank leaves the next free rank available');
+  const resumed = box.json(box.runAs(box.session, box.web, 'next', '--build', '--json'));
+  assert.equal(resumed.item.item_id, second, 'the agent resumes its own claim before pulling another rank');
+  assert.equal(resumed.held, true);
+  const beginner = box.json(box.run(box.repo, 'help', '--json'));
+  assert.doesNotMatch(JSON.stringify(beginner.overview ?? beginner), /milestone order|rank the queue/iu, 'newcomer help does not gain scheduling words');
+});
+
+test('an unranked item follows the ranked ones [N2,B13]', (t) => {
+  const { board, builder } = boardFixture();
+  t.after(() => store.closeBoard(board));
+  const oldest = store.addItem(board, { by: 'coordinator', lane: 'core', title: 'Oldest ordinary item', route: 'strong' });
+  const middle = store.addItem(board, { by: 'coordinator', lane: 'core', title: 'Middle ordinary item', route: 'strong' });
+  const ranked = store.addItem(board, { by: 'coordinator', lane: 'core', title: 'Newest ranked item', route: 'strong' });
+  store.addMilestone(board, { agentId: 'coordinator', name: 'release', items: [ranked, middle, oldest] });
+  assert.equal(store.nextFor(board, { agentId: builder, lane: 'core' }).item.item_id, oldest, 'a never-ranked board retains its old oldest-first tie-break');
+  store.orderMilestoneItems(board, 'release', { agentId: 'coordinator', items: [ranked] });
+  assert.equal(store.nextFor(board, { agentId: builder, lane: 'core' }).item.item_id, ranked);
+  const ordered = [oldest, middle, ranked].map(id => store.getItem(board, id)).sort(store.buildOrder(board));
+  assert.deepEqual(ordered.map(item => item.item_id), [ranked, oldest, middle], 'unranked items retain age order after explicit ranks');
+  store.editMilestoneItems(board, 'release', { agentId: 'coordinator', remove: [ranked] });
+  store.editMilestoneItems(board, 'release', { agentId: 'coordinator', add: [ranked] });
+  assert.equal(store.nextFor(board, { agentId: builder, lane: 'core' }).item.item_id, oldest, 'removing and readding an item does not retain a ghost rank');
+});
