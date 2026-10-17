@@ -3545,11 +3545,13 @@ if (hosted.local) $('local-note-retry').addEventListener('click', () => {
   if (transport) { location.reload(); return; }
   connectLocal().then((local) => local === 'local' ? refresh() : null).catch((error) => localNote('problem', { detail: error.message }));
 });
-/** Open a newly approved board through the ordinary selection path after its real list entry arrives. */
+/** Open a newly approved board's Items view after its real list entry arrives. */
 async function openApprovedBoard(boardId) {
   await refresh();
   const board = data?.projects.find(entry => entry.id === boardId && entry.ok);
   if (!board) throw new Error('The approved board did not load. Refresh the board list and try again.');
+  view.tab = 'items';
+  keep('pb.tab', view.tab);
   return switchTo(board.root);
 }
 

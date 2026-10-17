@@ -160,14 +160,27 @@ export async function createTransport({ onUpdate, onOpenBoard }) {
     await new Promise(resolveReady => server.listen(0, '127.0.0.1', resolveReady));
     chrome = await openSnapshotChrome(executable, `http://127.0.0.1:${server.address().port}/`, join(box.dir, 'approved-board-chrome'));
     await chrome.waitFor(`view.root === ${JSON.stringify(firstId)} && data?.project?.items.some(item => item.title === 'Current board item')`);
+    await chrome.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await chrome.click('document.querySelector(\'[data-tab="shouts"]\')');
+    await chrome.waitFor('view.tab === "shouts" && document.querySelector(\'[data-pane="items"]\').hidden');
     const documentOrigin = await chrome.stable('performance.timeOrigin');
     await chrome.stable('window.__transportUpdate()');
     assert.equal(await chrome.stable('view.root'), firstId, 'a transport update without an approved-board callback leaves the current board selected');
+    assert.equal(await chrome.stable('view.tab'), 'shouts', 'an ordinary transport update preserves the selected tab');
     await chrome.stable('window.__approveBoard()');
     assert.equal(await chrome.stable(`data.projects.some(board => board.id === ${JSON.stringify(secondId)} && board.ok)`), true, 'the approved board is genuinely available before the selection assertion');
     assert.equal(await chrome.stable('view.root'), secondId, 'the explicit approval opens its board rather than merely refreshing the old one');
     assert.equal(await chrome.stable("document.querySelector('#proj-name').textContent"), 'approved-board');
     assert.equal(await chrome.stable("document.querySelector('#chain').textContent.includes('Newly approved board item')"), true);
+    for (const width of [390, 1280]) {
+      await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 844, deviceScaleFactor: 1, mobile: width === 390 });
+      assert.equal(await chrome.stable(`(() => {
+        const pane = document.querySelector('[data-pane="items"]');
+        const row = document.querySelector('#chain [data-item]');
+        const rect = row?.getBoundingClientRect();
+        return !pane.hidden && row.getClientRects().length > 0 && rect.height > 0 && rect.top < innerHeight && rect.bottom > 0;
+      })()`), true, `${width}px approval opens visible items after reading Shouts`);
+    }
     assert.equal(await chrome.stable('performance.timeOrigin'), documentOrigin, 'the original document remains open');
     assert.equal(pageVisits, 1, 'approval does not reload the page or start pairing again');
     assert.equal(await chrome.stable('window.__approvalCalls'), 1);
