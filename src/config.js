@@ -44,6 +44,7 @@ export function defaults() {
     submitInvariants: [],
     lease: '2h',
     reviewLease: '30m',
+    worktrees: 'beside',
     verify: { policy: 'any', family: 'off', reviewRatio: 3 },
     agents: { names: 'suffix' },
     check: { install: '', timeout: '5m' },
@@ -159,6 +160,7 @@ export function configProblems(config) {
   if (typeof config.spec !== 'string' || !config.spec) problems.push('"spec" names a file');
   if (typeof config.practice !== 'string' || !config.practice) problems.push('"practice" names the doctrine file');
   if (typeof config.gate !== 'string') problems.push('"gate" is a shell command, like "npm test"');
+  if (!['inside', 'beside'].includes(config.worktrees)) problems.push('"worktrees" is "inside" or "beside"');
   if (config.submitGate !== undefined && config.submitGate !== 'landing') {
     problems.push('"submitGate" is "landing" when the full suite should be deferred until landing');
   }

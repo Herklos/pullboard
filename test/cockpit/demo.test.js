@@ -606,6 +606,7 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
       assert.ok(await chrome.stable("[...document.querySelectorAll('#proj-list .pname')].some(e=>e.textContent==='phone-demo')"), `${width}: demo appears in the project list`);
       assert.ok(await chrome.stable("!!document.querySelector('#needs:not([hidden])')"), `${width}: Needs you is visible`);
       await click('#chain .row');
+      await chrome.waitFor("!!document.querySelector('#detail h2')");
       assert.ok(await chrome.stable("!!document.querySelector('#detail h2')"), `${width}: selected item detail is visible`);
       await checkLayout(width, 'items, Needs you and detail');
       for (const tab of ['shouts', 'spec', 'doctrine', 'activity']) {

@@ -26,6 +26,8 @@ async function openAddress(chrome, server, address) {
   target.search = server.link.search;
   await chrome.send('Page.navigate', { url: target.href });
   await settled(chrome, SCRIPT);
+  // An item address opens its item; the view reads its detail then, and its heading arrives with it.
+  if (/\/items\/\d+$/.test(target.pathname)) await settled(chrome, "!!document.querySelector('#detail h2, #detail .empty')");
 }
 /** Assert the detail itself, so suppressing row rendering produces an assertion failure. */
 async function assertHeading(chrome, selector, id, text) {

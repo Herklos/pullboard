@@ -424,7 +424,10 @@ test('a token mint failure after registration preserves the agent for one clean 
   assert.equal(failedCreate.code, 1, 'the injected token service failure is reported after the real worktree registration');
   const firstCalls = box.calls.slice(firstStart);
   assert.equal(firstCalls.filter((call) => call.method === 'POST' && call.path === '/auth/tokens').length, 1);
-  const agentRoot = join(dirname(box.root), `${basename(box.root)}-${box.lane}-1`);
+  const worktreeMode = JSON.parse(readFileSync(join(box.root, 'pullboard.json'), 'utf8')).worktrees;
+  const agentRoot = worktreeMode === 'inside'
+    ? join(box.root, '.claude', 'worktrees', `${box.lane}-1`)
+    : join(dirname(box.root), `${basename(box.root)}-${box.lane}-1`);
   const agent = registeredAgent(boardFile, agentRoot);
   assert.ok(agent, 'successful ordered registration remains canonical after token mint failure');
   assert.equal(existsSync(agentRoot), true, 'the registered worktree is retained for retry');

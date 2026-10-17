@@ -424,7 +424,7 @@ export async function serveView({ port = 0, secret = randomBytes(18).toString('b
   // initialize, and use the real CLI entry point without adding a second move implementation.
   const { createLocalApiHandler } = await import('./api.js');
   const { main } = await import('./cli.js');
-  const apiHandler = createLocalApiHandler({ secret, getPort: () => bound, runCommand: main,
+  const apiHandler = createLocalApiHandler({ secret, getPort: () => bound, runCommand: main, stateDetail: 'summary',
     allowedOrigins: [HOSTED_ORIGIN], ...(projectRoot === undefined ? {} : { scope: { projectRoot } }) });
   const reply = (res, code, type, body) => {
     res.writeHead(code, {
