@@ -340,8 +340,9 @@ function starLine(list) {
     show();
   };
   if (hosted.relaySession && !starLinked.linked && !starLinked.reading) {
-    // The page's own read of the account, when it made one since the line last looked, answers the line: the line
-    // reads the account itself only when the page made no such read, so a listing never brings a second one (#817).
+    // The page's own read of the account, when it made one since the line last looked, answers the line, refused
+    // or not: the line reads the account itself only when the page made no such read, so a listing never brings a
+    // second one (#817).
     if (linkedSeen && linkedSeen.at > starLinked.at) learn(linkedSeen.reply);
     else if (Date.now() - starLinked.at > 2500) {
       starLinked = { at: Date.now(), linked: false, reading: true };
@@ -1030,13 +1031,19 @@ async function jsonRequest(path, body, base, headers, cache) {
 
 let relayEngine = null;
 /** The account's linked boards: a same-origin read that declares the relay's engine, as every relay request does. */
-// The account's last answer and when it came, for the star line, which reuses it rather than asking again (#817).
+// The account's last read and when it ended, answered or refused, for the star line, which reuses it rather than
+// asking again (#817): a refusal is an answer too, "not linked", and is not asked again straight away.
 let linkedSeen = null;
 async function linkedList() {
   relayEngine ??= await import('/relay/engine.js').then((engine) => String(engine.ENGINE_VERSION), () => '');
-  const reply = await jsonRequest('/api/v1/boards', undefined, '', relayEngine ? { 'x-pullboard-engine': relayEngine } : {}, 'no-store');
-  linkedSeen = { at: Date.now(), reply };
-  return reply;
+  try {
+    const reply = await jsonRequest('/api/v1/boards', undefined, '', relayEngine ? { 'x-pullboard-engine': relayEngine } : {}, 'no-store');
+    linkedSeen = { at: Date.now(), reply };
+    return reply;
+  } catch (error) {
+    linkedSeen = { at: Date.now(), reply: null };
+    throw error;
+  }
 }
 
 /**

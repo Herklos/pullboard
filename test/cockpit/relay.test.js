@@ -2067,6 +2067,14 @@ test('the star line shows once to a signed-in person and stays dismissed [N26]',
     await chrome.send('Page.navigate', { url: star.live.link.href }).then(() => chrome.waitFor('!!data?.project'));
     assert.equal(await chrome.stable("document.querySelector('#star-line') === null && !document.body.textContent.includes('GitHub star')"), true, 'the local view never carries the star line');
     for (const file of ['src/cli.js', 'src/mcp.js', 'src/help.js']) assert.ok(!readFileSync(new URL('../../' + file, import.meta.url), 'utf8').includes('GitHub star'), file + ' never prints the star line');
+    // The account read is refused while this machine's view still answers: the refusal answers the line too, "not
+    // linked", and the line never asks again on its own (#817).
+    star.state.refused = true;
+    await page.open('/in-local', 'no', []);
+    assert.ok(star.requests.get('/api/v1/boards') >= 1, 'the page read the account and was refused');
+    assert.equal(await page.shown(), null, 'a refused account read shows no star line');
+    assert.equal(await chrome.stable('window.__starReads'), 0, 'and the line makes no read of its own after the refusal');
+    star.state.refused = false;
     await page.open('/in-local', 'no', []);
     assert.equal(await page.shown(), null, 'a signed-in person with an unlinked local-only board sees no star line');
     await page.open('/in', 'no');
