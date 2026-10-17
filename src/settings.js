@@ -25,6 +25,9 @@ export function loadMachineSettings() {
     throw new Refused('BAD_MACHINE_SETTINGS', `gate.browserByLaunch in ${file} must be true or false`);
   }
   validateGateQueue(value, file);
+  if (value.gate?.memoryFloorMB !== undefined && (!Number.isSafeInteger(value.gate.memoryFloorMB) || value.gate.memoryFloorMB < 0)) {
+    throw new Refused('BAD_MACHINE_SETTINGS', `gate.memoryFloorMB in ${file} must be a whole number of megabytes, 0 or more; fix it before running Pullboard`);
+  }
   const gateSlots = value.gateSlots ?? DEFAULT_GATE_SLOTS;
   if (!Number.isSafeInteger(gateSlots) || gateSlots < 1) {
     throw new Refused('BAD_GATE_SLOTS', `gateSlots in ${file} must be a positive integer; run pullboard settings gateSlots <n>`);
@@ -55,6 +58,15 @@ export function browserFreeChecksEnabled() {
  */
 export function browserByLaunchEnabled() {
   return loadMachineSettings().gate?.browserByLaunch === true;
+}
+
+/**
+ * The free-memory floor, in megabytes, below which the machine gate pool holds its queue, or null
+ * when the hold is off. Gate and queue behavior is off by default, the person's rule, so an absent
+ * floor keeps today's admission by slots alone.
+ */
+export function memoryFloorMB() {
+  return loadMachineSettings().gate?.memoryFloorMB ?? null;
 }
 
 /** Atomically replace machine settings without exposing a partial JSON file. */

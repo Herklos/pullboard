@@ -108,7 +108,7 @@ test('the actual tour leaves a labelled demo visible at phone and desktop widths
       await chrome.waitFor(`innerWidth === ${width}`);
       assert.ok(await chrome.stable(`[...document.querySelectorAll('#proj-list [data-root]')].some(row => row.dataset.root === ${JSON.stringify(demo)} && /demo/.test(row.textContent))`), `${width}: the real tour board is listed and marked demo`);
       assert.equal(await chrome.stable('document.querySelector("#proj-name").textContent'), 'demo', `${width}: the selected board is the registered tour demo`);
-      assert.ok(await chrome.stable('data.project.items.some(item => item.status === "verified" && item.merged)'), `${width}: the tour\'s actual accepted history is visible`);
+      assert.ok(await chrome.stable('data.project.items.some(item => item.status === "verified" && item.stage === "merged")'), `${width}: the tour\'s actual accepted history is visible`);
       await tab(chrome, 'items');
       await press(chrome, 'document.querySelector("#new-item")');
       assert.equal(await chrome.stable('document.querySelector("#add-lane").value'), 'app', `${width}: tour work also defaults to its building lane`);

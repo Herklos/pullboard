@@ -4,6 +4,38 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-16
+
+### Open your board from pullboard.dev
+
+pullboard.dev now lists the boards on this machine beside your linked boards, so one page opens all of them. Link every board once with `pullboard relay on --all`, pair your phone from the QR it prints, and open pullboard.dev on any device.
+
+### Added
+
+- pullboard.dev lists the boards on this machine together with the boards you linked, and opens either kind.
+- The phone page can be installed to your Home Screen, and it asks the browser to keep its storage, so a paired phone stays paired.
+- `pullboard lane add <lane> --owns <path>` makes a lane, and `pullboard init` proposes lanes for the folders it finds.
+- A Doctrine rule can carry a check and a `count:` that only falls: `pullboard submit` refuses a change that makes a touched rule's count rise.
+- With `landingShards` in `pullboard.json`, the landing gate splits its tests into shards that run in parallel, locally or on registered runners.
+- Machine settings, all off unless you set them:
+  - `gate.queue.reviewsFirst`: the gate pool admits reviews before submits, with `gate.queue.agingMinutes` bounding every wait.
+  - `gate.memoryFloorMB`: the gate pool holds new work while free memory is under the floor, and names the biggest processes.
+- Every bundled blueprint's starter items carry a criterion and a check, so the first item can be built and verified.
+- `pullboard spec answer <id> "<choice or text>"` records your answer to a pending blueprint question, from your terminal or the view. An agent is refused.
+- `pullboard init` puts new agent worktrees inside the repository, in `.claude/worktrees`. Boards without the setting keep them beside it; set `"worktrees": "beside"` in `pullboard.json` to choose.
+
+### Fixed
+
+- `pullboard accept` says how to land the item, and `pullboard land --dry-run` catches a missing origin.
+- A gate blocked by an agent's sandbox stops with `SANDBOX_BLOCKED`, asks the person, and names any test file the agent edited.
+- A waiver given after a gate stopped early runs the gate again.
+- The view loads an item's full detail only when you open it.
+- The page's Needs-you list comes from one place, so the panel, the list and the counts agree.
+- `pullboard resume` on a board it cannot write refuses by name, with the step to fix it.
+- `pullboard resume` names `pullboard lane add` instead of a script.
+- A person move is refused from a remote SSH shell whichever SSH variable the shell carries.
+- `pullboard blueprint save` reads back a question with three or more choices.
+
 ## [0.8.29] - 2026-10-16
 
 ### Blueprints, MCP, and refusals that tell you what to do next
@@ -20,8 +52,6 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 - `pullboard mcp`: an MCP server over stdio. An agent's own client can read the board and coordinate on it: board status, show an item, shout, capture an idea. It uses the same moves and refusals as the CLI, and it can never act as the person.
 - `pullboard runner add <host> --slots <n> --browser <n>`: a test run waiting in the gate pool can run on another machine over SSH. A runner uses its own machine's browser slots. Nothing changes unless you add a runner.
 - `submitInvariants` in `pullboard.json`: with `"submitGate": "landing"`, `pullboard submit` still runs these test files on every submit.
-- The machine setting `gate.memoryFloorMB`: the gate pool holds new work while free memory is under the floor, and says so. Off unless you set it.
-- The gate checks its clock budgets before running the suite.
 - The Roadmap shows the work to ship first, with shipped work below it.
 
 ### Fixed
