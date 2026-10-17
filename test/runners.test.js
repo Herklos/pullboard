@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { after, test } from 'node:test';
-import { listResources, takeResource } from '../src/resources.js';
+import { listResources, setResourceCapacity, takeResource } from '../src/resources.js';
 import { parseProcessCensus } from '../src/process-census.js';
 import { listResources as listPreRunnerResources, takeResource as takePreRunnerResource } from './fixtures/resources-pre-runners.js';
 import { runFixtureChild, runFixtureChildAsync, startFixtureChild } from './fixture-child.js';
@@ -82,8 +82,9 @@ function cli(repo, env, ...args) {
  * Make a local ssh stand-in that executes the actual worker command in a second private machine.
  * It appends "dispatched" and "returned" to <requests>.phases so a round trip can be timed by phase,
  * and `hold` ('dispatch', 'run' or 'return') keeps it alive at that phase, as a stuck runner would.
+ * `stderrLog` also copies the worker's stderr, so a test can read its result receipt.
  */
-function installSshStandIn({ bin, worker, home, machineHome, requests, starts, nodeCommand = 'node', dropFirst = false, dropAfterMarker, hold = '' }) {
+function installSshStandIn({ bin, worker, home, machineHome, requests, starts, nodeCommand = 'node', dropFirst = false, dropAfterMarker, hold = '', stderrLog }) {
   const ssh = join(bin, 'ssh');
   const source = `#!/usr/bin/env node
 import { appendFileSync, existsSync, readFileSync, watch, writeFileSync } from 'node:fs';
@@ -160,7 +161,7 @@ ${dropFirst ? `if (host.endsWith('-drop') && call === 1) {
     stdio: ['pipe', 'pipe', 'pipe'] });
   child.stdout.pipe(process.stdout);
   child.stderr.pipe(process.stderr);
-  process.stdin.pipe(child.stdin);
+${stderrLog ? `  child.stderr.on('data', part => appendFileSync(${JSON.stringify(stderrLog)}, part));\n` : ''}  process.stdin.pipe(child.stdin);
   let droppedAfterSetup = false;
   if (dropAfterMarker) {
     const waiting = waitForMarker(dropAfterMarker);
@@ -1434,6 +1435,106 @@ test('a queued run executes on a registered runner and its result comes back [C7
     }
     if (remoteRun) {
       await remoteRun.closed;
+    }
+    if (previousHome === undefined) delete process.env.PULLBOARD_HOME;
+    else process.env.PULLBOARD_HOME = previousHome;
+    if (previousMachineHome === undefined) delete process.env.PULLBOARD_MACHINE_HOME;
+    else process.env.PULLBOARD_MACHINE_HOME = previousMachineHome;
+  }
+});
+
+/** Run one action with the process's machine home pointed at another fixture machine. */
+function onMachine(machineHome, action) {
+  const previous = process.env.PULLBOARD_MACHINE_HOME;
+  process.env.PULLBOARD_MACHINE_HOME = machineHome;
+  try { return action(); }
+  finally {
+    if (previous === undefined) delete process.env.PULLBOARD_MACHINE_HOME;
+    else process.env.PULLBOARD_MACHINE_HOME = previous;
+  }
+}
+
+test('a refused remote setup fails the run by name [C7]', async (t) => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-runner-refused-')));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const home = join(dir, 'home');
+  const machineHome = join(home, '.pullboard');
+  const remoteHome = join(dir, 'worker-home');
+  const remoteMachineHome = join(remoteHome, '.pullboard');
+  const repo = join(dir, 'repo');
+  const worker = join(dir, 'second-machine');
+  const bin = join(dir, 'bin');
+  const requests = join(dir, 'ssh-requests.jsonl');
+  const remoteStderr = join(dir, 'remote-stderr.log');
+  const ran = join(dir, 'command-ran');
+  for (const folder of [repo, worker, bin, home, machineHome, remoteHome, remoteMachineHome]) mkdirSync(folder, { recursive: true });
+  writeFileSync(join(machineHome, 'settings.json'), JSON.stringify({ gateSlots: 1 }));
+  const env = {
+    ...process.env, HOME: home, PULLBOARD_HOME: home, PULLBOARD_MACHINE_HOME: machineHome,
+    PATH: `${bin}:${process.env.PATH}`, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
+    GIT_AUTHOR_NAME: 'Runner Fixture', GIT_AUTHOR_EMAIL: 'runner-fixture@example.invalid',
+    GIT_COMMITTER_NAME: 'Runner Fixture', GIT_COMMITTER_EMAIL: 'runner-fixture@example.invalid',
+  };
+  const initialized = runFixtureChild('git', ['init', '-q', '-b', 'main'], { cwd: repo, env, encoding: 'utf8' });
+  assert.equal(initialized.status, 0, initialized.context);
+  writeFileSync(join(repo, 'pullboard.json'), JSON.stringify({ gate: 'true' }));
+  writeFileSync(join(repo, 'tracked.txt'), 'committed runner source\n');
+  git(repo, env, 'add', 'pullboard.json', 'tracked.txt');
+  git(repo, env, 'commit', '-q', '-m', 'test: prepare refused runner setup fixture');
+  installSshStandIn({ bin, worker, home: remoteHome, machineHome: remoteMachineHome, requests, stderrLog: remoteStderr });
+  const added = cli(repo, env, 'runner', 'add', HOST, '--slots', '1', '--browser', '1', '--json');
+  assert.equal(added.status, 0, added.context);
+  // The runner's own pool holds rows no browser gate lease can match, so the worker's request is refused.
+  onMachine(remoteMachineHome, () => {
+    setResourceCapacity({ name: 'gate', capacity: 1, scope: 'machine', root: repo });
+    setResourceCapacity({ name: 'browser', capacity: 2, scope: 'machine', root: repo });
+  });
+
+  const previousHome = process.env.PULLBOARD_HOME;
+  const previousMachineHome = process.env.PULLBOARD_MACHINE_HOME;
+  process.env.PULLBOARD_HOME = home;
+  process.env.PULLBOARD_MACHINE_HOME = machineHome;
+  let held;
+  let run;
+  try {
+    // Fill the controller's own gate so the run goes to the runner.
+    held = await takeResource({ name: 'gate', capacity: 1, scope: 'machine', root: repo,
+      agent: 'fixture-local-holder', item: 'local-holder', kind: 'force-registered-runner' });
+    const startedAt = Date.now();
+    run = observe(startQueueController(repo, env, `node -e ${shellQuote(`require('node:fs').writeFileSync(${JSON.stringify(ran)}, 'ran')`)}`,
+      { item: 'refused-setup', queueMarker: null, firstItem: null }));
+    const deadline = new Promise(resolve => { const timer = setTimeout(() => resolve(null), 30_000); timer.unref(); }); // budget: the bar's 30-second ceiling.
+    const result = await Promise.race([run.closed, deadline]);
+    assert.ok(result, 'the controller ends the refused run within 30 seconds');
+    assert.ok(Date.now() - startedAt < 30_000); // budget: declared 30-second completion ceiling in the frozen #690 criterion.
+    assert.notEqual(result.status, 0, 'a refused remote setup is a failed run');
+    const said = `${result.stdout}${result.stderr}`;
+    // Before #684 the worker's own request is refused as a capacity mismatch; after it, as a browser capacity above the gate.
+    assert.match(result.stderr, new RegExp(`\\[RUNNER_SETUP_REFUSED\\] runner ${HOST} refused this run before it started: \\[(?:RESOURCE_CAPACITY_MISMATCH|BAD_BROWSER_SLOTS)\\]`, 'u'),
+      `the failure names the runner host and the refusal code\n${said}`);
+    assert.equal(result.stdout.includes('PULLBOARD_RUN_RESULT'), false, 'the refused run reports no test result');
+    assert.equal(existsSync(ran), false, 'the command never ran');
+
+    const receipts = readFileSync(remoteStderr, 'utf8').split('\n').filter(line => line.startsWith('PULLBOARD_RUNNER_RESULT '));
+    assert.equal(receipts.length, 1, 'the worker writes one result receipt');
+    const ended = readFileSync(requests, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.equal(ended.length, 1, 'the refused run is not retried on the runner');
+    assert.equal(ended[0].workerStarted, true);
+    assert.equal(ended[0].code, 0, 'the worker exits after its receipt');
+
+    const remote = onMachine(remoteMachineHome, () => listResources({ scope: 'machine', root: repo }));
+    for (const resource of remote) {
+      assert.deepEqual([resource.holders.length, resource.line.length], [0, 0], `runner pool ${resource.name} keeps no holder or waiter`);
+    }
+    const local = onMachine(machineHome, () => listResources({ scope: 'machine', root: repo }));
+    assert.deepEqual(local.find(resource => resource.name === `runner:${HOST}`)?.holders ?? [], [], 'the runner slot is released');
+    assert.deepEqual(local.find(resource => resource.name === 'gate').line, [], 'the run is not left waiting in the controller queue');
+  } finally {
+    held?.release();
+    if (run) {
+      const ceiling = new Promise(resolve => { const timer = setTimeout(resolve, 20_000); timer.unref(); }); // budget: a hung controller must not hold the test file open.
+      if (!(await Promise.race([run.closed.then(() => true), ceiling]))) run.child.kill('SIGTERM');
+      await run.closed;
     }
     if (previousHome === undefined) delete process.env.PULLBOARD_HOME;
     else process.env.PULLBOARD_HOME = previousHome;
