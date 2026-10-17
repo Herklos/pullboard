@@ -1,7 +1,7 @@
 /** Registered SSH runner execution stays inside a committed, secret-free worker checkout [C7]. */
 import assert from 'node:assert/strict';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
-import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, watch, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { DatabaseSync } from 'node:sqlite';
@@ -435,25 +435,13 @@ function readRemoteGateHolders(file) {
   } finally { db.close(); }
 }
 
-/** Wait for a marker from an external queue observer, with a ceiling for a broken fixture. */
+/** Wait for the marker itself: a missed file notification must not hide observable readiness. */
 async function waitForMarker(path) {
-  if (existsSync(path)) return;
-  const watcher = watch(dirname(path), { persistent: false });
-  let timer;
-  try {
-    const changed = new Promise((resolve, reject) => {
-      const check = (_event, filename) => {
-        if ((filename === null || String(filename) === basename(path)) && existsSync(path)) resolve();
-      };
-      watcher.on('change', check);
-      watcher.once('error', reject);
-      check('rename', basename(path));
-    });
-    if (existsSync(path)) return;
-    await Promise.race([changed, new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`fixture marker did not arrive: ${path}`)), 20_000); // budget: hang ceiling for the queue-to-parent handoff.
-    })]);
-  } finally { clearTimeout(timer); watcher.close(); }
+  const deadline = Date.now() + 20_000; // budget: unchanged hang ceiling for the queue-to-parent handoff.
+  while (!existsSync(path)) {
+    if (Date.now() >= deadline) throw new Error(`fixture marker did not arrive: ${path}`);
+    await new Promise(resolve => setTimeout(resolve, 20)); // budget: polling interval for the actual readiness marker.
+  }
 }
 
 /** Poll a concrete process/resource state; the deadline only bounds a broken cleanup handshake. */
