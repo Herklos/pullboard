@@ -68,7 +68,8 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
   const requestMode = Boolean(readOnly && requests && !snapshot && transportModule);
   if (signIn !== null && (typeof signIn !== 'string' || !signIn.startsWith('/') || signIn.startsWith('//'))) throw new TypeError('signIn must be a path on the hosting site, or null');
   const hostedOptions = JSON.stringify({ local: Boolean(hostedLocal) && !snapshot, relaySession: Boolean(relaySession), signIn }).replace(/</g, '\\u003c');
-  const releaseInfo = hostedReleaseInfo(hostedReleaseVersion, hostedReleaseVersions, Boolean(hostedLocal) && !snapshot);
+  const releaseHosted = Boolean(hostedLocal) && !snapshot;
+  const releaseInfo = hostedReleaseInfo(hostedReleaseVersion, hostedReleaseVersions, releaseHosted);
   const css = stylesheet ?? (snapshot ? 'view.css' : transportModule ? '/view.css' : '/view.css?k=' + encodeURIComponent(key));
   const cssAttribute = css.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
   return `<!doctype html>
@@ -310,9 +311,10 @@ let detailRead = null;
 const addressedShouts = new Map();
 const $ = (id) => document.getElementById(id);
 // The update note from src/view/hosted-release.js (#632): only a confirmed read of this machine's view says how far behind it is.
-const renderHostedReleaseNote = (${hostedReleaseNote.toString()})(${releaseInfo}, { $, keep, distance: (${hostedReleaseDistance.toString()}),
+// Only the hosted page builds it; every other page draws nothing and never touches the DOM for it.
+const renderHostedReleaseNote = ${releaseHosted ? `(${hostedReleaseNote.toString()})(${releaseInfo}, { $, keep, distance: (${hostedReleaseDistance.toString()}),
   readable: () => hosted.local && localConfirmed && Boolean(localSession) && connection.base === localSession.origin && !transportModule && !transport,
-  project: (project = data?.project) => project?.releaseNotes ? project : data?.projects?.find((entry) => entry.ok && entry.releaseNotes) });
+  project: (project = data?.project) => project?.releaseNotes ? project : data?.projects?.find((entry) => entry.ok && entry.releaseNotes) })` : '() => {}'};
 
 const hostedState = (${hostedState.toString()});
 const hostedBrowser = (${hostedBrowser.toString()});

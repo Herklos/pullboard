@@ -61,6 +61,16 @@ function onwardOf(page) {
 }
 
 /**
+ * The relay's own asset at a path, as its production handler serves it, or null when it serves none there. Why: the
+ * relay page loads its own scripts (such as /relay/screens.js), and answering those with the view's styles throws in Chrome.
+ */
+async function relayAsset(pathname) {
+  let body = null;
+  const handled = await createRelayBrowserHandler({ authenticate: async () => ({ kind: 'session' }) })({ method: 'GET', url: pathname, headers: {} }, { writeHead() {}, end(content) { body = content ?? ''; } });
+  return handled ? body : null;
+}
+
+/**
  * Stand in for the hosted page at its real origin, and for this machine's default view address. Chrome answers every
  * request for https://app.pullboard.dev with the cockpit the relay would serve there and the view's styles. A request
  * for http://127.0.0.1:4890 goes to the test view, as if it held the default address, or meets a closed port when the
@@ -110,7 +120,8 @@ async function hostedStandIn(chrome, pages, styles, local) {
       }
       const document = resourceType === 'Document';
       const page = pages[address.search.slice(1)] ?? (address.search === '?relay' ? pages.relay : pages.anonymous);
-      const asset = pages.assets?.[address.pathname];
+      // The transport stays each test's own: one that names none means the relay module never loads.
+      const asset = pages.assets?.[address.pathname] ?? (document || address.pathname === '/relay/client.js' ? null : await relayAsset(address.pathname));
       await chrome.send('Fetch.fulfillRequest', {
         requestId, responseCode: 200,
         responseHeaders: [
