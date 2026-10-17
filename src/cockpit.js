@@ -367,10 +367,9 @@ async function connectLocal() {
   let reply;
   try { reply = await fetch(base + '/local/protocol', { signal: AbortSignal.timeout(3000), credentials: 'omit', redirect: 'error' }); }
   catch {
-    // A view from before 0.8.29 answers without the header that lets this page read it; an opaque answer still
-    // says something listens there, where a closed port answers nothing at all.
-    const listening = await fetch(base + '/local/protocol', { mode: 'no-cors', signal: AbortSignal.timeout(3000), credentials: 'omit' }).then(() => true, () => false);
-    localNote(listening ? 'too-old' : 'not-running');
+    // One discovery request is all this page makes of this device (P5), so a view too old to answer it reads as none,
+    // and the state names that case in its hint.
+    localNote('not-running');
     return 'unreachable';
   }
   let protocol = null;

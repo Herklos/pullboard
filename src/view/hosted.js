@@ -24,8 +24,8 @@ const WAYS_IN = [
 export function hostedMarkup(localView) {
   const ways = WAYS_IN.map(([title, line], n) => `<div class="way"><dt>${title}</dt><dd>${line}${n === 2 ? ' <a class="ghost" id="local-note-sign-in" hidden>Sign in with GitHub</a>' : ''}</dd></div>`).join('');
   return `<section class="hosted" id="local-note" role="status" hidden>
-    <div class="card-panel hosted-card"><h2 id="local-note-title"></h2><p id="local-note-text"></p><p class="hosted-hint" id="local-note-hint" hidden></p>
-    <div class="hosted-cmd" id="local-note-cmd" hidden><code id="local-note-code"></code><button class="ghost" id="local-note-copy" type="button">Copy</button></div>
+    <div class="card-panel hosted-card"><h2 id="local-note-title"></h2><p id="local-note-text"></p>
+    <div class="hosted-cmd" id="local-note-cmd" hidden><code id="local-note-code"></code><button class="ghost" id="local-note-copy" type="button">Copy</button></div><p class="hosted-hint" id="local-note-hint" hidden></p>
     <p class="hosted-step" id="local-note-links" hidden><a class="go" id="local-note-view" href="${localView}/local/view" hidden>Open the local view</a><a class="go" id="local-note-go" hidden>Sign in with GitHub</a><button class="go" id="local-note-retry" type="button" hidden>Try again</button></p></div>
     <section class="card-panel hosted-ways" id="ways-in" aria-labelledby="ways-in-title" hidden><h2 id="ways-in-title">Ways in</h2><dl>${ways}</dl></section>
   </section>`;
@@ -53,7 +53,7 @@ export function hostedBrowser(agent) {
  * What the hosted page says in one state, or null for none. A "state" stands in for the board; a "note" sits
  * over a list that shows; "wait" is the line on screen while the browser may ask its question.
  *
- * @param {string|null} state - asking, not-running, blocked, mismatch, too-old, problem, signed-out, no-linked, unpaired, linked-failed or local-failed.
+ * @param {string|null} state - asking, not-running, blocked, mismatch, problem, signed-out, no-linked, unpaired, linked-failed or local-failed.
  * @param {{browser?: string, linked?: string[], detail?: string}} [facts] - The browser's name, the linked boards this browser cannot open, and a refusal's own words.
  * @returns {null|{state: string, kind: string, heading: string, text: string, hint?: string, command?: string, button?: string, side?: string}}
  */
@@ -63,12 +63,11 @@ export function hostedState(state, facts = {}) {
   const chromium = ['Chrome', 'Edge', 'Opera'].includes(browser);
   const models = {
     'asking': { kind: 'wait', heading: 'Looking for Pullboard on this computer', text: 'Your browser may ask to let this page reach apps on this device. Allow it to open the boards running here.' },
-    'not-running': { kind: 'state', heading: 'Start Pullboard on this computer', text: 'This page cannot reach a local view on this computer. Run this in a terminal, then try again.', command: 'pullboard view', button: 'retry', side: 'Boards on this computer show here once pullboard view runs.', offline: 'not connected' },
+    'not-running': { kind: 'state', heading: 'Start Pullboard on this computer', text: 'This page cannot reach a local view on this computer. Run this in a terminal, then try again.', command: 'pullboard view', hint: 'A Pullboard older than 0.8.29 cannot answer this page, so update it first with npm i -g pullboard.', button: 'retry', side: 'Boards on this computer show here once pullboard view runs.', offline: 'not connected' },
     'blocked': { kind: 'state', heading: 'Let this page reach Pullboard', text: browser + ' has refused this page access to apps on this device, so it cannot open the board running here.',
       hint: chromium ? 'In ' + browser + ', click the icon at the left of the address bar, turn on Local network access, then try again.' : 'Allow this site to reach apps on this device in the browser\'s site settings, then try again.',
       button: 'retry', side: 'Boards on this computer show here once ' + (browser === 'This browser' ? 'the browser' : browser) + ' allows it.', offline: 'not connected' },
     'mismatch': { kind: 'state', heading: 'Update Pullboard on this computer', text: 'The Pullboard view running here does not match this page. Update Pullboard, restart pullboard view, then try again.', command: 'npm i -g pullboard', button: 'retry', side: 'Boards on this computer show here once the versions match.', offline: 'not connected' },
-    'too-old': { kind: 'state', heading: 'Update Pullboard on this computer', text: 'Something answered at the local view\'s address without the connection this page needs, as a Pullboard older than 0.8.29 does. Update Pullboard, restart pullboard view, then try again.', command: 'npm i -g pullboard', button: 'retry', side: 'Boards on this computer show here once Pullboard is updated.', offline: 'not connected' },
     'problem': { kind: 'state', heading: 'Open the local view', text: facts.detail || 'This page could not take the connection the local view sent back.', button: 'view', side: 'Boards on this computer show in the local view.', offline: 'not connected' },
     'signed-out': { kind: 'state', heading: 'Sign in to pair this browser', text: 'This link pairs this browser with your boards. Sign in with GitHub to finish, and they open here.', button: 'sign-in', side: 'Your linked boards show here after you sign in.', offline: 'not signed in' },
     'no-linked': { kind: 'state', heading: 'No linked boards yet', text: 'Your account has no linked boards. Link them from the computer that runs them:', command: 'pullboard relay on --all', side: 'Linked boards show here.' },

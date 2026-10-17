@@ -493,6 +493,32 @@ test('every hosted page state says what it is and what to do next [N26,H5]', { t
       };
     })())`;
     /** Open the hosted page at this address and read the state it settles in. */
+    // Every visible control beside a reference of its own kind that sees only the browser's own styles: a control that
+    // matches it on appearance, background, border and radius is a native default the view never styled.
+    const native = `JSON.stringify((() => {
+      const host = document.body.appendChild(document.createElement('div'));
+      const root = host.attachShadow({ mode: 'open' });
+      const signature = (element) => { const style = getComputedStyle(element); return [style.appearance, style.backgroundColor, style.borderTopStyle, style.borderTopWidth, style.borderRadius].join(' | '); };
+      const found = [...document.querySelectorAll('button, input, select, textarea')].filter((element) => element.type !== 'hidden' && element.getClientRects().length > 0).filter((element) => {
+        const probe = root.appendChild(document.createElement(element.tagName));
+        if (element.type) probe.type = element.type;
+        return signature(element) === signature(probe);
+      }).map((element) => element.outerHTML.slice(0, 90));
+      host.remove();
+      return found;
+    })())`;
+    /** Check every visible control at phone and desktop width, in light and in dark. */
+    const styledControls = async (state) => {
+      for (const width of [390, 1280]) {
+        await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
+        for (const theme of ['light', 'dark']) {
+          await chrome.stable(`document.documentElement.dataset.theme = '${theme}'`);
+          assert.deepEqual(JSON.parse(await chrome.stable(native)), [], `${state}: no visible control keeps the browser's native look at ${width}px in ${theme}`);
+        }
+      }
+      await chrome.stable('delete document.documentElement.dataset.theme');
+      await chrome.send('Emulation.clearDeviceMetricsOverride');
+    };
     const open = async (address, state) => {
       await chrome.send('Page.navigate', { url: HOSTED + '/' + address });
       await chrome.waitFor(`location.search === ${JSON.stringify(address.split('#')[0])} && document.querySelector('#local-note')?.dataset.state === ${JSON.stringify(state)} && !document.querySelector('#local-note').hidden`, 20_000); // budget: hang ceiling for one refused loopback request and an empty relay list.
@@ -504,6 +530,7 @@ test('every hosted page state says what it is and what to do next [N26,H5]', { t
       assert.deepEqual(seen.ways, ['The local view', 'This computer through pullboard.dev', 'Your phone and other devices', 'A second computer'], `${state}: the Ways in panel lists every route`);
       for (const command of ['pullboard view', 'pullboard relay on --all', 'pullboard relay pair', 'pullboard relay join <code>']) assert.ok(seen.waysText.includes(command), `${state}: Ways in names ${command}`);
       assert.ok(seen.side, `${state}: the empty sidebar says what fills it`);
+      await styledControls(state);
       return seen;
     };
     const retry = [['Try again', null]];
@@ -549,13 +576,14 @@ test('every hosted page state says what it is and what to do next [N26,H5]', { t
     for (const permissions of [['loopbackNetwork', 'localNetwork', 'localNetworkAccess'], ['localNetworkAccess']]) {
       try { await chrome.send('Browser.grantPermissions', { origin: HOSTED, permissions }); break; } catch { /* a name this Chrome does not have */ }
     }
-    // A view from before 0.8.29 refuses the hosted page without the header that would let it read the refusal.
+    // A view from before 0.8.29 refuses the hosted page without the header that would let it read the refusal. The page
+    // makes one discovery request of this device (P5), so it reads as no view, and the state's hint names the update.
     old = createServer((req, res) => { res.writeHead(403, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'this view needs its own address and secret: open the link pullboard view printed' })); });
     await new Promise((ready) => old.listen(0, '127.0.0.1', ready));
     stand.local = 'http://127.0.0.1:' + old.address().port;
-    const outdated = await open('?old', 'too-old');
-    assert.equal(outdated.heading, 'Update Pullboard on this computer', 'an old view is told apart from none');
-    assert.equal(outdated.command, 'npm i -g pullboard', 'the next step updates Pullboard');
+    const outdated = await open('?old', 'not-running');
+    assert.equal(outdated.heading, 'Start Pullboard on this computer');
+    assert.equal(outdated.hint, 'A Pullboard older than 0.8.29 cannot answer this page, so update it first with npm i -g pullboard.', 'the state names the update an old view needs');
     assert.deepEqual(outdated.steps, retry);
     stand.local = view.base;
     await chrome.send('Page.navigate', { url: HOSTED + '/?list' });
@@ -587,6 +615,7 @@ test('every hosted page state says what it is and what to do next [N26,H5]', { t
       await proofShot(chrome, width === 390 ? 'hosted-list-phone' : 'hosted-list', width);
     }
     await chrome.stable('delete document.documentElement.dataset.theme');
+    await styledControls('list');
     assert.deepEqual({ note: list.note, ways: list.ways, side: list.side }, { note: true, ways: true, side: true }, 'the list shows with no state, panel or hint over it');
     assert.equal(list.heading, 'hosted-states', 'the sidebar names the board shown');
     assert.equal(list.source, 'this computer', 'with a quiet label for where it comes from');
