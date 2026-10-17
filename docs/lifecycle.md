@@ -147,9 +147,9 @@ Each move checks its guards in this order and refuses with the first one that do
 | ALREADY_MERGED | the item has no recorded merge receipt | a merged item cannot be reopened |
 | LANDING_FAILURE_REQUIRED | a verified item note names the failing test and landing merge commit | cite the recorded batch, or name the test and merge commit in a manual note |
 | LAND_HEADER | a displayed merge command fits the commit-header limit (accept result) | shorten the item title or cited rows so the merge header fits |
-| ENGINE_VERSION | a verdict that implies items replays only under engine 18 or later (accept result) | upgrade Pullboard on every linked device before using --implies |
+| ENGINE_VERSION | a verdict that implies items replays only under engine 20 or later (accept result) | upgrade Pullboard on every linked device before using --implies |
 | LAND_HEADER | a displayed merge command fits the commit-header limit (reject result) | shorten the item title or cited rows so the merge header fits |
-| ENGINE_VERSION | a verdict that implies items replays only under engine 18 or later (reject result) | upgrade Pullboard on every linked device before using --implies |
+| ENGINE_VERSION | a verdict that implies items replays only under engine 20 or later (reject result) | upgrade Pullboard on every linked device before using --implies |
 | BAD_DECISION | a verdict is accept or reject | pullboard verify <id> accept, or reject --reason CODE --note "..." |
 
 For check diagnostics, a refusal from a failed or unverifiable check includes an output digest, sanitized tail, and a private full-output path in the CLI message (also `error.message` in JSON). The artifact is owner-readable only. If it cannot be saved, the tail remains available and the message names the storage error instead of claiming a path.
