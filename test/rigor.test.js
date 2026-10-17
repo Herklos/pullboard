@@ -201,8 +201,11 @@ test('a cause key is checked, recorded on reject and reopen, and the person alon
   board.submit(second);
   const move = prepareEngineMove(board.board, 'verify', [second, { agentId: 'app-2', decision: 'REJECT', reason: 'TEST_FAILURE', note: 'red', cause: 'row:G1', head: store.getItem(board.board, second).item_commit, digest: 'digest:Sealed', policy: 'any' }]);
   assert.equal(move.engine, CAUSE_ENGINE);
-  assert.throws(() => applyEngineMove(board.board, { ...move, engine: CAUSE_ENGINE - 1 }, { sequence: 1, at: new Date().toISOString() }),
-    (error) => error.code === 'RELAY_MOVE', 'an engine-12 move cannot carry a cause key');
+  for (const older of [19, CAUSE_ENGINE - 1]) {
+    assert.throws(() => applyEngineMove(board.board, { ...move, engine: older }, { sequence: 1, at: new Date().toISOString() }),
+      (error) => error.code === 'RELAY_MOVE', `an engine-${older} move cannot carry a cause key`);
+    assert.equal(store.getItem(board.board, second).item_status, 'submitted', `the engine-${older} refusal changes nothing`);
+  }
   board.close();
 
   // The coordinator's reopen records --cause through the CLI.

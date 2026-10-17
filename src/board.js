@@ -10,11 +10,14 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { boardNotWritable } from './board-access.js';
 import { briefFiles, briefSections } from './brief.js';
 import { COORDINATOR } from './config.js';
 import { ENGINE_VERSION, GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, effectiveGuards, storeTriggers } from './machine.js';
 import { Refused } from './refused.js';
 import { causeProblem, requireNeverAgain } from './rigor.js';
+import { barCorrectionFields } from './bar-corrections.js';
+import { factReference } from './fact-reference.js';
 import { parseSpec } from './spec.js';
 
 export const ACCEPT_REASON = 'CRITERION_MET';
@@ -192,7 +195,7 @@ export function openBoard(file, clock = systemClock, { isMain } = {}) {
         boardVersion = current.prepare('PRAGMA user_version').get().user_version;
         logVersion = readEventLogVersion(current);
       } catch (error) {
-        throw boardBusyError(file, startedAt, error);
+        throw boardNotWritable(file, boardBusyError(file, startedAt, error));
       } finally {
         current?.close();
       }
@@ -223,7 +226,7 @@ export function openBoard(file, clock = systemClock, { isMain } = {}) {
     return board;
   } catch (error) {
     try { db?.close(); } catch {}
-    throw boardBusyError(file, startedAt, error);
+    throw boardNotWritable(file, boardBusyError(file, startedAt, error));
   }
 }
 
@@ -737,11 +740,11 @@ export function validateItemAddition(board, { by, lane, title, criterion = '', p
  * @param {number} id
  * @param {{ agentId: string, brief?: string, route?: string, criterion?: string, check?: string, after?: number[] }} change
  */
-export function editItem(board, id, { agentId, brief, route, criterion, check, after, checkBaseline }) {
+export function editItem(board, id, { agentId, brief, route, criterion, check, after, checkBaseline, reason }) {
   atomic(board, () => {
     const stored = itemById(board, id);
     const expiredHolder = stored.item_status === 'claimed' && !isHeld(board, stored) ? stored.item_owner : null;
-    const { item, next, command, unfreeze } = validateItemEdit(board, id, { agentId, brief, route, criterion, check, after });
+    const { item, next, command, unfreeze, bar } = validateItemEdit(board, id, { agentId, brief, route, criterion, check, after, reason });
     const baseline = normalizeCheckBaseline(agentId, command, checkBaseline);
     const pendingFields = [
       ...(next.item_criterion !== item.item_criterion ? ['criterion'] : []),
@@ -766,6 +769,7 @@ export function editItem(board, id, { agentId, brief, route, criterion, check, a
       ...(pendingRefreeze ? { pendingRefreeze: pendingFields } : {}),
       ...(clearFrozen && item.item_frozen_digest ? { unfrozen: item.item_frozen_digest } : {}),
       ...(expiredHolder ? { expiredHolder } : {}),
+      ...bar,
     });
     if (pendingRefreeze) {
       insertShout(board, {
@@ -778,8 +782,8 @@ export function editItem(board, id, { agentId, brief, route, criterion, check, a
   });
 }
 
-/** Validate an edit without side effects, so a refused change never starts a shell baseline. */
-export function validateItemEdit(board, id, { agentId, brief, route, criterion, check, after }) {
+/** Validate an edit without side effects, so a refused change never starts a shell baseline; a bar correction needs a reason [B31]. */
+export function validateItemEdit(board, id, { agentId, brief, route, criterion, check, after, reason }) {
   const engine = board.executionEngineVersion ?? ENGINE_VERSION;
   if (after !== undefined && engine < 10) {
     throw new Refused('ENGINE_VERSION', `editing item dependencies requires engine 10; this board uses engine ${engine}; upgrade Pullboard before using --after`);
@@ -823,7 +827,7 @@ export function validateItemEdit(board, id, { agentId, brief, route, criterion, 
   }
   checkRouted({ brief: next.item_brief, route: next.item_route, criterion: next.item_criterion, check: next.item_check });
   const unfreeze = next.item_criterion !== item.item_criterion || next.item_check !== item.item_check;
-  return { item, next, command, unfreeze };
+  return { item, next, command, unfreeze, bar: barCorrectionFields(board, item, next, { reason }) };
 }
 
 /** Normalize an explicitly supplied check only when its author is the coordinator [V2]. */
@@ -2064,19 +2068,7 @@ export function events(board, { itemId } = {}) {
 /** Fact labels distinguish observations from judgements reserved to an item's live holder [B29,B30]. */
 export const FACT_KINDS = Object.freeze(['capture', 'measurement', 'note', 'diff', 'decision', 'rejection', 'supersession', 'root-cause']);
 const FACT_JUDGEMENTS = new Set(['decision', 'rejection', 'supersession', 'root-cause']);
-
-/** Validate a portable code binding without reading source on replicas that hold only board data [B32,H7]. */
-export function factReference(ref) {
-  if (ref === null || ref === undefined) return null;
-  const parts = typeof ref === 'string' && /^([^\r\n\0]+):(\d+)(?:-(\d+))?@([0-9a-f]{40})$/iu.exec(ref);
-  if (!parts) throw new Refused('BAD_FACT_REF', 'a fact reference needs path:line[-line]@full-sha with all 40 hexadecimal characters; use the full git commit id');
-  const [, path, first, last, commit] = parts;
-  const start = Number(first), end = Number(last ?? first);
-  if (path.startsWith('/') || path.includes('\\') || /^[A-Za-z]:/u.test(path) || path.split('/').some((part) => !part || part === '.' || part === '..') || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 1 || end < start) {
-    throw new Refused('BAD_FACT_REF', 'a fact reference needs a relative repo path and a positive ascending line range; use path:line[-line]@full-sha');
-  }
-  return { path, start, end, commit: commit.toLowerCase() };
-}
+export { factReference };
 
 /** Give facts the same stamped identity on CLI, API, export and replica reads; a never-again keeps its cause [B29,B31,D1]. */
 function factFromEvent(event) {
