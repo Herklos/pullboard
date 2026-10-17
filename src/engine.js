@@ -5,7 +5,7 @@ import { recordedRefusal } from './recorded-refusal.js';
 import { BAR_ENGINE, carriesBarReason } from './bar-corrections.js';
 import { carriesImplies, IMPLIES_ENGINE } from './implies.js';
 import { CHECK_ACCEPT_ENGINE } from './check-accept.js';
-import { ENGINE_VERSION, VERDICT_REVIEW_ENGINE } from './machine.js';
+import { CAUSE_ENGINE, ENGINE_VERSION, VERDICT_REVIEW_ENGINE } from './machine.js';
 import { Refused } from './refused.js';
 import { requestMoveProblem, recordRequestMove } from './relay-requests.js';
 import { relayMoveActor, relaySenderProblem, validRelaySender } from './relay-sender.js';
@@ -28,6 +28,7 @@ const OPERATION_ENGINE = Object.freeze({ reopen: 8, recordLandingBatch: 8, recor
 /** Dependency edits, bar reasons and sealed review metadata retain their distinct recorded engine meanings. */
 function minimumOperationEngine(operation, args, board) {
   const options = args[1];
+  const given = (name) => Boolean(options && typeof options === 'object' && Object.hasOwn(options, name) && options[name] !== undefined && options[name] !== null && options[name] !== false);
   if (board && ['recordLandingBatch', 'finishLandingBatch'].includes(operation)) {
     const id = operation === 'recordLandingBatch' ? args[0]?.batch?.id : args[0]?.id;
     const prior = id && store.landingBatches(board).find(batch => batch.id === id);
@@ -36,6 +37,7 @@ function minimumOperationEngine(operation, args, board) {
   if (operation === 'verify' && options && Object.hasOwn(options, 'review')) return VERDICT_REVIEW_ENGINE;
   if (operation === 'recordLandingBatch' && args[0]?.batch
     && ['items', 'candidates'].some(key => Array.isArray(args[0].batch[key]) && args[0].batch[key].some(entry => entry && typeof entry === 'object' && Object.hasOwn(entry, 'reviewedCommit')))) return VERDICT_REVIEW_ENGINE;
+  if (['verify', 'reopen', 'appendFact'].includes(operation) && (given('cause') || given('neverAgain') || given('asPerson'))) return CAUSE_ENGINE;
   if (carriesImplies(operation, args)) return IMPLIES_ENGINE;
   if (carriesBarReason(operation, args)) return BAR_ENGINE;
   return operation === 'editItem' && options && Object.hasOwn(options, 'after') && options.after !== undefined

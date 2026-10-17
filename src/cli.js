@@ -77,6 +77,7 @@ import { tour } from './tour.js';
 import { commandOutput, refusalDocument } from './json.js';
 import { forgetProject, listApiProjects, registerProjectAndLink, registeredProjectRootsSnapshot } from './projects.js';
 import { milestoneRoadmap } from './roadmap.js';
+import { rigorLines, rigorReport } from './rigor.js';
 import { listResources, memoryVerdict, readMachineMemory, runnerResourceStatus } from './resources.js';
 import { citedTestFiles, rowEvidence, rowStage } from './evidence.js';
 import { exportView, serveView } from './serve.js';
@@ -317,6 +318,8 @@ const OPTIONS = {
   commit: { type: 'string' },
   ref: { type: 'string' },
   supersedes: { type: 'string' },
+  cause: { type: 'string' },
+  'never-again': { type: 'boolean' },
   implies: { type: 'string' },
   owns: { type: 'string' },
   help: { type: 'boolean', short: 'h' },
@@ -460,7 +463,7 @@ function checkMainVerifier(ctx, board, values) {
  */
 function personMode(ctx, me, values) {
   if (values.as === undefined) return false;
-  if (values.as !== 'person') throw new Refused('USAGE', '--as person is supported for answer and decisions');
+  if (values.as !== 'person') throw new Refused('USAGE', '--as person is supported for answer, decisions and fact --never-again');
   if (!ctx.info.isMain || me.id !== COORDINATOR) {
     throw new Refused('B26_PERSON_ANSWER', 'only the main checkout can act as the person; ask your coordinator to answer or pass this decision');
   }
@@ -2242,6 +2245,14 @@ function readCommands(io, { first, second, rest, values }) {
       }
       return 0;
     },
+    rigor: () => {
+      if (first || second || rest.length) throw new Refused('USAGE', 'pullboard rigor takes no arguments');
+      const ctx = context(io);
+      const report = withBoard(ctx, (board) => rigorReport(store.events(board), { person: store.PERSON }));
+      io.result?.(report);
+      for (const line of rigorLines(report)) io.say(line);
+      return 0;
+    },
     log: () => {
       const ctx = context(io);
       const itemId = first ? idArg(first) : undefined;
@@ -2536,7 +2547,7 @@ async function verifyHere(ctx, id, { second, values }) {
     const previous = recovered?.args[1];
     if (recovered?.operation === 'verify' && recovered.args[0] === id && previous?.agentId === me.id &&
         previous.decision === decision && previous.reason === values.reason &&
-        previous.note === (textArg(ctx.io, values, 'note') ?? '')) {
+        previous.note === (textArg(ctx.io, values, 'note') ?? '') && previous.cause === (decision === 'REJECT' ? values.cause : undefined)) {
       if (decision === 'ACCEPT' && !recordedRecovery(board, recovered)) {
         const item = store.getItem(board, id);
         const commit = resolveCommit(root, item.item_commit);
@@ -2616,6 +2627,7 @@ async function verifyHere(ctx, id, { second, values }) {
       decision,
       reason: values.reason,
       note: textArg(ctx.io, values, 'note') ?? '',
+      ...(decision === 'REJECT' && values.cause !== undefined ? { cause: values.cause } : {}),
       head,
       digest,
       policy: ctx.config.verify.policy,
@@ -2991,11 +3003,15 @@ function workCommands(io, args) {
       return 0;
     }),
     fact: () => act(async (ctx, board, me) => {
-      if (!first || !second || rest.length !== 1) throw new Refused('USAGE', 'pullboard fact <id> <kind> <text> [--supersedes <fact-id>] [--ref path:lines@full-sha] [--implies <ids>]');
+      if (!first || !second || rest.length !== 1) throw new Refused('USAGE', 'pullboard fact <id> <kind> <text> [--supersedes <fact-id>] [--ref path:lines@full-sha] [--implies <ids>] [--cause <key> --never-again --as person]');
       const id = idArg(first);
       const implies = parseImplies(values.implies);
+      const asPerson = values.as === 'person' && personMode(ctx, me, values);
+      if (asPerson) requirePersonChannel(ctx.io.personChannel);
+      const marked = asPerson || values['never-again'] || values.cause !== undefined
+        ? { cause: values.cause ?? null, neverAgain: Boolean(values['never-again']), asPerson, channel: ctx.io.personChannel ?? 'terminal' } : {};
       const fact = await ordered(ctx, board, 'appendFact', [id, { agentId: me.id, kind: second,
-        text: rest[0], supersedes: values.supersedes ?? null, ref: values.ref ?? null, ...(implies ? { implies } : {}) }]);
+        text: rest[0], supersedes: values.supersedes ?? null, ref: values.ref ?? null, ...(implies ? { implies } : {}), ...marked }]);
       io.result?.({ item: id, fact });
       io.say(`fact ${fact.id} appended to #${id} as ${fact.kind}`);
       return 0;
@@ -3300,7 +3316,8 @@ function workCommands(io, args) {
       return 0;
     }),
     reopen: () => act(async (ctx, board, me) => {
-      const result = await ordered(ctx, board, 'reopen', [idArg(first), { agentId: me.id, note: textArg(io, values, 'note') ?? '' }]);
+      const result = await ordered(ctx, board, 'reopen', [idArg(first), { agentId: me.id, note: textArg(io, values, 'note') ?? '',
+        ...(values.cause !== undefined ? { cause: values.cause } : {}) }]);
       io.result?.(result);
       io.say(result.landingFailure
         ? `reopened #${first} after landing failure; previous accept remains recorded at ${result.commit.slice(0, 12)}`
@@ -3975,8 +3992,8 @@ async function runCommand(argv, io) {
   }
   const args = { first, second, rest, values };
   try {
-    if (values.as === 'person' && !['answer', 'decisions'].includes(command)) {
-      throw new Refused('USAGE', '--as person works only with pullboard answer or decisions');
+    if (values.as === 'person' && !['answer', 'decisions', 'fact'].includes(command)) {
+      throw new Refused('USAGE', '--as person works only with pullboard answer, decisions, or fact --never-again');
     }
     if (command === 'tour') return tour(io);
     if (command === 'lifecycle') {

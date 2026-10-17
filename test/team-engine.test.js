@@ -83,7 +83,7 @@ test('engine 12 acceptance receipts stay exact and sealed re-review needs a newe
   }
   const originalVerdicts = store.verdictsFor(one, 1);
   const reReview = { ...prepareEngineMove(one, 'verify', [1, verdict({ commit: COMMIT, head: COMMIT, trunk: TRUNK, paths: ['web/feature.js'] })], { id: 'sealed-new-review' }), engine: VERDICT_REVIEW_ENGINE };
-  assert.equal(reReview.engine, 25, 'the feature replays at its introduction version even after a later writer upgrade');
+  assert.equal(reReview.engine, 33, 'the feature replays at its introduction version even after a later writer upgrade');
   const oldBefore = oldExchange.exportBoard(old);
   assert.throws(() => oldEngine.applyEngineMove(old, reReview, { sequence: 3, at: AT }), { code: 'ENGINE_VERSION' });
   assert.deepEqual(oldExchange.exportBoard(old), oldBefore, 'an actual old client refuses the future envelope before changing its prefix');
@@ -96,6 +96,22 @@ test('engine 12 acceptance receipts stay exact and sealed re-review needs a newe
   assert.equal(store.verdictsFor(one, 1).length, 2);
   assert.deepEqual(store.verdictsFor(one, 1).slice(0, 1), originalVerdicts, 'the old proof remains byte-for-byte unchanged');
   assert.deepEqual(exportBoard(one), exportBoard(two));
+});
+
+test('a rejection carrying both cause and checked review keeps the newer review minimum [E8,H16,D1]', t => {
+  const board = submitted(t);
+  const move = prepareEngineMove(board, 'verify', [1, {
+    ...verdict({ commit: COMMIT, head: COMMIT, trunk: TRUNK, paths: ['web/feature.js'] }),
+    decision: 'REJECT', reason: 'TEST_FAILURE', note: 'the checked feature failed', cause: 'row:G1',
+  }], { id: 'cause-and-checked-review' });
+  const before = exportBoard(board);
+  assert.throws(() => applyEngineMove(board, { ...move, engine: 30 }, { sequence: 1, at: AT }), { code: 'RELAY_MOVE' });
+  assert.deepEqual(exportBoard(board), before, 'a cause key cannot downgrade checked-review metadata or advance the prefix');
+  const result = applyEngineMove(board, move, { sequence: 1, at: AT });
+  assert.equal(result.error, undefined);
+  const event = store.events(board, { itemId: 1 }).findLast(event => event.event_kind === 'reject');
+  assert.equal(JSON.parse(event.event_detail).cause, 'row:G1');
+  assert.deepEqual(JSON.parse(event.event_detail).review, move.args[1].review);
 });
 
 test('malformed sealed reviews cannot append proof or bind a different submission [E8,H16,V8]', t => {

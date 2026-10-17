@@ -988,6 +988,8 @@ test('submit, accept and reject refuse in the declared order, one failure peeled
         judge(built, 'web-2', { reason: bad, policy: 'any' }),
         judge(built, 'web-2', { reason: bad, policy: 'any', digest: 'digest:Page' }),
         judge(built, 'web-2', { reason: good, policy: 'any', digest: 'digest:Page' }),
+        // Only a reject reads a cause key, so only its order has the malformed-cause step (#713).
+        ...(verb === 'reject' ? [judge(built, 'web-2', { reason: good, policy: 'any', digest: 'digest:Page', note: 'reverted the fix; its test went red', cause: 'free text' })] : []),
         judge(built, 'web-2', { reason: good, policy: 'any', digest: 'digest:Page', note: 'reverted the fix; its test went red' }),
       ];
       assert.deepEqual(fired, [...declaredBoardOrder(verb), 'ok'], verb);
