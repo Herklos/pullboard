@@ -3,6 +3,7 @@ import * as store from './board.js';
 import { createHash } from 'node:crypto';
 import { recordedRefusal } from './recorded-refusal.js';
 import { Refused } from './refused.js';
+import { parseImplies } from './implies.js';
 import { validatePersonRequest } from './person-request.js';
 import { relayMoveActor } from './relay-sender.js';
 
@@ -88,9 +89,10 @@ function fulfilsIntent(record, move) {
     && (args.evidence === undefined ? value.evidence == null : value.evidence?.kind === args.evidence
       && value.evidence.outcome === (args.outcome ?? '') && value.evidence.item === Number(args.item)
       && /^[0-9a-f]{40,64}$/u.test(args.commit ?? '') && value.evidence.commit === args.commit);
-  // Every effect an answer can carry is bound to the request: no implied items or superseded answer the phone did not name.
+  // Every effect an answer can carry is bound to the request, read as the CLI reads its flags: no implied
+  // item or superseded answer the phone did not name, and none it named left out.
   if (intent.verb === 'answer') return value === intent.item && options?.asPerson === true && options.channel === 'view' && options.text === args.text
-    && JSON.stringify(options.implies ?? []) === JSON.stringify(args.implies ?? []) && (options.supersedes ?? null) === (args.supersedes ?? null);
+    && JSON.stringify(options.implies ?? []) === JSON.stringify(requestedImplies(args.implies)) && (options.supersedes ?? null) === requestedAnswer(args.supersedes);
   if (intent.verb === 'hold') return value === args.lane && options?.asPerson === true && options.channel === 'view'
     && (args.off || options.reason === (args.reason ?? ''));
   const rows = value?.decisions;
@@ -100,6 +102,17 @@ function fulfilsIntent(record, move) {
       && row.decision === (intent.verb === 'spec-approve' ? 'approve' : 'decline')
       && (intent.verb !== 'spec-decline' || row.reason === args.reason.trim())
       && (args.text === undefined || row.text === args.text.trim()));
+}
+
+/** The item ids a request's `implies` text names, parsed as `--implies` is, or null when it names none validly. */
+function requestedImplies(text) {
+  try { return parseImplies(text) ?? []; } catch { return null; } // an unreadable value matches no move
+}
+
+/** The answer id a request's `supersedes` text names, read as `--supersedes` is, or null for none. */
+function requestedAnswer(text) {
+  if (text === undefined || text === null) return null;
+  return /^#?[1-9]\d*$/u.test(String(text).trim()) ? Number(String(text).trim().replace(/^#/u, '')) : NaN;
 }
 
 /** Keep receipt shouts fixed so a valid request cannot authorize unrelated person text or flags. */
