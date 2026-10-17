@@ -82,6 +82,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `stats` | `version:number`, `stats:object` |
 | `status` | `version:number`, `me:object`, `mine:array`, `stats:object`, `reviewQueue:object`, `unread:number`, `relay:object` |
 | `doctor` | `version:number`, `problems:array` |
+| `health` | `version:number`, `asOf:string`, `thresholds:object`, `stuck:array`, `waiting:array` |
 | `skills` | `version:number`, `updated:array`, `current:array`, `customized:array` |
 | `inbox` | `version:number`, `shouts:array` |
 | `decisions` | `version:number`, `decisions:array` |
@@ -153,6 +154,44 @@ Releasing a reserved review requires a nonempty one-line `--note` (or `--note-fi
 When outstanding reviews reach `verify.reviewRatio` times the active reviewers (default 3, with zero reviewers counting as one), `next` first offers a review the agent may take. This creates no claim or reservation. Its additive v1 `offer` has the review's `item` id, exact `command` to reserve it, `queue` and `ratio`; `build` previews the otherwise available build or is `null`. `next --verify <id>` reserves explicitly. `next --build` claims explicitly; a fresh claim's event detail records `reviewSkipped` with the offered id (or `null`), ratio and queue snapshot. Renewing an existing claim creates no new skip.
 
 For HTTP `next`, a review offer returns success with `event: null`, `offer` and the ordinary CLI `result`. Send `args.build: true` to claim as before and receive the actual claim event. The unattended `run` command always supplies explicit build intent, records it on fresh claims, and prints the review backlog each iteration.
+
+## Board health
+
+`pullboard health` scans the board read-only and lists every stuck item with its cause, since when, the one next step and who takes it. It opens the board through a read-only connection, records no event, skips relay sync and asks git only `merge-tree`, which never touches a HEAD, index or working tree. It exits 0 when nothing is stuck and 1 when something is; the text form then prints `nothing is stuck`, or one line per finding: `#12 claim lapsed, since 2026-10-17 10:00 (2h): web-3's lease ran out and nobody is building it. Next, web-3 (builder): renew it with pullboard claim 12.`
+
+`health --json` returns `{version: 1, asOf, thresholds: {stuck, holds, release}, stuck: [...], waiting: [...]}`. `asOf` is the board clock's ISO time. Each finding in `stuck` and `waiting` is `{key, cause, item, subject, title, since, ageMinutes, why, next, command, owner: {role, who}, detail}`:
+
+- `key` names the cause and what is stuck, like `CLAIM_LAPSED:item:12`, `HOLD_STALE:lane:docs`, `DECISION_UNANSWERED:shout:40` or `RELEASE_OVERDUE:release:v0.9.0`; it stays the same while the finding persists, so a watcher can post it once and notice when it clears.
+- `item` is the item id, or `null` for a lane hold, a decision or a release; `subject` is the same thing as text (`#12`, `lane docs`, `decision #40`, `release v0.9.0`).
+- `since` is when the wait began, in ISO time; `ageMinutes` counts whole minutes from it to `asOf`.
+- `why` and `next` are plain sentences; `command` is the exact command for the next step, or `null` when the step has none.
+- `owner.role` is `builder`, `reviewer`, `coordinator` or `person`; `owner.who` is the agent, lane, `coordinator` or `person`, and `null` when any reviewer may take it.
+- `detail` holds the cause's facts: `holder`, `reviewer`, `builder`, `commit`, `files` and `trunk` for a conflict, `parent` for a stacked item, `reason` and `by` for a hold, `withdrawn`, `after`, `move` and `milestone`, `shout`, `from` and `to`, or `release` and `landed`.
+
+The causes, each with its owner:
+
+| cause | stuck when | owner |
+|---|---|---|
+| `CLAIM_LAPSED` | a claim's lease ran out; `since` is when it ran out | the holder |
+| `REVIEW_LAPSED` | a review reservation's lease ran out with no verdict | a reviewer |
+| `NO_REVIEWER` | a submission has had no reviewer past `health.stuck` | a reviewer |
+| `UNLANDED_CONFLICT` | accepted past `health.stuck` and its commit conflicts with the trunk; `detail.files` names the files | its builder |
+| `UNLANDED_HELD` | accepted past `health.stuck` and held; `detail.reason` names the hold | who holds it |
+| `UNLANDED_STACKED` | accepted past `health.stuck` and carrying another item's commit that has no accept | a reviewer, or that item's builder |
+| `UNLANDED_WAITING` | accepted past `health.stuck` and waiting on an item it lands after | the coordinator |
+| `UNLANDED_READY` | accepted past `health.stuck`, merges cleanly and nobody landed it | the coordinator |
+| `HOLD_STALE` | an item or lane hold older than `health.holds` | who holds it |
+| `CONFLICT_HOLD_CLEARS` | a hold whose reason names a conflict, on an item whose commit now merges cleanly | who holds it |
+| `REWORK_UNCLAIMED` | rejected or reopened in the current release and unclaimed past `health.stuck` | its builder |
+| `REWORK_LATER` | the same in a later milestone; listed in `waiting` | its builder |
+| `AFTER_WITHDRAWN` | an unfinished item waits on a withdrawn item | the coordinator |
+| `DECISION_UNANSWERED` | a decision to the coordinator or the person is unanswered past `health.stuck` | the coordinator or the person |
+| `REQUEST_UNANSWERED` | a person's request is not done or declined past `health.stuck` | the coordinator |
+| `RELEASE_OVERDUE` | landed work waits and the newest version tag is older than `health.release` | the coordinator |
+
+The current release is the roadmap's first milestone with unverified local work; an unplanned item counts as current. A release is the newest tag named like `v1.2.3` or `1.2.3`, dated by its creation, and its landed work is every item first recorded merged after it. A repository with no such tag has no release deadline. The trunk is the primary checkout's branch, or the retained trunk when that checkout is detached.
+
+`pullboard.json` sets the thresholds under `health`, each a duration like `90m`, `2h` or `1d`: `stuck` (default `1h`), `holds` (default `1d`) and `release` (default `1d`). A value that is not a duration is refused as `BAD_CONFIG`.
 
 ## Item threads
 
