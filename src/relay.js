@@ -35,6 +35,7 @@ const CHECKPOINT_MOVES = new WeakMap();
 const BASELINE_LOCAL_MOVES = new WeakSet();
 const BASELINE_FAILURES = new WeakMap();
 const AUTH_NOTICES = new WeakSet();
+const DELETION_NOTICES = new WeakSet();
 const ORDERED_MOVE_COMMANDS = new Set(['add', 'edit', 'fact', 'escalate', 'run', 'sweep', 'next', 'claim', 'hold', 'release',
   'submit', 'done', 'verify', 'merged', 'land', 'withdraw', 'refreeze', 'shout', 'answer', 'pass', 'import', 'milestone', 'takeover', 'forget', 'join', 'worktree']);
 
@@ -72,6 +73,45 @@ export function originRepository(root) {
 
 /** Find the shared local link metadata without opening a board or connecting for an unlinked repo. */
 function linkFile(root) { return join(repoInfo(root).commonDir, 'pullboard', 'relay.json'); }
+
+/** Locate the credential-free reason an independently deleted copy no longer syncs. */
+function deletedLinkFile(root) { return join(repoInfo(root).commonDir, 'pullboard', 'relay-deleted.json'); }
+
+/** Read only a private, bounded deletion marker; it never supplies credentials or an outbound destination. */
+function deletedLink(root) {
+  const file = deletedLinkFile(root);
+  if (!existsSync(file)) return null;
+  const stat = lstatSync(file);
+  if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) || stat.size > 4096) throw new Refused('RELAY_STORAGE', 'restore the private deleted-copy notice before reading relay status');
+  let value;
+  try { value = JSON.parse(readFileSync(file, 'utf8')); } catch { throw new Refused('RELAY_STORAGE', 'restore the private deleted-copy notice before reading relay status'); }
+  if (value?.version !== 1 || !/^[0-9a-f]{32}$/u.test(value.board ?? '') || typeof value.url !== 'string') throw new Refused('RELAY_STORAGE', 'restore the supported deleted-copy notice before reading relay status');
+  relayOrigin(value.url);
+  return value;
+}
+
+/** Accept deletion only from the configured versioned relay for this credential's own board. */
+function confirmedDeletion(state, error) {
+  return error instanceof Refused && error.httpStatus === 410 && error.relayVersion === 1
+    && error.relayCode === 'RELAY_BOARD_DELETED' && error.relayMessage?.startsWith(`relay copy ${state.board} was deleted;`);
+}
+
+/** Preserve a truthful local notice before removing an inert link; the native board is never replaced. */
+function forgetDeletedCopy(root, file, state, io) {
+  const marker = deletedLinkFile(root);
+  const temporary = marker + '.' + randomUUID() + '.tmp';
+  try {
+    writeFileSync(temporary, JSON.stringify({ version: 1, board: state.board, url: state.url }) + '\n', { flag: 'wx', mode: 0o600 });
+    renameSync(temporary, marker);
+  } finally { rmSync(temporary, { force: true }); }
+  updateRelayMachine(machine => { const project = repoInfo(root).root; if (!machine.excluded.includes(project)) machine.excluded.push(project); });
+  rmSync(file, { force: true });
+  try { forgetBoardKey(state.board, state.keyStorage); } catch { /* An unavailable key store cannot block completed local opt-out. */ }
+  if (!DELETION_NOTICES.has(io)) {
+    DELETION_NOTICES.add(io);
+    io.err(`pullboard: [RELAY_BOARD_DELETED] relay copy ${state.board} was deleted; local work continues; run pullboard relay on only to link it again`);
+  }
+}
 
 /** Validate private link metadata before trusting its destination or acknowledgement cursor. */
 function loadLink(file) {
@@ -245,7 +285,11 @@ function recoverySummary(state) {
 
 /** Expose key-free link status; only an explicit link operation includes its pairing carrier. */
 function summary(root, state, { pairing = false } = {}) {
-  if (!state) return { linked: false, board: '', url: '', link: '', sequence: 0, behind: 0, recovery: recoverySummary(null) };
+  if (!state) {
+    const deleted = deletedLink(root);
+    return { linked: false, board: deleted?.board ?? '', url: deleted?.url ?? '', link: '', sequence: 0, behind: 0, recovery: recoverySummary(null),
+      ...(deleted ? { deleted: true, notice: 'The relay copy was deleted; your local board is complete. Keep working locally, or run pullboard relay on to link it again.' } : {}) };
+  }
   if (state.unlinking) return { linked: false, board: state.board, url: state.url, link: '', sequence: state.sequence, behind: 0, cleanup: true, recovery: recoverySummary(state) };
   const fragment = pairing ? '&key=' + encodeBoardKey(readBoardKey(state.board)) : '';
   const oversizedSnapshot = snapshotSize(state);
@@ -984,14 +1028,16 @@ export async function relayOperation(root, operation, args, io, command, applyLo
       try { await publishCheckpoint(root, file, state, io); }
       catch (error) {
         if (!(error instanceof Refused)) throw error;
-        if (error.code === 'AUTH_REQUIRED') reportExpiredSignIn(state, io);
+        if (confirmedDeletion(state, error)) forgetDeletedCopy(root, file, state, io);
+        else if (error.code === 'AUTH_REQUIRED') reportExpiredSignIn(state, io);
         else io.err(`pullboard: ${error.message}`);
       }
       if (receipt.outcome.error) throw refusalFromReceipt(receipt.outcome.error);
-      if (['register', 'ensureCoordinator'].includes(operation)) await actorTransport(root, file, state, receipt.outcome.result, io);
+      if (existsSync(file) && ['register', 'ensureCoordinator'].includes(operation)) await actorTransport(root, file, state, receipt.outcome.result, io);
       for (const event of receipt.outcome.events ?? []) io.onEvent?.(event);
       return receipt.outcome.result;
     } catch (error) {
+      if (confirmedDeletion(state, error)) { forgetDeletedCopy(root, file, state, io); return applyPausedMoveLocally(); }
       if (error instanceof Refused && error.code === 'AUTH_REQUIRED') throw expiredSignInMoveRefusal(state, error);
       throw error;
     }
@@ -1026,6 +1072,7 @@ export async function syncRelay(root, io) {
     }
     catch (error) {
       if (!(error instanceof Refused)) throw error;
+      if (confirmedDeletion(state, error)) { forgetDeletedCopy(root, file, state, io); return summary(root, null); }
       if (error.code === 'RELAY_KEY_MISSING') {
         if (!KEY_WARNED_COMMANDS.has(io)) {
           KEY_WARNED_COMMANDS.add(io);
@@ -1375,6 +1422,7 @@ export async function relayOn(root, address, io, { session, credential, quiet = 
       }
       if (ready) ready = await ensureOrdered(root, file, state, io);
       if (ready) {
+        rmSync(deletedLinkFile(root), { force: true });
         await catchUp(root, file, state, io);
         await deliverDeviceWraps(root, io);
         updateRelayMachine(machine => { machine.excluded = machine.excluded.filter(entry => entry !== repoInfo(root).root); });
@@ -1394,7 +1442,15 @@ export async function relayOff(root, io) {
   return locked(file, async () => {
     const state = loadLink(file);
     if (!state) return summary(root, null);
+    let joined = [];
+    try {
+      const roster = await request(state, '/auth/machines?board=' + state.board, {}, io);
+      if (Array.isArray(roster.machines)) joined = roster.machines.filter(entry => typeof entry.machine === 'string' && /^[A-Za-z0-9_.-]{1,128}$/u.test(entry.machine) && entry.machine !== state.machine).map(entry => entry.machine);
+    } catch { /* Local unlink still completes when the relay cannot inventory joined computers. */ }
+    const warning = joined.length ? ' If you approve deletion, joined computers ' + joined.map(machine => machine.slice(-8)).join(', ') + ' lose the shared copy; their local boards keep working.' : '';
+    if (warning) io.err(warning.trim());
     // Local unlink always completes, including agent shells, outages and a fenced remote baseline.
+
     let proposal;
     try { proposal = await phoneProposal(state, 'delete-board', state.board); }
     catch { /* Missing key or pairing cannot stop local unlinking. */ }
@@ -1412,7 +1468,8 @@ export async function relayOff(root, io) {
     }
     return { linked: false, board: state.board, url: state.url, link: '', sequence: state.sequence, behind: 0, recovery: recoverySummary(null),
       ...(remote ? { remote } : {}),
-      notice: 'Local link removed. The relay copy stays until you approve deleting it on your phone.' + (requested ? '' : ' Open the phone to manage the relay copy.') };
+      ...(joined.length ? { affectedMachines: joined } : {}),
+      notice: 'Local link removed. The relay copy stays until you approve deleting it on your phone.' + warning + (requested ? '' : ' Open the phone to manage the relay copy.') };
   });
 }
 
