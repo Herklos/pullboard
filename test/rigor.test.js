@@ -7,7 +7,10 @@ import { pathToFileURL } from 'node:url';
 import { after, test } from 'node:test';
 import { runFixtureChild, runFixtureGit } from './fixture-child.js';
 import * as store from '../src/board.js';
-import { applyEngineMove, prepareEngineMove } from '../src/engine.js';
+import { applyEngineMove, applyRelayMove, appliedSequence, prepareEngineMove } from '../src/engine.js';
+import { executeMove } from '../src/api.js';
+import { main } from '../src/cli.js';
+import { refusePersonMove } from '../src/mcp.js';
 import { CAUSE_ENGINE } from '../src/machine.js';
 import { rigorReport } from '../src/rigor.js';
 import { unpackRelease } from './release-archive.js';
@@ -290,7 +293,7 @@ test('reject, reopen and fact moves without a cause replay unchanged from engine
   }
 });
 
-test('a repeated cause becomes a draft row with its proof [D1,D3,S1]', () => {
+test('a repeated cause becomes a draft row with its proof [D1,D3,S1,P6]', async () => {
   const box = freshBoard();
   // Two real commits: the bad one has a TODO and no fixed file; the fix removes the TODO and adds it.
   mkdirSync(join(box.repo, 'src'), { recursive: true });
@@ -317,8 +320,13 @@ test('a repeated cause becomes a draft row with its proof [D1,D3,S1]', () => {
 
   // Without proof, or with a proof that is not red then green, nothing is drafted.
   const flags = (check, red, green) => ['--check', check, '--red', red, '--green', green];
-  refused(box.run('rigor', 'draft', 'doctrine:C3', 'No TODO markers in shipped source', '--json'), 'RIGOR_UNPROVEN', 'a draft without a check is unproven');
-  refused(box.run('rigor', 'draft', 'doctrine:C3', 'No TODO markers in shipped source', '--check', 'grep -rn TODO src', '--red', bad, '--json'), 'RIGOR_UNPROVEN', 'a draft without its green commit is unproven');
+  const unchecked = box.run('rigor', 'draft', 'doctrine:C3', 'No TODO markers in shipped source', '--json');
+  refused(unchecked, 'RIGOR_UNPROVEN', 'a draft without a check is unproven');
+  assert.match(JSON.parse(unchecked.stdout).error.message, /no --check names the command that proves it/u, 'the refusal names the missing check');
+  const ungreen = box.run('rigor', 'draft', 'doctrine:C3', 'No TODO markers in shipped source', '--check', 'grep -rn TODO src', '--red', bad, '--json');
+  refused(ungreen, 'RIGOR_UNPROVEN', 'a draft without its green commit is unproven');
+  assert.match(JSON.parse(ungreen.stdout).error.message, /no --green names the commit where the check passes/u);
+  refused(box.run('rigor', 'draft', 'doctrine:C3', 'No TODO markers in shipped source', ...flags('grep -rn NEVER_PRESENT src', bad, fix), '--json'), 'RIGOR_UNPROVEN', 'a work check that finds no problem at red proves nothing');
   refused(box.run('rigor', 'draft', 'doctrine:C3', 'No TODO markers in shipped source', ...flags('grep -rn TODO src', fix, bad), '--json'), 'RIGOR_UNPROVEN', 'a check green at red and red at green proves nothing');
   refused(box.run('rigor', 'draft', 'row:G1', 'The fixed file exists', ...flags('true', bad, fix), '--json'), 'RIGOR_UNPROVEN', 'a test that never fails proves nothing');
   refused(box.run('rigor', 'draft', 'refusal:LONELY', 'Lonely rule', ...flags('test -f fixed.txt', bad, fix), '--json'), 'RIGOR_UNNOTICED', 'a cause that has not repeated cannot be drafted');
@@ -351,6 +359,22 @@ test('a repeated cause becomes a draft row with its proof [D1,D3,S1]', () => {
   assert.equal(both.reads, 'both');
   assert.deepEqual(both.drafts.map((draft) => draft.file), ['DOCTRINE.md', 'SPEC.md']);
 
+  // Drafting is any agent's; approving stays the person's, however an agent tries to reach it (P6).
+  const drafted = [doctrineRow.id, specRow.id];
+  const agentApprove = runFixtureChild(process.execPath, [BIN, 'spec', 'approve', specRow.id, '--json'], { cwd: box.repo, env: { ...box.env, CLAUDECODE: '1' }, encoding: 'utf8' });
+  refused(agentApprove, 'B26_PERSON_CHANNEL', 'an agent shell cannot approve a drafted row');
+  const api = await executeMove(box.repo, { verb: 'spec-approve', args: { ids: drafted.join(',') } }, main, true, 'api');
+  assert.equal(api.body.error?.code, 'B26_PERSON_CHANNEL', 'the standalone API cannot approve a drafted row');
+  assert.throws(() => refusePersonMove('spec_approve'), (error) => error.code === 'HUMAN_REQUIRED', 'MCP cannot approve a drafted row');
+  const sealedBoard = store.openBoard(box.file);
+  try {
+    const forged = prepareEngineMove(sealedBoard, 'recordRowDecisions', [{ agentId: store.PERSON, channel: 'view', decisions: [] }], { id: 'rigor-forged-approval' });
+    for (const sender of [{ kind: 'agent', userId: 'fixture', agent: 'coordinator' }, { kind: 'machine', userId: 'fixture', machine: 'fixture-machine' }]) {
+      const outcome = applyRelayMove(sealedBoard, { ...forged, id: `${forged.id}-${sender.kind}` }, { sequence: appliedSequence(sealedBoard) + 1, at: new Date().toISOString(), kind: 'move', sender });
+      assert.equal(outcome.error?.code, 'RELAY_PERSON_ONLY', `a sealed approval from a ${sender.kind} is refused`);
+    }
+  } finally { store.closeBoard(sealedBoard); }
+
   // Nothing is approved or applied: every drafted row is a draft, and the board records no decision.
   const rows = json(box, 'spec').rows.filter((row) => [doctrineRow.id, specRow.id, ...both.drafts.map((draft) => draft.id)].includes(row.id));
   assert.equal(rows.length, 4);
@@ -359,4 +383,12 @@ test('a repeated cause becomes a draft row with its proof [D1,D3,S1]', () => {
   const check = box.run('spec', 'check');
   assert.equal(check.status, 0, `the drafted rows parse cleanly: ${check.stdout}${check.stderr}`);
   assert.ok(!json(box, 'log').events.some((event) => ['row_decision', 'row_apply'].includes(event.event_kind)), 'the command approved and applied nothing');
+
+  // The person's approval applies through the usual spec apply, with no extra item filed.
+  const itemsBefore = json(box, 'list', '--all').items.length;
+  json(box, 'spec', 'approve', `doctrine:${doctrineRow.id},${specRow.id}`);
+  json(box, 'spec', 'apply');
+  const applied = json(box, 'spec').rows.filter((row) => drafted.includes(row.id));
+  assert.deepEqual(applied.map((row) => row.status), ['approved', 'approved'], 'the person approved both rows and spec apply applied them');
+  assert.equal(json(box, 'list', '--all').items.length, itemsBefore, 'approval files no proof-building item; the draft already carries its proof');
 });
