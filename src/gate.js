@@ -6,9 +6,9 @@
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { availableParallelism } from 'node:os';
+import { availableParallelism, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { gitChildEnv, gitPath, headTree, invalidateGitFacts, isClean, untracked } from './git.js';
 import { secretsIn } from './hooks.js';
@@ -149,49 +149,67 @@ export function isStampedGreen(root) {
 }
 
 /**
- * Split a gate command into its top-level stages, the commands joined by `&&`, `||`, `;` or a newline.
- * Anything the split cannot read for certain (a subshell, a group, command substitution, a heredoc,
- * a comment, a background job or an open quote) returns null, so no stage is ever guessed [B3,R3].
+ * Split a gate command into its top-level stages, the commands joined by `&&`, `||`, `;` or a newline,
+ * and each stage into its pipeline components, the commands joined by `|`. Anything the split cannot
+ * read for certain (a subshell, a group, command substitution, a heredoc, a comment, a background job,
+ * `|&` or an open quote) returns null, so no stage or component is ever guessed [B3,R3].
  *
  * @param {string} command
- * @returns {Array<{ text: string, op: string }> | null}
+ * @returns {Array<{ text: string, op: string, pipeline: string[] }> | null}
  */
 export function gateStages(command) {
   const source = String(command).trim();
   const stages = [];
   let current = '';
+  let segment = '';
+  let pipeline = [];
   let quote = null;
   let variable = 0;
+  /** Append text to both the stage and its current pipeline component. */
+  const add = (text) => { current += text; segment += text; };
+  /** Close the current pipeline component; an empty or line-continued component is unreadable. */
+  const pipe = () => {
+    if (!segment.trim() || /\\$/u.test(segment.trim())) return false;
+    pipeline.push(segment.trim());
+    segment = '';
+    return true;
+  };
   /** Close the current stage with the operator that follows it; an empty stage is unreadable. */
   const close = (op) => {
-    if (!current.trim() || /\\$/u.test(current.trim())) return false;
-    stages.push({ text: current.trim(), op });
+    if (!current.trim() || /\\$/u.test(current.trim()) || !pipe()) return false;
+    stages.push({ text: current.trim(), op, pipeline });
     current = '';
+    pipeline = [];
     return true;
   };
   for (let at = 0; at < source.length; at += 1) {
     const char = source[at];
     const next = source[at + 1];
-    if (quote === "'") { current += char; if (char === "'") quote = null; continue; }
-    if (char === '\\') { current += next === '\n' ? ' ' : char + (next ?? ''); at += 1; continue; }
+    if (quote === "'") { add(char); if (char === "'") quote = null; continue; }
+    if (char === '\\') { add(next === '\n' ? ' ' : char + (next ?? '')); at += 1; continue; }
     if (char === '`' || (char === '$' && next === '(')) return null;
-    if (quote === '"') { current += char; if (char === '"') quote = null; continue; }
-    if (char === "'" || char === '"') { quote = char; current += char; continue; }
-    if (char === '$' && next === '{') { variable += 1; current += '${'; at += 1; continue; }
-    if (char === '}' && variable) { variable -= 1; current += char; continue; }
+    if (quote === '"') { add(char); if (char === '"') quote = null; continue; }
+    if (char === "'" || char === '"') { quote = char; add(char); continue; }
+    if (char === '$' && next === '{') { variable += 1; add('${'); at += 1; continue; }
+    if (char === '}' && variable) { variable -= 1; add(char); continue; }
     if ('(){}#'.includes(char) || (char === '<' && (next === '<' || next === '('))) return null;
     if (char === '&') {
       if (next === '&') { if (!close('&&')) return null; at += 1; continue; }
-      if (next === '>' || source[at - 1] === '>' || source[at - 1] === '<') { current += char; continue; }
+      if (next === '>' || source[at - 1] === '>' || source[at - 1] === '<') { add(char); continue; }
       return null;
     }
     if (char === '|' && next === '|') { if (!close('||')) return null; at += 1; continue; }
+    if (char === '|') {
+      if (source[at - 1] === '>') { add(char); continue; }
+      if (next === '&' || variable || !pipe()) return null;
+      current += char;
+      continue;
+    }
     if (char === ';') { if (next === ';' || !close(';')) return null; continue; }
     if (char === '\n') { if (current.trim() && !close(';')) return null; continue; }
-    current += char;
+    add(char);
   }
-  if (quote || variable || !current.trim() || /\\$/u.test(current.trim())) return null;
-  stages.push({ text: current.trim(), op: '' });
+  if (quote || variable || !current.trim() || /\\$/u.test(current.trim()) || !close('')) return null;
   return stages;
 }
 
@@ -199,10 +217,35 @@ export function gateStages(command) {
  * Wrap each stage so the shell prints its start and its exit status between private marker lines.
  * Control flow is unchanged: each wrapper exits with its stage's status, and an `exit` inside a
  * stage still ends the run, which leaves that stage without an end marker and so unaccounted.
+ * A pipeline's components each append their own exit status to a private file instead of the
+ * output, since a marker written into a pipe would land in the next component's input [B3,R3].
  */
-function stagedScript(stages, marker) {
-  return stages.map((stage, index) => `{ printf '\\n${marker} begin ${index}\\n'; {\n${stage.text}\n}; pullboard_stage_status=$?; `
-    + `printf '\\n${marker} end ${index} %s\\n' "$pullboard_stage_status"; (exit "$pullboard_stage_status"); } ${stage.op}`).join('\n');
+function stagedScript(stages, marker, pipes) {
+  const quoted = `'${String(pipes).replaceAll("'", "'\\''")}'`;
+  /** One component that records its own status, then exits with it so the pipeline is unchanged. */
+  const component = (text, index, at) => `{ {\n${text}\n}; pullboard_pipe_status=$?; `
+    + `printf '%s %s %s\\n' ${index} ${at} "$pullboard_pipe_status" >> ${quoted}; (exit "$pullboard_pipe_status"); }`;
+  return stages.map((stage, index) => {
+    const body = stage.pipeline.length > 1 ? stage.pipeline.map((text, at) => component(text, index, at)).join(' | ') : stage.text;
+    return `{ printf '\\n${marker} begin ${index}\\n'; {\n${body}\n}; pullboard_stage_status=$?; `
+      + `printf '\\n${marker} end ${index} %s\\n' "$pullboard_stage_status"; (exit "$pullboard_stage_status"); } ${stage.op}`;
+  }).join('\n');
+}
+
+/**
+ * Read each pipeline component's recorded status. A component that recorded none, or more than one,
+ * stays null, so a line forged into the private file can only make its stage unaccounted [B3,R3].
+ */
+function readPipes(split, pipes) {
+  const records = new Map();
+  const text = existsSync(pipes) ? readFileSync(pipes, 'utf8') : '';
+  for (const line of text.split('\n')) {
+    const found = /^(\d+) (\d+) (\d+)$/u.exec(line);
+    if (found) records.set(`${found[1]} ${found[2]}`, [...(records.get(`${found[1]} ${found[2]}`) ?? []), Number(found[3])]);
+  }
+  return split.map((stage, index) => (stage.pipeline.length > 1
+    ? stage.pipeline.map((_, at) => { const seen = records.get(`${index} ${at}`) ?? []; return seen.length === 1 ? seen[0] : null; })
+    : null));
 }
 
 /** Cut a staged run's output back to the command's own lines and each stage's lines and status. */
@@ -235,7 +278,7 @@ function readStages(output, marker, count) {
  * @param {string} root
  * @param {string} command
  * @param {{ pipefail?: boolean, env?: NodeJS.ProcessEnv, stages?: boolean }} [options] - Gate-only pipefail, additional child environment values and per-stage accounting.
- * @returns {{ isGreen: boolean, output: string, seconds: number, sandboxBlocked: string|null, stages?: Array<{ status: number|null, output: string }> | null }}
+ * @returns {{ isGreen: boolean, output: string, seconds: number, sandboxBlocked: string|null, stages?: Array<{ status: number|null, output: string, pipeline?: Array<number|null> }> | null }}
  */
 export function runShell(root, command, { pipefail = false, env = {}, stages = false } = {}) {
   const started = Date.now();
@@ -251,16 +294,22 @@ export function runShell(root, command, { pipefail = false, env = {}, stages = f
   }
   const split = stages ? gateStages(command) : null;
   const marker = `PULLBOARD_STAGE_${randomUUID().replaceAll('-', '')}`;
+  const pipeDirectory = split?.some((stage) => stage.pipeline.length > 1) ? mkdtempSync(join(tmpdir(), 'pullboard-pipes-')) : null;
+  const pipes = pipeDirectory ? join(pipeDirectory, 'status') : null;
   // Newlines, not spaces, around the command, so a trailing comment in it cannot swallow the `)`.
-  const result = spawnSync(`${prefix}(\n${split ? stagedScript(split, marker) : command}\n) 2>&1`, options);
+  const result = spawnSync(`${prefix}(\n${split ? stagedScript(split, marker, pipes) : command}\n) 2>&1`, options);
   invalidateGitFacts();
+  const pipeStatuses = pipes ? readPipes(split, pipes) : null;
+  if (pipeDirectory) rmSync(pipeDirectory, { recursive: true, force: true });
   const raw = `${result.stdout ?? ''}${result.stderr ?? ''}`;
   const seconds = Math.round((Date.now() - started) / 1000);
   const blocked = (output) => (result.status === 0 ? null : sandboxBlockedOperation(root, output));
   if (!stages) return { isGreen: result.status === 0, output: raw, seconds, sandboxBlocked: blocked(raw) };
   if (!split) return { isGreen: result.status === 0, output: raw, seconds, stages: null, sandboxBlocked: blocked(raw) };
   const staged = readStages(raw, marker, split.length);
-  return { isGreen: result.status === 0, seconds, ...staged, sandboxBlocked: blocked(staged.output) };
+  // Each pipeline component's own status rides on its stage, so no failing producer hides behind a later one.
+  const withPipes = staged.stages.map((stage, index) => (pipeStatuses?.[index] ? { ...stage, pipeline: pipeStatuses[index] } : stage));
+  return { isGreen: result.status === 0, seconds, ...staged, stages: withPipes, sandboxBlocked: blocked(staged.output) };
 }
 
 /** Resolve existing path prefixes so a symlink cannot hide an outside-worktree operation. */

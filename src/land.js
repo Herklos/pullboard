@@ -276,20 +276,33 @@ export function tapFailures(output, root) {
 
 /**
  * The failures that explain a red run, or null when anything else may have failed: the command
- * could not be split into stages, a stage did not finish, or a stage exited other than 0 without
- * exactly 1 and a complete TAP account of its failures. Waivers only ever subtract these [B3,R3].
+ * could not be split into stages, a stage did not finish, a stage exited other than 0 without
+ * exactly 1 and a complete TAP account of its failures, or a pipeline in a stage had a component
+ * that left no status or a second failing component. Waivers only ever subtract these [B3,R3].
  */
 export function accountedFailures(gate, root) {
   if (gate.isGreen || !Array.isArray(gate.stages) || !gate.stages.length) return null;
   const failures = [];
   for (const stage of gate.stages) {
     if (!Number.isInteger(stage.status)) return null;
+    // In a pipeline every component's own status counts: at most one may fail, and only with exit 1 [B3,R3].
+    if (stage.pipeline !== undefined && !pipelineAccounted(stage.pipeline)) return null;
     if (stage.status === 0) continue;
     const own = stage.status === 1 ? tapFailures(stage.output ?? '', root) : null;
     if (!own) return null;
     failures.push(...own);
   }
   return failures.length ? failures : null;
+}
+
+/**
+ * True when a stage's pipeline statuses leave one place a failure can come from. A producer that
+ * fails beside a failing TAP consumer is an independent red no waiver names, so it voids the run.
+ */
+function pipelineAccounted(statuses) {
+  if (!Array.isArray(statuses) || statuses.some((status) => !Number.isInteger(status))) return false;
+  const failed = statuses.filter((status) => status !== 0);
+  return failed.length === 0 || (failed.length === 1 && failed[0] === 1);
 }
 
 /**
