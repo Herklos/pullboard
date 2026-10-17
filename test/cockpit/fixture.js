@@ -10,6 +10,7 @@ import vm from 'node:vm';
 import { stableChrome, press, tapTouch } from './stable.js';
 import { closeBoard, openBoard } from '../../src/board.js';
 import { fetchFresh } from '../http-fixture.js';
+import { disableFixtureBackgroundView } from './background-view-fixture.js';
 
 
 const BIN = resolve(import.meta.dirname, '../../bin/pullboard.js');
@@ -51,6 +52,7 @@ function machine() {
     PULLBOARD_HOME: join(dir, 'home'),
     PULLBOARD_MACHINE_HOME: join(dir, 'machine-home'),
   };
+  disableFixtureBackgroundView(env, dir);
   const git = (cwd, ...args) => execFileSync('git', args, { cwd, env, encoding: 'utf8', stdio: 'pipe' }).trim();
   const invocations = [];
   /** Run the CLI with an explicit environment and retain facts used by fixture checks. */
@@ -75,6 +77,8 @@ function project(box, name, spec = SPEC, extra = {}) {
   box.git(repo, 'init', '-q', '-b', 'main');
   const initEnv = { ...box.env };
   delete initEnv.PULLBOARD_MODEL;
+  // Set the fixture-only opt-out in the machine home that this exact init environment will use.
+  disableFixtureBackgroundView(initEnv, box.dir);
   box.runWithEnv(repo, initEnv, 'init');
   const config = { gate: 'true', spec: 'SPEC.md', verify: 'any', lease: '2h', lanes: { web: { owns: ['web/'], specs: ['G'] } }, shared: [], ...extra };
   writeFileSync(join(repo, 'pullboard.json'), JSON.stringify(config, null, 2));
