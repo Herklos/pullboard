@@ -61,7 +61,7 @@ import {
   standings,
   unmetRows,
 } from './spec.js';
-import { answerQuestion, bundledBlueprints, planBlueprint, readBlueprint, saveBlueprint } from './blueprints.js';
+import { answerQuestion, bundledBlueprints, landBlueprint, planBlueprint, readBlueprint, repoAnswers, saveBlueprint } from './blueprints.js';
 import { briefFiles } from './brief.js';
 import { commitFirst, commitOwnerLines, commitOwners, coordinatorInbox, coordinatorInboxLines, inboxFirst } from './resume.js';
 import { checkBaseline, prepareCheckBaseline, sayCheckBaseline, refuseCheckSyntax } from './check-baseline.js';
@@ -2429,7 +2429,9 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
   const source = readFileSync(spec.file, 'utf8');
   const configFile = join(ctx.info.root, CONFIG_FILE);
   const configSource = readFileSync(configFile, 'utf8');
-  const plan = planBlueprint(blueprint, { source, spec, doctrine: ctx.doctrine,
+  // A question takes the answer this repo already shows as its default, read from package.json
+  // only: nothing runs and nothing is fetched (#725).
+  const plan = planBlueprint(landBlueprint(blueprint, repoAnswers(ctx.info.root)), { source, spec, doctrine: ctx.doctrine,
     existingItems: store.listItems(board, { all: true }).map((item) => ({ id: item.item_id, title: item.item_title, specIds: item.item_spec_ids ? item.item_spec_ids.split(',') : [] })),
     gate: String(JSON.parse(configSource).gate ?? '') });
   // Every starter is checked before anything is written, so a refusal leaves the board as it was.
