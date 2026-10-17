@@ -214,7 +214,7 @@ test('relay devices isolate accounts, persist opaque wraps, expire enrollments a
     method: 'PUT', cookie: cookieA, origin: box.origin, engine: ENGINE_VERSION,
     body: { engine: ENGINE_VERSION, wrapped },
   });
-  assert.equal(staleUpload.document.error?.code, 'DEVICE_NOT_ENROLLED');
+  assert.equal(staleUpload.document.error?.code, 'DEVICE_REVOKED');
   const staleRegistration = await deviceRequest(box, `/api/v1/devices/${pair.keys.deviceId}`, {
     method: 'POST', cookie: cookieA, origin: box.origin, body: {},
   });
@@ -222,5 +222,20 @@ test('relay devices isolate accounts, persist opaque wraps, expire enrollments a
   const noWrapsAfterRevoke = await deviceRequest(box, `/api/v1/devices/${pair.keys.deviceId}/boards`, {
     cookie: cookieA, origin: box.origin,
   });
-  assert.equal(noWrapsAfterRevoke.document.error?.code, 'DEVICE_NOT_ENROLLED');
+  assert.equal(noWrapsAfterRevoke.document.error?.code, 'DEVICE_REVOKED');
+
+  box.restart();
+  const persistedRefusal = await deviceRequest(box, '/api/v1/boards', { cookie: cookieA });
+  assert.equal(persistedRefusal.document.error?.code, 'DEVICE_REVOKED', 'closing and reopening the actual auth and device databases retains the browser session revocation');
+  assert.equal(persistedRefusal.response.status, 403);
+  const freshCookie = await browserSession(box);
+  const recovery = await deviceRequest(box, '/api/v1/devices/session', { cookie: freshCookie });
+  assert.equal(recovery.response.status, 200, 'a fresh independently provider-authenticated session remains available for lost-phone recovery');
+  const visible = await deviceRequest(box, '/api/v1/boards', { cookie: freshCookie });
+  assert.equal(visible.response.status, 200);
+  assert.equal(visible.document.boards.some(board => board.id === boardA), true);
+  const oldId = await deviceRequest(box, `/api/v1/devices/${pair.keys.deviceId}`, {
+    method: 'POST', cookie: freshCookie, origin: box.origin, body: {},
+  });
+  assert.equal(oldId.document.error?.code, 'DEVICE_REVOKED', 'a fresh sign-in does not resurrect the tombstoned device id');
 });
