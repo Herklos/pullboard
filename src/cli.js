@@ -2573,8 +2573,12 @@ async function verifyHere(ctx, id, { second, values }) {
       review = captureVerdictReview(root, board, item, trunk.commit, checkedCommit);
       refuseUnverifiedStack(root, board, item, checkedCommit, trunk);
       const checkedItem = reReview ? { ...item, item_commit: checkedCommit } : item;
-      const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(root, frozenCheck(item), { commit: checkedCommit, onFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
-      check = await withGateSlot(root, (lease) => checkAtCommit(root, checkedItem, { waitMs: lease.waitMs, gateLease: lease }), { browser, agent: me.id, item: String(id), kind: 'review', itemCheck: true, onWait: gateWaitReporter(ctx.io) });
+      if (frozenCheck(item)) {
+        const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(root, frozenCheck(item), { commit: checkedCommit, onFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
+        check = await withGateSlot(root, (lease) => checkAtCommit(root, checkedItem, { waitMs: lease.waitMs, gateLease: lease }), { browser, agent: me.id, item: String(id), kind: 'review', itemCheck: true, onWait: gateWaitReporter(ctx.io) });
+      } else {
+        check = checkAtCommit(root, checkedItem);
+      }
       invalidateGitFacts(); // A private check can outlive changes in the reviewer's live checkout.
       refuseSandboxBlocked(check);
       verificationProfile = check.profile ?? null;
