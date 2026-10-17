@@ -201,7 +201,7 @@ function commandHelp(name) {
       '  pullboard spec apply — coordinator: apply recorded row decisions to the files',
     ] : []),
     'Example:',
-    `  ${entry.example}`, ...entry.notes,
+    ...entry.example.split('\n').map((line) => `  ${line}`), ...entry.notes,
   ].join('\n');
 }
 
