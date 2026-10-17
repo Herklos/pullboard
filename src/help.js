@@ -167,7 +167,7 @@ Spec
   pullboard blueprint save [file] [--name <name>] [--title "<title>"]  write approved rules and answered questions as a blueprint
                                         never items, notes, paths, emails or names; file defaults to <project>.blueprint.json
   pullboard blueprint starters <name or file>  list a blueprint's starter items and whether each is filed
-                                        a filed starter shows its item id and status
+                                        a filed starter shows its item id and status; add links each starter it files with a note fact
   pullboard spec signers add [--key <path>] [--by <principal>]  opt into SSH-signed sign-offs
                                         principal defaults to Git user.email; --by overrides it
   pullboard spec approve <ids> | decline <ids> --reason "why"  the person's exact-row decision

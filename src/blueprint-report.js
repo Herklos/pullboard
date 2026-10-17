@@ -28,31 +28,75 @@ export function blueprintRowIds(blueprint, spec) {
   return Object.fromEntries(keys.flatMap((key, index) => (rows[index] ? [[key, rows[index].id]] : [])));
 }
 
+/** The start of the note fact blueprint add records on each starter item it files. */
+const STARTER_LINK = 'blueprint starter: ';
+
+/**
+ * The note fact text blueprint add records on a starter item it files: the blueprint's name and
+ * version and the starter's key, as JSON after a fixed prefix. Why a fact: an item's title and
+ * citations can repeat across blueprint versions and unrelated items, so the add itself records
+ * which starter of which version this item is, and blueprint starters reads that record back.
+ *
+ * @param {{ name: string, version: number }} blueprint
+ * @param {string} key - The starter's key in the blueprint.
+ * @returns {string}
+ */
+export function starterLinkText(blueprint, key) {
+  return `${STARTER_LINK}${JSON.stringify({ blueprint: blueprint.name, version: blueprint.version, key })}`;
+}
+
+/**
+ * The starter link an item's thread records, or null when its add recorded none, as on an item
+ * filed by hand or by an add from before links were recorded.
+ *
+ * @param {{ type: string, kind?: string, text?: string }[]} thread - The item's thread, from store.itemThread.
+ * @returns {{ blueprint: string, version: number, key: string } | null}
+ */
+export function starterLink(thread) {
+  for (const entry of thread) {
+    if (entry.type !== 'fact' || entry.kind !== 'note' || !entry.text?.startsWith(STARTER_LINK)) continue;
+    try {
+      const link = JSON.parse(entry.text.slice(STARTER_LINK.length));
+      if (typeof link?.blueprint === 'string' && Number.isInteger(link.version) && typeof link.key === 'string') return link;
+    } catch (error) {
+      // A note that only starts like a link is someone's own words; it links nothing.
+      if (!(error instanceof SyntaxError)) throw error;
+    }
+  }
+  return null;
+}
+
 /**
  * Each of a blueprint's starter items and whether its add filed it on this board. An item is the
- * starter only when it carries the starter's title and cites exactly the rows this blueprint's add
- * gave the starter's keys, the same identity a resumed add uses to find starters already filed.
- * Why both: a title alone also names an unrelated item someone filed under the same words, and
- * that item must never be reported as the starter. A starter that cites no rows has no citation
- * to link it, so its item must also carry the starter's criterion, which add stores as written.
- * When several items match, a live one is named before a withdrawn one, then the oldest.
+ * starter when the link its add recorded names this blueprint, this version and the starter's key.
+ * An item with no recorded link at all, filed before adds recorded one, counts only when it carries
+ * the starter's title and cites exactly the rows this blueprint's add gave the starter's keys, the
+ * identity a resumed add uses; a starter that cites no rows must also match its criterion. That
+ * fallback is used only when no linked item names the starter, and an item linked to another
+ * blueprint, version or starter never counts. When several items match, a live one is named
+ * before a withdrawn one, then the oldest.
  *
- * @param {{ items: { key: string, title: string, cites?: string[], criterion?: string }[] }} blueprint
+ * @param {{ name: string, version: number, items: { key: string, title: string, cites?: string[], criterion?: string }[] }} blueprint
  * @param {Record<string, any>[]} items - Every item on the board, as store.listItems returns them.
  * @param {Record<string, string>} rowIds - Row id by rule or question key, from blueprintRowIds.
+ * @param {Map<number, { blueprint: string, version: number, key: string } | null>} links - Each item's recorded link, by item id.
  * @returns {StarterState[]}
  */
-export function starterStates(blueprint, items, rowIds) {
+export function starterStates(blueprint, items, rowIds, links) {
+  const order = (a, b) => Number(a.item_status === 'withdrawn') - Number(b.item_status === 'withdrawn') || a.item_id - b.item_id;
   return blueprint.items.map((starter) => {
     const title = starter.title.trim();
+    const own = items.filter((item) => {
+      const link = links.get(item.item_id);
+      return link && link.blueprint === blueprint.name && link.version === blueprint.version && link.key === starter.key;
+    });
     const cites = starter.cites ?? [];
     const specIds = cites.map((key) => rowIds[key]).filter(Boolean).join(',');
-    const linked = cites.length
+    const cited = cites.length
       ? (item) => specIds.length > 0 && item.item_spec_ids === specIds
       : (item) => item.item_spec_ids === '' && item.item_criterion === (starter.criterion ?? '');
-    const matches = items.filter((item) => item.item_title === title && linked(item))
-      .sort((a, b) => Number(a.item_status === 'withdrawn') - Number(b.item_status === 'withdrawn') || a.item_id - b.item_id);
-    const found = matches[0];
+    const unlinked = items.filter((item) => !links.get(item.item_id) && item.item_title === title && cited(item));
+    const found = (own.length ? own : unlinked).sort(order)[0];
     const status = found?.item_status ?? null;
     return { key: starter.key, title, filed: Boolean(found), id: found?.item_id ?? null, status };
   });

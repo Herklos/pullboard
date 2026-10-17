@@ -65,7 +65,7 @@ import { briefFiles } from './brief.js';
 import { commitFirst, commitOwnerLines, commitOwners, coordinatorInbox, coordinatorInboxLines, inboxFirst } from './resume.js';
 import { checkBaseline, prepareCheckBaseline, sayCheckBaseline } from './check-baseline.js';
 import { retryCheckBaselines, startCheckBaseline } from './check-baseline-worker.js';
-import { blueprintRowIds, starterLines, starterStates, waitingRowLines, waitingRows } from './blueprint-report.js';
+import { blueprintRowIds, starterLines, starterLink, starterLinkText, starterStates, waitingRowLines, waitingRows } from './blueprint-report.js';
 import { compareMainFailures, mainRedMessage, mainRedReworkItems } from './main-red.js';
 import { runItems } from './run.js';
 import { parseProblems, sweepItems } from './sweep.js';
@@ -2432,6 +2432,8 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
       item.after = afterKeys.map((before) => byKey[before]).filter(Boolean);
       const id = await ordered(ctx, board, 'addItem', [item]);
       byKey[key] = id;
+      // The link blueprint starters reads back: this blueprint, this version, this starter (#734).
+      await ordered(ctx, board, 'appendFact', [id, { agentId: me.id, kind: 'note', text: starterLinkText(blueprint, key) }]);
       added.push({ id, key, title: item.title, lane: item.lane, ...(asked ? { askedLane: asked } : {}), specIds: item.specIds, after: item.after, ...(item.check ? { check: item.check } : {}) });
     }
   } catch (error) {
@@ -3861,7 +3863,10 @@ async function runCommand(argv, io) {
       const blueprint = readBlueprint(second, io.cwd);
       const ctx = context(io);
       const rowIds = blueprintRowIds(blueprint, loadSpec(ctx.info.root, ctx.config));
-      const starters = withBoard(ctx, (board) => starterStates(blueprint, store.listItems(board, { all: true }), rowIds));
+      const starters = withBoard(ctx, (board) => {
+        const items = store.listItems(board, { all: true });
+        return starterStates(blueprint, items, rowIds, new Map(items.map((item) => [item.item_id, starterLink(store.itemThread(board, item.item_id))])));
+      });
       io.result?.({ blueprint: { name: blueprint.name, title: blueprint.title, version: blueprint.version }, starters });
       starterLines(blueprint, starters).forEach((line) => io.say(line));
       return 0;

@@ -430,6 +430,10 @@ test('blueprint commands say what they did [S1,I1]', () => {
   const box = freshBoard();
   const decoy = json(box, 'add', 'coordinator', PUBLISHED.items[0].title).item;
   assert.equal(decoy.item_spec_ids ?? '', '', 'the unrelated item cites no row');
+  // A row that exists before the add, and an older item under another starter's title citing it.
+  const existingRow = json(box, 'spec', 'draft', 'A requirement written before the blueprint').id;
+  const citing = json(box, 'add', 'coordinator', PUBLISHED.items[1].title, '--specs', existingRow).item;
+  assert.equal(citing.item_spec_ids, existingRow, 'the second unrelated item cites the row that was there first');
   const unfiled = json(box, 'blueprint', 'starters', 'web-app');
   assert.deepEqual(unfiled.blueprint, { name: 'web-app', title: 'Web app', version: 1 });
   assert.deepEqual(unfiled.starters.map((starter) => [starter.title, starter.filed, starter.id]), PUBLISHED.items.map((item) => [item.title, false, null]));
@@ -463,6 +467,20 @@ test('blueprint commands say what they did [S1,I1]', () => {
     assert.ok(filedText.includes(`  #${own.id} open  ${item.title}`), `${item.title} shows its id:\n${filedText.join('\n')}`);
   }
   assert.ok(!filedText.some((line) => line.startsWith(`  #${decoy.item_id} `)), `the unrelated item is never listed:\n${filedText.join('\n')}`);
+  assert.ok(!filed.some((starter) => starter.id === citing.item_id), 'an item citing a row from before the add is never the starter');
+
+  // Two versions of one blueprint, the same title and starter: each version names the item it filed.
+  const versioned = join(box.dir, 'versioned.json');
+  const firstVersion = { ...PUBLISHED, name: 'versioned', title: 'Versioned plan', version: 1, items: [PUBLISHED.items[0]] };
+  writeFileSync(versioned, JSON.stringify(firstVersion));
+  const one = json(box, 'blueprint', 'add', versioned).items[0];
+  writeFileSync(versioned, JSON.stringify({ ...firstVersion, version: 2 }));
+  const two = json(box, 'blueprint', 'add', versioned).items[0];
+  assert.notEqual(two.id, one.id, 'version 2 files its own starter');
+  const forTwo = json(box, 'blueprint', 'starters', versioned);
+  assert.deepEqual([forTwo.blueprint.version, forTwo.starters[0].id], [2, two.id], 'version 2 names the item version 2 filed');
+  writeFileSync(versioned, JSON.stringify(firstVersion));
+  assert.equal(json(box, 'blueprint', 'starters', versioned).starters[0].id, one.id, 'version 1 names the item version 1 filed');
 
   // init --blueprint lists every row that waits for the person, the inherited doctrine row PB7 included.
   const started = emptyRepo();
