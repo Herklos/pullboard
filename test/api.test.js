@@ -1017,6 +1017,20 @@ test('[A1] every catalog command and subcommand has a real CLI exercise', () => 
   json(source, source.repo, 'claim', [String(reopenItem.item_id)]);
   json(source, source.repo, 'submit', [String(reopenItem.item_id)]);
   json(source, source.repo, 'reopen', [String(reopenItem.item_id), '--note', 'exercise the versioned reopen result']);
+  // A cause repeated on two items becomes a draft row once its check is proved red, then green (#714).
+  for (const title of ['Rigor catalog one', 'Rigor catalog two']) {
+    const caused = json(source, source.repo, 'add', ['coordinator', title, '--criterion', 'Exercise a caused reopen.', '--check', 'true'], 'add').item;
+    json(source, source.repo, 'claim', [String(caused.item_id)]);
+    json(source, source.repo, 'submit', [String(caused.item_id)]);
+    json(source, source.repo, 'reopen', [String(caused.item_id), '--note', 'the bar cites the wrong row', '--cause', 'row:G1']);
+  }
+  const red = source.git(source.repo, 'rev-parse', 'HEAD').stdout.trim();
+  mkdirSync(join(source.repo, 'app'), { recursive: true });
+  writeFileSync(join(source.repo, 'app', 'fixed.txt'), 'fixed\n');
+  source.git(source.repo, 'add', 'app/fixed.txt');
+  source.git(source.repo, 'commit', '-q', '-m', 'feat(app): add the fixed file [G1]');
+  const drafted = json(source, source.repo, 'rigor', ['draft', 'row:G1', 'The fixed file exists', '--check', 'test -f app/fixed.txt', '--red', red, '--green', 'HEAD'], 'draft');
+  assert.equal(drafted.drafts.length, 1);
   json(source, source.repo, 'spec', ['approve', 'G1'], 'approve');
   json(source, source.repo, 'spec', ['decline', 'G1', '--reason', 'Catalog decline'], 'decline');
   writeFileSync(join(source.repo, 'SPEC.md'), `${readFileSync(join(source.repo, 'SPEC.md'), 'utf8')}- G2 [pending, must] Which store holds the catalog: SQLite. Choices: SQLite, Postgres. | gate: review\n`);

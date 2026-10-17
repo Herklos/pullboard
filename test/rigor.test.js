@@ -40,7 +40,7 @@ function freshBoard() {
   });
   const repo = join(dir, 'repo');
   mkdirSync(repo);
-  const git = (...args) => runFixtureGit(args, { cwd: repo, env });
+  const git = (...args) => runFixtureGit(args, { cwd: repo, env, encoding: 'utf8' });
   const run = (...args) => runFixtureChild(process.execPath, [BIN, ...args], { cwd: repo, env, encoding: 'utf8' });
   git('init', '-q', '-b', 'main');
   const init = run('init', '--model', 'Rigor coordinator');
@@ -288,4 +288,75 @@ test('reject, reopen and fact moves without a cause replay unchanged from engine
     assert.throws(() => legacyEngine.applyEngineMove(old, caused, { sequence: journal.length + 1, at: '2026-10-16T12:01:00.000Z' }),
       (error) => error.code === 'ENGINE_VERSION', `the engine-${version} client refuses a cause move before interpreting it`);
   }
+});
+
+test('a repeated cause becomes a draft row with its proof [D1,D3,S1]', () => {
+  const box = freshBoard();
+  // Two real commits: the bad one has a TODO and no fixed file; the fix removes the TODO and adds it.
+  mkdirSync(join(box.repo, 'src'), { recursive: true });
+  writeFileSync(join(box.repo, 'src', 'page.js'), '// TODO: escape the title\nexport const page = 1;\n');
+  box.git('add', 'src/page.js');
+  box.git('commit', '-q', '-m', 'chore: add the page');
+  const bad = box.git('rev-parse', 'HEAD').stdout.trim();
+  writeFileSync(join(box.repo, 'src', 'page.js'), 'export const page = 1;\n');
+  writeFileSync(join(box.repo, 'fixed.txt'), 'fixed\n');
+  box.git('add', 'src/page.js', 'fixed.txt');
+  box.git('commit', '-q', '-m', 'chore: escape the title');
+  const fix = box.git('rev-parse', 'HEAD').stdout.trim();
+
+  const board = history(box.file);
+  const items = ['Work one', 'Work two', 'Product one', 'Product two', 'Both one', 'Both two', 'Lonely'].map(board.add);
+  const [workA, workB, productA, productB, bothA, bothB, lonely] = items;
+  const bothKey = 'test:test/page.test.js::[G1] the page title is escaped';
+  for (const [id, cause] of [[workA, 'doctrine:C3'], [workB, 'doctrine:C3'], [productA, 'row:G1'], [productB, 'row:G1'], [bothA, bothKey], [bothB, bothKey], [lonely, 'refusal:LONELY']]) {
+    board.submit(id); board.reject(id, cause);
+  }
+  board.close();
+  const specBefore = readFileSync(join(box.repo, 'SPEC.md'), 'utf8');
+  const doctrineBefore = readFileSync(join(box.repo, 'DOCTRINE.md'), 'utf8');
+
+  // Without proof, or with a proof that is not red then green, nothing is drafted.
+  const flags = (check, red, green) => ['--check', check, '--red', red, '--green', green];
+  refused(box.run('rigor', 'draft', 'doctrine:C3', 'No TODO markers in shipped source', '--json'), 'RIGOR_UNPROVEN', 'a draft without a check is unproven');
+  refused(box.run('rigor', 'draft', 'doctrine:C3', 'No TODO markers in shipped source', '--check', 'grep -rn TODO src', '--red', bad, '--json'), 'RIGOR_UNPROVEN', 'a draft without its green commit is unproven');
+  refused(box.run('rigor', 'draft', 'doctrine:C3', 'No TODO markers in shipped source', ...flags('grep -rn TODO src', fix, bad), '--json'), 'RIGOR_UNPROVEN', 'a check green at red and red at green proves nothing');
+  refused(box.run('rigor', 'draft', 'row:G1', 'The fixed file exists', ...flags('true', bad, fix), '--json'), 'RIGOR_UNPROVEN', 'a test that never fails proves nothing');
+  refused(box.run('rigor', 'draft', 'refusal:LONELY', 'Lonely rule', ...flags('test -f fixed.txt', bad, fix), '--json'), 'RIGOR_UNNOTICED', 'a cause that has not repeated cannot be drafted');
+  assert.equal(readFileSync(join(box.repo, 'SPEC.md'), 'utf8'), specBefore, 'a refused draft writes no spec row');
+  assert.equal(readFileSync(join(box.repo, 'DOCTRINE.md'), 'utf8'), doctrineBefore, 'a refused draft writes no doctrine row');
+
+  // A work cause becomes a Doctrine row: gate: check, count: 0, its evidence and its proof.
+  const work = json(box, 'rigor', 'draft', 'doctrine:C3', 'No TODO markers in shipped source', ...flags('grep -rn TODO src', bad, fix));
+  assert.equal(work.reads, 'work');
+  assert.deepEqual(work.evidence.items.map((item) => item.id), [workA, workB]);
+  assert.deepEqual([work.proof.red.commit, work.proof.red.problems, work.proof.green.commit, work.proof.green.problems], [bad, 1, fix, 0]);
+  assert.equal(work.drafts.length, 1);
+  const [doctrineRow] = work.drafts;
+  assert.equal(doctrineRow.file, 'DOCTRINE.md');
+  assert.equal(doctrineRow.line, `- ${doctrineRow.id} [draft, must] No TODO markers in shipped source Why: rigor doctrine:C3 failed on #${workA}, #${workB}; red at ${bad.slice(0, 12)}, green at ${fix.slice(0, 12)}. | gate: check grep -rn TODO src | count: 0`);
+  assert.ok(readFileSync(join(box.repo, 'DOCTRINE.md'), 'utf8').includes(doctrineRow.line), 'the row is written into DOCTRINE.md');
+  assert.equal(readFileSync(join(box.repo, 'SPEC.md'), 'utf8'), specBefore, 'a work cause writes no spec row');
+
+  // A product cause becomes a spec row gated by its failing test.
+  const product = json(box, 'rigor', 'draft', 'row:G1', 'The fixed file exists', ...flags('test -f fixed.txt', bad, fix));
+  assert.equal(product.reads, 'product');
+  assert.deepEqual([product.proof.red.exit, product.proof.green.exit], [1, 0], 'the test fails on the bad commit and passes on the fix');
+  assert.equal(product.drafts.length, 1);
+  const [specRow] = product.drafts;
+  assert.equal(specRow.file, 'SPEC.md');
+  assert.equal(specRow.line, `- ${specRow.id} [draft, must] The fixed file exists Why: rigor row:G1 failed on #${productA}, #${productB}; red at ${bad.slice(0, 12)}, green at ${fix.slice(0, 12)}. | gate: test -f fixed.txt`);
+
+  // An unclear cause drafts both, and the person picks.
+  const both = json(box, 'rigor', 'draft', bothKey, 'Page titles are escaped', ...flags('! grep -rn TODO src', bad, fix));
+  assert.equal(both.reads, 'both');
+  assert.deepEqual(both.drafts.map((draft) => draft.file), ['DOCTRINE.md', 'SPEC.md']);
+
+  // Nothing is approved or applied: every drafted row is a draft, and the board records no decision.
+  const rows = json(box, 'spec').rows.filter((row) => [doctrineRow.id, specRow.id, ...both.drafts.map((draft) => draft.id)].includes(row.id));
+  assert.equal(rows.length, 4);
+  assert.ok(rows.every((row) => row.status === 'draft'), 'every drafted row is still a draft');
+  assert.equal(rows.find((row) => row.id === doctrineRow.id).gate, 'check grep -rn TODO src');
+  const check = box.run('spec', 'check');
+  assert.equal(check.status, 0, `the drafted rows parse cleanly: ${check.stdout}${check.stderr}`);
+  assert.ok(!json(box, 'log').events.some((event) => ['row_decision', 'row_apply'].includes(event.event_kind)), 'the command approved and applied nothing');
 });
