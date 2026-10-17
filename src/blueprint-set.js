@@ -12,9 +12,8 @@ import { CONFIG_FILE } from './config.js';
 import { Refused } from './refused.js';
 
 /**
- * The kinds a board takes one of, by the slot each fills. Why infrastructure fills the
- * architecture slot: the bundled serverless and data-pipeline blueprints say infrastructure today,
- * and #719 renames that kind to architecture, so both spellings name the same slot.
+ * The kinds a board takes one of, by the slot each fills. Why infrastructure is here: #719 renamed
+ * it architecture and loads it as such, but a kind line written by name still says what it read.
  */
 const ONE_PER_BOARD = { product: 'product', infrastructure: 'architecture', architecture: 'architecture' };
 
