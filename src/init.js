@@ -5,10 +5,10 @@
  * write.
  */
 import {
-  accessSync, appendFileSync, constants as fsConstants, existsSync, mkdirSync,
-  readdirSync, readFileSync, statSync, writeFileSync,
+  accessSync, appendFileSync, constants as fsConstants, existsSync, lstatSync, mkdirSync,
+  readdirSync, readFileSync, realpathSync, statSync, writeFileSync,
 } from 'node:fs';
-import { delimiter, basename, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
+import { delimiter, basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { userInfo } from 'node:os';
 import { CONFIG_FILE, COORDINATOR, doctrineFile, loadConfig } from './config.js';
 import { loadDoctrine } from './doctrine.js';
@@ -23,11 +23,33 @@ import {
 
 const NPM_DEFAULT_TEST = 'echo "Error: no test specified" && exit 1';
 
+/** Resolve a directory through symlinks, retaining a missing suffix for a not-yet-created private home. */
+function canonicalDirectoryPath(candidate) {
+  let cursor = resolve(candidate);
+  const missing = [];
+  while (true) {
+    try {
+      const physical = realpathSync(cursor);
+      if (!statSync(physical).isDirectory()) return null;
+      return resolve(physical, ...missing.reverse());
+    } catch (error) {
+      if (error.code !== 'ENOENT') return null;
+      try { lstatSync(cursor); return null; } catch (statError) {
+        if (statError.code !== 'ENOENT') return null;
+      }
+      const parent = dirname(cursor);
+      if (parent === cursor) return null;
+      missing.push(basename(cursor));
+      cursor = parent;
+    }
+  }
+}
+
 /** Keep an automatic machine-home write grant below the OS user home and away from filesystem roots. */
 export function machineHomeWriteScopeIsNarrow(machinePath, userHome = userInfo().homedir) {
-  const target = resolve(machinePath);
-  const home = resolve(userHome);
-  if (target === parse(target).root) return false;
+  const target = canonicalDirectoryPath(machinePath);
+  const home = canonicalDirectoryPath(userHome);
+  if (!target || !home || target === parse(target).root) return false;
   const homeFromTarget = relative(target, home);
   const targetContainsHome = homeFromTarget === '' || (homeFromTarget !== '..'
     && !homeFromTarget.startsWith(`..${sep}`) && !isAbsolute(homeFromTarget));

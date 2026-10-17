@@ -1,6 +1,6 @@
 /** Init adds only the requested project-local agent loop permissions and can skip them [I1,I2]. */
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, parse, resolve } from 'node:path';
 import { test } from 'node:test';
@@ -86,6 +86,18 @@ test('init grants the agent the permissions the Pullboard loop needs [I1,I2]', t
   assert.equal(machineHomeWriteScopeIsNarrow(syntheticHome, syntheticHome), false, 'the OS home itself is never granted');
   assert.equal(machineHomeWriteScopeIsNarrow(resolve(syntheticHome, '..'), syntheticHome), false, 'an ancestor containing the OS home is never granted');
   assert.equal(machineHomeWriteScopeIsNarrow(parse(syntheticHome).root, syntheticHome), false, 'a filesystem root is never granted');
+
+  const scopeFixture = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-machine-home-symlink-')));
+  t.after(() => rmSync(scopeFixture, { recursive: true, force: true }));
+  const simulatedHome = join(scopeFixture, 'os-home');
+  mkdirSync(simulatedHome);
+  const homeAlias = join(scopeFixture, 'home-alias');
+  symlinkSync(simulatedHome, homeAlias, 'dir');
+  assert.equal(machineHomeWriteScopeIsNarrow(homeAlias, simulatedHome), false, 'a symlink that grants the entire OS home is refused');
+  assert.equal(machineHomeWriteScopeIsNarrow(join(homeAlias, '.pullboard'), simulatedHome), true, 'a missing private machine-home below the canonical home remains eligible');
+  const danglingAlias = join(scopeFixture, 'dangling-home-alias');
+  symlinkSync(join(scopeFixture, 'missing-home'), danglingAlias, 'dir');
+  assert.equal(machineHomeWriteScopeIsNarrow(danglingAlias, simulatedHome), false, 'an unresolvable existing symlink fails closed');
 
   const fresh = initFixture(t);
   const freshInit = fresh.init();
