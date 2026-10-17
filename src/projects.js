@@ -51,6 +51,15 @@ function readRegistry() {
   }
 }
 
+/** Read registered project roots without refreshing or pruning the machine registry.
+ *
+ * @returns {string[] | null} A snapshot of paths, or null when the registry cannot be trusted.
+ */
+export function registeredProjectRootsSnapshot() {
+  const state = readRegistry();
+  return state.readable ? state.projects.map((project) => project.root) : null;
+}
+
 /**
  * Open the small SQLite file that serializes registry mutations. SQLite releases its OS lock when
  * a process exits, so a killed writer cannot strand a directory lock or evict a newer owner.

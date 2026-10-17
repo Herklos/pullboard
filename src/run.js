@@ -36,6 +36,8 @@ import {
 } from './doctrine.js';
 import {
   digestOf,
+  refuseSandboxBlocked,
+  sandboxBlockedOperation,
   runGate,
 } from './gate.js';
 import {
@@ -347,6 +349,7 @@ async function tryItem(ctx, item, { command, attempts, minutes, deps, me, start,
     const late = built.timedOut ? `The agent ran out of time after ${minutes} minutes.\n` : '';
     const checked = await runCommand(item.item_check, { cwd: root, timeoutMs: minutes * 60_000 });
     seconds += built.seconds + checked.seconds;
+    if (checked.status !== 0) refuseSandboxBlocked({ sandboxBlocked: sandboxBlockedOperation(root, checked.output) });
     let result = 'green';
     if (checked.status !== 0) {
       result = 'red';

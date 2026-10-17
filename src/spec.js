@@ -46,19 +46,35 @@ const SECTION_RE = /^##\s+(.+)$/;
 const SIGNER_RE = /^(?!#)[^\s,]+$/u;
 const LEGACY_SIGNER_RE = /^[A-Z][A-Za-z]{1,11}$/;
 
+const FIELD_NAMES = ['gate', 'serves', 'signers', 'count', 'runs', 'mode', 'files'];
+const CHECK_FIELDS = ['count', 'runs', 'mode', 'files'];
+
 /**
  * One row's trailing fields, after the text: `| gate: ...`, `| serves: a, b` and `| signers: CO,AB`.
+ * A doctrine rule may add `| count: N`, `| runs: nightly`, `| mode: watch` and `| files: <paths>`
+ * to a `gate: check`;
+ * those keys appear on the row only when written, so rows without them parse exactly as before.
+ * A check command may itself contain ` | `: a part that names no known field continues it.
  *
  * @param {string} rest
- * @returns {{ text: string, gate: string, serves: string[], signers: string[], unknown: string[] }}
+ * @returns {{ text: string, gate: string, serves: string[], signers: string[], unknown: string[], count?: string, runs?: string, mode?: string, files?: string }}
  */
 function splitFields(rest) {
   const [text = '', ...parts] = rest.split(' | ');
   const fields = { text: text.trim(), gate: '', serves: [], signers: [], unknown: [] };
+  let inCheck = false;
   for (const part of parts) {
     const [key = '', ...value] = part.split(':');
     const joined = value.join(':').trim();
-    if (key.trim() === 'gate') fields.gate = joined;
+    if (inCheck && !FIELD_NAMES.includes(key.trim())) {
+      fields.gate += ` | ${part.trim()}`;
+      continue;
+    }
+    inCheck = false;
+    if (key.trim() === 'gate') {
+      fields.gate = joined;
+      inCheck = /^check(\s|$)/u.test(joined);
+    } else if (CHECK_FIELDS.includes(key.trim())) fields[key.trim()] = joined;
     else if (key.trim() === 'serves') {
       fields.serves = joined.split(',').map((id) => id.trim()).filter(Boolean);
     } else if (key.trim() === 'signers') {
@@ -194,8 +210,33 @@ function rowFindings(row, maxWords) {
   // are not counted: the limit keeps the requirement itself short (blueprint rows carry both).
   const words = row.text.split(/ (?:Why|Choices): /u)[0].split(/\s+/).filter(Boolean).length;
   if (words > maxWords) add('warning', `${words} words; rows stay under ${maxWords}, the why goes elsewhere`);
-  for (const part of row.unknown) add('error', `unknown field "${part}"; fields are gate, serves and signers`);
+  for (const part of row.unknown) add('error', `unknown field "${part}"; fields are gate, serves, signers, count, runs, mode and files`);
+  findings.push(...checkFieldFindings(row).map((message) => ({ level: 'error', line: row.line, id: row.id, message })));
   return findings;
+}
+
+/**
+ * Problems with a row's check fields: a `gate: check` names its command and a whole-number count,
+ * `runs` is submit or nightly, `mode` is hold or watch, `files` names paths, and none of them
+ * stands without a check.
+ *
+ * @param {any} row
+ * @returns {string[]}
+ */
+export function checkFieldFindings(row) {
+  const isCheck = /^check(\s|$)/u.test(row.gate ?? '');
+  const problems = [];
+  if (!isCheck) {
+    if (CHECK_FIELDS.some((key) => row[key] !== undefined)) problems.push('count, runs, mode and files belong to a row whose gate is check <command>');
+    return problems;
+  }
+  if (!row.gate.slice('check'.length).trim()) problems.push('gate: check names the command that prints one line per problem');
+  if (row.count === undefined) problems.push('a check row names its committed count: | count: N');
+  else if (!/^\d+$/u.test(row.count)) problems.push(`count "${row.count}" is a whole number`);
+  if (row.runs !== undefined && !['submit', 'nightly'].includes(row.runs)) problems.push(`runs "${row.runs}" is submit or nightly`);
+  if (row.mode !== undefined && !['hold', 'watch'].includes(row.mode)) problems.push(`mode "${row.mode}" is hold or watch`);
+  if (row.files !== undefined && !row.files.trim()) problems.push('files names the repo paths the rule covers; leave it out to cover the whole repo');
+  return problems;
 }
 
 /**

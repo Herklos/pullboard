@@ -16,9 +16,10 @@ import {
 } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { boardNotWritable } from './board-access.js';
 import {
   briefFiles,
-  briefSections,
+  checkRouted,
 } from './brief.js';
 import { COORDINATOR } from './config.js';
 import {
@@ -32,6 +33,14 @@ import {
   storeTriggers,
 } from './machine.js';
 import { Refused } from './refused.js';
+import { barCorrectionFields } from './bar-corrections.js';
+import {
+  factFromEvent,
+  requestAnswerRefusal,
+  tellAnswerImplications,
+  tellFactImplications,
+  tellVerdictImplications,
+} from './implies.js';
 import { parseSpec } from './spec.js';
 
 export const ACCEPT_REASON = 'CRITERION_MET';
@@ -64,7 +73,6 @@ export function boardBusyError(file, startedAt, error) {
  * at its tier and below.
  */
 export const ROUTES = ['light', 'mid', 'strong'];
-const BRIEF_LIMIT = 8000;
 const REVIEW_RELEASE_COOLDOWN_MS = 60 * 60 * 1000;
 
 /**
@@ -209,7 +217,7 @@ export function openBoard(file, clock = systemClock, { isMain } = {}) {
         boardVersion = current.prepare('PRAGMA user_version').get().user_version;
         logVersion = readEventLogVersion(current);
       } catch (error) {
-        throw boardBusyError(file, startedAt, error);
+        throw boardNotWritable(file, boardBusyError(file, startedAt, error));
       } finally {
         current?.close();
       }
@@ -240,7 +248,7 @@ export function openBoard(file, clock = systemClock, { isMain } = {}) {
     return board;
   } catch (error) {
     try { db?.close(); } catch {}
-    throw boardBusyError(file, startedAt, error);
+    throw boardNotWritable(file, boardBusyError(file, startedAt, error));
   }
 }
 
@@ -640,30 +648,6 @@ function checkRoute(route) {
 }
 
 /**
- * Refuse an item a lighter model could not build cold (B10, B14). Any brief stays short enough to
- * read. Below the strong route the item needs all of it: a criterion, a check command that proves
- * it, and a brief naming the files and the test.
- *
- * @param {{ brief: string, route: string, criterion: string, check: string }} item
- */
-function checkRouted({ brief, route, criterion, check }) {
-  if (brief.length > BRIEF_LIMIT) {
-    throw new Refused('BRIEF_TOO_LONG', `the brief is ${brief.length} characters; keep it under ${BRIEF_LIMIT} and point to longer docs by path`);
-  }
-  if (route === 'strong') return;
-  const sections = briefSections(brief);
-  const missing = [
-    ...(briefFiles(brief).length ? [] : ['a brief with a Files: section naming the paths to touch']),
-    ...(sections.test?.length ? [] : ['a Test: section saying what the test asserts']),
-    ...(criterion.trim() ? [] : ['--criterion, saying when it is done']),
-    ...(check.trim() ? [] : ['--check, the command that proves it']),
-  ];
-  if (missing.length) {
-    throw new Refused('NO_BRIEF', `an item routed ${route} must be buildable cold; it needs ${missing.join(', ')}`);
-  }
-}
-
-/**
  * The route an agent joined on; strong for the coordinator and for ids the board does not know.
  *
  * @param {any} board
@@ -754,11 +738,11 @@ export function validateItemAddition(board, { by, lane, title, criterion = '', p
  * @param {number} id
  * @param {{ agentId: string, brief?: string, route?: string, criterion?: string, check?: string, after?: number[] }} change
  */
-export function editItem(board, id, { agentId, brief, route, criterion, check, after, checkBaseline }) {
+export function editItem(board, id, { agentId, brief, route, criterion, check, after, checkBaseline, reason }) {
   atomic(board, () => {
     const stored = itemById(board, id);
     const expiredHolder = stored.item_status === 'claimed' && !isHeld(board, stored) ? stored.item_owner : null;
-    const { item, next, command, unfreeze } = validateItemEdit(board, id, { agentId, brief, route, criterion, check, after });
+    const { item, next, command, unfreeze, bar } = validateItemEdit(board, id, { agentId, brief, route, criterion, check, after, reason });
     const baseline = normalizeCheckBaseline(agentId, command, checkBaseline);
     const pendingFields = [
       ...(next.item_criterion !== item.item_criterion ? ['criterion'] : []),
@@ -783,6 +767,7 @@ export function editItem(board, id, { agentId, brief, route, criterion, check, a
       ...(pendingRefreeze ? { pendingRefreeze: pendingFields } : {}),
       ...(clearFrozen && item.item_frozen_digest ? { unfrozen: item.item_frozen_digest } : {}),
       ...(expiredHolder ? { expiredHolder } : {}),
+      ...bar,
     });
     if (pendingRefreeze) {
       insertShout(board, {
@@ -795,8 +780,8 @@ export function editItem(board, id, { agentId, brief, route, criterion, check, a
   });
 }
 
-/** Validate an edit without side effects, so a refused change never starts a shell baseline. */
-export function validateItemEdit(board, id, { agentId, brief, route, criterion, check, after }) {
+/** Validate an edit without side effects, so a refused change never starts a shell baseline; a bar correction needs a reason [B31]. */
+export function validateItemEdit(board, id, { agentId, brief, route, criterion, check, after, reason }) {
   const engine = board.executionEngineVersion ?? ENGINE_VERSION;
   if (after !== undefined && engine < 10) {
     throw new Refused('ENGINE_VERSION', `editing item dependencies requires engine 10; this board uses engine ${engine}; upgrade Pullboard before using --after`);
@@ -840,7 +825,7 @@ export function validateItemEdit(board, id, { agentId, brief, route, criterion, 
   }
   checkRouted({ brief: next.item_brief, route: next.item_route, criterion: next.item_criterion, check: next.item_check });
   const unfreeze = next.item_criterion !== item.item_criterion || next.item_check !== item.item_check;
-  return { item, next, command, unfreeze };
+  return { item, next, command, unfreeze, bar: barCorrectionFields(board, item, next, { reason }) };
 }
 
 /** Normalize an explicitly supplied check only when its author is the coordinator [V2]. */
@@ -1219,6 +1204,7 @@ export function submit(board, id, { agentId, commit, tree, files = [], policyCom
         withinLane: null,
         trunkMergeClean: null,
         noUnverifiedStack: null,
+        doctrineHolds: null,
         gateConfigured: null,
         gateGreen: null,
         treeStillDuringGate: null,
@@ -1496,10 +1482,10 @@ function reserveWithin(board, id, { agentId, leaseMs, policy, familyPolicy = 'of
  *
  * @param {any} board
  * @param {number} id
- * @param {{ agentId: string, decision: string, reason?: string, note?: string, head: string, digest: string, policy: string, familyPolicy?: string, check?: 'none' | 'green' }} verdict
+ * @param {{ agentId: string, decision: string, reason?: string, note?: string, head: string, digest: string, policy: string, familyPolicy?: string, check?: 'none' | 'green', implies?: number[], impliesId?: string }} verdict - implies: items this verdict changes (B29)
  * @returns {{ decision: string, reason: string, check?: 'none' | 'green' }}
  */
-export function verify(board, id, { agentId, decision, reason, note = '', head, digest, policy, familyPolicy = 'off', check }) {
+export function verify(board, id, { agentId, decision, reason, note = '', head, digest, policy, familyPolicy = 'off', check, implies, impliesId }) {
   const verb = { ACCEPT: 'accept', REJECT: 'reject' }[decision];
   if (!verb) throw new Refused('BAD_DECISION', 'the decision is accept or reject');
   const isAccept = verb === 'accept';
@@ -1541,7 +1527,8 @@ export function verify(board, id, { agentId, decision, reason, note = '', head, 
     });
     const detail = { reason: code, commit: item.item_commit };
     if (isAccept && check !== undefined) detail.check = check;
-    logEvent(board, agentId, verb, id, detail);
+    logEvent(board, agentId, verb, id, implies?.length ? { ...detail, implies } : detail);
+    tellVerdictImplications(board, (by, itemId, fact) => logEvent(board, by, 'fact', itemId, fact), id, { seed: impliesId, implies });
     return { decision, reason: code, ...(isAccept && check !== undefined ? { check } : {}) };
   });
 }
@@ -1823,10 +1810,10 @@ export function verdictsFor(board, id) {
  * Insert a shout within the caller's transaction.
  *
  * @param {any} board
- * @param {{ from: string, to: string, text: string, lanes: string[], decision?: boolean, answers?: number | null, evidence?: any, request?: boolean, channel?: 'terminal' | 'view' }} message
+ * @param {{ from: string, to: string, text: string, lanes: string[], decision?: boolean, answers?: number | null, evidence?: any, request?: boolean, channel?: 'terminal' | 'view', detail?: object }} message - detail: extra event fields
  * @returns {number}
  */
-function insertShout(board, { from, to, text, lanes, decision = false, answers = null, evidence = null, request = false, channel = 'terminal' }) {
+function insertShout(board, { from, to, text, lanes, decision = false, answers = null, evidence = null, request = false, channel = 'terminal', detail = {} }) {
   if (!text.trim()) throw new Refused('EMPTY_SHOUT', 'a shout needs text');
   if (to === from) throw new Refused('SELF_SHOUT', `a shout cannot be addressed to its sender ${from}; name another agent, a lane or all`);
   if (request && (from !== 'person' || to !== COORDINATOR || decision || answers !== null)) {
@@ -1869,7 +1856,7 @@ function insertShout(board, { from, to, text, lanes, decision = false, answers =
     )
     .run(from, to, text.trim(), now(board), decision ? 1 : 0, answers, evidence?.kind ?? null, evidence ? evidence.outcome.trim() : null, evidence?.item ?? null, evidence?.commit ?? null, request ? 1 : 0, outcome);
   const id = Number(result.lastInsertRowid);
-  logEvent(board, from, answers === null ? 'shout' : decision ? 'pass' : 'answer', null, { shout: id, to, decision: Boolean(decision), request: Boolean(request), answers, ...(outcome ? { outcome } : {}), ...(personAnswer ? { channel } : {}) });
+  logEvent(board, from, answers === null ? 'shout' : decision ? 'pass' : 'answer', null, { shout: id, to, decision: Boolean(decision), request: Boolean(request), answers, ...(outcome ? { outcome } : {}), ...(personAnswer ? { channel } : {}), ...detail });
   return id;
 }
 
@@ -1909,14 +1896,14 @@ export function passDecision(board, id, { agentId, note, lanes }) {
  *
  * @param {any} board
  * @param {number} id
- * @param {{ agentId: string, text: string, lanes: string[], asPerson?: boolean, channel?: 'terminal' | 'view' }} options
+ * @param {{ agentId: string, text: string, lanes: string[], asPerson?: boolean, channel?: 'terminal' | 'view', implies?: number[], supersedes?: number | null, impliesId?: string }} options - implies and supersedes tell items (B29,B31)
  * @returns {number}
  */
-export function answerDecision(board, id, { agentId, text, lanes, asPerson = false, channel = 'terminal' }) {
+export function answerDecision(board, id, { agentId, text, lanes, asPerson = false, channel = 'terminal', implies, supersedes = null, impliesId }) {
   return atomic(board, () => {
     const ask = getShout(board, id);
     if (ask.shout_request) {
-      if (asPerson) throw new Refused('B26_PERSON_ANSWER', `requests are answered by the coordinator; run pullboard answer ${id} done or declined <reason>`);
+      if (asPerson || implies?.length || supersedes !== null) throw requestAnswerRefusal(id, { asPerson });
       return insertShout(board, { from: agentId, to: ask.shout_from, text, lanes, answers: id });
     }
     if (!ask.shout_decision) throw new Refused('NOT_A_DECISION', `shout #${id} asked for no decision`);
@@ -1932,7 +1919,7 @@ export function answerDecision(board, id, { agentId, text, lanes, asPerson = fal
       throw new Refused('NOT_YOUR_DECISION', `shout #${id} is addressed to ${ask.shout_to}, not ${lane} (agent ${agentId})`);
     }
     const from = personAnswer ? PERSON : agentId;
-    const answerId = insertShout(board, { from, to: ask.shout_from, text, lanes, answers: id, channel });
+    const answerId = tellAnswerImplications(board, (by, itemId, fact) => logEvent(board, by, 'fact', itemId, fact), insertShout(board, { from, to: ask.shout_from, text, lanes, answers: id, channel, detail: { ...(implies?.length ? { implies } : {}), ...(supersedes !== null ? { supersedes } : {}) } }), { seed: impliesId, implies, supersedes, from, person: PERSON });
     if (personAnswer && ask.shout_answers !== null) {
       const original = getShout(board, ask.shout_answers);
       insertShout(board, { from: PERSON, to: original.shout_from, text: `Person answered #${id}: ${String(text).trim()}`, lanes, answers: original.shout_id, channel });
@@ -2092,13 +2079,6 @@ export function factReference(ref) {
   return { path, start, end, commit: commit.toLowerCase() };
 }
 
-/** Give facts the same stamped identity on CLI, API, export and replica reads [B29,B31]. */
-function factFromEvent(event) {
-  const detail = JSON.parse(event.event_detail);
-  return { id: detail.id, eventId: event.event_id, kind: detail.kind, text: detail.text,
-    by: event.event_by, at: event.event_at, ref: detail.ref ?? null, supersedes: detail.supersedes ?? null };
-}
-
 /** Read every move and fact in append order, including superseded facts and full original text [B31,B32]. */
 export function itemThread(board, id) {
   itemById(board, id);
@@ -2116,7 +2096,7 @@ export function projectItemThreads(board, state) {
 /** Append a typed fact atomically; a correction never edits the original event [B29,B30,B31,B32].
  * The internal factId is set from a sealed move's identity during replay, rather than replica-local sequence ids.
  */
-export function appendFact(board, id, { agentId, kind, text, ref = null, supersedes = null, factId = randomUUID() }) {
+export function appendFact(board, id, { agentId, kind, text, ref = null, supersedes = null, factId = randomUUID(), implies }) {
   return atomic(board, () => {
     const item = current(board, itemById(board, id));
     if (!board.db.prepare('SELECT 1 FROM agent WHERE agent_id = ?').get(agentId)) throw new Refused('NO_AGENT', `no registered agent ${agentId}; join a worktree before appending a fact`);
@@ -2131,8 +2111,8 @@ export function appendFact(board, id, { agentId, kind, text, ref = null, superse
       throw new Refused('NO_FACT', `no fact ${String(supersedes)} on item #${id}; use a fact id from pullboard show ${id} --json`);
     }
     const binding = factReference(ref);
-    logEvent(board, agentId, 'fact', id, { id: factId, kind, text, ref: binding, supersedes });
-    return factFromEvent(board.lastEvent);
+    logEvent(board, agentId, 'fact', id, { id: factId, kind, text, ref: binding, supersedes, ...(implies?.length ? { implies } : {}) });
+    return tellFactImplications(board, (by, itemId, fact) => logEvent(board, by, 'fact', itemId, fact), factFromEvent(board.lastEvent), { id, implies, supersedes });
   });
 }
 

@@ -114,18 +114,52 @@ async function flushRevocations(session, io) {
   }
 }
 
-/** The native device revocation uses the same one-tap grant path as token revocation. */
+/** Recover an unavailable phone using a new provider proof kept only for this foreground action. */
+async function revokeDeviceWithSignIn(device, io) {
+  const controller = new AbortController();
+  /** Cancel the new device flow without retaining a person credential. */
+  const stop = () => controller.abort();
+  process.once('SIGINT', stop); process.once('SIGTERM', stop);
+  let session;
+  try {
+    io.say('Sign in again with GitHub to revoke this device; approval on that device is not needed.');
+    session = await relayMachineSignIn(device.url, io, { signal: controller.signal });
+    if (session.outcome) throw new Refused('DEVICE_REVOKE_CANCELLED',
+      'GitHub sign-in ' + session.outcome + '; no device was revoked. Run pullboard relay revoke ' + device.deviceId + ' when ready.');
+    if (session.account !== device.account || session.url !== device.url) throw new Refused('DEVICE_ACCOUNT',
+      'Sign in to the GitHub account that paired this device, then run pullboard relay revoke ' + device.deviceId + ' again.');
+    const reply = await relayDeviceRequest(session, '/api/v1/devices/' + device.deviceId,
+      { method: 'DELETE', signal: controller.signal }, io);
+    if (reply.recorded !== true) throw new Refused('RELAY_RESPONSE',
+      'The relay did not confirm device revocation; check pullboard relay devices and retry the same revoke command.');
+    updateRelayMachine(state => {
+      state.devices = state.devices.filter(entry => entry.deviceId !== device.deviceId);
+      state.revocations = state.revocations.filter(entry => entry.deviceId !== device.deviceId);
+    });
+    return { deviceId: device.deviceId, revoked: true,
+      notice: 'Revoked device; keys it already received remain known. Board key rotation is separate.' };
+  } finally {
+    process.off('SIGINT', stop); process.off('SIGTERM', stop);
+    if (session?.token) await revokeRelayPersonSession(session, io);
+  }
+}
+
+/** Use another paired phone when available; the device being revoked never approves itself. */
 export async function revokeRelayDevice(deviceId, io) {
   requirePersonChannel(io.personChannel);
-  const device = readRelayMachine().devices.find(entry => entry.deviceId === deviceId);
+  const machine = readRelayMachine();
+  const device = machine.devices.find(entry => entry.deviceId === deviceId);
   if (!device) throw new Refused('DEVICE_NOT_ENROLLED', 'Name a paired device from pullboard relay devices.');
-  const roots = [io.cwd, ...listApiProjects().map(entry => entry.root)];
-  for (const root of roots) {
-    let state;
-    try { state = relayMachineContext(root); } catch { continue; }
-    if (state?.token?.startsWith('pm_') && state.account === device.account && state.url === device.url) return relayRevokeDevice(root, deviceId, io);
+  const otherPhone = machine.devices.some(entry => entry.deviceId !== deviceId && entry.account === device.account && entry.url === device.url);
+  if (otherPhone) {
+    const roots = [io.cwd, ...listApiProjects().map(entry => entry.root)];
+    for (const root of roots) {
+      let state;
+      try { state = relayMachineContext(root); } catch { continue; }
+      if (state?.token?.startsWith('pm_') && state.account === device.account && state.url === device.url) return relayRevokeDevice(root, deviceId, io);
+    }
   }
-  throw new Refused('RELAY_NOT_LINKED', 'Link a board and pair the phone with pullboard relay on --all.');
+  return revokeDeviceWithSignIn(device, io);
 }
 
 /** Link non-excluded registry entries and report an explicit outcome for every registered project. */

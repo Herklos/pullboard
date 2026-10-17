@@ -17,10 +17,12 @@
  *   gate       "npm test"              optional, set in pullboard.json only when it has no gate
  *   rules      [{ key, text, why, tier?, gate? }]          tier must|aim (must), gate (review)
  *   questions  [{ key, ask, choices, default }]            default is one of choices
- *   items      [{ key, title, cites?, after?, lane?, route?, criterion?, brief?, check? }]
+ *   items      [{ key, title, cites?, after?, lane?, route?, criterion, brief?, check }]
  *
- * An item's route is light, mid or strong (strong when left out), as pullboard add takes it. Its
- * brief, criterion and check pass through to add unchanged, so a light or mid item is filed when it
+ * Every starter item carries a criterion and a check, or the blueprint is refused with
+ * BLUEPRINT_ITEM_UNCHECKED when it is read or saved: a starter that cannot be verified cannot be
+ * accepted. An item's route is light, mid or strong (strong when left out), as pullboard add takes
+ * it. Its brief, criterion and check pass through to add unchanged, so a light or mid item is filed when it
  * carries what add requires for that route and refused with add's own refusal when it does not.
  * A check is stored on the item and never run during add: no check baseline starts, so nothing a
  * blueprint supplies executes. A blueprint is read from the bundled set or a local path, never a URL.
@@ -35,6 +37,7 @@ import {
 } from 'node:fs';
 import {
   basename,
+  join,
   resolve,
 } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -109,7 +112,7 @@ export function readBlueprint(reference, cwd) {
  * @property {string} [gate]
  * @property {{ key: string, text: string, why: string, tier: string, gate: string }[]} rules
  * @property {{ key: string, ask: string, choices: string[], default: string }[]} questions
- * @property {{ key: string, title: string, cites: string[], after: string[], lane?: string, route: string, criterion: string, brief: string }[]} items
+ * @property {{ key: string, title: string, cites: string[], after: string[], lane?: string, route: string, criterion: string, brief: string, check: string }[]} items
  */
 
 /**
@@ -166,8 +169,13 @@ export function validateBlueprint(value, source = 'blueprint') {
     line(`${at}.ask`, question.ask);
     if (!Array.isArray(question.choices) || question.choices.length < 2) fail(`${at}.choices`, 'must list at least two answers');
     else question.choices.forEach((choice, n) => line(`${at}.choices[${n}]`, choice));
-    line(`${at}.default`, question.default);
-    if (Array.isArray(question.choices) && !question.choices.includes(question.default)) fail(`${at}.default`, 'must be one of its choices');
+    // A question may leave its default out: it then lands unanswered unless the repo shows one.
+    if (question.default !== undefined) {
+      line(`${at}.default`, question.default);
+      if (Array.isArray(question.choices) && !question.choices.includes(question.default)) fail(`${at}.default`, 'must be one of its choices');
+    }
+    if (Array.isArray(question.choices) && question.choices.includes(NO_ANSWER)) fail(`${at}.choices`, `must not offer ${NO_ANSWER}, which marks an unanswered question`);
+    if (question.detect !== undefined && !BLUEPRINT_DETECTS.includes(question.detect)) fail(`${at}.detect`, `must be one of ${BLUEPRINT_DETECTS.join(', ')}`);
   });
   const itemKeys = new Set();
   items.forEach((item, index) => {
@@ -183,19 +191,40 @@ export function validateBlueprint(value, source = 'blueprint') {
     }
     line(`${at}.lane`, item.lane, { required: false });
     if (item.route !== undefined && !ROUTES.includes(item.route)) fail(`${at}.route`, `must be one of ${ROUTES.join(', ')}`);
-    line(`${at}.check`, item.check, { required: false });
-    line(`${at}.criterion`, item.criterion, { required: false });
+    // A blank check or criterion is a missing one, refused below by name as BLUEPRINT_ITEM_UNCHECKED.
+    const blank = (text) => typeof text === 'string' && !text.trim();
+    if (!blank(item.check)) line(`${at}.check`, item.check, { required: false });
+    if (!blank(item.criterion)) line(`${at}.criterion`, item.criterion, { required: false });
     if (item.brief !== undefined && typeof item.brief !== 'string') fail(`${at}.brief`, 'must be text');
   });
   if (problems.length) {
     throw new Refused('BAD_BLUEPRINT', `${source} is not a valid blueprint: ${problems.slice(0, 5).join('; ')}${problems.length > 5 ? `; and ${problems.length - 5} more` : ''}; fix the file and run pullboard blueprint add again`);
   }
+  refuseUncheckedItems(value.name, items);
   return {
     ...value,
     rules: rules.map((rule) => ({ ...rule, tier: rule.tier ?? 'must', gate: rule.gate ?? 'review' })),
     questions,
     items: items.map((item) => ({ ...item, cites: item.cites ?? [], after: item.after ?? [], route: item.route ?? 'strong', criterion: item.criterion ?? '', brief: item.brief ?? '' })),
   };
+}
+
+/**
+ * Refuse a blueprint whose starter item has no criterion or no check, naming the blueprint and the
+ * item. A starter without both cannot be built against a bar or verified, so it could never reach
+ * an accept (#724). The check is stored on the item and still never run by add or init.
+ *
+ * @param {string} name - The blueprint's name, already checked.
+ * @param {{ key: string, title: string, criterion?: string, check?: string }[]} items
+ * @returns {void}
+ */
+function refuseUncheckedItems(name, items) {
+  for (const item of items) {
+    const missing = [item.criterion, item.check].map((text) => (typeof text === 'string' ? text.trim() : ''));
+    const lacks = [!missing[0] && 'no criterion', !missing[1] && 'no check'].filter(Boolean);
+    if (!lacks.length) continue;
+    throw new Refused('BLUEPRINT_ITEM_UNCHECKED', `blueprint ${name} starter item ${item.key} (${JSON.stringify(item.title)}) has ${lacks.join(' and ')}; give every starter item a criterion and a check command, then run pullboard blueprint add again`);
+  }
 }
 
 /**
@@ -246,13 +275,92 @@ export function ruleText(rule) {
 }
 
 /**
- * One question's row text: the question with its default as the answer, then every choice.
+ * One question's row text: the question with its default as the answer, then every choice. A
+ * question with no default reads "(choose one)" as its answer, so the person sees it is open.
  *
- * @param {{ ask: string, choices: string[], default: string }} question
+ * @param {{ ask: string, choices: string[], default?: string }} question
  * @returns {string}
  */
 export function questionText(question) {
-  return `${question.ask.trim()}: ${question.default.trim()}. Choices: ${question.choices.map((choice) => choice.trim()).join(', ')}.`;
+  return `${question.ask.trim()}: ${(question.default ?? NO_ANSWER).trim()}. Choices: ${question.choices.map((choice) => choice.trim()).join(', ')}.`;
+}
+
+/** What a question with nothing to answer it shows as its answer, so the person picks one. */
+export const NO_ANSWER = '(choose one)';
+
+/**
+ * What a question's detect field can name: each reads an answer from the repo a blueprint lands in.
+ * A question may carry detect ("test-runner" or "framework") and may leave its default out. When
+ * the repo shows an answer that is one of the question's choices, that answer is the default; else
+ * the blueprint's own default stands; else the row is filed unanswered as "<ask>: (choose one)".
+ */
+export const BLUEPRINT_DETECTS = ['test-runner', 'framework'];
+
+// A test script names its runner as a command word: node --test, vitest, jest or mocha.
+const SCRIPT_RUNNERS = [
+  ['node:test', /(?:^|[\s;&|(])node\s+(?:[^\s;&|]+\s+)*--test(?:[\s;&|)=]|$)/u],
+  ['Vitest', /(?:^|[\s;&|(/])vitest(?:[\s;&|)]|$)/u],
+  ['Jest', /(?:^|[\s;&|(/])jest(?:[\s;&|)]|$)/u],
+  ['Mocha', /(?:^|[\s;&|(/])mocha(?:[\s;&|)]|$)/u],
+];
+const PACKAGE_RUNNERS = [['Vitest', 'vitest'], ['Jest', 'jest'], ['Mocha', 'mocha']];
+const PACKAGE_FRAMEWORKS = [['Next.js', 'next'], ['SvelteKit', '@sveltejs/kit']];
+
+/**
+ * The one answer a list of candidates gives, or null when it gives none or more than one, so an
+ * ambiguous repo leaves the question for the person instead of guessing.
+ *
+ * @param {string[]} found
+ * @returns {string | null}
+ */
+function onlyAnswer(found) {
+  const distinct = [...new Set(found)];
+  return distinct.length === 1 ? distinct[0] : null;
+}
+
+/**
+ * Read the answers a repo already shows, by detect name: the test runner from package.json's
+ * scripts.test, then its devDependencies; the framework from its dependencies (and
+ * devDependencies, where SvelteKit sits). Only package.json is read: nothing runs and nothing is
+ * fetched, so the same repo always gives the same answers. A missing or unreadable package.json
+ * gives none.
+ *
+ * @param {string} root - The repository root.
+ * @returns {Record<string, string>}
+ */
+export function repoAnswers(root) {
+  const file = join(root, 'package.json');
+  if (!existsSync(file)) return {};
+  let manifest;
+  try { manifest = JSON.parse(readFileSync(file, 'utf8')); }
+  catch { return {}; }
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) return {};
+  const table = (name) => (manifest[name] && typeof manifest[name] === 'object' && !Array.isArray(manifest[name]) ? manifest[name] : {});
+  const has = (name, pkg) => Object.hasOwn(table(name), pkg);
+  const script = typeof table('scripts').test === 'string' ? table('scripts').test : '';
+  const answers = {};
+  const runner = onlyAnswer(SCRIPT_RUNNERS.filter(([, pattern]) => pattern.test(script)).map(([answer]) => answer))
+    ?? onlyAnswer(PACKAGE_RUNNERS.filter(([, pkg]) => has('devDependencies', pkg)).map(([answer]) => answer));
+  if (runner) answers['test-runner'] = runner;
+  const framework = onlyAnswer(PACKAGE_FRAMEWORKS.filter(([, pkg]) => has('dependencies', pkg) || has('devDependencies', pkg)).map(([answer]) => answer));
+  if (framework) answers.framework = framework;
+  return answers;
+}
+
+/**
+ * The blueprint as it lands in a repo: each question that detects an answer the repo shows, and
+ * lists that answer among its choices, gets it as its default. An answer outside the choices is
+ * never used, so a row never offers what the blueprint did not.
+ *
+ * @param {Blueprint} blueprint
+ * @param {Record<string, string>} answers - From repoAnswers.
+ * @returns {Blueprint}
+ */
+export function landBlueprint(blueprint, answers) {
+  return { ...blueprint, questions: blueprint.questions.map((question) => {
+    const answer = question.detect ? answers[question.detect] : undefined;
+    return answer && question.choices.includes(answer) ? { ...question, default: answer } : question;
+  }) };
 }
 
 /**
@@ -384,9 +492,12 @@ function positions(text, separator) {
 
 /**
  * Read an approved question row back into its ask, choices and answer, or say why it cannot be.
- * The ask and the choices may hold ": " and ", ", so every split is tried: a reading counts only if
- * its answer is one of two or more choices and questionText gives back the exact row text. One
- * reading is kept; none or several leave the row out, so a save never changes a question [S1].
+ * The ask and the choices may hold ": " and ", ", so every split of the ask is tried. The answer
+ * is the one run of comma-separated parts it equals; every other part is a choice of its own, so
+ * a question with three or more choices keeps its listed choices exactly as written instead of
+ * reading as every way its parts could join. A reading counts only if it has two or more choices
+ * and questionText gives back the exact row text. One reading is kept; none or several leave the
+ * row out, so a save never changes a question [S1].
  *
  * @param {string} text
  * @returns {{ question?: { ask: string, choices: string[], default: string }, reason?: string } | null} null when the row is no question
@@ -401,20 +512,83 @@ function readQuestion(text) {
     for (const colon of positions(head, ': ')) {
       const ask = head.slice(0, colon);
       const answer = head.slice(colon + 2);
-      for (let mask = 0; mask < 2 ** (tokens.length - 1); mask += 1) {
-        const choices = [tokens[0]];
-        for (let index = 1; index < tokens.length; index += 1) {
-          if (mask & (2 ** (index - 1))) choices[choices.length - 1] += `, ${tokens[index]}`;
-          else choices.push(tokens[index]);
+      for (let from = 0; from < tokens.length; from += 1) {
+        for (let to = from + 1; to <= tokens.length; to += 1) {
+          if (tokens.slice(from, to).join(', ') !== answer) continue;
+          const choices = [...tokens.slice(0, from), answer, ...tokens.slice(to)];
+          const question = { ask, choices, default: answer };
+          if (choices.length < 2 || [ask, ...choices].some((part) => !part.trim() || part !== part.trim())) continue;
+          if (questionText(question) === text) readings.set(JSON.stringify(question), question);
         }
-        const question = { ask, choices, default: answer };
-        if (choices.length < 2 || !choices.includes(answer) || [ask, ...choices].some((part) => !part.trim() || part !== part.trim())) continue;
-        if (questionText(question) === text) readings.set(JSON.stringify(question), question);
       }
     }
   }
   if (readings.size === 1) return { question: [...readings.values()][0] };
+  if (positions(text, CHOICES).some((at) => text.slice(0, at).endsWith(`: ${NO_ANSWER}`))) return { reason: 'its question has no answer yet' };
   return { reason: readings.size ? 'its question can be read more than one way' : 'its answer is not one of its choices, or its choices cannot be read back exactly' };
+}
+
+/**
+ * A question row's text once the person answers it: "<ask>: <answer>. Choices: <choices>.". The
+ * choices stay exactly as written. A listed choice (any run of the comma-separated parts, so a
+ * choice holding ", " counts) matches in any case and keeps its listed spelling; any other answer
+ * joins the choices last. The ask ends at the one ": " whose remainder is a listed choice, or at
+ * the last ": " when the default is none of them; readQuestion's single reading is not required,
+ * because three or more choices always read more than one way there [S1].
+ *
+ * @param {string} text - The pending row's text, as questionText wrote it.
+ * @param {string} given - The person's answer: one of the choices, or their own one-line text.
+ * @param {string} id - The row id, for the refusal's next step.
+ * @returns {{ text: string, answer: string, listed: boolean }}
+ */
+export function answerQuestion(text, given, id) {
+  const at = text.lastIndexOf(CHOICES);
+  const approve = `the person approves its exact new text instead: pullboard spec approve ${id} --text "<the answered row>"`;
+  if (at < 0 || !text.endsWith('.')) throw new Refused('SPEC_ANSWER', `${id} does not read as a question with its choices: it has no ". Choices: " list`, approve);
+  const head = text.slice(0, at);
+  const choicesText = text.slice(at + CHOICES.length, -1);
+  const parts = choicesText.split(', ');
+  // The same bound readQuestion keeps, so the runs of parts below stay a small, fixed amount of work.
+  if (parts.length > MOST_CHOICE_PARTS) {
+    throw new Refused('SPEC_ANSWER_CHOICES', `${id} lists ${parts.length} choice parts, more than the ${MOST_CHOICE_PARTS} an answer can read`,
+      `the person approves its exact answered text instead: pullboard spec approve ${id} --text "<ask>: <answer>. Choices: <choices>."`);
+  }
+  const runs = parts.flatMap((_, from) => parts.slice(from).map((__, length) => parts.slice(from, from + length + 1).join(', ')));
+  const colons = positions(head, ': ');
+  const listedSplits = colons.filter((colon) => runs.includes(head.slice(colon + 2)));
+  if (!colons.length || listedSplits.length > 1) throw new Refused('SPEC_ANSWER', `${id}'s question and its current answer cannot be told apart`, approve);
+  const ask = head.slice(0, listedSplits[0] ?? colons.at(-1));
+  const answer = given.trim();
+  if (answer.includes(CHOICES.trim())) throw new Refused('SPEC_ANSWER', `the answer to ${id} cannot hold "Choices:"`, `give the answer alone: pullboard spec answer ${id} "<answer>"`);
+  const listed = runs.find((choice) => choice.toLowerCase() === answer.toLowerCase());
+  const chosen = listed ?? answer;
+  return { text: `${ask}: ${chosen}${CHOICES}${listed ? choicesText : `${choicesText}, ${answer}`}.`, answer: chosen, listed: Boolean(listed) };
+}
+
+/**
+ * The answer an answered row's text carries, read back from the text alone: the one answer that
+ * answerQuestion turns the pending row's text into exactly this answered text, or null when there
+ * is none. Spec show and the view display this, because the source and the answered text are what
+ * a row decision signs; nothing else a record carries is trusted for display [S1,S19].
+ *
+ * @param {string} pending - The pending row's text before the answer.
+ * @param {string} answered - The decision's signed text.
+ * @returns {string | null}
+ */
+export function answerFromText(pending, answered) {
+  const at = answered.lastIndexOf(CHOICES);
+  if (at < 0) return null;
+  const head = answered.slice(0, at);
+  for (const colon of positions(head, ': ')) {
+    try {
+      const read = answerQuestion(pending, head.slice(colon + 2), 'row');
+      if (read.text === answered) return read.answer;
+    } catch (error) {
+      if (!(error instanceof Refused)) throw error;
+      // This split of the answered text is no answer to the pending row; try the next one.
+    }
+  }
+  return null;
 }
 
 /**

@@ -1,6 +1,8 @@
 /** Private runtime records that let an unattended CLI hand off its live view link. */
+import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -90,4 +92,26 @@ export async function runningView(port = 0, expectedScopeCommonDir = null) {
   } catch {
     return null;
   }
+}
+
+/**
+ * Name the process listening on a loopback port, when this machine can tell. Only the system's
+ * listener table (lsof) can say who owns a port: a recorded view pid that is still alive may be a
+ * reused pid, so the record only labels a listener lsof already confirmed. Without lsof, or when
+ * it names no listener, this returns null and the caller gives the fix without a pid.
+ * Only the pid and the executable's own name are kept, since arguments can carry secrets.
+ *
+ * @param {number} port
+ * @returns {{ pid: number, name: string } | null}
+ */
+export function portHolder(port) {
+  const lsof = ['/usr/sbin/lsof', '/usr/bin/lsof'].find((file) => existsSync(file));
+  if (!lsof) return null;
+  const listed = spawnSync(lsof, ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-Fpc'], { encoding: 'utf8', timeout: 2_000 });
+  const pids = [...String(listed.stdout ?? '').matchAll(/^p(\d+)$/gmu)].map((match) => Number(match[1]));
+  // One listener is an answer; none or several (an unusual shared socket) names no single process.
+  if (listed.status !== 0 || pids.length !== 1 || !Number.isInteger(pids[0]) || pids[0] < 1) return null;
+  const pid = pids[0];
+  if (readSession(port)?.pid === pid) return { pid, name: 'pullboard view' };
+  return { pid, name: /^c(.+)$/mu.exec(listed.stdout)?.[1]?.trim() || 'a program' };
 }

@@ -4,10 +4,13 @@ import {
   randomUUID,
 } from 'node:crypto';
 import {
+  closeSync,
   copyFileSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
 } from 'node:fs';
 import {
   dirname,
@@ -145,10 +148,80 @@ async function mergeGroup(state, items) {
   return { items: merged, conflicts, tip: headCommit(batch.root) };
 }
 
+/** Read positive TAP completion counts while rejecting the canonical runner's incomplete accounts. */
+function completionAccount() {
+  let early = false;
+  let plan = null;
+  let topLevel = 0;
+  const counts = {};
+  /** Recognize canonical incomplete accounts even when only a bounded line prefix is retained. */
+  const markerPrefix = (text) => {
+    if (/^(?:Landing gate stopped early after |Files not run: |Interrupted test files: )/u.test(text)) early = true;
+  };
+  return {
+    markerPrefix,
+    /** Consume one complete output line without retaining test output or diagnostic blocks. */
+    line(text) {
+      markerPrefix(text);
+      if (/^(?:not )?ok \d+\b/u.test(text)) topLevel++;
+      const planned = /^1\.\.(\d+)\s*$/u.exec(text);
+      if (planned) plan = Number(planned[1]);
+      const count = /^# (tests|pass|fail|cancelled|skipped|todo) (\d+)\s*$/u.exec(text);
+      if (count) counts[count[1]] = Number(count[2]);
+    },
+    /** A complete plan accounts for every test and contains no interrupted or cancelled work. */
+    complete() {
+      return !early && Number.isSafeInteger(plan) && plan > 0 && plan === topLevel && Number.isSafeInteger(counts.tests)
+        && Number.isSafeInteger(counts.pass) && Number.isSafeInteger(counts.fail)
+        && (counts.cancelled ?? 0) === 0
+        && counts.pass + counts.fail + (counts.skipped ?? 0) + (counts.todo ?? 0) === counts.tests;
+    },
+  };
+}
+
+/** Require positive completion evidence from this run, or stream the retained legacy raw account. */
+function completeGate(gate) {
+  if (typeof gate.complete === 'boolean') return gate.complete;
+  const account = completionAccount();
+  if (typeof gate.output === 'string') {
+    for (const line of gate.output.split('\n')) account.line(line);
+    return account.complete();
+  }
+  if (!gate.logPath || !existsSync(gate.logPath)) return false;
+  const input = openSync(gate.logPath, 'r');
+  const chunk = Buffer.alloc(64 * 1024);
+  let pending = '';
+  let oversized = false;
+  try {
+    let count;
+    while ((count = readSync(input, chunk, 0, chunk.length, null)) > 0) {
+      const parts = chunk.toString('latin1', 0, count).split('\n');
+      for (const [index, part] of parts.entries()) {
+        if (index) {
+          if (oversized) account.markerPrefix(pending);
+          else account.line(pending);
+          pending = ''; oversized = false;
+        }
+        if (pending.length + part.length > 256) oversized = true;
+        pending += part.slice(0, 256 - pending.length);
+      }
+    }
+    if (oversized) account.markerPrefix(pending);
+    else account.line(pending);
+    return account.complete();
+  } finally { closeSync(input); }
+}
+
+/** Whether current person waivers cover every named failure of this exact recorded run. */
+function coveredFailures(state, gate) {
+  return gate.failures.length > 0 && gate.failures.every((failure) => failure.file && store.landingWaiverFor(state.board, failure));
+}
+
 /** Run one full landing gate and retain its complete output under this batch's immutable phase path. */
 async function gateGroup(state, label) {
   const tree = headTree(state.batch.root);
-  if (state.gates.has(tree)) return state.gates.get(tree);
+  const cached = state.gates.get(tree);
+  if (cached && (completeGate(cached) || !coveredFailures(state, cached))) return cached;
   const directory = join(dirname(state.batch.root), 'logs');
   mkdirSync(directory, { recursive: true });
   const logPath = join(directory, `${label}-${state.batch.revision}.log`);
@@ -156,9 +229,11 @@ async function gateGroup(state, label) {
   const gate = await runGate(state.batch.root, state.config, { trustStamp: false, landing: true, agent: 'coordinator', onWait: state.onWait });
   copyFileSync(gate.log, logPath);
   if (gate.profilePath) copyFileSync(gate.profilePath, `${logPath}.profile.json`);
-  const result = { ...gate, failures: landingFailures(gate.output, state.batch.root), tree, logPath };
+  const result = { ...gate, failures: landingFailures(gate.output, state.batch.root), complete: completeGate(gate),
+    requiresGreen: Boolean(cached && !completeGate(cached)), tree, logPath };
   state.gates.set(tree, result);
-  await save(state, { gateResults: [...state.gates.values()].map(({ tree: testedTree, isGreen, failures, logPath: log }) => ({ tree: testedTree, isGreen, failures, logPath: log })) });
+  await save(state, { gateResults: [...state.gates.values()].map(({ tree: testedTree, isGreen, failures, complete, requiresGreen, logPath: log }) =>
+    ({ tree: testedTree, isGreen, failures, complete: complete ?? null, requiresGreen: Boolean(requiresGreen), logPath: log })) });
   return result;
 }
 
@@ -183,6 +258,7 @@ async function diagnose(state, failures) {
 
 /** Record every failure's exact live waiver rather than changing which tests the gate runs. */
 function waivedProof(state, gate) {
+  if (!completeGate(gate) || gate.requiresGreen) return null;
   if (!gate.failures.length || gate.failures.some((entry) => !entry.file)) return null;
   const failures = gate.failures.map((failure) => ({ ...failure, waiver: store.landingWaiverFor(state.board, failure)?.id }));
   return failures.every((entry) => entry.waiver) ? { tree: gate.tree, failures, logPath: gate.logPath } : null;
@@ -247,10 +323,41 @@ async function fileFlakes(state, gate, files) {
   state.say(`flake: ${files.join(', ')}; nothing landed; fix the test or ask the person for an expiring waiver`);
 }
 
+/** Name the remote a landing pushes the trunk to: the trunk branch's own remote, else origin [B3]. */
+function landingRemoteName(root, branch) {
+  return tryGit(root, ['config', '--get', `branch.${branch.replace(/^refs\/heads\//u, '')}.remote`]).stdout || 'origin';
+}
+
+/**
+ * Name the configured remote a landing would push the trunk to, or null when this repo has none [B3].
+ * An accept uses it to say which landing command fits this repo; the landing itself refuses on null.
+ */
+export function landingRemote(root, branch) {
+  const remote = landingRemoteName(root, branch);
+  return tryGit(root, ['remote', 'get-url', remote]).status === 0 ? remote : null;
+}
+
+/** Build the one LAND_PUSH refusal every landing push failure reports, real or previewed [B3]. */
+function pushRefused(reason, next = 'inspect the remote and hooks, then run pullboard land --adopt') {
+  return new Refused('LAND_PUSH', `the landing push failed: ${reason}; ${next}`);
+}
+
+/**
+ * Return the remote a landing pushes to, refusing LAND_PUSH when it does not exist [B3].
+ * The dry run and the real landing both call this, so a preview cannot say "would land" for a push that must fail.
+ */
+function requirePushTarget(root, branch) {
+  const remote = landingRemote(root, branch);
+  if (remote) return remote;
+  const missing = landingRemoteName(root, branch);
+  throw pushRefused(`this repo has no ${missing} remote to push ${branch.replace(/^refs\/heads\//u, '')} to`,
+    `add one with git remote add ${missing} <url> and run pullboard land again, or merge each verified commit on the trunk with git merge --no-ff and record it with pullboard merged <id> <commit>`);
+}
+
 /** Push the exact gated tip before recording receipts, then fast-forward only a clean unchanged main. */
 async function publish(state) {
   let batch = state.batch;
-  const remote = tryGit(state.root, ['config', '--get', `branch.${batch.branch.replace(/^refs\/heads\//u, '')}.remote`]).stdout || 'origin';
+  const remote = requirePushTarget(state.root, batch.branch);
   if (batch.proof?.failures?.length && batch.state !== 'pushed') {
     const failures = batch.proof.failures.map((failure) => ({ ...failure, waiver: store.landingWaiverFor(state.board, failure)?.id }));
     if (!failures.every((failure) => failure.waiver)) throw new Refused('LAND_WAIVER', 'the landing proof has an expired or missing person waiver; ask the person for a new expiring waiver, then adopt the batch');
@@ -263,7 +370,7 @@ async function publish(state) {
     const alreadyPushed = tryGit(batch.root, ['ls-remote', remote, batch.branch]).stdout.split(/\s+/u)[0] === batch.tip;
     if (!alreadyPushed) {
       const pushed = tryGit(batch.root, ['push', remote, `HEAD:${batch.branch}`]);
-      if (pushed.status !== 0) throw new Refused('LAND_PUSH', `the landing push failed: ${pushed.stderr || pushed.stdout}; inspect the remote and hooks, then run pullboard land --adopt`);
+      if (pushed.status !== 0) throw pushRefused(pushed.stderr || pushed.stdout);
     }
     await save(state, { state: 'pushed' });
   }
@@ -289,6 +396,7 @@ export async function land({ root, board, config, write, say, owner, maximum = I
   const unfinished = store.landingBatches(board).findLast((batch) => batch.state !== 'landed' && batch.state !== 'blocked');
   const selected = candidates(board, root, trunk.commit, maximum);
   if (dryRun) {
+    if (selected.ready.length) requirePushTarget(root, trunk.branch);
     const conflicts = [];
     for (const item of selected.ready) {
       const merge = tryGit(root, ['merge-tree', '--write-tree', '--name-only', '-z', trunk.commit, item.item_commit]);
@@ -320,6 +428,7 @@ export async function land({ root, board, config, write, say, owner, maximum = I
     return { batch: null, landed: [], conflicts: [], blocked: selected.blocked, culprits: [], flakes: [] };
   }
   if (!batch) {
+    requirePushTarget(root, trunk.branch);
     const id = randomUUID();
     const directory = join(repoInfo(root).commonDir, 'pullboard', 'landings', id);
     batch = { version: 1, id, base: trunk.commit, tip: trunk.commit, branch: trunk.branch, root: join(directory, 'worktree'),
