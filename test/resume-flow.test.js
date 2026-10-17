@@ -8,6 +8,7 @@ import * as store from '../src/board.js';
 import { main } from '../src/cli.js';
 import { spawn } from 'node:child_process';
 import { AGENT_SHELL_MARKERS, SSH_SHELL_MARKERS } from '../src/person.js';
+import { RESUME_HOOK } from '../src/init.js';
 import { proofStats } from '../src/stats.js';
 import { runFixtureChild, runFixtureGit } from './fixture-child.js';
 import { takeDefaultViewPort } from './view-port-fixture.js';
@@ -225,7 +226,7 @@ function fixture(t, { wait = null, age = null, reservation = null, otherAge = nu
     assert.equal(code, 0, stderr || stdout);
     return args.includes('--json') ? JSON.parse(stdout) : stdout.trimEnd();
   }
-  return { root, web, waiting, run, stats: () => proofStats(board, { now: clock.now().getTime() }) };
+  return { root, web, waiting, run, board, builder, reviewer, stats: () => proofStats(board, { now: clock.now().getTime() }) };
 }
 
 /** Require exactly one final line while preserving the ordinary next-step line immediately before it. */
@@ -301,6 +302,74 @@ test('agent resume keeps its next step without a coordinator flow alert [N32,R1,
   assert.doesNotMatch(text, /^flow:/mu);
   assert.match(text.split('\n').at(-1), /^next: /u);
   assert.equal(Object.hasOwn(await box.run(['resume', '--json'], box.web), 'flow'), false);
+});
+
+/** Prove the coordinator's resume counts and names its waiting inbox, privately and read-only. */
+test('resume shows the coordinator its unread shouts [I1,A9]', async t => {
+  const box = fixture(t);
+  const none = await box.run(['resume']);
+  assert.ok(none.split('\n').includes('inbox: 0 unread shouts, 0 open decisions for you'), none);
+  assert.match(none.split('\n').at(-1), /^next: (?!read your)/u, 'nothing waiting puts no inbox step first');
+  assert.deepEqual((await box.run(['resume', '--json'])).inbox,
+    { unread: 0, decisions: 0, newest: [], more: 0, read: 'pullboard inbox' });
+  const say = (from, to, text, decision = false) => store.shout(box.board, { from, to, text, lanes: ['web'], decision });
+  const first = say(box.builder, 'coordinator', 'Builder asks the coordinator something');
+  say(box.builder, box.reviewer, 'Private note for the reviewer alone');
+  say(box.reviewer, 'web', 'A note for the web lane alone');
+  const second = say(box.reviewer, 'coordinator', 'Which lane owns the docs?\nMore detail below.', true);
+  const text = await box.run(['resume']);
+  assert.equal(store.unreadCount(box.board, 'coordinator'), 2, 'resume marks nothing read');
+  const lines = text.split('\n');
+  const at = lines.indexOf('inbox: 2 unread shouts, 1 open decision for you; read them with pullboard inbox');
+  assert.ok(at > 0 && lines[at - 1].startsWith('resume: '), `the count opens the card, after its header:\n${text}`);
+  assert.doesNotMatch(text, /Private note|for the web lane/u, 'another seat\'s private and lane shouts stay out');
+  assert.doesNotMatch(text, /\d+ unread shouts?; newest from/u, 'the old line at the end of the card is not repeated');
+  assert.deepEqual(lines.slice(at + 1, at + 3), [
+    `  newest #${second} from ${box.reviewer} (unknown) (0m ago): Which lane owns the docs?`,
+    `  newest #${first} from ${box.builder} (unknown) (0m ago): Builder asks the coordinator something`,
+  ], text);
+  assert.equal(lines.at(-1), `next: read your 2 unread shouts first: pullboard inbox; then ${none.split('\n').at(-1).slice('next: '.length)}`);
+  const json = await box.run(['resume', '--json']);
+  assert.deepEqual(json.inbox, { unread: 2, decisions: 1, more: 0, read: 'pullboard inbox', newest: [
+    { id: first, from: box.builder, at: '2026-10-10T08:20:00.000Z', text: 'Builder asks the coordinator something' },
+    { id: second, from: box.reviewer, at: '2026-10-10T08:20:00.000Z', text: 'Which lane owns the docs?\nMore detail below.' },
+  ] });
+  const builderCard = await box.run(['resume', '--json'], box.web);
+  assert.equal(Object.hasOwn(builderCard, 'inbox'), false, 'an agent keeps its own unread line');
+  assert.equal(builderCard.unread, 1, 'the builder sees its lane, never the coordinator or reviewer shouts');
+  assert.equal(builderCard.newest[0].shout_text, 'A note for the web lane alone');
+  for (let n = 0; n < 3; n += 1) say(box.builder, 'all', `Board-wide note ${n}`);
+  const busy = (await box.run(['resume'])).split('\n');
+  const top = busy.findIndex(line => line.startsWith('inbox: '));
+  assert.equal(busy[top], 'inbox: 5 unread shouts, 1 open decision for you; read them with pullboard inbox');
+  assert.deepEqual(busy.slice(top + 1, top + 5).map(line => line.replace(/#\d+ /u, '')), [
+    `  newest from ${box.builder} (unknown) (0m ago): Board-wide note 2`,
+    `  newest from ${box.builder} (unknown) (0m ago): Board-wide note 1`,
+    `  newest from ${box.builder} (unknown) (0m ago): Board-wide note 0`,
+    '  2 more; read them all with pullboard inbox',
+  ], 'the newest three by name, then the rest as a count and the command');
+  assert.equal(store.inbox(box.board, 'coordinator').length, 5, 'inbox still reads every shout resume showed');
+  const read = await box.run(['resume']);
+  assert.ok(read.split('\n').includes('inbox: 0 unread shouts, 1 open decision for you; read them with pullboard inbox'), read);
+  assert.match(read.split('\n').at(-1), /^next: (?!read your)/u, 'a read inbox no longer goes first');
+});
+
+/** Prove the SessionStart hook prints the same inbox count, since it runs pullboard resume. */
+test('resume shows the coordinator its unread shouts through the SessionStart hook [I1,A9]', t => {
+  const box = releaseFixture(t);
+  const other = join(box.root, 'other-checkout');
+  box.git(box.repo, 'add', '-A');
+  box.git(box.repo, 'commit', '-q', '-m', 'chore: initialize hook inbox fixture [N19]');
+  box.git(box.repo, 'worktree', 'add', '-q', '-b', 'other', other);
+  const lane = Object.keys(JSON.parse(readFileSync(join(box.repo, 'pullboard.json'), 'utf8')).lanes)[0];
+  const joined = box.run(other, 'join', lane, '--model', 'Fixture');
+  assert.equal(joined.status, 0, joined.failure || joined.stderr || joined.stdout);
+  const shouted = box.run(other, 'shout', 'coordinator', 'The hook shows this shout');
+  assert.equal(shouted.status, 0, shouted.failure || shouted.stderr || shouted.stdout);
+  const hook = runFixtureChild('sh', ['-c', RESUME_HOOK], { cwd: box.repo, env: box.env, encoding: 'utf8' });
+  assert.equal(hook.status, 0, hook.failure || hook.stderr || hook.stdout);
+  assert.match(hook.stdout, /^inbox: 1 unread shout, 0 open decisions for you; read them with pullboard inbox$/mu, hook.stdout);
+  assert.match(hook.stdout, /^ {2}newest #\d+ from .+ \(\d+m ago\): The hook shows this shout$/mu, hook.stdout);
 });
 
 test('spec draft adds draft rows and resume names them [N32]', t => {
