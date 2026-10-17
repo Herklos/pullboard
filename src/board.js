@@ -16,6 +16,9 @@ import { ENGINE_VERSION, GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, effectiv
 import { Refused } from './refused.js';
 import { parseSpec } from './spec.js';
 import { invariantEvidence } from './submit-invariants.js';
+import { preserveInvariantEvidence } from './submit-invariants.js';
+import { validateLandingBatch } from './submit-invariants.js';
+import { validateLandingRevision } from './submit-invariants.js';
 import { submissionProof } from './submit-invariants.js';
 import { SUBMISSION_PROOF_ENGINE } from './submit-invariants.js';
 
@@ -2693,30 +2696,11 @@ export function landingBatches(board) {
 export function recordLandingBatch(board, { agentId, batch, revision = 0 }) {
   coordinatorOnly(agentId, 'records landing batches');
   const evidence = (board.executionEngineVersion ?? ENGINE_VERSION) >= SUBMISSION_PROOF_ENGINE ? invariantEvidence(batch?.invariantEvidence) : undefined;
-  if (!batch || batch.version !== 1 || typeof batch.id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/u.test(batch.id)
-    || !['merging', 'gating', 'bisecting', 'flaky', 'blocked', 'ready', 'pushed', 'landed'].includes(batch.state)
-    || !/^[a-f0-9]{40,64}$/u.test(batch.base ?? '') || !/^[a-f0-9]{40,64}$/u.test(batch.tip ?? '')
-    || typeof batch.root !== 'string' || !batch.root || typeof batch.branch !== 'string' || !batch.branch.startsWith('refs/heads/')
-    || !Array.isArray(batch.items) || batch.items.some((entry) => !Number.isSafeInteger(entry?.id) || entry.id < 1 || !/^[a-f0-9]{40,64}$/u.test(entry.commit ?? ''))
-    || typeof batch.owner !== 'string' || !batch.owner || typeof batch.logPath !== 'string' || !batch.logPath
-    || !Number.isSafeInteger(revision) || revision < 0) {
-    throw new Refused('LAND_BATCH', 'a landing batch needs its exact base, tip, items, state, owner and log path; run pullboard land');
-  }
+  validateLandingBatch(batch, revision);
   return atomic(board, () => {
     const previous = landingBatches(board).find((entry) => entry.id === batch.id);
-    if (previous?.invariantEvidence && (board.executionEngineVersion ?? ENGINE_VERSION) >= SUBMISSION_PROOF_ENGINE) {
-      for (const kind of ['gates', 'diagnostics']) {
-        if (!evidence || JSON.stringify(evidence[kind].slice(0, previous.invariantEvidence[kind].length)) !== JSON.stringify(previous.invariantEvidence[kind])) {
-          throw new Refused('LAND_EVIDENCE', 'recorded landing evidence is append-only; preserve earlier gate and diagnostic receipts when adopting');
-        }
-      }
-    }
-    if ((previous?.revision ?? 0) !== revision || previous?.state === 'landed') {
-      throw new Refused('LAND_MOVED', 'the landing batch changed; read pullboard resume and adopt its current revision');
-    }
-    if (previous && (previous.base !== batch.base || previous.root !== batch.root || previous.branch !== batch.branch)) {
-      throw new Refused('LAND_BATCH', 'a batch keeps its original base and landing worktree; adopt it with pullboard land --adopt');
-    }
+    preserveInvariantEvidence(previous, evidence, board.executionEngineVersion ?? ENGINE_VERSION);
+    validateLandingRevision(previous, batch, revision);
     const recorded = { ...batch, revision: revision + 1, updatedAt: now(board) };
     delete recorded.invariantEvidence;
     if (evidence) recorded.invariantEvidence = evidence;

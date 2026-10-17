@@ -123,3 +123,37 @@ export function submitInvariantLine(proposal) {
   const budget = proposal.withinBudget === null ? '' : proposal.withinBudget ? ' (within budget)' : ' (over budget)';
   return `submit invariant proposal: ${proposal.file}; ${proposal.escapes} escaped merge(s); runtime ${runtime} / 60 s${budget}; edit submitInvariants on main to accept`;
 }
+
+/** Validate the existing canonical batch identity before its append-only snapshot is recorded. */
+export function validateLandingBatch(batch, revision) {
+  if (!batch || batch.version !== 1 || typeof batch.id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/u.test(batch.id)
+    || !['merging', 'gating', 'bisecting', 'flaky', 'blocked', 'ready', 'pushed', 'landed'].includes(batch.state)
+    || !/^[a-f0-9]{40,64}$/u.test(batch.base ?? '') || !/^[a-f0-9]{40,64}$/u.test(batch.tip ?? '')
+    || typeof batch.root !== 'string' || !batch.root || typeof batch.branch !== 'string' || !batch.branch.startsWith('refs/heads/')
+    || !Array.isArray(batch.items) || batch.items.some((entry) => !Number.isSafeInteger(entry?.id) || entry.id < 1 || !/^[a-f0-9]{40,64}$/u.test(entry.commit ?? ''))
+    || typeof batch.owner !== 'string' || !batch.owner || typeof batch.logPath !== 'string' || !batch.logPath
+    || !Number.isSafeInteger(revision) || revision < 0) {
+    throw new Refused('LAND_BATCH', 'a landing batch needs its exact base, tip, items, state, owner and log path; run pullboard land');
+  }
+}
+
+/** Preserve earlier normalized gate and diagnostic receipts when an engine-17 batch is adopted. */
+export function preserveInvariantEvidence(previous, evidence, engine) {
+  if (previous?.invariantEvidence && engine >= SUBMISSION_PROOF_ENGINE) {
+    for (const kind of ['gates', 'diagnostics']) {
+      if (!evidence || JSON.stringify(evidence[kind].slice(0, previous.invariantEvidence[kind].length)) !== JSON.stringify(previous.invariantEvidence[kind])) {
+        throw new Refused('LAND_EVIDENCE', 'recorded landing evidence is append-only; preserve earlier gate and diagnostic receipts when adopting');
+      }
+    }
+  }
+}
+
+/** Keep the original revision, terminal-state and immutable batch-identity guards together. */
+export function validateLandingRevision(previous, batch, revision) {
+  if ((previous?.revision ?? 0) !== revision || previous?.state === 'landed') {
+    throw new Refused('LAND_MOVED', 'the landing batch changed; read pullboard resume and adopt its current revision');
+  }
+  if (previous && (previous.base !== batch.base || previous.root !== batch.root || previous.branch !== batch.branch)) {
+    throw new Refused('LAND_BATCH', 'a batch keeps its original base and landing worktree; adopt it with pullboard land --adopt');
+  }
+}

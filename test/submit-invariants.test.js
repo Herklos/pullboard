@@ -78,6 +78,7 @@ test('a landing escape is proposed as a submit invariant [C7,V4]', async () => {
   const first = 'a'.repeat(40);
   const second = 'b'.repeat(40);
   const third = 'c'.repeat(40);
+  landing(box, 'earlier-green', submit, first, [], [], true);
   landing(box, 'first-escape', submit, first, [
     { path: 'test/repeated.test.js', durationMs: 4000 },
     { path: 'test/once.test.js', durationMs: 1000 },
@@ -96,6 +97,16 @@ test('a landing escape is proposed as a submit invariant [C7,V4]', async () => {
   ]);
   // A second receipt of the same merge is evidence custody, not another escaped merge.
   landing(box, 'duplicate-receipt', submit, second, [{ path: 'test/repeated.test.js', durationMs: 4500 }]);
+  const recoveredCommit = 'f'.repeat(40);
+  landing(box, 'full-recovery-red', submit, recoveredCommit, [{ path: 'test/full-recovered.test.js', durationMs: 25 }]);
+  landing(box, 'later-full-green', submit, recoveredCommit, [], [], true);
+  onBoard(box, board => {
+    const previous = store.landingBatches(board).find(batch => batch.id === 'first-escape');
+    const eventCount = store.events(board).length;
+    assert.throws(() => store.recordLandingBatch(board, { agentId: 'coordinator', revision: previous.revision,
+      batch: { ...previous, invariantEvidence: { ...previous.invariantEvidence, gates: [] } } }), { code: 'LAND_EVIDENCE' });
+    assert.equal(store.events(board).length, eventCount, 'a prior receipt cannot be removed or rewritten');
+  });
   const untouchedConfig = readFileSync(configPath, 'utf8');
   const proposals = json(box, box.repo, 'status').submitInvariantProposals;
   assert.equal(proposals[0].file, 'test/repeated.test.js', 'a repeated escape below budget is first');
@@ -108,6 +119,8 @@ test('a landing escape is proposed as a submit invariant [C7,V4]', async () => {
   assert.equal(byFile.get('test/unknown.test.js').runtimeMs, null, 'unmeasured is not zero');
   assert.equal(byFile.get('test/unknown.test.js').withinBudget, null);
   assert.ok(byFile.has('test/other-commit.test.js'), 'green on a different commit cannot erase the escape');
+  assert.ok(byFile.has('test/once.test.js'), 'an earlier green at the same commit does not erase a later failure');
+  assert.equal(byFile.has('test/full-recovered.test.js'), false, 'a later full green at the exact commit suppresses the escape');
   assert.equal(byFile.has('test/recovered.test.js'), false, 'whole-file green at the exact merge suppresses it');
   assert.equal(byFile.has('web/page.test.js'), false, 'a selected file did not escape selection');
   const human = box.run(box.repo, 'status');
@@ -176,6 +189,11 @@ test('submission selection replays on two replicas and legacy history remains un
   assert.deepEqual(store.events(copies[0]), store.events(copies[1]));
   assert.throws(() => applyEngineMove(copies[2], { ...move, engine: SUBMISSION_PROOF_ENGINE - 1 }, receipt), { code: 'RELAY_MOVE' });
   assert.equal(store.getItem(copies[2], id).item_status, 'claimed');
+  const invalid = structuredClone(move);
+  invalid.id = 'selection-invalid-path';
+  invalid.args[1].submissionProof.files = ['../outside.test.js'];
+  assert.equal(applyRelayMove(copies[2], invalid, receipt).error?.code, 'SUBMISSION_PROOF');
+  assert.equal(store.getItem(copies[2], id).item_status, 'claimed', 'invalid coverage cannot submit the item');
   const legacy = structuredClone(move);
   legacy.engine = 12;
   delete legacy.args[1].submissionProof;
