@@ -3826,9 +3826,10 @@ async function runCommand(argv, io) {
         const ctx = context(io);
         return await relayJoin(ctx.info.root, second, values.url, io);
       }
-      if (second || rest.length || (first && !['on', 'off'].includes(first)) || (values.url && first !== 'on')) throw new Refused('USAGE', 'pullboard relay [on|off] [--url <address>]');
+      if (second || rest.length || (first && !['on', 'off', 'status'].includes(first)) || (values.url && first !== 'on')) throw new Refused('USAGE', 'pullboard relay [status|on|off] [--url <address>]');
       const ctx = context(io);
-      if (!first) { await syncRelay(ctx.info.root, io); await executePersonRequests(ctx.info.root, io, main); }
+      // pullboard relay status is the named form of plain pullboard relay: the same sync and report.
+      if (!first || first === 'status') { await syncRelay(ctx.info.root, io); await executePersonRequests(ctx.info.root, io, main); }
       const result = first === 'on' ? await relayOn(ctx.info.root, values.url, io)
         : first === 'off' ? await relayOff(ctx.info.root, io) : relayStatus(ctx.info.root);
       io.result?.(result);

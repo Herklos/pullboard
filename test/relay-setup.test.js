@@ -285,11 +285,20 @@ test('relay on --all says who signed in, what it linked and what it waits for [H
   assert.equal((finished.stdout.match(/#device=/gu) ?? []).length, 1, 'the pairing secret appears only in the one existing link');
 
   const board = JSON.parse(readFileSync(join(box.root, '.git/pullboard/relay.json'), 'utf8')).board;
-  const status = plainCommand(box.root, box.env, ['relay']);
+  const relayRequests = (from) => box.calls.slice(from).map(call => `${call.method} ${call.path.replace(/[0-9a-f]{32}/gu, '<board>')}`);
+  const beforeStatus = box.calls.length;
+  const status = plainCommand(box.root, box.env, ['relay', 'status']);
   const shown = await status.done;
-  assert.equal(shown.code, 0, shown.stderr);
+  const statusRequests = relayRequests(beforeStatus);
+  assert.equal(shown.code, 0, `pullboard relay status runs: ${shown.stderr}`);
   const statusLine = shown.stdout.split('\n').find(line => line.startsWith('relay: ')) ?? '';
   assert.ok(statusLine.startsWith(`relay: repo (board ${board}) `), `relay status names the linked board: ${statusLine}`);
   assert.ok(statusLine.includes(' is linked for GitHub fixture-user; '), `relay status names the linked account: ${statusLine}`);
   assert.match(statusLine, /; sequence \d+; \d+ pending uploads$/u, 'relay status still gives the sequence and pending uploads');
+  const beforePlain = box.calls.length;
+  const plain = await plainCommand(box.root, box.env, ['relay']).done;
+  assert.equal(plain.code, 0, plain.stderr);
+  assert.equal(plain.stdout, shown.stdout, 'plain pullboard relay prints the same status');
+  assert.ok(statusRequests.length > 0, 'relay status syncs with the relay before it reports');
+  assert.deepEqual(statusRequests, relayRequests(beforePlain), 'relay status makes the same relay requests as plain relay');
 });
