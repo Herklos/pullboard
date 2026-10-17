@@ -18,7 +18,7 @@ const DEFAULT_SHORT_SLOTS = 0;
 export function loadMachineSettings() {
   const file = machineSettingsFile();
   const value = readMachineSettingsFile(file);
-  if (!value) return { gateSlots: DEFAULT_GATE_SLOTS, browserSlots: DEFAULT_BROWSER_SLOTS, gate: { shortSlots: DEFAULT_SHORT_SLOTS } };
+  if (!value) return { gateSlots: DEFAULT_GATE_SLOTS, browserSlots: DEFAULT_BROWSER_SLOTS };
   if (value.gate?.browserFreeChecks !== undefined && typeof value.gate.browserFreeChecks !== 'boolean') {
     throw new Refused('BAD_MACHINE_SETTINGS', `gate.browserFreeChecks in ${file} must be true or false`);
   }
@@ -27,13 +27,13 @@ export function loadMachineSettings() {
   if (!Number.isSafeInteger(gateSlots) || gateSlots < 1) {
     throw new Refused('BAD_GATE_SLOTS', `gateSlots in ${file} must be a positive integer; run pullboard settings gateSlots <n>`);
   }
-  const shortSlots = value.gate?.shortSlots ?? DEFAULT_SHORT_SLOTS;
-  if (!Number.isSafeInteger(shortSlots) || shortSlots < 0) {
-    throw new Refused('BAD_SHORT_SLOTS', `gate.shortSlots in ${file} must be a nonnegative integer; run pullboard settings gate.shortSlots <n>`);
-  }
   const browserSlots = value.browserSlots ?? DEFAULT_BROWSER_SLOTS;
   if (!Number.isSafeInteger(browserSlots) || browserSlots < 1 || browserSlots > gateSlots) {
     throw new Refused('BAD_BROWSER_SLOTS', `browserSlots in ${file} must be a positive integer no greater than gateSlots (${gateSlots}); run pullboard settings browserSlots <n>`);
+  }
+  const shortSlots = value.gate?.shortSlots;
+  if (shortSlots !== undefined && (!Number.isSafeInteger(shortSlots) || shortSlots < 0)) {
+    throw new Refused('BAD_SHORT_SLOTS', `gate.shortSlots in ${file} must be a whole number, 0 or more; run pullboard settings gate.shortSlots <n>`);
   }
   const runners = value.runners ?? [];
   if (!Array.isArray(runners)) throw new Refused('BAD_MACHINE_SETTINGS', 'runners must be an array; use pullboard runner add <ssh-host> --slots <n> --browser <n>');
@@ -43,7 +43,7 @@ export function loadMachineSettings() {
     if (seen.has(runner.host)) throw new Refused('BAD_MACHINE_SETTINGS', 'runner hosts must be unique; remove the duplicate machine setting');
     seen.add(runner.host);
   }
-  return { ...value, gateSlots, browserSlots, gate: { ...value.gate, shortSlots }, ...(runners.length ? { runners } : {}) };
+  return { ...value, gateSlots, browserSlots, ...(runners.length ? { runners } : {}) };
 }
 
 /** Browser-free check admission is deliberately opt-in per machine. */
@@ -75,16 +75,28 @@ export function setGateSlots(capacity) {
   return next;
 }
 
-/** Set short admission capacity only while the shared gate queue is idle. */
-export function setGateShortSlots(capacity) {
-  if (!Number.isSafeInteger(capacity) || capacity < 0) throw new Refused('BAD_SHORT_SLOTS', 'gate.shortSlots must be a nonnegative integer; run pullboard settings gate.shortSlots <n>');
+/**
+ * Short gate slots admit runs that name their test files while every ordinary slot is busy.
+ * The default 0 keeps them off, so the pool behaves exactly as it did before the setting existed.
+ */
+export function gateShortSlots() {
+  return loadMachineSettings().gate?.shortSlots ?? DEFAULT_SHORT_SLOTS;
+}
+
+/** Set the short slot count only while the gate pool is idle, like gateSlots, so no holder changes class mid-run. */
+export function setGateShortSlots(count) {
+  if (!Number.isSafeInteger(count) || count < 0) throw new Refused('BAD_SHORT_SLOTS', 'gate.shortSlots must be a whole number, 0 or more; run pullboard settings gate.shortSlots <n>');
   let next;
-  const current = loadMachineSettings();
-  setResourceCapacity({ name: 'gate', capacity: current.gateSlots, scope: 'machine', persist: () => {
-    const latest = loadMachineSettings();
-    next = { ...latest, gate: { ...latest.gate, shortSlots: capacity } };
-    writeMachineSettings(next);
-  } });
+  try {
+    setResourceCapacity({ name: 'gate', capacity: loadMachineSettings().gateSlots, scope: 'machine', persist: () => {
+      const current = loadMachineSettings();
+      next = { ...current, gate: { ...current.gate, shortSlots: count } };
+      writeMachineSettings(next);
+    } });
+  } catch (error) {
+    if (error?.code !== 'RESOURCE_BUSY') throw error;
+    throw new Refused('RESOURCE_BUSY', `the gate pool is in use; wait for it to become idle, then retry pullboard settings gate.shortSlots ${count}`);
+  }
   return next;
 }
 

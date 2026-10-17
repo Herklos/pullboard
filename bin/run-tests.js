@@ -1379,7 +1379,7 @@ async function main(args) {
       }
     }
     if (scopedMarker) {
-      const inherited = inheritedGateSlot({ root: process.cwd(), browser, fullSuite: !shortEligible });
+      const inherited = inheritedGateSlot({ root: process.cwd(), browser, namedFiles: shortEligible });
       if (inherited) await run(gateSlotEnvironment(inherited));
       else await acquire();
     } else if (legacyHeld) {

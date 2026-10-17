@@ -14,9 +14,9 @@ import { gitChildEnv, gitPath, headTree, invalidateGitFacts, isClean, untracked 
 import { secretsIn } from './hooks.js';
 import { Refused } from './refused.js';
 import { GATE_SLOT_HELD_ENV, gateSlotEnvironment, inheritedGateSlot, takeResource } from './resources.js';
-import { browserFreeChecksEnabled, loadMachineSettings } from './settings.js';
+import { browserFreeChecksEnabled, gateShortSlots, loadMachineSettings } from './settings.js';
 import { selectAffectedTests } from './affected-tests.js';
-import { checkNeedsBrowser, explicitCheckFiles, testsNeedBrowser } from './browser-admission.js';
+import { checkNeedsBrowser, testsNeedBrowser } from './browser-admission.js';
 import { timingFromOutput, timingRunner } from './timing.js';
 import { landingShardProfile } from './landing-shards.js';
 import { RunnerDropped, runOnRunner, runOnRunnerAsync, runnerSource } from './runners.js';
@@ -498,26 +498,27 @@ function hasPipeline(command) {
 /** Run work under the machine queue: landings first, then every other eligible waiter in arrival order.
  *
  * @param {string} root - Checkout used to locate the machine resource database.
+ * shortEligible marks a run that names its test files: with gate.shortSlots above 0 it may take a
+ * short slot when every ordinary slot is held, and a full suite can never inherit that slot.
+ *
  * @param {(lease: { waitMs: number, token?: string, pool?: string, browser?: boolean, slotClass?: 'gate'|'short', release: () => void }) => any | Promise<any>} action - Work to perform while holding a slot.
  * @param {{ landing?: boolean, itemCheck?: boolean, shortEligible?: boolean, diagnostic?: boolean, browser?: boolean, agent?: string, item?: string|number, kind?: string, onWait?: (state: object) => void }} [options] - Queue class and progress reporter.
  * @returns {Promise<any>} The action's result after releasing its lease.
  */
 export async function withGateSlot(root, action, { landing = false, itemCheck = false, shortEligible = false, diagnostic = false, browser = false, remote = true, agent, item = '', kind = '', onWait } = {}) {
-  if (shortEligible && (landing || diagnostic)) throw new Refused('BAD_SHORT_SLOT_REQUEST', 'short gate slots are only available to named non-landing, non-diagnostic runs');
-  const inherited = inheritedGateSlot({ root, browser, fullSuite: !shortEligible });
+  const inherited = inheritedGateSlot({ root, browser, namedFiles: shortEligible });
   if (inherited) {
     try { return await action(inherited); }
     finally { inherited.release(); }
   }
   const settingsProvider = () => loadMachineSettings();
   const capacityProvider = () => settingsProvider().gateSlots;
-  const shortCapacityProvider = () => settingsProvider().gate.shortSlots;
   const source = runnerSource(root);
   let lease = await takeResource({
     name: 'gate',
     capacity: capacityProvider(),
     capacityProvider,
-    shortCapacityProvider,
+    shortCapacityProvider: () => gateShortSlots(),
     shortEligible,
     browserCapacityProvider: () => settingsProvider().browserSlots,
     scope: 'machine',
@@ -538,7 +539,7 @@ export async function withGateSlot(root, action, { landing = false, itemCheck = 
   try {
     while (true) {
       lease.source = source;
-      lease.runMetadata = { landing, itemCheck, shortEligible, diagnostic, item: String(item), kind };
+      lease.runMetadata = { landing, itemCheck, diagnostic, item: String(item), kind };
       try { return await action(lease); }
       catch (error) {
         if (!(error instanceof RunnerDropped) || !lease.runner || !lease.requeueRunner) throw error;
@@ -625,21 +626,6 @@ export async function runSubmitGate(root, config, { base, trunk, changed, check,
     ? (proofFiles.length > 0 && (!allowBrowserFreeChecks || await testsNeedBrowser(root, proofFiles, { onFallback: onBrowserFallback })))
     : (selection.full || !allowBrowserFreeChecks || await testsNeedBrowser(root, proofFiles, { onFallback: onBrowserFallback }));
   const browser = checkUsesBrowser || proofUsesBrowser;
-  // Only an explicit runner command over exactly the selected files can use short capacity.
-  // Opaque configured runners, opaque item checks, and full selections stay ordinary.
-  const proofCommand = proofFiles.length && config.affectedTests?.trim()
-    ? `${config.affectedTests.trimEnd()} ${proofFiles.map(path => commandWord('./' + path)).join(' ')}`
-    : '';
-  // The parser accepts canonical repository-relative test paths; the executed command keeps its existing ./ spelling.
-  const proofSelectionCommand = proofFiles.length && config.affectedTests?.trim()
-    ? `${config.affectedTests.trimEnd()} ${proofFiles.map(commandWord).join(' ')}`
-    : '';
-  const parsedProofFiles = proofSelectionCommand ? await explicitCheckFiles(root, proofSelectionCommand) : null;
-  const exactNamedProof = parsedProofFiles !== null
-    && JSON.stringify(parsedProofFiles) === JSON.stringify(proofFiles);
-  const namedCheck = check ? await explicitCheckFiles(root, check) : [];
-  const shortEligible = namedCheck !== null && (!proofFiles.length || exactNamedProof)
-    && (Boolean(check) || proofFiles.length > 0) && (deferFullFallback || !selection.full);
   return await withGateSlot(root, (lease) => {
     const startedAt = Date.now();
     const log = gitPath(root, 'pullboard-submit.log');
@@ -678,13 +664,14 @@ export async function runSubmitGate(root, config, { base, trunk, changed, check,
     if (!deferFullFallback && selection.full) proof = fullGateRun(root, config, false, { waitMs: proofWait, log: proofLog, gateLease: lease });
     else if (!proofFiles.length) proof = { isGreen: true, output: '', seconds: 0, isCached: false, log: '' };
     else {
-      proof = { ...runProfiledShell(root, proofCommand, { waitMs: proofWait, profileFile: `${proofLog}.profile.json`, gateLease: lease }), isCached: false, log: proofLog };
+      const command = `${config.affectedTests.trimEnd()} ${proofFiles.map(path => commandWord('./' + path)).join(' ')}`;
+      proof = { ...runProfiledShell(root, command, { waitMs: proofWait, profileFile: `${proofLog}.profile.json`, gateLease: lease }), isCached: false, log: proofLog };
       writeFileSync(proofLog, proof.output);
     }
     const phase = deferFullFallback ? `submit invariants: ${invariants.length ? invariants.join(', ') : 'none'}; full suite deferred to the landing gate` : selection.full ? 'full gate' : 'affected tests';
     writeFileSync(log, `item check:\n${criterion.output}\n${phase}:\n${proof.output}`);
     return finish(proof);
-  }, { browser, agent, item, kind, itemCheck: true, shortEligible, onWait });
+  }, { browser, agent, item, kind, itemCheck: true, onWait });
 }
 
 /** Describe precisely which submission proof ran, including absent checks and full fallbacks. */

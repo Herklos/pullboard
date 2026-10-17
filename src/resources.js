@@ -20,7 +20,6 @@ export const GATE_SLOT_HELD_ENV = 'PULLBOARD_GATE_SLOT_HELD';
 export const GATE_SLOT_POOL_ENV = 'PULLBOARD_GATE_SLOT_POOL';
 export const GATE_SLOT_TOKEN_ENV = 'PULLBOARD_GATE_SLOT_TOKEN';
 export const BROWSER_SLOT_HELD_ENV = 'PULLBOARD_BROWSER_SLOT_HELD';
-export const GATE_SLOT_CLASS_ENV = 'PULLBOARD_GATE_SLOT_CLASS';
 
 /** Reserve a distinct resource row for each configured remote host. */
 function runnerResourceName(host) { return `runner:${host}`; }
@@ -28,15 +27,13 @@ function runnerResourceName(host) { return `runner:${host}`; }
 /** Build child markers that identify the exact machine queue lease and its browser capacity. */
 export function gateSlotEnvironment(lease) {
   if (lease?.runner) throw new Refused('REMOTE_GATE_SLOT_NOT_INHERITABLE', 'remote runner leases cannot be inherited through local gate markers');
-  if (!lease || lease.name !== 'gate' || lease.scope !== 'machine' || typeof lease.pool !== 'string' || typeof lease.token !== 'string'
-    || !['gate', 'short'].includes(lease.slotClass)) {
+  if (!lease || lease.name !== 'gate' || lease.scope !== 'machine' || typeof lease.pool !== 'string' || typeof lease.token !== 'string') {
     throw new Refused('GATE_SLOT_LEASE_REQUIRED', 'pass the live machine gate lease when starting a child test process');
   }
   return {
     [GATE_SLOT_HELD_ENV]: '1',
     [GATE_SLOT_POOL_ENV]: lease.pool,
     [GATE_SLOT_TOKEN_ENV]: lease.token,
-    [GATE_SLOT_CLASS_ENV]: lease.slotClass,
     [BROWSER_SLOT_HELD_ENV]: lease.browser ? '1' : '',
   };
 }
@@ -534,7 +531,7 @@ export async function takeResource(options) {
       const currentCapacity = options.capacityProvider?.() ?? capacity;
       const currentShortCapacity = options.shortCapacityProvider?.() ?? 0;
       if (!Number.isSafeInteger(currentCapacity) || currentCapacity < 1) throw new Refused('BAD_RESOURCE_CAPACITY', 'resource capacity must be a positive integer');
-      if (!Number.isSafeInteger(currentShortCapacity) || currentShortCapacity < 0) throw new Refused('BAD_SHORT_SLOTS', 'gate.shortSlots must be a nonnegative integer');
+      if (!Number.isSafeInteger(currentShortCapacity) || currentShortCapacity < 0) throw new Refused('BAD_SHORT_SLOTS', 'gate.shortSlots must be a whole number, 0 or more; run pullboard settings gate.shortSlots <n>');
       const row = db.prepare('SELECT capacity FROM resource WHERE name = ?').get(name);
       if (row && row.capacity !== currentCapacity) {
         const state = snapshot(db, name);
@@ -692,11 +689,13 @@ export async function takeResource(options) {
   }
 }
 
-/** Reuse a same-machine gate lease in a child without queueing or acquiring a partial browser slot. */
-export function inheritedGateSlot({ root = process.cwd(), browser = false, fullSuite = true } = {}) {
+/** Reuse a same-machine gate lease in a child without queueing or acquiring a partial browser slot.
+ * The live holder row says whether the lease is a short slot; only a run that names its test files
+ * (namedFiles) may reuse one, so a whole suite started under a short check queues for a real slot.
+ */
+export function inheritedGateSlot({ root = process.cwd(), browser = false, namedFiles = false } = {}) {
   const markedPool = process.env[GATE_SLOT_POOL_ENV] ?? '';
   const token = process.env[GATE_SLOT_TOKEN_ENV] ?? '';
-  const markedClass = process.env[GATE_SLOT_CLASS_ENV] ?? 'gate';
   if (!markedPool && !token) return null;
   if (!markedPool) throw new Refused('GATE_SLOT_MARKER_INVALID', 'the inherited gate token has no pool marker; start the child with gateSlotEnvironment(lease)');
   const pool = canonicalResourceFile(machineResourceFile());
@@ -711,8 +710,7 @@ export function inheritedGateSlot({ root = process.cwd(), browser = false, fullS
   } finally { db.close(); }
   if (!holder) throw new Refused('GATE_SLOT_LEASE_LOST', 'the inherited gate lease is missing or expired; remove stale gate markers or let the parent reacquire the gate slot');
   const slotClass = holder.shortSlot === 1 ? 'short' : 'gate';
-  if (markedClass !== slotClass) throw new Refused('GATE_SLOT_MARKER_INVALID', 'the inherited slot class does not match its live gate lease; restart the parent runner');
-  if (slotClass === 'short' && fullSuite) throw new Refused('SHORT_SLOT_FULL_SUITE', 'a full suite cannot inherit a short gate slot; start it through the ordinary gate queue');
+  if (slotClass === 'short' && !namedFiles) throw new Refused('SHORT_SLOT_FULL_SUITE', 'a run that does not name its test files cannot reuse a short gate slot; start it outside the short check so it queues for an ordinary slot');
   const expectedBrowserMarker = holder.browser === 1 ? '1' : '';
   if (process.env[BROWSER_SLOT_HELD_ENV] !== expectedBrowserMarker) throw new Refused('GATE_SLOT_MARKER_INVALID', 'the inherited browser marker does not match its live gate lease; restart the child with gateSlotEnvironment(lease)');
   if (browser && holder.browser !== 1) throw new Refused('BROWSER_SLOT_REQUIRED', 'the inherited gate lease does not hold the browser slot; release it and reacquire gate with browser: true before launching Chrome');

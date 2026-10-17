@@ -224,73 +224,24 @@ function browserFallback(onFallback, file, reason) {
   return true;
 }
 
-/** Parse the same literal frozen-runner grammar used by browser admission, returning a reason on uncertainty. */
-async function explicitCheckSelection(root, command, { env = process.env } = {}) {
-  if (env.NODE_OPTIONS) return { file: '<frozen check>', reason: 'NODE_OPTIONS may load an unclassified module' };
+/** Parse the frozen check and classify its explicit test files, failing closed on unknown shell. */
+export async function checkNeedsBrowser(root, command, { commit, env = process.env, onFallback } = {}) {
+  if (env.NODE_OPTIONS) return browserFallback(onFallback, '<frozen check>', 'NODE_OPTIONS may load an unclassified module');
   let words = literalShellWords(command);
   if (!words) {
     const inner = capturedRunner(command);
-    if (!inner) return { file: '<frozen check>', reason: 'shell syntax is outside the supported literal capture form' };
+    if (!inner) return browserFallback(onFallback, '<frozen check>', 'shell syntax is outside the supported literal capture form');
     const grep = resolveExecutable('grep', env.PATH);
-    if (!grep || !['/usr/bin/grep', '/bin/grep'].includes(await realpath(grep).catch(() => ''))) {
-      return { file: '<frozen check>', reason: 'capture wrapper does not resolve the system grep' };
-    }
+    if (!grep || !['/usr/bin/grep', '/bin/grep'].includes(await realpath(grep).catch(() => ''))) return browserFallback(onFallback, '<frozen check>', 'capture wrapper does not resolve the system grep');
     words = literalShellWords(inner);
   }
-  if (!words || words.length < 3) return { file: '<frozen check>', reason: 'command is not an explicit Node test selection' };
+  if (!words || words.length < 3) return browserFallback(onFallback, '<frozen check>', 'command is not an explicit Node test selection');
   const node = resolveExecutable(words[0], env.PATH);
-  if (!node || await realpath(node).catch(() => '') !== await realpath(process.execPath).catch(() => '')) {
-    return { file: '<frozen check>', reason: 'Node executable does not resolve to this runtime' };
-  }
-  if (resolve(root, words[1]) !== resolve(root, TEST_RUNNER)) {
-    return { file: '<frozen check>', reason: 'runner is not bin/run-tests.js in this repository' };
-  }
+  if (!node || await realpath(node).catch(() => '') !== await realpath(process.execPath).catch(() => '')) return browserFallback(onFallback, '<frozen check>', 'Node executable does not resolve to this runtime');
+  const runner = resolve(root, words[1]);
+  if (runner !== resolve(root, TEST_RUNNER)) return browserFallback(onFallback, '<frozen check>', 'runner is not bin/run-tests.js in this repository');
   const files = explicitRunnerFiles(words.slice(2));
-  if (!files) return { file: '<frozen check>', reason: 'runner options or test selection are not statically understood' };
-  return { files };
-}
-
-/** Return exact parser-backed named files only when the runner and selected files are real in-root sources.
- * @param {string} root
- * @param {string} command
- * @param {{commit?:string,env?:NodeJS.ProcessEnv}} [options]
- * @returns {Promise<string[]|null>}
- */
-export async function explicitCheckFiles(root, command, { commit, env = process.env } = {}) {
-  const selection = await explicitCheckSelection(root, command, { env });
-  if (!selection.files) return null;
-  if (commit) {
-    const committed = committedFiles(root, commit);
-    if (!committed) return null;
-    const runner = committed.get(TEST_RUNNER);
-    if (!runner || runner.type !== 'blob' || !['100644', '100755'].includes(runner.mode)) return null;
-    if (selection.files.some(file => {
-      const entry = committed.get(file);
-      return !entry || entry.type !== 'blob' || !['100644', '100755'].includes(entry.mode);
-    })) return null;
-    return selection.files;
-  }
-  const runnerPath = resolve(root, TEST_RUNNER);
-  if (await realpath(runnerPath).catch(() => '') !== await realpath(resolve(root, TEST_RUNNER)).catch(() => '')) return null;
-  const runnerInfo = await lstat(runnerPath).catch(() => null);
-  let runnerInside = false;
-  try { runnerInside = await staysInside(root, runnerPath); } catch { /* unresolved paths remain ordinary */ }
-  if (!runnerInfo?.isFile() || runnerInfo.isSymbolicLink() || !runnerInside) return null;
-  for (const file of selection.files) {
-    const absolute = resolve(root, file);
-    const info = await lstat(absolute).catch(() => null);
-    let inside = false;
-    try { inside = await staysInside(root, absolute); } catch { /* unresolved paths remain ordinary */ }
-    if (!info?.isFile() || info.isSymbolicLink() || !inside) return null;
-  }
-  return selection.files;
-}
-
-/** Parse the frozen check and classify its explicit test files, failing closed on unknown shell. */
-export async function checkNeedsBrowser(root, command, { commit, env = process.env, onFallback } = {}) {
-  const selection = await explicitCheckSelection(root, command, { env });
-  if (!selection.files) return browserFallback(onFallback, selection.file, selection.reason);
-  const { files } = selection;
+  if (!files) return browserFallback(onFallback, '<frozen check>', 'runner options or test selection are not statically understood');
   if (files.some(file => file === JOURNEYS_TEST || file === 'test/cockpit' || file.startsWith('test/cockpit/'))) return true;
   if (commit) {
     const committed = committedFiles(root, commit);
@@ -298,13 +249,55 @@ export async function checkNeedsBrowser(root, command, { commit, env = process.e
     if (!runnerEntry || runnerEntry.type !== 'blob' || !['100644', '100755'].includes(runnerEntry.mode)) return browserFallback(onFallback, TEST_RUNNER, 'committed runner is missing or is not a regular file');
     return testsNeedBrowserInTree(root, files, committed, onFallback);
   }
-  const runner = resolve(root, TEST_RUNNER);
   if (await realpath(runner).catch(() => '') !== await realpath(resolve(root, TEST_RUNNER)).catch(() => '')) return browserFallback(onFallback, TEST_RUNNER, 'runner resolves outside the expected repository path');
   const runnerInfo = await lstat(runner).catch(() => null);
   let runnerInside = false;
   try { runnerInside = await staysInside(root, runner); } catch { /* Missing or unresolved runner is uncertain. */ }
   if (!runnerInfo?.isFile() || runnerInfo.isSymbolicLink() || !runnerInside) return browserFallback(onFallback, TEST_RUNNER, 'runner is not a regular in-repository file');
   return testsNeedBrowser(root, files, { onFallback });
+}
+
+/**
+ * Name the test files a check runs when it is a literal bin/run-tests.js call over regular in-repository
+ * test files, or return null. Only such a check may take a short gate slot (gate.shortSlots); anything
+ * uncertain, a directory or discovery included, stays an ordinary run. Kept apart from checkNeedsBrowser
+ * so short-slot admission never changes how a check is classified for the browser.
+ *
+ * @param {string} root
+ * @param {string} command
+ * @param {{ commit?: string, env?: NodeJS.ProcessEnv }} [options] - commit reads the files from that tree
+ * @returns {Promise<string[] | null>}
+ */
+export async function explicitCheckFiles(root, command, { commit, env = process.env } = {}) {
+  if (env.NODE_OPTIONS) return null;
+  let words = literalShellWords(command);
+  if (!words) {
+    const inner = capturedRunner(command);
+    const grep = inner ? resolveExecutable('grep', env.PATH) : null;
+    if (!grep || !['/usr/bin/grep', '/bin/grep'].includes(await realpath(grep).catch(() => ''))) return null;
+    words = literalShellWords(inner);
+  }
+  if (!words || words.length < 3) return null;
+  const node = resolveExecutable(words[0], env.PATH);
+  if (!node || await realpath(node).catch(() => '') !== await realpath(process.execPath).catch(() => '')) return null;
+  if (resolve(root, words[1]) !== resolve(root, TEST_RUNNER)) return null;
+  const files = explicitRunnerFiles(words.slice(2));
+  if (!files) return null;
+  if (commit) {
+    const committed = committedFiles(root, commit);
+    const regular = path => {
+      const entry = committed?.get(path);
+      return Boolean(entry) && entry.type === 'blob' && ['100644', '100755'].includes(entry.mode);
+    };
+    return [TEST_RUNNER, ...files].every(regular) ? files : null;
+  }
+  for (const path of [TEST_RUNNER, ...files]) {
+    const absolute = resolve(root, path);
+    const info = await lstat(absolute).catch(() => null);
+    const inside = await staysInside(root, absolute).catch(() => false);
+    if (!info?.isFile() || info.isSymbolicLink() || !inside) return null;
+  }
+  return files;
 }
 
 /** Convert an in-root absolute or relative selection to a normalized repository-relative path. */
