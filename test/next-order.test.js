@@ -185,13 +185,14 @@ test('an agent pulls the top item in any of its lanes [N2,B13]', (t) => {
   assert.equal(resumed.held, true);
   assert.equal(resumed.seat.agent, api.agent);
   const wrongLane = box.runAs(box.session, api.root, 'claim', String(later), '--json');
-  assert.equal(JSON.parse(wrongLane.out).code, 'WRONG_LANE', 'cross-lane routing does not widen a seat’s write authority');
+  assert.equal(wrongLane.code, 1);
+  assert.equal(JSON.parse(wrongLane.out).error.code, 'WRONG_LANE', 'cross-lane routing does not widen a seat’s write authority');
   assert.notEqual(web.agent, api.agent);
 });
 
 test('next names the seat to open for a lane the agent lacks [N2,B13]', (t) => {
   const box = crossLaneFixture(t);
-  box.json(box.runAs(box.session, box.web, 'join', 'web', '--route', 'mid', '--model', 'Cross-lane test', '--json'));
+  const web = box.seat('owned-mid-web', 'web', box.session, 'mid');
   const peer = box.seat('peer-api', 'api', 'unrelated-session');
   const peerBinding = box.binding(peer.root);
   const tooStrong = box.add('api', 'A strong-only earlier release');
@@ -202,7 +203,7 @@ test('next names the seat to open for a lane the agent lacks [N2,B13]', (t) => {
   box.milestone('later', later);
   const before = box.git(box.repo, 'worktree', 'list', '--porcelain');
 
-  const next = box.json(box.runAs(box.session, box.web, 'next', '--build', '--json'));
+  const next = box.json(box.runAs(box.session, web.root, 'next', '--build', '--json'));
   assert.equal(next.item.item_id, first, 'the route still skips stronger work in an earlier milestone');
   assert.equal(next.seat.lane, 'api');
   assert.equal(next.seat.created, true);
@@ -218,8 +219,9 @@ test('next names the seat to open for a lane the agent lacks [N2,B13]', (t) => {
   assert.equal(box.binding(next.seat.path).digest, createHash('sha256').update(JSON.stringify(['CLAUDE_CODE_SESSION_ID', box.session])).digest('hex'));
   assert.deepEqual(box.binding(peer.root), peerBinding);
   const board = store.openBoard(join(box.repo, '.git', 'pullboard', 'board.sqlite'));
-  t.after(() => store.closeBoard(board));
-  assert.equal(store.getItem(board, tooStrong).item_status, 'open', 'the new mid seat never claims above its route');
-  assert.equal(store.getItem(board, later).item_status, 'open');
+  try {
+    assert.equal(store.getItem(board, tooStrong).item_status, 'open', 'the new mid seat never claims above its route');
+    assert.equal(store.getItem(board, later).item_status, 'open');
+  } finally { store.closeBoard(board); }
   assert.equal(readFileSync(join(box.repo, '.git', 'pullboard', 'board.sqlite')).includes(Buffer.from(box.session)), false, 'raw session ids stay out of shared SQLite');
 });
