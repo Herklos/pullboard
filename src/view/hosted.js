@@ -63,7 +63,7 @@ export function hostedState(state, facts = {}) {
   const chromium = ['Chrome', 'Edge', 'Opera'].includes(browser);
   const models = {
     'asking': { kind: 'wait', heading: 'Looking for Pullboard on this computer', text: 'Your browser may ask to let this page reach apps on this device. Allow it to open the boards running here.' },
-    'not-running': { kind: 'state', heading: 'Start Pullboard on this computer', text: 'This page cannot reach a local view on this computer. Run this in a terminal, then try again.', command: 'pullboard view', hint: 'A Pullboard older than 0.8.29 cannot answer this page, so update it first with npm i -g pullboard.', button: 'retry', side: 'Boards on this computer show here once pullboard view runs.', offline: 'not connected' },
+    'not-running': { kind: 'state', heading: 'Start Pullboard on this computer', text: 'This page cannot reach a local view on this computer. Run this in a terminal, then try again.', command: 'pullboard view', hint: 'A Pullboard older than 0.8.29 cannot answer this page, so update it first with `npm i -g pullboard`.', button: 'retry', side: 'Boards on this computer show here once pullboard view runs.', offline: 'not connected' },
     'blocked': { kind: 'state', heading: 'Let this page reach Pullboard', text: browser + ' has refused this page access to apps on this device, so it cannot open the board running here.',
       hint: chromium ? 'In ' + browser + ', click the icon at the left of the address bar, turn on Local network access, then try again.' : 'Allow this site to reach apps on this device in the browser\'s site settings, then try again.',
       button: 'retry', side: 'Boards on this computer show here once ' + (browser === 'This browser' ? 'the browser' : browser) + ' allows it.', offline: 'not connected' },
@@ -98,7 +98,13 @@ export function drawHosted(doc, model, place) {
   $('local-note-title').textContent = model ? model.heading : '';
   $('local-note-text').textContent = model ? model.text : '';
   $('local-note-hint').hidden = !model?.hint;
-  $('local-note-hint').textContent = model?.hint || '';
+  // A command in a hint, between backticks, is code that never breaks across lines.
+  $('local-note-hint').replaceChildren(...String(model?.hint || '').split('`').map((part, n) => {
+    if (n % 2 === 0) return doc.createTextNode(part);
+    const code = doc.createElement('code');
+    code.textContent = part;
+    return code;
+  }));
   if (full && model.offline) $('live').textContent = model.offline;
   $('local-note-cmd').hidden = !model?.command;
   $('local-note-code').textContent = model?.command || '';
