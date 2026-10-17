@@ -2360,6 +2360,12 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
     ...(entry.check === undefined ? {} : { check: entry.check }) } }));
   // The same checks pullboard add uses, before anything is written. A blueprint's item check is
   // stored, never run: no check baseline starts during add, so nothing a blueprint supplies executes.
+  // Every bundled starter carries a check (#724), and only the coordinator sets one, so an agent's
+  // add is refused with the step that works: add it from the coordinator's checkout.
+  if (me.id !== COORDINATOR && starters.some(({ item }) => item.check !== undefined)) {
+    throw new Refused('COORDINATOR_CHECK', `the ${blueprint.name} blueprint's starter items carry checks, and only the coordinator sets an item check; run pullboard blueprint add from the main checkout, or ask your coordinator: pullboard shout coordinator "please add the ${blueprint.name} blueprint"`,
+      'run the same pullboard blueprint add from the main checkout, where the coordinator works');
+  }
   for (const { item } of starters) store.validateItemAddition(board, item);
   const files = [];
   if (plan.specRows !== source) files.push({ file: ctx.config.spec, before: source, after: plan.specRows });
