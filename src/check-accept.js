@@ -3,7 +3,9 @@
  * until the person accepts that exact check [V2,V4,B26].
  */
 import { createHash } from 'node:crypto';
-import { PERSON, atomic, itemById, logEvent } from './board.js';
+import { PERSON, atomic, getItem, itemById, logEvent } from './board.js';
+import { COORDINATOR } from './config.js';
+import { requirePersonChannel } from './person.js';
 import { Refused } from './refused.js';
 
 /** The engine that first replays a person's check acceptance; older engines refuse the move unread [H16]. */
@@ -86,4 +88,32 @@ export function refuseProvesNothing(mainConfig, board, item) {
   throw new Refused('CRITERION_PROVES_NOTHING',
     `#${item.item_id} is held: its check already passes on main ${String(base.main).slice(0, 12)}, so it proves nothing: ${base.command}`,
     `the coordinator sets a check that fails before the work (pullboard edit ${item.item_id} --check "<command>"), or the person accepts this one: pullboard check accept ${item.item_id}`);
+}
+
+/**
+ * Run pullboard check accept <id>: the person accepts an item's check as it reads now, which lifts a
+ * hold on a check already green on main. A person-only move (P6): an agent shell, a remote shell, a
+ * worktree, the API and MCP are refused, and the move carries the check's digest so a changed
+ * check needs a new acceptance. The CLI passes its own context, board and ordered-move helpers.
+ *
+ * @param {any} io
+ * @param {string | undefined} first - the item id
+ * @param {string[]} rest
+ * @param {{ context: Function, withBoard: Function, whoAmI: Function, ordered: Function, idArg: Function }} cli
+ * @returns {Promise<number>}
+ */
+export async function checkAcceptCommand(io, first, rest, { context, withBoard, whoAmI, ordered, idArg }) {
+  requirePersonChannel(io.personChannel);
+  if (!/^#?\d+$/u.test(first ?? '') || rest.length) throw new Refused('USAGE', 'pullboard check accept <id>');
+  const ctx = context(io);
+  return withBoard(ctx, async (board) => {
+    if (!ctx.info.isMain || whoAmI(ctx, board).id !== COORDINATOR) throw new Refused('B26_PERSON_APPROVAL', 'only the person accepts a check, from the main checkout or the view', 'ask the person to accept it in pullboard view, or in their own terminal at the main checkout');
+    const item = getItem(board, idArg(first));
+    if (!item.item_check) throw new Refused('NO_CHECK', `#${item.item_id} has no check command to accept; its proof is the project gate: pullboard gate`);
+    const accepted = await ordered(ctx, board, 'acceptCheck', [item.item_id, { agentId: PERSON, channel: io.personChannel ?? 'terminal', digest: checkDigest(item.item_check) }]);
+    io.result?.({ id: accepted.id, digest: accepted.digest, check: accepted.check });
+    io.say(`accepted #${accepted.id}'s check as it reads now: ${accepted.check}`);
+    io.say('a changed check needs the person to accept it again');
+    return 0;
+  });
 }

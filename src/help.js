@@ -45,6 +45,7 @@ Set up
                                         keep this command open until pairing finishes; later projects link on registration
   pullboard relay devices               list paired device ids and their public-key fingerprints
   pullboard relay revoke <device>       stop future key delivery; already received keys remain known
+                                        approve on another paired phone, or sign in again with GitHub
   pullboard relay tokens                list this board's agent token ids, agents and expiry, never credentials
   pullboard relay revoke <token-id>     revoke one token from that list; other agents keep working
   pullboard relay recover --skip <sequence>  person-only recovery of one blocked next relay position
@@ -81,8 +82,11 @@ Work
   pullboard skills --update            refresh unchanged Claude Code skills from shipped versions
   pullboard show <id> [--history]       an item, the criterion frozen at claim, its verdicts: the latest in full,
                                         earlier ones as one line; --history prints every note in full
-  pullboard fact <id> <kind> <text> [--supersedes <fact-id>] [--ref path:lines@full-sha]
+  pullboard fact <id> <kind> <text> [--supersedes <fact-id>] [--ref path:lines@full-sha] [--implies <ids>]
                                         append an observation or a holder/coordinator judgement to its thread
+                                        --implies 12,13: each named item gets a fact citing this decision,
+                                        and is told again when the decision is superseded
+  pullboard why <id>                    the decisions that imply an item, newest first, and what superseded them
   pullboard next [--wait <minutes>]     offer an eligible review when reviews pile up, otherwise claim work
   pullboard next --build                claim a build explicitly, recording a skipped review offer
   pullboard next --verify               reserve the next submitted item you can check;
@@ -97,12 +101,15 @@ Work
   pullboard submit <id>                 needs a clean tree, item check and affected tests green at HEAD (alias: done)
   pullboard verify <id> accept --note "what you broke or which edge you tried, and what happened"
   pullboard verify <id> reject --reason TEST_FAILURE --note "what failed"
+                                        a verdict takes --implies <ids>; a later verdict on the item supersedes it
                                         any --note can be --note-file <file>, which keeps quotes, $ and backticks intact
   pullboard shout <lane|agent|person|all> <text>  pullboard inbox
   pullboard shout [<to>] <text> --decision       ask for a decision; defaults to your coordinator or the person
   pullboard shout <to> <text> --evidence attempt|receipt --outcome <word> --item <id> --commit <rev>
-  pullboard answer <shout-id> <text> [--as person]
+  pullboard answer <shout-id> <text> [--as person] [--implies <ids>] [--supersedes <answer-id>]
                                         answer your decision; person mode is main-checkout only
+                                        --supersedes tells the items an earlier answer implied; only the person
+                                        supersedes the person's answer
   pullboard pass <shout-id> <note>                coordinator passes a decision to the person
   pullboard decisions [--as person]               shouts waiting for you; main checkout defaults to coordinator
   pullboard export                              print the whole board as versioned JSON
@@ -195,7 +202,7 @@ Reject reasons: TEST_FAILURE, BEHAVIOR_MISMATCH, INSUFFICIENT_EVIDENCE, STALE_HE
 const HELP_NAMES = [
   'tour', 'init', 'worktree', 'join', 'takeover', 'whoami', 'lanes', 'lane', 'lane add', 'status', 'resources', 'settings', 'view', 'view export',
   'serve', 'mcp', 'relay', 'relay recover', 'resume', 'hooks', 'add', 'edit', 'escalate', 'run', 'list', 'doctor', 'skills', 'show', 'next', 'land',
-  'check', 'check accept', 'claim', 'release', 'submit', 'done', 'verify', 'fact', 'shout', 'answer', 'pass', 'decisions', 'inbox', 'export', 'import',
+  'check', 'check accept', 'claim', 'release', 'submit', 'done', 'verify', 'fact', 'why', 'shout', 'answer', 'pass', 'decisions', 'inbox', 'export', 'import',
   'sweep', 'merged', 'withdraw', 'refreeze', 'reopen', 'hold', 'stats', 'ledger', 'log', 'spec', 'spec check', 'spec view',
   'spec show', 'spec unmet', 'spec signoff', 'spec draft', 'spec signers', 'spec signers add', 'doctrine', 'doctrine check', 'forget', 'prompt', 'gate', 'hook',
   'hook pre-commit', 'hook pre-merge-commit', 'hook commit-msg', 'hook pre-push', 'view export', 'version', 'lifecycle', 'help',
@@ -215,6 +222,7 @@ const HELP_EXAMPLES = {
   add: 'pullboard add web "Upload page" --specs G1', list: 'pullboard list web', show: 'pullboard show 12',
   claim: 'pullboard claim 12', submit: 'pullboard submit 12', 'next --verify': 'pullboard next --verify',
   fact: 'pullboard fact 12 measurement "The check passes in 8 seconds"',
+  why: 'pullboard why 12',
   verify: 'pullboard verify 12 accept --note "removed the fix; the test failed"',
   answer: 'pullboard answer 12 "done"', pass: 'pullboard pass 12 "please decide"',
   status: 'pullboard status', view: 'pullboard view', mcp: 'pullboard mcp', stats: 'pullboard stats --since 2026-10-08', log: 'pullboard log 12', ledger: 'pullboard ledger',
@@ -269,6 +277,7 @@ const HELP_FLAG_EXPLANATIONS = {
   '--check': 'the command that proves it',
   '--family': 'records the family name',
   '--model': 'identifies the agent model; required unless PULLBOARD_MODEL is set',
+  '--implies': 'each named item gets a fact citing this decision',
   '--landing': 'prioritizes a trunk landing in the machine gate queue',
   '--json': 'prints one versioned document',
   '--note': 'what was checked stays with the receipt',

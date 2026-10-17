@@ -44,6 +44,7 @@ export const JSON_SHAPES = {
     add: shape({ item: 'object' }),
     edit: shape({ item: 'object' }),
     fact: shape({ item: 'number', fact: 'object' }),
+    why: shape({ id: 'number', decisions: 'array' }),
     escalate: shape({ id: 'number', from: 'string', to: 'string' }),
     run: shape({ messages: 'array' }),
     sweep: shape({ messages: 'array' }),
