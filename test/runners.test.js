@@ -91,10 +91,9 @@ function cli(repo, env, ...args) {
 function installSshStandIn({ bin, worker, home, machineHome, requests, starts, nodeCommand = 'node', dropFirst = false, dropAfterMarker, hold = '', stderrLog }) {
   const ssh = join(bin, 'ssh');
   const source = `#!/usr/bin/env node
-import { appendFileSync, existsSync, readFileSync, watch, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { basename, dirname, join } from 'node:path';
 const argv = process.argv.slice(2);
 const divider = argv.indexOf('--');
 const host = divider >= 0 ? argv[divider + 1] : '';
@@ -118,26 +117,23 @@ const record = extra => appendFileSync(requests, JSON.stringify({ call, host,
   remoteHasLocalPath: remoteCommand.includes(${JSON.stringify(worker)}),
   remoteHasSourceHome: remoteCommand.includes(${JSON.stringify(home)}),
   remoteHasSourceMachineHome: remoteCommand.includes(${JSON.stringify(machineHome)}), ...extra }) + '\\n');
+/** Wait for the concrete setup marker and allow a finished worker to cancel its wait. */
 const waitForMarker = path => {
   let cancel = () => {};
   const promise = new Promise((resolve, reject) => {
     if (existsSync(path)) return resolve(true);
-    const watcher = watch(dirname(path), { persistent: false });
-    let timer;
+    let poll, timer;
     let settled = false;
     const finish = (error, found = true) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer); watcher.close(); error ? reject(error) : resolve(found);
+      clearInterval(poll); clearTimeout(timer); error ? reject(error) : resolve(found);
     };
     cancel = () => finish(null, false);
-    const check = (_event, filename) => {
-      if ((filename === null || String(filename) === basename(path)) && existsSync(path)) finish();
-    };
-    watcher.on('change', check);
-    watcher.once('error', finish);
-    timer = setTimeout(() => finish(new Error('setup marker hang ceiling exceeded')), 20_000); // budget: bound the SSH-to-setup disconnect handshake.
-    check('rename', basename(path));
+    const check = () => { if (existsSync(path)) finish(); };
+    poll = setInterval(check, 20); // budget: observe actual setup readiness without relying on notifications.
+    timer = setTimeout(() => finish(new Error('setup marker hang ceiling exceeded')), 20_000); // budget: unchanged SSH-to-setup handshake ceiling.
+    check();
   });
   return { promise, cancel: () => cancel() };
 };
@@ -1145,8 +1141,7 @@ test('a queued run executes on a registered runner and its result comes back [C7
     name: 'setup-fixture-dep', version: '1.0.0', scripts: { postinstall: 'node postinstall.js' },
   }, null, 2) + '\n');
   writeFileSync(join(packageDirectory, 'witness.txt'), 'setup fixture package source\n');
-  writeFileSync(join(packageDirectory, 'postinstall.js'), `import { existsSync, watch, writeFileSync } from 'node:fs';
-import { basename, dirname } from 'node:path';
+  writeFileSync(join(packageDirectory, 'postinstall.js'), `import { existsSync, writeFileSync } from 'node:fs';
 const ready = ${JSON.stringify(setupReady)};
 const pidFile = ${JSON.stringify(setupPid)};
 const term = ${JSON.stringify(setupTerm)};
@@ -1154,16 +1149,17 @@ const release = ${JSON.stringify(releaseSetup)};
 const gone = ${JSON.stringify(setupGone)};
 const waitForRelease = new Promise((resolve, reject) => {
   if (existsSync(release)) return resolve();
-  const watcher = watch(dirname(release), { persistent: false });
-  let timer;
-  const finish = error => { clearTimeout(timer); watcher.close(); error ? reject(error) : resolve(); };
-  const check = (_event, filename) => {
-    if ((filename === null || String(filename) === basename(release)) && existsSync(release)) finish();
+  let poll, timer;
+  let settled = false;
+  const finish = error => {
+    if (settled) return;
+    settled = true;
+    clearInterval(poll); clearTimeout(timer); error ? reject(error) : resolve();
   };
-  watcher.on('change', check);
-  watcher.once('error', finish);
-  timer = setTimeout(() => finish(new Error('postinstall release hang ceiling exceeded')), 20_000); // budget: bound a broken fixture handshake.
-  check('rename', basename(release));
+  const check = () => { if (existsSync(release)) finish(); };
+  poll = setInterval(check, 20); // budget: observe the actual release handshake.
+  timer = setTimeout(() => finish(new Error('postinstall release hang ceiling exceeded')), 20_000); // budget: unchanged broken-fixture ceiling.
+  check();
 });
 let stopping = false;
 process.on('SIGTERM', () => {
