@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, request } from 'node:http';
 import diagnosticsChannel from 'node:diagnostics_channel';
 import { tmpdir } from 'node:os';
@@ -13,7 +13,71 @@ import { waitForStableBoxes } from './stable.js';
 import { addItem, closeBoard, openBoard } from '../../src/board.js';
 import { exportBoard, importBoard } from '../../src/exchange.js';
 import { projectState } from '../../src/serve.js';
+import { testsNeedBrowser } from '../../src/browser-admission.js';
 import { scratch, machine, project, build, fetchView, fetchLive, startView, styleOf, openPage, boardId, boardOf, assertObservationsEqual, chromeExecutable, startSnapshotChrome, openSnapshotChrome, stopOwnedChrome, closeSnapshotChrome } from './fixture.js';
+
+test('the view fixture refuses to launch Chrome outside a browser slot [C7,O5]', async t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-view-browser-slot-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  for (const name of ['bin', 'machine']) mkdirSync(join(root, name));
+  cpSync(resolve(import.meta.dirname, '../../src'), join(root, 'src'), { recursive: true });
+  cpSync(resolve(import.meta.dirname, '..'), join(root, 'test'), { recursive: true });
+  cpSync(resolve(import.meta.dirname, '../../bin/run-tests.js'), join(root, 'bin/run-tests.js'));
+  writeFileSync(join(root, 'package.json'), '{"type":"module"}\n');
+  writeFileSync(join(root, 'machine/settings.json'), JSON.stringify({ gate: { browserByLaunch: true } }));
+
+  /** Exercise the actual view launcher and always stop any stand-in it owns, including a failing baseline. */
+  const body = (name, binding) => `
+import { appendFileSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { test } from 'node:test';
+${binding}
+test('${name} view launch', async () => {
+  appendFileSync(process.env.FIXTURE_MARKERS, '${name}=' + process.env.PULLBOARD_TEST_BROWSER_SLOT + '\\n');
+  const profile = join(process.cwd(), '${name}-profile');
+  mkdirSync(profile);
+  let stop;
+  try {
+    const view = ${name === 'held' ? '{ startSnapshotChrome }' : "await import(['.', 'cockpit', 'fixture.js'].join('/'))"};
+    const browser = await view.startSnapshotChrome(process.env.FIXTURE_BROWSER, profile, { onOwned: owned => { stop = owned; } });
+    await browser.stop();
+  } finally { await stop?.(); }
+});
+`;
+  writeFileSync(join(root, 'test/classified-view.test.js'), body('held', "import { startSnapshotChrome } from './cockpit/fixture.js';"));
+  writeFileSync(join(root, 'test/hidden-view.test.js'), body('none', ''));
+  const browser = join(root, 'view-browser-stand-in');
+  writeFileSync(browser, `#!/usr/bin/env node
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
+const profile = process.argv.find(arg => arg.startsWith('--user-data-dir=')).slice('--user-data-dir='.length);
+appendFileSync(process.env.FIXTURE_LAUNCHES, basename(profile) + '\\n');
+mkdirSync(profile, { recursive: true });
+writeFileSync(join(profile, 'DevToolsActivePort'), '9333\\n/devtools/browser/fixture\\n');
+setInterval(() => {}, 1000); // Protocol lifetime: the owner terminates this stand-in process group.
+`);
+  chmodSync(browser, 0o755);
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (key.startsWith('GIT_') || key.startsWith('PULLBOARD_GATE_SLOT_') || key.startsWith('PULLBOARD_TEST_BROWSER_')) delete env[key];
+  }
+  for (const key of ['NODE_TEST_CONTEXT', 'NODE_OPTIONS', 'PULLBOARD_BROWSER_SLOT_HELD', 'PULLBOARD_TEST_FILE', 'PULLBOARD_CHROME']) delete env[key];
+  Object.assign(env, { PULLBOARD_HOME: join(root, 'home'), PULLBOARD_MACHINE_HOME: join(root, 'machine'),
+    FIXTURE_BROWSER: browser, FIXTURE_MARKERS: join(root, 'markers'), FIXTURE_LAUNCHES: join(root, 'launches') });
+  const initialized = spawnSync('git', ['init', '-q'], { cwd: root, env, encoding: 'utf8' });
+  assert.equal(initialized.status, 0, initialized.stderr);
+  assert.equal(await testsNeedBrowser(root, ['test/classified-view.test.js'], { byLaunch: true }), true);
+  assert.equal(await testsNeedBrowser(root, ['test/hidden-view.test.js'], { byLaunch: true }), false,
+    'the computed import genuinely hides the view launch from the classifier');
+  const run = spawnSync(process.execPath, ['bin/run-tests.js', 'test/classified-view.test.js', 'test/hidden-view.test.js'],
+    { cwd: root, env, encoding: 'utf8' });
+  const output = `${run.stdout}\n${run.stderr}`;
+  assert.notEqual(run.status, 0, output);
+  assert.match(output, /\[BROWSER_SLOT_REQUIRED\] test\/hidden-view\.test\.js launched Chrome/u);
+  assert.deepEqual(readFileSync(join(root, 'markers'), 'utf8').trim().split('\n').sort(), ['held=held', 'none=none']);
+  assert.deepEqual(readFileSync(join(root, 'launches'), 'utf8').trim().split('\n'), ['held-profile'],
+    'only the classified worker starts the stand-in; the unclassified worker never spawns it');
+});
 
 
 test('the cockpit fixture inits its board without a model [N26]', () => {

@@ -63,6 +63,7 @@ import {
   unmetRows,
 } from './spec.js';
 import { answerQuestion, bundledBlueprints, landBlueprint, planBlueprint, readBlueprint, repoAnswers, saveBlueprint } from './blueprints.js';
+import { blueprintStarterNote, combinedSummary, initBlueprintLines, initBlueprintResult, installedBlueprints, landEach, readBlueprints, sharedRowLines } from './blueprint-set.js';
 import { briefFiles } from './brief.js';
 import { commitFirst, commitOwnerLines, commitOwners, coordinatorInbox, coordinatorInboxLines, inboxFirst } from './resume.js';
 import { checkBaseline, prepareCheckBaseline, refuseCheckSyntax, sayCheckBaseline } from './check-baseline.js';
@@ -92,6 +93,7 @@ import { proofStats } from './stats.js';
 import { flowLines, flowAlertLine } from './stats-flow.js';
 import { releaseHeadlinesBetween } from './changelog.js';
 import { exportBoard, importBoard } from './exchange.js';
+import { digestCommand } from './digest.js';
 import { addSigner, assertRequiredSigners, defaultPrincipal, hasSignerFile } from './signature.js';
 import { addRunner, browserFreeChecksEnabled, gateQueueSettings, gateShortSlots, loadMachineSettings, memoryFloorMB, relayOfferEnabled, setBrowserSlots, setGateShortSlots, setGateSlots } from './settings.js';
 import { formatSnapshotLimit, pendingSnapshotSize, pendingCheckpointProblem, relayCommandReceipt, relayCommandReceiptReported, relayLinked, relayOff, relayOn, relayOperation, relayRecover, relayRecovered, relayRevoke, relayStatus, relayTokens, syncRelay } from './relay.js';
@@ -259,6 +261,7 @@ const OPTIONS = {
   by: { type: 'string' },
   key: { type: 'string' },
   out: { type: 'string' },
+  watch: { type: 'boolean' },
   after: { type: 'string' },
   brief: { type: 'string' },
   'brief-file': { type: 'string' },
@@ -268,7 +271,7 @@ const OPTIONS = {
   doctrine: { type: 'boolean' },
   source: { type: 'string' },
   section: { type: 'string' },
-  blueprint: { type: 'string' },
+  blueprint: { type: 'string', multiple: true },
   route: { type: 'string' },
   family: { type: 'string' },
   model: { type: 'string' },
@@ -620,13 +623,27 @@ async function bindCheckoutSession(io, positionals, values) {
     throw new Refused('USAGE', 'pullboard takeover takes no arguments; run pullboard takeover [--json]');
   }
   const writes = ['init', 'join', 'worktree', 'hooks', 'hook', 'skills', 'add', 'edit', 'fact', 'escalate', 'run', 'sweep',
-    'next', 'claim', 'hold', 'release', 'submit', 'done', 'verify', 'merged', 'land', 'withdraw', 'refreeze', 'reopen', 'shout', 'answer', 'pass', 'import', 'milestone', 'takeover', 'forget'];
+    'next', 'claim', 'hold', 'release', 'submit', 'done', 'verify', 'check', 'merged', 'land', 'withdraw', 'refreeze', 'reopen', 'shout', 'answer', 'pass', 'import', 'milestone', 'takeover', 'forget'];
   if (!writes.includes(command) && !(command === 'lane' && first === 'add') && !(command === 'settings' && first) && !(command === 'spec' && first === 'apply') && !(command === 'relay' && ['on', 'off'].includes(first))) return;
   if (command === 'answer' && values.as === 'person') return;
   const digest = agentSessionDigest();
   if (!digest) {
     if (command === 'takeover') throw new Refused('AGENT_SESSION', 'takeover belongs to an agent session; run pullboard takeover from the agent’s shell');
     return;
+  }
+  if (command === 'check') {
+    // Acceptance follows its person-channel path; it does not renew a build claim.
+    if (first === 'accept') return;
+    const ctx = context(io);
+    const renewsOwnClaim = withBoard(ctx, (board) => {
+      const agentId = ctx.info.isMain ? COORDINATOR : store.agentAt(board, ctx.info.root)?.agent_id;
+      const item = first ? store.getItem(board, idArg(first)) : store.listItems(board)
+        .find((entry) => entry.item_status === 'claimed' && entry.item_owner === agentId && entry.item_parent_id === null);
+      return Boolean(agentId && item?.item_status === 'claimed' && item.item_owner === agentId);
+    });
+    // A named peer's check remains read-only. An owned check can renew, so acquire checkout
+    // authority before joining the gate queue, in the same order as submit and verify.
+    if (!renewsOwnClaim) return;
   }
   const info = repoInfo(io.cwd);
   let agent = info.isMain ? COORDINATOR : null;
@@ -1630,10 +1647,9 @@ function setupCommands(io, { first, second, rest = [], values }) {
   return {
     init: async () => {
       const info = repoInfo(io.cwd);
-      // A named blueprint is read and checked before anything is written, so an unknown name
-      // or a broken file or a URL leaves the repository untouched (#678). Past that, init adds the
-      // blueprint exactly as pullboard blueprint add does, through the same function.
-      const blueprint = values.blueprint === undefined ? null : readBlueprint(values.blueprint, io.cwd);
+      // Every blueprint is read and checked before anything is written: an unknown name, a broken file, a URL
+      // or a second product leaves the repo untouched (#678, #720). Then each is added as blueprint add does.
+      const blueprints = readBlueprints(values.blueprint ?? [], io.cwd, 'init', installedBlueprints(info.root));
       const model = optionalModel(values.model);
       const linked = relayLinked(info.root);
       const ctx = linked && model !== undefined ? context(io) : null;
@@ -1662,19 +1678,13 @@ function setupCommands(io, { first, second, rest = [], values }) {
         { lane: COORDINATOR, path: info.root, model },
       ]));
       // Keep blueprint initialization and the person's unwritten lane proposals in the same result.
-      const added = blueprint ? await addBlueprintHere(io, values.blueprint, { report: false, blueprint }) : null;
+      const landed = await landEach(blueprints, ({ reference, blueprint }, drafted) => addBlueprintHere(io, reference, { report: false, blueprint, drafted }));
       const result = { root: info.root, notes, proposedLanes: proposeLanes(info.root),
-        ...(added ? { blueprint: { name: added.blueprint.name, title: added.blueprint.title,
-          section: added.section, waiting: added.rows.length, items: added.items.length, gate: added.gate, checksNotRun: added.checksNotRun } } : {}) };
+        ...(landed.length ? { blueprint: initBlueprintResult(landed[0]), blueprints: landed.map(initBlueprintResult) } : {}) };
       io.result?.(result);
       const staging = notes.at(-1)?.startsWith('git add -f -- ') ? notes.at(-1) : null;
       (staging ? notes.slice(0, -1) : notes).forEach((note) => io.say(note));
-      if (added) {
-        io.say(`added the ${added.blueprint.title} blueprint: ${added.rows.length} ${added.rows.length === 1 ? 'row waits' : 'rows wait'} for your approval in SPEC.md (${added.section}), `
-          + `${added.items.length} starter ${added.items.length === 1 ? 'item' : 'items'} filed${added.proposedLanes.length ? ` in the ${added.proposedLanes.map((lane) => lane.name).join(' and ')} lane, proposed above and not written until the person accepts` : ''}${added.gate ? `, gate set to ${added.gate}` : ''}`);
-        for (const note of askedLaneNotes(added.items, loadConfig(info.root))) io.say(`  ${note}`);
-        if (added.checksNotRun.length) io.say(`  checks stored, not run: ${added.checksNotRun.map((id) => `#${id}`).join(', ')}; no check baseline ran, so read each check before work starts: pullboard show <id>`);
-      }
+      for (const added of landed) initBlueprintLines(added, askedLaneNotes(added.items, loadConfig(info.root))).forEach((line) => io.say(line));
       if (await registerProjectAndLink(info.root, new Date(), loadConfig(info.root), io)) io.say('registered this project on this machine, so pullboard view lists it');
       // Once registered, a background view lists this board for pullboard.dev [H5,N26].
       const view = await keepViewRunning();
@@ -1930,6 +1940,7 @@ function readCommands(io, { first, second, rest, values }) {
       io.say(JSON.stringify(withBoard(ctx, (board) => exportBoard(board)), null, 2));
       return 0;
     },
+    digest: () => digestCommand(io, { first, second, rest, values }, context(io)),
     import: () => {
       if (!first || second || rest.length) throw new Refused('USAGE', 'pullboard import <file>');
       const file = resolve(io.cwd, first);
@@ -2309,7 +2320,7 @@ async function submitHere(ctx, id) {
   // Doctrine counts only fall: accepted main's rules, at this exact commit (D1). No rule, no change.
   const doctrine = hasSubmitRules(root, acceptedMain.commit, acceptedMain.config.practice)
     ? await withGateSlot(root, () => holdDoctrine(root, { mainCommit: acceptedMain.commit, commit, practice: acceptedMain.config.practice, timeoutMs: acceptedMain.config.check?.timeoutMs }),
-      { itemCheck: true, agent: me.id, item: String(id), kind: 'doctrine', onWait: gateWaitReporter(ctx.io) })
+      { itemCheck: true, agent: me.id, item: String(id), kind: 'doctrine', onWait: queuedItemLease(ctx, held, me.id, 'build') })
     : [];
   for (const rule of doctrine) ctx.io.say(`doctrine: ${ruleLine(rule)}`);
   // Every submit proves its frozen check and reachable tests anew on this exact commit (V4,V16).
@@ -2318,7 +2329,7 @@ async function submitHere(ctx, id) {
     submitInvariants: acceptedMain.config.submitInvariants,
     // The accepted project runner interprets its current invariant files; candidate config cannot replace it.
     ...(acceptedMain.config.submitInvariants.length ? { affectedTests: acceptedMain.config.affectedTests } : {}) };
-  const gate = await runSubmitGate(root, submitConfig, { base: claimHead, trunk: acceptedMain.commit, check: frozenCheck(held), agent: me.id, item: String(id), onWait: gateWaitReporter(ctx.io), onBrowserFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
+  const gate = await runSubmitGate(root, submitConfig, { base: claimHead, trunk: acceptedMain.commit, check: frozenCheck(held), agent: me.id, item: String(id), onWait: queuedItemLease(ctx, held, me.id, 'build'), onBrowserFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
   if (!gate.isGreen) {
     const message = `the submission proof is red at ${commit.slice(0, 12)}; fix it, commit, submit again. ${submitGateReport(gate)}`;
     // No submission can follow this verdict. Read-only main comparisons must not retain the seat's write lease.
@@ -2366,12 +2377,12 @@ function reportSubmission(ctx, id, commit, gate, doctrine = []) {
  *
  * @param {any} io
  * @param {string} reference - A bundled blueprint name or a path to a blueprint file, relative to io.cwd.
- * @param {{ report?: boolean, blueprint?: ReturnType<typeof readBlueprint> }} [options]
+ * @param {{ report?: boolean, blueprint?: ReturnType<typeof readBlueprint>, drafted?: Map<string, string> }} [options] - drafted: see addBlueprint.
  * @returns {Promise<BlueprintAdded>}
  */
-export async function addBlueprintHere(io, reference, { report = true, blueprint = readBlueprint(reference, io.cwd) } = {}) {
+export async function addBlueprintHere(io, reference, { report = true, blueprint = readBlueprint(reference, io.cwd), drafted } = {}) {
   const ctx = context(io);
-  return await withBoard(ctx, async (board) => await addBlueprint(ctx, board, whoAmI(ctx, board), blueprint, { report }));
+  return await withBoard(ctx, async (board) => await addBlueprint(ctx, board, whoAmI(ctx, board), blueprint, { report, drafted }));
 }
 
 /**
@@ -2384,6 +2395,7 @@ export async function addBlueprintHere(io, reference, { report = true, blueprint
  * @property {boolean} marked - This blueprint version was already on the board, so nothing was added.
  * @property {number[]} checksNotRun - New items that carry a check; no check baseline ran for them.
  * @property {{ name: string, owns: string[] }[]} proposedLanes - Proposed, unwritten lanes new starters were filed in.
+ * @property {{ key: string, id: string }[]} shared - Keys that cite a row an earlier blueprint in the same command drafted.
  */
 
 /**
@@ -2396,11 +2408,12 @@ export async function addBlueprintHere(io, reference, { report = true, blueprint
  * @param {any} board
  * @param {{ id: string }} me
  * @param {import('./blueprints.js').Blueprint} blueprint
- * @param {{ report?: boolean }} [options] - With report false, print nothing and set no JSON result.
+ * @param {{ report?: boolean, result?: boolean, drafted?: Map<string, string> }} [options] - report false prints nothing and sets no
+ *   JSON result; result false prints but sets none. drafted: rows earlier blueprints of this command drafted, by text (#720).
  * @returns {Promise<BlueprintAdded>}
  */
-async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
-  const io = report ? ctx.io : { say: () => {} };
+async function addBlueprint(ctx, board, me, blueprint, { report = true, result = report, drafted = new Map() } = {}) {
+  const io = report ? (result ? ctx.io : { say: (text) => ctx.io.say(text) }) : { say: () => {} };
   const spec = loadSpec(ctx.info.root, ctx.config);
   if (!spec.exists) throw new Refused('NO_SPEC', `no ${ctx.config.spec}; run: pullboard init`);
   const malformed = [[spec.file, spec.problems], [ctx.doctrine.repo.file, ctx.doctrine.repo.problems]].find(([, problems]) => problems.length);
@@ -2412,7 +2425,8 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
   // only: nothing runs and nothing is fetched (#725).
   const plan = planBlueprint(landBlueprint(blueprint, repoAnswers(ctx.info.root)), { source, spec, doctrine: ctx.doctrine,
     existingItems: store.listItems(board, { all: true }).map((item) => ({ id: item.item_id, title: item.item_title, specIds: item.item_spec_ids ? item.item_spec_ids.split(',') : [] })),
-    gate: String(JSON.parse(configSource).gate ?? '') });
+    gate: String(JSON.parse(configSource).gate ?? ''), drafted });
+  for (const row of plan.rows) drafted.set(row.text, row.id);
   // Every starter is checked before anything is written, so a refusal leaves the board as it was.
   // Starters go to a build lane, never the coordinator's; a proposed lane is named, not written (#732).
   const proposals = proposeLanes(ctx.info.root, ctx.config);
@@ -2447,6 +2461,8 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
       item.after = afterKeys.map((before) => byKey[before]).filter(Boolean);
       const id = await ordered(ctx, board, 'addItem', [item]);
       byKey[key] = id;
+      // The starter keeps its blueprint's name, in the link #734 reads back (#720).
+      await ordered(ctx, board, 'appendFact', [id, { agentId: me.id, kind: 'note', text: blueprintStarterNote(blueprint, key) }]);
       added.push({ id, key, title: item.title, lane: item.lane, ...(asked ? { askedLane: asked } : {}), specIds: item.specIds, after: item.after, ...(item.check ? { check: item.check } : {}) });
     }
   } catch (error) {
@@ -2461,12 +2477,14 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
   if (plan.specAfter !== source && !files.some((file) => file.file === ctx.config.spec)) files.unshift({ file: ctx.config.spec });
   const rows = plan.rows.map(({ key, id, status, text, source }) => ({ key, id, status, text, ...(source ? { source } : {}) }));
   const summary = { blueprint: { name: blueprint.name, title: blueprint.title, version: blueprint.version },
-    section: plan.section.name, rows, items: added, gate: plan.gate, marked: plan.marked, proposedLanes: added.length ? proposedLanes : [],
+    section: plan.section.name, rows, items: added.map((item) => ({ ...item, blueprint: blueprint.name })), gate: plan.gate, shared: plan.shared, marked: plan.marked, proposedLanes: added.length ? proposedLanes : [],
     // Item checks are stored and never run during add; the caller tells the reader so.
     checksNotRun: added.filter((item) => item.check).map((item) => item.id) };
   io.result?.(summary);
   if (plan.marked) {
     io.say(`${blueprint.title} (version ${blueprint.version}) is already on this board; nothing added`);
+    // A board an older Pullboard set up gets the blueprint's kind recorded beside its marker (#720).
+    if (plan.specRows !== source) io.say(`  recorded its kind (${blueprint.kind ?? 'none'}) in ${ctx.config.spec}; commit ${ctx.config.spec}`);
     return summary;
   }
   io.say(`added ${blueprint.title} (version ${blueprint.version}) as drafts in ${ctx.config.spec}, section ${plan.section.name}`);
@@ -2476,6 +2494,7 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
   if (checked.length) io.say(`  checks stored, not run: ${checked.map((item) => `#${item.id}`).join(', ')}; no check baseline ran during add, so read each check before work starts: pullboard show <id>`);
   for (const note of [...askedLaneNotes(added, ctx.config), ...starterLaneNotes(summary.proposedLanes)]) io.say(`  ${note}`);
   if (plan.gate) io.say(`  gate set in ${CONFIG_FILE}: ${plan.gate}`);
+  for (const line of sharedRowLines(summary)) io.say(`  ${line}`);
   const changed = files.map((file) => file.file);
   io.say(`next: the person approves the rows in pullboard view or with pullboard spec approve <ids>${changed.length ? `; commit ${changed.join(' and ')}` : ''}`);
   return summary;
@@ -2544,7 +2563,7 @@ async function verifyHere(ctx, id, { second, values }) {
         // The private check runs here, in a private clone, under this machine's gate markers; a runner
         // lease cannot carry those markers, so the review queues for a local slot only [C7,V4].
         const shortEligible = Boolean(await explicitCheckFiles(root, frozenCheck(item), { commit }));
-        check = await withGateSlot(root, (lease) => checkAtCommit(root, item, { waitMs: lease.waitMs, gateLease: lease }), { browser, remote: false, agent: me.id, item: String(id), kind: 'review', itemCheck: true, shortEligible, onWait: gateWaitReporter(ctx.io) });
+        check = await withGateSlot(root, (lease) => checkAtCommit(root, item, { waitMs: lease.waitMs, gateLease: lease }), { browser, remote: false, agent: me.id, item: String(id), kind: 'review', itemCheck: true, shortEligible, onWait: queuedItemLease(ctx, item, me.id, 'review') });
       } else {
         check = checkAtCommit(root, item);
       }
@@ -2928,10 +2947,12 @@ function workCommands(io, args) {
   };
   return {
     blueprint: () => act(async (ctx, board, me) => {
-      if (first !== 'add' || !second || rest.length) {
-        throw new Refused('USAGE', `pullboard blueprint add <name or file> | save [file]; bundled: ${bundledBlueprints().join(', ')}`);
-      }
-      await addBlueprint(ctx, board, me, readBlueprint(second, io.cwd));
+      const references = [...(second ? [second] : []), ...(values.blueprint ?? [])];
+      if (first !== 'add' || !references.length || rest.length) throw new Refused('USAGE', `pullboard blueprint add <name or file> [--blueprint <name or file>]... | save [file]; bundled: ${bundledBlueprints().join(', ')}`);
+      // Several blueprints land in the order given, as one result; one lands exactly as before (#720).
+      const listed = readBlueprints(references, io.cwd, 'blueprint add', installedBlueprints(ctx.info.root));
+      const landed = await landEach(listed, ({ blueprint }, drafted) => addBlueprint(ctx, board, me, blueprint, { result: listed.length === 1, drafted }));
+      if (listed.length > 1) io.result?.(combinedSummary(landed));
       return 0;
     }),
     fact: () => act(async (ctx, board, me) => {
@@ -3119,7 +3140,7 @@ function workCommands(io, args) {
       }
       const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(ctx.info.root, check, { onFallback: browserAdmissionReporter(io, values.json) });
       const shortEligible = Boolean(await explicitCheckFiles(ctx.info.root, check));
-      const run = await withGateSlot(ctx.info.root, (lease) => runProfiledShell(ctx.info.root, check, { waitMs: lease.waitMs, artifactPrefix: `pullboard-check-${item.item_id}`, persistLog: true, gateLease: lease }), { browser, agent: caller, item: String(item.item_id), kind: 'check', itemCheck: true, shortEligible, onWait: gateWaitReporter(io) });
+      const run = await withGateSlot(ctx.info.root, (lease) => runProfiledShell(ctx.info.root, check, { waitMs: lease.waitMs, artifactPrefix: `pullboard-check-${item.item_id}`, persistLog: true, gateLease: lease }), { browser, agent: caller, item: String(item.item_id), kind: 'check', itemCheck: true, shortEligible, onWait: queuedItemLease(ctx, item, caller, 'build') });
       refuseSandboxBlocked(run);
       io.result?.({ id: item.item_id, green: run.isGreen, seconds: run.seconds, check, by, report: run.isGreen ? '' : digestOf(run.output) });
       const timings = timingDigest(run.profile);
@@ -3307,13 +3328,55 @@ function workCommands(io, args) {
 function resourceRunLabel(entry, shortSlots = 0) {
   const priority = entry.landing ? 'landing' : entry.itemCheck ? 'item check' : entry.diagnostic ? 'diagnostic' : '';
   const slot = !shortSlots ? '' : entry.slot ? `${entry.slot} slot` : entry.requestedSlot === 'short-eligible' ? 'may use a short slot' : '';
-  const details = [slot, entry.kind !== priority ? entry.kind : '', entry.item ? `#${entry.item}` : '', entry.browser ? 'browser' : ''].filter(Boolean);
+  const details = [slot, entry.kind !== priority ? entry.kind : '', entry.item ? `#${entry.item}` : '', entry.leaseUntil ? `lease until ${entry.leaseUntil}` : '', entry.browser ? 'browser' : ''].filter(Boolean);
   return `${priority ? ` (${priority})` : ''}${details.length ? ` (${details.join(', ')})` : ''}`;
 }
 
 /** Name a known board seat for queue diagnostics without requiring an unjoined checkout to join. */
 function resourceAgent(ctx) {
   return ctx.info.isMain ? COORDINATOR : withBoard(ctx, board => store.agentAt(board, ctx.info.root)?.agent_id);
+}
+
+/** Keep only this queued command's live item lease, using ordinary ordered board moves. */
+function queuedItemLease(ctx, initial, agentId, kind) {
+  const report = gateWaitReporter(ctx.io);
+  // Naming somebody else's check remains read-only; it never extends their build claim.
+  if (kind === 'build' && (initial.item_status !== 'claimed' || initial.item_owner !== agentId)) return report;
+  const review = kind === 'review';
+  if (review && initial.item_review_by !== agentId) return report;
+  const field = review ? 'item_review_until' : 'item_lease_until';
+  const owner = review ? 'item_review_by' : 'item_owner';
+  const status = review ? 'submitted' : 'claimed';
+  const leaseMs = review ? ctx.config.reviewLeaseMs : ctx.config.leaseMs;
+  const expected = { digest: initial.item_frozen_digest, commit: initial.item_commit };
+  let confirmedLeaseUntil = '';
+  return async (state) => {
+    if (!state.admitted) report(state);
+    const now = ctx.clock.now().getTime();
+    // Queue polling is frequent; reopen the board only when renewal is due or admission starts.
+    if (!state.admitted && Date.parse(confirmedLeaseUntil) - now > leaseMs / 2) {
+      return { leaseUntil: confirmedLeaseUntil };
+    }
+    return await withBoard(ctx, async (board) => {
+      const current = store.getItem(board, initial.item_id);
+      const expires = Date.parse(current[field]);
+      if (current.item_status !== status || current[owner] !== agentId || !Number.isFinite(expires) || expires <= now
+        || current.item_frozen_digest !== expected.digest || current.item_commit !== expected.commit) {
+        throw new Refused('ITEM_LEASE_LOST', `the queued ${review ? 'review' : 'build'} lease for #${initial.item_id} changed or expired; claim or reserve the item again before retrying`);
+      }
+      if (state.admitted || expires - now <= leaseMs / 2) {
+        const result = await ordered(ctx, board, review ? 'reserveReview' : 'claim', [initial.item_id, {
+          agentId, leaseMs,
+          ...(review ? { policy: ctx.config.verify.policy, familyPolicy: ctx.config.verify.family }
+            : { lane: current.item_lane, freeze: claimFreezer(ctx), head: headCommit(ctx.info.root) }),
+        }]);
+        confirmedLeaseUntil = review ? result.item_review_until : result.leaseUntil;
+        return { leaseUntil: confirmedLeaseUntil };
+      }
+      confirmedLeaseUntil = current[field];
+      return { leaseUntil: confirmedLeaseUntil };
+    });
+  };
 }
 
 /** Print the file and reason when conservative uncertainty reserves browser capacity.
@@ -4006,6 +4069,11 @@ async function runCommand(argv, io) {
       return 0;
     }
     if (command === 'gate') {
+      if (first !== undefined || second !== undefined || rest.length > 0) {
+        const words = [first, second, ...rest].filter((word) => word !== undefined);
+        const next = 'use pullboard resources for status, or pullboard gate with no extra words to run the gate';
+        throw new Refused('GATE_ARGUMENT', `pullboard gate does not accept extra words: ${words.join(' ')}. Use pullboard resources for status, or pullboard gate with no extra words to run the gate.`, next);
+      }
       const ctx = context(io);
       let config;
       try { config = mainPolicy(ctx.info.root).config; }
@@ -4115,7 +4183,7 @@ async function runMain(argv, streams) {
       positionals: parsed.positionals.slice(1),
       values: Object.fromEntries(Object.keys(parsed.values).filter(key => key !== 'json').sort().map(key => [key, parsed.values[key]])) };
     sync = Boolean(command) && !parsed.values.help && !parsed.values.version
-      && !['help', 'version', 'hook', 'init', 'relay', 'tour', 'mcp', 'health', 'watch'].includes(command)
+      && !['help', 'version', 'hook', 'init', 'relay', 'tour', 'mcp', 'health', 'watch', 'digest'].includes(command)
       // A coordinator declaration on a linked clone must refuse before auto-link or relay sync.
       && !(command === 'join' && parsed.positionals[1] === COORDINATOR);
     needsRepo = !(parsed.values.help || parsed.values.version || command === 'help' || command === 'version');

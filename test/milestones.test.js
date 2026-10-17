@@ -209,3 +209,29 @@ test('[N26] milestone ship leaves external references in place and names them as
   assert.match(text.stdout, /not moved across boards: other-repo#31, third-repo#33/,
     'human output names every foreign reference that stayed in place');
 });
+
+test('[N26,H16] engine 30 cannot ship a milestone or set its target', async (t) => {
+  const box = fixture(t);
+  box.json('milestone', 'add', 'A');
+  box.json('milestone', 'add', 'B');
+  const { applyEngineMove, appliedSequence, engineReceipt, prepareEngineMove } = await import('../src/engine.js');
+  const { exportBoard } = await import('../src/exchange.js');
+  const main = box.git('rev-parse', 'main');
+  const moves = [
+    prepareEngineMove(box.board, 'shipMilestone', ['A', { agentId: 'coordinator', commit: main, next: 'B' }],
+      { id: 'engine30-milestone-ship', actor: 'coordinator' }),
+    prepareEngineMove(box.board, 'editMilestone', ['A', { agentId: 'coordinator', target: '2026-10-20T18:00:00Z' }],
+      { id: 'engine30-milestone-target', actor: 'coordinator' }),
+  ];
+  const before = exportBoard(box.board);
+
+  for (const move of moves) {
+    const oldEnvelope = { ...move, engine: 30 };
+    assert.throws(() => applyEngineMove(box.board, oldEnvelope, { sequence: 1, at: '2026-10-17T12:00:00.000Z' }),
+      (error) => error.code === 'RELAY_MOVE' && /introduced in engine 31/u.test(error.message),
+      `${move.operation} was introduced in engine 31 and must not run as engine 30`);
+    assert.deepEqual(exportBoard(box.board), before, 'an unsupported engine-30 meaning changes no rows or event history');
+    assert.equal(appliedSequence(box.board), 0, 'pre-validation refusal does not advance the relay cursor');
+    assert.equal(engineReceipt(box.board, move.id), null, 'pre-validation refusal creates no move receipt');
+  }
+});
