@@ -31,6 +31,40 @@ function declineReason(row) {
 export function loadDoctrine(root, config = {}) {
   const name = doctrineFile(root, config.practice);
   const repo = loadSpec(root, { ...config, spec: name });
+  return composeDoctrine(repo, name);
+}
+
+/** Compose committed doctrine bytes without reading an unapproved checkout file. */
+export function doctrineFromSource(source, name) {
+  return composeDoctrine({ ...parseSpec(source ?? ''), source, name, file: name, exists: source !== null }, name);
+}
+
+/** Overlay only the person's applied exact-row decisions on the committed doctrine. */
+export function appliedDoctrine(doctrine, decisions, currentSource) {
+  const rows = new Map(doctrine.repo.rows.map(row => [row.id, row]));
+  const aliases = new Set([DOCTRINE_FILE, LEGACY_DOCTRINE_FILE]);
+  const current = parseSpec(currentSource ?? '');
+  const currentLines = (currentSource ?? '').split(/\r?\n/u);
+  const committedLines = (doctrine.repo.source ?? '').split(/\r?\n/u);
+  for (const record of decisions) {
+    if (record.kind !== 'doctrine' || !record.applied) continue;
+    if (record.file !== doctrine.name && !(aliases.has(record.file) && aliases.has(doctrine.name))) continue;
+    const matching = current.rows.filter(row => row.id === record.id);
+    if (matching.length !== 1 || currentLines[matching[0].line - 1] !== record.replacement) continue;
+    const committed = rows.get(record.id);
+    if (committed && doctrine.repo.source !== undefined
+      && ![record.source, record.replacement].includes(committedLines[committed.line - 1])) continue;
+    const parsed = parseSpec(`## Approved rulings\n${record.replacement}\n`);
+    const row = parsed.rows[0];
+    if (parsed.rows.length !== 1 || row.id !== record.id || row.text !== record.text
+      || row.status !== (record.decision === 'approve' ? 'approved' : 'wont')) continue;
+    rows.set(row.id, { ...row, section: rows.get(row.id)?.section ?? row.section });
+  }
+  return composeDoctrine({ ...doctrine.repo, rows: [...rows.values()] }, doctrine.name);
+}
+
+/** Combine one repo snapshot with the packaged standard using the same override rules. */
+function composeDoctrine(repo, name) {
   const standard = standardDoctrine();
   const inherited = new Set(standard.rows.map((row) => row.id));
   const overrides = new Set(repo.rows.filter((row) => inherited.has(row.id)).map((row) => row.id));
