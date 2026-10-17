@@ -178,6 +178,7 @@ export const NEXT_STEPS = Object.freeze({
   MISSING_SIGNERS: 'restore the signer list from git: git checkout HEAD -- .pullboard/signers',
   MODEL_REQUIRED: 'pass --model "<model name>", or set PULLBOARD_MODEL in this shell',
   MOVED_DURING_GATE: 'leave the worktree alone until the gate finishes, then submit again',
+  BAR_REASON: 'say what the old bar got wrong: pullboard edit <id> --reason "..."',
   NOTE_REQUIRED: 'add --note "<what happened>"',
   NOTHING_FREE: 'wait for work: pullboard next --wait 9 (minutes)',
   NOT_AT_COMMIT: 'check out the submitted commit shown by pullboard show <id>: git switch --detach <commit>',

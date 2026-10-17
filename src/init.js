@@ -97,6 +97,69 @@ export function proposeLanes(root, config = loadConfig(root)) {
 }
 
 /**
+ * The lane a blueprint starter is filed in (I1, S1). A starter is built in a build lane, never the
+ * coordinator lane: the coordinator verifies and merges, and nothing moves an item between lanes,
+ * so a starter filed there had to be withdrawn and filed again (blueprint trial, finding 3). In
+ * order: the starter's own lane when it exists or is proposed, else the first declared lane that
+ * owns folders, else the first lane init proposes. A proposed lane is used by name and never
+ * written: the person accepts it with its `pullboard lane add` command, and the starters are
+ * waiting in it from then on.
+ *
+ * @param {string | undefined} wanted - The lane the blueprint names for this starter, if any.
+ * @param {any} config - The repo's config.
+ * @param {{ name: string, owns: string[] }[]} proposals - The lanes init proposes, from proposeLanes.
+ * @returns {{ lane: string, proposal: { name: string, owns: string[] } | null }}
+ */
+export function starterLane(wanted, config, proposals) {
+  const proposalFor = (name) => proposals.find((lane) => lane.name === name) ?? null;
+  // A lane that owns no folders, like a verifier lane, builds nothing, so it never takes a starter.
+  const builds = (name) => name !== COORDINATOR && Object.hasOwn(config.lanes, name) && config.lanes[name].owns.length > 0;
+  if (wanted && (builds(wanted) || (!Object.hasOwn(config.lanes, wanted) && proposalFor(wanted)))) {
+    return { lane: wanted, proposal: builds(wanted) ? null : proposalFor(wanted) };
+  }
+  const asked = wanted ? { asked: wanted } : {};
+  const built = Object.keys(config.lanes).find(builds);
+  if (built) return { lane: built, proposal: null, ...asked };
+  // proposeLanes always proposes one lane when no lane owns a folder, so this is never empty.
+  return { lane: proposals[0].name, proposal: proposals[0], ...asked };
+}
+
+/**
+ * The lines blueprint add prints for starters that named a lane they could not go to: which lane
+ * they asked for, why it was not used, and where they went instead, so a person reading the output
+ * knows the blueprint's lane was set aside.
+ *
+ * @param {{ lane: string, askedLane?: string }[]} placed - The starters filed, each with its lane.
+ * @param {any} config - The repo's config.
+ * @returns {string[]}
+ */
+export function askedLaneNotes(placed, config) {
+  const groups = new Map();
+  for (const { lane, askedLane: asked } of placed) {
+    if (!asked) continue;
+    const key = `${asked}\n${lane}`;
+    groups.set(key, { asked, lane, count: (groups.get(key)?.count ?? 0) + 1 });
+  }
+  return [...groups.values()].map(({ asked, lane, count }) => {
+    const why = asked === COORDINATOR ? 'which verifies and merges' : Object.hasOwn(config.lanes, asked) ? 'which owns no folders' : 'which does not exist';
+    return `${count} starter ${count === 1 ? 'item' : 'items'} asked for the ${asked} lane, ${why}, so ${count === 1 ? 'it is' : 'they are'} filed in the ${lane} lane`;
+  });
+}
+
+/**
+ * The lines blueprint add prints when its starters went into a proposed lane: where they are,
+ * and the one command that accepts the lane.
+ *
+ * @param {{ name: string, owns: string[] }[]} proposed - The proposed lanes starters were filed in.
+ * @returns {string[]}
+ */
+export function starterLaneNotes(proposed) {
+  if (!proposed.length) return [];
+  const [, accept] = laneProposalNotes(proposed);
+  return [`starter items filed in the ${proposed.map((lane) => lane.name).join(' and ')} lane, proposed, not written until the person accepts`, accept];
+}
+
+/**
  * Quote one word for a POSIX shell when it needs quoting.
  *
  * @param {string} word

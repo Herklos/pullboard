@@ -15,6 +15,7 @@ import { briefFiles, briefSections } from './brief.js';
 import { COORDINATOR } from './config.js';
 import { ENGINE_VERSION, GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, effectiveGuards, storeTriggers } from './machine.js';
 import { Refused } from './refused.js';
+import { barCorrectionFields } from './bar-corrections.js';
 import { parseSpec } from './spec.js';
 export { acceptCheck } from './check-accept.js';
 
@@ -736,11 +737,11 @@ export function validateItemAddition(board, { by, lane, title, criterion = '', p
  * @param {number} id
  * @param {{ agentId: string, brief?: string, route?: string, criterion?: string, check?: string, after?: number[] }} change
  */
-export function editItem(board, id, { agentId, brief, route, criterion, check, after, checkBaseline }) {
+export function editItem(board, id, { agentId, brief, route, criterion, check, after, checkBaseline, reason }) {
   atomic(board, () => {
     const stored = itemById(board, id);
     const expiredHolder = stored.item_status === 'claimed' && !isHeld(board, stored) ? stored.item_owner : null;
-    const { item, next, command, unfreeze } = validateItemEdit(board, id, { agentId, brief, route, criterion, check, after });
+    const { item, next, command, unfreeze, bar } = validateItemEdit(board, id, { agentId, brief, route, criterion, check, after, reason });
     const baseline = normalizeCheckBaseline(agentId, command, checkBaseline);
     const pendingFields = [
       ...(next.item_criterion !== item.item_criterion ? ['criterion'] : []),
@@ -765,6 +766,7 @@ export function editItem(board, id, { agentId, brief, route, criterion, check, a
       ...(pendingRefreeze ? { pendingRefreeze: pendingFields } : {}),
       ...(clearFrozen && item.item_frozen_digest ? { unfrozen: item.item_frozen_digest } : {}),
       ...(expiredHolder ? { expiredHolder } : {}),
+      ...bar,
     });
     if (pendingRefreeze) {
       insertShout(board, {
@@ -777,8 +779,8 @@ export function editItem(board, id, { agentId, brief, route, criterion, check, a
   });
 }
 
-/** Validate an edit without side effects, so a refused change never starts a shell baseline. */
-export function validateItemEdit(board, id, { agentId, brief, route, criterion, check, after }) {
+/** Validate an edit without side effects, so a refused change never starts a shell baseline; a bar correction needs a reason [B31]. */
+export function validateItemEdit(board, id, { agentId, brief, route, criterion, check, after, reason }) {
   const engine = board.executionEngineVersion ?? ENGINE_VERSION;
   if (after !== undefined && engine < 10) {
     throw new Refused('ENGINE_VERSION', `editing item dependencies requires engine 10; this board uses engine ${engine}; upgrade Pullboard before using --after`);
@@ -822,7 +824,7 @@ export function validateItemEdit(board, id, { agentId, brief, route, criterion, 
   }
   checkRouted({ brief: next.item_brief, route: next.item_route, criterion: next.item_criterion, check: next.item_check });
   const unfreeze = next.item_criterion !== item.item_criterion || next.item_check !== item.item_check;
-  return { item, next, command, unfreeze };
+  return { item, next, command, unfreeze, bar: barCorrectionFields(board, item, next, { reason }) };
 }
 
 /** Normalize an explicitly supplied check only when its author is the coordinator [V2]. */

@@ -113,7 +113,9 @@ Engine 11 permits resubmitting the same commit after a coordinator no-verdict re
 
 Engine 12 records declined person row decisions without replacing the exact source text: the row becomes `wont` and the reason stays in the decision record. Engine-11 decline receipts retain their original reason-as-row-text validation and replay outcome. Engine-11 clients refuse engine-12 moves before interpreting them; upgrade linked clients before recording new decline decisions.
 
-Engine 24 adds the person's `acceptCheck`: an item's current check, named by its SHA-256 digest, accepted so a check already green on main no longer holds the item on a board whose `checks.provesNothing` is `"hold"`. Only the person may send it, from the terminal or the view; the relay refuses it from an agent or a machine. A move from an older engine is refused before it changes the board or replay cursor, and older clients refuse engine-24 moves before interpreting them.
+Engine 19 makes a corrected bar record why the old one was wrong. Once an item has ever been claimed, an `editItem` that changes its criterion or check must carry `reason`, the text of what the old bar got wrong; without one it is refused with `BAR_REASON`, naming `--reason`. The edit event then records `reason` and `barCorrection: {fields, reject}`: `fields` lists `criterion` and/or `check`, and `reject` is `{verdict, by, reason, at}` when the item's newest verdict is a reject no earlier correction already explained, or `null`. That reject is counted as caused by the bar. The board derives `barCorrection` from its own rows; a move supplies only `reason`. An edit before any claim needs no reason and records one only if given. `pullboard stats` JSON adds `bars`, keyed by agent: `{corrections, barRejects, buildRejects}`. Corrections and the rejects they explain count to the agent who corrected the bar; any other reject counts as the build's, to the agent who added the item. An `editItem` move carrying `reason` requires engine 19, and older engines refuse it with `RELAY_MOVE` before changing their board or cursor. Moves recorded under engines 18 and earlier replay without the reason rule. Engine numbers 13 to 18 are allocated to other changes; whichever lands later renumbers, keeping every earlier engine's replay unchanged.
+
+Engine 24 adds the person's `acceptCheck`: an item's current check, named by its SHA-256 digest, accepted so a check already green on main no longer holds the item on a board whose `checks.provesNothing` is `"hold"`. Only the person may send it, from the terminal or the view; the relay refuses it from an agent or a machine. A move from an older engine is refused before it changes the board or replay cursor, and older clients refuse engine-24 moves before interpreting them. Engines 20 through 23 are allocated to other changes.
 
 The CLI declares its engine in every relay request's `X-Pullboard-Engine` header.
 A linked board requires at least engine 3 after issuing any agent token, including
@@ -304,7 +306,7 @@ The `event` table is a SQLite schema object governed by `SCHEMA_VERSION`; its ap
 | `model` | agent | — |
 | `moved` | coordinator | `path` |
 | `add` | item creator | `lane`, `specIds`, `after`, `route` |
-| `edit` | editor | `brief`, `route`, `criterion`, `check`, `unfrozen`, optional `after`, optional `pendingRefreeze` |
+| `edit` | editor | `brief`, `route`, `criterion`, `check`, `unfrozen`, optional `after`, optional `pendingRefreeze`, engine-19 `reason`, `barCorrection` |
 | `escalate` | builder | `from`, `to`, `note`, `attempt` |
 | `attempt` | reporting agent | `n`, `seconds`, `result` |
 | `fact` | author | `id`, `kind`, `text`, `ref`, `supersedes` |

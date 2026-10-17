@@ -615,8 +615,8 @@ const count = (n, one, many = one) => n + ' ' + (n === 1 ? one : many);
 // and the line under the project says so without counting it.
 const needCount = (x) => x.ok && !x.loading ? x.decisions + x.pending + x.drafts + x.holds : 0;
 const doing = (x) => [x.decisions && count(x.decisions, 'decision', 'decisions'), x.pending && count(x.pending, 'question', 'questions'), x.drafts && count(x.drafts, 'draft row', 'draft rows'), x.holds && count(x.holds, 'lane held', 'lanes held'), x.sentBack && count(x.sentBack, 'sent back'), x.awaiting && count(x.awaiting, 'to verify'), x.building && count(x.building, 'building')].filter(Boolean).join(' · ') || (x.open ? count(x.open, 'item open', 'items open') : 'nothing open');
-// Embed the standalone shared builder for live, exported and relay pages.
-const personNeeds = (${personNeeds.toString()});
+// Embed the standalone shared builder for every page; the binding also lets the page fixture substitute its output.
+let personNeeds = (${personNeeds.toString()});
 /** The person's calls in one repo, reused by a combined project view. */
 function projectNeeds(p) {
   return personNeeds(p);
