@@ -281,6 +281,13 @@ test("the coordinator's handoff brief orders current work and leaves agent resum
   assert.deepEqual(document.verifiedNotMerged.clean.map((item) => item.item_id).sort((a, b) => a - b),
     [cleanId, supersededId, plainId, factId, unrelatedId, expiredId].sort((a, b) => a - b));
   assert.deepEqual(document.verifiedNotMerged.conflicts[0].files, ['web/shared.txt']);
+  assert.equal(document.verifiedNotMerged.conflicts[0].item.item_verdict_state?.code, 'STALE_VERDICT',
+    'the stale accepted conflict remains visible as an integration diagnostic');
+  assert.ok(!document.toMerge.some(item => item.item_id === conflictId),
+    'visible stale conflict diagnostics never become ready-to-land work');
+  assert.ok(document.staleVerdicts.some(item => item.item_id === conflictId),
+    'the handoff also states that the old acceptance must be re-reviewed');
+  assert.match(resumed.out, new RegExp(`conflicts: #${conflictId} Conflict item.*\\[STALE_VERDICT\\]`));
   assert.deepEqual(document.verifiedNotMerged.integrating.map((entry) => entry.item.item_id), [activeId],
     'the >40 later plain shouts do not hide the structured descendant attempt');
   assert.equal(document.verifiedNotMerged.integrating[0].commit, descendant, 'the typed evidence keeps its full descendant SHA');

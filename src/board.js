@@ -6,6 +6,8 @@
  * every move lands in an append-only event log (R2). The caller supplies what only git and the
  * spec know: the commit, the verifier's checkout, the frozen criterion.
  */
+import { verdictReviewProblem, verdictsFor, acceptedVerdict, checkedLandingCommit } from './verdict-reviews.js';
+export { verdictReviewProblem, verdictsFor, acceptedVerdict, checkedLandingCommit };
 import { randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -13,9 +15,11 @@ import { DatabaseSync } from 'node:sqlite';
 import { boardNotWritable } from './board-access.js';
 import { briefFiles, briefSections } from './brief.js';
 import { COORDINATOR } from './config.js';
-import { ENGINE_VERSION, GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, effectiveGuards, storeTriggers } from './machine.js';
+import { ENGINE_VERSION, VERDICT_REVIEW_ENGINE, GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, effectiveGuards, storeTriggers } from './machine.js';
 import { Refused } from './refused.js';
+import { causeProblem, requireNeverAgain } from './rigor.js';
 import { barCorrectionFields } from './bar-corrections.js';
+import { factReference } from './fact-reference.js';
 import { factFromEvent, requestAnswerRefusal, tellAnswerImplications, tellFactImplications, tellVerdictImplications } from './implies.js';
 import { parseSpec } from './spec.js';
 export { acceptCheck } from './check-accept.js';
@@ -1470,7 +1474,8 @@ function reserveWithin(board, id, { agentId, leaseMs, policy, familyPolicy = 'of
 }
 
 /**
- * Record a verdict on a submitted item (V1, V3, V5, V6, V8): an accept verifies it, a reject
+ * Record a verdict on submitted work, or a sealed re-review of unlanded work (E8,V1,V3,V8).
+ * An accept verifies it; a reject
  * reopens it for rework.
  *
  * The verdict binds the submitted commit and the digest frozen at claim. If the criterion's text
@@ -1478,25 +1483,36 @@ function reserveWithin(board, id, { agentId, leaseMs, policy, familyPolicy = 'of
  * claimed again. The builder never verifies; under `verify: "coordinator"`, lane work is the
  * coordinator's to verify; an agent verifies items at its tier or below, and not while another
  * agent holds the review (V15). An accept means CRITERION_MET and says how it was proved; a reject
- * names one of the reject reasons and says what failed.
+ * names one of the reject reasons and says what failed, and may name its cause key for rigor (#713).
  *
  * @param {any} board
  * @param {number} id
- * @param {{ agentId: string, decision: string, reason?: string, note?: string, head: string, digest: string, policy: string, familyPolicy?: string, check?: 'none' | 'green', implies?: number[], impliesId?: string }} verdict - implies: items this verdict changes (B29)
+ * @param {{ agentId: string, decision: string, reason?: string, note?: string, cause?: string, head: string, digest: string, policy: string, familyPolicy?: string, check?: 'none' | 'green', review?: {commit: string, head?: string, trunk: string, paths: string[]}, implies?: number[], impliesId?: string }} verdict - implies: items this verdict changes (B29)
  * @returns {{ decision: string, reason: string, check?: 'none' | 'green' }}
  */
-export function verify(board, id, { agentId, decision, reason, note = '', head, digest, policy, familyPolicy = 'off', check, implies, impliesId }) {
+export function verify(board, id, { agentId, decision, reason, note = '', cause, head, digest, policy, familyPolicy = 'off', check, review, implies, impliesId }) {
   const verb = { ACCEPT: 'accept', REJECT: 'reject' }[decision];
   if (!verb) throw new Refused('BAD_DECISION', 'the decision is accept or reject');
   const isAccept = verb === 'accept';
   const code = isAccept ? ACCEPT_REASON : reason;
+  const engine = board.executionEngineVersion ?? ENGINE_VERSION;
+  const declaration = MOVES.find(move => move.verb === verb);
+  const newReview = engine >= VERDICT_REVIEW_ENGINE && review !== undefined;
+  // Without the new sealed metadata, old moves keep their exact submitted-only semantics.
+  const transition = newReview ? declaration : { ...declaration, from: ['submitted'],
+    guards: declaration.guards.filter(guard => !['notMerged', 'verdictReviewRecorded', 'reviewTreeCurrent'].includes(guard)) };
   return atomic(board, () => {
     const item = moveItem(board, id, verb, {
+      transition,
       checks: {
         coordinatorSaysAs: null,
         joined: null,
         [IN_STATE]: (found) => new Refused('NOT_SUBMITTED', `item #${id} is ${current(board, found).item_status}, not submitted`),
         atSubmittedCommit: null,
+        notMerged: found => !found.item_merged_commit ? null
+          : new Refused('ALREADY_MERGED', `item #${id} already landed; only unlanded acceptances can be re-reviewed`),
+        verdictReviewRecorded: found => verdictReviewProblem(review, found.item_commit, { checked: engine >= VERDICT_REVIEW_ENGINE }),
+        reviewTreeCurrent: null,
         ...reviewerChecks(board, { agentId, policy, familyPolicy }),
         criterionUnchanged: (found) =>
           digest === found.item_frozen_digest
@@ -1512,6 +1528,7 @@ export function verify(board, id, { agentId, decision, reason, note = '', head, 
             : new Refused('PROOF_REQUIRED', 'an accept says how you proved it: --note "what you broke or which edge you tried, and what happened"; passing tests alone are not proof'),
         reasonCoded: () => (reason && REJECT_REASONS.includes(reason) ? null : new Refused('BAD_REASON', `a reject names one of: ${REJECT_REASONS.join(', ')}`)),
         noteGiven: () => (note.trim() ? null : new Refused('NOTE_REQUIRED', 'a reject says what failed: --note "..."')),
+        causeWellFormed: () => causeProblem(cause),
       },
       before: (found) => {
         const family = board.db.prepare('SELECT agent_family FROM agent WHERE agent_id = ?').get(agentId)?.agent_family ?? null;
@@ -1525,8 +1542,9 @@ export function verify(board, id, { agentId, decision, reason, note = '', head, 
       },
       set: (found) => ({ item_verdict: decision, item_verified_by: isAccept ? agentId : null, item_owner: isAccept ? found.item_owner : null }),
     });
-    const detail = { reason: code, commit: item.item_commit };
+    const detail = { reason: code, commit: item.item_commit, ...(!isAccept && cause !== undefined && cause !== null ? { cause } : {}) };
     if (isAccept && check !== undefined) detail.check = check;
+    if (newReview) detail.review = { commit: review.commit, ...(Object.hasOwn(review, 'head') ? { head: review.head } : {}), trunk: review.trunk, paths: [...review.paths] };
     logEvent(board, agentId, verb, id, implies?.length ? { ...detail, implies } : detail);
     tellVerdictImplications(board, (by, itemId, fact) => logEvent(board, by, 'fact', itemId, fact), id, { seed: impliesId, implies });
     return { decision, reason: code, ...(isAccept && check !== undefined ? { check } : {}) };
@@ -1538,10 +1556,10 @@ export function verify(board, id, { agentId, decision, reason, note = '', head, 
  *
  * @param {any} board
  * @param {number} id
- * @param {{ agentId: string, note: string }} request
+ * @param {{ agentId: string, note: string, cause?: string }} request
  * @returns {{ id: number, commit: string, supersedes?: number, landingFailure?: object }}
  */
-export function reopen(board, id, { agentId, note }) {
+export function reopen(board, id, { agentId, note, cause }) {
   return atomic(board, () => {
     let submittedCommit = null;
     let supersedes;
@@ -1556,6 +1574,7 @@ export function reopen(board, id, { agentId, note }) {
         [IN_STATE]: (found) => new Refused('NOT_SUBMITTED', `item #${id} is ${current(board, found).item_status}, not submitted`),
         coordinatorOnly: () => onlyCoordinator(agentId, 'reopens submissions'),
         noteGiven: () => (note.trim() ? null : new Refused('NOTE_REQUIRED', 'say why the criterion needs correction: --note "why"')),
+        causeWellFormed: () => causeProblem(cause),
         notMerged: (found) => found.item_status !== 'verified' || !found.item_merged_commit
           ? null
           : new Refused('ALREADY_MERGED', `item #${id} was merged as ${found.item_merged_commit}; merged items cannot be reopened`),
@@ -1592,7 +1611,7 @@ export function reopen(board, id, { agentId, note }) {
       },
     });
     logEvent(board, agentId, 'reopen', id, { commit: submittedCommit, note: note.trim(), judgment: null,
-      ...(supersedes ? { supersedes, landingFailure } : {}) });
+      ...(supersedes ? { supersedes, landingFailure } : {}), ...(cause !== undefined && cause !== null ? { cause } : {}) });
     return { id: item.item_id, commit: submittedCommit, ...(supersedes ? { supersedes, landingFailure } : {}) };
   });
 }
@@ -1787,23 +1806,6 @@ export function getItem(board, id) {
   const item = current(board, itemById(board, id));
   const baseline = itemCheckBaseline(board, item);
   return baseline ? { ...item, item_check_baseline: baseline } : item;
-}
-
-/**
- * Every verdict on an item, oldest first.
- *
- * @param {any} board
- * @param {number} id
- * @returns {any[]}
- */
-export function verdictsFor(board, id) {
-  const verdicts = board.db.prepare('SELECT * FROM verdict WHERE item_id = ? ORDER BY verdict_id').all(id);
-  const receipts = board.db.prepare("SELECT event_kind, event_detail FROM event WHERE item_id = ? AND event_kind IN ('accept', 'reject') ORDER BY event_id").all(id);
-  return verdicts.map((verdict, index) => {
-    let detail = {};
-    try { detail = JSON.parse(receipts[index]?.event_detail ?? '{}'); } catch { /* Malformed legacy details remain unknown. */ }
-    return { ...verdict, check: detail.check ?? 'unknown' };
-  });
 }
 
 /**
@@ -2065,19 +2067,7 @@ export function events(board, { itemId } = {}) {
 /** Fact labels distinguish observations from judgements reserved to an item's live holder [B29,B30]. */
 export const FACT_KINDS = Object.freeze(['capture', 'measurement', 'note', 'diff', 'decision', 'rejection', 'supersession', 'root-cause']);
 const FACT_JUDGEMENTS = new Set(['decision', 'rejection', 'supersession', 'root-cause']);
-
-/** Validate a portable code binding without reading source on replicas that hold only board data [B32,H7]. */
-export function factReference(ref) {
-  if (ref === null || ref === undefined) return null;
-  const parts = typeof ref === 'string' && /^([^\r\n\0]+):(\d+)(?:-(\d+))?@([0-9a-f]{40})$/iu.exec(ref);
-  if (!parts) throw new Refused('BAD_FACT_REF', 'a fact reference needs path:line[-line]@full-sha with all 40 hexadecimal characters; use the full git commit id');
-  const [, path, first, last, commit] = parts;
-  const start = Number(first), end = Number(last ?? first);
-  if (path.startsWith('/') || path.includes('\\') || /^[A-Za-z]:/u.test(path) || path.split('/').some((part) => !part || part === '.' || part === '..') || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 1 || end < start) {
-    throw new Refused('BAD_FACT_REF', 'a fact reference needs a relative repo path and a positive ascending line range; use path:line[-line]@full-sha');
-  }
-  return { path, start, end, commit: commit.toLowerCase() };
-}
+export { factReference };
 
 /** Read every move and fact in append order, including superseded facts and full original text [B31,B32]. */
 export function itemThread(board, id) {
@@ -2094,9 +2084,9 @@ export function projectItemThreads(board, state) {
 }
 
 /** Append a typed fact atomically; a correction never edits the original event [B29,B30,B31,B32].
- * The internal factId is set from a sealed move's identity during replay, rather than replica-local sequence ids.
+ * The internal factId is set from a sealed move's identity during replay, rather than replica-local sequence ids; a never-again with its cause is the person's alone, and rigor lists it at once (#713) [D1].
  */
-export function appendFact(board, id, { agentId, kind, text, ref = null, supersedes = null, factId = randomUUID(), implies }) {
+export function appendFact(board, id, { agentId, kind, text, ref = null, supersedes = null, factId = randomUUID(), implies, cause = null, neverAgain = false, asPerson = false, channel = 'terminal' }) {
   return atomic(board, () => {
     const item = current(board, itemById(board, id));
     if (!board.db.prepare('SELECT 1 FROM agent WHERE agent_id = ?').get(agentId)) throw new Refused('NO_AGENT', `no registered agent ${agentId}; join a worktree before appending a fact`);
@@ -2111,7 +2101,8 @@ export function appendFact(board, id, { agentId, kind, text, ref = null, superse
       throw new Refused('NO_FACT', `no fact ${String(supersedes)} on item #${id}; use a fact id from pullboard show ${id} --json`);
     }
     const binding = factReference(ref);
-    logEvent(board, agentId, 'fact', id, { id: factId, kind, text, ref: binding, supersedes, ...(implies?.length ? { implies } : {}) });
+    if (neverAgain || asPerson || cause !== null) requireNeverAgain(id, { agentId, cause, neverAgain, asPerson, channel });
+    logEvent(board, neverAgain ? PERSON : agentId, 'fact', id, { id: factId, kind, text, ref: binding, supersedes, ...(neverAgain ? { cause, neverAgain: true, channel } : {}), ...(implies?.length ? { implies } : {}) });
     return tellFactImplications(board, (by, itemId, fact) => logEvent(board, by, 'fact', itemId, fact), factFromEvent(board.lastEvent), { id, implies, supersedes });
   });
 }
@@ -2697,7 +2688,8 @@ export function recordLandingBatch(board, { agentId, batch, revision = 0 }) {
     || !['merging', 'gating', 'bisecting', 'flaky', 'blocked', 'ready', 'pushed', 'landed'].includes(batch.state)
     || !/^[a-f0-9]{40,64}$/u.test(batch.base ?? '') || !/^[a-f0-9]{40,64}$/u.test(batch.tip ?? '')
     || typeof batch.root !== 'string' || !batch.root || typeof batch.branch !== 'string' || !batch.branch.startsWith('refs/heads/')
-    || !Array.isArray(batch.items) || batch.items.some((entry) => !Number.isSafeInteger(entry?.id) || entry.id < 1 || !/^[a-f0-9]{40,64}$/u.test(entry.commit ?? ''))
+    || !Array.isArray(batch.items) || batch.items.some((entry) => !Number.isSafeInteger(entry?.id) || entry.id < 1 || !/^[a-f0-9]{40,64}$/u.test(entry.commit ?? '')
+      || ((board.executionEngineVersion ?? ENGINE_VERSION) >= VERDICT_REVIEW_ENGINE && Object.hasOwn(entry, 'reviewedCommit') && !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(entry.reviewedCommit ?? '')))
     || typeof batch.owner !== 'string' || !batch.owner || typeof batch.logPath !== 'string' || !batch.logPath
     || !Number.isSafeInteger(revision) || revision < 0) {
     throw new Refused('LAND_BATCH', 'a landing batch needs its exact base, tip, items, state, owner and log path; run pullboard land');
@@ -2796,8 +2788,22 @@ export function finishLandingBatch(board, { agentId, id, tip }) {
       if (item.item_commit !== entry.commit || item.item_status !== 'verified') {
         throw new Refused('LAND_ITEM_MOVED', `item #${entry.id} changed after the batch was gated; rebuild its landing`);
       }
+      if ((board.executionEngineVersion ?? ENGINE_VERSION) >= VERDICT_REVIEW_ENGINE
+        && (entry.reviewedCommit ?? entry.commit) !== checkedLandingCommit(board, item)) {
+        throw new Refused('LAND_ITEM_MOVED', `item #${entry.id} was re-reviewed after the batch was gated; rebuild its landing`);
+      }
       if (item.item_merged_commit && item.item_merged_commit !== entry.merge) {
         throw new Refused('LAND_ITEM_MOVED', `item #${entry.id} already has another landing receipt; read pullboard show ${entry.id}`);
+      }
+      const accepted = acceptedVerdict(board, item);
+      if ((board.executionEngineVersion ?? ENGINE_VERSION) < VERDICT_REVIEW_ENGINE
+        && accepted?.review?.head && accepted.review.head !== (entry.reviewedCommit ?? entry.commit)) {
+        // An old client may already have pushed B before a newer client checked C.
+        // Record physical history without lending C's proof to B or wedging replay.
+        logEvent(board, agentId, 'landing-review-moved', entry.id, {
+          code: 'LAND_ITEM_MOVED', batch: id, verdict: accepted.verdict_id,
+          checked: accepted.review.head, landed: entry.merge,
+        });
       }
       if (!item.item_merged_commit) merged(board, entry.id, { agentId, commit: entry.merge });
     }

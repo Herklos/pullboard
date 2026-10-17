@@ -20,7 +20,9 @@ stateDiagram-v2
   claimed --> submitted: submit
   submitted --> submitted: reserve
   submitted --> verified: accept
+  verified --> verified: accept
   submitted --> open: reject
+  verified --> open: reject
   submitted --> open: reopen
   verified --> open: reopen
   open --> open: escalate
@@ -56,9 +58,9 @@ Each move checks its guards in this order and refuses with the first one that do
 | lapse | claimed | open | clock, when its lease runs out | none |
 | submit | claimed | submitted | agent, coordinator | joined (NOT_JOINED), itemExists (NO_ITEM), inState (NOT_YOURS), isHolder (NOT_YOURS), correctionRefrozen (PENDING_REFREEZE), checkProvesSomething (CRITERION_PROVES_NOTHING), criterionUnchanged (CRITERIA_CHANGED), treeClean (DIRTY), nothingUntracked (UNTRACKED), hasCommit (NO_COMMIT), withinLane (OUTSIDE_LANE or NO_POLICY or BAD_CONFIG or GIT_GRAFTS), trunkMergeClean (MERGE_CONFLICT or MERGE_CHECK_FAILED or NO_POLICY or NO_TRUNK), noUnverifiedStack (STACKED_ON_UNVERIFIED), doctrineHolds (RATCHET_ROSE or RATCHET_UNCOUNTED), gateConfigured (NO_GATE), queuedItemLease (ITEM_LEASE_LOST or A5_GRAMMAR_VERSION or SPEC_BEHIND_MAIN or NOT_A_REPO or NO_CONFIG), gateGreen (GATE_RED or PIPEFAIL_UNAVAILABLE), treeStillDuringGate (MOVED_DURING_GATE), childrenDone (CHILDREN_OPEN), headIsNew (HEAD_NOT_NEW) |
 | reserve | submitted | submitted | agent, coordinator | coordinatorSaysAs (MAIN_IS_COORDINATOR), joined (NOT_JOINED), roadmapReadable (MILESTONES_CORRUPT), itemExists (NO_ITEM), inState (NOT_SUBMITTED), reviewCooldownElapsed (REVIEW_COOLDOWN), notBuilder (SELF_VERIFY), routeAllows (ROUTE), policyAllows (COORDINATOR_VERIFIES), familyAllows (O2_FAMILY_MATCH), reviewFree (REVIEW_HELD) |
-| accept | submitted | verified | agent, coordinator | coordinatorSaysAs (MAIN_IS_COORDINATOR), joined (NOT_JOINED), itemExists (NO_ITEM), inState (NOT_SUBMITTED), atSubmittedCommit (NOT_AT_COMMIT or OUTSIDE_LANE or NO_POLICY or BAD_CONFIG or GIT_GRAFTS), notBuilder (SELF_VERIFY), routeAllows (ROUTE), policyAllows (COORDINATOR_VERIFIES), familyAllows (O2_FAMILY_MATCH), reviewFree (REVIEW_HELD), criterionUnchanged (CRITERIA_CHANGED), reasonIsMet (BAD_REASON), trunkMergeClean (MERGE_CONFLICT or MERGE_CHECK_FAILED or NO_POLICY or NO_TRUNK), noUnverifiedStack (STACKED_ON_UNVERIFIED), queuedItemLease (ITEM_LEASE_LOST or A5_GRAMMAR_VERSION or SPEC_BEHIND_MAIN or NOT_A_REPO or NO_CONFIG), itemCheckGreen (CHECK_RED or CHECK_UNVERIFIED), proofNoted (PROOF_REQUIRED), result (LAND_HEADER), result (ENGINE_VERSION) |
-| reject | submitted | open | agent, coordinator | coordinatorSaysAs (MAIN_IS_COORDINATOR), joined (NOT_JOINED), itemExists (NO_ITEM), inState (NOT_SUBMITTED), atSubmittedCommit (NOT_AT_COMMIT or OUTSIDE_LANE or NO_POLICY or BAD_CONFIG or GIT_GRAFTS), notBuilder (SELF_VERIFY), routeAllows (ROUTE), policyAllows (COORDINATOR_VERIFIES), familyAllows (O2_FAMILY_MATCH), reviewFree (REVIEW_HELD), criterionUnchanged (CRITERIA_CHANGED), reasonCoded (BAD_REASON), noteGiven (NOTE_REQUIRED), result (LAND_HEADER), result (ENGINE_VERSION) |
-| reopen | submitted, verified | open | coordinator | joined (NOT_JOINED), itemExists (NO_ITEM), inState (NOT_SUBMITTED), coordinatorOnly (COORDINATOR_ONLY), noteGiven (NOTE_REQUIRED), notMerged (ALREADY_MERGED), landingFailureRecorded (LANDING_FAILURE_REQUIRED) |
+| accept | submitted, verified | verified | agent, coordinator | coordinatorSaysAs (MAIN_IS_COORDINATOR), joined (NOT_JOINED), itemExists (NO_ITEM), inState (NOT_SUBMITTED), atSubmittedCommit (NOT_AT_COMMIT or OUTSIDE_LANE or NO_POLICY or BAD_CONFIG or GIT_GRAFTS), notMerged (ALREADY_MERGED), verdictReviewRecorded (BAD_VERDICT_REVIEW), reviewTreeCurrent (STALE_VERDICT or DIRTY or UNTRACKED or VERDICT_TRUNK_MOVED), notBuilder (SELF_VERIFY), routeAllows (ROUTE), policyAllows (COORDINATOR_VERIFIES), familyAllows (O2_FAMILY_MATCH), reviewFree (REVIEW_HELD), criterionUnchanged (CRITERIA_CHANGED), reasonIsMet (BAD_REASON), trunkMergeClean (MERGE_CONFLICT or MERGE_CHECK_FAILED or NO_POLICY or NO_TRUNK), noUnverifiedStack (STACKED_ON_UNVERIFIED), queuedItemLease (ITEM_LEASE_LOST or A5_GRAMMAR_VERSION or SPEC_BEHIND_MAIN or NOT_A_REPO or NO_CONFIG), itemCheckGreen (CHECK_RED or CHECK_UNVERIFIED), proofNoted (PROOF_REQUIRED), result (LAND_HEADER), result (ENGINE_VERSION) |
+| reject | submitted, verified | open | agent, coordinator | coordinatorSaysAs (MAIN_IS_COORDINATOR), joined (NOT_JOINED), itemExists (NO_ITEM), inState (NOT_SUBMITTED), atSubmittedCommit (NOT_AT_COMMIT or OUTSIDE_LANE or NO_POLICY or BAD_CONFIG or GIT_GRAFTS), notMerged (ALREADY_MERGED), verdictReviewRecorded (BAD_VERDICT_REVIEW), reviewTreeCurrent (STALE_VERDICT or DIRTY or UNTRACKED or VERDICT_TRUNK_MOVED), notBuilder (SELF_VERIFY), routeAllows (ROUTE), policyAllows (COORDINATOR_VERIFIES), familyAllows (O2_FAMILY_MATCH), reviewFree (REVIEW_HELD), criterionUnchanged (CRITERIA_CHANGED), reasonCoded (BAD_REASON), noteGiven (NOTE_REQUIRED), causeWellFormed (BAD_CAUSE), result (LAND_HEADER), result (ENGINE_VERSION) |
+| reopen | submitted, verified | open | coordinator | joined (NOT_JOINED), itemExists (NO_ITEM), inState (NOT_SUBMITTED), coordinatorOnly (COORDINATOR_ONLY), noteGiven (NOTE_REQUIRED), causeWellFormed (BAD_CAUSE), notMerged (ALREADY_MERGED), landingFailureRecorded (LANDING_FAILURE_REQUIRED) |
 | escalate | open, claimed | open | agent, coordinator | joined (NOT_JOINED), noteGiven (NOTE_REQUIRED), itemExists (NO_ITEM), holderOrCoordinator (NOT_YOURS), inState (CLOSED) |
 | refreeze | open, claimed, submitted | open | coordinator, when there is no live claim awaiting a coordinator correction | joined (NOT_JOINED), coordinatorOnly (COORDINATOR_ONLY), itemExists (NO_ITEM), inState (CLOSED), rowsInForce (UNKNOWN_SPEC or A5_GRAMMAR_VERSION or NO_POLICY or BAD_CONFIG or SPEC_BEHIND_MAIN) |
 | refreeze | claimed | claimed | agent, coordinator, when a live claim has a pending coordinator correction | joined (NOT_JOINED), itemExists (NO_ITEM), holderOrCoordinator (NOT_YOURS), inState (CLOSED), rowsInForce (UNKNOWN_SPEC or A5_GRAMMAR_VERSION or NO_POLICY or BAD_CONFIG or SPEC_BEHIND_MAIN) |
@@ -79,8 +81,8 @@ Each move checks its guards in this order and refuses with the first one that do
 | NOT_YOURS | release: the item is in claimed | pullboard show <id> |
 | NOT_YOURS | submit: the item is in claimed | pullboard show <id> |
 | NOT_SUBMITTED | reserve: the item is in submitted | pullboard show <id> |
-| NOT_SUBMITTED | accept: the item is in submitted | pullboard show <id> |
-| NOT_SUBMITTED | reject: the item is in submitted | pullboard show <id> |
+| NOT_SUBMITTED | accept: the item is in submitted, verified | pullboard show <id> |
+| NOT_SUBMITTED | reject: the item is in submitted, verified | pullboard show <id> |
 | NOT_SUBMITTED | reopen: the item is in submitted, verified | pullboard show <id> |
 | CLOSED | escalate: the item is in open, claimed | pullboard show <id> |
 | CLOSED | refreeze: the item is in open, claimed, submitted | pullboard show <id> |
@@ -122,8 +124,8 @@ Each move checks its guards in this order and refuses with the first one that do
 | STACKED_ON_UNVERIFIED | the candidate range contains no other item's unverified submitted commit | wait for that item to be accepted, or rebuild without its commits |
 | RATCHET_ROSE | every touched doctrine check counts (exit 0 or 1), none rises above its committed count and no changed file gains a problem; watch-mode rules only count, only when accepted main has an approved doctrine rule with gate: check | fix the new problems, commit, submit again; only the person's signature raises count: |
 | RATCHET_UNCOUNTED | every touched doctrine check counts (exit 0 or 1), none rises above its committed count and no changed file gains a problem; watch-mode rules only count, only when accepted main has an approved doctrine rule with gate: check | fix the check so it exits 0 or 1 within its timeout, then submit again |
-| CHECK_RED | the frozen item check passes at the exact submitted commit | reject the failing behavior; the builder fixes and resubmits |
-| CHECK_UNVERIFIED | the frozen item check passes at the exact submitted commit | restore the frozen install or check environment and retry |
+| CHECK_RED | the frozen item check passes at the submitted commit, or its clean reviewed composition for a stale acceptance | reject the failing behavior; the builder fixes and resubmits |
+| CHECK_UNVERIFIED | the frozen item check passes at the submitted commit, or its clean reviewed composition for a stale acceptance | restore the frozen install or check environment and retry |
 | CRITERION_PROVES_NOTHING | the item's check does not already pass on main, or the person accepted that exact check, only when accepted main sets checks.provesNothing to "hold" | set a check that fails before the work, or the person runs pullboard check accept <id> |
 | GATE_RED | the gate, which submit runs itself every time, is green at HEAD | fix what the digest names, commit, submit again |
 | PIPEFAIL_UNAVAILABLE | the gate, which submit runs itself every time, is green at HEAD | rewrite the gate without a pipe |
@@ -140,6 +142,11 @@ Each move checks its guards in this order and refuses with the first one that do
 | NO_POLICY | the caller's checkout contains the submitted commit | restore the frozen policy objects |
 | BAD_CONFIG | the caller's checkout contains the submitted commit | repair the committed coordinator configuration |
 | GIT_GRAFTS | the caller's checkout contains the submitted commit | ask the coordinator to remove the Git graft file before retrying |
+| BAD_VERDICT_REVIEW | a new review binds the submitted commit, its exact checked commit, a valid trunk commit and canonical candidate paths | restore the submitted Git objects and retry the review with current Pullboard |
+| STALE_VERDICT | a stale acceptance is re-reviewed at a clean HEAD containing the current trunk, which stays fixed through its check | merge current main into the submitted commit and re-review it |
+| DIRTY | a stale acceptance is re-reviewed at a clean HEAD containing the current trunk, which stays fixed through its check | commit the reviewed composition before re-reviewing |
+| UNTRACKED | a stale acceptance is re-reviewed at a clean HEAD containing the current trunk, which stays fixed through its check | commit or ignore untracked files before re-reviewing |
+| VERDICT_TRUNK_MOVED | a stale acceptance is re-reviewed at a clean HEAD containing the current trunk, which stays fixed through its check | merge the latest main and re-review the clean composition |
 | SELF_VERIFY | the caller did not build it | another agent verifies it: pullboard next --verify |
 | COORDINATOR_VERIFIES | the repo's verify policy lets the caller verify this lane's work | the coordinator verifies it |
 | O2_FAMILY_MATCH | the builder and verifier have different declared families; an undeclared family counts as a match, only when verify.family is require | ask the coordinator for a verifier from another declared family |
@@ -150,6 +157,7 @@ Each move checks its guards in this order and refuses with the first one that do
 | NOTE_REQUIRED | a review release gives a nonempty one-line reason, engine 5 or newer, only when freeing a submitted review reservation | release with --note "why", or --note-file <file> |
 | REVIEW_COOLDOWN | the reviewer has not released this submission within the past hour, engine 5 or newer, only for the same reviewer and current submission | let another reviewer take it, or wait an hour or for a new submission |
 | NOTE_REQUIRED | the move carries a note: what failed, what was tried, or why | --note "..." or --note-file <file> |
+| BAD_CAUSE | a cause, when given, is test:<file>::<title>, refusal:<CODE>, row:<id> or doctrine:<id> | fix --cause, or leave it out |
 | ALREADY_MERGED | the item has no recorded merge receipt | a merged item cannot be reopened |
 | LANDING_FAILURE_REQUIRED | a verified item note names the failing test and landing merge commit | cite the recorded batch, or name the test and merge commit in a manual note |
 | LAND_HEADER | a displayed merge command fits the commit-header limit (accept result) | shorten the item title or cited rows so the merge header fits |
