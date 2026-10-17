@@ -83,6 +83,8 @@ Land verified work in batches with `pullboard land`: preview with `pullboard lan
 
 When a batch goes red, land runs each failing test file alone. A file that passes alone is a flake and holds the batch with `LAND_FLAKE` until the test is fixed or the person records an expiring waiver. A real red is split in halves until one item reproduces it alone; land returns only that item, with a fact naming the tests it fails, and lands the green rest. When green items fail only together, it stops with `LAND_INTERACTION` and lands nothing.
 
+A red batch reopens only the item a paired control proves. Before you reopen a culprit, run the same failing test or command twice: once on the control, which is main or the batch without the candidate, and once on the candidate. The control must pass and the candidate must reproduce the red. Keep both commands, both commits and both outputs as the evidence, and put them in the reopen note: `pullboard reopen <id> --note "<test file>: <test name>; merge commit <sha>"` names the red, and a verified item refuses any other note with `LANDING_FAILURE_REQUIRED`. When the pair does not prove it, keep the candidate held with `pullboard hold <id> "unproven culprit: <test>"` and leave it unreopened until a paired control does.
+
 ## Release every day
 
 Publish a release at least once a day while landed work waits. `pullboard health` reports `release <tag> overdue` when landed items have waited longer than `health.release` since the newest version tag.
