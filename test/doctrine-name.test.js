@@ -411,6 +411,8 @@ test('[D4,A5] verify in a detached checkout reads the trunk baseline for a doctr
   const builder = join(box.dir, 'verify-doctrine-builder');
   box.git(source, 'worktree', 'add', '-q', '-b', 'web/doctrine-review', builder);
   assert.equal(box.run(builder, 'join', 'web').status, 0);
+  // This doctrine check already passes on main by design; the person accepts it so the new board's hold lifts.
+  assert.equal(box.run(source, 'check', 'accept', String(id)).status, 0);
   assert.equal(box.run(builder, 'claim', String(id)).status, 0);
   mkdirSync(join(builder, 'web'));
   writeFileSync(join(builder, 'web/candidate.txt'), 'doctrine verification fixture\n');

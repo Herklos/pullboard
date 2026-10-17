@@ -57,16 +57,19 @@ export function createRelayBrowserHandler({ authenticate }) {
     }
     if (path !== '/') return false;
     let relaySession = false;
+    let removedSession = false;
     try {
       const who = await authenticate(req);
       if (who.kind !== 'session') throw new Refused('HUMAN_REQUIRED', 'Sign in as a person to open the relay view.');
       relaySession = true;
     } catch (error) {
-      if (!(error instanceof Refused) || !['AUTH_REQUIRED', 'HUMAN_REQUIRED'].includes(error.code)) throw error;
+      if (!(error instanceof Refused) || !['AUTH_REQUIRED', 'HUMAN_REQUIRED', 'DEVICE_REVOKED'].includes(error.code)) throw error;
+      removedSession = error.code === 'DEVICE_REVOKED';
     }
-    const notice = relaySession ? '<p>Pairing this browser…</p>'
+    // The public, board-free shell must still load so its client can erase a removed browser's local keys.
+    const notice = removedSession ? '<p>Checking this browser…</p>' : relaySession ? '<p>Pairing this browser…</p>'
       : '<p>Connecting to this machine. Sign in to see your linked boards.</p><a href="/auth/github/start">Sign in with GitHub</a>';
-    const page = cockpitPage('', { readOnly: true, requests: relaySession, transportModule: relaySession ? '/relay/client.js' : '/relay/sign-in.js', apiHeaders: {}, stylesheet: '/view.css', hostedLocal: true, relaySession, signIn: '/auth/github/start' })
+    const page = cockpitPage('', { readOnly: true, requests: relaySession, transportModule: relaySession || removedSession ? '/relay/client.js' : '/relay/sign-in.js', apiHeaders: {}, stylesheet: '/view.css', hostedLocal: true, relaySession: relaySession || removedSession, signIn: '/auth/github/start' })
       .replace('<link rel="icon" href="data:,">', '<link rel="icon" href="/icons/pullboard.svg" type="image/svg+xml">\n<link rel="manifest" href="/manifest.webmanifest">\n<link rel="apple-touch-icon" href="/icons/pullboard-192.png">\n<meta name="theme-color" content="#f6faf7">')
       .replace('<main>', '<main><section class="card-panel" id="relay-notice" role="status">' + notice + '</section>');
     const scripts = [...page.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(match => createHash('sha256').update(match[1]).digest('base64'));
