@@ -81,6 +81,7 @@ import { forgetView, portHolder, rememberView, runningView } from './view-sessio
 import { serveApi } from './api.js';
 import { serveMcp } from './mcp.js';
 import { doctorProblems, doctrineProblems } from './doctor.js';
+import { boardHealth, healthLines } from './health.js';
 import { staleFrozenItems, staleItemFinding } from './approved-rows.js';
 import { mainPolicy, policyAt, itemPolicy, submissionPaths, frozenCheck, checkAtCommit, dependencySnapshots, requireTrunkMerge, trunkRef } from './trusted-policy.js';
 import { proofStats } from './stats.js';
@@ -2162,6 +2163,13 @@ function readCommands(io, { first, second, rest, values }) {
       for (const problem of problems) if (problem !== checkpointProblem) io.say(`problem: ${problem.message}; repair: ${problem.next}`);
       return 1;
     },
+    health: () => {
+      const ctx = context(io);
+      const report = boardHealth(ctx.file, { root: ctx.info.root, config: ctx.config, now: ctx.clock.now() });
+      io.result?.(report);
+      for (const line of healthLines(report)) io.say(line);
+      return report.stuck.length ? 1 : 0;
+    },
     inbox: () => {
       const ctx = context(io);
       const { shouts, agents } = withBoard(ctx, (board) => ({
@@ -4001,7 +4009,7 @@ async function runMain(argv, streams) {
       positionals: parsed.positionals.slice(1),
       values: Object.fromEntries(Object.keys(parsed.values).filter(key => key !== 'json').sort().map(key => [key, parsed.values[key]])) };
     sync = Boolean(command) && !parsed.values.help && !parsed.values.version
-      && !['help', 'version', 'hook', 'init', 'relay', 'tour', 'mcp'].includes(command)
+      && !['help', 'version', 'hook', 'init', 'relay', 'tour', 'mcp', 'health'].includes(command)
       // A coordinator declaration on a linked clone must refuse before auto-link or relay sync.
       && !(command === 'join' && parsed.positionals[1] === COORDINATOR);
     needsRepo = !(parsed.values.help || parsed.values.version || command === 'help' || command === 'version');
