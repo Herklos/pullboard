@@ -626,8 +626,8 @@ test('[A1] command results match the catalog across roots and subcommands', () =
   json(box, repo, 'spec', ['show', 'G1'], 'show');
   json(box, repo, 'spec', ['unmet'], 'unmet');
   assert.equal(json(box, repo, 'spec', ['draft', 'A draft API catalogue row'], 'draft').id, 'G2');
-  writeFileSync(join(box.dir, 'catalog-blueprint.json'), `${JSON.stringify({ blueprint: 1, name: 'catalog', title: 'Catalog', version: 1, rules: [{ key: 'R1', text: 'A catalog rule.', why: 'the API lists it.' }] })}\n`);
-  assert.equal(json(box, repo, 'blueprint', ['add', join(box.dir, 'catalog-blueprint.json')], 'add').rows[0].status, 'draft');
+  for (const [name, kind, rules] of [['catalog', undefined, [['R1', 'A catalog rule.']]], ['catalog-practice', 'practice', [['R1', 'A catalog rule.'], ['R2', 'A practice catalog rule.']]]]) writeFileSync(join(box.dir, `${name}-blueprint.json`), `${JSON.stringify({ blueprint: 1, name, title: name, version: 1, kind, rules: rules.map(([key, text]) => ({ key, text, why: 'the API lists it.' })) })}\n`);
+  assert.deepEqual((({ rows, blueprints }) => [rows[0].status, rows.length, blueprints.length, blueprints[1].shared.length])(json(box, repo, 'blueprint', ['add', join(box.dir, 'catalog-blueprint.json'), '--blueprint', join(box.dir, 'catalog-practice-blueprint.json')], 'add')), ['draft', 2, 2, 1], 'two blueprints in one add land as one result, a shared rule drafted once (#720)');
   mkdirSync(join(repo, 'test'));
   writeFileSync(join(repo, 'test', 'proof.test.js'), "import { test } from 'node:test';\ntest('proof [G1]', () => {});\n");
   box.git(repo, 'add', 'SPEC.md', 'test/proof.test.js');

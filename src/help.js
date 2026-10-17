@@ -10,7 +10,7 @@ Nothing ships until a second agent verifies it.
 
 Set up
   pullboard tour                        see it work: a reject and its rework, scripted, in thirty seconds
-  pullboard init [--model <name>] [--blueprint <name or file>] [--no-permissions]  config, SPEC.md, agent instructions, git hooks, board and project agent rules; optional coordinator model
+  pullboard init [--model <name>] [--blueprint <name or file>]... [--no-permissions]  config, SPEC.md, agent instructions, git hooks, board and project agent rules; optional coordinator model
   pullboard worktree <lane> --model <name> [--route light] [--family <name>]   make and join a worktree for a new agent
                                         pullboard.json worktrees: inside or beside; init defaults to inside
   pullboard join <lane> --model <name> [--route light] [--family <name>]       register this worktree as an agent
@@ -184,8 +184,9 @@ Spec
                 [--doctrine --source "<shout id or chat, date>"]  the coordinator proposes a sourced doctrine ruling
                                         --section chooses the section prefix; defaults to G, or DR with --doctrine
                                         Defaults to must and gate review.
-  pullboard blueprint add <name or file>  add a blueprint's rules and questions as drafts, and its starter items
+  pullboard blueprint add <name or file> [--blueprint <name or file>]...  add a blueprint's rules and questions as drafts, and its starter items
                                         bundled: web-app; nothing is approved, and a repeat adds nothing
+                                        several land in order: one product, one architecture, any practice; a shared rule is drafted once
   pullboard blueprint save [file] [--name <name>] [--title "<title>"]  write approved rules and answered questions as a blueprint
                                         never items, notes, paths, emails or names; file defaults to <project>.blueprint.json
   pullboard spec signers add [--key <path>] [--by <principal>]  opt into SSH-signed sign-offs
@@ -273,8 +274,8 @@ const HELP_ALIASES = {
   lifecycle: { usage: 'pullboard lifecycle', source: null },
   escalate: { usage: 'pullboard escalate <id> --note "..." [--note-file <file>]', source: 'escalate <id> --note "what was tried and how it failed"', extraFlags: ['--note-file <file>'] },
   'view export': { usage: 'pullboard view --export <dir>', source: 'view' },
-  blueprint: { usage: 'pullboard blueprint add <name or file>', source: 'blueprint add' },
-  'blueprint add': { usage: 'pullboard blueprint add <name or file>', source: 'blueprint add' },
+  blueprint: { usage: 'pullboard blueprint add <name or file> [--blueprint <name or file>]...', source: 'blueprint add' },
+  'blueprint add': { usage: 'pullboard blueprint add <name or file> [--blueprint <name or file>]...', source: 'blueprint add' },
   'spec check': { usage: 'pullboard spec check', source: 'spec check' },
   'spec view': { usage: 'pullboard spec view [--out file]', source: 'spec view' },
   'spec show': { usage: 'pullboard spec show <id>', source: 'spec show', onlyFlags: [] },
@@ -292,7 +293,7 @@ const HELP_ALIASES = {
 
 const HELP_FLAG_EXPLANATIONS = {
   '--after': 'claiming waits until those items are verified',
-  '--blueprint': 'start from a bundled blueprint or a JSON file',
+  '--blueprint': 'start from a bundled blueprint or a JSON file; repeat it for one product, one architecture and any practice blueprints',
   '--brief': 'what a cold agent needs',
   '--check': 'the command that proves it',
   '--doctrine': 'proposes a doctrine ruling; only the person can approve it',
