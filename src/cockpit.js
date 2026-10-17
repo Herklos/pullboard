@@ -326,7 +326,8 @@ let starLinked = { at: 0, linked: false, reading: false };
  * Show the hosted page's star line (src/view/star.js) to a signed-in person whose account lists a linked board, until
  * dismissed here; pass a board list through. Why the account's list: it is the linked-board metadata the relay serves
  * this page, whichever source then draws a board, so a linked board this machine reads locally still counts, and no
- * relay client loads to decide it. It is read until it lists one, at most every few seconds.
+ * relay client loads to decide it. It is read until it lists one, at most every few seconds, and
+ * declares the relay's engine as every relay request does.
  */
 function starLine(list) {
   const line = $('star-line');
@@ -334,14 +335,15 @@ function starLine(list) {
   const show = () => { line.hidden = !(hosted.relaySession && starLinked.linked && keep(${JSON.stringify(STAR_KEY)}) !== 'dismissed'); };
   if (hosted.relaySession && !starLinked.linked && !starLinked.reading && Date.now() - starLinked.at > 2500) {
     starLinked = { at: Date.now(), linked: false, reading: true };
-    jsonRequest('/api/v1/boards', undefined, '', {}, 'no-store').then((reply) => reply?.boards?.some((board) => typeof board?.id === 'string'), () => false)
+    linkedList().then((reply) => reply?.boards?.some((board) => typeof board?.id === 'string'), () => false)
       .then((linked) => { starLinked = { at: Date.now(), linked, reading: false }; line.dataset.linked = linked ? 'yes' : 'no'; show(); });
   }
   show();
   return list;
 }
 $('star-dismiss')?.addEventListener('click', () => { keep(${JSON.stringify(STAR_KEY)}, 'dismissed'); starLine(null); });
-starLine(null);
+// The first look waits for the whole script, so the engine the read declares (linkedList) is set up by then.
+queueMicrotask(() => starLine(null));
 
 /** Hide the relay's own banner, which speaks for the relay, on a page the relay does not serve this time. */
 function hideRelayNotice() {
