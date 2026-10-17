@@ -6,7 +6,7 @@ import { basename, dirname, join } from 'node:path';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import * as store from './board.js';
 import { exportBoard, importBoard, restoreRelaySnapshot, semanticBoardDigest } from './exchange.js';
-import { appliedSequence, applyRelayMove, checkpointSequence, engineReceipt, prepareEngineMove, refuseRelayMove, requireSupportedEngine, startRelayEpoch } from './engine.js';
+import { appliedSequence, applyEngineMove, applyRelayMove, checkpointSequence, engineReceipt, prepareEngineMove, refuseRelayMove, requireSupportedEngine, startRelayEpoch } from './engine.js';
 import { relayMoveActor } from './relay-sender.js';
 import { ENGINE_VERSION } from './machine.js';
 import { presentationDigest, relayPresentation, relaySnapshot } from './relay-presentation.js';
@@ -87,6 +87,12 @@ function deletedLink(root) {
   try { value = JSON.parse(readFileSync(file, 'utf8')); } catch { throw new Refused('RELAY_STORAGE', 'restore the private deleted-copy notice before reading relay status'); }
   if (value?.version !== 1 || !/^[0-9a-f]{32}$/u.test(value.board ?? '') || typeof value.url !== 'string') throw new Refused('RELAY_STORAGE', 'restore the supported deleted-copy notice before reading relay status');
   relayOrigin(value.url);
+  const recovered = value.recovered;
+  if (recovered !== undefined && (!recovered || !/^[A-Za-z0-9_-]{1,80}$/u.test(recovered.id ?? '')
+      || !/^[0-9a-f]{64}$/u.test(recovered.intent ?? '')
+      || (recovered.commandIntent !== undefined && !/^[0-9a-f]{64}$/u.test(recovered.commandIntent)))) {
+    throw new Refused('RELAY_STORAGE', 'restore the private interrupted-move receipt pointer before retrying');
+  }
   return value;
 }
 
@@ -96,14 +102,81 @@ function confirmedDeletion(state, error) {
     && error.relayCode === 'RELAY_BOARD_DELETED' && error.relayMessage?.startsWith(`relay copy ${state.board} was deleted;`);
 }
 
-/** Preserve a truthful local notice before removing an inert link; the native board is never replaced. */
-function forgetDeletedCopy(root, file, state, io) {
+/** Atomically persist a private notice and its optional key-free native receipt pointer. */
+function saveDeletedLink(root, value) {
   const marker = deletedLinkFile(root);
   const temporary = marker + '.' + randomUUID() + '.tmp';
+  const encoded = JSON.stringify(value) + '\n';
+  if (Buffer.byteLength(encoded) > 4096) throw new Refused('RELAY_STORAGE', 'restore a bounded deleted-copy notice before retrying');
   try {
-    writeFileSync(temporary, JSON.stringify({ version: 1, board: state.board, url: state.url }) + '\n', { flag: 'wx', mode: 0o600 });
+    writeFileSync(temporary, encoded, { flag: 'wx', mode: 0o600 });
     renameSync(temporary, marker);
   } finally { rmSync(temporary, { force: true }); }
+}
+
+/** Compare an interrupted intent without retaining command arguments or credentials in the notice. */
+function intentDigest(intent) { return createHash('sha256').update(intent).digest('hex'); }
+
+/** Commit the sender's pending native obligation before any link metadata or key can be removed. */
+function retainDeletedMove(root, state) {
+  const recovered = state.pending ?? state.recovered;
+  if (!recovered) return null;
+  const move = recovered.move;
+  if (!move || typeof move.id !== 'string') throw new Refused('RELAY_STORAGE', 'restore the interrupted move before forgetting the deleted copy');
+  const intent = recovered.intent ?? operationIntent(move.operation, move.args);
+  if (typeof intent !== 'string' || recovered.commandIntent !== undefined
+      && recovered.commandIntent !== operationIntent('cli:' + recovered.command?.cliOperation, recovered.command)) {
+    throw new Refused('RELAY_STORAGE', 'restore the interrupted command metadata before retrying');
+  }
+  localRecords(root, board => {
+    const receipt = engineReceipt(board, move.id);
+    if (receipt) {
+      if (receipt.move !== JSON.stringify(move)) throw new Refused('RELAY_MOVE', 'restore the interrupted move that matches its durable receipt before retrying');
+      return; // A crash after the receipt must not advance the native cursor again.
+    }
+    applyEngineMove(board, move, { sequence: appliedSequence(board) + 1, at: board.clock.now().toISOString() });
+  });
+  return { id: move.id, intent: intentDigest(intent),
+    ...(recovered.commandIntent === undefined ? {} : { commandIntent: intentDigest(recovered.commandIntent) }) };
+}
+
+/** Resolve the private pointer only through the exact durable native receipt, never a remote key. */
+function deletedRecovery(root) {
+  const marker = deletedLink(root);
+  if (!marker?.recovered) return null;
+  const receipt = localRecords(root, board => engineReceipt(board, marker.recovered.id));
+  let move;
+  try { move = receipt && JSON.parse(receipt.move); } catch { /* Refuse a corrupt receipt below. */ }
+  if (!move || move.id !== marker.recovered.id || !receipt.outcome) {
+    throw new Refused('RELAY_STORAGE', 'restore the interrupted native receipt before retrying its command');
+  }
+  return { marker, receipt, move };
+}
+
+/** Consume only the reported receipt, preserving the truthful deleted-copy notice. */
+function clearDeletedRecovery(root, marker) {
+  delete marker.recovered;
+  saveDeletedLink(root, marker);
+}
+
+/** Return an exact interrupted result once; a different command can continue beside the saved move. */
+function deletedMoveResult(root, operation, args, command, io, applyLocally) {
+  const recovered = deletedRecovery(root);
+  const pointer = recovered?.marker.recovered;
+  const matches = pointer && (pointer.commandIntent === undefined
+    ? pointer.intent === intentDigest(operationIntent(operation, args))
+    : recovered.move.operation === operation && pointer.commandIntent === intentDigest(operationIntent('cli:' + command?.cliOperation, command)));
+  if (!matches) return applyLocally();
+  clearDeletedRecovery(root, recovered.marker);
+  if (recovered.receipt.outcome.error) throw refusalFromReceipt(recovered.receipt.outcome.error);
+  for (const event of recovered.receipt.outcome.events ?? []) io.onEvent?.(event);
+  return recovered.receipt.outcome.result;
+}
+
+/** Preserve the pending native move and a truthful notice before removing the inert link. */
+function forgetDeletedCopy(root, file, state, io) {
+  const recovered = retainDeletedMove(root, state);
+  saveDeletedLink(root, { version: 1, board: state.board, url: state.url, ...(recovered ? { recovered } : {}) });
   updateRelayMachine(machine => { const project = repoInfo(root).root; if (!machine.excluded.includes(project)) machine.excluded.push(project); });
   rmSync(file, { force: true });
   try { forgetBoardKey(state.board, state.keyStorage); } catch { /* An unavailable key store cannot block completed local opt-out. */ }
@@ -963,6 +1036,11 @@ export async function relayOperation(root, operation, args, io, command, applyLo
   const file = linkFile(root);
   return locked(file, async () => {
     const state = loadLink(file);
+    /** Apply through the CLI's existing board handle so local events and guards remain unchanged. */
+    const applyPausedMoveLocally = () => typeof applyLocally === 'function'
+      ? applyLocally()
+      : localRecords(root, (board) => store[operation](board, ...args));
+    if (!state && deletedRecovery(root)) return deletedMoveResult(root, operation, args, command, io, applyPausedMoveLocally);
     if (!state || state.unlinking) throw new Refused('RELAY_UNLINK_PENDING', 'finish unlinking this device with pullboard relay off before sending a move');
     if (state.recovery) throw new Refused('RELAY_RECOVERY_PENDING', `finish the saved recovery for sequence ${state.recovery.skip} before sending a linked move`);
     if (credentialActor({ operation, args, personRequest: io?.personRequest }) === 'person') {
@@ -972,10 +1050,6 @@ export async function relayOperation(root, operation, args, io, command, applyLo
     if (!moves) { moves = new Set(); CHECKPOINT_MOVES.set(io, moves); }
     if (moves.has(state.board)) CHECKPOINT_NOTICES.get(io)?.delete(state.board);
     moves.add(state.board);
-    /** Apply through the CLI's existing board handle so local events and guards remain unchanged. */
-    const applyPausedMoveLocally = () => typeof applyLocally === 'function'
-      ? applyLocally()
-      : localRecords(root, (board) => store[operation](board, ...args));
     try {
       if (!await ensureOrdered(root, file, state, io)) {
         // Preflight's notice covers the first move; long-running commands still name every later move.
@@ -1037,7 +1111,10 @@ export async function relayOperation(root, operation, args, io, command, applyLo
       for (const event of receipt.outcome.events ?? []) io.onEvent?.(event);
       return receipt.outcome.result;
     } catch (error) {
-      if (confirmedDeletion(state, error)) { forgetDeletedCopy(root, file, state, io); return applyPausedMoveLocally(); }
+      if (confirmedDeletion(state, error)) {
+        forgetDeletedCopy(root, file, state, io);
+        return deletedMoveResult(root, operation, args, command, io, applyPausedMoveLocally);
+      }
       if (error instanceof Refused && error.code === 'AUTH_REQUIRED') throw expiredSignInMoveRefusal(state, error);
       throw error;
     }
@@ -1143,7 +1220,18 @@ export async function relayCommandReceipt(root, command) {
   const file = linkFile(root);
   return locked(file, async () => {
     const state = loadLink(file);
-    if (!state || state.unlinking) return null;
+    if (!state) {
+      const recovered = deletedRecovery(root);
+      if (!recovered || recovered.marker.recovered.commandIntent !== intentDigest(operationIntent('cli:' + command.cliOperation, command))) return null;
+      const expected = { add: 'addItem', edit: 'editItem', merged: 'merged' }[command.cliOperation];
+      if (recovered.move.operation !== expected) throw new Refused('RELAY_STORAGE', 'restore the interrupted command receipt before retrying');
+      if (recovered.receipt.outcome.error) {
+        clearDeletedRecovery(root, recovered.marker);
+        throw refusalFromReceipt(recovered.receipt.outcome.error);
+      }
+      return { result: recovered.receipt.outcome.result, events: recovered.receipt.outcome.events ?? [], move: recovered.move };
+    }
+    if (state.unlinking) return null;
     const recovered = state.recovered;
     if (!recovered || recovered.commandIntent !== operationIntent('cli:' + command.cliOperation, command)) return null;
     if (recovered.commandIntent !== operationIntent('cli:' + recovered.command?.cliOperation, recovered.command)) {
@@ -1170,13 +1258,17 @@ export async function relayCommandReceiptReported(root, moveId) {
     if (state?.recovered?.move?.id === moveId) {
       delete state.recovered;
       saveLink(file, state);
+    } else if (!state) {
+      const recovered = deletedRecovery(root);
+      if (recovered?.move.id === moveId) clearDeletedRecovery(root, recovered.marker);
     }
   });
 }
 
 /** Expose only an unreported operation descriptor so CLI preconditions cannot strand its outcome. */
 export function relayRecovered(root) {
-  return loadLink(linkFile(root))?.recovered?.move ?? null;
+  const state = loadLink(linkFile(root));
+  return state ? state.recovered?.move ?? null : deletedRecovery(root)?.move ?? null;
 }
 
 /** Explicitly refuse one blocked position, replay its valid tail on a private copy, then publish it. */

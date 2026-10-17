@@ -324,3 +324,130 @@ test('another board deletion never turns this board into local mode [H17,E9]', a
   assert.equal((await box.cli('status')).document.relay.board, state.board);
   assert.equal((await box.cli('add', box.lane, 'the surviving board still syncs')).code, 0, 'ordinary ordered work remains available with its own credential');
 });
+
+test('a move pending acknowledgement when the relay copy is deleted is kept [H17,E9]', async t => {
+ const box = await relayClientFixture(t);
+ await box.link();
+ const state = JSON.parse(readFileSync(box.linkFile, 'utf8'));
+ const phone = await box.phoneSession();
+ const firstTitle = 'locally originated move before deleted-copy lost acknowledgement';
+ const result = await box.script(`
+   const { main } = await import(${JSON.stringify(box.mainURL)});
+   const realFetch = globalThis.fetch;
+   let intercepted = false;
+   globalThis.fetch = async function(input, init) {
+     const response = await realFetch(input, init);
+     if (!intercepted && init?.method === 'POST' && String(input).endsWith('/moves') && response.ok) {
+       intercepted = true;
+       const removed = await realFetch(${JSON.stringify(box.origin + '/api/v1/boards/' + state.board)}, {
+         method: 'DELETE', headers: { authorization: ${JSON.stringify('Bearer ' + phone.token)}, 'x-pullboard-engine': ${JSON.stringify(String(ENGINE_VERSION))} }
+       });
+       if (removed.status !== 200) throw new Error('review fixture could not delete the remote copy');
+       throw new TypeError('review fixture drops the already accepted move acknowledgement');
+     }
+     return response;
+   };
+   let stdout = '', stderr = '';
+   const code = await main(['add', ${JSON.stringify(box.lane)}, ${JSON.stringify(firstTitle)}, '--json'], {
+     cwd: ${JSON.stringify(box.root)}, stdout: {write(value) {stdout += value;}}, stderr: {write(value) {stderr += value;}}
+   });
+   console.log(JSON.stringify({code, intercepted, output: JSON.parse(stdout), stderr}));
+ `);
+ assert.equal(result.code, 0, 'the private capture process completed');
+ assert.equal(result.document.intercepted, true, 'the real relay accepted the move before its acknowledgement was lost');
+ assert.equal(box.auth.linkedBoards().length, 0, 'a real person-authenticated HTTP deletion completed before the transport refusal');
+ const next = await box.cli('add', box.lane, 'independent local work after deleted-copy lost acknowledgement');
+ assert.equal(next.code, 0, 'subsequent local work succeeds');
+ const exported = await box.cli('export');
+ assert.equal(exported.code, 0);
+ assert.equal(exported.document.tables.item.filter(row => row.item_title === firstTitle).length, 1,
+   'the local sender retains its earlier accepted obligation across the deletion and lost acknowledgement');
+});
+
+test('a deleted-copy pending move survives interrupted cleanup and is returned only once on retry [H17,E9]', async t => {
+  const box = await relayClientFixture(t);
+  await box.link();
+  const state = JSON.parse(readFileSync(box.linkFile, 'utf8'));
+  const phone = await box.phoneSession();
+  const firstTitle = 'pending move retained through an interrupted local deletion cleanup';
+  const captured = await box.script(`
+    const { main } = await import(${JSON.stringify(box.mainURL)});
+    const realFetch = globalThis.fetch;
+    let intercepted = false;
+    globalThis.fetch = async function(input, init) {
+      const response = await realFetch(input, init);
+      if (!intercepted && init?.method === 'POST' && String(input).endsWith('/moves') && response.ok) {
+        intercepted = true;
+        const removed = await realFetch(${JSON.stringify(box.origin + '/api/v1/boards/' + state.board)}, {
+          method: 'DELETE', headers: { authorization: ${JSON.stringify('Bearer ' + phone.token)}, 'x-pullboard-engine': ${JSON.stringify(String(ENGINE_VERSION))} }
+        });
+        if (removed.status !== 200) throw new Error('the private phone could not delete the accepted copy');
+        throw new TypeError('the private fixture loses the accepted move acknowledgement');
+      }
+      return response;
+    };
+    let firstOutput = '';
+    const firstCode = await main(['add', ${JSON.stringify(box.lane)}, ${JSON.stringify(firstTitle)}, '--json'], {
+      cwd: ${JSON.stringify(box.root)}, stdout: {write(value) {firstOutput += value;}}, stderr: {write() {}}
+    });
+    const fs = await import('node:fs');
+    const { syncBuiltinESMExports } = await import('node:module');
+    const rename = fs.default.renameSync;
+    let cleanupInterrupted = false;
+    fs.default.renameSync = function(from, to) {
+      if (!cleanupInterrupted && String(to).endsWith('/relay-deleted.json')) {
+        cleanupInterrupted = true;
+        fs.default.renameSync = rename;
+        syncBuiltinESMExports();
+        throw new Error('the private fixture interrupts deletion-marker persistence');
+      }
+      return rename(from, to);
+    };
+    syncBuiltinESMExports();
+    let cleanupOutput = '';
+    let cleanupCode;
+    let cleanupError;
+    try {
+      cleanupCode = await main(['add', ${JSON.stringify(box.lane)}, 'new work after interrupted deletion cleanup', '--json'], {
+        cwd: ${JSON.stringify(box.root)}, stdout: {write(value) {cleanupOutput += value;}}, stderr: {write() {}}
+      });
+    } catch (error) {
+      if (error.message !== 'the private fixture interrupts deletion-marker persistence') throw error;
+      cleanupError = error.message;
+    } finally { fs.default.renameSync = rename; syncBuiltinESMExports(); }
+    const { localRecords } = await import(${JSON.stringify(new URL('relay.js', box.mainURL).href)});
+    const beforeCleanup = localRecords(${JSON.stringify(box.root)}, board => ({
+      firstCount: board.db.prepare('SELECT COUNT(*) AS count FROM item WHERE item_title=?').get(${JSON.stringify(firstTitle)}).count,
+      cursor: board.db.prepare("SELECT meta_value FROM board_meta WHERE meta_key='relay_applied_sequence'").get()?.meta_value
+    }));
+    const stillLinked = fs.existsSync(${JSON.stringify(box.linkFile)});
+    console.log(JSON.stringify({ firstCode, intercepted, cleanupInterrupted, cleanupCode, cleanupError, firstOutput, cleanupOutput, beforeCleanup, stillLinked }));
+  `);
+  assert.equal(captured.code, 0, 'the private capture completed both real CLI invocations');
+  assert.equal(captured.document.intercepted, true, 'the relay accepted the original move before its reply was lost');
+  assert.equal(captured.document.cleanupInterrupted, true, 'the next CLI reached the exact deletion-marker write');
+  assert.equal(captured.document.cleanupError, 'the private fixture interrupts deletion-marker persistence',
+    'the private fault interrupts the command at the marker boundary');
+  assert.equal(box.auth.linkedBoards().length, 0, 'the real person-authenticated deletion remains complete');
+  assert.equal(captured.document.stillLinked, true, 'interruption leaves the original pending link available for recovery');
+  const cursor = document => document.tables.board_meta.find(row => row.meta_key === 'relay_applied_sequence')?.meta_value;
+  const savedCursor = captured.document.beforeCleanup.cursor;
+  assert.equal(captured.document.beforeCleanup.firstCount, 1,
+    'the pending native move is durable before link cleanup can be interrupted');
+  const next = await box.cli('add', box.lane, 'new work after interrupted deletion cleanup');
+  assert.equal(next.code, 0, 'a fresh invocation completes cleanup and different local work');
+  const repeated = await box.cli('add', box.lane, firstTitle);
+  assert.equal(repeated.code, 0, 'the interrupted original command receives its retained native outcome');
+  const exported = await box.cli('export');
+  assert.equal(exported.code, 0);
+  assert.equal(exported.document.tables.item.filter(row => row.item_title === firstTitle).length, 1,
+    'neither repeated cleanup nor the original command retry duplicates the native move');
+  assert.equal(cursor(exported.document), savedCursor, 'repeated cleanup does not fabricate another relay position');
+  const marker = JSON.parse(readFileSync(join(box.root, '.git', 'pullboard', 'relay-deleted.json'), 'utf8'));
+  assert.equal(JSON.stringify(marker).includes(state.token), false, 'the deletion notice retains no bearer credential');
+  assert.equal(marker.recovered, undefined, 'reporting the original outcome consumes its recovery pointer');
+  assert.equal((await box.cli('add', box.lane, firstTitle)).code, 0);
+  const later = await box.cli('export');
+  assert.equal(later.document.tables.item.filter(row => row.item_title === firstTitle).length, 2,
+    'after reporting the retained outcome, the same command can intentionally make new local work');
+});
