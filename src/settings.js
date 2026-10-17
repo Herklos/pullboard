@@ -22,6 +22,10 @@ export function loadMachineSettings() {
     throw new Refused('BAD_MACHINE_SETTINGS', `gate.browserFreeChecks in ${file} must be true or false`);
   }
   validateGateQueue(value, file);
+  if (value.view !== undefined && (!value.view || typeof value.view !== 'object' || Array.isArray(value.view)
+    || (value.view.background !== undefined && typeof value.view.background !== 'boolean'))) {
+    throw new Refused('BAD_MACHINE_SETTINGS', `view in ${file} must be an object whose background is true or false; fix it before running Pullboard`);
+  }
   if (value.gate?.memoryFloorMB !== undefined && (!Number.isSafeInteger(value.gate.memoryFloorMB) || value.gate.memoryFloorMB < 0)) {
     throw new Refused('BAD_MACHINE_SETTINGS', `gate.memoryFloorMB in ${file} must be a whole number of megabytes, 0 or more; fix it before running Pullboard`);
   }
@@ -47,6 +51,16 @@ export function loadMachineSettings() {
 /** Browser-free check admission is deliberately opt-in per machine. */
 export function browserFreeChecksEnabled() {
   return loadMachineSettings().gate?.browserFreeChecks === true;
+}
+
+/**
+ * Whether init and resume keep a view running in the background [H5,N26]. Unlike the gate's
+ * settings this is on by default: pullboard.dev can only open a computer's boards while its view
+ * runs, and a newcomer should never need a command for that. Only `"view": { "background": false }`
+ * turns it off.
+ */
+export function viewBackgroundEnabled() {
+  return loadMachineSettings().view?.background !== false;
 }
 
 /**
