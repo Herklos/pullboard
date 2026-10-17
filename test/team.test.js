@@ -62,9 +62,16 @@ try {
 `;
   const holder = helpers.launch(box, box.repo, process.execPath, ['--input-type=module', '-e', source, box.repo, ready, observed]);
   const deadline = Date.now() + 10_000;
-  while (!existsSync(ready)) {
-    assert.ok(Date.now() < deadline, 'the real private gate holder becomes ready');
-    await new Promise(resolveWait => setTimeout(resolveWait, 20));
+  try {
+    while (!existsSync(ready)) {
+      assert.equal(holder.exitCode, null, holder.failure ?? holder.stderrText);
+      assert.ok(Date.now() < deadline, 'the real private gate holder becomes ready');
+      await new Promise(resolveWait => setTimeout(resolveWait, 20));
+    }
+  } catch (error) {
+    if (holder.exitCode === null && holder.signalCode === null) holder.kill('SIGTERM');
+    await holder.closed;
+    throw error;
   }
   return { holder, observed };
 }

@@ -3360,7 +3360,8 @@ function queuedItemLease(ctx, initial, agentId, kind) {
   // Naming somebody else's check remains read-only; it never extends their build claim.
   if (kind === 'build' && (initial.item_status !== 'claimed' || initial.item_owner !== agentId)) return report;
   const review = kind === 'review';
-  if (review && initial.item_review_by !== agentId) return report;
+  // Accepted items retain their former reviewer as history, not a renewable reservation.
+  if (review && (initial.item_status !== 'submitted' || initial.item_review_by !== agentId)) return report;
   const field = review ? 'item_review_until' : 'item_lease_until';
   const owner = review ? 'item_review_by' : 'item_owner';
   const status = review ? 'submitted' : 'claimed';
