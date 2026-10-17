@@ -4,6 +4,7 @@ import {
   MACHINE,
 } from './machine.js';
 import { commandPhrases } from './help.js';
+import { personNeeds } from './needs.js';
 
 /** The CLI's default phrases, ordered by depth for the existing prose inventory guard. */
 export const PULLBOARD_COMMANDS = Object.freeze(commandPhrases().sort((left, right) => right.split(' ').length - left.split(' ').length));
@@ -610,14 +611,11 @@ const count = (n, one, many = one) => n + ' ' + (n === 1 ? one : many);
 // and the line under the project says so without counting it.
 const needCount = (x) => x.ok && !x.loading ? x.decisions + x.pending + x.drafts + x.holds : 0;
 const doing = (x) => [x.decisions && count(x.decisions, 'decision', 'decisions'), x.pending && count(x.pending, 'question', 'questions'), x.drafts && count(x.drafts, 'draft row', 'draft rows'), x.holds && count(x.holds, 'lane held', 'lanes held'), x.sentBack && count(x.sentBack, 'sent back'), x.awaiting && count(x.awaiting, 'to verify'), x.building && count(x.building, 'building')].filter(Boolean).join(' · ') || (x.open ? count(x.open, 'item open', 'items open') : 'nothing open');
-/** The person's calls in one repo, as its Needs-you panel shows them, reused by a combined project view. */
+// Embed the standalone shared builder for live, exported and relay pages.
+const personNeeds = (${personNeeds.toString()});
+/** The person's calls in one repo, reused by a combined project view. */
 function projectNeeds(p) {
-  return [
-    ...p.decisions.map((d) => ({ ref: agentName(d.shout_from, p), text: d.shout_text, what: 'decision', at: d.shout_at })),
-    ...p.spec.filter((row) => row.status === 'pending' && !row.decision).map((row) => ({ ref: row.id, text: row.text, what: 'answer in SPEC.md' })),
-    ...p.holds.map((hold) => ({ ref: hold.hold_lane, text: hold.hold_reason, what: 'lane held by ' + agentName(hold.hold_by, p) })),
-    ...(p.spec.some((row) => row.status === 'draft' && !row.decision) ? [{ ref: String(p.spec.filter((row) => row.status === 'draft' && !row.decision).length), text: 'draft spec rows to approve or drop', what: 'review in SPEC.md', target: 'tab:spec' }] : []),
-  ];
+  return personNeeds(p);
 }
 // The item lifecycle as pullboard declares it in src/machine.js, embedded when the page is served.
 const FLOW = ${JSON.stringify(lifecycle()).replaceAll('<', '\\u003c')};
@@ -1090,6 +1088,9 @@ function renderPersonRequests(project) {
 
 /** A board's sidebar counts, derived from the same API state the page displays. */
 function boardSummary(board, state) {
+  const needs = personNeeds(state);
+  /** Count the calls, with draft rows retaining their individual count in the sidebar. */
+  const calls = (kind) => needs.filter((row) => row.kind === kind).reduce((total, row) => total + (row.count ?? 1), 0);
   /** Count one item state for the sidebar. */
   const count = (test) => state.items.filter(test).length;
   return {
@@ -1099,10 +1100,10 @@ function boardSummary(board, state) {
     sentBack: count((item) => item.status === 'open' && item.verdict && item.verdict.decision === 'REJECT'),
     open: count((item) => item.status === 'open'),
     verified: count((item) => item.status === 'verified'),
-    pending: state.spec.filter((row) => row.status === 'pending' && !row.decision).length,
-    drafts: state.spec.filter((row) => row.status === 'draft' && !row.decision).length,
-    holds: state.holds.length,
-    decisions: state.decisions.length,
+    pending: calls('pending'),
+    drafts: calls('draft'),
+    holds: calls('hold'),
+    decisions: calls('decision'),
     // What each item's state reads from, so another repo's roadmap can show it as this board's
     // Items tab does, sent back included, and open it here.
     items: state.items.map((item) => ({ id: item.id, title: item.title, status: item.status, merged: Boolean(item.merged), verdict: item.verdict && { decision: item.verdict.decision } })),
@@ -2096,12 +2097,13 @@ function render() {
   // What needs the person, first, and only the person's calls (B26): the decisions passed up to them,
   // questions in the spec, held lanes, then draft rows. Work waiting for a verdict or sent back shows
   // on the board with who holds it; it is the agents' to move.
-  const needs = [
-    ...p.decisions.map((d) => ['decide:' + d.shout_id, agentName(d.shout_from, p), d.shout_text, 'decide', d.shout_at]),
-    ...p.spec.filter((r) => r.status === 'pending' && !r.decision).map((r) => ['spec:' + r.id, r.id, r.text, 'answer in SPEC.md']),
-    ...p.holds.map((h) => ['tab:shouts', h.hold_lane, h.hold_reason, 'lane held by ' + agentName(h.hold_by), h.hold_at]),
-  ];
-  const drafts = p.spec.filter((r) => r.status === 'draft' && !r.decision).length;
+  const personalNeeds = personNeeds(p);
+  // Adapt display targets and the existing hold age without reimplementing which calls belong here.
+  const needs = personalNeeds.filter((row) => row.kind !== 'draft').map((row) => row.kind === 'decision'
+    ? ['decide:' + row.id, row.ref, row.text, 'decide', row.at]
+    : row.kind === 'pending' ? ['spec:' + row.id, row.ref, row.text, row.what]
+      : ['tab:shouts', row.ref, row.text, row.what, p.holds.find((hold) => hold.hold_lane === row.id)?.hold_at]);
+  const drafts = personalNeeds.find((row) => row.kind === 'draft')?.count ?? 0;
   // Each of the person's calls is a row at the head of Active, shaped like an item: what it is first, then NEEDS YOU and
   // its kind where an item has its lane, and what to do at the right. Every call is a row; the draft rows are one row
   // with their count. Read-only, a row is its words, opening nothing.
