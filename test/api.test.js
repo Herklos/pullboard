@@ -605,6 +605,7 @@ test('[A1] command results match the catalog across roots and subcommands', () =
   json(box, repo, 'status');
   json(box, repo, 'stats');
   json(box, repo, 'doctor');
+  assert.deepEqual(json(box, repo, 'health').stuck, [], 'a new board has nothing stuck [A6]');
   json(box, repo, 'skills', ['--update']);
   const plainStatus = box.run(repo, 'status');
   assert.equal(plainStatus.status, 0, plainStatus.stderr);
@@ -961,6 +962,7 @@ test('[A1] every catalog command and subcommand has a real CLI exercise', () => 
   assert.match(humanImport.stdout, /imported version 1 board tables/);
 
   json(source, source.repo, 'relay');
+  assert.deepEqual(json(source, source.repo, 'relay', ['status']), json(source, source.repo, 'relay'), 'relay status reports what plain relay reports');
   json(source, source.repo, 'relay', ['off']);
   const catalog = json(source, source.repo, 'add', ['app', 'Catalog item', '--criterion', 'catalog coverage'], 'add').item;
   const landing = json(source, source.repo, 'land', ['--dry-run']);
