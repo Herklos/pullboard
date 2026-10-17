@@ -2488,6 +2488,8 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true, result =
   io.result?.(summary);
   if (plan.marked) {
     io.say(`${blueprint.title} (version ${blueprint.version}) is already on this board; nothing added`);
+    // A board an older Pullboard set up gets the blueprint's kind recorded beside its marker (#720).
+    if (plan.specRows !== source) io.say(`  recorded its kind (${blueprint.kind ?? 'none'}) in ${ctx.config.spec}; commit ${ctx.config.spec}`);
     return summary;
   }
   io.say(`added ${blueprint.title} (version ${blueprint.version}) as drafts in ${ctx.config.spec}, section ${plan.section.name}`);

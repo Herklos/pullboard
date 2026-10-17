@@ -277,15 +277,34 @@ export function blueprintMarker(blueprint) {
 }
 
 /**
- * The line a blueprint of a kind a board takes one of leaves beside its rows: its name and kind, so
- * a later add or init finds which product or architecture blueprint the board already has, even
- * one read from a local file (#720). Other kinds leave no such line.
+ * The line every blueprint leaves beside its rows: its name and kind, or none when it names no
+ * kind, so a later add or init finds which product or architecture blueprint the board already
+ * has, even one read from a local file that is gone (#720).
  *
  * @param {{ name: string, kind?: string }} blueprint
- * @returns {string | null}
+ * @returns {string}
  */
 export function blueprintKindMarker(blueprint) {
-  return ['product', 'infrastructure', 'architecture'].includes(blueprint.kind) ? `<!-- pullboard-blueprint-kind ${blueprint.name} ${blueprint.kind} -->` : null;
+  return `<!-- pullboard-blueprint-kind ${blueprint.name} ${blueprint.kind ?? 'none'} -->`;
+}
+
+/**
+ * SPEC.md text with this blueprint's kind line after its finished marker, when the line is missing.
+ * Why: a board an older Pullboard set up has the marker alone, and adding the same blueprint again
+ * is how the person records its kind there; that add changes nothing else (#720).
+ *
+ * @param {string} source - SPEC.md's text.
+ * @param {{ name: string, version: number, kind?: string }} blueprint
+ * @returns {string}
+ */
+function withKindLine(source, blueprint) {
+  const kindLine = blueprintKindMarker(blueprint);
+  const parts = source.split(/(\r?\n)/u);
+  if (parts.some((part) => part.trim() === kindLine)) return source;
+  const at = parts.findIndex((part) => part.trim() === blueprintMarker(blueprint));
+  if (at < 0) return source;
+  parts.splice(at, 0, kindLine, source.includes('\r\n') ? '\r\n' : '\n');
+  return parts.join('');
 }
 
 /**
@@ -450,7 +469,10 @@ export function planBlueprint(blueprint, { source, spec, doctrine, existingItems
   const name = existingSection ? existingSection.name : `${prefix} · ${blueprint.title.trim()}`;
   const section = { prefix, name, isNew: !existingSection };
   const gateToSet = !gate?.trim() && blueprint.gate ? blueprint.gate : null;
-  if (marked) return { marked, resumed: false, section, rows: [], shared: [], specRows: source, specAfter: source, ids: {}, items: [], existing: {}, gate: null };
+  if (marked) {
+    const recorded = withKindLine(source, blueprint);
+    return { marked, resumed: false, section, rows: [], shared: [], specRows: recorded, specAfter: recorded, ids: {}, items: [], existing: {}, gate: null };
+  }
   const rows = [];
   const shared = [];
   let ids;
@@ -490,7 +512,7 @@ export function planBlueprint(blueprint, { source, spec, doctrine, existingItems
       rows.push({ key: question.key, id, status: 'pending', text, line: `- ${id} [pending, must] ${text} | gate: review` });
     }
     const kindLine = blueprintKindMarker(blueprint);
-    const kindLines = kindLine && !lines.some((text) => text.trim() === kindLine) ? [kindLine] : [];
+    const kindLines = lines.some((text) => text.trim() === kindLine) ? [] : [kindLine];
     specRows = insertSection(source, spec, { existing: existingSection, name, lines: [...rows.map((row) => row.line), ...kindLines, blueprintAddingMarker(blueprint, ids)] });
   }
   const underWay = blueprintAddingMarker(blueprint, ids);

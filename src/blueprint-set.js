@@ -28,12 +28,15 @@ export function blueprintSlot(blueprint) {
 }
 
 /**
- * The product and architecture blueprints a repo's board already has, read from its SPEC.md: the
- * kind line each one's add leaves, and for a board added before that line existed, the marker of a
- * bundled blueprint, whose kind its bundled file says. Nothing when the repo has no spec yet.
+ * The blueprints a repo's board already has and the slot each fills, read from its SPEC.md: the
+ * kind line each one's add leaves, with slot null for a kind a board takes any number of. A board
+ * an older Pullboard set up has a blueprint's marker alone. Its kind then comes from the bundled
+ * file of that name, else from its own file at the repo root (<name>.json or <name>.blueprint.json),
+ * checked like any blueprint; else the slot is unknown, which may be the product or architecture
+ * slot, so readBlueprints refuses either until the kind is recorded. Nothing without a spec.
  *
  * @param {string} root - The repository root.
- * @returns {{ name: string, slot: string }[]}
+ * @returns {{ name: string, slot: string | null }[]}
  */
 export function installedBlueprints(root) {
   let specFile = 'SPEC.md';
@@ -45,17 +48,38 @@ export function installedBlueprints(root) {
   const file = join(root, String(specFile));
   if (!existsSync(file)) return [];
   const found = new Map();
-  const bundled = bundledBlueprints();
+  const legacy = [];
   for (const line of readFileSync(file, 'utf8').split(/\r?\n/u)) {
     const kind = /^<!-- pullboard-blueprint-kind (\S+) (\S+) -->$/u.exec(line.trim());
     const marker = /^<!-- pullboard-blueprint (\S+) \d+(?: adding .*)? -->$/u.exec(line.trim());
-    if (kind && blueprintSlot({ kind: kind[2] })) found.set(kind[1], blueprintSlot({ kind: kind[2] }));
-    else if (marker && !found.has(marker[1]) && bundled.includes(marker[1])) {
-      const slot = blueprintSlot(readBlueprint(marker[1], root));
-      if (slot) found.set(marker[1], slot);
+    if (kind) found.set(kind[1], blueprintSlot({ kind: kind[2] }));
+    else if (marker) legacy.push(marker[1]);
+  }
+  for (const name of legacy) if (!found.has(name)) found.set(name, legacySlot(name, root));
+  return [...found].map(([name, slot]) => ({ name, slot }));
+}
+
+/**
+ * The slot of a blueprint whose marker has no kind line: from the bundled file of that name, else
+ * from its own file at the repo root when that file names it, else "unknown".
+ *
+ * @param {string} name
+ * @param {string} root
+ * @returns {string | null}
+ */
+function legacySlot(name, root) {
+  if (bundledBlueprints().includes(name)) return blueprintSlot(readBlueprint(name, root));
+  for (const candidate of [`${name}.json`, `${name}.blueprint.json`]) {
+    if (!existsSync(join(root, candidate))) continue;
+    try {
+      const blueprint = readBlueprint(join(root, candidate), root);
+      if (blueprint.name === name) return blueprintSlot(blueprint);
+    } catch (error) {
+      // A file there that is no valid blueprint says nothing about this one's kind.
+      if (!(error instanceof Refused)) throw error;
     }
   }
-  return [...found].map(([name, slot]) => ({ name, slot }));
+  return 'unknown';
 }
 
 /**
@@ -68,7 +92,7 @@ export function installedBlueprints(root) {
  * @param {string[]} references - Bundled names or paths, as --blueprint gave them.
  * @param {string} cwd
  * @param {string} command - The command to name in the next step, such as "init".
- * @param {{ name: string, slot: string }[]} [installed] - The board's own, from installedBlueprints.
+ * @param {{ name: string, slot: string | null }[]} [installed] - The board's own, from installedBlueprints.
  * @returns {{ reference: string, blueprint: import('./blueprints.js').Blueprint }[]}
  */
 export function readBlueprints(references, cwd, command, installed = []) {
@@ -77,7 +101,12 @@ export function readBlueprints(references, cwd, command, installed = []) {
     const blueprint = readBlueprint(reference, cwd);
     if (read.some((entry) => entry.blueprint.name === blueprint.name && entry.blueprint.version === blueprint.version)) continue;
     const slot = blueprintSlot(blueprint);
-    const onBoard = slot && installed.find((entry) => entry.slot === slot && entry.name !== blueprint.name);
+    const onBoard = slot && installed.find((entry) => [slot, 'unknown'].includes(entry.slot) && entry.name !== blueprint.name);
+    if (onBoard?.slot === 'unknown') {
+      throw new Refused('BLUEPRINT_KIND_TAKEN',
+        `${onBoard.name} and ${blueprint.name} may both be ${slot} blueprints: this board has ${onBoard.name}, added before Pullboard recorded a blueprint's kind, and a board takes one ${slot} blueprint; record its kind by adding its file again, which changes nothing else: pullboard blueprint add <${onBoard.name} file>`,
+        `record ${onBoard.name}'s kind with pullboard blueprint add <${onBoard.name} file>, then run pullboard ${command} again`);
+    }
     if (onBoard) {
       throw new Refused('BLUEPRINT_KIND_TAKEN',
         `${onBoard.name} and ${blueprint.name} are both ${slot} blueprints, and this board already has ${onBoard.name}; a board takes one ${slot} blueprint, so add ${blueprint.name} on a board of its own`,

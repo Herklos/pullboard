@@ -940,6 +940,7 @@ test('a second blueprint of the same kind is refused [S1,I1]', () => {
     writeFileSync(join(sequential.repo, 'other-product.json'), `${JSON.stringify({ ...PUBLISHED, name: 'other-product', title: 'Other product' })}\n`);
     json(sequential, 'blueprint', 'add', first);
     const spec = readFileSync(join(sequential.repo, 'SPEC.md'), 'utf8');
+    assert.ok(spec.includes(`<!-- pullboard-blueprint-kind ${first.replace(/\.json$/u, '')} product -->`), 'the add records its kind beside its rows');
     const items = listed(sequential);
     const later = sequential.run('blueprint', 'add', second, '--json');
     assert.notEqual(later.status, 0, later.stdout);
@@ -951,6 +952,68 @@ test('a second blueprint of the same kind is refused [S1,I1]', () => {
     assert.equal(readFileSync(join(sequential.repo, 'SPEC.md'), 'utf8'), spec);
     assert.equal(json(sequential, 'blueprint', 'add', 'serverless').blueprint.name, 'serverless', 'an architecture blueprint still joins a product one later');
   }
+  // A board an older Pullboard set up: each blueprint's marker with no kind line. That Pullboard
+  // wrote exactly today's add without the kind line, byte for byte, so the fixture is that (#720).
+  const legacyAdd = (box, file) => {
+    json(box, 'blueprint', 'add', file);
+    const path = join(box.repo, 'SPEC.md');
+    writeFileSync(path, readFileSync(path, 'utf8').split('\n').filter((line) => !line.startsWith('<!-- pullboard-blueprint-kind ')).join('\n'));
+    assert.doesNotMatch(readFileSync(path, 'utf8'), /pullboard-blueprint-kind/u);
+  };
+  const refusedBoth = (box, first, second, args) => {
+    const spec = readFileSync(join(box.repo, 'SPEC.md'), 'utf8');
+    const items = listed(box);
+    const later = box.run('blueprint', 'add', ...args, '--json');
+    assert.notEqual(later.status, 0, later.stdout);
+    const { error } = JSON.parse(later.stdout);
+    assert.equal(error.code, 'BLUEPRINT_KIND_TAKEN');
+    assert.match(error.message, new RegExp(`^${first} and ${second} `, 'u'), 'the refusal names both');
+    assert.equal(readFileSync(join(box.repo, 'SPEC.md'), 'utf8'), spec, 'SPEC.md is unchanged');
+    assert.equal(listed(box), items, 'no starter is filed');
+    return error;
+  };
+  const custom = (box, name, kind, where) => {
+    const file = join(where, `${name}.json`);
+    writeFileSync(file, `${JSON.stringify({ ...PUBLISHED, name, title: name, kind })}\n`);
+    return file;
+  };
+  // A custom product whose file is gone from the repo: its kind is unknown, so another product is
+  // refused, naming both, with the step that records the kind. Adding its file again records it
+  // and nothing else; a product is still refused after, and an architecture blueprint joins it.
+  const away = freshBoard();
+  const awayFile = custom(away, 'legacy-product', 'product', away.dir);
+  legacyAdd(away, awayFile);
+  const unknown = refusedBoth(away, 'legacy-product', 'web-app', ['web-app']);
+  assert.match(unknown.next, /record legacy-product's kind with pullboard blueprint add/u, 'the next step says how to resolve it');
+  const beforeRecord = readFileSync(join(away.repo, 'SPEC.md'), 'utf8');
+  const items = listed(away);
+  assert.equal(json(away, 'blueprint', 'add', awayFile).marked, true, 'adding its file again adds nothing');
+  const recorded = readFileSync(join(away.repo, 'SPEC.md'), 'utf8');
+  assert.deepEqual(recorded.split('\n').filter((line) => !beforeRecord.split('\n').includes(line)), ['<!-- pullboard-blueprint-kind legacy-product product -->'], 'it records only the kind');
+  assert.equal(listed(away), items);
+  refusedBoth(away, 'legacy-product', 'web-app', ['web-app']);
+  assert.equal(json(away, 'blueprint', 'add', 'serverless').blueprint.name, 'serverless', 'an architecture blueprint joins the recorded product');
+  // A custom product whose file is still at the repo root: its kind is read from it.
+  const home = freshBoard();
+  legacyAdd(home, custom(home, 'legacy-product', 'product', home.repo));
+  assert.match(refusedBoth(home, 'legacy-product', 'web-app', ['web-app']).message, /are both product blueprints/u);
+  // A custom practice blueprint: once its kind is recorded, a product joins it.
+  const practiced = freshBoard();
+  const practiceFile = custom(practiced, 'legacy-practice', 'practice', practiced.dir);
+  legacyAdd(practiced, practiceFile);
+  refusedBoth(practiced, 'legacy-practice', 'web-app', ['web-app']);
+  json(practiced, 'blueprint', 'add', practiceFile);
+  assert.equal(json(practiced, 'blueprint', 'add', 'web-app').blueprint.name, 'web-app', 'a product joins a recorded practice blueprint');
+  // A bundled product from an older Pullboard is read from its bundled file; adding it again is a
+  // no-op apart from recording its kind.
+  const bundledLegacy = freshBoard();
+  writeFileSync(join(bundledLegacy.repo, 'other-product.json'), `${JSON.stringify({ ...PUBLISHED, name: 'other-product', title: 'Other product' })}\n`);
+  legacyAdd(bundledLegacy, 'web-app');
+  refusedBoth(bundledLegacy, 'web-app', 'other-product', ['other-product.json']);
+  const bundledItems = listed(bundledLegacy);
+  assert.equal(json(bundledLegacy, 'blueprint', 'add', 'web-app').marked, true, 'the same bundled blueprint again adds nothing');
+  assert.equal(listed(bundledLegacy), bundledItems);
+
   const reinit = emptyRepo();
   const once = reinit.run('init', '--blueprint', 'web-app');
   assert.equal(once.status, 0, once.stdout + once.stderr);
