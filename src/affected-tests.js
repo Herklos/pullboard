@@ -2,7 +2,10 @@
 import { spawnSync } from 'node:child_process';
 import { posix } from 'node:path';
 import { cleanGitEnvironment } from './git.js';
-import { importsIn } from './module-imports.js';
+import {
+  commonJsIn,
+  importsIn,
+} from './module-imports.js';
 
 const MODULE = /\.[cm]?js$/u;
 const TEST = /\.(?:test|spec)\.[cm]?js$/u;
@@ -137,11 +140,30 @@ function documentationInputs(path, source, imports, changedDocs = []) {
   return inputs;
 }
 
+/**
+ * Admit only the named builtin-export synchronizer, which cannot create module-loader edges.
+ * Rewrite that exact import and ask V8 whether another node:module edge remains. Text in comments
+ * or strings cannot hide a real unknown import. Keep dynamic builtin loaders and CommonJS unknown.
+ */
+function knownBuiltinSynchronizers(sources, imports) {
+  const indices = sources.flatMap((_source, index) => imports[index].includes('node:module') ? [index] : []);
+  if (!indices.length) return new Set();
+  const synchronizer = /\bimport\s*\{\s*syncBuiltinESMExports\s*,?\s*\}\s*from\s*(['"])node:module\1/gu;
+  const rewritten = indices.map(index => sources[index].replace(synchronizer,
+    (_match, quote) => `import { syncBuiltinESMExports } from ${quote}node:fs${quote}`));
+  const remaining = importsIn(rewritten);
+  // Reuse V8's code-versus-text probe for the dynamic builtin loader as well as CommonJS words.
+  const loaders = commonJsIn(indices.map(index => sources[index].replace(/\bgetBuiltinModule\b/gu, 'createRequire')));
+  return new Set(indices.filter((_index, offset) => !remaining[offset].includes('node:module') && !loaders[offset]));
+}
+
 /** Compile this tree's import edges, plus the literal child-CLI dependency used by fixture modules. */
 function graphAt(root, commit, changedDocs = []) {
   const modules = modulesAt(root, commit);
   const paths = [...modules.keys()];
-  const imports = importsIn([...modules.values()]);
+  const sources = [...modules.values()];
+  const imports = importsIn(sources);
+  const synchronizers = knownBuiltinSynchronizers(sources, imports);
   const reverse = new Map();
   const unknown = new Map();
   const always = new Set();
@@ -159,7 +181,10 @@ function graphAt(root, commit, changedDocs = []) {
       }
     }
     for (const target of imports[index]) {
-      if (target === 'node:module') { unknown.set(path, 'a reached module may create CommonJS imports'); continue; }
+      if (target === 'node:module') {
+        if (!synchronizers.has(index)) unknown.set(path, 'a reached module may create CommonJS imports');
+        continue;
+      }
       if (target.startsWith('node:')) continue;
       if (target === '(computed)' && TEST.test(path)) { always.add(path); continue; }
       if (!target.startsWith('.')) {

@@ -21,6 +21,7 @@ import { bindLocalSession, localSessionMatches, localSessionSeats } from './agen
 import { decisionAnswer, decisionProjection, handAnsweredQuestions, pendingAnswers, planRowApply, prepareRowDecisions, restoreRowApply, writeRowApply } from './row-decisions.js';
 import { draftRow } from './spec-draft.js';
 import { digestOf, gateReport, refuseSandboxBlocked, runGate, runProfiledShell, runSubmitGate, submitGateReport, timingDigest, withGateSlot } from './gate.js';
+import { gateWaitReporter } from './gate-wait.js';
 import { checkNeedsBrowser, explicitCheckFiles } from './browser-admission.js';
 import { bareWorktreeFinding, codeIsFromMain, contains, differFromHead, git, gitChildEnv, headCommit, headTree, invalidateGitFacts, isClean, mainCheckout, patchId, repoInfo, resolveCommit, tryGit, untracked, withGitFacts } from './git.js';
 import {
@@ -62,6 +63,8 @@ import {
   unmetRows,
 } from './spec.js';
 import { answerQuestion, bundledBlueprints, landBlueprint, planBlueprint, readBlueprint, repoAnswers, saveBlueprint } from './blueprints.js';
+import { fitCommand } from './blueprint-fit-command.js';
+import { fitSummary, readFitBatch } from './blueprint-fit.js';
 import { blueprintStarterNote, combinedSummary, initBlueprintLines, initBlueprintResult, installedBlueprints, landEach, readBlueprints, sharedRowLines } from './blueprint-set.js';
 import { briefFiles } from './brief.js';
 import { commitFirst, commitOwnerLines, commitOwners, coordinatorInbox, coordinatorInboxLines, inboxFirst } from './resume.js';
@@ -104,9 +107,10 @@ import { readRelayMachine } from './relay-machine.js';
 import { relayJoin, relayPair } from './relay-pairing-client.js';
 import { executePersonRequests } from './relay-request-execution.js';
 import { engineReceipt } from './engine.js';
-import { land, landingRemote, landingSubject } from './land.js';
+import { accountedFailures, land, landingRemote, landingSubject, liveWaiverProjection, waivedFailures, waiverLine } from './land.js';
 import { installStep } from './worktree.js';
 
+export { gateWaitReporter };
 const CHECKOUT_LEASES = new WeakMap();
 const CHECKOUT_BOARD_ONLY = new WeakMap();
 let startupMainTraced = false;
@@ -2377,7 +2381,9 @@ async function submitHere(ctx, id) {
     // The accepted project runner interprets its current invariant files; candidate config cannot replace it.
     ...(acceptedMain.config.submitInvariants.length ? { affectedTests: acceptedMain.config.affectedTests } : {}) };
   const gate = await runSubmitGate(root, submitConfig, { base: claimHead, trunk: acceptedMain.commit, check: frozenCheck(held), agent: me.id, item: String(id), onWait: queuedItemLease(ctx, held, me.id, 'build'), onBrowserFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
-  if (!gate.isGreen) {
+  // Only the person's live waivers can pass a red proof, failure by failure; the item's own check is never waived [B3].
+  const waived = !gate.isGreen && gate.check?.green ? withBoard(ctx, (board) => waivedFailures(board, accountedFailures(gate, root))) : null;
+  if (!gate.isGreen && !waived) {
     const message = `the submission proof is red at ${commit.slice(0, 12)}; fix it, commit, submit again. ${submitGateReport(gate)}`;
     // No submission can follow this verdict. Read-only main comparisons must not retain the seat's write lease.
     CHECKOUT_LEASES.get(ctx.io)?.release();
@@ -2394,13 +2400,20 @@ async function submitHere(ctx, id) {
     );
   }
   const currentTrunk = requireTrunkMerge(root, commit); // The trunk may have moved while the gate ran.
+  const waivedLines = waived ? waived.map(waiverLine) : [];
   await withBoard(ctx, async (board) => {
     refuseUnverifiedStack(root, board, store.getItem(board, id), commit, currentTrunk);
+    // The waived run is written to the item's thread before the submission, so no waived proof reads as green.
+    if (waived) await ordered(ctx, board, 'appendFact', [id, { agentId: me.id, kind: 'measurement', text: `submission proof at ${commit.slice(0, 12)} was red and is recorded as waived, not green; every failure is covered by a live person waiver:\n${waivedLines.join('\n')}` }]);
     return await ordered(ctx, board, 'submit', [id, { agentId: me.id, commit, tree: headTree(root) ?? '', files: filesSince(root, id, claimHead, commit), policyCommit: acceptedMain.commit,
       ...(gate.deferred ? { note: 'full suite deferred to the landing gate' } : {}) }]);
   });
-  return reportSubmission(ctx, id, commit, { green: gate.isGreen, report: submitGateReport(gate), files: gate.files, full: gate.full, deferred: gate.deferred, deferFullFallback: gate.deferFullFallback, reason: gate.reason, check: gate.check,
-    log: gate.log, profile: gate.profile, profilePath: gate.profilePath, proofLog: gate.proofLog, proofProfilePath: gate.proofProfilePath }, doctrine);
+  const report = waived
+    ? `submission proof waived, not green: ${waived.length} failure(s), each covered by a live person waiver; the whole output is in ${gate.log}\n${waivedLines.join('\n')}`
+    : submitGateReport(gate);
+  return reportSubmission(ctx, id, commit, { green: gate.isGreen, report, files: gate.files, full: gate.full, deferred: gate.deferred, deferFullFallback: gate.deferFullFallback, reason: gate.reason, check: gate.check,
+    log: gate.log, profile: gate.profile, profilePath: gate.profilePath, proofLog: gate.proofLog, proofProfilePath: gate.proofProfilePath,
+    ...(waived ? { waived: waived.map(({ file, name, waiver }) => ({ file, name, waiver: waiver.id, reason: waiver.reason, until: waiver.until })) } : {}) }, doctrine);
 }
 
 /** Report and pin the original submitted commit, including a recovered acknowledged outcome. */
@@ -3019,6 +3032,7 @@ function workCommands(io, args) {
   };
   return {
     blueprint: () => act(async (ctx, board, me) => {
+      if (first === 'fit') return await fitCommand(ctx, board, me, 'propose', [second, ...rest].filter((value) => value !== undefined), values, { ordered, whoAmI });
       const references = [...(second ? [second] : []), ...(values.blueprint ?? [])];
       if (first !== 'add' || !references.length || rest.length) throw new Refused('USAGE', `pullboard blueprint add <name or file> [--blueprint <name or file>]... | save [file]; bundled: ${bundledBlueprints().join(', ')}`);
       // Several blueprints land in the order given, as one result; one lands exactly as before (#720).
@@ -3281,7 +3295,7 @@ function workCommands(io, args) {
         const waiver = await ordered(ctx, board, 'recordLandingWaiver', [{ agentId: store.PERSON, channel: io.personChannel ?? 'terminal',
           id: randomUUID(), test: values.waive, until: values.until, reason: values.reason }]);
         io.result?.({ batch: null, landed: [], conflicts: [], blocked: [], culprits: [], flakes: [], waiver });
-        io.say(`waived ${waiver.test} until ${waiver.until}: ${waiver.reason}`);
+        io.say(`waived ${waiver.kind ?? store.landingWaiverKind(waiver.test)} ${waiver.test} until ${waiver.until}: ${waiver.reason}`);
         return 0;
       }
       if (values.until !== undefined || values.reason !== undefined || values.max !== undefined && (!/^[1-9][0-9]*$/u.test(values.max) || !Number.isSafeInteger(Number(values.max)))) throw new Refused('USAGE', 'use --max with a positive item count, or --waive with --until and --reason');
@@ -3457,38 +3471,6 @@ function browserAdmissionReporter(io, jsonMode = false) {
   };
 }
 
-/** Build de-duplicated queue messages for a gate waiting on machine capacity or memory; exported so tests can read what a person sees. */
-export function gateWaitReporter(io) {
-  let last = '';
-  let warned = false;
-  let held = false;
-  return ({ holders, position, memory, runnerUnavailable }) => {
-    if (runnerUnavailable) {
-      io.say(`runner ${runnerUnavailable.host} unavailable: ${runnerUnavailable.reason}; until ${runnerUnavailable.until}; requeueing the run`);
-      return;
-    }
-    // Memory speaks once per state: one warning where it cannot be read, one line per hold.
-    if (memory && !memory.checked) {
-      if (!warned) io.say(memory.warning);
-      warned = true;
-      if (!position) return;
-    }
-    if (memory?.held) {
-      if (!held) io.say(memory.line);
-      held = true;
-      last = '';
-      return;
-    }
-    held = false;
-    const repos = holders.map(({ repo }) => repo).filter(Boolean);
-    const message = `gate waiting: ${holders.length} running${repos.length ? ` in ${repos.join(', ')}` : ''}; place ${position}`;
-    if (message !== last) {
-      io.say(message);
-      last = message;
-    }
-  };
-}
-
 /** Read or update machine-wide gate capacity. */
 function settingsCommand(io, { first, second, rest }) {
   if (!first && !second && !rest.length) {
@@ -3600,6 +3582,7 @@ async function specCommand(io, { first, second, rest, values }) {
     decline: ['reason'],
     answer: [],
     apply: [],
+    fit: ['text', 'reason'],
   }[first ?? '--json'];
   if (!commandFlags) throw new Refused('USAGE', 'use pullboard spec --json | check | view | show <id> | unmet [--must] | draft "<text>" | signoff <ids> | approve <ids> | decline <ids> --reason "why" | answer <id> "<choice or text>" | apply');
   const allowedFlags = [...new Set([...commandFlags, 'json'])];
@@ -3608,6 +3591,9 @@ async function specCommand(io, { first, second, rest, values }) {
       const next = flag === 'must' ? 'use --must with spec unmet' : 'use a flag accepted by this spec command';
       throw new Refused('FLAG_NOT_ALLOWED', `spec ${first ?? '--json'} does not take --${flag}; ${next}`);
     }
+  }
+  if (first === 'fit') {
+    return await withBoard(ctx, async (board) => await fitCommand(ctx, board, null, second ?? 'list', rest, values, { ordered, whoAmI }));
   }
   const spec = loadSpec(ctx.info.root, ctx.config);
   if (!spec.exists) throw new Refused('NO_SPEC', `no ${ctx.config.spec}; run: pullboard init`);
@@ -3773,8 +3759,10 @@ async function specCommand(io, { first, second, rest, values }) {
         { id, status, tier, text, gate, serves, signers, section, line, file: source ?? file,
           ...(from === undefined ? {} : { source: from }), ...(origin ? { origin, version, reason } : {}) }
       )));
-      io.result({ rows });
+      const fit = readFitBatch(ctx.info.commonDir, { isMain: ctx.info.isMain, channel: io.personChannel });
+      io.result({ rows, ...(fit.proposals.length ? { fit: fit.proposals, fitBatch: fit.batch } : {}) });
     } else messages.forEach((message) => io.say(message));
+    if (!values.json) fitSummary(readFitBatch(ctx.info.commonDir, { isMain: ctx.info.isMain, channel: io.personChannel })).forEach((message) => io.say(message));
     return errors ? 1 : 0;
   }
   if (first === 'signers' && second === 'add') {
@@ -4144,7 +4132,17 @@ async function runCommand(argv, io) {
         }
         throw error;
       }
-      const gate = await runGate(ctx.info.root, config, { landing: values.landing, agent: resourceAgent(ctx), onWait: gateWaitReporter(io) });
+      const waivers = values.landing ? withBoard(ctx, (board) => liveWaiverProjection(board)) : [];
+      const gate = await runGate(ctx.info.root, config, { landing: values.landing, agent: resourceAgent(ctx), onWait: gateWaitReporter(io), stages: Boolean(values.landing), waivers });
+      // A landing gate honours the person's live waivers exactly as land does; a red run never stamps, so it stays waived, not green [B3,R3].
+      const waived = values.landing && !gate.isGreen ? withBoard(ctx, (board) => waivedFailures(board, accountedFailures(gate, ctx.info.root))) : null;
+      if (waived) {
+        const lines = waived.map(waiverLine);
+        const report = `landing gate waived, not green: ${waived.length} failure(s), each covered by a live person waiver; the whole output is in ${gate.log}\n${lines.join('\n')}`;
+        io.result?.({ green: false, waived: waived.map(({ file, name, waiver }) => ({ file, name, waiver: waiver.id, reason: waiver.reason, until: waiver.until })), report });
+        io.say(report);
+        return 0;
+      }
       io.result?.({ green: gate.isGreen, report: gateReport(gate) });
       io.say(gateReport(gate));
       return gate.isGreen ? 0 : 1;

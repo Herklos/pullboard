@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import * as store from '../src/board.js';
 import { exportBoard, importBoard } from '../src/exchange.js';
 import { applyEngineMove, appliedSequence, engineReceipt, prepareEngineMove } from '../src/engine.js';
-import { VERDICT_REVIEW_ENGINE } from '../src/machine.js';
+import { ENGINE_VERSION, VERDICT_REVIEW_ENGINE } from '../src/machine.js';
 import { unpackRelease } from './release-archive.js';
 
 const BASE = 'a'.repeat(40);
@@ -153,7 +153,10 @@ test('a landing snapshot binds the checked composition through replay and final 
     branch: 'refs/heads/main', root: '/fixture/landing', owner: 'fixture', logPath: '/fixture/landing.log',
     candidates: [entry], items: [entry], revision: 0 };
   const record = prepareEngineMove(one, 'recordLandingBatch', [{ agentId: 'coordinator', batch }], { id: 'checked-landing-snapshot' });
-  assert.equal(record.engine, VERDICT_REVIEW_ENGINE);
+  // A new move carries the writer's current engine; the checked-review feature only sets the minimum (17 Oct: pinning the
+  // current version to the feature number broke every later engine item).
+  assert.equal(record.engine, ENGINE_VERSION);
+  assert.ok(record.engine >= VERDICT_REVIEW_ENGINE, 'the checked-review snapshot is written at or above its feature engine');
   const before = exportBoard(one);
   assert.throws(() => applyEngineMove(one, { ...record, engine: 12 }, { sequence: 2, at: AT }), { code: 'RELAY_MOVE' });
   assert.deepEqual(exportBoard(one), before, 'a downgraded checked-head snapshot cannot mutate the prefix');

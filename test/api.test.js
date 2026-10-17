@@ -1040,6 +1040,11 @@ test('[A1] every catalog command and subcommand has a real CLI exercise', () => 
   /** Exercise the agent-only takeover with a private explicit session, leaving later terminal calls markerless. */
   const sessionSource = { ...source, run: (cwd, ...args) => runFixtureChild(process.execPath, [BIN, ...args], { cwd, env: { ...source.env, CODEX_SESSION_ID: 'api-catalog-session' }, encoding: 'utf8' }) };
   json(sessionSource, source.repo, 'takeover');
+  const fitBlueprint = json(source, source.repo, 'blueprint', ['add', 'web-app'], 'add');
+  const fitTarget = fitBlueprint.rows[0].id;
+  const fitProposal = json(source, source.repo, 'blueprint', ['fit', 'web-app', fitTarget, 'keep'], 'fit');
+  assert.equal(fitProposal.proposals[0].target, fitTarget);
+  assert.equal(json(source, source.repo, 'spec', ['fit'], 'fit').proposals.length, 1);
   const lane = json(source, source.repo, 'lane', ['add', 'catalog', '--owns', 'catalog/'], 'add');
   assert.deepEqual([lane.lane, lane.owns], ['catalog', ['catalog/']]);
   assert.deepEqual(json(source, source.repo, 'lanes').lanes.catalog, { owns: ['catalog/'] });
