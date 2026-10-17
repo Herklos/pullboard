@@ -3,11 +3,11 @@
  * a free local gate slot or a registered runner, and report one result. One red shard stops the rest,
  * and a shard whose runner fails mid-run reruns locally.
  */
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { randomUUID } from 'node:crypto';
-import { repoInfo } from './git.js';
+import { createHash, randomUUID } from 'node:crypto';
+import { gitChildEnv, repoInfo } from './git.js';
 import {
   BROWSER_SLOT_HELD_ENV,
   GATE_SLOT_HELD_ENV,
@@ -162,6 +162,26 @@ async function runLocalShard({ root, runner, files, label, lease, stop }) {
   return { isGreen: status === 0 && !signal, output: chunks.join('') };
 }
 
+/**
+ * A fingerprint of exactly what a local shard would run: HEAD, every tracked change against it and
+ * the untracked files Git does not ignore. A landing pins it before its first shard.
+ *
+ * @param {string} root
+ * @returns {{ commit: string, fingerprint: string }}
+ */
+export function landingSource(root) {
+  const git = args => {
+    const result = spawnSync('git', args, { cwd: root, env: gitChildEnv(root), encoding: 'buffer', maxBuffer: 1024 ** 3 });
+    if (result.status !== 0) throw new Error(`git ${args[0]} failed while pinning the landing source`);
+    return result.stdout;
+  };
+  const commit = git(['rev-parse', 'HEAD']).toString('utf8').trim();
+  const hash = createHash('sha256').update(commit).update('\0')
+    .update(git(['diff', 'HEAD', '--binary', '--no-ext-diff'])).update('\0')
+    .update(git(['ls-files', '--others', '--exclude-standard', '-z']));
+  return { commit, fingerprint: hash.digest('hex') };
+}
+
 /** Runner refusals that mean the host could not run the shard right now, so a local rerun is sound. */
 const RERUN_REFUSALS = new Set(['RUNNER_SETUP_REFUSED', 'RESOURCE_LEASE_LOST']);
 
@@ -211,6 +231,8 @@ export async function runLandingShards({ root, runner, files, count, inherited =
   // A test may stand in for the SSH round trip to make a runner answer with a given refusal.
   const runOnRunnerAsync = remoteRun ?? runners.runOnRunnerAsync;
   const quarantined = new Map();
+  // Every local shard, first run or rerun, must run exactly this source or refuse by name.
+  const pinned = landingSource(root);
   const { Refused } = await import('./refused.js');
   const history = readFileTimes(root);
   const plan = planLandingShards(files, count, history);
@@ -239,7 +261,15 @@ export async function runLandingShards({ root, runner, files, count, inherited =
     const started = Date.now();
     const number = entry.attempts.length + 1;
     if (!lease.runner) {
+      const drifted = () => landingSource(root).fingerprint !== pinned.fingerprint;
+      /** A local result on other source than the landing pinned is never a result for this landing. */
+      const sourceChanged = when => {
+        write(`landing shard ${entry.label}: [LANDING_SOURCE_CHANGED] the checkout changed from the landing's pinned source ${pinned.commit.slice(0, 12)} ${when} this shard ran; restore that commit with no other changes and run the landing again\n`);
+        return { attempt: number, host: 'local', outcome: 'refused', reason: 'landing refused: LANDING_SOURCE_CHANGED', output: '', wallMs: Date.now() - started };
+      };
+      if (drifted()) return sourceChanged('before');
       const run = await runLocalShard({ root, runner, files: entry.shard.files, label: entry.label, lease, stop });
+      if (!stop.aborted && drifted()) return sourceChanged('while');
       return { attempt: number, host: 'local', outcome: run.isGreen ? 'green' : 'red', output: run.output, wallMs: Date.now() - started };
     }
     const command = `${LANDING_SHARD_ENV}=${word(entry.label)} ${['node', './bin/run-tests.js', ...entry.shard.files].map(word).join(' ')}`;

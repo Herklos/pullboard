@@ -278,11 +278,17 @@ async function landingWithRunnerAnswer(box, answer, count, deadlineMs) {
   const script = `const { runLandingShards, landingShardProfile } = await import(${url('landing-shards.js')});
 const { Refused } = await import(${url('refused.js')});
 const { RunnerDropped } = await import(${url('runners.js')});
+const { appendFileSync } = await import('node:fs');
 const answer = ${JSON.stringify(answer)};
 const calls = [];
 const remoteRun = async (_root, _command, options) => {
   calls.push(options.runner.host);
   if (answer === 'DROPPED') throw new RunnerDropped(options.runner.host);
+  if (answer === 'DROPPED_AFTER_EDIT') {
+    // The checkout moves on while the landing runs: a rerun must not test this source instead.
+    appendFileSync(${JSON.stringify(join(box.repo, 'test', 'f.test.js'))}, '\\n// edited while the landing ran\\n');
+    throw new RunnerDropped(options.runner.host);
+  }
   throw new Refused(answer, 'runner ' + options.runner.host + ' answered ' + answer + '; inspect job fixture-job under its runner namespace before another run');
 };
 const chunks = [];
@@ -335,6 +341,9 @@ test('a runner refusal in a sharded landing is handled by its class [C7,V4]', { 
   const unverified = await landingWithRunnerAnswer(box, 'RUNNER_CLEANUP_TIMEOUT', 4, 150_000);
   assert.equal(unverified.isGreen, true, unverified.output);
   assert.match(unverified.output, rerunLine);
+  // The quarantine and its inspect instruction come before the shard is retried anywhere.
+  assert.ok(unverified.output.indexOf('quarantined for the rest of this landing') < unverified.output.search(rerunLine),
+    `the host is quarantined before the retry\n${unverified.output}`);
   assert.match(unverified.output, /^landing runner fixture-host quarantined for the rest of this landing: \[RUNNER_CLEANUP_TIMEOUT\] .*inspect job fixture-job under its runner namespace before another run$/mu);
   assert.deepEqual(unverified.calls, ['fixture-host'], 'the quarantined host gets no second shard');
   assert.deepEqual(unverified.profile.quarantined.map(entry => entry.host), ['fixture-host']);
@@ -352,4 +361,16 @@ test('a runner refusal in a sharded landing is handled by its class [C7,V4]', { 
   assert.equal(unknown.isGreen, false, unknown.output);
   assert.match(unknown.output, /attempt 1 on fixture-host: refused \(runner refused: RUNNER_SOMETHING_NEW\)/u);
   assert.doesNotMatch(unknown.output, rerunLine);
+
+  // 6. A transport-loss rerun runs only the landing's pinned source: when the checkout changed
+  // under the landing, the rerun refuses by name instead of testing other code.
+  const edited = join(box.repo, 'test', 'f.test.js');
+  const original = readFileSync(edited, 'utf8');
+  try {
+    const moved = await landingWithRunnerAnswer(box, 'DROPPED_AFTER_EDIT', 3, 120_000);
+    assert.equal(moved.isGreen, false, moved.output);
+    assert.match(moved.output, /^landing shard \d\/3: \[LANDING_SOURCE_CHANGED\] the checkout changed from the landing's pinned source [0-9a-f]{12} /mu);
+    assert.match(moved.output, /: refused \(landing refused: LANDING_SOURCE_CHANGED\) in \d+ ms$/mu);
+    assert.doesNotMatch(moved.output, /attempt 2 on local: green/u, 'no green result comes from the changed checkout');
+  } finally { writeFileSync(edited, original); }
 });
