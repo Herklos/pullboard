@@ -6,7 +6,7 @@ import { snapshotState, presentationState } from './model.js';
 import { ENGINE_VERSION } from './engine.js';
 import { Refused } from './refused.js';
 import { enqueueStream, followStream } from './browser-stream.js';
-import { noticeLines, rememberOwnedRequestId, storedOwnedRequestState } from './browser-notice.js';
+import { homeLineDismissed, homeScreenLine, noticeLines, nothingShared, rememberOwnedRequestId, showRelayScreen, storedOwnedRequestState } from './browser-notice.js';
 import { registerApp, requestPairingPersistence } from './install.js';
 
 const KEYS = 'pullboard.relay.keys.v1';
@@ -174,21 +174,19 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
       paragraph.textContent = text;
       element.append(paragraph);
     }
+    // With nothing this device can open, the one-command screen shows; the page's poll fills the board in by itself.
+    showRelayScreen(document.documentElement, nothingShared({ paired, waitingBoards, failure }) ? 'share' : null);
   }
 
-  /** Ask once after pairing, retaining one refusal line through later board refreshes. */
+  /** Ask once after pairing; a refusal leaves one dismissible line under the board, never above it. */
   function keepPairingStorage() {
     persistenceRequest ??= requestPairingPersistence().then(kept => {
       const current = document.getElementById('pairing-storage-notice');
-      if (kept) { current?.remove(); return; }
-      const target = document.getElementById('relay-notice');
-      if (!target || accessLost) return;
-      const paragraph = current ?? document.createElement('p');
-      paragraph.id = 'pairing-storage-notice';
-      paragraph.className = 'card-panel';
-      paragraph.setAttribute('role', 'status');
-      paragraph.textContent = 'This browser may remove your pairing. Add Pullboard to your Home Screen to help keep it.';
-      if (!current) target.insertAdjacentElement('afterend', paragraph);
+      if (kept || homeLineDismissed(localStorage)) { current?.remove(); return; }
+      const main = document.querySelector('main');
+      // The answer comes later: a board lost meanwhile, or access lost, leaves no line about keeping it.
+      if (!main || accessLost || current || paired.size === 0) return;
+      main.append(homeScreenLine(document, localStorage));
     });
   }
 
@@ -573,7 +571,14 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
     catch { failure = 'The pairing link is invalid. Get a new link from a linked machine.'; failureBoard = null; notice(); }
   }
   addEventListener('hashchange', pairingChanged);
+  // A pairing link opened in another tab, as a scanned QR does, saves its key here: this page fills in by itself.
+  addEventListener('storage', event => { if (event.key === KEYS && !accessLost) listing().then(onUpdate, notice); });
   addEventListener('pagehide', () => { for (const entry of paired.values()) entry.stream?.close(); });
+  // Signed in with no board key saved and no pairing on its way, the one-command screen shows at once, while the
+  // first listing is still on the network; the listing then fills the board in, or keeps this screen.
+  let devicePairing = /(?:^#|&)device=/u.test(location.hash);
+  try { devicePairing ||= sessionStorage.getItem('pullboard.relay.device-pair.v1') !== null; } catch { /* No storage: no saved pairing. */ }
+  if (!pair && !devicePairing && !Object.keys(keys).length) showRelayScreen(document.documentElement, 'share');
   if (await enrollPhone((path, options) => documentAt(path, denied, options))) keepPairingStorage();
   await listing();
   await installPhoneApprovals((path, options) => documentAt(path, denied, options), keys, openApprovedBoard, access.signal);
