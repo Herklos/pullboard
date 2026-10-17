@@ -12,6 +12,8 @@ A successful command returns the fields listed below. `version` is always the nu
 
 Browser-free check admission is opt-in per machine with `"gate": { "browserFreeChecks": true }` in `~/.pullboard/settings.json`; it defaults to `false`. When enabled, the reviewed test classifier can let checks use a CPU-only gate slot. An absent or false setting keeps every check browser-gated, and uncertain or unsupported test commands remain browser-gated even when enabled. The same setting controls the wider frozen-check classification introduced in 0.8.26.
 
+The machine gate pool admits landings first and then everything else in arrival order. A machine opts in to reviews first with `"gate": { "queue": { "reviewsFirst": true } }` in `~/.pullboard/settings.json`: the pool then admits landing runs, then reviews, then submits and item checks, then focused and other runs, first come first served within each class. `gate.queue.agingMinutes` (a positive whole number, default `30`) is how long a waiting run waits before it moves up one class, so no class starves; it is used only while `reviewsFirst` is true. `pullboard settings` prints both values, and `pullboard resources` names the order in effect.
+
 When `add` or `edit` supplies a new nonempty check, it records the item before measuring that check in a background temporary checkout of the captured `main` commit. Use `--wait` to wait for the measurement before returning, or `args.wait: true` for an HTTP add/edit move. The item returned by `add`, `edit`, `show`, and `next --verify` may include `item_check_baseline`: `{command, main, result, request?, seconds?, reason?, warning?}`. `main` is the commit id or `null`, and `result` is `pending`, `green`, `red`, or `unavailable`. A background request carries an opaque `request` identity; an older completion cannot overwrite a newly edited or cleared check.
 
 An item's HTTP detail, and each item in the full board state, include `check` and, when recorded, `checkBaseline` with the same observation fields. A green result carries `warning: "CRITERION_PROVES_NOTHING"`; text output names that warning when showing or reserving the item for review, and when filing it with `--wait`. An exact match with the project gate configured at that main commit records green with `reason: "repo gate"` without running it again. A missing main records unavailable with `reason: "no main"` and still files the item. Changing the check replaces this observation; clearing it removes the observation. Captured observations and completions travel through ordered board moves, so replicas store results without executing commands. A completed result awaiting relay delivery stays on the measuring device and is retried by the next normal CLI command.
@@ -46,7 +48,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | --- | --- |
 | `help` | `version:number`, `help:string` |
 | `version` | `version:number`, `release:string` |
-| `init` | `version:number`, `root:string`, `notes:array` |
+| `init` | `version:number`, `root:string`, `notes:array`, `proposedLanes:array` |
 | `hooks` | `version:number`, `notes:array` |
 | `join` | `version:number`, `agent:string`, `lane:string`, `route:string`, `path:string`, `model:string`, `displayName:string` |
 | `takeover` | `version:number`, `agent:string`, `path:string` |
@@ -54,6 +56,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `resume` | `version:number`, `me:object`, `all:array`, `requests:array`, `holding:array`, `sentBack:array`, `awaiting:array`, `toVerify:array`, `toMerge:array`, `open:array`, `stale:array`, `holds:array`, `unread:number`, `newest:array`, `root:string`, `dirty:number`, `next:string` |
 | `whoami` | `version:number`, `id:string`, `lane:string`, `path:string`, `model:string`, `displayName:string` |
 | `lanes` | `version:number`, `lanes:object`, `shared:array`, `coordinator:string` |
+| `lane add` | `version:number`, `lane:string`, `owns:array` |
 | `resources` | `version:number`, `resources:array` |
 | `settings` | `version:number`, `settings:object` |
 | `runner` | `version:number`, `runner:object` |
@@ -118,13 +121,14 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `spec approve` | `version:number`, `decisions:array` |
 | `spec decline` | `version:number`, `decisions:array` |
 | `spec apply` | `version:number`, `applied:array`, `files:array` |
+| `doctrine check` | `version:number`, `rules:array` |
 | `hook pre-commit` | `version:number`, `messages:array` |
 | `hook pre-merge-commit` | `version:number`, `messages:array` |
 | `hook commit-msg` | `version:number`, `messages:array` |
 | `hook pre-push` | `version:number`, `messages:array` |
 <!-- api-command-shapes:end -->
 
-`hook pre-merge-commit` runs the same staged checks as `hook pre-commit` before Git creates an automatic merge commit. `init` and `hooks` install it; `doctor` names it when absent at Git's effective hook path. Lane ownership comes from `HEAD:pullboard.json`, so an unstaged configuration edit cannot grant a lane new folders. Lane-sensitive checks refuse a repository with `info/grafts` in its Git common directory because grafts alter ancestry even when replacement objects are disabled.
+`hook pre-merge-commit` runs the same staged checks as `hook pre-commit` before Git creates an automatic merge commit. `init` and `hooks` install it; `doctor` names it when absent at Git's effective hook path. Lane ownership comes from `HEAD:pullboard.json`, so an unstaged configuration edit cannot grant a lane new folders. `lane add` writes the new lane to the working `pullboard.json` and returns `{ lane, owns }`; commit the file before the lane's ownership takes effect. `init` returns the lanes it proposes as `proposedLanes`, each `{ name, owns }`, and writes none of them. Lane-sensitive checks refuse a repository with `info/grafts` in its Git common directory because grafts alter ancestry even when replacement objects are disabled.
 
 `join` and `worktree` require a free-text `--model` label or `PULLBOARD_MODEL` environment value; labels are not inferred from a provider or family. Rejoining the same worktree preserves its agent id; the model label is required on every join, and omitting the optional `--family` preserves its prior declaration. `pullboard.json` may set `agents.names` to `suffix` (the default, `web-1 (Claude)`) or `prefix` (`claude-web-1`). CLI `agent` fields remain stable ids; `displayName` shows the chosen style. `resume.me` and API state `agents[]` carry `model` and `displayName`; older agents with no model display `unknown`. Each event records the actor model in `event_detail.model` for a registered agent, with `unknown` for legacy agents without a declaration. `show` includes `item_builder_family` and each verdict's `verdict_verifier_family`. These family fields are `null` when the agent did not declare a family, and later declarations do not rewrite prior submissions or verdicts.
 

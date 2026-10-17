@@ -1,7 +1,7 @@
 /** Coordinator policy and immutable submission checks cannot come from a builder's candidate [V4,V16,L3,M3]. */
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { digestOf, writeTimingProfile } from './gate.js';
+import { digestOf, sandboxBlockedScanner, writeTimingProfile } from './gate.js';
 import { timingFromOutput, timingFromLog, timingRunner } from './timing.js';
 import { closeSync, existsSync, mkdtempSync, mkdirSync, openSync, readFileSync, readSync, rmSync, writeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -177,7 +177,7 @@ export function checkAtCommit(root, item, { waitMs = 0, gateSlotHeld = false, ga
     const runner = timingRunner(command);
     const events = checkLogPath && existsSync(checkLogPath) ? timingFromLog(checkLogPath, runner) : timingFromOutput(checkOutput, runner);
     timingProfile = { ...events, wallMs: Math.max(0, Date.now() - checkStartedAt) };
-    return checkResult(state, stage, installOutput, checkOutput, { root, item, installLogPath, checkLogPath, timingProfile, waitMs });
+    return checkResult(state, stage, installOutput, checkOutput, { root, item, commandRoot: copy, installLogPath, checkLogPath, timingProfile, waitMs });
   };
   try {
     const common = policyGit(root, ['rev-parse', '--path-format=absolute', '--git-common-dir']).trim();
@@ -271,7 +271,7 @@ function secretScanned(output, path) {
 }
 
 /** Stream one worker log into a private artifact while retaining only its bounded sanitized tail. */
-function streamSanitizedLog(path, fallback, label, writeArtifact) {
+function streamSanitizedLog(path, fallback, label, writeArtifact, onLine = () => {}) {
   const decoder = new StringDecoder('utf8');
   const tail = [];
   let line = '';
@@ -298,6 +298,7 @@ function streamSanitizedLog(path, fallback, label, writeArtifact) {
   /** Retain one bounded tail line and append its scanned form to the artifact buffer. */
   function emitLine(newline) {
     const sanitized = oversized ? CHECK_OVERSIZED_LINE : scanOutputLine(line, label, lineNumber);
+    onLine(sanitized);
     const bounded = sanitized.length > 2000
       ? `${sanitized.slice(0, 1000)}…[line truncated]…${sanitized.slice(-1000)}` : sanitized;
     tail.push(bounded);
@@ -365,12 +366,13 @@ function streamSanitizedLog(path, fallback, label, writeArtifact) {
 }
 
 /** Persist a sanitized full diagnostic outside the temporary checkout so a refusal can name it. */
-function checkResult(state, stage, installCapture, checkCapture, { root = '', item = {}, installLogPath = '', checkLogPath = '', timingProfile = null, waitMs = 0 } = {}) {
+function checkResult(state, stage, installCapture, checkCapture, { root = '', item = {}, commandRoot = root, installLogPath = '', checkLogPath = '', timingProfile = null, waitMs = 0 } = {}) {
   const boundedInstall = secretScanned(installCapture, 'check install capture');
   const boundedCheck = secretScanned(checkCapture, 'frozen check capture');
   const install = digestOf(boundedInstall) || '(no output)';
   const check = digestOf(boundedCheck) || '(not run or no output)';
   const report = `install output:\n${install}\ncheck output:\n${check}`;
+  let sandboxBlocked = null;
   let outputPath = null;
   let outputError = null;
   let artifactFd = null;
@@ -400,11 +402,12 @@ function checkResult(state, stage, installCapture, checkCapture, { root = '', it
   /** Give a missing phase the same explicit placeholder used by the former complete-string path. */
   const writePhase = (title, path, capture, label, absentText) => {
     appendArtifact(`${title}:\n`);
+    const scan = sandboxBlockedScanner(commandRoot);
     const result = streamSanitizedLog(path, capture, label, artifactFd === null ? null : (buffer, offset) => {
       const written = writeSync(artifactFd, buffer, offset, buffer.length - offset);
       if (written <= 0) throw new Error('diagnostic artifact write made no progress');
       return written;
-    });
+    }, line => { if (state !== 'pass' && title === (stage.startsWith('install') ? 'install' : 'check')) sandboxBlocked ??= scan(line); });
     if (!result.sawOutput) appendArtifact(`${absentText}\n`);
     return result;
   };
@@ -438,5 +441,5 @@ function checkResult(state, stage, installCapture, checkCapture, { root = '', it
   const failure = state === 'red' ? 'failed' : /timed out/u.test(stage) ? 'timed out'
     : /could not start/u.test(stage) ? "couldn't start" : state === 'unverified' ? 'could not be verified' : 'passed';
   const output = `install output:\n${boundedInstall || '(no output)'}\ncheck output:\n${boundedCheck || '(not run or no output)'}`;
-  return { state, green: state === 'pass', checked: true, stage, failure, report, output, outputTail, outputPath, outputError, profilePath, profile: timingProfile ? { ...timingProfile, profilePath } : null };
+  return { sandboxBlocked, state, green: state === 'pass', checked: true, stage, failure, report, output, outputTail, outputPath, outputError, profilePath, profile: timingProfile ? { ...timingProfile, profilePath } : null };
 }
