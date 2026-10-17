@@ -17,10 +17,12 @@
  *   gate       "npm test"              optional, set in pullboard.json only when it has no gate
  *   rules      [{ key, text, why, tier?, gate? }]          tier must|aim (must), gate (review)
  *   questions  [{ key, ask, choices, default }]            default is one of choices
- *   items      [{ key, title, cites?, after?, lane?, route?, criterion?, brief?, check? }]
+ *   items      [{ key, title, cites?, after?, lane?, route?, criterion, brief?, check }]
  *
- * An item's route is light, mid or strong (strong when left out), as pullboard add takes it. Its
- * brief, criterion and check pass through to add unchanged, so a light or mid item is filed when it
+ * Every starter item carries a criterion and a check, or the blueprint is refused with
+ * BLUEPRINT_ITEM_UNCHECKED when it is read or saved: a starter that cannot be verified cannot be
+ * accepted. An item's route is light, mid or strong (strong when left out), as pullboard add takes
+ * it. Its brief, criterion and check pass through to add unchanged, so a light or mid item is filed when it
  * carries what add requires for that route and refused with add's own refusal when it does not.
  * A check is stored on the item and never run during add: no check baseline starts, so nothing a
  * blueprint supplies executes. A blueprint is read from the bundled set or a local path, never a URL.
@@ -99,7 +101,7 @@ export function readBlueprint(reference, cwd) {
  * @property {string} [gate]
  * @property {{ key: string, text: string, why: string, tier: string, gate: string }[]} rules
  * @property {{ key: string, ask: string, choices: string[], default: string }[]} questions
- * @property {{ key: string, title: string, cites: string[], after: string[], lane?: string, route: string, criterion: string, brief: string }[]} items
+ * @property {{ key: string, title: string, cites: string[], after: string[], lane?: string, route: string, criterion: string, brief: string, check: string }[]} items
  */
 
 /**
@@ -173,19 +175,40 @@ export function validateBlueprint(value, source = 'blueprint') {
     }
     line(`${at}.lane`, item.lane, { required: false });
     if (item.route !== undefined && !ROUTES.includes(item.route)) fail(`${at}.route`, `must be one of ${ROUTES.join(', ')}`);
-    line(`${at}.check`, item.check, { required: false });
-    line(`${at}.criterion`, item.criterion, { required: false });
+    // A blank check or criterion is a missing one, refused below by name as BLUEPRINT_ITEM_UNCHECKED.
+    const blank = (text) => typeof text === 'string' && !text.trim();
+    if (!blank(item.check)) line(`${at}.check`, item.check, { required: false });
+    if (!blank(item.criterion)) line(`${at}.criterion`, item.criterion, { required: false });
     if (item.brief !== undefined && typeof item.brief !== 'string') fail(`${at}.brief`, 'must be text');
   });
   if (problems.length) {
     throw new Refused('BAD_BLUEPRINT', `${source} is not a valid blueprint: ${problems.slice(0, 5).join('; ')}${problems.length > 5 ? `; and ${problems.length - 5} more` : ''}; fix the file and run pullboard blueprint add again`);
   }
+  refuseUncheckedItems(value.name, items);
   return {
     ...value,
     rules: rules.map((rule) => ({ ...rule, tier: rule.tier ?? 'must', gate: rule.gate ?? 'review' })),
     questions,
     items: items.map((item) => ({ ...item, cites: item.cites ?? [], after: item.after ?? [], route: item.route ?? 'strong', criterion: item.criterion ?? '', brief: item.brief ?? '' })),
   };
+}
+
+/**
+ * Refuse a blueprint whose starter item has no criterion or no check, naming the blueprint and the
+ * item. A starter without both cannot be built against a bar or verified, so it could never reach
+ * an accept (#724). The check is stored on the item and still never run by add or init.
+ *
+ * @param {string} name - The blueprint's name, already checked.
+ * @param {{ key: string, title: string, criterion?: string, check?: string }[]} items
+ * @returns {void}
+ */
+function refuseUncheckedItems(name, items) {
+  for (const item of items) {
+    const missing = [item.criterion, item.check].map((text) => (typeof text === 'string' ? text.trim() : ''));
+    const lacks = [!missing[0] && 'no criterion', !missing[1] && 'no check'].filter(Boolean);
+    if (!lacks.length) continue;
+    throw new Refused('BLUEPRINT_ITEM_UNCHECKED', `blueprint ${name} starter item ${item.key} (${JSON.stringify(item.title)}) has ${lacks.join(' and ')}; give every starter item a criterion and a check command, then run pullboard blueprint add again`);
+  }
 }
 
 /**
