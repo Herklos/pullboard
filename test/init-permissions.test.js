@@ -109,6 +109,10 @@ test('init grants the agent the permissions the Pullboard loop needs [I1,I2]', t
     sandbox: { enabled: true, filesystem: { allowWrite: ['/tmp/existing-write'], denyWrite: ['/tmp/existing-deny'] } },
   };
   const box = initFixture(t, { existingSettings: existing, existingCodexRules: '# user rule stays\n' });
+  const existingCodexConfig = `sandbox_mode = "workspace-write"\n\n[sandbox_workspace_write]\nwritable_roots = ["/tmp/existing-codex-root"]\n`;
+  mkdirSync(join(box.root, '.codex'), { recursive: true });
+  const codexConfigPath = join(box.root, '.codex', 'config.toml');
+  writeFileSync(codexConfigPath, existingCodexConfig);
   const initialized = box.init();
   assert.equal(initialized.code, 0, initialized.stderr);
 
@@ -139,8 +143,11 @@ test('init grants the agent the permissions the Pullboard loop needs [I1,I2]', t
   assert.deepEqual(codexPrefixes(codexRules), [['pullboard'], ['git', 'status'], ['git', 'diff'], ['git', 'log'], ['git', 'add'], ['git', 'commit'], ['git', 'merge'], ['git', 'rebase'], ['git', 'switch'], ['git', 'checkout'], ['git', 'worktree'], ['npm', 'test']], 'Codex rules stay scoped to the exact loop commands');
   assert.ok(initialized.document.notes.some(note => /Claude Code.*Pullboard loop/u.test(note)), 'init says what Claude rules it added');
   assert.ok(initialized.document.notes.some(note => /trusted-project Codex rules.*trust this project and restart the session/u.test(note)), 'init explains trust and session restart for Codex rules');
-  const expectedLegacyCodex = `[sandbox_workspace_write]\nwritable_roots=${JSON.stringify([machineHomePath])}`;
-  assert.ok(initialized.document.notes.some(note => note.includes(expectedLegacyCodex)), 'Codex setup prints the exact machine-home legacy workspace-write lines');
+  const expectedLegacyCodex = `sandbox_mode = "workspace-write"\n\n[sandbox_workspace_write]\nwritable_roots = ${JSON.stringify([machineHomePath])}`;
+  assert.ok(initialized.document.notes.some(note => note.includes(expectedLegacyCodex)), 'Codex setup prints exact legacy workspace-write values scoped to the machine home');
+  assert.ok(initialized.document.notes.some(note => /sandbox_mode at the TOML top level before any table, append this exact path to any existing writable_roots array while keeping its entries, and do not duplicate the table or replace unrelated settings/u.test(note)), 'Codex setup explains the top-level key and exact append without replacing settings or duplicating the TOML table');
+  assert.ok(initialized.document.notes.some(note => /https:\/\/learn\.chatgpt\.com\/docs\/config-file\/config-reference.*https:\/\/learn\.chatgpt\.com\/docs\/permissions/u.test(note)), 'Codex setup cites the official sandbox and permission-profile references');
+  assert.equal(readFileSync(codexConfigPath, 'utf8'), existingCodexConfig, 'init prints Codex configuration guidance without rewriting a project config');
   assert.ok(initialized.document.notes.some(note => /permission-profile users.*existing \[permissions\.<active-profile>\.filesystem\].*do not mix/iu.test(note)), 'Codex setup explains the permission-profile alternative without mixing config systems');
 
   const settingsBytes = readFileSync(settingsPath, 'utf8');
