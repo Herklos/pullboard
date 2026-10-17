@@ -64,7 +64,7 @@ import {
 import { answerQuestion, bundledBlueprints, planBlueprint, readBlueprint, saveBlueprint } from './blueprints.js';
 import { briefFiles } from './brief.js';
 import { commitFirst, commitOwnerLines, commitOwners, coordinatorInbox, coordinatorInboxLines, inboxFirst } from './resume.js';
-import { checkBaseline, prepareCheckBaseline, sayCheckBaseline } from './check-baseline.js';
+import { checkBaseline, prepareCheckBaseline, sayCheckBaseline, refuseCheckSyntax } from './check-baseline.js';
 import { retryCheckBaselines, startCheckBaseline } from './check-baseline-worker.js';
 import { compareMainFailures, mainRedMessage, mainRedReworkItems } from './main-red.js';
 import { runItems } from './run.js';
@@ -2943,6 +2943,7 @@ function workCommands(io, args) {
       };
       buildInFilelessLane(ctx.config, first, after);
       const { command } = store.validateItemAddition(board, item);
+      if (command) refuseCheckSyntax(command);
       if (command) item.checkBaseline = values.wait ? checkBaseline(ctx.info.root, command) : prepareCheckBaseline(ctx.info.root, command);
       const id = await ordered(ctx, board, 'addItem', [item]);
       if (item.checkBaseline?.result === 'pending') await launchBaseline(ctx, board, id, item.checkBaseline);
@@ -2973,6 +2974,7 @@ function workCommands(io, args) {
         ...(values.reason !== undefined ? { reason: values.reason } : {}),
       };
       const { item, command } = store.validateItemEdit(board, id, change);
+      if (command && command !== item.item_check) refuseCheckSyntax(command);
       if (command && command !== item.item_check) change.checkBaseline = values.wait ? checkBaseline(ctx.info.root, command) : prepareCheckBaseline(ctx.info.root, command);
       await ordered(ctx, board, 'editItem', [id, change]);
       if (change.checkBaseline?.result === 'pending') await launchBaseline(ctx, board, id, change.checkBaseline);
