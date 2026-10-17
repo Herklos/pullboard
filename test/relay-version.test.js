@@ -28,10 +28,10 @@ test('relay enforces the minimum engine ever required by each board [H16,H3]', a
   await auth.revoke(person.token, historical.id);
   time += 10;
   assert.equal(auth.minimumEngineVersion(A), 1);
-  assert.equal(auth.minimumEngineVersion(B), 20, 'agent tokens now require engine 20 (#579)');
+  assert.equal(auth.minimumEngineVersion(B), 27, 'agent tokens now require engine 27 (#579)');
   auth.close();
   auth = createRelayAuth(authConfig);
-  assert.equal(auth.minimumEngineVersion(B), 20, 'the minimum survives revocation, expiry and reopening the real auth database');
+  assert.equal(auth.minimumEngineVersion(B), 27, 'the minimum survives revocation, expiry and reopening the real auth database');
   const relay = await serveRelay({ directory: join(directory, 'data'), auth, maintenanceMs: 0, pollMs: 10 });
   t.after(async () => { await relay.close(); auth.close(); rmSync(directory, { recursive: true, force: true }); });
   const base = `http://127.0.0.1:${relay.port}/api/v1/boards/`;
@@ -48,19 +48,19 @@ test('relay enforces the minimum engine ever required by each board [H16,H3]', a
   }
   // Seed opaque snapshots so eligible reads reach actual state and event handlers.
   for (const board of [A, B]) {
-    const seeded = await call(board, '/state', { engine: 20, method: 'PUT', body: JSON.stringify({ sequence: 0, sealed: opaque }) });
+    const seeded = await call(board, '/state', { engine: 27, method: 'PUT', body: JSON.stringify({ sequence: 0, sealed: opaque }) });
     assert.equal(seeded.status, 200, seeded.text);
   }
 
   for (const board of [A, B]) {
-    const currentState = await call(board, '/state', { engine: 20 });
+    const currentState = await call(board, '/state', { engine: 27 });
     assert.equal(currentState.status, 200, currentState.text);
-    assert.equal((await call(board, '/events?after=0', { engine: 20 })).status, 200);
+    assert.equal((await call(board, '/events?after=0', { engine: 27 })).status, 200);
   }
   for (const board of [A, B]) {
     const controller = new AbortController();
     const streamed = await fetch(base + board + '/events?after=0', {
-      headers: { authorization: `Bearer ${person.token}`, 'x-pullboard-engine': '20', accept: 'text/event-stream' }, signal: controller.signal,
+      headers: { authorization: `Bearer ${person.token}`, 'x-pullboard-engine': '27', accept: 'text/event-stream' }, signal: controller.signal,
     });
     assert.equal(streamed.status, 200);
     await streamed.body.cancel(); controller.abort();

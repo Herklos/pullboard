@@ -247,7 +247,7 @@ test('an agent in its worktree cannot mint a relay token [H2,V1,E3,E5,P6]', asyn
     /** The accept arguments a seat sends for this item. */
     const verdict = (agentId) => [item.item_id, { agentId, decision: 'ACCEPT', reason: 'CRITERION_MET', note: 'checked the proof', head: 'd'.repeat(40), digest: item.item_frozen_digest }];
     let id = 0;
-    /** Replay one stamped engine-20 relay move from an agent on the linked board copy. */
+    /** Replay one stamped engine-27 relay move from an agent on the linked board copy. */
     const move = (operation, args, sender, extra = {}) => applyRelayMove(board, { version: 1, engine: ENGINE_VERSION, id: `standing-${++id}`, operation, args }, {
       sequence: appliedSequence(board) + 1, at: new Date().toISOString(), kind: 'move', sender: { kind: 'agent', userId: '1', policy: VERIFIER_STANDING_ENGINE, ...sender }, ...extra,
     });

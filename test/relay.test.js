@@ -823,7 +823,7 @@ test('revoking a board credential while its upload body is open stores nothing [
   const origin = `http://127.0.0.1:${service.port}`;
   const snapshot = await fetch(`${origin}/api/v1/boards/${board}/state`, {
     method: 'PUT',
-    headers: { 'x-pullboard-engine': '20', authorization: `Bearer ${person.token}`, 'content-type': 'application/json' },
+    headers: { 'x-pullboard-engine': '27', authorization: `Bearer ${person.token}`, 'content-type': 'application/json' },
     body: JSON.stringify({ sequence: 0, sealed: 'AQ' }),
   });
   assert.equal(snapshot.status, 200);
@@ -843,7 +843,7 @@ test('revoking a board credential while its upload body is open stores nothing [
   let stream;
   const upload = fetch(`${origin}/api/v1/boards/${board}/moves`, {
     method: 'POST',
-    headers: { 'x-pullboard-engine': '20', authorization: `Bearer ${agent.token}`, 'content-type': 'application/json' },
+    headers: { 'x-pullboard-engine': '27', authorization: `Bearer ${agent.token}`, 'content-type': 'application/json' },
     body: new ReadableStream({ start(controller) { stream = controller; controller.enqueue(Buffer.from('{"sequence":1,"sealed":"')); } }),
     duplex: 'half',
   });
@@ -859,7 +859,7 @@ test('revoking a board credential while its upload body is open stores nothing [
   assert.equal(response.status, 401, JSON.stringify(refusal));
   assert.equal(refusal.error.code, 'AUTH_REQUIRED');
   const events = await fetch(`${origin}/api/v1/boards/${board}/events?after=0`, {
-    headers: { 'x-pullboard-engine': '20', authorization: `Bearer ${person.token}` },
+    headers: { 'x-pullboard-engine': '27', authorization: `Bearer ${person.token}` },
   });
   assert.equal(events.status, 200);
   assert.deepEqual((await events.json()).events, [], 'the revoked upload never appends a move');
@@ -880,7 +880,7 @@ test('revoking a person token during snapshot upload preserves the prior snapsho
   const origin = `http://127.0.0.1:${service.port}`;
   const firstSnapshot = await fetch(`${origin}/api/v1/boards/${board}/state`, {
     method: 'PUT',
-    headers: { 'x-pullboard-engine': '20', authorization: `Bearer ${person.token}`, 'content-type': 'application/json' },
+    headers: { 'x-pullboard-engine': '27', authorization: `Bearer ${person.token}`, 'content-type': 'application/json' },
     body: JSON.stringify({ sequence: 0, sealed: 'AQ' }),
   });
   assert.equal(firstSnapshot.status, 200);
@@ -900,7 +900,7 @@ test('revoking a person token during snapshot upload preserves the prior snapsho
   let stream;
   const upload = fetch(`${origin}/api/v1/boards/${board}/state`, {
     method: 'PUT',
-    headers: { 'x-pullboard-engine': '20', authorization: `Bearer ${person.token}`, 'content-type': 'application/json' },
+    headers: { 'x-pullboard-engine': '27', authorization: `Bearer ${person.token}`, 'content-type': 'application/json' },
     body: new ReadableStream({ start(controller) { stream = controller; controller.enqueue(Buffer.from('{"sequence":0,"sealed":"')); } }),
     duplex: 'half',
   });
@@ -916,7 +916,7 @@ test('revoking a person token during snapshot upload preserves the prior snapsho
   assert.equal(response.status, 401, JSON.stringify(refusal));
   assert.equal(refusal.error.code, 'AUTH_REQUIRED');
   const current = await fetch(`${origin}/api/v1/boards/${board}/state`, {
-    headers: { 'x-pullboard-engine': '20', authorization: `Bearer ${observer.token}` },
+    headers: { 'x-pullboard-engine': '27', authorization: `Bearer ${observer.token}` },
   });
   assert.equal(current.status, 200);
   const saved = await current.json();

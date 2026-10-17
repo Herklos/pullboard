@@ -183,7 +183,7 @@ export function refuseRelayMove(board, move, { sequence, at, sender, kind, code,
 }
 
 /**
- * Bind an engine-20 registration to the relay's receipt (#579). A seat made by another seat names
+ * Bind an engine-27 registration to the relay's receipt (#579). A seat made by another seat names
  * itself in the move (`id`) and arrives with the receipt the relay issued its first token under:
  * same target, the authenticated creator, this position and these exact sealed bytes. A join no
  * seat made is machine-sent and carries no receipt; a receipt on any other move is refused.
@@ -220,7 +220,7 @@ export function applyRelayMove(board, move, { sequence, at, sender, kind, digest
   const phoneReceipt = sender?.kind === 'machine' && move?.engine >= 6 && Boolean(move.personRequest) && !requestMoveProblem(board, move, { checkExecutorLease: false });
   const problem = relaySenderProblem(move, sender, kind, { phoneReceipt }) ?? (kind === 'move' ? registrationProblem(board, move, { sender, registration, sequence, digest }) : null);
   if (!problem) {
-    // Engine-20 relay moves run under linked verifier standing; older recorded moves replay as they did.
+    // Engine-27 relay moves run under linked verifier standing; older recorded moves replay as they did.
     // The person is above every seat; their own moves act with the coordinator's standing.
     const standing = move?.engine >= VERIFIER_STANDING_ENGINE ? { root: sender?.root === true || sender?.kind === 'person',
       person: sender?.kind === 'person', lineage: sender?.root === true && typeof sender.lineage === 'string' ? sender.lineage : null } : null;

@@ -576,7 +576,7 @@ function withBoard(ctx, work) {
 
 /** Dispatch a board mutation locally, or seal it before any linked replica applies it. */
 async function ordered(ctx, board, operation, args) {
-  // Every engine-20 registration records the seat that made it: the coordinator from the main
+  // Every engine-27 registration records the seat that made it: the coordinator from the main
   // checkout, the joined agent from its worktree, or `machine` for a join no seat made (#579).
   if (operation === 'register' && args[0] && args[0].createdBy === undefined) {
     const joined = store.agentAt(board, ctx.info.root)?.agent_id;
@@ -2650,7 +2650,7 @@ async function nextOnce(ctx, values) {
     const { item, reasons, shared } = store.nextFor(board, { agentId: me.id, lane: me.lane, runnable: values.runnable, routes: values.routes, warm,
       priority: mainRedReworkItems(ctx.info.root, board) });
     const held = item?.item_status === 'claimed';
-    /** Offer only reviews this seat may give; a linked board previews its engine-20 verifier standing (#579). */
+    /** Offer only reviews this seat may give; a linked board previews its engine-27 verifier standing (#579). */
     const findOffer = () => store.reviewOffer(board, { agentId: me.id, lane: me.lane, policy: ctx.config.verify.policy,
       familyPolicy: ctx.config.verify.family, ratio: ctx.config.verify.reviewRatio, runnable: values.runnable, routes: values.routes });
     const offer = held ? null : relayLinked(ctx.info.root) ? store.withVerifierStanding(board, { root: true }, findOffer) : findOffer();

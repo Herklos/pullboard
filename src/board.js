@@ -507,7 +507,7 @@ function current(board, item) {
  * by the agent; the board neither names nor infers it. Registering again preserves the agent id;
  * explicitly supplied family and model values update their declarations, while omission preserves them.
  *
- * From engine 20 a new seat records the seat that created it (`createdBy`: an agent id, or
+ * From engine 27 a new seat records the seat that created it (`createdBy`: an agent id, or
  * `machine` for a join no seat made), so a linked board can tell a builder's own seats from
  * independent verifiers (#579). A creator may name the new seat (`id`, the lane's next form) when
  * the relay already issued a token for the next name; ids then skip taken names.
