@@ -1540,9 +1540,9 @@ export async function relayOff(root, io) {
     let joined = [];
     try {
       const roster = await request(state, '/auth/machines?board=' + state.board, {}, io);
-      if (Array.isArray(roster.machines)) joined = roster.machines.filter(entry => typeof entry.machine === 'string' && /^[A-Za-z0-9_.-]{1,128}$/u.test(entry.machine) && entry.machine !== state.machine).map(entry => entry.machine);
+      if (Array.isArray(roster.machines)) joined = roster.machines.filter(entry => typeof entry.machine === 'string' && /^[A-Za-z0-9_.-]{1,128}$/u.test(entry.machine) && entry.machine !== state.machine).map(entry => ({ machine: entry.machine, name: typeof entry.host === 'string' && entry.host.trim() ? entry.host : entry.machine.slice(-8) }));
     } catch { /* Local unlink still completes when the relay cannot inventory joined computers. */ }
-    const warning = joined.length ? ' If you approve deletion, joined computers ' + joined.map(machine => machine.slice(-8)).join(', ') + ' lose the shared copy; their local boards keep working.' : '';
+    const warning = joined.length ? ' If you approve deletion, joined computers ' + joined.map(entry => entry.name).join(', ') + ' lose the shared copy; their local boards keep working.' : '';
     if (warning) io.err(warning.trim());
     // Local unlink always completes, including agent shells, outages and a fenced remote baseline.
 
@@ -1563,7 +1563,7 @@ export async function relayOff(root, io) {
     }
     return { linked: false, board: state.board, url: state.url, link: '', sequence: state.sequence, behind: 0, recovery: recoverySummary(null),
       ...(remote ? { remote } : {}),
-      ...(joined.length ? { affectedMachines: joined } : {}),
+      ...(joined.length ? { affectedMachines: joined.map(entry => entry.machine), joined: joined.map(entry => entry.name) } : {}),
       notice: 'Local link removed. The relay copy stays until you approve deleting it on your phone.' + warning + (requested ? '' : ' Open the phone to manage the relay copy.') };
   });
 }
