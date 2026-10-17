@@ -7,6 +7,7 @@ import * as store from '../src/board.js';
 import { applyEngineMove, applyRelayMove, prepareEngineMove } from '../src/engine.js';
 import { exportBoard, importBoard } from '../src/exchange.js';
 import { SUBMISSION_PROOF_ENGINE, landingFileTimes } from '../src/submit-invariants.js';
+import { landingFailures } from '../src/land.js';
 import { createE2eHelpers } from './e2e-helpers.js';
 
 const e2e = createE2eHelpers();
@@ -186,4 +187,8 @@ test('submission selection replays on two replicas and legacy history remains un
     'case-body duration is not a measured file duration');
   assert.deepEqual(landingFileTimes('/fixture', { files: [{ path: '/fixture/test/a.test.js', durationMs: 8 }, { path: '/elsewhere/private.js', durationMs: 1 }] }),
     [{ path: 'test/a.test.js', durationMs: 8 }], 'reported file timings are relative and cannot escape the project');
+  const cancelled = "not ok 1 - cancelled child\n  location: /fixture/test/cancelled.test.js:1:1\n  failureType: 'cancelledByParent'\nnot ok 2 - actual failure\n  location: /fixture/test/failed.test.js:1:1\n  failureType: 'testCodeFailure'\nnot ok 3 - test/wrapper.test.js\n  failureType: 'subtestsFailed'\n";
+  assert.equal(landingFailures(cancelled, '/fixture').length, 3, 'the existing landing parser behavior stays available');
+  assert.deepEqual(landingFailures(cancelled, '/fixture', { excludeCancelled: true }), [{ file: 'test/failed.test.js', name: 'actual failure' }],
+    'cancellation fallout and aggregate wrappers do not become independent escaped-file suggestions');
 });

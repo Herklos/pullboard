@@ -19,7 +19,7 @@ function testHash(root, file) {
 }
 
 /** Derive failing test identities from TAP names and source locations, refusing unknown paths. */
-export function landingFailures(output, root) {
+export function landingFailures(output, root, { excludeCancelled = false } = {}) {
   const failures = [];
   let active = null;
   for (const line of output.split('\n')) {
@@ -35,8 +35,9 @@ export function landingFailures(output, root) {
       const file = isAbsolute(path) ? relative(root, path) : path.replace(/^\.\//u, '');
       if (file && !file.startsWith('../') && !file.includes('\\')) active.file = file;
     }
+    if (excludeCancelled && active && /^\s*failureType:\s*['"]?(?:cancelledByParent|subtestsFailed)['"]?\s*$/u.test(line)) active.omit = true;
   }
-  const unique = new Map(failures.map((entry) => [`${entry.file}\0${entry.name}`, entry]));
+  const unique = new Map(failures.filter(entry => !entry.omit).map(({ file, name }) => [`${file}\0${name}`, { name, file }]));
   return [...unique.values()];
 }
 
@@ -211,7 +212,7 @@ async function gateGroup(state, label) {
   const evidence = state.batch.invariantEvidence ?? { version: 1, gates: [], diagnostics: [] };
   const tested = { commit, isGreen: gate.isGreen && completeGate(gate),
     submissions: state.batch.items.map(({ id, commit }) => ({ id, commit })),
-    failures: [...new Set(result.failures.map(failure => failure.file).filter(Boolean))],
+    failures: [...new Set(landingFailures(gate.output, state.batch.root, { excludeCancelled: true }).map(failure => failure.file).filter(Boolean))],
     fileTimes: landingFileTimes(state.batch.root, gate.profile) };
   await save(state, { gateResults: [...state.gates.values()].map(({ tree: testedTree, isGreen, failures, complete, requiresGreen, logPath: log }) =>
     ({ tree: testedTree, isGreen, failures, complete: complete ?? null, requiresGreen: Boolean(requiresGreen), logPath: log })),
