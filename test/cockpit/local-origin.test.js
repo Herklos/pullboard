@@ -83,6 +83,13 @@ async function hostedStandIn(chrome, pages, styles, local) {
           body: Buffer.from(reply.body).toString('base64'),
         });
       }
+      if (address.pathname === '/api/v1/boards') {
+        return chrome.send('Fetch.fulfillRequest', {
+          requestId, responseCode: 200,
+          responseHeaders: [{ name: 'Content-Type', value: 'application/json' }, { name: 'Cache-Control', value: 'no-store' }],
+          body: Buffer.from(JSON.stringify({ version: 1, boards: [], warnings: [] })).toString('base64'),
+        });
+      }
       const document = resourceType === 'Document';
       const page = address.search === '?relay' ? pages.relay : pages.anonymous;
       await chrome.send('Fetch.fulfillRequest', {
@@ -219,6 +226,19 @@ test('a pullboard.dev page reads the local board [N26,A2]', { timeout: 120_000 }
     assert.equal(trips(), 2, 'the page repeated the round trip without the person');
     assert.ok(!(await chrome.stable('location.href')).includes(view.key), 'the new secret is gone from the address bar too');
     assert.ok(chrome.requests.every((entry) => !new URL(entry.url).search.includes(view.key) && !new URL(entry.url).search.includes(before)), 'neither secret ever rode in a query');
+    // A signed-in person with only local boards has no need for the decrypting relay client. The metadata
+    // read is on the hosted origin and must never carry this machine's local credential.
+    const modulesBefore = relayModule();
+    const metadataBefore = chrome.requests.filter((entry) => entry.url === HOSTED + '/api/v1/boards').length;
+    await chrome.send('Page.navigate', { url: HOSTED + '/?relay' });
+    await chrome.waitFor("location.search === '?relay' && document.querySelector('#chain')?.textContent.includes('A board that stays on this machine')", 20_000); // budget: hang ceiling for a tab-session read and empty linked-board metadata.
+    await chrome.waitFor("(window.__localFetches || []).some((entry) => entry.url === '/api/v1/boards')", 10_000); // budget: hang ceiling for the same-origin metadata request.
+    assert.equal(await chrome.stable('transportModule'), null, 'an empty linked list leaves the relay transport unloaded even when signed in');
+    assert.equal(relayModule(), modulesBefore, 'a local-only signed-in page does not request the relay module');
+    const metadata = chrome.requests.filter((entry) => entry.url === HOSTED + '/api/v1/boards').slice(metadataBefore);
+    assert.ok(metadata.length > 0, 'the signed-in page checked its linked-board metadata');
+    assert.ok(metadata.every((entry) => !Object.keys(entry.headers).some((name) => name.toLowerCase() === 'x-pullboard-key')), 'same-origin metadata never gets the local secret header');
+    assert.equal(await chrome.stable('readOnly'), false, 'the local board remains writable');
     assert.deepEqual(chrome.exceptions, [], 'Chrome reports no uncaught exceptions');
   } finally {
     try { if (stopStandIn) await stopStandIn(); }
