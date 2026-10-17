@@ -139,10 +139,22 @@ export async function relayPair(root, io) {
     version: 1, board: state.board, url: state.url, repository: state.repository,
     mode: ordered ? 'ordered' : 'mirror', sequence, cursor, key: encodeBoardKey(key), snapshot: local.snapshot,
   };
+  const changed = () => {
+    const current = localSnapshot(root);
+    return current.board !== local.board || (current.snapshot.tables.event.at(-1)?.event_id ?? 0) !== cursor;
+  };
+  const busy = () => new Refused('PAIR_BUSY', 'a local move changed during pairing; run pullboard relay pair again after sync completes');
   const code = createPairingCode(state.board);
   const sealed = await sealPairingBundle(code.code, bundle);
-  const response = await relayRequest(state.url, state.token,
-    `/api/v1/pairings/${code.board}/${code.locator}`, { sealed });
+  if (changed()) throw busy();
+  const path = `/api/v1/pairings/${code.board}/${code.locator}`;
+  const response = await relayRequest(state.url, state.token, path, { sealed });
+  if (changed()) {
+    // This code has never left this process. Discard its opaque package without exposing its secret.
+    try { await relayRequest(state.url, state.token, path + '/consume', {}); }
+    catch { io.err?.('pullboard: the unused pairing package could not be discarded; it expires within 10 minutes'); }
+    throw busy();
+  }
   const viewLink = relayStatus(root).link;
   io.result?.({ code: code.code, link: viewLink, expiresIn: response.expiresIn });
   io.say(`One-time code (10 minutes, one use): ${code.code}`);

@@ -419,3 +419,97 @@ test('a move made during pairing is still refused as busy [H15,H17]', async t =>
   assert.equal(result.document.code,'PAIR_BUSY','pairing must refuse a native move during its async sync: '+JSON.stringify(result.document));
   assert.equal(result.document.issued,false,'a changed native prefix never prints a usable pairing code');
 });
+
+
+test('a local move during pairing upload refuses before issuing a code [H15,H17]', async t => {
+  const box = await relayClientFixture(t);
+  await box.link();
+  const result = await box.script(`
+    const store = await import(${JSON.stringify(new URL('../src/board.js', import.meta.url).href)});
+    const {relayPair} = await import(${JSON.stringify(new URL('../src/relay-pairing-client.js', import.meta.url).href)});
+    const root = process.cwd();
+    const originalFetch = globalThis.fetch;
+    let injected = false;
+    globalThis.fetch = async (...args) => {
+      if (!injected && String(args[0]).includes('/api/v1/pairings/')) {
+        injected = true;
+        const board = store.openBoard(root + '/.git/pullboard/board.sqlite');
+        try { store.addItem(board, {by:'coordinator',lane:${JSON.stringify(box.lane)},title:'A real local move during pairing upload',criterion:'Pairing must retry the changed native boundary'}); }
+        finally { store.closeBoard(board); }
+      }
+      return originalFetch(...args);
+    };
+    const sink = {isTTY:false,write(){}};
+    let code = null, issued = false;
+    try { await relayPair(root,{cwd:root,stdout:sink,stderr:sink,say(){},err(){},result(){issued=true;}}); }
+    catch(error) { code=error.code; }
+    finally { globalThis.fetch=originalFetch; }
+    process.stdout.write(JSON.stringify({injected,code,issued}));
+  `);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.document.injected, true, 'the actual native move occurred during pairing upload');
+  assert.equal(result.document.code, 'PAIR_BUSY', 'the pairing upload must reject its changed native boundary: '+JSON.stringify(result.document));
+  assert.equal(result.document.issued, false, 'a changed native boundary must not print the one-use code');
+});
+
+
+test('a refused upload race discards only its unprinted package [H15,H17]', async t => {
+  const box=await relayClientFixture(t);
+  await box.link();
+  const result=await box.script(`
+    const store=await import(${JSON.stringify(new URL('../src/board.js',import.meta.url).href)});
+    const {relayPair}=await import(${JSON.stringify(new URL('../src/relay-pairing-client.js',import.meta.url).href)});
+    const root=process.cwd(), originalFetch=globalThis.fetch;
+    let injected=false,published=null;
+    globalThis.fetch=async (...args)=>{
+      const url=String(args[0]);
+      if(!injected && url.includes('/api/v1/pairings/') && !url.endsWith('/consume')) {
+        injected=true;published=url;
+        const board=store.openBoard(root+'/.git/pullboard/board.sqlite');
+        try{store.addItem(board,{by:'coordinator',lane:${JSON.stringify(box.lane)},title:'Late private local move',criterion:'Discard its unpublished package'});}finally{store.closeBoard(board);}
+      }
+      return originalFetch(...args);
+    };
+    const sink={isTTY:false,write(){}};let code=null,issued=false;
+    try{await relayPair(root,{cwd:root,stdout:sink,stderr:sink,say(){},err(){},result(){issued=true;}});}catch(error){code=error.code;}finally{globalThis.fetch=originalFetch;}
+    const {readFileSync}=await import('node:fs');
+    const state=JSON.parse(readFileSync(root+'/.git/pullboard/relay.json','utf8'));
+    const second=await originalFetch(published+'/consume',{method:'POST',headers:{authorization:'Bearer '+state.token,'content-type':'application/json','x-pullboard-engine':${JSON.stringify(String(ENGINE_VERSION))}},body:'{}'});
+    process.stdout.write(JSON.stringify({code,issued,discarded:(await second.json()).error?.code}));
+  `);
+  assert.equal(result.code,0,result.stderr);
+  assert.deepEqual(result.document,{code:'PAIR_BUSY',issued:false,discarded:'PAIR_CODE_USED'},'the stale, unprinted package has already been consumed');
+  const retried=await box.cli('relay','pair');
+  assert.equal(retried.code,0,JSON.stringify(retried.document.error));
+  const joined=await box.otherDeviceJoin(retried.document.code);
+  assert.ok(joined.exported.tables.item.some(row=>row.item_title==='Late private local move'),'the next fresh pairing imports the current native board');
+});
+
+
+test('a local move while sealing is refused before the pairing upload [H15,H17]', async t => {
+  const box=await relayClientFixture(t);
+  await box.link();
+  const result=await box.script(`
+    const {webcrypto}=await import('node:crypto');
+    const store=await import(${JSON.stringify(new URL('../src/board.js',import.meta.url).href)});
+    const {relayPair}=await import(${JSON.stringify(new URL('../src/relay-pairing-client.js',import.meta.url).href)});
+    const root=process.cwd(), originalEncrypt=webcrypto.subtle.encrypt;
+    let injected=false,issued=false,code=null;
+    webcrypto.subtle.encrypt=async function(...args) {
+      const result=await originalEncrypt.apply(this,args);
+      const aad=new TextDecoder().decode(args[0].additionalData??new Uint8Array());
+      if(!injected && aad.startsWith('["pullboard-pairing",')) {
+        injected=true;
+        const board=store.openBoard(root+'/.git/pullboard/board.sqlite');
+        try{store.addItem(board,{by:'coordinator',lane:${JSON.stringify(box.lane)},title:'A native move while the package is sealing',criterion:'No stale package is uploaded'});}finally{store.closeBoard(board);}
+      }
+      return result;
+    };
+    const sink={isTTY:false,write(){}};
+    try{await relayPair(root,{cwd:root,stdout:sink,stderr:sink,say(){},err(){},result(){issued=true;}});}catch(error){code=error.code;}finally{webcrypto.subtle.encrypt=originalEncrypt;}
+    process.stdout.write(JSON.stringify({injected,code,issued}));
+  `);
+  assert.equal(result.code,0,result.stderr);
+  assert.deepEqual(result.document,{injected:true,code:'PAIR_BUSY',issued:false});
+  assert.equal(box.calls.some(call=>call.path.startsWith('/api/v1/pairings/')),false,'a stale package is refused before its first publish request');
+});
