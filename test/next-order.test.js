@@ -273,7 +273,7 @@ test('an unranked item follows the ranked ones [N2,B13]', (t) => {
 });
 
 test('milestone rank moves replay identically and preserve historical next selection [N2,B13,H16]', (t) => {
-  for (const version of [8, 24, 31, 32]) {
+  for (const version of new Set([8, 24, 31, 32, ENGINE_VERSION])) {
     const source = boardFixture();
     const replica = store.openBoard(':memory:');
     const fixtures = [source, { ...source, board: replica }];
@@ -285,7 +285,7 @@ test('milestone rank moves replay identically and preserve historical next selec
     }
     importBoard(replica, exportBoard(source.board));
     const move = prepareEngineMove(fixtures[0].board, 'orderMilestoneItems', ['release', { agentId: fixtures[0].builder, items: [2, 1] }]);
-    assert.equal(move.engine, 32, 'the coordinator allocated engine32 to the sealed order move');
+    assert.equal(move.engine, ENGINE_VERSION, 'the envelope carries the current engine; milestone order starts at32');
     const outcomes = fixtures.map(({ board }) => applyRelayMove(board, move, {
       sequence: 1, at: '2026-10-18T01:00:00Z', kind: 'move', sender: { kind: 'agent', userId: 'fixture', agent: fixtures[0].builder },
     }));

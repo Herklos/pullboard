@@ -2236,6 +2236,14 @@ export function nextFor(board, { agentId, lane, verify = false, policy = 'any', 
     const selected = mine.findIndex(({ entry }) => tier(entry) === routeTier && mainRed.has(entry.item_id));
     const firstTierItem = mine.findIndex(({ entry }) => tier(entry) === routeTier);
     if (selected > firstTierItem && firstTierItem >= 0) {
+      // Explicit coordinator order leads automatic rework; never-ranked boards retain their old path.
+      if ((board.executionEngineVersion ?? ENGINE_VERSION) >= 32 && milestones(board).some(entry => entry.order?.length)) {
+        const position = milestonePriorities(board);
+        const rank = milestoneRanks(board, position);
+        const first = mine[firstTierItem].entry;
+        const selectedItem = mine[selected].entry;
+        if (position(first) !== position(selectedItem) || rank(first) !== rank(selectedItem)) continue;
+      }
       const [rework] = mine.splice(selected, 1);
       mine.splice(firstTierItem, 0, rework);
     }
