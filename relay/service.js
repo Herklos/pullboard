@@ -101,14 +101,14 @@ export function createRelayHandler({ directory, auth, pollMs = 200, publicOrigin
 
   /** Check expiry only after normal authorization; the first authorized contact also purges overdue data. */
   async function authorized(token, id, write = false) {
-    const who = await auth.authenticate(token, { board: identity(id), write });
+    const who = deviceStore.authorizeSession(await auth.authenticate(token, { board: identity(id), write }));
     if (retention.expire(id)) throw new Refused('NO_BOARD', 'this inactive link expired; link and upload the local board again');
     return who;
   }
 
   const deviceStore = createDeviceStore({ directory: root, now });
   const deviceHandler = createDeviceHandler({
-    authenticate: (req, write) => auth.authenticate(credential(req, origin, write)),
+    authenticate: async (req, write) => deviceStore.authorizeSession(await auth.authenticate(credential(req, origin, write))),
     authorizeBoard: (req, id) => authorizedRequest(req, id, true),
     boardsFor: req => auth.boardsFor(credential(req, origin)),
     devices: deviceStore,
@@ -185,8 +185,11 @@ export function createRelayHandler({ directory, auth, pollMs = 200, publicOrigin
   const common = createApiHandler({
     authenticate: async (req, { board, write }) => {
       const token = credential(req, origin, write);
-      return board === null ? { visible: await auth.boardsFor(token) }
-        : { ...await authorizedRequest(req, board, write), credential: token };
+      if (board !== null) return { ...await authorizedRequest(req, board, write), credential: token };
+      if (token.startsWith('ps_')) deviceStore.authorizeSession(await auth.authenticate(token));
+      const visible = await auth.boardsFor(token);
+      if (token.startsWith('ps_')) deviceStore.authorizeSession(await auth.authenticate(token));
+      return { visible };
     },
     boards: (who) => {
       const boards = who.visible.filter((board) => !retention.expire(board.id));

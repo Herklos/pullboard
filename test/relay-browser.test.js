@@ -1,7 +1,7 @@
 /** Real Chrome reads and follows device-sealed boards; the relay never receives its key [H5,H15,H18]. */
 import assert from 'node:assert/strict';
 import { AssertionError } from 'node:assert';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -532,4 +532,122 @@ test('legacy queued presentations never disclose later unacknowledged moves [H5,
   assert.equal(document.presentation.state.items.some(item => item.title === 'SECOND_QUEUED_108'), true);
   const compacted = await fetch(box.origin + '/api/v1/boards/' + link.board + '/events?after=0', { headers: { authorization: 'Bearer ' + link.token, 'x-pullboard-engine': String(ENGINE_VERSION) } });
   assert.equal(compacted.status, 409, 'the relay compacted the moves only after acknowledging their final checkpoint');
+});
+
+/** Wait for a genuine native enrollment/approval to reach the fixture, without retrying a move. */
+async function browserDeviceTransition(read, message) {
+  const deadline = Date.now() + 90_000;
+  while (Date.now() < deadline) {
+    const value = read();
+    if (value) return value;
+    await new Promise(resolveTransition => setTimeout(resolveTransition, 25));
+  }
+  assert.fail(message);
+}
+
+/** Pair a real Chrome private key through the foreground Mac and its one-use enrollment. */
+async function enrolledBrowser(box, t) {
+  const setup = box.startCli(['relay', 'on', '--all', '--url', box.origin]);
+  const machineFile = join(box.env.PULLBOARD_HOME, 'relay-machine/state.json');
+  const pending = await browserDeviceTransition(() => existsSync(machineFile)
+    && JSON.parse(readFileSync(machineFile, 'utf8')).pending, 'the Mac publishes the real phone enrollment');
+  const chrome = await startChrome();
+  t.after(() => chrome.close());
+  await signIn(chrome, box);
+  await chrome.navigate(box.origin + '/#device=' + pending.locator + '.' + pending.secret);
+  const result = await setup.closed;
+  assert.equal(result.code, 0, 'the genuine native phone enrollment succeeds');
+  await chrome.waitFor("document.querySelector('#chain')?.textContent.includes('private cleanup fixture item') && document.querySelector('#phone-approvals') !== null");
+  const state = JSON.parse(readFileSync(machineFile, 'utf8'));
+  assert.equal(state.devices.length, 1);
+  return { chrome, device: state.devices[0].deviceId };
+}
+
+/** Revoke the enrolled browser with the real CLI and one actual phone approval tap. */
+async function revokeBrowser(box, chrome, device) {
+  const before = box.transit.length;
+  const revoke = box.startCli(['relay', 'revoke', device]);
+  const posted = await browserDeviceTransition(() => box.transit.slice(before).find(record =>
+    record.method === 'POST' && record.path === '/api/v1/devices/approvals'), 'the native revocation requests phone approval');
+  const context = JSON.parse(posted.request.toString('utf8')).context;
+  assert.equal(context.target, device);
+  assert.equal(context.action, 'revoke-device');
+  await chrome.waitFor(`document.querySelector('#phone-approve-${context.id}') !== null`);
+  await chrome.evaluate(`document.querySelector('#phone-approve-${context.id}').click()`);
+  const result = await revoke.closed;
+  assert.equal(result.code, 0, 'one actual phone tap completes native revocation');
+  assert.equal(JSON.parse(result.stdout).revoked, true);
+}
+
+test('a revoked device read is refused as revoked [H5,E16]', {
+  skip: !findChromeExecutable() && 'Chrome is not installed',
+}, async t => {
+  const box = await relayClientFixture(t);
+  const { chrome, device } = await enrolledBrowser(box, t);
+  const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));
+  const session = await box.phoneSession();
+  const headers = { cookie: 'pb_session=' + session.token, 'x-pullboard-engine': String(ENGINE_VERSION) };
+  const endpoint = box.origin + '/api/v1/boards/' + link.board + '/state';
+  assert.equal((await fetch(endpoint, { headers })).status, 200, 'the genuine enrolled browser can read before revocation');
+  await revokeBrowser(box, chrome, device);
+  await box.restartRelay();
+  const response = await fetch(endpoint, { headers });
+  const document = await response.json();
+  assert.equal(document.error?.code, 'DEVICE_REVOKED', 'the same browser session cannot keep reading ciphertext after device revocation and relay restart');
+  assert.equal(response.ok, false);
+  assert.equal('state' in document, false);
+  const machine = await fetch(endpoint, { headers: { authorization: 'Bearer ' + link.token, 'x-pullboard-engine': String(ENGINE_VERSION) } });
+  assert.equal(machine.status, 200, 'revoking this browser does not revoke the linked computer');
+});
+
+test('a revoked browser shows it was removed and no board [H5,E16]', {
+  skip: !findChromeExecutable() && 'Chrome is not installed',
+}, async t => {
+  const box = await relayClientFixture(t);
+  const { chrome, device } = await enrolledBrowser(box, t);
+  const key = 'pullboard.relay.keys.v1';
+  assert.equal(await chrome.evaluate(`Object.keys(JSON.parse(localStorage.getItem(${JSON.stringify(key)}))).length > 0`), true);
+  await revokeBrowser(box, chrome, device);
+  await chrome.navigate(box.origin);
+  await chrome.waitFor("document.body.textContent.includes('This browser was removed') || document.querySelector('#chain')?.textContent.includes('private cleanup fixture item')");
+  assert.equal(await chrome.evaluate("document.body.textContent.includes('This browser was removed')"), true, 'reload distinguishes a removed browser from an unpaired browser');
+  assert.equal(await chrome.evaluate("document.body.textContent.includes('private cleanup fixture item')"), false, 'the old decrypted board is not drawn');
+  assert.equal(await chrome.evaluate(`localStorage.getItem(${JSON.stringify(key)}) === null`), true, 'the cached board keys are erased');
+  assert.equal(await chrome.evaluate(`new Promise((resolve, reject) => {
+    const open = indexedDB.open('pullboard-relay-device-v1', 1);
+    open.onsuccess = () => { const db = open.result; const request = db.transaction('keys').objectStore('keys').get('device');
+      request.onsuccess = () => { db.close(); resolve(request.result === undefined); }; request.onerror = () => reject(request.error); };
+    open.onerror = () => reject(open.error);
+  })`), true, 'the removed browser no longer retains its private device key');
+  assert.equal(await chrome.evaluate("Object.keys(localStorage).some(key => key.startsWith('pullboard.relay.requests.v1.') || key.startsWith('pullboard.relay.owned-requests.v1.'))"), false, 'cached board request state is erased');
+  assert.equal(box.keyInRequest(), false);
+});
+
+
+test('revocation clears an already open browser and its cached board request state [H5,E16]', {
+  skip: !findChromeExecutable() && 'Chrome is not installed',
+}, async t => {
+  const box = await relayClientFixture(t);
+  const { chrome, device } = await enrolledBrowser(box, t);
+  const board = JSON.parse(readFileSync(box.linkFile, 'utf8')).board;
+  assert.equal(await chrome.evaluate("(window.__removedBoardReference = data.project).items.some(item => item.title === 'private cleanup fixture item')"), true);
+  // These are device-local opaque caches, never authority or a relay response. Use the real key/sealer.
+  await chrome.evaluate(`(async () => {
+    const module = await import('/relay/seal.js');
+    const board = ${JSON.stringify(board)};
+    const key = module.decodeBoardKey(JSON.parse(localStorage.getItem('pullboard.relay.keys.v1'))[board]);
+    const sealed = await module.seal(key, new TextEncoder().encode('removed cached request'), {boardId:board,kind:'request',sequence:1});
+    let binary = ''; for (const value of sealed) binary += String.fromCharCode(value);
+    localStorage.setItem('pullboard.relay.requests.v1.'+board+'.cached', JSON.stringify({id:'cached',sequence:1,sealed:btoa(binary)}));
+    localStorage.setItem('pullboard.relay.owned-requests.v1.'+board, JSON.stringify(['cached']));
+    return true;
+  })()`);
+  assert.equal(await chrome.evaluate("Object.keys(localStorage).filter(key => key.startsWith('pullboard.relay.requests.v1.') || key.startsWith('pullboard.relay.owned-requests.v1.')).length"), 2);
+  await revokeBrowser(box, chrome, device);
+  await chrome.waitFor("document.body.textContent.includes('This browser was removed')");
+  assert.equal(await chrome.evaluate("document.body.textContent.includes('private cleanup fixture item')"), false, 'live authorization loss clears the actual drawn board before reload');
+  assert.equal(await chrome.evaluate("window.__removedBoardReference.items?.length ?? 0"), 0, 'the shared cached board projection held by the cockpit is cleared, not only its DOM');
+  assert.equal(await chrome.evaluate("Object.keys(localStorage).some(key => key.startsWith('pullboard.relay.requests.v1.') || key.startsWith('pullboard.relay.owned-requests.v1.'))"), false, 'non-empty opaque board request caches are erased');
+  assert.equal(await chrome.evaluate("document.querySelector('#phone-approvals') === null"), true, 'removed browser releases its approval panel and polling loop');
+  assert.equal(await chrome.evaluate("document.querySelector('#relay-removed a')?.getAttribute('href')"), '/auth/github/start');
 });
