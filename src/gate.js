@@ -6,9 +6,9 @@
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, sep } from 'node:path';
-import { availableParallelism } from 'node:os';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { availableParallelism, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { gitChildEnv, gitPath, headTree, invalidateGitFacts, isClean, untracked } from './git.js';
 import { secretsIn } from './hooks.js';
@@ -19,6 +19,8 @@ import { selectAffectedTests } from './affected-tests.js';
 import { checkNeedsBrowser, testsNeedBrowser } from './browser-admission.js';
 import { timingFromOutput, timingRunner } from './timing.js';
 import { landingShardProfile } from './landing-shards.js';
+import { gateStages, stagedScript, readPipes, readStages } from './gate-stages.js';
+export { gateStages } from './gate-stages.js';
 import { RunnerDropped, runOnRunner, runOnRunnerAsync, runnerSource } from './runners.js';
 import { sandboxBlockedOperation, sandboxBlockedScanner } from './sandbox-denial.js';
 
@@ -28,6 +30,8 @@ export { sandboxBlockedOperation, sandboxBlockedScanner };
 const STAMP = 'pullboard-gate-green';
 const LOG = 'pullboard-gate.log';
 const LANDING_RUN_ENV = 'PULLBOARD_LANDING_RUN';
+// Live person waivers, as {kind, test}, so a landing run does not stop early on a waived failure.
+const LANDING_WAIVERS_ENV = 'PULLBOARD_LANDING_WAIVERS';
 const DIGEST_CHARS = 3000;
 const TAIL_CHARS = 1000;
 const LINE_CHARS = 300;
@@ -152,14 +156,15 @@ export function isStampedGreen(root) {
 
 /**
  * Run a shell command in a checkout for a digest: both streams in one pipe, in order, read whole
- * however long, stdin closed so nothing waits on a person.
+ * however long, stdin closed so nothing waits on a person. With `stages`, each top-level stage's
+ * exit status and own output are kept too, or `stages` is null when the command cannot be split.
  *
  * @param {string} root
  * @param {string} command
- * @param {{ pipefail?: boolean, env?: NodeJS.ProcessEnv }} [options] - Gate-only pipefail and additional child environment values.
- * @returns {{ isGreen: boolean, output: string, seconds: number }}
+ * @param {{ pipefail?: boolean, env?: NodeJS.ProcessEnv, stages?: boolean }} [options] - Gate-only pipefail, additional child environment values and per-stage accounting.
+ * @returns {{ isGreen: boolean, output: string, seconds: number, sandboxBlocked: string|null, stages?: Array<{ status: number|null, output: string, pipeline?: Array<{ status: number|null, output: string|null }> }> | null }}
  */
-export function runShell(root, command, { pipefail = false, env = {} } = {}) {
+export function runShell(root, command, { pipefail = false, env = {}, stages = false } = {}) {
   const started = Date.now();
   const options = { cwd: root, env: { ...gitChildEnv(root), ...env }, shell: true, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', maxBuffer: 2 ** 30 };
   let prefix = '';
@@ -171,12 +176,23 @@ export function runShell(root, command, { pipefail = false, env = {} } = {}) {
       throw new Refused('PIPEFAIL_UNAVAILABLE', 'the repo gate shell cannot enable pipefail; rewrite the gate without a pipe');
     }
   }
+  const split = stages ? gateStages(command) : null;
+  const marker = `PULLBOARD_STAGE_${randomUUID().replaceAll('-', '')}`;
+  const pipes = split?.some((stage) => stage.pipeline.length > 1) ? mkdtempSync(join(tmpdir(), 'pullboard-pipes-')) : null;
   // Newlines, not spaces, around the command, so a trailing comment in it cannot swallow the `)`.
-  const result = spawnSync(`${prefix}(\n${command}\n) 2>&1`, options);
+  const result = spawnSync(`${prefix}(\n${split ? stagedScript(split, marker, pipes) : command}\n) 2>&1`, options);
   invalidateGitFacts();
-  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
-  return { isGreen: result.status === 0, output, seconds: Math.round((Date.now() - started) / 1000),
-    sandboxBlocked: result.status === 0 ? null : sandboxBlockedOperation(root, output) };
+  const pipeStatuses = pipes ? readPipes(split, pipes) : null;
+  if (pipes) rmSync(pipes, { recursive: true, force: true });
+  const raw = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+  const seconds = Math.round((Date.now() - started) / 1000);
+  const blocked = (output) => (result.status === 0 ? null : sandboxBlockedOperation(root, output));
+  if (!stages) return { isGreen: result.status === 0, output: raw, seconds, sandboxBlocked: blocked(raw) };
+  if (!split) return { isGreen: result.status === 0, output: raw, seconds, stages: null, sandboxBlocked: blocked(raw) };
+  const staged = readStages(raw, marker, split.length);
+  // Each pipeline component's own status rides on its stage, so no failing producer hides behind a later one.
+  const withPipes = staged.stages.map((stage, index) => (pipeStatuses?.[index] ? { ...stage, pipeline: pipeStatuses[index] } : stage));
+  return { isGreen: result.status === 0, seconds, ...staged, stages: withPipes, sandboxBlocked: blocked(staged.output) };
 }
 
 /** Refuse an environment-blocked proof after its ordinary raw logs and timings are persisted. */
@@ -197,9 +213,9 @@ function safeLog(output) {
 /** Run the unchanged caller command and profile only timings already present in its output.
  * @param {string} root
  * @param {string} command
- * @param {{ waitMs?: number, artifactDirectory?: string, artifactPrefix?: string, persistLog?: boolean, profileFile?: string, pipefail?: boolean, gateSlotHeld?: boolean, gateLease?: object, landing?: boolean }} [options]
+ * @param {{ waitMs?: number, artifactDirectory?: string, artifactPrefix?: string, persistLog?: boolean, profileFile?: string, pipefail?: boolean, gateSlotHeld?: boolean, gateLease?: object, landing?: boolean, stages?: boolean, waivers?: Array<{ kind: string, test: string }> }} [options]
  */
-export function runProfiledShell(root, command, { waitMs = 0, artifactDirectory, artifactPrefix = 'pullboard-gate', persistLog = false, profileFile, pipefail = false, gateSlotHeld = false, gateLease, landing = false } = {}) {
+export function runProfiledShell(root, command, { waitMs = 0, artifactDirectory, artifactPrefix = 'pullboard-gate', persistLog = false, profileFile, pipefail = false, gateSlotHeld = false, gateLease, landing = false, stages = false, waivers = [] } = {}) {
   const directory = artifactDirectory ?? dirname(gitPath(root, LOG));
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const id = randomUUID();
@@ -209,9 +225,12 @@ export function runProfiledShell(root, command, { waitMs = 0, artifactDirectory,
   const inherited = {
     ...(gateLease && !gateLease.runner ? gateSlotEnvironment(gateLease) : gateSlotHeld ? { [GATE_SLOT_HELD_ENV]: '1' } : {}),
     [LANDING_RUN_ENV]: landing ? '1' : '0',
+    [LANDING_WAIVERS_ENV]: landing ? JSON.stringify(waivers) : '[]',
   };
-  const run = gateLease?.runner ? runOnRunner(root, command, { runner: gateLease.runner, source: gateLease.source,
-    browser: gateLease.browser, pipefail, metadata: { ...(gateLease.runMetadata ?? {}), landing } }) : runShell(root, command, { pipefail, env: inherited });
+  // The registered worker returns the same complete stage/component accounting as a local run.
+  const run = gateLease?.runner ? { ...runOnRunner(root, command, { runner: gateLease.runner, source: gateLease.source,
+    browser: gateLease.browser, pipefail, stages, waivers: landing ? waivers : [], metadata: { ...(gateLease.runMetadata ?? {}), landing } }) }
+    : runShell(root, command, { pipefail, env: inherited, stages });
   const sandboxBlocked = run.isGreen ? null : run.sandboxBlocked ?? (run.executionRunner
     // The controller cannot realpath remote files; retain the network denial signal without treating remote paths as local paths.
     ? sandboxBlockedOperation(root, run.output, { includeFilePaths: false })
@@ -446,26 +465,26 @@ export async function withGateSlot(root, action, { landing = false, itemCheck = 
  * @param {{ trustStamp?: boolean, onWait?: (state: object) => void, landing?: boolean, agent?: string, item?: string|number }} [options]
  * @returns {Promise<{ isGreen: boolean, isCached: boolean, output: string, seconds: number, log: string, profile?: object, profilePath?: string }>}
  */
-export async function runGate(root, config, { trustStamp = true, onWait, landing = false, agent, item = '' } = {}) {
+export async function runGate(root, config, { trustStamp = true, onWait, landing = false, agent, item = '', stages = false, waivers = [] } = {}) {
   if (!config.gate.trim()) {
     throw new Refused('NO_GATE', 'no gate configured; set "gate" in pullboard.json, e.g. "npm test"');
   }
   if (trustStamp && isStampedGreen(root)) return { isGreen: true, isCached: true, output: '', seconds: 0, log: '' };
-  return await withGateSlot(root, (lease) => fullGateRun(root, config, trustStamp, { waitMs: lease.waitMs, gateLease: lease, landing }), {
+  return await withGateSlot(root, (lease) => fullGateRun(root, config, trustStamp, { waitMs: lease.waitMs, gateLease: lease, landing, stages, waivers }), {
     landing, browser: true, agent, item, kind: landing ? 'landing' : 'gate', onWait,
   });
 }
 
 /** Run a full gate while its caller owns the queue lease; only a full run may stamp its tree. */
-function fullGateRun(root, config, trustStamp = false, { waitMs = 0, log = gitPath(root, LOG), gateLease, landing = false } = {}) {
+function fullGateRun(root, config, trustStamp = false, { waitMs = 0, log = gitPath(root, LOG), gateLease, landing = false, stages = false, waivers = [] } = {}) {
   if (trustStamp && isStampedGreen(root)) return { isGreen: true, isCached: true, output: '', seconds: 0, log: '' };
   const before = committedTree(root);
-  const run = runProfiledShell(root, config.gate, { waitMs, pipefail: true, profileFile: `${log}.profile.json`, gateLease, landing });
+  const run = runProfiledShell(root, config.gate, { waitMs, pipefail: true, profileFile: `${log}.profile.json`, gateLease, landing, stages, waivers });
   const { isGreen, output, seconds, profile, profilePath } = run;
   writeFileSync(log, output);
   refuseSandboxBlocked(run);
   if (isGreen && before !== null && committedTree(root) === before) writeFileSync(gitPath(root, STAMP), `${before}\n`);
-  return { isGreen, isCached: false, output, seconds, log, profile, profilePath };
+  return { isGreen, isCached: false, output, seconds, log, profile, profilePath, ...(run.executionRoot ? { executionRoot: run.executionRoot } : {}), ...(stages ? { stages: run.stages } : {}) };
 }
 
 /** Quote a fixed executable or selected path without permitting shell expansion. */
@@ -540,11 +559,12 @@ export async function runSubmitGate(root, config, { base, trunk, changed, check,
     // The proof already owns this lease: its phase profile has no additional queue wait.
     const proofWait = check ? 0 : lease.waitMs;
     let proof;
-    if (!deferFullFallback && selection.full) proof = fullGateRun(root, config, false, { waitMs: proofWait, log: proofLog, gateLease: lease });
+    // The proof keeps each stage's status, so a person's waiver can only ever explain named test failures.
+    if (!deferFullFallback && selection.full) proof = fullGateRun(root, config, false, { waitMs: proofWait, log: proofLog, gateLease: lease, stages: true });
     else if (!proofFiles.length) proof = { isGreen: true, output: '', seconds: 0, isCached: false, log: '' };
     else {
       const command = `${config.affectedTests.trimEnd()} ${proofFiles.map(path => commandWord('./' + path)).join(' ')}`;
-      proof = { ...runProfiledShell(root, command, { waitMs: proofWait, profileFile: `${proofLog}.profile.json`, gateLease: lease }), isCached: false, log: proofLog };
+      proof = { ...runProfiledShell(root, command, { waitMs: proofWait, profileFile: `${proofLog}.profile.json`, gateLease: lease, stages: true }), isCached: false, log: proofLog };
       writeFileSync(proofLog, proof.output);
     }
     const phase = deferFullFallback ? `submit invariants: ${invariants.length ? invariants.join(', ') : 'none'}; full suite deferred to the landing gate` : selection.full ? 'full gate' : 'affected tests';
