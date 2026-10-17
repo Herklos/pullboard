@@ -90,6 +90,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `add` | `version:number`, `item:object` |
 | `edit` | `version:number`, `item:object` |
 | `fact` | `version:number`, `item:number`, `fact:object` |
+| `why` | `version:number`, `id:number`, `decisions:array` |
 | `escalate` | `version:number`, `id:number`, `from:string`, `to:string` |
 | `run` | `version:number`, `messages:array` |
 | `sweep` | `version:number`, `messages:array` |
@@ -164,6 +165,8 @@ Use `--ref src/file.js:12-30@<full-40-character-sha>` to bind a fact to a commit
 A correction is a new fact with `--supersedes <fact-id>`. It requires the live holder or coordinator even when its kind is an observation. The earlier fact remains visible; supersession must name a fact on the same item. A missing or cross-item identity is refused with `NO_FACT`. Unsupported kinds receive `BAD_FACT_KIND`, empty text receives `EMPTY_FACT`, and unauthorized judgements or corrections receive `FACT_JUDGEMENT`.
 
 `show --json` retains its existing item fields and verdicts and adds `thread`. The HTTP item detail's `thread` field, also on each item in the full board state, has the same array. Entries are oldest first, ordered by the append-only event sequence. A fact entry is `{type: "fact", ...fact}`. A move entry is `{type: "move", eventId, kind, by, at, detail}`, with `detail` holding the original move's structured event detail. Text `show` prints these moves and facts as one timeline, including full references and both sides of a correction. Ordinary verdict summaries and `--history` remain available.
+
+A decision names the items it changes with `--implies 12,13` on `fact`, `verify` or `answer`; the HTTP moves take the same value as `args.implies`, and `answer` also takes `args.supersedes`, the id of an earlier answer. Each named item must exist; an unknown one is refused with `NO_ITEM` naming it, before anything is recorded. Each named item's `thread` then gets a `note` fact with a `decision` citation `{source, id, item, by, line}`, and a second fact with `supersededBy` when that decision is superseded (docs/formats.md has the shapes). These optional fact fields appear only when set. `by` is read from the board's record of the decision, never from the arguments, and only the person supersedes the person's answer. `pullboard why <id>` returns `{version: 1, id, decisions: [...]}`, newest first; each entry is the citation plus `at`, `fact` (the implied fact's id) and `supersededBy` (a citation, or `null`). `resume --json` adds `decisions`: the implied facts on held items shown for the first time, each `{item, fact, text}`.
 
 The HTTP move is `{verb: "fact", item: 12, agent: "web-1", args: {kind: "measurement", text: "The check takes 8 seconds", ref: "src/file.js:12-30@<full-sha>"}}`. Omit `agent` to act as the coordinator; `args.supersedes` supplies a correction's earlier fact identity. The response carries the committed `fact` event and the CLI result. The event-log format stays at version 1 because facts use its existing immutable event rows; exports and imports preserve those rows. The sealed move engine advances to version 3 for this release so older engines refuse the new operation before replay.
 
