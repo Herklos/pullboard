@@ -17,7 +17,7 @@ import { doctrineHistory, loadDoctrine } from './doctrine.js';
 import { checkRulesAt, doctrineReport, hasSubmitRules, holdDoctrine, ruleLine } from './doctrine-checks.js';
 import { agentSessionDigest, requirePersonChannel } from './person.js';
 import { bindLocalSession, localSessionMatches } from './agent-session.js';
-import { decisionAnswer, decisionProjection, handAnsweredQuestions, planRowApply, prepareRowDecisions, restoreRowApply, writeRowApply } from './row-decisions.js';
+import { decisionAnswer, decisionProjection, handAnsweredQuestions, pendingAnswers, planRowApply, prepareRowDecisions, restoreRowApply, writeRowApply } from './row-decisions.js';
 import { digestOf, gateReport, refuseSandboxBlocked, runGate, runProfiledShell, runSubmitGate, submitGateReport, timingDigest, withGateSlot } from './gate.js';
 import { checkNeedsBrowser } from './browser-admission.js';
 import { bareWorktreeFinding, codeIsFromMain, contains, differFromHead, git, gitChildEnv, headCommit, headTree, invalidateGitFacts, isClean, mainCheckout, patchId, repoInfo, resolveCommit, tryGit, untracked, withGitFacts } from './git.js';
@@ -82,6 +82,7 @@ import { forgetView, portHolder, rememberView, runningView } from './view-sessio
 import { serveApi } from './api.js';
 import { serveMcp } from './mcp.js';
 import { doctorProblems, doctrineProblems } from './doctor.js';
+import { boardHealth, healthLines } from './health.js';
 import { staleFrozenItems, staleItemFinding } from './approved-rows.js';
 import { mainPolicy, policyAt, itemPolicy, submissionPaths, frozenCheck, checkAtCommit, dependencySnapshots, requireTrunkMerge, trunkMerge, trunkRef } from './trusted-policy.js';
 import { proofStats } from './stats.js';
@@ -583,7 +584,7 @@ function withBoard(ctx, work) {
 async function ordered(ctx, board, operation, args) {
   const command = ['add', 'edit', 'merged'].includes(ctx.io.relayCommand?.cliOperation) ? ctx.io.relayCommand : undefined;
   /** Dispatch while this session holds the checkout, including long-running next/run loops. */
-  const execute = () => relayLinked(ctx.info.root)
+  const execute = () => relayLinked(ctx.info.root) || relayRecovered(ctx.info.root)
     ? relayOperation(ctx.info.root, operation, args, ctx.io, command, () => store[operation](board, ...args)) : store[operation](board, ...args);
   const digest = agentSessionDigest();
   const boardOnly = CHECKOUT_BOARD_ONLY.get(ctx.io);
@@ -2171,6 +2172,13 @@ function readCommands(io, { first, second, rest, values }) {
       for (const problem of problems) if (problem !== checkpointProblem) io.say(`problem: ${problem.message}; repair: ${problem.next}`);
       return 1;
     },
+    health: () => {
+      const ctx = context(io);
+      const report = boardHealth(ctx.file, { root: ctx.info.root, config: ctx.config, now: ctx.clock.now() });
+      io.result?.(report);
+      for (const line of healthLines(report)) io.say(line);
+      return report.stuck.length ? 1 : 0;
+    },
     inbox: () => {
       const ctx = context(io);
       const { shouts, agents } = withBoard(ctx, (board) => ({
@@ -2393,7 +2401,7 @@ export async function addBlueprintHere(io, reference, { report = true, blueprint
  * @typedef {object} BlueprintAdded
  * @property {{ name: string, title: string, version: number }} blueprint
  * @property {string} section - The SPEC.md section heading the rows are in.
- * @property {{ key: string, id: string, status: string, text: string }[]} rows - New rows; each waits for the person.
+ * @property {{ key: string, id: string, status: string, text: string, source?: string }[]} rows - New rows; each waits for the person, with the source its rule names.
  * @property {{ id: number, key: string, title: string, lane: string, askedLane?: string, specIds: string[], after: number[], check?: string }[]} items - New open items.
  * @property {string | null} gate - The gate set in pullboard.json, or null when it was left alone.
  * @property {boolean} marked - This blueprint version was already on the board, so nothing was added.
@@ -2474,7 +2482,7 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
     writeRowApply(ctx.info.root, { records: [], files: [{ file: ctx.config.spec, before: plan.specRows, after: plan.specAfter }], signoffs: { before: null, receipts: [] } });
   }
   if (plan.specAfter !== source && !files.some((file) => file.file === ctx.config.spec)) files.unshift({ file: ctx.config.spec });
-  const rows = plan.rows.map(({ key, id, status, text }) => ({ key, id, status, text }));
+  const rows = plan.rows.map(({ key, id, status, text, source }) => ({ key, id, status, text, ...(source ? { source } : {}) }));
   const summary = { blueprint: { name: blueprint.name, title: blueprint.title, version: blueprint.version },
     section: plan.section.name, rows, items: added, gate: plan.gate, marked: plan.marked, proposedLanes: added.length ? proposedLanes : [],
     // Item checks are stored and never run during add; the caller tells the reader so.
@@ -3434,10 +3442,19 @@ async function specCommand(io, { first, second, rest, values }) {
       const me = whoAmI(ctx, board);
       if (!ctx.info.isMain || me.id !== COORDINATOR) throw new Refused('B26_PERSON_APPROVAL', 'only the person from the main checkout approves or declines rows; use pullboard view for the person to decide');
       const ids = [second, ...rest].filter(Boolean).flatMap((text) => text.split(/[\s,]+/u)).filter(Boolean);
-      const records = prepareRowDecisions(ctx.info.root, ctx.config, { ids, decision: first, reason: values.reason, text: values.text, by: values.by, on: new Date().toISOString(), commit: headCommit(ctx.info.root) ?? '' });
+      // An approve keeps a pending answer: plain, it approves the answered text; --text says what it replaces.
+      const kept = first === 'approve' ? pendingAnswers(ctx.info.root, ctx.config, ids, store.rowDecisions(board)) : new Map();
+      const decide = { decision: first, reason: values.reason, by: values.by, on: new Date().toISOString(), commit: headCommit(ctx.info.root) ?? '' };
+      const records = values.text === undefined && kept.size ? ids.flatMap((id) => prepareRowDecisions(ctx.info.root, ctx.config, { ...decide, ids: [id], text: kept.get(id)?.text }))
+        : prepareRowDecisions(ctx.info.root, ctx.config, { ...decide, ids, text: values.text });
       const decisions = await ordered(ctx, board, 'recordRowDecisions', [{ agentId: store.PERSON, channel: io.personChannel ?? 'terminal', decisions: records }]);
       io.result?.({ decisions });
-      decisions.forEach((record) => io.say(`${record.kind === 'doctrine' ? 'doctrine:' : ''}${record.id}: ${first === 'approve' ? 'approved' : 'declined'}, pending apply`));
+      decisions.forEach((record) => {
+        const old = record.kind === 'spec' ? kept.get(record.id) : undefined;
+        const now = decisionAnswer(record);
+        if (old && old.text !== record.text) io.say(`${record.id}: this text replaces the pending answer ${old.answer} with ${now === null ? `"${record.text}"` : `the answer ${now}`}`);
+        io.say(`${record.kind === 'doctrine' ? 'doctrine:' : ''}${record.id}: ${first === 'approve' ? (old && old.text === record.text ? `approved with the answer ${old.answer}` : 'approved') : 'declined'}, pending apply`);
+      });
       return 0;
     });
   }
@@ -3546,9 +3563,9 @@ async function specCommand(io, { first, second, rest, values }) {
     unnamed.forEach((problem) => messages.push(`${ctx.config.spec}: error: ${problem}`));
     errors += unnamed.length;
     if (values.json && !errors) {
-      const rows = files.flatMap(([file, parsed]) => parsed.rows.map(({ id, status, tier, text, gate, serves, signers = [], section, line, origin, version, reason, file: source }) => (
+      const rows = files.flatMap(([file, parsed]) => parsed.rows.map(({ id, status, tier, text, gate, serves, signers = [], section, line, origin, version, reason, file: source, source: from }) => (
         { id, status, tier, text, gate, serves, signers, section, line, file: source ?? file,
-          ...(origin ? { origin, version, reason } : {}) }
+          ...(from === undefined ? {} : { source: from }), ...(origin ? { origin, version, reason } : {}) }
       )));
       io.result({ rows });
     } else messages.forEach((message) => io.say(message));
@@ -3596,6 +3613,7 @@ async function specCommand(io, { first, second, rest, values }) {
     if (row.reason) io.say(`reason: ${row.reason}`);
     if (row.gate) io.say(`gate: ${row.gate}`);
     if (row.serves.length) io.say(`serves: ${row.serves.join(', ')}`);
+    if (row.source) io.say(`source: ${row.source}`);
     io.say(`signed: ${standing.met.map((entry) => `${entry.by} ${entry.on}`).join(', ') || 'no'}${standing.stale.length ? `; stale: ${standing.stale.length}` : ''}`);
     for (const entry of [...standing.met, ...standing.stale]) if (entry.note) io.say(`note (${entry.by}): ${entry.note}`);
     return 0;
@@ -3878,13 +3896,15 @@ async function runCommand(argv, io) {
         const ctx = context(io);
         return await relayJoin(ctx.info.root, second, values.url, io);
       }
-      if (second || rest.length || (first && !['on', 'off'].includes(first)) || (values.url && first !== 'on')) throw new Refused('USAGE', 'pullboard relay [on|off] [--url <address>]');
+      if (second || rest.length || (first && !['on', 'off', 'status'].includes(first)) || (values.url && first !== 'on')) throw new Refused('USAGE', 'pullboard relay [status|on|off] [--url <address>]');
       const ctx = context(io);
-      if (!first) { await syncRelay(ctx.info.root, io); await executePersonRequests(ctx.info.root, io, main); }
+      // pullboard relay status is the named form of plain pullboard relay: the same sync and report.
+      if (!first || first === 'status') { await syncRelay(ctx.info.root, io); await executePersonRequests(ctx.info.root, io, main); }
       const result = first === 'on' ? await relayOn(ctx.info.root, values.url, io)
         : first === 'off' ? await relayOff(ctx.info.root, io) : relayStatus(ctx.info.root);
       io.result?.(result);
-      io.say(result.linked ? `${result.link}\nrelay: sequence ${result.sequence}; ${result.behind} pending uploads${result.recovery?.pending ? `; recovery pending for sequence ${result.recovery.skip}; retry ${result.recovery.next}` : ''}` : (result.notice || 'relay off; the local board is complete'));
+      const boardName = listApiProjects().find((project) => project.root === ctx.info.root)?.name ?? basename(ctx.info.root);
+      io.say(result.linked ? `${result.link}\nrelay: ${boardName} (board ${result.board}) is linked for GitHub ${result.login || `account ${result.account}`}; sequence ${result.sequence}; ${result.behind} pending uploads${result.recovery?.pending ? `; recovery pending for sequence ${result.recovery.skip}; retry ${result.recovery.next}` : ''}` : (result.notice || 'relay off; the local board is complete'));
       return 0;
     }
     if (command === 'blueprint' && first === 'save') {
@@ -4013,7 +4033,7 @@ async function runMain(argv, streams) {
       positionals: parsed.positionals.slice(1),
       values: Object.fromEntries(Object.keys(parsed.values).filter(key => key !== 'json').sort().map(key => [key, parsed.values[key]])) };
     sync = Boolean(command) && !parsed.values.help && !parsed.values.version
-      && !['help', 'version', 'hook', 'init', 'relay', 'tour', 'mcp'].includes(command)
+      && !['help', 'version', 'hook', 'init', 'relay', 'tour', 'mcp', 'health'].includes(command)
       // A coordinator declaration on a linked clone must refuse before auto-link or relay sync.
       && !(command === 'join' && parsed.positionals[1] === COORDINATOR);
     needsRepo = !(parsed.values.help || parsed.values.version || command === 'help' || command === 'version');

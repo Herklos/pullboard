@@ -28,6 +28,41 @@ test('the cockpit fixture inits its board without a model [N26]', () => {
   assert.equal(join.model, 'Test Model');
 });
 
+test('the view fixture opts out of the background view [N26]', () => {
+  const box = machine();
+  const originalHome = box.env.PULLBOARD_MACHINE_HOME;
+  const originalFile = join(originalHome, 'settings.json');
+  assert.equal(JSON.parse(readFileSync(originalFile, 'utf8')).view.background, false,
+    'machine setup opts out before any CLI command runs');
+
+  // A second machine in the same scratch root can override the effective home after machine().
+  // Seed unrelated settings there to prove project() preserves them when it applies the opt-out.
+  const overrideHome = join(box.dir, 'second-machine-home');
+  mkdirSync(overrideHome);
+  const overrideFile = join(overrideHome, 'settings.json');
+  writeFileSync(overrideFile, JSON.stringify({ browserSlots: 1, view: { custom: 'keep', background: true } }));
+  box.env.PULLBOARD_MACHINE_HOME = overrideHome;
+  let checkedInit = false;
+  const realRun = box.runWithEnv;
+  /** Observe the real init boundary before delegating to the unchanged fixture CLI runner. */
+  box.runWithEnv = (cwd, env, ...args) => {
+    if (args[0] === 'init') {
+      checkedInit = true;
+      assert.equal(env.PULLBOARD_MACHINE_HOME, overrideHome, 'check the exact environment passed to init');
+      assert.deepEqual(JSON.parse(readFileSync(join(env.PULLBOARD_MACHINE_HOME, 'settings.json'), 'utf8')),
+        { browserSlots: 1, view: { custom: 'keep', background: false } },
+        'the effective machine opts out before the real init, without replacing its other settings');
+    }
+    return realRun(cwd, env, ...args);
+  };
+  project(box, 'background-view-opt-out');
+  assert.equal(checkedInit, true, 'the fixture executes the actual init command');
+  assert.equal(JSON.parse(readFileSync(originalFile, 'utf8')).view.background, false,
+    'changing the effective home leaves the first private machine alone');
+  assert.equal(JSON.parse(readFileSync(overrideFile, 'utf8')).view.background, false,
+    'later copied or hooked CLI commands retain the effective machine opt-out');
+});
+
 test('the cockpit helper starts its view in the foreground [C7,N26]', async t => {
   const box = machine();
   project(box, 'foreground-view');
