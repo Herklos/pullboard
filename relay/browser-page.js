@@ -65,7 +65,7 @@ export function createRelayBrowserHandler({ authenticate }) {
       removedSession = error.code === 'DEVICE_REVOKED';
     }
     // The public, board-free shell must still load so its client can erase a removed browser's local keys.
-    const notice = removedSession ? '<p>This browser was removed from the board.</p>' : relaySession ? '<p>Pairing this browser…</p>'
+    const notice = removedSession ? '<p>Checking this browser…</p>' : relaySession ? '<p>Pairing this browser…</p>'
       : '<p>Connecting to this machine. Sign in to see your linked boards.</p><a href="/auth/github/start">Sign in with GitHub</a>';
     const page = cockpitPage('', { readOnly: true, requests: relaySession, transportModule: relaySession || removedSession ? '/relay/client.js' : '/relay/sign-in.js', apiHeaders: {}, stylesheet: '/view.css', hostedLocal: true, relaySession: relaySession || removedSession, signIn: '/auth/github/start' })
       .replace('<link rel="icon" href="data:,">', '<link rel="icon" href="/icons/pullboard.svg" type="image/svg+xml">\n<link rel="manifest" href="/manifest.webmanifest">\n<link rel="apple-touch-icon" href="/icons/pullboard-192.png">\n<meta name="theme-color" content="#f6faf7">')
