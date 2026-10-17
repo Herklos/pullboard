@@ -3,7 +3,7 @@ import { Refused } from './refused.js';
 import { isAbsolute } from 'node:path';
 import { relative } from 'node:path';
 
-export const SUBMISSION_PROOF_ENGINE = 17;
+export const SUBMISSION_PROOF_ENGINE = 22;
 const BUDGET_MS = 60_000;
 const COMMIT = /^[a-f0-9]{40,64}$/u;
 
@@ -137,7 +137,7 @@ export function validateLandingBatch(batch, revision) {
   }
 }
 
-/** Preserve earlier normalized gate and diagnostic receipts when an engine-17 batch is adopted. */
+/** Preserve earlier normalized gate and diagnostic receipts when an engine-22 batch is adopted. */
 export function preserveInvariantEvidence(previous, evidence, engine) {
   if (previous?.invariantEvidence && engine >= SUBMISSION_PROOF_ENGINE) {
     for (const kind of ['gates', 'diagnostics']) {

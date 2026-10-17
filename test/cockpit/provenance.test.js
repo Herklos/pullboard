@@ -10,6 +10,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { addItem, closeBoard, openBoard } from '../../src/board.js';
 import { exportBoard, importBoard } from '../../src/exchange.js';
+import { disableFixtureBackgroundView } from './background-view-fixture.js';
 
 /** Copy the actual candidate into a private primary repo and linked source checkout. */
 function fixture(t) {
@@ -82,6 +83,10 @@ function fixture(t) {
   writeFileSync(join(root, 'SPEC.md'), '# View provenance fixture\n\n## G · Goals\n- G1 [approved, must] Keep the primary board unchanged. | gate: true\n');
   git(root, 'add', '-A');
   git(root, 'commit', '-q', '-m', 'chore: initialize provenance fixture');
+  // This custom fixture initializes directly rather than through fixture.js project().
+  disableFixtureBackgroundView(env, dir);
+  assert.equal(JSON.parse(readFileSync(join(env.PULLBOARD_MACHINE_HOME, 'settings.json'), 'utf8')).view.background, false,
+    'the copied CLI sees the private opt-out before initialization');
   const initialized = cli(root, root, 'init');
   assert.equal(initialized.status, 0, `${initialized.stderr}${initialized.stdout}`);
   git(root, 'add', '-A');

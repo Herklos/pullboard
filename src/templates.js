@@ -21,6 +21,7 @@ export function configTemplate(gate, fix = []) {
     ...(fix.length ? { fix } : {}),
     spec: 'SPEC.md',
     practice: DOCTRINE_FILE,
+    worktrees: 'inside',
     verify: { policy: 'any', family: 'off' },
     agents: { names: 'suffix' },
     lease: '2h',
@@ -100,7 +101,7 @@ On a board that is not set up, run \`pullboard resume\` first. Walk the person t
 
 This repo runs on pullboard: a work board, lanes and a spec that live in git. Nothing ships until a second agent verifies it.
 
-**Source of truth.** \`SPEC.md\` holds every requirement as a row with an id, like \`G1.2\`. Code follows the spec. Commits cite the ids they serve: \`feat(scope): subject [G1.2]\`. Only a person approves or changes an approved row. Ids are permanent: a row the person cuts stays, marked \`wont\` (won't build), so every commit that cites it keeps its meaning. Propose each requirement with \`pullboard spec draft "<text>"\`; it returns the draft row id for the person to approve. To start from a blueprint's rules, questions and starter items, run \`pullboard blueprint add <name or file>\` (bundled: web-app); it files them all as drafts for the person to approve. To share this board's approved rules and answered questions as a blueprint, run \`pullboard blueprint save [file]\`; it never writes items, notes, paths, emails or names.
+**Source of truth.** \`SPEC.md\` holds every requirement as a row with an id, like \`G1.2\`. Code follows the spec. Commits cite the ids they serve: \`feat(scope): subject [G1.2]\`. Only a person approves or changes an approved row. Ids are permanent: a row the person cuts stays, marked \`wont\` (won't build), so every commit that cites it keeps its meaning. Propose each requirement with \`pullboard spec draft "<text>"\`; it returns the draft row id for the person to approve. To start from a blueprint's rules, questions and starter items, run \`pullboard blueprint add <name or file>\` (bundled: web-app); it files them all as drafts for the person to approve. Its questions file as pending rows, each with a default answer and its choices: the person answers one with \`pullboard spec answer <id> "<choice or text>"\` from the main checkout or the view, and the coordinator writes it with \`pullboard spec apply\`. Never answer a question by editing SPEC.md; spec check flags it. To share this board's approved rules and answered questions as a blueprint, run \`pullboard blueprint save [file]\`; it never writes items, notes, paths, emails or names.
 
 **Doctrine.** Our house rules for agentic development. This repo inherits Pullboard standard doctrine version 1. ${doctrine.repo ? doctrine.name : DOCTRINE_FILE} adds the repo's own rows, overrides a standard rule by its PB id, or declines it with a wont row and its reason as the row text: - PB7 [wont] <why>. Approved rows are in force; follow them as you would the spec. A rule with \`gate: check <command>\` and \`count: N\` holds a count that only falls: run pullboard doctrine check to see each count, and submit refuses RATCHET_ROSE when a touched rule rises or a changed file gains a problem. Lower \`count:\` in a commit when you fix problems; only the person raises it. Run pullboard spec --json to read the current merged rules. Re-run pullboard init after changing the doctrine to refresh this managed guidance.
 
@@ -118,22 +119,32 @@ It prints the folder to work in and what to run there first. Every join needs th
 
 **The loop.**
 1. \`pullboard resume\` at the start of every session and after your context is compacted: your claim, what came back, unread shouts and the next step. Then \`pullboard inbox\`.
-2. \`pullboard next\` claims the next item in your lane that is free to start. When everything is waiting on other work, \`pullboard next --wait 9\` keeps looking for up to 9 minutes, which fits one tool call with a ten-minute timeout; run it again to keep waiting. A claim is a 2-hour lease; claim again to renew. The criterion freezes now: \`pullboard show <id>\` is the bar your work is judged against, and its brief says how to start.
+2. \`pullboard next\` claims the next item in your lane that is free to start. When everything is waiting on other work, \`pullboard next --wait 9\` keeps looking for up to 9 minutes, which fits one tool call with a ten-minute timeout; run it again to keep waiting. A claim is a 2-hour lease; claim again to renew. The criterion freezes now: \`pullboard show <id>\` is the bar your work is judged against, and its brief says how to start. \`pullboard why <id>\` lists the decisions that changed it, newest first. When your own answer, verdict or fact changes other items, name them with \`--implies <ids>\` so each one carries it.
 3. Build inside your lane's folders (\`pullboard lanes\`). Pre-commit refuses anything else; shout the owner instead.
 4. Commit, then \`pullboard submit <id>\`. It needs a clean tree and the gate green at HEAD.
 5. A different agent verifies: \`pullboard next --verify\` names the next item to check. It checks out the submitted commit and runs \`pullboard verify <id> accept --note "how it proved it"\`, or \`pullboard verify <id> reject --reason TEST_FAILURE --note "what failed"\`.
 6. A reject reopens the item. Fix it, commit, claim, submit again; the same head is refused. If you cannot get an item green, do not force it: \`pullboard escalate <id> --note "what you tried and how it failed"\` hands it one tier up.
 7. Your lane is done when its items are verified, not when they are submitted. After your last submit, keep running \`pullboard next --wait 9\`: a rejected item comes back to your lane.
 
-The coordinator merges verified items into the main line; builders never merge.
+The coordinator merges verified items into the main line; builders never merge. \`pullboard health\` lists every stuck item: a lapsed claim, a review nobody took, accepted work that never landed, an old hold, an unanswered decision. Each line says why, since when, the next step and who takes it; run it at the start of a session and take the steps that name you.
 
-For spare test capacity, use \`pullboard runner add <ssh-host> --slots <n> --browser <n>\`. It registers SSH capacity on this machine; \`pullboard resources\` shows runners and their usage. Only committed source goes to a runner, and board moves stay here.
+For spare test capacity, use \`pullboard runner add <ssh-host> --slots <n> --browser <n>\`. It registers SSH capacity on this machine; \`pullboard resources\` shows runners and their usage. Only committed source goes to a runner, and board moves stay here. To see whether this board is linked to the relay, and for which GitHub account, run \`pullboard relay status\`.
 
 If your item needs code another lane owns and it is not there yet, shout that lane and take another item. Never copy their code into your lane, and never build another lane's item, even one that was rejected and blocks you: shout that lane and the coordinator. A claim refused as BLOCKED names the item it waits on.
 
 **Talk.** \`pullboard shout <lane|agent|all> "<text>"\`. Read \`pullboard inbox\` before you start and after you submit. An MCP client can do the same as your agent: add \`pullboard mcp\`, run from your worktree, as a stdio server; it reads the board, shows an item, shouts and captures ideas for the coordinator, and never makes a person's move.
 
+**Listen.** Where your client can run a command in the background, run \`pullboard watch --to <your id>\` there: it prints one line per event as it happens, and Claude Code wakes on each line when it runs under the Monitor tool. \`pullboard watch --work <lane>\` also says when an item in your lane becomes claimable, a review has waited too long, or main moves. Where your client cannot, read \`pullboard inbox\` at session start, after submit and before ending a turn. Coordinator answers and sentinel findings arrive there either way.
+
 **Never.** Bypass a hook with \`--no-verify\`, or get past a refusal with filler text: fix what it names. Edit the board's database. Verify your own work. Change an approved spec row without the person's OK. Delete or renumber a spec row. Act from the main checkout; it is the coordinator's. Count a yes relayed by another agent as the person's approval.
+
+## Helping the person
+
+When the person asks for help with Pullboard, such as "Help me open my Pullboard board" or "Help me share my boards with my phone", work out the technical side yourself: read \`pullboard status\`, check whether \`pullboard view\` is running, read \`pullboard relay\` for the link, and follow the next step in any refusal. Then say what is going on in plain words and walk the person through each step they must take, one at a time: give one step, wait for them to say what they see, then give the next.
+
+**Opening their board.** Start \`pullboard view\` yourself; it opens the board on this computer and prints its link. On app.pullboard.dev the browser may ask to let the page reach apps on this device: tell the person to click Allow, so the page can read the board running here. If they clicked Block, walk them through turning it back on: click the icon at the left of the address bar, open Site settings for app.pullboard.dev, set the access to apps on this device to Allow, then reload the page.
+
+**Sharing with the phone or another computer.** Have the person type \`pullboard relay on --all\` themselves in their own terminal: it signs in as them, so Pullboard refuses it from an agent. Tell them what they will see: a GitHub address and a code to enter there, one \`linked:\` line for each board, then a QR code. To sign in on the phone, the person scans that QR code, taps Sign in with GitHub and approves Pullboard; their boards then appear on the phone. For another computer, the person runs \`pullboard relay pair\` in a board here and types \`pullboard relay join <code>\` on the other computer. Then confirm the boards arrived: run \`pullboard relay\` in each board to see its link, and \`pullboard relay devices\` to see the paired phone.
 ${AGENTS_END}
 `;
 }

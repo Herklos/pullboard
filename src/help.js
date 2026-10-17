@@ -12,6 +12,7 @@ Set up
   pullboard tour                        see it work: a reject and its rework, scripted, in thirty seconds
   pullboard init [--model <name>] [--blueprint <name or file>]  config, SPEC.md, agent instructions, git hooks, board; optional coordinator model
   pullboard worktree <lane> --model <name> [--route light] [--family <name>]   make and join a worktree for a new agent
+                                        pullboard.json worktrees: inside or beside; init defaults to inside
   pullboard join <lane> --model <name> [--route light] [--family <name>]       register this worktree as an agent
                                         A model is required (or set PULLBOARD_MODEL); family is a separate declaration
   pullboard join coordinator --model <name>                                 declare the main checkout's coordinator model
@@ -24,6 +25,8 @@ Set up
   pullboard settings [gateSlots <n> | browserSlots <n>]  view or set machine capacity (gate default 2; browser default 1)
                                         browser-free check slots are opt-in: gate.browserFreeChecks in ~/.pullboard/settings.json (default false)
                                         reviews-first queue order is opt-in: gate.queue.reviewsFirst (default false), gate.queue.agingMinutes (default 30)
+                                        release priority is opt-in: gate.queue.currentReleaseFirst (default false), within each board's otherwise-tied positions
+                                        memory hold is opt-in: gate.memoryFloorMB in ~/.pullboard/settings.json holds the queue under that many MB free or critical pressure (default off)
   pullboard runner add <ssh-host> --slots <n> --browser <n> [--node <remote-path>] [--root <remote-path>]
                                         register SSH test capacity; no runner sign-in; root defaults to ~/.pullboard-runner
   pullboard view [--project] [--port N] [--no-open]  every project on this machine in your browser; default http://127.0.0.1:${DEFAULT_VIEW_PORT}
@@ -35,13 +38,14 @@ Set up
                                         behind the session secret in its printed address
   pullboard mcp                        MCP tools over stdio for this worktree's agent, started by its MCP client:
                                         board status, show, shout and capture an idea; a person's move is refused
-  pullboard relay [on|off|pair|join <code>] [--url <address>]  link, inspect or unlink this board's sealed relay
+  pullboard relay [status|on|off|pair|join <code>] [--url <address>]  link, inspect or unlink this board's sealed relay
                                         on signs in through GitHub; the address defaults to https://app.pullboard.dev
                                         pair prints a one-use machine code; join stores it in another clone
   pullboard relay on --all [--url <address>]  link every registered project after one sign-in; pair the phone once
                                         keep this command open until pairing finishes; later projects link on registration
   pullboard relay devices               list paired device ids and their public-key fingerprints
   pullboard relay revoke <device>       stop future key delivery; already received keys remain known
+                                        approve on another paired phone, or sign in again with GitHub
   pullboard relay tokens                list this board's agent token ids, agents and expiry, never credentials
   pullboard relay revoke <token-id>     revoke one token from that list; other agents keep working
   pullboard relay recover --skip <sequence>  person-only recovery of one blocked next relay position
@@ -58,6 +62,8 @@ Work
                                         with --criterion and a brief, --check is needed below strong
   pullboard edit <id> [--brief "..." | --brief-file <file>] [--route light|mid|strong] [--criterion "..."] [--check "..."]
                 [--wait]                wait for a new check's baseline; otherwise it runs in the background
+                [--reason "what the old bar got wrong"]   needed to change the criterion or check of an item
+                                        that was ever claimed; show and stats list each correction
   pullboard escalate <id> --note "what was tried and how it failed"   hand it one tier up
   pullboard run --agent "<command>" [--attempts 3] [--minutes 15] [--items N] [--wait M]
                                         build routed items unattended in this worktree: the agent command reads
@@ -73,11 +79,17 @@ Work
                                         rename or update a milestone note
   pullboard milestone remove <name>                            remove a milestone without changing its items
   pullboard doctor                     check board integrity without changing it
+  pullboard health                     every stuck item: why, since when, the next step and who takes it
+                                        reads the board and changes nothing; exits 1 when something is stuck
+                                        pullboard.json health.stuck (default 1h), health.holds (1d), health.release (1d)
   pullboard skills --update            refresh unchanged Claude Code skills from shipped versions
   pullboard show <id> [--history]       an item, the criterion frozen at claim, its verdicts: the latest in full,
                                         earlier ones as one line; --history prints every note in full
-  pullboard fact <id> <kind> <text> [--supersedes <fact-id>] [--ref path:lines@full-sha]
+  pullboard fact <id> <kind> <text> [--supersedes <fact-id>] [--ref path:lines@full-sha] [--implies <ids>]
                                         append an observation or a holder/coordinator judgement to its thread
+                                        --implies 12,13: each named item gets a fact citing this decision,
+                                        and is told again when the decision is superseded
+  pullboard why <id>                    the decisions that imply an item, newest first, and what superseded them
   pullboard next [--wait <minutes>]     offer an eligible review when reviews pile up, otherwise claim work
   pullboard next --build                claim a build explicitly, recording a skipped review offer
   pullboard next --verify               reserve the next submitted item you can check;
@@ -90,14 +102,22 @@ Work
   pullboard submit <id>                 needs a clean tree, item check and affected tests green at HEAD (alias: done)
   pullboard verify <id> accept --note "what you broke or which edge you tried, and what happened"
   pullboard verify <id> reject --reason TEST_FAILURE --note "what failed"
+                                        a verdict takes --implies <ids>; a later verdict on the item supersedes it
                                         any --note can be --note-file <file>, which keeps quotes, $ and backticks intact
   pullboard shout <lane|agent|person|all> <text>  pullboard inbox
   pullboard shout [<to>] <text> --decision       ask for a decision; defaults to your coordinator or the person
   pullboard shout <to> <text> --evidence attempt|receipt --outcome <word> --item <id> --commit <rev>
-  pullboard answer <shout-id> <text> [--as person]
+  pullboard answer <shout-id> <text> [--as person] [--implies <ids>] [--supersedes <answer-id>]
                                         answer your decision; person mode is main-checkout only
+                                        --supersedes tells the items an earlier answer implied; only the person
+                                        supersedes the person's answer
   pullboard pass <shout-id> <note>                coordinator passes a decision to the person
   pullboard decisions [--as person]               shouts waiting for you; main checkout defaults to coordinator
+  pullboard watch [--to <agent|lane|all>] [--kinds <kinds>] [--item <id>] [--since <sequence>] [--json]
+                [--work <lane>] [--review-wait <minutes>]
+                                        follow the board's live events, one line each as it happens, with or without the view
+                                        --work also says when an item there becomes claimable, a review waits longer than
+                                        --review-wait minutes (default 20), or main moves; Ctrl-C stops it
   pullboard export                              print the whole board as versioned JSON
   pullboard import <file>                       restore a versioned export into an empty board
 
@@ -155,7 +175,8 @@ Spec
   pullboard spec show <id> | unmet [--must] | signoff <ids> [--by <principal>]
                                         signoff: --note "what was checked" stays with the receipt
   pullboard spec draft <text> [--section <letter>] [--aim] [--gate "<gate>"]  any agent appends a draft row; never approves it
-                                        --section chooses the section prefix; defaults to G
+                [--doctrine --source "<shout id or chat, date>"]  the coordinator proposes a sourced doctrine ruling
+                                        --section chooses the section prefix; defaults to G, or DR with --doctrine
                                         Defaults to must and gate review.
   pullboard blueprint add <name or file>  add a blueprint's rules and questions as drafts, and its starter items
                                         bundled: web-app; nothing is approved, and a repeat adds nothing
@@ -165,6 +186,8 @@ Spec
                                         principal defaults to Git user.email; --by overrides it
   pullboard spec approve <ids> | decline <ids> --reason "why"  the person's exact-row decision
                                         approve <id> --text "new wording" approves an exact rewrite
+  pullboard spec answer <id> "<choice or text>"  the person's answer to a pending question
+                                        a listed choice, or their own words added as the last choice
   pullboard spec apply                  coordinator applies recorded row decisions to the files
   pullboard doctrine check              each doctrine rule's check: its count, its committed count, whether it holds
                                         a rule row adds | gate: check <command> | count: N, and | files: <paths> to narrow it
@@ -181,12 +204,12 @@ Gate and hooks
 ${lifecycleHelp()}
 
 Reject reasons: TEST_FAILURE, BEHAVIOR_MISMATCH, INSUFFICIENT_EVIDENCE, STALE_HEAD, OTHER.
---json prints one versioned document for every command; refusals include their code and next step.`;
+--json prints one versioned document for every command, and one per line for watch; refusals include their code and next step.`;
 
 const HELP_NAMES = [
   'tour', 'init', 'worktree', 'join', 'takeover', 'whoami', 'lanes', 'lane', 'lane add', 'status', 'resources', 'settings', 'view', 'view export',
-  'serve', 'mcp', 'relay', 'relay recover', 'resume', 'hooks', 'add', 'edit', 'escalate', 'run', 'list', 'doctor', 'skills', 'show', 'next', 'land',
-  'check', 'claim', 'release', 'submit', 'done', 'verify', 'fact', 'shout', 'answer', 'pass', 'decisions', 'inbox', 'export', 'import',
+  'serve', 'mcp', 'relay', 'relay recover', 'resume', 'hooks', 'add', 'edit', 'escalate', 'run', 'list', 'doctor', 'health', 'skills', 'show', 'next', 'land',
+  'check', 'claim', 'release', 'submit', 'done', 'verify', 'fact', 'why', 'shout', 'answer', 'pass', 'decisions', 'inbox', 'watch', 'export', 'import',
   'sweep', 'merged', 'withdraw', 'refreeze', 'reopen', 'hold', 'stats', 'ledger', 'log', 'spec', 'spec check', 'spec view',
   'spec show', 'spec unmet', 'spec signoff', 'spec draft', 'spec signers', 'spec signers add', 'doctrine', 'doctrine check', 'forget', 'prompt', 'gate', 'hook',
   'hook pre-commit', 'hook pre-merge-commit', 'hook commit-msg', 'hook pre-push', 'view export', 'version', 'lifecycle', 'help',
@@ -206,14 +229,16 @@ const HELP_EXAMPLES = {
   add: 'pullboard add web "Upload page" --specs G1', list: 'pullboard list web', show: 'pullboard show 12',
   claim: 'pullboard claim 12', submit: 'pullboard submit 12', 'next --verify': 'pullboard next --verify',
   fact: 'pullboard fact 12 measurement "The check passes in 8 seconds"',
+  why: 'pullboard why 12',
   verify: 'pullboard verify 12 accept --note "removed the fix; the test failed"',
-  answer: 'pullboard answer 12 "done"', pass: 'pullboard pass 12 "please decide"',
+  watch: 'pullboard watch --to web', answer: 'pullboard answer 12 "done"', pass: 'pullboard pass 12 "please decide"',
   status: 'pullboard status', view: 'pullboard view', mcp: 'pullboard mcp', stats: 'pullboard stats --since 2026-10-08', log: 'pullboard log 12', ledger: 'pullboard ledger',
   'lane add': 'pullboard lane add web --owns apps/web/', lane: 'pullboard lane add web --owns apps/web/',
   roadmap: 'pullboard roadmap', milestone: 'pullboard milestone add "0.7.0" --items 12,13',
   runner: 'pullboard runner add studio --slots 2 --browser 1', 'runner add': 'pullboard runner add studio --slots 2 --browser 1',
   edit: 'pullboard edit 12 --brief "Add the upload page"', release: 'pullboard release 12',
   land: 'pullboard land --max 4',
+  health: 'pullboard health',
   reopen: 'pullboard reopen 12 --note "correct the frozen criterion"',
   escalate: 'pullboard escalate 12 --note "needs a manual step"', next: 'pullboard next',
   run: 'pullboard run --agent "node agent.js"', 'view export': 'pullboard view --export ./site',
@@ -258,13 +283,24 @@ const HELP_FLAG_EXPLANATIONS = {
   '--blueprint': 'start from a bundled blueprint or a JSON file',
   '--brief': 'what a cold agent needs',
   '--check': 'the command that proves it',
+  '--doctrine': 'proposes a doctrine ruling; only the person can approve it',
   '--family': 'records the family name',
   '--model': 'identifies the agent model; required unless PULLBOARD_MODEL is set',
+  '--implies': 'each named item gets a fact citing this decision',
   '--landing': 'prioritizes a trunk landing in the machine gate queue',
   '--json': 'prints one versioned document',
   '--note': 'what was checked stays with the receipt',
   '--note-file': 'keeps quotes, $ and backticks intact',
   '--route': 'sets which work the model can take',
+  '--source': 'where the person gave the ruling; required with --doctrine',
+};
+
+/** Lines a command's own help adds after its example. */
+const HELP_NOTES = {
+  watch: [
+    'Claude Code: run pullboard watch --to <your id> under the Monitor tool, and each event line wakes the seat.',
+    'Any other harness: run it as a long-running command and treat each stdout line as an event.',
+  ],
 };
 
 /** Build command-specific help rows from the preserved full list so its syntax stays authoritative. */
@@ -299,7 +335,7 @@ function commandHelpRows(fullHelp) {
       return explanation ? `${flag} — ${explanation}` : flag;
     });
     const example = exampleFor(name, usages[0]);
-    return [name, Object.freeze({ usages, flags, example })];
+    return [name, Object.freeze({ usages, flags, example, notes: HELP_NOTES[name] ?? [] })];
   }));
 }
 

@@ -50,6 +50,7 @@ const NOT_MOVES = {
   BAD_RUNNER: 'machine-wide SSH runner settings checked before remote execution',
   RUNNER_OUTPUT_LIMIT: 'remote execution output is bounded before accepting its result',
   RUNNER_CLEANUP_TIMEOUT: 'remote cleanup must report a bounded failure before returning capacity',
+  RUNNER_SETUP_REFUSED: 'a runner whose own resource pool refuses setup fails the run by name instead of hanging',
   RUNNER_SOURCE_CHANGED: 'remote execution requires the exact admitted committed source',
   RUNNER_SECRET: 'source and command transfer is refused before private content leaves the machine',
   RUNNER_REQUEST_LIMIT: 'remote tooling requests are bounded before transport starts',
@@ -68,6 +69,7 @@ const NOT_MOVES = {
   REMOTE_COORDINATOR_MODEL: 'a linked replica cannot redeclare the coordinator model; use the coordinator checkout',
   EVENT_LOG_VERSION: 'the local board format is checked before opening it for an item move',
   BOARD_BUSY: 'the board connection is opened or read before an item move can begin',
+  BOARD_NOT_WRITABLE: 'the board folder must be writable before a command opens it for an item move',
   NOT_YOUR_CHECKOUT: 'the caller owns the checkout session, checked before any item move',
   CHECKOUT_SESSION: 'the checkout-local session binding is readable before any item move',
   UNMERGED_SCHEMA: 'shared-board schema compatibility checked before a command opens the database',
@@ -941,7 +943,7 @@ test('submit, accept and reject refuse in the declared order, one failure peeled
     const submits = [submitAs(999, 'web-1', SHA_A), submitAs(piece, 'web-1', SHA_A)];
     store.claim(board, piece, { agentId: 'web-1', lane: 'web', leaseMs: 7_200_000, freeze });
     submits.push(submitAs(piece, 'web-2', SHA_A));
-    store.editItem(board, piece, { agentId: 'coordinator', criterion: 'A correction before submission.' });
+    store.editItem(board, piece, { agentId: 'coordinator', criterion: 'A correction before submission.', reason: 'the fixture corrects its bar' });
     submits.push(submitAs(piece, 'web-1', SHA_A));
     assert.equal(submits.at(-1), 'PENDING_REFREEZE', 'a pending correction stops the board submission before later guards');
     store.refreeze(board, piece, { agentId: 'web-1', freeze });
@@ -1248,7 +1250,7 @@ test('the two conditional guards behave as declared: a renewal passes a held lan
     assert.equal(claimAs(mine, 'web-1', retiredFreeze), 'ok', 'a reclaim keeps the frozen bar too');
     assert.equal(claimAs(theirs, 'web-2', retiredFreeze), 'UNKNOWN_SPEC', 'a first claim freezes, so it checks the rows');
     store.release(board, mine, 'web-1');
-    store.editItem(board, mine, { agentId: 'coordinator', criterion: 'A changed bar.' });
+    store.editItem(board, mine, { agentId: 'coordinator', criterion: 'A changed bar.', reason: 'the fixture corrects its bar' });
     assert.equal(claimAs(mine, 'web-1', retiredFreeze), 'UNKNOWN_SPEC', 'after an edit drops the bar, the next claim freezes and checks');
     assert.equal(outcome(() => store.refreeze(board, mine, { agentId: 'coordinator', freeze: retiredFreeze })), 'UNKNOWN_SPEC', 'refreeze freezes, so it checks');
   } finally {
