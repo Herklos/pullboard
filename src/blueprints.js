@@ -228,6 +228,18 @@ export function blueprintMarker(blueprint) {
 }
 
 /**
+ * The line a blueprint of a kind a board takes one of leaves beside its rows: its name and kind, so
+ * a later add or init finds which product or architecture blueprint the board already has, even
+ * one read from a local file (#720). Other kinds leave no such line.
+ *
+ * @param {{ name: string, kind?: string }} blueprint
+ * @returns {string | null}
+ */
+export function blueprintKindMarker(blueprint) {
+  return ['product', 'infrastructure', 'architecture'].includes(blueprint.kind) ? `<!-- pullboard-blueprint-kind ${blueprint.name} ${blueprint.kind} -->` : null;
+}
+
+/**
  * The marker line written with the rows while an add is under way: it records which row id each
  * rule and question key got, so a retry after a failure part way files no row twice and finds the
  * starter items already added by those ids. The finished add replaces it with blueprintMarker.
@@ -425,7 +437,9 @@ export function planBlueprint(blueprint, { source, spec, doctrine, existingItems
       ids[question.key] = id;
       rows.push({ key: question.key, id, status: 'pending', text, line: `- ${id} [pending, must] ${text} | gate: review` });
     }
-    specRows = insertSection(source, spec, { existing: existingSection, name, lines: [...rows.map((row) => row.line), blueprintAddingMarker(blueprint, ids)] });
+    const kindLine = blueprintKindMarker(blueprint);
+    const kindLines = kindLine && !lines.some((text) => text.trim() === kindLine) ? [kindLine] : [];
+    specRows = insertSection(source, spec, { existing: existingSection, name, lines: [...rows.map((row) => row.line), ...kindLines, blueprintAddingMarker(blueprint, ids)] });
   }
   const underWay = blueprintAddingMarker(blueprint, ids);
   const specAfter = specRows.split(/(\r?\n)/u).map((part) => (part.trim() === underWay || (resumed && part === addingLine) ? part.replace(part.trim(), marker) : part)).join('');

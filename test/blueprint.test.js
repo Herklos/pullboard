@@ -780,6 +780,38 @@ test('a second blueprint of the same kind is refused [S1,I1]', () => {
   assert.match(JSON.parse(refused.stdout).error.message, /web-app and website are both product blueprints/u);
   assert.equal(readFileSync(join(board.repo, 'SPEC.md'), 'utf8'), before, 'SPEC.md is unchanged');
 
+  // A board that already has a product blueprint refuses another in a later command, before any
+  // write, whichever was added first; the same blueprint again changes nothing and is no clash.
+  const listed = (box) => (JSON.parse(box.run('list', '--all', '--json').stdout).items ?? []).length;
+  for (const [first, second] of [['web-app', 'other-product.json'], ['other-product.json', 'web-app']]) {
+    const sequential = freshBoard();
+    writeFileSync(join(sequential.repo, 'other-product.json'), `${JSON.stringify({ ...PUBLISHED, name: 'other-product', title: 'Other product' })}\n`);
+    json(sequential, 'blueprint', 'add', first);
+    const spec = readFileSync(join(sequential.repo, 'SPEC.md'), 'utf8');
+    const items = listed(sequential);
+    const later = sequential.run('blueprint', 'add', second, '--json');
+    assert.notEqual(later.status, 0, later.stdout);
+    assert.equal(JSON.parse(later.stdout).error.code, 'BLUEPRINT_KIND_TAKEN');
+    assert.match(JSON.parse(later.stdout).error.message, /(?=.*web-app)(?=.*other-product)/u, 'the refusal names both');
+    assert.equal(readFileSync(join(sequential.repo, 'SPEC.md'), 'utf8'), spec, 'a later second product writes no row');
+    assert.equal(listed(sequential), items, 'a later second product files no starter');
+    assert.equal(json(sequential, 'blueprint', 'add', first).marked, true, 'the same blueprint again is a no-op');
+    assert.equal(readFileSync(join(sequential.repo, 'SPEC.md'), 'utf8'), spec);
+    assert.equal(json(sequential, 'blueprint', 'add', 'serverless').blueprint.name, 'serverless', 'an architecture blueprint still joins a product one later');
+  }
+  const reinit = emptyRepo();
+  const once = reinit.run('init', '--blueprint', 'web-app');
+  assert.equal(once.status, 0, once.stdout + once.stderr);
+  const initSpec = readFileSync(join(reinit.repo, 'SPEC.md'), 'utf8');
+  const second = reinit.run('init', '--blueprint', 'ios-app', '--json');
+  assert.notEqual(second.status, 0, second.stdout);
+  assert.equal(JSON.parse(second.stdout).error.code, 'BLUEPRINT_KIND_TAKEN');
+  assert.match(JSON.parse(second.stdout).error.message, /web-app and ios-app are both product blueprints/u);
+  assert.equal(readFileSync(join(reinit.repo, 'SPEC.md'), 'utf8'), initSpec, 'a later init with a second product writes no row');
+  const again = reinit.run('init', '--blueprint', 'web-app');
+  assert.equal(again.status, 0, again.stdout + again.stderr);
+  assert.equal(readFileSync(join(reinit.repo, 'SPEC.md'), 'utf8'), initSpec, 'init with the same blueprint again changes no row');
+
   // Any number of practice and beyond-code blueprints sit beside one product and one architecture.
   const many = emptyRepo();
   const names = ['web-app', 'serverless', 'test-reliability', 'research', 'writing'];

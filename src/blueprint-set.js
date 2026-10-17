@@ -5,7 +5,10 @@
  * A rule or question text two of them share is drafted once, by the first, and the later blueprint
  * cites that row. Every starter item keeps the name of the blueprint that filed it.
  */
-import { readBlueprint } from './blueprints.js';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { bundledBlueprints, readBlueprint } from './blueprints.js';
+import { CONFIG_FILE } from './config.js';
 import { Refused } from './refused.js';
 
 /**
@@ -26,21 +29,61 @@ export function blueprintSlot(blueprint) {
 }
 
 /**
+ * The product and architecture blueprints a repo's board already has, read from its SPEC.md: the
+ * kind line each one's add leaves, and for a board added before that line existed, the marker of a
+ * bundled blueprint, whose kind its bundled file says. Nothing when the repo has no spec yet.
+ *
+ * @param {string} root - The repository root.
+ * @returns {{ name: string, slot: string }[]}
+ */
+export function installedBlueprints(root) {
+  let specFile = 'SPEC.md';
+  try { specFile = JSON.parse(readFileSync(join(root, CONFIG_FILE), 'utf8')).spec ?? specFile; }
+  catch (error) {
+    // No pullboard.json yet, or one init will refuse on its own: the default spec file is read.
+    if (!(error instanceof SyntaxError) && error?.code !== 'ENOENT') throw error;
+  }
+  const file = join(root, String(specFile));
+  if (!existsSync(file)) return [];
+  const found = new Map();
+  const bundled = bundledBlueprints();
+  for (const line of readFileSync(file, 'utf8').split(/\r?\n/u)) {
+    const kind = /^<!-- pullboard-blueprint-kind (\S+) (\S+) -->$/u.exec(line.trim());
+    const marker = /^<!-- pullboard-blueprint (\S+) \d+(?: adding .*)? -->$/u.exec(line.trim());
+    if (kind && blueprintSlot({ kind: kind[2] })) found.set(kind[1], blueprintSlot({ kind: kind[2] }));
+    else if (marker && !found.has(marker[1]) && bundled.includes(marker[1])) {
+      const slot = blueprintSlot(readBlueprint(marker[1], root));
+      if (slot) found.set(marker[1], slot);
+    }
+  }
+  return [...found].map(([name, slot]) => ({ name, slot }));
+}
+
+/**
  * Read every named blueprint, in the order given, before anything is written, so an unknown name
  * or a clash leaves the repository as it was. The same blueprint version named twice is read once.
- * A second product or architecture blueprint is refused with BLUEPRINT_KIND_TAKEN naming both.
+ * A second product or architecture blueprint is refused with BLUEPRINT_KIND_TAKEN naming both,
+ * whether the first is named in the same command or already on the board; adding again the
+ * blueprint the board already has is no clash, since that add changes nothing.
  *
  * @param {string[]} references - Bundled names or paths, as --blueprint gave them.
  * @param {string} cwd
  * @param {string} command - The command to name in the next step, such as "init".
+ * @param {{ name: string, slot: string }[]} [installed] - The board's own, from installedBlueprints.
  * @returns {{ reference: string, blueprint: import('./blueprints.js').Blueprint }[]}
  */
-export function readBlueprints(references, cwd, command) {
+export function readBlueprints(references, cwd, command, installed = []) {
   const read = [];
   for (const reference of references) {
     const blueprint = readBlueprint(reference, cwd);
     if (read.some((entry) => entry.blueprint.name === blueprint.name && entry.blueprint.version === blueprint.version)) continue;
     const slot = blueprintSlot(blueprint);
+    const onBoard = slot && installed.find((entry) => entry.slot === slot && entry.name !== blueprint.name);
+    if (onBoard) {
+      throw new Refused('BLUEPRINT_KIND_TAKEN',
+        `${onBoard.name} and ${blueprint.name} are both ${slot} blueprints, and this board already has ${onBoard.name}; a board takes one ${slot} blueprint, so add ${blueprint.name} on a board of its own`,
+        `keep ${onBoard.name} and leave ${blueprint.name} out of pullboard ${command}`);
+    }
     const holder = slot && read.find((entry) => blueprintSlot(entry.blueprint) === slot);
     if (holder) {
       const keep = read.map((entry) => `--blueprint ${entry.reference}`).join(' ');

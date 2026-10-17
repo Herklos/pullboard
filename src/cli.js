@@ -62,7 +62,7 @@ import {
   unmetRows,
 } from './spec.js';
 import { answerQuestion, bundledBlueprints, landBlueprint, planBlueprint, readBlueprint, repoAnswers, saveBlueprint } from './blueprints.js';
-import { blueprintStarterNote, combinedSummary, initBlueprintResult, readBlueprints, sharedRowLines } from './blueprint-set.js';
+import { blueprintStarterNote, combinedSummary, initBlueprintResult, installedBlueprints, readBlueprints, sharedRowLines } from './blueprint-set.js';
 import { briefFiles } from './brief.js';
 import { commitFirst, commitOwnerLines, commitOwners, coordinatorInbox, coordinatorInboxLines, inboxFirst } from './resume.js';
 import { checkBaseline, prepareCheckBaseline, sayCheckBaseline, refuseCheckSyntax } from './check-baseline.js';
@@ -1664,7 +1664,7 @@ function setupCommands(io, { first, second, rest = [], values }) {
       // Every named blueprint is read and checked before anything is written, so an unknown name,
       // a broken file, a URL or a second product blueprint leaves the repository untouched (#678,
       // #720). Past that, init adds each blueprint exactly as pullboard blueprint add does.
-      const blueprints = readBlueprints(values.blueprint ?? [], io.cwd, 'init');
+      const blueprints = readBlueprints(values.blueprint ?? [], io.cwd, 'init', installedBlueprints(info.root));
       const model = optionalModel(values.model);
       const linked = relayLinked(info.root);
       const ctx = linked && model !== undefined ? context(io) : null;
@@ -2877,7 +2877,7 @@ function workCommands(io, args) {
         throw new Refused('USAGE', `pullboard blueprint add <name or file> [--blueprint <name or file>]... | save [file]; bundled: ${bundledBlueprints().join(', ')}`);
       }
       // Several blueprints land in the order given, as one result; one lands exactly as before (#720).
-      const listed = readBlueprints(references, io.cwd, 'blueprint add');
+      const listed = readBlueprints(references, io.cwd, 'blueprint add', installedBlueprints(ctx.info.root));
       const drafted = new Map();
       const landed = [];
       for (const { blueprint } of listed) landed.push(await addBlueprint(ctx, board, me, blueprint, { result: listed.length === 1, drafted }));
