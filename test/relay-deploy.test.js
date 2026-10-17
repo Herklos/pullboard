@@ -763,7 +763,7 @@ function refusingStoragePage(t, { hash, board, sealed }) {
     location,
     history: { replaceState(state, title, path) { const url = new URL(path, location.origin); location.pathname = url.pathname; location.search = url.search; location.hash = url.hash; } },
     sessionStorage: storage(), localStorage: storage(), indexedDB,
-    document: { getElementById: () => null, querySelector: () => null },
+    document: { getElementById: () => null, querySelector: () => null, documentElement: { dataset: {} } },
     addEventListener: (type, listener, options) => events.addEventListener(type, listener, options),
     /** Serve only the listing, one sealed snapshot, an empty prefix and a live stream that waits until the page hides. */
     fetch: async (input, init = {}) => {

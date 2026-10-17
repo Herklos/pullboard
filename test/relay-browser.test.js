@@ -1,7 +1,7 @@
 /** Real Chrome reads and follows device-sealed boards; the relay never receives its key [H5,H15,H18]. */
 import assert from 'node:assert/strict';
 import { AssertionError } from 'node:assert';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -483,6 +483,198 @@ test('an unauthenticated pairing link stays device-only through sign-in and a wr
   assert.equal(box.keyInRequest(), false);
 });
 
+/** Make this browser a 390-wide touch phone, so the page sees a coarse pointer and no hover. */
+async function asPhone(chrome) {
+  await chrome.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+  await chrome.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+}
+
+/** Install the person's real stand-in session cookie without reading any board link. */
+async function personCookie(chrome, box) {
+  const result = await chrome.send('Network.setCookie', {
+    name: 'pb_session', value: (await box.phoneSession()).token, url: box.origin, httpOnly: true, sameSite: 'Lax',
+  });
+  assert.equal(result.success, true, 'the real person session is installed in this private browser');
+}
+
+/** What a person can read and press on the page now: visible text, actions, sizes and colours. */
+const SCREEN_FACTS = `(() => {
+  const shown = node => node.getClientRects().length > 0 && getComputedStyle(node).visibility !== 'hidden';
+  const box = selector => { const node = document.querySelector(selector); return node && shown(node) ? Math.round(node.getBoundingClientRect().height) : null; };
+  const github = document.querySelector('#relay-screen .relay-github');
+  const rgb = github && shown(github) ? getComputedStyle(github).backgroundColor.match(/[0-9.]+/g).slice(0, 3).map(Number) : null;
+  return {
+    screen: document.documentElement.dataset.relayScreen ?? null,
+    text: document.body.innerText,
+    actions: [...document.querySelectorAll('a[href], button')].filter(shown).map(node => node.textContent.trim()),
+    cards: [...document.querySelectorAll('.card-panel')].filter(shown).length,
+    footer: shown(document.querySelector('footer.status')),
+    github: box('#relay-screen .relay-github'), githubLight: rgb && (0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]) / 255,
+    command: box('#relay-screen .relay-command'), agent: box('#relay-screen .relay-agent'),
+    copies: [...document.querySelectorAll('#relay-screen button')].filter(shown).map(node => node.textContent.trim() + ' ' + Math.round(node.getBoundingClientRect().height)),
+    commandFont: document.querySelector('#relay-screen .relay-command code') ? getComputedStyle(document.querySelector('#relay-screen .relay-command code')).fontFamily : null,
+  };
+})()`;
+
+/** Press a screen's Copy button and return what it put on the clipboard. */
+async function copied(chrome, selector) {
+  return chrome.evaluate(`(async () => {
+    const written = new Promise(resolveCopy => {
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async value => resolveCopy(value) } });
+    });
+    document.querySelector(${JSON.stringify(selector)}).click();
+    return written;
+  })()`);
+}
+
+const THIS_COMPUTER = /this computer|this machine|pullboard view|local view|try again/iu;
+
+test('a phone not signed in sees one GitHub button and nothing about this computer [H17,H5]', {
+  skip: !findChromeExecutable() && 'Chrome is not installed',
+}, async t => {
+  const box = await relayClientFixture(t);
+  const marker = 'PHONE_FIRST_SCREEN_BOARD_757';
+  assert.equal((await box.cli('add', box.lane, marker)).code, 0);
+  await box.link();
+  const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));
+  const encoded = readFileSync(box.keyFile, 'utf8').trim();
+  const computer = await startChrome();
+  t.after(() => computer.close());
+  await computer.navigate(box.origin);
+  await computer.waitFor("document.readyState === 'complete' && document.querySelector('#relay-screen') !== null");
+  assert.equal(await computer.evaluate('document.documentElement.dataset.relayScreen ?? null'), null, 'a computer keeps the page its own states draw');
+
+  const chrome = await startChrome();
+  t.after(() => chrome.close());
+  await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: "Object.defineProperty(navigator.storage, 'persist', { value: async () => false });" });
+  await asPhone(chrome);
+  const opened = [['directly', box.origin + '/'], ['after a pairing QR', box.origin + '/#device=' + 'A'.repeat(22) + '.' + 'B'.repeat(43)]];
+  for (const [how, url] of opened) {
+    await chrome.navigate('about:blank'); // A scanned QR opens a new page, never a fragment change in this one.
+    await chrome.navigate(url);
+    await chrome.waitFor("document.documentElement.dataset.relayScreen === 'sign-in' && location.hash === ''");
+    const facts = await chrome.evaluate(SCREEN_FACTS);
+    for (const words of ['Your boards, on your phone', 'Sign in with GitHub', 'Nothing to install on your phone.', 'Stuck? On your computer, ask your agent', 'Help me see my boards on my phone.']) {
+      assert.equal(facts.text.includes(words), true, how + ': the first screen says ' + words);
+    }
+    assert.deepEqual(facts.actions, ['Sign in with GitHub', 'Copy'], how + ': one GitHub button, and Copy for the sentence to the agent');
+    assert.doesNotMatch(facts.text, THIS_COMPUTER, how + ': nothing about this computer or pullboard view');
+    assert.doesNotMatch(facts.text, /\brelay\b|\blinked\b/iu, how + ': no relay or linked words');
+    assert.equal(facts.cards, 0, how + ': no empty cards');
+    assert.equal(facts.footer, false, how + ': no error footer');
+    assert.equal(facts.github, 60, how + ': the GitHub button is 60 px tall');
+    assert.deepEqual(facts.copies, ['Copy 60'], how + ': the Stuck line\'s Copy is 60 px tall');
+    assert.ok(facts.githubLight < 0.2, how + ': the GitHub button is dark');
+    assert.equal(facts.text.trim().endsWith('Copy'), true, how + ': the screen ends with the Stuck line and its Copy');
+  }
+  assert.equal(await chrome.evaluate("sessionStorage.getItem('pullboard.relay.device-pair.v1') !== null"), true, 'the scanned pairing waits on this phone through sign-in');
+  assert.equal(await copied(chrome, '#relay-screen [data-copy]'), 'Help me see my boards on my phone.');
+  await chrome.evaluate('sessionStorage.clear()'); // The stand-in code above was never a real pairing.
+
+  await chrome.navigate('about:blank');
+  await chrome.navigate(box.origin + '/#board=' + link.board + '&key=' + encoded);
+  await chrome.waitFor("document.documentElement.dataset.relayScreen === 'sign-in' && location.hash === ''");
+  await chrome.evaluate("document.querySelector('#relay-screen .relay-github').click()");
+  await chrome.waitFor("document.querySelector('#chain')?.textContent.includes(" + JSON.stringify(marker) + ") && document.querySelector('#pairing-storage-notice') !== null");
+  const board = await chrome.evaluate(`({ text: document.body.innerText, screen: document.documentElement.dataset.relayScreen ?? null,
+    after: Boolean(document.querySelector('#chain').compareDocumentPosition(document.querySelector('#pairing-storage-notice')) & Node.DOCUMENT_POSITION_FOLLOWING),
+    line: (() => { const range = document.createRange(); range.selectNodeContents(document.querySelector('#pairing-storage-notice span')); return range.getClientRects().length; })(),
+    lineText: document.querySelector('#pairing-storage-notice').innerText })`);
+  assert.equal(board.screen, null, 'the GitHub button leads straight to the board');
+  assert.doesNotMatch(board.text, THIS_COMPUTER, 'the paired phone says nothing about this computer or pullboard view');
+  assert.equal(board.after, true, 'the board shows before the Home Screen line');
+  assert.equal(board.line, 1, 'the Home Screen notice is one line');
+  assert.match(board.lineText, /Home Screen/u);
+  await chrome.evaluate("document.querySelector('#pairing-storage-notice button').click()");
+  assert.equal(await chrome.evaluate("document.querySelector('#pairing-storage-notice') === null"), true, 'the Home Screen line dismisses');
+  await chrome.navigate(box.origin + '/');
+  await chrome.waitFor("document.querySelector('#chain')?.textContent.includes(" + JSON.stringify(marker) + ')');
+  assert.equal(await chrome.evaluate("document.querySelector('#pairing-storage-notice') === null"), true, 'a dismissed line stays dismissed');
+});
+
+test('signed in with nothing shared shows one command and waits [H5,H17]', {
+  skip: !findChromeExecutable() && 'Chrome is not installed',
+}, async t => {
+  const box = await relayClientFixture(t);
+  const marker = 'SHARED_WHILE_WAITING_757';
+  assert.equal((await box.cli('add', box.lane, marker)).code, 0);
+  for (const device of ['a phone', 'another computer']) {
+    const chrome = await startChrome();
+    t.after(() => chrome.close());
+    if (device === 'a phone') await asPhone(chrome);
+    await personCookie(chrome, box);
+    await chrome.navigate(box.origin);
+    await chrome.waitFor("document.documentElement.dataset.relayScreen === 'share'");
+    const facts = await chrome.evaluate(SCREEN_FACTS);
+    for (const words of ['One step on your computer', 'pullboard relay on --all', 'Ask your agent', 'Help me share my boards with my phone.', 'Waiting for your boards']) {
+      assert.equal(facts.text.includes(words), true, device + ': the screen says ' + words);
+    }
+    assert.deepEqual(facts.actions, ['Copy', 'Copy'], device + ': Copy for the command and Copy for the agent sentence, and nothing to retry');
+    assert.doesNotMatch(facts.text.replace('pullboard relay on --all', ''), /\brelay\b|\blinked\b|local view|try again/iu, device + ': relay only inside the command');
+    assert.equal(facts.command, 60, device + ': the command box is 60 px tall');
+    assert.equal(facts.agent, 60, device + ': the agent box is the same height');
+    assert.deepEqual(facts.copies, ['Copy 60', 'Copy 60'], device + ': the command\'s Copy and the agent\'s Copy are 60 px tall');
+    assert.match(facts.commandFont, /mono|Menlo|Consolas/iu, device + ': the command is in a mono box');
+    if (device === 'a phone') {
+      assert.doesNotMatch(facts.text, THIS_COMPUTER, 'the phone says nothing about this computer or pullboard view');
+      assert.equal(await copied(chrome, '#relay-screen .relay-command button'), 'pullboard relay on --all');
+      assert.equal(await copied(chrome, '#relay-screen .relay-agent button'), 'Help me share my boards with my phone.');
+      await chrome.evaluate('window.samePage757 = true');
+      await box.link();
+      const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));
+      const encoded = readFileSync(box.keyFile, 'utf8').trim();
+      // The person scans the QR into a second tab of the same phone browser; this tab is never touched.
+      const tab = await chrome.send('Target.createTarget', { url: box.origin + '/#board=' + link.board + '&key=' + encoded });
+      assert.equal(typeof tab.targetId, 'string');
+      await chrome.waitFor("document.querySelector('#chain')?.textContent.includes(" + JSON.stringify(marker) + ')');
+      assert.equal(await chrome.evaluate("window.samePage757 === true && (document.documentElement.dataset.relayScreen ?? null) === null"), true,
+        'the waiting page fills in by itself, with no click and no reload');
+    }
+  }
+});
+
+test('a signed-in phone shows the one-command screen while its first listing is on its way [H5,H17]', {
+  skip: !findChromeExecutable() && 'Chrome is not installed',
+}, async t => {
+  const box = await relayClientFixture(t);
+  const marker = 'SHARED_AFTER_SLOW_LISTING_757';
+  assert.equal((await box.cli('add', box.lane, marker)).code, 0);
+  const chrome = await startChrome();
+  t.after(() => chrome.close());
+  await asPhone(chrome);
+  // Hold every board listing on the network until the test lets it go, as a slow phone connection does.
+  await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+    const original = window.fetch.bind(window);
+    window.held757 = [];
+    window.fetch = (input, init) => {
+      const path = new URL(typeof input === 'string' ? input : input.url, location.href).pathname;
+      if (path !== '/api/v1/boards' || window.release757) return original(input, init);
+      return new Promise(resolve => { window.held757.push(() => resolve(original(input, init))); });
+    };
+    window.releaseListings757 = () => { window.release757 = true; for (const go of window.held757.splice(0)) go(); };
+  })();` });
+  await personCookie(chrome, box);
+  await chrome.navigate(box.origin);
+  await chrome.waitFor("window.held757?.length > 0 && document.documentElement.dataset.relayScreen === 'share'");
+  const facts = await chrome.evaluate(SCREEN_FACTS);
+  assert.equal(await chrome.evaluate('window.release757 === undefined && window.held757.length > 0'), true, 'the first listing is still on its way');
+  for (const words of ['One step on your computer', 'pullboard relay on --all', 'Waiting for your boards']) {
+    assert.equal(facts.text.includes(words), true, 'while the listing waits, the screen says ' + words);
+  }
+  assert.doesNotMatch(facts.text, /Pairing this browser|Projects/u, 'no pairing notice or project list while the listing waits');
+  assert.deepEqual(facts.copies, ['Copy 60', 'Copy 60'], 'both Copy buttons are 60 px tall while the listing waits');
+  await chrome.evaluate('window.samePage757 = true; window.releaseListings757()');
+  await chrome.waitFor("document.querySelector('#relay-notice') !== null && document.documentElement.dataset.relayScreen === 'share'");
+  await box.link();
+  const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));
+  const encoded = readFileSync(box.keyFile, 'utf8').trim();
+  const tab = await chrome.send('Target.createTarget', { url: box.origin + '/#board=' + link.board + '&key=' + encoded });
+  assert.equal(typeof tab.targetId, 'string');
+  await chrome.waitFor("document.querySelector('#chain')?.textContent.includes(" + JSON.stringify(marker) + ')');
+  assert.equal(await chrome.evaluate("window.samePage757 === true && (document.documentElement.dataset.relayScreen ?? null) === null"), true,
+    'once a board is shared the waiting page fills in by itself');
+});
+
 /** A pre-ordered mirror's durable local outbox keeps its final browser projection recoverable. */
 test('legacy queued presentations never disclose later unacknowledged moves [H5,H15]', async t => {
   const box = await relayClientFixture(t);
@@ -533,6 +725,211 @@ test('legacy queued presentations never disclose later unacknowledged moves [H5,
   assert.equal(document.presentation.state.items.some(item => item.title === 'SECOND_QUEUED_108'), true);
   const compacted = await fetch(box.origin + '/api/v1/boards/' + link.board + '/events?after=0', { headers: { authorization: 'Bearer ' + link.token, 'x-pullboard-engine': String(ENGINE_VERSION) } });
   assert.equal(compacted.status, 409, 'the relay compacted the moves only after acknowledging their final checkpoint');
+});
+
+/** Wait for a genuine native enrollment/approval to reach the fixture, without retrying a move. */
+async function browserDeviceTransition(read, message) {
+  const deadline = Date.now() + 90_000;
+  while (Date.now() < deadline) {
+    const value = read();
+    if (value) return value;
+    await new Promise(resolveTransition => setTimeout(resolveTransition, 25));
+  }
+  assert.fail(message);
+}
+
+/** Pair a real Chrome private key through the foreground Mac and its one-use enrollment. */
+async function enrolledBrowser(box, t) {
+  const setup = box.startCli(['relay', 'on', '--all', '--url', box.origin]);
+  const machineFile = join(box.env.PULLBOARD_HOME, 'relay-machine/state.json');
+  const pending = await browserDeviceTransition(() => existsSync(machineFile)
+    && JSON.parse(readFileSync(machineFile, 'utf8')).pending, 'the Mac publishes the real phone enrollment');
+  const chrome = await startChrome();
+  t.after(() => chrome.close());
+  await signIn(chrome, box);
+  await chrome.navigate(box.origin + '/#device=' + pending.locator + '.' + pending.secret);
+  const result = await setup.closed;
+  assert.equal(result.code, 0, 'the genuine native phone enrollment succeeds');
+  await chrome.waitFor("document.querySelector('#chain')?.textContent.includes('private cleanup fixture item') && document.querySelector('#phone-approvals') !== null");
+  const state = JSON.parse(readFileSync(machineFile, 'utf8'));
+  assert.equal(state.devices.length, 1);
+  return { chrome, device: state.devices[0].deviceId };
+}
+
+/** Revoke the only enrolled browser through main's fresh provider sign-in, without its own approval. */
+async function revokeBrowser(box, _chrome, device) {
+  const before = box.calls.length;
+  const authorized = box.providerState.deviceAuthorized;
+  box.providerState.deviceAuthorized = false;
+  try {
+    const revoke = box.startCli(['relay', 'revoke', device]);
+    await revoke.waitForOutput('Sign in with GitHub: open ');
+    assert.ok(box.calls.slice(before).some(record => record.path === '/auth/device/start'),
+      'the only phone is removed through a fresh provider sign-in');
+    assert.equal(box.calls.slice(before).some(record => record.path === '/api/v1/devices/approvals'), false,
+      'the target browser never approves its own removal');
+    box.providerState.deviceAuthorized = true;
+    const result = await revoke.closed;
+    assert.equal(result.code, 0, 'a genuine fresh sign-in completes native revocation');
+    assert.equal(JSON.parse(result.stdout).revoked, true);
+  } finally { box.providerState.deviceAuthorized = authorized; }
+}
+
+test('a revoked device read is refused as revoked [H5,E16]', {
+  skip: !findChromeExecutable() && 'Chrome is not installed',
+}, async t => {
+  const box = await relayClientFixture(t);
+  const { chrome, device } = await enrolledBrowser(box, t);
+  const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));
+  const session = await box.phoneSession();
+  const headers = { cookie: 'pb_session=' + session.token, 'x-pullboard-engine': String(ENGINE_VERSION) };
+  const endpoint = box.origin + '/api/v1/boards/' + link.board + '/state';
+  assert.equal((await fetch(endpoint, { headers })).status, 200, 'the genuine enrolled browser can read before revocation');
+  await revokeBrowser(box, chrome, device);
+  await box.restartRelay();
+  const response = await fetch(endpoint, { headers });
+  const document = await response.json();
+  assert.equal(document.error?.code, 'DEVICE_REVOKED', 'the same browser session cannot keep reading ciphertext after device revocation and relay restart');
+  assert.equal(response.ok, false);
+  assert.equal('state' in document, false);
+  const machine = await fetch(endpoint, { headers: { authorization: 'Bearer ' + link.token, 'x-pullboard-engine': String(ENGINE_VERSION) } });
+  assert.equal(machine.status, 200, 'revoking this browser does not revoke the linked computer');
+});
+
+test('a revoked browser shows it was removed and no board [H5,E16]', {
+  skip: !findChromeExecutable() && 'Chrome is not installed',
+}, async t => {
+  const box = await relayClientFixture(t);
+  const { chrome, device } = await enrolledBrowser(box, t);
+  const key = 'pullboard.relay.keys.v1';
+  assert.equal(await chrome.evaluate(`Object.keys(JSON.parse(localStorage.getItem(${JSON.stringify(key)}))).length > 0`), true);
+  await revokeBrowser(box, chrome, device);
+  await chrome.navigate(box.origin);
+  await chrome.waitFor("document.body.textContent.includes('This browser was removed') || document.querySelector('#chain')?.textContent.includes('private cleanup fixture item')");
+  assert.equal(await chrome.evaluate("document.body.textContent.includes('This browser was removed')"), true, 'reload distinguishes a removed browser from an unpaired browser');
+  assert.equal(await chrome.evaluate("document.body.textContent.includes('private cleanup fixture item')"), false, 'the old decrypted board is not drawn');
+  assert.equal(await chrome.evaluate(`localStorage.getItem(${JSON.stringify(key)}) === null`), true, 'the cached board keys are erased');
+  assert.equal(await chrome.evaluate(`new Promise((resolve, reject) => {
+    const open = indexedDB.open('pullboard-relay-device-v1', 1);
+    open.onsuccess = () => { const db = open.result; const request = db.transaction('keys').objectStore('keys').get('device');
+      request.onsuccess = () => { db.close(); resolve(request.result === undefined); }; request.onerror = () => reject(request.error); };
+    open.onerror = () => reject(open.error);
+  })`), true, 'the removed browser no longer retains its private device key');
+  assert.equal(await chrome.evaluate("Object.keys(localStorage).some(key => key.startsWith('pullboard.relay.requests.v1.') || key.startsWith('pullboard.relay.owned-requests.v1.'))"), false, 'cached board request state is erased');
+  assert.equal(box.keyInRequest(), false);
+});
+
+
+test('revocation clears an already open browser and its cached board request state [H5,E16]', {
+  skip: !findChromeExecutable() && 'Chrome is not installed',
+}, async t => {
+  const box = await relayClientFixture(t);
+  const { chrome, device } = await enrolledBrowser(box, t);
+  const board = JSON.parse(readFileSync(box.linkFile, 'utf8')).board;
+  assert.equal(await chrome.evaluate("(window.__removedBoardReference = data.project).items.some(item => item.title === 'private cleanup fixture item')"), true);
+  // These are device-local opaque caches, never authority or a relay response. Use the real key/sealer.
+  await chrome.evaluate(`(async () => {
+    const module = await import('/relay/seal.js');
+    const board = ${JSON.stringify(board)};
+    const key = module.decodeBoardKey(JSON.parse(localStorage.getItem('pullboard.relay.keys.v1'))[board]);
+    const sealed = await module.seal(key, new TextEncoder().encode('removed cached request'), {boardId:board,kind:'request',sequence:1});
+    let binary = ''; for (const value of sealed) binary += String.fromCharCode(value);
+    localStorage.setItem('pullboard.relay.requests.v1.'+board+'.cached', JSON.stringify({id:'cached',sequence:1,sealed:btoa(binary)}));
+    localStorage.setItem('pullboard.relay.owned-requests.v1.'+board, JSON.stringify(['cached']));
+    return true;
+  })()`);
+  assert.equal(await chrome.evaluate("Object.keys(localStorage).filter(key => key.startsWith('pullboard.relay.requests.v1.') || key.startsWith('pullboard.relay.owned-requests.v1.')).length"), 2);
+  await revokeBrowser(box, chrome, device);
+  await chrome.waitFor("document.body.textContent.includes('This browser was removed')");
+  assert.equal(await chrome.evaluate("document.body.textContent.includes('private cleanup fixture item')"), false, 'live authorization loss clears the actual drawn board before reload');
+  assert.equal(await chrome.evaluate("window.__removedBoardReference.items?.length ?? 0"), 0, 'the shared cached board projection held by the cockpit is cleared, not only its DOM');
+  assert.equal(await chrome.evaluate("Object.keys(localStorage).some(key => key.startsWith('pullboard.relay.requests.v1.') || key.startsWith('pullboard.relay.owned-requests.v1.'))"), false, 'non-empty opaque board request caches are erased');
+  assert.equal(await chrome.evaluate("document.querySelector('#phone-approvals') === null"), true, 'removed browser releases its approval panel and polling loop');
+  assert.equal(await chrome.evaluate("document.querySelector('#relay-removed a')?.getAttribute('href')"), '/auth/github/start');
+});
+
+/** Independently probe real public auth delegation after a genuinely enrolled browser is revoked. */
+test('reviewer: a revoked bound session cannot regain ciphertext through auth machine minting [H5,E16]', {
+ skip: !findChromeExecutable() && 'Chrome is not installed',
+}, async t => {
+ const box = await relayClientFixture(t);
+ const {chrome, device} = await enrolledBrowser(box, t);
+ const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));
+ const oldSession = await box.phoneSession();
+ const retainedKey = await chrome.evaluate(`JSON.parse(localStorage.getItem('pullboard.relay.keys.v1'))[${JSON.stringify(link.board)}]`);
+ assert.equal(typeof retainedKey, 'string', 'the genuinely enrolled browser already received this board key');
+ const endpoint = box.origin + '/api/v1/boards/' + link.board + '/state';
+ const oldHeaders = {authorization:'Bearer '+oldSession.token,'x-pullboard-engine':String(ENGINE_VERSION)};
+ assert.equal((await fetch(endpoint,{headers:oldHeaders})).status,200,'the bound session has original read access');
+ await revokeBrowser(box, chrome, device);
+ const refused = await fetch(endpoint,{headers:oldHeaders});
+ assert.equal(refused.status,403,'the direct bound-session read is refused');
+ assert.equal((await refused.json()).error.code,'DEVICE_REVOKED','revocation is real, not an expired or foreign session');
+ // A genuinely fresh unbound GitHub sign-in must remain eligible for lost-phone recovery (#755).
+ const start = await fetch(box.origin+'/auth/github/start',{redirect:'manual'});
+ const binding=start.headers.getSetCookie().find(value=>value.startsWith('pb_oauth_binding=')).split(';')[0];
+ const approved=await fetch(start.headers.get('location'),{redirect:'manual'});
+ const callback=await fetch(approved.headers.get('location'),{redirect:'manual',headers:{cookie:binding}});
+ assert.equal(callback.status,303,'a fresh independent OAuth sign-in completes');
+ const fresh=callback.headers.getSetCookie().find(value=>value.startsWith('pb_session=')).split(';')[0].slice('pb_session='.length);
+ assert.notEqual(fresh,oldSession.token,'the positive control really uses a different fresh session');
+ const freshRead=await fetch(endpoint,{headers:{authorization:'Bearer '+fresh,'x-pullboard-engine':String(ENGINE_VERSION)}});
+ assert.equal(freshRead.status,200,'fresh unbound person recovery remains eligible');
+ const minted=await fetch(box.origin+'/auth/machines',{method:'POST',headers:{...oldHeaders,'content-type':'application/json'},body:JSON.stringify({board:link.board,machine:'revoked-browser-redelegation'})});
+ const document=await minted.json();
+ let delegatedStatus=null,decryptedOriginal=false;
+ if(minted.status===201){
+   assert.match(document.token,/^pm_[A-Za-z0-9_-]{43}$/u,'the actual auth endpoint issued a machine delegate');
+   const delegated=await fetch(endpoint,{headers:{authorization:'Bearer '+document.token,'x-pullboard-engine':String(ENGINE_VERSION)}});
+   delegatedStatus=delegated.status;
+   if(delegated.status===200){
+     const {state}=await delegated.json();
+     assert.equal(typeof state.sealed,'string','the relay served actual ciphertext, not merely a board name');
+     const plain=await unseal(decodeBoardKey(retainedKey),Buffer.from(state.sealed,'base64url'),{boardId:link.board,kind:'snapshot',sequence:state.sequence});
+     const snapshot=snapshotDocument(plain);
+     decryptedOriginal=JSON.stringify(snapshot).includes('private cleanup fixture item');
+     assert.equal(decryptedOriginal,true,'the previously received browser key decrypts the regained board');
+   }
+ }
+ t.diagnostic(JSON.stringify({oldBoundRead:refused.status,freshUnboundRead:freshRead.status,machineMint:minted.status,delegatedRead:delegatedStatus,decryptedOriginal}));
+ assert.equal(minted.status,403,'a revoked bound browser session must not mint a fresh machine credential that bypasses its revoked read');
+ assert.equal(document.error?.code,'DEVICE_REVOKED');
+});
+/** The revoked session cannot exchange its refusal for another credential through the auth router. */
+test('a revoked browser cannot mint or list relay credentials [H5,E16]', {
+  skip: !findChromeExecutable() && 'Chrome is not installed',
+}, async t => {
+  const box = await relayClientFixture(t);
+  const { chrome, device } = await enrolledBrowser(box, t);
+  const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));
+  const session = await box.phoneSession();
+  const old = { authorization: 'Bearer ' + session.token };
+  const paths = ['/auth/session', '/auth/boards', '/auth/machines?board=' + link.board, '/auth/tokens?board=' + link.board];
+  for (const path of paths) {
+    const response = await fetch(box.origin + path, { headers: old });
+    assert.equal(response.status, 200, 'the active enrolled session can read ' + path);
+    await response.body?.cancel();
+  }
+  await revokeBrowser(box, chrome, device);
+  await box.restartRelay();
+  for (const headers of [old, { cookie: 'pb_session=' + session.token, origin: box.origin }]) {
+    for (const path of paths) {
+      const response = await fetch(box.origin + path, { headers });
+      assert.equal(response.status, 403, 'the revoked session cannot read ' + path);
+      assert.equal((await response.json()).error.code, 'DEVICE_REVOKED');
+    }
+    for (const [path, input] of [
+      ['/auth/tokens', { board: link.board, agent: 'revoked-auth-route-probe' }],
+      ['/auth/machines', { board: link.board, machine: 'revoked-auth-route-probe' }],
+    ]) {
+      const response = await fetch(box.origin + path, { method: 'POST',
+        headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify(input) });
+      const document = await response.json();
+      assert.equal(response.status, 403, 'the revoked session cannot mint through ' + path);
+      assert.equal(document.error?.code, 'DEVICE_REVOKED');
+      assert.equal(Object.hasOwn(document, 'token'), false, 'a refusal contains no delegated credential');
+    }
+  }
 });
 
 test('the link approval card names the computer and the board [H17,H5]', {

@@ -53,6 +53,8 @@ Close each finding with its next step in the same cycle. When the step belongs t
 
 ## Route by roadmap order
 
+`pullboard digest --out briefing.md` writes a short Markdown briefing of this board for a person or a chat assistant; hand it over when someone needs the board's state at a glance.
+
 `pullboard roadmap` lists the milestones in order. Work the current release's open items first. Within it, take repairs before new work: rework a verifier sent back, and anything health reports, comes ahead of a new build. Reviews come before new builds, so a submission never waits while a builder starts something else. `pullboard health` sets rework planned for a later release apart under `waiting for a later release`.
 
 ## Write a ruling into the bar

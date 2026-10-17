@@ -1,10 +1,21 @@
+import { hostedReleaseDistance, hostedReleaseInfo, hostedReleaseNote } from './view/hosted-release.js';
 import {
   effectiveGuards,
   IN_STATE,
   MACHINE,
 } from './machine.js';
+import {
+  STAR_KEY,
+  starMarkup,
+} from './view/star.js';
 import { commandPhrases } from './help.js';
 import { personNeeds } from './needs.js';
+import {
+  drawHosted,
+  hostedBrowser,
+  hostedMarkup,
+  hostedState,
+} from './view/hosted.js';
 import { staleChip } from './view/stale.js';
 
 /** The CLI's default phrases, ordered by depth for the existing prose inventory guard. */
@@ -48,10 +59,10 @@ function lifecycle() {
  * connect or sign in.
  *
  * @param {string} [key] - The session's secret.
- * @param {{snapshot?: boolean, readOnly?: boolean, requests?: boolean, transportModule?: string|null, apiBase?: string, apiHeaders?: Record<string, string>, stylesheet?: string, paths?: boolean, hostedLocal?: boolean, relaySession?: boolean, signIn?: string|null}} [options] - Served connection and assets, optional person requests over a read-only transport, host routes, a static page with event replay, or the hosted page that reads this machine's view first.
+ * @param {{snapshot?: boolean, readOnly?: boolean, requests?: boolean, transportModule?: string|null, apiBase?: string, apiHeaders?: Record<string, string>, stylesheet?: string, paths?: boolean, hostedLocal?: boolean, relaySession?: boolean, signIn?: string|null, hostedReleaseVersion?: string, hostedReleaseVersions?: string[]|null}} [options] - Served connection and assets, optional person requests over a read-only transport, host routes, a static page with event replay, or the hosted page that reads this machine's view first.
  * @returns {string}
  */
-export function cockpitPage(key = '', { snapshot = false, readOnly = false, requests = false, transportModule = null, apiBase = '', apiHeaders = { 'x-pullboard-key': key }, stylesheet = null, paths = false, hostedLocal = false, relaySession = false, signIn = null } = {}) {
+export function cockpitPage(key = '', { snapshot = false, readOnly = false, requests = false, transportModule = null, apiBase = '', apiHeaders = { 'x-pullboard-key': key }, stylesheet = null, paths = false, hostedLocal = false, relaySession = false, signIn = null, hostedReleaseVersion, hostedReleaseVersions = null } = {}) {
   // Derive the current CLI inventory for every served, relay or exported page.
   const COMMAND_SOURCE = 'pullboard (?:' + commandPhrases().join('|') + ')(?![\\w-])(?: (?:--?[\\w-]+|\\d+|#\\d+|"[^"\\n]*"|[A-Z][A-Z0-9_]*|[\\w-]*[\\/.:@][^\\s"]*|[a-z]+-\\d+)(?![\\w-]))*';
 
@@ -61,6 +72,8 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
   const requestMode = Boolean(readOnly && requests && !snapshot && transportModule);
   if (signIn !== null && (typeof signIn !== 'string' || !signIn.startsWith('/') || signIn.startsWith('//'))) throw new TypeError('signIn must be a path on the hosting site, or null');
   const hostedOptions = JSON.stringify({ local: Boolean(hostedLocal) && !snapshot, relaySession: Boolean(relaySession), signIn }).replace(/</g, '\\u003c');
+  const releaseHosted = Boolean(hostedLocal) && !snapshot;
+  const releaseInfo = hostedReleaseInfo(hostedReleaseVersion, hostedReleaseVersions, releaseHosted);
   const css = stylesheet ?? (snapshot ? 'view.css' : transportModule ? '/view.css' : '/view.css?k=' + encodeURIComponent(key));
   const cssAttribute = css.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
   return `<!doctype html>
@@ -82,7 +95,7 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
   </div>
   <div class="side-body" id="side-body">
     <div class="label">Projects</div>
-    <nav id="proj-list" aria-label="Projects on this machine"></nav>
+    <nav id="proj-list" aria-label="Projects on this machine"></nav><p class="side-hint" id="side-hint" hidden></p>
     <section class="products" id="products" aria-label="Products" hidden><div class="label">Products</div><div id="prod-list"></div></section>
   </div>
 </aside>
@@ -104,10 +117,7 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
     <p>Run <code>pullboard init</code> in a git repo, or ask an agent to. Its board shows up here by itself.</p>
   </section>
   <p class="empty" id="project-loading" role="status" hidden>Loading project…</p>
-  <section class="card-panel" id="local-note" role="status" hidden>
-    <p id="local-note-text"></p>
-    <p id="local-note-links" hidden><a id="local-note-view" href="http://127.0.0.1:4890/local/view">Open the local view</a> <a id="local-note-sign-in" hidden>Sign in to see linked boards</a> <button class="ghost" id="local-note-retry" type="button">Try again</button></p>
-  </section>
+  ${hostedMarkup('http://127.0.0.1:4890')}
   <section class="card-panel snapshot-controls" id="snapshot-controls" ${snapshot ? '' : 'hidden'} aria-label="Snapshot replay">
     <span>Read-only snapshot</span>
     <button class="ghost" id="replay-play" type="button">Play from first event</button>
@@ -169,6 +179,7 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
     <div class="card-panel feed" id="activity"></div>
   </section>
   <section data-pane="roadmap" class="roadmap-layout" id="roadmap" aria-label="Roadmap"></section>
+  ${hostedLocal && !snapshot ? starMarkup() : ''}
 </main>
 </div>
 </div>
@@ -304,16 +315,49 @@ const itemSearches = new Map();
 let detailRead = null;
 const addressedShouts = new Map();
 const $ = (id) => document.getElementById(id);
+// The update note from src/view/hosted-release.js (#632): only a confirmed read of this machine's view says how far behind it is.
+// Only the hosted page builds it; every other page draws nothing and never touches the DOM for it.
+const renderHostedReleaseNote = ${releaseHosted ? `(${hostedReleaseNote.toString()})(${releaseInfo}, { $, keep, distance: (${hostedReleaseDistance.toString()}),
+  // The selected board's own source decides (#632 review): a confirmed local board keeps its note on a mixed list that
+  // also reads relay boards, and a selected relay board never shows one; with no board selected, only an all-local page.
+  readable: () => {
+    if (!hosted.local || !localConfirmed || !localSession || connection.base !== localSession.origin) return false;
+    const board = data?.projects?.find((entry) => entry.root === view.root && entry.ok);
+    return board ? boardSources.get(board.id)?.kind === 'local' : !transportModule && !transport;
+  },
+  project: (project = data?.project) => project?.releaseNotes ? project : data?.projects?.find((entry) => entry.ok && entry.releaseNotes) })` : '() => {}'};
 
-/** Say in one line what the page is doing about this machine's view, or why it cannot read it, with the ways on. */
-function localNote(text, ways = false) {
-  $('local-note').hidden = !text;
-  $('local-note-text').textContent = text || '';
-  $('local-note-links').hidden = !ways;
-  $('local-note-view').href = (localSession?.origin || LOCAL_VIEW) + '/local/view';
-  $('local-note-sign-in').hidden = !hosted.signIn || hosted.relaySession;
-  if (hosted.signIn) $('local-note-sign-in').href = hosted.signIn;
+const hostedState = (${hostedState.toString()});
+const hostedBrowser = (${hostedBrowser.toString()});
+const drawHosted = (${drawHosted.toString()});
+/** Show the hosted state the page is in (src/view/hosted.js), with its next step, or none with null. */
+function localNote(state, facts = {}) {
+  drawHosted(document, hostedState(state, { browser: hostedBrowser(navigator), ...facts }), { view: localSession?.origin || LOCAL_VIEW, signIn: hosted.signIn, session: hosted.relaySession });
 }
+
+let starLinked = { at: 0, linked: false, reading: false };
+/**
+ * Show the hosted page's star line (src/view/star.js) to a signed-in person whose account lists a linked board, until
+ * dismissed here; pass a board list through. Why the account's list: it is the linked-board metadata the relay serves
+ * this page, whichever source then draws a board, so a linked board this machine reads locally still counts, and no
+ * relay client loads to decide it. It is read until it lists one, at most every few seconds, and
+ * declares the relay's engine as every relay request does.
+ */
+function starLine(list) {
+  const line = $('star-line');
+  if (!line) return list;
+  const show = () => { line.hidden = !(hosted.relaySession && starLinked.linked && keep(${JSON.stringify(STAR_KEY)}) !== 'dismissed'); };
+  if (hosted.relaySession && !starLinked.linked && !starLinked.reading && Date.now() - starLinked.at > 2500) {
+    starLinked = { at: Date.now(), linked: false, reading: true };
+    linkedList().then((reply) => reply?.boards?.some((board) => typeof board?.id === 'string'), () => false)
+      .then((linked) => { starLinked = { at: Date.now(), linked, reading: false }; line.dataset.linked = linked ? 'yes' : 'no'; show(); });
+  }
+  show();
+  return list;
+}
+$('star-dismiss')?.addEventListener('click', () => { keep(${JSON.stringify(STAR_KEY)}, 'dismissed'); starLine(null); });
+// The first look waits for the whole script, so the engine the read declares (linkedList) is set up by then.
+Promise.resolve().then(() => starLine(null)); // a microtask, as queueMicrotask would schedule, but present in every page context
 
 /** Hide the relay's own banner, which speaks for the relay, on a page the relay does not serve this time. */
 function hideRelayNotice() {
@@ -326,7 +370,7 @@ function localTrip(base) {
   const trips = Number(tabValue(LOCAL_TRIPS) || 0);
   if (trips >= 2) {
     tabValue(LOCAL_TRIPS, null);
-    localNote('The local view did not give this page a session it accepts. Open the local view, or try again.', true);
+    localNote('problem', { detail: 'The local view did not give this page a session it accepts. Open the local view to see its boards.' });
     return false;
   }
   tabValue(LOCAL_TRIPS, String(trips + 1));
@@ -356,24 +400,26 @@ async function connectLocal() {
     try { permission = (await navigator.permissions.query({ name })).state; break; } catch { /* this browser has no such permission */ }
   }
   if (permission === 'denied') {
-    localNote('This browser has refused this page access to apps on this device, so it cannot read the board running here. Allow it in the site settings for app.pullboard.dev, or open the local view.', true);
+    localNote('blocked');
     return 'unreachable';
   }
   if (permission !== 'granted') {
-    localNote('Your browser may ask to let this page reach apps on this device: allow it, and the page reads the board pullboard view runs here, which never leaves this machine.');
+    localNote('asking');
     // The line is on screen before the request that can raise the browser's prompt.
     await new Promise((painted) => requestAnimationFrame(() => requestAnimationFrame(painted)));
   }
   let reply;
   try { reply = await fetch(base + '/local/protocol', { signal: AbortSignal.timeout(3000), credentials: 'omit', redirect: 'error' }); }
   catch {
-    localNote('This page cannot reach a local view: pullboard view may not be running, this browser may have refused it access to this device, or the installed Pullboard may be older than this page. Start pullboard view and try again, or open the link it printed.', true);
+    // One discovery request is all this page makes of this device (P5), so a view too old to answer it reads as none,
+    // and the state names that case in its hint.
+    localNote('not-running');
     return 'unreachable';
   }
   let protocol = null;
   try { protocol = await reply.json(); } catch { /* not this protocol */ }
   if (!reply.ok || protocol?.version !== 1 || protocol?.apiVersion !== 1 || protocol?.hostedOrigin !== location.origin) {
-    localNote('The installed Pullboard does not match this page. Open the link pullboard view printed, or update Pullboard.', true);
+    localNote('mismatch');
     return 'unreachable';
   }
   if (!localSession) return localTrip(base) ? 'away' : 'unreachable';
@@ -456,13 +502,15 @@ const dayName = (iso) => {
   today.setDate(today.getDate() - 1);
   return then === today.toDateString() ? 'Yesterday' : new Date(iso).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
 };
+// When the page last named days, so tickDays can rename them in place once the clock passes midnight (#644).
+let daysNamedAt = new Date();
 // A feed's rows, newest first, with the day named above each run of rows from the same day.
-const byDay = (rows, at, row) => rows.map((x, i) => (i && new Date(at(x)).toDateString() === new Date(at(rows[i - 1])).toDateString() ? '' : '<h4 class="day">' + dayName(at(x)) + '</h4>') + row(x)).join('');
+const byDay = (rows, at, row) => { daysNamedAt = new Date(); return rows.map((x, i) => (i && new Date(at(x)).toDateString() === new Date(at(rows[i - 1])).toDateString() ? '' : '<h4 class="day">' + dayName(at(x)) + '</h4>') + row(x)).join(''); };
 // Where the shouts cross into an earlier day, a rule names it in the middle; today needs no label at the top.
-const dayRules = (rows, at, row) => rows.map((x, i) => {
+const dayRules = (rows, at, row) => { daysNamedAt = new Date(); return rows.map((x, i) => {
   const day = new Date(at(x)).toDateString(), before = i ? new Date(at(rows[i - 1])).toDateString() : new Date().toDateString();
   return (day === before ? '' : '<div class="day-rule" role="separator"><span>' + dayName(at(x)) + '</span></div>') + row(x);
-}).join('');
+}).join(''); };
 const firstLine = (text) => String(text ?? '').split('\\n').map((line) => line.trim()).find(Boolean) || '';
 /** Omit a duplicated leading verdict code from rendered copy while preserving the recorded note. */
 function visibleVerdictNote(reason, note) {
@@ -948,7 +996,7 @@ async function api(path, body) {
     if (body !== undefined && body !== null) throw new Error('This is a read-only snapshot.');
     return jsonRequest(path, undefined, '', {});
   }
-  if (path === '/api/v1/boards') return await listedBoards();
+  if (path === '/api/v1/boards') return starLine(await listedBoards());
   const boardId = /^\\/api\\/v1\\/boards\\/([0-9a-f]{32})(?:\\/|$)/u.exec(path)?.[1];
   const source = boardId ? boardSources.get(boardId) : null;
   if (boardId && !source) throw new Error(transport
@@ -985,13 +1033,20 @@ async function jsonRequest(path, body, base, headers, cache) {
   return json;
 }
 
+let relayEngine = null;
+/** The account's linked boards: a same-origin read that declares the relay's engine, as every relay request does. */
+async function linkedList() {
+  relayEngine ??= await import('/relay/engine.js').then((engine) => String(engine.ENGINE_VERSION), () => '');
+  return jsonRequest('/api/v1/boards', undefined, '', relayEngine ? { 'x-pullboard-engine': relayEngine } : {}, 'no-store');
+}
+
 /**
  * Whether the signed-in person's linked boards name one this machine's list lacks: only then does the page need the
  * decrypting relay client. The metadata is a same-origin cookie-authenticated read, with none of this machine's local
  * credential.
  */
 async function linkedBoardMissing(localIds) {
-  const linked = await jsonRequest('/api/v1/boards', undefined, '', {}, 'no-store');
+  const linked = await linkedList();
   return Boolean(linked.boards?.some(board => typeof board.id === 'string' && /^[0-9a-f]{32}$/.test(board.id) && typeof board.repository === 'string' && !localIds.has(board.id)));
 }
 
@@ -1010,20 +1065,20 @@ async function listedBoards() {
         try { if (await linkedBoardMissing(new Set())) await loadTransport(); } catch { /* Keep the local refusal when neither source can be read. */ }
       }
       if (!transport) throw error;
-      localNote(String(error.message || error), true);
+      localNote('local-failed', { detail: String(error.message || error) });
     }
   }
   if (hosted.local && hasLocal && hosted.relaySession && configuredTransportModule && !transport) {
     try {
       if (await linkedBoardMissing(new Set((local.boards || []).map(board => board.id)))) await loadTransport();
-    } catch (error) { localNote('Linked boards are unavailable: ' + String(error.message || error), true); }
+    } catch (error) { localNote('linked-failed', { detail: String(error.message || error) }); }
   }
   if (!hasLocal && transportModule && !transport) throw transportLoadError || new Error('The browser transport is still loading.');
   if (transport) {
     try { relay = await transport.request('/api/v1/boards'); }
     catch (error) {
       if (!hosted.local || !hasLocal) throw error;
-      localNote('Linked boards are unavailable: ' + String(error.message || error), true);
+      localNote('linked-failed', { detail: String(error.message || error) });
     }
   }
   boardSources.clear();
@@ -1038,11 +1093,26 @@ async function listedBoards() {
   }
   for (const board of relay.boards || []) {
     if (typeof board.id !== 'string' || boardSources.has(board.id)) continue;
-    const row = { ...board, root: board.id, source: 'relay' };
+    // A linked board reads by its own name, as it does locally, with its owner as a quiet prefix.
+    const [owner, name] = String(board.name || '').includes('/') ? board.name.split('/') : ['', board.name];
+    const row = { ...board, root: board.id, source: 'relay', name, owner };
     boardSources.set(row.id, { kind: 'relay', board: row });
     boards.push(row);
   }
+  if (hosted.local) await hostedListed(boards);
   return { version: 1, boards, warnings: [...(local.warnings || []), ...(relay.warnings || [])] };
+}
+
+/** After a hosted board list: a list clears a state it stood in for, and a signed-in empty one says why it is empty. */
+async function hostedListed(boards) {
+  const shown = $('local-note').dataset.state || '';
+  if (boards.length) { if (['not-running', 'no-linked', 'unpaired', 'signed-out'].includes(shown)) localNote(null); return; }
+  // An empty local view can still leave linked boards on another computer waiting for this browser to pair.
+  if (!hosted.relaySession || !['', 'not-running', 'no-linked', 'unpaired'].includes(shown)) return;
+  let linked;
+  try { linked = await linkedList(); } catch { return; /* the relay's banner says why */ }
+  const names = (linked.boards || []).filter((board) => typeof board.repository === 'string').map((board) => board.repository);
+  localNote(names.length ? 'unpaired' : 'no-linked', { linked: names });
 }
 
 /** Set presentation controls for the selected board; API routing still checks the target board independently. */
@@ -1127,6 +1197,7 @@ function boardSummary(board, state) {
   const count = (test) => state.items.filter(test).length;
   return {
     ...board, ok: true,
+    releaseNotes: state.releaseNotes,
     building: count((item) => item.status === 'claimed'),
     awaiting: count((item) => item.status === 'submitted'),
     sentBack: count((item) => item.status === 'open' && item.verdict && item.verdict.decision === 'REJECT'),
@@ -1152,6 +1223,11 @@ function flowMinutes(value) {
   return Math.floor(hours / 24) + ' d ' + hours % 24 + ' h';
 }
 
+/** A queue's oldest item and how long it has waited, as the flow card reads it. */
+function oldestLine(oldest) {
+  return 'Oldest: ' + (oldest ? '#' + oldest.id + ' · ' + flowMinutes(oldest.ageMinutes) : 'none');
+}
+
 /** Render the four stages, live queues and single recommendation supplied by stats [N26]. */
 function proofFlowCard(flow) {
   if (!flow) return '';
@@ -1165,7 +1241,7 @@ function proofFlowCard(flow) {
     const queue = flow.queues[key];
     const oldest = queue.oldest;
     return '<div><span>' + label + ' queue</span><b data-queue="' + key + '" data-value="' + esc(queue.size) + '">' + esc(queue.size) + '</b>'
-      + '<small data-oldest="' + key + '" data-value="' + esc(oldest?.ageMinutes ?? '') + '">Oldest: ' + (oldest ? '#' + esc(oldest.id) + ' · ' + esc(flowMinutes(oldest.ageMinutes)) : 'none') + '</small></div>';
+      + '<small data-oldest="' + key + '" data-value="' + esc(oldest?.ageMinutes ?? '') + '">' + esc(oldestLine(oldest)) + '</small></div>';
   }).join('');
   const bottleneck = flow.bottleneck;
   return '<div class="proof-stats-flow"><div class="proof-stats-grid">' + averages + waiting + '</div>'
@@ -1383,6 +1459,26 @@ async function revokeCredential(id) {
   if (root === view.root) renderCredentials();
 }
 
+/**
+ * A board read as text with its clock readings blanked: the flow's observation time (asOf) and each queue's oldest age
+ * (ageMinutes) are stamped afresh on every read, so two reads that differ only there show the same board (#644).
+ * Matching whole JSON keys is safe: a quote inside any string value is escaped, so no title can look like one.
+ */
+function boardText(state) {
+  return JSON.stringify(state).replace(/"(asOf|ageMinutes)":(?:"[^"]*"|[-+.0-9eE]+|null)/g, '"$1":null');
+}
+
+/** Show each queue's oldest age from the board on hand in place: the one thing on the page that moves with the clock alone. */
+function showFlowAges() {
+  const flow = data?.project?.proofStats?.flow;
+  if (!flow) return;
+  for (const node of document.querySelectorAll('#proof-stats [data-oldest]')) {
+    const oldest = flow.queues[node.dataset.oldest]?.oldest;
+    node.dataset.value = oldest?.ageMinutes ?? '';
+    node.textContent = oldestLine(oldest);
+  }
+}
+
 /** Refresh from API v1, every board or only those in fresh, and discard a response for a project the person left. */
 async function refresh(fresh = null) {
   const generation = ++refreshStarted;
@@ -1420,7 +1516,7 @@ async function refresh(fresh = null) {
     if (place) applyPlace(place, globalThis.history?.state);
     addressReady = true;
   }
-  const text = JSON.stringify(next);
+  const text = boardText(next);
   const changed = text !== seen;
   if (text !== seen) {
     seen = text;
@@ -1430,6 +1526,11 @@ async function refresh(fresh = null) {
     const reading = detailRead;
     render();
     if (detailRead !== reading) await detailRead;
+  } else if (data !== next) {
+    // The same board read again: keep its newest clock readings and show them in place, with no redraw (#644).
+    data = next;
+    showFlowAges();
+    tickAges();
   }
   if (changed) {
     address(false);
@@ -1763,7 +1864,7 @@ function renderSide() {
     const on = x.root === view.root;
     const parts = doing(x).split(' · '), asks = [x.decisions, x.pending, x.drafts, x.holds].filter(Boolean).length;
     const line = x.loading ? 'Loading…' : (asks ? '<span class="asks">' + esc(parts.slice(0, asks).join(' · ')) + '</span>' + (parts.length > asks ? ' · ' : '') : '') + esc(parts.slice(asks).join(' · '));
-    return '<button class="proj repo' + (on ? ' on' : '') + '"' + (on ? ' aria-current="true"' : '') + ' data-root="' + esc(x.root) + '" title="' + esc(x.root) + '" type="button"><span class="pname">' + esc(x.name) + '</span><small>' + line + '</small></button>';
+    return '<button class="proj repo' + (on ? ' on' : '') + '"' + (on ? ' aria-current="true"' : '') + ' data-root="' + esc(x.root) + '" title="' + esc(x.root) + '" type="button"><span class="pname">' + (x.owner ? '<span class="owner">' + esc(x.owner) + '/</span>' : '') + esc(x.name) + '</span><small>' + (hosted.local && x.source ? '<span class="src">' + (x.source === 'relay' ? 'linked' : 'this computer') + '</span> · ' : '') + line + '</small></button>';
   };
   const groupedRoots = new Set(data.groups.flatMap((group) => group.repos.map((repo) => repo.root)));
   const grouped = data.groups.map((group) => {
@@ -2160,6 +2261,7 @@ function render() {
   document.querySelectorAll('[data-pane]').forEach((pane) => { pane.hidden = Boolean(group) || pane.dataset.pane !== view.tab; });
   $('products').hidden = !p || !p.products.length;
   renderReleaseNotes(group ? null : p);
+  renderHostedReleaseNote(p);
   renderPersonRequests(p);
   renderCredentials();
   if (group) { renderGroup(group); return; }
@@ -2270,6 +2372,8 @@ function render() {
   $('filter-toggle').title = filterLabel;
   if (view.filterOpen && activeChoice) [...menu.querySelectorAll('[data-filter-choice]')].find((option) => option.dataset.filterChoice === activeChoice)?.focus({ preventScroll: true });
   const shown = inView.filter(inLane(view.lane)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  const finishedUnderAll = !shown.length && p.items.length > 0 && p.items.every((item) => stateOf(item) === 'verified')
+    && view.tab === 'items' && view.itemsView === 'list' && view.state === 'active' && !view.lane && !q && !snapshot;
   $('pipeline').innerHTML = pipeline ? pipelineCard(shown) : '';
   // With nothing picked, the detail shows the first row, and keeps it when a refresh reorders the list.
   // While another project loads, the item picked there waits for its own board.
@@ -2292,7 +2396,9 @@ function render() {
       // A rejected row's second line is its verdict; any other row's is its lane and the spec ids it serves.
       secondary: (rejected(i) ? '<span class="why"><b>' + esc(i.verdict.reason) + '</b> ' + linked(firstLine(visibleVerdictNote(i.verdict.reason, i.verdict.note)), titles) + '</span>'
         : '<span>' + esc(i.lane) + '</span>' + (i.specs.length ? '<span class="specs" title="' + esc(i.specs.join(', ')) + '">' + esc(i.specs.slice(0, 3).join(', ') + (i.specs.length > 3 ? ' +' + (i.specs.length - 3) : '')) + '</span>' : '')) + pills + staleChip(i) });
-  }).join('') : '<li class="empty">' + (items.length ? 'No items match.' : snapshot ? 'No items at this event.' : 'No items yet. Add the first one with New item.') + '</li>';
+  }).join('') : '<li class="empty">' + (finishedUnderAll
+    ? 'Finished work is under All. <button class="link" data-filter-choice="state:all" data-filter-kind="state" data-filter-value="all" type="button">Show all</button>'
+    : items.length ? 'No items match.' : snapshot ? 'No items at this event.' : 'No items yet. Add the first one with New item.') + '</li>';
 
   const selected = p.items.find((i) => i.id === view.item);
   // The form shows when asked for, or when the project has no item at all, withdrawn ones included.
@@ -2341,7 +2447,7 @@ function render() {
       + '<div><h3>People and commits</h3><dl class="kv">' + (item.owner && s === 'building' ? '<dt>holding</dt><dd>' + esc(agentName(item.owner)) + '</dd>' : '') + (item.builtBy ? '<dt>built by</dt><dd>' + esc(agentName(item.builtBy)) + '</dd>' : '') + (item.verifiedBy ? '<dt>verified by</dt><dd>' + esc(agentName(item.verifiedBy)) + '</dd>' : '') + (item.commit ? '<dt>commit</dt><dd><code>' + esc(item.commit.slice(0, 12)) + '</code></dd>' : '') + (item.merged ? '<dt>merged</dt><dd><code>' + esc(item.merged.slice(0, 12)) + '</code></dd>' : '') + (item.blockedBy.length ? '<dt>waits on</dt><dd class="waits-on">' + item.blockedBy.map((id) => '<span class="wait-unit"><a class="ref" href="' + esc(itemAddress(id)) + '" data-go="item:' + id + '">#' + id + '</a></span>').join(', ') + '</dd>' : '') + '</dl></div>'
       + (back && !earlier.length ? '' : '<div><h3>' + (back ? 'Earlier verdicts' : 'Verdicts') + '</h3>' + (earlier.length ? earlier.map((v) => verdictHtml(v, titles)).join('') : '<div class="muted">None yet.</div>') + '</div>')
       + '<div><h3>History</h3>' + timeline(item) + '</div>'
-      + '<div class="links"><button data-shout="' + esc(item.lane) + '" data-about="' + item.id + '" type="button">Shout the ' + esc(item.lane) + ' lane about #' + item.id + '</button><button data-new type="button">New item</button></div></div>';
+      + '<div class="links"><button class="ghost" data-shout="' + esc(item.lane) + '" data-about="' + item.id + '" type="button">Shout the ' + esc(item.lane) + ' lane about #' + item.id + '</button><button class="go" data-new type="button">New item</button></div></div>';
   }
 
   // Every #id in a shout that names an item opens it, whatever stands next to it. The ids are found in
@@ -3195,6 +3301,24 @@ function foldShouts() {
 
 function tickAges() {
   document.querySelectorAll('[data-ago]').forEach((node) => { node.textContent = node.classList.contains('long') ? agoLong(node.dataset.ago) : ago(node.dataset.ago); });
+  tickDays();
+}
+
+/**
+ * Once the clock has passed midnight since the page named its days, rename them in place with no redraw (#644): the
+ * day that was Today and the one that was Yesterday get their names for now, and the shouts, which carry no rule above
+ * today's, get one above what is no longer today. Every other day was named by its date and stays true.
+ */
+function tickDays() {
+  const then = daysNamedAt, now = new Date();
+  if (then.toDateString() === now.toDateString()) return;
+  const before = new Date(then);
+  before.setDate(then.getDate() - 1);
+  const names = { Today: dayName(then.toISOString()), Yesterday: dayName(before.toISOString()) };
+  document.querySelectorAll('.feed .day, #feed > .day-rule span').forEach((node) => { if (names[node.textContent]) node.textContent = names[node.textContent]; });
+  const first = $('feed')?.querySelector?.('.shout');
+  if (first && !first.previousElementSibling?.classList?.contains('day-rule')) first.insertAdjacentHTML('beforebegin', '<div class="day-rule" role="separator"><span>' + names.Today + '</span></div>');
+  daysNamedAt = now;
 }
 
 /** Open or close the project list where the sidebar is folded into a top bar (under 900px). */
@@ -3223,7 +3347,7 @@ function switchTo(root, target = null, record = true) {
   seen = '';
   if (data) render();
   document.body.classList.add('switching');
-  refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }).finally(() => {
+  return refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }).finally(() => {
     if (generation === switchGeneration) document.body.classList.remove('switching');
     if (generation === switchGeneration && requestedItem !== null && view.item === requestedItem && view.root === root && view.tab === 'items') reveal();
   });
@@ -3518,8 +3642,18 @@ if (hosted.local) $('local-note-retry').addEventListener('click', () => {
   tabValue(LOCAL_TRIPS, null);
   // Reload both source-scoped connections together when relay streams are already active.
   if (transport) { location.reload(); return; }
-  connectLocal().then((local) => local === 'local' ? refresh() : null).catch((error) => localNote(error.message, true));
+  connectLocal().then((local) => local === 'local' ? refresh() : null).catch((error) => localNote('problem', { detail: error.message }));
 });
+/** Open a newly approved board's Items view after its real list entry arrives. */
+async function openApprovedBoard(boardId) {
+  await refresh();
+  const board = data?.projects.find(entry => entry.id === boardId && entry.ok);
+  if (!board) throw new Error('The approved board did not load. Refresh the board list and try again.');
+  view.tab = 'items';
+  keep('pb.tab', view.tab);
+  return switchTo(board.root);
+}
+
 /** Load the configured decrypting transport once, only when relay reads or pairing need it. */
 let transportLoading = null;
 async function loadTransport() {
@@ -3527,7 +3661,10 @@ async function loadTransport() {
   if (!transportLoading) transportLoading = (async () => {
     const module = await import(configuredTransportModule);
     if (typeof module.createTransport !== 'function') throw new Error('The browser transport must export createTransport({ onUpdate }).');
-    const configured = await module.createTransport({ onUpdate: () => transport ? refresh().catch((error) => { $('live').textContent = 'offline: ' + error.message; }) : Promise.resolve() });
+    const configured = await module.createTransport({
+      onUpdate: () => transport ? refresh().catch((error) => { $('live').textContent = 'offline: ' + error.message; }) : Promise.resolve(),
+      onOpenBoard: openApprovedBoard,
+    });
     if (!configured || typeof configured.request !== 'function') throw new Error('The browser transport must provide request(path, body).');
     transportModule = configuredTransportModule;
     transport = configured;
@@ -3542,13 +3679,16 @@ async function loadTransport() {
 async function startPage() {
   let local = 'unreachable';
   if (hosted.local && !relayPairing) {
-    if (localProblem) localNote(localProblem, true);
+    if (localProblem) localNote('problem', { detail: localProblem });
     else local = await connectLocal();
     if (local === 'away') return;
     if (local === 'unreachable' && !hosted.relaySession) { hideRelayNotice(); return; }
   }
   if (hosted.local && local === 'local') transportModule = null;
-  else if (configuredTransportModule) await loadTransport();
+  else if (configuredTransportModule) {
+    // Signed out, a pairing link waits for sign-in, which its own state asks for.
+    try { await loadTransport(); } catch (error) { if (!hosted.local || hosted.relaySession) throw error; localNote('signed-out'); return; }
+  }
   await refresh();
 }
 startPage().catch((error) => { document.body.classList.remove('loading'); $('live').textContent = 'cannot reach the view: ' + error.message; });

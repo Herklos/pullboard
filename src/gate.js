@@ -6,24 +6,32 @@
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { availableParallelism } from 'node:os';
+import { availableParallelism, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { gitChildEnv, gitPath, headTree, invalidateGitFacts, isClean, untracked } from './git.js';
 import { secretsIn } from './hooks.js';
 import { Refused } from './refused.js';
 import { GATE_SLOT_HELD_ENV, gateSlotEnvironment, inheritedGateSlot, memoryAdmission, readMachineMemory, takeResource } from './resources.js';
-import { browserFreeChecksEnabled, gateQueueSettings, loadMachineSettings, memoryFloorMB } from './settings.js';
+import { browserFreeChecksEnabled, gateQueueSettings, gateShortSlots, loadMachineSettings, memoryFloorMB } from './settings.js';
 import { selectAffectedTests } from './affected-tests.js';
 import { checkNeedsBrowser, testsNeedBrowser } from './browser-admission.js';
 import { timingFromOutput, timingRunner } from './timing.js';
 import { landingShardProfile } from './landing-shards.js';
+import { gateStages, stagedScript, readPipes, readStages } from './gate-stages.js';
+export { gateStages } from './gate-stages.js';
 import { RunnerDropped, runOnRunner, runOnRunnerAsync, runnerSource } from './runners.js';
+import { sandboxBlockedOperation, sandboxBlockedScanner } from './sandbox-denial.js';
+
+// Callers keep importing the classifier from the gate; the runner worker imports it directly.
+export { sandboxBlockedOperation, sandboxBlockedScanner };
 
 const STAMP = 'pullboard-gate-green';
 const LOG = 'pullboard-gate.log';
 const LANDING_RUN_ENV = 'PULLBOARD_LANDING_RUN';
+// Live person waivers, as {kind, test}, so a landing run does not stop early on a waived failure.
+const LANDING_WAIVERS_ENV = 'PULLBOARD_LANDING_WAIVERS';
 const DIGEST_CHARS = 3000;
 const TAIL_CHARS = 1000;
 const LINE_CHARS = 300;
@@ -148,14 +156,15 @@ export function isStampedGreen(root) {
 
 /**
  * Run a shell command in a checkout for a digest: both streams in one pipe, in order, read whole
- * however long, stdin closed so nothing waits on a person.
+ * however long, stdin closed so nothing waits on a person. With `stages`, each top-level stage's
+ * exit status and own output are kept too, or `stages` is null when the command cannot be split.
  *
  * @param {string} root
  * @param {string} command
- * @param {{ pipefail?: boolean, env?: NodeJS.ProcessEnv }} [options] - Gate-only pipefail and additional child environment values.
- * @returns {{ isGreen: boolean, output: string, seconds: number }}
+ * @param {{ pipefail?: boolean, env?: NodeJS.ProcessEnv, stages?: boolean }} [options] - Gate-only pipefail, additional child environment values and per-stage accounting.
+ * @returns {{ isGreen: boolean, output: string, seconds: number, sandboxBlocked: string|null, stages?: Array<{ status: number|null, output: string, pipeline?: Array<{ status: number|null, output: string|null }> }> | null }}
  */
-export function runShell(root, command, { pipefail = false, env = {} } = {}) {
+export function runShell(root, command, { pipefail = false, env = {}, stages = false } = {}) {
   const started = Date.now();
   const options = { cwd: root, env: { ...gitChildEnv(root), ...env }, shell: true, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', maxBuffer: 2 ** 30 };
   let prefix = '';
@@ -167,145 +176,23 @@ export function runShell(root, command, { pipefail = false, env = {} } = {}) {
       throw new Refused('PIPEFAIL_UNAVAILABLE', 'the repo gate shell cannot enable pipefail; rewrite the gate without a pipe');
     }
   }
+  const split = stages ? gateStages(command) : null;
+  const marker = `PULLBOARD_STAGE_${randomUUID().replaceAll('-', '')}`;
+  const pipes = split?.some((stage) => stage.pipeline.length > 1) ? mkdtempSync(join(tmpdir(), 'pullboard-pipes-')) : null;
   // Newlines, not spaces, around the command, so a trailing comment in it cannot swallow the `)`.
-  const result = spawnSync(`${prefix}(\n${command}\n) 2>&1`, options);
+  const result = spawnSync(`${prefix}(\n${split ? stagedScript(split, marker, pipes) : command}\n) 2>&1`, options);
   invalidateGitFacts();
-  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
-  return { isGreen: result.status === 0, output, seconds: Math.round((Date.now() - started) / 1000),
-    sandboxBlocked: result.status === 0 ? null : sandboxBlockedOperation(root, output) };
-}
-
-/** Resolve existing path prefixes so a symlink cannot hide an outside-worktree operation. */
-function diagnosticPath(path) {
-  let current = resolve(path);
-  const missing = [];
-  for (;;) {
-    try { return resolve(realpathSync(current), ...missing); }
-    catch (error) {
-      if (!['ENOENT', 'ENOTDIR'].includes(error.code)) return null;
-      const parent = dirname(current);
-      if (parent === current) return null;
-      missing.unshift(relative(parent, current));
-      current = parent;
-    }
-  }
-}
-
-/** Describe one OS permission message, resolving file targets against the command's worktree. */
-function permissionOperation(root, message, { includeFilePaths = true } = {}) {
-  const network = /^(listen|bind) (EPERM|EACCES)\b/u.exec(message);
-  if (network) return { code: network[2], syscall: network[1], operation: `${network[1]} (${network[2]})` };
-  if (!includeFilePaths) return null;
-  const file = /^(EPERM|EACCES): [^\n]*?, (open|mkdir|read|write|rename|unlink|scandir|access) (['"])([^\n]+?)\3(?= -> |$)/u.exec(message);
-  const python = /^PermissionError: \[Errno (?:1|13)\] [^\n]*?: ['"]([^'"\n]+)['"]/u.exec(message);
-  if (!file && !python) return null;
-  const path = diagnosticPath(resolve(root, file ? file[4] : python[1]));
-  const tree = diagnosticPath(root);
-  if (!path || !tree) return null;
-  const within = relative(tree, path);
-  if (within !== '..' && !within.startsWith('../') && !isAbsolute(within)) return null;
-  const code = file ? file[1] : 'EACCES';
-  return { code, path, syscall: file ? file[2] : null,
-    operation: `${file ? file[2] : 'file access'} ${JSON.stringify(path)} (${code})` };
-}
-
-/** Decode the single-line quoted YAML scalars emitted by Node's TAP reporter. */
-function tapScalar(value) {
-  if (value.startsWith('"')) {
-    try { return JSON.parse(value); } catch { return null; }
-  }
-  if (value.startsWith("'") && value.endsWith("'")) return value.slice(1, -1).replace(/''/gu, "'");
-  return /^[A-Z_]+$/u.test(value) ? value : null;
-}
-
-/** Scan complete lines with bounded TAP state so assertion messages cannot impersonate OS codes. */
-export function sandboxBlockedScanner(root, { includeFilePaths = true } = {}) {
-  let failureIndent = null;
-  let fieldIndent = null;
-  let permission = null;
-  let code = null;
-  let comment = null;
-  let startup = null;
-  let failureMessage = null;
-  let failureType = false;
-  let exitCode = null;
-  /** Retain one pending fatal diagnostic and the current failed TAP record. */
-  return (raw) => {
-    const line = raw.trim().replace(/^#\s*/u, '');
-    const indent = raw.length - raw.trimStart().length;
-    // Node's TAP reporter prints test-console output as comments and assertion details
-    // as indented YAML. Neither is a standalone gate diagnostic, even when it contains
-    // text that looks exactly like an operating-system denial.
-    if (indent === 0 && !raw.startsWith('#') && /^(?:Error: |PermissionError: )/u.test(line)) {
-      const direct = permissionOperation(root, line.replace(/^Error: /u, ''), { includeFilePaths });
-      if (direct) return direct.operation;
-    }
-    if (/^TAP version \d+$/u.test(raw)) {
-      comment = null; startup = null;
-      failureIndent = null; fieldIndent = null; permission = null; code = null;
-      failureMessage = null; failureType = false; exitCode = null;
-    }
-    // Uncaught module-load errors are comments too. Keep their complete Node fatal
-    // diagnostic pending; it is evidence only if the following file record failed
-    // to start. A test logging a caught error and then asserting is not that record.
-    if (indent === 0 && raw.startsWith('#')) {
-      if (line.startsWith('Error: ')) {
-        const operation = permissionOperation(root, line.slice('Error: '.length), { includeFilePaths });
-        comment = operation ? { operation, code: null, syscall: null, path: null, closed: false, fatal: false } : null;
-      } else if (comment) {
-        const field = /^(code|syscall|path): (.*)$/u.exec(line);
-        if (field) comment[field[1]] = tapScalar(field[2].replace(/,$/u, ''));
-        else if (line === '}') comment.closed = true;
-        else if (/^Node\.js v\d+\./u.test(line)) comment.fatal = true;
-        else if (line && !/^at |^errno: |^address: |^port: /u.test(line)
-          && !(comment.closed && comment.fatal && line.startsWith('Subtest: '))) comment = null;
-      }
-    }
-    if (/^(?:not )?ok \d+\b/u.test(line)) {
-      failureIndent = /^not ok /u.test(line) ? indent : null;
-      const operation = comment?.operation;
-      startup = failureIndent !== null && comment?.closed && comment.fatal
-        && comment.code === operation.code && comment.syscall === operation.syscall
-        && (!operation.path || (typeof comment.path === 'string'
-          && diagnosticPath(resolve(root, comment.path)) === operation.path)) ? operation : null;
-      comment = null;
-      fieldIndent = null; permission = null; code = null;
-      failureMessage = null; failureType = false; exitCode = null;
-    } else if (line === '---' && failureIndent !== null && indent === failureIndent + 2) {
-      fieldIndent = indent;
-    } else if (line === '...' && indent === fieldIndent) {
-      failureIndent = null; fieldIndent = null; permission = null; code = null;
-      startup = null; comment = null;
-      failureMessage = null; failureType = false; exitCode = null;
-    } else if (fieldIndent !== null && indent === fieldIndent) {
-      const field = /^(error|code|failureType|exitCode): (.*)$/u.exec(line);
-      if (field) {
-        const value = tapScalar(field[2]);
-        if (field[1] === 'error') {
-          failureMessage = value;
-          permission = typeof value === 'string' ? permissionOperation(root, value, { includeFilePaths }) : null;
-        } else if (field[1] === 'code') {
-          code = value;
-          if (code !== 'ERR_TEST_FAILURE') startup = null;
-        } else if (field[1] === 'failureType') failureType = value === 'testCodeFailure' || field[2] === 'testCodeFailure';
-        else exitCode = /^[1-9]\d*$/u.test(field[2]) && Number.isSafeInteger(Number(field[2])) ? Number(field[2]) : null;
-        if (permission && permission.code === code) return permission.operation;
-        if (startup && code === 'ERR_TEST_FAILURE' && failureMessage === 'test failed'
-          && failureType && exitCode !== null) return startup.operation;
-      }
-    }
-    return null;
-  };
-}
-
-/** Recognize concrete OS permission diagnostics, keeping ordinary assertion failures ordinary. */
-export function sandboxBlockedOperation(root, output, options) {
-  const scan = sandboxBlockedScanner(root, options);
-  for (const line of output.split('\n')) {
-    const operation = scan(line);
-    if (operation) return operation;
-  }
-  return null;
+  const pipeStatuses = pipes ? readPipes(split, pipes) : null;
+  if (pipes) rmSync(pipes, { recursive: true, force: true });
+  const raw = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+  const seconds = Math.round((Date.now() - started) / 1000);
+  const blocked = (output) => (result.status === 0 ? null : sandboxBlockedOperation(root, output));
+  if (!stages) return { isGreen: result.status === 0, output: raw, seconds, sandboxBlocked: blocked(raw) };
+  if (!split) return { isGreen: result.status === 0, output: raw, seconds, stages: null, sandboxBlocked: blocked(raw) };
+  const staged = readStages(raw, marker, split.length);
+  // Each pipeline component's own status rides on its stage, so no failing producer hides behind a later one.
+  const withPipes = staged.stages.map((stage, index) => (pipeStatuses?.[index] ? { ...stage, pipeline: pipeStatuses[index] } : stage));
+  return { isGreen: result.status === 0, seconds, ...staged, stages: withPipes, sandboxBlocked: blocked(staged.output) };
 }
 
 /** Refuse an environment-blocked proof after its ordinary raw logs and timings are persisted. */
@@ -326,9 +213,9 @@ function safeLog(output) {
 /** Run the unchanged caller command and profile only timings already present in its output.
  * @param {string} root
  * @param {string} command
- * @param {{ waitMs?: number, artifactDirectory?: string, artifactPrefix?: string, persistLog?: boolean, profileFile?: string, pipefail?: boolean, gateSlotHeld?: boolean, gateLease?: object, landing?: boolean }} [options]
+ * @param {{ waitMs?: number, artifactDirectory?: string, artifactPrefix?: string, persistLog?: boolean, profileFile?: string, pipefail?: boolean, gateSlotHeld?: boolean, gateLease?: object, landing?: boolean, stages?: boolean, waivers?: Array<{ kind: string, test: string }> }} [options]
  */
-export function runProfiledShell(root, command, { waitMs = 0, artifactDirectory, artifactPrefix = 'pullboard-gate', persistLog = false, profileFile, pipefail = false, gateSlotHeld = false, gateLease, landing = false } = {}) {
+export function runProfiledShell(root, command, { waitMs = 0, artifactDirectory, artifactPrefix = 'pullboard-gate', persistLog = false, profileFile, pipefail = false, gateSlotHeld = false, gateLease, landing = false, stages = false, waivers = [] } = {}) {
   const directory = artifactDirectory ?? dirname(gitPath(root, LOG));
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const id = randomUUID();
@@ -338,9 +225,12 @@ export function runProfiledShell(root, command, { waitMs = 0, artifactDirectory,
   const inherited = {
     ...(gateLease && !gateLease.runner ? gateSlotEnvironment(gateLease) : gateSlotHeld ? { [GATE_SLOT_HELD_ENV]: '1' } : {}),
     [LANDING_RUN_ENV]: landing ? '1' : '0',
+    [LANDING_WAIVERS_ENV]: landing ? JSON.stringify(waivers) : '[]',
   };
-  const run = gateLease?.runner ? runOnRunner(root, command, { runner: gateLease.runner, source: gateLease.source,
-    browser: gateLease.browser, pipefail, metadata: { ...(gateLease.runMetadata ?? {}), landing } }) : runShell(root, command, { pipefail, env: inherited });
+  // The registered worker returns the same complete stage/component accounting as a local run.
+  const run = gateLease?.runner ? { ...runOnRunner(root, command, { runner: gateLease.runner, source: gateLease.source,
+    browser: gateLease.browser, pipefail, stages, waivers: landing ? waivers : [], metadata: { ...(gateLease.runMetadata ?? {}), landing } }) }
+    : runShell(root, command, { pipefail, env: inherited, stages });
   const sandboxBlocked = run.isGreen ? null : run.sandboxBlocked ?? (run.executionRunner
     // The controller cannot realpath remote files; retain the network denial signal without treating remote paths as local paths.
     ? sandboxBlockedOperation(root, run.output, { includeFilePaths: false })
@@ -499,12 +389,16 @@ function hasPipeline(command) {
  * The whole queue waits while the machine is out of memory, so a run never starts into swap.
  *
  * @param {string} root - Checkout used to locate the machine resource database.
- * @param {(lease: { waitMs: number, token?: string, pool?: string, browser?: boolean, release: () => void }) => any | Promise<any>} action - Work to perform while holding a slot.
- * @param {{ landing?: boolean, itemCheck?: boolean, diagnostic?: boolean, browser?: boolean, remote?: boolean, agent?: string, item?: string|number, kind?: string, onWait?: (state: object) => void, readMemory?: typeof readMachineMemory }} [options] - Queue class, remote eligibility, progress reporter and, for tests, the machine memory reader.
+ * shortEligible marks a run that names its test files: with gate.shortSlots above 0 it may take a
+ * short slot when every ordinary slot is held, and a full suite can never inherit that slot. A memory
+ * hold (gate.memoryFloorMB) holds short slots too, since a short run uses the same machine memory.
+ *
+ * @param {(lease: { waitMs: number, token?: string, pool?: string, browser?: boolean, slotClass?: 'gate'|'short', release: () => void }) => any | Promise<any>} action - Work to perform while holding a slot.
+ * @param {{ landing?: boolean, itemCheck?: boolean, shortEligible?: boolean, diagnostic?: boolean, browser?: boolean, remote?: boolean, agent?: string, item?: string|number, kind?: string, onWait?: (state: object) => void, readMemory?: typeof readMachineMemory }} [options] - Queue class, short-slot eligibility, remote eligibility, progress reporter and, for tests, the machine memory reader.
  * @returns {Promise<any>} The action's result after releasing its lease.
  */
-export async function withGateSlot(root, action, { landing = false, itemCheck = false, diagnostic = false, browser = false, remote = true, agent, item = '', kind = '', onWait, readMemory = readMachineMemory } = {}) {
-  const inherited = inheritedGateSlot({ root, browser });
+export async function withGateSlot(root, action, { landing = false, itemCheck = false, shortEligible = false, diagnostic = false, browser = false, remote = true, agent, item = '', kind = '', onWait, readMemory = readMachineMemory } = {}) {
+  const inherited = inheritedGateSlot({ root, browser, namedFiles: shortEligible });
   if (inherited) {
     try { return await action(inherited); }
     finally { inherited.release(); }
@@ -520,6 +414,8 @@ export async function withGateSlot(root, action, { landing = false, itemCheck = 
     name: 'gate',
     capacity: capacityProvider(),
     capacityProvider,
+    shortCapacityProvider: () => gateShortSlots(),
+    shortEligible,
     browserCapacityProvider: () => settingsProvider().browserSlots,
     scope: 'machine',
     root,
@@ -569,26 +465,26 @@ export async function withGateSlot(root, action, { landing = false, itemCheck = 
  * @param {{ trustStamp?: boolean, onWait?: (state: object) => void, landing?: boolean, agent?: string, item?: string|number }} [options]
  * @returns {Promise<{ isGreen: boolean, isCached: boolean, output: string, seconds: number, log: string, profile?: object, profilePath?: string }>}
  */
-export async function runGate(root, config, { trustStamp = true, onWait, landing = false, agent, item = '' } = {}) {
+export async function runGate(root, config, { trustStamp = true, onWait, landing = false, agent, item = '', stages = false, waivers = [] } = {}) {
   if (!config.gate.trim()) {
     throw new Refused('NO_GATE', 'no gate configured; set "gate" in pullboard.json, e.g. "npm test"');
   }
   if (trustStamp && isStampedGreen(root)) return { isGreen: true, isCached: true, output: '', seconds: 0, log: '' };
-  return await withGateSlot(root, (lease) => fullGateRun(root, config, trustStamp, { waitMs: lease.waitMs, gateLease: lease, landing }), {
+  return await withGateSlot(root, (lease) => fullGateRun(root, config, trustStamp, { waitMs: lease.waitMs, gateLease: lease, landing, stages, waivers }), {
     landing, browser: true, agent, item, kind: landing ? 'landing' : 'gate', onWait,
   });
 }
 
 /** Run a full gate while its caller owns the queue lease; only a full run may stamp its tree. */
-function fullGateRun(root, config, trustStamp = false, { waitMs = 0, log = gitPath(root, LOG), gateLease, landing = false } = {}) {
+function fullGateRun(root, config, trustStamp = false, { waitMs = 0, log = gitPath(root, LOG), gateLease, landing = false, stages = false, waivers = [] } = {}) {
   if (trustStamp && isStampedGreen(root)) return { isGreen: true, isCached: true, output: '', seconds: 0, log: '' };
   const before = committedTree(root);
-  const run = runProfiledShell(root, config.gate, { waitMs, pipefail: true, profileFile: `${log}.profile.json`, gateLease, landing });
+  const run = runProfiledShell(root, config.gate, { waitMs, pipefail: true, profileFile: `${log}.profile.json`, gateLease, landing, stages, waivers });
   const { isGreen, output, seconds, profile, profilePath } = run;
   writeFileSync(log, output);
   refuseSandboxBlocked(run);
   if (isGreen && before !== null && committedTree(root) === before) writeFileSync(gitPath(root, STAMP), `${before}\n`);
-  return { isGreen, isCached: false, output, seconds, log, profile, profilePath };
+  return { isGreen, isCached: false, output, seconds, log, profile, profilePath, ...(run.executionRoot ? { executionRoot: run.executionRoot } : {}), ...(stages ? { stages: run.stages } : {}) };
 }
 
 /** Quote a fixed executable or selected path without permitting shell expansion. */
@@ -663,11 +559,12 @@ export async function runSubmitGate(root, config, { base, trunk, changed, check,
     // The proof already owns this lease: its phase profile has no additional queue wait.
     const proofWait = check ? 0 : lease.waitMs;
     let proof;
-    if (!deferFullFallback && selection.full) proof = fullGateRun(root, config, false, { waitMs: proofWait, log: proofLog, gateLease: lease });
+    // The proof keeps each stage's status, so a person's waiver can only ever explain named test failures.
+    if (!deferFullFallback && selection.full) proof = fullGateRun(root, config, false, { waitMs: proofWait, log: proofLog, gateLease: lease, stages: true });
     else if (!proofFiles.length) proof = { isGreen: true, output: '', seconds: 0, isCached: false, log: '' };
     else {
       const command = `${config.affectedTests.trimEnd()} ${proofFiles.map(path => commandWord('./' + path)).join(' ')}`;
-      proof = { ...runProfiledShell(root, command, { waitMs: proofWait, profileFile: `${proofLog}.profile.json`, gateLease: lease }), isCached: false, log: proofLog };
+      proof = { ...runProfiledShell(root, command, { waitMs: proofWait, profileFile: `${proofLog}.profile.json`, gateLease: lease, stages: true }), isCached: false, log: proofLog };
       writeFileSync(proofLog, proof.output);
     }
     const phase = deferFullFallback ? `submit invariants: ${invariants.length ? invariants.join(', ') : 'none'}; full suite deferred to the landing gate` : selection.full ? 'full gate' : 'affected tests';

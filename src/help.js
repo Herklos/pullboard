@@ -10,7 +10,7 @@ Nothing ships until a second agent verifies it.
 
 Set up
   pullboard tour                        see it work: a reject and its rework, scripted, in thirty seconds
-  pullboard init [--model <name>] [--blueprint <name or file>]  config, SPEC.md, agent instructions, git hooks, board; optional coordinator model
+  pullboard init [--model <name>] [--blueprint <name or file>]... [--no-permissions]  config, SPEC.md, agent instructions, git hooks, board and project agent rules; optional coordinator model
   pullboard worktree <lane> --model <name> [--route light] [--family <name>]   make and join a worktree for a new agent
                                         pullboard.json worktrees: inside or beside; init defaults to inside
   pullboard join <lane> --model <name> [--route light] [--family <name>]       register this worktree as an agent
@@ -24,9 +24,11 @@ Set up
   pullboard resources                  local resource holders and their FIFO queues
   pullboard settings [gateSlots <n> | browserSlots <n>]  view or set machine capacity (gate default 2; browser default 1)
                                         browser-free check slots are opt-in: gate.browserFreeChecks in ~/.pullboard/settings.json (default false)
+                                        a test file takes a browser slot only if it launches Chrome: gate.browserByLaunch (default false)
                                         reviews-first queue order is opt-in: gate.queue.reviewsFirst (default false), gate.queue.agingMinutes (default 30)
                                         release priority is opt-in: gate.queue.currentReleaseFirst (default false), within each board's otherwise-tied positions
                                         memory hold is opt-in: gate.memoryFloorMB in ~/.pullboard/settings.json holds the queue under that many MB free or critical pressure (default off)
+                                        short slots for runs that name their test files are opt-in: pullboard settings gate.shortSlots <n> (default 0)
   pullboard runner add <ssh-host> --slots <n> --browser <n> [--node <remote-path>] [--root <remote-path>]
                                         register SSH test capacity; no runner sign-in; root defaults to ~/.pullboard-runner
   pullboard view [--project] [--port N] [--no-open]  every project on this machine in your browser; default http://127.0.0.1:${DEFAULT_VIEW_PORT}
@@ -89,6 +91,7 @@ Work
                                         append an observation or a holder/coordinator judgement to its thread
                                         --implies 12,13: each named item gets a fact citing this decision,
                                         and is told again when the decision is superseded
+                                        the person adds --cause <key> --never-again --as person: rigor lists it at once
   pullboard why <id>                    the decisions that imply an item, newest first, and what superseded them
   pullboard next [--wait <minutes>]     offer an eligible review when reviews pile up, otherwise claim work
   pullboard next --build                claim a build explicitly, recording a skipped review offer
@@ -97,11 +100,14 @@ Work
                                         in the main checkout, verifying needs --as coordinator
   pullboard check [id] [--yes]          show and run your item's check; --yes confirms a check set by someone else
                                         the command and its author print first; the project gate is pullboard gate
+  pullboard check accept <id>           the person accepts an item's check that already passes on main, as it reads now;
+                                        with checks.provesNothing "hold", claim and submit refuse that item until then
   pullboard claim <id>                  take or renew a lease; the first claim freezes the criterion
   pullboard release <id> [--note "why"]  hand it back; a review release needs a one-line reason
   pullboard submit <id>                 needs a clean tree, item check and affected tests green at HEAD (alias: done)
   pullboard verify <id> accept --note "what you broke or which edge you tried, and what happened"
-  pullboard verify <id> reject --reason TEST_FAILURE --note "what failed"
+  pullboard verify <id> reject --reason TEST_FAILURE --note "what failed" [--cause <key>]
+                                        a cause is test:<file>::<title>, refusal:<CODE>, row:<id> or doctrine:<id>
                                         a verdict takes --implies <ids>; a later verdict on the item supersedes it
                                         any --note can be --note-file <file>, which keeps quotes, $ and backticks intact
   pullboard shout <lane|agent|person|all> <text>  pullboard inbox
@@ -119,6 +125,8 @@ Work
                                         --work also says when an item there becomes claimable, a review waits longer than
                                         --review-wait minutes (default 20), or main moves; Ctrl-C stops it
   pullboard export                              print the whole board as versioned JSON
+  pullboard digest [--out <file>] [--watch]     a short Markdown briefing of this board for a person or a chat assistant;
+                                        secrets redacted; --out replaces a file, --watch rewrites it after every move
   pullboard import <file>                       restore a versioned export into an empty board
 
 Coordinator
@@ -129,7 +137,7 @@ Coordinator
   pullboard merged <id> <commit>        record where verified work landed
   pullboard withdraw <id> <reason>      drop an item nobody should build
   pullboard refreeze <id>               adopt a corrected criterion or changed spec rows
-  pullboard reopen <id> --note "why"    return a submission for criterion correction without a verdict
+  pullboard reopen <id> --note "why" [--cause <key>]   return a submission for criterion correction without a verdict
   pullboard reopen <id> --conflict <file> [--conflict <file>]
                                         return accepted work that conflicts with the trunk for a main merge
   pullboard hold <lane> --reason "..."   pause a lane: next there claims nothing and names the reason
@@ -168,6 +176,8 @@ Receipts
                                         when that queue is empty, the action says none waiting or waits for open work
   pullboard ledger                      markdown: what was built, by whom, verified by whom
   pullboard log [id]                    every move, in order
+  pullboard rigor                       failure causes that repeated: on 2 items, or 1 item at 2 commits;
+                                        each with its items and whether it reads as work, product or both
 
 Spec
   pullboard spec --json                 parsed SPEC.md and doctrine rows as JSON
@@ -180,8 +190,9 @@ Spec
                 [--doctrine --source "<shout id or chat, date>"]  the coordinator proposes a sourced doctrine ruling
                                         --section chooses the section prefix; defaults to G, or DR with --doctrine
                                         Defaults to must and gate review.
-  pullboard blueprint add <name or file>  add a blueprint's rules and questions as drafts, and its starter items
+  pullboard blueprint add <name or file> [--blueprint <name or file>]...  add a blueprint's rules and questions as drafts, and its starter items
                                         bundled: web-app; nothing is approved, and a repeat adds nothing
+                                        several land in order: one product, one architecture, any practice; a shared rule is drafted once
   pullboard blueprint save [file] [--name <name>] [--title "<title>"]  write approved rules and answered questions as a blueprint
                                         never items, notes, paths, emails or names; file defaults to <project>.blueprint.json
   pullboard spec signers add [--key <path>] [--by <principal>]  opt into SSH-signed sign-offs
@@ -211,8 +222,8 @@ Reject reasons: TEST_FAILURE, BEHAVIOR_MISMATCH, INSUFFICIENT_EVIDENCE, STALE_HE
 const HELP_NAMES = [
   'tour', 'init', 'worktree', 'join', 'takeover', 'whoami', 'lanes', 'lane', 'lane add', 'status', 'resources', 'settings', 'view', 'view export',
   'serve', 'mcp', 'relay', 'relay recover', 'resume', 'hooks', 'add', 'edit', 'escalate', 'run', 'list', 'doctor', 'health', 'skills', 'show', 'next', 'land',
-  'check', 'claim', 'release', 'submit', 'done', 'verify', 'fact', 'why', 'shout', 'answer', 'pass', 'decisions', 'inbox', 'watch', 'export', 'import',
-  'sweep', 'merged', 'withdraw', 'refreeze', 'reopen', 'hold', 'stats', 'ledger', 'log', 'spec', 'spec check', 'spec view',
+  'check', 'check accept', 'claim', 'release', 'submit', 'done', 'verify', 'fact', 'why', 'shout', 'answer', 'pass', 'decisions', 'inbox', 'watch', 'export', 'digest', 'import',
+  'sweep', 'merged', 'withdraw', 'refreeze', 'reopen', 'hold', 'stats', 'ledger', 'log', 'rigor', 'spec', 'spec check', 'spec view',
   'spec show', 'spec unmet', 'spec signoff', 'spec draft', 'spec signers', 'spec signers add', 'doctrine', 'doctrine check', 'forget', 'prompt', 'gate', 'hook',
   'hook pre-commit', 'hook pre-merge-commit', 'hook commit-msg', 'hook pre-push', 'view export', 'version', 'lifecycle', 'help',
   'roadmap', 'milestone', 'runner', 'runner add', 'blueprint', 'blueprint add', 'blueprint save',
@@ -225,18 +236,23 @@ const HELP_GROUPS = [
   ['See', ['status', 'view', 'log']],
 ];
 
+// The add example runs as pasted on a board init just made, which has no web lane and no G1 row (#721).
+const ADD_EXAMPLE = ['pullboard lane add web --owns src/web', 'pullboard spec draft "A person can upload a page"',
+  'pullboard add web "Upload page" --specs G1'].join('\n');
+
 const HELP_EXAMPLES = {
   tour: 'pullboard tour', init: 'pullboard init --blueprint web-app', worktree: 'pullboard worktree web --model "my-model"',
   join: 'pullboard join web --model "my-model"', resume: 'pullboard resume',
-  add: 'pullboard add web "Upload page" --specs G1', list: 'pullboard list web', show: 'pullboard show 12',
+  add: ADD_EXAMPLE, list: 'pullboard list web', show: 'pullboard show 12',
   claim: 'pullboard claim 12', submit: 'pullboard submit 12', 'next --verify': 'pullboard next --verify',
   fact: 'pullboard fact 12 measurement "The check passes in 8 seconds"',
   why: 'pullboard why 12',
   verify: 'pullboard verify 12 accept --note "removed the fix; the test failed"',
   watch: 'pullboard watch --to web', answer: 'pullboard answer 12 "done"', pass: 'pullboard pass 12 "please decide"',
-  status: 'pullboard status', view: 'pullboard view', mcp: 'pullboard mcp', stats: 'pullboard stats --since 2026-10-08', log: 'pullboard log 12', ledger: 'pullboard ledger',
+  status: 'pullboard status', view: 'pullboard view', digest: 'pullboard digest --out briefing.md', mcp: 'pullboard mcp', stats: 'pullboard stats --since 2026-10-08', log: 'pullboard log 12', ledger: 'pullboard ledger',
+  relay: 'pullboard relay on --all', 'relay recover': 'pullboard relay recover --skip 12',
   'lane add': 'pullboard lane add web --owns apps/web/', lane: 'pullboard lane add web --owns apps/web/',
-  roadmap: 'pullboard roadmap', milestone: 'pullboard milestone add "0.7.0" --items 12,13',
+  roadmap: 'pullboard roadmap', rigor: 'pullboard rigor', milestone: 'pullboard milestone add "0.7.0" --items 12,13',
   runner: 'pullboard runner add studio --slots 2 --browser 1', 'runner add': 'pullboard runner add studio --slots 2 --browser 1',
   edit: 'pullboard edit 12 --brief "Add the upload page"', release: 'pullboard release 12',
   land: 'pullboard land --max 4',
@@ -260,11 +276,12 @@ const HELP_ALIASES = {
   status: { usage: 'pullboard status', source: 'whoami' },
   done: { usage: 'pullboard done <id>', source: 'submit <id>' },
   inbox: { usage: 'pullboard inbox', source: null },
+  relay: { source: 'relay', every: true },
   lifecycle: { usage: 'pullboard lifecycle', source: null },
   escalate: { usage: 'pullboard escalate <id> --note "..." [--note-file <file>]', source: 'escalate <id> --note "what was tried and how it failed"', extraFlags: ['--note-file <file>'] },
   'view export': { usage: 'pullboard view --export <dir>', source: 'view' },
-  blueprint: { usage: 'pullboard blueprint add <name or file>', source: 'blueprint add' },
-  'blueprint add': { usage: 'pullboard blueprint add <name or file>', source: 'blueprint add' },
+  blueprint: { usage: 'pullboard blueprint add <name or file> [--blueprint <name or file>]...', source: 'blueprint add' },
+  'blueprint add': { usage: 'pullboard blueprint add <name or file> [--blueprint <name or file>]...', source: 'blueprint add' },
   'spec check': { usage: 'pullboard spec check', source: 'spec check' },
   'spec view': { usage: 'pullboard spec view [--out file]', source: 'spec view' },
   'spec show': { usage: 'pullboard spec show <id>', source: 'spec show', onlyFlags: [] },
@@ -282,7 +299,7 @@ const HELP_ALIASES = {
 
 const HELP_FLAG_EXPLANATIONS = {
   '--after': 'claiming waits until those items are verified',
-  '--blueprint': 'start from a bundled blueprint or a JSON file',
+  '--blueprint': 'start from a bundled blueprint or a JSON file; repeat it for one product, one architecture and any practice blueprints',
   '--brief': 'what a cold agent needs',
   '--check': 'the command that proves it',
   '--conflict': 'one conflicting file, exactly as Git names it; repeat it for each file',
@@ -325,8 +342,8 @@ function commandHelpRows(fullHelp) {
       const next = tokens[parts.length];
       return !next || next.startsWith('--') || next.startsWith('<') || next.startsWith('[') || next === '|';
     });
-    const usages = alias ? [alias.usage] : matches.length ? [...new Set(matches.map((row) => `pullboard ${row.usage}`))] : [`pullboard ${name}`];
-    const foundFlags = [...matches.flatMap((row) => row.details.flatMap((line) => line.match(/--[a-z][a-z-]*(?:\s+(?:<[^>]+>|"[^"]*"|\[[^\]]+\]|[A-Za-z][A-Za-z0-9|_-]*))?/gu) ?? [])), ...(alias?.extraFlags ?? []), '--json', '--help', ...(name === 'help' ? ['--all'] : [])];
+    const usages = alias && !alias.every ? [alias.usage] : matches.length ? [...new Set(matches.map((row) => `pullboard ${row.usage}`))] : [`pullboard ${name}`];
+    const foundFlags = [...matches.flatMap((row) => row.details.flatMap((line) => line.match(/--[a-z][a-z-]*(?:\s+(?:<[^>]+>|"[^"]*"|\[(?!-)[^\]]+\]|[A-Za-z][A-Za-z0-9|_-]*))?/gu) ?? [])), ...(alias?.extraFlags ?? []), '--json', '--help', ...(name === 'help' ? ['--all'] : [])];
     const flagMap = new Map();
     for (const flag of foundFlags) {
       const key = flag.split(/\s/u, 1)[0];

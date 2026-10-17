@@ -7,6 +7,8 @@ import { delimiter, dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as resourceApi from './resources.js';
 import { parseProcessCensus } from './process-census.js';
+import { gateStages, stagedScript, readPipes } from './gate-stages.js';
+import { fileDenialWatcher } from './sandbox-denial.js';
 import { once } from 'node:events';
 import { pipeline } from 'node:stream/promises';
 
@@ -106,6 +108,8 @@ async function readSpec() {
     || typeof value.browserRequired !== 'boolean'
     || !value.runtime || typeof value.runtime !== 'object' || !value.runtime.files || typeof value.runtime.files !== 'object'
     || typeof value.runtime.sha256 !== 'string') throw new Error('invalid work specification');
+  if (value.stageMarker !== undefined && !/^PULLBOARD_STAGE_[a-f0-9]{32}$/u.test(value.stageMarker)) throw new Error('invalid stage marker');
+  if (value.waivers !== undefined && (!Array.isArray(value.waivers) || value.waivers.some(entry => !entry || !['file', 'name'].includes(entry.kind) || typeof entry.test !== 'string' || !entry.test || Object.keys(entry).some(key => !['kind', 'test'].includes(key))))) throw new Error('invalid continuation projection');
   if (value.origin !== undefined) {
     if (typeof value.origin !== 'string') throw new Error('invalid work specification');
     let origin;
@@ -131,7 +135,7 @@ async function readSpec() {
     tagNames.add(tag.name);
     if (tag.chain.length ? tag.chain[0] !== tag.object : tag.object !== tag.peeledCommit) throw new Error('invalid tag manifest');
   }
-  const runtimeNames = ['resources.js', 'git.js', 'machine-home.js', 'refused.js', 'process-census.js', 'queue-settings.js', 'queue-order.js'];
+  const runtimeNames = ['resources.js', 'git.js', 'machine-home.js', 'refused.js', 'process-census.js', 'queue-settings.js', 'queue-order.js', 'sandbox-denial.js', 'gate-stages.js'];
   if (Object.keys(value.runtime.files).length !== runtimeNames.length
     || runtimeNames.some(name => typeof value.runtime.files[name] !== 'string')) throw new Error('invalid work specification');
   if (createHash('sha256').update(JSON.stringify(value.runtime.files)).digest('hex') !== value.runtime.sha256) throw new Error('invalid trusted runtime');
@@ -1039,14 +1043,20 @@ async function stopOwnedGroup(pid, closed, tracker) {
   await closed;
 }
 
-/** Run the exact requested command in its isolated checkout, retaining raw output and real test exit status. */
+/**
+ * Run the exact requested command in its isolated checkout, retaining raw output and real test exit status.
+ * A failed command also carries any file denial's evidence, classified here against this checkout (#706).
+ */
 async function runCommand(spec, root, env, sink, tracker) {
+  const split = spec.stageMarker ? gateStages(spec.command) : null;
+  const pipes = split?.some(stage => stage.pipeline.length > 1) ? mkdtempSync(join(dirname(root), 'gate-pipes-')) : null;
+  const command = split ? `(\n${stagedScript(split, spec.stageMarker, pipes)}\n) 2>&1` : spec.command;
   let shell = '/bin/sh';
-  let args = ['-c', spec.command];
+  let args = ['-c', command];
   if (spec.pipefail) {
     const probe = spawnSync(shell, ['-c', 'set -o pipefail'], { env, stdio: 'ignore' });
-    if (probe.status === 0) args = ['-c', `set -o pipefail\n${spec.command}`];
-    else if (existsSync('/bin/bash')) { shell = '/bin/bash'; args = ['-o', 'pipefail', '-c', spec.command]; }
+    if (probe.status === 0) args = ['-c', `set -o pipefail\n${command}`];
+    else if (existsSync('/bin/bash')) { shell = '/bin/bash'; args = ['-o', 'pipefail', '-c', command]; }
     else if (/(?:^|[^|])\|(?:[^|]|$)/u.test(spec.command)) throw new Error('runner shell cannot enforce pipefail');
   }
   const owned = spawnOwned(shell, args, { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -1058,9 +1068,10 @@ async function runCommand(spec, root, env, sink, tracker) {
   let writes = Promise.resolve();
   const closed = owned.closed;
   const onDrop = () => { sink.pipeFailed = true; transportDrop(); };
+  const denials = fileDenialWatcher(root);
   const forward = stream => stream.on('data', part => {
     stream.pause();
-    if (!outputError) writes = writes.then(() => sink.write(part)).then(() => stream.resume()).catch(error => { outputError = error; onDrop(); });
+    if (!outputError) writes = writes.then(() => { denials.push(part); return sink.write(part); }).then(() => stream.resume()).catch(error => { outputError = error; onDrop(); });
   });
   forward(child.stdout); forward(child.stderr);
   const result = await closed;
@@ -1075,7 +1086,12 @@ async function runCommand(spec, root, env, sink, tracker) {
   if (outputError) throw outputError;
   if (sink.pipeFailed) return { code: 1, signal: result.signal ?? 'SIGHUP' };
   if (result.error) throw result.error;
-  return { code: Number.isInteger(result.code) ? result.code : 1, signal: result.signal ?? null };
+  const code = Number.isInteger(result.code) ? result.code : 1;
+  const denial = code === 0 && !result.signal ? null : denials.end();
+  let pipeStatuses = pipes ? readPipes(split, pipes, 8 * 1024 ** 2) : null;
+  // Accounting beyond this bound fails closed; it never turns an unaccounted failure green.
+  if (Buffer.byteLength(JSON.stringify(pipeStatuses)) > 8 * 1024 ** 2) pipeStatuses = null;
+  return { code, signal: result.signal ?? null, ...(spec.stageMarker ? { pipeStatuses } : {}), ...(denial ? { denial } : {}) };
 }
 
 /** Send the single nonce-bound result line after the complete merged output has drained. */
@@ -1083,7 +1099,7 @@ async function receipt(spec, fields, sink) {
   await flushStdout();
   const body = { id: spec.id, commit: spec.commit, tree: spec.tree, code: fields.code, signal: fields.signal,
     runtimeSha256: spec.runtime.sha256, toolingSha256: spec.tooling.sha256, root: fields.root ?? '', outputSha256: sink.hash.digest('hex'), wallMs: Math.max(0, Date.now() - sink.wallStart),
-    ...(fields.refused ? { refused: fields.refused } : {}) };
+    ...(spec.stageMarker ? { pipeStatuses: fields.pipeStatuses ?? null } : {}), ...(fields.refused ? { refused: fields.refused } : {}), ...(fields.denial ? { denial: fields.denial } : {}) };
   const encoded = Buffer.from(JSON.stringify(body)).toString('base64');
   await new Promise((resolveWrite, rejectWrite) => process.stderr.write(`${RECEIPT} ${spec.id} ${encoded}\n`, error => error ? rejectWrite(error) : resolveWrite()));
 }
@@ -1175,7 +1191,7 @@ async function main() {
     const env = scopedEnvironment(privateHome, temporary, canonicalMachineHome, lease, api, tracker.nodeOptions);
     await checkoutHistory(api, runnerRoot, root, packFile, spec, env);
     await installDependencies(root, runnerRoot, env, tracker);
-    final = { ...(await runCommand(spec, root, { ...env, PULLBOARD_LANDING_RUN: spec.landing === true ? '1' : '0' }, sink, tracker)), root };
+    final = { ...(await runCommand(spec, root, { ...env, PULLBOARD_LANDING_RUN: spec.landing === true ? '1' : '0', PULLBOARD_LANDING_WAIVERS: JSON.stringify(spec.landing === true ? spec.waivers ?? [] : []) }, sink, tracker)), root };
   } catch (error) {
     const refused = setupRefusalCode(error);
     const message = refused ? `${safeSetupMessage(error)} [${refused}]` : safeSetupMessage(error);

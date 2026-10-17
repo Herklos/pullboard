@@ -10,7 +10,13 @@
  */
 
 /** Executable move semantics, carried by every sealed move and retained during replay [H16]. */
-export const ENGINE_VERSION = 28;
+export const ENGINE_VERSION = 36;
+
+/** The engine at which a reject, reopen or person fact can carry a cause key (#713); older moves replay unchanged [D1,H16]. */
+export const CAUSE_ENGINE = 30;
+
+/** First released engine binding the checked composition, review trunk and paths [E8,H16]. */
+export const VERDICT_REVIEW_ENGINE = 33;
 
 /** @typedef {'agent' | 'coordinator' | 'clock'} Role */
 
@@ -122,13 +128,17 @@ export const GUARDS = [
   { id: 'trunkMergeClean', refuse: 'MERGE_CONFLICT', alsoRefuses: [{ code: 'MERGE_CHECK_FAILED', next: 'use Git 2.38 or newer, restore its objects and retry' }, { code: 'NO_POLICY', next: 'restore the primary repository metadata' }, { code: 'NO_TRUNK', next: 'check out the trunk branch in the main checkout once and run pullboard inbox' }], rule: 'the candidate merges cleanly into the current primary branch without changing an index or worktree', next: 'merge the trunk into your branch, resolve conflicts, commit and resubmit', source: 'cli' },
   { id: 'noUnverifiedStack', refuse: 'STACKED_ON_UNVERIFIED', rule: "the candidate range contains no other item's unverified submitted commit", next: 'wait for that item to be accepted, or rebuild without its commits', source: 'cli' },
   { id: 'doctrineHolds', refuse: 'RATCHET_ROSE', alsoRefuses: [{ code: 'RATCHET_UNCOUNTED', next: 'fix the check so it exits 0 or 1 within its timeout, then submit again' }], rule: "every touched doctrine check counts (exit 0 or 1), none rises above its committed count and no changed file gains a problem; watch-mode rules only count", next: "fix the new problems, commit, submit again; only the person's signature raises count:", source: 'cli', when: 'only when accepted main has an approved doctrine rule with gate: check' },
-  { id: 'itemCheckGreen', refuse: 'CHECK_RED', alsoRefuses: [{ code: 'CHECK_UNVERIFIED', next: 'restore the frozen install or check environment and retry' }], rule: 'the frozen item check passes at the exact submitted commit', next: 'reject the failing behavior; the builder fixes and resubmits', source: 'cli' },
+  { id: 'itemCheckGreen', refuse: 'CHECK_RED', alsoRefuses: [{ code: 'CHECK_UNVERIFIED', next: 'restore the frozen install or check environment and retry' }], rule: 'the frozen item check passes at the submitted commit, or its clean reviewed composition for a stale acceptance', next: 'reject the failing behavior; the builder fixes and resubmits', source: 'cli' },
 
+  { id: 'checkProvesSomething', refuse: 'CRITERION_PROVES_NOTHING', rule: "the item's check does not already pass on main, or the person accepted that exact check", next: 'set a check that fails before the work, or the person runs pullboard check accept <id>', source: 'cli', when: 'only when accepted main sets checks.provesNothing to "hold"' },
   { id: 'gateGreen', refuse: 'GATE_RED', alsoRefuses: [{ code: 'PIPEFAIL_UNAVAILABLE', next: 'rewrite the gate without a pipe' }], rule: 'the gate, which submit runs itself every time, is green at HEAD', next: 'fix what the digest names, commit, submit again', source: 'cli' },
+  { id: 'queuedItemLease', refuse: 'ITEM_LEASE_LOST', alsoRefuses: [{ code: 'A5_GRAMMAR_VERSION', next: 'upgrade Pullboard or restore a spec written for grammar 1, then retry' }, { code: 'SPEC_BEHIND_MAIN', next: 'merge main into this worktree, then renew the claim and retry' }, { code: 'NOT_A_REPO', next: 'restore the worktree Git metadata, then retry the command' }, { code: 'NO_CONFIG', next: 'restore pullboard.json in this worktree, then retry the command' }], rule: 'the caller still owns the same live item claim or review and can renew it against the frozen criterion', next: 'claim or reserve the item again before retrying the command', source: 'cli', when: 'while submit or an accept waits for a machine slot, and once immediately before admission' },
   { id: 'treeStillDuringGate', refuse: 'MOVED_DURING_GATE', rule: 'when the gate ends, HEAD and every tracked file are as they were when it started', next: 'leave the worktree alone until the gate finishes, then submit again', source: 'cli' },
   { id: 'childrenDone', refuse: 'CHILDREN_OPEN', rule: 'every child item is verified or withdrawn', next: 'finish the child items, or the coordinator withdraws them', source: 'board' },
   { id: 'headIsNew', refuse: 'HEAD_NOT_NEW', rule: 'a verifier has not rejected this commit at this bar; after a no-verdict reopen, the bar was refrozen', next: 'commit the rework, or refreeze the bar after a no-verdict reopen before resubmitting the same commit', source: 'board' },
   { id: 'atSubmittedCommit', refuse: 'NOT_AT_COMMIT', alsoRefuses: [{ code: 'OUTSIDE_LANE', next: 'restore foreign paths before accepting' }, { code: 'NO_POLICY', next: 'restore the frozen policy objects' }, { code: 'BAD_CONFIG', next: 'repair the committed coordinator configuration' }, { code: 'GIT_GRAFTS', next: 'ask the coordinator to remove the Git graft file before retrying' }], rule: "the caller's checkout contains the submitted commit", next: 'git switch --detach <commit>', source: 'cli' },
+  { id: 'verdictReviewRecorded', refuse: 'BAD_VERDICT_REVIEW', rule: 'a new review binds the submitted commit, its exact checked commit, a valid trunk commit and canonical candidate paths', next: 'restore the submitted Git objects and retry the review with current Pullboard', source: 'board' },
+  { id: 'reviewTreeCurrent', refuse: 'STALE_VERDICT', alsoRefuses: [{ code: 'DIRTY', next: 'commit the reviewed composition before re-reviewing' }, { code: 'UNTRACKED', next: 'commit or ignore untracked files before re-reviewing' }, { code: 'VERDICT_TRUNK_MOVED', next: 'merge the latest main and re-review the clean composition' }], rule: 'a stale acceptance is re-reviewed at a clean HEAD containing the current trunk, which stays fixed through its check', next: 'merge current main into the submitted commit and re-review it', source: 'cli' },
   { id: 'notBuilder', refuse: 'SELF_VERIFY', rule: 'the caller did not build it', next: 'another agent verifies it: pullboard next --verify', source: 'board' },
   { id: 'policyAllows', refuse: 'COORDINATOR_VERIFIES', rule: "the repo's verify policy lets the caller verify this lane's work", next: 'the coordinator verifies it', source: 'board' },
   { id: 'familyAllows', refuse: 'O2_FAMILY_MATCH', rule: 'the builder and verifier have different declared families; an undeclared family counts as a match', next: 'ask the coordinator for a verifier from another declared family', source: 'board', when: 'only when verify.family is require' },
@@ -139,17 +149,18 @@ export const GUARDS = [
   { id: 'reviewReleaseExplained', refuse: 'NOTE_REQUIRED', rule: 'a review release gives a nonempty one-line reason', next: 'release with --note "why", or --note-file <file>', source: 'board', when: 'engine 5 or newer, only when freeing a submitted review reservation' },
   { id: 'reviewCooldownElapsed', refuse: 'REVIEW_COOLDOWN', rule: 'the reviewer has not released this submission within the past hour', next: 'let another reviewer take it, or wait an hour or for a new submission', source: 'board', when: 'engine 5 or newer, only for the same reviewer and current submission' },
   { id: 'noteGiven', refuse: 'NOTE_REQUIRED', rule: 'the move carries a note: what failed, what was tried, or why', next: '--note "..." or --note-file <file>', source: 'board' },
+  { id: 'causeWellFormed', refuse: 'BAD_CAUSE', rule: 'a cause, when given, is test:<file>::<title>, refusal:<CODE>, row:<id> or doctrine:<id>', next: 'fix --cause, or leave it out', source: 'board' },
   { id: 'notMerged', refuse: 'ALREADY_MERGED', rule: 'the item has no recorded merge receipt', next: 'a merged item cannot be reopened', source: 'board' },
   { id: 'landingFailureRecorded', refuse: 'LANDING_FAILURE_REQUIRED', rule: 'a verified item note names the failing test and landing merge commit', next: 'cite the recorded batch, or name the test and merge commit in a manual note; work that only conflicts with the trunk reopens with --conflict <file> for each conflicting file', source: 'board', when: 'unless the reopen names a trunk conflict' },
   { id: 'trunkConflicts', refuse: 'NOT_CONFLICTING', alsoRefuses: [{ code: 'CONFLICT_FILES', next: 'name only files Git reports as conflicting with the trunk' }, { code: 'NO_TRUNK', next: 'check out the trunk branch in the main checkout once and run pullboard inbox' }, { code: 'MERGE_CHECK_FAILED', next: 'use Git 2.38 or newer, restore its objects and retry' }], rule: 'the accepted commit no longer merges onto the trunk, and every named file is one that conflicts', next: 'merge it, or reopen after a red landing with --note "<test file>: <test name>; merge commit <sha>"', source: 'cli', when: 'only for reopen --conflict by the coordinator on accepted, unmerged work' },
-  { id: 'conflictAccepted', refuse: 'NOT_ACCEPTED', alsoRefuses: [{ code: 'BAD_CONFLICT', next: 'run pullboard reopen <id> --conflict <file> from the main checkout' }, { code: 'ENGINE_VERSION', next: 'upgrade Pullboard on every linked device before using --conflict' }], rule: 'a trunk conflict reopens an accepted item, names its files and the full trunk commit, and replays only under engine 28 or later', next: 'reopen a submission with --note "why"', source: 'board', when: 'only for reopen --conflict' },
+  { id: 'conflictAccepted', refuse: 'NOT_ACCEPTED', alsoRefuses: [{ code: 'BAD_CONFLICT', next: 'run pullboard reopen <id> --conflict <file> from the main checkout' }, { code: 'ENGINE_VERSION', next: 'upgrade Pullboard on every linked device before using --conflict' }], rule: 'a trunk conflict reopens an accepted item, names its files and the full trunk commit, and replays only under engine 36 or later', next: 'reopen a submission with --note "why"', source: 'board', when: 'only for reopen --conflict' },
 ];
 
 /** @type {Move[]} */
 export const MOVES = [
   {
     verb: 'claim', from: ['open', 'claimed'], to: 'claimed', by: ['agent', 'coordinator'], refuse: 'NOT_CLAIMABLE',
-    guards: ['joined', 'itemExists', IN_STATE, 'itemNotHeld', 'inLane', 'routeAllows', 'dependenciesVerified', 'notHeldByAnother', 'correctionRefrozen', 'laneOpen', 'oneLiveClaim', 'rowsInForce'],
+    guards: ['joined', 'itemExists', IN_STATE, 'checkProvesSomething', 'itemNotHeld', 'inLane', 'routeAllows', 'dependenciesVerified', 'notHeldByAnother', 'correctionRefrozen', 'laneOpen', 'oneLiveClaim', 'rowsInForce'],
     sets: ['item_owner', 'item_lease_until', 'item_frozen_digest'], command: 'pullboard claim <id>',
   },
   {
@@ -159,7 +170,7 @@ export const MOVES = [
   { verb: 'lapse', from: ['claimed'], to: 'open', by: ['clock'], guards: [], when: 'its lease runs out' },
   {
     verb: 'submit', from: ['claimed'], to: 'submitted', by: ['agent', 'coordinator'], refuse: 'NOT_YOURS',
-    guards: ['joined', 'itemExists', IN_STATE, 'isHolder', 'correctionRefrozen', 'criterionUnchanged', 'treeClean', 'nothingUntracked', 'hasCommit', 'withinLane', 'trunkMergeClean', 'noUnverifiedStack', 'doctrineHolds', 'gateConfigured', 'gateGreen', 'treeStillDuringGate', 'childrenDone', 'headIsNew'],
+    guards: ['joined', 'itemExists', IN_STATE, 'isHolder', 'correctionRefrozen', 'checkProvesSomething', 'criterionUnchanged', 'treeClean', 'nothingUntracked', 'hasCommit', 'withinLane', 'trunkMergeClean', 'noUnverifiedStack', 'doctrineHolds', 'gateConfigured', 'queuedItemLease', 'gateGreen', 'treeStillDuringGate', 'childrenDone', 'headIsNew'],
     sets: ['item_built_by', 'item_commit'], command: 'pullboard submit <id>',
   },
   {
@@ -168,20 +179,20 @@ export const MOVES = [
     sets: ['item_review_by', 'item_review_until'], command: 'pullboard next --verify',
   },
   {
-    verb: 'accept', from: ['submitted'], to: 'verified', by: ['agent', 'coordinator'], refuse: 'NOT_SUBMITTED',
-    guards: ['coordinatorSaysAs', 'joined', 'itemExists', IN_STATE, 'atSubmittedCommit', 'notBuilder', 'routeAllows', 'policyAllows', 'familyAllows', 'reviewFree', 'criterionUnchanged', 'reasonIsMet', 'trunkMergeClean', 'noUnverifiedStack', 'itemCheckGreen', 'proofNoted'],
+    verb: 'accept', from: ['submitted', 'verified'], to: 'verified', by: ['agent', 'coordinator'], refuse: 'NOT_SUBMITTED',
+    guards: ['coordinatorSaysAs', 'joined', 'itemExists', IN_STATE, 'atSubmittedCommit', 'notMerged', 'verdictReviewRecorded', 'reviewTreeCurrent', 'notBuilder', 'routeAllows', 'policyAllows', 'familyAllows', 'reviewFree', 'criterionUnchanged', 'reasonIsMet', 'trunkMergeClean', 'noUnverifiedStack', 'queuedItemLease', 'itemCheckGreen', 'proofNoted'],
     alsoRefuses: [{ code: 'LAND_HEADER', rule: 'a displayed merge command fits the commit-header limit', next: 'shorten the item title or cited rows so the merge header fits' }, { code: 'ENGINE_VERSION', rule: 'a verdict that implies items replays only under engine 20 or later', next: 'upgrade Pullboard on every linked device before using --implies' }],
     sets: ['item_verified_by'], command: 'pullboard verify <id> accept --note "..."',
   },
   {
-    verb: 'reject', from: ['submitted'], to: 'open', by: ['agent', 'coordinator'], refuse: 'NOT_SUBMITTED',
-    guards: ['coordinatorSaysAs', 'joined', 'itemExists', IN_STATE, 'atSubmittedCommit', 'notBuilder', 'routeAllows', 'policyAllows', 'familyAllows', 'reviewFree', 'criterionUnchanged', 'reasonCoded', 'noteGiven'],
+    verb: 'reject', from: ['submitted', 'verified'], to: 'open', by: ['agent', 'coordinator'], refuse: 'NOT_SUBMITTED',
+    guards: ['coordinatorSaysAs', 'joined', 'itemExists', IN_STATE, 'atSubmittedCommit', 'notMerged', 'verdictReviewRecorded', 'reviewTreeCurrent', 'notBuilder', 'routeAllows', 'policyAllows', 'familyAllows', 'reviewFree', 'criterionUnchanged', 'reasonCoded', 'noteGiven', 'causeWellFormed'],
     alsoRefuses: [{ code: 'LAND_HEADER', rule: 'a displayed merge command fits the commit-header limit', next: 'shorten the item title or cited rows so the merge header fits' }, { code: 'ENGINE_VERSION', rule: 'a verdict that implies items replays only under engine 20 or later', next: 'upgrade Pullboard on every linked device before using --implies' }],
     command: 'pullboard verify <id> reject --reason CODE --note "..."',
   },
   {
     verb: 'reopen', from: ['submitted', 'verified'], to: 'open', by: ['coordinator'], refuse: 'NOT_SUBMITTED',
-    guards: ['joined', 'itemExists', IN_STATE, 'coordinatorOnly', 'noteGiven', 'notMerged', 'landingFailureRecorded', 'trunkConflicts', 'conflictAccepted'],
+    guards: ['joined', 'itemExists', IN_STATE, 'coordinatorOnly', 'noteGiven', 'causeWellFormed', 'notMerged', 'landingFailureRecorded', 'trunkConflicts', 'conflictAccepted'],
     sets: ['item_verdict', 'item_verified_by', 'item_owner', 'item_lease_until', 'item_review_by', 'item_review_until'],
     command: 'pullboard reopen <id> --note "why" | --conflict <file> [--conflict <file>]',
   },
