@@ -1006,6 +1006,7 @@ test('[A1] every catalog command and subcommand has a real CLI exercise', () => 
   json(source, source.repo, 'milestone', ['add', 'Catalog', '--items', String(catalog.item_id)], 'add');
   json(source, source.repo, 'milestone', ['items', 'Catalog', '--remove', String(catalog.item_id)], 'items');
   json(source, source.repo, 'milestone', ['items', 'Catalog', '--add', String(catalog.item_id)], 'items');
+  json(source, source.repo, 'milestone', ['order', 'Catalog', String(catalog.item_id)], 'order');
   json(source, source.repo, 'milestone', ['add', 'Later'], 'add');
   json(source, source.repo, 'milestone', ['move', 'Later', '--before', 'Catalog'], 'move');
   json(source, source.repo, 'milestone', ['edit', 'Catalog', '--name', 'Release', '--note', 'Catalog coverage'], 'edit');
