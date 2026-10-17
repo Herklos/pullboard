@@ -101,7 +101,8 @@ function commitAll(box, message = 'chore: fixture state') {
 /** Build a claimed submit fixture whose changed source selects a nested child-process test. */
 function childFailureSubmitBox(t, testSource) {
   let box = privateRepo(t);
-  put(box.root, 'pullboard.json', JSON.stringify({ gate: 'node --test', affectedTests: 'node --test', spec: 'SPEC.md' }));
+  // This fixture proves multiline TAP diagnostics; Node's default reporter varies by runtime.
+  put(box.root, 'pullboard.json', JSON.stringify({ gate: 'node --test --test-reporter=tap', affectedTests: 'node --test --test-reporter=tap', spec: 'SPEC.md' }));
   put(box.root, 'SPEC.md', SPEC);
   put(box.root, 'src/listener-probe.js', 'export const listenerProbe = 1;\n');
   put(box.root, 'test/listen-denial.js', [
