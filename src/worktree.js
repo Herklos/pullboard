@@ -24,16 +24,17 @@ function declaredDependencies(root) {
 }
 
 /**
- * Name the npm lockfile git tracks in `root`, or null when none is committed.
+ * Name the npm lockfile the checkout's HEAD commit holds, or null when none is committed.
  *
- * A lockfile counts only when git tracks it: one that merely sits on disk is what an earlier
- * install wrote, and `npm ci` from it would install something the commit does not record.
+ * A lockfile counts only when HEAD has it: one that sits on disk or is only staged (a hook can
+ * stage one in a new worktree) is not in the commit, and `npm ci` from it would install
+ * something the commit does not record.
  *
  * @param {string} root
  * @returns {string | null}
  */
 function committedLockfile(root) {
-  const listed = tryGit(root, ['ls-files', '-z', '--', ...NPM_LOCKFILES], { env: cleanGitEnvironment() });
+  const listed = tryGit(root, ['ls-tree', '-z', '--name-only', 'HEAD', '--', ...NPM_LOCKFILES], { env: cleanGitEnvironment() });
   if (listed.status !== 0) return null;
   const tracked = new Set(listed.stdout.split('\0').filter(Boolean));
   return NPM_LOCKFILES.find((name) => tracked.has(name)) ?? null;

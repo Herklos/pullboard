@@ -233,7 +233,7 @@ test('worktree suggests no install for a zero-dependency project [I1,L3]', () =>
     'without a committed lockfile the step is npm install, with the lockfile it writes named for commit');
   assert.doesNotMatch(unlocked, /\bnpm ci\b/u, 'npm ci fails without a lockfile');
 
-  // A lockfile on disk that git does not track is not committed; a tracked shrinkwrap is.
+  // A lockfile on disk or only staged is not committed; one HEAD holds is.
   const loose = join(box.dir, 'loose');
   mkdirSync(loose);
   box.git(loose, 'init', '-q', '-b', 'main');
@@ -244,6 +244,8 @@ test('worktree suggests no install for a zero-dependency project [I1,L3]', () =>
   assert.equal(installStep(loose)?.command, 'npm install', 'an untracked package-lock.json does not count as committed');
   writeFileSync(join(loose, 'npm-shrinkwrap.json'), '{}');
   box.git(loose, 'add', 'npm-shrinkwrap.json');
+  assert.equal(installStep(loose)?.command, 'npm install', 'a staged npm-shrinkwrap.json that HEAD lacks does not count as committed');
+  box.git(loose, 'commit', '-q', '-m', 'chore: shrinkwrap');
   assert.deepEqual(installStep(loose), { command: 'npm ci', note: 'its own install from the committed npm-shrinkwrap.json, so its tests run its own code' },
-    'a tracked npm-shrinkwrap.json is a committed lockfile');
+    'an npm-shrinkwrap.json in HEAD is a committed lockfile');
 });
