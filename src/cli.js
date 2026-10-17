@@ -2565,8 +2565,9 @@ async function verifyHere(ctx, id, { second, values }) {
       const checkedItem = reReview ? { ...item, item_commit: checkedCommit } : item;
       if (frozenCheck(item)) {
         const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(root, frozenCheck(item), { commit: checkedCommit, onFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
+        // A private checked composition needs this machine's live local gate markers [C7,V4].
         const shortEligible = Boolean(await explicitCheckFiles(root, frozenCheck(item), { commit: checkedCommit }));
-        check = await withGateSlot(root, (lease) => checkAtCommit(root, checkedItem, { waitMs: lease.waitMs, gateLease: lease }), { browser, agent: me.id, item: String(id), kind: 'review', itemCheck: true, shortEligible, onWait: gateWaitReporter(ctx.io) });
+        check = await withGateSlot(root, (lease) => checkAtCommit(root, checkedItem, { waitMs: lease.waitMs, gateLease: lease }), { browser, remote: false, agent: me.id, item: String(id), kind: 'review', itemCheck: true, shortEligible, onWait: gateWaitReporter(ctx.io) });
       } else {
         check = checkAtCommit(root, checkedItem);
       }

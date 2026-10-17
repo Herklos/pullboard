@@ -1,17 +1,18 @@
 /** Registered SSH runner execution stays inside a committed, secret-free worker checkout [C7]. */
 import assert from 'node:assert/strict';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
-import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, watch, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { after, test } from 'node:test';
-import { listResources, setResourceCapacity, takeResource } from '../src/resources.js';
+import { gateSlotEnvironment, listResources, setResourceCapacity, takeResource } from '../src/resources.js';
 import { parseProcessCensus } from '../src/process-census.js';
 import { listResources as listPreRunnerResources, takeResource as takePreRunnerResource } from './fixtures/resources-pre-runners.js';
 import { runFixtureChild, runFixtureChildAsync, startFixtureChild } from './fixture-child.js';
+import { createE2eHelpers } from './e2e-helpers.js';
 import { refuseSandboxBlocked } from '../src/gate.js';
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
@@ -19,6 +20,8 @@ const TEMP = [];
 const SECRET = ['fixture', 'runner', 'secret', 'must', 'stay', 'local'].join('-');
 const HOST = 'fixture-host';
 const TOOLING_SNAPSHOTS = new Map();
+const e2e = createE2eHelpers();
+after(e2e.cleanup);
 
 /** Quote one literal value for the fixture's POSIX shell command. */
 function shellQuote(value) {
@@ -88,10 +91,9 @@ function cli(repo, env, ...args) {
 function installSshStandIn({ bin, worker, home, machineHome, requests, starts, nodeCommand = 'node', dropFirst = false, dropAfterMarker, hold = '', stderrLog }) {
   const ssh = join(bin, 'ssh');
   const source = `#!/usr/bin/env node
-import { appendFileSync, existsSync, readFileSync, watch, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { basename, dirname, join } from 'node:path';
 const argv = process.argv.slice(2);
 const divider = argv.indexOf('--');
 const host = divider >= 0 ? argv[divider + 1] : '';
@@ -115,26 +117,23 @@ const record = extra => appendFileSync(requests, JSON.stringify({ call, host,
   remoteHasLocalPath: remoteCommand.includes(${JSON.stringify(worker)}),
   remoteHasSourceHome: remoteCommand.includes(${JSON.stringify(home)}),
   remoteHasSourceMachineHome: remoteCommand.includes(${JSON.stringify(machineHome)}), ...extra }) + '\\n');
+/** Wait for the concrete setup marker and allow a finished worker to cancel its wait. */
 const waitForMarker = path => {
   let cancel = () => {};
   const promise = new Promise((resolve, reject) => {
     if (existsSync(path)) return resolve(true);
-    const watcher = watch(dirname(path), { persistent: false });
-    let timer;
+    let poll, timer;
     let settled = false;
     const finish = (error, found = true) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer); watcher.close(); error ? reject(error) : resolve(found);
+      clearInterval(poll); clearTimeout(timer); error ? reject(error) : resolve(found);
     };
     cancel = () => finish(null, false);
-    const check = (_event, filename) => {
-      if ((filename === null || String(filename) === basename(path)) && existsSync(path)) finish();
-    };
-    watcher.on('change', check);
-    watcher.once('error', finish);
-    timer = setTimeout(() => finish(new Error('setup marker hang ceiling exceeded')), 20_000); // budget: bound the SSH-to-setup disconnect handshake.
-    check('rename', basename(path));
+    const check = () => { if (existsSync(path)) finish(); };
+    poll = setInterval(check, 20); // budget: observe actual setup readiness without relying on notifications.
+    timer = setTimeout(() => finish(new Error('setup marker hang ceiling exceeded')), 20_000); // budget: unchanged SSH-to-setup handshake ceiling.
+    check();
   });
   return { promise, cancel: () => cancel() };
 };
@@ -432,25 +431,13 @@ function readRemoteGateHolders(file) {
   } finally { db.close(); }
 }
 
-/** Wait for a marker from an external queue observer, with a ceiling for a broken fixture. */
+/** Wait for the marker itself: a missed file notification must not hide observable readiness. */
 async function waitForMarker(path) {
-  if (existsSync(path)) return;
-  const watcher = watch(dirname(path), { persistent: false });
-  let timer;
-  try {
-    const changed = new Promise((resolve, reject) => {
-      const check = (_event, filename) => {
-        if ((filename === null || String(filename) === basename(path)) && existsSync(path)) resolve();
-      };
-      watcher.on('change', check);
-      watcher.once('error', reject);
-      check('rename', basename(path));
-    });
-    if (existsSync(path)) return;
-    await Promise.race([changed, new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`fixture marker did not arrive: ${path}`)), 20_000); // budget: hang ceiling for the queue-to-parent handoff.
-    })]);
-  } finally { clearTimeout(timer); watcher.close(); }
+  const deadline = Date.now() + 20_000; // budget: unchanged hang ceiling for the queue-to-parent handoff.
+  while (!existsSync(path)) {
+    if (Date.now() >= deadline) throw new Error(`fixture marker did not arrive: ${path}`);
+    await new Promise(resolve => setTimeout(resolve, 20)); // budget: polling interval for the actual readiness marker.
+  }
 }
 
 /** Poll a concrete process/resource state; the deadline only bounds a broken cleanup handshake. */
@@ -642,6 +629,88 @@ test('a queued run executes on a registered runner and its result comes back (ho
     completedCleanly = true;
   } finally {
     if (held) held.release();
+    if (previousHome === undefined) delete process.env.PULLBOARD_HOME;
+    else process.env.PULLBOARD_HOME = previousHome;
+    if (previousMachineHome === undefined) delete process.env.PULLBOARD_MACHINE_HOME;
+    else process.env.PULLBOARD_MACHINE_HOME = previousMachineHome;
+  }
+});
+
+test('a private check never refuses its own remote lease [C7,V4]', async (t) => {
+  // The frozen check records the local gate marker it ran under, so a verdict proves the check itself ran.
+  const box = e2e.privateCheckSubmission({ check: `printf 'held=%s pool=%s' "$PULLBOARD_GATE_SLOT_HELD" "$PULLBOARD_GATE_SLOT_POOL" > "$RUNNER_FIXTURE_CHECK_MARKER"` });
+  const home = join(box.dir, 'home');
+  const remoteHome = join(box.dir, 'worker-home');
+  const remoteMachineHome = join(remoteHome, '.pullboard');
+  const worker = join(box.dir, 'second-machine');
+  const bin = join(box.dir, 'ssh-bin');
+  const requests = join(box.dir, 'ssh-requests.jsonl');
+  const marker = join(box.dir, 'check-ran');
+  for (const folder of [home, remoteHome, remoteMachineHome, join(remoteHome, '.pullboard-runner'), worker, bin, box.env.PULLBOARD_MACHINE_HOME]) {
+    mkdirSync(folder, { recursive: true });
+  }
+  const env = { ...box.env, HOME: home, PATH: bin + ':' + box.env.PATH, RUNNER_FIXTURE_CHECK_MARKER: marker };
+  // The suite runs under its own gate lease; the review must take and mark a lease of its own.
+  for (const key of ['PULLBOARD_GATE_SLOT_HELD', 'PULLBOARD_GATE_SLOT_POOL', 'PULLBOARD_GATE_SLOT_TOKEN', 'PULLBOARD_BROWSER_SLOT_HELD']) delete env[key];
+  const machineHome = env.PULLBOARD_MACHINE_HOME;
+  const settingsFile = join(machineHome, 'settings.json');
+  const settings = existsSync(settingsFile) ? JSON.parse(readFileSync(settingsFile, 'utf8')) : {};
+  writeFileSync(settingsFile, JSON.stringify({ ...settings, gateSlots: 1 }));
+  installSshStandIn({ bin, worker, home: remoteHome, machineHome: remoteMachineHome, requests });
+  const added = cli(box.repo, env, 'runner', 'add', HOST, '--slots', '1', '--browser', '1', '--json');
+  assert.equal(added.status, 0, added.context);
+
+  const previousHome = process.env.PULLBOARD_HOME;
+  const previousMachineHome = process.env.PULLBOARD_MACHINE_HOME;
+  process.env.PULLBOARD_HOME = env.PULLBOARD_HOME;
+  process.env.PULLBOARD_MACHINE_HOME = machineHome;
+  let held;
+  let review;
+  try {
+    // Filling the only local slot is what sends a remote-capable waiter to the runner.
+    held = await takeResource({ name: 'gate', capacity: 1, scope: 'machine', root: box.repo,
+      agent: 'private-check-local-holder', item: 'private-check-local-holder', kind: 'force-registered-runner' });
+    review = observe(startFixtureChild(process.execPath, [BIN, 'verify', '1', 'accept', '--note', 'the frozen check ran to a verdict', '--json'], {
+      cwd: box.review, env, stdio: ['ignore', 'pipe', 'pipe'] }));
+    let exited = null;
+    review.closed.then(result => { exited = result; });
+    /** Read the review's ticket in this machine's gate line, if it is waiting there. */
+    const reviewTicket = () => listResources({ scope: 'machine', root: box.repo })
+      .find(resource => resource.name === 'gate')?.line.find(entry => entry.item === '1' && entry.kind === 'review');
+    const deadline = Date.now() + 20_000; // budget: hang ceiling for the review to reach the gate line.
+    while (!exited && !reviewTicket()) {
+      if (Date.now() >= deadline) throw new Error('the review neither queued nor finished');
+      await new Promise(resolve => setTimeout(resolve, 40)); // budget: polling interval for the observable queue state.
+    }
+    const early = exited ? `${exited.stdout}\n${exited.stderr}` : '';
+    assert.doesNotMatch(early, /REMOTE_GATE_SLOT_NOT_INHERITABLE/, 'the review refused its own runner lease before its frozen check ran');
+    assert.equal(exited, null, `the review finished while the only local slot was held: ${early}`);
+    assert.equal(reviewTicket().remote, undefined, 'the private check queues for a local slot only, never the runner');
+
+    const command = `node -e ${shellQuote('process.stdout.write("GATE_ON_RUNNER\\n")')}`;
+    // The round trip's phase deadlines bound a broken fixture-only remote dispatch.
+    const gate = await runThroughGate(box.repo, env, command, { item: 'private-check-gate', requests });
+    assert.equal(gate.status, 0, `a gate run still dispatches to the runner while the review waits: ${fixtureResultContext(gate)}`);
+    assert.match(gate.stdout, /GATE_ON_RUNNER/u);
+    assert.equal(gateResult(gate.stdout).runner, HOST, 'the gate run executed on the registered runner');
+    assert.equal(exited, null, 'the review still waits for its local slot after the runner run');
+
+    held.release();
+    held = undefined;
+    const finished = await review.closed;
+    assert.doesNotMatch(`${finished.stdout}\n${finished.stderr}`, /REMOTE_GATE_SLOT_NOT_INHERITABLE/);
+    assert.equal(finished.status, 0, `the review reached a verdict: ${finished.stdout}\n${finished.stderr}`);
+    assert.equal(readFileSync(marker, 'utf8'), `held=1 pool=${realpathSync(join(machineHome, 'resources.sqlite'))}`, 'the frozen check ran locally under the review\'s own local gate lease');
+    assert.equal(JSON.parse(box.run(box.repo, 'show', '1', '--json').out).item_status, 'verified');
+    const requestsSeen = readFileSync(requests, 'utf8').trim().split(/\r?\n/u).filter(Boolean).map(line => JSON.parse(line));
+    assert.deepEqual(requestsSeen.map(request => request.host), [HOST], 'only the gate run reached the runner');
+
+    // The refusal still guards its real case: a runner lease never becomes local child markers.
+    assert.throws(() => gateSlotEnvironment({ name: 'gate', scope: 'machine', pool: 'fixture-pool', token: 'fixture-token', runner: { host: HOST } }),
+      error => error.code === 'REMOTE_GATE_SLOT_NOT_INHERITABLE');
+  } finally {
+    if (held) held.release();
+    if (review && review.child.exitCode === null && review.child.signalCode === null) review.child.kill('SIGKILL');
     if (previousHome === undefined) delete process.env.PULLBOARD_HOME;
     else process.env.PULLBOARD_HOME = previousHome;
     if (previousMachineHome === undefined) delete process.env.PULLBOARD_MACHINE_HOME;
@@ -1072,8 +1141,7 @@ test('a queued run executes on a registered runner and its result comes back [C7
     name: 'setup-fixture-dep', version: '1.0.0', scripts: { postinstall: 'node postinstall.js' },
   }, null, 2) + '\n');
   writeFileSync(join(packageDirectory, 'witness.txt'), 'setup fixture package source\n');
-  writeFileSync(join(packageDirectory, 'postinstall.js'), `import { existsSync, watch, writeFileSync } from 'node:fs';
-import { basename, dirname } from 'node:path';
+  writeFileSync(join(packageDirectory, 'postinstall.js'), `import { existsSync, writeFileSync } from 'node:fs';
 const ready = ${JSON.stringify(setupReady)};
 const pidFile = ${JSON.stringify(setupPid)};
 const term = ${JSON.stringify(setupTerm)};
@@ -1081,16 +1149,17 @@ const release = ${JSON.stringify(releaseSetup)};
 const gone = ${JSON.stringify(setupGone)};
 const waitForRelease = new Promise((resolve, reject) => {
   if (existsSync(release)) return resolve();
-  const watcher = watch(dirname(release), { persistent: false });
-  let timer;
-  const finish = error => { clearTimeout(timer); watcher.close(); error ? reject(error) : resolve(); };
-  const check = (_event, filename) => {
-    if ((filename === null || String(filename) === basename(release)) && existsSync(release)) finish();
+  let poll, timer;
+  let settled = false;
+  const finish = error => {
+    if (settled) return;
+    settled = true;
+    clearInterval(poll); clearTimeout(timer); error ? reject(error) : resolve();
   };
-  watcher.on('change', check);
-  watcher.once('error', finish);
-  timer = setTimeout(() => finish(new Error('postinstall release hang ceiling exceeded')), 20_000); // budget: bound a broken fixture handshake.
-  check('rename', basename(release));
+  const check = () => { if (existsSync(release)) finish(); };
+  poll = setInterval(check, 20); // budget: observe the actual release handshake.
+  timer = setTimeout(() => finish(new Error('postinstall release hang ceiling exceeded')), 20_000); // budget: unchanged broken-fixture ceiling.
+  check();
 });
 let stopping = false;
 process.on('SIGTERM', () => {
