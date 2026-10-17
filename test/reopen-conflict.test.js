@@ -151,8 +151,9 @@ test('a trunk conflict is not counted as a test cause [D1,B3]', () => {
   const item = submitItem(box, 'Conflict item', 'export const status = "ITEM";\n');
   accept(box, item.id, item.commit);
   const trunk = moveTrunk(box);
-  const reopened = box.run(box.repo, 'reopen', String(item.id), '--conflict', 'web/feature.js', '--note', 'two accepted items changed web/feature.js', '--json');
-  assert.equal(reopened.code, 0, reopened.out);
+  const reopened = box.run(box.repo, 'reopen', String(item.id), ...ALL_FILES.flatMap((file) => ['--conflict', file]), '--note', 'two accepted items changed web/feature.js');
+  assert.equal(reopened.code, 0, reopened.err);
+  assert.match(reopened.out, /for a main merge: conflicts with the trunk at [a-f0-9]{12} in web\/feature\.js, "web\/my feature\.js", "web\/a,b\.js"; the accept at/u, 'each name reads as one name');
 
   const reopenOf = (id) => readItem(box, id).thread.findLast((entry) => entry.type === 'move' && entry.kind === 'reopen').detail;
   assert.deepEqual(reopenOf(red.id).landingFailure.tests, [{ file: 'web/landing.test.js', name: 'keeps the landed behavior' }], 'a red landing names its failing test');
@@ -160,7 +161,7 @@ test('a trunk conflict is not counted as a test cause [D1,B3]', () => {
   const conflict = reopenOf(item.id);
   assert.equal(conflict.landingFailure, undefined, 'a trunk conflict names no failing test');
   assert.equal(conflict.cause, 'refusal:MERGE_CONFLICT', 'its cause key is the merge-conflict refusal, which rigor never counts');
-  assert.deepEqual(conflict.conflict, { files: ['web/feature.js'], trunk });
+  assert.deepEqual(conflict.conflict, { files: ALL_FILES, trunk });
   assert.equal(conflict.note, 'two accepted items changed web/feature.js', 'a note the coordinator gives is kept');
   assert.ok(!Object.keys(conflict).some((key) => /test/iu.test(key)), 'no field records a test');
   assert.deepEqual(readItem(box, item.id).verdicts.map((verdict) => verdict.verdict_reason), ['CRITERION_MET'], 'no TEST_FAILURE verdict is recorded');
