@@ -153,8 +153,9 @@ test('[B29,B31] verdicts and facts carry --implies; a later verdict or a superse
   box.json(box.web, 'claim', '1');
   writeFileSync(join(box.web, 'web', 'shared.txt'), 'fixed\n');
   runFixtureGit(['commit', '-q', '-am', 'fix: the fixture passes [G1]'], { cwd: box.web, env: box.env });
-  box.json(box.web, 'submit', '1');
+  const resubmitted = box.json(box.web, 'submit', '1').commit;
   box.json(review, 'next', '--verify');
+  runFixtureGit(['switch', '-q', '--detach', resubmitted], { cwd: review, env: box.env });
   box.json(review, 'verify', '1', 'accept', '--note', 'ran the fixture check');
   const told = facts(box, 2).filter((fact) => fact.supersededBy);
   assert.equal(told.length, 1, 'a later verdict on the same item supersedes the earlier one for the items it implied');
