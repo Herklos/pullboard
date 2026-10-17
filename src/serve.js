@@ -412,6 +412,27 @@ export function codeAt(root, { path, from, to, commit, before = '' }) {
 }
 
 /**
+ * True when the OS refused the view's listen as an agent sandbox does: EPERM, or EACCES on a port
+ * anyone may open. EACCES on a port below 1024 is the ordinary privileged-port rule, so it stays as it is.
+ */
+function sandboxRefusedListen(error, port) {
+  return error.code === 'EPERM' || (error.code === 'EACCES' && (port === 0 || port >= 1024));
+}
+
+/**
+ * The step that lets a sandboxed view listen, for the agent tool this command runs under. Each
+ * named step is one that tool documents; any other tool gets the general step and the terminal.
+ */
+function sandboxListenStep(env = process.env) {
+  const terminal = 'or start pullboard view from a normal terminal';
+  if (env.CLAUDECODE) return `allow local network for Claude Code: set sandbox.network.allowLocalBinding to true in .claude/settings.json, ${terminal}`;
+  if (env.CODEX_SANDBOX !== undefined || env.CODEX_SANDBOX_NETWORK_DISABLED !== undefined) {
+    return `allow local network for Codex in its sandbox settings in ~/.codex/config.toml, ${terminal}`;
+  }
+  return `allow local network in your agent tool's sandbox settings, ${terminal}`;
+}
+
+/**
  * Serve the view until stopped, optionally giving its API access to only one registered project.
  *
  * @param {{ port?: number, secret?: string, projectRoot?: string }} [options]
@@ -516,6 +537,9 @@ export async function serveView({ port = 0, secret = randomBytes(18).toString('b
   return new Promise((ready, fail) => {
     const listen = (port) => {
       const failed = (error) => {
+        if (sandboxRefusedListen(error, port)) {
+          return fail(new Refused('SANDBOX_BLOCKED', `the sandbox around this command refused to let pullboard view listen on ${port ? `${LOOPBACK}:${port}` : LOOPBACK} (${error.code})\nnext: ${sandboxListenStep()}`));
+        }
         if (error.code !== 'EADDRINUSE') return fail(error);
         if (port !== 0 && port === last) return listen(0);
         return fail(asked === 0 ? error : new Refused('PORT_BUSY', `port ${asked} is in use: name another with --port, or leave --port out to take any free one`));
