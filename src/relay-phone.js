@@ -1,27 +1,41 @@
 /** Native approval requests never retain a person grant or its reply key [H5,H16,H17,B26]. */
 import { randomUUID } from 'node:crypto';
+import { hostname } from 'node:os';
+import { basename } from 'node:path';
 import { approvalContext, createApprovalReply, openApproval, sealApproval, signApprovalIntent } from './relay-approval.js';
 import { readBoardKey } from './relay-key.js';
 import { readRelayMachine } from './relay-machine.js';
 import { requirePersonChannel } from './person.js';
+import { repoInfo } from './git.js';
+import { listApiProjects } from './projects.js';
 import { Refused } from './refused.js';
 
 /** Select only a phone whose public key was MAC-authenticated into this native machine's roster. */
-export function approvalPhone(state) {
-  const device = readRelayMachine().devices.find(entry => entry.account === state.account && entry.url === state.url);
+export function approvalPhone(state, { exclude } = {}) {
+  const device = readRelayMachine().devices.find(entry => entry.account === state.account && entry.url === state.url && entry.deviceId !== exclude);
   if (!device) throw new Refused('PHONE_NOT_PAIRED', 'Pair the phone with pullboard relay on --all before requesting this action.');
   return device;
 }
 
+/**
+ * The words the phone shows for a request: this computer's host name and, given its folder, the board's own name.
+ * Why sealed with the intent: the relay never sees them, and the board key's MAC stops it changing them.
+ */
+export function proposalNames(root) {
+  if (!root) return { computer: hostname() };
+  const project = repoInfo(root).root;
+  return { computer: hostname(), board: listApiProjects().find(entry => entry.root === project)?.name ?? basename(project) };
+}
+
 /** Build a sealed immutable proposal; only new-board link replies can have a durable private key. */
-export async function phoneProposal(state, action, target, { board = state.board, command, link = false } = {}) {
+export async function phoneProposal(state, action, target, { board = state.board, command, link = false, root } = {}) {
   if (!/^pm_[A-Za-z0-9_-]{43}$/u.test(state.token ?? '')) throw new Refused('RELAY_SESSION', 'Run pullboard relay on --all to replace the old person session with board machine credentials.');
-  const phone = approvalPhone(state);
+  const phone = approvalPhone(state, { exclude: action === 'revoke-device' ? target : undefined });
   const reply = await createApprovalReply({ link });
   const context = approvalContext({ id: randomUUID(), account: state.account, publisher: state.board, board,
     device: phone.deviceId, action, target, machine: state.machine,
     command: command ?? 'pullboard relay ' + (action === 'revoke-device' || action === 'revoke-token' ? 'revoke ' + target : 'off'), expires: Date.now() + 600_000 });
-  const envelope = await sealApproval({ context, replyKey: reply.publicKey }, phone.publicKey, context, 'intent');
+  const envelope = await sealApproval({ context, replyKey: reply.publicKey, names: proposalNames(root) }, phone.publicKey, context, 'intent');
   const mac = await signApprovalIntent(readBoardKey(state.board), envelope);
   return { context, sealed: Buffer.from(JSON.stringify({ envelope, mac })).toString('base64url'), reply };
 }

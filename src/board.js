@@ -18,6 +18,7 @@ import { Refused } from './refused.js';
 import { causeProblem, requireNeverAgain } from './rigor.js';
 import { barCorrectionFields } from './bar-corrections.js';
 import { factReference } from './fact-reference.js';
+import { factFromEvent, requestAnswerRefusal, tellAnswerImplications, tellFactImplications, tellVerdictImplications } from './implies.js';
 import { parseSpec } from './spec.js';
 
 export const ACCEPT_REASON = 'CRITERION_MET';
@@ -1484,10 +1485,10 @@ function reserveWithin(board, id, { agentId, leaseMs, policy, familyPolicy = 'of
  *
  * @param {any} board
  * @param {number} id
- * @param {{ agentId: string, decision: string, reason?: string, note?: string, cause?: string, head: string, digest: string, policy: string, familyPolicy?: string, check?: 'none' | 'green' }} verdict
+ * @param {{ agentId: string, decision: string, reason?: string, note?: string, cause?: string, head: string, digest: string, policy: string, familyPolicy?: string, check?: 'none' | 'green', implies?: number[], impliesId?: string }} verdict - implies: items this verdict changes (B29)
  * @returns {{ decision: string, reason: string, check?: 'none' | 'green' }}
  */
-export function verify(board, id, { agentId, decision, reason, note = '', cause, head, digest, policy, familyPolicy = 'off', check }) {
+export function verify(board, id, { agentId, decision, reason, note = '', cause, head, digest, policy, familyPolicy = 'off', check, implies, impliesId }) {
   const verb = { ACCEPT: 'accept', REJECT: 'reject' }[decision];
   if (!verb) throw new Refused('BAD_DECISION', 'the decision is accept or reject');
   const isAccept = verb === 'accept';
@@ -1530,7 +1531,8 @@ export function verify(board, id, { agentId, decision, reason, note = '', cause,
     });
     const detail = { reason: code, commit: item.item_commit, ...(!isAccept && cause !== undefined && cause !== null ? { cause } : {}) };
     if (isAccept && check !== undefined) detail.check = check;
-    logEvent(board, agentId, verb, id, detail);
+    logEvent(board, agentId, verb, id, implies?.length ? { ...detail, implies } : detail);
+    tellVerdictImplications(board, (by, itemId, fact) => logEvent(board, by, 'fact', itemId, fact), id, { seed: impliesId, implies });
     return { decision, reason: code, ...(isAccept && check !== undefined ? { check } : {}) };
   });
 }
@@ -1813,10 +1815,10 @@ export function verdictsFor(board, id) {
  * Insert a shout within the caller's transaction.
  *
  * @param {any} board
- * @param {{ from: string, to: string, text: string, lanes: string[], decision?: boolean, answers?: number | null, evidence?: any, request?: boolean, channel?: 'terminal' | 'view' }} message
+ * @param {{ from: string, to: string, text: string, lanes: string[], decision?: boolean, answers?: number | null, evidence?: any, request?: boolean, channel?: 'terminal' | 'view', detail?: object }} message - detail: extra event fields
  * @returns {number}
  */
-function insertShout(board, { from, to, text, lanes, decision = false, answers = null, evidence = null, request = false, channel = 'terminal' }) {
+function insertShout(board, { from, to, text, lanes, decision = false, answers = null, evidence = null, request = false, channel = 'terminal', detail = {} }) {
   if (!text.trim()) throw new Refused('EMPTY_SHOUT', 'a shout needs text');
   if (to === from) throw new Refused('SELF_SHOUT', `a shout cannot be addressed to its sender ${from}; name another agent, a lane or all`);
   if (request && (from !== 'person' || to !== COORDINATOR || decision || answers !== null)) {
@@ -1859,7 +1861,7 @@ function insertShout(board, { from, to, text, lanes, decision = false, answers =
     )
     .run(from, to, text.trim(), now(board), decision ? 1 : 0, answers, evidence?.kind ?? null, evidence ? evidence.outcome.trim() : null, evidence?.item ?? null, evidence?.commit ?? null, request ? 1 : 0, outcome);
   const id = Number(result.lastInsertRowid);
-  logEvent(board, from, answers === null ? 'shout' : decision ? 'pass' : 'answer', null, { shout: id, to, decision: Boolean(decision), request: Boolean(request), answers, ...(outcome ? { outcome } : {}), ...(personAnswer ? { channel } : {}) });
+  logEvent(board, from, answers === null ? 'shout' : decision ? 'pass' : 'answer', null, { shout: id, to, decision: Boolean(decision), request: Boolean(request), answers, ...(outcome ? { outcome } : {}), ...(personAnswer ? { channel } : {}), ...detail });
   return id;
 }
 
@@ -1899,14 +1901,14 @@ export function passDecision(board, id, { agentId, note, lanes }) {
  *
  * @param {any} board
  * @param {number} id
- * @param {{ agentId: string, text: string, lanes: string[], asPerson?: boolean, channel?: 'terminal' | 'view' }} options
+ * @param {{ agentId: string, text: string, lanes: string[], asPerson?: boolean, channel?: 'terminal' | 'view', implies?: number[], supersedes?: number | null, impliesId?: string }} options - implies and supersedes tell items (B29,B31)
  * @returns {number}
  */
-export function answerDecision(board, id, { agentId, text, lanes, asPerson = false, channel = 'terminal' }) {
+export function answerDecision(board, id, { agentId, text, lanes, asPerson = false, channel = 'terminal', implies, supersedes = null, impliesId }) {
   return atomic(board, () => {
     const ask = getShout(board, id);
     if (ask.shout_request) {
-      if (asPerson) throw new Refused('B26_PERSON_ANSWER', `requests are answered by the coordinator; run pullboard answer ${id} done or declined <reason>`);
+      if (asPerson || implies?.length || supersedes !== null) throw requestAnswerRefusal(id, { asPerson });
       return insertShout(board, { from: agentId, to: ask.shout_from, text, lanes, answers: id });
     }
     if (!ask.shout_decision) throw new Refused('NOT_A_DECISION', `shout #${id} asked for no decision`);
@@ -1922,7 +1924,7 @@ export function answerDecision(board, id, { agentId, text, lanes, asPerson = fal
       throw new Refused('NOT_YOUR_DECISION', `shout #${id} is addressed to ${ask.shout_to}, not ${lane} (agent ${agentId})`);
     }
     const from = personAnswer ? PERSON : agentId;
-    const answerId = insertShout(board, { from, to: ask.shout_from, text, lanes, answers: id, channel });
+    const answerId = tellAnswerImplications(board, (by, itemId, fact) => logEvent(board, by, 'fact', itemId, fact), insertShout(board, { from, to: ask.shout_from, text, lanes, answers: id, channel, detail: { ...(implies?.length ? { implies } : {}), ...(supersedes !== null ? { supersedes } : {}) } }), { seed: impliesId, implies, supersedes, from, person: PERSON });
     if (personAnswer && ask.shout_answers !== null) {
       const original = getShout(board, ask.shout_answers);
       insertShout(board, { from: PERSON, to: original.shout_from, text: `Person answered #${id}: ${String(text).trim()}`, lanes, answers: original.shout_id, channel });
@@ -2070,13 +2072,6 @@ export const FACT_KINDS = Object.freeze(['capture', 'measurement', 'note', 'diff
 const FACT_JUDGEMENTS = new Set(['decision', 'rejection', 'supersession', 'root-cause']);
 export { factReference };
 
-/** Give facts the same stamped identity on CLI, API, export and replica reads; a never-again keeps its cause [B29,B31,D1]. */
-function factFromEvent(event) {
-  const detail = JSON.parse(event.event_detail);
-  return { id: detail.id, eventId: event.event_id, kind: detail.kind, text: detail.text,
-    by: event.event_by, at: event.event_at, ref: detail.ref ?? null, supersedes: detail.supersedes ?? null, ...(detail.neverAgain ? { cause: detail.cause, neverAgain: true } : {}) };
-}
-
 /** Read every move and fact in append order, including superseded facts and full original text [B31,B32]. */
 export function itemThread(board, id) {
   itemById(board, id);
@@ -2092,8 +2087,9 @@ export function projectItemThreads(board, state) {
 }
 
 /** Append a typed fact atomically; a correction never edits the original event [B29,B30,B31,B32].
- * The internal factId is set from a sealed move's identity during replay, rather than replica-local sequence ids; a never-again with its cause is the person's alone, and rigor lists it at once (#713) [D1]. */
-export function appendFact(board, id, { agentId, kind, text, ref = null, supersedes = null, factId = randomUUID(), cause = null, neverAgain = false, asPerson = false, channel = 'terminal' }) {
+ * The internal factId is set from a sealed move's identity during replay, rather than replica-local sequence ids; a never-again with its cause is the person's alone, and rigor lists it at once (#713) [D1].
+ */
+export function appendFact(board, id, { agentId, kind, text, ref = null, supersedes = null, factId = randomUUID(), implies, cause = null, neverAgain = false, asPerson = false, channel = 'terminal' }) {
   return atomic(board, () => {
     const item = current(board, itemById(board, id));
     if (!board.db.prepare('SELECT 1 FROM agent WHERE agent_id = ?').get(agentId)) throw new Refused('NO_AGENT', `no registered agent ${agentId}; join a worktree before appending a fact`);
@@ -2109,8 +2105,8 @@ export function appendFact(board, id, { agentId, kind, text, ref = null, superse
     }
     const binding = factReference(ref);
     if (neverAgain || asPerson || cause !== null) requireNeverAgain(id, { agentId, cause, neverAgain, asPerson, channel });
-    logEvent(board, neverAgain ? PERSON : agentId, 'fact', id, { id: factId, kind, text, ref: binding, supersedes, ...(neverAgain ? { cause, neverAgain: true, channel } : {}) });
-    return factFromEvent(board.lastEvent);
+    logEvent(board, neverAgain ? PERSON : agentId, 'fact', id, { id: factId, kind, text, ref: binding, supersedes, ...(neverAgain ? { cause, neverAgain: true, channel } : {}), ...(implies?.length ? { implies } : {}) });
+    return tellFactImplications(board, (by, itemId, fact) => logEvent(board, by, 'fact', itemId, fact), factFromEvent(board.lastEvent), { id, implies, supersedes });
   });
 }
 

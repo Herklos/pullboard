@@ -63,7 +63,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `join` | `version:number`, `agent:string`, `lane:string`, `route:string`, `path:string`, `model:string`, `displayName:string` |
 | `takeover` | `version:number`, `agent:string`, `path:string` |
 | `worktree` | `version:number`, `agent:string`, `lane:string`, `route:string`, `path:string`, `branch:string`, `prompt:string`, `model:string`, `displayName:string` |
-| `resume` | `version:number`, `me:object`, `all:array`, `requests:array`, `holding:array`, `sentBack:array`, `awaiting:array`, `toVerify:array`, `toMerge:array`, `open:array`, `stale:array`, `holds:array`, `unread:number`, `newest:array`, `root:string`, `newWorktreeLocation:string`, `dirty:number`, `next:string` |
+| `resume` | `version:number`, `me:object`, `all:array`, `requests:array`, `holding:array`, `sentBack:array`, `awaiting:array`, `toVerify:array`, `toMerge:array`, `open:array`, `stale:array`, `doctrineNotes:array`, `holds:array`, `unread:number`, `newest:array`, `root:string`, `newWorktreeLocation:string`, `dirty:number`, `next:string` |
 | `whoami` | `version:number`, `id:string`, `lane:string`, `path:string`, `model:string`, `displayName:string` |
 | `lanes` | `version:number`, `lanes:object`, `shared:array`, `coordinator:string` |
 | `lane add` | `version:number`, `lane:string`, `owns:array` |
@@ -82,6 +82,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `stats` | `version:number`, `stats:object` |
 | `status` | `version:number`, `me:object`, `mine:array`, `stats:object`, `reviewQueue:object`, `unread:number`, `relay:object` |
 | `doctor` | `version:number`, `problems:array` |
+| `health` | `version:number`, `asOf:string`, `thresholds:object`, `stuck:array`, `waiting:array` |
 | `skills` | `version:number`, `updated:array`, `current:array`, `customized:array` |
 | `inbox` | `version:number`, `shouts:array` |
 | `decisions` | `version:number`, `decisions:array` |
@@ -91,6 +92,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `add` | `version:number`, `item:object` |
 | `edit` | `version:number`, `item:object` |
 | `fact` | `version:number`, `item:number`, `fact:object` |
+| `why` | `version:number`, `id:number`, `decisions:array` |
 | `escalate` | `version:number`, `id:number`, `from:string`, `to:string` |
 | `run` | `version:number`, `messages:array` |
 | `sweep` | `version:number`, `messages:array` |
@@ -140,6 +142,8 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `hook pre-push` | `version:number`, `messages:array` |
 <!-- api-command-shapes:end -->
 
+`spec draft "<rule>" --doctrine --source "chat, 2026-10-16"` proposes a sourced doctrine row and returns a qualified `id`, such as `doctrine:DR1`, for the existing person approval commands. Resume adds `doctrineNotes`, an array of newly seen approved rules with `id`, `text` and `gate`; each checkout consumes its own notices. Drafts and pending applications are excluded. The shared approved doctrine also supplies frozen citations and stale-item comparisons in older checkouts.
+
 `hook pre-merge-commit` runs the same staged checks as `hook pre-commit` before Git creates an automatic merge commit. `init` and `hooks` install it; `doctor` names it when absent at Git's effective hook path. Lane ownership comes from `HEAD:pullboard.json`, so an unstaged configuration edit cannot grant a lane new folders. `lane add` writes the new lane to the working `pullboard.json` and returns `{ lane, owns }`; commit the file before the lane's ownership takes effect. `init` returns the lanes it proposes as `proposedLanes`, each `{ name, owns }`, and writes none of them. Lane-sensitive checks refuse a repository with `info/grafts` in its Git common directory because grafts alter ancestry even when replacement objects are disabled.
 
 `join` and `worktree` require a free-text `--model` label or `PULLBOARD_MODEL` environment value; labels are not inferred from a provider or family. Rejoining the same worktree preserves its agent id; the model label is required on every join, and omitting the optional `--family` preserves its prior declaration. `pullboard.json` may set `agents.names` to `suffix` (the default, `web-1 (Claude)`) or `prefix` (`claude-web-1`). CLI `agent` fields remain stable ids; `displayName` shows the chosen style. `resume.me` and API state `agents[]` carry `model` and `displayName`; older agents with no model display `unknown`. Each event records the actor model in `event_detail.model` for a registered agent, with `unknown` for legacy agents without a declaration. `show` includes `item_builder_family` and each verdict's `verdict_verifier_family`. These family fields are `null` when the agent did not declare a family, and later declarations do not rewrite prior submissions or verdicts.
@@ -154,6 +158,44 @@ When outstanding reviews reach `verify.reviewRatio` times the active reviewers (
 
 For HTTP `next`, a review offer returns success with `event: null`, `offer` and the ordinary CLI `result`. Send `args.build: true` to claim as before and receive the actual claim event. The unattended `run` command always supplies explicit build intent, records it on fresh claims, and prints the review backlog each iteration.
 
+## Board health
+
+`pullboard health` scans the board read-only and lists every stuck item with its cause, since when, the one next step and who takes it. It opens the board through a read-only connection, records no event, skips relay sync and asks git only `merge-tree`, which never touches a HEAD, index or working tree. It exits 0 when nothing is stuck and 1 when something is; the text form then prints `nothing is stuck`, or one line per finding: `#12 claim lapsed, since 2026-10-17 10:00 (2h): web-3's lease ran out and nobody is building it. Next, web-3 (builder): renew it with pullboard claim 12.`
+
+`health --json` returns `{version: 1, asOf, thresholds: {stuck, holds, release}, stuck: [...], waiting: [...]}`. `asOf` is the board clock's ISO time. Each finding in `stuck` and `waiting` is `{key, cause, item, subject, title, since, ageMinutes, why, next, command, owner: {role, who}, detail}`:
+
+- `key` names the cause and what is stuck, like `CLAIM_LAPSED:item:12`, `HOLD_STALE:lane:docs`, `DECISION_UNANSWERED:shout:40` or `RELEASE_OVERDUE:release:v0.9.0`; it stays the same while the finding persists, so a watcher can post it once and notice when it clears.
+- `item` is the item id, or `null` for a lane hold, a decision or a release; `subject` is the same thing as text (`#12`, `lane docs`, `decision #40`, `release v0.9.0`).
+- `since` is when the wait began, in ISO time; `ageMinutes` counts whole minutes from it to `asOf`.
+- `why` and `next` are plain sentences; `command` is the exact command for the next step, or `null` when the step has none.
+- `owner.role` is `builder`, `reviewer`, `coordinator` or `person`; `owner.who` is the agent, lane, `coordinator` or `person`, and `null` when any reviewer may take it.
+- `detail` holds the cause's facts: `holder`, `reviewer`, `builder`, `commit`, `files` and `trunk` for a conflict, `parent` for a stacked item, `reason` and `by` for a hold, `withdrawn`, `after`, `move` and `milestone`, `shout`, `from` and `to`, or `release` and `landed`.
+
+The causes, each with its owner:
+
+| cause | stuck when | owner |
+|---|---|---|
+| `CLAIM_LAPSED` | a claim's lease ran out; `since` is when it ran out | the holder |
+| `REVIEW_LAPSED` | a review reservation's lease ran out with no verdict | a reviewer |
+| `NO_REVIEWER` | a submission has had no reviewer past `health.stuck` | a reviewer |
+| `UNLANDED_CONFLICT` | accepted past `health.stuck` and its commit conflicts with the trunk; `detail.files` names the files | its builder |
+| `UNLANDED_HELD` | accepted past `health.stuck` and held; `detail.reason` names the hold | who holds it |
+| `UNLANDED_STACKED` | accepted past `health.stuck` and carrying another item's commit that has no accept | a reviewer, or that item's builder |
+| `UNLANDED_WAITING` | accepted past `health.stuck` and waiting on an item it lands after | the coordinator |
+| `UNLANDED_READY` | accepted past `health.stuck`, merges cleanly and nobody landed it | the coordinator |
+| `HOLD_STALE` | an item or lane hold older than `health.holds` | who holds it |
+| `CONFLICT_HOLD_CLEARS` | a hold whose reason names a conflict, on an item whose commit now merges cleanly | who holds it |
+| `REWORK_UNCLAIMED` | rejected or reopened in the current release and unclaimed past `health.stuck` | its builder |
+| `REWORK_LATER` | the same in a later milestone; listed in `waiting` | its builder |
+| `AFTER_WITHDRAWN` | an unfinished item waits on a withdrawn item | the coordinator |
+| `DECISION_UNANSWERED` | a decision to the coordinator or the person is unanswered past `health.stuck` | the coordinator or the person |
+| `REQUEST_UNANSWERED` | a person's request is not done or declined past `health.stuck` | the coordinator |
+| `RELEASE_OVERDUE` | landed work waits and the newest version tag is older than `health.release` | the coordinator |
+
+The current release is the roadmap's first milestone with unverified local work; an unplanned item counts as current. A release is the newest tag named like `v1.2.3` or `1.2.3`, dated by its creation, and its landed work is every item first recorded merged after it. A repository with no such tag has no release deadline. The trunk is the primary checkout's branch, or the retained trunk when that checkout is detached.
+
+`pullboard.json` sets the thresholds under `health`, each a duration like `90m`, `2h` or `1d`: `stuck` (default `1h`), `holds` (default `1d`) and `release` (default `1d`). A value that is not a duration is refused as `BAD_CONFIG`.
+
 ## Item threads
 
 `pullboard fact <id> <kind> "<text>"` appends a fact to an existing item. The observation kinds are `capture`, `measurement`, `note` and `diff`; any registered agent may append them. The judgement kinds are `decision`, `rejection`, `supersession` and `root-cause`; only the item's live lease holder or the coordinator may append them. An expired lease gives no judgement permission. Facts do not change the item's status or its claim.
@@ -165,6 +207,8 @@ Use `--ref src/file.js:12-30@<full-40-character-sha>` to bind a fact to a commit
 A correction is a new fact with `--supersedes <fact-id>`. It requires the live holder or coordinator even when its kind is an observation. The earlier fact remains visible; supersession must name a fact on the same item. A missing or cross-item identity is refused with `NO_FACT`. Unsupported kinds receive `BAD_FACT_KIND`, empty text receives `EMPTY_FACT`, and unauthorized judgements or corrections receive `FACT_JUDGEMENT`.
 
 `show --json` retains its existing item fields and verdicts and adds `thread`. The HTTP item detail's `thread` field, also on each item in the full board state, has the same array. Entries are oldest first, ordered by the append-only event sequence. A fact entry is `{type: "fact", ...fact}`. A move entry is `{type: "move", eventId, kind, by, at, detail}`, with `detail` holding the original move's structured event detail. Text `show` prints these moves and facts as one timeline, including full references and both sides of a correction. Ordinary verdict summaries and `--history` remain available.
+
+A decision names the items it changes with `--implies 12,13` on `fact`, `verify` or `answer`; the HTTP moves take the same value as `args.implies`, and `answer` also takes `args.supersedes`, the id of an earlier answer. Each named item must exist; an unknown one is refused with `NO_ITEM` naming it, before anything is recorded. Each named item's `thread` then gets a `note` fact with a `decision` citation `{source, id, item, by, line}`, and a second fact with `supersededBy` when that decision is superseded (docs/formats.md has the shapes). These optional fact fields appear only when set. `by` is read from the board's record of the decision, never from the arguments, and only the person supersedes the person's answer. `pullboard why <id>` returns `{version: 1, id, decisions: [...]}`, newest first; each entry is the citation plus `at`, `fact` (the implied fact's id) and `supersededBy` (a citation, or `null`). `resume --json` adds `decisions`: the implied facts on held items shown for the first time, each `{item, fact, text}`.
 
 The HTTP move is `{verb: "fact", item: 12, agent: "web-1", args: {kind: "measurement", text: "The check takes 8 seconds", ref: "src/file.js:12-30@<full-sha>"}}`. Omit `agent` to act as the coordinator; `args.supersedes` supplies a correction's earlier fact identity. The response carries the committed `fact` event and the CLI result. The event-log format stays at version 1 because facts use its existing immutable event rows; exports and imports preserve those rows. The sealed move engine advances to version 3 for this release so older engines refuse the new operation before replay.
 
@@ -204,17 +248,21 @@ Only the coordinator sets or edits an item's `--check`. `pullboard check [id]` p
 
 `relay on --all [--url <address>]` returns `{version, linked: [{project, root, board}], failed: [{project, root, reason}], paired, autoLink: true}`. Its status is nonzero when a project failed; successful links remain available. With no paired phone, the command prints one tappable pairing link and QR, then waits in the foreground up to ten minutes. Interruption or expiration leaves completed links intact and exits zero when no link failed. Every explicit invocation signs in afresh; no person session is retained on the Mac. Later project registrations publish one sealed phone-link proposal and keep working locally until its single approval tap. `doctor` and `resume` name the waiting project and its expiry; expiration requires an explicit fresh sign-in rather than silently asking again. `relay off` excludes that project from automatic linking; explicit `relay on` clears the exclusion.
 
-`relay devices` returns `{version, devices: [{deviceId, label, fingerprint, createdAt}]}` without a private key or credential. `relay revoke <deviceId>` returns `{version, deviceId, revoked: true, notice}` after removing the local recipient and deleting its remote wraps. Native revocation waits for one tap on the paired phone and uses a short-lived, single-use, RAM-only grant for that exact device. A failed or interrupted approval needs an explicit retry. Revocation stops future wrapping; it cannot erase board keys already received.
+`relay devices` returns `{version, devices: [{deviceId, label, fingerprint, createdAt}]}` without a private key or credential. `relay revoke <deviceId>` returns `{version, deviceId, revoked: true, notice}` after removing the local recipient and deleting its remote wraps. Native revocation never asks the target device to approve its own removal. Another paired phone can approve it with a short-lived, single-use, RAM-only grant for that exact target. With no other paired approver or no linked publishing board, the person completes a fresh GitHub device-code sign-in on the computer instead. The authenticated account and relay origin must match the saved enrollment; the fresh session stays in memory and is revoked after the action. Agent terminals are refused before any sign-in or network request. A failed or interrupted approval or sign-in needs an explicit retry. Revocation stops future wrapping; it cannot erase board keys already received.
 
 Phone enrollment uses a one-use `#device=<locator>.<secret>` fragment, removed before sign-in. The secret remains on the phone and Mac. Person-authenticated `/api/v1/devices/session` returns the current account id. `/api/v1/devices/enrollments/:locator` supports POST `{}` to start a ten-minute locator, PUT of the exact public enrollment and MAC, GET of `{version, enrollment}` and DELETE to consume it. A native Mac checks the MAC locally before retaining any recipient. `/api/v1/devices/:deviceId` supports POST `{}` to record an authenticated recipient and DELETE to revoke it. PUT `/api/v1/devices/:deviceId/boards/:boardId` stores `{engine, wrapped}`; GET `/api/v1/devices/:deviceId/boards` returns `{version, wraps: [{board, engine, wrapped}]}` filtered by current board access. `wrapped` is opaque base64url client ciphertext. Enrollment, device listing and direct revocation require a person session. A board-scoped machine credential can PUT only its own board wrap to an already enrolled device. Cookie writes require the exact configured Origin, and all responses are no-store. Device ids and grants belong to the authenticated GitHub account. Revoked ids cannot be registered or uploaded again.
 
 `POST /auth/machines {board,machine}` requires a foreground person session and returns a `pm_` credential bound to that board and machine. This delegate can mint board-scoped `pa_` tokens through `/auth/tokens` and list only its board’s token ids and metadata. It cannot link a board, issue a machine credential, post a phone request, revoke another credential directly, or use person-only cookie endpoints. Agent tokens cannot mint any credential.
 
+`GET /auth/machines?board=<id>` returns `{version, machines: [{machine}]}` for the live computer credentials on that board, with duplicate computer ids listed once. It requires that board's machine credential or a person session with current repository write access; agent tokens and credentials from another board are refused. `relay off` excludes its own computer from the list and warns which joined computers lose the shared copy if the phone approves deletion. JSON also returns those ids in `affectedMachines`. Local unlink still succeeds when the relay cannot supply the list.
+
+After phone-approved deletion, a previously live scoped credential receives HTTP 410 / `RELAY_BOARD_DELETED` for that deleted copy. The relay retains only its hash, board id and original expiry as a deletion receipt, prunes expired receipts, and grants no access through them. Unknown, already revoked and already expired credentials receive `AUTH_REQUIRED` as before. Only a versioned deletion response naming this link's own board turns a joined computer back into a local board. The CLI removes the inert link and its device key, excludes the project from automatic relinking, and retains a private credential-free notice that the relay copy was deleted; native board contents remain local. A successful explicit `relay on` starts a new link and clears that notice. A network outage or ordinary credential refusal does not authorize this transition. Before forgetting a deleted copy, the CLI commits any pending native move and its durable receipt locally. The notice keeps only the receipt id and intent digests, so interrupted cleanup or an explicit repeat can return the original outcome without applying that move twice; different local work can continue beside it.
+
 A machine publishes an opaque approval with `POST /api/v1/devices/approvals {context,sealed}`. The publishing machine may GET only its own requests. The paired phone reads `/api/v1/devices/:deviceId/approvals`, explicitly POSTs `/:requestId/authorize {}` and completes the encrypted reply through `/:requestId/complete {response}`. The publishing machine executes a native revocation through `/:requestId/execute {grant}`; the two-minute grant binds the entire context and is atomically consumed once. Native reply keys and grants never persist. A refused foreground approval fails immediately with the original refusal code and reason plus its request id. A refused remote approval makes local unlinking or registration exit nonzero while retaining the completed local work: one line names that completion, the refusal code and reason, the request id and the next action. The JSON result preserves the local outcome and includes `remote: {code, reason, requestId}`. New-board linking uses a durable non-person reply key and returns only a board-scoped machine credential. `relay off` immediately unlinks locally even offline or in an agent shell, reports that the relay copy remains, and queues a separate one-tap phone deletion request when possible.
 
 The result and refusal tables are checked against `JSON_SHAPES` in `src/json.js` by `docs/api.test.js`.
 
-When `verify <id> accept` runs a frozen check and refuses with `CHECK_RED` or `CHECK_UNVERIFIED`, `error.message` includes its output digest, up to 40 sanitized tail lines, and `full output file: <path>`. The file is written with owner-only permissions. If diagnostic storage fails, the message says `full output file: (unavailable: CODE)` while retaining the bounded sanitized lines; the JSON error object remains `{ code, message, next }`. An item with no frozen check produces no check-output section.
+When `verify <id> accept` runs a frozen check and refuses with `CHECK_RED` or `CHECK_UNVERIFIED`, `error.message` includes its output digest, up to 40 sanitized tail lines, and `full output file: <path>`. The file is written with owner-only permissions. If diagnostic storage fails, the message says `full output file: (unavailable: CODE)` while retaining the bounded sanitized lines; the JSON error object remains `{ code, message, next }`. An item with no frozen check produces no check-output section and records `check: "none"` without requesting a native test or browser slot. Its submitted-commit, frozen-digest, trunk, dependency, review-reservation, and verdict guards still apply.
 
 ## MCP server
 
