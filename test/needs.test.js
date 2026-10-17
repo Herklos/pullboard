@@ -1,3 +1,4 @@
+/** @pullboard-test-input source-tree */
 /** One person-facing obligation builder across sessions and transports [N26,A9]. */
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';

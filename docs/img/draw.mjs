@@ -430,8 +430,164 @@ text{font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
   });
 }
 
+/* The Software factory: one night on Pullboard's own board, what a board runs, and why it holds. */
+const FACTORY_STYLE = `
+text{font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
+.card{fill:#fff;stroke:#dce5df}.title{font-size:16px;font-weight:650;fill:#101714}.sub{font-size:12px;fill:#4f5b55}
+.zone{fill:none;stroke:#c9d4cd;stroke-dasharray:4 4}.zl{font-size:10.5px;font-weight:650;letter-spacing:.08em;fill:#65746b}
+.h{font-size:13px;font-weight:650;fill:#101714}.m{font-size:11.5px;fill:#4f5b55}.n{font-size:18px;font-weight:650;fill:#101714;font-variant-numeric:tabular-nums}
+.nb{font-size:30px;font-weight:700;fill:#0b5d3a;font-variant-numeric:tabular-nums}.hl{font-weight:700;fill:#0b5d3a}.stamp{fill:none;stroke:#1f8a5a;stroke-width:2}.stamp.in{stroke-width:1;opacity:.55}.stw{font-size:24px;font-weight:800;letter-spacing:.14em;fill:#1f8a5a}.sts{font-size:10px;font-weight:800;letter-spacing:.24em;fill:#1f8a5a}
+.you{fill:#e8f0f8;stroke:#9bb7d4}.plain{fill:#fff;stroke:#c9d4cd}.rows{fill:#efe9ff;stroke:#b9a6f0}.ver{fill:#dff4e8;stroke:#9fd6b6}.bld{fill:#fdf6e3;stroke:#e2c98a}.lay{fill:#f6f8f7;stroke:#c9d4cd}
+.ln{stroke:#65746b;stroke-width:1.5;fill:none}.ln.d{stroke-dasharray:5 4}.hd{fill:#65746b}.dot{fill:#65746b}.ship{fill:#1f8a5a}
+.pill{fill:#fff;stroke:#dce5df}.pill.ok{fill:#dff4e8;stroke:#9fd6b6}.pt{font-size:11px;fill:#4f5b55}.pt.ok{fill:#0b5d3a;font-weight:600}
+.h.sm{font-size:12.5px}.okl{stroke:#1f8a5a}
+.ico{fill:none;stroke:#65746b;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+@media(prefers-color-scheme:dark){.card{fill:#111714;stroke:#34443a}.title,.h,.n{fill:#e9eeeb}.sub,.m,.pt{fill:#b6c3bc}.zone{stroke:#3a4a40}.zl{fill:#9cafa3}
+.you{fill:#14243a;stroke:#3f6a96}.plain{fill:#111714;stroke:#3a4a40}.rows{fill:#231d3a;stroke:#6b57b8}.ver{fill:#163829;stroke:#2f7a55}.bld{fill:#2e2614;stroke:#8a6f2c}.lay{fill:#18201c;stroke:#3a4a40}
+.ln{stroke:#9cafa3}.hd,.dot{fill:#9cafa3}.ship{fill:#4cc38a}.pill{fill:#111714;stroke:#34443a}.pill.ok{fill:#163829;stroke:#2f7a55}.pt.ok{fill:#8fe0b6}.nb,.hl{fill:#8fe0b6}.stamp{stroke:#4cc38a}.stw,.sts{fill:#4cc38a}.ico{stroke:#9cafa3}.okl{stroke:#4cc38a}}`;
+
+/** The Software factory figures share one wrapper: draw.mjs's card and palette, then their own style, as holds does. */
+const softwareFigure = (width, height, title, desc, body) => figure({ width, height, title, desc, body: [
+  `<style>${FACTORY_STYLE}\n</style>`,
+  '<defs><marker id="tip-f" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto"><path class="hd" d="M0 1 L9 5 L0 9 z"/></marker></defs>',
+  ...body,
+] });
+// a pill label centred on (cx, cy), sized to its words
+const pill = (cx, cy, words, ok = false) => { const w = words.length * 6.1 + 18; return `<rect class="pill${ok ? ' ok' : ''}" x="${cx - w / 2}" y="${cy - 11}" width="${w}" height="22" rx="11"/>${text(cx, cy + 4, words, `pt${ok ? ' ok' : ''}`, 'middle')}`; };
+
+// One night on Pullboard's own board: 16 Oct 2026, 04:17Z to 13:51Z (11:17 pm to 8:51 am, Chicago).
+const NIGHT = { claims: 22, rejected: 2, sentBack: 12, coordinatorMoves: 205, hours: 9.6, from: '11:17 pm', to: '8:51 am', agents: 38, submitted: 30, accepted: 27, merged: 11, release: '0.8.27', releaseAt: '7:56 am', frac: (12 * 60 + 56 - (4 * 60 + 17)) / (13 * 60 + 51 - (4 * 60 + 17)) };
+
+// What landed on main that night: main at 04:17Z (4168633, 0.8.26) against main at 13:51Z (7160df0, 0.8.27),
+// first-parent history of github.com/pullboard-dev/pullboard. Features and fixes are the night's landing merges.
+const BUILT = { features: 6, fixes: 5, code: '+817', codeFiles: 17, tests: '+1,596', testCases: 17,
+  highlights: ['The view signs in and links every board', 'pullboard.dev opens the boards on this machine', 'A project can save its full test suite for landing'] };
+
+/** One night on Pullboard's own board: what the agents did while the person was away, and what landed. */
+export function drawFactory() {
+  const W = 840, H = 564;
+  const bx = 48, bw = 132, bh = 48, by = 110;
+  const l0 = bx + bw, l1 = W - 48 - bw, ly = by + bh / 2;
+  const rx = l0 + (l1 - l0) * NIGHT.frac;
+  const tiles = [
+    ['ver', String(BUILT.features), 'features shipped'],
+    ['bld', String(BUILT.fixes), 'fixes landed'],
+    ['rows', BUILT.code, `lines of product code`],
+    ['you', BUILT.tests, `lines of tests`],
+    ['lay', NIGHT.release, 'released to npm'],
+  ];
+  const tw = (W - 96 - 4 * 12) / 5;
+  const flow = [
+    { cls: 'lay', head: 'Coordinator', sub: 'answers, reopens' },
+    { cls: 'bld', head: 'Builders', sub: `${NIGHT.claims} claims · ${NIGHT.submitted} submitted` },
+    { cls: 'rows', head: 'A verifier agent', sub: `${NIGHT.accepted} accepted · ${NIGHT.rejected} rejected` },
+    { cls: 'ver', head: 'main', sub: `${NIGHT.merged} work items merged` },
+  ];
+  const fw = 156, fg = (W - 96 - 4 * fw) / 3, fy = 263, fh = 48;
+  return softwareFigure(W, H, 'You leave. It builds.', `One night on Pullboard's own board, 16 October 2026: ${NIGHT.agents} agents, ${NIGHT.hours} hours from ${NIGHT.from} to ${NIGHT.to}, with no moves from the person. ${NIGHT.agents} agents worked: a coordinator agent answered and reopened work, and landed what the verifier accepted; builders made ${NIGHT.claims} claims and ${NIGHT.submitted} submissions; a verifier agent accepted ${NIGHT.accepted} and rejected ${NIGHT.rejected}; ${NIGHT.sentBack} went back to their builders; ${NIGHT.merged} work items merged to main. What landed on main: ${BUILT.features} features and ${BUILT.fixes} fixes, ${BUILT.code} lines of product code across ${BUILT.codeFiles} files and ${BUILT.tests} lines of tests with ${BUILT.testCases} new test cases, and release ${NIGHT.release} on npm at ${NIGHT.releaseAt}. Among the features: ${BUILT.highlights.join('; ')}.`, [
+    text(24, 34, 'You leave. It builds.', 'title'),
+    text(24, 54, `One night on Pullboard’s own board, 16 Oct: ${NIGHT.hours} hours with no moves from the person.`, 'sub'),
+    `<rect class="zone" x="24" y="72" width="${W - 48}" height="102" rx="10"/>`, text(38, 94, 'THE NIGHT', 'zl'),
+    `<rect class="you" x="${bx}" y="${by}" width="${bw}" height="${bh}" rx="8"/>`, text(bx + bw / 2, by + 21, 'You leave', 'h', 'middle'), text(bx + bw / 2, by + 37, NIGHT.from, 'm', 'middle'),
+    `<rect class="you" x="${l1}" y="${by}" width="${bw}" height="${bh}" rx="8"/>`, text(l1 + bw / 2, by + 21, 'You’re back', 'h', 'middle'), text(l1 + bw / 2, by + 37, NIGHT.to, 'm', 'middle'),
+    `<line class="ln d" x1="${l0}" y1="${ly}" x2="${l1}" y2="${ly}"/>`,
+    pill((l0 + rx) / 2, ly, `${NIGHT.hours} hours · no moves from you`),
+    ...(() => { const words = `${NIGHT.release} ships · ${NIGHT.releaseAt}`, pw = words.length * 6.1 + 18, cx = Math.min(rx, l1 - 10 - pw / 2); return [`<line class="ln" x1="${rx}" y1="${ly}" x2="${rx}" y2="${ly - 18}"/>`, `<circle class="ship" cx="${rx}" cy="${ly}" r="5"/>`, pill(cx, ly - 29, words, true)]; })(),
+    // how the work moved: the coordinator organizes, builders claim and submit, a second agent checks, main takes what passes
+    `<rect class="zone" x="24" y="186" width="${W - 48}" height="180" rx="10"/>`, text(38, 208, `WHAT THE AGENTS DID · ${NIGHT.agents} AGENTS`, 'zl'),
+    ...flow.map((b, i) => { const x = 48 + i * (fw + fg); return `<rect class="${b.cls}" x="${x}" y="${fy}" width="${fw}" height="${fh}" rx="8"/>${text(x + fw / 2, fy + 21, b.head, 'h', 'middle')}${text(x + fw / 2, fy + 38, b.sub, 'm', 'middle')}`; }),
+    ...flow.slice(1).map((_, i) => { const x1 = 48 + (i + 1) * fw + i * fg; return `<line class="ln" x1="${x1}" y1="${fy + fh / 2}" x2="${x1 + fg - 2}" y2="${fy + fh / 2}" marker-end="url(#tip-f)"/>`; }),
+    `<path class="ln d" d="M${48 + 3 * (fw + fg) + fw / 2} ${fy} V${fy - 28} H${48 + (fw + fg) + fw / 2} V${fy - 2}" marker-end="url(#tip-f)"/>`,
+    pill(48 + 2 * (fw + fg) + fw / 2 - 40, fy - 28, `${NIGHT.sentBack} sent back`),
+    // the coordinator lands what the verifier accepted: a line under the boxes, from the coordinator up into main
+    `<path class="ln d" d="M${48 + fw / 2} ${fy + fh} V${fy + fh + 28} H${48 + 3 * (fw + fg) + 36} V${fy + fh + 2}" marker-end="url(#tip-f)"/>`,
+    pill(48 + 2 * (fw + fg) + fw / 2 - 40, fy + fh + 28, 'lands accepted work'),
+    `<line class="ln" x1="${48 + 3 * (fw + fg) + fw / 2}" y1="${fy + fh}" x2="${48 + 3 * (fw + fg) + fw / 2}" y2="${376}" marker-end="url(#tip-f)"/>`,
+    `<rect class="zone" x="24" y="378" width="${W - 48}" height="166" rx="10"/>`, text(38, 400, 'WHAT LANDED ON MAIN BY MORNING', 'zl'),
+    ...tiles.map(([cls, n, words], i) => { const x = 48 + i * (tw + 12); return `<rect class="${cls}" x="${x}" y="416" width="${tw}" height="62" rx="8"/>${text(x + 14, 443, n, 'n')}${text(x + 14, 462, words, 'm')}`; }),
+    text(48, 502, 'Among the features', 'h sm'),
+    text(48, 524, BUILT.highlights.join('  ·  '), 'm'),
+  ]);
+}
+
+const ICON = {
+  phone: '<rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/>',
+  blueprint: '<path d="M7 3h7l4 4v14H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"/><path d="M14 3v4h4M9 12h6M9 16h4"/>',
+  mcp: '<path d="M9 3v5M15 3v5M6.5 8h11v3.5a5.5 5.5 0 0 1-11 0Z"/><path d="M12 17v4"/>',
+  machines: '<rect x="2.5" y="4" width="12" height="9" rx="1.5"/><path d="M6.5 16.5h4M8.5 13v3.5"/><rect x="15" y="8" width="6.5" height="11" rx="1.5"/><path d="M17.5 16.5h1.5"/>',
+  verified: '<path d="M12 3 5 6v5c0 4.5 3 8 7 10 4-2 7-5.5 7-10V6l-7-3Z"/><path d="m9 12 2 2 4-4"/>',
+  team: '<circle cx="9" cy="8.5" r="3"/><circle cx="17" cy="9.5" r="2.4"/><path d="M3.5 19c.8-3 3-4.6 5.5-4.6s4.7 1.6 5.5 4.6M15.5 14.6c2.2 0 4 1.3 4.8 3.9"/>',
+};
+// Each glyph's drawn middle, top to bottom, in its 24-unit box; the icon centers there on its heading's capitals (13 px, baseline 15 below y).
+const MID = { phone: 12, blueprint: 12, mcp: 12, machines: 11.5, verified: 12, team: 12.25 };
+const ic = (name, x, y) => `<g class="ico" transform="translate(${x} ${(y + 15 - 13 * 0.35 - MID[name] * 0.75).toFixed(2)}) scale(0.75)">${ICON[name]}</g>`;
+
+/** What a board runs in the pinned release: a team, a phone, blueprints, any agent and paired machines. */
+export function drawWhat() {
+  const W = 840, pad = 24, gap = 12, inner = W - pad * 2 - 2 * 16, top = 60;
+  const col = (inner - 2 * gap) / 3, x0 = pad + 16;
+  const bigW = col * 2 + gap, h1 = 84, h2 = 78, y2 = top + 32 + h1 + gap;
+  const small = [
+    { cls: 'you', icon: 'phone', head: 'Your board, on your phone', line: 'Answer what’s waiting, anywhere. Sealed: the relay can’t read it.', lines: ['Answer what’s waiting, anywhere.', 'Sealed: the relay can’t read it.'] },
+    { cls: 'rows', icon: 'blueprint', head: 'Start from a blueprint', line: 'Pick the one for your project, then approve its rules.', lines: ['Pick the one for your project,', 'then approve its rules.'] },
+    { cls: 'bld', icon: 'mcp', head: 'Plug in any agent', line: 'Keep Claude Code or Codex, and add any MCP client.', lines: ['Keep Claude Code or Codex,', 'and add any MCP client.'] },
+    { cls: 'lay', icon: 'machines', head: 'Across your machines', line: 'Pair a machine once. Its agents share your board, in one order.', lines: ['Pair a machine once. Its agents', 'share your board, in one order.'] },
+  ];
+  const wrap = (s, n) => { const words = s.split(' '); const lines = ['']; for (const w of words) { if ((lines.at(-1) + ' ' + w).trim().length > n) lines.push(w); else lines[lines.length - 1] = (lines.at(-1) + ' ' + w).trim(); } return lines; };
+  const tile = (t, x, y, w, h) => `<rect class="${t.cls}" x="${x}" y="${y}" width="${w}" height="${h}" rx="8"/>${ic(t.icon, x + 12, y + 12)}${text(x + 40, y + 27, t.head, 'h')}${(t.lines ?? wrap(t.line, Math.floor((w - 52) / 6.2))).map((l, i) => text(x + 40, y + 46 + i * 15, l, 'm')).join('')}`;
+  const H = y2 + h2 + 16 + pad;
+  return softwareFigure(W, H, 'One board. Every agent. Every machine.', `One board. Every agent. Every machine. All of it is in Pullboard 0.9.0. Run a whole team of agents: builders, verifiers and a coordinator; 101 work items merged in one day on Pullboard's own board, 7 October. ${small.map((t) => `${t.head}: ${t.line}`).join(' ')}`, [
+    text(24, 34, 'One board. Every agent. Every machine.', 'title'),
+    `<rect class="zone" x="${pad}" y="${top - 6}" width="${W - pad * 2}" height="${H - top - pad + 6}" rx="10"/>`, text(pad + 14, top + 16, 'IN PULLBOARD 0.9.0', 'zl'),
+    `<rect class="ver" x="${x0}" y="${top + 32}" width="${bigW}" height="${h1}" rx="8"/>`, ic('team', x0 + 12, top + 44),
+    text(x0 + 40, top + 59, 'Run a whole team of agents', 'h'), text(x0 + 40, top + 78, 'Builders, verifiers and a coordinator.', 'm'),
+    `<text class="m" x="${x0 + 40}" y="${top + 32 + 61}"><tspan class="hl">101</tspan> work items merged in one day · 7 Oct</text>`,
+    // The verifier's accept, as a stamp: LGTM, ship it, from an agent that checked it.
+    ...(() => { const cx = x0 + bigW - 96, cy = top + 32 + 42; return [`<g transform="rotate(-6 ${cx} ${cy})"><rect class="stamp" x="${cx - 64}" y="${cy - 27}" width="128" height="54" rx="7"/><rect class="stamp in" x="${cx - 59}" y="${cy - 22}" width="118" height="44" rx="4"/>${text(cx + 1.7, cy + 4, 'LGTM', 'stw', 'middle')}${text(cx + 1.2, cy + 17, 'SHIP IT', 'sts', 'middle')}</g>`]; })(),
+    tile(small[0], x0 + bigW + gap, top + 32, col, h1),
+    ...small.slice(1).map((t, i) => tile(t, x0 + i * (col + gap), y2, col, h2)),
+  ]);
+}
+
+// Why it's safe to walk away: vibe coding against Pullboard, and what Pullboard's own board shows.
+// 908 submitted, 227 sent back, 588 merged, 0 merged without an accept: pullboard stats --json, 4 to 16 Oct 2026.
+const SB = { submitted: 908, sentBack: 227, merged: 588, unchecked: 0 };
+const ROWS = [
+  ['It said done. It wasn’t.', 'A second agent checks it, at the exact commit'],
+  ['It forgot what you decided', 'Decisions live in your spec'],
+  ['Two agents, one file', 'Each agent works in its own lane'],
+  ['You review every line', 'Only your decisions reach you'],
+];
+/** Where vibe coding breaks, what holds instead, and how often a second agent sends work back. */
+export function drawWhy() {
+  const W = 840, zw = W / 2 - 24 - 6, zr = W / 2 + 6, bw = zw - 32, lx = 40, rx = zr + 16, top = 102, rh = 30, gap = 8;
+  const zoneH = 38 + ROWS.length * (rh + gap) - gap + 16;
+  const by = 72 + zoneH + 12;
+  const H = by + 62 + 24;
+  const X = (x, y) => `<path class="ln" d="M${x} ${y}l8 8M${x + 8} ${y}l-8 8"/>`;
+  const C = (x, y) => `<path class="ln okl" d="M${x} ${y + 4}l3 3 6-7"/>`;
+  return softwareFigure(W, H, 'Where vibe coding breaks, and what holds instead', `Where vibe coding breaks, and what holds instead. Pullboard enforces each fix, so none of it depends on you watching. Vibe coding: ${ROWS.map((r) => r[0]).join('; ')}. With Pullboard: ${ROWS.map((r) => r[1]).join('; ')}. On Pullboard's own board, 4 to 16 October 2026: 1 in 4 times an agent said done, a second agent sent it back (${SB.sentBack} of ${SB.submitted}), and ${SB.merged} merged, ${SB.unchecked} of them without an accept.`, [
+    text(24, 34, 'Where vibe coding breaks, and what holds instead', 'title'),
+    text(24, 54, 'Pullboard enforces each fix, so none of it depends on you watching.', 'sub'),
+    `<rect class="zone" x="24" y="72" width="${zw}" height="${zoneH}" rx="10"/>`, text(38, 94, 'VIBE CODING', 'zl'),
+    `<rect class="zone" x="${zr}" y="72" width="${zw}" height="${zoneH}" rx="10"/>`, text(zr + 14, 94, 'WITH PULLBOARD', 'zl'),
+    ...ROWS.flatMap(([bad, good], i) => {
+      const y = top + 8 + i * (rh + gap);
+      return [
+        `<rect class="plain" x="${lx}" y="${y}" width="${bw}" height="${rh}" rx="8"/>${X(lx + 12, y + 11)}${text(lx + 32, y + 20, bad, 'm')}`,
+        `<rect class="ver" x="${rx}" y="${y}" width="${bw}" height="${rh}" rx="8"/>${C(rx + 12, y + 10)}${text(rx + 32, y + 20, good, 'h sm')}`,
+      ];
+    }),
+    `<rect class="lay" x="24" y="${by}" width="${W - 48}" height="62" rx="10"/>`,
+    text(44, by + 41, '1 in 4', 'nb'),
+    text(150, by + 27, 'times an agent said “done”, a second agent sent it back.', 'h'),
+    text(150, by + 45, `${SB.submitted} submitted · ${SB.sentBack} sent back · ${SB.merged} merged · ${SB.unchecked} merged without an accept · Pullboard’s own board, 4–16 Oct`, 'm'),
+  ]);
+}
+
+
 /** Every figure the README links, by file name under docs/img. */
-export const FIGURES = { loop: drawLoop, lifecycle: drawLifecycle, layout: drawLayout, 'agent-start': drawAgentStart, chain: drawChain, holds: drawHolds };
+export const FIGURES = { loop: drawLoop, lifecycle: drawLifecycle, layout: drawLayout, 'agent-start': drawAgentStart, chain: drawChain, holds: drawHolds, factory: drawFactory, what: drawWhat, why: drawWhy };
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   for (const [name, draw] of Object.entries(FIGURES)) {

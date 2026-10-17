@@ -10,10 +10,10 @@
  */
 
 /** Executable move semantics, carried by every sealed move and retained during replay [H16]. */
-export const ENGINE_VERSION = 15;
+export const ENGINE_VERSION = 20;
 
 /** First released engine binding the checked composition, review trunk and paths [E8,H16]. */
-export const VERDICT_REVIEW_ENGINE = 15;
+export const VERDICT_REVIEW_ENGINE = 20;
 
 
 /** @typedef {'agent' | 'coordinator' | 'clock'} Role */
