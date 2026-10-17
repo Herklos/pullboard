@@ -21,9 +21,9 @@ export const MCP_CHANNEL = 'mcp';
 
 /**
  * Tool names that read as a person's own move: approving or declining rows, answering a decision,
- * signing off. Matched anywhere in the normalized name, so a client cannot reach one by renaming it.
+ * signing off, accepting a check that already passes on main. Matched anywhere in the normalized name, so a client cannot reach one by renaming it.
  */
-const PERSON_MOVE = /approv|declin|answer|sign_?off|decide|decision/u;
+const PERSON_MOVE = /approv|declin|answer|sign_?off|decide|decision|check_?accept/u;
 
 /** The tools this server offers: name, what it does, and its exact input schema. */
 export const MCP_TOOLS = Object.freeze([
@@ -109,7 +109,7 @@ function normalizedToolName(name) {
  */
 export function refusePersonMove(name) {
   if (!PERSON_MOVE.test(normalizedToolName(name))) return;
-  throw new Refused('HUMAN_REQUIRED', `${name} is a person's move; approving or declining rows, answering decisions and signing off come only from the person, never through MCP; ask your coordinator to bring it to the person, with the shout tool or pullboard shout coordinator --decision`);
+  throw new Refused('HUMAN_REQUIRED', `${name} is a person's move; approving or declining rows, answering decisions, accepting checks and signing off come only from the person, never through MCP; ask your coordinator to bring it to the person, with the shout tool or pullboard shout coordinator --decision`);
 }
 
 /**

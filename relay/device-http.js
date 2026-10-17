@@ -104,6 +104,7 @@ export function createDeviceHandler({ authenticate, authorizeBoard, boardsFor, d
           }
           devicePublicKey(body.publicKey);
           devices.enroll(account, locator, body);
+          devices.bindSession(who, body.deviceId, { enrollment: true });
         } else if (req.method === 'DELETE') devices.consume(account, locator);
         else throw new Refused('NO_ENDPOINT', 'Use the supported device enrollment action.');
         apiJson(res, 200, { recorded: true }); return true;
@@ -113,6 +114,8 @@ export function createDeviceHandler({ authenticate, authorizeBoard, boardsFor, d
       const [, id, board] = route;
       if (url.pathname.endsWith('/boards') && req.method === 'GET') {
         const visible = new Set((await boardsFor(req)).map(value => value.id));
+        // This also binds previously paired browsers that predate session enrollment tracking.
+        devices.bindSession(who, id);
         apiJson(res, 200, { wraps: devices.wraps(account, id).filter(value => visible.has(value.board)) }); return true;
       }
       if (board && req.method === 'PUT') {
