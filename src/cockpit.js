@@ -4,6 +4,7 @@ import {
   MACHINE,
 } from './machine.js';
 import { commandPhrases } from './help.js';
+import { personNeeds } from './needs.js';
 
 /** The CLI's default phrases, ordered by depth for the existing prose inventory guard. */
 export const PULLBOARD_COMMANDS = Object.freeze(commandPhrases().sort((left, right) => right.split(' ').length - left.split(' ').length));
@@ -40,10 +41,10 @@ function lifecycle() {
  * The Roadmap tab has its own address (N38): /roadmap on a host that serves the page there too,
  * which `paths` declares, and a #roadmap fragment anywhere else, such as a snapshot hosted under a
  * folder, where a path the host does not serve would leave a reload with nothing.
- * The hosted page at https://app.pullboard.dev passes hostedLocal (N26, #513): on the machine that runs pullboard
- * view, the page reads that view straight, writable, and the relay transport is never loaded; on any other device it
- * is the relay page as before when relaySession says the request has a relay session, and otherwise it says why it
- * cannot read a board here and links signIn.
+ * The hosted page at https://app.pullboard.dev passes hostedLocal (N26, #513): on this machine it reads the local view
+ * and any linked relay boards through their own transports; local boards are writable, relay boards remain read-only.
+ * On another device it uses the relay when relaySession says the request has a session, and otherwise explains how to
+ * connect or sign in.
  *
  * @param {string} [key] - The session's secret.
  * @param {{snapshot?: boolean, readOnly?: boolean, requests?: boolean, transportModule?: string|null, apiBase?: string, apiHeaders?: Record<string, string>, stylesheet?: string, paths?: boolean, hostedLocal?: boolean, relaySession?: boolean, signIn?: string|null}} [options] - Served connection and assets, optional person requests over a read-only transport, host routes, a static page with event replay, or the hosted page that reads this machine's view first.
@@ -190,10 +191,21 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
 const snapshot = ${JSON.stringify(snapshot)};
 let readOnly = ${JSON.stringify(readOnly)};
 let requests = ${JSON.stringify(requestMode)};
-let transportModule = ${moduleOption};
+const pageReadOnly = ${JSON.stringify(readOnly)};
+const pageRequests = ${JSON.stringify(requestMode)};
+const relayRequestsEnabled = requests;
+const configuredTransportModule = ${moduleOption};
+let transportModule = configuredTransportModule;
 const connection = ${connection};
 let transport = null;
 let transportLoadError = null;
+// Hosted pages can read two independent authorities at once. Local boards use the view's API; relay boards
+// retain the relay client's device-only decryption and event stream. The board id, never a mutable global mode,
+// selects the authority for each request.
+const boardSources = new Map();
+const localBoardIds = new Set();
+let localReadBase = connection.base;
+let localReadHeaders = { ...connection.headers };
 // The hosted page (N26, #513): at https://app.pullboard.dev, on the machine that runs pullboard view, the page reads
 // that view straight instead of the relay. The view hands it the session's secret by a round trip that ends back here
 // with the secret in the address's fragment, which no request carries; the page takes it out of the address before
@@ -362,10 +374,10 @@ async function connectLocal() {
   if (!localSession) return localTrip(base) ? 'away' : 'unreachable';
   connection.base = localSession.origin;
   connection.headers = { 'x-pullboard-key': localSession.key };
+  localReadBase = connection.base;
+  localReadHeaders = { ...connection.headers };
   readOnly = false;
   requests = false;
-  transportModule = null;
-  transport = null;
   document.body.classList.remove('read-only', 'requests');
   hideRelayNotice();
   localNote(null);
@@ -599,14 +611,11 @@ const count = (n, one, many = one) => n + ' ' + (n === 1 ? one : many);
 // and the line under the project says so without counting it.
 const needCount = (x) => x.ok && !x.loading ? x.decisions + x.pending + x.drafts + x.holds : 0;
 const doing = (x) => [x.decisions && count(x.decisions, 'decision', 'decisions'), x.pending && count(x.pending, 'question', 'questions'), x.drafts && count(x.drafts, 'draft row', 'draft rows'), x.holds && count(x.holds, 'lane held', 'lanes held'), x.sentBack && count(x.sentBack, 'sent back'), x.awaiting && count(x.awaiting, 'to verify'), x.building && count(x.building, 'building')].filter(Boolean).join(' · ') || (x.open ? count(x.open, 'item open', 'items open') : 'nothing open');
-/** The person's calls in one repo, as its Needs-you panel shows them, reused by a combined project view. */
+// Embed the standalone shared builder for live, exported and relay pages.
+const personNeeds = (${personNeeds.toString()});
+/** The person's calls in one repo, reused by a combined project view. */
 function projectNeeds(p) {
-  return [
-    ...p.decisions.map((d) => ({ ref: agentName(d.shout_from, p), text: d.shout_text, what: 'decision', at: d.shout_at })),
-    ...p.spec.filter((row) => row.status === 'pending' && !row.decision).map((row) => ({ ref: row.id, text: row.text, what: 'answer in SPEC.md' })),
-    ...p.holds.map((hold) => ({ ref: hold.hold_lane, text: hold.hold_reason, what: 'lane held by ' + agentName(hold.hold_by, p) })),
-    ...(p.spec.some((row) => row.status === 'draft' && !row.decision) ? [{ ref: String(p.spec.filter((row) => row.status === 'draft' && !row.decision).length), text: 'draft spec rows to approve or drop', what: 'review in SPEC.md', target: 'tab:spec' }] : []),
-  ];
+  return personNeeds(p);
 }
 // The item lifecycle as pullboard declares it in src/machine.js, embedded when the page is served.
 const FLOW = ${JSON.stringify(lifecycle()).replaceAll('<', '\\u003c')};
@@ -910,16 +919,37 @@ function flowSvg(p) {
 
 /** Read or move through API v1, retaining the rule and repair guidance in a refusal. */
 async function api(path, body) {
-  if (body && (snapshot || readOnly)) throw new Error(snapshot ? 'This is a read-only snapshot.' : 'This is a read-only view.');
-  if (transportModule) {
-    if (transport) return transport.request(path, body);
-    if (transportLoadError) throw transportLoadError;
-    throw new Error('The browser transport is still loading.');
+  path = snapshot ? path.split('?')[0].slice(1) + '.json' : path;
+  if (snapshot) {
+    if (body !== undefined && body !== null) throw new Error('This is a read-only snapshot.');
+    return jsonRequest(path, undefined, '', {});
   }
-  path = snapshot ? path.split('?')[0].slice(1) + '.json' : connection.base + path;
-  const res = await fetch(path, { method: body ? 'POST' : 'GET', headers: snapshot ? {} : { ...connection.headers, ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
+  if (path === '/api/v1/boards') return await listedBoards();
+  const boardId = /^\\/api\\/v1\\/boards\\/([0-9a-f]{32})(?:\\/|$)/u.exec(path)?.[1];
+  const source = boardId ? boardSources.get(boardId) : null;
+  if (boardId && !source) throw new Error(transport
+    ? 'Pair this browser to read that board, or refresh the board list if the board is local.'
+    : 'This board is not available in the current view. Refresh the board list and retry.');
+  if (boardId && source?.kind === 'relay') {
+    if (body !== undefined && body !== null) throw new Error('This is a read-only view of relay boards.');
+    if (!transport) throw transportLoadError || new Error('The relay transport is still loading.');
+    const reply = await transport.request(path, body);
+    if (path.includes('/state') && reply.state) return { ...reply, state: { ...reply.state, root: source.board.root } };
+    return reply;
+  }
+  if (body && (hosted.local ? readOnly && source?.kind !== 'local' : pageReadOnly)) throw new Error('This is a read-only view.');
+  const base = source?.kind === 'local' ? localReadBase : connection.base;
+  const headers = source?.kind === 'local' ? localReadHeaders : connection.headers;
+  return jsonRequest(path, body, base, headers);
+}
+
+/** Use one JSON request primitive, capturing its local route and session before awaiting a reply. */
+async function jsonRequest(path, body, base, headers, cache) {
+  const session = localSession;
+  path = base + path;
+  const res = await fetch(path, { method: body ? 'POST' : 'GET', headers: { ...headers, ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined, cache });
   const json = await res.json();
-  if (localSession && connection.base === localSession.origin && !snapshot) {
+  if (session && session === localSession && base === session.origin) {
     if (res.status === 401 || res.status === 403) localExpired();
     else if (res.ok && !localConfirmed) { localConfirmed = true; tabValue(LOCAL_TRIPS, null); }
   }
@@ -931,9 +961,80 @@ async function api(path, body) {
   return json;
 }
 
+/** Read this machine's API list and the signed-in relay list, preferring a local registration with the same id. */
+async function listedBoards() {
+  let local = { boards: [], warnings: [] };
+  let relay = { boards: [], warnings: [] };
+  const hasLocal = hosted.local ? Boolean(localReadBase) && Boolean(localSession) : transportModule === null;
+  if (hasLocal) {
+    try {
+      local = await jsonRequest('/api/v1/boards', undefined, localReadBase, localReadHeaders, 'no-store');
+    } catch (error) {
+      if (!transport && hosted.relaySession && configuredTransportModule) {
+        try { await loadTransport(); } catch { /* Keep the local refusal when neither source can be read. */ }
+      }
+      if (!transport) throw error;
+      localNote(String(error.message || error), true);
+    }
+  }
+  if (hosted.local && hasLocal && hosted.relaySession && configuredTransportModule && !transport) {
+    try {
+      // Metadata is a same-origin cookie-authenticated read, with none of this machine's local credential.
+      // Loading the decrypting client is needed only for a linked board absent from the local list.
+      const linked = await jsonRequest('/api/v1/boards', undefined, '', {}, 'no-store');
+      const localIds = new Set((local.boards || []).map(board => board.id));
+      if (linked.boards?.some(board => typeof board.id === 'string' && /^[0-9a-f]{32}$/.test(board.id) && typeof board.repository === 'string' && !localIds.has(board.id))) await loadTransport();
+    } catch (error) { localNote('Linked boards are unavailable: ' + String(error.message || error), true); }
+  }
+  if (!hasLocal && transportModule && !transport) throw transportLoadError || new Error('The browser transport is still loading.');
+  if (transport) {
+    try { relay = await transport.request('/api/v1/boards'); }
+    catch (error) {
+      if (!hosted.local || !hasLocal) throw error;
+      localNote('Linked boards are unavailable: ' + String(error.message || error), true);
+    }
+  }
+  boardSources.clear();
+  localBoardIds.clear();
+  const boards = [];
+  for (const board of local.boards || []) {
+    if (typeof board.id !== 'string') continue;
+    const row = { ...board, source: 'local' };
+    boardSources.set(row.id, { kind: 'local', board: row });
+    localBoardIds.add(row.id);
+    boards.push(row);
+  }
+  for (const board of relay.boards || []) {
+    if (typeof board.id !== 'string' || boardSources.has(board.id)) continue;
+    const row = { ...board, root: board.id, source: 'relay' };
+    boardSources.set(row.id, { kind: 'relay', board: row });
+    boards.push(row);
+  }
+  return { version: 1, boards, warnings: [...(local.warnings || []), ...(relay.warnings || [])] };
+}
+
+/** Set presentation controls for the selected board; API routing still checks the target board independently. */
+function syncBoardMode(root) {
+  if (snapshot) return;
+  const board = data?.projects.find((entry) => entry.root === root && entry.ok);
+  const source = board && boardSources.get(board.id);
+  const relay = source?.kind === 'relay';
+  readOnly = hosted.local ? relay || (transportModule !== null && !source) : pageReadOnly;
+  requests = hosted.local ? Boolean(relay && relayRequestsEnabled) : pageRequests;
+  document.body.classList.toggle('read-only', readOnly);
+  document.body.classList.toggle('requests', requests);
+}
+
+/** Whether a selected project is backed by the read-only relay transport. */
+function relayProject(root = view.root) {
+  const board = data?.projects.find((entry) => entry.root === root && entry.ok);
+  return boardSources.get(board?.id)?.kind === 'relay';
+}
+
 /** Send only literal person intent; the transport seals it and generic API writes stay refused. */
 async function sendPersonRequest(root, move) {
   if (!requests || snapshot || !readOnly) throw new Error('This view cannot send person requests.');
+  if (!relayProject(root)) throw new Error('Person requests through the relay require a linked relay board.');
   if (!['add', 'shout', 'answer', 'hold', 'spec-approve', 'spec-decline'].includes(move.verb)) throw new Error('Choose a person action from the view controls.');
   if (!transport) throw transportLoadError || new Error('The browser transport is still loading.');
   return transport.request(boardPath(root) + '/moves', move);
@@ -987,6 +1088,9 @@ function renderPersonRequests(project) {
 
 /** A board's sidebar counts, derived from the same API state the page displays. */
 function boardSummary(board, state) {
+  const needs = personNeeds(state);
+  /** Count the calls, with draft rows retaining their individual count in the sidebar. */
+  const calls = (kind) => needs.filter((row) => row.kind === kind).reduce((total, row) => total + (row.count ?? 1), 0);
   /** Count one item state for the sidebar. */
   const count = (test) => state.items.filter(test).length;
   return {
@@ -996,10 +1100,10 @@ function boardSummary(board, state) {
     sentBack: count((item) => item.status === 'open' && item.verdict && item.verdict.decision === 'REJECT'),
     open: count((item) => item.status === 'open'),
     verified: count((item) => item.status === 'verified'),
-    pending: state.spec.filter((row) => row.status === 'pending' && !row.decision).length,
-    drafts: state.spec.filter((row) => row.status === 'draft' && !row.decision).length,
-    holds: state.holds.length,
-    decisions: state.decisions.length,
+    pending: calls('pending'),
+    drafts: calls('draft'),
+    holds: calls('hold'),
+    decisions: calls('decision'),
     // What each item's state reads from, so another repo's roadmap can show it as this board's
     // Items tab does, sent back included, and open it here.
     items: state.items.map((item) => ({ id: item.id, title: item.title, status: item.status, merged: Boolean(item.merged), verdict: item.verdict && { decision: item.verdict.decision } })),
@@ -1144,7 +1248,7 @@ const credentials = new Map();
 /** Draw only allowlisted credential metadata; bearer values never enter page state or markup. */
 function renderCredentials() {
   const region = $('credentials');
-  region.hidden = snapshot || readOnly || Boolean(transportModule);
+  region.hidden = snapshot || readOnly;
   if (region.hidden) { region.innerHTML = ''; return; }
   const state = credentials.get(view.root);
   /** Render an inventory timestamp without shortening its date or timezone. */
@@ -1158,7 +1262,7 @@ function renderCredentials() {
 
 /** Load this board's public metadata on demand, without granting any person authority. */
 async function loadCredentials(root = view.root) {
-  if (snapshot || readOnly || transportModule) return;
+  if (snapshot || relayProject(root) || (!hosted.local && pageReadOnly)) return;
   const state = credentials.get(root) || { tokens: [], message: '', busy: false };
   credentials.set(root, state);
   state.message = 'Loading agent credentials…';
@@ -1173,7 +1277,7 @@ async function loadCredentials(root = view.root) {
 
 /** Revoke a listed id through the existing one-tap phone grant, then reread its public metadata. */
 async function revokeCredential(id) {
-  if (snapshot || readOnly || transportModule) return;
+  if (snapshot || relayProject(view.root) || (!hosted.local && pageReadOnly)) return;
   const root = view.root, state = credentials.get(root);
   if (!state || state.busy || !state.tokens.some((row) => row.id === id && !row.revoked)) return;
   state.busy = true;
@@ -1232,6 +1336,7 @@ async function refresh(fresh = null) {
   if (text !== seen) {
     seen = text;
     data = next;
+    syncBoardMode(view.root);
     render();
   }
   if (changed) {
@@ -1244,7 +1349,7 @@ async function refresh(fresh = null) {
     snapshotReplay.index = snapshotReplay.events.length;
     replayControls();
   }
-  if (!snapshot && !transportModule) follow();
+  if (!snapshot) follow();
   $('live').textContent = snapshot ? 'read-only snapshot' : liveLine();
 }
 
@@ -1297,7 +1402,7 @@ function follow() {
   const repos = data.group ? data.group.repos.map((repo) => [repo.root, repo.board]) : data.project ? [[view.root, data.project]] : [];
   const boards = repos.flatMap(([root, state]) => {
     const board = data.projects.find((entry) => entry.root === root && entry.ok);
-    return board ? [{ root, id: board.id, shown: latestEvent(state) }] : [];
+    return board && localBoardIds.has(board.id) ? [{ root, id: board.id, shown: latestEvent(state) }] : [];
   });
   const key = boards.map((board) => board.id).join(',');
   // A board's events after the latest one this page shows are what changed it since.
@@ -1369,16 +1474,16 @@ async function listen(entry) {
   entry.controller = controller;
   try {
     if (!controller) throw new Error('this browser cannot read a stream');
-    // The stream goes where every API read goes: the serving host's base, with its credential headers. One board has
-    // its own events; a group's repos share one multiplexed stream (#600).
+    // Local board streams use the local view's base and credential, separate from the relay client's own streams.
+    // One board has its own events; a group's local repos share one multiplexed stream (#600).
     const single = entry.boards.length === 1;
-    const path = connection.base + (single ? '/api/v1/boards/' + encodeURIComponent(entry.boards[0].id) + '/events'
+    const path = localReadBase + (single ? '/api/v1/boards/' + encodeURIComponent(entry.boards[0].id) + '/events'
       : '/api/v1/events?boards=' + entry.boards.map((board) => encodeURIComponent(board.id)).join(','));
     const res = await fetch(path, {
-      headers: { ...connection.headers, accept: 'text/event-stream', 'last-event-id': entry.cursor }, cache: 'no-store', signal: controller.signal,
+      headers: { ...localReadHeaders, accept: 'text/event-stream', 'last-event-id': entry.cursor }, cache: 'no-store', signal: controller.signal,
     });
     // This machine's view refused the hosted page's secret, as after a restart with a new one: go round again (#513).
-    if ((res.status === 401 || res.status === 403) && localSession && connection.base === localSession.origin) { localExpired(); return; }
+    if ((res.status === 401 || res.status === 403) && localSession && localReadBase === localSession.origin) { localExpired(); return; }
     if (!res.ok || !res.body) throw new Error('the board stream answered ' + res.status);
     entry.status = 'up';
     entry.offline = false;
@@ -1992,12 +2097,13 @@ function render() {
   // What needs the person, first, and only the person's calls (B26): the decisions passed up to them,
   // questions in the spec, held lanes, then draft rows. Work waiting for a verdict or sent back shows
   // on the board with who holds it; it is the agents' to move.
-  const needs = [
-    ...p.decisions.map((d) => ['decide:' + d.shout_id, agentName(d.shout_from, p), d.shout_text, 'decide', d.shout_at]),
-    ...p.spec.filter((r) => r.status === 'pending' && !r.decision).map((r) => ['spec:' + r.id, r.id, r.text, 'answer in SPEC.md']),
-    ...p.holds.map((h) => ['tab:shouts', h.hold_lane, h.hold_reason, 'lane held by ' + agentName(h.hold_by), h.hold_at]),
-  ];
-  const drafts = p.spec.filter((r) => r.status === 'draft' && !r.decision).length;
+  const personalNeeds = personNeeds(p);
+  // Adapt display targets and the existing hold age without reimplementing which calls belong here.
+  const needs = personalNeeds.filter((row) => row.kind !== 'draft').map((row) => row.kind === 'decision'
+    ? ['decide:' + row.id, row.ref, row.text, 'decide', row.at]
+    : row.kind === 'pending' ? ['spec:' + row.id, row.ref, row.text, row.what]
+      : ['tab:shouts', row.ref, row.text, row.what, p.holds.find((hold) => hold.hold_lane === row.id)?.hold_at]);
+  const drafts = personalNeeds.find((row) => row.kind === 'draft')?.count ?? 0;
   // Each of the person's calls is a row at the head of Active, shaped like an item: what it is first, then NEEDS YOU and
   // its kind where an item has its lane, and what to do at the right. Every call is a row; the draft rows are one row
   // with their count. Read-only, a row is its words, opening nothing.
@@ -2454,7 +2560,7 @@ async function loadAddressedShout() {
     entry.shout = reply.shout;
   } catch (error) {
     const message = String(error.message || error);
-    entry.error = transportModule && !message.includes('NO_SHOUT')
+    entry.error = relayProject(root) && !message.includes('NO_SHOUT')
       ? 'This shout is older than the relay holds. Open its address in the local project view.'
       : 'No shout #' + id + ' exists here. ' + message;
   }
@@ -2675,7 +2781,7 @@ async function code(ref, before) {
     render();
     return;
   }
-  if (transportModule) {
+  if (relayProject(view.root)) {
     c.error = 'Source code is unavailable in a relay view; open this reference in the local project view.';
     render();
     return;
@@ -2695,7 +2801,7 @@ async function showAllCode(ref, before) {
   const c = view.code[root + '\\n' + before + '\\n' + ref];
   const parts = codeReferenceParts(ref);
   if (!c || c.allLoading) return;
-  if (transportModule) { c.error = 'Source code is unavailable in a relay view; open this reference in the local project view.'; render(); return; }
+  if (relayProject(root)) { c.error = 'Source code is unavailable in a relay view; open this reference in the local project view.'; render(); return; }
   if (!parts) { c.error = 'Code reference has an invalid path, range or commit SHA.'; render(); return; }
   c.error = null;
   c.allLoading = true;
@@ -2869,6 +2975,7 @@ function trapFocus(event) {
  */
 async function decideRow(kind, command, args, anchor) {
   if (snapshot || (readOnly && !requests)) return false;
+  const requestMode = requests;
   const root = view.root, scroll = window.scrollY;
   const ids = String(args.ids).split(/\s+/);
   const prefix = kind + ':';
@@ -2879,15 +2986,15 @@ async function decideRow(kind, command, args, anchor) {
   view.specFeedback = feedback;
   render();
   // A waiting request keeps its row; let browser anchoring follow growth above it.
-  if (!requests) window.scrollTo({ top: scroll, behavior: 'instant' });
+  if (!requestMode) window.scrollTo({ top: scroll, behavior: 'instant' });
   try {
     const move = pageMove(command, kind === 'doctrine' ? { ...args, ids: ids.map((id) => 'doctrine:' + id).join(' ') } : args);
-    const result = requests ? await sendPersonRequest(root, move.body) : await api(boardPath(root) + '/moves', move.body);
-    const request = requests && result?.result?.request;
-    if (requests && (!request?.id || !['waiting', 'done', 'refused'].includes(request.status))) throw new Error('The request did not include its status; refresh the board to check it.');
-    feedback.tone = requests ? request.status === 'done' ? 'ok' : request.status === 'refused' ? 'no' : '' : 'ok';
-    feedback.text = requests ? requestNotice(request) : moveMessage(move.body, result.result);
-    if (requests) { feedback.requestId = request.id; feedback.status = request.status; }
+    const result = requestMode ? await sendPersonRequest(root, move.body) : await api(boardPath(root) + '/moves', move.body);
+    const request = requestMode && result?.result?.request;
+    if (requestMode && (!request?.id || !['waiting', 'done', 'refused'].includes(request.status))) throw new Error('The request did not include its status; refresh the board to check it.');
+    feedback.tone = requestMode ? request.status === 'done' ? 'ok' : request.status === 'refused' ? 'no' : '' : 'ok';
+    feedback.text = requestMode ? requestNotice(request) : moveMessage(move.body, result.result);
+    if (requestMode) { feedback.requestId = request.id; feedback.status = request.status; }
     // Decided from the list, the pick moves on to the next row before the board redraws without the decided one, so
     // the next key decides that one.
     if (feedback.from === 'list' && feedback.tone !== 'no' && next && view.row[kind] === ids[0] && root === view.root) view.row[kind] = next;
@@ -2898,7 +3005,7 @@ async function decideRow(kind, command, args, anchor) {
   }
   if (root === view.root && view.specFeedback === feedback) {
     render();
-    if (!requests) window.scrollTo({ top: scroll, behavior: 'instant' });
+    if (!requestMode) window.scrollTo({ top: scroll, behavior: 'instant' });
     // A phone row click jumps to its detail. A later list-key decision returns the next pick to view,
     // instead of restoring that detail's scroll position with the focused list still offscreen.
     if (feedback.from === 'list' && feedback.tone === 'ok' && next && view.row[kind] === next) {
@@ -2907,15 +3014,16 @@ async function decideRow(kind, command, args, anchor) {
       // Center an offscreen pick: nearest can round a half-pixel edge just outside the viewport.
       if (rect && (rect.top < 0 || rect.bottom > innerHeight)) picked.scrollIntoView({ block: 'center', behavior: 'instant' });
     }
-    if (!requests || feedback.status === 'done') setTimeout(() => { if (view.specFeedback === feedback) { view.specFeedback = null; render(); } }, 6000);
+    if (!requestMode || feedback.status === 'done') setTimeout(() => { if (view.specFeedback === feedback) { view.specFeedback = null; render(); } }, 6000);
   }
-  return requests ? Boolean(feedback.requestId) && feedback.status !== 'refused' : feedback.tone === 'ok';
+  return requestMode ? Boolean(feedback.requestId) && feedback.status !== 'refused' : feedback.tone === 'ok';
 }
 
 /** Run a public API move beside its action and let only the latest one own the console and timer. */
 async function act(command, args, anchor) {
   const out = $('console');
   if (snapshot || (readOnly && !requests)) { out.hidden = false; out.className = 'console no'; out.textContent = snapshot ? 'This is a read-only snapshot.' : 'This is a read-only view.'; return false; }
+  const requestMode = requests;
   // A form's result stands above its actions, or above the shout composer's bar, never inside that one row.
   if (anchor) {
     const target = anchor.matches('form')
@@ -2930,28 +3038,28 @@ async function act(command, args, anchor) {
   clearTimeout(view.closing);
   out.hidden = false;
   out.className = 'console';
-  out.textContent = requests ? 'Request waiting…' : 'running…';
+  out.textContent = requestMode ? 'Request waiting…' : 'running…';
   out.scrollIntoView({ block: 'nearest' });
   try {
     // On the local view the person's word to the coordinator is the person's own request, not a shout the
     // coordinator sends itself; through the relay every action is already a sealed request.
-    const asked = command === 'request' && !requests;
+    const asked = command === 'request' && !requestMode;
     const move = asked ? null : pageMove(command === 'request' ? 'shout' : command, command === 'request' ? { to: 'coordinator', text: args.text } : args);
     const result = asked ? await api(boardPath(root) + '/requests', { text: String(args.text || '').trim() })
-      : requests ? await sendPersonRequest(root, move.body) : await api(boardPath(root) + '/moves', move.body);
-    const request = requests && result?.result?.request;
-    if (requests && (!request?.id || !['waiting', 'done', 'refused'].includes(request.status))) throw new Error('The request did not include its status; refresh the board to check it.');
+      : requestMode ? await sendPersonRequest(root, move.body) : await api(boardPath(root) + '/moves', move.body);
+    const request = requestMode && result?.result?.request;
+    if (requestMode && (!request?.id || !['waiting', 'done', 'refused'].includes(request.status))) throw new Error('The request did not include its status; refresh the board to check it.');
     if (latest()) {
-      out.className = 'console' + (requests ? request.status === 'done' ? ' ok' : request.status === 'refused' ? ' no' : '' : ' ok');
-      out.textContent = requests ? requestNotice(request) : asked ? 'Sent to the coordinator.' : '$ pullboard ' + move.label + '\\n' + moveMessage(move.body, result.result);
-      if (requests) view.request = { root, id: request.id, run };
+      out.className = 'console' + (requestMode ? request.status === 'done' ? ' ok' : request.status === 'refused' ? ' no' : '' : ' ok');
+      out.textContent = requestMode ? requestNotice(request) : asked ? 'Sent to the coordinator.' : '$ pullboard ' + move.label + '\\n' + moveMessage(move.body, result.result);
+      if (requestMode) view.request = { root, id: request.id, run };
       out.scrollIntoView({ block: 'center' });
       // What went through says so and then steps aside; a refusal stays until the person closes it.
-      if (!requests || request.status === 'done') view.closing = setTimeout(() => { if (latest()) out.hidden = true; }, 6000);
+      if (!requestMode || request.status === 'done') view.closing = setTimeout(() => { if (latest()) out.hidden = true; }, 6000);
     }
     await refresh();
     // The result was already revealed. A late refresh must not scroll after the person aims at the next action.
-    return !requests || request.status !== 'refused';
+    return !requestMode || request.status !== 'refused';
   } catch (error) {
     if (latest()) {
       out.className = 'console no';
@@ -2997,6 +3105,7 @@ function switchTo(root, target = null, record = true) {
   const generation = ++switchGeneration;
   answer(null);
   view.root = root;
+  syncBoardMode(root);
   const item = typeof target === 'number' ? target : /^item:(\\d+)$/.exec(target || '');
   const requestedItem = typeof item === 'number' ? item : item ? Number(item[1]) : null;
   view.item = requestedItem;
@@ -3253,7 +3362,12 @@ document.addEventListener('keydown', (event) => {
 });
 $('add-form').addEventListener('submit', async (event) => {
   event.preventDefault();
-  if (await act('add', { lane: $('add-lane').value, title: $('add-title').value, criterion: $('add-criterion').value, specs: $('add-specs').value, brief: $('add-brief').value }, event.currentTarget)) {
+  const root = view.root;
+  const submitted = { lane: $('add-lane').value, title: $('add-title').value, criterion: $('add-criterion').value, specs: $('add-specs').value, brief: $('add-brief').value };
+  if (await act('add', submitted, event.currentTarget) && view.root === root
+      && $('add-lane').value === submitted.lane && $('add-title').value === submitted.title
+      && $('add-criterion').value === submitted.criterion && $('add-specs').value === submitted.specs
+      && $('add-brief').value === submitted.brief) {
     $('add-title').value = '';
     $('add-criterion').value = '';
     $('add-specs').value = '';
@@ -3278,7 +3392,10 @@ $('shout-form').addEventListener('submit', async (event) => {
 });
 $('hold-form').addEventListener('submit', async (event) => {
   event.preventDefault();
-  if (await act('hold', { lane: $('hold-lane').value, reason: $('hold-reason').value }, event.currentTarget)) $('hold-reason').value = '';
+  const root = view.root;
+  const submitted = { lane: $('hold-lane').value, reason: $('hold-reason').value };
+  if (await act('hold', submitted, event.currentTarget) && view.root === root
+      && $('hold-lane').value === submitted.lane && $('hold-reason').value === submitted.reason) $('hold-reason').value = '';
 });
 // The first entry keeps the tab it opened on; Back and Forward show what each entry names.
 address(false);
@@ -3294,41 +3411,47 @@ if (snapshot) {
 if (hosted.local) $('local-note-retry').addEventListener('click', () => {
   localProblem = null;
   tabValue(LOCAL_TRIPS, null);
-  // A page already on the relay starts again instead, so it never holds the relay's streams and the view's at once.
+  // Reload both source-scoped connections together when relay streams are already active.
   if (transport) { location.reload(); return; }
   connectLocal().then((local) => local === 'local' ? refresh() : null).catch((error) => localNote(error.message, true));
 });
-/** Load an explicitly configured transport before the first read; its updates refresh this page. */
+/** Load the configured decrypting transport once, only when relay reads or pairing need it. */
+let transportLoading = null;
+async function loadTransport() {
+  if (transport) return transport;
+  if (!transportLoading) transportLoading = (async () => {
+    const module = await import(configuredTransportModule);
+    if (typeof module.createTransport !== 'function') throw new Error('The browser transport must export createTransport({ onUpdate }).');
+    const configured = await module.createTransport({ onUpdate: () => transport ? refresh().catch((error) => { $('live').textContent = 'offline: ' + error.message; }) : Promise.resolve() });
+    if (!configured || typeof configured.request !== 'function') throw new Error('The browser transport must provide request(path, body).');
+    transportModule = configuredTransportModule;
+    transport = configured;
+    return transport;
+  })();
+  try { return await transportLoading; }
+  catch (error) { transportLoadError = error; throw error; }
+  finally { transportLoading = null; }
+}
+
+/** Read local boards first; relay-only pages and pairing still load their configured client directly. */
 async function startPage() {
-  // The hosted page reads this machine's view when it can. When it cannot, it is the relay page as before, for a
-  // person signed in to the relay; anyone else sees why, and the ways on.
+  let local = 'unreachable';
   if (hosted.local && !relayPairing) {
-    let local = 'unreachable';
     if (localProblem) localNote(localProblem, true);
     else local = await connectLocal();
     if (local === 'away') return;
     if (local === 'unreachable' && !hosted.relaySession) { hideRelayNotice(); return; }
   }
-  if (transportModule) {
-    try {
-      const module = await import(transportModule);
-      if (typeof module.createTransport !== 'function') throw new Error('The browser transport must export createTransport({ onUpdate }).');
-      const configured = await module.createTransport({ onUpdate: () => transport ? refresh().catch((error) => { $('live').textContent = 'offline: ' + error.message; }) : Promise.resolve() });
-      if (!configured || typeof configured.request !== 'function') throw new Error('The browser transport must provide request(path, body).');
-      transport = configured;
-    } catch (error) {
-      transportLoadError = error;
-      throw error;
-    }
-  }
+  if (hosted.local && local === 'local') transportModule = null;
+  else if (configuredTransportModule) await loadTransport();
   await refresh();
 }
 startPage().catch((error) => { document.body.classList.remove('loading'); $('live').textContent = 'cannot reach the view: ' + error.message; });
 // The relay transport keeps its own stream and timer. The local view reads on a timer only while it has no live
 // stream, and its live line says so (#545). Each timer asks which the page uses as it fires: the hosted page starts
 // out on the relay and turns to this machine's view once it reaches it (#513).
-if (!snapshot) setInterval(() => { if (!document.hidden && transportModule && transport) refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }); }, 3000);
-if (!snapshot) setInterval(() => { if (!document.hidden && !transportModule && !connected()) refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }); }, FALLBACK_MS);
+if (!snapshot) setInterval(() => { if (!document.hidden && (transport || (hosted.local && hosted.relaySession && configuredTransportModule))) refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }); }, 3000);
+if (!snapshot) setInterval(() => { if (!document.hidden && !transport && !(hosted.local && hosted.relaySession && configuredTransportModule) && !connected()) refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }); }, FALLBACK_MS);
 setInterval(tickAges, 60000);
 </script>
 </body>
