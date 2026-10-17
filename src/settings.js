@@ -97,7 +97,7 @@ function writeMachineSettings(settings) {
   } finally { rmSync(temporary, { force: true }); }
 }
 
-/** Set machine gate capacity only when its durable holder and waiter lists are empty. */
+/** Raise machine gate capacity immediately; decreases require an empty durable queue. */
 export function setGateSlots(capacity) {
   if (!Number.isSafeInteger(capacity) || capacity < 1) throw new Refused('BAD_GATE_SLOTS', 'gateSlots must be a positive integer; run pullboard settings gateSlots <n>');
   let next;
@@ -135,7 +135,7 @@ export function setGateShortSlots(count) {
   return next;
 }
 
-/** Set machine browser capacity only when its browser holders and waiters are empty. */
+/** Raise machine browser capacity immediately; decreases require an empty browser queue. */
 export function setBrowserSlots(capacity) {
   if (!Number.isSafeInteger(capacity) || capacity < 1) throw new Refused('BAD_BROWSER_SLOTS', 'browserSlots must be a positive integer; run pullboard settings browserSlots <n>');
   let next;
