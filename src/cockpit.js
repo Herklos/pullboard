@@ -321,10 +321,23 @@ function localNote(state, facts = {}) {
   drawHosted(document, hostedState(state, { browser: hostedBrowser(navigator), ...facts }), { view: localSession?.origin || LOCAL_VIEW, signIn: hosted.signIn, session: hosted.relaySession });
 }
 
-/** Show the hosted page's star line (src/view/star.js) to a signed-in person with a linked board, until dismissed here; pass a board list through. */
+let starLinked = { at: 0, linked: false, reading: false };
+/**
+ * Show the hosted page's star line (src/view/star.js) to a signed-in person whose account lists a linked board, until
+ * dismissed here; pass a board list through. Why the account's list: it is the linked-board metadata the relay serves
+ * this page, whichever source then draws a board, so a linked board this machine reads locally still counts, and no
+ * relay client loads to decide it. It is read until it lists one, at most every few seconds.
+ */
 function starLine(list) {
-  const linked = Boolean(list?.boards?.some((board) => board.source === 'relay'));
-  if ($('star-line')) $('star-line').hidden = !(hosted.relaySession && linked && keep(${JSON.stringify(STAR_KEY)}) !== 'dismissed');
+  const line = $('star-line');
+  if (!line) return list;
+  const show = () => { line.hidden = !(hosted.relaySession && starLinked.linked && keep(${JSON.stringify(STAR_KEY)}) !== 'dismissed'); };
+  if (hosted.relaySession && !starLinked.linked && !starLinked.reading && Date.now() - starLinked.at > 2500) {
+    starLinked = { at: Date.now(), linked: false, reading: true };
+    jsonRequest('/api/v1/boards', undefined, '', {}, 'no-store').then((reply) => reply?.boards?.some((board) => typeof board?.id === 'string'), () => false)
+      .then((linked) => { starLinked = { at: Date.now(), linked, reading: false }; line.dataset.linked = linked ? 'yes' : 'no'; show(); });
+  }
+  show();
   return list;
 }
 $('star-dismiss')?.addEventListener('click', () => { keep(${JSON.stringify(STAR_KEY)}, 'dismissed'); starLine(null); });
