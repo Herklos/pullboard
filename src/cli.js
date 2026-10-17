@@ -47,6 +47,12 @@ import {
   loadDoctrine,
 } from './doctrine.js';
 import {
+  agentDoctrine,
+  proposeDoctrine,
+  resumeDoctrineNotes,
+  staleDoctrineRows,
+} from './doctrine-rulings.js';
+import {
   checkRulesAt,
   doctrineReport,
   hasSubmitRules,
@@ -513,6 +519,8 @@ const OPTIONS = {
   text: { type: 'string' },
   gate: { type: 'string' },
   aim: { type: 'boolean' },
+  doctrine: { type: 'boolean' },
+  source: { type: 'string' },
   section: { type: 'string' },
   blueprint: { type: 'string' },
   route: { type: 'string' },
@@ -957,7 +965,7 @@ function whoAmI(ctx, board) {
  * @param {{ captureVerifyPolicy?: boolean }} [options]
  * @returns {(item: any) => { text: string, digest: string }}
  */
-function freezer(ctx, { captureVerifyPolicy = false } = {}) {
+function freezer(ctx, { captureVerifyPolicy = false, board } = {}) {
   /** Freeze the criterion and, when requested, the trunk lane and verifier policy. */
   return (item) => {
     const prior = item.item_frozen ? JSON.parse(item.item_frozen) : null;
@@ -976,7 +984,8 @@ function freezer(ctx, { captureVerifyPolicy = false } = {}) {
     } else {
       config = policy ? itemPolicy(ctx.info.root, { ...item, item_frozen: JSON.stringify({ policy }) }).config : ctx.config;
     }
-    const frozen = frozenCriterion(loadSpec(ctx.info.root, config), item, loadDoctrine(ctx.info.root, config));
+    const doctrine = board ? agentDoctrine(ctx, board) : loadDoctrine(ctx.info.root, config);
+    const frozen = frozenCriterion(loadSpec(ctx.info.root, config), item, doctrine);
     if (!policy) return frozen; // Legacy criteria retain their original digest and committed claim base.
     const text = JSON.stringify({ ...JSON.parse(frozen.text), policy });
     return { text, digest: createHash('sha256').update(text).digest('hex') };
@@ -1034,11 +1043,11 @@ class MainSpecMerged extends Error {
  * @param {any} ctx
  * @returns {(item: any) => { text: string, digest: string }}
  */
-function claimFreezer(ctx) {
+function claimFreezer(ctx, board) {
   return (item) => {
     const rows = prepareClaimSpec(ctx, item);
     if (rows) throw new MainSpecMerged(rows);
-    return freezer(ctx)(item);
+    return freezer(ctx, { board })(item);
   };
 }
 
@@ -1354,8 +1363,10 @@ function resumeHere(io) {
   const mainRoot = primaryCheckoutRoot(ctx.info);
   const worktreeConfig = mainRoot ? (isMain ? ctx.config : loadConfig(mainRoot)) : null;
   let setupScope;
+  let doctrine;
   const card = withBoard(ctx, (board) => {
     setupScope = setupIdentity(board);
+    doctrine = agentDoctrine(ctx, board);
     const me = whoAmI(ctx, board);
     const all = store.listItems(board, { all: true });
     const toMerge = all.filter((item) => item.item_status === 'verified' && !item.item_merged_commit);
@@ -1395,7 +1406,7 @@ function resumeHere(io) {
     : unavailableWorktreeLocation();
   const { me } = card;
   const name = (id) => agentDisplayName(card.agents, ctx.config, id);
-  card.stale = staleFrozenItems(card.all, loadSpec(root, ctx.config).rows, ctx.doctrine.rows).map((item) => ({ ...item, ...staleItemFinding(item) }));
+  card.stale = staleFrozenItems(card.all, loadSpec(root, ctx.config).rows, staleDoctrineRows(ctx, doctrine)).map((item) => ({ ...item, ...staleItemFinding(item) }));
   if (isMain) {
     card.staleFollowUps = { count: card.stale.length + card.staleIntegrations.length,
       list: 'pullboard resume --json', items: card.stale, integrations: card.staleIntegrations };
@@ -1403,6 +1414,8 @@ function resumeHere(io) {
     card.reviewQueue = { items: card.toVerify, awaiting: card.awaiting };
   }
   const say = (line) => io.say(line);
+  card.doctrineNotes = resumeDoctrineNotes(ctx.info, doctrine);
+  for (const row of card.doctrineNotes) say(`new doctrine ${row.id} — ${row.text}`);
   const releaseNotes = card.whatsNew = resumeReleaseNotes(ctx.info);
   for (const note of (releaseNotes?.releases ?? [])) {
     say(`new in ${note.version} — ${note.headline}: ${note.paragraph}`);
@@ -2369,7 +2382,7 @@ async function submitHere(ctx, id) {
       let digest = null;
       let unusable = '';
       try {
-        digest = freezer(ctx)(item).digest;
+        digest = freezer(ctx, { board })(item).digest;
       } catch (error) {
         if (!(error instanceof Refused) || error.code === 'A5_GRAMMAR_VERSION') throw error;
         unusable = error.message.replace(/^\[\w+\] /, '').split(';')[0];
@@ -2603,7 +2616,7 @@ async function verifyHere(ctx, id, { second, values }) {
     let digest = 'missing';
     let check;
     try {
-      digest = freezer(ctx)(item).digest;
+      digest = freezer(ctx, { board })(item).digest;
     } catch (error) {
       if (!(error instanceof Refused) || error.code === 'A5_GRAMMAR_VERSION') throw error;
     }
@@ -2753,7 +2766,7 @@ async function nextOnce(ctx, values) {
     const reviewSkipped = values.build && !held
       ? { offeredItem: offer?.item.item_id ?? null, ratio: ctx.config.verify.reviewRatio, ...store.reviewQueue(board) } : null;
     try {
-      await ordered(ctx, board, 'claim', [item.item_id, { agentId: me.id, lane: me.lane, leaseMs: ctx.config.leaseMs, freeze: claimFreezer(ctx), head: headCommit(ctx.info.root), reviewSkipped }]);
+      await ordered(ctx, board, 'claim', [item.item_id, { agentId: me.id, lane: me.lane, leaseMs: ctx.config.leaseMs, freeze: claimFreezer(ctx, board), head: headCommit(ctx.info.root), reviewSkipped }]);
     } catch (error) {
       if (error instanceof MainSpecMerged) return { retry: true, specMerged: { item: item.item_id, rows: error.rows } };
       if (error instanceof Refused && ['HELD', 'ITEM_HELD', 'BLOCKED', 'ONE_CLAIM'].includes(error.code)) return { retry: true };
@@ -3122,7 +3135,7 @@ function workCommands(io, args) {
       let result;
       for (;;) {
         try {
-          result = await ordered(ctx, board, 'claim', [id, { agentId: me.id, lane: me.lane, leaseMs: ctx.config.leaseMs, freeze: claimFreezer(ctx), head: headCommit(ctx.info.root) }]);
+          result = await ordered(ctx, board, 'claim', [id, { agentId: me.id, lane: me.lane, leaseMs: ctx.config.leaseMs, freeze: claimFreezer(ctx, board), head: headCommit(ctx.info.root) }]);
           break;
         } catch (error) {
           if (!(error instanceof MainSpecMerged)) throw error;
@@ -3233,7 +3246,7 @@ function workCommands(io, args) {
       return 0;
     }),
     refreeze: () => act(async (ctx, board, me) => {
-      const result = await ordered(ctx, board, 'refreeze', [idArg(first), { agentId: me.id, freeze: freezer(ctx, { captureVerifyPolicy: true }) }]);
+      const result = await ordered(ctx, board, 'refreeze', [idArg(first), { agentId: me.id, freeze: freezer(ctx, { captureVerifyPolicy: true, board }) }]);
       io.result?.({ id: idArg(first), ...result });
       io.say(`#${first} refrozen ${String(result.before).slice(0, 12)} -> ${result.after.slice(0, 12)}; ${result.retainedClaim ? 'claim retained' : 'open again'}`);
       return 0;
@@ -3391,7 +3404,7 @@ async function specCommand(io, { first, second, rest, values }) {
     unmet: ['must'],
     signoff: ['by', 'note', 'note-file'],
     signers: ['key', 'by'],
-    draft: ['aim', 'gate', 'section'],
+    draft: ['aim', 'gate', 'section', 'doctrine', 'source'],
     approve: ['by', 'text'],
     decline: ['reason'],
     answer: [],
@@ -3416,6 +3429,19 @@ async function specCommand(io, { first, second, rest, values }) {
     if (values.gate !== undefined && (!values.gate.trim() || /[\r\n|]/u.test(values.gate))) {
       throw new Refused('USAGE', 'give one nonempty, single-line gate without a field separator, or omit --gate to use review');
     }
+    if (values.doctrine) {
+      if (typeof values.source !== 'string' || !values.source.trim() || /[\r\n|]/u.test(values.source)) {
+        throw new Refused('USAGE', 'a doctrine ruling needs its source; give --source "shout 42" or --source "chat, 2026-10-16"');
+      }
+      withBoard(ctx, (board) => {
+        if (!ctx.info.isMain || whoAmI(ctx, board).id !== COORDINATOR) throw new Refused('COORDINATOR_ONLY', 'only the coordinator proposes standing rulings; ask your coordinator to run spec draft --doctrine --source');
+      });
+      const result = proposeDoctrine(ctx, values, second);
+      io.result?.(result);
+      io.say(result.id);
+      return 0;
+    }
+    if (values.source !== undefined) throw new Refused('FLAG_NOT_ALLOWED', 'spec draft --source belongs to --doctrine; use both when proposing a ruling');
     if (!spec.sections.length) throw new Refused('NO_SECTION', `no section in ${ctx.config.spec}; add a section heading, then draft the requirement`);
     const sections = spec.sections.map(section => ({ ...section,
       prefix: /^([A-Z][A-Z0-9]*)\s*[·.:-]/u.exec(section.name)?.[1] })).filter(section => section.prefix);
