@@ -343,8 +343,10 @@ test('only a file that reaches a browser launch takes a browser slot [C7,O5]', a
   const bound = await browserBoundFiles(repository, tracked, { byLaunch: true });
   const missed = CENSUS_LAUNCHED.filter(file => tracked.includes(file) && !bound.includes(file));
   assert.deepEqual(missed, [], 'every file that launched Chrome in the census is classified browser-bound');
-  assert.ok(bound.length <= 50,
-    `about 42 of ${tracked.length} test files are browser-bound by launch (42 launched, plus cockpit files until #741); got ${bound.length}: ${bound.join(', ')}`);
+  // Cockpit and journey files stay bound by rule until #741 guards the view fixture; the rest must reach a launch.
+  const reached = bound.filter(file => !file.startsWith('test/cockpit/') && file !== 'test/journeys.test.js');
+  assert.ok(reached.length <= 20,
+    `about 42 of ${tracked.length} test files are browser-bound by launch (the census's 15 non-cockpit launchers, plus cockpit and journey files until #741); got ${bound.length}, ${reached.length} outside cockpit: ${reached.join(', ')}`);
 
   const runner = runnerFixture(t, {
     'test/plain.test.js': `import { spawnSync } from 'node:child_process';\nvoid spawnSync;\n${RECORD_MARKER('plain')}`,
