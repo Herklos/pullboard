@@ -95,13 +95,14 @@ async function documentAt(path, onDenied, options = {}) {
 }
 
 /** Build the API adapter the existing cockpit consumes; no board key enters an HTTP request. */
-export async function createTransport({ onUpdate = () => {} } = {}) {
+export async function createTransport({ onUpdate = () => {}, onOpenBoard = () => {} } = {}) {
   void registerApp();
   const savedKeys = stored(localStorage, KEYS, {});
   const keys = savedKeys && typeof savedKeys === 'object' && !Array.isArray(savedKeys) ? savedKeys : {};
   const paired = new Map();
   let available = [];
   let waitingBoards = new Map();
+  const approvedBoards = new Set();
   let warnings = [];
   let failure = '';
   let failureBoard = null;
@@ -168,7 +169,7 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
       try { state = storedOwnedRequestState(localStorage, key, entry.state?.personRequests); } catch { /* Missing device storage can only hide this device's own notice. */ }
       ownedRequestIds.set(id, state.owned);
     }
-    for (const text of noticeLines({ available, paired, ownedRequestIds, waitingBoards, warnings, failure })) {
+    for (const text of noticeLines({ available, paired, ownedRequestIds, waitingBoards, approvedBoards, warnings, failure })) {
       const paragraph = document.createElement('p');
       paragraph.textContent = text;
       element.append(paragraph);
@@ -544,6 +545,25 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
     throw new Refused('RELAY_BUSY', 'Other clients kept winning the relay order. Retry this saved request.');
   }
 
+  /**
+   * After this phone approves a link, list again until the computer's sealed key arrives, so the
+   * board opens here without another pairing. The wait ends at the approval's own expiry.
+   */
+  async function openApprovedBoard(context) {
+    if (context?.action !== 'link') { await listing(); onUpdate(); return; }
+    approvedBoards.add(context.board);
+    try {
+      while (!accessLost && Date.now() < context.expires) {
+        await listing(); onUpdate();
+        if (paired.has(context.board)) {
+          await onOpenBoard(context.board);
+          return;
+        }
+        await new Promise(resolveWait => setTimeout(resolveWait, 500));
+      }
+    } finally { approvedBoards.delete(context.board); notice(); }
+  }
+
   /** Pair a link opened in this already-loaded page as well as one opened on a fresh visit. */
   async function pairingChanged() {
     try {
@@ -564,7 +584,7 @@ export async function createTransport({ onUpdate = () => {} } = {}) {
   if (!pair && !devicePairing && !Object.keys(keys).length) showRelayScreen(document.documentElement, 'share');
   if (await enrollPhone((path, options) => documentAt(path, denied, options))) keepPairingStorage();
   await listing();
-  await installPhoneApprovals((path, options) => documentAt(path, denied, options), keys, async () => { await listing(); onUpdate(); }, access.signal);
+  await installPhoneApprovals((path, options) => documentAt(path, denied, options), keys, openApprovedBoard, access.signal);
   return {
     /** Return decoded API state or seal narrow person intent; no board key or plaintext leaves the device. */
     async request(path, body) {
