@@ -365,8 +365,11 @@ test('blueprint commands say what they did [S1,I1]', () => {
     return { files, events: json(box, 'log').events };
   };
 
-  // Before any add, every starter is listed and none is filed.
+  // Before any add, every starter is listed and none is filed, even with an older unrelated item
+  // filed under a starter's title that cites no blueprint row (review 12394).
   const box = freshBoard();
+  const decoy = json(box, 'add', 'coordinator', PUBLISHED.items[0].title).item;
+  assert.equal(decoy.item_spec_ids ?? '', '', 'the unrelated item cites no row');
   const unfiled = json(box, 'blueprint', 'starters', 'web-app');
   assert.deepEqual(unfiled.blueprint, { name: 'web-app', title: 'Web app', version: 1 });
   assert.deepEqual(unfiled.starters.map((starter) => [starter.title, starter.filed, starter.id]), PUBLISHED.items.map((item) => [item.title, false, null]));
@@ -375,7 +378,8 @@ test('blueprint commands say what they did [S1,I1]', () => {
   for (const item of PUBLISHED.items) assert.ok(unfiledText.stdout.split('\n').includes(`  not filed  ${item.title}`), `${item.title} is listed as not filed:\n${unfiledText.stdout}`);
 
   // A second add says it is already there, and no file byte and no board event changes.
-  json(box, 'blueprint', 'add', 'web-app');
+  const firstAdd = json(box, 'blueprint', 'add', 'web-app');
+  assert.equal(firstAdd.items.length, PUBLISHED.items.length, 'the add files every starter');
   const before = snapshot(box);
   const again = box.run('blueprint', 'add', 'web-app');
   assert.equal(again.status, 0, again.stdout + again.stderr);
@@ -387,17 +391,18 @@ test('blueprint commands say what they did [S1,I1]', () => {
   assert.deepEqual(after.files, before.files, 'a second add changes no file bytes');
   assert.deepEqual(after.events, before.events, 'a second add records no board event');
 
-  // Once added, each starter is filed and names its item id and status.
-  const items = json(box, 'list', '--all').items;
+  // Once added, each starter names the item its add filed, never the unrelated same-title item.
   const filed = json(box, 'blueprint', 'starters', 'web-app').starters;
   assert.equal(filed.length, PUBLISHED.items.length, 'every starter is listed');
   const filedText = box.run('blueprint', 'starters', 'web-app').stdout.split('\n');
   for (const [index, item] of PUBLISHED.items.entries()) {
-    const onBoard = items.find((entry) => entry.item_title === item.title);
-    assert.ok(onBoard, `${item.title} is on the board`);
-    assert.deepEqual([filed[index].title, filed[index].filed, filed[index].id, filed[index].status], [item.title, true, onBoard.item_id, 'open']);
-    assert.ok(filedText.includes(`  #${onBoard.item_id} open  ${item.title}`), `${item.title} shows its id:\n${filedText.join('\n')}`);
+    const own = firstAdd.items.find((entry) => entry.key === item.key);
+    assert.ok(own && own.id !== decoy.item_id, `${item.title} was filed by the add as its own item`);
+    assert.notEqual(filed[index].id, decoy.item_id, `${item.title} never names the unrelated item #${decoy.item_id}`);
+    assert.deepEqual([filed[index].title, filed[index].filed, filed[index].id, filed[index].status], [item.title, true, own.id, 'open']);
+    assert.ok(filedText.includes(`  #${own.id} open  ${item.title}`), `${item.title} shows its id:\n${filedText.join('\n')}`);
   }
+  assert.ok(!filedText.some((line) => line.startsWith(`  #${decoy.item_id} `)), `the unrelated item is never listed:\n${filedText.join('\n')}`);
 
   // init --blueprint lists every row that waits for the person, the inherited doctrine row PB7 included.
   const started = emptyRepo();

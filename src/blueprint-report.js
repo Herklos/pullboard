@@ -4,25 +4,53 @@
  * @typedef {object} StarterState
  * @property {string} key - The starter's key in the blueprint.
  * @property {string} title - The starter's title.
- * @property {boolean} filed - An item with this title is on the board.
+ * @property {boolean} filed - The blueprint's own add filed this starter on the board.
  * @property {number | null} id - The filed item's id, or null when it is not filed.
  * @property {string | null} status - The filed item's status, or null when it is not filed.
  */
 
 /**
- * Each of a blueprint's starter items and whether it is on the board. A starter is filed when an
- * item carries its title; blueprint add files a starter under its title, and the title is what a
- * person reads in pullboard list. When several items share the title, a live one is named before a
- * withdrawn one, then the oldest, so a starter withdrawn and filed again shows the item in work.
+ * The row id each rule and question key of a blueprint got on this board, read from its SPEC.md
+ * section. Blueprint add numbers the rules, then the questions, in blueprint order, as the first
+ * rows of a section named after the blueprint's title; a row the person rewords or declines keeps
+ * its id, so the positions still name the same keys. Empty when the blueprint has no section here.
  *
- * @param {{ items: { key: string, title: string }[] }} blueprint
+ * @param {{ title: string, rules: { key: string }[], questions: { key: string }[] }} blueprint
+ * @param {{ sections: { name: string }[], rows: { id: string, section: string }[] }} spec - loadSpec's result.
+ * @returns {Record<string, string>}
+ */
+export function blueprintRowIds(blueprint, spec) {
+  const section = spec.sections.find((entry) => /^[A-Z][A-Z0-9]*\s*[·.:-]/u.test(entry.name)
+    && entry.name.replace(/^[A-Z][A-Z0-9]*\s*[·.:-]\s*/u, '') === blueprint.title.trim());
+  if (!section) return {};
+  const rows = spec.rows.filter((row) => row.section === section.name);
+  const keys = [...blueprint.rules, ...blueprint.questions].map((entry) => entry.key);
+  return Object.fromEntries(keys.flatMap((key, index) => (rows[index] ? [[key, rows[index].id]] : [])));
+}
+
+/**
+ * Each of a blueprint's starter items and whether its add filed it on this board. An item is the
+ * starter only when it carries the starter's title and cites exactly the rows this blueprint's add
+ * gave the starter's keys, the same identity a resumed add uses to find starters already filed.
+ * Why both: a title alone also names an unrelated item someone filed under the same words, and
+ * that item must never be reported as the starter. A starter that cites no rows has no citation
+ * to link it, so its item must also carry the starter's criterion, which add stores as written.
+ * When several items match, a live one is named before a withdrawn one, then the oldest.
+ *
+ * @param {{ items: { key: string, title: string, cites?: string[], criterion?: string }[] }} blueprint
  * @param {Record<string, any>[]} items - Every item on the board, as store.listItems returns them.
+ * @param {Record<string, string>} rowIds - Row id by rule or question key, from blueprintRowIds.
  * @returns {StarterState[]}
  */
-export function starterStates(blueprint, items) {
+export function starterStates(blueprint, items, rowIds) {
   return blueprint.items.map((starter) => {
     const title = starter.title.trim();
-    const matches = items.filter((item) => item.item_title === title)
+    const cites = starter.cites ?? [];
+    const specIds = cites.map((key) => rowIds[key]).filter(Boolean).join(',');
+    const linked = cites.length
+      ? (item) => specIds.length > 0 && item.item_spec_ids === specIds
+      : (item) => item.item_spec_ids === '' && item.item_criterion === (starter.criterion ?? '');
+    const matches = items.filter((item) => item.item_title === title && linked(item))
       .sort((a, b) => Number(a.item_status === 'withdrawn') - Number(b.item_status === 'withdrawn') || a.item_id - b.item_id);
     const found = matches[0];
     const status = found?.item_status ?? null;

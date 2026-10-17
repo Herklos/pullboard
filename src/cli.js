@@ -63,7 +63,7 @@ import { answerQuestion, bundledBlueprints, planBlueprint, readBlueprint, saveBl
 import { briefFiles } from './brief.js';
 import { checkBaseline, prepareCheckBaseline, sayCheckBaseline } from './check-baseline.js';
 import { retryCheckBaselines, startCheckBaseline } from './check-baseline-worker.js';
-import { starterLines, starterStates, waitingRowLines, waitingRows } from './blueprint-report.js';
+import { blueprintRowIds, starterLines, starterStates, waitingRowLines, waitingRows } from './blueprint-report.js';
 import { compareMainFailures, mainRedMessage, mainRedReworkItems } from './main-red.js';
 import { runItems } from './run.js';
 import { parseProblems, sweepItems } from './sweep.js';
@@ -3843,7 +3843,9 @@ async function runCommand(argv, io) {
     if (command === 'blueprint' && first === 'starters') {
       if (!second || rest.length) throw new Refused('USAGE', `pullboard blueprint starters <name or file>; bundled: ${bundledBlueprints().join(', ')}`);
       const blueprint = readBlueprint(second, io.cwd);
-      const starters = withBoard(context(io), (board) => starterStates(blueprint, store.listItems(board, { all: true })));
+      const ctx = context(io);
+      const rowIds = blueprintRowIds(blueprint, loadSpec(ctx.info.root, ctx.config));
+      const starters = withBoard(ctx, (board) => starterStates(blueprint, store.listItems(board, { all: true }), rowIds));
       io.result?.({ blueprint: { name: blueprint.name, title: blueprint.title, version: blueprint.version }, starters });
       starterLines(blueprint, starters).forEach((line) => io.say(line));
       return 0;
