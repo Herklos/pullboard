@@ -527,7 +527,10 @@ test('a broken copy of the code fails the check: a refusal added wherever a move
   ], 'reserve reaches the route check through the reviewer checks it shares with a verdict');
 
   const doubleQuoted = editedSource('cli.js', /^const cdTo = .*$/m, "const cdTo = (root) => { if (!root) throw new Refused(\"NO_ROOT\", 'no root'); return 'cd ' + root + ' &&'; };");
-  assert.deepEqual(codeProblems(MACHINE, doubleQuoted), ['NO_ROOT is raised by accept and reject but not declared there']);
+  assert.deepEqual(codeProblems(MACHINE, doubleQuoted), [
+    'NO_ROOT is raised by submit but not declared there',
+    'NO_ROOT is raised by accept and reject but not declared there',
+  ]);
 });
 
 const SHA_A = 'a'.repeat(40);
@@ -843,9 +846,9 @@ test('pullboard help lists each role\'s moves from the declaration, and pullboar
 /** Guards checked before the explicit transition: CLI facts and optional roadmap selection. */
 const PRECHECKED = {
   claim: ['joined', 'checkProvesSomething'],
-  submit: ['joined', 'checkProvesSomething', 'criterionUnchanged', 'treeClean', 'nothingUntracked', 'hasCommit', 'withinLane', 'trunkMergeClean', 'doctrineHolds', 'gateConfigured', 'gateGreen', 'treeStillDuringGate', 'noUnverifiedStack'],
+  submit: ['joined', 'checkProvesSomething', 'criterionUnchanged', 'treeClean', 'nothingUntracked', 'hasCommit', 'withinLane', 'trunkMergeClean', 'doctrineHolds', 'gateConfigured', 'queuedItemLease', 'gateGreen', 'treeStillDuringGate', 'noUnverifiedStack'],
   reserve: ['coordinatorSaysAs', 'joined', 'roadmapReadable'],
-  accept: ['coordinatorSaysAs', 'joined', 'atSubmittedCommit', 'trunkMergeClean', 'itemCheckGreen', 'noUnverifiedStack'],
+  accept: ['coordinatorSaysAs', 'joined', 'atSubmittedCommit', 'trunkMergeClean', 'queuedItemLease', 'itemCheckGreen', 'noUnverifiedStack'],
   reject: ['coordinatorSaysAs', 'joined', 'atSubmittedCommit'],
 };
 
