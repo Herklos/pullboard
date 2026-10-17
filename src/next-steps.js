@@ -119,6 +119,8 @@ export const NEXT_STEPS = Object.freeze({
   DEVICE_WRAP_BINDING: 'upgrade Pullboard, then pair the device again: pullboard relay on --all',
   DEVICE_WRAP_KEY: 'pair the device again: pullboard relay on --all',
   DIFF_TOO_LARGE: 'split the change into smaller commits',
+  DIGEST_SIZE: 'shout the coordinator with the board size: pullboard shout coordinator "digest outgrew 50 KB"',
+  DIGEST_WRITE: 'choose a writable file outside .git: pullboard digest --out briefing.md',
   DIRTY: 'commit your changes, then run the command again',
   EMPTY_FACT: 'give nonempty fact text: pullboard fact <id> note "<what you saw>"',
   EMPTY_BLUEPRINT: 'ask the person to approve exportable rows written as "<rule> Why: <reason>", then run pullboard blueprint save again',
