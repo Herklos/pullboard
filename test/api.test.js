@@ -604,6 +604,7 @@ test('[A1] command results match the catalog across roots and subcommands', () =
   json(box, repo, 'status');
   json(box, repo, 'stats');
   json(box, repo, 'doctor');
+  assert.deepEqual(json(box, repo, 'health').stuck, [], 'a new board has nothing stuck [A6]');
   json(box, repo, 'skills', ['--update']);
   const plainStatus = box.run(repo, 'status');
   assert.equal(plainStatus.status, 0, plainStatus.stderr);
@@ -656,6 +657,8 @@ test('[A1] command results match the catalog across roots and subcommands', () =
   const added = json(box, repo, 'add', ['coordinator', 'API item', '--specs', 'G1', '--criterion', 'the API item is verified', '--check', 'true']);
   assert.equal(added.item.item_id, 1);
   json(box, repo, 'fact', ['1', 'note', 'API fact']);
+  json(box, repo, 'fact', ['1', 'decision', 'API decision', '--implies', '1']);
+  assert.equal(json(box, repo, 'why', ['1']).decisions[0].line, 'API decision', 'why lists the decision that implies the item [N29]');
   json(box, repo, 'edit', ['1', '--criterion', 'the edited API item is verified', '--check', 'true']);
   json(box, repo, 'show', ['1']);
   json(box, repo, 'list', ['--all']);
@@ -958,6 +961,7 @@ test('[A1] every catalog command and subcommand has a real CLI exercise', () => 
   assert.match(humanImport.stdout, /imported version 1 board tables/);
 
   json(source, source.repo, 'relay');
+  assert.deepEqual(json(source, source.repo, 'relay', ['status']), json(source, source.repo, 'relay'), 'relay status reports what plain relay reports');
   json(source, source.repo, 'relay', ['off']);
   const catalog = json(source, source.repo, 'add', ['app', 'Catalog item', '--criterion', 'catalog coverage'], 'add').item;
   const landing = json(source, source.repo, 'land', ['--dry-run']);

@@ -14,10 +14,11 @@
     { "key": "W3", "text": "Every page works at phone width before it ships.", "why": "a page that only works on a laptop is a bug nobody reports." },
     { "key": "W4", "text": "Secrets never appear in code, logs or commits.", "why": "a key pushed once stays public, even after you delete it." },
     { "key": "W5", "text": "A new dependency comes with a one-line reason.", "why": "every package you add is code you now maintain." },
-    { "key": "W6", "text": "An error a person sees says what to do next.", "why": "\"something went wrong\" is a support ticket waiting to happen." }
+    { "key": "W6", "text": "An error a person sees says what to do next.", "why": "\"something went wrong\" is a support ticket waiting to happen." },
+    { "key": "W7", "text": "Tests bind a local port, so a sandboxed agent asks the person instead of rewriting the tests.", "why": "a test rewritten into a fake passes inside the sandbox and proves nothing about the real server.", "tier": "must", "gate": "review" }
   ],
   "questions": [
-    { "key": "Q1", "ask": "The app is built with", "choices": ["Next.js", "SvelteKit", "Rails", "Something else"], "default": "Next.js" },
+    { "key": "Q1", "ask": "The app is built with", "choices": ["Next.js", "SvelteKit", "Rails", "Something else"], "detect": "framework" },
     { "key": "Q2", "ask": "It deploys to", "choices": ["Vercel", "Netlify", "Fly.io", "My own server"], "default": "Vercel" },
     { "key": "Q3", "ask": "People sign in with", "choices": ["Email links", "Passwords", "Google", "No sign-in yet"], "default": "Email links" },
     { "key": "Q4", "ask": "A change is done when", "choices": ["It runs on a preview link", "Its tests pass", "I have looked at it"], "default": "It runs on a preview link" }

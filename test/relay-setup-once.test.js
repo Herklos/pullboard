@@ -7,6 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { createPageStepEvaluator } from './chrome-fixture.js';
 import { relayClientFixture } from './relay-client-fixture.js';
+import { enrollProtocolPhone } from './relay-device-enrollment-fixture.js';
 import { startChrome, findChromeExecutable } from './relay-browser-fixture.js';
 
 const CLI = resolve(import.meta.dirname, '../bin/pullboard.js');
@@ -245,9 +246,10 @@ test('set up once links three registered boards, later registration and a persis
   await pageWait(chrome, `link approval card ${linkProposal.context.id}`, `document.querySelector(${JSON.stringify(approveLinkButton)}) !== null`);
   const linkCard = await pageEvaluate(chrome, `read link approval card ${linkProposal.context.id}`, `({text: document.querySelector('.phone-approval[data-request="${linkProposal.context.id}"]').innerText,
     action: document.querySelector(${JSON.stringify(approveLinkButton)}).innerText})`);
-  assert.match(linkCard.text, /Link fourth-project\?/u);
+  assert.match(linkCard.text, /Link fourth-project from /u, 'the link card names the board and the computer asking');
   assert.match(linkCard.text, /fixture\/repository/u);
-  assert.match(linkCard.text, new RegExp(new Date(linkProposal.context.expires).toISOString().replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')));
+  assert.match(linkCard.text, /expires /u, 'the proposal shows its expiry');
+  assert.equal(linkCard.text.includes(new Date(linkProposal.context.expires).toISOString()), false, 'the expiry is in the phone\'s local time');
   assert.equal(linkCard.action, 'Link project', 'the paired phone presents an explicit one-tap link action');
   const approvalsBeforeLinkTap = box.calls.filter(call => call.path.endsWith('/authorize')).length;
   await pageEvaluate(chrome, `tap link approval ${linkProposal.context.id}`, `document.querySelector(${JSON.stringify(approveLinkButton)}).click()`);
@@ -297,7 +299,7 @@ test('set up once links three registered boards, later registration and a persis
   await pageWait(chrome, `delete approval card ${deleteApproval.id}`, `document.querySelector('.phone-approval[data-request="${deleteApproval.id}"]') !== null`);
   const deleteCard = await pageEvaluate(chrome, `read delete approval card ${deleteApproval.id}`, `({text: document.querySelector('.phone-approval[data-request="${deleteApproval.id}"]').innerText,
     action: document.querySelector('.phone-approval[data-request="${deleteApproval.id}"] button').innerText})`);
-  assert.match(deleteCard.text, new RegExp(deleteApproval.target));
+  assert.match(deleteCard.text, /Delete fourth-project from the relay\?/u, 'the delete card names the board');
   assert.equal(deleteCard.action, 'Delete relay copy');
   const phone = await box.phoneSession();
   const boardsBeforeDeleteTap = await fetch(box.origin + '/auth/boards', { headers: { cookie: 'pb_session=' + phone.token } });
@@ -343,8 +345,9 @@ test('set up once links three registered boards, later registration and a persis
     assert.equal(durableBytes.includes(Buffer.from(raw, 'base64url')), false, 'no raw board-key bytes in relay records');
   }
 
+  const revokedDeviceId = await enrollProtocolPhone(box);
   const approvalsBeforeRevoke = box.transit.filter(record => record.method === 'POST' && record.path === '/api/v1/devices/approvals').length;
-  const revokeCommand = command(box.root, box.env, ['relay', 'revoke', device.id]);
+  const revokeCommand = command(box.root, box.env, ['relay', 'revoke', revokedDeviceId]);
   t.after(async () => { if (revokeCommand.child.exitCode === null) revokeCommand.child.kill('SIGTERM'); await revokeCommand.done.catch(() => {}); });
   /** Read the request id for the newly published revocation without adding another wait. */
   const revokeRequestId = () => {
@@ -352,20 +355,20 @@ test('set up once links three registered boards, later registration and a persis
     const post = approvals.length > approvalsBeforeRevoke ? approvals.at(-1) : null;
     return post ? JSON.parse(post.request.toString('utf8')).context.id : 'request pending';
   };
-  await pageWait(chrome, () => `device revocation approval ${revokeRequestId()}`, `[...document.querySelectorAll('.phone-approval')].some(node => node.textContent.includes(${JSON.stringify(device.id)}))`);
+  await pageWait(chrome, () => `device revocation approval ${revokeRequestId()}`, `[...document.querySelectorAll('.phone-approval')].some(node => node.textContent.includes(${JSON.stringify(revokedDeviceId)}))`);
   const revokeId = revokeRequestId();
-  const revocationCard = await pageEvaluate(chrome, `read device revocation approval ${revokeId}`, `({text: [...document.querySelectorAll('.phone-approval')].find(node => node.textContent.includes(${JSON.stringify(device.id)})).innerText,
-    action: [...document.querySelectorAll('.phone-approval')].find(node => node.textContent.includes(${JSON.stringify(device.id)})).querySelector('button').innerText})`);
-  assert.match(revocationCard.text, new RegExp(device.id));
+  const revocationCard = await pageEvaluate(chrome, `read device revocation approval ${revokeId}`, `({text: [...document.querySelectorAll('.phone-approval')].find(node => node.textContent.includes(${JSON.stringify(revokedDeviceId)})).innerText,
+    action: [...document.querySelectorAll('.phone-approval')].find(node => node.textContent.includes(${JSON.stringify(revokedDeviceId)})).querySelector('button').innerText})`);
+  assert.match(revocationCard.text, new RegExp(revokedDeviceId));
   assert.equal(revocationCard.action, 'Approve revocation');
   const beforeRevokeTap = box.calls.filter(call => call.path.endsWith('/authorize')).length;
-  await pageEvaluate(chrome, `tap device revocation approval ${revokeId}`, `[...document.querySelectorAll('.phone-approval')].find(node => node.textContent.includes(${JSON.stringify(device.id)})).querySelector('button').click()`);
+  await pageEvaluate(chrome, `tap device revocation approval ${revokeId}`, `[...document.querySelectorAll('.phone-approval')].find(node => node.textContent.includes(${JSON.stringify(revokedDeviceId)})).querySelector('button').click()`);
   const revoked = await revokeCommand.done;
   assert.equal(revoked.code, 0);
   assert.match(revoked.document.notice, /already received remain known/u);
   assert.equal(box.calls.filter(call => call.path.endsWith('/authorize')).length, beforeRevokeTap + 1,
     'the named-device revocation uses exactly one explicit phone tap');
-  assert.equal(JSON.parse(readFileSync(machineFile, 'utf8')).devices.length, 0);
+  assert.deepEqual(JSON.parse(readFileSync(machineFile, 'utf8')).devices.map(entry => entry.deviceId), [device.id], 'the approving phone remains paired; only the other target is removed');
 });
 
 
@@ -464,7 +467,7 @@ test('a set-up-once run stretched past 30 seconds still gets its approval card [
   assert.equal(proposal.published, true, 'the relay accepts the native approval after the elapsed delay');
   const card = await pageEvaluate(chrome, `read delayed project approval card ${proposal.context.id}`, `({text: document.querySelector('.phone-approval[data-request="${proposal.context.id}"]').innerText,
     action: document.querySelector(${JSON.stringify(button)}).innerText})`);
-  assert.match(card.text, /Link delayed-approval-project\?/u);
+  assert.match(card.text, /Link delayed-approval-project from /u);
   assert.equal(card.action, 'Link project');
   await pageEvaluate(chrome, `tap delayed project approval ${proposal.context.id}`, `document.querySelector(${JSON.stringify(button)}).click()`);
   await pageWait(chrome, `delayed project approval completes ${proposal.context.id}`, `document.querySelector(${JSON.stringify(button)}) === null`);
