@@ -13,6 +13,7 @@ import { CONFIG_FILE, COORDINATOR, doctrineFile, loadConfig } from './config.js'
 import { loadDoctrine } from './doctrine.js';
 import { installHooks } from './hooks.js';
 import { Refused } from './refused.js';
+import { AGENT_SHELL_MARKERS, remoteShell } from './person.js';
 import { installSkills } from './skills.js';
 import { AGENTS_END, AGENTS_START, agentsBlock, configTemplate, practiceTemplate, specTemplate } from './templates.js';
 
@@ -439,4 +440,55 @@ export function initRepo({ info, openBoardHere, register, closeBoard, model }) {
   }
   if (written.length) notes.push(`git add -f -- ${written.map((path) => `'${path.replaceAll("'", "'\\''")}'`).join(' ')}`);
   return notes;
+}
+
+/** The one command that shares every board on this computer with the phone and pullboard.dev. */
+export const RELAY_ON_ALL = 'pullboard relay on --all';
+
+/** The question init asks a person at the end of setup; Enter means yes. */
+export const RELAY_OFFER_QUESTION = 'See this board on your phone and pullboard.dev? Sign in with GitHub [Y/n] ';
+
+/** The line init prints when it does not ask, or when the person answers no. */
+export const RELAY_LATER = `To see your boards on your phone and pullboard.dev later, run ${RELAY_ON_ALL}`;
+
+/**
+ * Tell whether this run is under continuous integration. CI services set CI, usually to true;
+ * an explicit false or 0 is a person saying it is not.
+ *
+ * @param {Record<string, string | undefined>} environment
+ * @returns {boolean}
+ */
+function continuousIntegration(environment) {
+  const value = String(environment.CI ?? '').trim().toLowerCase();
+  return value !== '' && value !== 'false' && value !== '0';
+}
+
+/**
+ * What init does about sharing with the phone at its end (H5, H17, B26): 'ask' the person,
+ * 'print' the command for later, or 'none'. Sign-in is the person's alone, so the question is
+ * asked only at a person's own terminal: an agent shell is never asked even when its stdin is a
+ * terminal, and neither is CI, an SSH shell (relay on --all refuses there) or a run without a
+ * terminal on both stdin and stdout, so nothing ever waits on an answer no one can give. Those
+ * runs print the command instead. With the machine setting off, or once this board is linked or
+ * this machine already shares its boards, init says nothing about it.
+ *
+ * @param {{ enabled: boolean, shared: boolean, environment?: Record<string, string | undefined>, stdin?: { isTTY?: boolean }, stdout?: { isTTY?: boolean } }} facts
+ * @returns {'ask' | 'print' | 'none'}
+ */
+export function relayOfferAtInit({ enabled, shared, environment = process.env, stdin, stdout }) {
+  if (!enabled || shared) return 'none';
+  if (AGENT_SHELL_MARKERS.some((name) => Boolean(environment[name]))) return 'print';
+  if (continuousIntegration(environment) || remoteShell(environment)) return 'print';
+  return stdin?.isTTY && stdout?.isTTY ? 'ask' : 'print';
+}
+
+/**
+ * Whether an answer to the sharing question is yes: Enter, y or yes. No answer at all, as when
+ * the terminal closes, is no.
+ *
+ * @param {string | null} answer
+ * @returns {boolean}
+ */
+export function acceptsRelayOffer(answer) {
+  return answer !== null && ['', 'y', 'yes'].includes(answer.trim().toLowerCase());
 }
