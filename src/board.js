@@ -15,6 +15,9 @@ import { COORDINATOR } from './config.js';
 import { ENGINE_VERSION, GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, effectiveGuards, storeTriggers } from './machine.js';
 import { Refused } from './refused.js';
 import { parseSpec } from './spec.js';
+import { invariantEvidence } from './submit-invariants.js';
+import { submissionProof } from './submit-invariants.js';
+import { SUBMISSION_PROOF_ENGINE } from './submit-invariants.js';
 
 export const ACCEPT_REASON = 'CRITERION_MET';
 export const PERSON = 'person';
@@ -1182,7 +1185,8 @@ export function release(board, id, agentId, note = '') {
  * @param {{ agentId: string, commit: string, tree: string, files?: string[], policyCommit?: string, note?: string }} at - `files`: what the
  *   item's own commits changed since its claim; a rework adds to what the first attempt changed.
  */
-export function submit(board, id, { agentId, commit, tree, files = [], policyCommit = null, note }) {
+export function submit(board, id, { agentId, commit, tree, files = [], policyCommit = null, note, submissionProof: proof }) {
+  let recordedProof;
   if (note !== undefined && (typeof note !== 'string' || !note.trim() || /[\r\n\u2028\u2029]/u.test(note))) {
     throw new Refused('USAGE', 'a submission note, when present, is one nonempty line');
   }
@@ -1204,6 +1208,10 @@ export function submit(board, id, { agentId, commit, tree, files = [], policyCom
         gateConfigured: null,
         gateGreen: null,
         treeStillDuringGate: null,
+        submissionProofValid: () => {
+          if ((board.executionEngineVersion ?? ENGINE_VERSION) >= SUBMISSION_PROOF_ENGINE) recordedProof = submissionProof(proof);
+          return null;
+        },
         childrenDone: () => {
           const { total } = board.db
             .prepare("SELECT COUNT(*) AS total FROM item WHERE item_parent_id = ? AND item_status IN ('open', 'claimed', 'submitted')")
@@ -1241,6 +1249,7 @@ export function submit(board, id, { agentId, commit, tree, files = [], policyCom
       ...(policyCommit ? { policyCommit } : {}),
       ...(criterionDigest ? { criterionDigest } : {}),
       ...(note === undefined ? {} : { note: note.trim() }),
+      ...(recordedProof ? { submissionProof: recordedProof } : {}),
     });
   });
 }
@@ -2682,6 +2691,7 @@ export function landingBatches(board) {
 /** Append one coordinator-owned batch revision without changing the board schema [B3,R3]. */
 export function recordLandingBatch(board, { agentId, batch, revision = 0 }) {
   coordinatorOnly(agentId, 'records landing batches');
+  const evidence = (board.executionEngineVersion ?? ENGINE_VERSION) >= SUBMISSION_PROOF_ENGINE ? invariantEvidence(batch?.invariantEvidence) : undefined;
   if (!batch || batch.version !== 1 || typeof batch.id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/u.test(batch.id)
     || !['merging', 'gating', 'bisecting', 'flaky', 'blocked', 'ready', 'pushed', 'landed'].includes(batch.state)
     || !/^[a-f0-9]{40,64}$/u.test(batch.base ?? '') || !/^[a-f0-9]{40,64}$/u.test(batch.tip ?? '')
@@ -2693,6 +2703,13 @@ export function recordLandingBatch(board, { agentId, batch, revision = 0 }) {
   }
   return atomic(board, () => {
     const previous = landingBatches(board).find((entry) => entry.id === batch.id);
+    if (previous?.invariantEvidence && (board.executionEngineVersion ?? ENGINE_VERSION) >= SUBMISSION_PROOF_ENGINE) {
+      for (const kind of ['gates', 'diagnostics']) {
+        if (!evidence || JSON.stringify(evidence[kind].slice(0, previous.invariantEvidence[kind].length)) !== JSON.stringify(previous.invariantEvidence[kind])) {
+          throw new Refused('LAND_EVIDENCE', 'recorded landing evidence is append-only; preserve earlier gate and diagnostic receipts when adopting');
+        }
+      }
+    }
     if ((previous?.revision ?? 0) !== revision || previous?.state === 'landed') {
       throw new Refused('LAND_MOVED', 'the landing batch changed; read pullboard resume and adopt its current revision');
     }
@@ -2700,6 +2717,8 @@ export function recordLandingBatch(board, { agentId, batch, revision = 0 }) {
       throw new Refused('LAND_BATCH', 'a batch keeps its original base and landing worktree; adopt it with pullboard land --adopt');
     }
     const recorded = { ...batch, revision: revision + 1, updatedAt: now(board) };
+    delete recorded.invariantEvidence;
+    if (evidence) recorded.invariantEvidence = evidence;
     logEvent(board, agentId, 'landing_batch', null, { batch: recorded });
     return recorded;
   });

@@ -943,6 +943,8 @@ test('submit, accept and reject refuse in the declared order, one failure peeled
     submits.push(submitAs(piece, 'web-1', SHA_A));
     assert.equal(submits.at(-1), 'PENDING_REFREEZE', 'a pending correction stops the board submission before later guards');
     store.refreeze(board, piece, { agentId: 'web-1', freeze });
+    submits.push(outcome(() => store.submit(board, piece, { agentId: 'web-1', commit: SHA_A, tree: 'tree',
+      submissionProof: { version: 99, files: [], full: false, deferred: true, reason: '' } })));
     store.submit(board, piece, { agentId: 'web-1', commit: SHA_A, tree: 'tree' });
     verdictOn(board, piece, 'web-2', 'REJECT');
     store.claim(board, piece, { agentId: 'web-1', lane: 'web', leaseMs: 7_200_000, freeze });

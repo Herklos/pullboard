@@ -7,6 +7,7 @@ import { git, headCommit, headTree, isClean, mainCheckout, repoInfo, tryGit, unt
 import { runGate, runProfiledShell, withGateSlot } from './gate.js';
 import { laneOf } from './lanes.js';
 import { Refused } from './refused.js';
+import { landingFileTimes } from './submit-invariants.js';
 
 /** Quote a command argument without allowing shell interpolation. */
 function quote(value) { return `'${String(value).replaceAll("'", "'\\''")}'`; }
@@ -122,6 +123,7 @@ async function mergeGroup(state, items) {
 /** Run one full landing gate and retain its complete output under this batch's immutable phase path. */
 async function gateGroup(state, label) {
   const tree = headTree(state.batch.root);
+  const commit = headCommit(state.batch.root);
   if (state.gates.has(tree)) return state.gates.get(tree);
   const directory = join(dirname(state.batch.root), 'logs');
   mkdirSync(directory, { recursive: true });
@@ -130,9 +132,18 @@ async function gateGroup(state, label) {
   const gate = await runGate(state.batch.root, state.config, { trustStamp: false, landing: true, agent: 'coordinator', onWait: state.onWait });
   copyFileSync(gate.log, logPath);
   if (gate.profilePath) copyFileSync(gate.profilePath, `${logPath}.profile.json`);
+  if (headCommit(state.batch.root) !== commit || headTree(state.batch.root) !== tree || !isClean(state.batch.root)) {
+    throw new Refused('LAND_SOURCE_CHANGED', `the landing source changed while the gate ran; inspect ${logPath} and restore the recorded batch before adopting`);
+  }
   const result = { ...gate, failures: landingFailures(gate.output, state.batch.root), tree, logPath };
   state.gates.set(tree, result);
-  await save(state, { gateResults: [...state.gates.values()].map(({ tree: testedTree, isGreen, failures, logPath: log }) => ({ tree: testedTree, isGreen, failures, logPath: log })) });
+  const evidence = state.batch.invariantEvidence ?? { version: 1, gates: [], diagnostics: [] };
+  const tested = { commit, isGreen: gate.isGreen,
+    submissions: state.batch.items.map(({ id, commit }) => ({ id, commit })),
+    failures: [...new Set(result.failures.map(failure => failure.file).filter(Boolean))],
+    fileTimes: landingFileTimes(state.batch.root, gate.profile) };
+  await save(state, { gateResults: [...state.gates.values()].map(({ tree: testedTree, isGreen, failures, logPath: log }) => ({ tree: testedTree, isGreen, failures, logPath: log })),
+    invariantEvidence: { ...evidence, gates: [...evidence.gates, tested] } });
   return result;
 }
 
@@ -145,11 +156,19 @@ async function diagnose(state, failures) {
     if (state.diagnosed.has(file)) { if (state.diagnosed.get(file)) flakes.push(file); continue; }
     const runner = state.config.affectedTests || (/\.[cm]?js$/u.test(file) ? 'node --test' : null);
     if (!runner) throw new Refused('LAND_DIAGNOSTIC', `no runner can isolate ${file}; configure affectedTests for the project’s test runner`);
+    const commit = headCommit(state.batch.root);
+    const tree = headTree(state.batch.root);
     const result = await withGateSlot(state.batch.root, (lease) => runProfiledShell(state.batch.root, `${runner} ${quote(file)}`, {
       waitMs: lease.waitMs, artifactDirectory: dirname(state.batch.logPath), artifactPrefix: 'diagnostic', persistLog: true, pipefail: true, gateLease: lease,
     }), { landing: true, browser: true, agent: 'coordinator', kind: 'land-diagnostic', onWait: state.onWait });
+    if (headCommit(state.batch.root) !== commit || headTree(state.batch.root) !== tree || !isClean(state.batch.root)) {
+      throw new Refused('LAND_SOURCE_CHANGED', `the landing source changed during its whole-file diagnostic; inspect ${result.logPath} before adopting`);
+    }
     state.diagnosed.set(file, result.isGreen);
-    await save(state, { diagnostics: [...state.diagnosed].map(([test, isGreen]) => ({ test, isGreen })) });
+    const evidence = state.batch.invariantEvidence ?? { version: 1, gates: [], diagnostics: [] };
+    await save(state, { diagnostics: [...state.diagnosed].map(([test, isGreen]) => ({ test, isGreen })),
+      invariantEvidence: { ...evidence, diagnostics: [...evidence.diagnostics,
+        { test: file, isGreen: result.isGreen, commit, wallMs: result.profile?.wallMs ?? null }] } });
     if (result.isGreen) flakes.push(file);
   }
   return flakes;

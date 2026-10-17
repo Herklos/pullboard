@@ -6,6 +6,7 @@ import { ENGINE_VERSION } from './machine.js';
 import { Refused } from './refused.js';
 import { requestMoveProblem, recordRequestMove } from './relay-requests.js';
 import { relayMoveActor, relaySenderProblem, validRelaySender } from './relay-sender.js';
+import { SUBMISSION_PROOF_ENGINE } from './submit-invariants.js';
 
 const ITEM_ID_FIRST_ARGUMENT = new Set(['editItem', 'escalate', 'recordAttempt', 'claim', 'release', 'submit', 'reserveReview', 'verify', 'merged', 'withdraw', 'refreeze', 'reopen', 'appendFact']);
 
@@ -25,6 +26,8 @@ const OPERATION_ENGINE = Object.freeze({ reopen: 8, recordLandingBatch: 8, recor
 /** Dependency edits add engine-10 meaning without changing ordinary historical edit envelopes. */
 function minimumOperationEngine(operation, args) {
   const options = args[1];
+  if (operation === 'submit' && options?.submissionProof !== undefined
+    || operation === 'recordLandingBatch' && args[0]?.batch?.invariantEvidence !== undefined) return SUBMISSION_PROOF_ENGINE;
   return operation === 'editItem' && options && Object.hasOwn(options, 'after') && options.after !== undefined
     ? 10 : OPERATION_ENGINE[operation] ?? 1;
 }
