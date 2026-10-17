@@ -1485,7 +1485,7 @@ test('a refused remote setup fails the run by name [C7]', async (t) => {
     const deadline = new Promise(resolve => { const timer = setTimeout(() => resolve(null), 30_000); timer.unref(); }); // budget: the bar's 30-second ceiling.
     const result = await Promise.race([run.closed, deadline]);
     assert.ok(result, 'the controller ends the refused run within 30 seconds');
-    assert.ok(Date.now() - startedAt < 30_000);
+    assert.ok(Date.now() - startedAt < 30_000); // budget: declared 30-second completion ceiling in the frozen #690 criterion.
     assert.notEqual(result.status, 0, 'a refused remote setup is a failed run');
     const said = `${result.stdout}${result.stderr}`;
     // Before #684 the worker's own request is refused as a capacity mismatch; after it, as a browser capacity above the gate.
