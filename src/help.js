@@ -170,7 +170,8 @@ Spec
   pullboard spec show <id> | unmet [--must] | signoff <ids> [--by <principal>]
                                         signoff: --note "what was checked" stays with the receipt
   pullboard spec draft <text> [--section <letter>] [--aim] [--gate "<gate>"]  any agent appends a draft row; never approves it
-                                        --section chooses the section prefix; defaults to G
+                [--doctrine --source "<shout id or chat, date>"]  the coordinator proposes a sourced doctrine ruling
+                                        --section chooses the section prefix; defaults to G, or DR with --doctrine
                                         Defaults to must and gate review.
   pullboard blueprint add <name or file>  add a blueprint's rules and questions as drafts, and its starter items
                                         bundled: web-app; nothing is approved, and a repeat adds nothing
@@ -277,6 +278,7 @@ const HELP_FLAG_EXPLANATIONS = {
   '--blueprint': 'start from a bundled blueprint or a JSON file',
   '--brief': 'what a cold agent needs',
   '--check': 'the command that proves it',
+  '--doctrine': 'proposes a doctrine ruling; only the person can approve it',
   '--family': 'records the family name',
   '--model': 'identifies the agent model; required unless PULLBOARD_MODEL is set',
   '--implies': 'each named item gets a fact citing this decision',
@@ -285,6 +287,7 @@ const HELP_FLAG_EXPLANATIONS = {
   '--note': 'what was checked stays with the receipt',
   '--note-file': 'keeps quotes, $ and backticks intact',
   '--route': 'sets which work the model can take',
+  '--source': 'where the person gave the ruling; required with --doctrine',
 };
 
 /** Build command-specific help rows from the preserved full list so its syntax stays authoritative. */

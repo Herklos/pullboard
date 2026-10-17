@@ -63,7 +63,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `join` | `version:number`, `agent:string`, `lane:string`, `route:string`, `path:string`, `model:string`, `displayName:string` |
 | `takeover` | `version:number`, `agent:string`, `path:string` |
 | `worktree` | `version:number`, `agent:string`, `lane:string`, `route:string`, `path:string`, `branch:string`, `prompt:string`, `model:string`, `displayName:string` |
-| `resume` | `version:number`, `me:object`, `all:array`, `requests:array`, `holding:array`, `sentBack:array`, `awaiting:array`, `toVerify:array`, `toMerge:array`, `open:array`, `stale:array`, `holds:array`, `unread:number`, `newest:array`, `root:string`, `newWorktreeLocation:string`, `dirty:number`, `next:string` |
+| `resume` | `version:number`, `me:object`, `all:array`, `requests:array`, `holding:array`, `sentBack:array`, `awaiting:array`, `toVerify:array`, `toMerge:array`, `open:array`, `stale:array`, `doctrineNotes:array`, `holds:array`, `unread:number`, `newest:array`, `root:string`, `newWorktreeLocation:string`, `dirty:number`, `next:string` |
 | `whoami` | `version:number`, `id:string`, `lane:string`, `path:string`, `model:string`, `displayName:string` |
 | `lanes` | `version:number`, `lanes:object`, `shared:array`, `coordinator:string` |
 | `lane add` | `version:number`, `lane:string`, `owns:array` |
@@ -140,6 +140,8 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `hook commit-msg` | `version:number`, `messages:array` |
 | `hook pre-push` | `version:number`, `messages:array` |
 <!-- api-command-shapes:end -->
+
+`spec draft "<rule>" --doctrine --source "chat, 2026-10-16"` proposes a sourced doctrine row and returns a qualified `id`, such as `doctrine:DR1`, for the existing person approval commands. Resume adds `doctrineNotes`, an array of newly seen approved rules with `id`, `text` and `gate`; each checkout consumes its own notices. Drafts and pending applications are excluded. The shared approved doctrine also supplies frozen citations and stale-item comparisons in older checkouts.
 
 `hook pre-merge-commit` runs the same staged checks as `hook pre-commit` before Git creates an automatic merge commit. `init` and `hooks` install it; `doctor` names it when absent at Git's effective hook path. Lane ownership comes from `HEAD:pullboard.json`, so an unstaged configuration edit cannot grant a lane new folders. `lane add` writes the new lane to the working `pullboard.json` and returns `{ lane, owns }`; commit the file before the lane's ownership takes effect. `init` returns the lanes it proposes as `proposedLanes`, each `{ name, owns }`, and writes none of them. Lane-sensitive checks refuse a repository with `info/grafts` in its Git common directory because grafts alter ancestry even when replacement objects are disabled.
 
