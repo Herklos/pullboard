@@ -22,8 +22,12 @@ function decisionRows(root, config, ids) {
   });
 }
 
-/** Capture all source text and signatures before recording any decision on the board. */
-export function prepareRowDecisions(root, config, { ids, decision, reason = '', text: proposedText, by, on, commit = '' }) {
+/**
+ * Capture all source text and signatures before recording any decision on the board. An answer to
+ * a pending question is an approval of its answered text that also carries the answer, signed with
+ * the rest of the record, so spec show and the view can say what the person chose.
+ */
+export function prepareRowDecisions(root, config, { ids, decision, reason = '', text: proposedText, answer, by, on, commit = '' }) {
   if (!ids.length) throw new Refused('USAGE', 'name rows: pullboard spec approve <ids> or spec decline <ids> --reason "why"');
   if (!['approve', 'decline'].includes(decision)) throw new Refused('ROW_DECISION', 'use pullboard spec approve or decline');
   if (decision === 'decline' && (!reason.trim() || /[\r\n|]/u.test(reason))) throw new Refused('ROW_DECISION', 'a decline needs a one-line reason without a field separator; use --reason "why"');
@@ -35,7 +39,8 @@ export function prepareRowDecisions(root, config, { ids, decision, reason = '', 
     const text = decision === 'approve' ? proposedText?.trim() ?? row.text : row.text;
     const replacement = source.replace(/\[([a-z]+)(,\s*[a-z]+)?\]/u, (_, old, tier = '') => `[${status}${tier}]`)
       .replace(/(\]\s+)([^|]*)(?=\s*\||$)/u, (_, prefix, old) => `${prefix}${text}${old.match(/\s+$/u)?.[0] ?? ''}`);
-    const record = { version: 1, type: 'row-decision', kind, file, id: row.id, source, replacement, text, decision, reason: decision === 'decline' ? reason.trim() : '', by: principal, on, commit, note: '' };
+    const record = { version: 1, type: 'row-decision', kind, file, id: row.id, source, replacement, text, decision, reason: decision === 'decline' ? reason.trim() : '', by: principal, on, commit, note: '',
+      ...(answer !== undefined ? { answer } : {}) };
     return signed ? signRowDecision(root, record) : record;
   });
 }
@@ -52,7 +57,7 @@ export function decisionProjection(records, row, kind) {
   if (decision) return {
     ...row,
     decision,
-    stage: `${decision.decision === 'approve' ? 'approved' : 'declined'}, pending apply`,
+    stage: `${decision.answer !== undefined ? `answered ${decision.answer}` : decision.decision === 'approve' ? 'approved' : 'declined'}, pending apply`,
     ...(decision.decision === 'decline' ? { reason: decision.reason } : {}),
   };
   const appliedDecline = records.find((record) => record.kind === kind && record.id === row.id && record.applied
@@ -66,6 +71,28 @@ export function projectRowDecisions(records, state) {
     spec: state.spec.map((row) => decisionProjection(records, row, 'spec')),
     practice: state.practice.map((row) => row.origin === 'standard' ? row : decisionProjection(records, row, 'doctrine')),
   };
+}
+
+/**
+ * The ids of blueprint questions answered by a hand edit to SPEC.md: a row that was pending with
+ * its ". Choices: " list at the trunk tip and now differs in status or text, with no person row
+ * decision for that exact status and text. The answer is the person's move alone (P6), so an
+ * agent that edits the row instead is caught by spec check, the gate's first step.
+ *
+ * @param {any[]} before - The trunk tip's parsed SPEC.md rows.
+ * @param {any[]} after - The working file's parsed rows.
+ * @param {() => any[]} readDecisions - The board's row decisions, read only when a question changed.
+ * @returns {string[]}
+ */
+export function handAnsweredQuestions(before, after, readDecisions) {
+  const changed = before.filter((old) => old.status === 'pending' && old.text.includes('. Choices: ')).flatMap((old) => {
+    const now = after.filter((row) => row.id === old.id);
+    return now.length === 1 && (now[0].status !== old.status || now[0].text !== old.text) ? [now[0]] : [];
+  });
+  if (!changed.length) return [];
+  const records = readDecisions();
+  return changed.filter((row) => !records.some((record) => record.kind === 'spec' && record.id === row.id
+    && record.text === row.text && row.status === (record.decision === 'approve' ? 'approved' : 'wont'))).map((row) => row.id);
 }
 
 /** Remove local index metadata while retaining the one canonical person receipt verbatim. */

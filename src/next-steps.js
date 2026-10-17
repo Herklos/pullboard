@@ -342,6 +342,7 @@ export const NEXT_STEPS = Object.freeze({
   SHALLOW_BEFORE_OPT_IN: 'git fetch --unshallow, then pullboard spec signers add',
   SHOUT_NOT_AVAILABLE: 'read shouts with pullboard inbox, or refresh the snapshot with a current CLI',
   SNAPSHOT_FORMAT: 'refresh the snapshot from a linked machine: pullboard relay',
+  SPEC_ANSWER: 'read the row with pullboard spec show <id>; the person answers a pending question with pullboard spec answer <id> "<choice or text>"',
   SPEC_BEHIND_MAIN: 'git merge main',
   SPEC_INVALID: 'fix the unparsed row the message names, then pullboard spec check',
   SPEC_SECTION: 'name a section the spec has; see pullboard spec',

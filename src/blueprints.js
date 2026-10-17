@@ -408,6 +408,35 @@ function readQuestion(text) {
 }
 
 /**
+ * A question row's text once the person answers it: "<ask>: <answer>. Choices: <choices>.". A
+ * listed choice matches in any case and keeps its listed spelling; any other answer joins the
+ * choices last, so blueprint save still reads the answered row back as a question [S1].
+ *
+ * @param {string} text - The pending row's text, as questionText wrote it.
+ * @param {string} given - The person's answer: one of the choices, or their own one-line text.
+ * @param {string} id - The row id, for the refusal's next step.
+ * @returns {{ text: string, answer: string, listed: boolean }}
+ */
+export function answerQuestion(text, given, id) {
+  const read = readQuestion(text);
+  if (!read?.question) {
+    throw new Refused('SPEC_ANSWER', `${id} does not read as one question with its choices (${read?.reason ?? 'it has no ". Choices: " list'})`,
+      `the person approves its exact new text instead: pullboard spec approve ${id} --text "<the answered row>"`);
+  }
+  const { ask, choices } = read.question;
+  const answer = given.trim();
+  const listed = choices.find((choice) => choice.toLowerCase() === answer.toLowerCase());
+  const question = listed ? { ask, choices, default: listed } : { ask, choices: [...choices, answer], default: answer };
+  const answered = questionText(question);
+  const back = readQuestion(answered)?.question;
+  if (!back || back.default !== question.default || back.choices.join('\n') !== question.choices.join('\n')) {
+    throw new Refused('SPEC_ANSWER', `"${answer}" cannot be read back as ${id}'s one answer`,
+      `give the answer without ", " or ": ": pullboard spec answer ${id} "<answer>"`);
+  }
+  return { text: answered, answer: question.default, listed: Boolean(listed) };
+}
+
+/**
  * Name why a piece of text may not leave this board, or return null when it may. Text that holds
  * a path, an email or any private name (a person, an agent, a model label or a machine) stays.
  *
