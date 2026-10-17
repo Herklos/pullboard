@@ -559,7 +559,7 @@ test('[V2,V4,B26,P6] a check green on main holds the item until the person accep
   assert.equal(claimed.status, 0, `the person's acceptance lifts the hold: ${claimed.stdout}${claimed.stderr}`);
 
   const changed = fileCheck('green', 'changed-check-marker.txt');
-  const edited = box.run(box.repo, ['edit', id, '--check', changed, '--wait', '--json'], undefined, { env });
+  const edited = box.run(box.repo, ['edit', id, '--check', changed, '--reason', 'the fixture changes the check', '--wait', '--json'], undefined, { env });
   assert.equal(edited.status, 0, `${edited.stdout}${edited.stderr}`);
   assert.equal(JSON.parse(edited.stdout).item.item_check_baseline.result, 'green', 'the changed check gets a new baseline');
   assert.equal(box.run(box.repo, ['refreeze', id]).status, 0);
@@ -569,7 +569,7 @@ test('[V2,V4,B26,P6] a check green on main holds the item until the person accep
   assert.ok(resubmitted.message.includes(changed), `the submit refusal names the changed check: ${resubmitted.message}`);
 
   const red = fileCheck('done', 'red-check-marker.txt');
-  const corrected = box.run(box.repo, ['edit', id, '--check', red, '--wait', '--json'], undefined, { env });
+  const corrected = box.run(box.repo, ['edit', id, '--check', red, '--reason', 'the old check already passed on main', '--wait', '--json'], undefined, { env });
   assert.equal(corrected.status, 0, `${corrected.stdout}${corrected.stderr}`);
   assert.equal(JSON.parse(corrected.stdout).item.item_check_baseline.result, 'red');
   assert.equal(box.run(box.repo, ['refreeze', id]).status, 0);
