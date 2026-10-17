@@ -1,9 +1,9 @@
 /** The layered CLI help stays short, command-specific, and in parity with its declaration [N37,I1]. */
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { runFixtureChild } from './fixture-child.js';
+import { runFixtureChild, runFixtureGit } from './fixture-child.js';
 import { after, test } from 'node:test';
 import { HELP, resultCommands } from '../src/cli.js';
 
@@ -64,7 +64,7 @@ test('command help forms and flags match the declaration, with a full list only 
     assert.equal(result.status, 0, `${name}: ${result.stderr}`);
     assert.match(result.stdout, new RegExp(`^Usage: ${declaration.usages[0].replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}$`, 'm'));
     assert.deepEqual(flagsFrom(result.stdout), declaration.flags, `${name} flags`);
-    assert.match(result.stdout, new RegExp(`^  ${declaration.example.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}$`, 'm'));
+    assert.ok(result.stdout.includes(`Example:\n${declaration.example.replace(/^/gmu, '  ')}\n`), `${name} example is shown line by line`);
   }
   assert.equal(run('claim', '--help').stdout, run('help', 'claim').stdout);
   for (const name of resultCommands()) assert.ok(HELP.commands[name], `result command ${name} has a help declaration`);
@@ -132,4 +132,35 @@ test('init help names --blueprint [I1,N37]', () => {
   assert.match(result.stdout, /^Example:\n  pullboard init --blueprint web-app$/mu);
   assert.equal(run('help', 'init').stdout, result.stdout, 'both init help entry points share the declaration');
   assert.match(run('help', '--all').stdout, /pullboard init \[--model <name>\] \[--blueprint <name or file>\]/u);
+});
+
+test('help add example runs on a fresh board [I1,L3]', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'pullboard-help-add-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const root = join(dir, 'repo');
+  const bin = join(dir, 'bin');
+  mkdirSync(root);
+  mkdirSync(bin);
+  // The example is run as pasted, so `pullboard` on PATH is this checkout's CLI.
+  writeFileSync(join(bin, 'pullboard'), `#!/bin/sh\nexec "${process.execPath}" "${BIN}" "$@"\n`);
+  chmodSync(join(bin, 'pullboard'), 0o755);
+  const env = { ...process.env, HOME: join(dir, 'home'), PULLBOARD_HOME: join(dir, 'board-home'),
+    PULLBOARD_MACHINE_HOME: join(dir, 'machine-home'), PATH: `${bin}:${process.env.PATH ?? ''}`,
+    GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+  for (const key of Object.keys(env)) if (key.startsWith('GIT_') && !['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM'].includes(key)) delete env[key];
+  runFixtureGit(['init', '-q', '-b', 'main'], { cwd: root, env, encoding: 'utf8' });
+  const initialized = runFixtureChild(process.execPath, [BIN, 'init'], { cwd: root, env, encoding: 'utf8' });
+  assert.equal(initialized.status, 0, initialized.failure ?? `${initialized.stdout}${initialized.stderr}`);
+
+  const help = runFixtureChild(process.execPath, [BIN, 'help', 'add'], { cwd: root, env, encoding: 'utf8' });
+  assert.equal(help.status, 0, help.failure ?? help.stderr);
+  const lines = (help.stdout.split('Example:\n', 2)[1] ?? '').trimEnd().split('\n').map((line) => line.trim());
+  const laneAdd = lines.indexOf('pullboard lane add web --owns src/web');
+  const add = lines.indexOf('pullboard add web "Upload page" --specs G1');
+  assert.equal(laneAdd, 0, `the example starts with lane add: ${lines.join(' / ')}`);
+  assert.ok(add > laneAdd, `the example adds the item after its lane: ${lines.join(' / ')}`);
+  for (const line of lines) {
+    const result = runFixtureChild('sh', ['-c', line], { cwd: root, env, encoding: 'utf8' });
+    assert.equal(result.status, 0, `${line}\n${result.failure ?? `${result.stdout}${result.stderr}`}`);
+  }
 });
