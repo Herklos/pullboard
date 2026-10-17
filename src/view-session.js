@@ -1,5 +1,6 @@
 /** Private runtime records that let an unattended CLI hand off its live view link. */
-import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { LOOPBACK, lastPort } from './serve.js';
 import { registryFile } from './projects.js';
@@ -77,4 +78,28 @@ export async function runningView(port = 0, expectedScopeCommonDir = null) {
   } catch {
     return null;
   }
+}
+
+/**
+ * Name the process listening on a loopback port, when this machine can tell: first a live view
+ * recorded for that port, then lsof where the system has it. Returns null when neither knows.
+ * Only the pid and the executable's own name are kept, since arguments can carry secrets.
+ *
+ * @param {number} port
+ * @returns {{ pid: number, name: string } | null}
+ */
+export function portHolder(port) {
+  const recorded = readSession(port);
+  if (recorded) {
+    try {
+      process.kill(recorded.pid, 0);
+      return { pid: recorded.pid, name: 'pullboard view' };
+    } catch { /* The recorded view has exited; ask the system who holds the port instead. */ }
+  }
+  const lsof = ['/usr/sbin/lsof', '/usr/bin/lsof'].find((file) => existsSync(file));
+  if (!lsof) return null;
+  const listed = spawnSync(lsof, ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-Fpc'], { encoding: 'utf8', timeout: 2_000 });
+  const pid = Number(/^p(\d+)$/mu.exec(listed.stdout ?? '')?.[1]);
+  if (!Number.isInteger(pid) || pid < 1) return null;
+  return { pid, name: /^c(.+)$/mu.exec(listed.stdout)?.[1]?.trim() || 'a program' };
 }

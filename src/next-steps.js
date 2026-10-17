@@ -261,7 +261,7 @@ export const NEXT_STEPS = Object.freeze({
   PHONE_NOT_PAIRED: 'pair the phone: pullboard relay on --all',
   PIN_FAILED: 'fix what git reported, then run pullboard run again',
   PIPEFAIL_UNAVAILABLE: 'rewrite the gate in pullboard.json without a pipe',
-  PORT_BUSY: 'pick a free port with --port 0',
+  PORT_BUSY: 'stop the other view on that port, then run pullboard view again',
   PROJECT_NOT_REGISTERED: 'run pullboard view --project inside a registered repo, or plain pullboard view',
   PROJECT_SCOPE: 'scope the API to one registered project repo',
   PROOF_REQUIRED: 'say how you proved it: --note "what you broke or which edge you tried, and what happened"',
