@@ -102,6 +102,84 @@ test('a paired relay reference explains that committed source is available only 
 });
 
 
+test('the view opens the board the relay just approved [H17,E16]', { timeout: 90_000 }, async t => { // budget: hang ceiling for two private real boards and one owned Chrome, not a throughput assertion.
+  const executable = chromeExecutable();
+  if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME for the approved-board proof.');
+  const box = machine();
+  const first = project(box, 'current-board');
+  const second = project(box, 'approved-board');
+  box.run(first.repo, 'add', 'web', 'Current board item');
+  box.run(second.repo, 'add', 'web', 'Newly approved board item');
+  const live = await startView(box);
+  const listed = await fetchLive(live.base + '/api/v1/boards', { headers: { 'x-pullboard-key': live.key } });
+  const boards = (await listed.json()).boards;
+  const firstId = boards.find(board => board.name === 'current-board').id;
+  const secondId = boards.find(board => board.name === 'approved-board').id;
+  let pageVisits = 0;
+  const methods = [];
+  const moduleSource = `/** Report a link approval while keeping every board read backed by the private real view. */
+export async function createTransport({ onUpdate, onOpenBoard }) {
+  let approved = false;
+  window.__transportUpdate = onUpdate;
+  window.__approvalCalls = 0;
+  /** Announce one newly readable board through the explicit callback, with the previous update-only control. */
+  window.__approveBoard = async () => {
+    approved = true;
+    window.__approvalCalls += 1;
+    if (onOpenBoard) await onOpenBoard(${JSON.stringify(secondId)});
+    else await onUpdate();
+  };
+  /** Read real board documents and expose the second board only after its link approval. */
+  return { async request(path, body) {
+    if (body != null) throw new Error('The stand-in permits board reads only.');
+    const response = await fetch('/fixture' + path);
+    const document = await response.json();
+    if (!response.ok) throw new Error('Private board read failed: ' + response.status);
+    if (path === '/api/v1/boards' && !approved) document.boards = document.boards.filter(board => board.id === ${JSON.stringify(firstId)});
+    return document;
+  } };
+}`;
+  const server = createServer((request, response) => {
+    const url = new URL(request.url, 'http://127.0.0.1');
+    if (url.pathname === '/') {
+      pageVisits += 1;
+      return response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+        .end(cockpitPage('', { readOnly: true, transportModule: '/transport.js', stylesheet: '/view.css' }));
+    }
+    if (url.pathname === '/transport.js') return response.writeHead(200, { 'content-type': 'text/javascript' }).end(moduleSource);
+    if (url.pathname === '/view.css') return response.writeHead(200, { 'content-type': 'text/css' }).end(readFileSync(new URL('../../src/view.css', import.meta.url)));
+    if (!url.pathname.startsWith('/fixture/')) return response.writeHead(404).end();
+    methods.push(request.method);
+    if (request.method !== 'GET') return response.writeHead(405).end();
+    fetchLive(live.base + url.pathname.slice('/fixture'.length) + url.search, { headers: { 'x-pullboard-key': live.key } })
+      .then(async reply => response.writeHead(reply.status, { 'content-type': 'application/json' }).end(await reply.text()))
+      .catch(() => response.writeHead(502).end());
+  });
+  let chrome;
+  try {
+    await new Promise(resolveReady => server.listen(0, '127.0.0.1', resolveReady));
+    chrome = await openSnapshotChrome(executable, `http://127.0.0.1:${server.address().port}/`, join(box.dir, 'approved-board-chrome'));
+    await chrome.waitFor(`view.root === ${JSON.stringify(firstId)} && data?.project?.items.some(item => item.title === 'Current board item')`);
+    const documentOrigin = await chrome.stable('performance.timeOrigin');
+    await chrome.stable('window.__transportUpdate()');
+    assert.equal(await chrome.stable('view.root'), firstId, 'a transport update without an approved-board callback leaves the current board selected');
+    await chrome.stable('window.__approveBoard()');
+    assert.equal(await chrome.stable(`data.projects.some(board => board.id === ${JSON.stringify(secondId)} && board.ok)`), true, 'the approved board is genuinely available before the selection assertion');
+    assert.equal(await chrome.stable('view.root'), secondId, 'the explicit approval opens its board rather than merely refreshing the old one');
+    assert.equal(await chrome.stable("document.querySelector('#proj-name').textContent"), 'approved-board');
+    assert.equal(await chrome.stable("document.querySelector('#chain').textContent.includes('Newly approved board item')"), true);
+    assert.equal(await chrome.stable('performance.timeOrigin'), documentOrigin, 'the original document remains open');
+    assert.equal(pageVisits, 1, 'approval does not reload the page or start pairing again');
+    assert.equal(await chrome.stable('window.__approvalCalls'), 1);
+    assert.ok(methods.length > 0 && methods.every(method => method === 'GET'), 'the stand-in only reads real private board state');
+    assert.deepEqual(chrome.exceptions, []);
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    await new Promise(resolveClosed => server.close(resolveClosed));
+    await live.stop();
+  }
+});
+
 test('served connection reaches an authenticated API on another origin and path in Chrome [H5,N26]', { timeout: 60_000 }, async (t) => {
   const executable = chromeExecutable();
   if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME for the connection proof.');

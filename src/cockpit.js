@@ -3248,7 +3248,7 @@ function switchTo(root, target = null, record = true) {
   seen = '';
   if (data) render();
   document.body.classList.add('switching');
-  refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }).finally(() => {
+  return refresh().catch(() => { $('live').textContent = 'offline: is pullboard view still running?'; }).finally(() => {
     if (generation === switchGeneration) document.body.classList.remove('switching');
     if (generation === switchGeneration && requestedItem !== null && view.item === requestedItem && view.root === root && view.tab === 'items') reveal();
   });
@@ -3545,6 +3545,14 @@ if (hosted.local) $('local-note-retry').addEventListener('click', () => {
   if (transport) { location.reload(); return; }
   connectLocal().then((local) => local === 'local' ? refresh() : null).catch((error) => localNote('problem', { detail: error.message }));
 });
+/** Open a newly approved board through the ordinary selection path after its real list entry arrives. */
+async function openApprovedBoard(boardId) {
+  await refresh();
+  const board = data?.projects.find(entry => entry.id === boardId && entry.ok);
+  if (!board) throw new Error('The approved board did not load. Refresh the board list and try again.');
+  return switchTo(board.root);
+}
+
 /** Load the configured decrypting transport once, only when relay reads or pairing need it. */
 let transportLoading = null;
 async function loadTransport() {
@@ -3552,7 +3560,10 @@ async function loadTransport() {
   if (!transportLoading) transportLoading = (async () => {
     const module = await import(configuredTransportModule);
     if (typeof module.createTransport !== 'function') throw new Error('The browser transport must export createTransport({ onUpdate }).');
-    const configured = await module.createTransport({ onUpdate: () => transport ? refresh().catch((error) => { $('live').textContent = 'offline: ' + error.message; }) : Promise.resolve() });
+    const configured = await module.createTransport({
+      onUpdate: () => transport ? refresh().catch((error) => { $('live').textContent = 'offline: ' + error.message; }) : Promise.resolve(),
+      onOpenBoard: openApprovedBoard,
+    });
     if (!configured || typeof configured.request !== 'function') throw new Error('The browser transport must provide request(path, body).');
     transportModule = configuredTransportModule;
     transport = configured;
