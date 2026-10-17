@@ -283,18 +283,20 @@ export function tapFailures(output, root) {
  */
 export function accountedFailures(gate, root) {
   if (gate.isGreen || !Array.isArray(gate.stages) || !gate.stages.length) return null;
+  // Only the authenticated worker checkout may relocate remote failure locations.
+  const executionRoot = gate.executionRoot ?? root;
   const failures = [];
   for (const stage of gate.stages) {
     if (!Number.isInteger(stage.status)) return null;
     if (stage.pipeline !== undefined) {
       // In a pipeline each failing component must explain itself; a forwarded account credits no one else [B3,R3].
-      const own = pipelineFailures(stage.pipeline, root);
+      const own = pipelineFailures(stage.pipeline, executionRoot);
       if (!own || (stage.status === 0) !== (own.length === 0)) return null;
       failures.push(...own);
       continue;
     }
     if (stage.status === 0) continue;
-    const own = stage.status === 1 ? tapFailures(stage.output ?? '', root) : null;
+    const own = stage.status === 1 ? tapFailures(stage.output ?? '', executionRoot) : null;
     if (!own) return null;
     failures.push(...own);
   }
