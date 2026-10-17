@@ -155,7 +155,10 @@ test('a landing snapshot binds the checked composition through replay and final 
     candidates: [entry], items: [entry], revision: 0 };
   const record = prepareEngineMove(one, 'recordLandingBatch', [{ agentId: 'coordinator', batch }], { id: 'checked-landing-snapshot' });
   assert.equal(VERDICT_REVIEW_ENGINE, 33, 'checked reviews retain their stable first engine');
-  assert.equal(record.engine, ENGINE_VERSION, 'a new envelope uses the current writer independently of that minimum');
+  // A new move carries the writer's current engine; the checked-review feature only sets the minimum (17 Oct: pinning the
+  // current version to the feature number broke every later engine item).
+  assert.equal(record.engine, ENGINE_VERSION);
+  assert.ok(record.engine >= VERDICT_REVIEW_ENGINE, 'the checked-review snapshot is written at or above its feature engine');
   const before = exportBoard(one);
   assert.throws(() => applyEngineMove(one, { ...record, engine: 12 }, { sequence: 2, at: AT }), { code: 'RELAY_MOVE' });
   assert.deepEqual(exportBoard(one), before, 'a downgraded checked-head snapshot cannot mutate the prefix');

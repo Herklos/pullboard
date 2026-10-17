@@ -1,3 +1,4 @@
+import { hostedReleaseDistance, hostedReleaseInfo, hostedReleaseNote } from './view/hosted-release.js';
 import {
   effectiveGuards,
   IN_STATE,
@@ -58,10 +59,10 @@ function lifecycle() {
  * connect or sign in.
  *
  * @param {string} [key] - The session's secret.
- * @param {{snapshot?: boolean, readOnly?: boolean, requests?: boolean, transportModule?: string|null, apiBase?: string, apiHeaders?: Record<string, string>, stylesheet?: string, paths?: boolean, hostedLocal?: boolean, relaySession?: boolean, signIn?: string|null}} [options] - Served connection and assets, optional person requests over a read-only transport, host routes, a static page with event replay, or the hosted page that reads this machine's view first.
+ * @param {{snapshot?: boolean, readOnly?: boolean, requests?: boolean, transportModule?: string|null, apiBase?: string, apiHeaders?: Record<string, string>, stylesheet?: string, paths?: boolean, hostedLocal?: boolean, relaySession?: boolean, signIn?: string|null, hostedReleaseVersion?: string, hostedReleaseVersions?: string[]|null}} [options] - Served connection and assets, optional person requests over a read-only transport, host routes, a static page with event replay, or the hosted page that reads this machine's view first.
  * @returns {string}
  */
-export function cockpitPage(key = '', { snapshot = false, readOnly = false, requests = false, transportModule = null, apiBase = '', apiHeaders = { 'x-pullboard-key': key }, stylesheet = null, paths = false, hostedLocal = false, relaySession = false, signIn = null } = {}) {
+export function cockpitPage(key = '', { snapshot = false, readOnly = false, requests = false, transportModule = null, apiBase = '', apiHeaders = { 'x-pullboard-key': key }, stylesheet = null, paths = false, hostedLocal = false, relaySession = false, signIn = null, hostedReleaseVersion, hostedReleaseVersions = null } = {}) {
   // Derive the current CLI inventory for every served, relay or exported page.
   const COMMAND_SOURCE = 'pullboard (?:' + commandPhrases().join('|') + ')(?![\\w-])(?: (?:--?[\\w-]+|\\d+|#\\d+|"[^"\\n]*"|[A-Z][A-Z0-9_]*|[\\w-]*[\\/.:@][^\\s"]*|[a-z]+-\\d+)(?![\\w-]))*';
 
@@ -71,6 +72,8 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
   const requestMode = Boolean(readOnly && requests && !snapshot && transportModule);
   if (signIn !== null && (typeof signIn !== 'string' || !signIn.startsWith('/') || signIn.startsWith('//'))) throw new TypeError('signIn must be a path on the hosting site, or null');
   const hostedOptions = JSON.stringify({ local: Boolean(hostedLocal) && !snapshot, relaySession: Boolean(relaySession), signIn }).replace(/</g, '\\u003c');
+  const releaseHosted = Boolean(hostedLocal) && !snapshot;
+  const releaseInfo = hostedReleaseInfo(hostedReleaseVersion, hostedReleaseVersions, releaseHosted);
   const css = stylesheet ?? (snapshot ? 'view.css' : transportModule ? '/view.css' : '/view.css?k=' + encodeURIComponent(key));
   const cssAttribute = css.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
   return `<!doctype html>
@@ -312,6 +315,17 @@ const itemSearches = new Map();
 let detailRead = null;
 const addressedShouts = new Map();
 const $ = (id) => document.getElementById(id);
+// The update note from src/view/hosted-release.js (#632): only a confirmed read of this machine's view says how far behind it is.
+// Only the hosted page builds it; every other page draws nothing and never touches the DOM for it.
+const renderHostedReleaseNote = ${releaseHosted ? `(${hostedReleaseNote.toString()})(${releaseInfo}, { $, keep, distance: (${hostedReleaseDistance.toString()}),
+  // The selected board's own source decides (#632 review): a confirmed local board keeps its note on a mixed list that
+  // also reads relay boards, and a selected relay board never shows one; with no board selected, only an all-local page.
+  readable: () => {
+    if (!hosted.local || !localConfirmed || !localSession || connection.base !== localSession.origin) return false;
+    const board = data?.projects?.find((entry) => entry.root === view.root && entry.ok);
+    return board ? boardSources.get(board.id)?.kind === 'local' : !transportModule && !transport;
+  },
+  project: (project = data?.project) => project?.releaseNotes ? project : data?.projects?.find((entry) => entry.ok && entry.releaseNotes) })` : '() => {}'};
 
 const hostedState = (${hostedState.toString()});
 const hostedBrowser = (${hostedBrowser.toString()});
@@ -488,13 +502,15 @@ const dayName = (iso) => {
   today.setDate(today.getDate() - 1);
   return then === today.toDateString() ? 'Yesterday' : new Date(iso).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
 };
+// When the page last named days, so tickDays can rename them in place once the clock passes midnight (#644).
+let daysNamedAt = new Date();
 // A feed's rows, newest first, with the day named above each run of rows from the same day.
-const byDay = (rows, at, row) => rows.map((x, i) => (i && new Date(at(x)).toDateString() === new Date(at(rows[i - 1])).toDateString() ? '' : '<h4 class="day">' + dayName(at(x)) + '</h4>') + row(x)).join('');
+const byDay = (rows, at, row) => { daysNamedAt = new Date(); return rows.map((x, i) => (i && new Date(at(x)).toDateString() === new Date(at(rows[i - 1])).toDateString() ? '' : '<h4 class="day">' + dayName(at(x)) + '</h4>') + row(x)).join(''); };
 // Where the shouts cross into an earlier day, a rule names it in the middle; today needs no label at the top.
-const dayRules = (rows, at, row) => rows.map((x, i) => {
+const dayRules = (rows, at, row) => { daysNamedAt = new Date(); return rows.map((x, i) => {
   const day = new Date(at(x)).toDateString(), before = i ? new Date(at(rows[i - 1])).toDateString() : new Date().toDateString();
   return (day === before ? '' : '<div class="day-rule" role="separator"><span>' + dayName(at(x)) + '</span></div>') + row(x);
-}).join('');
+}).join(''); };
 const firstLine = (text) => String(text ?? '').split('\\n').map((line) => line.trim()).find(Boolean) || '';
 /** Omit a duplicated leading verdict code from rendered copy while preserving the recorded note. */
 function visibleVerdictNote(reason, note) {
@@ -1181,6 +1197,7 @@ function boardSummary(board, state) {
   const count = (test) => state.items.filter(test).length;
   return {
     ...board, ok: true,
+    releaseNotes: state.releaseNotes,
     building: count((item) => item.status === 'claimed'),
     awaiting: count((item) => item.status === 'submitted'),
     sentBack: count((item) => item.status === 'open' && item.verdict && item.verdict.decision === 'REJECT'),
@@ -1206,6 +1223,11 @@ function flowMinutes(value) {
   return Math.floor(hours / 24) + ' d ' + hours % 24 + ' h';
 }
 
+/** A queue's oldest item and how long it has waited, as the flow card reads it. */
+function oldestLine(oldest) {
+  return 'Oldest: ' + (oldest ? '#' + oldest.id + ' · ' + flowMinutes(oldest.ageMinutes) : 'none');
+}
+
 /** Render the four stages, live queues and single recommendation supplied by stats [N26]. */
 function proofFlowCard(flow) {
   if (!flow) return '';
@@ -1219,7 +1241,7 @@ function proofFlowCard(flow) {
     const queue = flow.queues[key];
     const oldest = queue.oldest;
     return '<div><span>' + label + ' queue</span><b data-queue="' + key + '" data-value="' + esc(queue.size) + '">' + esc(queue.size) + '</b>'
-      + '<small data-oldest="' + key + '" data-value="' + esc(oldest?.ageMinutes ?? '') + '">Oldest: ' + (oldest ? '#' + esc(oldest.id) + ' · ' + esc(flowMinutes(oldest.ageMinutes)) : 'none') + '</small></div>';
+      + '<small data-oldest="' + key + '" data-value="' + esc(oldest?.ageMinutes ?? '') + '">' + esc(oldestLine(oldest)) + '</small></div>';
   }).join('');
   const bottleneck = flow.bottleneck;
   return '<div class="proof-stats-flow"><div class="proof-stats-grid">' + averages + waiting + '</div>'
@@ -1437,6 +1459,26 @@ async function revokeCredential(id) {
   if (root === view.root) renderCredentials();
 }
 
+/**
+ * A board read as text with its clock readings blanked: the flow's observation time (asOf) and each queue's oldest age
+ * (ageMinutes) are stamped afresh on every read, so two reads that differ only there show the same board (#644).
+ * Matching whole JSON keys is safe: a quote inside any string value is escaped, so no title can look like one.
+ */
+function boardText(state) {
+  return JSON.stringify(state).replace(/"(asOf|ageMinutes)":(?:"[^"]*"|[-+.0-9eE]+|null)/g, '"$1":null');
+}
+
+/** Show each queue's oldest age from the board on hand in place: the one thing on the page that moves with the clock alone. */
+function showFlowAges() {
+  const flow = data?.project?.proofStats?.flow;
+  if (!flow) return;
+  for (const node of document.querySelectorAll('#proof-stats [data-oldest]')) {
+    const oldest = flow.queues[node.dataset.oldest]?.oldest;
+    node.dataset.value = oldest?.ageMinutes ?? '';
+    node.textContent = oldestLine(oldest);
+  }
+}
+
 /** Refresh from API v1, every board or only those in fresh, and discard a response for a project the person left. */
 async function refresh(fresh = null) {
   const generation = ++refreshStarted;
@@ -1474,7 +1516,7 @@ async function refresh(fresh = null) {
     if (place) applyPlace(place, globalThis.history?.state);
     addressReady = true;
   }
-  const text = JSON.stringify(next);
+  const text = boardText(next);
   const changed = text !== seen;
   if (text !== seen) {
     seen = text;
@@ -1484,6 +1526,11 @@ async function refresh(fresh = null) {
     const reading = detailRead;
     render();
     if (detailRead !== reading) await detailRead;
+  } else if (data !== next) {
+    // The same board read again: keep its newest clock readings and show them in place, with no redraw (#644).
+    data = next;
+    showFlowAges();
+    tickAges();
   }
   if (changed) {
     address(false);
@@ -2214,6 +2261,7 @@ function render() {
   document.querySelectorAll('[data-pane]').forEach((pane) => { pane.hidden = Boolean(group) || pane.dataset.pane !== view.tab; });
   $('products').hidden = !p || !p.products.length;
   renderReleaseNotes(group ? null : p);
+  renderHostedReleaseNote(p);
   renderPersonRequests(p);
   renderCredentials();
   if (group) { renderGroup(group); return; }
@@ -3253,6 +3301,24 @@ function foldShouts() {
 
 function tickAges() {
   document.querySelectorAll('[data-ago]').forEach((node) => { node.textContent = node.classList.contains('long') ? agoLong(node.dataset.ago) : ago(node.dataset.ago); });
+  tickDays();
+}
+
+/**
+ * Once the clock has passed midnight since the page named its days, rename them in place with no redraw (#644): the
+ * day that was Today and the one that was Yesterday get their names for now, and the shouts, which carry no rule above
+ * today's, get one above what is no longer today. Every other day was named by its date and stays true.
+ */
+function tickDays() {
+  const then = daysNamedAt, now = new Date();
+  if (then.toDateString() === now.toDateString()) return;
+  const before = new Date(then);
+  before.setDate(then.getDate() - 1);
+  const names = { Today: dayName(then.toISOString()), Yesterday: dayName(before.toISOString()) };
+  document.querySelectorAll('.feed .day, #feed > .day-rule span').forEach((node) => { if (names[node.textContent]) node.textContent = names[node.textContent]; });
+  const first = $('feed')?.querySelector?.('.shout');
+  if (first && !first.previousElementSibling?.classList?.contains('day-rule')) first.insertAdjacentHTML('beforebegin', '<div class="day-rule" role="separator"><span>' + names.Today + '</span></div>');
+  daysNamedAt = now;
 }
 
 /** Open or close the project list where the sidebar is folded into a top bar (under 900px). */
