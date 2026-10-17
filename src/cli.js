@@ -79,6 +79,7 @@ import { citedTestFiles, rowEvidence, rowStage } from './evidence.js';
 import { exportView, serveView } from './serve.js';
 import { forgetView, portHolder, rememberView, runningView } from './view-session.js';
 import { serveApi } from './api.js';
+import { watchCommand } from './watch.js';
 import { serveMcp } from './mcp.js';
 import { doctorProblems, doctrineProblems } from './doctor.js';
 import { staleFrozenItems, staleItemFinding } from './approved-rows.js';
@@ -198,6 +199,7 @@ function commandHelp(name) {
     ] : []),
     'Example:',
     `  ${entry.example}`,
+    ...entry.notes,
   ].join('\n');
 }
 
@@ -301,6 +303,7 @@ const OPTIONS = {
   evidence: { type: 'string' },
   outcome: { type: 'string' },
   item: { type: 'string' },
+  kinds: { type: 'string' }, to: { type: 'string' }, work: { type: 'string' }, 'review-wait': { type: 'string' },
   commit: { type: 'string' },
   ref: { type: 'string' },
   supersedes: { type: 'string' },
@@ -3774,6 +3777,11 @@ async function runCommand(argv, io) {
     if (command === 'view') return await viewHere(io, values);
     if (command === 'serve') return await serveHere(io, values);
     if (command === 'mcp') return await mcpHere(io, args);
+    if (command === 'watch') {
+      const ctx = context(io);
+      return await watchCommand({ io, values, positionals: [first, second, ...rest].filter((word) => word !== undefined), info: ctx.info,
+        config: ctx.config, file: ctx.file, mainRoot: primaryCheckoutRoot(ctx.info) ?? ctx.info.root, isMain: ctx.allowSchemaUpgrade, runCommand: main });
+    }
     if (command === 'forget') {
       if (!first || second) throw new Refused('USAGE', 'pullboard forget <path>');
       const root = resolve(io.cwd, first);
@@ -4001,7 +4009,7 @@ async function runMain(argv, streams) {
       positionals: parsed.positionals.slice(1),
       values: Object.fromEntries(Object.keys(parsed.values).filter(key => key !== 'json').sort().map(key => [key, parsed.values[key]])) };
     sync = Boolean(command) && !parsed.values.help && !parsed.values.version
-      && !['help', 'version', 'hook', 'init', 'relay', 'tour', 'mcp'].includes(command)
+      && !['help', 'version', 'hook', 'init', 'relay', 'tour', 'mcp', 'watch'].includes(command)
       // A coordinator declaration on a linked clone must refuse before auto-link or relay sync.
       && !(command === 'join' && parsed.positionals[1] === COORDINATOR);
     needsRepo = !(parsed.values.help || parsed.values.version || command === 'help' || command === 'version');
@@ -4066,7 +4074,7 @@ export function resultCommands() {
     ...Object.keys(setupCommands({}, args)),
     ...Object.keys(readCommands({}, args)),
     ...Object.keys(workCommands({}, args)),
-    'help', 'version', 'tour', 'lifecycle', 'view', 'serve', 'forget', 'spec', 'prompt', 'hook', 'gate', 'settings', 'runner', 'relay',
+    'help', 'version', 'tour', 'lifecycle', 'view', 'serve', 'watch', 'forget', 'spec', 'prompt', 'hook', 'gate', 'settings', 'runner', 'relay',
   ])].sort();
 }
 
