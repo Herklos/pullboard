@@ -12,6 +12,7 @@ import { listResources, setResourceCapacity, takeResource } from '../src/resourc
 import { parseProcessCensus } from '../src/process-census.js';
 import { listResources as listPreRunnerResources, takeResource as takePreRunnerResource } from './fixtures/resources-pre-runners.js';
 import { runFixtureChild, runFixtureChildAsync, startFixtureChild } from './fixture-child.js';
+import { refuseSandboxBlocked } from '../src/gate.js';
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
 const TEMP = [];
@@ -392,7 +393,7 @@ async function runThroughGate(repo, env, command, { browser = true, item = '663'
 const result = await withGateSlot(${JSON.stringify(repo)}, lease => runProfiledShell(${JSON.stringify(repo)}, ${JSON.stringify(command)}, { gateLease: lease, landing: ${landing} }),
   { browser: ${browser}, item: ${JSON.stringify(item)}, kind: ${JSON.stringify(kind)}, landing: ${landing}, agent: 'runner-fixture' });
 process.stdout.write(result.output);
-process.stdout.write('PULLBOARD_RUN_RESULT ' + JSON.stringify({ isGreen: result.isGreen, runner: result.profile.executionRunner, profile: result.profile }) + '\\n');
+process.stdout.write('PULLBOARD_RUN_RESULT ' + JSON.stringify({ isGreen: result.isGreen, runner: result.profile.executionRunner, sandboxBlocked: result.sandboxBlocked, profile: result.profile }) + '\\n');
 process.exitCode = result.isGreen ? 0 : 1;
 `;
   try {
@@ -1540,6 +1541,74 @@ test('a refused remote setup fails the run by name [C7]', async (t) => {
     else process.env.PULLBOARD_HOME = previousHome;
     if (previousMachineHome === undefined) delete process.env.PULLBOARD_MACHINE_HOME;
     else process.env.PULLBOARD_MACHINE_HOME = previousMachineHome;
+  }
+});
+
+test('a remote file denial is classified on the runner [I1,C7]', { skip: process.getuid?.() === 0 && 'root reads any file' }, async (t) => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-runner-denial-')));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const [home, remoteHome, repo, worker, bin] = ['home', 'worker-home', 'repo', 'second-machine', 'bin'].map(name => join(dir, name));
+  const machineHome = join(home, '.pullboard');
+  const remoteMachineHome = join(remoteHome, '.pullboard');
+  const requests = join(dir, 'ssh-requests.jsonl');
+  const realpaths = join(dir, 'controller-realpaths.log');
+  const preload = join(dir, 'realpath-witness.mjs');
+  for (const folder of [repo, worker, bin, machineHome, remoteMachineHome]) mkdirSync(folder, { recursive: true });
+  writeFileSync(join(machineHome, 'settings.json'), JSON.stringify({ gateSlots: 1 }));
+  // The controller logs every path it realpaths that lies on the runner, so resolving one is caught.
+  writeFileSync(preload, `import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module';
+const real = fs.realpathSync; const native = real.native;
+const log = path => { if (String(path).includes(${JSON.stringify(remoteHome)})) fs.appendFileSync(${JSON.stringify(realpaths)}, String(path) + '\\n'); };
+fs.realpathSync = Object.assign((path, ...rest) => { log(path); return real(path, ...rest); }, { native: (path, ...rest) => { log(path); return native(path, ...rest); } });
+syncBuiltinESMExports();\n`);
+  const env = {
+    ...process.env, HOME: home, PULLBOARD_HOME: home, PULLBOARD_MACHINE_HOME: machineHome,
+    PATH: `${bin}:${process.env.PATH}`, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
+    GIT_AUTHOR_NAME: 'Runner Fixture', GIT_AUTHOR_EMAIL: 'runner-fixture@example.invalid',
+    GIT_COMMITTER_NAME: 'Runner Fixture', GIT_COMMITTER_EMAIL: 'runner-fixture@example.invalid',
+  };
+  git(repo, env, 'init', '-q', '-b', 'main');
+  writeFileSync(join(repo, 'pullboard.json'), JSON.stringify({ gate: 'true' }));
+  git(repo, env, 'add', 'pullboard.json');
+  git(repo, env, 'commit', '-q', '-m', 'test: prepare remote denial fixture');
+  installSshStandIn({ bin, worker, home: remoteHome, machineHome: remoteMachineHome, requests });
+  const added = cli(repo, env, 'runner', 'add', HOST, '--slots', '1', '--browser', '1', '--json');
+  assert.equal(added.status, 0, added.context);
+  const controllerEnv = { ...env, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --import=${pathToFileURL(preload).href}`.trim() };
+  // The unreadable file sits beside the runner's checkout, outside its worktree, on the runner only.
+  const denied = "mkdir ../denied && echo kept > ../denied/secret && chmod 000 ../denied/secret && node -e \"require('node:fs').readFileSync('../denied/secret')\"";
+  const ordinary = "node -e \"require('node:assert').strictEqual('open ../denied/secret (EACCES)', 'an ordinary assertion')\"";
+  const previous = [process.env.PULLBOARD_HOME, process.env.PULLBOARD_MACHINE_HOME];
+  process.env.PULLBOARD_HOME = home;
+  process.env.PULLBOARD_MACHINE_HOME = machineHome;
+  let held;
+  try {
+    // Fill the controller's own gate so each run goes to the runner.
+    held = await takeResource({ name: 'gate', capacity: 1, scope: 'machine', root: repo,
+      agent: 'fixture-local-holder', item: 'local-holder', kind: 'force-registered-runner' });
+    const blocked = await runThroughGate(repo, controllerEnv, denied, { item: '706', requests });
+    const blockedResult = gateResult(blocked.stdout);
+    assert.equal(blockedResult.runner, HOST, fixtureResultContext(blocked));
+    assert.equal(blockedResult.isGreen, false);
+    assert.match(blocked.stdout, /EACCES: permission denied, open '\.\.\/denied\/secret'/u, 'the raw denial still comes back unchanged');
+    assert.equal(blockedResult.sandboxBlocked, `open outside its worktree (EACCES) on runner ${HOST}`,
+      `the controller names the operation and the runner host from the runner's evidence\n${fixtureResultContext(blocked)}`);
+    assert.throws(() => refuseSandboxBlocked(blockedResult), error => error.code === 'SANDBOX_BLOCKED'
+      && error.message.includes(`refused open outside its worktree (EACCES) on runner ${HOST}`), 'a remote denial asks the person');
+    const failed = await runThroughGate(repo, controllerEnv, ordinary, { item: '706', requests });
+    const failedResult = gateResult(failed.stdout);
+    assert.equal(failedResult.runner, HOST, fixtureResultContext(failed));
+    assert.equal(failedResult.isGreen, false);
+    assert.match(failed.stdout, /AssertionError/u);
+    assert.equal(failedResult.sandboxBlocked, null, 'an ordinary remote assertion failure stays ordinary');
+    assert.doesNotThrow(() => refuseSandboxBlocked(failedResult));
+    assert.equal(existsSync(realpaths) ? readFileSync(realpaths, 'utf8') : '', '', 'the controller never realpaths a runner path');
+  } finally {
+    held?.release();
+    for (const [key, value] of [['PULLBOARD_HOME', previous[0]], ['PULLBOARD_MACHINE_HOME', previous[1]]]) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 });
 
