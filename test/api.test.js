@@ -658,6 +658,8 @@ test('[A1] command results match the catalog across roots and subcommands', () =
   const added = json(box, repo, 'add', ['coordinator', 'API item', '--specs', 'G1', '--criterion', 'the API item is verified', '--check', 'true']);
   assert.equal(added.item.item_id, 1);
   json(box, repo, 'fact', ['1', 'note', 'API fact']);
+  json(box, repo, 'fact', ['1', 'decision', 'API decision', '--implies', '1']);
+  assert.equal(json(box, repo, 'why', ['1']).decisions[0].line, 'API decision', 'why lists the decision that implies the item [N29]');
   json(box, repo, 'edit', ['1', '--criterion', 'the edited API item is verified', '--check', 'true']);
   json(box, repo, 'show', ['1']);
   json(box, repo, 'list', ['--all']);
