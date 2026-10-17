@@ -703,7 +703,8 @@ test('a private check never refuses its own remote lease [C7,V4]', async (t) => 
     assert.equal(reviewTicket().remote, undefined, 'the private check queues for a local slot only, never the runner');
 
     const command = `node -e ${shellQuote('process.stdout.write("GATE_ON_RUNNER\\n")')}`;
-    const gate = runThroughGate(box.repo, env, command, { item: 'private-check-gate', timeout: 20_000 }); // budget: bound a broken fixture-only remote dispatch.
+    // The round trip's phase deadlines bound a broken fixture-only remote dispatch.
+    const gate = await runThroughGate(box.repo, env, command, { item: 'private-check-gate', requests });
     assert.equal(gate.status, 0, `a gate run still dispatches to the runner while the review waits: ${fixtureResultContext(gate)}`);
     assert.match(gate.stdout, /GATE_ON_RUNNER/u);
     assert.equal(gateResult(gate.stdout).runner, HOST, 'the gate run executed on the registered runner');
