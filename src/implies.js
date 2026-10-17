@@ -10,7 +10,7 @@
  * caller can mint a person-origin citation (P6). The only route to `by: "person"` is a real
  * person answer, which keeps its own person-channel rules.
  */
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { COORDINATOR } from './config.js';
@@ -108,9 +108,15 @@ export function factDecisionRef(fact, itemId) {
   return { source: 'fact', id: fact.id, item: itemId, by: fact.by, line: firstLine(fact.text) };
 }
 
-/** A fresh seed for implied-fact ids when no sealed move supplies one; replay passes the move id. */
+/**
+ * The seed for implied-fact ids: the sealed move id on replay, or a fresh one when no move supplies it.
+ * A move id may be 80 characters, but an implied id adds a suffix and must still fit a fact id, so a
+ * move id longer than 72 is replaced by a digest of itself: every replica derives the same ids.
+ */
 export function impliesSeed(seed) {
-  return typeof seed === 'string' && /^[A-Za-z0-9_-]{1,72}$/u.test(seed) ? seed : randomUUID();
+  if (typeof seed === 'string' && /^[A-Za-z0-9_-]{1,72}$/u.test(seed)) return seed;
+  if (typeof seed === 'string' && /^[A-Za-z0-9_-]{73,80}$/u.test(seed)) return `h${createHash('sha256').update(seed).digest('base64url').slice(0, 43)}`;
+  return randomUUID();
 }
 
 /**
@@ -268,11 +274,12 @@ export function tellAnswerImplications(board, log, answerId, { seed, implies, su
 export function tellFactImplications(board, log, fact, { id, implies, supersedes }) {
   const named = checkImplies(board, implies);
   const decision = factDecisionRef(fact, id);
-  writeImplied(log, { seed: fact.id, decision, implies: named });
+  const seed = impliesSeed(fact.id);
+  writeImplied(log, { seed, decision, implies: named });
   if (supersedes !== null && tellsSupersession(board)) {
     const row = board.db.prepare("SELECT event_by, event_detail FROM event WHERE event_kind = 'fact' AND item_id = ? AND json_extract(event_detail, '$.id') = ?").get(id, supersedes);
     const old = factDecisionRef({ id: supersedes, by: row.event_by, text: JSON.parse(row.event_detail).text }, id);
-    writeSuperseded(log, { seed: fact.id, old, next: decision, implies: impliedItems(board, old) });
+    writeSuperseded(log, { seed, old, next: decision, implies: impliedItems(board, old) });
   }
   return fact;
 }

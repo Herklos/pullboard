@@ -219,3 +219,34 @@ test('[P6,B26,H16] --implies cannot forge a person-origin fact through the relay
       { code: 'B26_PERSON_ANSWER' }, "an agent cannot supersede the person's decision");
   } finally { store.closeBoard(board); }
 });
+
+test('[B29,B31] every replica derives the same implied-fact ids for every supported move id', () => {
+  /** Build one board the same way on each replica, with a fixed clock. */
+  const replica = () => {
+    let at = Date.parse('2026-10-17T00:00:00.000Z');
+    const board = store.openBoard(':memory:', { now: () => new Date(at += 1000) });
+    store.register(board, { lane: 'coordinator', path: '/repo' });
+    store.register(board, { lane: 'web', path: '/repo-web-1' });
+    const one = store.addItem(board, { by: 'coordinator', lane: 'web', title: 'One' });
+    const two = store.addItem(board, { by: 'coordinator', lane: 'web', title: 'Two' });
+    return { board, one, two };
+  };
+  for (const [path, length] of [1, 72, 73, 80].flatMap((n) => [['fact', n], ['answer', n]])) {
+    const id = 'm'.repeat(length);
+    const ids = [];
+    for (const side of [replica(), replica()]) {
+      try {
+        const ask = store.shout(side.board, { from: 'web-1', to: 'coordinator', text: 'Which way?', decision: true, lanes: ['web'] });
+        const move = path === 'fact'
+          ? prepareEngineMove(side.board, 'appendFact', [side.one, { agentId: 'coordinator', kind: 'decision', text: `Boundary ${length}`, implies: [side.two] }], { id, actor: 'coordinator' })
+          : prepareEngineMove(side.board, 'answerDecision', [ask, { agentId: 'coordinator', text: `Boundary ${length}`, lanes: ['web'], implies: [side.two] }], { id, actor: 'coordinator' });
+        const applied = applyEngineMove(side.board, move, { sequence: 1, at: '2026-10-17T00:00:30.000Z' });
+        assert.equal(applied.error, undefined, JSON.stringify(applied.error));
+        ids.push(store.itemThread(side.board, side.two).filter((entry) => entry.type === 'fact' && entry.decision).map((entry) => entry.id));
+      } finally { store.closeBoard(side.board); }
+    }
+    assert.equal(ids[0].length, 1, `a ${length}-character ${path} move id implies one fact`);
+    assert.deepEqual(ids[0], ids[1], `a ${length}-character ${path} move id gives the same implied-fact id on both replicas`);
+    assert.ok(ids[0][0].length <= 80, `the implied-fact id fits a fact id: ${ids[0][0]}`);
+  }
+});
