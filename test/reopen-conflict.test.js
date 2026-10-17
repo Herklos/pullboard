@@ -1,10 +1,11 @@
 /** Real Git and SQLite coverage for an accepted item that conflicts with the trunk [B3,D1]. */
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
 import * as store from '../src/board.js';
+import { moveArgs } from '../src/api-moves.js';
 import { applyRelayMove, prepareEngineMove } from '../src/engine.js';
 import { exportBoard, importBoard } from '../src/exchange.js';
 import { ENGINE_VERSION } from '../src/machine.js';
@@ -14,6 +15,10 @@ import { createE2eHelpers } from './e2e-helpers.js';
 const e2e = createE2eHelpers();
 after(e2e.cleanup);
 const { project, commitFile } = e2e;
+
+/** Real Git paths with a space and a comma; each conflict names them exactly as Git does. */
+const ODD_FILES = ['web/my feature.js', 'web/a,b.js'];
+const ALL_FILES = ['web/feature.js', ...ODD_FILES];
 
 /** Read an item, its thread and its verdicts through a short-lived board connection. */
 function readItem(box, id) {
@@ -34,6 +39,8 @@ function submitItem(box, title, contents) {
   assert.equal(added.code, 0, added.err);
   const id = JSON.parse(added.out).item.item_id;
   assert.equal(box.run(box.web, 'claim', String(id)).code, 0);
+  mkdirSync(join(box.web, 'web'), { recursive: true });
+  for (const file of ODD_FILES) writeFileSync(join(box.web, file), contents);
   const committed = commitFile(box, box.web, 'web/feature.js', contents, `feat(web): ${title.toLowerCase()} [G1]`);
   assert.equal(committed.status, 0, committed.stderr);
   const submitted = box.run(box.web, 'submit', String(id));
@@ -52,6 +59,7 @@ function accept(box, id, commit) {
 
 /** Move the trunk under an accepted item: main changes the same line of web/feature.js. */
 function moveTrunk(box) {
+  for (const file of ODD_FILES) { mkdirSync(join(box.repo, 'web'), { recursive: true }); writeFileSync(join(box.repo, file), 'export const status = "TRUNK";\n'); }
   const committed = commitFile(box, box.repo, 'web/feature.js', 'export const status = "TRUNK";\n', 'feat(web): trunk changes the status [G1]');
   assert.equal(committed.status, 0, committed.stderr);
   return box.git(box.repo, 'rev-parse', 'HEAD');
@@ -79,16 +87,22 @@ test('a conflicting accepted item reopens for a main merge [B3,D1]', () => {
   assert.equal(refusal(box.run(box.repo, 'reopen', String(item.id), '--json')), 'NOTE_REQUIRED');
   assert.equal(refusal(box.run(box.repo, 'reopen', String(item.id), '--note', 'conflicts with main', '--json')), 'LANDING_FAILURE_REQUIRED',
     'a verified item without --conflict or a landing failure note is still refused');
-  const wrongFile = box.run(box.repo, 'reopen', String(item.id), '--conflict', 'web/feature.js, web/other.js', '--json');
+  const wrongFile = box.run(box.repo, 'reopen', String(item.id), '--conflict', 'web/feature.js', '--conflict', 'web/other.js', '--json');
   assert.equal(refusal(wrongFile), 'CONFLICT_FILES', 'every named file must be one Git reports as conflicting');
   assert.match(JSON.parse(wrongFile.out).error.message, /web\/other\.js does not conflict/u);
-  assert.equal(refusal(box.run(box.repo, 'reopen', String(item.id), '--conflict', ' , ', '--json')), 'CONFLICT_FILES');
+  assert.equal(refusal(box.run(box.repo, 'reopen', String(item.id), '--conflict', '', '--json')), 'CONFLICT_FILES', 'an empty name names nothing');
   assert.equal(readItem(box, item.id).item_status, 'verified', 'no refusal changed the item');
 
-  const reopened = box.run(box.repo, 'reopen', String(item.id), '--conflict', 'web/feature.js', '--json');
+  const joined = box.run(box.repo, 'reopen', String(item.id), '--conflict', 'web/my feature.js, web/a,b.js', '--json');
+  assert.equal(refusal(joined), 'CONFLICT_FILES', 'one value is one exact path; nothing inside it is split');
+  assert.match(JSON.parse(joined.out).error.message, /^"web\/my feature\.js, web\/a,b\.js" does not conflict/u);
+  assert.equal(refusal(box.run(box.repo, 'reopen', String(item.id), '--conflict', ' web/feature.js', '--json')), 'CONFLICT_FILES', 'nothing is trimmed');
+  assert.deepEqual(moveArgs({ verb: 'reopen', item: item.id, args: { conflict: ODD_FILES } }),
+    ['reopen', String(item.id), '--conflict=web/my feature.js', '--conflict=web/a,b.js', '--json', '--'], 'the API passes each path as its own flag');
+  const reopened = box.run(box.repo, 'reopen', String(item.id), ...ALL_FILES.flatMap((file) => ['--conflict', file]), '--json');
   assert.equal(reopened.code, 0, [reopened.out, reopened.err].join('\n'));
   const receipt = JSON.parse(reopened.out);
-  assert.deepEqual(receipt.conflict, { files: ['web/feature.js'], trunk }, 'the receipt names the conflicting files and the trunk commit');
+  assert.deepEqual(receipt.conflict, { files: ALL_FILES, trunk }, 'the receipt names the conflicting files exactly and the trunk commit');
   assert.equal(receipt.landingFailure, undefined, 'a trunk conflict is never a landing test failure');
   const returned = readItem(box, item.id);
   assert.equal(returned.item_status, 'open');
@@ -96,7 +110,7 @@ test('a conflicting accepted item reopens for a main merge [B3,D1]', () => {
   const acceptEvent = returned.thread.findLast((entry) => entry.type === 'move' && entry.kind === 'accept');
   const reopenEvent = returned.thread.findLast((entry) => entry.type === 'move' && entry.kind === 'reopen');
   assert.equal(reopenEvent.detail.supersedes, acceptEvent.eventId, 'the reopen names the accept it sets aside');
-  assert.deepEqual(reopenEvent.detail.conflict, { files: ['web/feature.js'], trunk });
+  assert.deepEqual(reopenEvent.detail.conflict, { files: ALL_FILES, trunk });
   assert.equal(reopenEvent.detail.landingFailure, undefined);
   assert.match(reopenEvent.detail.note, /conflicts with the trunk at [a-f0-9]{12} in web\/feature\.js/u);
   assert.deepEqual(returned.verdicts.map((verdict) => verdict.verdict_decision), ['ACCEPT'], 'no reject is recorded; the accept stands');
@@ -104,7 +118,7 @@ test('a conflicting accepted item reopens for a main merge [B3,D1]', () => {
   const shown = box.run(box.repo, 'show', String(item.id));
   assert.match(shown.out, new RegExp(`^#${item.id}  open \\(needs main merge\\)  web`, 'mu'), 'the item reads as needing a main merge, not rejected');
   assert.doesNotMatch(shown.out, /\(rejected\)/u);
-  assert.match(shown.out, new RegExp(`needs main merge: accepted by coordinator \\(unknown\\) at ${item.commit.slice(0, 12)}; conflicts with the trunk at ${trunk.slice(0, 12)} in web/feature\\.js`, 'u'));
+  assert.match(shown.out, new RegExp(`needs main merge: accepted by coordinator \\(unknown\\) at ${item.commit.slice(0, 12)}; conflicts with the trunk at ${trunk.slice(0, 12)} in web/feature\\.js, "web/my feature\\.js", "web/a,b\\.js"`, 'u'));
   assert.match(shown.out, new RegExp(`next: pullboard claim ${item.id} \\(the bar is unchanged\\), merge main`, 'u'));
   assert.match(box.run(box.repo, 'list', 'web').out, new RegExp(`#${item.id}  open \\(needs main merge\\)`, 'u'));
   const resume = box.run(box.web, 'resume', '--json');

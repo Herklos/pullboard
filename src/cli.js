@@ -36,7 +36,7 @@ import { askedLaneNotes, detectGate, initRepo, proposeLanes, starterLane, starte
 import { lifecycleMarkdown } from './machine.js';
 import { HELP, VERSION } from './help.js';
 import { barCorrectionLine, barCorrections, barStatsLines } from './bar-corrections.js';
-import { MAIN_MERGE_LABEL, mainMergeFor, mainMergeLines, reopenConflict } from './trunk-conflict.js';
+import { MAIN_MERGE_LABEL, mainMergeFor, mainMergeLines, reopenConflict, shownPath } from './trunk-conflict.js';
 import { checkImplies, decisionsImplying, parseImplies, takeDecisionNotices, whyLine } from './implies.js';
 import { defaultViewPort } from './view-port.js';
 export { HELP, VERSION };
@@ -305,7 +305,7 @@ const OPTIONS = {
   commit: { type: 'string' },
   ref: { type: 'string' },
   supersedes: { type: 'string' },
-  conflict: { type: 'string' },
+  conflict: { type: 'string', multiple: true },
   implies: { type: 'string' },
   owns: { type: 'string' },
   help: { type: 'boolean', short: 'h' },
@@ -3182,11 +3182,11 @@ function workCommands(io, args) {
       return 0;
     }),
     reopen: () => act(async (ctx, board, me) => {
-      const conflict = values.conflict === undefined ? undefined : reopenConflict({ item: store.getItem(board, idArg(first)), coordinator: me.id === COORDINATOR, text: values.conflict, trunkMerge: (commit) => trunkMerge(ctx.info.root, commit) });
+      const conflict = values.conflict === undefined ? undefined : reopenConflict({ item: store.getItem(board, idArg(first)), coordinator: me.id === COORDINATOR, values: values.conflict, trunkMerge: (commit) => trunkMerge(ctx.info.root, commit) });
       const result = await ordered(ctx, board, 'reopen', [idArg(first), { agentId: me.id, note: textArg(io, values, 'note') ?? '', ...(conflict ? { conflict } : {}) }]);
       io.result?.(result);
       io.say(result.conflict
-        ? `reopened #${first} for a main merge: conflicts with the trunk at ${result.conflict.trunk.slice(0, 12)} in ${result.conflict.files.join(', ')}; the accept at ${result.commit.slice(0, 12)} stays recorded`
+        ? `reopened #${first} for a main merge: conflicts with the trunk at ${result.conflict.trunk.slice(0, 12)} in ${result.conflict.files.map(shownPath).join(', ')}; the accept at ${result.commit.slice(0, 12)} stays recorded`
         : result.landingFailure
           ? `reopened #${first} after landing failure; previous accept remains recorded at ${result.commit.slice(0, 12)}`
           : `reopened #${first} without a verdict; previous commit ${result.commit.slice(0, 12)} remains recorded`);

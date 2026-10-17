@@ -3,7 +3,7 @@
  *
  * When two accepted items touch the same lines, the second no longer merges onto the trunk. That
  * is not a failed test and not a reject: the work was accepted and only needs main merged into
- * it. `pullboard reopen <id> --conflict "<files>"` records exactly that, naming the conflicting
+ * it. `pullboard reopen <id> --conflict <file>` (once per file) records exactly that, naming the conflicting
  * files and the trunk commit they conflict with, and keeps the original accept on record. The
  * builder claims it with its bar unchanged, merges main and resubmits; the re-review checks the
  * frozen check at the new head and nothing else.
@@ -29,14 +29,30 @@ export function carriesConflict(operation, args) {
 }
 
 /**
- * The file paths named by a `--conflict` value, split on commas and white space, without repeats.
+ * The file paths `--conflict` names: one exact path per flag, in order, without repeats. Nothing is
+ * split or trimmed inside a value, because a Git path may hold spaces, commas or any byte but NUL,
+ * and it must match the path `git merge-tree -z` reports byte for byte.
  *
- * @param {string} text
+ * @param {string | string[] | undefined} values - one value per --conflict flag
  * @returns {string[]}
  */
-export function conflictFiles(text) {
-  return [...new Set(String(text ?? '').split(/[\s,]+/u).filter(Boolean))];
+export function conflictFiles(values) {
+  return [...new Set([values ?? []].flat())];
 }
+
+/**
+ * A path as a reader sees it in a message or line: plain when it holds only ordinary path
+ * characters, otherwise JSON-quoted, so a space or comma inside a name never reads as two names.
+ *
+ * @param {string} path
+ * @returns {string}
+ */
+export function shownPath(path) {
+  return /^[\w./@+-]+$/u.test(path) ? path : JSON.stringify(path);
+}
+
+/** Paths for a message or line, each shown unambiguously, separated by commas. */
+const shownPaths = (paths) => paths.map(shownPath).join(', ');
 
 /**
  * Check the trunk for the conflict the coordinator names, so --conflict cannot stand in for a
@@ -49,12 +65,12 @@ export function conflictFiles(text) {
  * @returns {{ files: string[], trunk: string }}
  */
 export function requireTrunkConflict(trunkMerge, commit, files) {
-  if (!files.length) throw new Refused('CONFLICT_FILES', 'name the files that conflict: pullboard reopen <id> --conflict "<file>, <file>"');
+  if (!files.length || files.some((file) => !file || file.includes('\0'))) throw new Refused('CONFLICT_FILES', 'name each file that conflicts with its own flag: pullboard reopen <id> --conflict <file> [--conflict <file>]');
   const merge = trunkMerge(commit);
   const branch = merge.ref.replace(/^refs\/heads\//u, '');
   if (!merge.files) throw new Refused('NOT_CONFLICTING', `${commit.slice(0, 12)} merges cleanly onto ${branch} at ${merge.commit.slice(0, 12)}; merge it, or reopen with --note "<test file>: <test name>; merge commit <sha>" after a red landing`);
   const unknown = files.filter((file) => !merge.files.includes(file));
-  if (unknown.length) throw new Refused('CONFLICT_FILES', `${unknown.join(', ')} ${unknown.length === 1 ? 'does' : 'do'} not conflict with ${branch} at ${merge.commit.slice(0, 12)}; the conflicting files are ${merge.files.join(', ') || 'unnamed'}`);
+  if (unknown.length) throw new Refused('CONFLICT_FILES', `${shownPaths(unknown)} ${unknown.length === 1 ? 'does' : 'do'} not conflict with ${branch} at ${merge.commit.slice(0, 12)}; the conflicting files are ${shownPaths(merge.files) || 'unnamed'}; name each with its own --conflict <file>`);
   return { files, trunk: merge.commit };
 }
 
@@ -63,11 +79,11 @@ export function requireTrunkConflict(trunkMerge, commit, files) {
  * or an item that is not accepted and unmerged, gets the files alone, so the board's own guards
  * refuse it in their declared order (COORDINATOR_ONLY, NOT_SUBMITTED, ALREADY_MERGED, NOT_ACCEPTED).
  *
- * @param {{ item: any, coordinator: boolean, text: string, trunkMerge: (commit: string) => { ref: string, commit: string, files: string[] | null } }} request
+ * @param {{ item: any, coordinator: boolean, values: string | string[] | undefined, trunkMerge: (commit: string) => { ref: string, commit: string, files: string[] | null } }} request
  * @returns {{ files: string[], trunk: string | null }}
  */
-export function reopenConflict({ item, coordinator, text, trunkMerge }) {
-  const files = conflictFiles(text);
+export function reopenConflict({ item, coordinator, values, trunkMerge }) {
+  const files = conflictFiles(values);
   if (!coordinator || item.item_status !== 'verified' || item.item_merged_commit || !item.item_commit) return { files, trunk: null };
   return requireTrunkConflict(trunkMerge, item.item_commit, files);
 }
@@ -88,9 +104,9 @@ export function conflictProblem(board, item, conflict, found) {
   if (item.item_status !== 'verified') return new Refused('NOT_ACCEPTED', `item #${item.item_id} is ${item.item_status}; --conflict reopens accepted work for a main merge, and a submission reopens with --note "why"`);
   const shape = /** @type {any} */ (conflict);
   const files = Array.isArray(shape?.files) ? shape.files : [];
-  if (!files.length || files.some((file) => typeof file !== 'string' || !file.trim() || /[\r\n]/u.test(file)) || new Set(files).size !== files.length
+  if (!files.length || files.some((file) => typeof file !== 'string' || !file || file.includes('\0')) || new Set(files).size !== files.length
     || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(shape?.trunk ?? '')) {
-    return new Refused('BAD_CONFLICT', 'a trunk conflict names its files and the full trunk commit; run pullboard reopen <id> --conflict "<files>" from the main checkout');
+    return new Refused('BAD_CONFLICT', 'a trunk conflict names its files and the full trunk commit; run pullboard reopen <id> --conflict <file> from the main checkout');
   }
   const accept = board.db.prepare("SELECT event_id FROM event WHERE item_id = ? AND event_kind = 'accept' AND json_extract(event_detail, '$.commit') = ? ORDER BY event_id DESC LIMIT 1").get(item.item_id, item.item_commit);
   if (!accept) return new Refused('NOT_ACCEPTED', `item #${item.item_id} has no accept at ${String(item.item_commit).slice(0, 12)}; --conflict reopens accepted work for a main merge`);
@@ -117,7 +133,7 @@ export function conflictDetail({ files, trunk }) {
 
 /** The note a conflict reopen records when the coordinator gives none. */
 export function conflictNote({ files, trunk }) {
-  return `conflicts with the trunk at ${trunk.slice(0, 12)} in ${files.join(', ')}; merge main and resubmit`;
+  return `conflicts with the trunk at ${trunk.slice(0, 12)} in ${shownPaths(files)}; merge main and resubmit`;
 }
 
 /**
@@ -148,7 +164,7 @@ export function mainMergeFor(board, id) {
  */
 export function mainMergeLines(item, merge, name = (id) => id) {
   const accepted = merge.accept ? `accepted by ${name(merge.accept.by)} at ${merge.accept.commit.slice(0, 12)}` : 'accepted';
-  const head = `${MAIN_MERGE_LABEL}: ${accepted}; conflicts with the trunk at ${merge.trunk.slice(0, 12)} in ${merge.files.join(', ')}`;
+  const head = `${MAIN_MERGE_LABEL}: ${accepted}; conflicts with the trunk at ${merge.trunk.slice(0, 12)} in ${shownPaths(merge.files)}`;
   if (item.item_status === 'submitted') return [head, `re-review: main merge only; run the frozen check at ${item.item_commit.slice(0, 12)}; the accept above stands for the rest`];
-  return [head, `next: pullboard claim ${item.item_id} (the bar is unchanged), merge main, resolve ${merge.files.join(', ')}, commit, pullboard submit ${item.item_id}`];
+  return [head, `next: pullboard claim ${item.item_id} (the bar is unchanged), merge main, resolve ${shownPaths(merge.files)}, commit, pullboard submit ${item.item_id}`];
 }
