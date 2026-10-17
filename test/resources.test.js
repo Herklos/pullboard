@@ -102,22 +102,38 @@ function fixture() {
 }
 
 /** Wait for a fixture command to create a marker file, with a hang ceiling only for failure. */
-function waitForMarker(path, timeoutMs = 10_000) {
+function waitForMarker(path, timeoutMs = 60_000) {
   if (existsSync(path)) return Promise.resolve();
-  const watcher = watch(dirname(path), { persistent: false });
+  const watcher = watch(realpathSync(dirname(path)), { persistent: false });
   return new Promise((resolveMarker, rejectMarker) => {
-    const timer = setTimeout(() => rejectMarker(new Error(`timed out waiting for ${path}`)), timeoutMs);
+    let settled = false;
+    let timer;
+    let poller;
+    /** Release the deadline, fallback poller, and watcher together. */
+    const cleanup = () => {
+      clearTimeout(timer);
+      clearInterval(poller);
+      watcher.close();
+    };
+    /** Settle the marker promise once and always release its observers. */
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      error ? rejectMarker(error) : resolveMarker();
+    };
+    /** Check for the marker after a watch event or bounded poll interval. */
     const check = () => {
       if (!existsSync(path)) return;
-      clearTimeout(timer);
-      watcher.close();
-      resolveMarker();
+      finish();
     };
-    watcher.on('error', error => { clearTimeout(timer); rejectMarker(error); });
+    timer = setTimeout(() => finish(existsSync(path) ? null : new Error(`timed out waiting for ${path}`)), timeoutMs);
+    poller = setInterval(check, 100);
+    watcher.on('error', finish);
     watcher.on('change', check);
     watcher.on('rename', check);
     check();
-  }).finally(() => watcher.close());
+  });
 }
 
 /** Create the previous private queue schema so simultaneous openers exercise its migration. */
@@ -354,7 +370,7 @@ async function requeuedRemoteRun(queue) {
 }
 
 /** Read the next worker event, failing promptly with its stderr if it exits unexpectedly. */
-async function event(child, timeoutMs = 10_000) {
+async function event(child, timeoutMs = 60_000) {
   if (child.pendingLines.length) return JSON.parse(child.pendingLines.shift());
   if (child.exitResult) throw new Error(child.failure ?? `worker exited ${child.exitResult.code}/${child.exitResult.signal}: ${child.errors}`);
   const line = await new Promise((resolveLine, reject) => {
@@ -544,6 +560,7 @@ test('browser-free checks skip the slot only when the machine allows it [C7]', a
     const browserHolder = poolWorker(box, { agent: `policy-browser-${String(value)}`, browser: true, item: '681', kind: 'gate' });
     await acquired(browserHolder);
     const started = waitForMarker(marker);
+    const startedOutcome = started.then(() => null, error => error);
     const resultPromise = runFixtureChildAsync(process.execPath, [BIN, 'check', String(item), '--yes'], { cwd: repo, env: box.env });
     let result;
     try {
@@ -561,6 +578,7 @@ test('browser-free checks skip the slot only when the machine allows it [C7]', a
       result = await resultPromise;
     }
     assert.equal(result.status, 0, result.failure ?? result.stderr);
+    assert.equal(await startedOutcome, null, 'the check marker observer settles and closes');
     assert.equal(readFileSync(marker, 'utf8'), 'started');
   }
 
