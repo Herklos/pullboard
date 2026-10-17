@@ -311,7 +311,8 @@ function fixture(t) {
   }
   git('init', '-q', '-b', 'main');
   cli(root, 'init');
-  const config = JSON.parse(readFileSync(join(root, 'pullboard.json'), 'utf8'));
+  // HTTP fixtures file "true" checks to move items, so they keep a board with no hold setting.
+  const { checks: _hold, ...config } = JSON.parse(readFileSync(join(root, 'pullboard.json'), 'utf8'));
   writeFileSync(join(root, 'pullboard.json'), JSON.stringify({ ...config, gate: 'true', lanes: { app: { owns: ['app/'] }, review: { owns: [] } } }));
   writeFileSync(join(root, 'SPEC.md'), '# HTTP fixture\n\n## Goals\n- G1 [approved, must] Keep the board. | gate: true\n');
   writeFileSync(join(root, 'DOCTRINE.md'), '');

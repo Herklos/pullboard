@@ -17,6 +17,60 @@ import { fetchPrintedViewLink } from './view-link-fixture.js';
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
 
+test('a busy port names the program, not its thread [N26,I1]', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'pullboard-port-program-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const script = String.raw`
+import fs from 'node:fs';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+const original = { exists: fs.existsSync, read: fs.readFileSync, spawn: childProcess.spawnSync,
+  platform: Object.getOwnPropertyDescriptor(process, 'platform') };
+let listedName = 'MainThread';
+let program = '/opt/Runtime Folder/bin/node';
+fs.existsSync = path => ['/usr/sbin/lsof', '/usr/bin/lsof'].includes(path) || original.exists(path);
+fs.readFileSync = (path, ...args) => path === '/proc/43210/cmdline'
+  ? Buffer.from([program, '/private/DO_NOT_LEAK.js', '--token=DO_NOT_LEAK', ''].join(String.fromCharCode(0)))
+  : original.read(path, ...args);
+childProcess.spawnSync = (command, args, options) => {
+  if (command.endsWith('/lsof')) return { status: 0, stdout: 'p43210\nc' + listedName + '\n' };
+  if (command.endsWith('/ps')) return { status: 0, stdout: program + '\n' };
+  throw new Error('unexpected fixture process: ' + command);
+};
+syncBuiltinESMExports();
+try {
+  const { portHolder } = await import(process.argv[1]);
+  const threaded = [];
+  for (program of ['/opt/Runtime Folder/bin/node', '/opt/Runtime Folder/bin/fixture-server']) {
+    for (const platform of ['linux', 'darwin']) {
+      Object.defineProperty(process, 'platform', { value: platform, configurable: true });
+      threaded.push(portHolder(31337));
+    }
+  }
+  listedName = 'python3';
+  const ordinary = portHolder(31337);
+  process.stdout.write(JSON.stringify({ threaded, ordinary }));
+} finally {
+  fs.existsSync = original.exists; fs.readFileSync = original.read; childProcess.spawnSync = original.spawn;
+  Object.defineProperty(process, 'platform', original.platform);
+  syncBuiltinESMExports();
+}
+`;
+  const result = runFixtureChild(process.execPath, ['--input-type=module', '-e', script,
+    pathToFileURL(resolve(import.meta.dirname, '../src/view-session.js')).href], {
+    cwd: dir, encoding: 'utf8',
+    env: { ...process.env, HOME: join(dir, 'home'), PULLBOARD_HOME: join(dir, 'home', '.pullboard'),
+      PULLBOARD_MACHINE_HOME: join(dir, 'machine-home') },
+  });
+  assert.equal(result.status, 0, result.failure ?? result.stderr);
+  const named = JSON.parse(result.stdout);
+  assert.deepEqual(named.threaded, [{ pid: 43210, name: 'node' }, { pid: 43210, name: 'node' },
+    { pid: 43210, name: 'fixture-server' }, { pid: 43210, name: 'fixture-server' }],
+    'Linux and macOS name the program behind a MainThread listener');
+  assert.deepEqual(named.ordinary, { pid: 43210, name: 'python3' }, 'an ordinary program name stays unchanged');
+  assert.doesNotMatch(result.stdout, /DO_NOT_LEAK/u, 'a script path and command arguments never become the program label');
+});
+
 test('the shipped view port stays fixed and malformed environment overrides are refused [N26]', () => {
   assert.equal(DEFAULT_VIEW_PORT, 4890);
   assert.equal(defaultViewPort({}), DEFAULT_VIEW_PORT);
