@@ -17,7 +17,7 @@ import { doctrineHistory, loadDoctrine } from './doctrine.js';
 import { checkRulesAt, doctrineReport, hasSubmitRules, holdDoctrine, ruleLine } from './doctrine-checks.js';
 import { agentSessionDigest, requirePersonChannel } from './person.js';
 import { bindLocalSession, localSessionMatches } from './agent-session.js';
-import { decisionAnswer, decisionProjection, handAnsweredQuestions, planRowApply, prepareRowDecisions, restoreRowApply, writeRowApply } from './row-decisions.js';
+import { decisionAnswer, decisionProjection, handAnsweredQuestions, pendingAnswers, planRowApply, prepareRowDecisions, restoreRowApply, writeRowApply } from './row-decisions.js';
 import { digestOf, gateReport, refuseSandboxBlocked, runGate, runProfiledShell, runSubmitGate, submitGateReport, timingDigest, withGateSlot } from './gate.js';
 import { checkNeedsBrowser } from './browser-admission.js';
 import { bareWorktreeFinding, codeIsFromMain, contains, differFromHead, git, gitChildEnv, headCommit, headTree, invalidateGitFacts, isClean, mainCheckout, patchId, repoInfo, resolveCommit, tryGit, untracked, withGitFacts } from './git.js';
@@ -3422,10 +3422,19 @@ async function specCommand(io, { first, second, rest, values }) {
       const me = whoAmI(ctx, board);
       if (!ctx.info.isMain || me.id !== COORDINATOR) throw new Refused('B26_PERSON_APPROVAL', 'only the person from the main checkout approves or declines rows; use pullboard view for the person to decide');
       const ids = [second, ...rest].filter(Boolean).flatMap((text) => text.split(/[\s,]+/u)).filter(Boolean);
-      const records = prepareRowDecisions(ctx.info.root, ctx.config, { ids, decision: first, reason: values.reason, text: values.text, by: values.by, on: new Date().toISOString(), commit: headCommit(ctx.info.root) ?? '' });
+      // An approve keeps a pending answer: plain, it approves the answered text; --text says what it replaces.
+      const kept = first === 'approve' ? pendingAnswers(ctx.info.root, ctx.config, ids, store.rowDecisions(board)) : new Map();
+      const decide = { decision: first, reason: values.reason, by: values.by, on: new Date().toISOString(), commit: headCommit(ctx.info.root) ?? '' };
+      const records = values.text === undefined && kept.size ? ids.flatMap((id) => prepareRowDecisions(ctx.info.root, ctx.config, { ...decide, ids: [id], text: kept.get(id)?.text }))
+        : prepareRowDecisions(ctx.info.root, ctx.config, { ...decide, ids, text: values.text });
       const decisions = await ordered(ctx, board, 'recordRowDecisions', [{ agentId: store.PERSON, channel: io.personChannel ?? 'terminal', decisions: records }]);
       io.result?.({ decisions });
-      decisions.forEach((record) => io.say(`${record.kind === 'doctrine' ? 'doctrine:' : ''}${record.id}: ${first === 'approve' ? 'approved' : 'declined'}, pending apply`));
+      decisions.forEach((record) => {
+        const old = record.kind === 'spec' ? kept.get(record.id) : undefined;
+        const now = decisionAnswer(record);
+        if (old && old.text !== record.text) io.say(`${record.id}: this text replaces the pending answer ${old.answer} with ${now === null ? `"${record.text}"` : `the answer ${now}`}`);
+        io.say(`${record.kind === 'doctrine' ? 'doctrine:' : ''}${record.id}: ${first === 'approve' ? (old && old.text === record.text ? `approved with the answer ${old.answer}` : 'approved') : 'declined'}, pending apply`);
+      });
       return 0;
     });
   }

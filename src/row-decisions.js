@@ -45,6 +45,27 @@ export function prepareRowDecisions(root, config, { ids, decision, reason = '', 
   });
 }
 
+/**
+ * The pending answers the named spec rows carry, by id: each answer's signed text and the answer
+ * read back from it. Why: an approve without --text approves the answered text, so a person who
+ * answers a question and then approves it keeps their answer instead of the original default [S1,P6].
+ *
+ * @param {string} root
+ * @param {any} config
+ * @param {string[]} ids - The ids named to approve; doctrine ids carry no answer.
+ * @param {any[]} records - The board's current row decisions.
+ * @returns {Map<string, { text: string, answer: string }>}
+ */
+export function pendingAnswers(root, config, ids, records) {
+  const { rows } = loadSpec(root, config);
+  return new Map(ids.filter((id) => !id.startsWith('doctrine:')).flatMap((id) => {
+    const matches = rows.filter((row) => row.id === id);
+    const record = matches.length === 1 ? pendingRowDecision(records, matches[0], 'spec') : undefined;
+    const answer = record ? decisionAnswer(record) : null;
+    return answer === null ? [] : [[id, { text: record.text, answer }]];
+  }));
+}
+
 /** Compare a decision with the current row, excluding inherited standard rows from file edits. */
 export function pendingRowDecision(records, row, kind) {
   return records.find((record) => record.kind === kind && record.id === row.id && !record.applied
