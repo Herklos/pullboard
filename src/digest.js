@@ -27,8 +27,11 @@ const REASONS = {
 };
 
 /**
- * Board text as one safe Markdown line: any line that matches Pullboard's secret patterns is
- * redacted before the text is shortened, so a cut can never expose part of a secret.
+ * Board text as one safe Markdown line. Pullboard's secret patterns are checked on the whole
+ * source text, on each of its lines and on the text as it would print, before anything is split
+ * or shortened; any match redacts the whole entry. Why the whole entry: a multi-line secret such
+ * as a private key block is recognised by its header, and redacting only that line would print
+ * the body and footer that follow it.
  *
  * @param {unknown} value
  * @param {number} limit UTF-8 bytes
@@ -36,12 +39,11 @@ const REASONS = {
  * @returns {string}
  */
 function line(value, limit, cut) {
-  const lines = String(value ?? '').split(/\r?\n/u)
-    .map((text) => (secretsIn([{ path: 'digest', line: 1, text }]).length ? '[redacted secret]' : text));
-  let text = lines.join('\n');
-  // A multi-line secret, such as a private key block, is caught on the joined text.
-  if (secretsIn([{ path: 'digest', line: 1, text }]).length) text = '[redacted secret]';
-  text = text.replace(/[\u0000-\u001f\u007f]/gu, ' ').replace(/\s+/gu, ' ').trim();
+  const source = String(value ?? '');
+  const printed = source.replace(/[\u0000-\u001f\u007f]/gu, ' ').replace(/\s+/gu, ' ').trim();
+  const views = [source, printed, ...source.split(/\r?\n/u)];
+  if (secretsIn(views.map((text) => ({ path: 'digest', line: 1, text }))).length) return '[redacted secret]';
+  const text = printed;
   if (Buffer.byteLength(text) <= limit) return text;
   cut.count += 1;
   let kept = text.slice(0, limit);
@@ -204,7 +206,7 @@ function render(db, { name, now, root, config }) {
   ].join('\n');
   const left = [
     ...sections.filter((entry) => entry.shown < entry.total).map((entry) => `- ${entry.title}: ${entry.shown} of ${entry.total} shown.`),
-    `- ${cut.count} long texts were cut short, and lines that look like secrets read [redacted secret].`,
+    `- ${cut.count} long texts were cut short, and any entry that looks like it holds a secret reads [redacted secret].`,
     `- ${elsewhere} milestone items from other boards were left out; this briefing covers this board only.`,
     '- Older history, finished work, code and full conversations stay on the board: pullboard show <number> prints any item.',
   ].join('\n');

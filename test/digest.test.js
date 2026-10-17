@@ -93,6 +93,12 @@ test('the digest is a readable briefing of one board [A2,N26]', (t) => {
   store.holdItem(box.board, held, { agentId: 'coordinator', reason: 'The person picks the prices first' });
   add(box.board, 'Secret in a bar', { criterion: `Use token ${planted} for the demo` });
   store.appendFact(box.board, first, { agentId: 'coordinator', kind: 'decision', text: 'One upload path, because two paths drift apart' });
+  // A synthetic PEM-shaped block, built here: its header is what the secret patterns recognise.
+  const pemHeader = '-----BEGIN ' + 'PRIVATE KEY-----';
+  const pemBody = 'U3ludGhldGljRGlnZXN0' + 'Qm9keU9ubHlGb3JUZXN0';
+  const pemFooter = '-----END ' + 'PRIVATE KEY-----';
+  store.appendFact(box.board, first, { agentId: 'coordinator', kind: 'root-cause',
+    text: `The demo leaked this key:\n${pemHeader}\n${pemBody}\n${pemBody}\n${pemFooter}\nRotate it.` });
   const ask = store.shout(box.board, { from: 'web-1', to: 'coordinator', text: 'May the cache be the source of truth?', lanes: ['web'], decision: true });
   store.answerDecision(box.board, ask, { agentId: 'coordinator', text: 'No, because the cache must stay disposable', lanes: ['web'] });
   store.shout(box.board, { from: 'coordinator', to: 'person', text: 'Should a newcomer see the tour first?', lanes: ['web'], decision: true });
@@ -133,6 +139,10 @@ test('the digest is a readable briefing of one board [A2,N26]', (t) => {
 
   assert.equal(markdown.includes(planted), false, 'a secret never reaches the briefing');
   assert.equal(markdown.includes('ghp_'), false, 'no part of the secret survives');
+  for (const part of [pemHeader, pemBody, pemFooter, 'PRIVATE KEY', 'Rotate it']) {
+    assert.equal(markdown.includes(part), false, `no part of a multi-line secret block prints: ${part}`);
+  }
+  assert.match(decisions, /A root-cause on Upload page \(#1\) by coordinator.*\n {2}\[redacted secret\]\n/u, 'the whole entry is redacted');
   assert.match(sectionOf(markdown, 'Open work'), /Secret in a bar \(#5\).*\n {2}Done when: \[redacted secret\]/u);
   assert.match(shouts, /web-1, .*: \[redacted secret\]/u);
   for (const foreign of ['Other private project', 'Other board private item', 'Other board shout', other.repo]) {
