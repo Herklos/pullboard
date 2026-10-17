@@ -1336,8 +1336,8 @@ function resumeHere(io) {
   for (const problem of card.hookProblems) say(`${problem.message}; ${problem.next}`);
   const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
   say(`resume: ${me.displayName}${me.family ? ` [family ${me.family}]` : ''}, ${me.lane} lane${isMain ? ', the main checkout' : ''}, at ${root}`);
-  say(`New agent worktrees: ${card.newWorktreeLocation}`);
   if (card.inbox) for (const line of coordinatorInboxLines(card.inbox, name, (at) => span(ctx, at), firstLine)) say(line);
+  say(`New agent worktrees: ${card.newWorktreeLocation}`);
   card.setup = boardSetup(ctx, card, setupScope);
   if (card.setup) {
     say(`Setting up: step ${card.setup.step} of 5`);
