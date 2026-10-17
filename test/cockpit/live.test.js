@@ -151,6 +151,33 @@ test('the view shows a move as it happens [N26,A2]', { timeout: 120_000 }, async
   }
 });
 
+// #555: the catch-up asks the server what changed since the state the page holds (#552) and applies that delta.
+test('the view catches up with a delta after a move [N26,A2]', { timeout: 120_000 }, async () => {
+  const { box, alpha, view, chrome, close } = await liveBoard('live-delta');
+  try {
+    const held = (await boardOf(view, alpha.repo)).events[0].event_id;
+    const mark = chrome.requests.length;
+    box.run(alpha.web, 'claim', '1');
+    await chrome.waitFor('!!document.querySelector(\'#chain [data-item="1"] .chip.busy\')', 15_000); // budget: hang ceiling for the claim to arrive.
+    await liveReady(chrome);
+    /** The since cursor of each state read the page made from a request mark on, null for a full read. */
+    const reads = (from) => chrome.requests.slice(from).filter((request) => /^https?:/.test(request.url) && /^\/api\/v1\/boards\/[^/]+\/state$/.test(new URL(request.url).pathname))
+      .map((request) => new URL(request.url).searchParams.get('since'));
+    assert.deepEqual(reads(mark), [String(held)], `the page asked once what changed since the event it held, and read no full state: ${JSON.stringify(reads(mark))}`);
+    assert.equal(await chrome.stable('data.project.items.find((item) => item.id === 1).status'), 'claimed', 'the item shows the move');
+    // The delta's result is the page's next base: the move after it asks from the claim on.
+    const claimed = (await boardOf(view, alpha.repo)).events[0].event_id;
+    const again = chrome.requests.length;
+    box.run(alpha.repo, 'add', 'web', 'After the delta', '--specs', 'G1', '--criterion', 'renders');
+    await chrome.waitFor('!!document.querySelector(\'#chain [data-item="2"]\')', 15_000); // budget: hang ceiling for the new item to arrive.
+    await liveReady(chrome);
+    assert.deepEqual(reads(again), [String(claimed)], `the next catch-up asks from the state the delta made: ${JSON.stringify(reads(again))}`);
+    assert.deepEqual(chrome.exceptions, [], 'the page raises no uncaught exception');
+  } finally {
+    await close();
+  }
+});
+
 test('an idle view makes no requests [N26,A2]', { timeout: 150_000 }, async () => {
   const { box, alpha, chrome, close } = await liveBoard('live-idle');
   try {
@@ -267,6 +294,30 @@ test('a catch-up that cannot read the shown board keeps it shown [N26]', async (
     })()`);
     await assert.rejects(page.run(`refresh(new Set([${JSON.stringify(alpha.repo)}]))`), /did not answer/, 'the catch-up fails as a read');
     assert.equal(page.run('view.root'), alpha.repo, 'the page stays on the board it shows');
+  } finally {
+    await view.stop();
+  }
+});
+
+// #555's fallback: when the server cannot extend the state the page holds, as after it forgot that base, the
+// answer resets and the page loads a fresh snapshot instead.
+test('a catch-up whose base the server does not keep loads a fresh snapshot [N26,A2]', async () => {
+  const box = machine();
+  const alpha = project(box, 'reset-alpha');
+  box.run(alpha.repo, 'add', 'web', 'Before', '--specs', 'G1', '--criterion', 'renders');
+  const view = await startView(box);
+  try {
+    const page = await openPage(view);
+    // Sequence 0 is a base this server never sent, so its answer resets with BASE_NOT_KEPT.
+    page.run('[...sentStates.values()].forEach((held) => { held.sequence = 0; })');
+    box.run(alpha.repo, 'add', 'web', 'After', '--specs', 'G1', '--criterion', 'renders');
+    const mark = page.requests.length;
+    await page.run(`refresh(new Set([${JSON.stringify(alpha.repo)}]))`);
+    const reads = page.requests.slice(mark).map((request) => request.path).filter((path) => /\/state(?:\?|$)/.test(path))
+      .map((path) => new URL(path, 'http://page').searchParams.get('since'));
+    assert.deepEqual(reads, ['0', null], 'the page asked for a delta, was told to reset, and read one fresh snapshot');
+    assert.deepEqual(JSON.parse(page.run('JSON.stringify(data.project.items.map((item) => item.title).sort())')), ['After', 'Before'], 'the fresh snapshot shows the change');
+    assert.equal(page.run(`[...sentStates.values()][0].sequence`), page.run('data.project.sequence'), 'the fresh snapshot is the next base');
   } finally {
     await view.stop();
   }
