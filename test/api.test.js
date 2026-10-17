@@ -623,6 +623,8 @@ test('[A1] command results match the catalog across roots and subcommands', () =
   json(box, repo, 'spec', ['view', '--out', join(box.dir, 'spec.html')], 'view');
   json(box, repo, 'spec', ['show', 'G1'], 'show');
   json(box, repo, 'spec', ['unmet'], 'unmet');
+  const catalogStarters = json(box, repo, 'blueprint', ['starters', 'web-app'], 'starters').starters;
+  assert.ok(catalogStarters.length && catalogStarters.every((starter) => !starter.filed && starter.id === null), 'blueprint starters lists unfiled starters with no id');
   assert.equal(json(box, repo, 'spec', ['draft', 'A draft API catalogue row'], 'draft').id, 'G2');
   writeFileSync(join(box.dir, 'catalog-blueprint.json'), `${JSON.stringify({ blueprint: 1, name: 'catalog', title: 'Catalog', version: 1, rules: [{ key: 'R1', text: 'A catalog rule.', why: 'the API lists it.' }] })}\n`);
   assert.equal(json(box, repo, 'blueprint', ['add', join(box.dir, 'catalog-blueprint.json')], 'add').rows[0].status, 'draft');

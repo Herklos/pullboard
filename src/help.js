@@ -163,6 +163,8 @@ Spec
                                         bundled: web-app; nothing is approved, and a repeat adds nothing
   pullboard blueprint save [file] [--name <name>] [--title "<title>"]  write approved rules and answered questions as a blueprint
                                         never items, notes, paths, emails or names; file defaults to <project>.blueprint.json
+  pullboard blueprint starters <name or file>  list a blueprint's starter items and whether each is filed
+                                        a filed starter shows its item id and status
   pullboard spec signers add [--key <path>] [--by <principal>]  opt into SSH-signed sign-offs
                                         principal defaults to Git user.email; --by overrides it
   pullboard spec approve <ids> | decline <ids> --reason "why"  the person's exact-row decision
@@ -192,7 +194,7 @@ const HELP_NAMES = [
   'serve', 'mcp', 'relay', 'relay recover', 'resume', 'hooks', 'add', 'edit', 'escalate', 'run', 'list', 'doctor', 'skills', 'show', 'next', 'land',
   'check', 'claim', 'release', 'submit', 'done', 'verify', 'fact', 'shout', 'answer', 'pass', 'decisions', 'inbox', 'export', 'import',
   'sweep', 'merged', 'withdraw', 'refreeze', 'reopen', 'hold', 'stats', 'ledger', 'log', 'spec', 'spec check', 'spec view',
-  'spec show', 'spec unmet', 'spec signoff', 'spec draft', 'spec signers', 'spec signers add', 'doctrine', 'doctrine check', 'forget', 'prompt', 'gate', 'hook',
+  'spec show', 'spec unmet', 'spec signoff', 'spec draft', 'blueprint starters', 'spec signers', 'spec signers add', 'doctrine', 'doctrine check', 'forget', 'prompt', 'gate', 'hook',
   'hook pre-commit', 'hook pre-merge-commit', 'hook commit-msg', 'hook pre-push', 'view export', 'version', 'lifecycle', 'help',
   'roadmap', 'milestone', 'runner', 'runner add', 'blueprint', 'blueprint add', 'blueprint save',
 ];
@@ -224,7 +226,7 @@ const HELP_EXAMPLES = {
   'spec check': 'pullboard spec check',
   doctrine: 'pullboard doctrine check', 'doctrine check': 'pullboard doctrine check',
   'spec view': 'pullboard spec view', 'spec show': 'pullboard spec show G1',
-  'spec draft': 'pullboard spec draft "Describe the first requirement"',
+  'spec draft': 'pullboard spec draft "Describe the first requirement"', 'blueprint starters': 'pullboard blueprint starters web-app',
   'blueprint add': 'pullboard blueprint add web-app', 'blueprint save': 'pullboard blueprint save',
   'spec unmet': 'pullboard spec unmet', 'spec signoff': 'pullboard spec signoff G1',
   'spec signers add': 'pullboard spec signers add', help: 'pullboard help claim', version: 'pullboard --version',

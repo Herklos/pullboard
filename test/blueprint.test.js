@@ -353,6 +353,76 @@ test('blueprint add files a blueprint as drafts beside approved rows in its own 
   assert.equal(spec.rows.filter((row) => row.section === 'A · Web app').length, 12);
 });
 
+test('blueprint commands say what they did [S1,I1]', () => {
+  // Every file's bytes outside Git's object store, and every board event, so a repeat add is proven to change nothing.
+  const snapshot = (box) => {
+    const files = readdirSync(box.repo, { recursive: true, withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => join(entry.parentPath, entry.name))
+      .filter((path) => !path.includes(`${join('.git', 'objects')}`) && !/board\.sqlite/u.test(path))
+      .sort()
+      .map((path) => [path, readFileSync(path).toString('base64')]);
+    return { files, events: json(box, 'log').events };
+  };
+
+  // Before any add, every starter is listed and none is filed.
+  const box = freshBoard();
+  const unfiled = json(box, 'blueprint', 'starters', 'web-app');
+  assert.deepEqual(unfiled.blueprint, { name: 'web-app', title: 'Web app', version: 1 });
+  assert.deepEqual(unfiled.starters.map((starter) => [starter.title, starter.filed, starter.id]), PUBLISHED.items.map((item) => [item.title, false, null]));
+  const unfiledText = box.run('blueprint', 'starters', 'web-app');
+  assert.equal(unfiledText.status, 0, unfiledText.stdout + unfiledText.stderr);
+  for (const item of PUBLISHED.items) assert.ok(unfiledText.stdout.split('\n').includes(`  not filed  ${item.title}`), `${item.title} is listed as not filed:\n${unfiledText.stdout}`);
+
+  // A second add says it is already there, and no file byte and no board event changes.
+  json(box, 'blueprint', 'add', 'web-app');
+  const before = snapshot(box);
+  const again = box.run('blueprint', 'add', 'web-app');
+  assert.equal(again.status, 0, again.stdout + again.stderr);
+  assert.match(again.stdout, /^Web app \(version 1\) is already on this board; nothing added/mu, 'a second add says so');
+  assert.match(again.stdout, /pullboard blueprint starters web-app/u, 'a second add points at its starters');
+  const repeat = json(box, 'blueprint', 'add', 'web-app');
+  assert.deepEqual([repeat.marked, repeat.rows, repeat.items, repeat.gate], [true, [], [], null]);
+  const after = snapshot(box);
+  assert.deepEqual(after.files, before.files, 'a second add changes no file bytes');
+  assert.deepEqual(after.events, before.events, 'a second add records no board event');
+
+  // Once added, each starter is filed and names its item id and status.
+  const items = json(box, 'list', '--all').items;
+  const filed = json(box, 'blueprint', 'starters', 'web-app').starters;
+  assert.equal(filed.length, PUBLISHED.items.length, 'every starter is listed');
+  const filedText = box.run('blueprint', 'starters', 'web-app').stdout.split('\n');
+  for (const [index, item] of PUBLISHED.items.entries()) {
+    const onBoard = items.find((entry) => entry.item_title === item.title);
+    assert.ok(onBoard, `${item.title} is on the board`);
+    assert.deepEqual([filed[index].title, filed[index].filed, filed[index].id, filed[index].status], [item.title, true, onBoard.item_id, 'open']);
+    assert.ok(filedText.includes(`  #${onBoard.item_id} open  ${item.title}`), `${item.title} shows its id:\n${filedText.join('\n')}`);
+  }
+
+  // init --blueprint lists every row that waits for the person, the inherited doctrine row PB7 included.
+  const started = emptyRepo();
+  const init = started.run('init', '--blueprint', 'web-app');
+  assert.equal(init.status, 0, init.stdout + init.stderr);
+  const waiting = JSON.parse(started.run('spec', '--json').stdout).rows.filter((row) => ['draft', 'pending'].includes(row.status));
+  const doctrineRows = waiting.filter((row) => row.file !== 'SPEC.md');
+  const specRows = waiting.filter((row) => row.file === 'SPEC.md');
+  assert.ok(doctrineRows.some((row) => row.id === 'PB7' && row.status === 'pending'), 'the standard doctrine has PB7 pending');
+  assert.equal(specRows.length, PUBLISHED.rules.length + PUBLISHED.questions.length);
+  const lines = init.stdout.split('\n');
+  for (const row of doctrineRows) assert.ok(lines.includes(`    ${row.id} ${row.status}  ${row.text}  (${row.file})`), `init names doctrine row ${row.id}:\n${init.stdout}`);
+  for (const row of specRows) assert.ok(lines.includes(`    ${row.id} ${row.status}  ${row.text}  (SPEC.md)`), `init names spec row ${row.id}:\n${init.stdout}`);
+  assert.ok(lines.includes(`  ${waiting.length} rows wait for the person:`), `init counts every waiting row:\n${init.stdout}`);
+  const fromJson = emptyRepo().run('init', '--blueprint', 'web-app', '--json');
+  assert.equal(fromJson.status, 0, fromJson.stdout + fromJson.stderr);
+  assert.deepEqual(JSON.parse(fromJson.stdout).blueprint.waitingRows.map((row) => row.id).sort(), waiting.map((row) => row.id).sort(), 'the JSON lists the same waiting rows');
+
+  // A second init --blueprint says the blueprint is already there.
+  const reinit = started.run('init', '--blueprint', 'web-app');
+  assert.equal(reinit.status, 0, reinit.stdout + reinit.stderr);
+  assert.match(reinit.stdout, /the Web app blueprint \(version 1\) is already on this board; nothing added/u);
+  assert.doesNotMatch(reinit.stdout, /added the Web app blueprint/u);
+});
+
 test('blueprint add files a blueprint as drafts after an add stopped part way [S1,I1]', () => {
   // A finished add on one board gives the exact rows; a second board is left where an add stops
   // after its rows and first starter: the rows and the under-way marker written, item 1 added.

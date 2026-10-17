@@ -63,6 +63,7 @@ import { answerQuestion, bundledBlueprints, planBlueprint, readBlueprint, saveBl
 import { briefFiles } from './brief.js';
 import { checkBaseline, prepareCheckBaseline, sayCheckBaseline } from './check-baseline.js';
 import { retryCheckBaselines, startCheckBaseline } from './check-baseline-worker.js';
+import { starterLines, starterStates, waitingRowLines, waitingRows } from './blueprint-report.js';
 import { compareMainFailures, mainRedMessage, mainRedReworkItems } from './main-red.js';
 import { runItems } from './run.js';
 import { parseProblems, sweepItems } from './sweep.js';
@@ -1673,15 +1674,19 @@ function setupCommands(io, { first, second, rest = [], values }) {
       ]));
       // Keep blueprint initialization and the person's unwritten lane proposals in the same result.
       const added = blueprint ? await addBlueprintHere(io, values.blueprint, { report: false, blueprint }) : null;
+      // Every row that waits for the person, doctrine rows included, so none is missed (#734).
+      const waiting = added ? waitingRows(added.rows, loadDoctrine(info.root, loadConfig(info.root)), loadConfig(info.root).spec) : [];
       io.result?.({ root: info.root, notes, proposedLanes: proposeLanes(info.root),
-        ...(added ? { blueprint: { name: added.blueprint.name, title: added.blueprint.title,
+        ...(added ? { blueprint: { name: added.blueprint.name, title: added.blueprint.title, marked: added.marked, waitingRows: waiting,
           section: added.section, waiting: added.rows.length, items: added.items.length, gate: added.gate, checksNotRun: added.checksNotRun } } : {}) });
       const staging = notes.at(-1)?.startsWith('git add -f -- ') ? notes.at(-1) : null;
       (staging ? notes.slice(0, -1) : notes).forEach((note) => io.say(note));
-      if (added) {
+      if (added?.marked) io.say(`the ${added.blueprint.title} blueprint (version ${added.blueprint.version}) is already on this board; nothing added; see its starters with pullboard blueprint starters ${added.blueprint.name}`);
+      if (added && !added.marked) {
         io.say(`added the ${added.blueprint.title} blueprint: ${added.rows.length} ${added.rows.length === 1 ? 'row waits' : 'rows wait'} for your approval in SPEC.md (${added.section}), `
           + `${added.items.length} starter ${added.items.length === 1 ? 'item' : 'items'} filed${added.gate ? `, gate set to ${added.gate}` : ''}`);
         if (added.checksNotRun.length) io.say(`  checks stored, not run: ${added.checksNotRun.map((id) => `#${id}`).join(', ')}; no check baseline ran, so read each check before work starts: pullboard show <id>`);
+        waitingRowLines(waiting).forEach((line) => io.say(line));
       }
       if (await registerProjectAndLink(info.root, new Date(), loadConfig(info.root), io)) io.say('registered this project on this machine, so pullboard view lists it');
       io.say(agentSessionDigest()
@@ -2433,7 +2438,7 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
     checksNotRun: added.filter((item) => item.check).map((item) => item.id) };
   io.result?.(summary);
   if (plan.marked) {
-    io.say(`${blueprint.title} (version ${blueprint.version}) is already on this board; nothing added`);
+    io.say(`${blueprint.title} (version ${blueprint.version}) is already on this board; nothing added; see its starters with pullboard blueprint starters ${blueprint.name}`);
     return summary;
   }
   io.say(`added ${blueprint.title} (version ${blueprint.version}) as drafts in ${ctx.config.spec}, section ${plan.section.name}`);
@@ -3833,6 +3838,14 @@ async function runCommand(argv, io) {
       io.result?.({ file, name: blueprint.name, rules: blueprint.rules?.length ?? 0, questions: blueprint.questions?.length ?? 0, left });
       io.say(`saved ${blueprint.rules?.length ?? 0} rules and ${blueprint.questions?.length ?? 0} answered questions to ${file}`);
       for (const entry of left) io.say(`  left out ${entry.id}: ${entry.reason}`);
+      return 0;
+    }
+    if (command === 'blueprint' && first === 'starters') {
+      if (!second || rest.length) throw new Refused('USAGE', `pullboard blueprint starters <name or file>; bundled: ${bundledBlueprints().join(', ')}`);
+      const blueprint = readBlueprint(second, io.cwd);
+      const starters = withBoard(context(io), (board) => starterStates(blueprint, store.listItems(board, { all: true })));
+      io.result?.({ blueprint: { name: blueprint.name, title: blueprint.title, version: blueprint.version }, starters });
+      starterLines(blueprint, starters).forEach((line) => io.say(line));
       return 0;
     }
     if (command === 'gate') {
