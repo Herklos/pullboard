@@ -1091,7 +1091,10 @@ async function listedBoards() {
 
 /** After a hosted board list: a list clears a state it stood in for, and a signed-in empty one says why it is empty. */
 async function hostedListed(boards) {
-  const shown = $('local-note').dataset.state || '';
+  let shown = $('local-note').dataset.state || '';
+  // A list that arrives after a failed read, once this computer's view answered, means the page recovered: the problem
+  // it showed is over, and this list decides what shows now.
+  if (shown === 'problem' && localReached) { localNote(null); shown = ''; }
   if (boards.length) { if (['looking', 'not-running', 'no-linked', 'unpaired', 'signed-out'].includes(shown)) localNote(null); return; }
   // Nobody signed in and no board on this computer yet: the page says how to make one, as the local view does.
   if (!hosted.relaySession) { if (shown === 'looking') localNote(null); return; }
@@ -3601,7 +3604,14 @@ $('local-note').addEventListener('click', async (event) => {
  * the moment the view answers, the page opens the board, with no Try again (#764). Over a relay stream, a reload
  * starts both sources together.
  */
+let relisting = false;
 function lookAgain() {
+  // This computer's view answered, then a read failed, as a busy view's can: read again every two seconds, so the
+  // board shows the moment a list arrives (hostedListed clears the problem), never only on the slower fallback timer.
+  if (hosted.local && localReached && !document.hidden && $('local-note').dataset.state === 'problem') {
+    if (!relisting) { relisting = true; refresh().catch(() => {}).finally(() => { relisting = false; }); }
+    return;
+  }
   if (!hosted.local || relayPairing || localReached || localProblem || document.hidden) return;
   if (![...LOCAL_STATES, 'no-linked', 'unpaired'].includes($('local-note').dataset.state || '') || $('local-note').dataset.state === 'looking') return;
   connectLocal(true).then((local) => {

@@ -35,7 +35,7 @@ function call(base, path, { method = 'GET', headers = {} } = {}) {
  * the person answers), and otherwise passed to the view the test started on its own port.
  */
 async function openBoardStand(chrome, view) {
-  const stand = { signedIn: false, linked: [], local: null, hold: false, held: [], failures: [] };
+  const stand = { signedIn: false, linked: [], local: null, hold: false, held: [], failures: [], failList: 0 };
   const client = 'export function rememberPairing() { return null; }\nexport async function createTransport() { return { async request(path) { if (path === "/api/v1/boards") return { version: 1, boards: [], warnings: [] }; throw new Error("no paired board"); } }; }\n';
   const relay = createRelayBrowserHandler({ authenticate: async () => { if (stand.signedIn) return { kind: 'session' }; throw new Refused('AUTH_REQUIRED', 'Sign in.'); } });
   const send = (requestId, status, headers, body) => chrome.send('Fetch.fulfillRequest', { requestId, responseCode: status, responseHeaders: headers, body: Buffer.from(body).toString('base64') });
@@ -52,6 +52,15 @@ async function openBoardStand(chrome, view) {
     const { requestId, request: asked } = message.params;
     const address = new URL(asked.url);
     (async () => {
+      // The view's own board list, after the round trip: it answers 503 as many times as stand.failList says, as a busy
+      // view can, then passes through untouched.
+      if (address.origin === view.base) {
+        if (stand.failList > 0 && asked.method === 'GET' && address.pathname === '/api/v1/boards') {
+          stand.failList -= 1;
+          return send(requestId, 503, [{ name: 'Content-Type', value: 'application/json' }, { name: 'Access-Control-Allow-Origin', value: HOSTED }], JSON.stringify({ error: { code: 'BUSY', message: 'The view is busy.' } }));
+        }
+        return chrome.send('Fetch.continueRequest', { requestId });
+      }
       if (address.origin === LOCAL) {
         if (stand.hold) { stand.held.push({ requestId, asked, address }); return; }
         return toView({ requestId, asked, address });
@@ -72,7 +81,7 @@ async function openBoardStand(chrome, view) {
     })().catch((error) => stand.failures.push(error.message));
   };
   chrome.socket.addEventListener('message', listener);
-  await chrome.send('Fetch.enable', { patterns: [{ urlPattern: HOSTED + '/*', requestStage: 'Request' }, { urlPattern: LOCAL + '/*', requestStage: 'Request' }] });
+  await chrome.send('Fetch.enable', { patterns: [{ urlPattern: HOSTED + '/*', requestStage: 'Request' }, { urlPattern: LOCAL + '/*', requestStage: 'Request' }, { urlPattern: view.base + '/api/v1/boards', requestStage: 'Request' }, { urlPattern: view.base + '/api/v1/boards?*', requestStage: 'Request' }] });
   // The browser's answer about local network access, per load: ?asking asks, ?blocked has said no, anything else allows.
   // window.__access changes the answer on an open page, as the person does in the browser's settings. While the browser
   // asks, the discovery request waits as long as the person does, so its timeout never fires on those loads.
@@ -313,6 +322,8 @@ test('the page moves on by itself when the view starts [N26,H5]', { timeout: 120
     stand = await openBoardStand(chrome, view);
     // Count every press and click, so the move is shown to need none.
     await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: "(() => { window.__clicks = 0; addEventListener('pointerdown', () => { window.__clicks += 1; }, true); addEventListener('click', () => { window.__clicks += 1; }, true); })()" });
+    // Every state the screen passes through on a load, so a screen that came and went is on the record.
+    await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: "(() => { window.__states = []; addEventListener('DOMContentLoaded', () => { const note = document.getElementById('local-note'); if (note) new MutationObserver(() => window.__states.push(note.dataset.state)).observe(note, { attributes: true, attributeFilter: ['data-state'] }); }); })()" });
     const opened = "location.origin === 'https://app.pullboard.dev' && document.querySelector('#chain')?.textContent.includes('A board that opens by itself')";
 
     // Nothing runs here: Where are your projects?, with its live line. Then the view starts, and the board opens.
@@ -341,6 +352,17 @@ test('the page moves on by itself when the view starts [N26,H5]', { timeout: 120
     await chrome.stable("(() => { window.__access = 'granted'; return true; })()");
     await chrome.waitFor(opened, 30_000); // budget: hang ceiling for the next re-check and the first board read.
     assert.equal(await chrome.stable('window.__clicks'), 0, 'nobody clicked on the page');
+
+    // The view answers, but its first board list fails once with a 503, as a busy view can, and the next one succeeds:
+    // the problem screen it met gives way to the board by itself, with the sidebar back, and nobody clicks.
+    await chrome.stable("(() => { sessionStorage.clear(); return true; })()");
+    stand.failList = 1;
+    await chrome.send('Page.navigate', { url: HOSTED + '/?recover' });
+    await chrome.waitFor(opened + " && document.getElementById('local-note').hidden && !document.body.classList.contains('open-board')", 30_000); // budget: hang ceiling for one round trip, the failed list, a re-read two seconds on and the first board read.
+    assert.equal(stand.failList, 0, 'the first board list met a 503');
+    const recovered = JSON.parse(await chrome.stable("JSON.stringify({ states: window.__states, state: document.getElementById('local-note').dataset.state, side: document.querySelector('.side').getClientRects().length > 0, clicks: window.__clicks })"));
+    assert.ok(recovered.states.includes('problem'), `the failed list showed the problem screen first: ${JSON.stringify(recovered.states)}`);
+    assert.deepEqual({ state: recovered.state, side: recovered.side, clicks: recovered.clicks }, { state: '', side: true, clicks: 0 }, 'then the board shows, the problem screen gone and the sidebar back, and nobody clicked');
     assert.deepEqual(chrome.exceptions, [], 'Chrome reports no uncaught exceptions');
     assert.deepEqual(stand.failures, [], 'the stand-in hosted page was served');
   } finally {
