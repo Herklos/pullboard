@@ -6,6 +6,7 @@ import { BAR_ENGINE, carriesBarReason } from './bar-corrections.js';
 import { carriesImplies, IMPLIES_ENGINE } from './implies.js';
 import { CHECK_ACCEPT_ENGINE } from './check-accept.js';
 import { ENGINE_VERSION } from './machine.js';
+import { MILESTONE_SHIP_ENGINE, canonicalMilestoneTarget } from './milestones.js';
 import { Refused } from './refused.js';
 import { requestMoveProblem, recordRequestMove } from './relay-requests.js';
 import { relayMoveActor, relaySenderProblem, validRelaySender } from './relay-sender.js';
@@ -17,19 +18,21 @@ export const ENGINE_OPERATIONS = Object.freeze([
   'register', 'ensureCoordinator', 'addItem', 'editItem', 'completeCheckBaseline', 'escalate', 'recordAttempt',
   'claim', 'release', 'submit', 'reserveReview', 'reserveNextReview', 'verify', 'merged',
   'withdraw', 'refreeze', 'reopen', 'shout', 'passDecision', 'answerDecision', 'holdLane', 'releaseLane', 'holdItem', 'releaseItemHold',
-  'addMilestone', 'editMilestoneItems', 'moveMilestone', 'editMilestone', 'removeMilestone',
+  'addMilestone', 'editMilestoneItems', 'moveMilestone', 'editMilestone', 'removeMilestone', 'shipMilestone',
   'recordRowDecisions', 'applyRowDecisions', 'appendFact',
   'recordLandingBatch', 'recordLandingWaiver', 'recordLandingFlake', 'finishLandingBatch', 'acceptCheck',
 ]);
 
 /** Engine version at which each ordered operation first has stable replay semantics. */
-const OPERATION_ENGINE = Object.freeze({ reopen: 8, recordLandingBatch: 8, recordLandingWaiver: 8, recordLandingFlake: 8, finishLandingBatch: 8, acceptCheck: CHECK_ACCEPT_ENGINE });
+const OPERATION_ENGINE = Object.freeze({ reopen: 8, recordLandingBatch: 8, recordLandingWaiver: 8, recordLandingFlake: 8, finishLandingBatch: 8, acceptCheck: CHECK_ACCEPT_ENGINE,
+  shipMilestone: MILESTONE_SHIP_ENGINE });
 
-/** Dependency edits add engine-10 meaning, edit reasons engine-19 and implied items engine-20, without changing ordinary historical envelopes. */
+/** Dependency edits add engine-10 meaning, edit reasons engine-19, implied items engine-20 and a milestone target engine-31, without changing ordinary historical envelopes. */
 function minimumOperationEngine(operation, args) {
   const options = args[1];
   if (carriesImplies(operation, args)) return IMPLIES_ENGINE;
   if (carriesBarReason(operation, args)) return BAR_ENGINE;
+  if (operation === 'editMilestone' && options && Object.hasOwn(options, 'target') && options.target !== undefined) return MILESTONE_SHIP_ENGINE;
   return operation === 'editItem' && options && Object.hasOwn(options, 'after') && options.after !== undefined
     ? 10 : OPERATION_ENGINE[operation] ?? 1;
 }
@@ -93,6 +96,8 @@ export function prepareEngineMove(board, operation, args, { id = randomUUID(), a
       options.freezeError = error ?? null;
     }
   }
+  // A target is fixed to one instant here, so replicas in other time zones read the same one.
+  if (operation === 'editMilestone' && values[1] && 'target' in values[1]) values[1].target = canonicalMilestoneTarget(values[1].target);
   const move = { version: 1, engine: ENGINE_VERSION, id, operation, args: values, ...(actor === undefined ? {} : { actor }) };
   // JSON is the wire format: optional undefined fields become absent on every replica alike.
   return JSON.parse(JSON.stringify(move));
