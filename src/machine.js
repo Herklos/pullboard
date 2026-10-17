@@ -15,7 +15,6 @@ export const ENGINE_VERSION = 25;
 /** First released engine binding the checked composition, review trunk and paths [E8,H16]. */
 export const VERDICT_REVIEW_ENGINE = 25;
 
-
 /** @typedef {'agent' | 'coordinator' | 'clock'} Role */
 
 /**
@@ -128,6 +127,7 @@ export const GUARDS = [
   { id: 'doctrineHolds', refuse: 'RATCHET_ROSE', alsoRefuses: [{ code: 'RATCHET_UNCOUNTED', next: 'fix the check so it exits 0 or 1 within its timeout, then submit again' }], rule: "every touched doctrine check counts (exit 0 or 1), none rises above its committed count and no changed file gains a problem; watch-mode rules only count", next: "fix the new problems, commit, submit again; only the person's signature raises count:", source: 'cli', when: 'only when accepted main has an approved doctrine rule with gate: check' },
   { id: 'itemCheckGreen', refuse: 'CHECK_RED', alsoRefuses: [{ code: 'CHECK_UNVERIFIED', next: 'restore the frozen install or check environment and retry' }], rule: 'the frozen item check passes at the submitted commit, or its clean reviewed composition for a stale acceptance', next: 'reject the failing behavior; the builder fixes and resubmits', source: 'cli' },
 
+  { id: 'checkProvesSomething', refuse: 'CRITERION_PROVES_NOTHING', rule: "the item's check does not already pass on main, or the person accepted that exact check", next: 'set a check that fails before the work, or the person runs pullboard check accept <id>', source: 'cli', when: 'only when accepted main sets checks.provesNothing to "hold"' },
   { id: 'gateGreen', refuse: 'GATE_RED', alsoRefuses: [{ code: 'PIPEFAIL_UNAVAILABLE', next: 'rewrite the gate without a pipe' }], rule: 'the gate, which submit runs itself every time, is green at HEAD', next: 'fix what the digest names, commit, submit again', source: 'cli' },
   { id: 'treeStillDuringGate', refuse: 'MOVED_DURING_GATE', rule: 'when the gate ends, HEAD and every tracked file are as they were when it started', next: 'leave the worktree alone until the gate finishes, then submit again', source: 'cli' },
   { id: 'childrenDone', refuse: 'CHILDREN_OPEN', rule: 'every child item is verified or withdrawn', next: 'finish the child items, or the coordinator withdraws them', source: 'board' },
@@ -153,7 +153,7 @@ export const GUARDS = [
 export const MOVES = [
   {
     verb: 'claim', from: ['open', 'claimed'], to: 'claimed', by: ['agent', 'coordinator'], refuse: 'NOT_CLAIMABLE',
-    guards: ['joined', 'itemExists', IN_STATE, 'itemNotHeld', 'inLane', 'routeAllows', 'dependenciesVerified', 'notHeldByAnother', 'correctionRefrozen', 'laneOpen', 'oneLiveClaim', 'rowsInForce'],
+    guards: ['joined', 'itemExists', IN_STATE, 'checkProvesSomething', 'itemNotHeld', 'inLane', 'routeAllows', 'dependenciesVerified', 'notHeldByAnother', 'correctionRefrozen', 'laneOpen', 'oneLiveClaim', 'rowsInForce'],
     sets: ['item_owner', 'item_lease_until', 'item_frozen_digest'], command: 'pullboard claim <id>',
   },
   {
@@ -163,7 +163,7 @@ export const MOVES = [
   { verb: 'lapse', from: ['claimed'], to: 'open', by: ['clock'], guards: [], when: 'its lease runs out' },
   {
     verb: 'submit', from: ['claimed'], to: 'submitted', by: ['agent', 'coordinator'], refuse: 'NOT_YOURS',
-    guards: ['joined', 'itemExists', IN_STATE, 'isHolder', 'correctionRefrozen', 'criterionUnchanged', 'treeClean', 'nothingUntracked', 'hasCommit', 'withinLane', 'trunkMergeClean', 'noUnverifiedStack', 'doctrineHolds', 'gateConfigured', 'gateGreen', 'treeStillDuringGate', 'childrenDone', 'headIsNew'],
+    guards: ['joined', 'itemExists', IN_STATE, 'isHolder', 'correctionRefrozen', 'checkProvesSomething', 'criterionUnchanged', 'treeClean', 'nothingUntracked', 'hasCommit', 'withinLane', 'trunkMergeClean', 'noUnverifiedStack', 'doctrineHolds', 'gateConfigured', 'gateGreen', 'treeStillDuringGate', 'childrenDone', 'headIsNew'],
     sets: ['item_built_by', 'item_commit'], command: 'pullboard submit <id>',
   },
   {
