@@ -254,7 +254,7 @@ test('the coordinator reopens a submitted item without a verdict [V2,V6,O8]', (t
   });
   assert.equal(store.events(board).some((event) => event.event_kind === 'release' && JSON.parse(event.event_detail).review), false);
 
-  const edited = box.run(box.repo, 'edit', '1', '--criterion', 'The page renders a heading.');
+  const edited = box.run(box.repo, 'edit', '1', '--criterion', 'The page renders a heading.', '--reason', 'the fixture corrects its bar');
   assert.equal(edited.code, 0, edited.err);
   assert.equal(store.getItem(board, 1).item_criterion, 'The page renders a heading.');
 });
@@ -623,7 +623,7 @@ test('a reopened bar takes the same commit again [V2,V6,H16]', async (t) => {
 
   const secondReopen = box.run(box.repo, 'reopen', '1', '--note', 'correct the frozen criterion to match the implemented heading');
   assert.equal(secondReopen.code, 0, secondReopen.err);
-  const edited = box.run(box.repo, 'edit', '1', '--criterion', 'The page renders a heading.');
+  const edited = box.run(box.repo, 'edit', '1', '--criterion', 'The page renders a heading.', '--reason', 'the fixture corrects its bar');
   assert.equal(edited.code, 0, edited.err);
 
   const claimed = box.run(box.web, 'claim', '1');
