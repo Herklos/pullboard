@@ -574,7 +574,7 @@ async function boardId(view, root) {
 /** The board as the shared API serves it for one project. */
 async function boardOf(view, root) {
   const id = await boardId(view, root);
-  const res = await fetchLive(`${view.base}/api/v1/boards/${id}/state`, { headers: { 'x-pullboard-key': view.key } });
+  const res = await fetchLive(`${view.base}/api/v1/boards/${id}/state?detail=full`, { headers: { 'x-pullboard-key': view.key } });
   assert.equal(res.status, 200);
   return (await res.json()).state;
 }

@@ -2,7 +2,8 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { loadDoctrine } from './doctrine.js';
-import { loadSpec, SIGNOFFS_FILE } from './spec.js';
+import { answerFromText } from './blueprints.js';
+import { loadSpec, parseSpec, SIGNOFFS_FILE } from './spec.js';
 import { defaultPrincipal, hasSignerFile, signRowDecision, verifyRowDecision } from './signature.js';
 import { Refused } from './refused.js';
 
@@ -22,7 +23,11 @@ function decisionRows(root, config, ids) {
   });
 }
 
-/** Capture all source text and signatures before recording any decision on the board. */
+/**
+ * Capture all source text and signatures before recording any decision on the board. An answer to
+ * a pending question is an approval of its answered text and carries no separate answer field: the
+ * answer shown is read back from the signed source and text by decisionAnswer.
+ */
 export function prepareRowDecisions(root, config, { ids, decision, reason = '', text: proposedText, by, on, commit = '' }) {
   if (!ids.length) throw new Refused('USAGE', 'name rows: pullboard spec approve <ids> or spec decline <ids> --reason "why"');
   if (!['approve', 'decline'].includes(decision)) throw new Refused('ROW_DECISION', 'use pullboard spec approve or decline');
@@ -46,13 +51,33 @@ export function pendingRowDecision(records, row, kind) {
     && (row.text === record.text || row.text === record.source.match(/\]\s+([^|]*)(?:\||$)/u)?.[1]?.trim()));
 }
 
+/**
+ * The answer a decision gives a pending question, read back from the signed source row and the
+ * signed text, or null for any other decision. A record's other fields, such as an unsigned
+ * "answer" written into the board by hand, are never read [S19,P6].
+ *
+ * @param {any} record
+ * @returns {string | null}
+ */
+export function decisionAnswer(record) {
+  if (record.decision !== 'approve' || record.kind !== 'spec') return null;
+  const [pending] = parseSpec(`## Decision\n${record.source}\n`).rows;
+  return pending?.status === 'pending' ? answerFromText(pending.text, record.text) : null;
+}
+
+/** Name a pending decision: the answer it gives, or approved or declined. */
+function decisionStage(record) {
+  const answer = decisionAnswer(record);
+  return answer !== null ? `answered ${answer}` : record.decision === 'approve' ? 'approved' : 'declined';
+}
+
 /** Add pending status to existing rows without replacing their current file-backed status. */
 export function decisionProjection(records, row, kind) {
   const decision = pendingRowDecision(records, row, kind);
   if (decision) return {
     ...row,
     decision,
-    stage: `${decision.decision === 'approve' ? 'approved' : 'declined'}, pending apply`,
+    stage: `${decisionStage(decision)}, pending apply`,
     ...(decision.decision === 'decline' ? { reason: decision.reason } : {}),
   };
   const appliedDecline = records.find((record) => record.kind === kind && record.id === row.id && record.applied
@@ -66,6 +91,28 @@ export function projectRowDecisions(records, state) {
     spec: state.spec.map((row) => decisionProjection(records, row, 'spec')),
     practice: state.practice.map((row) => row.origin === 'standard' ? row : decisionProjection(records, row, 'doctrine')),
   };
+}
+
+/**
+ * The ids of blueprint questions answered by a hand edit to SPEC.md: a row that was pending with
+ * its ". Choices: " list at the trunk tip and now differs in status or text, with no person row
+ * decision for that exact status and text. The answer is the person's move alone (P6), so an
+ * agent that edits the row instead is caught by spec check, the gate's first step.
+ *
+ * @param {any[]} before - The trunk tip's parsed SPEC.md rows.
+ * @param {any[]} after - The working file's parsed rows.
+ * @param {() => any[]} readDecisions - The board's row decisions, read only when a question changed.
+ * @returns {string[]}
+ */
+export function handAnsweredQuestions(before, after, readDecisions) {
+  const changed = before.filter((old) => old.status === 'pending' && old.text.includes('. Choices: ')).flatMap((old) => {
+    const now = after.filter((row) => row.id === old.id);
+    return now.length === 1 && (now[0].status !== old.status || now[0].text !== old.text) ? [now[0]] : [];
+  });
+  if (!changed.length) return [];
+  const records = readDecisions();
+  return changed.filter((row) => !records.some((record) => record.kind === 'spec' && record.id === row.id
+    && record.text === row.text && row.status === (record.decision === 'approve' ? 'approved' : 'wont'))).map((row) => row.id);
 }
 
 /** Remove local index metadata while retaining the one canonical person receipt verbatim. */
