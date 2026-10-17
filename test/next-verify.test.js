@@ -1,15 +1,16 @@
 /** A reviewer who starts before the builder submits is told the builder is still working [C7,P4]. */
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import * as store from '../src/board.js';
 import { main } from '../src/cli.js';
 import { loadConfig } from '../src/config.js';
 import { runFixtureGit } from './fixture-child.js';
 
+const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
 const HOUR = 3_600_000;
 
 /** Run the actual CLI in one worktree with the fixture's board clock. */
@@ -27,9 +28,15 @@ async function project(t) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-next-verify-')));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const root = join(dir, 'repo');
-  mkdirSync(root);
+  const bin = join(dir, 'bin');
+  mkdirSync(root); mkdirSync(bin);
+  // The repo's hooks call pullboard; this private shim runs this checkout's CLI for them.
+  /** Quote a literal path for the shim's shell line. */
+  const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
+  writeFileSync(join(bin, 'pullboard'), `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(BIN)} "$@"\n`);
+  chmodSync(join(bin, 'pullboard'), 0o755);
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_')));
-  Object.assign(env, { GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
+  Object.assign(env, { PATH: `${bin}:${process.env.PATH}`, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
     GIT_AUTHOR_NAME: 'Verify fixture', GIT_AUTHOR_EMAIL: 'verify@example.invalid',
     GIT_COMMITTER_NAME: 'Verify fixture', GIT_COMMITTER_EMAIL: 'verify@example.invalid' });
   /** Git in the fixture, with a synthetic identity and no inherited GIT_* variables. */
