@@ -59,7 +59,7 @@ On top of the GitHub identity, the relay issues its own credentials. Each one is
 | `pd_` sign-in ticket | The CLI, during a device sign-in. The relay keeps its hash in memory. | Poll for or cancel one pending sign-in. | GitHub's device-code lifetime |
 | `pc_` confirmation ticket | The person's browser, in the fragment of the confirmation link. The relay keeps its hash in memory. | Confirm or decline one board link. | The sign-in, plus 10 minutes after GitHub confirms |
 
-A person session can revoke any of its account's credentials through `POST /auth/tokens/revoke`; a machine or agent credential can revoke only itself (`revoke` in `relay/auth.js`). Deleting a board's relay copy, or letting it expire, deletes every credential bound to it (`forgetBoard` in `relay/auth.js`).
+A person session can revoke any of its account's credentials through `POST /auth/tokens/revoke`; a machine or agent credential can revoke only itself (`revoke` in `relay/auth.js`). Deleting a board's relay copy, or letting it expire, deletes every credential bound to it (`forgetBoard` in `relay/auth.js`). The relay keeps the hashes of the ones still live until they would have expired, so a machine that uses one later hears that the relay copy was deleted and keeps working locally.
 
 The relay labels each record with a sender taken from the credential that sent it, and ignores any sender named in the request (`sender` in `relay/service.js`). Every client refuses a record its sender may not make: a machine credential may send snapshots, seat registrations, the coordinator seat and phone-approved moves, and an agent may act only as itself (`relaySenderProblem` in `src/relay-sender.js`). On the machine, a terminal that carries an agent marker or an SSH marker cannot take person actions, and the person uses the view or the phone instead (`requirePersonChannel` in `src/person.js`).
 
@@ -72,6 +72,7 @@ Everything durable lives on one volume at `/data`: `auth.sqlite`, then `devices.
 | `relay_users` | `auth.sqlite` | Each signed-in GitHub account: its numeric id and login. | No deletion path. |
 | `relay_boards` | `auth.sqlite` | Each linked board: board id, repository `owner/name`, repository id, link time. | The board is deleted, or 90 days pass without activity. |
 | `relay_cleanup` | `auth.sqlite` | Board ids whose deletion is in progress. | The deletion finishes. |
+| `relay_deleted_credentials` | `auth.sqlite` | Per credential of a deleted board: its SHA-256 hash, the board id, its expiry. | The credential's own expiry. |
 | `relay_credentials` | `auth.sqlite` | Per credential: id, SHA-256 hash, kind, account, board, agent or machine name, created, expiry, revoked flag. | The board is deleted or expires. Session rows stay, expired or revoked. |
 | `relay_action_grants` | `auth.sqlite` | Per approved action: grant hash, request id, account, the full approval context in clear, expiry, used flag. | No deletion path. |
 | `device` | `boards/devices.sqlite` | Per paired phone: account, device id, revoked flag. | No deletion path; a revoked row stays so its id is never reused. |
@@ -107,7 +108,7 @@ The relay never receives a board key in a form it can use. A phone gets it wrapp
 
 **Pairing another machine.** `pullboard relay pair` prints a code made of the board id, a locator and a 256-bit secret. The machine seals the board key and a snapshot under that secret and posts the package (`sealPairingBundle` in `src/pairing.js`). The relay holds it in memory for ten minutes and hands it out once, to a caller who can read the board (`relay/pairing-store.js`, `relay/pairing-http.js`).
 
-**Phone approvals.** For a native action that needs the person, such as revoking a device, the machine publishes the context and a sealed intent, authenticated with an HMAC under the board key so the relay cannot invent one (`phoneProposal` in `src/relay-phone.js`). The phone shows it. On a tap the relay issues a `pg_`; the phone seals it to the machine's in-memory reply key, and the machine spends it once (`issueActionGrant` and `consumeActionGrant` in `relay/auth.js`).
+**Phone approvals.** For a native action that needs the person, such as revoking a device, the machine publishes the context and a sealed intent, authenticated with an HMAC under the board key so the relay cannot invent one (`phoneProposal` in `src/relay-phone.js`). The intent also carries the machine's host name and the board's name, sealed, so the phone can show them and the relay cannot read or change them (`proposalNames` in `src/relay-phone.js`). The phone shows the request. On a tap the relay issues a `pg_`; the phone seals it to the machine's in-memory reply key, and the machine spends it once (`issueActionGrant` and `consumeActionGrant` in `relay/auth.js`).
 
 **One order for every move.** The relay gives each record the next sequence number atomically and refuses repeats and gaps (`insert` in `relay/journal.js`). Every client applies records in that order with the CLI's own rules.
 
