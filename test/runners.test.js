@@ -2040,3 +2040,71 @@ const timer=setInterval(()=>{ if (fs.existsSync(${JSON.stringify(release)})) cle
     else process.env.PULLBOARD_MACHINE_HOME = previousMachineHome;
   }
 });
+
+
+test('review655 a registered runner honors the same live person waiver at landing [B3,R3,C7]', { timeout: 120_000 }, async (t) => {
+  const { createE2eHelpers } = await import('./e2e-helpers.js');
+  const helper = createE2eHelpers();
+  t.after(helper.cleanup);
+  const box = helper.project('true');
+  const repo = box.repo;
+  const fixtureBin = join(box.dir, 'runner-bin');
+  const remoteHome = join(box.dir, 'runner-home');
+  const remoteMachineHome = join(remoteHome, '.pullboard');
+  const worker = join(box.dir, 'second-machine');
+  const requests = join(box.dir, 'runner-requests.jsonl');
+  for (const folder of [fixtureBin, remoteHome, remoteMachineHome, worker, join(repo, 'bin'), join(repo, 'test')]) mkdirSync(folder, { recursive: true });
+  const env = { ...box.env, PATH: fixtureBin + ':' + box.env.PATH };
+  writeFileSync(join(repo, 'package.json'), JSON.stringify({ private: true, type: 'module' }) + '\n');
+  cpSync(resolve(import.meta.dirname, '../src'), join(repo, 'src'), { recursive: true });
+  cpSync(resolve(import.meta.dirname, '../bin'), join(repo, 'bin'), { recursive: true });
+  const failing = 'test/review655-waived-red.test.js';
+  writeFileSync(join(repo, failing), "import { test } from 'node:test'; test('review655 known waived runner flake', () => { throw new Error('known private flaky failure'); });\n");
+  const configPath = join(repo, 'pullboard.json');
+  const config = JSON.parse(readFileSync(configPath, 'utf8'));
+  writeFileSync(configPath, JSON.stringify({ ...config, gate: 'node bin/run-tests.js --test-concurrency=1 ' + failing }) + '\n');
+  box.git(repo, 'add', 'package.json', 'pullboard.json', 'src', 'bin', failing);
+  box.git(repo, 'commit', '-q', '-m', 'test: commit private registered-runner waiver fixture');
+  const store = await import('../src/board.js');
+  const board = store.openBoard(join(repo, '.git', 'pullboard', 'board.sqlite'));
+  let waiver;
+  try { waiver = store.recordLandingWaiver(board, { agentId: 'person', channel: 'terminal', id: 'review655-remote-person-waiver', test: failing, until: '2099-01-01', reason: 'same live person exception on either execution machine' }); }
+  finally { store.closeBoard(board); }
+  const capacity = cli(repo, env, 'settings', 'gateSlots', '1', '--json');
+  assert.equal(capacity.status, 0, fixtureResultContext(capacity));
+  const local = cli(repo, env, 'gate', '--landing', '--json');
+  assert.equal(local.status, 0, fixtureResultContext(local));
+  const localDocument = JSON.parse(local.stdout);
+  assert.equal(localDocument.green, false);
+  assert.equal(localDocument.waived[0].waiver, waiver.id, 'the same exact committed source is waived locally');
+  installSshStandIn({ bin: fixtureBin, worker, home: remoteHome, machineHome: remoteMachineHome, requests });
+  const registered = cli(repo, env, 'runner', 'add', HOST, '--slots', '1', '--browser', '1', '--json');
+  assert.equal(registered.status, 0, fixtureResultContext(registered));
+  const priorHome = process.env.PULLBOARD_HOME, priorMachine = process.env.PULLBOARD_MACHINE_HOME;
+  process.env.PULLBOARD_HOME = env.PULLBOARD_HOME;
+  process.env.PULLBOARD_MACHINE_HOME = env.PULLBOARD_MACHINE_HOME;
+  let held;
+  try {
+    held = await takeResource({ name: 'gate', capacity: 1, scope: 'machine', root: repo, agent: 'review655-local-holder', item: 'review655-local-holder', kind: 'force-registered-runner' });
+    const phases = requests + '.phases';
+    const before = phaseCounts(phases);
+    const remote = observe(startToolingCli(repo, env, ['gate', '--landing', '--json'], { detached: true }));
+    const result = await awaitRoundTrip(remote.child, remote.closed, phases, before);
+    const profile = JSON.parse(readFileSync(join(repo, '.git', 'pullboard-gate.log.profile.json'), 'utf8'));
+    const raw = readFileSync(join(repo, '.git', 'pullboard-gate.log'), 'utf8');
+    assert.equal(profile.executionRunner, HOST, 'the real registered runner executed the frozen source');
+    assert.equal(profile.executionSource?.commit, box.git(repo, 'rev-parse', 'HEAD'), 'local and remote execute the same committed failing test');
+    assert.match(raw, /review655 known waived runner flake/u, 'the actual remote test is named in its result');
+    assert.match(raw, /known private flaky failure/u, 'the actual committed test threw its known error');
+    assert.match(raw, /^# tests 1$/mu, 'there is only this one committed test');
+    const document = JSON.parse(result.stdout);
+    console.log('review655 actual registered-runner waiver outcome ' + JSON.stringify({ localStatus: local.status, localWaiver: localDocument.waived[0].waiver, remoteStatus: result.status, executionRunner: profile.executionRunner, executionCommit: profile.executionSource?.commit, earlyStopped: raw.includes('Landing gate stopped early'), cancelled: /^# cancelled (\d+)$/mu.exec(raw)?.[1], raw, document }));
+    assert.equal(result.status, 0, 'the same live person waiver must cover this named landing failure on the registered runner');
+    assert.equal(document.green, false, 'a waived remote failure is never an ordinary green');
+    assert.equal(document.waived[0].waiver, waiver.id);
+  } finally {
+    held?.release();
+    if (priorHome === undefined) delete process.env.PULLBOARD_HOME; else process.env.PULLBOARD_HOME = priorHome;
+    if (priorMachine === undefined) delete process.env.PULLBOARD_MACHINE_HOME; else process.env.PULLBOARD_MACHINE_HOME = priorMachine;
+  }
+});
