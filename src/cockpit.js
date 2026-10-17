@@ -3,6 +3,10 @@ import {
   IN_STATE,
   MACHINE,
 } from './machine.js';
+import {
+  STAR_KEY,
+  starMarkup,
+} from './view/star.js';
 import { commandPhrases } from './help.js';
 import { personNeeds } from './needs.js';
 import {
@@ -172,6 +176,7 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
     <div class="card-panel feed" id="activity"></div>
   </section>
   <section data-pane="roadmap" class="roadmap-layout" id="roadmap" aria-label="Roadmap"></section>
+  ${hostedLocal && !snapshot ? starMarkup() : ''}
 </main>
 </div>
 </div>
@@ -315,6 +320,30 @@ const drawHosted = (${drawHosted.toString()});
 function localNote(state, facts = {}) {
   drawHosted(document, hostedState(state, { browser: hostedBrowser(navigator), ...facts }), { view: localSession?.origin || LOCAL_VIEW, signIn: hosted.signIn, session: hosted.relaySession });
 }
+
+let starLinked = { at: 0, linked: false, reading: false };
+/**
+ * Show the hosted page's star line (src/view/star.js) to a signed-in person whose account lists a linked board, until
+ * dismissed here; pass a board list through. Why the account's list: it is the linked-board metadata the relay serves
+ * this page, whichever source then draws a board, so a linked board this machine reads locally still counts, and no
+ * relay client loads to decide it. It is read until it lists one, at most every few seconds, and
+ * declares the relay's engine as every relay request does.
+ */
+function starLine(list) {
+  const line = $('star-line');
+  if (!line) return list;
+  const show = () => { line.hidden = !(hosted.relaySession && starLinked.linked && keep(${JSON.stringify(STAR_KEY)}) !== 'dismissed'); };
+  if (hosted.relaySession && !starLinked.linked && !starLinked.reading && Date.now() - starLinked.at > 2500) {
+    starLinked = { at: Date.now(), linked: false, reading: true };
+    linkedList().then((reply) => reply?.boards?.some((board) => typeof board?.id === 'string'), () => false)
+      .then((linked) => { starLinked = { at: Date.now(), linked, reading: false }; line.dataset.linked = linked ? 'yes' : 'no'; show(); });
+  }
+  show();
+  return list;
+}
+$('star-dismiss')?.addEventListener('click', () => { keep(${JSON.stringify(STAR_KEY)}, 'dismissed'); starLine(null); });
+// The first look waits for the whole script, so the engine the read declares (linkedList) is set up by then.
+queueMicrotask(() => starLine(null));
 
 /** Hide the relay's own banner, which speaks for the relay, on a page the relay does not serve this time. */
 function hideRelayNotice() {
@@ -951,7 +980,7 @@ async function api(path, body) {
     if (body !== undefined && body !== null) throw new Error('This is a read-only snapshot.');
     return jsonRequest(path, undefined, '', {});
   }
-  if (path === '/api/v1/boards') return await listedBoards();
+  if (path === '/api/v1/boards') return starLine(await listedBoards());
   const boardId = /^\\/api\\/v1\\/boards\\/([0-9a-f]{32})(?:\\/|$)/u.exec(path)?.[1];
   const source = boardId ? boardSources.get(boardId) : null;
   if (boardId && !source) throw new Error(transport
