@@ -371,3 +371,5 @@ Runner storage keeps one repository object cache and creates an isolated checkou
 Each checkout with a committed npm lockfile runs `npm ci`, including lifecycle scripts. Only npm's content cache is shared; installed dependencies and generated files stay in the fresh checkout. Other lock managers are refused. Combined command output and transport diagnostics are bounded at 64 MiB; exceeding that limit refuses the run.
 
 Post-run cleanup reports `RUNNER_CLEANUP_TIMEOUT` after 30 seconds instead of leaving the controller waiting indefinitely. That failure does not retry the command. The physical runner slot is released after its known children have drained and no unresolved live process remains; an unresolved live process keeps the slot occupied until cleanup can be verified.
+
+When the runner's own resource pool refuses the run's setup, the run fails at once with `RUNNER_SETUP_REFUSED`, naming the runner host and the pool's refusal code. It is not retried, and it leaves no holder or waiter on either machine.

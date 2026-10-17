@@ -95,6 +95,7 @@ import { relayJoin, relayPair } from './relay-pairing-client.js';
 import { executePersonRequests } from './relay-request-execution.js';
 import { engineReceipt } from './engine.js';
 import { land, landingRemote, landingSubject } from './land.js';
+import { installStep } from './worktree.js';
 
 const CHECKOUT_LEASES = new WeakMap();
 const CHECKOUT_BOARD_ONLY = new WeakMap();
@@ -1803,7 +1804,8 @@ async function worktreeFor(io, lane, route, family = null, model) {
   io.result?.({ agent: id, lane, route, path: root, branch: `${lane}/${n}`, model, displayName, prompt });
   io.say(`made ${root} on branch ${lane}/${n}, joined as ${displayName} in the ${lane} lane${route === 'light' ? ', on the light route' : ''}${family ? ` (family ${family})` : ''}`);
   io.say(`Work only in that folder. A shell that starts each command in the main checkout acts as the coordinator there, so start every command with: ${cdTo(root)}`);
-  if (existsSync(join(root, 'package.json'))) io.say(`  ${cdTo(root)} npm install    (its own install, so its tests run its own code)`);
+  const install = installStep(root);
+  if (install) io.say(`  ${cdTo(root)} ${install.command}    (${install.note})`);
   io.say(`  ${cdTo(root)} pullboard inbox`);
   io.say(`  ${cdTo(root)} pullboard next`);
   // A subagent inherits the instructions of the session that launched it, often another repo's (I7).

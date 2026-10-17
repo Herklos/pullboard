@@ -1316,21 +1316,52 @@ async function interceptJourneyOrigins(chrome, site, view, { deadline: currentDe
   };
   chrome.socket.addEventListener('message', listener);
   chrome.socket.addEventListener('message', networkListener);
+  // Chrome drops a paused request when its document is replaced, and reports no Network.loadingFailed for it (#748),
+  // so a read still in flight as the fixture navigates away would be stranded unaccounted. Each hosted document
+  // counts its own finite reads and can close to new ones; live streams are continued at once and stay open.
+  const { identifier: fetchGate } = await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+    if (location.origin !== ${JSON.stringify(JOURNEY_HOSTED)}) return;
+    const nativeFetch = window.fetch.bind(window);
+    const gate = { closed: false, open: 0 };
+    Object.defineProperty(window, '__journeyFetchGate', { value: gate });
+    window.fetch = (input, init) => {
+      const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+      const accept = new Headers(init?.headers ?? (typeof input === 'string' ? undefined : input.headers)).get('accept') || '';
+      if (url.pathname.endsWith('/events') || accept.includes('text/event-stream')) return gate.closed ? new Promise(() => {}) : nativeFetch(input, init);
+      if (gate.closed) return new Promise(() => {});
+      gate.open += 1;
+      return nativeFetch(input, init).finally(() => { gate.open -= 1; });
+    };
+  })()` });
   await chrome.send('Fetch.enable', { patterns: [{ urlPattern: JOURNEY_HOSTED + '/*', requestStage: 'Request' }, { urlPattern: JOURNEY_LOCAL + '/*', requestStage: 'Request' }, { urlPattern: view.base + '/*', requestStage: 'Request' }] });
+  /** Close the hosted document to new reads and wait until every read it started has its answer from this fixture. */
+  async function quiescePage() {
+    if (!(await chrome.stable('(() => { const gate = window.__journeyFetchGate; if (gate) gate.closed = true; return Boolean(gate); })()'))) return;
+    await chrome.waitFor('window.__journeyFetchGate.open === 0');
+    await drainTasks();
+  }
+  /** Leave the hosted page for a blank one only once nothing it started is still paused here. */
+  async function leavePage() {
+    await quiescePage();
+    await chrome.send('Page.navigate', { url: 'about:blank' });
+    await chrome.waitFor('location.href === "about:blank"');
+  }
   const stop = async () => {
     stopping = true;
     for (const record of interceptions) record.stopObserved = true;
     for (const held of heldResponses.splice(0)) held.cancel();
     for (const release of releaseHeldResponses) release();
     const errors = [];
-    // Settle active completions before quiescing the owned page; requests arriving during shutdown
-    // then receive an explicit matching browser cancellation instead of escaping to a real origin.
+    // Close the page to new reads and settle the ones it started before leaving it, so no read is stranded by the
+    // navigation; anything still arriving during shutdown is drained instead of escaping to a real origin.
+    try { await quiescePage(); } catch (error) { errors.push(error); }
     try { await drainTasks(); } catch (error) { errors.push(error); }
     try {
       await chrome.send('Page.navigate', { url: 'about:blank' });
       await chrome.waitFor('location.href === "about:blank"');
     } catch (error) { errors.push(error); }
     try { await drainTasks(); } catch (error) { errors.push(error); }
+    try { await chrome.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: fetchGate }); } catch (error) { errors.push(error); }
     try { await chrome.send('Fetch.disable'); } catch (error) { errors.push(error); }
     try { await drainTasks(); } catch (error) { errors.push(error); }
     finally {
@@ -1350,6 +1381,7 @@ async function interceptJourneyOrigins(chrome, site, view, { deadline: currentDe
     assert.equal(incomplete.length, 0, 'each paused request completes once or has its own confirmed browser cancellation; safe interception trace: ' + diagnostic);
   };
   stop.cancelOwned = cancelOwned;
+  stop.leavePage = leavePage;
   /** Observe terminal request outcomes after the caller releases or aborts its owned inputs. */
   stop.settled = () => Promise.allSettled(tasks);
   stop.holdNextResponse = holdNextResponse;
@@ -1412,6 +1444,7 @@ test('the hosted journey names its phase and stops within its own deadline [N26,
   const chrome = {
     socket: new EventTarget(),
     async send() { return {}; },
+    async stable() { return false; },
     async waitFor() { return true; },
   };
   let deadline;
@@ -1600,6 +1633,10 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
   let closingChrome;
   let stopOrigins;
   const heldMoves = [];
+  // The move's own reply is the act's outcome (#748): every relay read the following refresh makes waits here, so an
+  // act that still waited on that whole-page refresh would never complete while they are held.
+  const holdRelayReads = "(() => { const read = transport.request; window.__relayReadsHeld = []; window.__releaseRelayReads = () => { transport.request = read; for (const go of window.__relayReadsHeld.splice(0)) go(); }; transport.request = (path, body) => new Promise((resolve, reject) => window.__relayReadsHeld.push(() => read.call(transport, path, body).then(resolve, reject))); return true; })()";
+  const releaseRelayReads = '(() => { window.__releaseRelayReads(); return true; })()';
   /** Read only the fixture's existing bounded, redacted interception trace. */
   journeyTrace = () => stopOrigins?.trace?.() ?? null;
   /** Close only this fixture's browser and reads; racing a promise never claims cancellation. */
@@ -1673,7 +1710,7 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
     journeyDeadline.setPhase(journeyPhase);
     // C's real local board is also paired on the relay so this catches duplicate-ID source preference.
     // Start a fresh hosted document before pairing C, then wait for transport work rather than assuming C is selected.
-    await chrome.send('Page.navigate', { url: 'about:blank' });
+    await stopOrigins.leavePage();
     await chrome.send('Page.navigate', { url: JOURNEY_HOSTED + '/#board=' + localRelay.board + '&key=' + encodeURIComponent(localRelayKey) });
     await chrome.waitFor('location.hash === "" && !!JSON.parse(localStorage.getItem("pullboard.relay.keys.v1") || "{}")[' + JSON.stringify(localRelay.board) + ']', 30_000); // budget: 30s hang ceiling for paired-key storage to settle.
     assert.ok(linked.calls.some(call => call.method === 'GET'
@@ -1683,7 +1720,7 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
     journeyPhase = 'discover-combined-board-list';
     journeyDeadline.setPhase(journeyPhase);
     // The hosted page's real local-view handoff discovers B without a pasted key, URL or port.
-    await chrome.send('Page.navigate', { url: 'about:blank' });
+    await stopOrigins.leavePage();
     await chrome.send('Page.navigate', { url: JOURNEY_HOSTED + '/' });
     await chrome.waitFor("[...document.querySelectorAll('#proj-list .proj.repo')].some(row => row.textContent.includes('fixture/repository')) && [...document.querySelectorAll('#proj-list .proj.repo')].some(row => row.textContent.includes('local-machine-b')) && [...document.querySelectorAll('#proj-list .proj.repo')].some(row => row.textContent.includes('local-machine-c'))");
     const localList = await (await fetchLive(localView.base + '/api/v1/boards', { headers: { 'x-pullboard-key': localView.key } })).json();
@@ -1811,10 +1848,12 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
     await chrome.waitFor("view.root === data.projects.find(row => row.id === " + JSON.stringify(linkedId) + ").root && readOnly && requests");
     await chrome.click("document.querySelector('#new-item')");
     await chrome.stable("document.querySelector('#add-title').value = 'relay draft survives local completion'; true");
+    assert.equal(await chrome.stable(holdRelayReads), true, 'relay reads wait for the fixture');
     firstResponse.release();
     await chrome.waitFor('window.__actOutcome !== null');
     assert.equal(await chrome.stable('window.__actOutcome'), true, 'a local write response is parsed using the mode it started with after switching to relay');
     assert.equal(await chrome.stable("document.querySelector('#add-title').value"), 'relay draft survives local completion', 'the older local completion does not clear the current relay draft');
+    assert.equal(await chrome.stable(releaseRelayReads), true, 'the held relay reads go on');
 
     journeyPhase = 'hold-second-local-completion-across-reselection';
     journeyDeadline.setPhase(journeyPhase);
@@ -1836,9 +1875,12 @@ test('the hosted page lists linked and local boards together [N26,H5]', {
     await chrome.waitFor("view.root === data.projects.find(row => row.name === 'local-machine-b').root && !readOnly && !requests");
     await chrome.click("document.querySelector('#new-item')");
     await chrome.stable("document.querySelector('#add-title').value = 'replacement local draft'; true");
+    assert.equal(await chrome.stable(holdRelayReads), true, 'relay reads wait for the fixture');
     secondResponse.release();
     await chrome.waitFor('window.__actOutcome !== null');
+    assert.equal(await chrome.stable('window.__actOutcome'), true, 'the second local write completes on its own reply');
     assert.equal(await chrome.stable("document.querySelector('#add-title').value"), 'replacement local draft', 'a completion after switching away and back preserves the replacement draft');
+    assert.equal(await chrome.stable(releaseRelayReads), true, 'the held relay reads go on');
 
     journeyPhase = 'assert-final-browser-state';
     journeyDeadline.setPhase(journeyPhase);
