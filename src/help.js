@@ -45,6 +45,7 @@ Set up
                                         keep this command open until pairing finishes; later projects link on registration
   pullboard relay devices               list paired device ids and their public-key fingerprints
   pullboard relay revoke <device>       stop future key delivery; already received keys remain known
+                                        approve on another paired phone, or sign in again with GitHub
   pullboard relay tokens                list this board's agent token ids, agents and expiry, never credentials
   pullboard relay revoke <token-id>     revoke one token from that list; other agents keep working
   pullboard relay recover --skip <sequence>  person-only recovery of one blocked next relay position

@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import { AGENT_SHELL_MARKERS, SSH_SHELL_MARKERS } from '../src/person.js';
 import { ENGINE_VERSION } from '../src/machine.js';
 import { relayClientFixture } from './relay-client-fixture.js';
+import { enrollProtocolPhone } from './relay-device-enrollment-fixture.js';
 import { findChromeExecutable, startChrome } from './relay-browser-fixture.js';
 
 const CLI = resolve(import.meta.dirname, '../bin/pullboard.js');
@@ -180,7 +181,7 @@ test('same-user agents never act as their person while the phone approves native
     assertNoPersonPower(box.root); assertNoPersonPower(box.env.HOME);
   });
   await t.test('native device revocation needs one phone tap and offline agent unlink always works [H5,H16,H17,B26]', async () => {
-    const target = machine.devices[0].deviceId;
+    const target = await enrollProtocolPhone(box);
     const revoke = command(box.root, personEnv, ['relay', 'revoke', target]);
     t.after(async () => { if (revoke.child.exitCode === null) revoke.child.kill('SIGTERM'); await revoke.done.catch(() => {}); });
     await chrome.waitFor("[...document.querySelectorAll('.phone-approval')].some(node => node.textContent.includes(" + JSON.stringify(target) + '))');
@@ -189,6 +190,10 @@ test('same-user agents never act as their person while the phone approves native
     await chrome.evaluate("[...document.querySelectorAll('.phone-approval')].find(node => node.textContent.includes(" + JSON.stringify(target) + ')).querySelector("button").click()');
     assert.equal((await revoke.done).code, 0);
     assert.equal(box.calls.filter(call => call.path.endsWith('/authorize')).length, before + 1);
+    assert.deepEqual(JSON.parse(readFileSync(machineFile)).devices.map(device => device.deviceId), [machine.devices[0].deviceId],
+      'the approving phone remains paired after it revokes the other target');
+    const lastPhone = await command(box.root, personEnv, ['relay', 'revoke', machine.devices[0].deviceId]).done;
+    assert.equal(lastPhone.code, 0, 'fresh GitHub sign-in removes the last phone without asking it to approve itself');
     assert.equal(JSON.parse(readFileSync(machineFile)).devices.length, 0);
     await box.stopRelay();
     const calls = box.calls.length;
