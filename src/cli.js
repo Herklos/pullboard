@@ -36,6 +36,7 @@ import { askedLaneNotes, detectGate, initRepo, proposeLanes, starterLane, starte
 import { lifecycleMarkdown } from './machine.js';
 import { HELP, VERSION } from './help.js';
 import { barCorrectionLine, barCorrections, barStatsLines } from './bar-corrections.js';
+import { checkImplies, decisionsImplying, parseImplies, takeDecisionNotices, whyLine } from './implies.js';
 import { defaultViewPort } from './view-port.js';
 export { HELP, VERSION };
 import { productLine, productProblems, productSummaries } from './products.js';
@@ -60,10 +61,10 @@ import {
   standings,
   unmetRows,
 } from './spec.js';
-import { answerQuestion, bundledBlueprints, planBlueprint, readBlueprint, saveBlueprint } from './blueprints.js';
+import { answerQuestion, bundledBlueprints, landBlueprint, planBlueprint, readBlueprint, repoAnswers, saveBlueprint } from './blueprints.js';
 import { briefFiles } from './brief.js';
 import { commitFirst, commitOwnerLines, commitOwners, coordinatorInbox, coordinatorInboxLines, inboxFirst } from './resume.js';
-import { checkBaseline, prepareCheckBaseline, sayCheckBaseline } from './check-baseline.js';
+import { checkBaseline, prepareCheckBaseline, sayCheckBaseline, refuseCheckSyntax } from './check-baseline.js';
 import { retryCheckBaselines, startCheckBaseline } from './check-baseline-worker.js';
 import { compareMainFailures, mainRedMessage, mainRedReworkItems } from './main-red.js';
 import { runItems } from './run.js';
@@ -76,7 +77,7 @@ import { milestoneRoadmap } from './roadmap.js';
 import { listResources, memoryVerdict, readMachineMemory, runnerResourceStatus } from './resources.js';
 import { citedTestFiles, rowEvidence, rowStage } from './evidence.js';
 import { exportView, serveView } from './serve.js';
-import { forgetView, rememberView, runningView } from './view-session.js';
+import { forgetView, portHolder, rememberView, runningView } from './view-session.js';
 import { serveApi } from './api.js';
 import { serveMcp } from './mcp.js';
 import { doctorProblems, doctrineProblems } from './doctor.js';
@@ -303,6 +304,7 @@ const OPTIONS = {
   commit: { type: 'string' },
   ref: { type: 'string' },
   supersedes: { type: 'string' },
+  implies: { type: 'string' },
   owns: { type: 'string' },
   help: { type: 'boolean', short: 'h' },
   version: { type: 'boolean', short: 'v' },
@@ -1302,6 +1304,8 @@ function resumeHere(io) {
         flow: proofStats(board, { now: ctx.clock.now().getTime() }).flow } : {}),
       requests: me.id === COORDINATOR ? store.openRequests(board) : [],
       holding: all.filter((item) => item.item_status === 'claimed' && item.item_owner === me.id),
+      held: all.filter((item) => item.item_status === 'claimed' && item.item_owner === me.id)
+        .map((item) => ({ item: item.item_id, facts: store.itemThread(board, item.item_id) })),
       sentBack: all
         .filter((item) => item.item_status === 'open' && item.item_verdict === 'REJECT' && item.item_built_by === me.id)
         .map((item) => ({ item, verdict: store.verdictsFor(board, item.item_id).at(-1) })),
@@ -1370,6 +1374,9 @@ function resumeHere(io) {
     for (const line of commitOwnerLines(card.commits)) say(line);
   }
   for (const request of card.requests) say(`request #${request.shout_id}: ${request.shout_text}; answer with pullboard answer ${request.shout_id} done, or declined <reason>`);
+  card.decisions = takeDecisionNotices(ctx.info.gitDir, card.held);
+  delete card.held;
+  for (const notice of card.decisions) say(`decision for #${notice.item} ${notice.text}`);
   for (const item of card.holding) {
     say(`holding #${item.item_id} ${item.item_title}, lease ${span(ctx, item.item_lease_until)} left${item.item_check ? `; check: ${item.item_check}` : ''}`);
     const files = briefFiles(item.item_brief);
@@ -1521,7 +1528,14 @@ async function viewHere(io, values) {
   } catch (error) {
     if (view) await view.close();
     if (error instanceof Refused && error.code === 'PORT_BUSY') {
-      error = new Refused('PORT_BUSY', `port ${port} is in use: name another with --port N, or use --port 0 to take a free one`);
+      // pullboard.dev only looks on the default port, so a busy default names the holder to stop.
+      // The background child is handed --port explicitly, so the default is matched by number.
+      let hosted = false;
+      try { hosted = port !== 0 && port === defaultViewPort(); } catch { /* A malformed override names no default port. */ }
+      const holder = hosted ? portHolder(port) : null;
+      const stop = holder && (process.platform === 'win32' ? `taskkill /PID ${holder.pid} /T` : `kill ${holder.pid}`);
+      error = new Refused('PORT_BUSY', !hosted ? `port ${port} is in use: name another with --port N, or use --port 0 to take a free one`
+        : `port ${port} is in use${holder ? ` by ${holder.name} (pid ${holder.pid})` : ''}, and pullboard.dev looks for your view on that port: stop ${holder ? `it with ${stop}` : 'the other view there'}, then run pullboard view again`);
     }
     if (process.env.PULLBOARD_VIEW_BACKGROUND_CHILD === '1' && process.send) {
       process.send({ type: 'startup-error', code: error.code ?? 'VIEW_START', message: error.message });
@@ -2033,6 +2047,16 @@ function readCommands(io, { first, second, rest, values }) {
       }
       return 0;
     },
+    why: () => {
+      if (!first || second || rest.length) throw new Refused('USAGE', 'pullboard why <id>: the decisions that imply an item, newest first');
+      const ctx = context(io);
+      const id = idArg(first);
+      const decisions = withBoard(ctx, (board) => decisionsImplying(store.itemThread(board, id)));
+      io.result?.({ id, decisions });
+      if (!decisions.length) io.say(`no decision implies #${id}`);
+      for (const entry of decisions) io.say(whyLine(entry));
+      return 0;
+    },
     show: () => {
       const ctx = context(io);
       const id = idArg(first);
@@ -2396,7 +2420,9 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
   const source = readFileSync(spec.file, 'utf8');
   const configFile = join(ctx.info.root, CONFIG_FILE);
   const configSource = readFileSync(configFile, 'utf8');
-  const plan = planBlueprint(blueprint, { source, spec, doctrine: ctx.doctrine,
+  // A question takes the answer this repo already shows as its default, read from package.json
+  // only: nothing runs and nothing is fetched (#725).
+  const plan = planBlueprint(landBlueprint(blueprint, repoAnswers(ctx.info.root)), { source, spec, doctrine: ctx.doctrine,
     existingItems: store.listItems(board, { all: true }).map((item) => ({ id: item.item_id, title: item.item_title, specIds: item.item_spec_ids ? item.item_spec_ids.split(',') : [] })),
     gate: String(JSON.parse(configSource).gate ?? '') });
   // Every starter is checked before anything is written, so a refusal leaves the board as it was.
@@ -2479,6 +2505,7 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true } = {}) {
 async function verifyHere(ctx, id, { second, values }) {
   const decision = { accept: 'ACCEPT', reject: 'REJECT' }[String(second ?? '').toLowerCase()];
   if (!decision) throw new Refused('USAGE', 'pullboard verify <id> accept, or reject --reason CODE --note "..."');
+  const implies = parseImplies(values.implies);
   const { root } = ctx.info;
   let verificationProfile = null;
   let accepted = null;
@@ -2504,6 +2531,8 @@ async function verifyHere(ctx, id, { second, values }) {
     if (item.item_status !== 'submitted') {
       throw new Refused('NOT_SUBMITTED', `item #${id} is ${item.item_status}, not submitted`);
     }
+    // Name an unknown implied item before the frozen check runs, not after it.
+    if (implies) checkImplies(board, implies);
     const policy = itemPolicy(root, item);
     ctx = { ...ctx, config: policy.config };
     const head = headCommit(root) ?? '';
@@ -2522,8 +2551,12 @@ async function verifyHere(ctx, id, { second, values }) {
       if (digest !== item.item_frozen_digest) throw new Refused('CRITERIA_CHANGED', 'the criterion changed; ask the coordinator to refreeze this item before checking it');
       const trunk = requireTrunkMerge(root, commit);
       refuseUnverifiedStack(root, board, item, commit, trunk);
-      const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(root, frozenCheck(item), { commit, onFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
-      check = await withGateSlot(root, (lease) => checkAtCommit(root, item, { waitMs: lease.waitMs, gateLease: lease }), { browser, agent: me.id, item: String(id), kind: 'review', itemCheck: true, onWait: gateWaitReporter(ctx.io) });
+      if (frozenCheck(item)) {
+        const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(root, frozenCheck(item), { commit, onFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
+        check = await withGateSlot(root, (lease) => checkAtCommit(root, item, { waitMs: lease.waitMs, gateLease: lease }), { browser, agent: me.id, item: String(id), kind: 'review', itemCheck: true, onWait: gateWaitReporter(ctx.io) });
+      } else {
+        check = checkAtCommit(root, item);
+      }
       refuseSandboxBlocked(check);
       verificationProfile = check.profile ?? null;
       const evidence = check.checked
@@ -2548,6 +2581,7 @@ async function verifyHere(ctx, id, { second, values }) {
       policy: ctx.config.verify.policy,
       familyPolicy: ctx.config.verify.family,
       ...(decision === 'ACCEPT' ? { check: check.checked ? 'green' : 'none' } : {}),
+      ...(implies ? { implies } : {}),
     }]);
   };
   const result = await withBoard(ctx, async (board) => {
@@ -2841,10 +2875,11 @@ function workCommands(io, args) {
       return 0;
     }),
     fact: () => act(async (ctx, board, me) => {
-      if (!first || !second || rest.length !== 1) throw new Refused('USAGE', 'pullboard fact <id> <kind> <text> [--supersedes <fact-id>] [--ref path:lines@full-sha]');
+      if (!first || !second || rest.length !== 1) throw new Refused('USAGE', 'pullboard fact <id> <kind> <text> [--supersedes <fact-id>] [--ref path:lines@full-sha] [--implies <ids>]');
       const id = idArg(first);
+      const implies = parseImplies(values.implies);
       const fact = await ordered(ctx, board, 'appendFact', [id, { agentId: me.id, kind: second,
-        text: rest[0], supersedes: values.supersedes ?? null, ref: values.ref ?? null }]);
+        text: rest[0], supersedes: values.supersedes ?? null, ref: values.ref ?? null, ...(implies ? { implies } : {}) }]);
       io.result?.({ item: id, fact });
       io.say(`fact ${fact.id} appended to #${id} as ${fact.kind}`);
       return 0;
@@ -2929,6 +2964,7 @@ function workCommands(io, args) {
       };
       buildInFilelessLane(ctx.config, first, after);
       const { command } = store.validateItemAddition(board, item);
+      if (command) refuseCheckSyntax(command);
       if (command) item.checkBaseline = values.wait ? checkBaseline(ctx.info.root, command) : prepareCheckBaseline(ctx.info.root, command);
       const id = await ordered(ctx, board, 'addItem', [item]);
       if (item.checkBaseline?.result === 'pending') await launchBaseline(ctx, board, id, item.checkBaseline);
@@ -2959,6 +2995,7 @@ function workCommands(io, args) {
         ...(values.reason !== undefined ? { reason: values.reason } : {}),
       };
       const { item, command } = store.validateItemEdit(board, id, change);
+      if (command && command !== item.item_check) refuseCheckSyntax(command);
       if (command && command !== item.item_check) change.checkBaseline = values.wait ? checkBaseline(ctx.info.root, command) : prepareCheckBaseline(ctx.info.root, command);
       await ordered(ctx, board, 'editItem', [id, change]);
       if (change.checkBaseline?.result === 'pending') await launchBaseline(ctx, board, id, change.checkBaseline);
@@ -3167,7 +3204,10 @@ function workCommands(io, args) {
     answer: () => act(async (ctx, board, me) => {
       const asPerson = personMode(ctx, me, values);
       if (asPerson) requirePersonChannel(ctx.io.personChannel);
-      const id = await ordered(ctx, board, 'answerDecision', [idArg(first), { agentId: me.id, text: [second, ...rest].filter(Boolean).join(' '), lanes: laneNames(ctx.config), asPerson, channel: ctx.io.personChannel ?? 'terminal' }]);
+      const implies = parseImplies(values.implies);
+      const supersedes = values.supersedes === undefined ? undefined : idArg(String(values.supersedes).replace(/^#/u, ''));
+      const id = await ordered(ctx, board, 'answerDecision', [idArg(first), { agentId: me.id, text: [second, ...rest].filter(Boolean).join(' '), lanes: laneNames(ctx.config), asPerson, channel: ctx.io.personChannel ?? 'terminal',
+        ...(implies ? { implies } : {}), ...(supersedes ? { supersedes } : {}) }]);
       const ask = store.getShout(board, idArg(first));
       io.result?.({ id, answers: ask.shout_id });
       if (asPerson) {

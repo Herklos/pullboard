@@ -307,8 +307,8 @@ test('an agent in its worktree cannot mint a relay token [H2,V1,E3,E5,P6]', asyn
     assert.equal(person.result?.decision, 'ACCEPT', 'the person verifies coordinator-built work');
   });
 
-  // 19 is main's engine before #579 (bar corrections, #470); its journals replay as they did too.
-  for (const engine of [11, 12, 19]) await t.test(`an engine-${engine} journal replays as before`, (t) => {
+  // 19 (bar corrections, #470) and 20 (implies, #469) are main's engines before #579; their journals replay as they did too.
+  for (const engine of [11, 12, 19, 20]) await t.test(`an engine-${engine} journal replays as before`, (t) => {
     const directory = mkdtempSync(join(tmpdir(), `pullboard-mint-engine${engine}-`));
     t.after(() => rmSync(directory, { recursive: true, force: true }));
     const historical = store.openBoard(':memory:');

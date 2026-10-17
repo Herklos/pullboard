@@ -31,7 +31,7 @@
  * waits on other items by their keys. On a board they get real ids from the section's prefix.
  */
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { basename, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Refused } from './refused.js';
 import { insertSectionRows, nextRowId } from './spec.js';
@@ -158,8 +158,13 @@ export function validateBlueprint(value, source = 'blueprint') {
     line(`${at}.ask`, question.ask);
     if (!Array.isArray(question.choices) || question.choices.length < 2) fail(`${at}.choices`, 'must list at least two answers');
     else question.choices.forEach((choice, n) => line(`${at}.choices[${n}]`, choice));
-    line(`${at}.default`, question.default);
-    if (Array.isArray(question.choices) && !question.choices.includes(question.default)) fail(`${at}.default`, 'must be one of its choices');
+    // A question may leave its default out: it then lands unanswered unless the repo shows one.
+    if (question.default !== undefined) {
+      line(`${at}.default`, question.default);
+      if (Array.isArray(question.choices) && !question.choices.includes(question.default)) fail(`${at}.default`, 'must be one of its choices');
+    }
+    if (Array.isArray(question.choices) && question.choices.includes(NO_ANSWER)) fail(`${at}.choices`, `must not offer ${NO_ANSWER}, which marks an unanswered question`);
+    if (question.detect !== undefined && !BLUEPRINT_DETECTS.includes(question.detect)) fail(`${at}.detect`, `must be one of ${BLUEPRINT_DETECTS.join(', ')}`);
   });
   const itemKeys = new Set();
   items.forEach((item, index) => {
@@ -259,13 +264,92 @@ export function ruleText(rule) {
 }
 
 /**
- * One question's row text: the question with its default as the answer, then every choice.
+ * One question's row text: the question with its default as the answer, then every choice. A
+ * question with no default reads "(choose one)" as its answer, so the person sees it is open.
  *
- * @param {{ ask: string, choices: string[], default: string }} question
+ * @param {{ ask: string, choices: string[], default?: string }} question
  * @returns {string}
  */
 export function questionText(question) {
-  return `${question.ask.trim()}: ${question.default.trim()}. Choices: ${question.choices.map((choice) => choice.trim()).join(', ')}.`;
+  return `${question.ask.trim()}: ${(question.default ?? NO_ANSWER).trim()}. Choices: ${question.choices.map((choice) => choice.trim()).join(', ')}.`;
+}
+
+/** What a question with nothing to answer it shows as its answer, so the person picks one. */
+export const NO_ANSWER = '(choose one)';
+
+/**
+ * What a question's detect field can name: each reads an answer from the repo a blueprint lands in.
+ * A question may carry detect ("test-runner" or "framework") and may leave its default out. When
+ * the repo shows an answer that is one of the question's choices, that answer is the default; else
+ * the blueprint's own default stands; else the row is filed unanswered as "<ask>: (choose one)".
+ */
+export const BLUEPRINT_DETECTS = ['test-runner', 'framework'];
+
+// A test script names its runner as a command word: node --test, vitest, jest or mocha.
+const SCRIPT_RUNNERS = [
+  ['node:test', /(?:^|[\s;&|(])node\s+(?:[^\s;&|]+\s+)*--test(?:[\s;&|)=]|$)/u],
+  ['Vitest', /(?:^|[\s;&|(/])vitest(?:[\s;&|)]|$)/u],
+  ['Jest', /(?:^|[\s;&|(/])jest(?:[\s;&|)]|$)/u],
+  ['Mocha', /(?:^|[\s;&|(/])mocha(?:[\s;&|)]|$)/u],
+];
+const PACKAGE_RUNNERS = [['Vitest', 'vitest'], ['Jest', 'jest'], ['Mocha', 'mocha']];
+const PACKAGE_FRAMEWORKS = [['Next.js', 'next'], ['SvelteKit', '@sveltejs/kit']];
+
+/**
+ * The one answer a list of candidates gives, or null when it gives none or more than one, so an
+ * ambiguous repo leaves the question for the person instead of guessing.
+ *
+ * @param {string[]} found
+ * @returns {string | null}
+ */
+function onlyAnswer(found) {
+  const distinct = [...new Set(found)];
+  return distinct.length === 1 ? distinct[0] : null;
+}
+
+/**
+ * Read the answers a repo already shows, by detect name: the test runner from package.json's
+ * scripts.test, then its devDependencies; the framework from its dependencies (and
+ * devDependencies, where SvelteKit sits). Only package.json is read: nothing runs and nothing is
+ * fetched, so the same repo always gives the same answers. A missing or unreadable package.json
+ * gives none.
+ *
+ * @param {string} root - The repository root.
+ * @returns {Record<string, string>}
+ */
+export function repoAnswers(root) {
+  const file = join(root, 'package.json');
+  if (!existsSync(file)) return {};
+  let manifest;
+  try { manifest = JSON.parse(readFileSync(file, 'utf8')); }
+  catch { return {}; }
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) return {};
+  const table = (name) => (manifest[name] && typeof manifest[name] === 'object' && !Array.isArray(manifest[name]) ? manifest[name] : {});
+  const has = (name, pkg) => Object.hasOwn(table(name), pkg);
+  const script = typeof table('scripts').test === 'string' ? table('scripts').test : '';
+  const answers = {};
+  const runner = onlyAnswer(SCRIPT_RUNNERS.filter(([, pattern]) => pattern.test(script)).map(([answer]) => answer))
+    ?? onlyAnswer(PACKAGE_RUNNERS.filter(([, pkg]) => has('devDependencies', pkg)).map(([answer]) => answer));
+  if (runner) answers['test-runner'] = runner;
+  const framework = onlyAnswer(PACKAGE_FRAMEWORKS.filter(([, pkg]) => has('dependencies', pkg) || has('devDependencies', pkg)).map(([answer]) => answer));
+  if (framework) answers.framework = framework;
+  return answers;
+}
+
+/**
+ * The blueprint as it lands in a repo: each question that detects an answer the repo shows, and
+ * lists that answer among its choices, gets it as its default. An answer outside the choices is
+ * never used, so a row never offers what the blueprint did not.
+ *
+ * @param {Blueprint} blueprint
+ * @param {Record<string, string>} answers - From repoAnswers.
+ * @returns {Blueprint}
+ */
+export function landBlueprint(blueprint, answers) {
+  return { ...blueprint, questions: blueprint.questions.map((question) => {
+    const answer = question.detect ? answers[question.detect] : undefined;
+    return answer && question.choices.includes(answer) ? { ...question, default: answer } : question;
+  }) };
 }
 
 /**
@@ -429,6 +513,7 @@ function readQuestion(text) {
     }
   }
   if (readings.size === 1) return { question: [...readings.values()][0] };
+  if (positions(text, CHOICES).some((at) => text.slice(0, at).endsWith(`: ${NO_ANSWER}`))) return { reason: 'its question has no answer yet' };
   return { reason: readings.size ? 'its question can be read more than one way' : 'its answer is not one of its choices, or its choices cannot be read back exactly' };
 }
 
