@@ -120,7 +120,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `spec view` | `version:number`, `path:string` |
 | `spec show` | `version:number`, `row:object`, `standing:object` |
 | `spec draft` | `version:number`, `id:string`, `row:object` |
-| `blueprint add` | `version:number`, `blueprint:object`, `section:string`, `rows:array`, `items:array`, `gate:string\|null` |
+| `blueprint add` | `version:number`, `blueprint:object`, `section:string`, `rows:array`, `items:array`, `gate:string\|null`, `proposedLanes:array` |
 | `spec unmet` | `version:number`, `rows:array` |
 | `spec signoff` | `version:number`, `count:number`, `by:string`, `ids:array`, `evidence:array` |
 | `spec signers` | `version:number`, `added:boolean`, `by:string`, `path:string`, `initial:boolean` |
