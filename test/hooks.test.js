@@ -2,6 +2,7 @@
  * The commit-message rules (C1, C2) and the pre-commit pattern checks on real staged changes.
  */
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { runFixtureExecFile as execFileSync, runFixtureGit } from './fixture-child.js';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -252,4 +253,45 @@ test('a spec-less feature commit is told a path that works [S1,B26]', () => {
     assert.match(advice.join('\n'), /\[R9\]/u, 'an approved board names an id that really exists');
     assert.doesNotMatch(advice.join('\n'), /\[G1(?:,G2)?\]/u, 'a fenced example is never suggested as a citation');
   }
+});
+
+test('a hook names a Pullboard version mismatch instead of running old rules [C1,I2]', (t) => {
+  const box = stagedRepo(t);
+  const hooks = join(box.root, '.githooks'), bin = join(box.root, '.fakebin'), local = join(box.root, 'node_modules', '.bin');
+  mkdirSync(hooks); mkdirSync(bin);
+  box.git('config', 'core.hooksPath', '.githooks');
+  box.git('config', 'user.name', 'Fixture');
+  box.git('config', 'user.email', 'fixture@example.com');
+  writeFileSync(join(hooks, 'commit-msg'), hookScript('commit-msg', '0.9.0'));
+  chmodSync(join(hooks, 'commit-msg'), 0o755);
+  /** A pullboard that reports one version and says so if its rules ever run. */
+  const fake = (dir, version) => {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'pullboard'), `#!/bin/sh\nif [ "$1" = --version ]; then echo ${version}; exit 0; fi\necho "rules of ${version} ran" >&2\nexit 0\n`);
+    chmodSync(join(dir, 'pullboard'), 0o755);
+  };
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+  const commit = () => spawnSync('git', ['commit', '--allow-empty', '-q', '-m', 'chore: try a commit'], { cwd: box.root, env, encoding: 'utf8' });
+
+  fake(bin, '0.8.4');
+  let result = commit();
+  assert.equal(result.status, 1, 'an older global pullboard is stopped');
+  assert.match(result.stderr, /stopped before running any rule; these hooks were installed by Pullboard 0\.9\.0, but pullboard is Pullboard 0\.8\.4\. Run: npm i -g pullboard@0\.9\.0/u);
+  assert.doesNotMatch(result.stderr, /rules of 0\.8\.4 ran/u, 'the old rules never run');
+
+  fake(local, '0.8.4');
+  result = commit();
+  assert.equal(result.status, 1, 'an older project install is stopped');
+  assert.match(result.stderr, /Pullboard 0\.8\.4\. Run: npm i -D pullboard@0\.9\.0/u, 'a project install is fixed in the project');
+  rmSync(join(box.root, 'node_modules'), { recursive: true, force: true });
+
+  fake(bin, '0.9.9');
+  result = commit();
+  assert.equal(result.status, 1, 'a newer pullboard under older hooks is stopped too');
+  assert.match(result.stderr, /Pullboard 0\.9\.9\. Run: pullboard init/u, 'newer rules rewrite the hooks with init');
+
+  fake(bin, '0.9.0');
+  result = commit();
+  assert.equal(result.status, 0, `the matching version runs: ${result.stderr}`);
+  assert.match(result.stderr, /rules of 0\.9\.0 ran/u, 'the hook runs the version that installed it');
 });

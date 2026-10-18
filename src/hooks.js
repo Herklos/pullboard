@@ -588,24 +588,48 @@ export function pushesTrunk(refsText, trunk) {
   });
 }
 
+/** The Pullboard version that writes the hooks, read once from the package it ships in. */
+const INSTALLER_VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+
 /**
  * The shell script for one hook: it runs pullboard from this checkout's install, else the main
  * checkout's, which a fresh agent worktree shares, else the PATH.
  *
+ * The script carries the version that wrote it and asks the binary it found for its own before running
+ * any rule (#876): an older global install would otherwise apply its old rules under a newer CLI's
+ * guidance, and an old binary cannot be trusted to notice. A mismatch stops the hook, names both
+ * versions, and gives the one command that fixes it: install the hook's version (project or global, where
+ * the binary came from) when the found one is older, or rewrite the hooks with `pullboard init` when newer.
+ *
  * @param {string} hook
+ * @param {string} [version] The installing version; tests pass their own.
  * @returns {string}
  */
-export function hookScript(hook) {
-  const args = hook === 'commit-msg' ? ' "$1"' : '';
+export function hookScript(hook, version = INSTALLER_VERSION) {
+  const args = hook === 'commit-msg' ? ' "$message"' : '';
   return [
     '#!/bin/sh',
     `# ${HOOK_MARK}: runs the pullboard ${hook} checks. Edit pullboard.json, not this file.`,
+    `want='${version}'`,
+    ...(hook === 'commit-msg' ? ['message="$1"'] : []),
     'root=$(git rev-parse --show-toplevel)',
     'main=$(git rev-parse --path-format=absolute --git-common-dir)/..',
+    'run() {',
+    '  bin="$1"; scope="$2"',
+    // Shell builtins only, so a hook works on a PATH that has no tail or sed: keep the last line of --version.
+    '  nl=$(printf \'\\n_\'); nl=${nl%_}; have=$("$bin" --version 2>/dev/null); have=${have##*"$nl"}',
+    '  if [ "$have" != "$want" ]; then',
+    '    newer=$(node -e \'const [a,b]=process.argv.slice(1).map(v=>String(v).split(".").map(n=>parseInt(n,10)||0));for(let i=0;i<3;i++)if(a[i]!==b[i]){process.stdout.write(a[i]>b[i]?"yes":"no");process.exit(0)}process.stdout.write("no")\' "$have" "$want" 2>/dev/null)',
+    '    if [ "$newer" = yes ]; then fix="pullboard init"; else fix="npm i $scope pullboard@$want"; fi',
+    `    echo "pullboard ${hook}: stopped before running any rule; these hooks were installed by Pullboard $want, but $bin is Pullboard \${have:-unknown}. Run: $fix" >&2`,
+    '    exit 1',
+    '  fi',
+    `  exec "$bin" hook ${hook}${args}`,
+    '}',
     'for bin in "$root/node_modules/.bin/pullboard" "$main/node_modules/.bin/pullboard"; do',
-    `  if [ -x "$bin" ]; then exec "$bin" hook ${hook}${args}; fi`,
+    '  if [ -x "$bin" ]; then run "$bin" -D; fi',
     'done',
-    `if command -v pullboard >/dev/null 2>&1; then exec pullboard hook ${hook}${args}; fi`,
+    'if command -v pullboard >/dev/null 2>&1; then run pullboard -g; fi',
     'echo "pullboard is not installed; npm i -D pullboard, or npm i -g pullboard" >&2',
     'exit 1',
     '',
