@@ -51,50 +51,38 @@ test('reads and status answer when the relay sign-in expired [H16,H5]', async t 
   assert.equal(existsSync(view.document.path), true, 'the local view export is available after relay auth refusal');
 });
 
-test('a move renews its agent token from the machine credential [H16,H5]', async t => {
+test('a revoked agent token is never reminted from the machine credential; the person reissues the coordinator [H16,H5,H2]', async t => {
   const box = await relayClientFixture(t);
   await box.link();
   const seed = await box.cli('add', box.lane, 'seed agent credential');
-  assert.equal(seed.code, 0, seed.failure ?? 'the initial move registers the coordinator token');
+  assert.equal(seed.code, 0, seed.failure ?? 'the coordinator token from relay on sends the first move');
   const state = JSON.parse(readFileSync(box.linkFile, 'utf8'));
   const agent = state.agentTokens.coordinator;
   assert.ok(agent?.id, 'the board link caches a scoped coordinator credential');
   await revokeCredential(box, agent.id);
 
+  const before = (await box.cli('export')).document.tables;
   const mintsBefore = box.calls.filter(call => call.method === 'POST' && call.path === '/auth/tokens').length;
-  const sendsBefore = box.calls.filter(call => call.method === 'POST' && call.path.endsWith('/moves')).length;
   const acksBefore = box.moveAcks.length;
-  const moved = await box.cli('add', box.lane, 'move after agent-token renewal');
-  assert.equal(moved.code, 0, moved.failure ?? 'the machine credential renews the revoked scoped token');
-  assert.equal(box.calls.filter(call => call.method === 'POST' && call.path === '/auth/tokens').length, mintsBefore + 1,
-    'one machine-authenticated request mints one replacement agent token');
-  assert.equal(box.calls.filter(call => call.method === 'POST' && call.path.endsWith('/moves')).length, sendsBefore + 2,
-    'the refused move is retried exactly once with the replacement token');
-  assert.equal(box.moveAcks.length, acksBefore + 1, 'the ordered relay acknowledges exactly one move');
-  const rows = (await box.cli('export')).document.tables.item;
-  assert.equal(rows.filter(row => row.item_title === 'move after agent-token renewal').length, 1,
-    'the retried ordered move has one local effect');
-  const beforeSecondRefusal = (await box.cli('export')).document.tables;
-  const cached = JSON.parse(readFileSync(box.linkFile, 'utf8')).agentTokens.coordinator;
-  await revokeCredential(box, cached.id);
-  let refusedSends = 0;
-  /** Revoke each actual scoped credential just before its real HTTP send. */
-  async function revokeAtSend() {
-    const current = JSON.parse(readFileSync(box.linkFile, 'utf8')).agentTokens.coordinator;
-    await revokeCredential(box, current.id);
-    refusedSends += 1;
-    if (refusedSends === 1) box.beforeNextMove(revokeAtSend);
-  }
-  box.beforeNextMove(revokeAtSend);
-  const mintsBeforeRefusal = box.calls.filter(call => call.method === 'POST' && call.path === '/auth/tokens').length;
-  const failed = await box.cli('add', box.lane, 'a second refusal must not retry forever');
-  assert.equal(failed.code, 1, 'a replacement token refused again stops this command');
-  assert.equal(failed.document.error.code, 'AUTH_REQUIRED');
-  assert.equal(refusedSends, 2, 'there is one original send and one retry');
-  assert.equal(box.calls.filter(call => call.method === 'POST' && call.path === '/auth/tokens').length, mintsBeforeRefusal + 1,
-    'a second refusal never causes a second mint');
-  assert.deepEqual((await box.cli('export')).document.tables, beforeSecondRefusal,
-    'neither refused send can change the local ordered board');
+  const refused = await box.cli('add', box.lane, 'move after agent-token revocation');
+  assert.equal(refused.code, 1, 'the machine credential never replaces a revoked seat token (#579)');
+  assert.equal(refused.document.error.code, 'TOKEN_REVOKED');
+  assert.equal(box.calls.filter(call => call.method === 'POST' && call.path === '/auth/tokens').length, mintsBefore,
+    'no replacement token is minted');
+  assert.equal(box.moveAcks.length, acksBefore, 'the relay acknowledges no move');
+  assert.deepEqual((await box.cli('export')).document.tables, before, 'the refused move changes no local board state');
+
+  // The person's own relay on reissues the coordinator token and records it.
+  const relink = await box.cli('relay', 'on', '--url', box.origin);
+  assert.equal(relink.code, 0, relink.failure ?? 'relay on reissues the coordinator token from the person sign-in');
+  const reissued = JSON.parse(readFileSync(box.linkFile, 'utf8')).agentTokens.coordinator;
+  assert.notEqual(reissued.id, agent.id, 'a new coordinator token replaces the revoked one');
+  const moved = await box.cli('add', box.lane, 'move after person reissue');
+  assert.equal(moved.code, 0, moved.failure ?? 'the reissued coordinator token sends moves again');
+  const tokens = await box.cli('relay', 'tokens');
+  assert.equal(tokens.code, 0, tokens.failure ?? 'the token inventory lists the coordinator audit');
+  assert.deepEqual(tokens.document.coordinatorEvents.map(row => row.reason), ['bootstrap', 'reissue']);
+  assert.equal(tokens.document.coordinatorEvents[1].issued, reissued.id);
 });
 
 test('a move without a machine credential refuses with the fix [H16,H5]', async t => {

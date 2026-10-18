@@ -71,6 +71,15 @@ export function createRelayJournal({ directory, boardId, maxBytes = DEFAULT_BYTE
         DROP TABLE journal_snapshot_v2;
         UPDATE journal_meta SET value='3' WHERE key='format';`);
     }
+    // Engine-27 attribution (#579): the relay's policy stamp, the person-set coordinator flag and a
+    // seat receipt. Older records keep these empty, so they replay exactly as they did.
+    for (const [column, type] of [['sender_policy', 'INTEGER'], ['sender_root', 'INTEGER'], ['sender_lineage', 'TEXT'], ['registration', 'TEXT']]) {
+      if (!db.prepare('PRAGMA table_info(journal_record)').all().some((saved) => saved.name === column)) db.exec(`ALTER TABLE journal_record ADD COLUMN ${column} ${type}`);
+    }
+    // A published seat receipt claims its target for good: compaction keeps it, so no later machine
+    // first mint can take a name a creator registered, even if enrollment never finished (#579).
+    db.exec(`CREATE TABLE IF NOT EXISTS journal_registration (target TEXT PRIMARY KEY, creator TEXT NOT NULL,
+      sequence INTEGER NOT NULL UNIQUE, digest TEXT NOT NULL)`);
     db.exec('INSERT OR IGNORE INTO journal_head (slot,sequence) SELECT 1, COALESCE(MAX(sequence),0) FROM journal_record');
     if (!db.prepare('PRAGMA table_info(journal_head)').all().some((column) => column.name === 'last_activity_at')) {
       db.exec('ALTER TABLE journal_head ADD COLUMN last_activity_at TEXT');
@@ -90,7 +99,10 @@ export function createRelayJournal({ directory, boardId, maxBytes = DEFAULT_BYTE
   function record(row) {
     return { sequence: row.sequence, receivedAt: row.received_at, kind: row.kind ?? 'snapshot',
       sender: { kind: row.sender_kind, userId: row.sender_user,
-        ...(row.sender_kind === 'agent' ? { agent: row.sender_agent } : row.sender_kind === 'machine' ? { machine: row.sender_agent } : {}) }, bytes: Buffer.from(row.payload) };
+        ...(row.sender_kind === 'agent' ? { agent: row.sender_agent } : row.sender_kind === 'machine' ? { machine: row.sender_agent } : {}),
+        ...(row.sender_policy ? { policy: row.sender_policy } : {}), ...(row.sender_root ? { root: true } : {}),
+        ...(row.sender_lineage ? { lineage: row.sender_lineage } : {}) },
+      ...(row.registration ? { registration: JSON.parse(row.registration) } : {}), bytes: Buffer.from(row.payload) };
   }
 
   /** Require server-derived attribution, copying only its public identity and never a credential. */
@@ -102,7 +114,23 @@ export function createRelayJournal({ directory, boardId, maxBytes = DEFAULT_BYTE
       throw new Refused('RELAY_PRINCIPAL', 'supply the authenticated sender before storing a sealed record');
     }
     if (personOnly && !['person', 'machine'].includes(value.kind)) throw new Refused('HUMAN_REQUIRED', 'use this board’s machine credential to replace its snapshot');
-    return { kind: value.kind, userId: value.userId, agent: value.kind === 'agent' ? value.agent : value.kind === 'machine' ? value.machine : null };
+    if ((value.policy !== undefined && (!Number.isSafeInteger(value.policy) || value.policy < 1)) || (value.root !== undefined && value.root !== true) ||
+        (value.lineage !== undefined && (typeof value.lineage !== 'string' || !/^[0-9a-f-]{36}$/.test(value.lineage)))) {
+      throw new Refused('RELAY_PRINCIPAL', 'supply the relay policy stamp as a positive engine number');
+    }
+    return { kind: value.kind, userId: value.userId, agent: value.kind === 'agent' ? value.agent : value.kind === 'machine' ? value.machine : null,
+      policy: value.policy ?? null, root: value.root === true ? 1 : null, lineage: value.lineage ?? null };
+  }
+
+  /** Keep a seat receipt to its four public fields: target, creator, sequence and ciphertext digest. */
+  function receipt(value, sequence) {
+    if (value === undefined || value === null) return null;
+    const fields = ['creator', 'digest', 'sequence', 'target'];
+    if (typeof value !== 'object' || Object.keys(value).sort().join() !== fields.join() || value.sequence !== sequence ||
+        typeof value.target !== 'string' || typeof value.creator !== 'string' || !/^[0-9a-f]{64}$/.test(value.digest ?? '')) {
+      throw new Refused('BAD_REGISTRATION', 'attach a seat receipt naming its target, creator, this sequence and the ciphertext digest');
+    }
+    return JSON.stringify({ target: value.target, creator: value.creator, sequence: value.sequence, digest: value.digest });
   }
 
   /** Read the latest committed sequence, including an empty journal's initial cursor. */
@@ -124,12 +152,14 @@ export function createRelayJournal({ directory, boardId, maxBytes = DEFAULT_BYTE
   }
 
   /** Serialize prefix checking or sequence allocation with the opaque append. */
-  function insert(sequence, bytes, kind, principal) {
+  function insert(sequence, bytes, kind, principal, registration) {
     open();
     if (sequence !== null && (!Number.isSafeInteger(sequence) || sequence < 1)) throw new Refused('BAD_SEQUENCE', 'upload a positive safe integer sequence');
     const sealed = payload(bytes);
     const who = sender(principal);
     if (!['move', 'request'].includes(kind)) throw new Refused('BAD_UPLOAD', 'use the move or request transport kind');
+    if (registration !== undefined && (sequence === null || kind !== 'move')) throw new Refused('BAD_REGISTRATION', 'attach a seat receipt only to a move at its named sequence');
+    const stored = receipt(registration, sequence);
     db.exec('BEGIN IMMEDIATE');
     try {
       const next = latest() + 1;
@@ -139,7 +169,15 @@ export function createRelayJournal({ directory, boardId, maxBytes = DEFAULT_BYTE
       if (sequence > next) throw new Refused('SEQUENCE_GAP', 'send the next sequence after the latest committed record before later uploads');
       const at = now();
       if (!(at instanceof Date) || !Number.isFinite(at.getTime())) throw new Refused('RELAY_CONFIG', 'the journal clock must return a valid Date');
-      db.prepare('INSERT INTO journal_record (sequence,received_at,kind,payload,sender_kind,sender_user,sender_agent) VALUES (?,?,?,?,?,?,?)').run(sequence, at.toISOString(), kind, sealed, who.kind, who.userId, who.agent);
+      db.prepare('INSERT INTO journal_record (sequence,received_at,kind,payload,sender_kind,sender_user,sender_agent,sender_policy,sender_root,sender_lineage,registration) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+        .run(sequence, at.toISOString(), kind, sealed, who.kind, who.userId, who.agent, who.policy, who.root, who.lineage, stored);
+      if (stored) {
+        const claim = JSON.parse(stored);
+        if (db.prepare('SELECT 1 FROM journal_registration WHERE target=?').get(claim.target)) {
+          throw new Refused('SEAT_TAKEN', `${claim.target} was already registered; register the next free name`);
+        }
+        db.prepare('INSERT INTO journal_registration (target,creator,sequence,digest) VALUES (?,?,?,?)').run(claim.target, claim.creator, claim.sequence, claim.digest);
+      }
       db.prepare('UPDATE journal_head SET sequence=?,last_activity_at=? WHERE slot=1').run(sequence, at.toISOString());
       const result = record(db.prepare('SELECT * FROM journal_record WHERE sequence=?').get(sequence));
       db.exec('COMMIT');
@@ -150,8 +188,22 @@ export function createRelayJournal({ directory, boardId, maxBytes = DEFAULT_BYTE
     }
   }
 
-  /** Append a transport retry only at its explicitly named next sequence. */
-  function append(sequence, bytes, kind = 'move', principal) { return insert(sequence, bytes, kind, principal); }
+  /** Append a transport retry only at its explicitly named next sequence, with an optional seat receipt. */
+  function append(sequence, bytes, kind = 'move', principal, registration) { return insert(sequence, bytes, kind, principal, registration); }
+
+  /** The committed seat receipt that claims this target, kept through compaction, or null. */
+  function registrationFor(target) {
+    open();
+    const row = db.prepare('SELECT target,creator,sequence,digest FROM journal_registration WHERE target=?').get(target);
+    return row ? { target: row.target, creator: row.creator, sequence: row.sequence, digest: row.digest } : null;
+  }
+
+  /** Read one committed record, or null once compaction removed it, for an exact registration retry. */
+  function recordAt(sequence) {
+    open();
+    const row = db.prepare('SELECT * FROM journal_record WHERE sequence=?').get(sequence);
+    return row ? record(row) : null;
+  }
 
   /** Allocate the next sequence under the same lock as the append, as the live relay requires. */
   function appendNext(bytes, kind = 'move', principal) { return insert(null, bytes, kind, principal); }
@@ -199,5 +251,5 @@ export function createRelayJournal({ directory, boardId, maxBytes = DEFAULT_BYTE
     closed = true;
   }
 
-  return { board: id, latest, activity, append, appendNext, after, snapshot, saveSnapshot, close };
+  return { board: id, latest, activity, append, appendNext, recordAt, registrationFor, after, snapshot, saveSnapshot, close };
 }
