@@ -1642,7 +1642,7 @@ function boardSetup(ctx, card, identity) {
     // A pending question takes an answer, a draft row an approval: each gets the command that decides it.
     const { personCommand, verb, seatQuestion, seatNext } = personAsk(drafted);
     return { step: 1, total: 5, ...current, steps, waitingOn: 'person-approval', rowIds, ...(toApply.length ? { approvedRowIds: toApply.map(row => row.id) } : {}),
-      question: (seat ? seatQuestion : `Waiting for the person to ${verb} ${names}.`) + drafted.filter(row => row.staleDecision).map(row => ` ${row.stage}`).join(''), command,
+      question: ctx.io.guidance((seat ? seatQuestion : `Waiting for the person to ${verb} ${names}.`) + drafted.filter(row => row.staleDecision).map(row => ` ${row.stage}`).join('')), command,
       personCommand,
       afterAnswer: (toApply.length ? `The person already approved ${toApply.map(row => row.id).join(', ')}; pullboard spec apply writes them. ` : '') + 'The person approves draft rows and answers questions in Pullboard View or their own terminal; then the coordinator runs pullboard spec apply.',
       meanwhile: seat ? 'While waiting, review independent approved work or send questions to the coordinator with pullboard shout coordinator "<what is needed>" --decision.' : 'While waiting, the agent may review independent approved work or prepare questions for the person.',
