@@ -172,7 +172,10 @@ import {
   outOfLane,
 } from './lanes.js';
 import { Refused } from './refused.js';
-import { applyStep, personAsk } from './setup-rows.js';
+import {
+  applyStep,
+  personAsk,
+} from './setup-rows.js';
 import { personNeeds } from './needs.js';
 import { personNeedsState } from './needs-state.js';
 import { startServeSentinel } from './serve-sentinel.js';
