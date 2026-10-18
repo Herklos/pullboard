@@ -7,7 +7,7 @@ import { applyEngineMove, applyRelayMove, prepareEngineMove } from '../src/engin
 import { ENGINE_VERSION, MILESTONE_RANK_ENGINE } from '../src/machine.js';
 import { exportBoard, importBoard } from '../src/exchange.js';
 import { createE2eHelpers } from './e2e-helpers.js';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 
@@ -163,6 +163,50 @@ function crossLaneFixture(t) {
   }
   return { ...box, session, runAs, json, seat, add, milestone, binding };
 }
+
+test('next in the main checkout names the lane worktree to join [N2,B26]', t => {
+  const helpers = createE2eHelpers();
+  t.after(helpers.cleanup);
+  const box = helpers.sandbox(), repo = join(box.dir, 'fresh-board');
+  mkdirSync(repo);
+  box.git(repo, 'init', '-q', '-b', 'main');
+  const model = box.env.PULLBOARD_MODEL;
+  delete box.env.PULLBOARD_MODEL;
+  assert.equal(box.run(repo, 'init').code, 0);
+  if (model !== undefined) box.env.PULLBOARD_MODEL = model;
+  assert.equal(box.run(repo, 'lane', 'add', 'app', '--owns', 'app/').code, 0);
+  box.git(repo, 'add', '-A');
+  box.git(repo, 'commit', '-q', '-m', 'chore: set up the fresh board');
+  for (const title of ['First app item', 'Second app item']) {
+    const added = box.run(repo, 'add', 'app', title, '--route', 'strong',
+      '--criterion', 'The app item creates its readiness marker.', '--check', 'test -f app/ready', '--json');
+    assert.equal(added.code, 0, `${added.out}\n${added.err}`);
+  }
+  const json = box.run(repo, 'next', '--json');
+  assert.equal(json.code, 1, json.out);
+  const refusal = JSON.parse(json.out).error;
+  assert.equal(refusal.code, 'NOTHING_FREE', 'the empty coordinator queue keeps its refusal code');
+  assert.match(refusal.message, /2 items open in lane app/u);
+  assert.equal(refusal.next, 'pullboard worktree app --model "<model name>"');
+  assert.doesNotMatch(refusal.message + refusal.next, /wait|keep looking/iu);
+  for (const args of [[], ['--wait', '0.01']]) {
+    const text = box.run(repo, 'next', ...args);
+    assert.equal(text.code, 1);
+    assert.match(text.err, /2 items open in lane app/u);
+    assert.match(text.err, /pullboard worktree app --model "<model name>"/u);
+    assert.doesNotMatch(text.err, /pullboard next --wait|keep looking/iu);
+  }
+  const opened = box.run(repo, 'worktree', 'app', '--model', 'Newcomer test', '--json');
+  assert.equal(opened.code, 0, `${opened.out}\n${opened.err}`);
+  const seat = JSON.parse(opened.out);
+  const next = box.run(seat.path, 'next', '--build', '--json');
+  assert.equal(next.code, 0, `${next.out}\n${next.err}`);
+  assert.equal(JSON.parse(next.out).item.item_lane, 'app', 'the suggested command reaches work through the normal claim');
+  const idle = helpers.project('true');
+  const empty = JSON.parse(idle.run(idle.repo, 'next', '--json').out).error;
+  assert.equal(empty.code, 'NOTHING_FREE');
+  assert.match(empty.next, /pullboard next --wait 9/u, 'a genuinely idle board retains its ordinary wait');
+});
 
 test('an agent pulls the top item in any of its lanes [N2,B13]', (t) => {
   const box = crossLaneFixture(t);
