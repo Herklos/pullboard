@@ -47,6 +47,7 @@ import { addLane, isLane, laneNames, laneOf, outOfLane } from './lanes.js';
 import { Refused } from './refused.js';
 import { personNeeds } from './needs.js';
 import { personNeedsState } from './needs-state.js';
+import { startServeSentinel } from './serve-sentinel.js';
 import { commitCitations, committedIds } from './history.js';
 import { promptFor, skillProblems, updateSkills } from './skills.js';
 import {
@@ -1572,13 +1573,14 @@ async function viewHere(io, values) {
   try {
     // The adapter override is carried only by the in-process command streams, for private CLI fixtures.
     view = await (io.serveView ?? serveView)({ port, isMain: codeIsFromMain(), ...(projectRoot ? { projectRoot } : {}) });
+    const sentinel = startServeSentinel({ projectRoot });
     const boundAt = new Date().toISOString();
     const closeServer = view.close;
     view = {
       ...view,
       pid: process.pid,
       boundAt,
-      close: async () => { forgetView(view.port); await closeServer(); },
+      close: async () => { await sentinel.close(); forgetView(view.port); await closeServer(); },
     };
     try {
       rememberView({ port: view.port, secret: new URL(view.url).searchParams.get('k'), pid: process.pid, boundAt,
