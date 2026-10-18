@@ -363,6 +363,13 @@ test("the view's refresh re-renders only what changed [N26,A2]", async () => {
     address: () => {},
     api: async () => ({ events: [] }),
     boardPath: () => '/board',
+    // refresh() calls these helpers, defined outside the slice this test runs (#644's clock-blind board text and
+    // in-place ages, #633's share invitation); the page's own behavior is covered elsewhere.
+    boardText: (state) => JSON.stringify(state),
+    showFlowAges: () => {},
+    tickAges: () => {},
+    sharingReady: null,
+    sharingInvitation: () => Promise.resolve(),
     boardState: () => {
       let resolve;
       const promise = new Promise((done) => { resolve = done; });
@@ -430,6 +437,8 @@ test("the view's refresh re-renders only what changed [N26,A2]", async () => {
     assert.ok(call, 'refresh starts a board state read');
     call.resolve(next(marker));
     await new Promise((resolve) => setImmediate(resolve));
+    // A helper refresh() calls but this slice does not stub fails here by name, not as a later count.
+    if (failure) throw failure;
     const renderedThisRead = events.filter(([kind]) => kind === 'render').length > renderCount;
     if (hasDeferredDetail && renderedThisRead) {
       assert.equal(context.itemSearches.size, 0, 'changed board invalidates deferred item search results');
