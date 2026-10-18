@@ -2282,7 +2282,9 @@ function jumpToRoadmap(key) {
  */
 function milestoneRow(row, titles) {
   const title = row.title ? inline(String(row.title).replace(/\\s+/g, ' '), row.titles || titles, true, row.root) : '<span class="muted">' + esc(row.why) + '</span>';
-  const inner = '<span class="dot' + (row.state ? ' ' + row.state : '') + '"></span><span class="t"><span class="id">' + esc(row.label) + '</span>' + title + (row.block ? row.block.dot : '') + '</span>' + (row.stale || '') + (row.state ? chip(row.state) : '<span class="chip">' + esc(row.word) + '</span>');
+  const label = '<span class="id">' + esc(row.label) + '</span>' + title;
+  const text = row.block ? '<span class="milestone-title">' + label + '</span>' + row.block.dot : label;
+  const inner = '<span class="dot' + (row.state ? ' ' + row.state : '') + '"></span><span class="t">' + text + '</span>' + (row.stale || '') + (row.state ? chip(row.state) : '<span class="chip">' + esc(row.word) + '</span>');
   if (row.block && row.open) {
     // A blocked row unfolds in place to say why (#605); its detail links over to Items.
     const key = 'i:' + row.label, open = view.roadmapOpen.get(JSON.stringify([view.root, key])) === true;

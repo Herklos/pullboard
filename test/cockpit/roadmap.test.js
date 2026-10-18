@@ -912,8 +912,15 @@ test('a blocked roadmap item shows its dot and expands to say why [N26]', { time
     await press(chrome, "[...document.querySelectorAll('#roadmap .milestone-item.blocked')].find((row) => row.querySelector('.id').textContent === '#4')");
     await chrome.waitFor("!document.querySelector('#roadmap .milestone-why:not([hidden])')");
     await chrome.stable('window.__requests = []; true');
+    await chrome.send('Emulation.setDeviceMetricsOverride', { width: 375, height: 900, deviceScaleFactor: 1, mobile: false });
     await press(chrome, "[...document.querySelectorAll('#roadmap .milestone-item.blocked')].find((row) => row.querySelector('.id').textContent === 'blocked-roadmap-other#2')");
     await chrome.waitFor("document.querySelector('#roadmap .milestone-why:not([hidden])')");
+    const marker = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+      const row = [...document.querySelectorAll('#roadmap .milestone-item.blocked')].find((entry) => entry.querySelector('.id').textContent === 'blocked-roadmap-other#2');
+      const text = row.querySelector('.t').getBoundingClientRect(), dot = row.querySelector('.block-dot').getBoundingClientRect();
+      return { visible: dot.width > 0 && dot.left >= text.left && dot.right <= text.right };
+    })())`));
+    assert.equal(marker.visible, true, 'the remote blocker dot stays visible when its long title is clipped on a phone');
     const remote = Object.fromEntries((await read()).map((row) => [row.id, row]))['blocked-roadmap-other#2'];
     assert.match(remote.why, /state.*open, nobody holds it/, 'the remote item has no current holder');
     assert.match(remote.why, /waits on#1 open/, 'the remote dependency has its own state');
