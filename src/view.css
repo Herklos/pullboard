@@ -221,6 +221,11 @@ a.ghost { color: var(--ink); }
 .milestone-item { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; gap: 10px; align-items: center; width: 100%; min-height: var(--tap); padding: 0 9px; border: 1px solid transparent; border-radius: 10px; background: none; text-align: left; }
 .milestone-item[data-go] { cursor: pointer; }
 .milestone-item[data-go]:hover { background: var(--surface-2); }
+.milestone-item.blocked { cursor: pointer; }
+.milestone-item.blocked:hover { background: var(--surface-2); }
+.block-dot { display: inline-block; width: 7px; height: 7px; margin-left: 6px; border-radius: 50%; background: var(--reject); vertical-align: middle; }
+.milestone-why { margin: 2px 9px 8px 31px; font-size: 13px; }
+.milestone-why .kv { margin: 0 0 6px; }
 .milestone-item .t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .milestone-item .t code { white-space: nowrap; }
 .milestone-item .id { margin-right: 6px; color: var(--ink-faint); font: 500 12px var(--mono); }
