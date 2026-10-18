@@ -37,6 +37,7 @@ import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import {
   mainLaneWork,
+  reviewQueueLine,
   refuseNextIdle,
 } from './next-steps.js';
 import { reviewerStartup } from './next-steps.js';
@@ -2530,7 +2531,7 @@ function readCommands(io, { first, second, rest, values }) {
       io.say(`${summary.me.displayName}: ${summary.unread} unread shouts; holding ${summary.mine.map((item) => `#${item.item_id}`).join(', ') || 'nothing'}`);
       io.say(`board: ${items.open} open, ${items.claimed} claimed, ${items.submitted} awaiting verification, ${items.verified} verified, ${items.withdrawn} withdrawn`);
       io.say(`verdicts: ${accepted} accepted, ${rejected} rejected`);
-      io.say(reviewQueueLine(ctx, summary.reviewQueue));
+      io.say(reviewQueueLine(ctx, summary.reviewQueue, span));
       for (const proposal of summary.submitInvariantProposals) io.say(submitInvariantLine(proposal));
       if (Object.keys(ctx.config.products).length) {
         const all = withBoard(ctx, (board) => store.listItems(board, { all: true }));
@@ -3223,22 +3224,13 @@ async function nextOnce(ctx, values) {
   });
 }
 
-/** Describe the queue's actual outstanding reviews and submission age [Q1,V15]. */
-function reviewQueueLine(ctx, queue) {
-  const age = queue.oldestSubmittedAt ? `${span(ctx, queue.oldestSubmittedAt)} ago` : 'none';
-  if (queue.awaitingFirstReview !== undefined) {
-    const released = queue.releasedItems?.map((item) => `#${item.item} released ${item.releases} ${item.releases === 1 ? 'time' : 'times'}: ${item.reason}`).join('; ');
-    return `review queue: ${queue.pending} submitted; ${queue.awaitingFirstReview} waiting for a first reviewer, ${queue.releasedWithoutVerdict} released without a verdict${released ? ` (${released})` : ''}, ${queue.reviewing} agents reviewing; oldest submission ${age}`;
-  }
-  return `review queue: ${queue.pending} awaiting, ${queue.reviewing} agents reviewing; oldest submission ${age}`;
-}
 
 /** Print an unreserved review first, then the build available through an explicit opt-out. */
 function sayReviewOffer(ctx, found) {
   const command = `pullboard next --verify ${found.item.item_id}${ctx.info.isMain ? ' --as coordinator' : ''}`;
   const offer = { item: found.item.item_id, command, queue: found.offer.queue, ratio: found.offer.ratio };
   ctx.io.result?.({ item: found.item, review: true, held: false, shared: [], offer, build: found.build });
-  ctx.io.say(`${reviewQueueLine(ctx, offer.queue)}; ratio ${offer.ratio} reached (zero active reviewers counts as one)`);
+  ctx.io.say(`${reviewQueueLine(ctx, offer.queue, span)}; ratio ${offer.ratio} reached (zero active reviewers counts as one)`);
   const agents = withBoard(ctx, (board) => store.listAgents(board));
   ctx.io.say(`review offered: #${found.item.item_id} ${found.item.item_title}, built by ${agentDisplayName(agents, ctx.config, found.item.item_built_by)}; reserve it explicitly: ${command}`);
   if (found.build) ctx.io.say(`build available: #${found.build.item_id} ${found.build.item_title}; claim it explicitly: pullboard next --build`);
@@ -3317,7 +3309,7 @@ async function nextHere(io, values) {
         io.say(`check out exactly that commit, here: ${here} git switch --detach ${item.item_commit}`);
         io.say(`then: ${here} pullboard verify ${item.item_id} accept${as} --note "how you proved it", or reject${as} --reason CODE --note "what failed"`);
       } else {
-        if (found.reviewSkipped) io.say(`${reviewQueueLine(ctx, found.reviewSkipped)}; explicit build intent recorded with this claim`);
+        if (found.reviewSkipped) io.say(`${reviewQueueLine(ctx, found.reviewSkipped, span)}; explicit build intent recorded with this claim`);
         io.say(`${found.held ? 'you hold' : 'claimed'} #${item.item_id}: ${item.item_title}`);
         if (found.seat) io.say(`${found.seat.created ? 'opened' : 'work in'} ${found.seat.agent}, ${found.seat.lane} lane: ${here}`);
         if (found.shared?.length) io.say(`it touches ${found.shared.length === 1 ? 'a file' : `${found.shared.length} files`} you worked in recently: ${found.shared.slice(0, 4).join(', ')}`);
