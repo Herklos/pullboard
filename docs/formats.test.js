@@ -342,6 +342,7 @@ function recordEventContract() {
   withdraw(board, withdrawn, { agentId: coordinator, reason: 'duplicate fixture' });
   holdLane(board, 'view', { agentId: coordinator, reason: 'fixture hold' });
   releaseLane(board, 'view', { agentId: coordinator });
+  appendFact(board, first, { agentId: coordinator, kind: 'root-cause', text: 'A typed immediate Rigor format example', cause: 'doctrine:C3', neverAgain: true, asPerson: true, channel: 'terminal' });
   const rows = events(board).map((row) => ({ ...row, detail: JSON.parse(row.event_detail) }));
   closeBoard(board);
   return { rows, actors: { [coordinator]: 'coordinator', [builder]: 'builder', [returnedBuilder]: 'builder', [reviewer]: 'reviewer', [PERSON]: 'person', board: 'board' } };
@@ -610,6 +611,7 @@ test('[A5] schema, versions, event kinds and event detail fields match live beha
     attempt: 'reporting agent',
     fact: 'author',
     guards: 'board',
+    'rigor-notice': 'rigor',
     shout: 'sender',
     pass: 'coordinator',
     answer: 'answerer',
