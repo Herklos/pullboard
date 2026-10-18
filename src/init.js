@@ -39,6 +39,7 @@ import { loadDoctrine } from './doctrine.js';
 import { installHooks } from './hooks.js';
 import { machineHome } from './machine-home.js';
 import { Refused } from './refused.js';
+import { reviewerStartup } from './next-steps.js';
 import {
   AGENT_SHELL_MARKERS,
   remoteShell,
@@ -613,6 +614,7 @@ export function initRepo({ info, openBoardHere, register, closeBoard, model, per
     closeBoard(board);
   }
   notes.push('opened the board in the git dir; this checkout is the coordinator');
+  notes.push(reviewerStartup(root, loadConfig(root)));
   notes.push(...laneProposalNotes(proposeLanes(root)));
   if (!configuredGate(root)) {
     notes.push(gate
