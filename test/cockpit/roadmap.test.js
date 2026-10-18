@@ -919,7 +919,7 @@ test('a blocked roadmap item shows its dot and expands to say why [N26]', { time
     const blocked = await opened('#2');
     assert.match(blocked, /CriterionUse #1 and #3 <em>literally<\/em>\./u, 'the approved dense detail leads with the criterion');
     assert.doesNotMatch(blocked, /More detail stays in Items/u, 'only the first criterion sentence is shown');
-    assert.deepEqual(JSON.parse(await chrome.stable(`JSON.stringify([...${row('#2')}.parentElement.querySelectorAll('.roadmap-criterion .roadmap-ref')].map(chip=>chip.textContent))`)), ['#1','#3'], 'known references in Criterion are status chips');
+    assert.deepEqual(JSON.parse(await chrome.stable(`JSON.stringify([...${row('#2')}.parentElement.querySelectorAll('.roadmap-criterion .roadmap-ref')].map(chip=>chip.textContent))`)), [], 'references inside Criterion stay plain text');
     assert.equal(await chrome.stable(`${row('#2')}.parentElement.querySelectorAll('.roadmap-criterion em').length`),0,'criterion markup stays escaped');
     assert.match(blocked, /Waits on#1 building.*web-2.*since/u, 'dependency includes state, holder and local time');
     assert.match(blocked, /History.*added/u); assert.match(blocked, /Release.*Next.*G1/u);
@@ -970,11 +970,9 @@ test('a blocked roadmap item shows its dot and expands to say why [N26]', { time
       await chrome.send('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:scheme}]});
       for (const [id,field] of [['#2','.roadmap-criterion'],['#6','.roadmap-return']]) {
         await opened(id);
-        const refs=JSON.parse(await chrome.stable(`JSON.stringify((()=>{const panel=${row(id)}.parentElement.querySelector('.milestone-why'),value=panel.querySelector(${JSON.stringify(field)}),probe=document.createElement('span');panel.append(probe);probe.style.background='var(--blue-soft)';const busy=getComputedStyle(probe).backgroundColor;probe.style.background='var(--violet-soft)';const free=getComputedStyle(probe).backgroundColor;probe.remove();return {busy,free,links:panel.querySelectorAll('a').length,refs:[...value.querySelectorAll('.roadmap-ref')].map(chip=>({text:chip.textContent,bg:getComputedStyle(chip).backgroundColor,href:chip.getAttribute('href')}))};})())`));
-        assert.deepEqual(refs.refs.map(ref=>ref.text),['#1','#3'],`${width}/${scheme}: ${field} retains both references`);
-        assert.deepEqual(refs.refs.map(ref=>ref.bg),[refs.busy,refs.free],`${width}/${scheme}: prose uses each referenced item's actual status color`);
-        assert.ok(refs.refs.every(ref=>ref.href===null));assert.equal(refs.links,1,'only Open in Items is a link');
-        if(id==='#6') await press(chrome,`${row(id)}.parentElement.querySelector('${field} .roadmap-ref')`);
+        const prose=JSON.parse(await chrome.stable(`JSON.stringify((()=>{const panel=${row(id)}.parentElement.querySelector('.milestone-why'),value=panel.querySelector(${JSON.stringify(field)});return {text:value.textContent,chips:value.querySelectorAll('.roadmap-ref').length,links:panel.querySelectorAll('a').length};})())`));
+        assert.match(prose.text,/#1 and #3/u,`${width}/${scheme}: ${field} keeps its literal references`);
+        assert.equal(prose.chips,0,'the clarified bar keeps prose references plain');assert.equal(prose.links,1,'only Open in Items is a link');
         assert.equal(await chrome.stable('location.href'),address);assert.equal(await chrome.stable('view.tab'),'roadmap');
         await press(chrome,row(id));
       }
