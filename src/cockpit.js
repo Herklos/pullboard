@@ -22,6 +22,10 @@ import {
   hostedState,
 } from './view/hosted.js';
 import { staleChip } from './view/stale.js';
+import {
+  roadmapHeaders,
+  roadmapSummary,
+} from './view/roadmap-summary.js';
 import { roadmapBlock } from './view/roadmap-block.js';
 import { applyStateDelta } from './api-http.js';
 
@@ -602,6 +606,7 @@ function shoutAgentName(id) {
 }
 /** Render a review note with escaped text and references bound to the selected board. */
 const verdictHtml = (v, titles) => '<div class="verdict ' + (v.decision === 'ACCEPT' ? 'yes' : 'no') + '"><b>' + esc(v.decision) + ' ' + esc(v.reason) + '</b><span class="by">' + esc(agentName(v.by)) + ' · ' + when(v.at) + ' · at ' + esc(String(v.commit || '').slice(0, 12)) + '</span><div class="note">' + inline(visibleVerdictNote(v.reason, v.note), titles) + '</div></div>';
+const roadmapSummary = (${roadmapSummary.toString()}), roadmapHeaders = (${roadmapHeaders.toString()});
 const stateOf = (i) => i.status === 'claimed' ? 'building' : i.status === 'submitted' ? 'verify' : i.status === 'verified' ? 'verified' : i.status === 'withdrawn' ? 'withdrawn' : i.verdict && i.verdict.decision === 'REJECT' ? 'back' : 'open';
 const STATES = { building: ['building', 'busy'], verify: ['to verify', 'warn'], back: ['sent back', 'no'], verified: ['verified', 'ok'], open: ['unclaimed', 'free'], withdrawn: ['withdrawn', ''] };
 const chip = (s) => '<span class="chip ' + STATES[s][1] + '">' + STATES[s][0] + '</span>';
@@ -2199,7 +2204,7 @@ function renderGroup(group) {
   $('group-needs').innerHTML = needs.length ? needs.map((row) => {
     const titles = new Map(row.repo.board.items.map((item) => [String(item.id), item.title]));
     const text = rich(row.text, titles, true, row.repo.root);
-    return '<div class="group-need"><b>' + esc(row.repo.name) + '</b><code>' + esc(row.ref) + '</code><span>' + text + '</span><button data-root="' + esc(row.repo.root) + '" type="button"><em>' + esc(row.what) + (row.at ? ', ' + age(row.at) : '') + ' →</em></button></div>';
+    return '<div class="group-need"><b>' + esc(row.repo.name) + '</b><code>' + esc(row.ref) + '</code><span>' + text + '</span><button data-root="' + esc(row.repo.root) + '" type="button"><em>' + esc(row.kind === 'pending' ? 'answer ' + row.ref : row.what) + (row.at ? ', ' + age(row.at) : '') + ' →</em></button></div>';
   }).join('') : '<div class="empty">Nothing needs you across this project.</div>';
   const events = group.repos.flatMap((repo) => {
     const titles = new Map(repo.board.items.map((item) => [String(item.id), item.title]));
@@ -2240,7 +2245,7 @@ function milestoneItem(entry, p) {
       releases: (p.milestones || []).filter((milestone) => milestone.items.some((ref) => ref.id === entry.id)).map((milestone) => milestone.name),
       loading: detail?.loading, error: detail?.error,
     }) : null,
-    stage: item ? pipelineStage(item) : entry.status,
+    stage: entry.state === 'landed' ? 'merged' : entry.state === 'accepted' ? 'accepted' : item ? pipelineStage(item) : entry.status,
     word: entry.status,
     open: item ? { root, id } : null,
     // Why an item does not open, short enough to read beside its id on a phone.
@@ -2300,7 +2305,7 @@ function milestoneRow(row, titles) {
   const label = '<span class="id">' + esc(row.label) + '</span>' + title;
   const text = row.block?.dot ? '<span class="milestone-title">' + label + '</span>' + row.block.dot : label;
   const key = 'i:' + row.label, open = view.roadmapOpen.get(JSON.stringify([view.root, key])) === true;
-  const status = (open && row.block?.dot ? '<span class="chip warn roadmap-blocked"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>blocked</span>' : '') + (open && row.stage === 'merged' ? '<span class="chip ok roadmap-landed"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="m5 12 4 4L19 6"/></svg>landed</span>' : row.state ? chip(row.state) : '<span class="chip">' + esc(row.word) + '</span>');
+  const status = (open && row.block?.dot ? '<span class="chip warn roadmap-blocked"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>blocked</span>' : '') + (row.stage === 'merged' ? '<span class="chip ok roadmap-landed">verified</span>' : row.stage === 'accepted' ? '<span class="chip ok">accepted</span>' : row.state ? chip(row.state) : '<span class="chip">' + esc(row.word) + '</span>');
   const inner = '<span class="dot' + (row.state ? ' ' + row.state : '') + '"></span><span class="t">' + text + '</span>' + (row.stale || '') + '<span class="roadmap-status">' + status + '</span>';
   const board = row.open && row.open.root !== view.root ? ' data-board="' + esc(row.open.root) + '"' : '';
   const toggle = 'class="milestone-item' + (row.block?.dot ? ' blocked' : '') + '" data-roadmap-key="' + esc(key) + '" aria-expanded="' + open + '"' + board + ' title="' + esc(row.title ? row.title + (!row.open && row.why ? ' (' + row.why + ')' : '') : row.why) + '"';
@@ -2310,12 +2315,20 @@ function milestoneRow(row, titles) {
     + '<div class="milestone-why"' + (open ? '' : ' hidden') + '>' + detail + '</div></li>';
 }
 
-/** Read the work still to ship before verified items, excluding withdrawn work from every count. */
+/** Read supplied landed counts and explicit shipments; keep old exports readable and omit withdrawn rows. */
 function readMilestone(milestone, p) {
   const visible = milestone.items.map((entry) => milestoneItem(entry, p)).filter((row) => row.state !== 'withdrawn');
   const verified = visible.filter((row) => row.state === 'verified');
   const rows = visible.filter((row) => row.state !== 'verified').concat(verified);
-  return { milestone, rows, done: verified.length, shipped: rows.length > 0 && verified.length === rows.length };
+  // Current API milestones own their landed count and explicit shipment. Old exports retain their old count.
+  /** Reject malformed snapshot counts before they reach numeric HTML attributes. */
+  const numeric = value => Number.isInteger(value) && value >= 0 ? value : null;
+  const done = numeric(milestone.summary?.landed) ?? numeric(milestone.landed) ?? verified.length;
+  const total = numeric(milestone.summary?.total) ?? numeric(milestone.total) ?? rows.length;
+  // Nothing left (every item landed or withdrawn) is finished and sits under Shipped, shipped or not (the person, 18 Oct).
+  const left = numeric(milestone.summary?.left), finished = milestone.items.length > 0 && (left !== null ? left === 0 : rows.every((row) => row.stage === 'merged'));
+  const shipped = finished || (milestone.shipped !== undefined ? Boolean(milestone.shipped) : rows.length > 0 && verified.length === rows.length);
+  return { milestone, rows, done, total, shipped };
 }
 
 /** Pick the first release with remaining work in roadmap order; empty plans wait behind it. */
@@ -2326,15 +2339,13 @@ function nextMilestone(p) {
   });
   if (!next) return next;
   const read = readMilestone(next, p);
-  return { ...next, done: read.done, total: read.rows.length };
+  return { ...next, done: read.done, total: read.total };
 }
 
 /**
- * The Roadmap (N26, N38) leads with what ships next: every milestone with work still to verify, in the board's order,
- * open by default; then one Shipped section, folded, holding nonempty milestones with only verified items, newest
- * first, each a line with its name, its item count and its note's first line. A milestone opens to a card as before:
- * how many of its items are verified as a count and a bar, a row for each, and the note to the person in its own
- * highlighted line; one with no items says so. Each part stays open or closed as the person left it.
+ * The Roadmap (N26, N38) opens releases with work left in board order and folds shipped or finished ones into Shipped.
+ * Headers show the backend's summary; accepted and landed rows stay distinct; shipped history carries its commit; old
+ * exports keep their legacy completion rule; each part keeps the person's disclosure choice for this visit.
  */
 function roadmapCards(p, titles) {
   // Opened from the status bar's release, the Roadmap is that release alone, with a way back to all of them.
@@ -2342,36 +2353,47 @@ function roadmapCards(p, titles) {
   const milestones = (p.milestones || []).filter((m) => !only || m.name === only);
   const lead = only ? '<div class="roadmap-only"><span>' + esc(only) + '</span><button class="link" data-roadmap-all type="button">show all</button></div>' : '';
   const read = milestones.map((milestone) => readMilestone(milestone, p));
-  const coming = read.filter((m) => !m.shipped && m.rows.length).concat(read.filter((m) => !m.rows.length)), shipped = read.filter((m) => m.shipped).reverse();
+  const coming = read.filter((m) => !m.shipped && m.rows.length).concat(read.filter((m) => !m.shipped && !m.rows.length)), shipped = read.filter((m) => m.shipped).reverse();
   /** Preserve each board's disclosure choices independently. */
   const isOpen = (key, first) => view.roadmapOpen.has(JSON.stringify([view.root, key])) ? view.roadmapOpen.get(JSON.stringify([view.root, key])) : first;
-  const caret = '<span class="caret" aria-hidden="true"></span>';
+  const caret = '<svg class="caret" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>'; // The view's stroke chevron, set inside the title to centre on its first line (#870).
   const next = coming.find((m) => m.rows.length) || null;
-  const stages = [['open', 'Open'], ['claimed', 'Building'], ['submitted', 'In review'], ['accepted', 'Accepted'], ['merged', 'Verified']];
-  const counts = Object.fromEntries(stages.map(([stage]) => [stage, next ? next.rows.filter((row) => row.stage === stage).length : 0]));
-  const shippingCounts = '<dl class="roadmap-stage-counts">' + stages.map(([stage, label]) => '<div data-shipping-stage="' + stage + '"><dt>' + label + '</dt><dd>' + counts[stage] + '</dd></div>').join('') + '</dl>';
+  const headerFor = roadmapHeaders(roadmapSummary, { time: when, address: itemAddress, root: view.root });
+  const stages = [['open', 'Open'], ['claimed', 'Building'], ['submitted', 'In review'], ['accepted', 'Accepted'], ['merged', 'Landed']];
+  const counts = headerFor(next) ? null : Object.fromEntries(stages.map(([stage]) => [stage, next ? next.rows.filter((row) => row.stage === stage).length : 0]));
+  const shippingCounts = headerFor(next)
+    ? '<dl class="roadmap-stage-counts">' + [['landed','Landed'],['landing','Accepted, landing'],['review','In review'],['building','Building'],['waiting','Waiting'],['held','Held']].map(([key,label]) => '<div data-shipping-stage="' + key + '"><dt>' + label + '</dt><dd>' + next.milestone.summary[key] + '</dd></div>').join('') + '</dl>'
+    : '<dl class="roadmap-stage-counts">' + stages.map(([stage, label]) => '<div data-shipping-stage="' + stage + '"><dt>' + label + '</dt><dd>' + counts[stage] + '</dd></div>').join('') + '</dl>';
   const lastShipped = '<p class="roadmap-last-shipped"><span>Last shipped</span><b>' + esc(shipped[0]?.milestone.name || 'None yet') + '</b>'
     + (shipped[0]?.milestone.note ? '<small>' + esc(firstLine(shipped[0].milestone.note)) + '</small>' : '') + '</p>';
   const mobileShipping = '<section class="roadmap-shipping roadmap-mobile-shipping" aria-label="Shipping counts">' + shippingCounts + lastShipped + '</section>';
-  /** Keep the existing verified-item count beside an upcoming release. */
-  const count = (m) => m.rows.length ? '<span class="milestone-count">' + m.done + '/' + m.rows.length + ' done</span>' : '';
+  const mobileHistory = '<section class="roadmap-shipping roadmap-mobile-shipping" aria-label="Last shipped release">' + lastShipped + '</section>';
+  /** Keep supplied landed progress beside an upcoming release without a modern summary. */
+  const count = (m) => m.total ? '<span class="milestone-count" aria-label="' + m.done + '/' + m.total + ' landed">' + m.done + '/' + m.total + ' landed</span>' : '';
   /** Render the existing milestone items, progress and complete note when opened. */
-  const body = ({ milestone, rows, done }) => (rows.length
-    ? '<svg class="milestone-progress" viewBox="0 0 100 1" preserveAspectRatio="none" role="progressbar" aria-label="' + esc(milestone.name) + ': ' + done + ' of ' + rows.length + ' done" aria-valuemin="0" aria-valuemax="' + rows.length + '" aria-valuenow="' + done + '"><rect width="' + Math.round((100 * done) / rows.length) + '" height="1"/></svg><ul>' + rows.map((row) => milestoneRow(row, titles)).join('') + '</ul>'
-    : '<p class="milestone-empty">No items yet.</p>')
-    + (milestone.note ? '<p class="milestone-note">' + rich(milestone.note, titles) + '</p>' : '');
+  const body = (read) => {
+    const { milestone, rows, done, total } = read;
+    const progress = headerFor(read) ? '' : '<svg class="milestone-progress" viewBox="0 0 100 1" preserveAspectRatio="none" role="progressbar" aria-label="' + esc(milestone.name) + ': ' + done + ' of ' + total + ' landed" aria-valuemin="0" aria-valuemax="' + total + '" aria-valuenow="' + done + '"><rect width="' + (total ? (100 * done) / total : 0) + '" height="1"/></svg>';
+    return (rows.length ? progress + '<ul>' + rows.map((row) => milestoneRow(row, titles)).join('') + '</ul>' : '<p class="milestone-empty">No items yet.</p>')
+      + (milestone.note ? '<p class="milestone-note">' + rich(milestone.note, titles) + '</p>' : '');
+  };
   /** Keep folding consistent with the View's other keyboard-accessible disclosure controls. */
   const wrap = (tag, classes, key, first, heading, contents, afterHead = '') => {
     const open = isOpen(key, first);
-    return '<' + tag + ' class="' + classes + '" data-key="' + esc(key) + '"><div class="milestone-head" data-roadmap-key="' + esc(key) + '" role="button" tabindex="0" aria-expanded="' + open + '">' + caret + heading + '</div>' + afterHead + '<div class="milestone-body"' + (open ? '' : ' hidden') + '>' + contents + '</div></' + tag + '>';
+    return '<' + tag + ' class="' + classes + '" data-key="' + esc(key) + '"><div class="milestone-head" data-roadmap-key="' + esc(key) + '" role="button" tabindex="0" aria-expanded="' + open + '">' + heading.replace('<h2>', '<h2>' + caret) + '</div>' + afterHead + '<div class="milestone-body"' + (open ? '' : ' hidden') + '>' + contents + '</div></' + tag + '>';
   };
   /** Open every upcoming milestone by default; the person's current-page fold remains in the view map. */
-  const card = (m) => wrap('section', 'card-panel milestone', 'm:' + m.milestone.name, true, '<h2>' + linked(m.milestone.name, titles) + '</h2>' + count(m), body(m), m === next ? mobileShipping : '');
+  const card = (m) => {
+    const header = headerFor(m);
+    const legacyTarget = m.milestone.target ? '<div class="milestone-targetline">Target <time datetime="' + esc(m.milestone.target) + '">' + when(m.milestone.target) + '</time>' + (m.milestone.pastTarget ? ' <span class="chip warn">past target</span>' : '') + '</div>' : '';
+    return wrap('section', 'card-panel milestone' + (header ? ' roadmap-has-summary' : ''), 'm:' + m.milestone.name, true,
+      '<h2>' + linked(m.milestone.name, titles) + '</h2>' + (header ? header.count : count(m)), body(m), header ? header.detail + (m === next ? mobileHistory : '') : legacyTarget + (m === next ? mobileShipping : ''));
+  };
   /** Summarize one shipped milestone with its first note line and total count. */
-  const line = (m) => wrap('div', 'milestone shipped-one', 'm:' + m.milestone.name, false, '<h2>' + esc(m.milestone.name) + '</h2><small>' + esc(firstLine(m.milestone.note)) + '</small><span class="milestone-count">' + m.rows.length + (m.rows.length === 1 ? ' item' : ' items') + '</span>', body(m));
+  const line = (m) => wrap('div', 'milestone shipped-one', 'm:' + m.milestone.name, false, '<h2>' + esc(m.milestone.name) + '</h2><small>' + esc(firstLine(m.milestone.note)) + '</small>' + (m.milestone.shipped?.commit ? '<code class="roadmap-shipped-commit" title="' + esc(m.milestone.shipped.commit) + '">' + esc(m.milestone.shipped.commit.slice(0, 12)) + '</code>' : '') + '<span class="milestone-count">' + m.total + (m.total === 1 ? ' item' : ' items') + '</span>', body(m));
   const releaseButtons = coming.map((m) => {
     const key = 'm:' + m.milestone.name;
-    return '<button class="roadmap-release" data-roadmap-jump="' + esc(key) + '" type="button"><span>' + esc(m.milestone.name) + '</span><b>' + m.done + '/' + m.rows.length + '</b></button>';
+    return '<button class="roadmap-release" data-roadmap-jump="' + esc(key) + '" type="button"><span>' + esc(m.milestone.name) + '</span><b>' + m.done + '/' + m.total + '</b></button>';
   }).join('');
   const shippedButton = shipped.length
     ? '<button class="roadmap-release" data-roadmap-jump="shipped" type="button"><span>Shipped</span><b>' + shipped.length + '</b></button>' : '';
@@ -2517,7 +2539,7 @@ function render() {
   // Adapt display targets and the existing hold age without reimplementing which calls belong here.
   const needs = personalNeeds.filter((row) => !['draft', 'rigor-draft'].includes(row.kind)).map((row) => row.kind === 'decision'
     ? ['decide:' + row.id, row.ref, row.text, 'decide', row.at]
-    : row.kind === 'pending' ? ['spec:' + row.id, row.ref, row.text, row.what]
+    : row.kind === 'pending' ? ['spec:' + row.id, row.ref, row.text, 'answer ' + row.ref] // the person's words; agents get the command (#875)
       : ['tab:shouts', row.ref, row.text, row.what, p.holds.find((hold) => hold.hold_lane === row.id)?.hold_at]);
   const drafts = personalNeeds.find((row) => row.kind === 'draft')?.count ?? 0;
   const rigorDrafts = personalNeeds.filter((row) => row.kind === 'rigor-draft');

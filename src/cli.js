@@ -35,6 +35,12 @@ import {
 import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
+import {
+  mainLaneWork,
+  reviewQueueLine,
+  refuseNextIdle,
+} from './next-steps.js';
+import { reviewerStartup } from './next-steps.js';
 import * as store from './board.js';
 import {
   CONFIG_FILE,
@@ -65,6 +71,7 @@ import {
   AGENT_SESSION_IDS,
   agentSessionDigest,
   requirePersonChannel,
+  personShout,
 } from './person.js';
 import {
   bindLocalSession,
@@ -88,6 +95,7 @@ import {
   runGate,
   runProfiledShell,
   runSubmitGate,
+  runStaticChecks,
   submitGateReport,
   timingDigest,
   withGateSlot,
@@ -140,6 +148,12 @@ import {
   starterLane,
   starterLaneNotes,
 } from './init.js';
+import {
+  beginInitCommit,
+  finishInitCommit,
+  reportInitSetup,
+  SETUP_COMMIT_LATER,
+} from './init-finish.js';
 import { lifecycleMarkdown } from './machine.js';
 import {
   buildHelp,
@@ -150,6 +164,14 @@ import {
   barCorrections,
   barStatsLines,
 } from './bar-corrections.js';
+import {
+  MAIN_MERGE_LABEL,
+  mainMergeFor,
+  mainMergeLines,
+  mainMergesFor,
+  reopenConflict,
+  reopenedLine,
+} from './trunk-conflict.js';
 import {
   checkImplies,
   decisionsImplying,
@@ -172,6 +194,12 @@ import {
   outOfLane,
 } from './lanes.js';
 import { Refused } from './refused.js';
+import {
+  applyStep,
+  personAsk,
+  requirementStep,
+  withStarterWork,
+} from './setup-rows.js';
 import { personNeeds } from './needs.js';
 import { personNeedsState } from './needs-state.js';
 import { startServeSentinel } from './serve-sentinel.js';
@@ -214,8 +242,6 @@ import {
 import {
   blueprintStarterNote,
   combinedSummary,
-  initBlueprintLines,
-  initBlueprintResult,
   installedBlueprints,
   landEach,
   readBlueprints,
@@ -246,10 +272,7 @@ import {
   startCheckBaseline,
 } from './check-baseline-worker.js';
 import {
-  alreadyAddedLine,
-  initWaitingRows,
   startersCommand,
-  waitingRowLines,
 } from './blueprint-report.js';
 import {
   compareMainFailures,
@@ -272,7 +295,7 @@ import {
   registerProjectAndLink,
   registeredProjectRootsSnapshot,
 } from './projects.js';
-import { milestoneRoadmap } from './roadmap.js';
+import * as roadmapView from './roadmap.js';
 import {
   rigorLines,
   rigorReport,
@@ -330,6 +353,7 @@ import {
   checkAtCommit,
   dependencySnapshots,
   requireTrunkMerge,
+  trunkMerge,
   trunkRef,
 } from './trusted-policy.js';
 import {
@@ -627,6 +651,7 @@ const OPTIONS = {
   commit: { type: 'string' },
   ref: { type: 'string' },
   supersedes: { type: 'string' },
+  conflict: { type: 'string', multiple: true },
   cause: { type: 'string' },
   'never-again': { type: 'boolean' },
   implies: { type: 'string' },
@@ -757,10 +782,9 @@ function checkMainVerifier(ctx, board, values) {
   const agents = store.listAgents(board).filter((agent) => agent.agent_id !== COORDINATOR);
   const listed = agents.length ? ` Agent worktrees: ${agents.slice(0, 6).map((agent) => `${displayAgentName(agent, ctx.config.agents.names)} at ${agent.agent_path}`).join('; ')}.` : '';
   const detached = tryGit(ctx.info.root, ['symbolic-ref', '-q', 'HEAD']).status !== 0 ? ' The main checkout is not on its branch; whoever switched it puts it back.' : '';
-  throw new Refused(
-    'MAIN_IS_COORDINATOR',
+  throw new Refused('MAIN_IS_COORDINATOR',
     `this is the main checkout, so this verdict would be the coordinator's.${listed}${detached}`,
-    'create a new reviewer worktree with git worktree add --detach .claude/worktrees/<reviewer-name> HEAD, using an unused folder; then cd there and run pullboard join <lane> --model "<model name>" and pullboard next --verify <id>. The reviewer must not be the builder. The coordinator instead adds --as coordinator',
+    reviewerStartup(ctx.info.root, ctx.config, values.verifyId),
   );
 }
 
@@ -1206,13 +1230,13 @@ function firstLineOf(note) {
  * @param {any} item
  * @returns {string}
  */
-function itemLine(item, name = (id) => id) {
+function itemLine(item, name = (id) => id, mainMerge = false) {
   const holder = item.item_status === 'claimed' ? ` ${name(item.item_owner)}` : '';
   const verifier = item.item_status === 'verified' ? ` by ${name(item.item_verified_by)}` : '';
   const specs = item.item_spec_ids ? `  [${item.item_spec_ids}]` : '';
   const parent = item.item_parent_id ? `  under #${item.item_parent_id}` : '';
   const after = item.item_after ? `  after ${item.item_after.split(',').map((id) => `#${id}`).join(',')}` : '';
-  const rejected = item.item_status === 'open' && item.item_verdict === 'REJECT' ? ' (rejected)' : '';
+  const rejected = item.item_status === 'open' && item.item_verdict === 'REJECT' ? ' (rejected)' : mainMerge ? ` (${MAIN_MERGE_LABEL})` : '';
   const light = item.item_route === 'strong' ? '' : `  ${item.item_route}`;
   const staleVerdict = item.item_verdict_state ? `  ${item.item_verdict_state.code}` : '';
   const hold = item.item_hold_reason ? `  held by ${name(item.item_hold_by)}: ${item.item_hold_reason}` : '';
@@ -1390,7 +1414,7 @@ const reworkNext = (card) => `pullboard claim ${card.sentBack[0].item.item_id}, 
 /**
  * The coordinator's next step, from the board and the spec (N32): the spec with the person first,
  * then its own work in hand, then verdicts, merges, builders and the plan, so an agent that runs the
- * team by the run guide always knows where it is. Nothing jumps the spec, not even its own claim.
+ * team by the run guide knows where it is. A working board with no spec rows can keep building.
  *
  * @param {any} card
  * @param {{ id: string, status: string }[]} rows
@@ -1399,9 +1423,9 @@ const reworkNext = (card) => `pullboard claim ${card.sentBack[0].item.item_id}, 
 function coordinatorNext(card, rows) {
   if (card.requests.length) return `answer request #${card.requests[0].shout_id}: pullboard answer ${card.requests[0].shout_id} done, or declined <reason>`;
   const live = rows.filter((row) => !['wont', 'retired'].includes(row.status));
-  if (!live.length) return "turn what the person wants into spec rows with them: the pullboard-decompose skill (pullboard prompt decompose)";
+  if (!live.length && (rows.length || !card.all.length)) return "turn what the person wants into spec rows with them: the pullboard-decompose skill (pullboard prompt decompose)";
   const approved = live.filter((row) => row.status === 'approved');
-  if (!approved.length) return 'the person approves rows in SPEC.md; then plan them: the pullboard-plan skill';
+  if (live.length && !approved.length) return 'the person approves rows in SPEC.md; then plan them: the pullboard-plan skill';
   if (card.holding.length) return buildNext(card);
   if (card.sentBack.length) return reworkNext(card);
   if (card.toVerify.length) return 'pullboard next --verify --as coordinator, or a verifier that built nothing: pullboard worktree review --model "<model name>"';
@@ -1581,7 +1605,12 @@ function recordSetupState(ctx, identity, state) {
 function boardSetup(ctx, card, identity) {
   const rows = loadSpec(ctx.info.root, ctx.config).rows;
   const approved = rows.filter(row => row.status === 'approved');
-  const drafted = rows.filter(row => row.status === 'draft' || row.status === 'pending');
+  const decisions = withBoard(ctx, (board) => store.rowDecisions(board));
+  // Match the current row's decision projection, not a bare id: a changed draft needs a new person decision (#848).
+  const open = rows.filter(row => row.status === 'draft' || row.status === 'pending')
+    .map(row => decisionProjection(decisions, row, 'spec'));
+  const toApply = open.filter(row => row.decision);
+  const drafted = open.filter(row => !row.decision);
   const recordedComplete = setupReceiptMatches(ctx, identity, 'complete');
   const started = setupReceiptMatches(ctx, identity, 'started');
   const lanes = laneNames(ctx.config).filter(lane => !['review', COORDINATOR].includes(lane));
@@ -1603,9 +1632,7 @@ function boardSetup(ctx, card, identity) {
   /** Preserve all existing configuration when recording one setup answer. */
   const configure = patch => `node -e ${quote(`const fs=require('node:fs');const p='pullboard.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));${patch};fs.writeFileSync(p,JSON.stringify(c,null,2)+${JSON.stringify('\n')})`)}`;
   const steps = [
-    { number: 1, done: approved.length > 0 && (!drafted.length || completed), question: 'Ask the person: what are we building, and who will use it? Draft a few requirements, then ask the person to approve them.',
-      command: 'pullboard spec draft "<text>"',
-      afterAnswer: 'Record each answer with pullboard spec draft "<text>"; the person approves the returned ids in Pullboard View or runs pullboard spec approve <ids> in their own terminal; then the coordinator runs pullboard spec apply.' },
+    requirementStep({ rows, drafted, toApply, completed, hasItems: card.all.length > 0 }),
     { number: 2, done: lanes.length > 0, question: `Ask the person: how should we divide the work? Suggested folders: ${folders.join(', ') || 'app/ (create it for the app)'}.`,
       command: `pullboard lane add ${word(lane)} --owns ${word(lane + '/')}` },
     { number: 3, done: Boolean(ctx.config.gate?.trim()),
@@ -1622,17 +1649,19 @@ function boardSetup(ctx, card, identity) {
   const current = steps.find(step => !step.done);
   if (!current && !recordedComplete) recordSetupState(ctx, identity, 'complete');
   else if (current && !completed && !started) recordSetupState(ctx, identity, 'started');
+  const seat = ctx.io.callerRole() === 'seat';
+  if (current?.number === 1 && !drafted.length && toApply.length) return { step: 1, total: 5, ...current, steps, ...applyStep(toApply.map(row => row.id), seat) };
   if (current?.number === 1 && drafted.length) {
     const rowIds = drafted.map(row => row.id);
     const names = rowIds.join(', ');
     const command = `pullboard spec show ${rowIds[0]}`;
-    const seat = ctx.io.callerRole() === 'seat';
-    return { step: 1, total: 5, ...current, steps, waitingOn: 'person-approval', rowIds,
-      question: seat ? `Waiting for the coordinator to bring approval of ${names} to the person.` : `Waiting for the person to approve ${names}.`, command,
-      personCommand: `pullboard spec approve ${rowIds.join(',')}`,
-      afterAnswer: 'The person approves these rows in Pullboard View or their own terminal; then the coordinator runs pullboard spec apply.',
-      meanwhile: seat ? 'While waiting, review independent approved work or send questions to the coordinator with pullboard shout coordinator "<what is needed>" --decision.' : 'While waiting, the agent may review independent approved work or prepare questions for the person.',
-      agentNext: seat ? `ask the coordinator to bring approval of ${names} to the person: pullboard shout coordinator "approve ${names}" --decision; meanwhile ${command}` : `wait for the person to approve ${names}; meanwhile ${command}` };
+    // A pending question takes an answer, a draft row an approval: each gets the command that decides it.
+    const { personCommand, verb, seatQuestion, seatNext } = personAsk(drafted);
+    return { step: 1, total: 5, ...current, steps, waitingOn: 'person-approval', rowIds, ...(toApply.length ? { approvedRowIds: toApply.map(row => row.id) } : {}),
+      question: seat ? seatQuestion : `Waiting for the person to ${verb} ${names}.`, command,
+      personCommand,
+      afterAnswer: (toApply.length ? `The person already approved ${toApply.map(row => row.id).join(', ')}; pullboard spec apply writes them. ` : '') + 'The person approves draft rows and answers questions in Pullboard View or their own terminal; then the coordinator runs pullboard spec apply.',
+      agentNext: seat ? seatNext : (toApply.length ? 'pullboard spec apply for the approved rows; then ' : '') + `wait for the person to ${verb} ${names}; meanwhile ${command}` };
   }
   return current ? { step: current.number, total: 5, ...current, steps } : null;
 }
@@ -1687,6 +1716,7 @@ async function resumeHere(io, view) {
       sentBack: all
         .filter((item) => item.item_status === 'open' && item.item_verdict === 'REJECT' && item.item_built_by === me.id)
         .map((item) => ({ item, verdict: store.verdictsFor(board, item.item_id).at(-1) })),
+      mainMerges: mainMergesFor(board, all.filter((item) => item.item_status === 'open' && item.item_built_by === me.id)),
       awaiting: all.filter((item) => item.item_status === 'submitted' && item.item_built_by === me.id),
       toVerify: all.filter((item) => item.item_status === 'submitted' && item.item_built_by !== me.id),
       toMerge,
@@ -1734,11 +1764,12 @@ async function resumeHere(io, view) {
   if (view.state !== 'running' && backgroundViewLine(view)) say(backgroundViewLine(view));
   if (card.inbox) for (const line of coordinatorInboxLines(card.inbox, name, (at) => span(ctx, at), firstLine)) say(line);
   say(`New agent worktrees: ${card.newWorktreeLocation}`);
-  card.setup = boardSetup(ctx, card, setupScope);
+  card.setup = withBoard(ctx, board => withStarterWork(boardSetup(ctx, card, setupScope), { board, me, main: isMain, config: ctx.config, root, seat: ctx.io.callerRole() === 'seat' }));
+  if (!loadSpec(root, ctx.config).rows.length && card.all.length) say('Spec rows are optional; add a requirement later: pullboard spec draft "<text>".');
   if (card.setup) {
     say(`Setting up: step ${card.setup.step} of 5`);
     say(card.setup.question);
-    say(card.setup.personCommand ? `For the person: ${card.setup.personCommand}` : `Record the answer: ${card.setup.command}`);
+    say(card.setup.personCommand ? `For the person: ${card.setup.personCommand}` : card.setup.waitingOn === 'coordinator-apply' ? `Next: ${card.setup.agentNext}` : `Record the answer: ${card.setup.command}`);
     if (card.setup.afterAnswer) say(card.setup.afterAnswer);
     if (card.setup.meanwhile) say(card.setup.meanwhile);
   }
@@ -1769,6 +1800,7 @@ async function resumeHere(io, view) {
   for (const { item, verdict } of card.sentBack) {
     say(`sent back: #${item.item_id} ${verdict ? `${verdict.verdict_reason} by ${name(verdict.verdict_by)}: ${firstLine(verdict.verdict_note)}` : 'rejected'}`);
   }
+  for (const { item, merge } of card.mainMerges) say(mainMergeLines(item, merge, name).join('; '));
   if (isMain && card.staleFollowUps.count) say(`${plural(card.staleFollowUps.count, 'stale follow-up')}; list them with ${card.staleFollowUps.list}`);
   else if (!isMain) for (const item of card.stale) say(`stale: ${item.message}; next: ${item.next}`);
   for (const item of card.staleVerdicts) say(staleVerdictRefusal(item, item.item_verdict_state).message);
@@ -2006,8 +2038,10 @@ function setupCommands(io, { first, second, rest = [], values }) {
       const linked = relayLinked(info.root);
       const ctx = linked && model !== undefined ? context(io) : null;
       if (model !== undefined && linked) refuseRemoteCoordinatorModel(ctx, 'init');
+      const setupPlan = beginInitCommit(info);
       const notes = initRepo({
         info,
+        onWritten: setupPlan.written,
         model,
         permissions: !values['no-permissions'],
         openBoardHere: () => store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), io.clock, { isMain: codeIsFromMain() }),
@@ -2031,32 +2065,20 @@ function setupCommands(io, { first, second, rest = [], values }) {
       ]));
       // Keep blueprint initialization and the person's unwritten lane proposals in the same result.
       const landed = await landEach(blueprints, ({ reference, blueprint }, drafted) => addBlueprintHere(io, reference, { report: false, blueprint, drafted }));
-      // Every row that waits for the person once, the blueprints' new rows and the doctrine's pending rows alike (#734).
-      const fresh = landed.filter((added) => !added.marked);
-      const waiting = landed.length ? initWaitingRows(info.root, { rows: fresh.flatMap((added) => added.rows) }) : [];
-      const blueprintResult = (added) => ({ ...initBlueprintResult(added), marked: added.marked, waitingRows: waiting });
-      const result = { root: info.root, notes, proposedLanes: proposeLanes(info.root),
-        ...(landed.length ? { blueprint: blueprintResult(landed[0]), blueprints: landed.map(blueprintResult) } : {}) };
-      io.result?.(result);
-      const staging = notes.at(-1)?.startsWith('git add -f -- ') ? notes.at(-1) : null;
-      (staging ? notes.slice(0, -1) : notes).forEach((note) => io.say(note));
-      for (const added of landed) {
-        if (added.marked) io.say(alreadyAddedLine(added.blueprint));
-        else initBlueprintLines(added, askedLaneNotes(added.items, loadConfig(info.root))).forEach((line) => io.say(line));
-      }
-      if (fresh.length) waitingRowLines(waiting).forEach((line) => io.say(line));
+      const { result } = reportInitSetup(io, info, notes, landed, Boolean(agentSessionDigest()));
+      const setupCommit = await finishInitCommit(setupPlan, { io, yes: values.yes, landed, permissions: !values['no-permissions'] });
+      result.setupCommit = setupCommit;
       if (await registerProjectAndLink(info.root, new Date(), loadConfig(info.root), io)) io.say('registered this project on this machine, so pullboard view lists it');
       // Once registered, a background view lists this board for pullboard.dev [H5,N26].
       const view = await keepViewRunning();
       io.result?.({ ...result, view });
       const viewLine = backgroundViewLine(view);
       if (viewLine) io.say(viewLine);
-      io.say(agentSessionDigest()
-        ? 'Next: run pullboard resume now to continue setup in this session; the new skills load next session, and setup does not need them.'
-        : 'Next: ask your agent to set up Pullboard here; in Claude Code, start a new session first so it loads the Pullboard skills.');
-      // The offer comes before the staging line, which stays init's last line [I1,I2].
+      // Sharing remains a separate choice; --yes confirms only the setup commit.
       const code = await offerRelayAtInit(info.root, io);
-      if (staging) io.say(`To commit Pullboard's files: ${staging}`);
+      if (setupCommit.skipped.length) io.say(`Your earlier changes remain uncommitted: ${setupCommit.skipped.join(', ')}.`);
+      if (setupCommit.state === 'pending') io.say(SETUP_COMMIT_LATER);
+      if (setupCommit.state === 'committed') io.say(`Committed ${setupCommit.skipped.length ? 'only unchanged Pullboard files' : 'Pullboard setup'} at ${setupCommit.commit.slice(0, 12)}.`);
       return code;
     },
     lane: () => {
@@ -2370,20 +2392,20 @@ function readCommands(io, { first, second, rest, values }) {
     },
     list: () => {
       const ctx = context(io);
-      const { items, agents } = withBoard(ctx, (board) => ({
+      const { items, agents, merging } = withBoard(ctx, (board) => ({
         items: store.listItems(board, { lane: first, all: values.all }).map(verdictProjector(ctx.info.root, board).project),
-        agents: store.listAgents(board),
+        agents: store.listAgents(board), merging: new Set(store.listItems(board, { lane: first }).filter((item) => mainMergeFor(board, item.item_id)).map((item) => item.item_id)),
       }));
       const filtered = items.filter((item) => !values.route || item.item_route === values.route);
       if (values.json) io.result({ items: filtered });
       else if (!filtered.length) io.say(values.all ? 'no items yet' : 'nothing open; --all shows closed items');
-      else filtered.forEach((item) => io.say(itemLine(item, (id) => agentDisplayName(agents, ctx.config, id))));
+      else filtered.forEach((item) => io.say(itemLine(item, (id) => agentDisplayName(agents, ctx.config, id), merging.has(item.item_id))));
       return 0;
     },
     roadmap: () => {
       if (first || second || rest.length) throw new Refused('USAGE', 'pullboard roadmap takes no arguments');
       const ctx = context(io);
-      const milestones = withBoard(ctx, (board) => milestoneRoadmap(ctx.info.root, board));
+      const milestones = withBoard(ctx, (board) => roadmapView.milestoneRoadmap(ctx.info.root, board));
       io.result?.({ milestones });
       if (!milestones.length) io.say('no milestones yet; the coordinator can add one with pullboard milestone add');
       for (const milestone of milestones) {
@@ -2392,9 +2414,7 @@ function readCommands(io, { first, second, rest, values }) {
         io.say(`${milestone.name}: ${milestone.landed}/${milestone.total} landed${when}`);
         if (!milestone.shipped) {
           const summary = milestone.summary;
-          const bounds = summary.estimate;
-          const hours = bounds && (bounds.low === bounds.high ? bounds.low : `${bounds.low} to ${bounds.high}`);
-          const estimate = bounds ? `; about ${hours} h at today's pace.` : '; estimate unavailable.';
+          const estimate = roadmapView.roadmapEstimate(summary);
           io.say(`  ${summary.left} left of ${summary.total}: ${summary.landed} landed, ${summary.landing} landing, ${summary.review} in review, ${summary.building} building, ${summary.waiting} waiting, ${summary.held} held${estimate}`);
         }
         if (milestone.note) io.say(`  ${milestone.note}`);
@@ -2418,21 +2438,21 @@ function readCommands(io, { first, second, rest, values }) {
     show: () => {
       const ctx = context(io);
       const id = idArg(first);
-      const { item, verdicts, moves, thread, related, reviewer, agents } = withBoard(ctx, (board) => ({
+      const { item, verdicts, moves, thread, related, reviewer, agents, mainMerge } = withBoard(ctx, (board) => ({
         item: verdictProjector(ctx.info.root, board).project(store.getItem(board, id)),
         verdicts: store.verdictsFor(board, id),
         moves: store.events(board, { itemId: id }).filter((event) => ['attempt', 'escalate'].includes(event.event_kind)),
         thread: store.itemThread(board, id),
         related: store.relatedItems(board, store.getItem(board, id)),
         reviewer: store.reviewHolder(board, store.getItem(board, id)),
-        agents: store.listAgents(board),
+        agents: store.listAgents(board), mainMerge: mainMergeFor(board, id),
       }));
       const agentName = (id) => displayAgentName(agents.find((agent) => agent.agent_id === id) ?? { agent_id: id }, ctx.config.agents.names);
       if (values.json) {
         io.result({ ...item, verdicts, thread });
         return 0;
       }
-      io.say(itemLine(item, agentName));
+      io.say(itemLine(item, agentName, Boolean(mainMerge)));
       if (item.item_verdict_state) io.say(staleVerdictRefusal(item, item.item_verdict_state).message);
       if (item.item_criterion) io.say(`criterion: ${item.item_criterion}`);
       if (item.item_check) io.say(`check: ${item.item_check}`);
@@ -2464,6 +2484,7 @@ function readCommands(io, { first, second, rest, values }) {
       });
       if (notes.some((note, index) => note !== verdicts[index].verdict_note)) io.say(`(earlier verdicts shortened; every note in full: pullboard show ${id} --history)`);
       for (const correction of barCorrections(thread)) io.say(barCorrectionLine(correction));
+      for (const line of mainMerge ? mainMergeLines(item, mainMerge, agentName) : []) io.say(line);
       if (item.item_merged_commit) io.say(`merged as ${item.item_merged_commit}`);
       if (item.item_withdrawn_reason) io.say(`withdrawn: ${item.item_withdrawn_reason}`);
       io.say('thread:');
@@ -2497,7 +2518,7 @@ function readCommands(io, { first, second, rest, values }) {
       io.say(`${summary.me.displayName}: ${summary.unread} unread shouts; holding ${summary.mine.map((item) => `#${item.item_id}`).join(', ') || 'nothing'}`);
       io.say(`board: ${items.open} open, ${items.claimed} claimed, ${items.submitted} awaiting verification, ${items.verified} verified, ${items.withdrawn} withdrawn`);
       io.say(`verdicts: ${accepted} accepted, ${rejected} rejected`);
-      io.say(reviewQueueLine(ctx, summary.reviewQueue));
+      io.say(reviewQueueLine(ctx, summary.reviewQueue, span));
       for (const proposal of summary.submitInvariantProposals) io.say(submitInvariantLine(proposal));
       if (Object.keys(ctx.config.products).length) {
         const all = withBoard(ctx, (board) => store.listItems(board, { all: true }));
@@ -2725,8 +2746,8 @@ async function submitHere(ctx, id) {
     : [];
   for (const rule of doctrine) ctx.io.say(`doctrine: ${ruleLine(rule)}`);
   // Every submit proves its frozen check and reachable tests anew on this exact commit (V4,V16).
-  // A full-gate stamp never substitutes for either proof; only an actual full fallback may stamp.
-  const submitConfig = { ...ctx.config, submitGate: acceptedMain.config.submitGate,
+  // Empty frozen gates adopt accepted main setup; only a full fallback may stamp its tree.
+  const submitConfig = { ...ctx.config, gate: ctx.config.gate.trim() ? ctx.config.gate : acceptedMain.config.gate, submitGate: acceptedMain.config.submitGate, staticChecks: acceptedMain.config.staticChecks,
     submitInvariants: acceptedMain.config.submitInvariants,
     // The accepted project runner interprets its current invariant files; candidate config cannot replace it.
     ...(acceptedMain.config.submitInvariants.length ? { affectedTests: acceptedMain.config.affectedTests } : {}) };
@@ -2775,7 +2796,7 @@ function reportSubmission(ctx, id, commit, gate, doctrine = []) {
   ctx.io.result?.({ id, commit, pin, gate, ...(doctrine.length ? { doctrine } : {}) });
   ctx.io.say(`submitted #${id} at ${commit.slice(0, 12)}; ${gate.report}`);
   ctx.io.say(`pinned as ${pin}, so this work can't be lost; keep your worktree until it is merged`);
-  ctx.io.say(`next: another agent checks out ${commit.slice(0, 12)} and runs: pullboard verify ${id} accept|reject`);
+  ctx.io.say(`next: ${reviewerStartup(primaryCheckoutRoot(ctx.info), ctx.config, id)}`);
   return 0;
 }
 
@@ -3173,7 +3194,7 @@ async function nextOnce(ctx, values) {
       familyPolicy: ctx.config.verify.family, ratio: ctx.config.verify.reviewRatio, runnable: values.runnable, routes: values.routes });
     const offer = held ? null : relayLinked(ctx.info.root) ? store.withVerifierStanding(board, { root: true }, findOffer) : findOffer();
     if (offer && !values.build) return { item: offer.item, offer, build: item ?? null };
-    if (!item) return { reasons };
+    if (!item) return { reasons, laneWork: ctx.info.isMain ? mainLaneWork(store.listItems(board)) : null };
     const reviewSkipped = values.build && !held
       ? { offeredItem: offer?.item.item_id ?? null, ratio: ctx.config.verify.reviewRatio, ...store.reviewQueue(board) } : null;
     const routed = seats ? await nextSeatContext(ctx, board, me, item, seats) : { context: ctx };
@@ -3190,40 +3211,19 @@ async function nextOnce(ctx, values) {
   });
 }
 
-/** Describe the queue's actual outstanding reviews and submission age [Q1,V15]. */
-function reviewQueueLine(ctx, queue) {
-  const age = queue.oldestSubmittedAt ? `${span(ctx, queue.oldestSubmittedAt)} ago` : 'none';
-  if (queue.awaitingFirstReview !== undefined) {
-    const released = queue.releasedItems?.map((item) => `#${item.item} released ${item.releases} ${item.releases === 1 ? 'time' : 'times'}: ${item.reason}`).join('; ');
-    return `review queue: ${queue.pending} submitted; ${queue.awaitingFirstReview} waiting for a first reviewer, ${queue.releasedWithoutVerdict} released without a verdict${released ? ` (${released})` : ''}, ${queue.reviewing} agents reviewing; oldest submission ${age}`;
-  }
-  return `review queue: ${queue.pending} awaiting, ${queue.reviewing} agents reviewing; oldest submission ${age}`;
-}
 
 /** Print an unreserved review first, then the build available through an explicit opt-out. */
 function sayReviewOffer(ctx, found) {
   const command = `pullboard next --verify ${found.item.item_id}${ctx.info.isMain ? ' --as coordinator' : ''}`;
   const offer = { item: found.item.item_id, command, queue: found.offer.queue, ratio: found.offer.ratio };
   ctx.io.result?.({ item: found.item, review: true, held: false, shared: [], offer, build: found.build });
-  ctx.io.say(`${reviewQueueLine(ctx, offer.queue)}; ratio ${offer.ratio} reached (zero active reviewers counts as one)`);
+  ctx.io.say(`${reviewQueueLine(ctx, offer.queue, span)}; ratio ${offer.ratio} reached (zero active reviewers counts as one)`);
   const agents = withBoard(ctx, (board) => store.listAgents(board));
   ctx.io.say(`review offered: #${found.item.item_id} ${found.item.item_title}, built by ${agentDisplayName(agents, ctx.config, found.item.item_built_by)}; reserve it explicitly: ${command}`);
   if (found.build) ctx.io.say(`build available: #${found.build.item_id} ${found.build.item_title}; claim it explicitly: pullboard next --build`);
   else ctx.io.say('no build is currently free in your lane; this review is available');
 }
 
-/**
- * Whether a shout is the person's own: a relay person request, or the local view acting as the
- * coordinator (N26, B26). The view acting as a named agent, or an agent shell as the coordinator,
- * still speaks as that agent.
- *
- * @param {any} io
- * @param {{ id: string }} me
- * @returns {boolean}
- */
-function personShout(io, me) {
-  return io.personRequest?.phase === 'execute' || (io.personChannel === 'view' && me.id === COORDINATOR);
-}
 
 /**
  * A review search that found nothing while another agent is still building: say so, with the wait,
@@ -3284,7 +3284,7 @@ async function nextHere(io, values) {
         io.say(`check out exactly that commit, here: ${here} git switch --detach ${item.item_commit}`);
         io.say(`then: ${here} pullboard verify ${item.item_id} accept${as} --note "how you proved it", or reject${as} --reason CODE --note "what failed"`);
       } else {
-        if (found.reviewSkipped) io.say(`${reviewQueueLine(ctx, found.reviewSkipped)}; explicit build intent recorded with this claim`);
+        if (found.reviewSkipped) io.say(`${reviewQueueLine(ctx, found.reviewSkipped, span)}; explicit build intent recorded with this claim`);
         io.say(`${found.held ? 'you hold' : 'claimed'} #${item.item_id}: ${item.item_title}`);
         if (found.seat) io.say(`${found.seat.created ? 'opened' : 'work in'} ${found.seat.agent}, ${found.seat.lane} lane: ${here}`);
         if (found.shared?.length) io.say(`it touches ${found.shared.length === 1 ? 'a file' : `${found.shared.length} files`} you worked in recently: ${found.shared.slice(0, 4).join(', ')}`);
@@ -3296,14 +3296,10 @@ async function nextHere(io, values) {
       }
       return 0;
     }
-    if (!found.retry && Date.now() >= deadline) {
+    if (!found.retry && (found.laneWork || Date.now() >= deadline)) {
       if (values.verify) refuseWhileBuilding(ctx);
-      const waited = minutes ? ` after ${minutes} minutes` : '';
       const agents = withBoard(ctx, (board) => store.listAgents(board));
-      const repair = `${waited}. To keep looking: pullboard next --wait 9${values.verify ? ' --verify' : ''} (minutes; give the command a ten-minute timeout)`;
-      io.refusal?.(new Refused('NOTHING_FREE', found.reasons.join('; ') + repair));
-      io.err(`pullboard: [NOTHING_FREE] ${found.reasons.map((reason) => displayedWait(reason, agents, ctx.config)).join('; ')}${repair}`);
-      return 1;
+      return refuseNextIdle(io, found.reasons, found.reasons.map((reason) => displayedWait(reason, agents, ctx.config)), { minutes, verify: values.verify, laneWork: found.laneWork });
     }
     if (!found.retry) await new Promise((done) => setTimeout(done, 5000));
   }
@@ -3572,8 +3568,6 @@ function workCommands(io, args) {
       });
       const check = frozenCheck(item);
       if (!check) throw new Refused('NO_CHECK', `#${item.item_id} has no check command; its proof is the project gate: pullboard gate`);
-      if (item.item_claim_head) itemPolicy(ctx.info.root, item);
-      else mainPolicy(ctx.info.root);
       const by = author || 'unknown (legacy)';
       const authorName = author ? agentDisplayName(agents, ctx.config, author) : by;
       const notice = `check #${item.item_id} set by ${authorName}: ${check}`;
@@ -3587,6 +3581,7 @@ function workCommands(io, args) {
           throw new Refused('CHECK_CONFIRM', `the check set by ${authorName} was not run: ${check}; run pullboard check ${item.item_id} --yes after reading the command, or answer yes at the prompt`);
         }
       }
+      await runStaticChecks(ctx.info.root, (item.item_claim_head ? itemPolicy(ctx.info.root, item) : mainPolicy(ctx.info.root)).config, { agent: caller, item: String(item.item_id), onWait: queuedItemLease(ctx, item, caller, 'build'), onBrowserFallback: browserAdmissionReporter(io, values.json) });
       const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(ctx.info.root, check, { onFallback: browserAdmissionReporter(io, values.json) });
       const shortEligible = Boolean(await explicitCheckFiles(ctx.info.root, check));
       const run = await withGateSlot(ctx.info.root, (lease) => runProfiledShell(ctx.info.root, check, { waitMs: lease.waitMs, artifactPrefix: `pullboard-check-${item.item_id}`, persistLog: true, gateLease: lease }), { browser, agent: caller, item: String(item.item_id), kind: 'check', itemCheck: true, shortEligible, onWait: queuedItemLease(ctx, item, caller, 'build') });
@@ -3713,12 +3708,8 @@ function workCommands(io, args) {
       io.say(`#${first} merged as ${commit.slice(0, 12)}`);
       return 0;
     }),
-    withdraw: () => act(async (ctx, board, me) => {
-      await ordered(ctx, board, 'withdraw', [idArg(first), { agentId: me.id, reason: [second, ...rest].filter(Boolean).join(' ') }]);
-      io.result?.({ id: idArg(first), reason: [second, ...rest].filter(Boolean).join(' ') });
-      io.say(`withdrew #${first}`);
-      return 0;
-    }),
+    withdraw: () => act((ctx, board, me) => roadmapView.withdrawWithMilestones(ctx, board, me, idArg(first),
+      [second, ...rest].filter(Boolean).join(' '), ordered)),
     refreeze: () => act(async (ctx, board, me) => {
       const result = await ordered(ctx, board, 'refreeze', [idArg(first), { agentId: me.id, freeze: freezer(ctx, { captureVerifyPolicy: true, board }) }]);
       io.result?.({ id: idArg(first), ...result });
@@ -3727,11 +3718,10 @@ function workCommands(io, args) {
     }),
     reopen: () => act(async (ctx, board, me) => {
       const result = await ordered(ctx, board, 'reopen', [idArg(first), { agentId: me.id, note: textArg(io, values, 'note') ?? '',
-        ...(values.cause !== undefined ? { cause: values.cause } : {}) }]);
+        ...(values.cause !== undefined ? { cause: values.cause } : {}),
+        ...(values.conflict === undefined ? {} : { conflict: reopenConflict({ item: store.getItem(board, idArg(first)), coordinator: me.id === COORDINATOR, values: values.conflict, trunkMerge: (commit) => trunkMerge(ctx.info.root, commit) }) }) }]);
       io.result?.(result);
-      io.say(result.landingFailure
-        ? `reopened #${first} after landing failure; previous accept remains recorded at ${result.commit.slice(0, 12)}`
-        : `reopened #${first} without a verdict; previous commit ${result.commit.slice(0, 12)} remains recorded`);
+      io.say(reopenedLine(first, result));
       return 0;
     }),
     shout: () => act(async (ctx, board, me) => {

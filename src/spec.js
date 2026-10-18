@@ -97,11 +97,18 @@ function splitFields(rest) {
 export function parseSpec(source, { strictGrammarVersion = true } = {}) {
   const spec = { grammarVersion: SPEC_GRAMMAR_VERSION, title: '', intro: [], sections: [], rows: [], problems: [] };
   let section = null;
-  let isFenced = false;
+  let fence = '';
   source.split(/\r?\n/).forEach((line, index) => {
     const lineNo = index + 1;
-    if (line.startsWith('```')) isFenced = !isFenced;
-    if (isFenced || line.startsWith('```')) return;
+    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/u.exec(line);
+    if (fence) {
+      if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) fence = '';
+      return;
+    }
+    if (marker && (marker[1][0] === '~' || !marker[2].includes('`'))) {
+      fence = marker[1];
+      return;
+    }
     const grammar = /^\uFEFF?\s*<!--\s*pullboard-grammar(?:\s+(.*?))?\s*-->\s*$/.exec(line);
     if (grammar) {
       const declared = grammar[1]?.trim() ?? '';

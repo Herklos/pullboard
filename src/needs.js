@@ -12,7 +12,7 @@ export function personNeeds(state) {
     ...(state.decisions ?? []).map(ask => ({ kind: 'decision', id: ask.shout_id,
       ref: name(ask.shout_from), text: ask.shout_text, what: 'decision', at: ask.shout_at })),
     ...rows.filter(row => row.status === 'pending').map(row => ({ kind: 'pending', id: row.id,
-      ref: row.id, text: row.text, what: 'answer in SPEC.md' })),
+      ref: row.id, text: row.text, what: `pullboard spec answer ${row.id} "<choice>"` })),
     ...(state.holds ?? []).map(hold => ({ kind: 'hold', id: hold.hold_lane,
       ref: hold.hold_lane, text: hold.hold_reason, what: 'lane held by ' + name(hold.hold_by) })),
     ...rigorDrafts,

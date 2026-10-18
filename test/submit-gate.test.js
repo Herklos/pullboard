@@ -407,6 +407,49 @@ test('unknown imports and broad inputs fall back explicitly, while an all-test c
   assert.deepEqual(allTests.files, ['test/a.test.js', 'test/b.test.js', 'test/c.test.js']);
 });
 
+test('an item claimed before the gate existed submits once a gate exists [C7,B26]', (t) => {
+  let box = privateRepo(t);
+  put(box.root, 'pullboard.json', JSON.stringify({ gate: '', shared: ['pullboard.json'] }));
+  put(box.root, 'src/a.js', 'export const value = 1;\n');
+  put(box.root, 'test/a.test.js', [
+    "import assert from 'node:assert/strict';",
+    "import { appendFileSync } from 'node:fs';",
+    "import { value } from '../src/a.js';",
+    "appendFileSync(process.env.GATE_MARKER, 'accepted-main\\n');",
+    'assert.equal(value, 2);',
+  ].join('\n'));
+  box = builderRepo(box);
+  assert.equal(box.coordinator('add', 'build', 'Claim before setup', '--specs', 'G1').code, 0);
+  assert.equal(box.run('claim', '1').code, 0);
+  put(box.root, 'src/a.js', 'export const value = 2;\n');
+  commitAll(box, 'feat(core): build the claimed item [G1]');
+  const missing = box.run('submit', '1', '--json');
+  assert.equal(missing.code, 1, missing.err || missing.out);
+  assert.equal(JSON.parse(missing.out).error.code, 'NO_GATE', 'an unconfigured board still refuses');
+  const before = JSON.parse(box.run('show', '1', '--json').out);
+  const mainRoot = join(box.dir, 'repo');
+  const accepted = JSON.parse(readFileSync(join(mainRoot, 'pullboard.json'), 'utf8'));
+  accepted.gate = 'node --test --test-reporter=tap';
+  put(mainRoot, 'pullboard.json', JSON.stringify(accepted));
+  runFixtureGit(['add', 'pullboard.json'], { cwd: mainRoot, env: box.env });
+  runFixtureGit(['commit', '-q', '-m', 'chore: configure the project gate'], { cwd: mainRoot, env: box.env });
+  box.git('merge', '--no-edit', 'main');
+  const candidate = JSON.parse(readFileSync(join(box.root, 'pullboard.json'), 'utf8'));
+  candidate.gate = `node -e "require('node:fs').appendFileSync(process.env.GATE_MARKER, 'candidate')"`;
+  put(box.root, 'pullboard.json', JSON.stringify(candidate));
+  commitAll(box, 'chore: expose an untrusted candidate gate');
+  const marker = join(box.dir, 'gate-ran.log');
+  box.env.GATE_MARKER = marker;
+  const submitted = box.run('submit', '1', '--json');
+  assert.equal(submitted.code, 0, `${submitted.out}\n${submitted.err}`);
+  const receipt = JSON.parse(submitted.out);
+  assert.equal(receipt.gate.green, true);
+  assert.equal(receipt.gate.full, true, 'the newly configured gate really runs');
+  assert.equal(readFileSync(marker, 'utf8'), 'accepted-main\n', 'only committed accepted-Main policy supplies the missing gate');
+  const after = JSON.parse(box.run('show', '1', '--json').out);
+  assert.equal(after.item_frozen_digest, before.item_frozen_digest, 'recovery needs no criterion change or refreeze');
+});
+
 test('submit runs the frozen check and affected test only; landing and explicit gate remain full [V4,C7,V16]', (t) => {
   let box = privateRepo(t);
   const checkCommand = 'node -e "require(\'node:fs\').appendFileSync(process.env.ITEM_CHECK_MARKER, \'check\')"';
@@ -1378,4 +1421,45 @@ test('nested TAP child denials require bounded matching fatal details [C7,B26]',
   ]) {
     assert.equal(sandboxBlockedOperation(box.root, tapBareNodeError(options)), null, `${label} stays unclassified`);
   }
+});
+
+/** Project-declared static guards reject unchanged-gate import regressions before costly proof. */
+test('a submit runs the static style checks first [C7]', t => {
+  let box = privateRepo(t);
+  const marker = join(box.dir, 'item-check-ran');
+  box.env.ITEM_CHECK_MARKER = marker;
+  const check = 'node -e "require(\'node:fs\').writeFileSync(process.env.ITEM_CHECK_MARKER, \'ran\')"';
+  put(box.root, 'pullboard.json', JSON.stringify({ gate: 'node -e "process.exit(0)"',
+    affectedTests: 'node --test', submitGate: 'landing', staticChecks: 'node test/static-style-check.mjs',
+    spec: 'SPEC.md', verify: 'any', lease: '2h', shared: ['pullboard.json'] }));
+  put(box.root, 'src/cli.js', "import { join } from 'node:path';\nexport const fixture = join;\n");
+  const oracle = new URL('./import-style-helpers.js', import.meta.url).href;
+  put(box.root, 'test/static-style-check.mjs', [
+    "import { readFileSync } from 'node:fs';",
+    `import { importStyleViolations } from ${JSON.stringify(oracle)};`,
+    "const file = 'src/cli.js';",
+    "const errors = importStyleViolations([{ file, source: readFileSync(file, 'utf8') }]);",
+    "for (const row of errors) console.error(`${row.file}:${row.line}: one import binding per line`);",
+    'process.exit(errors.length ? 1 : 0);',
+  ].join('\n'));
+  commitAll(box);
+  box = builderRepo(box);
+  const added = box.coordinator('add', 'build', 'Static style before proof', '--check', check);
+  assert.equal(added.code, 0, added.err);
+  assert.equal(box.run('claim', '1').code, 0);
+  const candidateConfig = JSON.parse(readFileSync(join(box.root, 'pullboard.json'), 'utf8'));
+  candidateConfig.staticChecks = '';
+  put(box.root, 'pullboard.json', JSON.stringify(candidateConfig));
+  put(box.root, 'src/cli.js', "import { join, resolve } from 'node:path';\nexport const fixture = join;\n");
+  commitAll(box, 'feat(core): expose the missed static guard [G1]');
+  rmSync(marker, { force: true });
+  const submitted = box.run('submit', '1', '--json');
+  assert.notEqual(submitted.code, 0, 'submit must refuse a static import violation before any item proof');
+  assert.match(submitted.out + submitted.err, /src\/cli\.js:1: one import binding per line/u);
+  assert.equal(existsSync(marker), false, 'the frozen item check must not run after an early static refusal');
+  assert.equal(JSON.parse(box.run('show', '1', '--json').out).item_status, 'claimed');
+  const checked = box.run('check', '1', '--yes', '--json');
+  assert.notEqual(checked.code, 0, 'an explicit check must run the same accepted project guard first');
+  assert.match(checked.out + checked.err, /src\/cli\.js:1: one import binding per line/u);
+  assert.equal(existsSync(marker), false, 'neither a submit nor a check bypasses the failed static guard');
 });

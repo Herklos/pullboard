@@ -8,6 +8,68 @@
  * every code raised in src/ has a row here.
  */
 import { RECORDED_GENERIC_NEXT } from './recorded-refusal.js';
+import { Refused } from './refused.js';
+
+/** Describe the queue's actual outstanding reviews and submission age [Q1,V15]. */
+export function reviewQueueLine(ctx, queue, span) {
+  const age = queue.oldestSubmittedAt ? `${span(ctx, queue.oldestSubmittedAt)} ago` : 'none';
+  if (queue.awaitingFirstReview !== undefined) {
+    const released = queue.releasedItems?.map((item) => `#${item.item} released ${item.releases} ${item.releases === 1 ? 'time' : 'times'}: ${item.reason}`).join('; ');
+    return `review queue: ${queue.pending} submitted; ${queue.awaitingFirstReview} waiting for a first reviewer, ${queue.releasedWithoutVerdict} released without a verdict${released ? ` (${released})` : ''}, ${queue.reviewing} agents reviewing; oldest submission ${age}`;
+  }
+  return `review queue: ${queue.pending} awaiting, ${queue.reviewing} agents reviewing; oldest submission ${age}`;
+}
+
+
+/** Name open build lanes without claiming their work as the coordinator [N2,B26]. */
+export function mainLaneWork(items) {
+  const counts = new Map();
+  for (const item of items) {
+    if (item.item_status !== 'open' || item.item_lane === 'coordinator') continue;
+    counts.set(item.item_lane, (counts.get(item.item_lane) ?? 0) + 1);
+  }
+  const lanes = [...counts].sort(([a], [b]) => a.localeCompare(b));
+  if (!lanes.length) return null;
+  return {
+    summary: lanes.map(([lane, count]) => `${count} ${count === 1 ? 'item' : 'items'} open in lane ${lane}`).join('; '),
+    next: `pullboard worktree ${lanes[0][0]} --model "<model name>"`,
+  };
+}
+
+/** Preserve empty-queue refusals while sending a main-checkout newcomer to existing lane work. */
+export function refuseNextIdle(io, reasons, displayed, { minutes, verify, laneWork }) {
+  const waited = minutes ? ` after ${minutes} minutes` : '';
+  const repair = laneWork ? `. ${laneWork.summary}. Start there: ${laneWork.next}`
+    : `${waited}. To keep looking: pullboard next --wait 9${verify ? ' --verify' : ''} (minutes; give the command a ten-minute timeout)`;
+  io.refusal?.(new Refused('NOTHING_FREE', reasons.join('; ') + repair, laneWork?.next));
+  io.err(`pullboard: [NOTHING_FREE] ${displayed.join('; ')}${repair}`);
+  return 1;
+}
+import { existsSync } from 'node:fs';
+import {
+  basename,
+  dirname,
+  join,
+} from 'node:path';
+
+/** Give a separate agent session one pasteable startup line, without claiming or verifying for it [V1,B26]. */
+export function reviewerStartup(root, config, id) {
+  if (!root) return 'ask the coordinator to locate the main checkout for a different agent session; the reviewer must not be the builder';
+  const lanes = Object.entries(config.lanes).filter(([name]) => name !== 'coordinator');
+  const lane = lanes.find(([, value]) => !value.owns.length)?.[0] ?? lanes[0]?.[0];
+  if (!lane) return 'ask the coordinator to declare a reviewer lane for a different agent session; the reviewer must not be the builder';
+  /** Quote the whole path so spaces, apostrophes and dollar signs remain literal. */
+  const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
+  /** Respect the configured placement while avoiding an existing checkout. */
+  const location = number => config.worktrees === 'inside'
+    ? join(root, '.claude', 'worktrees', `reviewer-${number}`)
+    : join(dirname(root), `${basename(root)}-reviewer-${number}`);
+  let number = 1;
+  while (existsSync(location(number))) number++;
+  const path = location(number);
+  const command = `cd ${quote(root)} && mkdir -p ${quote(dirname(path))} && git worktree add --detach ${quote(path)} HEAD && cd ${quote(path)} && pullboard join ${lane} --model "<model name>" && pullboard next --verify${id ? ' ' + id : ''}`;
+  return `Use a different agent session; the reviewer must not be the builder. Run: ${command}`;
+}
 
 /** The coordinator carries every seat's request for a person decision [B26]. */
 export const COORDINATOR_PERSON_REQUEST = 'ask the coordinator to bring it to the person: pullboard shout coordinator "<what is needed>" --decision';
@@ -221,7 +283,11 @@ export const NEXT_STEPS = Object.freeze({
   ITEM_LEASE_LOST: 'read pullboard show <id>; if the item is free, claim it again for a build or reserve it with pullboard next --verify <id> for a review, then retry',
   ITEM_NOT_AVAILABLE: 'read the item from this API\'s board state',
   ITEM_NOT_OPEN: 'hold only open or claimed items; see pullboard list',
-  LANDING_FAILURE_REQUIRED: 'reopen with --note "<test file>: <test name>; merge commit <sha>"',
+  LANDING_FAILURE_REQUIRED: 'reopen with --note "<test file>: <test name>; merge commit <sha>", or with --conflict <file> for each conflicting file when it only conflicts with the trunk',
+  NOT_CONFLICTING: 'merge it; reopen only after a red landing, with --note "<test file>: <test name>; merge commit <sha>"',
+  CONFLICT_FILES: 'name only the files Git reports as conflicting with the trunk: pullboard reopen <id> --conflict <file> [--conflict <file>]',
+  NOT_ACCEPTED: 'reopen a submission with --note "why"; --conflict is for accepted work',
+  BAD_CONFLICT: 'run pullboard reopen <id> --conflict <file> [--conflict <file>] from the main checkout',
   LANE_TAKEN: 'choose a different lane name with pullboard lane add',
   LAND_ADOPT: 'read pullboard resume, then run pullboard land --adopt, or pullboard land when nothing is unfinished',
   LAND_BATCH: 'adopt the recorded batch: pullboard land --adopt',

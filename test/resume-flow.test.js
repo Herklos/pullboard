@@ -524,6 +524,51 @@ test('spec draft adds draft rows and resume names them [N32]', t => {
     'draft preserves every existing status row and inserts in the first section');
 });
 
+test('setup lets agents build starter items while rows wait [S1,B26]', t => {
+  const box = releaseFixture(t, { freshSetup: true, historyBeforeInit: true });
+  const initialized = box.run(box.repo, 'init', '--blueprint', 'web-app');
+  assert.equal(initialized.status, 0, initialized.failure || initialized.stderr);
+  const rows = JSON.parse(box.run(box.repo, 'spec', '--json').stdout).rows;
+  const starters = JSON.parse(box.run(box.repo, 'list', '--all', '--json').stdout).items.sort((a, b) => a.item_id - b.item_id);
+  const first = starters.find(item => !item.item_after);
+  assert.ok(first, 'the bundled blueprint files a starter with no dependency');
+  const initial = JSON.parse(box.run(box.repo, 'resume', '--json').stdout);
+  assert.equal(initial.setup.waitingOn, 'person-approval');
+  assert.equal(initial.setup.buildNow?.item, first.item_id, 'setup names the first starter while rows are undecided');
+  assert.match(initial.setup.meanwhile, /claimed and built now.*person.*parallel/iu);
+  assert.equal(initial.setup.buildNow.command, `pullboard lane add ${first.item_lane} --owns ${first.item_lane}/`,
+    'a proposed lane is declared before an agent tries to join it');
+  const lane = box.run(box.repo, 'lane', 'add', first.item_lane, '--owns', `${first.item_lane}/`);
+  assert.equal(lane.status, 0, lane.failure || lane.stderr);
+  box.git(box.repo, 'add', '-A');
+  box.git(box.repo, 'commit', '-q', '-m', 'chore: commit blueprint setup');
+  const coordinator = box.run(box.repo, 'resume');
+  assert.match(coordinator.stdout, /claimed and built now.*person.*parallel/iu);
+  assert.ok(coordinator.stdout.includes(`#${first.item_id}`), 'prose names the same first starter');
+  const prepared = JSON.parse(box.run(box.repo, 'resume', '--json').stdout);
+  assert.equal(prepared.setup.buildNow.command, `pullboard worktree ${first.item_lane} --model "<model name>"`);
+  box.env.CODEX_THREAD_ID = 'starter-builder-session';
+  const opened = box.run(box.repo, 'worktree', first.item_lane, '--model', 'Starter fixture', '--json');
+  assert.equal(opened.status, 0, opened.failure || opened.stderr);
+  const worktree = JSON.parse(opened.stdout).path;
+  const ready = JSON.parse(box.run(worktree, 'resume', '--json').stdout);
+  assert.equal(ready.setup.waitingOn, 'person-approval', 'approval remains a separate person decision');
+  assert.equal(ready.setup.buildNow.item, first.item_id);
+  assert.equal(ready.setup.buildNow.command, `pullboard claim ${first.item_id}`);
+  assert.equal(ready.next, `pullboard claim ${first.item_id}`, 'the agent is sent to build rather than wait for approval');
+  const claimed = box.run(worktree, 'claim', String(first.item_id));
+  assert.equal(claimed.status, 0, claimed.failure || claimed.stderr);
+  mkdirSync(join(worktree, first.item_lane));
+  writeFileSync(join(worktree, first.item_lane, 'starter.js'), 'export const started = true;\n');
+  box.git(worktree, 'add', `${first.item_lane}/starter.js`);
+  box.git(worktree, 'commit', '-q', '-m', `feat(app): start the requested runner [${first.item_spec_ids}]`);
+  const denied = box.run(worktree, 'spec', 'approve', first.item_spec_ids.split(',')[0]);
+  assert.equal(denied.status, 1, 'building does not give the agent approval rights');
+  assert.match(denied.stderr, /B26_PERSON/u);
+  assert.deepEqual(JSON.parse(box.run(worktree, 'spec', '--json').stdout).rows, rows,
+    'the real claim and build neither approve nor apply any row');
+});
+
 test("resume says setup waits on the person's approval [I1,I2]", async t => {
   const box = releaseFixture(t, { freshSetup: true });
   box.env.AI_AGENT = 'fixture-agent';
@@ -874,4 +919,51 @@ test('an upgraded configured board stays set up before its first resume [I1,I2]'
   assert.equal(complete.boardId, view.boardId);
   assert.equal(complete.setupStartedAt, view.setupStartedAt);
   assert.equal(statSync(join(stateDirectory, 'setup-complete.json')).mode & 0o077, 0);
+});
+
+test('a board building without spec rows is not told to draft the spec first [I10,B26]', async t => {
+  const box = releaseFixture(t, { freshSetup: true, historyBeforeInit: true });
+  const file = join(box.repo, 'pullboard.json');
+  const config = JSON.parse(readFileSync(file, 'utf8'));
+  config.gate = 'true';
+  config.lanes = { app: { owns: ['app/'] } };
+  writeFileSync(file, JSON.stringify(config));
+  mkdirSync(join(box.repo, 'app'));
+  writeFileSync(join(box.repo, 'app/first.txt'), 'first working item\n');
+  box.git(box.repo, 'add', '-A');
+  box.git(box.repo, 'commit', '-q', '-m', 'chore: initialize the private board');
+  const spec = box.run(box.repo, 'spec', '--json');
+  assert.equal(spec.status, 0, spec.failure || spec.stderr);
+  assert.deepEqual(JSON.parse(spec.stdout).rows.filter(row => row.file === 'SPEC.md'), []);
+  const added = box.run(box.repo, 'add', 'app', 'Build the first useful thing', '--criterion', 'The first useful thing works.', '--json');
+  assert.equal(added.status, 0, added.failure || added.stderr || added.stdout);
+  assert.equal(JSON.parse(added.stdout).item.item_spec_ids, '', 'real board items need no spec rows');
+  for (let repeat = 0; repeat < 2; repeat++) {
+    const resumed = box.run(box.repo, 'resume', '--json');
+    assert.equal(resumed.status, 0, resumed.failure || resumed.stderr || resumed.stdout);
+    const card = JSON.parse(resumed.stdout);
+    assert.notEqual(card.setup?.step, 1, 'an active rowless board skips the required spec step');
+    assert.doesNotMatch(card.next, /spec draft|decompose|person.*approv/iu,
+      'the work has an actionable next step without spec approval');
+    if (card.setup) {
+      const specStep = card.setup.steps.find(step => step.number === 1);
+      assert.equal(specStep.done, true);
+      assert.match(specStep.question, /optional/iu);
+      assert.match(specStep.command, /pullboard spec draft/u);
+    }
+    const text = box.run(box.repo, 'resume');
+    assert.equal(text.status, 0, text.failure || text.stderr || text.stdout);
+    assert.match(text.stdout, /spec rows are optional[^\n]*pullboard spec draft/iu,
+      'resume offers the way to add rows without making it the work prerequisite');
+    assert.doesNotMatch(text.stdout, /^next: .*spec draft/mu);
+  }
+  await openSetupView(box);
+  for (let repeat = 0; repeat < 2; repeat++) {
+    const resumed = box.run(box.repo, 'resume', '--json');
+    assert.equal(resumed.status, 0, resumed.failure || resumed.stderr || resumed.stdout);
+    const card = JSON.parse(resumed.stdout);
+    assert.equal(card.setup, null, 'the working board can finish setup without adding rows');
+    assert.doesNotMatch(card.next, /spec draft|decompose|person.*approv/iu,
+      'completed setup keeps directing the coordinator to the actual work');
+  }
 });

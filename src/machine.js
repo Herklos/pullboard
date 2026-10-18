@@ -11,6 +11,9 @@
 
 import { RIGOR_NOTICE_ENGINE } from './rigor-source.js';
 
+/** First writer for withdraw-and-remove milestone behavior; shipment remains engine 45. */
+export const WITHDRAW_MILESTONE_ENGINE = 51;
+
 /** First engine that automatically escalates an item's second rejection at its current route [B15]. */
 export const AUTO_ESCALATE_ENGINE = 50;
 
@@ -18,7 +21,13 @@ export const AUTO_ESCALATE_ENGINE = 50;
 export const STRONG_REJECTION_NOTICE_ENGINE = 54;
 
 /** Executable move semantics, carried by every sealed move and retained during replay [H16]. */
-export const ENGINE_VERSION = Math.max(AUTO_ESCALATE_ENGINE, RIGOR_NOTICE_ENGINE, STRONG_REJECTION_NOTICE_ENGINE);
+export const ENGINE_VERSION = Math.max(
+  AUTO_ESCALATE_ENGINE,
+  RIGOR_NOTICE_ENGINE,
+  WITHDRAW_MILESTONE_ENGINE,
+  STRONG_REJECTION_NOTICE_ENGINE,
+  52,
+);
 
 /**
  * The engine whose relay moves carry seat provenance and verifier standing (#579). It is its own
@@ -169,7 +178,9 @@ export const GUARDS = [
   { id: 'causeWellFormed', refuse: 'BAD_CAUSE', rule: 'a cause, when given, is test:<file>::<title>, refusal:<CODE>, row:<id> or doctrine:<id>', next: 'fix --cause, or leave it out', source: 'board' },
   { id: 'notMerged', refuse: 'ALREADY_MERGED', rule: 'the item has no recorded merge receipt', next: 'a merged item cannot be reopened', source: 'board' },
   { id: 'submissionProofValid', refuse: 'SUBMISSION_PROOF', rule: 'recorded test selection names literal project files and its full-fallback policy', next: 'rerun submit with the current CLI', source: 'board', when: 'engine 38 or later; absent legacy selection remains unknown' },
-  { id: 'landingFailureRecorded', refuse: 'LANDING_FAILURE_REQUIRED', rule: 'a verified item note names the failing test and landing merge commit', next: 'cite the recorded batch, or name the test and merge commit in a manual note', source: 'board' },
+  { id: 'landingFailureRecorded', refuse: 'LANDING_FAILURE_REQUIRED', rule: 'a verified item note names the failing test and landing merge commit', next: 'cite the recorded batch, or name the test and merge commit in a manual note; work that only conflicts with the trunk reopens with --conflict <file> for each conflicting file', source: 'board', when: 'unless the reopen names a trunk conflict' },
+  { id: 'trunkConflicts', refuse: 'NOT_CONFLICTING', alsoRefuses: [{ code: 'CONFLICT_FILES', next: 'name only files Git reports as conflicting with the trunk' }, { code: 'NO_TRUNK', next: 'check out the trunk branch in the main checkout once and run pullboard inbox' }, { code: 'MERGE_CHECK_FAILED', next: 'use Git 2.38 or newer, restore its objects and retry' }], rule: 'the accepted commit no longer merges onto the trunk, and every named file is one that conflicts', next: 'merge it, or reopen after a red landing with --note "<test file>: <test name>; merge commit <sha>"', source: 'cli', when: 'only for reopen --conflict by the coordinator on accepted, unmerged work' },
+  { id: 'conflictAccepted', refuse: 'NOT_ACCEPTED', alsoRefuses: [{ code: 'BAD_CONFLICT', next: 'run pullboard reopen <id> --conflict <file> from the main checkout' }, { code: 'ENGINE_VERSION', next: 'upgrade Pullboard on every linked device before using --conflict' }], rule: 'a trunk conflict reopens an accepted item, names its files and the full trunk commit, and replays only under engine 52 or later', next: 'reopen a submission with --note "why"', source: 'board', when: 'only for reopen --conflict' },
 ];
 
 /** @type {Move[]} */
@@ -208,9 +219,9 @@ export const MOVES = [
   },
   {
     verb: 'reopen', from: ['submitted', 'verified'], to: 'open', by: ['coordinator'], refuse: 'NOT_SUBMITTED',
-    guards: ['joined', 'itemExists', IN_STATE, 'coordinatorOnly', 'noteGiven', 'causeWellFormed', 'notMerged', 'landingFailureRecorded'],
+    guards: ['joined', 'itemExists', IN_STATE, 'coordinatorOnly', 'noteGiven', 'causeWellFormed', 'notMerged', 'landingFailureRecorded', 'trunkConflicts', 'conflictAccepted'],
     sets: ['item_verdict', 'item_verified_by', 'item_owner', 'item_lease_until', 'item_review_by', 'item_review_until'],
-    command: 'pullboard reopen <id> --note "why"',
+    command: 'pullboard reopen <id> --note "why" | --conflict <file> [--conflict <file>]',
   },
   {
     verb: 'escalate', from: ['open', 'claimed'], to: 'open', by: ['agent', 'coordinator'], refuse: 'CLOSED',
