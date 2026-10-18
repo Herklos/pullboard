@@ -1,4 +1,5 @@
 /** Cockpit stats checks, using the shared real-board fixtures [N26]. */
+import { submitFixture } from '../board-submit-fixture.js';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -403,7 +404,7 @@ function stageAcceptedQueue(box, alpha) {
   for (let id = 6; id <= 26; id += 1) {
     earlier(alpha.repo, base, board => store.addItem(board, { by: 'coordinator', lane: 'web', title: 'Waiting accepted item ' + id, specIds: ['G1'], criterion: 'Known accepted queue' }));
     earlier(alpha.repo, base + 60_000, board => store.claim(board, id, { agentId: 'web-1', lane: 'web', leaseMs: 24 * 60 * 60_000, head: commit, freeze: () => ({ text: '{}', digest }) }));
-    earlier(alpha.repo, base + 2 * 60_000, board => store.submit(board, id, { agentId: 'web-1', commit, tree }));
+    earlier(alpha.repo, base + 2 * 60_000, board => submitFixture(board, id, { agentId: 'web-1', commit, tree }));
     earlier(alpha.repo, base + 3 * 60_000, board => store.reserveReview(board, id, { agentId: 'tests-1', leaseMs: 24 * 60 * 60_000, policy: 'any' }));
     earlier(alpha.repo, base + 4 * 60_000, board => store.verify(board, id, { agentId: 'tests-1', decision: 'ACCEPT', note: 'Private accepted queue', head: commit, digest, policy: 'any' }));
     if (id === 26) earlier(alpha.repo, base + 104 * 60_000, board => store.merged(board, id, { agentId: 'coordinator', commit }));
@@ -426,7 +427,7 @@ function stageFlowBoard(box, alpha) {
   /** Claim one item with a private frozen criterion and a lease that outlasts the observation. */
   const claim = (id, minute) => at(minute, board => store.claim(board, id, { agentId: builder(id), lane: 'web', leaseMs: 24 * 60 * 60_000, head: commit, freeze: () => ({ text: '{}', digest }) }));
   /** Record the submitted fixture commit through the actual lifecycle writer. */
-  const submit = (id, minute) => at(minute, board => store.submit(board, id, { agentId: builder(id), commit, tree }));
+  const submit = (id, minute) => at(minute, board => submitFixture(board, id, { agentId: builder(id), commit, tree }));
   /** Reserve and accept with the private verifier so the review interval is measured. */
   const review = (id, start, end) => {
     at(start, board => store.reserveReview(board, id, { agentId: 'tests-1', leaseMs: 24 * 60 * 60_000, policy: 'any' }));

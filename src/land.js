@@ -36,6 +36,7 @@ import {
 } from './gate.js';
 import { laneOf } from './lanes.js';
 import { Refused } from './refused.js';
+import { landingFileTimes } from './submit-invariants.js';
 import {
   staleVerdictRefusal,
   verdictProjector,
@@ -51,7 +52,7 @@ function testHash(root, file) {
 }
 
 /** Derive failing test identities from TAP names and source locations, refusing unknown paths. */
-export function landingFailures(output, root) {
+export function landingFailures(output, root, { excludeCancelled = false } = {}) {
   const failures = [];
   let active = null;
   for (const line of output.split('\n')) {
@@ -67,8 +68,9 @@ export function landingFailures(output, root) {
       const file = isAbsolute(path) ? relative(root, path) : path.replace(/^\.\//u, '');
       if (file && !file.startsWith('../') && !file.includes('\\')) active.file = file;
     }
+    if (excludeCancelled && active && /^\s*failureType:\s*['"]?(?:cancelledByParent|subtestsFailed)['"]?\s*$/u.test(line)) active.omit = true;
   }
-  const unique = new Map(failures.map((entry) => [`${entry.file}\0${entry.name}`, entry]));
+  const unique = new Map(failures.filter(entry => !entry.omit).map(({ file, name }) => [`${file}\0${name}`, { name, file }]));
   return [...unique.values()];
 }
 
@@ -239,6 +241,7 @@ function coveredFailures(state, gate) {
 /** Run one full landing gate and retain its complete output under this batch's immutable phase path. */
 async function gateGroup(state, label) {
   const tree = headTree(state.batch.root);
+  const commit = headCommit(state.batch.root);
   const cached = state.gates.get(tree);
   if (cached && (completeGate(cached) || !coveredFailures(state, cached))) return cached;
   const directory = join(dirname(state.batch.root), 'logs');
@@ -248,11 +251,20 @@ async function gateGroup(state, label) {
   const gate = await runGate(state.batch.root, state.config, { trustStamp: false, landing: true, agent: 'coordinator', onWait: state.onWait, stages: true, waivers: liveWaiverProjection(state.board) });
   copyFileSync(gate.log, logPath);
   if (gate.profilePath) copyFileSync(gate.profilePath, `${logPath}.profile.json`);
+  if (headCommit(state.batch.root) !== commit || headTree(state.batch.root) !== tree || !isClean(state.batch.root)) {
+    throw new Refused('LAND_SOURCE_CHANGED', `the landing source changed while the gate ran; inspect ${logPath} and restore the recorded batch before adopting`);
+  }
   const result = { ...gate, failures: landingFailures(gate.output, state.batch.root), accounted: accountedFailures(gate, state.batch.root), complete: completeGate(gate),
     requiresGreen: Boolean(cached && !completeGate(cached)), tree, logPath };
   state.gates.set(tree, result);
+  const evidence = state.batch.invariantEvidence ?? { version: 1, gates: [], diagnostics: [] };
+  const tested = { commit, isGreen: gate.isGreen && completeGate(gate),
+    submissions: state.batch.items.map(({ id, commit }) => ({ id, commit })),
+    failures: [...new Set(landingFailures(gate.output, state.batch.root, { excludeCancelled: true }).map(failure => failure.file).filter(Boolean))],
+    fileTimes: landingFileTimes(state.batch.root, gate.profile) };
   await save(state, { gateResults: [...state.gates.values()].map(({ tree: testedTree, isGreen, failures, accounted, complete, requiresGreen, logPath: log }) =>
-    ({ tree: testedTree, isGreen, failures, accounted: accounted ?? null, complete: complete ?? null, requiresGreen: Boolean(requiresGreen), logPath: log })) });
+    ({ tree: testedTree, isGreen, failures, accounted: accounted ?? null, complete: complete ?? null, requiresGreen: Boolean(requiresGreen), logPath: log })),
+    invariantEvidence: { ...evidence, gates: [...evidence.gates, tested] } });
   return result;
 }
 
@@ -265,11 +277,19 @@ async function diagnose(state, failures) {
     if (state.diagnosed.has(file)) { if (state.diagnosed.get(file)) flakes.push(file); continue; }
     const runner = state.config.affectedTests || (/\.[cm]?js$/u.test(file) ? 'node --test' : null);
     if (!runner) throw new Refused('LAND_DIAGNOSTIC', `no runner can isolate ${file}; configure affectedTests for the project’s test runner`);
+    const commit = headCommit(state.batch.root);
+    const tree = headTree(state.batch.root);
     const result = await withGateSlot(state.batch.root, (lease) => runProfiledShell(state.batch.root, `${runner} ${quote(file)}`, {
       waitMs: lease.waitMs, artifactDirectory: dirname(state.batch.logPath), artifactPrefix: 'diagnostic', persistLog: true, pipefail: true, gateLease: lease,
     }), { landing: true, browser: true, agent: 'coordinator', kind: 'land-diagnostic', onWait: state.onWait });
+    if (headCommit(state.batch.root) !== commit || headTree(state.batch.root) !== tree || !isClean(state.batch.root)) {
+      throw new Refused('LAND_SOURCE_CHANGED', `the landing source changed during its whole-file diagnostic; inspect ${result.logPath} before adopting`);
+    }
     state.diagnosed.set(file, result.isGreen);
-    await save(state, { diagnostics: [...state.diagnosed].map(([test, isGreen]) => ({ test, isGreen })) });
+    const evidence = state.batch.invariantEvidence ?? { version: 1, gates: [], diagnostics: [] };
+    await save(state, { diagnostics: [...state.diagnosed].map(([test, isGreen]) => ({ test, isGreen })),
+      invariantEvidence: { ...evidence, diagnostics: [...evidence.diagnostics,
+        { test: file, isGreen: result.isGreen, commit, wallMs: result.profile?.wallMs ?? null }] } });
     if (result.isGreen) flakes.push(file);
   }
   return flakes;

@@ -2,6 +2,7 @@
  * End to end on real repos: the CLI runs as its own process, git runs the installed hooks, and
  * worktrees are real worktrees (B1–B3, B6, V3, V4, V7, L3, L4, C3, I1, I2, P2).
  */
+import { submitFixture } from './board-submit-fixture.js';
 import assert from 'node:assert/strict';
 import { runFixtureExecFile as execFileSync, startFixtureChild as spawn, runFixtureChild as spawnSync } from './fixture-child.js';
 import {
@@ -54,7 +55,7 @@ test('the blind gate-bypass repro refuses submit and accept, and doctor audits p
 
   // Model a historical unchecked receipt using the low-level engine in this private fixture.
   const board = store.openBoard(join(box.repo, '.git/pullboard/board.sqlite'));
-  try { store.submit(board, 1, { agentId: 'web-1', commit, tree: box.git(box.web, 'rev-parse', 'HEAD^{tree}'), policyCommit: original.item_claim_head }); }
+  try { submitFixture(board, 1, { agentId: 'web-1', commit, tree: box.git(box.web, 'rev-parse', 'HEAD^{tree}'), policyCommit: original.item_claim_head }); }
   finally { store.closeBoard(board); }
   box.git(box.repo, 'update-ref', 'refs/pullboard/items/1/' + commit.slice(0, 12), commit);
   const review = join(box.dir, 'review');
@@ -183,7 +184,7 @@ test('accept independently refuses a historically unchecked foreign submission [
   writeFileSync(join(box.web, 'coordinator.txt'), 'unauthorized');
   const commit = attackCommit(box, box.web);
   const board = store.openBoard(join(box.repo, '.git/pullboard/board.sqlite'));
-  try { store.submit(board, 1, { agentId: 'web-1', commit, tree: box.git(box.web, 'rev-parse', 'HEAD^{tree}') }); }
+  try { submitFixture(board, 1, { agentId: 'web-1', commit, tree: box.git(box.web, 'rev-parse', 'HEAD^{tree}') }); }
   finally { store.closeBoard(board); }
   const review = join(box.dir, 'foreign-review');
   box.git(box.repo, 'worktree', 'add', '-q', '--detach', review, commit);
@@ -207,7 +208,7 @@ test('replacement refs cannot conceal the real submitted foreign paths [L3,V4,M3
   assert.equal(submitted.code, 1);
   assert.equal(JSON.parse(submitted.out).error.code, 'OUTSIDE_LANE');
   const board = store.openBoard(join(box.repo, '.git/pullboard/board.sqlite'));
-  try { store.submit(board, 1, { agentId: 'web-1', commit, tree: 'synthetic unchecked tree' }); }
+  try { submitFixture(board, 1, { agentId: 'web-1', commit, tree: 'synthetic unchecked tree' }); }
   finally { store.closeBoard(board); }
   const review = join(box.dir, 'replacement-review');
   box.git(box.repo, 'worktree', 'add', '-q', '--detach', review, commit);

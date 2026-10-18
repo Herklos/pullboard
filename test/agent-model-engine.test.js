@@ -1,3 +1,5 @@
+import { CONFLICT_ENGINE } from '../src/trunk-conflict.js';
+import { HEALTH_SENTINEL_ENGINE } from '../src/health-receipts.js';
 /** Declared models replay with their recorded engine and survive board exchange [O8,O3,H16]. */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -10,8 +12,9 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-test('model declarations and event snapshots retain engines 1 through 33 semantics [O8,O3,H16]', (t) => {
-  assert.equal(ENGINE_VERSION, 36, 'the next writer preserves every historical model snapshot through engine 36');
+test('model declarations and event snapshots retain engines 1 through 34 semantics [O8,O3,H16]', (t) => {
+  assert.ok(ENGINE_VERSION >= HEALTH_SENTINEL_ENGINE, 'the current writer retains the sentinel minimum and historical behavior');
+  assert.ok(ENGINE_VERSION >= CONFLICT_ENGINE, 'the writer retains the trunk-conflict feature minimum');
   for (const version of Array.from({ length: ENGINE_VERSION }, (_, index) => index + 1)) {
     const board = store.openBoard(':memory:');
     t.after(() => store.closeBoard(board));

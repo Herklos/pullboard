@@ -2,6 +2,7 @@
  * End to end on real repos: the CLI runs as its own process, git runs the installed hooks, and
  * worktrees are real worktrees (B1–B3, B6, V3, V4, V7, L3, L4, C3, I1, I2, P2).
  */
+import { submitFixture } from './board-submit-fixture.js';
 import assert from 'node:assert/strict';
 import { runFixtureExecFile as execFileSync, startFixtureChild as spawn, runFixtureChild as spawnSync, runFixtureChild } from './fixture-child.js';
 import {
@@ -492,7 +493,7 @@ test('next --verify can reserve a named submitted review and default to the lowe
         agentId: 'web-1', lane: 'web', leaseMs: 60 * 60_000,
         freeze: (item) => ({ text: item.item_title, digest: `digest:${item.item_title}` }),
       });
-      store.submit(board, id, { agentId: 'web-1', commit, tree });
+      submitFixture(board, id, { agentId: 'web-1', commit, tree });
       return id;
     };
     first = submit('First review');

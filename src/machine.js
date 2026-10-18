@@ -10,7 +10,7 @@
  */
 
 /** Executable move semantics, carried by every sealed move and retained during replay [H16]. */
-export const ENGINE_VERSION = 36;
+export const ENGINE_VERSION = 47;
 
 /** The engine at which a reject, reopen or person fact can carry a cause key (#713); older moves replay unchanged [D1,H16]. */
 export const CAUSE_ENGINE = 30;
@@ -154,9 +154,10 @@ export const GUARDS = [
   { id: 'noteGiven', refuse: 'NOTE_REQUIRED', rule: 'the move carries a note: what failed, what was tried, or why', next: '--note "..." or --note-file <file>', source: 'board' },
   { id: 'causeWellFormed', refuse: 'BAD_CAUSE', rule: 'a cause, when given, is test:<file>::<title>, refusal:<CODE>, row:<id> or doctrine:<id>', next: 'fix --cause, or leave it out', source: 'board' },
   { id: 'notMerged', refuse: 'ALREADY_MERGED', rule: 'the item has no recorded merge receipt', next: 'a merged item cannot be reopened', source: 'board' },
+  { id: 'submissionProofValid', refuse: 'SUBMISSION_PROOF', rule: 'recorded test selection names literal project files and its full-fallback policy', next: 'rerun submit with the current CLI', source: 'board', when: 'engine 38 or later; absent legacy selection remains unknown' },
   { id: 'landingFailureRecorded', refuse: 'LANDING_FAILURE_REQUIRED', rule: 'a verified item note names the failing test and landing merge commit', next: 'cite the recorded batch, or name the test and merge commit in a manual note; work that only conflicts with the trunk reopens with --conflict <file> for each conflicting file', source: 'board', when: 'unless the reopen names a trunk conflict' },
   { id: 'trunkConflicts', refuse: 'NOT_CONFLICTING', alsoRefuses: [{ code: 'CONFLICT_FILES', next: 'name only files Git reports as conflicting with the trunk' }, { code: 'NO_TRUNK', next: 'check out the trunk branch in the main checkout once and run pullboard inbox' }, { code: 'MERGE_CHECK_FAILED', next: 'use Git 2.38 or newer, restore its objects and retry' }], rule: 'the accepted commit no longer merges onto the trunk, and every named file is one that conflicts', next: 'merge it, or reopen after a red landing with --note "<test file>: <test name>; merge commit <sha>"', source: 'cli', when: 'only for reopen --conflict by the coordinator on accepted, unmerged work' },
-  { id: 'conflictAccepted', refuse: 'NOT_ACCEPTED', alsoRefuses: [{ code: 'BAD_CONFLICT', next: 'run pullboard reopen <id> --conflict <file> from the main checkout' }, { code: 'ENGINE_VERSION', next: 'upgrade Pullboard on every linked device before using --conflict' }], rule: 'a trunk conflict reopens an accepted item, names its files and the full trunk commit, and replays only under engine 36 or later', next: 'reopen a submission with --note "why"', source: 'board', when: 'only for reopen --conflict' },
+  { id: 'conflictAccepted', refuse: 'NOT_ACCEPTED', alsoRefuses: [{ code: 'BAD_CONFLICT', next: 'run pullboard reopen <id> --conflict <file> from the main checkout' }, { code: 'ENGINE_VERSION', next: 'upgrade Pullboard on every linked device before using --conflict' }], rule: 'a trunk conflict reopens an accepted item, names its files and the full trunk commit, and replays only under engine 47 or later', next: 'reopen a submission with --note "why"', source: 'board', when: 'only for reopen --conflict' },
 ];
 
 /** @type {Move[]} */
@@ -173,7 +174,7 @@ export const MOVES = [
   { verb: 'lapse', from: ['claimed'], to: 'open', by: ['clock'], guards: [], when: 'its lease runs out' },
   {
     verb: 'submit', from: ['claimed'], to: 'submitted', by: ['agent', 'coordinator'], refuse: 'NOT_YOURS',
-    guards: ['joined', 'itemExists', IN_STATE, 'isHolder', 'correctionRefrozen', 'checkProvesSomething', 'criterionUnchanged', 'treeClean', 'nothingUntracked', 'hasCommit', 'withinLane', 'trunkMergeClean', 'noUnverifiedStack', 'doctrineHolds', 'gateConfigured', 'queuedItemLease', 'gateGreen', 'treeStillDuringGate', 'childrenDone', 'headIsNew'],
+    guards: ['joined', 'itemExists', IN_STATE, 'isHolder', 'correctionRefrozen', 'checkProvesSomething', 'criterionUnchanged', 'treeClean', 'nothingUntracked', 'hasCommit', 'withinLane', 'trunkMergeClean', 'noUnverifiedStack', 'doctrineHolds', 'gateConfigured', 'queuedItemLease', 'gateGreen', 'treeStillDuringGate', 'submissionProofValid', 'childrenDone', 'headIsNew'],
     sets: ['item_built_by', 'item_commit'], command: 'pullboard submit <id>',
   },
   {

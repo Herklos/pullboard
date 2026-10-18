@@ -1,4 +1,5 @@
 /** Rigor: a repeated failure cause is noticed from structured fields, never from notes [D1,V1]. */
+import { submitFixture } from './board-submit-fixture.js';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
@@ -89,7 +90,7 @@ function history(file) {
   const submit = (id, at = null) => {
     store.claim(board, id, { agentId: builder, lane: 'app', leaseMs: 2 * HOUR, freeze });
     const sha = at ?? commit();
-    store.submit(board, id, { agentId: builder, commit: sha, tree: `tree-${sha}` });
+    submitFixture(board, id, { agentId: builder, commit: sha, tree: `tree-${sha}` });
     return sha;
   };
   /** Reject the current submission, naming a cause key or none. */

@@ -11,6 +11,8 @@ import { RECORDED_GENERIC_NEXT } from './recorded-refusal.js';
 
 /** @type {Readonly<Record<string, string>>} */
 export const NEXT_STEPS = Object.freeze({
+  HEALTH_FINDINGS: 'run pullboard health to read the current findings, then run pullboard resume to capture a fresh observation',
+  HEALTH_SCAN_STALE: 'run pullboard resume again to scan the current board before posting sentinel notices',
   A5_GRAMMAR_VERSION: 'upgrade Pullboard: npm install -g pullboard@latest',
   AGENT_SESSION: 'run pullboard takeover from the agent session that should own this checkout',
   ALREADY_ANSWERED: 'read the answer with pullboard inbox; ask again with a new pullboard shout <to> "<text>" --decision',
@@ -173,6 +175,8 @@ export const NEXT_STEPS = Object.freeze({
   LANE_TAKEN: 'choose a different lane name with pullboard lane add',
   LAND_ADOPT: 'read pullboard resume, then run pullboard land --adopt, or pullboard land when nothing is unfinished',
   LAND_BATCH: 'adopt the recorded batch: pullboard land --adopt',
+  LAND_EVIDENCE: 'preserve earlier gate and diagnostic evidence, then pullboard land --adopt',
+  LAND_SOURCE_CHANGED: 'inspect the recorded landing logs and restore the batch source before pullboard land --adopt',
   LAND_DIAGNOSTIC: 'read the landing log the message names, and make the test reporter print file names',
   LAND_DIRTY: 'inspect the landing worktree, commit or remove its edits, then pullboard land --adopt',
   LAND_FLAKE: 'fix the flaky test, or ask the person for a waiver: pullboard land --waive <test> --until <date> --reason "why"',
@@ -392,6 +396,7 @@ export const NEXT_STEPS = Object.freeze({
   STALE_VERDICT: 'merge current main into the submitted commit, commit a clean composition, then ask another agent to re-review it before landing',
   STACKED_ON_UNVERIFIED: 'wait for the earlier item to be accepted, or rebuild on main without its commits',
   STALE_ROW_DECISION: 'ask the person to approve the current row again in pullboard view',
+  SUBMISSION_PROOF: 'rerun pullboard submit <id> with the current CLI so its selected files and fallback are recorded',
   TOKENS_NOT_AVAILABLE: 'manage agent tokens in pullboard view or the signed-in relay account',
   TOKEN_NOT_OWNED: 'name a token id from pullboard relay tokens',
   TOO_LARGE: 'open the file in your editor instead',

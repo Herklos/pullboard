@@ -12,7 +12,7 @@ import { ENGINE_VERSION } from './machine.js';
 import { Refused } from './refused.js';
 
 /** The engine whose reopen may carry a trunk conflict; older engines refuse it before replay. */
-export const CONFLICT_ENGINE = 36;
+export const CONFLICT_ENGINE = 47;
 
 /** The label an item carries from a conflict reopen until its next verdict. */
 export const MAIN_MERGE_LABEL = 'needs main merge';
