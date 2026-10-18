@@ -17,6 +17,9 @@ import { refusePersonMove } from '../src/mcp.js';
 import { CAUSE_ENGINE, ENGINE_VERSION } from '../src/machine.js';
 import { rigorReport } from '../src/rigor.js';
 import { readRigorSource, rigorSource, RIGOR_NOTICE_ENGINE } from '../src/rigor-source.js';
+import { loadConfig } from '../src/config.js';
+import { loadDoctrine } from '../src/doctrine.js';
+import { frozenCriterion, loadSpec } from '../src/spec.js';
 import { unpackRelease } from './release-archive.js';
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
@@ -77,12 +80,12 @@ function refused(result, code, why) {
  * Build board history straight through the board's own moves on the real SQLite file: a builder
  * and a reviewer in one lane, and helpers to submit, reject and land-reopen an item.
  */
-function history(file) {
+function history(file, { freeze: suppliedFreeze } = {}) {
   const board = store.openBoard(file);
   const builder = store.register(board, { lane: 'app', path: '/fixture/app-1', model: 'Builder model' });
   const reviewer = store.register(board, { lane: 'app', path: '/fixture/app-2', model: 'Reviewer model' });
   /** Freeze the item's title, as the real freezer digests its criterion. */
-  const freeze = (item) => ({ text: item.item_title, digest: `digest:${item.item_title}` });
+  const freeze = suppliedFreeze ?? ((item) => ({ text: item.item_title, digest: `digest:${item.item_title}` }));
   let next = 0;
   /** A fresh 40-character commit id for each submission. */
   const commit = () => (++next).toString(16).padStart(40, '0');
@@ -96,12 +99,12 @@ function history(file) {
   /** Reject the current submission, naming a cause key or none. */
   const reject = (id, cause, note = 'the named test failed at this commit') => store.verify(board, id, {
     agentId: reviewer, decision: 'REJECT', reason: 'TEST_FAILURE', note, ...(cause === undefined ? {} : { cause }),
-    head: store.getItem(board, id).item_commit, digest: `digest:${store.getItem(board, id).item_title}`, policy: 'any',
+    head: store.getItem(board, id).item_commit, digest: store.getItem(board, id).item_frozen_digest, policy: 'any',
   });
   /** Accept, then reopen after a red landing whose failing test the note names in the landing format. */
   const landReopen = (id, test) => {
     store.verify(board, id, { agentId: reviewer, decision: 'ACCEPT', note: 'broke the fix; its test failed; restored it',
-      head: store.getItem(board, id).item_commit, digest: `digest:${store.getItem(board, id).item_title}`, policy: 'any' });
+      head: store.getItem(board, id).item_commit, digest: store.getItem(board, id).item_frozen_digest, policy: 'any' });
     return store.reopen(board, id, { agentId: 'coordinator', note: `${test.file}: ${test.name}; merge commit ${MERGE}` });
   };
   /** Add one item in the fixture lane. */
@@ -121,10 +124,16 @@ function noticeProof(box) {
   return { red, green: box.git('rev-parse', 'HEAD') };
 }
 
+/** Resume reads a real frozen criterion, unlike the small board-only history fixture. */
+function noticeHistory(box) {
+  const config = loadConfig(box.repo);
+  return history(box.file, { freeze: item => frozenCriterion(loadSpec(box.repo, config), item, loadDoctrine(box.repo, config)) });
+}
+
 test('a repeated cause tells the coordinator once [D1,D3]', () => {
   const box = freshBoard();
   const proof = noticeProof(box);
-  const historyBox = history(box.file);
+  const historyBox = noticeHistory(box);
   const cause = 'doctrine:C3';
   const ids = ['First', 'Second', 'Third', 'After decline', 'Still quiet'].map(historyBox.add);
   const notices = () => store.allShouts(historyBox.board).filter(shout => shout.shout_from === 'rigor');
@@ -162,7 +171,7 @@ test('a repeated cause tells the coordinator once [D1,D3]', () => {
 test('a Rigor draft reaches Needs-you with its proof [D1,D3,S1,P6]', () => {
   const box = freshBoard();
   const proof = noticeProof(box);
-  const historyBox = history(box.file);
+  const historyBox = noticeHistory(box);
   const ids = ['Product first', 'Product second'].map(historyBox.add);
   for (const id of ids) { historyBox.submit(id, proof.red); historyBox.reject(id, 'row:G1'); }
   historyBox.close();
