@@ -25,7 +25,8 @@ export function roadmapBlock(item, context = {}) {
   const parts = waits.map((w) => '#' + w.id + ' (' + w.status + ')');
   const label = 'Blocked: ' + [parts.length ? 'waits on ' + parts.join(', ') : '', hold ? 'lane ' + item.lane + ' held' : ''].filter(Boolean).join('; ');
   const name = context.name || ((id) => id);
-  const holder = item.claim?.by || item.builtBy || null;
+  // Only a live claim holds an item; a sent-back item's past builder holds nothing (#605 review).
+  const holder = item.claim?.by || null;
   // A send-back note's first line, the way the Items list shows it.
   const sentBack = item.verdict && item.verdict.decision === 'REJECT' && item.verdict.note ? String(item.verdict.note).split('\n')[0].trim() : '';
   const address = context.address || ((id) => '#items/' + id);

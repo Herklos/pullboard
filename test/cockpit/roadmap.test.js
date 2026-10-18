@@ -849,7 +849,12 @@ test('a blocked roadmap item shows its dot and expands to say why [N26]', { time
   box.run(alpha.repo, 'add', 'web', 'Base work', '--specs', 'G1', '--criterion', 'renders');
   box.run(alpha.repo, 'add', 'web', 'Waits on base', '--specs', 'G1', '--criterion', 'renders', '--after', '1');
   box.run(alpha.repo, 'add', 'web', 'Free work', '--specs', 'G1', '--criterion', 'renders');
-  box.run(alpha.repo, 'milestone', 'add', 'Next', '--items', '1,2,3');
+  // A sent-back item that waits on #1: built once by web-1, whose claim ended with the reject (#605 review).
+  box.run(alpha.repo, 'add', 'web', 'Sent back once', '--specs', 'G1', '--criterion', 'renders');
+  build(box, alpha, 4, 'sent-back.html');
+  sendBack(box, alpha, 4, 'the heading is missing');
+  box.run(alpha.repo, 'edit', '4', '--after', '1', '--reason', 'it waits on the base work');
+  box.run(alpha.repo, 'milestone', 'add', 'Next', '--items', '1,2,3,4');
   const view = await startView(box);
   const profile = mkdtempSync(join(tmpdir(), 'pullboard-blocked-roadmap-chrome-'));
   let chrome;
@@ -888,6 +893,13 @@ test('a blocked roadmap item shows its dot and expands to say why [N26]', { time
     await chrome.waitFor("!document.querySelector('[data-pane=roadmap]').hidden");
     await press(chrome, "[...document.querySelectorAll('#roadmap .milestone-item.blocked')].find((row) => row.querySelector('.id').textContent === '#2')");
     await chrome.waitFor("!document.querySelector('#roadmap .milestone-why:not([hidden])')");
+    // The sent-back item: nobody holds it now, though web-1 built it; its latest send-back note shows.
+    await press(chrome, "[...document.querySelectorAll('#roadmap .milestone-item.blocked')].find((row) => row.querySelector('.id').textContent === '#4')");
+    await chrome.waitFor("document.querySelector('#roadmap .milestone-why:not([hidden])')");
+    const sent = Object.fromEntries((await read()).map((row) => [row.id, row]));
+    assert.match(sent['#4'].why, /state.*open, nobody holds it/, `a sent-back item names no holder: ${sent['#4'].why}`);
+    assert.doesNotMatch(sent['#4'].why, /held by/, 'its past builder is never shown as holding it');
+    assert.match(sent['#4'].why, /the heading is missing/, 'its latest send-back note shows');
     assert.deepEqual(chrome.exceptions, [], 'the blocked roadmap raises no uncaught page exception');
   } finally {
     if (chrome) await closeSnapshotChrome(chrome);
