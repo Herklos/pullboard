@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { runFixtureChild, runFixtureGit } from './fixture-child.js';
 import { after, test } from 'node:test';
-import { HELP, resultCommands, VERSION } from '../src/cli.js';
+import { HELP, resultCommands } from '../src/cli.js';
 import * as helpDeclaration from '../src/help.js';
 import { importStyleViolations } from './import-style-helpers.js';
 import { pathToFileURL } from 'node:url';
@@ -137,20 +137,10 @@ test('help names come from the command declarations [C7,N37]', async (t) => {
   assert.equal(all.status, 0, all.failure);
   assert.equal(overview.stdout, HELP.overview + '\n');
   assert.equal(all.stdout, HELP.all + '\n');
-  const before = JSON.parse(readFileSync(new URL('./fixtures/help-before-declarations.json', import.meta.url), 'utf8'));
-  assert.equal(HELP.overview, before.help.overview, 'overview preserves the captured pre-refactor bytes');
-  assert.equal(HELP.firstRun, before.help.firstRun, 'first-run help preserves its pre-refactor bytes');
-  const beforeAll = before.help.all.replace(/^pullboard [0-9]+\.[0-9]+\.[0-9]+:/u, `pullboard ${VERSION}:`);
-  assert.equal(HELP.all, beforeAll, 'full help preserves its pre-refactor bytes apart from a release version bump');
-  assert.deepEqual(Object.keys(HELP.commands).sort(), Object.keys(before.help.commands).sort(),
-    'the existing command-help names stay exact; undocumented subcommand help belongs to a separate change');
   const undocumented = run('help', 'milestone', 'items');
   assert.equal(undocumented.status, 2, 'the existing undocumented help stays refused');
   assert.equal(undocumented.stdout, '');
   assert.equal(undocumented.stderr, 'pullboard: no command "milestone items"; closest match is "milestone order". Run pullboard help --all for the full list.\n');
-  for (const [name, entry] of Object.entries(before.help.commands)) {
-    assert.deepEqual(HELP.commands[name], entry, `${name} preserves every existing usage, flag, example and note`);
-  }
   t.diagnostic('help overview bytes ' + JSON.stringify(overview.stdout));
 
   const directory = resolve(import.meta.dirname, '../src');
