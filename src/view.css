@@ -919,6 +919,31 @@ code.inline.long { white-space: break-spaces; overflow-wrap: anywhere; }
 .star-dismiss:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 @media (pointer: coarse) { .star-dismiss { width: 44px; height: 44px; } }
 
+.milestone-targetline { margin: 0 14px 10px; color: var(--ink-muted); font-size: 13px; }
+.roadmap-shipped-commit { flex: none; color: var(--ink-muted); font: 11px var(--mono); }
+
+/* Approved milestone summary: all quantities are supplied by the roadmap API [N26]. */
+.roadmap-has-summary > .milestone-head { align-items: flex-start; }
+.roadmap-has-summary > .milestone-head h2 { flex: 1; min-width: 0; font-size: 18px; line-height: 1.35; }
+.roadmap-left { flex: none; display: grid; gap: 4px; margin-left: auto; text-align: right; white-space: nowrap; }
+.roadmap-left > b { font-size: 19px; font-weight: 600; line-height: 1.1; }
+.roadmap-left > span { color: var(--ink-muted); font: 12px var(--mono); }
+.roadmap-summary { margin: 0 14px 14px; min-width: 0; }
+.roadmap-summary-bar { display: block; height: 10px; margin: 10px 0; border-radius: 5px; }
+.roadmap-summary-swatch { display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; }
+.roadmap-summary .landed { background: var(--accent); fill: var(--accent); }
+.roadmap-summary .landing { background: var(--accent-strong); fill: var(--accent-strong); }
+.roadmap-summary .review { background: var(--violet); fill: var(--violet); }
+.roadmap-summary .building { background: var(--blue); fill: var(--blue); }
+.roadmap-summary .waiting { background: var(--ink-faint); fill: var(--ink-faint); }
+.roadmap-summary .held { background: var(--warn); fill: var(--warn); }
+.roadmap-summary-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; color: var(--ink-muted); font-size: 13px; }
+.roadmap-summary-legend b { font-weight: 600; color: var(--ink); }
+.roadmap-summary-meta { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); color: var(--ink-muted); font-size: 13px; }
+.roadmap-summary-needs { margin-top: 12px; padding: 8px 12px; border-radius: 8px; background: var(--warn-soft); color: var(--warn); font-size: 13px; overflow-wrap: anywhere; }
+.roadmap-summary-needs a { color: inherit; }
+.shipped-one > .milestone-head h2 { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* Roadmap title references keep their colour and tooltip while the whole row expands in place. */
 .milestone-item span.ref { color: var(--accent-strong); display: inline-block; line-height: inherit; font: inherit; }
 
