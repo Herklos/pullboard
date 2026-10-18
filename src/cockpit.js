@@ -428,12 +428,16 @@ async function connectLocal() {
     await new Promise((painted) => requestAnimationFrame(() => requestAnimationFrame(painted)));
   }
   let reply;
-  try { reply = await fetch(base + '/local/protocol', { signal: AbortSignal.timeout(3000), credentials: 'omit', redirect: 'error' }); }
-  catch {
-    // One discovery request is all this page makes of this device (P5), so a view too old to answer it reads as none,
-    // and the state names that case in its hint.
-    localNote('not-running');
-    return 'unreachable';
+  for (let attempt = 1; !reply; attempt += 1) {
+    try { reply = await fetch(base + '/local/protocol', { signal: AbortSignal.timeout(3000), credentials: 'omit', redirect: 'error' }); }
+    catch (error) {
+      // A read that ran out of time may have met a slow first answer or a browser prompt still open, so it asks once
+      // more (#786). Otherwise the page asks nothing else of this device (P5): a refused or unanswered view reads as
+      // none, and the state names that case in its hint.
+      if (attempt < 2 && error?.name === 'TimeoutError') continue;
+      localNote('not-running');
+      return 'unreachable';
+    }
   }
   let protocol = null;
   try { protocol = await reply.json(); } catch { /* not this protocol */ }
