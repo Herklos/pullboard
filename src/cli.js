@@ -71,6 +71,7 @@ import {
   AGENT_SESSION_IDS,
   agentSessionDigest,
   requirePersonChannel,
+  personShout,
 } from './person.js';
 import {
   bindLocalSession,
@@ -3237,18 +3238,6 @@ function sayReviewOffer(ctx, found) {
   else ctx.io.say('no build is currently free in your lane; this review is available');
 }
 
-/**
- * Whether a shout is the person's own: a relay person request, or the local view acting as the
- * coordinator (N26, B26). The view acting as a named agent, or an agent shell as the coordinator,
- * still speaks as that agent.
- *
- * @param {any} io
- * @param {{ id: string }} me
- * @returns {boolean}
- */
-function personShout(io, me) {
-  return io.personRequest?.phase === 'execute' || (io.personChannel === 'view' && me.id === COORDINATOR);
-}
 
 /**
  * A review search that found nothing while another agent is still building: say so, with the wait,
