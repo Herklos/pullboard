@@ -28,6 +28,7 @@ const NOT_MOVES = {
   ALREADY_JOINED: 'registering who is asking, before any move',
   BAD_ROUTE: 'registering who is asking, before any move',
   ONE_COORDINATOR: 'registering who is asking, before any move',
+  BAD_SEAT_ID: 'registering who is asking, before any move; only a creator naming a new worktree seat raises it',
   MACHINE_HOME_NOT_WRITABLE: 'machine-wide storage must be writable before a command runs',
   SANDBOX_BLOCKED: 'the command environment must allow the gate or check operation',
   BAD_MACHINE_SETTINGS: 'machine-wide settings checked before a command runs',
