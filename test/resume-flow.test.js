@@ -1,4 +1,5 @@
 /** Coordinator flow alerts reuse the real Git/SQLite statistics and documented thresholds [N32,R1,R2]. */
+import { submitFixture } from './board-submit-fixture.js';
 import assert from 'node:assert/strict';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -286,7 +287,7 @@ function fixture(t, { wait = null, age = null, reservation = null, otherAge = nu
     const id = store.addItem(board, { by: 'coordinator', lane: 'web', title: 'Flow fixture' });
     store.claim(board, id, { agentId: builder, lane: 'web', leaseMs: 1000 * MINUTE, freeze });
     at = submitted;
-    store.submit(board, id, { agentId: builder, commit: 'a'.repeat(40), tree: 'b'.repeat(40) });
+    submitFixture(board, id, { agentId: builder, commit: 'a'.repeat(40), tree: 'b'.repeat(40) });
     return id;
   }
   if (wait !== null) {

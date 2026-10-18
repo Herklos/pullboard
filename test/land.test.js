@@ -525,6 +525,17 @@ test('land bisects a real red, blocks stale proof and refuses an unverified stac
   assert.deepEqual(result.conflicts, dry.conflicts);
   assert.deepEqual(result.blocked, dry.blocked);
   assert.deepEqual(result.culprits.map((entry) => entry.id), [entries[2].item]);
+  const evidence = result.batch.invariantEvidence;
+  assert.equal(evidence.version, 1);
+  const failedGate = evidence.gates.find(gate => !gate.isGreen);
+  assert.match(failedGate.commit, /^[a-f0-9]{40}$/u, 'the actual gate records its tested commit, not only a tree');
+  assert.ok(failedGate.submissions.some(row => row.id === entries[2].item && row.commit === entries[2].commit));
+  assert.ok(failedGate.failures.includes(FILES[2]));
+  const diagnosis = evidence.diagnostics.find(row => row.test === FILES[2]);
+  assert.equal(diagnosis.commit, failedGate.commit, 'the whole-file diagnosis names the exact original merge');
+  assert.equal(diagnosis.isGreen, false);
+  assert.equal(typeof diagnosis.wallMs, 'number', 'runtime is the real queued diagnostic execution wall');
+  assert.ok(diagnosis.wallMs >= 0);
   assert.equal(result.culprits[0].tests[0].file, FILES[2]);
   assert.match(result.culprits[0].tests[0].name, /keeps the landed behavior/u);
   assert.ok(json(box, box.repo, 'show', String(entries[2].item)).thread.some((entry) => entry.type === 'fact' && entry.text.includes(FILES[2])));

@@ -3,6 +3,7 @@
  * a lane belongs to is read from the spec each time; status prints each product's standing, and
  * spec check catches an entry that names no row.
  */
+import { submitFixture } from './board-submit-fixture.js';
 import assert from 'node:assert/strict';
 import { runFixtureChild, runFixtureGit } from './fixture-child.js';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
@@ -122,12 +123,12 @@ test('in a real repo, status prints each product, and spec check fails on an ent
     const claim = (id, agentId, lane) => store.claim(board, id, { agentId, lane, leaseMs: 7_200_000, freeze });
     const leases = add('board', 'Leases', ['B1']);
     claim(leases, 'board-1', 'board');
-    store.submit(board, leases, { agentId: 'board-1', commit: SHA, tree: 't' });
+    submitFixture(board, leases, { agentId: 'board-1', commit: SHA, tree: 't' });
     store.verify(board, leases, { agentId: 'web-1', decision: 'ACCEPT', head: SHA, digest: 'digest:Leases', policy: 'any', note: 'reverted the lease check; its test went red; restored' });
     claim(add('board', 'Holders', ['B2']), 'board-1', 'board');
     const sidebar = add('web', 'Sidebar', ['N26.1']);
     claim(sidebar, 'web-1', 'web');
-    store.submit(board, sidebar, { agentId: 'web-1', commit: SHA, tree: 't' });
+    submitFixture(board, sidebar, { agentId: 'web-1', commit: SHA, tree: 't' });
     add('web', 'Projects', ['N26']);
     add('board', 'Next', ['N1']);
   } finally {

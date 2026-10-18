@@ -1,4 +1,5 @@
 /** Real CLI and authenticated API review suggestions preserve explicit build and review intent [Q1,V15,A1,A2]. */
+import { submitFixture } from './board-submit-fixture.js';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { runFixtureGit } from './fixture-child.js';
@@ -71,7 +72,7 @@ function submitted(box, builder = box.peerId) {
   const text = JSON.stringify({ rows: [{ id: 'G1', text: 'Every move keeps its evidence.', gate: 'true' }] });
   store.claim(box.board, id, { agentId: builder, lane: 'web', leaseMs: HOUR,
     freeze: () => ({ text, digest: createHash('sha256').update(text).digest('hex') }) });
-  store.submit(box.board, id, { agentId: builder, commit: String(id).padStart(40, 'a'), tree: String(id).padStart(40, 'b') });
+  submitFixture(box.board, id, { agentId: builder, commit: String(id).padStart(40, 'a'), tree: String(id).padStart(40, 'b') });
   return id;
 }
 
@@ -194,7 +195,7 @@ test('[V1,R1] a review released without a verdict waits an hour for the same rev
   assert.equal(rejectedReserve.data.error.code, 'NOT_SUBMITTED', 'an old cooldown must not mask the item-state refusal');
   store.claim(box.board, released, { agentId: box.peerId, lane: 'web', leaseMs: HOUR,
     freeze: (current) => ({ text: current.item_frozen, digest: current.item_frozen_digest }) });
-  store.submit(box.board, released, { agentId: box.peerId, commit: createHash('sha1').update('resubmitted review item').digest('hex'),
+  submitFixture(box.board, released, { agentId: box.peerId, commit: createHash('sha1').update('resubmitted review item').digest('hex'),
     tree: createHash('sha1').update('resubmitted review tree').digest('hex') });
   const afterResubmit = await run(box, box.reviewer, ['next', '--verify', String(released), '--json']);
   assert.equal(afterResubmit.code, 0, afterResubmit.stderr);

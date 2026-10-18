@@ -134,6 +134,10 @@ Engine 24 adds the person's `acceptCheck`: an item's current check, named by its
 
 Engine 30 lets a reject and a reopen carry a cause key (`cause`: `test:<file>::<title>`, `refusal:<CODE>`, `row:<id>` or `doctrine:<id>`) and lets the person record a never-again fact with `cause` and `neverAgain: true`, for `pullboard rigor`. Only a move that carries one of these needs engine 30; engine-29 and older moves replay unchanged, and clients on an older engine refuse an engine-30 move with `RELAY_MOVE` before changing their board or cursor. Engine 20 is the implied-items engine above; engine numbers 21 through 29 are allocated to other changes.
 
+Engine 38 records submission test selections and normalized landing evidence. A `submit` carrying `submissionProof` or a `recordLandingBatch` carrying `invariantEvidence` requires engine 38; earlier engines refuse these envelopes before applying them, and a missing or malformed proof is refused with `SUBMISSION_PROOF` on a modern submit before its item or events change. Moves recorded under engines 37 and earlier replay without inferred coverage. Recorded invariant evidence is append-only when a landing batch is adopted; adopting or finishing a batch already carrying that evidence requires engine 38, even when the incoming move omits the evidence field. Engine slots 25 through 37 are allocated to earlier train changes; preserve their semantics when composing this item.
+
+Engine 42 adds ordered `recordHealthFindings` observations. A scan retains its board event revision, emits new and resolved sentinel notices once, and records `health-failure` receipts under their refusal cause keys. Rigor counts repeated health episodes without inventing a changed code commit. Older engines refuse this operation before replay; earlier move meanings and feature minima stay unchanged.
+
 The CLI declares its engine in every relay request's `X-Pullboard-Engine` header.
 A linked board requires at least engine 3 after issuing any agent token, including
 revoked or expired tokens. Issuing any machine credential raises that board’s minimum to engine 6, including after revocation or expiry. The minimum survives reopening the auth database;
@@ -330,7 +334,7 @@ The `event` table is a SQLite schema object governed by `SCHEMA_VERSION`; its ap
 | `claim` | builder | `leaseUntil`, `digest` |
 | `renew` | builder | `leaseUntil`, `digest` |
 | `release` | builder | — |
-| `submit` | builder | `commit`, `tree`, `policyCommit`, engine-9 `criterionDigest` |
+| `submit` | builder | `commit`, `tree`, `policyCommit`, engine-9 `criterionDigest`, engine-38 `submissionProof` |
 | `reserve` | reviewer | `until` |
 | `accept` | reviewer | `reason`, `commit`, engine-20 `implies`, engine-33 `review` |
 | `reject` | reviewer | `reason`, `commit`, engine-20 `implies`, engine-33 `review` |
@@ -350,6 +354,9 @@ The `event` table is a SQLite schema object governed by `SCHEMA_VERSION`; its ap
 | `guards` | board | `missing`, `changed`, `stale` |
 | `rigor-notice` | rigor | `cause`, `items`, `occurrences`, `neverAgain`, `engine` |
 | `shout` | sender | `shout`, `to`, `decision`, `request`, `answers` |
+| `health-scan` | observing agent | `active`, `engine` |
+| `health-failure` | sentinel | `key`, `cause`, `since`, `subject`, `owner`, `commit`, `engine` |
+| `health-resolved` | sentinel | `key`, `cause`, `since`, `subject`, `owner`, `commit`, `engine` |
 | `pass` | coordinator | `shout`, `to`, `decision`, `request`, `answers` |
 | `answer` | answerer | `shout`, `to`, `decision`, `request`, `answers`, `outcome`, `channel`, engine-20 `implies`, `supersedes` |
 | `row_decision` | person | `record`, `channel` |
