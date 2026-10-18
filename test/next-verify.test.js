@@ -1,4 +1,5 @@
 /** A reviewer who starts before the builder submits is told the builder is still working [C7,P4]. */
+import { submitFixture } from './board-submit-fixture.js';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
@@ -83,7 +84,7 @@ test('[C7,P4] next --verify with nothing submitted yet says the builder is still
   assert.doesNotMatch(said, /NOTHING_FREE/u, 'no NOTHING_FREE when work is in progress');
   assert.equal(store.getItem(box.board, id).item_review_by, null, 'nothing is reserved');
 
-  store.submit(box.board, id, { agentId: box.builderId, commit: String(id).padStart(40, 'a'), tree: String(id).padStart(40, 'b') });
+  submitFixture(box.board, id, { agentId: box.builderId, commit: String(id).padStart(40, 'a'), tree: String(id).padStart(40, 'b') });
   const ready = await run(box, box.reviewer, ['next', '--verify']);
   assert.equal(ready.code, 0, ready.stderr);
   assert.match(ready.stdout, new RegExp(`next to verify: #${id} Being built`, 'u'));

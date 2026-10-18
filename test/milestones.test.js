@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
 import * as store from '../src/board.js';
+import { submitFixture } from './board-submit-fixture.js';
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
 const HOUR = 3_600_000;
@@ -67,7 +68,7 @@ function fixture(t) {
     if (state === 'open') return id;
     const commit = String(id).repeat(40).slice(0, 40);
     store.claim(board, id, { agentId: builder, lane: 'web', leaseMs: HOUR, freeze });
-    store.submit(board, id, { agentId: builder, commit, tree: 'tree' });
+    submitFixture(board, id, { agentId: builder, commit, tree: 'tree' });
     store.verify(board, id, { agentId: 'coordinator', decision: 'ACCEPT', note: 'checked it', head: commit, digest: 'digest:tracked', policy: 'any' });
     if (state === 'landed') store.merged(board, id, { agentId: 'coordinator', commit: git('rev-parse', 'HEAD') });
     return id;

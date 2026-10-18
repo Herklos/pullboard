@@ -634,7 +634,12 @@ test('a reopened bar takes the same commit again [V2,V6,H16]', async (t) => {
   const engine11Move = prepareEngineMove(claimedBoard, 'submit', [1, {
     agentId: 'web-1', commit: submitted.commit, tree: submitted.tree,
     policyCommit: box.git(box.repo, 'rev-parse', 'HEAD'),
+    submissionProof: { version: 1, files: [], full: false, deferred: true,
+      reason: 'synthetic board-state fixture; no gate execution' },
   }], { id: 'same-commit-engine-11', actor: 'web-1' });
+  // Build a valid modern move, then model the historical proofless wire envelope explicitly.
+  delete engine11Move.args[1].submissionProof;
+  engine11Move.engine = 11;
   const builderSender = { kind: 'agent', userId: 'fixture-user', agent: 'web-1' };
   const engine10Replica = store.openBoard(join(box.dir, 'engine-10-same-commit.sqlite'));
   t.after(() => store.closeBoard(engine10Replica));

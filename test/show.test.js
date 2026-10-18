@@ -2,6 +2,7 @@
  * show stays short to read (N30): the latest verdict in full, each earlier one as a line, and every
  * note in full on --history or --json.
  */
+import { submitFixture } from './board-submit-fixture.js';
 import assert from 'node:assert/strict';
 import { runFixtureExecFile as execFileSync, runFixtureChild } from './fixture-child.js';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
@@ -84,7 +85,7 @@ test('show prints the latest verdict in full and earlier ones as one line; --his
       notes.forEach((note, round) => {
         const commit = letters[round].repeat(40);
         store.claim(board, id, { agentId: 'web-1', lane: 'web', leaseMs: 7_200_000, freeze });
-        store.submit(board, id, { agentId: 'web-1', commit, tree: 't' });
+        submitFixture(board, id, { agentId: 'web-1', commit, tree: 't' });
         const decision = round < notes.length - 1 ? 'REJECT' : 'ACCEPT';
         const reason = decision === 'REJECT' ? 'TEST_FAILURE' : undefined;
         store.verify(board, id, { agentId: 'web-2', decision, reason, note, head: commit, digest: freeze(store.getItem(board, id)).digest, policy: 'any' });
