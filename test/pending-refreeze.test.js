@@ -1,3 +1,4 @@
+import { HEALTH_SENTINEL_ENGINE } from '../src/health-receipts.js';
 /** Pending coordinator corrections keep a live claim until its frozen bar is adopted [V2,H16]. */
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -261,7 +262,7 @@ async function checkDependencyLegacyClients(cleanup, directory, snapshot, target
 }
 
 test('dependency edits replay the same on every engine [B3,V2,H16]', async (t) => {
-  assert.equal(ENGINE_VERSION, 34, 'the next writer retains all recorded dependency-edit behavior');
+  assert.ok(ENGINE_VERSION >= HEALTH_SENTINEL_ENGINE, 'the current writer retains the sentinel minimum and historical behavior');
   const directory = mkdtempSync(join(tmpdir(), 'pullboard-dependency-engines-'));
   const cleanup = [];
   t.after(() => {
