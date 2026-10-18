@@ -54,8 +54,7 @@ function registerHarnessProjects(board, projects) {
   for (let index = 1; index < projects; index += 1) {
     const root = join(board.workspace, 'projects', `project-${index + 1}`);
     mkdirSync(root, { recursive: true });
-    const git = runFixtureGit(['init', '-q', '-b', 'main'], { cwd: root, env: board.env, encoding: 'utf8' });
-    if (git.status !== 0) throw new Error(git.failure ?? git.stderr);
+    runFixtureGit(['init', '-q', '-b', 'main'], { cwd: root, env: board.env, encoding: 'utf8' });
     const initialized = runFixtureChild(process.execPath, [BIN, 'init', '--model', 'Stress fixture'],
       { cwd: root, env: board.env, encoding: 'utf8' });
     if (initialized.status !== 0) throw new Error(initialized.failure ?? initialized.stderr);
