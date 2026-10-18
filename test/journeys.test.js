@@ -368,19 +368,21 @@ function journeyAuthTrace(chrome, hostedOrigin = JOURNEY_HOSTED) {
       let address;
       try { address = new URL(params.response.url); } catch { return; }
       if (address.origin !== hostedOrigin || !address.pathname.startsWith('/api/')) return;
-      watched.set(params.requestId, { atMs: clock(), status: params.response.status, pathKind: journeyApiPathKind(address.pathname) });
+      const refusal = { atMs: clock(), status: params.response.status, pathKind: journeyApiPathKind(address.pathname), code: 'pending', kind: 'pending' };
+      refusals.push(refusal); // Retain the observed status throughout body delivery, even past read()'s ceiling (#825).
+      watched.set(params.requestId, refusal);
     } else if (message.method === 'Network.loadingFinished' && watched.has(params.requestId)) {
       const refusal = watched.get(params.requestId);
       watched.delete(params.requestId);
       const body = chrome.send('Network.getResponseBody', { requestId: params.requestId }).then((response) => {
-        refusals.push({ ...refusal, ...journeyRefusalBody(response) });
-      }, () => { refusals.push({ ...refusal, code: 'unread', kind: 'unread' }); }).finally(() => reading.delete(body));
+        Object.assign(refusal, journeyRefusalBody(response));
+      }, () => { Object.assign(refusal, { code: 'unread', kind: 'unread' }); }).finally(() => reading.delete(body));
       reading.add(body);
     } else if (message.method === 'Network.loadingFailed' && watched.has(params.requestId)) {
       // The refusal arrived but its body never did, as when the connection drops: it still counts, unread (#825 review).
       const refusal = watched.get(params.requestId);
       watched.delete(params.requestId);
-      refusals.push({ ...refusal, code: 'unread', kind: 'interrupted' });
+      Object.assign(refusal, { code: 'unread', kind: 'interrupted' });
     }
   };
   chrome.socket.addEventListener('message', listener);
@@ -391,13 +393,12 @@ function journeyAuthTrace(chrome, hostedOrigin = JOURNEY_HOSTED) {
     async read() {
       // Settle body reads already asked for, briefly, and keep any refusal whose body has not arrived as pending.
       await Promise.race([Promise.allSettled([...reading]), new Promise((done) => { setTimeout(done, 1_000); })]); // budget: hang ceiling for bodies Chrome already holds; no throughput claim.
-      const waiting = [...watched.values()].map((refusal) => ({ ...refusal, code: 'pending', kind: 'pending' }));
       let cookies = 'unavailable';
       try {
         cookies = (await chrome.send('Network.getAllCookies')).cookies.filter((cookie) => cookie.name === 'pb_session')
           .map(({ domain, path, secure, session, sameSite, sourceScheme, sourcePort, httpOnly }) => ({ domain, path, secure, session, sameSite, sourceScheme, sourcePort, httpOnly }));
       } catch { /* The rest of the record still stands. */ }
-      return { navigations: navigations.slice(), refusals: [...refusals, ...waiting], cookies };
+      return { navigations: navigations.slice(), refusals: refusals.map(refusal => ({ ...refusal })), cookies };
     },
     /** Stop listening. */
     close() { active = false; chrome.socket.removeEventListener('message', listener); },
@@ -487,6 +488,62 @@ test('auth diagnostics tolerate malformed refusals and preserve the original row
     finally {
       try { server.closeAllConnections(); if (server.listening) await new Promise(done => server.close(done)); }
       finally { rmSync(profile, { recursive: true, force: true }); }
+    }
+  }
+});
+
+
+/** Keep a physically observed refusal visible while its CDP body reply is deliberately withheld. */
+test('auth trace retains a completed refusal while its body delivery is pending [N40]', { timeout: 60_000 }, async () => { // budget: hang ceiling for owned Chrome and deferred CDP delivery cleanup.
+  const marker = 'owned-' + randomUUID();
+  const server = createServer((req, res) => {
+    res.writeHead(req.url === '/' ? 200 : 401, { 'Content-Type': req.url === '/' ? 'text/html' : 'application/json' });
+    res.end(req.url === '/' ? '<title>Owned trace delivery</title>' : JSON.stringify({ error: { code: 'AUTH_REQUIRED', message: 'this credential is expired or revoked ' + marker } }));
+  });
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-auth-delivery-'));
+  let chrome;
+  let trace;
+  let releaseBody;
+  const heldBody = new Promise(resolve => { releaseBody = resolve; });
+  let bodyRequested;
+  const requested = new Promise(resolve => { bodyRequested = resolve; });
+  let requestTimer;
+  try {
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+    const origin = 'http://127.0.0.1:' + server.address().port;
+    chrome = await openSnapshotChrome(chromeExecutable(), origin + '/', profile);
+    const send = chrome.send;
+    chrome.send = async (method, params) => {
+      const result = await send(method, params);
+      if (method === 'Network.getResponseBody') { bodyRequested(); await heldBody; }
+      return result;
+    };
+    trace = journeyAuthTrace(chrome, origin);
+    trace.begin();
+    const status = await chrome.stable(`(async () => { const r = await fetch('/api/v1/boards/${marker}/state'); await r.text(); return r.status; })()`);
+    assert.equal(status, 401, 'real Chrome received the completed HTTP refusal');
+    await Promise.race([requested, new Promise((resolve, reject) => { requestTimer = setTimeout(() => reject(new Error('owned CDP body request missing')), 5_000); })]); // budget: hang ceiling for observing the actual finished response event.
+    clearTimeout(requestTimer);
+    const pending = await trace.read();
+    assert.equal(pending.refusals.length, 1, 'an observed 401 remains present across the existing body-read ceiling');
+    assert.equal(pending.refusals[0].status, 401);
+    assert.equal(pending.refusals[0].code, 'pending');
+    releaseBody();
+    const decoded = await trace.read();
+    assert.equal(decoded.refusals.length, 1, 'late delivery replaces the pending category without duplicating the response');
+    assert.equal(decoded.refusals[0].code, 'AUTH_REQUIRED');
+    assert.equal(decoded.refusals[0].kind, 'session-expired-or-revoked');
+    assert.equal(pending.refusals[0].code, 'pending', 'a previously returned report stays a snapshot');
+    assert.equal((await trace.read()).refusals.length, 1, 'repeat reads do not duplicate the response');
+    assert.ok(!JSON.stringify([pending, decoded]).includes(marker), 'no URL identifier or response text is retained');
+  } finally {
+    clearTimeout(requestTimer);
+    releaseBody();
+    try { trace?.close(); if (chrome) await closeSnapshotChrome(chrome); }
+    finally {
+      server.closeAllConnections();
+      if (server.listening) await new Promise(resolve => server.close(resolve));
+      rmSync(profile, { recursive: true, force: true });
     }
   }
 });
