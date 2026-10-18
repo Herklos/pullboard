@@ -7,13 +7,26 @@
  * edit.
  */
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import {
+  mkdtempSync,
+  rmSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DOCTRINE_FILE, LEGACY_DOCTRINE_FILE } from './config.js';
-import { cleanGitEnvironment, gitChildEnv, invalidateGitFacts } from './git.js';
+import {
+  DOCTRINE_FILE,
+  LEGACY_DOCTRINE_FILE,
+} from './config.js';
+import {
+  cleanGitEnvironment,
+  gitChildEnv,
+  invalidateGitFacts,
+} from './git.js';
 import { Refused } from './refused.js';
-import { checkFieldFindings, parseSpec } from './spec.js';
+import {
+  checkFieldFindings,
+  parseSpec,
+} from './spec.js';
 
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 

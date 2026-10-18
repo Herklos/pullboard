@@ -1,5 +1,8 @@
 /** The gate queue's machine settings, read with node: built-ins only so a runner's trusted runtime can ship them [O5]. */
-import { existsSync, readFileSync } from 'node:fs';
+import {
+  existsSync,
+  readFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { machineHome } from './machine-home.js';
 import { Refused } from './refused.js';

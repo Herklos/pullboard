@@ -26,10 +26,26 @@
  * person's row decision, which is trusted because the person's own channel records it, the
  * approval rests on input only the person gives; anything an agent can write is only a draft.
  */
-import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { blueprintMarker, questionText, ruleText } from './blueprints.js';
+import {
+  createHash,
+  randomUUID,
+} from 'node:crypto';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs';
+import {
+  dirname,
+  join,
+} from 'node:path';
+import {
+  blueprintMarker,
+  questionText,
+  ruleText,
+} from './blueprints.js';
 import { requirePersonChannel } from './person.js';
 import { Refused } from './refused.js';
 

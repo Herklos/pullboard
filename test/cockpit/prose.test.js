@@ -85,8 +85,8 @@ test('the view chips a command the CLI adds [N26]', async (t) => {
   const source = readFileSync(helpFile, 'utf8');
   writeFileSync(helpFile, source
     .replace('all: ALL_HELP,', "all: ALL_HELP + '\\n  pullboard blueprint apply <path>  a copied CLI extension',")
-    .replace('commands: Object.freeze(commandHelpRows(ALL_HELP)),',
-      "commands: Object.freeze({ ...commandHelpRows(ALL_HELP), 'blueprint inspect': { usages: ['pullboard blueprint inspect <path>'] } }),"));
+    .replace('commands: Object.freeze(commandHelpRows(ALL_HELP, commandNames)),',
+      "commands: Object.freeze({ ...commandHelpRows(ALL_HELP, commandNames), 'blueprint inspect': { usages: ['pullboard blueprint inspect <path>'] } }),"));
   const copiedBin = join(cli, 'bin', 'pullboard.js');
   box.run(demo.repo, 'shout', 'all', 'A CLI extension says pullboard blueprint apply <file> and pullboard blueprint inspect <path>.');
   const view = await startView(box, { bin: copiedBin });

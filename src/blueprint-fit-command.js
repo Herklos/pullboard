@@ -1,11 +1,22 @@
 /** The blueprint fit verbs: blueprint fit, spec fit, spec fit edit and spec fit approve [S1,E3]. */
 import { readFileSync } from 'node:fs';
 import * as store from './board.js';
-import { approveFit, editFit, fitLine, fitSummary, proposeFit, readFitBatch, refuseOwnFit } from './blueprint-fit.js';
+import {
+  approveFit,
+  editFit,
+  fitLine,
+  fitSummary,
+  proposeFit,
+  readFitBatch,
+  refuseOwnFit,
+} from './blueprint-fit.js';
 import { readBlueprint } from './blueprints.js';
 import { COORDINATOR } from './config.js';
 import { headCommit } from './git.js';
-import { agentSessionDigest, requirePersonChannel } from './person.js';
+import {
+  agentSessionDigest,
+  requirePersonChannel,
+} from './person.js';
 import { Refused } from './refused.js';
 import { prepareRowDecisions } from './row-decisions.js';
 import { loadSpec } from './spec.js';

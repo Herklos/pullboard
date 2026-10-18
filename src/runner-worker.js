@@ -1,13 +1,44 @@
 /** SSH runner entry point in a pinned capsule with a static trusted resource graph. */
-import { spawn, spawnSync } from 'node:child_process';
+import {
+  spawn,
+  spawnSync,
+} from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, closeSync, createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  closeSync,
+  createReadStream,
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  readSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { userInfo } from 'node:os';
-import { delimiter, dirname, isAbsolute, join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import {
+  delimiter,
+  dirname,
+  isAbsolute,
+  join,
+} from 'node:path';
+import {
+  fileURLToPath,
+  pathToFileURL,
+} from 'node:url';
 import * as resourceApi from './resources.js';
 import { parseProcessCensus } from './process-census.js';
-import { gateStages, stagedScript, readPipes } from './gate-stages.js';
+import {
+  gateStages,
+  stagedScript,
+  readPipes,
+} from './gate-stages.js';
 import { fileDenialWatcher } from './sandbox-denial.js';
 import { once } from 'node:events';
 import { pipeline } from 'node:stream/promises';

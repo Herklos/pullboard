@@ -1,7 +1,11 @@
 /** Capture one board's release priority before joining the machine resource transaction [C7,V4]. */
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { boardId, openBoardReadOnly, roadmap } from './board.js';
+import {
+  boardId,
+  openBoardReadOnly,
+  roadmap,
+} from './board.js';
 import { repoInfo } from './git.js';
 
 /**
