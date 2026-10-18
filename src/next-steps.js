@@ -9,6 +9,59 @@
  */
 import { RECORDED_GENERIC_NEXT } from './recorded-refusal.js';
 
+/** The coordinator carries every seat's request for a person decision [B26]. */
+export const COORDINATOR_PERSON_REQUEST = 'ask the coordinator to bring it to the person: pullboard shout coordinator "<what is needed>" --decision';
+
+/**
+ * Route presentation-only person requests for a known seat; unknown callers retain existing text.
+ * This does not change a refusal receipt, actor identity or permission to make the person's move.
+ *
+ * @param {string} step
+ * @param {{ caller?: 'seat'|'coordinator'|'person'|'unknown' }} [options]
+ * @returns {string}
+ */
+export function personRequestStep(step, { caller } = {}) {
+  return caller === 'seat' && /\bask the person\b/iu.test(step) ? COORDINATOR_PERSON_REQUEST : step;
+}
+
+/** Keep quoted user text out of generated repair-clause rewriting. */
+function quotedAt(text, at) {
+  let quoted = false;
+  let escaped = false;
+  for (let index = 0; index < at; index += 1) {
+    if (escaped) { escaped = false; continue; }
+    if (text[index] === '\\') { escaped = true; continue; }
+    if (text[index] === '"') quoted = !quoted;
+  }
+  return quoted;
+}
+
+/**
+ * Present a generated person-request clause for a seat, keeping its reason and requested action.
+ * Only the explanatory first line and an explicit final next footer are guidance; raw diagnostic
+ * lines and quoted user text remain intact. Setup questions opt in to a leading imperative.
+ *
+ * @param {string} message
+ * @param {{ caller?: 'seat'|'coordinator'|'person'|'unknown', leading?: boolean }} [options]
+ * @returns {string}
+ */
+export function personRequestGuidance(message, { caller, leading = false } = {}) {
+  if (caller !== 'seat') return message;
+  const lines = String(message).split('\n');
+  /** Route only an unquoted imperative, preserving clauses that explain the refusal. */
+  const route = line => line.replace(/(^|[;.:]\s+|\b(?:or|and)\s+)ask the person(?=$|[\s:;])([^;\n]*)/giu,
+    (whole, before, action, at) => {
+      if ((!before && !leading) || quotedAt(line, at + before.length)) return whole;
+      const request = action.trim().replace(/^:?\s*(?:to\s+|for\s+)?/iu, '');
+      const needed = request.replace(/\bask the person(?:\s+to)?\s*/giu,
+        (words, offset) => quotedAt(request, offset) ? words : '');
+      return `${before}${COORDINATOR_PERSON_REQUEST}${needed ? ` (needed: ${needed})` : ''}`;
+    });
+  lines[0] = route(lines[0]);
+  if (lines.length > 1 && /^next:[ \t]*\S/u.test(lines.at(-1))) lines[lines.length - 1] = route(lines.at(-1));
+  return lines.join('\n');
+}
+
 /** @type {Readonly<Record<string, string>>} */
 export const NEXT_STEPS = Object.freeze({
   HEALTH_FINDINGS: 'run pullboard health to read the current findings, then run pullboard resume to capture a fresh observation',
@@ -449,14 +502,16 @@ function stepInMessage(message) {
  *
  * @param {{ code?: string, next?: string } | null | undefined} error
  * @param {string} message
+ * @param {{ caller?: 'seat'|'coordinator'|'person'|'unknown' }} [options]
  * @returns {string}
  */
-export function nextStepFor(error, message) {
+export function nextStepFor(error, message, options = {}) {
+  if (personRequestGuidance(String(message), options) !== String(message)) return COORDINATOR_PERSON_REQUEST;
   const code = typeof error?.code === 'string' ? error.code : '';
   const finalStep = /(?:^|\r?\n)next:[ \t]*([^\r\n]*\S)[ \t]*(?:\r?\n)*$/u.exec(String(message))?.[1];
-  if (finalStep) return finalStep.trim();
-  if (typeof error?.next === 'string' && error.next.trim() && error.next.trim() !== RECORDED_GENERIC_NEXT) return error.next.trim();
+  if (finalStep) return personRequestStep(finalStep.trim(), options);
+  if (typeof error?.next === 'string' && error.next.trim() && error.next.trim() !== RECORDED_GENERIC_NEXT) return personRequestStep(error.next.trim(), options);
   if (code === 'SPEC_BEHIND_MAIN') return NEXT_STEPS.SPEC_BEHIND_MAIN;
-  return stepInMessage(message) ?? NEXT_STEPS[code]
-    ?? `ask the service owner about refusal code ${code || '(unknown)'}, including the displayed refusal`;
+  return personRequestStep(stepInMessage(message) ?? NEXT_STEPS[code]
+    ?? `ask the service owner about refusal code ${code || '(unknown)'}, including the displayed refusal`, options);
 }
