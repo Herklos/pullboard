@@ -39,6 +39,7 @@ import {
   mainLaneWork,
   refuseNextIdle,
 } from './next-steps.js';
+import { reviewerStartup } from './next-steps.js';
 import * as store from './board.js';
 import {
   CONFIG_FILE,
@@ -769,10 +770,9 @@ function checkMainVerifier(ctx, board, values) {
   const agents = store.listAgents(board).filter((agent) => agent.agent_id !== COORDINATOR);
   const listed = agents.length ? ` Agent worktrees: ${agents.slice(0, 6).map((agent) => `${displayAgentName(agent, ctx.config.agents.names)} at ${agent.agent_path}`).join('; ')}.` : '';
   const detached = tryGit(ctx.info.root, ['symbolic-ref', '-q', 'HEAD']).status !== 0 ? ' The main checkout is not on its branch; whoever switched it puts it back.' : '';
-  throw new Refused(
-    'MAIN_IS_COORDINATOR',
+  throw new Refused('MAIN_IS_COORDINATOR',
     `this is the main checkout, so this verdict would be the coordinator's.${listed}${detached}`,
-    'create a new reviewer worktree with git worktree add --detach .claude/worktrees/<reviewer-name> HEAD, using an unused folder; then cd there and run pullboard join <lane> --model "<model name>" and pullboard next --verify <id>. The reviewer must not be the builder. The coordinator instead adds --as coordinator',
+    reviewerStartup(ctx.info.root, ctx.config, values.verifyId),
   );
 }
 
@@ -2795,7 +2795,7 @@ function reportSubmission(ctx, id, commit, gate, doctrine = []) {
   ctx.io.result?.({ id, commit, pin, gate, ...(doctrine.length ? { doctrine } : {}) });
   ctx.io.say(`submitted #${id} at ${commit.slice(0, 12)}; ${gate.report}`);
   ctx.io.say(`pinned as ${pin}, so this work can't be lost; keep your worktree until it is merged`);
-  ctx.io.say(`next: another agent checks out ${commit.slice(0, 12)} and runs: pullboard verify ${id} accept|reject`);
+  ctx.io.say(`next: ${reviewerStartup(primaryCheckoutRoot(ctx.info), ctx.config, id)}`);
   return 0;
 }
 
