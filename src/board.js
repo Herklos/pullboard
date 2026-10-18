@@ -30,7 +30,6 @@ import {
 } from './brief.js';
 import { COORDINATOR } from './config.js';
 import {
-  AUTO_ESCALATE_ENGINE,
   ENGINE_VERSION,
   VERDICT_REVIEW_ENGINE,
   MILESTONE_RANK_ENGINE,
@@ -43,6 +42,12 @@ import {
   storeTriggers,
 } from './machine.js';
 import { Refused } from './refused.js';
+import {
+  ROUTES,
+  canTake,
+  rejectedItemEscalation,
+} from './route-escalation.js';
+export { ROUTES, canTake };
 import {
   newRigorNotices,
   rigorNoticeText,
@@ -105,24 +110,9 @@ export function boardBusyError(file, startedAt, error) {
   return new Refused('BOARD_BUSY', `board file ${file} remained held by another process after ${Date.now() - startedAt}ms; wait for it to finish and retry`);
 }
 
-/**
- * Who can take an item (B13), as tiers in order of the model an item needs: `light` is work a small
- * or local model can build from its brief, `mid` needs a capable general model, and
- * `strong` needs a frontier model's judgment. An agent's route is set when it joins; it takes items
- * at its tier and below.
- */
-export const ROUTES = ['light', 'mid', 'strong'];
 const BRIEF_LIMIT = 8000;
 const REVIEW_RELEASE_COOLDOWN_MS = 60 * 60 * 1000;
 
-/**
- * True when an agent on `agentRoute` may build or verify an item routed `itemRoute`.
- *
- * @param {string} agentRoute
- * @param {string} itemRoute
- * @returns {boolean}
- */
-export const canTake = (agentRoute, itemRoute) => ROUTES.indexOf(itemRoute) <= ROUTES.indexOf(agentRoute);
 export const REJECT_REASONS = [
   'TEST_FAILURE',
   'BEHAVIOR_MISMATCH',
@@ -1540,61 +1530,6 @@ function reserveWithin(board, id, { agentId, leaseMs, policy, familyPolicy = 'of
   return getItem(board, id);
 }
 
-/** Return rejected verdict receipts since the item's most recent route change [B15,B13].
- *
- * @param {any} board
- * @param {number} id
- * @returns {object[]}
- */
-function rejectionsSinceRouteChange(board, id) {
-  const thread = events(board, { itemId: id });
-  let lastRouteChange = -1;
-  for (const [index, event] of thread.entries()) {
-    if (event.event_kind === 'escalate') {
-      lastRouteChange = index;
-      continue;
-    }
-    if (event.event_kind === 'edit' && Object.hasOwn(JSON.parse(event.event_detail), 'route')) lastRouteChange = index;
-  }
-  const verdictEvents = thread.filter((event) => ['accept', 'reject'].includes(event.event_kind));
-  const verdicts = verdictsFor(board, id);
-  const byEvent = new Map(verdictEvents.map((event, index) => [event.event_id, verdicts[index]]));
-  return thread.slice(lastRouteChange + 1).flatMap((event) => {
-    if (event.event_kind !== 'reject') return [];
-    const verdict = byEvent.get(event.event_id);
-    if (!verdict || verdict.verdict_decision !== 'REJECT') return [];
-    return [{
-      eventId: event.event_id,
-      verdictId: verdict.verdict_id,
-      by: verdict.verdict_by,
-      reason: verdict.verdict_reason,
-      note: verdict.verdict_note,
-      commit: verdict.verdict_commit,
-      digest: verdict.verdict_digest,
-      head: verdict.verdict_head,
-      at: verdict.verdict_at,
-    }];
-  });
-}
-
-/** Automatically apply the existing escalation move when the current route has two rejects [B15].
- *
- * @param {any} board
- * @param {number} id
- * @param {number} engine
- */
-function autoEscalateRejectedItem(board, id, engine) {
-  if (engine < AUTO_ESCALATE_ENGINE) return;
-  const rejections = rejectionsSinceRouteChange(board, id).slice(-2);
-  if (rejections.length < 2) return;
-  const item = itemById(board, id);
-  escalate(board, id, {
-    agentId: COORDINATOR,
-    note: `Two REJECT verdicts at the ${item.item_route} route`,
-    rejections,
-  });
-}
-
 /**
  * Record a verdict on submitted work, or a sealed re-review of unlanded work (E8,V1,V3,V8).
  * An accept verifies it; a reject
@@ -1669,7 +1604,8 @@ export function verify(board, id, { agentId, decision, reason, note = '', cause,
     if (newReview) detail.review = { commit: review.commit, ...(Object.hasOwn(review, 'head') ? { head: review.head } : {}), trunk: review.trunk, paths: [...review.paths] };
     logEvent(board, agentId, verb, id, implies?.length ? { ...detail, implies } : detail);
     const trigger = board.lastEvent;
-    if (!isAccept) autoEscalateRejectedItem(board, id, engine);
+    const escalation = !isAccept && rejectedItemEscalation(board, id, engine, item.item_route);
+    if (escalation) escalate(board, id, escalation);
     tellVerdictImplications(board, (by, itemId, fact) => logEvent(board, by, 'fact', itemId, fact), id, { seed: impliesId, implies });
     if (!isAccept) postRigorNotices(board, trigger);
     return { decision, reason: code, ...(isAccept && check !== undefined ? { check } : {}) };
