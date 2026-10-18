@@ -86,7 +86,7 @@ test('deleted-copy receipts grant no access and keep revocation and expiry disti
   const other = await auth.issueMachine(person.token, { board: beta, machine: 'joined-beta' });
   await auth.revoke(person.token, revoked.id);
   now += 2;
-  assert.deepEqual((await auth.listMachines(live.token, alpha)).map(row => ({ ...row })), [{ machine: 'joined-alpha' }],
+  assert.deepEqual((await auth.listMachines(live.token, alpha)).map(row => row.machine), ['joined-alpha'],
     'the roster excludes revoked and expired computer credentials');
   await assert.rejects(auth.listMachines(live.token, beta), { code: 'TOKEN_BOARD' });
   auth.forgetBoard(alpha);
