@@ -1,11 +1,13 @@
 /** Cockpit shouts checks, using the shared real-board fixtures [N26]. */
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
 import { register, shout as shoutOnBoard } from '../../src/board.js';
-import { tapTarget, SPEC, machine, project, build, startView, styleOf, element, storage, openPage, boardId, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, earlier, shoutsAt, press, pressedInto } from './fixture.js';
+import { relaySenderProblem } from '../../src/relay-sender.js';
+import { BIN, fetchLive, boardOf, shoutNameText, tapTarget, SPEC, machine, project, build, startView, styleOf, element, storage, openPage, boardId, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, earlier, shoutsAt, press, pressedInto } from './fixture.js';
 import { assertFirstStateDelay, press as sharedPress } from './stable.js';
 
 
@@ -110,6 +112,68 @@ test('a shout shows the evidence it carries [B22]', async () => {
     await view.stop();
   }
 });
+
+/** The person's own words carry the person's name, and only the view's secret can give it [N26,A9,B26]. */
+test('a shout from the view shows the person as its author [N26,A9]', { timeout: 60_000 }, async (t) => {
+  const box = machine();
+  const alpha = project(box, 'alpha');
+  box.run(alpha.web, 'shout', 'coordinator', 'web-1 is on the greeting');
+  const view = await startView(box);
+  // The standalone API an agent can start with pullboard serve: a board key, never the person.
+  const serve = spawn(process.execPath, [BIN, 'serve', '--port', '0', '--json'], { cwd: alpha.repo, env: box.env, stdio: ['ignore', 'pipe', 'pipe'] });
+  t.after(() => { if (serve.exitCode === null) serve.kill('SIGTERM'); });
+  try {
+    const page = await openPage(view);
+    await page.click({ tab: 'shouts' });
+    // The composer as it opens: addressed to the coordinator.
+    page.element('shout-to').value = 'coordinator';
+    page.element('shout-text').value = 'Hello from the person';
+    await page.fire('shout-form', 'submit');
+    page.element('shout-to').value = 'web';
+    page.element('shout-text').value = 'Web, keep it short';
+    await page.fire('shout-form', 'submit');
+    await page.run('refresh()');
+    const cards = () => [...shoutNameText(page.show('feed')).matchAll(/<b class="who">([^<]*)<\/b><span class="to">→ ([^<]*)<\/span>[^]*?<div class="text">([^<]*)<\/div>/g)].map((m) => m.slice(1));
+    assert.deepEqual(cards(), [
+      ['you', 'web', 'Web, keep it short'],
+      ['you', 'coordinator (unknown)', 'Hello from the person'],
+      ['web-1 (Test Model)', 'coordinator (unknown)', 'web-1 is on the greeting'],
+    ], 'the view reads "you" for the person, to the coordinator and to a lane, and an agent keeps its seat and model');
+
+    const said = (events) => events.filter((event) => event.event_kind === 'shout').map((event) => event.event_by);
+    assert.deepEqual(said(JSON.parse(box.run(alpha.repo, 'log', '--json')).events), ['web-1', 'person', 'person'], 'pullboard log --json records the person as the author');
+    const lines = box.run(alpha.repo, 'log').split('\n').filter((line) => / shout /.test(line));
+    assert.deepEqual(lines.map((line) => line.slice(21, 45).trim()), ['web-1 (Test Model)', 'person', 'person'], `pullboard log names the person: ${lines.join('\n')}`);
+    assert.ok(lines.every((line) => !line.includes('coordinator (unknown)')), 'never as coordinator (unknown)');
+
+    // An agent never shouts as the person: through the view's API under its own name, through the
+    // standalone API with a board key, or through the relay.
+    const id = await boardId(view, alpha.repo);
+    const viewMove = await fetchLive(`${view.base}/api/v1/boards/${id}/moves`, { method: 'POST', headers: { 'x-pullboard-key': view.key, 'content-type': 'application/json' },
+      body: JSON.stringify({ verb: 'shout', agent: 'web-1', args: { to: 'coordinator', text: 'an agent under its own name' } }) });
+    assert.equal(viewMove.status, 200, 'an agent named in a move speaks as itself');
+    const forged = await fetchLive(`${view.base}/api/v1/boards/${id}/moves`, { method: 'POST', headers: { 'x-pullboard-key': view.key, 'content-type': 'application/json' },
+      body: JSON.stringify({ verb: 'shout', from: 'person', args: { to: 'web', text: 'forged' } }) });
+    assert.equal((await forged.json()).error.code, 'BAD_REQUEST', 'a move cannot name its own author');
+    const url = new URL(await new Promise((found, fail) => {
+      let out = '';
+      serve.stdout.on('data', (chunk) => { out += chunk; const match = /"url": "([^"]+)"/.exec(out); if (match) found(match[1]); });
+      serve.once('exit', (code) => fail(new Error(`pullboard serve exited ${code}`)));
+    }));
+    const api = (path, body) => fetchLive(`${url.origin}/api/v1/boards/${id}/${path}?k=${url.searchParams.get('k')}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    assert.equal((await api('moves', { verb: 'shout', args: { to: 'web', text: 'through the serve key' } })).status, 200);
+    assert.equal((await (await api('requests', { text: 'as the person?' })).json()).error.code, 'B26_PERSON_CHANNEL', 'a serve key cannot send the person\'s request');
+    const state = await boardOf(view, alpha.repo);
+    const by = (text) => state.shouts.find((shout) => shout.shout_text === text)?.shout_from;
+    assert.deepEqual([by('an agent under its own name'), by('through the serve key'), by('forged'), by('as the person?')], ['web-1', 'coordinator', undefined, undefined], 'only the view\'s own person channel names the person');
+    const relayed = relaySenderProblem({ operation: 'shout', engine: 20, args: [{ from: 'person', to: 'web', text: 'relayed', lanes: ['web'] }] }, { kind: 'agent', userId: 'u1', agent: 'web-1' }, 'move');
+    assert.equal(relayed?.code, 'RELAY_PERSON_ONLY', 'the relay refuses an agent\'s shout as the person');
+  } finally {
+    if (serve.exitCode === null) serve.kill('SIGTERM');
+    await view.stop();
+  }
+});
+
 
 test('a short code chip at a line end stays whole, and long code stays one chip inside the screen [N26]', { timeout: 90_000 }, async (t) => {
   const executable = chromeExecutable();
