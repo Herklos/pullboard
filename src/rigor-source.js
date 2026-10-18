@@ -23,10 +23,11 @@ export function readRigorSource(source) {
         || !Array.isArray(item.commits) || item.commits.some(value => !commit(value)))
       || typeof data.proof?.check !== 'string' || !data.proof.check.trim()
       || !commit(data.proof.red?.commit) || !commit(data.proof.green?.commit)
-      || !Number.isInteger(data.proof.red.exit) || data.proof.green.exit !== 0) return null;
+      || !Number.isInteger(data.proof.red.exit) || !Number.isInteger(data.proof.green.exit)) return null;
     const work = data.key.startsWith('doctrine:') || data.key.startsWith('refusal:');
-    if (work ? ![0, 1].includes(data.proof.red.exit) || !(data.proof.red.problems > 0) || data.proof.green.problems !== 0
-      : data.proof.red.exit === 0) return null;
+    if (work ? ![0, 1].includes(data.proof.red.exit) || ![0, 1].includes(data.proof.green.exit)
+      || !(data.proof.red.problems > 0) || data.proof.green.problems !== 0
+      : data.proof.red.exit === 0 || data.proof.green.exit !== 0) return null;
     return data;
   } catch { return null; }
 }
