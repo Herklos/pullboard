@@ -10,6 +10,17 @@
 import { RECORDED_GENERIC_NEXT } from './recorded-refusal.js';
 import { Refused } from './refused.js';
 
+/** Describe the queue's actual outstanding reviews and submission age [Q1,V15]. */
+export function reviewQueueLine(ctx, queue, span) {
+  const age = queue.oldestSubmittedAt ? `${span(ctx, queue.oldestSubmittedAt)} ago` : 'none';
+  if (queue.awaitingFirstReview !== undefined) {
+    const released = queue.releasedItems?.map((item) => `#${item.item} released ${item.releases} ${item.releases === 1 ? 'time' : 'times'}: ${item.reason}`).join('; ');
+    return `review queue: ${queue.pending} submitted; ${queue.awaitingFirstReview} waiting for a first reviewer, ${queue.releasedWithoutVerdict} released without a verdict${released ? ` (${released})` : ''}, ${queue.reviewing} agents reviewing; oldest submission ${age}`;
+  }
+  return `review queue: ${queue.pending} awaiting, ${queue.reviewing} agents reviewing; oldest submission ${age}`;
+}
+
+
 /** Name open build lanes without claiming their work as the coordinator [N2,B26]. */
 export function mainLaneWork(items) {
   const counts = new Map();
@@ -272,7 +283,11 @@ export const NEXT_STEPS = Object.freeze({
   ITEM_LEASE_LOST: 'read pullboard show <id>; if the item is free, claim it again for a build or reserve it with pullboard next --verify <id> for a review, then retry',
   ITEM_NOT_AVAILABLE: 'read the item from this API\'s board state',
   ITEM_NOT_OPEN: 'hold only open or claimed items; see pullboard list',
-  LANDING_FAILURE_REQUIRED: 'reopen with --note "<test file>: <test name>; merge commit <sha>"',
+  LANDING_FAILURE_REQUIRED: 'reopen with --note "<test file>: <test name>; merge commit <sha>", or with --conflict <file> for each conflicting file when it only conflicts with the trunk',
+  NOT_CONFLICTING: 'merge it; reopen only after a red landing, with --note "<test file>: <test name>; merge commit <sha>"',
+  CONFLICT_FILES: 'name only the files Git reports as conflicting with the trunk: pullboard reopen <id> --conflict <file> [--conflict <file>]',
+  NOT_ACCEPTED: 'reopen a submission with --note "why"; --conflict is for accepted work',
+  BAD_CONFLICT: 'run pullboard reopen <id> --conflict <file> [--conflict <file>] from the main checkout',
   LANE_TAKEN: 'choose a different lane name with pullboard lane add',
   LAND_ADOPT: 'read pullboard resume, then run pullboard land --adopt, or pullboard land when nothing is unfinished',
   LAND_BATCH: 'adopt the recorded batch: pullboard land --adopt',

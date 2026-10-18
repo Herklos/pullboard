@@ -19,6 +19,7 @@ import {
 } from '../src/milestones.js';
 import { RIGOR_NOTICE_ENGINE } from '../src/rigor-source.js';
 import { HEALTH_SENTINEL_ENGINE } from '../src/health-receipts.js';
+import { CONFLICT_ENGINE } from '../src/trunk-conflict.js';
 import { createE2eHelpers } from './e2e-helpers.js';
 import { unpackRelease } from './release-archive.js';
 
@@ -273,7 +274,9 @@ async function checkDependencyLegacyClients(cleanup, directory, snapshot, target
 test('dependency edits replay the same on every engine [B3,V2,H16]', async (t) => {
   assert.equal(AUTO_ESCALATE_ENGINE, 50, 'automatic escalation retains its allocated engine');
   assert.equal(WITHDRAW_MILESTONE_ENGINE, 51, 'withdraw retains its allocated feature engine');
-  assert.equal(ENGINE_VERSION, WITHDRAW_MILESTONE_ENGINE, 'the current writer includes the withdraw feature');
+  assert.ok(ENGINE_VERSION >= WITHDRAW_MILESTONE_ENGINE, 'the current writer includes the withdraw feature');
+  assert.equal(CONFLICT_ENGINE, 52, 'trunk conflict retains its allocated feature engine');
+  assert.ok(ENGINE_VERSION >= CONFLICT_ENGINE, 'the current writer retains trunk-conflict semantics');
   assert.ok(ENGINE_VERSION >= AUTO_ESCALATE_ENGINE, 'the current writer retains automatic escalation');
   assert.equal(MILESTONE_SHIP_ENGINE, 45, 'shipment retains its engine-45 meaning');
   assert.ok(ENGINE_VERSION >= MILESTONE_SHIP_ENGINE, 'the current writer retains all milestone shipment behavior');
