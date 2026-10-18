@@ -869,128 +869,96 @@ test('the roadmap panel counts the next release by stage [N26]', {
   }
 });
 
-test('a blocked roadmap item shows its dot and expands to say why [N26]', { timeout: 90_000 }, async (t) => {
+test('a blocked roadmap item shows its dot and expands to say why [N26]', { timeout: 90_000 }, async () => {
   const executable = chromeExecutable();
   assert.ok(executable, 'Chrome is required for the roadmap blocker check.');
-  const box = machine();
-  const alpha = project(box, 'blocked-roadmap');
-  box.run(alpha.repo, 'add', 'web', 'Base work', '--specs', 'G1', '--criterion', 'renders');
-  box.run(alpha.repo, 'add', 'web', 'Waits on base', '--specs', 'G1', '--criterion', 'renders', '--after', '1');
-  box.run(alpha.repo, 'add', 'web', 'Free work', '--specs', 'G1', '--criterion', 'renders');
-  // A sent-back item that waits on #1: built once by web-1, whose claim ended with the reject (#605 review).
-  box.run(alpha.repo, 'add', 'web', 'Sent back once', '--specs', 'G1', '--criterion', 'renders');
-  build(box, alpha, 4, 'sent-back.html');
-  sendBack(box, alpha, 4, 'the heading is missing');
-  box.run(alpha.repo, 'edit', '4', '--after', '1', '--reason', 'it waits on the base work');
-  box.run(alpha.repo, 'add', 'web', 'Verified work', '--specs', 'G1', '--criterion', 'renders');
-  build(box, alpha, 5, 'verified.html'); accept(box, alpha, 5);
-  box.run(alpha.repo, 'add', 'web', 'Building work', '--specs', 'G1', '--criterion', 'renders');
+  const box = machine(), alpha = project(box, 'blocked-roadmap');
+  box.run(alpha.repo, 'add', 'web', 'Base work', '--specs', 'G1', '--criterion', 'Base is ready.');
+  box.run(alpha.repo, 'add', 'web', 'Waits on base', '--specs', 'G1', '--criterion', 'The heading renders. More detail stays in Items.', '--after', '1');
+  box.run(alpha.repo, 'add', 'web', 'Free work', '--specs', 'G1', '--criterion', 'Ready.');
+  box.run(alpha.repo, 'add', 'web', 'Sent back once', '--specs', 'G1', '--criterion', 'Ready.');
+  build(box, alpha, 4, 'sent-back.html'); sendBack(box, alpha, 4, 'The heading is missing.');
+  box.run(alpha.repo, 'edit', '4', '--after', '1', '--reason', 'Waits on the base.');
+  box.run(alpha.repo, 'add', 'web', 'Landed work', '--specs', 'G1', '--criterion', 'The page renders.');
+  build(box, alpha, 5, 'landed.html'); accept(box, alpha, 5);
+  box.git(alpha.repo, 'merge', '--no-ff', '--no-edit', alpha.itemBranches.get(`${alpha.baseBranch}:5`));
+  box.run(alpha.repo, 'merged', '5', box.git(alpha.repo, 'rev-parse', 'HEAD'));
+  box.run(alpha.repo, 'add', 'web', 'Building work', '--specs', 'G1', '--criterion', 'The corrected page renders.');
+  build(box, alpha, 6, 'building.html'); sendBack(box, alpha, 6, 'The title needs correction.\nMore detail stays in Items.');
   box.run(alpha.web, 'claim', '6');
+  const second = join(box.dir, 'second-builder');
+  box.git(alpha.repo, 'worktree', 'add', '-q', second, '-b', 'web/second');
+  box.run(second, 'join', 'web'); box.run(second, 'claim', '1');
   const other = project(box, 'blocked-roadmap-other');
-  box.run(other.repo, 'add', 'web', 'Remote base', '--specs', 'G1', '--criterion', 'renders');
-  box.run(other.repo, 'add', 'web', 'Remote sent-back work', '--specs', 'G1', '--criterion', 'renders');
-  build(box, other, 2, 'remote-sent-back.html');
-  sendBack(box, other, 2, 'Remote latest finding\nMore detail stays in Items');
-  box.run(other.repo, 'edit', '2', '--after', '1', '--reason', 'it waits on the remote base');
+  box.run(other.repo, 'add', 'web', 'Remote base', '--specs', 'G1', '--criterion', 'Ready.');
+  box.run(other.repo, 'add', 'web', 'Remote sent-back work', '--specs', 'G1', '--criterion', 'Remote renders.');
+  build(box, other, 2, 'remote.html'); sendBack(box, other, 2, 'Remote latest finding\nMore detail stays in Items');
+  box.run(other.repo, 'edit', '2', '--after', '1', '--reason', 'Waits on remote base.');
   box.run(other.repo, 'hold', 'web', '--reason', 'Review the remote dependency');
   box.run(alpha.repo, 'milestone', 'add', 'Next', '--items', '1,2,3,4,5,6,blocked-roadmap-other#2');
-  const view = await startView(box);
-  const profile = mkdtempSync(join(tmpdir(), 'pullboard-blocked-roadmap-chrome-'));
+  const view = await startView(box), profile = mkdtempSync(join(tmpdir(), 'pullboard-blocked-roadmap-chrome-'));
   let chrome;
-  /** Read the rows: their state dot, blocker dot and unfolded reason. */
-  const read = async () => JSON.parse(await chrome.stable(`JSON.stringify([...document.querySelectorAll('#roadmap-list > [data-key="m:Next"] .milestone-body > ul > li')].map((li) => ({
-    id: li.querySelector('.milestone-item .id').textContent,
-    dot: Boolean(li.querySelector('.milestone-item > .dot')),
-    blocker: li.querySelector('.block-dot')?.getAttribute('aria-label') || null,
-    why: li.querySelector('.milestone-why')?.hidden === false ? li.querySelector('.milestone-why').textContent : null,
-  })))`));
+  const row = id => `[...document.querySelectorAll('#roadmap .milestone-item')].find(x=>x.querySelector('.id')?.textContent===${JSON.stringify(id)})`;
+  /** Read the visible detail only, after its optional first detail request settles. */
+  async function opened(id) {
+    await press(chrome, row(id));
+    await chrome.waitFor(`${row(id)}?.getAttribute('aria-expanded')==='true' && !${row(id)}.parentElement.querySelector('.roadmap-loading')`);
+    return await chrome.stable(`${row(id)}.parentElement.querySelector('.milestone-why').textContent`);
+  }
+  /** Count item reads, excluding ordinary board polling. */
+  async function reads() { return JSON.parse(await chrome.stable('JSON.stringify(window.__requests)')).filter(url => /\/items\/\d/.test(url)); }
   try {
     chrome = await openSnapshotChrome(executable, view.link.href, profile);
-    await chrome.waitFor('data?.project?.milestones?.length === 1');
+    await chrome.waitFor('data?.project?.milestones?.length===1');
     await press(chrome, "document.querySelector('[data-tab=roadmap]')");
-    await chrome.waitFor("!document.querySelector('[data-pane=roadmap]').hidden && document.querySelector('#roadmap-list > [data-key=\"m:Next\"]')");
-    const folded = await read();
-    const byId = Object.fromEntries(folded.map((row) => [row.id, row]));
-    assert.equal(byId['#2'].blocker, 'Blocked: waits on #1 (open)', 'the gated item has a blocker dot naming what it waits on');
-    assert.equal(byId['#3'].dot, true, 'an unblocked item keeps its state dot');
-    assert.equal(byId['#3'].blocker, null, 'an unblocked item has no blocker dot');
-    assert.equal(byId['#1'].blocker, null, 'the item others wait on is not itself blocked');
-    assert.equal(byId['blocked-roadmap-other#2'].blocker, 'Blocked: waits on #1 (open); lane web held',
-      'a remote row uses its own dependency and lane-hold summaries');
-    assert.ok(folded.every((row) => row.why === null), 'every row starts folded');
-    // From here on, record every request the page makes: unfolding must not fetch an item's detail.
-    await chrome.stable("window.__requests = []; window.__fetch = window.__fetch || window.fetch; window.fetch = (url, options) => { window.__requests.push(String(url)); return window.__fetch(url, options); }; true");
-    const roadmapAddress = await chrome.stable('location.href');
-    for (const [id, state] of [[5, 'verified'], [6, 'claimed']]) {
-      const row = "[...document.querySelectorAll('#roadmap .milestone-item')].find((entry) => entry.querySelector('.id').textContent === '#" + id + "')";
-      assert.equal(await chrome.stable(row + ".getAttribute('aria-expanded')"), 'false', 'every status starts as an in-place disclosure');
-      await press(chrome, row);
-      await chrome.waitFor(row + ".getAttribute('aria-expanded') === 'true'");
-      assert.equal(await chrome.stable('location.href'), roadmapAddress, 'click keeps the Roadmap address');
-      assert.equal(await chrome.stable("view.tab"), 'roadmap');
-      assert.match(await chrome.stable(row + ".parentElement.querySelector('.milestone-why').textContent"), new RegExp('state.*' + state));
-      if (state === 'claimed') assert.match(await chrome.stable(row + ".parentElement.querySelector('.milestone-why').textContent"), /held by/u);
-      await press(chrome, row);
-      await chrome.waitFor(row + ".getAttribute('aria-expanded') === 'false'");
-      await chrome.stable(row + '.focus(); true');
-      await chrome.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
-      await chrome.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
-      await chrome.waitFor(row + ".getAttribute('aria-expanded') === 'true'");
-      assert.equal(await chrome.stable('location.href'), roadmapAddress, 'Enter keeps the Roadmap address');
-      assert.equal(await chrome.stable("view.tab"), 'roadmap');
-      await press(chrome, row);
-      await chrome.waitFor(row + ".getAttribute('aria-expanded') === 'false'");
+    await chrome.waitFor(`${row('#2')}?.querySelector('.block-dot')`);
+    assert.match(await chrome.stable(`${row('#2')}.querySelector('.block-dot').getAttribute('aria-label')`), /#1 \(claimed\)/u);
+    assert.equal(await chrome.stable(`Boolean(${row('#3')}.querySelector('.block-dot'))`), false);
+    await chrome.stable("window.__requests=[];window.__fetch=window.fetch;window.fetch=(url,options)=>{window.__requests.push(String(url));return window.__fetch(url,options);};true");
+    const address = await chrome.stable('location.href');
+    const blocked = await opened('#2');
+    assert.match(blocked, /CriterionThe heading renders\./u, 'the approved dense detail leads with the criterion');
+    assert.doesNotMatch(blocked, /More detail stays in Items/u, 'only the first criterion sentence is shown');
+    assert.match(blocked, /Waits on#1 building.*web-2.*since/u, 'dependency includes state, holder and local time');
+    assert.match(blocked, /History.*added/u); assert.match(blocked, /Release.*Next.*G1/u);
+    assert.equal((await reads()).length, 1, 'the first opened summary reads its detail once');
+    for (const id of ['#2', '#6', '#5']) {
+      if (id !== '#2') await opened(id);
+      const text = await chrome.stable(`${row(id)}.parentElement.querySelector('.milestone-why').textContent`);
+      if (id === '#6') {
+        assert.match(text, /Agents.*web-1.*building/u); assert.match(text, /Sent back.*coordinator.*The title needs correction/u);
+        assert.match(text, /History.*claimed.*submitted.*sent back.*claimed again/u);
+      }
+      if (id === '#5') { assert.match(text, /Agents.*web-1.*built.*coordinator.*verified/u); assert.match(text, /History.*accepted.*landed/u); }
+      const before = await reads();
+      await press(chrome, row(id));
+      await chrome.stable(`${row(id)}.focus();true`);
+      await chrome.send('Input.dispatchKeyEvent', { type:'keyDown', key:'Enter', code:'Enter', windowsVirtualKeyCode:13 });
+      await chrome.send('Input.dispatchKeyEvent', { type:'keyUp', key:'Enter', code:'Enter', windowsVirtualKeyCode:13 });
+      await chrome.waitFor(`${row(id)}.getAttribute('aria-expanded')==='true'`);
+      assert.deepEqual(await reads(), before, 'reopening keeps the shared item-detail cache');
+      assert.equal(await chrome.stable('location.href'), address); assert.equal(await chrome.stable('view.tab'), 'roadmap');
+      await press(chrome, row(id));
     }
-    assert.deepEqual(JSON.parse(await chrome.stable('JSON.stringify(window.__requests)')).filter(url => /\/items\/\d/.test(url)), [], 'verified and building expansion needs no item detail request');
-    await press(chrome, "[...document.querySelectorAll('#roadmap .milestone-item.blocked')].find((row) => row.querySelector('.id').textContent === '#2')");
-    await chrome.waitFor("document.querySelector('#roadmap .milestone-why:not([hidden])')");
-    const open = Object.fromEntries((await read()).map((row) => [row.id, row]));
-    assert.match(open['#2'].why, /waits on#1 open/, 'the unfolded row names the item it waits on and that item\'s state');
-    assert.match(open['#2'].why, /state.*open, nobody holds it/, 'the unfolded row says its own state and who holds it');
-    assert.equal(open['#3'].why, null, 'unblocked rows stay as they were');
-    const requests = JSON.parse(await chrome.stable('JSON.stringify(window.__requests)'));
-    assert.deepEqual(requests.filter((url) => /\/items\/\d/.test(url)), [], 'unfolding reads the summaries already held and makes no detail request');
-    await press(chrome, "document.querySelector('#roadmap .milestone-why:not([hidden]) a.ref')");
-    await chrome.waitFor("!document.querySelector('[data-pane=items]').hidden && document.querySelector('#detail h2')?.textContent.includes('Waits on base')");
-    await press(chrome, "document.querySelector('[data-tab=roadmap]')");
-    await chrome.waitFor("!document.querySelector('[data-pane=roadmap]').hidden");
-    await press(chrome, "[...document.querySelectorAll('#roadmap .milestone-item.blocked')].find((row) => row.querySelector('.id').textContent === '#2')");
-    await chrome.waitFor("!document.querySelector('#roadmap .milestone-why:not([hidden])')");
-    // The sent-back item: nobody holds it now, though web-1 built it; its latest send-back note shows.
-    await press(chrome, "[...document.querySelectorAll('#roadmap .milestone-item.blocked')].find((row) => row.querySelector('.id').textContent === '#4')");
-    await chrome.waitFor("document.querySelector('#roadmap .milestone-why:not([hidden])')");
-    const sent = Object.fromEntries((await read()).map((row) => [row.id, row]));
-    assert.match(sent['#4'].why, /state.*open, nobody holds it/, `a sent-back item names no holder: ${sent['#4'].why}`);
-    assert.doesNotMatch(sent['#4'].why, /held by/, 'its past builder is never shown as holding it');
-    assert.match(sent['#4'].why, /the heading is missing/, 'its latest send-back note shows');
-    await press(chrome, "[...document.querySelectorAll('#roadmap .milestone-item.blocked')].find((row) => row.querySelector('.id').textContent === '#4')");
-    await chrome.waitFor("!document.querySelector('#roadmap .milestone-why:not([hidden])')");
-    await chrome.stable('window.__requests = []; true');
-    await chrome.send('Emulation.setDeviceMetricsOverride', { width: 375, height: 900, deviceScaleFactor: 1, mobile: false });
-    await press(chrome, "[...document.querySelectorAll('#roadmap .milestone-item.blocked')].find((row) => row.querySelector('.id').textContent === 'blocked-roadmap-other#2')");
-    await chrome.waitFor("document.querySelector('#roadmap .milestone-why:not([hidden])')");
-    const marker = JSON.parse(await chrome.stable(`JSON.stringify((() => {
-      const row = [...document.querySelectorAll('#roadmap .milestone-item.blocked')].find((entry) => entry.querySelector('.id').textContent === 'blocked-roadmap-other#2');
-      const text = row.querySelector('.t').getBoundingClientRect(), dot = row.querySelector('.block-dot').getBoundingClientRect();
-      return { visible: dot.width > 0 && dot.left >= text.left && dot.right <= text.right };
-    })())`));
-    assert.equal(marker.visible, true, 'the remote blocker dot stays visible when its long title is clipped on a phone');
-    const remote = Object.fromEntries((await read()).map((row) => [row.id, row]))['blocked-roadmap-other#2'];
-    assert.match(remote.why, /state.*open, nobody holds it/, 'the remote item has no current holder');
-    assert.match(remote.why, /waits on#1 open/, 'the remote dependency has its own state');
-    assert.match(remote.why, /lane heldweb: Review the remote dependency/, 'the remote lane hold keeps its reason');
-    assert.match(remote.why, /sent backRemote latest finding/, 'the remote send-back note keeps its first line');
-    assert.doesNotMatch(remote.why, /More detail stays in Items/, 'the expansion stays compact');
-    const remoteRequests = JSON.parse(await chrome.stable('JSON.stringify(window.__requests)'));
-    assert.deepEqual(remoteRequests.filter((url) => /\/items\/\d/.test(url)), [], 'remote expansion also needs no detail request');
-    await press(chrome, "document.querySelector('#roadmap .milestone-why:not([hidden]) a.ref')");
-    await chrome.waitFor("!document.querySelector('[data-pane=items]').hidden && document.querySelector('#detail h2')?.textContent.includes('Remote sent-back work')");
-    assert.equal(await chrome.stable("document.querySelector('#proj-name').textContent"), 'blocked-roadmap-other',
-      'the link opens the remote item, even though the local board has the same item id');
-    assert.deepEqual(chrome.exceptions, [], 'the blocked roadmap raises no uncaught page exception');
-  } finally {
-    if (chrome) await closeSnapshotChrome(chrome);
-    rmSync(profile, { recursive: true, force: true });
-    await view.stop();
-  }
+    for (const scheme of ['light', 'dark']) {
+      await chrome.send('Emulation.setEmulatedMedia', { features:[{name:'prefers-color-scheme',value:scheme}] });
+      await opened('#6');
+      const style = JSON.parse(await chrome.stable(`JSON.stringify((()=>{const panel=${row('#6')}.parentElement.querySelector('.milestone-why');const label=panel.querySelector('dt'),value=label.nextElementSibling;return {icons:panel.querySelectorAll('dt svg').length, labels:panel.querySelectorAll('dt').length,top:getComputedStyle(label).alignSelf,chip:getComputedStyle(panel.querySelector('.roadmap-step.no')).backgroundColor,danger:getComputedStyle(panel.querySelector('.roadmap-return')).backgroundColor,labelTop:label.getBoundingClientRect().top,valueTop:value.getBoundingClientRect().top};})())`));
+      assert.equal(style.icons, style.labels, `${scheme}: every label has an inline icon`);
+      assert.equal(style.top, 'start', `${scheme}: labels stay at the first value line`);
+      assert.ok(Math.abs(style.labelTop-style.valueTop)<2, `${scheme}: wrapped values keep their top-aligned label`);
+      assert.notEqual(style.danger, 'rgba(0, 0, 0, 0)', `${scheme}: send-back reason is tinted`);
+      await press(chrome, row('#6'));
+    }
+    await chrome.send('Emulation.setDeviceMetricsOverride', {width:375,height:900,deviceScaleFactor:1,mobile:false});
+    const remote = await opened('blocked-roadmap-other#2');
+    assert.match(remote, /Waits on#1 unclaimed/u); assert.match(remote, /Review the remote dependency/u);
+    assert.match(remote, /Sent back.*Remote latest finding/u); assert.doesNotMatch(remote, /More detail stays in Items/u);
+    const metrics = JSON.parse(await chrome.stable(`JSON.stringify((()=>{const r=${row('blocked-roadmap-other#2')},d=r.querySelector('.block-dot').getBoundingClientRect(),t=r.querySelector('.t').getBoundingClientRect();return {visible:d.width>0&&d.left>=t.left&&d.right<=t.right,width:document.documentElement.scrollWidth,viewport:innerWidth};})())`));
+    assert.ok(metrics.visible, 'the remote blocker mark stays visible on a phone'); assert.ok(metrics.width<=metrics.viewport);
+    await press(chrome, `${row('blocked-roadmap-other#2')}.parentElement.querySelector('.milestone-why a[data-go]')`);
+    await chrome.waitFor("view.tab==='items' && document.querySelector('#detail h2')?.textContent.includes('Remote sent-back work')");
+    assert.equal(await chrome.stable("document.querySelector('#proj-name').textContent"), 'blocked-roadmap-other');
+    assert.deepEqual(chrome.exceptions, []);
+  } finally { if(chrome) await closeSnapshotChrome(chrome); rmSync(profile,{recursive:true,force:true}); await view.stop(); }
 });
