@@ -188,7 +188,8 @@ test('withdraw leaves every milestone and the roadmap lists work to ship first [
   // Probe both sealed writers without consuming fixture IDs or changing board state.
   const withdrawMove = prepareEngineMove(board, 'withdraw', [dropped, { agentId: 'coordinator', reason: 'writer version' }], { id: 'withdraw-writer', actor: 'coordinator' });
   const cleanupMove = prepareEngineMove(board, 'editMilestoneItems', ['Now', { agentId: 'coordinator', remove: [dropped] }], { id: 'milestone-writer', actor: 'coordinator' });
-  assert.equal(WITHDRAW_MILESTONE_ENGINE, ENGINE_VERSION, 'the feature writer is the current engine');
+  assert.equal(WITHDRAW_MILESTONE_ENGINE, 51, 'withdraw retains its allocated feature engine');
+  assert.ok(ENGINE_VERSION >= WITHDRAW_MILESTONE_ENGINE, 'the current writer retains withdraw semantics');
   assert.equal(withdrawMove.engine, ENGINE_VERSION, 'withdraw writes use the current engine');
   assert.equal(cleanupMove.engine, ENGINE_VERSION, 'milestone cleanup writes use the current engine');
 
