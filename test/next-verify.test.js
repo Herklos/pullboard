@@ -2,14 +2,15 @@
 import { submitFixture } from './board-submit-fixture.js';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import * as store from '../src/board.js';
 import { main } from '../src/cli.js';
 import { loadConfig } from '../src/config.js';
-import { runFixtureGit } from './fixture-child.js';
+import { runFixtureChild, runFixtureGit } from './fixture-child.js';
+import { createE2eHelpers } from './e2e-helpers.js';
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
 const HOUR = 3_600_000;
@@ -89,4 +90,57 @@ test('[C7,P4] next --verify with nothing submitted yet says the builder is still
   assert.equal(ready.code, 0, ready.stderr);
   assert.match(ready.stdout, new RegExp(`next to verify: #${id} Being built`, 'u'));
   assert.equal(store.getItem(box.board, id).item_review_by, box.reviewerId, 'a submitted item is reserved as before');
+});
+
+test('a lone newcomer starts a reviewer with one command [V1,B26]', t => {
+  const helpers = createE2eHelpers();
+  t.after(helpers.cleanup);
+  const machine = helpers.sandbox();
+  machine.dir = join(machine.dir, "reviewer's board $dollar");
+  mkdirSync(machine.dir);
+  const box = helpers.project('true', machine);
+  const configFile = join(box.repo, 'pullboard.json');
+  const config = JSON.parse(readFileSync(configFile, 'utf8'));
+  config.lanes.review = { owns: [] };
+  writeFileSync(configFile, JSON.stringify(config, null, 2));
+  box.git(box.repo, 'add', 'pullboard.json');
+  box.git(box.repo, 'commit', '-q', '-m', 'chore: keep a dedicated reviewer lane');
+  box.git(box.web, 'merge', '-q', '--ff-only', 'main');
+  const model = box.env.PULLBOARD_MODEL;
+  delete box.env.PULLBOARD_MODEL;
+  const initialized = box.run(box.repo, 'init');
+  if (model !== undefined) box.env.PULLBOARD_MODEL = model;
+  assert.equal(initialized.code, 0, initialized.err);
+  const added = box.run(box.repo, 'add', 'web', 'Ready for review', '--specs', 'G1',
+    '--criterion', 'The readiness marker exists.', '--check', 'test -f web/ready');
+  assert.equal(added.code, 0, added.err);
+  assert.equal(box.run(box.web, 'claim', '1').code, 0);
+  const committed = helpers.commitFile(box, box.web, 'web/ready', 'ready\n', 'feat(web): readiness marker [G1]');
+  assert.equal(committed.status, 0, committed.stderr);
+  const submitted = box.run(box.web, 'submit', '1');
+  assert.equal(submitted.code, 0, submitted.err);
+  assert.match(submitted.out, /different agent session/iu);
+  const startup = submitted.out.split('\n').find(line => line.includes('git worktree add --detach'));
+  assert.ok(startup, 'submit prints the complete reviewer startup on one line');
+  assert.match(startup, /&&.*pullboard join review.*&&.*pullboard next --verify 1/u);
+  assert.equal(initialized.out.split('\n').filter(line => line.includes('git worktree add --detach')).length, 1,
+    'init explains the same reviewer path once');
+  const mainRefusal = JSON.parse(box.run(box.repo, 'next', '--verify', '1', '--json').out).error;
+  assert.equal(mainRefusal.code, 'MAIN_IS_COORDINATOR');
+  assert.match(mainRefusal.next, /different agent session/iu);
+  assert.match(mainRefusal.next, /git worktree add --detach.*&&.*pullboard join review.*&&.*pullboard next --verify 1/u);
+  const self = JSON.parse(box.run(box.web, 'next', '--verify', '1', '--json').out).error;
+  assert.equal(self.code, 'SELF_VERIFY', 'the startup guidance does not give the builder a verdict');
+  const command = startup.slice(startup.indexOf('cd ')).replaceAll('"<model name>"', "'Independent Reviewer Model'");
+  const independent = runFixtureChild('/bin/sh', ['-c', command], { cwd: box.repo,
+    env: { ...box.env, CODEX_THREAD_ID: 'independent-review-fixture' }, encoding: 'utf8' });
+  assert.equal(independent.status, 0, independent.context);
+  assert.match(independent.stdout, /next to verify: #1 Ready for review/u,
+    'the printed line reserves the submitted item from the new independent fixture session');
+  const board = store.openBoard(join(box.repo, '.git', 'pullboard', 'board.sqlite'));
+  try {
+    const item = store.getItem(board, 1);
+    assert.equal(item.item_status, 'submitted', 'startup reserves a review without writing a verdict');
+    assert.notEqual(item.item_review_by, item.item_built_by);
+  } finally { store.closeBoard(board); }
 });

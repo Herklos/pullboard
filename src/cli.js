@@ -35,6 +35,11 @@ import {
 import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
+import {
+  mainLaneWork,
+  refuseNextIdle,
+} from './next-steps.js';
+import { reviewerStartup } from './next-steps.js';
 import * as store from './board.js';
 import {
   CONFIG_FILE,
@@ -176,6 +181,7 @@ import { Refused } from './refused.js';
 import {
   applyStep,
   personAsk,
+  withStarterWork,
 } from './setup-rows.js';
 import { personNeeds } from './needs.js';
 import { personNeedsState } from './needs-state.js';
@@ -277,7 +283,10 @@ import {
   registerProjectAndLink,
   registeredProjectRootsSnapshot,
 } from './projects.js';
-import { milestoneRoadmap } from './roadmap.js';
+import {
+  milestoneRoadmap,
+  withdrawWithMilestones,
+} from './roadmap.js';
 import {
   rigorLines,
   rigorReport,
@@ -762,10 +771,9 @@ function checkMainVerifier(ctx, board, values) {
   const agents = store.listAgents(board).filter((agent) => agent.agent_id !== COORDINATOR);
   const listed = agents.length ? ` Agent worktrees: ${agents.slice(0, 6).map((agent) => `${displayAgentName(agent, ctx.config.agents.names)} at ${agent.agent_path}`).join('; ')}.` : '';
   const detached = tryGit(ctx.info.root, ['symbolic-ref', '-q', 'HEAD']).status !== 0 ? ' The main checkout is not on its branch; whoever switched it puts it back.' : '';
-  throw new Refused(
-    'MAIN_IS_COORDINATOR',
+  throw new Refused('MAIN_IS_COORDINATOR',
     `this is the main checkout, so this verdict would be the coordinator's.${listed}${detached}`,
-    'create a new reviewer worktree with git worktree add --detach .claude/worktrees/<reviewer-name> HEAD, using an unused folder; then cd there and run pullboard join <lane> --model "<model name>" and pullboard next --verify <id>. The reviewer must not be the builder. The coordinator instead adds --as coordinator',
+    reviewerStartup(ctx.info.root, ctx.config, values.verifyId),
   );
 }
 
@@ -1644,7 +1652,6 @@ function boardSetup(ctx, card, identity) {
       question: seat ? seatQuestion : `Waiting for the person to ${verb} ${names}.`, command,
       personCommand,
       afterAnswer: (toApply.length ? `The person already approved ${toApply.map(row => row.id).join(', ')}; pullboard spec apply writes them. ` : '') + 'The person approves draft rows and answers questions in Pullboard View or their own terminal; then the coordinator runs pullboard spec apply.',
-      meanwhile: seat ? 'While waiting, review independent approved work or send questions to the coordinator with pullboard shout coordinator "<what is needed>" --decision.' : 'While waiting, the agent may review independent approved work or prepare questions for the person.',
       agentNext: seat ? seatNext : (toApply.length ? 'pullboard spec apply for the approved rows; then ' : '') + `wait for the person to ${verb} ${names}; meanwhile ${command}` };
   }
   return current ? { step: current.number, total: 5, ...current, steps } : null;
@@ -1747,7 +1754,7 @@ async function resumeHere(io, view) {
   if (view.state !== 'running' && backgroundViewLine(view)) say(backgroundViewLine(view));
   if (card.inbox) for (const line of coordinatorInboxLines(card.inbox, name, (at) => span(ctx, at), firstLine)) say(line);
   say(`New agent worktrees: ${card.newWorktreeLocation}`);
-  card.setup = boardSetup(ctx, card, setupScope);
+  card.setup = withBoard(ctx, board => withStarterWork(boardSetup(ctx, card, setupScope), { board, me, main: isMain, config: ctx.config, root, seat: ctx.io.callerRole() === 'seat' }));
   if (card.setup) {
     say(`Setting up: step ${card.setup.step} of 5`);
     say(card.setup.question);
@@ -2788,7 +2795,7 @@ function reportSubmission(ctx, id, commit, gate, doctrine = []) {
   ctx.io.result?.({ id, commit, pin, gate, ...(doctrine.length ? { doctrine } : {}) });
   ctx.io.say(`submitted #${id} at ${commit.slice(0, 12)}; ${gate.report}`);
   ctx.io.say(`pinned as ${pin}, so this work can't be lost; keep your worktree until it is merged`);
-  ctx.io.say(`next: another agent checks out ${commit.slice(0, 12)} and runs: pullboard verify ${id} accept|reject`);
+  ctx.io.say(`next: ${reviewerStartup(primaryCheckoutRoot(ctx.info), ctx.config, id)}`);
   return 0;
 }
 
@@ -3186,7 +3193,7 @@ async function nextOnce(ctx, values) {
       familyPolicy: ctx.config.verify.family, ratio: ctx.config.verify.reviewRatio, runnable: values.runnable, routes: values.routes });
     const offer = held ? null : relayLinked(ctx.info.root) ? store.withVerifierStanding(board, { root: true }, findOffer) : findOffer();
     if (offer && !values.build) return { item: offer.item, offer, build: item ?? null };
-    if (!item) return { reasons };
+    if (!item) return { reasons, laneWork: ctx.info.isMain ? mainLaneWork(store.listItems(board)) : null };
     const reviewSkipped = values.build && !held
       ? { offeredItem: offer?.item.item_id ?? null, ratio: ctx.config.verify.reviewRatio, ...store.reviewQueue(board) } : null;
     const routed = seats ? await nextSeatContext(ctx, board, me, item, seats) : { context: ctx };
@@ -3309,14 +3316,10 @@ async function nextHere(io, values) {
       }
       return 0;
     }
-    if (!found.retry && Date.now() >= deadline) {
+    if (!found.retry && (found.laneWork || Date.now() >= deadline)) {
       if (values.verify) refuseWhileBuilding(ctx);
-      const waited = minutes ? ` after ${minutes} minutes` : '';
       const agents = withBoard(ctx, (board) => store.listAgents(board));
-      const repair = `${waited}. To keep looking: pullboard next --wait 9${values.verify ? ' --verify' : ''} (minutes; give the command a ten-minute timeout)`;
-      io.refusal?.(new Refused('NOTHING_FREE', found.reasons.join('; ') + repair));
-      io.err(`pullboard: [NOTHING_FREE] ${found.reasons.map((reason) => displayedWait(reason, agents, ctx.config)).join('; ')}${repair}`);
-      return 1;
+      return refuseNextIdle(io, found.reasons, found.reasons.map((reason) => displayedWait(reason, agents, ctx.config)), { minutes, verify: values.verify, laneWork: found.laneWork });
     }
     if (!found.retry) await new Promise((done) => setTimeout(done, 5000));
   }
@@ -3725,12 +3728,8 @@ function workCommands(io, args) {
       io.say(`#${first} merged as ${commit.slice(0, 12)}`);
       return 0;
     }),
-    withdraw: () => act(async (ctx, board, me) => {
-      await ordered(ctx, board, 'withdraw', [idArg(first), { agentId: me.id, reason: [second, ...rest].filter(Boolean).join(' ') }]);
-      io.result?.({ id: idArg(first), reason: [second, ...rest].filter(Boolean).join(' ') });
-      io.say(`withdrew #${first}`);
-      return 0;
-    }),
+    withdraw: () => act((ctx, board, me) => withdrawWithMilestones(ctx, board, me, idArg(first),
+      [second, ...rest].filter(Boolean).join(' '), ordered)),
     refreeze: () => act(async (ctx, board, me) => {
       const result = await ordered(ctx, board, 'refreeze', [idArg(first), { agentId: me.id, freeze: freezer(ctx, { captureVerifyPolicy: true, board }) }]);
       io.result?.({ id: idArg(first), ...result });

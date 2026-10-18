@@ -3,6 +3,33 @@
  * coordinator's spec apply, never for the person again, and each open row gets the command that
  * decides it, approve for a draft and answer for a pending question.
  */
+import { nextFor } from './board.js';
+import { proposeLanes } from './init.js';
+
+/** Show available starter work beside undecided rows, without changing any approval or apply move [S1,B26]. */
+export function withStarterWork(setup, { board, me, main, config, root, seat }) {
+  if (setup?.waitingOn !== 'person-approval') return setup;
+  const meanwhile = seat
+    ? 'While waiting, review independent approved work or send questions to the coordinator with pullboard shout coordinator "<what is needed>" --decision.'
+    : 'While waiting, the agent may review independent approved work or prepare questions for the person.';
+  const waiting = { ...setup, meanwhile };
+  const proposed = main ? proposeLanes(root, config) : [];
+  const lanes = Object.entries(config.lanes).filter(([, lane]) => lane.owns.length).map(([name]) => name);
+  if (!main && !lanes.includes(me.lane)) return waiting;
+  const item = nextFor(board, { agentId: me.id, lane: me.lane,
+    ...(main ? { lanes: [...lanes, ...proposed.map(lane => lane.name)] } : {}) }).item;
+  if (!item || (main && ![...lanes, ...proposed.map(lane => lane.name)].includes(item.item_lane))) return waiting;
+  /** Quote a configured path only when the command needs it. */
+  const word = value => /^[A-Za-z0-9._/,-]+$/u.test(value) ? value : "'" + value.replaceAll("'", "'\\''") + "'";
+  const proposal = proposed.find(lane => lane.name === item.item_lane);
+  const command = !main ? `pullboard claim ${item.item_id}` : !Object.hasOwn(config.lanes, item.item_lane)
+    ? `pullboard lane add ${item.item_lane} --owns ${word(proposal.owns.join(','))}`
+    : `pullboard worktree ${item.item_lane} --model "<model name>"`;
+  return { ...waiting,
+    buildNow: { item: item.item_id, lane: item.item_lane, title: item.item_title, command },
+    meanwhile: `Starter items can be claimed and built now while the person decides these rows in parallel. First: #${item.item_id} ${item.item_title}. Start: ${command}`,
+    agentNext: main && setup.approvedRowIds?.length ? 'pullboard spec apply' : command };
+}
 
 /**
  * The setup step once every open row has a person decision that spec apply has not written yet.

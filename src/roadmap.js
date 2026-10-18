@@ -10,6 +10,7 @@ import {
   events,
   laneHolds,
   listItems,
+  milestones,
   openDecisions,
   PERSON,
   openBoard,
@@ -20,6 +21,45 @@ import {
   repoInfo,
 } from './git.js';
 import { listApiProjects } from './projects.js';
+import { milestoneReferencesToRemove } from './milestones.js';
+
+/** Parse a registered-project reference and resolve only an unambiguous project name or basename. */
+export function resolveMilestoneProjectReference(reference, projects) {
+  const match = /^(.+)#([1-9]\d*)$/.exec(reference);
+  if (!match) return null;
+  const [, repo, number] = match;
+  const candidates = projects.filter((project) => project.name === repo || basename(project.root) === repo);
+  return { repo, number, project: candidates.length === 1 ? candidates[0] : null };
+}
+
+/** Collect unambiguous registered aliases for one local item before milestone cleanup. */
+export function localMilestoneAliases(root, board, id) {
+  const projects = listApiProjects();
+  const localRoot = resolve(root);
+  const aliases = new Set();
+  for (const milestone of milestones(board)) {
+    for (const reference of milestone.items) {
+      if (typeof reference !== 'string') continue;
+      const parsed = resolveMilestoneProjectReference(reference, projects);
+      if (!parsed?.project || !Number.isSafeInteger(Number(parsed.number)) || Number(parsed.number) !== id) continue;
+      if (resolve(parsed.project.root) === localRoot) aliases.add(reference);
+    }
+  }
+  return [...aliases];
+}
+
+/** Withdraw through ordered moves, then remove every local milestone alias and report the result. */
+export async function withdrawWithMilestones(ctx, board, me, id, reason, ordered) {
+  await ordered(ctx, board, 'withdraw', [id, { agentId: me.id, reason }]);
+  const removals = milestoneReferencesToRemove(board, [id, ...localMilestoneAliases(ctx.info.root, board, id)]);
+  const left = removals.map(({ name }) => name);
+  for (const { name, remove } of removals) {
+    await ordered(ctx, board, 'editMilestoneItems', [name, { agentId: me.id, remove }]);
+  }
+  ctx.io.result?.({ id, reason, milestones: left });
+  ctx.io.say(`withdrew #${id}${left.length ? `; removed it from milestone ${left.join(', ')}` : ''}`);
+  return 0;
+}
 
 /** Resolve a repo-qualified milestone item against registered boards, optionally within an API scope.
  * @param {string} root
@@ -33,14 +73,13 @@ export function milestoneRoadmap(root, board, options = {}) {
   const externalItems = new Map();
   const hidden = () => ({ id: `external-${++hiddenExternal}`, title: 'External item', status: 'unavailable' });
   const resolveExternal = (reference) => {
-    const match = /^(.+)#([1-9]\d*)$/.exec(reference);
-    if (!match) return options.hideOutOfScope ? hidden() : { id: reference, title: reference, status: 'unavailable' };
-    const [, repo, number] = match;
-    const candidates = projects.filter((project) => project.name === repo || basename(project.root) === repo);
-    if (candidates.length !== 1) return options.hideOutOfScope ? hidden() : { id: reference, title: `#${number} (${repo})`, status: 'unavailable' };
+    const parsed = resolveMilestoneProjectReference(reference, projects);
+    if (!parsed) return options.hideOutOfScope ? hidden() : { id: reference, title: reference, status: 'unavailable' };
+    const { repo, number, project } = parsed;
+    if (!project) return options.hideOutOfScope ? hidden() : { id: reference, title: `#${number} (${repo})`, status: 'unavailable' };
     try {
-      const info = repoInfo(candidates[0].root);
-      const other = resolve(candidates[0].root) === resolve(root)
+      const info = repoInfo(project.root);
+      const other = resolve(project.root) === resolve(root)
         ? board
         : openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), undefined, { isMain: codeIsFromMain() });
       try {
