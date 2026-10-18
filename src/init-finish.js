@@ -106,14 +106,17 @@ export function beginInitCommit(info) {
     else if (actual) skipped.add(name);
   }
   const owned = new Set(files.keys());
+  const initialIndex = new Map();
   /** Retain the exact bytes init wrote, without adopting a file that already held user edits. */
   function written(name) {
     if (typeof name !== 'string') return;
     if (!owned.has(name) && [...blocked].some(path => path === name || (path?.endsWith('/') && name.startsWith(path)))) { skipped.add(name); return; }
+    if (!initialIndex.has(name)) initialIndex.set(name, tryGit(info.root, ['ls-files', '--stage', '-z', '--', `:(literal)${name}`]).stdout);
     const hash = setupFile(info.root, name);
     if (hash) { owned.add(name); files.set(name, hash); }
   }
-  return { info, file, files, written, skipped };
+  for (const name of files.keys()) if (!initialIndex.has(name)) initialIndex.set(name, tryGit(info.root, ['ls-files', '--stage', '-z', '--', `:(literal)${name}`]).stdout);
+  return { info, file, files, written, skipped, initialIndex };
 }
 
 /** Ask once; closing stdin is a decline, while Enter accepts the displayed file list. */
@@ -159,9 +162,17 @@ export async function finishInitCommit(plan, { io, yes, landed, permissions }) {
   if (changed.some(([name, hash]) => setupFile(info.root, name) !== hash)) {
     throw new Refused('NOT_COMMITTED', 'a setup file changed while confirmation was open; review the change and run pullboard init --yes again');
   }
+  if (changed.some(([name, hash]) => {
+    const index = tryGit(info.root, ['ls-files', '--stage', '-z', '--', `:(literal)${name}`]);
+    return index.status !== 0 || (index.stdout !== plan.initialIndex.get(name) && indexedSetupFile(info.root, name) !== hash);
+  })) {
+    throw new Refused('NOT_COMMITTED', 'a setup file was staged differently while confirmation was open; your index is unchanged; review it, then run pullboard init --yes again');
+  }
   try {
     git(info.root, ['add', '-f', '--', ...paths.map(name => `:(literal)${name}`)]);
-    git(info.root, ['commit', '--only', '-q', '-m', 'chore: set up Pullboard', '--', ...paths.map(name => `:(literal)${name}`)]);
+    const identity = { ...process.env };
+    for (const name of ['GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL', 'EMAIL']) delete identity[name];
+    git(info.root, ['commit', '--only', '-q', '-m', 'chore: set up Pullboard', '--', ...paths.map(name => `:(literal)${name}`)], { env: identity });
   } catch (error) {
     // Every selected path was clean or absent before init; restore only those index entries.
     if (head.status === 0) tryGit(info.root, ['reset', '-q', head.stdout, '--', ...paths.map(name => `:(literal)${name}`)]);

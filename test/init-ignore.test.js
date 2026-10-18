@@ -1,11 +1,13 @@
 /** Setup preserves local ignore rules and excludes real nested agent worktrees [I1,I2,I16]. */
 import assert from 'node:assert/strict';
-import { runFixtureChild, runFixtureGit } from './fixture-child.js';
+import { runFixtureChild, runFixtureGit, startFixtureChild } from './fixture-child.js';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
-import { AGENT_SHELL_MARKERS } from '../src/person.js';
+import { SETUP_COMMIT_QUESTION } from '../src/init-finish.js';
+import { RELAY_OFFER_QUESTION } from '../src/init.js';
+import { AGENT_SHELL_MARKERS, SSH_SHELL_MARKERS } from '../src/person.js';
 
 /** Create a private Git repo whose installed hooks invoke this candidate CLI only. */
 function fixture(t, ignore) {
@@ -37,6 +39,7 @@ function fixture(t, ignore) {
     return { code: result.status, stdout: result.stdout, stderr: result.failure ?? result.stderr, failure: result.failure };
   }
   git('init', '-q', '-b', 'main');
+  git('config', 'user.name', 'Init Fixture'); git('config', 'user.email', 'init@example.com');
   writeFileSync(join(root, 'pullboard.json'), JSON.stringify({ gate: 'true', lanes: { web: { owns: ['web/'], specs: [] } } }));
   if (ignore !== undefined) writeFileSync(join(root, '.gitignore'), ignore);
   return { root, git, cli, output, env };
@@ -80,6 +83,7 @@ test('setup confirmation keeps the index when Git identity is missing and retrie
   const box = fixture(t);
   rmSync(join(box.root, 'pullboard.json'));
   for (const key of ['GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL']) delete box.env[key];
+  box.git('config', '--unset', 'user.name'); box.git('config', '--unset', 'user.email');
   writeFileSync(join(box.root, 'README.md'), '# User staging\n');
   box.git('add', 'README.md');
   const staged = box.git('diff', '--cached', '--binary');
@@ -143,6 +147,67 @@ test('setup confirmation preserves a different version staged from its saved wor
   assert.equal(box.git('show', ':SPEC.md'), staged.trimEnd(), 'the distinct staged version survives');
   assert.equal(box.git('diff', '--cached', '--binary', '--', 'SPEC.md'), before, 'the staged patch remains exact');
   assert.equal(readFileSync(file, 'utf8'), original, 'the working version remains exact too');
+});
+
+/** Run a real terminal confirmation, staging the caller's change only after the question appears. */
+async function confirmSetupAfter(t, box, beforeEnter) {
+  const env = { ...box.env, SHELL: '/bin/sh', PULLBOARD_VIEW_BACKGROUND: '0' };
+  for (const marker of [...AGENT_SHELL_MARKERS, ...SSH_SHELL_MARKERS, 'CI']) delete env[marker];
+  const word = value => "'" + value.replaceAll("'", "'\\''") + "'";
+  const cli = resolve(import.meta.dirname, '../bin/pullboard.js');
+  const inner = `${word(process.execPath)} ${word(cli)} init; echo "pty-exit:$?"`;
+  const script = process.platform === 'darwin' ? ['-q', '/dev/null', '/bin/sh', '-c', inner] : ['-qec', inner, '/dev/null'];
+  const child = startFixtureChild('/bin/sh', ['-c', '/bin/cat | /usr/bin/script "$@"', 'sh', ...script],
+    { cwd: box.root, env, stdio: ['pipe', 'pipe', 'pipe'] });
+  t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM'); });
+  let output = '', entered = false, closed = false;
+  child.stdout.setEncoding('utf8').on('data', part => {
+    output += part;
+    if (!entered && output.includes(SETUP_COMMIT_QUESTION.trim())) {
+      entered = true; beforeEnter(); child.stdin.write('\r');
+    }
+    if (!closed && (output.includes(RELAY_OFFER_QUESTION.trim()) || /pty-exit:\d+/u.test(output))) {
+      closed = true; child.stdin.end();
+    }
+  });
+  await new Promise((resolveRun, reject) => { child.once('error', reject); child.once('close', resolveRun); });
+  return { entered, output, code: Number(/pty-exit:(\d+)/u.exec(output)?.[1]) };
+}
+
+test('setup confirmation preserves an index-only edit made while the prompt is open [I1,I2]', { timeout: 30_000 }, async t => {
+  const box = fixture(t);
+  rmSync(join(box.root, 'pullboard.json'));
+  writeFileSync(join(box.root, 'README.md'), '# Existing repository\n');
+  box.git('add', 'README.md'); box.git('commit', '-q', '-m', 'chore: initial repository');
+  assert.equal(box.output('init').code, 0);
+  const head = box.git('rev-parse', 'HEAD'), file = join(box.root, 'SPEC.md');
+  const original = readFileSync(file, 'utf8'), staged = original + '\nA note staged during confirmation.\n';
+  let before;
+  const confirmed = await confirmSetupAfter(t, box, () => {
+    writeFileSync(file, staged); box.git('add', 'SPEC.md'); writeFileSync(file, original);
+    before = box.git('diff', '--cached', '--binary');
+  });
+  assert.equal(confirmed.entered, true, 'the actual human question appeared before the index changed');
+  assert.equal(box.git('show', ':SPEC.md'), staged.trimEnd(), 'the new index-only version survives Enter');
+  assert.equal(box.git('diff', '--cached', '--binary'), before, 'the whole staged patch remains exact');
+  assert.equal(readFileSync(file, 'utf8'), original, 'the working version remains exact too');
+  assert.equal(box.git('rev-parse', 'HEAD'), head, 'a stale confirmation commits nothing');
+  assert.equal(confirmed.code, 1, confirmed.output);
+  assert.match(confirmed.output, /\[NOT_COMMITTED\].*staged differently while confirmation was open/u);
+});
+
+test('setup commits use repository identity despite inherited agent identity [I1,I2]', t => {
+  const box = fixture(t);
+  rmSync(join(box.root, 'pullboard.json'));
+  box.git('config', 'user.name', 'Repository Owner'); box.git('config', 'user.email', 'owner@example.invalid');
+  Object.assign(box.env, { GIT_AUTHOR_NAME: 'Inherited Agent', GIT_AUTHOR_EMAIL: 'agent@example.invalid',
+    GIT_COMMITTER_NAME: 'Inherited Agent', GIT_COMMITTER_EMAIL: 'agent@example.invalid', EMAIL: 'agent@example.invalid' });
+  const configured = box.git('config', '--local', '--get-regexp', '^user\\.');
+  const initialized = box.cli('init', '--yes');
+  assert.equal(initialized.code, 0, initialized.stderr);
+  assert.equal(box.git('log', '-1', '--format=%an <%ae> / %cn <%ce>'),
+    'Repository Owner <owner@example.invalid> / Repository Owner <owner@example.invalid>', 'both identities come from this repository');
+  assert.equal(box.git('config', '--local', '--get-regexp', '^user\\.'), configured, 'setup never changes repository identity settings');
 });
 
 test('a fresh init tells the person and the agent how to start [I9,I1]', t => {
