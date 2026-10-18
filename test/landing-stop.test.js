@@ -63,6 +63,8 @@ test('queued work must not start', () => writeFileSync(${JSON.stringify(queued)}
     assert.match(output, /expected: 1/u);
     assert.match(output, /actual: 2/u);
     assert.match(output, /02-failure\.test\.js:\d+:\d+/u);
-    assert.match(output, /# fail [1-9]\d*/u, `${where} counts the assertion as a failure`);
+    assert.match(output, /(?:^|\n)\s*# fail 1(?:\n|$)/u, `${where} counts the assertion exactly once`);
+    assert.equal(output.match(/not ok \d+ - later assertion owns its report/gu)?.length, 1,
+      `${where} never duplicates an already reported assertion`);
   }
 });
