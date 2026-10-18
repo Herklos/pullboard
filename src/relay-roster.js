@@ -1,8 +1,10 @@
 /** Who reads this computer's linked boards: paired phones and joined computers, by name [H17]. */
-import { ENGINE_VERSION } from './machine.js';
 import { listApiProjects } from './projects.js';
 import { readRelayMachine } from './relay-machine.js';
-import { relayMachineContext, relayOrigin } from './relay.js';
+import {
+  relayMachineContext,
+  relayRosterRead,
+} from './relay.js';
 
 const MACHINE = /^[A-Za-z0-9_.-]{1,128}$/u;
 const DEVICE = /^device-[0-9a-f]{32}$/u;
@@ -10,9 +12,7 @@ const DEVICE = /^device-[0-9a-f]{32}$/u;
 /** Read one roster document with a board's machine credential; an older or unreachable relay gives null. */
 async function rosterRead(state, path) {
   try {
-    const response = await fetch(relayOrigin(state.url) + path, { redirect: 'error', signal: AbortSignal.timeout(5000),
-      headers: { authorization: 'Bearer ' + state.token, 'x-pullboard-engine': String(ENGINE_VERSION) } });
-    return response.ok ? await response.json() : null;
+    return await relayRosterRead(state, path);
   } catch {
     // The roster is a courtesy: local names and dates still print when the relay cannot answer.
     return null;

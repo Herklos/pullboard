@@ -1627,6 +1627,20 @@ export async function deliverDeviceWraps(root, io) {
 /** Expose board-scoped machine context only to the native setup/approval adapter. */
 export function relayMachineContext(root) { return loadLink(linkFile(root)); }
 
+/** Ignore notices from courtesy roster reads; disconnected boards keep their local labels and dates. */
+function ignoreRosterNotice() {}
+
+const ROSTER_READ_IO = Object.freeze({ ignoreRelayEnvironmentToken: true, err: ignoreRosterNotice });
+
+/** Read only the fixed, board-scoped roster resources through the CLI's existing outbound transport. */
+export async function relayRosterRead(state, path) {
+  const board = typeof state?.board === 'string' && /^[0-9a-f]{32}$/u.test(state.board);
+  const allowed = typeof path === 'string' && (path === '/api/v1/devices' || /^\/api\/v1\/devices\/device-[0-9a-f]{32}$/u.test(path) ||
+    (board && path === `/auth/machines?board=${state.board}`));
+  if (!allowed) throw new Refused('RELAY_ROSTER_PATH', 'the roster requested an unsupported relay resource');
+  return request(state, path, { method: 'GET', signal: AbortSignal.timeout(5000) }, ROSTER_READ_IO);
+}
+
 /** Require one exact phone approval before revoking and removing a device from the trusted roster. */
 export async function relayRevokeDevice(root, deviceId, io) {
   requirePersonChannel(io.personChannel);
