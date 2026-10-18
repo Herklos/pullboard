@@ -233,7 +233,9 @@ test('a child process listen denial reads as sandbox blocked [C7,B26]', (t) => {
   assert.equal(python.code, 1, pythonOutput);
   assert.match(python.err, /SANDBOX_BLOCKED/u, 'submit names a scanner-known denial from a child traceback');
   assert.match(python.err, /file access .*\(EACCES\)/u);
-  assert.match(python.err, /Ask the person to allow this operation/u);
+  assert.match(python.err, /ask the coordinator to bring (?:it|this operation) to the person/iu);
+  assert.match(python.err, /pullboard shout coordinator .*--decision/u);
+  assert.doesNotMatch(python.err, /\bask the person\b/iu);
   assert.doesNotMatch(python.err, /GATE_RED/u);
 
   const pythonSource = childPythonTestSource();
@@ -1106,12 +1108,14 @@ for (const mode of ['deleted source', 'topic parent', 'merge commit']) {
 
 test('a sandbox-blocked gate asks the person [I1,C7]', async (t) => {
   const command = 'node -e "console.error(process.env.BLOCKED_DIAGNOSTIC); process.exit(Number(process.env.BLOCKED_EXIT || 1))"';
-  /** Assert the actual CLI names the refused operation and directs the person to restore access. */
+  /** Assert the actual CLI keeps the refused operation and routes the access request through the coordinator. */
   function blocked(result, operation) {
     assert.equal(result.code, 1, result.out + result.err);
     assert.match(result.err, /SANDBOX_BLOCKED/u);
     assert.ok(result.err.includes(operation), result.err);
-    assert.match(result.err, /Ask the person to allow this operation/u);
+    assert.match(result.err, /ask the coordinator to bring (?:it|this operation) to the person/iu);
+    assert.match(result.err, /pullboard shout coordinator .*--decision/u);
+    assert.doesNotMatch(result.err, /\bask the person\b/iu);
     assert.match(result.err, /run the gate outside the sandbox/u);
     assert.match(result.err, /keep the tests unchanged/u);
   }
