@@ -1,12 +1,13 @@
 /** @pullboard-test-input source-tree */
 /** One person-facing obligation builder across sessions and transports [N26,A9]. */
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import { main } from '../src/cli.js';
+import { parseSpec } from '../src/spec.js';
 import { serveMcp } from '../src/mcp.js';
 import { createE2eHelpers } from './e2e-helpers.js';
 
@@ -69,4 +70,54 @@ test('one builder lists what needs the person [N26,A9]', async (t) => {
   const reply = JSON.parse(output);
   assert.equal(reply.result?.isError, false, JSON.stringify(reply));
   assert.deepEqual(reply.result.structuredContent.needsYou, expected, 'MCP uses the same complete list');
+});
+
+
+test('a pending question names pullboard spec answer [S1,B26]', async (t) => {
+  const e2e = createE2eHelpers();
+  t.after(e2e.cleanup);
+  const box = e2e.sandbox();
+  const repo = join(box.dir, 'newcomer');
+  mkdirSync(repo);
+  box.git(repo, 'init', '-q', '-b', 'main');
+  const initialized = box.run(repo, 'init', '--blueprint', 'web-app');
+  assert.equal(initialized.code, 0, initialized.err || initialized.out);
+  box.git(repo, 'add', '-A');
+  box.git(repo, 'commit', '-q', '-m', 'chore: preserve newcomer setup');
+  const file = join(repo, 'SPEC.md');
+  const source = readFileSync(file, 'utf8');
+  const question = parseSpec(source).rows.find(row => row.status === 'pending' && row.text.startsWith('The app is built with:'));
+  assert.ok(question, 'the actual web-app blueprint files its framework question');
+
+  // Reproduce the dead end invited by the old wording, then restore the exact pending source.
+  writeFileSync(file, source.replace(`- ${question.id} [pending,`, `- ${question.id} [approved,`));
+  const handEdit = box.run(repo, 'spec', 'check');
+  assert.notEqual(handEdit.code, 0);
+  assert.match(handEdit.out + handEdit.err, /pending question answered by hand/u);
+  writeFileSync(file, source);
+
+  const resumed = box.run(repo, 'resume', '--json');
+  assert.equal(resumed.code, 0, resumed.err || resumed.out);
+  const pending = JSON.parse(resumed.out).needsYou.filter(need => need.kind === 'pending');
+  assert.equal(pending.length, 4, 'all four real blueprint questions remain visible');
+  for (const need of pending) assert.equal(need.what, `pullboard spec answer ${need.id} "<choice>"`);
+  const human = box.run(repo, 'resume');
+  assert.equal(human.code, 0, human.err || human.out);
+  assert.doesNotMatch(human.out, /answer in SPEC\.md/u);
+  assert.ok(human.out.includes(`pullboard spec answer ${question.id} "<choice>"`));
+  const { personNeeds } = await import('../src/needs.js');
+  const browserBuilder = runInNewContext(`(${personNeeds.toString()})`);
+  const browserNeeds = browserBuilder({ spec: parseSpec(source).rows }).filter(need => need.kind === 'pending');
+  assert.deepEqual(JSON.parse(JSON.stringify(browserNeeds)), pending, 'the standalone browser builder gives the same commands');
+
+  const answered = box.run(repo, 'spec', 'answer', question.id, 'SvelteKit');
+  assert.equal(answered.code, 0, answered.err || answered.out);
+  assert.equal(readFileSync(file, 'utf8'), source, 'the command records the decision before changing the file');
+  const applied = box.run(repo, 'spec', 'apply');
+  assert.equal(applied.code, 0, applied.err || applied.out);
+  const row = parseSpec(readFileSync(file, 'utf8')).rows.find(row => row.id === question.id);
+  assert.equal(row.status, 'approved');
+  assert.match(row.text, /^The app is built with: SvelteKit\./u);
+  const checked = box.run(repo, 'spec', 'check');
+  assert.equal(checked.code, 0, checked.err || checked.out);
 });

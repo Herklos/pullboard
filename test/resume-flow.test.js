@@ -927,3 +927,50 @@ test('an upgraded configured board stays set up before its first resume [I1,I2]'
   assert.equal(complete.setupStartedAt, view.setupStartedAt);
   assert.equal(statSync(join(stateDirectory, 'setup-complete.json')).mode & 0o077, 0);
 });
+
+test('a board building without spec rows is not told to draft the spec first [I10,B26]', async t => {
+  const box = releaseFixture(t, { freshSetup: true, historyBeforeInit: true });
+  const file = join(box.repo, 'pullboard.json');
+  const config = JSON.parse(readFileSync(file, 'utf8'));
+  config.gate = 'true';
+  config.lanes = { app: { owns: ['app/'] } };
+  writeFileSync(file, JSON.stringify(config));
+  mkdirSync(join(box.repo, 'app'));
+  writeFileSync(join(box.repo, 'app/first.txt'), 'first working item\n');
+  box.git(box.repo, 'add', '-A');
+  box.git(box.repo, 'commit', '-q', '-m', 'chore: initialize the private board');
+  const spec = box.run(box.repo, 'spec', '--json');
+  assert.equal(spec.status, 0, spec.failure || spec.stderr);
+  assert.deepEqual(JSON.parse(spec.stdout).rows.filter(row => row.file === 'SPEC.md'), []);
+  const added = box.run(box.repo, 'add', 'app', 'Build the first useful thing', '--criterion', 'The first useful thing works.', '--json');
+  assert.equal(added.status, 0, added.failure || added.stderr || added.stdout);
+  assert.equal(JSON.parse(added.stdout).item.item_spec_ids, '', 'real board items need no spec rows');
+  for (let repeat = 0; repeat < 2; repeat++) {
+    const resumed = box.run(box.repo, 'resume', '--json');
+    assert.equal(resumed.status, 0, resumed.failure || resumed.stderr || resumed.stdout);
+    const card = JSON.parse(resumed.stdout);
+    assert.notEqual(card.setup?.step, 1, 'an active rowless board skips the required spec step');
+    assert.doesNotMatch(card.next, /spec draft|decompose|person.*approv/iu,
+      'the work has an actionable next step without spec approval');
+    if (card.setup) {
+      const specStep = card.setup.steps.find(step => step.number === 1);
+      assert.equal(specStep.done, true);
+      assert.match(specStep.question, /optional/iu);
+      assert.match(specStep.command, /pullboard spec draft/u);
+    }
+    const text = box.run(box.repo, 'resume');
+    assert.equal(text.status, 0, text.failure || text.stderr || text.stdout);
+    assert.match(text.stdout, /spec rows are optional[^\n]*pullboard spec draft/iu,
+      'resume offers the way to add rows without making it the work prerequisite');
+    assert.doesNotMatch(text.stdout, /^next: .*spec draft/mu);
+  }
+  await openSetupView(box);
+  for (let repeat = 0; repeat < 2; repeat++) {
+    const resumed = box.run(box.repo, 'resume', '--json');
+    assert.equal(resumed.status, 0, resumed.failure || resumed.stderr || resumed.stdout);
+    const card = JSON.parse(resumed.stdout);
+    assert.equal(card.setup, null, 'the working board can finish setup without adding rows');
+    assert.doesNotMatch(card.next, /spec draft|decompose|person.*approv/iu,
+      'completed setup keeps directing the coordinator to the actual work');
+  }
+});
