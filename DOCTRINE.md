@@ -17,12 +17,16 @@ Statuses: approved = in force · draft = proposed · wont = considered and decli
 - C4 [approved, must] Refusals throw Refused(code, message); nothing else exits the process except the bin. | gate: review
 - C5 [approved, must] Text from files or users is escaped before it reaches a page. | gate: test/view.test.js
 - C6 [draft, aim] Functions under 60 lines and files under 1,000. | gate: review
+- C9 [approved, must] Source and test files stay under 1500 lines; existing excess can only fall. Why: bounded files keep changes and reviews manageable. | gate: check node bin/checks/file-size.js | count: 111
+- C8 [approved, must] No bare empty catch hides a failure; existing cases can only fall. Why: failures need handling or an explicit reason to ignore them. | gate: check node bin/checks/empty-catch.js | count: 13
 
 ## T · Tests
 - T1 [approved, must] Tests use node:test against real git repos and a real SQLite file, not mocks. | gate: review
 - T2 [approved, must] Every test name cites the spec rows it proves. | gate: review
 - T3 [approved, must] The suite passes on Node 22, 24 and 26 before a release. | gate: release check
 - T4 [draft, must] A check that guards a rule is shown failing on a broken copy before anyone trusts it. | gate: review
+- T5 [approved, must] Every test name cites the spec rows it proves; existing omissions can only fall. Why: a passing test must name the requirement it checks. | gate: check node bin/checks/test-names.js | count: 15
+- T6 [approved, must] Tests declare the source files they read; existing omissions can only fall. Why: affected-test selection must see those dependencies. | gate: check node bin/checks/test-inputs.js | count: 19
 
 ## G · Git and the gate
 - G1 [approved, must] `npm run gate` (spec check and tests) passes before every push. | gate: pre-push hook
