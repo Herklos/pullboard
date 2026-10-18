@@ -49,7 +49,7 @@ export function roadmapBlock(item, context = {}) {
   }).join('<span class="roadmap-arrow" aria-hidden="true"> → </span>');
   const releases = (context.releases || []).map(release => '<b>'+escape(release)+'</b>').join(', ');
   const specs = (item.specs || []).map(escape).join(', ');
-  const rows = field('Criterion','<b>'+escape(criterion)+'</b>','roadmap-criterion')+field('Agents',agents.join(' · '))
+  const rows = field('Criterion',criterion?'<b>'+escape(criterion)+'</b>':'','roadmap-criterion')+field('Agents',agents.join(' · '))
     +field('Waits on',waiting.join('<br>'))+field('Blocks',downstream.map(ref).join(' '))
     +field('Sent back',returned,'roadmap-return')+field('History',history,'roadmap-history')
     +field('Release',[releases,specs?'spec '+specs:''].filter(Boolean).join(' · '));

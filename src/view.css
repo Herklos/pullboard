@@ -922,7 +922,7 @@ code.inline.long { white-space: break-spaces; overflow-wrap: anywhere; }
 .milestone-item[role="button"] { cursor: pointer; }
 .milestone-item[role="button"]:hover { background: var(--surface-2); }
 .roadmap-status { display: inline-flex; align-items: center; gap: 6px; }
-.roadmap-blocked svg, .roadmap-items svg { width: 12px; height: 12px; flex: none; }
+.roadmap-blocked svg, .roadmap-landed svg, .roadmap-items svg { width: 12px; height: 12px; flex: none; }
 .roadmap-detail { display: grid; grid-template-columns: 104px minmax(0, 1fr); gap: 5px 12px; margin: 10px 0 0; font-size: 12.5px; line-height: 1.55; }
 .roadmap-detail dt { display: flex; align-self: start; align-items: flex-start; gap: 6px; color: var(--ink-muted); white-space: nowrap; }
 .roadmap-detail dt svg { flex: none; width: 14px; height: 14px; margin-top: 3px; color: var(--ink-faint); }
