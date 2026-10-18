@@ -29,3 +29,23 @@ export function roadmapSummary(milestone, context = {}) {
   }).join(', ') : '';
   return { count, detail: '<div class="roadmap-summary">'+bar+legend+meta+(needs?'<div class="roadmap-summary-needs"><b>Needs you:</b> '+needs+'</div>':'')+'</div>' };
 }
+
+/**
+ * The header for each milestone read, made once and reused across its header, body and companion panel [N26]. Why here:
+ * the page embeds this source, so it keeps src/cockpit.js inside its line cap; the page hands in what it reads by.
+ *
+ * @param {(milestone: object, context: object) => object|null} summarize - roadmapSummary.
+ * @param {{time: (iso: string) => string, address: (id: number, root: string) => string, root: string}} page
+ * @returns {(read: {milestone: object, rows: object[]}|null) => object|null}
+ */
+export function roadmapHeaders(summarize, page) {
+  const made = new Map();
+  return (read) => {
+    if (!read) return null;
+    if (!made.has(read)) made.set(read, summarize(read.milestone, { time: page.time, lookup: (id) => {
+      const label = typeof id === 'number' ? '#' + id : String(id), row = read.rows.find((row) => row.label === label);
+      return row ? { label, title: row.title, id: row.open?.id, address: row.open ? page.address(row.open.id, row.open.root) : null, board: row.open?.root !== page.root ? row.open?.root : null } : null;
+    } }));
+    return made.get(read);
+  };
+}

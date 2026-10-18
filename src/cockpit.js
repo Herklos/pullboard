@@ -22,7 +22,7 @@ import {
   hostedState,
 } from './view/hosted.js';
 import { staleChip } from './view/stale.js';
-import { roadmapSummary } from './view/roadmap-summary.js';
+import { roadmapHeaders, roadmapSummary } from './view/roadmap-summary.js';
 import { roadmapBlock } from './view/roadmap-block.js';
 import { applyStateDelta } from './api-http.js';
 
@@ -603,7 +603,7 @@ function shoutAgentName(id) {
 }
 /** Render a review note with escaped text and references bound to the selected board. */
 const verdictHtml = (v, titles) => '<div class="verdict ' + (v.decision === 'ACCEPT' ? 'yes' : 'no') + '"><b>' + esc(v.decision) + ' ' + esc(v.reason) + '</b><span class="by">' + esc(agentName(v.by)) + ' · ' + when(v.at) + ' · at ' + esc(String(v.commit || '').slice(0, 12)) + '</span><div class="note">' + inline(visibleVerdictNote(v.reason, v.note), titles) + '</div></div>';
-const roadmapSummary = (${roadmapSummary.toString()});
+const roadmapSummary = (${roadmapSummary.toString()}), roadmapHeaders = (${roadmapHeaders.toString()});
 const stateOf = (i) => i.status === 'claimed' ? 'building' : i.status === 'submitted' ? 'verify' : i.status === 'verified' ? 'verified' : i.status === 'withdrawn' ? 'withdrawn' : i.verdict && i.verdict.decision === 'REJECT' ? 'back' : 'open';
 const STATES = { building: ['building', 'busy'], verify: ['to verify', 'warn'], back: ['sent back', 'no'], verified: ['verified', 'ok'], open: ['unclaimed', 'free'], withdrawn: ['withdrawn', ''] };
 const chip = (s) => '<span class="chip ' + STATES[s][1] + '">' + STATES[s][0] + '</span>';
@@ -2355,16 +2355,7 @@ function roadmapCards(p, titles) {
   const isOpen = (key, first) => view.roadmapOpen.has(JSON.stringify([view.root, key])) ? view.roadmapOpen.get(JSON.stringify([view.root, key])) : first;
   const caret = '<span class="caret" aria-hidden="true"></span>';
   const next = coming.find((m) => m.rows.length) || null;
-  const summaryHeaders = new Map();
-  /** Reuse the supplied summary across its header, body and companion panel. */
-  const headerFor = (read) => {
-    if (!read) return null;
-    if (!summaryHeaders.has(read)) summaryHeaders.set(read, roadmapSummary(read.milestone, { time: when, lookup: (id) => {
-      const label = typeof id === 'number' ? '#' + id : String(id), row = read.rows.find((row) => row.label === label);
-      return row ? { label, title: row.title, id: row.open?.id, address: row.open ? itemAddress(row.open.id, row.open.root) : null, board: row.open?.root !== view.root ? row.open?.root : null } : null;
-    } }));
-    return summaryHeaders.get(read);
-  };
+  const headerFor = roadmapHeaders(roadmapSummary, { time: when, address: itemAddress, root: view.root });
   const stages = [['open', 'Open'], ['claimed', 'Building'], ['submitted', 'In review'], ['accepted', 'Accepted'], ['merged', 'Landed']];
   const counts = headerFor(next) ? null : Object.fromEntries(stages.map(([stage]) => [stage, next ? next.rows.filter((row) => row.stage === stage).length : 0]));
   const shippingCounts = headerFor(next)
