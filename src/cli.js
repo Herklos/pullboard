@@ -1581,7 +1581,12 @@ function recordSetupState(ctx, identity, state) {
 function boardSetup(ctx, card, identity) {
   const rows = loadSpec(ctx.info.root, ctx.config).rows;
   const approved = rows.filter(row => row.status === 'approved');
-  const drafted = rows.filter(row => row.status === 'draft' || row.status === 'pending');
+  const open = rows.filter(row => row.status === 'draft' || row.status === 'pending');
+  // A row the person has already decided waits for the coordinator's spec apply, not for the person (#848):
+  // telling her to approve it again is the loop a newcomer's agents fell into.
+  const decided = new Set(withBoard(ctx, (board) => store.rowDecisions(board)).filter(record => record.kind === 'spec' && !record.applied).map(record => record.id));
+  const toApply = open.filter(row => decided.has(row.id));
+  const drafted = open.filter(row => !decided.has(row.id));
   const recordedComplete = setupReceiptMatches(ctx, identity, 'complete');
   const started = setupReceiptMatches(ctx, identity, 'started');
   const lanes = laneNames(ctx.config).filter(lane => !['review', COORDINATOR].includes(lane));
@@ -1603,7 +1608,7 @@ function boardSetup(ctx, card, identity) {
   /** Preserve all existing configuration when recording one setup answer. */
   const configure = patch => `node -e ${quote(`const fs=require('node:fs');const p='pullboard.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));${patch};fs.writeFileSync(p,JSON.stringify(c,null,2)+${JSON.stringify('\n')})`)}`;
   const steps = [
-    { number: 1, done: approved.length > 0 && (!drafted.length || completed), question: 'Ask the person: what are we building, and who will use it? Draft a few requirements, then ask the person to approve them.',
+    { number: 1, done: approved.length > 0 && ((!drafted.length && !toApply.length) || completed), question: 'Ask the person: what are we building, and who will use it? Draft a few requirements, then ask the person to approve them.',
       command: 'pullboard spec draft "<text>"',
       afterAnswer: 'Record each answer with pullboard spec draft "<text>"; the person approves the returned ids in Pullboard View or runs pullboard spec approve <ids> in their own terminal; then the coordinator runs pullboard spec apply.' },
     { number: 2, done: lanes.length > 0, question: `Ask the person: how should we divide the work? Suggested folders: ${folders.join(', ') || 'app/ (create it for the app)'}.`,
@@ -1622,17 +1627,30 @@ function boardSetup(ctx, card, identity) {
   const current = steps.find(step => !step.done);
   if (!current && !recordedComplete) recordSetupState(ctx, identity, 'complete');
   else if (current && !completed && !started) recordSetupState(ctx, identity, 'started');
+  const seat = ctx.io.callerRole() === 'seat';
+  if (current?.number === 1 && !drafted.length && toApply.length) {
+    const rowIds = toApply.map(row => row.id);
+    const names = rowIds.join(', ');
+    return { step: 1, total: 5, ...current, steps, waitingOn: 'coordinator-apply', rowIds,
+      question: seat ? `The person approved ${names}; the coordinator applies them.` : `The person approved ${names}; apply them: pullboard spec apply.`, command: 'pullboard spec apply',
+      afterAnswer: 'spec apply writes the person\u2019s decisions into SPEC.md; then commit SPEC.md so every worktree reads them.',
+      agentNext: seat ? `ask the coordinator to apply ${names}: pullboard shout coordinator "the person approved ${names}; please run pullboard spec apply"` : 'pullboard spec apply, then commit SPEC.md' };
+  }
   if (current?.number === 1 && drafted.length) {
     const rowIds = drafted.map(row => row.id);
     const names = rowIds.join(', ');
     const command = `pullboard spec show ${rowIds[0]}`;
-    const seat = ctx.io.callerRole() === 'seat';
-    return { step: 1, total: 5, ...current, steps, waitingOn: 'person-approval', rowIds,
-      question: seat ? `Waiting for the coordinator to bring approval of ${names} to the person.` : `Waiting for the person to approve ${names}.`, command,
-      personCommand: `pullboard spec approve ${rowIds.join(',')}`,
-      afterAnswer: 'The person approves these rows in Pullboard View or their own terminal; then the coordinator runs pullboard spec apply.',
+    // A pending question takes an answer, a draft row an approval: each gets the command that decides it.
+    const questions = drafted.filter(row => row.status === 'pending').map(row => row.id);
+    const drafts = drafted.filter(row => row.status !== 'pending').map(row => row.id);
+    const personCommand = [drafts.length ? `pullboard spec approve ${drafts.join(',')}` : '', ...questions.map(id => `pullboard spec answer ${id} "<choice>"`)].filter(Boolean).join('; ');
+    const verb = !questions.length ? 'approve' : drafts.length ? 'decide' : 'answer';
+    return { step: 1, total: 5, ...current, steps, waitingOn: 'person-approval', rowIds, ...(toApply.length ? { approvedRowIds: toApply.map(row => row.id) } : {}),
+      question: seat ? `Waiting for the coordinator to bring approval of ${names} to the person.` : `Waiting for the person to ${verb} ${names}.`, command,
+      personCommand,
+      afterAnswer: (toApply.length ? `The person already approved ${toApply.map(row => row.id).join(', ')}; pullboard spec apply writes them. ` : '') + 'The person approves draft rows and answers questions in Pullboard View or their own terminal; then the coordinator runs pullboard spec apply.',
       meanwhile: seat ? 'While waiting, review independent approved work or send questions to the coordinator with pullboard shout coordinator "<what is needed>" --decision.' : 'While waiting, the agent may review independent approved work or prepare questions for the person.',
-      agentNext: seat ? `ask the coordinator to bring approval of ${names} to the person: pullboard shout coordinator "approve ${names}" --decision; meanwhile ${command}` : `wait for the person to approve ${names}; meanwhile ${command}` };
+      agentNext: seat ? `ask the coordinator to bring approval of ${names} to the person: pullboard shout coordinator "approve ${names}" --decision; meanwhile ${command}` : (toApply.length ? 'pullboard spec apply for the approved rows; then ' : '') + `wait for the person to ${verb} ${names}; meanwhile ${command}` };
   }
   return current ? { step: current.number, total: 5, ...current, steps } : null;
 }
@@ -1738,7 +1756,7 @@ async function resumeHere(io, view) {
   if (card.setup) {
     say(`Setting up: step ${card.setup.step} of 5`);
     say(card.setup.question);
-    say(card.setup.personCommand ? `For the person: ${card.setup.personCommand}` : `Record the answer: ${card.setup.command}`);
+    say(card.setup.personCommand ? `For the person: ${card.setup.personCommand}` : card.setup.waitingOn === 'coordinator-apply' ? `Next: ${card.setup.agentNext}` : `Record the answer: ${card.setup.command}`);
     if (card.setup.afterAnswer) say(card.setup.afterAnswer);
     if (card.setup.meanwhile) say(card.setup.meanwhile);
   }

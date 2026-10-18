@@ -921,3 +921,42 @@ test('a failing never-run test citation is not verified, and signoff says no tes
   assert.equal(existsSync(join(box.root, 'test/ghost-ran')), false, 'signoff does not execute the test either');
   assert.ok(readSignoffs(box.root).some(row => row.id === 'G3'), 'S15 still permits the fixture person to sign');
 });
+
+const SETUP_SPEC = `# Spec
+
+## A · Setup
+- A1 [draft, must] Every page works at phone width. | gate: review
+- A2 [pending, must] It deploys to: Vercel. Choices: Vercel, Netlify. | gate: review
+`;
+
+test('an approved row waits for apply, not for the person [S1,I1,P6]', (t) => {
+  const box = specBox(t, { specSource: SETUP_SPEC });
+  /** The coordinator's resume, as an agent would read it at session start. */
+  const resume = () => {
+    const read = runIn(box, box.root, ['resume']);
+    assert.equal(read.status, 0, read.stdout + read.stderr);
+    return read.stdout;
+  };
+  const before = resume();
+  assert.match(before, /For the person: pullboard spec approve A1; pullboard spec answer A2 "<choice>"/u,
+    'a draft row is offered for approval and a pending question for an answer, never approve');
+
+  assert.equal(box.run('approve', 'A1').status, 0);
+  const halfway = resume();
+  assert.doesNotMatch(halfway, /spec approve A1|approve A1,|Waiting for the person to (approve|decide|answer) A1/u, 'an approved row is no longer asked of the person');
+  assert.match(halfway, /The person already approved A1; pullboard spec apply writes them\./u, 'the approved row is named as waiting for apply');
+  assert.match(halfway, /pullboard spec answer A2 "<choice>"/u, 'the open question is still offered as an answer');
+
+  assert.equal(box.run('answer', 'A2', 'Netlify').status, 0);
+  const decided = resume();
+  assert.match(decided, /The person approved A1, A2; apply them: pullboard spec apply\./u, 'with every row decided, the coordinator is told to apply');
+  assert.match(decided, /^next: pullboard spec apply, then commit SPEC\.md$/mu);
+  assert.doesNotMatch(decided, /Waiting for the person|For the person|spec approve/u, 'nothing is asked of the person again');
+  for (const text of [before, halfway, decided]) assert.doesNotMatch(text, /reword|redraft/iu, 'no surface asks an agent to reword or redraft a row');
+
+  assert.equal(box.run('apply').status, 0);
+  // runFixtureGit throws if the commit fails, so reaching the next line means SPEC.md is committed.
+  runFixtureGit(['commit', '-q', '-m', 'docs(spec): apply row decisions', '--', box.specName], { cwd: box.root, env: box.env, encoding: 'utf8' });
+  const after = resume();
+  assert.doesNotMatch(after, /spec apply|Waiting for the person to (approve|decide|answer)/u, 'once applied and committed, setup moves on');
+});
