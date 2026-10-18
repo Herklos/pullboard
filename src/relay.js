@@ -369,8 +369,8 @@ export async function request(state, path, { method = 'GET', body, allowMissing 
       break;
     } catch (error) {
       if (signal?.aborted) throw new Refused('OAUTH_CANCELLED', 'GitHub device sign-in was cancelled; no board was linked');
-      // A cached connection can reset before its closure reaches the client loop. Only a read may try once more.
-      if (method === 'GET' && attempt === 0 && transportFailure(error) === 'ECONNRESET' && requestSignal && !requestSignal.aborted) continue;
+      // A stale cached connection reports ECONNRESET or EPIPE across supported Node runtimes. Only a read may try once more.
+      if (method === 'GET' && attempt === 0 && ['ECONNRESET', 'EPIPE'].includes(transportFailure(error)) && requestSignal && !requestSignal.aborted) continue;
       const refusal = new Refused('RELAY_UNAVAILABLE', `the relay ${state.url} did not answer (${transportFailure(error)} after ${Date.now() - startedAt} ms on ${method} ${path.split('?')[0]}); read the local board offline, then retry this move when the relay is reachable`);
       refusal.transportFailure = transportFailure(error);
       throw refusal;
