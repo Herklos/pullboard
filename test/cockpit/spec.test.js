@@ -536,7 +536,24 @@ test('real Chrome records Spec row decisions from the row, detail and confirmed 
       box.run(demo.repo, 'shout', 'person', `refresh probe ${width}`);
       await chrome.waitFor(`data.project.shouts.some(shout => shout.shout_text === 'refresh probe ${width}')`);
       assert.equal(await chrome.stable("document.querySelector('#spec-decline-reason').value"), 'Needs a clearer outcome', `${width}: typed reason survives a live refresh`);
+      // A background scroll must not refuse a fixed dialog button that stays under the native pointer.
+      if (width === 375) await chrome.stable(`(() => {
+        window.__pullboardScrollProbe = null;
+        window.addEventListener('mousemove', () => {
+          const target = document.querySelector('#spec-decline-submit');
+          const box = () => { const r=target.getBoundingClientRect(); return { x:r.x, y:r.y, width:r.width, height:r.height }; };
+          const before={ scrollX, scrollY, box:box() };
+          window.scrollBy({ top:-49, left:0, behavior:'instant' });
+          window.__pullboardScrollProbe={ before, after:{scrollX, scrollY, box:box()}, connected:target.isConnected };
+        }, { once:true });
+      })()`);
       await diagnosticClick(chrome, '#spec-decline-submit', width, 'decline submit');
+      if (width === 375) {
+        const scrollProbe = JSON.parse(await chrome.stable('JSON.stringify(window.__pullboardScrollProbe)'));
+        assert.ok(scrollProbe?.connected, 'the real pointer moved over the connected fixed dialog target');
+        assert.equal(scrollProbe.before.scrollY - scrollProbe.after.scrollY, 49, 'the background document scrolls during pointer movement');
+        assert.deepEqual(scrollProbe.after.box, scrollProbe.before.box, 'the fixed target retains its exact viewport geometry');
+      }
       await chrome.waitFor("!!document.querySelector('#spec-detail .spec-feedback.ok,#spec-detail .spec-feedback.no')");
 
       await chrome.stable("window.__confirmCalls = 0; window.confirm = () => { window.__confirmCalls += 1; return false; }");

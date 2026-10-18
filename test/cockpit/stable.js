@@ -118,6 +118,7 @@ export async function waitForStableBoxes(chrome, find = 'document.documentElemen
 /**
  * Press an uncovered, stable target through real Chrome input, optionally using a browser button or modifier.
  * A pointer move can change hover layout, so wait again after it and refuse a changed point rather than retrying.
+ * Compare viewport geometry: background document scrolling cannot move a fixed dialog target under that pointer.
  * @param {object} chrome
  * @param {string} find
  * @param {{ native?: boolean, button?: string, modifiers?: number, afterMouseDown?: () => Promise<void> }} [options] - Optionally observe work while the real pointer remains held.
@@ -132,7 +133,7 @@ export async function press(chrome, find, { native = true, button = 'left', modi
     const element = (${find}), rect = element.getBoundingClientRect(), x = rect.x + rect.width / 2, y = rect.y + rect.height / 2;
     const hit = document.elementFromPoint(x, y);
     if (!rect.width || !rect.height || !hit || (hit !== element && !element.contains(hit))) throw Error('shared press: target is hidden or covered: ' + ${JSON.stringify(find)});
-    return { x, y, width: rect.width, height: rect.height, scrollX, scrollY };
+    return { x, y, width: rect.width, height: rect.height };
   })()`;
   const point = await rawChromeEvaluation(chrome, pointExpression);
   const raw = clients.get(chrome);
