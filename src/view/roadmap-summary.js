@@ -1,8 +1,10 @@
 /** The approved Roadmap header, displaying the backend's summary without deriving board counts [N26]. */
 export function roadmapSummary(milestone, context = {}) {
+  /** Escape supplied milestone text before placing it in HTML or attributes. */
   const escape = text => String(text ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
   const summary = milestone.summary;
   const states = [['landed','landed'],['landing','accepted, landing'],['review','in review'],['building','building'],['waiting','waiting for an agent'],['held','held']];
+  /** Accept only nonnegative integer counts from the backend contract. */
   const number = value => Number.isInteger(value) && value >= 0;
   if (!summary || !number(summary.total) || !number(summary.left) || states.some(([key]) => !number(summary[key]))) return null;
   const count = '<span class="roadmap-left"><b>'+escape(summary.left)+' left</b><span aria-label="'+escape(summary.landed)+'/'+escape(summary.total)+' landed">'+escape(summary.landed)+' of '+escape(summary.total)+' landed</span></span>';
