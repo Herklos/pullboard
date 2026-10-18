@@ -909,9 +909,16 @@ test('real Chrome keeps the demo board usable at phone and desktop widths [H5,N2
 
     const posts = chrome.requests.filter((request) => request.method === 'POST' && new URL(request.url).pathname.endsWith('/moves'));
     assert.equal(posts.length, 10, 'each viewport sends add, shout, answer, hold and release through the public move endpoint');
-    const apiRequests = chrome.requests.filter((request) => new URL(request.url).pathname.includes('/api/'));
-    assert.ok(apiRequests.length > 0 && apiRequests.every((request) => new URL(request.url).pathname.startsWith('/api/v1/boards')),
-      'every observed API request uses public v1');
+    // The local view also asks its own server whether it can link boards (/api/v1/view-link, #633); every board read
+    // and move still goes through the public boards API.
+    const apiRequests = chrome.requests.filter((request) => {
+      const path = new URL(request.url).pathname;
+      return path.includes('/api/') && path !== '/api/v1/view-link';
+    });
+    const offPublic = [...new Set(apiRequests.map((request) => new URL(request.url).pathname)
+      .filter((path) => !path.startsWith('/api/v1/boards')))];
+    assert.ok(apiRequests.length > 0 && offPublic.length === 0,
+      'every observed API request uses public v1' + (offPublic.length ? ': ' + offPublic.join(', ') : ''));
     const state = await boardOf(view, demo.repo);
     t.diagnostic(JSON.stringify({ width: 'final-board-state', personAnswers: state.shouts
       .filter((shout) => String(shout.shout_text || '').startsWith('Phone answer '))
