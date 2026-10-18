@@ -72,10 +72,49 @@ function journeyFixtureBoardNames(names) {
   return [...new Set((Array.isArray(names) ? names : []).filter(name => allowed.has(name)))].sort();
 }
 
-/** Keep rendered text only for the two boards this owned fixture created. */
-function journeyFixtureRows(rows) {
-  return [...new Set((Array.isArray(rows) ? rows : []).filter(row => row && JOURNEY_BOARD_NAMES.includes(row.label)
-    && typeof row.text === 'string').map(row => row.text))].slice(0, 16);
+/** Preserve only fixture labels, structured sidebar counts, and complete known UI phrases. */
+function journeySafeRowText(row) {
+  if (!row || typeof row.text !== 'string') return '';
+  const kind = ['repo', 'repo-error', 'group', 'empty', 'other'].includes(row.kind) ? row.kind : 'other';
+  const label = typeof row.label === 'string' && JOURNEY_BOARD_NAMES.includes(row.label) ? row.label : '[redacted]';
+  if (kind === 'repo' || kind === 'group') {
+    const details = typeof row.detail === 'string' ? row.detail.trim() : '';
+    const parts = details ? details.split(' · ') : [];
+    const validDetail = kind === 'group'
+      ? /^(?:\d+ need you · )?\d+ repos?$/u.test(details)
+      : parts.every(part => ['linked', 'this computer', 'nothing open', 'Loading…', 'Loading...'].includes(part)
+        || /^\d+ (?:decisions?|questions?|draft rows?|lanes? held|sent back|to verify|building|items? open)$/u.test(part));
+    return `${kind}: ${label}${validDetail && details ? ` · ${details}` : ''}`;
+  }
+  const phrases = [...JOURNEY_BOARD_NAMES, 'Sign in again to show local boards', 'None yet.', 'Loading…', 'Loading...',
+    'This board could not be read.', 'The relay did not answer.', 'The local view did not answer.'];
+  const escapeRegex = value => value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  const pattern = new RegExp(phrases.map(escapeRegex).join('|'), 'gu');
+  let text = row.text.replace(/\s+/gu, ' ').trim();
+  const capturedLabel = typeof row.label === 'string' ? row.label.trim() : '';
+  if (capturedLabel && text.startsWith(capturedLabel)) text = text.slice(capturedLabel.length).trimStart();
+  if (kind === 'repo-error' && text.startsWith(':')) text = text.slice(1).trimStart();
+  const safe = [];
+  let cursor = 0;
+  const addUnknown = part => {
+    const redacted = part.replace(/\S+/gu, '[redacted]');
+    if (redacted.trim()) safe.push(redacted.trim());
+  };
+  for (const match of text.matchAll(pattern)) {
+    addUnknown(text.slice(cursor, match.index));
+    safe.push(match[0]);
+    cursor = match.index + match[0].length;
+  }
+  addUnknown(text.slice(cursor));
+  const body = safe.join(' ').replace(/(?:\[redacted\]\s+){1,}\[redacted\]/gu, '[redacted]')
+    .replace(/\s+/gu, ' ').trim();
+  return kind === 'repo-error' ? `${kind}: ${label}: ${body || '[redacted]'}` : `${kind}: ${body || label}`;
+}
+
+/** Preserve every observed row up to the bound and report how many rows were omitted. */
+function journeyRows(rows) {
+  const captured = (Array.isArray(rows) ? rows : []).map(journeySafeRowText);
+  return { rows: captured.slice(0, 16), rowsOmitted: Math.max(0, captured.length - 16) };
 }
 
 /** Share the real hosted sidebar's all-expected-rows condition with its bounded failure regression. */
@@ -117,10 +156,12 @@ async function journeyFailureReport(readPage, readAnswers) {
     if (Array.isArray(captured)) { answers = captured; apiCaptureAvailable = true; }
   } catch { /* Missing observations never replace the row failure. */ }
   const projects = Array.isArray(page?.projects) ? page.projects : [];
+  const visibleRows = pageCaptureAvailable ? journeyRows(page?.rows) : { rows: [], rowsOmitted: null };
   return {
     pageCaptureAvailable,
     apiCaptureAvailable,
-    rows: pageCaptureAvailable ? journeyFixtureRows(page?.rows) : [],
+    rows: visibleRows.rows,
+    rowsOmitted: visibleRows.rowsOmitted,
     unknownRowsPresent: pageCaptureAvailable ? Boolean(page?.unknownRowsPresent) : null,
     projects: pageCaptureAvailable ? projects.filter(project => JOURNEY_BOARD_NAMES.includes(project?.name)).map(({ name, source, ok, errorPresent }) => ({
       name, source: source === 'relay' ? 'relay' : source === 'local' ? 'local' : 'other',
@@ -170,8 +211,11 @@ async function observeJourneyRows(wait, readPage, readAnswers) {
 test('the hosted journey names what it saw when a board row never arrives [N40]', async () => {
   const seen = {
     rows: [
-      { label: 'fixture/repository', text: 'fixture/repository · linked · 1 item' },
-      { label: 'unlisted-board-sentinel', text: 'unlisted-board-sentinel · local · 1 item' },
+      { kind: 'repo', label: 'fixture/repository', detail: 'linked · 1 item open', text: 'fixture/repository · linked · 1 item open' },
+      { kind: 'repo-error', label: 'unlisted-board-sentinel', text: 'unlisted-board-sentinel: Sign in again to show local boards token=secret-token key=private-key person_id=person-987 path=/Users/private/project https://private.example/path?q=secret#person' },
+      { kind: 'empty', label: '', text: 'None yet.' },
+      { kind: 'group', label: 'private-group-name', detail: '2 repos', text: 'private-group-name 2 repos' },
+      ...Array.from({ length: 14 }, (_, index) => ({ kind: 'repo', label: `unknown-${index}`, detail: 'this computer · 1 item open', text: `unknown-${index} · this computer · 1 item open` })),
     ],
     unknownRowsPresent: true,
     projects: [
@@ -209,7 +253,15 @@ test('the hosted journey names what it saw when a board row never arrives [N40]'
   assert.equal(observed.report.pageCaptureAvailable, true);
   assert.equal(observed.report.apiCaptureAvailable, true);
   assert.ok(observed.report, 'a failed row wait reports its visible rows and page-used API answers');
-  assert.deepEqual(observed.report.rows, ['fixture/repository · linked · 1 item'], 'actual rendered text for the owned fixture row is preserved');
+  assert.deepEqual(observed.report.rows.slice(0, 4), [
+    'repo: fixture/repository · linked · 1 item open',
+    'repo-error: [redacted]: Sign in again to show local boards [redacted]',
+    'empty: None yet.',
+    'group: [redacted] · 2 repos',
+  ], 'fixture, safe sign-in, and empty-state row text is preserved while unknown prose is redacted');
+  assert.equal(observed.report.rows[4], 'repo: [redacted] · this computer · 1 item open',
+    'an unexpected row remains visible with its label redacted and structured sidebar detail preserved');
+  assert.equal(observed.report.rowsOmitted, 2, 'bounded row output reports its omitted count');
   assert.equal(observed.report.unknownRowsPresent, true);
   assert.deepEqual(observed.report.apiAnswers.map(({ source, pathKind, status, boardNames, bodyCapture, responseAtMs, streamOpen }) => ({ source, pathKind, status, boardNames, bodyCapture, responseAtMs, streamOpen })), [
     { source: 'linked', pathKind: '/api/v1/boards', status: 200, boardNames: [], bodyCapture: 'captured', responseAtMs: 4, streamOpen: false },
@@ -222,7 +274,8 @@ test('the hosted journey names what it saw when a board row never arrives [N40]'
     'a captured populated answer is selected after earlier empty and unavailable answers');
   assert.equal(journeyExpectedListAnswer(observed.report.apiAnswers.slice(0, 2), 'linked', 'fixture/repository'), null,
     'captured empty and unavailable answers never masquerade as the expected fixture response');
-  assert.doesNotMatch(JSON.stringify(observed.report), /unlisted-board-sentinel|query-sentinel|fragment-sentinel|header-sentinel|body-sentinel/u, 'diagnostics never expose arbitrary row names, URL parts, headers or bodies');
+  assert.doesNotMatch(JSON.stringify(observed.report), /unlisted-board-sentinel|unknown-\d+|secret-token|private-key|person-987|\b987\b|private\/project|private\.example|query-sentinel|fragment-sentinel|header-sentinel|body-sentinel/u,
+    'diagnostics never expose arbitrary row names, credentials, person identifiers, paths, URLs, API parts, headers or bodies');
 
   let pageRead = false;
   let answersRead = false;
@@ -244,6 +297,7 @@ test('the hosted journey names what it saw when a board row never arrives [N40]'
   assert.equal(unavailable.report.pageCaptureAvailable, false);
   assert.equal(unavailable.report.apiCaptureAvailable, false);
   assert.equal(unavailable.report.unknownRowsPresent, null, 'unavailable page facts are not presented as observed false values');
+  assert.equal(unavailable.report.rowsOmitted, null, 'unavailable row capture is not reported as zero omitted rows');
   assert.equal(unavailable.report.apiAnswers, null, 'unavailable trace data is not presented as an empty observed trace');
 });
 
@@ -648,7 +702,11 @@ async function everyBoardJourney(t, slow = null) {
     const rowObservation = await observeJourneyRows(
       () => chromeB.waitFor(rowPredicate, 45_000), // budget: bounded setup wait within this journey test’s declared outer timeout (5x relay-work budget plus 180 seconds).
       () => boundedJourneyRead(() => chromeB.stable(`JSON.stringify({
-        rows: [...document.querySelectorAll('#proj-list .proj.repo')].map(row => ({ label: row.querySelector('.pname')?.textContent.trim() || '', text: row.textContent.trim() })),
+        rows: [...document.querySelectorAll('#proj-list .proj.repo, #proj-list .repo-error, #proj-list .project-pick, #proj-list .empty')].map(row => ({
+          kind: row.matches('.repo-error') ? 'repo-error' : row.matches('.project-pick') ? 'group' : row.matches('.empty') ? 'empty' : 'repo',
+          label: row.querySelector('.pname')?.textContent.trim() || row.querySelector('b')?.textContent.trim().replace(/:$/u, '') || '',
+          text: row.textContent.trim(), detail: row.querySelector('small')?.textContent.trim() || '',
+        })),
         unknownRowsPresent: [...document.querySelectorAll('#proj-list .proj.repo .pname')].some(node => !${JSON.stringify(JOURNEY_BOARD_NAMES)}.includes(node.textContent.trim())),
         projects: (data?.projects || []).map(({name, source, ok, error}) => ({name, source, ok, errorPresent: Boolean(error)})),
         unknownProjectsPresent: (data?.projects || []).some(project => !${JSON.stringify(JOURNEY_BOARD_NAMES)}.includes(project.name)),
