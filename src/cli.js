@@ -276,10 +276,7 @@ import {
   registerProjectAndLink,
   registeredProjectRootsSnapshot,
 } from './projects.js';
-import {
-  milestoneRoadmap,
-  roadmapEstimate,
-} from './roadmap.js';
+import * as roadmapView from './roadmap.js';
 import {
   rigorLines,
   rigorReport,
@@ -2398,7 +2395,7 @@ function readCommands(io, { first, second, rest, values }) {
     roadmap: () => {
       if (first || second || rest.length) throw new Refused('USAGE', 'pullboard roadmap takes no arguments');
       const ctx = context(io);
-      const milestones = withBoard(ctx, (board) => milestoneRoadmap(ctx.info.root, board));
+      const milestones = withBoard(ctx, (board) => roadmapView.milestoneRoadmap(ctx.info.root, board));
       io.result?.({ milestones });
       if (!milestones.length) io.say('no milestones yet; the coordinator can add one with pullboard milestone add');
       for (const milestone of milestones) {
@@ -2407,7 +2404,7 @@ function readCommands(io, { first, second, rest, values }) {
         io.say(`${milestone.name}: ${milestone.landed}/${milestone.total} landed${when}`);
         if (!milestone.shipped) {
           const summary = milestone.summary;
-          const estimate = roadmapEstimate(summary);
+          const estimate = roadmapView.roadmapEstimate(summary);
           io.say(`  ${summary.left} left of ${summary.total}: ${summary.landed} landed, ${summary.landing} landing, ${summary.review} in review, ${summary.building} building, ${summary.waiting} waiting, ${summary.held} held${estimate}`);
         }
         if (milestone.note) io.say(`  ${milestone.note}`);
