@@ -15,7 +15,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { boardNotWritable } from './board-access.js';
 import { briefFiles, briefSections } from './brief.js';
 import { COORDINATOR } from './config.js';
-import { ENGINE_VERSION, VERDICT_REVIEW_ENGINE, GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, effectiveGuards, storeTriggers } from './machine.js';
+import { ENGINE_VERSION, VERDICT_REVIEW_ENGINE, MILESTONE_RANK_ENGINE, GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, effectiveGuards, storeTriggers } from './machine.js';
 import { Refused } from './refused.js';
 import { causeProblem, requireNeverAgain } from './rigor.js';
 import { barCorrectionFields } from './bar-corrections.js';
@@ -2130,12 +2130,26 @@ function milestonePriorities(board) {
   return (entry) => priorities.get(entry.item_id) ?? ordered.length;
 }
 
-/** Make the shared build-queue comparator once: milestone, route, recent files, then oldest. */
+/** Explicit item ranks belong to the same first unfinished milestone as its priority [N2,B13]. */
+function milestoneRanks(board, priority) {
+  if ((board.executionEngineVersion ?? ENGINE_VERSION) < MILESTONE_RANK_ENGINE) return () => 0;
+  const ranks = new Map();
+  for (const [index, milestone] of milestones(board).entries()) {
+    for (const [rank, id] of (milestone.order ?? []).entries()) {
+      if (milestone.items.includes(id) && priority({ item_id: id }) === index && !ranks.has(id)) ranks.set(id, rank);
+    }
+  }
+  return entry => ranks.get(entry.item_id) ?? Number.MAX_SAFE_INTEGER;
+}
+
+/** Make the shared build-queue comparator once: milestone, explicit rank, route, recent files, then oldest. */
 export function buildOrder(board, { warm = [] } = {}) {
   const milestonePriority = milestonePriorities(board);
+  const rank = milestoneRanks(board, milestonePriority);
   const recent = new Set(warm);
   const shared = (entry) => itemFiles(entry).filter((path) => recent.has(path)).length;
   return (first, second) => milestonePriority(first) - milestonePriority(second)
+    || rank(first) - rank(second)
     || ROUTES.indexOf(second.item_route) - ROUTES.indexOf(first.item_route)
     || shared(second) - shared(first) || first.item_id - second.item_id;
 }
@@ -2180,7 +2194,9 @@ export function nextFor(board, { agentId, lane, verify = false, policy = 'any', 
     const heldByMe = candidates.find((candidate) => candidate.holder === agentId)?.entry;
     if (heldByMe) return { item: heldByMe, reasons: [] };
     const milestonePriority = milestonePriorities(board);
-    candidates.sort((first, second) => milestonePriority(first.entry) - milestonePriority(second.entry));
+    const rank = milestoneRanks(board, milestonePriority);
+    candidates.sort((first, second) => milestonePriority(first.entry) - milestonePriority(second.entry)
+      || rank(first.entry) - rank(second.entry));
     const item = candidates.find((candidate) => !candidate.holder && !candidate.cooldown)?.entry;
     if (item) return { item, reasons: [] };
     const held = candidates.filter((candidate) => candidate.holder && candidate.holder !== agentId)
@@ -2214,6 +2230,14 @@ export function nextFor(board, { agentId, lane, verify = false, policy = 'any', 
     const selected = mine.findIndex(({ entry }) => tier(entry) === routeTier && mainRed.has(entry.item_id));
     const firstTierItem = mine.findIndex(({ entry }) => tier(entry) === routeTier);
     if (selected > firstTierItem && firstTierItem >= 0) {
+      // Explicit coordinator order leads automatic rework; never-ranked boards retain their old path.
+      if ((board.executionEngineVersion ?? ENGINE_VERSION) >= MILESTONE_RANK_ENGINE && milestones(board).some(entry => entry.order?.length)) {
+        const position = milestonePriorities(board);
+        const rank = milestoneRanks(board, position);
+        const first = mine[firstTierItem].entry;
+        const selectedItem = mine[selected].entry;
+        if (position(first) !== position(selectedItem) || rank(first) !== rank(selectedItem)) continue;
+      }
       const [rework] = mine.splice(selected, 1);
       mine.splice(firstTierItem, 0, rework);
     }
@@ -2410,7 +2434,7 @@ export function milestones(board) {
 }
 
 // The roadmap's moves live in milestones.js; the board keeps exporting them so the engine replays them.
-export { addMilestone, canonicalMilestoneTarget, editMilestone, editMilestoneItems, moveMilestone, removeMilestone, roadmap, shipMilestone } from './milestones.js';
+export { addMilestone, canonicalMilestoneTarget, editMilestone, editMilestoneItems, orderMilestoneItems, moveMilestone, removeMilestone, roadmap, shipMilestone } from './milestones.js';
 
 /** Current person decisions, including applied receipts, stored without checkout-dependent state. */
 export function rowDecisions(board) {

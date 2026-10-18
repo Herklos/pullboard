@@ -29,6 +29,7 @@ export const JSON_SHAPES = {
     roadmap: shape({ milestones: 'array' }),
     'milestone add': shape({ milestone: 'object' }),
     'milestone items': shape({ milestone: 'object' }),
+    'milestone order': shape({ milestone: 'object' }),
     'milestone move': shape({ milestone: 'object' }),
     'milestone edit': shape({ milestone: 'object' }),
     'milestone remove': shape({ milestone: 'object' }),

@@ -7,9 +7,9 @@
  * into the next milestone, so the roadmap stays the one place that says what is planned.
  */
 import { COORDINATOR } from './config.js';
-import { ENGINE_VERSION } from './machine.js';
+import { ENGINE_VERSION, MILESTONE_RANK_ENGINE } from './machine.js';
 import { Refused } from './refused.js';
-import { atomic, itemById, listItems, logEvent, milestones } from './board.js';
+import { atomic, itemById, listItems, logEvent, milestones, PERSON } from './board.js';
 
 /** The engine at which a milestone carries a target and ships; older moves replay as they did. */
 export const MILESTONE_SHIP_ENGINE = 39;
@@ -188,10 +188,32 @@ export function editMilestoneItems(board, name, { agentId, add = [], remove = []
     if (removals.some((id) => current.items.every((present) => JSON.stringify(id) !== JSON.stringify(present)))) {
       throw new Refused('MILESTONE_ITEMS', 'one or more ids are not in this milestone; read pullboard roadmap and retry');
     }
-    entries[index] = { ...current, items: nextItems };
+    entries[index] = { ...current, items: nextItems,
+      ...((board.executionEngineVersion ?? ENGINE_VERSION) >= MILESTONE_RANK_ENGINE && current.order
+        ? { order: current.order.filter(id => nextItems.includes(id)) } : {}) };
     saveMilestones(board, entries);
     logEvent(board, agentId, 'milestone_items', null, { name, add: additions, remove: removals });
     return nextItems;
+  });
+}
+
+/** Replace this milestone's explicit ranks; omitted items retain the ordinary queue order [N2,B13]. */
+export function orderMilestoneItems(board, name, { agentId, items }) {
+  if ((board.executionEngineVersion ?? ENGINE_VERSION) < MILESTONE_RANK_ENGINE) throw new Refused('ENGINE_VERSION', 'milestone order requires engine 34; upgrade Pullboard before ranking work');
+  if (agentId !== COORDINATOR && (agentId === PERSON || !board.db.prepare('SELECT 1 FROM agent WHERE agent_id = ?').get(agentId))) {
+    throw new Refused('NO_AGENT', 'milestone order is an agent or coordinator move; join an agent worktree or ask the coordinator');
+  }
+  const order = normalizeMilestoneItems(items);
+  if (!order.length) throw new Refused('MILESTONE_ITEMS', 'name the ranked item ids: pullboard milestone order <name> 1,2');
+  return atomic(board, () => {
+    const entries = milestones(board);
+    const index = entries.findIndex(entry => entry.name === name);
+    if (index < 0) throw new Refused('NO_MILESTONE', `no milestone named ${name}; list them with pullboard roadmap`);
+    if (order.some(id => !entries[index].items.includes(id))) throw new Refused('MILESTONE_ITEMS', 'rank only items in this milestone; read pullboard roadmap and retry');
+    entries[index] = { ...entries[index], order };
+    saveMilestones(board, entries);
+    logEvent(board, agentId, 'milestone_order', null, { name, items: order });
+    return order;
   });
 }
 

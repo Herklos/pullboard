@@ -5,7 +5,7 @@ import { recordedRefusal } from './recorded-refusal.js';
 import { BAR_ENGINE, carriesBarReason } from './bar-corrections.js';
 import { carriesImplies, IMPLIES_ENGINE } from './implies.js';
 import { CHECK_ACCEPT_ENGINE } from './check-accept.js';
-import { CAUSE_ENGINE, ENGINE_VERSION, VERDICT_REVIEW_ENGINE } from './machine.js';
+import { CAUSE_ENGINE, ENGINE_VERSION, VERDICT_REVIEW_ENGINE, MILESTONE_RANK_ENGINE } from './machine.js';
 import { MILESTONE_SHIP_ENGINE, canonicalMilestoneTarget } from './milestones.js';
 import { Refused } from './refused.js';
 import { requestMoveProblem, recordRequestMove } from './relay-requests.js';
@@ -18,13 +18,13 @@ export const ENGINE_OPERATIONS = Object.freeze([
   'register', 'ensureCoordinator', 'addItem', 'editItem', 'completeCheckBaseline', 'escalate', 'recordAttempt',
   'claim', 'release', 'submit', 'reserveReview', 'reserveNextReview', 'verify', 'merged',
   'withdraw', 'refreeze', 'reopen', 'shout', 'passDecision', 'answerDecision', 'holdLane', 'releaseLane', 'holdItem', 'releaseItemHold',
-  'addMilestone', 'editMilestoneItems', 'moveMilestone', 'editMilestone', 'removeMilestone', 'shipMilestone',
+  'addMilestone', 'editMilestoneItems', 'orderMilestoneItems', 'moveMilestone', 'editMilestone', 'removeMilestone', 'shipMilestone',
   'recordRowDecisions', 'applyRowDecisions', 'appendFact',
   'recordLandingBatch', 'recordLandingWaiver', 'recordLandingFlake', 'finishLandingBatch', 'acceptCheck',
 ]);
 
 /** Engine version at which each ordered operation first has stable replay semantics. */
-const OPERATION_ENGINE = Object.freeze({ reopen: 8, recordLandingBatch: 8, recordLandingWaiver: 8, recordLandingFlake: 8, finishLandingBatch: 8, acceptCheck: CHECK_ACCEPT_ENGINE,
+const OPERATION_ENGINE = Object.freeze({ orderMilestoneItems: MILESTONE_RANK_ENGINE, reopen: 8, recordLandingBatch: 8, recordLandingWaiver: 8, recordLandingFlake: 8, finishLandingBatch: 8, acceptCheck: CHECK_ACCEPT_ENGINE,
   shipMilestone: MILESTONE_SHIP_ENGINE });
 
 /** Dependency edits, bar reasons, cause keys, checked reviews, and milestone targets retain their distinct recorded engine meanings. */

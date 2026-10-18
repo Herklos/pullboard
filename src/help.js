@@ -77,6 +77,7 @@ Work
                                         accepted or its status
   pullboard milestone add <name> [--note ...] [--items 1,2,3]   create a milestone and optionally add items
   pullboard milestone items <name> --add|--remove ids          append or remove item references
+  pullboard milestone order <name> <ids>                       rank these items within their milestone (agents)
   pullboard milestone move <name> --before <other>             reorder a milestone
   pullboard milestone edit <name> [--name <new>] [--note <text>] [--target <date and time>|none]
                                         rename, update a note, or set the target a milestone ships by
@@ -233,7 +234,7 @@ const HELP_NAMES = [
   'sweep', 'merged', 'withdraw', 'refreeze', 'reopen', 'hold', 'stats', 'ledger', 'log', 'rigor', 'rigor draft', 'spec', 'spec check', 'spec view',
   'spec show', 'spec unmet', 'spec signoff', 'spec draft', 'spec signers', 'spec signers add', 'doctrine', 'doctrine check', 'forget', 'prompt', 'gate', 'hook',
   'hook pre-commit', 'hook pre-merge-commit', 'hook commit-msg', 'hook pre-push', 'view export', 'version', 'lifecycle', 'help',
-  'roadmap', 'milestone', 'runner', 'runner add', 'blueprint', 'blueprint add', 'blueprint fit', 'blueprint save', 'spec fit',
+  'roadmap', 'milestone', 'milestone order', 'runner', 'runner add', 'blueprint', 'blueprint add', 'blueprint fit', 'blueprint save', 'spec fit',
 ];
 
 const HELP_GROUPS = [
@@ -260,6 +261,7 @@ const HELP_EXAMPLES = {
   relay: 'pullboard relay on --all', 'relay recover': 'pullboard relay recover --skip 12',
   'lane add': 'pullboard lane add web --owns apps/web/', lane: 'pullboard lane add web --owns apps/web/',
   roadmap: 'pullboard roadmap', rigor: 'pullboard rigor', 'rigor draft': 'pullboard rigor draft "refusal:MERGE_LOST" "Merges keep every hunk" --check "node bin/checks/merges.js" --red 0123456 --green 89abcde', milestone: 'pullboard milestone add "0.7.0" --items 12,13',
+  'milestone order': 'pullboard milestone order "0.7.0" 13,12',
   runner: 'pullboard runner add studio --slots 2 --browser 1', 'runner add': 'pullboard runner add studio --slots 2 --browser 1',
   edit: 'pullboard edit 12 --brief "Add the upload page"', release: 'pullboard release 12',
   land: 'pullboard land --max 4',
