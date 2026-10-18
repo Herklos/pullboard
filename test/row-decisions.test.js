@@ -531,3 +531,95 @@ test('[B26,S19,V3] a view approval binds proposed wording without changing the s
   box.git(box.root, 'commit', '-q', '-m', 'docs: apply the person-approved rewrite');
   assert.ok(box.git(box.root, 'show', 'HEAD:SPEC.md').includes(text), 'the exact view-approved rewrite passes the real commit hook');
 });
+
+test('a same-text gate change makes an approval stale everywhere [S1,B26]', async (t) => {
+  for (const [field, before, after] of [
+    ['gate', 'Approve this row. | gate: true', 'Approve this row. | gate: false'],
+    ['tier', 'G1 [draft, must]', 'G1 [draft, aim]'],
+    ['format', 'Approve this row. | gate:', 'Approve this row.  | gate:'],
+  ]) {
+    const box = project();
+    const key = makeKey(join(box.dir, 'stale-signing-key'));
+    box.git(box.root, 'config', 'user.signingkey', key.privateKey);
+    const signer = command(box, box.root, 'spec', 'signers', 'add', '--key', key.publicKey, '--by', 'CO', '--json');
+    assert.equal(signer.status, 0, signer.stderr);
+    const approval = command(box, box.root, 'spec', 'approve', 'G1', '--by', 'CO', '--json');
+    assert.equal(approval.status, 0, approval.stderr);
+    assert.ok(JSON.parse(approval.stdout).decisions[0].signature);
+    const file = join(box.root, SPEC_FILE);
+    const original = readFileSync(file, 'utf8');
+    assert.ok(original.includes(before), field + ': change exactly the intended source');
+    const edited = original.replace(before, after);
+    writeFileSync(file, edited);
+    writeFileSync(join(box.web, SPEC_FILE), edited);
+    assert.equal(sourceRow(box, SPEC_FILE, 'G1').text, 'Approve this row.');
+    const shown = command(box, box.root, 'spec', 'show', 'G1', '--json');
+    assert.equal(shown.status, 0, shown.stderr);
+    const row = JSON.parse(shown.stdout).row;
+    assert.match(row.stage ?? '', /STALE/u, field + ': the changed signed row is stale, never approved pending apply');
+    assert.equal(row.decision, undefined);
+    assert.match(row.stage, new RegExp(field));
+    assert.match(row.stage, /person.*approve.*again/u);
+    const request = await startView(t, box);
+    const boardPath = await viewBoardPath(request, box.root);
+    const state = (await (await request(`${boardPath}/state`)).json()).state;
+    assert.equal(state.spec.find(entry => entry.id === 'G1').stage, row.stage, 'the live API uses the same exact source match');
+    assert.equal(state.spec.find(entry => entry.id === 'G1').decision, undefined);
+    assert.ok(state.needs.some(need => need.kind === 'draft'), 'the changed approval returns to the person');
+    const resume = command(box, box.web, 'resume', '--json');
+    assert.equal(resume.status, 0, resume.stderr);
+    const setup = JSON.parse(resume.stdout).setup;
+    assert.ok(setup.rowIds.includes('G1'));
+    assert.ok(!setup.approvedRowIds?.includes('G1'));
+    assert.match(setup.question, /STALE/u);
+    assert.match(setup.question, new RegExp(field));
+    assert.match(setup.question, /person.*approve.*again/u);
+    const health = command(box, box.root, 'health', '--json');
+    assert.equal(health.status, 1, health.stderr);
+    const stale = JSON.parse(health.stdout).stuck.find(entry => entry.cause === 'STALE_ROW_DECISION');
+    assert.ok(stale, field + ': health names the blocked approval');
+    assert.match(stale.why, new RegExp(field));
+    assert.match(stale.next, /person.*approve.*again/u);
+    const digest = command(box, box.root, 'digest');
+    assert.equal(digest.status, 0, digest.stderr);
+    assert.match(digest.stdout, /STALE/u);
+    assert.match(digest.stdout, new RegExp(field));
+    const page = command(box, box.root, 'spec', 'view', '--json');
+    assert.equal(page.status, 0, page.stderr);
+    assert.match(readFileSync(JSON.parse(page.stdout).path, 'utf8'), /STALE/u, 'the offline listing does not hide the stale approval');
+    const apply = command(box, box.root, 'spec', 'apply', '--json');
+    assert.equal(apply.status, 1, apply.stderr);
+    assert.equal(JSON.parse(apply.stdout).error.code, 'STALE_ROW_DECISION');
+    assert.equal(readFileSync(file, 'utf8'), edited, 'refusal writes no part of the signed source');
+    const renewed = command(box, box.root, 'spec', 'approve', 'G1', '--by', 'CO', '--json');
+    assert.equal(renewed.status, 0, renewed.stderr);
+    const renewedRecord = JSON.parse(renewed.stdout).decisions[0];
+    assert.ok(renewedRecord.signature, 'the renewed person approval is signed too');
+    const current = command(box, box.root, 'spec', 'show', 'G1', '--json');
+    assert.equal(JSON.parse(current.stdout).row.stage, 'approved, pending apply', 'a new person decision clears staleness');
+
+    const renewedState = (await (await request(`${boardPath}/state`)).json()).state;
+    const renewedRow = renewedState.spec.find(entry => entry.id === 'G1');
+    assert.equal(renewedRow.stage, 'approved, pending apply', 'the live API clears the stale projection');
+    assert.ok(renewedRow.decision, 'the live API retains the renewed decision');
+    const resumed = command(box, box.web, 'resume', '--json');
+    assert.equal(resumed.status, 0, resumed.stderr);
+    const resumedSetup = JSON.parse(resumed.stdout).setup;
+    assert.ok(resumedSetup.approvedRowIds?.includes('G1'), 'resume recognizes G1 as awaiting apply');
+    assert.ok(!resumedSetup.rowIds.includes('G1'), 'resume no longer presents G1 as a draft needing a fresh decision');
+    const recoveredHealth = command(box, box.root, 'health', '--json');
+    const recoveredHealthReport = JSON.parse(recoveredHealth.stdout);
+    assert.ok(!recoveredHealthReport.stuck.some(entry => entry.cause === 'STALE_ROW_DECISION'), 'health clears the stale finding after renewed approval');
+    const recoveredDigest = command(box, box.root, 'digest');
+    assert.equal(recoveredDigest.status, 0, recoveredDigest.stderr);
+    const currentStuck = recoveredDigest.stdout.split('## Stuck and who moves it')[1].split('## Open work')[0];
+    assert.doesNotMatch(currentStuck, /STALE/u, 'digest clears the current stale warning while retaining historical shouts');
+    const recoveredPage = command(box, box.root, 'spec', 'view', '--json');
+    assert.equal(recoveredPage.status, 0, recoveredPage.stderr);
+    assert.doesNotMatch(readFileSync(JSON.parse(recoveredPage.stdout).path, 'utf8'), /STALE/u, 'offline listing clears the stale warning after renewed approval');
+
+    const applied = command(box, box.root, 'spec', 'apply', '--json');
+    assert.equal(applied.status, 0, applied.stderr);
+    assert.equal(sourceRow(box, SPEC_FILE, 'G1').status, 'approved');
+  }
+});
