@@ -2317,11 +2317,8 @@ function readMilestone(milestone, p) {
   const numeric = value => Number.isInteger(value) && value >= 0 ? value : null;
   const done = numeric(milestone.summary?.landed) ?? numeric(milestone.landed) ?? verified.length;
   const total = numeric(milestone.summary?.total) ?? numeric(milestone.total) ?? rows.length;
-  // A milestone with nothing left, every item landed or withdrawn, is finished and sits under Shipped whether or not it
-  // was recorded with milestone ship (the person, 18 Oct). The summary's left owns that when present; an empty plan is
-  // never finished.
-  const left = numeric(milestone.summary?.left);
-  const finished = milestone.items.length > 0 && (left !== null ? left === 0 : rows.every((row) => row.stage === 'merged'));
+  // Nothing left (every item landed or withdrawn) is finished and sits under Shipped, shipped or not (the person, 18 Oct).
+  const left = numeric(milestone.summary?.left), finished = milestone.items.length > 0 && (left !== null ? left === 0 : rows.every((row) => row.stage === 'merged'));
   const shipped = finished || (milestone.shipped !== undefined ? Boolean(milestone.shipped) : rows.length > 0 && verified.length === rows.length);
   return { milestone, rows, done, total, shipped };
 }
@@ -2338,10 +2335,9 @@ function nextMilestone(p) {
 }
 
 /**
- * The Roadmap (N26, N38) opens unshipped milestones in board order, then folds explicit shipments into Shipped.
- * Each header displays the backend's supplied state partition, remaining work, forecast and person decisions.
- * Accepted and landed rows stay distinct; shipped history carries its commit. Older exports keep their legacy
- * completion rule. Each part preserves the person's disclosure choice for this visit.
+ * The Roadmap (N26, N38) opens releases with work left in board order and folds shipped or finished ones into Shipped.
+ * Headers show the backend's summary; accepted and landed rows stay distinct; shipped history carries its commit; old
+ * exports keep their legacy completion rule; each part keeps the person's disclosure choice for this visit.
  */
 function roadmapCards(p, titles) {
   // Opened from the status bar's release, the Roadmap is that release alone, with a way back to all of them.
