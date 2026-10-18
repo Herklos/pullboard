@@ -814,6 +814,8 @@ function landingFailureWaived(waivers, file, name) {
 
 /** Run a landing check with execution-ordered failure detection and native runner reporters. */
 async function runLandingTests(args, env, concurrency) {
+  const { landingFailureReport } = await import('../src/landing-failure-report.js');
+  const retainedFailure = landingFailureReport();
   const waivers = landingWaiverProjection(process.env[LANDING_WAIVERS_ENV]);
   const waivedFiles = new Map();
   const { run } = await import('node:test');
@@ -1082,6 +1084,7 @@ async function runLandingTests(args, env, concurrency) {
             if (waivers.length && details.error?.failureType === 'subtestsFailed' && waivedFiles.get(file) === true) return;
             waivedFiles.set(file, false);
             firstFailure = { file, name, error: details.error };
+            retainedFailure.remember(data);
             // Node emits completion before finalizing its result. Aborting inside that callback
             // replaces the real failure with cancellation; let the current publication finish.
             queueMicrotask(abortLandingRun);
@@ -1101,6 +1104,7 @@ async function runLandingTests(args, env, concurrency) {
       },
     });
     stream.on('data', event => {
+      event = retainedFailure.event(event);
       // Node 22's execution-complete event may describe only the failed file wrapper;
       // its ordered failure event retains the actual assertion once reporters drain.
       if (event.type === 'test:fail') {

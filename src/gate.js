@@ -100,7 +100,7 @@ const FAILURE_RE = /fail|error|expected|received|assert|not ok|✗|×|cannot|und
 // A passing test's own lines, whatever its name says: TAP's `ok N` and the `# Subtest:` before it.
 const PASSING_RE = /^\s*(ok \d+\b|# Subtest:)/;
 // Lines kept under a failure, where test runners say why: the message, expected and actual.
-const CONTEXT_LINES = 10;
+const CONTEXT_LINES = 20;
 
 /** Detect the performance-core budget on Apple Silicon, or the runtime's usable CPU budget elsewhere. */
 export function performanceCores() {
@@ -179,6 +179,12 @@ export function digestOf(output) {
   const failing = [];
   for (let at = 0; at < body.length && failing.length < 40; at += 1) {
     if (PASSING_RE.test(body[at]) || !FAILURE_RE.test(body[at])) continue;
+    if (/^\s*not ok \d+/u.test(body[at])) {
+      let end = at + 1;
+      while (end < body.length && !/^\s*(?:# Subtest:|(?:not )?ok \d+|\d+\.\.)/u.test(body[end])) end += 1;
+      // Cancelled siblings are fallout; keep the actual assertion's fields inside the digest cap.
+      if (body.slice(at, end).some(line => /failureType:\s*['"]testAborted['"]/u.test(line))) { at = end - 1; continue; }
+    }
     const block = body.slice(at, at + CONTEXT_LINES + 1);
     const end = block.findIndex((line, n) => n > 0 && (PASSING_RE.test(line) || /^\s*(not ok \d+|\.\.\.)\s*$|^\s*not ok \d+/.test(line)));
     for (const line of end === -1 ? block : block.slice(0, end)) {
