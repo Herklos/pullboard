@@ -176,6 +176,7 @@ import { Refused } from './refused.js';
 import {
   applyStep,
   personAsk,
+  requirementStep,
 } from './setup-rows.js';
 import { personNeeds } from './needs.js';
 import { personNeedsState } from './needs-state.js';
@@ -1395,7 +1396,7 @@ const reworkNext = (card) => `pullboard claim ${card.sentBack[0].item.item_id}, 
 /**
  * The coordinator's next step, from the board and the spec (N32): the spec with the person first,
  * then its own work in hand, then verdicts, merges, builders and the plan, so an agent that runs the
- * team by the run guide always knows where it is. Nothing jumps the spec, not even its own claim.
+ * team by the run guide knows where it is. A working board with no spec rows can keep building.
  *
  * @param {any} card
  * @param {{ id: string, status: string }[]} rows
@@ -1404,9 +1405,9 @@ const reworkNext = (card) => `pullboard claim ${card.sentBack[0].item.item_id}, 
 function coordinatorNext(card, rows) {
   if (card.requests.length) return `answer request #${card.requests[0].shout_id}: pullboard answer ${card.requests[0].shout_id} done, or declined <reason>`;
   const live = rows.filter((row) => !['wont', 'retired'].includes(row.status));
-  if (!live.length) return "turn what the person wants into spec rows with them: the pullboard-decompose skill (pullboard prompt decompose)";
+  if (!live.length && (rows.length || !card.all.length)) return "turn what the person wants into spec rows with them: the pullboard-decompose skill (pullboard prompt decompose)";
   const approved = live.filter((row) => row.status === 'approved');
-  if (!approved.length) return 'the person approves rows in SPEC.md; then plan them: the pullboard-plan skill';
+  if (live.length && !approved.length) return 'the person approves rows in SPEC.md; then plan them: the pullboard-plan skill';
   if (card.holding.length) return buildNext(card);
   if (card.sentBack.length) return reworkNext(card);
   if (card.toVerify.length) return 'pullboard next --verify --as coordinator, or a verifier that built nothing: pullboard worktree review --model "<model name>"';
@@ -1613,9 +1614,7 @@ function boardSetup(ctx, card, identity) {
   /** Preserve all existing configuration when recording one setup answer. */
   const configure = patch => `node -e ${quote(`const fs=require('node:fs');const p='pullboard.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));${patch};fs.writeFileSync(p,JSON.stringify(c,null,2)+${JSON.stringify('\n')})`)}`;
   const steps = [
-    { number: 1, done: approved.length > 0 && ((!drafted.length && !toApply.length) || completed), question: 'Ask the person: what are we building, and who will use it? Draft a few requirements, then ask the person to approve them.',
-      command: 'pullboard spec draft "<text>"',
-      afterAnswer: 'Record each answer with pullboard spec draft "<text>"; the person approves the returned ids in Pullboard View or runs pullboard spec approve <ids> in their own terminal; then the coordinator runs pullboard spec apply.' },
+    requirementStep({ rows, drafted, toApply, completed, hasItems: card.all.length > 0 }),
     { number: 2, done: lanes.length > 0, question: `Ask the person: how should we divide the work? Suggested folders: ${folders.join(', ') || 'app/ (create it for the app)'}.`,
       command: `pullboard lane add ${word(lane)} --owns ${word(lane + '/')}` },
     { number: 3, done: Boolean(ctx.config.gate?.trim()),
@@ -1748,6 +1747,7 @@ async function resumeHere(io, view) {
   if (card.inbox) for (const line of coordinatorInboxLines(card.inbox, name, (at) => span(ctx, at), firstLine)) say(line);
   say(`New agent worktrees: ${card.newWorktreeLocation}`);
   card.setup = boardSetup(ctx, card, setupScope);
+  if (!loadSpec(root, ctx.config).rows.length && card.all.length) say('Spec rows are optional; add a requirement later: pullboard spec draft "<text>".');
   if (card.setup) {
     say(`Setting up: step ${card.setup.step} of 5`);
     say(card.setup.question);
