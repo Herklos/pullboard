@@ -1,5 +1,8 @@
 /** Versioned command results and refusals for tools that drive the CLI (A1). */
-import { nextStepFor, personRequestGuidance } from './next-steps.js';
+import {
+  nextStepFor,
+  personRequestGuidance,
+} from './next-steps.js';
 
 /** A shape's required top-level fields; optional fields may be added within this version. */
 function shape(fields) {
