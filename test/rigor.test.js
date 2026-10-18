@@ -1,6 +1,9 @@
 /** Rigor: a repeated failure cause is noticed from structured fields, never from notes [D1,V1]. */
 import { submitFixture } from './board-submit-fixture.js';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { createServer } from 'node:net';
+import { once } from 'node:events';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -8,7 +11,10 @@ import { pathToFileURL } from 'node:url';
 import { after, test } from 'node:test';
 import { runFixtureChild, runFixtureGit } from './fixture-child.js';
 import * as store from '../src/board.js';
-import { applyEngineMove, prepareEngineMove } from '../src/engine.js';
+import { applyEngineMove, applyRelayMove, appliedSequence, prepareEngineMove } from '../src/engine.js';
+import { executeMove } from '../src/api.js';
+import { main } from '../src/cli.js';
+import { refusePersonMove } from '../src/mcp.js';
 import { CAUSE_ENGINE, ENGINE_VERSION } from '../src/machine.js';
 import { rigorReport } from '../src/rigor.js';
 import { unpackRelease } from './release-archive.js';
@@ -41,7 +47,7 @@ function freshBoard() {
   });
   const repo = join(dir, 'repo');
   mkdirSync(repo);
-  const git = (...args) => runFixtureGit(args, { cwd: repo, env });
+  const git = (...args) => runFixtureGit(args, { cwd: repo, env, encoding: 'utf8' });
   const run = (...args) => runFixtureChild(process.execPath, [BIN, ...args], { cwd: repo, env, encoding: 'utf8' });
   git('init', '-q', '-b', 'main');
   const init = run('init', '--model', 'Rigor coordinator');
@@ -81,9 +87,9 @@ function history(file) {
   /** A fresh 40-character commit id for each submission. */
   const commit = () => (++next).toString(16).padStart(40, '0');
   /** Claim and submit an item at a new commit, returning that commit. */
-  const submit = (id) => {
+  const submit = (id, at = null) => {
     store.claim(board, id, { agentId: builder, lane: 'app', leaseMs: 2 * HOUR, freeze });
-    const sha = commit();
+    const sha = at ?? commit();
     submitFixture(board, id, { agentId: builder, commit: sha, tree: `tree-${sha}` });
     return sha;
   };
@@ -290,4 +296,227 @@ test('reject, reopen and fact moves without a cause replay unchanged from engine
     assert.throws(() => legacyEngine.applyEngineMove(old, caused, { sequence: journal.length + 1, at: '2026-10-16T12:01:00.000Z' }),
       (error) => error.code === 'ENGINE_VERSION', `the engine-${version} client refuses a cause move before interpreting it`);
   }
+});
+
+test('a repeated cause becomes a draft row with its proof [D1,D3,S1,P6]', async () => {
+  const box = freshBoard();
+  // Two real commits: the bad one has a TODO and no fixed file; the fix removes the TODO and adds it.
+  mkdirSync(join(box.repo, 'src'), { recursive: true });
+  writeFileSync(join(box.repo, 'src', 'page.js'), '// TODO: escape the title\nexport const page = 1;\n');
+  mkdirSync(join(box.repo, 'test'), { recursive: true });
+  writeFileSync(join(box.repo, 'test', 'page.test.js'), "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { page } from '../src/page.js';\ntest('[G1] the page::title is escaped', () => assert.equal(page, 2));\n");
+  box.git('add', 'src/page.js', 'test/page.test.js');
+  box.git('commit', '-q', '-m', 'chore: add the page');
+  const bad = box.git('rev-parse', 'HEAD');
+  writeFileSync(join(box.repo, 'unrelated-note.txt'), 'An unrelated commit still has the same failure.\n');
+  box.git('add', 'unrelated-note.txt');
+  box.git('commit', '-q', '-m', 'chore: record an unrelated note');
+  const unrelatedBad = box.git('rev-parse', 'HEAD');
+  writeFileSync(join(box.repo, 'src', 'page.js'), 'export const page = 2;\n');
+  writeFileSync(join(box.repo, 'fixed.txt'), 'fixed\n');
+  box.git('add', 'src/page.js', 'fixed.txt');
+  box.git('commit', '-q', '-m', 'chore: escape the title');
+  const fix = box.git('rev-parse', 'HEAD');
+  const testFile = join(box.repo, 'test', 'page.test.js');
+  const testSource = readFileSync(testFile, 'utf8');
+  writeFileSync(testFile, testSource.replace("', () =>", "', { skip: true }, () =>"));
+  box.git('add', 'test/page.test.js');
+  box.git('commit', '-q', '-m', 'chore: record a skipped green test');
+  const skippedGreen = box.git('rev-parse', 'HEAD');
+  writeFileSync(testFile, testSource);
+  box.git('add', 'test/page.test.js');
+  box.git('commit', '-q', '-m', 'chore: restore the executed test');
+
+  const board = history(box.file);
+  const items = ['Work one', 'Work two', 'Product one', 'Product two', 'Both one', 'Both two', 'Lonely'].map(board.add);
+  const [workA, workB, productA, productB, bothA, bothB, lonely] = items;
+  const bothKey = 'test:test/page.test.js::[G1] the page::title is escaped';
+  for (const [id, cause] of [[workA, 'doctrine:C3'], [workB, 'doctrine:C3'], [productA, 'row:G1'], [productB, 'row:G1'], [bothA, bothKey], [bothB, bothKey], [lonely, 'refusal:LONELY']]) {
+    board.submit(id, bad); board.reject(id, cause);
+  }
+  board.close();
+  const specBefore = readFileSync(join(box.repo, 'SPEC.md'), 'utf8');
+  const doctrineBefore = readFileSync(join(box.repo, 'DOCTRINE.md'), 'utf8');
+
+  // Without proof, or with a proof that is not red then green, nothing is drafted.
+  const flags = (check, red, green) => ['--check', check, '--red', red, '--green', green];
+  const unrelatedRed = box.run('rigor', 'draft', 'doctrine:C3', 'No TODO markers in shipped source', ...flags('grep -rn TODO src', unrelatedBad, fix), '--json');
+  refused(unrelatedRed, 'RIGOR_UNPROVEN', 'a red commit outside the noticed failure receipts cannot prove this cause');
+  assert.ok(JSON.parse(unrelatedRed.stdout).error.message.includes(bad), 'the refusal names the actual noticed receipt commit');
+  const unrelatedCheck = box.run('rigor', 'draft', bothKey, 'Page titles are escaped', ...flags('! grep -rn TODO src', bad, fix), '--json');
+  refused(unrelatedCheck, 'RIGOR_UNPROVEN', 'an unrelated check cannot prove the named failing test');
+  assert.ok(JSON.parse(unrelatedCheck.stdout).error.message.includes(bad), 'an unrelated check refusal names the noticed receipt commit');
+  refused(box.run('rigor', 'draft', bothKey, 'Page titles are escaped', ...flags('node --test test/page.test.js', bad, skippedGreen), '--json'), 'RIGOR_UNPROVEN', 'a skipped green test is no passing proof');
+  refused(box.run('rigor', 'draft', bothKey, 'Page titles are escaped', ...flags("node --test --test-name-pattern 'a different test' test/page.test.js", bad, fix), '--json'), 'RIGOR_UNPROVEN', 'a selector that excludes the noticed test is no proof');
+  const unchecked = box.run('rigor', 'draft', 'doctrine:C3', 'No TODO markers in shipped source', '--json');
+  refused(unchecked, 'RIGOR_UNPROVEN', 'a draft without a check is unproven');
+  assert.match(JSON.parse(unchecked.stdout).error.message, /no --check names the command that proves it/u, 'the refusal names the missing check');
+  const ungreen = box.run('rigor', 'draft', 'doctrine:C3', 'No TODO markers in shipped source', '--check', 'grep -rn TODO src', '--red', bad, '--json');
+  refused(ungreen, 'RIGOR_UNPROVEN', 'a draft without its green commit is unproven');
+  assert.match(JSON.parse(ungreen.stdout).error.message, /no --green names the commit where the check passes/u);
+  refused(box.run('rigor', 'draft', 'doctrine:C3', 'No TODO markers in shipped source', ...flags('grep -rn NEVER_PRESENT src', bad, fix), '--json'), 'RIGOR_UNPROVEN', 'a work check that finds no problem at red proves nothing');
+  refused(box.run('rigor', 'draft', 'doctrine:C3', 'No TODO markers in shipped source', ...flags('grep -rn TODO src', fix, bad), '--json'), 'RIGOR_UNPROVEN', 'a check green at red and red at green proves nothing');
+  refused(box.run('rigor', 'draft', 'row:G1', 'The fixed file exists', ...flags('true', bad, fix), '--json'), 'RIGOR_UNPROVEN', 'a test that never fails proves nothing');
+  refused(box.run('rigor', 'draft', 'refusal:LONELY', 'Lonely rule', ...flags('test -f fixed.txt', bad, fix), '--json'), 'RIGOR_UNNOTICED', 'a cause that has not repeated cannot be drafted');
+  assert.equal(readFileSync(join(box.repo, 'SPEC.md'), 'utf8'), specBefore, 'a refused draft writes no spec row');
+  assert.equal(readFileSync(join(box.repo, 'DOCTRINE.md'), 'utf8'), doctrineBefore, 'a refused draft writes no doctrine row');
+
+  // A work cause becomes a Doctrine row: gate: check, count: 0, its evidence and its proof.
+  const work = json(box, 'rigor', 'draft', 'doctrine:C3', 'No TODO markers in shipped source', ...flags('grep -rn TODO src', bad, fix));
+  assert.equal(work.reads, 'work');
+  assert.deepEqual(work.evidence.items.map((item) => item.id), [workA, workB]);
+  assert.deepEqual([work.proof.red.commit, work.proof.red.problems, work.proof.green.commit, work.proof.green.problems], [bad, 1, fix, 0]);
+  assert.equal(work.drafts.length, 1);
+  const [doctrineRow] = work.drafts;
+  assert.equal(doctrineRow.file, 'DOCTRINE.md');
+  assert.equal(doctrineRow.line, `- ${doctrineRow.id} [draft, must] No TODO markers in shipped source Why: rigor doctrine:C3 failed on #${workA}, #${workB}; red at ${bad}, green at ${fix}. | gate: check grep -rn TODO src | count: 0`);
+  assert.ok(readFileSync(join(box.repo, 'DOCTRINE.md'), 'utf8').includes(doctrineRow.line), 'the row is written into DOCTRINE.md');
+  assert.equal(readFileSync(join(box.repo, 'SPEC.md'), 'utf8'), specBefore, 'a work cause writes no spec row');
+
+  // A product cause becomes a spec row gated by its failing test.
+  const product = json(box, 'rigor', 'draft', 'row:G1', 'The fixed file exists', ...flags('test -f fixed.txt', bad, fix));
+  assert.equal(product.reads, 'product');
+  assert.deepEqual([product.proof.red.exit, product.proof.green.exit], [1, 0], 'the test fails on the bad commit and passes on the fix');
+  assert.equal(product.drafts.length, 1);
+  const [specRow] = product.drafts;
+  assert.equal(specRow.file, 'SPEC.md');
+  assert.equal(specRow.line, `- ${specRow.id} [draft, must] The fixed file exists Why: rigor row:G1 failed on #${productA}, #${productB}; red at ${bad}, green at ${fix}. | gate: test -f fixed.txt`);
+
+  // An unclear cause drafts both, and the person picks.
+  const both = json(box, 'rigor', 'draft', bothKey, 'Page titles are escaped', ...flags("node --test test/page.test.js", bad, fix));
+  assert.equal(both.reads, 'both');
+  assert.deepEqual(both.drafts.map((draft) => draft.file), ['DOCTRINE.md', 'SPEC.md']);
+  const scanner = both.drafts.find(draft => draft.file === 'DOCTRINE.md').row.gate.slice('check '.length);
+  const scanned = runFixtureChild('/bin/sh', ['-c', scanner], { cwd: box.repo, env: box.env, encoding: 'utf8' });
+  assert.equal(scanned.status, 0, 'the derived count scanner succeeds on the fixed test');
+  assert.equal(scanned.stdout, '', 'a passing test really has zero problem lines in its doctrine scanner');
+  writeFileSync(join(box.repo, 'src', 'page.js'), 'export const page = 1;\n');
+  try {
+    const redScan = runFixtureChild('/bin/sh', ['-c', scanner], { cwd: box.repo, env: box.env, encoding: 'utf8' });
+    assert.equal(redScan.status, 1, 'the derived scanner really executes the failing target instead of inheriting a recursive-test skip');
+    assert.equal(redScan.stdout, 'The noticed test failed.\n', 'a failing target produces exactly one doctrine problem line');
+  } finally { writeFileSync(join(box.repo, 'src', 'page.js'), 'export const page = 2;\n'); }
+  assert.equal(both.drafts.find(draft => draft.file === 'SPEC.md').row.gate, 'node --test test/page.test.js', 'the product row keeps the actual test command');
+
+  // Drafting is any agent's; approving stays the person's, however an agent tries to reach it (P6).
+  const drafted = [doctrineRow.id, specRow.id];
+  const agentApprove = runFixtureChild(process.execPath, [BIN, 'spec', 'approve', specRow.id, '--json'], { cwd: box.repo, env: { ...box.env, CLAUDECODE: '1' }, encoding: 'utf8' });
+  refused(agentApprove, 'B26_PERSON_CHANNEL', 'an agent shell cannot approve a drafted row');
+  const api = await executeMove(box.repo, { verb: 'spec-approve', args: { ids: drafted.join(',') } }, main, true, 'api');
+  assert.equal(api.body.error?.code, 'B26_PERSON_CHANNEL', 'the standalone API cannot approve a drafted row');
+  assert.throws(() => refusePersonMove('spec_approve'), (error) => error.code === 'HUMAN_REQUIRED', 'MCP cannot approve a drafted row');
+  const sealedBoard = store.openBoard(box.file);
+  try {
+    const forged = prepareEngineMove(sealedBoard, 'recordRowDecisions', [{ agentId: store.PERSON, channel: 'view', decisions: [] }], { id: 'rigor-forged-approval' });
+    for (const sender of [{ kind: 'agent', userId: 'fixture', agent: 'coordinator' }, { kind: 'machine', userId: 'fixture', machine: 'fixture-machine' }]) {
+      const outcome = applyRelayMove(sealedBoard, { ...forged, id: `${forged.id}-${sender.kind}` }, { sequence: appliedSequence(sealedBoard) + 1, at: new Date().toISOString(), kind: 'move', sender });
+      assert.equal(outcome.error?.code, 'RELAY_PERSON_ONLY', `a sealed approval from a ${sender.kind} is refused`);
+    }
+  } finally { store.closeBoard(sealedBoard); }
+
+  // Nothing is approved or applied: every drafted row is a draft, and the board records no decision.
+  const rows = json(box, 'spec').rows.filter((row) => [doctrineRow.id, specRow.id, ...both.drafts.map((draft) => draft.id)].includes(row.id));
+  assert.equal(rows.length, 4);
+  assert.ok(rows.every((row) => row.status === 'draft'), 'every drafted row is still a draft');
+  assert.equal(rows.find((row) => row.id === doctrineRow.id).gate, 'check grep -rn TODO src');
+  const check = box.run('spec', 'check');
+  assert.equal(check.status, 0, `the drafted rows parse cleanly: ${check.stdout}${check.stderr}`);
+  assert.ok(!json(box, 'log').events.some((event) => ['row_decision', 'row_apply'].includes(event.event_kind)), 'the command approved and applied nothing');
+
+  // The person's approval applies through the usual spec apply, with no extra item filed.
+  const itemsBefore = json(box, 'list', '--all').items.length;
+  json(box, 'spec', 'approve', `doctrine:${doctrineRow.id},${specRow.id}`);
+  json(box, 'spec', 'apply');
+  const applied = json(box, 'spec').rows.filter((row) => drafted.includes(row.id));
+  assert.deepEqual(applied.map((row) => row.status), ['approved', 'approved'], 'the person approved both rows and spec apply applied them');
+  assert.equal(json(box, 'list', '--all').items.length, itemsBefore, 'approval files no proof-building item; the draft already carries its proof');
+});
+
+
+test('a timed-out proof drains only its captured process group before removing its worktree [D1,D3,S1]', async () => {
+  const { runCheckAt } = await import('../src/rigor-proof.js');
+  const { parseProcessCensus } = await import('../src/process-census.js');
+  const box = freshBoard();
+  const helper = join(box.repo, 'hold-proof.mjs');
+  const parserUrl = new URL('../src/process-census.js', import.meta.url).href;
+  let resolveMarker;
+  let rejectMarker;
+  const marker = new Promise((resolve, reject) => { resolveMarker = resolve; rejectMarker = reject; });
+  const ready = createServer(socket => {
+    let value = '';
+    socket.setEncoding('utf8');
+    socket.on('data', chunk => { value += chunk; });
+    socket.once('end', () => {
+      try { resolveMarker(JSON.parse(value)); } catch (error) { rejectMarker(error); }
+    });
+    socket.once('error', rejectMarker);
+  });
+  ready.listen(0, '127.0.0.1');
+  await once(ready, 'listening');
+  const port = ready.address().port;
+  const timeoutMs = 1000;
+  writeFileSync(helper, `
+    import { spawn, spawnSync } from 'node:child_process';
+    import { createConnection } from 'node:net';
+    import { parseProcessCensus } from ${JSON.stringify(parserUrl)};
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)']);
+    await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+    const ps = spawnSync('/bin/ps', ['-axo', 'pid=,ppid=,pgid=,lstart=,stat=,comm='], { encoding: 'utf8', timeout: 2000, env: { ...process.env, LC_ALL: 'C' } });
+    const rows = ps.status === 0 ? parseProcessCensus(ps.stdout) : null;
+    const owned = rows && [process.pid, child.pid].map(pid => rows.get(pid));
+    if (!owned?.every(Boolean) || owned[0].pgid !== owned[1].pgid) process.exit(32);
+    const socket = createConnection({ host: '127.0.0.1', port: ${port} });
+    socket.on('error', () => process.exit(33));
+    socket.end(JSON.stringify({ rows: owned }));
+    setInterval(() => {}, 1000);
+  `);
+  let runOutcome;
+  let failure;
+  let watchdog;
+  try {
+    box.git('add', 'hold-proof.mjs');
+    box.git('commit', '-q', '-m', 'test: add bounded proof process fixture');
+    const before = box.git('worktree', 'list', '--porcelain').split(/\n\n/u).filter(Boolean).length;
+    watchdog = setTimeout(() => rejectMarker(new Error('proof fixture did not send its live process identities')), 5000);
+    runOutcome = runCheckAt(box.repo, box.git('rev-parse', 'HEAD'), 'unused', {
+      executable: process.execPath, args: ['hold-proof.mjs'],
+    }, { timeoutMs }).then(value => ({ value }), error => ({ error }));
+    const recorded = await marker;
+    const pre = spawnSync('/bin/ps', ['-axo', 'pid=,ppid=,pgid=,lstart=,stat=,comm='], { encoding: 'utf8', timeout: 2000, env: { ...process.env, LC_ALL: 'C' } });
+    assert.equal(pre.status, 0, 'the pre-timeout census completed');
+    const live = parseProcessCensus(pre.stdout);
+    assert.ok(live, 'the pre-timeout census is parseable');
+    assert.equal(recorded.rows[0].pgid, recorded.rows[1].pgid, 'both captured processes belong to one group');
+    for (const identity of recorded.rows) {
+      const current = live.get(identity.pid);
+      assert.ok(current && current.pgid === identity.pgid && current.started === identity.started
+        && current.processSha256 === identity.processSha256 && !current.state.startsWith('Z'),
+      'each real process identity is still present before timeout');
+    }
+    const outcome = await runOutcome;
+    if (outcome.error) throw outcome.error;
+    assert.equal(outcome.value.timedOut, true, 'the owned proof reports its configured timeout');
+    const post = spawnSync('/bin/ps', ['-axo', 'pid=,ppid=,pgid=,lstart=,stat=,comm='], { encoding: 'utf8', timeout: 2000, env: { ...process.env, LC_ALL: 'C' } });
+    assert.equal(post.status, 0, 'the post-timeout census completed');
+    const drained = parseProcessCensus(post.stdout);
+    assert.ok(drained, 'the post-timeout census is parseable');
+    for (const identity of recorded.rows) {
+      const current = drained.get(identity.pid);
+      assert.ok(!current || current.state.startsWith('Z') || current.pgid !== identity.pgid
+        || current.started !== identity.started || current.processSha256 !== identity.processSha256,
+      'each captured process is absent, a zombie, or a different process');
+    }
+    assert.equal(box.git('worktree', 'list', '--porcelain').split(/\n\n/u).filter(Boolean).length, before,
+      'the temporary proof worktree was removed after its group drained');
+  } catch (error) { failure = error; }
+  finally {
+    clearTimeout(watchdog);
+    const outcome = await runOutcome;
+    if (!failure && outcome?.error) failure = outcome.error;
+    if (failure && outcome) failure.message += '; bounded proof outcome: ' + JSON.stringify(outcome.error
+      ? { refusal: outcome.error.code, message: outcome.error.message }
+      : { exit: outcome.value.exit, timedOut: outcome.value.timedOut, stderr: outcome.value.stderr });
+    await new Promise(resolve => ready.close(resolve));
+  }
+  if (failure) throw failure;
 });

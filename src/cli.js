@@ -19,6 +19,7 @@ import { checkRulesAt, doctrineReport, hasSubmitRules, holdDoctrine, ruleLine } 
 import { AGENT_SESSION_IDS, agentSessionDigest, requirePersonChannel } from './person.js';
 import { bindLocalSession, localSessionMatches, localSessionSeats } from './agent-session.js';
 import { decisionAnswer, decisionProjection, handAnsweredQuestions, pendingAnswers, planRowApply, prepareRowDecisions, restoreRowApply, writeRowApply } from './row-decisions.js';
+import { draftRow } from './spec-draft.js';
 import { digestOf, gateReport, refuseSandboxBlocked, runGate, runProfiledShell, runSubmitGate, submitGateReport, timingDigest, withGateSlot } from './gate.js';
 import { gateWaitReporter } from './gate-wait.js';
 import { checkNeedsBrowser, explicitCheckFiles } from './browser-admission.js';
@@ -52,11 +53,9 @@ import { promptFor, skillProblems, updateSkills } from './skills.js';
 import {
   frozenCriterion,
   idProblems,
-  insertSectionRows,
   lintSpec,
   loadSpec,
   legacyDoctrineRenameBase,
-  nextRowId,
   permanenceProblems,
   parseSpec,
   readSignoffs,
@@ -82,6 +81,7 @@ import { commandOutput, refusalDocument } from './json.js';
 import { forgetProject, listApiProjects, registerProjectAndLink, registeredProjectRootsSnapshot } from './projects.js';
 import { milestoneRoadmap } from './roadmap.js';
 import { rigorLines, rigorReport } from './rigor.js';
+import { rigorDraft } from './rigor-draft.js';
 import { listResources, memoryVerdict, readMachineMemory, runnerResourceStatus } from './resources.js';
 import { citedTestFiles, rowEvidence, rowStage } from './evidence.js';
 import { exportView, serveView } from './serve.js';
@@ -327,6 +327,8 @@ const OPTIONS = {
   'never-again': { type: 'boolean' },
   implies: { type: 'string' },
   owns: { type: 'string' },
+  red: { type: 'string' },
+  green: { type: 'string' },
   help: { type: 'boolean', short: 'h' },
   version: { type: 'boolean', short: 'v' },
 };
@@ -2253,7 +2255,8 @@ function readCommands(io, { first, second, rest, values }) {
       return 0;
     },
     rigor: () => {
-      if (first || second || rest.length) throw new Refused('USAGE', 'pullboard rigor takes no arguments');
+      if (first === 'draft') return rigorDraftHere(io, { second, rest, values });
+      if (first || second || rest.length) throw new Refused('USAGE', 'pullboard rigor takes no arguments; to draft a rule: pullboard rigor draft <key> "<rule>" --check "<command>" --red <commit> --green <commit>');
       const ctx = context(io);
       const report = withBoard(ctx, (board) => rigorReport(store.events(board), { person: store.PERSON }));
       io.result?.(report);
@@ -2269,6 +2272,28 @@ function readCommands(io, { first, second, rest, values }) {
       return 0;
     },
   };
+}
+
+/**
+ * Draft a rule from a repeated cause (#714): prove its check red then green on real commits, then
+ * write the pending row or rows through the spec draft writer. Nothing is approved or applied; the
+ * person approves the rows in pullboard view or with pullboard spec approve [D1,D3,S1].
+ *
+ * @param {any} io
+ * @param {{ second?: string, rest: string[], values: any }} args
+ * @returns {Promise<number>}
+ */
+async function rigorDraftHere(io, { second, rest, values }) {
+  if (rest.length > 1) throw new Refused('USAGE', 'pullboard rigor draft <key> "<rule>" --check "<command>" --red <commit> --green <commit> [--section <letter>]');
+  const ctx = context(io);
+  const { events, actor } = withBoard(ctx, (board) => ({ events: store.events(board), actor: whoAmI(ctx, board).id }));
+  const result = await rigorDraft({ root: ctx.info.root, config: ctx.config, events, person: store.PERSON, agent: actor },
+    { key: second, text: rest[0], check: values.check, red: values.red, green: values.green, section: values.section });
+  io.result?.(result);
+  io.say(`proved ${result.key}: red at ${result.proof.red.commit.slice(0, 12)} (${result.proof.red.problems} problem lines, exit ${result.proof.red.exit}), green at ${result.proof.green.commit.slice(0, 12)} (exit ${result.proof.green.exit})`);
+  for (const draft of result.drafts) io.say(`${draft.file}: ${draft.line}`);
+  io.say(`next: the person approves ${result.drafts.map((draft) => draft.id).join(' or ')} in pullboard view or with pullboard spec approve; commit ${[...new Set(result.drafts.map((draft) => draft.file))].join(' and ')}`);
+  return 0;
 }
 
 /**
@@ -3601,28 +3626,9 @@ async function specCommand(io, { first, second, rest, values }) {
       return 0;
     }
     if (values.source !== undefined) throw new Refused('FLAG_NOT_ALLOWED', 'spec draft --source belongs to --doctrine; use both when proposing a ruling');
-    if (!spec.sections.length) throw new Refused('NO_SECTION', `no section in ${ctx.config.spec}; add a section heading, then draft the requirement`);
-    const sections = spec.sections.map(section => ({ ...section,
-      prefix: /^([A-Z][A-Z0-9]*)\s*[·.:-]/u.exec(section.name)?.[1] })).filter(section => section.prefix);
-    const requested = values.section ?? 'G';
-    const section = sections.find(section => section.prefix === requested);
-    if (!section) throw new Refused('SPEC_SECTION', `unknown section "${requested}" in ${ctx.config.spec}; ${sections.length
-      ? `choose one of: ${sections.map(section => section.prefix).join(', ')}`
-      : 'add a section heading with an id prefix such as G · Goals'}`);
-    const { prefix } = section;
-    const malformed = [[spec.file, spec.problems], [practice.repo.file, practice.repo.problems]].find(([, problems]) => problems.length);
-    if (malformed) {
-      throw new Refused('SPEC_INVALID', `fix the unparsed row in ${malformed[0]} before drafting; an existing id may be ambiguous`);
-    }
-    const id = nextRowId(prefix, [...spec.rows, ...practice.repo.rows]);
     const tier = values.aim ? 'aim' : 'must';
-    const gate = values.gate?.trim() ?? 'review';
-    const row = `- ${id} [draft, ${tier}] ${second.trim()} | gate: ${gate}`;
-    const source = readFileSync(spec.file, 'utf8');
-    const after = insertSectionRows(source, spec, section, [row]);
-    writeRowApply(ctx.info.root, { records: [], files: [{ file: ctx.config.spec, before: source, after }],
-      signoffs: { before: null, receipts: [] } });
-    io.result?.({ id, row: { id, status: 'draft', tier, text: second.trim(), gate, section: section.name } });
+    const { id, row } = draftRow(ctx.info.root, ctx.config, { target: 'spec', text: second.trim(), gate: values.gate?.trim() ?? 'review', tier, section: values.section });
+    io.result?.({ id, row });
     io.say(id);
     return 0;
   }
