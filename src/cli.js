@@ -99,6 +99,10 @@ import {
   explicitCheckFiles,
 } from './browser-admission.js';
 import {
+  submitInvariantLine,
+  submitInvariantProposals,
+} from './submit-invariants.js';
+import {
   bareWorktreeFinding,
   codeIsFromMain,
   contains,
@@ -2442,7 +2446,8 @@ function readCommands(io, { first, second, rest, values }) {
       const summary = withBoard(ctx, (board) => {
         const me = whoAmI(ctx, board);
         const mine = store.listItems(board).filter((item) => item.item_status === 'claimed' && item.item_owner === me.id);
-        return { me, mine, stats: store.stats(board), reviewQueue: { ...store.reviewQueue(board), ...store.reviewQueueBreakdown(board) }, unread: store.unreadCount(board, me.id), relay: relayStatus(ctx.info.root) };
+        return { me, mine, stats: store.stats(board), reviewQueue: { ...store.reviewQueue(board), ...store.reviewQueueBreakdown(board) }, unread: store.unreadCount(board, me.id), relay: relayStatus(ctx.info.root),
+          submitInvariantProposals: submitInvariantProposals(store.events(board), ctx.config) };
       });
       if (values.json) {
         io.result(summary);
@@ -2455,6 +2460,7 @@ function readCommands(io, { first, second, rest, values }) {
       io.say(`board: ${items.open} open, ${items.claimed} claimed, ${items.submitted} awaiting verification, ${items.verified} verified, ${items.withdrawn} withdrawn`);
       io.say(`verdicts: ${accepted} accepted, ${rejected} rejected`);
       io.say(reviewQueueLine(ctx, summary.reviewQueue));
+      for (const proposal of summary.submitInvariantProposals) io.say(submitInvariantLine(proposal));
       if (Object.keys(ctx.config.products).length) {
         const all = withBoard(ctx, (board) => store.listItems(board, { all: true }));
         productSummaries(ctx.config, loadSpec(ctx.info.root, ctx.config), all).forEach((product) => io.say(productLine(product)));
@@ -2712,6 +2718,7 @@ async function submitHere(ctx, id) {
     // The waived run is written to the item's thread before the submission, so no waived proof reads as green.
     if (waived) await ordered(ctx, board, 'appendFact', [id, { agentId: me.id, kind: 'measurement', text: `submission proof at ${commit.slice(0, 12)} was red and is recorded as waived, not green; every failure is covered by a live person waiver:\n${waivedLines.join('\n')}` }]);
     return await ordered(ctx, board, 'submit', [id, { agentId: me.id, commit, tree: headTree(root) ?? '', files: filesSince(root, id, claimHead, commit), policyCommit: acceptedMain.commit,
+      submissionProof: { version: 1, files: gate.files, full: gate.full, deferred: gate.deferred, reason: gate.reason },
       ...(gate.deferred ? { note: 'full suite deferred to the landing gate' } : {}) }]);
   });
   const report = waived

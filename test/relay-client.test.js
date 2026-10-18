@@ -1105,6 +1105,8 @@ async function recoverReplicaReplies(fixture, timing) {
       commit: freshStackCommit,
       tree: gitAt(worktrees[2], envs[2], 'rev-parse', 'HEAD^{tree}'),
       files: ['web/recovery-a.txt', 'web/recovery-fresh.txt'],
+      submissionProof: { version: 1, files: [], full: false, deferred: true,
+        reason: 'synthetic recovery descriptor; no gate execution' },
       policyCommit: gitAt(clones[2], envs[2], 'rev-parse', 'main'),
     }];
     fabricatedReceiptlessMove = prepareEngineMove(freshBoard, 'submit', args);

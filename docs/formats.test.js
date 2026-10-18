@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
+import { submitFixture } from '../test/board-submit-fixture.js';
 import { COORDINATOR } from '../src/config.js';
 import { JSON_SHAPES } from '../src/json.js';
 import { exportView } from '../src/serve.js';
@@ -43,7 +44,6 @@ import {
   reopen,
   reserveReview,
   SCHEMA_VERSION,
-  submit,
   shout,
   verify,
   withdraw,
@@ -297,7 +297,7 @@ function recordEventContract() {
   refreeze(board, first, { agentId: coordinator, freeze: freeze('second') });
   claim(board, first, { agentId: builder, lane: 'docs', leaseMs: 60_000, freeze: freeze('unused') });
   const acceptedCommit = 'a'.repeat(40);
-  submit(board, first, { agentId: builder, commit: acceptedCommit, tree: 'b'.repeat(40), files: ['docs/formats.md'], policyCommit: 'a'.repeat(40) });
+  submitFixture(board, first, { agentId: builder, commit: acceptedCommit, tree: 'b'.repeat(40), files: ['docs/formats.md'], policyCommit: 'a'.repeat(40) });
   reserveReview(board, first, { agentId: reviewer, leaseMs: 60_000, policy: 'agents' });
   verify(board, first, { agentId: reviewer, decision: 'ACCEPT', reason: ACCEPT_REASON, note: 'checked the example', head: acceptedCommit, digest: 'second', policy: 'agents', implies: [dependency] });
   verify(board, first, { agentId: reviewer, decision: 'ACCEPT', note: 'checked a newer composition',
@@ -316,7 +316,7 @@ function recordEventContract() {
   const rejected = addItem(board, { by: coordinator, lane: 'docs', title: 'Rejected example' });
   claim(board, rejected, { agentId: builder, lane: 'docs', leaseMs: 60_000, freeze: freeze('rejected') });
   const rejectedCommit = 'd'.repeat(40);
-  submit(board, rejected, { agentId: builder, commit: rejectedCommit, tree: 'e'.repeat(40) });
+  submitFixture(board, rejected, { agentId: builder, commit: rejectedCommit, tree: 'e'.repeat(40) });
   verify(board, rejected, { agentId: reviewer, decision: 'REJECT', reason: 'TEST_FAILURE', note: 'the fixture failed', head: rejectedCommit, digest: 'rejected', policy: 'agents', implies: [dependency],
     review: { commit: rejectedCommit, head: rejectedCommit, trunk: 'a'.repeat(40), paths: ['docs/formats.md'] } });
 
@@ -330,7 +330,7 @@ function recordEventContract() {
   const returned = addItem(board, { by: coordinator, lane: 'docs', title: 'Returned landing example' });
   claim(board, returned, { agentId: returnedBuilder, lane: 'docs', leaseMs: 60_000, freeze: freeze('returned') });
   const returnedCommit = 'f'.repeat(40);
-  submit(board, returned, { agentId: returnedBuilder, commit: returnedCommit, tree: 'e'.repeat(40) });
+  submitFixture(board, returned, { agentId: returnedBuilder, commit: returnedCommit, tree: 'e'.repeat(40) });
   verify(board, returned, { agentId: reviewer, decision: 'ACCEPT', reason: ACCEPT_REASON, note: 'checked the returned example', head: returnedCommit, digest: 'returned', policy: 'agents' });
   const failureBatch = recordLandingBatch(board, { agentId: coordinator, batch: { version: 1, id: 'format-red-example', base: 'a'.repeat(40), tip: 'c'.repeat(40),
     root: '/landing-red', branch: 'refs/heads/main', state: 'blocked', owner: 'format-red-example', logPath: '/landing-red.log',

@@ -1,4 +1,5 @@
 /** pullboard digest: a readable, bounded, read-only briefing of one real board [A2,N26]. */
+import { submitFixture } from './board-submit-fixture.js';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -107,7 +108,7 @@ test('the digest is a readable briefing of one board [A2,N26]', (t) => {
   /** The frozen criterion a claim records. */
   const freeze = (item) => ({ text: item.item_title, digest: 'digest:briefing' });
   store.claim(box.board, first, { agentId: 'web-1', lane: 'web', leaseMs: 3_600_000, freeze });
-  store.submit(box.board, first, { agentId: 'web-1', commit: 'a'.repeat(40), tree: 'fixture-tree' });
+  submitFixture(box.board, first, { agentId: 'web-1', commit: 'a'.repeat(40), tree: 'fixture-tree' });
   store.verify(box.board, first, { agentId: 'web-2', decision: 'REJECT', reason: 'TEST_FAILURE',
     note: 'The upload test fails on an empty file', head: 'a'.repeat(40), digest: 'digest:briefing', policy: 'any' });
   store.addMilestone(box.board, { agentId: 'coordinator', name: 'First release', note: 'Uploads that work', items: [first, prerequisite] });

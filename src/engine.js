@@ -30,6 +30,10 @@ import {
   relaySenderProblem,
   validRelaySender,
 } from './relay-sender.js';
+import {
+  SUBMISSION_PROOF_ENGINE,
+  submissionProof,
+} from './submit-invariants.js';
 
 const ITEM_ID_FIRST_ARGUMENT = new Set(['acceptCheck', 'editItem', 'escalate', 'recordAttempt', 'claim', 'release', 'submit', 'reserveReview', 'verify', 'merged', 'withdraw', 'refreeze', 'reopen', 'appendFact']);
 
@@ -46,13 +50,16 @@ export const ENGINE_OPERATIONS = Object.freeze([
 /** Engine version at which each ordered operation first has stable replay semantics. */
 const OPERATION_ENGINE = Object.freeze({ orderMilestoneItems: MILESTONE_RANK_ENGINE, reopen: 8, recordLandingBatch: 8, recordLandingWaiver: 8, recordLandingFlake: 8, finishLandingBatch: 8, acceptCheck: CHECK_ACCEPT_ENGINE });
 
-/** Dependency edits, bar reasons and sealed review metadata retain their distinct recorded engine meanings. */
+/** Dependency edits, causes, sealed reviews and submission proofs retain distinct recorded engine meanings. */
 function minimumOperationEngine(operation, args, board) {
   const options = args[1];
+  if (operation === 'submit' && options?.submissionProof !== undefined
+    || operation === 'recordLandingBatch' && args[0]?.batch?.invariantEvidence !== undefined) return SUBMISSION_PROOF_ENGINE;
   const given = (name) => Boolean(options && typeof options === 'object' && Object.hasOwn(options, name) && options[name] !== undefined && options[name] !== null && options[name] !== false);
   if (board && ['recordLandingBatch', 'finishLandingBatch'].includes(operation)) {
     const id = operation === 'recordLandingBatch' ? args[0]?.batch?.id : args[0]?.id;
     const prior = id && store.landingBatches(board).find(batch => batch.id === id);
+    if (prior?.invariantEvidence) return SUBMISSION_PROOF_ENGINE;
     if (prior && ['items', 'candidates'].some(key => Array.isArray(prior[key]) && prior[key].some(entry => entry && Object.hasOwn(entry, 'reviewedCommit')))) return VERDICT_REVIEW_ENGINE;
   }
   if (operation === 'verify' && options && Object.hasOwn(options, 'review')) return VERDICT_REVIEW_ENGINE;
@@ -101,6 +108,7 @@ export function startRelayEpoch(board) {
 /** Turn caller-only callbacks into deterministic values before sealing an executable operation. */
 export function prepareEngineMove(board, operation, args, { id = randomUUID(), actor } = {}) {
   if (!ENGINE_OPERATIONS.includes(operation) || !Array.isArray(args)) throw new Refused('RELAY_MOVE', 'use a supported board-engine operation with its argument array');
+  if (operation === 'submit' && ENGINE_VERSION >= SUBMISSION_PROOF_ENGINE) submissionProof(args[1]?.submissionProof);
   const minimumEngine = minimumOperationEngine(operation, args, board);
   if (ENGINE_VERSION < minimumEngine) throw new Refused('ENGINE_VERSION', `${operation} requires engine version ${minimumEngine}; this pullboard uses engine ${ENGINE_VERSION}; upgrade before sending it`);
   const values = args.map((value) => value && typeof value === 'object' ? { ...value } : value);

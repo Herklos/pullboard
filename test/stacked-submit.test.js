@@ -1,4 +1,5 @@
 /** A candidate cannot carry another item's unverified submission through submit or accept [V17]. */
+import { submitFixture } from './board-submit-fixture.js';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -71,7 +72,7 @@ test('[V17] accept refuses a historical candidate stacked on another item', () =
   const stackedCommit = commitFile(box, box.web, 'web/stacked.txt', 'historical stacked submission');
   const board = store.openBoard(join(box.repo, '.git/pullboard/board.sqlite'));
   try {
-    store.submit(board, stacked, {
+    submitFixture(board, stacked, {
       agentId: 'web-1',
       commit: stackedCommit,
       tree: box.git(box.web, 'rev-parse', 'HEAD^{tree}'),
@@ -103,7 +104,7 @@ function trunkStack(box, { historical = false } = {}) {
   if (historical) {
     const board = store.openBoard(join(box.repo, '.git/pullboard/board.sqlite'));
     try {
-      store.submit(board, stacked, {
+      submitFixture(board, stacked, {
         agentId: 'coordinator',
         commit: trunkHead,
         tree: box.git(box.repo, 'rev-parse', 'HEAD^{tree}'),
