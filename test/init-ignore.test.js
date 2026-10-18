@@ -127,6 +127,24 @@ test('setup confirmation leaves a later executable-mode edit uncommitted [I1,I2]
   assert.match(box.git('diff', '--summary'), /mode change/u);
 });
 
+test('setup confirmation preserves a different version staged from its saved working bytes [I1,I2]', t => {
+  const box = fixture(t);
+  rmSync(join(box.root, 'pullboard.json'));
+  writeFileSync(join(box.root, 'README.md'), '# Existing repository\n');
+  box.git('add', 'README.md'); box.git('commit', '-q', '-m', 'chore: initial repository');
+  assert.equal(box.cli('init').code, 0);
+  const file = join(box.root, 'SPEC.md'), original = readFileSync(file, 'utf8');
+  const staged = original + '\nA note held only in the index.\n';
+  writeFileSync(file, staged); box.git('add', 'SPEC.md');
+  writeFileSync(file, original);
+  const before = box.git('diff', '--cached', '--binary', '--', 'SPEC.md');
+  const confirmed = box.cli('init', '--yes');
+  assert.equal(confirmed.code, 0, confirmed.stderr);
+  assert.equal(box.git('show', ':SPEC.md'), staged.trimEnd(), 'the distinct staged version survives');
+  assert.equal(box.git('diff', '--cached', '--binary', '--', 'SPEC.md'), before, 'the staged patch remains exact');
+  assert.equal(readFileSync(file, 'utf8'), original, 'the working version remains exact too');
+});
+
 test('a fresh init tells the person and the agent how to start [I9,I1]', t => {
   const box = fixture(t);
   rmSync(join(box.root, 'pullboard.json'));

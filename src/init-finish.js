@@ -46,6 +46,11 @@ import { Refused } from './refused.js';
 export const SETUP_COMMIT_QUESTION = 'Commit Pullboard setup now? [Y/n] ';
 export const SETUP_COMMIT_LATER = "To commit Pullboard's files: pullboard init --yes";
 
+/** Bind content to the executable mode Git records. */
+function setupFingerprint(mode, content) {
+  return createHash('sha256').update(mode + ':').update(content).digest('hex');
+}
+
 /** Hash regular files and Git's executable bit, refusing external paths and symlink targets. */
 function setupFile(root, name) {
   if (typeof name !== 'string' || isAbsolute(name) || name.includes('\0')) return null;
@@ -56,8 +61,18 @@ function setupFile(root, name) {
     if (!stat.isFile()) return null;
     const physical = relative(root, realpathSync(path));
     if (physical === '..' || physical.startsWith('..' + sep)) return null;
-    return createHash('sha256').update(stat.mode & 0o111 ? '100755:' : '100644:').update(readFileSync(path)).digest('hex');
+    return setupFingerprint(stat.mode & 0o111 ? '100755' : '100644', readFileSync(path));
   } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+}
+
+/** Read a regular stage-zero index entry without replacing either version of a partial edit. */
+function indexedSetupFile(root, name) {
+  const entry = tryGit(root, ['ls-files', '--stage', '-z', '--', `:(literal)${name}`]);
+  const match = /^(100644|100755) ([a-f0-9]{40,64}) 0\t[^\0]+\0$/u.exec(entry.stdout);
+  if (entry.status !== 0 || !match) return null;
+  const blob = spawnSync('git', ['--no-replace-objects', 'cat-file', 'blob', match[2]],
+    { cwd: root, maxBuffer: 32 * 1024 * 1024 });
+  return blob.status === 0 ? setupFingerprint(match[1], blob.stdout) : null;
 }
 
 /** Capture existing edits before init writes, and retain only unchanged previous setup receipts. */
@@ -65,12 +80,18 @@ export function beginInitCommit(info) {
   const status = spawnSync('git', ['--no-replace-objects', 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=matching'],
     { cwd: info.root, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
   if (status.status !== 0) throw new Refused('NOT_COMMITTED', 'Git could not read the existing changes; fix Git before running pullboard init again');
-  const entries = status.stdout.split('\0'), blocked = new Set();
+  const entries = status.stdout.split('\0'), blocked = new Set(), staged = new Set();
   for (let index = 0; index < entries.length; index++) {
     const entry = entries[index];
     if (!entry) continue;
-    blocked.add(entry.slice(3));
-    if (/[RC]/u.test(entry.slice(0, 2))) blocked.add(entries[++index]);
+    const name = entry.slice(3), indexChanged = ![' ', '?', '!'].includes(entry[0]);
+    blocked.add(name);
+    if (indexChanged) staged.add(name);
+    if (/[RC]/u.test(entry.slice(0, 2))) {
+      const previousName = entries[++index];
+      blocked.add(previousName);
+      if (indexChanged) staged.add(previousName);
+    }
   }
   const file = join(info.commonDir, 'pullboard', 'setup-written-files.json');
   let previous = {};
@@ -81,7 +102,7 @@ export function beginInitCommit(info) {
   const files = new Map(), skipped = new Set();
   for (const [name, hash] of Object.entries(previous)) {
     const actual = setupFile(info.root, name);
-    if (hash && actual === hash) files.set(name, hash);
+    if (hash && actual === hash && (!staged.has(name) || indexedSetupFile(info.root, name) === hash)) files.set(name, hash);
     else if (actual) skipped.add(name);
   }
   const owned = new Set(files.keys());
