@@ -35,6 +35,10 @@ import {
 import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
+import {
+  mainLaneWork,
+  refuseNextIdle,
+} from './next-steps.js';
 import * as store from './board.js';
 import {
   CONFIG_FILE,
@@ -3189,7 +3193,7 @@ async function nextOnce(ctx, values) {
       familyPolicy: ctx.config.verify.family, ratio: ctx.config.verify.reviewRatio, runnable: values.runnable, routes: values.routes });
     const offer = held ? null : relayLinked(ctx.info.root) ? store.withVerifierStanding(board, { root: true }, findOffer) : findOffer();
     if (offer && !values.build) return { item: offer.item, offer, build: item ?? null };
-    if (!item) return { reasons };
+    if (!item) return { reasons, laneWork: ctx.info.isMain ? mainLaneWork(store.listItems(board)) : null };
     const reviewSkipped = values.build && !held
       ? { offeredItem: offer?.item.item_id ?? null, ratio: ctx.config.verify.reviewRatio, ...store.reviewQueue(board) } : null;
     const routed = seats ? await nextSeatContext(ctx, board, me, item, seats) : { context: ctx };
@@ -3312,14 +3316,10 @@ async function nextHere(io, values) {
       }
       return 0;
     }
-    if (!found.retry && Date.now() >= deadline) {
+    if (!found.retry && (found.laneWork || Date.now() >= deadline)) {
       if (values.verify) refuseWhileBuilding(ctx);
-      const waited = minutes ? ` after ${minutes} minutes` : '';
       const agents = withBoard(ctx, (board) => store.listAgents(board));
-      const repair = `${waited}. To keep looking: pullboard next --wait 9${values.verify ? ' --verify' : ''} (minutes; give the command a ten-minute timeout)`;
-      io.refusal?.(new Refused('NOTHING_FREE', found.reasons.join('; ') + repair));
-      io.err(`pullboard: [NOTHING_FREE] ${found.reasons.map((reason) => displayedWait(reason, agents, ctx.config)).join('; ')}${repair}`);
-      return 1;
+      return refuseNextIdle(io, found.reasons, found.reasons.map((reason) => displayedWait(reason, agents, ctx.config)), { minutes, verify: values.verify, laneWork: found.laneWork });
     }
     if (!found.retry) await new Promise((done) => setTimeout(done, 5000));
   }
