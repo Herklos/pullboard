@@ -6,7 +6,11 @@
  * coordinator's spec apply writes the drafts into SPEC.md, and the person approves them there as before.
  * A draft counts as applied once SPEC.md has its id, so applying needs no second move.
  */
-import { atomic, logEvent, PERSON } from './board.js';
+import {
+  atomic,
+  logEvent,
+  PERSON,
+} from './board.js';
 import { Refused } from './refused.js';
 
 /** The board's recorded row drafts, oldest first. */

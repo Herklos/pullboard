@@ -103,7 +103,10 @@ import {
   withGateSlot,
 } from './gate.js';
 import { draftRow } from './spec-draft.js';
-import { pendingRowDrafts, withRowDrafts } from './row-drafts.js';
+import {
+  pendingRowDrafts,
+  withRowDrafts,
+} from './row-drafts.js';
 import { gateWaitReporter } from './gate-wait.js';
 import {
   checkNeedsBrowser,
