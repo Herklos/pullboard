@@ -441,7 +441,7 @@ test('an item claimed before the gate existed submits once a gate exists [C7,B26
   const marker = join(box.dir, 'gate-ran.log');
   box.env.GATE_MARKER = marker;
   const submitted = box.run('submit', '1', '--json');
-  assert.equal(submitted.code, 0, submitted.err || submitted.out);
+  assert.equal(submitted.code, 0, `${submitted.out}\n${submitted.err}`);
   const receipt = JSON.parse(submitted.out);
   assert.equal(receipt.gate.green, true);
   assert.equal(receipt.gate.full, true, 'the newly configured gate really runs');
