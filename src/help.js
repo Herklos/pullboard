@@ -45,7 +45,8 @@ Set up
                                         pair prints a one-use machine code; join stores it in another clone
   pullboard relay on --all [--url <address>]  link every registered project after one sign-in; pair the phone once
                                         keep this command open until pairing finishes; later projects link on registration
-  pullboard relay devices               list paired device ids and their public-key fingerprints
+  pullboard relay devices [--verbose]   paired phones and joined computers by name, with paired date, last seen and boards
+                                        --verbose adds each id and phone key fingerprint
   pullboard relay revoke <device>       stop future key delivery; already received keys remain known
                                         approve on another paired phone, or sign in again with GitHub
   pullboard relay tokens                list this board's agent token ids, agents and expiry, never credentials
