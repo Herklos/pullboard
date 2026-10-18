@@ -148,6 +148,12 @@ import {
   starterLane,
   starterLaneNotes,
 } from './init.js';
+import {
+  beginInitCommit,
+  finishInitCommit,
+  reportInitSetup,
+  SETUP_COMMIT_LATER,
+} from './init-finish.js';
 import { lifecycleMarkdown } from './machine.js';
 import {
   buildHelp,
@@ -236,8 +242,6 @@ import {
 import {
   blueprintStarterNote,
   combinedSummary,
-  initBlueprintLines,
-  initBlueprintResult,
   installedBlueprints,
   landEach,
   readBlueprints,
@@ -268,10 +272,7 @@ import {
   startCheckBaseline,
 } from './check-baseline-worker.js';
 import {
-  alreadyAddedLine,
-  initWaitingRows,
   startersCommand,
-  waitingRowLines,
 } from './blueprint-report.js';
 import {
   compareMainFailures,
@@ -2037,8 +2038,10 @@ function setupCommands(io, { first, second, rest = [], values }) {
       const linked = relayLinked(info.root);
       const ctx = linked && model !== undefined ? context(io) : null;
       if (model !== undefined && linked) refuseRemoteCoordinatorModel(ctx, 'init');
+      const setupPlan = beginInitCommit(info);
       const notes = initRepo({
         info,
+        onWritten: setupPlan.written,
         model,
         permissions: !values['no-permissions'],
         openBoardHere: () => store.openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), io.clock, { isMain: codeIsFromMain() }),
@@ -2062,32 +2065,20 @@ function setupCommands(io, { first, second, rest = [], values }) {
       ]));
       // Keep blueprint initialization and the person's unwritten lane proposals in the same result.
       const landed = await landEach(blueprints, ({ reference, blueprint }, drafted) => addBlueprintHere(io, reference, { report: false, blueprint, drafted }));
-      // Every row that waits for the person once, the blueprints' new rows and the doctrine's pending rows alike (#734).
-      const fresh = landed.filter((added) => !added.marked);
-      const waiting = landed.length ? initWaitingRows(info.root, { rows: fresh.flatMap((added) => added.rows) }) : [];
-      const blueprintResult = (added) => ({ ...initBlueprintResult(added), marked: added.marked, waitingRows: waiting });
-      const result = { root: info.root, notes, proposedLanes: proposeLanes(info.root),
-        ...(landed.length ? { blueprint: blueprintResult(landed[0]), blueprints: landed.map(blueprintResult) } : {}) };
-      io.result?.(result);
-      const staging = notes.at(-1)?.startsWith('git add -f -- ') ? notes.at(-1) : null;
-      io.say(agentSessionDigest()
-        ? 'Next: run pullboard resume now to continue setup in this session; the new skills load next session, and setup does not need them.\nSetup details:'
-        : 'Next: ask your agent to set up Pullboard here; in Claude Code, start a new session first so it loads the Pullboard skills.\nSetup details:');
-      (staging ? notes.slice(0, -1) : notes).forEach((note) => io.say(note));
-      for (const added of landed) {
-        if (added.marked) io.say(alreadyAddedLine(added.blueprint));
-        else initBlueprintLines(added, askedLaneNotes(added.items, loadConfig(info.root))).forEach((line) => io.say(line));
-      }
-      if (fresh.length) waitingRowLines(waiting).forEach((line) => io.say(line));
+      const { result } = reportInitSetup(io, info, notes, landed, Boolean(agentSessionDigest()));
+      const setupCommit = await finishInitCommit(setupPlan, { io, yes: values.yes, landed, permissions: !values['no-permissions'] });
+      result.setupCommit = setupCommit;
       if (await registerProjectAndLink(info.root, new Date(), loadConfig(info.root), io)) io.say('registered this project on this machine, so pullboard view lists it');
       // Once registered, a background view lists this board for pullboard.dev [H5,N26].
       const view = await keepViewRunning();
       io.result?.({ ...result, view });
       const viewLine = backgroundViewLine(view);
       if (viewLine) io.say(viewLine);
-      // The offer comes before the staging line, which stays init's last line [I1,I2].
+      // Sharing remains a separate choice; --yes confirms only the setup commit.
       const code = await offerRelayAtInit(info.root, io);
-      if (staging) io.say(`To commit Pullboard's files: ${staging}`);
+      if (setupCommit.skipped.length) io.say(`Your earlier changes remain uncommitted: ${setupCommit.skipped.join(', ')}.`);
+      if (setupCommit.state === 'pending') io.say(SETUP_COMMIT_LATER);
+      if (setupCommit.state === 'committed') io.say(`Committed ${setupCommit.skipped.length ? 'only unchanged Pullboard files' : 'Pullboard setup'} at ${setupCommit.commit.slice(0, 12)}.`);
       return code;
     },
     lane: () => {
