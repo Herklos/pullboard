@@ -840,3 +840,40 @@ test('the roadmap panel counts the next release by stage [N26]', {
     await view.stop();
   }
 });
+
+test('the roadmap shows landed, accepted and past target [N26]', { timeout: 90_000 }, async () => {
+  const executable = chromeExecutable(); assert.ok(executable, 'Chrome is required for the roadmap header check.');
+  const box=machine(), alpha=project(box,'roadmap-truth',SPEC,{lanes:{web:{owns:['web/'],specs:['G']},ops:{owns:['ops/'],specs:['G']}});
+  const names=['Landed A','Accepted A','Waiting A','Shipped B','Landed C','Accepted C','In review C','Building C','Approve the release','Held C'];
+  names.forEach((name,index)=>box.run(alpha.repo,'add',index===9?'ops':'web',name,'--specs','G1','--criterion','The page renders.'));
+  /** Land through real Git and the ordinary board receipt; acceptance alone stays unlanded. */
+  function land(id) {
+    box.git(alpha.repo,'merge','--no-ff','--no-edit',alpha.itemBranches.get(`${alpha.baseBranch}:${id}`));
+    box.run(alpha.repo,'merged',String(id),box.git(alpha.repo,'rev-parse','HEAD'));
+  }
+  for(const id of [1,2,4,5,6]) {build(box,alpha,id,`item-${id}.txt`);accept(box,alpha,id);if([1,4,5].includes(id))land(id);}
+  build(box,alpha,7,'item-7.txt');box.run(alpha.web,'claim','8');box.run(alpha.repo,'hold','ops','--reason','Waiting for the person');
+  box.run(alpha.repo,'shout','person','#9 Approve the release','--decision');
+  box.run(alpha.repo,'milestone','add','Past target','--items','1,2,3');
+  box.run(alpha.repo,'milestone','edit','Past target','--target',new Date(Date.now()-86_400_000).toISOString());
+  box.run(alpha.repo,'milestone','add','Shipped release','--items','4');
+  box.run(alpha.repo,'milestone','add','State summary','--items','5,6,7,8,9,10');
+  box.run(alpha.repo,'milestone','ship','Shipped release','--next','State summary');
+  const shipped=box.git(alpha.repo,'rev-parse','HEAD');
+  const view=await startView(box),profile=mkdtempSync(join(tmpdir(),'pullboard-roadmap-truth-'));let chrome;
+  const milestone=name=>`document.querySelector('[data-key="m:${name}"]')`;
+  try {
+    chrome=await openSnapshotChrome(executable,view.link.href,profile);await chrome.waitFor('data?.project?.milestones?.length===3');
+    await press(chrome,"document.querySelector('[data-tab=roadmap]')");
+    await chrome.waitFor(`${milestone('Past target')}?.querySelector('.milestone-head')`);
+    const truth=await chrome.stable(`${milestone('Past target')}.textContent`);
+    assert.match(truth,/1\/3 landed/u,'acceptance does not count as landed');assert.match(truth,/past target/u);
+    const states=JSON.parse(await chrome.stable(`JSON.stringify([...${milestone('Past target')}.querySelectorAll('.milestone-item')].map(row=>[row.querySelector('.id').textContent,row.querySelector('.chip').textContent]))`));
+    assert.deepEqual(Object.fromEntries(states),{'#1':'landed','#2':'accepted','#3':'unclaimed'});
+    await press(chrome,"document.querySelector('[data-key=shipped] > .milestone-head')");
+    await chrome.waitFor(`${milestone('Shipped release')}?.querySelector('.milestone-head')`);
+    assert.match(await chrome.stable(`${milestone('Shipped release')}.textContent`),new RegExp(shipped.slice(0,12)),'the shipped release names its actual commit');
+    // #820 summary assertions will be added after its exact JSON shape is confirmed.
+    assert.deepEqual(chrome.exceptions,[]);
+  } finally {if(chrome)await closeSnapshotChrome(chrome);rmSync(profile,{recursive:true,force:true});await view.stop();}
+});
