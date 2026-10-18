@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
 import { runFixtureChild, runFixtureGit } from './fixture-child.js';
 import { bundledBlueprints, readBlueprint, validateBlueprint } from '../src/blueprints.js';
+import { blueprintRowIds, starterStates } from '../src/blueprint-report.js';
 import { parseSpec } from '../src/spec.js';
 import { createE2eHelpers } from './e2e-helpers.js';
 
@@ -564,6 +565,122 @@ test('bundled blueprint rows carry their checks [S1,I1]', async () => {
   assert.deepEqual(saved.left, [], 'no new or changed row is left out of a save');
   assert.deepEqual(saved.blueprint.questions.map(({ ask, choices, default: answer }) => ({ ask, choices, default: answer })), [{ ask: runs.ask, choices: runs.choices, default: runs.default }]);
   assert.equal(saved.blueprint.rules.length, 5);
+});
+
+test('blueprint commands say what they did [S1,I1]', () => {
+  // Every file's bytes outside Git's object store, and every board event, so a repeat add is proven to change nothing.
+  const snapshot = (box) => {
+    const files = readdirSync(box.repo, { recursive: true, withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => join(entry.parentPath, entry.name))
+      .filter((path) => !path.includes(`${join('.git', 'objects')}`) && !/board\.sqlite/u.test(path))
+      .sort()
+      .map((path) => [path, readFileSync(path).toString('base64')]);
+    return { files, events: json(box, 'log').events };
+  };
+
+  // Before any add, every starter is listed and none is filed, even with an older unrelated item
+  // filed under a starter's title that cites no blueprint row (review 12394).
+  const box = freshBoard();
+  const decoy = json(box, 'add', 'coordinator', PUBLISHED.items[0].title).item;
+  assert.equal(decoy.item_spec_ids ?? '', '', 'the unrelated item cites no row');
+  // A row that exists before the add, and an older item under another starter's title citing it.
+  const existingRow = json(box, 'spec', 'draft', 'A requirement written before the blueprint').id;
+  const citing = json(box, 'add', 'coordinator', PUBLISHED.items[1].title, '--specs', existingRow).item;
+  assert.equal(citing.item_spec_ids, existingRow, 'the second unrelated item cites the row that was there first');
+  const unfiled = json(box, 'blueprint', 'starters', 'web-app');
+  assert.deepEqual(unfiled.blueprint, { name: 'web-app', title: 'Web app', version: 1 });
+  assert.deepEqual(unfiled.starters.map((starter) => [starter.title, starter.filed, starter.id]), PUBLISHED.items.map((item) => [item.title, false, null]));
+  const unfiledText = box.run('blueprint', 'starters', 'web-app');
+  assert.equal(unfiledText.status, 0, unfiledText.stdout + unfiledText.stderr);
+  for (const item of PUBLISHED.items) assert.ok(unfiledText.stdout.split('\n').includes(`  not filed  ${item.title}`), `${item.title} is listed as not filed:\n${unfiledText.stdout}`);
+
+  // A second add says it is already there, and no file byte and no board event changes.
+  const firstAdd = json(box, 'blueprint', 'add', 'web-app');
+  assert.equal(firstAdd.items.length, PUBLISHED.items.length, 'the add files every starter');
+  const before = snapshot(box);
+  const again = box.run('blueprint', 'add', 'web-app');
+  assert.equal(again.status, 0, again.stdout + again.stderr);
+  assert.match(again.stdout, /^Web app \(version 1\) is already on this board; nothing added/mu, 'a second add says so');
+  assert.match(again.stdout, /pullboard blueprint starters web-app/u, 'a second add points at its starters');
+  const repeat = json(box, 'blueprint', 'add', 'web-app');
+  assert.deepEqual([repeat.marked, repeat.rows, repeat.items, repeat.gate], [true, [], [], null]);
+  const after = snapshot(box);
+  assert.deepEqual(after.files, before.files, 'a second add changes no file bytes');
+  assert.deepEqual(after.events, before.events, 'a second add records no board event');
+
+  // Once added, each starter names the item its add filed, never the unrelated same-title item.
+  const filed = json(box, 'blueprint', 'starters', 'web-app').starters;
+  assert.equal(filed.length, PUBLISHED.items.length, 'every starter is listed');
+  const filedText = box.run('blueprint', 'starters', 'web-app').stdout.split('\n');
+  for (const [index, item] of PUBLISHED.items.entries()) {
+    const own = firstAdd.items.find((entry) => entry.key === item.key);
+    assert.ok(own && own.id !== decoy.item_id, `${item.title} was filed by the add as its own item`);
+    assert.notEqual(filed[index].id, decoy.item_id, `${item.title} never names the unrelated item #${decoy.item_id}`);
+    assert.deepEqual([filed[index].title, filed[index].filed, filed[index].id, filed[index].status], [item.title, true, own.id, 'open']);
+    assert.ok(filedText.includes(`  #${own.id} open  ${item.title}`), `${item.title} shows its id:\n${filedText.join('\n')}`);
+  }
+  assert.ok(!filedText.some((line) => line.startsWith(`  #${decoy.item_id} `)), `the unrelated item is never listed:\n${filedText.join('\n')}`);
+  assert.ok(!filed.some((starter) => starter.id === citing.item_id), 'an item citing a row from before the add is never the starter');
+
+  // Two versions of one blueprint, the same title and starter: each version names the item it filed.
+  const versioned = join(box.dir, 'versioned.json');
+  // No kind: web-app already holds its kind on this board, and a blueprint of a kind already taken is refused (#720).
+  const firstVersion = { ...PUBLISHED, name: 'versioned', title: 'Versioned plan', version: 1, kind: undefined, items: [PUBLISHED.items[0]] };
+  writeFileSync(versioned, JSON.stringify(firstVersion));
+  const one = json(box, 'blueprint', 'add', versioned).items[0];
+  writeFileSync(versioned, JSON.stringify({ ...firstVersion, version: 2 }));
+  const two = json(box, 'blueprint', 'add', versioned).items[0];
+  assert.notEqual(two.id, one.id, 'version 2 files its own starter');
+  const forTwo = json(box, 'blueprint', 'starters', versioned);
+  assert.deepEqual([forTwo.blueprint.version, forTwo.starters[0].id], [2, two.id], 'version 2 names the item version 2 filed');
+  writeFileSync(versioned, JSON.stringify(firstVersion));
+  assert.equal(json(box, 'blueprint', 'starters', versioned).starters[0].id, one.id, 'version 1 names the item version 1 filed');
+
+  // init --blueprint lists every row that waits for the person, the inherited doctrine row PB7 included.
+  const started = emptyRepo();
+  const init = started.run('init', '--blueprint', 'web-app');
+  assert.equal(init.status, 0, init.stdout + init.stderr);
+  const waiting = JSON.parse(started.run('spec', '--json').stdout).rows.filter((row) => ['draft', 'pending'].includes(row.status));
+  const doctrineRows = waiting.filter((row) => row.file !== 'SPEC.md');
+  const specRows = waiting.filter((row) => row.file === 'SPEC.md');
+  assert.ok(doctrineRows.some((row) => row.id === 'PB7' && row.status === 'pending'), 'the standard doctrine has PB7 pending');
+  assert.equal(specRows.length, PUBLISHED.rules.length + PUBLISHED.questions.length);
+  const lines = init.stdout.split('\n');
+  for (const row of doctrineRows) assert.ok(lines.includes(`    ${row.id} ${row.status}  ${row.text}  (${row.file})`), `init names doctrine row ${row.id}:\n${init.stdout}`);
+  for (const row of specRows) assert.ok(lines.includes(`    ${row.id} ${row.status}  ${row.text}  (SPEC.md)`), `init names spec row ${row.id}:\n${init.stdout}`);
+  assert.ok(lines.includes(`  ${waiting.length} rows wait for the person:`), `init counts every waiting row:\n${init.stdout}`);
+  const fromJson = emptyRepo().run('init', '--blueprint', 'web-app', '--json');
+  assert.equal(fromJson.status, 0, fromJson.stdout + fromJson.stderr);
+  assert.deepEqual(JSON.parse(fromJson.stdout).blueprint.waitingRows.map((row) => row.id).sort(), waiting.map((row) => row.id).sort(), 'the JSON lists the same waiting rows');
+
+  // A second init --blueprint says the blueprint is already there.
+  const reinit = started.run('init', '--blueprint', 'web-app');
+  assert.equal(reinit.status, 0, reinit.stdout + reinit.stderr);
+  assert.match(reinit.stdout, /the Web app blueprint \(version 1\) is already on this board; nothing added/u);
+  assert.doesNotMatch(reinit.stdout, /added the Web app blueprint/u);
+});
+
+test('blueprint starters reads its own version on a board added before starter links [S1,I1]', () => {
+  // An older Pullboard filed starters with no link note (review of #734, the v1/v2 upgrade counter): two versions of one
+  // custom blueprint, one title and one starter. Read back with no links, each version must still find the item it filed.
+  const box = freshBoard();
+  const file = join(box.dir, 'versioned.json');
+  const first = { ...PUBLISHED, name: 'versioned', title: 'Versioned plan', version: 1, items: [PUBLISHED.items[0]] };
+  writeFileSync(file, JSON.stringify(first));
+  const one = json(box, 'blueprint', 'add', file).items[0];
+  writeFileSync(file, JSON.stringify({ ...first, version: 2 }));
+  const two = json(box, 'blueprint', 'add', file).items[0];
+  assert.notEqual(two.id, one.id, 'version 2 files its own starter');
+  const source = readFileSync(join(box.repo, 'SPEC.md'), 'utf8');
+  const spec = parseSpec(source);
+  const items = json(box, 'list', '--all').items;
+  const unlinked = new Map();
+  for (const [version, id] of [[1, one.id], [2, two.id]]) {
+    const blueprint = { ...first, version };
+    const [found] = starterStates(blueprint, items, blueprintRowIds(blueprint, spec, source), unlinked);
+    assert.deepEqual([found.filed, found.id], [true, id], `version ${version} names the item version ${version} filed, never the other version's`);
+  }
 });
 
 test('blueprint add files a blueprint as drafts after an add stopped part way [S1,I1]', () => {
