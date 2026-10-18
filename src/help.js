@@ -143,6 +143,8 @@ Coordinator
   pullboard withdraw <id> <reason>      drop an item nobody should build
   pullboard refreeze <id>               adopt a corrected criterion or changed spec rows
   pullboard reopen <id> --note "why" [--cause <key>]   return a submission for criterion correction without a verdict
+  pullboard reopen <id> --conflict <file> [--conflict <file>]
+                                        return accepted work that conflicts with the trunk for a main merge
   pullboard hold <lane> --reason "..."   pause a lane: next there claims nothing and names the reason
   pullboard hold <id> "reason"          hold one item so next skips it
   pullboard hold <lane|id> --off        lift a lane or item hold
@@ -311,6 +313,7 @@ const HELP_FLAG_EXPLANATIONS = {
   '--blueprint': 'start from a bundled blueprint or a JSON file; repeat it for one product, one architecture and any practice blueprints',
   '--brief': 'what a cold agent needs',
   '--check': 'the command that proves it',
+  '--conflict': 'one conflicting file, exactly as Git names it; repeat it for each file',
   '--doctrine': 'proposes a doctrine ruling; only the person can approve it',
   '--family': 'records the family name',
   '--model': 'identifies the agent model; required unless PULLBOARD_MODEL is set',

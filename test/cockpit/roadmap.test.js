@@ -1159,3 +1159,56 @@ test('a release jump on a phone leaves its heading below the top bar [N26]', { t
     await view.stop();
   }
 });
+
+test('the release chevron lines up with its title [N26]', { timeout: 90_000 }, async () => {
+  const executable = chromeExecutable();
+  assert.ok(executable, 'Chrome is required for the release chevron check.');
+  const box = machine();
+  const alpha = project(box, 'release-chevron');
+  for (const title of ['Shipped work', 'Open work', 'More open work']) box.run(alpha.repo, 'add', 'web', title, '--specs', 'G1', '--criterion', 'renders');
+  build(box, alpha, 1, 'shipped.html');
+  accept(box, alpha, 1);
+  box.run(alpha.repo, 'milestone', 'add', 'Old release', '--items', '1');
+  box.run(alpha.repo, 'milestone', 'add', 'Next release with a longer name', '--items', '2,3');
+  box.run(alpha.repo, 'milestone', 'ship', 'Old release', '--next', 'Next release with a longer name');
+  box.run(alpha.repo, 'milestone', 'add', 'Later', '--note', 'Nothing filed yet.');
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-release-chevron-chrome-'));
+  let chrome;
+  /** Each visible release head: its chevron's centre against the centre of its title's first line of text. */
+  const offsets = async () => JSON.parse(await chrome.stable(`JSON.stringify([...document.querySelectorAll('#roadmap-list .milestone-head')].filter((head) => head.getClientRects().length).map((head) => {
+    const caret = head.querySelector('h2 > .caret'), title = head.querySelector('h2');
+    const walker = document.createTreeWalker(title, NodeFilter.SHOW_TEXT, { acceptNode: (node) => node.textContent.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP });
+    const text = walker.nextNode(), range = document.createRange();
+    range.selectNodeContents(text);
+    const line = range.getClientRects()[0], mark = caret?.getBoundingClientRect();
+    return { key: head.dataset.roadmapKey, open: head.getAttribute('aria-expanded'), svg: caret?.tagName.toLowerCase() || null, size: mark ? [Math.round(mark.width), Math.round(mark.height)] : null,
+      offset: mark ? Math.round(((mark.top + mark.height / 2) - (line.top + line.height / 2)) * 10) / 10 : null };
+  }))`));
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.waitFor('data?.project?.milestones?.length === 3');
+    await press(chrome, "document.querySelector('[data-tab=roadmap]')");
+    await chrome.waitFor("!document.querySelector('[data-pane=roadmap]').hidden && document.querySelector('[data-key=\"shipped\"] > .milestone-head')");
+    for (const width of [1280, 375]) {
+      await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
+      for (const pass of ['as opened', 'toggled']) {
+        const heads = await offsets();
+        assert.ok(heads.length >= 3, `${width} ${pass}: every release head is read: ${JSON.stringify(heads)}`);
+        for (const head of heads) {
+          assert.equal(head.svg, 'svg', `${width} ${pass} ${head.key}: the disclosure is the view's stroke chevron`);
+          assert.ok(head.size[0] >= 15 && head.size[0] <= 17, `${width} ${pass} ${head.key}: the chevron is about 16px: ${head.size}`);
+          assert.ok(Math.abs(head.offset) <= 2, `${width} ${pass} ${head.key} (${head.open}): the chevron centres on the title's first line: ${head.offset}px`);
+        }
+        // Flip every head, inner ones first so a folding Shipped never hides one still to press; each is measured both ways.
+        for (const key of heads.map((head) => head.key).reverse()) await press(chrome, `document.querySelector('[data-key=${JSON.stringify(key)}] > .milestone-head')`);
+        await chrome.waitFor(`[...document.querySelectorAll('#roadmap-list .milestone-head')].filter((head) => head.getClientRects().length).length >= 3`);
+      }
+    }
+    assert.deepEqual(chrome.exceptions, [], 'the roadmap raises no uncaught page exception');
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    rmSync(profile, { recursive: true, force: true });
+    await view.stop();
+  }
+});
