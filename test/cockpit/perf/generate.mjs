@@ -9,8 +9,9 @@ import { STATUSES, frozenCriterion, loadSpec } from '../../../src/spec.js';
 import {
   ACCEPT_REASON, addItem, addMilestone, allShouts, appendFact, claim, closeBoard,
   ensureCoordinator, events, listAgents, listItems, milestones, openBoard, recordAttempt,
-  register, reopen, shout, submit, verify, withdraw,
+  register, reopen, shout, verify, withdraw,
 } from '../../../src/board.js';
+import { submitFixture } from '../../board-submit-fixture.js';
 
 const ROOT = resolve(import.meta.dirname, '../../..');
 const BIN = join(ROOT, 'bin', 'pullboard.js');
@@ -144,7 +145,7 @@ function submitItem(board, id, seed, lane, builder, commitNumber, freezer) {
   const tree = digest(seed, 'tree', id, commitNumber).slice(0, 40);
   const frozen = claim(board, id, { agentId: builder, lane,
     leaseMs: LEASE_MS, freeze: freezer, head: digest(seed, 'claim-head', id, commitNumber).slice(0, 40) });
-  submit(board, id, { agentId: builder, commit, tree, files: [`generated/${id}.txt`] });
+  submitFixture(board, id, { agentId: builder, commit, tree, files: [`generated/${id}.txt`] });
   return { commit, tree, digest: frozen.digest };
 }
 
