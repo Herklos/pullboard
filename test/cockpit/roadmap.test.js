@@ -860,11 +860,13 @@ test('the roadmap shows landed, accepted and past target [N26]', { timeout: 90_0
   box.run(alpha.repo,'milestone','add','Shipped release','--items','4');
   box.run(alpha.repo,'milestone','add','State summary','--items','5,6,7,8,9,10');
   box.run(alpha.repo,'milestone','ship','Shipped release','--next','State summary');
+  box.run(alpha.repo,'milestone','add','Empty shipped');
+  box.run(alpha.repo,'milestone','ship','Empty shipped','--next','State summary');
   const shipped=box.git(alpha.repo,'rev-parse','HEAD');
   const view=await startView(box),profile=mkdtempSync(join(tmpdir(),'pullboard-roadmap-truth-'));let chrome;
   const milestone=name=>`document.querySelector('[data-key="m:${name}"]')`;
   try {
-    chrome=await openSnapshotChrome(executable,view.link.href,profile);await chrome.waitFor('data?.project?.milestones?.length===3');
+    chrome=await openSnapshotChrome(executable,view.link.href,profile);await chrome.waitFor('data?.project?.milestones?.length===4');
     // Temporary #820 contract fixture for the permitted parallel build. Its shape is provisional until the backend lands; this is not real CLI summary proof.
     await chrome.stable(`(()=>{const m=data.project.milestones.find(m=>m.name==='State summary');m.summary={total:6,left:5,landed:1,landing:1,review:1,building:1,waiting:1,held:1,needsYou:[9],pace:{last6h:3,last2h:3},estimate:{low:3.5,high:10}};return true})()`);
     await press(chrome,"document.querySelector('[data-tab=roadmap]')");
@@ -876,6 +878,8 @@ test('the roadmap shows landed, accepted and past target [N26]', { timeout: 90_0
     await press(chrome,"document.querySelector('[data-key=shipped] > .milestone-head')");
     await chrome.waitFor(`${milestone('Shipped release')}?.querySelector('.milestone-head')`);
     assert.match(await chrome.stable(`${milestone('Shipped release')}.textContent`),new RegExp(shipped.slice(0,12)),'the shipped release names its actual commit');
+    assert.equal(await chrome.stable(`${milestone('Empty shipped')}.closest('.shipped')!==null`),true,'an empty shipped milestone appears only under Shipped');
+    assert.equal(await chrome.stable("document.querySelectorAll('[data-key=\"m:Empty shipped\"]').length"),1,'an empty shipment is not repeated among upcoming releases');
     for(const width of [375,1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride',{width,height:950,deviceScaleFactor:1,mobile:false});
       for(const scheme of ['light','dark']) {
