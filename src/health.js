@@ -352,17 +352,36 @@ function releaseOverdue(db, root, now, deadlineMs, history) {
   });
 }
 
-/** Each item's latest event of every kind, its latest lifecycle move and its first merge record. */
-function itemHistory(db) {
+/**
+ * Each item's latest event of every kind, its latest lifecycle move and its first merge record.
+ *
+ * The statement is held for the whole loop and touched after it (#874): Node 22.13's node:sqlite
+ * finalizes an unreferenced statement when garbage collection runs mid-iterate, which crashed
+ * resume with "statement has been finalized" on a large board. Exported for that regression test.
+ */
+export function itemHistory(db) {
   const history = new Map();
-  for (const event of db.prepare('SELECT event_id, event_at, event_by, event_kind, item_id, event_detail FROM event WHERE item_id IS NOT NULL ORDER BY event_id').iterate()) {
+  const statement = db.prepare('SELECT event_id, event_at, event_by, event_kind, item_id, event_detail FROM event WHERE item_id IS NOT NULL ORDER BY event_id');
+  try { readItemHistory(statement.iterate(), history); }
+  finally { keepAlive(statement); }
+  return history;
+}
+
+/** Keep a value reachable until this call, so no optimizer treats it as dead early. */
+function keepAlive(value) {
+  if (value === KEEP_ALIVE_SENTINEL) throw new Error('unreachable');
+}
+const KEEP_ALIVE_SENTINEL = Symbol('keep alive');
+
+/** Fold item events, oldest first, into each item's history entry. */
+function readItemHistory(events, history) {
+  for (const event of events) {
     let entry = history.get(event.item_id);
     if (!entry) history.set(event.item_id, entry = { last: new Map(), lifecycle: null, firstMerged: null });
     entry.last.set(event.event_kind, event);
     if (LIFECYCLE.has(event.event_kind)) entry.lifecycle = event;
     if (event.event_kind === 'merged' && !entry.firstMerged) entry.firstMerged = event.event_at;
   }
-  return history;
 }
 
 /** Decisions to the coordinator or the person, and the person's requests, that nobody has closed. */
