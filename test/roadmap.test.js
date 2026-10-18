@@ -144,3 +144,28 @@ test('[N26] roadmap holds and unavailable scoped references partition without le
   assert.equal(expired.held, 2, 'the expired builder is held instead of waiting');
   assert.equal(expired.waiting, 1);
 });
+
+
+test('[N26] an estimate with equal bounds prints one number', async t => {
+  const box = fixture(t);
+  const now = box.clock.now().getTime();
+  // Equal six-hour and two-hour rates make the rounded decimal bounds equal.
+  for (const hours of [...Array(8).fill(5.75), ...Array(4).fill(1)]) {
+    box.at(now - hours * HOUR);
+    box.item('landed');
+  }
+  box.at(now);
+  const items = Array.from({ length: 5 }, () => box.item('waiting'));
+  store.addMilestone(box.board, { agentId: 'coordinator', name: 'Estimate', items });
+  assert.deepEqual((await box.run()).milestones[0].summary.estimate, { low: 2.5, high: 2.5 },
+    'JSON retains both equal bounds');
+  const equal = await box.run(false);
+  assert.match(equal, /; about 2\.5 h at today's pace\./u);
+  assert.doesNotMatch(equal, /2\.5 to 2\.5/u);
+
+  // Aging the older landings out of the long window separates the two rates.
+  box.at(now + 0.5 * HOUR);
+  assert.deepEqual((await box.run()).milestones[0].summary.estimate, { low: 2.5, high: 7.5 },
+    'JSON retains both different bounds');
+  assert.match(await box.run(false), /; about 2\.5 to 7\.5 h at today's pace\./u);
+});

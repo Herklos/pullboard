@@ -44,6 +44,12 @@ import {
 } from './machine.js';
 import { Refused } from './refused.js';
 import {
+  ROUTES,
+  canTake,
+  rejectedItemEscalation,
+} from './route-escalation.js';
+export { ROUTES, canTake };
+import {
   agentAt,
   agentModel,
   listAgents,
@@ -118,24 +124,9 @@ export function boardBusyError(file, startedAt, error) {
   return new Refused('BOARD_BUSY', `board file ${file} remained held by another process after ${Date.now() - startedAt}ms; wait for it to finish and retry`);
 }
 
-/**
- * Who can take an item (B13), as tiers in order of the model an item needs: `light` is work a small
- * or local model can build from its brief, `mid` needs a capable general model, and
- * `strong` needs a frontier model's judgment. An agent's route is set when it joins; it takes items
- * at its tier and below.
- */
-export const ROUTES = ['light', 'mid', 'strong'];
 const BRIEF_LIMIT = 8000;
 const REVIEW_RELEASE_COOLDOWN_MS = 60 * 60 * 1000;
 
-/**
- * True when an agent on `agentRoute` may build or verify an item routed `itemRoute`.
- *
- * @param {string} agentRoute
- * @param {string} itemRoute
- * @returns {boolean}
- */
-export const canTake = (agentRoute, itemRoute) => ROUTES.indexOf(itemRoute) <= ROUTES.indexOf(agentRoute);
 export const REJECT_REASONS = [
   'TEST_FAILURE',
   'BEHAVIOR_MISMATCH',
@@ -1034,10 +1025,10 @@ const onlyCoordinator = (agentId, what) => (agentId === COORDINATOR ? null : new
  *
  * @param {any} board
  * @param {number} id
- * @param {{ agentId: string, note: string, attempt?: string }} why
+ * @param {{ agentId: string, note: string, attempt?: string, rejections?: object[] }} why
  * @returns {{ from: string, to: string }}
  */
-export function escalate(board, id, { agentId, note, attempt = '' }) {
+export function escalate(board, id, { agentId, note, attempt = '', rejections }) {
   return atomic(board, () => {
     const nextRoute = (route) => ROUTES[Math.min(ROUTES.indexOf(route) + 1, ROUTES.length - 1)];
     const item = moveItem(board, id, 'escalate', {
@@ -1055,7 +1046,9 @@ export function escalate(board, id, { agentId, note, attempt = '' }) {
     });
     const from = item.item_route;
     const to = nextRoute(from);
-    logEvent(board, agentId, 'escalate', id, { from, to, note: note.trim(), ...(attempt ? { attempt } : {}) });
+    logEvent(board, agentId, 'escalate', id, {
+      from, to, note: note.trim(), ...(attempt ? { attempt } : {}), ...(rejections ? { rejections } : {}),
+    });
     return { from, to };
   });
 }
@@ -1597,6 +1590,8 @@ export function verify(board, id, { agentId, decision, reason, note = '', cause,
     if (newReview) detail.review = { commit: review.commit, ...(Object.hasOwn(review, 'head') ? { head: review.head } : {}), trunk: review.trunk, paths: [...review.paths] };
     logEvent(board, agentId, verb, id, implies?.length ? { ...detail, implies } : detail);
     const trigger = board.lastEvent;
+    const escalation = !isAccept && rejectedItemEscalation(board, id, engine, item.item_route);
+    if (escalation) escalate(board, id, escalation);
     tellVerdictImplications(board, (by, itemId, fact) => logEvent(board, by, 'fact', itemId, fact), id, { seed: impliesId, implies });
     if (!isAccept) postRigorNotices(board, trigger);
     return { decision, reason: code, ...(isAccept && check !== undefined ? { check } : {}) };
