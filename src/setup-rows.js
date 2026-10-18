@@ -24,11 +24,16 @@ export function applyStep(rowIds, seat) {
  * answer for pending questions, decide for a mix.
  *
  * @param {{id: string, status: string}[]} rows The open rows with no person decision.
- * @returns {{personCommand: string, verb: string}}
+ * @returns {{personCommand: string, verb: string, seatQuestion: string, seatNext: string}}
  */
 export function personAsk(rows) {
   const questions = rows.filter(row => row.status === 'pending').map(row => row.id);
   const drafts = rows.filter(row => row.status !== 'pending').map(row => row.id);
   const personCommand = [drafts.length ? `pullboard spec approve ${drafts.join(',')}` : '', ...questions.map(id => `pullboard spec answer ${id} "<choice>"`)].filter(Boolean).join('; ');
-  return { personCommand, verb: !questions.length ? 'approve' : drafts.length ? 'decide' : 'answer' };
+  const verb = !questions.length ? 'approve' : drafts.length ? 'decide' : 'answer';
+  const names = rows.map(row => row.id).join(', ');
+  const request = verb === 'approve' ? `bring approval of ${names} to the person` : `ask the person to ${verb} ${names}`;
+  return { personCommand, verb,
+    seatQuestion: `Waiting for the coordinator to ${request}.`,
+    seatNext: `ask the coordinator to ${request}: pullboard shout coordinator "${verb} ${names}" --decision; meanwhile pullboard spec show ${rows[0].id}` };
 }

@@ -1635,13 +1635,13 @@ function boardSetup(ctx, card, identity) {
     const names = rowIds.join(', ');
     const command = `pullboard spec show ${rowIds[0]}`;
     // A pending question takes an answer, a draft row an approval: each gets the command that decides it.
-    const { personCommand, verb } = personAsk(drafted);
+    const { personCommand, verb, seatQuestion, seatNext } = personAsk(drafted);
     return { step: 1, total: 5, ...current, steps, waitingOn: 'person-approval', rowIds, ...(toApply.length ? { approvedRowIds: toApply.map(row => row.id) } : {}),
-      question: seat ? `Waiting for the coordinator to bring approval of ${names} to the person.` : `Waiting for the person to ${verb} ${names}.`, command,
+      question: seat ? seatQuestion : `Waiting for the person to ${verb} ${names}.`, command,
       personCommand,
       afterAnswer: (toApply.length ? `The person already approved ${toApply.map(row => row.id).join(', ')}; pullboard spec apply writes them. ` : '') + 'The person approves draft rows and answers questions in Pullboard View or their own terminal; then the coordinator runs pullboard spec apply.',
       meanwhile: seat ? 'While waiting, review independent approved work or send questions to the coordinator with pullboard shout coordinator "<what is needed>" --decision.' : 'While waiting, the agent may review independent approved work or prepare questions for the person.',
-      agentNext: seat ? `ask the coordinator to bring approval of ${names} to the person: pullboard shout coordinator "approve ${names}" --decision; meanwhile ${command}` : (toApply.length ? 'pullboard spec apply for the approved rows; then ' : '') + `wait for the person to ${verb} ${names}; meanwhile ${command}` };
+      agentNext: seat ? seatNext : (toApply.length ? 'pullboard spec apply for the approved rows; then ' : '') + `wait for the person to ${verb} ${names}; meanwhile ${command}` };
   }
   return current ? { step: current.number, total: 5, ...current, steps } : null;
 }

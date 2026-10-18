@@ -960,3 +960,34 @@ test('an approved row waits for apply, not for the person [S1,I1,P6]', (t) => {
   const after = resume();
   assert.doesNotMatch(after, /spec apply|Waiting for the person to (approve|decide|answer)/u, 'once applied and committed, setup moves on');
 });
+
+
+test('a joined seat requests answers for pending questions [S1,I1,P6]', t => {
+  for (const mixed of [false, true]) {
+    const source = '# Spec\n\n## Q · Setup\n- Q1 [pending, must] It deploys to: Vercel. Choices: Vercel, Netlify. | gate: review\n'
+      + (mixed ? '- A1 [draft, must] Every page works at phone width. | gate: review\n' : '');
+    const box = specBox(t, { specSource: source });
+    const configPath = join(box.root, 'pullboard.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf8'));
+    config.lanes.build = { owns: ['app/'] };
+    writeFileSync(configPath, JSON.stringify(config));
+    box.git('add', 'pullboard.json');
+    box.git('commit', '-q', '-m', 'chore: configure the setup fixture lane');
+    const builder = join(box.root, 'builder');
+    box.git('worktree', 'add', '-q', '-b', 'build/setup', builder);
+    const joined = runIn(box, builder, ['join', 'build', '--model', 'Fixture']);
+    assert.equal(joined.status, 0, joined.stderr + joined.stdout);
+    const read = runIn(box, builder, ['resume', '--json']);
+    assert.equal(read.status, 0, read.stderr + read.stdout);
+    const card = JSON.parse(read.stdout);
+    assert.match(card.setup.personCommand, /pullboard spec answer Q1 "<choice>"/u);
+    assert.doesNotMatch([card.setup.question, card.setup.agentNext, card.next].join('\n'), /approv/iu,
+      'pending-only or mixed joined-seat guidance never asks for approval of a question');
+    const expected = mixed ? 'decide Q1, A1' : 'answer Q1';
+    assert.ok(card.setup.question.includes(expected), card.setup.question);
+    assert.ok(card.setup.agentNext.includes(expected), card.setup.agentNext);
+    assert.equal(card.next, card.setup.agentNext);
+    if (mixed) assert.match(card.setup.personCommand, /pullboard spec approve A1; pullboard spec answer Q1/u,
+      'the draft still gets approval while the question gets its answer');
+  }
+});
