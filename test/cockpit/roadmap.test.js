@@ -153,7 +153,7 @@ test('the roadmap reads every item as the Items tab does, opens each one, anothe
     { id: '#3', label: 'sent back', tone: 'no' },
     { id: '#4', label: 'to verify', tone: 'warn' },
     { id: 'beacon#1', label: 'sent back', tone: 'no' },
-    { id: '#1', label: 'landed', tone: 'ok' },
+    { id: '#1', label: 'verified', tone: 'ok' },
     { id: '#2', label: 'accepted', tone: 'ok' },
     { id: '#5', label: 'building', tone: 'busy' },
     { id: '#6', label: 'unclaimed', tone: 'free' },
@@ -254,7 +254,7 @@ test('the roadmap reads every item as the Items tab does, opens each one, anothe
     accept(box, alpha, 4);
     await chrome.waitFor(`${roadmapRow('#4')}?.querySelector('.chip').innerText === 'accepted' && document.querySelector('#roadmap .roadmap-left [aria-label]').getAttribute('aria-label') === '1/5 landed'`, 15_000); // budget: hang ceiling for the accepted receipt and unchanged landed count to reach the browser; no throughput claim.
     landRoadmapItem(box, alpha, 4);
-    await chrome.waitFor(`${roadmapRow('#4')}?.querySelector('.chip').innerText === 'landed' && document.querySelector('#roadmap .roadmap-left [aria-label]').getAttribute('aria-label') === '2/5 landed'`, 15_000); // budget: hang ceiling for the real merge receipt and landed count to reach the browser; no throughput claim.
+    await chrome.waitFor(`${roadmapRow('#4')}?.querySelector('.chip').innerText === 'verified' && document.querySelector('#roadmap .roadmap-left [aria-label]').getAttribute('aria-label') === '2/5 landed'`, 15_000); // budget: hang ceiling for the real merge receipt and landed count to reach the browser; no throughput claim.
     box.run(beacon.web, 'claim', '1');
     await chrome.waitFor(`${roadmapRow('beacon#1')}?.querySelector('.chip').innerText === 'building'`, 15_000); // budget: hang ceiling for the claimed external item to refresh; no throughput claim.
 
@@ -933,7 +933,7 @@ test('the roadmap shows landed, accepted and past target [N26]', { timeout: 90_0
     const truth=await chrome.stable(`${milestone('Past target')}.textContent`);
     assert.match(truth,/1 of 3 landed/u,'acceptance does not count as landed');assert.match(truth,/past target/u);
     const states=JSON.parse(await chrome.stable(`JSON.stringify([...${milestone('Past target')}.querySelectorAll('.milestone-item')].map(row=>[row.querySelector('.id').textContent,row.querySelector('.chip').textContent]))`));
-    assert.deepEqual(Object.fromEntries(states),{'#1':'landed','#2':'accepted','#3':'unclaimed'});
+    assert.deepEqual(Object.fromEntries(states),{'#1':'verified','#2':'accepted','#3':'unclaimed'});
     await press(chrome,"document.querySelector('[data-key=shipped] > .milestone-head')");
     await chrome.waitFor(`${milestone('Shipped release')}?.querySelector('.milestone-head')`);
     assert.match(await chrome.stable(`${milestone('Shipped release')}.textContent`),new RegExp(shipped.slice(0,12)),'the shipped release names its actual commit');
@@ -1070,7 +1070,7 @@ test('a blocked roadmap item shows its dot and expands to say why [N26]', { time
       await opened('#5');
       const landed = JSON.parse(await chrome.stable(`JSON.stringify((()=>{const r=${row('#5')},panel=r.parentElement.querySelector('.milestone-why');return {color:getComputedStyle(panel.querySelector('.roadmap-event:last-child .roadmap-step')).backgroundColor,chip:r.querySelector('.roadmap-landed')?.textContent,icon:!!r.querySelector('.roadmap-landed svg')};})())`));
       assert.equal(landed.color, colors.success, `${scheme}: landing history uses the success token`);
-      assert.equal(landed.chip, 'landed'); assert.equal(landed.icon, true);
+      assert.equal(landed.chip, 'verified'); assert.equal(landed.icon, false, 'a landed row reads verified, with no checkmark (the person, 18 Oct)');
       await press(chrome, row('#5'));
     }
     for (const width of [375,1280]) for (const scheme of ['light','dark']) {
