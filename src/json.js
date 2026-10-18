@@ -44,6 +44,7 @@ export const JSON_SHAPES = {
     ledger: shape({ items: 'array', stats: 'object' }),
     log: shape({ events: 'array' }),
     rigor: shape({ causes: 'array', uncaused: 'number' }),
+    'rigor draft': shape({ key: 'string', reads: 'string', evidence: 'object', proof: 'object', drafts: 'array' }),
     add: shape({ item: 'object' }),
     edit: shape({ item: 'object' }),
     fact: shape({ item: 'number', fact: 'object' }),

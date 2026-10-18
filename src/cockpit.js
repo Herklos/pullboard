@@ -1,4 +1,8 @@
-import { hostedReleaseDistance, hostedReleaseInfo, hostedReleaseNote } from './view/hosted-release.js';
+import {
+  hostedReleaseDistance,
+  hostedReleaseInfo,
+  hostedReleaseNote,
+} from './view/hosted-release.js';
 import {
   effectiveGuards,
   IN_STATE,
@@ -427,12 +431,16 @@ async function connectLocal() {
     await new Promise((painted) => requestAnimationFrame(() => requestAnimationFrame(painted)));
   }
   let reply;
-  try { reply = await fetch(base + '/local/protocol', { signal: AbortSignal.timeout(3000), credentials: 'omit', redirect: 'error' }); }
-  catch {
-    // One discovery request is all this page makes of this device (P5), so a view too old to answer it reads as none,
-    // and the state names that case in its hint.
-    localNote('not-running');
-    return 'unreachable';
+  for (let attempt = 1; !reply; attempt += 1) {
+    try { reply = await fetch(base + '/local/protocol', { signal: AbortSignal.timeout(3000), credentials: 'omit', redirect: 'error' }); }
+    catch (error) {
+      // A read that ran out of time may have met a slow first answer or a browser prompt still open, so it asks once
+      // more (#786). Otherwise the page asks nothing else of this device (P5): a refused or unanswered view reads as
+      // none, and the state names that case in its hint.
+      if (attempt < 2 && error?.name === 'TimeoutError') continue;
+      localNote('not-running');
+      return 'unreachable';
+    }
   }
   let protocol = null;
   try { protocol = await reply.json(); } catch { /* not this protocol */ }
@@ -2644,8 +2652,9 @@ function render() {
   };
   // One card for a shout, in the feed and among the asks; tail adds what the place needs, such as Answer. Only the
   // feed's copy carries the band and the id an answer's link lands on, so an ask shown twice never repeats an id.
+  // The person's own shout is signed "you", plainly, never as the coordinator that ran it.
   const card = (x, tail = '', inFeed = true) => '<article class="shout h' + hue(x.shout_from) + (lead(x.shout_from) ? ' lead' : '') + (openShouts.has(x.shout_id) ? ' open' : '') + (inFeed && x.shout_id === view.shout ? ' found' : '') + '"' + (inFeed ? ' id="shout-' + x.shout_id + '"' : '') + ' data-shout-id="' + x.shout_id + '">'
-    + (lead(x.shout_from) ? '<span class="avatar">' + LEAD + '</span>' : '<span class="avatar' + (initials(x.shout_from).length > 3 ? ' wide' : '') + '" aria-hidden="true">' + esc(initials(x.shout_from)) + '</span>') + '<div class="shout-main">' + (inFeed && x.shout_id === view.shout ? '<h2 class="visually-hidden">Shout #' + x.shout_id + '</h2>' : '') + '<header><b class="who">' + shoutAgentName(x.shout_from) + '</b><span class="to">→ ' + shoutAgentName(x.shout_to) + '</span>'
+    + (lead(x.shout_from) ? '<span class="avatar">' + LEAD + '</span>' : '<span class="avatar' + (initials(x.shout_from).length > 3 ? ' wide' : '') + '" aria-hidden="true">' + esc(initials(x.shout_from)) + '</span>') + '<div class="shout-main">' + (inFeed && x.shout_id === view.shout ? '<h2 class="visually-hidden">Shout #' + x.shout_id + '</h2>' : '') + '<header><b class="who">' + (x.shout_from === 'person' ? 'you' : shoutAgentName(x.shout_from)) + '</b><span class="to">→ ' + shoutAgentName(x.shout_to) + '</span>'
     + (itemOf(x) ? '<span class="item">#' + esc(itemOf(x)) + '</span>' : '') + mark(x) + '<time class="long" data-ago="' + esc(x.shout_at) + '" title="' + esc(when(x.shout_at)) + '">' + agoLong(x.shout_at) + '</time></header>'
     + '<div class="text">' + rich(x.shout_text, titles) + '</div><button class="more" data-more type="button">' + (openShouts.has(x.shout_id) ? 'less' : 'more') + '</button>' + (inFeed ? band(x) + heardBy(x) : '') + evidence(x) + tail + '</div></article>';
   $('feed').innerHTML = (view.shout !== null && !feedShouts.some((entry) => entry.shout_id === view.shout) ? '<p class="empty" id="shout-address-status" role="status">' + esc(addressed?.error || 'Loading shout #' + view.shout + '…') + '</p>' : '') + bar + (heard.length ? dayRules(heard, (x) => x.shout_at, card) : '<div class="empty">' + (unread ? 'No unread shouts.' : view.agent ? 'No shouts with ' + esc(agentName(view.agent)) + ' among the last forty.' : 'No shouts yet.') + '</div>');
