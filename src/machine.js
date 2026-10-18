@@ -10,6 +10,7 @@
  */
 
 /** Executable move semantics, carried by every sealed move and retained during replay [H16]. */
+import { RIGOR_NOTICE_ENGINE } from './rigor-source.js';
 export const ENGINE_VERSION = 47;
 
 /** The engine at which a reject, reopen or person fact can carry a cause key (#713); older moves replay unchanged [D1,H16]. */
