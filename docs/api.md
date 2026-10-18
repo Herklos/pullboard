@@ -101,6 +101,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `ledger` | `version:number`, `items:array`, `stats:object` |
 | `log` | `version:number`, `events:array` |
 | `rigor` | `version:number`, `causes:array`, `uncaused:number` |
+| `rigor draft` | `version:number`, `key:string`, `reads:string`, `evidence:object`, `proof:object`, `drafts:array` |
 | `add` | `version:number`, `item:object` |
 | `edit` | `version:number`, `item:object` |
 | `fact` | `version:number`, `item:number`, `fact:object` |
@@ -236,6 +237,11 @@ Rigor is how errors become doctrine or specs. It starts by noticing a failure ca
 `pullboard rigor` is read-only. It lists each cause that repeated: on 2 items, or on 1 item at 2 different commits. Each line shows the key, how it reads (`work` for `doctrine:` and `refusal:`, `product` for `row:`, `both` for `test:`), its failure count and its items. Its JSON result is `{version, causes: [{key, reads, occurrences, neverAgain, items: [{id, commits}]}], uncaused}`; `uncaused` counts rejects and reopens with no cause key.
 
 The person can mark a cause never-again from the main checkout's terminal: `pullboard fact <id> root-cause "<why>" --cause <key> --never-again --as person`. The fact is recorded as the person's, carries `cause` and `neverAgain: true`, and `rigor` lists its cause at once. An agent or a fact without `--as person` is refused with `RIGOR_PERSON_ONLY`. Over the relay, a fact move with person mode, a never-again or a cause key is accepted only from an authenticated person sender; an agent, a coordinator seat or the machine credential is refused with `RELAY_PERSON_ONLY` whatever channel the move names, and nothing is recorded. A move that carries a cause key needs move engine 30; moves without one replay as before.
+
+`pullboard rigor draft <key> "<rule>" --check "<command>" --red <commit> --green <commit> [--section <letter>]` turns a currently noticed cause into a draft row. `--red` must resolve to one of that exact cause's failure-receipt commits; an unrelated red commit is refused with `RIGOR_UNPROVEN`, naming the noticed commits. A work check exits 0 or 1 and prints problems at red and none at green. A product check fails at red and passes at green. For a `test:<file>::<title>` cause, the first supported proof format is a literal `node --test <file>` command, optionally with `--test-name-pattern`: the exact file must be regular in both commits, and complete real Node TAP must fail that named test at red and pass it at green without skipping it. Shell wrappers, other runners and unrelated files or selectors are refused rather than inferred to execute the named test. Node preload options are not carried into named-test proof. Ordinary board checks keep their existing runner support.
+
+The proof holds a real local machine gate while it runs on throwaway detached worktrees. Its owned child group is drained before each worktree is removed; an uncertain drain retains the worktree and refuses proof. Missing references, a timeout, incomplete test accounting or a check that is not red then green is `RIGOR_UNPROVEN`. Work causes draft doctrine with `gate: check <command> | count: 0`; product causes draft spec with the test gate; unclear test causes draft both, deriving a portable doctrine scanner that prints only a failed test run so a passing test has count zero. Each row's Why retains the evidence and both full commit hashes. Rows remain `[draft, must]`; only the person approves, and ordinary `spec apply` applies that decision with no extra proof-building item. The JSON result is `{version, key, reads, evidence: {items, occurrences, neverAgain}, proof: {check, red, green}, drafts: [{id, file, line, row}]}`; `red` and `green` retain `{commit, exit, problems, timedOut}`. `--section` selects the existing target section, defaulting to doctrine's first section or spec's G.
+
 
 ## Refusals
 
