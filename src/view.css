@@ -917,3 +917,26 @@ code.inline.long { white-space: break-spaces; overflow-wrap: anywhere; }
 
 /* Roadmap title references keep their colour and tooltip while the whole row expands in place. */
 .milestone-item span.ref { color: var(--accent-strong); display: inline-block; line-height: inherit; font: inherit; }
+
+/* The approved dense Roadmap detail uses the view's own light/dark tokens [N26]. */
+.milestone-item[role="button"] { cursor: pointer; }
+.milestone-item[role="button"]:hover { background: var(--surface-2); }
+.roadmap-status { display: inline-flex; align-items: center; gap: 6px; }
+.roadmap-blocked svg, .roadmap-items svg { width: 12px; height: 12px; flex: none; }
+.roadmap-detail { display: grid; grid-template-columns: 104px minmax(0, 1fr); gap: 5px 12px; margin: 10px 0 0; font-size: 12.5px; line-height: 1.55; }
+.roadmap-detail dt { display: flex; align-self: start; align-items: flex-start; gap: 6px; color: var(--ink-muted); white-space: nowrap; }
+.roadmap-detail dt svg { flex: none; width: 14px; height: 14px; margin-top: 3px; color: var(--ink-faint); }
+.roadmap-detail dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.roadmap-detail b { font-weight: 600; }
+.roadmap-detail .roadmap-criterion { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.roadmap-ref { display: inline; padding: 1px 5px; border-radius: 4px; font-size: 11px; white-space: nowrap; }
+.roadmap-return { padding: 5px 7px; border-radius: 5px; background: var(--reject-soft); color: var(--reject); }
+.roadmap-event { display: inline; white-space: nowrap; }
+.roadmap-step { display: inline-block; width: 7px; height: 7px; margin-right: 5px; border-radius: 50%; background: var(--ink-faint); }
+.roadmap-step.busy { background: var(--blue); }
+.roadmap-step.warn { background: var(--warn); }
+.roadmap-step.ok { background: var(--accent); }
+.roadmap-step.no { background: var(--reject); }
+.roadmap-step.free { background: var(--violet); }
+.roadmap-arrow { color: var(--ink-faint); }
+.roadmap-items { display: inline-flex; align-items: center; gap: 5px; margin-top: 8px; font-size: 12.5px; }

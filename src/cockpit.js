@@ -1408,9 +1408,8 @@ function boardSummary(board, state) {
     decisions: calls('decision'),
     // What each item's state reads from, so another repo's roadmap can show it as this board's
     // Items tab does, sent back included, and open it here.
-    items: state.items.map((item) => ({ id: item.id, title: item.title, status: item.status, stage: item.stage ?? pipelineStage(item),
-      lane: item.lane, blockedBy: item.blockedBy, claim: item.claim,
-      verdict: item.verdict && { decision: item.verdict.decision, note: item.verdict.note } })),
+    items: state.items.map((item) => listFields(item)),
+    agents: state.agents, events: state.events, milestones: state.milestones,
   };
 }
 
@@ -1591,9 +1590,9 @@ function movedSince(project, id, cursor) {
 }
 
 /** Load one opened item's omitted fields, retaining them only while its summary and event cursor stay current. */
-function detailOf(project, item, ask) {
+function detailOf(project, item, ask, root = view.root) {
   if (Array.isArray(item.history)) return { item };
-  const root = view.root, key = root + '\\n' + item.id, summary = JSON.stringify(item);
+  const drawnRoot = view.root, key = root + '\\n' + item.id, summary = JSON.stringify(item);
   const kept = itemDetails.get(key);
   /** Keep the prior detail visible during a refresh, or return the short initial loading state. */
   const waiting = (entry) => (entry?.shown ? { item: { ...item, ...entry.shown } } : { loading: true });
@@ -1607,7 +1606,7 @@ function detailOf(project, item, ask) {
   detailRead = api(boardPath(root) + '/items/' + encodeURIComponent(String(item.id))).then((reply) => { entry.detail = reply.item; },
     (error) => { entry.error = String(error.message || error); }).finally(() => {
     entry.loading = false;
-    if (view.root === root && view.item === item.id) render();
+    if (view.root === drawnRoot && ((root === view.root && view.item === item.id) || view.tab === 'roadmap')) render();
   });
   return waiting(entry);
 }
@@ -2247,6 +2246,10 @@ function milestoneItem(entry, p) {
   const root = local ? view.root : named.length === 1 && named[0].ok ? named[0].root : null;
   const id = local ? entry.id : ref ? Number(ref[2]) : null;
   const item = (root === view.root ? p.items : root ? named[0].items : []).find((i) => i.id === id) || null;
+  const source = root === view.root ? p : root ? named[0] : null;
+  const label = local ? '#' + entry.id : String(entry.id);
+  const expanded = view.tab === 'roadmap' && view.roadmapOpen.get(JSON.stringify([view.root, 'i:' + label])) === true;
+  const detail = item && expanded ? detailOf(source, item, true, root) : null;
   // A status the lifecycle declares; the roadmap says unavailable or missing for an item it could not read.
   const read = item || (FLOW.states.some((state) => state.id === entry.status) ? { status: entry.status, verdict: null } : null);
   return {
@@ -2256,7 +2259,12 @@ function milestoneItem(entry, p) {
     titles: new Map((root === view.root ? p.items : root ? named[0].items : []).map((i) => [String(i.id), i.title])),
     state: read ? stateOf(read) : null,
     stale: item ? staleChip(item) : '',
-    block: item ? roadmapBlock(item, { holds: root === view.root ? p.holds : named[0].laneHolds, items: root === view.root ? p.items : named[0].items, name: (id) => agentName(id), address: (id) => itemAddress(id, root), board: root === view.root ? null : root }) : null,
+    block: item ? roadmapBlock(detail?.item || item, {
+      holds: source.holds || source.laneHolds, items: source.items, name: (id) => agentName(id, source), time: when, state: stateOf,
+      address: (id) => itemAddress(id, root), board: root === view.root ? null : root,
+      releases: (p.milestones || []).filter((milestone) => milestone.items.some((ref) => ref.id === entry.id)).map((milestone) => milestone.name),
+      loading: detail?.loading, error: detail?.error,
+    }) : null,
     stage: item ? pipelineStage(item) : entry.status,
     word: entry.status,
     open: item ? { root, id } : null,
@@ -2311,8 +2319,9 @@ function milestoneRow(row, titles) {
   const title = row.title ? inline(String(row.title).replace(/\\s+/g, ' '), row.titles || titles, 'in-place', row.root) : '<span class="muted">' + esc(row.why) + '</span>';
   const label = '<span class="id">' + esc(row.label) + '</span>' + title;
   const text = row.block?.dot ? '<span class="milestone-title">' + label + '</span>' + row.block.dot : label;
-  const inner = '<span class="dot' + (row.state ? ' ' + row.state : '') + '"></span><span class="t">' + text + '</span>' + (row.stale || '') + (row.state ? chip(row.state) : '<span class="chip">' + esc(row.word) + '</span>');
   const key = 'i:' + row.label, open = view.roadmapOpen.get(JSON.stringify([view.root, key])) === true;
+  const status = (open && row.block?.dot ? '<span class="chip warn roadmap-blocked"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>blocked</span>' : '') + (row.state ? chip(row.state) : '<span class="chip">' + esc(row.word) + '</span>');
+  const inner = '<span class="dot' + (row.state ? ' ' + row.state : '') + '"></span><span class="t">' + text + '</span>' + (row.stale || '') + '<span class="roadmap-status">' + status + '</span>';
   const board = row.open && row.open.root !== view.root ? ' data-board="' + esc(row.open.root) + '"' : '';
   const toggle = 'class="milestone-item' + (row.block?.dot ? ' blocked' : '') + '" data-roadmap-key="' + esc(key) + '" aria-expanded="' + open + '"' + board + ' title="' + esc(row.title ? row.title + (!row.open && row.why ? ' (' + row.why + ')' : '') : row.why) + '"';
   const detail = row.block ? row.block.detail : '<p>' + esc(row.why || row.word) + '</p>';
