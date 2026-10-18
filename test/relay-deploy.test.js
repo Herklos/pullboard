@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import { releaseHeadlinesBetween } from '../src/changelog.js';
-import { ENGINE_VERSION } from '../src/machine.js';
+import { ENGINE_VERSION, VERIFIER_STANDING_ENGINE } from '../src/machine.js';
 import { relayClientFixture } from './relay-client-fixture.js';
 import { githubFixture } from './relay-fixture.js';
 import { createRelayBrowserHandler } from '../relay/browser-page.js';
@@ -291,7 +291,7 @@ test('[H5,H18] the Railway checklist matches the container and relay runtime set
 test('[H5,H18] the Railway smoke links, reads one unsealed move and unlinks locally', async (t) => {
   const box = await relayClientFixture(t);
   await box.link();
-  assert.equal(await box.requireEngineThree(), 27, 'a machine-linked board requires the engine-27 seat-provenance replay engine');
+  assert.equal(await box.requireEngineThree(), VERIFIER_STANDING_ENGINE, `a machine-linked board requires the engine-${VERIFIER_STANDING_ENGINE} seat-provenance replay engine`);
   const previous = JSON.parse(readFileSync(box.linkFile, 'utf8'));
   const legacy = await fetch(`${previous.url}/api/v1/boards/${previous.board}/state`, {
     headers: { authorization: `Bearer ${previous.token}`, 'x-pullboard-engine': '2' },
