@@ -874,7 +874,7 @@ test('a blocked roadmap item shows its dot and expands to say why [N26]', { time
   assert.ok(executable, 'Chrome is required for the roadmap blocker check.');
   const box = machine(), alpha = project(box, 'blocked-roadmap');
   box.run(alpha.repo, 'add', 'web', 'Base work', '--specs', 'G1', '--criterion', 'Base is ready.');
-  box.run(alpha.repo, 'add', 'web', 'Waits on base', '--specs', 'G1', '--criterion', 'The heading renders. More detail stays in Items.', '--after', '1');
+  box.run(alpha.repo, 'add', 'web', 'Waits on base', '--specs', 'G1', '--criterion', 'Use #1 and #3 <em>literally</em>. More detail stays in Items.', '--after', '1');
   box.run(alpha.repo, 'add', 'web', 'Free work', '--specs', 'G1', '--criterion', 'Ready.');
   box.run(alpha.repo, 'add', 'web', 'Sent back once', '--specs', 'G1', '--criterion', 'Ready.');
   build(box, alpha, 4, 'sent-back.html'); sendBack(box, alpha, 4, 'The heading is missing.');
@@ -884,7 +884,7 @@ test('a blocked roadmap item shows its dot and expands to say why [N26]', { time
   box.git(alpha.repo, 'merge', '--no-ff', '--no-edit', alpha.itemBranches.get(`${alpha.baseBranch}:5`));
   box.run(alpha.repo, 'merged', '5', box.git(alpha.repo, 'rev-parse', 'HEAD'));
   box.run(alpha.repo, 'add', 'web', 'Building work', '--specs', 'G1', '--criterion', 'The corrected page renders.');
-  build(box, alpha, 6, 'building.html'); sendBack(box, alpha, 6, 'The title needs correction.\nMore detail stays in Items.');
+  build(box, alpha, 6, 'building.html'); sendBack(box, alpha, 6, 'See #1 and #3 before accepting.\nMore detail stays in Items.');
   box.run(alpha.web, 'claim', '6');
   const second = join(box.dir, 'second-builder');
   box.git(alpha.repo, 'worktree', 'add', '-q', second, '-b', 'web/second');
@@ -917,8 +917,10 @@ test('a blocked roadmap item shows its dot and expands to say why [N26]', { time
     await chrome.stable("window.__requests=[];window.__fetch=window.fetch;window.fetch=(url,options)=>{window.__requests.push(String(url));return window.__fetch(url,options);};true");
     const address = await chrome.stable('location.href');
     const blocked = await opened('#2');
-    assert.match(blocked, /CriterionThe heading renders\./u, 'the approved dense detail leads with the criterion');
+    assert.match(blocked, /CriterionUse #1 and #3 <em>literally<\/em>\./u, 'the approved dense detail leads with the criterion');
     assert.doesNotMatch(blocked, /More detail stays in Items/u, 'only the first criterion sentence is shown');
+    assert.deepEqual(JSON.parse(await chrome.stable(`JSON.stringify([...${row('#2')}.parentElement.querySelectorAll('.roadmap-criterion .roadmap-ref')].map(chip=>chip.textContent))`)), ['#1','#3'], 'known references in Criterion are status chips');
+    assert.equal(await chrome.stable(`${row('#2')}.parentElement.querySelectorAll('.roadmap-criterion em').length`),0,'criterion markup stays escaped');
     assert.match(blocked, /Waits on#1 building.*web-2.*since/u, 'dependency includes state, holder and local time');
     assert.match(blocked, /History.*added/u); assert.match(blocked, /Release.*Next.*G1/u);
     assert.equal((await reads()).length, 1, 'the first opened summary reads its detail once');
@@ -926,7 +928,7 @@ test('a blocked roadmap item shows its dot and expands to say why [N26]', { time
       if (id !== '#2') await opened(id);
       const text = await chrome.stable(`${row(id)}.parentElement.querySelector('.milestone-why').textContent`);
       if (id === '#6') {
-        assert.match(text, /Agents.*web-1.*building/u); assert.match(text, /Sent back.*coordinator.*The title needs correction/u);
+        assert.match(text, /Agents.*web-1.*building/u); assert.match(text, /Sent back.*coordinator.*See #1 and #3 before accepting/u);
         assert.match(text, /History.*claimed.*submitted.*sent back.*claimed again/u);
       }
       if (id === '#5') { assert.match(text, /Agents.*web-1.*built.*coordinator.*verified/u); assert.match(text, /History.*accepted.*landed/u); }
@@ -962,6 +964,20 @@ test('a blocked roadmap item shows its dot and expands to say why [N26]', { time
       assert.equal(landed.color, colors.success, `${scheme}: landing history uses the success token`);
       assert.equal(landed.chip, 'landed'); assert.equal(landed.icon, true);
       await press(chrome, row('#5'));
+    }
+    for (const width of [375,1280]) for (const scheme of ['light','dark']) {
+      await chrome.send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:false});
+      await chrome.send('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:scheme}]});
+      for (const [id,field] of [['#2','.roadmap-criterion'],['#6','.roadmap-return']]) {
+        await opened(id);
+        const refs=JSON.parse(await chrome.stable(`JSON.stringify((()=>{const panel=${row(id)}.parentElement.querySelector('.milestone-why'),value=panel.querySelector(${JSON.stringify(field)}),probe=document.createElement('span');panel.append(probe);probe.style.background='var(--blue-soft)';const busy=getComputedStyle(probe).backgroundColor;probe.style.background='var(--violet-soft)';const free=getComputedStyle(probe).backgroundColor;probe.remove();return {busy,free,links:panel.querySelectorAll('a').length,refs:[...value.querySelectorAll('.roadmap-ref')].map(chip=>({text:chip.textContent,bg:getComputedStyle(chip).backgroundColor,href:chip.getAttribute('href')}))};})())`));
+        assert.deepEqual(refs.refs.map(ref=>ref.text),['#1','#3'],`${width}/${scheme}: ${field} retains both references`);
+        assert.deepEqual(refs.refs.map(ref=>ref.bg),[refs.busy,refs.free],`${width}/${scheme}: prose uses each referenced item's actual status color`);
+        assert.ok(refs.refs.every(ref=>ref.href===null));assert.equal(refs.links,1,'only Open in Items is a link');
+        if(id==='#6') await press(chrome,`${row(id)}.parentElement.querySelector('${field} .roadmap-ref')`);
+        assert.equal(await chrome.stable('location.href'),address);assert.equal(await chrome.stable('view.tab'),'roadmap');
+        await press(chrome,row(id));
+      }
     }
     await chrome.send('Emulation.setDeviceMetricsOverride', {width:375,height:900,deviceScaleFactor:1,mobile:false});
     const remote = await opened('blocked-roadmap-other#2');
