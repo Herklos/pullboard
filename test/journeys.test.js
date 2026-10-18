@@ -128,8 +128,14 @@ async function journeyRelaySite(box, localOrigin) {
   return { server, base: 'http://127.0.0.1:' + server.address().port, apiObservations: () => apiObservations.map(value => ({ ...value })) };
 }
 
-/** Fulfill only the hosted document/assets; rewrite live API and local requests to owned HTTP servers. */
-async function routeJourneyOrigins(chrome, site, view) {
+/**
+ * Fulfill only the hosted document/assets; rewrite live API and local requests to owned HTTP servers. With `slow`
+ * armed, the next discovery read of this machine's view answers only after `slow.ms`, once: the CI condition (#786),
+ * where a macOS runner's first local answer outlasted the page's three-second wait. Off unless a test arms it.
+ *
+ * @param {{armed: boolean, ms: number}|null} [slow] - The stand-in for a slow first discovery answer.
+ */
+async function routeJourneyOrigins(chrome, site, view, slow = null) {
   const failures = [];
   const tasks = [];
   const listener = ({ data }) => {
@@ -169,6 +175,13 @@ async function routeJourneyOrigins(chrome, site, view) {
         return;
       }
       if (address.origin === JOURNEY_LOCAL) {
+        if (slow?.armed && address.pathname === '/local/protocol') {
+          slow.armed = false;
+          await new Promise((later) => setTimeout(later, slow.ms)); // budget: the stand-in's one slow answer, longer than the page's 3 s wait; no throughput claim.
+          // By now the page has stopped waiting and Chrome has dropped the request, so the late answer has nowhere to go.
+          try { await chrome.send('Fetch.continueRequest', { requestId, url: view.base + address.pathname + address.search }); } catch { /* the request the page gave up on */ }
+          return;
+        }
         await chrome.send('Fetch.continueRequest', { requestId, url: view.base + address.pathname + address.search });
         return;
       }
@@ -207,10 +220,14 @@ async function routeJourneyOrigins(chrome, site, view) {
   };
 }
 
-test('pullboard.dev shows every board, linked and local [N40]', {
-  timeout: relayWorkBudgetMs() * 5 + 180_000,
-  skip: !findChromeExecutable() && 'Chrome is not installed',
-}, async (t) => {
+/**
+ * The two-home hosted journey: machine A links a board through the relay, and machine B's browser at pullboard.dev
+ * lists it beside B's own local board. With `slow`, B's first discovery read on that last visit answers late.
+ *
+ * @param {import('node:test').TestContext} t - The running test.
+ * @param {{armed: boolean, ms: number}|null} [slow] - The CI stand-in, armed just before B's last visit.
+ */
+async function everyBoardJourney(t, slow = null) {
   const executable = findChromeExecutable();
   if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME to run the two-home hosted journey.');
 
@@ -273,7 +290,7 @@ test('pullboard.dev shows every board, linked and local [N40]', {
     // A real foreground browser at the hosted relay completes the CLI's one-use device enrollment.
     site = await journeyRelaySite(machineA, viewB.base);
     chromeB = await openSnapshotChrome(executable, 'about:blank', profileB);
-    stopRoutes = await routeJourneyOrigins(chromeB, site, viewB);
+    stopRoutes = await routeJourneyOrigins(chromeB, site, viewB, slow);
     const person = await machineA.phoneSession();
     assert.equal((await chromeB.send('Network.setCookie', {
       name: 'pb_session', value: person.token, url: JOURNEY_HOSTED, httpOnly: true, sameSite: 'Lax',
@@ -296,6 +313,7 @@ test('pullboard.dev shows every board, linked and local [N40]', {
     assert.equal(linkedSetup.document.paired, true, 'the fixture phone completes the actual device enrollment');
     await chromeB.waitFor("location.hash === '' && document.querySelector('#chain')?.textContent.includes('linked machine A board')", 45_000); // budget: bounded setup wait within this journey test’s declared outer timeout (5x relay-work budget plus 180 seconds).
     await chromeB.send('Page.navigate', { url: 'about:blank' });
+    if (slow) slow.armed = true;
     await chromeB.send('Page.navigate', { url: JOURNEY_HOSTED + '/' });
     await chromeB.waitFor("[...document.querySelectorAll('#proj-list .proj.repo')].some(row => row.textContent.includes('fixture/repository')) && [...document.querySelectorAll('#proj-list .proj.repo')].some(row => row.textContent.includes('local-machine-b'))", 45_000); // budget: bounded setup wait within this journey test’s declared outer timeout (5x relay-work budget plus 180 seconds).
     const localOrigin = await chromeB.stable('localSession?.origin || null');
@@ -372,4 +390,14 @@ test('pullboard.dev shows every board, linked and local [N40]', {
       }
     }
   }
-});
+}
+
+test('pullboard.dev shows every board, linked and local [N40]', {
+  timeout: relayWorkBudgetMs() * 5 + 180_000,
+  skip: !findChromeExecutable() && 'Chrome is not installed',
+}, (t) => everyBoardJourney(t));
+
+test('pullboard.dev shows every board under the CI condition [N40,N26]', {
+  timeout: relayWorkBudgetMs() * 5 + 180_000,
+  skip: !findChromeExecutable() && 'Chrome is not installed',
+}, (t) => everyBoardJourney(t, { armed: false, ms: 3_500 }));
