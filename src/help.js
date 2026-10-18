@@ -45,7 +45,8 @@ Set up
                                         pair prints a one-use machine code; join stores it in another clone
   pullboard relay on --all [--url <address>]  link every registered project after one sign-in; pair the phone once
                                         keep this command open until pairing finishes; later projects link on registration
-  pullboard relay devices               list paired device ids and their public-key fingerprints
+  pullboard relay devices [--verbose]   paired phones and joined computers by name, with paired date, last seen and boards
+                                        --verbose adds each id and phone key fingerprint
   pullboard relay revoke <device>       stop future key delivery; already received keys remain known
                                         approve on another paired phone, or sign in again with GitHub
   pullboard relay tokens                list this board's agent token ids, agents and expiry, never credentials
@@ -200,6 +201,8 @@ Spec
   pullboard spec fit [approve <batch>] | fit edit <row id or #item> keep|adapt|drop|answer [--text "..."] [--reason "why"]  the person's fit batch
   pullboard blueprint save [file] [--name <name>] [--title "<title>"]  write approved rules and answered questions as a blueprint
                                         never items, notes, paths, emails or names; file defaults to <project>.blueprint.json
+  pullboard blueprint starters <name or file>  list a blueprint's starter items and whether each is filed
+                                        a filed starter shows its item id and status; add links each starter it files with a note fact
   pullboard spec signers add [--key <path>] [--by <principal>]  opt into SSH-signed sign-offs
                                         principal defaults to Git user.email; --by overrides it
   pullboard spec approve <ids> | decline <ids> --reason "why"  the person's exact-row decision
@@ -223,16 +226,6 @@ ${lifecycleHelp()}
 
 Reject reasons: TEST_FAILURE, BEHAVIOR_MISMATCH, INSUFFICIENT_EVIDENCE, STALE_HEAD, OTHER.
 --json prints one versioned document for every command, and one per line for watch; refusals include their code and next step.`;
-
-const HELP_NAMES = [
-  'tour', 'init', 'worktree', 'join', 'takeover', 'whoami', 'lanes', 'lane', 'lane add', 'status', 'resources', 'settings', 'view', 'view export',
-  'serve', 'mcp', 'relay', 'relay recover', 'resume', 'hooks', 'add', 'edit', 'escalate', 'run', 'list', 'doctor', 'health', 'skills', 'show', 'next', 'land',
-  'check', 'check accept', 'claim', 'release', 'submit', 'done', 'verify', 'fact', 'why', 'shout', 'answer', 'pass', 'decisions', 'inbox', 'watch', 'export', 'digest', 'import',
-  'sweep', 'merged', 'withdraw', 'refreeze', 'reopen', 'hold', 'stats', 'ledger', 'log', 'rigor', 'rigor draft', 'spec', 'spec check', 'spec view',
-  'spec show', 'spec unmet', 'spec signoff', 'spec draft', 'spec signers', 'spec signers add', 'doctrine', 'doctrine check', 'forget', 'prompt', 'gate', 'hook',
-  'hook pre-commit', 'hook pre-merge-commit', 'hook commit-msg', 'hook pre-push', 'view export', 'version', 'lifecycle', 'help',
-  'roadmap', 'milestone', 'milestone order', 'runner', 'runner add', 'blueprint', 'blueprint add', 'blueprint fit', 'blueprint save', 'spec fit',
-];
 
 const HELP_GROUPS = [
   ['Start', ['tour', 'init', 'worktree']],
@@ -269,7 +262,7 @@ const HELP_EXAMPLES = {
   'spec check': 'pullboard spec check',
   doctrine: 'pullboard doctrine check', 'doctrine check': 'pullboard doctrine check',
   'spec view': 'pullboard spec view', 'spec show': 'pullboard spec show G1',
-  'spec draft': 'pullboard spec draft "Describe the first requirement"',
+  'spec draft': 'pullboard spec draft "Describe the first requirement"', 'blueprint starters': 'pullboard blueprint starters web-app',
   'blueprint add': 'pullboard blueprint add web-app', 'blueprint save': 'pullboard blueprint save',
   'blueprint fit': 'pullboard blueprint fit web-app G1 keep --reason "the repository already meets this row"',
   'spec fit': 'pullboard spec fit',
@@ -278,12 +271,15 @@ const HELP_EXAMPLES = {
 };
 
 const HELP_ALIASES = {
+  help: { usage: 'pullboard help', source: null },
+  version: { usage: 'pullboard version', source: null },
   whoami: { usage: 'pullboard whoami', source: 'whoami' },
   lanes: { usage: 'pullboard lanes', source: 'whoami' },
   lane: { usage: 'pullboard lane add <name> --owns <path>[,<path>]', source: 'lane add' },
   status: { usage: 'pullboard status', source: 'whoami' },
   done: { usage: 'pullboard done <id>', source: 'submit <id>' },
   inbox: { usage: 'pullboard inbox', source: null },
+  'check accept': { usage: 'pullboard check accept <id>', source: 'check accept' },
   relay: { source: 'relay', every: true },
   lifecycle: { usage: 'pullboard lifecycle', source: null },
   escalate: { usage: 'pullboard escalate <id> --note "..." [--note-file <file>]', source: 'escalate <id> --note "what was tried and how it failed"', extraFlags: ['--note-file <file>'] },
@@ -333,7 +329,7 @@ const HELP_NOTES = {
 };
 
 /** Build command-specific help rows from the preserved full list so its syntax stays authoritative. */
-function commandHelpRows(fullHelp) {
+function commandHelpRows(fullHelp, commandNames) {
   const lines = fullHelp.split('\n');
   const rows = [];
   for (let index = 0; index < lines.length; index += 1) {
@@ -342,7 +338,13 @@ function commandHelpRows(fullHelp) {
     for (let next = index + 1; next < lines.length && lines[next].startsWith(' ') && lines[next].trim() && !lines[next].startsWith('  pullboard '); next += 1) details.push(lines[next].trim());
     rows.push({ usage: lines[index].trim().slice('pullboard '.length).split(/\s{2,}/, 1)[0].trim(), details });
   }
-  return Object.fromEntries(HELP_NAMES.map((name) => {
+  const names = [...new Set([
+    ...commandNames,
+    ...Object.keys(HELP_ALIASES),
+    ...Object.keys(HELP_EXAMPLES).filter((name) => /^[a-z][a-z0-9-]*(?: [a-z][a-z0-9-]*)*$/u.test(name)),
+    ...rows.map((row) => commandWords(row.usage)[0]).filter(Boolean),
+  ])];
+  return Object.fromEntries(names.map((name) => {
     const parts = name.split(' ');
     const alias = HELP_ALIASES[name];
     const matches = alias?.source ? rows.filter((row) => row.usage === alias.source || row.usage.startsWith(`${alias.source} `)) : alias ? [] : rows.filter((row) => {
@@ -381,14 +383,19 @@ function overviewHelp(groups, firstRun = false) {
   return lines.join('\n');
 }
 
-/** The one help declaration feeds the overview, command detail, JSON result and unchanged full list. */
-export const HELP = Object.freeze({
-  overview: overviewHelp(HELP_GROUPS),
-  firstRun: overviewHelp(HELP_GROUPS, true),
-  all: ALL_HELP,
-  groups: HELP_GROUPS,
-  commands: Object.freeze(commandHelpRows(ALL_HELP)),
-});
+/** Build help from the actual command declarations, preserving the printed overview and full list. */
+export function buildHelp(commandNames = []) {
+  return Object.freeze({
+    overview: overviewHelp(HELP_GROUPS),
+    firstRun: overviewHelp(HELP_GROUPS, true),
+    all: ALL_HELP,
+    groups: HELP_GROUPS,
+    commands: Object.freeze(commandHelpRows(ALL_HELP, commandNames)),
+  });
+}
+
+/** Browser consumers read pure help declarations without initializing the CLI or server. */
+export const HELP = buildHelp();
 
 /** Replace help placeholders with ordinary values so every command receives a usable example. */
 function exampleFor(name, usage) {

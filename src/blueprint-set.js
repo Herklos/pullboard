@@ -5,9 +5,15 @@
  * A rule or question text two of them share is drafted once, by the first, and the later blueprint
  * cites that row. Every starter item keeps the name of the blueprint that filed it.
  */
-import { existsSync, readFileSync } from 'node:fs';
+import {
+  existsSync,
+  readFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
-import { bundledBlueprints, readBlueprint } from './blueprints.js';
+import {
+  bundledBlueprints,
+  readBlueprint,
+} from './blueprints.js';
 import { CONFIG_FILE } from './config.js';
 import { Refused } from './refused.js';
 

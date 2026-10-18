@@ -6,23 +6,70 @@
  * every move lands in an append-only event log (R2). The caller supplies what only git and the
  * spec know: the commit, the verifier's checkout, the frozen criterion.
  */
-import { verdictReviewProblem, verdictsFor, acceptedVerdict, checkedLandingCommit } from './verdict-reviews.js';
+import {
+  verdictReviewProblem,
+  verdictsFor,
+  acceptedVerdict,
+  checkedLandingCommit,
+} from './verdict-reviews.js';
 export { verdictReviewProblem, verdictsFor, acceptedVerdict, checkedLandingCommit };
-import { randomBytes, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync } from 'node:fs';
+import {
+  randomBytes,
+  randomUUID,
+} from 'node:crypto';
+import {
+  existsSync,
+  mkdirSync,
+} from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { boardNotWritable } from './board-access.js';
-import { briefFiles, briefSections } from './brief.js';
+import {
+  briefFiles,
+  briefSections,
+} from './brief.js';
 import { COORDINATOR } from './config.js';
-import { ENGINE_VERSION, VERDICT_REVIEW_ENGINE, MILESTONE_RANK_ENGINE, GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, VERIFIER_STANDING_ENGINE, effectiveGuards, storeTriggers } from './machine.js';
+import {
+  ENGINE_VERSION,
+  VERDICT_REVIEW_ENGINE,
+  MILESTONE_RANK_ENGINE,
+  GUARDS,
+  IN_STATE,
+  MOVES,
+  STATES,
+  UNKNOWN_MOVE,
+  VERIFIER_STANDING_ENGINE,
+  effectiveGuards,
+  storeTriggers,
+} from './machine.js';
 import { Refused } from './refused.js';
-import { agentAt, agentModel, newSeatId, routeOf, saveAgentModel, seatLineage, standingProblem } from './seats.js';
-import { causeProblem, requireNeverAgain } from './rigor.js';
+import {
+  agentAt,
+  agentModel,
+  newSeatId,
+  routeOf,
+  saveAgentModel,
+  seatLineage,
+  standingProblem,
+} from './seats.js';
+import {
+  causeProblem,
+  requireNeverAgain,
+} from './rigor.js';
 import { barCorrectionFields } from './bar-corrections.js';
 import { factReference } from './fact-reference.js';
-import { factFromEvent, requestAnswerRefusal, tellAnswerImplications, tellFactImplications, tellVerdictImplications } from './implies.js';
-import { landingFlakes, landingWaiverCovers, landingWaiverKind } from './landing-exceptions.js';
+import {
+  factFromEvent,
+  requestAnswerRefusal,
+  tellAnswerImplications,
+  tellFactImplications,
+  tellVerdictImplications,
+} from './implies.js';
+import {
+  landingFlakes,
+  landingWaiverCovers,
+  landingWaiverKind,
+} from './landing-exceptions.js';
 import { parseSpec } from './spec.js';
 export { landingFlakes, landingWaiverCovers, landingWaiverKind };
 export { acceptCheck } from './check-accept.js';

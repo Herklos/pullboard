@@ -1,13 +1,14 @@
 /** The view uses the actual device authorization and all-board linking path without a terminal [H5,N26]. */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { hostname, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import * as setup from '../src/relay-setup.js';
 import { relayClientFixture } from './relay-client-fixture.js';
+import { createDeviceKeys, signDeviceEnrollment } from '../src/relay-device-keys.js';
 import { runFixtureChild, startFixtureChild } from './fixture-child.js';
 
 /** Run the public view adapter in a process whose complete home, registry and boards are private. */
@@ -237,6 +238,142 @@ test("the view's sign-in links every board without a terminal or a stored sessio
 });
 
 const CLI = resolve(import.meta.dirname, '../bin/pullboard.js');
+
+/** Pair a stand-in phone through the real relay: Node signs the same enrollment the phone page sends. */
+async function pairPhone(box, t) {
+  const child = startFixtureChild(process.execPath, [CLI, 'relay', 'on', '--all', '--url', box.origin, '--json'], { cwd: box.root, env: box.env, stdio: ['ignore', 'pipe', 'pipe'] });
+  t.after(() => { if (child.exitCode === null) child.kill('SIGTERM'); });
+  const exited = new Promise(done => child.once('close', done));
+  const machineFile = join(box.env.PULLBOARD_HOME, 'relay-machine/state.json');
+  const deadline = Date.now() + 20_000; // A hang ceiling for the foreground setup, never a performance assertion.
+  let pending = null;
+  while (!pending && Date.now() < deadline) {
+    if (existsSync(machineFile)) pending = JSON.parse(readFileSync(machineFile, 'utf8')).pending;
+    if (!pending) await new Promise(done => setTimeout(done, 25));
+  }
+  assert.ok(pending, 'the foreground setup publishes one phone enrollment');
+  const headers = { authorization: 'Bearer ' + (await box.phoneSession()).token, 'content-type': 'application/json' };
+  const identity = await (await fetch(box.origin + '/api/v1/devices/session', { headers })).json();
+  const keys = await createDeviceKeys();
+  const createdAt = new Date().toISOString();
+  const body = await signDeviceEnrollment(pending.secret, { v: 1, account: identity.account, locator: pending.locator,
+    deviceId: keys.deviceId, publicKey: keys.publicKey, label: 'Kitchen phone', createdAt });
+  const enrolled = await fetch(box.origin + '/api/v1/devices/enrollments/' + pending.locator, { method: 'PUT', headers, body: JSON.stringify(body) });
+  assert.equal(enrolled.status, 200, 'the relay carries the signed enrollment');
+  assert.equal(await exited, 0, 'the foreground setup pairs the phone');
+  const wraps = await fetch(box.origin + '/api/v1/devices/' + keys.deviceId + '/boards', { headers });
+  assert.equal(wraps.status, 200, 'the paired phone reads its board keys once');
+  return { deviceId: keys.deviceId, createdAt };
+}
+
+/** Pair a phone and join a second computer to this board, the walkthrough's path 5. */
+async function phoneAndJoinedComputer(t) {
+  const box = await relayClientFixture(t);
+  const phone = await pairPhone(box, t);
+  const printed = await box.cli('relay', 'pair');
+  assert.equal(printed.code, 0, 'the linked computer prints a one-time code');
+  const joined = await box.otherDeviceJoin(printed.document.code);
+  return { box, phone, joined };
+}
+
+/** Run relay devices on the linked computer and keep its text lines and its board name. */
+async function devicesText(box, args) {
+  const cliModule = JSON.stringify(pathToFileURL(resolve(import.meta.dirname, '../src/cli.js')).href);
+  const projectsModule = JSON.stringify(pathToFileURL(resolve(import.meta.dirname, '../src/projects.js')).href);
+  const result = await box.script(`
+import { main } from ${cliModule};
+import { listApiProjects } from ${projectsModule};
+let output = '';
+const streams = { cwd: ${JSON.stringify(box.root)}, stdout: { write: part => { output += part; } }, stderr: { write() {} } };
+const code = await main(${JSON.stringify(['relay', 'devices', ...args])}, streams);
+process.stdout.write(JSON.stringify({ code, lines: output.trim().split('\\n'), names: listApiProjects().map(project => project.name) }));
+`);
+  assert.equal(result.code, 0, 'the private relay devices script completes');
+  assert.equal(result.document.code, 0, 'relay devices succeeds');
+  return result.document;
+}
+
+test('relay devices names phones and joined computers with paired date and boards [H17]', async (t) => {
+  const { box, phone, joined } = await phoneAndJoinedComputer(t);
+  const { lines, names } = await devicesText(box, []);
+  const day = value => new Date(value).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+  const board = names[0];
+  const phoneLine = lines.find(line => line.startsWith('Kitchen phone (phone): '));
+  assert.ok(phoneLine, 'the phone is named by its label');
+  assert.match(phoneLine, new RegExp(`^Kitchen phone \\(phone\\): paired ${day(phone.createdAt)}, last seen (?!unknown)[^;]+; reads ${board}$`, 'u'),
+    'the phone line has its paired date, a last seen time and the board it reads');
+  const computerLine = lines.find(line => line.includes('(computer): '));
+  assert.ok(computerLine, 'the joined computer is listed on the linked computer');
+  assert.match(computerLine, new RegExp(`^${hostname().replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')} \\(computer\\): joined ${day(Date.now())}, last seen (?!unknown)[^;]+; reads ${board}$`, 'u'),
+    'the joined computer is named by its host name, with its joined date, last seen and board');
+  assert.equal(lines.length, 2, 'one line each, with no ids');
+  assert.ok(!/[0-9a-f]{64}/u.test(lines.join('\n')) && !lines.join('\n').includes(phone.deviceId), 'ids and fingerprints stay out of the default view');
+  const verbose = await devicesText(box, ['--verbose']);
+  assert.ok(verbose.lines.some(line => line.includes(phone.deviceId) && /fingerprint [0-9a-f]{64}$/u.test(line)), '--verbose adds the phone id and fingerprint');
+  const json = await box.cli('relay', 'devices');
+  assert.equal(json.code, 0, 'relay devices --json succeeds');
+  const [phoneJson] = json.document.devices;
+  assert.equal(json.document.devices.length, 1, 'the linked computer lists its one paired phone');
+  assert.deepEqual([phoneJson.deviceId, phoneJson.label, phoneJson.pairedHere, phoneJson.createdAt, phoneJson.revoked, phoneJson.boards],
+    [phone.deviceId, 'Kitchen phone', true, phone.createdAt, false, [board]], 'JSON names the phone with its paired date, status and board');
+  assert.ok(Number.isSafeInteger(phoneJson.seen), 'JSON carries the relay last seen time');
+  assert.ok(!('fingerprint' in phoneJson) && !/[0-9a-f]{64}/u.test(JSON.stringify(json.document)), 'default JSON leaves the fingerprint out');
+  const verboseJson = await box.cli('relay', 'devices', '--verbose');
+  assert.match(verboseJson.document.devices[0].fingerprint, /^[0-9a-f]{64}$/u, 'JSON adds the fingerprint only with --verbose');
+  // The joined computer never paired the phone: it lists it by short id from the relay, with its status and board.
+  const there = await joined.cli('relay', 'devices');
+  assert.equal(there.code, 0, 'relay devices succeeds on the joined computer');
+  assert.equal(there.document.devices.length, 1, "the joined computer lists the linked computer's phone");
+  const [phoneThere] = there.document.devices;
+  assert.deepEqual([phoneThere.deviceId, phoneThere.pairedHere, phoneThere.label, phoneThere.revoked, phoneThere.boards],
+    [phone.deviceId, false, null, false, [joined.joined.name]], 'the joined computer knows the phone by id, paired on another computer');
+  assert.ok(Number.isSafeInteger(phoneThere.seen) && !('fingerprint' in phoneThere), 'it carries last seen and no fingerprint');
+  const plain = plainCommand(joined.root, joined.env, ['relay', 'devices']);
+  const shown = await plain.done;
+  assert.equal(shown.code, 0, shown.stderr);
+  const otherLine = shown.stdout.split('\n').find(line => line.includes('(phone): '));
+  assert.match(otherLine ?? '', new RegExp(`^Phone ${phone.deviceId.slice(-8)} \\(phone\\): paired on another computer, last seen (?!unknown)[^;]+; reads ${joined.joined.name}$`, 'u'),
+    'the joined computer says the phone was paired on another computer, with its short id, last seen and board');
+
+  // Revoke through a separate authenticated person request, leaving this computer's local
+  // pairing record intact. A stale local roster must not claim the phone still reads this board.
+  const person = await box.phoneSession();
+  const headers = { authorization: 'Bearer ' + person.token };
+  const revoked = await fetch(box.origin + '/api/v1/devices/' + phone.deviceId, { method: 'DELETE', headers });
+  assert.equal(revoked.status, 200, 'an authenticated external revoke removes the remote device grant');
+  const phoneGrant = await fetch(box.origin + '/api/v1/devices/' + phone.deviceId + '/boards', { headers });
+  assert.equal(phoneGrant.status, 403, 'the revoked phone cannot read its board grants');
+  assert.equal((await phoneGrant.json()).error.code, 'DEVICE_REVOKED', 'the relay fails closed for the revoked phone');
+  const afterRevoke = await box.cli('relay', 'devices');
+  assert.equal(afterRevoke.code, 0, 'the local roster remains available after the remote revoke');
+  assert.equal(afterRevoke.document.devices.length, 1, 'the paired phone remains in local pairing history');
+  const [stillPaired] = afterRevoke.document.devices;
+  assert.deepEqual([stillPaired.deviceId, stillPaired.pairedHere, stillPaired.label, stillPaired.revoked],
+    [phone.deviceId, true, 'Kitchen phone', true], 'the local phone entry remains and reflects revocation');
+  assert.deepEqual(stillPaired.boards, [], 'the revoked phone no longer appears to read a board');
+  const afterRevokeThere = await joined.cli('relay', 'devices');
+  assert.equal(afterRevokeThere.code, 0, 'the other computer can still read its device roster');
+  assert.deepEqual(afterRevokeThere.document.devices, [], 'the other computer does not restore the revoked phone from local history');
+});
+
+test('relay off names joined computers by host name [H17]', async (t) => {
+  const { box, joined } = await phoneAndJoinedComputer(t);
+  const off = await box.cli('relay', 'off');
+  assert.equal(off.code, 0, 'relay off unlinks this computer');
+  assert.deepEqual(off.document.joined, [hostname()], 'the joined computer is named by its host name');
+  assert.deepEqual(off.document.affectedMachines, [joined.machine], 'the stable machine id stays beside the name');
+  assert.ok(off.document.notice.includes('If you approve deletion, joined computers ' + hostname() + ' lose the shared copy'),
+    'the warning names the joined computer by host before the phone approves the delete');
+});
+
+test('relay join names the board it joined [H17]', async (t) => {
+  const { joined } = await phoneAndJoinedComputer(t);
+  const { name, board, notice } = joined.joined;
+  assert.equal(typeof name, 'string');
+  assert.equal(notice, 'Joined ' + name + '. This brought one board; for another, run pullboard relay pair in that board on the linked computer. Run pullboard status to read it.',
+    'join names the board and says it brought one board');
+  assert.ok(!notice.includes(board), 'the board id stays out of the join message');
+});
 
 test('relay help lists every relay command, with a whole example [H17]', () => {
   const printed = spawnSync(process.execPath, [CLI, 'relay', '--help'], { cwd: tmpdir(), encoding: 'utf8' });

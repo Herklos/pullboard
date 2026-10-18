@@ -316,7 +316,10 @@ test('nothing a person types on the view sits inside what the refresh rewrites [
     const opening = new RegExp(`id="${id}"[^>]*>([^]*?)</`).exec(page);
     assert.doesNotMatch(opening ? opening[1] : '', /<(input|textarea|form)/, `#${id} starts with no form`);
   }
-  assert.doesNotMatch(page.slice(page.indexOf('<script>')), /<input|<textarea|createElement\('(form|input|textarea)'\)/, 'the script never builds a field a refresh could erase');
+  // copyWords' clipboard fallback (#764) creates a read-only field, selects it and removes it in the same call, so it
+  // never holds anything a person typed; every other field the script could build is still refused.
+  const script = page.slice(page.indexOf('<script>')).replace(/\nasync function copyWords\([^]*?\n}\n/, '\n');
+  assert.doesNotMatch(script, /<input|<textarea|createElement\('(form|input|textarea)'\)/, 'the script never builds a field a refresh could erase');
 });
 
 test('the view keeps the board layout people know: switcher, tabs, a list and its detail, every verdict and the history [N26, N27]', async () => {
@@ -363,6 +366,13 @@ test("the view's refresh re-renders only what changed [N26,A2]", async () => {
     address: () => {},
     api: async () => ({ events: [] }),
     boardPath: () => '/board',
+    // refresh() calls these helpers, defined outside the slice this test runs (#644's clock-blind board text and
+    // in-place ages, #633's share invitation); the page's own behavior is covered elsewhere.
+    boardText: (state) => JSON.stringify(state),
+    showFlowAges: () => {},
+    tickAges: () => {},
+    sharingReady: null,
+    sharingInvitation: () => Promise.resolve(),
     boardState: () => {
       let resolve;
       const promise = new Promise((done) => { resolve = done; });
@@ -430,6 +440,8 @@ test("the view's refresh re-renders only what changed [N26,A2]", async () => {
     assert.ok(call, 'refresh starts a board state read');
     call.resolve(next(marker));
     await new Promise((resolve) => setImmediate(resolve));
+    // A helper refresh() calls but this slice does not stub fails here by name, not as a later count.
+    if (failure) throw failure;
     const renderedThisRead = events.filter(([kind]) => kind === 'render').length > renderCount;
     if (hasDeferredDetail && renderedThisRead) {
       assert.equal(context.itemSearches.size, 0, 'changed board invalidates deferred item search results');

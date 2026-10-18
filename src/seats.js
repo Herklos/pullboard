@@ -5,7 +5,10 @@
  * decided here from that line of creators. board.js registers seats and re-exports the readers.
  */
 import { COORDINATOR } from './config.js';
-import { ENGINE_VERSION, VERIFIER_STANDING_ENGINE } from './machine.js';
+import {
+  ENGINE_VERSION,
+  VERIFIER_STANDING_ENGINE,
+} from './machine.js';
 import { Refused } from './refused.js';
 
 /**

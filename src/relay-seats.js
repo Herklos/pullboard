@@ -9,9 +9,16 @@
  */
 import { createHash } from 'node:crypto';
 import * as store from './board.js';
-import { ENGINE_VERSION, VERIFIER_STANDING_ENGINE } from './machine.js';
+import {
+  ENGINE_VERSION,
+  VERIFIER_STANDING_ENGINE,
+} from './machine.js';
 import { Refused } from './refused.js';
-import { localRecords, request, saveLink } from './relay.js';
+import {
+  localRecords,
+  request,
+  saveLink,
+} from './relay.js';
 
 /**
  * Name the seat a creator registers (#579): the receipt names its target before the move is

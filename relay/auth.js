@@ -68,6 +68,12 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
     if (!db.prepare('PRAGMA table_info(relay_credentials)').all().some((column) => column.name === 'created')) {
       db.exec('ALTER TABLE relay_credentials ADD COLUMN created INTEGER');
     }
+    // A joined computer's host name and last contact let its owner recognise it in relay devices.
+    for (const column of ['host TEXT', 'seen INTEGER']) {
+      if (!db.prepare('PRAGMA table_info(relay_credentials)').all().some((entry) => entry.name === column.split(' ')[0])) {
+        db.exec('ALTER TABLE relay_credentials ADD COLUMN ' + column);
+      }
+    }
     // Older unshipped links receive a full retention grace period, rather than guessing their age.
     if (!db.prepare('PRAGMA table_info(relay_boards)').all().some((column) => column.name === 'linked_at')) {
       db.exec('ALTER TABLE relay_boards ADD COLUMN linked_at INTEGER');
@@ -127,6 +133,8 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
     if (row.kind === 'session') {
       for (const guard of sessionGuards) guard({ id: row.id, kind: row.kind, user: { id: row.user_id }, expires: row.expires });
     }
+    // Last seen moves at most once a minute, so ordinary sync does not rewrite the row on every request.
+    if (row.kind === 'machine' && !(row.seen > now() - 60_000)) db.prepare('UPDATE relay_credentials SET seen=? WHERE id=?').run(now(), row.id);
     return row;
   }
 
@@ -568,14 +576,19 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
       return db.prepare("SELECT 1 FROM relay_credentials WHERE board=? AND kind='board' LIMIT 1").get(board) ? 3 : 1;
     },
     /** Give a foreground person one board-bound machine delegate, never another person credential. */
-    async issueMachine(token, { board, machine, expiresIn = MAX_TTL }) {
+    async issueMachine(token, { board, machine, host, expiresIn = MAX_TTL }) {
       identifier(board, 'BAD_BOARD');
       identifier(machine, 'BAD_MACHINE');
+      if (host !== undefined && (typeof host !== 'string' || !host.trim() || host.length > 255 || /[\u0000-\u001f\u007f]/u.test(host))) {
+        throw new Refused('BAD_REQUEST', 'send the joining computer’s host name as plain text of at most 255 characters');
+      }
       if (!Number.isSafeInteger(expiresIn) || expiresIn <= 0 || expiresIn > MAX_TTL) throw new Refused('BAD_EXPIRY', 'choose a machine expiry of at most thirty days');
       const principal = await auth.authenticate(token, { board, write: true });
       if (principal.kind !== 'session') throw new Refused('HUMAN_REQUIRED', 'approve this machine from the signed-in phone');
       credential(token);
-      return { ...issue(principal.user, 'machine', board, machine, expiresIn), board, machine };
+      const issued = issue(principal.user, 'machine', board, machine, expiresIn);
+      if (host !== undefined) db.prepare('UPDATE relay_credentials SET host=? WHERE id=?').run(host, issued.id);
+      return { ...issued, board, machine };
     },
     /** List live computer identities only for this board's machine or a freshly authorized person. */
     async listMachines(token, board) {
@@ -583,7 +596,9 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
       const principal = await auth.authenticate(token, { board, write: true });
       if (!['session', 'machine'].includes(principal.kind)) throw new Refused('HUMAN_REQUIRED', 'use this board’s machine credential or the signed-in phone to list joined computers');
       credential(token);
-      return db.prepare("SELECT DISTINCT agent AS machine FROM relay_credentials WHERE board=? AND kind='machine' AND revoked=0 AND expires>? ORDER BY agent").all(board, now());
+      // Each computer is listed once, by the host name it sent when it joined, with its first join and last contact.
+      return db.prepare("SELECT agent AS machine, MAX(host) AS host, MIN(created) AS created, MAX(seen) AS seen FROM relay_credentials WHERE board=? AND kind='machine' AND revoked=0 AND expires>? GROUP BY agent ORDER BY agent")
+        .all(board, now()).map(row => ({ machine: row.machine, host: row.host ?? null, created: row.created ?? null, seen: row.seen ?? null }));
     },
     /**
      * Mint an agent credential scoped to one board (#579). The machine credential, or a person,

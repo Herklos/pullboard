@@ -3,7 +3,13 @@
  * until the person accepts that exact check [V2,V4,B26].
  */
 import { createHash } from 'node:crypto';
-import { PERSON, atomic, getItem, itemById, logEvent } from './board.js';
+import {
+  PERSON,
+  atomic,
+  getItem,
+  itemById,
+  logEvent,
+} from './board.js';
 import { COORDINATOR } from './config.js';
 import { requirePersonChannel } from './person.js';
 import { Refused } from './refused.js';

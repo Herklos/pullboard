@@ -8,16 +8,29 @@
  * `view.background` (on unless set to false) turns it off.
  */
 import { spawn } from 'node:child_process';
-import { closeSync, mkdirSync, openSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import {
+  closeSync,
+  mkdirSync,
+  openSync,
+} from 'node:fs';
+import {
+  dirname,
+  join,
+} from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fetchLocal } from './local-fetch.js';
 import { Refused } from './refused.js';
 import { registryFile } from './projects.js';
 import { LOOPBACK } from './serve.js';
 import { defaultViewPort } from './view-port.js';
-import { portHolder, runningView } from './view-session.js';
-import { machineSettingsFile, viewBackgroundEnabled } from './settings.js';
+import {
+  portHolder,
+  runningView,
+} from './view-session.js';
+import {
+  machineSettingsFile,
+  viewBackgroundEnabled,
+} from './settings.js';
 
 const BIN = fileURLToPath(new URL('../bin/pullboard.js', import.meta.url));
 
