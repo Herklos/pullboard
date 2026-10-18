@@ -339,6 +339,13 @@ function recordEventContract() {
       tests: [{ file: 'test/format.test.js', name: 'keeps the example' }] }] } });
   reopen(board, returned, { agentId: coordinator, note: `Landing batch ${failureBatch.id} failed test/format.test.js: keeps the example; merge commit ${'c'.repeat(40)}` });
 
+  const conflicting = addItem(board, { by: coordinator, lane: 'docs', title: 'Conflicting example' });
+  claim(board, conflicting, { agentId: returnedBuilder, lane: 'docs', leaseMs: 60_000, freeze: freeze('conflicting') });
+  const conflictingCommit = '1'.repeat(40);
+  submitFixture(board, conflicting, { agentId: returnedBuilder, commit: conflictingCommit, tree: 'e'.repeat(40) });
+  verify(board, conflicting, { agentId: reviewer, decision: 'ACCEPT', reason: ACCEPT_REASON, note: 'checked the conflicting example', head: conflictingCommit, digest: 'conflicting', policy: 'agents' });
+  reopen(board, conflicting, { agentId: coordinator, conflict: { files: ['docs/formats.md'], trunk: '2'.repeat(40) } });
+
   const withdrawn = addItem(board, { by: coordinator, lane: 'docs', title: 'Withdrawn example' });
   withdraw(board, withdrawn, { agentId: coordinator, reason: 'duplicate fixture' });
   holdLane(board, 'view', { agentId: coordinator, reason: 'fixture hold' });

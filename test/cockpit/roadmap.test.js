@@ -922,7 +922,7 @@ test('the roadmap shows landed, accepted and past target [N26]', { timeout: 90_0
   const shipped=box.git(alpha.repo,'rev-parse','HEAD');
   const rawRoadmap=JSON.parse(box.run(alpha.repo,'roadmap','--json'));
   assert.equal(rawRoadmap.milestones.find(m=>m.name==='State summary').total,6,'649: the milestone total leaves the withdrawn member out, like the summary');
-  assert.deepEqual(rawRoadmap.milestones.find(m=>m.name==='State summary').summary,{total:6,left:5,landed:1,landing:1,review:1,building:1,waiting:1,held:1,needsYou:[9],pace:{last6h:4,last2h:4},estimate:{low:2.5,high:7.5}},'real roadmap JSON owns every header field');
+  assert.deepEqual(rawRoadmap.milestones.find(m=>m.name==='State summary').summary,{total:6,left:5,landed:1,landing:1,review:1,building:1,waiting:1,held:1,needsYou:[9],pace:{last6h:4,last2h:4,last24h:4},estimate:{low:2.5,high:7.5},window:'6h',reason:null},'real roadmap JSON owns every header field');
   const view=await startView(box),profile=mkdtempSync(join(tmpdir(),'pullboard-roadmap-truth-'));let chrome;
   const milestone=name=>`document.querySelector('[data-key="m:${name}"]')`;
   try {
