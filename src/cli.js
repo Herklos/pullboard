@@ -104,6 +104,7 @@ import {
 } from './gate.js';
 import { draftRow } from './spec-draft.js';
 import { gateWaitReporter } from './gate-wait.js';
+import * as gateConfig from './gate-config.js';
 import {
   checkNeedsBrowser,
   explicitCheckFiles,
@@ -1630,8 +1631,6 @@ function boardSetup(ctx, card, identity) {
   const quote = value => "'" + String(value).replaceAll("'", "'\\''") + "'";
   /** Quote one shell word only when it needs it, so a plain lane command reads as typed. */
   const word = value => /^[A-Za-z0-9._/-]+$/u.test(String(value)) ? String(value) : quote(value);
-  /** Preserve all existing configuration when recording one setup answer. */
-  const configure = patch => `node -e ${quote(`const fs=require('node:fs');const p='pullboard.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));${patch};fs.writeFileSync(p,JSON.stringify(c,null,2)+${JSON.stringify('\n')})`)}`;
   const steps = [
     requirementStep({ rows, drafted, toApply, completed: completed && !open.some(row => row.staleDecision), hasItems: card.all.length > 0 }),
     { number: 2, done: lanes.length > 0, question: `Ask the person: how should we divide the work? Suggested folders: ${folders.join(', ') || 'app/ (create it for the app)'}.`,
@@ -1640,7 +1639,7 @@ function boardSetup(ctx, card, identity) {
       question: detectedGate
         ? `Ask the person: which command proves the build works? Suggested: ${detectedGate}.`
         : 'Ask the person: if this board has no build, use `pullboard spec check` to check its spec and practice files; a second agent review checks the actual work. Or choose a custom gate command.',
-      command: configure(`c.gate=${JSON.stringify(detectedGate || 'pullboard spec check')}`) },
+      command: gateConfig.settingCommand(ctx.info.root, detectedGate || 'pullboard spec check') },
     { number: 4, done: card.all.length > 0, question: 'Ask the person: what is the first small piece we should build?',
       command: `pullboard add ${quote(lane)} 'First small piece' --specs ${quote(approved[0]?.id ?? 'G1')} --criterion 'Describe what the person will be able to do'` },
     { number: 5, done: card.viewOpened,
@@ -4470,6 +4469,7 @@ async function runCommand(argv, io) {
     }
     if (command === 'blueprint' && first === 'starters') return startersCommand(io, { second, rest, context, withBoard });
     if (command === 'gate') {
+      if (first === 'set') return gateConfig.setHere(io, second, rest, values);
       if (first !== undefined || second !== undefined || rest.length > 0) {
         const words = [first, second, ...rest].filter((word) => word !== undefined);
         const next = 'use pullboard resources for status, or pullboard gate with no extra words to run the gate';

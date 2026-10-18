@@ -139,6 +139,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `forget` | `version:number`, `root:string` |
 | `prompt` | `version:number`, `role:string`, `text:string` |
 | `gate` | `version:number`, `green:boolean`, `report:string` |
+| `gate set` | `version:number`, `gate:string`, `file:string` |
 | `export` | `version:number`, `tables:object` |
 | `digest` | `version:number`, `markdown:string`, `bytes:number`, `sequence:number`, `sections:array` |
 | `import` | `version:number`, `tables:array` |

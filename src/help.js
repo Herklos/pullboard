@@ -225,6 +225,7 @@ Role guides
 
 Gate and hooks
   pullboard gate [--landing]            run the configured gate; prioritize a trunk landing in the machine queue
+  pullboard gate set "<command>"         record the project gate in the main checkout; commit it before running the gate
   pullboard hook pre-commit|pre-merge-commit|commit-msg|pre-push   git runs these
 
 ${lifecycleHelp()}
@@ -302,6 +303,7 @@ const HELP_ALIASES = {
   'spec signers add': { usage: 'pullboard spec signers add [--key <path>] [--by <principal>]', source: 'spec signers add' },
   doctrine: { usage: 'pullboard doctrine check', source: 'doctrine check' },
   hook: { usage: 'pullboard hook pre-commit|pre-merge-commit|commit-msg|pre-push', source: 'hook' },
+  'gate set': { usage: 'pullboard gate set "<command>"', source: 'gate set' },
   'hook pre-commit': { usage: 'pullboard hook pre-commit', source: 'hook' },
   'hook pre-merge-commit': { usage: 'pullboard hook pre-merge-commit', source: 'hook' },
   'hook commit-msg': { usage: 'pullboard hook commit-msg <file>', source: 'hook' },

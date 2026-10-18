@@ -83,6 +83,7 @@ export const JSON_SHAPES = {
     forget: shape({ root: 'string' }),
     prompt: shape({ role: 'string', text: 'string' }),
     gate: shape({ green: 'boolean', report: 'string' }),
+    'gate set': shape({ gate: 'string', file: 'string' }),
     export: shape({ tables: 'object' }),
     digest: shape({ markdown: 'string', bytes: 'number', sequence: 'number', sections: 'array' }),
     import: shape({ tables: 'array' }),
