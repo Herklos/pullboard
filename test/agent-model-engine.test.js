@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import * as store from '../src/board.js';
 import { applyEngineMove, prepareEngineMove } from '../src/engine.js';
 import { exportBoard, importBoard } from '../src/exchange.js';
+import { AUTO_ESCALATE_ENGINE } from '../src/machine.js';
 import { ENGINE_VERSION } from '../src/machine.js';
 import { VERIFIER_STANDING_ENGINE } from '../src/machine.js';
 import { RIGOR_NOTICE_ENGINE } from '../src/rigor-source.js';
@@ -14,9 +15,12 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-test('model declarations and event snapshots retain all recorded engine semantics [O8,O3,H16]', (t) => {
-  assert.ok(ENGINE_VERSION >= RIGOR_NOTICE_ENGINE, 'the current writer preserves historical model snapshots');
+test('model declarations and event snapshots retain all supported engine semantics [O8,O3,H16]', (t) => {
+  assert.equal(ENGINE_VERSION, AUTO_ESCALATE_ENGINE, 'the current writer is the automatic-escalation engine');
+  assert.ok(ENGINE_VERSION >= 45, 'the current writer retains engine-45 milestone semantics');
+  assert.ok(ENGINE_VERSION >= RIGOR_NOTICE_ENGINE, 'the next writer preserves every historical model snapshot through main engine 33');
   assert.ok(ENGINE_VERSION >= HEALTH_SENTINEL_ENGINE, 'the current writer retains the sentinel minimum and historical behavior');
+  assert.equal(AUTO_ESCALATE_ENGINE, ENGINE_VERSION, 'the current writer includes automatic escalation and preserves historical model snapshots');
   assert.ok(ENGINE_VERSION >= VERIFIER_STANDING_ENGINE, 'the current writer retains verifier standing');
   assert.ok(ENGINE_VERSION >= MILESTONE_SHIP_ENGINE, 'the current writer retains milestone shipping');
   for (const version of Array.from({ length: ENGINE_VERSION }, (_, index) => index + 1)) {
