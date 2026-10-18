@@ -125,7 +125,7 @@ test("the coordinator's resume names its next step from the spec and the board, 
   assert.equal(next(fresh, repo), firstSetup.command);
   assert.equal(fresh.run(repo, 'add', 'coordinator', 'Tidy the readme').code, 0);
   assert.equal(fresh.run(repo, 'claim', '1').code, 0);
-  assert.equal(JSON.parse(fresh.run(repo, 'resume', '--json').out).setup.step, 1, "the coordinator's own claim does not jump the spec");
+  assert.equal(JSON.parse(fresh.run(repo, 'resume', '--json').out).setup.step, 2, 'a working board with an item and no spec rows treats the spec as optional (#866)');
   writeFileSync(join(repo, 'SPEC.md'), '# Fresh\n\n## G · Goals\n- G1 [draft, must] It works. | gate: test\n');
   assert.equal(JSON.parse(fresh.run(repo, 'resume', '--json').out).setup.step, 1, 'nor the approval');
   writeFileSync(join(repo, 'SPEC.md'), '# Fresh\n\n## G · Goals\n- G1 [approved, must] It works. | gate: test\n');
