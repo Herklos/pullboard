@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { runFixtureChild as spawnSync, cleanupFixtureChildren, runFixtureChildAsync, runFixtureGit, safeFixtureDiagnostic } from './fixture-child.js';
 import { createServer } from 'node:http';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
-import { delimiter, join, resolve } from 'node:path';
+import { delimiter, dirname, join, relative, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { after, test } from 'node:test';
@@ -251,6 +251,30 @@ async function relayServer(t, directory, auth) {
     dropPending() { return loseReply; },
     failReads(value) { if (!value) requireDropConsumed('reads were restored'); refuseReads = value; },
     advance(days) { now = Date.now() + days * 86400000; } };
+}
+
+
+/**
+ * Copy this checkout's doctrine into a fixture repo, with every check script its rows run and the
+ * scripts' own relative imports, so the fixture's Rigor checks count what the repository's do [D1,H3].
+ * Reading the gates from the doctrine, not naming files here, keeps the next check that lands from
+ * leaving a fixture without its script, which otherwise raises the ratchet and changes the refusal.
+ */
+function seedDoctrine(seed) {
+  const repo = resolve(import.meta.dirname, '..');
+  const text = readFileSync(join(repo, existsSync(join(repo, 'DOCTRINE.md')) ? 'DOCTRINE.md' : 'PRACTICE.md'), 'utf8');
+  writeFileSync(join(seed, 'PRACTICE.md'), text);
+  const pending = [...text.matchAll(/gate: check node (\S+\.m?js)/g)].map((match) => match[1]);
+  const copied = new Set();
+  while (pending.length) {
+    const file = pending.pop();
+    if (copied.has(file)) continue;
+    copied.add(file);
+    const body = readFileSync(join(repo, file), 'utf8');
+    mkdirSync(dirname(join(seed, file)), { recursive: true });
+    writeFileSync(join(seed, file), body);
+    for (const match of body.matchAll(/from '(\.{1,2}\/[^']+)'/g)) pending.push(relative(repo, resolve(dirname(join(repo, file)), match[1])));
+  }
 }
 
 test('[H1,H3,H7,H15,H16] relay on snapshots and orders ciphertext, refuses offline moves, and off preserves the board', async (t) => {
@@ -681,7 +705,7 @@ async function threeReplicaFixture(t, timing) {
     gate: 'true', lanes: { web: { owns: ['web/'], specs: ['G'] } },
   }, null, 2) + '\n');
   writeFileSync(join(seed, 'SPEC.md'), '# Spec\n\n## G · Goals: relay claim fixture\n- G1 [approved, must] A linked claim is applied once in relay order. | gate: review\n');
-  writeFileSync(join(seed, 'PRACTICE.md'), readFileSync(resolve(import.meta.dirname, '..', existsSync(resolve(import.meta.dirname, '../DOCTRINE.md')) ? 'DOCTRINE.md' : 'PRACTICE.md')));
+  seedDoctrine(seed);
   mkdirSync(join(seed, 'web'));
   writeFileSync(join(seed, 'web', 'README.md'), 'relay claim fixture\n');
   gitAt(seed, envs[0], 'add', '-A');
