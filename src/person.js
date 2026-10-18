@@ -1,5 +1,6 @@
 /** Person actions use the view when a terminal is remote or belongs to an agent [B26]. */
 import { createHash } from 'node:crypto';
+import { COORDINATOR } from './config.js';
 import { Refused } from './refused.js';
 
 /** Markers carried by Claude Code and Codex agent subprocesses, rather than user configuration. */
@@ -53,4 +54,17 @@ export function requireRelayOnChannel(channel = 'terminal', environment = proces
     throw new Refused('B26_PERSON_CHANNEL', 'this terminal belongs to an agent; run pullboard view, the person’s channel, and let the person act there');
   }
   return channel;
+}
+
+/**
+ * Whether a shout is the person's own: a relay person request, or the local view acting as the
+ * coordinator (N26, B26). The view acting as a named agent, or an agent shell as the coordinator,
+ * still speaks as that agent.
+ *
+ * @param {any} io
+ * @param {{ id: string }} me
+ * @returns {boolean}
+ */
+export function personShout(io, me) {
+  return io.personRequest?.phase === 'execute' || (io.personChannel === 'view' && me.id === COORDINATOR);
 }

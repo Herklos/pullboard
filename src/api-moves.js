@@ -18,7 +18,7 @@ const MOVES = {
   merged: { item: true, positions: ['commit'] },
   withdraw: { item: true, positions: ['reason'] },
   refreeze: { item: true },
-  reopen: { item: true, flags: ['note', 'cause'] },
+  reopen: { item: true, flags: ['note', 'cause'], lists: ['conflict'] },
   escalate: { item: true, flags: ['note'] },
   hold: { positions: ['lane'], flags: ['reason'], booleans: ['off'] },
   shout: { positions: ['to', 'text'], optional: ['to'], booleans: ['decision'], flags: ['evidence', 'outcome', 'item', 'commit'] },
@@ -33,7 +33,7 @@ export function moveArgs({ verb, item, args = {} }) {
   const form = Object.hasOwn(MOVES, verb) ? MOVES[verb] : null;
   if (!form) throw new Refused('BAD_REQUEST', `no API move ${String(verb)}; use a board move such as add, claim, submit, verify, shout or answer`);
   if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Refused('BAD_REQUEST', 'args needs a JSON object containing this move\'s arguments');
-  const allowed = [...(form.positions ?? []), ...(form.flags ?? []), ...(form.booleans ?? [])];
+  const allowed = [...(form.positions ?? []), ...(form.flags ?? []), ...(form.lists ?? []), ...(form.booleans ?? [])];
   for (const key of Object.keys(args)) if (!allowed.includes(key)) throw new Refused('BAD_REQUEST', `${verb} does not take args.${key}; use only this CLI move's arguments`);
   const argv = form.prefix ? [...form.prefix] : [verb];
   if (form.item) {
@@ -50,6 +50,12 @@ export function moveArgs({ verb, item, args = {} }) {
   for (const key of form.flags ?? []) if (args[key] !== undefined) {
     if (typeof args[key] !== 'string') throw new Refused('BAD_REQUEST', `args.${key} needs text; supply the CLI flag's value`);
     argv.push(`--${key}=${args[key]}`);
+  }
+  // A list flag repeats once per value, so each value reaches the CLI exactly, never split or joined.
+  for (const key of form.lists ?? []) if (args[key] !== undefined) {
+    const values = [args[key]].flat();
+    if (!values.length || values.some((value) => typeof value !== 'string')) throw new Refused('BAD_REQUEST', `args.${key} needs text or an array of text; supply one value per CLI flag`);
+    for (const value of values) argv.push(`--${key}=${value}`);
   }
   for (const key of form.booleans ?? []) if (args[key] !== undefined) {
     if (typeof args[key] !== 'boolean') throw new Refused('BAD_REQUEST', `args.${key} needs true or false`);

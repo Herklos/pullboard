@@ -407,6 +407,49 @@ test('unknown imports and broad inputs fall back explicitly, while an all-test c
   assert.deepEqual(allTests.files, ['test/a.test.js', 'test/b.test.js', 'test/c.test.js']);
 });
 
+test('an item claimed before the gate existed submits once a gate exists [C7,B26]', (t) => {
+  let box = privateRepo(t);
+  put(box.root, 'pullboard.json', JSON.stringify({ gate: '', shared: ['pullboard.json'] }));
+  put(box.root, 'src/a.js', 'export const value = 1;\n');
+  put(box.root, 'test/a.test.js', [
+    "import assert from 'node:assert/strict';",
+    "import { appendFileSync } from 'node:fs';",
+    "import { value } from '../src/a.js';",
+    "appendFileSync(process.env.GATE_MARKER, 'accepted-main\\n');",
+    'assert.equal(value, 2);',
+  ].join('\n'));
+  box = builderRepo(box);
+  assert.equal(box.coordinator('add', 'build', 'Claim before setup', '--specs', 'G1').code, 0);
+  assert.equal(box.run('claim', '1').code, 0);
+  put(box.root, 'src/a.js', 'export const value = 2;\n');
+  commitAll(box, 'feat(core): build the claimed item [G1]');
+  const missing = box.run('submit', '1', '--json');
+  assert.equal(missing.code, 1, missing.err || missing.out);
+  assert.equal(JSON.parse(missing.out).error.code, 'NO_GATE', 'an unconfigured board still refuses');
+  const before = JSON.parse(box.run('show', '1', '--json').out);
+  const mainRoot = join(box.dir, 'repo');
+  const accepted = JSON.parse(readFileSync(join(mainRoot, 'pullboard.json'), 'utf8'));
+  accepted.gate = 'node --test --test-reporter=tap';
+  put(mainRoot, 'pullboard.json', JSON.stringify(accepted));
+  runFixtureGit(['add', 'pullboard.json'], { cwd: mainRoot, env: box.env });
+  runFixtureGit(['commit', '-q', '-m', 'chore: configure the project gate'], { cwd: mainRoot, env: box.env });
+  box.git('merge', '--no-edit', 'main');
+  const candidate = JSON.parse(readFileSync(join(box.root, 'pullboard.json'), 'utf8'));
+  candidate.gate = `node -e "require('node:fs').appendFileSync(process.env.GATE_MARKER, 'candidate')"`;
+  put(box.root, 'pullboard.json', JSON.stringify(candidate));
+  commitAll(box, 'chore: expose an untrusted candidate gate');
+  const marker = join(box.dir, 'gate-ran.log');
+  box.env.GATE_MARKER = marker;
+  const submitted = box.run('submit', '1', '--json');
+  assert.equal(submitted.code, 0, `${submitted.out}\n${submitted.err}`);
+  const receipt = JSON.parse(submitted.out);
+  assert.equal(receipt.gate.green, true);
+  assert.equal(receipt.gate.full, true, 'the newly configured gate really runs');
+  assert.equal(readFileSync(marker, 'utf8'), 'accepted-main\n', 'only committed accepted-Main policy supplies the missing gate');
+  const after = JSON.parse(box.run('show', '1', '--json').out);
+  assert.equal(after.item_frozen_digest, before.item_frozen_digest, 'recovery needs no criterion change or refreeze');
+});
+
 test('submit runs the frozen check and affected test only; landing and explicit gate remain full [V4,C7,V16]', (t) => {
   let box = privateRepo(t);
   const checkCommand = 'node -e "require(\'node:fs\').appendFileSync(process.env.ITEM_CHECK_MARKER, \'check\')"';
