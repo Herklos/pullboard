@@ -112,6 +112,21 @@ test('setup confirmation does not adopt a later user edit to a generated file [I
     'the unchanged-write receipt cannot authorize a later user edit');
 });
 
+test('setup confirmation leaves a later executable-mode edit uncommitted [I1,I2]', t => {
+  const box = fixture(t);
+  rmSync(join(box.root, 'pullboard.json'));
+  assert.equal(box.cli('init', '--yes').code, 0);
+  const head = box.git('rev-parse', 'HEAD');
+  const file = join(box.root, 'SPEC.md');
+  chmodSync(file, 0o755);
+  assert.match(box.git('diff', '--summary'), /mode change/u);
+  const repeated = box.cli('init', '--yes');
+  assert.equal(repeated.code, 0, repeated.stderr);
+  assert.equal(box.git('rev-parse', 'HEAD'), head, 'setup must not commit the user permission change');
+  assert.equal(statSync(file).mode & 0o111, 0o111, 'the user permission edit stays in the worktree');
+  assert.match(box.git('diff', '--summary'), /mode change/u);
+});
+
 test('a fresh init tells the person and the agent how to start [I9,I1]', t => {
   const box = fixture(t);
   rmSync(join(box.root, 'pullboard.json'));

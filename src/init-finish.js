@@ -46,16 +46,17 @@ import { Refused } from './refused.js';
 export const SETUP_COMMIT_QUESTION = 'Commit Pullboard setup now? [Y/n] ';
 export const SETUP_COMMIT_LATER = "To commit Pullboard's files: pullboard init --yes";
 
-/** Hash regular files only, refusing paths outside the repository and symlink targets. */
+/** Hash regular files and Git's executable bit, refusing external paths and symlink targets. */
 function setupFile(root, name) {
   if (typeof name !== 'string' || isAbsolute(name) || name.includes('\0')) return null;
   const path = resolve(root, name), inside = relative(root, path);
   if (!inside || inside === '..' || inside.startsWith('..' + sep)) return null;
   try {
-    if (!lstatSync(path).isFile()) return null;
+    const stat = lstatSync(path);
+    if (!stat.isFile()) return null;
     const physical = relative(root, realpathSync(path));
     if (physical === '..' || physical.startsWith('..' + sep)) return null;
-    return createHash('sha256').update(readFileSync(path)).digest('hex');
+    return createHash('sha256').update(stat.mode & 0o111 ? '100755:' : '100644:').update(readFileSync(path)).digest('hex');
   } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
 }
 
@@ -119,10 +120,13 @@ export async function finishInitCommit(plan, { io, yes, landed, permissions }) {
   writeFileSync(temporary, JSON.stringify({ version: 1, root: info.root, files: Object.fromEntries(retained) }) + '\n', { mode: 0o600 });
   renameSync(temporary, plan.file);
   const head = tryGit(info.root, ['rev-parse', '--verify', 'HEAD']);
-  const changed = retained.filter(([name]) => head.status !== 0
+  /** Observe Git's content and mode differences without touching the user's index. */
+  const differs = name => head.status !== 0
     || tryGit(info.root, ['diff', '--quiet', 'HEAD', '--', `:(literal)${name}`]).status !== 0
-    || !tryGit(info.root, ['ls-tree', 'HEAD', '--', `:(literal)${name}`]).stdout);
-  if (!changed.length) return { state: 'unchanged', files: [], skipped: [...plan.skipped] };
+    || !tryGit(info.root, ['ls-tree', 'HEAD', '--', `:(literal)${name}`]).stdout;
+  const changed = retained.filter(([name]) => differs(name));
+  const skipped = [...plan.skipped].filter(differs);
+  if (!changed.length) return { state: 'unchanged', files: [], skipped };
   const paths = changed.map(([name]) => name);
   let accepted = Boolean(yes);
   if (!accepted && !io.json && relayOfferAtInit({ enabled: true, shared: false, stdin: io.stdin, stdout: io.stdout }) === 'ask') {
@@ -130,7 +134,7 @@ export async function finishInitCommit(plan, { io, yes, landed, permissions }) {
     const answer = await askCommit(io);
     accepted = answer !== null && ['', 'y', 'yes'].includes(answer.trim().toLowerCase());
   }
-  if (!accepted) return { state: 'pending', files: paths, skipped: [...plan.skipped] };
+  if (!accepted) return { state: 'pending', files: paths, skipped };
   if (changed.some(([name, hash]) => setupFile(info.root, name) !== hash)) {
     throw new Refused('NOT_COMMITTED', 'a setup file changed while confirmation was open; review the change and run pullboard init --yes again');
   }
@@ -143,7 +147,7 @@ export async function finishInitCommit(plan, { io, yes, landed, permissions }) {
     else tryGit(info.root, ['rm', '--cached', '-q', '--ignore-unmatch', '--', ...paths.map(name => `:(literal)${name}`)]);
     throw new Refused('NOT_COMMITTED', `Git did not commit Pullboard setup: ${String(error.stderr ?? error.message).trim()}; fix the reported identity or hook problem, then run pullboard init --yes`, 'fix the Git error above, then run pullboard init --yes');
   }
-  return { state: 'committed', files: paths, skipped: [...plan.skipped], commit: git(info.root, ['rev-parse', 'HEAD']) };
+  return { state: 'committed', files: paths, skipped, commit: git(info.root, ['rev-parse', 'HEAD']) };
 }
 
 /** Report setup and blueprint notes together, keeping the CLI command itself bounded. */
