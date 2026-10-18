@@ -497,10 +497,15 @@ function unchangedMergePath(root, path, mergeHeads) {
   return staged !== null && (mergeHeads.some((mergeHead) => staged === committedObject(root, mergeHead, path)) || staged === committedObject(root, 'HEAD', path));
 }
 
-/** Allow a new foreign object only when Git records both exact parents in the resolved conflict index. */
+/**
+ * Allow a new foreign object, or the file's removal, only when Git records both exact parents in the
+ * resolved conflict index. Removing the file is a resolution like any other (#860): `git rm` after a
+ * real conflict leaves no staged entry, so a missing side compares as absent rather than refusing.
+ */
 function resolvedMergeConflictPath(root, path, mergeHeads) {
   const staged = stagedObject(root, path);
-  if (!staged) return false;
+  if (staged === null) return false;
+  const removed = staged === '';
   const records = git(root, ['ls-files', '--resolve-undo', '--stage', '-z', '--', ':(literal)' + path])
     .split('\0').filter(Boolean);
   const stages = new Map();
@@ -509,7 +514,7 @@ function resolvedMergeConflictPath(root, path, mergeHeads) {
     if (separator === -1 || record.slice(separator + 1) !== path) continue;
     const fields = /^(\d{6}) ([0-9a-f]{40,64}) ([0123])$/iu.exec(record.slice(0, separator));
     if (fields?.[3] === '0') {
-      if (fields[1] + ' ' + fields[2] !== staged) return false;
+      if (removed || fields[1] + ' ' + fields[2] !== staged) return false;
       continue;
     }
     if (!fields || stages.has(fields[3])) return false;
@@ -524,12 +529,12 @@ function resolvedMergeConflictPath(root, path, mergeHeads) {
   const hasBaseProvenance = baseStage
     ? bases.some((base) => baseStage === committedObject(root, base, path))
     : bases.every((base) => committedObject(root, base, path) === '');
-  const stagedMode = staged.split(' ', 1)[0];
   const parentModes = [stages.get('2'), stages.get('3')].filter(Boolean).map((entry) => entry.split(' ', 1)[0]);
-  return hasBaseProvenance
-    && stages.get('2') === committedObject(root, 'HEAD', path)
-    && mergeHeads.some((mergeHead) => stages.get('3') === committedObject(root, mergeHead, path))
-    && parentModes.includes(stagedMode);
+  // A side the conflict lacks, as in modify/delete, is the parent's absent path, compared as ''.
+  return (stages.has('2') || stages.has('3')) && hasBaseProvenance
+    && (stages.get('2') ?? '') === committedObject(root, 'HEAD', path)
+    && mergeHeads.some((mergeHead) => (stages.get('3') ?? '') === committedObject(root, mergeHead, path))
+    && (removed || parentModes.includes(staged.split(' ', 1)[0]));
 }
 
 /**
