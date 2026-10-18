@@ -580,7 +580,7 @@ export function initRepo({ info, openBoardHere, register, closeBoard, model, per
   const { root } = info;
   const worktreeMode = existsSync(join(root, CONFIG_FILE)) ? loadConfig(root).worktrees : 'inside';
   const doctrine = existsSync(join(root, CONFIG_FILE)) ? loadConfig(root).practice : doctrineFile(root);
-  const gate = detectGate(root) || 'pullboard spec check';
+  const gate = detectGate(root);
   const configured = configuredGate(root);
   const written = [];
   /** Record only paths setup actually writes; unrelated files never enter its staging command. */
@@ -619,7 +619,7 @@ export function initRepo({ info, openBoardHere, register, closeBoard, model, per
   if (!configuredGate(root)) {
     notes.push(gate
       ? 'no gate yet: set "gate" in pullboard.json to the command that proves the build'
-      : 'if this board has no build, use `pullboard spec check` to check its spec and practice files; a second agent review checks the actual work');
+      : 'no test command detected; ask the person which command tests this project, then set "gate" in pullboard.json to that command; if this board has no build, use `pullboard spec check` to check its spec and practice files; a second agent review checks the actual work');
   }
   if (written.length) notes.push(`git add -f -- ${written.map((path) => `'${path.replaceAll("'", "'\\''")}'`).join(' ')}`);
   return notes;
