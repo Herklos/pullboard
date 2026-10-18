@@ -54,10 +54,12 @@ test('only an authenticated person sender records a never-again over the relay [
     ['person', attempt('person')],
   ];
   closeBoard(native);
+  const coordinator = link.agentTokens?.coordinator;
+  assert.match(coordinator?.token ?? '', /^pa_[A-Za-z0-9_-]{43}$/u, 'relay on already supplied the coordinator credential');
   const tokens = {
     agent: await agentToken(box, link, 'rigor-relay-agent'),
     machine: link.token,
-    coordinator: await agentToken(box, link, 'coordinator'),
+    coordinator: coordinator.token,
     'coordinator-cause-only': null,
     person: (await box.phoneSession()).token,
   };
