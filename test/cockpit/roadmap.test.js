@@ -15,6 +15,14 @@ async function openRoadmapItem(chrome, id) {
   await press(chrome, row + ".parentElement.querySelector('.milestone-why a[data-go]')");
 }
 
+/** Record a real trunk merge before reporting a fixture item as landed. */
+function landRoadmapItem(box, p, id) {
+  box.git(p.repo, 'merge', '--no-ff', '--no-edit', p.itemBranches.get(`${p.baseBranch}:${id}`));
+  const commit = box.git(p.repo, 'rev-parse', 'HEAD');
+  box.run(p.repo, 'merged', String(id), commit);
+  return commit;
+}
+
 test('Roadmap references stay inline and rows expand before opening Items [N26,N38]', { timeout: 90_000 }, async (t) => {
   const executable = chromeExecutable();
   if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME for prose-reference checks.');
@@ -146,7 +154,7 @@ test('the roadmap reads every item as the Items tab does, opens each one, anothe
     { id: '#4', label: 'to verify', tone: 'warn' },
     { id: 'beacon#1', label: 'sent back', tone: 'no' },
     { id: '#1', label: 'verified', tone: 'ok' },
-    { id: '#2', label: 'verified', tone: 'ok' },
+    { id: '#2', label: 'accepted', tone: 'ok' },
     { id: '#5', label: 'building', tone: 'busy' },
     { id: '#6', label: 'unclaimed', tone: 'free' },
   ];
@@ -180,10 +188,10 @@ test('the roadmap reads every item as the Items tab does, opens each one, anothe
       assert.ok(seen.document <= seen.client && seen.body <= seen.client, `${width}: no sideways scroll: ${JSON.stringify(seen)}`);
       assert.deepEqual(seen.cards.map((card) => card.name), ['Launch', 'Next', 'Later'], `${width}: a card for each milestone, in order`);
       assert.deepEqual(seen.cards.map((card) => card.note), ['Ships when the review lands; your call on the name.', 'Queued behind Launch.', 'Ideas not filed yet.'], `${width}: each card's note`);
-      assert.deepEqual(seen.cards.map((card) => [card.count, card.progress, card.filled]), [['2/5 done', [2, 5], 0.4], ['0/2 done', [0, 2], 0], [null, null, null]], `${width}: counts and bars say how many visible items are verified`);
-      assert.deepEqual([seen.cards[2].empty, seen.cards[2].rows.length], ['No items yet.', 0], `${width}: an empty milestone says so, with no bar or count`);
+      assert.deepEqual(seen.cards.map((card) => [card.count, card.progress, card.filled]), [['1/5 landed', [1, 5], 0.2], ['0/2 landed', [0, 2], 0], [null, null, null]], `${width}: counts and bars say how many retained items landed`);
+      assert.deepEqual([seen.cards[2].empty, seen.cards[2].rows.length], ['No items yet.', 0], `${width}: an empty milestone says so with zero summary counts`);
       const rows = seen.cards.flatMap((card) => card.rows);
-      assert.deepEqual(rows.map(({ id, label, tone }) => ({ id, label, tone })), words, `${width}: each chip shows the word and colour the Items tab gives its item's state`);
+      assert.deepEqual(rows.map(({ id, label, tone }) => ({ id, label, tone })), words, `${width}: each roadmap chip distinguishes landed and accepted with the Items tab's colour`);
       assert.ok(rows.every((row) => row.seen), `${width}: every chip is on screen`);
       assert.deepEqual(rows.map((row) => row.title), [titles[2], titles[3], 'Billing webhook retries', titles[0], titles[1], titles[4], titles[5]], `${width}: unfinished work precedes verified items in each milestone`);
       assert.deepEqual(rows.map((row) => row.tip), rows.map((row) => row.title), `${width}: each row's tooltip is its whole title`);
@@ -237,14 +245,16 @@ test('the roadmap reads every item as the Items tab does, opens each one, anothe
         const chip = document.querySelector('#detail .meta .chip'), dot = document.querySelector('#chain [data-item="${row.id.slice(1)}"] .dot');
         return { label: chip.innerText, chip: getComputedStyle(chip).color + ' on ' + getComputedStyle(chip).backgroundColor, dot: dot ? getComputedStyle(dot).backgroundColor : 'not listed' };
       })())`));
-      assert.deepEqual(here, { label: row.label, chip: row.chip, dot: row.label === 'withdrawn' ? 'not listed' : row.dot }, `${row.id}: the Items tab shows it with the Roadmap's word and colours`);
+      assert.deepEqual(here, { label: ['landed', 'accepted'].includes(row.label) ? 'verified' : row.label, chip: row.chip, dot: row.label === 'withdrawn' ? 'not listed' : row.dot }, `${row.id}: the Items tab keeps its verified label while both tabs share colours`);
       await travel(chrome, -1);
       await settled(chrome, `${showing('roadmap', roadmapPath)} && !!${roadmapRow(row.id)}`);
     }
 
     // It updates live as items move, here and on the other repo's board.
     accept(box, alpha, 4);
-    await chrome.waitFor(`${roadmapRow('#4')}?.querySelector('.chip').innerText === 'verified' && document.querySelector('#roadmap .milestone-count').innerText === '3/5 done'`, 15_000); // budget: hang ceiling for the verified item and milestone count to refresh; no throughput claim.
+    await chrome.waitFor(`${roadmapRow('#4')}?.querySelector('.chip').innerText === 'accepted' && document.querySelector('#roadmap .roadmap-left [aria-label]').getAttribute('aria-label') === '1/5 landed'`, 15_000); // budget: hang ceiling for the accepted receipt and unchanged landed count to reach the browser; no throughput claim.
+    landRoadmapItem(box, alpha, 4);
+    await chrome.waitFor(`${roadmapRow('#4')}?.querySelector('.chip').innerText === 'verified' && document.querySelector('#roadmap .roadmap-left [aria-label]').getAttribute('aria-label') === '2/5 landed'`, 15_000); // budget: hang ceiling for the real merge receipt and landed count to reach the browser; no throughput claim.
     box.run(beacon.web, 'claim', '1');
     await chrome.waitFor(`${roadmapRow('beacon#1')}?.querySelector('.chip').innerText === 'building'`, 15_000); // budget: hang ceiling for the claimed external item to refresh; no throughput claim.
 
@@ -281,25 +291,27 @@ test('a milestone lists work to ship first, shipped below, and no withdrawn item
   for (const title of ['First verified', 'First open', 'Second verified', 'Dropped idea', 'Second open']) {
     box.run(alpha.repo, 'add', 'web', title, '--specs', 'G1', '--criterion', 'renders');
   }
-  for (const id of [1, 3]) { build(box, alpha, id, `page-${id}.html`); accept(box, alpha, id); }
+  for (const id of [1, 3]) { build(box, alpha, id, `page-${id}.html`); accept(box, alpha, id); landRoadmapItem(box, alpha, id); }
   box.run(alpha.repo, 'withdraw', '4', 'not needed');
   box.run(alpha.repo, 'milestone', 'add', 'Next', '--items', '3,2,4,1,5');
   box.run(alpha.repo, 'milestone', 'add', 'Shipped', '--items', '1,4,3');
+  box.run(alpha.repo, 'milestone', 'ship', 'Shipped', '--next', 'Next');
   const view = await startView(box);
   const profile = mkdtempSync(join(tmpdir(), 'pullboard-shipping-rows-chrome-'));
   let chrome;
   /** Read the actual row order and every visible-count consumer, including folded history. */
   const read = async () => JSON.parse(await chrome.stable(`JSON.stringify((() => {
     const next = document.querySelector('#roadmap-list > [data-key="m:Next"]');
-    const progress = next.querySelector('[role=progressbar]');
+    const progress = next.querySelector('.roadmap-summary-bar');
     const shipped = document.querySelector('#roadmap .shipped-one[data-key="m:Shipped"]');
     return {
       rows: [...next.querySelectorAll(':scope > .milestone-body > ul .milestone-item .id')].map(id => id.textContent),
-      count: next.querySelector('.milestone-count').textContent,
-      progress: [progress.getAttribute('aria-valuenow'), progress.getAttribute('aria-valuemax')],
+      count: next.querySelector('.roadmap-left [aria-label]').getAttribute('aria-label'),
+      progress: [progress.querySelector('[data-summary-segment=landed]').dataset.count, progress.dataset.total],
       index: document.querySelector('#roadmap-panel [data-roadmap-jump="m:Next"] b').textContent,
       status: document.querySelector('[data-status=release]').textContent.replace(/\\s+/g, ' ').trim(),
-      openCounts: [...document.querySelectorAll('[data-shipping-stage=open] dd')].map(count => count.textContent),
+      openCounts: [...document.querySelectorAll('[data-shipping-stage=waiting] dd')].map(count => count.textContent),
+      headerWaiting: next.querySelector('[data-summary-state=waiting] b').textContent,
       shippedCount: shipped.querySelector('.milestone-count').textContent,
       shippedRows: [...shipped.querySelectorAll(':scope > .milestone-body > ul .milestone-item .id')].map(id => id.textContent),
       allIds: [...document.querySelectorAll('#roadmap .milestone-item .id')].map(id => id.textContent),
@@ -315,11 +327,12 @@ test('a milestone lists work to ship first, shipped below, and no withdrawn item
       await chrome.waitFor(`innerWidth === ${width}`);
       const seen = await read();
       assert.deepEqual(seen.rows, ['#2', '#5', '#3', '#1'], `${width}: each group keeps milestone order, with work to ship before verified items`);
-      assert.equal(seen.count, '2/4 done', `${width}: withdrawn work is absent from the card count`);
+      assert.equal(seen.count, '2/4 landed', `${width}: withdrawn work is absent from the card count`);
       assert.deepEqual(seen.progress, ['2', '4'], `${width}: progress counts only retained items`);
       assert.equal(seen.index, '2/4', `${width}: the release index uses the same count`);
       assert.equal(seen.status, 'Next 2/4', `${width}: the status bar names the same next release and count`);
-      assert.deepEqual(seen.openCounts, ['2', '2'], `${width}: desktop and mobile shipping counts include both open items`);
+      assert.deepEqual(seen.openCounts, ['2'], `${width}: the companion panel reads the supplied waiting count`);
+      assert.equal(seen.headerWaiting, '2', `${width}: the header includes both waiting items`);
       assert.equal(seen.shippedCount, '2 items', `${width}: folded history excludes withdrawn work from its total`);
       assert.equal(seen.allIds.includes('#4'), false, `${width}: no withdrawn row is rendered, including folded history`);
       await press(chrome, "document.querySelector('#roadmap-list > [data-key=shipped] > .milestone-head')");
@@ -343,7 +356,7 @@ test('the roadmap leads with the next release and folds shipped ones [N26]', { t
   const box = machine();
   const alpha = project(box, 'releases');
   for (const title of ['First page', 'Second page', 'Third page', 'Fourth page', 'Fifth page', 'Dropped idea']) box.run(alpha.repo, 'add', 'web', title, '--specs', 'G1', '--criterion', 'renders');
-  for (const id of [1, 2, 4]) { build(box, alpha, id, `page-${id}.html`); accept(box, alpha, id); }
+  for (const id of [1, 2, 4]) { build(box, alpha, id, `page-${id}.html`); accept(box, alpha, id); landRoadmapItem(box, alpha, id); }
   box.run(alpha.repo, 'withdraw', '6', 'not needed');
   // In the board's order: two releases shipped (one with a withdrawn item, which does not hold it back), the next one
   // part done, and one queued after it.
@@ -353,6 +366,9 @@ test('the roadmap leads with the next release and folds shipped ones [N26]', { t
   box.run(alpha.repo, 'milestone', 'add', '0.4', '--note', 'Queued behind 0.3.', '--items', '5');
   box.run(alpha.repo, 'milestone', 'add', 'Later', '--note', 'Work not filed yet.');
   box.run(alpha.repo, 'milestone', 'move', 'Later', '--before', '0.1');
+  box.run(alpha.repo, 'milestone', 'ship', '0.1', '--next', '0.3');
+  box.run(alpha.repo, 'milestone', 'ship', '0.2', '--next', '0.3');
+  const shippedCommit = box.git(alpha.repo, 'rev-parse', 'HEAD');
   const other = project(box, 'other-releases');
   box.run(other.repo, 'add', 'web', 'Other next page', '--specs', 'G1', '--criterion', 'renders');
   box.run(other.repo, 'milestone', 'add', '0.3', '--items', '1');
@@ -362,7 +378,7 @@ test('the roadmap leads with the next release and folds shipped ones [N26]', { t
   /** The Roadmap as it reads: each part in order, open or closed, with what its summary says. */
   const read = async () => JSON.parse(await chrome.stable(`JSON.stringify((() => {
     /** Read header columns without the decorative caret. */
-    const words = (e) => [...e.children].filter((c) => !c.classList.contains('caret')).map((c) => c.textContent.replace(/\\s+/g, ' ').trim()).join(' | ');
+    const words = (e) => [...e.children].filter((c) => !c.classList.contains('caret') && !c.matches('.roadmap-shipped-commit')).map((c) => c.matches('.roadmap-left') ? c.querySelector('[aria-label]').getAttribute('aria-label') : c.textContent.replace(/\\s+/g, ' ').trim()).join(' | ');
     /** Measure the rendered header target. */
     const box = (e) => { const r = e.getBoundingClientRect(); return { width: r.width, height: r.height }; };
     /** Find the direct disclosure control. */
@@ -379,7 +395,7 @@ test('the roadmap leads with the next release and folds shipped ones [N26]', { t
       parts: [...document.querySelectorAll('#roadmap-list > [data-key]')].map((d) => ({ key: d.dataset.key, open: open(d), summary: words(head(d)), height: box(head(d)).height,
         rows: rows(d), empty: body(d).querySelector('.milestone-empty')?.textContent ?? null, note: body(d).querySelector('.milestone-note')?.textContent ?? null,
         shipped: [...body(d).querySelectorAll(':scope > .shipped-one[data-key]')].map((one) => ({ key: one.dataset.key, open: open(one), summary: words(head(one)), height: box(head(one)).height,
-          rows: rows(one) })) })),
+          rows: rows(one), commit: one.querySelector('.roadmap-shipped-commit')?.title })) })),
     };
   })())`));
   /** Activate a disclosure or item through the shared native pointer helper. */
@@ -401,8 +417,8 @@ test('the roadmap leads with the next release and folds shipped ones [N26]', { t
         assert.ok(r.page.scroll <= r.page.width && r.page.body <= r.page.width, `${at}: no sideways scroll`);
         // Every release with work ahead stays open; the shipped ones fold into one part at the end.
         assert.deepEqual(r.parts.map((part) => [part.key, part.open, part.summary]), [
-          ['m:0.3', true, '0.3 | 1/2 done'],
-          ['m:0.4', true, '0.4 | 0/1 done'],
+          ['m:0.3', true, '0.3 | 1/2 landed'],
+          ['m:0.4', true, '0.4 | 0/1 landed'],
           ['m:Later', true, 'Later'],
           ['shipped', false, 'Shipped | 2 releases'],
         ], `${at}: every upcoming milestone opens in order, with Shipped folded last`);
@@ -416,6 +432,7 @@ test('the roadmap leads with the next release and folds shipped ones [N26]', { t
           ['m:0.2', false, '0.2 | Shipped on Tuesday. | 1 item'],
           ['m:0.1', false, '0.1 | The first page. | 1 item'],
         ], at + ': shipped names, first note line and counts in reverse roadmap order');
+        assert.ok(history.shipped.every((one) => one.commit === shippedCommit), at + ': each shipment displays its real commit');
         assert.ok(history.shipped.every((one) => one.height >= 44), at + ': shipped targets are at least 44px');
         assert.ok(expanded.page.scroll <= expanded.page.width && expanded.page.body <= expanded.page.width, at + ': expanded history has no sideways scroll');
         await click('#roadmap .shipped-one[data-key="m:0.2"] > .milestone-head');
@@ -482,12 +499,14 @@ test('the roadmap keeps every upcoming release open [N26]', {
   const box = machine();
   const alpha = project(box, 'all-upcoming-open');
   for (const title of ['Shipped one', 'Shipped two', 'Next release', 'Later release']) box.run(alpha.repo, 'add', 'web', title, '--specs', 'G1', '--criterion', 'renders');
-  for (const id of [1, 2]) { build(box, alpha, id, `page-${id}.html`); accept(box, alpha, id); }
+  for (const id of [1, 2]) { build(box, alpha, id, `page-${id}.html`); accept(box, alpha, id); landRoadmapItem(box, alpha, id); }
   box.run(alpha.repo, 'milestone', 'add', '0.1', '--items', '1');
   box.run(alpha.repo, 'milestone', 'add', '0.2', '--items', '2');
   box.run(alpha.repo, 'milestone', 'add', '0.3', '--note', 'Next out.', '--items', '3');
   box.run(alpha.repo, 'milestone', 'add', '0.4', '--note', 'Queued next.', '--items', '4');
   box.run(alpha.repo, 'milestone', 'add', 'Later', '--note', 'No work filed yet.');
+  box.run(alpha.repo, 'milestone', 'ship', '0.1', '--next', '0.3');
+  box.run(alpha.repo, 'milestone', 'ship', '0.2', '--next', '0.3');
   const view = await startView(box);
   const profile = mkdtempSync(join(tmpdir(), 'pullboard-all-upcoming-open-chrome-'));
   let chrome;
@@ -594,6 +613,7 @@ test('the roadmap panel jumps to each release [N26]', {
   box.run(alpha.repo, 'merged', '1', box.git(alpha.repo, 'rev-parse', 'HEAD'));
   box.run(alpha.repo, 'milestone', 'add', '0.8.6', '--note', 'Shipped first line.\nThis line stays in the expanded history.', '--items', '1');
   box.run(alpha.repo, 'milestone', 'add', '0.8.7', '--note', 'The next release.', '--items', '2');
+  box.run(alpha.repo, 'milestone', 'ship', '0.8.6', '--next', '0.8.7');
   for (const name of ['0.8.8', '0.8.9', '0.8.10', '0.8.11', '0.8.12', '0.8.13', '0.8.14', '0.8.15', '0.8.16', '0.8.17', '0.8.18', '0.8.19']) {
     box.run(alpha.repo, 'milestone', 'add', name, '--note', 'Queued after the next release.');
   }
@@ -629,12 +649,12 @@ test('the roadmap panel jumps to each release [N26]', {
           const panel = document.querySelector('#roadmap-panel'), list = document.querySelector('#roadmap-list');
           const shown = (e) => !!e && e.getClientRects().length > 0 && e.getBoundingClientRect().height > 0;
           return { position: getComputedStyle(panel).position, beside: panel.getBoundingClientRect().left >= list.getBoundingClientRect().right,
-            chips: getComputedStyle(document.querySelector('#roadmap-releases')).display, desk: shown(panel.querySelector('.roadmap-desktop-shipping')), phone: shown(list.querySelector('.roadmap-mobile-shipping')),
+            chips: getComputedStyle(document.querySelector('#roadmap-releases')).display, desk: shown(panel.querySelector('.roadmap-desktop-shipping')), phone: shown(list.querySelector('.roadmap-summary')),
             page: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) };
         })())`));
         const at = `${width}/${scheme}`;
-        if (width === 900) assert.deepEqual([edge.position, edge.beside, edge.desk, edge.phone], ['sticky', true, true, false], `${at}: the panel stays on the right with its Shipping: ${JSON.stringify(edge)}`);
-        else assert.deepEqual([edge.position, edge.beside, edge.chips, edge.desk, edge.phone], ['static', false, 'flex', false, true], `${at}: the chip row above the list, Shipping under the next release: ${JSON.stringify(edge)}`);
+        if (width === 900) assert.deepEqual([edge.position, edge.beside, edge.desk, edge.phone], ['sticky', true, true, true], `${at}: the panel stays on the right alongside each release summary: ${JSON.stringify(edge)}`);
+        else assert.deepEqual([edge.position, edge.beside, edge.chips, edge.desk, edge.phone], ['static', false, 'flex', false, true], `${at}: the chip row above the list, summary under each release: ${JSON.stringify(edge)}`);
         assert.ok(edge.page <= width, `${at}: no sideways scroll: ${JSON.stringify(edge)}`);
       }
     }
@@ -827,19 +847,21 @@ test('the roadmap panel counts the next release by stage [N26]', {
   box.run(alpha.web, 'claim', '2');
   box.run(alpha.repo, 'milestone', 'add', '0.8.6', '--note', 'The last shipped note.\nA second detail line.', '--items', '6');
   box.run(alpha.repo, 'milestone', 'add', '0.8.7', '--note', 'Shipping next.', '--items', '1,2,3,4,5');
+  box.run(alpha.repo, 'milestone', 'ship', '0.8.6', '--next', '0.8.7');
   const view = await startView(box);
   const profile = mkdtempSync(join(tmpdir(), 'pullboard-roadmap-panel-counts-'));
   let chrome;
   /** Read the visible stage counts and the bounded last-shipped summary. */
   const read = async () => JSON.parse(await chrome.stable(`JSON.stringify((() => {
-    const card=document.querySelector('#roadmap-panel'), rect=e=>{const r=e.getBoundingClientRect();return {top:r.top,bottom:r.bottom,height:r.height};};
+    const card=document.querySelector('#roadmap-panel'), rect=e=>{const r=e?.getBoundingClientRect();return r ? {top:r.top,bottom:r.bottom,height:r.height} : {top:0,bottom:0,height:0};};
     const last=[...document.querySelectorAll('#roadmap .roadmap-last-shipped')].find(e=>e.getBoundingClientRect().height>0);
     return {next:document.querySelector('#roadmap-list > .milestone > .milestone-head h2').textContent,
       counts:[...document.querySelectorAll('#roadmap [data-shipping-stage]')].filter(e=>e.getBoundingClientRect().height>0).map(e=>[e.dataset.shippingStage,e.querySelector('dd').textContent]),
       shipped:last ? [...last.children].map(e=>e.textContent) : null,
-      panel:rect(card),desktop:rect(card.querySelector('.roadmap-desktop-shipping')),mobile:rect(document.querySelector('.roadmap-list .roadmap-mobile-shipping')),
+      panel:rect(card),desktop:rect(card.querySelector('.roadmap-desktop-shipping')),mobile:rect(document.querySelector('.roadmap-list .roadmap-summary')),
       heading:rect(document.querySelector('#roadmap-list > .milestone > .milestone-head h2')),
-      mobileCounts:rect(document.querySelector('#roadmap-list > .milestone > .roadmap-mobile-shipping .roadmap-stage-counts')),
+      mobileCounts:rect(document.querySelector('#roadmap-list > .milestone > .roadmap-summary .roadmap-summary-legend')),
+      headerCounts:[...document.querySelector('#roadmap-list > .milestone').querySelectorAll('[data-summary-state]')].map(e=>[e.dataset.summaryState,e.querySelector('b').textContent]),
       documentWidth:Math.max(document.documentElement.scrollWidth,document.body.scrollWidth),viewport:document.documentElement.clientWidth,viewportHeight:document.documentElement.clientHeight};
   })())`));
   try {
@@ -854,11 +876,13 @@ test('the roadmap panel counts the next release by stage [N26]', {
         await chrome.waitFor(`matchMedia('(prefers-color-scheme: ${scheme})').matches`);
         const counts = await read();
         assert.equal(counts.next, '0.8.7', `${width}/${scheme}: the panel names the next release`);
-        assert.deepEqual(counts.counts, [['open', '1'], ['claimed', '1'], ['submitted', '1'], ['accepted', '1'], ['merged', '1']], `${width}/${scheme}: each state uses the board's held item data`);
+        const expected = [['landed', '1'], ['landing', '1'], ['review', '1'], ['building', '1'], ['waiting', '1'], ['held', '0']];
+        assert.deepEqual(counts.headerCounts, expected, `${width}/${scheme}: the header reads every supplied state`);
+        assert.deepEqual(counts.counts, width < 900 ? [] : expected, `${width}/${scheme}: the desktop companion panel shares those supplied counts`);
         assert.deepEqual(counts.shipped, ['Last shipped', '0.8.6', 'The last shipped note.'], `${width}/${scheme}: the last shipped row includes only the note's first line`);
         assert.ok(counts.documentWidth <= counts.viewport, `${width}/${scheme}: the page never scrolls sideways`);
         if (width < 900) assert.ok(counts.heading.top < counts.mobileCounts.top && counts.mobile.height > 0 && counts.desktop.height === 0, `${width}/${scheme}: counts sit under the actual next release heading on the phone`);
-        else assert.ok(counts.desktop.height > 0 && counts.mobile.height === 0, `${width}/${scheme}: desktop shipping counts stay in the right panel`);
+        else assert.ok(counts.desktop.height > 0 && counts.mobile.height > 0, `${width}/${scheme}: desktop shipping counts stay in the right panel alongside the header`);
       }
       await proofShot(chrome, 'roadmap-panel-counts', width);
     }
@@ -867,6 +891,96 @@ test('the roadmap panel counts the next release by stage [N26]', {
     rmSync(profile, { recursive: true, force: true });
     await view.stop();
   }
+});
+
+
+test('the roadmap shows landed, accepted and past target [N26]', { timeout: 90_000 }, async () => {
+  const executable = chromeExecutable(); assert.ok(executable, 'Chrome is required for the roadmap header check.');
+  const box=machine(), alpha=project(box,'roadmap-truth',SPEC,{lanes:{web:{owns:['web/'],specs:['G']},ops:{owns:['ops/'],specs:['G']}}});
+  const names=['Landed A','Accepted A','Waiting A','Shipped B','Landed C','Accepted C','In review C','Building C','Approve the release','Held C','Withdrawn C','Landed D','Withdrawn D'];
+  names.forEach((name,index)=>box.run(alpha.repo,'add',index===9?'ops':'web',name,'--specs','G1','--criterion','The page renders.'));
+  /** Land through real Git and the ordinary board receipt; acceptance alone stays unlanded. */
+  function land(id) {
+    box.git(alpha.repo,'merge','--no-ff','--no-edit',alpha.itemBranches.get(`${alpha.baseBranch}:${id}`));
+    box.run(alpha.repo,'merged',String(id),box.git(alpha.repo,'rev-parse','HEAD'));
+  }
+  for(const id of [1,2,4,5,6]) {build(box,alpha,id,`item-${id}.txt`);accept(box,alpha,id);if([1,4,5].includes(id))land(id);}
+  box.run(alpha.repo,'withdraw','11','Removed from this release');
+  // A release that finished, every item landed or withdrawn, without milestone ship (the person, 18 Oct).
+  build(box,alpha,12,'item-12.txt');accept(box,alpha,12);land(12);box.run(alpha.repo,'withdraw','13','Not needed after all');
+  box.run(alpha.repo,'milestone','add','Finished unshipped','--items','12,13');
+  box.run(alpha.repo,'milestone','add','Empty plan','--note','Nothing filed yet.');
+  build(box,alpha,7,'item-7.txt');box.run(alpha.web,'claim','8');box.run(alpha.repo,'hold','ops','--reason','Waiting for the person');
+  box.run(alpha.repo,'shout','person','#9 Approve the release','--decision');
+  box.run(alpha.repo,'milestone','add','Past target','--items','1,2,3');
+  box.run(alpha.repo,'milestone','edit','Past target','--target',new Date(Date.now()-86_400_000).toISOString());
+  box.run(alpha.repo,'milestone','add','Shipped release','--items','4');
+  box.run(alpha.repo,'milestone','add','State summary','--items','5,6,7,8,9,10,11');
+  box.run(alpha.repo,'milestone','ship','Shipped release','--next','State summary');
+  box.run(alpha.repo,'milestone','add','Empty shipped');
+  box.run(alpha.repo,'milestone','ship','Empty shipped','--next','State summary');
+  const shipped=box.git(alpha.repo,'rev-parse','HEAD');
+  const rawRoadmap=JSON.parse(box.run(alpha.repo,'roadmap','--json'));
+  assert.equal(rawRoadmap.milestones.find(m=>m.name==='State summary').total,7,'692 total retains the withdrawn member; the summary excludes it');
+  assert.deepEqual(rawRoadmap.milestones.find(m=>m.name==='State summary').summary,{total:6,left:5,landed:1,landing:1,review:1,building:1,waiting:1,held:1,needsYou:[9],pace:{last6h:4,last2h:4},estimate:{low:2.5,high:7.5}},'real roadmap JSON owns every header field');
+  const view=await startView(box),profile=mkdtempSync(join(tmpdir(),'pullboard-roadmap-truth-'));let chrome;
+  const milestone=name=>`document.querySelector('[data-key="m:${name}"]')`;
+  try {
+    chrome=await openSnapshotChrome(executable,view.link.href,profile);await chrome.waitFor('data?.project?.milestones?.length===6');
+    const apiSummary=JSON.parse(await chrome.stable("JSON.stringify(data.project.milestones.find(m=>m.name==='State summary').summary)"));
+    assert.deepEqual(apiSummary,rawRoadmap.milestones.find(m=>m.name==='State summary').summary,'the live API carries the real CLI summary unchanged');
+    await press(chrome,"document.querySelector('[data-tab=roadmap]')");
+    await chrome.waitFor(`${milestone('Past target')}?.querySelector('.milestone-head')`);
+    const truth=await chrome.stable(`${milestone('Past target')}.textContent`);
+    assert.match(truth,/1 of 3 landed/u,'acceptance does not count as landed');assert.match(truth,/past target/u);
+    const states=JSON.parse(await chrome.stable(`JSON.stringify([...${milestone('Past target')}.querySelectorAll('.milestone-item')].map(row=>[row.querySelector('.id').textContent,row.querySelector('.chip').textContent]))`));
+    assert.deepEqual(Object.fromEntries(states),{'#1':'verified','#2':'accepted','#3':'unclaimed'});
+    await press(chrome,"document.querySelector('[data-key=shipped] > .milestone-head')");
+    await chrome.waitFor(`${milestone('Shipped release')}?.querySelector('.milestone-head')`);
+    assert.match(await chrome.stable(`${milestone('Shipped release')}.textContent`),new RegExp(shipped.slice(0,12)),'the shipped release names its actual commit');
+    assert.equal(await chrome.stable(`${milestone('Empty shipped')}.closest('.shipped')!==null`),true,'an empty shipped milestone appears only under Shipped');
+    assert.equal(await chrome.stable("document.querySelectorAll('[data-key=\"m:Empty shipped\"]').length"),1,'an empty shipment is not repeated among upcoming releases');
+    // Finished without milestone ship: under Shipped, no summary header, never among upcoming releases; the page opens on the
+    // first release with work left (Past target), and the Releases list starts with it.
+    const finished=JSON.parse(await chrome.stable(`JSON.stringify({shipped:${milestone('Finished unshipped')}?.closest('.shipped')!==null,copies:document.querySelectorAll('[data-key="m:Finished unshipped"]').length,summary:Boolean(${milestone('Finished unshipped')}?.querySelector('.roadmap-summary,.roadmap-left')),zero:/0 (left|remaining)|About 0/u.test(${milestone('Finished unshipped')}?.textContent||''),releases:[...document.querySelectorAll('#roadmap-releases [data-roadmap-jump]')].map(b=>b.querySelector('span').textContent),status:document.querySelector('[data-status=release]')?.textContent.trim()||''})`));
+    assert.deepEqual([finished.shipped,finished.copies,finished.summary,finished.zero],[true,1,false,false],`a finished release sits once under Shipped with no summary: ${JSON.stringify(finished)}`);
+    assert.equal(finished.releases[0],'Past target','the Releases list starts with the first release with work left');
+    assert.ok(!finished.releases.includes('Finished unshipped'),'a finished release is not listed as coming');
+    assert.match(finished.status,/^Past target/u,'the page opens on the first release with work left');
+    // An empty plan has nothing left either: no header, its No items yet reading as before the header (tests-28, 18 Oct).
+    const empty=JSON.parse(await chrome.stable(`JSON.stringify({summary:Boolean(${milestone('Empty plan')}?.querySelector('.roadmap-summary,.roadmap-left')),zero:/0 (left|remaining)|0 of 0|About 0/u.test(${milestone('Empty plan')}?.textContent||''),empty:${milestone('Empty plan')}?.querySelector('.milestone-empty')?.textContent||''})`));
+    assert.deepEqual(empty,{summary:false,zero:false,empty:'No items yet.'},`an empty plan shows no header: ${JSON.stringify(empty)}`);
+    for(const width of [375,1280]) {
+      await chrome.send('Emulation.setDeviceMetricsOverride',{width,height:950,deviceScaleFactor:1,mobile:false});
+      for(const scheme of ['light','dark']) {
+        await chrome.send('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:scheme}]});
+        const read=JSON.parse(await chrome.stable(`JSON.stringify((()=>{const m=${milestone('State summary')},bar=m.querySelector('.roadmap-summary-bar');return {text:m.textContent,releaseCount:document.querySelector('[data-roadmap-jump=\"m:State summary\"] b').textContent,legend:[...m.querySelectorAll('[data-summary-state]')].map(x=>[x.dataset.summaryState,x.querySelector('b').textContent]),segments:[...m.querySelectorAll('[data-summary-segment]')].map(x=>[x.dataset.summarySegment,Number(x.dataset.count),x.getBoundingClientRect().width]),bar:bar?.getBoundingClientRect().width,width:document.documentElement.scrollWidth,viewport:innerWidth};})())`));
+        assert.match(read.text,/5 remaining.*1 of 6 landed/u);assert.doesNotMatch(read.text,/ left/u,'the count reads remaining, never left');assert.equal(read.releaseCount,'1/6','the header and Releases list share the summary total');assert.match(read.text,/About 2\.5 to 7\.5 h/u);assert.match(read.text,/4 landed in the last 6 h, 4 in the last 2 h/u);assert.match(read.text,/Needs you:.*#9 Approve the release/u);
+        assert.deepEqual(read.legend,[['landed','1'],['landing','1'],['review','1'],['building','1'],['waiting','1'],['held','1']]);
+        assert.equal(read.segments.reduce((sum,row)=>sum+row[1],0),6,'the six supplied states sum to total');
+        assert.ok(read.segments.every(row=>row[2]>0&&Math.abs(row[2]-read.bar/6)<1),`${width}/${scheme}: every supplied state occupies its share`);
+        assert.ok(read.width<=read.viewport,`${width}/${scheme}: the header stays inside the viewport`);
+        const emptyPlan=JSON.parse(await chrome.stable(`JSON.stringify({summary:Boolean(${milestone('Empty plan')}?.querySelector('.roadmap-summary,.roadmap-left')),empty:${milestone('Empty plan')}?.querySelector('.milestone-empty')?.textContent||''})`));
+        assert.deepEqual(emptyPlan,{summary:false,empty:'No items yet.'},`${width}/${scheme}: an empty plan shows no header, only No items yet`);
+      }
+    }
+    // Equal bounds read as one number, and the legend says waiting.
+    await chrome.stable("(()=>{const m=data.project.milestones.find(m=>m.name==='State summary');m.summary={...m.summary,estimate:{low:2.5,high:2.5}};render();return true;})()");
+    const single=await chrome.stable(`${milestone('State summary')}.querySelector('.roadmap-estimate')?.textContent||''`);
+    assert.match(single,/^About 2\.5 h at today/u,`equal bounds read as one number: ${single}`);
+    assert.equal(await chrome.stable(`${milestone('State summary')}.querySelector('[data-summary-state=waiting]').textContent.trim()`),'1 waiting','the legend says waiting');
+    // The API owns counts: changing held item summaries cannot change the supplied milestone summary.
+    await chrome.stable("window.__originalItems=data.project.items;window.__originalRoadmapItems=data.project.milestones.find(m=>m.name==='State summary').items;data.project.items=data.project.items.map(item=>({...item,status:'open',stage:'open',merged:null,claim:null}));data.project.milestones.find(m=>m.name==='State summary').items=window.__originalRoadmapItems.map(item=>({...item,status:'open',state:'open'}));render();true");
+    assert.equal(await chrome.stable(`${milestone('State summary')}.querySelector('[data-summary-state=building] b').textContent`),'1');
+    await chrome.stable("data.project.items=window.__originalItems;const m=data.project.milestones.find(m=>m.name==='State summary');m.items=window.__originalRoadmapItems;m.summary.estimate=null;m.summary.needsYou=[];render();true");
+    assert.equal(await chrome.stable(`${milestone('State summary')}.querySelectorAll('.roadmap-estimate,.roadmap-pace,.roadmap-summary-needs').length`),0,'absent JSON omits forecast and person line');
+    // A hand-edited snapshot can contain malformed counts; those values must remain inert [C5].
+    await chrome.stable(`(()=>{const m=data.project.milestones.find(m=>m.name==='State summary');const value='"><img src=x onerror="window.__badRoadmapCount=true">';m.summary={...m.summary,total:value,landed:value,left:value};m.total=value;m.landed=value;render();return true})()`);
+    assert.equal(await chrome.stable("document.querySelectorAll('#roadmap img,[data-status=release] img').length"),0,'malformed supplied counts never become HTML');
+
+    assert.deepEqual(chrome.exceptions,[]);
+  } finally {if(chrome)await closeSnapshotChrome(chrome);rmSync(profile,{recursive:true,force:true});await view.stop();}
+
 });
 
 test('a blocked roadmap item shows its dot and expands to say why [N26]', { timeout: 90_000 }, async () => {
@@ -962,7 +1076,7 @@ test('a blocked roadmap item shows its dot and expands to say why [N26]', { time
       await opened('#5');
       const landed = JSON.parse(await chrome.stable(`JSON.stringify((()=>{const r=${row('#5')},panel=r.parentElement.querySelector('.milestone-why');return {color:getComputedStyle(panel.querySelector('.roadmap-event:last-child .roadmap-step')).backgroundColor,chip:r.querySelector('.roadmap-landed')?.textContent,icon:!!r.querySelector('.roadmap-landed svg')};})())`));
       assert.equal(landed.color, colors.success, `${scheme}: landing history uses the success token`);
-      assert.equal(landed.chip, 'landed'); assert.equal(landed.icon, true);
+      assert.equal(landed.chip, 'verified'); assert.equal(landed.icon, false, 'a landed row reads verified, with no checkmark (the person, 18 Oct)');
       await press(chrome, row('#5'));
     }
     for (const width of [375,1280]) for (const scheme of ['light','dark']) {

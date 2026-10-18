@@ -921,3 +921,98 @@ test('a failing never-run test citation is not verified, and signoff says no tes
   assert.equal(existsSync(join(box.root, 'test/ghost-ran')), false, 'signoff does not execute the test either');
   assert.ok(readSignoffs(box.root).some(row => row.id === 'G3'), 'S15 still permits the fixture person to sign');
 });
+
+const SETUP_SPEC = `# Spec
+
+## A · Setup
+- A1 [draft, must] Every page works at phone width. | gate: review
+- A2 [pending, must] It deploys to: Vercel. Choices: Vercel, Netlify. | gate: review
+`;
+
+test('an approved row waits for apply, not for the person [S1,I1,P6]', (t) => {
+  const box = specBox(t, { specSource: SETUP_SPEC });
+  /** The coordinator's resume, as an agent would read it at session start. */
+  const resume = () => {
+    const read = runIn(box, box.root, ['resume']);
+    assert.equal(read.status, 0, read.stdout + read.stderr);
+    return read.stdout;
+  };
+  const before = resume();
+  assert.match(before, /For the person: pullboard spec approve A1; pullboard spec answer A2 "<choice>"/u,
+    'a draft row is offered for approval and a pending question for an answer, never approve');
+
+  assert.equal(box.run('approve', 'A1').status, 0);
+  const halfway = resume();
+  assert.doesNotMatch(halfway, /spec approve A1|approve A1,|Waiting for the person to (approve|decide|answer) A1/u, 'an approved row is no longer asked of the person');
+  assert.match(halfway, /The person already approved A1; pullboard spec apply writes them\./u, 'the approved row is named as waiting for apply');
+  assert.match(halfway, /pullboard spec answer A2 "<choice>"/u, 'the open question is still offered as an answer');
+
+  assert.equal(box.run('answer', 'A2', 'Netlify').status, 0);
+  const decided = resume();
+  assert.match(decided, /The person approved A1, A2; apply them: pullboard spec apply\./u, 'with every row decided, the coordinator is told to apply');
+  assert.match(decided, /^next: pullboard spec apply, then commit SPEC\.md$/mu);
+  assert.doesNotMatch(decided, /Waiting for the person|For the person|spec approve/u, 'nothing is asked of the person again');
+  for (const text of [before, halfway, decided]) assert.doesNotMatch(text, /reword|redraft/iu, 'no surface asks an agent to reword or redraft a row');
+
+  assert.equal(box.run('apply').status, 0);
+  // runFixtureGit throws if the commit fails, so reaching the next line means SPEC.md is committed.
+  runFixtureGit(['commit', '-q', '-m', 'docs(spec): apply row decisions', '--', box.specName], { cwd: box.root, env: box.env, encoding: 'utf8' });
+  const after = resume();
+  assert.doesNotMatch(after, /spec apply|Waiting for the person to (approve|decide|answer)/u, 'once applied and committed, setup moves on');
+});
+
+
+test('a joined seat requests answers for pending questions [S1,I1,P6]', t => {
+  for (const mixed of [false, true]) {
+    const source = '# Spec\n\n## Q · Setup\n- Q1 [pending, must] It deploys to: Vercel. Choices: Vercel, Netlify. | gate: review\n'
+      + (mixed ? '- A1 [draft, must] Every page works at phone width. | gate: review\n' : '');
+    const box = specBox(t, { specSource: source });
+    const configPath = join(box.root, 'pullboard.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf8'));
+    config.lanes.build = { owns: ['app/'] };
+    writeFileSync(configPath, JSON.stringify(config));
+    box.git('add', 'pullboard.json');
+    box.git('commit', '-q', '-m', 'chore: configure the setup fixture lane');
+    const builder = join(box.root, 'builder');
+    box.git('worktree', 'add', '-q', '-b', 'build/setup', builder);
+    const joined = runIn(box, builder, ['join', 'build', '--model', 'Fixture']);
+    assert.equal(joined.status, 0, joined.stderr + joined.stdout);
+    const read = runIn(box, builder, ['resume', '--json']);
+    assert.equal(read.status, 0, read.stderr + read.stdout);
+    const card = JSON.parse(read.stdout);
+    assert.match(card.setup.personCommand, /pullboard spec answer Q1 "<choice>"/u);
+    assert.doesNotMatch([card.setup.question, card.setup.agentNext, card.next].join('\n'), /approv/iu,
+      'pending-only or mixed joined-seat guidance never asks for approval of a question');
+    const expected = mixed ? 'decide Q1, A1' : 'answer Q1';
+    assert.ok(card.setup.question.includes(expected), card.setup.question);
+    assert.ok(card.setup.agentNext.includes(expected), card.setup.agentNext);
+    assert.equal(card.next, card.setup.agentNext);
+    if (mixed) assert.match(card.setup.personCommand, /pullboard spec approve A1; pullboard spec answer Q1/u,
+      'the draft still gets approval while the question gets its answer');
+  }
+});
+
+
+test('a changed approved draft needs a new decision before apply [S1,I1,P6]', t => {
+  const box = specBox(t, { specSource: '# Spec\n\n## A · Setup\n- A1 [draft, must] Every page works at phone width. | gate: review\n' });
+  assert.equal(box.run('approve', 'A1').status, 0);
+  const path = join(box.root, box.specName);
+  writeFileSync(path, readFileSync(path, 'utf8').replace('phone width', 'desktop width'));
+  const staleApply = box.run('apply');
+  assert.equal(staleApply.status, 1, staleApply.stdout + staleApply.stderr);
+  assert.match(staleApply.stderr, /STALE_ROW_DECISION/u);
+  const read = runIn(box, box.root, ['resume', '--json']);
+  assert.equal(read.status, 0, read.stderr + read.stdout);
+  const card = JSON.parse(read.stdout);
+  assert.equal(card.setup.waitingOn, 'person-approval', 'the old decision does not approve the changed text');
+  assert.deepEqual(card.setup.rowIds, ['A1']);
+  assert.equal(card.setup.personCommand, 'pullboard spec approve A1');
+  assert.doesNotMatch(card.next, /spec apply/u, 'applying the stale receipt would loop');
+  assert.equal(box.run('approve', 'A1').status, 0, 'the person can approve the current text');
+  const decided = JSON.parse(runIn(box, box.root, ['resume', '--json']).stdout);
+  assert.equal(decided.setup.waitingOn, 'coordinator-apply');
+  assert.equal(box.run('apply').status, 0);
+  runFixtureGit(['commit', '-q', '-m', 'docs(spec): apply current row decision', '--', box.specName], { cwd: box.root, env: box.env, encoding: 'utf8' });
+  const applied = JSON.parse(runIn(box, box.root, ['resume', '--json']).stdout);
+  assert.doesNotMatch(applied.next, /spec apply|approve A1/u);
+});
