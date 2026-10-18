@@ -21,6 +21,7 @@ import {
   hostedState,
 } from './view/hosted.js';
 import { staleChip } from './view/stale.js';
+import { roadmapBlock } from './view/roadmap-block.js';
 import { applyStateDelta } from './api-http.js';
 
 /** The CLI's default phrases, ordered by depth for the existing prose inventory guard. */
@@ -604,6 +605,8 @@ const STATES = { building: ['building', 'busy'], verify: ['to verify', 'warn'], 
 const chip = (s) => '<span class="chip ' + STATES[s][1] + '">' + STATES[s][0] + '</span>';
 // A verified item's stale mark from src/view/stale.js (#726): Core publishes verdictState and the page only draws it.
 const staleChip = (${staleChip.toString()});
+// A roadmap item's blocker dot and unfolded reason from src/view/roadmap-block.js (#605), read from the summaries held.
+const roadmapBlock = (${roadmapBlock.toString()});
 /** Parse the bounded reference syntax before requesting additional committed line windows. */
 function codeReferenceParts(ref) {
   const match = /^(.+):(\\d+)(?:-(\\d+))?@([0-9a-f]{7,40})$/.exec(String(ref));
@@ -1401,10 +1404,12 @@ function boardSummary(board, state) {
     pending: calls('pending'),
     drafts: calls('draft') + calls('rigor-draft'),
     holds: calls('hold'),
+    laneHolds: state.holds,
     decisions: calls('decision'),
     // What each item's state reads from, so another repo's roadmap can show it as this board's
     // Items tab does, sent back included, and open it here.
-    items: state.items.map((item) => ({ id: item.id, title: item.title, status: item.status, stage: item.stage ?? pipelineStage(item), verdict: item.verdict && { decision: item.verdict.decision } })),
+    items: state.items.map((item) => listFields(item)),
+    agents: state.agents, events: state.events, milestones: state.milestones,
   };
 }
 
@@ -1585,9 +1590,9 @@ function movedSince(project, id, cursor) {
 }
 
 /** Load one opened item's omitted fields, retaining them only while its summary and event cursor stay current. */
-function detailOf(project, item, ask) {
+function detailOf(project, item, ask, root = view.root) {
   if (Array.isArray(item.history)) return { item };
-  const root = view.root, key = root + '\\n' + item.id, summary = JSON.stringify(item);
+  const drawnRoot = view.root, key = root + '\\n' + item.id, summary = JSON.stringify(item);
   const kept = itemDetails.get(key);
   /** Keep the prior detail visible during a refresh, or return the short initial loading state. */
   const waiting = (entry) => (entry?.shown ? { item: { ...item, ...entry.shown } } : { loading: true });
@@ -1601,7 +1606,7 @@ function detailOf(project, item, ask) {
   detailRead = api(boardPath(root) + '/items/' + encodeURIComponent(String(item.id))).then((reply) => { entry.detail = reply.item; },
     (error) => { entry.error = String(error.message || error); }).finally(() => {
     entry.loading = false;
-    if (view.root === root && view.item === item.id) render();
+    if (view.root === drawnRoot && ((root === view.root && view.item === item.id) || view.tab === 'roadmap')) render();
   });
   return waiting(entry);
 }
@@ -2108,18 +2113,19 @@ function renderSide() {
   /** Escape plain text while preserving safe item and code-preview links.
    * @param {string} text
    * @param {Map<string, string>} titles
-   * @param {boolean} allowLinks
+   * @param {boolean|'in-place'} allowLinks
    * @returns {string}
    */
   function linked(text, titles, allowLinks = true, root = view.root) { return String(text ?? '').split(/(#\\d+|(?<![^\\s([{"'\`])[^\\s:@()[\\]{}"'\`]+:\\d+(?:-\\d+)?@[0-9a-f]{7,40}(?![^\\s)\\]}"'\`.,;:!?]))/).map((part, n, parts) => {
-    if (n % 2 && part[0] !== '#') return allowLinks ? codeRef(part, parts.slice(0, n).join('').split('\\n').pop().slice(-2000)) : codeChip(part);
+    if (n % 2 && part[0] !== '#') return allowLinks === true ? codeRef(part, parts.slice(0, n).join('').split('\\n').pop().slice(-2000)) : codeChip(part);
     const id = /^#\\d+$/.test(part) ? String(Number(part.slice(1))) : '';
+    if (id && allowLinks === 'in-place') return '<span class="ref"' + (titles.has(id) ? ' title="' + esc(titles.get(id)) + '"' : '') + '>' + esc(part) + '</span>';
     return id && allowLinks ? '<a class="ref" href="' + esc(itemAddress(id, root)) + '" data-go="item:' + id + '"' + (root === view.root ? '' : ' data-board="' + esc(root) + '"') + (titles.has(id) ? ' title="' + esc(titles.get(id)) + '"' : '') + '>' + esc(part) + '</a>' : esc(part);
   }).join(''); }
   /** Format inline code and recognized command tokens without interpreting markup.
    * @param {string} text
    * @param {Map<string, string>} titles
-   * @param {boolean} allowLinks
+   * @param {boolean|'in-place'} allowLinks
    * @returns {string}
    */
   function inline(text, titles, allowLinks = true, root = view.root) { return String(text ?? '').split(/(\`[^\`]*\`|(?:[^\\s:@()[\\]{}"'\`]+)?:\\d+(?:-\\d+)?@[0-9a-f]{0,40}|${COMMAND_SOURCE}|--[\\w-]+|(?:\\/|\\.\\.?\\/|[\\w.-]+\\/)\\w[\\w./-]*\\.[A-Za-z0-9]+|\\b[0-9a-fA-F]{7,40}\\b|#\\d+)/g).map((part, n, parts) => {
@@ -2136,7 +2142,7 @@ function renderSide() {
         const reason = !partial[1] ? 'missing the repository path' : 'missing a usable commit SHA';
         return '<span class="code no ref-missing" role="status">Code reference unavailable: ' + reason + '.</span>';
       }
-      if (allowLinks && validRef) return codeRef(part, textBefore.slice(-2000));
+      if (allowLinks === true && validRef) return codeRef(part, textBefore.slice(-2000));
       return codeChip(part);
     }
     if (/^(?:${COMMAND_SOURCE}|--[\\w-]+)$/.test(part)) return codeChip(part, 'cmd');
@@ -2240,6 +2246,10 @@ function milestoneItem(entry, p) {
   const root = local ? view.root : named.length === 1 && named[0].ok ? named[0].root : null;
   const id = local ? entry.id : ref ? Number(ref[2]) : null;
   const item = (root === view.root ? p.items : root ? named[0].items : []).find((i) => i.id === id) || null;
+  const source = root === view.root ? p : root ? named[0] : null;
+  const label = local ? '#' + entry.id : String(entry.id);
+  const expanded = view.tab === 'roadmap' && view.roadmapOpen.get(JSON.stringify([view.root, 'i:' + label])) === true;
+  const detail = item && expanded ? detailOf(source, item, true, root) : null;
   // A status the lifecycle declares; the roadmap says unavailable or missing for an item it could not read.
   const read = item || (FLOW.states.some((state) => state.id === entry.status) ? { status: entry.status, verdict: null } : null);
   return {
@@ -2249,6 +2259,12 @@ function milestoneItem(entry, p) {
     titles: new Map((root === view.root ? p.items : root ? named[0].items : []).map((i) => [String(i.id), i.title])),
     state: read ? stateOf(read) : null,
     stale: item ? staleChip(item) : '',
+    block: item ? roadmapBlock(detail?.item || item, {
+      holds: root === view.root ? source.holds : source.laneHolds, items: source.items, name: (id) => agentName(id, source), time: when, state: stateOf,
+      address: (id) => itemAddress(id, root), board: root === view.root ? null : root,
+      releases: (p.milestones || []).filter((milestone) => milestone.items.some((ref) => ref.id === entry.id)).map((milestone) => milestone.name),
+      loading: detail?.loading, error: detail?.error,
+    }) : null,
     stage: item ? pipelineStage(item) : entry.status,
     word: entry.status,
     open: item ? { root, id } : null,
@@ -2297,17 +2313,21 @@ function jumpToRoadmap(key) {
 /**
  * One item's row on the Roadmap, laid out as the Items list lays one out: the dot of its state, its
  * id and title on one line that ends in an ellipsis when cut, and the Items tab's chip. The whole
- * title is the row's tooltip. An item that opens is a button; one that cannot says why instead.
+ * title is the row's tooltip. Every row expands in place; its compact detail alone links over to Items.
  */
 function milestoneRow(row, titles) {
-  const title = row.title ? inline(String(row.title).replace(/\\s+/g, ' '), row.titles || titles, true, row.root) : '<span class="muted">' + esc(row.why) + '</span>';
-  const inner = '<span class="dot' + (row.state ? ' ' + row.state : '') + '"></span><span class="t"><span class="id">' + esc(row.label) + '</span>' + title + '</span>' + (row.stale || '') + (row.state ? chip(row.state) : '<span class="chip">' + esc(row.word) + '</span>');
-  if (!row.open) return '<li><div class="milestone-item" title="' + esc(row.title ? row.title + ' (' + row.why + ')' : row.why) + '">' + inner + '</div></li>';
-  const attributes = 'class="milestone-item" data-go="item:' + row.open.id + '"' + (row.open.root === view.root ? '' : ' data-board="' + esc(row.open.root) + '"') + ' title="' + esc(row.title) + '"';
-  // A title with its own links needs a separate containing control, never a nested button.
-  return title.includes('class="ref"')
-    ? '<li><div ' + attributes + ' role="button" tabindex="0">' + inner + '</div></li>'
-    : '<li><button ' + attributes + ' type="button">' + inner + '</button></li>';
+  const title = row.title ? inline(String(row.title).replace(/\\s+/g, ' '), row.titles || titles, 'in-place', row.root) : '<span class="muted">' + esc(row.why) + '</span>';
+  const label = '<span class="id">' + esc(row.label) + '</span>' + title;
+  const text = row.block?.dot ? '<span class="milestone-title">' + label + '</span>' + row.block.dot : label;
+  const key = 'i:' + row.label, open = view.roadmapOpen.get(JSON.stringify([view.root, key])) === true;
+  const status = (open && row.block?.dot ? '<span class="chip warn roadmap-blocked"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>blocked</span>' : '') + (open && row.stage === 'merged' ? '<span class="chip ok roadmap-landed"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="m5 12 4 4L19 6"/></svg>landed</span>' : row.state ? chip(row.state) : '<span class="chip">' + esc(row.word) + '</span>');
+  const inner = '<span class="dot' + (row.state ? ' ' + row.state : '') + '"></span><span class="t">' + text + '</span>' + (row.stale || '') + '<span class="roadmap-status">' + status + '</span>';
+  const board = row.open && row.open.root !== view.root ? ' data-board="' + esc(row.open.root) + '"' : '';
+  const toggle = 'class="milestone-item' + (row.block?.dot ? ' blocked' : '') + '" data-roadmap-key="' + esc(key) + '" aria-expanded="' + open + '"' + board + ' title="' + esc(row.title ? row.title + (!row.open && row.why ? ' (' + row.why + ')' : '') : row.why) + '"';
+  const detail = row.block ? row.block.detail : '<p>' + esc(row.why || row.word) + '</p>';
+  // Every row stays on the Roadmap; only its explicit Open in Items link navigates (#605).
+  return '<li><div ' + toggle + ' role="button" tabindex="0">' + inner + '</div>'
+    + '<div class="milestone-why"' + (open ? '' : ' hidden') + '>' + detail + '</div></li>';
 }
 
 /** Read the work still to ship before verified items, excluding withdrawn work from every count. */
@@ -3700,6 +3720,7 @@ document.addEventListener('keydown', (event) => {
   const row = event.target.closest('.milestone-item[role="button"]');
   if (event.target !== row) return;
   event.preventDefault();
+  if (row.dataset.roadmapKey !== undefined) { row.click(); return; }
   go(row.dataset.go, row.dataset.board || view.root);
 });
 // In a focused Spec or Doctrine list the arrow keys move the pick, and A approves the picked row and D asks why it is
