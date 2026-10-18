@@ -940,6 +940,10 @@ test('a blocked roadmap item shows its dot and expands to say why [N26]', { time
       assert.equal(await chrome.stable('location.href'), address); assert.equal(await chrome.stable('view.tab'), 'roadmap');
       await press(chrome, row(id));
     }
+    const base = await opened('#1');
+    assert.match(base, /Blocks#2 unclaimed.*#4 sent back/u, 'the dense row names its open dependants in their status colors');
+    assert.equal(await chrome.stable(`${row('#1')}.parentElement.querySelectorAll('.milestone-why a').length`), 1, 'references are chips; only the explicit Items link navigates');
+    await press(chrome, row('#1'));
     for (const scheme of ['light', 'dark']) {
       await chrome.send('Emulation.setEmulatedMedia', { features:[{name:'prefers-color-scheme',value:scheme}] });
       await opened('#6');
@@ -948,7 +952,15 @@ test('a blocked roadmap item shows its dot and expands to say why [N26]', { time
       assert.equal(style.top, 'start', `${scheme}: labels stay at the first value line`);
       assert.ok(Math.abs(style.labelTop-style.valueTop)<2, `${scheme}: wrapped values keep their top-aligned label`);
       assert.notEqual(style.danger, 'rgba(0, 0, 0, 0)', `${scheme}: send-back reason is tinted`);
+      const colors = JSON.parse(await chrome.stable(`JSON.stringify((()=>{const panel=${row('#6')}.parentElement.querySelector('.milestone-why');const probe=document.createElement('span');panel.append(probe);probe.style.color='var(--reject)';const danger=getComputedStyle(probe).color;probe.style.color='var(--accent)';const success=getComputedStyle(probe).color;probe.remove();return {danger,success,reject:getComputedStyle(panel.querySelector('.roadmap-step.no')).backgroundColor,reason:getComputedStyle(panel.querySelector('.roadmap-return')).color};})())`));
+      assert.equal(colors.reject, colors.danger, `${scheme}: send-back history uses the danger token`);
+      assert.equal(colors.reason, colors.danger, `${scheme}: the callout uses the danger token`);
       await press(chrome, row('#6'));
+      await opened('#5');
+      const landed = JSON.parse(await chrome.stable(`JSON.stringify((()=>{const r=${row('#5')},panel=r.parentElement.querySelector('.milestone-why');return {color:getComputedStyle(panel.querySelector('.roadmap-event:last-child .roadmap-step')).backgroundColor,chip:r.querySelector('.roadmap-landed')?.textContent,icon:!!r.querySelector('.roadmap-landed svg')};})())`));
+      assert.equal(landed.color, colors.success, `${scheme}: landing history uses the success token`);
+      assert.equal(landed.chip, 'landed'); assert.equal(landed.icon, true);
+      await press(chrome, row('#5'));
     }
     await chrome.send('Emulation.setDeviceMetricsOverride', {width:375,height:900,deviceScaleFactor:1,mobile:false});
     const remote = await opened('blocked-roadmap-other#2');
