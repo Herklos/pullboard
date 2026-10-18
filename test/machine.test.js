@@ -523,7 +523,7 @@ test('a broken copy of the code fails the check: a refusal added wherever a move
     'MOON_PHASE is raised by refreeze but not declared there',
   ], 'claim and refreeze let a freeze refusal through; submit and verify catch it');
 
-  const inArrow = editedSource('board.js', /^export const canTake = .*$/m, "export const canTake = (agentRoute, itemRoute) => { if (!agentRoute) throw new Refused('NO_ROUTE', 'no route'); return ROUTES.indexOf(itemRoute) <= ROUTES.indexOf(agentRoute); };");
+  const inArrow = editedSource('route-escalation.js', /^export const canTake = .*$/m, "import { Refused } from './refused.js';\nexport const canTake = (agentRoute, itemRoute) => { if (!agentRoute) throw new Refused('NO_ROUTE', 'no route'); return ROUTES.indexOf(itemRoute) <= ROUTES.indexOf(agentRoute); };");
   assert.deepEqual(codeProblems(MACHINE, inArrow).sort(), [
     'NO_ROUTE is raised by accept and reject but not declared there',
     'NO_ROUTE is raised by claim but not declared there',
