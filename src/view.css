@@ -960,10 +960,12 @@ code.inline.long { white-space: break-spaces; overflow-wrap: anywhere; }
 /* Keep the approved invitation readable and its controls reachable at phone widths. */
 .share-gh, .share-again { min-height: var(--tap); }
 .share-x { min-width: var(--tap); min-height: var(--tap); }
+@media (pointer: coarse) { .share-txt a { display: inline-flex; align-items: center; min-height: var(--tap); } }
 @media (width < 600px) {
   .share-card { display: grid; grid-template-columns: 30px minmax(0, 1fr) var(--tap); align-items: start; }
   .share-ic { margin-top: 4px; }
   .share-txt { grid-column: 2; }
+  .share-txt a { display: flex; align-items: center; width: fit-content; min-height: var(--tap); }
   .share-x { grid-column: 3; grid-row: 1; }
   .share-gh { grid-column: 2 / 4; justify-self: start; }
 }

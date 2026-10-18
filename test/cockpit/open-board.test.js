@@ -441,8 +441,9 @@ test('the link invitation closes, stays closed and comes back [N26,H5]', async t
     await chrome.send('Page.navigate', { url: view.link.href });
     await chrome.waitFor("data?.project?.root && !document.body.classList.contains('loading')");
     await chrome.stable('sharingReady');
-    assert.equal(await chrome.stable("document.querySelector('#share-note b')?.textContent"), 'See these boards from any device');
-    assert.equal(await chrome.stable("document.querySelector('#share-note .share-txt > span')?.textContent"), 'Link them to pullboard.dev with your GitHub account.');
+    assert.equal(await chrome.stable("document.querySelector('#share-note b')?.textContent"), 'Open your boards on any device');
+    assert.equal(await chrome.stable("document.querySelector('#share-note .share-txt > span')?.textContent"), 'Sign in to use pullboard.dev while on the go.');
+    assert.deepEqual(JSON.parse(await chrome.stable("JSON.stringify((() => { const a = document.querySelector('#share-note .share-txt a'); return a ? [a.textContent, a.href, a.target, a.rel] : null; })())")), ['How the relay works', 'https://pullboard.dev/relay/', '_blank', 'noopener']);
     assert.equal(await chrome.stable("document.querySelector('#share-start').textContent.trim()"), 'Sign in with GitHub');
     assert.equal(await chrome.stable("Boolean(document.querySelector('#share-start svg') && document.querySelector('#share-note .share-ic svg'))"), true);
     assert.equal(await chrome.stable("document.querySelector('#share-hide')?.getAttribute('aria-label')"), 'Hide this; bring it back from the projects list');
@@ -459,7 +460,7 @@ test('the link invitation closes, stays closed and comes back [N26,H5]', async t
     assert.equal(await chrome.stable("document.querySelector('#share-note').hidden"), false);
     assert.equal(await chrome.stable("document.querySelector('#share-again').hidden"), true);
     const backgrounds = new Set();
-    for (const width of [1280, 390]) {
+    for (const width of [1280, 390, 375]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
       await press(chrome, "document.querySelector('[data-tab=roadmap]')");
       await chrome.waitFor("document.querySelector('.roadmap-list') && document.querySelector('.roadmap-panel')");
@@ -469,10 +470,14 @@ test('the link invitation closes, stays closed and comes back [N26,H5]', async t
           const card = document.querySelector('#share-note'), rect = card.getBoundingClientRect();
           const parts = [...document.querySelectorAll('.roadmap-list, .roadmap-panel')].map(part => part.getBoundingClientRect());
           const button = document.querySelector('#share-start');
+          const link = card.querySelector('.share-txt a'), line = card.querySelector('.share-txt > span'), linkRect = link.getBoundingClientRect();
           return { left: rect.left, right: rect.right, columnsLeft: Math.min(...parts.map(part => part.left)),
             columnsRight: Math.max(...parts.map(part => part.right)), background: getComputedStyle(card).backgroundColor,
             githubBackground: getComputedStyle(button).backgroundColor, overflow: document.documentElement.scrollWidth > innerWidth,
             buttonFits: button.getBoundingClientRect().right <= rect.right,
+            linkFits: linkRect.left >= rect.left && linkRect.right <= rect.right,
+            linkBelowLine: linkRect.top >= line.getBoundingClientRect().bottom - 1,
+            linkColor: getComputedStyle(link).color, entryColor: getComputedStyle(document.querySelector('#share-again')).color,
             closeWidth: document.querySelector('#share-hide').getBoundingClientRect().width,
             closeHeight: document.querySelector('#share-hide').getBoundingClientRect().height,
             buttonHeight: button.getBoundingClientRect().height };
@@ -482,6 +487,9 @@ test('the link invitation closes, stays closed and comes back [N26,H5]', async t
         assert.equal(measured.githubBackground, 'rgb(31, 35, 40)', 'the existing GitHub style stays dark');
         assert.equal(measured.overflow, false, `${width}/${theme}: no horizontal overflow`);
         assert.equal(measured.buttonFits, true);
+        assert.equal(measured.linkFits, true, `${width}/${theme}: the relay link stays inside the card`);
+        assert.equal(measured.linkColor, measured.entryColor, `${width}/${theme}: the relay link uses the view accent`);
+        if (width < 600) assert.equal(measured.linkBelowLine, true, `${width}/${theme}: the relay link wraps below the quiet line`);
         const target = width < 900 ? 44 : 32;
         assert.ok(measured.closeWidth >= target && measured.closeHeight >= target && measured.buttonHeight >= target,
           `${width}/${theme}: close and sign-in retain the view's existing tap target`);

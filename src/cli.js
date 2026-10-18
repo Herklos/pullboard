@@ -2393,8 +2393,9 @@ function readCommands(io, { first, second, rest, values }) {
         io.say(`${milestone.name}: ${milestone.landed}/${milestone.total} landed${when}`);
         if (!milestone.shipped) {
           const summary = milestone.summary;
-          const estimate = summary.estimate
-            ? `; about ${summary.estimate.low} to ${summary.estimate.high} h at today's pace.` : '; estimate unavailable.';
+          const bounds = summary.estimate;
+          const hours = bounds && (bounds.low === bounds.high ? bounds.low : `${bounds.low} to ${bounds.high}`);
+          const estimate = bounds ? `; about ${hours} h at today's pace.` : '; estimate unavailable.';
           io.say(`  ${summary.left} left of ${summary.total}: ${summary.landed} landed, ${summary.landing} landing, ${summary.review} in review, ${summary.building} building, ${summary.waiting} waiting, ${summary.held} held${estimate}`);
         }
         if (milestone.note) io.say(`  ${milestone.note}`);
