@@ -342,7 +342,7 @@ function recordEventContract() {
   const conflicting = addItem(board, { by: coordinator, lane: 'docs', title: 'Conflicting example' });
   claim(board, conflicting, { agentId: returnedBuilder, lane: 'docs', leaseMs: 60_000, freeze: freeze('conflicting') });
   const conflictingCommit = '1'.repeat(40);
-  submit(board, conflicting, { agentId: returnedBuilder, commit: conflictingCommit, tree: 'e'.repeat(40) });
+  submitFixture(board, conflicting, { agentId: returnedBuilder, commit: conflictingCommit, tree: 'e'.repeat(40) });
   verify(board, conflicting, { agentId: reviewer, decision: 'ACCEPT', reason: ACCEPT_REASON, note: 'checked the conflicting example', head: conflictingCommit, digest: 'conflicting', policy: 'agents' });
   reopen(board, conflicting, { agentId: coordinator, conflict: { files: ['docs/formats.md'], trunk: '2'.repeat(40) } });
 
