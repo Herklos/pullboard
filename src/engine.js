@@ -20,7 +20,14 @@ import {
 } from './trunk-conflict.js';
 import { CHECK_ACCEPT_ENGINE } from './check-accept.js';
 import { HEALTH_SENTINEL_ENGINE } from './health-receipts.js';
-import { CAUSE_ENGINE, ENGINE_VERSION, VERIFIER_STANDING_ENGINE, VERDICT_REVIEW_ENGINE, MILESTONE_RANK_ENGINE, ROW_DRAFT_ENGINE } from './machine.js';
+import {
+  CAUSE_ENGINE,
+  ENGINE_VERSION,
+  VERIFIER_STANDING_ENGINE,
+  VERDICT_REVIEW_ENGINE,
+  MILESTONE_RANK_ENGINE,
+  ROW_DRAFT_ENGINE,
+} from './machine.js';
 import {
   MILESTONE_SHIP_ENGINE,
   canonicalMilestoneTarget,

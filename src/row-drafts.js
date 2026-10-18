@@ -12,6 +12,14 @@ import {
   PERSON,
 } from './board.js';
 import { Refused } from './refused.js';
+import { spawnSync } from 'node:child_process';
+import { loadDoctrine } from './doctrine.js';
+import {
+  loadSpec,
+  parseSpec,
+} from './spec.js';
+import { cleanGitEnvironment } from './git.js';
+import { trunkRef } from './trusted-policy.js';
 
 /** The board's recorded row drafts, oldest first. */
 export function rowDrafts(board) {
@@ -42,10 +50,36 @@ export function draftSpecRow(board, { agentId, row }) {
   });
 }
 
+/**
+ * Row ids the trunk holds that a lane's own files may lack: the primary checkout's working spec and
+ * doctrine, which carry a coordinator's uncommitted draft, and the spec on the trunk branch, for a
+ * primary checkout on another computer. A lane's new id skips them, so a lane draft and a coordinator
+ * draft never share an id, whichever comes first.
+ *
+ * @param {string} root the lane worktree
+ * @param {string | null} mainRoot the primary checkout on this computer, if any
+ * @param {any} config
+ */
+export function trunkRowIds(root, mainRoot, config) {
+  const ids = [];
+  if (mainRoot) ids.push(...loadSpec(mainRoot, config).rows, ...loadDoctrine(mainRoot, config).repo.rows);
+  const shown = spawnSync('git', ['show', `${trunkRef(root) ?? 'main'}:${config.spec}`], { cwd: root, env: cleanGitEnvironment(), encoding: 'utf8' });
+  if (shown.status === 0) ids.push(...parseSpec(shown.stdout, { strictGrammarVersion: false }).rows);
+  return ids.map((row) => row.id);
+}
+
 /** Board drafts that SPEC.md does not have yet, for spec apply to write. */
 export function pendingRowDrafts(spec, drafts) {
   const present = new Set(spec.rows.map((row) => row.id));
   return drafts.filter((draft) => !present.has(draft.id));
+}
+
+/**
+ * Board drafts whose id SPEC.md holds as a draft row with other text: a proposal that lost its id to
+ * another writer. spec apply names each one instead of treating it as written.
+ */
+export function clashingRowDrafts(spec, drafts) {
+  return drafts.filter((draft) => spec.rows.some((row) => row.id === draft.id && row.status === 'draft' && row.text !== draft.text));
 }
 
 /** A parsed spec with the board's pending drafts added as draft rows, for readers deciding whether an id is live. */

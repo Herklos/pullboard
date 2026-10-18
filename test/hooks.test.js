@@ -288,3 +288,35 @@ test('a lane agent drafts a row and cites it without leaving its lane [S1,B26]',
   assert.equal(box.run(box.repo, 'spec', 'apply').code, 0);
   assert.match(row(), /\[approved, must\]/u, 'the approved row is applied');
 });
+
+test('a lane draft and a coordinator draft never share an id, in either order [S1,B26]', () => {
+  const box = e2e.project('pullboard spec check');
+  const draft = (cwd, text) => {
+    const result = box.run(cwd, 'spec', 'draft', text);
+    assert.equal(result.code, 0, result.out + result.err);
+    return result.out.trim().split('\n').at(-1);
+  };
+  // Lane first: the coordinator's next id skips the lane's board draft.
+  const laneFirst = draft(box.web, 'A lane row drafted first');
+  const coordinatorAfter = draft(box.repo, 'A coordinator row drafted after');
+  // Coordinator first, committed through the installed hooks: the lane's older files lack it, and its next id still skips it.
+  const coordinatorFirst = draft(box.repo, 'A coordinator row drafted first');
+  box.git(box.repo, 'add', 'SPEC.md');
+  const committed = box.tryGit(box.repo, 'commit', '-q', '-m', `docs(spec): draft two rows [${coordinatorAfter},${coordinatorFirst}]`);
+  assert.equal(committed.status, 0, committed.stderr);
+  const laneAfter = draft(box.web, 'A lane row drafted after');
+  const ids = [laneFirst, coordinatorAfter, coordinatorFirst, laneAfter];
+  assert.equal(new Set(ids).size, 4, `every proposal keeps its own id: ${ids.join(', ')}`);
+  assert.equal(box.tryGit(box.web, 'status', '--porcelain').stdout, '', 'the lane edits no file outside its lane');
+
+  const applied = box.run(box.repo, 'spec', 'apply');
+  assert.equal(applied.code, 0, applied.out + applied.err);
+  assert.doesNotMatch(applied.out, /holds other text/u);
+  const spec = readFileSync(join(box.repo, 'SPEC.md'), 'utf8');
+  for (const [id, text] of [[laneFirst, 'A lane row drafted first'], [coordinatorAfter, 'A coordinator row drafted after'],
+    [coordinatorFirst, 'A coordinator row drafted first'], [laneAfter, 'A lane row drafted after']]) {
+    assert.ok(spec.includes(`- ${id} [draft, must] ${text} | gate: review`), `${id} keeps its own text as a draft after apply`);
+  }
+  const approve = box.run(box.web, 'spec', 'approve', laneAfter);
+  assert.notEqual(approve.code, 0, 'a lane cannot approve its own draft; the person does');
+});

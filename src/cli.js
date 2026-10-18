@@ -104,7 +104,9 @@ import {
 } from './gate.js';
 import { draftRow } from './spec-draft.js';
 import {
+  clashingRowDrafts,
   pendingRowDrafts,
+  trunkRowIds,
   withRowDrafts,
 } from './row-drafts.js';
 import { gateWaitReporter } from './gate-wait.js';
@@ -3991,12 +3993,12 @@ async function specCommand(io, { first, second, rest, values }) {
     const tier = values.aim ? 'aim' : 'must';
     if (!ctx.info.isMain) {
       // A lane cannot write SPEC.md, so its draft is recorded on the board and cited at once; spec apply writes it (#878).
-      const entry = await withBoard(ctx, async (board) => ordered(ctx, board, 'draftSpecRow', [{ agentId: store.agentAt(board, ctx.info.root)?.agent_id, row: draftRow(ctx.info.root, ctx.config, { target: 'spec', text: second.trim(), gate: values.gate?.trim() ?? 'review', tier, section: values.section, taken: store.rowDrafts(board).map((draft) => draft.id), write: false }).row }]));
+      const entry = await withBoard(ctx, async (board) => ordered(ctx, board, 'draftSpecRow', [{ agentId: store.agentAt(board, ctx.info.root)?.agent_id, row: draftRow(ctx.info.root, ctx.config, { target: 'spec', text: second.trim(), gate: values.gate?.trim() ?? 'review', tier, section: values.section, taken: [...store.rowDrafts(board).map((draft) => draft.id), ...trunkRowIds(ctx.info.root, primaryCheckoutRoot(ctx.info), ctx.config)], write: false }).row }]));
       io.result?.({ id: entry.id, row: entry });
       io.say(entry.id);
       return 0;
     }
-    const { id, row } = draftRow(ctx.info.root, ctx.config, { target: 'spec', text: second.trim(), gate: values.gate?.trim() ?? 'review', tier, section: values.section });
+    const { id, row } = draftRow(ctx.info.root, ctx.config, { target: 'spec', text: second.trim(), gate: values.gate?.trim() ?? 'review', tier, section: values.section, taken: (hookRead(ctx, (board) => store.rowDrafts(board)) ?? []).map((draft) => draft.id) });
     io.result?.({ id, row });
     io.say(id);
     return 0;
@@ -4051,6 +4053,7 @@ async function specCommand(io, { first, second, rest, values }) {
       // A lane's board drafts (#878) reach SPEC.md as draft rows at their own ids; the person approves them there as before.
       const drafted = pendingRowDrafts(loadSpec(ctx.info.root, ctx.config), store.rowDrafts(board)).map((draft) => draftRow(ctx.info.root, ctx.config, { target: 'spec', text: draft.text, gate: draft.gate, tier: draft.tier, section: /^(.*?)\d+$/u.exec(draft.id)[1], id: draft.id }));
       drafted.forEach((row) => io.say(`${row.file}: ${row.id} drafted from a lane, for the person to approve`));
+      clashingRowDrafts(loadSpec(ctx.info.root, ctx.config), store.rowDrafts(board)).forEach((draft) => io.say(`${ctx.config.spec}: ${draft.id} holds other text, so the draft by ${draft.by} was not written; shout ${draft.by} to run pullboard spec draft again and cite the new id`));
       const plan = planRowApply(ctx.info.root, ctx.config, store.rowDecisions(board));
       writeRowApply(ctx.info.root, plan);
       let applied;
