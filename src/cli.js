@@ -294,10 +294,7 @@ import {
   registerProjectAndLink,
   registeredProjectRootsSnapshot,
 } from './projects.js';
-import {
-  milestoneRoadmap,
-  withdrawWithMilestones,
-} from './roadmap.js';
+import * as roadmapView from './roadmap.js';
 import {
   rigorLines,
   rigorReport,
@@ -2417,7 +2414,7 @@ function readCommands(io, { first, second, rest, values }) {
     roadmap: () => {
       if (first || second || rest.length) throw new Refused('USAGE', 'pullboard roadmap takes no arguments');
       const ctx = context(io);
-      const milestones = withBoard(ctx, (board) => milestoneRoadmap(ctx.info.root, board));
+      const milestones = withBoard(ctx, (board) => roadmapView.milestoneRoadmap(ctx.info.root, board));
       io.result?.({ milestones });
       if (!milestones.length) io.say('no milestones yet; the coordinator can add one with pullboard milestone add');
       for (const milestone of milestones) {
@@ -2426,9 +2423,7 @@ function readCommands(io, { first, second, rest, values }) {
         io.say(`${milestone.name}: ${milestone.landed}/${milestone.total} landed${when}`);
         if (!milestone.shipped) {
           const summary = milestone.summary;
-          const bounds = summary.estimate;
-          const hours = bounds && (bounds.low === bounds.high ? bounds.low : `${bounds.low} to ${bounds.high}`);
-          const estimate = bounds ? `; about ${hours} h at today's pace.` : '; estimate unavailable.';
+          const estimate = roadmapView.roadmapEstimate(summary);
           io.say(`  ${summary.left} left of ${summary.total}: ${summary.landed} landed, ${summary.landing} landing, ${summary.review} in review, ${summary.building} building, ${summary.waiting} waiting, ${summary.held} held${estimate}`);
         }
         if (milestone.note) io.say(`  ${milestone.note}`);
@@ -3722,7 +3717,7 @@ function workCommands(io, args) {
       io.say(`#${first} merged as ${commit.slice(0, 12)}`);
       return 0;
     }),
-    withdraw: () => act((ctx, board, me) => withdrawWithMilestones(ctx, board, me, idArg(first),
+    withdraw: () => act((ctx, board, me) => roadmapView.withdrawWithMilestones(ctx, board, me, idArg(first),
       [second, ...rest].filter(Boolean).join(' '), ordered)),
     refreeze: () => act(async (ctx, board, me) => {
       const result = await ordered(ctx, board, 'refreeze', [idArg(first), { agentId: me.id, freeze: freezer(ctx, { captureVerifyPolicy: true, board }) }]);
