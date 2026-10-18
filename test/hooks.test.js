@@ -3,14 +3,18 @@
  */
 import assert from 'node:assert/strict';
 import { runFixtureExecFile as execFileSync, runFixtureGit } from './fixture-child.js';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import { defaults } from '../src/config.js';
 import { addedLines, blockedPaths, commitCitationWarnings, commitMsgProblems, hookScript, matchesPattern, preCommitProblems, secretsIn, unwiredHookProblems } from '../src/hooks.js';
 import { parseSpec } from '../src/spec.js';
 import { Refused } from '../src/refused.js';
+import { createE2eHelpers } from './e2e-helpers.js';
+
+const e2e = createE2eHelpers();
+after(e2e.cleanup);
 
 const SPEC = { ...parseSpec('## G\n- G1 [approved, must] One. | gate: t\n- G2 [retired] Gone.\n'), name: 'SPEC.md' };
 const RULES = defaults().commits;
@@ -81,7 +85,7 @@ test('a clean header citing a live id passes [C1, C2]', () => {
 });
 
 test('feat and fix cite ids; cited ids exist and are not retired [C2]', () => {
-  assert.match(check('feat(web): add the page')[0], /end the header with the spec rows this feat serves, like \[G1,G2\]/);
+  assert.match(check('feat(web): add the page')[0], /end the header with the spec rows this feat serves, like \[G1\]/);
   assert.match(check('fix: patch [G9]')[0], /G9 is not in SPEC.md/);
   assert.match(check('fix: patch [G2]')[0], /G2 is retired/);
 });
@@ -109,7 +113,8 @@ test('header format, length, case and period [C1]', () => {
     'start the subject with a lowercase letter (saw "Explain lanes.")',
     'remove the period at the end of the subject',
   ]);
-  assert.match(check('feat: x [G K P D]')[0], /cite only rows that exist and are live, separated by commas like \[G1,G2\]/);
+  assert.match(check('feat: x [G K P D]')[0], /cite only rows that exist and are live, separated by commas \(/);
+  assert.match(check('feat: x [G K P D]')[0], /like \[G1\]/, 'invalid-id guidance names only an approved row that exists');
   assert.deepEqual(check('docs: explain lanes\nsecond line'), ['leave a blank line after the header']);
 });
 
@@ -193,4 +198,58 @@ test('pre-commit still refuses and redacts a staged text secret [P4]', (t) => {
 test('a refused merge message points to the message git writes, which is exempt [C4]', () => {
   assert.match(check('merge: include store date validation')[0], /For a merge, keep the message git writes, which is exempt: git merge --no-edit/);
   assert.deepEqual(check("Merge branch 'store/1'"), []);
+});
+
+
+test('a spec-less feature commit is told a path that works [S1,B26]', () => {
+  const box = e2e.sandbox();
+  const root = join(box.dir, 'newcomer');
+  mkdirSync(root);
+  box.git(root, 'init', '-q', '-b', 'main');
+  const initialized = box.run(root, 'init');
+  assert.equal(initialized.code, 0, initialized.err || initialized.out);
+  const source = readFileSync(join(root, 'SPEC.md'), 'utf8');
+  assert.match(source, /- G1 \[draft, must\]/u, 'the fresh spec visibly contains a fenced format example');
+  const listed = box.run(root, 'spec', '--json');
+  assert.equal(listed.code, 0, listed.err || listed.out);
+  assert.deepEqual(JSON.parse(listed.out).rows.filter(row => row.file === 'SPEC.md'), [], 'the example is not a real row');
+  assert.equal(box.run(root, 'lane', 'add', 'app', '--owns', 'app/').code, 0);
+  mkdirSync(join(root, 'app'));
+  box.git(root, 'add', '-A');
+  box.git(root, 'commit', '-q', '-m', 'chore: set up the private board');
+  const added = box.run(root, 'add', 'app', 'Build the first useful thing', '--criterion', 'The first useful thing works.', '--json');
+  assert.equal(added.code, 0, added.err || added.out);
+  assert.equal(JSON.parse(added.out).item.item_spec_ids, '');
+  writeFileSync(join(root, 'app/first.txt'), 'first useful thing\n');
+  box.git(root, 'add', '--', 'app/first.txt');
+  const missing = box.tryGit(root, 'commit', '-q', '-m', 'feat(app): build the first useful thing');
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.stderr, /pullboard spec draft "<text>"/u, 'the actual installed hook names a supported command');
+  assert.match(missing.stderr, /person.*approv/iu, 'the next step honestly names the person approval');
+  assert.doesNotMatch(missing.stderr, /like \[G1,G2\]|as a chore|use chore/iu, 'the hook neither invents ids nor mislabels the feature');
+  const malformed = box.tryGit(root, 'commit', '-q', '-m', 'Added the first useful thing');
+  assert.notEqual(malformed.status, 0);
+  assert.doesNotMatch(malformed.stderr, /\[G7\]/u, 'format guidance also avoids an invented citation');
+  const copiedExample = box.tryGit(root, 'commit', '-q', '-m', 'feat(app): build the first useful thing [G1]');
+  assert.notEqual(copiedExample.status, 0);
+  assert.match(copiedExample.stderr, /G1 is not in SPEC\.md/u);
+  assert.match(copiedExample.stderr, /fenced.*example.*not.*rows/iu, 'the refusal explains why the visible format example is not a row');
+  const drafted = box.run(root, 'spec', 'draft', 'The first useful thing works.', '--json');
+  assert.equal(drafted.code, 0, drafted.err || drafted.out);
+  const id = JSON.parse(drafted.out).id;
+  for (const args of [['spec', 'approve', id], ['spec', 'apply']]) {
+    const result = box.run(root, ...args);
+    assert.equal(result.code, 0, result.err || result.out);
+  }
+  box.git(root, 'add', '-A');
+  const committed = box.tryGit(root, 'commit', '-q', '-m', `feat(app): build the first useful thing [${id}]`);
+  assert.equal(committed.status, 0, committed.failure || committed.stderr || committed.stdout);
+
+  for (const [open, close] of [['```markdown', '```'], ['~~~markdown', '~~~'], ['   ````markdown', '   ````'], ['````markdown\n```', '````']]) {
+    const fenced = parseSpec(`## G\n${open}\n- G1 [approved, must] Example only. | gate: true\n${close}\n- R9 [approved, must] Real requirement. | gate: true\n`);
+    assert.deepEqual(fenced.rows.map(row => row.id), ['R9'], `only real rows are read around ${open}`);
+    const advice = commitMsgProblems('feat(app): add a feature', { rules: RULES, spec: { ...fenced, name: 'SPEC.md' } });
+    assert.match(advice.join('\n'), /\[R9\]/u, 'an approved board names an id that really exists');
+    assert.doesNotMatch(advice.join('\n'), /\[G1(?:,G2)?\]/u, 'a fenced example is never suggested as a citation');
+  }
 });
