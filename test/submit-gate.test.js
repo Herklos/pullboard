@@ -251,6 +251,42 @@ test('a child process listen denial reads as sandbox blocked [C7,B26]', (t) => {
   assert.doesNotMatch(barePythonOutput, /GATE_RED/u);
 });
 
+/** A failed project command keeps its first diagnostic even when later output is unstructured. */
+test('a red gate on submit shows what the gate said [C7,V10]', (t) => {
+  for (const stream of ['log', 'error']) {
+    let box = privateRepo(t);
+    const first = stream === 'log' ? 'G1: merge main to get the missing row' : 'G1 error: commit cites it, but it was never committed to the spec';
+    put(box.root, 'pullboard.json', JSON.stringify({ gate: 'node test/gate-diagnostic.mjs', spec: 'SPEC.md', verify: 'any', lease: '2h' }));
+    put(box.root, 'test/gate-diagnostic.mjs', [
+      "import { existsSync } from 'node:fs';",
+      "if (existsSync('src/RED')) {",
+      `  console.${stream}(${JSON.stringify(first)});`,
+      `  for (let n = 0; n < 80; n++) console.${stream}('detail ' + n + ': ' + 'x'.repeat(100));`,
+      '  process.exit(1);',
+      '}',
+    ].join('\n'));
+    commitAll(box);
+    box = builderRepo(box);
+    const added = box.coordinator('add', 'build', 'Show the gate diagnostic');
+    assert.equal(added.code, 0, added.err);
+    assert.equal(box.run('claim', '1').code, 0);
+    put(box.root, 'src/RED', 'red\n');
+    commitAll(box, 'feat(core): exercise gate output [G1]');
+    const submitted = box.run('submit', '1', '--json');
+    assert.notEqual(submitted.code, 0);
+    const refusal = JSON.parse(submitted.out).error;
+    assert.equal(refusal.code, 'GATE_RED');
+    assert.ok(refusal.message.includes(first), 'the first diagnostic must survive the bounded refusal');
+    assert.match(refusal.message, /\d+ nonempty output lines omitted/u);
+    assert.ok(refusal.message.length < 5000, 'a refusal must remain bounded');
+    const log = box.git('rev-parse', '--git-path', 'pullboard-submit.log').trim();
+    const raw = readFileSync(resolve(box.root, log), 'utf8');
+    assert.ok(raw.includes(first));
+    assert.ok(raw.includes('detail 79:'), 'the complete gate output remains available in its log');
+    assert.equal(JSON.parse(box.run('show', '1', '--json').out).item_status, 'claimed');
+  }
+});
+
 test('an ordinary failure stays gate red [C7,B26]', (t) => {
   const source = [
     "import { test } from 'node:test';",
