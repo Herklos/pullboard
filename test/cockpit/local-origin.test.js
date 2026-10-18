@@ -95,7 +95,8 @@ async function hostedStandIn(chrome, pages, styles, local) {
         let responseBody = reply.body;
         if (asked.method === 'GET' && reply.status === 200 && local.versionOverride && address.pathname.startsWith('/api/v1/boards/') && address.pathname.endsWith('/state')) {
           const document = JSON.parse(responseBody);
-          document.state.releaseNotes.version = local.versionOverride;
+          if (document.state) document.state.releaseNotes.version = local.versionOverride;
+          else if (document.delta?.replace?.releaseNotes) document.delta.replace.releaseNotes.version = local.versionOverride;
           responseBody = JSON.stringify(document);
         }
         return chrome.send('Fetch.fulfillRequest', {
