@@ -1,4 +1,4 @@
-import { HEALTH_SENTINEL_ENGINE } from '../src/health-receipts.js';
+import { MILESTONE_SHIP_ENGINE } from '../src/milestones.js';
 /** Declared models replay with their recorded engine and survive board exchange [O8,O3,H16]. */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -8,15 +8,17 @@ import { exportBoard, importBoard } from '../src/exchange.js';
 import { ENGINE_VERSION } from '../src/machine.js';
 import { VERIFIER_STANDING_ENGINE } from '../src/machine.js';
 import { RIGOR_NOTICE_ENGINE } from '../src/rigor-source.js';
+import { HEALTH_SENTINEL_ENGINE } from '../src/health-receipts.js';
 import { configProblems, defaults, loadConfig } from '../src/config.js';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 test('model declarations and event snapshots retain all recorded engine semantics [O8,O3,H16]', (t) => {
-  assert.ok(ENGINE_VERSION >= RIGOR_NOTICE_ENGINE, 'the next writer preserves every historical model snapshot through main engine 33');
+  assert.ok(ENGINE_VERSION >= RIGOR_NOTICE_ENGINE, 'the current writer preserves historical model snapshots');
   assert.ok(ENGINE_VERSION >= HEALTH_SENTINEL_ENGINE, 'the current writer retains the sentinel minimum and historical behavior');
   assert.ok(ENGINE_VERSION >= VERIFIER_STANDING_ENGINE, 'the current writer retains verifier standing');
+  assert.ok(ENGINE_VERSION >= MILESTONE_SHIP_ENGINE, 'the current writer retains milestone shipping');
   for (const version of Array.from({ length: ENGINE_VERSION }, (_, index) => index + 1)) {
     const board = store.openBoard(':memory:');
     t.after(() => store.closeBoard(board));
