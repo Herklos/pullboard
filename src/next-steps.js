@@ -11,6 +11,8 @@ import { RECORDED_GENERIC_NEXT } from './recorded-refusal.js';
 
 /** @type {Readonly<Record<string, string>>} */
 export const NEXT_STEPS = Object.freeze({
+  HEALTH_FINDINGS: 'run pullboard health to read the current findings, then run pullboard resume to capture a fresh observation',
+  HEALTH_SCAN_STALE: 'run pullboard resume again to scan the current board before posting sentinel notices',
   A5_GRAMMAR_VERSION: 'upgrade Pullboard: npm install -g pullboard@latest',
   AGENT_SESSION: 'run pullboard takeover from the agent session that should own this checkout',
   ALREADY_ANSWERED: 'read the answer with pullboard inbox; ask again with a new pullboard shout <to> "<text>" --decision',

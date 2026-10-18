@@ -30,6 +30,7 @@ import {
   recordLandingBatch,
   recordLandingWaiver,
   recordLandingFlake,
+  recordHealthFindings,
   openBoard,
   passDecision,
   PERSON,
@@ -342,6 +343,13 @@ function recordEventContract() {
   withdraw(board, withdrawn, { agentId: coordinator, reason: 'duplicate fixture' });
   holdLane(board, 'view', { agentId: coordinator, reason: 'fixture hold' });
   releaseLane(board, 'view', { agentId: coordinator });
+  // A synthetic health observation exercises receipt fields only; the health tests prove scanning.
+  const healthFinding = { key: `CLAIM_LAPSED:item:${corrected}`, cause: 'CLAIM_LAPSED', item: corrected,
+    subject: `#${corrected}`, title: 'claim lapsed', since: '2026-10-17T19:00:00.000Z',
+    why: 'the format example names its owner', next: `pullboard claim ${corrected}`, owner: { who: builder } };
+  const revision = () => events(board).at(-1)?.event_id ?? 0;
+  recordHealthFindings(board, { agentId: coordinator, observedRevision: revision(), findings: [healthFinding] });
+  recordHealthFindings(board, { agentId: coordinator, observedRevision: revision(), findings: [] });
   const rows = events(board).map((row) => ({ ...row, detail: JSON.parse(row.event_detail) }));
   closeBoard(board);
   return { rows, actors: { [coordinator]: 'coordinator', [builder]: 'builder', [returnedBuilder]: 'builder', [reviewer]: 'reviewer', [PERSON]: 'person', board: 'board' } };
@@ -613,6 +621,9 @@ test('[A5] schema, versions, event kinds and event detail fields match live beha
     shout: 'sender',
     pass: 'coordinator',
     answer: 'answerer',
+    'health-scan': 'observing agent',
+    'health-failure': 'sentinel',
+    'health-resolved': 'sentinel',
   };
   for (const row of actualRows) {
     const kind = row.event_kind;

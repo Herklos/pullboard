@@ -14,6 +14,7 @@ import {
   IMPLIES_ENGINE,
 } from './implies.js';
 import { CHECK_ACCEPT_ENGINE } from './check-accept.js';
+import { HEALTH_SENTINEL_ENGINE } from './health-receipts.js';
 import {
   CAUSE_ENGINE,
   ENGINE_VERSION,
@@ -45,6 +46,7 @@ export const ENGINE_OPERATIONS = Object.freeze([
   'addMilestone', 'editMilestoneItems', 'orderMilestoneItems', 'moveMilestone', 'editMilestone', 'removeMilestone',
   'recordRowDecisions', 'applyRowDecisions', 'appendFact',
   'recordLandingBatch', 'recordLandingWaiver', 'recordLandingFlake', 'finishLandingBatch', 'acceptCheck',
+  'recordHealthFindings',
 ]);
 
 /** Engine version at which each ordered operation first has stable replay semantics. */
@@ -52,6 +54,7 @@ const OPERATION_ENGINE = Object.freeze({ orderMilestoneItems: MILESTONE_RANK_ENG
 
 /** Dependency edits, causes, sealed reviews and submission proofs retain distinct recorded engine meanings. */
 function minimumOperationEngine(operation, args, board) {
+  if (operation === 'recordHealthFindings') return HEALTH_SENTINEL_ENGINE;
   const options = args[1];
   if (operation === 'submit' && options?.submissionProof !== undefined
     || operation === 'recordLandingBatch' && args[0]?.batch?.invariantEvidence !== undefined) return SUBMISSION_PROOF_ENGINE;

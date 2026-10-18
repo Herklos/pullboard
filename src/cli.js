@@ -174,6 +174,7 @@ import {
 import { Refused } from './refused.js';
 import { personNeeds } from './needs.js';
 import { personNeedsState } from './needs-state.js';
+import { startServeSentinel } from './serve-sentinel.js';
 import {
   commitCitations,
   committedIds,
@@ -308,6 +309,7 @@ import { rigorDraft } from './rigor-draft.js';
 import { serveApi } from './api.js';
 import { watchCommand } from './watch.js';
 import { serveMcp } from './mcp.js';
+import { scanHealthSentinel } from './health-sentinel.js';
 import {
   doctorProblems,
   doctrineProblems,
@@ -1628,8 +1630,16 @@ function boardSetup(ctx, card, identity) {
  * @param {Awaited<ReturnType<typeof keepViewRunning>>} view what keeping the background view running did
  * @returns {number}
  */
-function resumeHere(io, view) {
+async function resumeHere(io, view) {
   const ctx = context(io);
+  await withBoard(ctx, async board => {
+    const me = whoAmI(ctx, board);
+    const observation = scanHealthSentinel(ctx.file, { root: ctx.info.root, config: ctx.config, now: ctx.clock.now() });
+    if (observation) {
+      try { await ordered(ctx, board, 'recordHealthFindings', [{ agentId: me.id, ...observation }]); }
+      catch (error) { if (!(error instanceof Refused) || error.code !== 'HEALTH_SCAN_STALE') throw error; }
+    }
+  });
   const { root, isMain } = ctx.info;
   const mainRoot = primaryCheckoutRoot(ctx.info);
   const worktreeConfig = mainRoot ? (isMain ? ctx.config : loadConfig(mainRoot)) : null;
@@ -1863,13 +1873,14 @@ async function viewHere(io, values) {
   try {
     // The adapter override is carried only by the in-process command streams, for private CLI fixtures.
     view = await (io.serveView ?? serveView)({ port, isMain: codeIsFromMain(), ...(projectRoot ? { projectRoot } : {}) });
+    const sentinel = startServeSentinel({ projectRoot });
     const boundAt = new Date().toISOString();
     const closeServer = view.close;
     view = {
       ...view,
       pid: process.pid,
       boundAt,
-      close: async () => { forgetView(view.port); await closeServer(); },
+      close: async () => { await sentinel.close(); forgetView(view.port); await closeServer(); },
     };
     try {
       rememberView({ port: view.port, secret: new URL(view.url).searchParams.get('k'), pid: process.pid, boundAt,

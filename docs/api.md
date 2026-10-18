@@ -216,6 +216,8 @@ The causes, each with its owner:
 
 The current release is the roadmap's first milestone with unverified local work; an unplanned item counts as current. A release is the newest tag named like `v1.2.3` or `1.2.3`, dated by its creation, and its landed work is every item first recorded merged after it. A repository with no such tag has no release deadline. The trunk is the primary checkout's branch, or the retained trunk when that checkout is detached.
 
+The health sentinel runs this read-only scan on `pullboard resume` and every ten minutes while the background view runs. New findings and resolutions arrive as ordinary shouts from `sentinel` to the coordinator and the finding’s owner, with its cause and next step. A continuing episode is not posted again. Ordered engine-42 receipts retain the observed revision; a concurrent board change defers the observation to a later resume instead of publishing stale findings. Health never changes claim state. Set `health.sentinel` to `false` in this repo’s `pullboard.json` or in machine settings to turn automatic scans off. Repeated `health-failure` receipts are visible to `pullboard rigor`, including a recurring work cause with no changed code commit.
+
 `pullboard.json` sets the thresholds under `health`, each a duration like `90m`, `2h` or `1d`: `stuck` (default `1h`), `holds` (default `1d`) and `release` (default `1d`). A value that is not a duration is refused as `BAD_CONFIG`.
 
 ## Item threads
