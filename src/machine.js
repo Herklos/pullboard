@@ -9,11 +9,28 @@
  * broken copy, and checks the declaration against the refusals board.js and cli.js raise today.
  */
 
-/** Executable move semantics, carried by every sealed move and retained during replay [H16]. */
 import { RIGOR_NOTICE_ENGINE } from './rigor-source.js';
-export const ENGINE_VERSION = 51;
 
-/** The engine at which a reject, reopen or person fact can carry a cause key (#713); older moves replay unchanged [D1,H16]. */
+/** First writer for withdraw-and-remove milestone behavior; shipment remains engine 45. */
+export const WITHDRAW_MILESTONE_ENGINE = 51;
+
+/** First engine that automatically escalates an item's second rejection at its current route [B15]. */
+export const AUTO_ESCALATE_ENGINE = 50;
+
+/** Executable move semantics, carried by every sealed move and retained during replay [H16]. */
+export const ENGINE_VERSION = Math.max(
+  AUTO_ESCALATE_ENGINE,
+  RIGOR_NOTICE_ENGINE,
+  WITHDRAW_MILESTONE_ENGINE,
+);
+
+/**
+ * The engine whose relay moves carry seat provenance and verifier standing (#579). It is its own
+ * constant because engine slots are allotted per item: whoever lands second renumbers this line.
+ */
+export const VERIFIER_STANDING_ENGINE = 48;
+
+/** The engine at which reject, reopen and person facts may carry cause keys [D1,H16]. */
 export const CAUSE_ENGINE = 30;
 
 /** First released engine binding the checked composition, review trunk and paths [E8,H16]. */
@@ -143,7 +160,7 @@ export const GUARDS = [
   { id: 'atSubmittedCommit', refuse: 'NOT_AT_COMMIT', alsoRefuses: [{ code: 'OUTSIDE_LANE', next: 'restore foreign paths before accepting' }, { code: 'NO_POLICY', next: 'restore the frozen policy objects' }, { code: 'BAD_CONFIG', next: 'repair the committed coordinator configuration' }, { code: 'GIT_GRAFTS', next: 'ask the coordinator to remove the Git graft file before retrying' }], rule: "the caller's checkout contains the submitted commit", next: 'git switch --detach <commit>', source: 'cli' },
   { id: 'verdictReviewRecorded', refuse: 'BAD_VERDICT_REVIEW', rule: 'a new review binds the submitted commit, its exact checked commit, a valid trunk commit and canonical candidate paths', next: 'restore the submitted Git objects and retry the review with current Pullboard', source: 'board' },
   { id: 'reviewTreeCurrent', refuse: 'STALE_VERDICT', alsoRefuses: [{ code: 'DIRTY', next: 'commit the reviewed composition before re-reviewing' }, { code: 'UNTRACKED', next: 'commit or ignore untracked files before re-reviewing' }, { code: 'VERDICT_TRUNK_MOVED', next: 'merge the latest main and re-review the clean composition' }], rule: 'a stale acceptance is re-reviewed at a clean HEAD containing the current trunk, which stays fixed through its check', next: 'merge current main into the submitted commit and re-review it', source: 'cli' },
-  { id: 'notBuilder', refuse: 'SELF_VERIFY', rule: 'the caller did not build it', next: 'another agent verifies it: pullboard next --verify', source: 'board' },
+  { id: 'notBuilder', refuse: 'SELF_VERIFY', alsoRefuses: [{ code: 'VERIFIER_STANDING', next: 'the coordinator makes an independent verifier from the main checkout: pullboard worktree <lane> --model "<model name>"' }], rule: 'the caller did not build it; on a linked board, at engine 48 or newer, the caller was enrolled through the relay by a line of creating seats from the coordinator that includes neither the builder nor a machine join', next: 'another agent verifies it: pullboard next --verify', source: 'board' },
   { id: 'policyAllows', refuse: 'COORDINATOR_VERIFIES', rule: "the repo's verify policy lets the caller verify this lane's work", next: 'the coordinator verifies it', source: 'board' },
   { id: 'familyAllows', refuse: 'O2_FAMILY_MATCH', rule: 'the builder and verifier have different declared families; an undeclared family counts as a match', next: 'ask the coordinator for a verifier from another declared family', source: 'board', when: 'only when verify.family is require' },
   { id: 'reviewFree', refuse: 'REVIEW_HELD', rule: 'no other agent holds its review under a live lease', next: 'pullboard next --verify, which passes over reviews another agent holds', source: 'board' },
@@ -190,7 +207,7 @@ export const MOVES = [
   {
     verb: 'reject', from: ['submitted', 'verified'], to: 'open', by: ['agent', 'coordinator'], refuse: 'NOT_SUBMITTED',
     guards: ['coordinatorSaysAs', 'joined', 'itemExists', IN_STATE, 'atSubmittedCommit', 'notMerged', 'verdictReviewRecorded', 'reviewTreeCurrent', 'notBuilder', 'routeAllows', 'policyAllows', 'familyAllows', 'reviewFree', 'criterionUnchanged', 'reasonCoded', 'noteGiven', 'causeWellFormed'],
-    alsoRefuses: [{ code: 'LAND_HEADER', rule: 'a displayed merge command fits the commit-header limit', next: 'shorten the item title or cited rows so the merge header fits' }, { code: 'ENGINE_VERSION', rule: 'a verdict that implies items replays only under engine 20 or later', next: 'upgrade Pullboard on every linked device before using --implies' }],
+    alsoRefuses: [{ code: 'LAND_HEADER', rule: 'a displayed merge command fits the commit-header limit', next: 'shorten the item title or cited rows so the merge header fits' }, { code: 'ENGINE_VERSION', rule: 'a verdict that implies items replays only under engine 20 or later', next: 'upgrade Pullboard on every linked device before using --implies' }, { code: 'NOT_YOURS', rule: 'the automatic escalation is authorized as the coordinator or item holder', next: 'ask the coordinator to inspect the item and its route' }, { code: 'CLOSED', rule: 'the rejected item remains open or claimed when automatic escalation starts', next: 'pullboard show <id>, then ask the coordinator to inspect its current state' }],
     command: 'pullboard verify <id> reject --reason CODE --note "..."',
   },
   {

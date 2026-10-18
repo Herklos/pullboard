@@ -39,6 +39,7 @@ import { terminalQr } from './qr.js';
 import {
   DEFAULT_RELAY,
   originRepository,
+  relayPersonCoordinator,
   syncRelay,
 } from './relay.js';
 import { ENGINE_VERSION } from './machine.js';
@@ -277,6 +278,8 @@ export async function relayJoin(root, code, address, io) {
     }
     throw error;
   }
+  // This machine's coordinator token comes from the same person sign-in, never the machine credential.
+  await relayPersonCoordinator(root, signed.token, io);
   await syncRelay(root, io);
   const name = listApiProjects().find(project => project.root === repoInfo(root).root)?.name ?? bundle.repository;
   const notice = `Joined ${name}. This brought one board; for another, run pullboard relay pair in that board on the linked computer. Run pullboard status to read it.`;

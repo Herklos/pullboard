@@ -690,7 +690,8 @@ test('an agent cannot answer a pending row [P6,B26,E3]', (t) => {
   const agentError = JSON.parse(agent.stdout).error;
   assert.equal(agentError.code, 'B26_PERSON_APPROVAL', 'an agent worktree is refused even from a clean terminal');
   assert.match(agentError.message, /only the person answers/u);
-  assert.match(agentError.next, /pullboard view/u);
+  assert.match(agentError.next, /pullboard shout coordinator.*--decision/u);
+  assert.doesNotMatch(agentError.next, /ask the person|pullboard view/u);
   assert.equal(readFileSync(file, 'utf8'), before, 'refused answers leave the spec bytes alone');
   assert.equal(boardRowDecisions(box), decisions, 'refused answers record no row decision');
 

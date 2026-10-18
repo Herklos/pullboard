@@ -1,0 +1,80 @@
+/** Model route policy and rejection receipts for automatic escalation [B13,B15,H16]. */
+import { COORDINATOR } from './config.js';
+import { AUTO_ESCALATE_ENGINE } from './machine.js';
+import { verdictsFor } from './verdict-reviews.js';
+
+/**
+ * Who can take an item (B13), as tiers in order of the model an item needs: `light` is work a small
+ * or local model can build from its brief, `mid` needs a capable general model, and
+ * `strong` needs a frontier model's judgment. An agent's route is set when it joins; it takes items
+ * at its tier and below.
+ */
+export const ROUTES = ['light', 'mid', 'strong'];
+
+/**
+ * True when an agent on `agentRoute` may build or verify an item routed `itemRoute`.
+ *
+ * @param {string} agentRoute
+ * @param {string} itemRoute
+ * @returns {boolean}
+ */
+export const canTake = (agentRoute, itemRoute) => ROUTES.indexOf(itemRoute) <= ROUTES.indexOf(agentRoute);
+
+/** Return rejected verdict receipts since the item's most recent route change [B15,B13].
+ *
+ * @param {any} board
+ * @param {number} id
+ * @returns {object[]}
+ */
+function rejectionsSinceRouteChange(board, id) {
+  const thread = board.db.prepare('SELECT * FROM event WHERE item_id = ? ORDER BY event_id').all(id);
+  let lastRouteChange = -1;
+  for (const [index, event] of thread.entries()) {
+    if (event.event_kind === 'escalate') {
+      lastRouteChange = index;
+      continue;
+    }
+    if (event.event_kind === 'edit' && Object.hasOwn(JSON.parse(event.event_detail), 'route')) lastRouteChange = index;
+  }
+  const verdictEvents = thread.filter((event) => ['accept', 'reject'].includes(event.event_kind));
+  const verdicts = verdictsFor(board, id);
+  const byEvent = new Map(verdictEvents.map((event, index) => [event.event_id, verdicts[index]]));
+  return thread.slice(lastRouteChange + 1).flatMap((event) => {
+    if (event.event_kind !== 'reject') return [];
+    const verdict = byEvent.get(event.event_id);
+    if (!verdict || verdict.verdict_decision !== 'REJECT') return [];
+    return [{
+      eventId: event.event_id,
+      verdictId: verdict.verdict_id,
+      by: verdict.verdict_by,
+      reason: verdict.verdict_reason,
+      note: verdict.verdict_note,
+      commit: verdict.verdict_commit,
+      digest: verdict.verdict_digest,
+      head: verdict.verdict_head,
+      at: verdict.verdict_at,
+    }];
+  });
+}
+
+/** Describe the existing escalation move after two rejects at this route [B15,H16].
+ *
+ * The caller applies the move inside the verdict's transaction, so a refusal still rolls back
+ * both the verdict and escalation. Older engines never consult the new rejection history.
+ *
+ * @param {any} board
+ * @param {number} id
+ * @param {number} engine
+ * @param {string} route
+ * @returns {{ agentId: string, note: string, rejections: object[] } | null}
+ */
+export function rejectedItemEscalation(board, id, engine, route) {
+  if (engine < AUTO_ESCALATE_ENGINE) return null;
+  const rejections = rejectionsSinceRouteChange(board, id).slice(-2);
+  if (rejections.length < 2) return null;
+  return {
+    agentId: COORDINATOR,
+    note: `Two REJECT verdicts at the ${route} route`,
+    rejections,
+  };
+}

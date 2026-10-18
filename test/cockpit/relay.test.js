@@ -2147,7 +2147,8 @@ process.stdout.write(JSON.stringify({other}));
         await chrome.stable("typeof sharingReady === 'undefined' ? null : sharingReady");
         assert.equal(await chrome.stable("document.querySelector('#share-note')?.hidden === false"), true,
           'the real local view offers one quiet invitation before any board is linked');
-        assert.equal(await chrome.stable("document.querySelector('#share-note')?.textContent.includes('See these boards from any device: link them to pullboard.dev')"), true);
+        assert.equal(await chrome.stable("document.querySelector('#share-note b')?.textContent"), 'See these boards from any device');
+        assert.equal(await chrome.stable("document.querySelector('#share-note .share-txt > span')?.textContent"), 'Link them to pullboard.dev with your GitHub account.');
         const starts = box.providerCalls.filter(call => call.path === '/login/device/code').length;
         await press(chrome, "document.querySelector('#share-start')");
         // The real GitHub popup hides this tab; foreground the owned view before measuring its progress.
@@ -2157,6 +2158,11 @@ process.stdout.write(JSON.stringify({other}));
           'one native person click starts exactly one real device sign-in for every board');
         assert.equal(await chrome.stable("document.querySelector('#share-status')?.textContent.includes('TEST-ONLY')"), true,
           'the view displays the public GitHub code');
+        if (mode === 'linked') {
+          await press(chrome, "document.querySelector('#share-hide')");
+          assert.equal(await chrome.stable("document.querySelector('#share-again').hidden"), false,
+            'dismissing while sign-in waits offers the restore entry');
+        }
         if (mode === 'closed') {
           const targets = await chrome.send('Target.getTargets');
           const popup = targets.targetInfos.find(target => target.type === 'page' && target.url.endsWith('/login/device'));
@@ -2189,6 +2195,7 @@ process.stdout.write(JSON.stringify({other}));
           if (mode === 'linked') assert.match(text, /Linked second-view-board/u);
           else assert.match(text, /Did not link second-view-board: .+/u, 'a refused board is named with its actual reason');
           assert.equal(await chrome.stable("document.querySelector('#share-note').hidden"), true, 'the invitation disappears after linking');
+          assert.equal(await chrome.stable("document.querySelector('#share-again').hidden"), true, 'linking also removes a previously dismissed restore entry');
           await press(chrome, "document.querySelector('#share-close')");
           await chrome.stable('sharingTask');
           assert.deepEqual(links.map(existsSync), mode === 'linked' ? [true,true] : [true,false], 'stopping phone pairing preserves completed board links');

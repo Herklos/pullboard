@@ -259,7 +259,7 @@ export function runShell(root, command, { pipefail = false, env = {}, stages = f
 /** Refuse an environment-blocked proof after its ordinary raw logs and timings are persisted. */
 export function refuseSandboxBlocked(run) {
   if (run.sandboxBlocked) throw new Refused('SANDBOX_BLOCKED',
-    `The environment refused ${run.sandboxBlocked}. Ask the person to allow this operation, or run the gate outside the sandbox; keep the tests unchanged.`);
+    `The environment refused ${run.sandboxBlocked}. Ask the coordinator to bring this operation to the person, or run the gate outside the sandbox; keep the tests unchanged.`);
 }
 
 /** Replace a possible secret-bearing line before persisting a direct item-check log. */

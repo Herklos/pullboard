@@ -10,7 +10,9 @@ import { COORDINATOR } from './config.js';
 import {
   ENGINE_VERSION,
   MILESTONE_RANK_ENGINE,
+  WITHDRAW_MILESTONE_ENGINE,
 } from './machine.js';
+export { WITHDRAW_MILESTONE_ENGINE };
 import { Refused } from './refused.js';
 import {
   atomic,
@@ -24,8 +26,6 @@ import {
 /** The engine at which a milestone carries a target and ships; older moves replay as they did. */
 export const MILESTONE_SHIP_ENGINE = 45;
 
-/** First writer for withdraw-and-remove milestone behavior; shipment remains engine 45. */
-export const WITHDRAW_MILESTONE_ENGINE = 51;
 
 /** The engine a move runs under: its recorded one during replay, else this client's. */
 function engineOf(board) {

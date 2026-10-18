@@ -28,6 +28,7 @@ const NOT_MOVES = {
   ALREADY_JOINED: 'registering who is asking, before any move',
   BAD_ROUTE: 'registering who is asking, before any move',
   ONE_COORDINATOR: 'registering who is asking, before any move',
+  BAD_SEAT_ID: 'registering who is asking, before any move; only a creator naming a new worktree seat raises it',
   MACHINE_HOME_NOT_WRITABLE: 'machine-wide storage must be writable before a command runs',
   SANDBOX_BLOCKED: 'the command environment must allow the gate or check operation',
   BAD_MACHINE_SETTINGS: 'machine-wide settings checked before a command runs',
@@ -522,7 +523,7 @@ test('a broken copy of the code fails the check: a refusal added wherever a move
     'MOON_PHASE is raised by refreeze but not declared there',
   ], 'claim and refreeze let a freeze refusal through; submit and verify catch it');
 
-  const inArrow = editedSource('board.js', /^export const canTake = .*$/m, "export const canTake = (agentRoute, itemRoute) => { if (!agentRoute) throw new Refused('NO_ROUTE', 'no route'); return ROUTES.indexOf(itemRoute) <= ROUTES.indexOf(agentRoute); };");
+  const inArrow = editedSource('route-escalation.js', /^export const canTake = .*$/m, "import { Refused } from './refused.js';\nexport const canTake = (agentRoute, itemRoute) => { if (!agentRoute) throw new Refused('NO_ROUTE', 'no route'); return ROUTES.indexOf(itemRoute) <= ROUTES.indexOf(agentRoute); };");
   assert.deepEqual(codeProblems(MACHINE, inArrow).sort(), [
     'NO_ROUTE is raised by accept and reject but not declared there',
     'NO_ROUTE is raised by claim but not declared there',
