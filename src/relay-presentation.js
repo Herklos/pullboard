@@ -3,12 +3,19 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import * as store from './board.js';
 import { exportBoard } from './exchange.js';
-import { codeIsFromMain, repoInfo, withGitReadFacts } from './git.js';
+import {
+  codeIsFromMain,
+  repoInfo,
+  withGitReadFacts,
+} from './git.js';
 import { Refused } from './refused.js';
 import { loadConfig } from './config.js';
 import { projectState } from './serve.js';
 import { personRequestStatuses } from './relay-requests.js';
-import { cachedVerdictStates, verdictProjector } from './verdict-freshness.js';
+import {
+  cachedVerdictStates,
+  verdictProjector,
+} from './verdict-freshness.js';
 import { trunkRevisionReader } from './trunk-revision.js';
 
 /** Capture spec, doctrine, config and board presentation without sending plaintext to a relay. */

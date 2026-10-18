@@ -3,7 +3,10 @@ import { existsSync } from 'node:fs';
 import { openBoardReadOnly } from './board.js';
 import { healthReport } from './health.js';
 import { healthSentinelEnabled } from './settings.js';
-import { healthFindingIdentity, normalizedHealthFindings } from './health-receipts.js';
+import {
+  healthFindingIdentity,
+  normalizedHealthFindings,
+} from './health-receipts.js';
 
 /** A missing board or an explicitly disabled sentinel has no observation to publish. */
 export function scanHealthSentinel(file, { root, config, now }) {

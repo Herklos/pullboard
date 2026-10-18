@@ -2,7 +2,13 @@
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { basename } from 'node:path';
-import { approvalContext, createApprovalReply, openApproval, sealApproval, signApprovalIntent } from './relay-approval.js';
+import {
+  approvalContext,
+  createApprovalReply,
+  openApproval,
+  sealApproval,
+  signApprovalIntent,
+} from './relay-approval.js';
 import { readBoardKey } from './relay-key.js';
 import { readRelayMachine } from './relay-machine.js';
 import { requirePersonChannel } from './person.js';

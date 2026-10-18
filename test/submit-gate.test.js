@@ -99,6 +99,26 @@ function commitAll(box, message = 'chore: fixture state') {
   return box.git('rev-parse', 'HEAD');
 }
 
+/** Copy the real module graph in bounded commits while retaining every installed hook and secret scan. */
+function copyRepositoryFixture(box, repository, tracked) {
+  // New-file diffs add one prefix per line and small path headers. Leave half the real scan limit free.
+  const batchBytes = 4 * 1024 * 1024;
+  let stagedBytes = 0;
+  let pending = false;
+  let head;
+  for (const path of tracked) {
+    const source = readFileSync(join(repository, path), 'utf8');
+    const estimate = Buffer.byteLength(source) + source.split('\n').length + 512 + 2 * Buffer.byteLength(path);
+    assert.ok(estimate <= batchBytes, `one copied module exceeds the fixture batch limit: ${path}`);
+    if (pending && stagedBytes + estimate > batchBytes) {
+      head = commitAll(box); stagedBytes = 0; pending = false;
+    }
+    put(box.root, path, source);
+    stagedBytes += estimate; pending = true;
+  }
+  return pending ? commitAll(box) : head;
+}
+
 /** Build a claimed submit fixture whose changed source selects a nested child-process test. */
 function childFailureSubmitBox(t, testSource) {
   let box = privateRepo(t);
@@ -923,8 +943,7 @@ test('a changed test file selects the scanners that read test files [C7,B3]', (t
   const tracked = execFileSync('git', ['ls-files', '-z', 'src/', 'test/'], {
     cwd: repository, encoding: 'utf8',
   }).split('\0').filter(path => /\.[cm]?js$/u.test(path));
-  for (const path of tracked) put(actual.root, path, readFileSync(join(repository, path), 'utf8'));
-  const actualBase = commitAll(actual);
+  const actualBase = copyRepositoryFixture(actual, repository, tracked);
   appendFileSync(join(actual.root, 'test/cockpit/demo.test.js'), '\n// Only the cockpit input changes.\n');
   const actualCommit = commitAll(actual, 'test(core): change cockpit input [G1]');
   assert.deepEqual(actual.git('diff', '--name-only', actualBase, actualCommit).split('\n'),
@@ -981,8 +1000,7 @@ test('a source change selects the tests that scan sources [C7,B3]', (t) => {
   const tracked = execFileSync('git', ['ls-files', '-z', 'src/', 'bin/', 'test/'], {
     cwd: repository, encoding: 'utf8',
   }).split('\0').filter(path => /\.[cm]?js$/u.test(path));
-  for (const path of tracked) put(actual.root, path, readFileSync(join(repository, path), 'utf8'));
-  const actualBase = commitAll(actual);
+  const actualBase = copyRepositoryFixture(actual, repository, tracked);
   put(actual.root, 'src/scanner-input.js', 'export const scannerInput = true;\n');
   const actualCommit = commitAll(actual, 'test(core): add an unimported source input [G1]');
   const actualSelection = selectAffectedTests(actual.root, { base: actualBase, commit: actualCommit });

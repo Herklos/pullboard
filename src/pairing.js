@@ -1,5 +1,8 @@
 /** Client-side one-time pairing envelope; the relay sees only locator-bound ciphertext [H15,H17]. */
-import { randomBytes, webcrypto } from 'node:crypto';
+import {
+  randomBytes,
+  webcrypto,
+} from 'node:crypto';
 import { ENGINE_VERSION } from './machine.js';
 import { Refused } from './refused.js';
 

@@ -95,7 +95,8 @@ async function hostedStandIn(chrome, pages, styles, local) {
         let responseBody = reply.body;
         if (asked.method === 'GET' && reply.status === 200 && local.versionOverride && address.pathname.startsWith('/api/v1/boards/') && address.pathname.endsWith('/state')) {
           const document = JSON.parse(responseBody);
-          document.state.releaseNotes.version = local.versionOverride;
+          if (document.state) document.state.releaseNotes.version = local.versionOverride;
+          else if (document.delta?.replace?.releaseNotes) document.delta.replace.releaseNotes.version = local.versionOverride;
           responseBody = JSON.stringify(document);
         }
         return chrome.send('Fetch.fulfillRequest', {
@@ -164,7 +165,7 @@ test('a pullboard.dev page reads the local board [N26,A2]', { timeout: 120_000 }
       const log = window.__localFetches = [];
       window.fetch = (input, init) => {
         const note = document.getElementById('local-note');
-        log.push({ url: String(typeof input === 'string' ? input : input.url), address: location.href, note: note ? !note.hidden : false, text: document.getElementById('local-note-text')?.textContent ?? '' });
+        log.push({ url: String(typeof input === 'string' ? input : input.url), address: location.href, note: note ? !note.hidden : false, state: note?.dataset.state ?? '' });
         return nativeFetch(input, init);
       };
     })()` });
@@ -182,27 +183,28 @@ test('a pullboard.dev page reads the local board [N26,A2]', { timeout: 120_000 }
     };
     const localFetches = "JSON.stringify((window.__localFetches || []).filter((entry) => entry.url.startsWith('http://127.0.0.1:')))";
 
-    // With no view on this machine, the page says why and links the local view; a person with no relay session gets
-    // the sign-in link and the relay module is never loaded, while one with a session gets the relay page. The browser
-    // has not been allowed to reach this device yet, so the page says why it may ask before it first asks.
+    // With no view on this machine, the page asks where the projects are: pullboard view here, or sign in for every
+    // device (#764). A person with no relay session never loads the relay module, while one with a session gets the
+    // relay page. The browser has not been allowed to reach this device yet, so a screen is up before it first asks.
     await view.stop();
     await chrome.send('Page.navigate', { url: HOSTED + '/' });
-    await chrome.waitFor("location.search === '' && /cannot reach a local view/.test(document.querySelector('#local-note-text')?.textContent)", 20_000); // budget: hang ceiling for one refused loopback request.
+    await chrome.waitFor("location.search === '' && document.querySelector('#local-note')?.dataset.state === 'not-running'", 20_000); // budget: hang ceiling for one refused loopback request.
     const asked = JSON.parse(await chrome.stable(localFetches));
     assert.equal(asked[0]?.url, LOCAL + '/local/protocol', 'the page first reads the public protocol at the default address');
-    assert.ok(asked[0].note && /may ask to let this page reach apps on this device/.test(asked[0].text), `the line saying why the browser may ask is on screen before that request: ${JSON.stringify(asked[0])}`);
-    const away = JSON.parse(await chrome.stable("JSON.stringify({ links: !document.querySelector('#local-note-links').hidden, view: document.querySelector('#local-note-view').href, signIn: document.querySelector('#local-note-sign-in').hidden ? null : document.querySelector('#local-note-sign-in').getAttribute('href') })"));
-    assert.deepEqual(away, { links: true, view: LOCAL + '/local/view', signIn: '/auth/github/start' }, 'an unreachable view is named, with the local view and sign-in linked');
+    assert.ok(asked[0].note && ['looking', 'asking'].includes(asked[0].state), `Finding your boards, or Click Allow, is on screen before that request: ${JSON.stringify(asked[0])}`);
+    const away = JSON.parse(await chrome.stable("JSON.stringify({ command: document.querySelector('#local-note .ob-two .ob-cmd button').dataset.copy, signIn: document.querySelector('#local-note .ob-two .ob-gh').getAttribute('href') })"));
+    assert.deepEqual(away, { command: 'pullboard view', signIn: '/auth/github/start' }, 'nothing running here: the page offers pullboard view and sign-in');
     assert.equal(relayModule(), 0, 'without a relay session the relay module is never loaded');
     assert.equal(await chrome.stable(banner), true, 'and the relay\'s banner does not speak for it');
     await chrome.send('Page.navigate', { url: HOSTED + '/?relay' });
-    await chrome.waitFor("location.search === '?relay' && !document.querySelector('#local-note-links').hidden", 20_000); // budget: hang ceiling for one refused loopback request.
+    await chrome.waitFor("location.search === '?relay' && ['blocked', 'not-running', 'no-linked'].includes(document.querySelector('#local-note')?.dataset.state)", 20_000); // budget: hang ceiling for one refused loopback request.
     // A browser that has since refused this page the access is named as the reason, as it is the one the page knows.
-    const second = JSON.parse(await chrome.stable(`(async () => JSON.stringify({ text: document.querySelector('#local-note-text').textContent, permission: await navigator.permissions.query({ name: 'loopback-network' }).then((p) => p.state, () => null) }))()`));
-    assert.match(second.text, second.permission === 'denied' ? /has refused this page access to apps on this device/ : /cannot reach a local view/, `the page names what it knows: ${JSON.stringify(second)}`);
+    const second = JSON.parse(await chrome.stable(`(async () => JSON.stringify({ state: document.querySelector('#local-note').dataset.state, permission: await navigator.permissions.query({ name: 'loopback-network' }).then((p) => p.state, () => null) }))()`));
     await relayAsked(1);
-    assert.equal(await chrome.stable("document.querySelector('#local-note-sign-in').hidden"), true, 'a person with a relay session is not asked to sign in');
-    assert.equal(await chrome.stable(banner), false, 'and the relay page keeps its banner');
+    // This stand-in serves no relay client, so a signed-in page stays on the screen that waits for this computer.
+    assert.ok(second.permission === 'denied' ? second.state === 'blocked' : ['not-running', 'no-linked'].includes(second.state), `the page shows what it knows: ${JSON.stringify(second)}`);
+    assert.equal(await chrome.stable("[...document.querySelectorAll('#local-note .ob-gh')].every((link) => link.getClientRects().length === 0)"), true, 'a person with a relay session is not asked to sign in');
+    assert.equal(await chrome.stable("document.querySelector('#relay-notice').getClientRects().length"), 0, 'and the screen stands alone, without the relay page\'s banner');
     // A relay pairing link stays the relay's: the page does not look for this machine on that load.
     await chrome.send('Page.navigate', { url: HOSTED + '/#board=b1&key=k1' });
     await relayAsked(2);
@@ -220,7 +222,7 @@ test('a pullboard.dev page reads the local board [N26,A2]', { timeout: 120_000 }
     await new Promise((ready) => other.listen(0, '127.0.0.1', ready));
     local.target = 'http://127.0.0.1:' + other.address().port;
     await chrome.send('Page.navigate', { url: HOSTED + '/?other' });
-    await chrome.waitFor("location.search === '?other' && /does not match this page/.test(document.querySelector('#local-note-text')?.textContent)", 20_000); // budget: hang ceiling for one loopback request.
+    await chrome.waitFor("location.search === '?other' && document.querySelector('#local-note')?.dataset.state === 'mismatch'", 20_000); // budget: hang ceiling for one loopback request.
     assert.equal(trips(), 0, 'no round trip starts toward a view the page cannot use');
 
     // This machine's view: the page finds it at the default address, goes round for its secret, and reads the board.
@@ -575,10 +577,8 @@ test('a signed-in local view with linked metadata and no paired transport says h
     assert.ok(seen.fetches.some((x) => x.origin === 'https://app.pullboard.dev' && x.path === '/api/v1/boards' && x.status === 200), 'the hosted page read the signed-in account metadata');
     assert.equal(seen.state, 'unpaired', `linked account metadata with no paired transport must show pairing guidance, not the generic local empty state: ${JSON.stringify(seen)}`);
     assert.equal(seen.hidden, false);
-    assert.equal(seen.heading, 'Pair this browser');
-    assert.match(seen.text, /acme\/web/);
+    assert.equal(seen.heading, 'One step on your computer', 'the one step #757 names for a person with nothing open here');
     assert.equal(seen.command, 'pullboard relay on --all');
-    assert.match(seen.text, /scan its QR/, 'the pairing guidance tells the person to use the QR printed by relay on --all');
     assert.equal(seen.cards, 0, 'no local or paired board is falsely shown');
     assert.deepEqual(chrome.exceptions, [], 'Chrome reports no uncaught exceptions');
   } finally {
@@ -714,10 +714,10 @@ test('every hosted page state says what it is and what to do next [N26,H5]', { t
       const tokens = ['--accent-strong', '--ink', '--ink-muted', '--surface'].map((token) => { probe.style.color = 'var(' + token + ')'; return getComputedStyle(probe).color; });
       probe.remove();
       return {
-        state: document.getElementById('local-note').dataset.state, heading: text('local-note-title'), text: text('local-note-text'), hint: text('local-note-hint'), command: text('local-note-code'),
-        steps: [...document.querySelectorAll('#local-note-links a, #local-note-links button')].filter(on).map((step) => [step.textContent.trim(), step.getAttribute('href')]),
-        ways: on(document.getElementById('ways-in')) ? [...document.querySelectorAll('#ways-in dt')].map((title) => title.textContent) : null,
-        waysText: text('ways-in'), side: document.getElementById('side-hint').hidden ? null : document.getElementById('side-hint').textContent, banner: on(document.getElementById('relay-notice')), browser: hostedBrowser(navigator),
+        state: document.getElementById('local-note').dataset.state, heading: text('local-note-title'), text: text('local-note-text'), command: text('local-note-code'),
+        steps: [...document.querySelectorAll('#local-note a, #local-note button')].filter(on).map((step) => [step.textContent.trim(), step.getAttribute('href')]),
+        cards: [...document.querySelectorAll('#local-note .ob-card h2')].filter(on).map((title) => title.textContent),
+        side: on(document.querySelector('.side')), banner: on(document.getElementById('relay-notice')), browser: hostedBrowser(navigator),
         defaults: [...document.querySelectorAll('*')].filter((element) => ['rgb(0, 0, 238)', 'rgb(85, 26, 139)'].includes(getComputedStyle(element).color)).map((element) => element.outerHTML.slice(0, 80)),
         bare: [...document.querySelectorAll('a')].filter((link) => on(link) && !link.className && !tokens.includes(getComputedStyle(link).color)).map((link) => link.outerHTML.slice(0, 80)),
       };
@@ -757,45 +757,39 @@ test('every hosted page state says what it is and what to do next [N26,H5]', { t
       await proofShot(chrome, 'hosted-' + state, 1280);
       assert.deepEqual(seen.defaults, [], `${state}: no element keeps the browser's default link colours`);
       assert.deepEqual(seen.bare, [], `${state}: every link has a class or the view's colours`);
-      assert.deepEqual(seen.ways, ['The local view', 'This computer through pullboard.dev', 'Your phone and other devices', 'A second computer'], `${state}: the Ways in panel lists every route`);
-      for (const command of ['pullboard view', 'pullboard relay on --all', 'pullboard relay pair', 'pullboard relay join <code>']) assert.ok(seen.waysText.includes(command), `${state}: Ways in names ${command}`);
-      assert.ok(seen.side, `${state}: the empty sidebar says what fills it`);
+      // Each state is one open-board screen (#764): alone, with no sidebar and no Try again; the page looks again by itself.
+      assert.equal(seen.side, false, `${state}: the sidebar waits until there is a board to list`);
+      assert.ok(!seen.steps.some(([label]) => label === 'Try again'), `${state}: no Try again`);
       await styledControls(state);
       return seen;
     };
-    const retry = [['Try again', null]];
-
     const blocked = await open('?blocked', 'blocked');
-    assert.equal(blocked.heading, 'Let this page reach Pullboard');
-    assert.match(blocked.text, new RegExp('^' + blocked.browser + ' has refused this page access to apps on this device'), 'the line names the browser and what it refused');
+    assert.equal(blocked.heading, 'Your browser said no');
+    assert.equal(blocked.text, 'That\'s fine. Turn it back on in three clicks:', 'the line leads to the steps that lift the block');
     assert.equal(blocked.browser, 'Chrome', 'the fixture Chrome is named as Chrome');
-    assert.match(blocked.hint ?? '', /^In Chrome, click the icon at the left of the address bar, turn on Local network access, then try again\.$/, 'the step is the one for this browser');
-    assert.deepEqual(blocked.steps, retry, 'and its button tries again');
+    assert.deepEqual(blocked.steps.map(([label]) => label), ['', 'Copy'], 'its one control copies the sentence for the agent, beside the theme toggle');
 
     const absent = await open('?absent', 'not-running');
-    assert.equal(absent.heading, 'Start Pullboard on this computer');
-    assert.match(absent.text, /cannot reach a local view on this computer/);
-    assert.equal(absent.command, 'pullboard view', 'the next step is the command that starts the local view');
-    assert.deepEqual(absent.steps, retry);
-    assert.equal(await chrome.stable("document.querySelector('#local-note-copy').textContent"), 'Copy', 'the command has a copy button');
+    assert.equal(absent.heading, 'Where are your projects?');
+    assert.deepEqual(absent.cards, ['Open them on this computer', 'Open them from any device'], 'the two ways in, as two cards');
+    assert.equal(await chrome.stable("document.querySelector('#local-note .ob-two .ob-cmd button').dataset.copy"), 'pullboard view', 'the command that starts Pullboard here has a copy button');
     assert.equal(absent.banner, false, 'the relay\'s banner stays out of it');
 
     const out = await open('?out#board=' + 'b'.repeat(32) + '&key=k1', 'signed-out');
-    assert.equal(out.heading, 'Sign in to pair this browser');
-    assert.deepEqual(out.steps, [['Sign in with GitHub', '/auth/github/start']], 'the next step is signing in');
+    assert.equal(out.heading, 'Open them from any device');
+    assert.deepEqual(out.steps.filter(([, href]) => href), [['Sign in with GitHub', '/auth/github/start']], 'the next step is signing in');
     assert.equal(out.banner, false, 'the state speaks for the relay\'s banner');
 
     stand.signedIn = true;
     const none = await open('?in', 'no-linked');
-    assert.equal(none.heading, 'No linked boards yet');
+    assert.equal(none.heading, 'One step on your computer');
     assert.equal(none.command, 'pullboard relay on --all', 'the next step links the boards');
     assert.equal(none.banner, false);
-    assert.equal(await chrome.stable("document.querySelector('#local-note-sign-in').hidden"), true, 'a signed-in person is not asked to sign in');
+    assert.equal(await chrome.stable("[...document.querySelectorAll('#local-note .ob-gh')].every((link) => link.getClientRects().length === 0)"), true, 'a signed-in person is not asked to sign in');
 
     stand.linked = [{ id: 'a'.repeat(32), repository: 'acme/web', linkedAt: 0 }];
     const unpaired = await open('?linked', 'unpaired');
-    assert.equal(unpaired.heading, 'Pair this browser');
-    assert.match(unpaired.text, /^You are signed in, .*acme\/web\. Each browser pairs once before it can read it\..*scan its QR:$/, 'the line says the person is signed in, names the board, that each browser pairs once, and the QR');
+    assert.equal(unpaired.heading, 'One step on your computer');
     assert.equal(unpaired.command, 'pullboard relay on --all', 'the next step prints the QR');
 
     // This machine's view: the normal list, with no state over it.
@@ -812,13 +806,11 @@ test('every hosted page state says what it is and what to do next [N26,H5]', { t
     await new Promise((ready) => old.listen(0, '127.0.0.1', ready));
     stand.local = 'http://127.0.0.1:' + old.address().port;
     const outdated = await open('?old', 'not-running');
-    assert.equal(outdated.heading, 'Start Pullboard on this computer');
-    assert.equal(outdated.hint, 'A Pullboard older than 0.8.29 cannot answer this page, so update it first with npm i -g pullboard.', 'the state names the update an old view needs');
-    assert.deepEqual(outdated.steps, retry);
+    assert.equal(outdated.heading, 'Where are your projects?', 'a view too old to answer reads as none');
     stand.local = view.base;
     await chrome.send('Page.navigate', { url: HOSTED + '/?list' });
     await chrome.waitFor("location.origin === 'https://app.pullboard.dev' && document.querySelector('#chain')?.textContent.includes('A board the hosted page lists')", 30_000); // budget: hang ceiling for the discovery, one round trip and the first board read.
-    const list = JSON.parse(await chrome.stable(`JSON.stringify({ note: document.querySelector('#local-note').hidden, ways: document.querySelector('#ways-in').hidden, heading: document.querySelector('#proj-list .proj.on .pname')?.textContent, source: document.querySelector('#proj-list .proj.on .src')?.textContent, tab: document.querySelector('.tab.on')?.textContent, step: document.querySelector('#new-item').getClientRects().length > 0, side: document.querySelector('#side-hint').hidden, state: JSON.parse(${shown}) })`));
+    const list = JSON.parse(await chrome.stable(`JSON.stringify({ note: document.querySelector('#local-note').hidden, side: document.querySelector('.side').getClientRects().length > 0, heading: document.querySelector('#proj-list .proj.on .pname')?.textContent, source: document.querySelector('#proj-list .proj.on .src')?.textContent, tab: document.querySelector('.tab.on')?.textContent, step: document.querySelector('#new-item').getClientRects().length > 0, state: JSON.parse(${shown}) })`));
     // Normal-list next actions use the view styles at both sizes and in both themes (outside review 950).
     for (const width of [390, 1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
@@ -846,7 +838,7 @@ test('every hosted page state says what it is and what to do next [N26,H5]', { t
     }
     await chrome.stable('delete document.documentElement.dataset.theme');
     await styledControls('list');
-    assert.deepEqual({ note: list.note, ways: list.ways, side: list.side }, { note: true, ways: true, side: true }, 'the list shows with no state, panel or hint over it');
+    assert.deepEqual({ note: list.note, side: list.side }, { note: true, side: true }, 'the list shows with its sidebar and no state over it');
     assert.equal(list.heading, 'hosted-states', 'the sidebar names the board shown');
     assert.equal(list.source, 'this computer', 'with a quiet label for where it comes from');
     assert.equal(list.tab, 'Items', 'its items are open');

@@ -1,5 +1,8 @@
 /** Cheap filesystem observation of the primary or retained trunk [E8,A2]. */
-import { readFileSync, statSync } from 'node:fs';
+import {
+  readFileSync,
+  statSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { trunkRef } from './trusted-policy.js';
 

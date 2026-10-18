@@ -14,9 +14,18 @@
  * Without the marker, importing this module changes nothing.
  */
 import childProcess from 'node:child_process';
-import { statSync, realpathSync } from 'node:fs';
+import {
+  statSync,
+  realpathSync,
+} from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
-import { basename, delimiter, isAbsolute, relative, resolve } from 'node:path';
+import {
+  basename,
+  delimiter,
+  isAbsolute,
+  relative,
+  resolve,
+} from 'node:path';
 import { Refused } from './refused.js';
 
 // Node registers this symbol globally; looking it up needs no util facade or dynamic loader.

@@ -1,11 +1,24 @@
 /** Machine-wide settings shared by every Pullboard checkout on this machine. */
-import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { setResourceCapacity, updateRunnerSettings } from './resources.js';
+import {
+  setResourceCapacity,
+  updateRunnerSettings,
+} from './resources.js';
 import { validateRunner } from './runners.js';
 import { Refused } from './refused.js';
-import { gateQueueSettings, machineSettingsFile, readMachineSettingsFile, validateGateQueue } from './queue-settings.js';
+import {
+  gateQueueSettings,
+  machineSettingsFile,
+  readMachineSettingsFile,
+  validateGateQueue,
+} from './queue-settings.js';
 
 // The gate queue's settings live in queue-settings.js so the runner runtime can read them too.
 export { gateQueueSettings, machineSettingsFile };
