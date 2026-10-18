@@ -279,9 +279,15 @@ export function preCommitProblems({ root, isMain, config, agent, boardFile, preM
   }
   const mergeHeads = mainMergeHeads(root, preMergeHook);
   const ownershipConfig = committedLaneConfig(root);
+  const mergeTouched = mergeHeads ? [...new Set([...touched, ...mergeHeads.flatMap((mergeHead) => stagedPaths(root, mergeHead).touched)])] : touched;
+  // Keeping either parent's exact content of a foreign file is accepted unchanged; when that file had a real conflict
+  // in this merge, the resolution still names its owner (#860).
+  const kept = mergeHeads && !preMergeHook
+    ? mergeTouched.filter((path) => outOfLane(ownershipConfig, agent.agent_lane, [path]).length && unchangedMergePath(root, path, mergeHeads) && conflictedInMerge(root, path))
+    : [];
+  kept.forEach((path) => onNotice?.(`resolved accepted-main conflict in ${path}; the coordinator owns ${path}`));
   const ownershipTouched = mergeHeads
-    ? [...new Set([...touched, ...mergeHeads.flatMap((mergeHead) => stagedPaths(root, mergeHead).touched)])]
-      .filter((path) => !outOfLane(ownershipConfig, agent.agent_lane, [path]).length || !unchangedMergePath(root, path, mergeHeads))
+    ? mergeTouched.filter((path) => !outOfLane(ownershipConfig, agent.agent_lane, [path]).length || !unchangedMergePath(root, path, mergeHeads))
     : touched;
   const foreignPaths = ownershipTouched.filter((path) => outOfLane(ownershipConfig, agent.agent_lane, [path]).length);
   const resolved = mergeHeads && !preMergeHook
@@ -495,6 +501,12 @@ function committedObject(root, commit, path) {
 function unchangedMergePath(root, path, mergeHeads) {
   const staged = stagedObject(root, path);
   return staged !== null && (mergeHeads.some((mergeHead) => staged === committedObject(root, mergeHead, path)) || staged === committedObject(root, 'HEAD', path));
+}
+
+/** Whether Git's resolve-undo index records a real conflict for this path in the merge being committed. */
+function conflictedInMerge(root, path) {
+  return git(root, ['ls-files', '--resolve-undo', '--stage', '-z', '--', ':(literal)' + path]).split('\0').filter(Boolean)
+    .some((record) => record.slice(record.indexOf('\t') + 1) === path && /^\d{6} [0-9a-f]{40,64} [123]\t/iu.test(record));
 }
 
 /**
