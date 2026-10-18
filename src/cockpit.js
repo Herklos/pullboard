@@ -2814,7 +2814,7 @@ function render() {
     const defaults = kind === 'doctrine' ? rows.filter((r) => r.origin === 'standard') : [];
     const labels = { decide: 'Needs your decision', ...(defaults.length ? { defaults: 'Defaults to review' } : {}), all: 'All rows', approved: 'Approved' };
     /** Inherited defaults are reviewed in the repo's doctrine; only local proposals ask for a decision. */
-    const undecided = (r) => ['pending', 'draft'].includes(r.status) && !r.decision && !(kind === 'doctrine' && r.origin === 'standard');
+    const undecided = (r) => (['pending', 'draft'].includes(r.status) && !r.decision || !!r.staleDecision) && !(kind === 'doctrine' && r.origin === 'standard');
     const n = { decide: rows.filter(undecided).length, defaults: defaults.length, all: rows.length, approved: rows.filter((r) => r.status === 'approved').length };
     $(kind + '-chips').innerHTML = Object.keys(labels).map((f) => '<button data-rows="' + kind + ':' + f + '" class="' + (filter === f ? 'on' : '') + '" type="button">' + labels[f] + '<b>' + n[f] + '</b></button>').join('');
     const shownRows = rows.filter((r) => filter === 'all' || (filter === 'decide' ? undecided(r) : filter === 'defaults' ? r.origin === 'standard' : r.status === 'approved'));
@@ -2833,7 +2833,7 @@ function render() {
       const source = kind === 'doctrine' ? ruleSource(r) : 'this repo';
       const reason = (declined || kind === 'spec' && r.status === 'wont') && r.reason ? '<span class="rule-reason" title="' + esc(r.reason) + '">Reason: ' + linked(r.reason, titles) + '</span>' : '';
       const secondary = '<span class="rule-source" title="' + esc(source) + '">' + esc(source) + '</span>' + reason + (r.gate ? '<span class="gate" title="' + esc(r.gate) + '">' + esc(r.gate) + '</span>' : '');
-      const statusShown = filter === 'all' || (filter === 'decide' && r.status !== 'draft');
+      const statusShown = filter === 'all' || !!r.staleDecision || (filter === 'decide' && r.status !== 'draft');
       const badge = statusShown ? '<span class="chip ' + tone(r.status) + '">' + esc(r.stage || r.status) + '</span>' : r.tier ? '<span class="chip">' + esc(r.tier) + '</span>' : '';
       const citations = p.items.filter((item) => item.specs.includes(r.id)).length;
       return head + (feedback && feedbackId === r.id ? specFeedback(feedback) : '') + recordRow({ tag: 'div', classes: view.row[kind] === r.id ? 'on' : '', attributes: 'data-row="' + kind + ':' + esc(r.id) + '"', title: r.text,

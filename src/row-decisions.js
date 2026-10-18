@@ -25,6 +25,8 @@ import {
   verifyRowDecision,
 } from './signature.js';
 import { Refused } from './refused.js';
+import { rowDecisionContext } from './row-decision-state.js';
+import { staleRowDecision } from './row-decision-state.js';
 
 /** Resolve qualified doctrine ids while bare ids continue to name the spec. */
 function decisionRows(root, config, ids) {
@@ -77,18 +79,19 @@ export function prepareRowDecisions(root, config, { ids, decision, reason = '', 
  */
 export function pendingAnswers(root, config, ids, records) {
   const { rows } = loadSpec(root, config);
+  const context = rowDecisionContext(root, config);
   return new Map(ids.filter((id) => !id.startsWith('doctrine:')).flatMap((id) => {
     const matches = rows.filter((row) => row.id === id);
-    const record = matches.length === 1 ? pendingRowDecision(records, matches[0], 'spec') : undefined;
+    const record = matches.length === 1 ? pendingRowDecision(records, matches[0], 'spec', context) : undefined;
     const answer = record ? decisionAnswer(record) : null;
     return answer === null ? [] : [[id, { text: record.text, answer }]];
   }));
 }
 
 /** Compare a decision with the current row, excluding inherited standard rows from file edits. */
-export function pendingRowDecision(records, row, kind) {
+export function pendingRowDecision(records, row, kind, context) {
   return records.find((record) => record.kind === kind && record.id === row.id && !record.applied
-    && (row.text === record.text || row.text === record.source.match(/\]\s+([^|]*)(?:\||$)/u)?.[1]?.trim()));
+    && !staleRowDecision(record, context));
 }
 
 /**
@@ -112,14 +115,19 @@ function decisionStage(record) {
 }
 
 /** Add pending status to existing rows without replacing their current file-backed status. */
-export function decisionProjection(records, row, kind) {
-  const decision = pendingRowDecision(records, row, kind);
+export function decisionProjection(records, input, kind, context) {
+  const { decision: previous, staleDecision: oldStale, stage: oldStage, ...plain } = input;
+  const row = previous || oldStale ? plain : input;
+  const decision = pendingRowDecision(records, row, kind, context);
   if (decision) return {
     ...row,
     decision,
     stage: `${decisionStage(decision)}, pending apply`,
     ...(decision.decision === 'decline' ? { reason: decision.reason } : {}),
   };
+  const pending = records.find(record => record.kind === kind && record.id === row.id && !record.applied);
+  const stale = pending && staleRowDecision(pending, context);
+  if (stale) return { ...row, staleDecision: stale, stage: `${stale.why}; ${stale.next}` };
   const appliedDecline = records.find((record) => record.kind === kind && record.id === row.id && record.applied
     && record.decision === 'decline' && row.status === 'wont' && row.text === record.text);
   return appliedDecline ? { ...row, reason: appliedDecline.reason } : row;
@@ -127,10 +135,19 @@ export function decisionProjection(records, row, kind) {
 
 /** Decorate the shared API state so the cockpit receives the same pending decisions as spec show. */
 export function projectRowDecisions(records, state) {
+  if (!records.length) return state;
+  const context = rowDecisionContext(state.root);
   return { ...state,
-    spec: state.spec.map((row) => decisionProjection(records, row, 'spec')),
-    practice: state.practice.map((row) => row.origin === 'standard' ? row : decisionProjection(records, row, 'doctrine')),
+    spec: state.spec.map((row) => decisionProjection(records, row, 'spec', context)),
+    practice: state.practice.map((row) => row.origin === 'standard' ? row : decisionProjection(records, row, 'doctrine', context)),
   };
+}
+
+/** Preserve parsed page metadata while projecting both file-backed row lists. */
+export function rowDecisionView(root, config, records, spec, practice) {
+  const context = rowDecisionContext(root, config);
+  return { spec: { ...spec, rows: spec.rows.map(row => decisionProjection(records, row, 'spec', context)) },
+    practice: { ...practice, rows: practice.rows.map(row => row.origin === 'standard' ? row : decisionProjection(records, row, 'doctrine', context)) } };
 }
 
 /**

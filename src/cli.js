@@ -86,8 +86,10 @@ import {
   planRowApply,
   prepareRowDecisions,
   restoreRowApply,
+  rowDecisionView,
   writeRowApply,
 } from './row-decisions.js';
+import { rowDecisionContext } from './row-decision-state.js';
 import {
   digestOf,
   gateReport,
@@ -198,6 +200,7 @@ import {
   applyStep,
   personAsk,
   requirementStep,
+  setupDecisionRows,
   withStarterWork,
 } from './setup-rows.js';
 import { personNeeds } from './needs.js';
@@ -1606,9 +1609,7 @@ function boardSetup(ctx, card, identity) {
   const rows = loadSpec(ctx.info.root, ctx.config).rows;
   const approved = rows.filter(row => row.status === 'approved');
   const decisions = withBoard(ctx, (board) => store.rowDecisions(board));
-  // Match the current row's decision projection, not a bare id: a changed draft needs a new person decision (#848).
-  const open = rows.filter(row => row.status === 'draft' || row.status === 'pending')
-    .map(row => decisionProjection(decisions, row, 'spec'));
+  const open = setupDecisionRows(ctx.info.root, ctx.config, decisions, rows);
   const toApply = open.filter(row => row.decision);
   const drafted = open.filter(row => !row.decision);
   const recordedComplete = setupReceiptMatches(ctx, identity, 'complete');
@@ -1632,7 +1633,7 @@ function boardSetup(ctx, card, identity) {
   /** Preserve all existing configuration when recording one setup answer. */
   const configure = patch => `node -e ${quote(`const fs=require('node:fs');const p='pullboard.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));${patch};fs.writeFileSync(p,JSON.stringify(c,null,2)+${JSON.stringify('\n')})`)}`;
   const steps = [
-    requirementStep({ rows, drafted, toApply, completed, hasItems: card.all.length > 0 }),
+    requirementStep({ rows, drafted, toApply, completed: completed && !open.some(row => row.staleDecision), hasItems: card.all.length > 0 }),
     { number: 2, done: lanes.length > 0, question: `Ask the person: how should we divide the work? Suggested folders: ${folders.join(', ') || 'app/ (create it for the app)'}.`,
       command: `pullboard lane add ${word(lane)} --owns ${word(lane + '/')}` },
     { number: 3, done: Boolean(ctx.config.gate?.trim()),
@@ -1658,7 +1659,7 @@ function boardSetup(ctx, card, identity) {
     // A pending question takes an answer, a draft row an approval: each gets the command that decides it.
     const { personCommand, verb, seatQuestion, seatNext } = personAsk(drafted);
     return { step: 1, total: 5, ...current, steps, waitingOn: 'person-approval', rowIds, ...(toApply.length ? { approvedRowIds: toApply.map(row => row.id) } : {}),
-      question: seat ? seatQuestion : `Waiting for the person to ${verb} ${names}.`, command,
+      question: ctx.io.guidance((seat ? seatQuestion : `Waiting for the person to ${verb} ${names}.`) + drafted.filter(row => row.staleDecision).map(row => ` ${row.stage}`).join('')), command,
       personCommand,
       afterAnswer: (toApply.length ? `The person already approved ${toApply.map(row => row.id).join(', ')}; pullboard spec apply writes them. ` : '') + 'The person approves draft rows and answers questions in Pullboard View or their own terminal; then the coordinator runs pullboard spec apply.',
       agentNext: seat ? seatNext : (toApply.length ? 'pullboard spec apply for the approved rows; then ' : '') + `wait for the person to ${verb} ${names}; meanwhile ${command}` };
@@ -4141,8 +4142,7 @@ async function specCommand(io, { first, second, rest, values }) {
     const out = values.out ? resolve(ctx.io.cwd, values.out) : join(ctx.info.gitDir, 'pullboard', 'spec.html');
     const html = renderSpecView({
       title: spec.title,
-      spec,
-      practice,
+      ...withBoard(ctx, board => rowDecisionView(ctx.info.root, ctx.config, store.rowDecisions(board), spec, practice)),
       signoffs,
       generatedAt: new Date().toISOString().slice(0, 16).replace('T', ' '),
       files: { spec: ctx.config.spec, practice: ctx.config.practice },
@@ -4159,7 +4159,7 @@ async function specCommand(io, { first, second, rest, values }) {
     const parsed = doctrineId ? practice : spec;
     const id = doctrineId ? second.slice('doctrine:'.length) : second;
     const source = parsed.rows.find((entry) => entry.id === id);
-    const row = source && withBoard(ctx, (board) => decisionProjection(store.rowDecisions(board), source, doctrineId ? 'doctrine' : 'spec'));
+    const row = source && withBoard(ctx, (board) => decisionProjection(store.rowDecisions(board), source, doctrineId ? 'doctrine' : 'spec', rowDecisionContext(ctx.info.root, ctx.config)));
     if (!row) throw new Refused('NO_ROW', `no row ${second ?? ''} in ${ctx.config.spec}`);
     const standing = standings(parsed.rows, signoffs).get(row.id) ?? { met: [], stale: [] };
     io.result?.({ row, standing });
@@ -4272,7 +4272,7 @@ async function hookCommand(io, { first, second }) {
     const landing = hookRead(ctx, (board) => store.landingBatches(board).some((batch) => batch.root === info.root && !['landed', 'blocked'].includes(batch.state)));
     if (landing) io.caller('coordinator', info.root);
     else if (agent) io.caller('seat', info.root);
-    problems = preCommitProblems({ root: info.root, isMain: info.isMain || landing, config: ctx.config, agent, boardFile: ctx.file });
+    problems = preCommitProblems({ root: info.root, isMain: info.isMain || landing, config: ctx.config, agent, boardFile: ctx.file, preMergeHook: first === 'pre-merge-commit', onNotice: (message) => io.err(`pullboard pre-commit: warning: ${message}`) });
   } else if (first === 'commit-msg') {
     const message = readFileSync(second ?? '', 'utf8');
     const spec = loadSpec(info.root, ctx.config);

@@ -25,7 +25,7 @@ export function personNeedsState(root, { board: providedBoard = null, includeRig
     const decisions = store.rowDecisions(board);
     const state = projectFit(pendingFit(info.commonDir), projectRowDecisions(decisions, projectState(root, { board })));
     const config = loadConfig(root);
-    const rows = projectRowDecisions(decisions, { spec: loadSpec(root, config).rows, practice: loadDoctrine(root, config).rows });
+    const rows = projectRowDecisions(decisions, { root, spec: loadSpec(root, config).rows, practice: loadDoctrine(root, config).rows });
     const rigorDrafts = rigorDraftNeeds(rows);
     const projected = { ...state, rigorDrafts, ...(includeRigorUndrafted
       ? { rigorUndrafted: undraftedRigor(store.events(board), rows, { person: store.PERSON }) } : {}) };

@@ -3,8 +3,17 @@
  * coordinator's spec apply, never for the person again, and each open row gets the command that
  * decides it, approve for a draft and answer for a pending question.
  */
+import { decisionProjection } from './row-decisions.js';
+import { rowDecisionContext } from './row-decision-state.js';
 import { nextFor } from './board.js';
 import { proposeLanes } from './init.js';
+
+/** Include stale decisions even when the current file row was already marked approved. */
+export function setupDecisionRows(root, config, records, rows) {
+  const context = rowDecisionContext(root, config);
+  return rows.map(row => decisionProjection(records, row, 'spec', context))
+    .filter(row => row.status === 'draft' || row.status === 'pending' || row.staleDecision);
+}
 
 /** Show available starter work beside undecided rows, without changing any approval or apply move [S1,B26]. */
 export function withStarterWork(setup, { board, me, main, config, root, seat }) {
