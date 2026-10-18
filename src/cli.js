@@ -79,8 +79,10 @@ import {
   planRowApply,
   prepareRowDecisions,
   restoreRowApply,
+  rowDecisionView,
   writeRowApply,
 } from './row-decisions.js';
+import { rowDecisionContext } from './row-decision-state.js';
 import {
   digestOf,
   gateReport,
@@ -175,6 +177,7 @@ import { Refused } from './refused.js';
 import {
   applyStep,
   personAsk,
+  setupDecisionRows,
 } from './setup-rows.js';
 import { personNeeds } from './needs.js';
 import { personNeedsState } from './needs-state.js';
@@ -1586,9 +1589,7 @@ function boardSetup(ctx, card, identity) {
   const rows = loadSpec(ctx.info.root, ctx.config).rows;
   const approved = rows.filter(row => row.status === 'approved');
   const decisions = withBoard(ctx, (board) => store.rowDecisions(board));
-  // Match the current row's decision projection, not a bare id: a changed draft needs a new person decision (#848).
-  const open = rows.filter(row => row.status === 'draft' || row.status === 'pending')
-    .map(row => decisionProjection(decisions, row, 'spec'));
+  const open = setupDecisionRows(ctx.info.root, ctx.config, decisions, rows);
   const toApply = open.filter(row => row.decision);
   const drafted = open.filter(row => !row.decision);
   const recordedComplete = setupReceiptMatches(ctx, identity, 'complete');
@@ -1612,7 +1613,7 @@ function boardSetup(ctx, card, identity) {
   /** Preserve all existing configuration when recording one setup answer. */
   const configure = patch => `node -e ${quote(`const fs=require('node:fs');const p='pullboard.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));${patch};fs.writeFileSync(p,JSON.stringify(c,null,2)+${JSON.stringify('\n')})`)}`;
   const steps = [
-    { number: 1, done: approved.length > 0 && ((!drafted.length && !toApply.length) || completed), question: 'Ask the person: what are we building, and who will use it? Draft a few requirements, then ask the person to approve them.',
+    { number: 1, done: approved.length > 0 && ((!drafted.length && !toApply.length) || (completed && !open.some(row => row.staleDecision))), question: 'Ask the person: what are we building, and who will use it? Draft a few requirements, then ask the person to approve them.',
       command: 'pullboard spec draft "<text>"',
       afterAnswer: 'Record each answer with pullboard spec draft "<text>"; the person approves the returned ids in Pullboard View or runs pullboard spec approve <ids> in their own terminal; then the coordinator runs pullboard spec apply.' },
     { number: 2, done: lanes.length > 0, question: `Ask the person: how should we divide the work? Suggested folders: ${folders.join(', ') || 'app/ (create it for the app)'}.`,
@@ -1640,7 +1641,7 @@ function boardSetup(ctx, card, identity) {
     // A pending question takes an answer, a draft row an approval: each gets the command that decides it.
     const { personCommand, verb, seatQuestion, seatNext } = personAsk(drafted);
     return { step: 1, total: 5, ...current, steps, waitingOn: 'person-approval', rowIds, ...(toApply.length ? { approvedRowIds: toApply.map(row => row.id) } : {}),
-      question: seat ? seatQuestion : `Waiting for the person to ${verb} ${names}.`, command,
+      question: (seat ? seatQuestion : `Waiting for the person to ${verb} ${names}.`) + drafted.filter(row => row.staleDecision).map(row => ` ${row.stage}`).join(''), command,
       personCommand,
       afterAnswer: (toApply.length ? `The person already approved ${toApply.map(row => row.id).join(', ')}; pullboard spec apply writes them. ` : '') + 'The person approves draft rows and answers questions in Pullboard View or their own terminal; then the coordinator runs pullboard spec apply.',
       meanwhile: seat ? 'While waiting, review independent approved work or send questions to the coordinator with pullboard shout coordinator "<what is needed>" --decision.' : 'While waiting, the agent may review independent approved work or prepare questions for the person.',
@@ -4163,8 +4164,7 @@ async function specCommand(io, { first, second, rest, values }) {
     const out = values.out ? resolve(ctx.io.cwd, values.out) : join(ctx.info.gitDir, 'pullboard', 'spec.html');
     const html = renderSpecView({
       title: spec.title,
-      spec,
-      practice,
+      ...withBoard(ctx, board => rowDecisionView(ctx.info.root, ctx.config, store.rowDecisions(board), spec, practice)),
       signoffs,
       generatedAt: new Date().toISOString().slice(0, 16).replace('T', ' '),
       files: { spec: ctx.config.spec, practice: ctx.config.practice },
@@ -4181,7 +4181,7 @@ async function specCommand(io, { first, second, rest, values }) {
     const parsed = doctrineId ? practice : spec;
     const id = doctrineId ? second.slice('doctrine:'.length) : second;
     const source = parsed.rows.find((entry) => entry.id === id);
-    const row = source && withBoard(ctx, (board) => decisionProjection(store.rowDecisions(board), source, doctrineId ? 'doctrine' : 'spec'));
+    const row = source && withBoard(ctx, (board) => decisionProjection(store.rowDecisions(board), source, doctrineId ? 'doctrine' : 'spec', rowDecisionContext(ctx.info.root, ctx.config)));
     if (!row) throw new Refused('NO_ROW', `no row ${second ?? ''} in ${ctx.config.spec}`);
     const standing = standings(parsed.rows, signoffs).get(row.id) ?? { met: [], stale: [] };
     io.result?.({ row, standing });

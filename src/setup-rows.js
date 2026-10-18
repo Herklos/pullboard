@@ -3,6 +3,15 @@
  * coordinator's spec apply, never for the person again, and each open row gets the command that
  * decides it, approve for a draft and answer for a pending question.
  */
+import { decisionProjection } from './row-decisions.js';
+import { rowDecisionContext } from './row-decision-state.js';
+
+/** Include stale decisions even when the current file row was already marked approved. */
+export function setupDecisionRows(root, config, records, rows) {
+  const context = rowDecisionContext(root, config);
+  return rows.map(row => decisionProjection(records, row, 'spec', context))
+    .filter(row => row.status === 'draft' || row.status === 'pending' || row.staleDecision);
+}
 
 /**
  * The setup step once every open row has a person decision that spec apply has not written yet.

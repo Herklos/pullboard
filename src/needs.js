@@ -7,7 +7,7 @@ export function personNeeds(state) {
   };
   const rows = (state.spec ?? []).filter(row => !row.decision);
   const rigorDrafts = state.rigorDrafts ?? [];
-  const drafts = rows.filter(row => row.status === 'draft' && !rigorDrafts.some(draft => draft.target === `spec:${row.id}`)).length;
+  const drafts = rows.filter(row => (row.status === 'draft' || row.staleDecision) && !rigorDrafts.some(draft => draft.target === `spec:${row.id}`)).length;
   return [
     ...(state.decisions ?? []).map(ask => ({ kind: 'decision', id: ask.shout_id,
       ref: name(ask.shout_from), text: ask.shout_text, what: 'decision', at: ask.shout_at })),
@@ -17,6 +17,6 @@ export function personNeeds(state) {
       ref: hold.hold_lane, text: hold.hold_reason, what: 'lane held by ' + name(hold.hold_by) })),
     ...rigorDrafts,
     ...(drafts ? [{ kind: 'draft', id: 'drafts', count: drafts, ref: String(drafts),
-      text: 'draft spec rows to approve or drop', what: 'review in SPEC.md', target: 'tab:spec' }] : []),
+      text: 'draft spec rows to approve or drop' + rows.filter(row => row.staleDecision).map(row => `; ${row.stage}`).join(''), what: 'review in SPEC.md', target: 'tab:spec' }] : []),
   ];
 }

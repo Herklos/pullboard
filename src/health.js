@@ -20,8 +20,10 @@ import {
   openBoardReadOnly,
   PERSON,
   roadmap,
+  rowDecisions,
   unverifiedSubmissions,
 } from './board.js';
+import { staleRowDecisions } from './row-decision-state.js';
 import { localReleaseRank } from './release-queue.js';
 import { trunkRef } from './trusted-policy.js';
 
@@ -79,6 +81,13 @@ export function healthReport({ db, root, config, now }) {
   const at = now.getTime();
   const age = (iso) => at - Date.parse(iso);
   const board = { db, clock: { now: () => now } };
+  for (const stale of staleRowDecisions(rowDecisions(board), root, config)) {
+    report.stuck.push(finding('STALE_ROW_DECISION', null, {
+      subject: `${stale.kind}:${stale.id}`, key: `STALE_ROW_DECISION:${stale.kind}:${stale.id}`,
+      since: stale.at ?? asOf, now: at, title: 'person decision is stale', why: stale.why, next: stale.next,
+      owner: { role: 'person', who: PERSON }, detail: { changed: stale.changed },
+    }));
+  }
   const items = db.prepare('SELECT * FROM item ORDER BY item_id').all();
   const byId = new Map(items.map((item) => [item.item_id, item]));
   const history = itemHistory(db);
