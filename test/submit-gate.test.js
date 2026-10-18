@@ -1388,7 +1388,7 @@ test('a submit runs the static style checks first [C7]', t => {
   const check = 'node -e "require(\'node:fs\').writeFileSync(process.env.ITEM_CHECK_MARKER, \'ran\')"';
   put(box.root, 'pullboard.json', JSON.stringify({ gate: 'node -e "process.exit(0)"',
     affectedTests: 'node --test', submitGate: 'landing', staticChecks: 'node test/static-style-check.mjs',
-    spec: 'SPEC.md', verify: 'any', lease: '2h' }));
+    spec: 'SPEC.md', verify: 'any', lease: '2h', shared: ['pullboard.json'] }));
   put(box.root, 'src/cli.js', "import { join } from 'node:path';\nexport const fixture = join;\n");
   const oracle = new URL('./import-style-helpers.js', import.meta.url).href;
   put(box.root, 'test/static-style-check.mjs', [
@@ -1404,6 +1404,9 @@ test('a submit runs the static style checks first [C7]', t => {
   const added = box.coordinator('add', 'build', 'Static style before proof', '--check', check);
   assert.equal(added.code, 0, added.err);
   assert.equal(box.run('claim', '1').code, 0);
+  const candidateConfig = JSON.parse(readFileSync(join(box.root, 'pullboard.json'), 'utf8'));
+  candidateConfig.staticChecks = '';
+  put(box.root, 'pullboard.json', JSON.stringify(candidateConfig));
   put(box.root, 'src/cli.js', "import { join, resolve } from 'node:path';\nexport const fixture = join;\n");
   commitAll(box, 'feat(core): expose the missed static guard [G1]');
   rmSync(marker, { force: true });
@@ -1412,4 +1415,8 @@ test('a submit runs the static style checks first [C7]', t => {
   assert.match(submitted.out + submitted.err, /src\/cli\.js:1: one import binding per line/u);
   assert.equal(existsSync(marker), false, 'the frozen item check must not run after an early static refusal');
   assert.equal(JSON.parse(box.run('show', '1', '--json').out).item_status, 'claimed');
+  const checked = box.run('check', '1', '--yes', '--json');
+  assert.notEqual(checked.code, 0, 'an explicit check must run the same accepted project guard first');
+  assert.match(checked.out + checked.err, /src\/cli\.js:1: one import binding per line/u);
+  assert.equal(existsSync(marker), false, 'neither a submit nor a check bypasses the failed static guard');
 });

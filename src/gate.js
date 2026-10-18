@@ -553,6 +553,19 @@ function commandWord(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`;
 }
 
+/** Run the project's declared static guard before proof, retaining normal queue classification. */
+export async function runStaticChecks(root, config, { agent, item = '', onWait, onBrowserFallback } = {}) {
+  const command = config.staticChecks?.trim();
+  if (!command) return null;
+  const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(root, command, { onFallback: onBrowserFallback });
+  return withGateSlot(root, lease => {
+    const run = runProfiledShell(root, command, { waitMs: lease.waitMs, artifactPrefix: 'pullboard-static-checks', persistLog: true, gateLease: lease });
+    refuseSandboxBlocked(run);
+    if (!run.isGreen) throw new Refused('GATE_RED', `static checks are red; fix the named source before running proof:\n${digestOf(run.output)}`);
+    return run;
+  }, { browser, agent, item, kind: 'static', itemCheck: true, shortEligible: true, onWait });
+}
+
 /**
  * Prove the frozen item check and selected imports under one lease. Subsets neither read nor write
  * the full-gate stamp. An uncertain selection runs the full configured gate and records its reason.
@@ -564,6 +577,7 @@ function commandWord(value) {
  */
 export async function runSubmitGate(root, config, { base, trunk, changed, check, agent, item = '', kind = 'submit', onWait, onBrowserFallback }) {
   if (!config.gate.trim()) throw new Refused('NO_GATE', 'no gate configured; set "gate" in pullboard.json, e.g. "npm test"');
+  await runStaticChecks(root, config, { agent, item, onWait, onBrowserFallback });
   const selection = config.affectedTests
     ? selectAffectedTests(root, { base, trunk, changed })
     : { full: true, reason: 'affected-test selection is not enabled for this project', files: [] };
