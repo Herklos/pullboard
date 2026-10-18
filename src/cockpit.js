@@ -2204,7 +2204,7 @@ function renderGroup(group) {
   $('group-needs').innerHTML = needs.length ? needs.map((row) => {
     const titles = new Map(row.repo.board.items.map((item) => [String(item.id), item.title]));
     const text = rich(row.text, titles, true, row.repo.root);
-    return '<div class="group-need"><b>' + esc(row.repo.name) + '</b><code>' + esc(row.ref) + '</code><span>' + text + '</span><button data-root="' + esc(row.repo.root) + '" type="button"><em>' + esc(row.what) + (row.at ? ', ' + age(row.at) : '') + ' →</em></button></div>';
+    return '<div class="group-need"><b>' + esc(row.repo.name) + '</b><code>' + esc(row.ref) + '</code><span>' + text + '</span><button data-root="' + esc(row.repo.root) + '" type="button"><em>' + esc(row.kind === 'pending' ? 'answer ' + row.ref : row.what) + (row.at ? ', ' + age(row.at) : '') + ' →</em></button></div>';
   }).join('') : '<div class="empty">Nothing needs you across this project.</div>';
   const events = group.repos.flatMap((repo) => {
     const titles = new Map(repo.board.items.map((item) => [String(item.id), item.title]));
@@ -2539,7 +2539,7 @@ function render() {
   // Adapt display targets and the existing hold age without reimplementing which calls belong here.
   const needs = personalNeeds.filter((row) => !['draft', 'rigor-draft'].includes(row.kind)).map((row) => row.kind === 'decision'
     ? ['decide:' + row.id, row.ref, row.text, 'decide', row.at]
-    : row.kind === 'pending' ? ['spec:' + row.id, row.ref, row.text, row.what]
+    : row.kind === 'pending' ? ['spec:' + row.id, row.ref, row.text, 'answer ' + row.ref] // the person's words; agents get the command (#875)
       : ['tab:shouts', row.ref, row.text, row.what, p.holds.find((hold) => hold.hold_lane === row.id)?.hold_at]);
   const drafts = personalNeeds.find((row) => row.kind === 'draft')?.count ?? 0;
   const rigorDrafts = personalNeeds.filter((row) => row.kind === 'rigor-draft');
