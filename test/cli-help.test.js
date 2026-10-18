@@ -170,6 +170,10 @@ test('help names come from the command declarations [C7,N37]', async (t) => {
   assert.deepEqual(generated.commands['future-command']?.usages, ['pullboard future-command']);
   assert.equal(generated.overview, HELP.overview, 'a new declaration preserves the overview bytes');
   assert.equal(generated.all, HELP.all, 'a new declaration preserves the full-help bytes');
+  assert.deepEqual(generated.commands['relay join'].usages, ['pullboard relay join <code> [--url <address>]']);
+  assert.deepEqual(generated.commands['spec approve'].usages, ['pullboard spec approve <ids>']);
+  assert.deepEqual(generated.commands['spec decline'].usages, ['pullboard spec decline <ids> --reason "why"']);
+  assert.match(generated.commands['spec fit edit'].usages[0], /^pullboard spec fit edit <row id or #item>/u);
 
   const original = readFileSync(join(directory, 'cli.js'), 'utf8');
   const declaration = /function readCommands\(io, \{ first, second, rest, values \}\) \{\s*return \{/u;

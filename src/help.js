@@ -243,6 +243,7 @@ const HELP_EXAMPLES = {
   relay: 'pullboard relay on --all', 'relay recover': 'pullboard relay recover --skip 12',
   'lane add': 'pullboard lane add web --owns apps/web/', lane: 'pullboard lane add web --owns apps/web/',
   roadmap: 'pullboard roadmap', rigor: 'pullboard rigor', milestone: 'pullboard milestone add "0.7.0" --items 12,13',
+  'milestone items': 'pullboard milestone items "0.7.0" --add 12,13',
   runner: 'pullboard runner add studio --slots 2 --browser 1', 'runner add': 'pullboard runner add studio --slots 2 --browser 1',
   edit: 'pullboard edit 12 --brief "Add the upload page"', release: 'pullboard release 12',
   land: 'pullboard land --max 4',
@@ -334,10 +335,12 @@ function commandHelpRows(fullHelp, commandNames) {
     ...Object.keys(HELP_ALIASES),
     ...phrases.flatMap((name) => [name.split(' ')[0], name]),
   ])];
+  const expandedRows = rows.flatMap((row) => usageVariants(row.usage)
+    .map((usage) => ({ usage, details: [`pullboard ${usage}`, ...row.details.slice(1)] })));
   return Object.fromEntries(names.map((name) => {
     const parts = name.split(' ');
     const alias = HELP_ALIASES[name];
-    const matches = alias?.source ? rows.filter((row) => row.usage === alias.source || row.usage.startsWith(`${alias.source} `)) : alias ? [] : rows.filter((row) => {
+    const matches = alias?.source ? rows.filter((row) => row.usage === alias.source || row.usage.startsWith(`${alias.source} `)) : alias ? [] : expandedRows.filter((row) => {
       const tokens = row.usage.split(/\s+/u);
       if (!parts.every((part, index) => tokens[index] === part)) return false;
       const next = tokens[parts.length];
@@ -417,6 +420,23 @@ function expandWords(words) {
   let phrases = [''];
   for (const word of words) phrases = phrases.flatMap(prefix => word.split('|').map(choice => (prefix + ' ' + choice).trim()));
   return phrases.filter(Boolean);
+}
+
+/** Expand printed sibling commands into complete usages, retaining each branch's arguments and flags. */
+function usageVariants(usage) {
+  const branches = usage.split(/\s+\|\s+/u);
+  const shared = branches.length > 1 ? commandWords(branches[0]).slice(0, -1) : [];
+  return branches.flatMap((branch, index) => {
+    const command = [...(index ? shared : []), branch.replace(/^pullboard\s+/u, '')].join(' ');
+    const words = commandWords(command);
+    const tail = command.slice(words.join(' ').length);
+    return expandWords(words).flatMap((prefix) => {
+      const base = prefix + tail;
+      const optional = /^(.*?)\[([^\]]+)\](.*)$/u.exec(base);
+      if (!optional || !optional[2].includes('|') || optional[2].trim().startsWith('-')) return [base];
+      return [base, ...optional[2].split('|').map((choice) => `${optional[1]}${choice}${optional[3]}`)];
+    });
+  });
 }
 
 /** Read one printed usage, including sibling commands and optional literal subcommands. */
