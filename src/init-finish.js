@@ -172,7 +172,7 @@ export async function finishInitCommit(plan, { io, yes, landed, permissions }) {
 }
 
 /** Report setup and blueprint notes together, keeping the CLI command itself bounded. */
-export function reportInitSetup(io, info, notes, landed) {
+export function reportInitSetup(io, info, notes, landed, agentSession) {
   const fresh = landed.filter(added => !added.marked);
   const waiting = landed.length ? initWaitingRows(info.root, { rows: fresh.flatMap(added => added.rows) }) : [];
   /** Give each blueprint the same complete list of still-undecided rows. */
@@ -181,6 +181,9 @@ export function reportInitSetup(io, info, notes, landed) {
     ...(landed.length ? { blueprint: blueprintResult(landed[0]), blueprints: landed.map(blueprintResult) } : {}) };
   io.result?.(result);
   const staging = notes.at(-1)?.startsWith('git add -f -- ') ? notes.at(-1) : null;
+  io.say(agentSession
+    ? 'Next: run pullboard resume now to continue setup in this session; the new skills load next session, and setup does not need them.\nSetup details:'
+    : 'Next: ask your agent to set up Pullboard here; in Claude Code, start a new session first so it loads the Pullboard skills.\nSetup details:');
   (staging ? notes.slice(0, -1) : notes).forEach(note => io.say(note));
   for (const added of landed) {
     if (added.marked) io.say(alreadyAddedLine(added.blueprint));

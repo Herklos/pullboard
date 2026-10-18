@@ -163,6 +163,22 @@ test('a fresh init tells the person and the agent how to start [I9,I1]', t => {
   assert.doesNotMatch(section, /\b(?:spec|lanes|gates)\b/iu, 'the first setup guidance uses plain words');
 });
 
+test('init leads with the next step and folds the details [I10,B26]', t => {
+  const box = fixture(t);
+  rmSync(join(box.root, 'pullboard.json'));
+  const initialized = box.output('init');
+  assert.equal(initialized.code, 0, initialized.stderr);
+  const lines = initialized.stdout.trimEnd().split(/\r?\n/u);
+  assert.match(lines[0] ?? '', /^Next:\s+\S/u,
+    'a newcomer sees the next step before setup details');
+  assert.match(lines.slice(0, 2).join('\n'), /Next: ask your agent to set up Pullboard here/u,
+    'the first one or two lines say what to do next');
+  const detailsHeading = lines.findIndex((line, index) => index >= 1 && /^(?:Setup details|Details):?$/iu.test(line));
+  const verboseFlag = lines.slice(0, 2).some(line => /--verbose\b/u.test(line));
+  assert.ok(verboseFlag || detailsHeading === 1 || detailsHeading === 2,
+    'setup details follow under a short heading or are explicitly behind --verbose');
+});
+
 /** Run init on a fresh repo and return the "Helping the person" section of the AGENTS.md it wrote. */
 function helpSection(t) {
   const box = fixture(t);
