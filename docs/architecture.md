@@ -74,6 +74,8 @@ Everything durable lives on one volume at `/data`: `auth.sqlite`, then `devices.
 | `relay_cleanup` | `auth.sqlite` | Board ids whose deletion is in progress. | The deletion finishes. |
 | `relay_deleted_credentials` | `auth.sqlite` | Per credential of a deleted board: its SHA-256 hash, the board id, its expiry. | The credential's own expiry. |
 | `relay_credentials` | `auth.sqlite` | Per credential: id, SHA-256 hash, kind, account, board, agent or machine name, created, expiry, revoked flag. | The board is deleted or expires. Session rows stay, expired or revoked. |
+| `relay_seats` | `auth.sqlite` | Per board seat: board, agent name, how the seat was made (machine, registered or root), its creator, the registering move's sequence and digest, and its first credential's id, creation and expiry. | The board is unlinked or deleted. |
+| `relay_coordinator_events` | `auth.sqlite` | Each coordinator token the person issued: board, reason (bootstrap, reissue or reset), session id, the revoked token ids, the issued id and the time. | The board is unlinked or deleted. |
 | `relay_action_grants` | `auth.sqlite` | Per approved action: grant hash, request id, account, the full approval context in clear, expiry, used flag. | No deletion path. |
 | `device` | `boards/devices.sqlite` | Per paired phone: account, device id, revoked flag. | No deletion path; a revoked row stays so its id is never reused. |
 | `device_session` | `boards/devices.sqlite` | Per signed-in browser session: account, session id, the paired device it belongs to, and its expiry, so a revoked device's sessions are refused. | Its expiry; expired rows are deleted whenever a session is recorded. |
@@ -83,6 +85,7 @@ Everything durable lives on one volume at `/data`: `auth.sqlite`, then `devices.
 | `journal_meta` | `boards/<board>.journal.sqlite` | The board id and the journal format. | The board is deleted or expires. |
 | `journal_head` | `boards/<board>.journal.sqlite` | The latest sequence number and the time of the last move or request. | The board is deleted or expires. |
 | `journal_record` | `boards/<board>.journal.sqlite` | Per record: sequence, arrival time, kind (move or request), sealed payload, sender kind, sender account, agent or machine name. | The next snapshot covers it. |
+| `journal_registration` | `boards/<board>.journal.sqlite` | Per seat a move registered: the target seat, its creator, the move's sequence and the sealed move's digest, so a replica checks who created a seat. | The board is deleted or expires. |
 | `journal_snapshot` | `boards/<board>.journal.sqlite` | One sealed snapshot: the sequence it covers, arrival time, sealed payload, sender. | The next snapshot replaces it. |
 
 Once a day the relay copies each journal into `backups/` and keeps each copy for 14 days; deleting a board deletes its copies at once (`relay/retention.js`). After 60 days without activity the relay warns on the next contact, and at 90 days it deletes the board.
