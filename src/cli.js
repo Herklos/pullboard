@@ -386,7 +386,10 @@ import {
   revokeRelayDevice,
   unlinkedRelayProjects,
 } from './relay-setup.js';
-import { readRelayMachine } from './relay-machine.js';
+import {
+  relayRoster,
+  rosterLines,
+} from './relay-roster.js';
 import {
   relayJoin,
   relayPair,
@@ -607,6 +610,7 @@ const OPTIONS = {
   must: { type: 'boolean' },
   json: { type: 'boolean' },
   history: { type: 'boolean' },
+  verbose: { type: 'boolean' },
   since: { type: 'string' },
   decision: { type: 'boolean' },
   evidence: { type: 'string' },
@@ -4344,11 +4348,10 @@ async function runCommand(argv, io) {
       }
       if (values.skip) throw new Refused('USAGE', '--skip is only valid with pullboard relay recover');
       if (first === 'devices') {
-        if (second || rest.length || values.url || values.all) throw new Refused('USAGE', 'pullboard relay devices');
-        const devices = readRelayMachine().devices.map(({ deviceId, label, fingerprint, createdAt }) => ({ deviceId, label, fingerprint, createdAt }));
-        io.result?.({ devices });
-        for (const device of devices) io.say(`${device.deviceId}  ${device.label}  ${device.fingerprint}`);
-        if (!devices.length) io.say('no paired devices; run pullboard relay on --all');
+        if (second || rest.length || values.url || values.all) throw new Refused('USAGE', 'pullboard relay devices [--verbose]');
+        const roster = await relayRoster({ verbose: values.verbose });
+        io.result?.(roster);
+        for (const line of rosterLines(roster, { verbose: values.verbose })) io.say(line);
         return 0;
       }
       if (first === 'revoke' && /^device-[0-9a-f]{32}$/u.test(second ?? '')) {

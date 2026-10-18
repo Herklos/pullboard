@@ -76,6 +76,16 @@ export function createDeviceHandler({ authenticate, authorizeBoard, boardsFor, d
       }
       // A machine may wrap only its own board to an already enrolled device, never enroll or revoke.
       if (who.kind === 'machine') {
+        // A joined computer lists its own board's phones by id; their names stay on the computer that paired them.
+        if (url.pathname === '/api/v1/devices' && req.method === 'GET') {
+          await authorizeBoard(req, who.board);
+          apiJson(res, 200, { devices: devices.boardDevices(account, who.board) }); return true;
+        }
+        const seen = /^\/api\/v1\/devices\/(device-[0-9a-f]{32})$/.exec(url.pathname);
+        if (seen && req.method === 'GET') {
+          await authorizeBoard(req, who.board);
+          apiJson(res, 200, devices.status(account, seen[1])); return true;
+        }
         const wrap = /^\/api\/v1\/devices\/(device-[0-9a-f]{32})\/boards\/([0-9a-f]{32})$/.exec(url.pathname);
         if (!wrap || req.method !== 'PUT' || wrap[2] !== who.board) throw new Refused('HUMAN_REQUIRED', 'approve device management from the paired phone');
         await authorizeBoard(req, who.board);
