@@ -30,13 +30,41 @@ function addRowItem(box, ids = 'G3', lane = 'web') {
 }
 
 /** Commit a local file through the lane's normal hooks. */
-function commitLocalWork(box) {
+function commitLocalWork(box, id = 'G1') {
   const file = join(box.web, 'web', 'local.txt');
   mkdirSync(join(box.web, 'web'), { recursive: true });
   writeFileSync(file, 'local work\n');
   box.git(box.web, 'add', 'web/local.txt');
-  box.git(box.web, 'commit', '-q', '-m', 'docs: local work [G1]');
+  box.git(box.web, 'commit', '-q', '-m', `docs: local work [${id}]`);
 }
+
+/** Main-only cited rows need a merge; a row unknown to Main still needs its historical meaning. */
+test('spec check names merge main when a cited row exists on main [S8,B6]', () => {
+  for (const [id, onMain] of [['G3', true], ['X9', false]]) {
+    const box = project();
+    if (onMain) addMainRows(box, [id]);
+    const path = join(box.web, 'SPEC.md');
+    const previous = readFileSync(path, 'utf8');
+    // Cite a working-copy row through the real hook without committing that row, as in E4.
+    writeFileSync(path, `${previous}\n- ${id} [approved, must] The new row is in force. | gate: test\n`);
+    commitLocalWork(box, id);
+    writeFileSync(path, previous);
+    const head = box.git(box.web, 'rev-parse', 'HEAD');
+    const checked = box.run(box.web, 'spec', 'check');
+    assert.equal(checked.code, 1, checked.err || checked.out);
+    if (onMain) {
+      assert.match(checked.out, /G3 error:.*git merge main/u, 'main-only cited row must name git merge main');
+      assert.doesNotMatch(checked.out, /G3 error:.*add it as a retired row/u);
+      box.git(box.web, 'merge', '--no-edit', 'main');
+      const repaired = box.run(box.web, 'spec', 'check');
+      assert.equal(repaired.code, 0, repaired.err || repaired.out);
+    } else {
+      assert.match(checked.out, /X9 error:.*never committed.*add it as a retired row/u);
+      assert.doesNotMatch(checked.out, /git merge main/u);
+      assert.equal(box.git(box.web, 'rev-parse', 'HEAD'), head, 'checking never mutates the worktree');
+    }
+  }
+});
 
 test('a worktree behind main on the spec is caught before UNKNOWN_SPEC [B6, V1]', () => {
   const fastForward = project();
