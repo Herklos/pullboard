@@ -1005,6 +1005,37 @@ test('engine 43 reject moves replay without automatic escalation [B15,H16]', () 
   assert.equal(store.events(board, { itemId: id }).filter((event) => event.event_kind === 'escalate').length, 0);
 });
 
+test('engine 49 reject moves replay without automatic escalation [B15,H16]', () => {
+  const id = routed('Legacy engine', 'light');
+  const legacyFreeze = (item) => ({
+    text: JSON.stringify({
+      criterion: item.item_criterion,
+      policy: { version: 1, commit: SHA_A, verify: { policy: 'any', family: 'off' } },
+    }),
+    digest: `digest:${item.item_title}`,
+  });
+  const submissionProof = {
+    version: 1, files: [], full: false, deferred: true,
+    reason: 'synthetic board-state fixture; no gate execution',
+  };
+  let sequence = 0;
+  const applyLegacyMove = (operation, args) => {
+    sequence += 1;
+    const move = prepareEngineMove(board, operation, args, { id: `engine-49-auto-escalation-${sequence}` });
+    move.engine = 49;
+    const result = applyEngineMove(board, move, { sequence, at: `2026-10-18T00:00:0${sequence}.000Z` });
+    assert.equal(result.error, undefined, `${operation} replays on engine 49`);
+  };
+  applyLegacyMove('claim', [id, { agentId: 'web-1', lane: 'web', leaseMs: HOUR, freeze: legacyFreeze }]);
+  applyLegacyMove('submit', [id, { agentId: 'web-1', commit: SHA_A, tree: 'tree-a', submissionProof }]);
+  applyLegacyMove('verify', [id, { agentId: 'web-2', decision: 'REJECT', reason: 'TEST_FAILURE', note: 'legacy reject one', head: SHA_A, digest: `digest:${store.getItem(board, id).item_title}`, policy: 'any' }]);
+  applyLegacyMove('claim', [id, { agentId: 'web-1', lane: 'web', leaseMs: HOUR, freeze: legacyFreeze }]);
+  applyLegacyMove('submit', [id, { agentId: 'web-1', commit: SHA_B, tree: 'tree-b', submissionProof }]);
+  applyLegacyMove('verify', [id, { agentId: 'web-2', decision: 'REJECT', reason: 'TEST_FAILURE', note: 'legacy reject two', head: SHA_B, digest: `digest:${store.getItem(board, id).item_title}`, policy: 'any' }]);
+  assert.equal(store.getItem(board, id).item_route, 'light');
+  assert.equal(store.events(board, { itemId: id }).filter((event) => event.event_kind === 'escalate').length, 0);
+});
+
 test('a fresh claim records where the work started; submit records what it changed, reworks included [N21]', () => {
   const id = store.addItem(board, { by: 'coordinator', lane: 'web', title: 'Page' });
   const claimAt = (head) => store.claim(board, id, { agentId: 'web-1', lane: 'web', leaseMs: 2 * HOUR, freeze, head });

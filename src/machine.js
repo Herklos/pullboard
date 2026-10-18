@@ -11,11 +11,11 @@
 
 import { RIGOR_NOTICE_ENGINE } from './rigor-source.js';
 
-/** Executable move semantics, carried by every sealed move and retained during replay [H16]. */
-export const ENGINE_VERSION = Math.max(44, RIGOR_NOTICE_ENGINE);
-
 /** First engine that automatically escalates an item's second rejection at its current route [B15]. */
-export const AUTO_ESCALATE_ENGINE = 44;
+export const AUTO_ESCALATE_ENGINE = 50;
+
+/** Executable move semantics, carried by every sealed move and retained during replay [H16]. */
+export const ENGINE_VERSION = Math.max(AUTO_ESCALATE_ENGINE, RIGOR_NOTICE_ENGINE);
 
 /** The engine at which a reject, reopen or person fact can carry a cause key (#713); older moves replay unchanged [D1,H16]. */
 export const CAUSE_ENGINE = 30;

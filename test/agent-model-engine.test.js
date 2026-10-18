@@ -13,8 +13,8 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-test('model declarations and event snapshots retain engines 1 through 34 semantics [O8,O3,H16]', (t) => {
-  assert.equal(ENGINE_VERSION, 44, 'engine 44 is the current writer');
+test('model declarations and event snapshots retain all supported engine semantics [O8,O3,H16]', (t) => {
+  assert.equal(ENGINE_VERSION, AUTO_ESCALATE_ENGINE, 'the current writer is the automatic-escalation engine');
   assert.ok(ENGINE_VERSION >= RIGOR_NOTICE_ENGINE, 'the next writer preserves every historical model snapshot through main engine 33');
   assert.ok(ENGINE_VERSION >= HEALTH_SENTINEL_ENGINE, 'the current writer retains the sentinel minimum and historical behavior');
   assert.equal(AUTO_ESCALATE_ENGINE, ENGINE_VERSION, 'the current writer includes automatic escalation and preserves historical model snapshots');
