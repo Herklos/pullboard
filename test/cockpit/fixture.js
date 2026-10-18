@@ -1127,7 +1127,7 @@ async function readRoadmap(chrome) {
               id: row.querySelector('.id').innerText, label: chip.innerText, tone: [...chip.classList].filter((name) => name !== 'chip').join(' '),
               seen: box.width > 0 && box.height > 0 && getComputedStyle(chip).visibility === 'visible',
               chip: paint(chip), dot: getComputedStyle(row.querySelector('.dot')).backgroundColor,
-              button: row.tagName === 'BUTTON', tip: row.title, title: [...title.childNodes].slice(1).map((node) => node.textContent).join(''),
+              button: row.matches('button,[role="button"]'), tip: row.title, title: [...title.childNodes].slice(1).map((node) => node.textContent).join(''),
               lines: Math.round(title.getBoundingClientRect().height / parseFloat(style.lineHeight)),
               cut: title.scrollWidth > title.clientWidth, ellipsis: style.textOverflow === 'ellipsis' && style.whiteSpace === 'nowrap' && style.overflow === 'hidden',
             };
