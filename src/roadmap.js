@@ -1,7 +1,19 @@
 /** Read milestone references across the boards registered on this machine. */
-import { basename, resolve, join } from 'node:path';
-import { closeBoard, getItem, openBoard, roadmap } from './board.js';
-import { codeIsFromMain, repoInfo } from './git.js';
+import {
+  basename,
+  resolve,
+  join,
+} from 'node:path';
+import {
+  closeBoard,
+  getItem,
+  openBoard,
+  roadmap,
+} from './board.js';
+import {
+  codeIsFromMain,
+  repoInfo,
+} from './git.js';
 import { listApiProjects } from './projects.js';
 
 /** Resolve a repo-qualified milestone item against registered boards, optionally within an API scope.

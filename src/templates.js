@@ -2,7 +2,10 @@
  * What `pullboard init` writes into a repo: the config, a starter spec, and the agent instructions
  * every coding agent reads (AGENTS.md, which CLAUDE.md points at).
  */
-import { doctrineText, standardDoctrine } from './doctrine.js';
+import {
+  doctrineText,
+  standardDoctrine,
+} from './doctrine.js';
 import { DOCTRINE_FILE } from './config.js';
 
 export const AGENTS_START = '<!-- pullboard:start -->';

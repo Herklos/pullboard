@@ -131,7 +131,7 @@ assert.deepEqual(globalThis.__localFetchRequests, [
   assert.match(serve, /export const LOOPBACK = '127\.0\.0\.1';/);
   assert.match(serve, /server\.listen\(port, LOOPBACK, /);
   const viewSession = readFileSync(join(ROOT, 'src', 'view-session.js'), 'utf8');
-  assert.match(viewSession, /import \{ LOOPBACK, lastPort \} from '\.\/serve\.js';/);
+  assert.match(viewSession, /import\s*\{\s*LOOPBACK\s*,\s*lastPort\s*,?\s*\}\s*from '\.\/serve\.js';/);
   assert.match(viewSession, /redirect: 'manual'/, 'the local reuse probe cannot follow a remote redirect');
   const api = readFileSync(join(ROOT, 'src', 'api.js'), 'utf8');
   assert.match(api, /const ADDRESS = '127\.0\.0\.1';/);

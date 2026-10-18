@@ -6,7 +6,11 @@ import { readFileSync } from 'node:fs';
 import { loadDoctrine } from './doctrine.js';
 import { Refused } from './refused.js';
 import { writeRowApply } from './row-decisions.js';
-import { insertSectionRows, loadSpec, nextRowId } from './spec.js';
+import {
+  insertSectionRows,
+  loadSpec,
+  nextRowId,
+} from './spec.js';
 
 /**
  * The sections of a parsed row file that carry an id prefix, such as G in "G · Goals".

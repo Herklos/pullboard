@@ -2,7 +2,11 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as store from './board.js';
-import { blueprintMarker, bundledBlueprints, readBlueprint } from './blueprints.js';
+import {
+  blueprintMarker,
+  bundledBlueprints,
+  readBlueprint,
+} from './blueprints.js';
 import { loadConfig } from './config.js';
 import { loadDoctrine } from './doctrine.js';
 import { Refused } from './refused.js';
