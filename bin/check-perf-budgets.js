@@ -1,8 +1,19 @@
 #!/usr/bin/env node
 /** Save the main CI performance artifacts and warn by action against the fixed view budgets [N40,C7]. */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { evaluatePerfBudgets, perfBudgetTable, readPerfReport } from '../src/perf-budgets.js';
+import {
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
+import {
+  join,
+  resolve,
+} from 'node:path';
+import {
+  evaluatePerfBudgets,
+  perfBudgetTable,
+  readPerfReport,
+} from '../src/perf-budgets.js';
 
 /** Parse the saved harness output; artifacts live outside the harness's disposable workspace. */
 function main(args) {
