@@ -71,6 +71,7 @@ import { commitFirst, commitOwnerLines, commitOwners, coordinatorInbox, coordina
 import { checkBaseline, prepareCheckBaseline, refuseCheckSyntax, sayCheckBaseline } from './check-baseline.js';
 import { checkAcceptCommand, refuseClaimProvesNothing, refuseProvesNothing } from './check-accept.js';
 import { retryCheckBaselines, startCheckBaseline } from './check-baseline-worker.js';
+import { alreadyAddedLine, initWaitingRows, startersCommand, waitingRowLines } from './blueprint-report.js';
 import { compareMainFailures, mainRedMessage, mainRedReworkItems } from './main-red.js';
 import { runItems } from './run.js';
 import { parseProblems, sweepItems } from './sweep.js';
@@ -104,7 +105,7 @@ import { addSigner, assertRequiredSigners, defaultPrincipal, hasSignerFile } fro
 import { addRunner, browserFreeChecksEnabled, gateQueueSettings, gateShortSlots, loadMachineSettings, memoryFloorMB, relayOfferEnabled, setBrowserSlots, setGateShortSlots, setGateSlots } from './settings.js';
 import { formatSnapshotLimit, pendingSnapshotSize, pendingCheckpointProblem, relayCommandReceipt, relayCommandReceiptReported, relayLinked, relayOff, relayOn, relayOperation, relayRecover, relayRecovered, relayRevoke, relayStatus, relayTokens, syncRelay } from './relay.js';
 import { autoLinkProject, offerRelayAtInit, relayOnAllCommand, revokeRelayDevice, unlinkedRelayProjects } from './relay-setup.js';
-import { readRelayMachine } from './relay-machine.js';
+import { relayRoster, rosterLines } from './relay-roster.js';
 import { relayJoin, relayPair } from './relay-pairing-client.js';
 import { executePersonRequests } from './relay-request-execution.js';
 import { engineReceipt } from './engine.js';
@@ -314,6 +315,7 @@ const OPTIONS = {
   must: { type: 'boolean' },
   json: { type: 'boolean' },
   history: { type: 'boolean' },
+  verbose: { type: 'boolean' },
   since: { type: 'string' },
   decision: { type: 'boolean' },
   evidence: { type: 'string' },
@@ -1709,12 +1711,20 @@ function setupCommands(io, { first, second, rest = [], values }) {
       ]));
       // Keep blueprint initialization and the person's unwritten lane proposals in the same result.
       const landed = await landEach(blueprints, ({ reference, blueprint }, drafted) => addBlueprintHere(io, reference, { report: false, blueprint, drafted }));
+      // Every row that waits for the person once, the blueprints' new rows and the doctrine's pending rows alike (#734).
+      const fresh = landed.filter((added) => !added.marked);
+      const waiting = landed.length ? initWaitingRows(info.root, { rows: fresh.flatMap((added) => added.rows) }) : [];
+      const blueprintResult = (added) => ({ ...initBlueprintResult(added), marked: added.marked, waitingRows: waiting });
       const result = { root: info.root, notes, proposedLanes: proposeLanes(info.root),
-        ...(landed.length ? { blueprint: initBlueprintResult(landed[0]), blueprints: landed.map(initBlueprintResult) } : {}) };
+        ...(landed.length ? { blueprint: blueprintResult(landed[0]), blueprints: landed.map(blueprintResult) } : {}) };
       io.result?.(result);
       const staging = notes.at(-1)?.startsWith('git add -f -- ') ? notes.at(-1) : null;
       (staging ? notes.slice(0, -1) : notes).forEach((note) => io.say(note));
-      for (const added of landed) initBlueprintLines(added, askedLaneNotes(added.items, loadConfig(info.root))).forEach((line) => io.say(line));
+      for (const added of landed) {
+        if (added.marked) io.say(alreadyAddedLine(added.blueprint));
+        else initBlueprintLines(added, askedLaneNotes(added.items, loadConfig(info.root))).forEach((line) => io.say(line));
+      }
+      if (fresh.length) waitingRowLines(waiting).forEach((line) => io.say(line));
       if (await registerProjectAndLink(info.root, new Date(), loadConfig(info.root), io)) io.say('registered this project on this machine, so pullboard view lists it');
       // Once registered, a background view lists this board for pullboard.dev [H5,N26].
       const view = await keepViewRunning();
@@ -2551,7 +2561,7 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true, result =
     checksNotRun: added.filter((item) => item.check).map((item) => item.id) };
   io.result?.(summary);
   if (plan.marked) {
-    io.say(`${blueprint.title} (version ${blueprint.version}) is already on this board; nothing added`);
+    io.say(`${blueprint.title} (version ${blueprint.version}) is already on this board; nothing added; see its starters with pullboard blueprint starters ${blueprint.name}`);
     // A board an older Pullboard set up gets the blueprint's kind recorded beside its marker (#720).
     if (plan.specRows !== source) io.say(`  recorded its kind (${blueprint.kind ?? 'none'}) in ${ctx.config.spec}; commit ${ctx.config.spec}`);
     return summary;
@@ -4051,11 +4061,10 @@ async function runCommand(argv, io) {
       }
       if (values.skip) throw new Refused('USAGE', '--skip is only valid with pullboard relay recover');
       if (first === 'devices') {
-        if (second || rest.length || values.url || values.all) throw new Refused('USAGE', 'pullboard relay devices');
-        const devices = readRelayMachine().devices.map(({ deviceId, label, fingerprint, createdAt }) => ({ deviceId, label, fingerprint, createdAt }));
-        io.result?.({ devices });
-        for (const device of devices) io.say(`${device.deviceId}  ${device.label}  ${device.fingerprint}`);
-        if (!devices.length) io.say('no paired devices; run pullboard relay on --all');
+        if (second || rest.length || values.url || values.all) throw new Refused('USAGE', 'pullboard relay devices [--verbose]');
+        const roster = await relayRoster({ verbose: values.verbose });
+        io.result?.(roster);
+        for (const line of rosterLines(roster, { verbose: values.verbose })) io.say(line);
         return 0;
       }
       if (first === 'revoke' && /^device-[0-9a-f]{32}$/u.test(second ?? '')) {
@@ -4119,6 +4128,7 @@ async function runCommand(argv, io) {
       for (const entry of left) io.say(`  left out ${entry.id}: ${entry.reason}`);
       return 0;
     }
+    if (command === 'blueprint' && first === 'starters') return startersCommand(io, { second, rest, context, withBoard });
     if (command === 'gate') {
       if (first !== undefined || second !== undefined || rest.length > 0) {
         const words = [first, second, ...rest].filter((word) => word !== undefined);
