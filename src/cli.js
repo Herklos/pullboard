@@ -4105,6 +4105,10 @@ async function specCommand(io, { first, second, rest, values }) {
       const cited = name === ctx.config.spec ? citations(ctx, history) : new Map();
       const lost = permanenceProblems(parsed === practice ? practice.repo : parsed, { committed: history.ids, cited });
       if (name === ctx.config.spec) {
+        const mainRows = new Set((previousSources.get(name) ?? []).map(row => row.id));
+        for (const problem of lost) {
+          if (mainRows.has(problem.id)) problem.message = 'is present on main but missing from this worktree; run git merge main, then pullboard spec check';
+        }
         const answered = handAnsweredQuestions(previousSources.get(name) ?? [], parsed.rows, () => hookRead(ctx, (board) => store.rowDecisions(board)) ?? []);
         lost.push(...answered.map((id) => ({ id, message: io.guidance(`pending question answered by hand; ask the person to run pullboard spec answer ${id} "<choice or text>" and restore the pending row`) })));
       }
