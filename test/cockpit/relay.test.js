@@ -2147,8 +2147,9 @@ process.stdout.write(JSON.stringify({other}));
         await chrome.stable("typeof sharingReady === 'undefined' ? null : sharingReady");
         assert.equal(await chrome.stable("document.querySelector('#share-note')?.hidden === false"), true,
           'the real local view offers one quiet invitation before any board is linked');
-        assert.equal(await chrome.stable("document.querySelector('#share-note b')?.textContent"), 'See these boards from any device');
-        assert.equal(await chrome.stable("document.querySelector('#share-note .share-txt > span')?.textContent"), 'Link them to pullboard.dev with your GitHub account.');
+        assert.equal(await chrome.stable("document.querySelector('#share-note b')?.textContent"), 'Open your boards on any device');
+        assert.equal(await chrome.stable("document.querySelector('#share-note .share-txt > span')?.textContent"), 'Sign in to use pullboard.dev while on the go.');
+        assert.deepEqual(JSON.parse(await chrome.stable("JSON.stringify((() => { const a = document.querySelector('#share-note .share-txt a'); return a ? [a.textContent, a.href, a.target, a.rel] : null; })())")), ['How the relay works', 'https://pullboard.dev/relay/', '_blank', 'noopener']);
         const starts = box.providerCalls.filter(call => call.path === '/login/device/code').length;
         await press(chrome, "document.querySelector('#share-start')");
         // The real GitHub popup hides this tab; foreground the owned view before measuring its progress.
