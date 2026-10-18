@@ -2279,6 +2279,11 @@ function jumpToRoadmap(key) {
   }
   const target = $('roadmap-list')?.querySelector('[data-key="' + CSS.escape(key) + '"]');
   if (!target) return;
+  const topbar = document.querySelector('.top');
+  if (matchMedia('(max-width: 900px)').matches && topbar) {
+    // The Roadmap scrolls in the document viewport; use the wrapped sticky bar's actual lower edge, not its minimum height.
+    target.style.scrollMarginTop = Math.ceil(topbar.getBoundingClientRect().bottom + 16) + 'px';
+  } else target.style.removeProperty('scroll-margin-top');
   target.scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
   target.classList.remove('roadmap-arrival');
   void target.offsetWidth;

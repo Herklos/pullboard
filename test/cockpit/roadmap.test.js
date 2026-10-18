@@ -1103,3 +1103,59 @@ test('a blocked roadmap item shows its dot and expands to say why [N26]', { time
     assert.deepEqual(chrome.exceptions, []);
   } finally { if(chrome) await closeSnapshotChrome(chrome); rmSync(profile,{recursive:true,force:true}); await view.stop(); }
 });
+
+test('a release jump on a phone leaves its heading below the top bar [N26]', { timeout: 90_000 }, async (t) => {
+  const executable = chromeExecutable();
+  assert.ok(executable, 'Chrome is required for phone release-jump checks.');
+  const box = machine();
+  const alpha = project(box, 'roadmap-phone-release-jump');
+  for (const title of ['First release item', 'Second release item']) box.run(alpha.repo, 'add', 'web', title, '--specs', 'G1', '--criterion', 'renders');
+  box.run(alpha.repo, 'milestone', 'add', '0.9.0', '--items', '1');
+  box.run(alpha.repo, 'milestone', 'add', '0.9.1', '--items', '2');
+  for (const name of ['0.9.2', '0.9.3', '0.9.4', '0.9.5', '0.9.6', '0.9.7', '0.9.8', '0.9.9', '0.9.10', '0.9.11']) {
+    box.run(alpha.repo, 'milestone', 'add', name, '--note', 'Later release.');
+  }
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-roadmap-phone-jump-'));
+  let chrome;
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.waitFor('data?.project?.milestones?.length === 12');
+    await chrome.send('Emulation.setDeviceMetricsOverride', { width: 375, height: 812, deviceScaleFactor: 1, mobile: false });
+    await chrome.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+    await press(chrome, "document.querySelector('[data-tab=roadmap]')");
+    await press(chrome, `document.querySelector('#roadmap-panel [data-roadmap-jump="m:0.9.1"]')`);
+    await chrome.waitFor(`document.querySelector('#roadmap-list [data-key="m:0.9.1"]')?.classList.contains('roadmap-arrival')`);
+    const position = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+      const bar = document.querySelector('.top').getBoundingClientRect();
+      const target = document.querySelector('#roadmap-list [data-key="m:0.9.1"]').getBoundingClientRect();
+      const heading = document.querySelector('#roadmap-list [data-key="m:0.9.1"] .milestone-head h2').getBoundingClientRect();
+      const documentHeight = Math.max(document.documentElement.scrollHeight, document.body.scrollHeight);
+      const maxScroll = documentHeight - window.innerHeight;
+      return { barTop:bar.top, barBottom:bar.bottom, barHeight:bar.height, targetTop:target.top, headingTop:heading.top,
+        documentHeight, viewportHeight:window.innerHeight, scrollY:window.scrollY, maxScroll, remainingScroll:maxScroll-window.scrollY };
+    })())`));
+    console.log('phone release jump geometry', JSON.stringify(position));
+    assert.ok(position.barHeight > 56, `the phone header must wrap beyond its desktop height: ${JSON.stringify(position)}`);
+    assert.ok(position.remainingScroll > 300, `the jump is not clamped near the document bottom: ${JSON.stringify(position)}`);
+    assert.ok(position.headingTop >= position.barBottom, `the entire release heading sits below the wrapped header: ${JSON.stringify(position)}`);
+    assert.ok(position.scrollY > 0, `the release jump scrolls the page: ${JSON.stringify(position)}`);
+    await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 812, deviceScaleFactor: 1, mobile: false });
+    await chrome.waitFor('innerWidth === 1280');
+    await press(chrome, `document.querySelector('#roadmap-panel [data-roadmap-jump="m:0.9.1"]')`);
+    const desktop = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+      const bar = document.querySelector('.top').getBoundingClientRect();
+      const target = document.querySelector('#roadmap-list [data-key="m:0.9.1"]');
+      const heading = target.querySelector('.milestone-head h2').getBoundingClientRect();
+      return { margin:getComputedStyle(target).scrollMarginTop, barBottom:bar.bottom, headingTop:heading.top };
+    })())`));
+    console.log('desktop release jump geometry', JSON.stringify(desktop));
+    assert.equal(desktop.margin, '72px', `desktop keeps today's scroll offset: ${JSON.stringify(desktop)}`);
+    assert.ok(desktop.headingTop >= desktop.barBottom, `desktop heading stays below the top bar: ${JSON.stringify(desktop)}`);
+    assert.deepEqual(chrome.exceptions, []);
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    rmSync(profile, { recursive: true, force: true });
+    await view.stop();
+  }
+});
