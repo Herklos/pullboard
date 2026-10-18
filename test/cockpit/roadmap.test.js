@@ -843,7 +843,7 @@ test('the roadmap panel counts the next release by stage [N26]', {
 
 test('the roadmap shows landed, accepted and past target [N26]', { timeout: 90_000 }, async () => {
   const executable = chromeExecutable(); assert.ok(executable, 'Chrome is required for the roadmap header check.');
-  const box=machine(), alpha=project(box,'roadmap-truth',SPEC,{lanes:{web:{owns:['web/'],specs:['G']},ops:{owns:['ops/'],specs:['G']}});
+  const box=machine(), alpha=project(box,'roadmap-truth',SPEC,{lanes:{web:{owns:['web/'],specs:['G']},ops:{owns:['ops/'],specs:['G']}}});
   const names=['Landed A','Accepted A','Waiting A','Shipped B','Landed C','Accepted C','In review C','Building C','Approve the release','Held C'];
   names.forEach((name,index)=>box.run(alpha.repo,'add',index===9?'ops':'web',name,'--specs','G1','--criterion','The page renders.'));
   /** Land through real Git and the ordinary board receipt; acceptance alone stays unlanded. */
