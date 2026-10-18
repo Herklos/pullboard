@@ -4,13 +4,42 @@
  * Each check returns its problems; an empty list lets git go on.
  */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
-import { git, gitChildEnv, gitPath, gitConfig, invalidateGitFacts, mainCheckout, refuseGrafts, tryGit } from './git.js';
-import { CONFIG_FILE, configFromSource, DOCTRINE_FILE, LEGACY_DOCTRINE_FILE } from './config.js';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import {
+  join,
+  relative,
+  resolve,
+} from 'node:path';
+import {
+  git,
+  gitChildEnv,
+  gitPath,
+  gitConfig,
+  invalidateGitFacts,
+  mainCheckout,
+  refuseGrafts,
+  tryGit,
+} from './git.js';
+import {
+  CONFIG_FILE,
+  configFromSource,
+  DOCTRINE_FILE,
+  LEGACY_DOCTRINE_FILE,
+} from './config.js';
 import { Refused } from './refused.js';
 import { outOfLane } from './lanes.js';
-import { citedIds, deletedIds, idProblems } from './spec.js';
+import {
+  citedIds,
+  deletedIds,
+  idProblems,
+} from './spec.js';
 import { approvedRowProblems } from './approved-rows.js';
 
 export const HOOKS = ['pre-commit', 'pre-merge-commit', 'commit-msg', 'pre-push'];

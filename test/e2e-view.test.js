@@ -316,7 +316,10 @@ test('nothing a person types on the view sits inside what the refresh rewrites [
     const opening = new RegExp(`id="${id}"[^>]*>([^]*?)</`).exec(page);
     assert.doesNotMatch(opening ? opening[1] : '', /<(input|textarea|form)/, `#${id} starts with no form`);
   }
-  assert.doesNotMatch(page.slice(page.indexOf('<script>')), /<input|<textarea|createElement\('(form|input|textarea)'\)/, 'the script never builds a field a refresh could erase');
+  // copyWords' clipboard fallback (#764) creates a read-only field, selects it and removes it in the same call, so it
+  // never holds anything a person typed; every other field the script could build is still refused.
+  const script = page.slice(page.indexOf('<script>')).replace(/\nasync function copyWords\([^]*?\n}\n/, '\n');
+  assert.doesNotMatch(script, /<input|<textarea|createElement\('(form|input|textarea)'\)/, 'the script never builds a field a refresh could erase');
 });
 
 test('the view keeps the board layout people know: switcher, tabs, a list and its detail, every verdict and the history [N26, N27]', async () => {

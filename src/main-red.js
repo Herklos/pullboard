@@ -1,14 +1,35 @@
 /** Fresh per-file main comparisons for inherited submit reds [V1]. */
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { join, relative, resolve, sep } from 'node:path';
+import {
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import {
+  join,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
 import { tmpdir } from 'node:os';
 import { stripVTControlCharacters } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { runProfiledShellAsync, withGateSlot } from './gate.js';
-import { cleanGitEnvironment, mainCheckout } from './git.js';
-import { mainPolicy, policyAt } from './trusted-policy.js';
+import {
+  runProfiledShellAsync,
+  withGateSlot,
+} from './gate.js';
+import {
+  cleanGitEnvironment,
+  mainCheckout,
+} from './git.js';
+import {
+  mainPolicy,
+  policyAt,
+} from './trusted-policy.js';
 import { parseSpec } from './spec.js';
 import { listItems } from './board.js';
 import { takeResource } from './resources.js';

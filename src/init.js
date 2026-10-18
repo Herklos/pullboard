@@ -5,21 +5,55 @@
  * write.
  */
 import {
-  accessSync, appendFileSync, constants as fsConstants, existsSync, lstatSync, mkdirSync,
-  readdirSync, readFileSync, realpathSync, statSync, writeFileSync,
+  accessSync,
+  appendFileSync,
+  constants as fsConstants,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
 } from 'node:fs';
-import { delimiter, basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
+import {
+  delimiter,
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  parse,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
 import { userInfo } from 'node:os';
-import { CONFIG_FILE, COORDINATOR, doctrineFile, loadConfig } from './config.js';
+import {
+  CONFIG_FILE,
+  COORDINATOR,
+  doctrineFile,
+  loadConfig,
+} from './config.js';
 import { loadDoctrine } from './doctrine.js';
 import { installHooks } from './hooks.js';
 import { machineHome } from './machine-home.js';
 import { Refused } from './refused.js';
-import { AGENT_SHELL_MARKERS, remoteShell } from './person.js';
+import {
+  AGENT_SHELL_MARKERS,
+  remoteShell,
+} from './person.js';
 import { installSkills } from './skills.js';
 import {
-  AGENTS_END, AGENTS_START, agentsBlock, claudeLoopRules, codexLoopRules, configTemplate,
-  plainGateWords, practiceTemplate, specTemplate,
+  AGENTS_END,
+  AGENTS_START,
+  agentsBlock,
+  claudeLoopRules,
+  codexLoopRules,
+  configTemplate,
+  plainGateWords,
+  practiceTemplate,
+  specTemplate,
 } from './templates.js';
 
 const NPM_DEFAULT_TEST = 'echo "Error: no test specified" && exit 1';

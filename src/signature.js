@@ -1,8 +1,25 @@
 /** Offline SSH signature handling for spec sign-offs and signer-list transitions [S17,S18,S19,S20,S21]. */
-import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import {
+  createHash,
+  randomUUID,
+} from 'node:crypto';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import {
+  homedir,
+  tmpdir,
+} from 'node:os';
+import {
+  dirname,
+  join,
+  resolve,
+} from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { gitConfig } from './git.js';
 import { Refused } from './refused.js';
